@@ -149,3 +149,35 @@ def test_allows_documented_windows_path_counterexamples(tmp_path: Path) -> None:
     )
 
     assert check_repository(tmp_path) == []
+
+
+def test_rejects_second_lunar_navigation_msgs_package(tmp_path: Path) -> None:
+    canonical = tmp_path / "ros2_ws/src/lunar_navigation_msgs"
+    duplicate = tmp_path / "vendor/lunar_navigation_msgs"
+    canonical.mkdir(parents=True)
+    duplicate.mkdir(parents=True)
+    package_xml = "<package format='3'><name>lunar_navigation_msgs</name></package>"
+    (canonical / "package.xml").write_text(package_xml, encoding="utf-8")
+    (duplicate / "package.xml").write_text(package_xml, encoding="utf-8")
+    assert any("duplicate lunar_navigation_msgs" in error for error in check_repository(tmp_path))
+
+
+def test_rejects_noncanonical_lunar_navigation_msgs_package(tmp_path: Path) -> None:
+    package = tmp_path / "vendor/lunar_navigation_msgs"
+    package.mkdir(parents=True)
+    (package / "package.xml").write_text(
+        "<package format='3'><name>lunar_navigation_msgs</name></package>",
+        encoding="utf-8",
+    )
+
+    assert any("noncanonical lunar_navigation_msgs" in error for error in check_repository(tmp_path))
+
+
+def test_rejects_unapproved_provisional_interface(tmp_path: Path) -> None:
+    package = tmp_path / "ros2_ws/src/lunar_navigation_msgs"
+    (package / "action").mkdir(parents=True)
+    (package / "action/Unexpected.action").write_text(
+        "string input\n---\nbool ok\n",
+        encoding="utf-8",
+    )
+    assert any("unapproved lunar_navigation_msgs interface" in error for error in check_repository(tmp_path))

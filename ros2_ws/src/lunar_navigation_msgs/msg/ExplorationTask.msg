@@ -1,0 +1,12 @@
+uint8 ACTIVE=1
+uint8 PAUSED=2
+uint8 CANCELED=3
+std_msgs/Header header
+string mission_id
+uint64 revision
+uint8 desired_state
+float64 roi_min_x_m
+float64 roi_min_y_m
+float64 roi_max_x_m
+float64 roi_max_y_m
+lunar_navigation_msgs/ScienceTargetRegion[<=64] science_regions
