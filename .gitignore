@@ -25,3 +25,4 @@ checkpoints/
 artifacts/
 datasets/
 rosbags/
+.worktrees/
