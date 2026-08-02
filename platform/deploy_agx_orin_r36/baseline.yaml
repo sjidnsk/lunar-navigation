@@ -1,0 +1,9 @@
+schema_version: lunar-platform-baseline/v1
+profile: deploy_agx_orin_r36
+os: Ubuntu 22.04 LTS
+architecture: aarch64
+ros_distro: humble
+device_model: Jetson AGX Orin 64GB
+l4t: R36.0.0
+jetpack: "6.0"
+responsibilities: [native_build, tensorrt_engine, inference, device_release_gate]

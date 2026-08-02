@@ -1,0 +1,9 @@
+schema_version: lunar-platform-baseline/v1
+profile: train_amd64_rtx4080_super
+os: Ubuntu 22.04 LTS
+architecture: amd64
+ros_distro: humble
+python: "3.10"
+gpu_model: NVIDIA GeForce RTX 4080 SUPER
+gpu_pci_device_id: "10de:2702"
+responsibilities: [ros_integration, ppo_training, onnx_export, rosbag_replay]
