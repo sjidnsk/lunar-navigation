@@ -1,6 +1,6 @@
 # Lunar Navigation Ubuntu 交接基线修订设计
 
-**状态：** 已批准设计，待实施
+**状态：** 已实施
 
 **日期：** 2026-08-02
 
@@ -24,7 +24,7 @@ Ubuntu 22.04 amd64 现场复验确认了两项与原冻结设计不同的事实�
 - 保持外部定位和任务系统对 Topic 数据的所有权，同时明确 schema 暂由本仓提供。
 - 建立禁止同名包共存、阻止接口漂移并支持未来原子切换上游的自动门槛。
 - 把权威训练平台统一修正为 Ubuntu 22.04 amd64 + NVIDIA GeForce RTX 4080 SUPER。
-- 如实记录当前 GPU 驱动未就绪状态，不用计划值掩盖现场探测失败。
+- 如实记录 GPU 驱动、CUDA 与训练 readiness 的现场探测结果，不用计划值或事后补写掩盖探测时序。
 
 ### 2.2 非目标
 
@@ -188,7 +188,7 @@ responsibilities: [ros_integration, ppo_training, onnx_export, rosbag_replay]
 2. 驱动不可用时记录 `lspci`/sysfs 的 PCI ID、原始错误和 `available: false`。
 3. `nvcc` 只证明 toolkit 存在，不能替代驱动或 GPU compute readiness。
 
-当前主机可通过 Ubuntu 22.04、amd64、CPU、内存、ROS 2 Humble 和基础工具链检查，但 NVIDIA 内核驱动缺失，因此 GPU compute readiness 必须失败。实际指纹写到仓库外，不修改期望基线来掩盖失败。暂定消息和 CPU/ROS 工作可以继续；任何训练、CUDA smoke 或正式平台完成门槛都必须等驱动安装并重新探测成功。
+本轮指纹工具实现前，当前训练主机已经完成 RTX 4080 SUPER 驱动维护，因此不存在由该工具生成的安装前 JSON，也不得事后伪造。最终现场采集必须写入调用方指定的仓库外验证根。当前主机探测到 NVIDIA GeForce RTX 4080 SUPER、PCI Device ID `10de:2702`、驱动 595.84 和 CUDA 13.2，训练 profile 的 `readiness.ready=true`；TensorRT 未安装不阻塞训练主机 readiness，因为 TensorRT engine 生成与设备验收仍属于 AGX Orin 权威环境。
 
 ## 10. 现有改动保护与实施顺序
 
@@ -200,7 +200,15 @@ responsibilities: [ros_integration, ppo_training, onnx_export, rosbag_replay]
 2. 以 TDD 创建暂定 `lunar_navigation_msgs` 并通过 Ubuntu 接口构建。
 3. 继续卷一 Task 4 的 `lunar_planning_msgs`。
 4. 实现 Task 5 的平台基线与环境指纹工具。
-5. 保存当前未就绪 GPU 指纹并明确失败原因。
-6. 完成显式驱动维护后重新采集，通过 compute readiness 才进入训练相关任务。
+5. 在调用方指定的仓库外目录保存现场 GPU 指纹和原始探测结果。
+6. 仅在训练 profile 的 compute readiness 通过后进入后续训练相关任务。
 
 该顺序保留原卷一边界，同时把已经不存在的“等待上游消息包”阻塞替换为可验证的暂定接口迁移路径。
+
+## 11. 实施结果
+
+卷一 Task 3–5 已按本设计完成：本仓暂定提供 `LocalizationStatus`、`ScienceTargetRegion` 和 `ExplorationTask` 三个外部输入接口；`lunar-external-interfaces/v2` 的 provider/source 现场门槛、内部规划接口以及训练与部署平台基线和环境指纹工具均已落地。最终集成验证从干净的仓库外构建根重建 `lunar_navigation_msgs`、`lunar_navigation_config` 和 `lunar_planning_msgs`，并核对生成类型、接口来源和仓库边界。
+
+RTX 4080 SUPER 驱动维护早于环境指纹工具实现，本仓没有也不会伪造安装前 JSON。最终训练主机指纹保存在调用方指定的仓库外验证根；本次采集结果为 `readiness.ready=true`，TensorRT 缺失不阻塞训练主机基线。该结论只覆盖当前 Ubuntu 22.04 amd64 训练主机，不构成训练 smoke、运行时语义适配器或 Jetson AGX Orin 部署能力验证。
+
+AGX Orin 的环境指纹、原生构建、TensorRT engine、性能、功耗和稳定性仍必须在后续实机门槛中采集和验收；在该权威设备验证完成前，不得写成已验证能力。
