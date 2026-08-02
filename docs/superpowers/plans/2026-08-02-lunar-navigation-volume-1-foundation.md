@@ -4,7 +4,7 @@
 
 **Goal:** 建立没有父子仓关系的新 `lunar_navigation` Git 仓库，并在 Ubuntu 22.04/ROS 2 Humble 上固定内部消息、外部依赖、平台探测和基础 CI。
 
-**Architecture:** Windows 只生成旧仓迁移清单并提交源码；所有 ROS 接口生成和发布构建都在 Ubuntu 完成。新仓依赖外部项目发布的 `lunar_navigation_msgs`，本卷只创建项目自有的 `lunar_planning_msgs` 和配置包，并用自动检查阻止复制外部消息或引入嵌套 Git。
+**Architecture:** Windows 只生成旧仓迁移清单并提交源码；所有 ROS 接口生成和发布构建都在 Ubuntu 完成。`grid_map_msgs`、`nav_msgs` 和 `tf2_msgs` 依赖 ROS/外部系统；`lunar_navigation_msgs` 上游未定义期间，新仓暂定提供 `lunar_navigation_msgs` schema，Topic 数据生产者仍由外部项目拥有。本卷创建该暂定包、项目自有的 `lunar_planning_msgs` 和配置包，并用自动检查阻止同名上游包共存或引入嵌套 Git。
 
 **Tech Stack:** Git、Python 3.10、YAML、Ubuntu 22.04、ROS 2 Humble、ament_cmake、colcon、rosdep、pytest、GitHub Actions 或等价 CI。
 
@@ -15,7 +15,7 @@
 - 新仓必须是单一 Git 根，不包含 gitlink、嵌套 Git 仓库或相邻目录导入。
 - Windows 只承担审计、编辑、提交和远程任务触发，不得产出权威 Linux/ROS/AGX 构建物。
 - Ubuntu 22.04 amd64、ROS 2 Humble、GCC 11、CMake 3.22、C++20 和 Python 3.10 是权威开发基线。
-- 外部消息由外部项目定义发布；本项目不得复制 `lunar_navigation_msgs` 源码或建立重复 schema。
+- 外部 Topic 数据由外部项目发布；上游未定义期间本仓暂定提供 `lunar_navigation_msgs` schema，并以权威外部输入基线冻结字段与语义；不得与上游同名包共存，未来只能原子切换。
 - 大 rosbag、模型、checkpoint、训练数据和构建目录不得提交 Git。
 - Windows 下载和大型临时资源必须写入 `D:/CodexDownloads`。
 - 文件必须使用 LF；脚本必须保留 executable bit；源码不得硬编码盘符、用户目录或相邻仓库路径。

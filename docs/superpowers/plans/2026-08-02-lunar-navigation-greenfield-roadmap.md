@@ -311,7 +311,7 @@ git tag -a lunar-navigation-v1.0.0 -m "first AGX-qualified lunar navigation rele
 
 - [ ] 新仓无 gitlink、嵌套 Git 和相邻目录导入。
 - [ ] Ubuntu amd64 与 AGX aarch64 均从同一干净 checkout 构建。
-- [ ] 外部消息只通过发布依赖消费，没有复制定义。
+- [ ] 外部 Topic 数据只通过发布依赖消费；上游未定义时本仓暂定 schema 与权威基线一致，且不存在同名包共存。
 - [ ] C++ v3 是唯一生产规划器。
 - [ ] Python A* 不在生产安装和部署包中。
 - [ ] Action 完成、取消、替换、陈旧输入和定位异常全部通过。

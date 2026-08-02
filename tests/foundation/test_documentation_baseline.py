@@ -35,3 +35,19 @@ def test_agent_rules_record_the_approved_provisional_exception():
     text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     assert "暂定提供同名 schema" in text
     assert "不得与上游同名包共存" in text
+
+
+def test_active_plans_preserve_provisional_schema_exception():
+    volume_one = (ROOT / "docs/superpowers/plans/2026-08-02-lunar-navigation-volume-1-foundation.md").read_text(
+        encoding="utf-8"
+    )
+    roadmap = (ROOT / "docs/superpowers/plans/2026-08-02-lunar-navigation-greenfield-roadmap.md").read_text(
+        encoding="utf-8"
+    )
+    design = (ROOT / "docs/superpowers/specs/2026-08-02-lunar-navigation-greenfield-ros2-jetson-design.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "新仓暂定提供 `lunar_navigation_msgs` schema" in volume_one
+    assert "上游未定义时本仓暂定 schema" in roadmap
+    assert "上游未定义时本仓暂定 schema" in design
