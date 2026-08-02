@@ -6,7 +6,7 @@
 - 当前文档位置：旧项目保存迁移设计基线；新项目建立后，本文应作为首批架构文档迁入。
 - 目标项目：新建单一 Git 仓库，不延续父仓库、gitlink 子仓库和跨仓库隐式导入结构。
 - 目标运行系统：Ubuntu 22.04 LTS、ROS 2 Humble。
-- 训练与集成主机：amd64、RTX 4080。
+- 训练与集成主机：amd64、RTX 4080 SUPER。
 - 最终部署设备：Jetson AGX Orin 64GB、aarch64、当前 L4T R36.0.0；允许未来升级，但 R36.0.0 在新版本完成验收前始终是最低兼容基线。
 - 默认路径规划器：C++ v3。旧 Python A* 只在迁移期作为差分测试参考，不进入生产包。
 - ROS 集成方式：独立 `PlanMotion` Action 节点；Nav2 仅提供可选的轮式薄适配器。
@@ -33,7 +33,7 @@
 3. C++ v3 内核与 ROS 解耦；ROS Action 是部署边界，不是算法内部类型。
 4. 训练与部署同仓维护，但依赖和产物严格分离。
 5. 训练端使用 PyTorch，部署端使用 ONNX 作为交换格式并在 AGX 上生成 TensorRT engine。
-6. 外部 ROS 消息由外部项目定义和发布；本项目只声明依赖、订阅和适配。
+6. 外部 Topic 数据由外部项目发布；上游未定义期间，本项目按批准设计暂定提供 `lunar_navigation_msgs` schema，且不得与上游同名包共存。
 7. 安全语义、平台约束和飞跃承诺状态必须保留，但内部身份、哈希和注册表机制不得扩散为公共接口。
 
 ### 2.1 非目标
@@ -56,7 +56,7 @@
 ```mermaid
 flowchart LR
     W["Windows 开发机<br/>源码审阅、编辑、提交"] --> G["固定 Git 提交或标签"]
-    G --> U["Ubuntu 22.04 amd64 + RTX 4080<br/>ROS 集成、训练、ONNX 验证"]
+    G --> U["Ubuntu 22.04 amd64 + RTX 4080 SUPER<br/>ROS 集成、训练、ONNX 验证"]
     U --> B["发布候选<br/>源码标签、ONNX、配置、报告"]
     B --> J["AGX Orin aarch64 + R36.0.0<br/>原生构建、TensorRT、实机验收"]
 ```
@@ -79,7 +79,7 @@ Ubuntu amd64 主机是新项目的权威开发和集成环境，必须承担：
 - ROS 2 Humble 与外部消息包集成；
 - GCC 11、CMake 3.22 和 C++20 构建；
 - C++ v3、ROS Action 和非 Jetson 专属测试；
-- RTX 4080 上的 PPO 训练、评估和 checkpoint 读取；
+- RTX 4080 SUPER 上的 PPO 训练、评估和 checkpoint 读取；
 - PyTorch 到 ONNX 导出及等价验证；
 - 外部项目 rosbag 回放；
 - 发布候选清单生成。
@@ -104,7 +104,7 @@ AGX 必须获取与 Ubuntu 验证一致的 Git 标签、外部消息版本、ONN
 - 平台、算法和运行参数；
 - Ubuntu 测试报告。
 
-禁止向 AGX 传递 RTX 4080 生成的 TensorRT engine、训练 checkpoint、优化器状态、训练数据、amd64 二进制或 Python 虚拟环境。
+禁止向 AGX 传递 RTX 4080 SUPER 生成的 TensorRT engine、训练 checkpoint、优化器状态、训练数据、amd64 二进制或 Python 虚拟环境。
 
 ---
 
@@ -127,7 +127,7 @@ lunar_navigation/
 │   └── evaluation/                # 模型发布评估
 ├── model_contract/                # manifest规范和小型黄金fixture
 ├── platform/
-│   ├── train_amd64_rtx4080/
+│   ├── train_amd64_rtx4080_super/
 │   └── deploy_agx_orin_r36/
 ├── dependencies.repos             # 未发布外部ROS依赖的固定版本
 ├── tests/
@@ -151,10 +151,10 @@ lunar_navigation/
 - `/environment/map_global`：`grid_map_msgs/msg/GridMap`；
 - `/environment/map_local`：`grid_map_msgs/msg/GridMap`；
 - `/localization/odometry`：`nav_msgs/msg/Odometry`；
-- `/localization/status`：外部 `LocalizationStatus`；
+- `/localization/status`：外部定位系统发布的 `LocalizationStatus` Topic 数据；
 - `/tf`：`tf2_msgs/msg/TFMessage`；
-- `/mission/exploration_task`：外部 `ExplorationTask`；
-- `ScienceTargetRegion`；
+- `/mission/exploration_task`：外部任务系统发布的 `ExplorationTask` Topic 数据；
+- 外部任务系统发布的 `ScienceTargetRegion` 数据；
 - 观测能力 YAML/JSON；
 - 平台能力 YAML/JSON、URDF 和 mesh。
 
@@ -162,13 +162,13 @@ lunar_navigation/
 
 本项目必须：
 
-- 优先依赖外部项目发布的 ROS/Debian 包；
-- 未发布二进制包时在 `dependencies.repos` 固定发布标签或提交；
+- 优先依赖外部项目发布的 `grid_map_msgs`、`nav_msgs` 和 `tf2_msgs` ROS/Debian 包；
+- `lunar_navigation_msgs` 上游尚未定义期间，按 `docs/interfaces/external-input-baseline.md` 暂定提供本仓 schema；
 - 在 `package.xml` 声明依赖；
 - 运行时校验字段、时间、坐标系和范围；
 - 通过共同确认的 rosbag 做兼容测试。
 
-本项目不得复制外部消息源码、重新发布同名消息或为同一消息建立重复 JSON Schema。
+本项目不得复制外部 Topic 数据、重新发布同名消息或为同一消息建立重复 JSON Schema；未来上游切换必须固定版本、比较 schema 并原子替换，任何时刻不得与上游同名包共存。
 
 ### 5.2 内部规划消息
 
@@ -362,7 +362,7 @@ PlannerOutput Plan(const PlannerInput& input);
 
 ### 10.1 训练端
 
-训练在 Ubuntu amd64 RTX 4080 上运行，使用与 ROS 2 Humble 相容的 Python 3.10 环境。迁移前置探测负责确定并锁定实际 NVIDIA 驱动、CUDA 和 PyTorch 版本。
+训练在 Ubuntu amd64 RTX 4080 SUPER 上运行，使用与 ROS 2 Humble 相容的 Python 3.10 环境。迁移前置探测负责确定并锁定实际 NVIDIA 驱动、CUDA 和 PyTorch 版本。
 
 新训练代码必须保留：
 
@@ -506,7 +506,7 @@ fingerprint 至少包含设备架构、L4T、CUDA、TensorRT、精度模式和�
 | 流水线 | 环境 | 发布职责 |
 |---|---|---|
 | PR基础CI | Ubuntu 22.04 amd64、ROS 2 Humble、CPU | 构建、单元、适配和ROS接口 |
-| 训练GPU | Ubuntu 22.04 amd64、RTX 4080 | 训练冒烟、checkpoint、ONNX和等价性 |
+| 训练GPU | Ubuntu 22.04 amd64、RTX 4080 SUPER | 训练冒烟、checkpoint、ONNX和等价性 |
 | ARM64构建 | Ubuntu 22.04 aarch64或交叉编译 | 非GPU架构问题提前发现 |
 | AGX实机 | AGX Orin 64GB、R36.0.0 | TensorRT、Action、性能、功耗和稳定性 |
 
@@ -579,7 +579,7 @@ PyTorch checkpoint -> PyTorch eval -> ONNX Runtime -> AGX TensorRT
 | 1 新仓骨架 | ROS包、平台profile、Ubuntu CI和依赖安装 | amd64与aarch64空链路构建 |
 | 2 v3迁移 | 算法快照、简化API、旧合同逐模块拆除 | 核心无ROS依赖且测试通过 |
 | 3 ROS规划 | Lifecycle、Action、输入适配、可选Nav2 | rosbag可驱动v3 |
-| 4 训练迁移 | PPO核心、训练、评估和单一发布门槛 | RTX 4080训练冒烟通过 |
+| 4 训练迁移 | PPO核心、训练、评估和单一发布门槛 | RTX 4080 SUPER训练冒烟通过 |
 | 5 模型发布 | ONNX、manifest、黄金样例和TensorRT | AGX推理等价通过 |
 | 6 系统集成 | PPO目标到Action到v3 | 完整rosbag端到端通过 |
 | 7 实机稳定 | 性能、异常、4小时稳定、安装和运维 | AGX发布门槛全部通过 |

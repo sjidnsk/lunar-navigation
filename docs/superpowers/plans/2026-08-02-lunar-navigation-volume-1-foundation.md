@@ -46,7 +46,7 @@ tests/foundation/test_source_inventory.py
 tests/foundation/test_environment_fingerprint.py
 ros2_ws/src/lunar_planning_msgs/      # 本项目自有 Action 与消息
 ros2_ws/src/lunar_navigation_config/  # Topic、frame 和平台基线配置
-platform/train_amd64_rtx4080/baseline.yaml
+platform/train_amd64_rtx4080_super/baseline.yaml
 platform/deploy_agx_orin_r36/baseline.yaml
 scripts/bootstrap_ubuntu.sh           # Ubuntu 依赖初始化
 scripts/build_runtime.sh              # 默认不构建 Nav2 和训练目录
@@ -183,7 +183,7 @@ git commit -m "chore: freeze legacy migration sources"
 
 - [ ] **Step 1: 迁入批准文档**
 
-从设计提交 `47716eb` 逐个迁入已批准设计、总路线图和四卷计划，保持 UTF-8/LF，并在迁移提交说明中记录旧仓来源 commit；不得复制旧仓 `.git` 或两个 gitlink。把用户提供的外部输入文档 hash、Topic/type 和外部所有权整理到 `docs/interfaces/external-input-baseline.md`，将迁入设计文档的旧相对链接改指该文件；文档头必须声明“这是接收基线，不是本项目消息定义源”，且不得包含 `.msg` 源码副本。
+从设计提交 `47716eb` 逐个迁入已批准设计、总路线图和四卷计划，保持 UTF-8/LF，并在迁移提交说明中记录旧仓来源 commit；不得复制旧仓 `.git` 或两个 gitlink。把用户提供的外部输入文档 hash、Topic/type、外部 Topic 数据所有权与暂定 schema 合同整理到 `docs/interfaces/external-input-baseline.md`，将迁入设计文档的旧相对链接改指该文件；文档头必须声明其为暂定消息字段与语义的唯一权威基线。
 
 - [ ] **Step 2: 写边界检查失败测试**
 
@@ -251,14 +251,18 @@ git add .gitattributes .gitignore README.md docs/architecture docs/interfaces do
 git commit -m "build: establish single-repository boundaries"
 ```
 
-### Task 3: 固定外部接口依赖而不复制消息
+### Task 3: 固定外部 Topic 生产者并提供本仓暂定 schema
 
 **Execution environment:** Ubuntu 22.04 amd64。
 
 **Estimated Codex time:** 0.5–1 小时；等待外部包交付不计时。
 
 **Files:**
-- Create: `dependencies.repos`
+- Create: `ros2_ws/src/lunar_navigation_msgs/package.xml`
+- Create: `ros2_ws/src/lunar_navigation_msgs/CMakeLists.txt`
+- Create: `ros2_ws/src/lunar_navigation_msgs/msg/LocalizationStatus.msg`
+- Create: `ros2_ws/src/lunar_navigation_msgs/msg/ScienceTargetRegion.msg`
+- Create: `ros2_ws/src/lunar_navigation_msgs/msg/ExplorationTask.msg`
 - Create: `ros2_ws/src/lunar_navigation_config/package.xml`
 - Create: `ros2_ws/src/lunar_navigation_config/CMakeLists.txt`
 - Create: `ros2_ws/src/lunar_navigation_config/config/external_interfaces.yaml`
@@ -266,8 +270,8 @@ git commit -m "build: establish single-repository boundaries"
 - Create: `tests/foundation/test_external_interface_config.py`
 
 **Interfaces:**
-- Consumes: ROS 包 `grid_map_msgs`、`nav_msgs`、`tf2_msgs`、外部 `lunar_navigation_msgs`。
-- Produces: Topic/type/frame/字段依赖清单和 `check_interfaces(config: Path) -> list[str]`。
+- Consumes: ROS 包 `grid_map_msgs`、`nav_msgs`、`tf2_msgs` 与 `docs/interfaces/external-input-baseline.md` 的暂定 schema 合同。
+- Produces: 本仓暂定 `lunar_navigation_msgs` schema、外部 Topic/type/frame/字段依赖清单和 `check_interfaces(config: Path) -> list[str]`。
 
 - [ ] **Step 1: 写配置结构测试**
 
@@ -285,7 +289,13 @@ def test_external_interfaces_declare_owner_and_required_fields():
 `external_interfaces.yaml` 必须包含：
 
 ```yaml
-schema_version: lunar-external-interfaces/v1
+schema_version: lunar-external-interfaces/v2
+interface_packages:
+  lunar_navigation_msgs:
+    schema_provider: in_repository_provisional
+    source_path: ros2_ws/src/lunar_navigation_msgs
+    upstream_status: undefined
+    replacement_policy: atomic
 topics:
   map_global:
     name: /environment/map_global
@@ -347,13 +357,13 @@ static_inputs:
 
 - [ ] **Step 3: 声明包依赖**
 
-`lunar_navigation_config/package.xml` 必须声明 `grid_map_msgs`、`nav_msgs`、`tf2_msgs`、`lunar_navigation_msgs` 为 `<exec_depend>`。`dependencies.repos` 初始内容固定为：
+`lunar_navigation_msgs` 必须严格实现权威基线中的三个 schema，并声明其 rosidl 依赖。`lunar_navigation_config/package.xml` 必须声明 `grid_map_msgs`、`nav_msgs`、`tf2_msgs`、`lunar_navigation_msgs` 为 `<exec_depend>`。`dependencies.repos` 初始内容固定为：
 
 ```yaml
 repositories: {}
 ```
 
-先运行 `rosdep resolve lunar_navigation_msgs` 和 `ros2 pkg prefix lunar_navigation_msgs`。若两者都找不到，停止本卷并向外部项目索取唯一上游仓库 URL 与固定 tag/commit，再只在 `dependencies.repos` 增加该上游；不得复制消息源码。
+`grid_map_msgs`、`nav_msgs` 与 `tf2_msgs` 必须来自 ROS/外部系统；本仓暂定提供 `lunar_navigation_msgs`，不得在 `dependencies.repos` 引入同名上游。上游定义后，必须固定唯一 URL 和 tag/commit、比较 schema，并在同一提交中原子替换本仓暂定包；不得与上游同名包共存。
 
 - [ ] **Step 4: 实现 ROS 接口检查器**
 
@@ -366,13 +376,13 @@ python3 -m pytest -q tests/foundation/test_external_interface_config.py
 python3 tools/check_external_interfaces.py --config ros2_ws/src/lunar_navigation_config/config/external_interfaces.yaml
 ```
 
-Expected: 配置测试通过，所有外部类型可见；输出不包含新仓内复制的 `lunar_navigation_msgs/msg` 路径。
+Expected: 配置测试通过，ROS 外部类型可见，`lunar_navigation_msgs` 来自本仓暂定包且无第二个同名实现。
 
 - [ ] **Step 6: 提交外部依赖基线**
 
 ```bash
-git add dependencies.repos ros2_ws/src/lunar_navigation_config tools/check_external_interfaces.py tests/foundation/test_external_interface_config.py
-git commit -m "build: pin external ROS interface dependencies"
+git add dependencies.repos ros2_ws/src/lunar_navigation_msgs ros2_ws/src/lunar_navigation_config tools/check_external_interfaces.py tests/foundation/test_external_interface_config.py
+git commit -m "build: define provisional ROS interface schemas"
 ```
 
 ### Task 4: 创建本项目内部 `lunar_planning_msgs`
@@ -542,7 +552,7 @@ git commit -m "feat: define internal planning action interfaces"
 **Estimated Codex time:** 0.5–1 小时，不含设备登录等待。
 
 **Files:**
-- Create: `platform/train_amd64_rtx4080/baseline.yaml`
+- Create: `platform/train_amd64_rtx4080_super/baseline.yaml`
 - Create: `platform/deploy_agx_orin_r36/baseline.yaml`
 - Create: `tools/capture_environment.py`
 - Create: `tests/foundation/test_environment_fingerprint.py`
@@ -568,12 +578,13 @@ def test_agx_fingerprint_requires_r36_and_aarch64():
 
 ```yaml
 schema_version: lunar-platform-baseline/v1
-profile: train_amd64_rtx4080
+profile: train_amd64_rtx4080_super
 os: Ubuntu 22.04 LTS
 architecture: amd64
 ros_distro: humble
 python: "3.10"
-gpu_model: NVIDIA GeForce RTX 4080
+gpu_model: NVIDIA GeForce RTX 4080 SUPER
+gpu_pci_device_id: "10de:2702"
 responsibilities: [ros_integration, ppo_training, onnx_export, rosbag_replay]
 ```
 
@@ -598,11 +609,11 @@ responsibilities: [native_build, tensorrt_engine, inference, device_release_gate
 - [ ] **Step 4: 在两台 Linux 主机采集指纹**
 
 ```bash
-python3 tools/capture_environment.py --profile train_amd64_rtx4080 --output /tmp/ubuntu-fingerprint.json
+python3 tools/capture_environment.py --profile train_amd64_rtx4080_super --output /tmp/ubuntu-fingerprint.json
 python3 tools/capture_environment.py --profile deploy_agx_orin_r36 --output /tmp/agx-fingerprint.json
 ```
 
-Expected: Ubuntu 指纹匹配 amd64/RTX 4080；AGX 指纹匹配 aarch64/R36.0.0。发现版本差异时停止发布流程并保留实际输出，不修改基线掩盖差异。
+Expected: Ubuntu 指纹匹配 amd64/RTX 4080 SUPER；AGX 指纹匹配 aarch64/R36.0.0。发现版本差异时停止发布流程并保留实际输出，不修改基线掩盖差异。
 
 - [ ] **Step 5: 运行测试并提交**
 

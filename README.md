@@ -5,10 +5,10 @@
 ## 三机职责
 
 - Windows：源码审阅、编辑、提交和发起远程任务；不是 ROS、Linux wheel、C++ 发布包或 TensorRT 的权威构建环境。
-- Ubuntu 22.04 amd64 + RTX 4080：ROS 集成、C++20 构建、训练、ONNX 等价验证和 rosbag 回放的权威环境。
+- Ubuntu 22.04 amd64 + RTX 4080 SUPER：ROS 集成、C++20 构建、训练、ONNX 等价验证和 rosbag 回放的权威环境。
 - Jetson AGX Orin 64GB（aarch64，最低 L4T R36.0.0）：原生构建、TensorRT engine 生成、Action/性能/功耗/稳定性验收。
 
-外部 ROS 消息和静态能力资料由外部项目拥有；本仓只声明依赖、订阅、适配和运行时校验。接收字段基线见 [`docs/interfaces/external-input-baseline.md`](docs/interfaces/external-input-baseline.md)。
+外部 Topic 数据和静态能力资料由外部项目拥有；上游未定义期间，本仓按批准设计暂定提供 `lunar_navigation_msgs` schema，且不得与上游同名包共存。接收字段与暂定 schema 基线见 [`docs/interfaces/external-input-baseline.md`](docs/interfaces/external-input-baseline.md)。
 
 ## 基础检查
 

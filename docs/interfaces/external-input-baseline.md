@@ -1,13 +1,14 @@
 # 外部输入接收基线
 
-> **这是接收基线，不是本项目消息定义源。** 本文只记录本项目订阅、加载和校验外部输入时需要的已确认字段；不得据此复制、重新发布或维护任何外部 `.msg` 定义。
+> **这是本项目暂定消息字段与语义的唯一权威基线。** `lunar_navigation_msgs` 上游尚未定义期间，本仓 `.msg`、配置和检查器必须与本文一致；Topic 数据生产者仍由外部项目拥有。未来切换上游必须执行固定版本、schema 对比和原子替换，不能叠加同名包。
 
 ## 来源与所有权
 
 - 只读输入：`docs/外部输入/课题四未知场景无人平台自主探索与规划外部输入.md`
 - SHA-256：`a4c2db0a6647d59fa7cee5cf8048d18f7bca7c7b11a591a32d33d237c0c06e78`
-- 消息、Topic、地图、定位、TF、任务和能力资料均由外部项目定义、发布和演进。
-- 本项目只声明依赖、直接订阅、适配和运行时校验；必须优先使用外部发布的 ROS/Debian 包。未发布二进制包时，在 `dependencies.repos` 固定唯一上游 tag 或 commit。
+- `grid_map_msgs`、`nav_msgs` 和 `tf2_msgs` 仍来自 ROS/外部系统；定位与任务系统仍负责消息数据的发布和演进协商。
+- 本仓暂定提供三个 `lunar_navigation_msgs` schema；Topic 数据生产者仍由外部项目拥有。
+- 本项目只声明依赖、直接订阅、适配和运行时校验；上游尚未定义时，本仓 `.msg`、配置和检查器以本文为准。未来切换必须固定唯一上游 tag 或 commit、执行 schema 对比并原子替换，不得与上游同名包共存。
 
 ## Topic 与接收字段
 
@@ -20,6 +21,46 @@
 | `/tf` | `tf2_msgs/msg/TFMessage` | 外部 TF 发布者 | `transforms[]`，形成 `map -> odom -> base_link` |
 | `/mission/exploration_task` | `lunar_navigation_msgs/msg/ExplorationTask` | 外部任务系统 | `header`、`mission_id`、`revision`、`desired_state`、ROI、`science_regions`；状态为 `ACTIVE/PAUSED/CANCELED` |
 | `science_regions[]` | `lunar_navigation_msgs/msg/ScienceTargetRegion` | 外部任务系统 | `region_id`、`objective_id`、`boundary`、`priority` |
+
+## 暂定消息 schema
+
+### `LocalizationStatus.msg`
+
+```text
+uint8 UNKNOWN=0
+uint8 VALID=1
+uint8 DEGRADED=2
+uint8 INVALID=3
+uint8 RELOCALIZING=4
+std_msgs/Header header
+uint8 status
+```
+
+### `ScienceTargetRegion.msg`
+
+```text
+string region_id
+string objective_id
+geometry_msgs/Polygon boundary
+float64 priority
+```
+
+### `ExplorationTask.msg`
+
+```text
+uint8 ACTIVE=1
+uint8 PAUSED=2
+uint8 CANCELED=3
+std_msgs/Header header
+string mission_id
+uint64 revision
+uint8 desired_state
+float64 roi_min_x_m
+float64 roi_min_y_m
+float64 roi_max_x_m
+float64 roi_max_y_m
+lunar_navigation_msgs/ScienceTargetRegion[<=64] science_regions
+```
 
 ## 地图与定位字段
 

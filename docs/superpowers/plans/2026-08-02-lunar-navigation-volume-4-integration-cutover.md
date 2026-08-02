@@ -12,10 +12,10 @@
 
 ## Global Constraints
 
-- Ubuntu 22.04 amd64/RTX 4080 是完整集成与发布候选生成环境；AGX aarch64/R36.0.0 是最终发布环境。
+- Ubuntu 22.04 amd64/RTX 4080 SUPER 是完整集成与发布候选生成环境；AGX aarch64/R36.0.0 是最终发布环境。
 - Ubuntu 与 AGX 必须使用同一 Git tag、外部消息版本、ONNX、配置和 release manifest。
 - 普通 ARM64 或交叉编译只做预警，不得替代 AGX 实机验收。
-- AGX 必须原生构建并本机生成 TensorRT engine；不得接收 amd64 二进制或 RTX 4080 engine。
+- AGX 必须原生构建并本机生成 TensorRT engine；不得接收 amd64 二进制或 RTX 4080 SUPER engine。
 - 外部 rosbag 不得提交 Git；仓库只提交 asset ID、SHA-256、Topic/类型和回放预期。
 - 规划节点与探索节点任一 configure 失败都不得进入 Active。
 - v3 必须满足 AGX 固定 benchmark `P95 < 1 s`。
@@ -227,7 +227,7 @@ git commit -m "test: cover navigation degradation and recovery matrix"
 
 ### Task 4: 生成不可混用二进制的发布候选清单
 
-**Execution environment:** Ubuntu 22.04 amd64 + RTX 4080。
+**Execution environment:** Ubuntu 22.04 amd64 + RTX 4080 SUPER。
 
 **Estimated Codex time:** 2–3 小时。
 

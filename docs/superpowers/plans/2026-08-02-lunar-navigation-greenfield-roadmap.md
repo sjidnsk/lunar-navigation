@@ -4,7 +4,7 @@
 
 **Goal:** 从当前父仓库与两个 gitlink 子仓库迁出一个以 C++ v3 为唯一生产规划内核、可在 ROS 2 Humble 与 Jetson AGX Orin 上部署的单 Git 根新项目。
 
-**Architecture:** 迁移分成四个可独立验收的卷册：先建立新仓与外部依赖基线，再迁移 C++ v3 和独立 `PlanMotion` Action，然后重构 PPO 训练与 ONNX/TensorRT 发布链，最后完成 Ubuntu 集成、AGX 实机验收和旧仓切换。Windows 只管理源码，Ubuntu amd64/RTX 4080 是权威开发训练环境，AGX aarch64/R36.0.0 是唯一设备发布门槛。
+**Architecture:** 迁移分成四个可独立验收的卷册：先建立新仓与外部依赖基线，再迁移 C++ v3 和独立 `PlanMotion` Action，然后重构 PPO 训练与 ONNX/TensorRT 发布链，最后完成 Ubuntu 集成、AGX 实机验收和旧仓切换。Windows 只管理源码，Ubuntu amd64/RTX 4080 SUPER 是权威开发训练环境，AGX aarch64/R36.0.0 是唯一设备发布门槛。
 
 **Tech Stack:** Git、Ubuntu 22.04、ROS 2 Humble、GCC 11、CMake 3.22、C++20、Python 3.10、PyTorch、ONNX、TensorRT、ament、colcon、rosdep、pytest、GoogleTest、launch_testing。
 
@@ -17,9 +17,9 @@
 - 最终部署设备必须是 Jetson AGX Orin 64GB、aarch64、L4T R36.0.0；新 L4T 未通过验收前不得删除 R36.0.0 基线。
 - C++ v3 必须是唯一生产规划内核；Python A* 只能存在于迁移差分测试，且不得进入生产部署包。
 - ROS 主入口必须是独立 `PlanMotion` Action；Nav2 只能是默认不构建的轮式薄适配器。
-- PPO 训练必须在 Ubuntu 22.04 amd64、RTX 4080 上进行；AGX 只执行推理。
+- PPO 训练必须在 Ubuntu 22.04 amd64、RTX 4080 SUPER 上进行；AGX 只执行推理。
 - 训练端必须使用 PyTorch，跨机器模型交换格式必须是 ONNX，TensorRT engine 必须在 AGX 本机生成。
-- 外部 ROS 消息必须由外部项目定义和发布；本项目只声明依赖、订阅、校验和适配，不得复制定义。
+- 外部 Topic 数据必须由外部项目发布；`lunar_navigation_msgs` 上游未定义期间，本项目按批准设计暂定提供 schema，不得与上游同名包共存。
 - 平台有效最大坡度必须取外部能力上限与项目 `30°` 硬上限中的较小值。
 - synthetic terrain 只能标为 proxy，不得声明为真实物理障碍。
 - v3 或 TensorRT 失败时不得静默回退到 Python A*、PyTorch、ONNX Runtime 或 CPU 推理。
@@ -36,9 +36,9 @@
 | 环境/责任方 | 执行任务 | 权威产物 | 不得承担 |
 |---|---|---|---|
 | Windows 开发机 | 旧仓审计、迁移清单、源码编辑、Git 提交与审查、触发远程任务 | Git commit/tag、迁移清单 | ROS/Linux 发布构建、训练、TensorRT engine、AGX 验收 |
-| Ubuntu 22.04 amd64 + RTX 4080 | rosdep、colcon、C++/ROS 测试、PPO 训练、checkpoint 读取、ONNX 导出与等价、rosbag 回放 | 测试报告、checkpoint、模型包候选、发布候选清单 | AGX TensorRT engine、aarch64 最终发布结论 |
+| Ubuntu 22.04 amd64 + RTX 4080 SUPER | rosdep、colcon、C++/ROS 测试、PPO 训练、checkpoint 读取、ONNX 导出与等价、rosbag 回放 | 测试报告、checkpoint、模型包候选、发布候选清单 | AGX TensorRT engine、aarch64 最终发布结论 |
 | ARM64 编译通道 | 编译和非 GPU 架构预警 | ARM64 编译报告 | 代替 AGX R36.0.0 实机门槛 |
-| AGX Orin 64GB/R36.0.0 | aarch64 原生构建、TensorRT engine、Action/异常/性能/功耗/稳定性、安装验证 | engine cache、设备报告、发布准入结论 | PPO 训练、接收 amd64 二进制或 RTX 4080 engine |
+| AGX Orin 64GB/R36.0.0 | aarch64 原生构建、TensorRT engine、Action/异常/性能/功耗/稳定性、安装验证 | engine cache、设备报告、发布准入结论 | PPO 训练、接收 amd64 二进制或 RTX 4080 SUPER engine |
 | 外部项目 | 定义并发布地图、定位、TF、任务、科学区域和能力资料 | ROS/Debian 包、固定版本、共同 rosbag | 依赖本项目内部 `lunar_planning_msgs` |
 
 ## 2. 跨系统制品流
@@ -48,7 +48,7 @@ Windows
   Git commit/tag + migration/source_inventory.yaml
             |
             v
-Ubuntu amd64 / RTX 4080
+Ubuntu amd64 / RTX 4080 SUPER
   source tag + test reports + policy.onnx + manifest.json
   + golden_inputs.npz + golden_outputs.npz
             |
@@ -69,7 +69,7 @@ AGX Orin / R36.0.0
 
 严禁向 AGX 传递：
 
-- RTX 4080 生成的 TensorRT engine；
+- RTX 4080 SUPER 生成的 TensorRT engine；
 - PyTorch checkpoint、优化器状态、训练数据和训练日志；
 - amd64 二进制、Windows 构建目录或 Python 虚拟环境。
 
@@ -79,7 +79,7 @@ AGX Orin / R36.0.0
 |---:|---|---|---:|
 | 1 | [`2026-08-02-lunar-navigation-volume-1-foundation.md`](2026-08-02-lunar-navigation-volume-1-foundation.md) | 新仓能在 Ubuntu 干净 checkout 上解析外部依赖、生成内部 ROS 接口并通过 amd64/ARM64 基础构建 | 7–12 |
 | 2 | [`2026-08-02-lunar-navigation-volume-2-planner-ros.md`](2026-08-02-lunar-navigation-volume-2-planner-ros.md) | 简化 C++ API、三平台 v3、Lifecycle Action、输入快照和可选 Nav2 通过测试 | 24–42 |
-| 3 | [`2026-08-02-lunar-navigation-volume-3-policy-pipeline.md`](2026-08-02-lunar-navigation-volume-3-policy-pipeline.md) | RTX 4080 训练冒烟、ONNX 模型包、AGX TensorRT 等价和探索节点通过 | 22–41 |
+| 3 | [`2026-08-02-lunar-navigation-volume-3-policy-pipeline.md`](2026-08-02-lunar-navigation-volume-3-policy-pipeline.md) | RTX 4080 SUPER 训练冒烟、ONNX 模型包、AGX TensorRT 等价和探索节点通过 | 22–41 |
 | 4 | [`2026-08-02-lunar-navigation-volume-4-integration-cutover.md`](2026-08-02-lunar-navigation-volume-4-integration-cutover.md) | 完整 rosbag 链、AGX 性能与 4 小时稳定性、安装、回退和旧仓归档全部通过 | 22–41 |
 | 横向 | 四卷接口复核、失败重试和发布回归 | 四卷产物来自同一 release candidate，接口/配置/模型 hash 一致 | 10–19 |
 
@@ -241,11 +241,11 @@ git tag -a planner-action-v1 -m "C++ v3 and PlanMotion action v1"
 - Consumes: `planner-action-v1`、经清点的 PPO 核心源码和选定 checkpoint。
 - Produces: 训练/评估命令、ONNX 模型包、`lunar_policy_runtime`、`lunar_exploration` 和等价报告。
 
-- [ ] **Step 1: 在 Ubuntu RTX 4080 执行训练冒烟、评估和 ONNX 发布**
+- [ ] **Step 1: 在 Ubuntu RTX 4080 SUPER 执行训练冒烟、评估和 ONNX 发布**
 
 ```bash
 python3 -m pytest -q training/lunar_policy_training/tests training/model_export/tests
-python3 -m lunar_policy_training.cli train-smoke --config training/configs/rtx4080_smoke.yaml --artifact-root "$LUNAR_TRAIN_ARTIFACT_ROOT"
+python3 -m lunar_policy_training.cli train-smoke --config training/configs/rtx4080_super_smoke.yaml --artifact-root "$LUNAR_TRAIN_ARTIFACT_ROOT"
 python3 -m model_export.publish --checkpoint "$LUNAR_TRAIN_ARTIFACT_ROOT/checkpoints/smoke.pt" --output "$LUNAR_TRAIN_ARTIFACT_ROOT/model-package"
 python3 -m model_export.verify_package "$LUNAR_TRAIN_ARTIFACT_ROOT/model-package"
 ```

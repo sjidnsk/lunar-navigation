@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把旧 Stage6 PPO 的有效模型、环境、训练和评估核心迁入新仓，并建立从 RTX 4080 checkpoint 到 AGX TensorRT 推理的唯一发布链。
+**Goal:** 把旧 Stage6 PPO 的有效模型、环境、训练和评估核心迁入新仓，并建立从 RTX 4080 SUPER checkpoint 到 AGX TensorRT 推理的唯一发布链。
 
-**Architecture:** 训练代码位于 `training/`，只在 Ubuntu amd64/RTX 4080 安装；公共模型合同位于 `model_contract/`，训练、导出、探索输入和设备运行时共同消费。PyTorch 模型通过固定 inference wrapper 导出 ONNX，设备包只含四个文件；AGX 使用 C++ TensorRT runtime 和进程内 Python binding，不经 DDS 传高分辨率张量，也不允许后端静默回退。
+**Architecture:** 训练代码位于 `training/`，只在 Ubuntu amd64/RTX 4080 SUPER 安装；公共模型合同位于 `model_contract/`，训练、导出、探索输入和设备运行时共同消费。PyTorch 模型通过固定 inference wrapper 导出 ONNX，设备包只含四个文件；AGX 使用 C++ TensorRT runtime 和进程内 Python binding，不经 DDS 传高分辨率张量，也不允许后端静默回退。
 
 **Tech Stack:** Python 3.10、PyTorch、NumPy、pytest、ONNX、ONNX Runtime、JSON Schema、C++20、pybind11、CUDA、TensorRT、ament_cmake、ament_python、rclpy、rclpy.lifecycle。
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- PPO 训练、checkpoint 读取、评估和 ONNX 导出必须在 Ubuntu 22.04 amd64、RTX 4080 上进行。
+- PPO 训练、checkpoint 读取、评估和 ONNX 导出必须在 Ubuntu 22.04 amd64、RTX 4080 SUPER 上进行。
 - AGX Orin 只执行推理，不得安装 PyTorch、训练包、checkpoint、优化器、训练数据或训练日志。
 - 设备模型包必须且只能包含 `policy.onnx`、`manifest.json`、`golden_inputs.npz`、`golden_outputs.npz`。
 - 模型 manifest schema ID 必须是 `lunar-policy-manifest/v1`。
@@ -62,7 +62,7 @@ training/
 │   ├── publish.py
 │   └── tests/
 └── configs/
-    ├── rtx4080_smoke.yaml
+    ├── rtx4080_super_smoke.yaml
     └── release_gate_v1.yaml
 ros2_ws/src/lunar_policy_runtime/
 ├── include/lunar_policy_runtime/manifest.hpp
@@ -89,7 +89,7 @@ tests/device/policy_runtime/
 
 ### Task 1: 迁移 PPO 核心而不迁移 Stage 编排合同
 
-**Execution environment:** Windows 清点并提交；Ubuntu RTX 4080 验证。
+**Execution environment:** Windows 清点并提交；Ubuntu RTX 4080 SUPER 验证。
 
 **Estimated Codex time:** 2–4 小时。
 
@@ -134,14 +134,14 @@ def test_training_package_has_no_legacy_workflow_imports():
 
 固定种子和小型合成输入，断言以下输出名称、shape、dtype 与 finite：`frontier_logits`、`theta_mu`、`theta_kappa`、`value`。候选 mask 无效位置必须不会被 argmax 选择。
 
-- [ ] **Step 5: 运行 CPU 与 RTX 4080 冒烟**
+- [ ] **Step 5: 运行 CPU 与 RTX 4080 SUPER 冒烟**
 
 ```bash
 python3 -m pytest -q training/lunar_policy_training/tests/test_import_boundary.py training/lunar_policy_training/tests/test_policy_forward.py
 CUDA_VISIBLE_DEVICES=0 python3 -m pytest -q training/lunar_policy_training/tests/test_policy_forward.py -m cuda
 ```
 
-Expected: CPU 和 CUDA 冒烟通过；CUDA 设备名称记录为 RTX 4080。
+Expected: CPU 和 CUDA 冒烟通过；CUDA 设备名称记录为 RTX 4080 SUPER。
 
 - [ ] **Step 6: 提交 PPO 核心**
 
@@ -152,7 +152,7 @@ git commit -m "refactor: migrate maintainable PPO training core"
 
 ### Task 2: 建立显式训练配置、checkpoint 和单一 CLI
 
-**Execution environment:** Ubuntu 22.04 amd64 + RTX 4080。
+**Execution environment:** Ubuntu 22.04 amd64 + RTX 4080 SUPER。
 
 **Estimated Codex time:** 2–4 小时。
 
@@ -160,8 +160,8 @@ git commit -m "refactor: migrate maintainable PPO training core"
 - Create: `training/lunar_policy_training/lunar_policy_training/config.py`
 - Create: `training/lunar_policy_training/lunar_policy_training/cli.py`
 - Create: `training/lunar_policy_training/lunar_policy_training/checkpoint.py`
-- Create: `training/configs/rtx4080_smoke.yaml`
-- Create: `training/constraints/ubuntu22.04-rtx4080.txt`
+- Create: `training/configs/rtx4080_super_smoke.yaml`
+- Create: `training/constraints/ubuntu22.04-rtx4080_super.txt`
 - Create: `training/tools/lock_training_stack.py`
 - Create: `training/lunar_policy_training/tests/test_cli.py`
 - Create: `training/lunar_policy_training/tests/test_training_stack_lock.py`
@@ -183,11 +183,11 @@ def test_train_rejects_missing_artifact_root(cli_runner):
 
 - [ ] **Step 2: 探测并锁定实际训练栈**
 
-`lock_training_stack.py` 读取卷一 Ubuntu 指纹，并从当前环境验证 NVIDIA driver、`torch.version.cuda`、`torch.cuda.get_device_name(0)`、cuDNN、NumPy、ONNX 和 ONNX Runtime GPU provider；GPU 必须是 RTX 4080。它只把训练直接依赖的精确版本写入 `training/constraints/ubuntu22.04-rtx4080.txt`，不得把 Windows/Conda 路径或完整 `pip freeze` 写入仓库。测试使用固定 probe fixture 验证版本不匹配时退出非零。
+`lock_training_stack.py` 读取卷一 Ubuntu 指纹，并从当前环境验证 NVIDIA driver、`torch.version.cuda`、`torch.cuda.get_device_name(0)`、cuDNN、NumPy、ONNX 和 ONNX Runtime GPU provider；GPU 必须是 RTX 4080 SUPER。它只把训练直接依赖的精确版本写入 `training/constraints/ubuntu22.04-rtx4080_super.txt`，不得把 Windows/Conda 路径或完整 `pip freeze` 写入仓库。测试使用固定 probe fixture 验证版本不匹配时退出非零。
 
 - [ ] **Step 3: 定义训练配置**
 
-`rtx4080_smoke.yaml` 固定随机种子、1 个短 rollout、2 个优化 epoch、小型场景集、FP32、`cuda:0` 和 `max_traversable_slope_deg: 30.0`；明确标记 synthetic terrain 为 `proxy`。
+`rtx4080_super_smoke.yaml` 固定随机种子、1 个短 rollout、2 个优化 epoch、小型场景集、FP32、`cuda:0` 和 `max_traversable_slope_deg: 30.0`；明确标记 synthetic terrain 为 `proxy`。
 
 - [ ] **Step 4: 实现单一 CLI**
 
@@ -207,12 +207,12 @@ CLI 对所有命令要求绝对 `--artifact-root`；训练输出固定为：
 
 checkpoint 必须包含 schema version、model state、optimizer state、global step、config、normalization、随机数状态和 source commit；加载时严格验证网络/观测格式版本。checkpoint 只用于训练端，发布器不得复制它。
 
-- [ ] **Step 6: 运行 roundtrip 和 RTX 4080 smoke**
+- [ ] **Step 6: 运行 roundtrip 和 RTX 4080 SUPER smoke**
 
 ```bash
 python3 -m pytest -q training/lunar_policy_training/tests/test_cli.py training/lunar_policy_training/tests/test_training_stack_lock.py training/lunar_policy_training/tests/test_checkpoint_roundtrip.py
-python3 training/tools/lock_training_stack.py --fingerprint "$LUNAR_UBUNTU_FINGERPRINT" --output training/constraints/ubuntu22.04-rtx4080.txt
-python3 -m lunar_policy_training.cli train --config training/configs/rtx4080_smoke.yaml --artifact-root "$LUNAR_TRAIN_ARTIFACT_ROOT"
+python3 training/tools/lock_training_stack.py --fingerprint "$LUNAR_UBUNTU_FINGERPRINT" --output training/constraints/ubuntu22.04-rtx4080_super.txt
+python3 -m lunar_policy_training.cli train --config training/configs/rtx4080_super_smoke.yaml --artifact-root "$LUNAR_TRAIN_ARTIFACT_ROOT"
 ```
 
 Expected: 训练完成、checkpoint 可恢复、输出目录外无文件写入。
@@ -220,13 +220,13 @@ Expected: 训练完成、checkpoint 可恢复、输出目录外无文件写入�
 - [ ] **Step 7: 提交训练入口**
 
 ```bash
-git add training/lunar_policy_training training/configs/rtx4080_smoke.yaml training/constraints training/tools/lock_training_stack.py
+git add training/lunar_policy_training training/configs/rtx4080_super_smoke.yaml training/constraints training/tools/lock_training_stack.py
 git commit -m "feat: add explicit PPO training and checkpoint CLI"
 ```
 
 ### Task 3: 合并 G1/G2/G3 为单一模型发布评估
 
-**Execution environment:** Ubuntu RTX 4080。
+**Execution environment:** Ubuntu RTX 4080 SUPER。
 
 **Estimated Codex time:** 2–3 小时。
 
@@ -372,7 +372,7 @@ git commit -m "feat: define deployable policy model contract"
 
 ### Task 5: 实现 ONNX 导出、黄金样例和等价验证
 
-**Execution environment:** Ubuntu amd64 + RTX 4080。
+**Execution environment:** Ubuntu amd64 + RTX 4080 SUPER。
 
 **Estimated Codex time:** 4–7 小时。
 
@@ -429,7 +429,7 @@ FP32 初始容差固定 `atol=1e-4`、`rtol=1e-4`；要求所有输出 finite、
 
 发布器先在同一 artifact root 的临时目录生成四文件、验证、fsync，再原子 rename 到 `<artifact-root>/published/<model-id>/<version>`。目标已存在且 hash 不同则拒绝覆盖。
 
-- [ ] **Step 7: 在 RTX 4080 发布 smoke 模型**
+- [ ] **Step 7: 在 RTX 4080 SUPER 发布 smoke 模型**
 
 ```bash
 python3 -m pytest -q training/model_export/tests
@@ -683,7 +683,7 @@ git commit -m "test: qualify AGX policy inference runtime"
 
 ### Task 9: 卷三全量验收与模型发布回退点
 
-**Execution environment:** Ubuntu RTX 4080 与 AGX R36.0.0。
+**Execution environment:** Ubuntu RTX 4080 SUPER 与 AGX R36.0.0。
 
 **Estimated Codex time:** 1–2 小时。
 
