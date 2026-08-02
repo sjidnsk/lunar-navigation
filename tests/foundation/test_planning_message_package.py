@@ -1,4 +1,5 @@
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -95,3 +96,8 @@ def test_internal_planning_message_sources_are_exact():
     }
     assert actual == EXPECTED_MESSAGES
     assert (PACKAGE / "action/PlanMotion.action").read_text(encoding="utf-8") == EXPECTED_ACTION
+
+
+def test_package_declares_ament_cmake_build_type():
+    root = ET.parse(PACKAGE / "package.xml").getroot()
+    assert root.findtext("export/build_type") == "ament_cmake"

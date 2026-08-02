@@ -54,6 +54,11 @@ def test_package_declares_only_required_rosidl_dependencies():
     assert root.findtext("member_of_group") == "rosidl_interface_packages"
 
 
+def test_package_declares_ament_cmake_build_type():
+    root = ET.parse(PACKAGE / "package.xml").getroot()
+    assert root.findtext("export/build_type") == "ament_cmake"
+
+
 def test_message_sources_match_the_authoritative_baseline():
     baseline = (ROOT / "docs/interfaces/external-input-baseline.md").read_text(encoding="utf-8")
     for source in EXPECTED.values():
