@@ -13,6 +13,97 @@ import yaml
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 _FIELD_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+_SCHEMA_VERSION = "lunar-external-interfaces/v1"
+_TOPICS = {
+    "map_global": {
+        "name": "/environment/map_global",
+        "type": "grid_map_msgs/msg/GridMap",
+        "owner": "external",
+        "frame": "map",
+        "required_fields": [
+            "header",
+            "info",
+            "layers",
+            "basic_layers",
+            "data",
+            "outer_start_index",
+            "inner_start_index",
+        ],
+    },
+    "map_local": {
+        "name": "/environment/map_local",
+        "type": "grid_map_msgs/msg/GridMap",
+        "owner": "external",
+        "frame": "odom",
+        "required_fields": [
+            "header",
+            "info",
+            "layers",
+            "basic_layers",
+            "data",
+            "outer_start_index",
+            "inner_start_index",
+        ],
+    },
+    "odometry": {
+        "name": "/localization/odometry",
+        "type": "nav_msgs/msg/Odometry",
+        "owner": "external",
+        "frame": "odom",
+        "child_frame": "base_link",
+        "required_fields": ["header", "child_frame_id", "pose", "twist"],
+    },
+    "localization_status": {
+        "name": "/localization/status",
+        "type": "lunar_navigation_msgs/msg/LocalizationStatus",
+        "owner": "external",
+        "frame": "odom",
+        "required_fields": ["header", "status"],
+    },
+    "exploration_task": {
+        "name": "/mission/exploration_task",
+        "type": "lunar_navigation_msgs/msg/ExplorationTask",
+        "owner": "external",
+        "frame": "map",
+        "required_fields": [
+            "header",
+            "mission_id",
+            "revision",
+            "desired_state",
+            "science_regions",
+        ],
+    },
+}
+_TF = {
+    "topic": "/tf",
+    "type": "tf2_msgs/msg/TFMessage",
+    "chain": ["map", "odom", "base_link"],
+}
+_REQUIRED_GRID_LAYERS = [
+    "elevation",
+    "valid_mask",
+    "obstacle",
+    "obstacle_height",
+    "observation_age_s",
+    "observation_quality",
+    "elevation_variance",
+    "obstacle_variance",
+    "observation_count",
+    "forbidden",
+]
+_STATIC_INPUTS = {
+    "observation_capability": {
+        "owner": "external",
+        "formats": ["yaml", "json"],
+        "required_fields": ["sensor_range_m", "sensor_fov_deg"],
+    },
+    "platform_capability": {
+        "owner": "external",
+        "schema": "platform-control-capability-source/v1",
+        "formats": ["yaml", "json", "urdf"],
+        "required_fields": ["platform", "geometry_source"],
+    },
+}
 
 
 def run_ros_command(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -44,26 +135,131 @@ def _command_failure(command: str, result: subprocess.CompletedProcess[str]) -> 
     return f"{command} failed: {detail}"
 
 
-def _interface_specs(document: Mapping[str, object]) -> list[tuple[str, tuple[str, ...]]]:
-    topics = document.get("topics", {})
-    if not isinstance(topics, Mapping):
-        raise ValueError("topics must be a mapping")
+def _missing_key(errors: list[str], path: str) -> None:
+    errors.append(f"config error: missing required key: {path}")
 
-    specs: list[tuple[str, tuple[str, ...]]] = []
-    for topic in topics.values():
-        if not isinstance(topic, Mapping):
-            raise ValueError("each topic must be a mapping")
-        interface_type = topic.get("type")
-        required_fields = topic.get("required_fields", [])
-        if not isinstance(interface_type, str) or not isinstance(required_fields, list):
-            raise ValueError("topic type and required_fields must be declared")
-        specs.append((interface_type, tuple(str(field) for field in required_fields)))
+
+def _unexpected_keys(errors: list[str], path: str, value: Mapping[str, object], allowed: set[str]) -> None:
+    unexpected = sorted(set(value) - allowed)
+    if unexpected:
+        errors.append(f"config error: {path} has unexpected keys: {', '.join(unexpected)}")
+
+
+def _validate_required_fields(
+    errors: list[str], path: str, value: object, expected: list[str]
+) -> None:
+    if not isinstance(value, list):
+        errors.append(f"config error: {path} must be a list")
+        return
+    if not all(isinstance(field, str) and field for field in value):
+        errors.append(f"config error: {path} must contain non-empty strings")
+        return
+    if not value:
+        errors.append(f"config error: {path} must not be empty")
+        return
+    if len(set(value)) != len(value):
+        errors.append(f"config error: {path} must not contain duplicates")
+        return
+    if value != expected:
+        errors.append(f"config error: {path} must be {expected!r}")
+
+
+def _validate_fixed_mapping(
+    errors: list[str], path: str, value: object, expected: Mapping[str, object]
+) -> None:
+    if not isinstance(value, Mapping):
+        errors.append(f"config error: {path} must be a mapping")
+        return
+
+    _unexpected_keys(errors, path, value, set(expected))
+    for key, expected_value in expected.items():
+        field_path = f"{path}.{key}"
+        if key not in value:
+            _missing_key(errors, field_path)
+            continue
+        actual_value = value[key]
+        if key == "required_fields":
+            _validate_required_fields(errors, field_path, actual_value, expected_value)
+        elif isinstance(expected_value, list):
+            if not isinstance(actual_value, list):
+                errors.append(f"config error: {field_path} must be a list")
+            elif actual_value != expected_value:
+                errors.append(f"config error: {field_path} must be {expected_value!r}")
+        elif not isinstance(actual_value, type(expected_value)):
+            errors.append(
+                f"config error: {field_path} must be a {type(expected_value).__name__}"
+            )
+        elif actual_value != expected_value:
+            errors.append(f"config error: {field_path} must be {expected_value!r}")
+
+
+def validate_external_config(document: object) -> list[str]:
+    """Return contract errors without invoking ROS commands."""
+    if not isinstance(document, Mapping):
+        return ["config error: document must be a mapping"]
+
+    errors: list[str] = []
+    required_top_level = {"schema_version", "topics", "tf", "required_grid_layers", "static_inputs"}
+    _unexpected_keys(errors, "document", document, required_top_level)
+    for key in sorted(required_top_level):
+        if key not in document:
+            _missing_key(errors, key)
+
+    schema_version = document.get("schema_version")
+    if schema_version is not None:
+        if not isinstance(schema_version, str):
+            errors.append("config error: schema_version must be a string")
+        elif schema_version != _SCHEMA_VERSION:
+            errors.append(f"config error: schema_version must be {_SCHEMA_VERSION!r}")
+
+    topics = document.get("topics")
+    if topics is not None:
+        if not isinstance(topics, Mapping):
+            errors.append("config error: topics must be a mapping")
+        else:
+            _unexpected_keys(errors, "topics", topics, set(_TOPICS))
+            for name, expected_topic in _TOPICS.items():
+                if name not in topics:
+                    _missing_key(errors, f"topics.{name}")
+                else:
+                    _validate_fixed_mapping(errors, f"topics.{name}", topics[name], expected_topic)
 
     tf = document.get("tf")
     if tf is not None:
-        if not isinstance(tf, Mapping) or not isinstance(tf.get("type"), str):
-            raise ValueError("tf type must be declared")
-        specs.append((tf["type"], ()))
+        _validate_fixed_mapping(errors, "tf", tf, _TF)
+
+    grid_layers = document.get("required_grid_layers")
+    if grid_layers is not None:
+        if not isinstance(grid_layers, list):
+            errors.append("config error: required_grid_layers must be a list")
+        elif not all(isinstance(layer, str) and layer for layer in grid_layers):
+            errors.append("config error: required_grid_layers must contain non-empty strings")
+        elif len(set(grid_layers)) != len(grid_layers):
+            errors.append("config error: required_grid_layers must not contain duplicates")
+        elif grid_layers != _REQUIRED_GRID_LAYERS:
+            errors.append(f"config error: required_grid_layers must be {_REQUIRED_GRID_LAYERS!r}")
+
+    static_inputs = document.get("static_inputs")
+    if static_inputs is not None:
+        if not isinstance(static_inputs, Mapping):
+            errors.append("config error: static_inputs must be a mapping")
+        else:
+            _unexpected_keys(errors, "static_inputs", static_inputs, set(_STATIC_INPUTS))
+            for name, expected_input in _STATIC_INPUTS.items():
+                if name not in static_inputs:
+                    _missing_key(errors, f"static_inputs.{name}")
+                else:
+                    _validate_fixed_mapping(
+                        errors, f"static_inputs.{name}", static_inputs[name], expected_input
+                    )
+    return errors
+
+
+def _interface_specs() -> list[tuple[str, tuple[str, ...]]]:
+    specs = [
+        (topic["type"], tuple(topic["required_fields"])) for topic in _TOPICS.values()
+    ]
+    specs.append((_TF["type"], ()))
     return specs
 
 
@@ -80,13 +276,18 @@ def check_interfaces(
     package_locations: dict[str, str] | None = None,
 ) -> list[str]:
     """Return external ROS package, type, or field validation errors."""
-    document = yaml.safe_load(config.read_text(encoding="utf-8"))
-    if not isinstance(document, Mapping):
-        raise ValueError("external interface config must be a mapping")
+    try:
+        document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as error:
+        return [f"config error: unable to load config: {error}"]
+
+    config_errors = validate_external_config(document)
+    if config_errors:
+        return config_errors
 
     errors: list[str] = []
     checked_packages: set[str] = set()
-    for interface_type, required_fields in _interface_specs(document):
+    for interface_type, required_fields in _interface_specs():
         package = _package_for(interface_type)
         if package not in checked_packages:
             checked_packages.add(package)
