@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>lunar_planner_core</name>
+  <version>0.1.0</version>
+  <description>ROS-independent planning core for lunar navigation.</description>
+  <maintainer email="maintainers@example.invalid">Lunar Navigation Maintainers</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- Temporary, build-only dependencies of the private frozen v3 baseline. -->
+  <build_depend>eigen</build_depend>
+  <build_depend>libfmt-dev</build_depend>
+  <build_depend>libdouble-conversion-dev</build_depend>
+  <build_depend>nlohmann-json-dev</build_depend>
+  <build_depend>openssl</build_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

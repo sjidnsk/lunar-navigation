@@ -1,0 +1,282 @@
+schema_version: lunar-v3-file-map/v1
+source:
+  repository: path_planner
+  commit: 2f6378d3c47da027c0d4146d94cab881b8f2a594
+target_root: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream
+exclude_roots:
+- schemas
+- benchmarks
+- python_bindings
+- bindings
+- json_fixtures
+- vcpkg
+- benchmark_reports
+groups:
+  shared:
+  - source: cpp/include/lunar_path_planner/v3/cache/deterministic_cache.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/cache/deterministic_cache.hpp
+  - source: cpp/include/lunar_path_planner/v3/corridor/convex_corridor.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/corridor/convex_corridor.hpp
+  - source: cpp/include/lunar_path_planner/v3/cost/learned_cost_snapshot.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/cost/learned_cost_snapshot.hpp
+  - source: cpp/include/lunar_path_planner/v3/goal/terminal_resolver.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/goal/terminal_resolver.hpp
+  - source: cpp/include/lunar_path_planner/v3/map/immutable_snapshot.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/map/immutable_snapshot.hpp
+  - source: cpp/include/lunar_path_planner/v3/map/safe_projection.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/map/safe_projection.hpp
+  - source: cpp/include/lunar_path_planner/v3/optimization/bounded_qp_solver.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/optimization/bounded_qp_solver.hpp
+  - source: cpp/include/lunar_path_planner/v3/search/ara_star.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/search/ara_star.hpp
+  - source: cpp/include/lunar_path_planner/v3/search/candidate_ranker.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/search/candidate_ranker.hpp
+  - source: cpp/include/lunar_path_planner/v3/search/platform_adapter.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/search/platform_adapter.hpp
+  - source: cpp/src/corridor/convex_corridor.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/corridor/convex_corridor.cpp
+  - source: cpp/src/cost/learned_cost_snapshot.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/cost/learned_cost_snapshot.cpp
+  - source: cpp/src/goal/terminal_resolver.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/goal/terminal_resolver.cpp
+  - source: cpp/src/map/immutable_snapshot.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/map/immutable_snapshot.cpp
+  - source: cpp/src/map/safe_projection.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/map/safe_projection.cpp
+  - source: cpp/src/optimization/bounded_qp_solver.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/optimization/bounded_qp_solver.cpp
+  - source: cpp/src/optimization/osqp_bounded_qp_solver.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/optimization/osqp_bounded_qp_solver.cpp
+  - source: cpp/src/search/candidate_ranker.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/search/candidate_ranker.cpp
+  wheel:
+  - source: cpp/include/lunar_path_planner/v3/wheel/wheel_capability.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_capability.hpp
+  - source: cpp/include/lunar_path_planner/v3/wheel/wheel_corridor.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_corridor.hpp
+  - source: cpp/include/lunar_path_planner/v3/wheel/wheel_lattice.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_lattice.hpp
+  - source: cpp/include/lunar_path_planner/v3/wheel/wheel_planner.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_planner.hpp
+  - source: cpp/include/lunar_path_planner/v3/wheel/wheel_primitive.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_primitive.hpp
+  - source: cpp/include/lunar_path_planner/v3/wheel/wheel_search.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_search.hpp
+  - source: cpp/include/lunar_path_planner/v3/wheel/wheel_spline_optimizer.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_spline_optimizer.hpp
+  - source: cpp/include/lunar_path_planner/v3/wheel/wheel_sweep_validator.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_sweep_validator.hpp
+  - source: cpp/include/lunar_path_planner/v3/wheel/wheel_timing.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_timing.hpp
+  - source: cpp/src/wheel/wheel_capability.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_capability.cpp
+  - source: cpp/src/wheel/wheel_corridor.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_corridor.cpp
+  - source: cpp/src/wheel/wheel_lattice.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_lattice.cpp
+  - source: cpp/src/wheel/wheel_planner.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_planner.cpp
+  - source: cpp/src/wheel/wheel_primitive.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_primitive.cpp
+  - source: cpp/src/wheel/wheel_search.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_search.cpp
+  - source: cpp/src/wheel/wheel_spline_optimizer.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_spline_optimizer.cpp
+  - source: cpp/src/wheel/wheel_sweep_validator.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_sweep_validator.cpp
+  - source: cpp/src/wheel/wheel_timing.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_timing.cpp
+  legged:
+  - source: cpp/include/lunar_path_planner/v3/legged/body_motion_primitive.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/body_motion_primitive.hpp
+  - source: cpp/include/lunar_path_planner/v3/legged/height_interval.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/height_interval.hpp
+  - source: cpp/include/lunar_path_planner/v3/legged/legged_capability.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_capability.hpp
+  - source: cpp/include/lunar_path_planner/v3/legged/legged_corridor.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_corridor.hpp
+  - source: cpp/include/lunar_path_planner/v3/legged/legged_lattice.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_lattice.hpp
+  - source: cpp/include/lunar_path_planner/v3/legged/legged_planner.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_planner.hpp
+  - source: cpp/include/lunar_path_planner/v3/legged/legged_search.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_search.hpp
+  - source: cpp/include/lunar_path_planner/v3/legged/legged_spline_optimizer.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_spline_optimizer.hpp
+  - source: cpp/include/lunar_path_planner/v3/legged/legged_terrain.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_terrain.hpp
+  - source: cpp/include/lunar_path_planner/v3/legged/legged_timing.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_timing.hpp
+  - source: cpp/src/legged/body_motion_primitive.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/body_motion_primitive.cpp
+  - source: cpp/src/legged/height_interval.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/height_interval.cpp
+  - source: cpp/src/legged/legged_capability.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_capability.cpp
+  - source: cpp/src/legged/legged_corridor.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_corridor.cpp
+  - source: cpp/src/legged/legged_lattice.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_lattice.cpp
+  - source: cpp/src/legged/legged_planner.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_planner.cpp
+  - source: cpp/src/legged/legged_search.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_search.cpp
+  - source: cpp/src/legged/legged_spline_optimizer.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_spline_optimizer.cpp
+  - source: cpp/src/legged/legged_terrain.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_terrain.cpp
+  - source: cpp/src/legged/legged_timing.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_timing.cpp
+  hopper:
+  - source: cpp/include/lunar_path_planner/v3/hopper/aim_point_generator.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/aim_point_generator.hpp
+  - source: cpp/include/lunar_path_planner/v3/hopper/attitude_certifier.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/attitude_certifier.hpp
+  - source: cpp/include/lunar_path_planner/v3/hopper/ballistic_kinematics.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/ballistic_kinematics.hpp
+  - source: cpp/include/lunar_path_planner/v3/hopper/ballistic_time_solver.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/ballistic_time_solver.hpp
+  - source: cpp/include/lunar_path_planner/v3/hopper/flight_tube_certifier.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/flight_tube_certifier.hpp
+  - source: cpp/include/lunar_path_planner/v3/hopper/hop_certifier.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/hop_certifier.hpp
+  - source: cpp/include/lunar_path_planner/v3/hopper/hopper_commitment_state_machine.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/hopper_commitment_state_machine.hpp
+  - source: cpp/include/lunar_path_planner/v3/hopper/hopper_config.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/hopper_config.hpp
+  - source: cpp/include/lunar_path_planner/v3/hopper/hopper_planner.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/hopper_planner.hpp
+  - source: cpp/include/lunar_path_planner/v3/hopper/landing_geometry.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/landing_geometry.hpp
+  - source: cpp/include/lunar_path_planner/v3/hopper/landing_graph.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/landing_graph.hpp
+  - source: cpp/include/lunar_path_planner/v3/hopper/landing_region.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/landing_region.hpp
+  - source: cpp/include/lunar_path_planner/v3/hopper/landing_set_propagator.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/landing_set_propagator.hpp
+  - source: cpp/include/lunar_path_planner/v3/hopper/safe_pose_mask.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/safe_pose_mask.hpp
+  - source: cpp/include/lunar_path_planner/v3/hopper/swept_footprint.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/swept_footprint.hpp
+  - source: cpp/src/hopper/aim_point_generator.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/aim_point_generator.cpp
+  - source: cpp/src/hopper/attitude_certifier.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/attitude_certifier.cpp
+  - source: cpp/src/hopper/ballistic_kinematics.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/ballistic_kinematics.cpp
+  - source: cpp/src/hopper/ballistic_time_solver.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/ballistic_time_solver.cpp
+  - source: cpp/src/hopper/flight_tube_certifier.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/flight_tube_certifier.cpp
+  - source: cpp/src/hopper/hop_certifier.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/hop_certifier.cpp
+  - source: cpp/src/hopper/hopper_commitment_state_machine.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/hopper_commitment_state_machine.cpp
+  - source: cpp/src/hopper/hopper_config.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/hopper_config.cpp
+  - source: cpp/src/hopper/hopper_planner.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/hopper_planner.cpp
+  - source: cpp/src/hopper/landing_geometry.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/landing_geometry.cpp
+  - source: cpp/src/hopper/landing_graph.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/landing_graph.cpp
+  - source: cpp/src/hopper/landing_region.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/landing_region.cpp
+  - source: cpp/src/hopper/landing_set_propagator.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/landing_set_propagator.cpp
+  - source: cpp/src/hopper/safe_pose_mask.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/safe_pose_mask.cpp
+  - source: cpp/src/hopper/swept_footprint.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/swept_footprint.cpp
+  temporary_contract_adapter:
+  - source: cpp/CMakeLists.txt
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/CMakeLists.txt
+  - source: cpp/cmake/CompilerWarnings.cmake
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/cmake/CompilerWarnings.cmake
+  - source: cpp/cmake/PlannerV3Config.cmake.in
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/cmake/PlannerV3Config.cmake.in
+  - source: cpp/cmake/ProjectOptions.cmake
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/cmake/ProjectOptions.cmake
+  - source: cpp/include/lunar_path_planner/v3/api/execution_arbitrator.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/api/execution_arbitrator.hpp
+  - source: cpp/include/lunar_path_planner/v3/api/planner_v3.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/api/planner_v3.hpp
+  - source: cpp/include/lunar_path_planner/v3/api/reference_bundle_builder.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/api/reference_bundle_builder.hpp
+  - source: cpp/include/lunar_path_planner/v3/codec/jcs_canonicalizer.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/codec/jcs_canonicalizer.hpp
+  - source: cpp/include/lunar_path_planner/v3/codec/json_codec.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/codec/json_codec.hpp
+  - source: cpp/include/lunar_path_planner/v3/codec/semantic_validator.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/codec/semantic_validator.hpp
+  - source: cpp/include/lunar_path_planner/v3/contracts/base_types.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/base_types.hpp
+  - source: cpp/include/lunar_path_planner/v3/contracts/planning_request.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/planning_request.hpp
+  - source: cpp/include/lunar_path_planner/v3/contracts/planning_response.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/planning_response.hpp
+  - source: cpp/include/lunar_path_planner/v3/contracts/platform_reference.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/platform_reference.hpp
+  - source: cpp/include/lunar_path_planner/v3/contracts/profiles.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/profiles.hpp
+  - source: cpp/include/lunar_path_planner/v3/contracts/reference_bundle.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/reference_bundle.hpp
+  - source: cpp/include/lunar_path_planner/v3/contracts/state.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/state.hpp
+  - source: cpp/include/lunar_path_planner/v3/contracts/status.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/status.hpp
+  - source: cpp/include/lunar_path_planner/v3/crypto/sha256.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/crypto/sha256.hpp
+  - source: cpp/src/api/execution_arbitrator.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/api/execution_arbitrator.cpp
+  - source: cpp/src/api/planner_v3.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/api/planner_v3.cpp
+  - source: cpp/src/api/reference_bundle_builder.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/api/reference_bundle_builder.cpp
+  - source: cpp/src/codec/jcs_canonicalizer.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/codec/jcs_canonicalizer.cpp
+  - source: cpp/src/codec/json_codec.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/codec/json_codec.cpp
+  - source: cpp/src/codec/semantic_validator.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/codec/semantic_validator.cpp
+  - source: cpp/src/contracts/base_types.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/contracts/base_types.cpp
+  - source: cpp/src/crypto/sha256.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/crypto/sha256.cpp
+  tests:
+  - source: cpp/tests/codec/jcs_canonicalizer_test.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/codec/jcs_canonicalizer_test.cpp
+  - source: cpp/tests/codec/json_codec_test.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/codec/json_codec_test.cpp
+  - source: cpp/tests/codec/semantic_validator_test.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/codec/semantic_validator_test.cpp
+  - source: cpp/tests/contracts/planning_request_test.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/contracts/planning_request_test.cpp
+  - source: cpp/tests/contracts/reference_bundle_test.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/contracts/reference_bundle_test.cpp
+  - source: cpp/tests/fixtures/system/planner_v3_system_fixture.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/fixtures/system/planner_v3_system_fixture.cpp
+  - source: cpp/tests/fixtures/system/planner_v3_system_fixture.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/fixtures/system/planner_v3_system_fixture.hpp
+  - source: cpp/tests/integration/api/planner_dispatch_test.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/api/planner_dispatch_test.cpp
+  - source: cpp/tests/integration/legged/legged_fault_matrix_test.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/legged/legged_fault_matrix_test.cpp
+  - source: cpp/tests/integration/legged/legged_planner_test.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/legged/legged_planner_test.cpp
+  - source: cpp/tests/integration/legged/legged_search_test.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/legged/legged_search_test.cpp
+  - source: cpp/tests/integration/legged/legged_test_fixture.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/legged/legged_test_fixture.hpp
+  - source: cpp/tests/integration/system/planner_v3_fault_matrix_test.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/system/planner_v3_fault_matrix_test.cpp
+  - source: cpp/tests/integration/system/planner_v3_system_test.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/system/planner_v3_system_test.cpp
+  - source: cpp/tests/integration/wheel/wheel_fault_matrix_test.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/wheel/wheel_fault_matrix_test.cpp
+  - source: cpp/tests/integration/wheel/wheel_planner_test.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/wheel/wheel_planner_test.cpp
+  - source: cpp/tests/integration/wheel/wheel_planner_test_fixture.hpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/wheel/wheel_planner_test_fixture.hpp
+  - source: cpp/tests/integration/wheel/wheel_search_test.cpp
+    target: ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/wheel/wheel_search_test.cpp

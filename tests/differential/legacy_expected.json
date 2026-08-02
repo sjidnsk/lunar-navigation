@@ -1,0 +1,140 @@
+{
+  "schema_version": "lunar-v3-legacy-summary/v1",
+  "summaries": [
+    {
+      "case_id": "wheel-safe-corridor",
+      "collision_free": true,
+      "cost": 3.200000067,
+      "goal_reached": true,
+      "planning_outcome": "NEW_REFERENCE_AVAILABLE",
+      "platform_constraints_satisfied": true,
+      "reachable": true
+    },
+    {
+      "case_id": "wheel-no-safe-route",
+      "collision_free": false,
+      "cost": null,
+      "goal_reached": false,
+      "planning_outcome": "NO_KNOWN_SAFE_ROUTE",
+      "platform_constraints_satisfied": false,
+      "reachable": false
+    },
+    {
+      "case_id": "wheel-goal-infeasible",
+      "collision_free": false,
+      "cost": null,
+      "goal_reached": false,
+      "planning_outcome": "GOAL_INFEASIBLE",
+      "platform_constraints_satisfied": false,
+      "reachable": false
+    },
+    {
+      "case_id": "wheel-numerical-failure",
+      "collision_free": false,
+      "cost": null,
+      "goal_reached": false,
+      "planning_outcome": "NUMERICAL_FAILURE",
+      "platform_constraints_satisfied": false,
+      "reachable": false
+    },
+    {
+      "case_id": "wheel-deterministic-repeat",
+      "collision_free": true,
+      "cost": 3.200000067,
+      "goal_reached": true,
+      "planning_outcome": "NEW_REFERENCE_AVAILABLE",
+      "platform_constraints_satisfied": true,
+      "reachable": true
+    },
+    {
+      "case_id": "legged-safe-corridor",
+      "collision_free": true,
+      "cost": 5.000111615,
+      "goal_reached": true,
+      "planning_outcome": "NEW_REFERENCE_AVAILABLE",
+      "platform_constraints_satisfied": true,
+      "reachable": true
+    },
+    {
+      "case_id": "legged-no-safe-route",
+      "collision_free": false,
+      "cost": null,
+      "goal_reached": false,
+      "planning_outcome": "NO_KNOWN_SAFE_ROUTE",
+      "platform_constraints_satisfied": false,
+      "reachable": false
+    },
+    {
+      "case_id": "legged-goal-infeasible",
+      "collision_free": false,
+      "cost": null,
+      "goal_reached": false,
+      "planning_outcome": "GOAL_INFEASIBLE",
+      "platform_constraints_satisfied": false,
+      "reachable": false
+    },
+    {
+      "case_id": "legged-numerical-failure",
+      "collision_free": false,
+      "cost": null,
+      "goal_reached": false,
+      "planning_outcome": "NUMERICAL_FAILURE",
+      "platform_constraints_satisfied": false,
+      "reachable": false
+    },
+    {
+      "case_id": "legged-deterministic-repeat",
+      "collision_free": true,
+      "cost": 5.000111615,
+      "goal_reached": true,
+      "planning_outcome": "NEW_REFERENCE_AVAILABLE",
+      "platform_constraints_satisfied": true,
+      "reachable": true
+    },
+    {
+      "case_id": "hopper-safe-corridor",
+      "collision_free": true,
+      "cost": 1.385398163,
+      "goal_reached": true,
+      "planning_outcome": "NEW_REFERENCE_AVAILABLE",
+      "platform_constraints_satisfied": true,
+      "reachable": true
+    },
+    {
+      "case_id": "hopper-no-safe-route",
+      "collision_free": false,
+      "cost": null,
+      "goal_reached": false,
+      "planning_outcome": "NO_KNOWN_SAFE_ROUTE",
+      "platform_constraints_satisfied": false,
+      "reachable": false
+    },
+    {
+      "case_id": "hopper-goal-infeasible",
+      "collision_free": false,
+      "cost": null,
+      "goal_reached": false,
+      "planning_outcome": "GOAL_INFEASIBLE",
+      "platform_constraints_satisfied": false,
+      "reachable": false
+    },
+    {
+      "case_id": "hopper-numerical-failure",
+      "collision_free": false,
+      "cost": null,
+      "goal_reached": false,
+      "planning_outcome": "NUMERICAL_FAILURE",
+      "platform_constraints_satisfied": false,
+      "reachable": false
+    },
+    {
+      "case_id": "hopper-deterministic-repeat",
+      "collision_free": true,
+      "cost": 1.385398163,
+      "goal_reached": true,
+      "planning_outcome": "NEW_REFERENCE_AVAILABLE",
+      "platform_constraints_satisfied": true,
+      "reachable": true
+    }
+  ]
+}

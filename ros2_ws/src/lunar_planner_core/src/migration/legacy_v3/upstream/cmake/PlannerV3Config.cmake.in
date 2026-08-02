@@ -1,0 +1,15 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(Eigen3 5.0.1 EXACT CONFIG)
+find_dependency(nlohmann_json 3.12.0 EXACT CONFIG)
+find_dependency(double-conversion 3.4.0 EXACT CONFIG)
+
+if("@LPP_V3_ENABLE_OSQP@" STREQUAL "ON")
+  find_dependency(osqp CONFIG)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/LunarPathPlannerV3Targets.cmake")
+
+check_required_components(LunarPathPlannerV3)
