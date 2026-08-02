@@ -115,7 +115,9 @@ def _normalise_relative_path(value: str) -> str:
 
 
 def _resolve_selection(
-    repositories: dict[str, Path], selection: str
+    repositories: dict[str, Path],
+    repository_metadata: dict[str, dict[str, str]],
+    selection: str,
 ) -> tuple[str, str]:
     repository_key, separator, file_path = selection.partition(":")
     if separator and repository_key in repositories:
@@ -123,8 +125,22 @@ def _resolve_selection(
 
     relative_path = _normalise_relative_path(selection)
     matching_keys = [
-        key for key, repository in repositories.items() if (repository / relative_path).is_file()
+        key
+        for key, repository in repositories.items()
+        if _git_bytes(
+            repository,
+            "ls-tree",
+            "-z",
+            repository_metadata[key]["commit"],
+            "--",
+            relative_path,
+        )
     ]
+    if not matching_keys:
+        raise ValueError(
+            "selected file is not a regular blob in captured commit "
+            f"(HEAD snapshot): {relative_path}"
+        )
     if len(matching_keys) != 1:
         raise ValueError(
             f"selected file must resolve in exactly one repository: {relative_path}"
@@ -240,7 +256,9 @@ def _create_document(
 
     file_records: list[dict[str, object]] = []
     for selection in selected_files:
-        key, relative_path = _resolve_selection(resolved_repositories, selection)
+        key, relative_path = _resolve_selection(
+            resolved_repositories, repository_records, selection
+        )
         repository = resolved_repositories[key]
         data = _read_commit_blob(repository, repository_records[key]["commit"], relative_path)
         _assert_selected_file_is_clean(repository, relative_path)
