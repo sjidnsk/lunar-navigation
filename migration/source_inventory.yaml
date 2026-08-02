@@ -1,0 +1,139 @@
+{
+  "schema_version": "lunar-migration-source-inventory/v1",
+  "repositories": {
+    "dev_platform_constraints": {
+      "commit": "61e9fa8afd09db83632456bdcf181c222ee13513",
+      "origin": "https://github.com/sjidnsk/dev-platform-constraints.git"
+    },
+    "legacy_root": {
+      "commit": "7309e93fdb85c60ff3736efe1a7f3c7eb640ee78",
+      "origin": "git@github.com:sjidnsk/lunar-path-planning.git"
+    },
+    "path_planner": {
+      "commit": "2f6378d3c47da027c0d4146d94cab881b8f2a594",
+      "origin": "git@github.com:sjidnsk/path-planner.git"
+    }
+  },
+  "files": [
+    {
+      "repository": "dev_platform_constraints",
+      "path": "configs/platforms/yutu.json",
+      "sha256": "f84ff7a4e4a5457751476db1130e07b613d9822a5696c17e5e12747a1d96f425",
+      "size_bytes": 2176
+    },
+    {
+      "repository": "dev_platform_constraints",
+      "path": "configs/platforms/yutu2.json",
+      "sha256": "545c3a00bbbe7b6db3d2b0977dbd5f07d366a882f5f1a091b3317d216ab02704",
+      "size_bytes": 2182
+    },
+    {
+      "repository": "dev_platform_constraints",
+      "path": "src/dev_platform_constraints/core/contracts.py",
+      "sha256": "2e81d79d13b3988167559676bb57d041d7889fccc4263419b26c20f293825aab",
+      "size_bytes": 5373
+    },
+    {
+      "repository": "dev_platform_constraints",
+      "path": "src/dev_platform_constraints/mapping/constraints.py",
+      "sha256": "74eee4306baf17b79895bf9b73f5a5153b328f8fb759f9cf88373fd5710ac50b",
+      "size_bytes": 2966
+    },
+    {
+      "repository": "dev_platform_constraints",
+      "path": "src/dev_platform_constraints/path_planning/astar.py",
+      "sha256": "9f9c1f42e27735fd1b613876594064c6afb87b225c80e18c4591bc5294b5310f",
+      "size_bytes": 3139
+    },
+    {
+      "repository": "dev_platform_constraints",
+      "path": "src/dev_platform_constraints/platforms/model.py",
+      "sha256": "9b2ccc3e25e13b7363d6ecd54fc2fd95a297fac903523122256ffe8e9772fafc",
+      "size_bytes": 4739
+    },
+    {
+      "repository": "legacy_root",
+      "path": "configs/platforms/v3/README.md",
+      "sha256": "cfab9695fd4240387e6959c98c14cd3d3d3368b2abc918c256d23061c297a99b",
+      "size_bytes": 5089
+    },
+    {
+      "repository": "legacy_root",
+      "path": "configs/platforms/v3/hopper_ballistic_v3_example_v1.json",
+      "sha256": "8b6c82d5eabc7b5bf1aa2f3b8377b3dc515aa186b67b5ecafd0d86b7870b55f6",
+      "size_bytes": 2931
+    },
+    {
+      "repository": "legacy_root",
+      "path": "configs/platforms/v3/legged_body_v3_example_v1.json",
+      "sha256": "99cdb263ac4a2c2f15b6a5121a63bebc5606fec1352addc529b613205fdb2edd",
+      "size_bytes": 5197
+    },
+    {
+      "repository": "legacy_root",
+      "path": "configs/platforms/v3/wheeled_skid_steer_v3_example_v1.json",
+      "sha256": "683e588743c52ed6194ed95c8d328f50276d5c918ea5883900ed768be051e2de",
+      "size_bytes": 6299
+    },
+    {
+      "repository": "legacy_root",
+      "path": "configs/ppo_highres_frontier_foundation_v1.json",
+      "sha256": "6cdb338bb839d9b7f8e3fef0fa9713f97d7751df15aa5daccb31ea23aa801779",
+      "size_bytes": 2114
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/env/terrain_proxy.py",
+      "sha256": "7830aa67e92d7d10ed4e94ff0baa3f5844ba2a4f265d7d2a6e8879498d031692",
+      "size_bytes": 28668
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/policy/cross_attention.py",
+      "sha256": "d8ff3f8f30dc814881579c03e3396af0a7d8b8b244d9a038a4bb178fc78d69f4",
+      "size_bytes": 30594
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/ppo/rollout.py",
+      "sha256": "5935d59c9c21c2d0eb49d96838c2fec7a824cfcd9028815bbbbe192624b6bb16",
+      "size_bytes": 39562
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/ppo/trainer.py",
+      "sha256": "e5d2e41bf38a50c76c5fdf01cb3adae8c25b280261f7ac731295376d781295fa",
+      "size_bytes": 41657
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/CMakeLists.txt",
+      "sha256": "5ffc9e06991570f02ca8abcad4fe3a5259c88bbd9196068dca84422843fcdea0",
+      "size_bytes": 26859
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/api/planner_v3.hpp",
+      "sha256": "cd87479f421c3acb9fb62671705ed3b9384432733118baa6b773ad381bc87979",
+      "size_bytes": 1854
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/contracts/planning_request.hpp",
+      "sha256": "63b2ee2376f22b2f71a5b15322e3be5944a3efcb1f2bd16ef2857fa983c2b778",
+      "size_bytes": 4222
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/contracts/planning_response.hpp",
+      "sha256": "e49da413eb5bb3a8b637e14e03ce5b1f85f53851629213ee7e8b0042ff28b274",
+      "size_bytes": 1741
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/api/planner_v3.cpp",
+      "sha256": "7660c495f7fb543a7a0e4a0934aa5f8fce0b424360dbc88909093b39359b9e38",
+      "size_bytes": 42884
+    }
+  ]
+}

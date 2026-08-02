@@ -1,0 +1,37 @@
+{
+  "schema_version": "lunar-migration-fixture-inventory/v1",
+  "repositories": {
+    "dev_platform_constraints": {
+      "commit": "61e9fa8afd09db83632456bdcf181c222ee13513",
+      "origin": "https://github.com/sjidnsk/dev-platform-constraints.git"
+    },
+    "legacy_root": {
+      "commit": "7309e93fdb85c60ff3736efe1a7f3c7eb640ee78",
+      "origin": "git@github.com:sjidnsk/lunar-path-planning.git"
+    },
+    "path_planner": {
+      "commit": "2f6378d3c47da027c0d4146d94cab881b8f2a594",
+      "origin": "git@github.com:sjidnsk/path-planner.git"
+    }
+  },
+  "files": [
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/fixtures/minimal_wheeled_request.json",
+      "sha256": "30d399ef6f4cd48c11280a487e13baddd3ee535d267523aa840170bdba26ba48",
+      "size_bytes": 2342
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/fixtures/shared_core_case_a.expected.json",
+      "sha256": "9c9707084f9f573d9135cf4d33041f431507bcc9dc38117d1d069add768c69cd",
+      "size_bytes": 3623
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/fixtures/shared_core_case_a.json",
+      "sha256": "5d40829288916fda5be1fa12bd8f64871678b9afdda670ed0964d87ecc974486",
+      "size_bytes": 3851
+    }
+  ]
+}
