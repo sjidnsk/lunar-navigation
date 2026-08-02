@@ -19,19 +19,22 @@
       "repository": "path_planner",
       "path": "cpp/tests/fixtures/minimal_wheeled_request.json",
       "sha256": "30d399ef6f4cd48c11280a487e13baddd3ee535d267523aa840170bdba26ba48",
-      "size_bytes": 2342
+      "size_bytes": 2342,
+      "migration_role": "migration_source"
     },
     {
       "repository": "path_planner",
       "path": "cpp/tests/fixtures/shared_core_case_a.expected.json",
       "sha256": "9c9707084f9f573d9135cf4d33041f431507bcc9dc38117d1d069add768c69cd",
-      "size_bytes": 3623
+      "size_bytes": 3623,
+      "migration_role": "migration_source"
     },
     {
       "repository": "path_planner",
       "path": "cpp/tests/fixtures/shared_core_case_a.json",
       "sha256": "5d40829288916fda5be1fa12bd8f64871678b9afdda670ed0964d87ecc974486",
-      "size_bytes": 3851
+      "size_bytes": 3851,
+      "migration_role": "migration_source"
     }
   ]
 }

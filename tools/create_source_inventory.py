@@ -21,20 +21,61 @@ SOURCE_FILES = (
     "legacy_root:configs/platforms/v3/legged_body_v3_example_v1.json",
     "legacy_root:configs/platforms/v3/wheeled_skid_steer_v3_example_v1.json",
     "legacy_root:src/lunar_exploration_ppo/env/terrain_proxy.py",
+    "legacy_root:src/lunar_exploration_ppo/env/coverage.py",
+    "legacy_root:src/lunar_exploration_ppo/env/coverage_cache.py",
+    "legacy_root:src/lunar_exploration_ppo/env/env.py",
+    "legacy_root:src/lunar_exploration_ppo/env/frontier.py",
+    "legacy_root:src/lunar_exploration_ppo/env/frontier_oracle.py",
+    "legacy_root:src/lunar_exploration_ppo/env/sensor_model.py",
     "legacy_root:src/lunar_exploration_ppo/policy/cross_attention.py",
+    "legacy_root:src/lunar_exploration_ppo/policy/observation.py",
+    "legacy_root:src/lunar_exploration_ppo/ppo/checkpoint.py",
+    "legacy_root:src/lunar_exploration_ppo/ppo/collector.py",
+    "legacy_root:src/lunar_exploration_ppo/ppo/resume.py",
     "legacy_root:src/lunar_exploration_ppo/ppo/rollout.py",
     "legacy_root:src/lunar_exploration_ppo/ppo/trainer.py",
+    "legacy_root:src/lunar_exploration_ppo/eval/baselines.py",
+    "legacy_root:src/lunar_exploration_ppo/eval/evaluator.py",
+    "legacy_root:src/lunar_exploration_ppo/eval/metrics.py",
+    "legacy_root:src/lunar_exploration_ppo/eval/standard.py",
+    "legacy_root:tests/ppo_highres_frontier/test_stage2_frontier.py",
+    "legacy_root:tests/ppo_highres_frontier/test_stage2_observation.py",
+    "legacy_root:tests/ppo_highres_frontier/test_stage3_policy_cpu.py",
+    "legacy_root:tests/ppo_highres_frontier/test_stage4_checkpoint.py",
+    "legacy_root:tests/ppo_highres_frontier/test_stage4_collector.py",
+    "legacy_root:tests/ppo_highres_frontier/test_stage4_rollout.py",
+    "legacy_root:tests/ppo_highres_frontier/test_stage4_trainer.py",
+    "legacy_root:tests/ppo_highres_frontier/test_stage5_baselines.py",
+    "legacy_root:tests/ppo_highres_frontier/test_stage6_standard_eval.py",
     "path_planner:cpp/CMakeLists.txt",
-    "path_planner:cpp/include/lunar_path_planner/v3/api/planner_v3.hpp",
-    "path_planner:cpp/include/lunar_path_planner/v3/contracts/planning_request.hpp",
-    "path_planner:cpp/include/lunar_path_planner/v3/contracts/planning_response.hpp",
-    "path_planner:cpp/src/api/planner_v3.cpp",
+    "path_planner:cpp/cmake/CompilerWarnings.cmake",
+    "path_planner:cpp/cmake/PlannerV3Config.cmake.in",
+    "path_planner:cpp/cmake/ProjectOptions.cmake",
     "dev_platform_constraints:configs/platforms/yutu.json",
     "dev_platform_constraints:configs/platforms/yutu2.json",
     "dev_platform_constraints:src/dev_platform_constraints/core/contracts.py",
     "dev_platform_constraints:src/dev_platform_constraints/mapping/constraints.py",
     "dev_platform_constraints:src/dev_platform_constraints/path_planning/astar.py",
     "dev_platform_constraints:src/dev_platform_constraints/platforms/model.py",
+)
+
+DIFFERENTIAL_REFERENCE_FILES = frozenset(
+    {
+        "dev_platform_constraints:src/dev_platform_constraints/path_planning/astar.py",
+        "dev_platform_constraints:tests/test_constraints_costmap_planning.py",
+    }
+)
+
+_PLANNER_V3_INCLUDE_PREFIX = "cpp/include/lunar_path_planner/v3/"
+_PLANNER_V3_SOURCE_PREFIX = "cpp/src/"
+_PLANNER_V3_TEST_PREFIXES = (
+    "cpp/tests/codec/",
+    "cpp/tests/contracts/",
+    "cpp/tests/fixtures/system/",
+    "cpp/tests/integration/api/",
+    "cpp/tests/integration/legged/",
+    "cpp/tests/integration/system/",
+    "cpp/tests/integration/wheel/",
 )
 
 FIXTURE_FILES = (
@@ -54,6 +95,16 @@ def _git(repository: Path, *arguments: str) -> str:
         encoding="utf-8",
     )
     return completed.stdout.strip()
+
+
+def _git_bytes(repository: Path, *arguments: str) -> bytes:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+    return completed.stdout
 
 
 def _normalise_relative_path(value: str) -> str:
@@ -88,6 +139,28 @@ def _repository_metadata(repository: Path) -> dict[str, str]:
     return {"commit": commit, "origin": _git(repository, "remote", "get-url", "origin")}
 
 
+def _is_selected_planner_v3_path(relative_path: str) -> bool:
+    if relative_path.startswith(_PLANNER_V3_INCLUDE_PREFIX):
+        return "/bindings/" not in relative_path
+    if relative_path.startswith(_PLANNER_V3_SOURCE_PREFIX):
+        return not relative_path.startswith("cpp/src/bindings/")
+    return relative_path.startswith(_PLANNER_V3_TEST_PREFIXES)
+
+
+def source_file_selections(repositories: dict[str, Path]) -> tuple[str, ...]:
+    """Return the frozen source paths, including the allowed C++ v3 surface."""
+    selections = set(SOURCE_FILES) | set(DIFFERENTIAL_REFERENCE_FILES)
+    planner = repositories.get("path_planner")
+    if planner is not None:
+        head_paths = _git(Path(planner), "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+        selections.update(
+            f"path_planner:{relative_path}"
+            for relative_path in head_paths
+            if _is_selected_planner_v3_path(relative_path)
+        )
+    return tuple(sorted(selections))
+
+
 def _assert_selected_file_is_clean(repository: Path, relative_path: str) -> None:
     status = _git(
         repository,
@@ -99,6 +172,32 @@ def _assert_selected_file_is_clean(repository: Path, relative_path: str) -> None
     )
     if status:
         raise ValueError(f"refusing selected dirty file: {relative_path}")
+    index_records = _git_bytes(repository, "ls-files", "-v", "-z", "--", relative_path)
+    for record in index_records.split(b"\0"):
+        if record and chr(record[0]).islower():
+            raise ValueError(f"refusing selected assume-unchanged file: {relative_path}")
+
+
+def _read_head_blob(repository: Path, relative_path: str) -> bytes:
+    entries = [
+        entry
+        for entry in _git_bytes(repository, "ls-tree", "-z", "HEAD", "--", relative_path).split(b"\0")
+        if entry
+    ]
+    if len(entries) != 1:
+        raise ValueError(f"selected file is not a regular blob in HEAD: {relative_path}")
+
+    metadata, separator, listed_path = entries[0].partition(b"\t")
+    parts = metadata.split()
+    if (
+        not separator
+        or listed_path.decode("utf-8") != relative_path
+        or len(parts) != 3
+        or parts[0] not in {b"100644", b"100755"}
+        or parts[1] != b"blob"
+    ):
+        raise ValueError(f"selected file is not a regular blob in HEAD: {relative_path}")
+    return _git_bytes(repository, "cat-file", "blob", parts[2].decode("ascii"))
 
 
 def _create_document(
@@ -123,17 +222,19 @@ def _create_document(
     for selection in selected_files:
         key, relative_path = _resolve_selection(resolved_repositories, selection)
         repository = resolved_repositories[key]
-        file_path = (repository / relative_path).resolve()
-        if not file_path.is_relative_to(repository) or not file_path.is_file():
-            raise ValueError(f"selected file is missing or escapes repository: {relative_path}")
+        data = _read_head_blob(repository, relative_path)
         _assert_selected_file_is_clean(repository, relative_path)
-        data = file_path.read_bytes()
         file_records.append(
             {
                 "repository": key,
                 "path": relative_path,
                 "sha256": hashlib.sha256(data).hexdigest(),
                 "size_bytes": len(data),
+                "migration_role": (
+                    "tests/differential_reference"
+                    if f"{key}:{relative_path}" in DIFFERENTIAL_REFERENCE_FILES
+                    else "migration_source"
+                ),
             }
         )
 
@@ -192,7 +293,10 @@ def main() -> None:
         "dev_platform_constraints": legacy_root / "dev-platform-constraints",
     }
     write_inventory(
-        create_inventory(repositories=repositories, selected_files=SOURCE_FILES),
+        create_inventory(
+            repositories=repositories,
+            selected_files=source_file_selections(repositories),
+        ),
         arguments.output,
     )
     write_inventory(

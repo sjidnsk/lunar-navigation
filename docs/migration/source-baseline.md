@@ -1,9 +1,8 @@
 # Legacy migration source baseline
 
-This baseline is a read-only source declaration. It authorizes later volumes to
-copy only files whose repository key, commit, relative path, and SHA-256 match
-the checked-in inventories. It does not authorize importing a legacy workspace
-into the new runtime.
+This baseline freezes the source commits, relative paths, and SHA-256 values
+that authorize later migration copies. It does not authorize importing a
+legacy workspace into the new runtime.
 
 ## Frozen repositories
 
@@ -13,7 +12,6 @@ into the new runtime.
 | `path_planner` | `2f6378d3c47da027c0d4146d94cab881b8f2a594` | `git@github.com:sjidnsk/path-planner.git` |
 | `dev_platform_constraints` | `61e9fa8afd09db83632456bdcf181c222ee13513` | `https://github.com/sjidnsk/dev-platform-constraints.git` |
 
-The legacy root and both listed gitlinks are read-only migration sources.
 The historical bundle set is stored under the backup storage relative location
 `lunar-path-planning-backups/2026-08-01-6a4c2dd`. It contains the two listed
 gitlink commits, but its legacy-root bundle predates the frozen
@@ -23,11 +21,26 @@ verified bundle before the legacy checkout is retired.
 
 ## Scope
 
-`migration/source_inventory.yaml` selects only PPO core material, v3 platform
-capability inputs, C++ planner v3 material, and platform-constraint capability
-material. `migration/fixture_inventory.yaml` selects only three small planner
-test fixtures. It deliberately excludes historical runners, checkpoints, job
-state, generated objects, and other runtime artifacts.
+`migration/source_inventory.yaml` selects only PPO observation, environment,
+collector, rollout, trainer, checkpoint, resume, and evaluation core material;
+v3 platform capability inputs; frozen C++ planner v3 headers, sources, CMake
+inputs, and selected contract/integration tests; and platform-constraint
+capability material. `migration/fixture_inventory.yaml` selects only three
+small planner test fixtures. The legacy Python A* entries have the explicit
+`tests/differential_reference` role: they are migration comparison inputs only,
+not platform capability inputs or production runtime source.
+
+The selection deliberately excludes legacy governance, workflows, runners,
+artifact utilities, checkpoints as artifacts, job state, generated objects,
+Python bindings, benchmarks, and other runtime artifacts.
+
+## Legacy transition policy
+
+The frozen commits above do not change. Until the AGX acceptance observation
+period ends, the `legacy-maintenance` branch may receive only urgent defect or
+security fixes; all new functionality belongs in this repository. Every such
+legacy fix must explicitly record whether it is also migrated here. After the
+AGX observation period ends, the legacy repositories become read-only archives.
 
 ## Rebuild and verify
 
@@ -42,9 +55,11 @@ python tools/create_source_inventory.py `
 git diff --exit-code -- migration/source_inventory.yaml migration/fixture_inventory.yaml
 ```
 
-The generator rejects any selected dirty file before hashing its original
-bytes. The final `git diff` is the fixture SHA-256 verification command as
-well as the source-inventory verification command.
+The generator rejects any selected dirty or assume-unchanged file, requires a
+regular blob at the selected path in `HEAD`, and hashes that `HEAD` blob rather
+than checkout-filtered working-tree bytes. The final `git diff` is the fixture
+SHA-256 verification command as well as the source-inventory verification
+command.
 
 ## Runtime boundary
 

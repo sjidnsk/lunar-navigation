@@ -18,122 +18,1192 @@
     {
       "repository": "dev_platform_constraints",
       "path": "configs/platforms/yutu.json",
-      "sha256": "f84ff7a4e4a5457751476db1130e07b613d9822a5696c17e5e12747a1d96f425",
-      "size_bytes": 2176
+      "sha256": "bf628c0cffe612b8d52bef200892e6ea8a1e80638a3cfd3f255e1149b4c19960",
+      "size_bytes": 2096,
+      "migration_role": "migration_source"
     },
     {
       "repository": "dev_platform_constraints",
       "path": "configs/platforms/yutu2.json",
-      "sha256": "545c3a00bbbe7b6db3d2b0977dbd5f07d366a882f5f1a091b3317d216ab02704",
-      "size_bytes": 2182
+      "sha256": "79fb05cf6d054d1cbbc5b529fbba420a6c81b4de96fa2f9cae7cc19e2bf76a0c",
+      "size_bytes": 2102,
+      "migration_role": "migration_source"
     },
     {
       "repository": "dev_platform_constraints",
       "path": "src/dev_platform_constraints/core/contracts.py",
-      "sha256": "2e81d79d13b3988167559676bb57d041d7889fccc4263419b26c20f293825aab",
-      "size_bytes": 5373
+      "sha256": "1a82d25cd5aa5eba704a8e8b0ab78bebfafa59db4a6a374169311e268f78eae0",
+      "size_bytes": 5226,
+      "migration_role": "migration_source"
     },
     {
       "repository": "dev_platform_constraints",
       "path": "src/dev_platform_constraints/mapping/constraints.py",
-      "sha256": "74eee4306baf17b79895bf9b73f5a5153b328f8fb759f9cf88373fd5710ac50b",
-      "size_bytes": 2966
+      "sha256": "ee10f5bc5797e878603937b5d3aba8093d8b47b13816b5bb8ad02616b88e4148",
+      "size_bytes": 2884,
+      "migration_role": "migration_source"
     },
     {
       "repository": "dev_platform_constraints",
       "path": "src/dev_platform_constraints/path_planning/astar.py",
-      "sha256": "9f9c1f42e27735fd1b613876594064c6afb87b225c80e18c4591bc5294b5310f",
-      "size_bytes": 3139
+      "sha256": "33bf574cfe0f3eaa0fbfbd59127339d5bc23c9f35baf608567c991bcc66ae701",
+      "size_bytes": 3049,
+      "migration_role": "tests/differential_reference"
     },
     {
       "repository": "dev_platform_constraints",
       "path": "src/dev_platform_constraints/platforms/model.py",
-      "sha256": "9b2ccc3e25e13b7363d6ecd54fc2fd95a297fac903523122256ffe8e9772fafc",
-      "size_bytes": 4739
+      "sha256": "930b4bb041cc98055f02da4ec163354f85d172bde1500fd4f4acef22b7c2fd06",
+      "size_bytes": 4624,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "dev_platform_constraints",
+      "path": "tests/test_constraints_costmap_planning.py",
+      "sha256": "5a8450f54ac1377e67a40394c81129f4e253b8a799c57a9d5a4ba20853b2892a",
+      "size_bytes": 3231,
+      "migration_role": "tests/differential_reference"
     },
     {
       "repository": "legacy_root",
       "path": "configs/platforms/v3/README.md",
       "sha256": "cfab9695fd4240387e6959c98c14cd3d3d3368b2abc918c256d23061c297a99b",
-      "size_bytes": 5089
+      "size_bytes": 5089,
+      "migration_role": "migration_source"
     },
     {
       "repository": "legacy_root",
       "path": "configs/platforms/v3/hopper_ballistic_v3_example_v1.json",
       "sha256": "8b6c82d5eabc7b5bf1aa2f3b8377b3dc515aa186b67b5ecafd0d86b7870b55f6",
-      "size_bytes": 2931
+      "size_bytes": 2931,
+      "migration_role": "migration_source"
     },
     {
       "repository": "legacy_root",
       "path": "configs/platforms/v3/legged_body_v3_example_v1.json",
       "sha256": "99cdb263ac4a2c2f15b6a5121a63bebc5606fec1352addc529b613205fdb2edd",
-      "size_bytes": 5197
+      "size_bytes": 5197,
+      "migration_role": "migration_source"
     },
     {
       "repository": "legacy_root",
       "path": "configs/platforms/v3/wheeled_skid_steer_v3_example_v1.json",
       "sha256": "683e588743c52ed6194ed95c8d328f50276d5c918ea5883900ed768be051e2de",
-      "size_bytes": 6299
+      "size_bytes": 6299,
+      "migration_role": "migration_source"
     },
     {
       "repository": "legacy_root",
       "path": "configs/ppo_highres_frontier_foundation_v1.json",
       "sha256": "6cdb338bb839d9b7f8e3fef0fa9713f97d7751df15aa5daccb31ea23aa801779",
-      "size_bytes": 2114
+      "size_bytes": 2114,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/env/coverage.py",
+      "sha256": "aa0b7a80124ef0fdffc2cf1511c283065347f8fffc27e03e9f7877f2bf8e86f7",
+      "size_bytes": 4501,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/env/coverage_cache.py",
+      "sha256": "1c6bfe32afcc2e5e24e68ddc19fbf88d3e43787379c389fc243dad70c0ea9e84",
+      "size_bytes": 25420,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/env/env.py",
+      "sha256": "c057c29fd073e181f12575a06687fb6ca22913c00afe5dc26666b17a0511f57f",
+      "size_bytes": 46304,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/env/frontier.py",
+      "sha256": "a08745cc50b005213fbd08cf86bebc1a05d2cd4e68e95814c3dfe03f43052181",
+      "size_bytes": 58341,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/env/frontier_oracle.py",
+      "sha256": "ed59309b75251152e3ac736f8f0db9c686d5b4ab09a22b01d20ef921c0fcf5e3",
+      "size_bytes": 6172,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/env/sensor_model.py",
+      "sha256": "0190963a44dde98802bf2ee4211aad496e2f790be9b803b07676994750d862ec",
+      "size_bytes": 10619,
+      "migration_role": "migration_source"
     },
     {
       "repository": "legacy_root",
       "path": "src/lunar_exploration_ppo/env/terrain_proxy.py",
       "sha256": "7830aa67e92d7d10ed4e94ff0baa3f5844ba2a4f265d7d2a6e8879498d031692",
-      "size_bytes": 28668
+      "size_bytes": 28668,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/eval/baselines.py",
+      "sha256": "a3c6496720e7d778d02207607a5f8f806363202eb6e9b3762337c59056f29070",
+      "size_bytes": 6772,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/eval/evaluator.py",
+      "sha256": "4357b0f4541afe500f6a8cc7a9a5f7e4aae21c9deb8423826e5cb07567dc65c7",
+      "size_bytes": 21319,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/eval/metrics.py",
+      "sha256": "263e51f81cd843f7fa7e3a2a5b58cbba5cfcff3503c890c5bb35b0b2f05757fc",
+      "size_bytes": 16190,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/eval/standard.py",
+      "sha256": "7e4d4cc6ebf30e502211ed7622b34ec4a3defd204ec8a3a8eaacc214212b5228",
+      "size_bytes": 94905,
+      "migration_role": "migration_source"
     },
     {
       "repository": "legacy_root",
       "path": "src/lunar_exploration_ppo/policy/cross_attention.py",
       "sha256": "d8ff3f8f30dc814881579c03e3396af0a7d8b8b244d9a038a4bb178fc78d69f4",
-      "size_bytes": 30594
+      "size_bytes": 30594,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/policy/observation.py",
+      "sha256": "a3fc7e08e68c00ce140e62b0fa0f5a46495c0afd49eaec0bd98568afe35b8d21",
+      "size_bytes": 11929,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/ppo/checkpoint.py",
+      "sha256": "7726ed6b33f4d89cc5633077c3b330fb39f91eeff90cd803fc4041480a8cde56",
+      "size_bytes": 84329,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/ppo/collector.py",
+      "sha256": "736040998ab0fef99d691e0c6adbff7a17955c4287439bfc274ab8914da701d2",
+      "size_bytes": 64754,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "src/lunar_exploration_ppo/ppo/resume.py",
+      "sha256": "4e8a093c31872ebdc1a5fb5a612e31a0103e8f51b2cc6c61afdcb32221a57f97",
+      "size_bytes": 9424,
+      "migration_role": "migration_source"
     },
     {
       "repository": "legacy_root",
       "path": "src/lunar_exploration_ppo/ppo/rollout.py",
       "sha256": "5935d59c9c21c2d0eb49d96838c2fec7a824cfcd9028815bbbbe192624b6bb16",
-      "size_bytes": 39562
+      "size_bytes": 39562,
+      "migration_role": "migration_source"
     },
     {
       "repository": "legacy_root",
       "path": "src/lunar_exploration_ppo/ppo/trainer.py",
       "sha256": "e5d2e41bf38a50c76c5fdf01cb3adae8c25b280261f7ac731295376d781295fa",
-      "size_bytes": 41657
+      "size_bytes": 41657,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "tests/ppo_highres_frontier/test_stage2_frontier.py",
+      "sha256": "7c36bda6f4f8ff28c2eadd61bef5a4934d2ca2c815b3273512aaf5e7da4904a0",
+      "size_bytes": 71466,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "tests/ppo_highres_frontier/test_stage2_observation.py",
+      "sha256": "38bce3094c2575ac2b7d19674c8c898eed88909e598a65d05cc88c1d67f569bf",
+      "size_bytes": 8336,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "tests/ppo_highres_frontier/test_stage3_policy_cpu.py",
+      "sha256": "6518a6365eb8d742f6f5c6fdff3f2e00a884b32caa24353b7bd2d6cb9a5f2f53",
+      "size_bytes": 28721,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "tests/ppo_highres_frontier/test_stage4_checkpoint.py",
+      "sha256": "e6ba33832f847f590b460e443982c63467beced33b7011efcadcff9d58a274ce",
+      "size_bytes": 74656,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "tests/ppo_highres_frontier/test_stage4_collector.py",
+      "sha256": "176f48ff7dd6d0c4bf78e5f6aadf816c88ec32c22aca2fc67fa713ebccba5595",
+      "size_bytes": 44168,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "tests/ppo_highres_frontier/test_stage4_rollout.py",
+      "sha256": "98bea2a1abf0f05ea612e7c57312c4c3d3025fe0d1cc4c515221241aee008ebb",
+      "size_bytes": 13879,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "tests/ppo_highres_frontier/test_stage4_trainer.py",
+      "sha256": "99ea0830e3e2679ce5571614427f3ba850ff56cb203492a073dc9a671143a031",
+      "size_bytes": 21429,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "tests/ppo_highres_frontier/test_stage5_baselines.py",
+      "sha256": "7114030701561429d0fae8f3bd18470856847a3f7e781ca37588a51066003603",
+      "size_bytes": 31758,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "legacy_root",
+      "path": "tests/ppo_highres_frontier/test_stage6_standard_eval.py",
+      "sha256": "b28a0a73be66ec5ead80b0023ca4816c9fc04b30d7b0532801ca929980688b09",
+      "size_bytes": 53622,
+      "migration_role": "migration_source"
     },
     {
       "repository": "path_planner",
       "path": "cpp/CMakeLists.txt",
       "sha256": "5ffc9e06991570f02ca8abcad4fe3a5259c88bbd9196068dca84422843fcdea0",
-      "size_bytes": 26859
+      "size_bytes": 26859,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/cmake/CompilerWarnings.cmake",
+      "sha256": "e3ce8e05f1f40b12c972ee1713c7972201872ec879087d1d6b0b139f73dec3e2",
+      "size_bytes": 333,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/cmake/PlannerV3Config.cmake.in",
+      "sha256": "cbce4b44ee9dee2574635c80fabaa3a6b82631c6a278be53e82cf21b1e527ff2",
+      "size_bytes": 397,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/cmake/ProjectOptions.cmake",
+      "sha256": "8347989f940543d21eb826bce25bef9dd2338de66f459bad71b322f77ad8e3df",
+      "size_bytes": 389,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/api/execution_arbitrator.hpp",
+      "sha256": "a56ab7036769c080326e823a94bc1746387d2fa9c8cea0aa516917503977ed47",
+      "size_bytes": 721,
+      "migration_role": "migration_source"
     },
     {
       "repository": "path_planner",
       "path": "cpp/include/lunar_path_planner/v3/api/planner_v3.hpp",
       "sha256": "cd87479f421c3acb9fb62671705ed3b9384432733118baa6b773ad381bc87979",
-      "size_bytes": 1854
+      "size_bytes": 1854,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/api/reference_bundle_builder.hpp",
+      "sha256": "a4940a4fb1af2668b87ae9163b7bb056bd9e3e21baaf45b86a3735b35ea07e9b",
+      "size_bytes": 1215,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/cache/deterministic_cache.hpp",
+      "sha256": "5332f8b1b2538a777e7a882bb2fec019c5a68acd31ee824c63a4c9fd35690dfd",
+      "size_bytes": 3445,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/codec/jcs_canonicalizer.hpp",
+      "sha256": "737539368e05f7d4ce70f4425bc81198d042ec88fa8027911c99f2899b6fb646",
+      "size_bytes": 328,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/codec/json_codec.hpp",
+      "sha256": "73202524ce2c1c4633ea0cb29f3a60af25367cb81342286e63b3372865d0ce80",
+      "size_bytes": 4523,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/codec/semantic_validator.hpp",
+      "sha256": "e7441c94b852d3a38416989a3abe477b1c885b735e7459122bbba923c018b929",
+      "size_bytes": 1477,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/contracts/base_types.hpp",
+      "sha256": "8db0d0dbe28971251614ae8243d4dc7a07715892e6da0a23c1e4fe9d5ff9a38a",
+      "size_bytes": 1623,
+      "migration_role": "migration_source"
     },
     {
       "repository": "path_planner",
       "path": "cpp/include/lunar_path_planner/v3/contracts/planning_request.hpp",
       "sha256": "63b2ee2376f22b2f71a5b15322e3be5944a3efcb1f2bd16ef2857fa983c2b778",
-      "size_bytes": 4222
+      "size_bytes": 4222,
+      "migration_role": "migration_source"
     },
     {
       "repository": "path_planner",
       "path": "cpp/include/lunar_path_planner/v3/contracts/planning_response.hpp",
       "sha256": "e49da413eb5bb3a8b637e14e03ce5b1f85f53851629213ee7e8b0042ff28b274",
-      "size_bytes": 1741
+      "size_bytes": 1741,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/contracts/platform_reference.hpp",
+      "sha256": "dbcb79fd63e6596257220e8f9ee9f15ae47aff3e788a8ebb2391d61a8ddc1ff2",
+      "size_bytes": 7415,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/contracts/profiles.hpp",
+      "sha256": "fb80b1a8a23f4f0ebe5741f1be86f5253c890a03e510781aa2299413d53407e6",
+      "size_bytes": 10243,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/contracts/reference_bundle.hpp",
+      "sha256": "a2a9f3afa4f714172b4ab0e18fd30f4fc9c56d7f27ec3ba6cca8b958bc36b630",
+      "size_bytes": 3143,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/contracts/state.hpp",
+      "sha256": "aaddd0d9546047977c462cdb36f0f2f57d5bb57f63e75a310babdcd564467d25",
+      "size_bytes": 1488,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/contracts/status.hpp",
+      "sha256": "c57d5dfd8dfe3199f69304cfbcf57c305842cece01e15f6d7b596e8ba467a0d6",
+      "size_bytes": 724,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/corridor/convex_corridor.hpp",
+      "sha256": "a30603e751e44ec9ae50b602df33ff17a1ab6ae2518aa2e97261b0d4b8fe5253",
+      "size_bytes": 1535,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/cost/learned_cost_snapshot.hpp",
+      "sha256": "ebe01605543d298bccc10b3e0f49e4dd2796055bb636e94e27890c712827c29b",
+      "size_bytes": 2546,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/crypto/sha256.hpp",
+      "sha256": "f0f878d1cc98807b68e7bbed2251857c66153e3d8c49534a959522cb9a2c6850",
+      "size_bytes": 305,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/goal/terminal_resolver.hpp",
+      "sha256": "36a26c95d9e408d84638c146f02d76b1ed61d0a13fb7dedb8821f70d134247b1",
+      "size_bytes": 1246,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/aim_point_generator.hpp",
+      "sha256": "1e11080ba730226fada864a71928e2dd9a2b35101485742fe3240e8901020d5a",
+      "size_bytes": 1187,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/attitude_certifier.hpp",
+      "sha256": "8ba870e2c22833a5a89da3c3d668c2272212565b55a22658998584337c42833d",
+      "size_bytes": 2620,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/ballistic_kinematics.hpp",
+      "sha256": "648e06855a577de91fa7e3454308a178329d8b44e01b9dcc2a37013f8a211396",
+      "size_bytes": 1752,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/ballistic_time_solver.hpp",
+      "sha256": "28b5f69b78ba48f64788dbaf10d4e011518874acfb579145f9609ab3f173a61b",
+      "size_bytes": 1518,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/flight_tube_certifier.hpp",
+      "sha256": "8df532a18dfdc0ed5ee595bf004e366f078f8287fdfaa8e6c3b0440fc4625e8f",
+      "size_bytes": 1523,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/hop_certifier.hpp",
+      "sha256": "eb667b33c7624878499238a71af29b5347212a377845408c5d6c5c86cddbaffd",
+      "size_bytes": 1621,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/hopper_commitment_state_machine.hpp",
+      "sha256": "2a1f2c434099115c9ee1199fa468073e3bf7bf00db7e7325d89c3db85a7d74d4",
+      "size_bytes": 1612,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/hopper_config.hpp",
+      "sha256": "09698d20d7471566a3c3001ac62cca436e56e741f16d3c1270023aa49718dc07",
+      "size_bytes": 3730,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/hopper_planner.hpp",
+      "sha256": "4cd53355df80769bdb0ee4ae97cb5a41ba4b1e75d6de79902ee8acbbaf2c3ec0",
+      "size_bytes": 390,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/landing_geometry.hpp",
+      "sha256": "534e02f788716a549b1b5f22369be38d958f985260ef01141e7a8c82a010705e",
+      "size_bytes": 1673,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/landing_graph.hpp",
+      "sha256": "1ce816f8a7f0286655294f6900808bd795510574cd061efd24a496a50c21a618",
+      "size_bytes": 3751,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/landing_region.hpp",
+      "sha256": "c004cae13a78e154f43b75eb4d6d88e914ab66ee687a2b723fbaf42fc8a8c697",
+      "size_bytes": 1540,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/landing_set_propagator.hpp",
+      "sha256": "91bf6e846861898e2e7ef0c8f03faa95d8b33d850e60155fed189c5dbb607fa3",
+      "size_bytes": 1684,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/safe_pose_mask.hpp",
+      "sha256": "23c2cb9f23849518a12937ee882d4415120d698eb43da18dbff9d66d38842d56",
+      "size_bytes": 1255,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/hopper/swept_footprint.hpp",
+      "sha256": "a2ac4aca0d6bdc3b4057de25a93babd927a0b3b477378f8735005e81666cf7ae",
+      "size_bytes": 1069,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/legged/body_motion_primitive.hpp",
+      "sha256": "414f99a0d322474802532edd51972a5b136af38a054be964513fc76e808f119f",
+      "size_bytes": 1312,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/legged/height_interval.hpp",
+      "sha256": "370c2a8042227eec9a8e80bc42214744cbbf1edca067c344f91809366525b30f",
+      "size_bytes": 581,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/legged/legged_capability.hpp",
+      "sha256": "aa2a751156f153ffbd83f351c00e08daf7f7c8c3c0f5c0311c0f53852473b43e",
+      "size_bytes": 811,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/legged/legged_corridor.hpp",
+      "sha256": "1faf318f1e23720115ec19b0865441cd4afc820f32929615638d72dcd2463638",
+      "size_bytes": 1232,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/legged/legged_lattice.hpp",
+      "sha256": "6c51d2c38a17b0177d399429d66b19b02ff8af6cd2aae244b67c478160e4a4e4",
+      "size_bytes": 3056,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/legged/legged_planner.hpp",
+      "sha256": "5d85da933ce722f463336f9dbf54202bbc6485d93581031b6ec8898e346b5062",
+      "size_bytes": 1086,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/legged/legged_search.hpp",
+      "sha256": "5ef211e46e78eef67b0b3d2b67fd694d30a1865a0eb663a942645cee068ae50e",
+      "size_bytes": 1159,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/legged/legged_spline_optimizer.hpp",
+      "sha256": "1be9949ef216e7b3c35a48fd6ae5d3875af22b95f1825611a4b8648f71eb4369",
+      "size_bytes": 1525,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/legged/legged_terrain.hpp",
+      "sha256": "6344b95706a16671c81d7b4137dab438f76280ed1964899da3c3275610000dd9",
+      "size_bytes": 1979,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/legged/legged_timing.hpp",
+      "sha256": "f45164bb3f8f8b22d255108d974894468f82d74efe81811d3a6c0400f7122c1d",
+      "size_bytes": 1215,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/map/immutable_snapshot.hpp",
+      "sha256": "ac59409ffa5b8e670e32625d18dc25375884d973096e6785333d50d5c93bce36",
+      "size_bytes": 3430,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/map/safe_projection.hpp",
+      "sha256": "b6a9dc08937b37fb0db488c36f86ad8a573a63610f50daf9e9b5cf5cb42e1019",
+      "size_bytes": 3412,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/optimization/bounded_qp_solver.hpp",
+      "sha256": "8d846a2c49945e7fc442701ea8fa41ae04900673086fdf23eae1f5b9610a059d",
+      "size_bytes": 1745,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/search/ara_star.hpp",
+      "sha256": "c5ad117eb905f1d4744e76a0f0009aa5e139eb454054ac9fd438d709a409c061",
+      "size_bytes": 18281,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/search/candidate_ranker.hpp",
+      "sha256": "9c63728bb4a74be93bdece55b83ea4551e091e9697cfa3e04b391b8d4ba0658a",
+      "size_bytes": 834,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/search/platform_adapter.hpp",
+      "sha256": "d856fa01bc6642aa5f3e7b147493a8031aeb5e28fb6a714ce79d3321f4b58e98",
+      "size_bytes": 1664,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/wheel/wheel_capability.hpp",
+      "sha256": "a26024898e95a42e589c06acea90771b12d9a09873a8986f9ec675806a59efd8",
+      "size_bytes": 946,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/wheel/wheel_corridor.hpp",
+      "sha256": "90f14d7dddbb0563436de9dad05482beab0af216234576fb7b4e65a3acd9a607",
+      "size_bytes": 981,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/wheel/wheel_lattice.hpp",
+      "sha256": "ecdaaa4e52c8ac1f5007eb01261e045e716e9dca84c8e992aaa5579c82237247",
+      "size_bytes": 2944,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/wheel/wheel_planner.hpp",
+      "sha256": "464ef287f6d52de58079dfa98b52755e58ce76984d58175351797dea9aeaf14f",
+      "size_bytes": 923,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/wheel/wheel_primitive.hpp",
+      "sha256": "bae8927f97687e839fa163d24a9e3b6a6294b5d282e8231e033acff76fd2c8ef",
+      "size_bytes": 1503,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/wheel/wheel_search.hpp",
+      "sha256": "a6d2fc6f686d07f7399e8f229ffad7d9c594d289edf5659c4edf9419aad16e89",
+      "size_bytes": 1971,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/wheel/wheel_spline_optimizer.hpp",
+      "sha256": "0c3808c842578e3fd8104e3d0b056159a603335f06486ce3df08cede55686bde",
+      "size_bytes": 1765,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/wheel/wheel_sweep_validator.hpp",
+      "sha256": "4bc2277f4dcbad2fa2051db3317e5e154f89139ba0c0d88271b02a3c1a6a4238",
+      "size_bytes": 1101,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/include/lunar_path_planner/v3/wheel/wheel_timing.hpp",
+      "sha256": "8ebea14ba7af031b0c11de19ff1a6af3f8dbc2c57500c5d857db0865fa9bd48f",
+      "size_bytes": 2516,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/api/execution_arbitrator.cpp",
+      "sha256": "de973b109a6d59b6186ff4196ef77de01b263eb764b4242b40b7482e940a3b5e",
+      "size_bytes": 11065,
+      "migration_role": "migration_source"
     },
     {
       "repository": "path_planner",
       "path": "cpp/src/api/planner_v3.cpp",
       "sha256": "7660c495f7fb543a7a0e4a0934aa5f8fce0b424360dbc88909093b39359b9e38",
-      "size_bytes": 42884
+      "size_bytes": 42884,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/api/reference_bundle_builder.cpp",
+      "sha256": "c5ce8fdf9698fbc415cffe1840b917e0886b517fde176353a65774573b1bc923",
+      "size_bytes": 16932,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/codec/jcs_canonicalizer.cpp",
+      "sha256": "451dd08e123a9c137ba9e007887283939b1c2289ee9799edc5d65c42d19c19b5",
+      "size_bytes": 11692,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/codec/json_codec.cpp",
+      "sha256": "9bb21cf78b84f9124a38101ea3f6d0f4c50ebfd10bed6693ba098dacc4b70ef8",
+      "size_bytes": 181890,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/codec/semantic_validator.cpp",
+      "sha256": "7b5850527136872257741431335ad00e294937bbe2dd119e3942703913e89d70",
+      "size_bytes": 179093,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/contracts/base_types.cpp",
+      "sha256": "45184422dba444a1dc07816f45b451c38eb66bbf0518370451e122e58eb358a2",
+      "size_bytes": 58,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/corridor/convex_corridor.cpp",
+      "sha256": "6056fc4ee15beba520b86dc01725a9322ffab52967ecbfa67067749d5b7ad65e",
+      "size_bytes": 27365,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/cost/learned_cost_snapshot.cpp",
+      "sha256": "580d623e27682a9fa3ebfaa7becc7b684369d4723285defbc56d7c5a5c23eaf8",
+      "size_bytes": 14266,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/crypto/sha256.cpp",
+      "sha256": "0507c53a7ea4a36f4a3b41c13472ddb60a179f4d220e673de78a8913c38e9948",
+      "size_bytes": 358,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/goal/terminal_resolver.cpp",
+      "sha256": "f9725f8fb971c66b581965baabaf0ed5f8616b94d3b4020b8b64480ff0432d04",
+      "size_bytes": 39502,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/aim_point_generator.cpp",
+      "sha256": "2f1d0022000c6ce967b3dcbe24046616c9656e49ce86c5944be0d79a499f2a0b",
+      "size_bytes": 7620,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/attitude_certifier.cpp",
+      "sha256": "d5001290b55f1642f93b81aa5a84228c50c68a81986c8d71bf0729702ee7dfb5",
+      "size_bytes": 12586,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/ballistic_kinematics.cpp",
+      "sha256": "3d0e7461fb49c6f9301d0371589b3a4574e229378bdf8e4ab31afa494ecde733",
+      "size_bytes": 4630,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/ballistic_time_solver.cpp",
+      "sha256": "f63cd83bf6e344ee43009fd2652d73452d4b9e07bd5263f8d00d89cc0cdea3a5",
+      "size_bytes": 5751,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/flight_tube_certifier.cpp",
+      "sha256": "f2c9eee958200eb91f685adc3c7f0267366efdbb342218cd42aa3026af9784c4",
+      "size_bytes": 12741,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/hop_certifier.cpp",
+      "sha256": "f33f98efa2333b2056abcf4b19dc1aba518c7c92e533467e334df0745c1ced86",
+      "size_bytes": 18453,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/hopper_commitment_state_machine.cpp",
+      "sha256": "2f63b51f6d79bce8a2c4f0c9467dce41f2fcba5360dd032704fbc9e21697a0b8",
+      "size_bytes": 6351,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/hopper_config.cpp",
+      "sha256": "52d2be49e4cacdbedd62f8a64546d7e10e636a99a962b94b05dbb148e7450db8",
+      "size_bytes": 14621,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/hopper_planner.cpp",
+      "sha256": "a3e1f6280273559510342ab76627b90132adcbf82aaf04bd5a5b0032d6a7b992",
+      "size_bytes": 14823,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/landing_geometry.cpp",
+      "sha256": "589412ecce957b6a9bb315c0e19696f0767828d577e8828032119c0af4408cc4",
+      "size_bytes": 8434,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/landing_graph.cpp",
+      "sha256": "e87570f5835b4fe8c4ac5463ffce8d32d8bba842d75361f68e50d5c2464e06f8",
+      "size_bytes": 12158,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/landing_region.cpp",
+      "sha256": "d0f2d2bdccdfee096bf423ec35da9d827ab543f674bacea3d9140edaadf068f1",
+      "size_bytes": 11329,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/landing_set_propagator.cpp",
+      "sha256": "6ebd59d4bbaef991100b9e99b09c2605341fc7d4a854382dc88a469e7ca5e3a1",
+      "size_bytes": 10180,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/safe_pose_mask.cpp",
+      "sha256": "76f61f934c71743c02d6b63cec0c4b03a9f6c704f5d8672d331a23ddca27171e",
+      "size_bytes": 7435,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/hopper/swept_footprint.cpp",
+      "sha256": "2b5b7de58d95fc18e6c916e8a4be99a45f8d3b9877ed4d684ff00857b1877328",
+      "size_bytes": 7134,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/legged/body_motion_primitive.cpp",
+      "sha256": "82055d534c237ce76729c2507047dd17145fff541d9243df1b71775d682753ac",
+      "size_bytes": 7816,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/legged/height_interval.cpp",
+      "sha256": "40cfe2f64dd0e5c61de6e997b9cd51d417d538847cfd6f77ce709809554a8fa4",
+      "size_bytes": 1507,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/legged/legged_capability.cpp",
+      "sha256": "7bcdb6a26ed9c53b9e8afc95d190099991f44ce33548256cc70f0f97122452b4",
+      "size_bytes": 5325,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/legged/legged_corridor.cpp",
+      "sha256": "b69fdff57770dac0a99b1eef158c278ee300dc02bb14f4a7ba9ecd84acb48587",
+      "size_bytes": 19067,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/legged/legged_lattice.cpp",
+      "sha256": "d9e2455611b4ac490c1fe84c8ac5db79d2a59331f91546d2e5172ba7c303462f",
+      "size_bytes": 16056,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/legged/legged_planner.cpp",
+      "sha256": "e57b595642d2b0ae2ed9ce64cad3b7bdc93a11caa9d5dc19281b6315de09972f",
+      "size_bytes": 24534,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/legged/legged_search.cpp",
+      "sha256": "dad8664a4e8777def6ac7918f593186047b140a78701aa6e03830c8ee653a049",
+      "size_bytes": 13586,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/legged/legged_spline_optimizer.cpp",
+      "sha256": "bd49f911a140c77b99edcbcd2de0dc9cf6c1e0869fc6e9ed9c4dcf2fb371509f",
+      "size_bytes": 19192,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/legged/legged_terrain.cpp",
+      "sha256": "ed65d57378c71a69e183fe7497fa60072acd0ab3d0f40dc5207fb5429c7a8288",
+      "size_bytes": 10111,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/legged/legged_timing.cpp",
+      "sha256": "9f400d2824ae7014055553cef327f2fefd6606f2150eea14533be88ee2a600fe",
+      "size_bytes": 18364,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/map/immutable_snapshot.cpp",
+      "sha256": "506eaafa4b6b066c2c527536ccb36762147b8185331d30510becfdb15f796525",
+      "size_bytes": 17280,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/map/safe_projection.cpp",
+      "sha256": "edc85b41d5e937bcade2a767cfeeb55d77d18681727d00f00012a2549fe71244",
+      "size_bytes": 34656,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/optimization/bounded_qp_solver.cpp",
+      "sha256": "dfdf8cea5e41608a0c0530098452634c488e431e50890d7301d78adef7dbd9f4",
+      "size_bytes": 7053,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/optimization/osqp_bounded_qp_solver.cpp",
+      "sha256": "885969e34e02ce11aa72df18f0c6dab484cc8f4e1794de03eab6ddc6f141cf98",
+      "size_bytes": 7618,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/search/candidate_ranker.cpp",
+      "sha256": "86b6296bedcfbd603479a9f2fcc2a45d04c973bd240188bc3ed4e3a852767b3a",
+      "size_bytes": 5591,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/wheel/wheel_capability.cpp",
+      "sha256": "d6c90aa4e257575f65e8b2422ae6a89d646f290ad31bc7b25179bc5349abb831",
+      "size_bytes": 4214,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/wheel/wheel_corridor.cpp",
+      "sha256": "e0e211fe9f28551b6a2f443447fc8372e39e7018241f9bc86f390a4ee1b26ea8",
+      "size_bytes": 7370,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/wheel/wheel_lattice.cpp",
+      "sha256": "61ad100dfdc88d0499fc21774c821d4fd6e2684b805a52afd2ff2d8f3d4dd2e5",
+      "size_bytes": 15533,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/wheel/wheel_planner.cpp",
+      "sha256": "fd7d7a26141df2cc350b55c3b3c3abc3ad7407e75f17e0cb3ad02c5dd92c8157",
+      "size_bytes": 37175,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/wheel/wheel_primitive.cpp",
+      "sha256": "7c41452c85eb18994cc0385fe002c4bc93b9bd76c13963afdc9bc3b7d2799b04",
+      "size_bytes": 8793,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/wheel/wheel_search.cpp",
+      "sha256": "73bf26071da9bfc9ce2a93b6c5bd041a8f22ee3f37016d0b3ac70a7514c1f8b7",
+      "size_bytes": 10700,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/wheel/wheel_spline_optimizer.cpp",
+      "sha256": "dae9f2caff8d7ca388add34ecbf46afa0ab0ee923319949a9f6feaca5c661e65",
+      "size_bytes": 21183,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/wheel/wheel_sweep_validator.cpp",
+      "sha256": "a242056bee319ccaab07439ebd21b10588d30d959b4d5b026b08fb03344e3df3",
+      "size_bytes": 18316,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/src/wheel/wheel_timing.cpp",
+      "sha256": "0e1b4ab38c3467a98acbf031bfae0de0d41413108d9e2591c1761982c9587140",
+      "size_bytes": 21523,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/codec/jcs_canonicalizer_test.cpp",
+      "sha256": "88ef5c7d9853057e5621798e319000cf586cc8868ff2aca2e54127b6189626e2",
+      "size_bytes": 5234,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/codec/json_codec_test.cpp",
+      "sha256": "eaf7841fb6f4b47af318dab5de38f5beb28310f8af51641c0b215afe9b5b194c",
+      "size_bytes": 25511,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/codec/semantic_validator_test.cpp",
+      "sha256": "8a3976137803f2df436a1c34722b344e1fa9e0077a3766af48fe5ac83a133695",
+      "size_bytes": 34987,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/contracts/planning_request_test.cpp",
+      "sha256": "f5e2e310834b5506cb56a68fb1aff08e4532c1fbd7c6fef7f4d388083863a1f9",
+      "size_bytes": 1325,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/contracts/reference_bundle_test.cpp",
+      "sha256": "cedbd291e6bbd9210b2aadd32215b4ca0346efa4c9ea24f48b53072ffcbd1175",
+      "size_bytes": 1487,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/fixtures/system/planner_v3_system_fixture.cpp",
+      "sha256": "c34675d20d8a7d447f7aee7da090a2759b95e056d1491ce479336f8cda022463",
+      "size_bytes": 76518,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/fixtures/system/planner_v3_system_fixture.hpp",
+      "sha256": "96b22bb7d6a28fccb4390d328d00826d777ea1d7cd095eb97ac13d4ad59985b7",
+      "size_bytes": 2906,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/integration/api/planner_dispatch_test.cpp",
+      "sha256": "a205d5dd4881090912dc14d8185218dd96343a2d451dff1da2018636bdc2b70f",
+      "size_bytes": 1103,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/integration/legged/legged_fault_matrix_test.cpp",
+      "sha256": "176db29e4edcc70e1740762a6c10dc06552c85fd9eaea2104fd2110215d6540d",
+      "size_bytes": 11517,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/integration/legged/legged_planner_test.cpp",
+      "sha256": "92b2015ce13c39fd86a281b5477c2fe21bdf5da078347d56e4920e84331f6d53",
+      "size_bytes": 12181,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/integration/legged/legged_search_test.cpp",
+      "sha256": "ed9cd6c5cbb05fa842f8781fcb89e676c69b93a65458cdf3b1d3174454f320e3",
+      "size_bytes": 8723,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/integration/legged/legged_test_fixture.hpp",
+      "sha256": "847bb1eaa93ac293f97abbb770ef2ee54d9fd79ad12c33f170eb8a67bad82cab",
+      "size_bytes": 10756,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/integration/system/planner_v3_fault_matrix_test.cpp",
+      "sha256": "38db9688c9d35d5041307502ed4de5b99349b80ee1d2fa0d84cf072066093417",
+      "size_bytes": 3050,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/integration/system/planner_v3_system_test.cpp",
+      "sha256": "1fabc39220dd97d4bf57a593f52815c2794036c5291048b2a38c35e98a33572d",
+      "size_bytes": 4129,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/integration/wheel/wheel_fault_matrix_test.cpp",
+      "sha256": "b117f5eb9e1e241c5ffb43a612c41ac3d29c773e45abc52c3a4b80af8c2204ab",
+      "size_bytes": 11101,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/integration/wheel/wheel_planner_test.cpp",
+      "sha256": "8d1119238a90a35ade479a1151d129d0368bd959da666e57afeea5b2d3c87dd2",
+      "size_bytes": 2773,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/integration/wheel/wheel_planner_test_fixture.hpp",
+      "sha256": "8648793516f99ac9cfe4bc079aa8abb006c812af63efb5b35a28fe2816fe20eb",
+      "size_bytes": 10253,
+      "migration_role": "migration_source"
+    },
+    {
+      "repository": "path_planner",
+      "path": "cpp/tests/integration/wheel/wheel_search_test.cpp",
+      "sha256": "2cb0372e0cc1d918052b483ae363cc72d475cad8433a28c039e60c3cfff6ae43",
+      "size_bytes": 10107,
+      "migration_role": "migration_source"
     }
   ]
 }
