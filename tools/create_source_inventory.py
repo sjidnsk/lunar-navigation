@@ -139,6 +139,15 @@ def _repository_metadata(repository: Path) -> dict[str, str]:
     return {"commit": commit, "origin": _git(repository, "remote", "get-url", "origin")}
 
 
+def _capture_repository_metadata(repositories: dict[str, Path]) -> dict[str, dict[str, str]]:
+    metadata: dict[str, dict[str, str]] = {}
+    for key, repository in sorted(repositories.items()):
+        if not repository.is_dir():
+            raise ValueError(f"repository directory is missing for key: {key}")
+        metadata[key] = _repository_metadata(repository)
+    return metadata
+
+
 def _is_selected_planner_v3_path(relative_path: str) -> bool:
     if relative_path.startswith(_PLANNER_V3_INCLUDE_PREFIX):
         return "/bindings/" not in relative_path
@@ -147,12 +156,16 @@ def _is_selected_planner_v3_path(relative_path: str) -> bool:
     return relative_path.startswith(_PLANNER_V3_TEST_PREFIXES)
 
 
-def source_file_selections(repositories: dict[str, Path]) -> tuple[str, ...]:
+def source_file_selections(
+    repositories: dict[str, Path], *, repository_metadata: dict[str, dict[str, str]] | None = None
+) -> tuple[str, ...]:
     """Return the frozen source paths, including the allowed C++ v3 surface."""
     selections = set(SOURCE_FILES) | set(DIFFERENTIAL_REFERENCE_FILES)
     planner = repositories.get("path_planner")
     if planner is not None:
-        head_paths = _git(Path(planner), "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+        metadata = repository_metadata or _capture_repository_metadata(repositories)
+        planner_commit = metadata["path_planner"]["commit"]
+        head_paths = _git(Path(planner), "ls-tree", "-r", "--name-only", planner_commit).splitlines()
         selections.update(
             f"path_planner:{relative_path}"
             for relative_path in head_paths
@@ -178,14 +191,16 @@ def _assert_selected_file_is_clean(repository: Path, relative_path: str) -> None
             raise ValueError(f"refusing selected assume-unchanged file: {relative_path}")
 
 
-def _read_head_blob(repository: Path, relative_path: str) -> bytes:
+def _read_commit_blob(repository: Path, commit: str, relative_path: str) -> bytes:
     entries = [
         entry
-        for entry in _git_bytes(repository, "ls-tree", "-z", "HEAD", "--", relative_path).split(b"\0")
+        for entry in _git_bytes(repository, "ls-tree", "-z", commit, "--", relative_path).split(b"\0")
         if entry
     ]
     if len(entries) != 1:
-        raise ValueError(f"selected file is not a regular blob in HEAD: {relative_path}")
+        raise ValueError(
+            f"selected file is not a regular blob in captured commit (HEAD snapshot): {relative_path}"
+        )
 
     metadata, separator, listed_path = entries[0].partition(b"\t")
     parts = metadata.split()
@@ -196,7 +211,9 @@ def _read_head_blob(repository: Path, relative_path: str) -> bytes:
         or parts[0] not in {b"100644", b"100755"}
         or parts[1] != b"blob"
     ):
-        raise ValueError(f"selected file is not a regular blob in HEAD: {relative_path}")
+        raise ValueError(
+            f"selected file is not a regular blob in captured commit (HEAD snapshot): {relative_path}"
+        )
     return _git_bytes(repository, "cat-file", "blob", parts[2].decode("ascii"))
 
 
@@ -205,6 +222,7 @@ def _create_document(
     schema_version: str,
     repositories: dict[str, Path],
     selected_files: Sequence[str],
+    repository_metadata: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, object]:
     resolved_repositories = {
         key: Path(path).resolve() for key, path in sorted(repositories.items())
@@ -212,17 +230,19 @@ def _create_document(
     if not resolved_repositories:
         raise ValueError("at least one repository is required")
 
-    repository_records: dict[str, dict[str, str]] = {}
-    for key, repository in resolved_repositories.items():
-        if not repository.is_dir():
-            raise ValueError(f"repository directory is missing for key: {key}")
-        repository_records[key] = _repository_metadata(repository)
+    repository_records = repository_metadata or _capture_repository_metadata(resolved_repositories)
+    if set(repository_records) != set(resolved_repositories):
+        raise ValueError("repository metadata keys do not match repositories")
+    for key, record in repository_records.items():
+        commit = record.get("commit", "")
+        if not _COMMIT_RE.fullmatch(commit):
+            raise ValueError(f"repository metadata has invalid commit for key: {key}")
 
     file_records: list[dict[str, object]] = []
     for selection in selected_files:
         key, relative_path = _resolve_selection(resolved_repositories, selection)
         repository = resolved_repositories[key]
-        data = _read_head_blob(repository, relative_path)
+        data = _read_commit_blob(repository, repository_records[key]["commit"], relative_path)
         _assert_selected_file_is_clean(repository, relative_path)
         file_records.append(
             {
@@ -292,15 +312,25 @@ def main() -> None:
         "path_planner": legacy_root / "path-planner",
         "dev_platform_constraints": legacy_root / "dev-platform-constraints",
     }
+    repository_metadata = _capture_repository_metadata(repositories)
     write_inventory(
-        create_inventory(
+        _create_document(
+            schema_version=SOURCE_SCHEMA,
             repositories=repositories,
-            selected_files=source_file_selections(repositories),
+            selected_files=source_file_selections(
+                repositories, repository_metadata=repository_metadata
+            ),
+            repository_metadata=repository_metadata,
         ),
         arguments.output,
     )
     write_inventory(
-        create_fixture_inventory(repositories=repositories, selected_files=FIXTURE_FILES),
+        _create_document(
+            schema_version=FIXTURE_SCHEMA,
+            repositories=repositories,
+            selected_files=FIXTURE_FILES,
+            repository_metadata=repository_metadata,
+        ),
         arguments.fixture_output,
     )
 

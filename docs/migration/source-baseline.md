@@ -4,6 +4,11 @@ This baseline freezes the source commits, relative paths, and SHA-256 values
 that authorize later migration copies. It does not authorize importing a
 legacy workspace into the new runtime.
 
+The source and fixture inventories are the only controlled migration source.
+Later volumes may migrate only the fixed commits and files listed in those
+inventories. The restricted `legacy-maintenance` policy below does not extend
+or replace that migration authorization.
+
 ## Frozen repositories
 
 | Repository key | Commit | Origin |

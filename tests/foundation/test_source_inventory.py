@@ -5,6 +5,7 @@ import subprocess
 
 import pytest
 
+import tools.create_source_inventory as source_inventory
 from tools.create_source_inventory import create_inventory, source_file_selections
 
 
@@ -246,3 +247,69 @@ def test_inventory_marks_legacy_python_astar_as_differential_reference(tmp_path)
     )
 
     assert output["files"][0]["migration_role"] == "tests/differential_reference"
+
+
+def test_inventory_reads_blobs_from_captured_commit_when_head_advances(tmp_path, monkeypatch):
+    repository = tmp_path / "root"
+    repository.mkdir()
+    subprocess.run(["git", "init"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://example.invalid/legacy.git"],
+        cwd=repository,
+        check=True,
+    )
+    readme = repository / "README.md"
+    readme.write_text("first\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repository, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "first",
+        ],
+        cwd=repository,
+        check=True,
+    )
+    first_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    readme.write_text("second\n", encoding="utf-8")
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-am",
+            "second",
+        ],
+        cwd=repository,
+        check=True,
+    )
+    second_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "--detach", first_commit], cwd=repository, check=True)
+
+    original_metadata = source_inventory._repository_metadata
+
+    def capture_then_advance_head(path):
+        metadata = original_metadata(path)
+        subprocess.run(["git", "checkout", "--detach", second_commit], cwd=path, check=True)
+        return metadata
+
+    monkeypatch.setattr(source_inventory, "_repository_metadata", capture_then_advance_head)
+
+    output = create_inventory(
+        repositories={"legacy_root": repository}, selected_files=("README.md",)
+    )
+
+    assert output["repositories"]["legacy_root"]["commit"] == first_commit
+    assert output["files"][0]["sha256"] == hashlib.sha256(b"first\n").hexdigest()
