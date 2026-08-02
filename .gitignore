@@ -1,0 +1,14 @@
+build/
+install/
+log/
+.venv/
+__pycache__/
+*.engine
+*.pt
+*.pth
+*.db3
+*.mcap
+*.bag
+*.obj
+training-output/
+device-output/
