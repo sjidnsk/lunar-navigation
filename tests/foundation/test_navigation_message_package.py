@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import xml.etree.ElementTree as ET
 
 
@@ -44,14 +45,42 @@ def test_provisional_message_sources_are_exact():
 
 def test_package_declares_only_required_rosidl_dependencies():
     root = ET.parse(PACKAGE / "package.xml").getroot()
-    names = [element.text for element in root]
     assert root.findtext("name") == "lunar_navigation_msgs"
     assert root.findtext("version") == "0.1.0"
-    assert "rosidl_default_generators" in names
-    assert "rosidl_default_runtime" in names
-    assert "geometry_msgs" in names
-    assert "std_msgs" in names
+    assert [node.text for node in root.findall("buildtool_depend")] == [
+        "ament_cmake",
+        "rosidl_default_generators",
+    ]
+    assert {node.text for node in root.findall("depend")} == {
+        "geometry_msgs",
+        "std_msgs",
+    }
+    assert [node.text for node in root.findall("exec_depend")] == [
+        "rosidl_default_runtime"
+    ]
+    dependency_tags = {
+        node.tag
+        for node in root
+        if node.tag.endswith("depend") or node.tag == "buildtool_depend"
+    }
+    assert dependency_tags == {"buildtool_depend", "depend", "exec_depend"}
     assert root.findtext("member_of_group") == "rosidl_interface_packages"
+
+    cmake = (PACKAGE / "CMakeLists.txt").read_text(encoding="utf-8")
+    found_packages = set(re.findall(r"find_package\((\w+) REQUIRED\)", cmake))
+    assert found_packages == {
+        "ament_cmake",
+        "geometry_msgs",
+        "rosidl_default_generators",
+        "std_msgs",
+    }
+    dependencies = re.search(
+        r"rosidl_generate_interfaces\(\$\{PROJECT_NAME\}.*?DEPENDENCIES\s+([^\n]+)",
+        cmake,
+        re.DOTALL,
+    )
+    assert dependencies is not None
+    assert set(dependencies.group(1).split()) == {"geometry_msgs", "std_msgs"}
 
 
 def test_package_declares_ament_cmake_build_type():

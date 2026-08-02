@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import xml.etree.ElementTree as ET
 
 
@@ -101,3 +102,61 @@ def test_internal_planning_message_sources_are_exact():
 def test_package_declares_ament_cmake_build_type():
     root = ET.parse(PACKAGE / "package.xml").getroot()
     assert root.findtext("export/build_type") == "ament_cmake"
+
+
+def test_package_declares_exact_public_rosidl_dependencies():
+    """Wrongly categorized or missing public Action dependencies break downstream imports."""
+    root = ET.parse(PACKAGE / "package.xml").getroot()
+    assert root.findtext("name") == "lunar_planning_msgs"
+    assert root.findtext("version") == "0.1.0"
+    assert [node.text for node in root.findall("buildtool_depend")] == [
+        "ament_cmake",
+        "rosidl_default_generators",
+    ]
+    assert {node.text for node in root.findall("depend")} == {
+        "action_msgs",
+        "builtin_interfaces",
+        "geometry_msgs",
+        "nav_msgs",
+        "std_msgs",
+        "trajectory_msgs",
+    }
+    assert [node.text for node in root.findall("exec_depend")] == [
+        "rosidl_default_runtime"
+    ]
+    dependency_tags = {
+        node.tag
+        for node in root
+        if node.tag.endswith("depend") or node.tag == "buildtool_depend"
+    }
+    assert dependency_tags == {"buildtool_depend", "depend", "exec_depend"}
+    assert [node.text for node in root.findall("member_of_group")] == [
+        "rosidl_interface_packages"
+    ]
+
+    cmake = (PACKAGE / "CMakeLists.txt").read_text(encoding="utf-8")
+    found_packages = set(re.findall(r"find_package\((\w+) REQUIRED\)", cmake))
+    assert found_packages == {
+        "action_msgs",
+        "ament_cmake",
+        "builtin_interfaces",
+        "geometry_msgs",
+        "nav_msgs",
+        "rosidl_default_generators",
+        "std_msgs",
+        "trajectory_msgs",
+    }
+    dependencies = re.search(
+        r"rosidl_generate_interfaces\(\$\{PROJECT_NAME\}.*?DEPENDENCIES\s+([^\n]+)",
+        cmake,
+        re.DOTALL,
+    )
+    assert dependencies is not None
+    assert set(dependencies.group(1).split()) == {
+        "action_msgs",
+        "builtin_interfaces",
+        "geometry_msgs",
+        "nav_msgs",
+        "std_msgs",
+        "trajectory_msgs",
+    }
