@@ -1,4 +1,10 @@
-schema_version: lunar-external-interfaces/v1
+schema_version: lunar-external-interfaces/v2
+interface_packages:
+  lunar_navigation_msgs:
+    schema_provider: in_repository_provisional
+    source_path: ros2_ws/src/lunar_navigation_msgs
+    upstream_status: undefined
+    replacement_policy: atomic
 topics:
   map_global:
     name: /environment/map_global
@@ -30,7 +36,7 @@ topics:
     type: lunar_navigation_msgs/msg/ExplorationTask
     owner: external
     frame: map
-    required_fields: [header, mission_id, revision, desired_state, science_regions]
+    required_fields: [header, mission_id, revision, desired_state, roi_min_x_m, roi_min_y_m, roi_max_x_m, roi_max_y_m, science_regions]
 tf:
   topic: /tf
   type: tf2_msgs/msg/TFMessage

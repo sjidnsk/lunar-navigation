@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 from collections.abc import Callable, Mapping
@@ -13,7 +14,50 @@ import yaml
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 _FIELD_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
-_SCHEMA_VERSION = "lunar-external-interfaces/v1"
+_SCHEMA_VERSION = "lunar-external-interfaces/v2"
+_INTERFACE_PACKAGES = {
+    "lunar_navigation_msgs": {
+        "schema_provider": "in_repository_provisional",
+        "source_path": "ros2_ws/src/lunar_navigation_msgs",
+        "upstream_status": "undefined",
+        "replacement_policy": "atomic",
+    }
+}
+LOCALIZATION_STATUS_DECLARATIONS = (
+    "uint8 UNKNOWN=0",
+    "uint8 VALID=1",
+    "uint8 DEGRADED=2",
+    "uint8 INVALID=3",
+    "uint8 RELOCALIZING=4",
+    "std_msgs/Header header",
+    "uint8 status",
+)
+SCIENCE_TARGET_REGION_DECLARATIONS = (
+    "string region_id",
+    "string objective_id",
+    "geometry_msgs/Polygon boundary",
+    "float64 priority",
+)
+EXPLORATION_TASK_DECLARATIONS = (
+    "uint8 ACTIVE=1",
+    "uint8 PAUSED=2",
+    "uint8 CANCELED=3",
+    "std_msgs/Header header",
+    "string mission_id",
+    "uint64 revision",
+    "uint8 desired_state",
+    "float64 roi_min_x_m",
+    "float64 roi_min_y_m",
+    "float64 roi_max_x_m",
+    "float64 roi_max_y_m",
+    "lunar_navigation_msgs/ScienceTargetRegion[<=64] science_regions",
+)
+_PROVISIONAL_DECLARATIONS = {
+    "lunar_navigation_msgs/msg/LocalizationStatus": LOCALIZATION_STATUS_DECLARATIONS,
+    "lunar_navigation_msgs/msg/ScienceTargetRegion": SCIENCE_TARGET_REGION_DECLARATIONS,
+    "lunar_navigation_msgs/msg/ExplorationTask": EXPLORATION_TASK_DECLARATIONS,
+}
+_SYSTEM_PREFIX = Path("/opt/ros/humble").resolve()
 _TOPICS = {
     "map_global": {
         "name": "/environment/map_global",
@@ -70,6 +114,10 @@ _TOPICS = {
             "mission_id",
             "revision",
             "desired_state",
+            "roi_min_x_m",
+            "roi_min_y_m",
+            "roi_max_x_m",
+            "roi_max_y_m",
             "science_regions",
         ],
     },
@@ -117,6 +165,17 @@ def run_ros_command(command: list[str]) -> subprocess.CompletedProcess[str]:
 def parse_top_level_fields(interface_definition: str) -> set[str]:
     """Extract declared top-level ROS message field names from CLI output."""
     fields: set[str] = set()
+    for declaration in parse_top_level_declarations(interface_definition):
+        tokens = declaration.split()
+        name = tokens[1]
+        if "=" not in name and _FIELD_NAME.fullmatch(name):
+            fields.add(name)
+    return fields
+
+
+def parse_top_level_declarations(interface_definition: str) -> tuple[str, ...]:
+    """Extract normalized, unindented ROS message constants and fields in order."""
+    declarations: list[str] = []
     for raw_line in interface_definition.splitlines():
         if not raw_line or raw_line[0].isspace():
             continue
@@ -124,10 +183,10 @@ def parse_top_level_fields(interface_definition: str) -> set[str]:
         tokens = declaration.split()
         if len(tokens) != 2:
             continue
-        name = tokens[1]
-        if "=" not in name and _FIELD_NAME.fullmatch(name):
-            fields.add(name)
-    return fields
+        name = tokens[1].split("=", maxsplit=1)[0]
+        if _FIELD_NAME.fullmatch(name):
+            declarations.append(declaration)
+    return tuple(declarations)
 
 
 def _command_failure(command: str, result: subprocess.CompletedProcess[str]) -> str:
@@ -199,7 +258,14 @@ def validate_external_config(document: object) -> list[str]:
         return ["config error: document must be a mapping"]
 
     errors: list[str] = []
-    required_top_level = {"schema_version", "topics", "tf", "required_grid_layers", "static_inputs"}
+    required_top_level = {
+        "schema_version",
+        "interface_packages",
+        "topics",
+        "tf",
+        "required_grid_layers",
+        "static_inputs",
+    }
     _unexpected_keys(errors, "document", document, required_top_level)
     for key in sorted(required_top_level):
         if key not in document:
@@ -211,6 +277,25 @@ def validate_external_config(document: object) -> list[str]:
             errors.append("config error: schema_version must be a string")
         elif schema_version != _SCHEMA_VERSION:
             errors.append(f"config error: schema_version must be {_SCHEMA_VERSION!r}")
+
+    interface_packages = document.get("interface_packages")
+    if interface_packages is not None:
+        if not isinstance(interface_packages, Mapping):
+            errors.append("config error: interface_packages must be a mapping")
+        else:
+            _unexpected_keys(
+                errors, "interface_packages", interface_packages, set(_INTERFACE_PACKAGES)
+            )
+            for name, expected_package in _INTERFACE_PACKAGES.items():
+                if name not in interface_packages:
+                    _missing_key(errors, f"interface_packages.{name}")
+                else:
+                    _validate_fixed_mapping(
+                        errors,
+                        f"interface_packages.{name}",
+                        interface_packages[name],
+                        expected_package,
+                    )
 
     topics = document.get("topics")
     if topics is not None:
@@ -259,6 +344,7 @@ def _interface_specs() -> list[tuple[str, tuple[str, ...]]]:
     specs = [
         (topic["type"], tuple(topic["required_fields"])) for topic in _TOPICS.values()
     ]
+    specs.append(("lunar_navigation_msgs/msg/ScienceTargetRegion", ()))
     specs.append((_TF["type"], ()))
     return specs
 
@@ -270,9 +356,65 @@ def _package_for(interface_type: str) -> str:
     return package
 
 
+def _ament_providers(ament_prefix_path: str, package: str) -> list[Path]:
+    providers: list[Path] = []
+    seen: set[Path] = set()
+    for prefix_text in ament_prefix_path.split(os.pathsep):
+        if not prefix_text:
+            continue
+        prefix = Path(prefix_text).resolve()
+        marker = prefix / "share/ament_index/resource_index/packages" / package
+        if marker.is_file() and prefix not in seen:
+            seen.add(prefix)
+            providers.append(prefix)
+    return providers
+
+
+def _validate_lunar_provider(
+    expected_prefix: Path, ament_prefix_path: str
+) -> list[str]:
+    providers = _ament_providers(ament_prefix_path, "lunar_navigation_msgs")
+    if not providers:
+        return [
+            "lunar_navigation_msgs: no ament provider found in AMENT_PREFIX_PATH"
+        ]
+    if len(providers) > 1:
+        locations = ", ".join(str(provider) for provider in providers)
+        return [
+            "lunar_navigation_msgs: multiple ament providers in AMENT_PREFIX_PATH: "
+            f"{locations}"
+        ]
+    if providers[0] != expected_prefix:
+        return [
+            "lunar_navigation_msgs: unexpected ament provider: "
+            f"expected {expected_prefix}, got {providers[0]}"
+        ]
+    return []
+
+
+def _declaration_mismatch(
+    interface_type: str, expected: tuple[str, ...], actual: tuple[str, ...]
+) -> str | None:
+    for index in range(max(len(expected), len(actual))):
+        expected_value = expected[index] if index < len(expected) else None
+        actual_value = actual[index] if index < len(actual) else None
+        if expected_value == actual_value:
+            continue
+        expected_text = repr(expected_value) if expected_value is not None else "end of declarations"
+        actual_text = repr(actual_value) if actual_value is not None else "end of declarations"
+        return (
+            f"{interface_type}: declaration mismatch: expected {expected_text} "
+            f"at declaration {index + 1}, got {actual_text}"
+        )
+    return None
+
+
 def check_interfaces(
     config: Path,
+    *,
+    expected_lunar_navigation_prefix: Path,
     run: CommandRunner = run_ros_command,
+    ament_prefix_path: str | None = None,
     package_locations: dict[str, str] | None = None,
 ) -> list[str]:
     """Return external ROS package, type, or field validation errors."""
@@ -285,7 +427,15 @@ def check_interfaces(
     if config_errors:
         return config_errors
 
-    errors: list[str] = []
+    expected_lunar_prefix = expected_lunar_navigation_prefix.resolve()
+    effective_ament_prefix_path = (
+        os.environ.get("AMENT_PREFIX_PATH", "")
+        if ament_prefix_path is None
+        else ament_prefix_path
+    )
+    errors = _validate_lunar_provider(
+        expected_lunar_prefix, effective_ament_prefix_path
+    )
     checked_packages: set[str] = set()
     for interface_type, required_fields in _interface_specs():
         package = _package_for(interface_type)
@@ -294,14 +444,36 @@ def check_interfaces(
             package_result = run(["ros2", "pkg", "prefix", package])
             if package_result.returncode != 0:
                 errors.append(f"{package}: {_command_failure('ros2 pkg prefix', package_result)}")
-            elif package_locations is not None:
-                package_locations[package] = package_result.stdout.strip()
+            else:
+                actual_prefix = Path(package_result.stdout.strip()).resolve()
+                expected_prefix = (
+                    expected_lunar_prefix
+                    if package == "lunar_navigation_msgs"
+                    else _SYSTEM_PREFIX
+                )
+                if package_locations is not None:
+                    package_locations[package] = str(actual_prefix)
+                if actual_prefix != expected_prefix:
+                    errors.append(
+                        f"{package}: unexpected package prefix: "
+                        f"expected {expected_prefix}, got {actual_prefix}"
+                    )
 
         interface_result = run(["ros2", "interface", "show", interface_type])
         if interface_result.returncode != 0:
             errors.append(
                 f"{interface_type}: {_command_failure('ros2 interface show', interface_result)}"
             )
+            continue
+
+        expected_declarations = _PROVISIONAL_DECLARATIONS.get(interface_type)
+        if expected_declarations is not None:
+            actual_declarations = parse_top_level_declarations(interface_result.stdout)
+            mismatch = _declaration_mismatch(
+                interface_type, expected_declarations, actual_declarations
+            )
+            if mismatch is not None:
+                errors.append(mismatch)
             continue
 
         available_fields = parse_top_level_fields(interface_result.stdout)
@@ -316,10 +488,15 @@ def check_interfaces(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--expected-lunar-navigation-prefix", type=Path, required=True)
     arguments = parser.parse_args()
 
     package_locations: dict[str, str] = {}
-    errors = check_interfaces(arguments.config, package_locations=package_locations)
+    errors = check_interfaces(
+        arguments.config,
+        expected_lunar_navigation_prefix=arguments.expected_lunar_navigation_prefix,
+        package_locations=package_locations,
+    )
     for package, location in sorted(package_locations.items()):
         print(f"external package: {package}: {location}")
     if errors:

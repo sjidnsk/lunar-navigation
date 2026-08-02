@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import subprocess
 import xml.etree.ElementTree as element_tree
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,15 @@ CONFIG = REPOSITORY_ROOT / "ros2_ws/src/lunar_navigation_config/config/external_
 PACKAGE_XML = REPOSITORY_ROOT / "ros2_ws/src/lunar_navigation_config/package.xml"
 
 EXPECTED_DOCUMENT = {
-    "schema_version": "lunar-external-interfaces/v1",
+    "schema_version": "lunar-external-interfaces/v2",
+    "interface_packages": {
+        "lunar_navigation_msgs": {
+            "schema_provider": "in_repository_provisional",
+            "source_path": "ros2_ws/src/lunar_navigation_msgs",
+            "upstream_status": "undefined",
+            "replacement_policy": "atomic",
+        }
+    },
     "topics": {
         "map_global": {
             "name": "/environment/map_global",
@@ -73,6 +82,10 @@ EXPECTED_DOCUMENT = {
                 "mission_id",
                 "revision",
                 "desired_state",
+                "roi_min_x_m",
+                "roi_min_y_m",
+                "roi_max_x_m",
+                "roi_max_y_m",
                 "science_regions",
             ],
         },
@@ -109,6 +122,33 @@ EXPECTED_DOCUMENT = {
     },
 }
 
+VALID_LOCALIZATION_STATUS = """uint8 UNKNOWN=0
+uint8 VALID=1
+uint8 DEGRADED=2
+uint8 INVALID=3
+uint8 RELOCALIZING=4
+std_msgs/Header header
+uint8 status
+"""
+VALID_SCIENCE_TARGET_REGION = """string region_id
+string objective_id
+geometry_msgs/Polygon boundary
+float64 priority
+"""
+VALID_EXPLORATION_TASK = """uint8 ACTIVE=1
+uint8 PAUSED=2
+uint8 CANCELED=3
+std_msgs/Header header
+string mission_id
+uint64 revision
+uint8 desired_state
+float64 roi_min_x_m
+float64 roi_min_y_m
+float64 roi_max_x_m
+float64 roi_max_y_m
+lunar_navigation_msgs/ScienceTargetRegion[<=64] science_regions
+"""
+
 
 def complete_valid_config() -> dict[str, object]:
     """Return a hand-maintained complete contract fixture for checker tests."""
@@ -132,6 +172,55 @@ def successful_ros_runner(required_fields_by_type: dict[str, list[str]], calls: 
         return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
 
     return run
+
+
+def field_definition(*names: str) -> str:
+    return "".join(f"string {name}\n" for name in names)
+
+
+@dataclass
+class SourceAwareRosRunner:
+    lunar_prefix: Path
+    interface_outputs: dict[str, str]
+
+    def __call__(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["ros2", "pkg", "prefix"]:
+            package = command[3]
+            prefix = (
+                self.lunar_prefix
+                if package == "lunar_navigation_msgs"
+                else Path("/opt/ros/humble")
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=f"{prefix}\n", stderr="")
+        if command[:3] == ["ros2", "interface", "show"]:
+            output = self.interface_outputs[command[3]]
+            return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+        raise AssertionError(f"unexpected command: {command!r}")
+
+
+def source_aware_ros_runner(lunar_prefix: Path) -> SourceAwareRosRunner:
+    document = complete_valid_config()
+    outputs = {
+        topic["type"]: field_definition(*topic["required_fields"])
+        for topic in document["topics"].values()
+    }
+    outputs["tf2_msgs/msg/TFMessage"] = field_definition("transforms")
+    outputs.update(
+        {
+            "lunar_navigation_msgs/msg/LocalizationStatus": VALID_LOCALIZATION_STATUS,
+            "lunar_navigation_msgs/msg/ScienceTargetRegion": VALID_SCIENCE_TARGET_REGION,
+            "lunar_navigation_msgs/msg/ExplorationTask": VALID_EXPLORATION_TASK,
+        }
+    )
+    return SourceAwareRosRunner(lunar_prefix.resolve(), outputs)
+
+
+def make_package_provider(prefix: Path, package: str) -> Path:
+    resolved = prefix.resolve()
+    index = resolved / "share/ament_index/resource_index/packages"
+    index.mkdir(parents=True)
+    (index / package).write_text("", encoding="utf-8")
+    return resolved
 
 
 def test_authoritative_config_matches_complete_external_contract():
@@ -165,10 +254,29 @@ geometry_msgs/Pose pose
     assert parse_top_level_fields(interface) == {"header", "status", "pose"}
 
 
+def test_parse_top_level_declarations_preserves_constants_fields_and_bounds():
+    """Losing constants or bounded sequence syntax would hide provisional schema drift."""
+    from tools.check_external_interfaces import parse_top_level_declarations
+
+    interface = """uint8 ACTIVE=1 # state
+std_msgs/Header header
+lunar_navigation_msgs/ScienceTargetRegion[<=64] science_regions
+  string nested
+# top-level comment
+"""
+
+    assert parse_top_level_declarations(interface) == (
+        "uint8 ACTIVE=1",
+        "std_msgs/Header header",
+        "lunar_navigation_msgs/ScienceTargetRegion[<=64] science_regions",
+    )
+
+
 @pytest.mark.parametrize(
     ("section", "expected_error"),
     [
         ("topics", "config error: missing required key: topics"),
+        ("interface_packages", "config error: missing required key: interface_packages"),
         ("tf", "config error: missing required key: tf"),
         ("required_grid_layers", "config error: missing required key: required_grid_layers"),
         ("static_inputs", "config error: missing required key: static_inputs"),
@@ -186,6 +294,7 @@ def test_check_interfaces_rejects_missing_required_contract_sections_without_ros
 
     errors = check_interfaces(
         write_config(tmp_path / "interfaces.yaml", document),
+        expected_lunar_navigation_prefix=tmp_path / "expected",
         run=successful_ros_runner({}, calls),
     )
 
@@ -196,7 +305,7 @@ def test_check_interfaces_rejects_missing_required_contract_sections_without_ros
 @pytest.mark.parametrize(
     ("path", "value", "expected_error"),
     [
-        (("schema_version",), "wrong/v1", "config error: schema_version must be 'lunar-external-interfaces/v1'"),
+        (("schema_version",), "wrong/v1", "config error: schema_version must be 'lunar-external-interfaces/v2'"),
         (("topics", "map_global", "owner"), "internal", "config error: topics.map_global.owner must be 'external'"),
         (("topics", "map_global", "type"), "nav_msgs/msg/Path", "config error: topics.map_global.type must be 'grid_map_msgs/msg/GridMap'"),
         (("topics", "map_global", "frame"), "odom", "config error: topics.map_global.frame must be 'map'"),
@@ -219,6 +328,7 @@ def test_check_interfaces_rejects_wrong_fixed_contract_values_without_ros(
 
     errors = check_interfaces(
         write_config(tmp_path / "interfaces.yaml", document),
+        expected_lunar_navigation_prefix=tmp_path / "expected",
         run=successful_ros_runner({}, calls),
     )
 
@@ -245,6 +355,7 @@ def test_check_interfaces_rejects_empty_or_duplicate_required_fields_without_ros
 
     errors = check_interfaces(
         write_config(tmp_path / "interfaces.yaml", document),
+        expected_lunar_navigation_prefix=tmp_path / "expected",
         run=successful_ros_runner({}, calls),
     )
 
@@ -257,23 +368,23 @@ def test_check_interfaces_reports_missing_top_level_required_field(tmp_path):
     from tools.check_external_interfaces import check_interfaces
 
     document = complete_valid_config()
-    fields_by_type = {
-        topic["type"]: list(topic["required_fields"])
-        for topic in document["topics"].values()
-    }
-    fields_by_type["tf2_msgs/msg/TFMessage"] = []
-    fields_by_type["lunar_navigation_msgs/msg/LocalizationStatus"] = ["header"]
-    calls: list[list[str]] = []
+    expected = make_package_provider(tmp_path / "expected", "lunar_navigation_msgs")
+    run = source_aware_ros_runner(expected)
+    run.interface_outputs["lunar_navigation_msgs/msg/LocalizationStatus"] = (
+        VALID_LOCALIZATION_STATUS.replace("uint8 status\n", "")
+    )
 
     errors = check_interfaces(
         write_config(tmp_path / "interfaces.yaml", document),
-        run=successful_ros_runner(fields_by_type, calls),
+        expected_lunar_navigation_prefix=expected,
+        run=run,
+        ament_prefix_path=f"{expected}:/opt/ros/humble",
     )
 
     assert errors == [
-        "lunar_navigation_msgs/msg/LocalizationStatus: missing top-level fields: status"
+        "lunar_navigation_msgs/msg/LocalizationStatus: declaration mismatch: "
+        "expected 'uint8 status' at declaration 7, got end of declarations"
     ]
-    assert calls
 
 
 def test_check_interfaces_reports_ros_command_failure(tmp_path):
@@ -282,20 +393,20 @@ def test_check_interfaces_reports_ros_command_failure(tmp_path):
 
     document = complete_valid_config()
 
+    expected = make_package_provider(tmp_path / "expected", "lunar_navigation_msgs")
+    successful_run = source_aware_ros_runner(expected)
+
     def run(command: list[str]) -> subprocess.CompletedProcess[str]:
-        if command[:3] == ["ros2", "pkg", "prefix"]:
-            return subprocess.CompletedProcess(command, 0, stdout="/opt/ros/humble\n", stderr="")
         if command[-1] == "nav_msgs/msg/Odometry":
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="unknown interface")
-        fields_by_type = {
-            topic["type"]: list(topic["required_fields"])
-            for topic in document["topics"].values()
-        }
-        fields_by_type["tf2_msgs/msg/TFMessage"] = []
-        output = "\n".join(f"string {field}" for field in fields_by_type[command[-1]]) + "\n"
-        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+        return successful_run(command)
 
-    errors = check_interfaces(write_config(tmp_path / "interfaces.yaml", document), run=run)
+    errors = check_interfaces(
+        write_config(tmp_path / "interfaces.yaml", document),
+        expected_lunar_navigation_prefix=expected,
+        run=run,
+        ament_prefix_path=f"{expected}:/opt/ros/humble",
+    )
 
     assert errors == ["nav_msgs/msg/Odometry: ros2 interface show failed: unknown interface"]
 
@@ -305,17 +416,14 @@ def test_check_interfaces_records_successful_package_prefix(tmp_path):
     from tools.check_external_interfaces import check_interfaces
 
     document = complete_valid_config()
-    fields_by_type = {
-        topic["type"]: list(topic["required_fields"])
-        for topic in document["topics"].values()
-    }
-    fields_by_type["tf2_msgs/msg/TFMessage"] = []
-    calls: list[list[str]] = []
+    expected = make_package_provider(tmp_path / "expected", "lunar_navigation_msgs")
     package_locations: dict[str, str] = {}
 
     errors = check_interfaces(
         write_config(tmp_path / "interfaces.yaml", document),
-        run=successful_ros_runner(fields_by_type, calls),
+        expected_lunar_navigation_prefix=expected,
+        run=source_aware_ros_runner(expected),
+        ament_prefix_path=f"{expected}:/opt/ros/humble",
         package_locations=package_locations,
     )
 
@@ -324,5 +432,49 @@ def test_check_interfaces_records_successful_package_prefix(tmp_path):
         "grid_map_msgs": "/opt/ros/humble",
         "nav_msgs": "/opt/ros/humble",
         "tf2_msgs": "/opt/ros/humble",
-        "lunar_navigation_msgs": "/opt/ros/humble",
+        "lunar_navigation_msgs": str(expected),
     }
+
+
+def test_rejects_provisional_package_from_wrong_prefix(tmp_path):
+    from tools.check_external_interfaces import check_interfaces
+
+    other = make_package_provider(tmp_path / "other", "lunar_navigation_msgs")
+    errors = check_interfaces(
+        write_config(tmp_path / "interfaces.yaml", complete_valid_config()),
+        expected_lunar_navigation_prefix=tmp_path / "expected",
+        run=source_aware_ros_runner(other),
+        ament_prefix_path=str(other),
+    )
+    assert any("unexpected package prefix" in error for error in errors)
+
+
+def test_rejects_duplicate_ament_provider(tmp_path):
+    from tools.check_external_interfaces import check_interfaces
+
+    expected = make_package_provider(tmp_path / "expected", "lunar_navigation_msgs")
+    duplicate = make_package_provider(tmp_path / "duplicate", "lunar_navigation_msgs")
+    errors = check_interfaces(
+        write_config(tmp_path / "interfaces.yaml", complete_valid_config()),
+        expected_lunar_navigation_prefix=expected,
+        run=source_aware_ros_runner(expected),
+        ament_prefix_path=f"{expected}:{duplicate}:/opt/ros/humble",
+    )
+    assert any("multiple ament providers" in error for error in errors)
+
+
+def test_rejects_provisional_declaration_drift(tmp_path):
+    from tools.check_external_interfaces import check_interfaces
+
+    expected = make_package_provider(tmp_path / "expected", "lunar_navigation_msgs")
+    run = source_aware_ros_runner(lunar_prefix=expected)
+    run.interface_outputs["lunar_navigation_msgs/msg/ExplorationTask"] = (
+        VALID_EXPLORATION_TASK.replace("[<=64]", "[]")
+    )
+    errors = check_interfaces(
+        write_config(tmp_path / "interfaces.yaml", complete_valid_config()),
+        expected_lunar_navigation_prefix=expected,
+        run=run,
+        ament_prefix_path=f"{expected}:/opt/ros/humble",
+    )
+    assert any("declaration mismatch" in error for error in errors)
