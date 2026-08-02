@@ -50,6 +50,15 @@ def test_rejects_nested_git_worktree_file(tmp_path: Path) -> None:
     assert any("nested Git" in error for error in errors)
 
 
+def test_rejects_nested_git_below_an_ignored_directory(tmp_path: Path) -> None:
+    """Skipping ignored directories during Git discovery must fail this test."""
+    (tmp_path / "build" / "third_party" / ".git").mkdir(parents=True)
+
+    errors = check_repository(tmp_path)
+
+    assert any("nested Git" in error and "build/third_party/.git" in error for error in errors)
+
+
 def test_rejects_tracked_gitlinks_forbidden_artifacts_and_nonexecutable_shell_scripts(
     tmp_path: Path,
 ) -> None:
@@ -73,6 +82,61 @@ def test_rejects_tracked_gitlinks_forbidden_artifacts_and_nonexecutable_shell_sc
     assert any("gitlink" in error for error in errors)
     assert any("forbidden artifact" in error for error in errors)
     assert any("shell script" in error for error in errors)
+
+
+def test_rejects_tracked_models_training_data_artifact_directories_and_large_files(
+    tmp_path: Path,
+) -> None:
+    """Removing artifact suffix, directory, or size checks must fail this test."""
+    _initialize_repository(tmp_path)
+    (tmp_path / "policy.onnx").write_text("model", encoding="utf-8")
+    (tmp_path / "checkpoint.ckpt").write_text("checkpoint", encoding="utf-8")
+    (tmp_path / "weights.safetensors").write_text("weights", encoding="utf-8")
+    (tmp_path / "training.npz").write_text("data", encoding="utf-8")
+    output = tmp_path / "training-output"
+    output.mkdir()
+    (output / "summary.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "large.bin").write_bytes(b"x" * (1_048_576 + 1))
+    _run_git(tmp_path, "add", ".")
+
+    errors = check_repository(tmp_path)
+
+    assert any("forbidden artifact" in error and "policy.onnx" in error for error in errors)
+    assert any("forbidden artifact" in error and "checkpoint.ckpt" in error for error in errors)
+    assert any("forbidden artifact" in error and "weights.safetensors" in error for error in errors)
+    assert any("forbidden artifact" in error and "training.npz" in error for error in errors)
+    assert any("forbidden artifact directory" in error and "training-output" in error for error in errors)
+    assert any("size limit" in error and "large.bin" in error for error in errors)
+
+
+def test_rejects_windows_paths_in_yaml_and_json_configuration(tmp_path: Path) -> None:
+    """Removing YAML or JSON configuration scanning must fail this test."""
+    (tmp_path / "runtime.yaml").write_text(
+        "model_path: D:/models/policy.onnx\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "runtime.json").write_text(
+        '{"cache_path": "C:\\\\Users\\\\operator\\\\cache"}\n',
+        encoding="utf-8",
+    )
+
+    errors = check_repository(tmp_path)
+
+    assert any("Windows absolute path" in error and "runtime.yaml" in error for error in errors)
+    assert any("Windows absolute path" in error and "runtime.json" in error for error in errors)
+
+
+def test_allows_windows_paths_in_approved_migration_inventories(tmp_path: Path) -> None:
+    """Removing the narrow migration-inventory exemption must fail this test."""
+    migration = tmp_path / "migration"
+    migration.mkdir()
+    for name in ("source_inventory.yaml", "fixture_inventory.yaml"):
+        (migration / name).write_text(
+            "captured_from: C:/legacy/lunar-navigation\n",
+            encoding="utf-8",
+        )
+
+    assert check_repository(tmp_path) == []
 
 
 def test_allows_documented_windows_path_counterexamples(tmp_path: Path) -> None:
