@@ -3,9 +3,9 @@ project(lunar_planner_core LANGUAGES CXX)
 
 find_package(ament_cmake REQUIRED)
 
-option(LUNAR_BUILD_LEGACY_V3 "Build the private frozen planner v3 baseline" OFF)
+option(LUNAR_BUILD_LEGACY_V3 "Build the private frozen planner v3 baseline" ON)
 
-add_library(${PROJECT_NAME} src/planner.cpp)
+add_library(${PROJECT_NAME} SHARED src/planner.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 target_include_directories(${PROJECT_NAME}
   PUBLIC
@@ -41,6 +41,8 @@ if(LUNAR_BUILD_LEGACY_V3)
     EXCLUDE REGEX "/optimization/osqp_bounded_qp_solver\\.cpp$")
 
   add_library(lunar_planner_legacy_v3 STATIC ${LEGACY_V3_SOURCES})
+  set_target_properties(lunar_planner_legacy_v3 PROPERTIES
+    POSITION_INDEPENDENT_CODE ON)
   target_compile_features(lunar_planner_legacy_v3 PRIVATE cxx_std_20)
   target_include_directories(lunar_planner_legacy_v3 PRIVATE
     "${LEGACY_V3_COMPAT_ROOT}"
@@ -64,6 +66,18 @@ if(LUNAR_BUILD_LEGACY_V3)
     Eigen3::Eigen
     lunar_planner_legacy_v3
     nlohmann_json::nlohmann_json)
+
+  target_sources(${PROJECT_NAME} PRIVATE
+    src/migration/legacy_v3_adapter.cpp)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE
+    LUNAR_HAS_LEGACY_V3=1)
+  target_include_directories(${PROJECT_NAME} PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${LEGACY_V3_COMPAT_ROOT}"
+    "${LEGACY_V3_ROOT}/include")
+  target_link_libraries(${PROJECT_NAME} PRIVATE
+    Eigen3::Eigen
+    lunar_planner_legacy_v3)
 endif()
 
 if(BUILD_TESTING)
@@ -74,6 +88,32 @@ if(BUILD_TESTING)
     test/public_api_test.cpp)
   target_include_directories(lunar_planner_core_public_api_test PRIVATE test)
   target_link_libraries(lunar_planner_core_public_api_test ${PROJECT_NAME})
+
+  if(LUNAR_BUILD_LEGACY_V3)
+    ament_add_gtest(lunar_planner_core_legacy_adapter_test
+      test/legacy_adapter_test.cpp)
+    target_include_directories(lunar_planner_core_legacy_adapter_test PRIVATE
+      src test)
+    target_link_libraries(lunar_planner_core_legacy_adapter_test ${PROJECT_NAME})
+
+    add_executable(lunar_planner_facade_summary
+      test/facade_summary.cpp)
+    target_compile_features(lunar_planner_facade_summary PRIVATE cxx_std_20)
+    target_include_directories(lunar_planner_facade_summary PRIVATE src test)
+    target_link_libraries(lunar_planner_facade_summary PRIVATE
+      ${PROJECT_NAME}
+      nlohmann_json::nlohmann_json)
+
+    add_test(
+      NAME lunar_planner_core_legacy_adapter_v3_semantic_equivalence
+      COMMAND "${CMAKE_COMMAND}" -E env
+        "LUNAR_PLANNER_FACADE_SUMMARY=$<TARGET_FILE:lunar_planner_facade_summary>"
+        "${Python3_EXECUTABLE}" -m pytest -q
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/differential/test_v3_semantic_equivalence.py")
+    set_tests_properties(
+      lunar_planner_core_legacy_adapter_v3_semantic_equivalence PROPERTIES
+      LABELS "legacy_adapter;differential")
+  endif()
 
   add_test(
     NAME lunar_planner_core_public_header_boundary

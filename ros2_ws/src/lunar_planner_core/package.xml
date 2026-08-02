@@ -15,7 +15,13 @@
   <build_depend>nlohmann-json-dev</build_depend>
   <build_depend>openssl</build_depend>
 
+  <!-- Temporary runtime dependencies while the installed facade links v3. -->
+  <exec_depend>libfmt-dev</exec_depend>
+  <exec_depend>libdouble-conversion-dev</exec_depend>
+  <exec_depend>openssl</exec_depend>
+
   <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>python3-pytest</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

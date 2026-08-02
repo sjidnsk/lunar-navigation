@@ -8,6 +8,10 @@
 #include <string_view>
 #include <utility>
 
+#ifdef LUNAR_HAS_LEGACY_V3
+#include "migration/legacy_v3_adapter.hpp"
+#endif
+
 namespace lunar::planning {
 namespace {
 
@@ -58,7 +62,11 @@ constexpr std::array<std::string_view, 10> kRequiredMapLayers{
 
 }  // namespace
 
-struct Planner::Impl final {};
+struct Planner::Impl final {
+#ifdef LUNAR_HAS_LEGACY_V3
+  LegacyV3Adapter adapter;
+#endif
+};
 
 Planner::Planner() : impl_(std::make_unique<Impl>()) {}
 
@@ -88,10 +96,14 @@ PlannerOutput Planner::Plan(const PlannerInput& input) noexcept {
           ExecutionDirective::kNoSafeReference,
           std::move(reason));
     }
+#ifdef LUNAR_HAS_LEGACY_V3
+    return impl_->adapter.Plan(input);
+#else
     return Failure(
         PlanningOutcome::kInvalidRequest,
         ExecutionDirective::kNoSafeReference,
         "PLANNER_BACKEND_NOT_CONFIGURED");
+#endif
   } catch (const std::bad_alloc&) {
     return Failure(
         PlanningOutcome::kResourceExhausted,
