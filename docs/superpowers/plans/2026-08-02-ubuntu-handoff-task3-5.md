@@ -14,6 +14,7 @@
 - `/localization/status` 与 `/mission/exploration_task` 的 Topic 数据所有者保持 `external`；schema 提供方暂记为 `in_repository_provisional`。
 - 工作区中任何时刻只能存在一个 `lunar_navigation_msgs`；不得同时引入同名 Debian、源码仓或第二个 overlay。
 - 暂定包只能包含 `LocalizationStatus.msg`、`ScienceTargetRegion.msg` 和 `ExplorationTask.msg`，不得新增 `.srv`、`.action` 或第四个 `.msg`。
+- 暂定接口源精确 allowlist 为 `LocalizationStatus.msg`、`ScienceTargetRegion.msg` 和 `ExplorationTask.msg`；不得存在第二个同名 provider/source。
 - `ExplorationTask.desired_state=0` 非法；`science_regions` 必须使用上限为 64 的 bounded sequence。
 - 权威训练基线固定为 Ubuntu 22.04 LTS、amd64、ROS 2 Humble、Python 3.10、NVIDIA GeForce RTX 4080 SUPER、PCI ID `10de:2702`，profile 为 `train_amd64_rtx4080_super`。
 - 当前已验证 NVIDIA 595.84、DRM KMS 和 CUDA 13.2 正常；指纹工具仍必须保留所有探测失败的原始错误，不能用这些计划值回填现场结果。
@@ -146,7 +147,7 @@ def test_agent_rules_record_the_approved_provisional_exception():
 Run:
 
 ```bash
-python3 -m pytest -q tests/foundation/test_documentation_baseline.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation/test_documentation_baseline.py
 ```
 
 Expected: FAIL；报告仍含 `RTX 4080`/`rtx4080` 的文件，并指出外部输入基线仍声明“不是消息定义源”。
@@ -190,7 +191,7 @@ Path("AGENTS.md").read_text(encoding="utf-8")
 Path("README.md").read_text(encoding="utf-8")
 print("UTF-8 documentation: OK")
 PY
-python3 -m pytest -q tests/foundation/test_documentation_baseline.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation/test_documentation_baseline.py
 ```
 
 Expected: `UTF-8 documentation: OK` 且 pytest PASS。
@@ -320,7 +321,7 @@ def test_rejects_unapproved_provisional_interface(tmp_path):
 - [ ] **Step 3: 运行测试确认包缺失且边界检查尚未实现**
 
 ```bash
-python3 -m pytest -q \
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q \
   tests/foundation/test_navigation_message_package.py \
   tests/foundation/test_repository_boundaries.py
 ```
@@ -351,7 +352,7 @@ ament_export_dependencies(rosidl_default_runtime)
 ament_package()
 ```
 
-`package.xml` 只声明 `ament_cmake`、`rosidl_default_generators`、`rosidl_default_runtime`、`geometry_msgs`、`std_msgs` 和 `rosidl_interface_packages` 成员关系；三个 `.msg` 内容必须与 Step 1 完全一致。
+`package.xml` 只把 `ament_cmake`、`rosidl_default_generators` 声明为 `<buildtool_depend>`，把 `geometry_msgs`、`std_msgs` 为 `<depend>`，并只把 `rosidl_default_runtime` 声明为 `<exec_depend>`；保留唯一 `rosidl_interface_packages` 成员关系，三个 `.msg` 内容必须与 Step 1 完全一致。
 
 - [ ] **Step 5: 扩展仓库边界检查器**
 
@@ -371,7 +372,7 @@ ALLOWED_PROVISIONAL_INTERFACES = {
 - [ ] **Step 6: 运行静态合同和真实仓边界检查**
 
 ```bash
-python3 -m pytest -q \
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q \
   tests/foundation/test_navigation_message_package.py \
   tests/foundation/test_repository_boundaries.py
 python3 tools/check_repository_boundaries.py .
@@ -553,7 +554,7 @@ def test_rejects_provisional_declaration_drift(tmp_path):
 - [ ] **Step 2: 运行配置测试确认 v1 检查器失败**
 
 ```bash
-python3 -m pytest -q tests/foundation/test_external_interface_config.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation/test_external_interface_config.py
 ```
 
 Expected: FAIL；旧配置缺 `interface_packages`，旧函数不接受期望前缀，也不会拒绝重复 provider 或 bounded-sequence 漂移。
@@ -632,7 +633,7 @@ static_inputs:
 - [ ] **Step 5: 运行配置与检查器单元测试**
 
 ```bash
-python3 -m pytest -q tests/foundation/test_external_interface_config.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation/test_external_interface_config.py
 ```
 
 Expected: PASS，包括错误前缀、重复 provider 和 `[<=64]` 漂移用例。
@@ -689,7 +690,7 @@ def test_exploration_state_zero_is_not_defined_and_regions_are_bounded():
 Run:
 
 ```bash
-python3 -m pytest -q tests/ros/test_generated_navigation_interfaces.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/ros/test_generated_navigation_interfaces.py
 python3 tools/check_external_interfaces.py \
   --config ros2_ws/src/lunar_navigation_config/config/external_interfaces.yaml \
   --expected-lunar-navigation-prefix "$LUNAR_VOLUME1_OUTPUT/install"
@@ -836,7 +837,7 @@ float64 best_cost
 - [ ] **Step 2: 运行静态测试确认内部包缺失**
 
 ```bash
-python3 -m pytest -q tests/foundation/test_planning_message_package.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation/test_planning_message_package.py
 ```
 
 Expected: FAIL，`ros2_ws/src/lunar_planning_msgs` 尚不存在。
@@ -850,6 +851,7 @@ cmake_minimum_required(VERSION 3.22)
 project(lunar_planning_msgs)
 
 find_package(ament_cmake REQUIRED)
+find_package(action_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -863,19 +865,19 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MotionReference.msg"
   "msg/PlannerDiagnostics.msg"
   "action/PlanMotion.action"
-  DEPENDENCIES builtin_interfaces geometry_msgs nav_msgs std_msgs trajectory_msgs
+  DEPENDENCIES action_msgs builtin_interfaces geometry_msgs nav_msgs std_msgs trajectory_msgs
 )
 
 ament_export_dependencies(rosidl_default_runtime)
 ament_package()
 ```
 
-`package.xml` 使用版本 `0.1.0`，声明同一组依赖、`rosidl_default_generators`、`rosidl_default_runtime` 和 `rosidl_interface_packages` 成员关系。
+`package.xml` 使用版本 `0.1.0`；只把 `ament_cmake`、`rosidl_default_generators` 声明为 `<buildtool_depend>`，把 `action_msgs`、`builtin_interfaces`、`geometry_msgs`、`nav_msgs`、`std_msgs`、`trajectory_msgs` 为 `<depend>`，并只把 `rosidl_default_runtime` 声明为 `<exec_depend>`；保留唯一 `rosidl_interface_packages` 成员关系。
 
 - [ ] **Step 4: 运行静态测试并构建内部包**
 
 ```bash
-python3 -m pytest -q tests/foundation/test_planning_message_package.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation/test_planning_message_package.py
 source /opt/ros/humble/setup.bash
 source "$LUNAR_VOLUME1_OUTPUT/install/setup.bash"
 colcon --log-base "$LUNAR_VOLUME1_OUTPUT/log" build \
@@ -916,7 +918,7 @@ def test_goal_and_motion_reference_constants():
 Run:
 
 ```bash
-python3 -m pytest -q tests/ros/test_generated_planning_interfaces.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/ros/test_generated_planning_interfaces.py
 ros2 interface show lunar_planning_msgs/action/PlanMotion
 ```
 
@@ -1040,7 +1042,7 @@ def test_training_profile_allows_tensorrt_to_be_unavailable():
 - [ ] **Step 2: 运行测试确认平台模块和基线缺失**
 
 ```bash
-python3 -m pytest -q tests/foundation/test_environment_fingerprint.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation/test_environment_fingerprint.py
 ```
 
 Expected: FAIL；`tools.capture_environment` 和两个 baseline 尚不存在。
@@ -1131,11 +1133,11 @@ device_model, l4t, jetpack, power_mode, clocks, readiness
 }
 ```
 
-`device_model`、`l4t` 和 `jetpack` 可用时使用 `{"available": true, "value": "解析后的版本或型号字符串"}`；`power_mode` 和 `clocks` 可用时把完整命令 stdout 放入同形 `value`。不可用时统一使用含 command、returncode 和 error 的结构。训练 OS 匹配使用 `os.name == "Ubuntu"` 和 `os.version_id == "22.04"`，因此补丁版本 `PRETTY_NAME` 不会误报。ROS 和 Python 分别读取 `ros.distro` 与 `python.version`；Python 只比较 major.minor。
+`l4t` 和 `jetpack` 可用时使用 `{"available": true, "value": "解析后的版本字符串"}`；`power_mode` 和 `clocks` 可用时把完整命令 stdout 放入同形 `value`。`device_model` 只有在设备树 raw model 识别 Jetson AGX Orin、`/etc/nv_boot_control.conf` 的唯一 `TNSPEC` 解析为 `P3701-0005`，且 `free -b` 的总内存不少于 `60 GiB` 时才可用；成功对象除规范值外必须保留 `raw_model`、`module_sku`、`tnspec`、`observed_memory_bytes`、阈值和各来源。任一条件失败时统一保留含 command、returncode、error 和已经取得的审计证据。训练 OS 匹配使用 `os.name == "Ubuntu"` 和 `os.version_id == "22.04"`，因此补丁版本 `PRETTY_NAME` 不会误报。ROS 和 Python 分别读取 `ros.distro` 与 `python.version`；Python 只比较 major.minor。
 
-所有子进程显式使用 `LC_ALL=C` 和 `LANG=C`，避免本地化输出破坏解析。`gpu` 使用 `nvidia-smi --query-gpu=name,pci.bus_id,pci.device_id,memory.total,compute_cap,driver_version --format=csv,noheader,nounits`；把 `0x270210DE` 规范化为 `10de:2702`。CUDA 使用 `/usr/local/cuda/bin/nvcc --version`。TensorRT 通过 `dpkg-query` 探测；Jetson 字段通过 `/etc/nv_tegra_release`、设备树 model、`nvpmodel -q` 和 `jetson_clocks --show` 探测。命令或文件不可用时使用统一 unavailable 结构并保留 stderr/stdout/退出码。
+所有子进程显式使用 `LC_ALL=C` 和 `LANG=C`，避免本地化输出破坏解析。`gpu` 使用 `nvidia-smi --query-gpu=name,pci.bus_id,pci.device_id,memory.total,compute_cap,driver_version --format=csv,noheader,nounits`；把 `0x270210DE` 规范化为 `10de:2702`，并用 `lspci -Dnn` 交叉核对。驱动失败时只从未过滤 PCI 清单中的唯一 NVIDIA 显示类候选补充总线和设备 ID，仍保持 GPU 不可用；驱动成功但 PCI 查询失败、畸形或不一致时保留全部驱动身份字段，另附 `pci_evidence` 并判定不可用。CUDA 使用 `/usr/local/cuda/bin/nvcc --version`。TensorRT 通过 `dpkg-query` 探测；Jetson 字段通过 `/etc/nv_tegra_release`、设备树 model、`/etc/nv_boot_control.conf`、`nvpmodel -q` 和 `jetson_clocks --show` 探测。命令或文件不可用时使用统一 unavailable 结构并保留 stderr/stdout/退出码。
 
-训练 readiness 必须精确匹配 baseline 的 OS、architecture、ROS、Python major.minor、GPU model 和 PCI ID，并要求 `gpu.available=true`、非空驱动版本和 `cuda.available=true`；TensorRT、L4T、JetPack、Jetson 功耗模式在训练 profile 可为 unavailable。AGX profile 必须精确匹配 architecture、device model、L4T、JetPack，并要求 CUDA 和 TensorRT 可用。
+训练 readiness 必须精确匹配 baseline 的 OS、architecture、ROS、Python major.minor、GPU model 和 PCI ID，并要求 `gpu.available=true`、非空驱动版本和 `cuda.available=true`；TensorRT、L4T、JetPack、Jetson 功耗模式在训练 profile 可为 unavailable。AGX profile 必须精确匹配 architecture、带 raw model/`P3701-0005` TNSPEC/内存阈值审计字段的 device model、L4T、JetPack，并要求 CUDA 和 TensorRT 可用。
 
 - [ ] **Step 5: 实现先写实际值、再返回 readiness 的 CLI**
 
@@ -1152,7 +1154,7 @@ CLI 参数：
 - [ ] **Step 6: 运行单元测试和当前主机采集**
 
 ```bash
-python3 -m pytest -q tests/foundation/test_environment_fingerprint.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation/test_environment_fingerprint.py
 source /opt/ros/humble/setup.bash
 mkdir -p "$LUNAR_VOLUME1_OUTPUT/fingerprints"
 python3 tools/capture_environment.py \
@@ -1189,7 +1191,7 @@ git commit -m "build: define Ubuntu and AGX platform baselines"
 ```bash
 source /opt/ros/humble/setup.bash
 source "$LUNAR_VOLUME1_OUTPUT/install/setup.bash"
-python3 -m pytest -q tests/foundation
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation
 python3 tools/check_repository_boundaries.py .
 ```
 
@@ -1205,7 +1207,8 @@ LUNAR_VOLUME1_VERIFY="$(mktemp -d "$LUNAR_VOLUME1_OUTPUT/verify-task3-5.XXXXXX")
 mkdir -p \
   "$LUNAR_VOLUME1_VERIFY/build" \
   "$LUNAR_VOLUME1_VERIFY/install" \
-  "$LUNAR_VOLUME1_VERIFY/log"
+  "$LUNAR_VOLUME1_VERIFY/log" \
+  "$LUNAR_VOLUME1_VERIFY/test-results"
 source /opt/ros/humble/setup.bash
 colcon --log-base "$LUNAR_VOLUME1_VERIFY/log" build \
   --merge-install \
@@ -1221,8 +1224,8 @@ Expected: 三个 package 均完成，退出码 0。
 - [ ] **Step 3: 运行生成类型、现场来源和 colcon 测试**
 
 ```bash
-python3 -m pytest -q tests/ros/test_generated_navigation_interfaces.py
-python3 -m pytest -q tests/ros/test_generated_planning_interfaces.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/ros/test_generated_navigation_interfaces.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/ros/test_generated_planning_interfaces.py
 python3 tools/check_external_interfaces.py \
   --config ros2_ws/src/lunar_navigation_config/config/external_interfaces.yaml \
   --expected-lunar-navigation-prefix "$LUNAR_VOLUME1_VERIFY/install"
@@ -1234,7 +1237,7 @@ colcon --log-base "$LUNAR_VOLUME1_VERIFY/log" test \
   --install-base "$LUNAR_VOLUME1_VERIFY/install" \
   --test-result-base "$LUNAR_VOLUME1_VERIFY/test-results" \
   --return-code-on-test-failure
-colcon test-result \
+colcon --log-base "$LUNAR_VOLUME1_VERIFY/log" test-result \
   --test-result-base "$LUNAR_VOLUME1_VERIFY/test-results" \
   --verbose
 ```
@@ -1282,7 +1285,7 @@ git commit -m "docs: record Ubuntu handoff verification"
 最终再运行一次：
 
 ```bash
-python3 -m pytest -q tests/foundation
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation
 python3 tools/check_repository_boundaries.py .
 git status --short --branch
 ```

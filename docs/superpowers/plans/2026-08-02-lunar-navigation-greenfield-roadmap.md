@@ -20,6 +20,7 @@
 - PPO 训练必须在 Ubuntu 22.04 amd64、RTX 4080 SUPER 上进行；AGX 只执行推理。
 - 训练端必须使用 PyTorch，跨机器模型交换格式必须是 ONNX，TensorRT engine 必须在 AGX 本机生成。
 - 外部 Topic 数据必须由外部项目发布；`lunar_navigation_msgs` 上游未定义期间，本项目按批准设计暂定提供 schema，不得与上游同名包共存。
+- 暂定接口源精确 allowlist 为 `LocalizationStatus.msg`、`ScienceTargetRegion.msg` 和 `ExplorationTask.msg`；不得新增其他接口，也不得存在第二个同名 provider/source。
 - 平台有效最大坡度必须取外部能力上限与项目 `30°` 硬上限中的较小值。
 - synthetic terrain 只能标为 proxy，不得声明为真实物理障碍。
 - v3 或 TensorRT 失败时不得静默回退到 Python A*、PyTorch、ONNX Runtime 或 CPU 推理。
@@ -28,6 +29,14 @@
 - Windows 不得成为 ROS 2、Linux wheel、C++ 发布包或 TensorRT 的权威构建环境。
 - 大 rosbag、checkpoint、训练数据、优化器、日志和构建产物不得提交 Git。
 - 所有下载、模型、缓存和大型运行 artifact 在 Windows 上必须写入 `D:/CodexDownloads` 或明确的 D 盘目录。
+
+在源码 checkout 中执行路线图命令前，调用方必须把 `LUNAR_ROADMAP_OUTPUT` 设置为仓库外绝对路径。所有 colcon verb 都使用该根下的显式 build/install/log/test-result 目录；所有 pytest 命令关闭 bytecode 和 cache provider：
+
+```bash
+export LUNAR_ROADMAP_OUTPUT="${LUNAR_ROADMAP_OUTPUT:?set an absolute output path outside the repository}"
+test "${LUNAR_ROADMAP_OUTPUT#/}" != "$LUNAR_ROADMAP_OUTPUT"
+mkdir -p "$LUNAR_ROADMAP_OUTPUT"
+```
 
 ---
 
@@ -185,13 +194,31 @@ Run:
 
 ```bash
 python3 tools/check_repository_boundaries.py .
-python3 tools/check_external_interfaces.py --config ros2_ws/src/lunar_navigation_config/config/external_interfaces.yaml
-colcon build --base-paths ros2_ws/src --packages-select lunar_planning_msgs lunar_navigation_config
-colcon test --base-paths ros2_ws/src --packages-select lunar_planning_msgs lunar_navigation_config --event-handlers console_direct+
-colcon test-result --verbose
+source /opt/ros/humble/setup.bash
+colcon --log-base "$LUNAR_ROADMAP_OUTPUT/volume1/log" build \
+  --base-paths ros2_ws/src \
+  --packages-select lunar_navigation_msgs lunar_navigation_config lunar_planning_msgs \
+  --build-base "$LUNAR_ROADMAP_OUTPUT/volume1/build" \
+  --install-base "$LUNAR_ROADMAP_OUTPUT/volume1/install"
+source "$LUNAR_ROADMAP_OUTPUT/volume1/install/setup.bash"
+python3 tools/check_external_interfaces.py \
+  --config ros2_ws/src/lunar_navigation_config/config/external_interfaces.yaml \
+  --expected-lunar-navigation-prefix "$LUNAR_ROADMAP_OUTPUT/volume1/install"
+mkdir -p "$LUNAR_ROADMAP_OUTPUT/volume1/test-results"
+colcon --log-base "$LUNAR_ROADMAP_OUTPUT/volume1/log" test \
+  --base-paths ros2_ws/src \
+  --packages-select lunar_navigation_msgs lunar_navigation_config lunar_planning_msgs \
+  --build-base "$LUNAR_ROADMAP_OUTPUT/volume1/build" \
+  --install-base "$LUNAR_ROADMAP_OUTPUT/volume1/install" \
+  --test-result-base "$LUNAR_ROADMAP_OUTPUT/volume1/test-results" \
+  --event-handlers console_direct+ \
+  --return-code-on-test-failure
+colcon --log-base "$LUNAR_ROADMAP_OUTPUT/volume1/log" test-result \
+  --test-result-base "$LUNAR_ROADMAP_OUTPUT/volume1/test-results" \
+  --verbose
 ```
 
-Expected: 全部命令退出码为 0，且没有复制的 `lunar_navigation_msgs/msg` 文件。
+Expected: 全部命令退出码为 0；暂定接口源精确匹配三个 canonical allowlist 文件，且不存在第二个同名 provider/source。
 
 - [ ] **Step 3: 标记卷 1 release point**
 
@@ -219,9 +246,26 @@ Action、地图、定位和 TF 必须使用分离 callback group；规划调用�
 - [ ] **Step 3: 在 Ubuntu 执行卷 2 completion gate**
 
 ```bash
-colcon build --base-paths ros2_ws/src --packages-up-to lunar_planner_ros --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
-colcon test --base-paths ros2_ws/src --packages-select lunar_planner_core lunar_planner_ros --event-handlers console_direct+
-colcon test-result --verbose
+source /opt/ros/humble/setup.bash
+colcon --log-base "$LUNAR_ROADMAP_OUTPUT/volume2/log" build \
+  --base-paths ros2_ws/src \
+  --packages-up-to lunar_planner_ros \
+  --build-base "$LUNAR_ROADMAP_OUTPUT/volume2/build" \
+  --install-base "$LUNAR_ROADMAP_OUTPUT/volume2/install" \
+  --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+source "$LUNAR_ROADMAP_OUTPUT/volume2/install/setup.bash"
+mkdir -p "$LUNAR_ROADMAP_OUTPUT/volume2/test-results"
+colcon --log-base "$LUNAR_ROADMAP_OUTPUT/volume2/log" test \
+  --base-paths ros2_ws/src \
+  --packages-select lunar_planner_core lunar_planner_ros \
+  --build-base "$LUNAR_ROADMAP_OUTPUT/volume2/build" \
+  --install-base "$LUNAR_ROADMAP_OUTPUT/volume2/install" \
+  --test-result-base "$LUNAR_ROADMAP_OUTPUT/volume2/test-results" \
+  --event-handlers console_direct+ \
+  --return-code-on-test-failure
+colcon --log-base "$LUNAR_ROADMAP_OUTPUT/volume2/log" test-result \
+  --test-result-base "$LUNAR_ROADMAP_OUTPUT/volume2/test-results" \
+  --verbose
 ```
 
 Expected: core、三平台、Action、取消、替换、陈旧输入和 Lifecycle 测试全部通过。
@@ -244,7 +288,7 @@ git tag -a planner-action-v1 -m "C++ v3 and PlanMotion action v1"
 - [ ] **Step 1: 在 Ubuntu RTX 4080 SUPER 执行训练冒烟、评估和 ONNX 发布**
 
 ```bash
-python3 -m pytest -q training/lunar_policy_training/tests training/model_export/tests
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q training/lunar_policy_training/tests training/model_export/tests
 python3 -m lunar_policy_training.cli train-smoke --config training/configs/rtx4080_super_smoke.yaml --artifact-root "$LUNAR_TRAIN_ARTIFACT_ROOT"
 python3 -m model_export.publish --checkpoint "$LUNAR_TRAIN_ARTIFACT_ROOT/checkpoints/smoke.pt" --output "$LUNAR_TRAIN_ARTIFACT_ROOT/model-package"
 python3 -m model_export.verify_package "$LUNAR_TRAIN_ARTIFACT_ROOT/model-package"
@@ -279,7 +323,7 @@ git tag -a policy-pipeline-v1 -m "PPO ONNX TensorRT pipeline v1"
 - [ ] **Step 1: 在 Ubuntu 通过完整 rosbag 与故障矩阵**
 
 ```bash
-pytest -q tests/integration
+PYTHONDONTWRITEBYTECODE=1 pytest -p no:cacheprovider -q tests/integration
 scripts/run_rosbag_integration.sh --bag "$LUNAR_INTEGRATION_BAG" --output "$LUNAR_INTEGRATION_OUTPUT"
 ```
 

@@ -16,10 +16,19 @@
 - Windows 只承担审计、编辑、提交和远程任务触发，不得产出权威 Linux/ROS/AGX 构建物。
 - Ubuntu 22.04 amd64、ROS 2 Humble、GCC 11、CMake 3.22、C++20 和 Python 3.10 是权威开发基线。
 - 外部 Topic 数据由外部项目发布；上游未定义期间本仓暂定提供 `lunar_navigation_msgs` schema，并以权威外部输入基线冻结字段与语义；不得与上游同名包共存，未来只能原子切换。
+- 暂定接口源精确 allowlist 为 `LocalizationStatus.msg`、`ScienceTargetRegion.msg` 和 `ExplorationTask.msg`；不得新增其他接口，也不得存在第二个同名 provider/source。
 - 大 rosbag、模型、checkpoint、训练数据和构建目录不得提交 Git。
 - Windows 下载和大型临时资源必须写入 `D:/CodexDownloads`。
 - 文件必须使用 LF；脚本必须保留 executable bit；源码不得硬编码盘符、用户目录或相邻仓库路径。
 - 本卷不迁移算法、PPO 代码、训练 runner、ContentRef、旧 Stage authority/repair 合同或历史 artifact。
+
+在源码 checkout 中执行本计划前，调用方必须先把 `LUNAR_VOLUME1_OUTPUT` 设置为仓库外绝对路径；下列命令以该变量为唯一 colcon build/install/log/test-result 根，并关闭 Python bytecode 与 pytest cache：
+
+```bash
+export LUNAR_VOLUME1_OUTPUT="${LUNAR_VOLUME1_OUTPUT:?set an absolute output path outside the repository}"
+test "${LUNAR_VOLUME1_OUTPUT#/}" != "$LUNAR_VOLUME1_OUTPUT"
+mkdir -p "$LUNAR_VOLUME1_OUTPUT"
+```
 
 ---
 
@@ -113,7 +122,8 @@ def test_inventory_records_each_repository_and_sha256(tmp_path):
 Run:
 
 ```powershell
-python -m pytest -q tests/foundation/test_source_inventory.py
+$env:PYTHONDONTWRITEBYTECODE = "1"
+python -m pytest -p no:cacheprovider -q tests/foundation/test_source_inventory.py
 ```
 
 Expected: FAIL，原因是 `tools.create_source_inventory` 尚不存在。
@@ -127,7 +137,8 @@ Expected: FAIL，原因是 `tools.create_source_inventory` 尚不存在。
 - [ ] **Step 5: 运行测试确认通过**
 
 ```powershell
-python -m pytest -q tests/foundation/test_source_inventory.py
+$env:PYTHONDONTWRITEBYTECODE = "1"
+python -m pytest -p no:cacheprovider -q tests/foundation/test_source_inventory.py
 ```
 
 Expected: PASS。
@@ -200,7 +211,7 @@ def test_rejects_nested_git_and_windows_absolute_paths(tmp_path):
 - [ ] **Step 3: 运行测试确认失败**
 
 ```bash
-python3 -m pytest -q tests/foundation/test_repository_boundaries.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation/test_repository_boundaries.py
 ```
 
 Expected: FAIL，模块尚不存在。
@@ -238,7 +249,7 @@ FORBIDDEN_SUFFIXES = {".obj", ".engine", ".pt", ".pth", ".bag", ".db3"}
 - [ ] **Step 6: 运行测试和真实仓审计**
 
 ```bash
-python3 -m pytest -q tests/foundation/test_repository_boundaries.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation/test_repository_boundaries.py
 python3 tools/check_repository_boundaries.py .
 ```
 
@@ -327,7 +338,7 @@ topics:
     type: lunar_navigation_msgs/msg/ExplorationTask
     owner: external
     frame: map
-    required_fields: [header, mission_id, revision, desired_state, science_regions]
+    required_fields: [header, mission_id, revision, desired_state, roi_min_x_m, roi_min_y_m, roi_max_x_m, roi_max_y_m, science_regions]
 tf:
   topic: /tf
   type: tf2_msgs/msg/TFMessage
@@ -357,7 +368,7 @@ static_inputs:
 
 - [ ] **Step 3: 声明包依赖**
 
-`lunar_navigation_msgs` 必须严格实现权威基线中的三个 schema，并声明其 rosidl 依赖。`lunar_navigation_config/package.xml` 必须声明 `grid_map_msgs`、`nav_msgs`、`tf2_msgs`、`lunar_navigation_msgs` 为 `<exec_depend>`。`dependencies.repos` 初始内容固定为：
+`lunar_navigation_msgs` 必须严格实现权威基线中的三个 schema。其 `package.xml` 只把 `ament_cmake`、`rosidl_default_generators` 声明为 `<buildtool_depend>`，把 `geometry_msgs`、`std_msgs` 为 `<depend>`，并只把 `rosidl_default_runtime` 声明为 `<exec_depend>`。`lunar_navigation_config/package.xml` 必须声明 `grid_map_msgs`、`nav_msgs`、`tf2_msgs`、`lunar_navigation_msgs` 为 `<exec_depend>`。`dependencies.repos` 初始内容固定为：
 
 ```yaml
 repositories: {}
@@ -372,8 +383,17 @@ repositories: {}
 - [ ] **Step 5: 运行配置与现场接口测试**
 
 ```bash
-python3 -m pytest -q tests/foundation/test_external_interface_config.py
-python3 tools/check_external_interfaces.py --config ros2_ws/src/lunar_navigation_config/config/external_interfaces.yaml
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation/test_external_interface_config.py
+source /opt/ros/humble/setup.bash
+colcon --log-base "$LUNAR_VOLUME1_OUTPUT/task3/log" build \
+  --base-paths ros2_ws/src \
+  --packages-select lunar_navigation_msgs lunar_navigation_config \
+  --build-base "$LUNAR_VOLUME1_OUTPUT/task3/build" \
+  --install-base "$LUNAR_VOLUME1_OUTPUT/task3/install"
+source "$LUNAR_VOLUME1_OUTPUT/task3/install/setup.bash"
+python3 tools/check_external_interfaces.py \
+  --config ros2_ws/src/lunar_navigation_config/config/external_interfaces.yaml \
+  --expected-lunar-navigation-prefix "$LUNAR_VOLUME1_OUTPUT/task3/install"
 ```
 
 Expected: 配置测试通过，ROS 外部类型可见，`lunar_navigation_msgs` 来自本仓暂定包且无第二个同名实现。
@@ -525,14 +545,19 @@ float64 best_cost
 
 - [ ] **Step 4: 配置 rosidl 生成**
 
-`CMakeLists.txt` 必须用 `rosidl_generate_interfaces` 枚举上述五个文件，并声明 `builtin_interfaces`、`geometry_msgs`、`nav_msgs`、`std_msgs`、`trajectory_msgs` 依赖。`package.xml` 必须声明 `rosidl_default_generators` 和 `rosidl_default_runtime`。
+`CMakeLists.txt` 必须用 `rosidl_generate_interfaces` 枚举上述五个文件，`find_package(action_msgs REQUIRED)`，并在生成依赖中包含 `action_msgs`、`builtin_interfaces`、`geometry_msgs`、`nav_msgs`、`std_msgs`、`trajectory_msgs`。`package.xml` 只把 `ament_cmake`、`rosidl_default_generators` 声明为 `<buildtool_depend>`，把 `action_msgs`、`builtin_interfaces`、`geometry_msgs`、`nav_msgs`、`std_msgs`、`trajectory_msgs` 为 `<depend>`，并只把 `rosidl_default_runtime` 声明为 `<exec_depend>`。
 
 - [ ] **Step 5: 构建并运行接口测试**
 
 ```bash
-colcon build --base-paths ros2_ws/src --packages-select lunar_planning_msgs
-source install/setup.bash
-python3 -m pytest -q tests/foundation/test_planning_interfaces.py
+source /opt/ros/humble/setup.bash
+colcon --log-base "$LUNAR_VOLUME1_OUTPUT/task4/log" build \
+  --base-paths ros2_ws/src \
+  --packages-select lunar_planning_msgs \
+  --build-base "$LUNAR_VOLUME1_OUTPUT/task4/build" \
+  --install-base "$LUNAR_VOLUME1_OUTPUT/task4/install"
+source "$LUNAR_VOLUME1_OUTPUT/task4/install/setup.bash"
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation/test_planning_interfaces.py
 ros2 interface show lunar_planning_msgs/action/PlanMotion
 ```
 
@@ -568,8 +593,11 @@ def test_agx_fingerprint_requires_r36_and_aarch64():
     document = parse_probe(FIXTURE_AGX)
     validate_fingerprint(document, expected_profile="deploy_agx_orin_r36")
     assert document["architecture"] == "aarch64"
-    assert document["l4t"] == "R36.0.0"
-    assert document["device_model"] == "Jetson AGX Orin 64GB"
+    assert document["l4t"]["value"] == "R36.0.0"
+    assert document["device_model"]["value"] == "Jetson AGX Orin 64GB"
+    assert document["device_model"]["module_sku"] == "P3701-0005"
+    assert "Jetson AGX Orin" in document["device_model"]["raw_model"]
+    assert document["device_model"]["observed_memory_bytes"] >= 60 * 1024**3
 ```
 
 - [ ] **Step 2: 固定两个基线文件**
@@ -604,21 +632,27 @@ responsibilities: [native_build, tensorrt_engine, inference, device_release_gate
 
 - [ ] **Step 3: 实现环境探测**
 
-`capture_environment.py` 必须记录：OS、arch、kernel、ROS distro、Python、GCC、CMake、GPU 名称、驱动、CUDA、TensorRT、L4T、JetPack、功耗模式和时钟状态。命令不可用时字段写入 `available: false` 和命令错误，不得伪造版本。
+`capture_environment.py` 必须记录：OS、arch、kernel、ROS distro、Python、GCC、CMake、GPU 名称、驱动、CUDA、TensorRT、L4T、JetPack、功耗模式和时钟状态。GPU 由 `nvidia-smi` 与独立 PCI 证据交叉核对；驱动或 PCI 查询失败时保留已取得的 GPU 身份和独立失败证据，但 readiness 不得通过。AGX 的 `Jetson AGX Orin 64GB` 规范值只可在设备树 raw model、`/etc/nv_boot_control.conf` 的 `TNSPEC` 模块 SKU `P3701-0005` 与不少于 `60 GiB` 的 OS-visible 内存三项同时成立时生成。命令不可用时字段写入 `available: false` 和命令错误，不得伪造版本。
 
 - [ ] **Step 4: 在两台 Linux 主机采集指纹**
 
 ```bash
-python3 tools/capture_environment.py --profile train_amd64_rtx4080_super --output /tmp/ubuntu-fingerprint.json
-python3 tools/capture_environment.py --profile deploy_agx_orin_r36 --output /tmp/agx-fingerprint.json
+mkdir -p "$LUNAR_VOLUME1_OUTPUT/fingerprints"
+python3 tools/capture_environment.py \
+  --profile train_amd64_rtx4080_super \
+  --output "$LUNAR_VOLUME1_OUTPUT/fingerprints/train_amd64_rtx4080_super.json"
+# 下列命令仅在 AGX 实机执行：
+python3 tools/capture_environment.py \
+  --profile deploy_agx_orin_r36 \
+  --output "$LUNAR_VOLUME1_OUTPUT/fingerprints/deploy_agx_orin_r36.json"
 ```
 
-Expected: Ubuntu 指纹匹配 amd64/RTX 4080 SUPER；AGX 指纹匹配 aarch64/R36.0.0。发现版本差异时停止发布流程并保留实际输出，不修改基线掩盖差异。
+Expected: Ubuntu 指纹匹配 amd64/RTX 4080 SUPER；AGX 指纹匹配 aarch64/R36.0.0，且 `device_model` 包含 raw model、`P3701-0005` TNSPEC 和内存阈值证据。发现版本差异时停止发布流程并保留实际输出，不修改基线掩盖差异。
 
 - [ ] **Step 5: 运行测试并提交**
 
 ```bash
-python3 -m pytest -q tests/foundation/test_environment_fingerprint.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation/test_environment_fingerprint.py
 git add platform tools/capture_environment.py tests/foundation/test_environment_fingerprint.py
 git commit -m "build: define Ubuntu and AGX platform baselines"
 ```
@@ -652,9 +686,12 @@ git commit -m "build: define Ubuntu and AGX platform baselines"
 #!/usr/bin/env bash
 set -euo pipefail
 source /opt/ros/humble/setup.bash
-colcon build \
+: "${LUNAR_VOLUME1_OUTPUT:?set an absolute output path outside the repository}"
+colcon --log-base "$LUNAR_VOLUME1_OUTPUT/runtime/log" build \
   --base-paths ros2_ws/src \
   --packages-skip lunar_nav2_adapter \
+  --build-base "$LUNAR_VOLUME1_OUTPUT/runtime/build" \
+  --install-base "$LUNAR_VOLUME1_OUTPUT/runtime/install" \
   --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
 ```
 
@@ -663,7 +700,7 @@ colcon build \
 - [ ] **Step 4: 验证并提交**
 
 ```bash
-python3 -m pytest -q tests/foundation/test_build_scripts.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation/test_build_scripts.py
 bash -n scripts/bootstrap_ubuntu.sh scripts/build_runtime.sh
 git add scripts tests/foundation/test_build_scripts.py
 git update-index --chmod=+x scripts/bootstrap_ubuntu.sh scripts/build_runtime.sh
@@ -697,10 +734,20 @@ runner labels 固定为 `[self-hosted, linux, arm64, lunar-arm64]`。job 只运�
 
 ```bash
 python3 tools/check_repository_boundaries.py .
-python3 -m pytest -q tests/foundation
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation
 scripts/build_runtime.sh
-colcon test --base-paths ros2_ws/src --packages-select lunar_planning_msgs lunar_navigation_config
-colcon test-result --verbose
+source "$LUNAR_VOLUME1_OUTPUT/runtime/install/setup.bash"
+mkdir -p "$LUNAR_VOLUME1_OUTPUT/runtime/test-results"
+colcon --log-base "$LUNAR_VOLUME1_OUTPUT/runtime/log" test \
+  --base-paths ros2_ws/src \
+  --packages-select lunar_navigation_msgs lunar_navigation_config lunar_planning_msgs \
+  --build-base "$LUNAR_VOLUME1_OUTPUT/runtime/build" \
+  --install-base "$LUNAR_VOLUME1_OUTPUT/runtime/install" \
+  --test-result-base "$LUNAR_VOLUME1_OUTPUT/runtime/test-results" \
+  --return-code-on-test-failure
+colcon --log-base "$LUNAR_VOLUME1_OUTPUT/runtime/log" test-result \
+  --test-result-base "$LUNAR_VOLUME1_OUTPUT/runtime/test-results" \
+  --verbose
 ```
 
 Expected: 全部通过。
@@ -731,11 +778,23 @@ git commit -m "ci: add amd64 and arm64 foundation gates"
 ```bash
 git status --short
 python3 tools/check_repository_boundaries.py .
-python3 tools/check_external_interfaces.py --config ros2_ws/src/lunar_navigation_config/config/external_interfaces.yaml
-python3 -m pytest -q tests/foundation
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/foundation
 scripts/build_runtime.sh
-colcon test --base-paths ros2_ws/src --packages-select lunar_planning_msgs lunar_navigation_config
-colcon test-result --verbose
+source "$LUNAR_VOLUME1_OUTPUT/runtime/install/setup.bash"
+python3 tools/check_external_interfaces.py \
+  --config ros2_ws/src/lunar_navigation_config/config/external_interfaces.yaml \
+  --expected-lunar-navigation-prefix "$LUNAR_VOLUME1_OUTPUT/runtime/install"
+mkdir -p "$LUNAR_VOLUME1_OUTPUT/runtime/test-results"
+colcon --log-base "$LUNAR_VOLUME1_OUTPUT/runtime/log" test \
+  --base-paths ros2_ws/src \
+  --packages-select lunar_navigation_msgs lunar_navigation_config lunar_planning_msgs \
+  --build-base "$LUNAR_VOLUME1_OUTPUT/runtime/build" \
+  --install-base "$LUNAR_VOLUME1_OUTPUT/runtime/install" \
+  --test-result-base "$LUNAR_VOLUME1_OUTPUT/runtime/test-results" \
+  --return-code-on-test-failure
+colcon --log-base "$LUNAR_VOLUME1_OUTPUT/runtime/log" test-result \
+  --test-result-base "$LUNAR_VOLUME1_OUTPUT/runtime/test-results" \
+  --verbose
 ```
 
 Expected: `git status` 为空，其余命令全部通过。
@@ -744,11 +803,15 @@ Expected: `git status` 为空，其余命令全部通过。
 
 ```bash
 git ls-files | grep -E '(^|/)(build|install|log)/|\.(pt|pth|engine|db3|mcap|obj)$' && exit 1 || true
-git ls-files | grep -E '(^|/)lunar_navigation_msgs/(msg|action|srv)/' && exit 1 || true
+git ls-files 'ros2_ws/src/lunar_navigation_msgs/msg/*.msg' | sort | diff -u <(printf '%s\n' \
+  ros2_ws/src/lunar_navigation_msgs/msg/ExplorationTask.msg \
+  ros2_ws/src/lunar_navigation_msgs/msg/LocalizationStatus.msg \
+  ros2_ws/src/lunar_navigation_msgs/msg/ScienceTargetRegion.msg) -
+python3 tools/check_repository_boundaries.py .
 git ls-files --stage | awk '$1 == "160000" { exit 1 }'
 ```
 
-Expected: 不存在受跟踪构建/模型/rosbag/object、外部消息源码或 gitlink。
+Expected: 不存在受跟踪构建/模型/rosbag/object 或 gitlink；暂定接口源恰为三个 canonical allowlist 文件，且边界检查确认不存在第二个 provider/source。
 
 - [ ] **Step 3: 记录完成报告**
 

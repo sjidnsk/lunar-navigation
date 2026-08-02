@@ -4,7 +4,7 @@
 
 ## 来源与所有权
 
-- 只读输入：`docs/外部输入/课题四未知场景无人平台自主探索与规划外部输入.md`
+- 外部/legacy 交接来源（不复制入本仓）：`课题四未知场景无人平台自主探索与规划外部输入.md`
 - SHA-256：`a4c2db0a6647d59fa7cee5cf8048d18f7bca7c7b11a591a32d33d237c0c06e78`
 - `grid_map_msgs`、`nav_msgs` 和 `tf2_msgs` 仍来自 ROS/外部系统；定位与任务系统仍负责消息数据的发布和演进协商。
 - 本仓暂定提供三个 `lunar_navigation_msgs` schema；Topic 数据生产者仍由外部项目拥有。
