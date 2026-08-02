@@ -1,4 +1,5 @@
 # Lunar Navigation 绿地迁移总路线实施计划
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 从当前父仓库与两个 gitlink 子仓库迁出一个以 C++ v3 为唯一生产规划内核、可在 ROS 2 Humble 与 Jetson AGX Orin 上部署的单 Git 根新项目。

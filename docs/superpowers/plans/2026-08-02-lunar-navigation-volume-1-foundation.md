@@ -1,4 +1,5 @@
 # Lunar Navigation 卷一：新仓与平台基线实施计划
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 建立没有父子仓关系的新 `lunar_navigation` Git 仓库，并在 Ubuntu 22.04/ROS 2 Humble 上固定内部消息、外部依赖、平台探测和基础 CI。

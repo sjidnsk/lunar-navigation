@@ -1,4 +1,5 @@
 # Lunar Navigation 卷四：Ubuntu/AGX 集成与切换实施计划
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在 Ubuntu amd64 完成外部 rosbag 驱动的全链路集成，并在 AGX Orin R36.0.0 上完成原生构建、TensorRT、性能、4 小时稳定性、版本化安装和旧仓切换。

@@ -1,4 +1,5 @@
 # Lunar Navigation 卷三：PPO 训练与 ONNX/TensorRT 实施计划
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把旧 Stage6 PPO 的有效模型、环境、训练和评估核心迁入新仓，并建立从 RTX 4080 checkpoint 到 AGX TensorRT 推理的唯一发布链。

@@ -1,4 +1,5 @@
 # Lunar Navigation 卷二：C++ v3 与 ROS Action 实施计划
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把旧 C++ v3 迁成 ROS 无关的简化规划库，并用独立 Lifecycle `PlanMotion` Action 节点适配外部地图、定位与 TF。
