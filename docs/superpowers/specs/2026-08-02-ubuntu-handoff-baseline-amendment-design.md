@@ -185,8 +185,12 @@ responsibilities: [ros_integration, ppo_training, onnx_export, rosbag_replay]
 环境指纹必须记录 OS、architecture、kernel、CPU、内存、ROS、Python、GCC、CMake、GPU model、PCI ID、driver、CUDA、TensorRT、L4T、JetPack、功耗模式和时钟状态。探测优先级为：
 
 1. 驱动正常时使用 `nvidia-smi` 识别型号、显存和驱动。
-2. 驱动不可用时记录 `lspci`/sysfs 的 PCI ID、原始错误和 `available: false`。
+2. 驱动不可用时仍以稳定 locale 运行未过滤的 `lspci -Dnn`，只接受显示类 `0300`、`0302`、`0380` 的唯一 NVIDIA 候选；保留规范化 PCI ID、原始 `nvidia-smi` 错误和独立 PCI evidence，同时保持 `available: false`。
 3. `nvcc` 只证明 toolkit 存在，不能替代驱动或 GPU compute readiness。
+
+`nvidia-smi` 成功但后续 PCI 查询失败、输出畸形或 ID 不一致时，指纹必须保留已经探测到的型号、显存、compute capability 和驱动字段，另附独立 PCI 失败 evidence 并把 GPU 标记为不可用；不得用一个不透明失败对象覆盖成功字段。
+
+AGX 部署身份采用三项一致证据：设备树原始 model 必须识别 Jetson AGX Orin，`/etc/nv_boot_control.conf` 的 `TNSPEC` 必须解析为 `P3701-0005`，且 `free -b` 的 OS-visible 总内存不得低于 `60 GiB`（`64,424,509,440` bytes）。只有三项全部满足才规范化为基线值 `Jetson AGX Orin 64GB`；`P3701-0000`、`P3701-0004`、缺失/含糊 TNSPEC 或低内存均保持不可用。eMMC 容量不作为 RAM 证据。该映射依据 NVIDIA Jetson Linux R36 supported devices 与 EEPROM module SKU 文档：https://docs.nvidia.com/jetson/archives/r36.4.4/DeveloperGuide/IN/QuickStart.html 、https://docs.nvidia.com/jetson/archives/r36.4.4/DeveloperGuide/HR/JetsonEepromLayout.html 。AGX 现场采集和发布验证仍明确待后续实机执行，不影响 Ubuntu 训练 profile readiness。
 
 本轮指纹工具实现前，当前训练主机已经完成 RTX 4080 SUPER 驱动维护，因此不存在由该工具生成的安装前 JSON，也不得事后伪造。最终现场采集必须写入调用方指定的仓库外验证根。当前主机探测到 NVIDIA GeForce RTX 4080 SUPER、PCI Device ID `10de:2702`、驱动 595.84 和 CUDA 13.2，训练 profile 的 `readiness.ready=true`；TensorRT 未安装不阻塞训练主机 readiness，因为 TensorRT engine 生成与设备验收仍属于 AGX Orin 权威环境。
 

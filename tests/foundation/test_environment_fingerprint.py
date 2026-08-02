@@ -57,13 +57,21 @@ NVIDIA_COMMAND = (
     "--query-gpu=name,pci.bus_id,pci.device_id,memory.total,compute_cap,driver_version",
     "--format=csv,noheader,nounits",
 )
+NVIDIA_COMMAND_TEXT = " ".join(NVIDIA_COMMAND)
 LSPCI_COMMAND = ("lspci", "-Dnn", "-s", "00000000:01:00.0")
+LSPCI_ALL_COMMAND = ("lspci", "-Dnn")
+DEVICE_MODEL_COMMAND = ("cat", "/proc/device-tree/model")
+NV_BOOT_CONTROL_COMMAND = ("cat", "/etc/nv_boot_control.conf")
 TENSORRT_COMMAND = (
     "dpkg-query",
     "-W",
     "-f=${binary:Package}\\t${db:Status-Abbrev}\\t${Version}\\n",
     "libnvinfer[0-9]*",
 )
+AGX_MEMORY_BYTES = 65_000_000_000
+AGX_MINIMUM_MEMORY_BYTES = 60 * 1024**3
+AGX_MODEL = "NVIDIA Jetson AGX Orin Developer Kit"
+AGX_TNSPEC = "3701-500-0005-K.2-1-1-jetson-agx-orin-devkit-"
 
 
 def valid_training_fingerprint() -> dict[str, object]:
@@ -115,6 +123,42 @@ def valid_training_fingerprint() -> dict[str, object]:
     }
 
 
+def valid_agx_identity() -> dict[str, object]:
+    """Return independently specified evidence for a qualified 64 GB AGX module."""
+    return {
+        "available": True,
+        "value": "Jetson AGX Orin 64GB",
+        "raw_model": AGX_MODEL,
+        "model_source": "/proc/device-tree/model",
+        "module_sku": "P3701-0005",
+        "tnspec": AGX_TNSPEC,
+        "module_source": "/etc/nv_boot_control.conf",
+        "observed_memory_bytes": AGX_MEMORY_BYTES,
+        "minimum_memory_bytes": AGX_MINIMUM_MEMORY_BYTES,
+        "memory_source": "free -b",
+    }
+
+
+def valid_agx_fingerprint() -> dict[str, object]:
+    document = valid_training_fingerprint()
+    document.update(
+        {
+            "profile": "deploy_agx_orin_r36",
+            "architecture": "aarch64",
+            "memory": {"available": True, "total_bytes": AGX_MEMORY_BYTES},
+            "device_model": valid_agx_identity(),
+            "l4t": {"available": True, "value": "R36.0.0"},
+            "jetpack": {"available": True, "value": "6.0"},
+            "tensorrt": {
+                "available": True,
+                "package": "libnvinfer8",
+                "version": "8.6.2.3-1+cuda12.0",
+            },
+        }
+    )
+    return document
+
+
 def capture_runner(
     overrides: dict[tuple[str, ...], subprocess.CompletedProcess[str]] | None = None,
 ):
@@ -163,6 +207,83 @@ def capture_runner(
             ["/usr/local/cuda/bin/nvcc", "--version"],
             0,
             stdout="Cuda compilation tools, release 13.2, V13.2.78\n",
+            stderr="",
+        ),
+    }
+    if overrides:
+        responses.update(overrides)
+
+    def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return responses.get(
+            tuple(command),
+            subprocess.CompletedProcess(command, 127, stdout="", stderr="not available"),
+        )
+
+    return run
+
+
+def agx_capture_runner(
+    overrides: dict[tuple[str, ...], subprocess.CompletedProcess[str]] | None = None,
+):
+    responses = {
+        ("uname", "-m"): subprocess.CompletedProcess(
+            ["uname", "-m"], 0, stdout="aarch64\n", stderr=""
+        ),
+        ("uname", "-r"): subprocess.CompletedProcess(
+            ["uname", "-r"], 0, stdout="5.15.122-tegra\n", stderr=""
+        ),
+        ("lscpu",): subprocess.CompletedProcess(
+            ["lscpu"], 0, stdout="Model name: ARMv8 Processor rev 1\nCPU(s): 12\n", stderr=""
+        ),
+        ("free", "-b"): subprocess.CompletedProcess(
+            ["free", "-b"], 0, stdout=f"Mem: {AGX_MEMORY_BYTES} 1 2 3 4 5\n", stderr=""
+        ),
+        ("python3", "--version"): subprocess.CompletedProcess(
+            ["python3", "--version"], 0, stdout="Python 3.10.12\n", stderr=""
+        ),
+        ("gcc", "-dumpfullversion"): subprocess.CompletedProcess(
+            ["gcc", "-dumpfullversion"], 0, stdout="11.4.0\n", stderr=""
+        ),
+        ("cmake", "--version"): subprocess.CompletedProcess(
+            ["cmake", "--version"], 0, stdout="cmake version 3.22.1\n", stderr=""
+        ),
+        NVIDIA_COMMAND: subprocess.CompletedProcess(
+            list(NVIDIA_COMMAND), 9, stdout="", stderr="nvidia-smi not supported\n"
+        ),
+        LSPCI_ALL_COMMAND: subprocess.CompletedProcess(
+            list(LSPCI_ALL_COMMAND), 0, stdout="", stderr=""
+        ),
+        ("/usr/local/cuda/bin/nvcc", "--version"): subprocess.CompletedProcess(
+            ["/usr/local/cuda/bin/nvcc", "--version"],
+            0,
+            stdout="Cuda compilation tools, release 12.2, V12.2.140\n",
+            stderr="",
+        ),
+        TENSORRT_COMMAND: subprocess.CompletedProcess(
+            list(TENSORRT_COMMAND),
+            0,
+            stdout="libnvinfer8:arm64\tii \t8.6.2.3-1+cuda12.0\n",
+            stderr="",
+        ),
+        DEVICE_MODEL_COMMAND: subprocess.CompletedProcess(
+            list(DEVICE_MODEL_COMMAND), 0, stdout=f"{AGX_MODEL}\x00", stderr=""
+        ),
+        NV_BOOT_CONTROL_COMMAND: subprocess.CompletedProcess(
+            list(NV_BOOT_CONTROL_COMMAND),
+            0,
+            stdout=f"TNSPEC {AGX_TNSPEC}\nCOMPATIBLE_SPEC 3701-300-0005--1--\n",
+            stderr="",
+        ),
+        ("cat", "/etc/nv_tegra_release"): subprocess.CompletedProcess(
+            ["cat", "/etc/nv_tegra_release"],
+            0,
+            stdout="# R36 (release), REVISION: 0.0, BOARD: generic, EABI: aarch64\n",
+            stderr="",
+        ),
+        ("dpkg-query", "-W", "-f=${Version}", "nvidia-jetpack"): subprocess.CompletedProcess(
+            ["dpkg-query", "-W", "-f=${Version}", "nvidia-jetpack"],
+            0,
+            stdout="6.0+b106\n",
             stderr="",
         ),
     }
@@ -388,6 +509,157 @@ def test_capture_cross_checks_matching_lspci_identity(monkeypatch):
     }
 
 
+def test_driver_failure_preserves_one_display_adapter_identity(monkeypatch):
+    """A broken driver must not erase the sole independently visible NVIDIA adapter."""
+    monkeypatch.setenv("ROS_DISTRO", "humble")
+    driver_failure = subprocess.CompletedProcess(
+        list(NVIDIA_COMMAND), 9, stdout="", stderr="NVIDIA driver unavailable\n"
+    )
+    fallback = subprocess.CompletedProcess(
+        list(LSPCI_ALL_COMMAND),
+        0,
+        stdout=(
+            "0000:00:02.0 VGA compatible controller [0300]: Intel Corporation Device [8086:a780]\n"
+            "0000:01:00.0 VGA compatible controller [0300]: "
+            "NVIDIA Corporation Device [10de:2702] (rev a1)\n"
+        ),
+        stderr="",
+    )
+    document = capture_environment(
+        "train_amd64_rtx4080_super",
+        run=capture_runner(
+            {NVIDIA_COMMAND: driver_failure, LSPCI_ALL_COMMAND: fallback}
+        ),
+    )
+
+    assert document["gpu"] == {
+        "available": False,
+        "command": NVIDIA_COMMAND_TEXT,
+        "returncode": 9,
+        "error": "NVIDIA driver unavailable",
+        "pci_bus_id": "00000000:01:00.0",
+        "pci_device_id": "10de:2702",
+        "pci_evidence": {
+            "available": True,
+            "command": "lspci -Dnn",
+            "returncode": 0,
+            "source": "lspci -Dnn",
+            "pci_bus_id": "00000000:01:00.0",
+            "pci_device_id": "10de:2702",
+            "raw_record": (
+                "0000:01:00.0 VGA compatible controller [0300]: "
+                "NVIDIA Corporation Device [10de:2702] (rev a1)"
+            ),
+        },
+    }
+    assert "gpu.available: expected True, got False" in validate_fingerprint(
+        document, load_baseline("train_amd64_rtx4080_super")
+    )
+
+
+@pytest.mark.parametrize(
+    ("fallback", "expected_pci_evidence"),
+    [
+        (
+            subprocess.CompletedProcess(
+                list(LSPCI_ALL_COMMAND),
+                0,
+                stdout=(
+                    "0000:00:02.0 VGA compatible controller [0300]: "
+                    "Intel Corporation Device [8086:a780]\n"
+                ),
+                stderr="",
+            ),
+            {
+                "available": False,
+                "command": "lspci -Dnn",
+                "returncode": 0,
+                "error": (
+                    "parse error: expected exactly one NVIDIA display-class PCI "
+                    "candidate, got 0; raw output: 0000:00:02.0 VGA compatible "
+                    "controller [0300]: Intel Corporation Device [8086:a780]"
+                ),
+            },
+        ),
+        (
+            subprocess.CompletedProcess(
+                list(LSPCI_ALL_COMMAND),
+                0,
+                stdout=(
+                    "0000:01:00.0 VGA compatible controller [0300]: NVIDIA Device [10de:2702]\n"
+                    "0000:02:00.0 3D controller [0302]: NVIDIA Device [10de:2684]\n"
+                ),
+                stderr="",
+            ),
+            {
+                "available": False,
+                "command": "lspci -Dnn",
+                "returncode": 0,
+                "error": (
+                    "parse error: expected exactly one NVIDIA display-class PCI "
+                    "candidate, got 2; raw output: 0000:01:00.0 VGA compatible "
+                    "controller [0300]: NVIDIA Device [10de:2702]\\n0000:02:00.0 "
+                    "3D controller [0302]: NVIDIA Device [10de:2684]"
+                ),
+            },
+        ),
+        (
+            subprocess.CompletedProcess(
+                list(LSPCI_ALL_COMMAND), 2, stdout="", stderr="PCI inventory denied\n"
+            ),
+            {
+                "available": False,
+                "command": "lspci -Dnn",
+                "returncode": 2,
+                "error": "PCI inventory denied",
+            },
+        ),
+        (
+            subprocess.CompletedProcess(
+                list(LSPCI_ALL_COMMAND),
+                0,
+                stdout=(
+                    "0000:01:00.0 VGA compatible controller [0300]: "
+                    "NVIDIA Corporation malformed-device-record\n"
+                ),
+                stderr="",
+            ),
+            {
+                "available": False,
+                "command": "lspci -Dnn",
+                "returncode": 0,
+                "error": (
+                    "parse error: malformed NVIDIA display-class PCI record(s): "
+                    "0000:01:00.0 VGA compatible controller [0300]: NVIDIA "
+                    "Corporation malformed-device-record"
+                ),
+            },
+        ),
+    ],
+)
+def test_driver_failure_fallback_rejects_ambiguous_pci_evidence(
+    monkeypatch, fallback, expected_pci_evidence
+):
+    """No, multiple, failed, or malformed fallback candidates must stay unavailable."""
+    monkeypatch.setenv("ROS_DISTRO", "humble")
+    driver_failure = subprocess.CompletedProcess(
+        list(NVIDIA_COMMAND), 9, stdout="", stderr="NVIDIA driver unavailable\n"
+    )
+    document = capture_environment(
+        "train_amd64_rtx4080_super",
+        run=capture_runner(
+            {NVIDIA_COMMAND: driver_failure, LSPCI_ALL_COMMAND: fallback}
+        ),
+    )
+    assert document["gpu"] == {
+        "available": False,
+        "command": NVIDIA_COMMAND_TEXT,
+        "returncode": 9,
+        "error": "NVIDIA driver unavailable",
+        "pci_evidence": expected_pci_evidence,
+    }
+
+
 def test_capture_preserves_failed_lspci_and_makes_gpu_unavailable(monkeypatch):
     """Discarding lspci failure would incorrectly leave GPU compute readiness true."""
     monkeypatch.setenv("ROS_DISTRO", "humble")
@@ -400,9 +672,19 @@ def test_capture_preserves_failed_lspci_and_makes_gpu_unavailable(monkeypatch):
     )
     assert document["gpu"] == {
         "available": False,
-        "command": "lspci -Dnn -s 00000000:01:00.0",
-        "returncode": 2,
-        "error": "unable to access PCI configuration",
+        "model": "NVIDIA GeForce RTX 4080 SUPER",
+        "pci_bus_id": "00000000:01:00.0",
+        "pci_device_id": "10de:2702",
+        "memory_total_mib": 16376,
+        "compute_capability": "8.9",
+        "driver_version": "595.84",
+        "error": "PCI cross-check failed: unable to access PCI configuration",
+        "pci_evidence": {
+            "available": False,
+            "command": "lspci -Dnn -s 00000000:01:00.0",
+            "returncode": 2,
+            "error": "unable to access PCI configuration",
+        },
     }
     assert "gpu.available: expected True, got False" in validate_fingerprint(
         document, load_baseline("train_amd64_rtx4080_super")
@@ -421,12 +703,25 @@ def test_capture_preserves_unparseable_lspci_and_makes_gpu_unavailable(monkeypat
     )
     assert document["gpu"] == {
         "available": False,
-        "command": "lspci -Dnn -s 00000000:01:00.0",
-        "returncode": 0,
+        "model": "NVIDIA GeForce RTX 4080 SUPER",
+        "pci_bus_id": "00000000:01:00.0",
+        "pci_device_id": "10de:2702",
+        "memory_total_mib": 16376,
+        "compute_capability": "8.9",
+        "driver_version": "595.84",
         "error": (
-            "parse error: lspci output did not contain a vendor/device ID; "
-            "raw output: unrecognized PCI record"
+            "PCI cross-check failed: parse error: lspci output did not contain "
+            "a vendor/device ID; raw output: unrecognized PCI record"
         ),
+        "pci_evidence": {
+            "available": False,
+            "command": "lspci -Dnn -s 00000000:01:00.0",
+            "returncode": 0,
+            "error": (
+                "parse error: lspci output did not contain a vendor/device ID; "
+                "raw output: unrecognized PCI record"
+            ),
+        },
     }
     assert "gpu.available: expected True, got False" in validate_fingerprint(
         document, load_baseline("train_amd64_rtx4080_super")
@@ -448,12 +743,28 @@ def test_capture_rejects_lspci_identity_mismatch(monkeypatch):
     )
     assert document["gpu"] == {
         "available": False,
-        "command": "lspci -Dnn -s 00000000:01:00.0",
-        "returncode": 0,
+        "model": "NVIDIA GeForce RTX 4080 SUPER",
+        "pci_bus_id": "00000000:01:00.0",
+        "pci_device_id": "10de:2702",
+        "memory_total_mib": 16376,
+        "compute_capability": "8.9",
+        "driver_version": "595.84",
         "error": (
-            "PCI device ID mismatch: nvidia-smi reported '10de:2702', "
+            "PCI cross-check failed: PCI device ID mismatch: "
+            "nvidia-smi reported '10de:2702', "
             "lspci reported '10de:2684'"
         ),
+        "pci_evidence": {
+            "available": True,
+            "command": "lspci -Dnn -s 00000000:01:00.0",
+            "returncode": 0,
+            "source": "lspci -Dnn -s 00000000:01:00.0",
+            "pci_bus_id": "00000000:01:00.0",
+            "pci_device_id": "10de:2684",
+            "raw_record": (
+                "0000:01:00.0 VGA controller [0300]: NVIDIA Device [10de:2684]"
+            ),
+        },
     }
     assert "gpu.available: expected True, got False" in validate_fingerprint(
         document, load_baseline("train_amd64_rtx4080_super")
@@ -515,22 +826,118 @@ def test_capture_preserves_uninstalled_tensorrt_package_record(monkeypatch):
 
 def test_jetpack_60_tensorrt8_package_satisfies_agx_readiness():
     """An installed libnvinfer8 runtime on the frozen AGX must satisfy TensorRT readiness."""
-    document = valid_training_fingerprint()
-    document.update(
-        {
-            "profile": "deploy_agx_orin_r36",
-            "architecture": "aarch64",
-            "device_model": {"available": True, "value": "Jetson AGX Orin 64GB"},
-            "l4t": {"available": True, "value": "R36.0.0"},
-            "jetpack": {"available": True, "value": "6.0"},
-            "tensorrt": _parse_tensorrt_packages(
-                "libnvinfer8:arm64\tii \t8.6.2.3-1+cuda12.0\n"
-            ),
-        }
-    )
+    document = valid_agx_fingerprint()
     assert validate_fingerprint(
         document, load_baseline("deploy_agx_orin_r36")
     ) == []
+
+
+def test_agx_capture_normalizes_only_audited_64gb_module(monkeypatch):
+    """Model, P3701-0005 SKU, and visible RAM must jointly establish the canonical value."""
+    monkeypatch.setenv("ROS_DISTRO", "humble")
+    document = capture_environment(
+        "deploy_agx_orin_r36", run=agx_capture_runner()
+    )
+    assert document["device_model"] == valid_agx_identity()
+    assert validate_fingerprint(
+        document, load_baseline("deploy_agx_orin_r36")
+    ) == []
+
+
+@pytest.mark.parametrize("module_sku", ["0000", "0004"])
+def test_agx_capture_rejects_non_64gb_p3701_skus(monkeypatch, module_sku):
+    """A nearby AGX Orin module SKU must never be relabeled as the 64 GB module."""
+    monkeypatch.setenv("ROS_DISTRO", "humble")
+    tnspec = f"3701-500-{module_sku}-K.2-1-1-jetson-agx-orin-devkit-"
+    module_result = subprocess.CompletedProcess(
+        list(NV_BOOT_CONTROL_COMMAND),
+        0,
+        stdout=f"TNSPEC {tnspec}\n",
+        stderr="",
+    )
+    document = capture_environment(
+        "deploy_agx_orin_r36",
+        run=agx_capture_runner({NV_BOOT_CONTROL_COMMAND: module_result}),
+    )
+    assert document["device_model"] == {
+        "available": False,
+        "command": "AGX identity validation",
+        "returncode": 0,
+        "error": f"module SKU must be P3701-0005, got P3701-{module_sku}",
+        "raw_model": AGX_MODEL,
+        "model_source": "/proc/device-tree/model",
+        "module_sku": f"P3701-{module_sku}",
+        "tnspec": tnspec,
+        "module_source": "/etc/nv_boot_control.conf",
+        "observed_memory_bytes": AGX_MEMORY_BYTES,
+        "minimum_memory_bytes": AGX_MINIMUM_MEMORY_BYTES,
+        "memory_source": "free -b",
+    }
+    assert "device_model.available: expected True, got False" in validate_fingerprint(
+        document, load_baseline("deploy_agx_orin_r36")
+    )
+
+
+def test_agx_capture_rejects_missing_tnspec_evidence(monkeypatch):
+    """An unreadable nv_boot_control file must keep the model evidence but fail identity."""
+    monkeypatch.setenv("ROS_DISTRO", "humble")
+    missing = subprocess.CompletedProcess(
+        list(NV_BOOT_CONTROL_COMMAND), 1, stdout="", stderr="file not found\n"
+    )
+    document = capture_environment(
+        "deploy_agx_orin_r36",
+        run=agx_capture_runner({NV_BOOT_CONTROL_COMMAND: missing}),
+    )
+    assert document["device_model"] == {
+        "available": False,
+        "command": "cat /etc/nv_boot_control.conf",
+        "returncode": 1,
+        "error": "file not found",
+        "raw_model": AGX_MODEL,
+        "model_source": "/proc/device-tree/model",
+        "observed_memory_bytes": AGX_MEMORY_BYTES,
+        "minimum_memory_bytes": AGX_MINIMUM_MEMORY_BYTES,
+        "memory_source": "free -b",
+    }
+    assert "device_model.available: expected True, got False" in validate_fingerprint(
+        document, load_baseline("deploy_agx_orin_r36")
+    )
+
+
+def test_agx_capture_rejects_low_os_visible_memory(monkeypatch):
+    """A valid 64 GB SKU with 32 GB-like visible RAM must not pass the release identity."""
+    monkeypatch.setenv("ROS_DISTRO", "humble")
+    low_memory = 31 * 1024**3
+    result = subprocess.CompletedProcess(
+        ["free", "-b"],
+        0,
+        stdout=f"Mem: {low_memory} 1 2 3 4 5\n",
+        stderr="",
+    )
+    document = capture_environment(
+        "deploy_agx_orin_r36",
+        run=agx_capture_runner({("free", "-b"): result}),
+    )
+    assert document["device_model"] == {
+        "available": False,
+        "command": "AGX identity validation",
+        "returncode": 0,
+        "error": (
+            f"OS-visible memory must be at least {AGX_MINIMUM_MEMORY_BYTES} bytes, "
+            f"got {low_memory}"
+        ),
+        "raw_model": AGX_MODEL,
+        "model_source": "/proc/device-tree/model",
+        "module_sku": "P3701-0005",
+        "tnspec": AGX_TNSPEC,
+        "module_source": "/etc/nv_boot_control.conf",
+        "observed_memory_bytes": low_memory,
+        "minimum_memory_bytes": AGX_MINIMUM_MEMORY_BYTES,
+        "memory_source": "free -b",
+    }
+    assert "device_model.available: expected True, got False" in validate_fingerprint(
+        document, load_baseline("deploy_agx_orin_r36")
+    )
 
 
 def test_training_readiness_requires_exact_gpu_and_cuda():
@@ -593,17 +1000,7 @@ def test_training_profile_allows_tensorrt_to_be_unavailable():
 
 def test_agx_readiness_requires_device_versions_cuda_and_tensorrt():
     """An AGX identity alone must not pass the native TensorRT release gate."""
-    document = valid_training_fingerprint()
-    document.update(
-        {
-            "profile": "deploy_agx_orin_r36",
-            "architecture": "aarch64",
-            "device_model": {"available": True, "value": "Jetson AGX Orin 64GB"},
-            "l4t": {"available": True, "value": "R36.0.0"},
-            "jetpack": {"available": True, "value": "6.0"},
-            "tensorrt": {"available": True, "value": "10.0.1"},
-        }
-    )
+    document = valid_agx_fingerprint()
     baseline = load_baseline("deploy_agx_orin_r36")
     assert validate_fingerprint(document, baseline) == []
 
@@ -615,18 +1012,15 @@ def test_agx_readiness_requires_device_versions_cuda_and_tensorrt():
 
 def test_agx_readiness_rejects_unavailable_identity_with_stale_values():
     """Stale matching values must not hide failed AGX identity probes."""
-    document = valid_training_fingerprint()
+    document = valid_agx_fingerprint()
     document.update(
         {
-            "profile": "deploy_agx_orin_r36",
-            "architecture": "aarch64",
             "device_model": {
                 "available": False,
                 "value": "Jetson AGX Orin 64GB",
             },
             "l4t": {"available": False, "value": "R36.0.0"},
             "jetpack": {"available": False, "value": "6.0"},
-            "tensorrt": {"available": True, "value": "10.0.1"},
         }
     )
 
@@ -651,17 +1045,7 @@ def test_agx_readiness_rejects_unavailable_identity_with_stale_values():
 )
 def test_agx_readiness_rejects_core_release_drift(path, value, expected_error):
     """An AGX with wrong identity or missing CUDA must not pass the device release gate."""
-    document = valid_training_fingerprint()
-    document.update(
-        {
-            "profile": "deploy_agx_orin_r36",
-            "architecture": "aarch64",
-            "device_model": {"available": True, "value": "Jetson AGX Orin 64GB"},
-            "l4t": {"available": True, "value": "R36.0.0"},
-            "jetpack": {"available": True, "value": "6.0"},
-            "tensorrt": {"available": True, "package": "libnvinfer8", "version": "8.6.2.3"},
-        }
-    )
+    document = valid_agx_fingerprint()
     target = document
     for key in path[:-1]:
         target = target[key]

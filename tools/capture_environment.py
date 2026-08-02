@@ -21,6 +21,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASELINE_ROOT = REPOSITORY_ROOT / "platform"
 SCHEMA_VERSION = "lunar-platform-fingerprint/v1"
 PROFILES = ("train_amd64_rtx4080_super", "deploy_agx_orin_r36")
+AGX_64GB_MODULE_SKU = "P3701-0005"
+AGX_64GB_MINIMUM_MEMORY_BYTES = 60 * 1024**3
 
 
 def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -229,6 +231,213 @@ def _parse_lspci_device_id(output: str) -> str:
     return identifiers.pop()
 
 
+def _normalize_pci_bus_id(raw_value: str) -> str:
+    """Normalize lspci's four-digit domain to NVIDIA's eight-digit domain form."""
+    match = re.fullmatch(
+        r"([0-9a-fA-F]{4}|[0-9a-fA-F]{8}):([0-9a-fA-F]{2}):"
+        r"([0-9a-fA-F]{2})\.([0-7])",
+        raw_value.strip(),
+    )
+    if match is None:
+        raise ValueError(f"invalid PCI bus ID: {raw_value!r}")
+    domain, bus, device, function = match.groups()
+    return f"{domain.lower().zfill(8)}:{bus.lower()}:{device.lower()}.{function}"
+
+
+def _parse_targeted_lspci_evidence(output: str, command: str) -> dict[str, object]:
+    """Parse the one device record requested using nvidia-smi's PCI address."""
+    raw_records = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(raw_records) != 1:
+        raise ValueError(f"expected one lspci device record, got {len(raw_records)}")
+    raw_record = raw_records[0]
+    pci_device_id = _parse_lspci_device_id(raw_record)
+    bus_match = re.match(r"^([0-9a-fA-F]{4,8}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7])\b", raw_record)
+    if bus_match is None:
+        raise ValueError("lspci output did not contain a PCI bus ID")
+    return {
+        "available": True,
+        "command": command,
+        "returncode": 0,
+        "source": command,
+        "pci_bus_id": _normalize_pci_bus_id(bus_match.group(1)),
+        "pci_device_id": pci_device_id,
+        "raw_record": raw_record,
+    }
+
+
+def _parse_nvidia_display_evidence(output: str, command: str) -> dict[str, object]:
+    """Select the sole NVIDIA VGA/3D/display PCI function from unfiltered lspci."""
+    candidates: list[dict[str, object]] = []
+    malformed: list[str] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        display_class = re.search(r"\[(0300|0302|0380)\]", line, re.IGNORECASE)
+        nvidia_identity = re.search(r"\[10de:[0-9a-f]{4}\]", line, re.IGNORECASE)
+        names_nvidia = "nvidia" in line.lower()
+        if display_class is None or not (nvidia_identity or names_nvidia):
+            continue
+        try:
+            evidence = _parse_targeted_lspci_evidence(line, command)
+        except ValueError:
+            malformed.append(line)
+        else:
+            if evidence["pci_device_id"].split(":", maxsplit=1)[0] == "10de":
+                candidates.append(evidence)
+            else:
+                malformed.append(line)
+    if malformed:
+        raise ValueError(
+            "malformed NVIDIA display-class PCI record(s): "
+            + " | ".join(malformed)
+        )
+    if len(candidates) != 1:
+        raise ValueError(
+            "expected exactly one NVIDIA display-class PCI candidate, "
+            f"got {len(candidates)}; raw output: {_audit_output(output)}"
+        )
+    return candidates[0]
+
+
+def _pci_probe(
+    command: list[str],
+    result: subprocess.CompletedProcess[str],
+    parser: Callable[[str, str], dict[str, object]],
+) -> dict[str, object]:
+    display = _command_text(command)
+    if result.returncode != 0:
+        return unavailable_probe(display, result.returncode, result.stdout, result.stderr)
+    try:
+        return parser(result.stdout, display)
+    except ValueError as error:
+        return unavailable_probe(display, result.returncode, "", f"parse error: {error}")
+
+
+def _parse_nv_boot_control(output: str) -> dict[str, str]:
+    """Extract the module ID/SKU from nv_boot_control.conf's TNSPEC record."""
+    tnspec_values = [
+        match.group(1).strip()
+        for line in output.splitlines()
+        if (match := re.fullmatch(r"\s*TNSPEC\s+(.+?)\s*", line)) is not None
+    ]
+    if len(tnspec_values) != 1:
+        raise ValueError(f"expected exactly one TNSPEC record, got {len(tnspec_values)}")
+    tnspec = tnspec_values[0]
+    identity = re.match(r"(?:P)?(\d{4})-[^-\s]+-(\d{4})(?:-|$)", tnspec)
+    if identity is None:
+        raise ValueError(f"TNSPEC module ID/SKU is unrecognized: {tnspec!r}")
+    module_id, sku = identity.groups()
+    return {"module_sku": f"P{module_id}-{sku}", "tnspec": tnspec}
+
+
+def _agx_identity_failure(
+    command: str,
+    returncode: int,
+    error: str,
+    evidence: Mapping[str, object],
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "available": False,
+        "command": command,
+        "returncode": returncode,
+        "error": error,
+    }
+    result.update(evidence)
+    return result
+
+
+def _capture_agx_device_identity(
+    model_result: subprocess.CompletedProcess[str],
+    module_result: subprocess.CompletedProcess[str],
+    memory: Mapping[str, object],
+) -> dict[str, object]:
+    """Qualify the canonical 64 GB AGX identity from three independent facts."""
+    evidence: dict[str, object] = {
+        "minimum_memory_bytes": AGX_64GB_MINIMUM_MEMORY_BYTES,
+        "memory_source": "free -b",
+    }
+    observed_memory = memory.get("total_bytes") if memory.get("available") is True else None
+    if isinstance(observed_memory, int):
+        evidence["observed_memory_bytes"] = observed_memory
+
+    model_command = "cat /proc/device-tree/model"
+    if model_result.returncode != 0:
+        return _agx_identity_failure(
+            model_command,
+            model_result.returncode,
+            model_result.stderr.strip() or model_result.stdout.strip() or f"exit code {model_result.returncode}",
+            evidence,
+        )
+    try:
+        raw_model = str(_parse_value(model_result.stdout)["value"])
+    except ValueError as error:
+        return _agx_identity_failure(model_command, 0, f"parse error: {error}", evidence)
+    evidence = {
+        "raw_model": raw_model,
+        "model_source": "/proc/device-tree/model",
+        **evidence,
+    }
+
+    module_command = "cat /etc/nv_boot_control.conf"
+    if module_result.returncode != 0:
+        return _agx_identity_failure(
+            module_command,
+            module_result.returncode,
+            module_result.stderr.strip() or module_result.stdout.strip() or f"exit code {module_result.returncode}",
+            evidence,
+        )
+    try:
+        module = _parse_nv_boot_control(module_result.stdout)
+    except ValueError as error:
+        return _agx_identity_failure(module_command, 0, f"parse error: {error}", evidence)
+    evidence.update(
+        {
+            "module_sku": module["module_sku"],
+            "tnspec": module["tnspec"],
+            "module_source": "/etc/nv_boot_control.conf",
+        }
+    )
+
+    if observed_memory is None:
+        memory_command = str(memory.get("command", "free -b"))
+        return _agx_identity_failure(
+            memory_command,
+            int(memory.get("returncode", 1)),
+            str(memory.get("error", "memory total unavailable")),
+            evidence,
+        )
+    if "jetson agx orin" not in raw_model.lower():
+        return _agx_identity_failure(
+            "AGX identity validation",
+            0,
+            f"device-tree model does not identify Jetson AGX Orin: {raw_model!r}",
+            evidence,
+        )
+    if module["module_sku"] != AGX_64GB_MODULE_SKU:
+        return _agx_identity_failure(
+            "AGX identity validation",
+            0,
+            f"module SKU must be {AGX_64GB_MODULE_SKU}, got {module['module_sku']}",
+            evidence,
+        )
+    if observed_memory < AGX_64GB_MINIMUM_MEMORY_BYTES:
+        return _agx_identity_failure(
+            "AGX identity validation",
+            0,
+            (
+                "OS-visible memory must be at least "
+                f"{AGX_64GB_MINIMUM_MEMORY_BYTES} bytes, got {observed_memory}"
+            ),
+            evidence,
+        )
+    return {
+        "available": True,
+        "value": "Jetson AGX Orin 64GB",
+        **evidence,
+    }
+
+
 def _parse_l4t(output: str) -> dict[str, object]:
     value = output.strip()
     direct = re.search(r"\bR\d+(?:\.\d+){2}\b", value)
@@ -316,36 +525,45 @@ def capture_environment(
     if gpu.get("available") is True:
         lspci_command = ["lspci", "-Dnn", "-s", str(gpu["pci_bus_id"])]
         lspci_result = run(lspci_command)
-        if lspci_result.returncode != 0:
-            gpu = unavailable_probe(
-                _command_text(lspci_command),
-                lspci_result.returncode,
-                lspci_result.stdout,
-                lspci_result.stderr,
+        pci_evidence = _pci_probe(
+            lspci_command, lspci_result, _parse_targeted_lspci_evidence
+        )
+        cross_check_error = ""
+        if pci_evidence.get("available") is not True:
+            cross_check_error = str(pci_evidence["error"])
+            if lspci_result.returncode == 0 and lspci_result.stdout.strip():
+                cross_check_error += f"; raw output: {_audit_output(lspci_result.stdout)}"
+                pci_evidence["error"] = cross_check_error
+        elif pci_evidence["pci_bus_id"] != gpu["pci_bus_id"]:
+            cross_check_error = (
+                "PCI bus ID mismatch: "
+                f"nvidia-smi reported {gpu['pci_bus_id']!r}, "
+                f"lspci reported {pci_evidence['pci_bus_id']!r}"
             )
-        else:
-            try:
-                lspci_device_id = _parse_lspci_device_id(lspci_result.stdout)
-            except ValueError as error:
-                gpu = unavailable_probe(
-                    _command_text(lspci_command),
-                    lspci_result.returncode,
-                    "",
-                    f"parse error: {error}; raw output: {_audit_output(lspci_result.stdout)}",
-                )
-            else:
-                nvidia_device_id = str(gpu["pci_device_id"])
-                if lspci_device_id != nvidia_device_id:
-                    gpu = unavailable_probe(
-                        _command_text(lspci_command),
-                        lspci_result.returncode,
-                        "",
-                        (
-                            "PCI device ID mismatch: "
-                            f"nvidia-smi reported {nvidia_device_id!r}, "
-                            f"lspci reported {lspci_device_id!r}"
-                        ),
-                    )
+        elif pci_evidence["pci_device_id"] != gpu["pci_device_id"]:
+            cross_check_error = (
+                "PCI device ID mismatch: "
+                f"nvidia-smi reported {gpu['pci_device_id']!r}, "
+                f"lspci reported {pci_evidence['pci_device_id']!r}"
+            )
+        if cross_check_error:
+            successful_gpu = dict(gpu)
+            successful_gpu["available"] = False
+            successful_gpu["error"] = f"PCI cross-check failed: {cross_check_error}"
+            successful_gpu["pci_evidence"] = pci_evidence
+            gpu = successful_gpu
+    else:
+        fallback_command = ["lspci", "-Dnn"]
+        fallback_result = run(fallback_command)
+        pci_evidence = _pci_probe(
+            fallback_command, fallback_result, _parse_nvidia_display_evidence
+        )
+        failed_gpu = dict(gpu)
+        failed_gpu["pci_evidence"] = pci_evidence
+        if pci_evidence.get("available") is True:
+            failed_gpu["pci_bus_id"] = pci_evidence["pci_bus_id"]
+            failed_gpu["pci_device_id"] = pci_evidence["pci_device_id"]
+        gpu = failed_gpu
 
     cuda_command = ["/usr/local/cuda/bin/nvcc", "--version"]
     cuda_result = run(cuda_command)
@@ -364,7 +582,13 @@ def capture_environment(
 
     device_model_command = ["cat", "/proc/device-tree/model"]
     device_model_result = run(device_model_command)
-    device_model = _probe_result(device_model_command, device_model_result, _parse_value)
+    nv_boot_control_command = ["cat", "/etc/nv_boot_control.conf"]
+    nv_boot_control_result = run(nv_boot_control_command)
+    device_model = _capture_agx_device_identity(
+        device_model_result,
+        nv_boot_control_result,
+        memory,
+    )
 
     l4t_command = ["cat", "/etc/nv_tegra_release"]
     l4t_result = run(l4t_command)
@@ -481,6 +705,32 @@ def validate_fingerprint(
             baseline.get("device_model"),
             _nested(document, "device_model", "value"),
         )
+        if _nested(document, "device_model", "available") is True:
+            _expect(
+                errors,
+                "device_model.module_sku",
+                AGX_64GB_MODULE_SKU,
+                _nested(document, "device_model", "module_sku"),
+            )
+            raw_model = _nested(document, "device_model", "raw_model")
+            if not isinstance(raw_model, str) or "jetson agx orin" not in raw_model.lower():
+                errors.append(
+                    "device_model.raw_model: expected Jetson AGX Orin evidence, "
+                    f"got {raw_model!r}"
+                )
+            tnspec = _nested(document, "device_model", "tnspec")
+            if not isinstance(tnspec, str) or not tnspec:
+                errors.append(
+                    f"device_model.tnspec: expected a non-empty value, got {tnspec!r}"
+                )
+            observed_memory = _nested(
+                document, "device_model", "observed_memory_bytes"
+            )
+            if not isinstance(observed_memory, int) or observed_memory < AGX_64GB_MINIMUM_MEMORY_BYTES:
+                errors.append(
+                    "device_model.observed_memory_bytes: expected at least "
+                    f"{AGX_64GB_MINIMUM_MEMORY_BYTES}, got {observed_memory!r}"
+                )
         _expect(errors, "l4t.available", True, _nested(document, "l4t", "available"))
         _expect(errors, "l4t.value", baseline.get("l4t"), _nested(document, "l4t", "value"))
         _expect(
