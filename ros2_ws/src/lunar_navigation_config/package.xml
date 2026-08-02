@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>lunar_navigation_config</name>
+  <version>0.1.0</version>
+  <description>External ROS interface contract configuration for lunar navigation.</description>
+  <maintainer email="maintainers@example.invalid">Lunar Navigation Maintainers</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>grid_map_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
+  <exec_depend>lunar_navigation_msgs</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

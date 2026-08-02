@@ -1,0 +1,58 @@
+schema_version: lunar-external-interfaces/v1
+topics:
+  map_global:
+    name: /environment/map_global
+    type: grid_map_msgs/msg/GridMap
+    owner: external
+    frame: map
+    required_fields: [header, info, layers, basic_layers, data, outer_start_index, inner_start_index]
+  map_local:
+    name: /environment/map_local
+    type: grid_map_msgs/msg/GridMap
+    owner: external
+    frame: odom
+    required_fields: [header, info, layers, basic_layers, data, outer_start_index, inner_start_index]
+  odometry:
+    name: /localization/odometry
+    type: nav_msgs/msg/Odometry
+    owner: external
+    frame: odom
+    child_frame: base_link
+    required_fields: [header, child_frame_id, pose, twist]
+  localization_status:
+    name: /localization/status
+    type: lunar_navigation_msgs/msg/LocalizationStatus
+    owner: external
+    frame: odom
+    required_fields: [header, status]
+  exploration_task:
+    name: /mission/exploration_task
+    type: lunar_navigation_msgs/msg/ExplorationTask
+    owner: external
+    frame: map
+    required_fields: [header, mission_id, revision, desired_state, science_regions]
+tf:
+  topic: /tf
+  type: tf2_msgs/msg/TFMessage
+  chain: [map, odom, base_link]
+required_grid_layers:
+  - elevation
+  - valid_mask
+  - obstacle
+  - obstacle_height
+  - observation_age_s
+  - observation_quality
+  - elevation_variance
+  - obstacle_variance
+  - observation_count
+  - forbidden
+static_inputs:
+  observation_capability:
+    owner: external
+    formats: [yaml, json]
+    required_fields: [sensor_range_m, sensor_fov_deg]
+  platform_capability:
+    owner: external
+    schema: platform-control-capability-source/v1
+    formats: [yaml, json, urdf]
+    required_fields: [platform, geometry_source]
