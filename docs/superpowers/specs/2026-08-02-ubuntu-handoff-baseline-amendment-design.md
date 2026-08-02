@@ -215,4 +215,22 @@ AGX 部署身份采用三项一致证据：设备树原始 model 必须识别 Je
 
 RTX 4080 SUPER 驱动维护早于环境指纹工具实现，本仓没有也不会伪造安装前 JSON。最终训练主机指纹保存在调用方指定的仓库外验证根；本次采集结果为 `readiness.ready=true`，TensorRT 缺失不阻塞训练主机基线。该结论只覆盖当前 Ubuntu 22.04 amd64 训练主机，不构成训练 smoke、运行时语义适配器或 Jetson AGX Orin 部署能力验证。
 
+### 11.1 Ubuntu 现场存储快照
+
+以下结果于 `2026-08-02T22:58:48+08:00` 在当前 Ubuntu 22.04 amd64 主机采集。块设备来自 `lsblk --bytes --nodeps --output NAME,TYPE,SIZE,ROTA,TRAN,MODEL`；挂载点来自稳定 `C.UTF-8` locale 下的 `findmnt --bytes --json --target PATH --output TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%`。
+
+| 设备 | 连接 | 型号 | 原始容量（bytes） | 当前用途 |
+| --- | --- | --- | ---: | --- |
+| `/dev/nvme0n1` | NVMe | ZHITAI Ti600 1TB | 1,000,204,886,016 | 当前系统根和仓库外输出所在分区 |
+| `/dev/nvme1n1` | NVMe | ZHITAI Ti600 2TB | 2,000,398,934,016 | 当前仓库工作区所在分区 |
+| `/dev/sda` | USB | TOSHIBA MQ04UBD200 | 2,000,398,934,016 | 主机可见，但不承担本轮三个路径角色 |
+
+| 路径角色 | 本轮探测路径 | 挂载点 | 来源 | 类型 | 总量（bytes） | 已用（bytes） | 可用（bytes） | 使用率 |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| 系统根 | `/` | `/` | `/dev/nvme0n1p7` | ext4 | 50,072,293,376 | 34,741,678,080 | 12,753,846,272 | 69% |
+| 仓库工作区 | `/mnt/data/WS/lunar-navigation/.worktrees/ubuntu-handoff-task3-5` | `/mnt/data` | `/dev/nvme1n1p1` | ext4 | 1,967,864,131,584 | 512,237,002,752 | 1,355,590,463,488 | 26% |
+| 仓库外输出 | `/home/kai/CodexDownloads` | `/home` | `/dev/nvme0n1p8` | ext4 | 430,841,765,888 | 145,541,169,152 | 263,339,851,776 | 34% |
+
+这是一份带时间戳的交接现场证据，不修改 `lunar-platform-fingerprint/v1`、平台 baseline 或 readiness 合同。容量占用会随系统运行变化；后续训练和验证仍须在启动前检查目标输出目录的实时可用空间，不能把本表当作容量预留或 AGX 存储能力证明。
+
 AGX Orin 的环境指纹、原生构建、TensorRT engine、性能、功耗和稳定性仍必须在后续实机门槛中采集和验收；在该权威设备验证完成前，不得写成已验证能力。
