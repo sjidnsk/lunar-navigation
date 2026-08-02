@@ -1,0 +1,11 @@
+uint8 POINT=1
+uint8 PLANAR_REGION=2
+std_msgs/Header header
+string goal_id
+uint8 goal_type
+geometry_msgs/Point point
+geometry_msgs/Polygon planar_region
+float64 position_tolerance_m
+bool has_yaw_constraint
+float64 yaw_rad
+float64 yaw_tolerance_rad

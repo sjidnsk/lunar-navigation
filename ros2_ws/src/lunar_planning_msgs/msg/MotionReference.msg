@@ -1,0 +1,10 @@
+uint8 WHEELED=1
+uint8 LEGGED=2
+uint8 HOPPER=3
+std_msgs/Header header
+string plan_id
+uint8 platform_type
+builtin_interfaces/Time input_time
+nav_msgs/Path path_preview
+trajectory_msgs/MultiDOFJointTrajectory trajectory
+lunar_planning_msgs/HopSegment[] hops

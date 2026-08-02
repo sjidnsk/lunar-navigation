@@ -1,0 +1,7 @@
+std_msgs/Header header
+string segment_id
+geometry_msgs/Pose launch_pose
+geometry_msgs/Polygon landing_region
+builtin_interfaces/Duration flight_time
+geometry_msgs/Vector3 launch_velocity
+float64 flight_tube_radius_m
