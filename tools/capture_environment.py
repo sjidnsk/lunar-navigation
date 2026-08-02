@@ -188,6 +188,47 @@ def _parse_value(output: str) -> dict[str, object]:
     return {"available": True, "value": value}
 
 
+def _audit_output(output: str) -> str:
+    """Render probe output on one line without losing tabs or line boundaries."""
+    value = output.strip()
+    if not value:
+        return "<empty>"
+    return value.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+
+
+def _parse_tensorrt_packages(output: str) -> dict[str, object]:
+    """Select an installed libnvinfer runtime from dpkg-query package records."""
+    installed: list[tuple[int, str, str]] = []
+    for line in output.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3:
+            continue
+        binary_package, status, version = (field.strip() for field in fields)
+        package = binary_package.split(":", maxsplit=1)[0]
+        match = re.fullmatch(r"libnvinfer(\d+)", package)
+        if match and status == "ii" and version:
+            installed.append((int(match.group(1)), package, version))
+    if not installed:
+        raise ValueError(
+            "no installed TensorRT runtime in dpkg-query output; "
+            f"raw output: {_audit_output(output)}"
+        )
+    _major, package, version = max(installed)
+    return {"available": True, "package": package, "version": version}
+
+
+def _parse_lspci_device_id(output: str) -> str:
+    """Extract the normalized PCI vendor/device ID from one lspci device record."""
+    matches = re.findall(
+        r"(?<![0-9a-f])([0-9a-f]{4}):([0-9a-f]{4})(?![0-9a-f])",
+        output.lower(),
+    )
+    identifiers = {f"{vendor}:{device}" for vendor, device in matches}
+    if len(identifiers) != 1:
+        raise ValueError("lspci output did not contain a vendor/device ID")
+    return identifiers.pop()
+
+
 def _parse_l4t(output: str) -> dict[str, object]:
     value = output.strip()
     direct = re.search(r"\bR\d+(?:\.\d+){2}\b", value)
@@ -273,15 +314,53 @@ def capture_environment(
     gpu_result = run(gpu_command)
     gpu = _probe_result(gpu_command, gpu_result, parse_nvidia_smi)
     if gpu.get("available") is True:
-        run(["lspci", "-Dnns", str(gpu["pci_bus_id"])])
+        lspci_command = ["lspci", "-Dnn", "-s", str(gpu["pci_bus_id"])]
+        lspci_result = run(lspci_command)
+        if lspci_result.returncode != 0:
+            gpu = unavailable_probe(
+                _command_text(lspci_command),
+                lspci_result.returncode,
+                lspci_result.stdout,
+                lspci_result.stderr,
+            )
+        else:
+            try:
+                lspci_device_id = _parse_lspci_device_id(lspci_result.stdout)
+            except ValueError as error:
+                gpu = unavailable_probe(
+                    _command_text(lspci_command),
+                    lspci_result.returncode,
+                    "",
+                    f"parse error: {error}; raw output: {_audit_output(lspci_result.stdout)}",
+                )
+            else:
+                nvidia_device_id = str(gpu["pci_device_id"])
+                if lspci_device_id != nvidia_device_id:
+                    gpu = unavailable_probe(
+                        _command_text(lspci_command),
+                        lspci_result.returncode,
+                        "",
+                        (
+                            "PCI device ID mismatch: "
+                            f"nvidia-smi reported {nvidia_device_id!r}, "
+                            f"lspci reported {lspci_device_id!r}"
+                        ),
+                    )
 
     cuda_command = ["/usr/local/cuda/bin/nvcc", "--version"]
     cuda_result = run(cuda_command)
     cuda = _probe_result(cuda_command, cuda_result, parse_nvcc)
 
-    tensorrt_command = ["dpkg-query", "-W", "-f=${Version}", "libnvinfer10"]
+    tensorrt_command = [
+        "dpkg-query",
+        "-W",
+        "-f=${binary:Package}\\t${db:Status-Abbrev}\\t${Version}\\n",
+        "libnvinfer[0-9]*",
+    ]
     tensorrt_result = run(tensorrt_command)
-    tensorrt = _probe_result(tensorrt_command, tensorrt_result, _parse_value)
+    tensorrt = _probe_result(
+        tensorrt_command, tensorrt_result, _parse_tensorrt_packages
+    )
 
     device_model_command = ["cat", "/proc/device-tree/model"]
     device_model_result = run(device_model_command)

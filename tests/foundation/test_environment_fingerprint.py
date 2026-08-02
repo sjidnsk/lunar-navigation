@@ -7,10 +7,14 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tools.capture_environment import (
     DEFAULT_BASELINE_ROOT,
+    _parse_jetpack,
+    _parse_l4t,
+    _parse_tensorrt_packages,
     capture_environment,
     load_baseline,
     main,
@@ -48,6 +52,18 @@ TOP_LEVEL_KEYS = {
     "clocks",
     "readiness",
 }
+NVIDIA_COMMAND = (
+    "nvidia-smi",
+    "--query-gpu=name,pci.bus_id,pci.device_id,memory.total,compute_cap,driver_version",
+    "--format=csv,noheader,nounits",
+)
+LSPCI_COMMAND = ("lspci", "-Dnn", "-s", "00000000:01:00.0")
+TENSORRT_COMMAND = (
+    "dpkg-query",
+    "-W",
+    "-f=${binary:Package}\\t${db:Status-Abbrev}\\t${Version}\\n",
+    "libnvinfer[0-9]*",
+)
 
 
 def valid_training_fingerprint() -> dict[str, object]:
@@ -97,6 +113,69 @@ def valid_training_fingerprint() -> dict[str, object]:
         "clocks": unavailable.copy(),
         "readiness": {"ready": True, "errors": []},
     }
+
+
+def capture_runner(
+    overrides: dict[tuple[str, ...], subprocess.CompletedProcess[str]] | None = None,
+):
+    """Return complete command-shaped platform fixtures with selected probe overrides."""
+    responses = {
+        ("uname", "-m"): subprocess.CompletedProcess(
+            ["uname", "-m"], 0, stdout="x86_64\n", stderr=""
+        ),
+        ("uname", "-r"): subprocess.CompletedProcess(
+            ["uname", "-r"], 0, stdout="6.8.0-test\n", stderr=""
+        ),
+        ("lscpu",): subprocess.CompletedProcess(
+            ["lscpu"], 0, stdout="Model name: Test CPU\nCPU(s): 28\n", stderr=""
+        ),
+        ("free", "-b"): subprocess.CompletedProcess(
+            ["free", "-b"], 0, stdout="Mem: 67223306240 1 2 3 4 5\n", stderr=""
+        ),
+        ("python3", "--version"): subprocess.CompletedProcess(
+            ["python3", "--version"], 0, stdout="Python 3.10.12\n", stderr=""
+        ),
+        ("gcc", "-dumpfullversion"): subprocess.CompletedProcess(
+            ["gcc", "-dumpfullversion"], 0, stdout="11.4.0\n", stderr=""
+        ),
+        ("cmake", "--version"): subprocess.CompletedProcess(
+            ["cmake", "--version"], 0, stdout="cmake version 3.22.1\n", stderr=""
+        ),
+        NVIDIA_COMMAND: subprocess.CompletedProcess(
+            list(NVIDIA_COMMAND),
+            0,
+            stdout=(
+                "NVIDIA GeForce RTX 4080 SUPER, 00000000:01:00.0, "
+                "0x270210DE, 16376, 8.9, 595.84\n"
+            ),
+            stderr="",
+        ),
+        LSPCI_COMMAND: subprocess.CompletedProcess(
+            list(LSPCI_COMMAND),
+            0,
+            stdout=(
+                "0000:01:00.0 VGA compatible controller [0300]: "
+                "NVIDIA Corporation Device [10de:2702] (rev a1)\n"
+            ),
+            stderr="",
+        ),
+        ("/usr/local/cuda/bin/nvcc", "--version"): subprocess.CompletedProcess(
+            ["/usr/local/cuda/bin/nvcc", "--version"],
+            0,
+            stdout="Cuda compilation tools, release 13.2, V13.2.78\n",
+            stderr="",
+        ),
+    }
+    if overrides:
+        responses.update(overrides)
+
+    def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return responses.get(
+            tuple(command),
+            subprocess.CompletedProcess(command, 127, stdout="", stderr="not available"),
+        )
+
+    return run
 
 
 def test_authoritative_platform_baselines_match_frozen_profiles():
@@ -178,6 +257,39 @@ def test_parse_nvcc_returns_release_and_full_compiler_version():
     assert result == {"available": True, "release": "13.2", "compiler_version": "13.2.78"}
 
 
+def test_parse_tensorrt_packages_accepts_jetpack_60_libnvinfer8_runtime():
+    """Hard-coding libnvinfer10 would reject the TensorRT 8.6 runtime shipped by JetPack 6.0."""
+    result = _parse_tensorrt_packages(
+        "libnvinfer8:arm64\tii \t8.6.2.3-1+cuda12.0\n"
+        "libnvinfer10:arm64\tun \t10.0.1-1+cuda12.4\n"
+    )
+    assert result == {
+        "available": True,
+        "package": "libnvinfer8",
+        "version": "8.6.2.3-1+cuda12.0",
+    }
+
+
+def test_parse_tensorrt_packages_rejects_known_but_uninstalled_runtime():
+    """Treating dpkg's uninstalled package records as available would bypass the AGX gate."""
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"no installed TensorRT runtime in dpkg-query output; raw output: "
+            r"libnvinfer8:arm64\\tun \\t8\.6\.2\.3-1"
+        ),
+    ):
+        _parse_tensorrt_packages("libnvinfer8:arm64\tun \t8.6.2.3-1\n")
+
+
+def test_parse_real_jetson_release_and_jetpack_package_versions():
+    """Failing to normalize real NVIDIA release text would reject a matching frozen AGX."""
+    assert _parse_l4t(
+        "# R36 (release), REVISION: 0.0, GCID: 35084178, BOARD: generic, EABI: aarch64\n"
+    ) == {"available": True, "value": "R36.0.0"}
+    assert _parse_jetpack("6.0+b106\n") == {"available": True, "value": "6.0"}
+
+
 def test_failed_probe_preserves_command_error():
     """Discarding the failing command or stderr would make a fingerprint unauditable."""
     result = unavailable_probe("nvidia-smi", returncode=9, stdout="", stderr="driver unavailable")
@@ -225,12 +337,8 @@ def test_capture_has_exact_schema_and_marks_failed_optional_probes(monkeypatch):
             ("python3", "--version"): "Python 3.10.12\n",
             ("gcc", "-dumpfullversion"): "11.4.0\n",
             ("cmake", "--version"): "cmake version 3.22.1\n",
-            (
-                "nvidia-smi",
-                "--query-gpu=name,pci.bus_id,pci.device_id,memory.total,compute_cap,driver_version",
-                "--format=csv,noheader,nounits",
-            ): "NVIDIA GeForce RTX 4080 SUPER, 00000000:01:00.0, 0x270210DE, 16376, 8.9, 595.84\n",
-            ("lspci", "-Dnns", "00000000:01:00.0"): "0000:01:00.0 VGA [0300]: NVIDIA [10de:2702]\n",
+            NVIDIA_COMMAND: "NVIDIA GeForce RTX 4080 SUPER, 00000000:01:00.0, 0x270210DE, 16376, 8.9, 595.84\n",
+            LSPCI_COMMAND: "0000:01:00.0 VGA [0300]: NVIDIA [10de:2702]\n",
             ("/usr/local/cuda/bin/nvcc", "--version"): "Cuda compilation tools, release 13.2, V13.2.78\n",
         }
         key = tuple(command)
@@ -252,11 +360,177 @@ def test_capture_has_exact_schema_and_marks_failed_optional_probes(monkeypatch):
     }
     assert document["tensorrt"] == {
         "available": False,
-        "command": "dpkg-query -W -f=${Version} libnvinfer10",
+        "command": (
+            "dpkg-query -W "
+            "-f=${binary:Package}\\t${db:Status-Abbrev}\\t${Version}\\n "
+            "libnvinfer[0-9]*"
+        ),
         "returncode": 127,
         "error": "not available",
     }
     assert document["readiness"] == {"ready": False, "errors": []}
+
+
+def test_capture_cross_checks_matching_lspci_identity(monkeypatch):
+    """Skipping the independent PCI cross-check would trust one driver-reported identity."""
+    monkeypatch.setenv("ROS_DISTRO", "humble")
+    document = capture_environment(
+        "train_amd64_rtx4080_super", run=capture_runner()
+    )
+    assert document["gpu"] == {
+        "available": True,
+        "model": "NVIDIA GeForce RTX 4080 SUPER",
+        "pci_bus_id": "00000000:01:00.0",
+        "pci_device_id": "10de:2702",
+        "memory_total_mib": 16376,
+        "compute_capability": "8.9",
+        "driver_version": "595.84",
+    }
+
+
+def test_capture_preserves_failed_lspci_and_makes_gpu_unavailable(monkeypatch):
+    """Discarding lspci failure would incorrectly leave GPU compute readiness true."""
+    monkeypatch.setenv("ROS_DISTRO", "humble")
+    failed = subprocess.CompletedProcess(
+        list(LSPCI_COMMAND), 2, stdout="", stderr="unable to access PCI configuration"
+    )
+    document = capture_environment(
+        "train_amd64_rtx4080_super",
+        run=capture_runner({LSPCI_COMMAND: failed}),
+    )
+    assert document["gpu"] == {
+        "available": False,
+        "command": "lspci -Dnn -s 00000000:01:00.0",
+        "returncode": 2,
+        "error": "unable to access PCI configuration",
+    }
+    assert "gpu.available: expected True, got False" in validate_fingerprint(
+        document, load_baseline("train_amd64_rtx4080_super")
+    )
+
+
+def test_capture_preserves_unparseable_lspci_and_makes_gpu_unavailable(monkeypatch):
+    """Accepting lspci output without a PCI ID would turn a missing cross-check into success."""
+    monkeypatch.setenv("ROS_DISTRO", "humble")
+    malformed = subprocess.CompletedProcess(
+        list(LSPCI_COMMAND), 0, stdout="unrecognized PCI record\n", stderr=""
+    )
+    document = capture_environment(
+        "train_amd64_rtx4080_super",
+        run=capture_runner({LSPCI_COMMAND: malformed}),
+    )
+    assert document["gpu"] == {
+        "available": False,
+        "command": "lspci -Dnn -s 00000000:01:00.0",
+        "returncode": 0,
+        "error": (
+            "parse error: lspci output did not contain a vendor/device ID; "
+            "raw output: unrecognized PCI record"
+        ),
+    }
+    assert "gpu.available: expected True, got False" in validate_fingerprint(
+        document, load_baseline("train_amd64_rtx4080_super")
+    )
+
+
+def test_capture_rejects_lspci_identity_mismatch(monkeypatch):
+    """A disagreement between driver and PCI inventory must not pass GPU readiness."""
+    monkeypatch.setenv("ROS_DISTRO", "humble")
+    mismatch = subprocess.CompletedProcess(
+        list(LSPCI_COMMAND),
+        0,
+        stdout="0000:01:00.0 VGA controller [0300]: NVIDIA Device [10de:2684]\n",
+        stderr="",
+    )
+    document = capture_environment(
+        "train_amd64_rtx4080_super",
+        run=capture_runner({LSPCI_COMMAND: mismatch}),
+    )
+    assert document["gpu"] == {
+        "available": False,
+        "command": "lspci -Dnn -s 00000000:01:00.0",
+        "returncode": 0,
+        "error": (
+            "PCI device ID mismatch: nvidia-smi reported '10de:2702', "
+            "lspci reported '10de:2684'"
+        ),
+    }
+    assert "gpu.available: expected True, got False" in validate_fingerprint(
+        document, load_baseline("train_amd64_rtx4080_super")
+    )
+
+
+def test_capture_preserves_failed_tensorrt_package_query(monkeypatch):
+    """A failed wildcard package query must retain the exact dpkg diagnostic."""
+    monkeypatch.setenv("ROS_DISTRO", "humble")
+    failed = subprocess.CompletedProcess(
+        list(TENSORRT_COMMAND),
+        1,
+        stdout="",
+        stderr="dpkg-query: no packages found matching libnvinfer[0-9]*",
+    )
+    document = capture_environment(
+        "train_amd64_rtx4080_super",
+        run=capture_runner({TENSORRT_COMMAND: failed}),
+    )
+    assert document["tensorrt"] == {
+        "available": False,
+        "command": (
+            "dpkg-query -W "
+            "-f=${binary:Package}\\t${db:Status-Abbrev}\\t${Version}\\n "
+            "libnvinfer[0-9]*"
+        ),
+        "returncode": 1,
+        "error": "dpkg-query: no packages found matching libnvinfer[0-9]*",
+    }
+
+
+def test_capture_preserves_uninstalled_tensorrt_package_record(monkeypatch):
+    """A dpkg record without installed status must remain visible in failure evidence."""
+    monkeypatch.setenv("ROS_DISTRO", "humble")
+    uninstalled = subprocess.CompletedProcess(
+        list(TENSORRT_COMMAND),
+        0,
+        stdout="libnvinfer8:arm64\tun \t8.6.2.3-1\n",
+        stderr="",
+    )
+    document = capture_environment(
+        "train_amd64_rtx4080_super",
+        run=capture_runner({TENSORRT_COMMAND: uninstalled}),
+    )
+    assert document["tensorrt"] == {
+        "available": False,
+        "command": (
+            "dpkg-query -W "
+            "-f=${binary:Package}\\t${db:Status-Abbrev}\\t${Version}\\n "
+            "libnvinfer[0-9]*"
+        ),
+        "returncode": 0,
+        "error": (
+            "parse error: no installed TensorRT runtime in dpkg-query output; "
+            "raw output: libnvinfer8:arm64\\tun \\t8.6.2.3-1"
+        ),
+    }
+
+
+def test_jetpack_60_tensorrt8_package_satisfies_agx_readiness():
+    """An installed libnvinfer8 runtime on the frozen AGX must satisfy TensorRT readiness."""
+    document = valid_training_fingerprint()
+    document.update(
+        {
+            "profile": "deploy_agx_orin_r36",
+            "architecture": "aarch64",
+            "device_model": {"available": True, "value": "Jetson AGX Orin 64GB"},
+            "l4t": {"available": True, "value": "R36.0.0"},
+            "jetpack": {"available": True, "value": "6.0"},
+            "tensorrt": _parse_tensorrt_packages(
+                "libnvinfer8:arm64\tii \t8.6.2.3-1+cuda12.0\n"
+            ),
+        }
+    )
+    assert validate_fingerprint(
+        document, load_baseline("deploy_agx_orin_r36")
+    ) == []
 
 
 def test_training_readiness_requires_exact_gpu_and_cuda():
@@ -281,6 +555,29 @@ def test_training_readiness_requires_driver_and_cuda_availability():
         "gpu.driver_version: expected a non-empty value, got ''",
         "cuda.available: expected True, got False",
     ]
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "expected_error"),
+    [
+        (("os", "name"), "Debian GNU/Linux", "os.name: expected 'Ubuntu', got 'Debian GNU/Linux'"),
+        (("os", "version_id"), "24.04", "os.version_id: expected '22.04', got '24.04'"),
+        (("architecture",), "aarch64", "architecture: expected 'amd64', got 'aarch64'"),
+        (("ros", "distro"), "jazzy", "ros.distro: expected 'humble', got 'jazzy'"),
+        (("python", "version"), "3.11.9", "python.version: expected '3.10', got '3.11'"),
+        (("gpu", "pci_device_id"), "10de:2684", "gpu.pci_device_id: expected '10de:2702', got '10de:2684'"),
+    ],
+)
+def test_training_readiness_rejects_core_baseline_drift(path, value, expected_error):
+    """Any frozen training identity drift must produce its precise readiness error."""
+    document = valid_training_fingerprint()
+    target = document
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    assert validate_fingerprint(
+        document, load_baseline("train_amd64_rtx4080_super")
+    ) == [expected_error]
 
 
 def test_training_profile_allows_tensorrt_to_be_unavailable():
@@ -342,6 +639,38 @@ def test_agx_readiness_rejects_unavailable_identity_with_stale_values():
     ]
 
 
+@pytest.mark.parametrize(
+    ("path", "value", "expected_error"),
+    [
+        (("architecture",), "amd64", "architecture: expected 'aarch64', got 'amd64'"),
+        (("device_model", "value"), "Jetson Orin Nano", "device_model.value: expected 'Jetson AGX Orin 64GB', got 'Jetson Orin Nano'"),
+        (("l4t", "value"), "R35.4.1", "l4t.value: expected 'R36.0.0', got 'R35.4.1'"),
+        (("jetpack", "value"), "5.1", "jetpack.value: expected '6.0', got '5.1'"),
+        (("cuda",), unavailable_probe("nvcc", 127, "", "not found"), "cuda.available: expected True, got False"),
+    ],
+)
+def test_agx_readiness_rejects_core_release_drift(path, value, expected_error):
+    """An AGX with wrong identity or missing CUDA must not pass the device release gate."""
+    document = valid_training_fingerprint()
+    document.update(
+        {
+            "profile": "deploy_agx_orin_r36",
+            "architecture": "aarch64",
+            "device_model": {"available": True, "value": "Jetson AGX Orin 64GB"},
+            "l4t": {"available": True, "value": "R36.0.0"},
+            "jetpack": {"available": True, "value": "6.0"},
+            "tensorrt": {"available": True, "package": "libnvinfer8", "version": "8.6.2.3"},
+        }
+    )
+    target = document
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    assert validate_fingerprint(
+        document, load_baseline("deploy_agx_orin_r36")
+    ) == [expected_error]
+
+
 def test_write_fingerprint_is_sorted_utf8_json_with_terminal_newline(tmp_path):
     """Non-deterministic or unterminated JSON would weaken reviewable evidence diffs."""
     output = tmp_path / "nested/fingerprint.json"
@@ -386,6 +715,28 @@ def test_cli_writes_actual_mismatch_before_returning_one(tmp_path, monkeypatch):
         "errors": [
             "gpu.model: expected 'NVIDIA GeForce RTX 4090', got 'NVIDIA GeForce RTX 4080 SUPER'"
         ],
+    }
+
+
+def test_cli_writes_ready_fingerprint_before_returning_zero(tmp_path, monkeypatch):
+    """A matching capture must be persisted with ready=true before a successful exit."""
+    monkeypatch.setattr(
+        "tools.capture_environment.capture_environment",
+        lambda profile: valid_training_fingerprint(),
+    )
+    output = tmp_path / "fingerprints/ready.json"
+
+    assert main(
+        [
+            "--profile",
+            "train_amd64_rtx4080_super",
+            "--output",
+            str(output),
+        ]
+    ) == 0
+    assert json.loads(output.read_text(encoding="utf-8"))["readiness"] == {
+        "ready": True,
+        "errors": [],
     }
 
 
