@@ -88,20 +88,22 @@ AGX Orin / R36.0.0
 |---:|---|---|---:|
 | 1 | [`2026-08-02-lunar-navigation-volume-1-foundation.md`](2026-08-02-lunar-navigation-volume-1-foundation.md) | 新仓能在 Ubuntu 干净 checkout 上解析外部依赖、生成内部 ROS 接口并通过 amd64/ARM64 基础构建 | 7–12 |
 | 2 | [`2026-08-02-lunar-navigation-volume-2-planner-ros.md`](2026-08-02-lunar-navigation-volume-2-planner-ros.md) | 简化 C++ API、三平台 v3、Lifecycle Action、输入快照和可选 Nav2 通过测试 | 24–42 |
-| 3 | [`2026-08-02-lunar-navigation-volume-3-policy-pipeline.md`](2026-08-02-lunar-navigation-volume-3-policy-pipeline.md) | RTX 4080 SUPER 训练冒烟、ONNX 模型包、AGX TensorRT 等价和探索节点通过 | 22–41 |
+| 3 | [`2026-08-02-lunar-navigation-volume-3-policy-pipeline.md`](2026-08-02-lunar-navigation-volume-3-policy-pipeline.md) | 三平台 v3 PPO 分别达到 95%、ONNX 模型包、AGX TensorRT 等价和探索节点通过 | 36–62，另含最多 24 GPU 小时 |
 | 4 | [`2026-08-02-lunar-navigation-volume-4-integration-cutover.md`](2026-08-02-lunar-navigation-volume-4-integration-cutover.md) | 完整 rosbag 链、AGX 性能与 4 小时稳定性、Git 一键安装、回退和旧仓归档全部通过 | 23–43 |
 | 横向 | 四卷接口复核、失败重试和发布回归 | 四卷产物来自同一 release candidate，接口/配置/模型 hash 一致 | 10–19 |
 
-总量：**86–157 Codex agent-hours**。
+总量：**100–178 Codex agent-hours**，另含卷三最多 24 小时累计 GPU 工作时间。
 
 墙钟目标：
 
 - Ubuntu 首个可运行纵向版本：24–40 小时；
-- Jetson 首个端到端版本：42–70 小时；
-- 完整迁移、合同清理和一次实机稳定性验收：65–110 小时；
-- 包含 R36.0.0、ARM64 和 TensorRT 重试的 P80：80–140 小时。
+- Jetson 首个端到端版本：56–115 小时；
+- 完整迁移、合同清理和一次实机稳定性验收：79–155 小时；
+- 包含 R36.0.0、ARM64 和 TensorRT 重试的 P80：94–185 小时。
 
-不计入：完整 PPO 重新训练至收敛、等待外部项目交付、凭据等待、接线、刷机和人工重启。R36.0.0 若出现重大兼容或刷机问题，另加 8–20 Codex 调试小时；人工等待不计入 Codex 时间。
+Ubuntu 首个可运行纵向版本只要求训练链路短冒烟，不代表三平台 PPO 已收敛；其后三项已包含卷三最多 24 小时累计 GPU 训练窗口，提前达到 95% 门槛时可相应缩短。
+
+不计入：等待外部项目交付、凭据等待、接线、刷机和人工重启。R36.0.0 若出现重大兼容或刷机问题，另加 8–20 Codex 调试小时；人工等待不计入 Codex 时间。
 
 ## 4. 稳定跨卷接口
 
