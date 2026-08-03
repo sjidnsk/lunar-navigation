@@ -1,0 +1,1210 @@
+#include "lunar_planner_ros/plan_motion_server.hpp"
+
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <stop_token>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
+#include <diagnostic_msgs/msg/diagnostic_status.hpp>
+#include <diagnostic_msgs/msg/key_value.hpp>
+#include <grid_map_msgs/msg/grid_map.hpp>
+#include <lifecycle_msgs/msg/state.hpp>
+#include <lunar_navigation_msgs/msg/exploration_task.hpp>
+#include <lunar_navigation_msgs/msg/localization_status.hpp>
+#include <lunar_planning_msgs/action/plan_motion.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <rclcpp/callback_group.hpp>
+#include <rclcpp/create_subscription.hpp>
+#include <rclcpp/qos.hpp>
+#include <rclcpp_action/create_server.hpp>
+#include <rclcpp_action/server.hpp>
+#include <rclcpp_action/server_goal_handle.hpp>
+#include <tf2_msgs/msg/tf_message.hpp>
+
+#include "lunar_planner_core/planner.hpp"
+#include "lunar_planner_ros/message_conversion.hpp"
+#include "lunar_planner_ros/reference_guard.hpp"
+#include "lunar_planner_ros/snapshot_builder.hpp"
+#include "lunar_planner_ros/snapshot_store.hpp"
+
+namespace lunar::planning::ros {
+namespace {
+
+using Action = lunar_planning_msgs::action::PlanMotion;
+using GoalHandle = rclcpp_action::ServerGoalHandle<Action>;
+using CallbackReturn =
+    rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
+using namespace std::chrono_literals;
+
+constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
+
+[[nodiscard]] std::optional<lunar::planning::TimePoint> TimePointFromStamp(
+    const builtin_interfaces::msg::Time& stamp) noexcept {
+  if (stamp.sec < 0 || stamp.nanosec >= kNanosecondsPerSecond) {
+    return std::nullopt;
+  }
+  return lunar::planning::TimePoint{
+      static_cast<std::int64_t>(stamp.sec) * kNanosecondsPerSecond +
+          static_cast<std::int64_t>(stamp.nanosec),
+  };
+}
+
+[[nodiscard]] std::optional<rclcpp::Time> RosTimeFromStamp(
+    const builtin_interfaces::msg::Time& stamp) noexcept {
+  const auto time = TimePointFromStamp(stamp);
+  if (!time || time->nanoseconds_since_epoch <= 0) {
+    return std::nullopt;
+  }
+  try {
+    return rclcpp::Time{stamp, RCL_ROS_TIME};
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
+[[nodiscard]] bool ValidMissionMessage(
+    const lunar_navigation_msgs::msg::ExplorationTask& mission) noexcept {
+  return !mission.mission_id.empty() && mission.revision > 0U &&
+      mission.header.frame_id == "map" &&
+      RosTimeFromStamp(mission.header.stamp).has_value() &&
+      (mission.desired_state == mission.ACTIVE ||
+       mission.desired_state == mission.PAUSED ||
+       mission.desired_state == mission.CANCELED);
+}
+
+[[nodiscard]] std::optional<std::chrono::nanoseconds> PositiveDuration(
+    const double seconds) noexcept {
+  if (!std::isfinite(seconds) || seconds <= 0.0 ||
+      seconds > static_cast<double>(
+          std::numeric_limits<std::int64_t>::max()) /
+          static_cast<double>(kNanosecondsPerSecond)) {
+    return std::nullopt;
+  }
+  const double nanoseconds =
+      seconds * static_cast<double>(kNanosecondsPerSecond);
+  if (!std::isfinite(nanoseconds) || nanoseconds < 1.0) {
+    return std::nullopt;
+  }
+  return std::chrono::nanoseconds{
+      static_cast<std::int64_t>(std::llround(nanoseconds))};
+}
+
+[[nodiscard]] bool SnapshotIsStale(const SnapshotErrorCode code) noexcept {
+  switch (code) {
+    case SnapshotErrorCode::kMissingGlobalMap:
+    case SnapshotErrorCode::kMissingLocalMap:
+    case SnapshotErrorCode::kMissingOdometry:
+    case SnapshotErrorCode::kMissingLocalizationStatus:
+    case SnapshotErrorCode::kStaleGlobalMap:
+    case SnapshotErrorCode::kStaleLocalMap:
+    case SnapshotErrorCode::kStaleOdometry:
+    case SnapshotErrorCode::kStaleLocalizationStatus:
+    case SnapshotErrorCode::kInputSkew:
+    case SnapshotErrorCode::kInvalidLocalization:
+    case SnapshotErrorCode::kCovarianceLimit:
+    case SnapshotErrorCode::kStaleTf:
+      return true;
+    case SnapshotErrorCode::kConfigurationInvalid:
+    case SnapshotErrorCode::kInvalidGlobalMap:
+    case SnapshotErrorCode::kInvalidLocalMap:
+    case SnapshotErrorCode::kInvalidOdometry:
+    case SnapshotErrorCode::kInvalidGoal:
+      return false;
+  }
+  return false;
+}
+
+[[nodiscard]] std::shared_ptr<Action::Result> CanceledResult(
+    const std::uint64_t mission_revision,
+    std::string reason_code) {
+  auto result = std::make_shared<Action::Result>();
+  result->planning_outcome = Action::Result::CANCELED;
+  result->execution_directive = Action::Result::HOLD_POSITION;
+  result->reason_code = std::move(reason_code);
+  result->mission_revision = mission_revision;
+  result->has_reference = false;
+  result->reference = lunar_planning_msgs::msg::MotionReference{};
+  result->diagnostics.planner_name = "cpp_v3";
+  return result;
+}
+
+[[nodiscard]] std::shared_ptr<Action::Result> InvariantFailureResult(
+    const std::uint64_t mission_revision,
+    std::string reason_code) {
+  auto result = std::make_shared<Action::Result>();
+  result->planning_outcome = Action::Result::NUMERICAL_FAILURE;
+  result->execution_directive = Action::Result::NO_SAFE_REFERENCE;
+  result->reason_code = std::move(reason_code);
+  result->mission_revision = mission_revision;
+  result->has_reference = false;
+  result->reference = lunar_planning_msgs::msg::MotionReference{};
+  result->diagnostics.planner_name = "cpp_v3";
+  return result;
+}
+
+}  // namespace
+
+struct PlanMotionServer::Impl final {
+  struct PendingGoal final {
+    std::string request_id;
+    std::string frame_id;
+    rclcpp::Time stamp;
+    lunar::planning::GoalRegion goal;
+    std::uint64_t mission_revision{};
+    bool replace_active_request{};
+  };
+
+  PlanMotionServer& node;
+  PlanMotionServerDependencies dependencies;
+
+  rclcpp::CallbackGroup::SharedPtr map_group;
+  rclcpp::CallbackGroup::SharedPtr localization_group;
+  rclcpp::CallbackGroup::SharedPtr tf_group;
+  rclcpp::CallbackGroup::SharedPtr mission_group;
+  rclcpp::CallbackGroup::SharedPtr action_group;
+
+  rclcpp::Subscription<grid_map_msgs::msg::GridMap>::SharedPtr global_map_sub;
+  rclcpp::Subscription<grid_map_msgs::msg::GridMap>::SharedPtr local_map_sub;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub;
+  rclcpp::Subscription<
+      lunar_navigation_msgs::msg::LocalizationStatus>::SharedPtr
+      localization_status_sub;
+  rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr tf_sub;
+  rclcpp::Subscription<
+      lunar_navigation_msgs::msg::ExplorationTask>::SharedPtr mission_sub;
+  rclcpp_action::Server<Action>::SharedPtr action_server;
+  rclcpp_lifecycle::LifecyclePublisher<
+      diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_publisher;
+
+  mutable std::mutex state_mutex;
+  mutable std::mutex diagnostic_mutex;
+  bool configured{};
+  bool active{};
+  bool faulted{};
+  std::shared_ptr<SnapshotStore> snapshot_store;
+  std::unique_ptr<SnapshotBuilder> snapshot_builder;
+  std::optional<LoadedCapabilities> capabilities;
+  std::unique_ptr<ReferenceGuard> reference_guard;
+  std::optional<lunar_navigation_msgs::msg::ExplorationTask> mission;
+  std::optional<PendingGoal> pending_goal;
+  std::shared_ptr<GoalHandle> active_goal;
+  std::unique_ptr<std::jthread> worker;
+  bool worker_running{};
+  std::uint64_t worker_generation{};
+  std::string worker_stop_reason{"REQUEST_CANCELED"};
+  std::string last_diagnostic_reason;
+  std::string diagnostic_hardware_id{"unconfigured"};
+
+  explicit Impl(
+      PlanMotionServer& owner,
+      PlanMotionServerDependencies injected_dependencies)
+      : node(owner), dependencies(std::move(injected_dependencies)) {
+    if (!dependencies.planner) {
+      auto planner = std::make_shared<lunar::planning::Planner>();
+      dependencies.planner =
+          [planner = std::move(planner)](
+              const lunar::planning::PlannerInput& input) {
+            return planner->Plan(input);
+          };
+    }
+
+    map_group = node.create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
+    localization_group = node.create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
+    tf_group = node.create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
+    mission_group = node.create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
+    action_group = node.create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
+
+    diagnostics_publisher =
+        node.create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+            "/diagnostics", rclcpp::QoS{10}.reliable());
+    action_server = rclcpp_action::create_server<Action>(
+        node.get_node_base_interface(),
+        node.get_node_clock_interface(),
+        node.get_node_logging_interface(),
+        node.get_node_waitables_interface(),
+        "/plan_motion",
+        [this](
+            const rclcpp_action::GoalUUID& uuid,
+            const std::shared_ptr<const Action::Goal> goal) {
+          return HandleGoal(uuid, goal);
+        },
+        [this](const std::shared_ptr<GoalHandle> goal_handle) {
+          return HandleCancel(goal_handle);
+        },
+        [this](const std::shared_ptr<GoalHandle> goal_handle) {
+          HandleAccepted(goal_handle);
+        },
+        rcl_action_server_get_default_options(), action_group);
+
+    DeclareParameters();
+  }
+
+  ~Impl() {
+    StopAndJoinWorker("NODE_SHUTDOWN");
+  }
+
+  void DeclareParameters() {
+    for (const char* name : {
+             "global_map_max_age", "local_map_max_age",
+             "odometry_max_age", "localization_status_max_age",
+             "tf_max_age", "max_pairwise_skew"}) {
+      node.declare_parameter(name, rclcpp::ParameterType::PARAMETER_DOUBLE);
+    }
+    node.declare_parameter<double>("degraded_pose_covariance_limit", 0.5);
+    node.declare_parameter<double>("degraded_twist_covariance_limit", 0.5);
+    node.declare_parameter<std::int64_t>("maximum_transform_samples", 256);
+    node.declare_parameter(
+        "capability_package", rclcpp::ParameterType::PARAMETER_STRING);
+    node.declare_parameter(
+        "platform_capability_file", rclcpp::ParameterType::PARAMETER_STRING);
+    node.declare_parameter(
+        "observation_capability_file", rclcpp::ParameterType::PARAMETER_STRING);
+  }
+
+  [[nodiscard]] std::chrono::nanoseconds RequiredDuration(
+      const std::string& name) const {
+    const auto value = PositiveDuration(node.get_parameter(name).as_double());
+    if (!value) {
+      throw std::invalid_argument{name + " must be a positive finite duration"};
+    }
+    return *value;
+  }
+
+  [[nodiscard]] SnapshotPolicy ReadPolicy() const {
+    const double pose_limit =
+        node.get_parameter("degraded_pose_covariance_limit").as_double();
+    const double twist_limit =
+        node.get_parameter("degraded_twist_covariance_limit").as_double();
+    SnapshotPolicy policy{
+        .global_map_max_age = RequiredDuration("global_map_max_age"),
+        .local_map_max_age = RequiredDuration("local_map_max_age"),
+        .odometry_max_age = RequiredDuration("odometry_max_age"),
+        .localization_status_max_age =
+            RequiredDuration("localization_status_max_age"),
+        .tf_max_age = RequiredDuration("tf_max_age"),
+        .max_pairwise_skew = RequiredDuration("max_pairwise_skew"),
+        .degraded_pose_covariance_limit = pose_limit,
+        .degraded_twist_covariance_limit = twist_limit,
+    };
+    if (!ValidateSnapshotPolicy(policy)) {
+      throw std::invalid_argument{"snapshot policy is invalid"};
+    }
+    return policy;
+  }
+
+  [[nodiscard]] LoadedCapabilities LoadCapabilities() const {
+    if (dependencies.preloaded_capabilities) {
+      return *dependencies.preloaded_capabilities;
+    }
+    const std::string package =
+        node.get_parameter("capability_package").as_string();
+    const std::string platform_file =
+        node.get_parameter("platform_capability_file").as_string();
+    const std::string observation_file =
+        node.get_parameter("observation_capability_file").as_string();
+    const CapabilityLoadResult loaded = CapabilityLoader{}.LoadFromPackageShare(
+        package, platform_file, observation_file);
+    if (!loaded.ok()) {
+      throw std::runtime_error{
+          loaded.error ? loaded.error->reason_code :
+                         std::string{"CAPABILITY_LOAD_FAILED"}};
+    }
+    return *loaded.capabilities;
+  }
+
+  [[nodiscard]] ReferenceGuardLimits GuardLimits(
+      const lunar::planning::PlatformCapability& capability) const {
+    if (const auto* hopper =
+            std::get_if<lunar::planning::HopperCapability>(&capability)) {
+      return ReferenceGuardLimits{
+          .minimum_settle_guard = hopper->minimum_settle_guard,
+          .maximum_landing_speed_mps = hopper->maximum_landing_speed_mps,
+          .maximum_angular_speed_radps = hopper->maximum_angular_speed_radps,
+      };
+    }
+    return ReferenceGuardLimits{
+        .minimum_settle_guard = 1ns,
+        .maximum_landing_speed_mps = 1.0,
+        .maximum_angular_speed_radps = 1.0,
+    };
+  }
+
+  CallbackReturn Configure() {
+    try {
+      StopAndJoinWorker("NODE_RECONFIGURED");
+      ResetSubscriptions();
+      const SnapshotPolicy policy = ReadPolicy();
+      LoadedCapabilities loaded = LoadCapabilities();
+      const auto transform_samples =
+          node.get_parameter("maximum_transform_samples").as_int();
+      if (transform_samples <= 0) {
+        throw std::invalid_argument{
+            "maximum_transform_samples must be positive"};
+      }
+      auto new_store = std::make_shared<SnapshotStore>(
+          static_cast<std::size_t>(transform_samples));
+      auto new_builder = std::make_unique<SnapshotBuilder>(
+          new_store, policy, loaded.platform);
+      auto new_guard = std::make_unique<ReferenceGuard>(
+          GuardLimits(loaded.platform));
+
+      {
+        std::scoped_lock lock{state_mutex};
+        snapshot_store = std::move(new_store);
+        snapshot_builder = std::move(new_builder);
+        capabilities = std::move(loaded);
+        reference_guard = std::move(new_guard);
+        mission.reset();
+        pending_goal.reset();
+        configured = true;
+        active = false;
+        faulted = false;
+      }
+      {
+        std::scoped_lock lock{diagnostic_mutex};
+        diagnostic_hardware_id = capabilities->platform_id;
+      }
+      CreateSubscriptions();
+      PublishDiagnostic(
+          diagnostic_msgs::msg::DiagnosticStatus::OK,
+          "PLANNER_CONFIGURED");
+      return CallbackReturn::SUCCESS;
+    } catch (const std::exception& error) {
+      RCLCPP_ERROR(node.get_logger(), "planner configure failed: %s", error.what());
+      {
+        std::scoped_lock lock{state_mutex};
+        configured = false;
+        active = false;
+        faulted = false;
+        snapshot_builder.reset();
+        snapshot_store.reset();
+        capabilities.reset();
+        reference_guard.reset();
+        mission.reset();
+        pending_goal.reset();
+      }
+      ResetSubscriptions();
+      PublishDiagnostic(
+          diagnostic_msgs::msg::DiagnosticStatus::ERROR,
+          "PLANNER_CONFIGURE_FAILED");
+      return CallbackReturn::FAILURE;
+    }
+  }
+
+  CallbackReturn Activate() {
+    {
+      std::scoped_lock lock{state_mutex};
+      if (!configured || faulted || !snapshot_builder || !reference_guard) {
+        return CallbackReturn::FAILURE;
+      }
+      active = true;
+    }
+    diagnostics_publisher->on_activate();
+    PublishDiagnostic(
+        diagnostic_msgs::msg::DiagnosticStatus::OK,
+        "PLANNER_ACTIVE");
+    return CallbackReturn::SUCCESS;
+  }
+
+  CallbackReturn Deactivate(const std::string& reason) {
+    {
+      std::scoped_lock lock{state_mutex};
+      active = false;
+      pending_goal.reset();
+    }
+    StopAndJoinWorker(reason);
+    {
+      std::scoped_lock lock{state_mutex};
+      if (reference_guard) {
+        reference_guard->Reset();
+      }
+    }
+    PublishDiagnostic(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN,
+        reason);
+    if (diagnostics_publisher->is_activated()) {
+      diagnostics_publisher->on_deactivate();
+    }
+    return CallbackReturn::SUCCESS;
+  }
+
+  CallbackReturn Cleanup() {
+    Deactivate("PLANNER_CLEANUP");
+    ResetSubscriptions();
+    std::scoped_lock lock{state_mutex};
+    configured = false;
+    faulted = false;
+    snapshot_builder.reset();
+    snapshot_store.reset();
+    capabilities.reset();
+    reference_guard.reset();
+    mission.reset();
+    return CallbackReturn::SUCCESS;
+  }
+
+  CallbackReturn Error() {
+    {
+      std::scoped_lock lock{state_mutex};
+      active = false;
+      configured = false;
+      faulted = true;
+      pending_goal.reset();
+    }
+    RequestWorkerStop("PLANNER_INTERNAL_INVARIANT");
+    ResetSubscriptions();
+    {
+      std::scoped_lock lock{state_mutex};
+      snapshot_builder.reset();
+      snapshot_store.reset();
+      capabilities.reset();
+      if (reference_guard) {
+        reference_guard->Reset();
+      }
+      reference_guard.reset();
+      mission.reset();
+    }
+    if (diagnostics_publisher->is_activated()) {
+      diagnostics_publisher->on_deactivate();
+    }
+    return CallbackReturn::SUCCESS;
+  }
+
+  void CreateSubscriptions() {
+    rclcpp::SubscriptionOptions map_options;
+    map_options.callback_group = map_group;
+    const auto map_qos = rclcpp::QoS{1}.reliable().transient_local();
+    global_map_sub = node.create_subscription<grid_map_msgs::msg::GridMap>(
+        "/environment/map_global", map_qos,
+        [this](const grid_map_msgs::msg::GridMap::SharedPtr message) {
+          const auto store = Store();
+          if (store) {
+            store->UpdateGlobalMap(*message);
+          }
+        },
+        map_options);
+    local_map_sub = node.create_subscription<grid_map_msgs::msg::GridMap>(
+        "/environment/map_local", map_qos,
+        [this](const grid_map_msgs::msg::GridMap::SharedPtr message) {
+          const auto store = Store();
+          if (store) {
+            store->UpdateLocalMap(*message);
+          }
+        },
+        map_options);
+
+    rclcpp::SubscriptionOptions localization_options;
+    localization_options.callback_group = localization_group;
+    odometry_sub = node.create_subscription<nav_msgs::msg::Odometry>(
+        "/localization/odometry", rclcpp::SensorDataQoS{},
+        [this](const nav_msgs::msg::Odometry::SharedPtr message) {
+          OnOdometry(*message);
+        },
+        localization_options);
+    localization_status_sub =
+        node.create_subscription<
+            lunar_navigation_msgs::msg::LocalizationStatus>(
+            "/localization/status", rclcpp::QoS{10}.reliable(),
+            [this](
+                const lunar_navigation_msgs::msg::LocalizationStatus::SharedPtr
+                    message) {
+              OnLocalizationStatus(*message);
+            },
+            localization_options);
+
+    rclcpp::SubscriptionOptions tf_options;
+    tf_options.callback_group = tf_group;
+    tf_sub = node.create_subscription<tf2_msgs::msg::TFMessage>(
+        "/tf", rclcpp::QoS{100}.best_effort(),
+        [this](const tf2_msgs::msg::TFMessage::SharedPtr message) {
+          const auto store = Store();
+          if (store) {
+            store->UpdateTransforms(*message);
+          }
+        },
+        tf_options);
+
+    rclcpp::SubscriptionOptions mission_options;
+    mission_options.callback_group = mission_group;
+    mission_sub =
+        node.create_subscription<lunar_navigation_msgs::msg::ExplorationTask>(
+            "/mission/exploration_task",
+            rclcpp::QoS{1}.reliable().transient_local(),
+            [this](
+                const lunar_navigation_msgs::msg::ExplorationTask::SharedPtr
+                    message) {
+              OnMission(*message);
+            },
+            mission_options);
+  }
+
+  void ResetSubscriptions() {
+    global_map_sub.reset();
+    local_map_sub.reset();
+    odometry_sub.reset();
+    localization_status_sub.reset();
+    tf_sub.reset();
+    mission_sub.reset();
+  }
+
+  [[nodiscard]] std::shared_ptr<SnapshotStore> Store() const {
+    std::scoped_lock lock{state_mutex};
+    return snapshot_store;
+  }
+
+  void OnOdometry(const nav_msgs::msg::Odometry& message) {
+    const auto store = Store();
+    if (!store) {
+      return;
+    }
+    store->UpdateOdometry(message);
+    std::optional<ReferenceGuardDecision> decision;
+    {
+      std::scoped_lock lock{state_mutex};
+      if (active && reference_guard &&
+          reference_guard->state() != ReferenceGuardState::kGroundHold) {
+        decision = reference_guard->MayReplace(node.now(), message);
+      }
+    }
+    if (decision &&
+        decision->state == ReferenceGuardState::kUnresolved) {
+      PublishDiagnostic(
+          diagnostic_msgs::msg::DiagnosticStatus::ERROR,
+          decision->reason_code);
+    }
+  }
+
+  void OnLocalizationStatus(
+      const lunar_navigation_msgs::msg::LocalizationStatus& message) {
+    const auto store = Store();
+    if (!store) {
+      return;
+    }
+    store->UpdateLocalizationStatus(message);
+    if (message.status == message.RELOCALIZING) {
+      store->ClearTransforms();
+      RequestStopIfReplaceable("LOCALIZATION_RELOCALIZING");
+    } else if (message.status == message.UNKNOWN ||
+               message.status == message.INVALID) {
+      RequestStopIfReplaceable("LOCALIZATION_NOT_PLANNABLE");
+    }
+  }
+
+  void OnMission(const lunar_navigation_msgs::msg::ExplorationTask& message) {
+    if (!ValidMissionMessage(message)) {
+      PublishDiagnostic(
+          diagnostic_msgs::msg::DiagnosticStatus::ERROR,
+          "MISSION_MESSAGE_INVALID");
+      return;
+    }
+    bool stop = false;
+    {
+      std::scoped_lock lock{state_mutex};
+      if (mission && mission->mission_id == message.mission_id &&
+          message.revision < mission->revision) {
+        return;
+      }
+      mission = message;
+      stop = message.desired_state == message.PAUSED ||
+          message.desired_state == message.CANCELED;
+    }
+    if (stop) {
+      RequestStopIfReplaceable(
+          message.desired_state == message.PAUSED
+              ? "MISSION_PAUSED" : "MISSION_CANCELED");
+    }
+  }
+
+  void RequestStopIfReplaceable(const std::string& reason) {
+    ReferenceGuardDecision decision;
+    bool has_guard = false;
+    {
+      std::scoped_lock lock{state_mutex};
+      if (reference_guard) {
+        const auto view = snapshot_store
+            ? snapshot_store->Capture() : SnapshotStoreView{};
+        decision = reference_guard->MayReplace(node.now(), view.odometry);
+        has_guard = true;
+      }
+    }
+    if (!has_guard || decision.may_replace) {
+      RequestWorkerStop(reason);
+    } else {
+      PublishDiagnostic(
+          decision.state == ReferenceGuardState::kUnresolved
+              ? diagnostic_msgs::msg::DiagnosticStatus::ERROR
+              : diagnostic_msgs::msg::DiagnosticStatus::WARN,
+          decision.reason_code);
+    }
+  }
+
+  rclcpp_action::GoalResponse HandleGoal(
+      const rclcpp_action::GoalUUID&,
+      const std::shared_ptr<const Action::Goal> goal) {
+    std::scoped_lock lock{state_mutex};
+
+    // Frozen validation order: lifecycle, request/mission, reference guard,
+    // worker ownership, then the explicit replacement flag.
+    if (!active || faulted || !configured) {
+      PublishDiagnostic(
+          diagnostic_msgs::msg::DiagnosticStatus::WARN,
+          "PLANNER_NOT_ACTIVE");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+
+    if (!goal || goal->request_id.empty() || goal->mission_id.empty() ||
+        goal->mission_revision == 0U ||
+        (goal->goal.header.frame_id != "map" &&
+         goal->goal.header.frame_id != "odom")) {
+      PublishDiagnostic(
+          diagnostic_msgs::msg::DiagnosticStatus::WARN,
+          "REQUEST_INVALID");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+    const auto stamp = RosTimeFromStamp(goal->goal.header.stamp);
+    const GoalMessageConversion converted = ConvertGoalMessage(goal->goal);
+    if (!stamp || !converted.ok() || !mission ||
+        mission->mission_id != goal->mission_id ||
+        mission->revision != goal->mission_revision ||
+        mission->desired_state != mission->ACTIVE) {
+      PublishDiagnostic(
+          diagnostic_msgs::msg::DiagnosticStatus::WARN,
+          converted.reason_code.empty()
+              ? "MISSION_REVISION_INVALID" : converted.reason_code);
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+
+    if (!reference_guard || !snapshot_store) {
+      PublishDiagnostic(
+          diagnostic_msgs::msg::DiagnosticStatus::ERROR,
+          "PLANNER_INTERNAL_INVARIANT");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+    const auto decision = reference_guard->MayReplace(
+        node.now(), snapshot_store->Capture().odometry);
+    if (!decision.may_replace) {
+      PublishDiagnostic(
+          decision.state == ReferenceGuardState::kUnresolved
+              ? diagnostic_msgs::msg::DiagnosticStatus::ERROR
+              : diagnostic_msgs::msg::DiagnosticStatus::WARN,
+          decision.reason_code);
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+
+    if (pending_goal) {
+      PublishDiagnostic(
+          diagnostic_msgs::msg::DiagnosticStatus::WARN,
+          "PLANNER_GOAL_PENDING");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+    if (worker_running && !goal->replace_active_request) {
+      PublishDiagnostic(
+          diagnostic_msgs::msg::DiagnosticStatus::WARN,
+          "ACTIVE_REQUEST_EXISTS");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+
+    pending_goal = PendingGoal{
+        .request_id = goal->request_id,
+        .frame_id = goal->goal.header.frame_id,
+        .stamp = *stamp,
+        .goal = *converted.goal,
+        .mission_revision = goal->mission_revision,
+        .replace_active_request = goal->replace_active_request,
+    };
+    return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+  }
+
+  rclcpp_action::CancelResponse HandleCancel(
+      const std::shared_ptr<GoalHandle> goal_handle) {
+    std::scoped_lock lock{state_mutex};
+    if (!active || !worker_running || !active_goal ||
+        active_goal.get() != goal_handle.get() || !reference_guard ||
+        !snapshot_store) {
+      return rclcpp_action::CancelResponse::REJECT;
+    }
+    const auto decision = reference_guard->MayReplace(
+        node.now(), snapshot_store->Capture().odometry);
+    if (!decision.may_replace) {
+      PublishDiagnostic(
+          decision.state == ReferenceGuardState::kUnresolved
+              ? diagnostic_msgs::msg::DiagnosticStatus::ERROR
+              : diagnostic_msgs::msg::DiagnosticStatus::WARN,
+          decision.reason_code);
+      return rclcpp_action::CancelResponse::REJECT;
+    }
+    worker_stop_reason = "REQUEST_CANCELED";
+    if (worker) {
+      worker->request_stop();
+    }
+    return rclcpp_action::CancelResponse::ACCEPT;
+  }
+
+  void HandleAccepted(const std::shared_ptr<GoalHandle> goal_handle) {
+    std::optional<PendingGoal> accepted;
+    {
+      std::scoped_lock lock{state_mutex};
+      if (pending_goal && goal_handle &&
+          pending_goal->request_id == goal_handle->get_goal()->request_id) {
+        accepted = std::move(pending_goal);
+        pending_goal.reset();
+      }
+    }
+    if (!accepted || !goal_handle) {
+      if (goal_handle) {
+        goal_handle->abort(InvariantFailureResult(0U, "GOAL_RESERVATION_LOST"));
+      }
+      return;
+    }
+
+    StopAndJoinWorker(
+        accepted->replace_active_request
+            ? "REQUEST_REPLACED" : "PREVIOUS_WORKER_COMPLETE");
+
+    std::uint64_t generation = 0U;
+    {
+      std::scoped_lock lock{state_mutex};
+      if (!active || faulted || !configured) {
+        goal_handle->abort(CanceledResult(
+            accepted->mission_revision, "PLANNER_NOT_ACTIVE"));
+        return;
+      }
+      active_goal = goal_handle;
+      worker_running = true;
+      worker_stop_reason = "REQUEST_CANCELED";
+      generation = ++worker_generation;
+      worker = std::make_unique<std::jthread>(
+          [this, goal_handle, request = std::move(*accepted), generation](
+              const std::stop_token token) mutable {
+            ExecuteGoal(goal_handle, std::move(request), generation, token);
+          });
+    }
+  }
+
+  void ExecuteGoal(
+      const std::shared_ptr<GoalHandle>& goal_handle,
+      PendingGoal request,
+      const std::uint64_t generation,
+      const std::stop_token stop_token) {
+    const auto started = std::chrono::steady_clock::now();
+    PublishFeedback(goal_handle, Action::Feedback::VALIDATING_INPUT, started);
+    if (stop_token.stop_requested()) {
+      CompleteCanceled(goal_handle, request.mission_revision, generation);
+      return;
+    }
+
+    SnapshotBuilder* builder = nullptr;
+    lunar::planning::PlatformType configured_platform{};
+    {
+      std::scoped_lock lock{state_mutex};
+      builder = snapshot_builder.get();
+      if (capabilities) {
+        configured_platform =
+            lunar::planning::CapabilityPlatform(capabilities->platform);
+      }
+    }
+    if (!builder) {
+      CompleteInvariantFailure(
+          goal_handle, request.mission_revision, generation,
+          "SNAPSHOT_BUILDER_MISSING");
+      return;
+    }
+
+    PublishFeedback(goal_handle, Action::Feedback::BUILDING_SNAPSHOT, started);
+    const SnapshotBuildResult snapshot = builder->Freeze(
+        GoalRequest{
+            .request_id = request.request_id,
+            .frame_id = request.frame_id,
+            .stamp = request.stamp,
+            .goal = std::move(request.goal),
+            .previous_execution = std::nullopt,
+            .stop_token = stop_token,
+        },
+        node.now());
+    if (stop_token.stop_requested()) {
+      CompleteCanceled(goal_handle, request.mission_revision, generation);
+      return;
+    }
+    if (!snapshot.ok()) {
+      CompleteSnapshotFailure(
+          goal_handle, request.mission_revision, generation,
+          snapshot.error, started);
+      return;
+    }
+
+    PublishFeedback(goal_handle, Action::Feedback::SEARCHING, started);
+    lunar::planning::PlannerOutput output = dependencies.planner(*snapshot.input);
+    if (stop_token.stop_requested() ||
+        output.outcome == lunar::planning::PlanningOutcome::kCanceled) {
+      CompleteCanceled(goal_handle, request.mission_revision, generation);
+      return;
+    }
+    if (output.reference &&
+        output.reference->platform_type != configured_platform) {
+      CompleteInvariantFailure(
+          goal_handle, request.mission_revision, generation,
+          "REFERENCE_PLATFORM_CAPABILITY_MISMATCH");
+      return;
+    }
+
+    PublishFeedback(goal_handle, Action::Feedback::CERTIFYING, started);
+    const ActionResultConversion converted = ConvertPlannerOutput(
+        output,
+        PlannerResultContext{
+            .global_map_stamp = snapshot.input->world.global_map.stamp,
+            .local_map_stamp = snapshot.input->world.local_map.stamp,
+            .state_stamp = snapshot.input->state_time,
+            .mission_revision = request.mission_revision,
+            .planning_frame = "odom",
+        });
+    if (!converted.ok()) {
+      CompleteInvariantFailure(
+          goal_handle, request.mission_revision, generation,
+          converted.reason_code);
+      return;
+    }
+
+    if (converted.result->has_reference &&
+        converted.result->execution_directive ==
+            Action::Result::ACTIVATE_NEW_REFERENCE &&
+        converted.result->reference.platform_type ==
+            lunar_planning_msgs::msg::MotionReference::HOPPER) {
+      bool committed = false;
+      {
+        std::scoped_lock lock{state_mutex};
+        committed = reference_guard &&
+            reference_guard->Commit(converted.result->reference);
+      }
+      if (!committed) {
+        CompleteInvariantFailure(
+            goal_handle, request.mission_revision, generation,
+            "HOP_REFERENCE_COMMIT_FAILED");
+        return;
+      }
+    }
+
+    auto result = std::make_shared<Action::Result>(std::move(*converted.result));
+    PublishDiagnostic(
+        diagnostic_msgs::msg::DiagnosticStatus::OK,
+        result->reason_code);
+    try {
+      goal_handle->succeed(result);
+    } catch (const std::exception& error) {
+      RCLCPP_ERROR(
+          node.get_logger(), "failed to succeed action goal: %s", error.what());
+    }
+    FinishWorker(generation, goal_handle);
+  }
+
+  void CompleteSnapshotFailure(
+      const std::shared_ptr<GoalHandle>& goal_handle,
+      const std::uint64_t mission_revision,
+      const std::uint64_t generation,
+      const std::optional<SnapshotError>& error,
+      const std::chrono::steady_clock::time_point started) {
+    auto result = std::make_shared<Action::Result>();
+    const SnapshotErrorCode code = error
+        ? error->code : SnapshotErrorCode::kConfigurationInvalid;
+    result->planning_outcome = SnapshotIsStale(code)
+        ? Action::Result::STALE_INPUT : Action::Result::INVALID_REQUEST;
+    result->execution_directive = Action::Result::HOLD_POSITION;
+    result->reason_code = error
+        ? error->reason_code : "SNAPSHOT_BUILD_FAILED";
+    result->mission_revision = mission_revision;
+    result->has_reference = false;
+    result->reference = lunar_planning_msgs::msg::MotionReference{};
+    PopulateLatestStamps(*result);
+    result->diagnostics.planner_name = "snapshot_builder";
+    result->diagnostics.elapsed_s =
+        std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+    PublishDiagnostic(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN,
+        result->reason_code);
+    try {
+      goal_handle->succeed(result);
+    } catch (const std::exception& exception) {
+      RCLCPP_ERROR(
+          node.get_logger(), "failed to return snapshot result: %s",
+          exception.what());
+    }
+    FinishWorker(generation, goal_handle);
+  }
+
+  void CompleteCanceled(
+      const std::shared_ptr<GoalHandle>& goal_handle,
+      const std::uint64_t mission_revision,
+      const std::uint64_t generation) {
+    std::string reason;
+    {
+      std::scoped_lock lock{state_mutex};
+      reason = worker_stop_reason;
+    }
+    auto result = CanceledResult(
+        mission_revision, reason.empty() ? "REQUEST_CANCELED" : reason);
+    PopulateLatestStamps(*result);
+    PublishDiagnostic(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN,
+        result->reason_code);
+    try {
+      if (result->reason_code == "REQUEST_CANCELED") {
+        for (std::size_t attempt = 0U;
+             attempt < 20U && !goal_handle->is_canceling(); ++attempt) {
+          std::this_thread::sleep_for(1ms);
+        }
+      }
+      if (goal_handle->is_canceling()) {
+        goal_handle->canceled(result);
+      } else {
+        goal_handle->abort(result);
+      }
+    } catch (const std::exception& error) {
+      RCLCPP_ERROR(
+          node.get_logger(), "failed to cancel action goal: %s", error.what());
+    }
+    FinishWorker(generation, goal_handle);
+  }
+
+  void CompleteInvariantFailure(
+      const std::shared_ptr<GoalHandle>& goal_handle,
+      const std::uint64_t mission_revision,
+      const std::uint64_t generation,
+      const std::string& detail) {
+    const std::string reason = detail.empty()
+        ? "PLANNER_INTERNAL_INVARIANT" : detail;
+    PublishDiagnostic(
+        diagnostic_msgs::msg::DiagnosticStatus::ERROR,
+        reason);
+    try {
+      auto result = InvariantFailureResult(mission_revision, reason);
+      PopulateLatestStamps(*result);
+      goal_handle->abort(result);
+    } catch (const std::exception& error) {
+      RCLCPP_ERROR(
+          node.get_logger(), "failed to abort invariant goal: %s", error.what());
+    }
+    FinishWorker(generation, goal_handle);
+    try {
+      {
+        std::scoped_lock lock{state_mutex};
+        faulted = true;
+      }
+      const auto& inactive_state = node.deactivate();
+      if (inactive_state.id() ==
+          lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE) {
+        node.cleanup();
+      }
+    } catch (const std::exception& error) {
+      RCLCPP_ERROR(
+          node.get_logger(), "failed to enter lifecycle error path: %s",
+          error.what());
+    }
+  }
+
+  void PublishFeedback(
+      const std::shared_ptr<GoalHandle>& goal_handle,
+      const std::uint8_t phase,
+      const std::chrono::steady_clock::time_point started) {
+    if (!goal_handle || !goal_handle->is_active()) {
+      return;
+    }
+    auto feedback = std::make_shared<Action::Feedback>();
+    feedback->phase = phase;
+    feedback->elapsed_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started).count();
+    feedback->expanded_states = 0U;
+    feedback->has_best_cost = false;
+    feedback->best_cost = 0.0;
+    try {
+      goal_handle->publish_feedback(feedback);
+    } catch (const std::exception& error) {
+      RCLCPP_WARN(
+          node.get_logger(), "failed to publish action feedback: %s",
+          error.what());
+    }
+  }
+
+  void PopulateLatestStamps(Action::Result& result) const {
+    const auto store = Store();
+    if (!store) {
+      return;
+    }
+    const SnapshotStoreView view = store->Capture();
+    if (view.global_map) {
+      result.global_map_stamp = view.global_map->header.stamp;
+    }
+    if (view.local_map) {
+      result.local_map_stamp = view.local_map->header.stamp;
+    }
+    if (view.odometry) {
+      result.state_stamp = view.odometry->header.stamp;
+    }
+  }
+
+  void FinishWorker(
+      const std::uint64_t generation,
+      const std::shared_ptr<GoalHandle>& goal_handle) {
+    std::scoped_lock lock{state_mutex};
+    if (generation == worker_generation) {
+      worker_running = false;
+      if (active_goal.get() == goal_handle.get()) {
+        active_goal.reset();
+      }
+    }
+  }
+
+  void RequestWorkerStop(const std::string& reason) {
+    std::scoped_lock lock{state_mutex};
+    if (worker_running && worker) {
+      worker_stop_reason = reason;
+      worker->request_stop();
+    }
+  }
+
+  void StopAndJoinWorker(const std::string& reason) {
+    std::unique_ptr<std::jthread> joinable;
+    {
+      std::scoped_lock lock{state_mutex};
+      if (!worker) {
+        worker_running = false;
+        active_goal.reset();
+        return;
+      }
+      if (worker_running) {
+        worker_stop_reason = reason;
+      }
+      worker->request_stop();
+      if (worker->get_id() == std::this_thread::get_id()) {
+        return;
+      }
+      joinable = std::move(worker);
+    }
+    if (joinable && joinable->joinable()) {
+      joinable->join();
+    }
+    std::scoped_lock lock{state_mutex};
+    worker_running = false;
+    active_goal.reset();
+  }
+
+  void PublishDiagnostic(
+      const std::uint8_t level,
+      const std::string& reason_code) {
+    std::scoped_lock lock{diagnostic_mutex};
+    last_diagnostic_reason = reason_code;
+    if (!diagnostics_publisher || !diagnostics_publisher->is_activated()) {
+      return;
+    }
+    diagnostic_msgs::msg::DiagnosticArray array;
+    array.header.stamp = node.now();
+    diagnostic_msgs::msg::DiagnosticStatus status;
+    status.level = level;
+    status.name = "lunar_planner_ros";
+    status.hardware_id = diagnostic_hardware_id;
+    status.message = reason_code;
+    diagnostic_msgs::msg::KeyValue reason_value;
+    reason_value.key = "reason_code";
+    reason_value.value = reason_code;
+    status.values.push_back(std::move(reason_value));
+    array.status.push_back(std::move(status));
+    diagnostics_publisher->publish(array);
+  }
+
+  [[nodiscard]] std::array<rclcpp::CallbackGroup::SharedPtr, 5U>
+  CallbackGroups() const {
+    return {map_group, localization_group, tf_group, mission_group, action_group};
+  }
+};
+
+PlanMotionServer::PlanMotionServer(
+    const rclcpp::NodeOptions& options,
+    PlanMotionServerDependencies dependencies)
+    : rclcpp_lifecycle::LifecycleNode("lunar_planner", options),
+      impl_(std::make_unique<Impl>(*this, std::move(dependencies))) {}
+
+PlanMotionServer::~PlanMotionServer() = default;
+
+PlanMotionServer::CallbackReturn PlanMotionServer::on_configure(
+    const rclcpp_lifecycle::State&) {
+  return impl_->Configure();
+}
+
+PlanMotionServer::CallbackReturn PlanMotionServer::on_activate(
+    const rclcpp_lifecycle::State&) {
+  return impl_->Activate();
+}
+
+PlanMotionServer::CallbackReturn PlanMotionServer::on_deactivate(
+    const rclcpp_lifecycle::State&) {
+  return impl_->Deactivate("PLANNER_DEACTIVATED");
+}
+
+PlanMotionServer::CallbackReturn PlanMotionServer::on_cleanup(
+    const rclcpp_lifecycle::State&) {
+  return impl_->Cleanup();
+}
+
+PlanMotionServer::CallbackReturn PlanMotionServer::on_shutdown(
+    const rclcpp_lifecycle::State&) {
+  return impl_->Deactivate("PLANNER_SHUTDOWN");
+}
+
+PlanMotionServer::CallbackReturn PlanMotionServer::on_error(
+    const rclcpp_lifecycle::State&) {
+  return impl_->Error();
+}
+
+std::size_t PlanMotionServer::callback_group_count_for_testing() const noexcept {
+  return impl_->CallbackGroups().size();
+}
+
+bool PlanMotionServer::callback_groups_mutually_exclusive_for_testing() const {
+  const auto groups = impl_->CallbackGroups();
+  for (std::size_t first = 0U; first < groups.size(); ++first) {
+    if (!groups[first] || groups[first]->type() !=
+            rclcpp::CallbackGroupType::MutuallyExclusive) {
+      return false;
+    }
+    for (std::size_t second = first + 1U; second < groups.size(); ++second) {
+      if (groups[first] == groups[second]) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool PlanMotionServer::worker_active_for_testing() const {
+  std::scoped_lock lock{impl_->state_mutex};
+  return impl_->worker_running;
+}
+
+std::optional<std::uint64_t>
+PlanMotionServer::mission_revision_for_testing() const {
+  std::scoped_lock lock{impl_->state_mutex};
+  if (!impl_->mission) {
+    return std::nullopt;
+  }
+  return impl_->mission->revision;
+}
+
+std::string PlanMotionServer::last_diagnostic_reason_for_testing() const {
+  std::scoped_lock lock{impl_->diagnostic_mutex};
+  return impl_->last_diagnostic_reason;
+}
+
+}  // namespace lunar::planning::ros

@@ -40,7 +40,11 @@ GoalRequest ValidGoal() {
                   .position_m = {12.0, 0.5, 0.0},
                   .tolerance_m = 0.2,
               },
+              .yaw_rad = std::nullopt,
+              .yaw_tolerance_rad = 0.0,
           },
+      .previous_execution = std::nullopt,
+      .stop_token = {},
   };
 }
 

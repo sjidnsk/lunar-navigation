@@ -201,7 +201,10 @@ inline lunar::planning::WheeledCapability MakeWheeledCapability() {
               .primitive_id = "forward",
               .kind = lunar::planning::WheelPrimitiveKind::kForward,
               .relative_end_pose =
-                  lunar::planning::Pose3{.position_m = {1.0, 0.0, 0.0}},
+                  lunar::planning::Pose3{
+                      .position_m = {1.0, 0.0, 0.0},
+                      .orientation = {},
+                  },
               .nominal_duration = std::chrono::seconds{1},
           }},
   };
