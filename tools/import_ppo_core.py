@@ -839,6 +839,365 @@ def _scan_output(
                     )
 
 
+def _manual_import_module(
+    node: ast.ImportFrom, target: PurePosixPath
+) -> str:
+    if node.level == 0:
+        if node.module is None:
+            raise ImportError(f"unresolved import in manual target {target}")
+        return node.module
+    package_parts = ("lunar_policy_training", *target.parent.parts)
+    if node.level > len(package_parts):
+        raise ImportError(f"relative import escapes package in manual target {target}")
+    base_parts = package_parts[: len(package_parts) - node.level + 1]
+    module_parts = tuple(node.module.split(".")) if node.module else ()
+    return ".".join((*base_parts, *module_parts))
+
+
+def _manual_import_bindings(
+    *,
+    tree: ast.Module,
+    spec: _MappingSpec,
+    allow_dependencies: set[str],
+) -> dict[str, _ImportBinding]:
+    bindings: dict[str, _ImportBinding] = {}
+    allowed = set(allow_dependencies) | {"lunar_policy_training"}
+
+    def register(
+        binding: str,
+        node: ast.Import | ast.ImportFrom,
+        alias: ast.alias,
+        module: str,
+    ) -> None:
+        if binding in bindings:
+            raise ImportError(
+                f"duplicate import binding in manual target {spec.target}: {binding}"
+            )
+        bindings[binding] = _ImportBinding(binding, node, alias, module, None)
+
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                _validate_module(
+                    alias.name,
+                    spec.target,
+                    {},
+                    allowed,
+                    spec.forbid_imports,
+                )
+                register(
+                    alias.asname or alias.name.split(".", maxsplit=1)[0],
+                    node,
+                    alias,
+                    alias.name,
+                )
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module == "__future__":
+                if any(alias.name != "annotations" for alias in node.names):
+                    raise ImportError(
+                        f"unsupported future import in manual target {spec.target}"
+                    )
+                continue
+            module = _manual_import_module(node, spec.target)
+            _validate_module(
+                module,
+                spec.target,
+                {},
+                allowed,
+                spec.forbid_imports,
+            )
+            for alias in node.names:
+                if alias.name == "*":
+                    raise ImportError(
+                        f"star import in manual target {spec.target}: {module}"
+                    )
+                register(alias.asname or alias.name, node, alias, module)
+    return bindings
+
+
+def _is_safe_manual_decorator(
+    node: ast.expr,
+    import_bindings: dict[str, _ImportBinding],
+    definition_names: set[str],
+    *,
+    method: bool,
+) -> bool:
+    expression = node.func if isinstance(node, ast.Call) else node
+    if not isinstance(expression, ast.Name):
+        return False
+    if method and expression.id in {"classmethod", "staticmethod", "property"}:
+        return (
+            expression.id not in import_bindings
+            and expression.id not in definition_names
+            and not isinstance(node, ast.Call)
+        )
+    binding = import_bindings.get(expression.id)
+    if not (
+        binding
+        and isinstance(binding.node, ast.ImportFrom)
+        and binding.module == "dataclasses"
+        and binding.alias.name == "dataclass"
+    ):
+        return False
+    if not isinstance(node, ast.Call):
+        return True
+    return all(
+        _is_safe_constant_expression(value, import_bindings, definition_names)
+        for value in (
+            *node.args,
+            *(keyword.value for keyword in node.keywords),
+        )
+    )
+
+
+def _manual_definition_is_safe(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+    import_bindings: dict[str, _ImportBinding],
+    definition_names: set[str],
+    *,
+    method: bool = False,
+) -> bool:
+    if not all(
+        _is_safe_manual_decorator(
+            decorator,
+            import_bindings,
+            definition_names,
+            method=method,
+        )
+        for decorator in node.decorator_list
+    ):
+        return False
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        expressions: list[ast.expr | None] = [
+            *node.args.defaults,
+            *node.args.kw_defaults,
+            node.returns,
+            *(argument.annotation for argument in node.args.posonlyargs),
+            *(argument.annotation for argument in node.args.args),
+            *(argument.annotation for argument in node.args.kwonlyargs),
+        ]
+        if node.args.vararg is not None:
+            expressions.append(node.args.vararg.annotation)
+        if node.args.kwarg is not None:
+            expressions.append(node.args.kwarg.annotation)
+        return all(
+            _is_safe_constant_expression(
+                expression,
+                import_bindings,
+                definition_names,
+            )
+            for expression in expressions
+        )
+    if not all(
+        _is_safe_constant_expression(
+            expression,
+            import_bindings,
+            definition_names,
+        )
+        for expression in (
+            *node.bases,
+            *(keyword.value for keyword in node.keywords),
+        )
+    ):
+        return False
+    for statement in node.body:
+        if (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Constant)
+            and isinstance(statement.value.value, str)
+        ):
+            continue
+        if isinstance(statement, ast.Assign):
+            if not _is_safe_constant_expression(
+                statement.value,
+                import_bindings,
+                definition_names,
+            ):
+                return False
+            continue
+        if isinstance(statement, ast.AnnAssign):
+            if not _is_safe_constant_expression(
+                statement.value,
+                import_bindings,
+                definition_names,
+            ):
+                return False
+            continue
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not _manual_definition_is_safe(
+                statement,
+                import_bindings,
+                definition_names,
+                method=True,
+            ):
+                return False
+            continue
+        if isinstance(statement, ast.ClassDef):
+            if not _manual_definition_is_safe(
+                statement,
+                import_bindings,
+                definition_names,
+            ):
+                return False
+            continue
+        return False
+    return True
+
+
+def _scan_manual_target(
+    tree: ast.Module,
+    spec: _MappingSpec,
+    import_bindings: dict[str, _ImportBinding],
+) -> None:
+    current_observation_symbols = {
+        binding
+        for binding, imported in import_bindings.items()
+        if imported.module == "lunar_policy_training.policy.observation"
+        and binding in {"PolicyBatch", "validate_policy_batch"}
+    }
+    defined_names = {
+        name for node in tree.body for name in _definition_names(node)
+    }
+    if "PolicyBatch" in defined_names:
+        raise ImportError(
+            f"{spec.target}:PolicyBatch -> forbidden old policy symbol: PolicyBatch"
+        )
+    for top_level in tree.body:
+        owner_names = _definition_names(top_level)
+        owner = owner_names[0] if owner_names else "<module>"
+        for node in ast.walk(top_level):
+            if isinstance(node, ast.Pass) or (
+                isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and node.value.value is Ellipsis
+            ):
+                raise ImportError(
+                    f"{spec.target}:{owner} -> empty stub is forbidden"
+                )
+            values: list[str] = []
+            if isinstance(node, ast.Name):
+                values.append(node.id)
+            elif isinstance(node, ast.arg):
+                values.append(node.arg)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                values.append(node.name)
+            elif isinstance(node, ast.Attribute):
+                values.append(node.attr)
+            elif isinstance(node, ast.alias):
+                values.extend(value for value in (node.name, node.asname) if value)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                values.append(node.module)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                values.append(node.value)
+            for value in values:
+                normalized = re.sub(r"[^a-z0-9]", "", value.lower())
+                if normalized in {"any", "typechecking"} or "stub" in normalized:
+                    raise ImportError(
+                        f"{spec.target}:{owner} -> forbidden name/content: {value}"
+                    )
+                forbidden = _forbidden_output_token(value)
+                if forbidden is None:
+                    continue
+                if value in current_observation_symbols and value not in defined_names:
+                    continue
+                raise ImportError(
+                    f"{spec.target}:{owner} -> forbidden name/content: {forbidden}"
+                )
+
+
+def _validate_manual_target(
+    *,
+    repository_root: Path,
+    target_root: PurePosixPath,
+    spec: _MappingSpec,
+    allow_dependencies: set[str],
+) -> dict[str, Any]:
+    target_relative = target_root / spec.target
+    destination = _resolve_inside(repository_root, target_relative, field="target")
+    if not destination.exists():
+        raise ImportError(f"manual target is missing: {target_relative}")
+    if destination.is_symlink() or not destination.is_file():
+        raise ImportError(f"manual target is not a regular file: {target_relative}")
+    payload = destination.read_bytes()
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ImportError(f"manual target is not UTF-8: {target_relative}") from error
+    try:
+        tree = ast.parse(text, filename=target_relative.as_posix())
+        compile(tree, target_relative.as_posix(), "exec")
+    except (SyntaxError, TypeError, ValueError) as error:
+        raise ImportError(f"manual target does not compile: {target_relative}: {error}") from error
+    _reject_dynamic_execution(
+        tree,
+        spec.target,
+        {},
+        set(allow_dependencies) | {"lunar_policy_training"},
+        spec.forbid_imports,
+    )
+    import_bindings = _manual_import_bindings(
+        tree=tree,
+        spec=spec,
+        allow_dependencies=allow_dependencies,
+    )
+    definition_names = {
+        name for node in tree.body for name in _definition_names(node)
+    }
+    for index, node in enumerate(tree.body):
+        if (
+            index == 0
+            and isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        names = _definition_names(node)
+        if not names:
+            raise ImportError(
+                f"top-level execution in manual target {spec.target}: "
+                f"{type(node).__name__}"
+            )
+        if isinstance(node, ast.Assign) and not _is_safe_constant_expression(
+            node.value, import_bindings, definition_names
+        ):
+            raise ImportError(
+                f"top-level constant execution in manual target {spec.target}:{names[0]}"
+            )
+        if isinstance(node, ast.AnnAssign) and not _is_safe_constant_expression(
+            node.value, import_bindings, definition_names
+        ):
+            raise ImportError(
+                f"top-level constant execution in manual target {spec.target}:{names[0]}"
+            )
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if not _manual_definition_is_safe(
+                node,
+                import_bindings,
+                definition_names,
+            ):
+                raise ImportError(
+                    f"definition-time execution in manual target "
+                    f"{spec.target}:{names[0]}"
+                )
+            for child in ast.walk(node):
+                if isinstance(child, (ast.Import, ast.ImportFrom)):
+                    raise ImportError(
+                        f"nested import in manual target {spec.target}:{names[0]}"
+                    )
+    _scan_manual_target(tree, spec, import_bindings)
+    return {
+        "target_sha256": hashlib.sha256(payload).hexdigest(),
+        "target_size_bytes": len(payload),
+        "target_validation": {
+            "ast": "parsed-and-compiled",
+            "imports": "static-allowlist-and-no-dynamic-imports",
+            "kind": "manual-python-adapter",
+        },
+    }
+
+
 def _extract_symbols(
     *,
     spec: _MappingSpec,
@@ -1248,8 +1607,15 @@ def import_snapshot(
                 allow_dependencies=set(allowed),
             )
             pending.append((spec, transformed.encode("utf-8")))
-        files.append(
-            {
+        target_proof: dict[str, Any] = {}
+        if spec.mode == "manual_thin_adapter":
+            target_proof = _validate_manual_target(
+                repository_root=repository_root,
+                target_root=target_root,
+                spec=spec,
+                allow_dependencies=set(allowed),
+            )
+        file_record = {
                 "adaptation": spec.adaptation,
                 "group": spec.group,
                 "mode": spec.mode,
@@ -1278,7 +1644,8 @@ def import_snapshot(
                 ],
                 "target": (target_root / spec.target).as_posix(),
             }
-        )
+        file_record.update(target_proof)
+        files.append(file_record)
 
     for spec, payload in pending:
         destination = _resolve_inside(

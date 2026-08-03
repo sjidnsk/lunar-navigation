@@ -1171,6 +1171,19 @@ def test_real_frozen_commit_extracts_six_clean_importable_cores_with_exact_prove
         "eval/baseline_core.py": "lunar_policy_training.eval.baseline_core",
         "eval/metrics_core.py": "lunar_policy_training.eval.metrics_core",
     }
+    manual_targets = {
+        "src/lunar_exploration_ppo/ppo/collector.py": "ppo/collector.py",
+        "src/lunar_exploration_ppo/ppo/checkpoint.py": "ppo/checkpoint.py",
+    }
+    package_root = tmp_path / "training/lunar_policy_training/lunar_policy_training"
+    repository_package_root = (
+        REPOSITORY_ROOT
+        / "training/lunar_policy_training/lunar_policy_training"
+    )
+    for target in manual_targets.values():
+        destination = package_root / target
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((repository_package_root / target).read_bytes())
     result_path = tmp_path / "migration/ppo_import_result.json"
 
     result = import_snapshot(
@@ -1199,6 +1212,19 @@ def test_real_frozen_commit_extracts_six_clean_importable_cores_with_exact_prove
         assert entry["source_blob_oid"] == _git(
             REAL_FROZEN_SOURCE, "rev-parse", f"{REAL_FROZEN_COMMIT}:{source}"
         ).strip()
+    for source, target in manual_targets.items():
+        entry = result_by_source[source]
+        target_payload = (package_root / target).read_bytes()
+        assert entry["mode"] == "manual_thin_adapter"
+        assert entry["requested_symbols"] == []
+        assert entry["resolved_symbols"] == []
+        assert entry["target_sha256"] == hashlib.sha256(target_payload).hexdigest()
+        assert entry["target_size_bytes"] == len(target_payload)
+        assert entry["target_validation"] == {
+            "ast": "parsed-and-compiled",
+            "imports": "static-allowlist-and-no-dynamic-imports",
+            "kind": "manual-python-adapter",
+        }
 
     forbidden = re.compile(
         r"\b(?:stage\d*|contentref|authority|repair|artifact|durable|"
@@ -1206,7 +1232,6 @@ def test_real_frozen_commit_extracts_six_clean_importable_cores_with_exact_prove
         r"crossattentionfrontierpolicy)\b",
         re.IGNORECASE,
     )
-    package_root = tmp_path / "training/lunar_policy_training/lunar_policy_training"
     clean_env = os.environ.copy()
     clean_env.update(
         {
@@ -1231,13 +1256,26 @@ def test_real_frozen_commit_extracts_six_clean_importable_cores_with_exact_prove
         )
 
 
-def test_manual_thin_adapter_mode_records_provenance_without_copying_source(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Would fail if a manual adapter entry copied legacy source or lost its hash record."""
-    source, commit, origin = _frozen_source(
-        tmp_path, cross_attention_payload=b"RESULT = 3\n"
+def _write_manual_target(
+    repository_root: pathlib.Path,
+    payload: str = (
+        "from __future__ import annotations\n"
+        "from dataclasses import dataclass\n"
+        "@dataclass(frozen=True)\n"
+        "class CollectorConfig:\n"
+        "    horizon: int\n"
+    ),
+) -> pathlib.Path:
+    target = (
+        repository_root
+        / "training/lunar_policy_training/lunar_policy_training/ppo/collector.py"
     )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(payload, encoding="utf-8")
+    return target
+
+
+def _manual_collector_map(source: pathlib.Path, commit: str) -> dict[str, object]:
     file_map = _map(source, commit)
     observation_entry = file_map["groups"]["policy"][0]  # type: ignore[index]
     observation_entry["target"] = "ppo/collector.py"
@@ -1247,6 +1285,20 @@ def test_manual_thin_adapter_mode_records_provenance_without_copying_source(
         "kind": "in_memory_vector_env",
         "require_target_in_2b": True,
     }
+    return file_map
+
+
+def test_manual_thin_adapter_validates_target_and_records_both_provenances(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if a legal adapter was copied from legacy or its target proof was lost."""
+    source, commit, origin = _frozen_source(
+        tmp_path, cross_attention_payload=b"RESULT = 3\n"
+    )
+    file_map = _manual_collector_map(source, commit)
+    observation_entry = file_map["groups"]["policy"][0]  # type: ignore[index]
+    target = _write_manual_target(tmp_path)
+    target_before = target.read_bytes()
     inventory_path, map_path, result_path = _write_contracts(
         tmp_path, _inventory_for_source(source, commit, origin), file_map
     )
@@ -1264,10 +1316,110 @@ def test_manual_thin_adapter_mode_records_provenance_without_copying_source(
     assert manual["requested_symbols"] == []
     assert manual["resolved_symbols"] == []
     assert manual["source_sha256"] == observation_entry["sha256"]
-    assert not (
-        tmp_path
-        / "training/lunar_policy_training/lunar_policy_training/ppo/collector.py"
-    ).exists()
+    assert manual["target_sha256"] == hashlib.sha256(target_before).hexdigest()
+    assert manual["target_size_bytes"] == len(target_before)
+    assert manual["target_validation"] == {
+        "ast": "parsed-and-compiled",
+        "imports": "static-allowlist-and-no-dynamic-imports",
+        "kind": "manual-python-adapter",
+    }
+    assert target.read_bytes() == target_before
+
+
+def test_manual_thin_adapter_rejects_missing_target(tmp_path: pathlib.Path) -> None:
+    """Would fail if provenance could claim validation for an absent public adapter."""
+    source, commit, origin = _frozen_source(
+        tmp_path, cross_attention_payload=b"RESULT = 3\n"
+    )
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path,
+        _inventory_for_source(source, commit, origin),
+        _manual_collector_map(source, commit),
+    )
+
+    with pytest.raises(ImportError, match=r"manual target is missing.*ppo/collector\.py"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    (
+        (
+            "from lunar_exploration_ppo.workflows.runner import Runner\n",
+            "forbidden dependency",
+        ),
+        ("import pandas\n", "unlisted dependency"),
+        ("VALUE = __import__('torch')\n", "dynamic import"),
+        ("from typing import Any\nVALUE: Any = 1\n", "Any"),
+        ("class PolicyBatch:\n    pass\n", "PolicyBatch"),
+        ("def run():\n    return 1\nrun()\n", "top-level execution"),
+        (
+            "def run(value):\n    return value\n@run(1)\nclass Adapter:\n    value = 1\n",
+            "definition-time execution",
+        ),
+        (
+            "def run():\n    return 1\ndef collect(value=run()):\n    return value\n",
+            "definition-time execution",
+        ),
+    ),
+)
+def test_manual_thin_adapter_rejects_unsafe_target_behavior(
+    tmp_path: pathlib.Path, payload: str, message: str
+) -> None:
+    """Would fail if an adapter target bypassed the extracted-core safety boundary."""
+    source, commit, origin = _frozen_source(
+        tmp_path, cross_attention_payload=b"RESULT = 3\n"
+    )
+    file_map = _manual_collector_map(source, commit)
+    _write_manual_target(tmp_path, payload)
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    with pytest.raises(ImportError, match=message):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+def test_manual_thin_adapter_result_is_byte_deterministic(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if target verification introduced paths, timestamps, or unstable order."""
+    source, commit, origin = _frozen_source(
+        tmp_path, cross_attention_payload=b"RESULT = 3\n"
+    )
+    inventory_path, map_path, _ = _write_contracts(
+        tmp_path,
+        _inventory_for_source(source, commit, origin),
+        _manual_collector_map(source, commit),
+    )
+    results: list[bytes] = []
+    for name in ("manual-a", "manual-b"):
+        repository_root = tmp_path / name
+        repository_root.mkdir()
+        _write_manual_target(repository_root)
+        result_path = repository_root / "migration/result.json"
+        import_snapshot(
+            source_git=source,
+            repository_root=repository_root,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+        results.append(result_path.read_bytes())
+
+    assert results[0] == results[1]
 
 
 @pytest.mark.parametrize("field", ("sha256", "target", "allow_symbols"))
