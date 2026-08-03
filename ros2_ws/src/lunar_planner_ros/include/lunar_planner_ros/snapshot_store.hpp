@@ -1,0 +1,45 @@
+#pragma once
+
+#include <cstddef>
+#include <mutex>
+#include <optional>
+#include <vector>
+
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <grid_map_msgs/msg/grid_map.hpp>
+#include <lunar_navigation_msgs/msg/localization_status.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <tf2_msgs/msg/tf_message.hpp>
+
+namespace lunar::planning::ros {
+
+struct SnapshotStoreView final {
+  std::optional<grid_map_msgs::msg::GridMap> global_map;
+  std::optional<grid_map_msgs::msg::GridMap> local_map;
+  std::optional<nav_msgs::msg::Odometry> odometry;
+  std::optional<lunar_navigation_msgs::msg::LocalizationStatus>
+      localization_status;
+  std::vector<geometry_msgs::msg::TransformStamped> transforms;
+};
+
+class SnapshotStore final {
+ public:
+  explicit SnapshotStore(std::size_t maximum_transform_samples = 256U);
+
+  void UpdateGlobalMap(const grid_map_msgs::msg::GridMap& message);
+  void UpdateLocalMap(const grid_map_msgs::msg::GridMap& message);
+  void UpdateOdometry(const nav_msgs::msg::Odometry& message);
+  void UpdateLocalizationStatus(
+      const lunar_navigation_msgs::msg::LocalizationStatus& message);
+  void UpdateTransforms(const tf2_msgs::msg::TFMessage& message);
+  void ClearTransforms();
+
+  [[nodiscard]] SnapshotStoreView Capture() const;
+
+ private:
+  std::size_t maximum_transform_samples_;
+  mutable std::mutex mutex_;
+  SnapshotStoreView view_;
+};
+
+}  // namespace lunar::planning::ros

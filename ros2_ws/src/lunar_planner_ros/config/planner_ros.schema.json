@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lunar-navigation.local/schemas/planner_ros.schema.json",
+  "title": "Lunar planner ROS snapshot policy",
+  "description": "Required time-consistency limits for freezing one planner input snapshot. Duration values are expressed in seconds.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "global_map_max_age",
+    "local_map_max_age",
+    "odometry_max_age",
+    "localization_status_max_age",
+    "tf_max_age",
+    "max_pairwise_skew"
+  ],
+  "properties": {
+    "global_map_max_age": {
+      "$ref": "#/$defs/positive_duration"
+    },
+    "local_map_max_age": {
+      "$ref": "#/$defs/positive_duration"
+    },
+    "odometry_max_age": {
+      "$ref": "#/$defs/positive_duration"
+    },
+    "localization_status_max_age": {
+      "$ref": "#/$defs/positive_duration"
+    },
+    "tf_max_age": {
+      "$ref": "#/$defs/positive_duration"
+    },
+    "max_pairwise_skew": {
+      "$ref": "#/$defs/positive_duration"
+    }
+  },
+  "$defs": {
+    "positive_duration": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  }
+}
