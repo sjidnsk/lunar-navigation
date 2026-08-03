@@ -22,6 +22,11 @@ endfunction()
 
 add_library(${PROJECT_NAME} SHARED
   src/planner.cpp
+  src/legged/legged_lattice.cpp
+  src/legged/legged_planner.cpp
+  src/legged/legged_spline_optimizer.cpp
+  src/legged/legged_terrain.cpp
+  src/legged/legged_timing.cpp
   src/shared/ara_star.cpp
   src/shared/bounded_qp_solver.cpp
   src/shared/candidate_ranker.cpp
@@ -150,6 +155,21 @@ if(BUILD_TESTING)
   target_link_libraries(
     lunar_planner_core_wheel_fault_matrix_test ${PROJECT_NAME})
   lunar_enable_sanitizers(lunar_planner_core_wheel_fault_matrix_test)
+
+  ament_add_gtest(lunar_planner_core_legged_planner_test
+    test/legged_planner_test.cpp)
+  target_include_directories(lunar_planner_core_legged_planner_test PRIVATE
+    src test)
+  target_link_libraries(lunar_planner_core_legged_planner_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_legged_planner_test)
+
+  ament_add_gtest(lunar_planner_core_legged_fault_matrix_test
+    test/legged_fault_matrix_test.cpp)
+  target_include_directories(lunar_planner_core_legged_fault_matrix_test PRIVATE
+    src test)
+  target_link_libraries(
+    lunar_planner_core_legged_fault_matrix_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_legged_fault_matrix_test)
 
   if(LUNAR_BUILD_LEGACY_V3)
     ament_add_gtest(lunar_planner_core_legacy_adapter_test

@@ -1,0 +1,53 @@
+#pragma once
+
+#include <optional>
+#include <stop_token>
+#include <string>
+#include <vector>
+
+#include "legged/legged_types.hpp"
+#include "lunar_planner_core/types/planner_io.hpp"
+#include "shared/ara_star.hpp"
+#include "shared/safe_projection.hpp"
+
+namespace lunar::planning::legged {
+
+struct LeggedLatticeGraph final {
+  shared::AraStarProblem search_problem;
+  std::vector<LeggedLatticeState> states;
+  std::vector<LeggedTransition> transitions;
+};
+
+enum class LeggedLatticeStatus {
+  kReady,
+  kCanceled,
+  kResourceExhausted,
+  kInvalidRequest,
+};
+
+struct LeggedLatticeBuildResult final {
+  LeggedLatticeStatus status{LeggedLatticeStatus::kInvalidRequest};
+  std::optional<LeggedLatticeGraph> graph;
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept {
+    return status == LeggedLatticeStatus::kReady && graph.has_value();
+  }
+};
+
+[[nodiscard]] bool GoalContainsBodyPose(
+    const GoalRegion& goal, const LeggedPose& pose) noexcept;
+
+[[nodiscard]] LeggedLatticeBuildResult BuildLeggedLattice(
+    const LeggedState& current_state,
+    const GoalRegion& goal,
+    const shared::SafeProjection& projection,
+    const LeggedCapability& capability,
+    const PlannerConfig& config,
+    std::stop_token stop_token);
+
+[[nodiscard]] std::optional<LeggedDiscretePlan> ResolveLeggedPlan(
+    const LeggedLatticeGraph& graph,
+    const shared::AraStarResult& search_result);
+
+}  // namespace lunar::planning::legged

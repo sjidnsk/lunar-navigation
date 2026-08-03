@@ -1,0 +1,29 @@
+#pragma once
+
+#include <optional>
+#include <stop_token>
+#include <string>
+#include <vector>
+
+#include "legged/legged_types.hpp"
+#include "lunar_planner_core/types/motion_reference.hpp"
+#include "lunar_planner_core/types/platform_capability.hpp"
+
+namespace lunar::planning::legged {
+
+struct LeggedTimingResult final {
+  std::optional<TrajectoryReference> trajectory;
+  bool canceled{};
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept {
+    return trajectory.has_value() && !canceled && reason_code.empty();
+  }
+};
+
+[[nodiscard]] LeggedTimingResult ParameterizeLeggedBodyTiming(
+    const std::vector<LeggedTransition>& transitions,
+    const LeggedCapability& capability,
+    std::stop_token stop_token);
+
+}  // namespace lunar::planning::legged

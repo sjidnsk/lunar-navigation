@@ -160,7 +160,8 @@ void MakeGoalKnownInfeasible(
       setup == "numerical_failure"
           ? LegacyV3FaultMode::kThrowingRegistry
           : LegacyV3FaultMode::kNone;
-  if (platform == PlatformType::kWheeled &&
+  if ((platform == PlatformType::kWheeled ||
+       platform == PlatformType::kLegged) &&
       fault_mode == LegacyV3FaultMode::kNone) {
     Planner planner;
     return planner.Plan(input);

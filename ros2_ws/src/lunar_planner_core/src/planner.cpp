@@ -9,6 +9,7 @@
 #include <string_view>
 #include <utility>
 
+#include "legged/legged_planner.hpp"
 #include "wheel/wheel_planner.hpp"
 
 #ifdef LUNAR_HAS_LEGACY_V3
@@ -68,6 +69,7 @@ constexpr std::array<std::string_view, 10> kRequiredMapLayers{
 }  // namespace
 
 struct Planner::Impl final {
+  legged::LeggedPlanner legged_planner;
   wheel::WheelPlanner wheel_planner;
 #ifdef LUNAR_HAS_LEGACY_V3
   LegacyV3Adapter adapter;
@@ -104,6 +106,9 @@ PlannerOutput Planner::Plan(const PlannerInput& input) noexcept {
     }
     if (CapabilityPlatform(input.capability) == PlatformType::kWheeled) {
       return impl_->wheel_planner.Plan(input);
+    }
+    if (CapabilityPlatform(input.capability) == PlatformType::kLegged) {
+      return impl_->legged_planner.Plan(input);
     }
 #ifdef LUNAR_HAS_LEGACY_V3
     return impl_->adapter.Plan(input);
