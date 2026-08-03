@@ -9,6 +9,7 @@ from typing import Callable, Protocol
 from lunar_planner_training_bridge import (
     ExecutionDirective,
     MotionReference,
+    PlannerBridge,
     PlannerOutput,
     PlanningOutcome,
     TrainingPlanRequest,
@@ -16,6 +17,44 @@ from lunar_planner_training_bridge import (
 
 from ..policy.observation import PolicyBatch
 from .macro_step import PlannerTransition, PolicyAction
+
+
+_REFERENCE_OUTPUTS = frozenset(
+    {
+        (
+            PlanningOutcome.NEW_REFERENCE_AVAILABLE,
+            ExecutionDirective.ACTIVATE_NEW_REFERENCE,
+        ),
+    }
+)
+_NO_REFERENCE_OUTPUTS = frozenset(
+    {
+        (
+            PlanningOutcome.SAFE_FRONTIER_REFERENCE_AVAILABLE,
+            ExecutionDirective.CONTINUE_COMMITTED_HOP,
+        ),
+        (PlanningOutcome.GOAL_INFEASIBLE, ExecutionDirective.HOLD_POSITION),
+        (PlanningOutcome.CANCELED, ExecutionDirective.HOLD_POSITION),
+        (PlanningOutcome.NUMERICAL_FAILURE, ExecutionDirective.HOLD_POSITION),
+        (PlanningOutcome.INVALID_REQUEST, ExecutionDirective.NO_SAFE_REFERENCE),
+        (
+            PlanningOutcome.NO_KNOWN_SAFE_ROUTE,
+            ExecutionDirective.NO_SAFE_REFERENCE,
+        ),
+        (
+            PlanningOutcome.RESOURCE_EXHAUSTED,
+            ExecutionDirective.NO_SAFE_REFERENCE,
+        ),
+        (
+            PlanningOutcome.ACTIVE_REFERENCE_INVALIDATED,
+            ExecutionDirective.NO_SAFE_REFERENCE,
+        ),
+        (
+            PlanningOutcome.NUMERICAL_FAILURE,
+            ExecutionDirective.NO_SAFE_REFERENCE,
+        ),
+    }
+)
 
 
 class EnvironmentInvariantError(RuntimeError):
@@ -28,9 +67,20 @@ class PlannerBridgeProtocol(Protocol):
 
 
 @dataclass(frozen=True)
+class CommittedHopExecutionFeedback:
+    execution_state: str
+    next_observation: PolicyBatch
+    coverage_delta: float
+    goal_progress: float
+    repeated_visit: bool
+    terminated: bool
+
+
+@dataclass(frozen=True)
 class DecisionBoundaryResult:
     execution_state: str
     transition: PlannerTransition | None = None
+    execution_feedback: CommittedHopExecutionFeedback | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +106,9 @@ class V3ExplorationEnvironment:
         reference_executor: Callable[
             [MotionReference], ReferenceExecutionResult
         ] | None = None,
+        committed_hop_executor: Callable[
+            [], CommittedHopExecutionFeedback
+        ] | None = None,
         plan_cost_scale: float = 1.0,
         planner_elapsed_scale_s: float = 1.0,
     ) -> None:
@@ -64,10 +117,12 @@ class V3ExplorationEnvironment:
         self._request_builder = request_builder
         self._observation = initial_observation
         self._reference_executor = reference_executor
+        self._committed_hop_executor = committed_hop_executor
         self._plan_cost_scale = plan_cost_scale
         self._planner_elapsed_scale_s = planner_elapsed_scale_s
         self._rollout_discarded = False
         self._training_stopped = False
+        self._committed_output: PlannerOutput | None = None
         self._execution_state = (
             "GROUND_HOLD" if platform_type == "HOPPER" else "DECISION_BOUNDARY"
         )
@@ -84,11 +139,8 @@ class V3ExplorationEnvironment:
         if self._execution_state in {"JUMP_COMMITTED", "IN_FLIGHT"}:
             self._fail_closed("committed hopper cannot accept a new policy action")
         output = self._bridge.plan(self._request_builder(action))
+        self._validate_output(output)
         if output.directive == ExecutionDirective.CONTINUE_COMMITTED_HOP:
-            if output.reference is not None:
-                self._fail_closed(
-                    "committed-hop directive cannot carry a replacement reference"
-                )
             return self._advance_committed_hop_without_policy(output)
         if output.reference is None:
             return self._hold_transition(
@@ -97,27 +149,54 @@ class V3ExplorationEnvironment:
                 reason_code=output.reason_code,
                 planner_elapsed=output.diagnostics.elapsed,
             )
-        if output.reference.platform_type != self._platform_type:
-            self._fail_closed("reference platform does not match episode platform")
-        if output.directive not in {
-            ExecutionDirective.ACTIVATE_NEW_REFERENCE,
-            ExecutionDirective.CONTINUE_ACTIVE_REFERENCE,
-        }:
-            self._fail_closed("execution directive does not allow its reference")
         return self._execute_reference_until_decision_boundary(output)
+
+    def _validate_output(self, output: PlannerOutput) -> None:
+        signature = (output.outcome, output.directive)
+        has_reference = output.reference is not None
+        legal = (
+            signature in _REFERENCE_OUTPUTS
+            if has_reference
+            else signature in _NO_REFERENCE_OUTPUTS
+        )
+        if not legal:
+            self._fail_closed(
+                "planner output outcome/directive/reference combination is invalid"
+            )
+        if has_reference and output.reference.platform_type != self._platform_type:
+            self._fail_closed("reference platform does not match episode platform")
+        if (
+            output.directive == ExecutionDirective.CONTINUE_COMMITTED_HOP
+            and self._platform_type != "HOPPER"
+        ):
+            self._fail_closed(
+                "committed hop directive requires a HOPPER episode"
+            )
 
     def begin_committed_hop(self) -> None:
         if self._platform_type != "HOPPER":
             raise ValueError("only HOPPER can enter a committed hop")
+        self._committed_output = None
         self._execution_state = "JUMP_COMMITTED"
 
     def advance_until_decision_boundary(
         self, policy: Callable[[PolicyBatch], PolicyAction]
     ) -> DecisionBoundaryResult:
         if self._execution_state in {"JUMP_COMMITTED", "IN_FLIGHT"}:
-            self._execution_state = "IN_FLIGHT"
-            self._execution_state = "LANDED_HOLD"
-            return DecisionBoundaryResult(execution_state=self._execution_state)
+            feedback = self._advance_committed_hop_execution()
+            output = self._committed_output
+            transition = (
+                self._committed_feedback_transition(output, feedback)
+                if output is not None
+                else None
+            )
+            if feedback.execution_state == "LANDED_HOLD":
+                self._committed_output = None
+            return DecisionBoundaryResult(
+                execution_state=self._execution_state,
+                transition=transition,
+                execution_feedback=feedback,
+            )
         action = policy(self._observation)
         transition = self.step(action)
         return DecisionBoundaryResult(
@@ -132,13 +211,52 @@ class V3ExplorationEnvironment:
             self._fail_closed(
                 "committed hop directive requires a HOPPER episode"
             )
-        self._execution_state = "IN_FLIGHT"
-        self._execution_state = "LANDED_HOLD"
-        return self._hold_transition(
-            outcome=output.outcome,
-            directive=output.directive,
+        self._committed_output = output
+        feedback = self._advance_committed_hop_execution()
+        transition = self._committed_feedback_transition(output, feedback)
+        if feedback.execution_state == "LANDED_HOLD":
+            self._committed_output = None
+        return transition
+
+    def _advance_committed_hop_execution(
+        self,
+    ) -> CommittedHopExecutionFeedback:
+        if self._committed_hop_executor is None:
+            self._fail_closed(
+                "committed hop execution feedback is required before landing"
+            )
+        feedback = self._committed_hop_executor()
+        if not isinstance(feedback, CommittedHopExecutionFeedback):
+            self._fail_closed("committed hop executor returned invalid feedback")
+        if feedback.execution_state not in {
+            "JUMP_COMMITTED",
+            "IN_FLIGHT",
+            "LANDED_HOLD",
+        }:
+            self._fail_closed("committed hop feedback has invalid execution state")
+        self._observation = feedback.next_observation
+        self._execution_state = feedback.execution_state
+        return feedback
+
+    def _committed_feedback_transition(
+        self,
+        output: PlannerOutput,
+        feedback: CommittedHopExecutionFeedback,
+    ) -> PlannerTransition:
+        return PlannerTransition(
+            next_observation=feedback.next_observation,
+            coverage_delta=feedback.coverage_delta,
+            goal_progress=feedback.goal_progress,
+            normalized_plan_cost=0.0,
+            normalized_elapsed_time=(
+                output.diagnostics.elapsed.total_seconds()
+                / self._planner_elapsed_scale_s
+            ),
+            repeated_visit=feedback.repeated_visit,
+            planning_outcome=output.outcome,
+            execution_directive=output.directive,
             reason_code=output.reason_code,
-            planner_elapsed=output.diagnostics.elapsed,
+            terminated=feedback.terminated,
         )
 
     def _execute_reference_until_decision_boundary(
@@ -211,9 +329,40 @@ def _clone_observation(observation: PolicyBatch) -> PolicyBatch:
     )
 
 
+def create_v3_environment(
+    *,
+    platform_type: str,
+    request_builder: Callable[[PolicyAction], TrainingPlanRequest],
+    initial_observation: PolicyBatch,
+    reference_executor: Callable[
+        [MotionReference], ReferenceExecutionResult
+    ] | None = None,
+    committed_hop_executor: Callable[
+        [], CommittedHopExecutionFeedback
+    ] | None = None,
+    plan_cost_scale: float = 1.0,
+    planner_elapsed_scale_s: float = 1.0,
+) -> V3ExplorationEnvironment:
+    """Compose the supported training environment with the real C++ v3 bridge."""
+    if platform_type == "HOPPER" and committed_hop_executor is None:
+        raise ValueError("production HOPPER requires a committed hop executor")
+    return V3ExplorationEnvironment(
+        platform_type=platform_type,
+        bridge=PlannerBridge(),
+        request_builder=request_builder,
+        initial_observation=initial_observation,
+        reference_executor=reference_executor,
+        committed_hop_executor=committed_hop_executor,
+        plan_cost_scale=plan_cost_scale,
+        planner_elapsed_scale_s=planner_elapsed_scale_s,
+    )
+
+
 __all__ = [
+    "CommittedHopExecutionFeedback",
     "DecisionBoundaryResult",
     "EnvironmentInvariantError",
     "ReferenceExecutionResult",
     "V3ExplorationEnvironment",
+    "create_v3_environment",
 ]

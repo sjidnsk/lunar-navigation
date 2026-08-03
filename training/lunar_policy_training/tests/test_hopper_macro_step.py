@@ -16,6 +16,7 @@ from lunar_planner_training_bridge import (  # noqa: E402
 import pytest  # noqa: E402
 
 from lunar_policy_training.environment.v3_environment import (  # noqa: E402
+    CommittedHopExecutionFeedback,
     EnvironmentInvariantError,
     V3ExplorationEnvironment,
 )
@@ -33,6 +34,16 @@ class _Bridge:
         return self.output
 
 
+class _CommittedHopSimulator:
+    def __init__(self, *feedback: CommittedHopExecutionFeedback) -> None:
+        self._feedback = list(feedback)
+
+    def __call__(self) -> CommittedHopExecutionFeedback:
+        if not self._feedback:
+            raise AssertionError("unexpected committed-hop simulation advance")
+        return self._feedback.pop(0)
+
+
 def _hopper_observation() -> PolicyBatch:
     return PolicyBatch(
         prior_channels=torch.zeros((1, 7, 4, 4), dtype=torch.float32),
@@ -45,13 +56,36 @@ def _hopper_observation() -> PolicyBatch:
     )
 
 
+def _execution_feedback(
+    execution_state: str,
+    *,
+    marker: float,
+    coverage_delta: float,
+    goal_progress: float,
+) -> CommittedHopExecutionFeedback:
+    observation = _hopper_observation()
+    observation.pose_features[0, 0] = marker
+    return CommittedHopExecutionFeedback(
+        execution_state=execution_state,
+        next_observation=observation,
+        coverage_delta=coverage_delta,
+        goal_progress=goal_progress,
+        repeated_visit=False,
+        terminated=False,
+    )
+
+
 def test_hopper_does_not_request_policy_while_committed() -> None:
     """Would fail if policy could replace a committed or in-flight hop."""
+    landed = _execution_feedback(
+        "LANDED_HOLD", marker=1.0, coverage_delta=0.1, goal_progress=0.2
+    )
     hopper_env = V3ExplorationEnvironment(
         platform_type="HOPPER",
         bridge=Mock(),
         request_builder=Mock(),
         initial_observation=_hopper_observation(),
+        committed_hop_executor=_CommittedHopSimulator(landed),
     )
     policy_spy = Mock()
 
@@ -60,6 +94,36 @@ def test_hopper_does_not_request_policy_while_committed() -> None:
 
     assert policy_spy.call_count == 0
     assert result.execution_state == "LANDED_HOLD"
+
+
+def test_hopper_remains_in_flight_without_landed_feedback() -> None:
+    """Would fail if repeated committed advances invented a landing boundary."""
+    first_feedback = _execution_feedback(
+        "IN_FLIGHT", marker=1.0, coverage_delta=0.1, goal_progress=0.2
+    )
+    second_feedback = _execution_feedback(
+        "IN_FLIGHT", marker=2.0, coverage_delta=0.3, goal_progress=0.4
+    )
+    hopper_env = V3ExplorationEnvironment(
+        platform_type="HOPPER",
+        bridge=Mock(),
+        request_builder=Mock(),
+        initial_observation=_hopper_observation(),
+        committed_hop_executor=_CommittedHopSimulator(
+            first_feedback, second_feedback
+        ),
+    )
+    policy_spy = Mock()
+
+    hopper_env.begin_committed_hop()
+    first = hopper_env.advance_until_decision_boundary(policy_spy)
+    second = hopper_env.advance_until_decision_boundary(policy_spy)
+
+    assert policy_spy.call_count == 0
+    assert first.execution_state == "IN_FLIGHT"
+    assert first.execution_feedback is first_feedback
+    assert second.execution_state == "IN_FLIGHT"
+    assert second.execution_feedback is second_feedback
 
 
 def test_hopper_rejects_explicit_action_while_committed() -> None:
@@ -79,25 +143,48 @@ def test_hopper_rejects_explicit_action_while_committed() -> None:
     assert hopper_env.training_stopped is True
 
 
+def test_production_hopper_factory_requires_execution_feedback() -> None:
+    """Would fail if production could compose a hopper with fake landing state."""
+    from lunar_policy_training.environment.v3_environment import (
+        create_v3_environment,
+    )
+
+    with pytest.raises(ValueError, match="committed hop executor"):
+        create_v3_environment(
+            platform_type="HOPPER",
+            request_builder=Mock(),
+            initial_observation=_hopper_observation(),
+        )
+
+
 def test_hopper_resumes_policy_only_after_landed_hold() -> None:
     """Would fail if the policy stayed disabled after the landing boundary."""
     output = PlannerOutput()
     output.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
     output.directive = ExecutionDirective.NO_SAFE_REFERENCE
     output.reason_code = "LANDED_NO_ROUTE"
+    landed = _execution_feedback(
+        "LANDED_HOLD", marker=3.0, coverage_delta=0.25, goal_progress=0.5
+    )
     hopper_env = V3ExplorationEnvironment(
         platform_type="HOPPER",
         bridge=_Bridge(output),
         request_builder=lambda action: action,
         initial_observation=_hopper_observation(),
+        committed_hop_executor=_CommittedHopSimulator(landed),
     )
     policy_spy = Mock(return_value=PolicyAction(frontier_index=0, theta_rad=0.0))
 
     hopper_env.begin_committed_hop()
-    hopper_env.advance_until_decision_boundary(policy_spy)
+    landed_result = hopper_env.advance_until_decision_boundary(policy_spy)
     result = hopper_env.advance_until_decision_boundary(policy_spy)
 
     assert policy_spy.call_count == 1
+    assert policy_spy.call_args.args[0] is landed.next_observation
+    assert landed_result.execution_state == "LANDED_HOLD"
+    assert landed_result.execution_feedback is landed
+    assert landed_result.execution_feedback.coverage_delta == 0.25
+    assert landed_result.execution_feedback.goal_progress == 0.5
     assert result.execution_state == "LANDED_HOLD"
     assert result.transition is not None
     assert result.transition.reason_code == "LANDED_NO_ROUTE"

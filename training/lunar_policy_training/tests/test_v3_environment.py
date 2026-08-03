@@ -14,12 +14,14 @@ from lunar_planner_training_bridge import (  # noqa: E402
     PlannerDiagnostics,
     PlannerOutput,
     PlanningOutcome,
+    TrainingPlanRequest,
 )
 import torch  # noqa: E402
 import pytest  # noqa: E402
 
 from lunar_policy_training.environment.macro_step import PolicyAction  # noqa: E402
 from lunar_policy_training.environment.v3_environment import (  # noqa: E402
+    CommittedHopExecutionFeedback,
     EnvironmentInvariantError,
     ReferenceExecutionResult,
     V3ExplorationEnvironment,
@@ -199,6 +201,138 @@ def test_rejecting_directive_with_reference_fails_closed() -> None:
     assert env.training_stopped is True
 
 
+def test_rejecting_outcome_with_executable_reference_fails_closed() -> None:
+    """Would fail if a failure outcome could smuggle an executable reference."""
+    output = _reference_output(
+        "WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE
+    )
+    output.outcome = PlanningOutcome.INVALID_REQUEST
+    executor = _ReferenceExecutor(
+        ReferenceExecutionResult(
+            next_observation=_observation(),
+            coverage_delta=1.0,
+            goal_progress=1.0,
+            repeated_visit=False,
+            terminated=False,
+            execution_state="DECISION_BOUNDARY",
+        )
+    )
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(output),
+        request_builder=lambda action: action,
+        initial_observation=_observation(),
+        reference_executor=executor,
+    )
+
+    with pytest.raises(EnvironmentInvariantError, match="outcome"):
+        env.step(PolicyAction(frontier_index=0, theta_rad=0.0))
+
+    assert executor.references == []
+    assert env.rollout_discarded is True
+    assert env.training_stopped is True
+
+
+def test_success_outcome_without_reference_fails_closed() -> None:
+    """Would fail if a missing successful reference were disguised as a hold."""
+    output = PlannerOutput()
+    output.outcome = PlanningOutcome.NEW_REFERENCE_AVAILABLE
+    output.directive = ExecutionDirective.ACTIVATE_NEW_REFERENCE
+    output.reason_code = "BROKEN_SUCCESS"
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(output),
+        request_builder=lambda action: action,
+        initial_observation=_observation(),
+    )
+
+    with pytest.raises(EnvironmentInvariantError, match="reference"):
+        env.step(PolicyAction(frontier_index=0, theta_rad=0.0))
+
+    assert env.rollout_discarded is True
+    assert env.training_stopped is True
+
+
+@pytest.mark.parametrize(
+    ("outcome", "directive"),
+    [
+        (PlanningOutcome.INVALID_REQUEST, ExecutionDirective.NO_SAFE_REFERENCE),
+        (
+            PlanningOutcome.NO_KNOWN_SAFE_ROUTE,
+            ExecutionDirective.NO_SAFE_REFERENCE,
+        ),
+        (
+            PlanningOutcome.RESOURCE_EXHAUSTED,
+            ExecutionDirective.NO_SAFE_REFERENCE,
+        ),
+        (
+            PlanningOutcome.ACTIVE_REFERENCE_INVALIDATED,
+            ExecutionDirective.NO_SAFE_REFERENCE,
+        ),
+        (
+            PlanningOutcome.NUMERICAL_FAILURE,
+            ExecutionDirective.NO_SAFE_REFERENCE,
+        ),
+        (PlanningOutcome.GOAL_INFEASIBLE, ExecutionDirective.HOLD_POSITION),
+        (PlanningOutcome.CANCELED, ExecutionDirective.HOLD_POSITION),
+        (PlanningOutcome.NUMERICAL_FAILURE, ExecutionDirective.HOLD_POSITION),
+    ],
+)
+def test_current_cpp_v3_no_reference_outputs_hold_without_rejection(
+    outcome: PlanningOutcome, directive: ExecutionDirective
+) -> None:
+    """Would fail if the matrix rejected a combination produced by C++ v3."""
+    output = PlannerOutput()
+    output.outcome = outcome
+    output.directive = directive
+    output.reason_code = "CPP_V3_HOLD"
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(output),
+        request_builder=lambda action: action,
+        initial_observation=_observation(),
+    )
+
+    transition = env.step(PolicyAction(frontier_index=0, theta_rad=0.0))
+
+    assert transition.planning_outcome == outcome
+    assert transition.execution_directive == directive
+    assert transition.reason_code == "CPP_V3_HOLD"
+
+
+def test_current_cpp_v3_committed_hop_output_uses_execution_feedback() -> None:
+    """Would fail if the legal committed-hop output were rejected or held."""
+    output = PlannerOutput()
+    output.outcome = PlanningOutcome.SAFE_FRONTIER_REFERENCE_AVAILABLE
+    output.directive = ExecutionDirective.CONTINUE_COMMITTED_HOP
+    output.reason_code = "COMMITTED_HOP_CONTINUES"
+    observation = _observation(2)
+    feedback = CommittedHopExecutionFeedback(
+        execution_state="IN_FLIGHT",
+        next_observation=observation,
+        coverage_delta=0.2,
+        goal_progress=0.3,
+        repeated_visit=True,
+        terminated=False,
+    )
+    env = V3ExplorationEnvironment(
+        platform_type="HOPPER",
+        bridge=_Bridge(output),
+        request_builder=lambda action: action,
+        initial_observation=_observation(2),
+        committed_hop_executor=lambda: feedback,
+    )
+
+    transition = env.step(PolicyAction(frontier_index=0, theta_rad=0.0))
+
+    assert transition.next_observation is observation
+    assert transition.coverage_delta == 0.2
+    assert transition.goal_progress == 0.3
+    assert transition.repeated_visit is True
+    assert transition.planning_outcome == PlanningOutcome.SAFE_FRONTIER_REFERENCE_AVAILABLE
+    assert transition.execution_directive == ExecutionDirective.CONTINUE_COMMITTED_HOP
+
+
 def test_committed_hop_directive_on_ground_platform_fails_closed() -> None:
     """Would fail if a hopper-only directive became a recoverable ground error."""
     output = PlannerOutput()
@@ -217,3 +351,24 @@ def test_committed_hop_directive_on_ground_platform_fails_closed() -> None:
 
     assert env.rollout_discarded is True
     assert env.training_stopped is True
+
+
+def test_production_factory_step_uses_real_cpp_v3_bridge() -> None:
+    """Would fail if production composition bypassed the in-process C++ planner."""
+    from lunar_policy_training.environment.v3_environment import (
+        create_v3_environment,
+    )
+
+    request = TrainingPlanRequest()
+    request.request_id = "production-composition-invalid-map"
+    env = create_v3_environment(
+        platform_type="WHEELED",
+        request_builder=lambda action: request,
+        initial_observation=_observation(),
+    )
+
+    transition = env.step(PolicyAction(frontier_index=0, theta_rad=0.0))
+
+    assert transition.planning_outcome == PlanningOutcome.INVALID_REQUEST
+    assert transition.execution_directive == ExecutionDirective.NO_SAFE_REFERENCE
+    assert transition.reason_code == "MISSING_MAP_LAYER_ELEVATION"
