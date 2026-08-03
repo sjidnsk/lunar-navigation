@@ -1,16 +1,42 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.13)
 project(lunar_planner_core LANGUAGES CXX)
 
 find_package(ament_cmake REQUIRED)
 
 option(LUNAR_BUILD_LEGACY_V3 "Build the private frozen planner v3 baseline" ON)
+option(LUNAR_ENABLE_SANITIZERS "Enable AddressSanitizer and UBSan" OFF)
 
-add_library(${PROJECT_NAME} SHARED src/planner.cpp)
+function(lunar_enable_sanitizers target_name)
+  if(NOT LUNAR_ENABLE_SANITIZERS)
+    return()
+  endif()
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(FATAL_ERROR "LUNAR_ENABLE_SANITIZERS requires GCC or Clang")
+  endif()
+  target_compile_options(${target_name} PRIVATE
+    -fsanitize=address,undefined
+    -fno-omit-frame-pointer)
+  target_link_options(${target_name} PRIVATE
+    -fsanitize=address,undefined)
+endfunction()
+
+add_library(${PROJECT_NAME} SHARED
+  src/planner.cpp
+  src/shared/ara_star.cpp
+  src/shared/bounded_qp_solver.cpp
+  src/shared/candidate_ranker.cpp
+  src/shared/convex_corridor.cpp
+  src/shared/map_snapshot.cpp
+  src/shared/safe_projection.cpp
+  src/shared/terrain_checks.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 target_include_directories(${PROJECT_NAME}
   PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
-    "$<INSTALL_INTERFACE:include>")
+    "$<INSTALL_INTERFACE:include>"
+  PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+lunar_enable_sanitizers(${PROJECT_NAME})
 
 install(
   TARGETS ${PROJECT_NAME}
@@ -88,6 +114,22 @@ if(BUILD_TESTING)
     test/public_api_test.cpp)
   target_include_directories(lunar_planner_core_public_api_test PRIVATE test)
   target_link_libraries(lunar_planner_core_public_api_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_public_api_test)
+
+  ament_add_gtest(lunar_planner_core_shared_core_test
+    test/shared_core_test.cpp)
+  target_include_directories(lunar_planner_core_shared_core_test PRIVATE
+    src test)
+  target_link_libraries(lunar_planner_core_shared_core_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_shared_core_test)
+
+  ament_add_gtest(lunar_planner_core_shared_core_determinism_test
+    test/shared_core_determinism_test.cpp)
+  target_include_directories(
+    lunar_planner_core_shared_core_determinism_test PRIVATE src test)
+  target_link_libraries(
+    lunar_planner_core_shared_core_determinism_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_shared_core_determinism_test)
 
   if(LUNAR_BUILD_LEGACY_V3)
     ament_add_gtest(lunar_planner_core_legacy_adapter_test
@@ -95,6 +137,7 @@ if(BUILD_TESTING)
     target_include_directories(lunar_planner_core_legacy_adapter_test PRIVATE
       src test)
     target_link_libraries(lunar_planner_core_legacy_adapter_test ${PROJECT_NAME})
+    lunar_enable_sanitizers(lunar_planner_core_legacy_adapter_test)
 
     add_executable(lunar_planner_facade_summary
       test/facade_summary.cpp)
@@ -103,6 +146,7 @@ if(BUILD_TESTING)
     target_link_libraries(lunar_planner_facade_summary PRIVATE
       ${PROJECT_NAME}
       nlohmann_json::nlohmann_json)
+    lunar_enable_sanitizers(lunar_planner_facade_summary)
 
     add_test(
       NAME lunar_planner_core_legacy_adapter_v3_semantic_equivalence
