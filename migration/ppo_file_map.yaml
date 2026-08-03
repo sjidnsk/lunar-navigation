@@ -6,21 +6,33 @@ target_root: training/lunar_policy_training/lunar_policy_training
 allow_dependencies:
   - numpy
   - torch
+type_checking_dependencies:
+  - lunar_exploration_ppo.env.frontier
+  - lunar_exploration_ppo.env.map_state
+  - lunar_exploration_ppo.env.scenario
+  - lunar_exploration_ppo.env.env
+  - lunar_exploration_ppo.utils.artifact_io
+  - lunar_exploration_ppo.utils.geometry
+  - lunar_exploration_ppo.utils.path_security
+  - lunar_exploration_ppo.configs.stage1
+  - lunar_exploration_ppo.configs.stage6
 groups:
   policy:
     - source: src/lunar_exploration_ppo/policy/observation.py
-      target: policy/observation.py
+      target: frozen_ppo/policy/observation.py
     - source: src/lunar_exploration_ppo/policy/cross_attention.py
-      target: policy/cross_attention.py
+      target: frozen_ppo/policy/cross_attention.py
   ppo:
     - source: src/lunar_exploration_ppo/ppo/collector.py
-      target: ppo/collector.py
+      target: frozen_ppo/ppo/collector.py
     - source: src/lunar_exploration_ppo/ppo/rollout.py
-      target: ppo/rollout.py
+      target: frozen_ppo/ppo/rollout.py
     - source: src/lunar_exploration_ppo/ppo/trainer.py
-      target: ppo/trainer.py
+      target: frozen_ppo/ppo/trainer.py
     - source: src/lunar_exploration_ppo/ppo/checkpoint.py
-      target: ppo/checkpoint.py
+      target: frozen_ppo/ppo/checkpoint.py
   evaluation:
+    - source: src/lunar_exploration_ppo/eval/baselines.py
+      target: frozen_ppo/eval/baselines.py
     - source: src/lunar_exploration_ppo/eval/metrics.py
-      target: eval/metrics.py
+      target: frozen_ppo/eval/metrics.py

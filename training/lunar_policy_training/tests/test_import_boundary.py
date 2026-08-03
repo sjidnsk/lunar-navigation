@@ -20,7 +20,14 @@ def _git(repository: pathlib.Path, *arguments: str) -> str:
     return subprocess.check_output(["git", "-C", str(repository), *arguments], text=True)
 
 
-def _frozen_source(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str, str]:
+def _frozen_source(
+    tmp_path: pathlib.Path,
+    *,
+    observation_payload: bytes = b"VALUE = 3\n",
+    cross_attention_payload: bytes = (
+        b"from lunar_exploration_ppo.policy.observation import VALUE\nRESULT = VALUE\n"
+    ),
+) -> tuple[pathlib.Path, str, str]:
     source = tmp_path / "source"
     source.mkdir()
     _git(source, "init")
@@ -28,10 +35,8 @@ def _frozen_source(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str, str]:
     _git(source, "config", "user.name", "Task 1 test")
     _git(source, "remote", "add", "origin", "git@example.invalid:legacy.git")
     payloads = {
-        "src/lunar_exploration_ppo/policy/observation.py": b"VALUE = 3\n",
-        "src/lunar_exploration_ppo/policy/cross_attention.py": (
-            b"from lunar_exploration_ppo.policy.observation import VALUE\nRESULT = VALUE\n"
-        ),
+        "src/lunar_exploration_ppo/policy/observation.py": observation_payload,
+        "src/lunar_exploration_ppo/policy/cross_attention.py": cross_attention_payload,
     }
     for relative, payload in payloads.items():
         destination = source / relative
@@ -40,6 +45,27 @@ def _frozen_source(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str, str]:
     _git(source, "add", ".")
     _git(source, "commit", "-m", "frozen source")
     return source, _git(source, "rev-parse", "HEAD").strip(), "git@example.invalid:legacy.git"
+
+
+def _inventory_for_source(
+    source: pathlib.Path, commit: str, origin: str
+) -> dict[str, object]:
+    files = []
+    for path in (
+        "src/lunar_exploration_ppo/policy/observation.py",
+        "src/lunar_exploration_ppo/policy/cross_attention.py",
+    ):
+        payload = (source / path).read_bytes()
+        files.append(
+            {
+                "repository": "legacy_root",
+                "path": path,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+                "migration_role": "migration_source",
+            }
+        )
+    return {"repositories": {"legacy_root": {"commit": commit, "origin": origin}}, "files": files}
 
 
 def _inventory(commit: str, origin: str, *, corrupt_hash: bool = False) -> dict[str, object]:
@@ -173,3 +199,194 @@ def test_import_rejects_forbidden_legacy_dependency_with_its_source_path(tmp_pat
             file_map_path=map_path,
             result_path=result_path,
         )
+
+
+def test_import_rejects_absolute_legacy_import_statement(tmp_path: pathlib.Path) -> None:
+    """Would fail if ``import lunar_exploration_ppo...`` survived the package boundary."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        cross_attention_payload=(
+            b"import lunar_exploration_ppo.policy.observation as observation\n"
+            b"RESULT = observation.VALUE\n"
+        ),
+    )
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), _map(commit)
+    )
+
+    with pytest.raises(ImportError, match=r"absolute legacy import.*cross_attention.py"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+def test_import_rewrites_multiline_from_legacy_import(tmp_path: pathlib.Path) -> None:
+    """Would fail if a parenthesized legacy import bypassed relative rewriting."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        cross_attention_payload=(
+            b"from lunar_exploration_ppo.policy.observation import (\n"
+            b"    VALUE,\n"
+            b")\nRESULT = VALUE\n"
+        ),
+    )
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), _map(commit)
+    )
+
+    import_snapshot(
+        source_git=source,
+        repository_root=tmp_path,
+        source_inventory_path=inventory_path,
+        file_map_path=map_path,
+        result_path=result_path,
+    )
+
+    imported = tmp_path / "training/lunar_policy_training/lunar_policy_training/policy/cross_attention.py"
+    assert imported.read_text(encoding="utf-8") == "from .observation import VALUE\nRESULT = VALUE\n"
+
+
+@pytest.mark.parametrize(
+    ("statement", "message"),
+    (
+        (
+            "import importlib\nimportlib.import_module('lunar_exploration_ppo.workflows.runner')\n",
+            "forbidden dependency",
+        ),
+        (
+            "__import__('lunar_exploration_ppo.authority.guard')\n",
+            "forbidden dependency",
+        ),
+        ("import pandas\n", "unlisted dependency"),
+        ("import importlib\nimportlib.import_module('pandas')\n", "unlisted dependency"),
+    ),
+)
+def test_import_rejects_forbidden_and_unlisted_static_or_dynamic_dependencies(
+    tmp_path: pathlib.Path, statement: str, message: str
+) -> None:
+    """Would fail if a dynamic import bypassed the same dependency boundary."""
+    source, commit, origin = _frozen_source(
+        tmp_path, observation_payload=statement.encode("utf-8")
+    )
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), _map(commit)
+    )
+
+    with pytest.raises(ImportError, match=message):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+def test_import_allows_constant_dynamic_import_of_allowlisted_dependency(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if a permitted constant dynamic dependency was rejected by accident."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=(
+            b"import importlib\nNUMPY = importlib.import_module('numpy')\n"
+        ),
+    )
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), _map(commit)
+    )
+
+    import_snapshot(
+        source_git=source,
+        repository_root=tmp_path,
+        source_inventory_path=inventory_path,
+        file_map_path=map_path,
+        result_path=result_path,
+    )
+
+    imported = tmp_path / "training/lunar_policy_training/lunar_policy_training/policy/observation.py"
+    assert imported.read_text(encoding="utf-8") == "import importlib\nNUMPY = importlib.import_module('numpy')\n"
+
+
+def test_import_erases_explicit_type_only_legacy_dependency(tmp_path: pathlib.Path) -> None:
+    """Would fail if an approved type-only source dependency left a legacy import behind."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=(
+            b"from __future__ import annotations\n"
+            b"from lunar_exploration_ppo.env.frontier import FrontierActionSet\n"
+            b"def name(value: FrontierActionSet) -> str:\n    return value.__class__.__name__\n"
+        ),
+    )
+    file_map = _map(commit)
+    file_map["type_checking_dependencies"] = ["lunar_exploration_ppo.env.frontier"]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    import_snapshot(
+        source_git=source,
+        repository_root=tmp_path,
+        source_inventory_path=inventory_path,
+        file_map_path=map_path,
+        result_path=result_path,
+    )
+
+    imported = tmp_path / "training/lunar_policy_training/lunar_policy_training/policy/observation.py"
+    assert imported.read_text(encoding="utf-8") == (
+        "from __future__ import annotations\n"
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from typing import Any as FrontierActionSet\n"
+        "def name(value: FrontierActionSet) -> str:\n    return value.__class__.__name__\n"
+    )
+
+
+def test_import_erases_multiline_type_only_dependency_without_breaking_future_import(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if a multiline type-only import left invalid syntax or moved a future import."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=(
+            b'"""Frozen observation."""\n'
+            b"from __future__ import annotations\n"
+            b"from lunar_exploration_ppo.utils.path_security import (\n"
+            b"    DurableParentGuard,\n"
+            b"    PathSecurityError,\n"
+            b")\n"
+            b"def name(value: DurableParentGuard) -> type[PathSecurityError]:\n"
+            b"    return PathSecurityError\n"
+        ),
+    )
+    file_map = _map(commit)
+    file_map["type_checking_dependencies"] = ["lunar_exploration_ppo.utils.path_security"]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    import_snapshot(
+        source_git=source,
+        repository_root=tmp_path,
+        source_inventory_path=inventory_path,
+        file_map_path=map_path,
+        result_path=result_path,
+    )
+
+    imported = tmp_path / "training/lunar_policy_training/lunar_policy_training/policy/observation.py"
+    text = imported.read_text(encoding="utf-8")
+    compile(text, str(imported), "exec")
+    assert text == (
+        '"""Frozen observation."""\n'
+        "from __future__ import annotations\n"
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from typing import Any as DurableParentGuard\n"
+        "    from typing import Any as PathSecurityError\n"
+        "def name(value: DurableParentGuard) -> type[PathSecurityError]:\n"
+        "    return PathSecurityError\n"
+    )

@@ -95,33 +95,116 @@ def _validate_dependencies(
     text: str,
     legacy_targets: dict[str, PurePosixPath],
     allow_dependencies: set[str],
+    type_checking_dependencies: set[str],
 ) -> str:
     try:
         tree = ast.parse(text, filename=source_path.as_posix())
     except SyntaxError as error:
         raise ImportError(f"invalid Python source: {source_path}: {error.msg}") from error
     replacements: dict[str, str] = {}
+    needs_type_checking = False
+    importlib_names = {"importlib"}
+    dynamic_import_names = {"__import__"}
     for node in ast.walk(tree):
-        module = None
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "importlib":
+                    importlib_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "importlib":
+                for alias in node.names:
+                    if alias.name == "import_module":
+                        dynamic_import_names.add(alias.asname or alias.name)
+            if node.module == "builtins":
+                for alias in node.names:
+                    if alias.name == "__import__":
+                        dynamic_import_names.add(alias.asname or alias.name)
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 _validate_module(alias.name, source_path, legacy_targets, allow_dependencies)
+                if alias.name.startswith("lunar_exploration_ppo."):
+                    raise ImportError(
+                        f"absolute legacy import in {source_path}: {alias.name}"
+                    )
         elif isinstance(node, ast.ImportFrom):
             module = node.module
             if node.level or module is None:
                 continue
+            if module in type_checking_dependencies:
+                _validate_type_checking_dependency(module, source_path)
+                original = ast.get_source_segment(text, node)
+                if original is None:
+                    raise ImportError(f"cannot rewrite type-only dependency in {source_path}")
+                aliases = "\n".join(
+                    f"{' ' * node.col_offset}    from typing import Any as {alias.asname or alias.name}"
+                    for alias in node.names
+                )
+                replacements[original] = f"if TYPE_CHECKING:\n{aliases}"
+                needs_type_checking = True
+                continue
             _validate_module(module, source_path, legacy_targets, allow_dependencies)
             if module.removeprefix("lunar_exploration_ppo.") in legacy_targets:
                 symbols = ", ".join(alias.name + (f" as {alias.asname}" if alias.asname else "") for alias in node.names)
-                original = f"from {module} import {symbols}"
+                original = ast.get_source_segment(text, node)
+                if original is None:
+                    raise ImportError(f"cannot rewrite legacy import in {source_path}")
                 replacements[original] = _relative_import(
                     target_path,
                     legacy_targets[module.removeprefix("lunar_exploration_ppo.")],
                     symbols,
                 )
+        elif isinstance(node, ast.Call):
+            module = _dynamic_import_module_name(
+                node, importlib_names, dynamic_import_names, source_path
+            )
+            if module is None:
+                continue
+            _validate_module(module, source_path, legacy_targets, allow_dependencies)
+            if module.startswith("lunar_exploration_ppo."):
+                raise ImportError(f"dynamic legacy import in {source_path}: {module}")
     for original, replacement in replacements.items():
-        text = re.sub(rf"(?m)^{re.escape(original)}$", replacement, text)
+        text = text.replace(original, replacement)
+    if needs_type_checking:
+        lines = text.splitlines(keepends=True)
+        insertion = 0
+        body = list(tree.body)
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+            insertion = body.pop(0).end_lineno or 0
+        while body and isinstance(body[0], ast.ImportFrom) and body[0].module == "__future__":
+            insertion = body.pop(0).end_lineno or insertion
+        lines.insert(insertion, "from typing import TYPE_CHECKING\n")
+        text = "".join(lines)
     return text
+
+
+def _dynamic_import_module_name(
+    node: ast.Call,
+    importlib_names: set[str],
+    dynamic_import_names: set[str],
+    source_path: PurePosixPath,
+) -> str | None:
+    is_dynamic_import = (
+        isinstance(node.func, ast.Name) and node.func.id in dynamic_import_names
+    ) or (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "import_module"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in importlib_names
+    )
+    if not is_dynamic_import:
+        return None
+    if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
+        raise ImportError(f"dynamic import in {source_path} must use a constant module name")
+    return node.args[0].value
+
+
+def _validate_type_checking_dependency(module: str, source_path: PurePosixPath) -> None:
+    parts = {part.lower() for part in module.split(".")}
+    if parts & FORBIDDEN_DEPENDENCY_PARTS:
+        raise ImportError(f"forbidden dependency in {source_path}: {module}")
+    if not module.startswith("lunar_exploration_ppo."):
+        raise ImportError(f"type-only dependency must be legacy module in {source_path}: {module}")
 
 
 def _validate_module(
@@ -182,6 +265,9 @@ def import_snapshot(
     allowed = file_map.get("allow_dependencies")
     if not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed):
         raise ImportError("file map is missing allow_dependencies")
+    type_checking = file_map.get("type_checking_dependencies", [])
+    if not isinstance(type_checking, list) or not all(isinstance(item, str) for item in type_checking):
+        raise ImportError("type_checking_dependencies must be a list of module names")
     inventory_entries = {entry.get("path"): entry for entry in inventory.get("files", []) if entry.get("repository") == repository}
 
     mappings: list[tuple[str, PurePosixPath, PurePosixPath]] = []
@@ -228,6 +314,7 @@ def import_snapshot(
                 text=payload.decode("utf-8"),
                 legacy_targets=legacy_targets,
                 allow_dependencies=set(allowed),
+                type_checking_dependencies=set(type_checking),
             )
         except UnicodeDecodeError as error:
             raise ImportError(f"source is not UTF-8 text: {source}") from error
