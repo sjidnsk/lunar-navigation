@@ -316,7 +316,7 @@ test "$ROS_DISTRO" = humble
 test -n "$LUNAR_POLICY_MODEL_DIR"
 ros2 run lunar_policy_runtime build_engine --model-dir "$LUNAR_POLICY_MODEL_DIR" --cache-root /var/cache/lunar_navigation/tensorrt --precision fp32
 ros2 run lunar_policy_runtime verify_engine --model-dir "$LUNAR_POLICY_MODEL_DIR" --cache-root /var/cache/lunar_navigation/tensorrt
-python3 -m pytest -q tests/device/policy_runtime
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q tests/device/policy_runtime
 ```
 
 `LUNAR_POLICY_MODEL_DIR` 必须是 `/var/lib/lunar_navigation/models/<model-id>/<version>` 下的绝对版本目录，不能指向 `current`。Expected: engine 路径包含 ONNX hash 与设备运行时指纹；黄金结果、cache、故障和推理性能通过，但模型链接仍未激活。
