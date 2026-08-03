@@ -67,7 +67,9 @@ _SCANNED_TEXT_SUFFIXES = {
     ".yaml",
     ".yml",
 }
-_WINDOWS_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|[\\/]Users[\\/])")
+_WINDOWS_PATH = re.compile(
+    r"(?:(?<![A-Za-z0-9_])[A-Za-z]:[\\/]|[\\/]Users[\\/])"
+)
 
 
 def _tracked_files(root: Path) -> list[tuple[str, str, str]]:
