@@ -8,7 +8,7 @@
 - 修改中文文件优先使用补丁式编辑，并在完成后显式按 UTF-8 读取核验。
 - 禁止递归或批量删除：不得使用 `del /s`、`rd /s`、`rmdir /s`、`Remove-Item -Recurse`、`rm -rf`。
 - 删除文件时只能删除一个明确路径；批量删除必须停止并请求用户手动确认。
-- 下载、数据集、模型、缓存、导出物和运行时 artifact 默认写入 `D:/CodexDownloads` 或 `D:/CodexDownloads/lunar_navigation/<stage_short>`，不要提交训练输出、checkpoint、job state 或设备生成物。
+- 下载、数据集、模型、缓存、导出物和运行时 artifact 不得写入仓库：Windows 默认写入 `D:/CodexDownloads` 或 `D:/CodexDownloads/lunar_navigation/<stage_short>`；Ubuntu 默认写入 `~/CodexDownloads` 或 `~/CodexDownloads/lunar_navigation/<stage_short>`。不要提交训练输出、checkpoint、job state 或设备生成物。
 
 ## Git 与用户改动保护
 
@@ -28,7 +28,9 @@
   ```
 
 - 涉及外部 ROS 消息或接口适配时，先核对 `docs/interfaces/external-input-baseline.md`、`ros2_ws/src/lunar_navigation_config/config/external_interfaces.yaml` 及对应检查脚本。
-- Windows 适合源码审阅、编辑和提交；ROS 集成、C++20 构建、训练、ONNX 等价验证与 rosbag 回放以 Ubuntu 22.04 amd64 + RTX 4080 SUPER 为权威环境；原生构建、TensorRT engine 生成以及设备性能/功耗/稳定性验收以 Jetson AGX Orin 为权威环境。
+- 当前工作主机为 Ubuntu 22.04 LTS amd64 + ROS 2 Humble；执行 ROS 命令前先 `source /opt/ros/humble/setup.bash`，并确认 `ROS_DISTRO=humble`。不要混用其他 ROS 发行版生成的 `build/`、`install/`、`log/` 或接口产物。
+- Windows 适合源码审阅、编辑、提交和发起远程任务；不是 ROS 集成、Linux wheel、C++ 发布包或 TensorRT 的权威构建环境。
+- Ubuntu 22.04 + ROS 2 Humble 是 ROS 集成、C++20 构建、ONNX 等价验证和 rosbag 回放的权威环境；涉及训练的验证需要使用项目指定的 RTX 4080 SUPER 环境。原生构建、TensorRT engine 生成以及设备性能/功耗/稳定性验收以 Jetson AGX Orin 为权威环境。
 
 ## 当前主线与硬边界
 
