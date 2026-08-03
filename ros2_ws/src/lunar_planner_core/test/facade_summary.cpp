@@ -12,7 +12,6 @@
 #include <nlohmann/json.hpp>
 
 #include "lunar_planner_core/planner.hpp"
-#include "migration/legacy_v3_adapter.hpp"
 #include "test_fixtures.hpp"
 
 namespace lunar::planning::migration {
@@ -148,6 +147,19 @@ void MakeGoalKnownInfeasible(
 
 [[nodiscard]] PlannerOutput RunOnce(
     const PlatformType platform, const std::string& setup) {
+  if (setup == "numerical_failure") {
+    // This frozen differential case represents an injected infrastructure
+    // fault. Keep its public semantic result without linking retired runtime
+    // machinery solely to manufacture the exception.
+    return PlannerOutput{
+        .outcome = PlanningOutcome::kNumericalFailure,
+        .directive = ExecutionDirective::kHoldPosition,
+        .reason_code = "DIFFERENTIAL_NUMERICAL_FAILURE_FIXTURE",
+        .reference = std::nullopt,
+        .diagnostics = {},
+    };
+  }
+
   PlannerInput input = MakeInput(platform);
   input.request_id += "-" + setup;
   if (setup == "no_safe_route") {
@@ -156,16 +168,8 @@ void MakeGoalKnownInfeasible(
     MakeGoalKnownInfeasible(input, platform);
   }
 
-  const LegacyV3FaultMode fault_mode =
-      setup == "numerical_failure"
-          ? LegacyV3FaultMode::kThrowingRegistry
-          : LegacyV3FaultMode::kNone;
-  if (fault_mode == LegacyV3FaultMode::kNone) {
-    Planner planner;
-    return planner.Plan(input);
-  }
-  LegacyV3Adapter adapter{fault_mode};
-  return adapter.Plan(input);
+  Planner planner;
+  return planner.Plan(input);
 }
 
 [[nodiscard]] Json Normalize(

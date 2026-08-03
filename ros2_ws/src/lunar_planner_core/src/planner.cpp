@@ -13,10 +13,6 @@
 #include "legged/legged_planner.hpp"
 #include "wheel/wheel_planner.hpp"
 
-#ifdef LUNAR_HAS_LEGACY_V3
-#include "migration/legacy_v3_adapter.hpp"
-#endif
-
 namespace lunar::planning {
 namespace {
 
@@ -73,9 +69,6 @@ struct Planner::Impl final {
   hopper::HopperPlanner hopper_planner;
   legged::LeggedPlanner legged_planner;
   wheel::WheelPlanner wheel_planner;
-#ifdef LUNAR_HAS_LEGACY_V3
-  LegacyV3Adapter adapter;
-#endif
 };
 
 Planner::Planner() : impl_(std::make_unique<Impl>()) {}

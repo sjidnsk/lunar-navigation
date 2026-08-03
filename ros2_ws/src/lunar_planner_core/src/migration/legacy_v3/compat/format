@@ -1,9 +1,0 @@
-#pragma once
-
-// GCC 11's libstdc++ does not provide C++20 <format>. Keep this migration-only
-// compatibility header ahead of the system include path for the frozen v3 target.
-#include <fmt/format.h>
-
-namespace std {
-using fmt::format;
-}  // namespace std

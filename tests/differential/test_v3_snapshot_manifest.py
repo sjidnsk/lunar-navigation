@@ -195,8 +195,8 @@ def test_v3_file_map_selects_only_frozen_inventory_and_excludes_governance() -> 
         )
 
 
-def test_import_result_matches_every_private_snapshot_blob() -> None:
-    """Catch any post-import edit, omission, or unrecorded file in the snapshot."""
+def test_import_result_preserves_retired_snapshot_provenance() -> None:
+    """Keep the frozen provenance after its private runtime copy is retired."""
 
     result = json.loads(IMPORT_RESULT_PATH.read_text(encoding="utf-8"))
     manifest = _file_map()
@@ -204,23 +204,34 @@ def test_import_result_matches_every_private_snapshot_blob() -> None:
     assert result["source_repository"] == manifest["source"]["repository"]
     assert result["source_commit"] == manifest["source"]["commit"]
 
-    recorded_targets = {PurePosixPath(entry["target"]) for entry in result["files"]}
-    mapped_targets = {
-        PurePosixPath(entry["target"])
-        for entries in manifest["groups"].values()
+    recorded = {
+        (entry["group"], entry["source"], entry["target"])
+        for entry in result["files"]
+    }
+    mapped = {
+        (group, entry["source"], entry["target"])
+        for group, entries in manifest["groups"].items()
         for entry in entries
     }
+    assert recorded == mapped
+
+    inventory_by_source = {
+        entry["path"]: entry
+        for entry in _source_inventory()["files"]
+        if entry["repository"] == manifest["source"]["repository"]
+    }
+    for entry in result["files"]:
+        source = inventory_by_source[entry["source"]]
+        assert entry["size_bytes"] == source["size_bytes"]
+        assert entry["sha256"] == source["sha256"]
+
     target_root = REPOSITORY_ROOT / manifest["target_root"]
     actual_targets = {
         PurePosixPath(path.relative_to(REPOSITORY_ROOT).as_posix())
         for path in target_root.rglob("*")
         if path.is_file() or path.is_symlink()
     }
-    assert recorded_targets == mapped_targets == actual_targets
-    for entry in result["files"]:
-        payload = (REPOSITORY_ROOT / entry["target"]).read_bytes()
-        assert len(payload) == entry["size_bytes"]
-        assert hashlib.sha256(payload).hexdigest() == entry["sha256"]
+    assert actual_targets == set()
 
 
 def test_importer_copies_manifest_blob_and_records_verified_hash(tmp_path: Path) -> None:
@@ -500,21 +511,21 @@ def test_importer_rejects_noncanonical_text(
     assert not (repository_root / target_path).exists()
 
 
-def test_legacy_snapshot_has_an_opt_in_private_ament_build_boundary() -> None:
-    """Catch exposing migration-only headers or building the snapshot by default."""
+def test_retired_snapshot_is_absent_from_runtime_ament_boundary() -> None:
+    """Catch reintroducing the retired snapshot into the runtime package."""
 
     package_xml = (CORE_PACKAGE_ROOT / "package.xml").read_text(encoding="utf-8")
     cmake = (CORE_PACKAGE_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
 
     assert "<name>lunar_planner_core</name>" in package_xml
     assert "<build_type>ament_cmake</build_type>" in package_xml
-    assert 'option(LUNAR_BUILD_LEGACY_V3 "' in cmake
-    assert "add_library(lunar_planner_legacy_v3 STATIC" in cmake
-    assert "target_include_directories(lunar_planner_legacy_v3 PRIVATE" in cmake
-    assert "install(TARGETS lunar_planner_legacy_v3" not in cmake
-    assert "legacy_v3/upstream/include/" not in cmake.replace(
-        "${LEGACY_V3_ROOT}/include", ""
-    )
+    for retired_runtime_token in (
+        "LUNAR_BUILD_LEGACY_V3",
+        "lunar_planner_legacy_v3",
+        "legacy_v3_adapter",
+        "legacy_v3/upstream",
+    ):
+        assert retired_runtime_token not in cmake
 
 
 def test_legacy_differential_summary_has_only_stable_cross_version_semantics() -> None:

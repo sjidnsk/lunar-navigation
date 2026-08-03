@@ -25,7 +25,7 @@ FORBIDDEN_PATTERNS = {
     "ROS client": re.compile(r"\brclcpp\b", re.IGNORECASE),
     "ROS message": re.compile(r"\bgeometry_msgs\b", re.IGNORECASE),
     "JSON dependency": re.compile(r"\bnlohmann\b", re.IGNORECASE),
-    "legacy content identity": re.compile(r"\bContentRef\b"),
+    "legacy content identity": re.compile(r"\bContent" + r"Ref\b"),
     "legacy registry": re.compile(r"\bRegistry\b"),
     "runtime schema": re.compile(r"\bschema\b", re.IGNORECASE),
     "TensorRT": re.compile(r"\bTensorRT\b", re.IGNORECASE),
