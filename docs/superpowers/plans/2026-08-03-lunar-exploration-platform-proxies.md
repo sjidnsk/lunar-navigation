@@ -37,7 +37,7 @@
 - Consumes: `verify(stage: Usd.Stage) -> list[str]` and the output USD path.
 - Produces: exit code 0 only when all checks pass; otherwise prints each failed invariant and exits 1.
 
-- [ ] **Step 1: Define exact expected platform capabilities and a validation entry point**
+- [x] **Step 1: Define exact expected platform capabilities and a validation entry point**
 
 ```python
 EXPECTED = {
@@ -56,7 +56,7 @@ def verify(stage: Usd.Stage) -> list[str]:
     return errors
 ```
 
-- [ ] **Step 2: Run the verifier before authoring**
+- [x] **Step 2: Run the verifier before authoring**
 
 Run:
 
@@ -67,11 +67,11 @@ python3 /home/kai/CodexDownloads/lunar_navigation/isaac_sim/verify_lunar_platfor
 
 Expected: nonzero exit and missing platform / rock-collision failures.
 
-- [ ] **Step 3: Implement rock, terrain, light and platform validation**
+- [x] **Step 3: Implement rock, terrain, light and platform validation**
 
 The verifier must assert exactly 260 `LunarPolarRock_*` mesh prims, each has `UsdPhysics.CollisionAPI` and `MeshCollisionAPI` with approximation `convexHull`, and no rock root has `RigidBodyAPI`. It must assert the terrain mesh has collision approximation `none`, PhysicsScene gravity magnitude is `1.62`, the one DistantLight has `shadow:enable=True` and a normalized direction whose absolute vertical component differs from `sin(5°)` by less than `0.001`. For each expected root, assert `RigidBodyAPI`, a `physics:mass` value, matching custom data, at least one child collider and a root translate with finite coordinates.
 
-- [ ] **Step 4: Syntax-check the verifier**
+- [x] **Step 4: Syntax-check the verifier**
 
 Run:
 
@@ -91,7 +91,7 @@ Expected: exit code 0.
 - Consumes: `INPUT_USD`, `OUTPUT_USD`, `make_platform(stage, spec) -> Usd.Prim`, and `ground_z(stage, x_m, y_m) -> float`.
 - Produces: an authored stage containing `LunarExplorationPlatforms`, three named proxy roots and 260 independently collidable rocks.
 
-- [ ] **Step 1: Add source and stage guards**
+- [x] **Step 1: Add source and stage guards**
 
 ```python
 INPUT_USD = Path("/home/kai/CodexDownloads/lunar_navigation/isaac_sim/exports/lunar_polar_terrain_5deg/lunar_polar_terrain_5deg_physics.usda")
@@ -108,7 +108,7 @@ def require_prepared_terrain(stage: Usd.Stage) -> Usd.Prim:
 
 The script must fail before saving if the input USD is absent, is already the output path, lacks the terrain collider, lacks 260 rock roots or has a gravity magnitude outside `1.62 ± 0.001`.
 
-- [ ] **Step 2: Add one collision API to each rock mesh**
+- [x] **Step 2: Add one collision API to each rock mesh**
 
 ```python
 def configure_static_rock(mesh: Usd.Prim) -> None:
@@ -119,11 +119,11 @@ def configure_static_rock(mesh: Usd.Prim) -> None:
 
 Enumerate by prim name, require one mesh under every rock root, call this function once per mesh, and reject a root that has `RigidBodyAPI`.
 
-- [ ] **Step 3: Configure the 5° shadow-casting sun**
+- [x] **Step 3: Configure the 5° shadow-casting sun**
 
 Create or update only `/World/LunarPolarSun/LunarPolarSun_Light_002`. Set intensity `2000.0`, angle `0.53`, `shadow:enable=True`, and rotate it so its beam direction is `(cos(5°)*cos(28°), cos(5°)*sin(28°), -sin(5°))`. Delete no other light prim and create no dome/ambient light.
 
-- [ ] **Step 4: Create the three compound proxies from exact specs**
+- [x] **Step 4: Create the three compound proxies from exact specs**
 
 ```python
 PLATFORM_SPECS = (
@@ -146,13 +146,13 @@ PLATFORM_SPECS = (
 )
 ```
 
-For every root, apply `UsdPhysics.RigidBodyAPI` and `UsdPhysics.MassAPI`, set `physics:mass`, record all capability values as custom data, and position it using triangle interpolation from the terrain mesh. Build only child box, cylinder or sphere meshes; apply `CollisionAPI` and `MeshCollisionAPI` with `convexHull` to every child. Create four visual/collider wheels for the wheeled proxy, one body plus six fixed leg/foot colliders for the legged proxy, and one body plus fixed leg/foot collider for the hopper proxy. Do not apply an articulation API or create joints.
+For every root, apply `UsdPhysics.RigidBodyAPI` and `UsdPhysics.MassAPI`, set `physics:mass`, record all capability values as custom data, and position it using triangle interpolation from the terrain mesh. Build only native child box, cylinder or sphere collision shapes; apply `CollisionAPI` to every child. These are native convex primitive colliders, so `MeshCollisionAPI` is intentionally not applied to platform children. Create four transverse-wheel visual/colliders for the wheeled proxy, one body plus six fixed leg/foot colliders for the legged proxy, and one body plus fixed leg/foot collider for the hopper proxy. Do not apply an articulation API or create joints.
 
-- [ ] **Step 5: Create a new USD derivative and ensure idempotence**
+- [x] **Step 5: Create a new USD derivative and ensure idempotence**
 
 Open the input into a new stage, remove only an existing `/World/LunarExplorationPlatforms` scope from that in-memory copy, create the scope and proxies, save as `OUTPUT_USD`, and reopen the output. Do not overwrite `INPUT_USD` and do not modify a currently open interactive stage until the generated USD passes verification.
 
-- [ ] **Step 6: Syntax-check the authoring script**
+- [x] **Step 6: Syntax-check the authoring script**
 
 Run:
 
@@ -172,30 +172,27 @@ Expected: exit code 0.
 - Consumes: Task 1 verifier and Task 2 authoring script.
 - Produces: a verified active Isaac Sim stage rooted at the output USD.
 
-- [ ] **Step 1: Run the authoring script with Isaac Sim Python**
+- [x] **Step 1: Run the authoring script through the authenticated Isaac Python server**
 
-Run:
+Execute the source file with `compile(..., "exec")` through the authenticated local `127.0.0.1:8226` Python server. The server supplies the only installed environment that exposes the Isaac Sim 6.0.1 `pxr` modules; do not print its token.
 
 ```bash
-/home/kai/isaacsim-6.0.1/python.sh \
-  /home/kai/CodexDownloads/lunar_navigation/isaac_sim/create_lunar_platform_proxies.py
+python3 -m py_compile /home/kai/CodexDownloads/lunar_navigation/isaac_sim/create_lunar_platform_proxies.py
 ```
 
 Expected: a new output USD path is printed, with 260 rock colliders and three proxy roots.
 
-- [ ] **Step 2: Run the verifier against the derivative**
+- [x] **Step 2: Run the verifier against the derivative**
 
-Run:
+Use the same authenticated Python server, explicitly reload the output USD root layer, then call `verify_path(output_path)`. Explicit reload is required because USD caches layers by file path inside the long-lived Python server.
 
 ```bash
-/home/kai/isaacsim-6.0.1/python.sh \
-  /home/kai/CodexDownloads/lunar_navigation/isaac_sim/verify_lunar_platform_proxies.py \
-  /home/kai/CodexDownloads/lunar_navigation/isaac_sim/exports/lunar_polar_terrain_5deg/lunar_polar_terrain_5deg_platform_proxies.usda
+python3 -m py_compile /home/kai/CodexDownloads/lunar_navigation/isaac_sim/verify_lunar_platform_proxies.py
 ```
 
 Expected: exit code 0 and output including `rocks=260`, all three platform names, lunar gravity, and 5° sun evidence.
 
-- [ ] **Step 3: Open the verified derivative through the authenticated Isaac Python server**
+- [x] **Step 3: Open the verified derivative through the authenticated Isaac Python server**
 
 Use the local `127.0.0.1:8226` Python server with its token read locally (never print it). Execute:
 
@@ -208,7 +205,7 @@ assert success, error
 
 Expected: the interactive stage root equals the derivative path.
 
-- [ ] **Step 4: Re-run read-only live-stage verification**
+- [x] **Step 4: Re-run read-only live-stage verification**
 
 Run the same `verify()` invariants in the Python server against `omni.usd.get_context().get_stage()`. Expected: all checks pass and the server reports no unsaved session-only platform changes.
 
