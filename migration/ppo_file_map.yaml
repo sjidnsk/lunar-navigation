@@ -6,33 +6,188 @@ target_root: training/lunar_policy_training/lunar_policy_training
 allow_dependencies:
   - numpy
   - torch
-type_checking_dependencies:
-  - lunar_exploration_ppo.env.frontier
-  - lunar_exploration_ppo.env.map_state
-  - lunar_exploration_ppo.env.scenario
-  - lunar_exploration_ppo.env.env
-  - lunar_exploration_ppo.utils.artifact_io
-  - lunar_exploration_ppo.utils.geometry
-  - lunar_exploration_ppo.utils.path_security
-  - lunar_exploration_ppo.configs.stage1
-  - lunar_exploration_ppo.configs.stage6
 groups:
   policy:
     - source: src/lunar_exploration_ppo/policy/observation.py
-      target: frozen_ppo/policy/observation.py
+      sha256: a3fc7e08e68c00ce140e62b0fa0f5a46495c0afd49eaec0bd98568afe35b8d21
+      target: policy/observation_core.py
+      allow_symbols:
+        - OBSERVATION_SCHEMA_VERSION
+        - GLOBAL_PRIOR_CHANNELS
+        - COVERAGE_SUMMARY_CHANNELS
+        - LOCAL_CROP_CHANNELS
+        - FRONTIER_FEATURE_FIELDS
+        - POSE_FEATURE_FIELDS
+      rename:
+        OBSERVATION_SCHEMA_VERSION: SOURCE_OBSERVATION_SCHEMA_VERSION
+      forbid_imports:
+        - lunar_exploration_ppo.workflows
+        - lunar_exploration_ppo.env
+        - lunar_exploration_ppo.utils.artifact_io
+        - lunar_exploration_ppo.utils.path_security
+      adaptation:
+        kind: shared_observation_constants
+        public_adapter: policy/observation.py
+        required_2b:
+          - seven_input_contract
+          - platform_context
     - source: src/lunar_exploration_ppo/policy/cross_attention.py
-      target: frozen_ppo/policy/cross_attention.py
+      sha256: d8ff3f8f30dc814881579c03e3396af0a7d8b8b244d9a038a4bb178fc78d69f4
+      target: policy/backbone_core.py
+      allow_symbols:
+        - TOKEN_DIM
+        - MAP_POOL_SHAPE
+        - ATTENTION_HEADS
+        - CROSS_ATTENTION_LAYERS
+        - FFN_HIDDEN_DIM
+        - ACTION_HIDDEN_DIM
+        - DROPOUT
+        - INVALID_LOGIT_VALUE
+        - INITIAL_KAPPA_RAW
+        - PolicyActionError
+        - MapEncoder
+        - CrossAttentionBlock
+        - _normalize_angle
+        - normalize_theta
+        - _validated_masked_logits
+        - _gather_candidate
+        - _safe_theta_mu
+        - _masked_mean_max
+        - _map_position_encoding
+      forbid_imports:
+        - lunar_exploration_ppo.workflows
+        - lunar_exploration_ppo.env
+        - lunar_exploration_ppo.utils.artifact_io
+        - lunar_exploration_ppo.utils.path_security
+      adaptation:
+        kind: seven_input_backbone
+        public_adapter: policy/cross_attention.py
+        required_2b:
+          - build_public_seven_input_policy
+          - use_core_encoders_and_helpers
+          - add_platform_encoder
   ppo:
     - source: src/lunar_exploration_ppo/ppo/collector.py
-      target: frozen_ppo/ppo/collector.py
+      sha256: 736040998ab0fef99d691e0c6adbff7a17955c4287439bfc274ab8914da701d2
+      target: ppo/collector.py
+      allow_symbols: []
+      mode: manual_thin_adapter
+      forbid_imports:
+        - lunar_exploration_ppo.workflows
+        - lunar_exploration_ppo.env
+        - lunar_exploration_ppo.utils.artifact_io
+        - lunar_exploration_ppo.utils.path_security
+      adaptation:
+        kind: in_memory_vector_env
+        require_target_in_2b: true
     - source: src/lunar_exploration_ppo/ppo/rollout.py
-      target: frozen_ppo/ppo/rollout.py
+      sha256: 5935d59c9c21c2d0eb49d96838c2fec7a824cfcd9028815bbbbe192624b6bb16
+      target: ppo/rollout_core.py
+      allow_symbols:
+        - GAMMA
+        - GAE_LAMBDA
+        - RolloutContractError
+        - GAEResult
+        - compute_gae
+      forbid_imports:
+        - lunar_exploration_ppo.workflows
+        - lunar_exploration_ppo.env
+        - lunar_exploration_ppo.utils.artifact_io
+        - lunar_exploration_ppo.utils.path_security
+      adaptation:
+        kind: gae_math
+        public_adapter: ppo/rollout.py
+        required_2b:
+          - seven_input_ephemeral_batch
     - source: src/lunar_exploration_ppo/ppo/trainer.py
-      target: frozen_ppo/ppo/trainer.py
+      sha256: e5d2e41bf38a50c76c5fdf01cb3adae8c25b280261f7ac731295376d781295fa
+      target: ppo/trainer_core.py
+      allow_symbols:
+        - PPOTrainingError
+        - PPOLossTerms
+        - compute_ppo_loss_terms
+        - policy_state_sha256
+        - physical_microbatch_slices
+        - _gradient_norm
+        - _parameter_change_l2
+      forbid_imports:
+        - lunar_exploration_ppo.workflows
+        - lunar_exploration_ppo.env
+        - lunar_exploration_ppo.utils.artifact_io
+        - lunar_exploration_ppo.utils.path_security
+      adaptation:
+        kind: ppo_update_math
+        public_adapter: ppo/trainer.py
+        required_2b:
+          - seven_input_update_loop
+          - lightweight_update_metrics
     - source: src/lunar_exploration_ppo/ppo/checkpoint.py
-      target: frozen_ppo/ppo/checkpoint.py
+      sha256: 7726ed6b33f4d89cc5633077c3b330fb39f91eeff90cd803fc4041480a8cde56
+      target: ppo/checkpoint.py
+      allow_symbols: []
+      mode: manual_thin_adapter
+      forbid_imports:
+        - lunar_exploration_ppo.workflows
+        - lunar_exploration_ppo.env
+        - lunar_exploration_ppo.utils.artifact_io
+        - lunar_exploration_ppo.utils.path_security
+      adaptation:
+        kind: single_file_checkpoint
+        require_target_in_2b: true
   evaluation:
     - source: src/lunar_exploration_ppo/eval/baselines.py
-      target: frozen_ppo/eval/baselines.py
+      sha256: a3c6496720e7d778d02207607a5f8f806363202eb6e9b3762337c59056f29070
+      target: eval/baseline_core.py
+      allow_symbols:
+        - BASELINE_METHODS
+        - ALL_METHODS
+        - _DISTANCE_FEATURE
+        - _POTENTIAL_GAIN_FEATURE
+        - _RECOMMENDED_THETA_SIN_FEATURE
+        - _RECOMMENDED_THETA_COS_FEATURE
+        - _REACHABLE_COST_FEATURE
+        - _MIN_DIRECTION_NORM
+        - BaselineSelectionError
+        - NoCandidateAction
+        - reconstruct_recommended_theta
+        - validate_selected_index
+      forbid_imports:
+        - lunar_exploration_ppo.workflows
+        - lunar_exploration_ppo.env
+        - lunar_exploration_ppo.utils.artifact_io
+        - lunar_exploration_ppo.utils.path_security
+      adaptation:
+        kind: candidate_selection_math
+        public_adapter: eval/baselines.py
+        required_2b:
+          - implement_public_action_selection
+          - use_seven_input_contract_and_policy_output
     - source: src/lunar_exploration_ppo/eval/metrics.py
-      target: frozen_ppo/eval/metrics.py
+      sha256: 263e51f81cd843f7fa7e3a2a5b58cbba5cfcff3503c890c5bb35b0b2f05757fc
+      target: eval/metrics_core.py
+      allow_symbols:
+        - EPISODE_FIELDS
+        - BOOTSTRAP_METRICS
+        - ZERO_DISTANCE_POLICY
+        - _TERMINATION_REASONS
+        - MetricError
+        - EpisodeResult
+        - build_episode_result
+        - validate_episode_result
+        - episode_record
+        - bootstrap_episode_indices
+        - bootstrap_indices_sha256
+        - summarize_episodes
+        - _episode_order_key
+        - _summary_values
+        - _finite_mean
+      forbid_imports:
+        - lunar_exploration_ppo.workflows
+        - lunar_exploration_ppo.env
+        - lunar_exploration_ppo.utils.artifact_io
+        - lunar_exploration_ppo.utils.path_security
+      adaptation:
+        kind: deterministic_evaluation_math
+        public_adapter: eval/metrics.py
+        required_2b:
+          - neutralize_stage_text

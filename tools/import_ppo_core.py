@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import argparse
 import ast
+import builtins
+import copy
 import hashlib
 import json
-import os
+import keyword
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -22,11 +25,23 @@ IMPORT_RESULT_SCHEMA = "lunar-ppo-import-result/v1"
 PACKAGE_ROOT = PurePosixPath("training/lunar_policy_training/lunar_policy_training")
 FORBIDDEN_DEPENDENCY_PARTS = {
     "workflows",
-    "stage",
     "contentref",
     "authority",
     "repair",
-    "artifact_registry",
+    "artifact",
+    "durable",
+}
+FORBIDDEN_OLD_SYMBOLS = {
+    "CrossAttentionFrontierPolicy",
+    "PolicyBatch",
+    "PolicyForwardOutput",
+}
+ALLOWED_MAPPING_MODES = {"extract", "manual_thin_adapter"}
+BUILTIN_NAMES = frozenset(dir(builtins))
+PURE_BUILTIN_CONSTANT_CALLS = {"frozenset"}
+PURE_MODULE_CONSTANT_CALLS = {
+    "math": {"expm1", "log"},
+    "numpy": {"float32"},
 }
 
 
@@ -76,7 +91,9 @@ def _legacy_module(source: PurePosixPath) -> str:
     return ".".join(source.relative_to(prefix).with_suffix("").parts)
 
 
-def _relative_import(target: PurePosixPath, imported_target: PurePosixPath, symbol: str) -> str:
+def _relative_import_parts(
+    target: PurePosixPath, imported_target: PurePosixPath
+) -> tuple[int, str | None]:
     target_parent = target.parent
     imported_module = imported_target.with_suffix("")
     common = 0
@@ -84,146 +101,862 @@ def _relative_import(target: PurePosixPath, imported_target: PurePosixPath, symb
         common += 1
     upwards = len(target_parent.parts) - common
     module_tail = imported_module.parts[common:]
-    dots = "." * (upwards + 1)
-    module = ".".join(module_tail)
-    return f"from {dots}{module} import {symbol}"
+    return upwards + 1, ".".join(module_tail) or None
 
 
-def _validate_dependencies(
-    *, source_path: PurePosixPath,
-    target_path: PurePosixPath,
-    text: str,
-    legacy_targets: dict[str, PurePosixPath],
+@dataclass(frozen=True)
+class _MappingSpec:
+    group: str
+    source: PurePosixPath
+    target: PurePosixPath
+    sha256: str
+    allow_symbols: tuple[str, ...]
+    rename: dict[str, str]
+    forbid_imports: tuple[str, ...]
+    mode: str
+    adaptation: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _ImportBinding:
+    binding: str
+    node: ast.Import | ast.ImportFrom
+    alias: ast.alias
+    module: str
+    legacy_spec: _MappingSpec | None = None
+
+
+@dataclass(frozen=True)
+class _Scope:
+    kind: str
+    bindings: frozenset[str]
+    globals: frozenset[str]
+    nonlocals: frozenset[str]
+
+
+class _BindingCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.bindings: set[str] = set()
+        self.globals: set[str] = set()
+        self.nonlocals: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if not isinstance(node.ctx, ast.Load):
+            self.bindings.add(node.id)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self.bindings.add(alias.asname or alias.name.split(".", maxsplit=1)[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            if alias.name != "*":
+                self.bindings.add(alias.asname or alias.name)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.bindings.add(node.name)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.bindings.add(node.name)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.bindings.add(node.name)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        return
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        return
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        return
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        return
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.globals.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.nonlocals.update(node.names)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name:
+            self.bindings.add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> None:
+        if node.name:
+            self.bindings.add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> None:
+        if node.name:
+            self.bindings.add(node.name)
+
+
+def _argument_names(arguments: ast.arguments) -> set[str]:
+    names = {
+        argument.arg
+        for argument in (
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+        )
+    }
+    if arguments.vararg is not None:
+        names.add(arguments.vararg.arg)
+    if arguments.kwarg is not None:
+        names.add(arguments.kwarg.arg)
+    return names
+
+
+def _scope_for_body(
+    kind: str, body: list[ast.stmt], arguments: ast.arguments | None = None
+) -> _Scope:
+    collector = _BindingCollector()
+    for statement in body:
+        collector.visit(statement)
+    bindings = collector.bindings | (_argument_names(arguments) if arguments else set())
+    bindings -= collector.globals
+    return _Scope(
+        kind=kind,
+        bindings=frozenset(bindings),
+        globals=frozenset(collector.globals),
+        nonlocals=frozenset(collector.nonlocals),
+    )
+
+
+class _GlobalLoadCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+        self.scopes: list[_Scope] = []
+
+    def _is_module_global(self, name: str) -> bool:
+        for scope in reversed(self.scopes):
+            if name in scope.globals:
+                return True
+            if name in scope.bindings or name in scope.nonlocals:
+                return False
+        return True
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Load) and self._is_module_global(node.id):
+            self.names.add(node.id)
+
+    def _visit_arguments_in_outer_scope(self, arguments: ast.arguments) -> None:
+        for argument in (
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+        ):
+            if argument.annotation is not None:
+                self.visit(argument.annotation)
+        if arguments.vararg and arguments.vararg.annotation:
+            self.visit(arguments.vararg.annotation)
+        if arguments.kwarg and arguments.kwarg.annotation:
+            self.visit(arguments.kwarg.annotation)
+        for default in (*arguments.defaults, *arguments.kw_defaults):
+            if default is not None:
+                self.visit(default)
+
+    def _visit_function(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self._visit_arguments_in_outer_scope(node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
+        outer_scopes = self.scopes
+        self.scopes = [scope for scope in outer_scopes if scope.kind != "class"]
+        self.scopes.append(_scope_for_body("function", node.body, node.args))
+        for statement in node.body:
+            self.visit(statement)
+        self.scopes = outer_scopes
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self._visit_arguments_in_outer_scope(node.args)
+        outer_scopes = self.scopes
+        self.scopes = [scope for scope in outer_scopes if scope.kind != "class"]
+        self.scopes.append(_scope_for_body("function", [], node.args))
+        self.visit(node.body)
+        self.scopes = outer_scopes
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword_node in node.keywords:
+            self.visit(keyword_node.value)
+        outer_scopes = self.scopes
+        self.scopes = [scope for scope in outer_scopes if scope.kind != "class"]
+        self.scopes.append(_scope_for_body("class", node.body))
+        for statement in node.body:
+            self.visit(statement)
+        self.scopes = outer_scopes
+
+    def _visit_comprehension(
+        self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
+    ) -> None:
+        if not node.generators:
+            return
+        self.visit(node.generators[0].iter)
+        bindings: set[str] = set()
+        for generator in node.generators:
+            bindings.update(
+                child.id
+                for child in ast.walk(generator.target)
+                if isinstance(child, ast.Name)
+            )
+        outer_scopes = self.scopes
+        self.scopes = [scope for scope in outer_scopes if scope.kind != "class"]
+        self.scopes.append(
+            _Scope("function", frozenset(bindings), frozenset(), frozenset())
+        )
+        for index, generator in enumerate(node.generators):
+            if index:
+                self.visit(generator.iter)
+            for condition in generator.ifs:
+                self.visit(condition)
+        if isinstance(node, ast.DictComp):
+            self.visit(node.key)
+            self.visit(node.value)
+        else:
+            self.visit(node.elt)
+        self.scopes = outer_scopes
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node)
+
+
+def _definition_names(node: ast.stmt) -> tuple[str, ...]:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return (node.name,)
+    if isinstance(node, ast.Assign):
+        if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            return ()
+        return (node.targets[0].id,)
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        return (node.target.id,)
+    return ()
+
+
+def _definition_dependencies(node: ast.stmt) -> set[str]:
+    collector = _GlobalLoadCollector()
+    if isinstance(node, ast.Assign):
+        collector.visit(node.value)
+    elif isinstance(node, ast.AnnAssign):
+        collector.visit(node.annotation)
+        if node.value is not None:
+            collector.visit(node.value)
+    else:
+        collector.visit(node)
+    return collector.names
+
+
+def _is_pure_constant_call(
+    function: ast.AST,
+    import_bindings: dict[str, _ImportBinding],
+    definition_names: set[str],
+) -> bool:
+    if isinstance(function, ast.Name):
+        if (
+            function.id in PURE_BUILTIN_CONSTANT_CALLS
+            and function.id not in import_bindings
+            and function.id not in definition_names
+        ):
+            return True
+        binding = import_bindings.get(function.id)
+        return bool(
+            binding
+            and binding.legacy_spec is None
+            and isinstance(binding.node, ast.ImportFrom)
+            and binding.alias.name
+            in PURE_MODULE_CONSTANT_CALLS.get(binding.module, set())
+        )
+    if isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name):
+        binding = import_bindings.get(function.value.id)
+        return bool(
+            binding
+            and binding.legacy_spec is None
+            and isinstance(binding.node, ast.Import)
+            and function.attr
+            in PURE_MODULE_CONSTANT_CALLS.get(binding.module, set())
+        )
+    return False
+
+
+def _is_safe_constant_expression(
+    node: ast.AST | None,
+    import_bindings: dict[str, _ImportBinding],
+    definition_names: set[str],
+) -> bool:
+    if node is None:
+        return True
+    forbidden = (
+        ast.Await,
+        ast.GeneratorExp,
+        ast.Lambda,
+        ast.ListComp,
+        ast.NamedExpr,
+        ast.SetComp,
+        ast.DictComp,
+        ast.Yield,
+        ast.YieldFrom,
+    )
+    for child in ast.walk(node):
+        if isinstance(child, forbidden):
+            return False
+        if isinstance(child, ast.Call) and not _is_pure_constant_call(
+            child.func, import_bindings, definition_names
+        ):
+            return False
+    return True
+
+
+def _dynamic_function_expression(
+    node: ast.AST,
+    importlib_names: set[str],
+    builtins_names: set[str],
+    dynamic_names: set[str],
+) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in dynamic_names
+    if isinstance(node, ast.Attribute):
+        if node.attr == "__import__":
+            return True
+        return (
+            node.attr == "import_module"
+            and isinstance(node.value, ast.Name)
+            and node.value.id in importlib_names
+        )
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value in {"__import__", "import_module"}
+        and (
+            not isinstance(node.args[0], ast.Name)
+            or node.args[0].id in importlib_names | builtins_names
+        )
+    )
+
+
+def _reject_dynamic_execution(
+    tree: ast.Module,
+    source_path: PurePosixPath,
+    legacy_specs: dict[str, _MappingSpec],
     allow_dependencies: set[str],
-    type_checking_dependencies: set[str],
-) -> str:
-    try:
-        tree = ast.parse(text, filename=source_path.as_posix())
-    except SyntaxError as error:
-        raise ImportError(f"invalid Python source: {source_path}: {error.msg}") from error
-    replacements: dict[str, str] = {}
-    needs_type_checking = False
+    forbid_imports: tuple[str, ...],
+) -> None:
     importlib_names = {"importlib"}
-    dynamic_import_names = {"__import__"}
-    for node in ast.walk(tree):
+    builtins_names = {"builtins"}
+    dynamic_names = {"__import__"}
+    for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == "importlib":
-                    importlib_names.add(alias.asname or alias.name)
+                    importlib_names.add(alias.asname or "importlib")
+                if alias.name == "builtins":
+                    builtins_names.add(alias.asname or "builtins")
         elif isinstance(node, ast.ImportFrom):
             if node.module == "importlib":
-                for alias in node.names:
-                    if alias.name == "import_module":
-                        dynamic_import_names.add(alias.asname or alias.name)
-            if node.module == "builtins":
-                for alias in node.names:
-                    if alias.name == "__import__":
-                        dynamic_import_names.add(alias.asname or alias.name)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                _validate_module(alias.name, source_path, legacy_targets, allow_dependencies)
-                if alias.name.startswith("lunar_exploration_ppo."):
-                    raise ImportError(
-                        f"absolute legacy import in {source_path}: {alias.name}"
-                    )
-        elif isinstance(node, ast.ImportFrom):
-            module = node.module
-            if node.level or module is None:
-                continue
-            if module in type_checking_dependencies:
-                _validate_type_checking_dependency(module, source_path)
-                original = ast.get_source_segment(text, node)
-                if original is None:
-                    raise ImportError(f"cannot rewrite type-only dependency in {source_path}")
-                aliases = "\n".join(
-                    f"{' ' * node.col_offset}    from typing import Any as {alias.asname or alias.name}"
+                dynamic_names.update(
+                    alias.asname or alias.name
                     for alias in node.names
+                    if alias.name == "import_module"
                 )
-                replacements[original] = f"if TYPE_CHECKING:\n{aliases}"
-                needs_type_checking = True
-                continue
-            _validate_module(module, source_path, legacy_targets, allow_dependencies)
-            if module.removeprefix("lunar_exploration_ppo.") in legacy_targets:
-                symbols = ", ".join(alias.name + (f" as {alias.asname}" if alias.asname else "") for alias in node.names)
-                original = ast.get_source_segment(text, node)
-                if original is None:
-                    raise ImportError(f"cannot rewrite legacy import in {source_path}")
-                replacements[original] = _relative_import(
-                    target_path,
-                    legacy_targets[module.removeprefix("lunar_exploration_ppo.")],
-                    symbols,
+            if node.module == "builtins":
+                dynamic_names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name == "__import__"
                 )
-        elif isinstance(node, ast.Call):
-            module = _dynamic_import_module_name(
-                node, importlib_names, dynamic_import_names, source_path
-            )
-            if module is None:
+    changed = True
+    while changed:
+        changed = False
+        for node in tree.body:
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and _dynamic_function_expression(
+                    node.value, importlib_names, builtins_names, dynamic_names
+                )
+                and node.targets[0].id not in dynamic_names
+            ):
+                dynamic_names.add(node.targets[0].id)
+                changed = True
+    for top_level in tree.body:
+        owner_names = _definition_names(top_level)
+        owner = owner_names[0] if owner_names else "<module>"
+        for node in ast.walk(top_level):
+            if not isinstance(node, ast.Call):
                 continue
-            _validate_module(module, source_path, legacy_targets, allow_dependencies)
-            if module.startswith("lunar_exploration_ppo."):
-                raise ImportError(f"dynamic legacy import in {source_path}: {module}")
-    for original, replacement in replacements.items():
-        text = text.replace(original, replacement)
-    if needs_type_checking:
-        lines = text.splitlines(keepends=True)
-        insertion = 0
-        body = list(tree.body)
-        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
-            insertion = body.pop(0).end_lineno or 0
-        while body and isinstance(body[0], ast.ImportFrom) and body[0].module == "__future__":
-            insertion = body.pop(0).end_lineno or insertion
-        lines.insert(insertion, "from typing import TYPE_CHECKING\n")
-        text = "".join(lines)
-    return text
+            if isinstance(node.func, ast.Name) and node.func.id in {"eval", "exec"}:
+                raise ImportError(
+                    f"{source_path}:{owner} -> forbidden dynamic execution: {node.func.id}"
+                )
+            if _dynamic_function_expression(
+                node.func, importlib_names, builtins_names, dynamic_names
+            ):
+                if (
+                    node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
+                ):
+                    try:
+                        _validate_module(
+                            node.args[0].value,
+                            source_path,
+                            legacy_specs,
+                            allow_dependencies,
+                            forbid_imports,
+                        )
+                    except ImportError as error:
+                        raise ImportError(
+                            f"dynamic import in {source_path}:{owner}; {error}"
+                        ) from error
+                raise ImportError(f"dynamic import in {source_path}:{owner}")
 
 
-def _dynamic_import_module_name(
-    node: ast.Call,
-    importlib_names: set[str],
-    dynamic_import_names: set[str],
-    source_path: PurePosixPath,
-) -> str | None:
-    is_dynamic_import = (
-        isinstance(node.func, ast.Name) and node.func.id in dynamic_import_names
-    ) or (
-        isinstance(node.func, ast.Attribute)
-        and node.func.attr == "import_module"
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id in importlib_names
-    )
-    if not is_dynamic_import:
-        return None
-    if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
-        raise ImportError(f"dynamic import in {source_path} must use a constant module name")
-    return node.args[0].value
-
-
-def _validate_type_checking_dependency(module: str, source_path: PurePosixPath) -> None:
-    parts = {part.lower() for part in module.split(".")}
-    if parts & FORBIDDEN_DEPENDENCY_PARTS:
-        raise ImportError(f"forbidden dependency in {source_path}: {module}")
-    if not module.startswith("lunar_exploration_ppo."):
-        raise ImportError(f"type-only dependency must be legacy module in {source_path}: {module}")
+def _forbidden_module_part(module: str) -> str | None:
+    for part in re.split(r"[.\-_/]", module.lower()):
+        if part in FORBIDDEN_DEPENDENCY_PARTS or re.fullmatch(r"stage\d*", part):
+            return part
+    return None
 
 
 def _validate_module(
     module: str,
     source_path: PurePosixPath,
-    legacy_targets: dict[str, PurePosixPath],
+    legacy_specs: dict[str, _MappingSpec],
     allow_dependencies: set[str],
-) -> None:
-    parts = {part.lower() for part in module.split(".")}
-    if parts & FORBIDDEN_DEPENDENCY_PARTS:
+    forbid_imports: tuple[str, ...],
+) -> _MappingSpec | None:
+    if any(module == prefix or module.startswith(prefix + ".") for prefix in forbid_imports):
+        raise ImportError(f"forbidden dependency in {source_path}: {module}")
+    if _forbidden_module_part(module):
         raise ImportError(f"forbidden dependency in {source_path}: {module}")
     if module.startswith("lunar_exploration_ppo."):
         legacy = module.removeprefix("lunar_exploration_ppo.")
-        if legacy not in legacy_targets:
+        if legacy not in legacy_specs:
             raise ImportError(f"unmapped dependency in {source_path}: {module}")
-        return
+        return legacy_specs[legacy]
     root = module.split(".", maxsplit=1)[0]
     if root not in allow_dependencies and root not in sys.stdlib_module_names:
         raise ImportError(f"unlisted dependency in {source_path}: {module}")
+    return None
+
+
+def _collect_import_bindings(
+    *,
+    tree: ast.Module,
+    source_path: PurePosixPath,
+    legacy_specs: dict[str, _MappingSpec],
+    allow_dependencies: set[str],
+    forbid_imports: tuple[str, ...],
+) -> tuple[dict[str, _ImportBinding], list[ast.ImportFrom]]:
+    bindings: dict[str, _ImportBinding] = {}
+    future_imports: list[ast.ImportFrom] = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                legacy_spec = _validate_module(
+                    alias.name,
+                    source_path,
+                    legacy_specs,
+                    allow_dependencies,
+                    forbid_imports,
+                )
+                if legacy_spec is not None:
+                    raise ImportError(
+                        f"absolute legacy import in {source_path}: {alias.name}"
+                    )
+                binding = alias.asname or alias.name.split(".", maxsplit=1)[0]
+                if binding in bindings:
+                    raise ImportError(f"duplicate import binding in {source_path}: {binding}")
+                bindings[binding] = _ImportBinding(
+                    binding, node, alias, alias.name, None
+                )
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                raise ImportError(f"relative source import in {source_path} is not supported")
+            if node.module == "__future__":
+                if any(alias.name != "annotations" for alias in node.names):
+                    raise ImportError(
+                        f"unsupported future import in {source_path}: "
+                        + ", ".join(alias.name for alias in node.names)
+                    )
+                future_imports.append(node)
+                continue
+            if node.module is None:
+                raise ImportError(f"unresolved import in {source_path}")
+            legacy_spec = _validate_module(
+                node.module,
+                source_path,
+                legacy_specs,
+                allow_dependencies,
+                forbid_imports,
+            )
+            for alias in node.names:
+                if alias.name == "*":
+                    raise ImportError(f"star import in {source_path}: {node.module}")
+                if legacy_spec and alias.name not in legacy_spec.allow_symbols:
+                    raise ImportError(
+                        f"unallowlisted legacy import in {source_path}: "
+                        f"{node.module}.{alias.name}"
+                    )
+                binding = alias.asname or alias.name
+                if binding in bindings:
+                    raise ImportError(f"duplicate import binding in {source_path}: {binding}")
+                bindings[binding] = _ImportBinding(
+                    binding, node, alias, node.module, legacy_spec
+                )
+    return bindings, future_imports
+
+
+class _RenameGlobals(ast.NodeTransformer):
+    def __init__(self, rename: dict[str, str]) -> None:
+        self.rename = rename
+        self.scopes: list[_Scope] = []
+
+    def _is_module_global(self, name: str) -> bool:
+        for scope in reversed(self.scopes):
+            if name in scope.globals:
+                return True
+            if name in scope.bindings or name in scope.nonlocals:
+                return False
+        return True
+
+    def visit_Name(self, node: ast.Name) -> ast.Name:
+        if node.id in self.rename and self._is_module_global(node.id):
+            node.id = self.rename[node.id]
+        return node
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+        if node.name in self.rename and self._is_module_global(node.name):
+            node.name = self.rename[node.name]
+        return self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AST:
+        if node.name in self.rename and self._is_module_global(node.name):
+            node.name = self.rename[node.name]
+        return self._visit_function(node)
+
+    def _visit_function(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> ast.AST:
+        node.decorator_list = [self.visit(item) for item in node.decorator_list]
+        node.args = self.visit(node.args)
+        if node.returns is not None:
+            node.returns = self.visit(node.returns)
+        outer_scopes = self.scopes
+        self.scopes = [scope for scope in outer_scopes if scope.kind != "class"]
+        self.scopes.append(_scope_for_body("function", node.body, node.args))
+        node.body = [self.visit(statement) for statement in node.body]
+        self.scopes = outer_scopes
+        return node
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+        if node.name in self.rename and self._is_module_global(node.name):
+            node.name = self.rename[node.name]
+        node.decorator_list = [self.visit(item) for item in node.decorator_list]
+        node.bases = [self.visit(item) for item in node.bases]
+        node.keywords = [self.visit(item) for item in node.keywords]
+        outer_scopes = self.scopes
+        self.scopes = [scope for scope in outer_scopes if scope.kind != "class"]
+        self.scopes.append(_scope_for_body("class", node.body))
+        node.body = [self.visit(statement) for statement in node.body]
+        self.scopes = outer_scopes
+        return node
+
+    def visit_Lambda(self, node: ast.Lambda) -> ast.AST:
+        node.args = self.visit(node.args)
+        outer_scopes = self.scopes
+        self.scopes = [scope for scope in outer_scopes if scope.kind != "class"]
+        self.scopes.append(_scope_for_body("function", [], node.args))
+        node.body = self.visit(node.body)
+        self.scopes = outer_scopes
+        return node
+
+    def _visit_comprehension(
+        self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
+    ) -> ast.AST:
+        if not node.generators:
+            return node
+        node.generators[0].iter = self.visit(node.generators[0].iter)
+        bindings = {
+            child.id
+            for generator in node.generators
+            for child in ast.walk(generator.target)
+            if isinstance(child, ast.Name)
+        }
+        outer_scopes = self.scopes
+        self.scopes = [scope for scope in outer_scopes if scope.kind != "class"]
+        self.scopes.append(
+            _Scope("function", frozenset(bindings), frozenset(), frozenset())
+        )
+        for index, generator in enumerate(node.generators):
+            generator.target = self.visit(generator.target)
+            if index:
+                generator.iter = self.visit(generator.iter)
+            generator.ifs = [self.visit(item) for item in generator.ifs]
+        if isinstance(node, ast.DictComp):
+            node.key = self.visit(node.key)
+            node.value = self.visit(node.value)
+        else:
+            node.elt = self.visit(node.elt)
+        self.scopes = outer_scopes
+        return node
+
+    def visit_ListComp(self, node: ast.ListComp) -> ast.AST:
+        return self._visit_comprehension(node)
+
+    def visit_SetComp(self, node: ast.SetComp) -> ast.AST:
+        return self._visit_comprehension(node)
+
+    def visit_DictComp(self, node: ast.DictComp) -> ast.AST:
+        return self._visit_comprehension(node)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> ast.AST:
+        return self._visit_comprehension(node)
+
+    def visit_Global(self, node: ast.Global) -> ast.Global:
+        node.names = [self.rename.get(name, name) for name in node.names]
+        return node
+
+
+def _forbidden_output_token(value: str) -> str | None:
+    normalized = re.sub(r"[^a-z0-9]", "", value.lower())
+    for part in (*FORBIDDEN_DEPENDENCY_PARTS, "stage"):
+        if part in normalized:
+            return value
+    for old_symbol in FORBIDDEN_OLD_SYMBOLS:
+        if re.sub(r"[^a-z0-9]", "", old_symbol.lower()) in normalized:
+            return value
+    return None
+
+
+def _scan_output(
+    tree: ast.Module, source_path: PurePosixPath
+) -> None:
+    for top_level in tree.body:
+        owner_names = _definition_names(top_level)
+        owner = owner_names[0] if owner_names else "<module>"
+        for node in ast.walk(top_level):
+            values: list[str] = []
+            if isinstance(node, ast.Name):
+                values.append(node.id)
+            elif isinstance(node, ast.arg):
+                values.append(node.arg)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                values.append(node.name)
+            elif isinstance(node, ast.Attribute):
+                values.append(node.attr)
+            elif isinstance(node, ast.alias):
+                values.extend(value for value in (node.name, node.asname) if value)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                values.append(node.module)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                values.append(node.value)
+            for value in values:
+                forbidden = _forbidden_output_token(value)
+                if forbidden is not None:
+                    raise ImportError(
+                        f"{source_path}:{owner} -> forbidden name/content: {forbidden}"
+                    )
+
+
+def _extract_symbols(
+    *,
+    spec: _MappingSpec,
+    text: str,
+    legacy_specs: dict[str, _MappingSpec],
+    allow_dependencies: set[str],
+) -> tuple[str, list[str]]:
+    try:
+        tree = ast.parse(text, filename=spec.source.as_posix())
+    except SyntaxError as error:
+        raise ImportError(f"invalid Python source: {spec.source}: {error.msg}") from error
+    _reject_dynamic_execution(
+        tree,
+        spec.source,
+        legacy_specs,
+        allow_dependencies,
+        spec.forbid_imports,
+    )
+    import_bindings, future_imports = _collect_import_bindings(
+        tree=tree,
+        source_path=spec.source,
+        legacy_specs=legacy_specs,
+        allow_dependencies=allow_dependencies,
+        forbid_imports=spec.forbid_imports,
+    )
+    definition_names = {
+        name for node in tree.body for name in _definition_names(node)
+    }
+    definitions: dict[str, ast.stmt] = {}
+    module_docstring: ast.Expr | None = None
+    for index, node in enumerate(tree.body):
+        if (
+            index == 0
+            and isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            module_docstring = node
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        names = _definition_names(node)
+        if not names:
+            raise ImportError(
+                f"top-level execution in {spec.source}: {type(node).__name__}"
+            )
+        if isinstance(node, ast.Assign) and not _is_safe_constant_expression(
+            node.value, import_bindings, definition_names
+        ):
+            raise ImportError(f"top-level constant execution in {spec.source}:{names[0]}")
+        if isinstance(node, ast.AnnAssign) and not _is_safe_constant_expression(
+            node.value, import_bindings, definition_names
+        ):
+            raise ImportError(f"top-level constant execution in {spec.source}:{names[0]}")
+        if any(name in definitions for name in names):
+            raise ImportError(f"duplicate top-level definition in {spec.source}: {names[0]}")
+        definitions.update((name, node) for name in names)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            for child in ast.walk(node):
+                if isinstance(child, (ast.Import, ast.ImportFrom)):
+                    raise ImportError(f"nested import in {spec.source}:{names[0]}")
+
+    for symbol in spec.allow_symbols:
+        if symbol not in definitions:
+            raise ImportError(f"{spec.source}:{symbol} -> symbol is not defined")
+
+    selected_nodes = {definitions[symbol] for symbol in spec.allow_symbols}
+    required_imports: set[str] = set()
+    for symbol in spec.allow_symbols:
+        for dependency in sorted(_definition_dependencies(definitions[symbol])):
+            if dependency in definitions:
+                if dependency not in spec.allow_symbols:
+                    raise ImportError(
+                        f"{spec.source}:{symbol} -> unallowlisted dependency: {dependency}"
+                    )
+            elif dependency in import_bindings:
+                required_imports.add(dependency)
+            elif dependency not in BUILTIN_NAMES:
+                raise ImportError(
+                    f"{spec.source}:{symbol} -> unresolved dependency: {dependency}"
+                )
+
+    output_items: list[tuple[int, ast.stmt]] = []
+    if module_docstring is not None:
+        output_items.append((module_docstring.lineno, copy.deepcopy(module_docstring)))
+    needs_future_annotations = any(
+        isinstance(child, ast.AnnAssign)
+        or (
+            isinstance(child, ast.arg)
+            and child.annotation is not None
+        )
+        or (
+            isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and child.returns is not None
+        )
+        for selected_node in selected_nodes
+        for child in ast.walk(selected_node)
+    )
+    if needs_future_annotations:
+        for future_import in future_imports:
+            output_items.append((future_import.lineno, copy.deepcopy(future_import)))
+    dependency_rename: dict[str, str] = {}
+    grouped_bindings: dict[int, list[_ImportBinding]] = {}
+    for binding_name in sorted(required_imports):
+        binding = import_bindings[binding_name]
+        grouped_bindings.setdefault(id(binding.node), []).append(binding)
+    for node in tree.body:
+        selected_bindings = grouped_bindings.get(id(node), [])
+        if not selected_bindings:
+            continue
+        aliases: list[ast.alias] = []
+        import_from_module = node.module if isinstance(node, ast.ImportFrom) else None
+        import_from_level = node.level if isinstance(node, ast.ImportFrom) else 0
+        for binding in sorted(
+            selected_bindings, key=lambda item: (item.alias.lineno, item.alias.col_offset)
+        ):
+            alias = copy.deepcopy(binding.alias)
+            if binding.legacy_spec is not None:
+                remote_name = binding.legacy_spec.rename.get(alias.name, alias.name)
+                if alias.asname is None and remote_name != alias.name:
+                    dependency_rename[alias.name] = remote_name
+                alias.name = remote_name
+                import_from_level, import_from_module = _relative_import_parts(
+                    spec.target, binding.legacy_spec.target
+                )
+            aliases.append(alias)
+        if isinstance(node, ast.Import):
+            output_node: ast.stmt = ast.Import(names=aliases)
+        else:
+            output_node = ast.ImportFrom(
+                module=import_from_module,
+                names=aliases,
+                level=import_from_level,
+            )
+        output_items.append((node.lineno, ast.copy_location(output_node, node)))
+
+    renamer = _RenameGlobals({**dependency_rename, **spec.rename})
+    for node in tree.body:
+        if node in selected_nodes:
+            output_items.append(
+                (
+                    node.lineno,
+                    renamer.visit(copy.deepcopy(node)),
+                )
+            )
+    output_items.sort(key=lambda item: item[0])
+    output_tree = ast.Module(body=[item[1] for item in output_items], type_ignores=[])
+    ast.fix_missing_locations(output_tree)
+    _scan_output(output_tree, spec.source)
+    try:
+        compile(output_tree, spec.target.as_posix(), "exec")
+    except (SyntaxError, TypeError, ValueError) as error:
+        raise ImportError(f"generated module does not compile: {spec.source}: {error}") from error
+    output = ast.unparse(output_tree).rstrip() + "\n"
+    try:
+        parsed_output = ast.parse(output, filename=spec.target.as_posix())
+        compile(parsed_output, spec.target.as_posix(), "exec")
+    except (SyntaxError, TypeError, ValueError) as error:
+        raise ImportError(f"generated text does not compile: {spec.source}: {error}") from error
+    _scan_output(parsed_output, spec.source)
+    resolved = [
+        name
+        for node in tree.body
+        for name in _definition_names(node)
+        if name in spec.allow_symbols
+    ]
+    return output, resolved
 
 
 def import_snapshot(
@@ -265,12 +998,20 @@ def import_snapshot(
     allowed = file_map.get("allow_dependencies")
     if not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed):
         raise ImportError("file map is missing allow_dependencies")
-    type_checking = file_map.get("type_checking_dependencies", [])
-    if not isinstance(type_checking, list) or not all(isinstance(item, str) for item in type_checking):
-        raise ImportError("type_checking_dependencies must be a list of module names")
-    inventory_entries = {entry.get("path"): entry for entry in inventory.get("files", []) if entry.get("repository") == repository}
+    if "type_checking_dependencies" in file_map:
+        raise ImportError(
+            "type_checking_dependencies is forbidden; dependencies must resolve at runtime"
+        )
+    inventory_files = inventory.get("files")
+    if not isinstance(inventory_files, list):
+        raise ImportError("source inventory is missing files")
+    inventory_entries = {
+        entry.get("path"): entry
+        for entry in inventory_files
+        if isinstance(entry, dict) and entry.get("repository") == repository
+    }
 
-    mappings: list[tuple[str, PurePosixPath, PurePosixPath]] = []
+    mappings: list[_MappingSpec] = []
     seen_sources: set[PurePosixPath] = set()
     seen_targets: set[PurePosixPath] = set()
     for group, entries in groups.items():
@@ -281,56 +1022,176 @@ def import_snapshot(
                 raise ImportError(f"invalid mapping in {group}")
             source = _safe_relative_path(entry.get("source"), field="source")
             target = _safe_relative_path(entry.get("target"), field="target")
+            expected_sha256 = entry.get("sha256")
+            if not isinstance(expected_sha256, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", expected_sha256
+            ):
+                raise ImportError(f"invalid sha256 for {source}")
+            allow_symbols = entry.get("allow_symbols")
+            if (
+                not isinstance(allow_symbols, list)
+                or not all(
+                    isinstance(symbol, str)
+                    and symbol.isidentifier()
+                    and not keyword.iskeyword(symbol)
+                    for symbol in allow_symbols
+                )
+                or len(allow_symbols) != len(set(allow_symbols))
+            ):
+                raise ImportError(f"invalid allow_symbols for {source}")
+            forbidden_old_symbols = [
+                symbol for symbol in allow_symbols if symbol in FORBIDDEN_OLD_SYMBOLS
+            ]
+            if forbidden_old_symbols:
+                raise ImportError(
+                    f"{source}:{forbidden_old_symbols[0]} -> forbidden old policy symbol: "
+                    f"{forbidden_old_symbols[0]}"
+                )
+            rename = entry.get("rename", {})
+            if (
+                not isinstance(rename, dict)
+                or not all(
+                    isinstance(old, str)
+                    and old in allow_symbols
+                    and isinstance(new, str)
+                    and new.isidentifier()
+                    and not keyword.iskeyword(new)
+                    for old, new in rename.items()
+                )
+                or len(set(rename.values())) != len(rename)
+            ):
+                raise ImportError(f"invalid rename for {source}")
+            final_names = [rename.get(symbol, symbol) for symbol in allow_symbols]
+            if len(final_names) != len(set(final_names)):
+                raise ImportError(f"rename collision for {source}")
+            forbid_imports = entry.get("forbid_imports", [])
+            if not isinstance(forbid_imports, list) or not all(
+                isinstance(module, str) and module for module in forbid_imports
+            ):
+                raise ImportError(f"invalid forbid_imports for {source}")
+            mode = entry.get("mode", "extract")
+            if mode not in ALLOWED_MAPPING_MODES:
+                raise ImportError(f"invalid extraction mode for {source}: {mode}")
+            if mode == "extract" and not allow_symbols:
+                raise ImportError(f"allow_symbols must not be empty for extracted source: {source}")
+            if mode == "manual_thin_adapter" and (allow_symbols or rename):
+                raise ImportError(
+                    f"manual_thin_adapter must not extract or rename symbols: {source}"
+                )
+            adaptation = entry.get("adaptation", {})
+            if not isinstance(adaptation, dict):
+                raise ImportError(f"invalid adaptation metadata for {source}")
             if source in seen_sources or target in seen_targets:
                 raise ImportError(f"duplicate source or target mapping: {source} -> {target}")
             seen_sources.add(source)
             seen_targets.add(target)
             if source.as_posix() not in inventory_entries:
                 raise ImportError(f"source is not selected by inventory: {source}")
-            mappings.append((str(group), source, target))
-    legacy_targets = {_legacy_module(source): target for _, source, target in mappings}
+            mappings.append(
+                _MappingSpec(
+                    group=str(group),
+                    source=source,
+                    target=target,
+                    sha256=expected_sha256,
+                    allow_symbols=tuple(allow_symbols),
+                    rename=dict(rename),
+                    forbid_imports=tuple(forbid_imports),
+                    mode=mode,
+                    adaptation=copy.deepcopy(adaptation),
+                )
+            )
+    legacy_specs = {_legacy_module(spec.source): spec for spec in mappings}
 
-    pending: list[tuple[str, PurePosixPath, bytes]] = []
+    pending: list[tuple[_MappingSpec, bytes]] = []
     files: list[dict[str, Any]] = []
-    for group, source, target in mappings:
-        tree_line = str(_git(source_git, "ls-tree", str(commit), "--", source.as_posix())).strip()
+    for spec in mappings:
+        tree_line = str(
+            _git(source_git, "ls-tree", str(commit), "--", spec.source.as_posix())
+        ).strip()
         if not tree_line:
-            raise ImportError(f"source is absent from frozen commit: {source}")
+            raise ImportError(f"source is absent from frozen commit: {spec.source}")
         metadata, found_path = tree_line.split("\t", maxsplit=1)
-        mode, kind, _object_id = metadata.split()
-        if found_path != source.as_posix() or kind != "blob" or mode not in {"100644", "100755"}:
-            raise ImportError(f"source is not a regular blob: {source}")
-        payload = bytes(_git(source_git, "show", f"{commit}:{source.as_posix()}", text=False))
-        entry = inventory_entries[source.as_posix()]
+        git_mode, kind, object_id = metadata.split()
+        if (
+            found_path != spec.source.as_posix()
+            or kind != "blob"
+            or git_mode not in {"100644", "100755"}
+        ):
+            raise ImportError(f"source is not a regular blob: {spec.source}")
+        payload = bytes(
+            _git(
+                source_git,
+                "show",
+                f"{commit}:{spec.source.as_posix()}",
+                text=False,
+            )
+        )
+        entry = inventory_entries[spec.source.as_posix()]
         if len(payload) != entry.get("size_bytes"):
-            raise ImportError(f"source size mismatch: {source}")
+            raise ImportError(f"source size mismatch: {spec.source}")
         digest = hashlib.sha256(payload).hexdigest()
         if digest != entry.get("sha256"):
-            raise ImportError(f"source SHA-256 mismatch: {source}")
+            raise ImportError(f"source SHA-256 mismatch: {spec.source}")
+        if digest != spec.sha256:
+            raise ImportError(f"file-map SHA-256 mismatch: {spec.source}")
         try:
-            transformed = _validate_dependencies(
-                source_path=source,
-                target_path=target,
-                text=payload.decode("utf-8"),
-                legacy_targets=legacy_targets,
-                allow_dependencies=set(allowed),
-                type_checking_dependencies=set(type_checking),
-            )
+            source_text = payload.decode("utf-8")
         except UnicodeDecodeError as error:
-            raise ImportError(f"source is not UTF-8 text: {source}") from error
-        pending.append((group, target, transformed.encode("utf-8")))
-        files.append({"group": group, "source": source.as_posix(), "target": (target_root / target).as_posix(), "sha256": digest, "size_bytes": len(payload)})
+            raise ImportError(f"source is not UTF-8 text: {spec.source}") from error
+        resolved_symbols: list[str] = []
+        if spec.mode == "extract":
+            transformed, resolved_symbols = _extract_symbols(
+                spec=spec,
+                text=source_text,
+                legacy_specs=legacy_specs,
+                allow_dependencies=set(allowed),
+            )
+            pending.append((spec, transformed.encode("utf-8")))
+        files.append(
+            {
+                "adaptation": spec.adaptation,
+                "group": spec.group,
+                "mode": spec.mode,
+                "provenance": {
+                    "commit": commit,
+                    "origin": actual_origin,
+                    "repository": repository,
+                },
+                "rename": spec.rename,
+                "requested_symbols": list(spec.allow_symbols),
+                "resolved_symbols": resolved_symbols,
+                "sha256": digest,
+                "size_bytes": len(payload),
+                "source": spec.source.as_posix(),
+                "source_blob_oid": object_id,
+                "source_sha256": digest,
+                "source_size_bytes": len(payload),
+                "target": (target_root / spec.target).as_posix(),
+            }
+        )
 
-    for _group, target, payload in pending:
-        destination = _resolve_inside(repository_root, target_root / target, field="target")
+    for spec, payload in pending:
+        destination = _resolve_inside(
+            repository_root, target_root / spec.target, field="target"
+        )
         if destination.exists() and (not destination.is_file() or destination.read_bytes() != payload):
-            raise ImportError(f"existing target differs from frozen blob: {target_root / target}")
-    for _group, target, payload in pending:
-        destination = _resolve_inside(repository_root, target_root / target, field="target")
+            raise ImportError(
+                f"existing target differs from extracted output: {target_root / spec.target}"
+            )
+    for spec, payload in pending:
+        destination = _resolve_inside(
+            repository_root, target_root / spec.target, field="target"
+        )
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(payload)
 
-    result = {"schema_version": IMPORT_RESULT_SCHEMA, "source_repository": repository, "source_commit": commit, "files": files}
+    result = {
+        "files": files,
+        "schema_version": IMPORT_RESULT_SCHEMA,
+        "source_commit": commit,
+        "source_origin": actual_origin,
+        "source_repository": repository,
+    }
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     return result

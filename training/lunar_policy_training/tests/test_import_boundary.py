@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import pathlib
@@ -55,7 +56,9 @@ def _inventory_for_source(
         "src/lunar_exploration_ppo/policy/observation.py",
         "src/lunar_exploration_ppo/policy/cross_attention.py",
     ):
-        payload = (source / path).read_bytes()
+        payload = subprocess.check_output(
+            ["git", "-C", str(source), "show", f"{commit}:{path}"]
+        )
         files.append(
             {
                 "repository": "legacy_root",
@@ -68,7 +71,13 @@ def _inventory_for_source(
     return {"repositories": {"legacy_root": {"commit": commit, "origin": origin}}, "files": files}
 
 
-def _inventory(commit: str, origin: str, *, corrupt_hash: bool = False) -> dict[str, object]:
+def _inventory(
+    commit: str,
+    origin: str,
+    *,
+    corrupt_hash: bool = False,
+    corrupt_size: bool = False,
+) -> dict[str, object]:
     paths = (
         "src/lunar_exploration_ppo/policy/observation.py",
         "src/lunar_exploration_ppo/policy/cross_attention.py",
@@ -81,14 +90,29 @@ def _inventory(commit: str, origin: str, *, corrupt_hash: bool = False) -> dict[
                 "repository": "legacy_root",
                 "path": path,
                 "sha256": "0" * 64 if corrupt_hash else hashlib.sha256(payload).hexdigest(),
-                "size_bytes": len(payload),
+                "size_bytes": len(payload) + (1 if corrupt_size else 0),
                 "migration_role": "migration_source",
             }
         )
     return {"repositories": {"legacy_root": {"commit": commit, "origin": origin}}, "files": files}
 
 
-def _map(commit: str, *, dependency: str | None = None, target: str = "policy/observation.py") -> dict[str, object]:
+def _frozen_payload(
+    source: pathlib.Path, commit: str, relative: str
+) -> bytes:
+    return subprocess.check_output(
+        ["git", "-C", str(source), "show", f"{commit}:{relative}"]
+    )
+
+
+def _map(
+    source: pathlib.Path,
+    commit: str,
+    *,
+    target: str = "policy/observation.py",
+) -> dict[str, object]:
+    observation_source = "src/lunar_exploration_ppo/policy/observation.py"
+    cross_attention_source = "src/lunar_exploration_ppo/policy/cross_attention.py"
     return {
         "schema_version": "lunar-ppo-file-map/v1",
         "source": {"repository": "legacy_root", "commit": commit},
@@ -97,12 +121,24 @@ def _map(commit: str, *, dependency: str | None = None, target: str = "policy/ob
         "groups": {
             "policy": [
                 {
-                    "source": "src/lunar_exploration_ppo/policy/observation.py",
+                    "source": observation_source,
+                    "sha256": hashlib.sha256(
+                        _frozen_payload(source, commit, observation_source)
+                    ).hexdigest(),
                     "target": target,
+                    "allow_symbols": ["VALUE"],
+                    "forbid_imports": ["lunar_exploration_ppo.workflows"],
+                    "adaptation": {"kind": "symbol_core"},
                 },
                 {
-                    "source": "src/lunar_exploration_ppo/policy/cross_attention.py",
+                    "source": cross_attention_source,
+                    "sha256": hashlib.sha256(
+                        _frozen_payload(source, commit, cross_attention_source)
+                    ).hexdigest(),
                     "target": "policy/cross_attention.py",
+                    "allow_symbols": ["RESULT"],
+                    "forbid_imports": ["lunar_exploration_ppo.workflows"],
+                    "adaptation": {"kind": "symbol_core"},
                 },
             ]
         },
@@ -123,7 +159,9 @@ def _write_contracts(
 def test_imports_only_verified_allowlisted_files_and_rewrites_internal_imports(tmp_path: pathlib.Path) -> None:
     """Would fail if an unverified file or absolute legacy import crossed the migration boundary."""
     source, commit, origin = _frozen_source(tmp_path)
-    inventory_path, map_path, result_path = _write_contracts(tmp_path, _inventory(commit, origin), _map(commit))
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory(commit, origin), _map(source, commit)
+    )
 
     result = import_snapshot(
         source_git=source,
@@ -145,6 +183,8 @@ def test_imports_only_verified_allowlisted_files_and_rewrites_internal_imports(t
         ("origin", "source origin mismatch"),
         ("commit", "source HEAD mismatch"),
         ("hash", "source SHA-256 mismatch"),
+        ("map_hash", "file-map SHA-256 mismatch"),
+        ("size", "source size mismatch"),
         ("unlisted", "source is not selected by inventory"),
         ("escape", "unsafe target"),
     ),
@@ -154,8 +194,13 @@ def test_import_rejects_identity_hash_allowlist_and_path_boundary_violations(
 ) -> None:
     """Would fail if a tampered source could be imported outside the frozen boundary."""
     source, commit, origin = _frozen_source(tmp_path)
-    inventory = _inventory(commit, origin, corrupt_hash=mutation == "hash")
-    file_map = _map(commit)
+    inventory = _inventory(
+        commit,
+        origin,
+        corrupt_hash=mutation == "hash",
+        corrupt_size=mutation == "size",
+    )
+    file_map = _map(source, commit)
     if mutation == "origin":
         _git(source, "remote", "set-url", "origin", "git@example.invalid:wrong.git")
     elif mutation == "commit":
@@ -163,6 +208,8 @@ def test_import_rejects_identity_hash_allowlist_and_path_boundary_violations(
         inventory["repositories"]["legacy_root"]["commit"] = "0" * 40  # type: ignore[index]
     elif mutation == "unlisted":
         inventory["files"] = inventory["files"][:-1]  # type: ignore[index]
+    elif mutation == "map_hash":
+        file_map["groups"]["policy"][0]["sha256"] = "0" * 64  # type: ignore[index]
     elif mutation == "escape":
         file_map["groups"]["policy"][0]["target"] = "../escape.py"  # type: ignore[index]
     inventory_path, map_path, result_path = _write_contracts(tmp_path, inventory, file_map)
@@ -189,7 +236,9 @@ def test_import_rejects_forbidden_legacy_dependency_with_its_source_path(tmp_pat
     inventory = _inventory(blocked_commit, origin)
     inventory["files"][0]["sha256"] = hashlib.sha256(payload).hexdigest()  # type: ignore[index]
     inventory["files"][0]["size_bytes"] = len(payload)  # type: ignore[index]
-    inventory_path, map_path, result_path = _write_contracts(tmp_path, inventory, _map(blocked_commit))
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, inventory, _map(source, blocked_commit)
+    )
 
     with pytest.raises(ImportError, match=r"forbidden dependency.*policy/observation.py"):
         import_snapshot(
@@ -211,7 +260,7 @@ def test_import_rejects_absolute_legacy_import_statement(tmp_path: pathlib.Path)
         ),
     )
     inventory_path, map_path, result_path = _write_contracts(
-        tmp_path, _inventory_for_source(source, commit, origin), _map(commit)
+        tmp_path, _inventory_for_source(source, commit, origin), _map(source, commit)
     )
 
     with pytest.raises(ImportError, match=r"absolute legacy import.*cross_attention.py"):
@@ -235,7 +284,7 @@ def test_import_rewrites_multiline_from_legacy_import(tmp_path: pathlib.Path) ->
         ),
     )
     inventory_path, map_path, result_path = _write_contracts(
-        tmp_path, _inventory_for_source(source, commit, origin), _map(commit)
+        tmp_path, _inventory_for_source(source, commit, origin), _map(source, commit)
     )
 
     import_snapshot(
@@ -273,7 +322,7 @@ def test_import_rejects_forbidden_and_unlisted_static_or_dynamic_dependencies(
         tmp_path, observation_payload=statement.encode("utf-8")
     )
     inventory_path, map_path, result_path = _write_contracts(
-        tmp_path, _inventory_for_source(source, commit, origin), _map(commit)
+        tmp_path, _inventory_for_source(source, commit, origin), _map(source, commit)
     )
 
     with pytest.raises(ImportError, match=message):
@@ -286,10 +335,10 @@ def test_import_rejects_forbidden_and_unlisted_static_or_dynamic_dependencies(
         )
 
 
-def test_import_allows_constant_dynamic_import_of_allowlisted_dependency(
+def test_import_rejects_dynamic_import_even_for_allowlisted_dependency(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Would fail if a permitted constant dynamic dependency was rejected by accident."""
+    """Would fail if an allowlisted module made dynamic execution acceptable."""
     source, commit, origin = _frozen_source(
         tmp_path,
         observation_payload=(
@@ -297,74 +346,544 @@ def test_import_allows_constant_dynamic_import_of_allowlisted_dependency(
         ),
     )
     inventory_path, map_path, result_path = _write_contracts(
-        tmp_path, _inventory_for_source(source, commit, origin), _map(commit)
+        tmp_path, _inventory_for_source(source, commit, origin), _map(source, commit)
     )
 
-    import_snapshot(
-        source_git=source,
-        repository_root=tmp_path,
-        source_inventory_path=inventory_path,
-        file_map_path=map_path,
-        result_path=result_path,
-    )
-
-    imported = tmp_path / "training/lunar_policy_training/lunar_policy_training/policy/observation.py"
-    assert imported.read_text(encoding="utf-8") == "import importlib\nNUMPY = importlib.import_module('numpy')\n"
+    with pytest.raises(ImportError, match="dynamic import"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
 
 
-def test_import_erases_explicit_type_only_legacy_dependency(tmp_path: pathlib.Path) -> None:
-    """Would fail if an approved type-only source dependency left a legacy import behind."""
+def test_import_rejects_type_checking_any_dependency_substitution(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if TYPE_CHECKING/Any could conceal an unmapped runtime dependency."""
     source, commit, origin = _frozen_source(
         tmp_path,
         observation_payload=(
             b"from __future__ import annotations\n"
             b"from lunar_exploration_ppo.env.frontier import FrontierActionSet\n"
-            b"def name(value: FrontierActionSet) -> str:\n    return value.__class__.__name__\n"
+            b"def name(value: FrontierActionSet) -> str:\n"
+            b"    return value.__class__.__name__\n"
         ),
     )
-    file_map = _map(commit)
-    file_map["type_checking_dependencies"] = ["lunar_exploration_ppo.env.frontier"]
+    file_map = _map(source, commit)
+    file_map["type_checking_dependencies"] = [
+        "lunar_exploration_ppo.env.frontier"
+    ]
+    file_map["groups"]["policy"][0]["allow_symbols"] = ["name"]  # type: ignore[index]
     inventory_path, map_path, result_path = _write_contracts(
         tmp_path, _inventory_for_source(source, commit, origin), file_map
     )
 
-    import_snapshot(
-        source_git=source,
-        repository_root=tmp_path,
-        source_inventory_path=inventory_path,
-        file_map_path=map_path,
-        result_path=result_path,
+    with pytest.raises(ImportError, match=r"type_checking_dependencies|unmapped dependency"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "import builtins\nbuiltins.__import__('lunar_exploration_ppo.workflows.runner')\n",
+        "import builtins\nload = builtins.__import__\nload('lunar_exploration_ppo.workflows.runner')\n",
+        "import builtins\nload = getattr(builtins, '__import__')\nload('lunar_exploration_ppo.workflows.runner')\n",
+    ),
+)
+def test_import_rejects_builtins_dynamic_import_bypasses(
+    tmp_path: pathlib.Path, statement: str
+) -> None:
+    """Would fail if builtins attribute or aliases bypassed forbidden dependency checks."""
+    source, commit, origin = _frozen_source(
+        tmp_path, observation_payload=statement.encode("utf-8")
+    )
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), _map(source, commit)
     )
 
-    imported = tmp_path / "training/lunar_policy_training/lunar_policy_training/policy/observation.py"
-    assert imported.read_text(encoding="utf-8") == (
-        "from __future__ import annotations\n"
-        "from typing import TYPE_CHECKING\n"
-        "if TYPE_CHECKING:\n"
-        "    from typing import Any as FrontierActionSet\n"
-        "def name(value: FrontierActionSet) -> str:\n    return value.__class__.__name__\n"
-    )
+    with pytest.raises(ImportError, match="forbidden dependency|dynamic import"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
 
 
-def test_import_erases_multiline_type_only_dependency_without_breaking_future_import(
+def test_symbol_extractor_emits_minimal_dependency_closure_and_provenance(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Would fail if a multiline type-only import left invalid syntax or moved a future import."""
+    """Would fail if extraction copied unused symbols/imports or lost source provenance."""
     source, commit, origin = _frozen_source(
         tmp_path,
         observation_payload=(
-            b'"""Frozen observation."""\n'
-            b"from __future__ import annotations\n"
-            b"from lunar_exploration_ppo.utils.path_security import (\n"
-            b"    DurableParentGuard,\n"
-            b"    PathSecurityError,\n"
-            b")\n"
-            b"def name(value: DurableParentGuard) -> type[PathSecurityError]:\n"
-            b"    return PathSecurityError\n"
+            b'"""Selected observation math."""\n'
+            b"import math\n"
+            b"import numpy as np\n"
+            b"UNUSED = (1, 2)\n"
+            b"VALUE = 3\n"
+            b"def helper(value):\n"
+            b"    local_only = math.floor(value)\n"
+            b"    return local_only + VALUE\n"
+            b"def public(value):\n"
+            b"    return helper(value)\n"
+        ),
+        cross_attention_payload=(
+            b"from lunar_exploration_ppo.policy.observation import public\n"
+            b"def run(value):\n"
+            b"    return public(value)\n"
         ),
     )
-    file_map = _map(commit)
-    file_map["type_checking_dependencies"] = ["lunar_exploration_ppo.utils.path_security"]
+    file_map = _map(source, commit)
+    policy_entries = file_map["groups"]["policy"]  # type: ignore[index]
+    policy_entries[0]["allow_symbols"] = ["VALUE", "helper", "public"]
+    policy_entries[1]["allow_symbols"] = ["run"]
+    policy_entries[1]["adaptation"] = {"kind": "renamed_backbone"}
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    result = import_snapshot(
+        source_git=source,
+        repository_root=tmp_path,
+        source_inventory_path=inventory_path,
+        file_map_path=map_path,
+        result_path=result_path,
+    )
+
+    observation = (
+        tmp_path
+        / "training/lunar_policy_training/lunar_policy_training/policy/observation.py"
+    )
+    cross_attention = observation.with_name("cross_attention.py")
+    observation_text = observation.read_text(encoding="utf-8")
+    cross_attention_text = cross_attention.read_text(encoding="utf-8")
+    compile(observation_text, str(observation), "exec")
+    compile(cross_attention_text, str(cross_attention), "exec")
+    assert ast_names(observation_text) >= {"VALUE", "helper", "math"}
+    assert "UNUSED" not in observation_text
+    assert "numpy" not in observation_text
+    assert "from .observation import public" in cross_attention_text
+    first = result["files"][0]
+    assert first["requested_symbols"] == ["VALUE", "helper", "public"]
+    assert first["resolved_symbols"] == ["VALUE", "helper", "public"]
+    assert first["source_sha256"] == file_map["groups"]["policy"][0]["sha256"]  # type: ignore[index]
+    assert first["source_blob_oid"] == _git(
+        source,
+        "rev-parse",
+        f"{commit}:src/lunar_exploration_ppo/policy/observation.py",
+    ).strip()
+    assert first["target"].endswith("policy/observation.py")
+    assert first["adaptation"] == {"kind": "symbol_core"}
+    assert first["provenance"] == {
+        "commit": commit,
+        "origin": origin,
+        "repository": "legacy_root",
+    }
+
+
+def test_symbol_extractor_omits_unused_future_annotations_import(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if a semantically unused future import survived minimal extraction."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=(
+            b"from __future__ import annotations\n"
+            b"VALUE = 3\n"
+        ),
+    )
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path,
+        _inventory_for_source(source, commit, origin),
+        _map(source, commit),
+    )
+
+    import_snapshot(
+        source_git=source,
+        repository_root=tmp_path,
+        source_inventory_path=inventory_path,
+        file_map_path=map_path,
+        result_path=result_path,
+    )
+
+    imported = (
+        tmp_path
+        / "training/lunar_policy_training/lunar_policy_training/policy/observation.py"
+    ).read_text(encoding="utf-8")
+    assert imported == "VALUE = 3\n"
+
+
+def test_symbol_extractor_allows_only_known_pure_constant_constructors(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if frozen numeric constants required unsafe arbitrary top-level calls."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=(
+            b"import math\n"
+            b"import numpy as np\n"
+            b"VALUE = np.float32(math.log(math.expm1(0.1)))\n"
+        ),
+    )
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path,
+        _inventory_for_source(source, commit, origin),
+        _map(source, commit),
+    )
+
+    import_snapshot(
+        source_git=source,
+        repository_root=tmp_path,
+        source_inventory_path=inventory_path,
+        file_map_path=map_path,
+        result_path=result_path,
+    )
+
+    imported = (
+        tmp_path
+        / "training/lunar_policy_training/lunar_policy_training/policy/observation.py"
+    ).read_text(encoding="utf-8")
+    assert "import math" in imported
+    assert "import numpy as np" in imported
+    assert "np.float32(math.log(math.expm1(0.1)))" in imported
+
+
+def ast_names(text: str) -> set[str]:
+    return {
+        node.id
+        for node in ast.walk(ast.parse(text))
+        if isinstance(node, ast.Name)
+    }
+
+
+def test_symbol_extractor_does_not_treat_function_locals_as_global_dependencies(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if a parameter or assignment shadowing a module name expanded the closure."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=(
+            b"VALUE = 99\n"
+            b"def public(VALUE):\n"
+            b"    local_only = VALUE + 1\n"
+            b"    return local_only\n"
+        ),
+        cross_attention_payload=b"RESULT = 3\n",
+    )
+    file_map = _map(source, commit)
+    file_map["groups"]["policy"][0]["allow_symbols"] = ["public"]  # type: ignore[index]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    result = import_snapshot(
+        source_git=source,
+        repository_root=tmp_path,
+        source_inventory_path=inventory_path,
+        file_map_path=map_path,
+        result_path=result_path,
+    )
+
+    imported = (
+        tmp_path
+        / "training/lunar_policy_training/lunar_policy_training/policy/observation.py"
+    ).read_text(encoding="utf-8")
+    assert result["files"][0]["resolved_symbols"] == ["public"]
+    assert "VALUE = 99" not in imported
+
+
+def test_symbol_extractor_rejects_unallowlisted_helper_in_dependency_closure(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if a helper could enter output without explicit symbol approval."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=(
+            b"def helper(value):\n    return value + 1\n"
+            b"def public(value):\n    return helper(value)\n"
+        ),
+    )
+    file_map = _map(source, commit)
+    file_map["groups"]["policy"][0]["allow_symbols"] = ["public"]  # type: ignore[index]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    with pytest.raises(ImportError, match=r"observation\.py:public.*helper"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+def test_symbol_extractor_rejects_unresolved_global_name(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if an unresolved runtime name survived extraction or compile checks."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=b"def public():\n    return MISSING_NAME\n",
+    )
+    file_map = _map(source, commit)
+    file_map["groups"]["policy"][0]["allow_symbols"] = ["public"]  # type: ignore[index]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    with pytest.raises(ImportError, match=r"observation\.py:public.*MISSING_NAME"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("payload", "dependency"),
+    (
+        (
+            b"def decorate(value):\n    return value\n"
+            b"@decorate\nclass Public:\n    pass\n",
+            "decorate",
+        ),
+        (b"class Base:\n    pass\nclass Public(Base):\n    pass\n", "Base"),
+        (
+            b"DEFAULT = 3\nclass Public:\n"
+            b"    def method(self, value=DEFAULT):\n        return value\n",
+            "DEFAULT",
+        ),
+        (
+            b"class Annotation:\n    pass\n"
+            b"class Public:\n    value: Annotation\n",
+            "Annotation",
+        ),
+        (b"BODY_VALUE = 3\nclass Public:\n    value = BODY_VALUE\n", "BODY_VALUE"),
+    ),
+)
+def test_symbol_extractor_counts_every_class_definition_dependency(
+    tmp_path: pathlib.Path, payload: bytes, dependency: str
+) -> None:
+    """Would fail if class decorators, bases, defaults, annotations, or body escaped closure."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=payload,
+        cross_attention_payload=b"RESULT = 3\n",
+    )
+    file_map = _map(source, commit)
+    file_map["groups"]["policy"][0]["allow_symbols"] = ["Public"]  # type: ignore[index]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    with pytest.raises(
+        ImportError, match=rf"observation\.py:Public.*{dependency}"
+    ):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b"VALUE = 3\nprint(VALUE)\n",
+        b"VALUE = side_effect()\n",
+    ),
+)
+def test_symbol_extractor_rejects_top_level_execution(
+    tmp_path: pathlib.Path, payload: bytes
+) -> None:
+    """Would fail if importing generated code could execute source-side behavior."""
+    source, commit, origin = _frozen_source(tmp_path, observation_payload=payload)
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path,
+        _inventory_for_source(source, commit, origin),
+        _map(source, commit),
+    )
+
+    with pytest.raises(ImportError, match=r"top-level.*observation\.py"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+@pytest.mark.parametrize("call", ("eval('1 + 1')", "exec('VALUE = 4')"))
+def test_symbol_extractor_rejects_eval_and_exec(
+    tmp_path: pathlib.Path, call: str
+) -> None:
+    """Would fail if selected symbols retained dynamic code evaluation."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=f"def public():\n    return {call}\n".encode("utf-8"),
+    )
+    file_map = _map(source, commit)
+    file_map["groups"]["policy"][0]["allow_symbols"] = ["public"]  # type: ignore[index]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    with pytest.raises(ImportError, match=r"observation\.py:public.*eval|exec"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("payload", "symbol", "message"),
+    (
+        (
+            b"def public(value):\n    artifact = value\n    return artifact\n",
+            "public",
+            "artifact",
+        ),
+        (
+            b"def public():\n    return 'Stage4 ContentRef durable repair authority'\n",
+            "public",
+            "Stage4",
+        ),
+        (
+            b"class CrossAttentionFrontierPolicy:\n    pass\n",
+            "CrossAttentionFrontierPolicy",
+            "CrossAttentionFrontierPolicy",
+        ),
+    ),
+)
+def test_symbol_extractor_rejects_forbidden_symbols_and_content(
+    tmp_path: pathlib.Path, payload: bytes, symbol: str, message: str
+) -> None:
+    """Would fail if governance, durable-state, or old public names entered output."""
+    source, commit, origin = _frozen_source(tmp_path, observation_payload=payload)
+    file_map = _map(source, commit)
+    file_map["groups"]["policy"][0]["allow_symbols"] = [symbol]  # type: ignore[index]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    with pytest.raises(
+        ImportError, match=rf"observation\.py:{symbol}.*{message}"
+    ):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+def test_symbol_extractor_applies_explicit_rename_to_definition_and_references(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if a renamed old class leaked through its definition or Name references."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=(
+            b"class LegacyPolicy:\n    pass\n"
+            b"def build():\n    return LegacyPolicy()\n"
+        ),
+        cross_attention_payload=b"RESULT = 3\n",
+    )
+    file_map = _map(source, commit)
+    observation_entry = file_map["groups"]["policy"][0]  # type: ignore[index]
+    observation_entry["allow_symbols"] = ["LegacyPolicy", "build"]
+    observation_entry["rename"] = {"LegacyPolicy": "StablePolicy"}
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    result = import_snapshot(
+        source_git=source,
+        repository_root=tmp_path,
+        source_inventory_path=inventory_path,
+        file_map_path=map_path,
+        result_path=result_path,
+    )
+
+    imported = (
+        tmp_path
+        / "training/lunar_policy_training/lunar_policy_training/policy/observation.py"
+    ).read_text(encoding="utf-8")
+    assert "LegacyPolicy" not in imported
+    assert "class StablePolicy" in imported
+    assert "return StablePolicy()" in imported
+    assert result["files"][0]["rename"] == {"LegacyPolicy": "StablePolicy"}
+
+
+@pytest.mark.parametrize(
+    "old_symbol",
+    ("PolicyBatch", "PolicyForwardOutput", "CrossAttentionFrontierPolicy"),
+)
+def test_symbol_extractor_rejects_old_policy_types_even_when_renamed(
+    tmp_path: pathlib.Path, old_symbol: str
+) -> None:
+    """Would fail if rename could disguise a frozen six-input policy type as safe core."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=f"class {old_symbol}:\n    pass\n".encode("utf-8"),
+        cross_attention_payload=b"RESULT = 3\n",
+    )
+    file_map = _map(source, commit)
+    observation_entry = file_map["groups"]["policy"][0]  # type: ignore[index]
+    observation_entry["allow_symbols"] = [old_symbol]
+    observation_entry["rename"] = {old_symbol: "RenamedCore"}
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    with pytest.raises(ImportError, match=rf"observation\.py:{old_symbol}"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+def test_symbol_extractor_rename_does_not_capture_shadowing_local_parameter(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if top-level rename changed a shadowing local into a global reference."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=(
+            b"class LegacyMath:\n    pass\n"
+            b"def echo(LegacyMath):\n    return LegacyMath\n"
+        ),
+        cross_attention_payload=b"RESULT = 3\n",
+    )
+    file_map = _map(source, commit)
+    observation_entry = file_map["groups"]["policy"][0]  # type: ignore[index]
+    observation_entry["allow_symbols"] = ["LegacyMath", "echo"]
+    observation_entry["rename"] = {"LegacyMath": "StableMath"}
     inventory_path, map_path, result_path = _write_contracts(
         tmp_path, _inventory_for_source(source, commit, origin), file_map
     )
@@ -377,16 +896,190 @@ def test_import_erases_multiline_type_only_dependency_without_breaking_future_im
         result_path=result_path,
     )
 
-    imported = tmp_path / "training/lunar_policy_training/lunar_policy_training/policy/observation.py"
-    text = imported.read_text(encoding="utf-8")
-    compile(text, str(imported), "exec")
-    assert text == (
-        '"""Frozen observation."""\n'
-        "from __future__ import annotations\n"
-        "from typing import TYPE_CHECKING\n"
-        "if TYPE_CHECKING:\n"
-        "    from typing import Any as DurableParentGuard\n"
-        "    from typing import Any as PathSecurityError\n"
-        "def name(value: DurableParentGuard) -> type[PathSecurityError]:\n"
-        "    return PathSecurityError\n"
+    imported = (
+        tmp_path
+        / "training/lunar_policy_training/lunar_policy_training/policy/observation.py"
+    ).read_text(encoding="utf-8")
+    assert "class StableMath" in imported
+    assert "def echo(LegacyMath):" in imported
+    assert "return LegacyMath" in imported
+
+
+def test_symbol_extractor_is_byte_deterministic_for_output_and_result(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if traversal order, filesystem paths, or timestamps changed generated bytes."""
+    source, commit, origin = _frozen_source(tmp_path)
+    inventory_path, map_path, _result_path = _write_contracts(
+        tmp_path,
+        _inventory_for_source(source, commit, origin),
+        _map(source, commit),
     )
+    output_bytes: list[bytes] = []
+    result_bytes: list[bytes] = []
+    for name in ("run-a", "run-b"):
+        repository_root = tmp_path / name
+        repository_root.mkdir()
+        result_path = repository_root / "migration/result.json"
+        import_snapshot(
+            source_git=source,
+            repository_root=repository_root,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+        output_bytes.append(
+            (
+                repository_root
+                / "training/lunar_policy_training/lunar_policy_training/policy/observation.py"
+            ).read_bytes()
+        )
+        result_bytes.append(result_path.read_bytes())
+
+    assert output_bytes[0] == output_bytes[1]
+    assert result_bytes[0] == result_bytes[1]
+
+
+def test_manual_thin_adapter_mode_records_provenance_without_copying_source(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if a manual adapter entry copied legacy source or lost its hash record."""
+    source, commit, origin = _frozen_source(
+        tmp_path, cross_attention_payload=b"RESULT = 3\n"
+    )
+    file_map = _map(source, commit)
+    observation_entry = file_map["groups"]["policy"][0]  # type: ignore[index]
+    observation_entry["target"] = "ppo/collector.py"
+    observation_entry["allow_symbols"] = []
+    observation_entry["mode"] = "manual_thin_adapter"
+    observation_entry["adaptation"] = {
+        "kind": "in_memory_vector_env",
+        "require_target_in_2b": True,
+    }
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    result = import_snapshot(
+        source_git=source,
+        repository_root=tmp_path,
+        source_inventory_path=inventory_path,
+        file_map_path=map_path,
+        result_path=result_path,
+    )
+
+    manual = result["files"][0]
+    assert manual["mode"] == "manual_thin_adapter"
+    assert manual["requested_symbols"] == []
+    assert manual["resolved_symbols"] == []
+    assert manual["source_sha256"] == observation_entry["sha256"]
+    assert not (
+        tmp_path
+        / "training/lunar_policy_training/lunar_policy_training/ppo/collector.py"
+    ).exists()
+
+
+@pytest.mark.parametrize("field", ("sha256", "target", "allow_symbols"))
+def test_file_map_requires_explicit_symbol_extraction_fields_per_source(
+    tmp_path: pathlib.Path, field: str
+) -> None:
+    """Would fail if a mapping silently fell back to whole-file copy defaults."""
+    source, commit, origin = _frozen_source(tmp_path)
+    file_map = _map(source, commit)
+    del file_map["groups"]["policy"][0][field]  # type: ignore[index]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    with pytest.raises(ImportError, match=field):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+def test_import_rejects_non_regular_git_blob(tmp_path: pathlib.Path) -> None:
+    """Would fail if a symlink could be imported as though it were a frozen regular blob."""
+    source, _commit, origin = _frozen_source(tmp_path)
+    observation = source / "src/lunar_exploration_ppo/policy/observation.py"
+    observation.unlink()
+    observation.symlink_to("cross_attention.py")
+    _git(source, "add", ".")
+    _git(source, "commit", "-m", "symlink source")
+    commit = _git(source, "rev-parse", "HEAD").strip()
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path,
+        _inventory_for_source(source, commit, origin),
+        _map(source, commit),
+    )
+
+    with pytest.raises(ImportError, match=r"not a regular blob.*observation\.py"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+def test_repository_file_map_declares_core_targets_and_manual_adapter_boundaries() -> None:
+    """Would fail if 2B targets regressed to frozen copies or overwrote public adapters."""
+    document = yaml.safe_load(
+        (REPOSITORY_ROOT / "migration/ppo_file_map.yaml").read_text(encoding="utf-8")
+    )
+    entries = {
+        entry["source"]: entry
+        for group in document["groups"].values()
+        for entry in group
+    }
+    inventory = json.loads(
+        (REPOSITORY_ROOT / "migration/source_inventory.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    inventory_hashes = {
+        entry["path"]: entry["sha256"]
+        for entry in inventory["files"]
+        if entry["repository"] == "legacy_root"
+    }
+    expected_targets = {
+        "src/lunar_exploration_ppo/policy/observation.py": "policy/observation_core.py",
+        "src/lunar_exploration_ppo/policy/cross_attention.py": "policy/backbone_core.py",
+        "src/lunar_exploration_ppo/ppo/rollout.py": "ppo/rollout_core.py",
+        "src/lunar_exploration_ppo/ppo/trainer.py": "ppo/trainer_core.py",
+        "src/lunar_exploration_ppo/eval/baselines.py": "eval/baseline_core.py",
+        "src/lunar_exploration_ppo/eval/metrics.py": "eval/metrics_core.py",
+        "src/lunar_exploration_ppo/ppo/collector.py": "ppo/collector.py",
+        "src/lunar_exploration_ppo/ppo/checkpoint.py": "ppo/checkpoint.py",
+    }
+    assert {source: entry["target"] for source, entry in entries.items()} == expected_targets
+    for source, entry in entries.items():
+        assert len(entry["sha256"]) == 64
+        assert entry["sha256"] == inventory_hashes[source]
+        assert isinstance(entry["allow_symbols"], list)
+        assert isinstance(entry["forbid_imports"], list)
+        old_policy_symbols = {
+            "PolicyBatch",
+            "PolicyForwardOutput",
+            "CrossAttentionFrontierPolicy",
+        }
+        assert old_policy_symbols.isdisjoint(entry["allow_symbols"])
+        assert old_policy_symbols.isdisjoint(entry.get("rename", {}))
+        assert all(
+            word not in entry["target"]
+            for word in ("frozen", "legacy", "reference")
+        )
+        expected_mode = (
+            "manual_thin_adapter"
+            if source.endswith(("collector.py", "checkpoint.py"))
+            else "extract"
+        )
+        assert entry.get("mode", "extract") == expected_mode
+        if expected_mode == "manual_thin_adapter":
+            assert entry["allow_symbols"] == []
+            assert entry["adaptation"]["require_target_in_2b"] is True
+    assert "type_checking_dependencies" not in document
