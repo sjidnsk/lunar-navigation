@@ -28,7 +28,12 @@ add_library(${PROJECT_NAME} SHARED
   src/shared/convex_corridor.cpp
   src/shared/map_snapshot.cpp
   src/shared/safe_projection.cpp
-  src/shared/terrain_checks.cpp)
+  src/shared/terrain_checks.cpp
+  src/wheel/wheel_lattice.cpp
+  src/wheel/wheel_planner.cpp
+  src/wheel/wheel_spline_optimizer.cpp
+  src/wheel/wheel_sweep_validator.cpp
+  src/wheel/wheel_timing.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 target_include_directories(${PROJECT_NAME}
   PUBLIC
@@ -130,6 +135,21 @@ if(BUILD_TESTING)
   target_link_libraries(
     lunar_planner_core_shared_core_determinism_test ${PROJECT_NAME})
   lunar_enable_sanitizers(lunar_planner_core_shared_core_determinism_test)
+
+  ament_add_gtest(lunar_planner_core_wheel_planner_test
+    test/wheel_planner_test.cpp)
+  target_include_directories(lunar_planner_core_wheel_planner_test PRIVATE
+    src test)
+  target_link_libraries(lunar_planner_core_wheel_planner_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_wheel_planner_test)
+
+  ament_add_gtest(lunar_planner_core_wheel_fault_matrix_test
+    test/wheel_fault_matrix_test.cpp)
+  target_include_directories(lunar_planner_core_wheel_fault_matrix_test PRIVATE
+    src test)
+  target_link_libraries(
+    lunar_planner_core_wheel_fault_matrix_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_wheel_fault_matrix_test)
 
   if(LUNAR_BUILD_LEGACY_V3)
     ament_add_gtest(lunar_planner_core_legacy_adapter_test

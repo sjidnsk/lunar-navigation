@@ -11,6 +11,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "lunar_planner_core/planner.hpp"
 #include "migration/legacy_v3_adapter.hpp"
 #include "test_fixtures.hpp"
 
@@ -159,6 +160,11 @@ void MakeGoalKnownInfeasible(
       setup == "numerical_failure"
           ? LegacyV3FaultMode::kThrowingRegistry
           : LegacyV3FaultMode::kNone;
+  if (platform == PlatformType::kWheeled &&
+      fault_mode == LegacyV3FaultMode::kNone) {
+    Planner planner;
+    return planner.Plan(input);
+  }
   LegacyV3Adapter adapter{fault_mode};
   return adapter.Plan(input);
 }

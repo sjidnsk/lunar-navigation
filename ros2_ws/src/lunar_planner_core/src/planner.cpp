@@ -4,9 +4,12 @@
 #include <cctype>
 #include <exception>
 #include <new>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
+
+#include "wheel/wheel_planner.hpp"
 
 #ifdef LUNAR_HAS_LEGACY_V3
 #include "migration/legacy_v3_adapter.hpp"
@@ -36,6 +39,8 @@ constexpr std::array<std::string_view, 10> kRequiredMapLayers{
       .outcome = outcome,
       .directive = directive,
       .reason_code = std::move(reason_code),
+      .reference = std::nullopt,
+      .diagnostics = {},
   };
 }
 
@@ -63,6 +68,7 @@ constexpr std::array<std::string_view, 10> kRequiredMapLayers{
 }  // namespace
 
 struct Planner::Impl final {
+  wheel::WheelPlanner wheel_planner;
 #ifdef LUNAR_HAS_LEGACY_V3
   LegacyV3Adapter adapter;
 #endif
@@ -95,6 +101,9 @@ PlannerOutput Planner::Plan(const PlannerInput& input) noexcept {
           PlanningOutcome::kInvalidRequest,
           ExecutionDirective::kNoSafeReference,
           std::move(reason));
+    }
+    if (CapabilityPlatform(input.capability) == PlatformType::kWheeled) {
+      return impl_->wheel_planner.Plan(input);
     }
 #ifdef LUNAR_HAS_LEGACY_V3
     return impl_->adapter.Plan(input);
