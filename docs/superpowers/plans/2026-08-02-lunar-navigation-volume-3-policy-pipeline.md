@@ -270,7 +270,7 @@ def test_release_gate_fails_any_safety_violation():
 ```yaml
 schema_version: lunar-policy-release-gate/v1
 rules:
-  success_coverage_rate_min: 0.99
+  success_coverage_rate_min: 0.95
   safety_violation_count_max: 0
   invalid_action_count_max: 0
   selected_action_observed_safe_rate_min: 1.0

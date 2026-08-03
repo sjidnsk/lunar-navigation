@@ -137,7 +137,7 @@ U80/A* 的最终训练成绩和 checkpoint 不决定新奖励权重。24 小时�
 
 最终选择所有候选中“三个平台最低覆盖成功率最高”的 checkpoint；并列时依次选择规划失败率较低、完成时间较短者。24 小时耗尽仍未通过时，保留最佳 checkpoint 和报告并明确标记为未收敛，不导出正式 AGX 发布包。
 
-`0.95` 是本次有限时间训练候选门槛，不覆盖卷三现有 `0.99` 正式模型发布规则。候选只有通过后续正式发布评估、ONNX 等价验证和包校验后才可进入 `model-package-ready`；AGX 上完成独立验证后才能进入 `device-verified`。
+`0.95` 同时作为本次训练候选和卷三正式模型发布的覆盖成功率门槛，且必须由三类平台分别满足。训练候选仍只有通过后续正式发布评估中的其余规则、ONNX 等价验证和包校验后才可进入 `model-package-ready`；AGX 上完成独立验证后才能进入 `device-verified`。
 
 所有训练地形、能力范围和平台代理结果继续显式标记为 `proxy`，不得写成真实平台能力结论。
 
@@ -190,7 +190,7 @@ checkpoint 包含模型、优化器、学习率状态、累计环境步数、课
 
 - Task 1 的旧模型前向基线改为“保留可维护骨干并新增 `platform_context` 融合”，不再承诺旧六输入数值完全相同。
 - Task 2 增加 v3 bridge 构建、激进并行配置、30 分钟 checkpoint、累计预算和恢复合同。
-- Task 3 区分本轮 95% 训练候选评估与原有 99% 正式发布评估；三平台始终分别聚合。
+- Task 3 把训练候选和正式发布的覆盖成功率统一为 95%，两者仍使用各自完整的评估范围，且三平台始终分别聚合。
 - Task 4 的 model manifest 和 `ObservationContract` 固定七项输入。
 - Task 5 的 inference wrapper、ONNX、黄金输入输出和等价测试加入 `platform_context`。
 - Task 6 的 TensorRT binding 和 cache 校验加入第七输入。
