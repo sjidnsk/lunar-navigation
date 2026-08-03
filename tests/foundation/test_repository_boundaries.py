@@ -126,6 +126,21 @@ def test_rejects_windows_paths_in_yaml_and_json_configuration(tmp_path: Path) ->
     assert any("Windows absolute path" in error and "runtime.json" in error for error in errors)
 
 
+def test_allows_uri_schemes_and_escaped_configuration_strings(tmp_path: Path) -> None:
+    """URI schemes and C++ escaped newlines must not be mistaken for drive paths."""
+    (tmp_path / "schema.json").write_text(
+        '{"$schema": "https://json-schema.org/draft/2020-12/schema"}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "loader.cpp").write_text(
+        'constexpr auto uri = "package://robot/mesh.stl";\n'
+        'constexpr auto yaml = "platform:\\n";\n',
+        encoding="utf-8",
+    )
+
+    assert check_repository(tmp_path) == []
+
+
 def test_allows_windows_paths_in_approved_migration_inventories(tmp_path: Path) -> None:
     """Removing the narrow migration-inventory exemption must fail this test."""
     migration = tmp_path / "migration"

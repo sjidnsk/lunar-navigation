@@ -1,0 +1,924 @@
+{
+  "files": [
+    {
+      "group": "shared",
+      "sha256": "5332f8b1b2538a777e7a882bb2fec019c5a68acd31ee824c63a4c9fd35690dfd",
+      "size_bytes": 3445,
+      "source": "cpp/include/lunar_path_planner/v3/cache/deterministic_cache.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/cache/deterministic_cache.hpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "a30603e751e44ec9ae50b602df33ff17a1ab6ae2518aa2e97261b0d4b8fe5253",
+      "size_bytes": 1535,
+      "source": "cpp/include/lunar_path_planner/v3/corridor/convex_corridor.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/corridor/convex_corridor.hpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "ebe01605543d298bccc10b3e0f49e4dd2796055bb636e94e27890c712827c29b",
+      "size_bytes": 2546,
+      "source": "cpp/include/lunar_path_planner/v3/cost/learned_cost_snapshot.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/cost/learned_cost_snapshot.hpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "36a26c95d9e408d84638c146f02d76b1ed61d0a13fb7dedb8821f70d134247b1",
+      "size_bytes": 1246,
+      "source": "cpp/include/lunar_path_planner/v3/goal/terminal_resolver.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/goal/terminal_resolver.hpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "ac59409ffa5b8e670e32625d18dc25375884d973096e6785333d50d5c93bce36",
+      "size_bytes": 3430,
+      "source": "cpp/include/lunar_path_planner/v3/map/immutable_snapshot.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/map/immutable_snapshot.hpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "b6a9dc08937b37fb0db488c36f86ad8a573a63610f50daf9e9b5cf5cb42e1019",
+      "size_bytes": 3412,
+      "source": "cpp/include/lunar_path_planner/v3/map/safe_projection.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/map/safe_projection.hpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "8d846a2c49945e7fc442701ea8fa41ae04900673086fdf23eae1f5b9610a059d",
+      "size_bytes": 1745,
+      "source": "cpp/include/lunar_path_planner/v3/optimization/bounded_qp_solver.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/optimization/bounded_qp_solver.hpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "c5ad117eb905f1d4744e76a0f0009aa5e139eb454054ac9fd438d709a409c061",
+      "size_bytes": 18281,
+      "source": "cpp/include/lunar_path_planner/v3/search/ara_star.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/search/ara_star.hpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "9c63728bb4a74be93bdece55b83ea4551e091e9697cfa3e04b391b8d4ba0658a",
+      "size_bytes": 834,
+      "source": "cpp/include/lunar_path_planner/v3/search/candidate_ranker.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/search/candidate_ranker.hpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "d856fa01bc6642aa5f3e7b147493a8031aeb5e28fb6a714ce79d3321f4b58e98",
+      "size_bytes": 1664,
+      "source": "cpp/include/lunar_path_planner/v3/search/platform_adapter.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/search/platform_adapter.hpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "6056fc4ee15beba520b86dc01725a9322ffab52967ecbfa67067749d5b7ad65e",
+      "size_bytes": 27365,
+      "source": "cpp/src/corridor/convex_corridor.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/corridor/convex_corridor.cpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "580d623e27682a9fa3ebfaa7becc7b684369d4723285defbc56d7c5a5c23eaf8",
+      "size_bytes": 14266,
+      "source": "cpp/src/cost/learned_cost_snapshot.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/cost/learned_cost_snapshot.cpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "f9725f8fb971c66b581965baabaf0ed5f8616b94d3b4020b8b64480ff0432d04",
+      "size_bytes": 39502,
+      "source": "cpp/src/goal/terminal_resolver.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/goal/terminal_resolver.cpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "506eaafa4b6b066c2c527536ccb36762147b8185331d30510becfdb15f796525",
+      "size_bytes": 17280,
+      "source": "cpp/src/map/immutable_snapshot.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/map/immutable_snapshot.cpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "edc85b41d5e937bcade2a767cfeeb55d77d18681727d00f00012a2549fe71244",
+      "size_bytes": 34656,
+      "source": "cpp/src/map/safe_projection.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/map/safe_projection.cpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "dfdf8cea5e41608a0c0530098452634c488e431e50890d7301d78adef7dbd9f4",
+      "size_bytes": 7053,
+      "source": "cpp/src/optimization/bounded_qp_solver.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/optimization/bounded_qp_solver.cpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "885969e34e02ce11aa72df18f0c6dab484cc8f4e1794de03eab6ddc6f141cf98",
+      "size_bytes": 7618,
+      "source": "cpp/src/optimization/osqp_bounded_qp_solver.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/optimization/osqp_bounded_qp_solver.cpp"
+    },
+    {
+      "group": "shared",
+      "sha256": "86b6296bedcfbd603479a9f2fcc2a45d04c973bd240188bc3ed4e3a852767b3a",
+      "size_bytes": 5591,
+      "source": "cpp/src/search/candidate_ranker.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/search/candidate_ranker.cpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "a26024898e95a42e589c06acea90771b12d9a09873a8986f9ec675806a59efd8",
+      "size_bytes": 946,
+      "source": "cpp/include/lunar_path_planner/v3/wheel/wheel_capability.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_capability.hpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "90f14d7dddbb0563436de9dad05482beab0af216234576fb7b4e65a3acd9a607",
+      "size_bytes": 981,
+      "source": "cpp/include/lunar_path_planner/v3/wheel/wheel_corridor.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_corridor.hpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "ecdaaa4e52c8ac1f5007eb01261e045e716e9dca84c8e992aaa5579c82237247",
+      "size_bytes": 2944,
+      "source": "cpp/include/lunar_path_planner/v3/wheel/wheel_lattice.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_lattice.hpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "464ef287f6d52de58079dfa98b52755e58ce76984d58175351797dea9aeaf14f",
+      "size_bytes": 923,
+      "source": "cpp/include/lunar_path_planner/v3/wheel/wheel_planner.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_planner.hpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "bae8927f97687e839fa163d24a9e3b6a6294b5d282e8231e033acff76fd2c8ef",
+      "size_bytes": 1503,
+      "source": "cpp/include/lunar_path_planner/v3/wheel/wheel_primitive.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_primitive.hpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "a6d2fc6f686d07f7399e8f229ffad7d9c594d289edf5659c4edf9419aad16e89",
+      "size_bytes": 1971,
+      "source": "cpp/include/lunar_path_planner/v3/wheel/wheel_search.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_search.hpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "0c3808c842578e3fd8104e3d0b056159a603335f06486ce3df08cede55686bde",
+      "size_bytes": 1765,
+      "source": "cpp/include/lunar_path_planner/v3/wheel/wheel_spline_optimizer.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_spline_optimizer.hpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "4bc2277f4dcbad2fa2051db3317e5e154f89139ba0c0d88271b02a3c1a6a4238",
+      "size_bytes": 1101,
+      "source": "cpp/include/lunar_path_planner/v3/wheel/wheel_sweep_validator.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_sweep_validator.hpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "8ebea14ba7af031b0c11de19ff1a6af3f8dbc2c57500c5d857db0865fa9bd48f",
+      "size_bytes": 2516,
+      "source": "cpp/include/lunar_path_planner/v3/wheel/wheel_timing.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/wheel/wheel_timing.hpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "d6c90aa4e257575f65e8b2422ae6a89d646f290ad31bc7b25179bc5349abb831",
+      "size_bytes": 4214,
+      "source": "cpp/src/wheel/wheel_capability.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_capability.cpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "e0e211fe9f28551b6a2f443447fc8372e39e7018241f9bc86f390a4ee1b26ea8",
+      "size_bytes": 7370,
+      "source": "cpp/src/wheel/wheel_corridor.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_corridor.cpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "61ad100dfdc88d0499fc21774c821d4fd6e2684b805a52afd2ff2d8f3d4dd2e5",
+      "size_bytes": 15533,
+      "source": "cpp/src/wheel/wheel_lattice.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_lattice.cpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "fd7d7a26141df2cc350b55c3b3c3abc3ad7407e75f17e0cb3ad02c5dd92c8157",
+      "size_bytes": 37175,
+      "source": "cpp/src/wheel/wheel_planner.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_planner.cpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "7c41452c85eb18994cc0385fe002c4bc93b9bd76c13963afdc9bc3b7d2799b04",
+      "size_bytes": 8793,
+      "source": "cpp/src/wheel/wheel_primitive.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_primitive.cpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "73bf26071da9bfc9ce2a93b6c5bd041a8f22ee3f37016d0b3ac70a7514c1f8b7",
+      "size_bytes": 10700,
+      "source": "cpp/src/wheel/wheel_search.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_search.cpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "dae9f2caff8d7ca388add34ecbf46afa0ab0ee923319949a9f6feaca5c661e65",
+      "size_bytes": 21183,
+      "source": "cpp/src/wheel/wheel_spline_optimizer.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_spline_optimizer.cpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "a242056bee319ccaab07439ebd21b10588d30d959b4d5b026b08fb03344e3df3",
+      "size_bytes": 18316,
+      "source": "cpp/src/wheel/wheel_sweep_validator.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_sweep_validator.cpp"
+    },
+    {
+      "group": "wheel",
+      "sha256": "0e1b4ab38c3467a98acbf031bfae0de0d41413108d9e2591c1761982c9587140",
+      "size_bytes": 21523,
+      "source": "cpp/src/wheel/wheel_timing.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/wheel/wheel_timing.cpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "414f99a0d322474802532edd51972a5b136af38a054be964513fc76e808f119f",
+      "size_bytes": 1312,
+      "source": "cpp/include/lunar_path_planner/v3/legged/body_motion_primitive.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/body_motion_primitive.hpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "370c2a8042227eec9a8e80bc42214744cbbf1edca067c344f91809366525b30f",
+      "size_bytes": 581,
+      "source": "cpp/include/lunar_path_planner/v3/legged/height_interval.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/height_interval.hpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "aa2a751156f153ffbd83f351c00e08daf7f7c8c3c0f5c0311c0f53852473b43e",
+      "size_bytes": 811,
+      "source": "cpp/include/lunar_path_planner/v3/legged/legged_capability.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_capability.hpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "1faf318f1e23720115ec19b0865441cd4afc820f32929615638d72dcd2463638",
+      "size_bytes": 1232,
+      "source": "cpp/include/lunar_path_planner/v3/legged/legged_corridor.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_corridor.hpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "6c51d2c38a17b0177d399429d66b19b02ff8af6cd2aae244b67c478160e4a4e4",
+      "size_bytes": 3056,
+      "source": "cpp/include/lunar_path_planner/v3/legged/legged_lattice.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_lattice.hpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "5d85da933ce722f463336f9dbf54202bbc6485d93581031b6ec8898e346b5062",
+      "size_bytes": 1086,
+      "source": "cpp/include/lunar_path_planner/v3/legged/legged_planner.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_planner.hpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "5ef211e46e78eef67b0b3d2b67fd694d30a1865a0eb663a942645cee068ae50e",
+      "size_bytes": 1159,
+      "source": "cpp/include/lunar_path_planner/v3/legged/legged_search.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_search.hpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "1be9949ef216e7b3c35a48fd6ae5d3875af22b95f1825611a4b8648f71eb4369",
+      "size_bytes": 1525,
+      "source": "cpp/include/lunar_path_planner/v3/legged/legged_spline_optimizer.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_spline_optimizer.hpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "6344b95706a16671c81d7b4137dab438f76280ed1964899da3c3275610000dd9",
+      "size_bytes": 1979,
+      "source": "cpp/include/lunar_path_planner/v3/legged/legged_terrain.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_terrain.hpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "f45164bb3f8f8b22d255108d974894468f82d74efe81811d3a6c0400f7122c1d",
+      "size_bytes": 1215,
+      "source": "cpp/include/lunar_path_planner/v3/legged/legged_timing.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/legged/legged_timing.hpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "82055d534c237ce76729c2507047dd17145fff541d9243df1b71775d682753ac",
+      "size_bytes": 7816,
+      "source": "cpp/src/legged/body_motion_primitive.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/body_motion_primitive.cpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "40cfe2f64dd0e5c61de6e997b9cd51d417d538847cfd6f77ce709809554a8fa4",
+      "size_bytes": 1507,
+      "source": "cpp/src/legged/height_interval.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/height_interval.cpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "7bcdb6a26ed9c53b9e8afc95d190099991f44ce33548256cc70f0f97122452b4",
+      "size_bytes": 5325,
+      "source": "cpp/src/legged/legged_capability.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_capability.cpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "b69fdff57770dac0a99b1eef158c278ee300dc02bb14f4a7ba9ecd84acb48587",
+      "size_bytes": 19067,
+      "source": "cpp/src/legged/legged_corridor.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_corridor.cpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "d9e2455611b4ac490c1fe84c8ac5db79d2a59331f91546d2e5172ba7c303462f",
+      "size_bytes": 16056,
+      "source": "cpp/src/legged/legged_lattice.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_lattice.cpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "e57b595642d2b0ae2ed9ce64cad3b7bdc93a11caa9d5dc19281b6315de09972f",
+      "size_bytes": 24534,
+      "source": "cpp/src/legged/legged_planner.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_planner.cpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "dad8664a4e8777def6ac7918f593186047b140a78701aa6e03830c8ee653a049",
+      "size_bytes": 13586,
+      "source": "cpp/src/legged/legged_search.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_search.cpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "bd49f911a140c77b99edcbcd2de0dc9cf6c1e0869fc6e9ed9c4dcf2fb371509f",
+      "size_bytes": 19192,
+      "source": "cpp/src/legged/legged_spline_optimizer.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_spline_optimizer.cpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "ed65d57378c71a69e183fe7497fa60072acd0ab3d0f40dc5207fb5429c7a8288",
+      "size_bytes": 10111,
+      "source": "cpp/src/legged/legged_terrain.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_terrain.cpp"
+    },
+    {
+      "group": "legged",
+      "sha256": "9f400d2824ae7014055553cef327f2fefd6606f2150eea14533be88ee2a600fe",
+      "size_bytes": 18364,
+      "source": "cpp/src/legged/legged_timing.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/legged/legged_timing.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "1e11080ba730226fada864a71928e2dd9a2b35101485742fe3240e8901020d5a",
+      "size_bytes": 1187,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/aim_point_generator.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/aim_point_generator.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "8ba870e2c22833a5a89da3c3d668c2272212565b55a22658998584337c42833d",
+      "size_bytes": 2620,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/attitude_certifier.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/attitude_certifier.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "648e06855a577de91fa7e3454308a178329d8b44e01b9dcc2a37013f8a211396",
+      "size_bytes": 1752,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/ballistic_kinematics.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/ballistic_kinematics.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "28b5f69b78ba48f64788dbaf10d4e011518874acfb579145f9609ab3f173a61b",
+      "size_bytes": 1518,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/ballistic_time_solver.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/ballistic_time_solver.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "8df532a18dfdc0ed5ee595bf004e366f078f8287fdfaa8e6c3b0440fc4625e8f",
+      "size_bytes": 1523,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/flight_tube_certifier.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/flight_tube_certifier.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "eb667b33c7624878499238a71af29b5347212a377845408c5d6c5c86cddbaffd",
+      "size_bytes": 1621,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/hop_certifier.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/hop_certifier.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "2a1f2c434099115c9ee1199fa468073e3bf7bf00db7e7325d89c3db85a7d74d4",
+      "size_bytes": 1612,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/hopper_commitment_state_machine.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/hopper_commitment_state_machine.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "09698d20d7471566a3c3001ac62cca436e56e741f16d3c1270023aa49718dc07",
+      "size_bytes": 3730,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/hopper_config.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/hopper_config.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "4cd53355df80769bdb0ee4ae97cb5a41ba4b1e75d6de79902ee8acbbaf2c3ec0",
+      "size_bytes": 390,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/hopper_planner.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/hopper_planner.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "534e02f788716a549b1b5f22369be38d958f985260ef01141e7a8c82a010705e",
+      "size_bytes": 1673,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/landing_geometry.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/landing_geometry.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "1ce816f8a7f0286655294f6900808bd795510574cd061efd24a496a50c21a618",
+      "size_bytes": 3751,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/landing_graph.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/landing_graph.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "c004cae13a78e154f43b75eb4d6d88e914ab66ee687a2b723fbaf42fc8a8c697",
+      "size_bytes": 1540,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/landing_region.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/landing_region.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "91bf6e846861898e2e7ef0c8f03faa95d8b33d850e60155fed189c5dbb607fa3",
+      "size_bytes": 1684,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/landing_set_propagator.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/landing_set_propagator.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "23c2cb9f23849518a12937ee882d4415120d698eb43da18dbff9d66d38842d56",
+      "size_bytes": 1255,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/safe_pose_mask.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/safe_pose_mask.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "a2ac4aca0d6bdc3b4057de25a93babd927a0b3b477378f8735005e81666cf7ae",
+      "size_bytes": 1069,
+      "source": "cpp/include/lunar_path_planner/v3/hopper/swept_footprint.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/hopper/swept_footprint.hpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "2f1d0022000c6ce967b3dcbe24046616c9656e49ce86c5944be0d79a499f2a0b",
+      "size_bytes": 7620,
+      "source": "cpp/src/hopper/aim_point_generator.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/aim_point_generator.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "d5001290b55f1642f93b81aa5a84228c50c68a81986c8d71bf0729702ee7dfb5",
+      "size_bytes": 12586,
+      "source": "cpp/src/hopper/attitude_certifier.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/attitude_certifier.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "3d0e7461fb49c6f9301d0371589b3a4574e229378bdf8e4ab31afa494ecde733",
+      "size_bytes": 4630,
+      "source": "cpp/src/hopper/ballistic_kinematics.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/ballistic_kinematics.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "f63cd83bf6e344ee43009fd2652d73452d4b9e07bd5263f8d00d89cc0cdea3a5",
+      "size_bytes": 5751,
+      "source": "cpp/src/hopper/ballistic_time_solver.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/ballistic_time_solver.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "f2c9eee958200eb91f685adc3c7f0267366efdbb342218cd42aa3026af9784c4",
+      "size_bytes": 12741,
+      "source": "cpp/src/hopper/flight_tube_certifier.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/flight_tube_certifier.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "f33f98efa2333b2056abcf4b19dc1aba518c7c92e533467e334df0745c1ced86",
+      "size_bytes": 18453,
+      "source": "cpp/src/hopper/hop_certifier.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/hop_certifier.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "2f63b51f6d79bce8a2c4f0c9467dce41f2fcba5360dd032704fbc9e21697a0b8",
+      "size_bytes": 6351,
+      "source": "cpp/src/hopper/hopper_commitment_state_machine.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/hopper_commitment_state_machine.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "52d2be49e4cacdbedd62f8a64546d7e10e636a99a962b94b05dbb148e7450db8",
+      "size_bytes": 14621,
+      "source": "cpp/src/hopper/hopper_config.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/hopper_config.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "a3e1f6280273559510342ab76627b90132adcbf82aaf04bd5a5b0032d6a7b992",
+      "size_bytes": 14823,
+      "source": "cpp/src/hopper/hopper_planner.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/hopper_planner.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "589412ecce957b6a9bb315c0e19696f0767828d577e8828032119c0af4408cc4",
+      "size_bytes": 8434,
+      "source": "cpp/src/hopper/landing_geometry.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/landing_geometry.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "e87570f5835b4fe8c4ac5463ffce8d32d8bba842d75361f68e50d5c2464e06f8",
+      "size_bytes": 12158,
+      "source": "cpp/src/hopper/landing_graph.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/landing_graph.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "d0f2d2bdccdfee096bf423ec35da9d827ab543f674bacea3d9140edaadf068f1",
+      "size_bytes": 11329,
+      "source": "cpp/src/hopper/landing_region.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/landing_region.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "6ebd59d4bbaef991100b9e99b09c2605341fc7d4a854382dc88a469e7ca5e3a1",
+      "size_bytes": 10180,
+      "source": "cpp/src/hopper/landing_set_propagator.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/landing_set_propagator.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "76f61f934c71743c02d6b63cec0c4b03a9f6c704f5d8672d331a23ddca27171e",
+      "size_bytes": 7435,
+      "source": "cpp/src/hopper/safe_pose_mask.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/safe_pose_mask.cpp"
+    },
+    {
+      "group": "hopper",
+      "sha256": "2b5b7de58d95fc18e6c916e8a4be99a45f8d3b9877ed4d684ff00857b1877328",
+      "size_bytes": 7134,
+      "source": "cpp/src/hopper/swept_footprint.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/hopper/swept_footprint.cpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "5ffc9e06991570f02ca8abcad4fe3a5259c88bbd9196068dca84422843fcdea0",
+      "size_bytes": 26859,
+      "source": "cpp/CMakeLists.txt",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/CMakeLists.txt"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "e3ce8e05f1f40b12c972ee1713c7972201872ec879087d1d6b0b139f73dec3e2",
+      "size_bytes": 333,
+      "source": "cpp/cmake/CompilerWarnings.cmake",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/cmake/CompilerWarnings.cmake"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "cbce4b44ee9dee2574635c80fabaa3a6b82631c6a278be53e82cf21b1e527ff2",
+      "size_bytes": 397,
+      "source": "cpp/cmake/PlannerV3Config.cmake.in",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/cmake/PlannerV3Config.cmake.in"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "8347989f940543d21eb826bce25bef9dd2338de66f459bad71b322f77ad8e3df",
+      "size_bytes": 389,
+      "source": "cpp/cmake/ProjectOptions.cmake",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/cmake/ProjectOptions.cmake"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "a56ab7036769c080326e823a94bc1746387d2fa9c8cea0aa516917503977ed47",
+      "size_bytes": 721,
+      "source": "cpp/include/lunar_path_planner/v3/api/execution_arbitrator.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/api/execution_arbitrator.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "cd87479f421c3acb9fb62671705ed3b9384432733118baa6b773ad381bc87979",
+      "size_bytes": 1854,
+      "source": "cpp/include/lunar_path_planner/v3/api/planner_v3.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/api/planner_v3.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "a4940a4fb1af2668b87ae9163b7bb056bd9e3e21baaf45b86a3735b35ea07e9b",
+      "size_bytes": 1215,
+      "source": "cpp/include/lunar_path_planner/v3/api/reference_bundle_builder.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/api/reference_bundle_builder.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "737539368e05f7d4ce70f4425bc81198d042ec88fa8027911c99f2899b6fb646",
+      "size_bytes": 328,
+      "source": "cpp/include/lunar_path_planner/v3/codec/jcs_canonicalizer.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/codec/jcs_canonicalizer.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "73202524ce2c1c4633ea0cb29f3a60af25367cb81342286e63b3372865d0ce80",
+      "size_bytes": 4523,
+      "source": "cpp/include/lunar_path_planner/v3/codec/json_codec.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/codec/json_codec.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "e7441c94b852d3a38416989a3abe477b1c885b735e7459122bbba923c018b929",
+      "size_bytes": 1477,
+      "source": "cpp/include/lunar_path_planner/v3/codec/semantic_validator.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/codec/semantic_validator.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "8db0d0dbe28971251614ae8243d4dc7a07715892e6da0a23c1e4fe9d5ff9a38a",
+      "size_bytes": 1623,
+      "source": "cpp/include/lunar_path_planner/v3/contracts/base_types.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/base_types.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "63b2ee2376f22b2f71a5b15322e3be5944a3efcb1f2bd16ef2857fa983c2b778",
+      "size_bytes": 4222,
+      "source": "cpp/include/lunar_path_planner/v3/contracts/planning_request.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/planning_request.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "e49da413eb5bb3a8b637e14e03ce5b1f85f53851629213ee7e8b0042ff28b274",
+      "size_bytes": 1741,
+      "source": "cpp/include/lunar_path_planner/v3/contracts/planning_response.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/planning_response.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "dbcb79fd63e6596257220e8f9ee9f15ae47aff3e788a8ebb2391d61a8ddc1ff2",
+      "size_bytes": 7415,
+      "source": "cpp/include/lunar_path_planner/v3/contracts/platform_reference.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/platform_reference.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "fb80b1a8a23f4f0ebe5741f1be86f5253c890a03e510781aa2299413d53407e6",
+      "size_bytes": 10243,
+      "source": "cpp/include/lunar_path_planner/v3/contracts/profiles.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/profiles.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "a2a9f3afa4f714172b4ab0e18fd30f4fc9c56d7f27ec3ba6cca8b958bc36b630",
+      "size_bytes": 3143,
+      "source": "cpp/include/lunar_path_planner/v3/contracts/reference_bundle.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/reference_bundle.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "aaddd0d9546047977c462cdb36f0f2f57d5bb57f63e75a310babdcd564467d25",
+      "size_bytes": 1488,
+      "source": "cpp/include/lunar_path_planner/v3/contracts/state.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/state.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "c57d5dfd8dfe3199f69304cfbcf57c305842cece01e15f6d7b596e8ba467a0d6",
+      "size_bytes": 724,
+      "source": "cpp/include/lunar_path_planner/v3/contracts/status.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/contracts/status.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "f0f878d1cc98807b68e7bbed2251857c66153e3d8c49534a959522cb9a2c6850",
+      "size_bytes": 305,
+      "source": "cpp/include/lunar_path_planner/v3/crypto/sha256.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/include/lunar_path_planner/v3/crypto/sha256.hpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "de973b109a6d59b6186ff4196ef77de01b263eb764b4242b40b7482e940a3b5e",
+      "size_bytes": 11065,
+      "source": "cpp/src/api/execution_arbitrator.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/api/execution_arbitrator.cpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "7660c495f7fb543a7a0e4a0934aa5f8fce0b424360dbc88909093b39359b9e38",
+      "size_bytes": 42884,
+      "source": "cpp/src/api/planner_v3.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/api/planner_v3.cpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "c5ce8fdf9698fbc415cffe1840b917e0886b517fde176353a65774573b1bc923",
+      "size_bytes": 16932,
+      "source": "cpp/src/api/reference_bundle_builder.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/api/reference_bundle_builder.cpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "451dd08e123a9c137ba9e007887283939b1c2289ee9799edc5d65c42d19c19b5",
+      "size_bytes": 11692,
+      "source": "cpp/src/codec/jcs_canonicalizer.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/codec/jcs_canonicalizer.cpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "9bb21cf78b84f9124a38101ea3f6d0f4c50ebfd10bed6693ba098dacc4b70ef8",
+      "size_bytes": 181890,
+      "source": "cpp/src/codec/json_codec.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/codec/json_codec.cpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "7b5850527136872257741431335ad00e294937bbe2dd119e3942703913e89d70",
+      "size_bytes": 179093,
+      "source": "cpp/src/codec/semantic_validator.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/codec/semantic_validator.cpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "45184422dba444a1dc07816f45b451c38eb66bbf0518370451e122e58eb358a2",
+      "size_bytes": 58,
+      "source": "cpp/src/contracts/base_types.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/contracts/base_types.cpp"
+    },
+    {
+      "group": "temporary_contract_adapter",
+      "sha256": "0507c53a7ea4a36f4a3b41c13472ddb60a179f4d220e673de78a8913c38e9948",
+      "size_bytes": 358,
+      "source": "cpp/src/crypto/sha256.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/src/crypto/sha256.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "88ef5c7d9853057e5621798e319000cf586cc8868ff2aca2e54127b6189626e2",
+      "size_bytes": 5234,
+      "source": "cpp/tests/codec/jcs_canonicalizer_test.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/codec/jcs_canonicalizer_test.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "eaf7841fb6f4b47af318dab5de38f5beb28310f8af51641c0b215afe9b5b194c",
+      "size_bytes": 25511,
+      "source": "cpp/tests/codec/json_codec_test.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/codec/json_codec_test.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "8a3976137803f2df436a1c34722b344e1fa9e0077a3766af48fe5ac83a133695",
+      "size_bytes": 34987,
+      "source": "cpp/tests/codec/semantic_validator_test.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/codec/semantic_validator_test.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "f5e2e310834b5506cb56a68fb1aff08e4532c1fbd7c6fef7f4d388083863a1f9",
+      "size_bytes": 1325,
+      "source": "cpp/tests/contracts/planning_request_test.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/contracts/planning_request_test.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "cedbd291e6bbd9210b2aadd32215b4ca0346efa4c9ea24f48b53072ffcbd1175",
+      "size_bytes": 1487,
+      "source": "cpp/tests/contracts/reference_bundle_test.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/contracts/reference_bundle_test.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "c34675d20d8a7d447f7aee7da090a2759b95e056d1491ce479336f8cda022463",
+      "size_bytes": 76518,
+      "source": "cpp/tests/fixtures/system/planner_v3_system_fixture.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/fixtures/system/planner_v3_system_fixture.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "96b22bb7d6a28fccb4390d328d00826d777ea1d7cd095eb97ac13d4ad59985b7",
+      "size_bytes": 2906,
+      "source": "cpp/tests/fixtures/system/planner_v3_system_fixture.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/fixtures/system/planner_v3_system_fixture.hpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "a205d5dd4881090912dc14d8185218dd96343a2d451dff1da2018636bdc2b70f",
+      "size_bytes": 1103,
+      "source": "cpp/tests/integration/api/planner_dispatch_test.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/api/planner_dispatch_test.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "176db29e4edcc70e1740762a6c10dc06552c85fd9eaea2104fd2110215d6540d",
+      "size_bytes": 11517,
+      "source": "cpp/tests/integration/legged/legged_fault_matrix_test.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/legged/legged_fault_matrix_test.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "92b2015ce13c39fd86a281b5477c2fe21bdf5da078347d56e4920e84331f6d53",
+      "size_bytes": 12181,
+      "source": "cpp/tests/integration/legged/legged_planner_test.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/legged/legged_planner_test.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "ed9cd6c5cbb05fa842f8781fcb89e676c69b93a65458cdf3b1d3174454f320e3",
+      "size_bytes": 8723,
+      "source": "cpp/tests/integration/legged/legged_search_test.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/legged/legged_search_test.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "847bb1eaa93ac293f97abbb770ef2ee54d9fd79ad12c33f170eb8a67bad82cab",
+      "size_bytes": 10756,
+      "source": "cpp/tests/integration/legged/legged_test_fixture.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/legged/legged_test_fixture.hpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "38db9688c9d35d5041307502ed4de5b99349b80ee1d2fa0d84cf072066093417",
+      "size_bytes": 3050,
+      "source": "cpp/tests/integration/system/planner_v3_fault_matrix_test.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/system/planner_v3_fault_matrix_test.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "1fabc39220dd97d4bf57a593f52815c2794036c5291048b2a38c35e98a33572d",
+      "size_bytes": 4129,
+      "source": "cpp/tests/integration/system/planner_v3_system_test.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/system/planner_v3_system_test.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "b117f5eb9e1e241c5ffb43a612c41ac3d29c773e45abc52c3a4b80af8c2204ab",
+      "size_bytes": 11101,
+      "source": "cpp/tests/integration/wheel/wheel_fault_matrix_test.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/wheel/wheel_fault_matrix_test.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "8d1119238a90a35ade479a1151d129d0368bd959da666e57afeea5b2d3c87dd2",
+      "size_bytes": 2773,
+      "source": "cpp/tests/integration/wheel/wheel_planner_test.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/wheel/wheel_planner_test.cpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "8648793516f99ac9cfe4bc079aa8abb006c812af63efb5b35a28fe2816fe20eb",
+      "size_bytes": 10253,
+      "source": "cpp/tests/integration/wheel/wheel_planner_test_fixture.hpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/wheel/wheel_planner_test_fixture.hpp"
+    },
+    {
+      "group": "tests",
+      "sha256": "2cb0372e0cc1d918052b483ae363cc72d475cad8433a28c039e60c3cfff6ae43",
+      "size_bytes": 10107,
+      "source": "cpp/tests/integration/wheel/wheel_search_test.cpp",
+      "target": "ros2_ws/src/lunar_planner_core/src/migration/legacy_v3/upstream/tests/integration/wheel/wheel_search_test.cpp"
+    }
+  ],
+  "schema_version": "lunar-v3-import-result/v1",
+  "source_commit": "2f6378d3c47da027c0d4146d94cab881b8f2a594",
+  "source_repository": "path_planner"
+}

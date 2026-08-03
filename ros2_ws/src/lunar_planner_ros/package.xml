@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>lunar_planner_ros</name>
+  <version>0.1.0</version>
+  <description>ROS 2 input and action boundary for lunar planning.</description>
+  <maintainer email="maintainers@example.invalid">Lunar Navigation Maintainers</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>ament_index_cpp</depend>
+  <depend>builtin_interfaces</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>grid_map_msgs</depend>
+  <depend>lifecycle_msgs</depend>
+  <depend>lunar_navigation_msgs</depend>
+  <depend>lunar_planner_core</depend>
+  <depend>lunar_planning_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>tf2_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>urdf</depend>
+  <depend>yaml-cpp</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>action_msgs</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

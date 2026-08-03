@@ -1,0 +1,31 @@
+{
+  "schema_version": "lunar-v3-differential-cases/v1",
+  "platform": "wheel",
+  "cases": [
+    {
+      "case_id": "wheel-safe-corridor",
+      "setup": "open_known",
+      "repetitions": 1
+    },
+    {
+      "case_id": "wheel-no-safe-route",
+      "setup": "no_safe_route",
+      "repetitions": 1
+    },
+    {
+      "case_id": "wheel-goal-infeasible",
+      "setup": "goal_infeasible",
+      "repetitions": 1
+    },
+    {
+      "case_id": "wheel-numerical-failure",
+      "setup": "numerical_failure",
+      "repetitions": 1
+    },
+    {
+      "case_id": "wheel-deterministic-repeat",
+      "setup": "deterministic_repeat",
+      "repetitions": 3
+    }
+  ]
+}

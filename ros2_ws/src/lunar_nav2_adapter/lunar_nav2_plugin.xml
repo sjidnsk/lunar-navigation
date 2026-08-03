@@ -1,0 +1,8 @@
+<library path="lunar_nav2_adapter">
+  <class
+    name="lunar_nav2_adapter/LunarGlobalPlanner"
+    type="lunar::planning::nav2::LunarGlobalPlanner"
+    base_class_type="nav2_core::GlobalPlanner">
+    <description>Wheeled-only bridge from Nav2 GlobalPlanner requests to PlanMotion.</description>
+  </class>
+</library>
