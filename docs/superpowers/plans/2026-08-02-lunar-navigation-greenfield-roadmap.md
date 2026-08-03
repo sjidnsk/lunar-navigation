@@ -89,10 +89,10 @@ AGX Orin / R36.0.0
 | 1 | [`2026-08-02-lunar-navigation-volume-1-foundation.md`](2026-08-02-lunar-navigation-volume-1-foundation.md) | 新仓能在 Ubuntu 干净 checkout 上解析外部依赖、生成内部 ROS 接口并通过 amd64/ARM64 基础构建 | 7–12 |
 | 2 | [`2026-08-02-lunar-navigation-volume-2-planner-ros.md`](2026-08-02-lunar-navigation-volume-2-planner-ros.md) | 简化 C++ API、三平台 v3、Lifecycle Action、输入快照和可选 Nav2 通过测试 | 24–42 |
 | 3 | [`2026-08-02-lunar-navigation-volume-3-policy-pipeline.md`](2026-08-02-lunar-navigation-volume-3-policy-pipeline.md) | RTX 4080 SUPER 训练冒烟、ONNX 模型包、AGX TensorRT 等价和探索节点通过 | 22–41 |
-| 4 | [`2026-08-02-lunar-navigation-volume-4-integration-cutover.md`](2026-08-02-lunar-navigation-volume-4-integration-cutover.md) | 完整 rosbag 链、AGX 性能与 4 小时稳定性、安装、回退和旧仓归档全部通过 | 22–41 |
+| 4 | [`2026-08-02-lunar-navigation-volume-4-integration-cutover.md`](2026-08-02-lunar-navigation-volume-4-integration-cutover.md) | 完整 rosbag 链、AGX 性能与 4 小时稳定性、Git 一键安装、回退和旧仓归档全部通过 | 23–43 |
 | 横向 | 四卷接口复核、失败重试和发布回归 | 四卷产物来自同一 release candidate，接口/配置/模型 hash 一致 | 10–19 |
 
-总量：**85–155 Codex agent-hours**。
+总量：**86–157 Codex agent-hours**。
 
 墙钟目标：
 
@@ -162,6 +162,8 @@ Action Goal 不携带地图、Odometry、TF、平台能力、算法配置或模�
 
 `manifest.json` 的 schema ID 固定为 `lunar-policy-manifest/v1`。卷 4 不得直接读取 checkpoint。
 
+卷 3 通过仓库外绝对路径交付该四文件目录，卷 4 以 `--candidate <absolute-path>` 消费。模型包、checkpoint 和 TensorRT engine 均不得提交 Git；源码始终由固定 annotated tag 获取。
+
 ### 4.4 发布候选接口
 
 卷 4 生成的 `release-manifest.json` 必须绑定：
@@ -172,6 +174,16 @@ Action Goal 不携带地图、Odometry、TF、平台能力、算法配置或模�
 - 平台、算法和运行配置 SHA-256；
 - Ubuntu 测试报告 SHA-256；
 - AGX 设备指纹和设备报告 SHA-256。
+
+### 4.5 AGX 安装、验收与激活状态
+
+卷 3、卷 4 和 [`2026-08-03-agx-git-one-command-deployment-design.md`](../specs/2026-08-03-agx-git-one-command-deployment-design.md) 统一使用以下状态顺序：
+
+1. `installed`：Git 一键入口完成 AGX 本机原生构建、模型安装、engine 和快速校验；两个 `current` 与 systemd 保持不变。
+2. `qualified`：独立 AGX release gate 通过并生成 qualified manifest。
+3. `activated`：操作者显式传入 release ID 和 qualified manifest，原子切换并启动服务。
+
+AGX 不可用时，卷 3 只能记录 `model-package-ready`，卷 4 部署工具只能记录 `simulated-ready`；两者都不能代替设备状态、正式卷册标签或最终发布。
 
 ## 5. 总执行顺序
 
@@ -283,7 +295,7 @@ git tag -a planner-action-v1 -m "C++ v3 and PlanMotion action v1"
 
 **Interfaces:**
 - Consumes: `planner-action-v1`、经清点的 PPO 核心源码和选定 checkpoint。
-- Produces: 训练/评估命令、ONNX 模型包、`lunar_policy_runtime`、`lunar_exploration` 和等价报告。
+- Produces: 训练/评估命令、ONNX 模型包、`lunar_policy_runtime`、`lunar_exploration` 和 Ubuntu 等价报告；AGX 不可用时只记录 `model-package-ready`，设备验证后才产生 AGX 等价报告和正式 release point。
 
 - [ ] **Step 1: 在 Ubuntu RTX 4080 SUPER 执行训练冒烟、评估和 ONNX 发布**
 
@@ -294,18 +306,24 @@ python3 -m model_export.publish --checkpoint "$LUNAR_TRAIN_ARTIFACT_ROOT/checkpo
 python3 -m model_export.verify_package "$LUNAR_TRAIN_ARTIFACT_ROOT/model-package"
 ```
 
-Expected: 训练冒烟通过，模型包只有四个允许文件且哈希和 ONNX Runtime 等价通过。
+Expected: 训练冒烟通过，模型包只有四个允许文件且哈希和 ONNX Runtime 等价通过；允许记录 `model-package-ready / AGX native verification: pending`，不得提前打 tag。
 
 - [ ] **Step 2: 在 AGX 生成 TensorRT engine 并通过黄金等价**
 
 ```bash
-ros2 run lunar_policy_runtime build_engine --model-dir /var/lib/lunar_navigation/models/current --cache-root /var/cache/lunar_navigation/tensorrt --precision fp32
-ros2 run lunar_policy_runtime verify_engine --model-dir /var/lib/lunar_navigation/models/current --cache-root /var/cache/lunar_navigation/tensorrt
+source /opt/ros/humble/setup.bash
+test "$ROS_DISTRO" = humble
+test -n "$LUNAR_POLICY_MODEL_DIR"
+ros2 run lunar_policy_runtime build_engine --model-dir "$LUNAR_POLICY_MODEL_DIR" --cache-root /var/cache/lunar_navigation/tensorrt --precision fp32
+ros2 run lunar_policy_runtime verify_engine --model-dir "$LUNAR_POLICY_MODEL_DIR" --cache-root /var/cache/lunar_navigation/tensorrt
+python3 -m pytest -q tests/device/policy_runtime
 ```
 
-Expected: engine 路径包含 ONNX hash 与设备运行时指纹；黄金结果通过 manifest 声明的 FP32 容差。
+`LUNAR_POLICY_MODEL_DIR` 必须是 `/var/lib/lunar_navigation/models/<model-id>/<version>` 下的绝对版本目录，不能指向 `current`。Expected: engine 路径包含 ONNX hash 与设备运行时指纹；黄金结果、cache、故障和推理性能通过，但模型链接仍未激活。
 
 - [ ] **Step 3: 标记卷 3 release point**
+
+只有 Step 2 在真实 AGX 上通过后才能执行：
 
 ```bash
 git tag -a policy-pipeline-v1 -m "PPO ONNX TensorRT pipeline v1"
@@ -318,7 +336,7 @@ git tag -a policy-pipeline-v1 -m "PPO ONNX TensorRT pipeline v1"
 
 **Interfaces:**
 - Consumes: `planner-action-v1`、`policy-pipeline-v1`、共同确认的外部 rosbag 和 AGX 访问。
-- Produces: 完整发布候选、AGX 设备报告、安装包、回退点和旧仓归档说明。
+- Produces: 完整发布候选、`installed → qualified → activated` 状态证据、AGX 设备报告、回退点和旧仓归档说明。
 
 - [ ] **Step 1: 在 Ubuntu 通过完整 rosbag 与故障矩阵**
 
@@ -329,23 +347,43 @@ scripts/run_rosbag_integration.sh --bag "$LUNAR_INTEGRATION_BAG" --output "$LUNA
 
 Expected: PPO 目标到 Action 到 v3 的纵向链路和所有降级场景通过。
 
-- [ ] **Step 2: 在 AGX 通过发布门槛**
+- [ ] **Step 2: 在 AGX 从 Git tag 一键安装但不激活**
 
 ```bash
-scripts/run_agx_release_gate.sh --release-manifest release/release-manifest.json --output /var/log/lunar_navigation/release-gate
+scripts/deploy_agx_from_git.sh \
+  --repo "$LUNAR_GIT_REPOSITORY" \
+  --ref "$LUNAR_RELEASE_TAG" \
+  --candidate "$LUNAR_RELEASE_CANDIDATE"
 ```
 
-Expected: 原生构建、TensorRT 等价、规划 `P95 < 1 s`、推理余量、故障矩阵和 4 小时稳定性全部通过。
+Expected: `installed` 报告通过；AGX 原生构建、本机 TensorRT engine 和快速校验成功，但 release/model `current` 不变且服务未启动。
 
-- [ ] **Step 3: 安装新版本并保留回退点**
+- [ ] **Step 3: 在 AGX 通过独立发布门槛**
 
-只更新 `/opt/lunar_navigation/current` 符号链接；保留上一个已验收 release 目录和旧系统，直到新系统完成最终观察期。
+```bash
+scripts/run_agx_release_gate.sh \
+  --release-manifest "$LUNAR_RELEASE_CANDIDATE/release-manifest.json" \
+  --bag "$LUNAR_INTEGRATION_BAG" \
+  --output /var/log/lunar_navigation/release-gate
+```
 
-- [ ] **Step 4: 归档旧仓**
+Expected: TensorRT 等价、规划 `P95 < 1 s`、推理余量、故障矩阵和 4 小时稳定性全部通过，生成 `qualified` manifest。
+
+- [ ] **Step 4: 手动激活并保留回退点**
+
+```bash
+sudo scripts/activate_agx_release.sh \
+  --release-id "$LUNAR_RELEASE_TAG" \
+  --qualified-manifest /var/log/lunar_navigation/release-gate/qualified-release-manifest.json
+```
+
+只在显式命令中原子更新 release/model `current`；保留上一个已验收 release 目录和旧系统，直到新系统完成最终观察期。健康检查失败时立即回退。
+
+- [ ] **Step 5: 归档旧仓**
 
 旧仓打只读标签并记录恢复方法；不得删除旧仓、批量清理文件或让新运行时导入旧仓源码。
 
-- [ ] **Step 5: 标记新主线发布**
+- [ ] **Step 6: 标记新主线发布**
 
 ```bash
 git tag -a lunar-navigation-v1.0.0 -m "first AGX-qualified lunar navigation release"

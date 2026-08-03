@@ -8,7 +8,7 @@
 
 **Tech Stack:** ROS 2 Humble、launch_ros、rclpy、rosbag2_py、pytest、launch_testing、colcon、rosdep、C++20、TensorRT、systemd、Bash、JSON Schema、SHA-256、tegrastats。
 
-**Codex Estimate:** 22–41 agent-hours；其中包含一次 4 小时自动稳定性运行，不包含物理操作等待。
+**Codex Estimate:** 23–43 agent-hours；其中包含 Git 一键编排器，并包含一次 4 小时自动稳定性运行，不包含物理操作等待。
 
 ## Global Constraints
 
@@ -26,6 +26,16 @@
 - 初始安装根必须是 `/opt/lunar_navigation`；模型根 `/var/lib/lunar_navigation/models`；engine cache `/var/cache/lunar_navigation/tensorrt`；日志根 `/var/log/lunar_navigation`。
 - 切换前必须保留上一已验收版本和旧系统；不得批量删除旧仓或旧部署。
 - R36.0.0 基线在任何新 L4T 通过完整验收前不得移除。
+
+## AGX Git 安装协调修订（2026-08-03）
+
+本卷的设备安装入口遵循 [`2026-08-03-agx-git-one-command-deployment-design.md`](../specs/2026-08-03-agx-git-one-command-deployment-design.md)，并固定三阶段状态：
+
+1. `installed`：`deploy_agx_from_git.sh` 从 annotated Git tag 获取源码，消费卷三四文件候选，在 AGX 本机完成原生构建、模型安装、TensorRT engine 和快速校验；不得更新 `current` 或启动服务。
+2. `qualified`：独立 `run_agx_release_gate.sh` 通过性能、功耗、故障矩阵和四小时稳定性门槛，生成新的 qualified manifest。
+3. `activated`：操作者显式调用 `activate_agx_release.sh`，传入 release ID 和 qualified manifest 后，才允许原子切换并启动服务。
+
+AGX 不可用时，Tasks 1–4 及 Tasks 5–7 的 Ubuntu fixture、临时根、命令注入和静态测试可以继续，允许的唯一结论是 `AGX deployment tooling: simulated-ready`。Task 8–9、真实 `installed/qualified/activated` 状态和最终标签必须等待设备恢复。U 盘与完全离线部署不在本卷当前范围。
 
 ---
 
@@ -51,15 +61,17 @@ tools/build_release_manifest.py
 release/release-manifest.schema.json
 scripts/run_rosbag_integration.sh
 scripts/build_release_candidate.sh
+scripts/deploy_agx_from_git.sh
 scripts/install_agx.sh
 scripts/verify_agx_install.sh
 scripts/run_agx_release_gate.sh
+scripts/activate_agx_release.sh
 scripts/rollback_agx.sh
 deployment/systemd/lunar-navigation.service
 deployment/systemd/lunar-navigation.env.example
 tests/integration/full_chain/
 tests/integration/faults/
-tests/device/agx/
+tests/device/agx/                                  # Git 安装、设备门槛、激活和回退测试
 docs/runbooks/ubuntu-integration.md
 docs/runbooks/agx-install.md
 docs/runbooks/agx-rollback.md
@@ -187,7 +199,7 @@ git commit -m "test: add external rosbag end-to-end integration"
 
 **Execution environment:** Ubuntu 22.04 amd64；关键子集在 AGX 重跑。
 
-**Estimated Codex time:** 2–4 小时。
+**Estimated Codex time:** 3–6 小时。
 
 **Files:**
 - Create: `tests/integration/faults/fault_cases.yaml`
@@ -254,11 +266,11 @@ def test_release_candidate_rejects_host_binary(tmp_path):
 
 - [ ] **Step 2: 定义 release manifest**
 
-manifest 必须记录：schema/version/release ID、Git tag+commit、外部包版本、model ID/version/四文件 hash、配置 hash、Ubuntu 指纹 hash、Ubuntu test report hash、AGX baseline ID，以及明确的 `agx_device_report: null` 预发布状态。AGX gate 完成后生成新的 qualified manifest，不原地覆盖预发布文件。
+manifest 必须记录：schema/version/release ID、Git tag+commit、外部包版本、model ID/version/四文件 hash、配置 hash、Ubuntu 指纹 hash、Ubuntu test report hash、AGX baseline ID，以及明确的 `agx_device_report: null` 预发布状态。release ID 必须等于 annotated tag 且只含 `[A-Za-z0-9._-]`。AGX gate 完成后生成新的 qualified manifest，不原地覆盖预发布文件。
 
 - [ ] **Step 3: 实现候选生成器**
 
-候选目录只包含：`release-manifest.json`、四文件模型包、平台/算法/runtime 配置副本和 Ubuntu 报告。源码通过 Git tag 获取，不打包 build/install/log；脚本发现 ELF、wheel、venv、checkpoint、engine、training 数据或 rosbag 即失败。
+候选目录只包含：`release-manifest.json`、卷三通过 `--candidate` 交接的四文件模型包、平台/算法/runtime 配置副本和 Ubuntu 报告。候选必须位于仓库外且以绝对路径传入。源码通过 Git tag 获取，不打包 build/install/log；脚本发现 ELF、wheel、venv、checkpoint、engine、training 数据或 rosbag 即失败。
 
 - [ ] **Step 4: 用测试 fixture 验证候选生成器**
 
@@ -277,32 +289,40 @@ git update-index --chmod=+x scripts/build_release_candidate.sh
 git commit -m "build: create source-only AGX release candidates"
 ```
 
-### Task 5: 实现 AGX 原生构建与版本化安装工具
+### Task 5: 实现 Git 一键编排、AGX 原生构建与版本化安装工具
 
 **Execution environment:** Ubuntu 进行路径/脚本测试；Task 8 在 AGX R36.0.0 执行。
 
 **Estimated Codex time:** 2–4 小时。
 
 **Files:**
+- Create: `scripts/deploy_agx_from_git.sh`
 - Create: `scripts/install_agx.sh`
 - Create: `scripts/verify_agx_install.sh`
 - Create: `platform/deploy_agx_orin_r36/expected-install-manifest.txt`
+- Create: `tests/device/agx/test_git_deploy.py`
 - Create: `tests/device/agx/test_native_install.py`
 - Create: `docs/runbooks/agx-install.md`
 
 **Interfaces:**
-- Consumes: Task 4 manifest schema 与 fixture candidate。
-- Produces: `/opt/lunar_navigation/releases/<release-id>` 原生 install、模型版本目录和本机 engine cache。
+- Consumes: `--repo`、annotated `--ref`、Task 4 manifest schema，以及需要模型时由绝对 `--candidate` 指向的四文件候选。
+- Produces: `/opt/lunar_navigation/releases/<release-id>` 原生 install、模型版本目录、本机 engine cache 和 `installed` 部署报告；不产生 `qualified` 或 `activated` 状态。
 
 - [ ] **Step 1: 写安装路径与边界测试**
 
-测试必须验证 release ID 只含 `[A-Za-z0-9._-]`、resolved 目标位于 `/opt/lunar_navigation/releases`、模型目标位于 `/var/lib/lunar_navigation/models`、不接受 amd64 ELF、候选 hash 全匹配。
+测试必须验证 annotated tag 和 release ID 只含 `[A-Za-z0-9._-]`、拒绝分支/浮动 HEAD/路径分隔符、resolved 目标位于 `/opt/lunar_navigation/releases`、模型目标位于 `/var/lib/lunar_navigation/models`、不接受 amd64 ELF、候选 hash 全匹配。成功路径必须断言 `current` 不变、systemd 未启动，并输出部署报告和独立激活提示。
 
-- [ ] **Step 2: 实现 AGX 预检**
+- [ ] **Step 2: 实现 Git 获取与薄编排入口**
+
+`deploy_agx_from_git.sh` 必须按 `--repo <url> --ref <annotated-tag> [--candidate <absolute-path>]` 工作：取得部署锁，在仓库外暂存目录检出精确 tag，验证 tag/commit/release manifest 一致，推导唯一 release ID，然后依次调用预检、`install_agx.sh` 和 `verify_agx_install.sh`。它不得调用 `run_agx_release_gate.sh`、`activate_agx_release.sh` 或 `systemctl start/restart`。
+
+相同 release ID 与 hash 已安装时执行只读复验并成功返回；内容冲突时失败且不得覆盖。Ubuntu 测试只能通过显式临时根和命令注入模拟设备调用，报告必须标记 `simulated: true`。
+
+- [ ] **Step 3: 实现 AGX 预检**
 
 安装脚本先运行环境指纹并严格要求 aarch64、Ubuntu 22.04、ROS Humble、AGX Orin 64GB、R36.0.0；验证 Git HEAD、外部包版本、candidate 和模型 hash。任一不符时在写 `/opt` 前退出。
 
-- [ ] **Step 3: 实现原生构建**
+- [ ] **Step 4: 实现原生构建**
 
 脚本以普通用户在显式临时 build root 执行 rosdep 和：
 
@@ -317,25 +337,25 @@ colcon build \
 
 脚本只为单个明确 release 目录设置写权限，不以 root 运行编译器。构建失败不更新任何 `current` 链接。
 
-- [ ] **Step 4: 实现模型安装与 engine 生成步骤**
+- [ ] **Step 5: 实现模型安装与 engine 生成步骤**
 
 四文件包复制到 `/var/lib/lunar_navigation/models/<model-id>/<version>`，验证后本机执行 `build_engine` 与 `verify_engine`。不得复制 Ubuntu/RTX engine；测试用命令注入器验证调用参数，真实 engine 在 Task 8 生成。
 
-- [ ] **Step 5: 运行脚本和安装清单测试**
+- [ ] **Step 6: 运行脚本和安装清单测试**
 
 ```bash
-bash -n scripts/install_agx.sh scripts/verify_agx_install.sh
-python3 -m pytest -q tests/device/agx/test_native_install.py
+bash -n scripts/deploy_agx_from_git.sh scripts/install_agx.sh scripts/verify_agx_install.sh
+python3 -m pytest -q tests/device/agx/test_git_deploy.py tests/device/agx/test_native_install.py
 ```
 
-Expected: 临时前缀中的 installed package、shared library、Python module、launch/config/model 和模拟 engine 均被清单验证；`training/`、checkpoint、A*、Nav2 adapter 被拒绝。
+Expected: Git tag 获取、锁、幂等、失败不激活和临时前缀中的 installed package、shared library、Python module、launch/config/model、模拟 engine 均被验证；`training/`、checkpoint、A*、Nav2 adapter 被拒绝。Ubuntu 报告只能写 `AGX deployment tooling: simulated-ready`。
 
-- [ ] **Step 6: 提交安装工具**
+- [ ] **Step 7: 提交安装工具**
 
 ```bash
-git add scripts/install_agx.sh scripts/verify_agx_install.sh platform/deploy_agx_orin_r36/expected-install-manifest.txt tests/device/agx/test_native_install.py docs/runbooks/agx-install.md
-git update-index --chmod=+x scripts/install_agx.sh scripts/verify_agx_install.sh
-git commit -m "deploy: add native AGX versioned installation"
+git add scripts/deploy_agx_from_git.sh scripts/install_agx.sh scripts/verify_agx_install.sh platform/deploy_agx_orin_r36/expected-install-manifest.txt tests/device/agx/test_git_deploy.py tests/device/agx/test_native_install.py docs/runbooks/agx-install.md
+git update-index --chmod=+x scripts/deploy_agx_from_git.sh scripts/install_agx.sh scripts/verify_agx_install.sh
+git commit -m "deploy: add Git-driven AGX versioned installation"
 ```
 
 ### Task 6: 实现 AGX 性能、功耗、异常和稳定性门槛工具
@@ -490,20 +510,18 @@ scripts/build_release_candidate.sh \
 
 `LUNAR_RELEASE_MODEL_DIR` 必须是绝对路径，并指向卷三统一 release gate 已通过的四文件模型包；完整训练至收敛的等待不计入 Codex 时间。Expected: 打标签前工作区为空；candidate 只包含 manifest、四文件模型包、配置和 Ubuntu 报告，manifest 的 Git commit 等于 RC tag。
 
-- [ ] **Step 2: 在 AGX checkout 同一 tag 并原生安装**
+- [ ] **Step 2: 从 Git tag 在 AGX 一键安装但不激活**
 
-通过已批准传输通道把 candidate 复制到 AGX 明确目录并验证整目录 hash；在 AGX checkout `lunar-navigation-v1.0.0-rc.1`，随后执行：
+通过已批准传输通道把 candidate 复制到 AGX 仓库外的明确目录并验证整目录 hash；在 bootstrap checkout 中执行唯一安装入口：
 
 ```bash
-scripts/install_agx.sh \
-  --release-id lunar-navigation-v1.0.0-rc.1 \
-  --candidate "$LUNAR_RELEASE_CANDIDATE"
-scripts/verify_agx_install.sh \
-  --release-id lunar-navigation-v1.0.0-rc.1 \
+scripts/deploy_agx_from_git.sh \
+  --repo "$LUNAR_GIT_REPOSITORY" \
+  --ref lunar-navigation-v1.0.0-rc.1 \
   --candidate "$LUNAR_RELEASE_CANDIDATE"
 ```
 
-Expected: aarch64 原生安装、四文件模型和本机 FP32 TensorRT engine 通过；未更新 `current`。
+Expected: 生成真实 `installed` 报告，aarch64 原生安装、四文件模型和本机 FP32 TensorRT engine 通过；未更新 release/model `current`，未启动或重启 systemd。安装器不执行 Step 3 的 release gate。
 
 - [ ] **Step 3: 执行完整 AGX release gate**
 
@@ -519,7 +537,7 @@ Expected: 规划 `p95 < 1.0 s`、推理 `p95 <= 0.8 * decision_period`、关键�
 - [ ] **Step 4: 激活并观察新服务**
 
 ```bash
-scripts/activate_agx_release.sh \
+sudo scripts/activate_agx_release.sh \
   --release-id lunar-navigation-v1.0.0-rc.1 \
   --qualified-manifest /var/log/lunar_navigation/release-gate/qualified-release-manifest.json
 ```

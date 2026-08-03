@@ -46,6 +46,8 @@ Git 只传递源码和发布身份。不得通过 Git 部署流程向 AGX 传递
 
 卷二规划运行时只需要固定 Git 标签。卷三模型接入后，四文件模型候选继续遵守既有 release candidate 合同；编排器通过可选的绝对路径 `--candidate` 把候选交给底层安装器，不把模型提交到 Git。若某一发布 manifest 声明模型为必需但未提供候选，预检必须在写系统目录前失败。
 
+跨卷接口以 [`卷三计划`](../plans/2026-08-02-lunar-navigation-volume-3-policy-pipeline.md)、[`卷四计划`](../plans/2026-08-02-lunar-navigation-volume-4-integration-cutover.md) 和 [`总路线图`](../plans/2026-08-02-lunar-navigation-greenfield-roadmap.md) 为共同约束：卷三在 AGX 不可用时只交付 `model-package-ready` 候选和 pending 报告，不创建临时替代 tag；卷四可以先完成 Ubuntu 模拟工具，但真实安装、验收、激活和最终标签必须等待设备。
+
 ## 5. 总体架构
 
 ```text
@@ -214,6 +216,6 @@ AGX 可用后执行一次不含完整 release gate 的短验收：
 
 ## 14. 与现有计划的关系
 
-本设计补充卷四 Task 5–8：新增 Git 一键编排入口，复用 `install_agx.sh`、`verify_agx_install.sh`、`activate_agx_release.sh` 和 `run_agx_release_gate.sh`。它不改变 Ubuntu/AGX 权威职责、不改变版本目录和 `current` 回退模型，也不把 AGX 不可用从发布阻塞条件改写为已通过状态。
+本设计与卷三设备交接、卷四 Task 5–8 和总路线图的 AGX 顺序已协调：新增 Git 一键编排入口，复用 `install_agx.sh`、`verify_agx_install.sh`、`activate_agx_release.sh` 和 `run_agx_release_gate.sh`，并统一 `installed → qualified → activated`。它不改变 Ubuntu/AGX 权威职责、不改变版本目录和 `current` 回退模型，也不把 AGX 不可用从发布阻塞条件改写为已通过状态。
 
 后续实施计划应先在 Ubuntu 完成编排器、fixture 和临时根测试；真实 AGX 命令只在设备恢复后执行。

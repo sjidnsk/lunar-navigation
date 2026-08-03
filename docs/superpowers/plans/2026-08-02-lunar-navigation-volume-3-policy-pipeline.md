@@ -26,6 +26,20 @@
 - Windows 上的模型、缓存和大型临时产物必须写入 `D:/CodexDownloads`；生产训练和发布必须在 Ubuntu 执行。
 - 旧 Stage authority/repair、ContentRef、多级 artifact hash graph、10k 行 runner 和历史 job state 不得迁移。
 
+## AGX Git 安装协调修订（2026-08-03）
+
+本卷与卷四的设备交接遵循 [`2026-08-03-agx-git-one-command-deployment-design.md`](../specs/2026-08-03-agx-git-one-command-deployment-design.md)。卷三只向卷四交付一个绝对路径的四文件模型候选目录；卷四通过 `deploy_agx_from_git.sh --candidate <absolute-path>` 消费该目录。Git 只传递源码和发布身份，不提交模型包、checkpoint 或 TensorRT engine。
+
+卷三完成状态分为：
+
+1. `model-package-ready`：Tasks 1–5、Task 6 的 Ubuntu CPU 接口和 Task 7 的 fake runner/ROS 测试通过，四文件候选及 Ubuntu 报告可供卷四在 Ubuntu 上继续开发和模拟。
+2. `device-verified`：Task 6 的 AGX TensorRT 构建、Task 8 和 Task 9 的 AGX completion gate 全部通过。
+3. `policy-pipeline-v1`：只能在 `device-verified` 后创建，不新增临时替代 tag。
+
+AGX 不可用时只允许记录 `model-package-ready` 和 `AGX native verification: pending`。卷四 Tasks 1–7 可以使用候选、fake runner 和 fixture 继续开发；卷三 Task 8–9 的设备部分、卷四 Task 8–9、生产激活和最终发布仍保持阻塞，不得把 Ubuntu 模拟结果写成设备能力。
+
+卷三的 AGX 验证必须使用显式绝对版本目录 `LUNAR_POLICY_MODEL_DIR=/var/lib/lunar_navigation/models/<model-id>/<version>`；在卷四生成 qualified manifest 并人工激活前，不得依赖或修改模型 `current` 链接。
+
 ---
 
 ## File Structure
@@ -314,7 +328,7 @@ git commit -m "feat: consolidate PPO model release evaluation"
 
 **Interfaces:**
 - Consumes: Task 3 evaluation report 与 Task 1 policy tensor surface。
-- Produces: `ModelManifest`、`ObservationContract`、`validate_model_package(path)`。
+- Produces: `ModelManifest`、`ObservationContract`、`validate_model_package(path)`，以及卷四 `--candidate` 唯一允许消费的四文件目录合同。
 
 - [ ] **Step 1: 写只允许四文件的失败测试**
 
@@ -551,12 +565,17 @@ Expected: manifest/cache/fake runner 通过，真实 TensorRT factory 明确报�
 - [ ] **Step 7: 在 AGX 构建并通过 FP32 黄金等价**
 
 ```bash
+source /opt/ros/humble/setup.bash
+test "$ROS_DISTRO" = humble
 colcon build --base-paths ros2_ws/src model_contract --packages-select lunar_model_contract lunar_policy_runtime --cmake-args -DLUNAR_ENABLE_TENSORRT=ON -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
-ros2 run lunar_policy_runtime build_engine --model-dir /var/lib/lunar_navigation/models/current --cache-root /var/cache/lunar_navigation/tensorrt --precision fp32
-ros2 run lunar_policy_runtime verify_engine --model-dir /var/lib/lunar_navigation/models/current --cache-root /var/cache/lunar_navigation/tensorrt
+test -n "$LUNAR_POLICY_MODEL_DIR"
+ros2 run lunar_policy_runtime build_engine --model-dir "$LUNAR_POLICY_MODEL_DIR" --cache-root /var/cache/lunar_navigation/tensorrt --precision fp32
+ros2 run lunar_policy_runtime verify_engine --model-dir "$LUNAR_POLICY_MODEL_DIR" --cache-root /var/cache/lunar_navigation/tensorrt
 python3 -m pytest -q tests/device/policy_runtime/test_tensorrt_parity.py
 ```
+
+`LUNAR_POLICY_MODEL_DIR` 必须是 `/var/lib/lunar_navigation/models/<model-id>/<version>` 下的绝对版本目录，不能指向 `current`。
 
 Expected: 所有黄金输出在 manifest 容差内，candidate index 完全一致。
 
@@ -663,8 +682,9 @@ git commit -m "feat: add lifecycle PPO exploration node"
 - [ ] **Step 3: 测量推理 P95**
 
 ```bash
+test -n "$LUNAR_POLICY_MODEL_DIR"
 python3 tests/device/policy_runtime/benchmark_inference.py \
-  --model-dir /var/lib/lunar_navigation/models/current \
+  --model-dir "$LUNAR_POLICY_MODEL_DIR" \
   --warmup 100 \
   --iterations 1000 \
   --output /var/log/lunar_navigation/policy-benchmark.json
@@ -688,6 +708,7 @@ git commit -m "test: qualify AGX policy inference runtime"
 **Estimated Codex time:** 1–2 小时。
 
 **Files:**
+- Create: `docs/migration/volume-3-ubuntu-readiness.md`
 - Create: `docs/migration/volume-3-completion.md`
 - Verify: `training/`
 - Verify: `model_contract/`
@@ -695,8 +716,8 @@ git commit -m "test: qualify AGX policy inference runtime"
 - Verify: `ros2_ws/src/lunar_exploration/`
 
 **Interfaces:**
-- Consumes: Tasks 1–8。
-- Produces: `policy-pipeline-v1` tag 与通过等价的四文件模型包。
+- Consumes: `model-package-ready` readiness 路径使用 Tasks 1–7；正式 completion 路径还必须消费 Task 8 的真实 AGX 报告。
+- Produces: AGX 不可用时的 Ubuntu readiness 报告；设备门槛通过后的 `policy-pipeline-v1` tag 与通过等价的四文件模型包。
 
 - [ ] **Step 1: 运行 Ubuntu 全量门槛**
 
@@ -708,6 +729,20 @@ colcon test-result --verbose
 ```
 
 Expected: 全部通过。
+
+AGX 不可用时，在 `volume-3-ubuntu-readiness.md` 记录 model ID/version、四文件 hash、source commit、Ubuntu 指纹和测试结果，并说明候选位于仓库外；不得持久化包含用户名的主机绝对路径。实际交接命令仍必须通过 `--candidate` 传入当次主机上的绝对路径。报告还要逐字记录：
+
+```text
+model-package-ready
+AGX native verification: pending
+```
+
+该报告不是 completion report，不能授权 `policy-pipeline-v1`、生产激活或最终发布。
+
+```bash
+git add docs/migration/volume-3-ubuntu-readiness.md
+git commit -m "docs: record policy pipeline Ubuntu readiness"
+```
 
 - [ ] **Step 2: 审计部署边界**
 
@@ -721,7 +756,10 @@ Expected: 第一条只输出四个允许文件；运行包不 import torch/onnxr
 - [ ] **Step 3: 运行 AGX completion gate**
 
 ```bash
-ros2 run lunar_policy_runtime verify_engine --model-dir /var/lib/lunar_navigation/models/current --cache-root /var/cache/lunar_navigation/tensorrt
+source /opt/ros/humble/setup.bash
+test "$ROS_DISTRO" = humble
+test -n "$LUNAR_POLICY_MODEL_DIR"
+ros2 run lunar_policy_runtime verify_engine --model-dir "$LUNAR_POLICY_MODEL_DIR" --cache-root /var/cache/lunar_navigation/tensorrt
 python3 -m pytest -q tests/device/policy_runtime
 ```
 
@@ -729,7 +767,7 @@ Expected: FP32 等价、cache、故障和性能全部通过。
 
 - [ ] **Step 4: 记录并标记 release point**
 
-`volume-3-completion.md` 记录 source commit、checkpoint hash（仅记录，不复制）、ONNX hash、manifest hash、evaluation report hash、Ubuntu/AGX 指纹 hash、TensorRT precision 和测试结果。
+本步骤只能在 Step 3 的真实 AGX completion gate 通过后执行。`volume-3-completion.md` 记录 source commit、checkpoint hash（仅记录，不复制）、ONNX hash、manifest hash、evaluation report hash、Ubuntu/AGX 指纹 hash、TensorRT precision 和测试结果。
 
 ```bash
 git add docs/migration/volume-3-completion.md
