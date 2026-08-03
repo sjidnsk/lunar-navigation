@@ -8,6 +8,14 @@ import torch
 
 from lunar_model_contract.observation import ObservationContractV1, validate_platform_context
 
+from .observation_core import (
+    COVERAGE_SUMMARY_CHANNELS,
+    FRONTIER_FEATURE_FIELDS,
+    GLOBAL_PRIOR_CHANNELS,
+    LOCAL_CROP_CHANNELS,
+    POSE_FEATURE_FIELDS,
+)
+
 
 @dataclass
 class PolicyBatch:
@@ -43,15 +51,29 @@ def validate_policy_batch(batch: PolicyBatch) -> None:
     if any(not bool(torch.isfinite(value).all()) for value in tensors):
         raise ValueError("policy float inputs must be finite")
     batch_size = batch.prior_channels.shape[0]
-    if batch.prior_channels.ndim != 4 or batch.prior_channels.shape[1] != 7:
+    if (
+        batch.prior_channels.ndim != 4
+        or batch.prior_channels.shape[1] != len(GLOBAL_PRIOR_CHANNELS)
+    ):
         raise ValueError("prior_channels must be float32 [B,7,H,W]")
-    if batch.coverage_summary.shape[:2] != (batch_size, 8) or batch.coverage_summary.ndim != 4:
+    if (
+        batch.coverage_summary.shape[:2]
+        != (batch_size, len(COVERAGE_SUMMARY_CHANNELS))
+        or batch.coverage_summary.ndim != 4
+    ):
         raise ValueError("coverage_summary must be float32 [B,8,H,W]")
-    if batch.local_crop.shape[:2] != (batch_size, 8) or batch.local_crop.ndim != 4:
+    if (
+        batch.local_crop.shape[:2] != (batch_size, len(LOCAL_CROP_CHANNELS))
+        or batch.local_crop.ndim != 4
+    ):
         raise ValueError("local_crop must be float32 [B,8,H,W]")
-    if batch.frontier_features.ndim != 3 or batch.frontier_features.shape[:2] != batch.candidate_mask.shape or batch.frontier_features.shape[2] != 22:
+    if (
+        batch.frontier_features.ndim != 3
+        or batch.frontier_features.shape[:2] != batch.candidate_mask.shape
+        or batch.frontier_features.shape[2] != len(FRONTIER_FEATURE_FIELDS)
+    ):
         raise ValueError("frontier_features must be float32 [B,M,22]")
-    if batch.pose_features.shape != (batch_size, 6):
+    if batch.pose_features.shape != (batch_size, len(POSE_FEATURE_FIELDS)):
         raise ValueError("pose_features must be float32 [B,6]")
     if batch.platform_context.shape != (batch_size, 3):
         raise ValueError("platform_context must be float32 [B,3]")

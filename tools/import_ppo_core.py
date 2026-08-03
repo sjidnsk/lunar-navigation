@@ -105,6 +105,13 @@ def _relative_import_parts(
 
 
 @dataclass(frozen=True)
+class _StringReplacement:
+    old: str
+    new: str
+    count: int
+
+
+@dataclass(frozen=True)
 class _MappingSpec:
     group: str
     source: PurePosixPath
@@ -113,6 +120,8 @@ class _MappingSpec:
     allow_symbols: tuple[str, ...]
     rename: dict[str, str]
     forbid_imports: tuple[str, ...]
+    omit_imports: tuple[str, ...]
+    string_replacements: tuple[_StringReplacement, ...]
     mode: str
     adaptation: dict[str, Any]
 
@@ -578,12 +587,28 @@ def _collect_import_bindings(
     legacy_specs: dict[str, _MappingSpec],
     allow_dependencies: set[str],
     forbid_imports: tuple[str, ...],
-) -> tuple[dict[str, _ImportBinding], list[ast.ImportFrom]]:
+    omit_imports: tuple[str, ...],
+) -> tuple[dict[str, _ImportBinding], list[ast.ImportFrom], dict[str, str]]:
     bindings: dict[str, _ImportBinding] = {}
+    omitted_bindings: dict[str, str] = {}
+    omitted_modules: set[str] = set()
     future_imports: list[ast.ImportFrom] = []
+
+    def register_omitted(binding: str, module: str) -> None:
+        if binding in bindings or binding in omitted_bindings:
+            raise ImportError(f"duplicate import binding in {source_path}: {binding}")
+        omitted_bindings[binding] = module
+        omitted_modules.add(module)
+
     for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
+                if alias.name in omit_imports:
+                    register_omitted(
+                        alias.asname or alias.name.split(".", maxsplit=1)[0],
+                        alias.name,
+                    )
+                    continue
                 legacy_spec = _validate_module(
                     alias.name,
                     source_path,
@@ -614,6 +639,12 @@ def _collect_import_bindings(
                 continue
             if node.module is None:
                 raise ImportError(f"unresolved import in {source_path}")
+            if node.module in omit_imports:
+                for alias in node.names:
+                    if alias.name == "*":
+                        raise ImportError(f"star import in {source_path}: {node.module}")
+                    register_omitted(alias.asname or alias.name, node.module)
+                continue
             legacy_spec = _validate_module(
                 node.module,
                 source_path,
@@ -635,7 +666,12 @@ def _collect_import_bindings(
                 bindings[binding] = _ImportBinding(
                     binding, node, alias, node.module, legacy_spec
                 )
-    return bindings, future_imports
+    missing_omissions = sorted(set(omit_imports) - omitted_modules)
+    if missing_omissions:
+        raise ImportError(
+            f"omit_imports not found in {source_path}: {missing_omissions[0]}"
+        )
+    return bindings, future_imports, omitted_bindings
 
 
 class _RenameGlobals(ast.NodeTransformer):
@@ -749,6 +785,19 @@ class _RenameGlobals(ast.NodeTransformer):
         return node
 
 
+class _ReplaceExactStrings(ast.NodeTransformer):
+    def __init__(self, replacements: tuple[_StringReplacement, ...]) -> None:
+        self.replacements = {replacement.old: replacement for replacement in replacements}
+        self.counts = {replacement.old: 0 for replacement in replacements}
+
+    def visit_Constant(self, node: ast.Constant) -> ast.Constant:
+        if isinstance(node.value, str) and node.value in self.replacements:
+            replacement = self.replacements[node.value]
+            self.counts[replacement.old] += 1
+            return ast.copy_location(ast.Constant(value=replacement.new), node)
+        return node
+
+
 def _forbidden_output_token(value: str) -> str | None:
     normalized = re.sub(r"[^a-z0-9]", "", value.lower())
     for part in (*FORBIDDEN_DEPENDENCY_PARTS, "stage"):
@@ -808,12 +857,13 @@ def _extract_symbols(
         allow_dependencies,
         spec.forbid_imports,
     )
-    import_bindings, future_imports = _collect_import_bindings(
+    import_bindings, future_imports, omitted_bindings = _collect_import_bindings(
         tree=tree,
         source_path=spec.source,
         legacy_specs=legacy_specs,
         allow_dependencies=allow_dependencies,
         forbid_imports=spec.forbid_imports,
+        omit_imports=spec.omit_imports,
     )
     definition_names = {
         name for node in tree.body for name in _definition_names(node)
@@ -867,6 +917,11 @@ def _extract_symbols(
                     )
             elif dependency in import_bindings:
                 required_imports.add(dependency)
+            elif dependency in omitted_bindings:
+                raise ImportError(
+                    f"{spec.source}:{symbol} -> omitted import is required: {dependency} "
+                    f"from {omitted_bindings[dependency]}"
+                )
             elif dependency not in BUILTIN_NAMES:
                 raise ImportError(
                     f"{spec.source}:{symbol} -> unresolved dependency: {dependency}"
@@ -937,6 +992,16 @@ def _extract_symbols(
             )
     output_items.sort(key=lambda item: item[0])
     output_tree = ast.Module(body=[item[1] for item in output_items], type_ignores=[])
+    ast.fix_missing_locations(output_tree)
+    string_replacer = _ReplaceExactStrings(spec.string_replacements)
+    output_tree = string_replacer.visit(output_tree)
+    for replacement in spec.string_replacements:
+        actual_count = string_replacer.counts[replacement.old]
+        if actual_count != replacement.count:
+            raise ImportError(
+                f"string replacement count in {spec.source}: expected "
+                f"{replacement.count}, got {actual_count} for {replacement.old!r}"
+            )
     ast.fix_missing_locations(output_tree)
     _scan_output(output_tree, spec.source)
     try:
@@ -1069,6 +1134,40 @@ def import_snapshot(
                 isinstance(module, str) and module for module in forbid_imports
             ):
                 raise ImportError(f"invalid forbid_imports for {source}")
+            omit_imports = entry.get("omit_imports", [])
+            if (
+                not isinstance(omit_imports, list)
+                or not all(isinstance(module, str) and module for module in omit_imports)
+                or len(omit_imports) != len(set(omit_imports))
+            ):
+                raise ImportError(f"invalid omit_imports for {source}")
+            raw_replacements = entry.get("string_replacements", [])
+            if not isinstance(raw_replacements, list):
+                raise ImportError(f"invalid string_replacements for {source}")
+            string_replacements: list[_StringReplacement] = []
+            replacement_sources: set[str] = set()
+            for replacement in raw_replacements:
+                if (
+                    not isinstance(replacement, dict)
+                    or set(replacement) != {"old", "new", "count"}
+                    or not isinstance(replacement.get("old"), str)
+                    or not replacement["old"]
+                    or not isinstance(replacement.get("new"), str)
+                    or not replacement["new"]
+                    or replacement["old"] == replacement["new"]
+                    or type(replacement.get("count")) is not int
+                    or replacement["count"] <= 0
+                    or replacement["old"] in replacement_sources
+                ):
+                    raise ImportError(f"invalid string_replacements for {source}")
+                replacement_sources.add(replacement["old"])
+                string_replacements.append(
+                    _StringReplacement(
+                        old=replacement["old"],
+                        new=replacement["new"],
+                        count=replacement["count"],
+                    )
+                )
             mode = entry.get("mode", "extract")
             if mode not in ALLOWED_MAPPING_MODES:
                 raise ImportError(f"invalid extraction mode for {source}: {mode}")
@@ -1096,6 +1195,8 @@ def import_snapshot(
                     allow_symbols=tuple(allow_symbols),
                     rename=dict(rename),
                     forbid_imports=tuple(forbid_imports),
+                    omit_imports=tuple(omit_imports),
+                    string_replacements=tuple(string_replacements),
                     mode=mode,
                     adaptation=copy.deepcopy(adaptation),
                 )
@@ -1158,6 +1259,7 @@ def import_snapshot(
                     "repository": repository,
                 },
                 "rename": spec.rename,
+                "omit_imports": list(spec.omit_imports),
                 "requested_symbols": list(spec.allow_symbols),
                 "resolved_symbols": resolved_symbols,
                 "sha256": digest,
@@ -1166,6 +1268,14 @@ def import_snapshot(
                 "source_blob_oid": object_id,
                 "source_sha256": digest,
                 "source_size_bytes": len(payload),
+                "string_replacements": [
+                    {
+                        "count": replacement.count,
+                        "new": replacement.new,
+                        "old": replacement.old,
+                    }
+                    for replacement in spec.string_replacements
+                ],
                 "target": (target_root / spec.target).as_posix(),
             }
         )

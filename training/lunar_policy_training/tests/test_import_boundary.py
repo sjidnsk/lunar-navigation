@@ -3,7 +3,9 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -12,6 +14,10 @@ import yaml
 
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
+REAL_FROZEN_SOURCE = pathlib.Path(
+    "/home/kai/CodexDownloads/lunar_navigation/volume3/sources/legacy_root"
+)
+REAL_FROZEN_COMMIT = "7309e93fdb85c60ff3736efe1a7f3c7eb640ee78"
 sys.path.insert(0, str(REPOSITORY_ROOT / "tools"))
 
 from import_ppo_core import ImportError, import_snapshot  # noqa: E402
@@ -938,6 +944,291 @@ def test_symbol_extractor_is_byte_deterministic_for_output_and_result(
 
     assert output_bytes[0] == output_bytes[1]
     assert result_bytes[0] == result_bytes[1]
+
+
+def test_symbol_extractor_applies_only_explicit_unused_import_and_string_adaptations(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if an exact frozen-source adaptation were ignored or broadened."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=(
+            b'"""Stage 9 policy math."""\n'
+            b"from lunar_exploration_ppo.workflows.runner import Runner\n"
+            b"VALUE = 3\n"
+        ),
+        cross_attention_payload=b"RESULT = 3\n",
+    )
+    file_map = _map(source, commit)
+    entry = file_map["groups"]["policy"][0]  # type: ignore[index]
+    entry["omit_imports"] = ["lunar_exploration_ppo.workflows.runner"]
+    entry["string_replacements"] = [
+        {
+            "old": "Stage 9 policy math.",
+            "new": "Frozen policy mathematical core.",
+            "count": 1,
+        }
+    ]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    result = import_snapshot(
+        source_git=source,
+        repository_root=tmp_path,
+        source_inventory_path=inventory_path,
+        file_map_path=map_path,
+        result_path=result_path,
+    )
+
+    generated = (
+        tmp_path
+        / "training/lunar_policy_training/lunar_policy_training/policy/observation.py"
+    ).read_text(encoding="utf-8")
+    assert ast.get_docstring(ast.parse(generated), clean=False) == (
+        "Frozen policy mathematical core."
+    )
+    assert "lunar_exploration_ppo" not in generated
+    assert result["files"][0]["omit_imports"] == [
+        "lunar_exploration_ppo.workflows.runner"
+    ]
+    assert result["files"][0]["string_replacements"] == entry[
+        "string_replacements"
+    ]
+
+
+def test_symbol_extractor_rejects_required_omitted_import(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if omit_imports could replace a selected runtime dependency with a stub."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=(
+            b"from lunar_exploration_ppo.workflows.runner import Runner\n"
+            b"def public():\n    return Runner()\n"
+        ),
+        cross_attention_payload=b"RESULT = 3\n",
+    )
+    file_map = _map(source, commit)
+    entry = file_map["groups"]["policy"][0]  # type: ignore[index]
+    entry["allow_symbols"] = ["public"]
+    entry["omit_imports"] = ["lunar_exploration_ppo.workflows.runner"]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    with pytest.raises(ImportError, match=r"public.*omitted import is required.*Runner"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+def test_symbol_extractor_rejects_unmatched_omit_import_declaration(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if stale adaptation metadata survived a frozen-source import drift."""
+    source, commit, origin = _frozen_source(tmp_path)
+    file_map = _map(source, commit)
+    file_map["groups"]["policy"][0]["omit_imports"] = [  # type: ignore[index]
+        "lunar_exploration_ppo.workflows.runner"
+    ]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    with pytest.raises(ImportError, match=r"omit_imports not found.*workflows\.runner"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+def test_symbol_extractor_rejects_string_replacement_count_drift(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if text adaptation silently matched more or fewer frozen strings."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=b'"""Stage 9 policy math."""\nVALUE = 3\n',
+        cross_attention_payload=b"RESULT = 3\n",
+    )
+    file_map = _map(source, commit)
+    file_map["groups"]["policy"][0]["string_replacements"] = [  # type: ignore[index]
+        {
+            "old": "Stage 9 policy math.",
+            "new": "Frozen policy mathematical core.",
+            "count": 2,
+        }
+    ]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    with pytest.raises(ImportError, match=r"string replacement count.*expected 2, got 1"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+def test_real_frozen_commit_extracts_six_clean_importable_cores_with_exact_provenance(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if real frozen behavior, exact provenance, or a clean core import were lost."""
+    expected_symbols = {
+        "src/lunar_exploration_ppo/policy/observation.py": [
+            "OBSERVATION_SCHEMA_VERSION",
+            "GLOBAL_PRIOR_CHANNELS",
+            "COVERAGE_SUMMARY_CHANNELS",
+            "LOCAL_CROP_CHANNELS",
+            "FRONTIER_FEATURE_FIELDS",
+            "POSE_FEATURE_FIELDS",
+        ],
+        "src/lunar_exploration_ppo/policy/cross_attention.py": [
+            "TOKEN_DIM",
+            "MAP_POOL_SHAPE",
+            "ATTENTION_HEADS",
+            "CROSS_ATTENTION_LAYERS",
+            "FFN_HIDDEN_DIM",
+            "ACTION_HIDDEN_DIM",
+            "DROPOUT",
+            "INVALID_LOGIT_VALUE",
+            "INITIAL_KAPPA_RAW",
+            "PolicyActionError",
+            "MapEncoder",
+            "CrossAttentionBlock",
+            "_normalize_angle",
+            "normalize_theta",
+            "_validated_masked_logits",
+            "_gather_candidate",
+            "_safe_theta_mu",
+            "_masked_mean_max",
+            "_map_position_encoding",
+        ],
+        "src/lunar_exploration_ppo/ppo/rollout.py": [
+            "GAMMA",
+            "GAE_LAMBDA",
+            "RolloutContractError",
+            "GAEResult",
+            "compute_gae",
+        ],
+        "src/lunar_exploration_ppo/ppo/trainer.py": [
+            "PPOTrainingError",
+            "PPOLossTerms",
+            "compute_ppo_loss_terms",
+            "policy_state_sha256",
+            "physical_microbatch_slices",
+            "_gradient_norm",
+            "_parameter_change_l2",
+        ],
+        "src/lunar_exploration_ppo/eval/baselines.py": [
+            "BASELINE_METHODS",
+            "ALL_METHODS",
+            "_DISTANCE_FEATURE",
+            "_POTENTIAL_GAIN_FEATURE",
+            "_RECOMMENDED_THETA_SIN_FEATURE",
+            "_RECOMMENDED_THETA_COS_FEATURE",
+            "_REACHABLE_COST_FEATURE",
+            "_MIN_DIRECTION_NORM",
+            "BaselineSelectionError",
+            "NoCandidateAction",
+            "reconstruct_recommended_theta",
+            "validate_selected_index",
+        ],
+        "src/lunar_exploration_ppo/eval/metrics.py": [
+            "EPISODE_FIELDS",
+            "BOOTSTRAP_METRICS",
+            "ZERO_DISTANCE_POLICY",
+            "_TERMINATION_REASONS",
+            "MetricError",
+            "EpisodeResult",
+            "build_episode_result",
+            "validate_episode_result",
+            "episode_record",
+            "bootstrap_episode_indices",
+            "bootstrap_indices_sha256",
+            "summarize_episodes",
+            "_episode_order_key",
+            "_summary_values",
+            "_finite_mean",
+        ],
+    }
+    expected_targets = {
+        "policy/observation_core.py": "lunar_policy_training.policy.observation_core",
+        "policy/backbone_core.py": "lunar_policy_training.policy.backbone_core",
+        "ppo/rollout_core.py": "lunar_policy_training.ppo.rollout_core",
+        "ppo/trainer_core.py": "lunar_policy_training.ppo.trainer_core",
+        "eval/baseline_core.py": "lunar_policy_training.eval.baseline_core",
+        "eval/metrics_core.py": "lunar_policy_training.eval.metrics_core",
+    }
+    result_path = tmp_path / "migration/ppo_import_result.json"
+
+    result = import_snapshot(
+        source_git=REAL_FROZEN_SOURCE,
+        repository_root=tmp_path,
+        source_inventory_path=REPOSITORY_ROOT / "migration/source_inventory.yaml",
+        file_map_path=REPOSITORY_ROOT / "migration/ppo_file_map.yaml",
+        result_path=result_path,
+    )
+
+    assert result["source_repository"] == "legacy_root"
+    assert result["source_origin"] == "git@github.com:sjidnsk/lunar-path-planning.git"
+    assert result["source_commit"] == REAL_FROZEN_COMMIT
+    assert result == json.loads(result_path.read_text(encoding="utf-8"))
+    assert len(result["files"]) == 8
+    result_by_source = {entry["source"]: entry for entry in result["files"]}
+    for source, requested in expected_symbols.items():
+        entry = result_by_source[source]
+        assert entry["requested_symbols"] == requested
+        assert entry["resolved_symbols"] == requested
+        assert entry["provenance"] == {
+            "commit": REAL_FROZEN_COMMIT,
+            "origin": "git@github.com:sjidnsk/lunar-path-planning.git",
+            "repository": "legacy_root",
+        }
+        assert entry["source_blob_oid"] == _git(
+            REAL_FROZEN_SOURCE, "rev-parse", f"{REAL_FROZEN_COMMIT}:{source}"
+        ).strip()
+
+    forbidden = re.compile(
+        r"\b(?:stage\d*|contentref|authority|repair|artifact|durable|"
+        r"stub|policybatch|policyforwardoutput|"
+        r"crossattentionfrontierpolicy)\b",
+        re.IGNORECASE,
+    )
+    package_root = tmp_path / "training/lunar_policy_training/lunar_policy_training"
+    clean_env = os.environ.copy()
+    clean_env.update(
+        {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": str(package_root.parent),
+        }
+    )
+    for target, module in expected_targets.items():
+        generated = package_root / target
+        text = generated.read_text(encoding="utf-8")
+        compile(text, generated.as_posix(), "exec")
+        assert forbidden.search(text) is None
+        names = {
+            node.id for node in ast.walk(ast.parse(text)) if isinstance(node, ast.Name)
+        }
+        assert names.isdisjoint({"Any", "TYPE_CHECKING"})
+        subprocess.run(
+            [sys.executable, "-c", f"import {module}"],
+            cwd=tmp_path,
+            check=True,
+            env=clean_env,
+        )
 
 
 def test_manual_thin_adapter_mode_records_provenance_without_copying_source(

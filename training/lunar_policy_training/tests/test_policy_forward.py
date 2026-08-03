@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import fields
 import pathlib
 import sys
 
@@ -12,9 +13,70 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "model_cont
 
 from lunar_policy_training.policy.cross_attention import (  # noqa: E402
     CrossAttentionPolicy,
+    PolicyOutput,
+    recompute_action_log_probs,
+    sample_action,
+)
+from lunar_policy_training.policy.observation import (  # noqa: E402
     PolicyBatch,
 )
+from lunar_policy_training.policy import backbone_core  # noqa: E402
 
+
+def test_policy_public_types_and_module_graph_use_the_frozen_backbone_core() -> None:
+    """Would fail if a second batch/output type or placeholder network bypassed the core."""
+    policy = CrossAttentionPolicy()
+
+    assert [field.name for field in fields(PolicyBatch)] == [
+        "prior_channels",
+        "coverage_summary",
+        "local_crop",
+        "frontier_features",
+        "pose_features",
+        "candidate_mask",
+        "platform_context",
+    ]
+    assert [field.name for field in fields(PolicyOutput)] == [
+        "frontier_logits",
+        "theta_mu",
+        "theta_kappa",
+        "value",
+    ]
+    assert isinstance(policy.global_encoder, backbone_core.MapEncoder)
+    assert isinstance(policy.local_encoder, backbone_core.MapEncoder)
+    assert all(
+        isinstance(block, backbone_core.CrossAttentionBlock)
+        for block in policy.cross_attention_blocks
+    )
+    assert policy.platform_encoder.in_features == 3
+    assert policy.platform_encoder.out_features == backbone_core.TOKEN_DIM
+
+
+def test_sampled_joint_log_prob_equals_immediate_recomputation() -> None:
+    """Would fail if sampling and PPO recomputation used different masked distributions."""
+    policy = CrossAttentionPolicy().eval()
+    batch = _batch()
+
+    with torch.no_grad():
+        output = policy(batch)
+        sample = sample_action(output, batch.candidate_mask, deterministic=True)
+        recomputed = recompute_action_log_probs(
+            output,
+            batch.candidate_mask,
+            sample.selected_frontier_index,
+            sample.selected_theta,
+        )
+
+    assert torch.equal(
+        batch.candidate_mask.gather(
+            1, sample.selected_frontier_index.unsqueeze(1)
+        ).squeeze(1),
+        torch.ones((2,), dtype=torch.bool),
+    )
+    assert torch.equal(sample.log_prob_frontier, recomputed.log_prob_frontier)
+    assert torch.equal(sample.log_prob_theta, recomputed.log_prob_theta)
+    assert torch.equal(sample.log_prob_total, recomputed.log_prob_total)
+    assert torch.equal(sample.frontier_entropy, recomputed.frontier_entropy)
 
 def _batch(device: str = "cpu") -> PolicyBatch:
     return PolicyBatch(
