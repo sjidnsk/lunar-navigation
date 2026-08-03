@@ -153,6 +153,15 @@ if(BUILD_TESTING)
     nlohmann_json::nlohmann_json)
   lunar_enable_sanitizers(lunar_planner_facade_summary)
 
+  add_executable(lunar_planner_core_benchmark
+    ../../../tests/performance/planner_core_benchmark.cpp)
+  target_compile_features(lunar_planner_core_benchmark PRIVATE cxx_std_20)
+  target_include_directories(lunar_planner_core_benchmark PRIVATE test)
+  target_link_libraries(lunar_planner_core_benchmark PRIVATE
+    ${PROJECT_NAME}
+    nlohmann_json::nlohmann_json)
+  lunar_enable_sanitizers(lunar_planner_core_benchmark)
+
   add_test(
     NAME lunar_planner_core_v3_semantic_equivalence
     COMMAND "${CMAKE_COMMAND}" -E env
@@ -162,6 +171,16 @@ if(BUILD_TESTING)
   set_tests_properties(
     lunar_planner_core_v3_semantic_equivalence PROPERTIES
     LABELS "differential;native")
+
+  add_test(
+    NAME lunar_planner_core_benchmark_contract
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "LUNAR_PLANNER_CORE_BENCHMARK=$<TARGET_FILE:lunar_planner_core_benchmark>"
+      "${Python3_EXECUTABLE}" -m pytest -q
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/performance/test_planner_core_benchmark.py")
+  set_tests_properties(
+    lunar_planner_core_benchmark_contract PROPERTIES
+    LABELS "performance;native")
 
   add_test(
     NAME lunar_planner_core_no_legacy_contract
