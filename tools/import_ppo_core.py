@@ -731,15 +731,43 @@ def _reject_dynamic_execution(
     )
 
 
+def _normalized_dependency_part(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.casefold())
+
+
+def _dependency_parts(module: str) -> tuple[str, ...]:
+    return tuple(
+        normalized
+        for component in re.split(r"[./]", module)
+        if (normalized := _normalized_dependency_part(component))
+    )
+
+
+def _forbidden_dependency_name(value: str) -> str | None:
+    normalized = _normalized_dependency_part(value)
+    if (
+        normalized in GLOBAL_FORBIDDEN_IMPORT_PARTS
+        or re.fullmatch(r"stage\d*", normalized)
+        or normalized == "artifactregistry"
+    ):
+        return normalized
+    return None
+
+
 def _forbidden_module_part(module: str) -> str | None:
-    parts = tuple(part for part in re.split(r"[.\-_/]", module.lower()) if part)
-    for part in parts:
-        if part in GLOBAL_FORBIDDEN_IMPORT_PARTS or re.fullmatch(r"stage\d*", part):
-            return part
-    normalized_parts = tuple(re.sub(r"[^a-z0-9]", "", part) for part in parts)
+    normalized_parts = _dependency_parts(module)
+    for part in normalized_parts:
+        if forbidden := _forbidden_dependency_name(part):
+            return forbidden
+    word_parts = tuple(
+        part for part in re.split(r"[.\-_/]", module.casefold()) if part
+    )
+    for part in word_parts:
+        if forbidden := _forbidden_dependency_name(part):
+            return forbidden
     if "artifactregistry" in normalized_parts or any(
         left in {"artifact", "artifacts"} and right == "registry"
-        for left, right in zip(normalized_parts, normalized_parts[1:])
+        for left, right in zip(word_parts, word_parts[1:])
     ):
         return "artifact-registry"
     return None
@@ -757,6 +785,16 @@ def _reject_forbidden_module(
         raise ImportError(f"forbidden dependency in {source_path}: {module}")
     if _forbidden_module_part(module):
         raise ImportError(f"forbidden dependency in {source_path}: {module}")
+
+
+def _reject_forbidden_import_symbol(
+    alias: ast.alias,
+    source_path: PurePosixPath,
+) -> None:
+    if _forbidden_dependency_name(alias.name):
+        raise ImportError(
+            f"forbidden imported symbol in {source_path}: {alias.name}"
+        )
 
 
 def _validate_module(
@@ -826,6 +864,8 @@ def _collect_import_bindings(
                     binding, node, alias, alias.name, None
                 )
         elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                _reject_forbidden_import_symbol(alias, source_path)
             if node.level:
                 raise ImportError(f"relative source import in {source_path} is not supported")
             if node.module == "__future__":

@@ -1137,6 +1137,103 @@ def test_symbol_extractor_rejects_unmatched_omit_import_declaration(
         )
 
 
+@pytest.mark.parametrize("omit_import", (False, True), ids=("direct", "exact-omit"))
+@pytest.mark.parametrize(
+    ("statement", "module", "message"),
+    (
+        (
+            "import lunar_exploration_ppo.content_ref\nVALUE = 3\n",
+            "lunar_exploration_ppo.content_ref",
+            r"forbidden dependency.*content_ref",
+        ),
+        (
+            "from lunar_exploration_ppo.content_ref import X as SafeX\nVALUE = 3\n",
+            "lunar_exploration_ppo.content_ref",
+            r"forbidden dependency.*content_ref",
+        ),
+        (
+            "from benign.module import ContentRef as ContentReference\nVALUE = 3\n",
+            "benign.module",
+            r"forbidden imported symbol.*ContentRef",
+        ),
+    ),
+)
+def test_import_rejects_content_ref_modules_and_symbols_before_exact_omit(
+    tmp_path: pathlib.Path,
+    statement: str,
+    module: str,
+    message: str,
+    omit_import: bool,
+) -> None:
+    """Would fail if exact omit metadata or an asname hid a forbidden ContentRef."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=statement.encode("utf-8"),
+        cross_attention_payload=b"RESULT = 3\n",
+    )
+    file_map = _map(source, commit)
+    file_map["allow_dependencies"].append("benign")  # type: ignore[union-attr]
+    if omit_import:
+        file_map["groups"]["policy"][0]["omit_imports"] = [module]  # type: ignore[index]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    with pytest.raises(ImportError, match=message):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+@pytest.mark.parametrize("omit_import", (False, True), ids=("direct", "exact-omit"))
+@pytest.mark.parametrize(
+    ("statement", "module"),
+    (
+        (
+            "import benign.content_reference\nVALUE = 3\n",
+            "benign.content_reference",
+        ),
+        (
+            "from benign.module import ContentReference as SafeReference\nVALUE = 3\n",
+            "benign.module",
+        ),
+    ),
+)
+def test_import_allows_nearby_content_reference_names(
+    tmp_path: pathlib.Path,
+    statement: str,
+    module: str,
+    omit_import: bool,
+) -> None:
+    """Would fail if exact forbidden-name normalization became a substring gate."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=statement.encode("utf-8"),
+        cross_attention_payload=b"RESULT = 3\n",
+    )
+    file_map = _map(source, commit)
+    file_map["allow_dependencies"].append("benign")  # type: ignore[union-attr]
+    if omit_import:
+        file_map["groups"]["policy"][0]["omit_imports"] = [module]  # type: ignore[index]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    result = import_snapshot(
+        source_git=source,
+        repository_root=tmp_path,
+        source_inventory_path=inventory_path,
+        file_map_path=map_path,
+        result_path=result_path,
+    )
+
+    assert result["files"][0]["resolved_symbols"] == ["VALUE"]
+
+
 @pytest.mark.parametrize(
     ("module", "forbid_imports"),
     (
