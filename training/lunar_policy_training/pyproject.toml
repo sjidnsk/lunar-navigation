@@ -10,4 +10,7 @@ requires-python = ">=3.10"
 dependencies = ["numpy", "torch"]
 
 [tool.pytest.ini_options]
-markers = ["cuda: requires a CUDA-capable PyTorch installation"]
+markers = [
+    "cuda: requires a CUDA-capable PyTorch installation",
+    "integration: requires an explicitly configured external source repository",
+]

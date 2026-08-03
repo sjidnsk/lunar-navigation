@@ -31,6 +31,13 @@ FORBIDDEN_DEPENDENCY_PARTS = {
     "artifact",
     "durable",
 }
+GLOBAL_FORBIDDEN_IMPORT_PARTS = {
+    "workflows",
+    "contentref",
+    "authority",
+    "repair",
+    "durable",
+}
 FORBIDDEN_OLD_SYMBOLS = {
     "CrossAttentionFrontierPolicy",
     "PolicyBatch",
@@ -448,6 +455,8 @@ def _dynamic_function_expression(
     importlib_names: set[str],
     builtins_names: set[str],
     dynamic_names: set[str],
+    *,
+    getattr_available: bool,
 ) -> bool:
     if isinstance(node, ast.Name):
         return node.id in dynamic_names
@@ -463,6 +472,7 @@ def _dynamic_function_expression(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "getattr"
+        and getattr_available
         and len(node.args) >= 2
         and isinstance(node.args[1], ast.Constant)
         and node.args[1].value in {"__import__", "import_module"}
@@ -473,6 +483,97 @@ def _dynamic_function_expression(
     )
 
 
+class _DynamicScopeCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.imports: list[ast.Import | ast.ImportFrom] = []
+        self.assignments: list[tuple[tuple[str, ...], ast.AST]] = []
+        self.calls: list[ast.Call] = []
+        self.children: list[
+            ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
+        ] = []
+
+    def visit_Import(self, node: ast.Import) -> None:
+        self.imports.append(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        self.imports.append(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        names = tuple(
+            target.id for target in node.targets if isinstance(target, ast.Name)
+        )
+        if names:
+            self.assignments.append((names, node.value))
+        self.visit(node.value)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if isinstance(node.target, ast.Name) and node.value is not None:
+            self.assignments.append(((node.target.id,), node.value))
+            self.visit(node.value)
+        self.visit(node.annotation)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        if isinstance(node.target, ast.Name):
+            self.assignments.append(((node.target.id,), node.value))
+        self.visit(node.value)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self.calls.append(node)
+        self.generic_visit(node)
+
+    def _visit_function_outer(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+    ) -> None:
+        if not isinstance(node, ast.Lambda):
+            for decorator in node.decorator_list:
+                self.visit(decorator)
+            if node.returns is not None:
+                self.visit(node.returns)
+        for argument in (
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        ):
+            if argument.annotation is not None:
+                self.visit(argument.annotation)
+        if node.args.vararg and node.args.vararg.annotation:
+            self.visit(node.args.vararg.annotation)
+        if node.args.kwarg and node.args.kwarg.annotation:
+            self.visit(node.args.kwarg.annotation)
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+        self.children.append(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function_outer(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function_outer(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self._visit_function_outer(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword_node in node.keywords:
+            self.visit(keyword_node.value)
+        self.children.append(node)
+
+
+def _inherited_dynamic_names(names: set[str], scope: _Scope) -> set[str]:
+    return {
+        name
+        for name in names
+        if name not in scope.bindings
+        or name in scope.globals
+        or name in scope.nonlocals
+    }
+
+
 def _reject_dynamic_execution(
     tree: ast.Module,
     source_path: PurePosixPath,
@@ -480,82 +581,182 @@ def _reject_dynamic_execution(
     allow_dependencies: set[str],
     forbid_imports: tuple[str, ...],
 ) -> None:
-    importlib_names = {"importlib"}
-    builtins_names = {"builtins"}
-    dynamic_names = {"__import__"}
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "importlib":
-                    importlib_names.add(alias.asname or "importlib")
-                if alias.name == "builtins":
-                    builtins_names.add(alias.asname or "builtins")
-        elif isinstance(node, ast.ImportFrom):
-            if node.module == "importlib":
+    def analyze_scope(
+        body: list[ast.stmt],
+        arguments: ast.arguments | None,
+        parent_importlib: set[str],
+        parent_builtins: set[str],
+        parent_dynamic: set[str],
+        *,
+        kind: str,
+        owner: str,
+        expression: ast.expr | None = None,
+    ) -> None:
+        scope = _scope_for_body(kind, body, arguments)
+        importlib_names = _inherited_dynamic_names(parent_importlib, scope)
+        builtins_names = _inherited_dynamic_names(parent_builtins, scope)
+        dynamic_names = _inherited_dynamic_names(parent_dynamic, scope)
+        collector = _DynamicScopeCollector()
+        for statement in body:
+            collector.visit(statement)
+        if expression is not None:
+            collector.visit(expression)
+        for import_node in collector.imports:
+            if isinstance(import_node, ast.Import):
+                for alias in import_node.names:
+                    if alias.name == "importlib":
+                        importlib_names.add(alias.asname or "importlib")
+                    if alias.name == "builtins":
+                        builtins_names.add(alias.asname or "builtins")
+            elif import_node.module == "importlib":
                 dynamic_names.update(
                     alias.asname or alias.name
-                    for alias in node.names
+                    for alias in import_node.names
                     if alias.name == "import_module"
                 )
-            if node.module == "builtins":
+            elif import_node.module == "builtins":
                 dynamic_names.update(
                     alias.asname or alias.name
-                    for alias in node.names
+                    for alias in import_node.names
                     if alias.name == "__import__"
                 )
-    changed = True
-    while changed:
-        changed = False
-        for node in tree.body:
-            if (
-                isinstance(node, ast.Assign)
-                and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and _dynamic_function_expression(
-                    node.value, importlib_names, builtins_names, dynamic_names
-                )
-                and node.targets[0].id not in dynamic_names
-            ):
-                dynamic_names.add(node.targets[0].id)
-                changed = True
-    for top_level in tree.body:
-        owner_names = _definition_names(top_level)
-        owner = owner_names[0] if owner_names else "<module>"
-        for node in ast.walk(top_level):
-            if not isinstance(node, ast.Call):
-                continue
-            if isinstance(node.func, ast.Name) and node.func.id in {"eval", "exec"}:
-                raise ImportError(
-                    f"{source_path}:{owner} -> forbidden dynamic execution: {node.func.id}"
-                )
-            if _dynamic_function_expression(
-                node.func, importlib_names, builtins_names, dynamic_names
-            ):
-                if (
-                    node.args
-                    and isinstance(node.args[0], ast.Constant)
-                    and isinstance(node.args[0].value, str)
+        getattr_available = (
+            "getattr" not in scope.bindings
+            or "getattr" in scope.globals
+            or "getattr" in scope.nonlocals
+        )
+        changed = True
+        while changed:
+            changed = False
+            for targets, value in collector.assignments:
+                if _dynamic_function_expression(
+                    value,
+                    importlib_names,
+                    builtins_names,
+                    dynamic_names,
+                    getattr_available=getattr_available,
                 ):
-                    try:
-                        _validate_module(
-                            node.args[0].value,
-                            source_path,
-                            legacy_specs,
-                            allow_dependencies,
-                            forbid_imports,
-                        )
-                    except ImportError as error:
-                        raise ImportError(
-                            f"dynamic import in {source_path}:{owner}; {error}"
-                        ) from error
-                raise ImportError(f"dynamic import in {source_path}:{owner}")
+                    for target in targets:
+                        if target not in dynamic_names:
+                            dynamic_names.add(target)
+                            changed = True
+                if isinstance(value, ast.Name) and value.id in importlib_names:
+                    for target in targets:
+                        if target not in importlib_names:
+                            importlib_names.add(target)
+                            changed = True
+                if isinstance(value, ast.Name) and value.id in builtins_names:
+                    for target in targets:
+                        if target not in builtins_names:
+                            builtins_names.add(target)
+                            changed = True
+        for call in collector.calls:
+            if isinstance(call.func, ast.Name) and call.func.id in {"eval", "exec"}:
+                raise ImportError(
+                    f"{source_path}:{owner} -> forbidden dynamic execution: "
+                    f"{call.func.id}"
+                )
+            if not _dynamic_function_expression(
+                call.func,
+                importlib_names,
+                builtins_names,
+                dynamic_names,
+                getattr_available=getattr_available,
+            ):
+                continue
+            if (
+                call.args
+                and isinstance(call.args[0], ast.Constant)
+                and isinstance(call.args[0].value, str)
+            ):
+                try:
+                    _validate_module(
+                        call.args[0].value,
+                        source_path,
+                        legacy_specs,
+                        allow_dependencies,
+                        forbid_imports,
+                    )
+                except ImportError as error:
+                    raise ImportError(
+                        f"dynamic import in {source_path}:{owner}; {error}"
+                    ) from error
+            raise ImportError(f"dynamic import in {source_path}:{owner}")
+        for child in collector.children:
+            child_owner = (
+                child.name
+                if owner == "<module>" and not isinstance(child, ast.Lambda)
+                else owner
+            )
+            if isinstance(child, ast.Lambda):
+                analyze_scope(
+                    [],
+                    child.args,
+                    importlib_names,
+                    builtins_names,
+                    dynamic_names,
+                    kind="function",
+                    owner=child_owner,
+                    expression=child.body,
+                )
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                analyze_scope(
+                    child.body,
+                    child.args,
+                    importlib_names,
+                    builtins_names,
+                    dynamic_names,
+                    kind="function",
+                    owner=child_owner,
+                )
+            else:
+                analyze_scope(
+                    child.body,
+                    None,
+                    importlib_names,
+                    builtins_names,
+                    dynamic_names,
+                    kind="class",
+                    owner=child_owner,
+                )
+
+    analyze_scope(
+        tree.body,
+        None,
+        set(),
+        set(),
+        {"__import__"},
+        kind="module",
+        owner="<module>",
+    )
 
 
 def _forbidden_module_part(module: str) -> str | None:
-    for part in re.split(r"[.\-_/]", module.lower()):
-        if part in FORBIDDEN_DEPENDENCY_PARTS or re.fullmatch(r"stage\d*", part):
+    parts = tuple(part for part in re.split(r"[.\-_/]", module.lower()) if part)
+    for part in parts:
+        if part in GLOBAL_FORBIDDEN_IMPORT_PARTS or re.fullmatch(r"stage\d*", part):
             return part
+    normalized_parts = tuple(re.sub(r"[^a-z0-9]", "", part) for part in parts)
+    if "artifactregistry" in normalized_parts or any(
+        left in {"artifact", "artifacts"} and right == "registry"
+        for left, right in zip(normalized_parts, normalized_parts[1:])
+    ):
+        return "artifact-registry"
     return None
+
+
+def _reject_forbidden_module(
+    module: str,
+    source_path: PurePosixPath,
+    forbid_imports: tuple[str, ...],
+) -> None:
+    if any(
+        module == prefix or module.startswith(prefix + ".")
+        for prefix in forbid_imports
+    ):
+        raise ImportError(f"forbidden dependency in {source_path}: {module}")
+    if _forbidden_module_part(module):
+        raise ImportError(f"forbidden dependency in {source_path}: {module}")
 
 
 def _validate_module(
@@ -565,10 +766,7 @@ def _validate_module(
     allow_dependencies: set[str],
     forbid_imports: tuple[str, ...],
 ) -> _MappingSpec | None:
-    if any(module == prefix or module.startswith(prefix + ".") for prefix in forbid_imports):
-        raise ImportError(f"forbidden dependency in {source_path}: {module}")
-    if _forbidden_module_part(module):
-        raise ImportError(f"forbidden dependency in {source_path}: {module}")
+    _reject_forbidden_module(module, source_path, forbid_imports)
     if module.startswith("lunar_exploration_ppo."):
         legacy = module.removeprefix("lunar_exploration_ppo.")
         if legacy not in legacy_specs:
@@ -603,6 +801,7 @@ def _collect_import_bindings(
     for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
+                _reject_forbidden_module(alias.name, source_path, forbid_imports)
                 if alias.name in omit_imports:
                     register_omitted(
                         alias.asname or alias.name.split(".", maxsplit=1)[0],
@@ -639,6 +838,7 @@ def _collect_import_bindings(
                 continue
             if node.module is None:
                 raise ImportError(f"unresolved import in {source_path}")
+            _reject_forbidden_module(node.module, source_path, forbid_imports)
             if node.module in omit_imports:
                 for alias in node.names:
                     if alias.name == "*":
@@ -1489,8 +1689,12 @@ def import_snapshot(
             if len(final_names) != len(set(final_names)):
                 raise ImportError(f"rename collision for {source}")
             forbid_imports = entry.get("forbid_imports", [])
-            if not isinstance(forbid_imports, list) or not all(
-                isinstance(module, str) and module for module in forbid_imports
+            if (
+                not isinstance(forbid_imports, list)
+                or not all(
+                    isinstance(module, str) and module for module in forbid_imports
+                )
+                or len(forbid_imports) != len(set(forbid_imports))
             ):
                 raise ImportError(f"invalid forbid_imports for {source}")
             omit_imports = entry.get("omit_imports", [])
@@ -1500,6 +1704,22 @@ def import_snapshot(
                 or len(omit_imports) != len(set(omit_imports))
             ):
                 raise ImportError(f"invalid omit_imports for {source}")
+            for omitted_module in omit_imports:
+                if _forbidden_module_part(omitted_module) is not None:
+                    raise ImportError(
+                        f"omit_imports contains globally forbidden dependency for "
+                        f"{source}: {omitted_module}"
+                    )
+                if any(
+                    omitted_module == forbidden_module
+                    or omitted_module.startswith(forbidden_module + ".")
+                    or forbidden_module.startswith(omitted_module + ".")
+                    for forbidden_module in forbid_imports
+                ):
+                    raise ImportError(
+                        f"forbid_imports overlaps omit_imports for {source}: "
+                        f"{omitted_module}"
+                    )
             raw_replacements = entry.get("string_replacements", [])
             if not isinstance(raw_replacements, list):
                 raise ImportError(f"invalid string_replacements for {source}")

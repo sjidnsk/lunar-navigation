@@ -14,9 +14,7 @@ import yaml
 
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
-REAL_FROZEN_SOURCE = pathlib.Path(
-    "/home/kai/CodexDownloads/lunar_navigation/volume3/sources/legacy_root"
-)
+REAL_FROZEN_SOURCE_ENV = "LUNAR_PPO_FROZEN_SOURCE_GIT"
 REAL_FROZEN_COMMIT = "7309e93fdb85c60ff3736efe1a7f3c7eb640ee78"
 sys.path.insert(0, str(REPOSITORY_ROOT / "tools"))
 
@@ -424,6 +422,92 @@ def test_import_rejects_builtins_dynamic_import_bypasses(
             file_map_path=map_path,
             result_path=result_path,
         )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        (
+            "def probe():\n"
+            "    loader = __import__\n"
+            "    return loader('torch')\n"
+            "VALUE = 3\n"
+        ),
+        (
+            "import importlib\n"
+            "def probe():\n"
+            "    loader = importlib.import_module\n"
+            "    return loader('torch')\n"
+            "VALUE = 3\n"
+        ),
+        (
+            "import builtins\n"
+            "def probe():\n"
+            "    loader = builtins.__import__\n"
+            "    return loader('torch')\n"
+            "VALUE = 3\n"
+        ),
+        (
+            "import builtins\n"
+            "def probe():\n"
+            "    loader = getattr(builtins, '__import__')\n"
+            "    def nested():\n"
+            "        return loader('torch')\n"
+            "    return nested()\n"
+            "VALUE = 3\n"
+        ),
+    ),
+)
+def test_import_rejects_dynamic_import_aliases_in_nested_scopes(
+    tmp_path: pathlib.Path, payload: str
+) -> None:
+    """Would fail if a local callable alias escaped recursive dynamic-import checks."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=payload.encode("utf-8"),
+        cross_attention_payload=b"RESULT = 3\n",
+    )
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), _map(source, commit)
+    )
+
+    with pytest.raises(ImportError, match="dynamic import"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+def test_import_keeps_ordinary_local_assignment_legal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if fail-closed alias tracking rejected unrelated local data flow."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=(
+            b"def probe():\n"
+            b"    local_value = 3\n"
+            b"    return local_value\n"
+            b"VALUE = 3\n"
+        ),
+        cross_attention_payload=b"RESULT = 3\n",
+    )
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), _map(source, commit)
+    )
+
+    result = import_snapshot(
+        source_git=source,
+        repository_root=tmp_path,
+        source_inventory_path=inventory_path,
+        file_map_path=map_path,
+        result_path=result_path,
+    )
+
+    assert result["files"][0]["resolved_symbols"] == ["VALUE"]
 
 
 def test_symbol_extractor_emits_minimal_dependency_closure_and_provenance(
@@ -954,14 +1038,14 @@ def test_symbol_extractor_applies_only_explicit_unused_import_and_string_adaptat
         tmp_path,
         observation_payload=(
             b'"""Stage 9 policy math."""\n'
-            b"from lunar_exploration_ppo.workflows.runner import Runner\n"
+            b"from lunar_exploration_ppo.utils.geometry import PoseXYTheta\n"
             b"VALUE = 3\n"
         ),
         cross_attention_payload=b"RESULT = 3\n",
     )
     file_map = _map(source, commit)
     entry = file_map["groups"]["policy"][0]  # type: ignore[index]
-    entry["omit_imports"] = ["lunar_exploration_ppo.workflows.runner"]
+    entry["omit_imports"] = ["lunar_exploration_ppo.utils.geometry"]
     entry["string_replacements"] = [
         {
             "old": "Stage 9 policy math.",
@@ -990,7 +1074,7 @@ def test_symbol_extractor_applies_only_explicit_unused_import_and_string_adaptat
     )
     assert "lunar_exploration_ppo" not in generated
     assert result["files"][0]["omit_imports"] == [
-        "lunar_exploration_ppo.workflows.runner"
+        "lunar_exploration_ppo.utils.geometry"
     ]
     assert result["files"][0]["string_replacements"] == entry[
         "string_replacements"
@@ -1004,20 +1088,23 @@ def test_symbol_extractor_rejects_required_omitted_import(
     source, commit, origin = _frozen_source(
         tmp_path,
         observation_payload=(
-            b"from lunar_exploration_ppo.workflows.runner import Runner\n"
-            b"def public():\n    return Runner()\n"
+            b"from lunar_exploration_ppo.utils.geometry import PoseXYTheta\n"
+            b"def public():\n    return PoseXYTheta(1.0, 2.0, 3.0)\n"
         ),
         cross_attention_payload=b"RESULT = 3\n",
     )
     file_map = _map(source, commit)
     entry = file_map["groups"]["policy"][0]  # type: ignore[index]
     entry["allow_symbols"] = ["public"]
-    entry["omit_imports"] = ["lunar_exploration_ppo.workflows.runner"]
+    entry["omit_imports"] = ["lunar_exploration_ppo.utils.geometry"]
     inventory_path, map_path, result_path = _write_contracts(
         tmp_path, _inventory_for_source(source, commit, origin), file_map
     )
 
-    with pytest.raises(ImportError, match=r"public.*omitted import is required.*Runner"):
+    with pytest.raises(
+        ImportError,
+        match=r"public.*omitted import is required.*PoseXYTheta",
+    ):
         import_snapshot(
             source_git=source,
             repository_root=tmp_path,
@@ -1034,13 +1121,59 @@ def test_symbol_extractor_rejects_unmatched_omit_import_declaration(
     source, commit, origin = _frozen_source(tmp_path)
     file_map = _map(source, commit)
     file_map["groups"]["policy"][0]["omit_imports"] = [  # type: ignore[index]
-        "lunar_exploration_ppo.workflows.runner"
+        "lunar_exploration_ppo.utils.geometry"
     ]
     inventory_path, map_path, result_path = _write_contracts(
         tmp_path, _inventory_for_source(source, commit, origin), file_map
     )
 
-    with pytest.raises(ImportError, match=r"omit_imports not found.*workflows\.runner"):
+    with pytest.raises(ImportError, match=r"omit_imports not found.*utils\.geometry"):
+        import_snapshot(
+            source_git=source,
+            repository_root=tmp_path,
+            source_inventory_path=inventory_path,
+            file_map_path=map_path,
+            result_path=result_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("module", "forbid_imports"),
+    (
+        (
+            "lunar_exploration_ppo.workflows.runner",
+            ["lunar_exploration_ppo.workflows"],
+        ),
+        (
+            "lunar_exploration_ppo.env.frontier",
+            ["lunar_exploration_ppo.env"],
+        ),
+        ("lunar_exploration_ppo.authority.guard", []),
+        ("lunar_exploration_ppo.utils.artifact_registry", []),
+    ),
+)
+def test_omit_imports_cannot_exempt_explicit_or_global_forbidden_dependency(
+    tmp_path: pathlib.Path,
+    module: str,
+    forbid_imports: list[str],
+) -> None:
+    """Would fail if omit metadata were consumed before the forbidden gate."""
+    source, commit, origin = _frozen_source(
+        tmp_path,
+        observation_payload=(f"from {module} import Ignored\nVALUE = 3\n").encode(
+            "utf-8"
+        ),
+        cross_attention_payload=b"RESULT = 3\n",
+    )
+    file_map = _map(source, commit)
+    entry = file_map["groups"]["policy"][0]  # type: ignore[index]
+    entry["forbid_imports"] = forbid_imports
+    entry["omit_imports"] = [module]
+    inventory_path, map_path, result_path = _write_contracts(
+        tmp_path, _inventory_for_source(source, commit, origin), file_map
+    )
+
+    with pytest.raises(ImportError, match="forbid"):
         import_snapshot(
             source_git=source,
             repository_root=tmp_path,
@@ -1081,10 +1214,24 @@ def test_symbol_extractor_rejects_string_replacement_count_drift(
         )
 
 
+def _real_frozen_source() -> pathlib.Path:
+    configured = os.environ.get(REAL_FROZEN_SOURCE_ENV)
+    if not configured:
+        pytest.skip(f"set {REAL_FROZEN_SOURCE_ENV} to run frozen-source integration")
+    source = pathlib.Path(configured)
+    if not source.is_absolute():
+        pytest.fail(f"{REAL_FROZEN_SOURCE_ENV} must be an absolute path")
+    if not source.is_dir():
+        pytest.fail(f"{REAL_FROZEN_SOURCE_ENV} does not name a directory")
+    return source.resolve()
+
+
+@pytest.mark.integration
 def test_real_frozen_commit_extracts_six_clean_importable_cores_with_exact_provenance(
     tmp_path: pathlib.Path,
 ) -> None:
     """Would fail if real frozen behavior, exact provenance, or a clean core import were lost."""
+    real_frozen_source = _real_frozen_source()
     expected_symbols = {
         "src/lunar_exploration_ppo/policy/observation.py": [
             "OBSERVATION_SCHEMA_VERSION",
@@ -1187,7 +1334,7 @@ def test_real_frozen_commit_extracts_six_clean_importable_cores_with_exact_prove
     result_path = tmp_path / "migration/ppo_import_result.json"
 
     result = import_snapshot(
-        source_git=REAL_FROZEN_SOURCE,
+        source_git=real_frozen_source,
         repository_root=tmp_path,
         source_inventory_path=REPOSITORY_ROOT / "migration/source_inventory.yaml",
         file_map_path=REPOSITORY_ROOT / "migration/ppo_file_map.yaml",
@@ -1210,7 +1357,7 @@ def test_real_frozen_commit_extracts_six_clean_importable_cores_with_exact_prove
             "repository": "legacy_root",
         }
         assert entry["source_blob_oid"] == _git(
-            REAL_FROZEN_SOURCE, "rev-parse", f"{REAL_FROZEN_COMMIT}:{source}"
+            real_frozen_source, "rev-parse", f"{REAL_FROZEN_COMMIT}:{source}"
         ).strip()
     for source, target in manual_targets.items():
         entry = result_by_source[source]

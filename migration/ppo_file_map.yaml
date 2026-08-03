@@ -22,7 +22,6 @@ groups:
         OBSERVATION_SCHEMA_VERSION: SOURCE_OBSERVATION_SCHEMA_VERSION
       forbid_imports:
         - lunar_exploration_ppo.workflows
-        - lunar_exploration_ppo.env
         - lunar_exploration_ppo.utils.artifact_io
         - lunar_exploration_ppo.utils.path_security
       omit_imports:
@@ -110,7 +109,6 @@ groups:
       forbid_imports:
         - lunar_exploration_ppo.workflows
         - lunar_exploration_ppo.env
-        - lunar_exploration_ppo.utils.artifact_io
         - lunar_exploration_ppo.utils.path_security
       omit_imports:
         - lunar_exploration_ppo.policy.observation
@@ -189,7 +187,6 @@ groups:
         - validate_selected_index
       forbid_imports:
         - lunar_exploration_ppo.workflows
-        - lunar_exploration_ppo.env
         - lunar_exploration_ppo.utils.artifact_io
         - lunar_exploration_ppo.utils.path_security
       omit_imports:

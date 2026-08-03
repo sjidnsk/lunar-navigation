@@ -304,8 +304,8 @@
       "source_size_bytes": 84329,
       "string_replacements": [],
       "target": "training/lunar_policy_training/lunar_policy_training/ppo/checkpoint.py",
-      "target_sha256": "f1568e42f28c9096fb8f4e68f11b5e6ed47521489527a63f597b73f58619b63c",
-      "target_size_bytes": 16011,
+      "target_sha256": "a62bbf31a54f12141e277326c193a69728a42b25fb8c029af4d0cd5d203a14be",
+      "target_size_bytes": 17214,
       "target_validation": {
         "ast": "parsed-and-compiled",
         "imports": "static-allowlist-and-no-dynamic-imports",

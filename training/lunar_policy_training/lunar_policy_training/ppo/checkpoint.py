@@ -92,12 +92,24 @@ def load_training_checkpoint(
         payload,
         expected_contract_version=expected_contract_version,
     )
+    live_model_state = _cpu_copy(model.state_dict())
+    live_optimizer_state = _cpu_copy(optimizer.state_dict())
+    live_rng_state = _capture_rng_state()
     try:
         model.load_state_dict(dict(body["model_state"]), strict=True)
         optimizer.load_state_dict(dict(body["optimizer_state"]))
+        _restore_rng_state(body["rng_state"])
     except Exception as error:
+        _rollback_training_state(
+            model,
+            optimizer,
+            model_state=live_model_state,
+            optimizer_state=live_optimizer_state,
+            rng_state=live_rng_state,
+        )
+        if isinstance(error, CheckpointError):
+            raise
         raise CheckpointError("checkpoint train state cannot be restored") from error
-    _restore_rng_state(body["rng_state"])
     return TrainingCheckpoint(
         update_step=body["update_step"],
         contract_version=body["contract_version"],
@@ -166,6 +178,10 @@ def _capture_rng_state() -> dict[str, object]:
 
 def _restore_rng_state(state: object) -> None:
     validated = _validated_rng_state(state)
+    _apply_rng_state(validated)
+
+
+def _apply_rng_state(validated: Mapping[object, object]) -> None:
     numpy_state = validated["numpy"]
     try:
         random.setstate(validated["python"])
@@ -192,6 +208,26 @@ def _restore_rng_state(state: object) -> None:
         raise
     except Exception as error:
         raise CheckpointError("checkpoint RNG state cannot be restored") from error
+
+
+def _rollback_training_state(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    *,
+    model_state: object,
+    optimizer_state: object,
+    rng_state: Mapping[object, object],
+) -> None:
+    try:
+        if not isinstance(model_state, Mapping) or not isinstance(
+            optimizer_state, Mapping
+        ):
+            raise CheckpointError("checkpoint live-state backup is invalid")
+        model.load_state_dict(dict(model_state), strict=True)
+        optimizer.load_state_dict(dict(optimizer_state))
+        _apply_rng_state(rng_state)
+    except Exception as error:
+        raise CheckpointError("checkpoint rollback failed") from error
 
 
 def _validated_rng_state(state: object) -> Mapping[object, object]:
