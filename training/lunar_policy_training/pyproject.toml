@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lunar-policy-training"
+version = "0.1.0"
+description = "Shared seven-input PPO policy training core"
+requires-python = ">=3.10"
+dependencies = ["numpy", "torch"]
+
+[tool.pytest.ini_options]
+markers = ["cuda: requires a CUDA-capable PyTorch installation"]

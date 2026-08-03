@@ -1,0 +1,26 @@
+schema_version: lunar-ppo-file-map/v1
+source:
+  repository: legacy_root
+  commit: 7309e93fdb85c60ff3736efe1a7f3c7eb640ee78
+target_root: training/lunar_policy_training/lunar_policy_training
+allow_dependencies:
+  - numpy
+  - torch
+groups:
+  policy:
+    - source: src/lunar_exploration_ppo/policy/observation.py
+      target: policy/observation.py
+    - source: src/lunar_exploration_ppo/policy/cross_attention.py
+      target: policy/cross_attention.py
+  ppo:
+    - source: src/lunar_exploration_ppo/ppo/collector.py
+      target: ppo/collector.py
+    - source: src/lunar_exploration_ppo/ppo/rollout.py
+      target: ppo/rollout.py
+    - source: src/lunar_exploration_ppo/ppo/trainer.py
+      target: ppo/trainer.py
+    - source: src/lunar_exploration_ppo/ppo/checkpoint.py
+      target: ppo/checkpoint.py
+  evaluation:
+    - source: src/lunar_exploration_ppo/eval/metrics.py
+      target: eval/metrics.py
