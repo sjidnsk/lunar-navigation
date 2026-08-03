@@ -9,6 +9,7 @@
 #include <string_view>
 #include <utility>
 
+#include "hopper/hopper_planner.hpp"
 #include "legged/legged_planner.hpp"
 #include "wheel/wheel_planner.hpp"
 
@@ -69,6 +70,7 @@ constexpr std::array<std::string_view, 10> kRequiredMapLayers{
 }  // namespace
 
 struct Planner::Impl final {
+  hopper::HopperPlanner hopper_planner;
   legged::LeggedPlanner legged_planner;
   wheel::WheelPlanner wheel_planner;
 #ifdef LUNAR_HAS_LEGACY_V3
@@ -86,17 +88,20 @@ Planner& Planner::operator=(Planner&&) noexcept = default;
 
 PlannerOutput Planner::Plan(const PlannerInput& input) noexcept {
   try {
-    if (input.stop_token.stop_requested()) {
-      return Failure(
-          PlanningOutcome::kCanceled,
-          ExecutionDirective::kHoldPosition,
-          "REQUEST_CANCELED");
-    }
     if (impl_ == nullptr) {
       return Failure(
           PlanningOutcome::kInvalidRequest,
           ExecutionDirective::kNoSafeReference,
           "PLANNER_MOVED_FROM");
+    }
+    if (CapabilityPlatform(input.capability) == PlatformType::kHopper) {
+      return impl_->hopper_planner.Plan(input);
+    }
+    if (input.stop_token.stop_requested()) {
+      return Failure(
+          PlanningOutcome::kCanceled,
+          ExecutionDirective::kHoldPosition,
+          "REQUEST_CANCELED");
     }
     if (std::string reason = MissingRequiredLayer(input.world); !reason.empty()) {
       return Failure(
@@ -110,14 +115,10 @@ PlannerOutput Planner::Plan(const PlannerInput& input) noexcept {
     if (CapabilityPlatform(input.capability) == PlatformType::kLegged) {
       return impl_->legged_planner.Plan(input);
     }
-#ifdef LUNAR_HAS_LEGACY_V3
-    return impl_->adapter.Plan(input);
-#else
     return Failure(
         PlanningOutcome::kInvalidRequest,
         ExecutionDirective::kNoSafeReference,
         "PLANNER_BACKEND_NOT_CONFIGURED");
-#endif
   } catch (const std::bad_alloc&) {
     return Failure(
         PlanningOutcome::kResourceExhausted,

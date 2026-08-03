@@ -22,6 +22,12 @@ endfunction()
 
 add_library(${PROJECT_NAME} SHARED
   src/planner.cpp
+  src/hopper/ballistic_kinematics.cpp
+  src/hopper/commitment_state_machine.cpp
+  src/hopper/flight_tube_certifier.cpp
+  src/hopper/hop_certifier.cpp
+  src/hopper/hopper_planner.cpp
+  src/hopper/landing_region.cpp
   src/legged/legged_lattice.cpp
   src/legged/legged_planner.cpp
   src/legged/legged_spline_optimizer.cpp
@@ -170,6 +176,30 @@ if(BUILD_TESTING)
   target_link_libraries(
     lunar_planner_core_legged_fault_matrix_test ${PROJECT_NAME})
   lunar_enable_sanitizers(lunar_planner_core_legged_fault_matrix_test)
+
+  ament_add_gtest(lunar_planner_core_hopper_planner_test
+    test/hopper_planner_test.cpp)
+  target_include_directories(lunar_planner_core_hopper_planner_test PRIVATE
+    src test)
+  target_link_libraries(
+    lunar_planner_core_hopper_planner_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_hopper_planner_test)
+
+  ament_add_gtest(lunar_planner_core_hopper_commitment_test
+    test/hopper_commitment_test.cpp)
+  target_include_directories(lunar_planner_core_hopper_commitment_test PRIVATE
+    src test)
+  target_link_libraries(
+    lunar_planner_core_hopper_commitment_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_hopper_commitment_test)
+
+  ament_add_gtest(lunar_planner_core_hopper_fault_matrix_test
+    test/hopper_fault_matrix_test.cpp)
+  target_include_directories(lunar_planner_core_hopper_fault_matrix_test PRIVATE
+    src test)
+  target_link_libraries(
+    lunar_planner_core_hopper_fault_matrix_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_hopper_fault_matrix_test)
 
   if(LUNAR_BUILD_LEGACY_V3)
     ament_add_gtest(lunar_planner_core_legacy_adapter_test
