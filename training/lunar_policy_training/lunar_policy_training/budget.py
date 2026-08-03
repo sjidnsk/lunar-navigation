@@ -1,0 +1,288 @@
+"""One cumulative GPU-time budget shared by every training phase."""
+
+from __future__ import annotations
+
+import math
+import json
+import os
+import tempfile
+from collections.abc import Callable, Iterable
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from .config import ResolvedTrainingConfig
+
+
+TOTAL_GPU_BUDGET_SECONDS = 86400.0
+
+
+class BudgetError(ValueError):
+    """GPU budget state is malformed or used out of order."""
+
+
+class BudgetExceededError(BudgetError):
+    """A requested GPU interval exceeds the remaining cumulative budget."""
+
+
+class CalibrationError(BudgetError):
+    """Runtime calibration could not produce a safe frozen selection."""
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationMeasurement:
+    workers: int
+    micro_batch: int
+    throughput_samples_per_second: float
+    peak_gpu_memory_fraction: float
+    planner_timeouts: int
+    oom: bool
+    gpu_seconds: float
+
+    def __post_init__(self) -> None:
+        if type(self.workers) is not int or self.workers <= 0:
+            raise CalibrationError("calibration workers must be positive")
+        if type(self.micro_batch) is not int or self.micro_batch <= 0:
+            raise CalibrationError("calibration micro-batch must be positive")
+        if (
+            not isinstance(self.throughput_samples_per_second, (int, float))
+            or isinstance(self.throughput_samples_per_second, bool)
+            or not math.isfinite(float(self.throughput_samples_per_second))
+            or self.throughput_samples_per_second < 0.0
+        ):
+            raise CalibrationError("calibration throughput must be finite")
+        if (
+            not isinstance(self.peak_gpu_memory_fraction, (int, float))
+            or isinstance(self.peak_gpu_memory_fraction, bool)
+            or not math.isfinite(float(self.peak_gpu_memory_fraction))
+            or not 0.0 <= self.peak_gpu_memory_fraction <= 1.0
+        ):
+            raise CalibrationError("calibration memory fraction is invalid")
+        if type(self.planner_timeouts) is not int or self.planner_timeouts < 0:
+            raise CalibrationError("planner timeout count is invalid")
+        if type(self.oom) is not bool:
+            raise CalibrationError("calibration OOM flag must be boolean")
+        _finite_nonnegative(self.gpu_seconds, "calibration GPU seconds")
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationResult:
+    selected_workers: int
+    selected_micro_batch: int
+    compared_workers: tuple[int, ...]
+    measurements: tuple[CalibrationMeasurement, ...]
+
+
+@dataclass(slots=True)
+class TrainingBudget:
+    total_gpu_seconds: float = TOTAL_GPU_BUDGET_SECONDS
+    consumed_gpu_seconds: float = 0.0
+    _active_since: float | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.total_gpu_seconds = _finite_nonnegative(
+            self.total_gpu_seconds, "total GPU seconds"
+        )
+        self.consumed_gpu_seconds = _finite_nonnegative(
+            self.consumed_gpu_seconds, "consumed GPU seconds"
+        )
+        if self.total_gpu_seconds != TOTAL_GPU_BUDGET_SECONDS:
+            raise BudgetError("total GPU budget must remain 86400 seconds")
+        if self.consumed_gpu_seconds > self.total_gpu_seconds:
+            raise BudgetExceededError("consumed GPU seconds exceed total budget")
+
+    @property
+    def remaining_gpu_seconds(self) -> float:
+        return self.total_gpu_seconds - self.consumed_gpu_seconds
+
+    def consume(self, gpu_seconds: float) -> None:
+        interval = _finite_nonnegative(gpu_seconds, "GPU interval")
+        if interval > self.remaining_gpu_seconds:
+            raise BudgetExceededError(
+                "GPU interval exceeds remaining cumulative budget"
+            )
+        self.consumed_gpu_seconds += interval
+
+    def begin_gpu_interval(self, *, monotonic_seconds: float) -> None:
+        timestamp = _finite_nonnegative(monotonic_seconds, "GPU interval start")
+        if self._active_since is not None:
+            raise BudgetError("GPU interval is already active")
+        self._active_since = timestamp
+
+    def end_gpu_interval(self, *, monotonic_seconds: float) -> None:
+        timestamp = _finite_nonnegative(monotonic_seconds, "GPU interval end")
+        if self._active_since is None:
+            raise BudgetError("GPU interval is not active")
+        if timestamp < self._active_since:
+            raise BudgetError("GPU interval end precedes its start")
+        interval = timestamp - self._active_since
+        self._active_since = None
+        self.consume(interval)
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint: object) -> "TrainingBudget":
+        consumed = getattr(checkpoint, "consumed_gpu_seconds", None)
+        frozen_config = getattr(checkpoint, "frozen_config", None)
+        if not isinstance(frozen_config, dict):
+            raise BudgetError("checkpoint frozen config is missing")
+        total = frozen_config.get("total_gpu_budget_seconds")
+        return cls(total_gpu_seconds=total, consumed_gpu_seconds=consumed)
+
+
+def calibrate_runtime(
+    *,
+    config: "ResolvedTrainingConfig",
+    workload: Callable[[int, int], CalibrationMeasurement],
+    budget: TrainingBudget,
+    manifest_path: str | Path,
+    micro_batch_candidates: Iterable[int] = (1, 2, 4, 8, 16, 32),
+) -> CalibrationResult:
+    """Measure both worker candidates and freeze the safe fastest selection."""
+    from .config import ResolvedTrainingConfig
+
+    if not isinstance(config, ResolvedTrainingConfig):
+        raise CalibrationError("calibration requires resolved training config")
+    if not isinstance(budget, TrainingBudget):
+        raise CalibrationError("calibration requires the run TrainingBudget")
+    if not callable(workload):
+        raise CalibrationError("calibration workload must be callable")
+    target = Path(manifest_path)
+    if not target.is_absolute():
+        raise CalibrationError("run manifest path must be absolute")
+    if target.exists():
+        raise CalibrationError("runtime calibration manifest is already frozen")
+    if not target.parent.is_dir():
+        raise CalibrationError("run manifest parent directory is missing")
+    micro_batches = tuple(micro_batch_candidates)
+    if (
+        not micro_batches
+        or any(type(value) is not int or value <= 0 for value in micro_batches)
+        or any(
+            right <= left
+            for left, right in zip(micro_batches, micro_batches[1:])
+        )
+    ):
+        raise CalibrationError(
+            "micro-batch candidates must be strictly increasing positive integers"
+        )
+
+    measurements: list[CalibrationMeasurement] = []
+    best: dict[int, CalibrationMeasurement] = {}
+    worker_safe: dict[int, bool] = {}
+    for workers in config.parallel.worker_candidates:
+        safe = True
+        for micro_batch in micro_batches:
+            measurement = workload(workers, micro_batch)
+            if not isinstance(measurement, CalibrationMeasurement):
+                raise CalibrationError(
+                    "calibration workload must return CalibrationMeasurement"
+                )
+            if (
+                measurement.workers != workers
+                or measurement.micro_batch != micro_batch
+            ):
+                raise CalibrationError("calibration workload mislabeled a measurement")
+            budget.consume(measurement.gpu_seconds)
+            measurements.append(measurement)
+            if measurement.oom or measurement.planner_timeouts:
+                safe = False
+                break
+            if (
+                measurement.peak_gpu_memory_fraction
+                > config.parallel.gpu_memory_fraction_max
+            ):
+                break
+            best[workers] = measurement
+        worker_safe[workers] = safe and workers in best
+
+    compared = tuple(config.parallel.worker_candidates)
+    if compared != (18, 24):
+        raise CalibrationError("runtime calibration must compare 18 and 24 workers")
+    if not worker_safe.get(18, False):
+        raise CalibrationError("18-worker control did not produce a safe result")
+    selected_workers = 18
+    if (
+        worker_safe.get(24, False)
+        and best[24].throughput_samples_per_second
+        >= best[18].throughput_samples_per_second
+    ):
+        selected_workers = 24
+    result = CalibrationResult(
+        selected_workers=selected_workers,
+        selected_micro_batch=best[selected_workers].micro_batch,
+        compared_workers=compared,
+        measurements=tuple(measurements),
+    )
+    payload = {
+        "schema_version": "lunar-training-run/v1",
+        "frozen_config": config.as_frozen_dict(),
+        "runtime_calibration": {
+            "selected_workers": result.selected_workers,
+            "selected_micro_batch": result.selected_micro_batch,
+            "compared_workers": list(result.compared_workers),
+            "measurements": [asdict(value) for value in result.measurements],
+        },
+        "consumed_gpu_seconds": budget.consumed_gpu_seconds,
+    }
+    _write_json_atomic_new(target, payload)
+    return result
+
+
+def _write_json_atomic_new(path: Path, payload: dict[str, object]) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(
+                payload,
+                stream,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        if path.exists():
+            raise CalibrationError(
+                "runtime calibration manifest is already frozen"
+            )
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception as error:
+        if temporary.exists():
+            temporary.unlink()
+        if isinstance(error, CalibrationError):
+            raise
+        raise CalibrationError("runtime calibration manifest write failed") from error
+
+
+def _finite_nonnegative(value: object, name: str) -> float:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or float(value) < 0.0
+    ):
+        raise BudgetError(f"{name} must be finite and non-negative")
+    return float(value)
+
+
+__all__ = [
+    "TOTAL_GPU_BUDGET_SECONDS",
+    "BudgetError",
+    "BudgetExceededError",
+    "CalibrationError",
+    "CalibrationMeasurement",
+    "CalibrationResult",
+    "TrainingBudget",
+    "calibrate_runtime",
+]

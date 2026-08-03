@@ -1,0 +1,14 @@
+parallel:
+  worker_candidates: [18, 24]
+  preferred_workers: 24
+  joint_workers:
+    WHEELED: 8
+    LEGGED: 8
+    HOPPER: 8
+  nested_compute_threads: 1
+  gpu_memory_fraction_max: 0.90
+checkpoint_interval_seconds: 1800
+candidate_checkpoint_interval_seconds: 3600
+total_gpu_budget_seconds: 86400
+formal_training_seeds: [4080]
+proxy: true
