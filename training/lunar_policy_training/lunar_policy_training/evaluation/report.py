@@ -18,11 +18,7 @@ from ..eval.baselines import select_baseline_action
 from ..policy.cross_attention import CrossAttentionPolicy, sample_action
 from ..policy.observation import PolicyBatch
 from ..proxy_scenario import ProxyEnvironmentFactory, proxy_observation
-from ..reward import (
-    InvalidTransition,
-    compute_transition_reward,
-    reward_weights_sha256,
-)
+from ..reward import compute_transition_reward, reward_weights_sha256
 
 
 EVALUATION_SCHEMA_VERSION = "lunar-policy-release-evaluation/v1"
@@ -521,10 +517,7 @@ def _select_actions(
 
 
 def _evaluation_reward(transition) -> float:
-    try:
-        return compute_transition_reward(transition)
-    except InvalidTransition:
-        return 0.0
+    return compute_transition_reward(transition)
 
 
 def _finite_output_rows(

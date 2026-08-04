@@ -120,3 +120,27 @@ git diff --check：
 ```
 
 上述仍是 `proxy: true` 的 Task 4 证据，不替代真实平台或 AGX 验收；未启动 Task 5 正式 24 小时训练。
+
+## Fix round 2（2026-08-04）
+
+本轮只修复评估 reward 边界吞掉 `InvalidTransition` 的 Important finding，原 fix round 1 的 reference、场景日程和事件聚合结构均未改动。
+
+### RED / GREEN
+
+- RED：对 `INVALID_REQUEST`、`STALE_INPUT`、`NUMERICAL_FAILURE` 三种 transition 调用评估 reward 边界，得到 `3 failed`，均为 `DID NOT RAISE InvalidTransition`；原实现错误返回 `0.0`。
+- GREEN：删除 `_evaluation_reward()` 中的 catch-and-zero，仅调用共享 `compute_transition_reward()`。上述三种非法 transition 现在传播 `InvalidTransition`，worker 通过既有 error protocol 令 `ParallelEnvPool`/整次评估 fail closed，不能生成可能通过 gate 的报告。
+
+### Fix round 2 验证
+
+```text
+非法 transition 聚焦测试：
+3 passed in 1.41s
+
+evaluation / release gate / reward / parallel pool / v3 environment CPU 回归：
+50 passed, 1 deselected in 14.08s
+
+CUDA evaluation smoke：
+1 passed, 8 deselected in 6.27s
+```
+
+本轮未启动正式训练，也未增加新的报告分类或改变 gate 阈值。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+from lunar_planner_training_bridge import ExecutionDirective, PlanningOutcome
 
 from lunar_policy_training.curriculum import CurriculumSchedule
 
@@ -12,11 +13,15 @@ from lunar_policy_training.evaluation.report import (
     PlatformMetrics,
     _ScenarioEvidence,
     _aggregate_platform_metrics,
+    _evaluation_reward,
     report_sha256,
     select_best_candidate,
 )
 from lunar_policy_training.evaluation.report import evaluate_proxy_policy
 from lunar_policy_training.policy.cross_attention import CrossAttentionPolicy
+from lunar_policy_training.environment.macro_step import PlannerTransition
+from lunar_policy_training.proxy_scenario import proxy_observation
+from lunar_policy_training.reward import InvalidTransition
 
 
 def _metrics(coverage: float, *, failures: float = 0.0, seconds: float = 5.0):
@@ -114,6 +119,35 @@ def test_platform_metrics_aggregate_observed_execution_events() -> None:
     assert metrics.deterministic_repeat_match_rate == 0.25
     assert metrics.planner_failure_rate == 0.5
     assert metrics.completion_time_s == 2.5
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    (
+        PlanningOutcome.INVALID_REQUEST,
+        PlanningOutcome.STALE_INPUT,
+        PlanningOutcome.NUMERICAL_FAILURE,
+    ),
+)
+def test_evaluation_reward_fails_closed_on_invalid_transition(
+    outcome: PlanningOutcome,
+) -> None:
+    """Would fail if evaluation converted an invalid transition to reward zero."""
+    transition = PlannerTransition(
+        next_observation=proxy_observation(0, "WHEELED", step=0),
+        coverage_delta=0.0,
+        goal_progress=0.0,
+        normalized_plan_cost=0.0,
+        normalized_elapsed_time=0.0,
+        repeated_visit=False,
+        planning_outcome=outcome,
+        execution_directive=ExecutionDirective.NO_SAFE_REFERENCE,
+        reason_code=outcome.name,
+        terminated=False,
+    )
+
+    with pytest.raises(InvalidTransition):
+        _evaluation_reward(transition)
 
 
 def test_best_checkpoint_maximizes_minimum_platform_coverage() -> None:
