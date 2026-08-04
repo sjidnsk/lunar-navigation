@@ -14,6 +14,8 @@ from lunar_model_contract import ObservationContractV2, validate_observation_inp
 from lunar_policy_training.environment.candidate_builder import CandidateBatch  # noqa: E402
 from lunar_policy_training.environment.observation_builder import (  # noqa: E402
     MissionRaster,
+    LocalObservation,
+    ElevationReference,
     ObservationBuilderV2,
     ObservedWorld,
     PlatformProjection,
@@ -21,25 +23,25 @@ from lunar_policy_training.environment.observation_builder import (  # noqa: E40
     TransformUnavailable,
     resolve_map_pose,
 )
-from lunar_policy_training.polar_data.raster import GLOBAL_GEOMETRY, LOCAL_GEOMETRY, WorldTruth  # noqa: E402
+from lunar_policy_training.polar_data.raster import GLOBAL_GEOMETRY, LOCAL_GEOMETRY, MapCanvas, WorldTruth  # noqa: E402
+
+
+def _canvas() -> MapCanvas:
+    return MapCanvas.from_roi_bounds("a" * 64, (500.0, 500.0, 524.0, 524.0))
 
 
 def _observed_world() -> ObservedWorld:
     elevation = np.full((256, 256), 9.0, dtype=np.float32)
     observed = np.zeros((256, 256), dtype=bool)
     observed[100:156, 100:156] = True
-    return ObservedWorld(
-        elevation_m=elevation,
-        observed_mask=observed,
-        physical_obstacle_ratio=np.full((256, 256), 0.25, dtype=np.float32),
-        local_elevation_m=np.full((32, 32), 11.0, dtype=np.float32),
-        local_observed_mask=np.ones((32, 32), dtype=bool),
-        local_physical_obstacle_ratio=np.full((32, 32), 0.5, dtype=np.float32),
-    )
+    canvas = _canvas()
+    local = LocalObservation(canvas.identity, (508.0, 508.0, 516.0, 516.0), np.full((32, 32), 11.0, dtype=np.float32), np.ones((32, 32), dtype=bool), np.full((32, 32), 0.5, dtype=np.float32))
+    return ObservedWorld(canvas, elevation, observed, np.full((256, 256), 0.25, dtype=np.float32), local)
 
 
 def _test_only_projection() -> PlatformProjection:
     return PlatformProjection(
+        _canvas(),
         traversable_ratio=np.full((256, 256), 0.75, dtype=np.float32),
         local_traversable_ratio=np.full((32, 32), 0.6, dtype=np.float32),
         clearance_margin_norm=np.full((256, 256), 0.4, dtype=np.float32),
@@ -49,6 +51,7 @@ def _test_only_projection() -> PlatformProjection:
 
 def test_builder_emits_complete_contract_in_contract_field_order_without_truth_leakage() -> None:
     mission = MissionRaster(
+        _canvas(),
         priority=np.ones((256, 256), dtype=np.float32),
         roi_ratio=np.ones((256, 256), dtype=np.float32),
         remaining_decision_budget_ratio=0.5,
@@ -72,12 +75,15 @@ def test_builder_emits_complete_contract_in_contract_field_order_without_truth_l
 def test_world_rejects_nodata_marked_observed_and_projection_must_be_narrow_proxy() -> None:
     with pytest.raises(ValueError, match="NoData"):
         ObservedWorld(
+            _canvas(),
             elevation_m=np.full((256, 256), np.nan, dtype=np.float32),
             observed_mask=np.ones((256, 256), dtype=bool),
             physical_obstacle_ratio=np.zeros((256, 256), dtype=np.float32),
+            local=LocalObservation(_canvas().identity, (508, 508, 516, 516), np.zeros((32, 32), np.float32), np.ones((32, 32), bool), np.zeros((32, 32), np.float32)),
         )
     with pytest.raises(ValueError, match="test_only/proxy"):
         PlatformProjection(
+            _canvas(),
             traversable_ratio=np.ones((256, 256), dtype=np.float32),
             local_traversable_ratio=np.ones((32, 32), dtype=np.float32),
             clearance_margin_norm=np.ones((256, 256), dtype=np.float32),
@@ -99,21 +105,41 @@ def test_builder_rejects_full_dem_truth_to_keep_network_input_observed_only() ->
     truth = WorldTruth(window_sha256="a" * 64, elevation_m=np.zeros((256, 256), dtype=np.float32))
     with pytest.raises(ValueError, match="ObservedWorld"):
         ObservationBuilderV2().build(
-            truth, _mission := MissionRaster(np.ones((256, 256), dtype=np.float32), np.ones((256, 256), dtype=np.float32), 1.0),
+            truth, _mission := MissionRaster(_canvas(), np.ones((256, 256), dtype=np.float32), np.ones((256, 256), dtype=np.float32), 1.0),
             Pose2(512.0, 512.0), _test_only_projection(), CandidateBatch.empty(), "WHEELED",
         )
 
 
 def test_builder_requires_true_local_observations_and_projection_normalizes_clearance_at_boundary() -> None:
-    world = ObservedWorld(
-        elevation_m=np.zeros((256, 256), dtype=np.float32), observed_mask=np.ones((256, 256), dtype=bool),
-        physical_obstacle_ratio=np.zeros((256, 256), dtype=np.float32),
-    )
+    canvas = _canvas()
+    local = LocalObservation(canvas.identity, (500.0, 500.0, 508.0, 508.0), np.zeros((32, 32), dtype=np.float32), np.ones((32, 32), dtype=bool), np.zeros((32, 32), dtype=np.float32))
+    world = ObservedWorld(canvas, np.zeros((256, 256), dtype=np.float32), np.ones((256, 256), dtype=bool), np.zeros((256, 256), dtype=np.float32), local)
     with pytest.raises(ValueError, match="local"):
-        ObservationBuilderV2().build(world, MissionRaster(np.ones((256, 256), dtype=np.float32), np.ones((256, 256), dtype=np.float32), 1.0), Pose2(512.0, 512.0), _test_only_projection(), CandidateBatch.empty(), "WHEELED")
+        ObservationBuilderV2().build(world, MissionRaster(canvas, np.ones((256, 256), dtype=np.float32), np.ones((256, 256), dtype=np.float32), 1.0), Pose2(512.0, 512.0), _test_only_projection(), CandidateBatch.empty(), "WHEELED")
     with pytest.raises(ValueError, match="clearance"):
         PlatformProjection(
+            _canvas(),
             traversable_ratio=np.ones((256, 256), dtype=np.float32),
             local_traversable_ratio=np.ones((32, 32), dtype=np.float32),
             clearance_margin_norm=np.full((256, 256), 1.1, dtype=np.float32), source="test_only/proxy",
         )
+
+
+def test_builder_requires_canvas_identity_local_center_and_relative_elevation() -> None:
+    canvas = MapCanvas.from_roi_bounds("c" * 64, (1_000.0, 2_000.0, 1_020.0, 2_020.0))
+    pose = Pose2(1_012.0, 2_008.0, elevation_m=10.0)
+    local = LocalObservation(
+        canvas_id=canvas.identity, bounds_m=(1_008.0, 2_004.0, 1_016.0, 2_012.0),
+        elevation_m=np.full((32, 32), 12.0, dtype=np.float32), observed_mask=np.ones((32, 32), dtype=bool),
+        physical_obstacle_ratio=np.zeros((32, 32), dtype=np.float32),
+    )
+    world = ObservedWorld(canvas, np.full((256, 256), 15.0, dtype=np.float32), np.ones((256, 256), dtype=bool), np.zeros((256, 256), dtype=np.float32), local)
+    mission = MissionRaster(canvas, np.ones((256, 256), dtype=np.float32), np.ones((256, 256), dtype=np.float32), 1.0)
+    projection = PlatformProjection(canvas, np.ones((256, 256), dtype=np.float32), np.ones((32, 32), dtype=np.float32), np.ones((256, 256), dtype=np.float32), "test_only/proxy")
+    observation = ObservationBuilderV2(ElevationReference(5.0)).build(world, mission, pose, projection, CandidateBatch.empty(), "WHEELED")
+    assert observation["prior_channels"][0, 0, 0, 0] == 10.0
+    assert observation["local_crop"][0, 0, 0, 0] == 2.0
+    assert observation["pose_features"][0, 0] == pytest.approx(514.0 / 1024.0)
+    bad_local = LocalObservation("other", local.bounds_m, local.elevation_m, local.observed_mask, local.physical_obstacle_ratio)
+    with pytest.raises(ValueError, match="canvas"):
+        ObservedWorld(canvas, world.elevation_m, world.observed_mask, world.physical_obstacle_ratio, bad_local)

@@ -5,6 +5,7 @@ import sys
 from hashlib import sha256
 
 import numpy as np
+import pytest
 from shapely.geometry import box
 
 
@@ -24,6 +25,11 @@ def test_scene_seed_binds_window_scenario_and_generator_version() -> None:
     assert baseline == sha256(f"{'a' * 64}:7:{GENERATOR_VERSION}".encode("utf-8")).hexdigest()
     assert baseline != scene_seed("b" * 64, 7)
     assert baseline != scene_seed("a" * 64, 8)
+
+
+def test_scene_seed_rejects_non_lowercase_window_sha() -> None:
+    with pytest.raises(ValueError, match="lowercase"):
+        scene_seed("A" * 64, 7)
 
 
 def test_hazard_generation_is_deterministic_and_craters_are_not_physical_obstacles() -> None:

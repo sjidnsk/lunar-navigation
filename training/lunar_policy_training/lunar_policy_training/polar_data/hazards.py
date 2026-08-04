@@ -34,6 +34,8 @@ class HazardScene:
 
 def scene_seed(window_sha256: str, scenario_seed: int, *, generator_version: str = GENERATOR_VERSION) -> str:
     """Return the required identity binding for a generated scene."""
+    if len(window_sha256) != 64 or any(character not in "0123456789abcdef" for character in window_sha256):
+        raise ValueError("window_sha256 must be exactly 64 lowercase hexadecimal characters")
     return sha256(f"{window_sha256}:{scenario_seed}:{generator_version}".encode("utf-8")).hexdigest()
 
 

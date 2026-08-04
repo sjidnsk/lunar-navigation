@@ -9,24 +9,38 @@ import numpy as np
 
 from lunar_model_contract import ObservationContractV2
 
-from ..polar_data.raster import GLOBAL_GEOMETRY
 from .observation_builder import MissionRaster, ObservedWorld, PlatformProjection, Pose2
 
 
 @dataclass(frozen=True)
-class CandidateBatch:
-    """Exactly 64 V2 frontier rows with boolean padding mask."""
+class SensorGeometry:
+    range_m: float
+    fov_rad: float
 
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.range_m) or self.range_m <= 0.0 or not 0.0 < self.fov_rad <= 2.0 * math.pi:
+            raise ValueError("sensor range/FOV are invalid")
+
+    @property
+    def anchor_spacing_m(self) -> float:
+        return max(4.0, self.range_m / 8.0)
+
+    @property
+    def standoff_m(self) -> float:
+        return max(4.0, self.range_m / 16.0)
+
+
+@dataclass(frozen=True)
+class CandidateBatch:
     features: np.ndarray
     mask: np.ndarray
 
     def __post_init__(self) -> None:
-        features = np.asarray(self.features, dtype=np.float32)
-        mask = np.asarray(self.mask, dtype=bool)
-        if features.shape != (64, len(ObservationContractV2.frontier_fields)) or mask.shape != (64,):
-            raise ValueError("candidate batch must use [64,12] and [64]")
-        if not np.isfinite(features).all():
-            raise ValueError("candidate features must be finite")
+        features, mask = np.asarray(self.features, dtype=np.float32), np.asarray(self.mask, dtype=bool)
+        if features.shape != (64, len(ObservationContractV2.frontier_fields)) or mask.shape != (64,) or not np.isfinite(features).all():
+            raise ValueError("candidate batch must use finite [64,12] and [64]")
+        if ((features < 0.0) | (features > 1.0)).any():
+            raise ValueError("candidate features must be in [0,1]")
         object.__setattr__(self, "features", features)
         object.__setattr__(self, "mask", mask)
 
@@ -36,156 +50,90 @@ class CandidateBatch:
 
     @classmethod
     def empty(cls) -> "CandidateBatch":
-        return cls(np.zeros((64, 12), dtype=np.float32), np.zeros((64,), dtype=bool))
+        return cls(np.zeros((64, 12), np.float32), np.zeros(64, bool))
 
 
-def _neighbors(row: int, column: int) -> tuple[tuple[int, int], ...]:
-    return tuple((row + dr, column + dc) for dr, dc in ((-1, 0), (0, -1), (0, 1), (1, 0)) if 0 <= row + dr < 256 and 0 <= column + dc < 256)
+def _neighbors(row: int, column: int, cells: int) -> tuple[tuple[int, int], ...]:
+    return tuple((row + dr, column + dc) for dr, dc in ((-1, 0), (0, -1), (0, 1), (1, 0)) if 0 <= row + dr < cells and 0 <= column + dc < cells)
 
 
-def _segments(boundary: np.ndarray) -> list[list[tuple[int, int]]]:
-    remaining = {(int(row), int(column)) for row, column in np.argwhere(boundary)}
-    result: list[list[tuple[int, int]]] = []
-    while remaining:
-        start = min(remaining)
-        remaining.remove(start)
-        queue, component = [start], []
-        while queue:
-            point = queue.pop()
-            component.append(point)
-            connected = sorted(set(_neighbors(*point)) & remaining)
-            for neighbor in connected:
-                remaining.remove(neighbor)
-                queue.append(neighbor)
-        result.append(sorted(component))
-    return result
-
-
-def _line_of_sight(observed: np.ndarray, start: tuple[int, int], end: tuple[int, int]) -> bool:
-    """Bresenham LOS using only observed cells, including endpoints."""
-    row0, column0 = start
-    row1, column1 = end
-    delta_column, delta_row = abs(column1 - column0), abs(row1 - row0)
-    step_column, step_row = (1 if column0 < column1 else -1), (1 if row0 < row1 else -1)
-    error = delta_column - delta_row
+def _ray_cells(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
+    row0, column0 = start; row1, column1 = end
+    dc, dr = abs(column1 - column0), abs(row1 - row0)
+    sc, sr = (1 if column0 < column1 else -1), (1 if row0 < row1 else -1)
+    error, result = dc - dr, []
     while True:
-        if not (0 <= row0 < 256 and 0 <= column0 < 256 and observed[row0, column0]):
-            return False
+        result.append((row0, column0))
         if (row0, column0) == (row1, column1):
-            return True
+            return result
         doubled = 2 * error
-        if doubled > -delta_row:
-            error -= delta_row
-            column0 += step_column
-        if doubled < delta_column:
-            error += delta_column
-            row0 += step_row
+        if doubled > -dr: error -= dr; column0 += sc
+        if doubled < dc: error += dc; row0 += sr
 
 
-@dataclass(frozen=True)
-class _Candidate:
-    feature: np.ndarray
-    point: tuple[int, int]
-    segment_index: int
+def _clear_observed(world: ObservedWorld, cells: list[tuple[int, int]], *, unknown_endpoint_allowed: bool = False) -> bool:
+    check = cells[:-1] if unknown_endpoint_allowed else cells
+    return bool(check) and all(world.observed_mask[row, column] and world.physical_obstacle_ratio[row, column] == 0.0 for row, column in check)
 
 
 class CandidateBuilderV2:
-    """Contour → anchors/standoff → observed LOS → gains → fixed V2 slots."""
+    def __init__(self, sensor: SensorGeometry = SensorGeometry(80.0, 2.0 * math.pi)) -> None:
+        self._sensor = sensor
 
     def build(self, world: ObservedWorld, mission: MissionRaster, pose_map: Pose2, projection: PlatformProjection) -> CandidateBatch:
-        if pose_map.frame_id != "map":
+        if pose_map.frame_id != "map" or world.canvas != mission.canvas or world.canvas != projection.canvas:
             return CandidateBatch.empty()
-        observed = world.observed_mask
-        roi = mission.roi_ratio > 0.0
+        canvas, cells, observed, roi = world.canvas, world.canvas.geometry.cells, world.observed_mask, mission.roi_ratio > 0.0
+        try:
+            robot = canvas.world_to_grid(pose_map.x_m, pose_map.y_m)
+        except ValueError:
+            return CandidateBatch.empty()
         boundary = np.zeros_like(observed)
         for row, column in np.argwhere(observed & roi):
-            # A frontier is a contour edge between observed ROI and unobserved ROI.
-            boundary[row, column] = any(roi[next_row, next_column] and not observed[next_row, next_column] for next_row, next_column in _neighbors(int(row), int(column)))
-        if not boundary.any():
-            return CandidateBatch.empty()
-        robot = (int(math.floor(pose_map.y_m / GLOBAL_GEOMETRY.resolution_m)), int(math.floor(pose_map.x_m / GLOBAL_GEOMETRY.resolution_m)))
-        components = _segments(boundary)
-        candidates: list[_Candidate] = []
-        total_priority = float((mission.priority * mission.roi_ratio).sum())
-        total_roi = float(mission.roi_ratio.sum())
-        for segment_index, segment in enumerate(components):
-            for row, column in segment:
-                # Standoff remains on the observed side of the contour.  Use the
-                # adjacent cell toward robot when it is observed; otherwise anchor.
-                direction_row = int(np.sign(robot[0] - row))
-                direction_column = int(np.sign(robot[1] - column))
-                standoff = (row + direction_row, column + direction_column)
-                if not (0 <= standoff[0] < 256 and 0 <= standoff[1] < 256 and observed[standoff]):
-                    standoff = (row, column)
-                if not _line_of_sight(observed, robot, standoff):
-                    continue
-                candidates.append(_Candidate(self._feature(standoff, robot, observed, roi, mission, projection, total_priority, total_roi), standoff, segment_index))
-        if not candidates:
-            return CandidateBatch.empty()
-        selected = self._segment_representatives(candidates)
-        selected = self._farthest_fill(selected, candidates)
-        selected.sort(key=self._stable_key)
-        selected = selected[:64]
-        features = np.zeros((64, 12), dtype=np.float32)
-        mask = np.zeros((64,), dtype=bool)
-        for index, candidate in enumerate(selected):
-            features[index] = candidate.feature
-            mask[index] = True
-        return CandidateBatch(features, mask)
+            boundary[row, column] = any(roi[next_row, next_column] and not observed[next_row, next_column] for next_row, next_column in _neighbors(int(row), int(column), cells))
+        spacing = max(1, math.ceil(self._sensor.anchor_spacing_m / canvas.geometry.resolution_m))
+        chosen: list[np.ndarray] = []
+        total_roi, total_priority = float(mission.roi_ratio.sum()), float((mission.priority * mission.roi_ratio).sum())
+        for index, (row, column) in enumerate(np.argwhere(boundary)):
+            if index % spacing:
+                continue
+            row, column = int(row), int(column)
+            step = max(1, round(self._sensor.standoff_m / canvas.geometry.resolution_m))
+            standoff = (row + int(np.sign(robot[0] - row)) * step, column + int(np.sign(robot[1] - column)) * step)
+            if not (0 <= standoff[0] < cells and 0 <= standoff[1] < cells and observed[standoff]): standoff = (row, column)
+            if projection.traversable_ratio[standoff] == 0.0 or not _clear_observed(world, _ray_cells(robot, standoff)):
+                continue
+            feature = self._feature(world, mission, projection, pose_map, robot, standoff, total_roi, total_priority)
+            if feature is not None:
+                chosen.append(feature)
+        chosen.sort(key=lambda item: tuple(item.tolist()))
+        output = np.zeros((64, 12), np.float32); mask = np.zeros(64, bool)
+        for index, feature in enumerate(chosen[:64]): output[index] = feature; mask[index] = True
+        return CandidateBatch(output, mask)
 
-    @staticmethod
-    def _feature(point: tuple[int, int], robot: tuple[int, int], observed: np.ndarray, roi: np.ndarray, mission: MissionRaster, projection: PlatformProjection, total_priority: float, total_roi: float) -> np.ndarray:
-        row, column = point
-        x, y = (column + 0.5) * 4.0, (row + 0.5) * 4.0
-        robot_x, robot_y = (robot[1] + 0.5) * 4.0, (robot[0] + 0.5) * 4.0
-        dx, dy = x - robot_x, y - robot_y
-        distance = math.hypot(dx, dy)
-        unobserved_neighbors = [(next_row - row, next_column - column) for next_row, next_column in _neighbors(row, column) if roi[next_row, next_column] and not observed[next_row, next_column]]
-        normal_row = float(sum(item[0] for item in unobserved_neighbors))
-        normal_column = float(sum(item[1] for item in unobserved_neighbors))
-        normal_norm = math.hypot(normal_row, normal_column)
-        radius = 6
-        nearby_roi = mission.roi_ratio[max(0, row - radius):row + radius + 1, max(0, column - radius):column + radius + 1]
-        nearby_observed = observed[max(0, row - radius):row + radius + 1, max(0, column - radius):column + radius + 1]
-        nearby_unobserved = nearby_roi * (~nearby_observed)
-        nearby_priority = mission.priority[max(0, row - radius):row + radius + 1, max(0, column - radius):column + radius + 1]
-        gain = float(nearby_unobserved.sum() / total_roi) if total_roi else 0.0
-        weighted_gain = float((nearby_priority * nearby_unobserved).sum() / total_priority) if total_priority else 0.0
-        remaining = float((mission.roi_ratio * ~observed).sum() / mission.roi_ratio.sum()) if mission.roi_ratio.any() else 0.0
-        return np.asarray((
-            (x - 512.0) / 512.0, (y - 512.0) / 512.0,
-            distance / (math.sqrt(2.0) * 512.0), dy / distance if distance else 0.0, dx / distance if distance else 1.0,
-            gain, weighted_gain,
-            normal_row / normal_norm if normal_norm else 0.0, normal_column / normal_norm if normal_norm else 1.0,
-            min(1.0, normal_norm / 2.0), projection.clearance_margin_norm[row, column], remaining,
-        ), dtype=np.float32)
-
-    @staticmethod
-    def _segment_representatives(candidates: list[_Candidate]) -> list[_Candidate]:
-        representatives: list[_Candidate] = []
-        for segment in sorted({candidate.segment_index for candidate in candidates}):
-            choices = [candidate for candidate in candidates if candidate.segment_index == segment]
-            representatives.append(min(choices, key=CandidateBuilderV2._stable_key))
-        return representatives[:64]
-
-    @staticmethod
-    def _farthest_fill(selected: list[_Candidate], candidates: list[_Candidate]) -> list[_Candidate]:
-        selected_ids = {(candidate.segment_index, candidate.point) for candidate in selected}
-        available = [candidate for candidate in candidates if (candidate.segment_index, candidate.point) not in selected_ids]
-        while available and len(selected) < 64:
-            def distance_to_selection(item: _Candidate) -> tuple[float, tuple[float, ...]]:
-                nearest = min(math.dist(item.point, chosen.point) for chosen in selected) if selected else float("inf")
-                return (-nearest, CandidateBuilderV2._stable_key(item))
-            choice_index = min(range(len(available)), key=lambda index: distance_to_selection(available[index]))
-            choice = available[choice_index]
-            selected.append(choice)
-            available.pop(choice_index)
-        return selected
-
-    @staticmethod
-    def _stable_key(candidate: _Candidate) -> tuple[float, ...]:
-        feature = candidate.feature
-        return (-float(feature[6]), -float(feature[5]), float(feature[2]), float(feature[1]), float(feature[0]))
+    def _feature(self, world: ObservedWorld, mission: MissionRaster, projection: PlatformProjection, pose: Pose2, robot: tuple[int, int], point: tuple[int, int], total_roi: float, total_priority: float) -> np.ndarray | None:
+        canvas = world.canvas; x, y = canvas.grid_center_world(*point)
+        dx, dy = x - pose.x_m, y - pose.y_m; distance = math.hypot(dx, dy)
+        bearing = math.atan2(dy, dx)
+        if distance > self._sensor.range_m or abs(math.atan2(math.sin(bearing - pose.yaw_rad), math.cos(bearing - pose.yaw_rad))) > self._sensor.fov_rad / 2.0:
+            return None
+        gain = priority_gain = 0.0
+        for row, column in np.argwhere((mission.roi_ratio > 0.0) & ~world.observed_mask):
+            tx, ty = canvas.grid_center_world(int(row), int(column))
+            if math.hypot(tx - x, ty - y) > self._sensor.range_m:
+                continue
+            target_bearing = math.atan2(ty - y, tx - x)
+            if abs(math.atan2(math.sin(target_bearing - bearing), math.cos(target_bearing - bearing))) > self._sensor.fov_rad / 2.0:
+                continue
+            if _clear_observed(world, _ray_cells(point, (int(row), int(column))), unknown_endpoint_allowed=True):
+                gain += float(mission.roi_ratio[row, column]); priority_gain += float(mission.priority[row, column] * mission.roi_ratio[row, column])
+        if gain == 0.0:
+            return None
+        normal = np.array([0.0, 0.0])
+        for neighbor in _neighbors(*point, canvas.geometry.cells):
+            if mission.roi_ratio[neighbor] > 0 and not world.observed_mask[neighbor]: normal += (neighbor[0] - point[0], neighbor[1] - point[1])
+        magnitude = float(np.linalg.norm(normal)); remaining = float((mission.roi_ratio * ~world.observed_mask).sum() / total_roi) if total_roi else 0.0
+        return np.asarray(((x - canvas.bounds_m[0]) / canvas.geometry.size_m, (canvas.bounds_m[3] - y) / canvas.geometry.size_m, min(1.0, distance / (math.sqrt(2.0) * canvas.geometry.size_m)), (math.sin(bearing) + 1.0) / 2.0, (math.cos(bearing) + 1.0) / 2.0, min(1.0, gain / total_roi) if total_roi else 0.0, min(1.0, priority_gain / total_priority) if total_priority else 0.0, (normal[0] / magnitude + 1.0) / 2.0 if magnitude else 0.5, (normal[1] / magnitude + 1.0) / 2.0 if magnitude else 0.5, min(1.0, magnitude / 2.0), projection.clearance_margin_norm[point], remaining), dtype=np.float32)
 
 
-__all__ = ["CandidateBatch", "CandidateBuilderV2"]
+__all__ = ["CandidateBatch", "CandidateBuilderV2", "SensorGeometry"]

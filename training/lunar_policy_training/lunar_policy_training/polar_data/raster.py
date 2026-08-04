@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 import math
+from pathlib import Path
 
 import numpy as np
+import rasterio
+from rasterio.enums import Resampling
+from rasterio.windows import from_bounds
 
 
 class RasterError(ValueError):
@@ -35,6 +40,88 @@ GLOBAL_GEOMETRY = GridGeometry(size_m=1024.0, resolution_m=4.0, cells=256)
 LOCAL_GEOMETRY = GridGeometry(size_m=8.0, resolution_m=0.25, cells=32)
 
 
+def _require_sha(value: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise RasterError("window_sha256 must be exactly 64 lowercase hexadecimal characters")
+
+
+@dataclass(frozen=True)
+class MapCanvas:
+    """The fixed map-axis canvas positioned around one mission ROI bbox."""
+
+    window_sha256: str
+    bounds_m: tuple[float, float, float, float]
+    geometry: GridGeometry = GLOBAL_GEOMETRY
+
+    def __post_init__(self) -> None:
+        _require_sha(self.window_sha256)
+        left, bottom, right, top = self.bounds_m
+        if not math.isclose(right - left, self.geometry.size_m) or not math.isclose(top - bottom, self.geometry.size_m):
+            raise RasterError("canvas bounds must match fixed geometry")
+
+    @classmethod
+    def from_roi_bounds(cls, window_sha256: str, roi_bounds_m: tuple[float, float, float, float]) -> "MapCanvas":
+        left, bottom, right, top = roi_bounds_m
+        if left >= right or bottom >= top:
+            raise RasterError("ROI bounds are invalid")
+        center_x, center_y = (left + right) / 2.0, (bottom + top) / 2.0
+        half = GLOBAL_GEOMETRY.size_m / 2.0
+        return cls(window_sha256, (center_x - half, center_y - half, center_x + half, center_y + half))
+
+    @property
+    def identity(self) -> str:
+        return sha256(repr((self.window_sha256, self.bounds_m, self.geometry)).encode("utf-8")).hexdigest()
+
+    def world_to_grid(self, x_m: float, y_m: float) -> tuple[int, int]:
+        left, bottom, right, top = self.bounds_m
+        if not (left <= x_m < right and bottom < y_m <= top):
+            raise RasterError("world point lies outside canvas")
+        return int(math.floor((top - y_m) / self.geometry.resolution_m)), int(math.floor((x_m - left) / self.geometry.resolution_m))
+
+    def grid_center_world(self, row: int, column: int) -> tuple[float, float]:
+        if not (0 <= row < self.geometry.cells and 0 <= column < self.geometry.cells):
+            raise RasterError("grid index lies outside canvas")
+        left, _, _, top = self.bounds_m
+        return left + (column + 0.5) * self.geometry.resolution_m, top - (row + 0.5) * self.geometry.resolution_m
+
+
+@dataclass(frozen=True)
+class LoadedPolarWindow:
+    """A source-bound global DEM view; padding and NoData are unobserved."""
+
+    canvas: MapCanvas
+    elevation_m: np.ndarray
+    observed_mask: np.ndarray
+    ratio: np.ndarray | None = None
+
+
+def _read(dataset: rasterio.io.DatasetReader, canvas: MapCanvas, resampling: Resampling, fill: float) -> np.ndarray:
+    left, bottom, right, top = canvas.bounds_m
+    return dataset.read(1, window=from_bounds(left, bottom, right, top, dataset.transform), out_shape=(canvas.geometry.cells, canvas.geometry.cells), boundless=True, fill_value=fill, resampling=resampling).astype(np.float32)
+
+
+def load_polar_window(elevation_path: str | Path, canvas: MapCanvas, *, valid_mask_path: str | Path | None = None, ratio_path: str | Path | None = None) -> LoadedPolarWindow:
+    """Read actual north-up source data into the absolute fixed canvas."""
+    with rasterio.open(elevation_path) as elevation_source:
+        if elevation_source.transform.b != 0.0 or elevation_source.transform.d != 0.0 or elevation_source.transform.e >= 0.0:
+            raise RasterError("source raster must use north-up transform")
+        elevation = _read(elevation_source, canvas, Resampling.bilinear, np.nan)
+        nodata = elevation_source.nodata
+    observed = np.isfinite(elevation)
+    if nodata is not None:
+        observed &= ~np.isclose(elevation, nodata)
+    if valid_mask_path is not None:
+        with rasterio.open(valid_mask_path) as mask_source:
+            observed &= _read(mask_source, canvas, Resampling.nearest, 0.0).astype(bool)
+    ratio = None
+    if ratio_path is not None:
+        with rasterio.open(ratio_path) as ratio_source:
+            ratio = _read(ratio_source, canvas, Resampling.average, 0.0)
+            if not np.isfinite(ratio).all() or ((ratio < 0.0) | (ratio > 1.0)).any():
+                raise RasterError("ratio source must produce finite [0,1] values")
+    return LoadedPolarWindow(canvas, np.where(observed, elevation, np.nan).astype(np.float32), observed, ratio)
+
+
 @dataclass(frozen=True)
 class WorldTruth:
     """Complete DEM truth retained by scene generation, never the network builder."""
@@ -46,8 +133,7 @@ class WorldTruth:
         elevation = np.asarray(self.elevation_m, dtype=np.float32)
         if elevation.shape != (GLOBAL_GEOMETRY.cells, GLOBAL_GEOMETRY.cells) or not np.isfinite(elevation).all():
             raise RasterError("WorldTruth elevation must be finite [256,256]")
-        if len(self.window_sha256) != 64:
-            raise RasterError("WorldTruth requires the split window SHA-256 identity")
+        _require_sha(self.window_sha256)
         object.__setattr__(self, "elevation_m", elevation)
 
 
@@ -138,8 +224,11 @@ __all__ = [
     "GLOBAL_GEOMETRY",
     "LOCAL_GEOMETRY",
     "GridGeometry",
+    "LoadedPolarWindow",
+    "MapCanvas",
     "RasterError",
     "WorldTruth",
+    "load_polar_window",
     "resample_average",
     "resample_bilinear",
     "resample_nearest",
