@@ -18,6 +18,7 @@ from lunar_policy_training.polar_data.hazards import (  # noqa: E402
     scene_seed,
 )
 from lunar_policy_training.polar_data.raster import GridGeometry  # noqa: E402
+from lunar_policy_training.polar_data.raster import MapCanvas  # noqa: E402
 
 
 def test_scene_seed_binds_window_scenario_and_generator_version() -> None:
@@ -34,8 +35,9 @@ def test_scene_seed_rejects_non_lowercase_window_sha() -> None:
 
 def test_hazard_generation_is_deterministic_and_craters_are_not_physical_obstacles() -> None:
     geometry = GridGeometry(size_m=8.0, resolution_m=1.0, cells=8)
-    left = generate_hazard_scene("f" * 64, 31, geometry=geometry, rock_count=2, crater_count=2)
-    right = generate_hazard_scene("f" * 64, 31, geometry=geometry, rock_count=2, crater_count=2)
+    canvas = MapCanvas("f" * 64, (0.0, 0.0, 8.0, 8.0), geometry)
+    left = generate_hazard_scene("f" * 64, 31, canvas=canvas, geometry=geometry, rock_count=2, crater_count=2)
+    right = generate_hazard_scene("f" * 64, 31, canvas=canvas, geometry=geometry, rock_count=2, crater_count=2)
 
     assert left.rock_footprints_wkb == right.rock_footprints_wkb
     assert left.no_go_polygons_wkb == right.no_go_polygons_wkb
@@ -50,3 +52,10 @@ def test_rock_union_counts_overlap_once_and_uses_polygon_cell_area() -> None:
     geometry = GridGeometry(size_m=2.0, resolution_m=1.0, cells=2)
     ratio = physical_obstacle_ratio((box(0.0, 0.0, 1.0, 1.0), box(0.5, 0.0, 1.5, 1.0)), geometry)
     np.testing.assert_allclose(ratio, [[1.0, 0.5], [0.0, 0.0]])
+
+
+def test_hazard_generation_requires_matching_absolute_canvas() -> None:
+    with pytest.raises(TypeError, match="canvas"):
+        generate_hazard_scene("e" * 64, 1, rock_count=0, crater_count=0)
+    canvas = MapCanvas("e" * 64, (1_000.0, 2_000.0, 2_024.0, 3_024.0))
+    assert generate_hazard_scene("e" * 64, 1, canvas=canvas, rock_count=0, crater_count=1).canvas is canvas

@@ -62,7 +62,7 @@ def physical_obstacle_ratio(footprints: tuple[object, ...], geometry: GridGeomet
     return result
 
 
-def generate_hazard_scene(window_sha256: str, scenario_seed: int, *, canvas: MapCanvas | None = None, geometry: GridGeometry = GLOBAL_GEOMETRY, rock_count: int = 32, crater_count: int = 8, no_go_count: int | None = None) -> HazardScene:
+def generate_hazard_scene(window_sha256: str, scenario_seed: int, *, canvas: MapCanvas, geometry: GridGeometry = GLOBAL_GEOMETRY, rock_count: int = 32, crater_count: int = 8, no_go_count: int | None = None) -> HazardScene:
     """Generate independent rock, crater-height and no-go polygon streams.
 
     Only rock footprints are physical obstacles.  Crater geometry contributes
@@ -74,7 +74,6 @@ def generate_hazard_scene(window_sha256: str, scenario_seed: int, *, canvas: Map
     if no_go_count is None:
         no_go_count = crater_count
     seed = scene_seed(window_sha256, scenario_seed)
-    canvas = canvas or MapCanvas(window_sha256, (-geometry.size_m / 2.0, -geometry.size_m / 2.0, geometry.size_m / 2.0, geometry.size_m / 2.0), geometry)
     if canvas.window_sha256 != window_sha256 or canvas.geometry != geometry:
         raise ValueError("hazard canvas identity/geometry mismatch")
     left, bottom, _, top = canvas.bounds_m
@@ -87,8 +86,8 @@ def generate_hazard_scene(window_sha256: str, scenario_seed: int, *, canvas: Map
     craters = []
     delta = np.zeros((geometry.cells, geometry.cells), dtype=np.float32)
     yy, xx = np.meshgrid(
-        (np.arange(geometry.cells, dtype=np.float32) + 0.5) * geometry.resolution_m,
-        (np.arange(geometry.cells, dtype=np.float32) + 0.5) * geometry.resolution_m,
+        canvas.bounds_m[3] - (np.arange(geometry.cells, dtype=np.float32) + 0.5) * geometry.resolution_m,
+        canvas.bounds_m[0] + (np.arange(geometry.cells, dtype=np.float32) + 0.5) * geometry.resolution_m,
         indexing="ij",
     )
     for _ in range(crater_count):
@@ -98,7 +97,7 @@ def generate_hazard_scene(window_sha256: str, scenario_seed: int, *, canvas: Map
         radius = float(crater_rng.uniform(min(2.0, maximum_radius), maximum_radius))
         x, y = crater_rng.uniform(radius, geometry.size_m - radius, size=2)
         depth = float(crater_rng.uniform(0.05, 1.0))
-        distance = np.hypot(xx - x, yy - y)
+        distance = np.hypot(xx - (left + x), yy - (bottom + y))
         delta -= (depth * np.clip(1.0 - distance / radius, 0.0, 1.0)).astype(np.float32)
         craters.append(Point(left + float(x), bottom + float(y)).buffer(radius, quad_segs=12))
     no_go_polygons = []
