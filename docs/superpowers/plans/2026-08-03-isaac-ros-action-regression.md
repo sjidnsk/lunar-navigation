@@ -1387,7 +1387,7 @@ Do not commit snapshots, build/install/log directories, candidate reports, token
 - Modify: external `scripts/preflight.py`
 - Modify: external `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/scenario_qualifier.py`
 - Test: external `test/test_cli_contract.py`
-- Test: external `ros2_ws/src/lunar_isaac_validation/test/{test_planner_semantics.py,test_scenario_qualifier.py}`
+- Test: external `ros2_ws/src/lunar_isaac_validation/test/{test_planner_semantics.py,test_scenario_qualifier.py,test_bridge_node.py}`
 
 **Interfaces:**
 - Consumes: `SnapshotBundle`, proxy capabilities, continuous platform planning pose, and the approved design commit.
@@ -1556,7 +1556,7 @@ Expected: FAIL on the v1 schema, missing evidence, `0.50` hopper-positive tolera
 
 Set `SCENARIO_LOCK_SCHEMA="lunar-scenario-lock/v2"`, `LEGACY_SCENARIO_LOCK_SCHEMA="lunar-scenario-lock/v1"`, `QUALIFICATION_EVIDENCE_SCHEMA="lunar-scenario-qualification-evidence/v2"`, default goal tolerance `0.50`, and hopper-positive tolerance `0.75`.
 
-For wheel and legged cases, call `project_trajectory_start` and store its three exact evidence fields. V2 parsing must reject missing, nonfinite, or malformed projection evidence. Default lock loading accepts only v2. The rebaseline writer alone may validate and archive a structurally valid v1 lock before replacing it with a freshly qualified v2 lock; no normal run path accepts v1.
+For wheel and legged cases, call `project_trajectory_start` and store its three exact evidence fields. V2 parsing must reject missing, nonfinite, or malformed projection evidence. Default lock loading accepts only v2. The rebaseline writer alone may validate and archive a structurally valid v1 lock before replacing it with a freshly qualified v2 lock; no normal run path accepts v1. Update the bridge-node test's hand-authored v2 lock fixture with literal, hand-derived projection evidence; do not call the production projection helper to construct expected test data.
 
 Replace the global `_rectangle_for_cell` decision with a goal-clipped mask. Select the safe seed by `(distance_to_goal,y,x)`, then repeatedly try `minimum_x`, `maximum_x`, `minimum_y`, and `maximum_y` expansions in that order. Store `landing_goal_tolerance_m`, `landing_candidate_cell_count`, `landing_seed_cell_xy`, the final bounds, and final area. A candidate qualifies only when the clipped area and all existing dynamics checks pass.
 
