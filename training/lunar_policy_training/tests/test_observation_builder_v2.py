@@ -23,11 +23,16 @@ from lunar_policy_training.environment.observation_builder import (  # noqa: E40
     TransformUnavailable,
     resolve_map_pose,
 )
+from lunar_policy_training.polar_data.hazards import CanvasRatioLayer  # noqa: E402
 from lunar_policy_training.polar_data.raster import GLOBAL_GEOMETRY, LOCAL_GEOMETRY, MapCanvas, WorldTruth  # noqa: E402
 
 
 def _canvas() -> MapCanvas:
     return MapCanvas.from_roi_bounds("a" * 64, (500.0, 500.0, 524.0, 524.0))
+
+
+def _obstacle_layer(canvas: MapCanvas, value: float = 0.0) -> CanvasRatioLayer:
+    return CanvasRatioLayer(canvas, np.full((256, 256), value, dtype=np.float32))
 
 
 def _observed_world() -> ObservedWorld:
@@ -36,7 +41,7 @@ def _observed_world() -> ObservedWorld:
     observed[100:156, 100:156] = True
     canvas = _canvas()
     local = LocalObservation(canvas.identity, (508.0, 508.0, 516.0, 516.0), np.full((32, 32), 11.0, dtype=np.float32), np.ones((32, 32), dtype=bool), np.full((32, 32), 0.5, dtype=np.float32))
-    return ObservedWorld(canvas, elevation, observed, np.full((256, 256), 0.25, dtype=np.float32), local)
+    return ObservedWorld(canvas, elevation, observed, _obstacle_layer(canvas, 0.25), local)
 
 
 def _test_only_projection() -> PlatformProjection:
@@ -78,7 +83,7 @@ def test_world_rejects_nodata_marked_observed_and_projection_must_be_narrow_prox
             _canvas(),
             elevation_m=np.full((256, 256), np.nan, dtype=np.float32),
             observed_mask=np.ones((256, 256), dtype=bool),
-            physical_obstacle_ratio=np.zeros((256, 256), dtype=np.float32),
+            physical_obstacle_layer=_obstacle_layer(_canvas()),
             local=LocalObservation(_canvas().identity, (508, 508, 516, 516), np.zeros((32, 32), np.float32), np.ones((32, 32), bool), np.zeros((32, 32), np.float32)),
         )
     with pytest.raises(ValueError, match="test_only/proxy"):
@@ -113,7 +118,7 @@ def test_builder_rejects_full_dem_truth_to_keep_network_input_observed_only() ->
 def test_builder_requires_true_local_observations_and_projection_normalizes_clearance_at_boundary() -> None:
     canvas = _canvas()
     local = LocalObservation(canvas.identity, (500.0, 500.0, 508.0, 508.0), np.zeros((32, 32), dtype=np.float32), np.ones((32, 32), dtype=bool), np.zeros((32, 32), dtype=np.float32))
-    world = ObservedWorld(canvas, np.zeros((256, 256), dtype=np.float32), np.ones((256, 256), dtype=bool), np.zeros((256, 256), dtype=np.float32), local)
+    world = ObservedWorld(canvas, np.zeros((256, 256), dtype=np.float32), np.ones((256, 256), dtype=bool), _obstacle_layer(canvas), local)
     with pytest.raises(ValueError, match="local"):
         ObservationBuilderV2().build(world, MissionRaster(canvas, np.ones((256, 256), dtype=np.float32), np.ones((256, 256), dtype=np.float32), 1.0), Pose2(512.0, 512.0), _test_only_projection(), CandidateBatch.empty(), "WHEELED")
     with pytest.raises(ValueError, match="clearance"):
@@ -133,7 +138,7 @@ def test_builder_requires_canvas_identity_local_center_and_relative_elevation() 
         elevation_m=np.full((32, 32), 12.0, dtype=np.float32), observed_mask=np.ones((32, 32), dtype=bool),
         physical_obstacle_ratio=np.zeros((32, 32), dtype=np.float32),
     )
-    world = ObservedWorld(canvas, np.full((256, 256), 15.0, dtype=np.float32), np.ones((256, 256), dtype=bool), np.zeros((256, 256), dtype=np.float32), local)
+    world = ObservedWorld(canvas, np.full((256, 256), 15.0, dtype=np.float32), np.ones((256, 256), dtype=bool), _obstacle_layer(canvas), local)
     mission = MissionRaster(canvas, np.ones((256, 256), dtype=np.float32), np.ones((256, 256), dtype=np.float32), 1.0)
     projection = PlatformProjection(canvas, np.ones((256, 256), dtype=np.float32), np.ones((32, 32), dtype=np.float32), np.ones((256, 256), dtype=np.float32), "test_only/proxy")
     observation = ObservationBuilderV2(ElevationReference(5.0)).build(world, mission, pose, projection, CandidateBatch.empty(), "WHEELED")
@@ -142,4 +147,25 @@ def test_builder_requires_canvas_identity_local_center_and_relative_elevation() 
     assert observation["pose_features"][0, 0] == pytest.approx(514.0 / 1024.0)
     bad_local = LocalObservation("other", local.bounds_m, local.elevation_m, local.observed_mask, local.physical_obstacle_ratio)
     with pytest.raises(ValueError, match="canvas"):
-        ObservedWorld(canvas, world.elevation_m, world.observed_mask, world.physical_obstacle_ratio, bad_local)
+        ObservedWorld(canvas, world.elevation_m, world.observed_mask, world.physical_obstacle_layer, bad_local)
+
+
+def test_observed_world_rejects_physical_obstacle_layer_from_another_canvas() -> None:
+    canvas = _canvas()
+    other_canvas = MapCanvas.from_roi_bounds("a" * 64, (1_500.0, 500.0, 1_524.0, 524.0))
+    local = LocalObservation(
+        canvas.identity,
+        (508.0, 508.0, 516.0, 516.0),
+        np.zeros((32, 32), dtype=np.float32),
+        np.ones((32, 32), dtype=bool),
+        np.zeros((32, 32), dtype=np.float32),
+    )
+
+    with pytest.raises(ValueError, match="physical obstacle.*canvas identity"):
+        ObservedWorld(
+            canvas,
+            np.zeros((256, 256), dtype=np.float32),
+            np.ones((256, 256), dtype=bool),
+            _obstacle_layer(other_canvas),
+            local,
+        )

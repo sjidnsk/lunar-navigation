@@ -17,6 +17,23 @@ GENERATOR_VERSION = "lunar-polar-hazards/v1"
 
 
 @dataclass(frozen=True)
+class CanvasRatioLayer:
+    """A finite ratio raster bound to its absolute map canvas."""
+
+    canvas: MapCanvas
+    values: np.ndarray
+
+    def __post_init__(self) -> None:
+        values = np.asarray(self.values, dtype=np.float32)
+        cells = self.canvas.geometry.cells
+        if values.shape != (cells, cells):
+            raise ValueError(f"canvas ratio layer must have shape [{cells},{cells}]")
+        if not np.isfinite(values).all() or ((values < 0.0) | (values > 1.0)).any():
+            raise ValueError("canvas ratio layer must be finite and in [0,1]")
+        object.__setattr__(self, "values", values)
+
+
+@dataclass(frozen=True)
 class HazardScene:
     """Generated hazards separated into terrain truth and physical obstacles."""
 
@@ -26,7 +43,13 @@ class HazardScene:
     crater_polygons_wkb: tuple[bytes, ...]
     no_go_polygons_wkb: tuple[bytes, ...]
     crater_elevation_delta_m: np.ndarray
-    physical_obstacle_ratio: np.ndarray
+    physical_obstacle_layer: CanvasRatioLayer
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.physical_obstacle_layer, CanvasRatioLayer):
+            raise ValueError("hazard physical obstacle input must be a canvas-bound ratio layer")
+        if self.physical_obstacle_layer.canvas.identity != self.canvas.identity:
+            raise ValueError("hazard obstacle layer canvas identity does not match scene")
 
     @property
     def rock_footprints(self) -> tuple[object, ...]:
@@ -113,8 +136,8 @@ def generate_hazard_scene(window_sha256: str, scenario_seed: int, *, canvas: Map
         crater_polygons_wkb=tuple(to_wkb(item) for item in craters),
         no_go_polygons_wkb=tuple(to_wkb(item) for item in no_go_polygons),
         crater_elevation_delta_m=delta,
-        physical_obstacle_ratio=ratio,
+        physical_obstacle_layer=CanvasRatioLayer(canvas, ratio),
     )
 
 
-__all__ = ["GENERATOR_VERSION", "HazardScene", "generate_hazard_scene", "physical_obstacle_ratio", "scene_seed"]
+__all__ = ["CanvasRatioLayer", "GENERATOR_VERSION", "HazardScene", "generate_hazard_scene", "physical_obstacle_ratio", "scene_seed"]

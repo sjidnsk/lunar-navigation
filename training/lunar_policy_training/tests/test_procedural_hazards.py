@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from dataclasses import replace
 from hashlib import sha256
 
 import numpy as np
@@ -12,6 +13,7 @@ from shapely.geometry import box
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from lunar_policy_training.polar_data.hazards import (  # noqa: E402
+    CanvasRatioLayer,
     GENERATOR_VERSION,
     generate_hazard_scene,
     physical_obstacle_ratio,
@@ -43,7 +45,9 @@ def test_hazard_generation_is_deterministic_and_craters_are_not_physical_obstacl
     assert left.no_go_polygons_wkb == right.no_go_polygons_wkb
     assert left.no_go_polygons_wkb
     np.testing.assert_array_equal(left.crater_elevation_delta_m, right.crater_elevation_delta_m)
-    assert left.physical_obstacle_ratio.shape == (8, 8)
+    assert isinstance(left.physical_obstacle_layer, CanvasRatioLayer)
+    assert left.physical_obstacle_layer.canvas is canvas
+    assert left.physical_obstacle_layer.values.shape == (8, 8)
     assert left.crater_polygons_wkb
     assert np.any(left.crater_elevation_delta_m != 0.0)
 
@@ -59,3 +63,13 @@ def test_hazard_generation_requires_matching_absolute_canvas() -> None:
         generate_hazard_scene("e" * 64, 1, rock_count=0, crater_count=0)
     canvas = MapCanvas("e" * 64, (1_000.0, 2_000.0, 2_024.0, 3_024.0))
     assert generate_hazard_scene("e" * 64, 1, canvas=canvas, rock_count=0, crater_count=1).canvas is canvas
+
+
+def test_hazard_scene_rejects_obstacle_layer_from_another_canvas() -> None:
+    geometry = GridGeometry(size_m=8.0, resolution_m=1.0, cells=8)
+    canvas = MapCanvas("e" * 64, (0.0, 0.0, 8.0, 8.0), geometry)
+    scene = generate_hazard_scene("e" * 64, 1, canvas=canvas, geometry=geometry, rock_count=0, crater_count=0)
+    other_canvas = MapCanvas("e" * 64, (10.0, 0.0, 18.0, 8.0), geometry)
+
+    with pytest.raises(ValueError, match="hazard.*canvas identity"):
+        replace(scene, physical_obstacle_layer=CanvasRatioLayer(other_canvas, np.zeros((8, 8), dtype=np.float32)))

@@ -11,6 +11,7 @@ import numpy as np
 from lunar_model_contract import ObservationContractV2, validate_observation_inputs
 from lunar_model_contract.observation import PLATFORM_CONTEXTS
 
+from ..polar_data.hazards import CanvasRatioLayer
 from ..polar_data.raster import GLOBAL_GEOMETRY, LOCAL_GEOMETRY, MapCanvas
 
 if TYPE_CHECKING:
@@ -92,7 +93,7 @@ class ObservedWorld:
     canvas: MapCanvas
     elevation_m: np.ndarray
     observed_mask: np.ndarray
-    physical_obstacle_ratio: np.ndarray
+    physical_obstacle_layer: CanvasRatioLayer
     local: LocalObservation
 
     def __post_init__(self) -> None:
@@ -102,9 +103,14 @@ class ObservedWorld:
             raise ValueError("NoData cannot be marked observed")
         if self.local.canvas_id != self.canvas.identity:
             raise ValueError("local input canvas identity does not match observed world")
+        if not isinstance(self.physical_obstacle_layer, CanvasRatioLayer):
+            raise ValueError("physical obstacle input must be a canvas-bound ratio layer")
+        if self.physical_obstacle_layer.canvas.identity != self.canvas.identity:
+            raise ValueError("physical obstacle layer canvas identity does not match observed world")
+        if self.physical_obstacle_layer.values.shape != elevation.shape:
+            raise ValueError("physical obstacle layer geometry does not match observed world")
         object.__setattr__(self, "elevation_m", elevation)
         object.__setattr__(self, "observed_mask", observed)
-        object.__setattr__(self, "physical_obstacle_ratio", _ratio("physical_obstacle_ratio", self.physical_obstacle_ratio, GLOBAL_GEOMETRY.cells))
 
 
 @dataclass(frozen=True)
@@ -158,7 +164,7 @@ class ObservationBuilderV2:
         observed = world.observed_mask
         elevation = np.where(observed, world.elevation_m - self._reference.global_reference_m, 0.0).astype(np.float32)
         local = world.local
-        prior = np.stack((elevation, mission.priority, np.where(observed, world.physical_obstacle_ratio, 0.0), np.where(observed, projection.traversable_ratio, 0.0)), axis=0)[None].astype(np.float32)
+        prior = np.stack((elevation, mission.priority, np.where(observed, world.physical_obstacle_layer.values, 0.0), np.where(observed, projection.traversable_ratio, 0.0)), axis=0)[None].astype(np.float32)
         coverage = np.stack((observed.astype(np.float32), mission.roi_ratio, mission.priority * mission.roi_ratio * (~observed)), axis=0)[None].astype(np.float32)
         local_crop = np.stack((np.where(local.observed_mask, local.elevation_m - pose_map.elevation_m, 0.0), local.observed_mask.astype(np.float32), np.where(local.observed_mask, local.physical_obstacle_ratio, 0.0), np.where(local.observed_mask, projection.local_traversable_ratio, 0.0)), axis=0)[None].astype(np.float32)
         total = float(mission.roi_ratio.sum())
