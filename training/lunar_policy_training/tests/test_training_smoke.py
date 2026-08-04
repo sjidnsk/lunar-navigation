@@ -72,7 +72,7 @@ def test_cuda_interrupt_resume_preserves_step_budget_and_allocation(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Would fail if a real CUDA pause/resume reset progress or the joint split."""
+    """Would fail if a real CUDA pause/resume reset progress or the warmup split."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     artifact_root = tmp_path / "cuda-interrupt-resume"
@@ -101,7 +101,7 @@ def test_cuda_interrupt_resume_preserves_step_budget_and_allocation(
         > 0.0
     )
     assert evidence.signal_observed_at_update_boundary is True
-    assert (artifact_root / "latest.pt").is_file()
+    assert (artifact_root / "checkpoints/latest.pt").is_file()
     manifest = json.loads(
         (artifact_root / "run-manifest.json").read_text(encoding="utf-8")
     )
@@ -123,14 +123,10 @@ def test_cuda_interrupt_resume_preserves_step_budget_and_allocation(
         and measurement["ipc_failures"] == 0
         for measurement in manifest["runtime_calibration"]["measurements"]
     )
-    selected_per_platform = selected_workers // 3
-    assert evidence.platform_allocation == {
-        "WHEELED": selected_per_platform,
-        "LEGGED": selected_per_platform,
-        "HOPPER": selected_per_platform,
-    }
-    checkpoint = load_checkpoint(artifact_root / "latest.pt")
+    assert evidence.platform_allocation == {"WHEELED": selected_workers}
+    checkpoint = load_checkpoint(artifact_root / "checkpoints/latest.pt")
     assert checkpoint.worker_allocation == evidence.platform_allocation
+    assert checkpoint.curriculum_phase == "warmup_wheeled"
     assert checkpoint.micro_batch_size == selected_micro_batch
     assert checkpoint.latest_checkpoint_gpu_seconds == (
         checkpoint.consumed_gpu_seconds

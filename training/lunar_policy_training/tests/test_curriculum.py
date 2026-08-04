@@ -1,0 +1,226 @@
+from __future__ import annotations
+
+import torch
+import pytest
+
+from lunar_policy_training.curriculum import CurriculumSchedule
+from lunar_policy_training.environment.parallel_pool import (
+    ParallelActions,
+    ParallelEnvPool,
+)
+from lunar_policy_training.environment.macro_step import PolicyAction
+from lunar_policy_training.proxy_scenario import (
+    ProxyEnvironmentFactory,
+    proxy_environment_factory,
+    proxy_observation,
+)
+from lunar_policy_training.reward import compute_transition_reward
+
+
+def test_frozen_curriculum_reserves_sixteen_hours_for_joint_training() -> None:
+    """Would fail if calibration or warmups could consume the joint minimum."""
+    schedule = CurriculumSchedule()
+
+    assert schedule.total_gpu_limit_s == 24 * 60 * 60
+    assert schedule.calibration_limit_s == 2 * 60 * 60
+    assert schedule.platform_warmup_order == ("WHEELED", "LEGGED", "HOPPER")
+    assert schedule.platform_warmup_limit_s == 2 * 60 * 60
+    assert schedule.joint_minimum_s == 16 * 60 * 60
+    assert schedule.joint_worker_allocation == {
+        "WHEELED": 8,
+        "LEGGED": 8,
+        "HOPPER": 8,
+    }
+
+
+def test_early_phase_savings_transfer_only_to_joint() -> None:
+    """Would fail if early savings vanished or shortened joint training."""
+    schedule = CurriculumSchedule()
+    frozen = schedule.freeze(
+        calibration_used_s=60 * 60,
+        warmup_used_s={
+            "WHEELED": 60 * 60,
+            "LEGGED": 2 * 60 * 60,
+            "HOPPER": 30 * 60,
+        },
+    )
+
+    assert frozen.joint_budget_s == 19.5 * 60 * 60
+    assert frozen.total_gpu_limit_s == 24 * 60 * 60
+    assert frozen.formal_seed == 4080
+    assert len(frozen.reward_calibration_seeds) == 3
+
+
+def test_active_gpu_phase_order_and_allocations_prepare_formal_train() -> None:
+    """Would fail if public train skipped a warmup or mixed platform workers."""
+    schedule = CurriculumSchedule()
+    calibration_end = 120.0
+
+    assert schedule.phase_for(
+        consumed_gpu_s=calibration_end, calibration_end_gpu_s=calibration_end
+    ) == "warmup_wheeled"
+    assert schedule.phase_for(
+        consumed_gpu_s=calibration_end + 2 * 60 * 60,
+        calibration_end_gpu_s=calibration_end,
+    ) == "warmup_legged"
+    assert schedule.phase_for(
+        consumed_gpu_s=calibration_end + 4 * 60 * 60,
+        calibration_end_gpu_s=calibration_end,
+    ) == "warmup_hopper"
+    assert schedule.phase_for(
+        consumed_gpu_s=calibration_end + 6 * 60 * 60,
+        calibration_end_gpu_s=calibration_end,
+    ) == "joint"
+    assert schedule.worker_allocation("warmup_legged", selected_workers=24) == {
+        "LEGGED": 24
+    }
+    assert schedule.worker_allocation("joint", selected_workers=18) == {
+        "WHEELED": 6,
+        "LEGGED": 6,
+        "HOPPER": 6,
+    }
+
+
+def test_curriculum_sampler_is_proxy_and_deterministic() -> None:
+    """Would fail if scenario identity drifted or claimed real capability."""
+    first = CurriculumSchedule().scenario_for(
+        platform_type="LEGGED", scenario_index=2
+    )
+    second = CurriculumSchedule().scenario_for(
+        platform_type="LEGGED", scenario_index=2
+    )
+
+    assert first == second
+    assert first.proxy is True
+    assert first.capability_id.startswith("proxy-")
+    assert first.scenario_seed == second.scenario_seed
+    assert CurriculumSchedule().scenario_schedule_id.startswith(
+        "proxy-scenario-schedule-v1:"
+    )
+
+
+def test_proxy_macro_step_uses_real_v3_and_changes_observation() -> None:
+    """Would fail if Task 4 used an empty request or a synthetic score fixture."""
+    with ParallelEnvPool(
+        allocation={"WHEELED": 1, "LEGGED": 1, "HOPPER": 1},
+        observation_template=proxy_observation(0, "WHEELED", step=0),
+        environment_factory=proxy_environment_factory,
+        reward_fn=compute_transition_reward,
+        worker_timeout_seconds=30.0,
+    ) as pool:
+        initial = pool.reset()
+        stepped = pool.step(
+            ParallelActions(
+                candidate_indices=torch.zeros(3, dtype=torch.int64),
+                thetas=torch.zeros(3, dtype=torch.float32),
+            ),
+            policy_version=7,
+        )
+
+    assert not torch.equal(
+        initial.observations.coverage_summary,
+        stepped.observations.coverage_summary,
+    )
+    assert not torch.equal(
+        initial.observations.pose_features,
+        stepped.observations.pose_features,
+    )
+    assert all(outcome.name == "NEW_REFERENCE_AVAILABLE" for outcome in stepped.planning_outcomes)
+    assert bool(torch.isfinite(stepped.rewards).all())
+
+
+def test_proxy_action_has_fixed_target_and_unique_frontiers_can_converge() -> None:
+    """Would fail if step count secretly changed an action or capped coverage below 95%."""
+    worker = ProxyEnvironmentFactory(scenario_index=0)(0, "WHEELED")
+    environment = worker.environment
+
+    distractor = environment.step(
+        PolicyAction(frontier_index=2, theta_rad=0.0)
+    )
+    first = environment.step(PolicyAction(frontier_index=0, theta_rad=0.0))
+    repeated = environment.step(PolicyAction(frontier_index=0, theta_rad=0.0))
+    second = environment.step(PolicyAction(frontier_index=1, theta_rad=0.0))
+
+    assert distractor.coverage_delta == 0.0
+    assert first.coverage_delta > 0.0
+    assert repeated.coverage_delta == 0.0
+    assert second.coverage_delta > 0.0
+    assert bool(worker.initial_observation.candidate_mask.all())
+    assert first.next_observation.frontier_features[0, 0, 5].item() == 0.0
+    assert first.next_observation.frontier_features[0, 1, 5].item() > 0.0
+    assert second.next_observation.pose_features[0, 4].item() >= 0.95
+
+
+def test_parallel_pool_auto_resets_terminal_proxy_episode() -> None:
+    """Would fail if a terminal worker remained stuck in repeat-only state."""
+    with ParallelEnvPool(
+        allocation={"WHEELED": 1},
+        observation_template=proxy_observation(0, "WHEELED", step=0),
+        environment_factory=ProxyEnvironmentFactory(scenario_index=0),
+        reward_fn=compute_transition_reward,
+        worker_timeout_seconds=30.0,
+    ) as pool:
+        pool.reset()
+        pool.step(
+            ParallelActions(
+                candidate_indices=torch.tensor([0], dtype=torch.int64),
+                thetas=torch.zeros(1, dtype=torch.float32),
+            ),
+            policy_version=1,
+        )
+        terminal = pool.step(
+            ParallelActions(
+                candidate_indices=torch.tensor([1], dtype=torch.int64),
+                thetas=torch.zeros(1, dtype=torch.float32),
+            ),
+            policy_version=1,
+        )
+        continued = pool.step(
+            ParallelActions(
+                candidate_indices=torch.tensor([0], dtype=torch.int64),
+                thetas=torch.zeros(1, dtype=torch.float32),
+            ),
+            policy_version=2,
+        )
+
+    assert terminal.dones.tolist() == [True]
+    assert terminal.rewards[0].item() > 0.0
+    assert terminal.observations.pose_features[0, 4].item() == pytest.approx(0.05)
+    assert continued.dones.tolist() == [False]
+    assert continued.observations.pose_features[0, 4].item() == pytest.approx(
+        0.525
+    )
+    assert continued.planning_outcomes[0].name == "NEW_REFERENCE_AVAILABLE"
+
+
+def test_parallel_pool_can_preserve_terminal_observation_for_evaluation() -> None:
+    """Would fail if evaluation saw the reset episode instead of final coverage."""
+    with ParallelEnvPool(
+        allocation={"WHEELED": 1},
+        observation_template=proxy_observation(0, "WHEELED", step=0),
+        environment_factory=ProxyEnvironmentFactory(scenario_index=0),
+        reward_fn=compute_transition_reward,
+        worker_timeout_seconds=30.0,
+        auto_reset=False,
+    ) as pool:
+        pool.reset()
+        pool.step(
+            ParallelActions(
+                candidate_indices=torch.tensor([0], dtype=torch.int64),
+                thetas=torch.zeros(1, dtype=torch.float32),
+            ),
+            policy_version=1,
+        )
+        terminal = pool.step(
+            ParallelActions(
+                candidate_indices=torch.tensor([1], dtype=torch.int64),
+                thetas=torch.zeros(1, dtype=torch.float32),
+            ),
+            policy_version=1,
+        )
+
+    assert terminal.dones.tolist() == [True]
+    assert terminal.observations.pose_features[0, 4].item() == pytest.approx(1.0)
+    assert terminal.observations.coverage_summary[0, 0].mean().item() == (
+        pytest.approx(1.0)
+    )

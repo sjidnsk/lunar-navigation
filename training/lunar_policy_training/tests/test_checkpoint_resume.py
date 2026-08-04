@@ -28,7 +28,11 @@ from lunar_policy_training.checkpoint import (  # noqa: E402
 from lunar_policy_training.ppo.checkpoint import CheckpointError  # noqa: E402
 
 
-def _checkpoint(consumed_gpu_seconds: float):
+def _checkpoint(
+    consumed_gpu_seconds: float,
+    *,
+    worker_allocation: dict[str, int] | None = None,
+):
     torch.manual_seed(17)
     model = torch.nn.Linear(3, 2)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
@@ -47,7 +51,11 @@ def _checkpoint(consumed_gpu_seconds: float):
         frozen_config={"total_gpu_budget_seconds": 86400},
         source_commit="a0cc8dfd9210e1badcbe883e6178b1b27888bd93",
         consumed_gpu_seconds=consumed_gpu_seconds,
-        worker_allocation={"WHEELED": 6, "LEGGED": 6, "HOPPER": 6},
+        worker_allocation=(
+            {"WHEELED": 6, "LEGGED": 6, "HOPPER": 6}
+            if worker_allocation is None
+            else worker_allocation
+        ),
         micro_batch_size=2,
         latest_checkpoint_gpu_seconds=consumed_gpu_seconds,
         candidate_checkpoint_gpu_seconds=min(consumed_gpu_seconds, 3600.0),
@@ -66,6 +74,21 @@ def test_resume_preserves_consumed_gpu_budget(tmp_path: pathlib.Path) -> None:
     assert resumed.contract_version == "ObservationContractV1"
     assert resumed.consumed_gpu_seconds == 7200.0
     assert budget.remaining_gpu_seconds == 86400.0 - 7200.0
+
+
+def test_checkpoint_roundtrips_single_platform_warmup_allocation(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if the formal warmup could not reach its first checkpoint."""
+    checkpoint = _checkpoint(
+        consumed_gpu_seconds=120.0,
+        worker_allocation={"WHEELED": 24},
+    )
+    path = tmp_path / "latest.pt"
+
+    save_checkpoint_atomic(path, checkpoint)
+
+    assert load_checkpoint(path).worker_allocation == {"WHEELED": 24}
 
 
 def test_exhausted_checkpoint_resume_never_restarts_terminal_unit(

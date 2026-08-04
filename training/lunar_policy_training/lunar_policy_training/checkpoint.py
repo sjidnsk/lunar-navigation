@@ -317,8 +317,10 @@ def _validate_body(body: object) -> None:
     allocation = body["worker_allocation"]
     if (
         not isinstance(allocation, Mapping)
-        or set(allocation) != {"WHEELED", "LEGGED", "HOPPER"}
+        or not allocation
+        or not set(allocation) <= {"WHEELED", "LEGGED", "HOPPER"}
         or any(type(value) is not int or value <= 0 for value in allocation.values())
+        or sum(allocation.values()) not in (18, 24)
     ):
         raise CheckpointError("checkpoint worker allocation is invalid")
     if type(body["micro_batch_size"]) is not int or body["micro_batch_size"] <= 0:

@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from lunar_policy_training.evaluation.release_gate import (
+    evaluate_release_gate,
+    load_gate_rules,
+)
+from lunar_policy_training.evaluation.report import (
+    EvaluationReport,
+    MethodEvaluation,
+    PlatformMetrics,
+)
+
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def _platform_metrics(coverage: float) -> PlatformMetrics:
+    return PlatformMetrics(
+        scenario_seeds=(101, 102),
+        success_coverage_rate=coverage,
+        safety_violation_count=0,
+        invalid_action_count=0,
+        output_finite_rate=1.0,
+        platform_reference_mismatch_count=0,
+        hopper_commitment_violation_count=0,
+        selected_action_observed_safe_rate=1.0,
+        deterministic_repeat_match_rate=1.0,
+        planner_failure_rate=0.0,
+        completion_time_s=10.0,
+    )
+
+
+def _report(*, wheeled: float, legged: float, hopper: float) -> EvaluationReport:
+    platforms = {
+        "WHEELED": _platform_metrics(wheeled),
+        "LEGGED": _platform_metrics(legged),
+        "HOPPER": _platform_metrics(hopper),
+    }
+    methods = tuple(
+        MethodEvaluation(method=method, per_platform=platforms)
+        for method in (
+            "ppo_policy",
+            "nearest_frontier",
+            "gain_over_cost_frontier",
+        )
+    )
+    return EvaluationReport(
+        proxy=True,
+        scenario_schedule_id="proxy-schedule",
+        reward_hash="a" * 64,
+        checkpoint_sha256="b" * 64,
+        methods=methods,
+    )
+
+
+def test_gate_fails_when_only_hopper_is_below_95_percent() -> None:
+    """Would fail if a three-platform mean could mask one failing platform."""
+    result = evaluate_release_gate(
+        _report(wheeled=0.97, legged=0.95, hopper=0.94),
+        load_gate_rules(ROOT / "training/configs/candidate_gate_v1.yaml"),
+    )
+
+    assert result.passed is False
+    assert result.failed_rules == ("HOPPER.success_coverage_rate_min",)
+
+
+def test_release_gate_adds_action_safety_and_repeat_rules() -> None:
+    """Would fail if the release configuration silently used candidate rules."""
+    report = _report(wheeled=0.97, legged=0.96, hopper=0.95)
+    hopper = report.method("ppo_policy").per_platform["HOPPER"]
+    changed = report.replace_platform_metrics(
+        method="ppo_policy",
+        platform_type="HOPPER",
+        metrics=hopper.replace(deterministic_repeat_match_rate=0.5),
+    )
+
+    result = evaluate_release_gate(
+        changed,
+        load_gate_rules(ROOT / "training/configs/release_gate_v1.yaml"),
+    )
+
+    assert result.failed_rules == (
+        "HOPPER.deterministic_repeat_match_rate_min",
+    )
+
+
+def test_baselines_are_required_but_do_not_need_to_beat_ppo() -> None:
+    """Would fail if diagnostics were turned into a PPO superiority gate."""
+    report = _report(wheeled=0.95, legged=0.95, hopper=0.95)
+    result = evaluate_release_gate(
+        report,
+        load_gate_rules(ROOT / "training/configs/candidate_gate_v1.yaml"),
+    )
+
+    assert result.passed is True
+    assert result.failed_rules == ()

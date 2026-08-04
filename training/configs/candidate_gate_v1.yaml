@@ -1,0 +1,12 @@
+schema_version: lunar-policy-release-gate/v1
+per_platform_rules:
+  success_coverage_rate_min: 0.95
+  safety_violation_count_max: 0
+  invalid_action_count_max: 0
+  output_finite_rate_min: 1.0
+  platform_reference_mismatch_count_max: 0
+  hopper_commitment_violation_count_max: 0
+required_methods:
+  - ppo_policy
+  - nearest_frontier
+  - gain_over_cost_frontier

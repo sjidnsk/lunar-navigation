@@ -69,6 +69,7 @@ class ParallelEnvPool:
         environment_factory: Callable[[int, str], ParallelEnvironmentWorker],
         reward_fn: Callable[[PlannerTransition], float],
         worker_timeout_seconds: float = 30.0,
+        auto_reset: bool = True,
     ) -> None:
         self._platforms = _expanded_platforms(allocation)
         self.worker_count = len(self._platforms)
@@ -77,6 +78,8 @@ class ParallelEnvPool:
             raise ParallelPoolError("environment factory must be callable")
         if not callable(reward_fn):
             raise ParallelPoolError("reward function must be callable")
+        if type(auto_reset) is not bool:
+            raise ParallelPoolError("auto_reset must be boolean")
         if (
             not isinstance(worker_timeout_seconds, (int, float))
             or isinstance(worker_timeout_seconds, bool)
@@ -86,6 +89,7 @@ class ParallelEnvPool:
             raise ParallelPoolError("worker timeout must be finite and positive")
         self._environment_factory = environment_factory
         self._reward_fn = reward_fn
+        self._auto_reset = auto_reset
         self._worker_timeout_seconds = float(worker_timeout_seconds)
         self.rollout_discarded = False
         self.training_stopped = False
@@ -172,6 +176,7 @@ class ParallelEnvPool:
                         platform_type,
                         self._environment_factory,
                         self._reward_fn,
+                        self._auto_reset,
                         self._command_queues[worker_index],
                         self._result_queue,
                         self.shared_observation_buffers,
@@ -437,6 +442,7 @@ def _worker_main(
     platform_type: str,
     environment_factory: Callable[[int, str], ParallelEnvironmentWorker],
     reward_fn: Callable[[PlannerTransition], float],
+    auto_reset: bool,
     command_queue,
     result_queue,
     observation_buffers: tuple[dict[str, torch.Tensor], ...],
@@ -466,6 +472,7 @@ def _worker_main(
                 os.environ["MKL_NUM_THREADS"],
             )
         )
+        terminal_transition: PlannerTransition | None = None
         while True:
             command = command_queue.get()
             if command == ("stop",):
@@ -483,22 +490,37 @@ def _worker_main(
                 ),
                 theta_rad=float(action_buffers[buffer_index]["thetas"][worker_index]),
             )
-            transition = worker.environment.step(action)
-            if not isinstance(transition, PlannerTransition):
-                raise ParallelPoolError(
-                    "worker environment must return PlannerTransition"
-                )
-            reward = reward_fn(transition)
+            if terminal_transition is None:
+                transition = worker.environment.step(action)
+                if not isinstance(transition, PlannerTransition):
+                    raise ParallelPoolError(
+                        "worker environment must return PlannerTransition"
+                    )
+                reward = reward_fn(transition)
+            else:
+                transition = terminal_transition
+                reward = 0.0
             if (
                 not isinstance(reward, (int, float))
                 or isinstance(reward, bool)
                 or not math.isfinite(float(reward))
             ):
                 raise ParallelPoolError("worker reward must be finite")
+            next_observation = transition.next_observation
+            if transition.terminated and auto_reset:
+                reset_worker = environment_factory(worker_index, platform_type)
+                if not isinstance(reset_worker, ParallelEnvironmentWorker):
+                    raise ParallelPoolError(
+                        "environment factory must return ParallelEnvironmentWorker"
+                    )
+                next_observation = reset_worker.initial_observation
+                worker = reset_worker
+            elif transition.terminated:
+                terminal_transition = transition
             _write_observation(
                 observation_buffers[buffer_index],
                 worker_index,
-                transition.next_observation,
+                next_observation,
             )
             reward_buffers[buffer_index][worker_index] = float(reward)
             done_buffers[buffer_index][worker_index] = transition.terminated
