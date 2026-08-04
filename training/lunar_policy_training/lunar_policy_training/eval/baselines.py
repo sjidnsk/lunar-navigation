@@ -7,9 +7,20 @@ import math
 
 import numpy as np
 import torch
+from lunar_model_contract import ActionContractV2, ObservationContractV2
 
 from ..policy.cross_attention import PolicyOutput
 from . import baseline_core
+
+
+_DISTANCE_FIELD = ObservationContractV2.frontier_fields.index(
+    "distance_from_robot_norm"
+)
+_BEARING_SIN_FIELD = ObservationContractV2.frontier_fields.index("bearing_sin")
+_BEARING_COS_FIELD = ObservationContractV2.frontier_fields.index("bearing_cos")
+_POTENTIAL_GAIN_FIELD = ObservationContractV2.frontier_fields.index(
+    "potential_coverage_gain_ratio"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,12 +46,10 @@ def select_baseline_action(
         )
     features = np.asarray(frontier_features)
     mask = np.asarray(candidate_mask)
-    if (
-        features.ndim != 2
-        or features.shape[1] <= baseline_core._REACHABLE_COST_FEATURE
-        or mask.shape != (features.shape[0],)
-        or mask.dtype != np.bool_
-    ):
+    if features.shape != (
+        ActionContractV2.candidate_count,
+        len(ObservationContractV2.frontier_fields),
+    ) or mask.shape != (ActionContractV2.candidate_count,) or mask.dtype != np.bool_:
         raise baseline_core.BaselineSelectionError(
             "baseline candidate feature or mask shape is invalid"
         )
@@ -58,7 +67,7 @@ def select_baseline_action(
         selected = min(
             (int(index) for index in valid_indices),
             key=lambda index: (
-                float(features[index, baseline_core._DISTANCE_FEATURE]),
+                float(features[index, _DISTANCE_FIELD]),
                 index,
             ),
         )
@@ -66,7 +75,7 @@ def select_baseline_action(
         selected = min(
             (int(index) for index in valid_indices),
             key=lambda index: (
-                -float(features[index, baseline_core._POTENTIAL_GAIN_FEATURE]),
+                -float(features[index, _POTENTIAL_GAIN_FIELD]),
                 index,
             ),
         )
@@ -74,23 +83,24 @@ def select_baseline_action(
         scores: dict[int, float] = {}
         for raw_index in valid_indices:
             index = int(raw_index)
-            denominator = 1.0 + float(
-                features[index, baseline_core._REACHABLE_COST_FEATURE]
-            )
+            denominator = 1.0 + float(features[index, _DISTANCE_FIELD])
             if not math.isfinite(denominator) or denominator <= 0.0:
                 raise baseline_core.BaselineSelectionError(
                     "gain-over-cost denominator must be positive"
                 )
             scores[index] = float(
-                features[index, baseline_core._POTENTIAL_GAIN_FEATURE]
+                features[index, _POTENTIAL_GAIN_FIELD]
             ) / denominator
         selected = min(scores, key=lambda index: (-scores[index], index))
 
     baseline_core.validate_selected_index(selected, mask)
-    return EvaluationAction(
-        candidate_index=selected,
-        theta=baseline_core.reconstruct_recommended_theta(features[selected]),
+    theta = math.atan2(
+        float(features[selected, _BEARING_SIN_FIELD]),
+        float(features[selected, _BEARING_COS_FIELD]),
     )
+    if not math.isfinite(theta):
+        raise baseline_core.BaselineSelectionError("baseline theta must be finite")
+    return EvaluationAction(candidate_index=selected, theta=theta)
 
 
 def select_ppo_action(
@@ -105,7 +115,7 @@ def select_ppo_action(
         not isinstance(candidate_mask, torch.Tensor)
         or candidate_mask.dtype != torch.bool
         or candidate_mask.ndim != 2
-        or candidate_mask.shape[0] != 1
+        or candidate_mask.shape != (1, ActionContractV2.candidate_count)
         or output.frontier_logits.shape != candidate_mask.shape
         or output.theta_mu.shape != candidate_mask.shape
         or output.frontier_logits.device != candidate_mask.device

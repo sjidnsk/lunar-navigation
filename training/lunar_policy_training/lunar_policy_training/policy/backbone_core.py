@@ -5,27 +5,33 @@ from typing import Final
 import torch
 from torch import nn
 TOKEN_DIM: Final = 128
-MAP_POOL_SHAPE: Final = (16, 16)
 ATTENTION_HEADS: Final = 4
 CROSS_ATTENTION_LAYERS: Final = 2
 FFN_HIDDEN_DIM: Final = 512
 ACTION_HIDDEN_DIM: Final = 128
 DROPOUT: Final = 0.0
 INVALID_LOGIT_VALUE: Final = -1000000000.0
-INITIAL_KAPPA_RAW: Final = math.log(math.expm1(0.1 - 0.001))
+INITIAL_KAPPA_RAW: Final = math.log(math.expm1(1.0))
 
 class PolicyActionError(ValueError):
     """动作或分布输入违反共享策略合同。"""
 
 class MapEncoder(nn.Module):
-    """用 GroupNorm 编码地图，并固定池化为 16x16 token 网格。"""
+    """Encode maps into the contract-selected fixed token grid."""
 
-    def __init__(self, input_channels: int) -> None:
+    def __init__(self, input_channels: int, output_grid: tuple[int, int]) -> None:
         super().__init__()
+        if (
+            not isinstance(output_grid, tuple)
+            or len(output_grid) != 2
+            or any(type(size) is not int or size <= 0 for size in output_grid)
+        ):
+            raise ValueError("output_grid must be two positive integers")
         self.input_channels = input_channels
+        self.output_grid = output_grid
         self.features = nn.Sequential(nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=2), nn.GroupNorm(8, 32), nn.GELU(), nn.Conv2d(32, 64, kernel_size=3, padding=1), nn.GroupNorm(8, 64), nn.GELU(), nn.Conv2d(64, TOKEN_DIM, kernel_size=3, padding=1), nn.GroupNorm(16, TOKEN_DIM), nn.GELU())
-        self.pool = nn.AdaptiveAvgPool2d(MAP_POOL_SHAPE)
-        self.register_buffer('position_encoding', _map_position_encoding(), persistent=False)
+        self.pool = nn.AdaptiveAvgPool2d(output_grid)
+        self.register_buffer('position_encoding', _map_position_encoding(output_grid), persistent=False)
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         feature_map = self.pool(self.features(value))
@@ -77,25 +83,6 @@ def _validated_masked_logits(frontier_logits: torch.Tensor, candidate_mask: torc
 def _gather_candidate(value: torch.Tensor, selected_index: torch.Tensor) -> torch.Tensor:
     return value.gather(1, selected_index.unsqueeze(1)).squeeze(1)
 
-def _safe_theta_mu(*, raw_sin: torch.Tensor, raw_cos: torch.Tensor, recommended_sin: torch.Tensor, recommended_cos: torch.Tensor, candidate_mask: torch.Tensor) -> torch.Tensor:
-    threshold = 1e-06
-    threshold_squared = threshold * threshold
-    raw_norm_squared = raw_sin.square() + raw_cos.square()
-    raw_denominator = torch.sqrt(raw_norm_squared.clamp_min(threshold_squared))
-    raw_unit_sin = raw_sin / raw_denominator
-    raw_unit_cos = raw_cos / raw_denominator
-    recommended_norm_squared = recommended_sin.square() + recommended_cos.square()
-    recommended_denominator = torch.sqrt(recommended_norm_squared.clamp_min(threshold_squared))
-    recommended_unit_sin = recommended_sin / recommended_denominator
-    recommended_unit_cos = recommended_cos / recommended_denominator
-    recommended_valid = (recommended_norm_squared > threshold_squared) & candidate_mask
-    fallback_sin = torch.where(recommended_valid, recommended_unit_sin, torch.zeros_like(recommended_sin))
-    fallback_cos = torch.where(recommended_valid, recommended_unit_cos, torch.ones_like(recommended_cos))
-    raw_valid = (raw_norm_squared > threshold_squared) & candidate_mask
-    unit_sin = torch.where(raw_valid, raw_unit_sin, fallback_sin)
-    unit_cos = torch.where(raw_valid, raw_unit_cos, fallback_cos)
-    return _normalize_angle(torch.atan2(unit_sin, unit_cos))
-
 def _masked_mean_max(tokens: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     expanded = mask.unsqueeze(-1)
     count = expanded.sum(dim=1).clamp_min(1)
@@ -103,10 +90,11 @@ def _masked_mean_max(tokens: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Te
     maximum = tokens.masked_fill(~expanded, torch.finfo(tokens.dtype).min).amax(dim=1)
     return (mean, maximum)
 
-def _map_position_encoding() -> torch.Tensor:
+def _map_position_encoding(output_grid: tuple[int, int]) -> torch.Tensor:
     quarter = TOKEN_DIM // 4
-    coordinates = torch.linspace(-1.0, 1.0, MAP_POOL_SHAPE[0])
-    (y, x) = torch.meshgrid(coordinates, coordinates, indexing='ij')
+    y_coordinates = torch.linspace(-1.0, 1.0, output_grid[0])
+    x_coordinates = torch.linspace(-1.0, 1.0, output_grid[1])
+    (y, x) = torch.meshgrid(y_coordinates, x_coordinates, indexing='ij')
     frequencies = torch.exp(torch.arange(quarter, dtype=torch.float32) * (-torch.log(torch.tensor(10000.0)) / max(quarter - 1, 1)))
     x_phase = x.reshape(-1, 1) * frequencies.reshape(1, -1)
     y_phase = y.reshape(-1, 1) * frequencies.reshape(1, -1)

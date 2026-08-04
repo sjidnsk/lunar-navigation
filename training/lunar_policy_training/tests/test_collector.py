@@ -35,24 +35,21 @@ from lunar_policy_training.ppo.rollout import RolloutBatch  # noqa: E402
 
 def _policy_batch(step: int = 0) -> PolicyBatch:
     batch_size = 3
-    frontier = torch.zeros((batch_size, 3, 22), dtype=torch.float32)
+    frontier = torch.zeros((batch_size, 64, 12), dtype=torch.float32)
     frontier[..., 0] = float(step) / 10.0
-    frontier[..., 14] = 0.0
-    frontier[..., 15] = 1.0
+    mask = torch.zeros((batch_size, 64), dtype=torch.bool)
+    mask[:, :3] = True
     return PolicyBatch(
         prior_channels=torch.full(
-            (batch_size, 7, 16, 16), float(step) / 100.0, dtype=torch.float32
+            (batch_size, 4, 256, 256), float(step) / 100.0, dtype=torch.float32
         ),
         coverage_summary=torch.zeros(
-            (batch_size, 8, 16, 16), dtype=torch.float32
+            (batch_size, 3, 256, 256), dtype=torch.float32
         ),
-        local_crop=torch.zeros((batch_size, 8, 16, 16), dtype=torch.float32),
+        local_crop=torch.zeros((batch_size, 4, 32, 32), dtype=torch.float32),
         frontier_features=frontier,
         pose_features=torch.zeros((batch_size, 6), dtype=torch.float32),
-        candidate_mask=torch.tensor(
-            [[True, True, False], [False, True, True], [True, False, True]],
-            dtype=torch.bool,
-        ),
+        candidate_mask=mask,
         platform_context=torch.eye(3, dtype=torch.float32),
     )
 
@@ -163,16 +160,51 @@ def test_collect_rollout_runs_real_vector_env_actions_and_hand_computed_gae() ->
     assert abs(float(collected.rollout.advantages.mean())) < 1.0e-6
 
 
+def test_collector_bypasses_all_false_candidate_rows_before_policy_forward() -> None:
+    """Would fail if a no-candidate row could enter policy action sampling."""
+    environment = DeterministicVectorEnv()
+    original_reset = environment.reset
+
+    class CountingPolicy(CrossAttentionPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.forward_calls = 0
+
+        def forward(self, batch: PolicyBatch):
+            self.forward_calls += 1
+            return super().forward(batch)
+
+    def reset_with_no_candidate() -> PolicyBatch:
+        batch = original_reset()
+        batch.candidate_mask[1].zero_()
+        return batch
+
+    environment.reset = reset_with_no_candidate
+    policy = CountingPolicy().eval()
+
+    with pytest.raises(
+        CollectorError, match="all-false candidate rows must bypass rollout collection"
+    ):
+        collect_rollout(
+            environment,
+            policy,
+            CollectorConfig(horizon=1, deterministic=True),
+            device="cpu",
+        )
+
+    assert policy.forward_calls == 0
+
+
 def _real_v3_worker(
     worker_index: int, platform_type: str
 ) -> ParallelEnvironmentWorker:
     observation = PolicyBatch(
-        prior_channels=torch.zeros((1, 7, 8, 8), dtype=torch.float32),
-        coverage_summary=torch.zeros((1, 8, 8, 8), dtype=torch.float32),
-        local_crop=torch.zeros((1, 8, 8, 8), dtype=torch.float32),
-        frontier_features=torch.zeros((1, 2, 22), dtype=torch.float32),
+        prior_channels=torch.zeros((1, 4, 256, 256), dtype=torch.float32),
+        coverage_summary=torch.zeros((1, 3, 256, 256), dtype=torch.float32),
+        local_crop=torch.zeros((1, 4, 32, 32), dtype=torch.float32),
+        frontier_features=torch.zeros((1, 64, 12), dtype=torch.float32),
         pose_features=torch.zeros((1, 6), dtype=torch.float32),
-        candidate_mask=torch.tensor([[True, False]], dtype=torch.bool),
+        candidate_mask=torch.tensor([[True, True, True] + [False] * 61], dtype=torch.bool),
         platform_context=torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32),
     )
     request = TrainingPlanRequest()
@@ -226,7 +258,7 @@ def test_production_pool_adapter_collects_real_v3_reward_gae_at_one_policy_versi
         ("nonfinite_reward", "rewards must be finite"),
         ("reward_dtype", "rewards must be float32"),
         ("done_dtype", "dones must be boolean"),
-        ("nonfinite_observation", "policy float inputs must be finite"),
+        ("nonfinite_observation", "pose_features must contain only finite values"),
     ),
 )
 def test_collect_rollout_rejects_invalid_transition(

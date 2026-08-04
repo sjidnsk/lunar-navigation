@@ -228,7 +228,9 @@ def test_proxy_action_has_fixed_target_and_unique_frontiers_can_converge() -> No
     assert first.coverage_delta > 0.0
     assert repeated.coverage_delta == 0.0
     assert second.coverage_delta > 0.0
-    assert bool(worker.initial_observation.candidate_mask.all())
+    assert worker.initial_observation.candidate_mask.shape == (1, 64)
+    assert bool(worker.initial_observation.candidate_mask[0, :3].all())
+    assert not bool(worker.initial_observation.candidate_mask[0, 3:].any())
     assert first.next_observation.frontier_features[0, 0, 5].item() == 0.0
     assert first.next_observation.frontier_features[0, 1, 5].item() > 0.0
     assert second.next_observation.pose_features[0, 4].item() >= 0.95

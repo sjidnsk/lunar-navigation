@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from lunar_model_contract import ObservationContractV2, validate_observation_inputs
 
 from ..policy.observation import PolicyBatch, validate_policy_batch
 from .rollout_core import (
@@ -65,23 +66,15 @@ class RolloutBatch:
         ):
             raise RolloutContractError("selected frontier indices must use int64")
         sample_count = self.prior_channels.shape[0]
-        if sample_count <= 0 or self.prior_channels.ndim != 4 or self.prior_channels.shape[1] != 7:
-            raise RolloutContractError("prior channels must use [N,7,H,W]")
-        if self.coverage_summary.ndim != 4 or self.coverage_summary.shape[:2] != (sample_count, 8):
-            raise RolloutContractError("coverage summary must use [N,8,H,W]")
-        if self.local_crop.ndim != 4 or self.local_crop.shape[:2] != (sample_count, 8):
-            raise RolloutContractError("local crop must use [N,8,H,W]")
-        if (
-            self.frontier_features.ndim != 3
-            or self.frontier_features.shape[0] != sample_count
-            or self.frontier_features.shape[2] != 22
-            or self.candidate_mask.shape != self.frontier_features.shape[:2]
-        ):
-            raise RolloutContractError("frontier features or mask shape is invalid")
-        if self.pose_features.shape != (sample_count, 6):
-            raise RolloutContractError("pose features must use [N,6]")
-        if self.platform_context.shape != (sample_count, 3):
-            raise RolloutContractError("platform context must use [N,3]")
+        try:
+            validate_observation_inputs(
+                {
+                    name: getattr(self, name)
+                    for name in ObservationContractV2.input_names
+                }
+            )
+        except ValueError as error:
+            raise RolloutContractError(str(error)) from error
         vectors = (
             self.selected_frontier_indices,
             self.selected_thetas,

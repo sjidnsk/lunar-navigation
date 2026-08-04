@@ -60,12 +60,12 @@ def _observation(worker_index: int, platform_type: str) -> PolicyBatch:
     pose = torch.zeros((1, 6), dtype=torch.float32)
     pose[0, 0] = float(worker_index)
     return PolicyBatch(
-        prior_channels=torch.zeros((1, 7, 8, 8), dtype=torch.float32),
-        coverage_summary=torch.zeros((1, 8, 8, 8), dtype=torch.float32),
-        local_crop=torch.zeros((1, 8, 8, 8), dtype=torch.float32),
-        frontier_features=torch.zeros((1, 2, 22), dtype=torch.float32),
+        prior_channels=torch.zeros((1, 4, 256, 256), dtype=torch.float32),
+        coverage_summary=torch.zeros((1, 3, 256, 256), dtype=torch.float32),
+        local_crop=torch.zeros((1, 4, 32, 32), dtype=torch.float32),
+        frontier_features=torch.zeros((1, 64, 12), dtype=torch.float32),
         pose_features=pose,
-        candidate_mask=torch.tensor([[True, False]], dtype=torch.bool),
+        candidate_mask=torch.tensor([[True, True, True] + [False] * 61], dtype=torch.bool),
         platform_context=platform_context,
     )
 

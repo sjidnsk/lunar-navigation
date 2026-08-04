@@ -22,15 +22,15 @@ from lunar_policy_training.ppo.trainer import PPOTrainer  # noqa: E402
 
 
 def _policy_batch() -> PolicyBatch:
+    mask = torch.zeros((2, 64), dtype=torch.bool)
+    mask[:, :3] = True
     return PolicyBatch(
-        prior_channels=torch.zeros((2, 7, 32, 32), dtype=torch.float32),
-        coverage_summary=torch.zeros((2, 8, 32, 32), dtype=torch.float32),
-        local_crop=torch.zeros((2, 8, 32, 32), dtype=torch.float32),
-        frontier_features=torch.zeros((2, 3, 22), dtype=torch.float32),
+        prior_channels=torch.zeros((2, 4, 256, 256), dtype=torch.float32),
+        coverage_summary=torch.zeros((2, 3, 256, 256), dtype=torch.float32),
+        local_crop=torch.zeros((2, 4, 32, 32), dtype=torch.float32),
+        frontier_features=torch.zeros((2, 64, 12), dtype=torch.float32),
         pose_features=torch.zeros((2, 6), dtype=torch.float32),
-        candidate_mask=torch.tensor(
-            [[True, True, False], [True, False, True]], dtype=torch.bool
-        ),
+        candidate_mask=mask,
         platform_context=torch.tensor(
             [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=torch.float32
         ),

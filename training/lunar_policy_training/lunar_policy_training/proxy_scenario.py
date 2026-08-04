@@ -249,16 +249,17 @@ def proxy_observation(
         position = (3.0, 3.0) if platform_type == "HOPPER" else (2.5, 3.5)
     if coverage is None:
         coverage = min(0.05 + 0.475 * step, 1.0)
-    prior = torch.zeros((1, 7, 8, 8), dtype=torch.float32)
+    prior = torch.zeros((1, 4, 256, 256), dtype=torch.float32)
     prior[0, 0].fill_(float(_PLATFORM_INDEX[platform_type]) / 2.0)
-    prior[0, 4, min(step, 7), worker_index % 8] = 1.0
-    coverage_summary = torch.zeros((1, 8, 8, 8), dtype=torch.float32)
+    prior[0, 3, min(step, 255), worker_index % 256] = 1.0
+    coverage_summary = torch.zeros((1, 3, 256, 256), dtype=torch.float32)
     coverage_summary[0, 0].fill_(coverage)
     coverage_summary[0, 1].fill_(1.0 - coverage)
-    local_crop = torch.zeros((1, 8, 8, 8), dtype=torch.float32)
+    coverage_summary[0, 2].fill_(1.0 - coverage)
+    local_crop = torch.zeros((1, 4, 32, 32), dtype=torch.float32)
     local_crop[0, 1].fill_(coverage)
-    local_crop[0, 5, min(step, 7), worker_index % 8] = 1.0
-    frontier = torch.zeros((1, 3, 22), dtype=torch.float32)
+    local_crop[0, 3, min(step, 31), worker_index % 32] = 1.0
+    frontier = torch.zeros((1, 64, 12), dtype=torch.float32)
     targets = _targets(platform_type)
     for index, (target_x, target_y) in enumerate(targets):
         was_visited = (target_x, target_y) in visited
@@ -272,14 +273,12 @@ def proxy_observation(
         frontier[0, index, 3] = math.sin(theta)
         frontier[0, index, 4] = math.cos(theta)
         frontier[0, index, 5] = 0.0 if was_visited else 0.475
-        frontier[0, index, 14] = math.sin(theta)
-        frontier[0, index, 15] = math.cos(theta)
-        frontier[0, index, 16] = 1.0
-        frontier[0, index, 17] = 1.0
-        frontier[0, index, 18] = distance / 10.0
-        frontier[0, index, 19] = float(was_visited)
-        frontier[0, index, 20] = 0.0 if was_visited else 1.0 - coverage
-        frontier[0, index, 21] = 1.0
+        frontier[0, index, 6] = 0.0 if was_visited else 1.0 - coverage
+        frontier[0, index, 7] = math.sin(theta)
+        frontier[0, index, 8] = math.cos(theta)
+        frontier[0, index, 9] = 1.0
+        frontier[0, index, 10] = 1.0
+        frontier[0, index, 11] = 0.0 if was_visited else 1.0 - coverage
     pose = torch.tensor(
         [[
             position[0] / 12.0,
@@ -299,7 +298,7 @@ def proxy_observation(
         local_crop=local_crop,
         frontier_features=frontier,
         pose_features=pose,
-        candidate_mask=torch.ones((1, 3), dtype=torch.bool),
+        candidate_mask=torch.tensor([[True, True, True] + [False] * 61], dtype=torch.bool),
         platform_context=platform_context,
     )
 

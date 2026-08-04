@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
+from lunar_model_contract import ActionContractV2
+
 from . import backbone_core
 from .observation import PolicyBatch, validate_policy_batch
 
@@ -45,8 +47,8 @@ class CrossAttentionPolicy(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.global_encoder = backbone_core.MapEncoder(15)
-        self.local_encoder = backbone_core.MapEncoder(8)
+        self.global_encoder = backbone_core.MapEncoder(input_channels=7, output_grid=(32, 32))
+        self.local_encoder = backbone_core.MapEncoder(input_channels=4, output_grid=(16, 16))
         self.pose_encoder = nn.Sequential(
             nn.Linear(6, backbone_core.TOKEN_DIM),
             nn.LayerNorm(backbone_core.TOKEN_DIM),
@@ -55,13 +57,7 @@ class CrossAttentionPolicy(nn.Module):
             nn.LayerNorm(backbone_core.TOKEN_DIM),
         )
         self.platform_encoder = nn.Linear(3, backbone_core.TOKEN_DIM)
-        self.frontier_encoder = nn.Sequential(
-            nn.Linear(22, backbone_core.TOKEN_DIM),
-            nn.LayerNorm(backbone_core.TOKEN_DIM),
-            nn.GELU(),
-            nn.Linear(backbone_core.TOKEN_DIM, backbone_core.TOKEN_DIM),
-            nn.LayerNorm(backbone_core.TOKEN_DIM),
-        )
+        self.frontier_encoder = nn.Linear(12, backbone_core.TOKEN_DIM)
         self.frontier_position_encoder = nn.Sequential(
             nn.Linear(4, backbone_core.TOKEN_DIM),
             nn.LayerNorm(backbone_core.TOKEN_DIM),
@@ -72,7 +68,7 @@ class CrossAttentionPolicy(nn.Module):
         )
         self.action_output_mlp = nn.Sequential(
             nn.Linear(
-                backbone_core.TOKEN_DIM * 2 + 22,
+                backbone_core.TOKEN_DIM * 2 + 12,
                 backbone_core.ACTION_HIDDEN_DIM,
             ),
             nn.LayerNorm(backbone_core.ACTION_HIDDEN_DIM),
@@ -112,6 +108,8 @@ class CrossAttentionPolicy(nn.Module):
         if not isinstance(batch, PolicyBatch):
             raise ValueError("forward requires PolicyBatch")
         validate_policy_batch(batch)
+        if not bool(batch.candidate_mask.any(dim=1).all()):
+            raise ValueError("all-false candidate rows must bypass policy")
         model_parameter = next(self.parameters())
         if model_parameter.dtype != torch.float32:
             raise ValueError("policy parameters must be float32")
@@ -153,18 +151,12 @@ class CrossAttentionPolicy(nn.Module):
         )
         raw_sin = self.theta_sin_head(action_hidden).squeeze(-1)
         raw_cos = self.theta_cos_head(action_hidden).squeeze(-1)
-        theta_mu = backbone_core._safe_theta_mu(
-            raw_sin=torch.where(batch.candidate_mask, raw_sin, torch.zeros_like(raw_sin)),
-            raw_cos=torch.where(batch.candidate_mask, raw_cos, torch.ones_like(raw_cos)),
-            recommended_sin=masked_features[..., 14],
-            recommended_cos=masked_features[..., 15],
-            candidate_mask=batch.candidate_mask,
-        )
+        theta_mu = backbone_core.normalize_theta(torch.atan2(raw_sin, raw_cos))
         raw_kappa = self.theta_kappa_head(action_hidden).squeeze(-1)
         theta_kappa = torch.clamp(
-            torch.nn.functional.softplus(raw_kappa) + 1.0e-3,
-            min=1.0e-3,
-            max=20.0,
+            torch.nn.functional.softplus(raw_kappa),
+            min=ActionContractV2.theta_kappa_min,
+            max=ActionContractV2.theta_kappa_max,
         )
         candidate_mean, candidate_max = backbone_core._masked_mean_max(
             refined, batch.candidate_mask
@@ -327,8 +319,10 @@ def _validate_policy_output(
         or not bool(torch.isfinite(output.value).all())
     ):
         raise backbone_core.PolicyActionError("value shape, dtype, or device is invalid")
-    if bool((output.theta_kappa < 1.0e-3).any()) or bool(
-        (output.theta_kappa > 20.0).any()
+    if expected[1] != ActionContractV2.candidate_count:
+        raise backbone_core.PolicyActionError("policy outputs must use 64 candidates")
+    if bool((output.theta_kappa < ActionContractV2.theta_kappa_min).any()) or bool(
+        (output.theta_kappa > ActionContractV2.theta_kappa_max).any()
     ):
         raise backbone_core.PolicyActionError("theta kappa is out of bounds")
 

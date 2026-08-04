@@ -12,21 +12,14 @@ from dataclasses import dataclass
 
 import torch
 from lunar_planner_training_bridge import PlanningOutcome
+from lunar_model_contract import ObservationContractV2
 
 from ..config import PLATFORMS
 from ..policy.observation import PolicyBatch, validate_policy_batch
 from .macro_step import ExecutionEvents, PlannerTransition, PolicyAction
 
 
-_OBSERVATION_FIELDS = (
-    "prior_channels",
-    "coverage_summary",
-    "local_crop",
-    "frontier_features",
-    "pose_features",
-    "candidate_mask",
-    "platform_context",
-)
+_OBSERVATION_FIELDS = ObservationContractV2.input_names
 
 
 class ParallelPoolError(RuntimeError):

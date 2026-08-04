@@ -7,6 +7,7 @@ from typing import Protocol
 
 import numpy as np
 import torch
+from lunar_model_contract import ObservationContractV2
 
 from ..policy.cross_attention import (
     CrossAttentionPolicy,
@@ -83,16 +84,7 @@ def collect_rollout(
     )
 
     observation_rows: dict[str, list[np.ndarray]] = {
-        name: []
-        for name in (
-            "prior_channels",
-            "coverage_summary",
-            "local_crop",
-            "frontier_features",
-            "pose_features",
-            "candidate_mask",
-            "platform_context",
-        )
+        name: [] for name in ObservationContractV2.input_names
     }
     selected_indices: list[np.ndarray] = []
     selected_thetas: list[np.ndarray] = []
@@ -191,6 +183,8 @@ def _validated_observations(
         raise CollectorError(str(error)) from error
     if moved.prior_channels.shape[0] != env_count:
         raise CollectorError("observation batch size does not match environment count")
+    if not bool(moved.candidate_mask.any(dim=1).all()):
+        raise CollectorError("all-false candidate rows must bypass rollout collection")
     return moved
 
 
