@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
 from zipfile import BadZipFile, ZipFile
 
@@ -36,9 +36,7 @@ class ArchiveMemberLock:
     nodata: float
 
     def __post_init__(self) -> None:
-        member_path = PurePosixPath(self.path)
-        if not self.path or member_path.is_absolute() or ".." in member_path.parts:
-            raise SourceLockError("archive member path is unsafe")
+        _validated_archive_member_path(self.path)
         if self.site_id not in JAXA_SITE_IDS:
             raise SourceLockError("archive member site id is invalid")
         if not isinstance(self.size_bytes, int) or self.size_bytes < 0:
@@ -290,8 +288,10 @@ def _archive_member_inventory(source: Path) -> tuple[ArchiveMemberLock, ...]:
         with ZipFile(source) as archive:
             members: list[ArchiveMemberLock] = []
             for info in archive.infolist():
-                member_path = PurePosixPath(info.filename)
-                if info.is_dir() or member_path.suffix.lower() not in {".tif", ".tiff", ".dem", ".dtm", ".img", ".vrt"}:
+                if info.is_dir():
+                    continue
+                member_path = _validated_archive_member_path(info.filename)
+                if member_path.suffix.lower() not in {".tif", ".tiff", ".dem", ".dtm", ".img", ".vrt"}:
                     continue
                 site_ids = [site for site in JAXA_SITE_IDS if site in member_path.parts]
                 if len(site_ids) != 1:
@@ -308,6 +308,24 @@ def _archive_member_inventory(source: Path) -> tuple[ArchiveMemberLock, ...]:
     if {member.site_id for member in ordered} != set(JAXA_SITE_IDS):
         raise SourceLockError("archive member inventory must contain the exact six JAXA sites")
     return ordered
+
+
+def _validated_archive_member_path(path: object) -> PurePosixPath:
+    """Accept only canonical relative POSIX archive paths on every host OS."""
+    if not isinstance(path, str) or not path or "\\" in path:
+        raise SourceLockError("archive member path is unsafe")
+    posix_path = PurePosixPath(path)
+    windows_path = PureWindowsPath(path)
+    if (
+        posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or ".." in posix_path.parts
+        or "." in posix_path.parts
+        or posix_path.as_posix() != path
+    ):
+        raise SourceLockError("archive member path is unsafe")
+    return posix_path
 
 
 def _read_raster_metadata(source: Path) -> tuple[str, tuple[float, float, float, float, float, float], float]:

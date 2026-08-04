@@ -211,6 +211,34 @@ def test_jaxa_archive_lock_fails_closed_when_one_site_is_missing(tmp_path: Path)
         )
 
 
+@pytest.mark.parametrize(
+    "malicious_member",
+    [
+        "C:" + "/" + "Users" + "/kai/CR1/CR1_DTM.tif",
+        "//server/share/CR1/CR1_DTM.tif",
+        r"CR1\CR1_DTM.tif",
+        "/CR1/CR1_DTM.tif",
+        "../CR1/CR1_DTM.tif",
+    ],
+)
+def test_jaxa_archive_lock_rejects_windows_and_posix_unsafe_member_paths(
+    tmp_path: Path, malicious_member: str
+) -> None:
+    archive = tmp_path / "DataS1.zip"
+    _write_jaxa_archive(archive)
+    with ZipFile(archive, "a", compression=ZIP_DEFLATED) as zip_file:
+        zip_file.writestr(malicious_member, _raster_bytes())
+
+    with pytest.raises(SourceLockError, match="unsafe"):
+        PolarSourceLock.from_file(
+            "JAXA_LUPEX_DATA_S1",
+            archive,
+            citation="https://doi.org/10.5281/zenodo.17153447",
+            license="cc-by-4.0",
+            final_url="https://zenodo.org/api/files/DataS1.zip",
+        )
+
+
 def test_existing_destination_rejects_lock_filename_mismatch(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
