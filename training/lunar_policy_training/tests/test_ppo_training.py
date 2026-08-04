@@ -142,3 +142,26 @@ def test_single_cpu_ppo_update_uses_core_loss_and_changes_a_parameter() -> None:
         for name, parameter in policy.named_parameters()
     )
     assert PPOTrainer.loss_function is trainer_core.compute_ppo_loss_terms
+
+
+def test_ppo_update_uses_the_frozen_physical_microbatch_for_real_backward() -> None:
+    """Would fail if calibration selected a value that formal training ignored."""
+    torch.manual_seed(19)
+    policy = CrossAttentionPolicy()
+    rollout = _rollout_from_current_policy(policy)
+    forward_batch_sizes: list[int] = []
+    handle = policy.register_forward_pre_hook(
+        lambda module, args: forward_batch_sizes.append(
+            int(args[0].prior_channels.shape[0])
+        )
+    )
+    try:
+        trainer = PPOTrainer(policy, learning_rate=1.0e-3)
+        metrics = trainer.update(rollout, micro_batch_size=1)
+    finally:
+        handle.remove()
+
+    assert forward_batch_sizes == [1, 1]
+    assert trainer.last_micro_batch_size == 1
+    assert metrics.optimizer_steps == 1
+    assert metrics.parameter_change_l2 > 0.0

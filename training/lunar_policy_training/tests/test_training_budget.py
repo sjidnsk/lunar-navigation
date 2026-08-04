@@ -31,6 +31,7 @@ def test_training_budget_uses_fixed_total_and_rejects_overspend() -> None:
     assert budget.remaining_gpu_seconds == 1.0
     with pytest.raises(BudgetExceededError, match="remaining"):
         budget.consume(1.001)
+    assert budget.remaining_gpu_seconds == 0.0
 
 
 def test_active_gpu_intervals_exclude_paused_wall_clock() -> None:
@@ -70,6 +71,7 @@ class _CalibrationProbe:
             planner_timeouts=planner_timeouts,
             oom=oom,
             gpu_seconds=1.0,
+            ipc_failures=0,
         )
 
 
@@ -135,3 +137,73 @@ def test_calibration_falls_back_to_18_when_24_is_not_safe_or_faster(
     )
 
     assert result.selected_workers == 18
+
+
+def test_calibration_rejects_ipc_failure_instead_of_labeling_planner_timeout(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if a dead/late worker were treated as a normal planner transition."""
+    config = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+
+    def ipc_failure(workers: int, micro_batch: int) -> CalibrationMeasurement:
+        return CalibrationMeasurement(
+            workers=workers,
+            micro_batch=micro_batch,
+            throughput_samples_per_second=0.0,
+            peak_gpu_memory_fraction=0.0,
+            planner_timeouts=0,
+            oom=False,
+            gpu_seconds=0.25,
+            ipc_failures=1,
+        )
+
+    budget = TrainingBudget()
+    with pytest.raises(CalibrationError, match="IPC"):
+        calibrate_runtime(
+            config=config,
+            workload=ipc_failure,
+            budget=budget,
+            manifest_path=tmp_path / "ipc.json",
+            micro_batch_candidates=(1,),
+        )
+
+    assert budget.consumed_gpu_seconds == 0.25
+
+
+def test_budget_refuses_to_start_another_bounded_unit_when_empty() -> None:
+    """Would fail if a new inference/update unit started after the shared cap."""
+    budget = TrainingBudget()
+    budget.consume(86400.0)
+
+    with pytest.raises(BudgetExceededError, match="remaining"):
+        budget.begin_gpu_interval(monotonic_seconds=5.0)
+
+    assert budget.interval_active is False
+
+
+def test_calibration_unexpected_exit_still_settles_shared_budget(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if a failed calibration probe left active GPU time uncharged."""
+    config = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+    timestamps = iter((20.0, 23.0))
+    budget = TrainingBudget()
+
+    with pytest.raises(RuntimeError, match="probe crashed"):
+        calibrate_runtime(
+            config=config,
+            workload=lambda workers, micro_batch: (_ for _ in ()).throw(
+                RuntimeError("probe crashed")
+            ),
+            budget=budget,
+            manifest_path=tmp_path / "failed.json",
+            micro_batch_candidates=(1,),
+            clock=lambda: next(timestamps),
+        )
+
+    assert budget.consumed_gpu_seconds == 3.0
+    assert budget.interval_active is False

@@ -21,6 +21,8 @@ from lunar_policy_training.cli import (  # noqa: E402
     ResumablePPOTrainer,
     run_cuda_interrupt_resume_smoke,
 )
+import lunar_policy_training.cli as training_cli  # noqa: E402
+from lunar_policy_training.checkpoint import load_checkpoint  # noqa: E402
 from lunar_policy_training.environment.macro_step import PlannerTransition  # noqa: E402
 from lunar_policy_training.policy.cross_attention import CrossAttentionPolicy  # noqa: E402
 from lunar_policy_training.policy.observation import PolicyBatch  # noqa: E402
@@ -68,11 +70,19 @@ def test_resumable_trainer_uses_injected_transition_reward() -> None:
 @pytest.mark.cuda
 def test_cuda_interrupt_resume_preserves_step_budget_and_allocation(
     tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Would fail if a real CUDA pause/resume reset progress or the joint split."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     artifact_root = tmp_path / "cuda-interrupt-resume"
+    monkeypatch.setattr(
+        training_cli,
+        "_proxy_rollout",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("public train/resume must not use proxy rollout")
+        ),
+    )
 
     evidence = run_cuda_interrupt_resume_smoke(
         config_path=(
@@ -105,9 +115,23 @@ def test_cuda_interrupt_resume_preserves_step_budget_and_allocation(
         "HOPPER": 8,
     }
     selected_workers = manifest["runtime_calibration"]["selected_workers"]
+    selected_micro_batch = manifest["runtime_calibration"][
+        "selected_micro_batch"
+    ]
+    assert all(
+        measurement["optimizer_steps"] == 1
+        and measurement["ipc_failures"] == 0
+        for measurement in manifest["runtime_calibration"]["measurements"]
+    )
     selected_per_platform = selected_workers // 3
     assert evidence.platform_allocation == {
         "WHEELED": selected_per_platform,
         "LEGGED": selected_per_platform,
         "HOPPER": selected_per_platform,
     }
+    checkpoint = load_checkpoint(artifact_root / "latest.pt")
+    assert checkpoint.worker_allocation == evidence.platform_allocation
+    assert checkpoint.micro_batch_size == selected_micro_batch
+    assert checkpoint.latest_checkpoint_gpu_seconds == (
+        checkpoint.consumed_gpu_seconds
+    )

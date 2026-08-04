@@ -143,6 +143,61 @@ def test_signal_after_collection_discards_unfinished_rollout_without_update() ->
     assert result.stop_signal == signal.SIGINT
 
 
+def test_rollout_and_failed_update_both_settle_the_same_active_gpu_budget() -> None:
+    """Would fail if policy inference or an exceptional PPO update escaped accounting."""
+    timestamps = iter((10.0, 12.0, 12.0, 15.0))
+    budget = TrainingBudget()
+    loop = TrainingBoundaryLoop(
+        budget=budget,
+        stop_flag=SignalStopFlag(),
+        checkpoint_interval_seconds=1800,
+        candidate_checkpoint_interval_seconds=3600,
+        curriculum_phase="joint",
+        clock=lambda: next(timestamps),
+    )
+
+    with pytest.raises(RuntimeError, match="update failed"):
+        loop.run(
+            collect_rollout=lambda: object(),
+            update_rollout=lambda rollout: (_ for _ in ()).throw(
+                RuntimeError("update failed")
+            ),
+            save_checkpoint=lambda kind, state: None,
+            max_updates=1,
+        )
+
+    assert budget.consumed_gpu_seconds == 5.0
+    assert budget.interval_active is False
+
+
+def test_resume_continues_latest_and_candidate_rhythms_from_active_gpu_markers() -> None:
+    """Would fail if pause/resume restarted the 30/60-minute checkpoint clocks."""
+    timestamps = iter((0.0, 0.5, 0.5, 1.0))
+    budget = TrainingBudget(consumed_gpu_seconds=3599.0)
+    saves: list[tuple[str, object]] = []
+    loop = TrainingBoundaryLoop(
+        budget=budget,
+        stop_flag=SignalStopFlag(),
+        checkpoint_interval_seconds=1800,
+        candidate_checkpoint_interval_seconds=3600,
+        curriculum_phase="joint",
+        initial_latest_checkpoint_gpu_seconds=1800.0,
+        initial_candidate_checkpoint_gpu_seconds=0.0,
+        clock=lambda: next(timestamps),
+    )
+
+    state = loop.run(
+        collect_rollout=lambda: object(),
+        update_rollout=lambda rollout: None,
+        save_checkpoint=lambda kind, saved_state: saves.append((kind, saved_state)),
+        max_updates=1,
+    )
+
+    assert [kind for kind, _ in saves][:2] == ["latest", "candidate"]
+    assert state.latest_checkpoint_gpu_seconds == 3600.0
+    assert state.candidate_checkpoint_gpu_seconds == 3600.0
+
+
 def _training_fingerprint() -> dict[str, object]:
     return {
         "schema_version": "lunar-platform-fingerprint/v1",

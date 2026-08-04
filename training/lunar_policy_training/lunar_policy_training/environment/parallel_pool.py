@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 import torch
+from lunar_planner_training_bridge import PlanningOutcome
 
 from ..config import PLATFORMS
 from ..policy.observation import PolicyBatch, validate_policy_batch
@@ -53,6 +54,8 @@ class ParallelRolloutStep:
     dones: torch.Tensor
     policy_versions: torch.Tensor
     buffer_index: int
+    planning_outcomes: tuple[PlanningOutcome, ...] = ()
+    reason_codes: tuple[str, ...] = ()
 
 
 class ParallelEnvPool:
@@ -227,13 +230,19 @@ class ParallelEnvPool:
             self.shared_action_buffers[target_buffer]["thetas"].copy_(actions.thetas)
             for command_queue in self._command_queues:
                 command_queue.put(("step", target_buffer, policy_version))
-            self._await_step(target_buffer, policy_version)
+            planning_outcomes, reason_codes = self._await_step(
+                target_buffer, policy_version
+            )
             self.validate_policy_versions(
                 self._shared_policy_versions[target_buffer],
                 expected_policy_version=policy_version,
             )
             self._buffer_index = target_buffer
-            return self._stage_buffer(target_buffer)
+            return self._stage_buffer(
+                target_buffer,
+                planning_outcomes=planning_outcomes,
+                reason_codes=reason_codes,
+            )
         except ParallelPoolError as error:
             if not self.training_stopped:
                 return self._fail_closed(str(error))
@@ -292,8 +301,11 @@ class ParallelEnvPool:
             for index in range(self.worker_count)
         ]
 
-    def _await_step(self, buffer_index: int, policy_version: int) -> None:
+    def _await_step(
+        self, buffer_index: int, policy_version: int
+    ) -> tuple[tuple[PlanningOutcome, ...], tuple[str, ...]]:
         completed: set[int] = set()
+        metadata: dict[int, tuple[PlanningOutcome, str]] = {}
         deadline = time.monotonic() + self._worker_timeout_seconds
         while len(completed) < self.worker_count:
             message = self._next_result(deadline)
@@ -305,10 +317,25 @@ class ParallelEnvPool:
             if (
                 kind != "step"
                 or worker_index in completed
-                or values != [buffer_index, policy_version]
+                or len(values) != 4
+                or values[:2] != [buffer_index, policy_version]
             ):
                 raise ParallelPoolError("worker step protocol failed")
+            outcome_value, reason_code = values[2:]
+            if type(outcome_value) is not int or not isinstance(reason_code, str):
+                raise ParallelPoolError("worker transition metadata is invalid")
+            try:
+                outcome = PlanningOutcome(outcome_value)
+            except (TypeError, ValueError) as error:
+                raise ParallelPoolError(
+                    "worker planning outcome is invalid"
+                ) from error
+            metadata[worker_index] = (outcome, reason_code)
             completed.add(worker_index)
+        return (
+            tuple(metadata[index][0] for index in range(self.worker_count)),
+            tuple(metadata[index][1] for index in range(self.worker_count)),
+        )
 
     def _next_result(self, deadline: float) -> tuple[object, ...]:
         while True:
@@ -334,7 +361,13 @@ class ParallelEnvPool:
                 raise ParallelPoolError("worker returned malformed control data")
             return message
 
-    def _stage_buffer(self, buffer_index: int) -> ParallelRolloutStep:
+    def _stage_buffer(
+        self,
+        buffer_index: int,
+        *,
+        planning_outcomes: tuple[PlanningOutcome, ...] = (),
+        reason_codes: tuple[str, ...] = (),
+    ) -> ParallelRolloutStep:
         try:
             for name, shared in self.shared_observation_buffers[buffer_index].items():
                 self._staging_observations[buffer_index][name].copy_(shared)
@@ -357,6 +390,8 @@ class ParallelEnvPool:
                 dones=self._staging_dones[buffer_index],
                 policy_versions=self._staging_policy_versions[buffer_index],
                 buffer_index=buffer_index,
+                planning_outcomes=planning_outcomes,
+                reason_codes=reason_codes,
             )
         except ParallelPoolError:
             raise
@@ -469,7 +504,14 @@ def _worker_main(
             done_buffers[buffer_index][worker_index] = transition.terminated
             policy_version_buffers[buffer_index][worker_index] = policy_version
             result_queue.put(
-                ("step", worker_index, buffer_index, policy_version)
+                (
+                    "step",
+                    worker_index,
+                    buffer_index,
+                    policy_version,
+                    int(transition.planning_outcome),
+                    transition.reason_code,
+                )
             )
     except BaseException as error:
         try:

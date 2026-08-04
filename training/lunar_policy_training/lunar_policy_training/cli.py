@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
@@ -21,7 +21,7 @@ from typing import TypeVar
 
 import numpy as np
 import torch
-from lunar_planner_training_bridge import TrainingPlanRequest
+from lunar_planner_training_bridge import PlanningOutcome, TrainingPlanRequest
 
 from .budget import (
     CalibrationMeasurement,
@@ -52,6 +52,7 @@ from .environment.macro_step import PlannerTransition
 from .environment.v3_environment import create_v3_environment
 from .policy.cross_attention import CrossAttentionPolicy, sample_action
 from .policy.observation import PolicyBatch
+from .ppo.collector import CollectorConfig, EnvStep, collect_rollout as collect_ppo_rollout
 from .ppo.rollout import RolloutBatch
 from .ppo.trainer import PPOTrainer
 
@@ -94,6 +95,8 @@ class TrainingLoopState:
     global_step: int
     rollout_discarded: bool
     stop_signal: int | None
+    latest_checkpoint_gpu_seconds: float
+    candidate_checkpoint_gpu_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +118,73 @@ class _RunEvidence:
     signal_observed_at_update_boundary: bool
 
 
+class _ParallelPoolVectorEnv:
+    """Thin production adapter from the shared pool to the PPO collector."""
+
+    def __init__(self, pool: ParallelEnvPool, *, policy_version: int) -> None:
+        if not isinstance(pool, ParallelEnvPool):
+            raise ValueError("parallel rollout adapter requires ParallelEnvPool")
+        self._pool = pool
+        self.env_count = pool.worker_count
+        self._current = None
+        self.policy_versions: list[int] = []
+        self.planning_outcomes: list[object] = []
+        self.reason_codes: list[str] = []
+        self._normalization_state: Mapping[str, object] | None = None
+        self.set_policy_version(policy_version)
+
+    def use_normalization_state(
+        self, normalization_state: Mapping[str, object]
+    ) -> None:
+        if not isinstance(normalization_state, Mapping):
+            raise ValueError("normalization state must be a mapping")
+        self._normalization_state = normalization_state
+
+    def set_policy_version(self, policy_version: int) -> None:
+        if type(policy_version) is not int or policy_version < 0:
+            raise ValueError("policy version must be a non-negative integer")
+        self._policy_version = policy_version
+        self.policy_versions.clear()
+        self.planning_outcomes.clear()
+        self.reason_codes.clear()
+
+    def reset(self) -> PolicyBatch:
+        if self._current is None:
+            self._current = self._pool.reset()
+        return self._current.observations
+
+    def step(
+        self, candidate_indices: np.ndarray, thetas: np.ndarray
+    ) -> EnvStep:
+        step = self._pool.step(
+            ParallelActions(
+                candidate_indices=torch.from_numpy(candidate_indices),
+                thetas=torch.from_numpy(thetas),
+            ),
+            policy_version=self._policy_version,
+        )
+        self._current = step
+        self.policy_versions.append(self._policy_version)
+        self.planning_outcomes.extend(step.planning_outcomes)
+        self.reason_codes.extend(step.reason_codes)
+        rewards = step.rewards.numpy().astype(np.float32, copy=True)
+        if self._normalization_state is not None:
+            mean = float(self._normalization_state["reward_mean"])
+            variance = float(self._normalization_state["reward_var"])
+            if not math.isfinite(mean) or not math.isfinite(variance) or variance <= 0.0:
+                raise ValueError("live reward normalization state is invalid")
+            rewards = np.asarray(
+                (rewards - np.float32(mean))
+                / np.float32(math.sqrt(variance)),
+                dtype=np.float32,
+            )
+        return EnvStep(
+            observations=step.observations,
+            rewards=rewards,
+            dones=step.dones.numpy().astype(np.bool_, copy=True),
+        )
+
+
 class ResumablePPOTrainer:
     """Task 1 PPO core plus an injectable Task 4-compatible reward boundary."""
 
@@ -129,6 +199,10 @@ class ResumablePPOTrainer:
             raise ValueError("reward function must be callable")
         self._reward_fn = reward_fn
         self._ppo = PPOTrainer(policy, device=device)
+        self.normalization: dict[str, object] = {
+            "reward_mean": 0.0,
+            "reward_var": 1.0,
+        }
 
     @property
     def policy(self) -> CrossAttentionPolicy:
@@ -150,8 +224,12 @@ class ResumablePPOTrainer:
             raise ValueError("reward function must return a finite scalar")
         return float(reward)
 
-    def update(self, rollout: RolloutBatch):
-        return self._ppo.update(rollout)
+    def update(
+        self, rollout: RolloutBatch, *, micro_batch_size: int | None = None
+    ):
+        return self._ppo.update(
+            rollout, micro_batch_size=micro_batch_size
+        )
 
 
 class TrainingBoundaryLoop:
@@ -166,6 +244,8 @@ class TrainingBoundaryLoop:
         candidate_checkpoint_interval_seconds: int,
         curriculum_phase: str,
         initial_global_step: int = 0,
+        initial_latest_checkpoint_gpu_seconds: float = 0.0,
+        initial_candidate_checkpoint_gpu_seconds: float = 0.0,
         clock: Callable[[], float] = time.monotonic,
         synchronize_device: Callable[[], None] | None = None,
     ) -> None:
@@ -184,6 +264,18 @@ class TrainingBoundaryLoop:
             raise ValueError("curriculum phase must be non-empty")
         if type(initial_global_step) is not int or initial_global_step < 0:
             raise ValueError("initial global step must be non-negative")
+        for name, marker in (
+            ("latest", initial_latest_checkpoint_gpu_seconds),
+            ("candidate", initial_candidate_checkpoint_gpu_seconds),
+        ):
+            if (
+                not isinstance(marker, (int, float))
+                or isinstance(marker, bool)
+                or not math.isfinite(float(marker))
+                or marker < 0.0
+                or marker > budget.consumed_gpu_seconds
+            ):
+                raise ValueError(f"initial {name} checkpoint marker is invalid")
         if not callable(clock):
             raise ValueError("boundary loop clock must be callable")
         if synchronize_device is not None and not callable(synchronize_device):
@@ -196,6 +288,12 @@ class TrainingBoundaryLoop:
         )
         self._curriculum_phase = curriculum_phase
         self._global_step = initial_global_step
+        self._latest_checkpoint_gpu_seconds = float(
+            initial_latest_checkpoint_gpu_seconds
+        )
+        self._candidate_checkpoint_gpu_seconds = float(
+            initial_candidate_checkpoint_gpu_seconds
+        )
         self._clock = clock
         self._synchronize_device = synchronize_device or (lambda: None)
 
@@ -214,12 +312,26 @@ class TrainingBoundaryLoop:
             raise ValueError("boundary loop callbacks must be callable")
         if type(max_updates) is not int or max_updates <= 0:
             raise ValueError("max updates must be a positive integer")
-        last_latest = self._clock()
-        last_candidate = last_latest
         updates = 0
         while updates < max_updates:
-            rollout = collect_rollout()
+            interval_start = self._clock()
+            self._budget.begin_gpu_interval(monotonic_seconds=interval_start)
+            collection_error: BaseException | None = None
+            rollout = None
+            try:
+                rollout = collect_rollout()
+                self._synchronize_device()
+            except BaseException as error:
+                collection_error = error
+            finally:
+                interval_end = self._clock()
+                self._budget.end_gpu_interval(monotonic_seconds=interval_end)
+            if collection_error is not None:
+                raise collection_error
             if self._stop_flag.requested:
+                self._latest_checkpoint_gpu_seconds = (
+                    self._budget.consumed_gpu_seconds
+                )
                 state = self._state(rollout_discarded=True)
                 save_checkpoint("latest", state)
                 return state
@@ -238,24 +350,30 @@ class TrainingBoundaryLoop:
                 raise update_error
             self._global_step += 1
             updates += 1
-            now = self._clock()
+            now = self._budget.consumed_gpu_seconds
             latest_saved = False
-            if now - last_latest >= self._checkpoint_interval_seconds:
+            if (
+                now - self._latest_checkpoint_gpu_seconds
+                >= self._checkpoint_interval_seconds
+            ):
+                self._latest_checkpoint_gpu_seconds = now
                 save_checkpoint("latest", self._state(rollout_discarded=False))
-                last_latest = now
                 latest_saved = True
             if (
                 self._curriculum_phase == "joint"
-                and now - last_candidate
+                and now - self._candidate_checkpoint_gpu_seconds
                 >= self._candidate_checkpoint_interval_seconds
             ):
+                self._candidate_checkpoint_gpu_seconds = now
                 save_checkpoint("candidate", self._state(rollout_discarded=False))
-                last_candidate = now
             if self._stop_flag.requested:
                 state = self._state(rollout_discarded=False)
                 if not latest_saved:
+                    self._latest_checkpoint_gpu_seconds = now
+                    state = self._state(rollout_discarded=False)
                     save_checkpoint("latest", state)
                 return state
+        self._latest_checkpoint_gpu_seconds = self._budget.consumed_gpu_seconds
         state = self._state(rollout_discarded=False)
         save_checkpoint("latest", state)
         return state
@@ -265,6 +383,10 @@ class TrainingBoundaryLoop:
             global_step=self._global_step,
             rollout_discarded=rollout_discarded,
             stop_signal=self._stop_flag.signal_number,
+            latest_checkpoint_gpu_seconds=self._latest_checkpoint_gpu_seconds,
+            candidate_checkpoint_gpu_seconds=(
+                self._candidate_checkpoint_gpu_seconds
+            ),
         )
 
 
@@ -414,6 +536,7 @@ def _start_training_run(
         source_commit=source_commit,
         budget=budget,
         allocation=allocation,
+        micro_batch_size=calibration.selected_micro_batch,
         initial_global_step=0,
         max_updates=max_updates,
         interrupt_first_update=interrupt_first_update,
@@ -436,11 +559,23 @@ def _resume_training_run(
         raise ArtifactRootError("run manifest frozen config is missing")
     config = resolve_training_config(frozen_config)
     source_commit = _source_commit(repository_root)
+    allocation_raw = manifest.get("platform_allocation")
+    if not isinstance(allocation_raw, dict):
+        raise ArtifactRootError("run manifest platform allocation is missing")
+    allocation = {name: int(value) for name, value in allocation_raw.items()}
+    runtime_calibration = manifest.get("runtime_calibration")
+    if not isinstance(runtime_calibration, dict):
+        raise ArtifactRootError("run manifest runtime calibration is missing")
+    micro_batch_size = runtime_calibration.get("selected_micro_batch")
+    if type(micro_batch_size) is not int or micro_batch_size <= 0:
+        raise ArtifactRootError("run manifest micro-batch is invalid")
     checkpoint = load_checkpoint_for_resume(
         root / "latest.pt",
         expected_contract_version="ObservationContractV1",
         expected_config_hash=config_sha256(config.as_frozen_dict()),
         expected_source_commit=source_commit,
+        expected_worker_allocation=allocation,
+        expected_micro_batch_size=micro_batch_size,
     )
     if manifest.get("global_step") != checkpoint.global_step:
         raise ArtifactRootError("run manifest global step differs from latest checkpoint")
@@ -450,10 +585,6 @@ def _resume_training_run(
         or float(manifest_budget) != checkpoint.consumed_gpu_seconds
     ):
         raise ArtifactRootError("run manifest budget differs from latest checkpoint")
-    allocation_raw = manifest.get("platform_allocation")
-    if not isinstance(allocation_raw, dict):
-        raise ArtifactRootError("run manifest platform allocation is missing")
-    allocation = {name: int(value) for name, value in allocation_raw.items()}
     budget = TrainingBudget.from_checkpoint(checkpoint)
     return _run_updates(
         config=config,
@@ -462,6 +593,7 @@ def _resume_training_run(
         source_commit=source_commit,
         budget=budget,
         allocation=allocation,
+        micro_batch_size=micro_batch_size,
         initial_global_step=checkpoint.global_step,
         max_updates=max_updates,
         interrupt_first_update=False,
@@ -477,18 +609,29 @@ def _run_updates(
     source_commit: str,
     budget: TrainingBudget,
     allocation: dict[str, int],
+    micro_batch_size: int,
     initial_global_step: int,
     max_updates: int,
     interrupt_first_update: bool,
     restore_checkpoint,
+    rollout_environment_factory: Callable[
+        [int, str], ParallelEnvironmentWorker
+    ] | None = None,
+    rollout_reward_fn: Callable[[PlannerTransition], float] | None = None,
 ) -> _RunEvidence:
     if type(max_updates) is not int or max_updates <= 0:
         raise ValueError("max updates must be a positive integer")
     _validated_cuda_device()
+    # Task 3 exercises the real bridge with a minimal fixture; Task 4 injects
+    # curriculum scenarios and the final reward without replacing this path.
+    environment_factory = (
+        rollout_environment_factory or _calibration_environment_factory
+    )
+    reward_fn = rollout_reward_fn or _calibration_reward
     policy = CrossAttentionPolicy()
     trainer = ResumablePPOTrainer(
         policy,
-        reward_fn=_calibration_reward,
+        reward_fn=reward_fn,
         device="cuda",
     )
     scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -500,16 +643,34 @@ def _run_updates(
             trainer.policy,
             trainer.optimizer,
             scheduler,
+            normalization_state=trainer.normalization,
         )
     stop_flag = SignalStopFlag()
-    sample_count = sum(allocation.values())
     sent_interrupt = False
+    rollout_policy_version = initial_global_step
+    pool = ParallelEnvPool(
+        allocation=allocation,
+        observation_template=_calibration_observation(0, "WHEELED"),
+        environment_factory=environment_factory,
+        reward_fn=reward_fn,
+        worker_timeout_seconds=60.0,
+    )
+    environment = _ParallelPoolVectorEnv(
+        pool, policy_version=rollout_policy_version
+    )
+    environment.use_normalization_state(trainer.normalization)
 
     def collect_rollout() -> RolloutBatch:
-        return _proxy_rollout(trainer.policy, sample_count=sample_count)
+        environment.set_policy_version(rollout_policy_version)
+        return collect_ppo_rollout(
+            environment,
+            trainer.policy,
+            CollectorConfig(horizon=2, deterministic=True),
+            device="cuda",
+        ).rollout
 
     def update_rollout(rollout: RolloutBatch) -> None:
-        nonlocal sent_interrupt
+        nonlocal sent_interrupt, rollout_policy_version
         timer: threading.Timer | None = None
         if interrupt_first_update and not sent_interrupt:
             sent_interrupt = True
@@ -518,13 +679,12 @@ def _run_updates(
             )
             timer.start()
         try:
-            trainer.update(rollout)
+            trainer.update(rollout, micro_batch_size=micro_batch_size)
             scheduler.step()
+            rollout_policy_version += 1
         finally:
             if timer is not None:
                 timer.join()
-
-    normalization = {"reward_mean": 0.0, "reward_var": 1.0}
 
     def save(kind: str, state: TrainingLoopState) -> None:
         checkpoint = build_training_checkpoint(
@@ -533,10 +693,18 @@ def _run_updates(
             scheduler=scheduler,
             global_step=state.global_step,
             curriculum_phase="joint",
-            normalization=normalization,
+            normalization=trainer.normalization,
             frozen_config=config.as_frozen_dict(),
             source_commit=source_commit,
             consumed_gpu_seconds=budget.consumed_gpu_seconds,
+            worker_allocation=allocation,
+            micro_batch_size=micro_batch_size,
+            latest_checkpoint_gpu_seconds=(
+                state.latest_checkpoint_gpu_seconds
+            ),
+            candidate_checkpoint_gpu_seconds=(
+                state.candidate_checkpoint_gpu_seconds
+            ),
         )
         if kind == "latest":
             target = artifact_root / "latest.pt"
@@ -565,15 +733,28 @@ def _run_updates(
         ),
         curriculum_phase="joint",
         initial_global_step=initial_global_step,
+        initial_latest_checkpoint_gpu_seconds=(
+            restore_checkpoint.latest_checkpoint_gpu_seconds
+            if restore_checkpoint is not None
+            else 0.0
+        ),
+        initial_candidate_checkpoint_gpu_seconds=(
+            restore_checkpoint.candidate_checkpoint_gpu_seconds
+            if restore_checkpoint is not None
+            else 0.0
+        ),
         synchronize_device=torch.cuda.synchronize,
     )
-    with stop_flag.installed():
-        state = loop.run(
-            collect_rollout=collect_rollout,
-            update_rollout=update_rollout,
-            save_checkpoint=save,
-            max_updates=max_updates,
-        )
+    try:
+        with stop_flag.installed():
+            state = loop.run(
+                collect_rollout=collect_rollout,
+                update_rollout=update_rollout,
+                save_checkpoint=save,
+                max_updates=max_updates,
+            )
+    finally:
+        pool.close()
     loaded = load_checkpoint(artifact_root / "latest.pt")
     if loaded.global_step != state.global_step:
         raise RuntimeError("latest checkpoint missed the completed update boundary")
@@ -595,44 +776,62 @@ class _CudaPlannerCalibrationWorkload:
     def __init__(self) -> None:
         _validated_cuda_device()
         self._pool: ParallelEnvPool | None = None
+        self._environment: _ParallelPoolVectorEnv | None = None
         self._workers: int | None = None
         self._policy_version = 0
-        self._policy = CrossAttentionPolicy().cuda().eval()
+        self._trainer = ResumablePPOTrainer(
+            CrossAttentionPolicy(),
+            reward_fn=_calibration_reward,
+            device="cuda",
+        )
 
     def __call__(self, workers: int, micro_batch: int) -> CalibrationMeasurement:
         self._ensure_pool(workers)
         assert self._pool is not None
-        actions = ParallelActions(
-            candidate_indices=torch.zeros((workers,), dtype=torch.int64),
-            thetas=torch.zeros((workers,), dtype=torch.float32),
-        )
+        assert self._environment is not None
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         wall_start = time.perf_counter()
         planner_timeouts = 0
+        ipc_failures = 0
+        optimizer_steps = 0
         oom = False
         gpu_seconds = 0.0
         try:
-            for _ in range(micro_batch):
-                self._policy_version += 1
-                self._pool.step(actions, policy_version=self._policy_version)
-            batch = _proxy_policy_batch(workers * micro_batch, device="cuda")
+            self._policy_version += 1
+            self._environment.set_policy_version(self._policy_version)
             start_event.record()
-            with torch.no_grad():
-                self._policy(batch)
+            collected = collect_ppo_rollout(
+                self._environment,
+                self._trainer.policy,
+                CollectorConfig(horizon=micro_batch, deterministic=True),
+                device="cuda",
+            )
+            metrics = self._trainer.update(
+                collected.rollout, micro_batch_size=micro_batch
+            )
+            optimizer_steps = metrics.optimizer_steps
             end_event.record()
             torch.cuda.synchronize()
             gpu_seconds = max(start_event.elapsed_time(end_event) / 1000.0, 0.0)
+            planner_timeouts = sum(
+                outcome == PlanningOutcome.RESOURCE_EXHAUSTED
+                and "TIMEOUT" in reason.upper()
+                for outcome, reason in zip(
+                    self._environment.planning_outcomes,
+                    self._environment.reason_codes,
+                )
+            )
         except torch.cuda.OutOfMemoryError:
             oom = True
             torch.cuda.synchronize()
             gpu_seconds = max(time.perf_counter() - wall_start, 0.0)
-        except ParallelPoolError as error:
-            if "timed out" not in str(error):
-                raise
-            planner_timeouts = 1
+        except ParallelPoolError:
+            ipc_failures = 1
+            torch.cuda.synchronize()
+            gpu_seconds = max(time.perf_counter() - wall_start, 0.0)
         wall_seconds = max(time.perf_counter() - wall_start, 1.0e-9)
         total_memory = torch.cuda.get_device_properties(0).total_memory
         peak_fraction = torch.cuda.max_memory_allocated() / total_memory
@@ -645,12 +844,15 @@ class _CudaPlannerCalibrationWorkload:
             planner_timeouts=planner_timeouts,
             oom=oom,
             gpu_seconds=gpu_seconds,
+            ipc_failures=ipc_failures,
+            optimizer_steps=optimizer_steps,
         )
 
     def close(self) -> None:
         if self._pool is not None:
             self._pool.close()
             self._pool = None
+            self._environment = None
             self._workers = None
 
     def _ensure_pool(self, workers: int) -> None:
@@ -665,7 +867,9 @@ class _CudaPlannerCalibrationWorkload:
             reward_fn=_calibration_reward,
             worker_timeout_seconds=60.0,
         )
-        self._pool.reset()
+        self._environment = _ParallelPoolVectorEnv(
+            self._pool, policy_version=self._policy_version
+        )
         self._workers = workers
 
 

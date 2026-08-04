@@ -7,7 +7,7 @@ import json
 import math
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,6 +41,10 @@ _BODY_FIELDS = {
     "config_hash",
     "source_commit",
     "consumed_gpu_seconds",
+    "worker_allocation",
+    "micro_batch_size",
+    "latest_checkpoint_gpu_seconds",
+    "candidate_checkpoint_gpu_seconds",
 }
 
 
@@ -59,6 +63,10 @@ class TrainingCheckpointV2:
     config_hash: str
     source_commit: str
     consumed_gpu_seconds: float
+    worker_allocation: dict[str, int]
+    micro_batch_size: int
+    latest_checkpoint_gpu_seconds: float
+    candidate_checkpoint_gpu_seconds: float
     payload_sha256: str
 
 
@@ -73,6 +81,10 @@ def build_training_checkpoint(
     frozen_config: Mapping[str, object],
     source_commit: str,
     consumed_gpu_seconds: float,
+    worker_allocation: Mapping[str, int],
+    micro_batch_size: int,
+    latest_checkpoint_gpu_seconds: float,
+    candidate_checkpoint_gpu_seconds: float,
 ) -> TrainingCheckpointV2:
     """Capture a complete run state with the PPO core's strict validators."""
     if not isinstance(model, nn.Module):
@@ -95,6 +107,10 @@ def build_training_checkpoint(
         "config_hash": config_sha256(frozen_config),
         "source_commit": source_commit,
         "consumed_gpu_seconds": consumed_gpu_seconds,
+        "worker_allocation": dict(worker_allocation),
+        "micro_batch_size": micro_batch_size,
+        "latest_checkpoint_gpu_seconds": latest_checkpoint_gpu_seconds,
+        "candidate_checkpoint_gpu_seconds": candidate_checkpoint_gpu_seconds,
     }
     _validate_body(body)
     return _checkpoint_from_body(body, _semantic_sha256(body))
@@ -177,6 +193,8 @@ def load_checkpoint_for_resume(
     expected_contract_version: str,
     expected_config_hash: str,
     expected_source_commit: str,
+    expected_worker_allocation: Mapping[str, int] | None = None,
+    expected_micro_batch_size: int | None = None,
 ) -> TrainingCheckpointV2:
     """Reject any run identity drift before live state can be mutated."""
     checkpoint = load_checkpoint(path)
@@ -186,6 +204,16 @@ def load_checkpoint_for_resume(
         raise CheckpointError("checkpoint config hash mismatch")
     if checkpoint.source_commit != expected_source_commit:
         raise CheckpointError("checkpoint source commit mismatch")
+    if (
+        expected_worker_allocation is not None
+        and checkpoint.worker_allocation != dict(expected_worker_allocation)
+    ):
+        raise CheckpointError("checkpoint worker allocation mismatch")
+    if (
+        expected_micro_batch_size is not None
+        and checkpoint.micro_batch_size != expected_micro_batch_size
+    ):
+        raise CheckpointError("checkpoint micro-batch mismatch")
     return checkpoint
 
 
@@ -194,6 +222,8 @@ def restore_training_state(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
+    *,
+    normalization_state: MutableMapping[object, object] | None = None,
 ) -> None:
     """Restore complete train/RNG state, rolling live objects back on failure."""
     if not isinstance(checkpoint, TrainingCheckpointV2):
@@ -208,16 +238,31 @@ def restore_training_state(
     live_optimizer = _cpu_copy(optimizer.state_dict())
     live_scheduler = _cpu_copy(scheduler.state_dict())
     live_rng = _capture_rng_state()
+    if normalization_state is not None and not isinstance(
+        normalization_state, MutableMapping
+    ):
+        raise CheckpointError("live normalization state must be mutable")
+    live_normalization = (
+        _cpu_copy(dict(normalization_state))
+        if normalization_state is not None
+        else None
+    )
     try:
         model.load_state_dict(dict(checkpoint.model_state), strict=True)
         optimizer.load_state_dict(dict(checkpoint.optimizer_state))
         scheduler.load_state_dict(dict(checkpoint.scheduler_state))
+        if normalization_state is not None:
+            normalization_state.clear()
+            normalization_state.update(_cpu_copy(dict(checkpoint.normalization)))
         _restore_rng_state(checkpoint.rng_state)
     except Exception as error:
         try:
             model.load_state_dict(dict(live_model), strict=True)
             optimizer.load_state_dict(dict(live_optimizer))
             scheduler.load_state_dict(dict(live_scheduler))
+            if normalization_state is not None:
+                normalization_state.clear()
+                normalization_state.update(live_normalization)
             _restore_rng_state(live_rng)
         except Exception as rollback_error:
             raise CheckpointError("checkpoint restore rollback failed") from rollback_error
@@ -269,6 +314,28 @@ def _validate_body(body: object) -> None:
         or consumed < 0.0
     ):
         raise CheckpointError("checkpoint consumed GPU seconds are invalid")
+    allocation = body["worker_allocation"]
+    if (
+        not isinstance(allocation, Mapping)
+        or set(allocation) != {"WHEELED", "LEGGED", "HOPPER"}
+        or any(type(value) is not int or value <= 0 for value in allocation.values())
+    ):
+        raise CheckpointError("checkpoint worker allocation is invalid")
+    if type(body["micro_batch_size"]) is not int or body["micro_batch_size"] <= 0:
+        raise CheckpointError("checkpoint micro-batch is invalid")
+    for name in (
+        "latest_checkpoint_gpu_seconds",
+        "candidate_checkpoint_gpu_seconds",
+    ):
+        marker = body[name]
+        if (
+            not isinstance(marker, (int, float))
+            or isinstance(marker, bool)
+            or not math.isfinite(float(marker))
+            or marker < 0.0
+            or marker > float(consumed)
+        ):
+            raise CheckpointError(f"checkpoint {name} is invalid")
 
 
 def _checkpoint_from_body(
@@ -288,6 +355,14 @@ def _checkpoint_from_body(
         config_hash=body["config_hash"],
         source_commit=body["source_commit"],
         consumed_gpu_seconds=float(body["consumed_gpu_seconds"]),
+        worker_allocation=dict(body["worker_allocation"]),
+        micro_batch_size=body["micro_batch_size"],
+        latest_checkpoint_gpu_seconds=float(
+            body["latest_checkpoint_gpu_seconds"]
+        ),
+        candidate_checkpoint_gpu_seconds=float(
+            body["candidate_checkpoint_gpu_seconds"]
+        ),
         payload_sha256=payload_sha256,
     )
 

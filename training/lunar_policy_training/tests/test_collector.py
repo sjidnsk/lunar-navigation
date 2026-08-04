@@ -6,6 +6,7 @@ import sys
 import numpy as np
 import pytest
 import torch
+from lunar_planner_training_bridge import PlanningOutcome, TrainingPlanRequest
 
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -13,6 +14,15 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "model_cont
 
 from lunar_policy_training.policy.cross_attention import CrossAttentionPolicy  # noqa: E402
 from lunar_policy_training.policy.observation import PolicyBatch  # noqa: E402
+from lunar_policy_training.cli import _ParallelPoolVectorEnv  # noqa: E402
+from lunar_policy_training.environment.macro_step import PlannerTransition  # noqa: E402
+from lunar_policy_training.environment.parallel_pool import (  # noqa: E402
+    ParallelEnvironmentWorker,
+    ParallelEnvPool,
+)
+from lunar_policy_training.environment.v3_environment import (  # noqa: E402
+    create_v3_environment,
+)
 from lunar_policy_training.ppo.collector import (  # noqa: E402
     CollectedRollout,
     CollectorConfig,
@@ -151,6 +161,63 @@ def test_collect_rollout_runs_real_vector_env_actions_and_hand_computed_gae() ->
     )
     assert np.isfinite(collected.rollout.advantages).all()
     assert abs(float(collected.rollout.advantages.mean())) < 1.0e-6
+
+
+def _real_v3_worker(
+    worker_index: int, platform_type: str
+) -> ParallelEnvironmentWorker:
+    observation = PolicyBatch(
+        prior_channels=torch.zeros((1, 7, 8, 8), dtype=torch.float32),
+        coverage_summary=torch.zeros((1, 8, 8, 8), dtype=torch.float32),
+        local_crop=torch.zeros((1, 8, 8, 8), dtype=torch.float32),
+        frontier_features=torch.zeros((1, 2, 22), dtype=torch.float32),
+        pose_features=torch.zeros((1, 6), dtype=torch.float32),
+        candidate_mask=torch.tensor([[True, False]], dtype=torch.bool),
+        platform_context=torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32),
+    )
+    request = TrainingPlanRequest()
+    request.request_id = f"collector-v3-{worker_index}"
+    return ParallelEnvironmentWorker(
+        environment=create_v3_environment(
+            platform_type=platform_type,
+            request_builder=lambda action: request,
+            initial_observation=observation,
+        ),
+        initial_observation=observation,
+    )
+
+
+def _planner_transition_reward(transition: PlannerTransition) -> float:
+    assert isinstance(transition, PlannerTransition)
+    return 0.5 if transition.planning_outcome == PlanningOutcome.INVALID_REQUEST else 0.0
+
+
+def test_production_pool_adapter_collects_real_v3_reward_gae_at_one_policy_version() -> None:
+    """Would fail if train/resume could replace the Task 2/C++ rollout with a proxy."""
+    with ParallelEnvPool(
+        allocation={"WHEELED": 1},
+        observation_template=_real_v3_worker(0, "WHEELED").initial_observation,
+        environment_factory=_real_v3_worker,
+        reward_fn=_planner_transition_reward,
+        worker_timeout_seconds=5.0,
+    ) as pool:
+        environment = _ParallelPoolVectorEnv(pool, policy_version=17)
+        collected = collect_rollout(
+            environment,
+            _zero_value_policy(),
+            CollectorConfig(horizon=2, deterministic=True),
+            device="cpu",
+        )
+
+    assert collected.rewards.tolist() == [[0.5], [0.5]]
+    assert environment.policy_versions == [17, 17]
+    assert environment.planning_outcomes == [
+        PlanningOutcome.INVALID_REQUEST,
+        PlanningOutcome.INVALID_REQUEST,
+    ]
+    assert all(environment.reason_codes)
+    assert collected.rollout.returns.tolist() == pytest.approx([0.972625, 0.5])
+    assert np.isfinite(collected.rollout.advantages).all()
 
 
 @pytest.mark.parametrize(

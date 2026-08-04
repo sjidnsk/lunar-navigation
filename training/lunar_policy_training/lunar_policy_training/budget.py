@@ -6,6 +6,7 @@ import math
 import json
 import os
 import tempfile
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -40,6 +41,8 @@ class CalibrationMeasurement:
     planner_timeouts: int
     oom: bool
     gpu_seconds: float
+    ipc_failures: int = 0
+    optimizer_steps: int = 1
 
     def __post_init__(self) -> None:
         if type(self.workers) is not int or self.workers <= 0:
@@ -64,6 +67,10 @@ class CalibrationMeasurement:
             raise CalibrationError("planner timeout count is invalid")
         if type(self.oom) is not bool:
             raise CalibrationError("calibration OOM flag must be boolean")
+        if type(self.ipc_failures) is not int or self.ipc_failures < 0:
+            raise CalibrationError("calibration IPC failure count is invalid")
+        if type(self.optimizer_steps) is not int or self.optimizer_steps < 0:
+            raise CalibrationError("calibration optimizer step count is invalid")
         _finite_nonnegative(self.gpu_seconds, "calibration GPU seconds")
 
 
@@ -97,9 +104,14 @@ class TrainingBudget:
     def remaining_gpu_seconds(self) -> float:
         return self.total_gpu_seconds - self.consumed_gpu_seconds
 
+    @property
+    def interval_active(self) -> bool:
+        return self._active_since is not None
+
     def consume(self, gpu_seconds: float) -> None:
         interval = _finite_nonnegative(gpu_seconds, "GPU interval")
         if interval > self.remaining_gpu_seconds:
+            self.consumed_gpu_seconds = self.total_gpu_seconds
             raise BudgetExceededError(
                 "GPU interval exceeds remaining cumulative budget"
             )
@@ -109,9 +121,18 @@ class TrainingBudget:
         timestamp = _finite_nonnegative(monotonic_seconds, "GPU interval start")
         if self._active_since is not None:
             raise BudgetError("GPU interval is already active")
+        if self.remaining_gpu_seconds <= 0.0:
+            raise BudgetExceededError(
+                "no remaining cumulative GPU budget for another bounded unit"
+            )
         self._active_since = timestamp
 
-    def end_gpu_interval(self, *, monotonic_seconds: float) -> None:
+    def end_gpu_interval(
+        self,
+        *,
+        monotonic_seconds: float,
+        measured_gpu_seconds: float | None = None,
+    ) -> None:
         timestamp = _finite_nonnegative(monotonic_seconds, "GPU interval end")
         if self._active_since is None:
             raise BudgetError("GPU interval is not active")
@@ -119,7 +140,11 @@ class TrainingBudget:
             raise BudgetError("GPU interval end precedes its start")
         interval = timestamp - self._active_since
         self._active_since = None
-        self.consume(interval)
+        self.consume(
+            interval
+            if measured_gpu_seconds is None
+            else measured_gpu_seconds
+        )
 
     @classmethod
     def from_checkpoint(cls, checkpoint: object) -> "TrainingBudget":
@@ -138,6 +163,7 @@ def calibrate_runtime(
     budget: TrainingBudget,
     manifest_path: str | Path,
     micro_batch_candidates: Iterable[int] = (1, 2, 4, 8, 16, 32),
+    clock: Callable[[], float] = time.monotonic,
 ) -> CalibrationResult:
     """Measure both worker candidates and freeze the safe fastest selection."""
     from .config import ResolvedTrainingConfig
@@ -148,6 +174,8 @@ def calibrate_runtime(
         raise CalibrationError("calibration requires the run TrainingBudget")
     if not callable(workload):
         raise CalibrationError("calibration workload must be callable")
+    if not callable(clock):
+        raise CalibrationError("calibration clock must be callable")
     target = Path(manifest_path)
     if not target.is_absolute():
         raise CalibrationError("run manifest path must be absolute")
@@ -174,18 +202,37 @@ def calibrate_runtime(
     for workers in config.parallel.worker_candidates:
         safe = True
         for micro_batch in micro_batches:
-            measurement = workload(workers, micro_batch)
-            if not isinstance(measurement, CalibrationMeasurement):
-                raise CalibrationError(
-                    "calibration workload must return CalibrationMeasurement"
+            budget.begin_gpu_interval(monotonic_seconds=clock())
+            try:
+                measurement = workload(workers, micro_batch)
+                if not isinstance(measurement, CalibrationMeasurement):
+                    raise CalibrationError(
+                        "calibration workload must return CalibrationMeasurement"
+                    )
+                if (
+                    measurement.workers != workers
+                    or measurement.micro_batch != micro_batch
+                ):
+                    raise CalibrationError(
+                        "calibration workload mislabeled a measurement"
+                    )
+            except BaseException:
+                budget.end_gpu_interval(monotonic_seconds=clock())
+                raise
+            else:
+                budget.end_gpu_interval(
+                    monotonic_seconds=clock(),
+                    measured_gpu_seconds=measurement.gpu_seconds,
                 )
-            if (
-                measurement.workers != workers
-                or measurement.micro_batch != micro_batch
-            ):
-                raise CalibrationError("calibration workload mislabeled a measurement")
-            budget.consume(measurement.gpu_seconds)
             measurements.append(measurement)
+            if measurement.ipc_failures:
+                raise CalibrationError(
+                    "runtime calibration encountered an IPC failure"
+                )
+            if not measurement.oom and measurement.optimizer_steps != 1:
+                raise CalibrationError(
+                    "runtime calibration did not complete one optimizer update"
+                )
             if measurement.oom or measurement.planner_timeouts:
                 safe = False
                 break

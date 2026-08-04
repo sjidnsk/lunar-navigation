@@ -46,6 +46,10 @@ def _checkpoint(consumed_gpu_seconds: float):
         frozen_config={"total_gpu_budget_seconds": 86400},
         source_commit="a0cc8dfd9210e1badcbe883e6178b1b27888bd93",
         consumed_gpu_seconds=consumed_gpu_seconds,
+        worker_allocation={"WHEELED": 6, "LEGGED": 6, "HOPPER": 6},
+        micro_batch_size=2,
+        latest_checkpoint_gpu_seconds=consumed_gpu_seconds,
+        candidate_checkpoint_gpu_seconds=min(consumed_gpu_seconds, 3600.0),
     )
 
 
@@ -119,6 +123,10 @@ def test_restore_recovers_complete_train_state_and_rng(
         frozen_config={"total_gpu_budget_seconds": 86400},
         source_commit="a0cc8dfd9210e1badcbe883e6178b1b27888bd93",
         consumed_gpu_seconds=11.0,
+        worker_allocation={"WHEELED": 8, "LEGGED": 8, "HOPPER": 8},
+        micro_batch_size=4,
+        latest_checkpoint_gpu_seconds=10.0,
+        candidate_checkpoint_gpu_seconds=0.0,
     )
     saved_parameters = {
         name: value.detach().clone() for name, value in model.state_dict().items()
@@ -133,7 +141,14 @@ def test_restore_recovers_complete_train_state_and_rng(
     np.random.seed(999)
     torch.manual_seed(999)
 
-    restore_training_state(checkpoint, model, optimizer, scheduler)
+    live_normalization = {"mean": torch.tensor([-9.0]), "extra": 1.0}
+    restore_training_state(
+        checkpoint,
+        model,
+        optimizer,
+        scheduler,
+        normalization_state=live_normalization,
+    )
     actual_rng = (random.random(), float(np.random.random()), float(torch.rand(())))
 
     assert all(
@@ -142,6 +157,8 @@ def test_restore_recovers_complete_train_state_and_rng(
     )
     assert optimizer.param_groups[0]["lr"] == 1.0e-3
     assert scheduler.last_epoch == 1
+    assert set(live_normalization) == {"mean"}
+    assert torch.equal(live_normalization["mean"], torch.tensor([1.0]))
     assert actual_rng == expected_rng
 
 
@@ -178,6 +195,10 @@ def test_checkpoint_rejects_nonfinite_model_state() -> None:
             frozen_config={"total_gpu_budget_seconds": 86400},
             source_commit="a0cc8dfd9210e1badcbe883e6178b1b27888bd93",
             consumed_gpu_seconds=0.0,
+            worker_allocation={"WHEELED": 6, "LEGGED": 6, "HOPPER": 6},
+            micro_batch_size=1,
+            latest_checkpoint_gpu_seconds=0.0,
+            candidate_checkpoint_gpu_seconds=0.0,
         )
 
 
@@ -187,3 +208,31 @@ def test_config_hash_is_order_independent_and_changes_with_values() -> None:
         {"b": [2, 3], "a": 1}
     )
     assert config_sha256({"a": 1}) != config_sha256({"a": 2})
+
+
+@pytest.mark.parametrize(
+    ("allocation", "micro_batch", "message"),
+    [
+        ({"WHEELED": 8, "LEGGED": 8, "HOPPER": 8}, 2, "allocation"),
+        ({"WHEELED": 6, "LEGGED": 6, "HOPPER": 6}, 4, "micro-batch"),
+    ],
+)
+def test_resume_rejects_frozen_runtime_identity_drift(
+    tmp_path: pathlib.Path,
+    allocation: dict[str, int],
+    micro_batch: int,
+    message: str,
+) -> None:
+    checkpoint = _checkpoint(consumed_gpu_seconds=7200.0)
+    path = tmp_path / "latest.pt"
+    save_checkpoint_atomic(path, checkpoint)
+
+    with pytest.raises(CheckpointError, match=message):
+        load_checkpoint_for_resume(
+            path,
+            expected_contract_version="ObservationContractV1",
+            expected_config_hash=checkpoint.config_hash,
+            expected_source_commit=checkpoint.source_commit,
+            expected_worker_allocation=allocation,
+            expected_micro_batch_size=micro_batch,
+        )
