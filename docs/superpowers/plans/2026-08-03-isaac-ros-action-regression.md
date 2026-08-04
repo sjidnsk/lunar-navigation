@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build an external, deterministic Isaac Sim→ROS 2 Humble snapshot bridge, three proxy capability packages, and six isolated `/plan_motion` positive/negative Action regressions.
+**Goal:** Build an external, deterministic Isaac Sim→ROS 2 Humble snapshot bridge, three proxy capability packages, six isolated `/plan_motion` positive/negative Action regressions, and reviewable scene/route visual evidence.
 
-**Architecture:** Isaac Sim 6.0.1 executes one read-only collector in its Python 3.12 process and atomically writes a ROS-neutral JSON/NPZ snapshot. A standalone external ROS 2 Humble package running on system Python 3.10 validates and publishes that snapshot, qualifies immutable scene-backed fixtures, starts a fresh Lifecycle planner for each case, validates each Action result, and emits JSON/JUnit evidence.
+**Architecture:** Isaac Sim 6.0.1 executes one read-only collector in its Python 3.12 process and atomically writes a ROS-neutral JSON/NPZ snapshot. A standalone external ROS 2 Humble package running on system Python 3.10 validates and publishes that snapshot, qualifies immutable scene-backed fixtures, starts a fresh Lifecycle planner for each case, validates each Action result, and emits JSON/JUnit evidence. A post-run renderer then binds the same snapshot, v2 lock, and validated normalized references into deterministic self-contained SVG/HTML visual evidence without touching the USD.
 
 **Tech Stack:** Ubuntu 22.04, ROS 2 Humble, Python 3.10, Isaac Sim 6.0.1 Python 3.12, `pxr.Usd/UsdGeom/UsdPhysics`, NumPy, `rclpy`, `grid_map_msgs`, ROS 2 Lifecycle and Action APIs, pytest, colcon.
 
@@ -24,6 +24,7 @@
 - The 2026-08-04 approved semantic authority is main commit `a02601a8112f3417f57de9fb7df4d3cf2237b705`; production planner source remains read-only.
 - Replace the reviewed external `lunar-scenario-lock/v1` only through the explicit rebaseline path; the replacement is `lunar-scenario-lock/v2`, while the final USD and snapshot hashes remain unchanged.
 - Wheel and legged Action requests retain the continuous platform pose, but their trajectory-start oracle uses the independently recomputed local-grid projection. Hopper-positive alone uses a `0.75 m` point-goal tolerance; all other cases retain `0.50 m`.
+- Visual evidence is generated only from a hash-verified snapshot, v2 lock, and a complete passing six-case result set. It never connects to Isaac, adds route prims, saves a layer, downloads assets, or substitutes image inspection for JSON/JUnit assertions.
 
 Command convention: define `LUNAR_VALIDATION_ROOT=/home/kai/CodexDownloads/lunar_navigation/isaac_ros_action_regression` and `LUNAR_PACKAGE_ROOT=$LUNAR_VALIDATION_ROOT/ros2_ws/src/lunar_isaac_validation` at the start of execution. Relative `test/` and `lunar_isaac_validation/` paths run from `LUNAR_PACKAGE_ROOT`; relative `scripts/`, `isaac/`, `snapshots/`, and `artifacts/` paths run from `LUNAR_VALIDATION_ROOT`.
 
@@ -48,6 +49,7 @@ External standalone Git root:
 - Create: `scripts/collect_snapshot.py` — Python Server client entry point.
 - Create: `scripts/qualify_fixtures.sh` — explicit scenario-lock creation entry point.
 - Create: `scripts/run_action_regression.sh` — formal six-case entry point.
+- Create: `scripts/render_action_visualization.py` — deterministic post-run visual entry point.
 - Create: `ros2_ws/src/lunar_isaac_validation/package.xml` — ament package metadata.
 - Create: `ros2_ws/src/lunar_isaac_validation/setup.py` — package install and console entry points.
 - Create: `ros2_ws/src/lunar_isaac_validation/setup.cfg` — ROS executable install location.
@@ -66,6 +68,7 @@ External standalone Git root:
 - Create: `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/action_assertions.py` — exact outcome/result dispatch.
 - Create: `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/process_manager.py` — explicit managed-child lifecycle.
 - Create: `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/reports.py` — JSON/JUnit evidence.
+- Create: `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/visualization.py` — scene, route, ballistic, HTML, and manifest renderer.
 - Create: `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/regression_runner.py` — Lifecycle and Action orchestration.
 - Create: `ros2_ws/src/lunar_isaac_validation/config/capabilities/{wheeled,legged,hopper}.yaml` — three proxy capability sources.
 - Create: `ros2_ws/src/lunar_isaac_validation/config/observation.json` — shared observation capability.
@@ -75,6 +78,7 @@ External standalone Git root:
 - Create: `ros2_ws/src/lunar_isaac_validation/meshes/{wheeled,legged,hopper}_proxy_collision.stl` — deterministic proxy collision meshes.
 - Create during qualification: `ros2_ws/src/lunar_isaac_validation/scenarios/scenario_lock.json` — reviewed immutable fixture lock.
 - Create: focused tests under `ros2_ws/src/lunar_isaac_validation/test/` matching each Python module.
+- Create at runtime: `artifacts/<run-id>/visualization/{index.html,scene_and_routes.svg,platform_cases.svg,hopper_ballistic.svg,visualization_manifest.json}`.
 
 ---
 
@@ -1652,7 +1656,86 @@ Expected: all commands PASS and the source Git worktree is clean.
 
 ---
 
-### Task 13: Rebaseline, run the six cases twice, and document handoff
+### Task 13: Render deterministic scene and route evidence
+
+**Files:**
+- Create: external `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/visualization.py`
+- Create: external `scripts/render_action_visualization.py`
+- Modify: external `ros2_ws/src/lunar_isaac_validation/{package.xml,setup.py}`
+- Test: external `ros2_ws/src/lunar_isaac_validation/test/test_visualization.py`
+- Test: external `test/test_cli_contract.py`
+
+**Interfaces:**
+- Consumes: a hash-verified `SnapshotBundle`, v2 `ScenarioLock`, one complete passing `scenario_results.json`, and the proxy capability documents.
+- Produces: `render_action_visualization(...)`, self-contained scene/route and hopper-ballistic SVGs, an offline HTML report, and a hash-bound `visualization_manifest.json`.
+
+- [ ] **Step 1: Write failing completeness and coordinate-source tests**
+
+Build a small literal snapshot/lock/results fixture with all six cases. Assert that rendering rejects, with `VISUALIZATION_RESULTS_INCOMPLETE`, any result set with a missing case, `passed=false`, absent/non-mapping `normalized_reference`, or nonfinite coordinate. Assert that a valid fixture uses the exact wheel/legged `coordinates_m`, hopper validated geometry, locked starts/goals/tolerances, and map arrays; no route may be derived from assertion-detail strings or logs.
+
+Run:
+
+```bash
+python3 -m pytest -q \
+  ros2_ws/src/lunar_isaac_validation/test/test_visualization.py
+```
+
+Expected: FAIL importing the missing module or renderer.
+
+- [ ] **Step 2: Write failing deterministic artifact tests**
+
+Render the same fixture twice into two empty temporary directories. Require exactly:
+
+```text
+index.html
+scene_and_routes.svg
+platform_cases.svg
+hopper_ballistic.svg
+visualization_manifest.json
+```
+
+The three SVG byte streams must be identical between renders, contain no network URL or external asset reference, and contain fixed world-axis/metric legends plus all six case ids. `scene_and_routes.svg` must contain distinct wheel, legged, and hopper positive-route groups; `platform_cases.svg` must contain three negative goal-tolerance/infeasible markers and exact reason codes; `hopper_ballistic.svg` must contain at least 33 samples of the independently reconstructed parabola rather than a two-point straight segment.
+
+The manifest schema is `lunar-action-visualization/v1`; it records stage, arrays, lock, normalized-results and output SHA-256 values, fixed render parameters, and the ordered six case ids. A pre-existing output directory or any validation failure must leave all existing artifacts untouched and publish no partial directory.
+
+- [ ] **Step 3: Implement the minimal offline renderer**
+
+Implement a stable world-to-canvas transform with fixed colors, axes, scale bars, and HTML escaping. Raster heatmaps may be generated with the Ubuntu `python3-pil` package and embedded as `data:image/png;base64,...` inside the SVG; add the exact runtime dependency, but do not use Matplotlib, online fonts, JavaScript packages, downloaded assets, desktop screenshots, or live Isaac access.
+
+The oblique scene view uses the global elevation plus obstacle/forbidden masks and overlays all three positive references. Wheel and legged follow normalized path coordinates. For hopper, reconstruct launch velocity from locked launch, validated landing, flight time, and configured gravity, then sample the ballistic equation at 33 fixed inclusive times. The local-case view uses each platform grid, displays both positive and negative goals, and labels negative reason codes. Validate every input and generated coordinate as finite before publication.
+
+- [ ] **Step 4: Add the explicit CLI and atomic publication contract**
+
+`scripts/render_action_visualization.py` accepts only explicit `--manifest`, `--lock`, `--results`, `--capability-root`, `--output`, and `--run-id` arguments and delegates to the package renderer. Add CLI contract tests. Build all five files in a unique sibling temporary directory, hash and validate them, then atomically rename that directory to an absent target; cleanup may unlink only its five explicitly named temporary files and remove only its explicit temporary directory.
+
+Run:
+
+```bash
+python3 -m pytest -q \
+  test/test_cli_contract.py \
+  ros2_ws/src/lunar_isaac_validation/test/test_visualization.py
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Verify and commit Task 13**
+
+```bash
+python3 -m pytest -q test ros2_ws/src/lunar_isaac_validation/test
+python3 -m py_compile \
+  scripts/render_action_visualization.py \
+  ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/visualization.py
+git diff --check
+git add scripts/render_action_visualization.py test/test_cli_contract.py \
+  ros2_ws/src/lunar_isaac_validation
+git commit -m "feat: render planner scene and route evidence"
+```
+
+Expected: all source tests PASS; only Task 13 source/test/metadata files enter the commit; no live visualization directory is created before the formal runs.
+
+---
+
+### Task 14: Rebaseline, run the six cases twice, visualize, and document handoff
 
 **Files:**
 - Modify through approved CLI: external `ros2_ws/src/lunar_isaac_validation/scenarios/scenario_lock.json`
@@ -1661,8 +1744,8 @@ Expected: all commands PASS and the source Git worktree is clean.
 - Preserve: active USD, locked snapshot arrays, production planner source, and unrelated main-repository state
 
 **Interfaces:**
-- Consumes: snapshot `20260804T025645914927Z`, v1 lock, Task 11–12 source, and approved rebaseline reason.
-- Produces: reviewed v2 lock/report, fresh install overlay, two complete 6/6 runs, deterministic semantic comparison, final evidence paths, and operator instructions.
+- Consumes: snapshot `20260804T025645914927Z`, v1 lock, Task 11–13 source, and approved rebaseline reason.
+- Produces: reviewed v2 lock/report, fresh install overlay, two complete 6/6 runs, deterministic semantic comparison, two complete visual reports, final evidence paths, and operator instructions.
 
 - [ ] **Step 1: Explicitly rebaseline the reviewed lock**
 
@@ -1769,7 +1852,26 @@ print(json.dumps(comparison, sort_keys=True))
 PY
 ```
 
-- [ ] **Step 5: Verify immutable scene, artifact boundary, and main repository**
+- [ ] **Step 5: Generate and compare both visual reports**
+
+In the shell retaining both run ids:
+
+```bash
+for LUNAR_VISUAL_RUN_ID in \
+  "$LUNAR_FORMAL_RUN_ONE_ID" "$LUNAR_FORMAL_RUN_TWO_ID"; do
+  python3 scripts/render_action_visualization.py \
+    --manifest snapshots/20260804T025645914927Z/snapshot_manifest.json \
+    --lock ros2_ws/src/lunar_isaac_validation/scenarios/scenario_lock.json \
+    --results "artifacts/$LUNAR_VISUAL_RUN_ID/scenario_results.json" \
+    --capability-root ros2_ws/src/lunar_isaac_validation \
+    --output "artifacts/$LUNAR_VISUAL_RUN_ID/visualization" \
+    --run-id "$LUNAR_VISUAL_RUN_ID"
+done
+```
+
+Require all five files in both visualization directories. Verify each manifest binds the frozen stage, arrays, current v2 lock and ordered six cases. Because the two normalized result sets are equal, require byte-identical `scene_and_routes.svg`, `platform_cases.svg`, and `hopper_ballistic.svg` between runs; HTML and manifest may differ only in run-specific metadata. Open the first `index.html` and inspect that the lunar scene, three positive routes, three negative goal markers, axes, metric scale and legends are visible.
+
+- [ ] **Step 6: Verify immutable scene, artifact boundary, and main repository**
 
 ```bash
 test "$(sha256sum /home/kai/CodexDownloads/lunar_navigation/isaac_sim/exports/lunar_polar_terrain_5deg/lunar_polar_terrain_5deg_safe_wheeled_start.usda | cut -d' ' -f1)" = "0e5de317252740d691a852b69d5304a4150e26b4f2741a42149627a3016196b8"
@@ -1782,11 +1884,11 @@ git status --short
 
 Expected: both hashes match, boundary checks pass, and the only unrelated main entry remains `?? .vscode/`. All new runtime artifacts remain below the external root.
 
-- [ ] **Step 6: Document the exact operator workflow**
+- [ ] **Step 7: Document the exact operator workflow**
 
-README must explain: Python Server enable/check and optional `0600` token file; collect; qualify once; v1→v2 explicit rebaseline and required reason; v2 grid-projected wheel/legged start oracle; `0.75 m` goal-clipped hopper-positive rule; build; two formal runs; report locations; exit codes 10/20/30/40/50/60; six-session isolation; replay after post-snapshot Isaac disconnect; and the absence of platform execution/control.
+README must explain: Python Server enable/check and optional `0600` token file; collect; qualify once; v1→v2 explicit rebaseline and required reason; v2 grid-projected wheel/legged start oracle; `0.75 m` goal-clipped hopper-positive rule; build; two formal runs; visual-report generation/opening; JSON/JUnit/HTML/SVG evidence locations; exit codes 10/20/30/40/50/60; six-session isolation; replay after post-snapshot Isaac disconnect; and the absence of platform execution/control.
 
-- [ ] **Step 7: Run final external verification and commit the handoff**
+- [ ] **Step 8: Run final external verification and commit the handoff**
 
 ```bash
 python3 -m pytest -q test ros2_ws/src/lunar_isaac_validation/test
@@ -1806,8 +1908,8 @@ Expected: tests and compilation PASS; external source Git worktree is clean; ign
 
 ## Plan Self-Review
 
-- **Spec coverage:** Tasks 1–4 create the isolated two-runtime snapshot path; Task 5 creates all capability and geometry inputs; Task 6 locks six real cases without data injection; Task 7 publishes the frozen topics; Task 8 validates platform references; Task 9 handles Lifecycle, Action, cleanup, and reports; Task 10 qualifies the live scene; Tasks 11–13 implement the approved planner-semantic alignment, explicit v2 rebaseline, and two complete deterministic regressions.
+- **Spec coverage:** Tasks 1–4 create the isolated two-runtime snapshot path; Task 5 creates all capability and geometry inputs; Task 6 locks six real cases without data injection; Task 7 publishes the frozen topics; Task 8 validates platform references; Task 9 handles Lifecycle, Action, cleanup, and reports; Task 10 qualifies the live scene; Tasks 11–12 implement the approved planner-semantic alignment; Task 13 renders scene/route evidence; Task 14 performs the explicit v2 rebaseline and two complete deterministic regressions with visual handoff.
 - **Boundary coverage:** Every implementation source/build/output path is external; the main repository contains only the approved design and plan. Production planner source remains read-only, all pre-existing unrelated worktree entries are preserved, and final repository boundary checks are explicit.
-- **Failure coverage:** Preflight, Isaac, fixture, ROS, Action, and cleanup failures map to exit codes 10/20/30/40/50/60. Exact timeouts, continuation rules, token redaction, post-snapshot Isaac disconnect, and explicit-PID cleanup are assigned to Tasks 4, 9, and 10.
+- **Failure coverage:** Preflight, Isaac, fixture, ROS, Action, and cleanup failures map to exit codes 10/20/30/40/50/60. Exact timeouts, continuation rules, token redaction, post-snapshot Isaac disconnect, explicit-PID cleanup, incomplete visual inputs, and atomic visual publication are assigned to Tasks 4, 9, 10, and 13.
 - **Type consistency:** `SnapshotBundle`, `ProjectedStart`, `ScenarioCase`, `ScenarioLock`, `CaseResult`, layer keys, platform keys, topic names, Action enums, reason codes, frames, and public function names are defined before downstream use and remain identical across tasks.
 - **Placeholder scan:** All production values, paths, commands, expected results, algorithms, and test oracles are fixed; the plan contains no deferred implementation marker.

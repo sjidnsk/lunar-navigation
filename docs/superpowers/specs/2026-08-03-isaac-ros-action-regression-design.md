@@ -56,10 +56,17 @@
 │           ├── setup.cfg
 │           └── setup.py
 ├── scripts/{build_external,qualify_fixtures,run_action_regression}.sh
+├── scripts/render_action_visualization.py
 ├── build/
 ├── install/
 ├── log/
 └── artifacts/<run-id>/
+    └── visualization/
+        ├── index.html
+        ├── scene_and_routes.svg
+        ├── platform_cases.svg
+        ├── hopper_ballistic.svg
+        └── visualization_manifest.json
 ```
 
 `build/`、`install/`、`log/` 和 `artifacts/` 均为运行目录，不得链接或复制回仓库。
@@ -128,6 +135,20 @@ ROS 输入桥只读取已验证的中立快照，并发布：
 7. 完成断言后执行 `deactivate → cleanup → shutdown`，再结束输入桥。
 
 由于 `/plan_motion` 是绝对名称，任何时刻只能存在一个被测规划节点。正例产生的 active reference 不得泄漏到反例，因此总计运行六个独立会话。
+
+### 可视化证据生成器
+
+可视化生成器只读取已验证的快照、v2 场景锁和一次已通过的六场景 `scenario_results.json`；它不得连接或修改 Isaac stage，也不得从图片反推任何规划判据。若六个场景并非全部通过、任一 `normalized_reference` 缺失、快照数组哈希不匹配或路线坐标非有限，生成必须失败，不能输出看似成功的报告。
+
+每次正式运行在 `artifacts/<run-id>/visualization/` 生成：
+
+- `scene_and_routes.svg`：固定等轴视角的月面高程场景，叠加月岩/障碍、三类平台起点和三个正例路线；轮式与足式使用归一化 path 坐标，跳跃式按经验证的飞行时间、落点和能力重力重建弹道采样线。
+- `platform_cases.svg`：三个局部图面板，显示 elevation、obstacle、forbidden、正例路线/落点、负例目标 tolerance 与不可行标记，并附精确 reason code。
+- `hopper_ballistic.svg`：跳跃式距离—高度侧视图，标出发射、最高点、落点和地表高程；不得把起终点直线冒充弹道。
+- `index.html`：无需网络资源即可打开的中文总览，嵌入上述 SVG、6/6 结果表、stage/arrays SHA-256、run id、图例和“仅规划、未执行运动”说明。
+- `visualization_manifest.json`：记录输入文件哈希、固定渲染参数、六个 case id、输出文件 SHA-256 和 schema，便于审阅与重复生成比较。
+
+渲染使用确定性的世界坐标到画布变换，X/Y 轴、米制刻度、颜色和平台图例固定；不得依赖 Matplotlib、在线字体、外部瓦片、下载资产或当前桌面主题。可视化是 Action 证据的只读视图，不替代 JSON/JUnit 断言。
 
 ## 地图生成规则
 
@@ -300,15 +321,17 @@ Isaac Sim 在完整快照通过哈希校验后退出时，ROS 回归允许继续
 - 三个反例返回锁定的精确结果且不包含引用。
 - 无 stale input、TF unavailable、pairwise skew 或消息布局错误。
 - 同一锁定快照连续运行两次时，六个场景均生成完整归一化语义摘要，且 outcome、directive、reason code 和归一化 reference 摘要逐例一致；缺失任一摘要即失败。
+- 两次正式运行各自生成完整可视化目录；其 manifest 必须绑定相同 stage、arrays 和 lock 哈希，且路线坐标与对应 `normalized_reference` 完全一致。
 - 采集前后 USD SHA-256 不变。
 - 仓库内没有新增 build、install、log、快照或测试报告。
 - 现有 planner 和仓库边界测试通过。
 
-每次运行在 `artifacts/<run-id>/` 保存 `environment.json`、`snapshot_manifest.json` 副本、`scenario_results.json`、JUnit XML、受管进程日志和总摘要。报告不得包含认证令牌。
+每次运行在 `artifacts/<run-id>/` 保存 `environment.json`、`snapshot_manifest.json` 副本、`scenario_results.json`、JUnit XML、受管进程日志、总摘要和 `visualization/`。报告不得包含认证令牌。
 
 ## 非目标
 
 - 不在 Isaac Sim 中执行规划轨迹或 hop。
+- 不向 Isaac stage 写入路线 prim、调试线、相机或标注，也不为可视化保存或导出派生 USD。
 - 不建立平台代理关节、轮胎、足端或推进器控制器。
 - 不评估真实平台动力学、传感器噪声、闭环定位或实时性能。
 - 不修改冻结接口、平台迁移顺序、Nav2 适配或外部输入所有权。
