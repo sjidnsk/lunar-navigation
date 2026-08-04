@@ -21,6 +21,9 @@
 - Do not use Nav2, controllers, execution feedback, `/clock`, synthetic hazards, downloaded assets, broad `pkill`, recursive deletion, or automatic Isaac restart.
 - Runtime directories are unique per run under external `build/`, `install/`, `log/`, `snapshots/`, and `artifacts/`; do not delete earlier runs.
 - Preserve every unrelated main-repository working-tree entry present at execution start, including `.vscode/`; never restore, stage, or alter one for this task.
+- The 2026-08-04 approved semantic authority is main commit `a02601a8112f3417f57de9fb7df4d3cf2237b705`; production planner source remains read-only.
+- Replace the reviewed external `lunar-scenario-lock/v1` only through the explicit rebaseline path; the replacement is `lunar-scenario-lock/v2`, while the final USD and snapshot hashes remain unchanged.
+- Wheel and legged Action requests retain the continuous platform pose, but their trajectory-start oracle uses the independently recomputed local-grid projection. Hopper-positive alone uses a `0.75 m` point-goal tolerance; all other cases retain `0.50 m`.
 
 Command convention: define `LUNAR_VALIDATION_ROOT=/home/kai/CodexDownloads/lunar_navigation/isaac_ros_action_regression` and `LUNAR_PACKAGE_ROOT=$LUNAR_VALIDATION_ROOT/ros2_ws/src/lunar_isaac_validation` at the start of execution. Relative `test/` and `lunar_isaac_validation/` paths run from `LUNAR_PACKAGE_ROOT`; relative `scripts/`, `isaac/`, `snapshots/`, and `artifacts/` paths run from `LUNAR_VALIDATION_ROOT`.
 
@@ -55,6 +58,7 @@ External standalone Git root:
 - Create: `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/python_server_client.py` — authenticated JSON-envelope TCP client.
 - Create: `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/capability_contract.py` — capability/provenance validation.
 - Create: `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/scenario_qualifier.py` — map-only candidate selection and immutable lock writer.
+- Create: `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/planner_semantics.py` — action-independent grid projection shared by qualification and assertions.
 - Create: `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/grid_map_codec.py` — GridMap message layout encoder.
 - Create: `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/bridge_node.py` — six-topic ROS publisher and readiness service.
 - Create: `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/trajectory_checks.py` — wheel and legged reference checks.
@@ -1376,94 +1380,434 @@ Do not commit snapshots, build/install/log directories, candidate reports, token
 
 ---
 
-### Task 11: Run the six cases twice, verify the repository boundary, and document handoff
+### Task 11: Align qualification and lock migration with production planner semantics
 
 **Files:**
-- Modify: external `README.md`
-- Create at runtime: external `artifacts/<run-id>/` evidence only
-- Preserve: active USD and main repository source
+- Create: external `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/planner_semantics.py`
+- Modify: external `scripts/preflight.py`
+- Modify: external `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/scenario_qualifier.py`
+- Test: external `test/test_cli_contract.py`
+- Test: external `ros2_ws/src/lunar_isaac_validation/test/{test_planner_semantics.py,test_scenario_qualifier.py}`
 
 **Interfaces:**
-- Consumes: fresh install overlay, locked snapshot, six cases.
-- Produces: two complete regression runs, deterministic semantic comparison, final evidence paths, and operator instructions.
+- Consumes: `SnapshotBundle`, proxy capabilities, continuous platform planning pose, and the approved design commit.
+- Produces: `ProjectedStart`, `project_trajectory_start(platform_key, request_start_position_m, bundle, capabilities)`, `lunar-scenario-lock/v2`, planner-equivalent goal-clipped hopper evidence, and explicit legacy-v1 rebaseline migration.
 
-- [ ] **Step 1: Run the first formal six-case regression**
+- [ ] **Step 1: Write failing hand-derived grid-projection tests**
 
-Run:
+Create `ros2_ws/src/lunar_isaac_validation/test/test_planner_semantics.py` with a local fixture. It uses a `0.25 m` grid with origin `(-4.125,-4.125)`, continuous XY `(0.124,-0.124)`, and hand-set start-cell elevation `1.25`:
 
-```bash
-source /opt/ros/humble/setup.bash
-bash scripts/run_action_regression.sh \
-  --manifest snapshots/<snapshot-run-id>/snapshot_manifest.json \
-  --lock ros2_ws/src/lunar_isaac_validation/scenarios/scenario_lock.json \
-  --install install/<build-run-id>
+```python
+def _bundle() -> SnapshotBundle:
+    wheel = GridDescriptor(
+        "wheel", "odom", (-4.125, -4.125), 0.25, 33, 33
+    )
+    legged = replace(wheel, key="legged")
+    wheel_elevation = np.zeros((33, 33), dtype=np.float64)
+    legged_elevation = np.zeros((33, 33), dtype=np.float64)
+    wheel_elevation[16, 16] = 1.25
+    legged_elevation[16, 16] = 1.25
+    return SnapshotBundle(
+        Path("/fixture/manifest.json"),
+        Path("/fixture/arrays.npz"),
+        {},
+        {"wheel": wheel, "legged": legged},
+        {},
+        {
+            "wheel__elevation": wheel_elevation,
+            "legged__elevation": legged_elevation,
+        },
+    )
+
+
+def test_projected_start_is_derived_from_grid_and_capability() -> None:
+    bundle = _bundle()
+    capabilities = {"legged": {"body_height_m": [0.50, 0.60]}}
+    wheel = project_trajectory_start(
+        "wheel", (0.124, -0.124, 9.0), bundle, capabilities
+    )
+    assert wheel.cell_xy == (16, 16)
+    assert wheel.position_m == pytest.approx((0.0, 0.0, 1.25))
+    assert wheel.maximum_xy_error_m == pytest.approx(0.125)
+
+    legged = project_trajectory_start(
+        "legged", (0.124, -0.124, 1.80), bundle, capabilities
+    )
+    assert legged.cell_xy == (16, 16)
+    assert legged.position_m == pytest.approx((0.0, 0.0, 1.80))
 ```
 
-Expected: six isolated planner sessions, three exact new-reference results, three exact goal-infeasible results, no stale/TF/skew/layout failures, and cleanup after each session.
-
-- [ ] **Step 2: Run the same locked snapshot a second time**
-
-Run the identical command with a new artifact run id.
-
-Expected: normalized outcome/directive/reason/platform/point-or-hop summaries match the first run exactly. Timing, ROS stamps, PIDs, and raw logs are intentionally excluded from equality.
-
-- [ ] **Step 3: Run the existing planner and ROS tests in the external build tree**
+The legged capability body-height interval is `[0.50,0.60]`, so the expected Z is `1.25+0.55=1.80`. The production mutation caught by this test is returning the continuous request pose instead of the grid-cell projection.
 
 Run:
 
 ```bash
+python3 -m pytest -q ros2_ws/src/lunar_isaac_validation/test/test_planner_semantics.py
+```
+
+Expected: FAIL importing the missing module or function.
+
+- [ ] **Step 2: Implement the minimal projection contract**
+
+Define:
+
+```python
+class PlannerSemanticsError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class ProjectedStart:
+    cell_xy: tuple[int, int]
+    position_m: tuple[float, float, float]
+    maximum_xy_error_m: float
+
+
+def project_trajectory_start(
+    platform_key: str,
+    request_start_position_m: Sequence[float],
+    bundle: SnapshotBundle,
+    capabilities: Mapping[str, object],
+) -> ProjectedStart:
+    if platform_key not in {"wheel", "legged"}:
+        raise PlannerSemanticsError("PLANNER_SEMANTICS_PLATFORM_INVALID")
+    if len(request_start_position_m) != 3:
+        raise PlannerSemanticsError("PLANNER_SEMANTICS_START_INVALID")
+    start = tuple(float(value) for value in request_start_position_m)
+    if not all(math.isfinite(value) for value in start):
+        raise PlannerSemanticsError("PLANNER_SEMANTICS_START_INVALID")
+    descriptor = bundle.grids.get(platform_key)
+    if descriptor is None:
+        raise PlannerSemanticsError("PLANNER_SEMANTICS_GRID_MISSING")
+    cell_x = math.floor(
+        (start[0] - descriptor.origin_xy_m[0]) / descriptor.resolution_m
+    )
+    cell_y = math.floor(
+        (start[1] - descriptor.origin_xy_m[1]) / descriptor.resolution_m
+    )
+    if not (0 <= cell_x < descriptor.width and 0 <= cell_y < descriptor.height):
+        raise PlannerSemanticsError("PLANNER_SEMANTICS_START_OUTSIDE_GRID")
+    center_x = descriptor.origin_xy_m[0] + (cell_x + 0.5) * descriptor.resolution_m
+    center_y = descriptor.origin_xy_m[1] + (cell_y + 0.5) * descriptor.resolution_m
+    elevation = float(bundle.arrays[f"{platform_key}__elevation"][cell_y, cell_x])
+    center_z = elevation
+    if platform_key == "legged":
+        document = capabilities.get("legged")
+        if not isinstance(document, Mapping):
+            raise PlannerSemanticsError("PLANNER_SEMANTICS_CAPABILITY_INVALID")
+        section = document.get("legged", document)
+        interval = section.get("body_height_m") if isinstance(section, Mapping) else None
+        if not isinstance(interval, (list, tuple)) or len(interval) != 2:
+            raise PlannerSemanticsError("PLANNER_SEMANTICS_CAPABILITY_INVALID")
+        lower, upper = (float(value) for value in interval)
+        if not all(math.isfinite(value) for value in (lower, upper)) or lower > upper:
+            raise PlannerSemanticsError("PLANNER_SEMANTICS_CAPABILITY_INVALID")
+        center_z += 0.5 * (lower + upper)
+    maximum_error = 0.5 * descriptor.resolution_m
+    if (
+        abs(center_x - start[0]) > maximum_error + 1.0e-9
+        or abs(center_y - start[1]) > maximum_error + 1.0e-9
+    ):
+        raise PlannerSemanticsError("PLANNER_SEMANTICS_PROJECTION_INVALID")
+    return ProjectedStart(
+        cell_xy=(cell_x, cell_y),
+        position_m=(center_x, center_y, center_z),
+        maximum_xy_error_m=maximum_error,
+    )
+```
+
+Accept only `wheel` and `legged`. Use `floor((position-origin)/resolution)`, the selected local cell centre, and that cell's elevation. Wheel Z is elevation; legged Z is elevation plus the midpoint of `body_height_m`. Reject nonfinite/out-of-grid inputs and any per-axis XY displacement greater than `resolution/2+1e-9`; never inspect an Action result.
+
+Run the Step 1 test and expect PASS.
+
+- [ ] **Step 3: Write failing v2 lock, projected-evidence, and hopper-clipping tests**
+
+Extend `test_scenario_qualifier.py` with behavior tests that assert:
+
+```python
+lock, _ = qualify_snapshot(synthetic_bundle(), capability_documents())
+assert lock.schema_version == "lunar-scenario-lock/v2"
+
+wheel = lock.case("wheel-positive")
+assert wheel.evidence["start_cell_xy"] == [16, 16]
+assert wheel.evidence["projected_start_position_m"] == [0.0, 0.0, 0.0]
+assert wheel.evidence["start_projection_maximum_xy_error_m"] == 0.125
+
+hopper = lock.case("hopper-positive")
+assert hopper.goal_tolerance_m == 0.75
+assert hopper.evidence["landing_goal_tolerance_m"] == 0.75
+assert hopper.evidence["landing_candidate_cell_count"] == 29
+assert hopper.evidence["landing_seed_cell_xy"] == [16, 12]
+assert hopper.evidence["landing_rectangle_area_m2"] == 1.5625
+assert hopper.evidence["landing_rectangle_cell_bounds_xyxy"] == [14, 10, 18, 14]
+```
+
+Add a second test that sets `minimum_landing_region_area_m2=1.562501` on the otherwise globally safe synthetic map and requires `SCENARIO_CASE_NOT_FOUND:hopper-positive`. This catches implementations that use safe cells outside the Action goal tolerance.
+
+Add a migration test: serialize a valid lock with schema changed to `lunar-scenario-lock/v1`; normal `load_scenario_lock` must reject it with `SCENARIO_LOCK_INVALID`, while `write_scenario_lock(..., allow_rebaseline=True, reason="approved semantic migration")` must archive the v1 payload and replace it with v2. Run:
+
+```bash
+python3 -m pytest -q ros2_ws/src/lunar_isaac_validation/test/test_scenario_qualifier.py
+```
+
+Expected: FAIL on the v1 schema, missing evidence, `0.50` hopper-positive tolerance, or unbounded landing area.
+
+- [ ] **Step 4: Implement v2 qualification and explicit legacy migration**
+
+Set `SCENARIO_LOCK_SCHEMA="lunar-scenario-lock/v2"`, `LEGACY_SCENARIO_LOCK_SCHEMA="lunar-scenario-lock/v1"`, `QUALIFICATION_EVIDENCE_SCHEMA="lunar-scenario-qualification-evidence/v2"`, default goal tolerance `0.50`, and hopper-positive tolerance `0.75`.
+
+For wheel and legged cases, call `project_trajectory_start` and store its three exact evidence fields. V2 parsing must reject missing, nonfinite, or malformed projection evidence. Default lock loading accepts only v2. The rebaseline writer alone may validate and archive a structurally valid v1 lock before replacing it with a freshly qualified v2 lock; no normal run path accepts v1.
+
+Replace the global `_rectangle_for_cell` decision with a goal-clipped mask. Select the safe seed by `(distance_to_goal,y,x)`, then repeatedly try `minimum_x`, `maximum_x`, `minimum_y`, and `maximum_y` expansions in that order. Store `landing_goal_tolerance_m`, `landing_candidate_cell_count`, `landing_seed_cell_xy`, the final bounds, and final area. A candidate qualifies only when the clipped area and all existing dynamics checks pass.
+
+- [ ] **Step 5: Bind preflight to the approved semantic authority**
+
+First add a failing `test_cli_contract.py` assertion that `APPROVED_MAIN_COMMITS` contains `a02601a8112f3417f57de9fb7df4d3cf2237b705`, then append that exact commit to `scripts/preflight.py`. Run:
+
+```bash
+python3 -m pytest -q test/test_cli_contract.py
+python3 -m pytest -q \
+  ros2_ws/src/lunar_isaac_validation/test/test_planner_semantics.py \
+  ros2_ws/src/lunar_isaac_validation/test/test_scenario_qualifier.py
+```
+
+Expected: both commands PASS.
+
+- [ ] **Step 6: Run source verification and commit Task 11**
+
+```bash
+python3 -m pytest -q test ros2_ws/src/lunar_isaac_validation/test
+python3 -m py_compile \
+  scripts/preflight.py \
+  ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/planner_semantics.py \
+  ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/scenario_qualifier.py
+git diff --check
+git add scripts/preflight.py test/test_cli_contract.py ros2_ws/src/lunar_isaac_validation
+git commit -m "fix: align locked fixtures with planner semantics"
+```
+
+Expected: all source tests PASS and only Task 11 source/test files enter the commit; the old live lock remains unchanged until Task 13.
+
+---
+
+### Task 12: Validate projected starts and complete six-case repeat semantics
+
+**Files:**
+- Modify: external `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/{trajectory_checks.py,reports.py}`
+- Test: external `ros2_ws/src/lunar_isaac_validation/test/{test_trajectory_checks.py,test_reports.py}`
+
+**Interfaces:**
+- Consumes: `ScenarioCase` v2 evidence and `project_trajectory_start`.
+- Produces: trajectory-start validation independent of Action output and `compare_normalized_runs` that cannot pass missing or failed case summaries.
+
+- [ ] **Step 1: Write and observe failing projected-start assertion tests**
+
+Keep the existing valid fixture centred by changing its test-only grid origin to `(-5.0625,-5.0625)`. Add a separate wheel case on origin `(-5.0,-5.0)`, resolution `0.125`, continuous request start `(0.0,0.0,0.0)`, and locked evidence `cell=[40,40]`, projected position `[0.0625,0.0625,0.0]`, maximum per-axis error `0.0625`. A reference whose first point is that projected position must pass; changing either the first point back to `(0.0,0.0,0.0)` or the locked projection evidence must raise `TRAJECTORY_START_MISMATCH` or `TRAJECTORY_START_EVIDENCE_MISMATCH`, respectively.
+
+Run:
+
+```bash
+python3 -m pytest -q ros2_ws/src/lunar_isaac_validation/test/test_trajectory_checks.py
+```
+
+Expected: the projected-start acceptance test fails because the current validator compares against the continuous request pose.
+
+- [ ] **Step 2: Implement projected-start validation**
+
+For wheel and legged references, recompute `ProjectedStart` from the case request start, bundle, and capabilities. Require the lock's three evidence fields to equal the recomputed cell, position within `1e-9 m`, and maximum error within `1e-12 m`; otherwise raise `TRAJECTORY_START_EVIDENCE_MISMATCH`. Compare the first reference point to the recomputed projected position within `1e-3 m`; retain all terminal, kinematic, timing, sweep, and map checks unchanged.
+
+Run the Step 1 command and expect PASS.
+
+- [ ] **Step 3: Write and observe a failing missing-summary comparison test**
+
+Extend `test_reports.py` so a six-case pair with either `passed=False`, an absent `normalized_reference`, or `normalized_reference=None` returns the affected case id in `mismatches`. Existing comparisons must continue to ignore duration, ROS stamps, PIDs, logs, and assertion-detail text.
+
+Run:
+
+```bash
+python3 -m pytest -q ros2_ws/src/lunar_isaac_validation/test/test_reports.py
+```
+
+Expected: FAIL because the current comparator treats two missing summaries as equal.
+
+- [ ] **Step 4: Implement complete semantic comparison and commit Task 12**
+
+Require equal six-case order, both cases passing, and a mapping-valued `normalized_reference` on both sides before comparing summaries. Then run:
+
+```bash
+python3 -m pytest -q \
+  ros2_ws/src/lunar_isaac_validation/test/test_trajectory_checks.py \
+  ros2_ws/src/lunar_isaac_validation/test/test_action_assertions.py \
+  ros2_ws/src/lunar_isaac_validation/test/test_reports.py
+python3 -m pytest -q test ros2_ws/src/lunar_isaac_validation/test
+python3 -m py_compile \
+  ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/trajectory_checks.py \
+  ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/reports.py
+git diff --check
+git add ros2_ws/src/lunar_isaac_validation
+git commit -m "fix: validate projected trajectory starts"
+```
+
+Expected: all commands PASS and the source Git worktree is clean.
+
+---
+
+### Task 13: Rebaseline, run the six cases twice, and document handoff
+
+**Files:**
+- Modify through approved CLI: external `ros2_ws/src/lunar_isaac_validation/scenarios/scenario_lock.json`
+- Modify: external `README.md`
+- Create at runtime: external `build/`, `install/`, `log/`, and `artifacts/` evidence only
+- Preserve: active USD, locked snapshot arrays, production planner source, and unrelated main-repository state
+
+**Interfaces:**
+- Consumes: snapshot `20260804T025645914927Z`, v1 lock, Task 11–12 source, and approved rebaseline reason.
+- Produces: reviewed v2 lock/report, fresh install overlay, two complete 6/6 runs, deterministic semantic comparison, final evidence paths, and operator instructions.
+
+- [ ] **Step 1: Explicitly rebaseline the reviewed lock**
+
+From the external root, run in one shell:
+
+```bash
+LUNAR_REBASELINE_RUN_ID="$(date -u +%Y%m%dT%H%M%S%6NZ)"
+bash scripts/qualify_fixtures.sh \
+  --manifest snapshots/20260804T025645914927Z/snapshot_manifest.json \
+  --run-id "$LUNAR_REBASELINE_RUN_ID" \
+  --rebaseline \
+  --reason "2026-08-04 approved planner-semantic alignment: grid-projected starts and goal-clipped hopper landing region"
+printf '%s\n' "$LUNAR_REBASELINE_RUN_ID"
+```
+
+Expected: a v1→v2 `scenario_rebaseline_report.json`; unchanged stage and arrays hashes; wheel/legged projected-start evidence; hopper-positive tolerance `0.75` and goal-clipped area at least `1.327322 m²`. Commit only the lock:
+
+```bash
+git add ros2_ws/src/lunar_isaac_validation/scenarios/scenario_lock.json
+git commit -m "test: rebaseline planner-aligned scene fixtures"
+```
+
+- [ ] **Step 2: Build one fresh external overlay and run its tests**
+
+```bash
+LUNAR_BUILD_RUN_ID="$(date -u +%Y%m%dT%H%M%S%6NZ)"
+bash scripts/build_external.sh --run-id "$LUNAR_BUILD_RUN_ID"
+set +u
 source /opt/ros/humble/setup.bash
-source install/<build-run-id>/setup.bash
-colcon --log-base log/<test-run-id> test \
-  --build-base build/<build-run-id> \
-  --install-base install/<build-run-id> \
+source "install/$LUNAR_BUILD_RUN_ID/setup.bash"
+set -u
+colcon --log-base "log/${LUNAR_BUILD_RUN_ID}-test" test \
+  --build-base "build/$LUNAR_BUILD_RUN_ID" \
+  --install-base "install/$LUNAR_BUILD_RUN_ID" \
   --packages-select lunar_planner_core lunar_planner_ros lunar_isaac_validation
-colcon test-result --test-result-base build/<build-run-id> --verbose
+colcon test-result \
+  --test-result-base "build/$LUNAR_BUILD_RUN_ID" --verbose
+printf '%s\n' "$LUNAR_BUILD_RUN_ID"
 ```
 
-Expected: zero failed tests.
+Expected: build succeeds and test-result reports zero failed tests.
 
-- [ ] **Step 4: Re-run main-repository boundary checks without changing the repository**
+- [ ] **Step 3: Run two formal six-case regressions against the same lock and install**
 
-Run:
+In the same shell that retains `LUNAR_BUILD_RUN_ID`:
 
 ```bash
+LUNAR_FORMAL_RUN_ONE_ID="$(date -u +%Y%m%dT%H%M%S%6NZ)"
+bash scripts/run_action_regression.sh \
+  --manifest snapshots/20260804T025645914927Z/snapshot_manifest.json \
+  --lock ros2_ws/src/lunar_isaac_validation/scenarios/scenario_lock.json \
+  --install "install/$LUNAR_BUILD_RUN_ID" \
+  --run-id "$LUNAR_FORMAL_RUN_ONE_ID"
+
+LUNAR_FORMAL_RUN_TWO_ID="$(date -u +%Y%m%dT%H%M%S%6NZ)"
+bash scripts/run_action_regression.sh \
+  --manifest snapshots/20260804T025645914927Z/snapshot_manifest.json \
+  --lock ros2_ws/src/lunar_isaac_validation/scenarios/scenario_lock.json \
+  --install "install/$LUNAR_BUILD_RUN_ID" \
+  --run-id "$LUNAR_FORMAL_RUN_TWO_ID"
+printf '%s\n' "$LUNAR_FORMAL_RUN_ONE_ID" "$LUNAR_FORMAL_RUN_TWO_ID"
+```
+
+Expected for each run: exit 0; six isolated sessions; three exact new-reference and three exact goal-infeasible results; six cleanup assertions pass; no stale/TF/skew/layout failure.
+
+- [ ] **Step 4: Compare all six normalized summaries**
+
+Load both `scenario_results.json` files as `CaseResult` values and call `compare_normalized_runs`. Assert both `summary.json` objects equal `{"exit_code":0,"failed":0,"passed":6,"total":6}`, all twelve case results have mapping-valued `normalized_reference`, and comparison equals `{"passed":True,"mismatches":[]}`. Timing, ROS stamps, PIDs, and raw logs remain excluded.
+
+In the same shell that retains both formal run ids, run:
+
+```bash
+PYTHONPATH=ros2_ws/src/lunar_isaac_validation python3 - \
+  "$LUNAR_FORMAL_RUN_ONE_ID" "$LUNAR_FORMAL_RUN_TWO_ID" <<'PY'
+from collections.abc import Mapping
+import json
+from pathlib import Path
+import sys
+
+from lunar_isaac_validation.reports import CaseResult, compare_normalized_runs
+
+expected_summary = {"exit_code": 0, "failed": 0, "passed": 6, "total": 6}
+runs = []
+for run_id in sys.argv[1:]:
+    directory = Path("artifacts") / run_id
+    summary = json.loads((directory / "summary.json").read_text(encoding="utf-8"))
+    if summary != expected_summary:
+        raise SystemExit(f"unexpected summary for {run_id}: {summary}")
+    payload = json.loads(
+        (directory / "scenario_results.json").read_text(encoding="utf-8")
+    )
+    results = [CaseResult(**item) for item in payload["results"]]
+    if len(results) != 6 or not all(
+        result.passed
+        and isinstance(result.actual.get("normalized_reference"), Mapping)
+        for result in results
+    ):
+        raise SystemExit(f"incomplete semantic results for {run_id}")
+    runs.append(results)
+comparison = compare_normalized_runs(runs[0], runs[1])
+if comparison != {"passed": True, "mismatches": []}:
+    raise SystemExit(f"normalized mismatch: {comparison}")
+print(json.dumps(comparison, sort_keys=True))
+PY
+```
+
+- [ ] **Step 5: Verify immutable scene, artifact boundary, and main repository**
+
+```bash
+test "$(sha256sum /home/kai/CodexDownloads/lunar_navigation/isaac_sim/exports/lunar_polar_terrain_5deg/lunar_polar_terrain_5deg_safe_wheeled_start.usda | cut -d' ' -f1)" = "0e5de317252740d691a852b69d5304a4150e26b4f2741a42149627a3016196b8"
+test "$(sha256sum snapshots/20260804T025645914927Z/snapshot_arrays.npz | cut -d' ' -f1)" = "5853a6a8499c3663828549c155d278ddab4a31e767b93f15860e6d282c4c7ac4"
 cd /mnt/data/WS/lunar-navigation
 python3 tools/check_repository_boundaries.py .
 python3 -m pytest -q tests/foundation/test_repository_boundaries.py
 git status --short
 ```
 
-Expected: `repository boundaries: OK`, all foundation boundary tests pass, and every unrelated worktree entry captured before execution remains byte-for-byte/status-for-status unchanged.
+Expected: both hashes match, boundary checks pass, and the only unrelated main entry remains `?? .vscode/`. All new runtime artifacts remain below the external root.
 
-- [ ] **Step 5: Verify immutable USD and external artifact placement**
+- [ ] **Step 6: Document the exact operator workflow**
 
-Compare the root USD SHA-256 to the locked value and scan the main repository for newly created `build`, `install`, `log`, snapshot, NPZ, JUnit, or scenario-result files. Expected: USD hash matches and every runtime artifact resides below the external root.
-
-- [ ] **Step 6: Document exact operator commands and failure semantics**
-
-README must explain: enable/check Python Server, optional token-file permissions, collect, qualify once, explicit rebaseline, build, run, report locations, exit codes 10/20/30/40/50/60, six-session isolation, replay after post-snapshot Isaac disconnect, and the absence of platform execution/control.
+README must explain: Python Server enable/check and optional `0600` token file; collect; qualify once; v1→v2 explicit rebaseline and required reason; v2 grid-projected wheel/legged start oracle; `0.75 m` goal-clipped hopper-positive rule; build; two formal runs; report locations; exit codes 10/20/30/40/50/60; six-session isolation; replay after post-snapshot Isaac disconnect; and the absence of platform execution/control.
 
 - [ ] **Step 7: Run final external verification and commit the handoff**
 
-Run:
-
 ```bash
-python3 -m pytest -q ros2_ws/src/lunar_isaac_validation/test
-git -C /home/kai/CodexDownloads/lunar_navigation/isaac_ros_action_regression status --short
-git -C /home/kai/CodexDownloads/lunar_navigation/isaac_ros_action_regression add README.md
-git -C /home/kai/CodexDownloads/lunar_navigation/isaac_ros_action_regression commit -m "docs: document Isaac ROS regression workflow"
-git -C /home/kai/CodexDownloads/lunar_navigation/isaac_ros_action_regression status --short
+python3 -m pytest -q test ros2_ws/src/lunar_isaac_validation/test
+python3 -m py_compile \
+  scripts/*.py \
+  ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/*.py
+git diff --check
+git status --short
+git add README.md
+git commit -m "docs: document Isaac ROS regression workflow"
+git status --short
 ```
 
-Expected: tests PASS and external source Git worktree is clean; runtime artifact directories remain ignored and recoverable.
+Expected: tests and compilation PASS; external source Git worktree is clean; ignored runtime artifacts remain recoverable.
 
 ---
 
 ## Plan Self-Review
 
-- **Spec coverage:** Tasks 1–4 create the isolated two-runtime snapshot path; Task 5 creates all capability and geometry inputs; Task 6 locks six real cases without data injection; Task 7 publishes the frozen topics; Task 8 validates platform references; Task 9 handles Lifecycle, Action, cleanup, and reports; Tasks 10–11 qualify the live scene and run the complete deterministic regression twice.
-- **Boundary coverage:** Every source/build/output path is external except this plan. Main ROS interfaces and sources are consumed read-only, all pre-existing unrelated worktree entries are preserved, and final repository boundary checks are explicit.
+- **Spec coverage:** Tasks 1–4 create the isolated two-runtime snapshot path; Task 5 creates all capability and geometry inputs; Task 6 locks six real cases without data injection; Task 7 publishes the frozen topics; Task 8 validates platform references; Task 9 handles Lifecycle, Action, cleanup, and reports; Task 10 qualifies the live scene; Tasks 11–13 implement the approved planner-semantic alignment, explicit v2 rebaseline, and two complete deterministic regressions.
+- **Boundary coverage:** Every implementation source/build/output path is external; the main repository contains only the approved design and plan. Production planner source remains read-only, all pre-existing unrelated worktree entries are preserved, and final repository boundary checks are explicit.
 - **Failure coverage:** Preflight, Isaac, fixture, ROS, Action, and cleanup failures map to exit codes 10/20/30/40/50/60. Exact timeouts, continuation rules, token redaction, post-snapshot Isaac disconnect, and explicit-PID cleanup are assigned to Tasks 4, 9, and 10.
-- **Type consistency:** `SnapshotBundle`, `ScenarioCase`, `ScenarioLock`, `CaseResult`, layer keys, platform keys, topic names, Action enums, reason codes, frames, and public function names are defined before downstream use and remain identical across tasks.
+- **Type consistency:** `SnapshotBundle`, `ProjectedStart`, `ScenarioCase`, `ScenarioLock`, `CaseResult`, layer keys, platform keys, topic names, Action enums, reason codes, frames, and public function names are defined before downstream use and remain identical across tasks.
 - **Placeholder scan:** All production values, paths, commands, expected results, algorithms, and test oracles are fixed; the plan contains no deferred implementation marker.
