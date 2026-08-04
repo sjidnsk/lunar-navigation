@@ -148,13 +148,13 @@ class ObservationBuilderV2:
             raise TransformUnavailable("pose_map must be in map frame")
         if world.canvas != mission.canvas or world.canvas != projection.canvas:
             raise ValueError("observed world, mission and projection must share canvas identity")
+        if candidates.count and candidates.canvas_id != world.canvas.identity:
+            raise ValueError("candidate batch canvas identity does not match observation canvas")
         left, bottom, right, top = world.local.bounds_m
         if not (math.isclose((left + right) / 2.0, pose_map.x_m) and math.isclose((bottom + top) / 2.0, pose_map.y_m)):
             raise ValueError("local map-axis bounds must be centered on resolved robot pose")
         if platform_type not in PLATFORM_CONTEXTS or candidates.features.shape != (64, 12) or candidates.mask.shape != (64,):
             raise ValueError("invalid platform or candidate batch")
-        if ((candidates.features < 0.0) | (candidates.features > 1.0)).any():
-            raise ValueError("candidate features must be in [0,1]")
         observed = world.observed_mask
         elevation = np.where(observed, world.elevation_m - self._reference.global_reference_m, 0.0).astype(np.float32)
         local = world.local
@@ -164,9 +164,9 @@ class ObservationBuilderV2:
         total = float(mission.roi_ratio.sum())
         observed_ratio = float((observed * mission.roi_ratio).sum() / total) if total else 0.0
         canvas = world.canvas
-        pose_features = np.asarray([[(pose_map.x_m - canvas.bounds_m[0]) / canvas.geometry.size_m, (canvas.bounds_m[3] - pose_map.y_m) / canvas.geometry.size_m, (math.sin(pose_map.yaw_rad) + 1.0) / 2.0, (math.cos(pose_map.yaw_rad) + 1.0) / 2.0, observed_ratio, mission.remaining_decision_budget_ratio]], dtype=np.float32)
+        pose_features = np.asarray([[(pose_map.x_m - canvas.bounds_m[0]) / canvas.geometry.size_m, (canvas.bounds_m[3] - pose_map.y_m) / canvas.geometry.size_m, math.sin(pose_map.yaw_rad), math.cos(pose_map.yaw_rad), observed_ratio, mission.remaining_decision_budget_ratio]], dtype=np.float32)
         result = {"prior_channels": prior, "coverage_summary": coverage, "local_crop": local_crop, "frontier_features": candidates.features[None], "pose_features": pose_features, "candidate_mask": candidates.mask[None], "platform_context": np.asarray([PLATFORM_CONTEXTS[platform_type]], dtype=np.float32)}
-        for name in ("coverage_summary", "frontier_features", "pose_features"):
+        for name in ("coverage_summary",):
             if ((result[name] < 0.0) | (result[name] > 1.0)).any():
                 raise ValueError(f"{name} must be in [0,1]")
         validate_observation_inputs(result)

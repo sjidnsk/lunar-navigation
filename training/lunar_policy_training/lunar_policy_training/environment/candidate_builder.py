@@ -34,13 +34,12 @@ class SensorGeometry:
 class CandidateBatch:
     features: np.ndarray
     mask: np.ndarray
+    canvas_id: str | None = None
 
     def __post_init__(self) -> None:
         features, mask = np.asarray(self.features, dtype=np.float32), np.asarray(self.mask, dtype=bool)
         if features.shape != (64, len(ObservationContractV2.frontier_fields)) or mask.shape != (64,) or not np.isfinite(features).all():
             raise ValueError("candidate batch must use finite [64,12] and [64]")
-        if ((features < 0.0) | (features > 1.0)).any():
-            raise ValueError("candidate features must be in [0,1]")
         object.__setattr__(self, "features", features)
         object.__setattr__(self, "mask", mask)
 
@@ -49,8 +48,8 @@ class CandidateBatch:
         return int(self.mask.sum())
 
     @classmethod
-    def empty(cls) -> "CandidateBatch":
-        return cls(np.zeros((64, 12), np.float32), np.zeros(64, bool))
+    def empty(cls, canvas_id: str | None = None) -> "CandidateBatch":
+        return cls(np.zeros((64, 12), np.float32), np.zeros(64, bool), canvas_id)
 
 
 def _neighbors(row: int, column: int, cells: int) -> tuple[tuple[int, int], ...]:
@@ -76,6 +75,18 @@ def _clear_observed(world: ObservedWorld, cells: list[tuple[int, int]], *, unkno
     return bool(check) and all(world.observed_mask[row, column] and world.physical_obstacle_ratio[row, column] == 0.0 for row, column in check)
 
 
+def _segments(points: list[tuple[int, int]], cells: int) -> list[list[tuple[int, int]]]:
+    remaining, output = set(points), []
+    while remaining:
+        start = min(remaining); remaining.remove(start); queue, segment = [start], []
+        while queue:
+            point = queue.pop(); segment.append(point)
+            for neighbor in _neighbors(*point, cells):
+                if neighbor in remaining: remaining.remove(neighbor); queue.append(neighbor)
+        output.append(sorted(segment))
+    return output
+
+
 class CandidateBuilderV2:
     def __init__(self, sensor: SensorGeometry = SensorGeometry(80.0, 2.0 * math.pi)) -> None:
         self._sensor = sensor
@@ -92,7 +103,7 @@ class CandidateBuilderV2:
         for row, column in np.argwhere(observed & roi):
             boundary[row, column] = any(roi[next_row, next_column] and not observed[next_row, next_column] for next_row, next_column in _neighbors(int(row), int(column), cells))
         spacing = max(1, math.ceil(self._sensor.anchor_spacing_m / canvas.geometry.resolution_m))
-        chosen: list[np.ndarray] = []
+        chosen: list[tuple[tuple[int, int], np.ndarray]] = []
         total_roi, total_priority = float(mission.roi_ratio.sum()), float((mission.priority * mission.roi_ratio).sum())
         for index, (row, column) in enumerate(np.argwhere(boundary)):
             if index % spacing:
@@ -105,11 +116,20 @@ class CandidateBuilderV2:
                 continue
             feature = self._feature(world, mission, projection, pose_map, robot, standoff, total_roi, total_priority)
             if feature is not None:
-                chosen.append(feature)
-        chosen.sort(key=lambda item: tuple(item.tolist()))
+                chosen.append((standoff, feature))
+        by_point = {point: feature for point, feature in chosen}
+        representatives: list[tuple[tuple[int, int], np.ndarray]] = []
+        for segment in _segments(list(by_point), cells):
+            representatives.append(min(((point, by_point[point]) for point in segment), key=lambda item: tuple(item[1].tolist())))
+        selected = representatives[:64]
+        remaining = [(point, feature) for point, feature in chosen if point not in {item[0] for item in selected}]
+        while remaining and len(selected) < 64:
+            index = max(range(len(remaining)), key=lambda idx: min(math.dist(remaining[idx][0], item[0]) for item in selected))
+            selected.append(remaining.pop(index))
+        chosen = sorted(selected, key=lambda item: tuple(item[1].tolist()))
         output = np.zeros((64, 12), np.float32); mask = np.zeros(64, bool)
-        for index, feature in enumerate(chosen[:64]): output[index] = feature; mask[index] = True
-        return CandidateBatch(output, mask)
+        for index, (_, feature) in enumerate(chosen[:64]): output[index] = feature; mask[index] = True
+        return CandidateBatch(output, mask, canvas.identity)
 
     def _feature(self, world: ObservedWorld, mission: MissionRaster, projection: PlatformProjection, pose: Pose2, robot: tuple[int, int], point: tuple[int, int], total_roi: float, total_priority: float) -> np.ndarray | None:
         canvas = world.canvas; x, y = canvas.grid_center_world(*point)
@@ -133,7 +153,7 @@ class CandidateBuilderV2:
         for neighbor in _neighbors(*point, canvas.geometry.cells):
             if mission.roi_ratio[neighbor] > 0 and not world.observed_mask[neighbor]: normal += (neighbor[0] - point[0], neighbor[1] - point[1])
         magnitude = float(np.linalg.norm(normal)); remaining = float((mission.roi_ratio * ~world.observed_mask).sum() / total_roi) if total_roi else 0.0
-        return np.asarray(((x - canvas.bounds_m[0]) / canvas.geometry.size_m, (canvas.bounds_m[3] - y) / canvas.geometry.size_m, min(1.0, distance / (math.sqrt(2.0) * canvas.geometry.size_m)), (math.sin(bearing) + 1.0) / 2.0, (math.cos(bearing) + 1.0) / 2.0, min(1.0, gain / total_roi) if total_roi else 0.0, min(1.0, priority_gain / total_priority) if total_priority else 0.0, (normal[0] / magnitude + 1.0) / 2.0 if magnitude else 0.5, (normal[1] / magnitude + 1.0) / 2.0 if magnitude else 0.5, min(1.0, magnitude / 2.0), projection.clearance_margin_norm[point], remaining), dtype=np.float32)
+        return np.asarray(((x - canvas.bounds_m[0]) / canvas.geometry.size_m, (canvas.bounds_m[3] - y) / canvas.geometry.size_m, min(1.0, distance / (math.sqrt(2.0) * canvas.geometry.size_m)), math.sin(bearing), math.cos(bearing), min(1.0, gain / total_roi) if total_roi else 0.0, min(1.0, priority_gain / total_priority) if total_priority else 0.0, -normal[0] / magnitude if magnitude else 0.0, normal[1] / magnitude if magnitude else 1.0, min(1.0, magnitude / 2.0), projection.clearance_margin_norm[point], remaining), dtype=np.float32)
 
 
 __all__ = ["CandidateBatch", "CandidateBuilderV2", "SensorGeometry"]

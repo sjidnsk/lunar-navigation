@@ -7,6 +7,7 @@ import numpy as np
 
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "model_contract"))
 
 from lunar_policy_training.environment.candidate_builder import CandidateBatch, CandidateBuilderV2, SensorGeometry  # noqa: E402
 from lunar_policy_training.environment.observation_builder import LocalObservation, MissionRaster, ObservedWorld, PlatformProjection, Pose2  # noqa: E402
