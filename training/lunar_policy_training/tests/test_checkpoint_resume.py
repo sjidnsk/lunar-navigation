@@ -15,6 +15,7 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 sys.path.insert(0, str(REPOSITORY_ROOT / "model_contract"))
 
 from lunar_policy_training.budget import TrainingBudget  # noqa: E402
+from lunar_policy_training.cli import SignalStopFlag, TrainingBoundaryLoop  # noqa: E402
 from lunar_policy_training.checkpoint import (  # noqa: E402
     CHECKPOINT_SCHEMA_VERSION,
     build_training_checkpoint,
@@ -65,6 +66,46 @@ def test_resume_preserves_consumed_gpu_budget(tmp_path: pathlib.Path) -> None:
     assert resumed.contract_version == "ObservationContractV1"
     assert resumed.consumed_gpu_seconds == 7200.0
     assert budget.remaining_gpu_seconds == 86400.0 - 7200.0
+
+
+def test_exhausted_checkpoint_resume_never_restarts_terminal_unit(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if a persisted 24-hour terminal state retried callbacks."""
+    path = tmp_path / "latest.pt"
+    save_checkpoint_atomic(path, _checkpoint(consumed_gpu_seconds=86400.0))
+    resumed = load_checkpoint(path)
+    budget = TrainingBudget.from_checkpoint(resumed)
+    events: list[str] = []
+    loop = TrainingBoundaryLoop(
+        budget=budget,
+        stop_flag=SignalStopFlag(),
+        checkpoint_interval_seconds=1800,
+        candidate_checkpoint_interval_seconds=3600,
+        curriculum_phase="joint",
+        initial_global_step=resumed.global_step,
+        initial_latest_checkpoint_gpu_seconds=(
+            resumed.latest_checkpoint_gpu_seconds
+        ),
+        initial_candidate_checkpoint_gpu_seconds=(
+            resumed.candidate_checkpoint_gpu_seconds
+        ),
+        clock=lambda: 5.0,
+    )
+
+    state = loop.run(
+        collect_rollout=lambda: events.append("collect"),
+        update_rollout=lambda rollout: events.append("update"),
+        save_checkpoint=lambda kind, saved_state: events.append(
+            f"save-{kind}-step-{saved_state.global_step}"
+        ),
+        max_updates=1,
+    )
+
+    assert budget.exhausted is True
+    assert budget.consumed_gpu_seconds == 86400.0
+    assert events == ["save-latest-step-12"]
+    assert state.global_step == 12
 
 
 @pytest.mark.parametrize(

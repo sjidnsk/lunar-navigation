@@ -21,6 +21,7 @@ from lunar_policy_training.cli import (  # noqa: E402
     ArtifactRootError,
     SignalStopFlag,
     TrainingBoundaryLoop,
+    _update_run_manifest,
     build_parser,
     validate_artifact_root,
 )
@@ -145,7 +146,7 @@ def test_signal_after_collection_discards_unfinished_rollout_without_update() ->
 
 def test_rollout_and_failed_update_both_settle_the_same_active_gpu_budget() -> None:
     """Would fail if policy inference or an exceptional PPO update escaped accounting."""
-    timestamps = iter((10.0, 12.0, 12.0, 15.0))
+    timestamps = iter((10.0, 15.0))
     budget = TrainingBudget()
     loop = TrainingBoundaryLoop(
         budget=budget,
@@ -172,7 +173,7 @@ def test_rollout_and_failed_update_both_settle_the_same_active_gpu_budget() -> N
 
 def test_resume_continues_latest_and_candidate_rhythms_from_active_gpu_markers() -> None:
     """Would fail if pause/resume restarted the 30/60-minute checkpoint clocks."""
-    timestamps = iter((0.0, 0.5, 0.5, 1.0))
+    timestamps = iter((0.0, 1.0))
     budget = TrainingBudget(consumed_gpu_seconds=3599.0)
     saves: list[tuple[str, object]] = []
     loop = TrainingBoundaryLoop(
@@ -196,6 +197,97 @@ def test_resume_continues_latest_and_candidate_rhythms_from_active_gpu_markers()
     assert [kind for kind, _ in saves][:2] == ["latest", "candidate"]
     assert state.latest_checkpoint_gpu_seconds == 3600.0
     assert state.candidate_checkpoint_gpu_seconds == 3600.0
+
+
+def test_training_does_not_start_callbacks_below_bounded_unit_reserve() -> None:
+    """Would fail if the final partial budget launched another rollout/update."""
+    budget = TrainingBudget(consumed_gpu_seconds=86400.0 - 600.0 + 1.0)
+    events: list[str] = []
+    loop = TrainingBoundaryLoop(
+        budget=budget,
+        stop_flag=SignalStopFlag(),
+        checkpoint_interval_seconds=1800,
+        candidate_checkpoint_interval_seconds=3600,
+        curriculum_phase="joint",
+        initial_global_step=41,
+        initial_latest_checkpoint_gpu_seconds=84000.0,
+        initial_candidate_checkpoint_gpu_seconds=82800.0,
+        clock=lambda: 10.0,
+    )
+
+    state = loop.run(
+        collect_rollout=lambda: events.append("collect"),
+        update_rollout=lambda rollout: events.append("update"),
+        save_checkpoint=lambda kind, saved_state: events.append(
+            f"save-{kind}-step-{saved_state.global_step}"
+        ),
+        max_updates=1,
+    )
+
+    assert events == ["save-latest-step-41"]
+    assert state.global_step == 41
+    assert state.rollout_discarded is False
+    assert state.latest_checkpoint_gpu_seconds == 86400.0
+    assert budget.consumed_gpu_seconds == 86400.0
+    assert budget.interval_active is False
+
+
+def test_run_manifest_persists_exhausted_budget_terminal_state(
+    tmp_path: pathlib.Path,
+) -> None:
+    manifest = tmp_path / "run-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "lunar-training-run/v1",
+                "runtime_calibration": {"selected_workers": 18},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _update_run_manifest(
+        manifest,
+        source_commit="a" * 40,
+        config_hash="b" * 64,
+        global_step=41,
+        consumed_gpu_seconds=86400.0,
+        platform_allocation={"WHEELED": 6, "LEGGED": 6, "HOPPER": 6},
+    )
+
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["budget_state"] == "exhausted"
+    assert payload["consumed_gpu_seconds"] == 86400.0
+
+
+def test_training_overrun_saves_terminal_latest_after_complete_update() -> None:
+    timestamps = iter((0.0, 600.001))
+    events: list[str] = []
+    budget = TrainingBudget()
+    loop = TrainingBoundaryLoop(
+        budget=budget,
+        stop_flag=SignalStopFlag(),
+        checkpoint_interval_seconds=1800,
+        candidate_checkpoint_interval_seconds=3600,
+        curriculum_phase="joint",
+        initial_global_step=7,
+        clock=lambda: next(timestamps),
+    )
+
+    state = loop.run(
+        collect_rollout=lambda: events.append("collect") or object(),
+        update_rollout=lambda rollout: events.append("update"),
+        save_checkpoint=lambda kind, saved_state: events.append(
+            f"save-{kind}-step-{saved_state.global_step}"
+        ),
+        max_updates=2,
+    )
+
+    assert events == ["collect", "update", "save-latest-step-8"]
+    assert state.global_step == 8
+    assert state.rollout_discarded is False
+    assert state.latest_checkpoint_gpu_seconds == 86400.0
+    assert budget.exhausted is True
 
 
 def _training_fingerprint() -> dict[str, object]:

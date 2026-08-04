@@ -18,6 +18,12 @@ if TYPE_CHECKING:
 
 
 TOTAL_GPU_BUDGET_SECONDS = 86400.0
+# The largest calibration probe performs micro_batch=4 across two bounded
+# pool-step phases at a 60-second worker timeout: 4 * 2 * 60 = 480 seconds.
+# The remaining 120 seconds covers policy inference, backward/update, and CUDA
+# synchronization. Training uses the same conservative complete-update bound.
+CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS = 600.0
+TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS = 600.0
 
 
 class BudgetError(ValueError):
@@ -87,6 +93,9 @@ class TrainingBudget:
     total_gpu_seconds: float = TOTAL_GPU_BUDGET_SECONDS
     consumed_gpu_seconds: float = 0.0
     _active_since: float | None = field(default=None, init=False, repr=False)
+    _active_upper_bound: float | None = field(
+        default=None, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self.total_gpu_seconds = _finite_nonnegative(
@@ -108,6 +117,10 @@ class TrainingBudget:
     def interval_active(self) -> bool:
         return self._active_since is not None
 
+    @property
+    def exhausted(self) -> bool:
+        return self.consumed_gpu_seconds >= self.total_gpu_seconds
+
     def consume(self, gpu_seconds: float) -> None:
         interval = _finite_nonnegative(gpu_seconds, "GPU interval")
         if interval > self.remaining_gpu_seconds:
@@ -117,15 +130,25 @@ class TrainingBudget:
             )
         self.consumed_gpu_seconds += interval
 
-    def begin_gpu_interval(self, *, monotonic_seconds: float) -> None:
+    def begin_gpu_interval(
+        self,
+        *,
+        monotonic_seconds: float,
+        upper_bound_gpu_seconds: float,
+    ) -> None:
         timestamp = _finite_nonnegative(monotonic_seconds, "GPU interval start")
+        upper_bound = _finite_positive(
+            upper_bound_gpu_seconds, "bounded unit upper bound"
+        )
         if self._active_since is not None:
             raise BudgetError("GPU interval is already active")
-        if self.remaining_gpu_seconds <= 0.0:
+        if self.remaining_gpu_seconds < upper_bound:
+            self.consumed_gpu_seconds = self.total_gpu_seconds
             raise BudgetExceededError(
-                "no remaining cumulative GPU budget for another bounded unit"
+                "remaining GPU budget is below the bounded unit upper bound"
             )
         self._active_since = timestamp
+        self._active_upper_bound = upper_bound
 
     def end_gpu_interval(
         self,
@@ -139,12 +162,21 @@ class TrainingBudget:
         if timestamp < self._active_since:
             raise BudgetError("GPU interval end precedes its start")
         interval = timestamp - self._active_since
+        upper_bound = self._active_upper_bound
         self._active_since = None
-        self.consume(
-            interval
-            if measured_gpu_seconds is None
-            else measured_gpu_seconds
+        self._active_upper_bound = None
+        actual = (
+            interval if measured_gpu_seconds is None else measured_gpu_seconds
         )
+        actual = _finite_nonnegative(actual, "GPU interval")
+        if upper_bound is None:
+            raise BudgetError("bounded unit upper bound is missing")
+        if actual > upper_bound:
+            self.consumed_gpu_seconds = self.total_gpu_seconds
+            raise BudgetExceededError(
+                "bounded unit exceeded its reserved upper bound"
+            )
+        self.consume(actual)
 
     @classmethod
     def from_checkpoint(cls, checkpoint: object) -> "TrainingBudget":
@@ -202,7 +234,12 @@ def calibrate_runtime(
     for workers in config.parallel.worker_candidates:
         safe = True
         for micro_batch in micro_batches:
-            budget.begin_gpu_interval(monotonic_seconds=clock())
+            budget.begin_gpu_interval(
+                monotonic_seconds=clock(),
+                upper_bound_gpu_seconds=(
+                    CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS
+                ),
+            )
             try:
                 measurement = workload(workers, micro_batch)
                 if not isinstance(measurement, CalibrationMeasurement):
@@ -323,8 +360,17 @@ def _finite_nonnegative(value: object, name: str) -> float:
     return float(value)
 
 
+def _finite_positive(value: object, name: str) -> float:
+    result = _finite_nonnegative(value, name)
+    if result <= 0.0:
+        raise BudgetError(f"{name} must be positive")
+    return result
+
+
 __all__ = [
     "TOTAL_GPU_BUDGET_SECONDS",
+    "CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS",
+    "TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS",
     "BudgetError",
     "BudgetExceededError",
     "CalibrationError",

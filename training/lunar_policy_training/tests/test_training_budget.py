@@ -38,12 +38,30 @@ def test_active_gpu_intervals_exclude_paused_wall_clock() -> None:
     """Would fail if time between active intervals consumed the GPU budget."""
     budget = TrainingBudget()
 
-    budget.begin_gpu_interval(monotonic_seconds=10.0)
+    budget.begin_gpu_interval(
+        monotonic_seconds=10.0, upper_bound_gpu_seconds=10.0
+    )
     budget.end_gpu_interval(monotonic_seconds=13.5)
-    budget.begin_gpu_interval(monotonic_seconds=1013.5)
+    budget.begin_gpu_interval(
+        monotonic_seconds=1013.5, upper_bound_gpu_seconds=10.0
+    )
     budget.end_gpu_interval(monotonic_seconds=1014.0)
 
     assert budget.consumed_gpu_seconds == 4.0
+
+
+def test_bounded_interval_saturates_when_actual_exceeds_reserve() -> None:
+    budget = TrainingBudget()
+    budget.begin_gpu_interval(
+        monotonic_seconds=0.0, upper_bound_gpu_seconds=600.0
+    )
+
+    with pytest.raises(BudgetExceededError, match="reserved upper bound"):
+        budget.end_gpu_interval(monotonic_seconds=600.001)
+
+    assert budget.exhausted is True
+    assert budget.consumed_gpu_seconds == 86400.0
+    assert budget.interval_active is False
 
 
 class _CalibrationProbe:
@@ -178,7 +196,9 @@ def test_budget_refuses_to_start_another_bounded_unit_when_empty() -> None:
     budget.consume(86400.0)
 
     with pytest.raises(BudgetExceededError, match="remaining"):
-        budget.begin_gpu_interval(monotonic_seconds=5.0)
+        budget.begin_gpu_interval(
+            monotonic_seconds=5.0, upper_bound_gpu_seconds=1.0
+        )
 
     assert budget.interval_active is False
 
@@ -207,3 +227,34 @@ def test_calibration_unexpected_exit_still_settles_shared_budget(
 
     assert budget.consumed_gpu_seconds == 3.0
     assert budget.interval_active is False
+
+
+def test_calibration_does_not_start_probe_below_bounded_unit_reserve(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if the final partial budget still launched an 18/24 probe."""
+    config = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+    calls: list[tuple[int, int]] = []
+    budget = TrainingBudget(
+        consumed_gpu_seconds=(
+            86400.0 - 600.0 + 1.0
+        )
+    )
+
+    with pytest.raises(BudgetExceededError, match="bounded unit"):
+        calibrate_runtime(
+            config=config,
+            workload=lambda workers, micro_batch: calls.append(
+                (workers, micro_batch)
+            ),
+            budget=budget,
+            manifest_path=tmp_path / "must-not-start.json",
+            micro_batch_candidates=(1,),
+        )
+
+    assert calls == []
+    assert budget.consumed_gpu_seconds == 86400.0
+    assert budget.interval_active is False
+    assert not (tmp_path / "must-not-start.json").exists()

@@ -24,7 +24,10 @@ import torch
 from lunar_planner_training_bridge import PlanningOutcome, TrainingPlanRequest
 
 from .budget import (
+    BudgetExceededError,
     CalibrationMeasurement,
+    TOTAL_GPU_BUDGET_SECONDS,
+    TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS,
     TrainingBudget,
     calibrate_runtime,
 )
@@ -315,41 +318,63 @@ class TrainingBoundaryLoop:
         updates = 0
         while updates < max_updates:
             interval_start = self._clock()
-            self._budget.begin_gpu_interval(monotonic_seconds=interval_start)
+            try:
+                self._budget.begin_gpu_interval(
+                    monotonic_seconds=interval_start,
+                    upper_bound_gpu_seconds=(
+                        TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS
+                    ),
+                )
+            except BudgetExceededError:
+                self._latest_checkpoint_gpu_seconds = (
+                    self._budget.consumed_gpu_seconds
+                )
+                state = self._state(rollout_discarded=False)
+                save_checkpoint("latest", state)
+                return state
             collection_error: BaseException | None = None
+            update_error: BaseException | None = None
+            budget_error: BudgetExceededError | None = None
             rollout = None
+            update_completed = False
             try:
                 rollout = collect_rollout()
                 self._synchronize_device()
             except BaseException as error:
                 collection_error = error
-            finally:
+            if collection_error is None and not self._stop_flag.requested:
+                try:
+                    update_rollout(rollout)
+                    self._synchronize_device()
+                    update_completed = True
+                except BaseException as error:
+                    update_error = error
+            try:
                 interval_end = self._clock()
                 self._budget.end_gpu_interval(monotonic_seconds=interval_end)
+            except BudgetExceededError as error:
+                budget_error = error
             if collection_error is not None:
                 raise collection_error
-            if self._stop_flag.requested:
+            if self._stop_flag.requested and not update_completed:
                 self._latest_checkpoint_gpu_seconds = (
                     self._budget.consumed_gpu_seconds
                 )
                 state = self._state(rollout_discarded=True)
                 save_checkpoint("latest", state)
                 return state
-            interval_start = self._clock()
-            self._budget.begin_gpu_interval(monotonic_seconds=interval_start)
-            update_error: BaseException | None = None
-            try:
-                update_rollout(rollout)
-                self._synchronize_device()
-            except BaseException as error:
-                update_error = error
-            finally:
-                interval_end = self._clock()
-                self._budget.end_gpu_interval(monotonic_seconds=interval_end)
             if update_error is not None:
                 raise update_error
-            self._global_step += 1
-            updates += 1
+            if update_completed:
+                self._global_step += 1
+                updates += 1
+            if budget_error is not None:
+                self._latest_checkpoint_gpu_seconds = (
+                    self._budget.consumed_gpu_seconds
+                )
+                state = self._state(rollout_discarded=False)
+                save_checkpoint("latest", state)
+                return state
             now = self._budget.consumed_gpu_seconds
             latest_saved = False
             if (
@@ -585,6 +610,13 @@ def _resume_training_run(
         or float(manifest_budget) != checkpoint.consumed_gpu_seconds
     ):
         raise ArtifactRootError("run manifest budget differs from latest checkpoint")
+    expected_budget_state = (
+        "exhausted"
+        if checkpoint.consumed_gpu_seconds >= TOTAL_GPU_BUDGET_SECONDS
+        else "active"
+    )
+    if manifest.get("budget_state") != expected_budget_state:
+        raise ArtifactRootError("run manifest budget state differs from checkpoint")
     budget = TrainingBudget.from_checkpoint(checkpoint)
     return _run_updates(
         config=config,
@@ -1054,6 +1086,11 @@ def _update_run_manifest(
             "config_hash": config_hash,
             "global_step": global_step,
             "consumed_gpu_seconds": consumed_gpu_seconds,
+            "budget_state": (
+                "exhausted"
+                if consumed_gpu_seconds >= TOTAL_GPU_BUDGET_SECONDS
+                else "active"
+            ),
             "platform_allocation": dict(platform_allocation),
         }
     )
