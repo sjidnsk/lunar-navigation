@@ -202,9 +202,24 @@ GridMap 编码必须符合现有 adapter：十层名称唯一，二维布局标�
 
 ## 场景资格与锁定
 
-首次实施时，资格检查器依据快照和上述能力约束生成候选报告，再按固定规则选择六个坐标并写入 `scenario_lock.json`。锁文件包含 stage SHA-256、快照数组 SHA-256、平台起点、目标、目标 tolerance、选择证据以及精确期望的 Action outcome、directive 和 reason code。
+首次实施时，资格检查器依据快照和上述能力约束生成候选报告，再按固定规则选择六个坐标并写入 `scenario_lock.json`。锁文件使用 `lunar-scenario-lock/v2`，包含 stage SHA-256、快照数组 SHA-256、平台连续请求起点、目标、目标 tolerance、选择证据以及精确期望的 Action outcome、directive 和 reason code。旧版 `v1` 锁不得被新版回归静默接受。
 
 锁文件一旦存在，普通回归只能读取，不能重选坐标、修改期望值或覆盖锁文件。stage 或快照哈希不匹配时返回 `FIXTURE_STAGE_MISMATCH`；重新基线必须显式运行资格命令并产生独立审阅报告。
+
+### 2026-08-04 方案 A 语义修订
+
+本修订保持生产规划器、能力资料、快照数组和场景 USD 不变，只使外部资格检查与断言遵循现有离散规划契约。不得从 Action 实际输出反推锁值。
+
+轮式和足式仍以平台规划参考位姿作为 Odometry、TF 和 Action 请求的连续起点；锁证据另外保存 `start_cell_xy`、`projected_start_position_m` 和 `start_projection_maximum_xy_error_m`。投影按局部图执行：
+
+- `cell_x=floor((start_x-origin_x)/resolution)`，Y 轴同理。
+- 投影 X/Y 为该单元中心；每轴与连续请求起点的偏差不得超过 `resolution/2+1e-9 m`。
+- 轮式投影 Z 为起点单元的 `elevation`。
+- 足式投影 Z 为起点单元的 `elevation + (body_height_lower+body_height_upper)/2`。
+
+资格检查器必须从锁定快照和能力资料独立计算这些字段。Action 断言先重新计算并核对锁证据，再要求轮式或足式轨迹首点在 `1e-3 m` 内等于投影起点；不得把连续请求起点直接当作离散轨迹首点。
+
+`wheel-positive`、`wheel-negative`、`legged-positive`、`legged-negative` 和 `hopper-negative` 的点目标 tolerance 保持 `0.50 m`；`hopper-positive` 固定使用 `0.75 m`。跳跃正例对每个 1–2 m 候选目标执行与生产规划器相同的目标裁剪：只保留中心距点目标不超过 `0.75 m` 的认证安全单元，以距目标中心最近且按 `(distance,y,x)` 稳定排序的单元为 seed，再按 `minimum_x → maximum_x → minimum_y → maximum_y` 顺序反复扩展安全矩形，直到不能扩展。只有该目标裁剪矩形面积不小于 `1.327322 m²` 且弹道检查通过时才能锁定；证据保存 tolerance、候选单元数、seed、矩形边界和面积。在固定 `0.25 m` 栅格上，完整 `5×5` 矩形面积为 `1.5625 m²`，提供高于最低面积的离散余量。
 
 六个场景为：
 
@@ -214,7 +229,7 @@ GridMap 编码必须符合现有 adapter：十层名称唯一，二维布局标�
 | wheel-negative | 目标 tolerance 内所有单元均被高度超过 0.18 m 的月岩碰撞覆盖 | `GOAL_INFEASIBLE / HOLD_POSITION / WHEEL_GOAL_INFEASIBLE` |
 | legged-positive | 实际连通路线至少经过一个坡度大于 18°且不超过 28°的单元，同时满足足式其它约束 | `NEW_REFERENCE_AVAILABLE / ACTIVATE_NEW_REFERENCE / LEGGED_BODY_PLAN_AVAILABLE` |
 | legged-negative | 目标 tolerance 内所有单元均超过 28°坡度或 0.22 m 邻域台阶限制 | `GOAL_INFEASIBLE / HOLD_POSITION / LEGGED_GOAL_INFEASIBLE` |
-| hopper-positive | 目标距起点 1–2 m，存在面积不小于 1.327322 m² 的认证落区且可完成一次受约束跳跃 | `NEW_REFERENCE_AVAILABLE / ACTIVATE_NEW_REFERENCE / HOPPER_FIRST_HOP_AVAILABLE` |
+| hopper-positive | 目标距起点 1–2 m，`0.75 m` 点目标裁剪后存在面积不小于 1.327322 m² 的认证落区且可完成一次受约束跳跃 | `NEW_REFERENCE_AVAILABLE / ACTIVATE_NEW_REFERENCE / HOPPER_FIRST_HOP_AVAILABLE` |
 | hopper-negative | 目标 tolerance 内所有候选单元均因坡度、粗糙度、残差或净空不安全，不能形成任何落区 | `GOAL_INFEASIBLE / HOLD_POSITION / HOPPER_GOAL_INFEASIBLE` |
 
 找不到任一真实场景时资格检查失败；不得通过注入合成障碍、改写地图层或放宽能力参数让资格检查通过。
@@ -237,7 +252,7 @@ GridMap 编码必须符合现有 adapter：十层名称唯一，二维布局标�
 - outcome、directive 和 `reason_code` 与锁文件一致
 - `has_reference=true`、plan id 非空、platform type 正确
 - result 中地图、状态 stamp 与本次输入代一致，mission revision 为 1
-- reference 起点与平台规划参考位姿一致，终点落入目标 tolerance
+- 轮式和足式 reference 起点与锁定快照独立计算的离散投影起点一致；跳跃式 launch 起点与平台规划参考位姿一致；终点均落入各自目标 tolerance
 - 所有数值有限，时间严格递增，速度和加速度不超过能力资料
 
 轮式还要验证 `WHEELED_BASE` 轨迹语义和连续碰撞安全；足式验证 `LEGGED_BODY_REFERENCE`、身体高度和三轴速度区间；跳跃式要求恰好一个 hop，并独立复算飞行时间、弹道终点、发射速度、冲量、落地速度、向下接触速度和落区面积。
@@ -284,7 +299,7 @@ Isaac Sim 在完整快照通过哈希校验后退出时，ROS 回归允许继续
 - 三个正例返回新引用并通过平台专属几何与动力学断言。
 - 三个反例返回锁定的精确结果且不包含引用。
 - 无 stale input、TF unavailable、pairwise skew 或消息布局错误。
-- 同一锁定快照连续运行两次时，outcome、directive、reason code 和归一化 reference 摘要一致。
+- 同一锁定快照连续运行两次时，六个场景均生成完整归一化语义摘要，且 outcome、directive、reason code 和归一化 reference 摘要逐例一致；缺失任一摘要即失败。
 - 采集前后 USD SHA-256 不变。
 - 仓库内没有新增 build、install、log、快照或测试报告。
 - 现有 planner 和仓库边界测试通过。
@@ -297,4 +312,5 @@ Isaac Sim 在完整快照通过哈希校验后退出时，ROS 回归允许继续
 - 不建立平台代理关节、轮胎、足端或推进器控制器。
 - 不评估真实平台动力学、传感器噪声、闭环定位或实时性能。
 - 不修改冻结接口、平台迁移顺序、Nav2 适配或外部输入所有权。
+- 不为满足外部回归而改变生产规划器的网格投影、起点或着陆区契约。
 - 不把测试代理能力资料当作设备验收或生产能力声明。
