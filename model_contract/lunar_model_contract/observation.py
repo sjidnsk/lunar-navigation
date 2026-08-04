@@ -49,32 +49,37 @@ class ObservationContractV2:
         "active_platform_traversable_ratio",
     )
     coverage_summary_channels: Final = (
-        "observed_relative_elevation",
-        "mission_priority",
-        "active_platform_traversable_ratio",
+        "observed_ratio",
+        "mission_roi_ratio",
+        "unobserved_priority_ratio",
     )
-    local_crop_channels: Final = prior_channels
+    local_crop_channels: Final = (
+        "relative_elevation",
+        "observed_mask",
+        "observed_physical_obstacle",
+        "active_platform_traversable",
+    )
     frontier_fields: Final = (
-        "relative_x",
-        "relative_y",
-        "distance",
+        "x_norm",
+        "y_norm",
+        "distance_from_robot_norm",
         "bearing_sin",
         "bearing_cos",
-        "relative_elevation",
-        "slope",
+        "potential_coverage_gain_ratio",
+        "priority_weighted_gain_ratio",
         "normal_sin",
         "normal_cos",
         "normal_confidence",
-        "frontier_confidence",
-        "coverage_gain",
+        "clearance_margin_norm",
+        "region_remaining_ratio",
     )
     pose_fields: Final = (
-        "position_x",
-        "position_y",
-        "yaw_sin",
-        "yaw_cos",
-        "linear_velocity",
-        "angular_velocity",
+        "x_norm",
+        "y_norm",
+        "map_yaw_sin",
+        "map_yaw_cos",
+        "mission_observed_ratio",
+        "remaining_decision_budget_ratio",
     )
 
 

@@ -47,11 +47,39 @@ def test_v2_contract_freezes_exact_shapes_channels_and_fields() -> None:
         "observed_physical_obstacle_ratio",
         "active_platform_traversable_ratio",
     )
-    assert len(ObservationContractV2.frontier_fields) == 12
-    assert ObservationContractV2.frontier_fields[7:10] == (
-        "normal_sin", "normal_cos", "normal_confidence"
+    assert ObservationContractV2.coverage_summary_channels == (
+        "observed_ratio",
+        "mission_roi_ratio",
+        "unobserved_priority_ratio",
     )
-    assert len(ObservationContractV2.pose_fields) == 6
+    assert ObservationContractV2.local_crop_channels == (
+        "relative_elevation",
+        "observed_mask",
+        "observed_physical_obstacle",
+        "active_platform_traversable",
+    )
+    assert ObservationContractV2.frontier_fields == (
+        "x_norm",
+        "y_norm",
+        "distance_from_robot_norm",
+        "bearing_sin",
+        "bearing_cos",
+        "potential_coverage_gain_ratio",
+        "priority_weighted_gain_ratio",
+        "normal_sin",
+        "normal_cos",
+        "normal_confidence",
+        "clearance_margin_norm",
+        "region_remaining_ratio",
+    )
+    assert ObservationContractV2.pose_fields == (
+        "x_norm",
+        "y_norm",
+        "map_yaw_sin",
+        "map_yaw_cos",
+        "mission_observed_ratio",
+        "remaining_decision_budget_ratio",
+    )
 
 
 def test_v2_validator_accepts_exact_inputs_with_all_false_candidate_mask() -> None:
