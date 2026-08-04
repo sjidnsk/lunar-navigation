@@ -1782,15 +1782,49 @@ source /opt/ros/humble/setup.bash
 source "install/$LUNAR_BUILD_RUN_ID/setup.bash"
 set -u
 colcon --log-base "log/${LUNAR_BUILD_RUN_ID}-test" test \
+  --merge-install \
+  --base-paths "/mnt/data/WS/lunar-navigation/ros2_ws/src" \
+    "$PWD/ros2_ws/src" \
   --build-base "build/$LUNAR_BUILD_RUN_ID" \
   --install-base "install/$LUNAR_BUILD_RUN_ID" \
-  --packages-select lunar_planner_core lunar_planner_ros lunar_isaac_validation
+  --packages-select lunar_planner_core lunar_planner_ros lunar_isaac_validation \
+  --ctest-args -E '^lunar_planner_core_public_header_boundary$'
+
+LUNAR_HEADER_EVIDENCE="artifacts/$LUNAR_BUILD_RUN_ID/public-header-boundary"
+mkdir -p "$LUNAR_HEADER_EVIDENCE/include"
+cp -a "install/$LUNAR_BUILD_RUN_ID/include/lunar_planner_core" \
+  "$LUNAR_HEADER_EVIDENCE/include/"
+(
+  cd "install/$LUNAR_BUILD_RUN_ID/include"
+  find lunar_planner_core -type f -name '*.hpp' -print0 \
+    | sort -z | xargs -0 sha256sum
+) >"$LUNAR_HEADER_EVIDENCE/installed_core_headers.sha256"
+(
+  cd "$LUNAR_HEADER_EVIDENCE/include"
+  find lunar_planner_core -type f -name '*.hpp' -print0 \
+    | sort -z | xargs -0 sha256sum
+) >"$LUNAR_HEADER_EVIDENCE/staged_core_headers.sha256"
+cmp "$LUNAR_HEADER_EVIDENCE/installed_core_headers.sha256" \
+  "$LUNAR_HEADER_EVIDENCE/staged_core_headers.sha256"
+python3 /mnt/data/WS/lunar-navigation/ros2_ws/src/lunar_planner_core/test/public_header_boundary_test.py \
+  --include-root "$LUNAR_HEADER_EVIDENCE/include" \
+  --compiler "$(command -v c++)" \
+  >"$LUNAR_HEADER_EVIDENCE/stdout.log" \
+  2>"$LUNAR_HEADER_EVIDENCE/stderr.log"
 colcon test-result \
   --test-result-base "build/$LUNAR_BUILD_RUN_ID" --verbose
 printf '%s\n' "$LUNAR_BUILD_RUN_ID"
 ```
 
-Expected: build succeeds and test-result reports zero failed tests.
+The merged install contains headers from all packages, while the unchanged
+`lunar_planner_core_public_header_boundary` test intentionally requires a
+package-isolated include root and an exact nine-header set. Therefore the merged
+run excludes exactly that one CTest and the same original script runs against a
+hash-identical staged view of the fresh installed core headers. Expected: build
+succeeds, all three packages are discovered, merged test-result reports zero
+failed tests for the other 392 checks, the isolated original boundary script
+passes, and combined acceptance is 393/393. Do not modify or hide files in the
+fresh install.
 
 - [ ] **Step 3: Run two formal six-case regressions against the same lock and install**
 
@@ -1910,9 +1944,85 @@ Expected: tests and compilation PASS; external source Git worktree is clean; ign
 
 ---
 
+### Task 15: Correct the terrain-following wheel speed oracle, then resume Task 14
+
+**Files:**
+- Modify: external `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/trajectory_checks.py`
+- Test: external `ros2_ws/src/lunar_isaac_validation/test/test_trajectory_checks.py`
+- Modify: external `scripts/preflight.py`
+- Test: external `test/test_cli_contract.py`
+
+**Interfaces:**
+- Consumes: a wheel `MultiDOFJointTrajectory` whose world-frame Z follows terrain elevation.
+- Produces: a wheel speed assertion that bounds the full three-dimensional linear velocity without rejecting bounded terrain-following `vz`.
+
+- [ ] **Step 1: Preserve the formal RED evidence and write failing unit coverage**
+
+Record formal run `20260804T102154314459Z`: wheel-positive returned
+`WHEEL_SPEED_LIMIT` even though its maximum XY speed was about `0.27951 m/s`,
+maximum `|vz|` about `0.007414 m/s`, and the configured forward limit is
+`0.70 m/s`. Production `wheel_timing.cpp` constructs `linear.z` from the same
+source/target terrain elevation delta as the trajectory poses.
+
+Add a literal test trajectory with changing pose Z and a nonzero, bounded
+world-frame `vz`; it must be accepted but must fail on the current
+`abs(vz)>1e-9` implementation. Add a second test whose XY components remain
+below `0.70 m/s` but whose three-dimensional speed exceeds `0.70 m/s`; it must
+still raise `WHEEL_SPEED_LIMIT`. Do not read a formal Action artifact to build
+either expected fixture.
+
+Run:
+
+```bash
+python3 -m pytest -q \
+  ros2_ws/src/lunar_isaac_validation/test/test_trajectory_checks.py
+```
+
+Expected RED: only the bounded terrain-following acceptance test fails with
+`WHEEL_SPEED_LIMIT`.
+
+- [ ] **Step 2: Implement the minimal three-dimensional speed check**
+
+In `_check_wheel_kinematics`, retain the planar yaw projection used only to
+choose forward versus reverse. Replace the XY speed plus zero-`vz` rule with:
+
+```python
+speed = math.sqrt(vx * vx + vy * vy + vz * vz)
+if speed > limit + _EPSILON:
+    _fail("WHEEL_SPEED_LIMIT")
+```
+
+Do not alter angular, three-dimensional acceleration, braking, lateral
+acceleration, yaw acceleration, timing, sweep, map, start, goal, capability,
+lock, or normalization checks.
+
+- [ ] **Step 3: Bind preflight to this approved main design amendment**
+
+Add the exact main-repository commit that introduces this Task 15 to
+`APPROVED_MAIN_COMMITS` and add a literal CLI contract assertion for it. This
+change only proves that future build/run preflight sees the approved authority;
+it must not weaken any existing preflight rule.
+
+- [ ] **Step 4: Verify, review, commit, and restart the formal build boundary**
+
+Run source-first focused and full tests, `py_compile`, UTF-8/line-length checks,
+and `git diff --check`. Commit only the four authorized files with:
+
+```bash
+git commit -m "fix: validate terrain-following wheel speed"
+```
+
+Require a fresh implementation review with no open Critical/Important issue.
+Then discard no prior evidence, create a new Task 14 build id, repeat the
+corrected combined 393/393 build/test boundary, and use only that new install for
+both formal six-case runs. The production planner, capability files, USD,
+snapshot arrays, v2 lock, and expected Action triples remain unchanged.
+
+---
+
 ## Plan Self-Review
 
-- **Spec coverage:** Tasks 1–4 create the isolated two-runtime snapshot path; Task 5 creates all capability and geometry inputs; Task 6 locks six real cases without data injection; Task 7 publishes the frozen topics; Task 8 validates platform references; Task 9 handles Lifecycle, Action, cleanup, and reports; Task 10 qualifies the live scene; Tasks 11–12 implement the approved planner-semantic alignment; Task 13 renders scene/route evidence; Task 14 performs the explicit v2 rebaseline and two complete deterministic regressions with visual handoff.
+- **Spec coverage:** Tasks 1–4 create the isolated two-runtime snapshot path; Task 5 creates all capability and geometry inputs; Task 6 locks six real cases without data injection; Task 7 publishes the frozen topics; Task 8 validates platform references; Task 9 handles Lifecycle, Action, cleanup, and reports; Task 10 qualifies the live scene; Tasks 11–12 implement the approved planner-semantic alignment; Task 13 renders scene/route evidence; Task 15 corrects the terrain-following wheel speed oracle found by the first formal run; Task 14 then completes the explicit v2 rebaseline, two deterministic regressions, and visual handoff.
 - **Boundary coverage:** Every implementation source/build/output path is external; the main repository contains only the approved design and plan. Production planner source remains read-only, all pre-existing unrelated worktree entries are preserved, and final repository boundary checks are explicit.
 - **Failure coverage:** Preflight, Isaac, fixture, ROS, Action, and cleanup failures map to exit codes 10/20/30/40/50/60. Exact timeouts, continuation rules, token redaction, post-snapshot Isaac disconnect, explicit-PID cleanup, incomplete visual inputs, and atomic visual publication are assigned to Tasks 4, 9, 10, and 13.
 - **Type consistency:** `SnapshotBundle`, `ProjectedStart`, `ScenarioCase`, `ScenarioLock`, `CaseResult`, layer keys, platform keys, topic names, Action enums, reason codes, frames, and public function names are defined before downstream use and remain identical across tasks.
