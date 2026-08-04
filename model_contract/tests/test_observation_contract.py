@@ -75,8 +75,8 @@ def test_v2_contract_freezes_exact_shapes_channels_and_fields() -> None:
     assert ObservationContractV2.pose_fields == (
         "x_norm",
         "y_norm",
-        "map_yaw_sin",
-        "map_yaw_cos",
+        "sin_yaw",
+        "cos_yaw",
         "mission_observed_ratio",
         "remaining_decision_budget_ratio",
     )

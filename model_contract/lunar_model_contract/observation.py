@@ -76,8 +76,8 @@ class ObservationContractV2:
     pose_fields: Final = (
         "x_norm",
         "y_norm",
-        "map_yaw_sin",
-        "map_yaw_cos",
+        "sin_yaw",
+        "cos_yaw",
         "mission_observed_ratio",
         "remaining_decision_budget_ratio",
     )
