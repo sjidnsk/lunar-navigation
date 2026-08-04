@@ -7,7 +7,7 @@ name = "lunar-policy-training"
 version = "0.1.0"
 description = "Shared seven-input PPO policy training core"
 requires-python = ">=3.10"
-dependencies = ["numpy", "PyYAML", "torch"]
+dependencies = ["numpy", "PyYAML", "torch", "rasterio==1.4.4", "shapely==2.1.2"]
 
 [project.scripts]
 lunar-policy-training = "lunar_policy_training.cli:main"

@@ -27,6 +27,13 @@ FORBIDDEN_SUFFIXES = {
     ".parquet",
     ".safetensors",
     ".tfrecord",
+    ".tif",
+    ".tiff",
+    ".dem",
+    ".dtm",
+    ".img",
+    ".vrt",
+    ".zip",
 }
 FORBIDDEN_ARTIFACT_DIRS = {
     "artifacts",

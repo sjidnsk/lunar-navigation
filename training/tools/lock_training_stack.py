@@ -15,7 +15,7 @@ from pathlib import Path
 
 FINGERPRINT_SCHEMA = "lunar-platform-fingerprint/v1"
 TRAINING_PROFILE = "train_amd64_rtx4080_super"
-LOCKED_DISTRIBUTIONS = ("numpy", "PyYAML", "torch")
+LOCKED_DISTRIBUTIONS = ("numpy", "PyYAML", "torch", "rasterio", "shapely")
 
 
 class StackLockError(ValueError):

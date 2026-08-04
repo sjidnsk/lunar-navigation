@@ -109,6 +109,21 @@ def test_rejects_tracked_models_training_data_artifact_directories_and_large_fil
     assert any("size limit" in error and "large.bin" in error for error in errors)
 
 
+def test_rejects_tracked_raster_and_dataset_zip_artifacts(tmp_path: Path) -> None:
+    """Removing polar-raster or dataset-archive checks must fail this test."""
+    _initialize_repository(tmp_path)
+    (tmp_path / "terrain.tif").write_bytes(b"small raster fixture")
+    datasets = tmp_path / "datasets"
+    datasets.mkdir()
+    (datasets / "raw.zip").write_bytes(b"small dataset archive")
+    _run_git(tmp_path, "add", ".")
+
+    errors = check_repository(tmp_path)
+
+    assert any("forbidden artifact" in error and "terrain.tif" in error for error in errors)
+    assert any("forbidden artifact" in error and "datasets/raw.zip" in error for error in errors)
+
+
 def test_rejects_windows_paths_in_yaml_and_json_configuration(tmp_path: Path) -> None:
     """Removing YAML or JSON configuration scanning must fail this test."""
     (tmp_path / "runtime.yaml").write_text(

@@ -4,3 +4,5 @@
 numpy==2.2.6
 PyYAML==6.0.3
 torch==2.13.0+cu130
+rasterio==1.4.4
+shapely==2.1.2
