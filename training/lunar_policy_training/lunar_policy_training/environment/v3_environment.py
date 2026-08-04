@@ -121,13 +121,29 @@ class V3ExplorationEnvironment:
         committed_hop_executor: Callable[
             [], CommittedHopExecutionFeedback
         ] | None = None,
+        decision_budget_limit: int = 8,
         plan_cost_scale: float = 1.0,
         planner_elapsed_scale_s: float = 1.0,
     ) -> None:
         self._platform_type = platform_type
         self._bridge = bridge
         self._request_builder = request_builder
-        self._observation = initial_observation
+        if (
+            not isinstance(initial_observation, PolicyBatch)
+            or initial_observation.prior_channels.shape[0] != 1
+            or initial_observation.observation_identities is None
+            or len(initial_observation.observation_identities) != 1
+        ):
+            raise EnvironmentInvariantError(
+                "V3 observation requires one producer-owned observation identity"
+            )
+        if type(decision_budget_limit) is not int or decision_budget_limit <= 0:
+            raise ValueError("decision budget limit must be a positive integer")
+        self._observation = _clone_observation(initial_observation)
+        self._rejected_candidates: set[int] = set()
+        self._decision_budget_limit = decision_budget_limit
+        self._remaining_decisions = decision_budget_limit
+        self._set_network_budget_ratio()
         self._reference_executor = reference_executor
         self._committed_hop_executor = committed_hop_executor
         self._plan_cost_scale = plan_cost_scale
@@ -213,6 +229,10 @@ class V3ExplorationEnvironment:
             )
         if not bool(self._observation.candidate_mask.any().item()):
             return DecisionBoundaryResult(execution_state="NO_CANDIDATES")
+        if self._remaining_decisions <= 0:
+            return DecisionBoundaryResult(execution_state="DECISION_BUDGET_EXHAUSTED")
+        self._remaining_decisions -= 1
+        self._set_network_budget_ratio()
         action = policy(self._observation)
         transition = self.step(action)
         return DecisionBoundaryResult(
@@ -233,9 +253,41 @@ class V3ExplorationEnvironment:
             self._fail_closed(
                 "rejected planner action does not identify an active candidate"
             )
+        self._rejected_candidates.add(candidate_index)
         masked = _clone_observation(self._observation)
         masked.candidate_mask[0, candidate_index] = False
         self._observation = masked
+
+    def _install_observation(self, observation: PolicyBatch) -> PolicyBatch:
+        if (
+            not isinstance(observation, PolicyBatch)
+            or observation.prior_channels.shape[0] != 1
+            or observation.observation_identities is None
+            or len(observation.observation_identities) != 1
+        ):
+            self._fail_closed(
+                "V3 observation requires one producer-owned observation identity"
+            )
+        current_identity = self._observation.observation_identities[0]
+        next_identity = observation.observation_identities[0]
+        if next_identity != current_identity:
+            self._rejected_candidates.clear()
+        installed = (
+            _clone_observation(observation)
+            if self._rejected_candidates
+            else observation
+        )
+        for candidate_index in self._rejected_candidates:
+            if candidate_index < installed.candidate_mask.shape[1]:
+                installed.candidate_mask[0, candidate_index] = False
+        self._observation = installed
+        self._set_network_budget_ratio()
+        return self._observation
+
+    def _set_network_budget_ratio(self) -> None:
+        self._observation.pose_features[0, 5] = (
+            self._remaining_decisions / self._decision_budget_limit
+        )
 
     def _advance_committed_hop_without_policy(
         self, output: PlannerOutput
@@ -267,7 +319,7 @@ class V3ExplorationEnvironment:
             "LANDED_HOLD",
         }:
             self._fail_closed("committed hop feedback has invalid execution state")
-        self._observation = feedback.next_observation
+        self._install_observation(feedback.next_observation)
         self._execution_state = feedback.execution_state
         return feedback
 
@@ -277,7 +329,7 @@ class V3ExplorationEnvironment:
         feedback: CommittedHopExecutionFeedback,
     ) -> PlannerTransition:
         return PlannerTransition(
-            next_observation=feedback.next_observation,
+            next_observation=self._observation,
             coverage_delta=feedback.coverage_delta,
             goal_progress=feedback.goal_progress,
             normalized_plan_cost=0.0,
@@ -301,11 +353,11 @@ class V3ExplorationEnvironment:
         execution = self._reference_executor(output.reference)
         if not isinstance(execution, ReferenceExecutionResult):
             self._fail_closed("reference executor returned an invalid result")
-        self._observation = execution.next_observation
+        self._install_observation(execution.next_observation)
         self._execution_state = execution.execution_state
         best_cost = output.diagnostics.best_cost
         return PlannerTransition(
-            next_observation=execution.next_observation,
+            next_observation=self._observation,
             coverage_delta=execution.coverage_delta,
             goal_progress=execution.goal_progress,
             normalized_plan_cost=(
@@ -361,6 +413,7 @@ def _clone_observation(observation: PolicyBatch) -> PolicyBatch:
         pose_features=observation.pose_features.clone(),
         candidate_mask=observation.candidate_mask.clone(),
         platform_context=observation.platform_context.clone(),
+        observation_identities=observation.observation_identities,
     )
 
 
@@ -375,6 +428,7 @@ def create_v3_environment(
     committed_hop_executor: Callable[
         [], CommittedHopExecutionFeedback
     ] | None = None,
+    decision_budget_limit: int = 8,
     plan_cost_scale: float = 1.0,
     planner_elapsed_scale_s: float = 1.0,
 ) -> V3ExplorationEnvironment:
@@ -388,6 +442,7 @@ def create_v3_environment(
         initial_observation=initial_observation,
         reference_executor=reference_executor,
         committed_hop_executor=committed_hop_executor,
+        decision_budget_limit=decision_budget_limit,
         plan_cost_scale=plan_cost_scale,
         planner_elapsed_scale_s=planner_elapsed_scale_s,
     )

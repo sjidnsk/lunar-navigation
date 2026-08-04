@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from dataclasses import FrozenInstanceError
 import pathlib
 import sys
 
@@ -26,13 +27,48 @@ from lunar_policy_training.environment.v3_environment import (  # noqa: E402
     ReferenceExecutionResult,
     V3ExplorationEnvironment,
 )
-from lunar_policy_training.policy.observation import PolicyBatch  # noqa: E402
+from lunar_policy_training.policy.observation import (  # noqa: E402
+    ObservationIdentity,
+    PolicyBatch,
+)
+
+
+def _identity(**changes: object) -> ObservationIdentity:
+    values = {
+        "episode_id": "episode-1",
+        "mission_revision": 1,
+        "map_snapshot_id": "map-1",
+        "robot_state_id": "robot-state-1",
+        "state_time_ns": 1_000,
+        "execution_state": "DECISION_BOUNDARY",
+        "candidate_set_id": "candidates-1",
+    }
+    values.update(changes)
+    return ObservationIdentity(**values)
+
+
+def test_observation_identity_is_immutable_non_network_metadata() -> None:
+    identity = _identity()
+    observation = _observation(identity=identity)
+
+    with pytest.raises(FrozenInstanceError):
+        identity.map_snapshot_id = "map-2"  # type: ignore[misc]
+    assert observation.input_names == (
+        "prior_channels",
+        "coverage_summary",
+        "local_crop",
+        "frontier_features",
+        "pose_features",
+        "candidate_mask",
+        "platform_context",
+    )
 
 
 def _observation(
     platform_index: int = 0,
     *,
     candidate_mask: tuple[bool, bool] = (True, False),
+    identity: ObservationIdentity | None = None,
 ) -> PolicyBatch:
     platform_context = torch.zeros((1, 3), dtype=torch.float32)
     platform_context[0, platform_index] = 1.0
@@ -44,6 +80,7 @@ def _observation(
         pose_features=torch.zeros((1, 6), dtype=torch.float32),
         candidate_mask=torch.tensor([candidate_mask], dtype=torch.bool),
         platform_context=platform_context,
+        observation_identities=(identity or _identity(),),
     )
 
 
@@ -157,8 +194,22 @@ def test_normal_v3_rejection_consumes_decision_and_masks_only_selected_candidate
     ]
 
 
-def test_new_observation_identity_clears_temporary_rejections() -> None:
-    """Would fail if rejected candidates leaked across a state/snapshot revision."""
+@pytest.mark.parametrize(
+    ("identity_change", "changed_value"),
+    (
+        ("episode_id", "episode-2"),
+        ("mission_revision", 2),
+        ("map_snapshot_id", "map-2"),
+        ("robot_state_id", "robot-state-2"),
+        ("state_time_ns", 2_000),
+        ("execution_state", "GROUND_HOLD"),
+        ("candidate_set_id", "candidates-2"),
+    ),
+)
+def test_new_observation_identity_component_clears_temporary_rejections(
+    identity_change: str, changed_value: object
+) -> None:
+    """Would fail if rejection leaked across any producer identity component."""
     rejected = PlannerOutput()
     rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
     rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
@@ -166,7 +217,10 @@ def test_new_observation_identity_clears_temporary_rejections() -> None:
     accepted = _reference_output(
         "WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE
     )
-    refreshed = _observation(candidate_mask=(True, True))
+    refreshed = _observation(
+        candidate_mask=(True, True),
+        identity=_identity(**{identity_change: changed_value}),
+    )
     env = V3ExplorationEnvironment(
         platform_type="WHEELED",
         bridge=_SequenceBridge([rejected, accepted, rejected]),
@@ -199,6 +253,72 @@ def test_new_observation_identity_clears_temporary_rejections() -> None:
         [[False, True]],
         [[True, True]],
     ]
+
+
+def test_same_observation_identity_preserves_temporary_rejections() -> None:
+    """Would fail if a tensor refresh silently forgot same-boundary rejection state."""
+    rejected = PlannerOutput()
+    rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+    rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    rejected.reason_code = "CANDIDATE_REJECTED"
+    accepted = _reference_output("WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE)
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_SequenceBridge([rejected, accepted]),
+        request_builder=lambda action: action,
+        initial_observation=_observation(candidate_mask=(True, True)),
+        reference_executor=_ReferenceExecutor(
+            ReferenceExecutionResult(
+                next_observation=_observation(candidate_mask=(True, True)),
+                coverage_delta=0.0,
+                goal_progress=0.0,
+                repeated_visit=False,
+                terminated=False,
+                execution_state="DECISION_BOUNDARY",
+            )
+        ),
+    )
+    seen: list[list[list[bool]]] = []
+
+    def policy(observation: PolicyBatch) -> PolicyAction:
+        seen.append(observation.candidate_mask.tolist())
+        return PolicyAction(
+            frontier_index=0 if observation.candidate_mask[0, 0] else 1,
+            theta_rad=0.0,
+        )
+
+    env.advance_until_decision_boundary(policy)
+    env.advance_until_decision_boundary(policy)
+
+    assert seen == [[[True, True]], [[False, True]]]
+
+
+def test_policy_decision_consumes_real_budget_and_updates_network_ratio() -> None:
+    """Would fail if budget accounting remained helper-only metadata."""
+    output = PlannerOutput()
+    output.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+    output.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    output.reason_code = "NO_ROUTE"
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(output),
+        request_builder=lambda action: action,
+        initial_observation=_observation(candidate_mask=(True, True)),
+        decision_budget_limit=4,
+    )
+    ratios: list[float] = []
+
+    result = env.advance_until_decision_boundary(
+        lambda observation: (
+            ratios.append(float(observation.pose_features[0, 5].item()))
+            or PolicyAction(frontier_index=0, theta_rad=0.0)
+        )
+    )
+
+    assert result.decision_budget_consumed == 1
+    assert ratios == pytest.approx([0.75])
+    assert result.transition is not None
+    assert float(result.transition.next_observation.pose_features[0, 5]) == pytest.approx(0.75)
 
 
 def test_all_false_candidates_bypass_policy_without_fallback() -> None:

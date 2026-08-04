@@ -144,6 +144,11 @@ def test_proxy_macro_step_uses_real_v3_and_changes_observation() -> None:
     )
     assert all(outcome.name == "NEW_REFERENCE_AVAILABLE" for outcome in stepped.planning_outcomes)
     assert bool(torch.isfinite(stepped.rewards).all())
+    assert stepped.decision_budget_consumed.tolist() == [1, 1, 1]
+    assert stepped.observations.pose_features[:, 5].tolist() == pytest.approx(
+        [0.875, 0.875, 0.875]
+    )
+    assert stepped.observations.observation_identities is not None
     assert len(stepped.execution_events) == 3
     assert stepped.execution_events[0].reference_samples_consumed > 1
     assert stepped.execution_events[1].reference_samples_consumed > 1

@@ -23,7 +23,10 @@ from lunar_policy_training.environment.v3_environment import (  # noqa: E402
 from lunar_policy_training.environment.macro_step import PolicyAction  # noqa: E402
 import torch  # noqa: E402
 
-from lunar_policy_training.policy.observation import PolicyBatch  # noqa: E402
+from lunar_policy_training.policy.observation import (  # noqa: E402
+    ObservationIdentity,
+    PolicyBatch,
+)
 
 
 class _Bridge:
@@ -44,7 +47,7 @@ class _CommittedHopSimulator:
         return self._feedback.pop(0)
 
 
-def _hopper_observation() -> PolicyBatch:
+def _hopper_observation(execution_state: str = "GROUND_HOLD") -> PolicyBatch:
     return PolicyBatch(
         prior_channels=torch.zeros((1, 7, 4, 4), dtype=torch.float32),
         coverage_summary=torch.zeros((1, 8, 4, 4), dtype=torch.float32),
@@ -53,6 +56,17 @@ def _hopper_observation() -> PolicyBatch:
         pose_features=torch.zeros((1, 6), dtype=torch.float32),
         candidate_mask=torch.tensor([[True, False]], dtype=torch.bool),
         platform_context=torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32),
+        observation_identities=(
+            ObservationIdentity(
+                episode_id="hopper-1",
+                mission_revision=1,
+                map_snapshot_id="map-1",
+                robot_state_id="hopper-state-1",
+                state_time_ns=1_000,
+                execution_state=execution_state,
+                candidate_set_id="candidates-1",
+            ),
+        ),
     )
 
 
@@ -63,7 +77,7 @@ def _execution_feedback(
     coverage_delta: float,
     goal_progress: float,
 ) -> CommittedHopExecutionFeedback:
-    observation = _hopper_observation()
+    observation = _hopper_observation(execution_state)
     observation.pose_features[0, 0] = marker
     return CommittedHopExecutionFeedback(
         execution_state=execution_state,

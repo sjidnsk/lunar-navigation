@@ -62,7 +62,7 @@ from .curriculum import (
 from .evaluation.release_gate import evaluate_release_gate, load_gate_rules
 from .evaluation.report import evaluate_proxy_policy, report_sha256, write_report
 from .policy.cross_attention import CrossAttentionPolicy, sample_action
-from .policy.observation import PolicyBatch
+from .policy.observation import ObservationIdentity, PolicyBatch
 from .proxy_scenario import proxy_environment_factory, proxy_observation
 from .ppo.collector import CollectorConfig, EnvStep, collect_rollout as collect_ppo_rollout
 from .ppo.rollout import RolloutBatch
@@ -210,6 +210,22 @@ class _ParallelPoolVectorEnv:
             rewards=rewards,
             dones=step.dones.numpy().astype(np.bool_, copy=True),
         )
+
+    def resolve_no_candidates(self, rows: np.ndarray) -> PolicyBatch:
+        """Advance all-false workers without policy actions or rollout samples."""
+        if (
+            not isinstance(rows, np.ndarray)
+            or rows.dtype != np.bool_
+            or rows.shape != (self.env_count,)
+            or not rows.any()
+        ):
+            raise ValueError("no-candidate rows must be boolean [env_count]")
+        step = self._pool.resolve_no_candidates(
+            torch.from_numpy(rows.copy()),
+            policy_version=self._policy_version,
+        )
+        self._current = step
+        return step.observations
 
 
 class ResumablePPOTrainer:
@@ -1365,6 +1381,21 @@ def _calibration_observation(
         pose_features=pose_features,
         candidate_mask=torch.tensor([[True, False]], dtype=torch.bool),
         platform_context=platform_context,
+        observation_identities=(
+            ObservationIdentity(
+                episode_id=f"calibration-{worker_index}",
+                mission_revision=1,
+                map_snapshot_id="calibration-map",
+                robot_state_id=f"calibration-state-{worker_index}",
+                state_time_ns=1_000,
+                execution_state=(
+                    "GROUND_HOLD"
+                    if platform_type == "HOPPER"
+                    else "DECISION_BOUNDARY"
+                ),
+                candidate_set_id="calibration-candidates",
+            ),
+        ),
     )
 
 

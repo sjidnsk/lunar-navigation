@@ -15,7 +15,11 @@ from lunar_planner_training_bridge import PlanningOutcome
 from lunar_model_contract import ObservationContractV2
 
 from ..config import PLATFORMS
-from ..policy.observation import PolicyBatch, validate_policy_batch
+from ..policy.observation import (
+    ObservationIdentity,
+    PolicyBatch,
+    validate_policy_batch,
+)
 from .macro_step import ExecutionEvents, PlannerTransition, PolicyAction
 
 
@@ -46,6 +50,7 @@ class ParallelRolloutStep:
     rewards: torch.Tensor
     dones: torch.Tensor
     policy_versions: torch.Tensor
+    decision_budget_consumed: torch.Tensor
     buffer_index: int
     planning_outcomes: tuple[PlanningOutcome, ...] = ()
     reason_codes: tuple[str, ...] = ()
@@ -92,6 +97,10 @@ class ParallelEnvPool:
         self._buffer_index = 0
         self.worker_pids: list[int] = []
         self.worker_thread_limits: list[tuple[str, str]] = []
+        self._buffer_identities: list[tuple[ObservationIdentity, ...] | None] = [
+            None,
+            None,
+        ]
 
         self.shared_observation_buffers = _shared_observation_double_buffer(
             observation_template, self.worker_count
@@ -229,9 +238,16 @@ class ParallelEnvPool:
             self.shared_action_buffers[target_buffer]["thetas"].copy_(actions.thetas)
             for command_queue in self._command_queues:
                 command_queue.put(("step", target_buffer, policy_version))
-            planning_outcomes, reason_codes, execution_events = self._await_step(
+            (
+                planning_outcomes,
+                reason_codes,
+                execution_events,
+                identities,
+                decision_budget_consumed,
+            ) = self._await_step(
                 target_buffer, policy_version
             )
+            self._buffer_identities[target_buffer] = identities
             self.validate_policy_versions(
                 self._shared_policy_versions[target_buffer],
                 expected_policy_version=policy_version,
@@ -242,6 +258,7 @@ class ParallelEnvPool:
                 planning_outcomes=planning_outcomes,
                 reason_codes=reason_codes,
                 execution_events=execution_events,
+                decision_budget_consumed=decision_budget_consumed,
             )
         except ParallelPoolError as error:
             if not self.training_stopped:
@@ -249,6 +266,56 @@ class ParallelEnvPool:
             raise
         except Exception as error:
             return self._fail_closed("shared rollout operation failed", cause=error)
+
+    def resolve_no_candidates(
+        self, rows: torch.Tensor, *, policy_version: int
+    ) -> ParallelRolloutStep:
+        """Resolve selected all-false workers without synthesizing an action."""
+        if self._closed or self.training_stopped:
+            raise ParallelPoolError("parallel pool is stopped")
+        if not self._reset:
+            return self._fail_closed("parallel pool must be reset before resolution")
+        try:
+            if (
+                not isinstance(rows, torch.Tensor)
+                or rows.dtype != torch.bool
+                or rows.device.type != "cpu"
+                or rows.shape != (self.worker_count,)
+                or not bool(rows.any())
+            ):
+                raise ParallelPoolError(
+                    "no-candidate rows must be CPU boolean [workers]"
+                )
+            if type(policy_version) is not int or policy_version < 0:
+                raise ParallelPoolError(
+                    "policy version must be a non-negative integer"
+                )
+            target_buffer = 1 - self._buffer_index
+            for worker_index, command_queue in enumerate(self._command_queues):
+                command_queue.put(
+                    (
+                        "resolve_no_candidates",
+                        target_buffer,
+                        policy_version,
+                        bool(rows[worker_index]),
+                    )
+                )
+            identities = self._await_resolution(target_buffer, policy_version)
+            self._buffer_identities[target_buffer] = identities
+            self.validate_policy_versions(
+                self._shared_policy_versions[target_buffer],
+                expected_policy_version=policy_version,
+            )
+            self._buffer_index = target_buffer
+            return self._stage_buffer(target_buffer)
+        except ParallelPoolError as error:
+            if not self.training_stopped:
+                return self._fail_closed(str(error))
+            raise
+        except Exception as error:
+            return self._fail_closed(
+                "no-candidate resolution failed", cause=error
+            )
 
     def validate_policy_versions(
         self,
@@ -283,7 +350,7 @@ class ParallelEnvPool:
         self._stop_workers()
 
     def _await_ready(self) -> None:
-        ready: dict[int, tuple[int, str, str]] = {}
+        ready: dict[int, tuple[int, str, str, ObservationIdentity]] = {}
         deadline = time.monotonic() + self._worker_timeout_seconds
         while len(ready) < self.worker_count:
             message = self._next_result(deadline)
@@ -292,14 +359,19 @@ class ParallelEnvPool:
                 raise ParallelPoolError(
                     f"worker {worker_index} startup failed: {values[0]}"
                 )
-            if kind != "ready" or worker_index in ready or len(values) != 3:
+            if kind != "ready" or worker_index in ready or len(values) != 4:
                 raise ParallelPoolError("worker startup protocol failed")
-            ready[worker_index] = (values[0], values[1], values[2])
+            if not isinstance(values[3], ObservationIdentity):
+                raise ParallelPoolError("worker observation identity is invalid")
+            ready[worker_index] = (values[0], values[1], values[2], values[3])
         self.worker_pids = [ready[index][0] for index in range(self.worker_count)]
         self.worker_thread_limits = [
             (ready[index][1], ready[index][2])
             for index in range(self.worker_count)
         ]
+        self._buffer_identities[0] = tuple(
+            ready[index][3] for index in range(self.worker_count)
+        )
 
     def _await_step(
         self, buffer_index: int, policy_version: int
@@ -307,9 +379,13 @@ class ParallelEnvPool:
         tuple[PlanningOutcome, ...],
         tuple[str, ...],
         tuple[ExecutionEvents, ...],
+        tuple[ObservationIdentity, ...],
+        torch.Tensor,
     ]:
         completed: set[int] = set()
-        metadata: dict[int, tuple[PlanningOutcome, str, ExecutionEvents]] = {}
+        metadata: dict[
+            int, tuple[PlanningOutcome, str, ExecutionEvents, ObservationIdentity, int]
+        ] = {}
         deadline = time.monotonic() + self._worker_timeout_seconds
         while len(completed) < self.worker_count:
             message = self._next_result(deadline)
@@ -321,15 +397,23 @@ class ParallelEnvPool:
             if (
                 kind != "step"
                 or worker_index in completed
-                or len(values) != 5
+                or len(values) != 7
                 or values[:2] != [buffer_index, policy_version]
             ):
                 raise ParallelPoolError("worker step protocol failed")
-            outcome_value, reason_code, execution_events = values[2:]
+            (
+                outcome_value,
+                reason_code,
+                execution_events,
+                identity,
+                decision_budget_consumed,
+            ) = values[2:]
             if (
                 type(outcome_value) is not int
                 or not isinstance(reason_code, str)
                 or not isinstance(execution_events, ExecutionEvents)
+                or not isinstance(identity, ObservationIdentity)
+                or decision_budget_consumed not in (0, 1)
             ):
                 raise ParallelPoolError("worker transition metadata is invalid")
             try:
@@ -338,12 +422,23 @@ class ParallelEnvPool:
                 raise ParallelPoolError(
                     "worker planning outcome is invalid"
                 ) from error
-            metadata[worker_index] = (outcome, reason_code, execution_events)
+            metadata[worker_index] = (
+                outcome,
+                reason_code,
+                execution_events,
+                identity,
+                decision_budget_consumed,
+            )
             completed.add(worker_index)
         return (
             tuple(metadata[index][0] for index in range(self.worker_count)),
             tuple(metadata[index][1] for index in range(self.worker_count)),
             tuple(metadata[index][2] for index in range(self.worker_count)),
+            tuple(metadata[index][3] for index in range(self.worker_count)),
+            torch.tensor(
+                [metadata[index][4] for index in range(self.worker_count)],
+                dtype=torch.int64,
+            ),
         )
 
     def _next_result(self, deadline: float) -> tuple[object, ...]:
@@ -370,6 +465,31 @@ class ParallelEnvPool:
                 raise ParallelPoolError("worker returned malformed control data")
             return message
 
+    def _await_resolution(
+        self, buffer_index: int, policy_version: int
+    ) -> tuple[ObservationIdentity, ...]:
+        completed: set[int] = set()
+        identities: dict[int, ObservationIdentity] = {}
+        deadline = time.monotonic() + self._worker_timeout_seconds
+        while len(completed) < self.worker_count:
+            message = self._next_result(deadline)
+            kind, worker_index, *values = message
+            if kind == "error":
+                raise ParallelPoolError(
+                    f"worker {worker_index} failed: {values[0]}"
+                )
+            if (
+                kind != "resolved"
+                or worker_index in completed
+                or len(values) != 3
+                or values[:2] != [buffer_index, policy_version]
+                or not isinstance(values[2], ObservationIdentity)
+            ):
+                raise ParallelPoolError("worker resolution protocol failed")
+            identities[worker_index] = values[2]
+            completed.add(worker_index)
+        return tuple(identities[index] for index in range(self.worker_count))
+
     def _stage_buffer(
         self,
         buffer_index: int,
@@ -377,6 +497,7 @@ class ParallelEnvPool:
         planning_outcomes: tuple[PlanningOutcome, ...] = (),
         reason_codes: tuple[str, ...] = (),
         execution_events: tuple[ExecutionEvents, ...] = (),
+        decision_budget_consumed: torch.Tensor | None = None,
     ) -> ParallelRolloutStep:
         try:
             for name, shared in self.shared_observation_buffers[buffer_index].items():
@@ -389,7 +510,8 @@ class ParallelEnvPool:
                 self._shared_policy_versions[buffer_index]
             )
             observations = PolicyBatch(
-                **self._staging_observations[buffer_index]
+                **self._staging_observations[buffer_index],
+                observation_identities=self._buffer_identities[buffer_index],
             )
             validate_policy_batch(observations)
             if not bool(torch.isfinite(self._staging_rewards[buffer_index]).all()):
@@ -400,6 +522,11 @@ class ParallelEnvPool:
                 dones=self._staging_dones[buffer_index],
                 policy_versions=self._staging_policy_versions[buffer_index],
                 buffer_index=buffer_index,
+                decision_budget_consumed=(
+                    torch.zeros((self.worker_count,), dtype=torch.int64)
+                    if decision_budget_consumed is None
+                    else decision_budget_consumed
+                ),
                 planning_outcomes=planning_outcomes,
                 reason_codes=reason_codes,
                 execution_events=execution_events,
@@ -476,18 +603,66 @@ def _worker_main(
                 os.getpid(),
                 os.environ["OMP_NUM_THREADS"],
                 os.environ["MKL_NUM_THREADS"],
+                worker.initial_observation.observation_identities[0],
             )
         )
         terminal_transition: PlannerTransition | None = None
+        current_observation = worker.initial_observation
         while True:
             command = command_queue.get()
             if command == ("stop",):
                 return
-            if (
-                not isinstance(command, tuple)
-                or len(command) != 3
-                or command[0] != "step"
-            ):
+            if not isinstance(command, tuple) or not command:
+                raise ParallelPoolError("worker command protocol failed")
+            if command[0] == "resolve_no_candidates":
+                if len(command) != 4 or type(command[3]) is not bool:
+                    raise ParallelPoolError("worker resolution command failed")
+                _, buffer_index, policy_version, selected = command
+                if selected:
+                    boundary = worker.environment.advance_until_decision_boundary(
+                        lambda observation: (_ for _ in ()).throw(
+                            ParallelPoolError(
+                                "no-candidate resolution called policy"
+                            )
+                        )
+                    )
+                    if (
+                        boundary.execution_state != "NO_CANDIDATES"
+                        or boundary.transition is not None
+                        or boundary.decision_budget_consumed != 0
+                    ):
+                        raise ParallelPoolError(
+                            "selected worker is not at a no-candidate boundary"
+                        )
+                    if not auto_reset:
+                        raise ParallelPoolError(
+                            "no-candidate resolution requires auto reset"
+                        )
+                    worker = environment_factory(worker_index, platform_type)
+                    if not isinstance(worker, ParallelEnvironmentWorker):
+                        raise ParallelPoolError(
+                            "environment factory must return ParallelEnvironmentWorker"
+                        )
+                    current_observation = worker.initial_observation
+                _write_observation(
+                    observation_buffers[buffer_index],
+                    worker_index,
+                    current_observation,
+                )
+                reward_buffers[buffer_index][worker_index] = 0.0
+                done_buffers[buffer_index][worker_index] = selected
+                policy_version_buffers[buffer_index][worker_index] = policy_version
+                result_queue.put(
+                    (
+                        "resolved",
+                        worker_index,
+                        buffer_index,
+                        policy_version,
+                        current_observation.observation_identities[0],
+                    )
+                )
+                continue
+            if len(command) != 3 or command[0] != "step":
                 raise ParallelPoolError("worker command protocol failed")
             _, buffer_index, policy_version = command
             action = PolicyAction(
@@ -497,15 +672,24 @@ def _worker_main(
                 theta_rad=float(action_buffers[buffer_index]["thetas"][worker_index]),
             )
             if terminal_transition is None:
-                transition = worker.environment.step(action)
+                boundary = worker.environment.advance_until_decision_boundary(
+                    lambda observation: action
+                )
+                transition = boundary.transition
                 if not isinstance(transition, PlannerTransition):
                     raise ParallelPoolError(
                         "worker environment must return PlannerTransition"
                     )
+                if boundary.decision_budget_consumed != 1:
+                    raise ParallelPoolError(
+                        "worker policy decision must consume exactly one budget unit"
+                    )
                 reward = reward_fn(transition)
+                decision_budget_consumed = boundary.decision_budget_consumed
             else:
                 transition = terminal_transition
                 reward = 0.0
+                decision_budget_consumed = 0
             if (
                 not isinstance(reward, (int, float))
                 or isinstance(reward, bool)
@@ -523,6 +707,7 @@ def _worker_main(
                 worker = reset_worker
             elif transition.terminated:
                 terminal_transition = transition
+            current_observation = next_observation
             _write_observation(
                 observation_buffers[buffer_index],
                 worker_index,
@@ -540,6 +725,8 @@ def _worker_main(
                     int(transition.planning_outcome),
                     transition.reason_code,
                     transition.execution_events,
+                    next_observation.observation_identities[0],
+                    decision_budget_consumed,
                 )
             )
     except BaseException as error:
@@ -572,6 +759,10 @@ def _write_observation(
     validate_policy_batch(observation)
     if observation.prior_channels.shape[0] != 1:
         raise ParallelPoolError("worker observation batch size must be one")
+    if observation.observation_identities is None:
+        raise ParallelPoolError(
+            "worker observation requires a producer-owned identity"
+        )
     for name in _OBSERVATION_FIELDS:
         source = getattr(observation, name)
         destination = buffer[name][worker_index]
@@ -608,6 +799,10 @@ def _validate_template(template: PolicyBatch) -> None:
         raise ParallelPoolError("observation template is invalid") from error
     if template.prior_channels.shape[0] != 1:
         raise ParallelPoolError("observation template batch size must be one")
+    if template.observation_identities is None:
+        raise ParallelPoolError(
+            "observation template requires a producer-owned identity"
+        )
     if template.prior_channels.device.type != "cpu":
         raise ParallelPoolError("observation template must be on CPU")
 

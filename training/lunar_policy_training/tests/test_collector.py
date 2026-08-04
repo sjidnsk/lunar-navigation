@@ -6,21 +6,31 @@ import sys
 import numpy as np
 import pytest
 import torch
-from lunar_planner_training_bridge import PlanningOutcome, TrainingPlanRequest
+from lunar_planner_training_bridge import (
+    ExecutionDirective,
+    PlanningOutcome,
+    TrainingPlanRequest,
+)
 
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "model_contract"))
 
 from lunar_policy_training.policy.cross_attention import CrossAttentionPolicy  # noqa: E402
-from lunar_policy_training.policy.observation import PolicyBatch  # noqa: E402
+from lunar_policy_training.policy.observation import (  # noqa: E402
+    ObservationIdentity,
+    PolicyBatch,
+)
 from lunar_policy_training.cli import _ParallelPoolVectorEnv  # noqa: E402
-from lunar_policy_training.environment.macro_step import PlannerTransition  # noqa: E402
+from lunar_policy_training.environment.macro_step import (  # noqa: E402
+    PlannerTransition,
+)
 from lunar_policy_training.environment.parallel_pool import (  # noqa: E402
     ParallelEnvironmentWorker,
     ParallelEnvPool,
 )
 from lunar_policy_training.environment.v3_environment import (  # noqa: E402
+    DecisionBoundaryResult,
     create_v3_environment,
 )
 from lunar_policy_training.ppo.collector import (  # noqa: E402
@@ -206,6 +216,17 @@ def _real_v3_worker(
         pose_features=torch.zeros((1, 6), dtype=torch.float32),
         candidate_mask=torch.tensor([[True, True, True] + [False] * 61], dtype=torch.bool),
         platform_context=torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32),
+        observation_identities=(
+            ObservationIdentity(
+                episode_id=f"collector-{worker_index}",
+                mission_revision=1,
+                map_snapshot_id="map-1",
+                robot_state_id="robot-1",
+                state_time_ns=1_000,
+                execution_state="DECISION_BOUNDARY",
+                candidate_set_id="candidates-1",
+            ),
+        ),
     )
     request = TrainingPlanRequest()
     request.request_id = f"collector-v3-{worker_index}"
@@ -222,6 +243,127 @@ def _real_v3_worker(
 def _planner_transition_reward(transition: PlannerTransition) -> float:
     assert isinstance(transition, PlannerTransition)
     return 0.5 if transition.planning_outcome == PlanningOutcome.INVALID_REQUEST else 0.0
+
+
+def _boundary_observation(*, all_false: bool, generation: int) -> PolicyBatch:
+    mask = [False] * 64
+    if not all_false:
+        mask[0] = True
+    return PolicyBatch(
+        prior_channels=torch.zeros((1, 4, 256, 256), dtype=torch.float32),
+        coverage_summary=torch.zeros((1, 3, 256, 256), dtype=torch.float32),
+        local_crop=torch.zeros((1, 4, 32, 32), dtype=torch.float32),
+        frontier_features=torch.zeros((1, 64, 12), dtype=torch.float32),
+        pose_features=torch.tensor([[0.0, 0.0, 0.0, 1.0, 0.0, 1.0]], dtype=torch.float32),
+        candidate_mask=torch.tensor([mask], dtype=torch.bool),
+        platform_context=torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32),
+        observation_identities=(
+            ObservationIdentity(
+                episode_id=f"boundary-{generation}",
+                mission_revision=1,
+                map_snapshot_id=f"map-{generation}",
+                robot_state_id=f"state-{generation}",
+                state_time_ns=generation,
+                execution_state="DECISION_BOUNDARY",
+                candidate_set_id=f"candidates-{generation}",
+            ),
+        ),
+    )
+
+
+class _BoundaryProtocolEnvironment:
+    def __init__(self, observation: PolicyBatch) -> None:
+        self.observation = observation
+
+    def advance_until_decision_boundary(self, policy) -> DecisionBoundaryResult:
+        if not bool(self.observation.candidate_mask.any()):
+            return DecisionBoundaryResult(execution_state="NO_CANDIDATES")
+        policy(self.observation)
+        next_observation = _boundary_observation(
+            all_false=True,
+            generation=self.observation.observation_identities[0].state_time_ns,
+        )
+        next_observation.pose_features[0, 5] = 0.875
+        self.observation = next_observation
+        return DecisionBoundaryResult(
+            execution_state="DECISION_BOUNDARY",
+            transition=PlannerTransition(
+                next_observation=next_observation,
+                coverage_delta=0.0,
+                goal_progress=0.0,
+                normalized_plan_cost=0.0,
+                normalized_elapsed_time=0.0,
+                repeated_visit=False,
+                planning_outcome=PlanningOutcome.NO_KNOWN_SAFE_ROUTE,
+                execution_directive=ExecutionDirective.NO_SAFE_REFERENCE,
+                reason_code="LAST_CANDIDATE_REJECTED",
+                terminated=False,
+            ),
+            decision_budget_consumed=1,
+        )
+
+
+class _ResettingBoundaryFactory:
+    def __init__(self, *, initial_all_false: bool) -> None:
+        self.initial_all_false = initial_all_false
+        self.calls = 0
+
+    def __call__(
+        self, worker_index: int, platform_type: str
+    ) -> ParallelEnvironmentWorker:
+        self.calls += 1
+        observation = _boundary_observation(
+            all_false=self.initial_all_false and self.calls == 1,
+            generation=self.calls,
+        )
+        return ParallelEnvironmentWorker(
+            environment=_BoundaryProtocolEnvironment(observation),
+            initial_observation=observation,
+        )
+
+
+class _CountingPolicy(CrossAttentionPolicy):
+    def __init__(self) -> None:
+        super().__init__()
+        self.forward_calls = 0
+
+    def forward(self, batch: PolicyBatch):
+        self.forward_calls += 1
+        return super().forward(batch)
+
+
+def _quarter_reward(transition: PlannerTransition) -> float:
+    return 0.25 * transition.next_observation.observation_identities[0].state_time_ns
+
+
+@pytest.mark.parametrize("initial_all_false", [True, False])
+def test_production_collector_resolves_initial_or_final_all_false_without_policy_action(
+    initial_all_false: bool,
+) -> None:
+    """Would fail if pool resolution called policy or discarded the last action row."""
+    factory = _ResettingBoundaryFactory(initial_all_false=initial_all_false)
+    template = _boundary_observation(all_false=initial_all_false, generation=1)
+    policy = _CountingPolicy().eval()
+    with ParallelEnvPool(
+        allocation={"WHEELED": 1},
+        observation_template=template,
+        environment_factory=factory,
+        reward_fn=_quarter_reward,
+        worker_timeout_seconds=5.0,
+    ) as pool:
+        collected = collect_rollout(
+            _ParallelPoolVectorEnv(pool, policy_version=23),
+            policy,
+            CollectorConfig(horizon=2, deterministic=True),
+            device="cpu",
+        )
+
+    assert policy.forward_calls == 3  # two actions plus one valid bootstrap
+    assert len(collected.rollout) == 2
+    assert collected.rewards.tolist() == (
+        [[0.5], [0.75]] if initial_all_false else [[0.25], [0.5]]
+    )
+    assert collected.dones.tolist() == [[True], [True]]
 
 
 def test_production_pool_adapter_collects_real_v3_reward_gae_at_one_policy_version() -> None:

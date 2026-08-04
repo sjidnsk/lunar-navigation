@@ -26,7 +26,10 @@ from lunar_policy_training.environment.parallel_pool import (  # noqa: E402
 from lunar_policy_training.environment.v3_environment import (  # noqa: E402
     create_v3_environment,
 )
-from lunar_policy_training.policy.observation import PolicyBatch  # noqa: E402
+from lunar_policy_training.policy.observation import (  # noqa: E402
+    ObservationIdentity,
+    PolicyBatch,
+)
 
 
 @pytest.fixture
@@ -67,6 +70,17 @@ def _observation(worker_index: int, platform_type: str) -> PolicyBatch:
         pose_features=pose,
         candidate_mask=torch.tensor([[True, True, True] + [False] * 61], dtype=torch.bool),
         platform_context=platform_context,
+        observation_identities=(
+            ObservationIdentity(
+                episode_id=f"pool-{worker_index}",
+                mission_revision=1,
+                map_snapshot_id="map-1",
+                robot_state_id=f"robot-{worker_index}",
+                state_time_ns=1_000,
+                execution_state="DECISION_BOUNDARY",
+                candidate_set_id="candidates-1",
+            ),
+        ),
     )
 
 
@@ -154,6 +168,15 @@ def test_parallel_pool_uses_real_worker_processes_shared_double_buffers() -> Non
         ]
         assert first.policy_versions.tolist() == [7, 7, 7]
         assert second.policy_versions.tolist() == [8, 8, 8]
+        assert first.decision_budget_consumed.tolist() == [1, 1, 1]
+        assert first.observations.observation_identities is not None
+        assert [
+            identity.episode_id
+            for identity in first.observations.observation_identities
+        ] == ["pool-0", "pool-1", "pool-2"]
+        assert first.observations.pose_features[:, 5].tolist() == pytest.approx(
+            [0.875, 0.875, 0.875]
+        )
         assert first.observations.platform_context.tolist() == [
             [1.0, 0.0, 0.0],
             [0.0, 1.0, 0.0],

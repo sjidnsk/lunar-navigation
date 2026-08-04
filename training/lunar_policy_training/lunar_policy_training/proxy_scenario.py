@@ -18,7 +18,7 @@ from .environment.v3_environment import (
     ReferenceExecutionResult,
     create_v3_environment,
 )
-from .policy.observation import PolicyBatch
+from .policy.observation import ObservationIdentity, PolicyBatch
 
 
 _PLATFORM_INDEX = {platform: index for index, platform in enumerate(PLATFORMS)}
@@ -253,6 +253,10 @@ def proxy_observation(
     position: tuple[float, float] | None = None,
     coverage: float | None = None,
     visited: frozenset[tuple[float, float]] = frozenset(),
+    episode_id: str | None = None,
+    mission_revision: int = 0,
+    map_snapshot_id: str | None = None,
+    execution_state: str = "DECISION_BOUNDARY",
 ) -> PolicyBatch:
     """Build a seven-input proxy observation with real changed episode state."""
     if platform_type not in PLATFORMS:
@@ -304,6 +308,20 @@ def proxy_observation(
     )
     platform_context = torch.zeros((1, 3), dtype=torch.float32)
     platform_context[0, _PLATFORM_INDEX[platform_type]] = 1.0
+    state_time_ns = 1_000_000_000 + step * 1_000_000
+    candidate_set = ",".join(
+        f"{x:.3f}:{y:.3f}:{int((x, y) in visited)}"
+        for x, y in targets
+    )
+    identity = ObservationIdentity(
+        episode_id=episode_id or f"proxy-{platform_type}-{worker_index}",
+        mission_revision=mission_revision,
+        map_snapshot_id=map_snapshot_id or f"proxy-map-{step}",
+        robot_state_id=f"{position[0]:.6f}:{position[1]:.6f}",
+        state_time_ns=state_time_ns,
+        execution_state=execution_state,
+        candidate_set_id=candidate_set,
+    )
     return PolicyBatch(
         prior_channels=prior,
         coverage_summary=coverage_summary,
@@ -312,6 +330,7 @@ def proxy_observation(
         pose_features=pose,
         candidate_mask=torch.tensor([[True, True, True] + [False] * 61], dtype=torch.bool),
         platform_context=platform_context,
+        observation_identities=(identity,),
     )
 
 
@@ -350,6 +369,9 @@ class _ProxyEpisode:
         self.coverage = 0.05
         self.visited = {self.position}
         self.pending_target = self.position
+        self.execution_state = (
+            "GROUND_HOLD" if platform_type == "HOPPER" else "DECISION_BOUNDARY"
+        )
 
     @property
     def observation(self) -> PolicyBatch:
@@ -360,6 +382,12 @@ class _ProxyEpisode:
             position=self.position,
             coverage=self.coverage,
             visited=frozenset(self.visited),
+            episode_id=f"proxy-{self.scenario.scenario_seed}-{self.worker_index}",
+            mission_revision=1,
+            map_snapshot_id=(
+                f"{self.scenario.terrain_id}-{self.step}"
+            ),
+            execution_state=self.execution_state,
         )
 
     def build_request(self, action: PolicyAction) -> bridge_api.TrainingPlanRequest:
@@ -543,6 +571,7 @@ class _ProxyEpisode:
         self.step += 1
         gain = 0.0 if repeated else min(0.475, 1.0 - self.coverage)
         self.coverage = min(1.0, self.coverage + gain)
+        self.execution_state = execution_state
         return ReferenceExecutionResult(
             next_observation=self.observation,
             coverage_delta=gain,
@@ -568,6 +597,11 @@ class _ProxyEpisode:
         hopper_commitment_violation_count: int = 0,
     ) -> ReferenceExecutionResult:
         self.step += 1
+        self.execution_state = (
+            "GROUND_HOLD"
+            if self.platform_type == "HOPPER"
+            else "DECISION_BOUNDARY"
+        )
         return ReferenceExecutionResult(
             next_observation=self.observation,
             coverage_delta=0.0,

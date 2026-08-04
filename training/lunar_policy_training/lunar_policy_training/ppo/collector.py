@@ -79,8 +79,16 @@ def collect_rollout(
     if target_device.type == "cuda" and not torch.cuda.is_available():
         raise CollectorError("requested CUDA device is unavailable")
     policy = policy.to(target_device)
-    observations = _validated_observations(
-        environment.reset(), env_count=env_count, device=target_device
+    observations, _ = _resolve_no_candidate_rows(
+        environment,
+        _validated_observations(
+            environment.reset(),
+            env_count=env_count,
+            device=target_device,
+            allow_no_candidates=True,
+        ),
+        env_count=env_count,
+        device=target_device,
     )
 
     observation_rows: dict[str, list[np.ndarray]] = {
@@ -120,6 +128,13 @@ def collect_rollout(
             env_count=env_count,
             device=target_device,
         )
+        observations, resolved_rows = _resolve_no_candidate_rows(
+            environment,
+            observations,
+            env_count=env_count,
+            device=target_device,
+        )
+        step_dones[resolved_rows] = True
         selected_indices.append(action_indices)
         selected_thetas.append(action_thetas)
         old_log_probs.append(_tensor_numpy(recomputed.log_prob_total, np.float32))
@@ -165,6 +180,7 @@ def _validated_observations(
     *,
     env_count: int,
     device: torch.device,
+    allow_no_candidates: bool = False,
 ) -> PolicyBatch:
     if not isinstance(value, PolicyBatch):
         raise CollectorError("environment must return a seven-input observation batch")
@@ -176,6 +192,7 @@ def _validated_observations(
         pose_features=value.pose_features.to(device),
         candidate_mask=value.candidate_mask.to(device),
         platform_context=value.platform_context.to(device),
+        observation_identities=value.observation_identities,
     )
     try:
         validate_policy_batch(moved)
@@ -183,9 +200,41 @@ def _validated_observations(
         raise CollectorError(str(error)) from error
     if moved.prior_channels.shape[0] != env_count:
         raise CollectorError("observation batch size does not match environment count")
-    if not bool(moved.candidate_mask.any(dim=1).all()):
+    if (
+        not allow_no_candidates
+        and not bool(moved.candidate_mask.any(dim=1).all())
+    ):
         raise CollectorError("all-false candidate rows must bypass rollout collection")
     return moved
+
+
+def _resolve_no_candidate_rows(
+    environment: VectorEnv,
+    observations: PolicyBatch,
+    *,
+    env_count: int,
+    device: torch.device,
+) -> tuple[PolicyBatch, np.ndarray]:
+    rows = ~observations.candidate_mask.any(dim=1)
+    if not bool(rows.any()):
+        return observations, np.zeros((env_count,), dtype=np.bool_)
+    resolver = getattr(environment, "resolve_no_candidates", None)
+    if not callable(resolver):
+        raise CollectorError(
+            "all-false candidate rows must bypass rollout collection"
+        )
+    resolved = resolver(_tensor_numpy(rows, np.bool_))
+    observations = _validated_observations(
+        resolved,
+        env_count=env_count,
+        device=device,
+        allow_no_candidates=True,
+    )
+    if not bool(observations.candidate_mask.any(dim=1).all()):
+        raise CollectorError(
+            "no-candidate resolver must return actionable observations"
+        )
+    return observations, _tensor_numpy(rows, np.bool_)
 
 
 def _validated_transition(
@@ -210,7 +259,10 @@ def _validated_transition(
     if value.dones.shape != (env_count,):
         raise CollectorError("dones must have one value per environment")
     observations = _validated_observations(
-        value.observations, env_count=env_count, device=device
+        value.observations,
+        env_count=env_count,
+        device=device,
+        allow_no_candidates=True,
     )
     return observations, value.rewards.copy(), value.dones.copy()
 
