@@ -27,26 +27,24 @@ from lunar_policy_training.policy.cross_attention import PolicyOutput  # noqa: E
 
 
 def _candidate_features() -> np.ndarray:
-    features = np.zeros((3, 22), dtype=np.float32)
+    features = np.zeros((64, 12), dtype=np.float32)
     features[0, 2] = 5.0
     features[0, 5] = 2.0
-    features[0, 14:16] = (0.0, 1.0)
-    features[0, 18] = 2.0
+    features[0, 3:5] = (0.0, 1.0)
     features[1, 2] = 1.0
     features[1, 5] = 1.0
-    features[1, 14:16] = (1.0, 0.0)
-    features[1, 18] = 0.25
+    features[1, 3:5] = (1.0, 0.0)
     features[2, 2] = 0.1
     features[2, 5] = 100.0
-    features[2, 14:16] = (-1.0, 0.0)
-    features[2, 18] = 0.01
+    features[2, 3:5] = (-1.0, 0.0)
     return features
 
 
 def test_public_baselines_use_core_candidate_math_and_return_only_index_theta() -> None:
     """Would fail if EnvAction/old observations returned or masked candidates were considered."""
     features = _candidate_features()
-    mask = np.asarray([True, True, False], dtype=np.bool_)
+    mask = np.zeros((64,), dtype=np.bool_)
+    mask[:2] = True
 
     nearest = select_baseline_action(
         "nearest_frontier", features, mask, np.random.default_rng(9)
@@ -68,18 +66,36 @@ def test_public_baselines_use_core_candidate_math_and_return_only_index_theta() 
     assert BaselineSelectionError is baseline_core.BaselineSelectionError
 
 
+def test_baseline_rejects_legacy_dynamic_candidate_geometry() -> None:
+    """Would fail if V2 baseline selection silently accepted a 3-by-22 fixture."""
+    with pytest.raises(
+        BaselineSelectionError,
+        match="baseline candidate feature or mask shape is invalid",
+    ):
+        select_baseline_action(
+            "nearest_frontier",
+            np.zeros((3, 22), dtype=np.float32),
+            np.asarray([True, True, False], dtype=np.bool_),
+            np.random.default_rng(9),
+        )
+
+
 def test_ppo_eval_selection_masks_logits_and_uses_four_field_policy_output() -> None:
     """Would fail if eval used the old output type or selected a masked high logit."""
+    logits = torch.zeros((1, 64), dtype=torch.float32)
+    logits[0, :3] = torch.tensor([1.0, 99.0, 2.0], dtype=torch.float32)
+    theta_mu = torch.zeros((1, 64), dtype=torch.float32)
+    theta_mu[0, :3] = torch.tensor([0.1, 0.2, -0.3], dtype=torch.float32)
     output = PolicyOutput(
-        frontier_logits=torch.tensor([[1.0, 99.0, 2.0]], dtype=torch.float32),
-        theta_mu=torch.tensor([[0.1, 0.2, -0.3]], dtype=torch.float32),
-        theta_kappa=torch.ones((1, 3), dtype=torch.float32),
+        frontier_logits=logits,
+        theta_mu=theta_mu,
+        theta_kappa=torch.ones((1, 64), dtype=torch.float32),
         value=torch.zeros((1,), dtype=torch.float32),
     )
+    mask = torch.zeros((1, 64), dtype=torch.bool)
+    mask[0, (0, 2)] = True
 
-    action = select_ppo_action(
-        output, torch.tensor([[True, False, True]], dtype=torch.bool)
-    )
+    action = select_ppo_action(output, mask)
 
     assert action.candidate_index == 2
     assert action.theta == pytest.approx(-0.3)
