@@ -16,6 +16,20 @@ class PolicyAction:
 
 
 @dataclass(frozen=True)
+class ExecutionEvents:
+    """Observed execution facts carried from a worker into evaluation."""
+
+    safety_violation_count: int = 0
+    invalid_action_count: int = 0
+    platform_reference_mismatch_count: int = 0
+    hopper_commitment_violation_count: int = 0
+    execution_failure_count: int = 0
+    reference_samples_consumed: int = 0
+    selected_action_observed_safe: bool = False
+    hopper_commitment_states: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class PlannerTransition:
     next_observation: PolicyBatch
     coverage_delta: float
@@ -27,6 +41,7 @@ class PlannerTransition:
     execution_directive: ExecutionDirective
     reason_code: str
     terminated: bool
+    execution_events: ExecutionEvents = ExecutionEvents()
 
 
-__all__ = ["PlannerTransition", "PolicyAction"]
+__all__ = ["ExecutionEvents", "PlannerTransition", "PolicyAction"]

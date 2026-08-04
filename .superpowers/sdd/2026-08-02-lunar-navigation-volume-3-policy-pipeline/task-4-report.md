@@ -72,3 +72,51 @@ repository boundaries: OK
 ```
 
 最终静态检查包括 UTF-8 读取、`git diff --check`、无跟踪 artifact、无残留 `lunar-env` worker；均通过。正式 24 小时 seed 仍是 Task 5，Task 4 没有生成可发布模型。
+
+## Fix round 1（2026-08-04）
+
+本轮只处理 scoped review 的三个 Important finding：proxy reference 执行、完整冻结场景日程、执行事件指标；未调整 PPO 架构、gate 阈值、训练预算或 Task 5 边界。
+
+### RED 证据
+
+- 真实 C++ reference 聚焦测试首次为 `4 failed`：有效 wheel/legged 结果没有 reference-consumption 事件；空 reference 仍错误获得 `0.475` coverage；HOPPER 直接返回 `GROUND_HOLD`，没有 commitment 生命周期。
+- 冻结评估日程测试首次为 `1 failed`：`CurriculumSchedule` 没有公开完整 evaluation scenario indices。
+- 完整 seeds 的真实评估测试首次为 `1 failed`：WHEELED 实际只有 `(10000,)`，而冻结日程要求 `(10000, 10001, 10002)`；其他平台同样仅执行 index 0。
+- 事件聚合/gate 测试首次在收集阶段为 `2 errors`：`_ScenarioEvidence` 与 `_aggregate_platform_metrics` 尚不存在，证明原报告指标没有事件聚合入口。
+
+### 最小修复
+
+- proxy executor 现在验证并消费 C++ `MotionReference`：
+  - WHEELED/LEGGED 校验平台、trajectory semantics、plan id、至少两个轨迹点、有限且单调的时间、起点、地图边界和实际终点；使用实际末端位置推进下一决策边界。
+  - HOPPER 校验 `HopReference`、segment、launch、landing boundary、flight time、launch velocity 和 tube radius；按实际落区中心推进，并记录 `JUMP_COMMITTED → IN_FLIGHT → LANDED_HOLD`。
+  - 不可执行 reference 保持原位置、coverage/progress 均为零，记录 execution failure 及对应 safety/platform/commitment 事件，不再给合成成功奖励。
+- `ExecutionEvents` 随 `PlannerTransition` 穿过 worker queue 到 `ParallelRolloutStep`；评估读取真实 action、planner、reference executor 与 HOPPER lifecycle 事件。
+- 评估使用 9 个 worker 一次覆盖三平台 × scenario index `0/1/2`；PPO、nearest 与 gain/cost 使用完全相同的 row schedule。报告持久化全部实际 seeds：WHEELED `10000..10002`、LEGGED `11000..11002`、HOPPER `12000..12002`。
+- coverage/finite/safe/deterministic/planner failure 以 scenario 或实际 step 为分母聚合；四个 violation 指标求真实事件计数，不再在报告构造处写死为零。HOPPER 接受 reference 但未观察到完整 commitment 序列时额外计一次 violation。
+
+### Fix round 1 验证
+
+```text
+指定三个 Task 4 测试文件（CPU）：
+22 passed, 1 deselected in 13.40s
+
+v3 environment / hopper / parallel pool 回归：
+30 passed in 4.93s
+
+training/lunar_policy_training/tests（含 CUDA）：
+220 passed, 1 skipped in 54.25s
+
+独立 CUDA 短 smoke：
+3 passed, 218 deselected in 33.98s
+
+model_contract/tests + tests/foundation：
+120 passed in 0.62s
+
+python tools/check_repository_boundaries.py .：
+repository boundaries: OK
+
+git diff --check：
+通过
+```
+
+上述仍是 `proxy: true` 的 Task 4 证据，不替代真实平台或 AGX 验收；未启动 Task 5 正式 24 小时训练。

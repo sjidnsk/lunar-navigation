@@ -72,6 +72,10 @@ class CurriculumSchedule:
         return {platform: 8 for platform in PLATFORMS}
 
     @property
+    def evaluation_scenario_indices(self) -> tuple[int, int, int]:
+        return (0, 1, 2)
+
+    @property
     def scenario_schedule_id(self) -> str:
         payload = {
             "schema_version": "lunar-policy-proxy-scenario-schedule/v1",
@@ -81,7 +85,7 @@ class CurriculumSchedule:
             "scenario_seeds": tuple(
                 10_000 + platform_index * 1_000 + scenario_index
                 for platform_index in range(len(PLATFORMS))
-                for scenario_index in range(3)
+                for scenario_index in self.evaluation_scenario_indices
             ),
         }
         digest = hashlib.sha256(

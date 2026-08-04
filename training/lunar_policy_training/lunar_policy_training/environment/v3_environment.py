@@ -16,7 +16,7 @@ from lunar_planner_training_bridge import (
 )
 
 from ..policy.observation import PolicyBatch
-from .macro_step import PlannerTransition, PolicyAction
+from .macro_step import ExecutionEvents, PlannerTransition, PolicyAction
 
 
 _REFERENCE_OUTPUTS = frozenset(
@@ -74,6 +74,7 @@ class CommittedHopExecutionFeedback:
     goal_progress: float
     repeated_visit: bool
     terminated: bool
+    execution_events: ExecutionEvents = ExecutionEvents()
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,7 @@ class ReferenceExecutionResult:
     repeated_visit: bool
     terminated: bool
     execution_state: str
+    execution_events: ExecutionEvents = ExecutionEvents()
 
 
 class V3ExplorationEnvironment:
@@ -257,6 +259,7 @@ class V3ExplorationEnvironment:
             execution_directive=output.directive,
             reason_code=output.reason_code,
             terminated=feedback.terminated,
+            execution_events=feedback.execution_events,
         )
 
     def _execute_reference_until_decision_boundary(
@@ -286,6 +289,7 @@ class V3ExplorationEnvironment:
             execution_directive=output.directive,
             reason_code=output.reason_code,
             terminated=execution.terminated,
+            execution_events=execution.execution_events,
         )
 
     def _fail_closed(self, message: str) -> None:

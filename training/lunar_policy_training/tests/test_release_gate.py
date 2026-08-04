@@ -10,6 +10,8 @@ from lunar_policy_training.evaluation.report import (
     EvaluationReport,
     MethodEvaluation,
     PlatformMetrics,
+    _ScenarioEvidence,
+    _aggregate_platform_metrics,
 )
 
 
@@ -83,6 +85,46 @@ def test_release_gate_adds_action_safety_and_repeat_rules() -> None:
 
     assert result.failed_rules == (
         "HOPPER.deterministic_repeat_match_rate_min",
+    )
+
+
+def test_candidate_gate_rejects_event_derived_execution_violations() -> None:
+    """Would fail if observed worker violations were replaced with zeroes."""
+    report = _report(wheeled=0.97, legged=0.96, hopper=0.95)
+    observed = _aggregate_platform_metrics(
+        (
+            _ScenarioEvidence(
+                scenario_seed=12000,
+                final_coverage=1.0,
+                safety_violation_count=1,
+                invalid_action_count=1,
+                output_finite=True,
+                platform_reference_mismatch_count=1,
+                hopper_commitment_violation_count=1,
+                selected_action_observed_safe_count=1,
+                deterministic_match_count=1,
+                planner_failure_count=0,
+                executed_step_count=1,
+                completion_step_count=1,
+            ),
+        )
+    )
+    changed = report.replace_platform_metrics(
+        method="ppo_policy",
+        platform_type="HOPPER",
+        metrics=observed,
+    )
+
+    result = evaluate_release_gate(
+        changed,
+        load_gate_rules(ROOT / "training/configs/candidate_gate_v1.yaml"),
+    )
+
+    assert result.failed_rules == (
+        "HOPPER.safety_violation_count_max",
+        "HOPPER.invalid_action_count_max",
+        "HOPPER.platform_reference_mismatch_count_max",
+        "HOPPER.hopper_commitment_violation_count_max",
     )
 
 

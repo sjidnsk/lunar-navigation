@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import pytest
+from lunar_planner_training_bridge import MotionReference, PlannerBridge
 
 from lunar_policy_training.curriculum import CurriculumSchedule
 from lunar_policy_training.environment.parallel_pool import (
@@ -11,6 +12,7 @@ from lunar_policy_training.environment.parallel_pool import (
 from lunar_policy_training.environment.macro_step import PolicyAction
 from lunar_policy_training.proxy_scenario import (
     ProxyEnvironmentFactory,
+    _ProxyEpisode,
     proxy_environment_factory,
     proxy_observation,
 )
@@ -99,6 +101,19 @@ def test_curriculum_sampler_is_proxy_and_deterministic() -> None:
     )
 
 
+def test_evaluation_schedule_exposes_every_frozen_proxy_scenario() -> None:
+    """Would fail if evaluation silently ran only the first frozen terrain."""
+    schedule = CurriculumSchedule()
+
+    assert schedule.evaluation_scenario_indices == (0, 1, 2)
+    assert tuple(
+        schedule.scenario_for(
+            platform_type="HOPPER", scenario_index=scenario_index
+        ).scenario_seed
+        for scenario_index in schedule.evaluation_scenario_indices
+    ) == (12000, 12001, 12002)
+
+
 def test_proxy_macro_step_uses_real_v3_and_changes_observation() -> None:
     """Would fail if Task 4 used an empty request or a synthetic score fixture."""
     with ParallelEnvPool(
@@ -127,6 +142,74 @@ def test_proxy_macro_step_uses_real_v3_and_changes_observation() -> None:
     )
     assert all(outcome.name == "NEW_REFERENCE_AVAILABLE" for outcome in stepped.planning_outcomes)
     assert bool(torch.isfinite(stepped.rewards).all())
+    assert len(stepped.execution_events) == 3
+    assert stepped.execution_events[0].reference_samples_consumed > 1
+    assert stepped.execution_events[1].reference_samples_consumed > 1
+    assert stepped.execution_events[2].hopper_commitment_states == (
+        "JUMP_COMMITTED",
+        "IN_FLIGHT",
+        "LANDED_HOLD",
+    )
+
+
+@pytest.mark.parametrize("platform_type", ["WHEELED", "LEGGED"])
+def test_proxy_executor_consumes_cpp_trajectory_endpoint(
+    platform_type: str,
+) -> None:
+    """Would fail if execution teleported to the requested target without a trajectory."""
+    episode = _ProxyEpisode(0, platform_type, scenario_index=0)
+    request = episode.build_request(PolicyAction(frontier_index=0, theta_rad=0.0))
+    output = PlannerBridge().plan(request)
+    assert output.reference is not None
+
+    executed = episode.execute_reference(output.reference)
+
+    assert executed.coverage_delta > 0.0
+    assert executed.execution_state == "DECISION_BOUNDARY"
+    assert executed.execution_events.reference_samples_consumed > 1
+    assert executed.execution_events.execution_failure_count == 0
+    assert executed.next_observation.pose_features[0, 0].item() == pytest.approx(
+        4.5 / 12.0
+    )
+
+
+def test_proxy_executor_rejects_unexecutable_reference_without_success_gain() -> None:
+    """Would fail if an empty C++ reference still received synthetic coverage."""
+    episode = _ProxyEpisode(0, "WHEELED", scenario_index=0)
+    episode.build_request(PolicyAction(frontier_index=0, theta_rad=0.0))
+    empty_reference = MotionReference()
+    empty_reference.platform_type = "WHEELED"
+
+    executed = episode.execute_reference(empty_reference)
+
+    assert executed.coverage_delta == 0.0
+    assert executed.goal_progress == 0.0
+    assert executed.execution_events.execution_failure_count == 1
+    assert executed.execution_events.safety_violation_count == 1
+    assert executed.execution_events.selected_action_observed_safe is False
+    assert executed.next_observation.pose_features[0, 0].item() == pytest.approx(
+        2.5 / 12.0
+    )
+
+
+def test_hopper_proxy_consumes_hop_and_reaches_landed_decision_boundary() -> None:
+    """Would fail if the hopper skipped its committed execution lifecycle."""
+    episode = _ProxyEpisode(0, "HOPPER", scenario_index=0)
+    request = episode.build_request(PolicyAction(frontier_index=0, theta_rad=0.0))
+    output = PlannerBridge().plan(request)
+    assert output.reference is not None
+
+    executed = episode.execute_reference(output.reference)
+
+    assert executed.execution_state == "LANDED_HOLD"
+    assert executed.execution_events.hopper_commitment_states == (
+        "JUMP_COMMITTED",
+        "IN_FLIGHT",
+        "LANDED_HOLD",
+    )
+    assert executed.execution_events.hopper_commitment_violation_count == 0
+    assert executed.execution_events.reference_samples_consumed == 1
+    assert executed.coverage_delta > 0.0
 
 
 def test_proxy_action_has_fixed_target_and_unique_frontiers_can_converge() -> None:

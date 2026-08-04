@@ -11,7 +11,7 @@ import torch
 import lunar_planner_training_bridge as bridge_api
 
 from .curriculum import CurriculumSchedule, PLATFORMS
-from .environment.macro_step import PolicyAction
+from .environment.macro_step import ExecutionEvents, PolicyAction
 from .environment.parallel_pool import ParallelEnvironmentWorker
 from .environment.v3_environment import (
     CommittedHopExecutionFeedback,
@@ -310,6 +310,18 @@ def _targets(platform_type: str) -> tuple[tuple[float, float], ...]:
     return ((4.5, 3.5), (2.5, 5.5), (2.5, 3.5))
 
 
+def _finite_positions(positions: tuple[tuple[float, float], ...]) -> bool:
+    return all(
+        math.isfinite(coordinate)
+        for position in positions
+        for coordinate in position
+    )
+
+
+def _inside_proxy_map(position: tuple[float, float]) -> bool:
+    return 0.0 <= position[0] <= 12.0 and 0.0 <= position[1] <= 8.0
+
+
 class _ProxyEpisode:
     def __init__(
         self, worker_index: int, platform_type: str, *, scenario_index: int
@@ -396,10 +408,125 @@ class _ProxyEpisode:
     def execute_reference(
         self, reference: bridge_api.MotionReference
     ) -> ReferenceExecutionResult:
+        if not isinstance(reference, bridge_api.MotionReference):
+            return self._execution_failure(safety_violation_count=1)
+        if reference.platform_type != self.platform_type:
+            return self._execution_failure(platform_reference_mismatch_count=1)
+        if self.platform_type == "HOPPER":
+            return self._execute_hop_reference(reference)
+        return self._execute_trajectory_reference(reference)
+
+    def _execute_trajectory_reference(
+        self, reference: bridge_api.MotionReference
+    ) -> ReferenceExecutionResult:
+        data = reference.data
+        expected_semantics = (
+            bridge_api.TrajectorySemantics.WHEELED_BASE
+            if self.platform_type == "WHEELED"
+            else bridge_api.TrajectorySemantics.LEGGED_BODY_REFERENCE
+        )
+        if not isinstance(data, bridge_api.TrajectoryReference):
+            return self._execution_failure(platform_reference_mismatch_count=1)
+        points = tuple(data.points)
+        if data.semantics != expected_semantics:
+            return self._execution_failure(platform_reference_mismatch_count=1)
+        if not reference.plan_id or len(points) < 2:
+            return self._execution_failure(safety_violation_count=1)
+        positions = tuple(
+            (point.pose.position_m.x, point.pose.position_m.y)
+            for point in points
+        )
+        timestamps = tuple(point.time_from_start.total_seconds() for point in points)
+        if (
+            not _finite_positions(positions)
+            or not all(math.isfinite(value) for value in timestamps)
+            or timestamps[0] < 0.0
+            or timestamps[-1] <= timestamps[0]
+            or any(right < left for left, right in zip(timestamps, timestamps[1:]))
+            or math.dist(positions[0], self.position) > 0.25
+            or not all(_inside_proxy_map(position) for position in positions)
+        ):
+            return self._execution_failure(safety_violation_count=1)
+        return self._finish_execution(
+            executed_position=positions[-1],
+            reference_samples_consumed=len(points),
+            execution_state="DECISION_BOUNDARY",
+        )
+
+    def _execute_hop_reference(
+        self, reference: bridge_api.MotionReference
+    ) -> ReferenceExecutionResult:
+        data = reference.data
+        if not isinstance(data, bridge_api.HopReference):
+            return self._execution_failure(
+                platform_reference_mismatch_count=1,
+                hopper_commitment_violation_count=1,
+            )
+        segments = tuple(data.segments)
+        if not reference.plan_id or not segments:
+            return self._execution_failure(
+                safety_violation_count=1,
+                hopper_commitment_violation_count=1,
+            )
+        previous_landing = self.position
+        final_landing = self.position
+        commitment_states = ["JUMP_COMMITTED"]
+        for segment in segments:
+            commitment_states.append("IN_FLIGHT")
+            launch = (
+                segment.launch_pose.position_m.x,
+                segment.launch_pose.position_m.y,
+            )
+            boundary = tuple(
+                (point.x, point.y) for point in segment.landing_region_boundary_m
+            )
+            velocity = segment.launch_velocity_mps
+            if (
+                not segment.segment_id
+                or len(boundary) < 3
+                or not _finite_positions((launch, *boundary))
+                or math.dist(launch, previous_landing) > 0.25
+                or not all(_inside_proxy_map(point) for point in boundary)
+                or segment.flight_time.total_seconds() <= 0.0
+                or not all(
+                    math.isfinite(value)
+                    for value in (velocity.x, velocity.y, velocity.z)
+                )
+                or not math.isfinite(segment.flight_tube_radius_m)
+                or segment.flight_tube_radius_m <= 0.0
+            ):
+                return self._execution_failure(
+                    safety_violation_count=1,
+                    hopper_commitment_violation_count=1,
+                )
+            final_landing = (
+                sum(point[0] for point in boundary) / len(boundary),
+                sum(point[1] for point in boundary) / len(boundary),
+            )
+            previous_landing = final_landing
+        commitment_states.append("LANDED_HOLD")
+        return self._finish_execution(
+            executed_position=final_landing,
+            reference_samples_consumed=len(segments),
+            execution_state="LANDED_HOLD",
+            hopper_commitment_states=tuple(commitment_states),
+        )
+
+    def _finish_execution(
+        self,
+        *,
+        executed_position: tuple[float, float],
+        reference_samples_consumed: int,
+        execution_state: str,
+        hopper_commitment_states: tuple[str, ...] = (),
+    ) -> ReferenceExecutionResult:
+        tolerance = 0.5 if self.platform_type == "HOPPER" else 0.2
+        if math.dist(executed_position, self.pending_target) > tolerance:
+            return self._execution_failure(safety_violation_count=1)
         repeated = self.pending_target in self.visited
         previous = self.position
-        self.position = self.pending_target
-        self.visited.add(self.position)
+        self.position = executed_position
+        self.visited.add(self.pending_target)
         self.step += 1
         gain = 0.0 if repeated else min(0.475, 1.0 - self.coverage)
         self.coverage = min(1.0, self.coverage + gain)
@@ -412,22 +539,57 @@ class _ProxyEpisode:
             / 4.0,
             repeated_visit=repeated,
             terminated=self.coverage >= 0.99,
+            execution_state=execution_state,
+            execution_events=ExecutionEvents(
+                reference_samples_consumed=reference_samples_consumed,
+                selected_action_observed_safe=True,
+                hopper_commitment_states=hopper_commitment_states,
+            ),
+        )
+
+    def _execution_failure(
+        self,
+        *,
+        safety_violation_count: int = 0,
+        platform_reference_mismatch_count: int = 0,
+        hopper_commitment_violation_count: int = 0,
+    ) -> ReferenceExecutionResult:
+        self.step += 1
+        return ReferenceExecutionResult(
+            next_observation=self.observation,
+            coverage_delta=0.0,
+            goal_progress=0.0,
+            repeated_visit=False,
+            terminated=False,
             execution_state=(
                 "GROUND_HOLD"
                 if self.platform_type == "HOPPER"
                 else "DECISION_BOUNDARY"
             ),
+            execution_events=ExecutionEvents(
+                safety_violation_count=safety_violation_count,
+                platform_reference_mismatch_count=(
+                    platform_reference_mismatch_count
+                ),
+                hopper_commitment_violation_count=(
+                    hopper_commitment_violation_count
+                ),
+                execution_failure_count=1,
+            ),
         )
 
     def committed_hop_feedback(self) -> CommittedHopExecutionFeedback:
-        executed = self.execute_reference(bridge_api.MotionReference())
         return CommittedHopExecutionFeedback(
             execution_state="LANDED_HOLD",
-            next_observation=executed.next_observation,
-            coverage_delta=executed.coverage_delta,
-            goal_progress=executed.goal_progress,
-            repeated_visit=executed.repeated_visit,
-            terminated=executed.terminated,
+            next_observation=self.observation,
+            coverage_delta=0.0,
+            goal_progress=0.0,
+            repeated_visit=False,
+            terminated=False,
+            execution_events=ExecutionEvents(
+                hopper_commitment_violation_count=1,
+                execution_failure_count=1,
+            ),
         )
 
 

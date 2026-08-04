@@ -18,7 +18,11 @@ from ..eval.baselines import select_baseline_action
 from ..policy.cross_attention import CrossAttentionPolicy, sample_action
 from ..policy.observation import PolicyBatch
 from ..proxy_scenario import ProxyEnvironmentFactory, proxy_observation
-from ..reward import compute_transition_reward, reward_weights_sha256
+from ..reward import (
+    InvalidTransition,
+    compute_transition_reward,
+    reward_weights_sha256,
+)
 
 
 EVALUATION_SCHEMA_VERSION = "lunar-policy-release-evaluation/v1"
@@ -175,6 +179,70 @@ class CandidateEvaluation:
     report: EvaluationReport
 
 
+@dataclass(frozen=True, slots=True)
+class _ScenarioEvidence:
+    scenario_seed: int
+    final_coverage: float
+    safety_violation_count: int
+    invalid_action_count: int
+    output_finite: bool
+    platform_reference_mismatch_count: int
+    hopper_commitment_violation_count: int
+    selected_action_observed_safe_count: int
+    deterministic_match_count: int
+    planner_failure_count: int
+    executed_step_count: int
+    completion_step_count: int
+
+
+def _aggregate_platform_metrics(
+    scenarios: Sequence[_ScenarioEvidence],
+) -> PlatformMetrics:
+    if not scenarios:
+        raise ValueError("platform evaluation requires scenario evidence")
+    executed_steps = sum(item.executed_step_count for item in scenarios)
+    if executed_steps <= 0:
+        raise ValueError("platform evaluation requires executed steps")
+    scenario_count = len(scenarios)
+    return PlatformMetrics(
+        scenario_seeds=tuple(item.scenario_seed for item in scenarios),
+        success_coverage_rate=(
+            sum(item.final_coverage >= 0.95 for item in scenarios)
+            / scenario_count
+        ),
+        safety_violation_count=sum(
+            item.safety_violation_count for item in scenarios
+        ),
+        invalid_action_count=sum(item.invalid_action_count for item in scenarios),
+        output_finite_rate=(
+            sum(item.output_finite for item in scenarios) / scenario_count
+        ),
+        platform_reference_mismatch_count=sum(
+            item.platform_reference_mismatch_count for item in scenarios
+        ),
+        hopper_commitment_violation_count=sum(
+            item.hopper_commitment_violation_count for item in scenarios
+        ),
+        selected_action_observed_safe_rate=(
+            sum(
+                item.selected_action_observed_safe_count for item in scenarios
+            )
+            / executed_steps
+        ),
+        deterministic_repeat_match_rate=(
+            sum(item.deterministic_match_count for item in scenarios)
+            / executed_steps
+        ),
+        planner_failure_rate=(
+            sum(item.planner_failure_count for item in scenarios)
+            / executed_steps
+        ),
+        completion_time_s=(
+            sum(item.completion_step_count for item in scenarios) / scenario_count
+        ),
+    )
+
+
 def report_sha256(report: EvaluationReport) -> str:
     payload = json.dumps(
         report.to_dict(),
@@ -256,23 +324,36 @@ def _evaluate_method(
     device: torch.device,
     schedule: CurriculumSchedule,
 ) -> MethodEvaluation:
-    allocation = {platform: 1 for platform in PLATFORMS}
+    scenario_indices = schedule.evaluation_scenario_indices
+    row_schedule = tuple(
+        (platform, scenario_index)
+        for platform in PLATFORMS
+        for scenario_index in scenario_indices
+    )
+    allocation = {
+        platform: len(scenario_indices) for platform in PLATFORMS
+    }
+    row_count = len(row_schedule)
     with ParallelEnvPool(
         allocation=allocation,
         observation_template=proxy_observation(0, "WHEELED", step=0),
-        environment_factory=ProxyEnvironmentFactory(scenario_index=0),
-        reward_fn=compute_transition_reward,
+        environment_factory=ProxyEnvironmentFactory(),
+        reward_fn=_evaluation_reward,
         worker_timeout_seconds=30.0,
         auto_reset=False,
     ) as pool:
         observations = pool.reset().observations
-        deterministic_match = True
-        planner_failures = [0, 0, 0]
-        accepted_references = [0, 0, 0]
-        executed_steps = [0, 0, 0]
-        output_finite = [True, True, True]
-        completion_steps = [0, 0, 0]
-        final_coverage = np.full(3, 0.05, dtype=np.float32)
+        planner_failures = np.zeros(row_count, dtype=np.int64)
+        executed_steps = np.zeros(row_count, dtype=np.int64)
+        deterministic_matches = np.zeros(row_count, dtype=np.int64)
+        selected_safe_actions = np.zeros(row_count, dtype=np.int64)
+        safety_violations = np.zeros(row_count, dtype=np.int64)
+        invalid_actions = np.zeros(row_count, dtype=np.int64)
+        reference_mismatches = np.zeros(row_count, dtype=np.int64)
+        hopper_commitment_violations = np.zeros(row_count, dtype=np.int64)
+        output_finite = np.ones(row_count, dtype=np.bool_)
+        completion_steps = np.zeros(row_count, dtype=np.int64)
+        final_coverage = np.full(row_count, 0.05, dtype=np.float32)
         for step_index in range(1, 4):
             first_indices, first_thetas = _select_actions(
                 policy,
@@ -280,6 +361,7 @@ def _evaluate_method(
                 observations=observations,
                 device=device,
                 schedule=schedule,
+                row_schedule=row_schedule,
             )
             repeated_indices, repeated_thetas = _select_actions(
                 policy,
@@ -287,10 +369,21 @@ def _evaluate_method(
                 observations=observations,
                 device=device,
                 schedule=schedule,
+                row_schedule=row_schedule,
             )
-            deterministic_match = deterministic_match and bool(
-                np.array_equal(first_indices, repeated_indices)
-                and np.array_equal(first_thetas, repeated_thetas)
+            deterministic_rows = np.logical_and(
+                first_indices == repeated_indices,
+                first_thetas == repeated_thetas,
+            )
+            masks = observations.candidate_mask.detach().cpu().numpy()
+            selected_action_valid = np.asarray(
+                [
+                    0 <= candidate_index < masks.shape[1]
+                    and bool(masks[row, candidate_index])
+                    and math.isfinite(float(first_thetas[row]))
+                    for row, candidate_index in enumerate(first_indices)
+                ],
+                dtype=np.bool_,
             )
             stepped = pool.step(
                 ParallelActions(
@@ -300,21 +393,7 @@ def _evaluate_method(
                 policy_version=0,
             )
             observations = stepped.observations
-            finite_tensors = (
-                observations.prior_channels,
-                observations.coverage_summary,
-                observations.local_crop,
-                observations.frontier_features,
-                observations.pose_features,
-                observations.platform_context,
-                stepped.rewards,
-            )
-            finite_step = bool(
-                all(
-                    torch.isfinite(tensor).all().item()
-                    for tensor in finite_tensors
-                )
-            )
+            finite_rows = _finite_output_rows(observations, stepped.rewards)
             observed_coverage = (
                 observations.coverage_summary[:, 0]
                 .mean(dim=(1, 2))
@@ -322,39 +401,77 @@ def _evaluate_method(
                 .cpu()
                 .numpy()
             )
+            if len(stepped.execution_events) != row_count:
+                raise ValueError("evaluation worker execution events are missing")
             for index, outcome in enumerate(stepped.planning_outcomes):
                 if completion_steps[index] != 0:
                     continue
                 executed_steps[index] += 1
-                accepted = outcome.name == "NEW_REFERENCE_AVAILABLE"
-                accepted_references[index] += int(accepted)
+                deterministic_matches[index] += int(deterministic_rows[index])
+                events = stepped.execution_events[index]
+                safety_violations[index] += events.safety_violation_count
+                invalid_actions[index] += (
+                    events.invalid_action_count
+                    + int(not selected_action_valid[index])
+                )
+                reference_mismatches[index] += (
+                    events.platform_reference_mismatch_count
+                )
+                hopper_commitment_violations[index] += (
+                    events.hopper_commitment_violation_count
+                )
+                selected_safe_actions[index] += int(
+                    events.selected_action_observed_safe
+                )
+                accepted = (
+                    outcome.name == "NEW_REFERENCE_AVAILABLE"
+                    and events.execution_failure_count == 0
+                )
                 planner_failures[index] += int(not accepted)
-                output_finite[index] = output_finite[index] and finite_step
+                platform, _ = row_schedule[index]
+                if (
+                    accepted
+                    and platform == "HOPPER"
+                    and events.hopper_commitment_states
+                    != ("JUMP_COMMITTED", "IN_FLIGHT", "LANDED_HOLD")
+                ):
+                    hopper_commitment_violations[index] += 1
+                output_finite[index] = bool(
+                    output_finite[index] and finite_rows[index]
+                )
                 final_coverage[index] = observed_coverage[index]
                 if bool(stepped.dones[index].item()):
                     completion_steps[index] = step_index
     per_platform: dict[str, PlatformMetrics] = {}
-    for index, platform in enumerate(PLATFORMS):
-        success = float(final_coverage[index]) >= 0.95
-        per_platform[platform] = PlatformMetrics(
-            scenario_seeds=(
-                schedule.scenario_for(
-                    platform_type=platform, scenario_index=0
+    for platform in PLATFORMS:
+        scenario_evidence = tuple(
+            _ScenarioEvidence(
+                scenario_seed=schedule.scenario_for(
+                    platform_type=row_platform,
+                    scenario_index=scenario_index,
                 ).scenario_seed,
-            ),
-            success_coverage_rate=float(success),
-            safety_violation_count=0,
-            invalid_action_count=0,
-            output_finite_rate=float(output_finite[index]),
-            platform_reference_mismatch_count=0,
-            hopper_commitment_violation_count=0,
-            selected_action_observed_safe_rate=(
-                accepted_references[index] / executed_steps[index]
-            ),
-            deterministic_repeat_match_rate=float(deterministic_match),
-            planner_failure_rate=planner_failures[index] / executed_steps[index],
-            completion_time_s=float(completion_steps[index] or 3),
+                final_coverage=float(final_coverage[index]),
+                safety_violation_count=int(safety_violations[index]),
+                invalid_action_count=int(invalid_actions[index]),
+                output_finite=bool(output_finite[index]),
+                platform_reference_mismatch_count=int(
+                    reference_mismatches[index]
+                ),
+                hopper_commitment_violation_count=int(
+                    hopper_commitment_violations[index]
+                ),
+                selected_action_observed_safe_count=int(
+                    selected_safe_actions[index]
+                ),
+                deterministic_match_count=int(deterministic_matches[index]),
+                planner_failure_count=int(planner_failures[index]),
+                executed_step_count=int(executed_steps[index]),
+                completion_step_count=int(completion_steps[index] or 3),
+            )
+            for index, (row_platform, scenario_index) in enumerate(row_schedule)
+            if row_platform == platform
         )
+        per_platform[platform] = _aggregate_platform_metrics(scenario_evidence)
     return MethodEvaluation(method=method, per_platform=per_platform)
 
 
@@ -365,6 +482,7 @@ def _select_actions(
     observations: PolicyBatch,
     device: torch.device,
     schedule: CurriculumSchedule,
+    row_schedule: tuple[tuple[str, int], ...],
 ) -> tuple[np.ndarray, np.ndarray]:
     if method == "ppo_policy":
         batch = _move_batch(observations, device)
@@ -387,9 +505,9 @@ def _select_actions(
     masks = observations.candidate_mask.detach().cpu().numpy()
     indices: list[int] = []
     thetas: list[float] = []
-    for row, platform in enumerate(PLATFORMS):
+    for row, (platform, scenario_index) in enumerate(row_schedule):
         seed = schedule.scenario_for(
-            platform_type=platform, scenario_index=0
+            platform_type=platform, scenario_index=scenario_index
         ).scenario_seed
         action = select_baseline_action(
             method,
@@ -400,6 +518,31 @@ def _select_actions(
         indices.append(action.candidate_index)
         thetas.append(action.theta)
     return np.asarray(indices, dtype=np.int64), np.asarray(thetas, dtype=np.float32)
+
+
+def _evaluation_reward(transition) -> float:
+    try:
+        return compute_transition_reward(transition)
+    except InvalidTransition:
+        return 0.0
+
+
+def _finite_output_rows(
+    observations: PolicyBatch, rewards: torch.Tensor
+) -> np.ndarray:
+    rows = observations.prior_channels.shape[0]
+    finite = torch.ones(rows, dtype=torch.bool)
+    for tensor in (
+        observations.prior_channels,
+        observations.coverage_summary,
+        observations.local_crop,
+        observations.frontier_features,
+        observations.pose_features,
+        observations.platform_context,
+        rewards,
+    ):
+        finite &= torch.isfinite(tensor).reshape(rows, -1).all(dim=1).cpu()
+    return finite.numpy()
 
 
 def _move_batch(batch: PolicyBatch, device: torch.device) -> PolicyBatch:

@@ -10,6 +10,8 @@ from lunar_policy_training.evaluation.report import (
     EvaluationReport,
     MethodEvaluation,
     PlatformMetrics,
+    _ScenarioEvidence,
+    _aggregate_platform_metrics,
     report_sha256,
     select_best_candidate,
 )
@@ -64,6 +66,54 @@ def test_same_scenario_report_has_identical_canonical_hash() -> None:
     assert first.schema_version == "lunar-policy-release-evaluation/v1"
     assert report_sha256(first) == report_sha256(second)
     assert first.to_dict() == second.to_dict()
+
+
+def test_platform_metrics_aggregate_observed_execution_events() -> None:
+    """Would fail if release metrics were constants instead of worker evidence."""
+    metrics = _aggregate_platform_metrics(
+        (
+            _ScenarioEvidence(
+                scenario_seed=10,
+                final_coverage=0.96,
+                safety_violation_count=1,
+                invalid_action_count=0,
+                output_finite=True,
+                platform_reference_mismatch_count=2,
+                hopper_commitment_violation_count=3,
+                selected_action_observed_safe_count=1,
+                deterministic_match_count=1,
+                planner_failure_count=0,
+                executed_step_count=2,
+                completion_step_count=2,
+            ),
+            _ScenarioEvidence(
+                scenario_seed=11,
+                final_coverage=0.50,
+                safety_violation_count=4,
+                invalid_action_count=5,
+                output_finite=False,
+                platform_reference_mismatch_count=6,
+                hopper_commitment_violation_count=7,
+                selected_action_observed_safe_count=1,
+                deterministic_match_count=0,
+                planner_failure_count=2,
+                executed_step_count=2,
+                completion_step_count=3,
+            ),
+        )
+    )
+
+    assert metrics.scenario_seeds == (10, 11)
+    assert metrics.success_coverage_rate == 0.5
+    assert metrics.safety_violation_count == 5
+    assert metrics.invalid_action_count == 5
+    assert metrics.output_finite_rate == 0.5
+    assert metrics.platform_reference_mismatch_count == 8
+    assert metrics.hopper_commitment_violation_count == 10
+    assert metrics.selected_action_observed_safe_rate == 0.5
+    assert metrics.deterministic_repeat_match_rate == 0.25
+    assert metrics.planner_failure_rate == 0.5
+    assert metrics.completion_time_s == 2.5
 
 
 def test_best_checkpoint_maximizes_minimum_platform_coverage() -> None:
@@ -121,13 +171,14 @@ def test_real_proxy_evaluation_is_deterministic_and_compares_three_methods() -> 
         "gain_over_cost_frontier",
     )
     assert report_sha256(first) == report_sha256(second)
+    expected_seeds = {
+        "WHEELED": (10000, 10001, 10002),
+        "LEGGED": (11000, 11001, 11002),
+        "HOPPER": (12000, 12001, 12002),
+    }
     for method in first.methods:
         for platform, metrics in method.per_platform.items():
-            assert metrics.scenario_seeds == (
-                CurriculumSchedule()
-                .scenario_for(platform_type=platform, scenario_index=0)
-                .scenario_seed,
-            )
+            assert metrics.scenario_seeds == expected_seeds[platform]
     gain_over_cost = first.method("gain_over_cost_frontier")
     assert all(
         metrics.success_coverage_rate == 1.0
