@@ -2,7 +2,7 @@
 
 日期：2026-08-04
 
-状态：已完成会话设计评审，待用户复核本文档
+状态：已批准；仓库外实现与 Ubuntu 验证已完成
 
 选择：实时交互模式；RViz 左侧面板选择平台；只显示当前平台
 
@@ -86,7 +86,8 @@ revision。
 
 随仓库外安装空间提供固定 RViz 配置，Fixed Frame 为 `map`，包含：
 
-- 全局和当前平台局部 GridMap；
+- 从全局 GridMap 派生的灰度高程 `PointCloud2`，以及从当前平台局部 GridMap 派生的
+  红色障碍/禁行 `PointCloud2`；规划器继续直接使用原始 GridMap，显示适配不改变规划输入；
 - 高程、障碍物和禁行层；
 - 当前平台代理标记、起点、目标和容差；
 - 当前轮式或腿式 `nav_msgs/Path`；
@@ -106,6 +107,9 @@ revision。
   `diagnostic_msgs/DiagnosticArray`，包含 session、active platform、state、Action phase
   和 reason code；
 - `/lunar_isaac_validation/current_path` 使用 `nav_msgs/Path`；
+- `/lunar_isaac_validation/global_surface` 和
+  `/lunar_isaac_validation/local_hazards` 使用 `sensor_msgs/PointCloud2`，只属于仓库外
+  RViz 显示面；
 - 目标、文字、弹道、飞行管、落区和错误使用
   `/lunar_isaac_validation/current_markers` 的
   `visualization_msgs/MarkerArray`。
@@ -186,9 +190,13 @@ Action feedback 驱动面板显示 `VALIDATING_INPUT`、`BUILDING_SNAPSHOT`、`S
 ## 启动与退出
 
 仓库外提供单独的交互启动脚本。脚本负责 source ROS 2 Humble 与指定 install overlay、
-租用非 ambient ROS domain、启动交互控制器和带固定配置的 RViz。退出时只清理由该脚本
-启动且身份已核验的进程，并释放 domain lease；不得按名称批量终止其他 ROS、Isaac Sim
-或 RViz 进程。
+租用非 ambient ROS domain、启动交互控制器和带固定配置的 RViz。退出时对已核验的
+RViz PID 发送 X11 `WM_DELETE_WINDOW`，再按身份清理该脚本启动的控制器和子进程并释放
+domain lease；不得按名称批量终止其他 ROS、Isaac Sim 或 RViz 进程。
+
+Ubuntu 实测确认 ROS Humble `grid_map_rviz_plugin` 即使不加载本项目面板，也会在正常
+窗口析构时触发段错误；保留本项目面板而移除该显示插件则正常退出。因此 RViz 只使用
+标准 `PointCloud2` 显示，原始 `grid_map_msgs/GridMap` Topic 与规划端语义保持不变。
 
 正式六案例脚本保持原命令和无界面默认行为。交互会话不得写入正式 artifact 目录；若
 需要日志，只能写入仓库外本次 session 的明确目录。

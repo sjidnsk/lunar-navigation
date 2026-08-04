@@ -6,7 +6,12 @@
 
 **Architecture:** 保持主仓规划接口不变，在外部 `lunar_isaac_validation` 包中增加纯目标契约、交互快照桥、会话监管、Action 控制器和 RViz 消息构造；另建小型 `ament_cmake` RViz Panel 插件包。启动脚本租用独立 ROS domain，同时启动控制器和 RViz；控制器一次只拥有一个 bridge/planner 子进程对和一个 Action goal。
 
-**Tech Stack:** Ubuntu 22.04 amd64、ROS 2 Humble、Python 3.10、rclpy、rclcpp、Qt5、rviz_common/pluginlib、grid_map_rviz_plugin、pytest、ament_cmake_gtest、colcon。
+**Tech Stack:** Ubuntu 22.04 amd64、ROS 2 Humble、Python 3.10、rclpy、rclcpp、Qt5、rviz_common/pluginlib、sensor_msgs/PointCloud2、pytest、ament_cmake_gtest、colcon。
+
+**实施备注（2026-08-04）：** 对照测试确认 ROS Humble `grid_map_rviz_plugin` 在窗口析构
+阶段崩溃，且问题在不加载本项目面板时仍可复现。最终实现保留规划器的原始 GridMap
+输入，由交互 bridge 额外发布灰度高程与局部危险单元 `PointCloud2` 给 RViz，并用
+PID 限定的 X11 `WM_DELETE_WINDOW` 正常关窗；该适配不改变正式六案例 lock 或规划接口。
 
 ## Global Constraints
 
