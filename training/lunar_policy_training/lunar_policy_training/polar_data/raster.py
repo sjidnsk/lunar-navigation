@@ -64,6 +64,8 @@ class MapCanvas:
         left, bottom, right, top = roi_bounds_m
         if left >= right or bottom >= top:
             raise RasterError("ROI bounds are invalid")
+        if right - left > GLOBAL_GEOMETRY.size_m or top - bottom > GLOBAL_GEOMETRY.size_m:
+            raise RasterError("ROI bounds exceed fixed 1024m canvas")
         center_x, center_y = (left + right) / 2.0, (bottom + top) / 2.0
         half = GLOBAL_GEOMETRY.size_m / 2.0
         return cls(window_sha256, (center_x - half, center_y - half, center_x + half, center_y + half))
@@ -106,10 +108,9 @@ def load_polar_window(elevation_path: str | Path, canvas: MapCanvas, *, valid_ma
         if elevation_source.transform.b != 0.0 or elevation_source.transform.d != 0.0 or elevation_source.transform.e >= 0.0:
             raise RasterError("source raster must use north-up transform")
         elevation = _read(elevation_source, canvas, Resampling.bilinear, np.nan)
-        nodata = elevation_source.nodata
-    observed = np.isfinite(elevation)
-    if nodata is not None:
-        observed &= ~np.isclose(elevation, nodata)
+        left, bottom, right, top = canvas.bounds_m
+        validity = elevation_source.read_masks(1, window=from_bounds(left, bottom, right, top, elevation_source.transform), out_shape=(canvas.geometry.cells, canvas.geometry.cells), boundless=True, resampling=Resampling.nearest).astype(bool)
+    observed = np.isfinite(elevation) & validity
     if valid_mask_path is not None:
         with rasterio.open(valid_mask_path) as mask_source:
             observed &= _read(mask_source, canvas, Resampling.nearest, 0.0).astype(bool)
