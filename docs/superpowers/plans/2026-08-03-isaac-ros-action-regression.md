@@ -1598,7 +1598,7 @@ Expected: all source tests PASS and only Task 11 source/test files enter the com
 
 **Files:**
 - Modify: external `ros2_ws/src/lunar_isaac_validation/lunar_isaac_validation/{trajectory_checks.py,reports.py}`
-- Test: external `ros2_ws/src/lunar_isaac_validation/test/{test_trajectory_checks.py,test_reports.py}`
+- Test: external `ros2_ws/src/lunar_isaac_validation/test/{test_trajectory_checks.py,test_action_assertions.py,test_reports.py}`
 
 **Interfaces:**
 - Consumes: `ScenarioCase` v2 evidence and `project_trajectory_start`.
@@ -1619,6 +1619,8 @@ Expected: the projected-start acceptance test fails because the current validato
 - [ ] **Step 2: Implement projected-start validation**
 
 For wheel and legged references, recompute `ProjectedStart` from the case request start, bundle, and capabilities. Require the lock's three evidence fields to equal the recomputed cell, position within `1e-9 m`, and maximum error within `1e-12 m`; otherwise raise `TRAJECTORY_START_EVIDENCE_MISMATCH`. Compare the first reference point to the recomputed projected position within `1e-3 m`; retain all terminal, kinematic, timing, sweep, and map checks unchanged.
+
+Update the existing action-assertion test's hand-authored wheel/legged `ScenarioCase` fixture with literal v2 projection evidence and centre its test-only local grids at origin `(-5.0625,-5.0625)`, so its existing `(0,0)` wheel reference remains a valid projected start. Do not call the production helper to construct expected fixture evidence, and do not relax trajectory or v2 parsing behavior.
 
 Run the Step 1 command and expect PASS.
 
