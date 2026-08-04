@@ -127,6 +127,7 @@ def _wheel_capability() -> bridge_api.WheeledCapability:
     capability.maximum_curvature_per_m = 1.0
     capability.maximum_slope_rad = 0.5
     capability.minimum_clearance_m = 0.0
+    yaw_bin_step = 2.0 * math.pi / 64.0
     primitives = []
     for primitive_id, kind, x, yaw, duration in (
         ("forward", bridge_api.WheelPrimitiveKind.FORWARD, 1.0, 0.0, 1.0),
@@ -149,14 +150,14 @@ def _wheel_capability() -> bridge_api.WheeledCapability:
             "spin-left",
             bridge_api.WheelPrimitiveKind.SPIN_COUNTERCLOCKWISE,
             0.0,
-            math.pi / 2.0,
+            yaw_bin_step,
             0.5,
         ),
         (
             "spin-right",
             bridge_api.WheelPrimitiveKind.SPIN_CLOCKWISE,
             0.0,
-            -math.pi / 2.0,
+            -yaw_bin_step,
             0.5,
         ),
     ):
@@ -203,6 +204,17 @@ def _legged_capability() -> bridge_api.LeggedCapability:
         primitive.kind = kind
         primitive.body_frame_displacement_m = _vec3(x, y, 0.0)
         primitive.nominal_duration = timedelta(seconds=2)
+        primitives.append(primitive)
+    yaw_bin_step = 2.0 * math.pi / 64.0
+    for primitive_id, yaw_change in (
+        ("spin-left", yaw_bin_step),
+        ("spin-right", -yaw_bin_step),
+    ):
+        primitive = bridge_api.LeggedBodyPrimitive()
+        primitive.primitive_id = primitive_id
+        primitive.kind = bridge_api.LeggedPrimitiveKind.SPIN
+        primitive.yaw_change_rad = yaw_change
+        primitive.nominal_duration = timedelta(milliseconds=250)
         primitives.append(primitive)
     capability.motion_primitives = primitives
     return capability
@@ -369,7 +381,7 @@ class _ProxyEpisode:
         request.goal.goal_id = f"proxy-frontier-{target_index}"
         request.goal.target = goal
         request.goal.yaw_rad = float(action.theta_rad)
-        request.goal.yaw_tolerance_rad = math.pi
+        request.goal.yaw_tolerance_rad = math.pi / 24.0
         if self.platform_type == "WHEELED":
             state = bridge_api.WheeledState()
             state.pose = _pose(*self.position, 0.0)
@@ -401,7 +413,9 @@ class _ProxyEpisode:
         request.world.map_from_odom.child_frame = "odom"
         request.world.map_from_odom.stamp.nanoseconds_since_epoch = stamp_ns
         request.config.wheel.xy_resolution_m = 1.0
+        request.config.wheel.yaw_bin_count = 64
         request.config.legged.xy_resolution_m = 1.0
+        request.config.legged.yaw_bin_count = 64
         return request
 
     def execute_reference(

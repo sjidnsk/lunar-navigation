@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import pytest
 from lunar_planner_training_bridge import MotionReference, PlannerBridge
@@ -171,6 +173,39 @@ def test_proxy_executor_consumes_cpp_trajectory_endpoint(
     assert executed.next_observation.pose_features[0, 0].item() == pytest.approx(
         4.5 / 12.0
     )
+
+
+@pytest.mark.parametrize("platform_type", ["WHEELED", "LEGGED", "HOPPER"])
+def test_proxy_request_preserves_sampled_absolute_yaw(
+    platform_type: str,
+) -> None:
+    """Would fail if theta were ignored or hidden behind an unconstrained goal."""
+    episode = _ProxyEpisode(0, platform_type, scenario_index=0)
+    sampled_theta = -1.125
+
+    request = episode.build_request(
+        PolicyAction(frontier_index=0, theta_rad=sampled_theta)
+    )
+
+    assert request.goal.yaw_rad == pytest.approx(sampled_theta)
+    assert request.goal.yaw_tolerance_rad == pytest.approx(math.pi / 24.0)
+    assert request.config.wheel.yaw_bin_count == 64
+    assert request.config.legged.yaw_bin_count == 64
+
+
+@pytest.mark.parametrize("platform_type", ["WHEELED", "LEGGED"])
+def test_ground_proxy_capability_can_plan_non_cardinal_sampled_yaw(
+    platform_type: str,
+) -> None:
+    """Would fail if proxy primitives could not realize the fixed 64-bin yaw."""
+    episode = _ProxyEpisode(0, platform_type, scenario_index=0)
+    request = episode.build_request(
+        PolicyAction(frontier_index=0, theta_rad=-1.125)
+    )
+
+    output = PlannerBridge().plan(request)
+
+    assert output.reference is not None, output.reason_code
 
 
 def test_proxy_executor_rejects_unexecutable_reference_without_success_gain() -> None:

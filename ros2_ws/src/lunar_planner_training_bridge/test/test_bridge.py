@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import threading
 
 import numpy as np
 import pytest
@@ -211,6 +212,78 @@ def test_bridge_uses_matching_v3_planner(bridge, easy_request, platform_type):
     if output.reference is not None:
         assert output.reference.platform_type == platform_type
     assert output.diagnostics.planner_name == "cpp_v3"
+
+
+@pytest.mark.parametrize("platform_type", ["WHEELED", "LEGGED", "HOPPER"])
+def test_bridge_projects_traversability_with_exact_array_contract(
+    bridge, easy_request, platform_type
+) -> None:
+    """Would fail if projection crossed Python with wrong platform/shape/dtype."""
+    request = easy_request(platform_type)
+
+    projection = bridge.project_traversability(request)
+
+    expected_shape = (
+        request.world.local_map.height,
+        request.world.local_map.width,
+    )
+    assert projection.platform_type == platform_type
+    assert projection.width == expected_shape[1]
+    assert projection.height == expected_shape[0]
+    expected_dtypes = {
+        "known": np.uint8,
+        "hard_feasible": np.uint8,
+        "clearance_m": np.float32,
+        "slope_rad": np.float32,
+        "roughness_m": np.float32,
+        "traversal_cost": np.float32,
+        "connected_component": np.int32,
+    }
+    for field, dtype in expected_dtypes.items():
+        values = getattr(projection, field)
+        assert values.shape == expected_shape
+        assert values.dtype == dtype
+        assert values.flags.c_contiguous
+
+
+def test_bridge_projection_rejects_invalid_map_with_stable_reason(
+    bridge, easy_request
+) -> None:
+    """Would fail if projection errors lost the C++ map reason code."""
+    request = easy_request("WHEELED")
+    layers = request.world.local_map.layers
+    del layers["forbidden"]
+    request.world.local_map.layers = layers
+
+    with pytest.raises(RuntimeError, match="MISSING_MAP_LAYER_FORBIDDEN"):
+        bridge.project_traversability(request)
+
+
+def test_bridge_projection_releases_gil(bridge, easy_request) -> None:
+    """Would fail if a real C++ projection blocked every Python thread."""
+    request = easy_request("WHEELED")
+    request.world.local_map = _flat_map("odom", width=640, height=640)
+    started = threading.Event()
+    stop = threading.Event()
+    counter = [0]
+
+    def count_python_work() -> None:
+        started.set()
+        while not stop.is_set():
+            counter[0] += 1
+
+    worker = threading.Thread(target=count_python_work)
+    worker.start()
+    assert started.wait(timeout=1.0)
+    before = counter[0]
+    try:
+        bridge.project_traversability(request)
+    finally:
+        stop.set()
+        worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert counter[0] > before
 
 
 def test_grid_layer_rejects_non_contiguous_numpy() -> None:

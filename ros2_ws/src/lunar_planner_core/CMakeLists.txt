@@ -21,6 +21,7 @@ endfunction()
 
 add_library(${PROJECT_NAME} SHARED
   src/planner.cpp
+  src/shared/traversability_projection.cpp
   src/hopper/ballistic_kinematics.cpp
   src/hopper/commitment_state_machine.cpp
   src/hopper/flight_tube_certifier.cpp
@@ -74,6 +75,15 @@ if(BUILD_TESTING)
   target_include_directories(lunar_planner_core_public_api_test PRIVATE test)
   target_link_libraries(lunar_planner_core_public_api_test ${PROJECT_NAME})
   lunar_enable_sanitizers(lunar_planner_core_public_api_test)
+
+  ament_add_gtest(lunar_planner_core_traversability_projection_test
+    test/traversability_projection_test.cpp)
+  target_include_directories(
+    lunar_planner_core_traversability_projection_test PRIVATE test)
+  target_link_libraries(
+    lunar_planner_core_traversability_projection_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(
+    lunar_planner_core_traversability_projection_test)
 
   ament_add_gtest(lunar_planner_core_shared_core_test
     test/shared_core_test.cpp)

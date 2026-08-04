@@ -7,10 +7,16 @@
 #include <gtest/gtest.h>
 
 #include "lunar_planner_core/planner.hpp"
+#include "lunar_planner_core/traversability_projection.hpp"
 #include "test_fixtures.hpp"
 
 namespace lunar::planning {
 namespace {
+
+TEST(PlannerDefaults, GroundPlatformsUseSixtyFourYawBins) {
+  EXPECT_EQ(WheelPlannerConfig{}.yaw_bin_count, 64U);
+  EXPECT_EQ(LeggedPlannerConfig{}.yaw_bin_count, 64U);
+}
 
 TEST(PublicApi, RejectsMissingRequiredMapLayersWithoutCallingBackend) {
   Planner planner;

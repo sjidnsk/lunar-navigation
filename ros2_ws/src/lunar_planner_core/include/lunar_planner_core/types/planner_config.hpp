@@ -50,14 +50,14 @@ struct MapSafetyConfig final {
 
 struct WheelPlannerConfig final {
   double xy_resolution_m{0.25};
-  std::size_t yaw_bin_count{32U};
+  std::size_t yaw_bin_count{64U};
   std::size_t maximum_terminal_candidates{64U};
   std::size_t continuous_validation_maximum_subdivisions{32U};
 };
 
 struct LeggedPlannerConfig final {
   double xy_resolution_m{0.25};
-  std::size_t yaw_bin_count{32U};
+  std::size_t yaw_bin_count{64U};
   std::size_t maximum_terminal_candidates{64U};
   std::size_t maximum_height_interval_splits{16U};
   std::size_t continuous_validation_maximum_subdivisions{32U};

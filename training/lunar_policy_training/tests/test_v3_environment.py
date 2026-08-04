@@ -29,7 +29,11 @@ from lunar_policy_training.environment.v3_environment import (  # noqa: E402
 from lunar_policy_training.policy.observation import PolicyBatch  # noqa: E402
 
 
-def _observation(platform_index: int = 0) -> PolicyBatch:
+def _observation(
+    platform_index: int = 0,
+    *,
+    candidate_mask: tuple[bool, bool] = (True, False),
+) -> PolicyBatch:
     platform_context = torch.zeros((1, 3), dtype=torch.float32)
     platform_context[0, platform_index] = 1.0
     return PolicyBatch(
@@ -38,7 +42,7 @@ def _observation(platform_index: int = 0) -> PolicyBatch:
         local_crop=torch.zeros((1, 8, 4, 4), dtype=torch.float32),
         frontier_features=torch.zeros((1, 2, 22), dtype=torch.float32),
         pose_features=torch.zeros((1, 6), dtype=torch.float32),
-        candidate_mask=torch.tensor([[True, False]], dtype=torch.bool),
+        candidate_mask=torch.tensor([candidate_mask], dtype=torch.bool),
         platform_context=platform_context,
     )
 
@@ -49,6 +53,14 @@ class _Bridge:
 
     def plan(self, request: object) -> PlannerOutput:
         return self.output
+
+
+class _SequenceBridge:
+    def __init__(self, outputs: list[PlannerOutput]) -> None:
+        self.outputs = iter(outputs)
+
+    def plan(self, request: object) -> PlannerOutput:
+        return next(self.outputs)
 
 
 class _ReferenceExecutor:
@@ -102,6 +114,117 @@ def test_no_reference_holds_state_and_preserves_planner_failure() -> None:
     assert transition.execution_directive == ExecutionDirective.NO_SAFE_REFERENCE
     assert transition.reason_code == "NO_ROUTE"
     assert transition.terminated is False
+
+
+@pytest.mark.parametrize(
+    ("outcome", "directive"),
+    [
+        (PlanningOutcome.GOAL_INFEASIBLE, ExecutionDirective.HOLD_POSITION),
+        (
+            PlanningOutcome.NO_KNOWN_SAFE_ROUTE,
+            ExecutionDirective.NO_SAFE_REFERENCE,
+        ),
+    ],
+)
+def test_normal_v3_rejection_consumes_decision_and_masks_only_selected_candidate(
+    outcome: PlanningOutcome,
+    directive: ExecutionDirective,
+) -> None:
+    """Would fail if one rejected frontier poisoned unrelated candidates."""
+    output = PlannerOutput()
+    output.outcome = outcome
+    output.directive = directive
+    output.reason_code = "CANDIDATE_REJECTED"
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(output),
+        request_builder=lambda action: action,
+        initial_observation=_observation(candidate_mask=(True, True)),
+    )
+    policy_masks: list[torch.Tensor] = []
+
+    def policy(observation: PolicyBatch) -> PolicyAction:
+        policy_masks.append(observation.candidate_mask.clone())
+        return PolicyAction(frontier_index=0, theta_rad=0.25)
+
+    result = env.advance_until_decision_boundary(policy)
+
+    assert result.decision_budget_consumed == 1
+    assert result.transition is not None
+    assert policy_masks[0].tolist() == [[True, True]]
+    assert result.transition.next_observation.candidate_mask.tolist() == [
+        [False, True]
+    ]
+
+
+def test_new_observation_identity_clears_temporary_rejections() -> None:
+    """Would fail if rejected candidates leaked across a state/snapshot revision."""
+    rejected = PlannerOutput()
+    rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+    rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    rejected.reason_code = "CANDIDATE_REJECTED"
+    accepted = _reference_output(
+        "WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE
+    )
+    refreshed = _observation(candidate_mask=(True, True))
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_SequenceBridge([rejected, accepted, rejected]),
+        request_builder=lambda action: action,
+        initial_observation=_observation(candidate_mask=(True, True)),
+        reference_executor=_ReferenceExecutor(
+            ReferenceExecutionResult(
+                next_observation=refreshed,
+                coverage_delta=0.1,
+                goal_progress=0.1,
+                repeated_visit=False,
+                terminated=False,
+                execution_state="DECISION_BOUNDARY",
+            )
+        ),
+    )
+    seen_masks: list[list[list[bool]]] = []
+
+    def policy(observation: PolicyBatch) -> PolicyAction:
+        seen_masks.append(observation.candidate_mask.tolist())
+        selected = 0 if observation.candidate_mask[0, 0] else 1
+        return PolicyAction(frontier_index=selected, theta_rad=0.0)
+
+    env.advance_until_decision_boundary(policy)
+    env.advance_until_decision_boundary(policy)
+    env.advance_until_decision_boundary(policy)
+
+    assert seen_masks == [
+        [[True, True]],
+        [[False, True]],
+        [[True, True]],
+    ]
+
+
+def test_all_false_candidates_bypass_policy_without_fallback() -> None:
+    """Would fail if the environment sampled policy or invented robot position."""
+    output = PlannerOutput()
+    output.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+    output.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(output),
+        request_builder=lambda action: action,
+        initial_observation=_observation(candidate_mask=(False, False)),
+    )
+    policy_called = False
+
+    def policy(observation: PolicyBatch) -> PolicyAction:
+        nonlocal policy_called
+        policy_called = True
+        return PolicyAction(frontier_index=0, theta_rad=0.0)
+
+    result = env.advance_until_decision_boundary(policy)
+
+    assert policy_called is False
+    assert result.execution_state == "NO_CANDIDATES"
+    assert result.transition is None
+    assert result.decision_budget_consumed == 0
 
 
 @pytest.mark.parametrize(

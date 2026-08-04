@@ -55,6 +55,15 @@ _NO_REFERENCE_OUTPUTS = frozenset(
         ),
     }
 )
+_REJECTED_ACTION_OUTPUTS = frozenset(
+    {
+        (PlanningOutcome.GOAL_INFEASIBLE, ExecutionDirective.HOLD_POSITION),
+        (
+            PlanningOutcome.NO_KNOWN_SAFE_ROUTE,
+            ExecutionDirective.NO_SAFE_REFERENCE,
+        ),
+    }
+)
 
 
 class EnvironmentInvariantError(RuntimeError):
@@ -82,6 +91,7 @@ class DecisionBoundaryResult:
     execution_state: str
     transition: PlannerTransition | None = None
     execution_feedback: CommittedHopExecutionFeedback | None = None
+    decision_budget_consumed: int = 0
 
 
 @dataclass(frozen=True)
@@ -145,6 +155,8 @@ class V3ExplorationEnvironment:
         if output.directive == ExecutionDirective.CONTINUE_COMMITTED_HOP:
             return self._advance_committed_hop_without_policy(output)
         if output.reference is None:
+            if (output.outcome, output.directive) in _REJECTED_ACTION_OUTPUTS:
+                self._mask_rejected_candidate(action.frontier_index)
             return self._hold_transition(
                 outcome=output.outcome,
                 directive=output.directive,
@@ -199,12 +211,31 @@ class V3ExplorationEnvironment:
                 transition=transition,
                 execution_feedback=feedback,
             )
+        if not bool(self._observation.candidate_mask.any().item()):
+            return DecisionBoundaryResult(execution_state="NO_CANDIDATES")
         action = policy(self._observation)
         transition = self.step(action)
         return DecisionBoundaryResult(
             execution_state=self._execution_state,
             transition=transition,
+            decision_budget_consumed=1,
         )
+
+    def _mask_rejected_candidate(self, candidate_index: int) -> None:
+        mask = self._observation.candidate_mask
+        if (
+            mask.ndim != 2
+            or mask.shape[0] != 1
+            or candidate_index < 0
+            or candidate_index >= mask.shape[1]
+            or not bool(mask[0, candidate_index].item())
+        ):
+            self._fail_closed(
+                "rejected planner action does not identify an active candidate"
+            )
+        masked = _clone_observation(self._observation)
+        masked.candidate_mask[0, candidate_index] = False
+        self._observation = masked
 
     def _advance_committed_hop_without_policy(
         self, output: PlannerOutput

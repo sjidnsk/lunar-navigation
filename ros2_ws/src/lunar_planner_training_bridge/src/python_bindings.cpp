@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -52,6 +53,19 @@ template <typename Value>
 [[nodiscard]] py::array_t<Value> CopyArray(const std::vector<Value> &values) {
   py::array_t<Value> result(py::array::ShapeContainer{
       static_cast<py::ssize_t>(values.size()),
+  });
+  std::copy(values.begin(), values.end(), result.mutable_data());
+  return result;
+}
+
+template <typename Value>
+[[nodiscard]] py::array_t<Value> CopyArray2d(
+    const std::vector<Value> &values,
+    const std::size_t height,
+    const std::size_t width) {
+  py::array_t<Value> result(py::array::ShapeContainer{
+      static_cast<py::ssize_t>(height),
+      static_cast<py::ssize_t>(width),
   });
   std::copy(values.begin(), values.end(), result.mutable_data());
   return result;
@@ -594,6 +608,56 @@ void BindOutput(py::module_ &module) {
       .def_readwrite("diagnostics", &planning::PlannerOutput::diagnostics);
 }
 
+void BindProjection(py::module_ &module) {
+  py::class_<planning::TraversabilityProjection>(
+      module, "TraversabilityProjection")
+      .def_property_readonly(
+          "platform_type",
+          [](const planning::TraversabilityProjection &self) {
+            return PlatformTypeName(self.platform_type);
+          })
+      .def_readonly("width", &planning::TraversabilityProjection::width)
+      .def_readonly("height", &planning::TraversabilityProjection::height)
+      .def_property_readonly(
+          "known",
+          [](const planning::TraversabilityProjection &self) {
+            return CopyArray2d(self.known, self.height, self.width);
+          })
+      .def_property_readonly(
+          "hard_feasible",
+          [](const planning::TraversabilityProjection &self) {
+            return CopyArray2d(
+                self.hard_feasible, self.height, self.width);
+          })
+      .def_property_readonly(
+          "clearance_m",
+          [](const planning::TraversabilityProjection &self) {
+            return CopyArray2d(self.clearance_m, self.height, self.width);
+          })
+      .def_property_readonly(
+          "slope_rad",
+          [](const planning::TraversabilityProjection &self) {
+            return CopyArray2d(self.slope_rad, self.height, self.width);
+          })
+      .def_property_readonly(
+          "roughness_m",
+          [](const planning::TraversabilityProjection &self) {
+            return CopyArray2d(self.roughness_m, self.height, self.width);
+          })
+      .def_property_readonly(
+          "traversal_cost",
+          [](const planning::TraversabilityProjection &self) {
+            return CopyArray2d(
+                self.traversal_cost, self.height, self.width);
+          })
+      .def_property_readonly(
+          "connected_component",
+          [](const planning::TraversabilityProjection &self) {
+            return CopyArray2d(
+                self.connected_component, self.height, self.width);
+          });
+}
+
 void BindRequest(py::module_ &module) {
   py::class_<training::TrainingPlanRequest>(module, "TrainingPlanRequest")
       .def(py::init<>())
@@ -610,7 +674,18 @@ void BindRequest(py::module_ &module) {
   py::class_<training::PlannerBridge>(module, "PlannerBridge")
       .def(py::init<>())
       .def("plan", &training::PlannerBridge::Plan, py::arg("request"),
-           py::call_guard<py::gil_scoped_release>());
+           py::call_guard<py::gil_scoped_release>())
+      .def(
+          "project_traversability",
+          [](const training::PlannerBridge &self,
+             const training::TrainingPlanRequest &request) {
+            auto result = self.ProjectTraversability(request);
+            if (!result.ok()) {
+              throw std::runtime_error(result.reason_code);
+            }
+            return std::move(*result.projection);
+          },
+          py::arg("request"), py::call_guard<py::gil_scoped_release>());
 }
 
 }  // namespace
@@ -624,5 +699,6 @@ PYBIND11_MODULE(_lunar_planner_training_bridge, module) {
   BindConfig(module);
   BindExecution(module);
   BindOutput(module);
+  BindProjection(module);
   BindRequest(module);
 }

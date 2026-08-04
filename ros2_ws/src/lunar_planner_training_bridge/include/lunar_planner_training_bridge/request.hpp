@@ -4,6 +4,7 @@
 #include <string>
 
 #include "lunar_planner_core/planner.hpp"
+#include "lunar_planner_core/traversability_projection.hpp"
 
 namespace lunar::planning::training {
 
@@ -22,6 +23,11 @@ class PlannerBridge final {
  public:
   [[nodiscard]] lunar::planning::PlannerOutput Plan(
       const TrainingPlanRequest &request) noexcept;
+  [[nodiscard]] lunar::planning::TraversabilityProjectionResult
+  ProjectTraversability(const TrainingPlanRequest &request) const {
+    return lunar::planning::ProjectTraversability(
+        request.world, request.capability, request.config.map_safety, {});
+  }
 
  private:
   lunar::planning::Planner planner_;
