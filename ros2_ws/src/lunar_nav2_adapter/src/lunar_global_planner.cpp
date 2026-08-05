@@ -82,6 +82,7 @@ struct LunarGlobalPlanner::Impl final {
   std::string plugin_name;
   std::string action_name;
   std::string mission_id;
+  std::string global_frame{"map"};
   std::uint64_t mission_revision{0U};
   double start_tolerance_m{0.0};
   double goal_tolerance_m{0.0};
@@ -109,7 +110,6 @@ void LunarGlobalPlanner::configure(
     std::string name,
     std::shared_ptr<tf2_ros::Buffer> tf,
     std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) {
-  static_cast<void>(costmap_ros);
   auto node = parent.lock();
   if (!node) {
     throw nav2_core::PlannerException{"Nav2 lifecycle parent expired"};
@@ -124,6 +124,8 @@ void LunarGlobalPlanner::configure(
   }
 
   const std::string prefix = name + ".";
+  const std::string global_frame = costmap_ros
+      ? costmap_ros->getGlobalFrameID() : std::string{"map"};
   const auto action_name = DeclareOrGetParameter<std::string>(
       node, prefix + "action_name", "/plan_motion");
   const auto odometry_topic = DeclareOrGetParameter<std::string>(
@@ -147,9 +149,9 @@ void LunarGlobalPlanner::configure(
   const auto replace_active_request = DeclareOrGetParameter<bool>(
       node, prefix + "replace_active_request", false);
 
-  if (action_name.empty() || odometry_topic.empty()) {
+  if (action_name.empty() || odometry_topic.empty() || global_frame.empty()) {
     throw nav2_core::PlannerException{
-        "action_name and odometry_topic must be non-empty"};
+        "action_name, odometry_topic, and global frame must be non-empty"};
   }
   if (mission_id.empty() || mission_revision_parameter <= 0) {
     throw nav2_core::PlannerException{
@@ -196,6 +198,7 @@ void LunarGlobalPlanner::configure(
   impl_->plugin_name = std::move(name);
   impl_->action_name = action_name;
   impl_->mission_id = mission_id;
+  impl_->global_frame = global_frame;
   impl_->mission_revision =
       static_cast<std::uint64_t>(mission_revision_parameter);
   impl_->start_tolerance_m = start_tolerance_m;
@@ -421,6 +424,11 @@ nav_msgs::msg::Path LunarGlobalPlanner::createPlan(
 
 nav_msgs::msg::Path LunarGlobalPlanner::ConvertResult(
     const Action::Result& result) const {
+  std::string global_frame;
+  {
+    std::scoped_lock lock{impl_->mutex};
+    global_frame = impl_->global_frame;
+  }
   if (!result.has_reference) {
     throw nav2_core::PlannerException{
         "PlanMotion did not return an executable reference: " +
@@ -431,7 +439,22 @@ nav_msgs::msg::Path LunarGlobalPlanner::ConvertResult(
     throw nav2_core::PlannerException{
         "Nav2 adapter accepts only WHEELED MotionReference results"};
   }
-  return result.reference.path_preview;
+  const auto& preview = result.reference.path_preview;
+  if (preview.header.frame_id != global_frame) {
+    throw nav2_core::PlannerException{
+        "PlanMotion path preview is not in the configured global frame"};
+  }
+  if (preview.poses.size() < 2U) {
+    throw nav2_core::PlannerException{
+        "PlanMotion path preview must contain at least two poses"};
+  }
+  for (const auto& pose : preview.poses) {
+    if (pose.header != preview.header) {
+      throw nav2_core::PlannerException{
+          "PlanMotion path preview pose header is inconsistent"};
+    }
+  }
+  return preview;
 }
 
 void LunarGlobalPlanner::SetLatestOdometryForTesting(

@@ -68,6 +68,9 @@ Action::Result MakeResult(const std::uint8_t platform_type) {
   result.reference.header.frame_id = "map";
   result.reference.path_preview.header.frame_id = "map";
   result.reference.path_preview.poses.resize(2U);
+  for (auto& pose : result.reference.path_preview.poses) {
+    pose.header = result.reference.path_preview.header;
+  }
   return result;
 }
 
@@ -90,16 +93,35 @@ TEST(LunarGlobalPlanner, RejectsHopperReference) {
   EXPECT_THROW(adapter.ConvertResult(result), nav2_core::PlannerException);
 }
 
-TEST(LunarGlobalPlanner, ReturnsWheeledPathWithoutReplanning) {
+TEST(LunarGlobalPlanner, RejectsOdomEmptyAndInconsistentPreviews) {
+  LunarGlobalPlanner adapter;
+
+  auto result = MakeResult(Reference::WHEELED);
+  result.reference.path_preview.header.frame_id = "odom";
+  for (auto& pose : result.reference.path_preview.poses) {
+    pose.header = result.reference.path_preview.header;
+  }
+  EXPECT_THROW(adapter.ConvertResult(result), nav2_core::PlannerException);
+
+  result = MakeResult(Reference::WHEELED);
+  result.reference.path_preview.poses.clear();
+  EXPECT_THROW(adapter.ConvertResult(result), nav2_core::PlannerException);
+
+  result = MakeResult(Reference::WHEELED);
+  result.reference.path_preview.poses.back().header.frame_id = "odom";
+  EXPECT_THROW(adapter.ConvertResult(result), nav2_core::PlannerException);
+}
+
+TEST(LunarGlobalPlanner, ReturnsFarMapPreviewWithoutReplanning) {
   LunarGlobalPlanner adapter;
   auto result = MakeResult(Reference::WHEELED);
-  result.reference.path_preview.poses[1].pose.position.x = 4.5;
+  result.reference.path_preview.poses[1].pose.position.x = 900.0;
 
   const auto path = adapter.ConvertResult(result);
 
   ASSERT_EQ(path.poses.size(), 2U);
   EXPECT_EQ(path.header.frame_id, "map");
-  EXPECT_DOUBLE_EQ(path.poses[1].pose.position.x, 4.5);
+  EXPECT_DOUBLE_EQ(path.poses[1].pose.position.x, 900.0);
 }
 
 TEST(LunarGlobalPlanner, ExportsNav2GlobalPlannerPlugin) {
