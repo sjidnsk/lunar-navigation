@@ -182,6 +182,26 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
       Finite(metrics.corridor_width_m) && metrics.corridor_width_m >= 0.0;
 }
 
+[[nodiscard]] bool ValidLocalTrajectoryDiagnostics(
+    const lunar::planning::LocalTrajectoryDiagnostics& diagnostics) noexcept {
+  return static_cast<std::uint8_t>(diagnostics.trajectory_mode) <=
+          static_cast<std::uint8_t>(
+              lunar::planning::TrajectoryMode::kCertifiedHop) &&
+      static_cast<std::uint8_t>(diagnostics.collision_validation) <=
+          static_cast<std::uint8_t>(
+              lunar::planning::CollisionValidation::kNotApplicable) &&
+      Finite(diagnostics.start_anchor_error_m) &&
+      diagnostics.start_anchor_error_m >= 0.0 &&
+      Finite(diagnostics.endpoint_error_m) &&
+      diagnostics.endpoint_error_m >= 0.0 &&
+      Finite(diagnostics.maximum_curvature_per_m) &&
+      diagnostics.maximum_curvature_per_m >= 0.0 &&
+      Finite(diagnostics.smoothing_elapsed_s) &&
+      diagnostics.smoothing_elapsed_s >= 0.0 &&
+      Finite(diagnostics.landing_field_elapsed_s) &&
+      diagnostics.landing_field_elapsed_s >= 0.0;
+}
+
 [[nodiscard]] std::optional<std::string> ConvertPreview(
     const lunar::planning::GlobalRoutePreview& preview,
     const builtin_interfaces::msg::Time& input_time,
@@ -411,7 +431,10 @@ ActionResultConversion ConvertPlannerOutput(
       (output.diagnostics.best_cost &&
        !Finite(*output.diagnostics.best_cost)) ||
       (output.diagnostics.hierarchical &&
-       !ValidHierarchicalMetrics(*output.diagnostics.hierarchical))) {
+       !ValidHierarchicalMetrics(*output.diagnostics.hierarchical)) ||
+      (output.diagnostics.local_trajectory &&
+       !ValidLocalTrajectoryDiagnostics(
+           *output.diagnostics.local_trajectory))) {
     return ResultFailure("RESULT_DIAGNOSTICS_INVALID");
   }
 

@@ -531,6 +531,75 @@ TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
       0.012);
 }
 
+TEST_F(PlanMotionServerTest, PublishesStableLocalTrajectoryEvidence) {
+  auto output = NoRouteOutput("DISCRETE_REFERENCE_AVAILABLE");
+  output.diagnostics.warning_codes = {
+      "WHEEL_OPTIMIZATION_CONFIG_INVALID",
+      "WHEEL_OPTIMIZATION_DISCRETE_FALLBACK",
+  };
+  output.diagnostics.local_trajectory =
+      lunar::planning::LocalTrajectoryDiagnostics{
+          .trajectory_mode =
+              lunar::planning::TrajectoryMode::kDiscreteFallback,
+          .start_anchor_error_m = 0.0,
+          .endpoint_error_m = 0.125,
+          .maximum_curvature_per_m = 0.75,
+          .collision_validation =
+              lunar::planning::CollisionValidation::kCertified,
+          .smoothing_elapsed_s = 0.004,
+          .landing_field_elapsed_s = 0.0,
+      };
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [output](const lunar::planning::PlannerInput&) {
+        return output;
+      },
+      .preloaded_capabilities = WheelCapabilities(),
+  }};
+  system.PublishInputs();
+  const auto handle = system.SendGoal(system.Goal("local-diagnostics"));
+  ASSERT_NE(handle, nullptr);
+  const auto wrapped = system.Result(handle);
+  ASSERT_EQ(wrapped.code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_NE(wrapped.result, nullptr);
+  EXPECT_EQ(
+      wrapped.result->diagnostics.warning_codes,
+      output.diagnostics.warning_codes);
+
+  const std::vector<std::string> expected_keys{
+      "trajectory_mode",
+      "start_anchor_error_m",
+      "endpoint_error_m",
+      "maximum_curvature_per_m",
+      "collision_validation",
+      "smoothing_elapsed_s",
+      "landing_field_elapsed_s",
+      "warning_codes",
+  };
+  ASSERT_TRUE(WaitFor([&] {
+    return std::ranges::all_of(expected_keys, [&](const auto& key) {
+      return system.DiagnosticValue(
+          "DISCRETE_REFERENCE_AVAILABLE", key).has_value();
+    });
+  }));
+  EXPECT_EQ(
+      system.DiagnosticValue(
+          "DISCRETE_REFERENCE_AVAILABLE", "trajectory_mode"),
+      "DISCRETE_FALLBACK");
+  EXPECT_EQ(
+      system.DiagnosticValue(
+          "DISCRETE_REFERENCE_AVAILABLE", "collision_validation"),
+      "CERTIFIED");
+  EXPECT_EQ(
+      system.DiagnosticValue(
+          "DISCRETE_REFERENCE_AVAILABLE", "warning_codes"),
+      "WHEEL_OPTIMIZATION_CONFIG_INVALID,"
+      "WHEEL_OPTIMIZATION_DISCRETE_FALLBACK");
+  EXPECT_DOUBLE_EQ(
+      std::stod(*system.DiagnosticValue(
+          "DISCRETE_REFERENCE_AVAILABLE", "endpoint_error_m")),
+      0.125);
+}
+
 TEST_F(PlanMotionServerTest, RejectsSecondGoalAndSerializesExplicitReplacement) {
   struct PlannerState final {
     std::atomic<int> calls{0};

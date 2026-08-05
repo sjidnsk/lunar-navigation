@@ -82,6 +82,18 @@ lunar::planning::PlannerOutput WheelOutput() {
           .expanded_states = 42U,
           .best_cost = 3.5,
           .warning_codes = {"LOW_MARGIN"},
+          .local_trajectory =
+              lunar::planning::LocalTrajectoryDiagnostics{
+                  .trajectory_mode =
+                      lunar::planning::TrajectoryMode::kOptimized,
+                  .start_anchor_error_m = 0.0,
+                  .endpoint_error_m = 0.05,
+                  .maximum_curvature_per_m = 0.25,
+                  .collision_validation =
+                      lunar::planning::CollisionValidation::kCertified,
+                  .smoothing_elapsed_s = 0.002,
+                  .landing_field_elapsed_s = 0.0,
+              },
       },
   };
 }
@@ -282,6 +294,13 @@ TEST(MessageConversion, RejectsResultInvariantViolations) {
   EXPECT_EQ(
       ConvertPlannerOutput(output, Context()).reason_code,
       "REFERENCE_GLOBAL_PREVIEW_INVALID");
+
+  output = WheelOutput();
+  output.diagnostics.local_trajectory->endpoint_error_m =
+      std::numeric_limits<double>::quiet_NaN();
+  EXPECT_EQ(
+      ConvertPlannerOutput(output, Context()).reason_code,
+      "RESULT_DIAGNOSTICS_INVALID");
 
   output = WheelOutput();
   output.outcome = static_cast<lunar::planning::PlanningOutcome>(255U);
