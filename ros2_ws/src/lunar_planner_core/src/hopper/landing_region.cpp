@@ -42,7 +42,7 @@ struct CellRectangle final {
 
 [[nodiscard]] bool IsFinite(const Vec3 value) noexcept {
   return std::isfinite(value.x) && std::isfinite(value.y) &&
-      std::isfinite(value.z);
+         std::isfinite(value.z);
 }
 
 [[nodiscard]] double Norm(const Vec3 value) noexcept {
@@ -57,8 +57,8 @@ struct CellRectangle final {
   return {value.x / length, value.y / length, value.z / length};
 }
 
-[[nodiscard]] bool PointInPolygon(
-    const Vec2 point, const std::vector<Vec3>& boundary) noexcept {
+[[nodiscard]] bool PointInPolygon(const Vec2 point,
+                                  const std::vector<Vec3> &boundary) noexcept {
   if (boundary.size() < 3U || !std::isfinite(point.x) ||
       !std::isfinite(point.y)) {
     return false;
@@ -83,16 +83,16 @@ struct CellRectangle final {
   return inside;
 }
 
-[[nodiscard]] PreferredPoint GoalPreferredPoint(const GoalRegion& goal) {
+[[nodiscard]] PreferredPoint GoalPreferredPoint(const GoalRegion &goal) {
   return std::visit(
-      [](const auto& target) -> PreferredPoint {
+      [](const auto &target) -> PreferredPoint {
         using Target = std::decay_t<decltype(target)>;
         if constexpr (std::is_same_v<Target, PointGoal>) {
           return PreferredPoint{
               .point_m = target.position_m,
               .valid = IsFinite(target.position_m) &&
-                  std::isfinite(target.tolerance_m) &&
-                  target.tolerance_m >= 0.0,
+                       std::isfinite(target.tolerance_m) &&
+                       target.tolerance_m >= 0.0,
           };
         } else {
           if (target.boundary_m.size() < 3U ||
@@ -119,41 +119,40 @@ struct CellRectangle final {
       goal.target);
 }
 
-[[nodiscard]] bool GoalContainsCellCenter(
-    const GoalRegion& goal, const Vec3 center) noexcept {
+[[nodiscard]] bool GoalContainsPoint(const GoalRegion &goal,
+                                     const Vec3 point) noexcept {
   return std::visit(
-      [&](const auto& target) {
+      [&](const auto &target) {
         using Target = std::decay_t<decltype(target)>;
         if constexpr (std::is_same_v<Target, PointGoal>) {
-          return std::hypot(
-                     center.x - target.position_m.x,
-                     center.y - target.position_m.y) <=
-              target.tolerance_m + kTolerance;
+          return std::hypot(point.x - target.position_m.x,
+                            point.y - target.position_m.y) <=
+                 target.tolerance_m + kTolerance;
         } else {
-          return PointInPolygon(Vec2{center.x, center.y}, target.boundary_m);
+          return PointInPolygon(Vec2{point.x, point.y}, target.boundary_m);
         }
       },
       goal.target);
 }
 
-[[nodiscard]] double Elevation(
-    const shared::MapSnapshot& map,
-    const shared::GridCell cell) noexcept {
+[[nodiscard]] double Elevation(const shared::MapSnapshot &map,
+                               const shared::GridCell cell) noexcept {
   if (!map.InBounds(cell)) {
     return std::numeric_limits<double>::quiet_NaN();
   }
   return static_cast<double>(map.FloatLayer("elevation")[map.Index(cell)]);
 }
 
-[[nodiscard]] double AxisGradient(
-    const shared::MapSnapshot& map, const shared::GridCell cell,
-    const std::int32_t dx, const std::int32_t dy) noexcept {
+[[nodiscard]] double AxisGradient(const shared::MapSnapshot &map,
+                                  const shared::GridCell cell,
+                                  const std::int32_t dx,
+                                  const std::int32_t dy) noexcept {
   const shared::GridCell negative{.x = cell.x - dx, .y = cell.y - dy};
   const shared::GridCell positive{.x = cell.x + dx, .y = cell.y + dy};
   const double center = Elevation(map, cell);
   if (map.InBounds(negative) && map.InBounds(positive)) {
     return (Elevation(map, positive) - Elevation(map, negative)) /
-        (2.0 * map.resolution_m());
+           (2.0 * map.resolution_m());
   }
   if (map.InBounds(positive)) {
     return (Elevation(map, positive) - center) / map.resolution_m();
@@ -164,13 +163,12 @@ struct CellRectangle final {
   return 0.0;
 }
 
-[[nodiscard]] double PlaneResidual(
-    const shared::SafeProjection& projection,
-    const shared::GridCell cell) noexcept {
+[[nodiscard]] double PlaneResidual(const shared::SafeProjection &projection,
+                                   const shared::GridCell cell) noexcept {
   if (projection.source_map() == nullptr) {
     return std::numeric_limits<double>::infinity();
   }
-  const shared::MapSnapshot& map = *projection.source_map();
+  const shared::MapSnapshot &map = *projection.source_map();
   const double center_elevation = Elevation(map, cell);
   const Vec3 center = map.CellCenter(cell);
   const double gradient_x = AxisGradient(map, cell, 1, 0);
@@ -186,26 +184,25 @@ struct CellRectangle final {
       if (!map.InBounds(neighbor)) {
         continue;
       }
-      if (!projection.Known(neighbor) ||
-          !projection.HardFeasible(neighbor)) {
+      if (!projection.Known(neighbor) || !projection.HardFeasible(neighbor)) {
         return std::numeric_limits<double>::infinity();
       }
       const Vec3 point = map.CellCenter(neighbor);
       const double predicted = center_elevation +
-          gradient_x * (point.x - center.x) +
-          gradient_y * (point.y - center.y);
-      residual = std::max(
-          residual, std::abs(Elevation(map, neighbor) - predicted));
+                               gradient_x * (point.x - center.x) +
+                               gradient_y * (point.y - center.y);
+      residual =
+          std::max(residual, std::abs(Elevation(map, neighbor) - predicted));
     }
   }
   return residual;
 }
 
-[[nodiscard]] bool CellRange(
-    const shared::MapSnapshot& map, const Vec3 center,
-    const HopperCapability& capability,
-    std::int32_t& minimum_x, std::int32_t& maximum_x,
-    std::int32_t& minimum_y, std::int32_t& maximum_y) noexcept {
+[[nodiscard]] bool CellRange(const shared::MapSnapshot &map, const Vec3 center,
+                             const HopperCapability &capability,
+                             std::int32_t &minimum_x, std::int32_t &maximum_x,
+                             std::int32_t &minimum_y,
+                             std::int32_t &maximum_y) noexcept {
   const double lateral = capability.minimum_lateral_clearance_m;
   const double min_x_m = center.x - capability.body_half_extent_m.x - lateral;
   const double max_x_m = center.x + capability.body_half_extent_m.x + lateral;
@@ -219,10 +216,9 @@ struct CellRectangle final {
   const long long high_x = index(max_x_m, map.origin_m().x);
   const long long low_y = index(min_y_m, map.origin_m().y);
   const long long high_y = index(max_y_m, map.origin_m().y);
-  if (low_x < 0 || low_y < 0 ||
-      high_x >= static_cast<long long>(map.width()) ||
-      high_y >= static_cast<long long>(map.height()) ||
-      low_x > high_x || low_y > high_y) {
+  if (low_x < 0 || low_y < 0 || high_x >= static_cast<long long>(map.width()) ||
+      high_y >= static_cast<long long>(map.height()) || low_x > high_x ||
+      low_y > high_y) {
     return false;
   }
   minimum_x = static_cast<std::int32_t>(low_x);
@@ -232,24 +228,22 @@ struct CellRectangle final {
   return true;
 }
 
-[[nodiscard]] CellCertification CertifyCell(
-    const shared::SafeProjection& projection,
-    const shared::GridCell cell,
-    const HopperCapability& capability,
-    const MapSafetyConfig& map_safety) {
+[[nodiscard]] CellCertification
+CertifyCell(const shared::SafeProjection &projection,
+            const shared::GridCell cell, const HopperCapability &capability,
+            const MapSafetyConfig &map_safety) {
   CellCertification result;
   if (projection.source_map() == nullptr || !projection.InBounds(cell)) {
     return result;
   }
-  const shared::MapSnapshot& map = *projection.source_map();
+  const shared::MapSnapshot &map = *projection.source_map();
   const Vec3 center = map.CellCenter(cell);
   std::int32_t minimum_x = 0;
   std::int32_t maximum_x = -1;
   std::int32_t minimum_y = 0;
   std::int32_t maximum_y = -1;
-  if (!CellRange(
-          map, center, capability, minimum_x, maximum_x,
-          minimum_y, maximum_y)) {
+  if (!CellRange(map, center, capability, minimum_x, maximum_x, minimum_y,
+                 maximum_y)) {
     return result;
   }
 
@@ -271,43 +265,41 @@ struct CellRectangle final {
           result.roughness_m,
           static_cast<double>(projection.RoughnessMeters(footprint_cell)));
       result.plane_residual_m = std::max(
-          result.plane_residual_m,
-          PlaneResidual(projection, footprint_cell));
+          result.plane_residual_m, PlaneResidual(projection, footprint_cell));
       result.clearance_m = std::min(
           result.clearance_m,
           static_cast<double>(projection.ClearanceMeters(footprint_cell)));
     }
   }
 
-  const double required_center_clearance = std::max(
-      capability.minimum_landing_clearance_m,
-      std::hypot(
-          capability.body_half_extent_m.x,
-          capability.body_half_extent_m.y) +
-          capability.minimum_lateral_clearance_m);
+  const double required_center_clearance =
+      std::max(capability.minimum_landing_clearance_m,
+               std::hypot(capability.body_half_extent_m.x,
+                          capability.body_half_extent_m.y) +
+                   capability.minimum_lateral_clearance_m);
   const double center_clearance =
       static_cast<double>(projection.ClearanceMeters(cell));
-  const double effective_slope = std::min(
-      capability.maximum_landing_slope_rad,
-      std::min(map_safety.project_maximum_slope_rad, projection.maximum_slope_rad()));
+  const double effective_slope =
+      std::min(capability.maximum_landing_slope_rad,
+               std::min(map_safety.project_maximum_slope_rad,
+                        projection.maximum_slope_rad()));
   result.safe = std::isfinite(result.slope_rad) &&
-      std::isfinite(result.roughness_m) &&
-      std::isfinite(result.plane_residual_m) &&
-      std::isfinite(center_clearance) &&
-      result.slope_rad <= effective_slope + kTolerance &&
-      result.roughness_m <=
-          capability.maximum_landing_roughness_m + kTolerance &&
-      result.plane_residual_m <=
-          capability.maximum_plane_residual_m + kTolerance &&
-      center_clearance + kTolerance >= required_center_clearance;
+                std::isfinite(result.roughness_m) &&
+                std::isfinite(result.plane_residual_m) &&
+                std::isfinite(center_clearance) &&
+                result.slope_rad <= effective_slope + kTolerance &&
+                result.roughness_m <=
+                    capability.maximum_landing_roughness_m + kTolerance &&
+                result.plane_residual_m <=
+                    capability.maximum_plane_residual_m + kTolerance &&
+                center_clearance + kTolerance >= required_center_clearance;
   result.clearance_m = std::min(result.clearance_m, center_clearance);
   return result;
 }
 
-[[nodiscard]] bool RectangleSafe(
-    const shared::MapSnapshot& map,
-    const std::vector<std::uint8_t>& safe_mask,
-    const CellRectangle rectangle) noexcept {
+[[nodiscard]] bool RectangleSafe(const shared::MapSnapshot &map,
+                                 const std::vector<std::uint8_t> &safe_mask,
+                                 const CellRectangle rectangle) noexcept {
   for (std::int32_t y = rectangle.minimum_y; y <= rectangle.maximum_y; ++y) {
     for (std::int32_t x = rectangle.minimum_x; x <= rectangle.maximum_x; ++x) {
       const shared::GridCell cell{.x = x, .y = y};
@@ -319,13 +311,10 @@ struct CellRectangle final {
   return true;
 }
 
-[[nodiscard]] LandingRegionResult Certify(
-    const shared::SafeProjection& projection,
-    const GoalRegion& goal,
-    const HopperCapability& capability,
-    const MapSafetyConfig& map_safety,
-    const std::stop_token stop_token,
-    const bool holding_region) {
+[[nodiscard]] LandingRegionResult
+Certify(const shared::SafeProjection &projection, const GoalRegion &goal,
+        const HopperCapability &capability, const MapSafetyConfig &map_safety,
+        const std::stop_token stop_token, const bool holding_region) {
   if (stop_token.stop_requested()) {
     return LandingRegionResult{
         .status = LandingRegionStatus::kCanceled,
@@ -343,17 +332,16 @@ struct CellRectangle final {
         .reason_code = "HOPPER_LANDING_GOAL_INVALID",
     };
   }
-  const shared::MapSnapshot& map = *projection.source_map();
-  const auto containing = map.PositionToCell(
-      Vec2{preferred.point_m.x, preferred.point_m.y});
+  const shared::MapSnapshot &map = *projection.source_map();
+  const auto containing =
+      map.PositionToCell(Vec2{preferred.point_m.x, preferred.point_m.y});
   if (!containing.has_value()) {
     return LandingRegionResult{
         .status = LandingRegionStatus::kInfeasible,
         .region = std::nullopt,
         .inspected_cells = 0U,
-        .reason_code = holding_region
-            ? "HOPPER_START_NOT_SAFE"
-            : "HOPPER_GOAL_INFEASIBLE",
+        .reason_code =
+            holding_region ? "HOPPER_START_NOT_SAFE" : "HOPPER_GOAL_INFEASIBLE",
     };
   }
 
@@ -375,20 +363,19 @@ struct CellRectangle final {
           .x = static_cast<std::int32_t>(x),
           .y = static_cast<std::int32_t>(y),
       };
-      const bool candidate = holding_region
-          ? true
-          : (GoalContainsCellCenter(goal, map.CellCenter(cell)) ||
-             cell == *containing);
-      if (!candidate) {
-        continue;
-      }
+      const bool seed_candidate =
+          holding_region ? true
+                         : (GoalContainsPoint(goal, map.CellCenter(cell)) ||
+                            cell == *containing);
       ++inspected;
       const std::size_t index = map.Index(cell);
       certifications[index] =
           CertifyCell(projection, cell, capability, map_safety);
       if (certifications[index].safe) {
         safe_mask[index] = 1U;
-        safe_cells.push_back(cell);
+        if (seed_candidate) {
+          safe_cells.push_back(cell);
+        }
       }
     }
   }
@@ -397,25 +384,21 @@ struct CellRectangle final {
         .status = LandingRegionStatus::kInfeasible,
         .region = std::nullopt,
         .inspected_cells = inspected,
-        .reason_code = holding_region
-            ? "HOPPER_START_NOT_SAFE"
-            : "HOPPER_GOAL_INFEASIBLE",
+        .reason_code =
+            holding_region ? "HOPPER_START_NOT_SAFE" : "HOPPER_GOAL_INFEASIBLE",
     };
   }
-  std::ranges::sort(
-      safe_cells,
-      [&](const shared::GridCell lhs, const shared::GridCell rhs) {
-        const Vec3 left = map.CellCenter(lhs);
-        const Vec3 right = map.CellCenter(rhs);
-        const double left_distance = std::hypot(
-            left.x - preferred.point_m.x,
-            left.y - preferred.point_m.y);
-        const double right_distance = std::hypot(
-            right.x - preferred.point_m.x,
-            right.y - preferred.point_m.y);
-        return std::tuple{left_distance, lhs.y, lhs.x} <
-            std::tuple{right_distance, rhs.y, rhs.x};
-      });
+  std::ranges::sort(safe_cells, [&](const shared::GridCell lhs,
+                                    const shared::GridCell rhs) {
+    const Vec3 left = map.CellCenter(lhs);
+    const Vec3 right = map.CellCenter(rhs);
+    const double left_distance =
+        std::hypot(left.x - preferred.point_m.x, left.y - preferred.point_m.y);
+    const double right_distance = std::hypot(right.x - preferred.point_m.x,
+                                             right.y - preferred.point_m.y);
+    return std::tuple{left_distance, lhs.y, lhs.x} <
+           std::tuple{right_distance, rhs.y, rhs.x};
+  });
   const shared::GridCell seed = safe_cells.front();
   CellRectangle rectangle{
       .minimum_x = seed.x,
@@ -456,8 +439,8 @@ struct CellRectangle final {
         .region = std::nullopt,
         .inspected_cells = inspected,
         .reason_code = holding_region
-            ? "HOPPER_START_REGION_AREA_INSUFFICIENT"
-            : "HOPPER_LANDING_REGION_AREA_INSUFFICIENT",
+                           ? "HOPPER_START_REGION_AREA_INSUFFICIENT"
+                           : "HOPPER_LANDING_REGION_AREA_INSUFFICIENT",
     };
   }
 
@@ -467,7 +450,7 @@ struct CellRectangle final {
   double minimum_clearance = std::numeric_limits<double>::infinity();
   for (std::int32_t y = rectangle.minimum_y; y <= rectangle.maximum_y; ++y) {
     for (std::int32_t x = rectangle.minimum_x; x <= rectangle.maximum_x; ++x) {
-      const CellCertification& certification =
+      const CellCertification &certification =
           certifications[map.Index(shared::GridCell{.x = x, .y = y})];
       maximum_slope = std::max(maximum_slope, certification.slope_rad);
       maximum_roughness =
@@ -493,74 +476,83 @@ struct CellRectangle final {
   const Vec3 seed_center = map.CellCenter(seed);
   const auto plane_height = [&](const double x, const double y) {
     return seed_center.z + gradient_x * (x - seed_center.x) +
-        gradient_y * (y - seed_center.y);
+           gradient_y * (y - seed_center.y);
   };
-  const double x0 = map.origin_m().x +
-      static_cast<double>(rectangle.minimum_x) * resolution;
+  const double x0 =
+      map.origin_m().x + static_cast<double>(rectangle.minimum_x) * resolution;
   const double x1 = map.origin_m().x +
-      static_cast<double>(rectangle.maximum_x + 1) * resolution;
-  const double y0 = map.origin_m().y +
-      static_cast<double>(rectangle.minimum_y) * resolution;
+                    static_cast<double>(rectangle.maximum_x + 1) * resolution;
+  const double y0 =
+      map.origin_m().y + static_cast<double>(rectangle.minimum_y) * resolution;
   const double y1 = map.origin_m().y +
-      static_cast<double>(rectangle.maximum_y + 1) * resolution;
+                    static_cast<double>(rectangle.maximum_y + 1) * resolution;
   const double aim_x = std::clamp(preferred.point_m.x, x0, x1);
   const double aim_y = std::clamp(preferred.point_m.y, y0, y1);
+  const Vec3 aim_position{
+      aim_x,
+      aim_y,
+      plane_height(aim_x, aim_y),
+  };
+  if (!holding_region && !GoalContainsPoint(goal, aim_position)) {
+    return LandingRegionResult{
+        .status = LandingRegionStatus::kInfeasible,
+        .region = std::nullopt,
+        .inspected_cells = inspected,
+        .reason_code = "HOPPER_GOAL_INFEASIBLE",
+    };
+  }
 
   return LandingRegionResult{
       .status = LandingRegionStatus::kCertified,
-      .region = CertifiedLandingRegion{
-          .seed_cell = seed,
-          .aim_position_on_surface_m =
-              Vec3{aim_x, aim_y, plane_height(aim_x, aim_y)},
-          .plane_normal = normal,
-          .boundary_m =
-              {
-                  Vec3{x0, y0, plane_height(x0, y0)},
-                  Vec3{x1, y0, plane_height(x1, y0)},
-                  Vec3{x1, y1, plane_height(x1, y1)},
-                  Vec3{x0, y1, plane_height(x0, y1)},
-              },
-          .area_m2 = area,
-          .maximum_slope_rad = maximum_slope,
-          .maximum_roughness_m = maximum_roughness,
-          .maximum_plane_residual_m = maximum_residual,
-          .minimum_clearance_m = minimum_clearance,
-      },
+      .region =
+          CertifiedLandingRegion{
+              .seed_cell = seed,
+              .aim_position_on_surface_m = aim_position,
+              .plane_normal = normal,
+              .boundary_m =
+                  {
+                      Vec3{x0, y0, plane_height(x0, y0)},
+                      Vec3{x1, y0, plane_height(x1, y0)},
+                      Vec3{x1, y1, plane_height(x1, y1)},
+                      Vec3{x0, y1, plane_height(x0, y1)},
+                  },
+              .area_m2 = area,
+              .maximum_slope_rad = maximum_slope,
+              .maximum_roughness_m = maximum_roughness,
+              .maximum_plane_residual_m = maximum_residual,
+              .minimum_clearance_m = minimum_clearance,
+          },
       .inspected_cells = inspected,
       .reason_code = {},
   };
 }
 
-}  // namespace
+} // namespace
 
-LandingRegionResult CertifyLandingRegion(
-    const shared::SafeProjection& projection,
-    const GoalRegion& goal,
-    const HopperCapability& capability,
-    const MapSafetyConfig& map_safety,
-    const std::stop_token stop_token) {
-  return Certify(
-      projection, goal, capability, map_safety, stop_token, false);
+LandingRegionResult
+CertifyLandingRegion(const shared::SafeProjection &projection,
+                     const GoalRegion &goal, const HopperCapability &capability,
+                     const MapSafetyConfig &map_safety,
+                     const std::stop_token stop_token) {
+  return Certify(projection, goal, capability, map_safety, stop_token, false);
 }
 
 LandingRegionResult CertifyHoldingRegion(
-    const shared::SafeProjection& projection,
-    const Vec3 holding_position_m,
-    const HopperCapability& capability,
-    const MapSafetyConfig& map_safety,
+    const shared::SafeProjection &projection, const Vec3 holding_position_m,
+    const HopperCapability &capability, const MapSafetyConfig &map_safety,
     const std::stop_token stop_token) {
-  return Certify(
-      projection,
-      GoalRegion{
-          .goal_id = "hopper-holding-region",
-          .target = PointGoal{
-              .position_m = holding_position_m,
-              .tolerance_m = 0.0,
-          },
-          .yaw_rad = std::nullopt,
-          .yaw_tolerance_rad = 0.0,
-      },
-      capability, map_safety, stop_token, true);
+  return Certify(projection,
+                 GoalRegion{
+                     .goal_id = "hopper-holding-region",
+                     .target =
+                         PointGoal{
+                             .position_m = holding_position_m,
+                             .tolerance_m = 0.0,
+                         },
+                     .yaw_rad = std::nullopt,
+                     .yaw_tolerance_rad = 0.0,
+                 },
+                 capability, map_safety, stop_token, true);
 }
 
-}  // namespace lunar::planning::hopper
+} // namespace lunar::planning::hopper

@@ -72,6 +72,23 @@ namespace {
   return input;
 }
 
+[[nodiscard]] PlannerInput ReachableFrontierInput() {
+  PlannerInput input = ThreeHopInput();
+  input.request_id = "reachable-frontier-route";
+  input.world.global_map = test::MakeFlatMap("map", 40U, 20U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 40U, 20U, 0.5);
+  input.current_state = HopperState{
+      .pose = Pose3{.position_m = {1.25, 7.25, 0.5}},
+  };
+  input.goal_map.target = PointGoal{
+      .position_m = {17.25, 7.25, 0.0},
+      .tolerance_m = 0.1,
+  };
+  input.config.hopper.maximum_landing_regions = 64U;
+  input.config.hopper.maximum_graph_nodes = 128U;
+  return input;
+}
+
 void SetByte(GridMap &map, const std::string &layer, const std::size_t x,
              const std::size_t y, const std::uint8_t value) {
   std::get<std::vector<std::uint8_t>>(map.layers.at(layer).values)
@@ -114,7 +131,12 @@ TEST(HopperRoutePlanner,
 
   const HopperRoutePlanResult result = PlanHopperGlobalRoute(input);
 
-  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_TRUE(result.ok()) << result.reason_code
+                           << " nodes=" << result.graph_nodes
+                           << " edges=" << result.graph_edges
+                           << " expanded=" << result.expanded_nodes
+                           << " evaluated=" << result.evaluated_edge_pairs
+                           << " truncated=" << result.graph_truncated;
   ASSERT_TRUE(result.route.has_value());
   EXPECT_EQ(result.reason_code, "HOPPER_GLOBAL_ROUTE_AVAILABLE");
   EXPECT_EQ(result.route_hops, 1U);
@@ -122,6 +144,22 @@ TEST(HopperRoutePlanner,
             input.world.global_map.CellCount() *
                 (2U * sizeof(std::uint8_t) + sizeof(double)));
   EXPECT_GT(result.landing_field_elapsed.count(), 0);
+}
+
+TEST(HopperRoutePlanner,
+     DiscoversLandingNodesFromTheReachableFrontierInsteadOfMapPrefix) {
+  const PlannerInput input = ReachableFrontierInput();
+
+  const HopperRoutePlanResult result = PlanHopperGlobalRoute(input);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code
+                           << " nodes=" << result.graph_nodes
+                           << " edges=" << result.graph_edges
+                           << " expanded=" << result.expanded_nodes
+                           << " evaluated=" << result.evaluated_edge_pairs
+                           << " truncated=" << result.graph_truncated;
+  EXPECT_GT(result.route_hops, 1U);
+  EXPECT_LE(result.graph_nodes, input.config.hopper.maximum_graph_nodes);
 }
 
 TEST(HopperRoutePlanner, DistinguishesACompleteBrokenChainFromResourceLimits) {
@@ -146,8 +184,8 @@ TEST(HopperRoutePlanner, DistinguishesACompleteBrokenChainFromResourceLimits) {
   PlannerInput degree = ThreeHopInput();
   degree.config.hopper.maximum_graph_out_degree = 1U;
   const HopperRoutePlanResult degree_limit = PlanHopperGlobalRoute(degree);
-  EXPECT_EQ(degree_limit.outcome, PlanningOutcome::kResourceExhausted);
-  EXPECT_EQ(degree_limit.reason_code, "HOPPER_GLOBAL_ROUTE_RESOURCE_LIMIT");
+  ASSERT_TRUE(degree_limit.ok()) << degree_limit.reason_code;
+  EXPECT_EQ(degree_limit.reason_code, "HOPPER_GLOBAL_ROUTE_AVAILABLE");
   EXPECT_TRUE(degree_limit.graph_truncated);
 }
 
@@ -194,7 +232,7 @@ TEST(HopperRoutePlanner, HonorsCancellationBeforeBuildingTheGraph) {
   EXPECT_EQ(result.graph_nodes, 0U);
 }
 
-TEST(HopperRoutePlanner, GeneratesOutgoingEdgesOnlyForExpandedNodes) {
+TEST(HopperRoutePlanner, BoundsEdgeEvaluationToExpandedReachableFrontier) {
   PlannerInput input = ThreeHopInput();
   input.goal_map.target = PointGoal{
       .position_m = {3.75, 0.25, 0.0},
@@ -204,11 +242,11 @@ TEST(HopperRoutePlanner, GeneratesOutgoingEdgesOnlyForExpandedNodes) {
   const HopperRoutePlanResult result = PlanHopperGlobalRoute(input);
 
   ASSERT_TRUE(result.ok()) << result.reason_code;
-  EXPECT_EQ(result.evaluated_edge_pairs,
-            result.expanded_nodes * (result.graph_nodes - 1U));
+  EXPECT_GT(result.evaluated_edge_pairs, 0U);
+  EXPECT_LE(result.evaluated_edge_pairs,
+            result.expanded_nodes *
+                (input.config.hopper.maximum_landing_regions + 1U));
   EXPECT_LT(result.expanded_nodes, result.graph_nodes);
-  EXPECT_LT(result.evaluated_edge_pairs,
-            result.graph_nodes * (result.graph_nodes - 1U));
 }
 
 TEST(HopperRoutePlanner, PublishesTheFullPreviewButAuthorizesOnlyOneHop) {

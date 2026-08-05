@@ -36,6 +36,8 @@ constexpr std::size_t kReachSamples = 512U;
 // against the complete L0 flight tube before it can be authorized.
 constexpr std::size_t kEdgeTimeSamples = 16U;
 constexpr std::size_t kTubeSamples = 8U;
+constexpr std::size_t kRadialCandidateBands = 8U;
+constexpr double kFrontierHeuristicWeight = 2.0;
 
 struct LandingNode final {
   shared::GridCell cell;
@@ -54,6 +56,19 @@ struct OutgoingEdgesResult final {
   std::size_t evaluated_pairs{};
   bool truncated{};
   bool canceled{};
+};
+
+struct LandingCellCandidate final {
+  shared::GridCell cell;
+  Vec3 surface_position_map;
+  double source_distance_m{};
+  double goal_distance_m{};
+};
+
+struct PendingEdge final {
+  std::optional<std::size_t> existing_target;
+  LandingCellCandidate candidate;
+  NominalEdge edge;
 };
 
 [[nodiscard]] HopperRoutePlanResult
@@ -169,6 +184,32 @@ ValidReachCapability(const HopperCapability &capability) noexcept {
   const auto *region = std::get_if<PlanarRegionGoal>(&goal.target);
   return region != nullptr && region->boundary_m.size() >= 3U &&
          PointInPolygon(Vec2{center.x, center.y}, region->boundary_m);
+}
+
+[[nodiscard]] std::optional<Vec2>
+GoalAnchorMap(const GoalRegion &goal) noexcept {
+  if (const auto *point = std::get_if<PointGoal>(&goal.target)) {
+    if (!Finite(point->position_m)) {
+      return std::nullopt;
+    }
+    return Vec2{point->position_m.x, point->position_m.y};
+  }
+  const auto *region = std::get_if<PlanarRegionGoal>(&goal.target);
+  if (region == nullptr || region->boundary_m.size() < 3U) {
+    return std::nullopt;
+  }
+  Vec2 anchor{};
+  for (const Vec3 point : region->boundary_m) {
+    if (!Finite(point)) {
+      return std::nullopt;
+    }
+    anchor.x += point.x;
+    anchor.y += point.y;
+  }
+  const double count = static_cast<double>(region->boundary_m.size());
+  anchor.x /= count;
+  anchor.y /= count;
+  return anchor;
 }
 
 [[nodiscard]] bool KnownAt(const shared::MapSnapshot &map,
@@ -327,45 +368,210 @@ BuildNominalEdge(const LandingNode &source, const LandingNode &target,
   return selected;
 }
 
-[[nodiscard]] OutgoingEdgesResult BuildOutgoingEdges(
-    const std::size_t source, const std::vector<LandingNode> &nodes,
+[[nodiscard]] OutgoingEdgesResult BuildReachableOutgoingEdges(
+    const std::size_t source, std::vector<LandingNode> &nodes,
+    std::set<shared::GridCell> &inserted, const std::size_t node_capacity,
+    const Vec2 goal_anchor_map, const LandingSupportField &landing_field,
     const shared::MapSnapshot &map, const HopperCapability &capability,
     const PlannerConfig &config, const double maximum_reach_m,
     const std::stop_token stop_token) {
   OutgoingEdgesResult result;
-  for (std::size_t target = 0U; target < nodes.size(); ++target) {
+  const LandingNode source_node = nodes[source];
+  std::vector<PendingEdge> pending;
+
+  const std::size_t existing_count = nodes.size();
+  for (std::size_t target = 0U; target < existing_count; ++target) {
     if (stop_token.stop_requested()) {
       result.canceled = true;
       return result;
     }
-    if (source == target) {
+    if (source == target || !nodes[target].goal) {
       continue;
     }
     ++result.evaluated_pairs;
     const double horizontal_distance =
         std::hypot(nodes[target].surface_position_map.x -
-                       nodes[source].surface_position_map.x,
+                       source_node.surface_position_map.x,
                    nodes[target].surface_position_map.y -
-                       nodes[source].surface_position_map.y);
+                       source_node.surface_position_map.y);
     if (!std::isfinite(horizontal_distance) ||
         horizontal_distance > maximum_reach_m + kTolerance) {
       continue;
     }
     auto edge =
-        BuildNominalEdge(nodes[source], nodes[target], map, capability, config);
+        BuildNominalEdge(source_node, nodes[target], map, capability, config);
     if (!edge.has_value()) {
       continue;
     }
-    edge->target = target;
-    result.edges.push_back(*edge);
+    pending.push_back(PendingEdge{
+        .existing_target = target,
+        .candidate =
+            LandingCellCandidate{
+                .cell = nodes[target].cell,
+                .surface_position_map = nodes[target].surface_position_map,
+                .source_distance_m = horizontal_distance,
+                .goal_distance_m = std::hypot(
+                    nodes[target].surface_position_map.x - goal_anchor_map.x,
+                    nodes[target].surface_position_map.y - goal_anchor_map.y),
+            },
+        .edge = *edge,
+    });
   }
-  std::ranges::sort(
-      result.edges, [](const NominalEdge &lhs, const NominalEdge &rhs) {
-        return std::tie(lhs.cost, lhs.target) < std::tie(rhs.cost, rhs.target);
+
+  const auto bounded_index = [](const double coordinate, const double origin,
+                                const double resolution,
+                                const std::size_t limit) {
+    const long long raw =
+        static_cast<long long>(std::floor((coordinate - origin) / resolution));
+    return static_cast<std::int32_t>(
+        std::clamp(raw, 0LL, static_cast<long long>(limit) - 1LL));
+  };
+  const std::int32_t minimum_x =
+      bounded_index(source_node.surface_position_map.x - maximum_reach_m,
+                    map.origin_m().x, map.resolution_m(), map.width());
+  const std::int32_t maximum_x =
+      bounded_index(source_node.surface_position_map.x + maximum_reach_m,
+                    map.origin_m().x, map.resolution_m(), map.width());
+  const std::int32_t minimum_y =
+      bounded_index(source_node.surface_position_map.y - maximum_reach_m,
+                    map.origin_m().y, map.resolution_m(), map.height());
+  const std::int32_t maximum_y =
+      bounded_index(source_node.surface_position_map.y + maximum_reach_m,
+                    map.origin_m().y, map.resolution_m(), map.height());
+
+  std::vector<LandingCellCandidate> candidates;
+  for (std::int32_t y = minimum_y; y <= maximum_y; ++y) {
+    if (stop_token.stop_requested()) {
+      result.canceled = true;
+      return result;
+    }
+    for (std::int32_t x = minimum_x; x <= maximum_x; ++x) {
+      const shared::GridCell cell{.x = x, .y = y};
+      if (inserted.contains(cell) || !landing_field.CenterSafe(cell)) {
+        continue;
+      }
+      const Vec3 position = map.CellCenter(cell);
+      const double source_distance =
+          std::hypot(position.x - source_node.surface_position_map.x,
+                     position.y - source_node.surface_position_map.y);
+      if (!std::isfinite(source_distance) || source_distance <= kTolerance ||
+          source_distance > maximum_reach_m + kTolerance) {
+        continue;
+      }
+      candidates.push_back(LandingCellCandidate{
+          .cell = cell,
+          .surface_position_map = position,
+          .source_distance_m = source_distance,
+          .goal_distance_m = std::hypot(position.x - goal_anchor_map.x,
+                                        position.y - goal_anchor_map.y),
       });
-  if (result.edges.size() > config.hopper.maximum_graph_out_degree) {
+    }
+  }
+  const std::size_t candidate_budget = config.hopper.maximum_landing_regions;
+  const std::size_t radial_band_count =
+      std::min(kRadialCandidateBands, candidate_budget);
+  std::vector<std::vector<LandingCellCandidate>> radial_bands(
+      radial_band_count);
+  for (LandingCellCandidate &candidate : candidates) {
+    const double normalized_radius =
+        std::clamp(candidate.source_distance_m / maximum_reach_m, 0.0, 1.0);
+    const std::size_t band = std::min(
+        radial_band_count - 1U,
+        static_cast<std::size_t>(normalized_radius * radial_band_count));
+    radial_bands[band].push_back(std::move(candidate));
+  }
+  for (auto &band : radial_bands) {
+    std::ranges::sort(band, [](const LandingCellCandidate &lhs,
+                               const LandingCellCandidate &rhs) {
+      return std::tuple{lhs.goal_distance_m, -lhs.source_distance_m, lhs.cell.y,
+                        lhs.cell.x} < std::tuple{rhs.goal_distance_m,
+                                                 -rhs.source_distance_m,
+                                                 rhs.cell.y, rhs.cell.x};
+    });
+  }
+  if (candidates.size() > candidate_budget) {
     result.truncated = true;
-    result.edges.resize(config.hopper.maximum_graph_out_degree);
+  }
+  candidates.clear();
+  candidates.reserve(candidate_budget);
+  std::size_t radial_index = 0U;
+  while (candidates.size() < candidate_budget) {
+    bool selected_any = false;
+    for (std::size_t reverse_band = radial_band_count;
+         reverse_band > 0U && candidates.size() < candidate_budget;
+         --reverse_band) {
+      auto &band = radial_bands[reverse_band - 1U];
+      if (radial_index >= band.size()) {
+        continue;
+      }
+      candidates.push_back(std::move(band[radial_index]));
+      selected_any = true;
+    }
+    if (!selected_any) {
+      break;
+    }
+    ++radial_index;
+  }
+  for (const LandingCellCandidate &candidate : candidates) {
+    if (stop_token.stop_requested()) {
+      result.canceled = true;
+      return result;
+    }
+    ++result.evaluated_pairs;
+    const LandingNode target{
+        .cell = candidate.cell,
+        .surface_position_map = candidate.surface_position_map,
+        .goal = false,
+    };
+    auto edge = BuildNominalEdge(source_node, target, map, capability, config);
+    if (!edge.has_value()) {
+      continue;
+    }
+    pending.push_back(PendingEdge{
+        .existing_target = std::nullopt,
+        .candidate = candidate,
+        .edge = *edge,
+    });
+  }
+
+  std::ranges::sort(pending, [&](const PendingEdge &lhs,
+                                 const PendingEdge &rhs) {
+    const double left_rank = lhs.edge.cost + kFrontierHeuristicWeight *
+                                                 lhs.candidate.goal_distance_m /
+                                                 maximum_reach_m;
+    const double right_rank =
+        rhs.edge.cost + kFrontierHeuristicWeight *
+                            rhs.candidate.goal_distance_m / maximum_reach_m;
+    return std::tuple{!lhs.existing_target.has_value(), left_rank,
+                      lhs.candidate.goal_distance_m, lhs.candidate.cell.y,
+                      lhs.candidate.cell.x} <
+           std::tuple{!rhs.existing_target.has_value(), right_rank,
+                      rhs.candidate.goal_distance_m, rhs.candidate.cell.y,
+                      rhs.candidate.cell.x};
+  });
+  if (pending.size() > config.hopper.maximum_graph_out_degree) {
+    result.truncated = true;
+    pending.resize(config.hopper.maximum_graph_out_degree);
+  }
+  result.edges.reserve(pending.size());
+  for (PendingEdge &selected : pending) {
+    if (selected.existing_target.has_value()) {
+      selected.edge.target = *selected.existing_target;
+      result.edges.push_back(selected.edge);
+      continue;
+    }
+    if (nodes.size() >= node_capacity) {
+      result.truncated = true;
+      continue;
+    }
+    selected.edge.target = nodes.size();
+    nodes.push_back(LandingNode{
+        .cell = selected.candidate.cell,
+        .surface_position_map = selected.candidate.surface_position_map,
+        .goal = false,
+    });
+    inserted.insert(selected.candidate.cell);
+    result.edges.push_back(selected.edge);
   }
   return result;
 }
@@ -524,13 +730,14 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
                    "HOPPER_GLOBAL_GOAL_INFEASIBLE", started, reach,
                    levels.global_level);
   }
+  const std::optional<Vec2> goal_anchor = GoalAnchorMap(input.goal_map);
+  if (!goal_anchor.has_value()) {
+    return Failure(PlanningOutcome::kGoalInfeasible,
+                   "HOPPER_GLOBAL_GOAL_INFEASIBLE", started, reach,
+                   levels.global_level);
+  }
 
-  const std::size_t node_capacity =
-      std::min(input.config.hopper.maximum_graph_nodes,
-               input.config.hopper.maximum_landing_regions >=
-                       input.config.hopper.maximum_graph_nodes
-                   ? input.config.hopper.maximum_graph_nodes
-                   : input.config.hopper.maximum_landing_regions + 1U);
+  const std::size_t node_capacity = input.config.hopper.maximum_graph_nodes;
   std::vector<LandingNode> nodes;
   nodes.reserve(node_capacity);
   std::set<shared::GridCell> inserted;
@@ -545,7 +752,6 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
       .goal = false,
   });
   inserted.insert(*start_cell);
-  bool node_truncated = false;
   for (const shared::GridCell cell : goal_cells) {
     if (inserted.contains(cell)) {
       continue;
@@ -562,44 +768,30 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
     });
     inserted.insert(cell);
   }
-  for (std::size_t index = 0U; index < snapshot.snapshot->cell_count();
-       ++index) {
-    const shared::GridCell cell{
-        .x = static_cast<std::int32_t>(index % snapshot.snapshot->width()),
-        .y = static_cast<std::int32_t>(index / snapshot.snapshot->width()),
-    };
-    if (inserted.contains(cell) || !landing_field.field->CenterSafe(cell)) {
-      continue;
-    }
-    if (nodes.size() >= node_capacity) {
-      node_truncated = true;
-      break;
-    }
-    nodes.push_back(LandingNode{
-        .cell = cell,
-        .surface_position_map = snapshot.snapshot->CellCenter(cell),
-        .goal = false,
-    });
-    inserted.insert(cell);
-  }
 
-  std::vector<std::optional<std::vector<NominalEdge>>> adjacency(nodes.size());
+  std::vector<std::optional<std::vector<NominalEdge>>> adjacency(node_capacity);
   std::size_t graph_edge_count = 0U;
   std::size_t evaluated_edge_pairs = 0U;
-  bool graph_truncated = node_truncated;
+  bool graph_truncated = false;
 
   const double infinity = std::numeric_limits<double>::infinity();
-  std::vector<double> distances(nodes.size(), infinity);
-  std::vector<std::size_t> hops(nodes.size(),
+  std::vector<double> distances(node_capacity, infinity);
+  std::vector<std::size_t> hops(node_capacity,
                                 std::numeric_limits<std::size_t>::max());
-  std::vector<std::optional<std::size_t>> parent(nodes.size());
-  using QueueEntry = std::tuple<double, std::size_t, std::size_t>;
+  std::vector<std::optional<std::size_t>> parent(node_capacity);
+  using QueueEntry =
+      std::tuple<double, double, double, std::size_t, std::size_t>;
   std::priority_queue<QueueEntry, std::vector<QueueEntry>,
                       std::greater<QueueEntry>>
       open;
   distances[0] = 0.0;
   hops[0] = 0U;
-  open.emplace(0.0, 0U, 0U);
+  const double start_heuristic =
+      std::hypot(nodes[0].surface_position_map.x - goal_anchor->x,
+                 nodes[0].surface_position_map.y - goal_anchor->y) /
+      reach;
+  open.emplace(kFrontierHeuristicWeight * start_heuristic, start_heuristic, 0.0,
+               0U, 0U);
   std::uint64_t expanded = 0U;
   std::size_t open_peak = 1U;
   std::optional<std::size_t> reached_goal;
@@ -609,8 +801,10 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
                      reach, levels.global_level, nodes.size(), graph_edge_count,
                      expanded, graph_truncated, evaluated_edge_pairs);
     }
-    const auto [cost, hop_count, node] = open.top();
+    const auto [estimated_total, heuristic, cost, hop_count, node] = open.top();
     open.pop();
+    static_cast<void>(estimated_total);
+    static_cast<void>(heuristic);
     if (cost > distances[node] + kTolerance || hop_count != hops[node]) {
       continue;
     }
@@ -627,9 +821,10 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
     }
     ++expanded;
     if (!adjacency[node].has_value()) {
-      OutgoingEdgesResult outgoing =
-          BuildOutgoingEdges(node, nodes, *snapshot.snapshot, *capability,
-                             input.config, reach, input.stop_token);
+      OutgoingEdgesResult outgoing = BuildReachableOutgoingEdges(
+          node, nodes, inserted, node_capacity, *goal_anchor,
+          *landing_field.field, *snapshot.snapshot, *capability, input.config,
+          reach, input.stop_token);
       evaluated_edge_pairs += outgoing.evaluated_pairs;
       if (outgoing.canceled) {
         return Failure(PlanningOutcome::kCanceled, "REQUEST_CANCELED", started,
@@ -654,7 +849,14 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
       distances[edge.target] = candidate_cost;
       hops[edge.target] = candidate_hops;
       parent[edge.target] = node;
-      open.emplace(candidate_cost, candidate_hops, edge.target);
+      const double target_heuristic =
+          std::hypot(nodes[edge.target].surface_position_map.x - goal_anchor->x,
+                     nodes[edge.target].surface_position_map.y -
+                         goal_anchor->y) /
+          reach;
+      open.emplace(candidate_cost + kFrontierHeuristicWeight * target_heuristic,
+                   target_heuristic, candidate_cost, candidate_hops,
+                   edge.target);
       open_peak = std::max(open_peak, open.size());
     }
   }
