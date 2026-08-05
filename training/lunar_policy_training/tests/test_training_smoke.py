@@ -6,14 +6,17 @@ import json
 import pathlib
 import subprocess
 import sys
+from dataclasses import dataclass
 from zipfile import ZIP_DEFLATED, ZipFile
 
+import lunar_planner_training_bridge as bridge_api
 import numpy as np
 import pytest
 import rasterio
 import torch
 from rasterio.io import MemoryFile
 from rasterio.transform import from_origin
+from shapely import from_wkb
 from lunar_planner_training_bridge import (
     ExecutionDirective,
     PlannerBridge,
@@ -52,7 +55,6 @@ from lunar_policy_training.environment.candidate_builder import (  # noqa: E402
 from lunar_policy_training.environment.macro_step import (  # noqa: E402
     ExecutionEvents,
     PlannerTransition,
-    PolicyAction,
 )
 from lunar_policy_training.environment.observation_builder import (  # noqa: E402
     LocalObservation,
@@ -65,6 +67,7 @@ from lunar_policy_training.environment.observation_builder import (  # noqa: E40
 from lunar_policy_training.polar_data.hazards import (  # noqa: E402
     GENERATOR_VERSION,
     generate_hazard_scene,
+    physical_obstacle_ratio,
 )
 from lunar_policy_training.polar_data.raster import (  # noqa: E402
     LOCAL_GEOMETRY,
@@ -85,7 +88,6 @@ from lunar_policy_training.policy.cross_attention import (  # noqa: E402
 from lunar_policy_training.policy.observation import PolicyBatch  # noqa: E402
 from lunar_policy_training.ppo.rollout import RolloutBatch  # noqa: E402
 from lunar_policy_training.ppo.trainer import PPOTrainer  # noqa: E402
-from lunar_policy_training.proxy_scenario import _ProxyEpisode  # noqa: E402
 from lunar_policy_training.reward import reward_weights_sha256  # noqa: E402
 
 
@@ -305,12 +307,35 @@ def _write_synthetic_sources(root: pathlib.Path) -> tuple[pathlib.Path, pathlib.
     return aggregate, split
 
 
-def _policy_batch_from_synthetic_window(
+@dataclass(frozen=True)
+class _SyntheticPolarInputs:
+    world: ObservedWorld
+    mission: MissionRaster
+    pose: Pose2
+    forbidden_ratio: np.ndarray
+
+
+def _sample_local(
+    canvas: MapCanvas,
+    pose: Pose2,
+    values: np.ndarray,
+) -> np.ndarray:
+    resolution = LOCAL_GEOMETRY.resolution_m
+    half = LOCAL_GEOMETRY.size_m / 2.0
+    left, _, _, top = canvas.bounds_m
+    x = pose.x_m - half + (np.arange(LOCAL_GEOMETRY.cells) + 0.5) * resolution
+    y = pose.y_m + half - (np.arange(LOCAL_GEOMETRY.cells) + 0.5) * resolution
+    columns = np.floor((x - left) / canvas.geometry.resolution_m).astype(np.intp)
+    rows = np.floor((top - y) / canvas.geometry.resolution_m).astype(np.intp)
+    assert rows.min() >= 0 and rows.max() < canvas.geometry.cells
+    assert columns.min() >= 0 and columns.max() < canvas.geometry.cells
+    return np.ascontiguousarray(np.asarray(values)[np.ix_(rows, columns)])
+
+
+def _synthetic_polar_inputs(
     dem_path: pathlib.Path,
     split_document: dict[str, object],
-    *,
-    capability_sha256: str,
-) -> tuple[PolicyBatch, object]:
+) -> _SyntheticPolarInputs:
     row = next(
         item
         for item in split_document["rows"]
@@ -322,30 +347,25 @@ def _policy_batch_from_synthetic_window(
         row["window_sha256"],
         17,
         canvas=canvas,
-        rock_count=1,
-        crater_count=1,
-        no_go_count=1,
+        rock_count=32,
+        crater_count=8,
+        no_go_count=8,
     )
     observed = loaded.observed_mask.copy()
     observed[:, 128:] = False
     elevation = loaded.elevation_m + hazards.crater_elevation_delta_m
     elevation[~np.isfinite(elevation)] = 0.0
     robot_x, robot_y = canvas.grid_center_world(128, 120)
+    pose = Pose2(robot_x, robot_y, elevation_m=float(elevation[128, 120]))
     local = LocalObservation(
         canvas_id=canvas.identity,
         bounds_m=(robot_x - 4.0, robot_y - 4.0, robot_x + 4.0, robot_y + 4.0),
-        elevation_m=np.full(
-            (LOCAL_GEOMETRY.cells, LOCAL_GEOMETRY.cells),
-            elevation[128, 120],
-            dtype=np.float32,
-        ),
-        observed_mask=np.ones(
-            (LOCAL_GEOMETRY.cells, LOCAL_GEOMETRY.cells),
-            dtype=bool,
-        ),
-        physical_obstacle_ratio=np.zeros(
-            (LOCAL_GEOMETRY.cells, LOCAL_GEOMETRY.cells),
-            dtype=np.float32,
+        elevation_m=_sample_local(canvas, pose, elevation),
+        observed_mask=_sample_local(canvas, pose, observed),
+        physical_obstacle_ratio=_sample_local(
+            canvas,
+            pose,
+            hazards.physical_obstacle_layer.values,
         ),
     )
     world = ObservedWorld(
@@ -361,20 +381,172 @@ def _policy_batch_from_synthetic_window(
         roi_ratio=np.ones((256, 256), dtype=np.float32),
         remaining_decision_budget_ratio=1.0,
     )
-    projection = PlatformProjection(
+    forbidden = physical_obstacle_ratio(
+        tuple(from_wkb(item) for item in hazards.no_go_polygons_wkb),
         canvas=canvas,
-        traversable_ratio=np.ones((256, 256), dtype=np.float32),
-        local_traversable_ratio=np.ones((32, 32), dtype=np.float32),
-        clearance_margin_norm=np.ones((256, 256), dtype=np.float32),
+    )
+    return _SyntheticPolarInputs(world, mission, pose, forbidden)
+
+
+def _bridge_vec3(x: float, y: float, z: float) -> bridge_api.Vec3:
+    value = bridge_api.Vec3()
+    value.x = x
+    value.y = y
+    value.z = z
+    return value
+
+
+def _bridge_grid_map(
+    inputs: _SyntheticPolarInputs,
+    *,
+    frame_id: str,
+    stamp_ns: int,
+) -> bridge_api.GridMap:
+    world = inputs.world
+    canvas = world.canvas
+
+    def layer(values: np.ndarray, dtype) -> bridge_api.GridLayer:
+        south_up = np.ascontiguousarray(
+            np.flipud(np.asarray(values)).astype(dtype, copy=False).reshape(-1)
+        )
+        return bridge_api.GridLayer(south_up)
+
+    observed = world.observed_mask
+    physical = np.where(
+        observed,
+        world.physical_obstacle_layer.values,
+        0.0,
+    ).astype(np.float32)
+    forbidden = np.where(observed, inputs.forbidden_ratio, 0.0).astype(np.float32)
+    grid = bridge_api.GridMap()
+    grid.frame_id = frame_id
+    grid.stamp.nanoseconds_since_epoch = stamp_ns
+    grid.width = canvas.geometry.cells
+    grid.height = canvas.geometry.cells
+    grid.resolution_m = canvas.geometry.resolution_m
+    grid.origin_m = _bridge_vec3(canvas.bounds_m[0], canvas.bounds_m[1], 0.0)
+    grid.layers = {
+        "elevation": layer(
+            np.where(observed, world.elevation_m, 0.0),
+            np.float32,
+        ),
+        "valid_mask": layer(observed, np.uint8),
+        "obstacle": layer(physical > 0.0, np.uint8),
+        "obstacle_height": layer(physical * 0.5, np.float32),
+        "observation_age_s": layer(np.zeros_like(physical), np.float32),
+        "observation_quality": layer(observed, np.float32),
+        "elevation_variance": layer(np.zeros_like(physical), np.float32),
+        "obstacle_variance": layer(np.zeros_like(physical), np.float32),
+        "observation_count": layer(observed, np.uint32),
+        "forbidden": layer(forbidden > 0.0, np.uint8),
+    }
+    return grid
+
+
+def _synthetic_bridge_request(
+    inputs: _SyntheticPolarInputs,
+    wheeled,
+) -> bridge_api.TrainingPlanRequest:
+    canvas_id = inputs.world.canvas.identity
+    stamp_ns = 1_000_000_000
+    request = bridge_api.TrainingPlanRequest()
+    request.request_id = f"polar-smoke/{canvas_id}/{wheeled.content_sha256}"
+    request.state_time.nanoseconds_since_epoch = stamp_ns
+    state = bridge_api.WheeledState()
+    state.pose.position_m = _bridge_vec3(
+        inputs.pose.x_m,
+        inputs.pose.y_m,
+        inputs.pose.elevation_m,
+    )
+    state.pose.orientation.w = 1.0
+    request.current_state = state
+    request.capability = wheeled.to_bridge_capability()
+    goal = bridge_api.PointGoal()
+    goal.position_m = _bridge_vec3(
+        inputs.pose.x_m,
+        inputs.pose.y_m,
+        inputs.pose.elevation_m,
+    )
+    goal.tolerance_m = inputs.world.canvas.geometry.resolution_m
+    request.goal.goal_id = f"polar-frontier/{canvas_id}"
+    request.goal.target = goal
+    request.goal.yaw_tolerance_rad = np.pi / 24.0
+    request.world.global_map = _bridge_grid_map(
+        inputs,
+        frame_id=f"polar-map/{canvas_id}",
+        stamp_ns=stamp_ns,
+    )
+    request.world.local_map = _bridge_grid_map(
+        inputs,
+        frame_id=f"polar-odom/{canvas_id}",
+        stamp_ns=stamp_ns,
+    )
+    request.world.map_from_odom.parent_frame = f"polar-map/{canvas_id}"
+    request.world.map_from_odom.child_frame = f"polar-odom/{canvas_id}"
+    request.world.map_from_odom.stamp.nanoseconds_since_epoch = stamp_ns
+    request.config.wheel.xy_resolution_m = inputs.world.canvas.geometry.resolution_m
+    request.config.wheel.yaw_bin_count = 64
+    return request
+
+
+def _platform_projection_from_cpp(
+    inputs: _SyntheticPolarInputs,
+    cpp_projection,
+    *,
+    capability_sha256: str,
+    sensor_range_m: float,
+) -> PlatformProjection:
+    known = np.ascontiguousarray(np.flipud(cpp_projection.known).astype(bool))
+    hard_feasible = np.ascontiguousarray(
+        np.flipud(cpp_projection.hard_feasible).astype(bool)
+    )
+    clearance_m = np.ascontiguousarray(
+        np.flipud(cpp_projection.clearance_m).astype(np.float32)
+    )
+    traversable = (known & hard_feasible).astype(np.float32)
+    clearance_norm = np.where(
+        known,
+        np.clip(
+            np.nan_to_num(
+                clearance_m,
+                nan=0.0,
+                posinf=sensor_range_m,
+                neginf=0.0,
+            ),
+            0.0,
+            sensor_range_m,
+        )
+        / sensor_range_m,
+        0.0,
+    ).astype(np.float32)
+    return PlatformProjection(
+        canvas=inputs.world.canvas,
+        traversable_ratio=traversable,
+        local_traversable_ratio=_sample_local(
+            inputs.world.canvas,
+            inputs.pose,
+            traversable,
+        ),
+        clearance_margin_norm=clearance_norm,
         source=f"cpp_v3/{capability_sha256}",
     )
-    pose = Pose2(robot_x, robot_y, elevation_m=float(elevation[128, 120]))
-    candidates = CandidateBuilderV2().build(world, mission, pose, projection)
+
+
+def _policy_batch_from_projection(
+    inputs: _SyntheticPolarInputs,
+    projection: PlatformProjection,
+) -> tuple[PolicyBatch, object]:
+    candidates = CandidateBuilderV2().build(
+        inputs.world,
+        inputs.mission,
+        inputs.pose,
+        projection,
+    )
     assert candidates.count > 0
     arrays = ObservationBuilderV2().build(
-        world,
-        mission,
-        pose,
+        inputs.world,
+        inputs.mission,
+        inputs.pose,
         projection,
         candidates,
         "WHEELED",
@@ -422,37 +594,128 @@ def test_cpu_pretraining_smoke_links_data_v3_update_checkpoint_and_resume(
         run_kind="development-smoke",
     )
     wheeled = capability_bundle.for_platform("WHEELED")
-    batch, candidates = _policy_batch_from_synthetic_window(
+    inputs = _synthetic_polar_inputs(
         tmp_path / "synthetic-polar/raw/synthetic-dem.tif",
         split_document,
-        capability_sha256=wheeled.content_sha256,
     )
-    policy = CrossAttentionPolicy()
-    rollout, sampled = _one_row_rollout(batch, policy)
+    request = _synthetic_bridge_request(inputs, wheeled)
+    canvas = inputs.world.canvas
+    assert request.request_id == (
+        f"polar-smoke/{canvas.identity}/{wheeled.content_sha256}"
+    )
+    assert request.world.global_map.frame_id == f"polar-map/{canvas.identity}"
+    assert request.world.local_map.frame_id == f"polar-odom/{canvas.identity}"
+    assert (
+        request.world.map_from_odom.parent_frame
+        == request.world.global_map.frame_id
+    )
+    assert (
+        request.world.map_from_odom.child_frame
+        == request.world.local_map.frame_id
+    )
+    assert request.world.local_map.origin_m.x == canvas.bounds_m[0]
+    assert request.world.local_map.origin_m.y == canvas.bounds_m[1]
+    assert request.world.local_map.resolution_m == canvas.geometry.resolution_m
+    assert request.world.local_map.width == request.world.local_map.height == 256
+    assert request.capability.maximum_slope_rad == (
+        wheeled.typed_capability.maximum_slope_rad
+    )
+    assert tuple(
+        item.primitive_id for item in request.capability.motion_primitives
+    ) == wheeled.source_motion_primitive_ids
 
-    episode = _ProxyEpisode(0, "WHEELED", scenario_index=0)
-    proxy_identity = episode.observation.observation_identities[0]
-    prepared = episode.build_request(
-        PolicyAction(0, float(sampled.selected_theta.item())),
-        proxy_identity,
+    def north_up_request_layer(name: str) -> np.ndarray:
+        layer = request.world.local_map.layers[name].values.reshape(256, 256)
+        return np.ascontiguousarray(np.flipud(layer))
+
+    expected_elevation = np.where(
+        inputs.world.observed_mask,
+        inputs.world.elevation_m,
+        0.0,
+    ).astype(np.float32)
+    request_elevation = north_up_request_layer("elevation")
+    request_observed = north_up_request_layer("valid_mask").astype(bool)
+    request_obstacle = north_up_request_layer("obstacle").astype(bool)
+    request_forbidden = north_up_request_layer("forbidden").astype(bool)
+    global_elevation = np.ascontiguousarray(
+        np.flipud(
+            request.world.global_map.layers["elevation"].values.reshape(256, 256)
+        )
     )
-    selected = int(sampled.selected_frontier_index.item())
-    selected_features = candidates.features[selected]
-    prepared.request.goal.target.position_m.x = 2.0 + 4.0 * float(selected_features[0])
-    prepared.request.goal.target.position_m.y = 2.0 + 4.0 * float(selected_features[1])
-    prepared.request.goal.yaw_rad = float(sampled.selected_theta.item())
-    prepared.request.capability = wheeled.to_bridge_capability()
+    np.testing.assert_array_equal(global_elevation, request_elevation)
+    np.testing.assert_allclose(request_elevation, expected_elevation)
+    np.testing.assert_array_equal(request_observed, inputs.world.observed_mask)
+    np.testing.assert_array_equal(
+        request_obstacle,
+        (inputs.world.physical_obstacle_layer.values > 0.0)
+        & inputs.world.observed_mask,
+    )
+    np.testing.assert_array_equal(
+        request_forbidden,
+        (inputs.forbidden_ratio > 0.0) & inputs.world.observed_mask,
+    )
+
     bridge = PlannerBridge()
-    cpp_projection = bridge.project_traversability(prepared.request)
+    cpp_projection = bridge.project_traversability(request)
     assert cpp_projection.platform_type == "WHEELED"
     assert cpp_projection.known.dtype == np.uint8
     assert cpp_projection.hard_feasible.dtype == np.uint8
     assert cpp_projection.traversal_cost.dtype == np.float32
-    assert cpp_projection.known.shape == (
-        prepared.request.world.local_map.height,
-        prepared.request.world.local_map.width,
+    assert cpp_projection.known.shape == (256, 256)
+    projection = _platform_projection_from_cpp(
+        inputs,
+        cpp_projection,
+        capability_sha256=wheeled.content_sha256,
+        sensor_range_m=wheeled.observation_capability.sensor_range_m,
     )
-    planner_output = bridge.plan(prepared.request)
+    np.testing.assert_array_equal(
+        projection.traversable_ratio > 0.0,
+        np.flipud(cpp_projection.known).astype(bool)
+        & np.flipud(cpp_projection.hard_feasible).astype(bool),
+    )
+    np.testing.assert_array_equal(
+        projection.local_traversable_ratio,
+        _sample_local(canvas, inputs.pose, projection.traversable_ratio),
+    )
+    assert projection.source == f"cpp_v3/{wheeled.content_sha256}"
+    assert not np.all(projection.traversable_ratio == 1.0)
+    assert np.isfinite(projection.clearance_margin_norm).all()
+    assert (projection.clearance_margin_norm[~request_observed] == 0.0).all()
+    known_obstacles = request_observed & request_obstacle
+    assert known_obstacles.any()
+    assert not projection.traversable_ratio[known_obstacles].any()
+
+    batch, candidates = _policy_batch_from_projection(inputs, projection)
+    assert request_elevation.shape == tuple(batch.prior_channels.shape[-2:])
+    np.testing.assert_allclose(
+        request_elevation,
+        batch.prior_channels[0, 0].numpy(),
+    )
+    np.testing.assert_array_equal(
+        request_obstacle,
+        batch.prior_channels[0, 2].numpy() > 0.0,
+    )
+    np.testing.assert_array_equal(
+        projection.traversable_ratio,
+        batch.prior_channels[0, 3].numpy(),
+    )
+    policy = CrossAttentionPolicy()
+    rollout, sampled = _one_row_rollout(batch, policy)
+
+    selected = int(sampled.selected_frontier_index.item())
+    selected_features = candidates.features[selected]
+    left, _, _, top = canvas.bounds_m
+    selected_x = left + float(selected_features[0]) * canvas.geometry.size_m
+    selected_y = top - float(selected_features[1]) * canvas.geometry.size_m
+    request.goal.target.position_m.x = selected_x
+    request.goal.target.position_m.y = selected_y
+    request.goal.yaw_rad = float(sampled.selected_theta.item())
+    request.goal.goal_id = f"polar-frontier/{canvas.identity}/{selected}"
+    assert request.goal.target.position_m.x == pytest.approx(selected_x)
+    assert request.goal.target.position_m.y == pytest.approx(selected_y)
+    assert request.goal.goal_id.endswith(f"/{selected}")
+    planner_output = bridge.plan(request)
+    assert planner_output.diagnostics.planner_name == "cpp_v3"
     assert planner_output.outcome in {
         PlanningOutcome.NEW_REFERENCE_AVAILABLE,
         PlanningOutcome.SAFE_FRONTIER_REFERENCE_AVAILABLE,
