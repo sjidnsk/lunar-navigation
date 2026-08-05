@@ -5,12 +5,18 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <variant>
 #include <vector>
+
+#include <urdf/model.h>
+#include <urdf_model/link.h>
 
 #include "lunar_planner_training_bridge/request.hpp"
 
@@ -19,6 +25,54 @@ namespace planning = lunar::planning;
 namespace training = lunar::planning::training;
 
 namespace {
+
+void AddUrdfMeshFilename(
+    const urdf::GeometrySharedPtr &geometry,
+    std::set<std::string, std::less<>> &filenames) {
+  if (geometry == nullptr || geometry->type != urdf::Geometry::MESH) {
+    return;
+  }
+  const auto mesh = std::static_pointer_cast<urdf::Mesh>(geometry);
+  if (mesh->filename.empty() || !std::isfinite(mesh->scale.x) ||
+      !std::isfinite(mesh->scale.y) || !std::isfinite(mesh->scale.z) ||
+      mesh->scale.x <= 0.0 || mesh->scale.y <= 0.0 || mesh->scale.z <= 0.0) {
+    throw py::value_error("URDF mesh filename or scale is invalid");
+  }
+  filenames.insert(mesh->filename);
+}
+
+[[nodiscard]] py::tuple ValidateUrdfGeometry(
+    const std::string &document,
+    const std::string &base_frame_id) {
+  urdf::Model model;
+  if (!model.initString(document) || model.getLink(base_frame_id) == nullptr) {
+    throw py::value_error("URDF model or base frame is invalid");
+  }
+  std::vector<urdf::LinkSharedPtr> links;
+  model.getLinks(links);
+  std::set<std::string, std::less<>> filenames;
+  for (const auto &link : links) {
+    for (const auto &visual : link->visual_array) {
+      if (visual != nullptr) {
+        AddUrdfMeshFilename(visual->geometry, filenames);
+      }
+    }
+    for (const auto &collision : link->collision_array) {
+      if (collision != nullptr) {
+        AddUrdfMeshFilename(collision->geometry, filenames);
+      }
+    }
+  }
+  if (filenames.empty()) {
+    throw py::value_error("URDF requires at least one mesh");
+  }
+  py::tuple result(filenames.size());
+  std::size_t index = 0U;
+  for (const auto &filename : filenames) {
+    result[index++] = py::str(filename);
+  }
+  return result;
+}
 
 [[nodiscard]] planning::GridLayer GridLayerFromArray(const py::array &values) {
   if ((values.flags() & py::array::c_style) == 0) {
@@ -732,6 +786,9 @@ void BindRequest(py::module_ &module) {
 
 PYBIND11_MODULE(_lunar_planner_training_bridge, module) {
   module.doc() = "In-process Python bindings for lunar::planning::Planner";
+  module.def(
+      "validate_urdf_geometry", &ValidateUrdfGeometry,
+      py::arg("document"), py::arg("base_frame_id"));
   BindGeometry(module);
   BindWorld(module);
   BindGoalsAndState(module);

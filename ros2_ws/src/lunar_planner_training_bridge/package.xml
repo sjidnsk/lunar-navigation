@@ -12,6 +12,8 @@
   <build_depend>lunar_planner_core</build_depend>
   <build_depend>pybind11_vendor</build_depend>
 
+  <depend>urdf</depend>
+
   <exec_depend>lunar_planner_core</exec_depend>
   <exec_depend>python3</exec_depend>
   <exec_depend>python3-numpy</exec_depend>

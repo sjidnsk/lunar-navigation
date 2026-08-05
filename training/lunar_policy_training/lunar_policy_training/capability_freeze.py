@@ -7,9 +7,9 @@ import json
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 from pathlib import Path, PurePosixPath
 from typing import TypeAlias
-from xml.etree import ElementTree
 
 import yaml
 
@@ -812,41 +812,25 @@ def _parse_urdf_mesh_paths(
     base_frame_id: str,
 ) -> tuple[str, ...]:
     try:
-        root = ElementTree.fromstring(data.decode("utf-8"))
-    except (UnicodeError, ElementTree.ParseError) as error:
-        raise CapabilityFreezeError("URDF is not valid UTF-8 XML") from error
-    if root.tag != "robot":
-        raise CapabilityFreezeError("URDF root must be robot")
-    links = root.findall("link")
-    if not any(link.get("name") == base_frame_id for link in links):
-        raise CapabilityFreezeError("URDF does not contain base_frame_id link")
-    mesh_nodes = [
-        *root.findall(".//visual/geometry/mesh"),
-        *root.findall(".//collision/geometry/mesh"),
-    ]
-    if not mesh_nodes:
-        raise CapabilityFreezeError("URDF requires at least one mesh")
+        document = data.decode("utf-8")
+    except UnicodeError as error:
+        raise CapabilityFreezeError("URDF is not valid UTF-8") from error
+    try:
+        from lunar_planner_training_bridge import validate_urdf_geometry
+    except ImportError as error:
+        raise CapabilityFreezeError("URDF validator is unavailable") from error
+
+    try:
+        mesh_filenames = validate_urdf_geometry(document, base_frame_id)
+    except (RuntimeError, ValueError) as error:
+        raise CapabilityFreezeError("URDF model or geometry is invalid") from error
     mesh_paths: set[str] = set()
     urdf_parent = PurePosixPath(urdf_path).parent
-    for mesh in mesh_nodes:
-        filename = mesh.get("filename")
+    for filename in mesh_filenames:
         relative_mesh = _normalized_relative(filename)
         closure_path = _normalized_relative(
             (urdf_parent / PurePosixPath(relative_mesh)).as_posix()
         )
-        scale = mesh.get("scale")
-        if scale is not None:
-            try:
-                values = tuple(float(item) for item in scale.split())
-            except ValueError as error:
-                raise CapabilityFreezeError("URDF mesh scale is invalid") from error
-            if (
-                len(values) != 3
-                or any(not math.isfinite(item) or item <= 0.0 for item in values)
-            ):
-                raise CapabilityFreezeError(
-                    "URDF mesh scale must contain three positive finite values"
-                )
         mesh_paths.add(closure_path)
     return tuple(sorted(mesh_paths))
 
@@ -1203,10 +1187,14 @@ def _duration_ns(value: object, field: str, *, allow_zero: bool = False) -> int:
     seconds = _finite(value, field)
     if seconds < 0.0 or (seconds == 0.0 and not allow_zero):
         raise CapabilityFreezeError(f"{field} duration is invalid")
-    nanoseconds = seconds * 1_000_000_000.0
-    if nanoseconds > _INT64_MAX:
-        raise CapabilityFreezeError(f"{field} duration exceeds int64 nanoseconds")
-    return math.floor(nanoseconds + 0.5)
+    with localcontext() as context:
+        context.prec = 40
+        nanoseconds = Decimal.from_float(seconds) * Decimal(1_000_000_000)
+        if nanoseconds > Decimal(_INT64_MAX):
+            raise CapabilityFreezeError(
+                f"{field} duration exceeds int64 nanoseconds"
+            )
+        return int(nanoseconds.to_integral_value(rounding=ROUND_HALF_UP))
 
 
 def _enum_string(value: object, allowed: frozenset[str], field: str) -> str:

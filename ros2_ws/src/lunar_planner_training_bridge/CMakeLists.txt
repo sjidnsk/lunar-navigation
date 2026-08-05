@@ -7,6 +7,7 @@ find_package(lunar_planner_core REQUIRED)
 find_package(pybind11_vendor REQUIRED)
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development NumPy)
 find_package(pybind11 REQUIRED)
+find_package(urdf REQUIRED)
 
 pybind11_add_module(_lunar_planner_training_bridge MODULE NO_EXTRAS
   src/conversions.cpp
@@ -14,7 +15,8 @@ pybind11_add_module(_lunar_planner_training_bridge MODULE NO_EXTRAS
 target_compile_features(_lunar_planner_training_bridge PRIVATE cxx_std_20)
 target_include_directories(_lunar_planner_training_bridge PRIVATE include)
 target_link_libraries(_lunar_planner_training_bridge PRIVATE
-  lunar_planner_core::lunar_planner_core)
+  lunar_planner_core::lunar_planner_core
+  urdf::urdf)
 
 ament_python_install_package(${PROJECT_NAME}
   PACKAGE_DIR python/${PROJECT_NAME})

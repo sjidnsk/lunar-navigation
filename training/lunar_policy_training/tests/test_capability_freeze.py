@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pickle
+import sys
 from pathlib import Path
 
 import pytest
@@ -597,6 +598,10 @@ def test_observation_document_is_authoritative(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "urdf",
     (
+        (
+            '<robot><link name="base_link"><visual><geometry>'
+            '<mesh filename="body.stl"/></geometry></visual></link></robot>\n'
+        ),
         '<robot name="test"><link name="base_link"/></robot>\n',
         (
             '<robot name="test"><link name="other"><visual><geometry>'
@@ -627,6 +632,17 @@ def test_urdf_geometry_must_close_over_base_link_and_mesh_resources(
     )
 
     with pytest.raises(CapabilityFreezeError, match="URDF|mesh|base"):
+        load_frozen_capability_bundle(lock_path, run_kind="formal")
+
+
+def test_missing_urdf_bridge_validator_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = _write_bundle(tmp_path / "missing-urdf-validator")
+    monkeypatch.setitem(sys.modules, "lunar_planner_training_bridge", None)
+
+    with pytest.raises(CapabilityFreezeError, match="URDF validator"):
         load_frozen_capability_bundle(lock_path, run_kind="formal")
 
 
@@ -675,6 +691,29 @@ def test_duration_nanoseconds_survive_freeze_pickle_and_bridge_exactly(
         == 1_000_000_001
     )
     assert hopper.to_bridge_capability().minimum_settle_guard_ns == 1
+
+
+def test_duration_uses_cpp_long_double_multiply_before_half_up(
+    tmp_path: Path,
+) -> None:
+    """Would fail if Python double multiplication crossed a half-ns boundary."""
+    lock_path = _write_bundle(tmp_path / "long-double-duration")
+    _rewrite_typed_source_and_content(
+        lock_path,
+        "WHEELED",
+        lambda capability: capability["motion_primitives"][0].__setitem__(
+            "nominal_duration_s", 86.3431073285
+        ),
+    )
+
+    bundle = load_frozen_capability_bundle(lock_path, run_kind="formal")
+
+    assert (
+        bundle.for_platform("WHEELED")
+        .typed_capability.motion_primitives[0]
+        .nominal_duration_ns
+        == 86_343_107_328
+    )
 
 
 def test_complete_typed_bundle_maps_all_platforms_to_v3_bridge(

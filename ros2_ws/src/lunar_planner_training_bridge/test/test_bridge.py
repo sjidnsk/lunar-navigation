@@ -168,6 +168,22 @@ def test_duration_nanosecond_properties_are_exact_and_keep_legacy_bindings() -> 
     assert hopper.minimum_settle_guard_ns == 1
 
 
+def test_urdf_validation_uses_authoritative_model_parser() -> None:
+    """Would fail if freeze accepted XML that urdf::Model rejects."""
+    valid = (
+        '<robot name="test"><link name="base_link"><visual><geometry>'
+        '<mesh filename="body.stl" scale="1 1 1"/>'
+        '</geometry></visual></link></robot>'
+    )
+    missing_name = valid.replace(' name="test"', "", 1)
+
+    assert bridge_api.validate_urdf_geometry(valid, "base_link") == (
+        "body.stl",
+    )
+    with pytest.raises(ValueError, match="URDF"):
+        bridge_api.validate_urdf_geometry(missing_name, "base_link")
+
+
 @pytest.fixture
 def easy_request():
     def make(platform_type: str) -> bridge_api.TrainingPlanRequest:
