@@ -139,6 +139,9 @@ def test_cuda_interrupt_resume_preserves_step_budget_and_allocation(
     )
     assert evidence.platform_allocation == {"WHEELED": selected_workers}
     checkpoint = load_checkpoint(artifact_root / "checkpoints/latest.pt")
+    assert checkpoint.schema_version == "lunar-ppo-checkpoint/v3"
+    assert checkpoint.run_identity.run_kind == "development-smoke"
+    assert manifest["run_identity"] == checkpoint.run_identity.to_dict()
     assert checkpoint.worker_allocation == evidence.platform_allocation
     assert checkpoint.curriculum_phase == "warmup_wheeled"
     assert checkpoint.micro_batch_size == selected_micro_batch

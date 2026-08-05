@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from ..curriculum import CurriculumSchedule, PLATFORMS
+from ..checkpoint import RunIdentity
 from ..environment.parallel_pool import ParallelActions, ParallelEnvPool
 from ..eval.baselines import select_baseline_action
 from ..policy.cross_attention import CrossAttentionPolicy, sample_action
@@ -102,6 +103,7 @@ class MethodEvaluation:
 class EvaluationReport:
     proxy: bool
     scenario_schedule_id: str
+    run_identity: RunIdentity
     reward_hash: str
     checkpoint_sha256: str
     methods: tuple[MethodEvaluation, ...]
@@ -110,12 +112,19 @@ class EvaluationReport:
     def __post_init__(self) -> None:
         if self.schema_version != EVALUATION_SCHEMA_VERSION:
             raise ValueError("evaluation schema version mismatch")
-        if self.proxy is not True:
-            raise ValueError("Task 4 scenario conclusions must be marked proxy")
-        if not self.scenario_schedule_id.startswith("proxy-"):
-            raise ValueError("proxy scenario schedule identity is missing")
+        if not isinstance(self.run_identity, RunIdentity):
+            raise ValueError("evaluation run identity is missing")
+        if self.proxy:
+            if self.run_identity.run_kind != "development-smoke":
+                raise ValueError("proxy evaluation cannot use formal run identity")
+            if not self.scenario_schedule_id.startswith("proxy-"):
+                raise ValueError("proxy scenario schedule identity is missing")
+        elif self.run_identity.run_kind != "formal":
+            raise ValueError("formal evaluation requires formal run identity")
         if len(self.reward_hash) != 64 or len(self.checkpoint_sha256) != 64:
             raise ValueError("evaluation hashes must be SHA-256 hex digests")
+        if self.reward_hash != self.run_identity.reward_sha256:
+            raise ValueError("evaluation reward hash differs from run identity")
         names = tuple(method.method for method in self.methods)
         if len(set(names)) != len(names):
             raise ValueError("evaluation methods must be unique")
@@ -154,6 +163,7 @@ class EvaluationReport:
             "schema_version": self.schema_version,
             "proxy": self.proxy,
             "scenario_schedule_id": self.scenario_schedule_id,
+            "run_identity": self.run_identity.to_dict(),
             "reward_hash": self.reward_hash,
             "checkpoint_sha256": self.checkpoint_sha256,
             "methods": [
@@ -286,6 +296,7 @@ def evaluate_proxy_policy(
     device: torch.device | str,
     checkpoint_sha256: str,
     schedule: CurriculumSchedule,
+    run_identity: RunIdentity,
 ) -> EvaluationReport:
     """Compare PPO and two diagnostics on one identical real-v3 proxy schedule."""
     if not isinstance(policy, CrossAttentionPolicy):
@@ -307,6 +318,7 @@ def evaluate_proxy_policy(
     return EvaluationReport(
         proxy=True,
         scenario_schedule_id=schedule.scenario_schedule_id,
+        run_identity=run_identity,
         reward_hash=reward_weights_sha256(),
         checkpoint_sha256=checkpoint_sha256,
         methods=methods,

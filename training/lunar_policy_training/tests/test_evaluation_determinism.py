@@ -5,6 +5,7 @@ import torch
 from lunar_planner_training_bridge import ExecutionDirective, PlanningOutcome
 
 from lunar_policy_training.curriculum import CurriculumSchedule
+from lunar_policy_training.checkpoint import RunIdentity
 
 from lunar_policy_training.evaluation.report import (
     CandidateEvaluation,
@@ -24,7 +25,7 @@ from lunar_policy_training.environment.macro_step import (
     PlannerTransition,
 )
 from lunar_policy_training.proxy_scenario import proxy_observation
-from lunar_policy_training.reward import InvalidTransition
+from lunar_policy_training.reward import InvalidTransition, reward_weights_sha256
 
 
 def _metrics(coverage: float, *, failures: float = 0.0, seconds: float = 5.0):
@@ -53,7 +54,8 @@ def _report(coverages: tuple[float, float, float]) -> EvaluationReport:
     return EvaluationReport(
         proxy=True,
         scenario_schedule_id="proxy-scenario-schedule-v1:abc",
-        reward_hash="a" * 64,
+        run_identity=_run_identity(),
+        reward_hash=reward_weights_sha256(),
         checkpoint_sha256="b" * 64,
         methods=tuple(
             MethodEvaluation(method=method, per_platform=platforms)
@@ -66,6 +68,18 @@ def _report(coverages: tuple[float, float, float]) -> EvaluationReport:
     )
 
 
+def _run_identity(run_kind: str = "development-smoke") -> RunIdentity:
+    return RunIdentity(
+        run_kind=run_kind,
+        data_sha256="1" * 64,
+        split_sha256="2" * 64,
+        generator_sha256="3" * 64,
+        capability_sha256="4" * 64,
+        reward_sha256=reward_weights_sha256(),
+        v3_sha256="6" * 64,
+    )
+
+
 def test_same_scenario_report_has_identical_canonical_hash() -> None:
     """Would fail if map order, reruns, or timestamps changed report identity."""
     first = _report((0.95, 0.96, 0.97))
@@ -74,6 +88,14 @@ def test_same_scenario_report_has_identical_canonical_hash() -> None:
     assert first.schema_version == "lunar-policy-release-evaluation/v1"
     assert report_sha256(first) == report_sha256(second)
     assert first.to_dict() == second.to_dict()
+
+
+def test_report_records_the_exact_checkpoint_run_identity() -> None:
+    """Would fail if evaluation lost data, capability, reward, or v3 provenance."""
+    report = _report((0.95, 0.96, 0.97))
+
+    assert report.run_identity == _run_identity()
+    assert report.to_dict()["run_identity"] == _run_identity().to_dict()
 
 
 def test_platform_metrics_aggregate_observed_execution_events() -> None:
@@ -200,12 +222,14 @@ def test_real_proxy_evaluation_is_deterministic_and_compares_three_methods() -> 
         device="cpu",
         checkpoint_sha256="b" * 64,
         schedule=CurriculumSchedule(),
+        run_identity=_run_identity(),
     )
     second = evaluate_proxy_policy(
         policy,
         device="cpu",
         checkpoint_sha256="b" * 64,
         schedule=CurriculumSchedule(),
+        run_identity=_run_identity(),
     )
 
     assert tuple(method.method for method in first.methods) == (
@@ -239,6 +263,7 @@ def test_cuda_marker_is_reserved_for_real_public_evaluation_smoke() -> None:
         device="cuda",
         checkpoint_sha256="b" * 64,
         schedule=CurriculumSchedule(),
+        run_identity=_run_identity(),
     )
 
     assert report.proxy is True

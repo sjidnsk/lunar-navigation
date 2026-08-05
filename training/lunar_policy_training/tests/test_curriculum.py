@@ -7,6 +7,10 @@ import pytest
 from lunar_planner_training_bridge import MotionReference, PlannerBridge
 
 from lunar_policy_training.curriculum import CurriculumSchedule
+from lunar_policy_training.capability_freeze import (
+    FrozenJsonObject,
+    FrozenPlatformCapability,
+)
 from lunar_policy_training.environment.parallel_pool import (
     ParallelActions,
     ParallelEnvPool,
@@ -105,10 +109,36 @@ def test_curriculum_sampler_is_proxy_and_deterministic() -> None:
     assert first == second
     assert first.proxy is True
     assert first.capability_id.startswith("proxy-")
+    assert proxy_environment_factory.run_kind == "development-smoke"
     assert first.scenario_seed == second.scenario_seed
     assert CurriculumSchedule().scenario_schedule_id.startswith(
         "proxy-scenario-schedule-v1:"
     )
+
+
+def test_formal_curriculum_identity_matches_injected_capability() -> None:
+    """Would fail if a worker request named a capability other than its bundle."""
+    capability = FrozenPlatformCapability(
+        platform_type="LEGGED",
+        capability_type="lunar-planner-legged-capability/v1",
+        capability_version="legged-2026.08",
+        content=FrozenJsonObject(()),
+        content_sha256="a" * 64,
+        resources=(),
+    )
+
+    scenario = CurriculumSchedule().scenario_for(
+        platform_type="LEGGED",
+        scenario_index=4,
+        capability=capability,
+        scenario_schedule_id="nasa-polar-train/v1",
+    )
+
+    assert scenario.proxy is False
+    assert scenario.capability_version == "legged-2026.08"
+    assert scenario.capability_sha256 == "a" * 64
+    assert scenario.capability_id == "legged-2026.08:" + "a" * 64
+    assert scenario.scenario_schedule_id == "nasa-polar-train/v1"
 
 
 def test_evaluation_schedule_exposes_every_frozen_proxy_scenario() -> None:

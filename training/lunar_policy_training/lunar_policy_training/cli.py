@@ -24,6 +24,12 @@ import numpy as np
 import torch
 from lunar_planner_training_bridge import PlanningOutcome, TrainingPlanRequest
 
+from .capability_freeze import (
+    CapabilityFreezeError,
+    FrozenCapabilityBundle,
+    FrozenCapabilityEnvironmentFactory,
+    load_frozen_capability_bundle,
+)
 from .budget import (
     BudgetExceededError,
     CalibrationMeasurement,
@@ -33,6 +39,7 @@ from .budget import (
     extend_budget_manifest,
 )
 from .checkpoint import (
+    RunIdentity,
     build_training_checkpoint,
     config_sha256,
     load_checkpoint,
@@ -76,6 +83,10 @@ _Rollout = TypeVar("_Rollout")
 
 class ArtifactRootError(ValueError):
     """Runtime artifacts must use an explicit absolute path outside Git."""
+
+
+class PreflightError(ValueError):
+    """A formal command failed before artifact or accelerator access."""
 
 
 @dataclass(slots=True)
@@ -144,6 +155,7 @@ class CalibratedRunState:
     formal_seed: int
     reward_calibration_seeds: tuple[int, int, int]
     calibration_end_gpu_seconds: float
+    run_identity: RunIdentity
 
 
 class _ParallelPoolVectorEnv:
@@ -584,6 +596,10 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
     frozen_config = manifest.get("frozen_config")
     runtime = manifest.get("runtime_calibration")
     task4 = manifest.get("task4_calibration")
+    try:
+        run_identity = RunIdentity.from_mapping(manifest.get("run_identity"))
+    except Exception as error:
+        raise ArtifactRootError("run manifest identity is missing or invalid") from error
     if not isinstance(frozen_config, dict) or not isinstance(runtime, dict):
         raise ArtifactRootError("calibrated runtime state is incomplete")
     if not isinstance(task4, dict):
@@ -631,6 +647,10 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
         raise ArtifactRootError("runtime calibration selection is invalid")
     consumed = manifest.get("consumed_gpu_seconds")
     config = resolve_training_config(frozen_config)
+    if config.run_kind != run_identity.run_kind:
+        raise ArtifactRootError("run manifest kind differs from frozen config")
+    if task4.get("proxy") is True and run_identity.run_kind != "development-smoke":
+        raise ArtifactRootError("proxy calibration cannot identify a formal run")
     budget = TrainingBudget(
         total_gpu_seconds=manifest.get("total_gpu_budget_seconds"),
         consumed_gpu_seconds=consumed,
@@ -647,6 +667,7 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
         formal_seed=task4["formal_seed"],
         reward_calibration_seeds=tuple(task4["reward_calibration_seeds"]),
         calibration_end_gpu_seconds=float(calibration_end),
+        run_identity=run_identity,
     )
 
 
@@ -661,17 +682,18 @@ def build_parser() -> argparse.ArgumentParser:
     train = subparsers.add_parser("train")
     train.add_argument("--config", required=True)
     train.add_argument("--artifact-root", required=True)
-    train.add_argument("--max-updates", type=int, default=None)
+    train.add_argument("--capability-lock")
 
     resume = subparsers.add_parser("resume")
     resume.add_argument("--artifact-root", required=True)
     resume.add_argument("--checkpoint", required=True)
-    resume.add_argument("--max-updates", type=int, default=None)
+    resume.add_argument("--capability-lock")
 
     evaluate = subparsers.add_parser("evaluate")
     evaluate.add_argument("--checkpoint", required=True)
     evaluate.add_argument("--gate", required=True)
     evaluate.add_argument("--artifact-root", required=True)
+    evaluate.add_argument("--capability-lock")
 
     extend_budget = subparsers.add_parser("extend-budget")
     extend_budget.add_argument("--artifact-root", required=True)
@@ -703,28 +725,45 @@ def main(argv: list[str] | None = None) -> int:
             repository_root=repository_root,
         )
     elif arguments.command == "train":
+        requested_config = load_training_config(Path(arguments.config))
+        if requested_config.run_kind != "formal":
+            raise PreflightError(
+                "public train is formal; use the development-smoke helper"
+            )
+        capability_bundle = _formal_capability_preflight(
+            arguments.capability_lock
+        )
         if not Path(arguments.artifact_root).is_dir():
             raise ArtifactRootError("run calibrate before public train")
         _start_training_run(
             config_path=Path(arguments.config),
             artifact_root=Path(arguments.artifact_root),
             repository_root=repository_root,
-            max_updates=arguments.max_updates,
+            max_updates=None,
             interrupt_first_update=False,
+            capability_bundle=capability_bundle,
         )
     elif arguments.command == "resume":
+        capability_bundle = _formal_capability_preflight(
+            arguments.capability_lock
+        )
         _resume_training_run(
             artifact_root=Path(arguments.artifact_root),
             checkpoint_path=Path(arguments.checkpoint),
             repository_root=repository_root,
-            max_updates=arguments.max_updates,
+            max_updates=None,
+            capability_bundle=capability_bundle,
         )
     elif arguments.command == "evaluate":
+        capability_bundle = _formal_capability_preflight(
+            arguments.capability_lock
+        )
         _evaluate_checkpoint(
             checkpoint_path=Path(arguments.checkpoint),
             gate_path=Path(arguments.gate),
             artifact_root=Path(arguments.artifact_root),
             repository_root=repository_root,
+            capability_bundle=capability_bundle,
         )
     elif arguments.command == "extend-budget":
         root = validate_artifact_root(
@@ -736,6 +775,29 @@ def main(argv: list[str] | None = None) -> int:
             root / "run-manifest.json", blocks=arguments.blocks
         )
     return 0
+
+
+def _formal_capability_preflight(
+    lock_path: str | None,
+) -> FrozenCapabilityBundle:
+    if lock_path is None:
+        raise PreflightError("formal capability bundle is required")
+    try:
+        return load_frozen_capability_bundle(Path(lock_path), run_kind="formal")
+    except CapabilityFreezeError as error:
+        raise PreflightError(f"formal capability bundle is invalid: {error}") from error
+
+
+def _validate_formal_bundle_identity(
+    bundle: FrozenCapabilityBundle | None,
+    run_identity: RunIdentity,
+) -> None:
+    if bundle is None or not bundle.formal_eligible:
+        raise PreflightError("formal capability bundle is required")
+    if run_identity.run_kind != "formal":
+        raise PreflightError("formal capability bundle cannot enter development-smoke")
+    if run_identity.capability_sha256 != bundle.bundle_sha256:
+        raise PreflightError("formal capability bundle hash differs from run identity")
 
 
 def run_cuda_interrupt_resume_smoke(
@@ -750,14 +812,16 @@ def run_cuda_interrupt_resume_smoke(
         config_path=Path(config_path),
         artifact_root=Path(artifact_root),
         repository_root=Path(repository_root),
-        max_updates=100,
+        max_updates=2,
         interrupt_first_update=True,
+        capability_bundle=None,
     )
     resumed = _resume_training_run(
         artifact_root=Path(artifact_root),
         checkpoint_path=(Path(artifact_root) / "checkpoints/latest.pt"),
         repository_root=Path(repository_root),
         max_updates=1,
+        capability_bundle=None,
     )
     return CudaSmokeEvidence(
         device_name=device_name,
@@ -779,6 +843,13 @@ def _calibrate_training_run(
     repository_root: Path,
 ) -> CalibratedRunState:
     """Run runtime probes plus three real proxy-v3 reward calibration seeds."""
+    config = load_training_config(config_path)
+    if config.run_kind != "development-smoke":
+        raise PreflightError(
+            "formal runtime calibration requires the future non-proxy environment"
+        )
+    source_commit = _source_commit(repository_root)
+    run_identity = _development_run_identity(source_commit)
     root = validate_artifact_root(
         artifact_root, repository_root=repository_root
     )
@@ -787,7 +858,6 @@ def _calibrate_training_run(
     if not root.parent.is_dir():
         raise ArtifactRootError("artifact root parent directory is missing")
     root.mkdir()
-    config = load_training_config(config_path)
     budget = TrainingBudget(
         total_gpu_seconds=float(config.total_gpu_budget_seconds)
     )
@@ -819,6 +889,7 @@ def _calibrate_training_run(
                     f"reward-calibration-{seed}".encode("utf-8")
                 ).hexdigest(),
                 schedule=schedule,
+                run_identity=run_identity,
             )
             torch.cuda.synchronize()
         except BaseException:
@@ -839,8 +910,9 @@ def _calibrate_training_run(
     allocation = _allocation_for_workers(calibration.selected_workers)
     _update_run_manifest(
         root / "run-manifest.json",
-        source_commit=_source_commit(repository_root),
+        source_commit=source_commit,
         config_hash=config_sha256(config.as_frozen_dict()),
+        run_identity=run_identity,
         global_step=0,
         consumed_gpu_seconds=budget.consumed_gpu_seconds,
         platform_allocation=allocation,
@@ -860,12 +932,18 @@ def _evaluate_checkpoint(
     gate_path: Path,
     artifact_root: Path,
     repository_root: Path,
+    capability_bundle: FrozenCapabilityBundle | None = None,
 ):
     """Evaluate one explicit checkpoint through proxy-v3 using the run budget."""
     root = validate_artifact_root(
         artifact_root, repository_root=repository_root
     )
     calibrated = _load_calibrated_run_state(root)
+    if calibrated.config.run_kind == "formal":
+        _validate_formal_bundle_identity(capability_bundle, calibrated.run_identity)
+        raise PreflightError("formal evaluation environment is not configured yet")
+    if capability_bundle is not None:
+        raise PreflightError("development-smoke evaluation rejects formal capability")
     checkpoint_target = checkpoint_path.resolve(strict=True)
     authoritative_parent = (root / "checkpoints").resolve(strict=True)
     if checkpoint_target.parent != authoritative_parent:
@@ -877,6 +955,7 @@ def _evaluate_checkpoint(
         expected_contract_version="ObservationContractV1",
         expected_config_hash=config_sha256(calibrated.config.as_frozen_dict()),
         expected_source_commit=_source_commit(repository_root),
+        expected_run_identity=calibrated.run_identity,
         expected_worker_allocation=calibrated.allocation,
         expected_micro_batch_size=calibrated.micro_batch_size,
         expected_budget_extension_blocks=(
@@ -899,6 +978,7 @@ def _evaluate_checkpoint(
             device="cuda",
             checkpoint_sha256=checkpoint.payload_sha256,
             schedule=CurriculumSchedule(),
+            run_identity=calibrated.run_identity,
         )
         torch.cuda.synchronize()
     except BaseException:
@@ -928,6 +1008,7 @@ def _evaluate_checkpoint(
         root / "run-manifest.json",
         source_commit=checkpoint.source_commit,
         config_hash=checkpoint.config_hash,
+        run_identity=calibrated.run_identity,
         global_step=checkpoint.global_step,
         consumed_gpu_seconds=calibrated.budget.consumed_gpu_seconds,
         platform_allocation=calibrated.allocation,
@@ -952,8 +1033,25 @@ def _run_curriculum_training(
     max_updates: int | None,
     interrupt_first_update: bool,
     restore_checkpoint,
+    capability_bundle: FrozenCapabilityBundle | None = None,
+    formal_environment_factory: FrozenCapabilityEnvironmentFactory | None = None,
+    formal_observation_template: PolicyBatch | None = None,
 ) -> _RunEvidence:
     """Run one smoke override or advance across four active-GPU phases."""
+    if calibrated.config.run_kind == "formal":
+        _validate_formal_bundle_identity(capability_bundle, calibrated.run_identity)
+        if (
+            formal_environment_factory is not None
+            and formal_environment_factory.bundle is not capability_bundle
+        ):
+            raise PreflightError(
+                "formal environment factory must bind the validated bundle object"
+            )
+        rollout_factory = formal_environment_factory
+    else:
+        if capability_bundle is not None or formal_environment_factory is not None:
+            raise PreflightError("development-smoke cannot consume formal capability")
+        rollout_factory = proxy_environment_factory
     schedule = CurriculumSchedule()
     checkpoint = restore_checkpoint
     global_step = initial_global_step
@@ -985,8 +1083,10 @@ def _run_curriculum_training(
             restore_checkpoint=checkpoint,
             curriculum_phase=phase,
             phase_end_gpu_seconds=phase_end,
-            rollout_environment_factory=proxy_environment_factory,
+            rollout_environment_factory=rollout_factory,
+            rollout_observation_template=formal_observation_template,
             rollout_reward_fn=compute_transition_reward,
+            run_identity=calibrated.run_identity,
         )
         if max_updates is not None or calibrated.budget.exhausted:
             return evidence
@@ -1013,11 +1113,27 @@ def _start_training_run(
     repository_root: Path,
     max_updates: int | None,
     interrupt_first_update: bool,
+    capability_bundle: FrozenCapabilityBundle | None = None,
+    formal_environment_factory: FrozenCapabilityEnvironmentFactory | None = None,
+    formal_observation_template: PolicyBatch | None = None,
 ) -> _RunEvidence:
+    requested_config = load_training_config(config_path)
+    if requested_config.run_kind == "formal":
+        if max_updates is not None:
+            raise PreflightError("formal train cannot bound updates")
+        if capability_bundle is None:
+            raise PreflightError("formal capability bundle is required")
+    else:
+        if capability_bundle is not None:
+            raise PreflightError("development-smoke rejects formal capability bundle")
+        if type(max_updates) is not int or not 1 <= max_updates <= 2:
+            raise PreflightError("development-smoke permits only one or two updates")
     root = validate_artifact_root(
         artifact_root, repository_root=repository_root
     )
     if not root.exists():
+        if requested_config.run_kind == "formal":
+            raise PreflightError("formal train requires a frozen calibrated run")
         _calibrate_training_run(
             config_path=config_path,
             artifact_root=root,
@@ -1025,9 +1141,10 @@ def _start_training_run(
         )
     calibrated = _load_calibrated_run_state(root)
     config = calibrated.config
-    requested_config = load_training_config(config_path)
     if requested_config.as_frozen_dict() != config.as_frozen_dict():
         raise ArtifactRootError("train config differs from calibrated run")
+    if config.run_kind == "formal":
+        _validate_formal_bundle_identity(capability_bundle, calibrated.run_identity)
     source_commit = _source_commit(repository_root)
     _seed_everything(calibrated.formal_seed)
     return _run_curriculum_training(
@@ -1039,6 +1156,9 @@ def _start_training_run(
         max_updates=max_updates,
         interrupt_first_update=interrupt_first_update,
         restore_checkpoint=None,
+        capability_bundle=capability_bundle,
+        formal_environment_factory=formal_environment_factory,
+        formal_observation_template=formal_observation_template,
     )
 
 
@@ -1048,6 +1168,9 @@ def _resume_training_run(
     checkpoint_path: Path | None = None,
     repository_root: Path,
     max_updates: int | None,
+    capability_bundle: FrozenCapabilityBundle | None = None,
+    formal_environment_factory: FrozenCapabilityEnvironmentFactory | None = None,
+    formal_observation_template: PolicyBatch | None = None,
 ) -> _RunEvidence:
     root = validate_artifact_root(
         artifact_root, repository_root=repository_root
@@ -1058,6 +1181,15 @@ def _resume_training_run(
     if not isinstance(frozen_config, dict):
         raise ArtifactRootError("run manifest frozen config is missing")
     config = resolve_training_config(frozen_config)
+    if config.run_kind == "formal":
+        if max_updates is not None:
+            raise PreflightError("formal resume cannot bound updates")
+        _validate_formal_bundle_identity(capability_bundle, calibrated.run_identity)
+    else:
+        if capability_bundle is not None:
+            raise PreflightError("development-smoke rejects formal capability bundle")
+        if type(max_updates) is not int or not 1 <= max_updates <= 2:
+            raise PreflightError("development-smoke permits only one or two updates")
     source_commit = _source_commit(repository_root)
     allocation_raw = manifest.get("platform_allocation")
     if not isinstance(allocation_raw, dict):
@@ -1084,6 +1216,7 @@ def _resume_training_run(
         expected_contract_version="ObservationContractV1",
         expected_config_hash=config_sha256(config.as_frozen_dict()),
         expected_source_commit=source_commit,
+        expected_run_identity=calibrated.run_identity,
         expected_worker_allocation=allocation,
         expected_micro_batch_size=micro_batch_size,
         expected_budget_extension_blocks=(
@@ -1129,6 +1262,9 @@ def _resume_training_run(
         max_updates=max_updates,
         interrupt_first_update=False,
         restore_checkpoint=checkpoint,
+        capability_bundle=capability_bundle,
+        formal_environment_factory=formal_environment_factory,
+        formal_observation_template=formal_observation_template,
     )
 
 
@@ -1150,12 +1286,38 @@ def _run_updates(
     rollout_environment_factory: Callable[
         [int, str], ParallelEnvironmentWorker
     ] | None = None,
+    rollout_observation_template: PolicyBatch | None = None,
     rollout_reward_fn: Callable[[PlannerTransition], float] | None = None,
+    run_identity: RunIdentity,
 ) -> _RunEvidence:
     if type(max_updates) is not int or max_updates <= 0:
         raise ValueError("max updates must be a positive integer")
+    if not isinstance(run_identity, RunIdentity) or (
+        run_identity.run_kind != config.run_kind
+    ):
+        raise PreflightError("training run identity differs from configuration")
+    if config.run_kind == "formal":
+        if not isinstance(
+            rollout_environment_factory, FrozenCapabilityEnvironmentFactory
+        ):
+            raise PreflightError(
+                "formal environment factory must bind the capability bundle"
+            )
+        if (
+            rollout_environment_factory.bundle.bundle_sha256
+            != run_identity.capability_sha256
+        ):
+            raise PreflightError("formal worker capability identity mismatch")
+        if not isinstance(rollout_observation_template, PolicyBatch):
+            raise PreflightError("formal observation template is required")
+        environment_factory = rollout_environment_factory
+        observation_template = rollout_observation_template
+    else:
+        if rollout_environment_factory not in (None, proxy_environment_factory):
+            raise PreflightError("development-smoke must remain proxy-only")
+        environment_factory = proxy_environment_factory
+        observation_template = proxy_observation(0, "WHEELED", step=0)
     _validated_cuda_device()
-    environment_factory = rollout_environment_factory or proxy_environment_factory
     reward_fn = rollout_reward_fn or compute_transition_reward
     policy = CrossAttentionPolicy()
     trainer = ResumablePPOTrainer(
@@ -1180,7 +1342,7 @@ def _run_updates(
     rollout_policy_version = initial_global_step
     pool = ParallelEnvPool(
         allocation=allocation,
-        observation_template=proxy_observation(0, "WHEELED", step=0),
+        observation_template=observation_template,
         environment_factory=environment_factory,
         reward_fn=reward_fn,
         worker_timeout_seconds=60.0,
@@ -1228,6 +1390,7 @@ def _run_updates(
             curriculum_phase=curriculum_phase,
             normalization=trainer.normalization,
             frozen_config=config.as_frozen_dict(),
+            run_identity=run_identity,
             source_commit=source_commit,
             consumed_gpu_seconds=budget.consumed_gpu_seconds,
             budget_extension_blocks=budget.budget_extension_blocks,
@@ -1251,6 +1414,7 @@ def _run_updates(
             artifact_root / "run-manifest.json",
             source_commit=source_commit,
             config_hash=checkpoint.config_hash,
+            run_identity=run_identity,
             global_step=state.global_step,
             consumed_gpu_seconds=budget.consumed_gpu_seconds,
             platform_allocation=allocation,
@@ -1595,6 +1759,24 @@ def _source_commit(repository_root: Path) -> str:
     return commit
 
 
+def _development_run_identity(source_commit: str) -> RunIdentity:
+    """Identity for bounded proxy smoke; it can never label a formal candidate."""
+    def digest(label: str) -> str:
+        return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+    return RunIdentity(
+        run_kind="development-smoke",
+        data_sha256=digest("development-smoke/proxy-data/v1"),
+        split_sha256=digest("development-smoke/proxy-split/v1"),
+        generator_sha256=digest("development-smoke/proxy-generator/v1"),
+        capability_sha256=digest(
+            f"development-smoke/proxy-capability/v1:{source_commit}"
+        ),
+        reward_sha256=reward_weights_sha256(),
+        v3_sha256=digest(f"lunar-planner-v3-source:{source_commit}"),
+    )
+
+
 def _read_run_manifest(path: Path) -> dict[str, object]:
     if not path.is_file() or path.is_symlink():
         raise ArtifactRootError("run manifest is missing or unsafe")
@@ -1612,6 +1794,7 @@ def _update_run_manifest(
     *,
     source_commit: str,
     config_hash: str,
+    run_identity: RunIdentity,
     global_step: int,
     consumed_gpu_seconds: float,
     platform_allocation: dict[str, int],
@@ -1619,6 +1802,16 @@ def _update_run_manifest(
     payload = _read_run_manifest(path)
     if "runtime_calibration" not in payload:
         raise ArtifactRootError("run manifest calibration is missing")
+    if not isinstance(run_identity, RunIdentity):
+        raise ArtifactRootError("run manifest identity must use RunIdentity")
+    existing_identity = payload.get("run_identity")
+    if existing_identity is not None:
+        try:
+            existing = RunIdentity.from_mapping(existing_identity)
+        except Exception as error:
+            raise ArtifactRootError("run manifest identity is invalid") from error
+        if existing != run_identity:
+            raise ArtifactRootError("run manifest identity cannot drift")
     try:
         budget = TrainingBudget(
             total_gpu_seconds=payload.get("total_gpu_budget_seconds"),
@@ -1631,6 +1824,7 @@ def _update_run_manifest(
         {
             "source_commit": source_commit,
             "config_hash": config_hash,
+            "run_identity": run_identity.to_dict(),
             "global_step": global_step,
             "consumed_gpu_seconds": consumed_gpu_seconds,
             "budget_state": (
@@ -1678,6 +1872,7 @@ if __name__ == "__main__":
 __all__ = [
     "ArtifactRootError",
     "CudaSmokeEvidence",
+    "PreflightError",
     "ResumablePPOTrainer",
     "SignalStopFlag",
     "TrainingBoundaryLoop",

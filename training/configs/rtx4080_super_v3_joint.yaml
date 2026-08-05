@@ -28,4 +28,4 @@ checkpoint_interval_seconds: 1800
 candidate_checkpoint_interval_seconds: 3600
 total_gpu_budget_seconds: 86400
 formal_training_seeds: [4080]
-proxy: true
+run_kind: formal

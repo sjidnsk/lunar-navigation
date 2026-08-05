@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from lunar_policy_training.checkpoint import RunIdentity
+
 from lunar_policy_training.evaluation.release_gate import (
     evaluate_release_gate,
     load_gate_rules,
@@ -51,6 +53,15 @@ def _report(*, wheeled: float, legged: float, hopper: float) -> EvaluationReport
     return EvaluationReport(
         proxy=True,
         scenario_schedule_id="proxy-schedule",
+        run_identity=RunIdentity(
+            run_kind="development-smoke",
+            data_sha256="1" * 64,
+            split_sha256="2" * 64,
+            generator_sha256="3" * 64,
+            capability_sha256="4" * 64,
+            reward_sha256="a" * 64,
+            v3_sha256="6" * 64,
+        ),
         reward_hash="a" * 64,
         checkpoint_sha256="b" * 64,
         methods=methods,

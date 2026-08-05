@@ -673,6 +673,11 @@ class ProxyEnvironmentFactory:
     """Picklable factory with an optional fixed evaluation scenario index."""
 
     scenario_index: int | None = None
+    run_kind: str = "development-smoke"
+
+    def __post_init__(self) -> None:
+        if self.run_kind != "development-smoke":
+            raise ValueError("proxy environment is development-smoke only")
 
     def __call__(
         self, worker_index: int, platform_type: str
@@ -710,13 +715,7 @@ def _create_proxy_environment(
     )
 
 
-def proxy_environment_factory(
-    worker_index: int, platform_type: str
-) -> ParallelEnvironmentWorker:
-    """Create one process-local deterministic proxy episode and real v3 bridge."""
-    return _create_proxy_environment(
-        worker_index, platform_type, scenario_index=worker_index % 3
-    )
+proxy_environment_factory = ProxyEnvironmentFactory()
 
 
 __all__ = [

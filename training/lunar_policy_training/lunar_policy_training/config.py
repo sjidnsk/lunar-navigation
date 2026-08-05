@@ -11,6 +11,15 @@ import yaml
 
 
 PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
+_CONFIG_FIELDS = {
+    "parallel",
+    "ppo",
+    "checkpoint_interval_seconds",
+    "candidate_checkpoint_interval_seconds",
+    "total_gpu_budget_seconds",
+    "formal_training_seeds",
+    "run_kind",
+}
 
 
 class TrainingConfigError(ValueError):
@@ -77,7 +86,7 @@ class ResolvedTrainingConfig:
     candidate_checkpoint_interval_seconds: int
     total_gpu_budget_seconds: int
     formal_training_seeds: tuple[int, ...]
-    proxy: bool
+    run_kind: str
 
     def as_frozen_dict(self) -> dict[str, object]:
         return {
@@ -114,7 +123,7 @@ class ResolvedTrainingConfig:
             ),
             "total_gpu_budget_seconds": self.total_gpu_budget_seconds,
             "formal_training_seeds": list(self.formal_training_seeds),
-            "proxy": self.proxy,
+            "run_kind": self.run_kind,
         }
 
 
@@ -136,6 +145,10 @@ def resolve_training_config(raw: Mapping[str, object]) -> ResolvedTrainingConfig
     """Resolve an already-loaded run-manifest config through the same gates."""
     if not isinstance(raw, Mapping):
         raise TrainingConfigError("training config must be a mapping")
+    if set(raw) != _CONFIG_FIELDS:
+        raise TrainingConfigError(
+            "training config must contain exactly the frozen top-level fields"
+        )
     parallel_raw = raw.get("parallel")
     if not isinstance(parallel_raw, Mapping):
         raise TrainingConfigError("parallel config must be a mapping")
@@ -238,7 +251,7 @@ def resolve_training_config(raw: Mapping[str, object]) -> ResolvedTrainingConfig
         formal_training_seeds=_integer_tuple(
             raw.get("formal_training_seeds"), "formal training seeds"
         ),
-        proxy=raw.get("proxy"),
+        run_kind=_string(raw.get("run_kind"), "run kind"),
     )
     _validate_frozen_values(config)
     return config
@@ -256,7 +269,6 @@ def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
         "candidate_checkpoint_interval_seconds": 3600,
         "total_gpu_budget_seconds": 86400,
         "formal_training_seeds": (4080,),
-        "proxy": True,
     }
     actual = {
         "worker_candidates": config.parallel.worker_candidates,
@@ -270,10 +282,11 @@ def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
         ),
         "total_gpu_budget_seconds": config.total_gpu_budget_seconds,
         "formal_training_seeds": config.formal_training_seeds,
-        "proxy": config.proxy,
     }
     if actual != expected:
         raise TrainingConfigError("training config changes a frozen Task 3 value")
+    if config.run_kind not in ("formal", "development-smoke"):
+        raise TrainingConfigError("run kind must be formal or development-smoke")
 
 
 def validate_ppo_config(config: PPOConfig) -> PPOConfig:

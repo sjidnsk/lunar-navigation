@@ -23,6 +23,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "model_contract"))
 from lunar_policy_training.budget import TrainingBudget  # noqa: E402
 from lunar_policy_training.cli import (  # noqa: E402
     ArtifactRootError,
+    PreflightError,
     SignalStopFlag,
     TrainingBoundaryLoop,
     _checkpoint_target,
@@ -32,6 +33,11 @@ from lunar_policy_training.cli import (  # noqa: E402
     _update_run_manifest,
     build_parser,
     validate_artifact_root,
+)
+from lunar_policy_training.config import (
+    TrainingConfigError,
+    load_training_config,
+    resolve_training_config,
 )
 from lunar_policy_training.curriculum import CurriculumSchedule
 from lunar_policy_training.reward import reward_weights_sha256
@@ -92,12 +98,108 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
 
     assert calibrate.command == "calibrate"
     assert train.command == "train"
-    assert train.max_updates is None
     assert resume.command == "resume"
-    assert resume.max_updates is None
     assert evaluate.command == "evaluate"
     assert extension.command == "extend-budget"
     assert extension.blocks == 2
+
+
+def test_training_configs_explicitly_separate_formal_and_development_smoke() -> None:
+    """Would fail if proxy status were inferred instead of frozen as run kind."""
+    formal = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+    smoke = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
+    )
+
+    assert formal.run_kind == "formal"
+    assert smoke.run_kind == "development-smoke"
+    assert "proxy" not in formal.as_frozen_dict()
+    assert "proxy" not in smoke.as_frozen_dict()
+
+    leaked = formal.as_frozen_dict()
+    leaked["proxy"] = True
+    with pytest.raises(TrainingConfigError, match="exactly"):
+        resolve_training_config(leaked)
+
+
+@pytest.mark.parametrize("command", ("train", "resume"))
+def test_formal_parser_has_no_max_updates_escape_hatch(command: str) -> None:
+    """Would fail if a bounded test knob remained exposed on a formal command."""
+    arguments = [command]
+    if command == "train":
+        arguments += [
+            "--config",
+            "training/configs/rtx4080_super_v3_joint.yaml",
+        ]
+    else:
+        arguments += ["--checkpoint", "/tmp/run/checkpoints/latest.pt"]
+    arguments += ["--artifact-root", "/tmp/run", "--max-updates", "1"]
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(arguments)
+
+
+@pytest.mark.parametrize("command", ("train", "resume", "evaluate"))
+def test_formal_without_capability_lock_fails_before_artifact_or_cuda(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    """Would fail if a formal entry touched artifacts/CUDA before capability gate."""
+    artifact_root = tmp_path / command
+    touched: list[str] = []
+    monkeypatch.setattr(
+        torch.cuda, "is_available", lambda: touched.append("cuda") or True
+    )
+    arguments = [command]
+    if command == "train":
+        arguments += [
+            "--config",
+            str(REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"),
+        ]
+    elif command == "resume":
+        arguments += ["--checkpoint", str(artifact_root / "checkpoints/latest.pt")]
+    else:
+        arguments += [
+            "--checkpoint",
+            str(artifact_root / "checkpoints/latest.pt"),
+            "--gate",
+            str(REPOSITORY_ROOT / "training/configs/candidate_gate_v1.yaml"),
+        ]
+    arguments += ["--artifact-root", str(artifact_root)]
+
+    with pytest.raises(PreflightError, match="formal capability bundle"):
+        cli_module.main(arguments)
+
+    assert touched == []
+    assert not artifact_root.exists()
+
+
+def test_development_smoke_is_proxy_only_and_bounded_to_two_updates(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Would fail if the test helper could become an unbounded pseudo-formal run."""
+    artifact_root = tmp_path / "unbounded-smoke"
+    touched: list[str] = []
+    monkeypatch.setattr(
+        torch.cuda, "is_available", lambda: touched.append("cuda") or True
+    )
+
+    with pytest.raises(PreflightError, match="one or two"):
+        cli_module._start_training_run(
+            config_path=(
+                REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
+            ),
+            artifact_root=artifact_root,
+            repository_root=REPOSITORY_ROOT,
+            max_updates=3,
+            interrupt_first_update=False,
+        )
+
+    assert touched == []
+    assert not artifact_root.exists()
 
 
 @pytest.mark.parametrize("blocks", ["0", "-1", "1.5", "not-an-int"])
@@ -147,6 +249,9 @@ def test_artifact_root_must_be_explicit_absolute_and_outside_repository(
 
 def _write_calibrated_manifest(root: pathlib.Path, *, consumed: float = 12.5) -> None:
     root.mkdir()
+    run_identity = cli_module._development_run_identity(
+        cli_module._source_commit(REPOSITORY_ROOT)
+    )
     config = yaml.safe_load(
         (REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml").read_text(
             encoding="utf-8"
@@ -157,6 +262,7 @@ def _write_calibrated_manifest(root: pathlib.Path, *, consumed: float = 12.5) ->
             {
                 "schema_version": "lunar-training-run/v1",
                 "frozen_config": config,
+                "run_identity": run_identity.to_dict(),
                 "runtime_calibration": {
                     "selected_workers": 24,
                     "selected_micro_batch": 2,
@@ -519,6 +625,7 @@ def test_run_manifest_persists_exhausted_budget_terminal_state(
         manifest,
         source_commit="a" * 40,
         config_hash="b" * 64,
+        run_identity=cli_module._development_run_identity("a" * 40),
         global_step=41,
         consumed_gpu_seconds=86400.0,
         platform_allocation={"WHEELED": 6, "LEGGED": 6, "HOPPER": 6},
@@ -527,6 +634,18 @@ def test_run_manifest_persists_exhausted_budget_terminal_state(
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert payload["budget_state"] == "exhausted"
     assert payload["consumed_gpu_seconds"] == 86400.0
+    identity = cli_module._development_run_identity("a" * 40)
+    assert payload["run_identity"] == identity.to_dict()
+    with pytest.raises(ArtifactRootError, match="identity cannot drift"):
+        _update_run_manifest(
+            manifest,
+            source_commit="a" * 40,
+            config_hash="b" * 64,
+            run_identity=cli_module._development_run_identity("c" * 40),
+            global_step=41,
+            consumed_gpu_seconds=86400.0,
+            platform_allocation={"WHEELED": 6, "LEGGED": 6, "HOPPER": 6},
+        )
 
 
 def test_run_manifest_keeps_extended_budget_active_at_initial_limit(
@@ -550,6 +669,7 @@ def test_run_manifest_keeps_extended_budget_active_at_initial_limit(
         manifest,
         source_commit="a" * 40,
         config_hash="b" * 64,
+        run_identity=cli_module._development_run_identity("a" * 40),
         global_step=41,
         consumed_gpu_seconds=86400.0,
         platform_allocation={"WHEELED": 6, "LEGGED": 6, "HOPPER": 6},

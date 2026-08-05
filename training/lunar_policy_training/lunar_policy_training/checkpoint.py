@@ -30,7 +30,16 @@ from .ppo.checkpoint import (
 )
 
 
-CHECKPOINT_SCHEMA_VERSION = "lunar-ppo-checkpoint/v2"
+CHECKPOINT_SCHEMA_VERSION = "lunar-ppo-checkpoint/v3"
+_RUN_IDENTITY_FIELDS = (
+    "run_kind",
+    "data_sha256",
+    "split_sha256",
+    "generator_sha256",
+    "capability_sha256",
+    "reward_sha256",
+    "v3_sha256",
+)
 _BODY_FIELDS = {
     "schema_version",
     "contract_version",
@@ -42,6 +51,7 @@ _BODY_FIELDS = {
     "normalization",
     "rng_state",
     "frozen_config",
+    "run_identity",
     "config_hash",
     "source_commit",
     "consumed_gpu_seconds",
@@ -52,10 +62,65 @@ _BODY_FIELDS = {
     "latest_checkpoint_gpu_seconds",
     "candidate_checkpoint_gpu_seconds",
 }
+_V2_BODY_FIELDS = _BODY_FIELDS - {"run_identity"}
+
+
+@dataclass(frozen=True, slots=True)
+class RunIdentity:
+    run_kind: str
+    data_sha256: str
+    split_sha256: str
+    generator_sha256: str
+    capability_sha256: str
+    reward_sha256: str
+    v3_sha256: str
+
+    def __post_init__(self) -> None:
+        if self.run_kind not in ("formal", "development-smoke"):
+            raise CheckpointError("run identity run kind is invalid")
+        for field in _RUN_IDENTITY_FIELDS[1:]:
+            if not _is_sha256(getattr(self, field)):
+                raise CheckpointError(
+                    f"run identity {field.replace('_', ' ')} is invalid"
+                )
+
+    def to_dict(self) -> dict[str, str]:
+        return {field: getattr(self, field) for field in _RUN_IDENTITY_FIELDS}
+
+    @classmethod
+    def from_mapping(cls, value: object) -> "RunIdentity":
+        return _run_identity_from_mapping(value)
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingCheckpointV3:
+    schema_version: str
+    contract_version: str
+    model_state: Mapping[object, object]
+    optimizer_state: Mapping[object, object]
+    scheduler_state: Mapping[object, object]
+    global_step: int
+    curriculum_phase: str
+    normalization: Mapping[object, object]
+    rng_state: Mapping[object, object]
+    frozen_config: dict[str, object]
+    run_identity: RunIdentity
+    config_hash: str
+    source_commit: str
+    consumed_gpu_seconds: float
+    budget_extension_blocks: int
+    total_gpu_budget_seconds: float
+    worker_allocation: dict[str, int]
+    micro_batch_size: int
+    latest_checkpoint_gpu_seconds: float
+    candidate_checkpoint_gpu_seconds: float
+    payload_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
 class TrainingCheckpointV2:
+    """Read-only legacy state; accepted only by explicit development smoke."""
+
     schema_version: str
     contract_version: str
     model_state: Mapping[object, object]
@@ -87,6 +152,7 @@ def build_training_checkpoint(
     curriculum_phase: str,
     normalization: Mapping[object, object],
     frozen_config: Mapping[str, object],
+    run_identity: RunIdentity,
     source_commit: str,
     consumed_gpu_seconds: float,
     budget_extension_blocks: int,
@@ -95,7 +161,7 @@ def build_training_checkpoint(
     micro_batch_size: int,
     latest_checkpoint_gpu_seconds: float,
     candidate_checkpoint_gpu_seconds: float,
-) -> TrainingCheckpointV2:
+) -> TrainingCheckpointV3:
     """Capture a complete run state with the PPO core's strict validators."""
     if not isinstance(model, nn.Module):
         raise CheckpointError("model must be a Torch module")
@@ -103,6 +169,8 @@ def build_training_checkpoint(
         raise CheckpointError("optimizer must be a Torch optimizer")
     if not isinstance(scheduler, torch.optim.lr_scheduler.LRScheduler):
         raise CheckpointError("scheduler must be a Torch LR scheduler")
+    if not isinstance(run_identity, RunIdentity):
+        raise CheckpointError("checkpoint run identity must use RunIdentity")
     body = {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "contract_version": OBSERVATION_CONTRACT_VERSION,
@@ -114,6 +182,7 @@ def build_training_checkpoint(
         "normalization": _cpu_copy(dict(normalization)),
         "rng_state": _capture_rng_state(),
         "frozen_config": _json_copy(frozen_config),
+        "run_identity": run_identity.to_dict(),
         "config_hash": config_sha256(frozen_config),
         "source_commit": source_commit,
         "consumed_gpu_seconds": consumed_gpu_seconds,
@@ -130,13 +199,13 @@ def build_training_checkpoint(
 
 def save_checkpoint_atomic(
     path: str | Path,
-    checkpoint: TrainingCheckpointV2,
+    checkpoint: TrainingCheckpointV3,
     *,
     overwrite: bool = True,
 ) -> None:
     """Flush one same-directory temporary file before atomically replacing target."""
-    if not isinstance(checkpoint, TrainingCheckpointV2):
-        raise CheckpointError("checkpoint must use TrainingCheckpointV2")
+    if not isinstance(checkpoint, TrainingCheckpointV3):
+        raise CheckpointError("checkpoint must use TrainingCheckpointV3")
     target = _validated_target(path)
     if not overwrite and target.exists():
         raise CheckpointError("immutable checkpoint already exists")
@@ -175,7 +244,9 @@ def save_checkpoint_atomic(
         raise CheckpointError("checkpoint file could not be written atomically") from error
 
 
-def load_checkpoint(path: str | Path) -> TrainingCheckpointV2:
+def load_checkpoint(
+    path: str | Path, *, run_kind: str | None = None
+) -> TrainingCheckpointV3 | TrainingCheckpointV2:
     """Load and validate an inert checkpoint payload without mutating live state."""
     target = Path(path)
     if target.is_symlink() or not target.is_file():
@@ -191,11 +262,27 @@ def load_checkpoint(path: str | Path) -> TrainingCheckpointV2:
         raise CheckpointError("checkpoint payload structure is invalid")
     body = payload["body"]
     payload_sha256 = payload["body_sha256"]
-    _validate_body(body)
+    schema = body.get("schema_version") if isinstance(body, Mapping) else None
+    if schema == CHECKPOINT_SCHEMA_VERSION:
+        _validate_body(body)
+    elif schema == "lunar-ppo-checkpoint/v2":
+        if run_kind is None:
+            raise CheckpointError(
+                "v2 checkpoint requires explicit development-smoke run kind"
+            )
+        if run_kind == "formal":
+            raise CheckpointError("formal run rejects v2 checkpoint")
+        if run_kind != "development-smoke":
+            raise CheckpointError("checkpoint run kind is invalid")
+        _validate_v2_body(body)
+    else:
+        raise CheckpointError("checkpoint schema version mismatch")
     if not _is_sha256(payload_sha256):
         raise CheckpointError("checkpoint payload hash is invalid")
     if _semantic_sha256(body) != payload_sha256:
         raise CheckpointError("checkpoint payload hash mismatch")
+    if schema == "lunar-ppo-checkpoint/v2":
+        return _checkpoint_v2_from_body(body, payload_sha256)
     return _checkpoint_from_body(body, payload_sha256)
 
 
@@ -205,19 +292,30 @@ def load_checkpoint_for_resume(
     expected_contract_version: str,
     expected_config_hash: str,
     expected_source_commit: str,
+    expected_run_identity: RunIdentity,
     expected_worker_allocation: Mapping[str, int] | None = None,
     expected_micro_batch_size: int | None = None,
     expected_budget_extension_blocks: int | None = None,
     expected_total_gpu_budget_seconds: float | None = None,
-) -> TrainingCheckpointV2:
+) -> TrainingCheckpointV3 | TrainingCheckpointV2:
     """Reject any run identity drift before live state can be mutated."""
-    checkpoint = load_checkpoint(path)
+    if not isinstance(expected_run_identity, RunIdentity):
+        raise CheckpointError("expected run identity must use RunIdentity")
+    checkpoint = load_checkpoint(path, run_kind=expected_run_identity.run_kind)
     if checkpoint.contract_version != expected_contract_version:
         raise CheckpointError("checkpoint contract version mismatch")
     if checkpoint.config_hash != expected_config_hash:
         raise CheckpointError("checkpoint config hash mismatch")
     if checkpoint.source_commit != expected_source_commit:
         raise CheckpointError("checkpoint source commit mismatch")
+    if isinstance(checkpoint, TrainingCheckpointV3):
+        for field in _RUN_IDENTITY_FIELDS:
+            if getattr(checkpoint.run_identity, field) != getattr(
+                expected_run_identity, field
+            ):
+                raise CheckpointError(
+                    f"checkpoint {field.replace('_', ' ')} mismatch"
+                )
     if (
         expected_worker_allocation is not None
         and checkpoint.worker_allocation != dict(expected_worker_allocation)
@@ -250,7 +348,7 @@ def load_checkpoint_for_resume(
 
 
 def restore_training_state(
-    checkpoint: TrainingCheckpointV2,
+    checkpoint: TrainingCheckpointV3 | TrainingCheckpointV2,
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
@@ -258,8 +356,8 @@ def restore_training_state(
     normalization_state: MutableMapping[object, object] | None = None,
 ) -> None:
     """Restore complete train/RNG state, rolling live objects back on failure."""
-    if not isinstance(checkpoint, TrainingCheckpointV2):
-        raise CheckpointError("checkpoint must use TrainingCheckpointV2")
+    if not isinstance(checkpoint, (TrainingCheckpointV3, TrainingCheckpointV2)):
+        raise CheckpointError("checkpoint must use a supported training checkpoint")
     if not isinstance(model, nn.Module):
         raise CheckpointError("model must be a Torch module")
     if not isinstance(optimizer, torch.optim.Optimizer):
@@ -336,6 +434,7 @@ def _validate_body(body: object) -> None:
         raise CheckpointError("checkpoint frozen config is invalid")
     if config_sha256(body["frozen_config"]) != body["config_hash"]:
         raise CheckpointError("checkpoint config hash mismatch")
+    _run_identity_from_mapping(body["run_identity"])
     if not _is_source_commit(body["source_commit"]):
         raise CheckpointError("checkpoint source commit is invalid")
     consumed = body["consumed_gpu_seconds"]
@@ -387,7 +486,56 @@ def _validate_body(body: object) -> None:
             raise CheckpointError(f"checkpoint {name} is invalid")
 
 
+def _validate_v2_body(body: object) -> None:
+    if not isinstance(body, Mapping) or set(body) != _V2_BODY_FIELDS:
+        raise CheckpointError("v2 checkpoint body structure is invalid")
+    promoted = dict(body)
+    promoted["schema_version"] = CHECKPOINT_SCHEMA_VERSION
+    promoted["run_identity"] = RunIdentity(
+        run_kind="development-smoke",
+        data_sha256="0" * 64,
+        split_sha256="0" * 64,
+        generator_sha256="0" * 64,
+        capability_sha256="0" * 64,
+        reward_sha256="0" * 64,
+        v3_sha256="0" * 64,
+    ).to_dict()
+    _validate_body(promoted)
+
+
 def _checkpoint_from_body(
+    body: Mapping[object, object], payload_sha256: str
+) -> TrainingCheckpointV3:
+    return TrainingCheckpointV3(
+        schema_version=body["schema_version"],
+        contract_version=body["contract_version"],
+        model_state=body["model_state"],
+        optimizer_state=body["optimizer_state"],
+        scheduler_state=body["scheduler_state"],
+        global_step=body["global_step"],
+        curriculum_phase=body["curriculum_phase"],
+        normalization=body["normalization"],
+        rng_state=body["rng_state"],
+        frozen_config=dict(body["frozen_config"]),
+        run_identity=_run_identity_from_mapping(body["run_identity"]),
+        config_hash=body["config_hash"],
+        source_commit=body["source_commit"],
+        consumed_gpu_seconds=float(body["consumed_gpu_seconds"]),
+        budget_extension_blocks=body["budget_extension_blocks"],
+        total_gpu_budget_seconds=float(body["total_gpu_budget_seconds"]),
+        worker_allocation=dict(body["worker_allocation"]),
+        micro_batch_size=body["micro_batch_size"],
+        latest_checkpoint_gpu_seconds=float(
+            body["latest_checkpoint_gpu_seconds"]
+        ),
+        candidate_checkpoint_gpu_seconds=float(
+            body["candidate_checkpoint_gpu_seconds"]
+        ),
+        payload_sha256=payload_sha256,
+    )
+
+
+def _checkpoint_v2_from_body(
     body: Mapping[object, object], payload_sha256: str
 ) -> TrainingCheckpointV2:
     return TrainingCheckpointV2(
@@ -418,11 +566,21 @@ def _checkpoint_from_body(
     )
 
 
-def _body_from_checkpoint(checkpoint: TrainingCheckpointV2) -> dict[str, object]:
+def _body_from_checkpoint(checkpoint: TrainingCheckpointV3) -> dict[str, object]:
     return {
-        name: getattr(checkpoint, name)
+        name: (
+            checkpoint.run_identity.to_dict()
+            if name == "run_identity"
+            else getattr(checkpoint, name)
+        )
         for name in _BODY_FIELDS
     }
+
+
+def _run_identity_from_mapping(value: object) -> RunIdentity:
+    if not isinstance(value, Mapping) or set(value) != set(_RUN_IDENTITY_FIELDS):
+        raise CheckpointError("checkpoint run identity structure is invalid")
+    return RunIdentity(**{field: value[field] for field in _RUN_IDENTITY_FIELDS})
 
 
 def _validated_target(path: str | Path) -> Path:
@@ -463,7 +621,9 @@ def _is_source_commit(value: object) -> bool:
 
 __all__ = [
     "CHECKPOINT_SCHEMA_VERSION",
+    "RunIdentity",
     "TrainingCheckpointV2",
+    "TrainingCheckpointV3",
     "build_training_checkpoint",
     "config_sha256",
     "load_checkpoint",

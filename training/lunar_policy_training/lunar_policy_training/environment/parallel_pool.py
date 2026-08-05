@@ -14,6 +14,7 @@ import torch
 from lunar_planner_training_bridge import PlanningOutcome
 from lunar_model_contract import ObservationContractV2
 
+from ..capability_freeze import FrozenPlatformCapability, ScenarioIdentity
 from ..config import PLATFORMS
 from ..policy.observation import (
     ObservationIdentity,
@@ -36,6 +37,13 @@ class ParallelEnvironmentWorker:
 
     environment: object
     initial_observation: PolicyBatch
+
+
+EnvironmentFactory = Callable[[int, str], ParallelEnvironmentWorker]
+CapabilityEnvironmentBuilder = Callable[
+    [int, str, FrozenPlatformCapability, ScenarioIdentity],
+    ParallelEnvironmentWorker,
+]
 
 
 @dataclass(slots=True)
@@ -65,7 +73,7 @@ class ParallelEnvPool:
         *,
         allocation: Mapping[str, int],
         observation_template: PolicyBatch,
-        environment_factory: Callable[[int, str], ParallelEnvironmentWorker],
+        environment_factory: EnvironmentFactory,
         reward_fn: Callable[[PlannerTransition], float],
         worker_timeout_seconds: float = 30.0,
         auto_reset: bool = True,
@@ -666,7 +674,7 @@ def joint_worker_allocation(total_workers: int) -> dict[str, int]:
 def _worker_main(
     worker_index: int,
     platform_type: str,
-    environment_factory: Callable[[int, str], ParallelEnvironmentWorker],
+    environment_factory: EnvironmentFactory,
     reward_fn: Callable[[PlannerTransition], float],
     auto_reset: bool,
     command_queue,
@@ -979,6 +987,8 @@ def _validate_actions(actions: ParallelActions, worker_count: int) -> None:
 
 
 __all__ = [
+    "CapabilityEnvironmentBuilder",
+    "EnvironmentFactory",
     "ParallelActions",
     "ParallelEnvironmentWorker",
     "ParallelEnvPool",

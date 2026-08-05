@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
+from .capability_freeze import FrozenPlatformCapability
+
 
 PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
 FORMAL_SEED = 4080
@@ -19,10 +21,18 @@ _COMPLETE_UPDATE_RESERVE_S = 600
 @dataclass(frozen=True, slots=True)
 class CurriculumScenario:
     platform_type: str
-    capability_id: str
+    capability_version: str
+    capability_sha256: str
     terrain_id: str
     scenario_seed: int
+    scenario_schedule_id: str
     proxy: bool = True
+
+    @property
+    def capability_id(self) -> str:
+        if self.proxy:
+            return self.capability_version
+        return f"{self.capability_version}:{self.capability_sha256}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +106,12 @@ class CurriculumSchedule:
         return f"proxy-scenario-schedule-v1:{digest}"
 
     def scenario_for(
-        self, *, platform_type: str, scenario_index: int
+        self,
+        *,
+        platform_type: str,
+        scenario_index: int,
+        capability: FrozenPlatformCapability | None = None,
+        scenario_schedule_id: str | None = None,
     ) -> CurriculumScenario:
         if platform_type not in PLATFORMS:
             raise ValueError("unknown curriculum platform")
@@ -104,11 +119,28 @@ class CurriculumSchedule:
             raise ValueError("scenario index must be a non-negative integer")
         platform_index = PLATFORMS.index(platform_type)
         terrain_cycle = ("flat_sparse", "rolling_sparse", "full_proxy")
+        if capability is not None:
+            if capability.platform_type != platform_type:
+                raise ValueError("curriculum capability platform mismatch")
+            if not isinstance(scenario_schedule_id, str) or not scenario_schedule_id:
+                raise ValueError("formal curriculum schedule identity is missing")
+            return CurriculumScenario(
+                platform_type=platform_type,
+                capability_version=capability.capability_version,
+                capability_sha256=capability.content_sha256,
+                terrain_id=f"{scenario_schedule_id}:{scenario_index}",
+                scenario_seed=10_000 + platform_index * 1_000 + scenario_index,
+                scenario_schedule_id=scenario_schedule_id,
+                proxy=False,
+            )
+        proxy_version = f"proxy-{platform_type.lower()}-v1"
         return CurriculumScenario(
             platform_type=platform_type,
-            capability_id=f"proxy-{platform_type.lower()}-v1",
+            capability_version=proxy_version,
+            capability_sha256=hashlib.sha256(proxy_version.encode("utf-8")).hexdigest(),
             terrain_id=terrain_cycle[scenario_index % len(terrain_cycle)],
             scenario_seed=10_000 + platform_index * 1_000 + scenario_index,
+            scenario_schedule_id=self.scenario_schedule_id,
         )
 
     def freeze(
