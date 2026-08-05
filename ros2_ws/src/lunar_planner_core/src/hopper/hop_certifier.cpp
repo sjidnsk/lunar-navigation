@@ -16,6 +16,7 @@
 
 #include "hopper/ballistic_kinematics.hpp"
 #include "hopper/flight_tube_certifier.hpp"
+#include "shared/map_snapshot.hpp"
 
 namespace lunar::planning::hopper {
 namespace {
@@ -195,13 +196,27 @@ struct CertifiedCandidate final {
 }  // namespace
 
 HopCertificationResult CertifyFirstHop(
-    const PlannerInput& input,
-    const HopperState& state,
-    const HopperCapability& capability,
-    const shared::MapSnapshot& map,
+    const hierarchical::LocalPlanningProblem& problem,
     const CertifiedLandingRegion& source_region,
     const CertifiedLandingRegion& target_region) {
-  if (input.stop_token.stop_requested()) {
+  const auto* state = std::get_if<HopperState>(&problem.current_state);
+  const auto* capability =
+      std::get_if<HopperCapability>(&problem.capability);
+  const shared::MapSnapshotBuildResult map =
+      shared::MapSnapshot::Create(problem.local_map_view);
+  if (state == nullptr || capability == nullptr || !map.ok()) {
+    return HopCertificationResult{
+        .segment = std::nullopt,
+        .canceled = false,
+        .resource_exhausted = false,
+        .attempted_candidates = 0U,
+        .cost = 0.0,
+        .reason_code = map.ok()
+            ? "HOPPER_CERTIFICATION_INPUT_INVALID"
+            : map.reason_code,
+    };
+  }
+  if (problem.stop_token.stop_requested()) {
     return HopCertificationResult{
         .segment = std::nullopt,
         .canceled = true,
@@ -211,8 +226,8 @@ HopCertificationResult CertifyFirstHop(
         .reason_code = "REQUEST_CANCELED",
     };
   }
-  if (input.config.hopper.maximum_certification_attempts == 0U ||
-      input.config.hopper.maximum_authorized_hops == 0U) {
+  if (problem.config.hopper.maximum_certification_attempts == 0U ||
+      problem.config.hopper.maximum_authorized_hops == 0U) {
     return HopCertificationResult{
         .segment = std::nullopt,
         .canceled = false,
@@ -223,7 +238,7 @@ HopCertificationResult CertifyFirstHop(
     };
   }
   const auto required_attitude_time = RequiredAttitudeTime(
-      state, input.goal_map, target_region, capability);
+      *state, problem.goal_odom, target_region, *capability);
   if (!required_attitude_time.has_value()) {
     return HopCertificationResult{
         .segment = std::nullopt,
@@ -234,12 +249,12 @@ HopCertificationResult CertifyFirstHop(
         .reason_code = "HOPPER_ATTITUDE_NOT_CERTIFIED",
     };
   }
-  const Vec3 launch_position = state.pose.position_m;
+  const Vec3 launch_position = state->pose.position_m;
   const Vec3 landing_position{
       .x = target_region.aim_position_on_surface_m.x,
       .y = target_region.aim_position_on_surface_m.y,
       .z = target_region.aim_position_on_surface_m.z +
-          capability.body_half_extent_m.z,
+          capability->body_half_extent_m.z,
   };
   const Vec3 displacement{
       .x = landing_position.x - launch_position.x,
@@ -247,11 +262,11 @@ HopCertificationResult CertifyFirstHop(
       .z = landing_position.z - launch_position.z,
   };
   const double minimum_s = std::chrono::duration<double>(
-      capability.minimum_flight_time).count();
+      capability->minimum_flight_time).count();
   const double maximum_s = std::chrono::duration<double>(
-      capability.maximum_flight_time).count();
+      capability->maximum_flight_time).count();
   if (!IsFinite(launch_position) || !IsFinite(landing_position) ||
-      !IsFinite(state.velocity.linear_mps) ||
+      !IsFinite(state->velocity.linear_mps) ||
       !std::isfinite(minimum_s) || !std::isfinite(maximum_s) ||
       minimum_s <= 0.0 || maximum_s < minimum_s) {
     return HopCertificationResult{
@@ -265,17 +280,18 @@ HopCertificationResult CertifyFirstHop(
   }
 
   const std::vector<double> times = CandidateFlightTimes(
-      displacement, capability.gravity_mps2, minimum_s, maximum_s,
-      input.config.hopper.maximum_certification_attempts);
-  const double gravity_norm = Norm(capability.gravity_mps2);
+      displacement, capability->gravity_mps2, minimum_s, maximum_s,
+      problem.config.hopper.maximum_certification_attempts);
+  const double gravity_norm = Norm(capability->gravity_mps2);
   std::optional<CertifiedCandidate> selected;
+  std::optional<std::string> tube_rejection;
   std::size_t attempts = 0U;
   std::string last_rejection = "HOPPER_NO_BALLISTIC_CANDIDATE";
   for (const double time_s : times) {
-    if (attempts >= input.config.hopper.maximum_certification_attempts) {
+    if (attempts >= problem.config.hopper.maximum_certification_attempts) {
       break;
     }
-    if (input.stop_token.stop_requested()) {
+    if (problem.stop_token.stop_requested()) {
       return HopCertificationResult{
           .segment = std::nullopt,
           .canceled = true,
@@ -291,7 +307,7 @@ HopCertificationResult CertifyFirstHop(
       continue;
     }
     const BallisticSolveResult solved = SolveBallisticArc(
-        launch_position, landing_position, capability.gravity_mps2, time_s);
+        launch_position, landing_position, capability->gravity_mps2, time_s);
     if (!solved.ok()) {
       last_rejection = solved.reason_code;
       continue;
@@ -300,39 +316,40 @@ HopCertificationResult CertifyFirstHop(
     const double launch_speed = Norm(arc.launch_velocity_mps);
     const double landing_speed = Norm(arc.landing_velocity_mps);
     const Vec3 velocity_change{
-        .x = arc.launch_velocity_mps.x - state.velocity.linear_mps.x,
-        .y = arc.launch_velocity_mps.y - state.velocity.linear_mps.y,
-        .z = arc.launch_velocity_mps.z - state.velocity.linear_mps.z,
+        .x = arc.launch_velocity_mps.x - state->velocity.linear_mps.x,
+        .y = arc.launch_velocity_mps.y - state->velocity.linear_mps.y,
+        .z = arc.launch_velocity_mps.z - state->velocity.linear_mps.z,
     };
-    const double impulse = capability.platform_mass_kg * Norm(velocity_change);
+    const double impulse = capability->platform_mass_kg * Norm(velocity_change);
     const double downward_speed = gravity_norm > kTolerance
-        ? Dot(arc.landing_velocity_mps, capability.gravity_mps2) / gravity_norm
+        ? Dot(arc.landing_velocity_mps, capability->gravity_mps2) /
+            gravity_norm
         : -std::numeric_limits<double>::infinity();
     if (!std::isfinite(launch_speed) ||
-        launch_speed > capability.maximum_launch_speed_mps + kTolerance) {
+        launch_speed > capability->maximum_launch_speed_mps + kTolerance) {
       last_rejection = "HOPPER_LAUNCH_SPEED_LIMIT";
       continue;
     }
     if (!std::isfinite(impulse) ||
         impulse >
-            capability.maximum_launch_impulse_newton_seconds + kTolerance) {
+            capability->maximum_launch_impulse_newton_seconds + kTolerance) {
       last_rejection = "HOPPER_LAUNCH_IMPULSE_LIMIT";
       continue;
     }
     if (!std::isfinite(landing_speed) ||
-        landing_speed > capability.maximum_landing_speed_mps + kTolerance) {
+        landing_speed > capability->maximum_landing_speed_mps + kTolerance) {
       last_rejection = "HOPPER_LANDING_SPEED_LIMIT";
       continue;
     }
     if (!std::isfinite(downward_speed) ||
         downward_speed + kTolerance <
-            capability.minimum_downward_impact_speed_mps) {
+            capability->minimum_downward_impact_speed_mps) {
       last_rejection = "HOPPER_DOWNWARD_IMPACT_SPEED_LIMIT";
       continue;
     }
     const FlightTubeCertificationResult tube = CertifyFlightTube(
-        arc, map, source_region, target_region, capability,
-        input.config, input.stop_token);
+        arc, *map.snapshot, source_region, target_region, *capability,
+        problem.config, problem.stop_token);
     if (tube.canceled) {
       return HopCertificationResult{
           .segment = std::nullopt,
@@ -345,6 +362,9 @@ HopCertificationResult CertifyFirstHop(
     }
     if (!tube.certified) {
       last_rejection = tube.reason_code;
+      if (!tube_rejection.has_value()) {
+        tube_rejection = tube.reason_code;
+      }
       continue;
     }
     CertifiedCandidate candidate{
@@ -363,7 +383,9 @@ HopCertificationResult CertifyFirstHop(
         .resource_exhausted = false,
         .attempted_candidates = attempts,
         .cost = 0.0,
-        .reason_code = std::move(last_rejection),
+        .reason_code = tube_rejection.has_value()
+            ? std::move(*tube_rejection)
+            : std::move(last_rejection),
     };
   }
 
@@ -371,11 +393,11 @@ HopCertificationResult CertifyFirstHop(
       static_cast<std::int64_t>(
           std::llround(selected->arc.flight_time_s * 1.0e9))};
   const double settle_s = std::chrono::duration<double>(
-      capability.minimum_settle_guard).count();
+      capability->minimum_settle_guard).count();
   return HopCertificationResult{
       .segment = HopSegment{
-          .segment_id = input.request_id + "-hop-0",
-          .launch_pose = state.pose,
+          .segment_id = problem.request_id + "-hop-0",
+          .launch_pose = state->pose,
           .landing_region_boundary_m = target_region.boundary_m,
           .flight_time = flight_time,
           .launch_velocity_mps = selected->arc.launch_velocity_mps,

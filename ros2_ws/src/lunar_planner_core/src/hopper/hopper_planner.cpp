@@ -1,5 +1,6 @@
 #include "hopper/hopper_planner.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -10,6 +11,9 @@
 #include <utility>
 #include <vector>
 
+#include "hierarchical/frame_transform.hpp"
+#include "hierarchical/hopper_route_planner.hpp"
+#include "hierarchical/local_planning_problem.hpp"
 #include "hopper/commitment_state_machine.hpp"
 #include "hopper/hop_certifier.hpp"
 #include "hopper/landing_region.hpp"
@@ -188,8 +192,77 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
         "HOPPER_RESOURCE_LIMIT_INVALID", started);
   }
 
+  const hierarchical::HopperRoutePlanResult global =
+      hierarchical::PlanHopperGlobalRoute(input);
+  if (!global.ok()) {
+    ExecutionDirective directive = ExecutionDirective::kNoSafeReference;
+    if (global.outcome == PlanningOutcome::kCanceled ||
+        global.outcome == PlanningOutcome::kGoalInfeasible) {
+      directive = ExecutionDirective::kHoldPosition;
+    }
+    return Failure(
+        global.outcome, directive, global.reason_code, started,
+        global.expanded_nodes);
+  }
+  if (!global.route.has_value() || global.route->poses_map.size() < 2U) {
+    return Failure(
+        PlanningOutcome::kNumericalFailure,
+        ExecutionDirective::kNoSafeReference,
+        "HOPPER_GLOBAL_ROUTE_RESULT_INVALID", started,
+        global.expanded_nodes);
+  }
+
+  const Pose3& next_pose_map = global.route->poses_map[1U];
+  const auto next_pose_odom = hierarchical::TransformPose(
+      next_pose_map, input.world.map_from_odom,
+      hierarchical::TransformDirection::kParentToChild);
+  if (!next_pose_odom.has_value()) {
+    return Failure(
+        PlanningOutcome::kInvalidRequest,
+        ExecutionDirective::kNoSafeReference,
+        "FRAME_TRANSFORM_INVALID", started, global.expanded_nodes);
+  }
+  const auto final_goal_odom = hierarchical::TransformGoal(
+      input.goal_map, input.world.map_from_odom,
+      hierarchical::TransformDirection::kParentToChild);
+  if (!final_goal_odom.has_value()) {
+    return Failure(
+        PlanningOutcome::kInvalidRequest,
+        ExecutionDirective::kNoSafeReference,
+        "FRAME_TRANSFORM_INVALID", started, global.expanded_nodes);
+  }
+  GoalRegion local_goal{
+      .goal_id = input.goal_map.goal_id + "/first-hop",
+      .target = PointGoal{
+          .position_m = Vec3{
+              .x = next_pose_odom->position_m.x,
+              .y = next_pose_odom->position_m.y,
+              .z = next_pose_odom->position_m.z -
+                  capability->body_half_extent_m.z,
+          },
+          .tolerance_m = std::max(
+              0.1, 0.25 * input.world.local_map.resolution_m),
+      },
+      .yaw_rad = std::nullopt,
+      .yaw_tolerance_rad = 0.0,
+  };
+  if (global.route_hops == 1U) {
+    local_goal = *final_goal_odom;
+  }
+  const hierarchical::LocalPlanningProblem local_problem{
+      .request_id = input.request_id,
+      .state_time = input.state_time,
+      .current_state = input.current_state,
+      .goal_odom = std::move(local_goal),
+      .local_map_view = input.world.local_map,
+      .capability = input.capability,
+      .config = input.config,
+      .previous_execution = input.previous_execution,
+      .stop_token = input.stop_token,
+  };
+
   const shared::MapSnapshotBuildResult map =
-      shared::MapSnapshot::Create(input.world.local_map);
+      shared::MapSnapshot::Create(local_problem.local_map_view);
   if (!map.ok()) {
     return Failure(
         PlanningOutcome::kInvalidRequest,
@@ -198,8 +271,8 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
   }
   const shared::SafeProjectionBuildResult projection =
       shared::BuildSafeProjection(
-          map.snapshot, input.capability, input.config.map_safety,
-          input.stop_token);
+          map.snapshot, local_problem.capability,
+          local_problem.config.map_safety, local_problem.stop_token);
   if (!projection.ok()) {
     if (projection.reason_code == "REQUEST_CANCELED") {
       return Canceled(started);
@@ -210,9 +283,58 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
         projection.reason_code, started);
   }
 
+  std::uint64_t final_goal_work = 0U;
+  if (global.route_hops > 1U) {
+    const auto final_pose_odom = hierarchical::TransformPose(
+        global.route->poses_map.back(), input.world.map_from_odom,
+        hierarchical::TransformDirection::kParentToChild);
+    if (!final_pose_odom.has_value()) {
+      return Failure(
+          PlanningOutcome::kInvalidRequest,
+          ExecutionDirective::kNoSafeReference,
+          "FRAME_TRANSFORM_INVALID", started, global.expanded_nodes);
+    }
+    const auto final_cell = map.snapshot->PositionToCell(Vec2{
+        .x = final_pose_odom->position_m.x,
+        .y = final_pose_odom->position_m.y,
+    });
+    if (final_cell.has_value()) {
+      const LandingRegionResult final_region = CertifyLandingRegion(
+          *projection.projection, *final_goal_odom, *capability,
+          local_problem.config.map_safety, local_problem.stop_token);
+      final_goal_work = final_region.inspected_cells;
+      if (!final_region.ok()) {
+        if (final_region.status == LandingRegionStatus::kCanceled) {
+          return Canceled(
+              started, global.expanded_nodes + final_goal_work);
+        }
+        if (final_region.status == LandingRegionStatus::kInvalidRequest) {
+          return Failure(
+              PlanningOutcome::kInvalidRequest,
+              ExecutionDirective::kNoSafeReference,
+              final_region.reason_code, started,
+              global.expanded_nodes + final_goal_work);
+        }
+        if (final_region.status == LandingRegionStatus::kResourceExhausted) {
+          return Failure(
+              PlanningOutcome::kResourceExhausted,
+              ExecutionDirective::kNoSafeReference,
+              final_region.reason_code, started,
+              global.expanded_nodes + final_goal_work);
+        }
+        return Failure(
+            PlanningOutcome::kGoalInfeasible,
+            ExecutionDirective::kHoldPosition,
+            final_region.reason_code, started,
+            global.expanded_nodes + final_goal_work);
+      }
+    }
+  }
+
   const LandingRegionResult source = CertifyHoldingRegion(
       *projection.projection, state->pose.position_m,
-      *capability, input.config.map_safety, input.stop_token);
+      *capability, local_problem.config.map_safety,
+      local_problem.stop_token);
   if (!source.ok()) {
     if (source.status == LandingRegionStatus::kCanceled) {
       return Canceled(started, source.inspected_cells);
@@ -241,10 +363,11 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
   }
 
   const LandingRegionResult target = CertifyLandingRegion(
-      *projection.projection, input.goal_map, *capability,
-      input.config.map_safety, input.stop_token);
-  const std::uint64_t landing_work = static_cast<std::uint64_t>(
-      source.inspected_cells + target.inspected_cells);
+      *projection.projection, local_problem.goal_odom, *capability,
+      local_problem.config.map_safety, local_problem.stop_token);
+  const std::uint64_t landing_work = final_goal_work +
+      static_cast<std::uint64_t>(
+          source.inspected_cells + target.inspected_cells);
   if (!target.ok()) {
     if (target.status == LandingRegionStatus::kCanceled) {
       return Canceled(started, landing_work);
@@ -261,16 +384,23 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
           ExecutionDirective::kNoSafeReference,
           target.reason_code, started, landing_work);
     }
+    if (global.route_hops == 1U) {
+      return Failure(
+          PlanningOutcome::kGoalInfeasible,
+          ExecutionDirective::kHoldPosition,
+          target.reason_code, started,
+          global.expanded_nodes + landing_work);
+    }
     return Failure(
-        PlanningOutcome::kGoalInfeasible,
-        ExecutionDirective::kHoldPosition,
-        target.reason_code, started, landing_work);
+        PlanningOutcome::kNoKnownSafeRoute,
+        ExecutionDirective::kNoSafeReference,
+        "LOCAL_MAP_COVERAGE_INSUFFICIENT", started,
+        global.expanded_nodes + landing_work);
   }
 
   HopCertificationResult certified = CertifyFirstHop(
-      input, *state, *capability, *map.snapshot,
-      *source.region, *target.region);
-  const std::uint64_t total_work = landing_work +
+      local_problem, *source.region, *target.region);
+  const std::uint64_t total_work = global.expanded_nodes + landing_work +
       static_cast<std::uint64_t>(certified.attempted_candidates);
   if (!certified.ok()) {
     if (certified.canceled) {
@@ -289,6 +419,9 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
   }
 
   std::vector<std::string> warnings{"HOPPER_FIRST_HOP_ONLY"};
+  if (global.route_hops > 1U) {
+    warnings.emplace_back("HOPPER_REMAINING_HOPS_PREVIEW_ONLY");
+  }
   if (input.config.hopper.maximum_authorized_hops > 1U) {
     warnings.emplace_back("HOPPER_AUTHORIZATION_CLAMPED_TO_ONE");
   }
@@ -303,6 +436,9 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
           .plan_id = "hopper/" + input.request_id,
           .platform_type = PlatformType::kHopper,
           .input_time = input.state_time,
+          .preview = GlobalRoutePreview{
+              .poses_map = global.route->poses_map,
+          },
           .data = std::move(reference),
       },
       .diagnostics = PlannerDiagnostics{
@@ -312,6 +448,35 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
           .expanded_states = total_work,
           .best_cost = certified.cost,
           .warning_codes = std::move(warnings),
+          .hierarchical = HierarchicalPlannerMetrics{
+              .global_level = global.global_level.value_or(0U),
+              .global_resolution_m = input.world.global_map.resolution_m,
+              .global_cells = input.world.global_map.CellCount(),
+              .global_elapsed = global.elapsed,
+              .local_elapsed = std::chrono::duration_cast<
+                  std::chrono::nanoseconds>(
+                  std::chrono::steady_clock::now() - started) -
+                  global.elapsed,
+              .global_expanded_states = global.expanded_nodes,
+              .local_expanded_states = landing_work +
+                  static_cast<std::uint64_t>(
+                      certified.attempted_candidates),
+              .global_open_peak = global.route->open_peak,
+              .estimated_work_memory_bytes =
+                  global.route->estimated_work_memory_bytes,
+              .raw_route_points = global.route->raw_cells.size(),
+              .simplified_route_points =
+                  global.route->simplified_cells.size(),
+              .local_frontier_distance_m = std::hypot(
+                  next_pose_odom->position_m.x - state->pose.position_m.x,
+                  next_pose_odom->position_m.y - state->pose.position_m.y),
+              .local_attempts = 1U,
+              .hopper_graph_nodes = global.graph_nodes,
+              .hopper_graph_edges = global.graph_edges,
+              .hopper_route_hops = global.route_hops,
+              .hopper_certification_attempts =
+                  certified.attempted_candidates,
+          },
       },
   };
 }

@@ -237,6 +237,7 @@ inline PlannerInput MakeValidHopperInput() {
   input.goal_map.yaw_tolerance_rad = 0.1;
   input.world.global_map = MakeFlatMap("map", 16U, 12U, 0.5);
   input.world.local_map = MakeFlatMap("odom", 16U, 12U, 0.5);
+  input.config.global_map.base_resolution_m = 0.5;
   input.capability = HopperCapability{
       .body_half_extent_m = {0.35, 0.25, 0.5},
       .platform_mass_kg = 10.0,
