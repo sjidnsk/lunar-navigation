@@ -16,7 +16,7 @@
 namespace lunar::planning::legged {
 namespace {
 
-constexpr std::size_t kSamplesPerTransition = 8U;
+constexpr std::size_t kPreferredSamplesPerTransition = 8U;
 constexpr double kTolerance = 1.0e-12;
 
 [[nodiscard]] LeggedTimingResult Failure(
@@ -100,7 +100,7 @@ constexpr double kTolerance = 1.0e-12;
   }
   const auto count = std::max<std::int64_t>(
       static_cast<std::int64_t>(std::ceil(seconds * 1.0e9)),
-      static_cast<std::int64_t>(kSamplesPerTransition));
+      static_cast<std::int64_t>(kPreferredSamplesPerTransition));
   return std::chrono::nanoseconds{count};
 }
 
@@ -131,6 +131,7 @@ constexpr double kTolerance = 1.0e-12;
 LeggedTimingResult ParameterizeLeggedBodyTiming(
     const std::vector<LeggedTransition>& transitions,
     const LeggedCapability& capability,
+    const std::size_t maximum_samples,
     const std::stop_token stop_token) {
   if (stop_token.stop_requested()) {
     return Failure("REQUEST_CANCELED", true);
@@ -148,13 +149,23 @@ LeggedTimingResult ParameterizeLeggedBodyTiming(
       capability.maximum_yaw_acceleration_radps2 <= 0.0) {
     return Failure("LEGGED_TIMING_CAPABILITY_INVALID");
   }
+  if (maximum_samples <= 1U ||
+      transitions.size() > maximum_samples - 1U) {
+    return Failure("LEGGED_TIMING_SAMPLE_LIMIT");
+  }
+  const std::size_t samples_per_transition = std::min(
+      kPreferredSamplesPerTransition,
+      (maximum_samples - 1U) / transitions.size());
+  if (samples_per_transition == 0U) {
+    return Failure("LEGGED_TIMING_SAMPLE_LIMIT");
+  }
 
   TrajectoryReference trajectory{
       .semantics = TrajectorySemantics::kLeggedBodyReference,
       .points = {},
   };
   trajectory.points.reserve(
-      1U + transitions.size() * kSamplesPerTransition);
+      1U + transitions.size() * samples_per_transition);
   trajectory.points.push_back(TrajectoryPoint{
       .time_from_start = std::chrono::nanoseconds{0},
       .pose = PoseAt(transitions.front(), 0.0),
@@ -176,16 +187,16 @@ LeggedTimingResult ParameterizeLeggedBodyTiming(
         transition.source_pose.yaw_rad,
         transition.target_pose.yaw_rad);
     for (std::size_t sample = 1U;
-         sample <= kSamplesPerTransition; ++sample) {
+         sample <= samples_per_transition; ++sample) {
       if (stop_token.stop_requested()) {
         return Failure("REQUEST_CANCELED", true);
       }
       const double ratio = static_cast<double>(sample) /
-          static_cast<double>(kSamplesPerTransition);
+          static_cast<double>(samples_per_transition);
       const double progress = ratio * ratio * (3.0 - 2.0 * ratio);
       const double rate = 6.0 * ratio * (1.0 - ratio) / seconds;
       const auto sample_count =
-          static_cast<std::int64_t>(kSamplesPerTransition);
+          static_cast<std::int64_t>(samples_per_transition);
       const auto sample_index = static_cast<std::int64_t>(sample);
       const std::chrono::nanoseconds offset{
           (duration->count() / sample_count) * sample_index +

@@ -15,7 +15,7 @@
 namespace lunar::planning::wheel {
 namespace {
 
-constexpr std::size_t kSamplesPerTransition = 8U;
+constexpr std::size_t kPreferredSamplesPerTransition = 8U;
 constexpr double kComparisonTolerance = 1.0e-12;
 
 [[nodiscard]] WheelTimingResult Failure(
@@ -97,7 +97,8 @@ constexpr double kComparisonTolerance = 1.0e-12;
             std::chrono::nanoseconds{
                 std::max<std::int64_t>(
                     nanoseconds,
-                    static_cast<std::int64_t>(kSamplesPerTransition))}}
+                    static_cast<std::int64_t>(
+                        kPreferredSamplesPerTransition))}}
       : std::nullopt;
 }
 
@@ -127,6 +128,7 @@ constexpr double kComparisonTolerance = 1.0e-12;
 WheelTimingResult ParameterizeWheelTiming(
     const std::vector<WheelTransition>& transitions,
     const WheeledCapability& capability,
+    const std::size_t maximum_samples,
     const std::stop_token stop_token) {
   if (stop_token.stop_requested()) {
     return Failure("REQUEST_CANCELED", true);
@@ -137,13 +139,23 @@ WheelTimingResult ParameterizeWheelTiming(
   if (!ValidateCapability(capability)) {
     return Failure("WHEEL_TIMING_CAPABILITY_INVALID");
   }
+  if (maximum_samples <= 1U ||
+      transitions.size() > maximum_samples - 1U) {
+    return Failure("WHEEL_TIMING_SAMPLE_LIMIT");
+  }
+  const std::size_t samples_per_transition = std::min(
+      kPreferredSamplesPerTransition,
+      (maximum_samples - 1U) / transitions.size());
+  if (samples_per_transition == 0U) {
+    return Failure("WHEEL_TIMING_SAMPLE_LIMIT");
+  }
 
   TrajectoryReference trajectory{
       .semantics = TrajectorySemantics::kWheeledBase,
       .points = {},
   };
   trajectory.points.reserve(
-      1U + transitions.size() * kSamplesPerTransition);
+      1U + transitions.size() * samples_per_transition);
   trajectory.points.push_back(TrajectoryPoint{
       .time_from_start = std::chrono::nanoseconds{0},
       .pose = PoseAt(transitions.front(), 0.0),
@@ -165,17 +177,17 @@ WheelTimingResult ParameterizeWheelTiming(
     const double yaw_delta = ShortestYawDelta(
         transition.source_pose.yaw_rad, transition.target_pose.yaw_rad);
     for (std::size_t sample = 1U;
-         sample <= kSamplesPerTransition; ++sample) {
+         sample <= samples_per_transition; ++sample) {
       if (stop_token.stop_requested()) {
         return Failure("REQUEST_CANCELED", true);
       }
       const double ratio = static_cast<double>(sample) /
-          static_cast<double>(kSamplesPerTransition);
+          static_cast<double>(samples_per_transition);
       const double progress = ratio * ratio * (3.0 - 2.0 * ratio);
       const double progress_rate =
           6.0 * ratio * (1.0 - ratio) / duration_s;
       const std::int64_t samples =
-          static_cast<std::int64_t>(kSamplesPerTransition);
+          static_cast<std::int64_t>(samples_per_transition);
       const std::int64_t sample_index =
           static_cast<std::int64_t>(sample);
       const auto sample_offset = std::chrono::nanoseconds{

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <numbers>
 #include <optional>
 #include <string>
@@ -37,6 +38,28 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_hopper";
 
 [[nodiscard]] double Norm(const Vec3 value) noexcept {
   return std::hypot(std::hypot(value.x, value.y), value.z);
+}
+
+[[nodiscard]] double PositionError(const Vec3 lhs, const Vec3 rhs) noexcept {
+  return std::hypot(std::hypot(lhs.x - rhs.x, lhs.y - rhs.y), lhs.z - rhs.z);
+}
+
+[[nodiscard]] double PlanarGoalError(const GoalRegion& goal,
+                                     const Vec3 point) noexcept {
+  if (const auto* target = std::get_if<PointGoal>(&goal.target)) {
+    return std::hypot(point.x - target->position_m.x,
+                      point.y - target->position_m.y);
+  }
+  const auto* region = std::get_if<PlanarRegionGoal>(&goal.target);
+  if (region == nullptr || region->boundary_m.empty()) {
+    return 0.0;
+  }
+  double error = std::numeric_limits<double>::infinity();
+  for (const Vec3& vertex : region->boundary_m) {
+    error = std::min(error,
+                     std::hypot(point.x - vertex.x, point.y - vertex.y));
+  }
+  return error;
 }
 
 [[nodiscard]] bool ValidCapability(
@@ -425,6 +448,41 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
   if (input.config.hopper.maximum_authorized_hops > 1U) {
     warnings.emplace_back("HOPPER_AUTHORIZATION_CLAMPED_TO_ONE");
   }
+  const HopSegment& first_hop = *certified.segment;
+  const double flight_s =
+      std::chrono::duration<double>(first_hop.flight_time).count();
+  const Vec3 landing_position{
+      .x = first_hop.launch_pose.position_m.x +
+           first_hop.launch_velocity_mps.x * flight_s +
+           0.5 * capability->gravity_mps2.x * flight_s * flight_s,
+      .y = first_hop.launch_pose.position_m.y +
+           first_hop.launch_velocity_mps.y * flight_s +
+           0.5 * capability->gravity_mps2.y * flight_s * flight_s,
+      .z = first_hop.launch_pose.position_m.z +
+           first_hop.launch_velocity_mps.z * flight_s +
+           0.5 * capability->gravity_mps2.z * flight_s * flight_s,
+  };
+  const LocalTrajectoryDiagnostics local_diagnostics{
+      .trajectory_mode = TrajectoryMode::kCertifiedHop,
+      .start_anchor_error_m =
+          PositionError(first_hop.launch_pose.position_m,
+                        state->pose.position_m),
+      .endpoint_error_m =
+          PlanarGoalError(local_problem.goal_odom, landing_position),
+      .maximum_curvature_per_m = 0.0,
+      .collision_validation = CollisionValidation::kCertified,
+      .smoothing_elapsed_s = 0.0,
+      .landing_field_elapsed_s =
+          std::chrono::duration<double>(global.landing_field_elapsed).count(),
+  };
+  if (!std::isfinite(local_diagnostics.start_anchor_error_m) ||
+      !std::isfinite(local_diagnostics.endpoint_error_m) ||
+      !std::isfinite(local_diagnostics.landing_field_elapsed_s)) {
+    return Failure(PlanningOutcome::kNumericalFailure,
+                   ExecutionDirective::kNoSafeReference,
+                   "HOPPER_TRAJECTORY_DIAGNOSTICS_NONFINITE", started,
+                   total_work, global.route->cost, std::move(warnings));
+  }
   HopReference reference{
       .segments = {std::move(*certified.segment)},
   };
@@ -477,6 +535,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
               .hopper_certification_attempts =
                   certified.attempted_candidates,
           },
+          .local_trajectory = local_diagnostics,
       },
   };
 }

@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include "legged/legged_spline_optimizer.hpp"
 #include "lunar_planner_core/planner.hpp"
 #include "test_fixtures.hpp"
 
@@ -29,6 +30,12 @@ const TrajectoryReference& LeggedTrajectory(const PlannerOutput& output) {
   return *trajectory;
 }
 
+const LocalTrajectoryDiagnostics& LeggedDiagnostics(
+    const PlannerOutput& output) {
+  EXPECT_TRUE(output.diagnostics.local_trajectory.has_value());
+  return *output.diagnostics.local_trajectory;
+}
+
 TEST(LeggedPlanner, ProducesOnlyBodyReferenceWithBoundedKinematics) {
   Planner planner;
   const auto input = test::MakeValidLeggedInput();
@@ -43,9 +50,15 @@ TEST(LeggedPlanner, ProducesOnlyBodyReferenceWithBoundedKinematics) {
   ASSERT_TRUE(output.diagnostics.best_cost.has_value());
   const TrajectoryReference& trajectory = LeggedTrajectory(output);
   ASSERT_GT(trajectory.points.size(), 2U);
+  EXPECT_LE(trajectory.points.size(),
+            input.config.optimization.maximum_smoothing_samples);
   EXPECT_EQ(
       trajectory.semantics,
       TrajectorySemantics::kLeggedBodyReference);
+  EXPECT_EQ(LeggedDiagnostics(output).trajectory_mode,
+            TrajectoryMode::kOptimized);
+  EXPECT_EQ(LeggedDiagnostics(output).collision_validation,
+            CollisionValidation::kCertified);
   EXPECT_NEAR(trajectory.points.front().pose.position_m.x, 2.5, 1.0e-9);
   EXPECT_NEAR(trajectory.points.back().pose.position_m.x, 4.5, 0.25);
   for (std::size_t index = 0U; index < trajectory.points.size(); ++index) {
@@ -107,6 +120,44 @@ TEST(LeggedPlanner, ProducesOnlyBodyReferenceWithBoundedKinematics) {
   }
 }
 
+TEST(LeggedPlanner, RejectsValidationSubdivisionBudgetAboveHardCeiling) {
+  Planner planner;
+  auto input = test::MakeValidLeggedInput();
+  input.config.legged.continuous_validation_maximum_subdivisions = 33U;
+
+  const PlannerOutput output = planner.Plan(input);
+
+  EXPECT_EQ(output.outcome, PlanningOutcome::kInvalidRequest);
+  EXPECT_EQ(output.reason_code, "LEGGED_LATTICE_REQUEST_INVALID");
+  EXPECT_FALSE(output.reference.has_value());
+}
+
+TEST(LeggedPlanner, HonorsRequiredSmoothingPolicy) {
+  Planner planner;
+  auto fallback = test::MakeValidLeggedInput();
+  fallback.request_id = "legged-forced-fallback";
+  fallback.config.optimization.maximum_iterations = 0U;
+
+  const PlannerOutput allowed = planner.Plan(fallback);
+
+  ASSERT_EQ(allowed.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << allowed.reason_code;
+  EXPECT_EQ(LeggedDiagnostics(allowed).trajectory_mode,
+            TrajectoryMode::kDiscreteFallback);
+  EXPECT_NE(std::ranges::find(
+                allowed.diagnostics.warning_codes,
+                "LEGGED_OPTIMIZATION_DISCRETE_FALLBACK"),
+            allowed.diagnostics.warning_codes.end());
+
+  auto required = fallback;
+  required.request_id = "legged-required-smoothing";
+  required.config.optimization.require_smoothed_execution = true;
+  const PlannerOutput rejected = planner.Plan(required);
+  EXPECT_EQ(rejected.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(rejected.reason_code, "LEGGED_SMOOTHED_EXECUTION_REQUIRED");
+  EXPECT_FALSE(rejected.reference.has_value());
+}
+
 TEST(LeggedPlanner, PreservesTheTrueOffCenterBodyPoseAndHeight) {
   Planner planner;
   auto input = test::MakeValidLeggedInput();
@@ -153,6 +204,51 @@ TEST(LeggedPlanner, SupportsLateralBodyPrimitive) {
   EXPECT_TRUE(std::ranges::any_of(
       trajectory.points, [](const TrajectoryPoint& point) {
         return point.velocity.linear_mps.y > 1.0e-3;
+      }));
+}
+
+TEST(LeggedPlanner, SmoothsLateralPositionHeightAndYawIndependently) {
+  const legged::LeggedTransition control{
+      .source_pose = legged::LeggedPose{
+          .position_m = {2.5, 3.5, 0.45}, .yaw_rad = 0.0},
+      .target_pose = legged::LeggedPose{
+          .position_m = {2.5, 4.5, 0.55}, .yaw_rad = 0.6},
+      .target_body_z_m = {.lower = 0.4, .upper = 0.6},
+      .primitive_kind = LeggedPrimitiveKind::kLateralLeft,
+      .nominal_duration = std::chrono::seconds{1},
+      .path_length_m = std::hypot(1.0, 0.1),
+  };
+  const shared::CorridorResult corridor{
+      .status = shared::CorridorStatus::kCertified,
+      .fallback = shared::CorridorFallback::kNone,
+      .cells = {
+          shared::ConvexCorridorCell{
+              .half_planes = {
+                  shared::HalfPlane2{{1.0, 0.0}, 10.0},
+                  shared::HalfPlane2{{-1.0, 0.0}, 0.0},
+                  shared::HalfPlane2{{0.0, 1.0}, 10.0},
+                  shared::HalfPlane2{{0.0, -1.0}, 0.0},
+              },
+          },
+      },
+  };
+  const OptimizationConfig config;
+
+  const legged::LeggedOptimizationResult result =
+      legged::OptimizeLeggedBodySpline({control}, corridor, config, {});
+
+  ASSERT_TRUE(result.optimized) << result.reason_code;
+  ASSERT_GT(result.transitions.size(), 1U);
+  EXPECT_LE(1U + 8U * result.transitions.size(),
+            config.maximum_smoothing_samples);
+  EXPECT_EQ(result.transitions.front().source_pose, control.source_pose);
+  EXPECT_EQ(result.transitions.back().target_pose, control.target_pose);
+  EXPECT_TRUE(std::ranges::all_of(
+      result.transitions, [](const legged::LeggedTransition& transition) {
+        return std::abs(transition.source_pose.position_m.x - 2.5) < 1.0e-9 &&
+            std::abs(transition.target_pose.position_m.x - 2.5) < 1.0e-9 &&
+            transition.source_pose.yaw_rad < 1.0 &&
+            transition.target_pose.yaw_rad < 1.0;
       }));
 }
 

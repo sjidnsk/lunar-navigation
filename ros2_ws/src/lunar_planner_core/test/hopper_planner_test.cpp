@@ -58,6 +58,17 @@ TEST(HopperPlanner, ProducesExactlyOnePhysicallyBoundedHop) {
   EXPECT_EQ(output.directive, ExecutionDirective::kActivateNewReference);
   EXPECT_EQ(output.diagnostics.planner_name, "cpp_v3_hierarchical");
   ASSERT_TRUE(output.diagnostics.best_cost.has_value());
+  ASSERT_TRUE(output.diagnostics.local_trajectory.has_value());
+  EXPECT_EQ(output.diagnostics.local_trajectory->trajectory_mode,
+            TrajectoryMode::kCertifiedHop);
+  EXPECT_EQ(output.diagnostics.local_trajectory->collision_validation,
+            CollisionValidation::kCertified);
+  EXPECT_TRUE(
+      std::isfinite(output.diagnostics.local_trajectory->start_anchor_error_m));
+  EXPECT_TRUE(
+      std::isfinite(output.diagnostics.local_trajectory->endpoint_error_m));
+  EXPECT_TRUE(std::isfinite(
+      output.diagnostics.local_trajectory->landing_field_elapsed_s));
   EXPECT_NEAR(*output.diagnostics.best_cost, 1.385398163, 0.35);
   const HopReference &reference = HopperReference(output);
   ASSERT_EQ(reference.segments.size(), 1U);

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <ranges>
 #include <stop_token>
@@ -119,6 +120,38 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_wheel";
     radius = std::max(radius, std::hypot(vertex.x, vertex.y));
   }
   return radius;
+}
+
+[[nodiscard]] double PlanarGoalError(const GoalRegion& goal,
+                                     const Pose3& pose) noexcept {
+  if (const auto* point = std::get_if<PointGoal>(&goal.target)) {
+    return std::hypot(pose.position_m.x - point->position_m.x,
+                      pose.position_m.y - point->position_m.y);
+  }
+  const auto* region = std::get_if<PlanarRegionGoal>(&goal.target);
+  if (region == nullptr || region->boundary_m.empty()) {
+    return 0.0;
+  }
+  GoalRegion position_goal = goal;
+  position_goal.yaw_rad.reset();
+  if (GoalContainsPose(position_goal,
+                       WheelPose{.position_m = pose.position_m})) {
+    return 0.0;
+  }
+  double error = std::numeric_limits<double>::infinity();
+  for (const Vec3& vertex : region->boundary_m) {
+    error = std::min(error, std::hypot(pose.position_m.x - vertex.x,
+                                      pose.position_m.y - vertex.y));
+  }
+  return error;
+}
+
+[[nodiscard]] double PositionError(const Pose3& lhs,
+                                   const Pose3& rhs) noexcept {
+  return std::hypot(
+      std::hypot(lhs.position_m.x - rhs.position_m.x,
+                 lhs.position_m.y - rhs.position_m.y),
+      lhs.position_m.z - rhs.position_m.z);
 }
 
 [[nodiscard]] TrajectoryReference StationaryTrajectory(
@@ -261,6 +294,11 @@ PlannerOutput WheelPlanner::Plan(
 
   std::vector<std::string> warnings;
   TrajectoryReference trajectory;
+  TrajectoryMode trajectory_mode = TrajectoryMode::kStationary;
+  CollisionValidation collision_validation =
+      CollisionValidation::kNotApplicable;
+  std::chrono::nanoseconds smoothing_elapsed{};
+  double maximum_curvature_per_m = 0.0;
   if (discrete->transitions.empty()) {
     trajectory = StationaryTrajectory(*current_state);
   } else {
@@ -279,15 +317,22 @@ PlannerOutput WheelPlanner::Plan(
     if (corridor.status != shared::CorridorStatus::kCertified) {
       warnings.push_back(corridor.reason_code);
     }
+    const auto smoothing_started = std::chrono::steady_clock::now();
     WheelOptimizationResult optimized = OptimizeWheelSpline(
         discrete->transitions, corridor, problem.config.optimization,
         problem.stop_token);
+    smoothing_elapsed =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - smoothing_started);
     if (optimized.canceled) {
       return Canceled(started, search.expanded_states);
     }
+    bool used_discrete_fallback =
+        corridor.status != shared::CorridorStatus::kCertified;
     if (!optimized.optimized &&
         optimized.reason_code != "WHEEL_OPTIMIZATION_NOT_NEEDED") {
       warnings.push_back(optimized.reason_code);
+      used_discrete_fallback = true;
     }
     std::vector<WheelTransition> selected = std::move(optimized.transitions);
     WheelSweepValidator validator{
@@ -303,6 +348,7 @@ PlannerOutput WheelPlanner::Plan(
     if (!optimized_valid) {
       selected = discrete->transitions;
       warnings.emplace_back("WHEEL_OPTIMIZATION_SWEEP_FALLBACK");
+      used_discrete_fallback = true;
     }
     const bool discrete_valid = std::ranges::all_of(
         selected, [&](const WheelTransition& transition) {
@@ -318,8 +364,34 @@ PlannerOutput WheelPlanner::Plan(
           "WHEEL_VALIDATED_PATH_LOST", started, search.expanded_states,
           discrete->cost, std::move(warnings));
     }
+    if (used_discrete_fallback &&
+        std::ranges::find(
+            warnings, "WHEEL_OPTIMIZATION_DISCRETE_FALLBACK") ==
+            warnings.end()) {
+      warnings.emplace_back("WHEEL_OPTIMIZATION_DISCRETE_FALLBACK");
+    }
+    if (used_discrete_fallback &&
+        problem.config.optimization.require_smoothed_execution) {
+      return Failure(
+          PlanningOutcome::kNoKnownSafeRoute,
+          ExecutionDirective::kNoSafeReference,
+          "WHEEL_SMOOTHED_EXECUTION_REQUIRED", started,
+          search.expanded_states, discrete->cost, std::move(warnings));
+    }
+    trajectory_mode = used_discrete_fallback
+        ? TrajectoryMode::kDiscreteFallback
+        : TrajectoryMode::kOptimized;
+    collision_validation = CollisionValidation::kCertified;
+    for (const WheelTransition& transition : selected) {
+      maximum_curvature_per_m =
+          std::max(maximum_curvature_per_m,
+                   std::abs(transition.curvature_per_m));
+    }
     WheelTimingResult timed = ParameterizeWheelTiming(
-        selected, *capability, problem.stop_token);
+        selected, *capability,
+        std::min(problem.config.optimization.maximum_smoothing_samples,
+                 std::size_t{512U}),
+        problem.stop_token);
     if (timed.canceled) {
       return Canceled(started, search.expanded_states);
     }
@@ -331,6 +403,29 @@ PlannerOutput WheelPlanner::Plan(
           discrete->cost, std::move(warnings));
     }
     trajectory = std::move(*timed.trajectory);
+  }
+
+  const LocalTrajectoryDiagnostics local_diagnostics{
+      .trajectory_mode = trajectory_mode,
+      .start_anchor_error_m =
+          PositionError(trajectory.points.front().pose, current_state->pose),
+      .endpoint_error_m =
+          PlanarGoalError(problem.goal_odom, trajectory.points.back().pose),
+      .maximum_curvature_per_m = maximum_curvature_per_m,
+      .collision_validation = collision_validation,
+      .smoothing_elapsed_s =
+          std::chrono::duration<double>(smoothing_elapsed).count(),
+      .landing_field_elapsed_s = 0.0,
+  };
+  if (!std::isfinite(local_diagnostics.start_anchor_error_m) ||
+      !std::isfinite(local_diagnostics.endpoint_error_m) ||
+      !std::isfinite(local_diagnostics.maximum_curvature_per_m) ||
+      !std::isfinite(local_diagnostics.smoothing_elapsed_s)) {
+    return Failure(PlanningOutcome::kNumericalFailure,
+                   ExecutionDirective::kNoSafeReference,
+                   "WHEEL_TRAJECTORY_DIAGNOSTICS_NONFINITE", started,
+                   search.expanded_states, discrete->cost,
+                   std::move(warnings));
   }
 
   return PlannerOutput{
@@ -350,6 +445,7 @@ PlannerOutput WheelPlanner::Plan(
           .expanded_states = search.expanded_states,
           .best_cost = discrete->cost,
           .warning_codes = std::move(warnings),
+          .local_trajectory = local_diagnostics,
       },
   };
 }

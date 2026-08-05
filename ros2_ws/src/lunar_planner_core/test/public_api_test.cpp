@@ -35,6 +35,28 @@ TEST(PublicApi, KeepsFrozenWireFacingEnumValues) {
   EXPECT_EQ(static_cast<std::uint8_t>(ExecutionDirective::kNoSafeReference), 4U);
 }
 
+TEST(PublicApi, ExposesStableBoundedSmoothingAndDiagnosticContracts) {
+  const OptimizationConfig config;
+  EXPECT_EQ(config.maximum_smoothing_control_points, 64U);
+  EXPECT_EQ(config.maximum_smoothing_samples, 512U);
+  EXPECT_EQ(config.maximum_iterations, 128U);
+  EXPECT_EQ(config.maximum_trust_region_reductions, 8U);
+  EXPECT_FALSE(config.require_smoothed_execution);
+
+  EXPECT_EQ(ToString(TrajectoryMode::kStationary), "STATIONARY");
+  EXPECT_EQ(ToString(TrajectoryMode::kOptimized), "OPTIMIZED");
+  EXPECT_EQ(ToString(TrajectoryMode::kDiscreteFallback),
+            "DISCRETE_FALLBACK");
+  EXPECT_EQ(ToString(TrajectoryMode::kCertifiedHop), "CERTIFIED_HOP");
+  EXPECT_EQ(ToString(CollisionValidation::kCertified), "CERTIFIED");
+  EXPECT_EQ(ToString(CollisionValidation::kNotApplicable), "NOT_APPLICABLE");
+
+  static_assert(std::is_copy_constructible_v<LocalTrajectoryDiagnostics>);
+  static_assert(std::is_move_constructible_v<LocalTrajectoryDiagnostics>);
+  static_assert(std::is_copy_assignable_v<LocalTrajectoryDiagnostics>);
+  static_assert(std::is_move_assignable_v<LocalTrajectoryDiagnostics>);
+}
+
 TEST(PublicApi, RetainsTypedContiguousRowMajorLayers) {
   const auto input = test::MakeValidWheelInput();
   const GridLayer& forbidden = input.world.local_map.layers.at("forbidden");

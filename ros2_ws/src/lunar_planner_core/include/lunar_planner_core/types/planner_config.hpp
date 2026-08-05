@@ -34,11 +34,14 @@ struct CorridorConfig final {
 };
 
 struct OptimizationConfig final {
+  std::size_t maximum_smoothing_control_points{64U};
+  std::size_t maximum_smoothing_samples{512U};
   std::size_t maximum_iterations{128U};
   std::size_t maximum_trust_region_reductions{8U};
   double initial_trust_region_m{0.25};
   double minimum_trust_region_m{0.005};
   double constraint_tolerance{1.0e-6};
+  bool require_smoothed_execution{false};
 };
 
 struct MapSafetyConfig final {

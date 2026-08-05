@@ -226,7 +226,7 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
 
     const auto local_started = std::chrono::steady_clock::now();
     std::uint64_t local_expanded = 0U;
-    std::optional<std::string> start_connector_failure;
+    std::optional<std::string> specific_local_failure;
     for (std::size_t attempt = 0U; attempt < frontiers.problems.size();
          ++attempt) {
       PlannerOutput local =
@@ -244,6 +244,8 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
         const ExecutionDirective directive = local.directive;
         std::string reason_code = local.reason_code;
         std::vector<std::string> warnings = local.diagnostics.warning_codes;
+        std::optional<LocalTrajectoryDiagnostics> local_trajectory =
+            local.diagnostics.local_trajectory;
         if (attempt > 0U) {
           warnings.emplace_back("LOCAL_FRONTIER_BACKOFF");
         }
@@ -278,6 +280,7 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
                     .hierarchical = GroundMetrics(
                         input, global, &frontiers, local_expanded, attempts,
                         frontiers.frontier_distances_m[attempt], local_elapsed),
+                    .local_trajectory = std::move(local_trajectory),
                 },
         };
       }
@@ -295,8 +298,10 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
                                      local_elapsed));
       }
       if (local.reason_code == "WHEEL_START_CONNECTOR_INFEASIBLE" ||
-          local.reason_code == "LEGGED_START_CONNECTOR_INFEASIBLE") {
-        start_connector_failure = local.reason_code;
+          local.reason_code == "LEGGED_START_CONNECTOR_INFEASIBLE" ||
+          local.reason_code == "WHEEL_SMOOTHED_EXECUTION_REQUIRED" ||
+          local.reason_code == "LEGGED_SMOOTHED_EXECUTION_REQUIRED") {
+        specific_local_failure = local.reason_code;
       }
     }
     const auto local_elapsed =
@@ -305,7 +310,7 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
     return Failure(
         PlanningOutcome::kNoKnownSafeRoute,
         ExecutionDirective::kNoSafeReference,
-        start_connector_failure.value_or("LOCAL_SEGMENT_INFEASIBLE"),
+        specific_local_failure.value_or("LOCAL_SEGMENT_INFEASIBLE"),
         started, global.route->expanded_states + local_expanded,
         global.route->cost, {},
         GroundMetrics(input, global, &frontiers, local_expanded,

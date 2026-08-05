@@ -6,6 +6,7 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -37,6 +38,55 @@ enum class ExecutionDirective : std::uint8_t {
   kHoldPosition = 2,
   kContinueCommittedHop = 3,
   kNoSafeReference = 4,
+};
+
+enum class TrajectoryMode : std::uint8_t {
+  kStationary,
+  kOptimized,
+  kDiscreteFallback,
+  kCertifiedHop,
+};
+
+enum class CollisionValidation : std::uint8_t {
+  kCertified,
+  kNotApplicable,
+};
+
+[[nodiscard]] constexpr std::string_view ToString(
+    const TrajectoryMode mode) noexcept {
+  switch (mode) {
+    case TrajectoryMode::kStationary:
+      return "STATIONARY";
+    case TrajectoryMode::kOptimized:
+      return "OPTIMIZED";
+    case TrajectoryMode::kDiscreteFallback:
+      return "DISCRETE_FALLBACK";
+    case TrajectoryMode::kCertifiedHop:
+      return "CERTIFIED_HOP";
+  }
+  return "UNKNOWN";
+}
+
+[[nodiscard]] constexpr std::string_view ToString(
+    const CollisionValidation validation) noexcept {
+  switch (validation) {
+    case CollisionValidation::kCertified:
+      return "CERTIFIED";
+    case CollisionValidation::kNotApplicable:
+      return "NOT_APPLICABLE";
+  }
+  return "UNKNOWN";
+}
+
+struct LocalTrajectoryDiagnostics final {
+  TrajectoryMode trajectory_mode{TrajectoryMode::kStationary};
+  double start_anchor_error_m{0.0};
+  double endpoint_error_m{0.0};
+  double maximum_curvature_per_m{0.0};
+  CollisionValidation collision_validation{
+      CollisionValidation::kNotApplicable};
+  double smoothing_elapsed_s{0.0};
+  double landing_field_elapsed_s{0.0};
 };
 
 struct WheeledState final {
@@ -96,6 +146,7 @@ struct PlannerDiagnostics final {
   std::optional<double> best_cost;
   std::vector<std::string> warning_codes;
   std::optional<HierarchicalPlannerMetrics> hierarchical;
+  std::optional<LocalTrajectoryDiagnostics> local_trajectory;
 };
 
 struct PlannerOutput final {

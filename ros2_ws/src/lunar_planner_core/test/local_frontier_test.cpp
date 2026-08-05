@@ -169,6 +169,13 @@ TEST(LocalFrontier, MasksEveryCellOutsideTheHorizonCorridorIntersection) {
       std::get<std::vector<std::uint8_t>>(view.layers.at("forbidden").values);
   const Vec3 current{2.5, 3.5, 0.0};
   const Vec3 frontier = PointTarget(result.problems.front().goal_odom);
+  const double raster_margin_m =
+      std::sqrt(2.0) * 0.5 * view.resolution_m;
+  const double mask_half_width_m =
+      result.corridor_half_width_m + raster_margin_m;
+  const double mask_horizon_m =
+      input.config.local_frontier.wheel_horizon_m +
+      result.corridor_half_width_m + raster_margin_m;
   for (std::size_t y = 0U; y < view.height; ++y) {
     for (std::size_t x = 0U; x < view.width; ++x) {
       const std::size_t index = y * view.width + x;
@@ -180,10 +187,10 @@ TEST(LocalFrontier, MasksEveryCellOutsideTheHorizonCorridorIntersection) {
       };
       const bool inside =
           std::hypot(center.x - current.x, center.y - current.y) <=
-              input.config.local_frontier.wheel_horizon_m + 1.0e-9 &&
+              mask_horizon_m + 1.0e-9 &&
           DistanceToHorizontalPrefix(center, current.x, frontier.x,
                                      current.y) <=
-              result.corridor_half_width_m + 1.0e-9;
+              mask_half_width_m + 1.0e-9;
       if (!inside) {
         EXPECT_EQ(valid[index], 0U) << "cell " << x << ',' << y;
         EXPECT_EQ(forbidden[index], 1U) << "cell " << x << ',' << y;

@@ -275,7 +275,8 @@ struct OrderedPrimitive final {
       config.wheel.xy_resolution_m <= 0.0 ||
       config.wheel.yaw_bin_count < 4U ||
       config.wheel.maximum_terminal_candidates == 0U ||
-      config.wheel.continuous_validation_maximum_subdivisions == 0U) {
+      config.wheel.continuous_validation_maximum_subdivisions == 0U ||
+      config.wheel.continuous_validation_maximum_subdivisions > 32U) {
     return false;
   }
   if (!std::ranges::all_of(capability.footprint_xy_m, [](const Vec2& value) {

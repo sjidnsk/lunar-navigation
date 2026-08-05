@@ -150,7 +150,8 @@ struct OrderedPrimitive final {
       config.legged.yaw_bin_count < 4U ||
       config.legged.maximum_terminal_candidates == 0U ||
       config.legged.maximum_height_interval_splits == 0U ||
-      config.legged.continuous_validation_maximum_subdivisions == 0U) {
+      config.legged.continuous_validation_maximum_subdivisions == 0U ||
+      config.legged.continuous_validation_maximum_subdivisions > 32U) {
     return false;
   }
   return std::ranges::all_of(

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -24,6 +25,7 @@ struct WheelTimingResult final {
 [[nodiscard]] WheelTimingResult ParameterizeWheelTiming(
     const std::vector<WheelTransition>& transitions,
     const WheeledCapability& capability,
+    std::size_t maximum_samples,
     std::stop_token stop_token);
 
 }  // namespace lunar::planning::wheel
