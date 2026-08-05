@@ -27,10 +27,10 @@ from lunar_planner_training_bridge import PlanningOutcome, TrainingPlanRequest
 from .budget import (
     BudgetExceededError,
     CalibrationMeasurement,
-    TOTAL_GPU_BUDGET_SECONDS,
     TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS,
     TrainingBudget,
     calibrate_runtime,
+    extend_budget_manifest,
 )
 from .checkpoint import (
     build_training_checkpoint,
@@ -41,6 +41,7 @@ from .checkpoint import (
     save_checkpoint_atomic,
 )
 from .config import (
+    PPOConfig,
     ResolvedTrainingConfig,
     load_training_config,
     resolve_training_config,
@@ -232,12 +233,15 @@ class ResumablePPOTrainer:
         policy: CrossAttentionPolicy,
         *,
         reward_fn: Callable[[PlannerTransition], float],
+        ppo_config: PPOConfig,
         device: torch.device | str,
     ) -> None:
         if not callable(reward_fn):
             raise ValueError("reward function must be callable")
         self._reward_fn = reward_fn
-        self._ppo = PPOTrainer(policy, device=device)
+        if not isinstance(ppo_config, PPOConfig):
+            raise ValueError("resumable trainer requires typed PPO config")
+        self._ppo = PPOTrainer(policy, config=ppo_config, device=device)
         self.normalization: dict[str, object] = {
             "reward_mean": 0.0,
             "reward_var": 1.0,
@@ -627,12 +631,14 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
         raise ArtifactRootError("runtime calibration selection is invalid")
     consumed = manifest.get("consumed_gpu_seconds")
     config = resolve_training_config(frozen_config)
+    budget = TrainingBudget(
+        total_gpu_seconds=manifest.get("total_gpu_budget_seconds"),
+        consumed_gpu_seconds=consumed,
+        budget_extension_blocks=manifest.get("budget_extension_blocks"),
+    )
     return CalibratedRunState(
         config=config,
-        budget=TrainingBudget(
-            total_gpu_seconds=float(config.total_gpu_budget_seconds),
-            consumed_gpu_seconds=consumed,
-        ),
+        budget=budget,
         allocation=_allocation_for_workers(selected_workers),
         selected_workers=selected_workers,
         micro_batch_size=micro_batch_size,
@@ -666,7 +672,25 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--checkpoint", required=True)
     evaluate.add_argument("--gate", required=True)
     evaluate.add_argument("--artifact-root", required=True)
+
+    extend_budget = subparsers.add_parser("extend-budget")
+    extend_budget.add_argument("--artifact-root", required=True)
+    extend_budget.add_argument("--blocks", required=True, type=_positive_block_count)
     return parser
+
+
+def _positive_block_count(value: str) -> int:
+    try:
+        blocks = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "budget extension blocks must be a positive integer"
+        ) from error
+    if str(blocks) != value or blocks <= 0:
+        raise argparse.ArgumentTypeError(
+            "budget extension blocks must be a positive integer"
+        )
+    return blocks
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -701,6 +725,15 @@ def main(argv: list[str] | None = None) -> int:
             gate_path=Path(arguments.gate),
             artifact_root=Path(arguments.artifact_root),
             repository_root=repository_root,
+        )
+    elif arguments.command == "extend-budget":
+        root = validate_artifact_root(
+            Path(arguments.artifact_root), repository_root=repository_root
+        )
+        if not root.is_dir():
+            raise ArtifactRootError("budget extension artifact root is missing")
+        extend_budget_manifest(
+            root / "run-manifest.json", blocks=arguments.blocks
         )
     return 0
 
@@ -758,7 +791,7 @@ def _calibrate_training_run(
     budget = TrainingBudget(
         total_gpu_seconds=float(config.total_gpu_budget_seconds)
     )
-    workload = _CudaPlannerCalibrationWorkload()
+    workload = _CudaPlannerCalibrationWorkload(config.ppo)
     try:
         calibration = calibrate_runtime(
             config=config,
@@ -846,6 +879,12 @@ def _evaluate_checkpoint(
         expected_source_commit=_source_commit(repository_root),
         expected_worker_allocation=calibrated.allocation,
         expected_micro_batch_size=calibrated.micro_batch_size,
+        expected_budget_extension_blocks=(
+            calibrated.budget.budget_extension_blocks
+        ),
+        expected_total_gpu_budget_seconds=(
+            calibrated.budget.total_gpu_seconds
+        ),
     )
     policy = CrossAttentionPolicy()
     policy.load_state_dict(dict(checkpoint.model_state), strict=True)
@@ -930,6 +969,8 @@ def _run_curriculum_training(
             phase,
             calibration_end_gpu_s=calibrated.calibration_end_gpu_seconds,
         )
+        if phase == "joint":
+            phase_end = calibrated.budget.total_gpu_seconds
         evidence = _run_updates(
             config=calibrated.config,
             artifact_root=artifact_root,
@@ -1045,6 +1086,12 @@ def _resume_training_run(
         expected_source_commit=source_commit,
         expected_worker_allocation=allocation,
         expected_micro_batch_size=micro_batch_size,
+        expected_budget_extension_blocks=(
+            calibrated.budget.budget_extension_blocks
+        ),
+        expected_total_gpu_budget_seconds=(
+            calibrated.budget.total_gpu_seconds
+        ),
     )
     if manifest.get("global_step") != checkpoint.global_step:
         raise ArtifactRootError("run manifest global step differs from latest checkpoint")
@@ -1054,11 +1101,7 @@ def _resume_training_run(
         or float(manifest_budget) < checkpoint.consumed_gpu_seconds
     ):
         raise ArtifactRootError("run manifest budget differs from latest checkpoint")
-    expected_budget_state = (
-        "exhausted"
-        if float(manifest_budget) >= TOTAL_GPU_BUDGET_SECONDS
-        else "active"
-    )
+    expected_budget_state = "exhausted" if calibrated.budget.exhausted else "active"
     if manifest.get("budget_state") != expected_budget_state:
         raise ArtifactRootError("run manifest budget state differs from checkpoint")
     phases = (
@@ -1118,6 +1161,7 @@ def _run_updates(
     trainer = ResumablePPOTrainer(
         policy,
         reward_fn=reward_fn,
+        ppo_config=config.ppo,
         device="cuda",
     )
     scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -1151,7 +1195,10 @@ def _run_updates(
         return collect_ppo_rollout(
             environment,
             trainer.policy,
-            CollectorConfig(horizon=2, deterministic=True),
+            CollectorConfig(
+                horizon=config.ppo.rollout_horizon,
+                deterministic=True,
+            ),
             device="cuda",
         ).rollout
 
@@ -1183,6 +1230,8 @@ def _run_updates(
             frozen_config=config.as_frozen_dict(),
             source_commit=source_commit,
             consumed_gpu_seconds=budget.consumed_gpu_seconds,
+            budget_extension_blocks=budget.budget_extension_blocks,
+            total_gpu_budget_seconds=budget.total_gpu_seconds,
             worker_allocation=allocation,
             micro_batch_size=micro_batch_size,
             latest_checkpoint_gpu_seconds=(
@@ -1259,7 +1308,7 @@ def _run_updates(
 class _CudaPlannerCalibrationWorkload:
     """Same real PlannerBridge + policy workload at 18 and 24 workers."""
 
-    def __init__(self) -> None:
+    def __init__(self, ppo_config: PPOConfig) -> None:
         _validated_cuda_device()
         self._pool: ParallelEnvPool | None = None
         self._environment: _ParallelPoolVectorEnv | None = None
@@ -1268,6 +1317,7 @@ class _CudaPlannerCalibrationWorkload:
         self._trainer = ResumablePPOTrainer(
             CrossAttentionPolicy(),
             reward_fn=compute_transition_reward,
+            ppo_config=ppo_config,
             device="cuda",
         )
 
@@ -1420,7 +1470,7 @@ def _calibration_environment_factory(
 
 
 def _calibration_reward(transition) -> float:
-    return float(transition.coverage_delta)
+    return float(transition.mission_observed_delta)
 
 
 def _proxy_policy_batch(sample_count: int, *, device: str) -> PolicyBatch:
@@ -1569,6 +1619,14 @@ def _update_run_manifest(
     payload = _read_run_manifest(path)
     if "runtime_calibration" not in payload:
         raise ArtifactRootError("run manifest calibration is missing")
+    try:
+        budget = TrainingBudget(
+            total_gpu_seconds=payload.get("total_gpu_budget_seconds"),
+            consumed_gpu_seconds=consumed_gpu_seconds,
+            budget_extension_blocks=payload.get("budget_extension_blocks"),
+        )
+    except (BudgetExceededError, ValueError) as error:
+        raise ArtifactRootError("run manifest budget identity is invalid") from error
     payload.update(
         {
             "source_commit": source_commit,
@@ -1576,9 +1634,7 @@ def _update_run_manifest(
             "global_step": global_step,
             "consumed_gpu_seconds": consumed_gpu_seconds,
             "budget_state": (
-                "exhausted"
-                if consumed_gpu_seconds >= TOTAL_GPU_BUDGET_SECONDS
-                else "active"
+                "exhausted" if budget.exhausted else "active"
             ),
             "platform_allocation": dict(platform_allocation),
         }

@@ -13,11 +13,15 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 sys.path.insert(0, str(REPOSITORY_ROOT / "model_contract"))
 
 from lunar_policy_training.budget import (  # noqa: E402
+    BUDGET_EXTENSION_BLOCK_SECONDS,
+    INITIAL_GPU_BUDGET_SECONDS,
+    BudgetError,
     BudgetExceededError,
     CalibrationError,
     CalibrationMeasurement,
     TrainingBudget,
     calibrate_runtime,
+    extend_budget_manifest,
 )
 from lunar_policy_training.config import load_training_config  # noqa: E402
 
@@ -127,6 +131,8 @@ def test_calibration_really_compares_18_and_24_and_freezes_manifest(
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert payload["runtime_calibration"]["selected_workers"] == 24
     assert payload["runtime_calibration"]["selected_micro_batch"] == 2
+    assert payload["budget_extension_blocks"] == 0
+    assert payload["total_gpu_budget_seconds"] == 86400
     with pytest.raises(CalibrationError, match="frozen"):
         calibrate_runtime(
             config=config,
@@ -258,3 +264,83 @@ def test_calibration_does_not_start_probe_below_bounded_unit_reserve(
     assert budget.consumed_gpu_seconds == 86400.0
     assert budget.interval_active is False
     assert not (tmp_path / "must-not-start.json").exists()
+
+
+def _write_budget_manifest(
+    path: pathlib.Path,
+    *,
+    blocks: object = 0,
+    total: object = 86400,
+    consumed: object = 123.5,
+) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "lunar-training-run/v1",
+                "budget_extension_blocks": blocks,
+                "total_gpu_budget_seconds": total,
+                "consumed_gpu_seconds": consumed,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("blocks", [0, -1, 1.5, True, "1"])
+def test_budget_extension_rejects_non_positive_integer_blocks(
+    tmp_path: pathlib.Path, blocks: object
+) -> None:
+    """Would fail if an implicit, fractional, or decreasing extension were accepted."""
+    manifest = tmp_path / "run-manifest.json"
+    _write_budget_manifest(manifest)
+
+    with pytest.raises(BudgetError, match="positive integer"):
+        extend_budget_manifest(manifest, blocks=blocks)
+
+    assert json.loads(manifest.read_text(encoding="utf-8"))[
+        "total_gpu_budget_seconds"
+    ] == 86400
+
+
+def test_budget_extension_accumulates_six_hour_blocks_without_resetting_consumed(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if repeated extension reset time or replaced prior blocks."""
+    manifest = tmp_path / "run-manifest.json"
+    _write_budget_manifest(manifest)
+
+    first = extend_budget_manifest(manifest, blocks=2)
+    second = extend_budget_manifest(manifest, blocks=3)
+
+    assert INITIAL_GPU_BUDGET_SECONDS == 86400
+    assert BUDGET_EXTENSION_BLOCK_SECONDS == 21600
+    assert first.budget_extension_blocks == 2
+    assert first.total_gpu_seconds == 86400 + 2 * 21600
+    assert second.budget_extension_blocks == 5
+    assert second.total_gpu_seconds == 86400 + 5 * 21600
+    assert second.consumed_gpu_seconds == 123.5
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["budget_extension_blocks"] == 5
+    assert payload["total_gpu_budget_seconds"] == 194400
+    assert payload["consumed_gpu_seconds"] == 123.5
+    assert list(tmp_path.iterdir()) == [manifest]
+
+
+@pytest.mark.parametrize(
+    ("blocks", "total", "consumed"),
+    [(1, 86400, 1.0), (0, 86401, 1.0), (0, 86400, 86401.0)],
+)
+def test_budget_extension_rejects_stale_or_malformed_manifest_identity(
+    tmp_path: pathlib.Path,
+    blocks: object,
+    total: object,
+    consumed: object,
+) -> None:
+    """Would fail if extension repaired a stale identity instead of failing closed."""
+    manifest = tmp_path / "run-manifest.json"
+    _write_budget_manifest(
+        manifest, blocks=blocks, total=total, consumed=consumed
+    )
+
+    with pytest.raises(BudgetError, match="budget"):
+        extend_budget_manifest(manifest, blocks=1)

@@ -23,6 +23,7 @@ from lunar_policy_training.cli import (  # noqa: E402
 )
 import lunar_policy_training.cli as training_cli  # noqa: E402
 from lunar_policy_training.checkpoint import load_checkpoint  # noqa: E402
+from lunar_policy_training.config import load_training_config  # noqa: E402
 from lunar_policy_training.environment.macro_step import PlannerTransition  # noqa: E402
 from lunar_policy_training.policy.cross_attention import CrossAttentionPolicy  # noqa: E402
 from lunar_policy_training.policy.observation import PolicyBatch  # noqa: E402
@@ -42,11 +43,14 @@ def _transition() -> PlannerTransition:
     )
     return PlannerTransition(
         next_observation=observation,
-        coverage_delta=0.5,
-        goal_progress=0.25,
-        normalized_plan_cost=0.1,
-        normalized_elapsed_time=0.2,
-        repeated_visit=False,
+        mission_observed_delta=0.5,
+        priority_observed_delta=0.25,
+        normalized_plan_or_execution_cost=0.1,
+        normalized_macro_step_time=0.2,
+        executed_without_new_coverage=False,
+        success_first_crossing=False,
+        episode_ended_without_success=False,
+        hard_safety_violation=False,
         planning_outcome=PlanningOutcome.INVALID_REQUEST,
         execution_directive=ExecutionDirective.NO_SAFE_REFERENCE,
         reason_code="TEST",
@@ -59,8 +63,11 @@ def test_resumable_trainer_uses_injected_transition_reward() -> None:
     trainer = ResumablePPOTrainer(
         CrossAttentionPolicy(),
         reward_fn=lambda transition: (
-            transition.coverage_delta + transition.goal_progress
+            transition.mission_observed_delta + transition.priority_observed_delta
         ),
+        ppo_config=load_training_config(
+            REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
+        ).ppo,
         device="cpu",
     )
 
@@ -118,8 +125,9 @@ def test_cuda_interrupt_resume_preserves_step_budget_and_allocation(
     selected_micro_batch = manifest["runtime_calibration"][
         "selected_micro_batch"
     ]
+    epochs_per_update = manifest["frozen_config"]["ppo"]["epochs_per_update"]
     assert all(
-        measurement["optimizer_steps"] == 1
+        measurement["optimizer_steps"] == epochs_per_update
         and measurement["ipc_failures"] == 0
         for measurement in manifest["runtime_calibration"]["measurements"]
     )

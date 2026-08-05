@@ -80,6 +80,15 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
             "/tmp/lunar-task4",
         ]
     )
+    extension = parser.parse_args(
+        [
+            "extend-budget",
+            "--artifact-root",
+            "/tmp/lunar-task4",
+            "--blocks",
+            "2",
+        ]
+    )
 
     assert calibrate.command == "calibrate"
     assert train.command == "train"
@@ -87,6 +96,23 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
     assert resume.command == "resume"
     assert resume.max_updates is None
     assert evaluate.command == "evaluate"
+    assert extension.command == "extend-budget"
+    assert extension.blocks == 2
+
+
+@pytest.mark.parametrize("blocks", ["0", "-1", "1.5", "not-an-int"])
+def test_extend_budget_cli_rejects_non_positive_integer_blocks(blocks: str) -> None:
+    """Would fail if automation could pass an implicit or invalid extension."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "extend-budget",
+                "--artifact-root",
+                "/tmp/lunar-task4",
+                "--blocks",
+                blocks,
+            ]
+        )
 
 
 def test_task_five_authoritative_checkpoint_paths_are_versioned_under_directory(
@@ -138,6 +164,8 @@ def _write_calibrated_manifest(root: pathlib.Path, *, consumed: float = 12.5) ->
                     "measurements": [],
                 },
                 "consumed_gpu_seconds": consumed,
+                "budget_extension_blocks": 0,
+                "total_gpu_budget_seconds": 86400,
             }
         ),
         encoding="utf-8",
@@ -152,6 +180,30 @@ def _write_calibrated_manifest(root: pathlib.Path, *, consumed: float = 12.5) ->
             {"seed": 4083, "minimum_platform_score": 0.5, "report_sha256": "3" * 64},
         ),
     )
+
+
+def test_extend_budget_cli_atomically_updates_only_run_budget_state(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if the explicit command reset consumption or touched checkpoints."""
+    root = tmp_path / "calibrated"
+    _write_calibrated_manifest(root, consumed=321.0)
+
+    assert cli_module.main(
+        [
+            "extend-budget",
+            "--artifact-root",
+            str(root),
+            "--blocks",
+            "2",
+        ]
+    ) == 0
+
+    payload = json.loads((root / "run-manifest.json").read_text(encoding="utf-8"))
+    assert payload["budget_extension_blocks"] == 2
+    assert payload["total_gpu_budget_seconds"] == 129600
+    assert payload["consumed_gpu_seconds"] == 321.0
+    assert not (root / "checkpoints").exists()
 
 
 def test_calibration_freezes_reward_schedule_and_one_shared_budget(
@@ -456,6 +508,8 @@ def test_run_manifest_persists_exhausted_budget_terminal_state(
             {
                 "schema_version": "lunar-training-run/v1",
                 "runtime_calibration": {"selected_workers": 18},
+                "budget_extension_blocks": 0,
+                "total_gpu_budget_seconds": 86400,
             }
         ),
         encoding="utf-8",
@@ -472,6 +526,39 @@ def test_run_manifest_persists_exhausted_budget_terminal_state(
 
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert payload["budget_state"] == "exhausted"
+    assert payload["consumed_gpu_seconds"] == 86400.0
+
+
+def test_run_manifest_keeps_extended_budget_active_at_initial_limit(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if terminal state ignored an explicit six-hour extension."""
+    manifest = tmp_path / "run-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "lunar-training-run/v1",
+                "runtime_calibration": {"selected_workers": 18},
+                "budget_extension_blocks": 1,
+                "total_gpu_budget_seconds": 108000,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _update_run_manifest(
+        manifest,
+        source_commit="a" * 40,
+        config_hash="b" * 64,
+        global_step=41,
+        consumed_gpu_seconds=86400.0,
+        platform_allocation={"WHEELED": 6, "LEGGED": 6, "HOPPER": 6},
+    )
+
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["budget_state"] == "active"
+    assert payload["budget_extension_blocks"] == 1
+    assert payload["total_gpu_budget_seconds"] == 108000
     assert payload["consumed_gpu_seconds"] == 86400.0
 
 

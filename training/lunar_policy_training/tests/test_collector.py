@@ -342,11 +342,14 @@ class _BoundaryProtocolEnvironment:
             execution_state="DECISION_BOUNDARY",
             transition=PlannerTransition(
                 next_observation=next_observation,
-                coverage_delta=0.0,
-                goal_progress=0.0,
-                normalized_plan_cost=0.0,
-                normalized_elapsed_time=0.0,
-                repeated_visit=False,
+                mission_observed_delta=0.0,
+                priority_observed_delta=0.0,
+                normalized_plan_or_execution_cost=0.0,
+                normalized_macro_step_time=0.0,
+                executed_without_new_coverage=False,
+                success_first_crossing=False,
+                episode_ended_without_success=False,
+                hard_safety_violation=False,
                 planning_outcome=PlanningOutcome.NO_KNOWN_SAFE_ROUTE,
                 execution_directive=ExecutionDirective.NO_SAFE_REFERENCE,
                 reason_code="LAST_CANDIDATE_REJECTED",
@@ -493,9 +496,12 @@ def _hopper_macro_worker(
         CommittedHopExecutionFeedback(
             execution_state=state,
             next_observation=_hopper_macro_observation(state, generation),
-            coverage_delta=coverage_delta,
-            goal_progress=goal_progress,
-            repeated_visit=False,
+            mission_observed_delta=mission_observed_delta,
+            priority_observed_delta=priority_observed_delta,
+            executed_without_new_coverage=False,
+            success_first_crossing=False,
+            episode_ended_without_success=False,
+            hard_safety_violation=False,
             terminated=False,
             execution_events=ExecutionEvents(
                 reference_samples_consumed=generation,
@@ -503,7 +509,7 @@ def _hopper_macro_worker(
                 hopper_commitment_states=(state,),
             ),
         )
-        for state, generation, coverage_delta, goal_progress in (
+        for state, generation, mission_observed_delta, priority_observed_delta in (
             ("JUMP_COMMITTED", 1, 0.1 * scale, 0.2 * scale),
             ("IN_FLIGHT", 2, 0.25 * scale, 0.3 * scale),
             ("LANDED_HOLD", 3, 0.4 * scale, 0.5 * scale),
@@ -533,7 +539,7 @@ def _hopper_macro_reward(transition: PlannerTransition) -> float:
         "LANDED_HOLD",
     ):
         raise AssertionError("pool lost committed-hop execution states")
-    return float(transition.coverage_delta)
+    return float(transition.mission_observed_delta)
 
 
 def _quarter_reward(transition: PlannerTransition) -> float:

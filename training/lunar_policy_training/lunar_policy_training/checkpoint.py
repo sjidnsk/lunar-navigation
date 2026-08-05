@@ -14,6 +14,10 @@ from pathlib import Path
 import torch
 from torch import nn
 
+from .budget import (
+    BUDGET_EXTENSION_BLOCK_SECONDS,
+    INITIAL_GPU_BUDGET_SECONDS,
+)
 from .ppo.checkpoint import (
     OBSERVATION_CONTRACT_VERSION,
     CheckpointError,
@@ -41,6 +45,8 @@ _BODY_FIELDS = {
     "config_hash",
     "source_commit",
     "consumed_gpu_seconds",
+    "budget_extension_blocks",
+    "total_gpu_budget_seconds",
     "worker_allocation",
     "micro_batch_size",
     "latest_checkpoint_gpu_seconds",
@@ -63,6 +69,8 @@ class TrainingCheckpointV2:
     config_hash: str
     source_commit: str
     consumed_gpu_seconds: float
+    budget_extension_blocks: int
+    total_gpu_budget_seconds: float
     worker_allocation: dict[str, int]
     micro_batch_size: int
     latest_checkpoint_gpu_seconds: float
@@ -81,6 +89,8 @@ def build_training_checkpoint(
     frozen_config: Mapping[str, object],
     source_commit: str,
     consumed_gpu_seconds: float,
+    budget_extension_blocks: int,
+    total_gpu_budget_seconds: float,
     worker_allocation: Mapping[str, int],
     micro_batch_size: int,
     latest_checkpoint_gpu_seconds: float,
@@ -107,6 +117,8 @@ def build_training_checkpoint(
         "config_hash": config_sha256(frozen_config),
         "source_commit": source_commit,
         "consumed_gpu_seconds": consumed_gpu_seconds,
+        "budget_extension_blocks": budget_extension_blocks,
+        "total_gpu_budget_seconds": float(total_gpu_budget_seconds),
         "worker_allocation": dict(worker_allocation),
         "micro_batch_size": micro_batch_size,
         "latest_checkpoint_gpu_seconds": latest_checkpoint_gpu_seconds,
@@ -195,6 +207,8 @@ def load_checkpoint_for_resume(
     expected_source_commit: str,
     expected_worker_allocation: Mapping[str, int] | None = None,
     expected_micro_batch_size: int | None = None,
+    expected_budget_extension_blocks: int | None = None,
+    expected_total_gpu_budget_seconds: float | None = None,
 ) -> TrainingCheckpointV2:
     """Reject any run identity drift before live state can be mutated."""
     checkpoint = load_checkpoint(path)
@@ -214,6 +228,24 @@ def load_checkpoint_for_resume(
         and checkpoint.micro_batch_size != expected_micro_batch_size
     ):
         raise CheckpointError("checkpoint micro-batch mismatch")
+    if (expected_budget_extension_blocks is None) != (
+        expected_total_gpu_budget_seconds is None
+    ):
+        raise CheckpointError("expected budget identity is incomplete")
+    if expected_budget_extension_blocks is not None:
+        if (
+            type(expected_budget_extension_blocks) is not int
+            or expected_budget_extension_blocks < 0
+            or not isinstance(expected_total_gpu_budget_seconds, (int, float))
+            or isinstance(expected_total_gpu_budget_seconds, bool)
+            or not math.isfinite(float(expected_total_gpu_budget_seconds))
+            or float(expected_total_gpu_budget_seconds)
+            != INITIAL_GPU_BUDGET_SECONDS
+            + expected_budget_extension_blocks * BUDGET_EXTENSION_BLOCK_SECONDS
+        ):
+            raise CheckpointError("expected budget identity is invalid")
+        if checkpoint.budget_extension_blocks > expected_budget_extension_blocks:
+            raise CheckpointError("checkpoint budget exceeds run manifest budget")
     return checkpoint
 
 
@@ -314,6 +346,21 @@ def _validate_body(body: object) -> None:
         or consumed < 0.0
     ):
         raise CheckpointError("checkpoint consumed GPU seconds are invalid")
+    blocks = body["budget_extension_blocks"]
+    total = body["total_gpu_budget_seconds"]
+    if type(blocks) is not int or blocks < 0:
+        raise CheckpointError("checkpoint budget extension blocks are invalid")
+    expected_total = (
+        INITIAL_GPU_BUDGET_SECONDS + blocks * BUDGET_EXTENSION_BLOCK_SECONDS
+    )
+    if (
+        not isinstance(total, (int, float))
+        or isinstance(total, bool)
+        or not math.isfinite(float(total))
+        or float(total) != expected_total
+        or float(consumed) > float(total)
+    ):
+        raise CheckpointError("checkpoint total GPU budget is invalid")
     allocation = body["worker_allocation"]
     if (
         not isinstance(allocation, Mapping)
@@ -357,6 +404,8 @@ def _checkpoint_from_body(
         config_hash=body["config_hash"],
         source_commit=body["source_commit"],
         consumed_gpu_seconds=float(body["consumed_gpu_seconds"]),
+        budget_extension_blocks=body["budget_extension_blocks"],
+        total_gpu_budget_seconds=float(body["total_gpu_budget_seconds"]),
         worker_allocation=dict(body["worker_allocation"]),
         micro_batch_size=body["micro_batch_size"],
         latest_checkpoint_gpu_seconds=float(

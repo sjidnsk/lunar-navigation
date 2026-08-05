@@ -103,9 +103,12 @@ class PreparedPlanRequest:
 class CommittedHopExecutionFeedback:
     execution_state: str
     next_observation: PolicyBatch
-    coverage_delta: float
-    goal_progress: float
-    repeated_visit: bool
+    mission_observed_delta: float
+    priority_observed_delta: float
+    executed_without_new_coverage: bool
+    success_first_crossing: bool
+    episode_ended_without_success: bool
+    hard_safety_violation: bool
     terminated: bool
     execution_events: ExecutionEvents = ExecutionEvents()
 
@@ -121,9 +124,12 @@ class DecisionBoundaryResult:
 @dataclass(frozen=True)
 class ReferenceExecutionResult:
     next_observation: PolicyBatch
-    coverage_delta: float
-    goal_progress: float
-    repeated_visit: bool
+    mission_observed_delta: float
+    priority_observed_delta: float
+    executed_without_new_coverage: bool
+    success_first_crossing: bool
+    episode_ended_without_success: bool
+    hard_safety_violation: bool
     terminated: bool
     execution_state: str
     execution_events: ExecutionEvents = ExecutionEvents()
@@ -483,34 +489,54 @@ class V3ExplorationEnvironment:
         self,
         transitions: list[PlannerTransition],
     ) -> PlannerTransition:
-        coverage_delta = sum(
-            transition.coverage_delta for transition in transitions
+        mission_observed_delta = sum(
+            transition.mission_observed_delta for transition in transitions
         )
-        goal_progress = sum(
-            transition.goal_progress for transition in transitions
+        priority_observed_delta = sum(
+            transition.priority_observed_delta for transition in transitions
         )
         if not all(
             math.isfinite(float(value))
             for transition in transitions
             for value in (
-                transition.coverage_delta,
-                transition.goal_progress,
-                transition.normalized_plan_cost,
-                transition.normalized_elapsed_time,
+                transition.mission_observed_delta,
+                transition.priority_observed_delta,
+                transition.normalized_plan_or_execution_cost,
+                transition.normalized_macro_step_time,
             )
-        ) or not all(math.isfinite(value) for value in (coverage_delta, goal_progress)):
+        ) or not all(
+            math.isfinite(value)
+            for value in (mission_observed_delta, priority_observed_delta)
+        ):
             self._fail_closed("committed hopper aggregation contains non-finite data")
+        success_crossings = sum(
+            transition.success_first_crossing for transition in transitions
+        )
+        if success_crossings > 1:
+            self._fail_closed("committed hopper emitted success more than once")
         final = transitions[-1]
         if self._execution_state != "LANDED_HOLD":
             self._fail_closed("committed hopper aggregation requires LANDED_HOLD")
         return PlannerTransition(
             next_observation=_clone_observation(final.next_observation),
-            coverage_delta=coverage_delta,
-            goal_progress=goal_progress,
-            normalized_plan_cost=transitions[0].normalized_plan_cost,
-            normalized_elapsed_time=transitions[0].normalized_elapsed_time,
-            repeated_visit=any(
-                transition.repeated_visit for transition in transitions
+            mission_observed_delta=mission_observed_delta,
+            priority_observed_delta=priority_observed_delta,
+            normalized_plan_or_execution_cost=(
+                transitions[0].normalized_plan_or_execution_cost
+            ),
+            normalized_macro_step_time=(
+                transitions[0].normalized_macro_step_time
+            ),
+            executed_without_new_coverage=all(
+                transition.executed_without_new_coverage
+                for transition in transitions
+            ),
+            success_first_crossing=success_crossings == 1,
+            episode_ended_without_success=(
+                final.episode_ended_without_success
+            ),
+            hard_safety_violation=any(
+                transition.hard_safety_violation for transition in transitions
             ),
             planning_outcome=transitions[0].planning_outcome,
             execution_directive=transitions[0].execution_directive,
@@ -567,14 +593,21 @@ class V3ExplorationEnvironment:
     ) -> PlannerTransition:
         return PlannerTransition(
             next_observation=self._observation,
-            coverage_delta=feedback.coverage_delta,
-            goal_progress=feedback.goal_progress,
-            normalized_plan_cost=0.0,
-            normalized_elapsed_time=(
+            mission_observed_delta=feedback.mission_observed_delta,
+            priority_observed_delta=feedback.priority_observed_delta,
+            normalized_plan_or_execution_cost=0.0,
+            normalized_macro_step_time=(
                 output.diagnostics.elapsed.total_seconds()
                 / self._planner_elapsed_scale_s
             ),
-            repeated_visit=feedback.repeated_visit,
+            executed_without_new_coverage=(
+                feedback.executed_without_new_coverage
+            ),
+            success_first_crossing=feedback.success_first_crossing,
+            episode_ended_without_success=(
+                feedback.episode_ended_without_success
+            ),
+            hard_safety_violation=feedback.hard_safety_violation,
             planning_outcome=output.outcome,
             execution_directive=output.directive,
             reason_code=output.reason_code,
@@ -600,16 +633,23 @@ class V3ExplorationEnvironment:
         best_cost = output.diagnostics.best_cost
         return PlannerTransition(
             next_observation=self._observation,
-            coverage_delta=execution.coverage_delta,
-            goal_progress=execution.goal_progress,
-            normalized_plan_cost=(
+            mission_observed_delta=execution.mission_observed_delta,
+            priority_observed_delta=execution.priority_observed_delta,
+            normalized_plan_or_execution_cost=(
                 0.0 if best_cost is None else best_cost / self._plan_cost_scale
             ),
-            normalized_elapsed_time=(
+            normalized_macro_step_time=(
                 output.diagnostics.elapsed.total_seconds()
                 / self._planner_elapsed_scale_s
             ),
-            repeated_visit=execution.repeated_visit,
+            executed_without_new_coverage=(
+                execution.executed_without_new_coverage
+            ),
+            success_first_crossing=execution.success_first_crossing,
+            episode_ended_without_success=(
+                execution.episode_ended_without_success
+            ),
+            hard_safety_violation=execution.hard_safety_violation,
             planning_outcome=output.outcome,
             execution_directive=output.directive,
             reason_code=output.reason_code,
@@ -632,13 +672,16 @@ class V3ExplorationEnvironment:
     ) -> PlannerTransition:
         return PlannerTransition(
             next_observation=_clone_observation(self._observation),
-            coverage_delta=0.0,
-            goal_progress=0.0,
-            normalized_plan_cost=0.0,
-            normalized_elapsed_time=(
+            mission_observed_delta=0.0,
+            priority_observed_delta=0.0,
+            normalized_plan_or_execution_cost=0.0,
+            normalized_macro_step_time=(
                 planner_elapsed.total_seconds() / self._planner_elapsed_scale_s
             ),
-            repeated_visit=False,
+            executed_without_new_coverage=False,
+            success_first_crossing=False,
+            episode_ended_without_success=False,
+            hard_safety_violation=False,
             planning_outcome=outcome,
             execution_directive=directive,
             reason_code=reason_code,

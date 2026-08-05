@@ -77,8 +77,8 @@ def _execution_feedback(
     execution_state: str,
     *,
     marker: float,
-    coverage_delta: float,
-    goal_progress: float,
+    mission_observed_delta: float,
+    priority_observed_delta: float,
     execution_events: ExecutionEvents = ExecutionEvents(),
 ) -> CommittedHopExecutionFeedback:
     observation = _hopper_observation(execution_state)
@@ -86,9 +86,12 @@ def _execution_feedback(
     return CommittedHopExecutionFeedback(
         execution_state=execution_state,
         next_observation=observation,
-        coverage_delta=coverage_delta,
-        goal_progress=goal_progress,
-        repeated_visit=False,
+        mission_observed_delta=mission_observed_delta,
+        priority_observed_delta=priority_observed_delta,
+        executed_without_new_coverage=False,
+        success_first_crossing=False,
+        episode_ended_without_success=False,
+        hard_safety_violation=False,
         terminated=False,
         execution_events=execution_events,
     )
@@ -104,8 +107,8 @@ def test_prepared_hopper_action_aggregates_until_landed_hold() -> None:
         _execution_feedback(
             "JUMP_COMMITTED",
             marker=1.0,
-            coverage_delta=0.1,
-            goal_progress=0.2,
+            mission_observed_delta=0.1,
+            priority_observed_delta=0.2,
             execution_events=ExecutionEvents(
                 reference_samples_consumed=1,
                 selected_action_observed_safe=True,
@@ -115,10 +118,10 @@ def test_prepared_hopper_action_aggregates_until_landed_hold() -> None:
         _execution_feedback(
             "IN_FLIGHT",
             marker=2.0,
-            coverage_delta=0.25,
-            goal_progress=0.3,
+            mission_observed_delta=0.25,
+            priority_observed_delta=0.3,
             execution_events=ExecutionEvents(
-                safety_violation_count=1,
+                invalid_action_count=1,
                 reference_samples_consumed=2,
                 hopper_commitment_states=("IN_FLIGHT",),
             ),
@@ -126,8 +129,8 @@ def test_prepared_hopper_action_aggregates_until_landed_hold() -> None:
         _execution_feedback(
             "LANDED_HOLD",
             marker=3.0,
-            coverage_delta=0.4,
-            goal_progress=0.5,
+            mission_observed_delta=0.4,
+            priority_observed_delta=0.5,
             execution_events=ExecutionEvents(
                 execution_failure_count=2,
                 reference_samples_consumed=3,
@@ -153,10 +156,10 @@ def test_prepared_hopper_action_aggregates_until_landed_hold() -> None:
     assert result.decision_budget_consumed == 1
     assert result.transition is not None
     assert result.transition.next_observation.pose_features[0, 0].item() == 3.0
-    assert result.transition.coverage_delta == pytest.approx(0.75)
-    assert result.transition.goal_progress == pytest.approx(1.0)
+    assert result.transition.mission_observed_delta == pytest.approx(0.75)
+    assert result.transition.priority_observed_delta == pytest.approx(1.0)
     assert result.transition.execution_events == ExecutionEvents(
-        safety_violation_count=1,
+        invalid_action_count=1,
         execution_failure_count=2,
         reference_samples_consumed=6,
         selected_action_observed_safe=True,
@@ -166,12 +169,15 @@ def test_prepared_hopper_action_aggregates_until_landed_hold() -> None:
             "LANDED_HOLD",
         ),
     )
+    assert result.transition.success_first_crossing is False
+    assert result.transition.episode_ended_without_success is False
+    assert result.transition.hard_safety_violation is False
 
 
 def test_hopper_does_not_request_policy_while_committed() -> None:
     """Would fail if policy could replace a committed or in-flight hop."""
     landed = _execution_feedback(
-        "LANDED_HOLD", marker=1.0, coverage_delta=0.1, goal_progress=0.2
+        "LANDED_HOLD", marker=1.0, mission_observed_delta=0.1, priority_observed_delta=0.2
     )
     hopper_env = V3ExplorationEnvironment(
         platform_type="HOPPER",
@@ -192,10 +198,10 @@ def test_hopper_does_not_request_policy_while_committed() -> None:
 def test_hopper_remains_in_flight_without_landed_feedback() -> None:
     """Would fail if repeated committed advances invented a landing boundary."""
     first_feedback = _execution_feedback(
-        "IN_FLIGHT", marker=1.0, coverage_delta=0.1, goal_progress=0.2
+        "IN_FLIGHT", marker=1.0, mission_observed_delta=0.1, priority_observed_delta=0.2
     )
     second_feedback = _execution_feedback(
-        "IN_FLIGHT", marker=2.0, coverage_delta=0.3, goal_progress=0.4
+        "IN_FLIGHT", marker=2.0, mission_observed_delta=0.3, priority_observed_delta=0.4
     )
     hopper_env = V3ExplorationEnvironment(
         platform_type="HOPPER",
@@ -257,7 +263,7 @@ def test_hopper_resumes_policy_only_after_landed_hold() -> None:
     output.directive = ExecutionDirective.NO_SAFE_REFERENCE
     output.reason_code = "LANDED_NO_ROUTE"
     landed = _execution_feedback(
-        "LANDED_HOLD", marker=3.0, coverage_delta=0.25, goal_progress=0.5
+        "LANDED_HOLD", marker=3.0, mission_observed_delta=0.25, priority_observed_delta=0.5
     )
     hopper_env = V3ExplorationEnvironment(
         platform_type="HOPPER",
@@ -280,8 +286,8 @@ def test_hopper_resumes_policy_only_after_landed_hold() -> None:
     assert landed.next_observation.pose_features[0, 5].item() == pytest.approx(0.0)
     assert landed_result.execution_state == "LANDED_HOLD"
     assert landed_result.execution_feedback is landed
-    assert landed_result.execution_feedback.coverage_delta == 0.25
-    assert landed_result.execution_feedback.goal_progress == 0.5
+    assert landed_result.execution_feedback.mission_observed_delta == 0.25
+    assert landed_result.execution_feedback.priority_observed_delta == 0.5
     assert result.execution_state == "LANDED_HOLD"
     assert result.transition is not None
     assert result.transition.reason_code == "LANDED_NO_ROUTE"

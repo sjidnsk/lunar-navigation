@@ -17,7 +17,11 @@ if TYPE_CHECKING:
     from .config import ResolvedTrainingConfig
 
 
-TOTAL_GPU_BUDGET_SECONDS = 86400.0
+INITIAL_GPU_BUDGET_SECONDS = 86400.0
+BUDGET_EXTENSION_BLOCK_SECONDS = 21600.0
+# Backward-compatible name for the immutable initial limit. Runtime code must
+# use TrainingBudget.total_gpu_seconds for an explicitly extended run.
+TOTAL_GPU_BUDGET_SECONDS = INITIAL_GPU_BUDGET_SECONDS
 # The largest calibration probe performs micro_batch=4 across two bounded
 # pool-step phases at a 60-second worker timeout: 4 * 2 * 60 = 480 seconds.
 # The remaining 120 seconds covers policy inference, backward/update, and CUDA
@@ -48,7 +52,7 @@ class CalibrationMeasurement:
     oom: bool
     gpu_seconds: float
     ipc_failures: int = 0
-    optimizer_steps: int = 1
+    optimizer_steps: int = 4
 
     def __post_init__(self) -> None:
         if type(self.workers) is not int or self.workers <= 0:
@@ -92,20 +96,30 @@ class CalibrationResult:
 class TrainingBudget:
     total_gpu_seconds: float = TOTAL_GPU_BUDGET_SECONDS
     consumed_gpu_seconds: float = 0.0
+    budget_extension_blocks: int = 0
     _active_since: float | None = field(default=None, init=False, repr=False)
     _active_upper_bound: float | None = field(
         default=None, init=False, repr=False
     )
 
     def __post_init__(self) -> None:
+        if (
+            type(self.budget_extension_blocks) is not int
+            or self.budget_extension_blocks < 0
+        ):
+            raise BudgetError("budget extension blocks must be a non-negative integer")
         self.total_gpu_seconds = _finite_nonnegative(
             self.total_gpu_seconds, "total GPU seconds"
         )
         self.consumed_gpu_seconds = _finite_nonnegative(
             self.consumed_gpu_seconds, "consumed GPU seconds"
         )
-        if self.total_gpu_seconds != TOTAL_GPU_BUDGET_SECONDS:
-            raise BudgetError("total GPU budget must remain 86400 seconds")
+        expected_total = (
+            INITIAL_GPU_BUDGET_SECONDS
+            + self.budget_extension_blocks * BUDGET_EXTENSION_BLOCK_SECONDS
+        )
+        if self.total_gpu_seconds != expected_total:
+            raise BudgetError("total GPU budget does not match extension blocks")
         if self.consumed_gpu_seconds > self.total_gpu_seconds:
             raise BudgetExceededError("consumed GPU seconds exceed total budget")
 
@@ -129,6 +143,16 @@ class TrainingBudget:
                 "GPU interval exceeds remaining cumulative budget"
             )
         self.consumed_gpu_seconds += interval
+
+    def extend_by_blocks(self, blocks: int) -> None:
+        """Add explicit six-hour blocks without changing consumed GPU time."""
+        if type(blocks) is not int or blocks <= 0:
+            raise BudgetError("budget extension blocks must be a positive integer")
+        self.budget_extension_blocks += blocks
+        self.total_gpu_seconds = (
+            INITIAL_GPU_BUDGET_SECONDS
+            + self.budget_extension_blocks * BUDGET_EXTENSION_BLOCK_SECONDS
+        )
 
     def begin_gpu_interval(
         self,
@@ -181,11 +205,49 @@ class TrainingBudget:
     @classmethod
     def from_checkpoint(cls, checkpoint: object) -> "TrainingBudget":
         consumed = getattr(checkpoint, "consumed_gpu_seconds", None)
-        frozen_config = getattr(checkpoint, "frozen_config", None)
-        if not isinstance(frozen_config, dict):
-            raise BudgetError("checkpoint frozen config is missing")
-        total = frozen_config.get("total_gpu_budget_seconds")
-        return cls(total_gpu_seconds=total, consumed_gpu_seconds=consumed)
+        total = getattr(checkpoint, "total_gpu_budget_seconds", None)
+        blocks = getattr(checkpoint, "budget_extension_blocks", None)
+        return cls(
+            total_gpu_seconds=total,
+            consumed_gpu_seconds=consumed,
+            budget_extension_blocks=blocks,
+        )
+
+
+def extend_budget_manifest(
+    manifest_path: str | Path, *, blocks: int
+) -> TrainingBudget:
+    """Atomically add explicit six-hour blocks to one existing run manifest."""
+    if type(blocks) is not int or blocks <= 0:
+        raise BudgetError("budget extension blocks must be a positive integer")
+    target = Path(manifest_path)
+    if target.is_symlink() or not target.is_file():
+        raise BudgetError("run budget manifest is missing or unsafe")
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise BudgetError("run budget manifest is invalid") from error
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != "lunar-training-run/v1"
+    ):
+        raise BudgetError("run budget manifest schema is invalid")
+    try:
+        budget = TrainingBudget(
+            total_gpu_seconds=payload.get("total_gpu_budget_seconds"),
+            consumed_gpu_seconds=payload.get("consumed_gpu_seconds"),
+            budget_extension_blocks=payload.get("budget_extension_blocks"),
+        )
+    except BudgetError as error:
+        raise BudgetError("run budget identity is invalid") from error
+    budget.extend_by_blocks(blocks)
+    payload["budget_extension_blocks"] = budget.budget_extension_blocks
+    payload["total_gpu_budget_seconds"] = budget.total_gpu_seconds
+    payload["budget_state"] = (
+        "exhausted" if budget.exhausted else "active"
+    )
+    _write_json_atomic_replace(target, payload)
+    return budget
 
 
 def calibrate_runtime(
@@ -266,9 +328,13 @@ def calibrate_runtime(
                 raise CalibrationError(
                     "runtime calibration encountered an IPC failure"
                 )
-            if not measurement.oom and measurement.optimizer_steps != 1:
+            if (
+                not measurement.oom
+                and measurement.optimizer_steps
+                != config.ppo.epochs_per_update
+            ):
                 raise CalibrationError(
-                    "runtime calibration did not complete one optimizer update"
+                    "runtime calibration did not complete the frozen PPO epochs"
                 )
             if measurement.oom or measurement.planner_timeouts:
                 safe = False
@@ -309,6 +375,8 @@ def calibrate_runtime(
             "measurements": [asdict(value) for value in result.measurements],
         },
         "consumed_gpu_seconds": budget.consumed_gpu_seconds,
+        "budget_extension_blocks": budget.budget_extension_blocks,
+        "total_gpu_budget_seconds": budget.total_gpu_seconds,
     }
     _write_json_atomic_new(target, payload)
     return result
@@ -349,6 +417,35 @@ def _write_json_atomic_new(path: Path, payload: dict[str, object]) -> None:
         raise CalibrationError("runtime calibration manifest write failed") from error
 
 
+def _write_json_atomic_replace(path: Path, payload: dict[str, object]) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(
+                payload,
+                stream,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception as error:
+        if temporary.exists():
+            temporary.unlink()
+        raise BudgetError("run budget manifest update failed") from error
+
+
 def _finite_nonnegative(value: object, name: str) -> float:
     if (
         not isinstance(value, (int, float))
@@ -369,6 +466,8 @@ def _finite_positive(value: object, name: str) -> float:
 
 __all__ = [
     "TOTAL_GPU_BUDGET_SECONDS",
+    "INITIAL_GPU_BUDGET_SECONDS",
+    "BUDGET_EXTENSION_BLOCK_SECONDS",
     "CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS",
     "TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS",
     "BudgetError",
@@ -378,4 +477,5 @@ __all__ = [
     "CalibrationResult",
     "TrainingBudget",
     "calibrate_runtime",
+    "extend_budget_manifest",
 ]

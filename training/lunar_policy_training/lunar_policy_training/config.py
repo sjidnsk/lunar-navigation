@@ -27,8 +27,29 @@ class ParallelConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PPOConfig:
+    gamma: float
+    gae_lambda: float
+    policy_clip: float
+    value_clip: float
+    learning_rate: float
+    optimizer: str
+    weight_decay: float
+    adam_epsilon: float
+    epochs_per_update: int
+    target_kl: float
+    value_loss_coefficient: float
+    frontier_entropy_coef: float
+    theta_entropy_coef: float
+    max_grad_norm: float
+    rollout_horizon: int
+    dtype: str
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedTrainingConfig:
     parallel: ParallelConfig
+    ppo: PPOConfig
     checkpoint_interval_seconds: int
     candidate_checkpoint_interval_seconds: int
     total_gpu_budget_seconds: int
@@ -45,6 +66,24 @@ class ResolvedTrainingConfig:
                 "gpu_memory_fraction_max": (
                     self.parallel.gpu_memory_fraction_max
                 ),
+            },
+            "ppo": {
+                "gamma": self.ppo.gamma,
+                "gae_lambda": self.ppo.gae_lambda,
+                "policy_clip": self.ppo.policy_clip,
+                "value_clip": self.ppo.value_clip,
+                "learning_rate": self.ppo.learning_rate,
+                "optimizer": self.ppo.optimizer,
+                "weight_decay": self.ppo.weight_decay,
+                "adam_epsilon": self.ppo.adam_epsilon,
+                "epochs_per_update": self.ppo.epochs_per_update,
+                "target_kl": self.ppo.target_kl,
+                "value_loss_coefficient": self.ppo.value_loss_coefficient,
+                "frontier_entropy_coef": self.ppo.frontier_entropy_coef,
+                "theta_entropy_coef": self.ppo.theta_entropy_coef,
+                "max_grad_norm": self.ppo.max_grad_norm,
+                "rollout_horizon": self.ppo.rollout_horizon,
+                "dtype": self.ppo.dtype,
             },
             "checkpoint_interval_seconds": self.checkpoint_interval_seconds,
             "candidate_checkpoint_interval_seconds": (
@@ -80,6 +119,27 @@ def resolve_training_config(raw: Mapping[str, object]) -> ResolvedTrainingConfig
     joint_raw = parallel_raw.get("joint_workers")
     if not isinstance(joint_raw, Mapping):
         raise TrainingConfigError("joint worker allocation must be a mapping")
+    ppo_raw = raw.get("ppo")
+    ppo_fields = {
+        "gamma",
+        "gae_lambda",
+        "policy_clip",
+        "value_clip",
+        "learning_rate",
+        "optimizer",
+        "weight_decay",
+        "adam_epsilon",
+        "epochs_per_update",
+        "target_kl",
+        "value_loss_coefficient",
+        "frontier_entropy_coef",
+        "theta_entropy_coef",
+        "max_grad_norm",
+        "rollout_horizon",
+        "dtype",
+    }
+    if not isinstance(ppo_raw, Mapping) or set(ppo_raw) != ppo_fields:
+        raise TrainingConfigError("PPO config must contain exactly the frozen fields")
     config = ResolvedTrainingConfig(
         parallel=ParallelConfig(
             worker_candidates=_integer_tuple(
@@ -102,6 +162,45 @@ def resolve_training_config(raw: Mapping[str, object]) -> ResolvedTrainingConfig
                 parallel_raw.get("gpu_memory_fraction_max"),
                 "GPU memory fraction",
             ),
+        ),
+        ppo=PPOConfig(
+            gamma=_number(ppo_raw["gamma"], "PPO gamma"),
+            gae_lambda=_number(ppo_raw["gae_lambda"], "PPO GAE lambda"),
+            policy_clip=_number(ppo_raw["policy_clip"], "PPO policy clip"),
+            value_clip=_number(ppo_raw["value_clip"], "PPO value clip"),
+            learning_rate=_number(
+                ppo_raw["learning_rate"], "PPO learning rate"
+            ),
+            optimizer=_string(ppo_raw["optimizer"], "PPO optimizer"),
+            weight_decay=_number(
+                ppo_raw["weight_decay"], "PPO weight decay"
+            ),
+            adam_epsilon=_number(
+                ppo_raw["adam_epsilon"], "PPO Adam epsilon"
+            ),
+            epochs_per_update=_integer(
+                ppo_raw["epochs_per_update"], "PPO epochs per update"
+            ),
+            target_kl=_number(ppo_raw["target_kl"], "PPO target KL"),
+            value_loss_coefficient=_number(
+                ppo_raw["value_loss_coefficient"],
+                "PPO value loss coefficient",
+            ),
+            frontier_entropy_coef=_number(
+                ppo_raw["frontier_entropy_coef"],
+                "PPO frontier entropy coefficient",
+            ),
+            theta_entropy_coef=_number(
+                ppo_raw["theta_entropy_coef"],
+                "PPO theta entropy coefficient",
+            ),
+            max_grad_norm=_number(
+                ppo_raw["max_grad_norm"], "PPO max gradient norm"
+            ),
+            rollout_horizon=_integer(
+                ppo_raw["rollout_horizon"], "PPO rollout horizon"
+            ),
+            dtype=_string(ppo_raw["dtype"], "PPO dtype"),
         ),
         checkpoint_interval_seconds=_integer(
             raw.get("checkpoint_interval_seconds"), "checkpoint interval"
@@ -134,6 +233,24 @@ def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
         "total_gpu_budget_seconds": 86400,
         "formal_training_seeds": (4080,),
         "proxy": True,
+        "ppo": {
+            "gamma": 0.995,
+            "gae_lambda": 0.95,
+            "policy_clip": 0.20,
+            "value_clip": 0.20,
+            "learning_rate": 3.0e-4,
+            "optimizer": "AdamW",
+            "weight_decay": 1.0e-4,
+            "adam_epsilon": 1.0e-5,
+            "epochs_per_update": 4,
+            "target_kl": 0.03,
+            "value_loss_coefficient": 0.5,
+            "frontier_entropy_coef": 0.01,
+            "theta_entropy_coef": 0.001,
+            "max_grad_norm": 0.5,
+            "rollout_horizon": 32,
+            "dtype": "float32",
+        },
     }
     actual = {
         "worker_candidates": config.parallel.worker_candidates,
@@ -148,6 +265,24 @@ def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
         "total_gpu_budget_seconds": config.total_gpu_budget_seconds,
         "formal_training_seeds": config.formal_training_seeds,
         "proxy": config.proxy,
+        "ppo": {
+            "gamma": config.ppo.gamma,
+            "gae_lambda": config.ppo.gae_lambda,
+            "policy_clip": config.ppo.policy_clip,
+            "value_clip": config.ppo.value_clip,
+            "learning_rate": config.ppo.learning_rate,
+            "optimizer": config.ppo.optimizer,
+            "weight_decay": config.ppo.weight_decay,
+            "adam_epsilon": config.ppo.adam_epsilon,
+            "epochs_per_update": config.ppo.epochs_per_update,
+            "target_kl": config.ppo.target_kl,
+            "value_loss_coefficient": config.ppo.value_loss_coefficient,
+            "frontier_entropy_coef": config.ppo.frontier_entropy_coef,
+            "theta_entropy_coef": config.ppo.theta_entropy_coef,
+            "max_grad_norm": config.ppo.max_grad_norm,
+            "rollout_horizon": config.ppo.rollout_horizon,
+            "dtype": config.ppo.dtype,
+        },
     }
     if actual != expected:
         raise TrainingConfigError("training config changes a frozen Task 3 value")
@@ -171,9 +306,16 @@ def _number(value: object, name: str) -> float:
     return float(value)
 
 
+def _string(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise TrainingConfigError(f"{name} must be a non-empty string")
+    return value
+
+
 __all__ = [
     "PLATFORMS",
     "ParallelConfig",
+    "PPOConfig",
     "ResolvedTrainingConfig",
     "TrainingConfigError",
     "load_training_config",

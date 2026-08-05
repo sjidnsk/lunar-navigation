@@ -580,22 +580,23 @@ class _ProxyEpisode:
         if math.dist(executed_position, self.pending_target) > tolerance:
             return self._execution_failure(safety_violation_count=1)
         repeated = self.pending_target in self.visited
-        previous = self.position
+        previous_coverage = self.coverage
         self.position = executed_position
         self.visited.add(self.pending_target)
         self.step += 1
         gain = 0.0 if repeated else min(0.475, 1.0 - self.coverage)
         self.coverage = min(1.0, self.coverage + gain)
         self.execution_state = execution_state
+        success_first_crossing = previous_coverage < 0.95 <= self.coverage
         return ReferenceExecutionResult(
             next_observation=self.observation,
-            coverage_delta=gain,
-            goal_progress=math.hypot(
-                self.position[0] - previous[0], self.position[1] - previous[1]
-            )
-            / 4.0,
-            repeated_visit=repeated,
-            terminated=self.coverage >= 0.99,
+            mission_observed_delta=gain,
+            priority_observed_delta=0.0,
+            executed_without_new_coverage=gain == 0.0,
+            success_first_crossing=success_first_crossing,
+            episode_ended_without_success=False,
+            hard_safety_violation=False,
+            terminated=success_first_crossing,
             execution_state=execution_state,
             execution_events=ExecutionEvents(
                 reference_samples_consumed=reference_samples_consumed,
@@ -619,10 +620,13 @@ class _ProxyEpisode:
         )
         return ReferenceExecutionResult(
             next_observation=self.observation,
-            coverage_delta=0.0,
-            goal_progress=0.0,
-            repeated_visit=False,
-            terminated=False,
+            mission_observed_delta=0.0,
+            priority_observed_delta=0.0,
+            executed_without_new_coverage=True,
+            success_first_crossing=False,
+            episode_ended_without_success=True,
+            hard_safety_violation=True,
+            terminated=True,
             execution_state=(
                 "GROUND_HOLD"
                 if self.platform_type == "HOPPER"
@@ -644,10 +648,13 @@ class _ProxyEpisode:
         return CommittedHopExecutionFeedback(
             execution_state="LANDED_HOLD",
             next_observation=self.observation,
-            coverage_delta=0.0,
-            goal_progress=0.0,
-            repeated_visit=False,
-            terminated=False,
+            mission_observed_delta=0.0,
+            priority_observed_delta=0.0,
+            executed_without_new_coverage=True,
+            success_first_crossing=False,
+            episode_ended_without_success=True,
+            hard_safety_violation=True,
+            terminated=True,
             execution_events=ExecutionEvents(
                 hopper_commitment_violation_count=1,
                 execution_failure_count=1,

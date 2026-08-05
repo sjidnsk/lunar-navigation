@@ -29,6 +29,7 @@ class ActionEvaluation:
     log_prob_theta: torch.Tensor
     log_prob_total: torch.Tensor
     frontier_entropy: torch.Tensor
+    theta_entropy: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class ActionSample:
     log_prob_theta: torch.Tensor
     log_prob_total: torch.Tensor
     frontier_entropy: torch.Tensor
+    theta_entropy: torch.Tensor
     value: torch.Tensor
 
 
@@ -231,12 +233,14 @@ def recompute_action_log_probs(
         log_prob_theta=log_prob_theta,
         log_prob_total=log_prob_frontier + log_prob_theta,
         frontier_entropy=frontier_distribution.entropy().to(torch.float32),
+        theta_entropy=_von_mises_entropy(selected_kappa),
     )
     _require_finite_action_tensors(
         evaluation.log_prob_frontier,
         evaluation.log_prob_theta,
         evaluation.log_prob_total,
         evaluation.frontier_entropy,
+        evaluation.theta_entropy,
     )
     return evaluation
 
@@ -281,6 +285,7 @@ def sample_action(
         log_prob_theta=evaluation.log_prob_theta,
         log_prob_total=evaluation.log_prob_total,
         frontier_entropy=evaluation.frontier_entropy,
+        theta_entropy=evaluation.theta_entropy,
         value=output.value,
     )
     _require_finite_action_tensors(
@@ -289,9 +294,31 @@ def sample_action(
         sample.log_prob_theta,
         sample.log_prob_total,
         sample.frontier_entropy,
+        sample.theta_entropy,
         sample.value,
     )
     return sample
+
+
+def _von_mises_entropy(kappa: torch.Tensor) -> torch.Tensor:
+    """Stable FP32 entropy for the selected conditional Von Mises action."""
+    scaled_i0 = torch.special.i0e(kappa)
+    scaled_i1 = torch.special.i1e(kappa)
+    entropy = (
+        torch.log(
+            torch.tensor(
+                2.0 * torch.pi,
+                dtype=torch.float32,
+                device=kappa.device,
+            )
+        )
+        + torch.log(scaled_i0)
+        + kappa
+        - kappa * scaled_i1 / scaled_i0
+    ).to(torch.float32)
+    if not bool(torch.isfinite(entropy).all()):
+        raise backbone_core.PolicyActionError("theta entropy must be finite")
+    return entropy
 
 
 def _validate_policy_output(

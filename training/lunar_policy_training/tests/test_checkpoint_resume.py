@@ -32,6 +32,7 @@ def _checkpoint(
     consumed_gpu_seconds: float,
     *,
     worker_allocation: dict[str, int] | None = None,
+    budget_extension_blocks: int = 0,
 ):
     torch.manual_seed(17)
     model = torch.nn.Linear(3, 2)
@@ -51,6 +52,10 @@ def _checkpoint(
         frozen_config={"total_gpu_budget_seconds": 86400},
         source_commit="a0cc8dfd9210e1badcbe883e6178b1b27888bd93",
         consumed_gpu_seconds=consumed_gpu_seconds,
+        budget_extension_blocks=budget_extension_blocks,
+        total_gpu_budget_seconds=(
+            86400 + budget_extension_blocks * 21600
+        ),
         worker_allocation=(
             {"WHEELED": 6, "LEGGED": 6, "HOPPER": 6}
             if worker_allocation is None
@@ -74,6 +79,69 @@ def test_resume_preserves_consumed_gpu_budget(tmp_path: pathlib.Path) -> None:
     assert resumed.contract_version == "ObservationContractV1"
     assert resumed.consumed_gpu_seconds == 7200.0
     assert budget.remaining_gpu_seconds == 86400.0 - 7200.0
+
+
+def test_checkpoint_roundtrips_extended_budget_without_resetting_consumed(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if extension state lived only in a mutable manifest."""
+    checkpoint = _checkpoint(
+        consumed_gpu_seconds=90000.0,
+        budget_extension_blocks=2,
+    )
+    path = tmp_path / "extended.pt"
+
+    save_checkpoint_atomic(path, checkpoint)
+    resumed = load_checkpoint(path)
+    budget = TrainingBudget.from_checkpoint(resumed)
+
+    assert resumed.budget_extension_blocks == 2
+    assert resumed.total_gpu_budget_seconds == 129600
+    assert budget.consumed_gpu_seconds == 90000.0
+    assert budget.remaining_gpu_seconds == 39600.0
+
+
+def test_pre_extension_checkpoint_may_resume_against_extended_manifest_identity(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if an explicit extension made the latest older checkpoint unusable."""
+    checkpoint = _checkpoint(consumed_gpu_seconds=7200.0)
+    path = tmp_path / "pre-extension.pt"
+    save_checkpoint_atomic(path, checkpoint)
+
+    resumed = load_checkpoint_for_resume(
+        path,
+        expected_contract_version="ObservationContractV1",
+        expected_config_hash=checkpoint.config_hash,
+        expected_source_commit=checkpoint.source_commit,
+        expected_budget_extension_blocks=2,
+        expected_total_gpu_budget_seconds=129600,
+    )
+
+    assert resumed.budget_extension_blocks == 0
+    assert resumed.total_gpu_budget_seconds == 86400
+
+
+def test_checkpoint_cannot_claim_more_budget_than_manifest(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if stale manifest identity could silently lose an extension."""
+    checkpoint = _checkpoint(
+        consumed_gpu_seconds=1000.0,
+        budget_extension_blocks=2,
+    )
+    path = tmp_path / "ahead-of-manifest.pt"
+    save_checkpoint_atomic(path, checkpoint)
+
+    with pytest.raises(CheckpointError, match="budget"):
+        load_checkpoint_for_resume(
+            path,
+            expected_contract_version="ObservationContractV1",
+            expected_config_hash=checkpoint.config_hash,
+            expected_source_commit=checkpoint.source_commit,
+            expected_budget_extension_blocks=1,
+            expected_total_gpu_budget_seconds=108000,
+        )
 
 
 def test_checkpoint_roundtrips_single_platform_warmup_allocation(
@@ -187,6 +255,8 @@ def test_restore_recovers_complete_train_state_and_rng(
         frozen_config={"total_gpu_budget_seconds": 86400},
         source_commit="a0cc8dfd9210e1badcbe883e6178b1b27888bd93",
         consumed_gpu_seconds=11.0,
+        budget_extension_blocks=0,
+        total_gpu_budget_seconds=86400,
         worker_allocation={"WHEELED": 8, "LEGGED": 8, "HOPPER": 8},
         micro_batch_size=4,
         latest_checkpoint_gpu_seconds=10.0,
@@ -259,6 +329,8 @@ def test_checkpoint_rejects_nonfinite_model_state() -> None:
             frozen_config={"total_gpu_budget_seconds": 86400},
             source_commit="a0cc8dfd9210e1badcbe883e6178b1b27888bd93",
             consumed_gpu_seconds=0.0,
+            budget_extension_blocks=0,
+            total_gpu_budget_seconds=86400,
             worker_allocation={"WHEELED": 6, "LEGGED": 6, "HOPPER": 6},
             micro_batch_size=1,
             latest_checkpoint_gpu_seconds=0.0,

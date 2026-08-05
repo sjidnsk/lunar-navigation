@@ -32,11 +32,14 @@ class ExecutionEvents:
 @dataclass(frozen=True)
 class PlannerTransition:
     next_observation: PolicyBatch
-    coverage_delta: float
-    goal_progress: float
-    normalized_plan_cost: float
-    normalized_elapsed_time: float
-    repeated_visit: bool
+    mission_observed_delta: float
+    priority_observed_delta: float
+    normalized_plan_or_execution_cost: float
+    normalized_macro_step_time: float
+    executed_without_new_coverage: bool
+    success_first_crossing: bool
+    episode_ended_without_success: bool
+    hard_safety_violation: bool
     planning_outcome: PlanningOutcome
     execution_directive: ExecutionDirective
     reason_code: str

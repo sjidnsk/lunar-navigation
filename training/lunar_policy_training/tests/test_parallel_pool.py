@@ -141,7 +141,7 @@ class _RestoredBudgetFactory:
 
 
 def _zero_reward(transition) -> float:
-    return float(transition.coverage_delta)
+    return float(transition.mission_observed_delta)
 
 
 class _CrashEnvironment:

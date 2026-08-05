@@ -80,6 +80,9 @@ def test_sampled_joint_log_prob_equals_immediate_recomputation() -> None:
     assert torch.equal(sample.log_prob_theta, recomputed.log_prob_theta)
     assert torch.equal(sample.log_prob_total, recomputed.log_prob_total)
     assert torch.equal(sample.frontier_entropy, recomputed.frontier_entropy)
+    assert torch.equal(sample.theta_entropy, recomputed.theta_entropy)
+    assert sample.theta_entropy.shape == (2,)
+    assert bool(torch.isfinite(sample.theta_entropy).all())
 
 def make_v2_batch(batch_size: int = 2, device: str = "cpu") -> PolicyBatch:
     mask = torch.zeros((batch_size, 64), dtype=torch.bool, device=device)

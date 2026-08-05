@@ -155,11 +155,11 @@ def test_no_reference_holds_state_and_preserves_planner_failure() -> None:
 
     assert transition.next_observation is not observation
     assert torch.equal(transition.next_observation.prior_channels, observation.prior_channels)
-    assert transition.coverage_delta == 0.0
-    assert transition.goal_progress == 0.0
-    assert transition.normalized_plan_cost == 0.0
-    assert transition.normalized_elapsed_time == 0.25
-    assert transition.repeated_visit is False
+    assert transition.mission_observed_delta == 0.0
+    assert transition.priority_observed_delta == 0.0
+    assert transition.normalized_plan_or_execution_cost == 0.0
+    assert transition.normalized_macro_step_time == 0.25
+    assert transition.executed_without_new_coverage is False
     assert transition.planning_outcome == PlanningOutcome.NO_KNOWN_SAFE_ROUTE
     assert transition.execution_directive == ExecutionDirective.NO_SAFE_REFERENCE
     assert transition.reason_code == "NO_ROUTE"
@@ -242,9 +242,12 @@ def test_new_observation_identity_component_clears_temporary_rejections(
         reference_executor=_ReferenceExecutor(
             ReferenceExecutionResult(
                 next_observation=refreshed,
-                coverage_delta=0.1,
-                goal_progress=0.1,
-                repeated_visit=False,
+                mission_observed_delta=0.1,
+                priority_observed_delta=0.1,
+                executed_without_new_coverage=False,
+                success_first_crossing=False,
+                episode_ended_without_success=False,
+                hard_safety_violation=False,
                 terminated=False,
                 execution_state="DECISION_BOUNDARY",
             )
@@ -283,9 +286,12 @@ def test_same_observation_identity_preserves_temporary_rejections() -> None:
         reference_executor=_ReferenceExecutor(
             ReferenceExecutionResult(
                 next_observation=_observation(candidate_mask=(True, True)),
-                coverage_delta=0.0,
-                goal_progress=0.0,
-                repeated_visit=False,
+                mission_observed_delta=0.0,
+                priority_observed_delta=0.0,
+                executed_without_new_coverage=False,
+                success_first_crossing=False,
+                episode_ended_without_success=False,
+                hard_safety_violation=False,
                 terminated=False,
                 execution_state="DECISION_BOUNDARY",
             )
@@ -573,9 +579,12 @@ def test_ground_reference_executes_to_next_decision_boundary(
     executor = _ReferenceExecutor(
         ReferenceExecutionResult(
             next_observation=next_observation,
-            coverage_delta=0.2,
-            goal_progress=0.1,
-            repeated_visit=True,
+            mission_observed_delta=0.2,
+            priority_observed_delta=0.1,
+            executed_without_new_coverage=True,
+            success_first_crossing=False,
+            episode_ended_without_success=False,
+            hard_safety_violation=False,
             terminated=False,
             execution_state="DECISION_BOUNDARY",
         )
@@ -600,11 +609,11 @@ def test_ground_reference_executes_to_next_decision_boundary(
     assert transition.next_observation is not next_observation
     assert transition.next_observation.pose_features[0, 0].item() == pytest.approx(0.5)
     assert next_observation.pose_features[0, 5].item() == pytest.approx(0.0)
-    assert transition.coverage_delta == 0.2
-    assert transition.goal_progress == 0.1
-    assert transition.normalized_plan_cost == 0.5
-    assert transition.normalized_elapsed_time == 0.25
-    assert transition.repeated_visit is True
+    assert transition.mission_observed_delta == 0.2
+    assert transition.priority_observed_delta == 0.1
+    assert transition.normalized_plan_or_execution_cost == 0.5
+    assert transition.normalized_macro_step_time == 0.25
+    assert transition.executed_without_new_coverage is True
     assert transition.planning_outcome == PlanningOutcome.NEW_REFERENCE_AVAILABLE
     assert transition.execution_directive == ExecutionDirective.ACTIVATE_NEW_REFERENCE
     assert transition.reason_code == "REFERENCE_READY"
@@ -616,9 +625,12 @@ def test_mismatched_reference_platform_discards_rollout_and_stops_training() -> 
     executor = _ReferenceExecutor(
         ReferenceExecutionResult(
             next_observation=_observation(),
-            coverage_delta=0.0,
-            goal_progress=0.0,
-            repeated_visit=False,
+            mission_observed_delta=0.0,
+            priority_observed_delta=0.0,
+            executed_without_new_coverage=False,
+            success_first_crossing=False,
+            episode_ended_without_success=False,
+            hard_safety_violation=False,
             terminated=False,
             execution_state="DECISION_BOUNDARY",
         )
@@ -669,9 +681,12 @@ def test_rejecting_outcome_with_executable_reference_fails_closed() -> None:
     executor = _ReferenceExecutor(
         ReferenceExecutionResult(
             next_observation=_observation(),
-            coverage_delta=1.0,
-            goal_progress=1.0,
-            repeated_visit=False,
+            mission_observed_delta=1.0,
+            priority_observed_delta=1.0,
+            executed_without_new_coverage=False,
+            success_first_crossing=False,
+            episode_ended_without_success=False,
+            hard_safety_violation=False,
             terminated=False,
             execution_state="DECISION_BOUNDARY",
         )
@@ -769,9 +784,12 @@ def test_current_cpp_v3_committed_hop_output_uses_execution_feedback() -> None:
     feedback = CommittedHopExecutionFeedback(
         execution_state="IN_FLIGHT",
         next_observation=observation,
-        coverage_delta=0.2,
-        goal_progress=0.3,
-        repeated_visit=True,
+        mission_observed_delta=0.2,
+        priority_observed_delta=0.3,
+        executed_without_new_coverage=True,
+        success_first_crossing=False,
+        episode_ended_without_success=False,
+        hard_safety_violation=False,
         terminated=False,
     )
     env = V3ExplorationEnvironment(
@@ -786,9 +804,9 @@ def test_current_cpp_v3_committed_hop_output_uses_execution_feedback() -> None:
 
     assert transition.next_observation is not observation
     assert observation.pose_features[0, 5].item() == pytest.approx(0.0)
-    assert transition.coverage_delta == 0.2
-    assert transition.goal_progress == 0.3
-    assert transition.repeated_visit is True
+    assert transition.mission_observed_delta == 0.2
+    assert transition.priority_observed_delta == 0.3
+    assert transition.executed_without_new_coverage is True
     assert transition.planning_outcome == PlanningOutcome.SAFE_FRONTIER_REFERENCE_AVAILABLE
     assert transition.execution_directive == ExecutionDirective.CONTINUE_COMMITTED_HOP
 

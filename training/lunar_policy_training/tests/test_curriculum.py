@@ -181,7 +181,7 @@ def test_proxy_executor_consumes_cpp_trajectory_endpoint(
 
     executed = episode.execute_reference(output.reference)
 
-    assert executed.coverage_delta > 0.0
+    assert executed.mission_observed_delta > 0.0
     assert executed.execution_state == "DECISION_BOUNDARY"
     assert executed.execution_events.reference_samples_consumed > 1
     assert executed.execution_events.execution_failure_count == 0
@@ -236,8 +236,8 @@ def test_proxy_executor_rejects_unexecutable_reference_without_success_gain() ->
 
     executed = episode.execute_reference(empty_reference)
 
-    assert executed.coverage_delta == 0.0
-    assert executed.goal_progress == 0.0
+    assert executed.mission_observed_delta == 0.0
+    assert executed.priority_observed_delta == 0.0
     assert executed.execution_events.execution_failure_count == 1
     assert executed.execution_events.safety_violation_count == 1
     assert executed.execution_events.selected_action_observed_safe is False
@@ -265,7 +265,7 @@ def test_hopper_proxy_consumes_hop_and_reaches_landed_decision_boundary() -> Non
     )
     assert executed.execution_events.hopper_commitment_violation_count == 0
     assert executed.execution_events.reference_samples_consumed == 1
-    assert executed.coverage_delta > 0.0
+    assert executed.mission_observed_delta > 0.0
 
 
 def test_proxy_action_has_fixed_target_and_unique_frontiers_can_converge() -> None:
@@ -288,10 +288,10 @@ def test_proxy_action_has_fixed_target_and_unique_frontiers_can_converge() -> No
     repeated = take_action(0)
     second = take_action(1)
 
-    assert distractor.coverage_delta == 0.0
-    assert first.coverage_delta > 0.0
-    assert repeated.coverage_delta == 0.0
-    assert second.coverage_delta > 0.0
+    assert distractor.mission_observed_delta == 0.0
+    assert first.mission_observed_delta > 0.0
+    assert repeated.mission_observed_delta == 0.0
+    assert second.mission_observed_delta > 0.0
     assert worker.initial_observation.candidate_mask.shape == (1, 64)
     assert bool(worker.initial_observation.candidate_mask[0, :3].all())
     assert not bool(worker.initial_observation.candidate_mask[0, 3:].any())
