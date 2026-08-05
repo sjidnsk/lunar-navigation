@@ -200,20 +200,56 @@ def _download_atomic(
                 )
             if expected_size_bytes is not None and response_total != expected_size_bytes:
                 raise PolarFetchError("response total does not match registry size; part retained")
-            mode = "ab" if append else "wb"
-            written = 0
-            with part.open(mode) as stream:
-                while chunk := response.read(1024 * 1024):
-                    stream.write(chunk)
-                    written += len(chunk)
-                stream.flush()
-                os.fsync(stream.fileno())
+            restart = None
+            body_path = part
+            if append:
+                mode = "ab"
+            elif offset:
+                restart = part.with_name(f".{part.name}.restart")
+                if restart.exists() or restart.is_symlink():
+                    raise PolarFetchError("restart part prevents safe HTTP 200 fallback")
+                body_path, mode = restart, "xb"
+            else:
+                mode = "wb"
+            try:
+                written, has_extra = _write_bounded_response_body(
+                    response, body_path, mode=mode, declared_length=response_length
+                )
+            except Exception as error:
+                _restore_retryable_part(
+                    part,
+                    restart=restart,
+                    append_offset=offset if append else None,
+                    declared_total=response_total,
+                )
+                if isinstance(error, PolarFetchError):
+                    raise
+                raise PolarFetchError("source download interrupted; part retained") from error
             if written != response_length:
+                if restart is not None:
+                    _discard_restart(restart)
                 raise PolarFetchError("response body length mismatch; part retained")
-            final_part_size = part.stat().st_size
+            if has_extra:
+                _restore_retryable_part(
+                    part,
+                    restart=restart,
+                    append_offset=offset if append else None,
+                    declared_total=response_total,
+                )
+                raise PolarFetchError("response body has extra data; part retained")
+            final_part_size = body_path.stat().st_size
             expected_part_size = (offset if append else 0) + written
             if final_part_size != expected_part_size or final_part_size != response_total:
+                _restore_retryable_part(
+                    part,
+                    restart=restart,
+                    append_offset=offset if append else None,
+                    declared_total=response_total,
+                )
                 raise PolarFetchError("final part length mismatch; part retained")
+            if restart is not None:
+                os.replace(restart, part)
+                _fsync_directory(part.parent)
     except PolarFetchError:
         raise
     except OSError as error:
@@ -229,6 +265,66 @@ def _decimal_header(value: object, label: str) -> int:
     if not isinstance(value, str) or not value.isdecimal():
         raise PolarFetchError(f"{label} is missing or invalid")
     return int(value)
+
+
+def _write_bounded_response_body(
+    response: Any,
+    path: Path,
+    *,
+    mode: str,
+    declared_length: int,
+) -> tuple[int, bool]:
+    remaining = declared_length
+    written = 0
+    has_extra = False
+    with path.open(mode) as stream:
+        while remaining:
+            chunk = response.read(min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            accepted = chunk[:remaining]
+            accepted_count = stream.write(accepted)
+            if accepted_count != len(accepted):
+                raise OSError("response body could not be written completely")
+            written += accepted_count
+            remaining -= accepted_count
+            if len(chunk) > len(accepted):
+                has_extra = True
+                break
+        if remaining == 0 and not has_extra:
+            has_extra = bool(response.read(1))
+        stream.flush()
+        os.fsync(stream.fileno())
+    return written, has_extra
+
+
+def _restore_retryable_part(
+    part: Path,
+    *,
+    restart: Path | None,
+    append_offset: int | None,
+    declared_total: int,
+) -> None:
+    if restart is not None:
+        _discard_restart(restart)
+        return
+    if not part.exists():
+        return
+    if append_offset is not None:
+        retryable_size = append_offset
+    else:
+        # A full-size unverified part would retry with an unsatisfiable Range at EOF.
+        retryable_size = min(part.stat().st_size, max(0, declared_total - 1))
+    with part.open("r+b") as stream:
+        stream.truncate(retryable_size)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _discard_restart(restart: Path) -> None:
+    if restart.exists() or restart.is_symlink():
+        restart.unlink()
+        _fsync_directory(restart.parent)
 
 
 def _read_lock(path: Path) -> PolarSourceLock:

@@ -565,6 +565,59 @@ def test_range_resume_appends_only_matching_partial_response(tmp_path: Path, mon
     assert destination.read_bytes() == b"abcdef"
 
 
+def test_overlong_partial_response_rolls_back_to_original_resume_offset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    part = tmp_path / "source.tif.part"
+    destination = tmp_path / "source.tif"
+    part.write_bytes(b"abc")
+    monkeypatch.setattr(
+        fetch_polar_data,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(
+            b"defg", status=206, content_length=3, content_range="bytes 3-5/6"
+        ),
+    )
+
+    with pytest.raises(fetch_polar_data.PolarFetchError, match="extra|length|part retained"):
+        fetch_polar_data._download_atomic(
+            "https://example.invalid/file", part, destination, expected_size_bytes=6
+        )
+
+    assert part.read_bytes() == b"abc"
+    assert not destination.exists()
+
+
+def test_partial_response_read_error_rolls_back_to_original_resume_offset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    part = tmp_path / "source.tif.part"
+    destination = tmp_path / "source.tif"
+    part.write_bytes(b"abc")
+
+    class InterruptedResponse(_Response):
+        def read(self, size: int = -1) -> bytes:
+            if self.tell() == 0:
+                return super().read(size)
+            raise OSError("network interrupted")
+
+    monkeypatch.setattr(
+        fetch_polar_data,
+        "urlopen",
+        lambda *_args, **_kwargs: InterruptedResponse(
+            b"def", status=206, content_length=3, content_range="bytes 3-5/6"
+        ),
+    )
+
+    with pytest.raises(fetch_polar_data.PolarFetchError, match="part retained"):
+        fetch_polar_data._download_atomic(
+            "https://example.invalid/file", part, destination, expected_size_bytes=6
+        )
+
+    assert part.read_bytes() == b"abc"
+    assert not destination.exists()
+
+
 def test_range_resume_restarts_when_server_ignores_range(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     part = tmp_path / "source.tif.part"
     destination = tmp_path / "source.tif"
@@ -579,6 +632,65 @@ def test_range_resume_restarts_when_server_ignores_range(tmp_path: Path, monkeyp
         "https://example.invalid/file", part, destination, expected_size_bytes=5
     )
     assert destination.read_bytes() == b"fresh"
+
+
+def test_overlong_200_fallback_preserves_original_resume_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    part = tmp_path / "source.tif.part"
+    destination = tmp_path / "source.tif"
+    part.write_bytes(b"abc")
+    monkeypatch.setattr(
+        fetch_polar_data,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(
+            b"freshX", status=200, content_length=5
+        ),
+    )
+
+    with pytest.raises(fetch_polar_data.PolarFetchError, match="extra|length|part retained"):
+        fetch_polar_data._download_atomic(
+            "https://example.invalid/file", part, destination, expected_size_bytes=5
+        )
+
+    assert part.read_bytes() == b"abc"
+    assert not (tmp_path / ".source.tif.part.restart").exists()
+    assert not destination.exists()
+
+
+def test_overlong_initial_200_keeps_one_byte_short_retryable_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    part = tmp_path / "source.tif.part"
+    destination = tmp_path / "source.tif"
+    monkeypatch.setattr(
+        fetch_polar_data,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(
+            b"abcdefg", status=200, content_length=6
+        ),
+    )
+
+    with pytest.raises(fetch_polar_data.PolarFetchError, match="extra|length|part retained"):
+        fetch_polar_data._download_atomic(
+            "https://example.invalid/file", part, destination, expected_size_bytes=6
+        )
+
+    assert part.read_bytes() == b"abcde"
+    assert not destination.exists()
+
+    def retry_open(request: object, **_: object) -> _Response:
+        assert request.get_header("Range") == "bytes=5-"
+        return _Response(
+            b"f", status=206, content_length=1, content_range="bytes 5-5/6"
+        )
+
+    monkeypatch.setattr(fetch_polar_data, "urlopen", retry_open)
+    fetch_polar_data._download_atomic(
+        "https://example.invalid/file", part, destination, expected_size_bytes=6
+    )
+    assert destination.read_bytes() == b"abcdef"
+    assert not part.exists()
 
 
 def test_range_resume_rejects_end_outside_advertised_total_and_retains_part(
@@ -730,5 +842,5 @@ def test_interrupted_download_retains_part_file(tmp_path: Path, monkeypatch: pyt
         fetch_polar_data._download_atomic(
             "https://example.invalid/file", part, destination, expected_size_bytes=7
         )
-    assert part.read_bytes() == b"partial"
+    assert part.read_bytes() == b"partia"
     assert not destination.exists()
