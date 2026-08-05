@@ -124,7 +124,7 @@ void RequireValidResult(const PlannerOutput& output) {
   std::ranges::sort(elapsed_ms);
 
   const auto& state = std::get<WheeledState>(input.current_state);
-  const auto& goal = std::get<PointGoal>(input.goal.target);
+  const auto& goal = std::get<PointGoal>(input.goal_map.target);
   return Json{
       {"schema_version", "lunar-planner-core-benchmark/v1"},
       {"fixture_id", "wheeled-flat-map-v1"},

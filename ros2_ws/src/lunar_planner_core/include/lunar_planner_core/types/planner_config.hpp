@@ -73,6 +73,34 @@ struct HopperPlannerConfig final {
   std::size_t maximum_authorized_hops{1U};
 };
 
+struct GlobalMapConfig final {
+  double base_resolution_m{0.2};
+  std::size_t maximum_level{4U};
+  std::size_t maximum_cells{1'048'576U};
+  std::size_t maximum_axis_cells{4'096U};
+};
+
+struct GlobalSearchConfig final {
+  SearchResourceLimits resources{
+      .maximum_expanded_states = 1'048'576U,
+      .maximum_reopened_states = 1'048'576U,
+      .maximum_generated_candidates = 1'048'576U,
+      .maximum_open_states = 1'048'576U,
+      .maximum_memory_bytes = 256U * 1024U * 1024U,
+  };
+  std::size_t maximum_preview_points{4'096U};
+  double slope_weight{1.0};
+  double roughness_weight{1.0};
+  double clearance_weight{1.0};
+};
+
+struct LocalFrontierConfig final {
+  double wheel_horizon_m{4.0};
+  double legged_horizon_m{3.0};
+  std::size_t maximum_attempts{3U};
+  double additional_corridor_margin_m{0.4};
+};
+
 struct PlannerConfig final {
   std::chrono::nanoseconds maximum_input_skew{std::chrono::seconds{1}};
   AraStarConfig search;
@@ -82,7 +110,10 @@ struct PlannerConfig final {
   WheelPlannerConfig wheel;
   LeggedPlannerConfig legged;
   HopperPlannerConfig hopper;
+  GlobalMapConfig global_map;
+  GlobalSearchConfig global_search;
+  LocalFrontierConfig local_frontier;
   bool stable_candidate_order{true};
 };
 
-}  // namespace lunar::planning
+} // namespace lunar::planning

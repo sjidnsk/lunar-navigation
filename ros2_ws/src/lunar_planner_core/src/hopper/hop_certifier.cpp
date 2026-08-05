@@ -223,7 +223,7 @@ HopCertificationResult CertifyFirstHop(
     };
   }
   const auto required_attitude_time = RequiredAttitudeTime(
-      state, input.goal, target_region, capability);
+      state, input.goal_map, target_region, capability);
   if (!required_attitude_time.has_value()) {
     return HopCertificationResult{
         .segment = std::nullopt,

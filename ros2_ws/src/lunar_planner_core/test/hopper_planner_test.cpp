@@ -71,7 +71,7 @@ TEST(HopperPlanner, ProducesExactlyOnePhysicallyBoundedHop) {
           segment.launch_velocity_mps.z * seconds +
           0.5 * capability.gravity_mps2.z * seconds * seconds,
   };
-  const auto goal = std::get<PointGoal>(input.goal.target);
+  const auto goal = std::get<PointGoal>(input.goal_map.target);
   EXPECT_LE(
       std::hypot(
           landing_position.x - goal.position_m.x,

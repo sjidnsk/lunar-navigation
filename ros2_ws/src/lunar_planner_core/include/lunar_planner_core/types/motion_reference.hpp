@@ -41,11 +41,16 @@ struct HopReference final {
 
 using MotionReferenceData = std::variant<TrajectoryReference, HopReference>;
 
+struct GlobalRoutePreview final {
+  std::vector<Pose3> poses_map;
+};
+
 struct MotionReference final {
   std::string plan_id;
   PlatformType platform_type{PlatformType::kWheeled};
   TimePoint input_time;
+  GlobalRoutePreview preview;
   MotionReferenceData data;
 };
 
-}  // namespace lunar::planning
+} // namespace lunar::planning

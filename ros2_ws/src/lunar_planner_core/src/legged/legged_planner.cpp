@@ -210,7 +210,7 @@ PlannerOutput LeggedPlanner::Plan(const PlannerInput& input) const {
         projection.reason_code, started);
   }
   if (!HasFeasibleGoalPosition(
-          input.goal, *projection.projection, *capability,
+          input.goal_map, *projection.projection, *capability,
           input.stop_token)) {
     if (input.stop_token.stop_requested()) {
       return Canceled(started);
@@ -222,7 +222,7 @@ PlannerOutput LeggedPlanner::Plan(const PlannerInput& input) const {
   }
 
   LeggedLatticeBuildResult lattice = BuildLeggedLattice(
-      *current_state, input.goal, *projection.projection, *capability,
+      *current_state, input.goal_map, *projection.projection, *capability,
       input.config, input.stop_token);
   if (!lattice.ok()) {
     switch (lattice.status) {

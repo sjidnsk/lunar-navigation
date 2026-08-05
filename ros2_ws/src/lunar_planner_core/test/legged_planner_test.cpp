@@ -103,7 +103,7 @@ TEST(LeggedPlanner, SupportsLateralBodyPrimitive) {
   Planner planner;
   auto input = test::MakeValidLeggedInput();
   input.request_id = "legged-lateral";
-  input.goal.target = PointGoal{
+  input.goal_map.target = PointGoal{
       .position_m = {2.5, 5.5, 0.0},
       .tolerance_m = 0.2,
   };

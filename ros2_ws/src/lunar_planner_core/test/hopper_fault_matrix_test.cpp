@@ -30,7 +30,7 @@ void SetByte(
 }
 
 void MakeExactCellGoal(PlannerInput& input) {
-  input.goal.target = PointGoal{
+  input.goal_map.target = PointGoal{
       .position_m = {4.25, 3.25, 0.0},
       .tolerance_m = 0.05,
   };

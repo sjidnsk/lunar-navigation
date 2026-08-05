@@ -66,14 +66,14 @@ void MakeGoalKnownInfeasible(
   auto& forbidden = std::get<std::vector<std::uint8_t>>(
       input.world.local_map.layers.at("forbidden").values);
   if (platform == PlatformType::kHopper) {
-    input.goal.target = PointGoal{
+    input.goal_map.target = PointGoal{
         .position_m = {4.25, 3.25, 0.0},
         .tolerance_m = 0.05,
     };
     forbidden[6U * input.world.local_map.width + 8U] = 1U;
     return;
   }
-  input.goal.target = PointGoal{
+  input.goal_map.target = PointGoal{
       .position_m = {4.5, 3.5, 0.0},
       .tolerance_m = 0.2,
   };

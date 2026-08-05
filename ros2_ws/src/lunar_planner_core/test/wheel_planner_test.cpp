@@ -62,7 +62,7 @@ TEST(WheelPlanner, SelectsReverseMotionForGoalBehind) {
   Planner planner;
   auto input = test::MakeValidWheelInput();
   input.request_id = "wheel-reverse";
-  input.goal.target = PointGoal{
+  input.goal_map.target = PointGoal{
       .position_m = {0.5, 3.5, 0.0},
       .tolerance_m = 0.2,
   };
@@ -83,12 +83,12 @@ TEST(WheelPlanner, ProducesInPlaceSpinForYawOnlyGoal) {
   Planner planner;
   auto input = test::MakeValidWheelInput();
   input.request_id = "wheel-spin";
-  input.goal.target = PointGoal{
+  input.goal_map.target = PointGoal{
       .position_m = {2.5, 3.5, 0.0},
       .tolerance_m = 0.1,
   };
-  input.goal.yaw_rad = std::numbers::pi / 2.0;
-  input.goal.yaw_tolerance_rad = 0.05;
+  input.goal_map.yaw_rad = std::numbers::pi / 2.0;
+  input.goal_map.yaw_tolerance_rad = 0.05;
 
   const PlannerOutput output = planner.Plan(input);
 

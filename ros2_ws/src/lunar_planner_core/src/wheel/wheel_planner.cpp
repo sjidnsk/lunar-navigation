@@ -177,7 +177,7 @@ PlannerOutput WheelPlanner::Plan(const PlannerInput& input) const {
         ExecutionDirective::kNoSafeReference,
         projection.reason_code, started);
   }
-  if (!HasFeasibleGoalPosition(input.goal, *projection.projection)) {
+  if (!HasFeasibleGoalPosition(input.goal_map, *projection.projection)) {
     return Failure(
         PlanningOutcome::kGoalInfeasible,
         ExecutionDirective::kHoldPosition,
@@ -185,7 +185,7 @@ PlannerOutput WheelPlanner::Plan(const PlannerInput& input) const {
   }
 
   WheelLatticeBuildResult lattice = BuildWheelLattice(
-      *current_state, input.goal, *projection.projection, *capability,
+      *current_state, input.goal_map, *projection.projection, *capability,
       input.config, input.stop_token);
   if (!lattice.ok()) {
     switch (lattice.status) {

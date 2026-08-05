@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <stop_token>
@@ -59,12 +60,33 @@ struct PlannerInput final {
   std::string request_id;
   TimePoint state_time;
   PlatformState current_state;
-  GoalRegion goal;
+  GoalRegion goal_map;
   WorldSnapshot world;
   PlatformCapability capability;
   PlannerConfig config;
   std::optional<ExecutionContext> previous_execution;
   std::stop_token stop_token;
+};
+
+struct HierarchicalPlannerMetrics final {
+  std::size_t global_level{};
+  double global_resolution_m{};
+  std::size_t global_cells{};
+  std::chrono::nanoseconds global_elapsed{};
+  std::chrono::nanoseconds local_elapsed{};
+  std::uint64_t global_expanded_states{};
+  std::uint64_t local_expanded_states{};
+  std::size_t global_open_peak{};
+  std::size_t estimated_work_memory_bytes{};
+  std::size_t raw_route_points{};
+  std::size_t simplified_route_points{};
+  double local_frontier_distance_m{};
+  std::size_t local_attempts{};
+  double corridor_width_m{};
+  std::size_t hopper_graph_nodes{};
+  std::size_t hopper_graph_edges{};
+  std::size_t hopper_route_hops{};
+  std::size_t hopper_certification_attempts{};
 };
 
 struct PlannerDiagnostics final {
@@ -73,6 +95,7 @@ struct PlannerDiagnostics final {
   std::uint64_t expanded_states{};
   std::optional<double> best_cost;
   std::vector<std::string> warning_codes;
+  std::optional<HierarchicalPlannerMetrics> hierarchical;
 };
 
 struct PlannerOutput final {
@@ -83,4 +106,4 @@ struct PlannerOutput final {
   PlannerDiagnostics diagnostics;
 };
 
-}  // namespace lunar::planning
+} // namespace lunar::planning

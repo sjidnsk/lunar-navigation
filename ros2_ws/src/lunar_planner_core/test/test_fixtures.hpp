@@ -68,7 +68,7 @@ inline PlannerInput MakeValidWheelInput() {
           WheeledState{
               .pose = Pose3{.position_m = {2.5, 3.5, 0.0}},
           },
-      .goal =
+      .goal_map =
           GoalRegion{
               .goal_id = "goal",
               .target = PointGoal{.position_m = {4.5, 3.5, 0.0},
@@ -229,12 +229,12 @@ inline PlannerInput MakeValidHopperInput() {
   input.current_state = HopperState{
       .pose = Pose3{.position_m = {3.0, 3.0, 0.5}},
   };
-  input.goal.target = PointGoal{
+  input.goal_map.target = PointGoal{
       .position_m = {4.0, 3.0, 0.0},
       .tolerance_m = 0.5,
   };
-  input.goal.yaw_rad = 0.0;
-  input.goal.yaw_tolerance_rad = 0.1;
+  input.goal_map.yaw_rad = 0.0;
+  input.goal_map.yaw_tolerance_rad = 0.1;
   input.world.global_map = MakeFlatMap("map", 16U, 12U, 0.5);
   input.world.local_map = MakeFlatMap("odom", 16U, 12U, 0.5);
   input.capability = HopperCapability{

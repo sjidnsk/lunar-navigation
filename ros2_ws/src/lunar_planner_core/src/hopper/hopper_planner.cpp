@@ -241,7 +241,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
   }
 
   const LandingRegionResult target = CertifyLandingRegion(
-      *projection.projection, input.goal, *capability,
+      *projection.projection, input.goal_map, *capability,
       input.config.map_safety, input.stop_token);
   const std::uint64_t landing_work = static_cast<std::uint64_t>(
       source.inspected_cells + target.inspected_cells);
