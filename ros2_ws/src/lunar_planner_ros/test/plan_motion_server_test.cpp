@@ -123,6 +123,10 @@ rclcpp::NodeOptions ValidOptions() {
       rclcpp::Parameter{"localization_status_max_age", 5.0},
       rclcpp::Parameter{"tf_max_age", 5.0},
       rclcpp::Parameter{"max_pairwise_skew", 0.2},
+      rclcpp::Parameter{"base_resolution_m", 1.0},
+      rclcpp::Parameter{"maximum_global_level", 4},
+      rclcpp::Parameter{"maximum_global_cells", 1'048'576},
+      rclcpp::Parameter{"maximum_global_axis_cells", 4'096},
   });
   return options;
 }
@@ -370,6 +374,20 @@ TEST_F(PlanMotionServerTest, ConfiguresAndActivatesWithExplicitSnapshotPolicy) {
   EXPECT_EQ(
       node->cleanup().id(),
       lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  node.reset();
+}
+
+TEST_F(PlanMotionServerTest, RejectsUnsupportedGlobalMapConfiguration) {
+  auto options = ValidOptions();
+  options.append_parameter_override("maximum_global_level", 3);
+  auto node = std::make_shared<PlanMotionServer>(
+      options, DefaultDependencies());
+  EXPECT_EQ(
+      node->configure().id(),
+      lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_EQ(
+      node->last_diagnostic_reason_for_testing(),
+      "PLANNER_CONFIGURE_FAILED");
   node.reset();
 }
 

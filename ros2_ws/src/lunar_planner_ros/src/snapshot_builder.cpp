@@ -150,15 +150,16 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
   };
 }
 
-[[nodiscard]] lunar::planning::Vec3 InverseTransformPoint(
+[[nodiscard]] lunar::planning::Vec3 TransformPoint(
     const geometry_msgs::msg::Transform& map_from_odom,
-    const lunar::planning::Vec3 point_in_map) noexcept {
-  const lunar::planning::Vec3 translated{
-      .x = point_in_map.x - map_from_odom.translation.x,
-      .y = point_in_map.y - map_from_odom.translation.y,
-      .z = point_in_map.z - map_from_odom.translation.z,
+    const lunar::planning::Vec3 point_in_odom) noexcept {
+  const lunar::planning::Vec3 rotated =
+      Rotate(map_from_odom.rotation, point_in_odom);
+  return lunar::planning::Vec3{
+      .x = rotated.x + map_from_odom.translation.x,
+      .y = rotated.y + map_from_odom.translation.y,
+      .z = rotated.z + map_from_odom.translation.z,
   };
-  return Rotate(Conjugate(map_from_odom.rotation), translated);
 }
 
 [[nodiscard]] bool IsFiniteOdometry(
@@ -331,7 +332,7 @@ SelectTransform(
   }
 
   lunar::planning::GoalRegion goal = request.goal;
-  const bool transform = request.frame_id == "map";
+  const bool transform = request.frame_id == "odom";
   bool target_valid = std::visit(
       [&](auto& target) {
         using Target = std::decay_t<decltype(target)>;
@@ -341,8 +342,8 @@ SelectTransform(
             return false;
           }
           if (transform) {
-            target.position_m =
-                InverseTransformPoint(map_from_odom, target.position_m);
+            target.position_m = TransformPoint(
+                map_from_odom, target.position_m);
           }
           return FiniteCoreVector(target.position_m);
         } else {
@@ -356,7 +357,7 @@ SelectTransform(
               return false;
             }
             if (transform) {
-              point = InverseTransformPoint(map_from_odom, point);
+              point = TransformPoint(map_from_odom, point);
             }
             if (!FiniteCoreVector(point)) {
               return false;
@@ -371,18 +372,18 @@ SelectTransform(
   }
 
   if (transform && goal.yaw_rad.has_value()) {
-    const lunar::planning::Vec3 heading_in_map{
+    const lunar::planning::Vec3 heading_in_odom{
         .x = std::cos(*goal.yaw_rad),
         .y = std::sin(*goal.yaw_rad),
         .z = 0.0,
     };
-    const auto heading_in_odom = Rotate(
-        Conjugate(map_from_odom.rotation), heading_in_map);
-    if (!FiniteCoreVector(heading_in_odom) ||
-        std::hypot(heading_in_odom.x, heading_in_odom.y) <= 1.0e-9) {
+    const auto heading_in_map = Rotate(
+        map_from_odom.rotation, heading_in_odom);
+    if (!FiniteCoreVector(heading_in_map) ||
+        std::hypot(heading_in_map.x, heading_in_map.y) <= 1.0e-9) {
       return std::nullopt;
     }
-    goal.yaw_rad = std::atan2(heading_in_odom.y, heading_in_odom.x);
+    goal.yaw_rad = std::atan2(heading_in_map.y, heading_in_map.x);
   }
   return goal;
 }
@@ -492,6 +493,28 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
         local.error.has_value() ? local.error->reason_code : std::string{});
   }
 
+  lunar::planning::WorldSnapshot world{
+      .global_map = std::move(*global.map),
+      .local_map = std::move(*local.map),
+      .map_from_odom = {},
+  };
+  const auto map_levels = lunar::planning::hierarchical::ValidateMapLevels(
+      world, planner_config_.global_map);
+  if (!map_levels.ok()) {
+    if (map_levels.reason_code == "GLOBAL_MAP_CONFIGURATION_INVALID") {
+      return Failure(
+          SnapshotErrorCode::kConfigurationInvalid,
+          "SNAPSHOT_CONFIGURATION_INVALID",
+          map_levels.reason_code);
+    }
+    const bool local_level_invalid =
+        map_levels.reason_code == "LOCAL_MAP_LEVEL_INVALID";
+    return Failure(
+        local_level_invalid ? SnapshotErrorCode::kInvalidLocalMap :
+                              SnapshotErrorCode::kInvalidGlobalMap,
+        map_levels.reason_code);
+  }
+
   const auto odometry_stamp = StampNanoseconds(view.odometry->header.stamp);
   const auto localization_stamp =
       StampNanoseconds(view.localization_status->header.stamp);
@@ -508,13 +531,13 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
 
   const std::int64_t now_stamp = now.nanoseconds();
   if (!Fresh(
-          now_stamp, global.map->stamp.nanoseconds_since_epoch,
+          now_stamp, world.global_map.stamp.nanoseconds_since_epoch,
           policy_.global_map_max_age)) {
     return Failure(
         SnapshotErrorCode::kStaleGlobalMap, "GLOBAL_MAP_STALE");
   }
   if (!Fresh(
-          now_stamp, local.map->stamp.nanoseconds_since_epoch,
+          now_stamp, world.local_map.stamp.nanoseconds_since_epoch,
           policy_.local_map_max_age)) {
     return Failure(SnapshotErrorCode::kStaleLocalMap, "LOCAL_MAP_STALE");
   }
@@ -530,8 +553,8 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
   }
 
   const std::array<std::int64_t, 4> input_stamps{
-      global.map->stamp.nanoseconds_since_epoch,
-      local.map->stamp.nanoseconds_since_epoch,
+      world.global_map.stamp.nanoseconds_since_epoch,
+      world.local_map.stamp.nanoseconds_since_epoch,
       *odometry_stamp,
       *localization_stamp,
   };
@@ -568,7 +591,7 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
     return Failure(SnapshotErrorCode::kStaleTf, "STALE_TF");
   }
   if (std::abs(
-          local.map->stamp.nanoseconds_since_epoch - *odometry_stamp) >
+          world.local_map.stamp.nanoseconds_since_epoch - *odometry_stamp) >
       policy_.max_pairwise_skew.count()) {
     return Failure(SnapshotErrorCode::kStaleTf, "STALE_TF");
   }
@@ -580,6 +603,24 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
 
   lunar::planning::PlannerConfig planner_config = planner_config_;
   planner_config.maximum_input_skew = policy_.max_pairwise_skew;
+  world.map_from_odom = lunar::planning::RigidTransform{
+      .parent_frame = "map",
+      .child_frame = "odom",
+      .stamp = lunar::planning::TimePoint{
+          .nanoseconds_since_epoch = *odometry_stamp,
+      },
+      .translation_m = {
+          map_from_odom->transform.translation.x,
+          map_from_odom->transform.translation.y,
+          map_from_odom->transform.translation.z,
+      },
+      .rotation = {
+          .w = map_from_odom->transform.rotation.w,
+          .x = map_from_odom->transform.rotation.x,
+          .y = map_from_odom->transform.rotation.y,
+          .z = map_from_odom->transform.rotation.z,
+      },
+  };
   lunar::planning::PlannerInput input{
       .request_id = request.request_id,
       .state_time = lunar::planning::TimePoint{
@@ -588,29 +629,8 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
       .current_state = ToPlatformState(
           *view.odometry,
           lunar::planning::CapabilityPlatform(capability_)),
-      .goal = *goal,
-      .world = lunar::planning::WorldSnapshot{
-          .global_map = std::move(*global.map),
-          .local_map = std::move(*local.map),
-          .map_from_odom = lunar::planning::RigidTransform{
-              .parent_frame = "map",
-              .child_frame = "odom",
-              .stamp = lunar::planning::TimePoint{
-                  .nanoseconds_since_epoch = *odometry_stamp,
-              },
-              .translation_m = {
-                  map_from_odom->transform.translation.x,
-                  map_from_odom->transform.translation.y,
-                  map_from_odom->transform.translation.z,
-              },
-              .rotation = {
-                  .w = map_from_odom->transform.rotation.w,
-                  .x = map_from_odom->transform.rotation.x,
-                  .y = map_from_odom->transform.rotation.y,
-                  .z = map_from_odom->transform.rotation.z,
-              },
-          },
-      },
+      .goal_map = *goal,
+      .world = std::move(world),
       .capability = capability_,
       .config = std::move(planner_config),
       .previous_execution = request.previous_execution,

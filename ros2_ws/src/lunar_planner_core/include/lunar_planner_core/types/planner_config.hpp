@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <numbers>
+#include <optional>
+#include <string>
 
 namespace lunar::planning {
 
@@ -115,5 +117,41 @@ struct PlannerConfig final {
   LocalFrontierConfig local_frontier;
   bool stable_candidate_order{true};
 };
+
+struct WorldSnapshot;
+
+namespace hierarchical {
+
+struct ExpectedMapLevelResult final {
+  std::optional<std::size_t> level;
+  std::size_t width{};
+  std::size_t height{};
+  double resolution_m{};
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept {
+    return level.has_value() && reason_code.empty();
+  }
+};
+
+struct MapLevelValidationResult final {
+  std::optional<std::size_t> global_level;
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept {
+    return global_level.has_value() && reason_code.empty();
+  }
+};
+
+[[nodiscard]] ExpectedMapLevelResult ExpectedGlobalMapLevel(
+    double size_x_m,
+    double size_y_m,
+    const GlobalMapConfig& config) noexcept;
+
+[[nodiscard]] MapLevelValidationResult ValidateMapLevels(
+    const WorldSnapshot& world,
+    const GlobalMapConfig& config) noexcept;
+
+}  // namespace hierarchical
 
 } // namespace lunar::planning

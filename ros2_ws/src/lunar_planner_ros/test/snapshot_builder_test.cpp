@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <numbers>
 #include <variant>
 
 #include <gtest/gtest.h>
@@ -60,12 +61,22 @@ std::shared_ptr<SnapshotStore> ValidStore() {
 
 SnapshotBuilder MakeBuilder(
     std::shared_ptr<const SnapshotStore> store,
-    const SnapshotPolicy policy = ValidPolicy()) {
+    const SnapshotPolicy policy = ValidPolicy(),
+    lunar::planning::PlannerConfig config = {}) {
+  config.global_map.base_resolution_m = 1.0;
   return SnapshotBuilder{
-      std::move(store), policy, test::MakeWheeledCapability()};
+      std::move(store), policy, test::MakeWheeledCapability(),
+      std::move(config)};
 }
 
-TEST(SnapshotBuilder, FreezesExactlyOneValidInputAndTransformsMapGoalToOdom) {
+void SetResolution(
+    grid_map_msgs::msg::GridMap& map, const double resolution_m) {
+  map.info.resolution = resolution_m;
+  map.info.length_x = static_cast<double>(test::kMapWidth) * resolution_m;
+  map.info.length_y = static_cast<double>(test::kMapHeight) * resolution_m;
+}
+
+TEST(SnapshotBuilder, FreezesExactlyOneValidMapFrameInput) {
   const SnapshotBuildResult result = MakeBuilder(ValidStore()).Freeze(
       ValidGoal(), rclcpp::Time{10'100'000'000LL});
 
@@ -78,14 +89,133 @@ TEST(SnapshotBuilder, FreezesExactlyOneValidInputAndTransformsMapGoalToOdom) {
   EXPECT_EQ(result.input->world.map_from_odom.parent_frame, "map");
   EXPECT_EQ(result.input->world.map_from_odom.child_frame, "odom");
   const auto& goal = std::get<lunar::planning::PointGoal>(
-      result.input->goal.target);
-  EXPECT_NEAR(goal.position_m.x, 2.0, 1.0e-9);
+      result.input->goal_map.target);
+  EXPECT_NEAR(goal.position_m.x, 12.0, 1.0e-9);
   EXPECT_NEAR(goal.position_m.y, 0.5, 1.0e-9);
   ASSERT_TRUE(std::holds_alternative<lunar::planning::WheeledState>(
       result.input->current_state));
   EXPECT_EQ(
       result.input->config.maximum_input_skew,
       ValidPolicy().max_pairwise_skew);
+}
+
+TEST(SnapshotBuilder, TransformsOdomPointPolygonAndYawIntoMap) {
+  auto store = ValidStore();
+  auto transforms = test::MakeTransforms();
+  transforms.transforms[0].transform.rotation.w = std::sqrt(0.5);
+  transforms.transforms[0].transform.rotation.z = std::sqrt(0.5);
+  store->UpdateTransforms(transforms);
+
+  GoalRequest point = ValidGoal();
+  point.frame_id = "odom";
+  point.goal.target = lunar::planning::PointGoal{
+      .position_m = {1.0, 0.0, 0.0},
+      .tolerance_m = 0.2,
+  };
+  point.goal.yaw_rad = 0.0;
+  const SnapshotBuildResult point_result = MakeBuilder(store).Freeze(
+      point, rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(point_result.ok())
+      << (point_result.error ? point_result.error->reason_code : "");
+  const auto& map_point = std::get<lunar::planning::PointGoal>(
+      point_result.input->goal_map.target);
+  EXPECT_NEAR(map_point.position_m.x, 10.0, 1.0e-9);
+  EXPECT_NEAR(map_point.position_m.y, 1.0, 1.0e-9);
+  ASSERT_TRUE(point_result.input->goal_map.yaw_rad.has_value());
+  EXPECT_NEAR(
+      *point_result.input->goal_map.yaw_rad,
+      std::numbers::pi / 2.0, 1.0e-9);
+
+  GoalRequest polygon = point;
+  polygon.goal.target = lunar::planning::PlanarRegionGoal{
+      .boundary_m = {
+          {0.0, 0.0, 0.0},
+          {1.0, 0.0, 0.0},
+          {0.0, 1.0, 0.0},
+      },
+      .normal_tolerance_m = 0.1,
+  };
+  const SnapshotBuildResult polygon_result = MakeBuilder(store).Freeze(
+      polygon, rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(polygon_result.ok());
+  const auto& map_polygon = std::get<lunar::planning::PlanarRegionGoal>(
+      polygon_result.input->goal_map.target);
+  ASSERT_EQ(map_polygon.boundary_m.size(), 3U);
+  EXPECT_NEAR(map_polygon.boundary_m[0].x, 10.0, 1.0e-9);
+  EXPECT_NEAR(map_polygon.boundary_m[0].y, 0.0, 1.0e-9);
+  EXPECT_NEAR(map_polygon.boundary_m[1].x, 10.0, 1.0e-9);
+  EXPECT_NEAR(map_polygon.boundary_m[1].y, 1.0, 1.0e-9);
+  EXPECT_NEAR(map_polygon.boundary_m[2].x, 9.0, 1.0e-9);
+  EXPECT_NEAR(map_polygon.boundary_m[2].y, 0.0, 1.0e-9);
+}
+
+TEST(SnapshotBuilder, RejectsInvalidLocalAndGlobalPyramidLevels) {
+  auto local_wrong = ValidStore();
+  auto local_map = test::MakeGridMap("odom");
+  SetResolution(local_map, 2.0);
+  local_wrong->UpdateLocalMap(local_map);
+  const SnapshotBuildResult local_result = MakeBuilder(local_wrong).Freeze(
+      ValidGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(local_result.error.has_value());
+  EXPECT_EQ(local_result.error->code, SnapshotErrorCode::kInvalidLocalMap);
+  EXPECT_EQ(local_result.error->reason_code, "LOCAL_MAP_LEVEL_INVALID");
+
+  auto nondyadic = ValidStore();
+  auto global_map = test::MakeGridMap("map");
+  SetResolution(global_map, 1.5);
+  nondyadic->UpdateGlobalMap(global_map);
+  const SnapshotBuildResult nondyadic_result = MakeBuilder(nondyadic).Freeze(
+      ValidGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(nondyadic_result.error.has_value());
+  EXPECT_EQ(
+      nondyadic_result.error->code, SnapshotErrorCode::kInvalidGlobalMap);
+  EXPECT_EQ(
+      nondyadic_result.error->reason_code, "GLOBAL_MAP_LEVEL_INVALID");
+
+  auto overcoarse = ValidStore();
+  global_map = test::MakeGridMap("map");
+  SetResolution(global_map, 2.0);
+  overcoarse->UpdateGlobalMap(global_map);
+  const SnapshotBuildResult overcoarse_result = MakeBuilder(overcoarse).Freeze(
+      ValidGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(overcoarse_result.error.has_value());
+  EXPECT_EQ(
+      overcoarse_result.error->reason_code, "GLOBAL_MAP_LEVEL_INVALID");
+}
+
+TEST(SnapshotBuilder, EnforcesCellAxisAndLevelFourResourceBounds) {
+  lunar::planning::PlannerConfig cell_limited;
+  cell_limited.global_map.maximum_cells = 2U;
+  const SnapshotBuildResult finer_than_required =
+      MakeBuilder(ValidStore(), ValidPolicy(), cell_limited)
+          .Freeze(ValidGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(finer_than_required.error.has_value());
+  EXPECT_EQ(
+      finer_than_required.error->reason_code, "GLOBAL_MAP_LEVEL_INVALID");
+
+  lunar::planning::PlannerConfig axis_limited;
+  axis_limited.global_map.maximum_axis_cells = 2U;
+  const SnapshotBuildResult axis_result =
+      MakeBuilder(ValidStore(), ValidPolicy(), axis_limited)
+          .Freeze(ValidGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(axis_result.error.has_value());
+  EXPECT_EQ(axis_result.error->reason_code, "GLOBAL_MAP_LEVEL_INVALID");
+
+  auto too_large = ValidStore();
+  auto global_map = test::MakeGridMap("map");
+  SetResolution(global_map, 16.0);
+  too_large->UpdateGlobalMap(global_map);
+  lunar::planning::PlannerConfig exhausted;
+  exhausted.global_map.maximum_cells = 1U;
+  const SnapshotBuildResult exhausted_result =
+      MakeBuilder(too_large, ValidPolicy(), exhausted)
+          .Freeze(ValidGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(exhausted_result.error.has_value());
+  EXPECT_EQ(
+      exhausted_result.error->code, SnapshotErrorCode::kInvalidGlobalMap);
+  EXPECT_EQ(
+      exhausted_result.error->reason_code,
+      "GLOBAL_MAP_SCALE_UNSUPPORTED");
 }
 
 TEST(SnapshotBuilder, RejectsMissingStaleAndSkewedInputs) {

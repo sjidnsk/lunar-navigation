@@ -3,6 +3,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -268,6 +269,10 @@ struct PlanMotionServer::Impl final {
     node.declare_parameter<double>("degraded_pose_covariance_limit", 0.5);
     node.declare_parameter<double>("degraded_twist_covariance_limit", 0.5);
     node.declare_parameter<std::int64_t>("maximum_transform_samples", 256);
+    node.declare_parameter<double>("base_resolution_m", 0.2);
+    node.declare_parameter<std::int64_t>("maximum_global_level", 4);
+    node.declare_parameter<std::int64_t>("maximum_global_cells", 1'048'576);
+    node.declare_parameter<std::int64_t>("maximum_global_axis_cells", 4'096);
     node.declare_parameter(
         "capability_package", rclcpp::ParameterType::PARAMETER_STRING);
     node.declare_parameter(
@@ -305,6 +310,40 @@ struct PlanMotionServer::Impl final {
       throw std::invalid_argument{"snapshot policy is invalid"};
     }
     return policy;
+  }
+
+  [[nodiscard]] std::size_t RequiredSizeParameter(
+      const std::string& name) const {
+    const std::int64_t value = node.get_parameter(name).as_int();
+    if (value <= 0 ||
+        static_cast<std::uint64_t>(value) >
+            std::numeric_limits<std::size_t>::max()) {
+      throw std::invalid_argument{name + " must be a positive size"};
+    }
+    return static_cast<std::size_t>(value);
+  }
+
+  [[nodiscard]] lunar::planning::PlannerConfig ReadPlannerConfig() const {
+    lunar::planning::PlannerConfig config;
+    const double base_resolution_m =
+        node.get_parameter("base_resolution_m").as_double();
+    if (!std::isfinite(base_resolution_m) || base_resolution_m <= 0.0) {
+      throw std::invalid_argument{
+          "base_resolution_m must be positive and finite"};
+    }
+    const std::size_t maximum_level =
+        RequiredSizeParameter("maximum_global_level");
+    if (maximum_level != 4U) {
+      throw std::invalid_argument{
+          "maximum_global_level must equal the supported level 4"};
+    }
+    config.global_map.base_resolution_m = base_resolution_m;
+    config.global_map.maximum_level = maximum_level;
+    config.global_map.maximum_cells =
+        RequiredSizeParameter("maximum_global_cells");
+    config.global_map.maximum_axis_cells =
+        RequiredSizeParameter("maximum_global_axis_cells");
+    return config;
   }
 
   [[nodiscard]] LoadedCapabilities LoadCapabilities() const {
@@ -349,6 +388,7 @@ struct PlanMotionServer::Impl final {
       StopAndJoinWorker("NODE_RECONFIGURED");
       ResetSubscriptions();
       const SnapshotPolicy policy = ReadPolicy();
+      lunar::planning::PlannerConfig planner_config = ReadPlannerConfig();
       LoadedCapabilities loaded = LoadCapabilities();
       const auto transform_samples =
           node.get_parameter("maximum_transform_samples").as_int();
@@ -359,7 +399,7 @@ struct PlanMotionServer::Impl final {
       auto new_store = std::make_shared<SnapshotStore>(
           static_cast<std::size_t>(transform_samples));
       auto new_builder = std::make_unique<SnapshotBuilder>(
-          new_store, policy, loaded.platform);
+          new_store, policy, loaded.platform, std::move(planner_config));
       auto new_guard = std::make_unique<ReferenceGuard>(
           GuardLimits(loaded.platform));
 

@@ -79,7 +79,7 @@ class SnapshotBuilder final {
       std::shared_ptr<const SnapshotStore> store,
       SnapshotPolicy policy,
       lunar::planning::PlatformCapability capability,
-      lunar::planning::PlannerConfig planner_config = {});
+      lunar::planning::PlannerConfig planner_config);
 
   [[nodiscard]] SnapshotBuildResult Freeze(
       const GoalRequest& request,
