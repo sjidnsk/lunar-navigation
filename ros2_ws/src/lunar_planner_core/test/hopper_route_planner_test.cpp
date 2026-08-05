@@ -43,11 +43,32 @@ namespace {
   auto &capability = std::get<HopperCapability>(input.capability);
   capability.body_half_extent_m.x = 0.1;
   capability.body_half_extent_m.y = 0.1;
+  capability.minimum_landing_region_area_m2 = 0.1;
   capability.maximum_launch_speed_mps = 2.0;
   capability.maximum_launch_impulse_newton_seconds = 100.0;
   capability.maximum_landing_speed_mps = 2.0;
   capability.minimum_flight_time = std::chrono::milliseconds{500};
   capability.maximum_flight_time = std::chrono::seconds{3};
+  return input;
+}
+
+[[nodiscard]] PlannerInput LargeLandingAreaInput() {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.request_id = "large-landing-support";
+  input.world.global_map = test::MakeFlatMap("map", 40U, 40U, 0.2);
+  input.world.local_map = test::MakeFlatMap("odom", 40U, 40U, 0.2);
+  input.config.global_map.base_resolution_m = 0.2;
+  input.current_state = HopperState{
+      .pose = Pose3{.position_m = {3.1, 3.1, 0.5}},
+  };
+  input.goal_map.target = PointGoal{
+      .position_m = {4.1, 3.1, 0.0},
+      .tolerance_m = 0.05,
+  };
+  auto &capability = std::get<HopperCapability>(input.capability);
+  capability.body_half_extent_m.x = 0.1;
+  capability.body_half_extent_m.y = 0.1;
+  capability.minimum_landing_region_area_m2 = 1.327322;
   return input;
 }
 
@@ -85,6 +106,22 @@ TEST(HopperRoutePlanner, BuildsADeterministicThreeHopLandingChain) {
   EXPECT_DOUBLE_EQ(first.route->cost, second.route->cost);
   EXPECT_GT(first.maximum_horizontal_reach_m, 2.0);
   EXPECT_LT(first.maximum_horizontal_reach_m, 2.5);
+}
+
+TEST(HopperRoutePlanner,
+     AcceptsLandingRegionLargerThanOneCellWhenSupportAreaIsSafe) {
+  const PlannerInput input = LargeLandingAreaInput();
+
+  const HopperRoutePlanResult result = PlanHopperGlobalRoute(input);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_TRUE(result.route.has_value());
+  EXPECT_EQ(result.reason_code, "HOPPER_GLOBAL_ROUTE_AVAILABLE");
+  EXPECT_EQ(result.route_hops, 1U);
+  EXPECT_GE(result.route->estimated_work_memory_bytes,
+            input.world.global_map.CellCount() *
+                (2U * sizeof(std::uint8_t) + sizeof(double)));
+  EXPECT_GT(result.landing_field_elapsed.count(), 0);
 }
 
 TEST(HopperRoutePlanner, DistinguishesACompleteBrokenChainFromResourceLimits) {

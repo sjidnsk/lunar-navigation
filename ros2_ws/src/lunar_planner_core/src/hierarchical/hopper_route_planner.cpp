@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "hierarchical/frame_transform.hpp"
+#include "hierarchical/landing_support_field.hpp"
 #include "hierarchical/map_level.hpp"
 #include "hopper/ballistic_kinematics.hpp"
 #include "shared/map_snapshot.hpp"
@@ -168,94 +169,6 @@ ValidReachCapability(const HopperCapability &capability) noexcept {
   const auto *region = std::get_if<PlanarRegionGoal>(&goal.target);
   return region != nullptr && region->boundary_m.size() >= 3U &&
          PointInPolygon(Vec2{center.x, center.y}, region->boundary_m);
-}
-
-[[nodiscard]] double Elevation(const shared::MapSnapshot &map,
-                               const shared::GridCell cell) noexcept {
-  if (!map.InBounds(cell)) {
-    return std::numeric_limits<double>::quiet_NaN();
-  }
-  return static_cast<double>(map.FloatLayer("elevation")[map.Index(cell)]);
-}
-
-[[nodiscard]] double AxisGradient(const shared::MapSnapshot &map,
-                                  const shared::GridCell cell,
-                                  const std::int32_t dx,
-                                  const std::int32_t dy) noexcept {
-  const shared::GridCell negative{.x = cell.x - dx, .y = cell.y - dy};
-  const shared::GridCell positive{.x = cell.x + dx, .y = cell.y + dy};
-  const double center = Elevation(map, cell);
-  if (map.InBounds(negative) && map.InBounds(positive)) {
-    return (Elevation(map, positive) - Elevation(map, negative)) /
-           (2.0 * map.resolution_m());
-  }
-  if (map.InBounds(positive)) {
-    return (Elevation(map, positive) - center) / map.resolution_m();
-  }
-  if (map.InBounds(negative)) {
-    return (center - Elevation(map, negative)) / map.resolution_m();
-  }
-  return 0.0;
-}
-
-[[nodiscard]] double PlaneResidual(const shared::SafeProjection &projection,
-                                   const shared::GridCell cell) noexcept {
-  if (projection.source_map() == nullptr) {
-    return std::numeric_limits<double>::infinity();
-  }
-  const shared::MapSnapshot &map = *projection.source_map();
-  const double center_elevation = Elevation(map, cell);
-  const Vec3 center = map.CellCenter(cell);
-  const double gradient_x = AxisGradient(map, cell, 1, 0);
-  const double gradient_y = AxisGradient(map, cell, 0, 1);
-  if (!std::isfinite(center_elevation) || !std::isfinite(gradient_x) ||
-      !std::isfinite(gradient_y)) {
-    return std::numeric_limits<double>::infinity();
-  }
-  double residual = 0.0;
-  for (std::int32_t dy = -1; dy <= 1; ++dy) {
-    for (std::int32_t dx = -1; dx <= 1; ++dx) {
-      const shared::GridCell neighbor{.x = cell.x + dx, .y = cell.y + dy};
-      if (!map.InBounds(neighbor)) {
-        continue;
-      }
-      if (!projection.Known(neighbor) || !projection.HardFeasible(neighbor)) {
-        return std::numeric_limits<double>::infinity();
-      }
-      const Vec3 point = map.CellCenter(neighbor);
-      const double predicted = center_elevation +
-                               gradient_x * (point.x - center.x) +
-                               gradient_y * (point.y - center.y);
-      residual =
-          std::max(residual, std::abs(Elevation(map, neighbor) - predicted));
-    }
-  }
-  return residual;
-}
-
-[[nodiscard]] bool
-LandingCellSafe(const shared::SafeProjection &projection,
-                const shared::GridCell cell,
-                const HopperCapability &capability) noexcept {
-  if (projection.source_map() == nullptr || !projection.HardFeasible(cell)) {
-    return false;
-  }
-  const double resolution = projection.source_map()->resolution_m();
-  const double required_clearance =
-      std::max(capability.minimum_landing_clearance_m,
-               std::hypot(capability.body_half_extent_m.x,
-                          capability.body_half_extent_m.y) +
-                   capability.minimum_lateral_clearance_m);
-  return resolution * resolution + kTolerance >=
-             capability.minimum_landing_region_area_m2 &&
-         static_cast<double>(projection.SlopeRadians(cell)) <=
-             capability.maximum_landing_slope_rad + kTolerance &&
-         static_cast<double>(projection.RoughnessMeters(cell)) <=
-             capability.maximum_landing_roughness_m + kTolerance &&
-         PlaneResidual(projection, cell) <=
-             capability.maximum_plane_residual_m + kTolerance &&
-         static_cast<double>(projection.ClearanceMeters(cell)) + kTolerance >=
-             required_clearance;
 }
 
 [[nodiscard]] bool KnownAt(const shared::MapSnapshot &map,
@@ -558,6 +471,15 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
                        : PlanningOutcome::kInvalidRequest,
                    projection.reason_code, started, reach, levels.global_level);
   }
+  LandingSupportFieldBuildResult landing_field = BuildLandingSupportField(
+      *projection.projection, *capability, input.stop_token);
+  if (!landing_field.ok()) {
+    return Failure(landing_field.reason_code == "REQUEST_CANCELED"
+                       ? PlanningOutcome::kCanceled
+                       : PlanningOutcome::kInvalidRequest,
+                   landing_field.reason_code, started, reach,
+                   levels.global_level);
+  }
   const auto start_pose_map =
       TransformPose(state->pose, input.world.map_from_odom,
                     TransformDirection::kChildToParent);
@@ -569,10 +491,14 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
       .x = start_pose_map->position_m.x,
       .y = start_pose_map->position_m.y,
   });
-  if (!start_cell.has_value() ||
-      !LandingCellSafe(*projection.projection, *start_cell, *capability)) {
+  if (!start_cell.has_value() || !landing_field.field->BaseSafe(*start_cell)) {
     return Failure(PlanningOutcome::kNoKnownSafeRoute, "HOPPER_START_NOT_SAFE",
                    started, reach, levels.global_level);
+  }
+  if (!landing_field.field->CenterSafe(*start_cell)) {
+    return Failure(PlanningOutcome::kNoKnownSafeRoute,
+                   "HOPPER_START_REGION_AREA_INSUFFICIENT", started, reach,
+                   levels.global_level);
   }
 
   std::vector<shared::GridCell> goal_cells;
@@ -589,7 +515,7 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
     const Vec3 center = snapshot.snapshot->CellCenter(cell);
     if (GoalIntersectsCell(input.goal_map, center,
                            snapshot.snapshot->resolution_m()) &&
-        LandingCellSafe(*projection.projection, cell, *capability)) {
+        landing_field.field->CenterSafe(cell)) {
       goal_cells.push_back(cell);
     }
   }
@@ -642,8 +568,7 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
         .x = static_cast<std::int32_t>(index % snapshot.snapshot->width()),
         .y = static_cast<std::int32_t>(index / snapshot.snapshot->width()),
     };
-    if (inserted.contains(cell) ||
-        !LandingCellSafe(*projection.projection, cell, *capability)) {
+    if (inserted.contains(cell) || !landing_field.field->CenterSafe(cell)) {
       continue;
     }
     if (nodes.size() >= node_capacity) {
@@ -791,6 +716,7 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
   route.expanded_states = expanded;
   route.open_peak = open_peak;
   route.estimated_work_memory_bytes =
+      landing_field.field->EstimatedWorkMemoryBytes() +
       nodes.size() * sizeof(LandingNode) +
       graph_edge_count * sizeof(NominalEdge) +
       nodes.size() * (sizeof(double) + sizeof(std::size_t) +
@@ -806,6 +732,7 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
       .route_hops = node_path.size() - 1U,
       .expanded_nodes = expanded,
       .graph_truncated = graph_truncated,
+      .landing_field_elapsed = landing_field.elapsed,
       .elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
           Clock::now() - started),
       .reason_code = "HOPPER_GLOBAL_ROUTE_AVAILABLE",

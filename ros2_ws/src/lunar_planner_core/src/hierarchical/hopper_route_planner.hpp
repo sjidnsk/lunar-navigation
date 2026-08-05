@@ -21,6 +21,7 @@ struct HopperRoutePlanResult final {
   std::size_t route_hops{};
   std::uint64_t expanded_nodes{};
   bool graph_truncated{};
+  std::chrono::nanoseconds landing_field_elapsed{};
   std::chrono::nanoseconds elapsed{};
   std::string reason_code;
 

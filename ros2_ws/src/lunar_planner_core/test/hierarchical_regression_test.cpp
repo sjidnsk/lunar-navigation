@@ -91,6 +91,7 @@ void AddVerticalWall(GridMap & map, const std::size_t x)
   auto & capability = std::get<HopperCapability>(input.capability);
   capability.body_half_extent_m.x = 0.1;
   capability.body_half_extent_m.y = 0.1;
+  capability.minimum_landing_region_area_m2 = 0.1;
   capability.maximum_launch_speed_mps = 2.0;
   capability.maximum_launch_impulse_newton_seconds = 100.0;
   capability.maximum_landing_speed_mps = 2.0;

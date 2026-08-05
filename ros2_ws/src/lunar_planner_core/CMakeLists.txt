@@ -26,6 +26,7 @@ add_library(${PROJECT_NAME} SHARED
   src/hierarchical/global_route_planner.cpp
   src/hierarchical/grid_search.cpp
   src/hierarchical/hopper_route_planner.cpp
+  src/hierarchical/landing_support_field.cpp
   src/hierarchical/local_frontier.cpp
   src/hierarchical/map_level.cpp
   src/hierarchical/reference_composer.cpp
