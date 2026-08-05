@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
@@ -214,7 +215,11 @@ def verify_source_lock(data_root: str | Path, source_lock: PolarSourceLock, *, r
             source,
             allow_null_nodata=source_lock.source_id == _NULL_NODATA_RASTER_SOURCE_ID,
         )
-        if (crs, transform, nodata) != (source_lock.crs, source_lock.transform, source_lock.nodata):
+        if (
+            crs != source_lock.crs
+            or transform != source_lock.transform
+            or not _nodata_equal(nodata, source_lock.nodata)
+        ):
             raise SourceLockError("locked source raster metadata does not match")
     if source.stat().st_size != source_lock.size_bytes:
         raise SourceLockError("locked source size does not match")
@@ -416,6 +421,12 @@ def _normalize_transform(transform: object) -> tuple[float, float, float, float,
     if len(normalized) != 6:
         raise SourceLockError("raster transform is invalid")
     return normalized  # type: ignore[return-value]
+
+
+def _nodata_equal(actual: float | None, locked: float | None) -> bool:
+    if actual is None or locked is None:
+        return actual is locked
+    return actual == locked or (math.isnan(actual) and math.isnan(locked))
 
 
 def _validate_sha256(value: object, label: str) -> None:

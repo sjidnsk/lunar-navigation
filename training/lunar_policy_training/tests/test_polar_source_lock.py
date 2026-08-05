@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import math
 import sys
 import warnings
 from pathlib import Path
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lunar_policy_training.polar_data.source_lock import (  # noqa: E402
     PolarSourceLock,
     SourceLockError,
+    load_aggregate_source_lock,
     write_aggregate_source_lock,
     verify_source_lock,
 )
@@ -146,6 +148,86 @@ def test_verify_source_lock_accepts_matching_external_raster(tmp_path: Path) -> 
     fixture, lock = _locked_fixture(data_root)
 
     assert verify_source_lock(data_root, lock, repository_root=repository) == fixture
+
+
+def test_verify_source_lock_accepts_matching_nan_nodata_raster(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    data_root = tmp_path / "polar-data"
+    data_root.mkdir()
+    fixture = data_root / "dem.tif"
+    _write_raster(fixture, nodata=float("nan"))
+    lock = PolarSourceLock.from_file(
+        "NASA_LOLA_87S_DEM",
+        fixture,
+        citation="NASA PGDA product 81",
+        license="NASA reproduction guidance",
+        final_url="https://example.invalid/dem.tif",
+    )
+
+    assert math.isnan(lock.nodata)
+    assert verify_source_lock(data_root, lock, repository_root=repository) == fixture
+
+
+def test_nan_nodata_survives_aggregate_json_roundtrip(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    data_root = tmp_path / "polar-data"
+    data_root.mkdir()
+    fixture = data_root / "dem.tif"
+    _write_raster(fixture, nodata=float("nan"))
+    lock = PolarSourceLock.from_file(
+        "NASA_LOLA_87S_DEM",
+        fixture,
+        citation="NASA PGDA product 81",
+        license="NASA reproduction guidance",
+        final_url="https://example.invalid/dem.tif",
+    )
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    aggregate = lock_dir / "polar_source_lock_v1.json"
+    write_aggregate_source_lock(
+        aggregate, data_root, (lock,), repository_root=repository
+    )
+
+    loaded_root, loaded_locks = load_aggregate_source_lock(
+        aggregate, repository_root=repository
+    )
+
+    assert loaded_root == data_root.resolve()
+    assert len(loaded_locks) == 1
+    assert math.isnan(loaded_locks[0].nodata)
+    assert verify_source_lock(
+        loaded_root, loaded_locks[0], repository_root=repository
+    ) == fixture
+
+
+@pytest.mark.parametrize(
+    ("source_nodata", "locked_nodata"),
+    [(float("nan"), -9999.0), (-9999.0, float("nan"))],
+)
+def test_verify_source_lock_rejects_one_sided_nan_nodata_drift(
+    tmp_path: Path, source_nodata: float, locked_nodata: float
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    data_root = tmp_path / "polar-data"
+    data_root.mkdir()
+    fixture = data_root / "dem.tif"
+    _write_raster(fixture, nodata=source_nodata)
+    lock = PolarSourceLock.from_file(
+        "NASA_LOLA_87S_DEM",
+        fixture,
+        citation="NASA PGDA product 81",
+        license="NASA reproduction guidance",
+        final_url="https://example.invalid/dem.tif",
+    )
+    drifted_lock = PolarSourceLock(
+        **{**lock.to_dict(), "nodata": locked_nodata}
+    )
+
+    with pytest.raises(SourceLockError, match="metadata"):
+        verify_source_lock(data_root, drifted_lock, repository_root=repository)
 
 
 def test_official_lola_count_accepts_explicit_null_nodata_roundtrip_and_detects_drift(
