@@ -24,6 +24,7 @@ from lunar_policy_training.environment.parallel_pool import (  # noqa: E402
     joint_worker_allocation,
 )
 from lunar_policy_training.environment.v3_environment import (  # noqa: E402
+    PreparedPlanRequest,
     create_v3_environment,
 )
 from lunar_policy_training.policy.observation import (  # noqa: E402
@@ -90,10 +91,16 @@ def _real_v3_worker_factory(
     observation = _observation(worker_index, platform_type)
     request = TrainingPlanRequest()
     request.request_id = f"parallel-worker-{worker_index}"
+
+    def build_request(action, identity):
+        request.state_time.nanoseconds_since_epoch = identity.state_time_ns
+        return PreparedPlanRequest(request=request, identity=identity)
+
     environment = create_v3_environment(
         platform_type=platform_type,
-        request_builder=lambda action: request,
+        request_builder=build_request,
         initial_observation=observation,
+        observation_provider=lambda: observation,
         committed_hop_executor=(lambda: None) if platform_type == "HOPPER" else None,
     )
     return ParallelEnvironmentWorker(
@@ -102,21 +109,55 @@ def _real_v3_worker_factory(
     )
 
 
+class _RestoredBudgetFactory:
+    def __call__(
+        self, worker_index: int, platform_type: str
+    ) -> ParallelEnvironmentWorker:
+        observation = _observation(worker_index, platform_type)
+        observation.pose_features[0, 5] = 0.9375
+        request = TrainingPlanRequest()
+        request.request_id = f"restored-budget-{worker_index}"
+
+        def build_request(action, identity):
+            request.state_time.nanoseconds_since_epoch = identity.state_time_ns
+            return PreparedPlanRequest(request=request, identity=identity)
+
+        environment = create_v3_environment(
+            platform_type=platform_type,
+            request_builder=build_request,
+            initial_observation=observation,
+            observation_provider=lambda: observation,
+            committed_hop_executor=(
+                (lambda: None) if platform_type == "HOPPER" else None
+            ),
+            total_decision_budget=4,
+            remaining_decision_budget=1,
+        )
+        return ParallelEnvironmentWorker(
+            environment=environment,
+            initial_observation=observation,
+        )
+
+
 def _zero_reward(transition) -> float:
     return float(transition.coverage_delta)
 
 
 class _CrashEnvironment:
-    def step(self, action) -> None:
+    def __init__(self, observation: PolicyBatch) -> None:
+        self.current_observation = observation
+
+    def advance_prepared_action(self, action, *, expected_identity) -> None:
         os._exit(23)
 
 
 def _crash_worker_factory(
     worker_index: int, platform_type: str
 ) -> ParallelEnvironmentWorker:
+    observation = _observation(worker_index, platform_type)
     return ParallelEnvironmentWorker(
-        environment=_CrashEnvironment(),
-        initial_observation=_observation(worker_index, platform_type),
+        environment=_CrashEnvironment(observation),
+        initial_observation=observation,
     )
 
 
@@ -182,6 +223,20 @@ def test_parallel_pool_uses_real_worker_processes_shared_double_buffers() -> Non
             [0.0, 1.0, 0.0],
             [0.0, 0.0, 1.0],
         ]
+
+
+def test_pool_publishes_environment_private_restored_budget_on_first_reset() -> None:
+    """Would fail if worker staged the factory's stale raw observation."""
+    with ParallelEnvPool(
+        allocation={"WHEELED": 1},
+        observation_template=_observation(0, "WHEELED"),
+        environment_factory=_RestoredBudgetFactory(),
+        reward_fn=_zero_reward,
+        worker_timeout_seconds=5.0,
+    ) as pool:
+        initial = pool.reset()
+
+    assert initial.observations.pose_features[0, 5].item() == pytest.approx(0.25)
 
 
 def test_mixed_policy_versions_fail_closed_and_discard_rollout() -> None:

@@ -15,6 +15,7 @@ from .environment.macro_step import ExecutionEvents, PolicyAction
 from .environment.parallel_pool import ParallelEnvironmentWorker
 from .environment.v3_environment import (
     CommittedHopExecutionFeedback,
+    PreparedPlanRequest,
     ReferenceExecutionResult,
     create_v3_environment,
 )
@@ -390,9 +391,20 @@ class _ProxyEpisode:
             execution_state=self.execution_state,
         )
 
-    def build_request(self, action: PolicyAction) -> bridge_api.TrainingPlanRequest:
+    def produce_observation(self) -> PolicyBatch:
+        """Produce the latest immutable-boundary input for every ground decision."""
+        return self.observation
+
+    def build_request(
+        self,
+        action: PolicyAction,
+        expected_identity: ObservationIdentity,
+    ) -> PreparedPlanRequest:
         if not 0 <= action.frontier_index < 3:
             raise ValueError("proxy action frontier is outside the candidate set")
+        current_identity = self.observation.observation_identities[0]
+        if current_identity != expected_identity:
+            raise ValueError("proxy request snapshot changed after policy preparation")
         target_index = action.frontier_index
         self.pending_target = _targets(self.platform_type)[target_index]
         stamp_ns = 1_000_000_000 + self.step * 1_000_000
@@ -444,7 +456,10 @@ class _ProxyEpisode:
         request.config.wheel.yaw_bin_count = 64
         request.config.legged.xy_resolution_m = 1.0
         request.config.legged.yaw_bin_count = 64
-        return request
+        return PreparedPlanRequest(
+            request=request,
+            identity=expected_identity,
+        )
 
     def execute_reference(
         self, reference: bridge_api.MotionReference
@@ -668,6 +683,7 @@ def _create_proxy_environment(
         platform_type=platform_type,
         request_builder=episode.build_request,
         initial_observation=initial,
+        observation_provider=episode.produce_observation,
         reference_executor=episode.execute_reference,
         committed_hop_executor=(
             episode.committed_hop_feedback if platform_type == "HOPPER" else None

@@ -15,7 +15,7 @@ from lunar_planner_training_bridge import (
     TrainingPlanRequest,
 )
 
-from ..policy.observation import PolicyBatch
+from ..policy.observation import ObservationIdentity, PolicyBatch
 from .macro_step import ExecutionEvents, PlannerTransition, PolicyAction
 
 
@@ -75,6 +75,20 @@ class PlannerBridgeProtocol(Protocol):
         raise NotImplementedError
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedPlanRequest:
+    """Planner request explicitly attested to one prepared observation identity."""
+
+    request: TrainingPlanRequest
+    identity: ObservationIdentity
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request, TrainingPlanRequest):
+            raise ValueError("prepared planner request must use TrainingPlanRequest")
+        if not isinstance(self.identity, ObservationIdentity):
+            raise ValueError("prepared planner request requires observation identity")
+
+
 @dataclass(frozen=True)
 class CommittedHopExecutionFeedback:
     execution_state: str
@@ -113,15 +127,18 @@ class V3ExplorationEnvironment:
         *,
         platform_type: str,
         bridge: PlannerBridgeProtocol,
-        request_builder: Callable[[PolicyAction], TrainingPlanRequest],
+        request_builder: Callable[..., object],
         initial_observation: PolicyBatch,
+        observation_provider: Callable[[], PolicyBatch] | None = None,
+        require_identity_bound_request: bool = False,
         reference_executor: Callable[
             [MotionReference], ReferenceExecutionResult
         ] | None = None,
         committed_hop_executor: Callable[
             [], CommittedHopExecutionFeedback
         ] | None = None,
-        decision_budget_limit: int = 8,
+        total_decision_budget: int = 8,
+        remaining_decision_budget: int | None = None,
         plan_cost_scale: float = 1.0,
         planner_elapsed_scale_s: float = 1.0,
     ) -> None:
@@ -137,12 +154,28 @@ class V3ExplorationEnvironment:
             raise EnvironmentInvariantError(
                 "V3 observation requires one producer-owned observation identity"
             )
-        if type(decision_budget_limit) is not int or decision_budget_limit <= 0:
-            raise ValueError("decision budget limit must be a positive integer")
+        if type(total_decision_budget) is not int or total_decision_budget <= 0:
+            raise ValueError("total decision budget must be a positive integer")
+        if remaining_decision_budget is None:
+            remaining_decision_budget = total_decision_budget
+        if (
+            type(remaining_decision_budget) is not int
+            or remaining_decision_budget < 0
+            or remaining_decision_budget > total_decision_budget
+        ):
+            raise ValueError(
+                "remaining decision budget must be within total decision budget"
+            )
+        if observation_provider is not None and not callable(observation_provider):
+            raise ValueError("observation provider must be callable")
+        if type(require_identity_bound_request) is not bool:
+            raise ValueError("identity-bound request flag must be boolean")
         self._observation = _clone_observation(initial_observation)
         self._rejected_candidates: set[int] = set()
-        self._decision_budget_limit = decision_budget_limit
-        self._remaining_decisions = decision_budget_limit
+        self._observation_provider = observation_provider
+        self._require_identity_bound_request = require_identity_bound_request
+        self._total_decision_budget = total_decision_budget
+        self._remaining_decisions = remaining_decision_budget
         self._set_network_budget_ratio()
         self._reference_executor = reference_executor
         self._committed_hop_executor = committed_hop_executor
@@ -163,10 +196,21 @@ class V3ExplorationEnvironment:
     def training_stopped(self) -> bool:
         return self._training_stopped
 
-    def step(self, action: PolicyAction) -> PlannerTransition:
+    @property
+    def current_observation(self) -> PolicyBatch:
+        """Return a detached copy of the environment-owned current observation."""
+        return _clone_observation(self._observation)
+
+    def step(
+        self,
+        action: PolicyAction,
+        *,
+        expected_identity: ObservationIdentity | None = None,
+    ) -> PlannerTransition:
         if self._execution_state in {"JUMP_COMMITTED", "IN_FLIGHT"}:
             self._fail_closed("committed hopper cannot accept a new policy action")
-        output = self._bridge.plan(self._request_builder(action))
+        request = self._build_plan_request(action, expected_identity)
+        output = self._bridge.plan(request)
         self._validate_output(output)
         if output.directive == ExecutionDirective.CONTINUE_COMMITTED_HOP:
             return self._advance_committed_hop_without_policy(output)
@@ -227,19 +271,52 @@ class V3ExplorationEnvironment:
                 transition=transition,
                 execution_feedback=feedback,
             )
+        boundary = self.refresh_decision_boundary()
+        if boundary.execution_state != "DECISION_READY":
+            return boundary
+        action = policy(_clone_observation(self._observation))
+        return self.advance_prepared_action(
+            action,
+            expected_identity=self._observation.observation_identities[0],
+        )
+
+    def advance_prepared_action(
+        self,
+        action: PolicyAction,
+        *,
+        expected_identity: ObservationIdentity,
+    ) -> DecisionBoundaryResult:
+        """Apply one action to the exact identity published before policy forward."""
+        current_identity = self._observation.observation_identities[0]
+        if not isinstance(expected_identity, ObservationIdentity):
+            self._fail_closed("prepared action requires an observation identity")
+        if expected_identity != current_identity:
+            self._fail_closed("prepared action observation identity is stale")
         if not bool(self._observation.candidate_mask.any().item()):
             return DecisionBoundaryResult(execution_state="NO_CANDIDATES")
         if self._remaining_decisions <= 0:
             return DecisionBoundaryResult(execution_state="DECISION_BUDGET_EXHAUSTED")
         self._remaining_decisions -= 1
         self._set_network_budget_ratio()
-        action = policy(self._observation)
-        transition = self.step(action)
+        transition = self.step(action, expected_identity=expected_identity)
         return DecisionBoundaryResult(
             execution_state=self._execution_state,
             transition=transition,
             decision_budget_consumed=1,
         )
+
+    def refresh_decision_boundary(self) -> DecisionBoundaryResult:
+        """Refresh producer input and classify a ground boundary without policy."""
+        if self._execution_state in {"JUMP_COMMITTED", "IN_FLIGHT"}:
+            self._fail_closed(
+                "committed hopper requires execution feedback before refresh"
+            )
+        self._refresh_ground_observation()
+        if not bool(self._observation.candidate_mask.any().item()):
+            return DecisionBoundaryResult(execution_state="NO_CANDIDATES")
+        if self._remaining_decisions <= 0:
+            return DecisionBoundaryResult(execution_state="DECISION_BUDGET_EXHAUSTED")
+        return DecisionBoundaryResult(execution_state="DECISION_READY")
 
     def _mask_rejected_candidate(self, candidate_index: int) -> None:
         mask = self._observation.candidate_mask
@@ -258,6 +335,31 @@ class V3ExplorationEnvironment:
         masked.candidate_mask[0, candidate_index] = False
         self._observation = masked
 
+    def _build_plan_request(
+        self,
+        action: PolicyAction,
+        expected_identity: ObservationIdentity | None,
+    ) -> TrainingPlanRequest | object:
+        if not self._require_identity_bound_request:
+            return self._request_builder(action)
+        if expected_identity is None:
+            self._fail_closed(
+                "identity-bound request requires a prepared observation"
+            )
+        prepared = self._request_builder(action, expected_identity)
+        if not isinstance(prepared, PreparedPlanRequest):
+            self._fail_closed(
+                "request builder must return PreparedPlanRequest"
+            )
+        if prepared.identity != expected_identity:
+            self._fail_closed("request observation identity is stale")
+        if (
+            prepared.request.state_time.nanoseconds_since_epoch
+            != expected_identity.state_time_ns
+        ):
+            self._fail_closed("request state time does not match observation identity")
+        return prepared.request
+
     def _install_observation(self, observation: PolicyBatch) -> PolicyBatch:
         if (
             not isinstance(observation, PolicyBatch)
@@ -272,11 +374,7 @@ class V3ExplorationEnvironment:
         next_identity = observation.observation_identities[0]
         if next_identity != current_identity:
             self._rejected_candidates.clear()
-        installed = (
-            _clone_observation(observation)
-            if self._rejected_candidates
-            else observation
-        )
+        installed = _clone_observation(observation)
         for candidate_index in self._rejected_candidates:
             if candidate_index < installed.candidate_mask.shape[1]:
                 installed.candidate_mask[0, candidate_index] = False
@@ -284,9 +382,17 @@ class V3ExplorationEnvironment:
         self._set_network_budget_ratio()
         return self._observation
 
+    def _refresh_ground_observation(self) -> None:
+        if self._observation_provider is None:
+            return
+        observation = self._observation_provider()
+        if not isinstance(observation, PolicyBatch):
+            self._fail_closed("observation provider returned invalid data")
+        self._install_observation(observation)
+
     def _set_network_budget_ratio(self) -> None:
         self._observation.pose_features[0, 5] = (
-            self._remaining_decisions / self._decision_budget_limit
+            self._remaining_decisions / self._total_decision_budget
         )
 
     def _advance_committed_hop_without_policy(
@@ -420,15 +526,19 @@ def _clone_observation(observation: PolicyBatch) -> PolicyBatch:
 def create_v3_environment(
     *,
     platform_type: str,
-    request_builder: Callable[[PolicyAction], TrainingPlanRequest],
+    request_builder: Callable[
+        [PolicyAction, ObservationIdentity], PreparedPlanRequest
+    ],
     initial_observation: PolicyBatch,
+    observation_provider: Callable[[], PolicyBatch] | None = None,
     reference_executor: Callable[
         [MotionReference], ReferenceExecutionResult
     ] | None = None,
     committed_hop_executor: Callable[
         [], CommittedHopExecutionFeedback
     ] | None = None,
-    decision_budget_limit: int = 8,
+    total_decision_budget: int = 8,
+    remaining_decision_budget: int | None = None,
     plan_cost_scale: float = 1.0,
     planner_elapsed_scale_s: float = 1.0,
 ) -> V3ExplorationEnvironment:
@@ -440,9 +550,12 @@ def create_v3_environment(
         bridge=PlannerBridge(),
         request_builder=request_builder,
         initial_observation=initial_observation,
+        observation_provider=observation_provider,
+        require_identity_bound_request=True,
         reference_executor=reference_executor,
         committed_hop_executor=committed_hop_executor,
-        decision_budget_limit=decision_budget_limit,
+        total_decision_budget=total_decision_budget,
+        remaining_decision_budget=remaining_decision_budget,
         plan_cost_scale=plan_cost_scale,
         planner_elapsed_scale_s=planner_elapsed_scale_s,
     )
@@ -452,6 +565,7 @@ __all__ = [
     "CommittedHopExecutionFeedback",
     "DecisionBoundaryResult",
     "EnvironmentInvariantError",
+    "PreparedPlanRequest",
     "ReferenceExecutionResult",
     "V3ExplorationEnvironment",
     "create_v3_environment",

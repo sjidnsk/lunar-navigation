@@ -194,7 +194,11 @@ def test_hopper_resumes_policy_only_after_landed_hold() -> None:
     result = hopper_env.advance_until_decision_boundary(policy_spy)
 
     assert policy_spy.call_count == 1
-    assert policy_spy.call_args.args[0] is landed.next_observation
+    policy_observation = policy_spy.call_args.args[0]
+    assert policy_observation is not landed.next_observation
+    assert policy_observation.pose_features[0, 0].item() == pytest.approx(3.0)
+    assert policy_observation.pose_features[0, 5].item() == pytest.approx(1.0)
+    assert landed.next_observation.pose_features[0, 5].item() == pytest.approx(0.0)
     assert landed_result.execution_state == "LANDED_HOLD"
     assert landed_result.execution_feedback is landed
     assert landed_result.execution_feedback.coverage_delta == 0.25

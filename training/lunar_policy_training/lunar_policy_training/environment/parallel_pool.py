@@ -236,8 +236,18 @@ class ParallelEnvPool:
                 actions.candidate_indices
             )
             self.shared_action_buffers[target_buffer]["thetas"].copy_(actions.thetas)
-            for command_queue in self._command_queues:
-                command_queue.put(("step", target_buffer, policy_version))
+            source_identities = self._buffer_identities[self._buffer_index]
+            if source_identities is None:
+                raise ParallelPoolError("current observation identities are missing")
+            for worker_index, command_queue in enumerate(self._command_queues):
+                command_queue.put(
+                    (
+                        "step",
+                        target_buffer,
+                        policy_version,
+                        source_identities[worker_index],
+                    )
+                )
             (
                 planning_outcomes,
                 reason_codes,
@@ -267,38 +277,23 @@ class ParallelEnvPool:
         except Exception as error:
             return self._fail_closed("shared rollout operation failed", cause=error)
 
-    def resolve_no_candidates(
-        self, rows: torch.Tensor, *, policy_version: int
+    def prepare_decision_boundaries(
+        self, *, policy_version: int
     ) -> ParallelRolloutStep:
-        """Resolve selected all-false workers without synthesizing an action."""
+        """Refresh every worker and resolve no-action task boundaries."""
         if self._closed or self.training_stopped:
             raise ParallelPoolError("parallel pool is stopped")
         if not self._reset:
             return self._fail_closed("parallel pool must be reset before resolution")
         try:
-            if (
-                not isinstance(rows, torch.Tensor)
-                or rows.dtype != torch.bool
-                or rows.device.type != "cpu"
-                or rows.shape != (self.worker_count,)
-                or not bool(rows.any())
-            ):
-                raise ParallelPoolError(
-                    "no-candidate rows must be CPU boolean [workers]"
-                )
             if type(policy_version) is not int or policy_version < 0:
                 raise ParallelPoolError(
                     "policy version must be a non-negative integer"
                 )
             target_buffer = 1 - self._buffer_index
-            for worker_index, command_queue in enumerate(self._command_queues):
+            for command_queue in self._command_queues:
                 command_queue.put(
-                    (
-                        "resolve_no_candidates",
-                        target_buffer,
-                        policy_version,
-                        bool(rows[worker_index]),
-                    )
+                    ("prepare_decision_boundary", target_buffer, policy_version)
                 )
             identities = self._await_resolution(target_buffer, policy_version)
             self._buffer_identities[target_buffer] = identities
@@ -314,8 +309,76 @@ class ParallelEnvPool:
             raise
         except Exception as error:
             return self._fail_closed(
-                "no-candidate resolution failed", cause=error
+                "decision-boundary preparation failed", cause=error
             )
+
+    def reset_terminated_workers(
+        self,
+        worker_indices: tuple[int, ...],
+        *,
+        policy_version: int,
+    ) -> ParallelRolloutStep:
+        """Explicitly reset selected preserved-terminal evaluation workers."""
+        if self._closed or self.training_stopped:
+            raise ParallelPoolError("parallel pool is stopped")
+        if not self._reset:
+            return self._fail_closed("parallel pool must be reset before worker reset")
+        try:
+            if self._auto_reset:
+                raise ParallelPoolError(
+                    "explicit worker reset requires auto_reset=False"
+                )
+            if type(policy_version) is not int or policy_version < 0:
+                raise ParallelPoolError(
+                    "policy version must be a non-negative integer"
+                )
+            if (
+                not isinstance(worker_indices, tuple)
+                or not worker_indices
+                or any(type(index) is not int for index in worker_indices)
+                or len(set(worker_indices)) != len(worker_indices)
+                or any(
+                    index < 0 or index >= self.worker_count
+                    for index in worker_indices
+                )
+            ):
+                raise ParallelPoolError("worker reset indices are invalid")
+            target_buffer = 1 - self._buffer_index
+            for name in _OBSERVATION_FIELDS:
+                self.shared_observation_buffers[target_buffer][name].copy_(
+                    self.shared_observation_buffers[self._buffer_index][name]
+                )
+            self._shared_rewards[target_buffer].copy_(
+                self._shared_rewards[self._buffer_index]
+            )
+            self._shared_dones[target_buffer].copy_(
+                self._shared_dones[self._buffer_index]
+            )
+            self._shared_policy_versions[target_buffer].fill_(policy_version)
+            current_identities = self._buffer_identities[self._buffer_index]
+            if current_identities is None:
+                raise ParallelPoolError("current observation identities are missing")
+            for worker_index in worker_indices:
+                self._command_queues[worker_index].put(
+                    ("reset_terminated", target_buffer, policy_version)
+                )
+            reset_identities = self._await_worker_resets(
+                worker_indices,
+                target_buffer,
+                policy_version,
+            )
+            identities = list(current_identities)
+            for worker_index, identity in reset_identities.items():
+                identities[worker_index] = identity
+            self._buffer_identities[target_buffer] = tuple(identities)
+            self._buffer_index = target_buffer
+            return self._stage_buffer(target_buffer)
+        except ParallelPoolError as error:
+            if not self.training_stopped:
+                return self._fail_closed(str(error))
+            raise
+        except Exception as error:
+            return self._fail_closed("explicit worker reset failed", cause=error)
 
     def validate_policy_versions(
         self,
@@ -490,6 +553,34 @@ class ParallelEnvPool:
             completed.add(worker_index)
         return tuple(identities[index] for index in range(self.worker_count))
 
+    def _await_worker_resets(
+        self,
+        worker_indices: tuple[int, ...],
+        buffer_index: int,
+        policy_version: int,
+    ) -> dict[int, ObservationIdentity]:
+        pending = set(worker_indices)
+        identities: dict[int, ObservationIdentity] = {}
+        deadline = time.monotonic() + self._worker_timeout_seconds
+        while pending:
+            message = self._next_result(deadline)
+            kind, worker_index, *values = message
+            if kind == "error":
+                raise ParallelPoolError(
+                    f"worker {worker_index} failed: {values[0]}"
+                )
+            if (
+                kind != "worker_reset"
+                or worker_index not in pending
+                or len(values) != 3
+                or values[:2] != [buffer_index, policy_version]
+                or not isinstance(values[2], ObservationIdentity)
+            ):
+                raise ParallelPoolError("worker reset protocol failed")
+            identities[worker_index] = values[2]
+            pending.remove(worker_index)
+        return identities
+
     def _stage_buffer(
         self,
         buffer_index: int,
@@ -593,9 +684,8 @@ def _worker_main(
             raise ParallelPoolError(
                 "environment factory must return ParallelEnvironmentWorker"
             )
-        _write_observation(
-            observation_buffers[0], worker_index, worker.initial_observation
-        )
+        current_observation = _environment_current_observation(worker)
+        _write_observation(observation_buffers[0], worker_index, current_observation)
         result_queue.put(
             (
                 "ready",
@@ -603,54 +693,91 @@ def _worker_main(
                 os.getpid(),
                 os.environ["OMP_NUM_THREADS"],
                 os.environ["MKL_NUM_THREADS"],
-                worker.initial_observation.observation_identities[0],
+                current_observation.observation_identities[0],
             )
         )
         terminal_transition: PlannerTransition | None = None
-        current_observation = worker.initial_observation
         while True:
             command = command_queue.get()
             if command == ("stop",):
                 return
             if not isinstance(command, tuple) or not command:
                 raise ParallelPoolError("worker command protocol failed")
-            if command[0] == "resolve_no_candidates":
-                if len(command) != 4 or type(command[3]) is not bool:
-                    raise ParallelPoolError("worker resolution command failed")
-                _, buffer_index, policy_version, selected = command
-                if selected:
-                    boundary = worker.environment.advance_until_decision_boundary(
-                        lambda observation: (_ for _ in ()).throw(
-                            ParallelPoolError(
-                                "no-candidate resolution called policy"
-                            )
-                        )
+            if command[0] == "reset_terminated":
+                if len(command) != 3 or auto_reset:
+                    raise ParallelPoolError("worker reset command failed")
+                _, buffer_index, policy_version = command
+                if terminal_transition is None:
+                    raise ParallelPoolError(
+                        "only a terminated worker can be explicitly reset"
                     )
-                    if (
-                        boundary.execution_state != "NO_CANDIDATES"
-                        or boundary.transition is not None
-                        or boundary.decision_budget_consumed != 0
-                    ):
-                        raise ParallelPoolError(
-                            "selected worker is not at a no-candidate boundary"
-                        )
-                    if not auto_reset:
-                        raise ParallelPoolError(
-                            "no-candidate resolution requires auto reset"
-                        )
-                    worker = environment_factory(worker_index, platform_type)
-                    if not isinstance(worker, ParallelEnvironmentWorker):
-                        raise ParallelPoolError(
-                            "environment factory must return ParallelEnvironmentWorker"
-                        )
-                    current_observation = worker.initial_observation
+                worker = environment_factory(worker_index, platform_type)
+                if not isinstance(worker, ParallelEnvironmentWorker):
+                    raise ParallelPoolError(
+                        "environment factory must return ParallelEnvironmentWorker"
+                    )
+                terminal_transition = None
+                current_observation = _environment_current_observation(worker)
                 _write_observation(
                     observation_buffers[buffer_index],
                     worker_index,
                     current_observation,
                 )
                 reward_buffers[buffer_index][worker_index] = 0.0
-                done_buffers[buffer_index][worker_index] = selected
+                done_buffers[buffer_index][worker_index] = False
+                policy_version_buffers[buffer_index][worker_index] = policy_version
+                result_queue.put(
+                    (
+                        "worker_reset",
+                        worker_index,
+                        buffer_index,
+                        policy_version,
+                        current_observation.observation_identities[0],
+                    )
+                )
+                continue
+            if command[0] == "prepare_decision_boundary":
+                if len(command) != 3:
+                    raise ParallelPoolError("worker preparation command failed")
+                _, buffer_index, policy_version = command
+                boundary = worker.environment.refresh_decision_boundary()
+                if (
+                    boundary.transition is not None
+                    or boundary.decision_budget_consumed != 0
+                ):
+                    raise ParallelPoolError(
+                        "boundary preparation must not create an action transition"
+                    )
+                terminal_boundary = boundary.execution_state in {
+                    "NO_CANDIDATES",
+                    "DECISION_BUDGET_EXHAUSTED",
+                }
+                if boundary.execution_state not in {
+                    "DECISION_READY",
+                    "NO_CANDIDATES",
+                    "DECISION_BUDGET_EXHAUSTED",
+                }:
+                    raise ParallelPoolError(
+                        "worker returned invalid decision-boundary state"
+                    )
+                if terminal_boundary:
+                    if not auto_reset:
+                        raise ParallelPoolError(
+                            "no-action boundary requires auto reset"
+                        )
+                    worker = environment_factory(worker_index, platform_type)
+                    if not isinstance(worker, ParallelEnvironmentWorker):
+                        raise ParallelPoolError(
+                            "environment factory must return ParallelEnvironmentWorker"
+                        )
+                current_observation = _environment_current_observation(worker)
+                _write_observation(
+                    observation_buffers[buffer_index],
+                    worker_index,
+                    current_observation,
+                )
+                reward_buffers[buffer_index][worker_index] = 0.0
+                done_buffers[buffer_index][worker_index] = terminal_boundary
                 policy_version_buffers[buffer_index][worker_index] = policy_version
                 result_queue.put(
                     (
@@ -662,9 +789,13 @@ def _worker_main(
                     )
                 )
                 continue
-            if len(command) != 3 or command[0] != "step":
+            if (
+                len(command) != 4
+                or command[0] != "step"
+                or not isinstance(command[3], ObservationIdentity)
+            ):
                 raise ParallelPoolError("worker command protocol failed")
-            _, buffer_index, policy_version = command
+            _, buffer_index, policy_version, expected_identity = command
             action = PolicyAction(
                 frontier_index=int(
                     action_buffers[buffer_index]["candidate_indices"][worker_index]
@@ -672,8 +803,9 @@ def _worker_main(
                 theta_rad=float(action_buffers[buffer_index]["thetas"][worker_index]),
             )
             if terminal_transition is None:
-                boundary = worker.environment.advance_until_decision_boundary(
-                    lambda observation: action
+                boundary = worker.environment.advance_prepared_action(
+                    action,
+                    expected_identity=expected_identity,
                 )
                 transition = boundary.transition
                 if not isinstance(transition, PlannerTransition):
@@ -687,9 +819,9 @@ def _worker_main(
                 reward = reward_fn(transition)
                 decision_budget_consumed = boundary.decision_budget_consumed
             else:
-                transition = terminal_transition
-                reward = 0.0
-                decision_budget_consumed = 0
+                raise ParallelPoolError(
+                    "terminated worker requires reset before another action"
+                )
             if (
                 not isinstance(reward, (int, float))
                 or isinstance(reward, bool)
@@ -703,8 +835,8 @@ def _worker_main(
                     raise ParallelPoolError(
                         "environment factory must return ParallelEnvironmentWorker"
                     )
-                next_observation = reset_worker.initial_observation
                 worker = reset_worker
+                next_observation = _environment_current_observation(worker)
             elif transition.terminated:
                 terminal_transition = transition
             current_observation = next_observation
@@ -771,6 +903,17 @@ def _write_observation(
                 f"worker observation shape/device mismatch for {name}"
             )
         destination.copy_(source[0])
+
+
+def _environment_current_observation(
+    worker: ParallelEnvironmentWorker,
+) -> PolicyBatch:
+    observation = getattr(worker.environment, "current_observation", None)
+    if not isinstance(observation, PolicyBatch):
+        raise ParallelPoolError(
+            "worker environment must expose its private current observation"
+        )
+    return observation
 
 
 def _expanded_platforms(allocation: Mapping[str, int]) -> list[str]:

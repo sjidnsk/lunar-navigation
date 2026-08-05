@@ -10,6 +10,7 @@ from lunar_policy_training.curriculum import CurriculumSchedule
 from lunar_policy_training.environment.parallel_pool import (
     ParallelActions,
     ParallelEnvPool,
+    ParallelPoolError,
 )
 from lunar_policy_training.environment.macro_step import PolicyAction
 from lunar_policy_training.proxy_scenario import (
@@ -19,6 +20,13 @@ from lunar_policy_training.proxy_scenario import (
     proxy_observation,
 )
 from lunar_policy_training.reward import compute_transition_reward
+
+
+def _build_episode_request(
+    episode: _ProxyEpisode, action: PolicyAction
+):
+    identity = episode.observation.observation_identities[0]
+    return episode.build_request(action, identity).request
 
 
 def test_frozen_curriculum_reserves_sixteen_hours_for_joint_training() -> None:
@@ -165,7 +173,9 @@ def test_proxy_executor_consumes_cpp_trajectory_endpoint(
 ) -> None:
     """Would fail if execution teleported to the requested target without a trajectory."""
     episode = _ProxyEpisode(0, platform_type, scenario_index=0)
-    request = episode.build_request(PolicyAction(frontier_index=0, theta_rad=0.0))
+    request = _build_episode_request(
+        episode, PolicyAction(frontier_index=0, theta_rad=0.0)
+    )
     output = PlannerBridge().plan(request)
     assert output.reference is not None
 
@@ -188,7 +198,8 @@ def test_proxy_request_preserves_sampled_absolute_yaw(
     episode = _ProxyEpisode(0, platform_type, scenario_index=0)
     sampled_theta = -1.125
 
-    request = episode.build_request(
+    request = _build_episode_request(
+        episode,
         PolicyAction(frontier_index=0, theta_rad=sampled_theta)
     )
 
@@ -204,7 +215,8 @@ def test_ground_proxy_capability_can_plan_non_cardinal_sampled_yaw(
 ) -> None:
     """Would fail if proxy primitives could not realize the fixed 64-bin yaw."""
     episode = _ProxyEpisode(0, platform_type, scenario_index=0)
-    request = episode.build_request(
+    request = _build_episode_request(
+        episode,
         PolicyAction(frontier_index=0, theta_rad=-1.125)
     )
 
@@ -216,7 +228,9 @@ def test_ground_proxy_capability_can_plan_non_cardinal_sampled_yaw(
 def test_proxy_executor_rejects_unexecutable_reference_without_success_gain() -> None:
     """Would fail if an empty C++ reference still received synthetic coverage."""
     episode = _ProxyEpisode(0, "WHEELED", scenario_index=0)
-    episode.build_request(PolicyAction(frontier_index=0, theta_rad=0.0))
+    _build_episode_request(
+        episode, PolicyAction(frontier_index=0, theta_rad=0.0)
+    )
     empty_reference = MotionReference()
     empty_reference.platform_type = "WHEELED"
 
@@ -235,7 +249,9 @@ def test_proxy_executor_rejects_unexecutable_reference_without_success_gain() ->
 def test_hopper_proxy_consumes_hop_and_reaches_landed_decision_boundary() -> None:
     """Would fail if the hopper skipped its committed execution lifecycle."""
     episode = _ProxyEpisode(0, "HOPPER", scenario_index=0)
-    request = episode.build_request(PolicyAction(frontier_index=0, theta_rad=0.0))
+    request = _build_episode_request(
+        episode, PolicyAction(frontier_index=0, theta_rad=0.0)
+    )
     output = PlannerBridge().plan(request)
     assert output.reference is not None
 
@@ -257,12 +273,20 @@ def test_proxy_action_has_fixed_target_and_unique_frontiers_can_converge() -> No
     worker = ProxyEnvironmentFactory(scenario_index=0)(0, "WHEELED")
     environment = worker.environment
 
-    distractor = environment.step(
-        PolicyAction(frontier_index=2, theta_rad=0.0)
-    )
-    first = environment.step(PolicyAction(frontier_index=0, theta_rad=0.0))
-    repeated = environment.step(PolicyAction(frontier_index=0, theta_rad=0.0))
-    second = environment.step(PolicyAction(frontier_index=1, theta_rad=0.0))
+    def take_action(candidate_index: int):
+        result = environment.advance_until_decision_boundary(
+            lambda _observation: PolicyAction(
+                frontier_index=candidate_index,
+                theta_rad=0.0,
+            )
+        )
+        assert result.transition is not None
+        return result.transition
+
+    distractor = take_action(2)
+    first = take_action(0)
+    repeated = take_action(0)
+    second = take_action(1)
 
     assert distractor.coverage_delta == 0.0
     assert first.coverage_delta > 0.0
@@ -343,9 +367,54 @@ def test_parallel_pool_can_preserve_terminal_observation_for_evaluation() -> Non
             ),
             policy_version=1,
         )
+        with pytest.raises(ParallelPoolError, match="terminated worker"):
+            pool.step(
+                ParallelActions(
+                    candidate_indices=torch.tensor([0], dtype=torch.int64),
+                    thetas=torch.zeros(1, dtype=torch.float32),
+                ),
+                policy_version=2,
+            )
 
     assert terminal.dones.tolist() == [True]
     assert terminal.observations.pose_features[0, 4].item() == pytest.approx(1.0)
     assert terminal.observations.coverage_summary[0, 0].mean().item() == (
         pytest.approx(1.0)
     )
+
+
+def test_parallel_pool_allows_explicit_reset_after_preserved_terminal() -> None:
+    """Evaluation must reset a finished row before the pool accepts another action."""
+    with ParallelEnvPool(
+        allocation={"WHEELED": 1},
+        observation_template=proxy_observation(0, "WHEELED", step=0),
+        environment_factory=ProxyEnvironmentFactory(scenario_index=0),
+        reward_fn=compute_transition_reward,
+        worker_timeout_seconds=30.0,
+        auto_reset=False,
+    ) as pool:
+        pool.reset()
+        for candidate_index in (0, 1):
+            terminal = pool.step(
+                ParallelActions(
+                    candidate_indices=torch.tensor(
+                        [candidate_index], dtype=torch.int64
+                    ),
+                    thetas=torch.zeros(1, dtype=torch.float32),
+                ),
+                policy_version=1,
+            )
+        assert terminal.dones.tolist() == [True]
+
+        reset = pool.reset_terminated_workers((0,), policy_version=2)
+        continued = pool.step(
+            ParallelActions(
+                candidate_indices=torch.tensor([0], dtype=torch.int64),
+                thetas=torch.zeros(1, dtype=torch.float32),
+            ),
+            policy_version=2,
+        )
+
+    assert reset.dones.tolist() == [False]
+    assert reset.observations.pose_features[0, 4].item() == pytest.approx(0.05)
+    assert continued.dones.tolist() == [False]

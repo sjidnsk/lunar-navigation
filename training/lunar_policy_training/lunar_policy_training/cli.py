@@ -53,7 +53,7 @@ from .environment.parallel_pool import (
     joint_worker_allocation,
 )
 from .environment.macro_step import PlannerTransition
-from .environment.v3_environment import create_v3_environment
+from .environment.v3_environment import PreparedPlanRequest, create_v3_environment
 from .curriculum import (
     CurriculumSchedule,
     FORMAL_SEED,
@@ -211,21 +211,17 @@ class _ParallelPoolVectorEnv:
             dones=step.dones.numpy().astype(np.bool_, copy=True),
         )
 
-    def resolve_no_candidates(self, rows: np.ndarray) -> PolicyBatch:
-        """Advance all-false workers without policy actions or rollout samples."""
-        if (
-            not isinstance(rows, np.ndarray)
-            or rows.dtype != np.bool_
-            or rows.shape != (self.env_count,)
-            or not rows.any()
-        ):
-            raise ValueError("no-candidate rows must be boolean [env_count]")
-        step = self._pool.resolve_no_candidates(
-            torch.from_numpy(rows.copy()),
+    def prepare_decision_boundaries(self) -> EnvStep:
+        """Refresh producers and resolve no-action rows before policy forward."""
+        step = self._pool.prepare_decision_boundaries(
             policy_version=self._policy_version,
         )
         self._current = step
-        return step.observations
+        return EnvStep(
+            observations=step.observations,
+            rewards=np.zeros((self.env_count,), dtype=np.float32),
+            dones=step.dones.numpy().astype(np.bool_, copy=True),
+        )
 
 
 class ResumablePPOTrainer:
@@ -1405,10 +1401,16 @@ def _calibration_environment_factory(
     observation = _calibration_observation(worker_index, platform_type)
     request = TrainingPlanRequest()
     request.request_id = f"task3-calibration-{worker_index}"
+
+    def build_request(action, identity):
+        request.state_time.nanoseconds_since_epoch = identity.state_time_ns
+        return PreparedPlanRequest(request=request, identity=identity)
+
     environment = create_v3_environment(
         platform_type=platform_type,
-        request_builder=lambda action: request,
+        request_builder=build_request,
         initial_observation=observation,
+        observation_provider=lambda: observation,
         committed_hop_executor=(lambda: None) if platform_type == "HOPPER" else None,
     )
     return ParallelEnvironmentWorker(

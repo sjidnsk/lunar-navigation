@@ -351,6 +351,9 @@ def _evaluate_method(
         completion_steps = np.zeros(row_count, dtype=np.int64)
         final_coverage = np.full(row_count, 0.05, dtype=np.float32)
         for step_index in range(1, 4):
+            observations = pool.prepare_decision_boundaries(
+                policy_version=0
+            ).observations
             first_indices, first_thetas = _select_actions(
                 policy,
                 method=method,
@@ -438,6 +441,17 @@ def _evaluate_method(
                 final_coverage[index] = observed_coverage[index]
                 if bool(stepped.dones[index].item()):
                     completion_steps[index] = step_index
+            terminated_workers = tuple(
+                int(index)
+                for index in torch.nonzero(stepped.dones, as_tuple=False)
+                .flatten()
+                .tolist()
+            )
+            if terminated_workers and step_index < 3:
+                observations = pool.reset_terminated_workers(
+                    terminated_workers,
+                    policy_version=0,
+                ).observations
     per_platform: dict[str, PlatformMetrics] = {}
     for platform in PLATFORMS:
         scenario_evidence = tuple(

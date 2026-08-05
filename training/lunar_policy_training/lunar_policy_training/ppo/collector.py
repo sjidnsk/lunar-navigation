@@ -79,7 +79,7 @@ def collect_rollout(
     if target_device.type == "cuda" and not torch.cuda.is_available():
         raise CollectorError("requested CUDA device is unavailable")
     policy = policy.to(target_device)
-    observations, _ = _resolve_no_candidate_rows(
+    observations, _ = _prepare_policy_observations(
         environment,
         _validated_observations(
             environment.reset(),
@@ -128,13 +128,13 @@ def collect_rollout(
             env_count=env_count,
             device=target_device,
         )
-        observations, resolved_rows = _resolve_no_candidate_rows(
+        observations, boundary_dones = _prepare_policy_observations(
             environment,
             observations,
             env_count=env_count,
             device=target_device,
         )
-        step_dones[resolved_rows] = True
+        step_dones |= boundary_dones
         selected_indices.append(action_indices)
         selected_thetas.append(action_thetas)
         old_log_probs.append(_tensor_numpy(recomputed.log_prob_total, np.float32))
@@ -208,33 +208,41 @@ def _validated_observations(
     return moved
 
 
-def _resolve_no_candidate_rows(
+def _prepare_policy_observations(
     environment: VectorEnv,
     observations: PolicyBatch,
     *,
     env_count: int,
     device: torch.device,
 ) -> tuple[PolicyBatch, np.ndarray]:
-    rows = ~observations.candidate_mask.any(dim=1)
-    if not bool(rows.any()):
-        return observations, np.zeros((env_count,), dtype=np.bool_)
-    resolver = getattr(environment, "resolve_no_candidates", None)
-    if not callable(resolver):
-        raise CollectorError(
-            "all-false candidate rows must bypass rollout collection"
+    preparer = getattr(environment, "prepare_decision_boundaries", None)
+    if callable(preparer):
+        prepared, _, boundary_dones = _validated_transition(
+            preparer(),
+            env_count=env_count,
+            device=device,
         )
-    resolved = resolver(_tensor_numpy(rows, np.bool_))
-    observations = _validated_observations(
-        resolved,
-        env_count=env_count,
-        device=device,
-        allow_no_candidates=True,
-    )
-    if not bool(observations.candidate_mask.any(dim=1).all()):
+        if bool(_unavailable_decision_rows(prepared).any()):
+            raise CollectorError(
+                "decision-boundary preparation must return actionable observations"
+            )
+        return prepared, boundary_dones
+    unavailable = _unavailable_decision_rows(observations)
+    if bool(unavailable.any()):
+        if bool((~observations.candidate_mask.any(dim=1)).any()):
+            raise CollectorError(
+                "all-false candidate rows must bypass rollout collection"
+            )
         raise CollectorError(
-            "no-candidate resolver must return actionable observations"
+            "exhausted-budget rows must bypass rollout collection"
         )
-    return observations, _tensor_numpy(rows, np.bool_)
+    return observations, np.zeros((env_count,), dtype=np.bool_)
+
+
+def _unavailable_decision_rows(observations: PolicyBatch) -> torch.Tensor:
+    has_candidate = observations.candidate_mask.any(dim=1)
+    has_budget = observations.pose_features[:, 5] > 0.0
+    return ~(has_candidate & has_budget)
 
 
 def _validated_transition(

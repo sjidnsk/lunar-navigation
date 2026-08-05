@@ -24,6 +24,7 @@ from lunar_policy_training.environment.macro_step import PolicyAction  # noqa: E
 from lunar_policy_training.environment.v3_environment import (  # noqa: E402
     CommittedHopExecutionFeedback,
     EnvironmentInvariantError,
+    PreparedPlanRequest,
     ReferenceExecutionResult,
     V3ExplorationEnvironment,
 )
@@ -108,6 +109,18 @@ class _ReferenceExecutor:
     def __call__(self, reference: MotionReference) -> ReferenceExecutionResult:
         self.references.append(reference)
         return self.result
+
+
+class _ObservationProvider:
+    def __init__(self, *observations: PolicyBatch) -> None:
+        self.observations = list(observations)
+        self.calls = 0
+
+    def __call__(self) -> PolicyBatch:
+        self.calls += 1
+        if not self.observations:
+            raise AssertionError("unexpected observation refresh")
+        return self.observations.pop(0)
 
 
 def _reference_output(platform_type: str, directive: ExecutionDirective) -> PlannerOutput:
@@ -293,6 +306,206 @@ def test_same_observation_identity_preserves_temporary_rejections() -> None:
     assert seen == [[[True, True]], [[False, True]]]
 
 
+def test_rejection_refreshes_changed_producer_identity_before_retry_policy() -> None:
+    """Would fail if rejection retry never observed new mission/map/state input."""
+    rejected = PlannerOutput()
+    rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+    rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    rejected.reason_code = "CANDIDATE_REJECTED"
+    first = _observation(candidate_mask=(True, True))
+    refreshed = _observation(
+        candidate_mask=(True, True),
+        identity=_identity(
+            mission_revision=2,
+            map_snapshot_id="map-2",
+            robot_state_id="robot-state-2",
+            state_time_ns=2_000,
+        ),
+    )
+    provider = _ObservationProvider(first, refreshed)
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_SequenceBridge([rejected, rejected]),
+        request_builder=lambda action: action,
+        initial_observation=first,
+        observation_provider=provider,
+    )
+    seen: list[list[list[bool]]] = []
+
+    def policy(observation: PolicyBatch) -> PolicyAction:
+        seen.append(observation.candidate_mask.tolist())
+        return PolicyAction(frontier_index=0, theta_rad=0.0)
+
+    env.advance_until_decision_boundary(policy)
+    env.advance_until_decision_boundary(policy)
+
+    assert provider.calls == 2
+    assert seen == [[[True, True]], [[True, True]]]
+
+
+def test_rejection_refresh_with_same_identity_keeps_temporary_mask() -> None:
+    """Would fail if every producer refresh erased same-boundary rejection state."""
+    rejected = PlannerOutput()
+    rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+    rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    rejected.reason_code = "CANDIDATE_REJECTED"
+    first = _observation(candidate_mask=(True, True))
+    provider = _ObservationProvider(
+        first,
+        _observation(candidate_mask=(True, True)),
+    )
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_SequenceBridge([rejected, rejected]),
+        request_builder=lambda action: action,
+        initial_observation=first,
+        observation_provider=provider,
+    )
+    seen: list[list[list[bool]]] = []
+
+    def policy(observation: PolicyBatch) -> PolicyAction:
+        seen.append(observation.candidate_mask.tolist())
+        return PolicyAction(
+            frontier_index=0 if observation.candidate_mask[0, 0] else 1,
+            theta_rad=0.0,
+        )
+
+    env.advance_until_decision_boundary(policy)
+    env.advance_until_decision_boundary(policy)
+
+    assert seen == [[[True, True]], [[False, True]]]
+
+
+def test_prepared_action_does_not_refresh_producer_after_policy_boundary() -> None:
+    """Would fail if identity could drift between policy forward and planner action."""
+    output = PlannerOutput()
+    output.outcome = PlanningOutcome.INVALID_REQUEST
+    output.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    output.reason_code = "INVALID"
+    prepared = _observation(candidate_mask=(True, True))
+    drifted = _observation(
+        candidate_mask=(True, True),
+        identity=_identity(map_snapshot_id="map-after-policy"),
+    )
+    provider = _ObservationProvider(prepared, drifted)
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(output),
+        request_builder=lambda action: action,
+        initial_observation=prepared,
+        observation_provider=provider,
+    )
+
+    boundary = env.refresh_decision_boundary()
+    result = env.advance_prepared_action(
+        PolicyAction(frontier_index=0, theta_rad=0.0),
+        expected_identity=env.current_observation.observation_identities[0],
+    )
+
+    assert boundary.execution_state == "DECISION_READY"
+    assert result.decision_budget_consumed == 1
+    assert provider.calls == 1
+    assert result.transition is not None
+    assert (
+        result.transition.next_observation.observation_identities[0].map_snapshot_id
+        == "map-1"
+    )
+
+
+def test_identity_bound_request_rejects_snapshot_drift_before_bridge_plan() -> None:
+    """Would fail if builder could swap request snapshot after policy forward."""
+    prepared = _observation(candidate_mask=(True, True))
+    prepared_identity = prepared.observation_identities[0]
+    drifted_identity = _identity(
+        mission_revision=2,
+        map_snapshot_id="map-after-policy",
+        robot_state_id="robot-after-policy",
+        state_time_ns=2_000,
+    )
+    request = TrainingPlanRequest()
+    request.state_time.nanoseconds_since_epoch = drifted_identity.state_time_ns
+
+    def drifting_builder(
+        action: PolicyAction, expected_identity: ObservationIdentity
+    ) -> PreparedPlanRequest:
+        assert expected_identity == prepared_identity
+        return PreparedPlanRequest(request=request, identity=drifted_identity)
+
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(PlannerOutput()),
+        request_builder=drifting_builder,
+        initial_observation=prepared,
+        require_identity_bound_request=True,
+    )
+    env.refresh_decision_boundary()
+
+    with pytest.raises(EnvironmentInvariantError, match="request observation identity"):
+        env.advance_prepared_action(
+            PolicyAction(frontier_index=0, theta_rad=0.0),
+            expected_identity=prepared_identity,
+        )
+
+
+def test_installed_observation_is_cloned_before_private_budget_update() -> None:
+    """Would fail if environment budget writes mutated producer-owned tensors."""
+    output = PlannerOutput()
+    output.outcome = PlanningOutcome.INVALID_REQUEST
+    output.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    output.reason_code = "INVALID"
+    initial = _observation(candidate_mask=(True, True))
+    producer_refresh = _observation(
+        candidate_mask=(True, True),
+        identity=_identity(map_snapshot_id="map-2"),
+    )
+    producer_refresh.pose_features[0, 5] = 0.625
+    provider = _ObservationProvider(producer_refresh)
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(output),
+        request_builder=lambda action: action,
+        initial_observation=initial,
+        observation_provider=provider,
+        total_decision_budget=4,
+        remaining_decision_budget=3,
+    )
+
+    env.advance_until_decision_boundary(
+        lambda observation: PolicyAction(frontier_index=0, theta_rad=0.0)
+    )
+    published = env.current_observation
+    published.pose_features[0, 5] = 0.0
+
+    assert float(producer_refresh.pose_features[0, 5]) == pytest.approx(0.625)
+    assert producer_refresh.candidate_mask.tolist() == [[True, True]]
+    assert float(env.current_observation.pose_features[0, 5]) == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    ("total", "remaining", "expected_ratio"),
+    ((8, 8, 1.0), (8, 3, 0.375), (1, 0, 0.0)),
+)
+def test_initial_and_resumed_decision_budget_publish_exact_ratio(
+    total: int, remaining: int, expected_ratio: float
+) -> None:
+    producer = _observation(candidate_mask=(True, True))
+    producer.pose_features[0, 5] = 0.123
+
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(PlannerOutput()),
+        request_builder=lambda action: action,
+        initial_observation=producer,
+        total_decision_budget=total,
+        remaining_decision_budget=remaining,
+    )
+
+    assert float(env.current_observation.pose_features[0, 5]) == pytest.approx(
+        expected_ratio
+    )
+    assert float(producer.pose_features[0, 5]) == pytest.approx(0.123)
+
+
 def test_policy_decision_consumes_real_budget_and_updates_network_ratio() -> None:
     """Would fail if budget accounting remained helper-only metadata."""
     output = PlannerOutput()
@@ -304,7 +517,8 @@ def test_policy_decision_consumes_real_budget_and_updates_network_ratio() -> Non
         bridge=_Bridge(output),
         request_builder=lambda action: action,
         initial_observation=_observation(candidate_mask=(True, True)),
-        decision_budget_limit=4,
+        total_decision_budget=4,
+        remaining_decision_budget=4,
     )
     ratios: list[float] = []
 
@@ -316,7 +530,7 @@ def test_policy_decision_consumes_real_budget_and_updates_network_ratio() -> Non
     )
 
     assert result.decision_budget_consumed == 1
-    assert ratios == pytest.approx([0.75])
+    assert ratios == pytest.approx([1.0])
     assert result.transition is not None
     assert float(result.transition.next_observation.pose_features[0, 5]) == pytest.approx(0.75)
 
@@ -383,7 +597,9 @@ def test_ground_reference_executes_to_next_decision_boundary(
     transition = env.step(PolicyAction(frontier_index=0, theta_rad=0.25))
 
     assert len(executor.references) == 1
-    assert transition.next_observation is next_observation
+    assert transition.next_observation is not next_observation
+    assert transition.next_observation.pose_features[0, 0].item() == pytest.approx(0.5)
+    assert next_observation.pose_features[0, 5].item() == pytest.approx(0.0)
     assert transition.coverage_delta == 0.2
     assert transition.goal_progress == 0.1
     assert transition.normalized_plan_cost == 0.5
@@ -568,7 +784,8 @@ def test_current_cpp_v3_committed_hop_output_uses_execution_feedback() -> None:
 
     transition = env.step(PolicyAction(frontier_index=0, theta_rad=0.0))
 
-    assert transition.next_observation is observation
+    assert transition.next_observation is not observation
+    assert observation.pose_features[0, 5].item() == pytest.approx(0.0)
     assert transition.coverage_delta == 0.2
     assert transition.goal_progress == 0.3
     assert transition.repeated_visit is True
@@ -604,14 +821,24 @@ def test_production_factory_step_uses_real_cpp_v3_bridge() -> None:
 
     request = TrainingPlanRequest()
     request.request_id = "production-composition-invalid-map"
+
+    def build_request(action, identity):
+        request.state_time.nanoseconds_since_epoch = identity.state_time_ns
+        return PreparedPlanRequest(request=request, identity=identity)
+
     env = create_v3_environment(
         platform_type="WHEELED",
-        request_builder=lambda action: request,
+        request_builder=build_request,
         initial_observation=_observation(),
     )
 
-    transition = env.step(PolicyAction(frontier_index=0, theta_rad=0.0))
+    env.refresh_decision_boundary()
+    transition = env.advance_prepared_action(
+        PolicyAction(frontier_index=0, theta_rad=0.0),
+        expected_identity=env.current_observation.observation_identities[0],
+    ).transition
 
+    assert transition is not None
     assert transition.planning_outcome == PlanningOutcome.INVALID_REQUEST
     assert transition.execution_directive == ExecutionDirective.NO_SAFE_REFERENCE
     assert transition.reason_code == "MISSING_MAP_LAYER_ELEVATION"
