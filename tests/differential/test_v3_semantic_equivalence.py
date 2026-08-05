@@ -20,6 +20,25 @@ HIERARCHICAL_COST_EXPECTED_PATH = (
     / "differential"
     / "hierarchical_cost_expected.json"
 )
+PPO_COMPATIBILITY_PATH = (
+    REPOSITORY_ROOT
+    / "tests"
+    / "differential"
+    / "ppo_behavior_compatibility.json"
+)
+PLANNER_IO_HEADER = (
+    REPOSITORY_ROOT
+    / "ros2_ws"
+    / "src"
+    / "lunar_planner_core"
+    / "include"
+    / "lunar_planner_core"
+    / "types"
+    / "planner_io.hpp"
+)
+TRAINING_BRIDGE_ROOT = (
+    REPOSITORY_ROOT / "ros2_ws" / "src" / "lunar_planner_training_bridge"
+)
 RUNNER_ENVIRONMENT_VARIABLE = "LUNAR_PLANNER_FACADE_SUMMARY"
 EXPECTED_DIRECTIVE = {
     "NEW_REFERENCE_AVAILABLE": "ACTIVATE_NEW_REFERENCE",
@@ -123,3 +142,43 @@ def test_facade_repeat_case_is_deterministic(
     safe.pop("case_id")
     repeated.pop("case_id")
     assert repeated == safe
+
+
+def test_ppo_behavior_compatibility_gate_fails_closed_until_retraining(
+    facade_summary: dict[str, object],
+) -> None:
+    """Do not relabel local-only PPO checkpoints after planner behavior changes."""
+    legacy = json.loads(LEGACY_EXPECTED_PATH.read_text(encoding="utf-8"))
+    compatibility = json.loads(
+        PPO_COMPATIBILITY_PATH.read_text(encoding="utf-8")
+    )
+    actual_by_id = {
+        summary["case_id"]: summary for summary in facade_summary["summaries"]
+    }
+    legacy_by_id = {
+        summary["case_id"]: summary for summary in legacy["summaries"]
+    }
+    safe_cases = (
+        "wheel-safe-corridor",
+        "legged-safe-corridor",
+        "hopper-safe-corridor",
+    )
+    assert any(
+        actual_by_id[case_id]["cost"] != legacy_by_id[case_id]["cost"]
+        for case_id in safe_cases
+    )
+    header = PLANNER_IO_HEADER.read_text(encoding="utf-8")
+    assert "GoalRegion goal_map;" in header
+    assert not TRAINING_BRIDGE_ROOT.exists()
+    assert compatibility == {
+        "schema_version": "lunar-ppo-behavior-compatibility/v1",
+        "required_comparison": (
+            "exact_macro_step_observations_and_policy_actions"
+        ),
+        "prior_planner_name": "cpp_v3",
+        "current_planner_name": "cpp_v3_hierarchical",
+        "macro_step_planner_inputs": "mismatch",
+        "policy_action_golden": "unavailable_in_current_branch",
+        "verdict": "retraining_required",
+        "checkpoint_policy": "do_not_relabel",
+    }

@@ -1,0 +1,10 @@
+{
+  "schema_version": "lunar-ppo-behavior-compatibility/v1",
+  "required_comparison": "exact_macro_step_observations_and_policy_actions",
+  "prior_planner_name": "cpp_v3",
+  "current_planner_name": "cpp_v3_hierarchical",
+  "macro_step_planner_inputs": "mismatch",
+  "policy_action_golden": "unavailable_in_current_branch",
+  "verdict": "retraining_required",
+  "checkpoint_policy": "do_not_relabel"
+}

@@ -114,6 +114,14 @@ if(BUILD_TESTING)
     lunar_planner_core_hierarchical_planner_test ${PROJECT_NAME})
   lunar_enable_sanitizers(lunar_planner_core_hierarchical_planner_test)
 
+  ament_add_gtest(lunar_planner_core_hierarchical_regression_test
+    test/hierarchical_regression_test.cpp)
+  target_include_directories(
+    lunar_planner_core_hierarchical_regression_test PRIVATE src test)
+  target_link_libraries(
+    lunar_planner_core_hierarchical_regression_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_hierarchical_regression_test)
+
   ament_add_gtest(lunar_planner_core_global_grid_search_test
     test/global_grid_search_test.cpp)
   target_include_directories(lunar_planner_core_global_grid_search_test PRIVATE
@@ -218,6 +226,17 @@ if(BUILD_TESTING)
     nlohmann_json::nlohmann_json)
   lunar_enable_sanitizers(lunar_planner_core_benchmark)
 
+  add_executable(lunar_hierarchical_planner_benchmark
+    ../../../tests/performance/hierarchical_planner_benchmark.cpp)
+  target_compile_features(
+    lunar_hierarchical_planner_benchmark PRIVATE cxx_std_20)
+  target_include_directories(
+    lunar_hierarchical_planner_benchmark PRIVATE src test)
+  target_link_libraries(lunar_hierarchical_planner_benchmark PRIVATE
+    ${PROJECT_NAME}
+    nlohmann_json::nlohmann_json)
+  lunar_enable_sanitizers(lunar_hierarchical_planner_benchmark)
+
   add_test(
     NAME lunar_planner_core_v3_semantic_equivalence
     COMMAND "${CMAKE_COMMAND}" -E env
@@ -237,6 +256,17 @@ if(BUILD_TESTING)
   set_tests_properties(
     lunar_planner_core_benchmark_contract PROPERTIES
     LABELS "performance;native")
+
+  add_test(
+    NAME lunar_planner_core_hierarchical_benchmark_contract
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "LUNAR_HIERARCHICAL_PLANNER_BENCHMARK=$<TARGET_FILE:lunar_hierarchical_planner_benchmark>"
+      "${Python3_EXECUTABLE}" -m pytest -q
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/performance/test_hierarchical_planner_benchmark.py")
+  set_tests_properties(
+    lunar_planner_core_hierarchical_benchmark_contract PROPERTIES
+    LABELS "performance;native"
+    TIMEOUT 900)
 
   add_test(
     NAME lunar_planner_core_no_legacy_contract
