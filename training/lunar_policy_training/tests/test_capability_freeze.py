@@ -6,6 +6,7 @@ import pickle
 from pathlib import Path
 
 import pytest
+import yaml
 
 from lunar_policy_training.capability_freeze import (
     CAPABILITY_TYPES,
@@ -34,18 +35,39 @@ def _write_bundle(
     entries = []
     for index, platform in enumerate(PLATFORMS):
         version = f"{platform.lower()}-2026.08"
+        platform_id = f"test-only-{platform.lower()}"
+        typed_content = _test_typed_content(platform)
         platform_root = Path(platform.lower())
         platform_document_path = platform_root / "platform.yaml"
         observation_document_path = platform_root / "observation.json"
         urdf_path = platform_root / "rover.urdf"
         mesh_path = platform_root / "body.stl"
+        platform_document = {
+            "schema_version": "platform-control-capability-source/v1",
+            "platform": {
+                "platform_id": platform_id,
+                "platform_type": platform,
+                "capability_version": version,
+                "base_frame_id": "base_link",
+            },
+            "geometry_source": {"urdf_file": urdf_path.as_posix()},
+            platform.lower(): typed_content,
+        }
+        observation_document = {
+            "sensor_range_m": 25.0 + index,
+            "sensor_fov_deg": 90.0,
+        }
         resource_bytes = {
-            ("document", platform_document_path): b"test-only platform source\n",
+            ("document", platform_document_path): yaml.safe_dump(
+                platform_document, sort_keys=False
+            ).encode("utf-8"),
             ("document", observation_document_path): (
-                b'{"sensor_range_m":25.0,"sensor_fov_deg":90.0}\n'
-            ),
+                json.dumps(observation_document, separators=(",", ":")) + "\n"
+            ).encode("utf-8"),
             ("urdf", urdf_path): (
-                b'<robot name="test"><link name="base_link"/></robot>\n'
+                b'<robot name="test"><link name="base_link"><visual><geometry>'
+                b'<mesh filename="body.stl" scale="1 1 1"/>'
+                b'</geometry></visual></link></robot>\n'
             ),
             ("mesh", mesh_path): b"solid test\nendsolid test\n",
         }
@@ -63,7 +85,7 @@ def _write_bundle(
             (
                 "content",
                 {
-                    "platform_id": f"test-only-{platform.lower()}",
+                    "platform_id": platform_id,
                     "base_frame_id": "base_link",
                     "platform_document_path": platform_document_path.as_posix(),
                     "observation_document_path": (
@@ -75,7 +97,7 @@ def _write_bundle(
                         "sensor_range_m": 25.0 + index,
                         "sensor_fov_deg": 90.0,
                     },
-                    "capability": _test_typed_content(platform),
+                    "capability": typed_content,
                 },
             ),
         ]
@@ -219,6 +241,51 @@ def _rewrite_content(
     content_path.write_bytes(content_bytes)
     entry["content_file_sha256"] = _sha256(content_bytes)
     lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+
+def _rewrite_locked_resource(
+    lock_path: Path,
+    platform: str,
+    relative_path: str,
+    data: bytes,
+) -> None:
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    entry = next(
+        item for item in lock["platforms"] if item["platform_type"] == platform
+    )
+    resource = next(
+        item for item in entry["resources"] if item["path"] == relative_path
+    )
+    (lock_path.parent / relative_path).write_bytes(data)
+    resource["sha256"] = _sha256(data)
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+
+def _rewrite_typed_source_and_content(
+    lock_path: Path,
+    platform: str,
+    mutation,
+) -> None:
+    _rewrite_content(
+        lock_path,
+        platform,
+        lambda document: mutation(document["content"]["capability"]),
+    )
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    entry = next(
+        item for item in lock["platforms"] if item["platform_type"] == platform
+    )
+    content_path = lock_path.parent / entry["content_path"]
+    content = json.loads(content_path.read_text(encoding="utf-8"))
+    source_path = content["content"]["platform_document_path"]
+    source = yaml.safe_load((lock_path.parent / source_path).read_text(encoding="utf-8"))
+    mutation(source[platform.lower()])
+    _rewrite_locked_resource(
+        lock_path,
+        platform,
+        source_path,
+        yaml.safe_dump(source, sort_keys=False).encode("utf-8"),
+    )
 
 
 def test_formal_bundle_is_canonical_pickle_safe_and_relocation_independent(
@@ -457,6 +524,157 @@ def test_resource_closure_exactly_matches_content_references(
 
     with pytest.raises(CapabilityFreezeError, match="resource|closure"):
         load_frozen_capability_bundle(lock_path, run_kind="formal")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda source: source["wheeled"].__setitem__(
+            "maximum_forward_speed_mps", 2.0
+        ),
+        lambda source: source["platform"].__setitem__(
+            "platform_id", "different-platform"
+        ),
+        lambda source: source["platform"].__setitem__(
+            "capability_version", "different-version"
+        ),
+        lambda source: source["geometry_source"].__setitem__(
+            "urdf_file", "wheeled/different.urdf"
+        ),
+    ),
+)
+def test_platform_document_is_authoritative_over_duplicate_typed_payload(
+    tmp_path: Path,
+    mutation,
+) -> None:
+    """Would fail if capability.json could disagree with the v3 source document."""
+    lock_path = _write_bundle(tmp_path / "platform-drift")
+    source_path = "wheeled/platform.yaml"
+    source = yaml.safe_load(
+        (lock_path.parent / source_path).read_text(encoding="utf-8")
+    )
+    mutation(source)
+    _rewrite_locked_resource(
+        lock_path,
+        "WHEELED",
+        source_path,
+        yaml.safe_dump(source, sort_keys=False).encode("utf-8"),
+    )
+
+    with pytest.raises(CapabilityFreezeError, match="source|document|mismatch"):
+        load_frozen_capability_bundle(lock_path, run_kind="formal")
+
+
+def test_platform_document_must_be_parseable_v1_yaml(tmp_path: Path) -> None:
+    """Would fail if a hashed arbitrary text file counted as capability source."""
+    lock_path = _write_bundle(tmp_path / "arbitrary-source")
+    _rewrite_locked_resource(
+        lock_path,
+        "WHEELED",
+        "wheeled/platform.yaml",
+        b"this is not a capability document\n",
+    )
+
+    with pytest.raises(CapabilityFreezeError, match="document|schema"):
+        load_frozen_capability_bundle(lock_path, run_kind="formal")
+
+
+def test_observation_document_is_authoritative(tmp_path: Path) -> None:
+    """Would fail if observation range/FOV drift were hidden by capability.json."""
+    lock_path = _write_bundle(tmp_path / "observation-drift")
+    changed = b'{"sensor_range_m":99.0,"sensor_fov_deg":90.0}\n'
+    _rewrite_locked_resource(
+        lock_path,
+        "WHEELED",
+        "wheeled/observation.json",
+        changed,
+    )
+
+    with pytest.raises(CapabilityFreezeError, match="observation|mismatch"):
+        load_frozen_capability_bundle(lock_path, run_kind="formal")
+
+
+@pytest.mark.parametrize(
+    "urdf",
+    (
+        '<robot name="test"><link name="base_link"/></robot>\n',
+        (
+            '<robot name="test"><link name="other"><visual><geometry>'
+            '<mesh filename="body.stl"/></geometry></visual></link></robot>\n'
+        ),
+        (
+            '<robot name="test"><link name="base_link"><visual><geometry>'
+            '<mesh filename="body.stl" scale="1 -1 1"/>'
+            '</geometry></visual></link></robot>\n'
+        ),
+        (
+            '<robot name="test"><link name="base_link"><collision><geometry>'
+            '<mesh filename="unlocked.stl"/></geometry></collision></link></robot>\n'
+        ),
+    ),
+)
+def test_urdf_geometry_must_close_over_base_link_and_mesh_resources(
+    tmp_path: Path,
+    urdf: str,
+) -> None:
+    """Would fail if formal geometry were unparsed or detached from its mesh set."""
+    lock_path = _write_bundle(tmp_path / "urdf")
+    _rewrite_locked_resource(
+        lock_path,
+        "WHEELED",
+        "wheeled/rover.urdf",
+        urdf.encode("utf-8"),
+    )
+
+    with pytest.raises(CapabilityFreezeError, match="URDF|mesh|base"):
+        load_frozen_capability_bundle(lock_path, run_kind="formal")
+
+
+def test_duration_nanoseconds_survive_freeze_pickle_and_bridge_exactly(
+    tmp_path: Path,
+) -> None:
+    """Would fail if float parsing or timedelta rounded v3 durations to microseconds."""
+    lock_path = _write_bundle(tmp_path / "duration")
+    _rewrite_typed_source_and_content(
+        lock_path,
+        "WHEELED",
+        lambda capability: capability["motion_primitives"][0].__setitem__(
+            "nominal_duration_s", 0.000000001
+        ),
+    )
+    _rewrite_typed_source_and_content(
+        lock_path,
+        "LEGGED",
+        lambda capability: capability["motion_primitives"][0].__setitem__(
+            "nominal_duration_s", 1.000000001
+        ),
+    )
+    _rewrite_typed_source_and_content(
+        lock_path,
+        "HOPPER",
+        lambda capability: capability.__setitem__(
+            "minimum_settle_guard_s", 0.0000000005
+        ),
+    )
+
+    bundle = pickle.loads(
+        pickle.dumps(load_frozen_capability_bundle(lock_path, run_kind="formal"))
+    )
+    wheel = bundle.for_platform("WHEELED")
+    legged = bundle.for_platform("LEGGED")
+    hopper = bundle.for_platform("HOPPER")
+    assert wheel.typed_capability.motion_primitives[0].nominal_duration_ns == 1
+    assert (
+        legged.typed_capability.motion_primitives[0].nominal_duration_ns
+        == 1_000_000_001
+    )
+    assert hopper.typed_capability.minimum_settle_guard_ns == 1
+    assert wheel.to_bridge_capability().motion_primitives[0].nominal_duration_ns == 1
+    assert (
+        legged.to_bridge_capability().motion_primitives[0].nominal_duration_ns
+        == 1_000_000_001
+    )
+    assert hopper.to_bridge_capability().minimum_settle_guard_ns == 1
 
 
 def test_complete_typed_bundle_maps_all_platforms_to_v3_bridge(

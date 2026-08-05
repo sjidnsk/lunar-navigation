@@ -5,14 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path, PurePosixPath
 from typing import TypeAlias
+from xml.etree import ElementTree
+
+import yaml
 
 
 CAPABILITY_FREEZE_SCHEMA = "lunar-training-capability-freeze/v1"
+_PLATFORM_SOURCE_SCHEMA = "platform-control-capability-source/v1"
 PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
 RUN_KINDS = ("formal", "development-smoke")
 CAPABILITY_TYPES = {
@@ -68,6 +71,10 @@ _LEGGED_PRIMITIVE_FIELDS = frozenset(
 )
 _HOPPER_PRIMITIVE_FIELDS = frozenset(("primitive_id",))
 _PROFILE_FIELDS = frozenset(("profile_id",))
+_SOURCE_PLATFORM_FIELDS = frozenset(
+    ("platform_id", "platform_type", "capability_version", "base_frame_id")
+)
+_GEOMETRY_SOURCE_FIELDS = frozenset(("urdf_file",))
 _WHEELED_FIELDS = frozenset(
     (
         "footprint_xy_m",
@@ -338,7 +345,7 @@ class FrozenPlatformCapability:
                 primitive.primitive_id = frozen.primitive_id
                 primitive.kind = getattr(bridge_api.WheelPrimitiveKind, frozen.kind)
                 primitive.relative_end_pose = _bridge_pose(frozen.relative_end_pose, bridge_api)
-                primitive.nominal_duration = _bridge_duration(frozen.nominal_duration_ns)
+                primitive.nominal_duration_ns = frozen.nominal_duration_ns
                 primitives.append(primitive)
             value.motion_primitives = primitives
             return value
@@ -376,7 +383,7 @@ class FrozenPlatformCapability:
                     frozen.body_frame_displacement_m, bridge_api
                 )
                 primitive.yaw_change_rad = frozen.yaw_change_rad
-                primitive.nominal_duration = _bridge_duration(frozen.nominal_duration_ns)
+                primitive.nominal_duration_ns = frozen.nominal_duration_ns
                 primitives.append(primitive)
             value.motion_primitives = primitives
             return value
@@ -401,9 +408,9 @@ class FrozenPlatformCapability:
             "maximum_initial_angular_speed_radps",
         ):
             setattr(value, field, getattr(typed, field))
-        value.minimum_flight_time = _bridge_duration(typed.minimum_flight_time_ns)
-        value.maximum_flight_time = _bridge_duration(typed.maximum_flight_time_ns)
-        value.minimum_settle_guard = _bridge_duration(typed.minimum_settle_guard_ns)
+        value.minimum_flight_time_ns = typed.minimum_flight_time_ns
+        value.maximum_flight_time_ns = typed.maximum_flight_time_ns
+        value.minimum_settle_guard_ns = typed.minimum_settle_guard_ns
         return value
 
 
@@ -587,13 +594,14 @@ def _parse_platform_entry(root: Path, entry: object) -> FrozenPlatformCapability
     if not isinstance(resources_raw, list) or not resources_raw:
         raise CapabilityFreezeError("capability resources must be a non-empty list")
     resources: list[FrozenCapabilityResource] = []
+    resource_payloads: dict[tuple[str, str], bytes] = {}
     seen_paths: set[str] = set()
     for raw_resource in resources_raw:
         resource = _require_exact_object(
             raw_resource, _RESOURCE_FIELDS, "capability resource"
         )
         kind = resource["kind"]
-        if kind not in _RESOURCE_KINDS:
+        if not isinstance(kind, str) or kind not in _RESOURCE_KINDS:
             raise CapabilityFreezeError("capability resource kind is unsupported")
         path = _normalized_relative(resource["path"])
         if path in seen_paths:
@@ -601,8 +609,10 @@ def _parse_platform_entry(root: Path, entry: object) -> FrozenPlatformCapability
         seen_paths.add(path)
         resolved = _resolve_relative(root, path, "resource")
         digest = _digest(resource["sha256"], "resource")
-        if _sha256_bytes(resolved.read_bytes()) != digest:
+        payload = resolved.read_bytes()
+        if _sha256_bytes(payload) != digest:
             raise CapabilityFreezeError("capability resource hash mismatch")
+        resource_payloads[(kind, path)] = payload
         resources.append(FrozenCapabilityResource(kind, path, digest))
     expected_references = parsed_content.resource_references
     if len(set(expected_references)) != len(expected_references):
@@ -611,6 +621,13 @@ def _parse_platform_entry(root: Path, entry: object) -> FrozenPlatformCapability
         raise CapabilityFreezeError(
             "capability resource closure does not exactly match content references"
         )
+    _validate_authoritative_sources(
+        content=content_raw["content"],
+        parsed=parsed_content,
+        platform_type=platform_type,
+        capability_version=capability_version,
+        resource_payloads=resource_payloads,
+    )
     resources.sort(key=lambda item: (item.relative_path, item.kind))
     canonical_content = {
         "schema": capability_type,
@@ -680,6 +697,158 @@ def _parse_typed_content(value: object, platform_type: str) -> _ParsedContent:
         ),
         typed_capability=typed,
     )
+
+
+def _validate_authoritative_sources(
+    *,
+    content: object,
+    parsed: _ParsedContent,
+    platform_type: str,
+    capability_version: str,
+    resource_payloads: Mapping[tuple[str, str], bytes],
+) -> None:
+    content_object = _require_exact_object(
+        content, _COMMON_CONTENT_FIELDS, "capability content fields"
+    )
+    platform_document = _yaml_object(
+        resource_payloads[("document", parsed.platform_document_path)],
+        "platform document",
+    )
+    platform_key = platform_type.lower()
+    _require_exact_object(
+        platform_document,
+        frozenset(
+            ("schema_version", "platform", "geometry_source", platform_key)
+        ),
+        "platform document",
+    )
+    if platform_document["schema_version"] != _PLATFORM_SOURCE_SCHEMA:
+        raise CapabilityFreezeError("platform document schema is unsupported")
+    source_platform = _require_exact_object(
+        platform_document["platform"],
+        _SOURCE_PLATFORM_FIELDS,
+        "platform document platform",
+    )
+    expected_common = {
+        "platform_id": parsed.platform_id,
+        "platform_type": platform_type,
+        "capability_version": capability_version,
+        "base_frame_id": parsed.base_frame_id,
+    }
+    if source_platform != expected_common:
+        raise CapabilityFreezeError(
+            "platform document common identity mismatch"
+        )
+    geometry = _require_exact_object(
+        platform_document["geometry_source"],
+        _GEOMETRY_SOURCE_FIELDS,
+        "platform document geometry source",
+    )
+    if _normalized_relative(geometry["urdf_file"]) != parsed.urdf_path:
+        raise CapabilityFreezeError("platform document URDF path mismatch")
+    source_capability = platform_document[platform_key]
+    if source_capability != content_object["capability"]:
+        raise CapabilityFreezeError(
+            "platform document typed capability mismatch"
+        )
+    if platform_type == "WHEELED":
+        source_typed = _parse_wheeled(source_capability)
+    elif platform_type == "LEGGED":
+        source_typed = _parse_legged(source_capability)
+    else:
+        source_typed = _parse_hopper(source_capability)
+    if source_typed != parsed.typed_capability:
+        raise CapabilityFreezeError(
+            "platform document parsed capability mismatch"
+        )
+
+    observation_document = _yaml_object(
+        resource_payloads[("document", parsed.observation_document_path)],
+        "observation document",
+    )
+    observation = _require_exact_object(
+        observation_document,
+        _OBSERVATION_FIELDS,
+        "observation document",
+    )
+    if observation != content_object["observation"]:
+        raise CapabilityFreezeError("observation document mismatch")
+    sensor_range = _positive(observation["sensor_range_m"], "sensor_range_m")
+    sensor_fov_deg = _positive(observation["sensor_fov_deg"], "sensor_fov_deg")
+    if sensor_fov_deg > 360.0:
+        raise CapabilityFreezeError("sensor_fov_deg exceeds 360 degrees")
+    source_observation = FrozenObservationCapability(
+        sensor_range_m=sensor_range,
+        sensor_fov_rad=sensor_fov_deg * math.pi / 180.0,
+    )
+    if source_observation != parsed.observation_capability:
+        raise CapabilityFreezeError("observation document parsed value mismatch")
+
+    urdf_mesh_paths = _parse_urdf_mesh_paths(
+        resource_payloads[("urdf", parsed.urdf_path)],
+        urdf_path=parsed.urdf_path,
+        base_frame_id=parsed.base_frame_id,
+    )
+    if set(urdf_mesh_paths) != set(parsed.mesh_paths):
+        raise CapabilityFreezeError(
+            "URDF mesh closure does not match capability content"
+        )
+
+
+def _yaml_object(data: bytes, name: str) -> dict[str, object]:
+    try:
+        value = yaml.safe_load(data.decode("utf-8"))
+    except (UnicodeError, yaml.YAMLError) as error:
+        raise CapabilityFreezeError(f"{name} is not valid UTF-8 YAML") from error
+    if not isinstance(value, dict):
+        raise CapabilityFreezeError(f"{name} must be a YAML object")
+    return value
+
+
+def _parse_urdf_mesh_paths(
+    data: bytes,
+    *,
+    urdf_path: str,
+    base_frame_id: str,
+) -> tuple[str, ...]:
+    try:
+        root = ElementTree.fromstring(data.decode("utf-8"))
+    except (UnicodeError, ElementTree.ParseError) as error:
+        raise CapabilityFreezeError("URDF is not valid UTF-8 XML") from error
+    if root.tag != "robot":
+        raise CapabilityFreezeError("URDF root must be robot")
+    links = root.findall("link")
+    if not any(link.get("name") == base_frame_id for link in links):
+        raise CapabilityFreezeError("URDF does not contain base_frame_id link")
+    mesh_nodes = [
+        *root.findall(".//visual/geometry/mesh"),
+        *root.findall(".//collision/geometry/mesh"),
+    ]
+    if not mesh_nodes:
+        raise CapabilityFreezeError("URDF requires at least one mesh")
+    mesh_paths: set[str] = set()
+    urdf_parent = PurePosixPath(urdf_path).parent
+    for mesh in mesh_nodes:
+        filename = mesh.get("filename")
+        relative_mesh = _normalized_relative(filename)
+        closure_path = _normalized_relative(
+            (urdf_parent / PurePosixPath(relative_mesh)).as_posix()
+        )
+        scale = mesh.get("scale")
+        if scale is not None:
+            try:
+                values = tuple(float(item) for item in scale.split())
+            except ValueError as error:
+                raise CapabilityFreezeError("URDF mesh scale is invalid") from error
+            if (
+                len(values) != 3
+                or any(not math.isfinite(item) or item <= 0.0 for item in values)
+            ):
+                raise CapabilityFreezeError(
+                    "URDF mesh scale must contain three positive finite values"
+                )
+        mesh_paths.add(closure_path)
+    return tuple(sorted(mesh_paths))
 
 
 def _parse_wheeled(value: object) -> FrozenWheeledCapability:
@@ -1037,7 +1206,7 @@ def _duration_ns(value: object, field: str, *, allow_zero: bool = False) -> int:
     nanoseconds = seconds * 1_000_000_000.0
     if nanoseconds > _INT64_MAX:
         raise CapabilityFreezeError(f"{field} duration exceeds int64 nanoseconds")
-    return round(nanoseconds)
+    return math.floor(nanoseconds + 0.5)
 
 
 def _enum_string(value: object, allowed: frozenset[str], field: str) -> str:
@@ -1080,10 +1249,6 @@ def _bridge_pose(value: FrozenPose3, bridge_api):
     orientation.z = value.orientation.z
     result.orientation = orientation
     return result
-
-
-def _bridge_duration(nanoseconds: int) -> timedelta:
-    return timedelta(seconds=nanoseconds / 1_000_000_000.0)
 
 
 def _read_json(path: Path, name: str) -> dict[str, object]:

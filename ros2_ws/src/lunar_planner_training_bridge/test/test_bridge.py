@@ -147,6 +147,27 @@ def _hopper_capability() -> bridge_api.HopperCapability:
     return capability
 
 
+def test_duration_nanosecond_properties_are_exact_and_keep_legacy_bindings() -> None:
+    """Would fail if pybind chrono forced v3 nanoseconds through timedelta."""
+    wheel = bridge_api.WheelMotionPrimitive()
+    wheel.nominal_duration_ns = 1
+    assert wheel.nominal_duration_ns == 1
+    wheel.nominal_duration = timedelta(microseconds=2)
+    assert wheel.nominal_duration_ns == 2_000
+
+    legged = bridge_api.LeggedBodyPrimitive()
+    legged.nominal_duration_ns = 1_000_000_001
+    assert legged.nominal_duration_ns == 1_000_000_001
+
+    hopper = bridge_api.HopperCapability()
+    hopper.minimum_flight_time_ns = 1
+    hopper.maximum_flight_time_ns = 1_000_000_001
+    hopper.minimum_settle_guard_ns = 1
+    assert hopper.minimum_flight_time_ns == 1
+    assert hopper.maximum_flight_time_ns == 1_000_000_001
+    assert hopper.minimum_settle_guard_ns == 1
+
+
 @pytest.fixture
 def easy_request():
     def make(platform_type: str) -> bridge_api.TrainingPlanRequest:

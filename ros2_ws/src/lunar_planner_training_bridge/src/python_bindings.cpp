@@ -232,7 +232,15 @@ void BindCapabilities(py::module_ &module) {
       .def_readwrite("relative_end_pose",
                      &planning::WheelMotionPrimitive::relative_end_pose)
       .def_readwrite("nominal_duration",
-                     &planning::WheelMotionPrimitive::nominal_duration);
+                     &planning::WheelMotionPrimitive::nominal_duration)
+      .def_property(
+          "nominal_duration_ns",
+          [](const planning::WheelMotionPrimitive &value) {
+            return value.nominal_duration.count();
+          },
+          [](planning::WheelMotionPrimitive &value, const std::int64_t count) {
+            value.nominal_duration = std::chrono::nanoseconds{count};
+          });
   py::class_<planning::WheeledCapability>(module, "WheeledCapability")
       .def(py::init<>())
       .def_readwrite("footprint_xy_m",
@@ -284,7 +292,15 @@ void BindCapabilities(py::module_ &module) {
       .def_readwrite("yaw_change_rad",
                      &planning::LeggedBodyPrimitive::yaw_change_rad)
       .def_readwrite("nominal_duration",
-                     &planning::LeggedBodyPrimitive::nominal_duration);
+                     &planning::LeggedBodyPrimitive::nominal_duration)
+      .def_property(
+          "nominal_duration_ns",
+          [](const planning::LeggedBodyPrimitive &value) {
+            return value.nominal_duration.count();
+          },
+          [](planning::LeggedBodyPrimitive &value, const std::int64_t count) {
+            value.nominal_duration = std::chrono::nanoseconds{count};
+          });
   py::class_<planning::LeggedCapability>(module, "LeggedCapability")
       .def(py::init<>())
       .def_readwrite("body_half_extent_m",
@@ -347,8 +363,24 @@ void BindCapabilities(py::module_ &module) {
           &planning::HopperCapability::maximum_launch_impulse_newton_seconds)
       .def_readwrite("minimum_flight_time",
                      &planning::HopperCapability::minimum_flight_time)
+      .def_property(
+          "minimum_flight_time_ns",
+          [](const planning::HopperCapability &value) {
+            return value.minimum_flight_time.count();
+          },
+          [](planning::HopperCapability &value, const std::int64_t count) {
+            value.minimum_flight_time = std::chrono::nanoseconds{count};
+          })
       .def_readwrite("maximum_flight_time",
                      &planning::HopperCapability::maximum_flight_time)
+      .def_property(
+          "maximum_flight_time_ns",
+          [](const planning::HopperCapability &value) {
+            return value.maximum_flight_time.count();
+          },
+          [](planning::HopperCapability &value, const std::int64_t count) {
+            value.maximum_flight_time = std::chrono::nanoseconds{count};
+          })
       .def_readwrite("maximum_landing_speed_mps",
                      &planning::HopperCapability::maximum_landing_speed_mps)
       .def_readwrite(
@@ -365,7 +397,15 @@ void BindCapabilities(py::module_ &module) {
           "maximum_initial_angular_speed_radps",
           &planning::HopperCapability::maximum_initial_angular_speed_radps)
       .def_readwrite("minimum_settle_guard",
-                     &planning::HopperCapability::minimum_settle_guard);
+                     &planning::HopperCapability::minimum_settle_guard)
+      .def_property(
+          "minimum_settle_guard_ns",
+          [](const planning::HopperCapability &value) {
+            return value.minimum_settle_guard.count();
+          },
+          [](planning::HopperCapability &value, const std::int64_t count) {
+            value.minimum_settle_guard = std::chrono::nanoseconds{count};
+          });
 }
 
 void BindConfig(py::module_ &module) {
