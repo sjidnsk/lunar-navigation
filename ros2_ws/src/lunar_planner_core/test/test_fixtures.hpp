@@ -162,6 +162,7 @@ inline PlannerInput MakeValidWheelInput() {
   };
   input.config.wheel.xy_resolution_m = 1.0;
   input.config.legged.xy_resolution_m = 1.0;
+  input.config.global_map.base_resolution_m = 1.0;
   return input;
 }
 

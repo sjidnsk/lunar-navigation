@@ -31,7 +31,7 @@ TEST(LeggedPlanner, ProducesOnlyBodyReferenceWithBoundedKinematics) {
   ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
       << output.reason_code;
   EXPECT_EQ(output.directive, ExecutionDirective::kActivateNewReference);
-  EXPECT_EQ(output.diagnostics.planner_name, "cpp_v3_native_legged");
+  EXPECT_EQ(output.diagnostics.planner_name, "cpp_v3_hierarchical");
   ASSERT_TRUE(output.diagnostics.best_cost.has_value());
   const TrajectoryReference& trajectory = LeggedTrajectory(output);
   ASSERT_GT(trajectory.points.size(), 2U);

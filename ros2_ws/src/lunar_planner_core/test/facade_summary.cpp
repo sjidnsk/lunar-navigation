@@ -244,6 +244,7 @@ void Generate(const std::string& output_path, char** fixture_paths) {
   }
   output << Json{
                 {"schema_version", "lunar-v3-facade-summary/v1"},
+                {"cost_semantics", "hierarchical_global_route_cost"},
                 {"summaries", std::move(summaries)},
             }
                  .dump(2)

@@ -28,6 +28,7 @@ add_library(${PROJECT_NAME} SHARED
   src/hierarchical/hopper_route_planner.cpp
   src/hierarchical/local_frontier.cpp
   src/hierarchical/map_level.cpp
+  src/hierarchical/reference_composer.cpp
   src/hopper/ballistic_kinematics.cpp
   src/hopper/commitment_state_machine.cpp
   src/hopper/flight_tube_certifier.cpp
@@ -104,6 +105,14 @@ if(BUILD_TESTING)
   target_link_libraries(
     lunar_planner_core_hierarchical_types_test ${PROJECT_NAME})
   lunar_enable_sanitizers(lunar_planner_core_hierarchical_types_test)
+
+  ament_add_gtest(lunar_planner_core_hierarchical_planner_test
+    test/hierarchical_planner_test.cpp)
+  target_include_directories(
+    lunar_planner_core_hierarchical_planner_test PRIVATE src test)
+  target_link_libraries(
+    lunar_planner_core_hierarchical_planner_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_hierarchical_planner_test)
 
   ament_add_gtest(lunar_planner_core_global_grid_search_test
     test/global_grid_search_test.cpp)

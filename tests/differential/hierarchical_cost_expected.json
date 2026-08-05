@@ -1,0 +1,20 @@
+{
+  "schema_version": "lunar-v3-hierarchical-cost-summary/v1",
+  "costs": {
+    "wheel-safe-corridor": 4.571428571428571,
+    "wheel-no-safe-route": null,
+    "wheel-goal-infeasible": 4.571428571428571,
+    "wheel-numerical-failure": null,
+    "wheel-deterministic-repeat": 4.571428571428571,
+    "legged-safe-corridor": 5.371988807405744,
+    "legged-no-safe-route": null,
+    "legged-goal-infeasible": 5.371988807405744,
+    "legged-numerical-failure": null,
+    "legged-deterministic-repeat": 5.371988807405744,
+    "hopper-safe-corridor": 1.1314877291375824,
+    "hopper-no-safe-route": null,
+    "hopper-goal-infeasible": null,
+    "hopper-numerical-failure": null,
+    "hopper-deterministic-repeat": 1.1314877291375824
+  }
+}

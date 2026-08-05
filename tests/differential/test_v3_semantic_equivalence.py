@@ -14,6 +14,12 @@ FIXTURE_ROOT = REPOSITORY_ROOT / "tests" / "differential" / "fixtures"
 LEGACY_EXPECTED_PATH = (
     REPOSITORY_ROOT / "tests" / "differential" / "legacy_expected.json"
 )
+HIERARCHICAL_COST_EXPECTED_PATH = (
+    REPOSITORY_ROOT
+    / "tests"
+    / "differential"
+    / "hierarchical_cost_expected.json"
+)
 RUNNER_ENVIRONMENT_VARIABLE = "LUNAR_PLANNER_FACADE_SUMMARY"
 EXPECTED_DIRECTIVE = {
     "NEW_REFERENCE_AVAILABLE": "ACTIVATE_NEW_REFERENCE",
@@ -57,7 +63,15 @@ def test_facade_matches_frozen_v3_semantics(
     facade_summary: dict[str, object],
 ) -> None:
     legacy = json.loads(LEGACY_EXPECTED_PATH.read_text(encoding="utf-8"))
+    hierarchical_costs = json.loads(
+        HIERARCHICAL_COST_EXPECTED_PATH.read_text(encoding="utf-8")
+    )
     assert facade_summary["schema_version"] == "lunar-v3-facade-summary/v1"
+    assert facade_summary["cost_semantics"] == "hierarchical_global_route_cost"
+    assert (
+        hierarchical_costs["schema_version"]
+        == "lunar-v3-hierarchical-cost-summary/v1"
+    )
 
     actual_by_id = {
         summary["case_id"]: summary for summary in facade_summary["summaries"]
@@ -82,7 +96,7 @@ def test_facade_matches_frozen_v3_semantics(
         for field in boolean_fields:
             assert actual[field] is expected[field], f"{case_id}:{field}"
 
-        expected_cost = expected["cost"]
+        expected_cost = hierarchical_costs["costs"][case_id]
         actual_cost = actual["cost"]
         if expected_cost is None:
             assert actual_cost is None, case_id

@@ -87,7 +87,7 @@ TEST(WheelFaultMatrix, ReportsNoPathAcrossFullBarrier) {
   EXPECT_EQ(output.outcome, PlanningOutcome::kNoKnownSafeRoute);
   EXPECT_EQ(output.directive, ExecutionDirective::kNoSafeReference);
   EXPECT_FALSE(output.reference.has_value());
-  EXPECT_EQ(output.diagnostics.planner_name, "cpp_v3_native_wheel");
+  EXPECT_EQ(output.diagnostics.planner_name, "cpp_v3_hierarchical");
 }
 
 TEST(WheelFaultMatrix, CancelsBeforeSearchExpansion) {

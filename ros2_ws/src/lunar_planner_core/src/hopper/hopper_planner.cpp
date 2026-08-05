@@ -446,7 +446,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
           .elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
               std::chrono::steady_clock::now() - started),
           .expanded_states = total_work,
-          .best_cost = certified.cost,
+          .best_cost = global.route->cost,
           .warning_codes = std::move(warnings),
           .hierarchical = HierarchicalPlannerMetrics{
               .global_level = global.global_level.value_or(0U),

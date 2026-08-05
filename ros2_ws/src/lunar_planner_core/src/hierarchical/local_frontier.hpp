@@ -13,6 +13,7 @@ namespace lunar::planning::hierarchical {
 enum class LocalFrontierStatus : std::uint8_t {
   kReady,
   kCoverageInsufficient,
+  kGoalInfeasible,
   kInvalidRequest,
   kCanceled,
 };

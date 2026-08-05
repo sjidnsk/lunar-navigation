@@ -38,6 +38,12 @@ struct FrontierSample final {
   bool is_route_end{};
 };
 
+enum class LocalGoalFeasibility : std::uint8_t {
+  kNotCovered,
+  kFeasible,
+  kInfeasible,
+};
+
 [[nodiscard]] LocalFrontierResult
 Failure(const LocalFrontierStatus status, std::string reason_code,
         const double corridor_half_width_m = 0.0) {
@@ -57,6 +63,81 @@ Failure(const LocalFrontierStatus status, std::string reason_code,
   return std::isfinite(lhs) && std::isfinite(rhs) &&
          std::abs(lhs - rhs) <=
              kTolerance * std::max({1.0, std::abs(lhs), std::abs(rhs)});
+}
+
+[[nodiscard]] bool PointOnSegment(const Vec2 point, const Vec2 start,
+                                  const Vec2 end) noexcept {
+  const double cross = (point.x - start.x) * (end.y - start.y) -
+                       (point.y - start.y) * (end.x - start.x);
+  if (std::abs(cross) > kTolerance) {
+    return false;
+  }
+  return (point.x - start.x) * (point.x - end.x) +
+             (point.y - start.y) * (point.y - end.y) <=
+         kTolerance;
+}
+
+[[nodiscard]] bool PointInPolygon(const Vec2 point,
+                                  const std::vector<Vec3> &boundary) noexcept {
+  if (boundary.size() < 3U) {
+    return false;
+  }
+  bool inside = false;
+  for (std::size_t current = 0U, previous = boundary.size() - 1U;
+       current < boundary.size(); previous = current++) {
+    const Vec2 start{boundary[previous].x, boundary[previous].y};
+    const Vec2 end{boundary[current].x, boundary[current].y};
+    if (PointOnSegment(point, start, end)) {
+      return true;
+    }
+    if ((start.y > point.y) == (end.y > point.y)) {
+      continue;
+    }
+    const double crossing =
+        start.x + (point.y - start.y) * (end.x - start.x) / (end.y - start.y);
+    if (point.x < crossing) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+[[nodiscard]] bool GoalIntersectsCell(const GoalRegion &goal,
+                                      const Vec3 center,
+                                      const double resolution_m) noexcept {
+  if (const auto *point = std::get_if<PointGoal>(&goal.target)) {
+    const double half = resolution_m / 2.0;
+    const double dx =
+        std::max(std::abs(center.x - point->position_m.x) - half, 0.0);
+    const double dy =
+        std::max(std::abs(center.y - point->position_m.y) - half, 0.0);
+    return std::hypot(dx, dy) <= point->tolerance_m + kTolerance;
+  }
+  const auto *region = std::get_if<PlanarRegionGoal>(&goal.target);
+  return region != nullptr &&
+         PointInPolygon(Vec2{center.x, center.y}, region->boundary_m);
+}
+
+[[nodiscard]] LocalGoalFeasibility EvaluateLocalGoal(
+    const shared::MapSnapshot &map,
+    const shared::SafeProjection &projection,
+    const GoalRegion &goal) noexcept {
+  bool covered = false;
+  for (std::size_t index = 0U; index < map.cell_count(); ++index) {
+    const shared::GridCell cell{
+        .x = static_cast<std::int32_t>(index % map.width()),
+        .y = static_cast<std::int32_t>(index / map.width()),
+    };
+    if (!GoalIntersectsCell(goal, map.CellCenter(cell), map.resolution_m())) {
+      continue;
+    }
+    covered = true;
+    if (projection.HardFeasible(cell)) {
+      return LocalGoalFeasibility::kFeasible;
+    }
+  }
+  return covered ? LocalGoalFeasibility::kInfeasible
+                 : LocalGoalFeasibility::kNotCovered;
 }
 
 [[nodiscard]] std::optional<PlatformGeometry>
@@ -272,7 +353,7 @@ LocalFrontierResult BuildLocalFrontiers(const PlannerInput &input,
   const double corridor_half_width =
       geometry->support_radius_m + geometry->minimum_clearance_m +
       input.config.local_frontier.additional_corridor_margin_m;
-  if (route.poses_map.size() < 2U) {
+  if (route.poses_map.empty()) {
     return Failure(LocalFrontierStatus::kInvalidRequest, "GLOBAL_ROUTE_INVALID",
                    corridor_half_width);
   }
@@ -305,6 +386,20 @@ LocalFrontierResult BuildLocalFrontiers(const PlannerInput &input,
                        ? LocalFrontierStatus::kCanceled
                        : LocalFrontierStatus::kInvalidRequest,
                    projection.reason_code, corridor_half_width);
+  }
+
+  const auto goal_odom =
+      TransformGoal(input.goal_map, input.world.map_from_odom,
+                    TransformDirection::kParentToChild);
+  if (!goal_odom.has_value()) {
+    return Failure(LocalFrontierStatus::kInvalidRequest,
+                   "FRAME_TRANSFORM_INVALID", corridor_half_width);
+  }
+  if (EvaluateLocalGoal(*snapshot.snapshot, *projection.projection,
+                        *goal_odom) ==
+      LocalGoalFeasibility::kInfeasible) {
+    return Failure(LocalFrontierStatus::kGoalInfeasible,
+                   "GLOBAL_GOAL_INFEASIBLE", corridor_half_width);
   }
 
   const auto start_cell = snapshot.snapshot->PositionToCell(Vec2{
@@ -341,8 +436,27 @@ LocalFrontierResult BuildLocalFrontiers(const PlannerInput &input,
     }
   }
   if (route_odom.size() < 2U) {
-    return Failure(LocalFrontierStatus::kCoverageInsufficient,
-                   "LOCAL_MAP_COVERAGE_INSUFFICIENT", corridor_half_width);
+    LocalFrontierResult stationary{
+        .status = LocalFrontierStatus::kReady,
+        .corridor_half_width_m = corridor_half_width,
+        .reason_code = "LOCAL_FRONTIERS_AVAILABLE",
+    };
+    stationary.problems.push_back(LocalPlanningProblem{
+        .request_id = input.request_id + "/local-0",
+        .state_time = input.state_time,
+        .current_state = input.current_state,
+        .goal_odom = *goal_odom,
+        .local_map_view = BuildLocalView(
+            local_map, geometry->current_position_odom,
+            {geometry->current_position_odom}, geometry->horizon_m,
+            corridor_half_width),
+        .capability = input.capability,
+        .config = input.config,
+        .previous_execution = input.previous_execution,
+        .stop_token = input.stop_token,
+    });
+    stationary.frontier_distances_m.push_back(0.0);
+    return stationary;
   }
 
   std::vector<FrontierSample> covered;

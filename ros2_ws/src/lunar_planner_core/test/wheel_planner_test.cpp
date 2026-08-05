@@ -39,7 +39,7 @@ TEST(WheelPlanner, PlansForwardReferenceWithBoundedTiming) {
   ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
       << output.reason_code;
   EXPECT_EQ(output.directive, ExecutionDirective::kActivateNewReference);
-  EXPECT_EQ(output.diagnostics.planner_name, "cpp_v3_native_wheel");
+  EXPECT_EQ(output.diagnostics.planner_name, "cpp_v3_hierarchical");
   ASSERT_TRUE(output.diagnostics.best_cost.has_value());
   const TrajectoryReference& trajectory = WheelTrajectory(output);
   ASSERT_GT(trajectory.points.size(), 2U);
@@ -72,7 +72,10 @@ TEST(WheelPlanner, SelectsReverseMotionForGoalBehind) {
   ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
       << output.reason_code;
   const TrajectoryReference& trajectory = WheelTrajectory(output);
-  EXPECT_NEAR(trajectory.points.back().pose.position_m.x, 0.5, 0.25);
+  EXPECT_NEAR(trajectory.points.back().pose.position_m.x, 1.5, 0.25);
+  ASSERT_FALSE(output.reference->preview.poses_map.empty());
+  EXPECT_NEAR(
+      output.reference->preview.poses_map.back().position_m.x, 0.5, 0.25);
   EXPECT_TRUE(std::ranges::any_of(
       trajectory.points, [](const TrajectoryPoint& point) {
         return point.velocity.linear_mps.x < -1.0e-3;

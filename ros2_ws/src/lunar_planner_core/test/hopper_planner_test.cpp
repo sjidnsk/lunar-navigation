@@ -36,7 +36,7 @@ TEST(HopperPlanner, ProducesExactlyOnePhysicallyBoundedHop) {
   ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
       << output.reason_code;
   EXPECT_EQ(output.directive, ExecutionDirective::kActivateNewReference);
-  EXPECT_EQ(output.diagnostics.planner_name, "cpp_v3_native_hopper");
+  EXPECT_EQ(output.diagnostics.planner_name, "cpp_v3_hierarchical");
   ASSERT_TRUE(output.diagnostics.best_cost.has_value());
   EXPECT_NEAR(*output.diagnostics.best_cost, 1.385398163, 0.35);
   const HopReference& reference = HopperReference(output);
