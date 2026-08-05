@@ -48,6 +48,13 @@ REQUIRED_RESULT_KEYS = {
     "open_peak",
     "peak_memory_bytes",
     "route_hash",
+    "smoothing_p50_s",
+    "smoothing_p95_s",
+    "smoothing_maximum_s",
+    "landing_field_p50_s",
+    "landing_field_p95_s",
+    "landing_field_maximum_s",
+    "trajectory_mode_counts",
 }
 
 
@@ -119,6 +126,12 @@ def test_benchmark_contract_covers_all_tiers_and_fixtures(
             "global_p50_s",
             "global_p95_s",
             "global_maximum_s",
+            "smoothing_p50_s",
+            "smoothing_p95_s",
+            "smoothing_maximum_s",
+            "landing_field_p50_s",
+            "landing_field_p95_s",
+            "landing_field_maximum_s",
         ):
             assert math.isfinite(result[key]) and result[key] >= 0.0
         assert result["p50_s"] <= result["p95_s"] <= result["maximum_s"]
@@ -129,6 +142,15 @@ def test_benchmark_contract_covers_all_tiers_and_fixtures(
         )
         for key in ("expanded_states", "open_peak", "peak_memory_bytes"):
             assert isinstance(result[key], int) and result[key] >= 0
+        assert result["peak_memory_bytes"] <= 256 * 1024 * 1024
+        assert result["trajectory_mode_counts"].keys() == {
+            "STATIONARY",
+            "OPTIMIZED",
+            "DISCRETE_FALLBACK",
+            "CERTIFIED_HOP",
+            "NONE",
+        }
+        assert sum(result["trajectory_mode_counts"].values()) == 30
 
 
 def test_ubuntu_thresholds_are_enforced_and_agx_is_device_only(

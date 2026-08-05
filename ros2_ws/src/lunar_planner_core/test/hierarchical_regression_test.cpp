@@ -63,6 +63,44 @@ void SetFloat(
   return input;
 }
 
+[[nodiscard]] PlannerInput FiftyMetreInput(const PlatformType platform)
+{
+  PlannerInput input = platform == PlatformType::kHopper ?
+    test::MakeValidHopperInput() : DistantGroundInput(platform);
+  input.request_id = "regression-50m-" +
+    std::to_string(static_cast<std::uint8_t>(platform));
+  input.world.global_map = test::MakeFlatMap("map", 250U, 250U, 0.2);
+  input.world.local_map = test::MakeFlatMap("odom", 250U, 250U, 0.2);
+  input.config.global_map.base_resolution_m = 0.2;
+  input.config.global_search.resources.maximum_generated_candidates =
+    8U * 250U * 250U;
+  input.config.global_search.resources.maximum_expanded_states = 250U * 250U;
+  input.config.global_search.resources.maximum_reopened_states = 250U * 250U;
+  input.config.global_search.resources.maximum_open_states = 250U * 250U;
+  input.config.global_search.resources.maximum_memory_bytes =
+    256U * 1024U * 1024U;
+  input.goal_map = GoalRegion{
+    .goal_id = "regression-50m-goal",
+    .target = PointGoal{.position_m = {47.9, 25.1, 0.0},
+      .tolerance_m = 0.2},
+  };
+  if (platform == PlatformType::kWheeled) {
+    input.config.wheel.xy_resolution_m = 0.2;
+    std::get<WheeledState>(input.current_state).pose.position_m = {
+      2.1, 25.1, 0.0};
+  } else if (platform == PlatformType::kLegged) {
+    input.config.legged.xy_resolution_m = 0.2;
+    input.config.local_frontier.legged_horizon_m = 2.0;
+    input.config.legged.maximum_height_interval_splits = 32U;
+    std::get<LeggedState>(input.current_state).body_pose.position_m = {
+      2.1, 25.1, 0.5};
+  } else {
+    std::get<HopperState>(input.current_state).pose.position_m = {
+      2.1, 25.1, 0.5};
+  }
+  return input;
+}
+
 void AddVerticalWall(GridMap & map, const std::size_t x)
 {
   for (std::size_t y = 0U; y < map.height; ++y) {
@@ -162,6 +200,79 @@ TEST(HierarchicalRegression, DistantGroundRoutesSucceedAndWallFailsClosed) {
   EXPECT_EQ(wall.outcome, PlanningOutcome::kNoKnownSafeRoute);
   EXPECT_EQ(wall.reason_code, "GLOBAL_NO_KNOWN_SAFE_ROUTE");
   EXPECT_FALSE(wall.reference.has_value());
+}
+
+TEST(HierarchicalRegression, FiftyMetreFarGoalsSucceedForAllPlatforms) {
+  Planner planner;
+  for (const PlatformType platform : {
+         PlatformType::kWheeled,
+         PlatformType::kLegged,
+         PlatformType::kHopper})
+  {
+    const PlannerOutput output = planner.Plan(FiftyMetreInput(platform));
+    ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << static_cast<int>(platform) << ' ' << output.reason_code;
+    ASSERT_TRUE(output.reference.has_value());
+    ASSERT_TRUE(output.diagnostics.local_trajectory.has_value());
+    EXPECT_EQ(
+      output.diagnostics.local_trajectory->collision_validation,
+      CollisionValidation::kCertified);
+  }
+}
+
+TEST(HierarchicalRegression, FiftyMetreFailuresRemainExplicitAndBounded) {
+  Planner planner;
+
+  PlannerInput blocked = FiftyMetreInput(PlatformType::kWheeled);
+  AddVerticalWall(blocked.world.global_map, 125U);
+  const PlannerOutput wall = planner.Plan(blocked);
+  EXPECT_EQ(wall.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(wall.reason_code, "GLOBAL_NO_KNOWN_SAFE_ROUTE");
+
+  PlannerInput fallback = FiftyMetreInput(PlatformType::kWheeled);
+  fallback.config.optimization.maximum_iterations = 0U;
+  const PlannerOutput discrete = planner.Plan(fallback);
+  ASSERT_EQ(discrete.outcome, PlanningOutcome::kNewReferenceAvailable)
+    << discrete.reason_code;
+  ASSERT_TRUE(discrete.diagnostics.local_trajectory.has_value());
+  EXPECT_EQ(
+    discrete.diagnostics.local_trajectory->trajectory_mode,
+    TrajectoryMode::kDiscreteFallback);
+
+  fallback.config.optimization.require_smoothed_execution = true;
+  const PlannerOutput required = planner.Plan(fallback);
+  EXPECT_EQ(required.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(required.reason_code, "WHEEL_SMOOTHED_EXECUTION_REQUIRED");
+
+  PlannerInput wheel_connector = test::MakeValidWheelInput();
+  std::get<WheeledState>(wheel_connector.current_state).pose.position_m = {
+    2.15, 3.5, 0.0};
+  SetByte(wheel_connector.world.local_map, "obstacle", 1U, 3U, 1U);
+  const PlannerOutput wheel_blocked = planner.Plan(wheel_connector);
+  EXPECT_EQ(
+    wheel_blocked.reason_code, "WHEEL_START_CONNECTOR_INFEASIBLE");
+
+  PlannerInput legged_connector = test::MakeValidLeggedInput();
+  std::get<LeggedState>(
+    legged_connector.current_state).body_pose.position_m = {2.15, 3.5, 0.5};
+  SetByte(legged_connector.world.local_map, "obstacle", 1U, 3U, 1U);
+  const PlannerOutput legged_blocked = planner.Plan(legged_connector);
+  EXPECT_EQ(
+    legged_blocked.reason_code, "LEGGED_START_CONNECTOR_INFEASIBLE");
+
+  PlannerInput support = FiftyMetreInput(PlatformType::kHopper);
+  std::get<HopperCapability>(
+    support.capability).minimum_landing_region_area_m2 = std::numbers::pi;
+  SetByte(support.world.global_map, "obstacle", 15U, 125U, 1U);
+  const PlannerOutput insufficient = planner.Plan(support);
+  EXPECT_EQ(
+    insufficient.reason_code, "HOPPER_START_REGION_AREA_INSUFFICIENT");
+
+  PlannerInput hopper = FiftyMetreInput(PlatformType::kHopper);
+  hopper.config.hopper.maximum_graph_nodes = 2U;
+  const PlannerOutput resource = planner.Plan(hopper);
+  EXPECT_EQ(resource.outcome, PlanningOutcome::kResourceExhausted);
+  EXPECT_EQ(resource.reason_code, "HOPPER_GLOBAL_ROUTE_RESOURCE_LIMIT");
 }
 
 TEST(HierarchicalRegression, LeggedPassesTerrainRejectedForWheel) {
@@ -343,6 +454,23 @@ TEST(HierarchicalRegression, RepeatedInputIsBitwiseStableExceptTiming) {
   EXPECT_EQ(
     second.diagnostics.hierarchical->simplified_route_points,
     first.diagnostics.hierarchical->simplified_route_points);
+  ASSERT_TRUE(first.diagnostics.local_trajectory.has_value());
+  ASSERT_TRUE(second.diagnostics.local_trajectory.has_value());
+  EXPECT_EQ(
+    second.diagnostics.local_trajectory->trajectory_mode,
+    first.diagnostics.local_trajectory->trajectory_mode);
+  EXPECT_EQ(
+    second.diagnostics.local_trajectory->start_anchor_error_m,
+    first.diagnostics.local_trajectory->start_anchor_error_m);
+  EXPECT_EQ(
+    second.diagnostics.local_trajectory->endpoint_error_m,
+    first.diagnostics.local_trajectory->endpoint_error_m);
+  EXPECT_EQ(
+    second.diagnostics.local_trajectory->maximum_curvature_per_m,
+    first.diagnostics.local_trajectory->maximum_curvature_per_m);
+  EXPECT_EQ(
+    second.diagnostics.local_trajectory->collision_validation,
+    first.diagnostics.local_trajectory->collision_validation);
   ExpectSameGroundReference(first, second);
 }
 

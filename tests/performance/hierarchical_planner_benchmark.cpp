@@ -38,6 +38,8 @@ constexpr double kResolutionM = 0.2;
 constexpr std::array<std::size_t, 3> kAxisTiers{256U, 512U, 1'024U};
 constexpr std::array<std::string_view, 4> kFixtures{
   "open", "fixed-obstacle", "narrow-channel", "no-route"};
+constexpr std::array<std::string_view, 5> kTrajectoryModes{
+  "STATIONARY", "OPTIMIZED", "DISCRETE_FALLBACK", "CERTIFIED_HOP", "NONE"};
 
 struct Thresholds final
 {
@@ -232,6 +234,14 @@ void AddNoRouteWall(GridMap & map)
       Json{nullptr}},
     {"warnings", output.diagnostics.warning_codes},
   };
+  if (output.diagnostics.local_trajectory) {
+    const auto & local = *output.diagnostics.local_trajectory;
+    signature["trajectory_mode"] = ToString(local.trajectory_mode);
+    signature["start_anchor_error_m"] = local.start_anchor_error_m;
+    signature["endpoint_error_m"] = local.endpoint_error_m;
+    signature["maximum_curvature_per_m"] = local.maximum_curvature_per_m;
+    signature["collision_validation"] = ToString(local.collision_validation);
+  }
   if (output.reference) {
     signature["plan_id"] = output.reference->plan_id;
     for (const auto & pose : output.reference->preview.poses_map) {
@@ -254,6 +264,24 @@ void AddNoRouteWall(GridMap & map)
     }
   }
   return signature;
+}
+
+[[nodiscard]] std::size_t TrajectoryModeIndex(const PlannerOutput & output)
+{
+  if (!output.diagnostics.local_trajectory) {
+    return kTrajectoryModes.size() - 1U;
+  }
+  switch (output.diagnostics.local_trajectory->trajectory_mode) {
+    case TrajectoryMode::kStationary:
+      return 0U;
+    case TrajectoryMode::kOptimized:
+      return 1U;
+    case TrajectoryMode::kDiscreteFallback:
+      return 2U;
+    case TrajectoryMode::kCertifiedHop:
+      return 3U;
+  }
+  throw std::logic_error{"unknown trajectory mode"};
 }
 
 [[nodiscard]] std::string HashSignature(const Json & signature)
@@ -359,8 +387,13 @@ void RequireExpected(
 
   std::vector<double> global_seconds;
   std::vector<double> complete_seconds;
+  std::vector<double> smoothing_seconds;
+  std::vector<double> landing_field_seconds;
   global_seconds.reserve(kMeasuredRuns);
   complete_seconds.reserve(kMeasuredRuns);
+  smoothing_seconds.reserve(kMeasuredRuns);
+  landing_field_seconds.reserve(kMeasuredRuns);
+  std::array<std::size_t, kTrajectoryModes.size()> trajectory_mode_counts{};
   std::string stable_hash;
   SearchMetrics stable_metrics;
   bool first = true;
@@ -377,6 +410,16 @@ void RequireExpected(
     global_seconds.push_back(
       std::chrono::duration<double>{
           output.diagnostics.hierarchical->global_elapsed}.count());
+    if (output.diagnostics.local_trajectory) {
+      smoothing_seconds.push_back(
+        output.diagnostics.local_trajectory->smoothing_elapsed_s);
+      landing_field_seconds.push_back(
+        output.diagnostics.local_trajectory->landing_field_elapsed_s);
+    } else {
+      smoothing_seconds.push_back(0.0);
+      landing_field_seconds.push_back(0.0);
+    }
+    ++trajectory_mode_counts[TrajectoryModeIndex(output)];
     const std::string hash = HashSignature(StableSignature(output));
     const SearchMetrics metrics = Metrics(output);
     if (first) {
@@ -391,10 +434,22 @@ void RequireExpected(
     {
       throw std::runtime_error{"benchmark result is not deterministic"};
     }
+    if (metrics.peak_memory_bytes >
+      input.config.global_search.resources.maximum_memory_bytes)
+    {
+      throw std::runtime_error{"benchmark memory ceiling exceeded"};
+    }
   }
 
   const Timings global = Summarize(std::move(global_seconds));
   const Timings complete = Summarize(std::move(complete_seconds));
+  const Timings smoothing = Summarize(std::move(smoothing_seconds));
+  const Timings landing_field = Summarize(std::move(landing_field_seconds));
+  Json mode_counts = Json::object();
+  for (std::size_t index = 0U; index < kTrajectoryModes.size(); ++index) {
+    mode_counts[std::string{kTrajectoryModes[index]}] =
+      trajectory_mode_counts[index];
+  }
   const std::size_t cells = axis * axis;
   const Thresholds thresholds = UbuntuThresholds(cells);
   return Json{
@@ -410,6 +465,13 @@ void RequireExpected(
     {"global_p50_s", global.p50_s},
     {"global_p95_s", global.p95_s},
     {"global_maximum_s", global.maximum_s},
+    {"smoothing_p50_s", smoothing.p50_s},
+    {"smoothing_p95_s", smoothing.p95_s},
+    {"smoothing_maximum_s", smoothing.maximum_s},
+    {"landing_field_p50_s", landing_field.p50_s},
+    {"landing_field_p95_s", landing_field.p95_s},
+    {"landing_field_maximum_s", landing_field.maximum_s},
+    {"trajectory_mode_counts", std::move(mode_counts)},
     {"expanded_states", stable_metrics.expanded_states},
     {"open_peak", stable_metrics.open_peak},
     {"peak_memory_bytes", stable_metrics.peak_memory_bytes},

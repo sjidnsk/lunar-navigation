@@ -9,7 +9,7 @@
 ## 1. 版本与主机基线
 
 - 主仓分支：`hierarchical-global-planning`
-- 主仓已验证实现基线：`9fd1862cff6f42496b76dcee99dbbeb8577637d5`
+- 主仓已验证实现基线：`b691a15`（有界平滑与性能资格提交在其后）
 - 外部地图金字塔提交：`c4e04f2e019ae4b7d59dfcab8eb164f4beef0a7a`
 - 外部 RViz 分层证据提交：`467d25201253bf95a591df851a5afc84063fa1ca`
 - OS：Ubuntu 22.04，内核 `6.8.0-124-generic`，架构 `x86_64`
@@ -24,7 +24,7 @@
 ## 2. 固定回归覆盖
 
 `lunar_planner_core_hierarchical_regression_test` 使用固定坐标，不在运行时扫描或重采样终点。
-7 项测试覆盖：
+10 项测试覆盖：
 
 - 远距离轮式和腿式成功，以及完整全局墙阻断；
 - 同一坡面上轮式失败、腿式通过；
@@ -33,8 +33,11 @@
 - 固定 `map_from_odom` 平移和旋转；
 - L4 仍不可表达的地图规模、预取消；
 - 相同输入的结果、路线、局部轨迹、代价、警告和搜索计数确定性。
+- 50×50 m、0.2 m 全局图上三类平台的远目标正例；
+- 同一 50 m 固定图上的全局墙、跳跃式落区面积不足和图资源耗尽；
+- 轮式/足式真实起点连接碰撞，以及优化失败时的认证离散回退和强制平滑失败。
 
-结果：7 项通过，0 失败。
+结果：10 项通过，0 失败。
 
 ## 3. 性能基准
 
@@ -47,18 +50,21 @@
 
 | 栅格数 | 全局 p95 | Ubuntu 门槛 | 完整核心 p95 | Ubuntu 门槛 | 最大规划器工作内存 |
 |---:|---:|---:|---:|---:|---:|
-| 65,536 | 0.078916 s | 0.5 s | 0.088118 s | 2.0 s | 1,164,032 B |
-| 262,144 | 0.327965 s | 1.0 s | 0.336826 s | 3.0 s | 4,557,848 B |
-| 1,048,576 | 1.364447 s | 2.0 s | 1.374577 s | 4.0 s | 18,027,952 B |
+| 65,536 | 0.082583 s | 0.5 s | 0.092056 s | 2.0 s | 1,164,032 B |
+| 262,144 | 0.329242 s | 1.0 s | 0.338979 s | 3.0 s | 4,557,848 B |
+| 1,048,576 | 1.370176 s | 2.0 s | 1.380653 s | 4.0 s | 18,027,952 B |
 
-12 组结果均通过 Ubuntu 门槛且 30 次路线哈希稳定。AGX 档位只写出设备门槛，不在 Ubuntu
-上求值：全局 p95 为 `1/2/4 s`，完整核心 p95 为 `3/4/6 s`。
+12 组结果均通过 Ubuntu 门槛且 30 次路线哈希稳定。新增阶段证据中，平滑阶段最慢 p95
+为 `0.001124782 s`；该基准只运行轮式平台，因此落区场耗时为零。9 组成功 fixture 中，
+7 组的 210 次测量为 `OPTIMIZED`，2 组的 60 次测量明确记录为
+`DISCRETE_FALLBACK`；3 组无路 fixture 的 90 次测量为 `NONE`。AGX 档位只写出设备
+门槛，不在 Ubuntu 上求值：全局 p95 为 `1/2/4 s`，完整核心 p95 为 `3/4/6 s`。
 
 完整 JSON 位于仓库外：
 
 ```text
-/home/kai/CodexDownloads/lunar_navigation/hierarchical_global_planning/benchmarks/ubuntu-hierarchical-benchmark.json
-SHA-256 db64977089262ee3f0dde9b49c32f981844740c9f128324a593bddda31dd641e
+/home/kai/CodexDownloads/lunar_navigation/planner_correctness/release/evidence/ubuntu-hierarchical-benchmark.json
+SHA-256 452b62de28c27204cd421f67bbef959e9096b8bb91d22b95fe8284660b145066
 ```
 
 权威性能构建显式使用 `-DCMAKE_BUILD_TYPE=Release`。一次无优化的空 `CMAKE_BUILD_TYPE`
