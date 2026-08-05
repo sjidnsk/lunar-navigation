@@ -15,7 +15,7 @@ rclcpp::Time At(const std::int64_t nanoseconds) {
 
 lunar_planning_msgs::msg::MotionReference HopperReference() {
   lunar_planning_msgs::msg::MotionReference reference;
-  reference.header.frame_id = "odom";
+  reference.header.frame_id = "map";
   reference.plan_id = "hop-plan";
   reference.platform_type = reference.HOPPER;
   lunar_planning_msgs::msg::HopSegment hop;
@@ -63,6 +63,12 @@ TEST(ReferenceGuard, AllowsReplacementOnGroundAndRejectsInvalidCommit) {
 
   auto invalid = HopperReference();
   invalid.hops.clear();
+  EXPECT_FALSE(guard.Commit(invalid));
+  invalid = HopperReference();
+  invalid.header.frame_id = "odom";
+  EXPECT_FALSE(guard.Commit(invalid));
+  invalid = HopperReference();
+  invalid.hops.push_back(invalid.hops.front());
   EXPECT_FALSE(guard.Commit(invalid));
   EXPECT_EQ(guard.state(), ReferenceGuardState::kGroundHold);
 }

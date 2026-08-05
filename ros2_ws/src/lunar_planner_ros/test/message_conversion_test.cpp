@@ -1,6 +1,7 @@
 #include "lunar_planner_ros/message_conversion.hpp"
 
 #include <chrono>
+#include <limits>
 #include <variant>
 
 #include <gtest/gtest.h>
@@ -31,7 +32,8 @@ PlannerResultContext Context() {
       .local_map_stamp = {10'100'000'000LL},
       .state_stamp = {10'200'000'000LL},
       .mission_revision = 7U,
-      .planning_frame = "odom",
+      .preview_frame = "map",
+      .execution_frame = "odom",
   };
 }
 
@@ -60,6 +62,18 @@ lunar::planning::PlannerOutput WheelOutput() {
           .plan_id = "wheel-plan",
           .platform_type = lunar::planning::PlatformType::kWheeled,
           .input_time = {10'200'000'000LL},
+          .preview = lunar::planning::GlobalRoutePreview{
+              .poses_map = {
+                  lunar::planning::Pose3{
+                      .position_m = {10.0, 20.0, 0.0},
+                      .orientation = {},
+                  },
+                  lunar::planning::Pose3{
+                      .position_m = {30.0, 40.0, 0.0},
+                      .orientation = {},
+                  },
+              },
+          },
           .data = std::move(trajectory),
       },
       .diagnostics = {
@@ -124,17 +138,34 @@ TEST(MessageConversion, EmitsDefaultReferenceWhenPlannerHasNone) {
   EXPECT_EQ(converted.result->mission_revision, 7U);
 }
 
-TEST(MessageConversion, ConvertsCompleteWheelReferenceAndDiagnostics) {
+TEST(MessageConversion, ConvertsMapPreviewAndOdomWheelExecutionSeparately) {
   const auto converted = ConvertPlannerOutput(WheelOutput(), Context());
   ASSERT_TRUE(converted.ok()) << converted.reason_code;
   ASSERT_TRUE(converted.result->has_reference);
   EXPECT_EQ(converted.result->reference.plan_id, "wheel-plan");
-  EXPECT_EQ(converted.result->reference.header.frame_id, "odom");
+  EXPECT_EQ(converted.result->reference.header.frame_id, "map");
+  EXPECT_EQ(converted.result->reference.path_preview.header.frame_id, "map");
+  EXPECT_EQ(converted.result->reference.trajectory.header.frame_id, "odom");
+  EXPECT_EQ(converted.result->reference.input_time.sec, 10);
+  EXPECT_EQ(converted.result->reference.input_time.nanosec, 200'000'000U);
   EXPECT_EQ(
       converted.result->reference.platform_type,
       lunar_planning_msgs::msg::MotionReference::WHEELED);
-  ASSERT_EQ(converted.result->reference.path_preview.poses.size(), 1U);
+  ASSERT_EQ(converted.result->reference.path_preview.poses.size(), 2U);
+  EXPECT_DOUBLE_EQ(
+      converted.result->reference.path_preview.poses[0].pose.position.x,
+      10.0);
+  EXPECT_DOUBLE_EQ(
+      converted.result->reference.path_preview.poses[1].pose.position.x,
+      30.0);
+  for (const auto& pose : converted.result->reference.path_preview.poses) {
+    EXPECT_EQ(pose.header.frame_id, "map");
+  }
   ASSERT_EQ(converted.result->reference.trajectory.points.size(), 1U);
+  EXPECT_DOUBLE_EQ(
+      converted.result->reference.trajectory.points[0]
+          .transforms[0].translation.x,
+      1.0);
   EXPECT_EQ(converted.result->diagnostics.expanded_states, 42U);
   EXPECT_TRUE(converted.result->diagnostics.has_best_cost);
   EXPECT_DOUBLE_EQ(converted.result->diagnostics.best_cost, 3.5);
@@ -160,6 +191,22 @@ TEST(MessageConversion, ConvertsHopperSegmentsWithExecutableTiming) {
       .plan_id = "hop-plan",
       .platform_type = lunar::planning::PlatformType::kHopper,
       .input_time = {10'200'000'000LL},
+      .preview = lunar::planning::GlobalRoutePreview{
+          .poses_map = {
+              lunar::planning::Pose3{
+                  .position_m = {0.0, 0.0, 0.0},
+                  .orientation = {},
+              },
+              lunar::planning::Pose3{
+                  .position_m = {2.0, 0.0, 0.0},
+                  .orientation = {},
+              },
+              lunar::planning::Pose3{
+                  .position_m = {4.0, 0.0, 0.0},
+                  .orientation = {},
+              },
+          },
+      },
       .data = std::move(hops),
   };
   const auto converted = ConvertPlannerOutput(output, Context());
@@ -168,6 +215,21 @@ TEST(MessageConversion, ConvertsHopperSegmentsWithExecutableTiming) {
   EXPECT_EQ(converted.result->reference.hops.front().segment_id, "hop-a");
   EXPECT_EQ(converted.result->reference.hops.front().header.frame_id, "odom");
   EXPECT_EQ(converted.result->reference.hops.front().flight_time.sec, 2);
+  EXPECT_EQ(converted.result->reference.header.frame_id, "map");
+  EXPECT_EQ(converted.result->reference.path_preview.header.frame_id, "map");
+  ASSERT_EQ(converted.result->reference.path_preview.poses.size(), 3U);
+  EXPECT_DOUBLE_EQ(
+      converted.result->reference.path_preview.poses.back().pose.position.x,
+      4.0);
+
+  auto multiple_hops = output;
+  auto& segments = std::get<lunar::planning::HopReference>(
+      multiple_hops.reference->data).segments;
+  segments.push_back(segments.front());
+  segments.back().segment_id = "hop-b";
+  EXPECT_EQ(
+      ConvertPlannerOutput(multiple_hops, Context()).reason_code,
+      "REFERENCE_HOP_AUTHORIZATION_INVALID");
 }
 
 TEST(MessageConversion, RejectsResultInvariantViolations) {
@@ -195,6 +257,31 @@ TEST(MessageConversion, RejectsResultInvariantViolations) {
   EXPECT_EQ(
       ConvertPlannerOutput(output, invalid_context).reason_code,
       "RESULT_CONTEXT_INVALID");
+
+  invalid_context = Context();
+  invalid_context.preview_frame = "odom";
+  EXPECT_EQ(
+      ConvertPlannerOutput(output, invalid_context).reason_code,
+      "RESULT_CONTEXT_INVALID");
+
+  invalid_context = Context();
+  invalid_context.execution_frame = "map";
+  EXPECT_EQ(
+      ConvertPlannerOutput(output, invalid_context).reason_code,
+      "RESULT_CONTEXT_INVALID");
+
+  output = WheelOutput();
+  output.reference->preview.poses_map.clear();
+  EXPECT_EQ(
+      ConvertPlannerOutput(output, Context()).reason_code,
+      "REFERENCE_GLOBAL_PREVIEW_EMPTY");
+
+  output = WheelOutput();
+  output.reference->preview.poses_map.front().position_m.x =
+      std::numeric_limits<double>::quiet_NaN();
+  EXPECT_EQ(
+      ConvertPlannerOutput(output, Context()).reason_code,
+      "REFERENCE_GLOBAL_PREVIEW_INVALID");
 
   output = WheelOutput();
   output.outcome = static_cast<lunar::planning::PlanningOutcome>(255U);

@@ -83,8 +83,9 @@ namespace {
 [[nodiscard]] bool ValidHop(
     const lunar_planning_msgs::msg::MotionReference& reference,
     const lunar_planning_msgs::msg::HopSegment& hop) noexcept {
-  if (reference.plan_id.empty() || reference.header.frame_id != "odom" ||
-      hop.segment_id.empty() || hop.header.frame_id != "odom" ||
+  if (reference.plan_id.empty() || reference.header.frame_id != "map" ||
+      reference.hops.size() != 1U || hop.segment_id.empty() ||
+      hop.header.frame_id != "odom" ||
       hop.landing_region.points.size() < 3U) {
     return false;
   }

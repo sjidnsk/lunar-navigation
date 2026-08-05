@@ -170,6 +170,41 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
              lunar::planning::ExecutionDirective::kContinueCommittedHop;
 }
 
+[[nodiscard]] bool ValidHierarchicalMetrics(
+    const lunar::planning::HierarchicalPlannerMetrics& metrics) noexcept {
+  return metrics.global_level <= 4U &&
+      Finite(metrics.global_resolution_m) &&
+      metrics.global_resolution_m > 0.0 && metrics.global_cells > 0U &&
+      metrics.global_elapsed >= std::chrono::nanoseconds::zero() &&
+      metrics.local_elapsed >= std::chrono::nanoseconds::zero() &&
+      Finite(metrics.local_frontier_distance_m) &&
+      metrics.local_frontier_distance_m >= 0.0 &&
+      Finite(metrics.corridor_width_m) && metrics.corridor_width_m >= 0.0;
+}
+
+[[nodiscard]] std::optional<std::string> ConvertPreview(
+    const lunar::planning::GlobalRoutePreview& preview,
+    const builtin_interfaces::msg::Time& input_time,
+    const std::string& preview_frame,
+    lunar_planning_msgs::msg::MotionReference& message) {
+  if (preview.poses_map.empty()) {
+    return "REFERENCE_GLOBAL_PREVIEW_EMPTY";
+  }
+  message.path_preview.header.frame_id = preview_frame;
+  message.path_preview.header.stamp = input_time;
+  message.path_preview.poses.reserve(preview.poses_map.size());
+  for (const auto& pose : preview.poses_map) {
+    if (!Finite(pose)) {
+      return "REFERENCE_GLOBAL_PREVIEW_INVALID";
+    }
+    geometry_msgs::msg::PoseStamped converted;
+    converted.header = message.path_preview.header;
+    converted.pose = RosPose(pose);
+    message.path_preview.poses.push_back(std::move(converted));
+  }
+  return std::nullopt;
+}
+
 [[nodiscard]] std::optional<std::string> ConvertTrajectory(
     const lunar::planning::MotionReference& reference,
     const lunar::planning::TrajectoryReference& trajectory,
@@ -192,8 +227,6 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
   }
 
   message.platform_type = wheeled ? message.WHEELED : message.LEGGED;
-  message.path_preview.header.frame_id = frame;
-  message.path_preview.header.stamp = input_time;
   message.trajectory.header.frame_id = frame;
   message.trajectory.header.stamp = input_time;
   message.trajectory.joint_names = {"base_link"};
@@ -206,16 +239,10 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
       return "REFERENCE_TRAJECTORY_POINT_INVALID";
     }
     const auto relative_time = RosDuration(point.time_from_start);
-    const auto pose_time = AddTime(reference.input_time, point.time_from_start);
-    if (!relative_time || !pose_time) {
+    if (!relative_time ||
+        !AddTime(reference.input_time, point.time_from_start)) {
       return "REFERENCE_TIME_INVALID";
     }
-
-    geometry_msgs::msg::PoseStamped preview;
-    preview.header.frame_id = frame;
-    preview.header.stamp = *pose_time;
-    preview.pose = RosPose(point.pose);
-    message.path_preview.poses.push_back(std::move(preview));
 
     trajectory_msgs::msg::MultiDOFJointTrajectoryPoint trajectory_point;
     trajectory_point.transforms.push_back(RosTransform(point.pose));
@@ -245,9 +272,10 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
   if (hops.segments.empty()) {
     return "REFERENCE_HOPS_EMPTY";
   }
+  if (hops.segments.size() != 1U) {
+    return "REFERENCE_HOP_AUTHORIZATION_INVALID";
+  }
   message.platform_type = message.HOPPER;
-  message.path_preview.header.frame_id = frame;
-  message.path_preview.header.stamp = input_time;
 
   std::chrono::nanoseconds elapsed{};
   for (const auto& segment : hops.segments) {
@@ -283,7 +311,6 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
     hop.launch_velocity.z = segment.launch_velocity_mps.z;
     hop.flight_tube_radius_m = segment.flight_tube_radius_m;
 
-    lunar::planning::Vec3 centroid{};
     for (const auto& point : segment.landing_region_boundary_m) {
       if (!FitsPoint32(point)) {
         return "REFERENCE_HOP_INVALID";
@@ -293,28 +320,7 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
       converted.y = static_cast<float>(point.y);
       converted.z = static_cast<float>(point.z);
       hop.landing_region.points.push_back(converted);
-      centroid.x += point.x;
-      centroid.y += point.y;
-      centroid.z += point.z;
     }
-    const double count =
-        static_cast<double>(segment.landing_region_boundary_m.size());
-    centroid.x /= count;
-    centroid.y /= count;
-    centroid.z /= count;
-
-    geometry_msgs::msg::PoseStamped launch_preview;
-    launch_preview.header = hop.header;
-    launch_preview.pose = hop.launch_pose;
-    message.path_preview.poses.push_back(std::move(launch_preview));
-    geometry_msgs::msg::PoseStamped landing_preview;
-    landing_preview.header.frame_id = frame;
-    landing_preview.header.stamp = *landing_time;
-    landing_preview.pose.position.x = centroid.x;
-    landing_preview.pose.position.y = centroid.y;
-    landing_preview.pose.position.z = centroid.z;
-    landing_preview.pose.orientation.w = 1.0;
-    message.path_preview.poses.push_back(std::move(landing_preview));
 
     message.hops.push_back(std::move(hop));
     elapsed = landing_offset;
@@ -389,7 +395,8 @@ ActionResultConversion ConvertPlannerOutput(
       context.global_map_stamp.nanoseconds_since_epoch <= 0 ||
       context.local_map_stamp.nanoseconds_since_epoch <= 0 ||
       context.state_stamp.nanoseconds_since_epoch <= 0 ||
-      context.planning_frame != "odom") {
+      context.preview_frame != "map" ||
+      context.execution_frame != "odom") {
     return ResultFailure("RESULT_CONTEXT_INVALID");
   }
   if (static_cast<std::uint8_t>(output.outcome) >
@@ -402,7 +409,9 @@ ActionResultConversion ConvertPlannerOutput(
   }
   if (output.reason_code.empty() || output.diagnostics.elapsed.count() < 0 ||
       (output.diagnostics.best_cost &&
-       !Finite(*output.diagnostics.best_cost))) {
+       !Finite(*output.diagnostics.best_cost)) ||
+      (output.diagnostics.hierarchical &&
+       !ValidHierarchicalMetrics(*output.diagnostics.hierarchical))) {
     return ResultFailure("RESULT_DIAGNOSTICS_INVALID");
   }
 
@@ -445,20 +454,26 @@ ActionResultConversion ConvertPlannerOutput(
   }
 
   lunar_planning_msgs::msg::MotionReference reference;
-  reference.header.frame_id = context.planning_frame;
+  reference.header.frame_id = context.preview_frame;
   reference.header.stamp = *input_time;
   reference.plan_id = output.reference->plan_id;
+  reference.input_time = *input_time;
+  if (const auto preview_error = ConvertPreview(
+          output.reference->preview, *input_time,
+          context.preview_frame, reference)) {
+    return ResultFailure(*preview_error);
+  }
   const auto error = std::visit(
       [&](const auto& data) -> std::optional<std::string> {
         using Data = std::decay_t<decltype(data)>;
         if constexpr (std::is_same_v<Data, lunar::planning::TrajectoryReference>) {
           return ConvertTrajectory(
               *output.reference, data, *input_time,
-              context.planning_frame, reference);
+              context.execution_frame, reference);
         } else {
           return ConvertHops(
               *output.reference, data, *input_time,
-              context.planning_frame, reference);
+              context.execution_frame, reference);
         }
       },
       output.reference->data);

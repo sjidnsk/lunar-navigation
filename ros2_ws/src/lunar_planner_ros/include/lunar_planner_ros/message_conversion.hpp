@@ -25,7 +25,8 @@ struct PlannerResultContext final {
   lunar::planning::TimePoint local_map_stamp;
   lunar::planning::TimePoint state_stamp;
   std::uint64_t mission_revision{};
-  std::string planning_frame{"odom"};
+  std::string preview_frame{"map"};
+  std::string execution_frame{"odom"};
 };
 
 struct ActionResultConversion final {

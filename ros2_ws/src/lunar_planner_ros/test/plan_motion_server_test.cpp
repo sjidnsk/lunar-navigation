@@ -295,6 +295,28 @@ class RunningSystem final {
     });
   }
 
+  [[nodiscard]] std::optional<std::string> DiagnosticValue(
+      const std::string& reason,
+      const std::string& key) const {
+    std::scoped_lock lock{diagnostics_mutex};
+    for (auto array = diagnostics.rbegin(); array != diagnostics.rend();
+         ++array) {
+      for (const auto& status : array->status) {
+        if (status.message != reason) {
+          continue;
+        }
+        const auto value = std::ranges::find_if(
+            status.values, [&](const auto& candidate) {
+              return candidate.key == key;
+            });
+        if (value != status.values.end()) {
+          return value->value;
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
   std::shared_ptr<PlanMotionServer> server;
   std::shared_ptr<rclcpp::Node> client_node;
   rclcpp::executors::MultiThreadedExecutor executor;
@@ -430,6 +452,83 @@ TEST_F(PlanMotionServerTest, ReturnsNoRouteAsSucceededActionWithEmptyReference) 
     return std::ranges::find(phases, Action::Feedback::SEARCHING) !=
         phases.end();
   }));
+}
+
+TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
+  auto output = NoRouteOutput("HIERARCHICAL_NO_ROUTE");
+  output.diagnostics.planner_name = "cpp_v3_hierarchical";
+  output.diagnostics.hierarchical = lunar::planning::HierarchicalPlannerMetrics{
+      .global_level = 2U,
+      .global_resolution_m = 0.8,
+      .global_cells = 62'500U,
+      .global_elapsed = 12ms,
+      .local_elapsed = 3ms,
+      .global_expanded_states = 401U,
+      .local_expanded_states = 51U,
+      .global_open_peak = 91U,
+      .estimated_work_memory_bytes = 4'096U,
+      .raw_route_points = 80U,
+      .simplified_route_points = 12U,
+      .local_frontier_distance_m = 4.0,
+      .local_attempts = 2U,
+      .corridor_width_m = 0.6,
+      .hopper_graph_nodes = 11U,
+      .hopper_graph_edges = 17U,
+      .hopper_route_hops = 3U,
+      .hopper_certification_attempts = 1U,
+  };
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [output](const lunar::planning::PlannerInput&) {
+        return output;
+      },
+      .preloaded_capabilities = WheelCapabilities(),
+  }};
+  system.PublishInputs();
+  const auto handle = system.SendGoal(system.Goal("hierarchical-diagnostics"));
+  ASSERT_NE(handle, nullptr);
+  ASSERT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::SUCCEEDED);
+
+  const std::vector<std::string> expected_keys{
+      "hierarchical_global_level",
+      "hierarchical_global_resolution_m",
+      "hierarchical_global_cells",
+      "hierarchical_global_elapsed_s",
+      "hierarchical_local_elapsed_s",
+      "hierarchical_global_expanded_states",
+      "hierarchical_local_expanded_states",
+      "hierarchical_global_open_peak",
+      "hierarchical_estimated_work_memory_bytes",
+      "hierarchical_raw_route_points",
+      "hierarchical_simplified_route_points",
+      "hierarchical_local_frontier_distance_m",
+      "hierarchical_local_attempts",
+      "hierarchical_corridor_width_m",
+      "hierarchical_hopper_graph_nodes",
+      "hierarchical_hopper_graph_edges",
+      "hierarchical_hopper_route_hops",
+      "hierarchical_hopper_certification_attempts",
+  };
+  ASSERT_TRUE(WaitFor([&] {
+    return std::ranges::all_of(expected_keys, [&](const auto& key) {
+      return system.DiagnosticValue("HIERARCHICAL_NO_ROUTE", key).has_value();
+    });
+  }));
+  EXPECT_EQ(
+      system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE", "hierarchical_global_level"),
+      "2");
+  EXPECT_EQ(
+      system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE", "hierarchical_global_cells"),
+      "62500");
+  EXPECT_DOUBLE_EQ(
+      std::stod(*system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE", "hierarchical_global_resolution_m")),
+      0.8);
+  EXPECT_DOUBLE_EQ(
+      std::stod(*system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE", "hierarchical_global_elapsed_s")),
+      0.012);
 }
 
 TEST_F(PlanMotionServerTest, RejectsSecondGoalAndSerializesExplicitReplacement) {
@@ -587,6 +686,18 @@ TEST_F(PlanMotionServerTest, LocksNewGoalsAfterActivatingHopperReference) {
                 .plan_id = "hop-plan",
                 .platform_type = lunar::planning::PlatformType::kHopper,
                 .input_time = input.state_time,
+                .preview = lunar::planning::GlobalRoutePreview{
+                    .poses_map = {
+                        lunar::planning::Pose3{
+                            .position_m = {0.0, 0.0, 0.0},
+                            .orientation = {},
+                        },
+                        lunar::planning::Pose3{
+                            .position_m = {2.0, 0.0, 0.0},
+                            .orientation = {},
+                        },
+                    },
+                },
                 .data = std::move(hops),
             },
             .diagnostics = {},
@@ -597,7 +708,13 @@ TEST_F(PlanMotionServerTest, LocksNewGoalsAfterActivatingHopperReference) {
   system.PublishInputs();
   const auto first = system.SendGoal(system.Goal("hop"));
   ASSERT_NE(first, nullptr);
-  ASSERT_EQ(system.Result(first).code, rclcpp_action::ResultCode::SUCCEEDED);
+  const auto first_result = system.Result(first);
+  ASSERT_EQ(first_result.code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_TRUE(first_result.result->has_reference);
+  EXPECT_EQ(first_result.result->reference.header.frame_id, "map");
+  EXPECT_EQ(first_result.result->reference.path_preview.header.frame_id, "map");
+  ASSERT_EQ(first_result.result->reference.hops.size(), 1U);
+  EXPECT_EQ(first_result.result->reference.hops.front().header.frame_id, "odom");
 
   EXPECT_EQ(system.SendGoal(system.Goal("replace-hop", 7U, true)), nullptr);
   const std::string reason =

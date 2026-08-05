@@ -5,10 +5,12 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -151,6 +153,13 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
   result->reference = lunar_planning_msgs::msg::MotionReference{};
   result->diagnostics.planner_name = "cpp_v3";
   return result;
+}
+
+[[nodiscard]] std::string DiagnosticDouble(const double value) {
+  std::ostringstream stream;
+  stream << std::setprecision(std::numeric_limits<double>::max_digits10)
+         << value;
+  return stream.str();
 }
 
 }  // namespace
@@ -909,7 +918,8 @@ struct PlanMotionServer::Impl final {
             .local_map_stamp = snapshot.input->world.local_map.stamp,
             .state_stamp = snapshot.input->state_time,
             .mission_revision = request.mission_revision,
-            .planning_frame = "odom",
+            .preview_frame = "map",
+            .execution_frame = "odom",
         });
     if (!converted.ok()) {
       CompleteInvariantFailure(
@@ -940,7 +950,8 @@ struct PlanMotionServer::Impl final {
     auto result = std::make_shared<Action::Result>(std::move(*converted.result));
     PublishDiagnostic(
         diagnostic_msgs::msg::DiagnosticStatus::OK,
-        result->reason_code);
+        result->reason_code,
+        output.diagnostics.hierarchical);
     try {
       goal_handle->succeed(result);
     } catch (const std::exception& error) {
@@ -1143,7 +1154,9 @@ struct PlanMotionServer::Impl final {
 
   void PublishDiagnostic(
       const std::uint8_t level,
-      const std::string& reason_code) {
+      const std::string& reason_code,
+      const std::optional<lunar::planning::HierarchicalPlannerMetrics>&
+          hierarchical = std::nullopt) {
     std::scoped_lock lock{diagnostic_mutex};
     last_diagnostic_reason = reason_code;
     if (!diagnostics_publisher || !diagnostics_publisher->is_activated()) {
@@ -1160,6 +1173,72 @@ struct PlanMotionServer::Impl final {
     reason_value.key = "reason_code";
     reason_value.value = reason_code;
     status.values.push_back(std::move(reason_value));
+    if (hierarchical) {
+      const auto append = [&status](
+                              std::string key,
+                              std::string value) {
+        diagnostic_msgs::msg::KeyValue entry;
+        entry.key = std::move(key);
+        entry.value = std::move(value);
+        status.values.push_back(std::move(entry));
+      };
+      append(
+          "hierarchical_global_level",
+          std::to_string(hierarchical->global_level));
+      append(
+          "hierarchical_global_resolution_m",
+          DiagnosticDouble(hierarchical->global_resolution_m));
+      append(
+          "hierarchical_global_cells",
+          std::to_string(hierarchical->global_cells));
+      append(
+          "hierarchical_global_elapsed_s",
+          DiagnosticDouble(std::chrono::duration<double>(
+              hierarchical->global_elapsed).count()));
+      append(
+          "hierarchical_local_elapsed_s",
+          DiagnosticDouble(std::chrono::duration<double>(
+              hierarchical->local_elapsed).count()));
+      append(
+          "hierarchical_global_expanded_states",
+          std::to_string(hierarchical->global_expanded_states));
+      append(
+          "hierarchical_local_expanded_states",
+          std::to_string(hierarchical->local_expanded_states));
+      append(
+          "hierarchical_global_open_peak",
+          std::to_string(hierarchical->global_open_peak));
+      append(
+          "hierarchical_estimated_work_memory_bytes",
+          std::to_string(hierarchical->estimated_work_memory_bytes));
+      append(
+          "hierarchical_raw_route_points",
+          std::to_string(hierarchical->raw_route_points));
+      append(
+          "hierarchical_simplified_route_points",
+          std::to_string(hierarchical->simplified_route_points));
+      append(
+          "hierarchical_local_frontier_distance_m",
+          DiagnosticDouble(hierarchical->local_frontier_distance_m));
+      append(
+          "hierarchical_local_attempts",
+          std::to_string(hierarchical->local_attempts));
+      append(
+          "hierarchical_corridor_width_m",
+          DiagnosticDouble(hierarchical->corridor_width_m));
+      append(
+          "hierarchical_hopper_graph_nodes",
+          std::to_string(hierarchical->hopper_graph_nodes));
+      append(
+          "hierarchical_hopper_graph_edges",
+          std::to_string(hierarchical->hopper_graph_edges));
+      append(
+          "hierarchical_hopper_route_hops",
+          std::to_string(hierarchical->hopper_route_hops));
+      append(
+          "hierarchical_hopper_certification_attempts",
+          std::to_string(hierarchical->hopper_certification_attempts));
+    }
     array.status.push_back(std::move(status));
     diagnostics_publisher->publish(array);
   }
