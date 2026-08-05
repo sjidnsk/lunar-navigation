@@ -14,8 +14,8 @@
 
 | 输入 | 类型 | 外部所有权 | 接收字段/约束 |
 |---|---|---|---|
-| `/environment/map_global` | `grid_map_msgs/msg/GridMap` | 外部地图融合系统 | `header`、`info`、`layers`、`basic_layers`、`data`、`outer_start_index`、`inner_start_index`；`frame_id=map` |
-| `/environment/map_local` | `grid_map_msgs/msg/GridMap` | 外部地图融合系统 | 同上；`frame_id=odom` |
+| `/environment/map_global` | `grid_map_msgs/msg/GridMap` | 外部地图融合系统 | `header`、`info`、`layers`、`basic_layers`、`data`、`outer_start_index`、`inner_start_index`；`frame_id=map`；发布满足下述资源规则的最精细二倍层级 |
+| `/environment/map_local` | `grid_map_msgs/msg/GridMap` | 外部地图融合系统 | 同上；`frame_id=odom`；始终发布当前平台附近的 L0 窗口，不得复制整张全局图 |
 | `/localization/odometry` | `nav_msgs/msg/Odometry` | 外部定位系统 | `header`、`child_frame_id`、`pose`、`twist`；`odom -> base_link` |
 | `/localization/status` | `lunar_navigation_msgs/msg/LocalizationStatus` | 外部定位系统 | `header`、`status`；状态为 `UNKNOWN/VALID/DEGRADED/INVALID/RELOCALIZING` |
 | `/tf` | `tf2_msgs/msg/TFMessage` | 外部 TF 发布者 | `transforms[]`，形成 `map -> odom -> base_link` |
@@ -67,6 +67,49 @@ lunar_navigation_msgs/ScienceTargetRegion[<=64] science_regions
 `GridMap` 接收 `header.stamp`（非零）、`header.frame_id`、`info.resolution`、`info.length_x`、`info.length_y`、`info.pose`、唯一的 `layers`、`basic_layers`、与层顺序一致的 `data`、`outer_start_index`、`inner_start_index`。本项目依赖的地图层为：
 
 `elevation`、`valid_mask`、`obstacle`、`obstacle_height`、`observation_age_s`、`observation_quality`、`elevation_variance`、`obstacle_variance`、`observation_count`、`forbidden`。
+
+### 多分辨率地图契约
+
+地图金字塔契约版本为 `lunar-conservative-grid-aggregation/v1`。设最高精度规划分辨率为
+`r0=0.2 m`，允许层级仅为：
+
+```text
+r_l = r0 * 2^l,  l in {0, 1, 2, 3, 4}
+```
+
+即默认分辨率依次为 `0.2 m`、`0.4 m`、`0.8 m`、`1.6 m` 和 `3.2 m`。设地图物理宽高
+为 `Sx`、`Sy`，外部地图生产方必须发布满足下式的最小层级，也就是满足资源条件的最精细
+层级：
+
+```text
+ceil(Sx / r_l) * ceil(Sy / r_l) <= 1048576
+max(ceil(Sx / r_l), ceil(Sy / r_l)) <= 4096
+```
+
+不得按任务名称或“50 m”“1 km”等特定范围选择固定分辨率。收到的全局图不是二倍层级、
+比应选层级更粗，或比应选层级更细而超过资源上限时，消费者以
+`GLOBAL_MAP_LEVEL_INVALID` 拒绝快照。L4 仍不满足上限时以
+`GLOBAL_MAP_SCALE_UNSUPPORTED` 拒绝；本阶段没有 L5，也不允许静默重采样。局部图分辨率
+必须始终等于 `r0`。
+
+每个父单元由最多四个 L(l-1) 子单元按下表保守聚合；奇数边界缺少的子单元视为无效且
+禁入，不能视为自由空间：
+
+| 图层 | `lunar-conservative-grid-aggregation/v1` 规则 |
+|---|---|
+| `valid_mask` | 所有四个子单元有效才为 1（AND） |
+| `obstacle` | 任一子单元为 1 即为 1（OR） |
+| `forbidden` | 任一子单元为 1 即为 1（OR） |
+| `obstacle_height` | 四个子单元的最大值 |
+| `observation_age_s` | 四个子单元的最大值 |
+| `observation_quality` | 四个子单元的最小值 |
+| `observation_count` | 四个子单元的最小值 |
+| `obstacle_variance` | 四个子单元的最大值 |
+| `elevation` | 仅当所有子单元有效时取四个高程的算术均值；否则父单元无效 |
+| `elevation_variance` | 最大子单元自身方差，加四个有效子单元高程的总体方差 |
+
+外部生产方必须保存聚合版本与逐层验证证据。规划核心校验收到层级、形状与数值，但单凭
+一张粗图无法证明生产方遵守了聚合算法，因此聚合证据属于接口集成验收的一部分。
 
 `Odometry` 接收非零 `header.stamp`、`header.frame_id=odom`、`child_frame_id=base_link`、`pose.pose.position`、单位四元数 `pose.pose.orientation`、`pose.covariance`、`twist.twist.linear`、`twist.twist.angular`、`twist.covariance`。协方差必须为有限值且主对角线非负。
 

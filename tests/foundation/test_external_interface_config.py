@@ -17,7 +17,7 @@ CONFIG = REPOSITORY_ROOT / "ros2_ws/src/lunar_navigation_config/config/external_
 PACKAGE_XML = REPOSITORY_ROOT / "ros2_ws/src/lunar_navigation_config/package.xml"
 
 EXPECTED_DOCUMENT = {
-    "schema_version": "lunar-external-interfaces/v2",
+    "schema_version": "lunar-external-interfaces/v3",
     "interface_packages": {
         "lunar_navigation_msgs": {
             "schema_provider": "in_repository_provisional",
@@ -32,6 +32,7 @@ EXPECTED_DOCUMENT = {
             "type": "grid_map_msgs/msg/GridMap",
             "owner": "external",
             "frame": "map",
+            "level_semantics": "selected_dyadic_global",
             "required_fields": [
                 "header",
                 "info",
@@ -47,6 +48,7 @@ EXPECTED_DOCUMENT = {
             "type": "grid_map_msgs/msg/GridMap",
             "owner": "external",
             "frame": "odom",
+            "level_semantics": "l0_platform_window",
             "required_fields": [
                 "header",
                 "info",
@@ -107,6 +109,16 @@ EXPECTED_DOCUMENT = {
         "observation_count",
         "forbidden",
     ],
+    "map_pyramid": {
+        "base_resolution_m": 0.2,
+        "resolution_scale_per_level": 2,
+        "maximum_level": 4,
+        "maximum_cells": 1_048_576,
+        "maximum_axis_cells": 4_096,
+        "global_selection": "smallest_admissible_level",
+        "local_level": 0,
+        "aggregation_version": "lunar-conservative-grid-aggregation/v1",
+    },
     "static_inputs": {
         "observation_capability": {
             "owner": "external",
@@ -279,6 +291,7 @@ lunar_navigation_msgs/ScienceTargetRegion[<=64] science_regions
         ("interface_packages", "config error: missing required key: interface_packages"),
         ("tf", "config error: missing required key: tf"),
         ("required_grid_layers", "config error: missing required key: required_grid_layers"),
+        ("map_pyramid", "config error: missing required key: map_pyramid"),
         ("static_inputs", "config error: missing required key: static_inputs"),
     ],
 )
@@ -305,10 +318,20 @@ def test_check_interfaces_rejects_missing_required_contract_sections_without_ros
 @pytest.mark.parametrize(
     ("path", "value", "expected_error"),
     [
-        (("schema_version",), "wrong/v1", "config error: schema_version must be 'lunar-external-interfaces/v2'"),
+        (("schema_version",), "wrong/v1", "config error: schema_version must be 'lunar-external-interfaces/v3'"),
         (("topics", "map_global", "owner"), "internal", "config error: topics.map_global.owner must be 'external'"),
         (("topics", "map_global", "type"), "nav_msgs/msg/Path", "config error: topics.map_global.type must be 'grid_map_msgs/msg/GridMap'"),
         (("topics", "map_global", "frame"), "odom", "config error: topics.map_global.frame must be 'map'"),
+        (("topics", "map_global", "level_semantics"), "l0_platform_window", "config error: topics.map_global.level_semantics must be 'selected_dyadic_global'"),
+        (("topics", "map_local", "level_semantics"), "selected_dyadic_global", "config error: topics.map_local.level_semantics must be 'l0_platform_window'"),
+        (("map_pyramid", "base_resolution_m"), 0.25, "config error: map_pyramid.base_resolution_m must be 0.2"),
+        (("map_pyramid", "resolution_scale_per_level"), 3, "config error: map_pyramid.resolution_scale_per_level must be 2"),
+        (("map_pyramid", "maximum_level"), 5, "config error: map_pyramid.maximum_level must be 4"),
+        (("map_pyramid", "maximum_cells"), 1_048_577, "config error: map_pyramid.maximum_cells must be 1048576"),
+        (("map_pyramid", "maximum_axis_cells"), 4_097, "config error: map_pyramid.maximum_axis_cells must be 4096"),
+        (("map_pyramid", "global_selection"), "coarsest_admissible_level", "config error: map_pyramid.global_selection must be 'smallest_admissible_level'"),
+        (("map_pyramid", "local_level"), 1, "config error: map_pyramid.local_level must be 0"),
+        (("map_pyramid", "aggregation_version"), "unsafe-average/v1", "config error: map_pyramid.aggregation_version must be 'lunar-conservative-grid-aggregation/v1'"),
         (("tf", "chain"), ["odom", "map", "base_link"], "config error: tf.chain must be ['map', 'odom', 'base_link']"),
         (("static_inputs", "platform_capability", "schema"), "wrong/v1", "config error: static_inputs.platform_capability.schema must be 'platform-control-capability-source/v1'"),
     ],

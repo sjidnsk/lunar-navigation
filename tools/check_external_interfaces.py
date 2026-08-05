@@ -14,7 +14,7 @@ import yaml
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 _FIELD_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
-_SCHEMA_VERSION = "lunar-external-interfaces/v2"
+_SCHEMA_VERSION = "lunar-external-interfaces/v3"
 _INTERFACE_PACKAGES = {
     "lunar_navigation_msgs": {
         "schema_provider": "in_repository_provisional",
@@ -64,6 +64,7 @@ _TOPICS = {
         "type": "grid_map_msgs/msg/GridMap",
         "owner": "external",
         "frame": "map",
+        "level_semantics": "selected_dyadic_global",
         "required_fields": [
             "header",
             "info",
@@ -79,6 +80,7 @@ _TOPICS = {
         "type": "grid_map_msgs/msg/GridMap",
         "owner": "external",
         "frame": "odom",
+        "level_semantics": "l0_platform_window",
         "required_fields": [
             "header",
             "info",
@@ -139,6 +141,16 @@ _REQUIRED_GRID_LAYERS = [
     "observation_count",
     "forbidden",
 ]
+_MAP_PYRAMID = {
+    "base_resolution_m": 0.2,
+    "resolution_scale_per_level": 2,
+    "maximum_level": 4,
+    "maximum_cells": 1_048_576,
+    "maximum_axis_cells": 4_096,
+    "global_selection": "smallest_admissible_level",
+    "local_level": 0,
+    "aggregation_version": "lunar-conservative-grid-aggregation/v1",
+}
 _STATIC_INPUTS = {
     "observation_capability": {
         "owner": "external",
@@ -264,6 +276,7 @@ def validate_external_config(document: object) -> list[str]:
         "topics",
         "tf",
         "required_grid_layers",
+        "map_pyramid",
         "static_inputs",
     }
     _unexpected_keys(errors, "document", document, required_top_level)
@@ -323,6 +336,10 @@ def validate_external_config(document: object) -> list[str]:
             errors.append("config error: required_grid_layers must not contain duplicates")
         elif grid_layers != _REQUIRED_GRID_LAYERS:
             errors.append(f"config error: required_grid_layers must be {_REQUIRED_GRID_LAYERS!r}")
+
+    map_pyramid = document.get("map_pyramid")
+    if map_pyramid is not None:
+        _validate_fixed_mapping(errors, "map_pyramid", map_pyramid, _MAP_PYRAMID)
 
     static_inputs = document.get("static_inputs")
     if static_inputs is not None:

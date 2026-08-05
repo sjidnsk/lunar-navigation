@@ -1,4 +1,4 @@
-schema_version: lunar-external-interfaces/v2
+schema_version: lunar-external-interfaces/v3
 interface_packages:
   lunar_navigation_msgs:
     schema_provider: in_repository_provisional
@@ -11,12 +11,14 @@ topics:
     type: grid_map_msgs/msg/GridMap
     owner: external
     frame: map
+    level_semantics: selected_dyadic_global
     required_fields: [header, info, layers, basic_layers, data, outer_start_index, inner_start_index]
   map_local:
     name: /environment/map_local
     type: grid_map_msgs/msg/GridMap
     owner: external
     frame: odom
+    level_semantics: l0_platform_window
     required_fields: [header, info, layers, basic_layers, data, outer_start_index, inner_start_index]
   odometry:
     name: /localization/odometry
@@ -52,6 +54,15 @@ required_grid_layers:
   - obstacle_variance
   - observation_count
   - forbidden
+map_pyramid:
+  base_resolution_m: 0.2
+  resolution_scale_per_level: 2
+  maximum_level: 4
+  maximum_cells: 1048576
+  maximum_axis_cells: 4096
+  global_selection: smallest_admissible_level
+  local_level: 0
+  aggregation_version: lunar-conservative-grid-aggregation/v1
 static_inputs:
   observation_capability:
     owner: external
