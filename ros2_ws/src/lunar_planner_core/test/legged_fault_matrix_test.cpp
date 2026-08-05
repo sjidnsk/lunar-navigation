@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <stop_token>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -106,6 +107,45 @@ TEST(LeggedFaultMatrix, ReportsNoRouteAcrossUnknownBarrier) {
   EXPECT_EQ(output.directive, ExecutionDirective::kNoSafeReference);
   EXPECT_FALSE(output.reference.has_value());
   EXPECT_EQ(output.diagnostics.planner_name, "cpp_v3_hierarchical");
+}
+
+TEST(LeggedFaultMatrix, RejectsObstacleIntersectingOnlyTheTrueBodySweep) {
+  Planner planner;
+  auto input = test::MakeValidLeggedInput();
+  input.request_id = "legged-start-sweep-blocked";
+  auto& state = std::get<LeggedState>(input.current_state);
+  state.body_pose.position_m = {2.15, 3.5, 0.5};
+  SetByte(input.world.local_map, "obstacle", 1U, 3U, 1U);
+
+  const PlannerOutput output = planner.Plan(input);
+
+  EXPECT_EQ(output.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(output.directive, ExecutionDirective::kNoSafeReference);
+  EXPECT_EQ(output.reason_code, "LEGGED_START_CONNECTOR_INFEASIBLE");
+  EXPECT_FALSE(output.reference.has_value());
+}
+
+TEST(LeggedFaultMatrix, RejectsWhenTrueHeightCannotReachAnySuccessorInterval) {
+  Planner planner;
+  auto input = test::MakeValidLeggedInput();
+  input.request_id = "legged-start-height-disconnected";
+  auto& state = std::get<LeggedState>(input.current_state);
+  state.body_pose.position_m.z = 0.4;
+  auto& capability = std::get<LeggedCapability>(input.capability);
+  capability.vertical_speed_mps = {-0.01, 0.01};
+  capability.motion_primitives.resize(4U);
+  for (const auto [x, y] :
+       {std::pair{3U, 3U}, std::pair{1U, 3U}, std::pair{2U, 4U},
+        std::pair{2U, 2U}}) {
+    SetFloat(input.world.local_map, "elevation", x, y, 0.2F);
+  }
+
+  const PlannerOutput output = planner.Plan(input);
+
+  EXPECT_EQ(output.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(output.directive, ExecutionDirective::kNoSafeReference);
+  EXPECT_EQ(output.reason_code, "LEGGED_START_CONNECTOR_INFEASIBLE");
+  EXPECT_FALSE(output.reference.has_value());
 }
 
 TEST(LeggedFaultMatrix, CancelsBeforeSearchExpansion) {

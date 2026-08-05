@@ -196,7 +196,7 @@ struct OrderedPrimitive final {
 }
 
 [[nodiscard]] std::optional<LeggedTransition> ApplyPrimitive(
-    const LeggedLatticeState& source_state,
+    const LeggedPose& source, const Interval& source_body_z_m,
     const LeggedBodyPrimitive& primitive,
     const std::size_t primitive_index,
     const shared::SafeProjection& projection,
@@ -205,8 +205,6 @@ struct OrderedPrimitive final {
     const std::stop_token stop_token,
     bool& canceled) {
   const shared::MapSnapshot& map = *projection.source_map();
-  const LeggedPose source = StatePose(
-      source_state, map, config.legged.yaw_bin_count);
   const double cosine = std::cos(source.yaw_rad);
   const double sine = std::sin(source.yaw_rad);
   const Vec3& relative = primitive.body_frame_displacement_m;
@@ -230,7 +228,7 @@ struct OrderedPrimitive final {
   };
   target.position_m.z = raw_target.z;
   const LeggedSweepResult sweep = ValidateLeggedBodySweep(
-      source, target, source_state.reachable_body_z_m,
+      source, target, source_body_z_m,
       primitive.nominal_duration, projection, capability,
       std::min(
           config.legged.continuous_validation_maximum_subdivisions,
@@ -353,6 +351,14 @@ LeggedLatticeBuildResult BuildLeggedLattice(
       });
 
   LeggedLatticeGraph graph;
+  graph.true_start_pose = LeggedPose{
+      .position_m = current_state.body_pose.position_m,
+      .yaw_rad = *current_yaw,
+  };
+  graph.true_start_body_z_m = Interval{
+      .lower = current_state.body_pose.position_m.z,
+      .upper = current_state.body_pose.position_m.z,
+  };
   const LeggedLatticeState start{
       .cell_x = start_cell->x,
       .cell_y = start_cell->y,
@@ -362,7 +368,6 @@ LeggedLatticeBuildResult BuildLeggedLattice(
   graph.states.push_back(start);
   graph.search_problem.outgoing_edges.emplace_back();
   std::map<LeggedStateKey, std::size_t> state_indices;
-  state_indices.emplace(KeyOf(start), 0U);
   std::queue<std::size_t> pending;
   pending.push(0U);
   const std::size_t map_cells = projection.source_map()->cell_count();
@@ -381,11 +386,19 @@ LeggedLatticeBuildResult BuildLeggedLattice(
     const std::size_t source_index = pending.front();
     pending.pop();
     const LeggedLatticeState source_state = graph.states[source_index];
+    const LeggedPose source_pose = source_index == 0U
+        ? graph.true_start_pose
+        : StatePose(source_state, *projection.source_map(),
+                    config.legged.yaw_bin_count);
+    const Interval source_body_z_m = source_index == 0U
+        ? graph.true_start_body_z_m
+        : source_state.reachable_body_z_m;
     for (const OrderedPrimitive& ordered : ordered_primitives) {
       bool canceled = false;
       auto transition = ApplyPrimitive(
-          source_state, *ordered.primitive, ordered.original_index,
-          projection, capability, config, stop_token, canceled);
+          source_pose, source_body_z_m, *ordered.primitive,
+          ordered.original_index, projection, capability, config, stop_token,
+          canceled);
       if (canceled) {
         return Failure(LeggedLatticeStatus::kCanceled, "REQUEST_CANCELED");
       }
@@ -452,9 +465,10 @@ LeggedLatticeBuildResult BuildLeggedLattice(
   const double maximum_speed = MaximumPlanarSpeed(capability);
   std::size_t terminal_count = 0U;
   for (std::size_t index = 0U; index < graph.states.size(); ++index) {
-    const LeggedPose pose = StatePose(
-        graph.states[index], *projection.source_map(),
-        config.legged.yaw_bin_count);
+    const LeggedPose pose = index == 0U
+        ? graph.true_start_pose
+        : StatePose(graph.states[index], *projection.source_map(),
+                    config.legged.yaw_bin_count);
     double heuristic = GoalDistance(goal, pose) / maximum_speed;
     if (goal.yaw_rad.has_value()) {
       const double yaw_speed = std::max(
@@ -472,6 +486,11 @@ LeggedLatticeBuildResult BuildLeggedLattice(
       graph.search_problem.goal_mask[index] = 1U;
       ++terminal_count;
     }
+  }
+  if (graph.search_problem.goal_mask.front() == 0U &&
+      graph.search_problem.outgoing_edges.front().empty()) {
+    return Failure(LeggedLatticeStatus::kInvalidRequest,
+                   "LEGGED_START_CONNECTOR_INFEASIBLE");
   }
   graph.search_problem.config = config.search;
   return LeggedLatticeBuildResult{

@@ -16,6 +16,8 @@ struct LeggedLatticeGraph final {
   shared::AraStarProblem search_problem;
   std::vector<LeggedLatticeState> states;
   std::vector<LeggedTransition> transitions;
+  LeggedPose true_start_pose;
+  Interval true_start_body_z_m;
 };
 
 enum class LeggedLatticeStatus {

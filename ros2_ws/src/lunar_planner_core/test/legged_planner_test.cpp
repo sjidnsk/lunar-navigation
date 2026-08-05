@@ -12,6 +12,14 @@
 namespace lunar::planning {
 namespace {
 
+double Yaw(const Quaternion& orientation) {
+  return std::atan2(
+      2.0 * (orientation.w * orientation.z +
+             orientation.x * orientation.y),
+      1.0 - 2.0 * (orientation.y * orientation.y +
+                   orientation.z * orientation.z));
+}
+
 const TrajectoryReference& LeggedTrajectory(const PlannerOutput& output) {
   EXPECT_TRUE(output.reference.has_value());
   EXPECT_EQ(output.reference->platform_type, PlatformType::kLegged);
@@ -97,6 +105,34 @@ TEST(LeggedPlanner, ProducesOnlyBodyReferenceWithBoundedKinematics) {
           capability.maximum_yaw_acceleration_radps2 + 1.0e-9);
     }
   }
+}
+
+TEST(LeggedPlanner, PreservesTheTrueOffCenterBodyPoseAndHeight) {
+  Planner planner;
+  auto input = test::MakeValidLeggedInput();
+  input.request_id = "legged-true-start";
+  auto& state = std::get<LeggedState>(input.current_state);
+  state.body_pose.position_m = {2.2, 3.2, 0.47};
+  state.body_pose.orientation = test::YawQuaternion(0.12);
+
+  const PlannerOutput output = planner.Plan(input);
+
+  ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << output.reason_code;
+  const TrajectoryReference& trajectory = LeggedTrajectory(output);
+  ASSERT_FALSE(trajectory.points.empty());
+  const Pose3& start = trajectory.points.front().pose;
+  EXPECT_NEAR(start.position_m.x, 2.2, 1.0e-9);
+  EXPECT_NEAR(start.position_m.y, 3.2, 1.0e-9);
+  EXPECT_NEAR(start.position_m.z, 0.47, 1.0e-9);
+  EXPECT_NEAR(Yaw(start.orientation), 0.12, 1.0e-9);
+  ASSERT_TRUE(output.reference.has_value());
+  ASSERT_FALSE(output.reference->preview.poses_map.empty());
+  const Pose3& preview_start = output.reference->preview.poses_map.front();
+  EXPECT_NEAR(preview_start.position_m.x, 2.2, 1.0e-9);
+  EXPECT_NEAR(preview_start.position_m.y, 3.2, 1.0e-9);
+  EXPECT_NEAR(preview_start.position_m.z, 0.47, 1.0e-9);
+  EXPECT_NEAR(Yaw(preview_start.orientation), 0.12, 1.0e-9);
 }
 
 TEST(LeggedPlanner, SupportsLateralBodyPrimitive) {

@@ -235,7 +235,8 @@ PlannerOutput LeggedPlanner::Plan(
             ExecutionDirective::kNoSafeReference,
             lattice.reason_code, started);
       case LeggedLatticeStatus::kInvalidRequest:
-        if (lattice.reason_code == "LEGGED_START_NOT_SAFE") {
+        if (lattice.reason_code == "LEGGED_START_NOT_SAFE" ||
+            lattice.reason_code == "LEGGED_START_CONNECTOR_INFEASIBLE") {
           return Failure(
               PlanningOutcome::kNoKnownSafeRoute,
               ExecutionDirective::kNoSafeReference,
@@ -326,18 +327,13 @@ PlannerOutput LeggedPlanner::Plan(
         optimized.reason_code != "LEGGED_OPTIMIZATION_NOT_NEEDED") {
       warnings.push_back(optimized.reason_code);
     }
-    const auto start_cell = projection.projection->source_map()->PositionToCell(
-        Vec2{
-            .x = current_state->body_pose.position_m.x,
-            .y = current_state->body_pose.position_m.y,
-        });
-    const LeggedTerrainEvaluation start_terrain =
-        EvaluateLeggedTerrainCell(
-            *projection.projection, *capability, *start_cell,
-            problem.stop_token);
+    const Interval true_start_height{
+        .lower = current_state->body_pose.position_m.z,
+        .upper = current_state->body_pose.position_m.z,
+    };
     std::vector<LeggedTransition> selected = std::move(optimized.transitions);
     if (!ValidateTransitions(
-            selected, start_terrain.body_height_m,
+            selected, true_start_height,
             *projection.projection, *capability, problem.config,
             problem.stop_token)) {
       if (problem.stop_token.stop_requested()) {
@@ -347,7 +343,7 @@ PlannerOutput LeggedPlanner::Plan(
       warnings.emplace_back("LEGGED_OPTIMIZATION_SWEEP_FALLBACK");
     }
     if (!ValidateTransitions(
-            selected, start_terrain.body_height_m,
+            selected, true_start_height,
             *projection.projection, *capability, problem.config,
             problem.stop_token)) {
       return Failure(
