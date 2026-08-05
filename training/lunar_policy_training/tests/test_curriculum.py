@@ -8,8 +8,12 @@ from lunar_planner_training_bridge import MotionReference, PlannerBridge
 
 from lunar_policy_training.curriculum import CurriculumSchedule
 from lunar_policy_training.capability_freeze import (
-    FrozenJsonObject,
+    FrozenInterval,
+    FrozenLeggedBodyPrimitive,
+    FrozenLeggedCapability,
+    FrozenObservationCapability,
     FrozenPlatformCapability,
+    FrozenVec3,
 )
 from lunar_policy_training.environment.parallel_pool import (
     ParallelActions,
@@ -122,7 +126,39 @@ def test_formal_curriculum_identity_matches_injected_capability() -> None:
         platform_type="LEGGED",
         capability_type="lunar-planner-legged-capability/v1",
         capability_version="legged-2026.08",
-        content=FrozenJsonObject(()),
+        platform_id="test-only-legged",
+        base_frame_id="base_link",
+        platform_document_path="legged/platform.yaml",
+        observation_document_path="legged/observation.json",
+        urdf_path="legged/rover.urdf",
+        mesh_paths=("legged/body.stl",),
+        observation_capability=FrozenObservationCapability(25.0, math.pi / 2.0),
+        typed_capability=FrozenLeggedCapability(
+            reference_point="test-body",
+            body_half_extent_m=FrozenVec3(0.2, 0.2, 0.3),
+            maximum_slope_rad=0.4,
+            maximum_roughness_m=0.2,
+            maximum_step_height_m=0.3,
+            maximum_gap_width_m=0.4,
+            minimum_confidence=0.8,
+            minimum_body_clearance_m=0.1,
+            body_height_m=FrozenInterval(0.4, 0.6),
+            forward_speed_mps=FrozenInterval(-0.5, 0.5),
+            lateral_speed_mps=FrozenInterval(-0.5, 0.5),
+            vertical_speed_mps=FrozenInterval(-0.1, 0.1),
+            yaw_rate_radps=FrozenInterval(-1.0, 1.0),
+            maximum_linear_acceleration_mps2=0.5,
+            maximum_yaw_acceleration_radps2=1.0,
+            motion_primitives=(
+                FrozenLeggedBodyPrimitive(
+                    primitive_id="test-forward",
+                    kind="FORWARD",
+                    body_frame_displacement_m=FrozenVec3(1.0, 0.0, 0.0),
+                    yaw_change_rad=0.0,
+                    nominal_duration_ns=2_000_000_000,
+                ),
+            ),
+        ),
         content_sha256="a" * 64,
         resources=(),
     )

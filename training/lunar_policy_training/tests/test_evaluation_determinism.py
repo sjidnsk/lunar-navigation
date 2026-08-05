@@ -85,7 +85,7 @@ def test_same_scenario_report_has_identical_canonical_hash() -> None:
     first = _report((0.95, 0.96, 0.97))
     second = _report((0.95, 0.96, 0.97))
 
-    assert first.schema_version == "lunar-policy-release-evaluation/v1"
+    assert first.schema_version == "lunar-policy-development-evaluation/v1"
     assert report_sha256(first) == report_sha256(second)
     assert first.to_dict() == second.to_dict()
 

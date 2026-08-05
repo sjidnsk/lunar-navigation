@@ -23,6 +23,9 @@ from ..reward import compute_transition_reward, reward_weights_sha256
 
 
 EVALUATION_SCHEMA_VERSION = "lunar-policy-release-evaluation/v1"
+DEVELOPMENT_EVALUATION_SCHEMA_VERSION = (
+    "lunar-policy-development-evaluation/v1"
+)
 REQUIRED_METHODS = (
     "ppo_policy",
     "nearest_frontier",
@@ -107,13 +110,20 @@ class EvaluationReport:
     reward_hash: str
     checkpoint_sha256: str
     methods: tuple[MethodEvaluation, ...]
-    schema_version: str = EVALUATION_SCHEMA_VERSION
+    schema_version: str | None = None
 
     def __post_init__(self) -> None:
-        if self.schema_version != EVALUATION_SCHEMA_VERSION:
-            raise ValueError("evaluation schema version mismatch")
         if not isinstance(self.run_identity, RunIdentity):
             raise ValueError("evaluation run identity is missing")
+        expected_schema = (
+            DEVELOPMENT_EVALUATION_SCHEMA_VERSION
+            if self.proxy
+            else EVALUATION_SCHEMA_VERSION
+        )
+        if self.schema_version is None:
+            object.__setattr__(self, "schema_version", expected_schema)
+        elif self.schema_version != expected_schema:
+            raise ValueError("evaluation schema version mismatch")
         if self.proxy:
             if self.run_identity.run_kind != "development-smoke":
                 raise ValueError("proxy evaluation cannot use formal run identity")
@@ -593,6 +603,7 @@ def _move_batch(batch: PolicyBatch, device: torch.device) -> PolicyBatch:
 
 __all__ = [
     "CandidateEvaluation",
+    "DEVELOPMENT_EVALUATION_SCHEMA_VERSION",
     "EVALUATION_SCHEMA_VERSION",
     "EvaluationReport",
     "MethodEvaluation",

@@ -39,7 +39,18 @@ from lunar_policy_training.config import (
     load_training_config,
     resolve_training_config,
 )
+from lunar_policy_training.checkpoint import RunIdentity
 from lunar_policy_training.curriculum import CurriculumSchedule
+from lunar_policy_training.evaluation.release_gate import (
+    evaluate_release_gate,
+    load_gate_rules,
+)
+from lunar_policy_training.evaluation.report import (
+    EvaluationReport,
+    MethodEvaluation,
+    PlatformMetrics,
+    REQUIRED_METHODS,
+)
 from lunar_policy_training.reward import reward_weights_sha256
 
 
@@ -200,6 +211,96 @@ def test_development_smoke_is_proxy_only_and_bounded_to_two_updates(
 
     assert touched == []
     assert not artifact_root.exists()
+
+
+def _perfect_development_report() -> EvaluationReport:
+    metrics = PlatformMetrics(
+        scenario_seeds=(101,),
+        success_coverage_rate=1.0,
+        safety_violation_count=0,
+        invalid_action_count=0,
+        output_finite_rate=1.0,
+        platform_reference_mismatch_count=0,
+        hopper_commitment_violation_count=0,
+        selected_action_observed_safe_rate=1.0,
+        deterministic_repeat_match_rate=1.0,
+        planner_failure_rate=0.0,
+        completion_time_s=1.0,
+    )
+    per_platform = {
+        platform: metrics for platform in ("WHEELED", "LEGGED", "HOPPER")
+    }
+    return EvaluationReport(
+        proxy=True,
+        scenario_schedule_id="proxy-schedule",
+        run_identity=RunIdentity(
+            run_kind="development-smoke",
+            data_sha256="1" * 64,
+            split_sha256="2" * 64,
+            generator_sha256="3" * 64,
+            capability_sha256="4" * 64,
+            reward_sha256="5" * 64,
+            v3_sha256="6" * 64,
+        ),
+        reward_hash="5" * 64,
+        checkpoint_sha256="7" * 64,
+        methods=tuple(
+            MethodEvaluation(method=method, per_platform=per_platform)
+            for method in REQUIRED_METHODS
+        ),
+    )
+
+
+def test_cli_development_evaluation_artifacts_cannot_be_mistaken_for_release(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if proxy output reused formal filenames/schema/manifest keys."""
+    root = tmp_path / "run"
+    root.mkdir()
+    (root / "run-manifest.json").write_text(
+        json.dumps({"schema_version": "lunar-training-run/v1"}),
+        encoding="utf-8",
+    )
+    report = _perfect_development_report()
+    gate_result = evaluate_release_gate(
+        report,
+        load_gate_rules(REPOSITORY_ROOT / "training/configs/release_gate_v1.yaml"),
+    )
+
+    digest = cli_module._write_development_evaluation_artifacts(
+        root=root,
+        checkpoint_path=root / "checkpoints/latest.pt",
+        report=report,
+        gate_result=gate_result,
+    )
+
+    evaluation = root / "evaluation"
+    result = json.loads(
+        (evaluation / "development-result.json").read_text(encoding="utf-8")
+    )
+    assert (evaluation / "development-report.json").is_file()
+    assert not (evaluation / "report.json").exists()
+    assert not (evaluation / "gate.json").exists()
+    assert result == {
+        "schema_version": "lunar-policy-development-evaluation-result/v1",
+        "report_sha256": digest,
+        "run_kind": "development-smoke",
+        "proxy": True,
+        "formal_candidate_eligible": False,
+        "release_gate_passed": False,
+        "failed_rules": ["formal_candidate_eligible"],
+    }
+    manifest = json.loads(
+        (root / "run-manifest.json").read_text(encoding="utf-8")
+    )
+    assert "last_evaluation" not in manifest
+    assert manifest["last_development_evaluation"] == {
+        "checkpoint": str(root / "checkpoints/latest.pt"),
+        "report_sha256": digest,
+        "run_kind": "development-smoke",
+        "proxy": True,
+        "formal_candidate_eligible": False,
+    }
 
 
 @pytest.mark.parametrize("blocks", ["0", "-1", "1.5", "not-an-int"])

@@ -36,7 +36,9 @@ def _platform_metrics(coverage: float) -> PlatformMetrics:
     )
 
 
-def _report(*, wheeled: float, legged: float, hopper: float) -> EvaluationReport:
+def _report(
+    *, wheeled: float, legged: float, hopper: float, proxy: bool = False
+) -> EvaluationReport:
     platforms = {
         "WHEELED": _platform_metrics(wheeled),
         "LEGGED": _platform_metrics(legged),
@@ -51,10 +53,10 @@ def _report(*, wheeled: float, legged: float, hopper: float) -> EvaluationReport
         )
     )
     return EvaluationReport(
-        proxy=True,
-        scenario_schedule_id="proxy-schedule",
+        proxy=proxy,
+        scenario_schedule_id=("proxy-schedule" if proxy else "formal-schedule"),
         run_identity=RunIdentity(
-            run_kind="development-smoke",
+            run_kind=("development-smoke" if proxy else "formal"),
             data_sha256="1" * 64,
             split_sha256="2" * 64,
             generator_sha256="3" * 64,
@@ -77,6 +79,21 @@ def test_gate_fails_when_only_hopper_is_below_95_percent() -> None:
 
     assert result.passed is False
     assert result.failed_rules == ("HOPPER.success_coverage_rate_min",)
+    assert result.formal_candidate_eligible is True
+
+
+def test_proxy_high_scores_never_pass_formal_gate() -> None:
+    """Would fail if development proxy metrics could authorize a release."""
+    result = evaluate_release_gate(
+        _report(wheeled=1.0, legged=1.0, hopper=1.0, proxy=True),
+        load_gate_rules(ROOT / "training/configs/release_gate_v1.yaml"),
+    )
+
+    assert result.passed is False
+    assert result.formal_candidate_eligible is False
+    assert result.run_kind == "development-smoke"
+    assert result.proxy is True
+    assert result.failed_rules == ("formal_candidate_eligible",)
 
 
 def test_release_gate_adds_action_safety_and_repeat_rules() -> None:

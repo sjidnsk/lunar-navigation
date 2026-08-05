@@ -67,8 +67,17 @@ from .curriculum import (
     FORMAL_SEED,
     REWARD_CALIBRATION_SEEDS,
 )
-from .evaluation.release_gate import evaluate_release_gate, load_gate_rules
-from .evaluation.report import evaluate_proxy_policy, report_sha256, write_report
+from .evaluation.release_gate import (
+    GateResult,
+    evaluate_release_gate,
+    load_gate_rules,
+)
+from .evaluation.report import (
+    EvaluationReport,
+    evaluate_proxy_policy,
+    report_sha256,
+    write_report,
+)
 from .policy.cross_attention import CrossAttentionPolicy, sample_action
 from .policy.observation import ObservationIdentity, PolicyBatch
 from .proxy_scenario import proxy_environment_factory, proxy_observation
@@ -926,6 +935,54 @@ def _calibrate_training_run(
     return _load_calibrated_run_state(root)
 
 
+def _write_development_evaluation_artifacts(
+    *,
+    root: Path,
+    checkpoint_path: Path,
+    report: EvaluationReport,
+    gate_result: GateResult,
+) -> str:
+    """Persist proxy metrics under names that cannot imply formal release."""
+    if (
+        not isinstance(report, EvaluationReport)
+        or not report.proxy
+        or report.run_identity.run_kind != "development-smoke"
+        or not isinstance(gate_result, GateResult)
+        or gate_result.passed
+        or gate_result.formal_candidate_eligible
+    ):
+        raise PreflightError(
+            "development evaluation artifacts require ineligible proxy result"
+        )
+    evaluation_dir = root / "evaluation"
+    evaluation_dir.mkdir(parents=True, exist_ok=True)
+    digest = write_report(evaluation_dir / "development-report.json", report)
+    result_payload = {
+        "schema_version": "lunar-policy-development-evaluation-result/v1",
+        "report_sha256": digest,
+        "run_kind": report.run_identity.run_kind,
+        "proxy": report.proxy,
+        "formal_candidate_eligible": False,
+        "release_gate_passed": False,
+        "failed_rules": list(gate_result.failed_rules),
+    }
+    (evaluation_dir / "development-result.json").write_text(
+        json.dumps(result_payload, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    manifest_path = root / "run-manifest.json"
+    manifest = _read_run_manifest(manifest_path)
+    manifest["last_development_evaluation"] = {
+        "checkpoint": str(checkpoint_path),
+        "report_sha256": digest,
+        "run_kind": report.run_identity.run_kind,
+        "proxy": report.proxy,
+        "formal_candidate_eligible": False,
+    }
+    _write_manifest_payload(manifest_path, manifest)
+    return digest
+
+
 def _evaluate_checkpoint(
     *,
     checkpoint_path: Path,
@@ -987,23 +1044,6 @@ def _evaluate_checkpoint(
     else:
         calibrated.budget.end_gpu_interval(monotonic_seconds=time.monotonic())
     gate_result = evaluate_release_gate(report, load_gate_rules(gate_path))
-    evaluation_dir = root / "evaluation"
-    evaluation_dir.mkdir(parents=True, exist_ok=True)
-    digest = write_report(evaluation_dir / "report.json", report)
-    (evaluation_dir / "gate.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "lunar-policy-evaluation-gate-result/v1",
-                "report_sha256": digest,
-                "passed": gate_result.passed,
-                "failed_rules": list(gate_result.failed_rules),
-            },
-            sort_keys=True,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
     _update_run_manifest(
         root / "run-manifest.json",
         source_commit=checkpoint.source_commit,
@@ -1013,13 +1053,12 @@ def _evaluate_checkpoint(
         consumed_gpu_seconds=calibrated.budget.consumed_gpu_seconds,
         platform_allocation=calibrated.allocation,
     )
-    payload = _read_run_manifest(root / "run-manifest.json")
-    payload["last_evaluation"] = {
-        "checkpoint": str(checkpoint_target),
-        "report_sha256": digest,
-        "passed": gate_result.passed,
-    }
-    _write_manifest_payload(root / "run-manifest.json", payload)
+    _write_development_evaluation_artifacts(
+        root=root,
+        checkpoint_path=checkpoint_target,
+        report=report,
+        gate_result=gate_result,
+    )
     return report, gate_result
 
 

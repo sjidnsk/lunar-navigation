@@ -23,6 +23,9 @@ class GateRules:
 class GateResult:
     passed: bool
     failed_rules: tuple[str, ...]
+    run_kind: str
+    proxy: bool
+    formal_candidate_eligible: bool
 
 
 def load_gate_rules(path: Path) -> GateRules:
@@ -54,13 +57,27 @@ def evaluate_release_gate(
         raise ValueError("release gate requires EvaluationReport")
     if not isinstance(rules, GateRules):
         raise ValueError("release gate requires GateRules")
+    if report.proxy or report.run_identity.run_kind != "formal":
+        return GateResult(
+            passed=False,
+            failed_rules=("formal_candidate_eligible",),
+            run_kind=report.run_identity.run_kind,
+            proxy=report.proxy,
+            formal_candidate_eligible=False,
+        )
     failed: list[str] = []
     report_methods = {method.method for method in report.methods}
     for method in rules.required_methods:
         if method not in report_methods:
             failed.append(f"required_methods.{method}")
     if "ppo_policy" not in report_methods:
-        return GateResult(False, tuple(failed))
+        return GateResult(
+            passed=False,
+            failed_rules=tuple(failed),
+            run_kind=report.run_identity.run_kind,
+            proxy=report.proxy,
+            formal_candidate_eligible=True,
+        )
     ppo = report.method("ppo_policy")
     for platform in PLATFORMS:
         metrics = ppo.per_platform[platform]
@@ -75,7 +92,13 @@ def evaluate_release_gate(
                 raise ValueError(f"gate rule lacks _min/_max suffix: {rule_name}")
             if not passed:
                 failed.append(f"{platform}.{rule_name}")
-    return GateResult(not failed, tuple(failed))
+    return GateResult(
+        passed=not failed,
+        failed_rules=tuple(failed),
+        run_kind=report.run_identity.run_kind,
+        proxy=report.proxy,
+        formal_candidate_eligible=True,
+    )
 
 
 __all__ = [
