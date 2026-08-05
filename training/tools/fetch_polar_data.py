@@ -27,7 +27,7 @@ from lunar_policy_training.polar_data.source_lock import (  # noqa: E402
 
 
 REGISTRY_SCHEMA = "lunar-polar-source-registry/v1"
-_CONTENT_RANGE = re.compile(r"^bytes (\d+)-\d+/\d+$")
+_CONTENT_RANGE = re.compile(r"^bytes (\d+)-(\d+)/(\d+)$")
 
 
 class PolarFetchError(ValueError):
@@ -80,6 +80,7 @@ def fetch_source(source: Mapping[str, object], data_root: str | Path, *, reposit
     source_id = _required_string(source, "id")
     filename = _required_string(source, "filename")
     citation, license_text = _required_string(source, "citation"), _required_string(source, "license")
+    expected_size = _expected_size(source)
     if Path(filename).name != filename:
         raise PolarFetchError("source filename is invalid")
     destination, lock_path = root / filename, root / f"{filename}.source-lock.json"
@@ -91,6 +92,8 @@ def fetch_source(source: Mapping[str, object], data_root: str | Path, *, reposit
         lock = _read_lock(lock_path)
         if lock.source_id != source_id or lock.filename != filename:
             raise PolarFetchError("existing source lock source id or filename does not match")
+        if expected_size is not None and lock.size_bytes != expected_size:
+            raise PolarFetchError("existing source size does not match registry")
         try:
             return verify_source_lock(root, lock, repository_root=repository_root)
         except SourceLockError as error:
@@ -102,12 +105,13 @@ def fetch_source(source: Mapping[str, object], data_root: str | Path, *, reposit
     if part.is_symlink():
         raise PolarFetchError("part file must not be a symbolic link")
     url = _source_download_url(source)
-    final_url = _download_atomic(url, part, destination)
+    final_url = _download_atomic(
+        url, part, destination, expected_size_bytes=expected_size
+    )
     try:
         lock = PolarSourceLock.from_file(
             source_id, destination, citation=citation, license=license_text, final_url=final_url
         )
-        expected_size = source.get("expected_size_bytes")
         if expected_size is not None and lock.size_bytes != expected_size:
             raise PolarFetchError("downloaded source size does not match registry")
         _write_lock_atomic(lock_path, lock)
@@ -139,9 +143,23 @@ def _source_download_url(source: Mapping[str, object]) -> str:
     raise PolarFetchError("Zenodo record does not contain the requested filename")
 
 
-def _download_atomic(url: str, part: Path, destination: Path) -> str:
+def _download_atomic(
+    url: str,
+    part: Path,
+    destination: Path,
+    *,
+    expected_size_bytes: int | None = None,
+) -> str:
     """Durably resume only an exact 206 response, otherwise safely restart."""
+    if expected_size_bytes is not None and (
+        not isinstance(expected_size_bytes, int)
+        or isinstance(expected_size_bytes, bool)
+        or expected_size_bytes < 0
+    ):
+        raise PolarFetchError("expected download size is invalid")
     offset = part.stat().st_size if part.exists() else 0
+    if expected_size_bytes is not None and offset > expected_size_bytes:
+        raise PolarFetchError("part file exceeds registry size; part retained")
     request = Request(url, headers={"Range": f"bytes={offset}-"}) if offset else Request(url)
     try:
         with urlopen(request, timeout=60) as response:
@@ -151,18 +169,51 @@ def _download_atomic(url: str, part: Path, destination: Path) -> str:
             if offset:
                 content_range = response.headers.get("Content-Range")
                 match = _CONTENT_RANGE.fullmatch(content_range or "")
-                if status == 206 and match and int(match.group(1)) == offset:
+                if status == 206 and match:
+                    range_start, range_end, response_total = (
+                        int(match.group(1)), int(match.group(2)), int(match.group(3))
+                    )
+                    if (
+                        range_start != offset
+                        or range_end < range_start
+                        or range_end >= response_total
+                    ):
+                        raise PolarFetchError("range response is not a validated partial response")
+                    response_length = range_end - range_start + 1
+                    content_length = response.headers.get("Content-Length")
+                    if content_length is not None and _decimal_header(
+                        content_length, "partial Content-Length"
+                    ) != response_length:
+                        raise PolarFetchError("partial response length headers do not match")
                     append = True
                 elif status != 200:
                     raise PolarFetchError("range response is not a validated partial response")
-            elif status != 200:
-                raise PolarFetchError("initial response must be HTTP 200")
+                else:
+                    response_total = response_length = _decimal_header(
+                        response.headers.get("Content-Length"), "HTTP 200 Content-Length"
+                    )
+            else:
+                if status != 200:
+                    raise PolarFetchError("initial response must be HTTP 200")
+                response_total = response_length = _decimal_header(
+                    response.headers.get("Content-Length"), "HTTP 200 Content-Length"
+                )
+            if expected_size_bytes is not None and response_total != expected_size_bytes:
+                raise PolarFetchError("response total does not match registry size; part retained")
             mode = "ab" if append else "wb"
+            written = 0
             with part.open(mode) as stream:
                 while chunk := response.read(1024 * 1024):
                     stream.write(chunk)
+                    written += len(chunk)
                 stream.flush()
                 os.fsync(stream.fileno())
+            if written != response_length:
+                raise PolarFetchError("response body length mismatch; part retained")
+            final_part_size = part.stat().st_size
+            expected_part_size = (offset if append else 0) + written
+            if final_part_size != expected_part_size or final_part_size != response_total:
+                raise PolarFetchError("final part length mismatch; part retained")
     except PolarFetchError:
         raise
     except OSError as error:
@@ -172,6 +223,12 @@ def _download_atomic(url: str, part: Path, destination: Path) -> str:
     os.replace(part, destination)
     _fsync_directory(destination.parent)
     return final_url
+
+
+def _decimal_header(value: object, label: str) -> int:
+    if not isinstance(value, str) or not value.isdecimal():
+        raise PolarFetchError(f"{label} is missing or invalid")
+    return int(value)
 
 
 def _read_lock(path: Path) -> PolarSourceLock:
@@ -205,6 +262,15 @@ def _required_string(source: Mapping[str, object], field: str) -> str:
     value = source.get(field)
     if not isinstance(value, str) or not value:
         raise PolarFetchError(f"source {field} is required")
+    return value
+
+
+def _expected_size(source: Mapping[str, object]) -> int | None:
+    value = source.get("expected_size_bytes")
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise PolarFetchError("source expected size is invalid")
     return value
 
 

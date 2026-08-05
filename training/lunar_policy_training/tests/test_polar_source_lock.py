@@ -433,10 +433,22 @@ def test_existing_destination_rejects_lock_filename_mismatch(tmp_path: Path) -> 
 
 
 class _Response(io.BytesIO):
-    def __init__(self, body: bytes, *, status: int, content_range: str | None = None, final_url: str = "https://example.invalid/file") -> None:
+    def __init__(
+        self,
+        body: bytes,
+        *,
+        status: int,
+        content_length: int | str | None = None,
+        content_range: str | None = None,
+        final_url: str = "https://example.invalid/file",
+    ) -> None:
         super().__init__(body)
         self.status = status
-        self.headers = {} if content_range is None else {"Content-Range": content_range}
+        self.headers = {}
+        if content_length is not None:
+            self.headers["Content-Length"] = str(content_length)
+        if content_range is not None:
+            self.headers["Content-Range"] = content_range
         self._final_url = final_url
 
     def __enter__(self) -> "_Response":
@@ -449,6 +461,92 @@ class _Response(io.BytesIO):
         return self._final_url
 
 
+def _download_source(expected_size_bytes: int) -> dict[str, object]:
+    return {
+        "id": "NASA_LOLA_87S_COUNT",
+        "filename": "source.tif",
+        "url": "https://example.invalid/source.tif",
+        "expected_size_bytes": expected_size_bytes,
+        "citation": "NASA PGDA product 81",
+        "license": "NASA reproduction guidance",
+    }
+
+
+def test_initial_normal_eof_before_content_length_retains_part_without_publishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    monkeypatch.setattr(
+        fetch_polar_data,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(b"abc", status=200, content_length=6),
+    )
+
+    with pytest.raises(fetch_polar_data.PolarFetchError, match="length|truncated|part retained"):
+        fetch_polar_data.fetch_source(
+            _download_source(6), data_root, repository_root=repository
+        )
+
+    assert (data_root / "source.tif.part").read_bytes() == b"abc"
+    assert not (data_root / "source.tif").exists()
+    assert not (data_root / "source.tif.source-lock.json").exists()
+
+
+def test_resume_normal_eof_before_content_range_end_retains_appended_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    part = data_root / "source.tif.part"
+    part.write_bytes(b"abc")
+
+    def fake_open(request: object, **_: object) -> _Response:
+        assert request.get_header("Range") == "bytes=3-"
+        return _Response(b"de", status=206, content_range="bytes 3-5/6")
+
+    monkeypatch.setattr(fetch_polar_data, "urlopen", fake_open)
+    with pytest.raises(fetch_polar_data.PolarFetchError, match="length|truncated|part retained"):
+        fetch_polar_data.fetch_source(
+            _download_source(6), data_root, repository_root=repository
+        )
+
+    assert part.read_bytes() == b"abcde"
+    assert not (data_root / "source.tif").exists()
+    assert not (data_root / "source.tif.source-lock.json").exists()
+
+
+def test_resume_rejects_advertised_total_registry_conflict_before_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    part = data_root / "source.tif.part"
+    part.write_bytes(b"abc")
+    monkeypatch.setattr(
+        fetch_polar_data,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(
+            b"def", status=206, content_range="bytes 3-5/6"
+        ),
+    )
+
+    with pytest.raises(fetch_polar_data.PolarFetchError, match="registry|total|length"):
+        fetch_polar_data.fetch_source(
+            _download_source(7), data_root, repository_root=repository
+        )
+
+    assert part.read_bytes() == b"abc"
+    assert not (data_root / "source.tif").exists()
+    assert not (data_root / "source.tif.source-lock.json").exists()
+
+
 def test_range_resume_appends_only_matching_partial_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     part = tmp_path / "source.tif.part"
     destination = tmp_path / "source.tif"
@@ -456,10 +554,14 @@ def test_range_resume_appends_only_matching_partial_response(tmp_path: Path, mon
 
     def fake_open(request: object, **_: object) -> _Response:
         assert request.get_header("Range") == "bytes=3-"
-        return _Response(b"def", status=206, content_range="bytes 3-5/6")
+        return _Response(
+            b"def", status=206, content_length=3, content_range="bytes 3-5/6"
+        )
 
     monkeypatch.setattr(fetch_polar_data, "urlopen", fake_open)
-    assert fetch_polar_data._download_atomic("https://example.invalid/file", part, destination) == "https://example.invalid/file"
+    assert fetch_polar_data._download_atomic(
+        "https://example.invalid/file", part, destination, expected_size_bytes=6
+    ) == "https://example.invalid/file"
     assert destination.read_bytes() == b"abcdef"
 
 
@@ -470,11 +572,35 @@ def test_range_resume_restarts_when_server_ignores_range(tmp_path: Path, monkeyp
 
     def fake_open(request: object, **_: object) -> _Response:
         assert request.get_header("Range") == "bytes=3-"
-        return _Response(b"fresh", status=200)
+        return _Response(b"fresh", status=200, content_length=5)
 
     monkeypatch.setattr(fetch_polar_data, "urlopen", fake_open)
-    fetch_polar_data._download_atomic("https://example.invalid/file", part, destination)
+    fetch_polar_data._download_atomic(
+        "https://example.invalid/file", part, destination, expected_size_bytes=5
+    )
     assert destination.read_bytes() == b"fresh"
+
+
+def test_range_resume_rejects_end_outside_advertised_total_and_retains_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    part = tmp_path / "source.tif.part"
+    destination = tmp_path / "source.tif"
+    part.write_bytes(b"abc")
+    monkeypatch.setattr(
+        fetch_polar_data,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(
+            b"defg", status=206, content_range="bytes 3-6/6"
+        ),
+    )
+
+    with pytest.raises(fetch_polar_data.PolarFetchError, match="range"):
+        fetch_polar_data._download_atomic(
+            "https://example.invalid/file", part, destination, expected_size_bytes=6
+        )
+    assert part.read_bytes() == b"abc"
+    assert not destination.exists()
 
 
 def test_range_resume_rejects_https_downgrade_and_retains_part(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -490,7 +616,9 @@ def test_range_resume_rejects_https_downgrade_and_retains_part(tmp_path: Path, m
         ),
     )
     with pytest.raises(fetch_polar_data.PolarFetchError, match="HTTPS"):
-        fetch_polar_data._download_atomic("https://example.invalid/file", part, destination)
+        fetch_polar_data._download_atomic(
+            "https://example.invalid/file", part, destination, expected_size_bytes=6
+        )
     assert part.read_bytes() == b"abc"
     assert not destination.exists()
 
@@ -549,16 +677,42 @@ def test_fetch_cli_writes_aggregate_lock_with_small_fixture(
     assert str(data_root) not in json.dumps(aggregate)
 
 
-def test_registry_carries_official_license_citation_and_jaxa_size() -> None:
+def test_registry_carries_official_license_citation_and_exact_source_sizes() -> None:
     registry = fetch_polar_data.load_registry(
         Path(__file__).resolve().parents[2] / "data_sources/polar_source_registry_v1.json"
     )
     jaxa = next(source for source in registry if source["id"] == "JAXA_LUPEX_DATA_S1")
-    nasa = next(source for source in registry if source["id"] == "NASA_LOLA_87S_DEM")
+    nasa_dem = next(source for source in registry if source["id"] == "NASA_LOLA_87S_DEM")
+    nasa_count = next(source for source in registry if source["id"] == "NASA_LOLA_87S_COUNT")
+    assert nasa_dem["expected_size_bytes"] == 3465285714
+    assert nasa_count["expected_size_bytes"] == 145895726
     assert jaxa["expected_size_bytes"] == 76134049
     assert jaxa["license"] == "cc-by-4.0"
     assert "10.5281/zenodo.17153447" in str(jaxa["citation"])
-    assert "10.1016/j.pss.2020.105119" in str(nasa["citation"])
+    assert "10.1016/j.pss.2020.105119" in str(nasa_dem["citation"])
+
+
+def test_existing_source_reuse_must_match_registry_expected_size(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    data_root = tmp_path / "data"
+    fixture, lock = _locked_fixture(data_root)
+    lock_path = data_root / f"{fixture.name}.source-lock.json"
+    lock_path.write_text(json.dumps(lock.to_dict()), encoding="utf-8")
+    source = {
+        "id": lock.source_id,
+        "filename": lock.filename,
+        "url": "https://example.invalid/fixture.tif",
+        "expected_size_bytes": lock.size_bytes + 1,
+        "citation": lock.citation,
+        "license": lock.license,
+    }
+
+    with pytest.raises(fetch_polar_data.PolarFetchError, match="registry|size"):
+        fetch_polar_data.fetch_source(source, data_root, repository_root=repository)
+
+    assert fixture.is_file()
+    assert lock_path.is_file()
 
 
 def test_interrupted_download_retains_part_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -571,8 +725,10 @@ def test_interrupted_download_retains_part_file(tmp_path: Path, monkeypatch: pyt
                 return super().read(size)
             raise OSError("network interrupted")
 
-    monkeypatch.setattr(fetch_polar_data, "urlopen", lambda *_args, **_kwargs: InterruptedResponse(b"partial", status=200))
+    monkeypatch.setattr(fetch_polar_data, "urlopen", lambda *_args, **_kwargs: InterruptedResponse(b"partial", status=200, content_length=7))
     with pytest.raises(fetch_polar_data.PolarFetchError, match="part retained"):
-        fetch_polar_data._download_atomic("https://example.invalid/file", part, destination)
+        fetch_polar_data._download_atomic(
+            "https://example.invalid/file", part, destination, expected_size_bytes=7
+        )
     assert part.read_bytes() == b"partial"
     assert not destination.exists()
