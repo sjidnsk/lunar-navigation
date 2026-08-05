@@ -24,6 +24,7 @@ from lunar_policy_training.environment.parallel_pool import (  # noqa: E402
     joint_worker_allocation,
 )
 from lunar_policy_training.environment.v3_environment import (  # noqa: E402
+    DecisionBoundaryResult,
     PreparedPlanRequest,
     create_v3_environment,
 )
@@ -159,6 +160,50 @@ def _crash_worker_factory(
         environment=_CrashEnvironment(observation),
         initial_observation=observation,
     )
+
+
+class _PreparationOnlyEnvironment:
+    def __init__(self, observation: PolicyBatch) -> None:
+        self._observation = observation
+
+    @property
+    def current_observation(self) -> PolicyBatch:
+        return self._observation
+
+    def refresh_decision_boundary(self) -> DecisionBoundaryResult:
+        if not bool(self._observation.candidate_mask.any()):
+            return DecisionBoundaryResult(execution_state="NO_CANDIDATES")
+        if float(self._observation.pose_features[0, 5]) <= 0.0:
+            return DecisionBoundaryResult(
+                execution_state="DECISION_BUDGET_EXHAUSTED"
+            )
+        return DecisionBoundaryResult(execution_state="DECISION_READY")
+
+
+class _NoActionThenReadyFactory:
+    def __init__(self, *, boundary: str, mixed_workers: bool = False) -> None:
+        self.boundary = boundary
+        self.mixed_workers = mixed_workers
+        self.calls = 0
+
+    def __call__(
+        self, worker_index: int, platform_type: str
+    ) -> ParallelEnvironmentWorker:
+        self.calls += 1
+        observation = _observation(worker_index + self.calls * 10, platform_type)
+        observation.pose_features[0, 5] = 1.0
+        selected = worker_index == 0 or not self.mixed_workers
+        if selected and self.calls == 1:
+            if self.boundary == "NO_CANDIDATES":
+                observation.candidate_mask.zero_()
+            elif self.boundary == "DECISION_BUDGET_EXHAUSTED":
+                observation.pose_features[0, 5] = 0.0
+            else:
+                raise AssertionError("unsupported no-action boundary")
+        return ParallelEnvironmentWorker(
+            environment=_PreparationOnlyEnvironment(observation),
+            initial_observation=observation,
+        )
 
 
 def _actions(worker_count: int) -> ParallelActions:
@@ -299,3 +344,83 @@ def test_worker_crash_never_silently_reduces_worker_count() -> None:
     assert pool.rollout_discarded is True
     assert pool.training_stopped is True
     pool.close()
+
+
+@pytest.mark.parametrize(
+    "boundary", ["NO_CANDIDATES", "DECISION_BUDGET_EXHAUSTED"]
+)
+def test_preserved_no_action_terminal_can_be_explicitly_reset(
+    boundary: str,
+) -> None:
+    """Would fail if evaluation could not reset a no-action terminal row."""
+    factory = _NoActionThenReadyFactory(boundary=boundary)
+    with ParallelEnvPool(
+        allocation={"WHEELED": 1},
+        observation_template=_observation(0, "WHEELED"),
+        environment_factory=factory,
+        reward_fn=_zero_reward,
+        worker_timeout_seconds=5.0,
+        auto_reset=False,
+    ) as pool:
+        pool.reset()
+        prepared = pool.prepare_decision_boundaries(policy_version=41)
+        prepared_dones = prepared.dones.tolist()
+        prepared_consumed = prepared.decision_budget_consumed.tolist()
+        prepared_outcomes = prepared.planning_outcomes
+        prepared_events = prepared.execution_events
+        reset = pool.reset_terminated_workers((0,), policy_version=42)
+        reset_dones = reset.dones.tolist()
+        actionable = pool.prepare_decision_boundaries(policy_version=42)
+
+    assert prepared_dones == [True]
+    assert prepared_consumed == [0]
+    assert prepared_outcomes == ()
+    assert prepared_events == ()
+    assert reset_dones == [False]
+    assert actionable.dones.tolist() == [False]
+    assert bool(actionable.observations.candidate_mask[0].any())
+    assert actionable.observations.pose_features[0, 5].item() > 0.0
+
+
+def test_targeted_reset_preserves_every_unselected_worker_field() -> None:
+    """Would fail if a local reset rewrote another worker's staged state."""
+    factory = _NoActionThenReadyFactory(
+        boundary="NO_CANDIDATES",
+        mixed_workers=True,
+    )
+    with ParallelEnvPool(
+        allocation={"WHEELED": 2},
+        observation_template=_observation(0, "WHEELED"),
+        environment_factory=factory,
+        reward_fn=_zero_reward,
+        worker_timeout_seconds=5.0,
+        auto_reset=False,
+    ) as pool:
+        pool.reset()
+        source = pool.prepare_decision_boundaries(policy_version=51)
+        source_fields = {
+            name: getattr(source.observations, name)[1].clone()
+            for name in (
+                "prior_channels",
+                "coverage_summary",
+                "local_crop",
+                "frontier_features",
+                "pose_features",
+                "candidate_mask",
+                "platform_context",
+            )
+        }
+        source_reward = source.rewards[1].item()
+        source_done = source.dones[1].item()
+        source_identity = source.observations.observation_identities[1]
+        source_version = source.policy_versions[1].item()
+
+        reset = pool.reset_terminated_workers((0,), policy_version=52)
+
+    assert reset.policy_versions.tolist() == [52, 51]
+    for name, expected in source_fields.items():
+        assert torch.equal(getattr(reset.observations, name)[1], expected)
+    assert reset.rewards[1].item() == source_reward
+    assert reset.dones[1].item() == source_done
+    assert reset.observations.observation_identities[1] == source_identity
+    assert source_version == 51

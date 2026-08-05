@@ -354,7 +354,9 @@ class ParallelEnvPool:
             self._shared_dones[target_buffer].copy_(
                 self._shared_dones[self._buffer_index]
             )
-            self._shared_policy_versions[target_buffer].fill_(policy_version)
+            self._shared_policy_versions[target_buffer].copy_(
+                self._shared_policy_versions[self._buffer_index]
+            )
             current_identities = self._buffer_identities[self._buffer_index]
             if current_identities is None:
                 raise ParallelPoolError("current observation identities are missing")
@@ -697,6 +699,7 @@ def _worker_main(
             )
         )
         terminal_transition: PlannerTransition | None = None
+        no_action_terminal: str | None = None
         while True:
             command = command_queue.get()
             if command == ("stop",):
@@ -707,7 +710,7 @@ def _worker_main(
                 if len(command) != 3 or auto_reset:
                     raise ParallelPoolError("worker reset command failed")
                 _, buffer_index, policy_version = command
-                if terminal_transition is None:
+                if terminal_transition is None and no_action_terminal is None:
                     raise ParallelPoolError(
                         "only a terminated worker can be explicitly reset"
                     )
@@ -717,6 +720,7 @@ def _worker_main(
                         "environment factory must return ParallelEnvironmentWorker"
                     )
                 terminal_transition = None
+                no_action_terminal = None
                 current_observation = _environment_current_observation(worker)
                 _write_observation(
                     observation_buffers[buffer_index],
@@ -740,6 +744,10 @@ def _worker_main(
                 if len(command) != 3:
                     raise ParallelPoolError("worker preparation command failed")
                 _, buffer_index, policy_version = command
+                if terminal_transition is not None or no_action_terminal is not None:
+                    raise ParallelPoolError(
+                        "terminated worker requires reset before preparation"
+                    )
                 boundary = worker.environment.refresh_decision_boundary()
                 if (
                     boundary.transition is not None
@@ -761,15 +769,14 @@ def _worker_main(
                         "worker returned invalid decision-boundary state"
                     )
                 if terminal_boundary:
-                    if not auto_reset:
-                        raise ParallelPoolError(
-                            "no-action boundary requires auto reset"
-                        )
-                    worker = environment_factory(worker_index, platform_type)
-                    if not isinstance(worker, ParallelEnvironmentWorker):
-                        raise ParallelPoolError(
-                            "environment factory must return ParallelEnvironmentWorker"
-                        )
+                    if auto_reset:
+                        worker = environment_factory(worker_index, platform_type)
+                        if not isinstance(worker, ParallelEnvironmentWorker):
+                            raise ParallelPoolError(
+                                "environment factory must return ParallelEnvironmentWorker"
+                            )
+                    else:
+                        no_action_terminal = boundary.execution_state
                 current_observation = _environment_current_observation(worker)
                 _write_observation(
                     observation_buffers[buffer_index],
@@ -802,7 +809,7 @@ def _worker_main(
                 ),
                 theta_rad=float(action_buffers[buffer_index]["thetas"][worker_index]),
             )
-            if terminal_transition is None:
+            if terminal_transition is None and no_action_terminal is None:
                 boundary = worker.environment.advance_prepared_action(
                     action,
                     expected_identity=expected_identity,

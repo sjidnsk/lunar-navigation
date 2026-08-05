@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Callable, Protocol
@@ -63,6 +64,15 @@ _REJECTED_ACTION_OUTPUTS = frozenset(
             ExecutionDirective.NO_SAFE_REFERENCE,
         ),
     }
+)
+_MAX_COMMITTED_HOP_FEEDBACK_STEPS = 64
+_EXECUTION_EVENT_COUNT_FIELDS = (
+    "safety_violation_count",
+    "invalid_action_count",
+    "platform_reference_mismatch_count",
+    "hopper_commitment_violation_count",
+    "execution_failure_count",
+    "reference_samples_consumed",
 )
 
 
@@ -299,6 +309,11 @@ class V3ExplorationEnvironment:
         self._remaining_decisions -= 1
         self._set_network_budget_ratio()
         transition = self.step(action, expected_identity=expected_identity)
+        if self._platform_type == "HOPPER" and self._execution_state in {
+            "JUMP_COMMITTED",
+            "IN_FLIGHT",
+        }:
+            transition = self._complete_committed_hop_transition(transition)
         return DecisionBoundaryResult(
             execution_state=self._execution_state,
             transition=transition,
@@ -429,6 +444,122 @@ class V3ExplorationEnvironment:
         self._execution_state = feedback.execution_state
         return feedback
 
+    def _complete_committed_hop_transition(
+        self,
+        initial_transition: PlannerTransition,
+    ) -> PlannerTransition:
+        """Drain one production HOPPER action to a finite landed macro-step."""
+        transitions = [initial_transition]
+        previous_state = self._execution_state
+        for _ in range(_MAX_COMMITTED_HOP_FEEDBACK_STEPS):
+            if previous_state == "LANDED_HOLD":
+                self._committed_output = None
+                return self._aggregate_hopper_transitions(transitions)
+            if previous_state not in {"JUMP_COMMITTED", "IN_FLIGHT"}:
+                self._fail_closed(
+                    "committed hopper left the execution state machine before landing"
+                )
+            if transitions[-1].terminated:
+                self._fail_closed(
+                    "committed hopper terminated before LANDED_HOLD"
+                )
+            output = self._committed_output
+            if output is None:
+                self._fail_closed(
+                    "committed hopper lost its planner output before landing"
+                )
+            feedback = self._advance_committed_hop_execution()
+            next_state = feedback.execution_state
+            if previous_state == "IN_FLIGHT" and next_state == "JUMP_COMMITTED":
+                self._fail_closed("committed hopper execution state regressed")
+            transitions.append(self._committed_feedback_transition(output, feedback))
+            previous_state = next_state
+            if previous_state == "LANDED_HOLD":
+                self._committed_output = None
+                return self._aggregate_hopper_transitions(transitions)
+        self._fail_closed("committed hopper did not land within the feedback limit")
+
+    def _aggregate_hopper_transitions(
+        self,
+        transitions: list[PlannerTransition],
+    ) -> PlannerTransition:
+        coverage_delta = sum(
+            transition.coverage_delta for transition in transitions
+        )
+        goal_progress = sum(
+            transition.goal_progress for transition in transitions
+        )
+        if not all(
+            math.isfinite(float(value))
+            for transition in transitions
+            for value in (
+                transition.coverage_delta,
+                transition.goal_progress,
+                transition.normalized_plan_cost,
+                transition.normalized_elapsed_time,
+            )
+        ) or not all(math.isfinite(value) for value in (coverage_delta, goal_progress)):
+            self._fail_closed("committed hopper aggregation contains non-finite data")
+        final = transitions[-1]
+        if self._execution_state != "LANDED_HOLD":
+            self._fail_closed("committed hopper aggregation requires LANDED_HOLD")
+        return PlannerTransition(
+            next_observation=_clone_observation(final.next_observation),
+            coverage_delta=coverage_delta,
+            goal_progress=goal_progress,
+            normalized_plan_cost=transitions[0].normalized_plan_cost,
+            normalized_elapsed_time=transitions[0].normalized_elapsed_time,
+            repeated_visit=any(
+                transition.repeated_visit for transition in transitions
+            ),
+            planning_outcome=transitions[0].planning_outcome,
+            execution_directive=transitions[0].execution_directive,
+            reason_code=transitions[0].reason_code,
+            terminated=final.terminated,
+            execution_events=self._aggregate_execution_events(transitions),
+        )
+
+    def _aggregate_execution_events(
+        self,
+        transitions: list[PlannerTransition],
+    ) -> ExecutionEvents:
+        totals = {name: 0 for name in _EXECUTION_EVENT_COUNT_FIELDS}
+        commitment_states: list[str] = []
+        selected_action_observed_safe = False
+        for transition in transitions:
+            events = transition.execution_events
+            if not isinstance(events, ExecutionEvents):
+                self._fail_closed("committed hopper execution events are invalid")
+            for name in _EXECUTION_EVENT_COUNT_FIELDS:
+                value = getattr(events, name)
+                if type(value) is not int or value < 0:
+                    self._fail_closed(
+                        "committed hopper event count must be non-negative"
+                    )
+                totals[name] += value
+            if type(events.selected_action_observed_safe) is not bool:
+                self._fail_closed("committed hopper safe-action fact is invalid")
+            selected_action_observed_safe = (
+                selected_action_observed_safe
+                or events.selected_action_observed_safe
+            )
+            states = events.hopper_commitment_states
+            if not isinstance(states, tuple) or any(
+                state not in {"JUMP_COMMITTED", "IN_FLIGHT", "LANDED_HOLD"}
+                for state in states
+            ):
+                self._fail_closed("committed hopper event states are invalid")
+            if states:
+                commitment_states.extend(states)
+            else:
+                identity = transition.next_observation.observation_identities[0]
+                commitment_states.append(identity.execution_state)
+        return ExecutionEvents(
+            **totals,
+            selected_action_observed_safe=selected_action_observed_safe,
+            hopper_commitment_states=tuple(commitment_states),
+        )
+
     def _committed_feedback_transition(
         self,
         output: PlannerOutput,
@@ -461,6 +592,11 @@ class V3ExplorationEnvironment:
             self._fail_closed("reference executor returned an invalid result")
         self._install_observation(execution.next_observation)
         self._execution_state = execution.execution_state
+        if self._platform_type == "HOPPER" and self._execution_state in {
+            "JUMP_COMMITTED",
+            "IN_FLIGHT",
+        }:
+            self._committed_output = output
         best_cost = output.diagnostics.best_cost
         return PlannerTransition(
             next_observation=self._observation,

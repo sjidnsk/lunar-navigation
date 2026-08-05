@@ -8,6 +8,7 @@ import pytest
 import torch
 from lunar_planner_training_bridge import (
     ExecutionDirective,
+    PlannerOutput,
     PlanningOutcome,
     TrainingPlanRequest,
 )
@@ -23,6 +24,7 @@ from lunar_policy_training.policy.observation import (  # noqa: E402
 )
 from lunar_policy_training.cli import _ParallelPoolVectorEnv  # noqa: E402
 from lunar_policy_training.environment.macro_step import (  # noqa: E402
+    ExecutionEvents,
     PlannerTransition,
 )
 from lunar_policy_training.environment.parallel_pool import (  # noqa: E402
@@ -30,8 +32,10 @@ from lunar_policy_training.environment.parallel_pool import (  # noqa: E402
     ParallelEnvPool,
 )
 from lunar_policy_training.environment.v3_environment import (  # noqa: E402
+    CommittedHopExecutionFeedback,
     DecisionBoundaryResult,
     PreparedPlanRequest,
+    V3ExplorationEnvironment,
     create_v3_environment,
 )
 from lunar_policy_training.ppo.collector import (  # noqa: E402
@@ -423,6 +427,115 @@ class _CountingPolicy(CrossAttentionPolicy):
         return super().forward(batch)
 
 
+class _HopperMacroPolicy(_CountingPolicy):
+    def __init__(self) -> None:
+        super().__init__()
+        self.execution_states: list[str] = []
+
+    def forward(self, batch: PolicyBatch):
+        assert batch.observation_identities is not None
+        self.execution_states.append(
+            batch.observation_identities[0].execution_state
+        )
+        return super().forward(batch)
+
+
+class _StaticPlannerBridge:
+    def __init__(self, output: PlannerOutput) -> None:
+        self.output = output
+
+    def plan(self, request) -> PlannerOutput:
+        return self.output
+
+
+class _FeedbackSequence:
+    def __init__(self, feedback: tuple[CommittedHopExecutionFeedback, ...]) -> None:
+        self.feedback = list(feedback)
+
+    def __call__(self) -> CommittedHopExecutionFeedback:
+        if not self.feedback:
+            raise AssertionError("committed-hop feedback over-consumed")
+        return self.feedback.pop(0)
+
+
+def _hopper_macro_observation(
+    execution_state: str,
+    generation: int,
+) -> PolicyBatch:
+    observation = _boundary_observation(all_false=False, generation=generation)
+    observation.platform_context.copy_(
+        torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32)
+    )
+    observation.observation_identities = (
+        ObservationIdentity(
+            episode_id="collector-hopper",
+            mission_revision=1,
+            map_snapshot_id="hopper-map",
+            robot_state_id=f"hopper-state-{generation}",
+            state_time_ns=generation,
+            execution_state=execution_state,
+            candidate_set_id=f"hopper-candidates-{generation}",
+        ),
+    )
+    return observation
+
+
+def _hopper_macro_worker(
+    worker_index: int, platform_type: str
+) -> ParallelEnvironmentWorker:
+    assert platform_type == "HOPPER"
+    scale = float(worker_index + 1)
+    output = PlannerOutput()
+    output.outcome = PlanningOutcome.SAFE_FRONTIER_REFERENCE_AVAILABLE
+    output.directive = ExecutionDirective.CONTINUE_COMMITTED_HOP
+    output.reason_code = "COMMITTED_HOP_CONTINUES"
+    feedback = tuple(
+        CommittedHopExecutionFeedback(
+            execution_state=state,
+            next_observation=_hopper_macro_observation(state, generation),
+            coverage_delta=coverage_delta,
+            goal_progress=goal_progress,
+            repeated_visit=False,
+            terminated=False,
+            execution_events=ExecutionEvents(
+                reference_samples_consumed=generation,
+                selected_action_observed_safe=(generation == 1),
+                hopper_commitment_states=(state,),
+            ),
+        )
+        for state, generation, coverage_delta, goal_progress in (
+            ("JUMP_COMMITTED", 1, 0.1 * scale, 0.2 * scale),
+            ("IN_FLIGHT", 2, 0.25 * scale, 0.3 * scale),
+            ("LANDED_HOLD", 3, 0.4 * scale, 0.5 * scale),
+        )
+    )
+    initial = _hopper_macro_observation("GROUND_HOLD", 0)
+    environment = V3ExplorationEnvironment(
+        platform_type="HOPPER",
+        bridge=_StaticPlannerBridge(output),
+        request_builder=lambda action: action,
+        initial_observation=initial,
+        committed_hop_executor=_FeedbackSequence(feedback),
+    )
+    return ParallelEnvironmentWorker(
+        environment=environment,
+        initial_observation=initial,
+    )
+
+
+def _hopper_macro_reward(transition: PlannerTransition) -> float:
+    identity = transition.next_observation.observation_identities[0]
+    if identity.execution_state != "LANDED_HOLD":
+        raise AssertionError("pool received an intermediate hopper transition")
+    if transition.execution_events.hopper_commitment_states != (
+        "JUMP_COMMITTED",
+        "IN_FLIGHT",
+        "LANDED_HOLD",
+    ):
+        raise AssertionError("pool lost committed-hop execution states")
+    return float(transition.coverage_delta)
+
+
 def _quarter_reward(transition: PlannerTransition) -> float:
     return 0.25 * transition.next_observation.observation_identities[0].state_time_ns
 
@@ -469,6 +582,34 @@ def test_first_production_policy_forward_sees_restored_budget_ratio() -> None:
         )
 
     assert policy.budget_ratios[0] == pytest.approx([0.25])
+
+
+def test_hopper_pool_collector_returns_one_complete_landed_macro_sample() -> None:
+    """Would fail if spawned collection requested policy during a committed hop."""
+    policy = _HopperMacroPolicy().eval()
+    with ParallelEnvPool(
+        allocation={"HOPPER": 2},
+        observation_template=_hopper_macro_observation("GROUND_HOLD", 0),
+        environment_factory=_hopper_macro_worker,
+        reward_fn=_hopper_macro_reward,
+        worker_timeout_seconds=5.0,
+    ) as pool:
+        collected = collect_rollout(
+            _ParallelPoolVectorEnv(pool, policy_version=37),
+            policy,
+            CollectorConfig(horizon=1, deterministic=True),
+            device="cpu",
+        )
+
+    assert len(collected.rollout) == 2
+    np.testing.assert_allclose(
+        collected.rewards,
+        np.asarray([[0.75, 1.5]], dtype=np.float32),
+        rtol=0.0,
+        atol=1.0e-6,
+    )
+    assert policy.execution_states == ["GROUND_HOLD", "LANDED_HOLD"]
+    assert policy.execution_states.count("GROUND_HOLD") == 1
 
 
 @pytest.mark.parametrize("initial_all_false", [True, False])

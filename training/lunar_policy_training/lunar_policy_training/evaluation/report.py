@@ -351,9 +351,24 @@ def _evaluate_method(
         completion_steps = np.zeros(row_count, dtype=np.int64)
         final_coverage = np.full(row_count, 0.05, dtype=np.float32)
         for step_index in range(1, 4):
-            observations = pool.prepare_decision_boundaries(
-                policy_version=0
-            ).observations
+            prepared = pool.prepare_decision_boundaries(policy_version=0)
+            no_action_workers = tuple(
+                int(index)
+                for index in torch.nonzero(prepared.dones, as_tuple=False)
+                .flatten()
+                .tolist()
+            )
+            if no_action_workers:
+                pool.reset_terminated_workers(
+                    no_action_workers,
+                    policy_version=0,
+                )
+                prepared = pool.prepare_decision_boundaries(policy_version=0)
+                if bool(prepared.dones.any()):
+                    raise ValueError(
+                        "evaluation reset did not reach an actionable boundary"
+                    )
+            observations = prepared.observations
             first_indices, first_thetas = _select_actions(
                 policy,
                 method=method,

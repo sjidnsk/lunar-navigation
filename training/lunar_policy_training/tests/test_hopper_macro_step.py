@@ -20,7 +20,10 @@ from lunar_policy_training.environment.v3_environment import (  # noqa: E402
     EnvironmentInvariantError,
     V3ExplorationEnvironment,
 )
-from lunar_policy_training.environment.macro_step import PolicyAction  # noqa: E402
+from lunar_policy_training.environment.macro_step import (  # noqa: E402
+    ExecutionEvents,
+    PolicyAction,
+)
 import torch  # noqa: E402
 
 from lunar_policy_training.policy.observation import (  # noqa: E402
@@ -76,6 +79,7 @@ def _execution_feedback(
     marker: float,
     coverage_delta: float,
     goal_progress: float,
+    execution_events: ExecutionEvents = ExecutionEvents(),
 ) -> CommittedHopExecutionFeedback:
     observation = _hopper_observation(execution_state)
     observation.pose_features[0, 0] = marker
@@ -86,6 +90,81 @@ def _execution_feedback(
         goal_progress=goal_progress,
         repeated_visit=False,
         terminated=False,
+        execution_events=execution_events,
+    )
+
+
+def test_prepared_hopper_action_aggregates_until_landed_hold() -> None:
+    """Would fail if production returned an intermediate committed-hop sample."""
+    output = PlannerOutput()
+    output.outcome = PlanningOutcome.SAFE_FRONTIER_REFERENCE_AVAILABLE
+    output.directive = ExecutionDirective.CONTINUE_COMMITTED_HOP
+    output.reason_code = "COMMITTED_HOP_CONTINUES"
+    feedback = (
+        _execution_feedback(
+            "JUMP_COMMITTED",
+            marker=1.0,
+            coverage_delta=0.1,
+            goal_progress=0.2,
+            execution_events=ExecutionEvents(
+                reference_samples_consumed=1,
+                selected_action_observed_safe=True,
+                hopper_commitment_states=("JUMP_COMMITTED",),
+            ),
+        ),
+        _execution_feedback(
+            "IN_FLIGHT",
+            marker=2.0,
+            coverage_delta=0.25,
+            goal_progress=0.3,
+            execution_events=ExecutionEvents(
+                safety_violation_count=1,
+                reference_samples_consumed=2,
+                hopper_commitment_states=("IN_FLIGHT",),
+            ),
+        ),
+        _execution_feedback(
+            "LANDED_HOLD",
+            marker=3.0,
+            coverage_delta=0.4,
+            goal_progress=0.5,
+            execution_events=ExecutionEvents(
+                execution_failure_count=2,
+                reference_samples_consumed=3,
+                hopper_commitment_states=("LANDED_HOLD",),
+            ),
+        ),
+    )
+    hopper_env = V3ExplorationEnvironment(
+        platform_type="HOPPER",
+        bridge=_Bridge(output),
+        request_builder=lambda action: action,
+        initial_observation=_hopper_observation(),
+        committed_hop_executor=_CommittedHopSimulator(*feedback),
+    )
+    prepared = hopper_env.current_observation
+
+    result = hopper_env.advance_prepared_action(
+        PolicyAction(frontier_index=0, theta_rad=0.0),
+        expected_identity=prepared.observation_identities[0],
+    )
+
+    assert result.execution_state == "LANDED_HOLD"
+    assert result.decision_budget_consumed == 1
+    assert result.transition is not None
+    assert result.transition.next_observation.pose_features[0, 0].item() == 3.0
+    assert result.transition.coverage_delta == pytest.approx(0.75)
+    assert result.transition.goal_progress == pytest.approx(1.0)
+    assert result.transition.execution_events == ExecutionEvents(
+        safety_violation_count=1,
+        execution_failure_count=2,
+        reference_samples_consumed=6,
+        selected_action_observed_safe=True,
+        hopper_commitment_states=(
+            "JUMP_COMMITTED",
+            "IN_FLIGHT",
+            "LANDED_HOLD",
+        ),
     )
 
 
