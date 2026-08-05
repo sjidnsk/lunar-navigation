@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import MISSING, fields
 import math
 
 import pytest
@@ -37,6 +38,8 @@ def _inputs(**overrides: object) -> RewardInputsV2:
         "hopper_commitment_violation_count": 0,
         "terminated": False,
         "planning_outcome": PlanningOutcome.NEW_REFERENCE_AVAILABLE,
+        "cancellation_expected": False,
+        "cpp_exception": None,
     }
     values.update(overrides)
     return RewardInputsV2(**values)
@@ -66,6 +69,8 @@ def test_transition_adapter_consumes_only_explicit_v2_facts() -> None:
         success_first_crossing=False,
         episode_ended_without_success=False,
         hard_safety_violation=False,
+        cancellation_expected=False,
+        cpp_exception=None,
         planning_outcome=PlanningOutcome.NEW_REFERENCE_AVAILABLE,
         execution_directive=ExecutionDirective.ACTIVATE_NEW_REFERENCE,
         reason_code="OK",
@@ -79,6 +84,77 @@ def test_transition_adapter_consumes_only_explicit_v2_facts() -> None:
     assert inputs.priority_observed_delta == 0.1
     assert inputs.normalized_plan_or_execution_cost == 0.4
     assert inputs.normalized_macro_step_time == 0.5
+
+
+def test_v2_ancillary_facts_have_no_implicit_dataclass_defaults() -> None:
+    """Would fail if cancellation, exception, or gate evidence became implicit."""
+    transition_defaults = {
+        field.name: field.default for field in fields(PlannerTransition)
+    }
+    reward_defaults = {
+        field.name: field.default for field in fields(RewardInputsV2)
+    }
+
+    assert transition_defaults["cancellation_expected"] is MISSING
+    assert transition_defaults["cpp_exception"] is MISSING
+    assert transition_defaults["execution_events"] is MISSING
+    assert reward_defaults["cancellation_expected"] is MISSING
+    assert reward_defaults["cpp_exception"] is MISSING
+
+
+def test_standard_transition_adapter_preserves_expected_cancellation() -> None:
+    """Would fail if expected CANCELED could only use a non-standard reward path."""
+    transition = PlannerTransition(
+        next_observation=_observation(),
+        mission_observed_delta=0.0,
+        priority_observed_delta=0.0,
+        normalized_plan_or_execution_cost=0.0,
+        normalized_macro_step_time=0.0,
+        executed_without_new_coverage=False,
+        success_first_crossing=False,
+        episode_ended_without_success=False,
+        hard_safety_violation=False,
+        cancellation_expected=True,
+        cpp_exception=None,
+        planning_outcome=PlanningOutcome.CANCELED,
+        execution_directive=ExecutionDirective.HOLD_POSITION,
+        reason_code="EXPECTED_CANCEL",
+        terminated=False,
+        execution_events=ExecutionEvents(),
+    )
+
+    inputs = RewardInputsV2.from_transition(transition, platform_type="WHEELED")
+
+    assert inputs.cancellation_expected is True
+    assert inputs.cpp_exception is None
+    assert compute_reward(inputs) == 0.0
+
+
+def test_standard_transition_adapter_rejects_cpp_exception_marker() -> None:
+    """Would fail if the adapter dropped an explicit C++ exception fact."""
+    transition = PlannerTransition(
+        next_observation=_observation(),
+        mission_observed_delta=0.0,
+        priority_observed_delta=0.0,
+        normalized_plan_or_execution_cost=0.0,
+        normalized_macro_step_time=0.0,
+        executed_without_new_coverage=False,
+        success_first_crossing=False,
+        episode_ended_without_success=False,
+        hard_safety_violation=False,
+        cancellation_expected=False,
+        cpp_exception="planner threw",
+        planning_outcome=PlanningOutcome.NEW_REFERENCE_AVAILABLE,
+        execution_directive=ExecutionDirective.ACTIVATE_NEW_REFERENCE,
+        reason_code="CPP_EXCEPTION",
+        terminated=False,
+        execution_events=ExecutionEvents(),
+    )
+
+    inputs = RewardInputsV2.from_transition(transition, platform_type="WHEELED")
+
+    with pytest.raises(InvalidTransition, match=r"C\+\+ exception"):
+        compute_reward(inputs)
 
 
 def test_success_bonus_dominates_maximum_dense_positive_shaping_once() -> None:

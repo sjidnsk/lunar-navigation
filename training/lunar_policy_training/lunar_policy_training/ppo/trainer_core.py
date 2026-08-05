@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from ..config import PPOConfig
+from ..config import PPOConfig, TrainingConfigError, validate_ppo_config
 
 
 class PPOTrainingError(RuntimeError):
@@ -43,8 +43,12 @@ def compute_ppo_loss_terms(
     config: PPOConfig,
 ) -> PPOLossTerms:
     """Compute clipped joint-policy/value PPO with separate action entropies."""
-    if not isinstance(config, PPOConfig):
-        raise PPOTrainingError("PPO loss requires typed PPOConfig")
+    try:
+        validate_ppo_config(config)
+    except TrainingConfigError as error:
+        raise PPOTrainingError(
+            "PPO loss requires the frozen typed PPO baseline"
+        ) from error
     tensors = (
         new_log_prob_total,
         old_log_prob_total,

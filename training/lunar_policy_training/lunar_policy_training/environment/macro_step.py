@@ -40,11 +40,13 @@ class PlannerTransition:
     success_first_crossing: bool
     episode_ended_without_success: bool
     hard_safety_violation: bool
+    cancellation_expected: bool
+    cpp_exception: str | None
     planning_outcome: PlanningOutcome
     execution_directive: ExecutionDirective
     reason_code: str
     terminated: bool
-    execution_events: ExecutionEvents = ExecutionEvents()
+    execution_events: ExecutionEvents
 
 
 __all__ = ["ExecutionEvents", "PlannerTransition", "PolicyAction"]

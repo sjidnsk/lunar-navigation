@@ -50,8 +50,8 @@ class RewardInputsV2:
     hopper_commitment_violation_count: int
     terminated: bool
     planning_outcome: PlanningOutcome
-    cancellation_expected: bool = False
-    cpp_exception: str | None = None
+    cancellation_expected: bool
+    cpp_exception: str | None
 
     @classmethod
     def from_transition(
@@ -86,6 +86,8 @@ class RewardInputsV2:
             ),
             terminated=transition.terminated,
             planning_outcome=transition.planning_outcome,
+            cancellation_expected=transition.cancellation_expected,
+            cpp_exception=transition.cpp_exception,
         )
 
 

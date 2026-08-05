@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, replace
 import pathlib
 import sys
 
@@ -248,6 +248,58 @@ _EXPECTED_PPO = {
     "dtype": "float32",
 }
 
+_PPO_VALUE_DRIFTS = (
+    ("gamma", 0.994),
+    ("gae_lambda", 0.94),
+    ("policy_clip", 0.19),
+    ("value_clip", 0.19),
+    ("learning_rate", 2.0e-4),
+    ("optimizer", "Adam"),
+    ("weight_decay", 2.0e-4),
+    ("adam_epsilon", 2.0e-5),
+    ("epochs_per_update", 3),
+    ("target_kl", 0.04),
+    ("value_loss_coefficient", 0.4),
+    ("frontier_entropy_coef", 0.02),
+    ("theta_entropy_coef", 0.002),
+    ("max_grad_norm", 0.6),
+    ("rollout_horizon", 31),
+    ("dtype", "float16"),
+)
+
+
+class _StringSubclass(str):
+    pass
+
+
+_PPO_SAME_VALUE_WRONG_TYPES = (
+    ("gamma", np.float64(0.995)),
+    ("gae_lambda", np.float64(0.95)),
+    ("policy_clip", np.float64(0.20)),
+    ("value_clip", np.float64(0.20)),
+    ("learning_rate", np.float64(3.0e-4)),
+    ("optimizer", _StringSubclass("AdamW")),
+    ("weight_decay", np.float64(1.0e-4)),
+    ("adam_epsilon", np.float64(1.0e-5)),
+    ("epochs_per_update", np.int64(4)),
+    ("target_kl", np.float64(0.03)),
+    ("value_loss_coefficient", np.float64(0.5)),
+    ("frontier_entropy_coef", np.float64(0.01)),
+    ("theta_entropy_coef", np.float64(0.001)),
+    ("max_grad_norm", np.float64(0.5)),
+    ("rollout_horizon", np.int64(32)),
+    ("dtype", _StringSubclass("float32")),
+)
+
+
+def _unchecked_ppo_config(**changes: object) -> PPOConfig:
+    values = dict(_EXPECTED_PPO)
+    values.update(changes)
+    config = object.__new__(PPOConfig)
+    for field, value in values.items():
+        object.__setattr__(config, field, value)
+    return config
+
 
 @pytest.mark.parametrize(
     "filename",
@@ -265,24 +317,7 @@ def test_both_yaml_files_freeze_the_exact_typed_ppo_baseline(filename: str) -> N
 
 @pytest.mark.parametrize(
     ("field", "drift"),
-    [
-        ("gamma", 0.994),
-        ("gae_lambda", 0.94),
-        ("policy_clip", 0.19),
-        ("value_clip", 0.19),
-        ("learning_rate", 2.0e-4),
-        ("optimizer", "Adam"),
-        ("weight_decay", 2.0e-4),
-        ("adam_epsilon", 2.0e-5),
-        ("epochs_per_update", 3),
-        ("target_kl", 0.04),
-        ("value_loss_coefficient", 0.4),
-        ("frontier_entropy_coef", 0.02),
-        ("theta_entropy_coef", 0.002),
-        ("max_grad_norm", 0.6),
-        ("rollout_horizon", 31),
-        ("dtype", "float16"),
-    ],
+    _PPO_VALUE_DRIFTS,
 )
 def test_loader_rejects_every_ppo_value_drift(field: str, drift: object) -> None:
     """Would fail if one PPO scalar, dtype, or horizon bypassed the freeze."""
@@ -296,6 +331,59 @@ def test_loader_rejects_every_ppo_value_drift(field: str, drift: object) -> None
 
     with pytest.raises(TrainingConfigError, match="PPO|frozen"):
         resolve_training_config(raw)
+
+
+@pytest.mark.parametrize(("field", "drift"), _PPO_VALUE_DRIFTS)
+@pytest.mark.parametrize("construction", ("direct", "replace"))
+def test_typed_ppo_config_rejects_every_value_drift(
+    field: str,
+    drift: object,
+    construction: str,
+) -> None:
+    """Would fail if direct construction or replace bypassed one frozen value."""
+    with pytest.raises(TrainingConfigError, match="PPO|frozen"):
+        if construction == "direct":
+            values = dict(_EXPECTED_PPO)
+            values[field] = drift
+            PPOConfig(**values)
+        else:
+            replace(_ppo_config(), **{field: drift})
+
+
+@pytest.mark.parametrize(("field", "drift"), _PPO_SAME_VALUE_WRONG_TYPES)
+def test_typed_ppo_config_rejects_same_value_with_wrong_exact_type(
+    field: str,
+    drift: object,
+) -> None:
+    """Would fail if equality let a non-builtin PPO field type pass."""
+    values = dict(_EXPECTED_PPO)
+    values[field] = drift
+
+    with pytest.raises(TrainingConfigError, match="PPO|type"):
+        PPOConfig(**values)
+
+
+@pytest.mark.parametrize("consumer", ("trainer", "loss"))
+def test_ppo_consumers_revalidate_unchecked_typed_config(consumer: str) -> None:
+    """Would fail if a typed object bypassing construction reached PPO math."""
+    config = _unchecked_ppo_config(epochs_per_update=3)
+
+    with pytest.raises(trainer_core.PPOTrainingError, match="PPO|frozen"):
+        if consumer == "trainer":
+            PPOTrainer(CrossAttentionPolicy(), config=config)
+        else:
+            scalar = torch.zeros((1,), dtype=torch.float32)
+            trainer_core.compute_ppo_loss_terms(
+                new_log_prob_total=scalar,
+                old_log_prob_total=scalar,
+                normalized_advantage=scalar,
+                new_value=scalar,
+                old_value=scalar,
+                returns=scalar,
+                frontier_entropy=scalar,
+                theta_entropy=scalar,
+                config=config,
+            )
 
 
 @pytest.mark.parametrize("mutation", ["missing", "extra"])

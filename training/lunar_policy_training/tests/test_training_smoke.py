@@ -24,7 +24,10 @@ from lunar_policy_training.cli import (  # noqa: E402
 import lunar_policy_training.cli as training_cli  # noqa: E402
 from lunar_policy_training.checkpoint import load_checkpoint  # noqa: E402
 from lunar_policy_training.config import load_training_config  # noqa: E402
-from lunar_policy_training.environment.macro_step import PlannerTransition  # noqa: E402
+from lunar_policy_training.environment.macro_step import (  # noqa: E402
+    ExecutionEvents,
+    PlannerTransition,
+)
 from lunar_policy_training.policy.cross_attention import CrossAttentionPolicy  # noqa: E402
 from lunar_policy_training.policy.observation import PolicyBatch  # noqa: E402
 
@@ -51,10 +54,13 @@ def _transition() -> PlannerTransition:
         success_first_crossing=False,
         episode_ended_without_success=False,
         hard_safety_violation=False,
+        cancellation_expected=False,
+        cpp_exception=None,
         planning_outcome=PlanningOutcome.INVALID_REQUEST,
         execution_directive=ExecutionDirective.NO_SAFE_REFERENCE,
         reason_code="TEST",
         terminated=False,
+        execution_events=ExecutionEvents(),
     )
 
 

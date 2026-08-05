@@ -8,7 +8,7 @@ import math
 import numpy as np
 import torch
 
-from ..config import PPOConfig
+from ..config import PPOConfig, TrainingConfigError, validate_ppo_config
 from ..policy.cross_attention import (
     CrossAttentionPolicy,
     recompute_action_log_probs,
@@ -49,12 +49,12 @@ class PPOTrainer:
             raise trainer_core.PPOTrainingError(
                 "PPOTrainer requires CrossAttentionPolicy"
             )
-        if not isinstance(config, PPOConfig):
-            raise trainer_core.PPOTrainingError("PPOTrainer requires typed PPOConfig")
-        if config.dtype != "float32" or config.optimizer != "AdamW":
+        try:
+            validate_ppo_config(config)
+        except TrainingConfigError as error:
             raise trainer_core.PPOTrainingError(
-                "PPOTrainer requires the frozen FP32 AdamW baseline"
-            )
+                "PPOTrainer requires the frozen typed PPO baseline"
+            ) from error
         self.config = config
         self.device = torch.device(device)
         if self.device.type == "cuda" and not torch.cuda.is_available():

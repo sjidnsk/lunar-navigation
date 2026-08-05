@@ -19,7 +19,10 @@ from lunar_policy_training.evaluation.report import (
 )
 from lunar_policy_training.evaluation.report import evaluate_proxy_policy
 from lunar_policy_training.policy.cross_attention import CrossAttentionPolicy
-from lunar_policy_training.environment.macro_step import PlannerTransition
+from lunar_policy_training.environment.macro_step import (
+    ExecutionEvents,
+    PlannerTransition,
+)
 from lunar_policy_training.proxy_scenario import proxy_observation
 from lunar_policy_training.reward import InvalidTransition
 
@@ -143,10 +146,13 @@ def test_evaluation_reward_fails_closed_on_invalid_transition(
         success_first_crossing=False,
         episode_ended_without_success=False,
         hard_safety_violation=False,
+        cancellation_expected=False,
+        cpp_exception=None,
         planning_outcome=outcome,
         execution_directive=ExecutionDirective.NO_SAFE_REFERENCE,
         reason_code=outcome.name,
         terminated=False,
+        execution_events=ExecutionEvents(),
     )
 
     with pytest.raises(InvalidTransition):

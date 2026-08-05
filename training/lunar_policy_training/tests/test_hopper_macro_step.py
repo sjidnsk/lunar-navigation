@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 import pathlib
 import sys
 from unittest.mock import Mock
@@ -79,6 +80,8 @@ def _execution_feedback(
     marker: float,
     mission_observed_delta: float,
     priority_observed_delta: float,
+    normalized_execution_cost_contribution: float,
+    normalized_execution_time_contribution: float,
     execution_events: ExecutionEvents = ExecutionEvents(),
 ) -> CommittedHopExecutionFeedback:
     observation = _hopper_observation(execution_state)
@@ -88,6 +91,12 @@ def _execution_feedback(
         next_observation=observation,
         mission_observed_delta=mission_observed_delta,
         priority_observed_delta=priority_observed_delta,
+        normalized_execution_cost_contribution=(
+            normalized_execution_cost_contribution
+        ),
+        normalized_execution_time_contribution=(
+            normalized_execution_time_contribution
+        ),
         executed_without_new_coverage=False,
         success_first_crossing=False,
         episode_ended_without_success=False,
@@ -103,12 +112,16 @@ def test_prepared_hopper_action_aggregates_until_landed_hold() -> None:
     output.outcome = PlanningOutcome.SAFE_FRONTIER_REFERENCE_AVAILABLE
     output.directive = ExecutionDirective.CONTINUE_COMMITTED_HOP
     output.reason_code = "COMMITTED_HOP_CONTINUES"
+    output.diagnostics.best_cost = 2.0
+    output.diagnostics.elapsed = timedelta(milliseconds=500)
     feedback = (
         _execution_feedback(
             "JUMP_COMMITTED",
             marker=1.0,
             mission_observed_delta=0.1,
             priority_observed_delta=0.2,
+            normalized_execution_cost_contribution=0.1,
+            normalized_execution_time_contribution=0.4,
             execution_events=ExecutionEvents(
                 reference_samples_consumed=1,
                 selected_action_observed_safe=True,
@@ -120,6 +133,8 @@ def test_prepared_hopper_action_aggregates_until_landed_hold() -> None:
             marker=2.0,
             mission_observed_delta=0.25,
             priority_observed_delta=0.3,
+            normalized_execution_cost_contribution=0.2,
+            normalized_execution_time_contribution=0.5,
             execution_events=ExecutionEvents(
                 invalid_action_count=1,
                 reference_samples_consumed=2,
@@ -131,6 +146,8 @@ def test_prepared_hopper_action_aggregates_until_landed_hold() -> None:
             marker=3.0,
             mission_observed_delta=0.4,
             priority_observed_delta=0.5,
+            normalized_execution_cost_contribution=0.3,
+            normalized_execution_time_contribution=0.6,
             execution_events=ExecutionEvents(
                 execution_failure_count=2,
                 reference_samples_consumed=3,
@@ -144,6 +161,8 @@ def test_prepared_hopper_action_aggregates_until_landed_hold() -> None:
         request_builder=lambda action: action,
         initial_observation=_hopper_observation(),
         committed_hop_executor=_CommittedHopSimulator(*feedback),
+        plan_cost_scale=4.0,
+        planner_elapsed_scale_s=2.0,
     )
     prepared = hopper_env.current_observation
 
@@ -158,6 +177,8 @@ def test_prepared_hopper_action_aggregates_until_landed_hold() -> None:
     assert result.transition.next_observation.pose_features[0, 0].item() == 3.0
     assert result.transition.mission_observed_delta == pytest.approx(0.75)
     assert result.transition.priority_observed_delta == pytest.approx(1.0)
+    assert result.transition.normalized_plan_or_execution_cost == pytest.approx(1.1)
+    assert result.transition.normalized_macro_step_time == pytest.approx(1.75)
     assert result.transition.execution_events == ExecutionEvents(
         invalid_action_count=1,
         execution_failure_count=2,
@@ -177,7 +198,12 @@ def test_prepared_hopper_action_aggregates_until_landed_hold() -> None:
 def test_hopper_does_not_request_policy_while_committed() -> None:
     """Would fail if policy could replace a committed or in-flight hop."""
     landed = _execution_feedback(
-        "LANDED_HOLD", marker=1.0, mission_observed_delta=0.1, priority_observed_delta=0.2
+        "LANDED_HOLD",
+        marker=1.0,
+        mission_observed_delta=0.1,
+        priority_observed_delta=0.2,
+        normalized_execution_cost_contribution=0.0,
+        normalized_execution_time_contribution=0.0,
     )
     hopper_env = V3ExplorationEnvironment(
         platform_type="HOPPER",
@@ -198,10 +224,20 @@ def test_hopper_does_not_request_policy_while_committed() -> None:
 def test_hopper_remains_in_flight_without_landed_feedback() -> None:
     """Would fail if repeated committed advances invented a landing boundary."""
     first_feedback = _execution_feedback(
-        "IN_FLIGHT", marker=1.0, mission_observed_delta=0.1, priority_observed_delta=0.2
+        "IN_FLIGHT",
+        marker=1.0,
+        mission_observed_delta=0.1,
+        priority_observed_delta=0.2,
+        normalized_execution_cost_contribution=0.0,
+        normalized_execution_time_contribution=0.0,
     )
     second_feedback = _execution_feedback(
-        "IN_FLIGHT", marker=2.0, mission_observed_delta=0.3, priority_observed_delta=0.4
+        "IN_FLIGHT",
+        marker=2.0,
+        mission_observed_delta=0.3,
+        priority_observed_delta=0.4,
+        normalized_execution_cost_contribution=0.0,
+        normalized_execution_time_contribution=0.0,
     )
     hopper_env = V3ExplorationEnvironment(
         platform_type="HOPPER",
@@ -263,7 +299,12 @@ def test_hopper_resumes_policy_only_after_landed_hold() -> None:
     output.directive = ExecutionDirective.NO_SAFE_REFERENCE
     output.reason_code = "LANDED_NO_ROUTE"
     landed = _execution_feedback(
-        "LANDED_HOLD", marker=3.0, mission_observed_delta=0.25, priority_observed_delta=0.5
+        "LANDED_HOLD",
+        marker=3.0,
+        mission_observed_delta=0.25,
+        priority_observed_delta=0.5,
+        normalized_execution_cost_contribution=0.0,
+        normalized_execution_time_contribution=0.0,
     )
     hopper_env = V3ExplorationEnvironment(
         platform_type="HOPPER",

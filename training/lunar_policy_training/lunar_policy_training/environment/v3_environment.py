@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Callable, Protocol
 
@@ -105,6 +105,8 @@ class CommittedHopExecutionFeedback:
     next_observation: PolicyBatch
     mission_observed_delta: float
     priority_observed_delta: float
+    normalized_execution_cost_contribution: float
+    normalized_execution_time_contribution: float
     executed_without_new_coverage: bool
     success_first_crossing: bool
     episode_ended_without_success: bool
@@ -126,6 +128,8 @@ class ReferenceExecutionResult:
     next_observation: PolicyBatch
     mission_observed_delta: float
     priority_observed_delta: float
+    normalized_execution_cost_contribution: float
+    normalized_execution_time_contribution: float
     executed_without_new_coverage: bool
     success_first_crossing: bool
     episode_ended_without_success: bool
@@ -276,7 +280,11 @@ class V3ExplorationEnvironment:
             feedback = self._advance_committed_hop_execution()
             output = self._committed_output
             transition = (
-                self._committed_feedback_transition(output, feedback)
+                self._committed_feedback_transition(
+                    output,
+                    feedback,
+                    include_planner_contribution=False,
+                )
                 if output is not None
                 else None
             )
@@ -320,6 +328,22 @@ class V3ExplorationEnvironment:
             "IN_FLIGHT",
         }:
             transition = self._complete_committed_hop_transition(transition)
+        if (
+            not transition.terminated
+            and not transition.success_first_crossing
+            and not transition.hard_safety_violation
+            and (
+                self._remaining_decisions <= 0
+                or not bool(
+                    transition.next_observation.candidate_mask.any().item()
+                )
+            )
+        ):
+            transition = replace(
+                transition,
+                episode_ended_without_success=True,
+                terminated=True,
+            )
         return DecisionBoundaryResult(
             execution_state=self._execution_state,
             transition=transition,
@@ -425,7 +449,11 @@ class V3ExplorationEnvironment:
             )
         self._committed_output = output
         feedback = self._advance_committed_hop_execution()
-        transition = self._committed_feedback_transition(output, feedback)
+        transition = self._committed_feedback_transition(
+            output,
+            feedback,
+            include_planner_contribution=True,
+        )
         if feedback.execution_state == "LANDED_HOLD":
             self._committed_output = None
         return transition
@@ -478,7 +506,13 @@ class V3ExplorationEnvironment:
             next_state = feedback.execution_state
             if previous_state == "IN_FLIGHT" and next_state == "JUMP_COMMITTED":
                 self._fail_closed("committed hopper execution state regressed")
-            transitions.append(self._committed_feedback_transition(output, feedback))
+            transitions.append(
+                self._committed_feedback_transition(
+                    output,
+                    feedback,
+                    include_planner_contribution=False,
+                )
+            )
             previous_state = next_state
             if previous_state == "LANDED_HOLD":
                 self._committed_output = None
@@ -522,10 +556,16 @@ class V3ExplorationEnvironment:
             mission_observed_delta=mission_observed_delta,
             priority_observed_delta=priority_observed_delta,
             normalized_plan_or_execution_cost=(
-                transitions[0].normalized_plan_or_execution_cost
+                sum(
+                    transition.normalized_plan_or_execution_cost
+                    for transition in transitions
+                )
             ),
             normalized_macro_step_time=(
-                transitions[0].normalized_macro_step_time
+                sum(
+                    transition.normalized_macro_step_time
+                    for transition in transitions
+                )
             ),
             executed_without_new_coverage=all(
                 transition.executed_without_new_coverage
@@ -537,6 +577,15 @@ class V3ExplorationEnvironment:
             ),
             hard_safety_violation=any(
                 transition.hard_safety_violation for transition in transitions
+            ),
+            cancellation_expected=transitions[0].cancellation_expected,
+            cpp_exception=next(
+                (
+                    transition.cpp_exception
+                    for transition in transitions
+                    if transition.cpp_exception is not None
+                ),
+                None,
             ),
             planning_outcome=transitions[0].planning_outcome,
             execution_directive=transitions[0].execution_directive,
@@ -590,15 +639,32 @@ class V3ExplorationEnvironment:
         self,
         output: PlannerOutput,
         feedback: CommittedHopExecutionFeedback,
+        *,
+        include_planner_contribution: bool,
     ) -> PlannerTransition:
+        if type(include_planner_contribution) is not bool:
+            self._fail_closed("planner contribution flag must be boolean")
+        planner_cost = output.diagnostics.best_cost
         return PlannerTransition(
             next_observation=self._observation,
             mission_observed_delta=feedback.mission_observed_delta,
             priority_observed_delta=feedback.priority_observed_delta,
-            normalized_plan_or_execution_cost=0.0,
+            normalized_plan_or_execution_cost=(
+                feedback.normalized_execution_cost_contribution
+                + (
+                    0.0
+                    if not include_planner_contribution or planner_cost is None
+                    else planner_cost / self._plan_cost_scale
+                )
+            ),
             normalized_macro_step_time=(
-                output.diagnostics.elapsed.total_seconds()
-                / self._planner_elapsed_scale_s
+                feedback.normalized_execution_time_contribution
+                + (
+                    output.diagnostics.elapsed.total_seconds()
+                    / self._planner_elapsed_scale_s
+                    if include_planner_contribution
+                    else 0.0
+                )
             ),
             executed_without_new_coverage=(
                 feedback.executed_without_new_coverage
@@ -608,6 +674,8 @@ class V3ExplorationEnvironment:
                 feedback.episode_ended_without_success
             ),
             hard_safety_violation=feedback.hard_safety_violation,
+            cancellation_expected=False,
+            cpp_exception=None,
             planning_outcome=output.outcome,
             execution_directive=output.directive,
             reason_code=output.reason_code,
@@ -636,10 +704,12 @@ class V3ExplorationEnvironment:
             mission_observed_delta=execution.mission_observed_delta,
             priority_observed_delta=execution.priority_observed_delta,
             normalized_plan_or_execution_cost=(
-                0.0 if best_cost is None else best_cost / self._plan_cost_scale
+                execution.normalized_execution_cost_contribution
+                + (0.0 if best_cost is None else best_cost / self._plan_cost_scale)
             ),
             normalized_macro_step_time=(
-                output.diagnostics.elapsed.total_seconds()
+                execution.normalized_execution_time_contribution
+                + output.diagnostics.elapsed.total_seconds()
                 / self._planner_elapsed_scale_s
             ),
             executed_without_new_coverage=(
@@ -650,6 +720,8 @@ class V3ExplorationEnvironment:
                 execution.episode_ended_without_success
             ),
             hard_safety_violation=execution.hard_safety_violation,
+            cancellation_expected=False,
+            cpp_exception=None,
             planning_outcome=output.outcome,
             execution_directive=output.directive,
             reason_code=output.reason_code,
@@ -682,10 +754,13 @@ class V3ExplorationEnvironment:
             success_first_crossing=False,
             episode_ended_without_success=False,
             hard_safety_violation=False,
+            cancellation_expected=False,
+            cpp_exception=None,
             planning_outcome=outcome,
             execution_directive=directive,
             reason_code=reason_code,
             terminated=False,
+            execution_events=ExecutionEvents(),
         )
 
 

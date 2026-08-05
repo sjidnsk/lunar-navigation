@@ -244,6 +244,8 @@ def test_new_observation_identity_component_clears_temporary_rejections(
                 next_observation=refreshed,
                 mission_observed_delta=0.1,
                 priority_observed_delta=0.1,
+                normalized_execution_cost_contribution=0.0,
+                normalized_execution_time_contribution=0.0,
                 executed_without_new_coverage=False,
                 success_first_crossing=False,
                 episode_ended_without_success=False,
@@ -288,6 +290,8 @@ def test_same_observation_identity_preserves_temporary_rejections() -> None:
                 next_observation=_observation(candidate_mask=(True, True)),
                 mission_observed_delta=0.0,
                 priority_observed_delta=0.0,
+                normalized_execution_cost_contribution=0.0,
+                normalized_execution_time_contribution=0.0,
                 executed_without_new_coverage=False,
                 success_first_crossing=False,
                 episode_ended_without_success=False,
@@ -581,6 +585,8 @@ def test_ground_reference_executes_to_next_decision_boundary(
             next_observation=next_observation,
             mission_observed_delta=0.2,
             priority_observed_delta=0.1,
+            normalized_execution_cost_contribution=0.3,
+            normalized_execution_time_contribution=0.4,
             executed_without_new_coverage=True,
             success_first_crossing=False,
             episode_ended_without_success=False,
@@ -611,8 +617,8 @@ def test_ground_reference_executes_to_next_decision_boundary(
     assert next_observation.pose_features[0, 5].item() == pytest.approx(0.0)
     assert transition.mission_observed_delta == 0.2
     assert transition.priority_observed_delta == 0.1
-    assert transition.normalized_plan_or_execution_cost == 0.5
-    assert transition.normalized_macro_step_time == 0.25
+    assert transition.normalized_plan_or_execution_cost == pytest.approx(0.8)
+    assert transition.normalized_macro_step_time == pytest.approx(0.65)
     assert transition.executed_without_new_coverage is True
     assert transition.planning_outcome == PlanningOutcome.NEW_REFERENCE_AVAILABLE
     assert transition.execution_directive == ExecutionDirective.ACTIVATE_NEW_REFERENCE
@@ -627,6 +633,8 @@ def test_mismatched_reference_platform_discards_rollout_and_stops_training() -> 
             next_observation=_observation(),
             mission_observed_delta=0.0,
             priority_observed_delta=0.0,
+            normalized_execution_cost_contribution=0.0,
+            normalized_execution_time_contribution=0.0,
             executed_without_new_coverage=False,
             success_first_crossing=False,
             episode_ended_without_success=False,
@@ -683,6 +691,8 @@ def test_rejecting_outcome_with_executable_reference_fails_closed() -> None:
             next_observation=_observation(),
             mission_observed_delta=1.0,
             priority_observed_delta=1.0,
+            normalized_execution_cost_contribution=0.0,
+            normalized_execution_time_contribution=0.0,
             executed_without_new_coverage=False,
             success_first_crossing=False,
             episode_ended_without_success=False,
@@ -786,6 +796,8 @@ def test_current_cpp_v3_committed_hop_output_uses_execution_feedback() -> None:
         next_observation=observation,
         mission_observed_delta=0.2,
         priority_observed_delta=0.3,
+        normalized_execution_cost_contribution=0.0,
+        normalized_execution_time_contribution=0.0,
         executed_without_new_coverage=True,
         success_first_crossing=False,
         episode_ended_without_success=False,

@@ -17,6 +17,26 @@ class TrainingConfigError(ValueError):
     """A training configuration violates the frozen Task 3 contract."""
 
 
+_FROZEN_PPO_FIELDS: tuple[tuple[str, type[object], object], ...] = (
+    ("gamma", float, 0.995),
+    ("gae_lambda", float, 0.95),
+    ("policy_clip", float, 0.20),
+    ("value_clip", float, 0.20),
+    ("learning_rate", float, 3.0e-4),
+    ("optimizer", str, "AdamW"),
+    ("weight_decay", float, 1.0e-4),
+    ("adam_epsilon", float, 1.0e-5),
+    ("epochs_per_update", int, 4),
+    ("target_kl", float, 0.03),
+    ("value_loss_coefficient", float, 0.5),
+    ("frontier_entropy_coef", float, 0.01),
+    ("theta_entropy_coef", float, 0.001),
+    ("max_grad_norm", float, 0.5),
+    ("rollout_horizon", int, 32),
+    ("dtype", str, "float32"),
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ParallelConfig:
     worker_candidates: tuple[int, ...]
@@ -44,6 +64,9 @@ class PPOConfig:
     max_grad_norm: float
     rollout_horizon: int
     dtype: str
+
+    def __post_init__(self) -> None:
+        validate_ppo_config(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +245,7 @@ def resolve_training_config(raw: Mapping[str, object]) -> ResolvedTrainingConfig
 
 
 def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
+    validate_ppo_config(config.ppo)
     expected = {
         "worker_candidates": (18, 24),
         "preferred_workers": 24,
@@ -233,24 +257,6 @@ def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
         "total_gpu_budget_seconds": 86400,
         "formal_training_seeds": (4080,),
         "proxy": True,
-        "ppo": {
-            "gamma": 0.995,
-            "gae_lambda": 0.95,
-            "policy_clip": 0.20,
-            "value_clip": 0.20,
-            "learning_rate": 3.0e-4,
-            "optimizer": "AdamW",
-            "weight_decay": 1.0e-4,
-            "adam_epsilon": 1.0e-5,
-            "epochs_per_update": 4,
-            "target_kl": 0.03,
-            "value_loss_coefficient": 0.5,
-            "frontier_entropy_coef": 0.01,
-            "theta_entropy_coef": 0.001,
-            "max_grad_norm": 0.5,
-            "rollout_horizon": 32,
-            "dtype": "float32",
-        },
     }
     actual = {
         "worker_candidates": config.parallel.worker_candidates,
@@ -265,27 +271,24 @@ def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
         "total_gpu_budget_seconds": config.total_gpu_budget_seconds,
         "formal_training_seeds": config.formal_training_seeds,
         "proxy": config.proxy,
-        "ppo": {
-            "gamma": config.ppo.gamma,
-            "gae_lambda": config.ppo.gae_lambda,
-            "policy_clip": config.ppo.policy_clip,
-            "value_clip": config.ppo.value_clip,
-            "learning_rate": config.ppo.learning_rate,
-            "optimizer": config.ppo.optimizer,
-            "weight_decay": config.ppo.weight_decay,
-            "adam_epsilon": config.ppo.adam_epsilon,
-            "epochs_per_update": config.ppo.epochs_per_update,
-            "target_kl": config.ppo.target_kl,
-            "value_loss_coefficient": config.ppo.value_loss_coefficient,
-            "frontier_entropy_coef": config.ppo.frontier_entropy_coef,
-            "theta_entropy_coef": config.ppo.theta_entropy_coef,
-            "max_grad_norm": config.ppo.max_grad_norm,
-            "rollout_horizon": config.ppo.rollout_horizon,
-            "dtype": config.ppo.dtype,
-        },
     }
     if actual != expected:
         raise TrainingConfigError("training config changes a frozen Task 3 value")
+
+
+def validate_ppo_config(config: PPOConfig) -> PPOConfig:
+    """Reject any typed PPO configuration outside the exact frozen baseline."""
+    if not isinstance(config, PPOConfig):
+        raise TrainingConfigError("PPO config must use typed PPOConfig")
+    for field, expected_type, expected_value in _FROZEN_PPO_FIELDS:
+        actual = getattr(config, field)
+        if type(actual) is not expected_type:
+            raise TrainingConfigError(
+                f"PPO field {field} must have exact type {expected_type.__name__}"
+            )
+        if actual != expected_value:
+            raise TrainingConfigError(f"PPO field {field} changes a frozen value")
+    return config
 
 
 def _integer(value: object, name: str) -> int:
@@ -320,4 +323,5 @@ __all__ = [
     "TrainingConfigError",
     "load_training_config",
     "resolve_training_config",
+    "validate_ppo_config",
 ]

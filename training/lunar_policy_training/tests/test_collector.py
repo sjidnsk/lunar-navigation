@@ -46,6 +46,7 @@ from lunar_policy_training.ppo.collector import (  # noqa: E402
     collect_rollout,
 )
 from lunar_policy_training.ppo.rollout import RolloutBatch  # noqa: E402
+from lunar_policy_training.reward import compute_transition_reward  # noqa: E402
 
 
 def _policy_batch(step: int = 0) -> PolicyBatch:
@@ -350,10 +351,13 @@ class _BoundaryProtocolEnvironment:
                 success_first_crossing=False,
                 episode_ended_without_success=False,
                 hard_safety_violation=False,
+                cancellation_expected=False,
+                cpp_exception=None,
                 planning_outcome=PlanningOutcome.NO_KNOWN_SAFE_ROUTE,
                 execution_directive=ExecutionDirective.NO_SAFE_REFERENCE,
                 reason_code="LAST_CANDIDATE_REJECTED",
                 terminated=False,
+                execution_events=ExecutionEvents(),
             ),
             decision_budget_consumed=1,
         )
@@ -451,6 +455,49 @@ class _StaticPlannerBridge:
         return self.output
 
 
+class _LastRealActionFactory:
+    """Create a real V3 action that exhausts candidates or decision budget."""
+
+    def __init__(self, terminal_cause: str) -> None:
+        self.terminal_cause = terminal_cause
+
+    def __call__(
+        self, worker_index: int, platform_type: str
+    ) -> ParallelEnvironmentWorker:
+        observation = _boundary_observation(
+            all_false=False,
+            generation=worker_index + 1,
+        )
+        if self.terminal_cause == "budget":
+            observation.candidate_mask[0, 1] = True
+            total_decision_budget = 1
+        elif self.terminal_cause == "candidates":
+            total_decision_budget = 8
+        else:
+            raise AssertionError("unsupported real-action terminal cause")
+        output = PlannerOutput()
+        if worker_index == 0:
+            output.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+            output.directive = ExecutionDirective.NO_SAFE_REFERENCE
+            output.reason_code = "NO_ROUTE"
+        else:
+            output.outcome = PlanningOutcome.GOAL_INFEASIBLE
+            output.directive = ExecutionDirective.HOLD_POSITION
+            output.reason_code = "GOAL_INFEASIBLE"
+        environment = V3ExplorationEnvironment(
+            platform_type=platform_type,
+            bridge=_StaticPlannerBridge(output),
+            request_builder=lambda action: action,
+            initial_observation=observation,
+            total_decision_budget=total_decision_budget,
+            remaining_decision_budget=total_decision_budget,
+        )
+        return ParallelEnvironmentWorker(
+            environment=environment,
+            initial_observation=observation,
+        )
+
+
 class _FeedbackSequence:
     def __init__(self, feedback: tuple[CommittedHopExecutionFeedback, ...]) -> None:
         self.feedback = list(feedback)
@@ -498,6 +545,8 @@ def _hopper_macro_worker(
             next_observation=_hopper_macro_observation(state, generation),
             mission_observed_delta=mission_observed_delta,
             priority_observed_delta=priority_observed_delta,
+            normalized_execution_cost_contribution=0.0,
+            normalized_execution_time_contribution=0.0,
             executed_without_new_coverage=False,
             success_first_crossing=False,
             episode_ended_without_success=False,
@@ -567,6 +616,33 @@ def test_budget_exhaustion_resolves_before_next_policy_forward() -> None:
     assert policy.forward_calls == 3  # two real actions plus valid bootstrap
     assert len(collected.rollout) == 2
     assert collected.dones.tolist() == [[True], [True]]
+
+
+@pytest.mark.parametrize("terminal_cause", ["candidates", "budget"])
+def test_last_real_action_receives_unsuccessful_terminal_reward_before_reset(
+    terminal_cause: str,
+) -> None:
+    """Would fail if no-action resolution appended done after reward calculation."""
+    template = _boundary_observation(all_false=False, generation=1)
+    policy = _CountingPolicy().eval()
+    with ParallelEnvPool(
+        allocation={"WHEELED": 2},
+        observation_template=template,
+        environment_factory=_LastRealActionFactory(terminal_cause),
+        reward_fn=compute_transition_reward,
+        worker_timeout_seconds=5.0,
+    ) as pool:
+        collected = collect_rollout(
+            _ParallelPoolVectorEnv(pool, policy_version=30),
+            policy,
+            CollectorConfig(horizon=1, deterministic=True),
+            device="cpu",
+        )
+
+    assert policy.forward_calls == 2  # one real action plus reset bootstrap
+    assert len(collected.rollout) == 2
+    assert collected.rewards.tolist() == [[-13.0, -12.0]]
+    assert collected.dones.tolist() == [[True, True]]
 
 
 def test_first_production_policy_forward_sees_restored_budget_ratio() -> None:
