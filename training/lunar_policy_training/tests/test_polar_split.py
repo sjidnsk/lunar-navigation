@@ -85,10 +85,10 @@ def test_split_cli_binds_rows_to_verified_dem_pixel_bounds(tmp_path: Path) -> No
         dataset.write(np.zeros((1, 192, 384), dtype="float32"))
     count = raw / "ldec_87s_5mpp.tif"
     with rasterio.open(
-        count, "w", driver="GTiff", height=192, width=384, count=1, dtype="float32",
-        crs="EPSG:3031", transform=from_origin(0.0, 50_000.0, 256.0, 256.0), nodata=-9999.0,
+        count, "w", driver="GTiff", height=192, width=384, count=1, dtype="uint8",
+        crs="EPSG:3031", transform=from_origin(0.0, 50_000.0, 256.0, 256.0),
     ) as dataset:
-        dataset.write(np.ones((1, 192, 384), dtype="float32"))
+        dataset.write(np.ones((1, 192, 384), dtype="uint8"))
     archive = raw / "DataS1.zip"
     _write_jaxa_archive(archive)
     dem_lock = PolarSourceLock.from_file(

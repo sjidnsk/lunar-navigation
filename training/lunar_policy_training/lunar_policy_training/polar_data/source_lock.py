@@ -17,6 +17,7 @@ from rasterio.io import MemoryFile
 SOURCE_LOCK_SCHEMA = "lunar-polar-source-lock/v1"
 AGGREGATE_SOURCE_LOCK_SCHEMA = "lunar-polar-source-lock-aggregate/v1"
 JAXA_SITE_IDS = ("CR1", "GR1", "GR2", "LP1", "MP1", "MP2")
+_NULL_NODATA_RASTER_SOURCE_ID = "NASA_LOLA_87S_COUNT"
 
 
 class SourceLockError(ValueError):
@@ -106,8 +107,12 @@ class PolarSourceLock:
             if self.transform is None:
                 raise SourceLockError("raster transform is missing")
             object.__setattr__(self, "transform", _normalize_transform(self.transform))
-            if not isinstance(self.nodata, (int, float)) or isinstance(self.nodata, bool):
+            if self.nodata is None and self.source_id != _NULL_NODATA_RASTER_SOURCE_ID:
                 raise SourceLockError("raster NoData is missing")
+            if self.nodata is not None and (
+                not isinstance(self.nodata, (int, float)) or isinstance(self.nodata, bool)
+            ):
+                raise SourceLockError("raster NoData is invalid")
             if members:
                 raise SourceLockError("raster source must not contain archive members")
         elif self.artifact_kind == "archive":
@@ -150,7 +155,10 @@ class PolarSourceLock:
                 nodata=None,
                 archive_members=_archive_member_inventory(source),
             )
-        crs, transform, nodata = _read_raster_metadata(source)
+        crs, transform, nodata = _read_raster_metadata(
+            source,
+            allow_null_nodata=source_id == _NULL_NODATA_RASTER_SOURCE_ID,
+        )
         return cls(
             **common,
             artifact_kind="raster",
@@ -162,6 +170,8 @@ class PolarSourceLock:
 
     @classmethod
     def from_dict(cls, document: Mapping[str, Any]) -> "PolarSourceLock":
+        if "nodata" not in document:
+            raise SourceLockError("source lock NoData must be explicit")
         members = document.get("archive_members", ())
         if not isinstance(members, list):
             raise SourceLockError("archive member inventory is invalid")
@@ -200,7 +210,10 @@ def verify_source_lock(data_root: str | Path, source_lock: PolarSourceLock, *, r
         if _archive_member_inventory(source) != source_lock.archive_members:
             raise SourceLockError("archive member inventory does not match")
     else:
-        crs, transform, nodata = _read_raster_metadata(source)
+        crs, transform, nodata = _read_raster_metadata(
+            source,
+            allow_null_nodata=source_lock.source_id == _NULL_NODATA_RASTER_SOURCE_ID,
+        )
         if (crs, transform, nodata) != (source_lock.crs, source_lock.transform, source_lock.nodata):
             raise SourceLockError("locked source raster metadata does not match")
     if source.stat().st_size != source_lock.size_bytes:
@@ -293,13 +306,13 @@ def _archive_member_inventory(source: Path) -> tuple[ArchiveMemberLock, ...]:
                 member_path = _validated_archive_member_path(info.filename)
                 if member_path.suffix.lower() not in {".tif", ".tiff", ".dem", ".dtm", ".img", ".vrt"}:
                     continue
-                site_ids = [site for site in JAXA_SITE_IDS if site in member_path.parts]
-                if len(site_ids) != 1:
+                site_token = member_path.name.split("_", 1)[0].upper()
+                if site_token not in JAXA_SITE_IDS:
                     raise SourceLockError("archive raster member has no exact JAXA site id")
                 contents = archive.read(info)
                 crs, transform, nodata = _read_raster_metadata_bytes(contents)
                 members.append(ArchiveMemberLock(
-                    path=info.filename, site_id=site_ids[0], size_bytes=info.file_size,
+                    path=info.filename, site_id=site_token, size_bytes=info.file_size,
                     sha256=sha256(contents).hexdigest(), crs=crs, transform=transform, nodata=nodata,
                 ))
     except (OSError, BadZipFile) as error:
@@ -328,10 +341,14 @@ def _validated_archive_member_path(path: object) -> PurePosixPath:
     return posix_path
 
 
-def _read_raster_metadata(source: Path) -> tuple[str, tuple[float, float, float, float, float, float], float]:
+def _read_raster_metadata(
+    source: Path,
+    *,
+    allow_null_nodata: bool = False,
+) -> tuple[str, tuple[float, float, float, float, float, float], float | None]:
     try:
         with rasterio.open(source) as dataset:
-            return _dataset_metadata(dataset)
+            return _dataset_metadata(dataset, allow_null_nodata=allow_null_nodata)
     except SourceLockError:
         raise
     except (OSError, rasterio.errors.RasterioError) as error:
@@ -341,21 +358,29 @@ def _read_raster_metadata(source: Path) -> tuple[str, tuple[float, float, float,
 def _read_raster_metadata_bytes(contents: bytes) -> tuple[str, tuple[float, float, float, float, float, float], float]:
     try:
         with MemoryFile(contents) as memory, memory.open() as dataset:
-            return _dataset_metadata(dataset)
+            crs, transform, nodata = _dataset_metadata(dataset)
+            if nodata is None:
+                raise SourceLockError("raster NoData is missing")
+            return crs, transform, nodata
     except SourceLockError:
         raise
     except (OSError, rasterio.errors.RasterioError) as error:
         raise SourceLockError("archive raster metadata cannot be read") from error
 
 
-def _dataset_metadata(dataset: rasterio.io.DatasetReader) -> tuple[str, tuple[float, float, float, float, float, float], float]:
+def _dataset_metadata(
+    dataset: rasterio.io.DatasetReader,
+    *,
+    allow_null_nodata: bool = False,
+) -> tuple[str, tuple[float, float, float, float, float, float], float | None]:
     if dataset.crs is None:
         raise SourceLockError("raster CRS is missing")
     if dataset.transform is None or dataset.transform.is_identity:
         raise SourceLockError("raster transform is missing")
-    if dataset.nodata is None:
+    if dataset.nodata is None and not allow_null_nodata:
         raise SourceLockError("raster NoData is missing")
-    return dataset.crs.to_string(), tuple(float(value) for value in dataset.transform)[:6], float(dataset.nodata)
+    nodata = None if dataset.nodata is None else float(dataset.nodata)
+    return dataset.crs.to_string(), tuple(float(value) for value in dataset.transform)[:6], nodata
 
 
 def _atomic_json_write(path: Path, document: Mapping[str, object]) -> None:

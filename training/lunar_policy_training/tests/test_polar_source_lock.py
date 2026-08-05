@@ -56,6 +56,26 @@ def _write_raster(
             dataset.write(np.array([[1.0, 2.0], [3.0, 4.0]], dtype="float32"), 1)
 
 
+def _write_count_raster(path: Path, *, nodata: int | None = None) -> None:
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=2,
+        width=2,
+        count=1,
+        dtype="uint8",
+        crs="EPSG:4326",
+        transform=from_origin(12.0, 34.0, 5.0, 5.0),
+        nodata=nodata,
+    ) as dataset:
+        dataset.write(np.array([[0, 1], [4, 5]], dtype="uint8"), 1)
+
+
 def _locked_fixture(root: Path) -> tuple[Path, PolarSourceLock]:
     root.mkdir()
     fixture = root / "fixture.tif"
@@ -68,7 +88,7 @@ def _locked_fixture(root: Path) -> tuple[Path, PolarSourceLock]:
     )
 
 
-def _raster_bytes() -> bytes:
+def _raster_bytes(*, nodata: float | None = -9999.0) -> bytes:
     import numpy as np
     import rasterio
     from rasterio.io import MemoryFile
@@ -83,7 +103,7 @@ def _raster_bytes() -> bytes:
             dtype="float32",
             crs="EPSG:4326",
             transform=from_origin(12.0, 34.0, 5.0, 5.0),
-            nodata=-9999.0,
+            nodata=nodata,
         ) as dataset:
             dataset.write(np.array([[1.0, 2.0], [3.0, 4.0]], dtype="float32"), 1)
         return memory.read()
@@ -96,6 +116,29 @@ def _write_jaxa_archive(path: Path, *, omit_site: str | None = None) -> None:
                 archive.writestr(f"{site_id}/{site_id}_DTM.tif", _raster_bytes())
 
 
+def _write_real_layout_jaxa_archive(
+    path: Path,
+    *,
+    extra_raster: str | None = None,
+    null_nodata_member: str | None = None,
+) -> None:
+    patterns = (
+        ("DTMs", "{site}_roi_sfs_1m-DEM.tif"),
+        ("orthomosaics", "{site}_roi_sfs_1m-ORTHO.tif"),
+        ("uncertainties", "{site}_sfs-height-error-final.tif"),
+    )
+    with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
+        for site_id in ("cr1", "gr1", "gr2", "lp1", "mp1", "mp2"):
+            for directory, pattern in patterns:
+                member = f"{directory}/{pattern.format(site=site_id)}"
+                archive.writestr(
+                    member,
+                    _raster_bytes(nodata=None if member == null_nodata_member else -9999.0),
+                )
+        if extra_raster is not None:
+            archive.writestr(extra_raster, _raster_bytes())
+
+
 def test_verify_source_lock_accepts_matching_external_raster(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -103,6 +146,68 @@ def test_verify_source_lock_accepts_matching_external_raster(tmp_path: Path) -> 
     fixture, lock = _locked_fixture(data_root)
 
     assert verify_source_lock(data_root, lock, repository_root=repository) == fixture
+
+
+def test_official_lola_count_accepts_explicit_null_nodata_roundtrip_and_detects_drift(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    data_root = tmp_path / "polar-data"
+    data_root.mkdir()
+    fixture = data_root / "ldec_87s_5mpp.tif"
+    _write_count_raster(fixture)
+
+    lock = PolarSourceLock.from_file(
+        "NASA_LOLA_87S_COUNT",
+        fixture,
+        citation="NASA PGDA product 81",
+        license="NASA reproduction guidance",
+        final_url="https://pgda.gsfc.nasa.gov/data/LOLA_5mpp/87S/ldec_87s_5mpp.tif",
+    )
+
+    document = lock.to_dict()
+    assert "nodata" in document and document["nodata"] is None
+    assert PolarSourceLock.from_dict(document) == lock
+    assert verify_source_lock(data_root, lock, repository_root=repository) == fixture
+
+    _write_count_raster(fixture, nodata=255)
+    with pytest.raises(SourceLockError, match="metadata"):
+        verify_source_lock(data_root, lock, repository_root=repository)
+
+
+def test_official_lola_count_dict_requires_explicit_nodata_field(tmp_path: Path) -> None:
+    fixture = tmp_path / "ldec_87s_5mpp.tif"
+    _write_count_raster(fixture)
+    lock = PolarSourceLock.from_file(
+        "NASA_LOLA_87S_COUNT",
+        fixture,
+        citation="NASA PGDA product 81",
+        license="NASA reproduction guidance",
+        final_url="https://pgda.gsfc.nasa.gov/data/LOLA_5mpp/87S/ldec_87s_5mpp.tif",
+    )
+    document = lock.to_dict()
+    document.pop("nodata")
+
+    with pytest.raises(SourceLockError, match="NoData.*explicit"):
+        PolarSourceLock.from_dict(document)
+
+
+@pytest.mark.parametrize("source_id", ["NASA_LOLA_87S_DEM", "NASA_LOLA_87S_COUNT_COPY"])
+def test_null_nodata_remains_invalid_for_non_count_rasters(
+    tmp_path: Path, source_id: str
+) -> None:
+    fixture = tmp_path / "source.tif"
+    _write_count_raster(fixture)
+
+    with pytest.raises(SourceLockError, match="NoData"):
+        PolarSourceLock.from_file(
+            source_id,
+            fixture,
+            citation="official source",
+            license="official license",
+            final_url="https://example.invalid/source.tif",
+        )
 
 
 @pytest.mark.parametrize(
@@ -195,6 +300,70 @@ def test_jaxa_archive_lock_inventories_exact_six_raster_sites(tmp_path: Path) ->
         "MP2",
     }
     assert all(member.crs and member.transform and member.nodata is not None for member in lock.archive_members)
+
+
+def test_jaxa_archive_lock_maps_all_real_lowercase_basename_prefixes(tmp_path: Path) -> None:
+    archive = tmp_path / "DataS1.zip"
+    _write_real_layout_jaxa_archive(archive)
+
+    lock = PolarSourceLock.from_file(
+        "JAXA_LUPEX_DATA_S1",
+        archive,
+        citation="https://doi.org/10.5281/zenodo.17153447",
+        license="cc-by-4.0",
+        final_url="https://zenodo.org/api/files/DataS1.zip",
+    )
+
+    assert len(lock.archive_members) == 18
+    assert {
+        site_id: sum(member.site_id == site_id for member in lock.archive_members)
+        for site_id in ("CR1", "GR1", "GR2", "LP1", "MP1", "MP2")
+    } == {site_id: 3 for site_id in ("CR1", "GR1", "GR2", "LP1", "MP1", "MP2")}
+    assert lock.archive_members == tuple(sorted(lock.archive_members, key=lambda member: member.path))
+
+
+@pytest.mark.parametrize(
+    "extra_raster",
+    [
+        "DTMs/xx1_roi_sfs_1m-DEM.tif",
+        "DTMs/xcr1_roi_sfs_1m-DEM.tif",
+        "DTMs/cr1x_roi_sfs_1m-DEM.tif",
+        "DTMs/prefix-cr1_roi_sfs_1m-DEM.tif",
+    ],
+)
+def test_jaxa_archive_lock_rejects_unknown_or_unanchored_basename_prefix(
+    tmp_path: Path, extra_raster: str
+) -> None:
+    archive = tmp_path / "DataS1.zip"
+    _write_real_layout_jaxa_archive(archive, extra_raster=extra_raster)
+
+    with pytest.raises(SourceLockError, match="site id"):
+        PolarSourceLock.from_file(
+            "JAXA_LUPEX_DATA_S1",
+            archive,
+            citation="https://doi.org/10.5281/zenodo.17153447",
+            license="cc-by-4.0",
+            final_url="https://zenodo.org/api/files/DataS1.zip",
+        )
+
+
+def test_jaxa_archive_lock_keeps_numeric_nodata_requirement_for_real_layout(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "DataS1.zip"
+    _write_real_layout_jaxa_archive(
+        archive,
+        null_nodata_member="DTMs/cr1_roi_sfs_1m-DEM.tif",
+    )
+
+    with pytest.raises(SourceLockError, match="NoData"):
+        PolarSourceLock.from_file(
+            "JAXA_LUPEX_DATA_S1",
+            archive,
+            citation="https://doi.org/10.5281/zenodo.17153447",
+            license="cc-by-4.0",
+            final_url="https://zenodo.org/api/files/DataS1.zip",
+        )
 
 
 def test_jaxa_archive_lock_fails_closed_when_one_site_is_missing(tmp_path: Path) -> None:
