@@ -22,6 +22,8 @@ endfunction()
 add_library(${PROJECT_NAME} SHARED
   src/planner.cpp
   src/hierarchical/frame_transform.cpp
+  src/hierarchical/global_route.cpp
+  src/hierarchical/grid_search.cpp
   src/hierarchical/map_level.cpp
   src/hopper/ballistic_kinematics.cpp
   src/hopper/commitment_state_machine.cpp
@@ -99,6 +101,14 @@ if(BUILD_TESTING)
   target_link_libraries(
     lunar_planner_core_hierarchical_types_test ${PROJECT_NAME})
   lunar_enable_sanitizers(lunar_planner_core_hierarchical_types_test)
+
+  ament_add_gtest(lunar_planner_core_global_grid_search_test
+    test/global_grid_search_test.cpp)
+  target_include_directories(lunar_planner_core_global_grid_search_test PRIVATE
+    src test)
+  target_link_libraries(
+    lunar_planner_core_global_grid_search_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_global_grid_search_test)
 
   ament_add_gtest(lunar_planner_core_wheel_planner_test
     test/wheel_planner_test.cpp)
