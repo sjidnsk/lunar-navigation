@@ -233,6 +233,9 @@ if(BUILD_TESTING)
     lunar_hierarchical_planner_benchmark PRIVATE cxx_std_20)
   target_include_directories(
     lunar_hierarchical_planner_benchmark PRIVATE src test)
+  target_compile_definitions(
+    lunar_hierarchical_planner_benchmark PRIVATE
+      LUNAR_BUILD_TYPE=\"${CMAKE_BUILD_TYPE}\")
   target_link_libraries(lunar_hierarchical_planner_benchmark PRIVATE
     ${PROJECT_NAME}
     nlohmann_json::nlohmann_json)

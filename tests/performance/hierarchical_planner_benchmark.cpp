@@ -32,6 +32,7 @@ using Json = nlohmann::json;
 
 constexpr std::string_view kSchemaVersion =
   "lunar-hierarchical-benchmark/v1";
+constexpr std::string_view kBuildType = LUNAR_BUILD_TYPE;
 constexpr std::size_t kWarmupRuns = 1U;
 constexpr std::size_t kMeasuredRuns = 30U;
 constexpr double kResolutionM = 0.2;
@@ -505,6 +506,9 @@ void RequireExpected(
 
 [[nodiscard]] Json Run()
 {
+  if (kBuildType != "Release") {
+    throw std::runtime_error{"PERFORMANCE_BUILD_NOT_RELEASE"};
+  }
   Json results = Json::array();
   for (const std::size_t axis : kAxisTiers) {
     for (const std::string_view fixture : kFixtures) {
@@ -519,6 +523,7 @@ void RequireExpected(
   }
   return Json{
     {"schema_version", kSchemaVersion},
+    {"build_type", kBuildType},
     {"warmup_runs", kWarmupRuns},
     {"measured_runs", kMeasuredRuns},
     {"timing_unit", "s"},

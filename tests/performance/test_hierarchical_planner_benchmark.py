@@ -84,6 +84,7 @@ def test_benchmark_contract_covers_all_tiers_and_fixtures(
     benchmark_document: dict[str, object],
 ) -> None:
     assert benchmark_document["schema_version"] == SCHEMA_VERSION
+    assert benchmark_document["build_type"] == "Release"
     assert benchmark_document["warmup_runs"] >= 1
     assert benchmark_document["measured_runs"] == 30
     assert benchmark_document["timing_unit"] == "s"
