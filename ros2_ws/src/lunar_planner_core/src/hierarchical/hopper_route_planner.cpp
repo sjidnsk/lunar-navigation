@@ -634,8 +634,7 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
       !ValidReachCapability(*capability) ||
       input.config.hopper.maximum_landing_regions == 0U ||
       input.config.hopper.maximum_graph_nodes < 2U ||
-      input.config.hopper.maximum_graph_out_degree == 0U ||
-      input.config.global_search.resources.maximum_expanded_states == 0U) {
+      input.config.hopper.maximum_graph_out_degree == 0U) {
     return Failure(PlanningOutcome::kInvalidRequest,
                    "HOPPER_GLOBAL_CONFIGURATION_INVALID", started);
   }
@@ -811,13 +810,6 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
     if (nodes[node].goal) {
       reached_goal = node;
       break;
-    }
-    if (expanded >=
-        input.config.global_search.resources.maximum_expanded_states) {
-      return Failure(PlanningOutcome::kResourceExhausted,
-                     "HOPPER_GLOBAL_ROUTE_RESOURCE_LIMIT", started, reach,
-                     levels.global_level, nodes.size(), graph_edge_count,
-                     expanded, true, evaluated_edge_pairs);
     }
     ++expanded;
     if (!adjacency[node].has_value()) {

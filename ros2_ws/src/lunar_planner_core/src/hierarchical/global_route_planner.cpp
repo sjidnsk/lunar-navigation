@@ -188,9 +188,9 @@ SearchFailure(const GlobalGridSearchResult &search,
   case GlobalSearchStatus::kCanceled:
     return Failure(PlanningOutcome::kCanceled, "REQUEST_CANCELED", started,
                    level);
-  case GlobalSearchStatus::kResourceExhausted:
+  case GlobalSearchStatus::kAllocationFailed:
     return Failure(PlanningOutcome::kResourceExhausted,
-                   "GLOBAL_SEARCH_RESOURCE_LIMIT", started, level);
+                   "GLOBAL_SEARCH_ALLOCATION_FAILED", started, level);
   case GlobalSearchStatus::kNoPath:
     return Failure(PlanningOutcome::kNoKnownSafeRoute,
                    "GLOBAL_NO_KNOWN_SAFE_ROUTE", started, level);

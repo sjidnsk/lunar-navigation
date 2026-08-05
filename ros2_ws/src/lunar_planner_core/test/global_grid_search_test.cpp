@@ -47,6 +47,24 @@ Projection(const std::size_t width, const std::size_t height,
   return std::move(*projection.projection);
 }
 
+[[nodiscard]] shared::SafeProjection SerpentineProjection(
+    const std::size_t width, const std::size_t height) {
+  std::vector<shared::GridCell> obstacles;
+  obstacles.reserve(width * height / 2U);
+  for (std::size_t y = 1U; y < height; y += 2U) {
+    const std::size_t connector_x = ((y / 2U) % 2U == 0U) ? width - 1U : 0U;
+    for (std::size_t x = 0U; x < width; ++x) {
+      if (x != connector_x) {
+        obstacles.push_back(shared::GridCell{
+            .x = static_cast<std::int32_t>(x),
+            .y = static_cast<std::int32_t>(y),
+        });
+      }
+    }
+  }
+  return Projection(width, height, obstacles);
+}
+
 [[nodiscard]] std::vector<std::uint8_t>
 GoalMask(const std::size_t width, const std::size_t height,
          const std::vector<shared::GridCell> &goals) {
@@ -127,33 +145,48 @@ TEST(GlobalGridSearch, StopsCooperativelyBeforeExpanding) {
   EXPECT_EQ(result.expanded_states, 0U);
 }
 
-TEST(GlobalGridSearch, DistinguishesSearchResourceExhaustionFromNoPath) {
-  const auto projection = Projection(8U, 1U);
-  const auto goals = GoalMask(8U, 1U, {{7, 0}});
-  GlobalSearchConfig config;
-  config.resources.maximum_expanded_states = 1U;
+TEST(GlobalGridSearch, CrossesMoreCellsThanTheFormerExpansionLimit) {
+  constexpr std::size_t kWidth = 512U;
+  constexpr std::size_t kHeight = 512U;
+  const auto projection = SerpentineProjection(kWidth, kHeight);
+  const auto goals = GoalMask(kWidth, kHeight, {{0, 510}});
 
-  const auto result = Search(projection, {0, 0}, goals, config);
+  const auto result = Search(projection, {0, 0}, goals);
 
-  EXPECT_EQ(result.status, GlobalSearchStatus::kResourceExhausted);
-  EXPECT_EQ(result.reason_code, "GLOBAL_SEARCH_RESOURCE_LIMIT");
-  EXPECT_EQ(result.expanded_states, 1U);
+  ASSERT_EQ(result.status, GlobalSearchStatus::kSolved);
+  EXPECT_GT(result.expanded_states, 100'000U);
+  EXPECT_EQ(result.path_cells.front(), (shared::GridCell{0, 0}));
+  EXPECT_EQ(result.path_cells.back(), (shared::GridCell{0, 510}));
 }
 
-TEST(GlobalGridSearch, EnforcesOpenAndMemoryLimits) {
-  const auto projection = Projection(4U, 4U);
-  const auto goals = GoalMask(4U, 4U, {{3, 3}});
-  GlobalSearchConfig open_limited;
-  open_limited.resources.maximum_open_states = 1U;
-  const auto open_result = Search(projection, {0, 0}, goals, open_limited);
-  EXPECT_EQ(open_result.status, GlobalSearchStatus::kResourceExhausted);
-  EXPECT_EQ(open_result.reason_code, "GLOBAL_SEARCH_RESOURCE_LIMIT");
+TEST(GlobalGridSearch, ReportsNoPathOnlyAfterFiniteOpenSetExhaustion) {
+  constexpr std::size_t kWidth = 9U;
+  constexpr std::size_t kHeight = 5U;
+  const auto projection = Projection(
+      kWidth, kHeight, {{4, 0}, {4, 1}, {4, 2}, {4, 3}, {4, 4}});
+  const auto goals = GoalMask(kWidth, kHeight, {{8, 2}});
+  const auto start = shared::GridCell{0, 2};
+  const std::int32_t start_component = projection.ConnectedComponent(start);
+  std::size_t reachable_safe_cells = 0U;
+  for (std::size_t y = 0U; y < kHeight; ++y) {
+    for (std::size_t x = 0U; x < kWidth; ++x) {
+      const shared::GridCell cell{
+          .x = static_cast<std::int32_t>(x),
+          .y = static_cast<std::int32_t>(y),
+      };
+      if (projection.HardFeasible(cell) &&
+          projection.ConnectedComponent(cell) == start_component) {
+        ++reachable_safe_cells;
+      }
+    }
+  }
 
-  GlobalSearchConfig memory_limited;
-  memory_limited.resources.maximum_memory_bytes = 1U;
-  const auto memory_result = Search(projection, {0, 0}, goals, memory_limited);
-  EXPECT_EQ(memory_result.status, GlobalSearchStatus::kResourceExhausted);
-  EXPECT_EQ(memory_result.reason_code, "GLOBAL_SEARCH_RESOURCE_LIMIT");
+  const auto result = Search(projection, start, goals);
+
+  ASSERT_GT(reachable_safe_cells, 0U);
+  EXPECT_EQ(result.status, GlobalSearchStatus::kNoPath);
+  EXPECT_EQ(result.reason_code, "GLOBAL_NO_KNOWN_SAFE_ROUTE");
+  EXPECT_EQ(result.expanded_states, reachable_safe_cells);
 }
 
 TEST(GlobalGridSearch, SimplifiesOnlyAcrossSafeSupercoverCells) {

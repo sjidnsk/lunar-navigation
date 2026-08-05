@@ -17,6 +17,13 @@ namespace {
 
 constexpr double kTolerance = 1.0e-9;
 
+template <typename Config>
+concept HasGlobalSearchResources = requires(Config config) {
+  config.resources;
+};
+
+static_assert(!HasGlobalSearchResources<GlobalSearchConfig>);
+
 [[nodiscard]] double Yaw(const Quaternion &quaternion) {
   return std::atan2(
       2.0 * (quaternion.w * quaternion.z + quaternion.x * quaternion.y),
@@ -41,17 +48,13 @@ constexpr double kTolerance = 1.0e-9;
   };
 }
 
-TEST(HierarchicalTypes, FreezesApprovedDefaultResourceRules) {
+TEST(HierarchicalTypes, FreezesApprovedMapAndLocalRules) {
   const PlannerConfig config;
 
   EXPECT_DOUBLE_EQ(config.global_map.base_resolution_m, 0.2);
   EXPECT_EQ(config.global_map.maximum_level, 4U);
   EXPECT_EQ(config.global_map.maximum_cells, 1'048'576U);
   EXPECT_EQ(config.global_map.maximum_axis_cells, 4'096U);
-  EXPECT_EQ(config.global_search.resources.maximum_expanded_states, 1'048'576U);
-  EXPECT_EQ(config.global_search.resources.maximum_open_states, 1'048'576U);
-  EXPECT_EQ(config.global_search.resources.maximum_memory_bytes,
-            256U * 1024U * 1024U);
   EXPECT_EQ(config.global_search.maximum_preview_points, 4'096U);
   EXPECT_DOUBLE_EQ(config.local_frontier.wheel_horizon_m, 4.0);
   EXPECT_DOUBLE_EQ(config.local_frontier.legged_horizon_m, 3.0);

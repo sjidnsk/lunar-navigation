@@ -35,6 +35,8 @@ constexpr std::string_view kSchemaVersion =
 constexpr std::string_view kBuildType = LUNAR_BUILD_TYPE;
 constexpr std::size_t kWarmupRuns = 1U;
 constexpr std::size_t kMeasuredRuns = 30U;
+constexpr std::size_t kMaximumBenchmarkMemoryBytes =
+  256U * 1024U * 1024U;
 constexpr double kResolutionM = 0.2;
 constexpr std::array<std::size_t, 3> kAxisTiers{256U, 512U, 1'024U};
 constexpr std::array<std::string_view, 4> kFixtures{
@@ -137,13 +139,6 @@ void AddNoRouteWall(GridMap & map)
   input.world.local_map = test::MakeFlatMap("odom", 64U, 64U, kResolutionM);
   input.config.global_map.base_resolution_m = kResolutionM;
   input.config.wheel.xy_resolution_m = kResolutionM;
-  input.config.global_search.resources.maximum_generated_candidates =
-    8U * axis * axis;
-  input.config.global_search.resources.maximum_expanded_states = axis * axis;
-  input.config.global_search.resources.maximum_reopened_states = axis * axis;
-  input.config.global_search.resources.maximum_open_states = axis * axis;
-  input.config.global_search.resources.maximum_memory_bytes =
-    256U * 1024U * 1024U;
   auto & capability = std::get<WheeledCapability>(input.capability);
   capability.footprint_xy_m =
   {{-0.05, -0.05}, {0.05, -0.05}, {0.05, 0.05}, {-0.05, 0.05}};
@@ -435,8 +430,7 @@ void RequireExpected(
     {
       throw std::runtime_error{"benchmark result is not deterministic"};
     }
-    if (metrics.peak_memory_bytes >
-      input.config.global_search.resources.maximum_memory_bytes)
+    if (metrics.peak_memory_bytes > kMaximumBenchmarkMemoryBytes)
     {
       throw std::runtime_error{"benchmark memory ceiling exceeded"};
     }

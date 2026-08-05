@@ -72,13 +72,6 @@ void SetFloat(
   input.world.global_map = test::MakeFlatMap("map", 250U, 250U, 0.2);
   input.world.local_map = test::MakeFlatMap("odom", 250U, 250U, 0.2);
   input.config.global_map.base_resolution_m = 0.2;
-  input.config.global_search.resources.maximum_generated_candidates =
-    8U * 250U * 250U;
-  input.config.global_search.resources.maximum_expanded_states = 250U * 250U;
-  input.config.global_search.resources.maximum_reopened_states = 250U * 250U;
-  input.config.global_search.resources.maximum_open_states = 250U * 250U;
-  input.config.global_search.resources.maximum_memory_bytes =
-    256U * 1024U * 1024U;
   input.goal_map = GoalRegion{
     .goal_id = "regression-50m-goal",
     .target = PointGoal{.position_m = {47.9, 25.1, 0.0},

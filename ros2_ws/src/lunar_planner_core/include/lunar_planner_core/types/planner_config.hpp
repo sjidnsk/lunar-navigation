@@ -86,13 +86,6 @@ struct GlobalMapConfig final {
 };
 
 struct GlobalSearchConfig final {
-  SearchResourceLimits resources{
-      .maximum_expanded_states = 1'048'576U,
-      .maximum_reopened_states = 1'048'576U,
-      .maximum_generated_candidates = 1'048'576U,
-      .maximum_open_states = 1'048'576U,
-      .maximum_memory_bytes = 256U * 1024U * 1024U,
-  };
   std::size_t maximum_preview_points{4'096U};
   double slope_weight{1.0};
   double roughness_weight{1.0};

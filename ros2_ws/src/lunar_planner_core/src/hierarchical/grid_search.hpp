@@ -17,7 +17,7 @@ enum class GlobalSearchStatus : std::uint8_t {
   kSolved,
   kNoPath,
   kCanceled,
-  kResourceExhausted,
+  kAllocationFailed,
   kInvalidProblem,
 };
 

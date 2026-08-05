@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
 #include <numbers>
 #include <optional>
 #include <queue>
@@ -26,14 +27,13 @@ struct OpenEntry final {
   double h{};
   double g{};
   std::size_t state{};
-  std::uint64_t serial{};
 };
 
 struct WorseOpenEntry final {
   [[nodiscard]] bool operator()(const OpenEntry &left,
                                 const OpenEntry &right) const noexcept {
-    return std::tie(left.f, left.h, left.g, left.state, left.serial) >
-           std::tie(right.f, right.h, right.g, right.state, right.serial);
+    return std::tie(left.f, left.h, left.g, left.state) >
+           std::tie(right.f, right.h, right.g, right.state);
   }
 };
 
@@ -63,7 +63,6 @@ struct WorseOpenEntry final {
 
 [[nodiscard]] bool
 ValidConfig(const GlobalGridSearchProblem &problem) noexcept {
-  const auto &resources = problem.config.resources;
   return std::isfinite(problem.maximum_speed_mps) &&
          problem.maximum_speed_mps > 0.0 &&
          std::isfinite(problem.config.slope_weight) &&
@@ -71,12 +70,7 @@ ValidConfig(const GlobalGridSearchProblem &problem) noexcept {
          std::isfinite(problem.config.roughness_weight) &&
          problem.config.roughness_weight >= 0.0 &&
          std::isfinite(problem.config.clearance_weight) &&
-         problem.config.clearance_weight >= 0.0 &&
-         resources.maximum_expanded_states > 0U &&
-         resources.maximum_reopened_states > 0U &&
-         resources.maximum_generated_candidates > 0U &&
-         resources.maximum_open_states > 0U &&
-         resources.maximum_memory_bytes > 0U;
+         problem.config.clearance_weight >= 0.0;
 }
 
 [[nodiscard]] std::optional<std::size_t>
@@ -154,7 +148,7 @@ Reconstruct(const shared::MapSnapshot &map,
 } // namespace
 
 GlobalGridSearchResult
-SearchGlobalGrid(const GlobalGridSearchProblem &problem) {
+SearchGlobalGrid(const GlobalGridSearchProblem &problem) try {
   if (problem.stop_token.stop_requested()) {
     return Failure(GlobalSearchStatus::kCanceled, "REQUEST_CANCELED");
   }
@@ -180,20 +174,10 @@ SearchGlobalGrid(const GlobalGridSearchProblem &problem) {
     return Failure(GlobalSearchStatus::kInvalidProblem,
                    "GLOBAL_SEARCH_PROBLEM_INVALID");
   }
-  const std::int32_t start_component =
-      problem.projection.ConnectedComponent(problem.start);
-  if (std::ranges::none_of(goals, [&](const shared::GridCell goal) {
-        return problem.projection.ConnectedComponent(goal) == start_component;
-      })) {
-    return Failure(GlobalSearchStatus::kNoPath, "GLOBAL_NO_KNOWN_SAFE_ROUTE");
-  }
-
   const auto fixed_memory = FixedMemoryBytes(map->cell_count());
-  if (!fixed_memory ||
-      *fixed_memory > problem.config.resources.maximum_memory_bytes) {
-    return Failure(
-        GlobalSearchStatus::kResourceExhausted, "GLOBAL_SEARCH_RESOURCE_LIMIT",
-        0U, 0U, fixed_memory.value_or(std::numeric_limits<std::size_t>::max()));
+  if (!fixed_memory) {
+    return Failure(GlobalSearchStatus::kInvalidProblem,
+                   "GLOBAL_SEARCH_PROBLEM_INVALID");
   }
 
   const double infinity = std::numeric_limits<double>::infinity();
@@ -212,13 +196,9 @@ SearchGlobalGrid(const GlobalGridSearchProblem &problem) {
       .h = start_h,
       .g = 0.0,
       .state = start_index,
-      .serial = 0U,
   });
   state[start_index] = 1U;
-  std::uint64_t serial = 1U;
   std::uint64_t expanded = 0U;
-  std::size_t reopened = 0U;
-  std::size_t generated = 0U;
   std::size_t open_peak = 1U;
   std::size_t estimated_memory =
       *fixed_memory + open.size() * sizeof(OpenEntry);
@@ -233,11 +213,6 @@ SearchGlobalGrid(const GlobalGridSearchProblem &problem) {
     if (current_entry.g > best_g[current_entry.state] ||
         state[current_entry.state] == 2U) {
       continue;
-    }
-    if (expanded >= problem.config.resources.maximum_expanded_states) {
-      return Failure(GlobalSearchStatus::kResourceExhausted,
-                     "GLOBAL_SEARCH_RESOURCE_LIMIT", expanded, open_peak,
-                     estimated_memory);
     }
     const shared::GridCell current = CellFromIndex(*map, current_entry.state);
     if (problem.goal_mask[current_entry.state] != 0U) {
@@ -277,31 +252,12 @@ SearchGlobalGrid(const GlobalGridSearchProblem &problem) {
           !DiagonalAllowed(problem.projection, current, delta_x, delta_y)) {
         continue;
       }
-      if (generated >= problem.config.resources.maximum_generated_candidates) {
-        return Failure(GlobalSearchStatus::kResourceExhausted,
-                       "GLOBAL_SEARCH_RESOURCE_LIMIT", expanded, open_peak,
-                       estimated_memory);
-      }
-      ++generated;
       const std::size_t next_state = map->Index(next);
       const double candidate_g =
           current_entry.g +
           EdgeCost(problem, next, delta_x != 0 && delta_y != 0);
       if (!std::isfinite(candidate_g) || candidate_g >= best_g[next_state]) {
         continue;
-      }
-      if (state[next_state] == 2U) {
-        if (reopened >= problem.config.resources.maximum_reopened_states) {
-          return Failure(GlobalSearchStatus::kResourceExhausted,
-                         "GLOBAL_SEARCH_RESOURCE_LIMIT", expanded, open_peak,
-                         estimated_memory);
-        }
-        ++reopened;
-      }
-      if (open.size() >= problem.config.resources.maximum_open_states) {
-        return Failure(GlobalSearchStatus::kResourceExhausted,
-                       "GLOBAL_SEARCH_RESOURCE_LIMIT", expanded, open_peak,
-                       estimated_memory);
       }
       const double h = Heuristic(*map, next, goals, problem.maximum_speed_mps);
       best_g[next_state] = candidate_g;
@@ -312,20 +268,17 @@ SearchGlobalGrid(const GlobalGridSearchProblem &problem) {
           .h = h,
           .g = candidate_g,
           .state = next_state,
-          .serial = serial++,
       });
       open_peak = std::max(open_peak, open.size());
       estimated_memory = std::max(
           estimated_memory, *fixed_memory + open.size() * sizeof(OpenEntry));
-      if (estimated_memory > problem.config.resources.maximum_memory_bytes) {
-        return Failure(GlobalSearchStatus::kResourceExhausted,
-                       "GLOBAL_SEARCH_RESOURCE_LIMIT", expanded, open_peak,
-                       estimated_memory);
-      }
     }
   }
   return Failure(GlobalSearchStatus::kNoPath, "GLOBAL_NO_KNOWN_SAFE_ROUTE",
                  expanded, open_peak, estimated_memory);
+} catch (const std::bad_alloc &) {
+  return Failure(GlobalSearchStatus::kAllocationFailed,
+                 "GLOBAL_SEARCH_ALLOCATION_FAILED");
 }
 
 } // namespace lunar::planning::hierarchical
