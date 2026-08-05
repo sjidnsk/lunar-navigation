@@ -9,6 +9,8 @@
 #include <string_view>
 #include <utility>
 
+#include "hierarchical/frame_transform.hpp"
+#include "hierarchical/local_planning_problem.hpp"
 #include "hopper/hopper_planner.hpp"
 #include "legged/legged_planner.hpp"
 #include "wheel/wheel_planner.hpp"
@@ -63,6 +65,27 @@ constexpr std::array<std::string_view, 10> kRequiredMapLayers{
   return {};
 }
 
+[[nodiscard]] std::optional<hierarchical::LocalPlanningProblem>
+MakeDirectLocalProblem(const PlannerInput& input) {
+  const auto goal_odom = hierarchical::TransformGoal(
+      input.goal_map, input.world.map_from_odom,
+      hierarchical::TransformDirection::kParentToChild);
+  if (!goal_odom.has_value()) {
+    return std::nullopt;
+  }
+  return hierarchical::LocalPlanningProblem{
+      .request_id = input.request_id,
+      .state_time = input.state_time,
+      .current_state = input.current_state,
+      .goal_odom = *goal_odom,
+      .local_map_view = input.world.local_map,
+      .capability = input.capability,
+      .config = input.config,
+      .previous_execution = input.previous_execution,
+      .stop_token = input.stop_token,
+  };
+}
+
 }  // namespace
 
 struct Planner::Impl final {
@@ -102,11 +125,18 @@ PlannerOutput Planner::Plan(const PlannerInput& input) noexcept {
           ExecutionDirective::kNoSafeReference,
           std::move(reason));
     }
+    const auto local_problem = MakeDirectLocalProblem(input);
+    if (!local_problem.has_value()) {
+      return Failure(
+          PlanningOutcome::kInvalidRequest,
+          ExecutionDirective::kNoSafeReference,
+          "FRAME_TRANSFORM_INVALID");
+    }
     if (CapabilityPlatform(input.capability) == PlatformType::kWheeled) {
-      return impl_->wheel_planner.Plan(input);
+      return impl_->wheel_planner.Plan(*local_problem);
     }
     if (CapabilityPlatform(input.capability) == PlatformType::kLegged) {
-      return impl_->legged_planner.Plan(input);
+      return impl_->legged_planner.Plan(*local_problem);
     }
     return Failure(
         PlanningOutcome::kInvalidRequest,

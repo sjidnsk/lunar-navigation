@@ -25,6 +25,7 @@ add_library(${PROJECT_NAME} SHARED
   src/hierarchical/global_route.cpp
   src/hierarchical/global_route_planner.cpp
   src/hierarchical/grid_search.cpp
+  src/hierarchical/local_frontier.cpp
   src/hierarchical/map_level.cpp
   src/hopper/ballistic_kinematics.cpp
   src/hopper/commitment_state_machine.cpp
@@ -118,6 +119,14 @@ if(BUILD_TESTING)
   target_link_libraries(
     lunar_planner_core_global_route_planner_test ${PROJECT_NAME})
   lunar_enable_sanitizers(lunar_planner_core_global_route_planner_test)
+
+  ament_add_gtest(lunar_planner_core_local_frontier_test
+    test/local_frontier_test.cpp)
+  target_include_directories(lunar_planner_core_local_frontier_test PRIVATE
+    src test)
+  target_link_libraries(
+    lunar_planner_core_local_frontier_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_local_frontier_test)
 
   ament_add_gtest(lunar_planner_core_wheel_planner_test
     test/wheel_planner_test.cpp)

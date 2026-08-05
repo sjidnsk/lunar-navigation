@@ -142,13 +142,14 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_wheel";
 
 }  // namespace
 
-PlannerOutput WheelPlanner::Plan(const PlannerInput& input) const {
+PlannerOutput WheelPlanner::Plan(
+    const hierarchical::LocalPlanningProblem& problem) const {
   const auto started = std::chrono::steady_clock::now();
-  if (input.stop_token.stop_requested()) {
+  if (problem.stop_token.stop_requested()) {
     return Canceled(started);
   }
-  const auto* current_state = std::get_if<WheeledState>(&input.current_state);
-  const auto* capability = std::get_if<WheeledCapability>(&input.capability);
+  const auto* current_state = std::get_if<WheeledState>(&problem.current_state);
+  const auto* capability = std::get_if<WheeledCapability>(&problem.capability);
   if (current_state == nullptr || capability == nullptr) {
     return Failure(
         PlanningOutcome::kInvalidRequest,
@@ -157,7 +158,7 @@ PlannerOutput WheelPlanner::Plan(const PlannerInput& input) const {
   }
 
   const shared::MapSnapshotBuildResult map =
-      shared::MapSnapshot::Create(input.world.local_map);
+      shared::MapSnapshot::Create(problem.local_map_view);
   if (!map.ok()) {
     return Failure(
         PlanningOutcome::kInvalidRequest,
@@ -166,8 +167,8 @@ PlannerOutput WheelPlanner::Plan(const PlannerInput& input) const {
   }
   const shared::SafeProjectionBuildResult projection =
       shared::BuildSafeProjection(
-          map.snapshot, input.capability, input.config.map_safety,
-          input.stop_token);
+          map.snapshot, problem.capability, problem.config.map_safety,
+          problem.stop_token);
   if (!projection.ok()) {
     if (projection.reason_code == "REQUEST_CANCELED") {
       return Canceled(started);
@@ -177,7 +178,7 @@ PlannerOutput WheelPlanner::Plan(const PlannerInput& input) const {
         ExecutionDirective::kNoSafeReference,
         projection.reason_code, started);
   }
-  if (!HasFeasibleGoalPosition(input.goal_map, *projection.projection)) {
+  if (!HasFeasibleGoalPosition(problem.goal_odom, *projection.projection)) {
     return Failure(
         PlanningOutcome::kGoalInfeasible,
         ExecutionDirective::kHoldPosition,
@@ -185,8 +186,8 @@ PlannerOutput WheelPlanner::Plan(const PlannerInput& input) const {
   }
 
   WheelLatticeBuildResult lattice = BuildWheelLattice(
-      *current_state, input.goal_map, *projection.projection, *capability,
-      input.config, input.stop_token);
+      *current_state, problem.goal_odom, *projection.projection, *capability,
+      problem.config, problem.stop_token);
   if (!lattice.ok()) {
     switch (lattice.status) {
       case WheelLatticeStatus::kCanceled:
@@ -227,7 +228,7 @@ PlannerOutput WheelPlanner::Plan(const PlannerInput& input) const {
   }
 
   const shared::AraStarResult search = shared::SearchAraStar(
-      lattice.graph->search_problem, input.stop_token);
+      lattice.graph->search_problem, problem.stop_token);
   switch (search.status) {
     case shared::AraStarStatus::kCanceled:
       return Canceled(started, search.expanded_states);
@@ -270,7 +271,7 @@ PlannerOutput WheelPlanner::Plan(const PlannerInput& input) const {
             .tracking_error_bound_m = 0.0,
             .additional_margin_m = 0.0,
         },
-        input.config.corridor, input.stop_token);
+        problem.config.corridor, problem.stop_token);
     if (corridor.status == shared::CorridorStatus::kCanceled) {
       return Canceled(started, search.expanded_states);
     }
@@ -278,8 +279,8 @@ PlannerOutput WheelPlanner::Plan(const PlannerInput& input) const {
       warnings.push_back(corridor.reason_code);
     }
     WheelOptimizationResult optimized = OptimizeWheelSpline(
-        discrete->transitions, corridor, input.config.optimization,
-        input.stop_token);
+        discrete->transitions, corridor, problem.config.optimization,
+        problem.stop_token);
     if (optimized.canceled) {
       return Canceled(started, search.expanded_states);
     }
@@ -290,12 +291,12 @@ PlannerOutput WheelPlanner::Plan(const PlannerInput& input) const {
     std::vector<WheelTransition> selected = std::move(optimized.transitions);
     WheelSweepValidator validator{
         *projection.projection, *capability,
-        input.config.wheel.continuous_validation_maximum_subdivisions};
+        problem.config.wheel.continuous_validation_maximum_subdivisions};
     const bool optimized_valid = std::ranges::all_of(
         selected, [&](const WheelTransition& transition) {
-          return validator.Validate(transition, input.stop_token).valid;
+          return validator.Validate(transition, problem.stop_token).valid;
         });
-    if (input.stop_token.stop_requested()) {
+    if (problem.stop_token.stop_requested()) {
       return Canceled(started, search.expanded_states);
     }
     if (!optimized_valid) {
@@ -304,9 +305,9 @@ PlannerOutput WheelPlanner::Plan(const PlannerInput& input) const {
     }
     const bool discrete_valid = std::ranges::all_of(
         selected, [&](const WheelTransition& transition) {
-          return validator.Validate(transition, input.stop_token).valid;
+          return validator.Validate(transition, problem.stop_token).valid;
         });
-    if (input.stop_token.stop_requested()) {
+    if (problem.stop_token.stop_requested()) {
       return Canceled(started, search.expanded_states);
     }
     if (!discrete_valid) {
@@ -317,7 +318,7 @@ PlannerOutput WheelPlanner::Plan(const PlannerInput& input) const {
           discrete->cost, std::move(warnings));
     }
     WheelTimingResult timed = ParameterizeWheelTiming(
-        selected, *capability, input.stop_token);
+        selected, *capability, problem.stop_token);
     if (timed.canceled) {
       return Canceled(started, search.expanded_states);
     }
@@ -336,9 +337,9 @@ PlannerOutput WheelPlanner::Plan(const PlannerInput& input) const {
       .directive = ExecutionDirective::kActivateNewReference,
       .reason_code = "WHEEL_PLAN_AVAILABLE",
       .reference = MotionReference{
-          .plan_id = "wheel/" + input.request_id,
+          .plan_id = "wheel/" + problem.request_id,
           .platform_type = PlatformType::kWheeled,
-          .input_time = input.state_time,
+          .input_time = problem.state_time,
           .data = std::move(trajectory),
       },
       .diagnostics = PlannerDiagnostics{
