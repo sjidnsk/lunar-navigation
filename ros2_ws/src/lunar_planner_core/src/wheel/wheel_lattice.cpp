@@ -125,7 +125,7 @@ struct OrderedPrimitive final {
 }
 
 [[nodiscard]] std::optional<WheelTransition> ApplyPrimitive(
-    const WheelLatticeState& source_state,
+    const WheelLatticeState& source_state, const WheelPose& source,
     const WheelMotionPrimitive& primitive,
     const std::size_t primitive_index,
     const shared::MapSnapshot& map,
@@ -133,7 +133,6 @@ struct OrderedPrimitive final {
   if (!ModeAllows(source_state.motion_mode, primitive.kind)) {
     return std::nullopt;
   }
-  const WheelPose source = StatePose(source_state, map, yaw_bin_count);
   const auto relative_yaw = YawFromQuaternion(
       primitive.relative_end_pose.orientation);
   if (!relative_yaw.has_value()) {
@@ -382,6 +381,10 @@ WheelLatticeBuildResult BuildWheelLattice(
       });
 
   WheelLatticeGraph graph;
+  graph.true_start_pose = WheelPose{
+      .position_m = current_state.pose.position_m,
+      .yaw_rad = *current_yaw,
+  };
   const WheelLatticeState start{
       .cell_x = current_cell->x,
       .cell_y = current_cell->y,
@@ -391,7 +394,6 @@ WheelLatticeBuildResult BuildWheelLattice(
   graph.states.push_back(start);
   graph.search_problem.outgoing_edges.emplace_back();
   std::map<WheelLatticeState, std::size_t> state_indices;
-  state_indices.emplace(start, 0U);
   std::queue<std::size_t> pending;
   pending.push(0U);
   const std::size_t per_map_upper_bound = projection.source_map()->cell_count() >
@@ -414,9 +416,13 @@ WheelLatticeBuildResult BuildWheelLattice(
     const std::size_t source_index = pending.front();
     pending.pop();
     const WheelLatticeState source_state = graph.states[source_index];
+    const WheelPose source_pose = source_index == 0U
+        ? graph.true_start_pose
+        : StatePose(source_state, *projection.source_map(),
+                    config.wheel.yaw_bin_count);
     for (const OrderedPrimitive& ordered : ordered_primitives) {
       auto transition = ApplyPrimitive(
-          source_state, *ordered.primitive, ordered.original_index,
+          source_state, source_pose, *ordered.primitive, ordered.original_index,
           *projection.source_map(), config.wheel.yaw_bin_count);
       if (!transition.has_value()) {
         continue;
@@ -485,9 +491,11 @@ WheelLatticeBuildResult BuildWheelLattice(
   const double maximum_translation_speed = std::max(
       capability.maximum_forward_speed_mps,
       capability.maximum_reverse_speed_mps);
-  for (const WheelLatticeState& state : graph.states) {
-    const WheelPose pose = StatePose(
-        state, *projection.source_map(), config.wheel.yaw_bin_count);
+  for (std::size_t index = 0U; index < graph.states.size(); ++index) {
+    const WheelPose pose = index == 0U
+        ? graph.true_start_pose
+        : StatePose(graph.states[index], *projection.source_map(),
+                    config.wheel.yaw_bin_count);
     double heuristic = GoalDistance(goal, pose) / maximum_translation_speed;
     if (goal.yaw_rad.has_value()) {
       heuristic += std::abs(ShortestYawDelta(pose.yaw_rad, *goal.yaw_rad)) /
@@ -497,6 +505,11 @@ WheelLatticeBuildResult BuildWheelLattice(
         std::isfinite(heuristic) ? heuristic : 0.0);
     graph.search_problem.goal_mask.push_back(
         GoalContainsPose(goal, pose) ? 1U : 0U);
+  }
+  if (graph.search_problem.goal_mask.front() == 0U &&
+      graph.search_problem.outgoing_edges.front().empty()) {
+    return Failure(WheelLatticeStatus::kInvalidRequest,
+                   "WHEEL_START_CONNECTOR_INFEASIBLE");
   }
   graph.search_problem.config = config.search;
   return WheelLatticeBuildResult{

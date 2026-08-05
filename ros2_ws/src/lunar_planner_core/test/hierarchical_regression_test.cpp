@@ -264,6 +264,33 @@ TEST(HierarchicalRegression, AppliesFrozenMapFromOdomTransform) {
   EXPECT_NEAR(result.route->poses_map.front().position_m.y, 11.5, 1.0e-9);
 }
 
+TEST(HierarchicalRegression, AnchorsWheelPreviewAtTheMapTransformedTrueStart) {
+  PlannerInput input = DistantGroundInput(PlatformType::kWheeled);
+  input.world.global_map = test::MakeFlatMap("map", 30U, 30U, 1.0);
+  auto& state = std::get<WheeledState>(input.current_state);
+  state.pose.position_m = {1.2, 2.3, 0.0};
+  state.pose.orientation = test::YawQuaternion(0.17);
+  input.world.map_from_odom.translation_m = {10.0, 10.0, 0.0};
+  input.world.map_from_odom.rotation =
+      test::YawQuaternion(std::numbers::pi / 2.0);
+  input.goal_map.target =
+      PointGoal{.position_m = {7.5, 15.5, 0.0}, .tolerance_m = 0.2};
+
+  const PlannerOutput output = Planner{}.Plan(input);
+
+  ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << output.reason_code;
+  ASSERT_TRUE(output.reference.has_value());
+  ASSERT_FALSE(output.reference->preview.poses_map.empty());
+  const Pose3& start = output.reference->preview.poses_map.front();
+  EXPECT_NEAR(start.position_m.x, 7.7, 1.0e-9);
+  EXPECT_NEAR(start.position_m.y, 11.2, 1.0e-9);
+  EXPECT_NEAR(
+      std::atan2(2.0 * start.orientation.w * start.orientation.z,
+                 1.0 - 2.0 * start.orientation.z * start.orientation.z),
+      std::numbers::pi / 2.0 + 0.17, 1.0e-9);
+}
+
 TEST(HierarchicalRegression, RejectsUnrepresentableScaleAndHonorsCancel) {
   PlannerInput scale = DistantGroundInput(PlatformType::kWheeled);
   scale.world.global_map = test::MakeFlatMap("map", 5'000U, 1U, 3.2);

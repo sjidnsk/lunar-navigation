@@ -283,6 +283,8 @@ PrefixPolyline(const std::vector<Vec3> &route_odom, const double distance_m,
                                      const double horizon_m,
                                      const double corridor_half_width_m) {
   GridMap view = source;
+  const double raster_margin_m =
+      std::numbers::sqrt2 * 0.5 * view.resolution_m;
   auto &valid =
       std::get<std::vector<std::uint8_t>>(view.layers.at("valid_mask").values);
   auto &forbidden =
@@ -298,9 +300,10 @@ PrefixPolyline(const std::vector<Vec3> &route_odom, const double distance_m,
       };
       const bool inside_horizon =
           std::hypot(center.x - current.x, center.y - current.y) <=
-          horizon_m + kTolerance;
+          horizon_m + corridor_half_width_m + raster_margin_m + kTolerance;
       const bool inside_corridor = DistanceToPolyline(center, route_prefix) <=
-                                   corridor_half_width_m + kTolerance;
+                                   corridor_half_width_m + raster_margin_m +
+                                       kTolerance;
       if (!inside_horizon || !inside_corridor) {
         valid[index] = 0U;
         forbidden[index] = 1U;

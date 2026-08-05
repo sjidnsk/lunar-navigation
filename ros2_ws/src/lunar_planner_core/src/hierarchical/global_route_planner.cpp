@@ -159,9 +159,10 @@ BuildPoses(const shared::MapSnapshot &map,
   std::vector<Pose3> poses;
   poses.reserve(cells.size());
   for (std::size_t index = 0U; index < cells.size(); ++index) {
-    const Vec3 position = map.CellCenter(cells[index]);
+    const Vec3 position =
+        index == 0U ? start_pose_map.position_m : map.CellCenter(cells[index]);
     Quaternion orientation = start_pose_map.orientation;
-    if (index + 1U < cells.size()) {
+    if (index > 0U && index + 1U < cells.size()) {
       const Vec3 next = map.CellCenter(cells[index + 1U]);
       orientation =
           YawQuaternion(std::atan2(next.y - position.y, next.x - position.x));

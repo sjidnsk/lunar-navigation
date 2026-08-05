@@ -90,6 +90,22 @@ TEST(WheelFaultMatrix, ReportsNoPathAcrossFullBarrier) {
   EXPECT_EQ(output.diagnostics.planner_name, "cpp_v3_hierarchical");
 }
 
+TEST(WheelFaultMatrix, RejectsObstacleIntersectingOnlyTheTrueStartConnector) {
+  Planner planner;
+  auto input = test::MakeValidWheelInput();
+  input.request_id = "wheel-start-connector-blocked";
+  auto& state = std::get<WheeledState>(input.current_state);
+  state.pose.position_m = {2.15, 3.5, 0.0};
+  SetObstacle(input.world.local_map, 1U, 3U);
+
+  const PlannerOutput output = planner.Plan(input);
+
+  EXPECT_EQ(output.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(output.directive, ExecutionDirective::kNoSafeReference);
+  EXPECT_EQ(output.reason_code, "WHEEL_START_CONNECTOR_INFEASIBLE");
+  EXPECT_FALSE(output.reference.has_value());
+}
+
 TEST(WheelFaultMatrix, CancelsBeforeSearchExpansion) {
   Planner planner;
   auto input = test::MakeValidWheelInput();

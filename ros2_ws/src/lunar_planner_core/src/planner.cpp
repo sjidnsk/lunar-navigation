@@ -226,6 +226,7 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
 
     const auto local_started = std::chrono::steady_clock::now();
     std::uint64_t local_expanded = 0U;
+    std::optional<std::string> start_connector_failure;
     for (std::size_t attempt = 0U; attempt < frontiers.problems.size();
          ++attempt) {
       PlannerOutput local =
@@ -293,13 +294,18 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
                                      frontiers.frontier_distances_m[attempt],
                                      local_elapsed));
       }
+      if (local.reason_code == "WHEEL_START_CONNECTOR_INFEASIBLE" ||
+          local.reason_code == "LEGGED_START_CONNECTOR_INFEASIBLE") {
+        start_connector_failure = local.reason_code;
+      }
     }
     const auto local_elapsed =
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - local_started);
     return Failure(
         PlanningOutcome::kNoKnownSafeRoute,
-        ExecutionDirective::kNoSafeReference, "LOCAL_SEGMENT_INFEASIBLE",
+        ExecutionDirective::kNoSafeReference,
+        start_connector_failure.value_or("LOCAL_SEGMENT_INFEASIBLE"),
         started, global.route->expanded_states + local_expanded,
         global.route->cost, {},
         GroundMetrics(input, global, &frontiers, local_expanded,

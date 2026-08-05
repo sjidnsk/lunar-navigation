@@ -16,6 +16,7 @@ struct WheelLatticeGraph final {
   shared::AraStarProblem search_problem;
   std::vector<WheelLatticeState> states;
   std::vector<WheelTransition> transitions;
+  WheelPose true_start_pose;
 };
 
 enum class WheelLatticeStatus {

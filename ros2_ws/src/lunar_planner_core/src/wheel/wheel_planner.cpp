@@ -198,7 +198,8 @@ PlannerOutput WheelPlanner::Plan(
             ExecutionDirective::kNoSafeReference,
             lattice.reason_code, started);
       case WheelLatticeStatus::kInvalidRequest:
-        if (lattice.reason_code == "WHEEL_START_NOT_SAFE") {
+        if (lattice.reason_code == "WHEEL_START_NOT_SAFE" ||
+            lattice.reason_code == "WHEEL_START_CONNECTOR_INFEASIBLE") {
           return Failure(
               PlanningOutcome::kNoKnownSafeRoute,
               ExecutionDirective::kNoSafeReference,

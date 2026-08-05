@@ -58,6 +58,33 @@ TEST(WheelPlanner, PlansForwardReferenceWithBoundedTiming) {
   }
 }
 
+TEST(WheelPlanner, PreservesTheTrueOffCenterStartPoseInTrajectoryAndPreview) {
+  Planner planner;
+  auto input = test::MakeValidWheelInput();
+  input.request_id = "wheel-true-start";
+  auto& state = std::get<WheeledState>(input.current_state);
+  state.pose.position_m = {2.2, 3.2, 0.0};
+  state.pose.orientation = test::YawQuaternion(0.12);
+
+  const PlannerOutput output = planner.Plan(input);
+
+  ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << output.reason_code;
+  const TrajectoryReference& trajectory = WheelTrajectory(output);
+  ASSERT_FALSE(trajectory.points.empty());
+  EXPECT_NEAR(trajectory.points.front().pose.position_m.x, 2.2, 1.0e-9);
+  EXPECT_NEAR(trajectory.points.front().pose.position_m.y, 3.2, 1.0e-9);
+  EXPECT_NEAR(Yaw(trajectory.points.front().pose.orientation), 0.12, 1.0e-9);
+  ASSERT_TRUE(output.reference.has_value());
+  ASSERT_FALSE(output.reference->preview.poses_map.empty());
+  EXPECT_NEAR(output.reference->preview.poses_map.front().position_m.x, 2.2,
+              1.0e-9);
+  EXPECT_NEAR(output.reference->preview.poses_map.front().position_m.y, 3.2,
+              1.0e-9);
+  EXPECT_NEAR(Yaw(output.reference->preview.poses_map.front().orientation),
+              0.12, 1.0e-9);
+}
+
 TEST(WheelPlanner, SelectsReverseMotionForGoalBehind) {
   Planner planner;
   auto input = test::MakeValidWheelInput();
