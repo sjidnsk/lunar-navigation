@@ -63,7 +63,11 @@ struct WorseOpenEntry final {
 
 [[nodiscard]] bool
 ValidConfig(const GlobalGridSearchProblem &problem) noexcept {
-  return std::isfinite(problem.maximum_speed_mps) &&
+  const auto &map = problem.projection.source_map();
+  return map != nullptr &&
+         (problem.excluded_mask.empty() ||
+          problem.excluded_mask.size() == map->cell_count()) &&
+         std::isfinite(problem.maximum_speed_mps) &&
          problem.maximum_speed_mps > 0.0 &&
          std::isfinite(problem.config.slope_weight) &&
          problem.config.slope_weight >= 0.0 &&
@@ -71,6 +75,19 @@ ValidConfig(const GlobalGridSearchProblem &problem) noexcept {
          problem.config.roughness_weight >= 0.0 &&
          std::isfinite(problem.config.clearance_weight) &&
          problem.config.clearance_weight >= 0.0;
+}
+
+[[nodiscard]] bool Available(const GlobalGridSearchProblem &problem,
+                             const shared::GridCell cell) noexcept {
+  if (!problem.projection.HardFeasible(cell)) {
+    return false;
+  }
+  if (problem.excluded_mask.empty()) {
+    return true;
+  }
+  const auto &map = problem.projection.source_map();
+  return map != nullptr && map->InBounds(cell) &&
+         problem.excluded_mask[map->Index(cell)] == 0U;
 }
 
 [[nodiscard]] std::optional<std::size_t>
@@ -96,17 +113,15 @@ FixedMemoryBytes(const std::size_t cells) noexcept {
   return minimum * map.resolution_m() / maximum_speed_mps;
 }
 
-[[nodiscard]] bool DiagonalAllowed(const shared::SafeProjection &projection,
+[[nodiscard]] bool DiagonalAllowed(const GlobalGridSearchProblem &problem,
                                    const shared::GridCell current,
                                    const std::int32_t delta_x,
                                    const std::int32_t delta_y) noexcept {
   if (delta_x == 0 || delta_y == 0) {
     return true;
   }
-  return projection.HardFeasible(
-             shared::GridCell{current.x + delta_x, current.y}) &&
-         projection.HardFeasible(
-             shared::GridCell{current.x, current.y + delta_y});
+  return Available(problem, shared::GridCell{current.x + delta_x, current.y}) &&
+         Available(problem, shared::GridCell{current.x, current.y + delta_y});
 }
 
 [[nodiscard]] double EdgeCost(const GlobalGridSearchProblem &problem,
@@ -155,8 +170,7 @@ SearchGlobalGrid(const GlobalGridSearchProblem &problem) try {
   const auto &map = problem.projection.source_map();
   if (map == nullptr || !ValidConfig(problem) ||
       problem.goal_mask.size() != map->cell_count() ||
-      !map->InBounds(problem.start) ||
-      !problem.projection.HardFeasible(problem.start)) {
+      !map->InBounds(problem.start) || !Available(problem, problem.start)) {
     return Failure(GlobalSearchStatus::kInvalidProblem,
                    "GLOBAL_SEARCH_PROBLEM_INVALID");
   }
@@ -165,14 +179,13 @@ SearchGlobalGrid(const GlobalGridSearchProblem &problem) try {
   for (std::size_t index = 0U; index < problem.goal_mask.size(); ++index) {
     if (problem.goal_mask[index] != 0U) {
       const shared::GridCell goal = CellFromIndex(*map, index);
-      if (problem.projection.HardFeasible(goal)) {
+      if (Available(problem, goal)) {
         goals.push_back(goal);
       }
     }
   }
   if (goals.empty()) {
-    return Failure(GlobalSearchStatus::kInvalidProblem,
-                   "GLOBAL_SEARCH_PROBLEM_INVALID");
+    return Failure(GlobalSearchStatus::kNoPath, "GLOBAL_NO_KNOWN_SAFE_ROUTE");
   }
   const auto fixed_memory = FixedMemoryBytes(map->cell_count());
   if (!fixed_memory) {
@@ -248,8 +261,8 @@ SearchGlobalGrid(const GlobalGridSearchProblem &problem) try {
           .x = current.x + delta_x,
           .y = current.y + delta_y,
       };
-      if (!problem.projection.HardFeasible(next) ||
-          !DiagonalAllowed(problem.projection, current, delta_x, delta_y)) {
+      if (!Available(problem, next) ||
+          !DiagonalAllowed(problem, current, delta_x, delta_y)) {
         continue;
       }
       const std::size_t next_state = map->Index(next);

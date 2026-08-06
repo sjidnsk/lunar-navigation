@@ -15,8 +15,8 @@ namespace {
 
 constexpr double kComparisonTolerance = 1.0e-9;
 
-[[nodiscard]] WheelSweepValidation Failure(
-    std::string reason_code, const std::size_t sample_count = 0U) {
+[[nodiscard]] WheelSweepValidation
+Failure(std::string reason_code, const std::size_t sample_count = 0U) {
   return WheelSweepValidation{
       .valid = false,
       .canceled = false,
@@ -25,20 +25,19 @@ constexpr double kComparisonTolerance = 1.0e-9;
   };
 }
 
-[[nodiscard]] bool IsFinite(const WheelPose& pose) noexcept {
-  return std::isfinite(pose.position_m.x) &&
-         std::isfinite(pose.position_m.y) &&
+[[nodiscard]] bool IsFinite(const WheelPose &pose) noexcept {
+  return std::isfinite(pose.position_m.x) && std::isfinite(pose.position_m.y) &&
          std::isfinite(pose.position_m.z) && std::isfinite(pose.yaw_rad);
 }
 
-[[nodiscard]] double Cross(
-    const Vec2& first, const Vec2& second, const Vec2& third) noexcept {
+[[nodiscard]] double Cross(const Vec2 &first, const Vec2 &second,
+                           const Vec2 &third) noexcept {
   return (second.x - first.x) * (third.y - first.y) -
          (second.y - first.y) * (third.x - first.x);
 }
 
-[[nodiscard]] bool PointOnSegment(
-    const Vec2& point, const Vec2& start, const Vec2& finish) noexcept {
+[[nodiscard]] bool PointOnSegment(const Vec2 &point, const Vec2 &start,
+                                  const Vec2 &finish) noexcept {
   return std::abs(Cross(start, finish, point)) <= kComparisonTolerance &&
          point.x + kComparisonTolerance >= std::min(start.x, finish.x) &&
          point.x <= std::max(start.x, finish.x) + kComparisonTolerance &&
@@ -46,9 +45,10 @@ constexpr double kComparisonTolerance = 1.0e-9;
          point.y <= std::max(start.y, finish.y) + kComparisonTolerance;
 }
 
-[[nodiscard]] bool SegmentsIntersect(
-    const Vec2& first_start, const Vec2& first_finish,
-    const Vec2& second_start, const Vec2& second_finish) noexcept {
+[[nodiscard]] bool SegmentsIntersect(const Vec2 &first_start,
+                                     const Vec2 &first_finish,
+                                     const Vec2 &second_start,
+                                     const Vec2 &second_finish) noexcept {
   const double first_side_start =
       Cross(first_start, first_finish, second_start);
   const double first_side_finish =
@@ -57,38 +57,37 @@ constexpr double kComparisonTolerance = 1.0e-9;
       Cross(second_start, second_finish, first_start);
   const double second_side_finish =
       Cross(second_start, second_finish, first_finish);
-  const bool proper_crossing =
-      ((first_side_start > kComparisonTolerance &&
-        first_side_finish < -kComparisonTolerance) ||
-       (first_side_start < -kComparisonTolerance &&
-        first_side_finish > kComparisonTolerance)) &&
-      ((second_side_start > kComparisonTolerance &&
-        second_side_finish < -kComparisonTolerance) ||
-       (second_side_start < -kComparisonTolerance &&
-        second_side_finish > kComparisonTolerance));
+  const bool proper_crossing = ((first_side_start > kComparisonTolerance &&
+                                 first_side_finish < -kComparisonTolerance) ||
+                                (first_side_start < -kComparisonTolerance &&
+                                 first_side_finish > kComparisonTolerance)) &&
+                               ((second_side_start > kComparisonTolerance &&
+                                 second_side_finish < -kComparisonTolerance) ||
+                                (second_side_start < -kComparisonTolerance &&
+                                 second_side_finish > kComparisonTolerance));
   return proper_crossing ||
-      PointOnSegment(second_start, first_start, first_finish) ||
-      PointOnSegment(second_finish, first_start, first_finish) ||
-      PointOnSegment(first_start, second_start, second_finish) ||
-      PointOnSegment(first_finish, second_start, second_finish);
+         PointOnSegment(second_start, first_start, first_finish) ||
+         PointOnSegment(second_finish, first_start, first_finish) ||
+         PointOnSegment(first_start, second_start, second_finish) ||
+         PointOnSegment(first_finish, second_start, second_finish);
 }
 
-[[nodiscard]] bool PointInPolygon(
-    const Vec2& point, const std::vector<Vec2>& polygon) noexcept {
+[[nodiscard]] bool PointInPolygon(const Vec2 &point,
+                                  const std::vector<Vec2> &polygon) noexcept {
   bool inside = false;
   for (std::size_t current = 0U, previous = polygon.size() - 1U;
        current < polygon.size(); previous = current++) {
-    const Vec2& start = polygon[previous];
-    const Vec2& finish = polygon[current];
+    const Vec2 &start = polygon[previous];
+    const Vec2 &finish = polygon[current];
     if (PointOnSegment(point, start, finish)) {
       return true;
     }
     if ((start.y > point.y) == (finish.y > point.y)) {
       continue;
     }
-    const double crossing_x = start.x +
-        (point.y - start.y) * (finish.x - start.x) /
-            (finish.y - start.y);
+    const double crossing_x = start.x + (point.y - start.y) *
+                                            (finish.x - start.x) /
+                                            (finish.y - start.y);
     if (point.x < crossing_x) {
       inside = !inside;
     }
@@ -96,15 +95,16 @@ constexpr double kComparisonTolerance = 1.0e-9;
   return inside;
 }
 
-[[nodiscard]] bool PolygonIntersectsCell(
-    const std::vector<Vec2>& polygon,
-    const double minimum_x, const double minimum_y,
-    const double maximum_x, const double maximum_y) noexcept {
-  const auto inside_cell = [&](const Vec2& point) {
+[[nodiscard]] bool PolygonIntersectsCell(const std::vector<Vec2> &polygon,
+                                         const double minimum_x,
+                                         const double minimum_y,
+                                         const double maximum_x,
+                                         const double maximum_y) noexcept {
+  const auto inside_cell = [&](const Vec2 &point) {
     return point.x + kComparisonTolerance >= minimum_x &&
-        point.x <= maximum_x + kComparisonTolerance &&
-        point.y + kComparisonTolerance >= minimum_y &&
-        point.y <= maximum_y + kComparisonTolerance;
+           point.x <= maximum_x + kComparisonTolerance &&
+           point.y + kComparisonTolerance >= minimum_y &&
+           point.y <= maximum_y + kComparisonTolerance;
   };
   if (std::ranges::any_of(polygon, inside_cell)) {
     return true;
@@ -115,21 +115,19 @@ constexpr double kComparisonTolerance = 1.0e-9;
       Vec2{maximum_x, maximum_y},
       Vec2{minimum_x, maximum_y},
   };
-  if (std::ranges::any_of(
-          corners,
-          [&](const Vec2& corner) { return PointInPolygon(corner, polygon); })) {
+  if (std::ranges::any_of(corners, [&](const Vec2 &corner) {
+        return PointInPolygon(corner, polygon);
+      })) {
     return true;
   }
-  for (std::size_t polygon_index = 0U;
-       polygon_index < polygon.size(); ++polygon_index) {
-    const Vec2& polygon_start = polygon[polygon_index];
-    const Vec2& polygon_finish =
-        polygon[(polygon_index + 1U) % polygon.size()];
-    for (std::size_t cell_index = 0U;
-         cell_index < corners.size(); ++cell_index) {
-      if (SegmentsIntersect(
-              polygon_start, polygon_finish, corners[cell_index],
-              corners[(cell_index + 1U) % corners.size()])) {
+  for (std::size_t polygon_index = 0U; polygon_index < polygon.size();
+       ++polygon_index) {
+    const Vec2 &polygon_start = polygon[polygon_index];
+    const Vec2 &polygon_finish = polygon[(polygon_index + 1U) % polygon.size()];
+    for (std::size_t cell_index = 0U; cell_index < corners.size();
+         ++cell_index) {
+      if (SegmentsIntersect(polygon_start, polygon_finish, corners[cell_index],
+                            corners[(cell_index + 1U) % corners.size()])) {
         return true;
       }
     }
@@ -137,22 +135,21 @@ constexpr double kComparisonTolerance = 1.0e-9;
   return false;
 }
 
-}  // namespace
+} // namespace
 
 WheelSweepValidator::WheelSweepValidator(
-    const shared::SafeProjection& projection,
-    const WheeledCapability& capability) noexcept
-    : projection_(&projection),
-      capability_(&capability) {
-  for (const Vec2& vertex : capability.footprint_xy_m) {
-    footprint_support_radius_m_ = std::max(
-        footprint_support_radius_m_, std::hypot(vertex.x, vertex.y));
+    const shared::SafeProjection &projection,
+    const WheeledCapability &capability) noexcept
+    : projection_(&projection), capability_(&capability) {
+  for (const Vec2 &vertex : capability.footprint_xy_m) {
+    footprint_support_radius_m_ =
+        std::max(footprint_support_radius_m_, std::hypot(vertex.x, vertex.y));
   }
 }
 
-WheelSweepValidation WheelSweepValidator::Validate(
-    const WheelTransition& transition,
-    const std::stop_token stop_token) const {
+WheelSweepValidation
+WheelSweepValidator::Validate(const WheelTransition &transition,
+                              const std::stop_token stop_token) const {
   if (stop_token.stop_requested()) {
     return WheelSweepValidation{
         .valid = false,
@@ -163,8 +160,7 @@ WheelSweepValidation WheelSweepValidator::Validate(
   }
   if (projection_ == nullptr || projection_->source_map() == nullptr ||
       capability_ == nullptr || capability_->footprint_xy_m.size() < 3U ||
-      !IsFinite(transition.source_pose) ||
-      !IsFinite(transition.target_pose) ||
+      !IsFinite(transition.source_pose) || !IsFinite(transition.target_pose) ||
       !std::isfinite(transition.curvature_per_m) ||
       !std::isfinite(capability_->maximum_curvature_per_m) ||
       capability_->maximum_curvature_per_m <= 0.0) {
@@ -176,8 +172,7 @@ WheelSweepValidation WheelSweepValidator::Validate(
   }
 
   const double translation_m = std::hypot(
-      transition.target_pose.position_m.x -
-          transition.source_pose.position_m.x,
+      transition.target_pose.position_m.x - transition.source_pose.position_m.x,
       transition.target_pose.position_m.y -
           transition.source_pose.position_m.y);
   const double yaw_delta = std::abs(ShortestYawDelta(
@@ -187,17 +182,16 @@ WheelSweepValidation WheelSweepValidator::Validate(
   const double maximum_step_m =
       projection_->source_map()->resolution_m() * 0.25;
   const std::size_t required_subdivisions = std::max<std::size_t>(
-      1U, static_cast<std::size_t>(
-              std::ceil(swept_distance_m / maximum_step_m)));
-  const auto& map = *projection_->source_map();
+      1U,
+      static_cast<std::size_t>(std::ceil(swept_distance_m / maximum_step_m)));
+  const auto &map = *projection_->source_map();
   const double resolution = map.resolution_m();
   const double origin_x = map.origin_m().x;
   const double origin_y = map.origin_m().y;
   const double signed_yaw_delta = ShortestYawDelta(
       transition.source_pose.yaw_rad, transition.target_pose.yaw_rad);
   std::size_t sample_count = 0U;
-  for (std::size_t sample = 0U;
-       sample <= required_subdivisions; ++sample) {
+  for (std::size_t sample = 0U; sample <= required_subdivisions; ++sample) {
     if (stop_token.stop_requested()) {
       return WheelSweepValidation{
           .valid = false,
@@ -208,13 +202,13 @@ WheelSweepValidation WheelSweepValidator::Validate(
     }
     ++sample_count;
     const double ratio = static_cast<double>(sample) /
-        static_cast<double>(required_subdivisions);
+                         static_cast<double>(required_subdivisions);
     const double center_x = transition.source_pose.position_m.x +
-        ratio * (transition.target_pose.position_m.x -
-                 transition.source_pose.position_m.x);
+                            ratio * (transition.target_pose.position_m.x -
+                                     transition.source_pose.position_m.x);
     const double center_y = transition.source_pose.position_m.y +
-        ratio * (transition.target_pose.position_m.y -
-                 transition.source_pose.position_m.y);
+                            ratio * (transition.target_pose.position_m.y -
+                                     transition.source_pose.position_m.y);
     const double yaw =
         transition.source_pose.yaw_rad + ratio * signed_yaw_delta;
     const double cosine = std::cos(yaw);
@@ -225,7 +219,7 @@ WheelSweepValidation WheelSweepValidator::Validate(
     double maximum_y = -std::numeric_limits<double>::infinity();
     std::vector<Vec2> footprint;
     footprint.reserve(capability_->footprint_xy_m.size());
-    for (const Vec2& vertex : capability_->footprint_xy_m) {
+    for (const Vec2 &vertex : capability_->footprint_xy_m) {
       if (!std::isfinite(vertex.x) || !std::isfinite(vertex.y)) {
         return Failure("WHEEL_FOOTPRINT_NONFINITE", sample_count);
       }
@@ -256,10 +250,9 @@ WheelSweepValidation WheelSweepValidator::Validate(
             .x = static_cast<std::int32_t>(x),
             .y = static_cast<std::int32_t>(y),
         };
-        if (!projection_->HardFeasible(cell) &&
+        if (!projection_->IntrinsicFeasible(cell) &&
             PolygonIntersectsCell(
-                footprint,
-                origin_x + static_cast<double>(x) * resolution,
+                footprint, origin_x + static_cast<double>(x) * resolution,
                 origin_y + static_cast<double>(y) * resolution,
                 origin_x + static_cast<double>(x + 1) * resolution,
                 origin_y + static_cast<double>(y + 1) * resolution)) {
@@ -276,4 +269,4 @@ WheelSweepValidation WheelSweepValidator::Validate(
   };
 }
 
-}  // namespace lunar::planning::wheel
+} // namespace lunar::planning::wheel

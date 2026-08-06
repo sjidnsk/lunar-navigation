@@ -5,7 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <numbers>
+#include <iterator>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -53,25 +53,6 @@ CurrentPose(const PlannerInput &input) noexcept {
     return state->body_pose;
   }
   return std::nullopt;
-}
-
-[[nodiscard]] shared::SafeProjectionClearanceMargins
-CenterlineClearanceMargins(const PlatformCapability &capability,
-                           const double resolution_m) {
-  double support_radius_m = 0.0;
-  if (const auto *wheel = std::get_if<WheeledCapability>(&capability)) {
-    for (const Vec2 vertex : wheel->footprint_xy_m) {
-      support_radius_m =
-          std::max(support_radius_m, std::hypot(vertex.x, vertex.y));
-    }
-  } else if (const auto *legged = std::get_if<LeggedCapability>(&capability)) {
-    support_radius_m = std::hypot(legged->body_half_extent_m.x,
-                                  legged->body_half_extent_m.y);
-  }
-  return shared::SafeProjectionClearanceMargins{
-      .hazard_m = support_radius_m + std::numbers::sqrt2 * resolution_m,
-      .boundary_m = support_radius_m,
-  };
 }
 
 [[nodiscard]] bool PointOnSegment(const Vec2 point, const Vec2 start,
@@ -225,7 +206,9 @@ SearchFailure(const GlobalGridSearchResult &search,
 
 } // namespace
 
-GlobalRoutePlanResult PlanGroundGlobalRoute(const PlannerInput &input) {
+GlobalRoutePlanResult
+PlanGroundGlobalRoute(const PlannerInput &input,
+                      const std::span<const shared::GridCell> excluded_cells) {
   const Clock::time_point started = Clock::now();
   if (input.stop_token.stop_requested()) {
     return Failure(PlanningOutcome::kCanceled, "REQUEST_CANCELED", started);
@@ -259,12 +242,9 @@ GlobalRoutePlanResult PlanGroundGlobalRoute(const PlannerInput &input) {
     return Failure(PlanningOutcome::kInvalidRequest, map.reason_code, started,
                    level);
   }
-  const shared::SafeProjectionClearanceMargins centerline_margins =
-      CenterlineClearanceMargins(input.capability,
-                                 map.snapshot->resolution_m());
-  const auto projection = shared::BuildSafeProjection(
-      map.snapshot, input.capability, input.config.map_safety,
-      input.stop_token, centerline_margins);
+  const auto projection =
+      shared::BuildSafeProjection(map.snapshot, input.capability,
+                                  input.config.map_safety, input.stop_token);
   if (!projection.ok()) {
     const PlanningOutcome outcome = projection.reason_code == "REQUEST_CANCELED"
                                         ? PlanningOutcome::kCanceled
@@ -307,10 +287,20 @@ GlobalRoutePlanResult PlanGroundGlobalRoute(const PlannerInput &input) {
                    started, level);
   }
 
+  std::vector<std::uint8_t> excluded_mask(map.snapshot->cell_count(), 0U);
+  for (const shared::GridCell cell : excluded_cells) {
+    if (!map.snapshot->InBounds(cell)) {
+      return Failure(PlanningOutcome::kNumericalFailure,
+                     "GLOBAL_EXCLUDED_CORRIDOR_INVALID", started, level);
+    }
+    excluded_mask[map.snapshot->Index(cell)] = 1U;
+  }
+
   GlobalGridSearchResult search = SearchGlobalGrid(GlobalGridSearchProblem{
       .projection = *projection.projection,
       .start = *start_cell,
       .goal_mask = goal_mask,
+      .excluded_mask = excluded_mask,
       .maximum_speed_mps = terrain_limits.limits->maximum_speed_mps,
       .config = input.config.global_search,
       .stop_token = input.stop_token,
@@ -318,9 +308,9 @@ GlobalRoutePlanResult PlanGroundGlobalRoute(const PlannerInput &input) {
   if (!search.ok()) {
     return SearchFailure(search, started, level);
   }
-  std::vector<shared::GridCell> simplified = SimplifyRouteSupercover(
-      *projection.projection, search.path_cells,
-      search.path_cells.size());
+  std::vector<shared::GridCell> simplified =
+      SimplifyRouteSupercover(*projection.projection, search.path_cells,
+                              search.path_cells.size(), excluded_mask);
   if (simplified.empty()) {
     return Failure(PlanningOutcome::kNumericalFailure,
                    "GLOBAL_ROUTE_SIMPLIFICATION_FAILED", started, level);
@@ -331,6 +321,13 @@ GlobalRoutePlanResult PlanGroundGlobalRoute(const PlannerInput &input) {
     return Failure(PlanningOutcome::kNumericalFailure,
                    "GLOBAL_ROUTE_RESULT_INVALID", started, level);
   }
+  std::vector<shared::GridCell> conditional_cells;
+  std::ranges::copy_if(search.path_cells, std::back_inserter(conditional_cells),
+                       [&](const shared::GridCell cell) {
+                         return projection.projection->ClearanceClassification(
+                                    cell) ==
+                                shared::ClearanceClass::kConditional;
+                       });
 
   return GlobalRoutePlanResult{
       .outcome = PlanningOutcome::kNewReferenceAvailable,
@@ -338,6 +335,7 @@ GlobalRoutePlanResult PlanGroundGlobalRoute(const PlannerInput &input) {
       .route =
           GlobalRoute{
               .raw_cells = std::move(search.path_cells),
+              .conditional_cells = std::move(conditional_cells),
               .simplified_cells = std::move(simplified),
               .poses_map = std::move(poses),
               .cost = search.cost,

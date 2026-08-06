@@ -25,6 +25,7 @@ struct GlobalGridSearchProblem final {
   const shared::SafeProjection &projection;
   shared::GridCell start;
   std::span<const std::uint8_t> goal_mask;
+  std::span<const std::uint8_t> excluded_mask;
   double maximum_speed_mps{1.0};
   GlobalSearchConfig config;
   std::stop_token stop_token;

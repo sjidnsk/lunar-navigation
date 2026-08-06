@@ -122,20 +122,30 @@ TEST(LocalFrontier, TransformsRouteAndReturnsEveryWheelCandidateFarToNear) {
   EXPECT_EQ(result.problems[0].local_map_view.frame_id, "odom");
 }
 
+TEST(LocalFrontier, ReportsOnlyConditionalCellsInsideTheAttemptedPrefix) {
+  const PlannerInput input = FrontierInput(PlatformType::kWheeled);
+  GlobalRoute route = StraightRoute();
+  route.conditional_cells = {{14, 4}, {19, 4}};
+
+  const LocalFrontierResult result = BuildLocalFrontiers(input, route);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_EQ(result.conditional_corridor_cells,
+            std::vector<shared::GridCell>({{14, 4}}));
+}
+
 TEST(LocalFrontier, WheelTurnFrontierRejectsAHeadingThatMissesTheRouteTurn) {
   PlannerInput input = FrontierInput(PlatformType::kWheeled);
-  std::get<WheeledCapability>(input.capability).motion_primitives.push_back(
-      WheelMotionPrimitive{
+  std::get<WheeledCapability>(input.capability)
+      .motion_primitives.push_back(WheelMotionPrimitive{
           .primitive_id = "production-sized-turn",
           .kind = WheelPrimitiveKind::kSpinCounterclockwise,
           .relative_end_pose =
-              Pose3{.orientation = test::YawQuaternion(
-                        std::numbers::pi / 4.0)},
+              Pose3{.orientation = test::YawQuaternion(std::numbers::pi / 4.0)},
           .nominal_duration = std::chrono::seconds{1},
       });
 
-  const LocalFrontierResult result =
-      BuildLocalFrontiers(input, AngledRoute());
+  const LocalFrontierResult result = BuildLocalFrontiers(input, AngledRoute());
 
   ASSERT_TRUE(result.ok()) << result.reason_code;
   ASSERT_FALSE(result.problems.empty());
@@ -144,9 +154,8 @@ TEST(LocalFrontier, WheelTurnFrontierRejectsAHeadingThatMissesTheRouteTurn) {
   EXPECT_FALSE(wheel::GoalContainsPose(
       goal, wheel::WheelPose{.position_m = target, .yaw_rad = 0.0}));
   EXPECT_TRUE(wheel::GoalContainsPose(
-      goal,
-      wheel::WheelPose{
-          .position_m = target, .yaw_rad = std::numbers::pi / 4.0}));
+      goal, wheel::WheelPose{.position_m = target,
+                             .yaw_rad = std::numbers::pi / 4.0}));
 }
 
 TEST(LocalFrontier, AppliesThreeMetreLeggedHorizon) {
@@ -212,13 +221,11 @@ TEST(LocalFrontier, MasksEveryCellOutsideTheHorizonCorridorIntersection) {
       std::get<std::vector<std::uint8_t>>(view.layers.at("forbidden").values);
   const Vec3 current{2.5, 3.5, 0.0};
   const Vec3 frontier = PointTarget(result.problems.front().goal_odom);
-  const double raster_margin_m =
-      std::sqrt(2.0) * 0.5 * view.resolution_m;
+  const double raster_margin_m = std::sqrt(2.0) * 0.5 * view.resolution_m;
   const double mask_half_width_m =
       result.corridor_half_width_m + raster_margin_m;
-  const double mask_horizon_m =
-      input.config.local_frontier.wheel_horizon_m +
-      result.corridor_half_width_m + raster_margin_m;
+  const double mask_horizon_m = input.config.local_frontier.wheel_horizon_m +
+                                result.corridor_half_width_m + raster_margin_m;
   for (std::size_t y = 0U; y < view.height; ++y) {
     for (std::size_t x = 0U; x < view.width; ++x) {
       const std::size_t index = y * view.width + x;
@@ -232,8 +239,7 @@ TEST(LocalFrontier, MasksEveryCellOutsideTheHorizonCorridorIntersection) {
           std::hypot(center.x - current.x, center.y - current.y) <=
               mask_horizon_m + 1.0e-9 &&
           DistanceToHorizontalPrefix(center, current.x, frontier.x,
-                                     current.y) <=
-              mask_half_width_m + 1.0e-9;
+                                     current.y) <= mask_half_width_m + 1.0e-9;
       if (!inside) {
         EXPECT_EQ(valid[index], 0U) << "cell " << x << ',' << y;
         EXPECT_EQ(forbidden[index], 1U) << "cell " << x << ',' << y;

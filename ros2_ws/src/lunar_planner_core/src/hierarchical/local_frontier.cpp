@@ -103,8 +103,7 @@ Failure(const LocalFrontierStatus status, std::string reason_code,
   return inside;
 }
 
-[[nodiscard]] bool GoalIntersectsCell(const GoalRegion &goal,
-                                      const Vec3 center,
+[[nodiscard]] bool GoalIntersectsCell(const GoalRegion &goal, const Vec3 center,
                                       const double resolution_m) noexcept {
   if (const auto *point = std::get_if<PointGoal>(&goal.target)) {
     const double half = resolution_m / 2.0;
@@ -119,10 +118,10 @@ Failure(const LocalFrontierStatus status, std::string reason_code,
          PointInPolygon(Vec2{center.x, center.y}, region->boundary_m);
 }
 
-[[nodiscard]] LocalGoalFeasibility EvaluateLocalGoal(
-    const shared::MapSnapshot &map,
-    const shared::SafeProjection &projection,
-    const GoalRegion &goal) noexcept {
+[[nodiscard]] LocalGoalFeasibility
+EvaluateLocalGoal(const shared::MapSnapshot &map,
+                  const shared::SafeProjection &projection,
+                  const GoalRegion &goal) noexcept {
   bool covered = false;
   for (std::size_t index = 0U; index < map.cell_count(); ++index) {
     const shared::GridCell cell{
@@ -283,8 +282,7 @@ PrefixPolyline(const std::vector<Vec3> &route_odom, const double distance_m,
                                      const double horizon_m,
                                      const double corridor_half_width_m) {
   GridMap view = source;
-  const double raster_margin_m =
-      std::numbers::sqrt2 * 0.5 * view.resolution_m;
+  const double raster_margin_m = std::numbers::sqrt2 * 0.5 * view.resolution_m;
   auto &valid =
       std::get<std::vector<std::uint8_t>>(view.layers.at("valid_mask").values);
   auto &forbidden =
@@ -301,9 +299,9 @@ PrefixPolyline(const std::vector<Vec3> &route_odom, const double distance_m,
       const bool inside_horizon =
           std::hypot(center.x - current.x, center.y - current.y) <=
           horizon_m + corridor_half_width_m + raster_margin_m + kTolerance;
-      const bool inside_corridor = DistanceToPolyline(center, route_prefix) <=
-                                   corridor_half_width_m + raster_margin_m +
-                                       kTolerance;
+      const bool inside_corridor =
+          DistanceToPolyline(center, route_prefix) <=
+          corridor_half_width_m + raster_margin_m + kTolerance;
       if (!inside_horizon || !inside_corridor) {
         valid[index] = 0U;
         forbidden[index] = 1U;
@@ -321,9 +319,10 @@ PrefixPolyline(const std::vector<Vec3> &route_odom, const double distance_m,
   if (const auto *capability =
           std::get_if<WheeledCapability>(&input.capability)) {
     double minimum_turn_rad = std::numeric_limits<double>::infinity();
-    for (const WheelMotionPrimitive &primitive : capability->motion_primitives) {
-      const auto yaw = wheel::YawFromQuaternion(
-          primitive.relative_end_pose.orientation);
+    for (const WheelMotionPrimitive &primitive :
+         capability->motion_primitives) {
+      const auto yaw =
+          wheel::YawFromQuaternion(primitive.relative_end_pose.orientation);
       if (yaw.has_value() && std::abs(*yaw) > kTolerance) {
         minimum_turn_rad = std::min(minimum_turn_rad, std::abs(*yaw));
       }
@@ -414,8 +413,7 @@ LocalFrontierResult BuildLocalFrontiers(const PlannerInput &input,
                    "FRAME_TRANSFORM_INVALID", corridor_half_width);
   }
   if (EvaluateLocalGoal(*snapshot.snapshot, *projection.projection,
-                        *goal_odom) ==
-      LocalGoalFeasibility::kInfeasible) {
+                        *goal_odom) == LocalGoalFeasibility::kInfeasible) {
     return Failure(LocalFrontierStatus::kGoalInfeasible,
                    "GLOBAL_GOAL_INFEASIBLE", corridor_half_width);
   }
@@ -464,10 +462,10 @@ LocalFrontierResult BuildLocalFrontiers(const PlannerInput &input,
         .state_time = input.state_time,
         .current_state = input.current_state,
         .goal_odom = *goal_odom,
-        .local_map_view = BuildLocalView(
-            local_map, geometry->current_position_odom,
-            {geometry->current_position_odom}, geometry->horizon_m,
-            corridor_half_width),
+        .local_map_view =
+            BuildLocalView(local_map, geometry->current_position_odom,
+                           {geometry->current_position_odom},
+                           geometry->horizon_m, corridor_half_width),
         .capability = input.capability,
         .config = input.config,
         .previous_execution = input.previous_execution,
@@ -562,6 +560,46 @@ LocalFrontierResult BuildLocalFrontiers(const PlannerInput &input,
       .corridor_half_width_m = corridor_half_width,
       .reason_code = "LOCAL_FRONTIERS_AVAILABLE",
   };
+  const double conditional_prefix_limit_m =
+      covered.back().route_distance_m +
+      std::numbers::sqrt2 * 0.5 * input.world.global_map.resolution_m;
+  std::set<shared::GridCell> unique_conditional_cells;
+  for (const shared::GridCell cell : route.conditional_cells) {
+    if (cell.x < 0 || cell.y < 0 ||
+        static_cast<std::size_t>(cell.x) >= input.world.global_map.width ||
+        static_cast<std::size_t>(cell.y) >= input.world.global_map.height ||
+        (!route.raw_cells.empty() && cell == route.raw_cells.front())) {
+      continue;
+    }
+    const Pose3 center_map{
+        .position_m =
+            Vec3{
+                .x = input.world.global_map.origin_m.x +
+                     (static_cast<double>(cell.x) + 0.5) *
+                         input.world.global_map.resolution_m,
+                .y = input.world.global_map.origin_m.y +
+                     (static_cast<double>(cell.y) + 0.5) *
+                         input.world.global_map.resolution_m,
+            },
+    };
+    const auto center_odom =
+        TransformPose(center_map, input.world.map_from_odom,
+                      TransformDirection::kParentToChild);
+    if (!center_odom.has_value()) {
+      continue;
+    }
+    const double distance_from_start =
+        SegmentLength(geometry->current_position_odom, center_odom->position_m);
+    const double distance_from_route =
+        DistanceToPolyline(center_odom->position_m, route_odom);
+    if (distance_from_start <= conditional_prefix_limit_m + kTolerance &&
+        distance_from_route <=
+            std::numbers::sqrt2 * 0.5 * input.world.global_map.resolution_m +
+                kTolerance &&
+        unique_conditional_cells.insert(cell).second) {
+      result.conditional_corridor_cells.push_back(cell);
+    }
+  }
   result.problems.reserve(attempt_count);
   result.frontier_distances_m.reserve(attempt_count);
   std::size_t previous_index = covered.size();

@@ -22,6 +22,7 @@ struct LocalFrontierResult final {
   LocalFrontierStatus status{LocalFrontierStatus::kInvalidRequest};
   std::vector<LocalPlanningProblem> problems;
   std::vector<double> frontier_distances_m;
+  std::vector<shared::GridCell> conditional_corridor_cells;
   double corridor_half_width_m{};
   std::string reason_code;
 

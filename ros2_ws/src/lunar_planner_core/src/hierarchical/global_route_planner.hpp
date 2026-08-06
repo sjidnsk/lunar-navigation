@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <optional>
+#include <span>
 #include <string>
 
 #include "hierarchical/global_route.hpp"
@@ -25,6 +26,7 @@ struct GlobalRoutePlanResult final {
 };
 
 [[nodiscard]] GlobalRoutePlanResult
-PlanGroundGlobalRoute(const PlannerInput &input);
+PlanGroundGlobalRoute(const PlannerInput &input,
+                      std::span<const shared::GridCell> excluded_cells = {});
 
 } // namespace lunar::planning::hierarchical

@@ -39,6 +39,15 @@ void SetGlobalForbiddenColumn(PlannerInput &input, const std::size_t x) {
   }
 }
 
+void SetObstacleBoth(PlannerInput &input, const std::size_t x,
+                     const std::size_t y) {
+  for (GridMap *map : {&input.world.global_map, &input.world.local_map}) {
+    auto &obstacles =
+        std::get<std::vector<std::uint8_t>>(map->layers.at("obstacle").values);
+    obstacles.at(y * map->width + x) = 1U;
+  }
+}
+
 [[nodiscard]] PlannerOutput LocalWheelOutput(const PlannerInput &input) {
   return PlannerOutput{
       .outcome = PlanningOutcome::kNewReferenceAvailable,
@@ -75,9 +84,11 @@ void SetGlobalForbiddenColumn(PlannerInput &input, const std::size_t x) {
 
 [[nodiscard]] GlobalRoute FivePointRoute() {
   GlobalRoute route = TwoPointRoute();
-  route.raw_cells = {
-      {.x = 0, .y = 0}, {.x = 1, .y = 0}, {.x = 2, .y = 0},
-      {.x = 3, .y = 0}, {.x = 4, .y = 0}};
+  route.raw_cells = {{.x = 0, .y = 0},
+                     {.x = 1, .y = 0},
+                     {.x = 2, .y = 0},
+                     {.x = 3, .y = 0},
+                     {.x = 4, .y = 0}};
   route.simplified_cells = route.raw_cells;
   route.poses_map.clear();
   for (std::int32_t x = 0; x < 5; ++x) {
@@ -115,7 +126,8 @@ TEST(ReferenceComposer, ThinsOnlyThePublishedPreviewWithoutLosingEndpoints) {
 
   ASSERT_TRUE(result.ok()) << result.reason_code;
   ASSERT_EQ(result.reference->preview.poses_map.size(), 3U);
-  EXPECT_EQ(result.reference->preview.poses_map.front(), route.poses_map.front());
+  EXPECT_EQ(result.reference->preview.poses_map.front(),
+            route.poses_map.front());
   EXPECT_EQ(result.reference->preview.poses_map.back(), route.poses_map.back());
   EXPECT_EQ(route.poses_map.size(), 5U);
 }
@@ -254,9 +266,8 @@ TEST(HierarchicalPlanner, ReportsTheLocalBackendReasonAfterAllFrontiersFail) {
           .primitive_id = "spin-only",
           .kind = WheelPrimitiveKind::kSpinCounterclockwise,
           .relative_end_pose =
-              Pose3{.orientation =
-                        Quaternion{.w = 0.9238795325112867,
-                                   .z = 0.3826834323650898}},
+              Pose3{.orientation = Quaternion{.w = 0.9238795325112867,
+                                              .z = 0.3826834323650898}},
           .nominal_duration = std::chrono::seconds{1},
       },
   };
@@ -268,6 +279,47 @@ TEST(HierarchicalPlanner, ReportsTheLocalBackendReasonAfterAllFrontiersFail) {
   EXPECT_NE(std::ranges::find(output.diagnostics.warning_codes,
                               "WHEEL_NO_KNOWN_SAFE_ROUTE"),
             output.diagnostics.warning_codes.end());
+}
+
+TEST(HierarchicalPlanner, ReroutesAfterAConditionalCorridorFailsLocalSweep) {
+  Planner planner;
+  PlannerInput input = test::MakeValidWheelInput();
+  input.request_id = "conditional-corridor-reroute";
+  input.world.global_map = test::MakeFlatMap("map", 14U, 13U, 1.0);
+  input.world.local_map = test::MakeFlatMap("odom", 14U, 13U, 1.0);
+  input.config.global_map.base_resolution_m = 1.0;
+  input.config.local_frontier.wheel_horizon_m = 20.0;
+  auto &state = std::get<WheeledState>(input.current_state);
+  state.pose.position_m = {1.5, 4.5, 0.0};
+  auto &capability = std::get<WheeledCapability>(input.capability);
+  capability.footprint_xy_m = {
+      {-0.2, -0.5}, {0.2, -0.5}, {0.2, 0.5}, {-0.2, 0.5}};
+  capability.minimum_clearance_m = 0.0;
+  input.goal_map.target = PointGoal{
+      .position_m = {12.5, 4.5, 0.0},
+      .tolerance_m = 0.2,
+  };
+  for (std::size_t y = 0U; y < 13U; ++y) {
+    if (y != 4U && (y < 8U || y > 10U)) {
+      SetObstacleBoth(input, 6U, y);
+    }
+  }
+  const GlobalRoutePlanResult shortest = PlanGroundGlobalRoute(input);
+  ASSERT_TRUE(shortest.ok()) << shortest.reason_code;
+  ASSERT_NE(std::ranges::find(shortest.route->conditional_cells,
+                              shared::GridCell{6, 4}),
+            shortest.route->conditional_cells.end());
+
+  const PlannerOutput output = planner.Plan(input);
+
+  ASSERT_TRUE(output.reference.has_value()) << output.reason_code;
+  EXPECT_NE(std::ranges::find(output.diagnostics.warning_codes,
+                              "GLOBAL_CONDITIONAL_CORRIDOR_RETRY"),
+            output.diagnostics.warning_codes.end());
+  EXPECT_NE(output.reference->preview.poses_map, shortest.route->poses_map);
+  EXPECT_TRUE(std::ranges::any_of(
+      output.reference->preview.poses_map,
+      [](const Pose3 &pose) { return pose.position_m.y >= 8.5; }));
 }
 
 TEST(HierarchicalPlanner, IsStatelessAcrossCancellationAndRepeatedRequests) {

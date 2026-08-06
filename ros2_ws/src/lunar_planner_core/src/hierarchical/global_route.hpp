@@ -13,6 +13,7 @@ namespace lunar::planning::hierarchical {
 
 struct GlobalRoute final {
   std::vector<shared::GridCell> raw_cells;
+  std::vector<shared::GridCell> conditional_cells;
   std::vector<shared::GridCell> simplified_cells;
   std::vector<Pose3> poses_map;
   double cost{};
@@ -24,9 +25,10 @@ struct GlobalRoute final {
 [[nodiscard]] std::vector<shared::GridCell>
 SimplifyRouteSupercover(const shared::SafeProjection &projection,
                         std::span<const shared::GridCell> route,
-                        std::size_t maximum_points);
+                        std::size_t maximum_points,
+                        std::span<const std::uint8_t> excluded_mask = {});
 
-[[nodiscard]] std::vector<Pose3>
-ThinRoutePreview(std::span<const Pose3> route, std::size_t maximum_points);
+[[nodiscard]] std::vector<Pose3> ThinRoutePreview(std::span<const Pose3> route,
+                                                  std::size_t maximum_points);
 
 } // namespace lunar::planning::hierarchical

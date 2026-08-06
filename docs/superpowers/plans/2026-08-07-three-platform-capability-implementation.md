@@ -205,17 +205,17 @@
 - Modify: `ros2_ws/src/lunar_planner_core/src/hierarchical/local_frontier.cpp`
 - Modify: `ros2_ws/src/lunar_planner_core/test/{shared_core_test,global_route_planner_test,local_frontier_test}.cpp`
 
-- [ ] **Step 1: Add exact boundary tests**
+- [x] **Step 1: Add exact boundary tests**
 
   Wheel bands are `<0.609`, `[0.609,0.918722)`, `>=0.918722`; legged bands are `<0.465`, `[0.465,0.678)`, `>=0.678`. Obstacle cells participate as complete `0.20 m` squares and no extra `sqrt(2)*resolution` inflation is permitted.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
-- [ ] **Step 3: Implement tri-state projection**
+- [x] **Step 3: Implement tri-state projection**
 
   Add `ClearanceClass { kRejected, kConditional, kUnconditional }`; global A* may traverse conditional cells but marks their corridors for L0 oriented-footprint certification. A failed conditional corridor disables only that edge/corridor and resumes global alternatives.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
   Commit: `feat: add conditional ground-clearance projection`
 

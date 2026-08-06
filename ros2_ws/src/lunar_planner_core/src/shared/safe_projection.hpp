@@ -15,18 +15,38 @@ namespace lunar::planning::shared {
 
 struct SafeProjectionBuildResult;
 
+enum class ClearanceClass : std::uint8_t {
+  kRejected = 0,
+  kConditional = 1,
+  kUnconditional = 2,
+};
+
+struct ClearanceBands final {
+  double rejected_below_m{};
+  double unconditional_at_or_above_m{};
+};
+
+[[nodiscard]] std::optional<ClearanceBands>
+ResolveClearanceBands(const PlatformCapability &capability) noexcept;
+
+[[nodiscard]] ClearanceClass
+ClassifyClearance(double clearance_m, const ClearanceBands &bands) noexcept;
+
 struct SafeProjectionClearanceMargins final {
   double hazard_m{};
   double boundary_m{};
 };
 
 class SafeProjection final {
- public:
-  [[nodiscard]] const std::shared_ptr<const MapSnapshot>& source_map()
-      const noexcept;
+public:
+  [[nodiscard]] const std::shared_ptr<const MapSnapshot> &
+  source_map() const noexcept;
   [[nodiscard]] bool InBounds(GridCell cell) const noexcept;
   [[nodiscard]] bool Known(GridCell cell) const noexcept;
+  [[nodiscard]] bool IntrinsicFeasible(GridCell cell) const noexcept;
   [[nodiscard]] bool HardFeasible(GridCell cell) const noexcept;
+  [[nodiscard]] ClearanceClass
+  ClearanceClassification(GridCell cell) const noexcept;
   [[nodiscard]] float ClearanceMeters(GridCell cell) const noexcept;
   [[nodiscard]] float SlopeRadians(GridCell cell) const noexcept;
   [[nodiscard]] float RoughnessMeters(GridCell cell) const noexcept;
@@ -35,18 +55,20 @@ class SafeProjection final {
   [[nodiscard]] double maximum_slope_rad() const noexcept;
   [[nodiscard]] PlatformType platform_type() const noexcept;
 
- private:
+private:
   friend struct SafeProjectionBuildResult;
-  friend SafeProjectionBuildResult BuildSafeProjection(
-      std::shared_ptr<const MapSnapshot>, const PlatformCapability&,
-      const MapSafetyConfig&, std::stop_token,
-      SafeProjectionClearanceMargins);
+  friend SafeProjectionBuildResult
+  BuildSafeProjection(std::shared_ptr<const MapSnapshot>,
+                      const PlatformCapability &, const MapSafetyConfig &,
+                      std::stop_token, SafeProjectionClearanceMargins);
 
   std::shared_ptr<const MapSnapshot> source_map_;
   PlatformType platform_type_{PlatformType::kWheeled};
   double maximum_slope_rad_{};
   std::vector<std::uint8_t> known_mask_;
+  std::vector<std::uint8_t> intrinsic_feasible_mask_;
   std::vector<std::uint8_t> hard_feasible_mask_;
+  std::vector<std::uint8_t> clearance_class_mask_;
   std::vector<float> clearance_m_;
   std::vector<float> slope_rad_;
   std::vector<float> roughness_m_;
@@ -63,11 +85,10 @@ struct SafeProjectionBuildResult final {
   }
 };
 
-[[nodiscard]] SafeProjectionBuildResult BuildSafeProjection(
-    std::shared_ptr<const MapSnapshot> map,
-    const PlatformCapability& capability,
-    const MapSafetyConfig& config,
-    std::stop_token stop_token,
-    SafeProjectionClearanceMargins clearance_margins = {});
+[[nodiscard]] SafeProjectionBuildResult
+BuildSafeProjection(std::shared_ptr<const MapSnapshot> map,
+                    const PlatformCapability &capability,
+                    const MapSafetyConfig &config, std::stop_token stop_token,
+                    SafeProjectionClearanceMargins clearance_margins = {});
 
-}  // namespace lunar::planning::shared
+} // namespace lunar::planning::shared

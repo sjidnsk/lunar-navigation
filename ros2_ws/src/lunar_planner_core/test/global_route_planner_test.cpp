@@ -72,36 +72,66 @@ TEST(GlobalRoutePlanner, PlansCompleteDeterministicWheelRoute) {
   EXPECT_NEAR(first.route->poses_map.back().position_m.y, 5.5, 0.2);
 }
 
-TEST(GlobalRoutePlanner, KeepsWheelFootprintClearOfGlobalObstacles) {
+TEST(GlobalRoutePlanner, MarksANarrowGlobalPassageForLocalCertification) {
   PlannerInput input = GroundInput(PlatformType::kWheeled);
   input.world.global_map = test::MakeFlatMap("map", 12U, 9U, 1.0);
   input.world.local_map = test::MakeFlatMap("odom", 12U, 9U, 1.0);
   auto &state = std::get<WheeledState>(input.current_state);
   state.pose.position_m = {1.5, 4.5, 0.0};
-  auto &capability = std::get<WheeledCapability>(input.capability);
-  capability.footprint_xy_m = {
-      {-0.9, -0.9}, {0.9, -0.9}, {0.9, 0.9}, {-0.9, 0.9}};
-  capability.minimum_clearance_m = 0.0;
+  std::get<WheeledCapability>(input.capability).minimum_clearance_m = 0.0;
   input.config.global_search.maximum_preview_points = 2U;
   input.goal_map.target = PointGoal{
       .position_m = {10.5, 4.5, 0.0},
       .tolerance_m = 0.2,
   };
-  SetObstacle(input.world.global_map, 6U, 5U);
+  for (std::size_t y = 0U; y < input.world.global_map.height; ++y) {
+    if (y != 4U) {
+      SetObstacle(input.world.global_map, 6U, y);
+    }
+  }
 
   const auto result = PlanGroundGlobalRoute(input);
 
   ASSERT_TRUE(result.ok());
-  ASSERT_GT(result.route->poses_map.size(), 2U);
-  EXPECT_NE(
-      result.reason_code,
-      std::string{"GLOBAL_SEARCH_"} + "RESOURCE_LIMIT");
-  EXPECT_TRUE(std::ranges::all_of(
-      result.route->raw_cells, [](const shared::GridCell cell) {
-        const double center_x = static_cast<double>(cell.x) + 0.5;
-        const double center_y = static_cast<double>(cell.y) + 0.5;
-        return std::hypot(center_x - 6.5, center_y - 5.5) >= 2.68;
-      }));
+  EXPECT_NE(std::ranges::find(result.route->conditional_cells,
+                              shared::GridCell{6, 4}),
+            result.route->conditional_cells.end());
+}
+
+TEST(GlobalRoutePlanner, ReplansAroundOnlyTheRejectedConditionalCells) {
+  PlannerInput input = GroundInput(PlatformType::kWheeled);
+  input.world.global_map = test::MakeFlatMap("map", 12U, 9U, 1.0);
+  input.world.local_map = test::MakeFlatMap("odom", 12U, 9U, 1.0);
+  std::get<WheeledState>(input.current_state).pose.position_m = {1.5, 4.5, 0.0};
+  std::get<WheeledCapability>(input.capability).minimum_clearance_m = 0.0;
+  input.goal_map.target = PointGoal{
+      .position_m = {10.5, 4.5, 0.0},
+      .tolerance_m = 0.2,
+  };
+  for (std::size_t y = 0U; y < input.world.global_map.height; ++y) {
+    if (y != 3U && y != 5U) {
+      SetObstacle(input.world.global_map, 6U, y);
+    }
+  }
+
+  const auto first = PlanGroundGlobalRoute(input);
+  ASSERT_TRUE(first.ok()) << first.reason_code;
+  const auto first_gap = std::ranges::find_if(
+      first.route->raw_cells,
+      [](const shared::GridCell cell) { return cell.x == 6; });
+  ASSERT_NE(first_gap, first.route->raw_cells.end());
+
+  const std::vector<shared::GridCell> rejected{*first_gap};
+  const auto alternative = PlanGroundGlobalRoute(input, rejected);
+
+  ASSERT_TRUE(alternative.ok()) << alternative.reason_code;
+  EXPECT_EQ(std::ranges::find(alternative.route->raw_cells, *first_gap),
+            alternative.route->raw_cells.end());
+  const auto alternative_gap = std::ranges::find_if(
+      alternative.route->raw_cells,
+      [](const shared::GridCell cell) { return cell.x == 6; });
+  ASSERT_NE(alternative_gap, alternative.route->raw_cells.end());
+  EXPECT_NE(*alternative_gap, *first_gap);
 }
 
 TEST(GlobalRoutePlanner, DistinguishesGoalInfeasibleFromDisconnectedRoute) {

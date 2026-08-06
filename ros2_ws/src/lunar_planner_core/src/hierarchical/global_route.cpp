@@ -14,10 +14,24 @@ namespace {
   return (value > 0) - (value < 0);
 }
 
-[[nodiscard]] bool SegmentSafe(const shared::SafeProjection &projection,
-                               const shared::GridCell start,
-                               const shared::GridCell end) noexcept {
-  if (!projection.HardFeasible(start) || !projection.HardFeasible(end)) {
+[[nodiscard]] bool
+CellSafe(const shared::SafeProjection &projection, const shared::GridCell cell,
+         const std::span<const std::uint8_t> excluded_mask) noexcept {
+  if (!projection.HardFeasible(cell)) {
+    return false;
+  }
+  const auto &map = projection.source_map();
+  return excluded_mask.empty() ||
+         (map != nullptr && excluded_mask.size() == map->cell_count() &&
+          excluded_mask[map->Index(cell)] == 0U);
+}
+
+[[nodiscard]] bool
+SegmentSafe(const shared::SafeProjection &projection,
+            const shared::GridCell start, const shared::GridCell end,
+            const std::span<const std::uint8_t> excluded_mask) noexcept {
+  if (!CellSafe(projection, start, excluded_mask) ||
+      !CellSafe(projection, end, excluded_mask)) {
     return false;
   }
   if (start == end) {
@@ -58,8 +72,8 @@ namespace {
       } else {
         const shared::GridCell side_x{x + step_x, y};
         const shared::GridCell side_y{x, y + step_y};
-        if (!projection.HardFeasible(side_x) ||
-            !projection.HardFeasible(side_y)) {
+        if (!CellSafe(projection, side_x, excluded_mask) ||
+            !CellSafe(projection, side_y, excluded_mask)) {
           return false;
         }
         x += step_x;
@@ -68,7 +82,7 @@ namespace {
         maximum_t_y += delta_t_y;
       }
     }
-    if (!projection.HardFeasible(shared::GridCell{x, y})) {
+    if (!CellSafe(projection, shared::GridCell{x, y}, excluded_mask)) {
       return false;
     }
   }
@@ -80,14 +94,20 @@ namespace {
 std::vector<shared::GridCell>
 SimplifyRouteSupercover(const shared::SafeProjection &projection,
                         const std::span<const shared::GridCell> route,
-                        const std::size_t maximum_points) {
+                        const std::size_t maximum_points,
+                        const std::span<const std::uint8_t> excluded_mask) {
   if (route.empty() || maximum_points == 0U) {
     return {};
   }
+  const auto &map = projection.source_map();
+  if (!excluded_mask.empty() &&
+      (map == nullptr || excluded_mask.size() != map->cell_count())) {
+    return {};
+  }
   for (std::size_t index = 0U; index < route.size(); ++index) {
-    if (!projection.HardFeasible(route[index]) ||
-        (index > 0U &&
-         !SegmentSafe(projection, route[index - 1U], route[index]))) {
+    if (!CellSafe(projection, route[index], excluded_mask) ||
+        (index > 0U && !SegmentSafe(projection, route[index - 1U], route[index],
+                                    excluded_mask))) {
       return {};
     }
   }
@@ -103,7 +123,8 @@ SimplifyRouteSupercover(const shared::SafeProjection &projection,
     std::size_t selected = current + 1U;
     for (std::size_t candidate = route.size() - 1U; candidate > current;
          --candidate) {
-      if (SegmentSafe(projection, route[current], route[candidate])) {
+      if (SegmentSafe(projection, route[current], route[candidate],
+                      excluded_mask)) {
         selected = candidate;
         break;
       }

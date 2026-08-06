@@ -47,8 +47,8 @@ Projection(const std::size_t width, const std::size_t height,
   return std::move(*projection.projection);
 }
 
-[[nodiscard]] shared::SafeProjection SerpentineProjection(
-    const std::size_t width, const std::size_t height) {
+[[nodiscard]] shared::SafeProjection
+SerpentineProjection(const std::size_t width, const std::size_t height) {
   std::vector<shared::GridCell> obstacles;
   obstacles.reserve(width * height / 2U);
   for (std::size_t y = 1U; y < height; y += 2U) {
@@ -79,7 +79,8 @@ GoalMask(const std::size_t width, const std::size_t height,
 [[nodiscard]] GlobalGridSearchResult
 Search(const shared::SafeProjection &projection, const shared::GridCell start,
        const std::vector<std::uint8_t> &goals, GlobalSearchConfig config = {},
-       const std::stop_token stop_token = {}) {
+       const std::stop_token stop_token = {},
+       const std::vector<std::uint8_t> &excluded = {}) {
   config.slope_weight = 0.0;
   config.roughness_weight = 0.0;
   config.clearance_weight = 0.0;
@@ -87,10 +88,59 @@ Search(const shared::SafeProjection &projection, const shared::GridCell start,
       .projection = projection,
       .start = start,
       .goal_mask = goals,
+      .excluded_mask = excluded,
       .maximum_speed_mps = 1.0,
       .config = config,
       .stop_token = stop_token,
   });
+}
+
+TEST(GlobalGridSearch, ExcludesOnlyTheRejectedConditionalCorridor) {
+  const auto projection = Projection(7U, 5U, {{3, 0}, {3, 2}, {3, 4}});
+  const auto goals = GoalMask(7U, 5U, {{6, 2}});
+
+  const auto shortest = Search(projection, {0, 2}, goals);
+  ASSERT_EQ(shortest.status, GlobalSearchStatus::kSolved);
+  EXPECT_NE(std::ranges::find(shortest.path_cells, shared::GridCell{3, 1}),
+            shortest.path_cells.end());
+
+  std::vector<std::uint8_t> excluded(7U * 5U, 0U);
+  excluded[1U * 7U + 3U] = 1U;
+  const auto alternative =
+      Search(projection, {0, 2}, goals, GlobalSearchConfig{}, {}, excluded);
+
+  ASSERT_EQ(alternative.status, GlobalSearchStatus::kSolved)
+      << alternative.reason_code;
+  EXPECT_EQ(std::ranges::find(alternative.path_cells, shared::GridCell{3, 1}),
+            alternative.path_cells.end());
+  EXPECT_NE(std::ranges::find(alternative.path_cells, shared::GridCell{3, 3}),
+            alternative.path_cells.end());
+}
+
+TEST(GlobalGridSearch, ExhaustsTheFiniteMapAfterAllCorridorsAreExcluded) {
+  const auto projection = Projection(7U, 5U, {{3, 0}, {3, 2}, {3, 4}});
+  const auto goals = GoalMask(7U, 5U, {{6, 2}});
+  std::vector<std::uint8_t> excluded(7U * 5U, 0U);
+  excluded[1U * 7U + 3U] = 1U;
+  excluded[3U * 7U + 3U] = 1U;
+
+  const auto result =
+      Search(projection, {0, 2}, goals, GlobalSearchConfig{}, {}, excluded);
+
+  EXPECT_EQ(result.status, GlobalSearchStatus::kNoPath);
+  EXPECT_EQ(result.reason_code, "GLOBAL_NO_KNOWN_SAFE_ROUTE");
+}
+
+TEST(GlobalGridSearch, RejectsAnExcludedMaskWithTheWrongMapSize) {
+  const auto projection = Projection(4U, 2U);
+  const auto goals = GoalMask(4U, 2U, {{3, 0}});
+  const std::vector<std::uint8_t> excluded(3U, 0U);
+
+  const auto result =
+      Search(projection, {0, 0}, goals, GlobalSearchConfig{}, {}, excluded);
+
+  EXPECT_EQ(result.status, GlobalSearchStatus::kInvalidProblem);
+  EXPECT_EQ(result.reason_code, "GLOBAL_SEARCH_PROBLEM_INVALID");
 }
 
 TEST(GlobalGridSearch, RejectsDiagonalCornerCutting) {
@@ -162,8 +212,8 @@ TEST(GlobalGridSearch, CrossesMoreCellsThanTheFormerExpansionLimit) {
 TEST(GlobalGridSearch, ReportsNoPathOnlyAfterFiniteOpenSetExhaustion) {
   constexpr std::size_t kWidth = 9U;
   constexpr std::size_t kHeight = 5U;
-  const auto projection = Projection(
-      kWidth, kHeight, {{4, 0}, {4, 1}, {4, 2}, {4, 3}, {4, 4}});
+  const auto projection =
+      Projection(kWidth, kHeight, {{4, 0}, {4, 1}, {4, 2}, {4, 3}, {4, 4}});
   const auto goals = GoalMask(kWidth, kHeight, {{8, 2}});
   const auto start = shared::GridCell{0, 2};
   const std::int32_t start_component = projection.ConnectedComponent(start);

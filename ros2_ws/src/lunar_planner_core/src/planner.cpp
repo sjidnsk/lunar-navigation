@@ -92,17 +92,15 @@ FailureDirective(const PlanningOutcome outcome) noexcept {
   return ExecutionDirective::kNoSafeReference;
 }
 
-[[nodiscard]] HierarchicalPlannerMetrics
-GroundMetrics(const PlannerInput &input,
-              const hierarchical::GlobalRoutePlanResult &global,
-              const hierarchical::LocalFrontierResult *frontiers,
-              const std::uint64_t local_expanded_states,
-              const std::size_t local_attempts,
-              const double frontier_distance_m,
-              const std::chrono::nanoseconds local_elapsed,
-              const bool route_reused = false,
-              const std::size_t route_cursor = 0U,
-              const std::uint64_t rolling_request_count = 1U) {
+[[nodiscard]] HierarchicalPlannerMetrics GroundMetrics(
+    const PlannerInput &input,
+    const hierarchical::GlobalRoutePlanResult &global,
+    const hierarchical::LocalFrontierResult *frontiers,
+    const std::uint64_t local_expanded_states, const std::size_t local_attempts,
+    const double frontier_distance_m,
+    const std::chrono::nanoseconds local_elapsed,
+    const bool route_reused = false, const std::size_t route_cursor = 0U,
+    const std::uint64_t rolling_request_count = 1U) {
   const hierarchical::GlobalRoute *route =
       global.route.has_value() ? &*global.route : nullptr;
   return HierarchicalPlannerMetrics{
@@ -134,6 +132,19 @@ GroundMetrics(const PlannerInput &input,
   return (platform == PlatformType::kWheeled ? "wheel-route/"
                                              : "legged-route/") +
          request_id;
+}
+
+[[nodiscard]] bool AppendNewConditionalCorridorCells(
+    const hierarchical::LocalFrontierResult &frontiers,
+    std::vector<shared::GridCell> &excluded_cells) {
+  bool added = false;
+  for (const shared::GridCell cell : frontiers.conditional_corridor_cells) {
+    if (std::ranges::find(excluded_cells, cell) == excluded_cells.end()) {
+      excluded_cells.push_back(cell);
+      added = true;
+    }
+  }
+  return added;
 }
 
 } // namespace
@@ -237,158 +248,199 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
     if (!route_reused) {
       global = hierarchical::PlanGroundGlobalRoute(input);
     }
-    if (!global.ok()) {
-      return Failure(global.outcome, FailureDirective(global.outcome),
-                     global.reason_code, started, 0U, std::nullopt, {},
-                     GroundMetrics(input, global, nullptr, 0U, 0U, 0.0, {}));
-    }
-    hierarchical::LocalFrontierResult frontiers =
-        hierarchical::BuildLocalFrontiers(input, *global.route);
-    if (!frontiers.ok() && route_reused) {
-      global = hierarchical::PlanGroundGlobalRoute(input);
-      route_reused = false;
-      route_cursor = 0U;
-      rolling_request_count = 1U;
-      if (global.ok()) {
-        frontiers = hierarchical::BuildLocalFrontiers(input, *global.route);
+    std::vector<shared::GridCell> excluded_conditional_cells;
+    std::vector<std::string> conditional_retry_warnings;
+    for (;;) {
+      if (!global.ok()) {
+        return Failure(global.outcome, FailureDirective(global.outcome),
+                       global.reason_code, started, 0U, std::nullopt, {},
+                       GroundMetrics(input, global, nullptr, 0U, 0U, 0.0, {}));
       }
-    }
-    if (!global.ok()) {
-      return Failure(global.outcome, FailureDirective(global.outcome),
-                     global.reason_code, started, 0U, std::nullopt, {},
-                     GroundMetrics(input, global, nullptr, 0U, 0U, 0.0, {},
-                                   route_reused, route_cursor,
-                                   rolling_request_count));
-    }
-    if (!frontiers.ok()) {
-      PlanningOutcome outcome = PlanningOutcome::kInvalidRequest;
-      if (frontiers.status ==
-          hierarchical::LocalFrontierStatus::kCoverageInsufficient) {
-        outcome = PlanningOutcome::kNoKnownSafeRoute;
-      } else if (frontiers.status ==
-                 hierarchical::LocalFrontierStatus::kGoalInfeasible) {
-        outcome = PlanningOutcome::kGoalInfeasible;
-      } else if (frontiers.status ==
-                 hierarchical::LocalFrontierStatus::kCanceled) {
-        outcome = PlanningOutcome::kCanceled;
-      }
-      return Failure(outcome, FailureDirective(outcome), frontiers.reason_code,
-                     started, global.route->expanded_states, global.route->cost,
-                     {},
-                     GroundMetrics(input, global, &frontiers, 0U, 0U, 0.0, {}));
-    }
-
-    const auto local_started = std::chrono::steady_clock::now();
-    std::uint64_t local_expanded = 0U;
-    std::optional<std::string> specific_local_failure;
-    std::vector<std::string> local_failure_reasons;
-    for (std::size_t attempt = 0U; attempt < frontiers.problems.size();
-         ++attempt) {
-      PlannerOutput local =
-          platform == PlatformType::kWheeled
-              ? impl_->wheel_planner.Plan(frontiers.problems[attempt])
-              : impl_->legged_planner.Plan(frontiers.problems[attempt]);
-      local_expanded += local.diagnostics.expanded_states;
-      const std::size_t attempts = attempt + 1U;
-      const auto local_elapsed =
-          std::chrono::duration_cast<std::chrono::nanoseconds>(
-              std::chrono::steady_clock::now() - local_started);
-      if (local.outcome == PlanningOutcome::kNewReferenceAvailable ||
-          local.outcome == PlanningOutcome::kSafeFrontierReferenceAvailable) {
-        const PlanningOutcome outcome = local.outcome;
-        const ExecutionDirective directive = local.directive;
-        std::string reason_code = local.reason_code;
-        std::vector<std::string> warnings = local.diagnostics.warning_codes;
-        std::optional<LocalTrajectoryDiagnostics> local_trajectory =
-            local.diagnostics.local_trajectory;
-        if (attempt > 0U) {
-          warnings.emplace_back("LOCAL_FRONTIER_BACKOFF");
+      hierarchical::LocalFrontierResult frontiers =
+          hierarchical::BuildLocalFrontiers(input, *global.route);
+      if (!frontiers.ok() && route_reused) {
+        global = hierarchical::PlanGroundGlobalRoute(input);
+        route_reused = false;
+        route_cursor = 0U;
+        rolling_request_count = 1U;
+        if (global.ok()) {
+          frontiers = hierarchical::BuildLocalFrontiers(input, *global.route);
         }
-        hierarchical::ReferenceComposeResult composed =
-            hierarchical::ComposeReference(input, *global.route,
-                                           std::move(local));
-        if (!composed.ok()) {
+      }
+      if (!global.ok()) {
+        return Failure(global.outcome, FailureDirective(global.outcome),
+                       global.reason_code, started, 0U, std::nullopt, {},
+                       GroundMetrics(input, global, nullptr, 0U, 0U, 0.0, {},
+                                     route_reused, route_cursor,
+                                     rolling_request_count));
+      }
+      if (!frontiers.ok()) {
+        PlanningOutcome outcome = PlanningOutcome::kInvalidRequest;
+        if (frontiers.status ==
+            hierarchical::LocalFrontierStatus::kCoverageInsufficient) {
+          outcome = PlanningOutcome::kNoKnownSafeRoute;
+        } else if (frontiers.status ==
+                   hierarchical::LocalFrontierStatus::kGoalInfeasible) {
+          outcome = PlanningOutcome::kGoalInfeasible;
+        } else if (frontiers.status ==
+                   hierarchical::LocalFrontierStatus::kCanceled) {
+          outcome = PlanningOutcome::kCanceled;
+        }
+        return Failure(
+            outcome, FailureDirective(outcome), frontiers.reason_code, started,
+            global.route->expanded_states, global.route->cost, {},
+            GroundMetrics(input, global, &frontiers, 0U, 0U, 0.0, {}));
+      }
+
+      const auto local_started = std::chrono::steady_clock::now();
+      std::uint64_t local_expanded = 0U;
+      std::optional<std::string> specific_local_failure;
+      std::vector<std::string> local_failure_reasons;
+      bool retry_global_route = false;
+      for (std::size_t attempt = 0U; attempt < frontiers.problems.size();
+           ++attempt) {
+        PlannerOutput local =
+            platform == PlatformType::kWheeled
+                ? impl_->wheel_planner.Plan(frontiers.problems[attempt])
+                : impl_->legged_planner.Plan(frontiers.problems[attempt]);
+        local_expanded += local.diagnostics.expanded_states;
+        const std::size_t attempts = attempt + 1U;
+        const auto local_elapsed =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - local_started);
+        if (local.outcome == PlanningOutcome::kNewReferenceAvailable ||
+            local.outcome == PlanningOutcome::kSafeFrontierReferenceAvailable) {
+          if (attempt > 0U && AppendNewConditionalCorridorCells(
+                                  frontiers, excluded_conditional_cells)) {
+            route_reused = false;
+            route_cursor = 0U;
+            rolling_request_count = 1U;
+            if (conditional_retry_warnings.empty()) {
+              conditional_retry_warnings.emplace_back(
+                  "GLOBAL_CONDITIONAL_CORRIDOR_RETRY");
+            }
+            global = hierarchical::PlanGroundGlobalRoute(
+                input, excluded_conditional_cells);
+            retry_global_route = true;
+            break;
+          }
+          const PlanningOutcome outcome = local.outcome;
+          const ExecutionDirective directive = local.directive;
+          std::string reason_code = local.reason_code;
+          std::vector<std::string> warnings = local.diagnostics.warning_codes;
+          warnings.insert(warnings.end(), conditional_retry_warnings.begin(),
+                          conditional_retry_warnings.end());
+          std::optional<LocalTrajectoryDiagnostics> local_trajectory =
+              local.diagnostics.local_trajectory;
+          if (attempt > 0U) {
+            warnings.emplace_back("LOCAL_FRONTIER_BACKOFF");
+          }
+          hierarchical::ReferenceComposeResult composed =
+              hierarchical::ComposeReference(input, *global.route,
+                                             std::move(local));
+          if (!composed.ok()) {
+            return Failure(
+                PlanningOutcome::kNumericalFailure,
+                ExecutionDirective::kNoSafeReference, composed.reason_code,
+                started, global.route->expanded_states + local_expanded,
+                global.route->cost, std::move(warnings),
+                GroundMetrics(input, global, &frontiers, local_expanded,
+                              attempts, frontiers.frontier_distances_m[attempt],
+                              local_elapsed));
+          }
+          const std::string reference_plan_id = composed.reference->plan_id;
+          const std::string route_id =
+              route_reused ? input.continuation->route_id()
+                           : GroundRouteId(platform, input.request_id);
+          const hierarchical::GlobalRoute &continuation_route =
+              route_reused ? input.continuation->global_route() : *global.route;
+          auto continuation = std::make_shared<const RouteContinuation>(
+              route_id, reference_plan_id, input, continuation_route,
+              std::vector<CertifiedHopPreview>{}, route_cursor,
+              frontiers.corridor_half_width_m, rolling_request_count);
+          return PlannerOutput{
+              .outcome = outcome,
+              .directive = directive,
+              .reason_code = std::move(reason_code),
+              .reference = std::move(composed.reference),
+              .diagnostics =
+                  PlannerDiagnostics{
+                      .planner_name = std::string{kPlannerName},
+                      .elapsed =
+                          std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now() - started),
+                      .expanded_states =
+                          global.route->expanded_states + local_expanded,
+                      .best_cost = global.route->cost,
+                      .warning_codes = std::move(warnings),
+                      .hierarchical = GroundMetrics(
+                          input, global, &frontiers, local_expanded, attempts,
+                          frontiers.frontier_distances_m[attempt],
+                          local_elapsed, route_reused, route_cursor,
+                          rolling_request_count),
+                      .local_trajectory = std::move(local_trajectory),
+                  },
+              .continuation = std::move(continuation),
+          };
+        }
+        if (local.outcome == PlanningOutcome::kCanceled ||
+            local.outcome == PlanningOutcome::kResourceExhausted ||
+            local.outcome == PlanningOutcome::kInvalidRequest ||
+            local.outcome == PlanningOutcome::kNumericalFailure ||
+            local.outcome == PlanningOutcome::kActiveReferenceInvalidated) {
           return Failure(
-              PlanningOutcome::kNumericalFailure,
-              ExecutionDirective::kNoSafeReference, composed.reason_code,
-              started, global.route->expanded_states + local_expanded,
-              global.route->cost, std::move(warnings),
+              local.outcome, local.directive, local.reason_code, started,
+              global.route->expanded_states + local_expanded,
+              global.route->cost, local.diagnostics.warning_codes,
               GroundMetrics(input, global, &frontiers, local_expanded, attempts,
                             frontiers.frontier_distances_m[attempt],
                             local_elapsed));
         }
-        const std::string reference_plan_id = composed.reference->plan_id;
-        const std::string route_id =
-            route_reused ? input.continuation->route_id()
-                         : GroundRouteId(platform, input.request_id);
-        const hierarchical::GlobalRoute &continuation_route =
-            route_reused ? input.continuation->global_route() : *global.route;
-        auto continuation = std::make_shared<const RouteContinuation>(
-            route_id, reference_plan_id, input, continuation_route,
-            std::vector<CertifiedHopPreview>{}, route_cursor,
-            frontiers.corridor_half_width_m, rolling_request_count);
-        return PlannerOutput{
-            .outcome = outcome,
-            .directive = directive,
-            .reason_code = std::move(reason_code),
-            .reference = std::move(composed.reference),
-            .diagnostics =
-                PlannerDiagnostics{
-                    .planner_name = std::string{kPlannerName},
-                    .elapsed =
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now() - started),
-                    .expanded_states =
-                        global.route->expanded_states + local_expanded,
-                    .best_cost = global.route->cost,
-                    .warning_codes = std::move(warnings),
-                    .hierarchical = GroundMetrics(
-                        input, global, &frontiers, local_expanded, attempts,
-                        frontiers.frontier_distances_m[attempt], local_elapsed,
-                        route_reused, route_cursor, rolling_request_count),
-                    .local_trajectory = std::move(local_trajectory),
-                },
-            .continuation = std::move(continuation),
-        };
+        if (!local.reason_code.empty() &&
+            std::find(local_failure_reasons.begin(),
+                      local_failure_reasons.end(),
+                      local.reason_code) == local_failure_reasons.end()) {
+          local_failure_reasons.push_back(local.reason_code);
+        }
+        if (local.reason_code == "WHEEL_START_CONNECTOR_INFEASIBLE" ||
+            local.reason_code == "LEGGED_START_CONNECTOR_INFEASIBLE" ||
+            local.reason_code == "WHEEL_SMOOTHED_EXECUTION_REQUIRED" ||
+            local.reason_code == "LEGGED_SMOOTHED_EXECUTION_REQUIRED") {
+          specific_local_failure = local.reason_code;
+        }
       }
-      if (local.outcome == PlanningOutcome::kCanceled ||
-          local.outcome == PlanningOutcome::kResourceExhausted ||
-          local.outcome == PlanningOutcome::kInvalidRequest ||
-          local.outcome == PlanningOutcome::kNumericalFailure ||
-          local.outcome == PlanningOutcome::kActiveReferenceInvalidated) {
-        return Failure(local.outcome, local.directive, local.reason_code,
-                       started, global.route->expanded_states + local_expanded,
-                       global.route->cost, local.diagnostics.warning_codes,
-                       GroundMetrics(input, global, &frontiers, local_expanded,
-                                     attempts,
-                                     frontiers.frontier_distances_m[attempt],
-                                     local_elapsed));
+      if (retry_global_route) {
+        continue;
       }
-      if (!local.reason_code.empty() &&
-          std::find(local_failure_reasons.begin(),
-                    local_failure_reasons.end(), local.reason_code) ==
-              local_failure_reasons.end()) {
-        local_failure_reasons.push_back(local.reason_code);
+      const auto local_elapsed =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - local_started);
+      if (AppendNewConditionalCorridorCells(frontiers,
+                                            excluded_conditional_cells)) {
+        route_reused = false;
+        route_cursor = 0U;
+        rolling_request_count = 1U;
+        if (conditional_retry_warnings.empty()) {
+          conditional_retry_warnings.emplace_back(
+              "GLOBAL_CONDITIONAL_CORRIDOR_RETRY");
+        }
+        global = hierarchical::PlanGroundGlobalRoute(
+            input, excluded_conditional_cells);
+        continue;
       }
-      if (local.reason_code == "WHEEL_START_CONNECTOR_INFEASIBLE" ||
-          local.reason_code == "LEGGED_START_CONNECTOR_INFEASIBLE" ||
-          local.reason_code == "WHEEL_SMOOTHED_EXECUTION_REQUIRED" ||
-          local.reason_code == "LEGGED_SMOOTHED_EXECUTION_REQUIRED") {
-        specific_local_failure = local.reason_code;
-      }
+      local_failure_reasons.insert(local_failure_reasons.end(),
+                                   conditional_retry_warnings.begin(),
+                                   conditional_retry_warnings.end());
+      return Failure(
+          PlanningOutcome::kNoKnownSafeRoute,
+          ExecutionDirective::kNoSafeReference,
+          specific_local_failure.value_or("LOCAL_SEGMENT_INFEASIBLE"), started,
+          global.route->expanded_states + local_expanded, global.route->cost,
+          std::move(local_failure_reasons),
+          GroundMetrics(input, global, &frontiers, local_expanded,
+                        frontiers.problems.size(),
+                        frontiers.frontier_distances_m.back(), local_elapsed));
     }
-    const auto local_elapsed =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - local_started);
-    return Failure(
-        PlanningOutcome::kNoKnownSafeRoute,
-        ExecutionDirective::kNoSafeReference,
-        specific_local_failure.value_or("LOCAL_SEGMENT_INFEASIBLE"),
-        started, global.route->expanded_states + local_expanded,
-        global.route->cost, std::move(local_failure_reasons),
-        GroundMetrics(input, global, &frontiers, local_expanded,
-                      frontiers.problems.size(),
-                      frontiers.frontier_distances_m.back(), local_elapsed));
   } catch (const std::bad_alloc &) {
     return Failure(PlanningOutcome::kResourceExhausted,
                    ExecutionDirective::kNoSafeReference, "RESOURCE_EXHAUSTED",
