@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -75,17 +76,25 @@ struct FlightTubeCertificationResult final {
   std::string reason_code;
 };
 
+enum class HopCertificationStatus : std::uint8_t {
+  kCertified,
+  kInfeasible,
+  kInvalid,
+  kCanceled,
+  kResourceExhausted,
+  kNumericalIndeterminate,
+};
+
 struct HopCertificationResult final {
+  HopCertificationStatus status{HopCertificationStatus::kInvalid};
   std::optional<HopSegment> segment;
-  bool canceled{};
-  bool resource_exhausted{};
-  std::size_t attempted_candidates{};
+  std::size_t examined_intervals{};
   double cost{};
   std::string reason_code;
 
   [[nodiscard]] bool ok() const noexcept {
-    return segment.has_value() && !canceled && !resource_exhausted &&
-        reason_code.empty();
+    return status == HopCertificationStatus::kCertified &&
+        segment.has_value() && reason_code.empty();
   }
 };
 

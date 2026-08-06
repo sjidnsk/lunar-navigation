@@ -130,8 +130,6 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_hopper";
   return config.maximum_landing_regions > 0U &&
       config.maximum_graph_nodes > 0U &&
       config.maximum_graph_out_degree > 0U &&
-      config.maximum_nominal_aim_points_per_region > 0U &&
-      config.maximum_certification_attempts > 0U &&
       config.maximum_flight_tube_sections >= 2U &&
       config.maximum_authorized_hops > 0U;
 }
@@ -424,21 +422,37 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
   HopCertificationResult certified = CertifyFirstHop(
       local_problem, *source.region, *target.region);
   const std::uint64_t total_work = global.expanded_nodes + landing_work +
-      static_cast<std::uint64_t>(certified.attempted_candidates);
+      static_cast<std::uint64_t>(certified.examined_intervals);
   if (!certified.ok()) {
-    if (certified.canceled) {
-      return Canceled(started, total_work);
-    }
-    if (certified.resource_exhausted) {
-      return Failure(
+    switch (certified.status) {
+      case HopCertificationStatus::kCanceled:
+        return Canceled(started, total_work);
+      case HopCertificationStatus::kResourceExhausted:
+        return Failure(
           PlanningOutcome::kResourceExhausted,
           ExecutionDirective::kNoSafeReference,
           certified.reason_code, started, total_work);
+      case HopCertificationStatus::kInvalid:
+        return Failure(
+            PlanningOutcome::kInvalidRequest,
+            ExecutionDirective::kNoSafeReference,
+            certified.reason_code, started, total_work);
+      case HopCertificationStatus::kNumericalIndeterminate:
+        return Failure(
+            PlanningOutcome::kNumericalFailure,
+            ExecutionDirective::kNoSafeReference,
+            certified.reason_code, started, total_work);
+      case HopCertificationStatus::kInfeasible:
+        return Failure(
+            PlanningOutcome::kNoKnownSafeRoute,
+            ExecutionDirective::kNoSafeReference,
+            certified.reason_code, started, total_work);
+      case HopCertificationStatus::kCertified:
+        return Failure(
+            PlanningOutcome::kNumericalFailure,
+            ExecutionDirective::kNoSafeReference,
+            "HOPPER_CERTIFICATION_RESULT_INVALID", started, total_work);
     }
-    return Failure(
-        PlanningOutcome::kNoKnownSafeRoute,
-        ExecutionDirective::kNoSafeReference,
-        certified.reason_code, started, total_work);
   }
 
   std::vector<std::string> warnings{"HOPPER_FIRST_HOP_ONLY"};
@@ -518,7 +532,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
               .global_expanded_states = global.expanded_nodes,
               .local_expanded_states = landing_work +
                   static_cast<std::uint64_t>(
-                      certified.attempted_candidates),
+                      certified.examined_intervals),
               .global_open_peak = global.route->open_peak,
               .estimated_work_memory_bytes =
                   global.route->estimated_work_memory_bytes,
@@ -533,7 +547,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
               .hopper_graph_edges = global.graph_edges,
               .hopper_route_hops = global.route_hops,
               .hopper_certification_attempts =
-                  certified.attempted_candidates,
+                  certified.examined_intervals,
           },
           .local_trajectory = local_diagnostics,
       },
