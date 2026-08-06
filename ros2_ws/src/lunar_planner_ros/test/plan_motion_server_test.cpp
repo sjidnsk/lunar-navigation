@@ -980,7 +980,7 @@ TEST_F(PlanMotionServerTest, ClearsContinuationBeforePlanningAChangedTarget) {
 
 TEST_F(
     PlanMotionServerTest,
-    PublishesCertifiedHopperMarkersAndDeletesOwnedMarkersOnDeactivate) {
+    PublishesSingleHopAuditMarkersAndDeletesOwnedMarkersOnDeactivate) {
   RunningSystem system{PlanMotionServerDependencies{
       .planner = [](const lunar::planning::PlannerInput& input) {
         auto output = lunar::planning::PlannerOutput{
@@ -1035,36 +1035,27 @@ TEST_F(
             },
             .diagnostics = {},
         };
-        for (std::size_t index = 0U; index < 2U; ++index) {
-          const double x = 10.5 + 2.0 * static_cast<double>(index);
-          output.certified_hops.push_back(
-              lunar::planning::CertifiedHopPreview{
-                  .segment_id = "hop-marker-" + std::to_string(index + 1U),
-                  .launch_pose_map = {
-                      .position_m = {x, 0.5, 0.2},
-                      .orientation = {},
-                  },
-                  .landing_pose_map = {
-                      .position_m = {x + 2.0, 0.5, 0.2},
-                      .orientation = {},
-                  },
-                  .launch_velocity_mps = {1.0, 0.0, 2.0},
-                  .flight_time = 2s,
-                  .flight_tube_radius_m = 0.2,
-                  .landing_region_map = {
-                      {x + 1.5, 0.0, 0.0},
-                      {x + 2.5, 0.0, 0.0},
-                      {x + 2.5, 1.0, 0.0},
-                      {x + 1.5, 1.0, 0.0},
-                  },
-                  .promotion_region_map = {
-                      {x + 1.7, 0.2, 0.0},
-                      {x + 2.3, 0.2, 0.0},
-                      {x + 2.3, 0.8, 0.0},
-                      {x + 1.7, 0.8, 0.0},
-                  },
-              });
-        }
+        output.certified_hops.push_back(
+            lunar::planning::CertifiedHopPreview{
+                .segment_id = "hop-marker-1",
+                .launch_pose_map = {
+                    .position_m = {10.5, 0.5, 0.2},
+                    .orientation = {},
+                },
+                .landing_pose_map = {
+                    .position_m = {12.5, 0.5, 0.96},
+                    .orientation = {},
+                },
+                .launch_velocity_mps = {1.0, 0.0, 2.0},
+                .flight_time = 2s,
+                .flight_tube_radius_m = 0.75,
+                .landing_region_map = {
+                    {12.3, 0.3, 0.96},
+                    {12.7, 0.3, 0.96},
+                    {12.7, 0.7, 0.96},
+                    {12.3, 0.7, 0.96},
+                },
+            });
         return output;
       },
       .preloaded_capabilities = HopperCapabilities(),
@@ -1075,19 +1066,24 @@ TEST_F(
   ASSERT_EQ(system.Result(goal).code, rclcpp_action::ResultCode::SUCCEEDED);
   ASSERT_TRUE(WaitFor([&] {
     return system.SawMarker(
-        "certified_hop_promotion_region",
+        "hopper_certification_evidence",
         visualization_msgs::msg::Marker::ADD);
   }));
+  EXPECT_TRUE(system.SawMarker(
+      "hopper_flight_tube", visualization_msgs::msg::Marker::ADD));
+  EXPECT_FALSE(system.SawMarker(
+      "certified_hop_promotion_region",
+      visualization_msgs::msg::Marker::ADD));
 
   ASSERT_EQ(
       system.server->deactivate().id(),
       lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
   EXPECT_TRUE(WaitFor([&] {
     return system.SawMarker(
-        "certified_hop_arc", visualization_msgs::msg::Marker::DELETE);
+        "hopper_nominal_arc", visualization_msgs::msg::Marker::DELETE);
   }));
   EXPECT_FALSE(system.SawMarker(
-      "certified_hop_arc", visualization_msgs::msg::Marker::DELETEALL));
+      "hopper_nominal_arc", visualization_msgs::msg::Marker::DELETEALL));
 }
 
 TEST_F(PlanMotionServerTest, RejectsSecondGoalAndSerializesExplicitReplacement) {

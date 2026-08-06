@@ -399,15 +399,15 @@
 - Modify: `ros2_ws/src/lunar_planner_ros/test/route_marker_publisher_test.cpp`
 - Modify: `ros2_ws/src/lunar_planner_ros/src/plan_motion_server.cpp`
 
-- [ ] **Step 1: Add Marker RED tests**
+- [x] **Step 1: Add Marker RED tests**
 
   Wheel: correct body/four-wheel scale, raw footprint, `0.20 m` margin, start/goal/global/current segment and direction. Legged: `0.68×0.33 m` body, start/goal/global/current segment. Hopper: platform, exact target, `0.65 m` disk, filled convex region, nominal point, parabola, `1.50 m` tube diameter and fuel/delta-v/version text. All namespaces must be deterministic and clear stale markers on platform switch/deactivate.
 
-- [ ] **Step 2: Implement evidence-only markers**
+- [x] **Step 2: Implement evidence-only markers**
 
   Consume core reference and diagnostics; Marker code must not re-run collision or change outcomes. Keep physical roughness diagnostic colors distinct from obstacle/unknown colors.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
   Commit: `feat: visualize approved platform planning evidence`
 

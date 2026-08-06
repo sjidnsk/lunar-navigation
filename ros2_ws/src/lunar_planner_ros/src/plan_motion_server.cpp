@@ -1334,8 +1334,8 @@ struct PlanMotionServer::Impl final {
             Action::Result::ACTIVATE_NEW_REFERENCE) {
       SetExpectedExecution(*output.reference);
     }
-    if (!output.certified_hops.empty() && output.reference.has_value()) {
-      PublishCertifiedRouteMarkers(
+    if (output.reference.has_value()) {
+      PublishRouteMarkers(
           output, *snapshot.input, route_id);
     } else {
       PublishOwnedMarkerDeletes();
@@ -1389,7 +1389,7 @@ struct PlanMotionServer::Impl final {
     });
   }
 
-  void PublishCertifiedRouteMarkers(
+  void PublishRouteMarkers(
       const lunar::planning::PlannerOutput& output,
       const lunar::planning::PlannerInput& input,
       const std::string& route_id) {
@@ -1397,27 +1397,12 @@ struct PlanMotionServer::Impl final {
         !output.reference.has_value()) {
       return;
     }
-    std::string authorized_segment;
-    if (const auto* hops = std::get_if<lunar::planning::HopReference>(
-            &output.reference->data);
-        hops != nullptr && !hops->segments.empty()) {
-      authorized_segment = hops->segments.front().segment_id;
-    }
-    const lunar::planning::Vec3 gravity =
-        std::holds_alternative<lunar::planning::HopperCapability>(
-            input.capability)
-            ? lunar::planning::Vec3{0.0, 0.0, -1.62}
-            : lunar::planning::Vec3{};
     std::scoped_lock marker_lock{route_marker_mutex};
     auto markers = route_markers.Replace(
-        output.certified_hops,
+        output, input,
         RouteMarkerContext{
             .stamp = node.now(),
             .route_id = route_id,
-            .reference_plan_id = output.reference->plan_id,
-            .authorized_segment_id = std::move(authorized_segment),
-            .map_from_odom = input.world.map_from_odom,
-            .gravity_mps2 = gravity,
         });
     if (!markers.markers.empty()) {
       route_marker_publisher->publish(markers);

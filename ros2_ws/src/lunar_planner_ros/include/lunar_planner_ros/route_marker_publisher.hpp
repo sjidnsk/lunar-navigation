@@ -16,16 +16,13 @@ namespace lunar::planning::ros {
 struct RouteMarkerContext final {
   builtin_interfaces::msg::Time stamp;
   std::string route_id;
-  std::string reference_plan_id;
-  std::string authorized_segment_id;
-  lunar::planning::RigidTransform map_from_odom;
-  lunar::planning::Vec3 gravity_mps2;
 };
 
 class RouteMarkerPublisher final {
  public:
   [[nodiscard]] visualization_msgs::msg::MarkerArray Replace(
-      const std::vector<lunar::planning::CertifiedHopPreview>& hops,
+      const lunar::planning::PlannerOutput& output,
+      const lunar::planning::PlannerInput& input,
       const RouteMarkerContext& context);
 
   [[nodiscard]] visualization_msgs::msg::MarkerArray DeleteOwned(
