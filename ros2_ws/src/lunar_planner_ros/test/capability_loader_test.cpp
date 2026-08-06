@@ -38,6 +38,11 @@ void WriteGeometry(const std::filesystem::path& share, const bool mesh_exists) {
   <link name="base_link">
     <visual><geometry><mesh filename="meshes/body.stl"/></geometry></visual>
   </link>
+  <link name="base_footprint"/>
+  <joint name="base_footprint_to_base_link" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+  </joint>
 </robot>)");
   if (mesh_exists) {
     Write(share / "urdf" / "meshes" / "body.stl", "solid body\nendsolid body\n");
@@ -51,94 +56,88 @@ void WriteObservation(const std::filesystem::path& share) {
 }
 
 std::string CommonHeader(const std::string& type) {
-  return "schema_version: platform-control-capability-source/v1\n"
+  const std::string base_frame = type == "WHEELED" ? "base_footprint" : "base_link";
+  return "schema_version: platform-control-capability-source/v2\n"
       "platform:\n"
       "  platform_id: rover-1\n"
       "  platform_type: " + type + "\n"
       "  capability_version: capability-v1\n"
-      "  base_frame_id: base_link\n"
+      "  base_frame_id: " + base_frame + "\n"
       "geometry_source:\n"
-      "  urdf_file: urdf/rover.urdf\n";
+      "  urdf_file: urdf/rover.urdf\n"
+      "sources:\n"
+      "  baseline: project_engineering_baseline\n";
 }
 
 std::string WheeledYaml(const std::string& forward_speed = "1.0") {
   return CommonHeader("WHEELED") + R"(wheeled:
   footprint_xy_m: [[-0.2, -0.2], [0.2, -0.2], [0.2, 0.2], [-0.2, 0.2]]
-  minimum_body_z_m: -0.1
-  maximum_body_z_m: 0.5
-  maximum_slope_rad: 0.8
-  maximum_obstacle_height_m: 0.2
+  body_extent_m: [1.182, 0.818, 1.29996]
+  reference_point: base_footprint
+  wheel_diameter_m: 0.319
+  wheel_width_m: 0.148
+  wheelbase_m: 0.8175
+  track_width_m: 0.67
+  minimum_underbody_clearance_m: 0.21
+  maximum_local_obstacle_relief_m: 0.2
+  allow_unsupported_gap: false
   maximum_forward_speed_mps: )" + forward_speed + R"(
-  maximum_reverse_speed_mps: 0.5
+  maximum_reverse_speed_mps: 1.0
   maximum_spin_rate_radps: 1.0
-  maximum_acceleration_mps2: 1.0
-  maximum_braking_deceleration_mps2: 1.0
-  maximum_yaw_acceleration_radps2: 1.0
-  maximum_lateral_acceleration_mps2: 1.0
+  maximum_acceleration_mps2: 0.5
+  maximum_braking_deceleration_mps2: 0.5
+  maximum_yaw_acceleration_radps2: 0.5
+  maximum_lateral_acceleration_mps2: 0.5
   maximum_curvature_per_m: 1.0
-  minimum_clearance_m: 0.05
+  maximum_slope_rad: 0.3490658503988659
+  minimum_clearance_m: 0.2
+  roughness_handling: COST_SPEED_AND_LOCAL_RECHECK
   motion_primitives:
     - primitive_id: forward
       kind: FORWARD
       relative_end_pose:
-        position_m: [1.0, 0.0, 0.0]
+        position_m: [0.2, 0.0, 0.0]
         orientation_wxyz: [1.0, 0.0, 0.0, 0.0]
-      nominal_duration_s: 1.0
 )";
 }
 
 std::string LeggedYaml() {
   return CommonHeader("LEGGED") + R"(legged:
-  reference_point: body
-  body_half_extent_m: [0.2, 0.2, 0.3]
-  maximum_slope_rad: 0.4
-  maximum_roughness_m: 0.2
-  maximum_step_height_m: 0.3
-  maximum_gap_width_m: 0.4
-  minimum_confidence: 0.8
-  minimum_body_clearance_m: 0.1
-  body_height_m: [0.4, 0.6]
-  forward_speed_mps: [-0.5, 0.5]
-  lateral_speed_mps: [-0.5, 0.5]
-  vertical_speed_mps: [-0.1, 0.1]
+  reference_point: base_link
+  body_extent_m: [0.68, 0.33, 0.35]
+  platform_mass_kg: 15.89
+  maximum_payload_kg: 10.0
+  maximum_slope_rad: 0.5235987755982988
+  maximum_step_height_m: 0.5
+  maximum_gap_width_m: 0.3
+  minimum_body_clearance_m: 0.3
+  step_vertical_rate_mps: 0.1
+  body_height_m: [0.28, 0.38]
+  forward_speed_mps: [-1.5, 1.5]
+  lateral_speed_mps: [-0.8, 0.8]
   yaw_rate_radps: [-1.0, 1.0]
-  maximum_linear_acceleration_mps2: 0.5
+  maximum_linear_acceleration_mps2: 1.0
   maximum_yaw_acceleration_radps2: 1.0
+  roughness_handling: DIAGNOSTIC_ONLY
   motion_primitives:
     - primitive_id: forward
       kind: FORWARD
-      body_frame_displacement_m: [1.0, 0.0, 0.0]
+      body_frame_displacement_m: [0.2, 0.0, 0.0]
       yaw_change_rad: 0.0
-      nominal_duration_s: 2.0
 )";
 }
 
 std::string HopperYaml() {
   return CommonHeader("HOPPER") + R"(hopper:
-  body_half_extent_m: [0.35, 0.25, 0.5]
-  platform_mass_kg: 10.0
-  gravity_mps2: [0.0, 0.0, -1.62]
-  maximum_landing_slope_rad: 0.7
-  maximum_landing_roughness_m: 0.1
-  maximum_plane_residual_m: 0.05
-  minimum_overhead_clearance_m: 0.0
-  minimum_lateral_clearance_m: 0.0
-  minimum_landing_region_area_m2: 0.2
-  maximum_launch_speed_mps: 8.0
-  maximum_launch_impulse_newton_seconds: 100.0
-  minimum_flight_time_s: 0.5
-  maximum_flight_time_s: 10.0
-  maximum_landing_speed_mps: 8.0
-  minimum_downward_impact_speed_mps: 0.1
-  minimum_landing_clearance_m: 0.0
-  maximum_angular_speed_radps: 2.0
-  maximum_angular_acceleration_radps2: 4.0
-  maximum_initial_angular_speed_radps: 0.2
-  minimum_settle_guard_s: 0.1
-  actuator_or_impulse_profile:
-    profile_id: nominal-impulse
-  motion_primitives:
-    - primitive_id: nominal-hop
+  specific_impulse_s: 301.0
+  landing_support_radius_m: 0.45
+  flight_collision_radius_m: 0.55
+  maximum_landing_slope_rad: 0.17453292519943295
+  maximum_landing_plane_residual_m: 0.05
+  landing_lateral_margin_m: 0.2
+  flight_map_margin_m: 0.2
+  reachability_delta_v_margin_ratio: 0.1
+  standard_gravity_mps2: 9.80665
 )";
 }
 
@@ -152,7 +151,7 @@ CapabilityLoadResult Load(
       share, "config/platform.yaml", "config/observation.json");
 }
 
-TEST(CapabilityLoader, LoadsYamlJsonUrdfMeshAndClampsProjectSlope) {
+TEST(CapabilityLoader, LoadsV2WheelGeometryAndSourcesWithoutProxyValues) {
   const CapabilityLoadResult result =
       Load(UniqueShare("wheel"), WheeledYaml());
 
@@ -160,7 +159,7 @@ TEST(CapabilityLoader, LoadsYamlJsonUrdfMeshAndClampsProjectSlope) {
       << (result.error.has_value() ? result.error->detail : std::string{});
   ASSERT_TRUE(result.capabilities.has_value());
   EXPECT_EQ(result.capabilities->platform_id, "rover-1");
-  EXPECT_EQ(result.capabilities->base_frame_id, "base_link");
+  EXPECT_EQ(result.capabilities->base_frame_id, "base_footprint");
   EXPECT_NEAR(
       result.capabilities->observation.sensor_fov_rad,
       std::numbers::pi / 2.0,
@@ -170,11 +169,19 @@ TEST(CapabilityLoader, LoadsYamlJsonUrdfMeshAndClampsProjectSlope) {
       result.capabilities->mesh_paths.front()));
   const auto& wheel = std::get<lunar::planning::WheeledCapability>(
       result.capabilities->platform);
-  EXPECT_NEAR(wheel.maximum_slope_rad, std::numbers::pi / 6.0, 1.0e-12);
+  EXPECT_NEAR(wheel.maximum_slope_rad, 0.3490658503988659, 1.0e-12);
+  EXPECT_EQ(wheel.body_extent_m, (lunar::planning::Vec3{1.182, 0.818, 1.29996}));
+  EXPECT_DOUBLE_EQ(wheel.wheel_diameter_m, 0.319);
+  EXPECT_DOUBLE_EQ(wheel.wheel_width_m, 0.148);
+  EXPECT_DOUBLE_EQ(wheel.wheelbase_m, 0.8175);
+  EXPECT_DOUBLE_EQ(wheel.track_width_m, 0.67);
+  EXPECT_DOUBLE_EQ(wheel.minimum_underbody_clearance_m, 0.21);
+  EXPECT_DOUBLE_EQ(wheel.maximum_local_obstacle_relief_m, 0.2);
+  EXPECT_FALSE(wheel.allow_unsupported_gap);
   ASSERT_EQ(wheel.motion_primitives.size(), 1U);
   EXPECT_EQ(wheel.motion_primitives.front().primitive_id, "forward");
-  ASSERT_TRUE(result.capabilities->maximum_obstacle_height_m.has_value());
-  EXPECT_DOUBLE_EQ(*result.capabilities->maximum_obstacle_height_m, 0.2);
+  EXPECT_EQ(result.capabilities->field_source_types.at("baseline"),
+            "project_engineering_baseline");
 }
 
 TEST(CapabilityLoader, AdaptsLeggedAndHopperSourcesToTypedCapabilities) {
@@ -184,7 +191,14 @@ TEST(CapabilityLoader, AdaptsLeggedAndHopperSourcesToTypedCapabilities) {
       << (legged.error.has_value() ? legged.error->detail : std::string{});
   EXPECT_TRUE(std::holds_alternative<lunar::planning::LeggedCapability>(
       legged.capabilities->platform));
-  EXPECT_EQ(legged.capabilities->reference_point, "body");
+  const auto& legged_typed = std::get<lunar::planning::LeggedCapability>(
+      legged.capabilities->platform);
+  EXPECT_EQ(legged.capabilities->reference_point, "base_link");
+  EXPECT_EQ(legged_typed.body_extent_m,
+            (lunar::planning::Vec3{0.68, 0.33, 0.35}));
+  EXPECT_DOUBLE_EQ(legged_typed.platform_mass_kg, 15.89);
+  EXPECT_DOUBLE_EQ(legged_typed.maximum_payload_kg, 10.0);
+  EXPECT_DOUBLE_EQ(legged_typed.step_vertical_rate_mps, 0.1);
 
   const CapabilityLoadResult hopper =
       Load(UniqueShare("hopper"), HopperYaml());
@@ -194,12 +208,45 @@ TEST(CapabilityLoader, AdaptsLeggedAndHopperSourcesToTypedCapabilities) {
       hopper.capabilities->platform);
   EXPECT_NEAR(
       typed.maximum_landing_slope_rad,
-      std::numbers::pi / 6.0,
+      0.17453292519943295,
       1.0e-12);
-  EXPECT_EQ(hopper.capabilities->actuator_profile_id, "nominal-impulse");
+  EXPECT_DOUBLE_EQ(typed.specific_impulse_s, 301.0);
+  EXPECT_DOUBLE_EQ(typed.landing_support_radius_m, 0.45);
+  EXPECT_DOUBLE_EQ(typed.flight_collision_radius_m, 0.55);
+  EXPECT_DOUBLE_EQ(typed.maximum_landing_plane_residual_m, 0.05);
+  EXPECT_DOUBLE_EQ(typed.reachability_delta_v_margin_ratio, 0.1);
+}
+
+TEST(CapabilityLoader, RejectsV1HopperFieldsAsVersionIncompatible) {
+  std::string retired = HopperYaml();
+  retired.replace(
+      retired.find("platform-control-capability-source/v2"),
+      std::string{"platform-control-capability-source/v2"}.size(),
+      "platform-control-capability-source/v1");
+
+  const CapabilityLoadResult result = Load(UniqueShare("retired-v1"), retired);
+
+  ASSERT_TRUE(result.error.has_value());
+  EXPECT_EQ(result.error->code, CapabilityLoadErrorCode::kSchemaInvalid);
   EXPECT_EQ(
-      hopper.capabilities->source_motion_primitive_ids,
-      (std::vector<std::string>{"nominal-hop"}));
+      result.error->reason_code,
+      "CAPABILITY_SCHEMA_VERSION_INCOMPATIBLE");
+}
+
+TEST(CapabilityLoader, RejectsRetiredHopperFieldInsideV2Document) {
+  std::string retired = HopperYaml();
+  const std::string marker = "hopper:\n";
+  retired.insert(
+      retired.find(marker) + marker.size(),
+      "  maximum_launch_speed_mps: 8.0\n");
+
+  const CapabilityLoadResult result = Load(UniqueShare("retired-field"), retired);
+
+  ASSERT_TRUE(result.error.has_value());
+  EXPECT_EQ(result.error->code, CapabilityLoadErrorCode::kSchemaInvalid);
+  EXPECT_EQ(
+      result.error->reason_code,
+      "CAPABILITY_SCHEMA_VERSION_INCOMPATIBLE");
 }
 
 TEST(CapabilityLoader, RejectsMissingMeshUnsafePathAndInvalidValues) {

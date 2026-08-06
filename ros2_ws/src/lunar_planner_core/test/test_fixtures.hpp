@@ -96,6 +96,14 @@ inline PlannerInput MakeValidWheelInput() {
           WheeledCapability{
               .footprint_xy_m =
                   {{-0.2, -0.2}, {0.2, -0.2}, {0.2, 0.2}, {-0.2, 0.2}},
+              .body_extent_m = {1.182, 0.818, 1.29996},
+              .wheel_diameter_m = 0.319,
+              .wheel_width_m = 0.148,
+              .wheelbase_m = 0.8175,
+              .track_width_m = 0.67,
+              .minimum_underbody_clearance_m = 0.21,
+              .maximum_local_obstacle_relief_m = 0.2,
+              .allow_unsupported_gap = false,
               .minimum_body_z_m = -0.1,
               .maximum_body_z_m = 0.5,
               .maximum_forward_speed_mps = 1.0,
@@ -184,13 +192,17 @@ inline PlannerInput MakeValidLeggedInput() {
       .body_pose = Pose3{.position_m = {2.5, 3.5, 0.5}},
   };
   input.capability = LeggedCapability{
+      .body_extent_m = {0.68, 0.33, 0.35},
       .body_half_extent_m = {0.2, 0.2, 0.3},
+      .platform_mass_kg = 15.89,
+      .maximum_payload_kg = 10.0,
       .maximum_slope_rad = 0.4,
       .maximum_roughness_m = 0.2,
       .maximum_step_height_m = 0.3,
       .maximum_gap_width_m = 0.4,
       .minimum_confidence = 0.8,
       .minimum_body_clearance_m = 0.1,
+      .step_vertical_rate_mps = 0.1,
       .body_height_m = {0.4, 0.6},
       .forward_speed_mps = {-0.5, 0.5},
       .lateral_speed_mps = {-0.5, 0.5},
@@ -253,6 +265,14 @@ inline PlannerInput MakeValidHopperInput() {
   input.world.local_map = MakeFlatMap("odom", 16U, 12U, 0.5);
   input.config.global_map.base_resolution_m = 0.5;
   input.capability = HopperCapability{
+      .specific_impulse_s = 301.0,
+      .landing_support_radius_m = 0.45,
+      .flight_collision_radius_m = 0.55,
+      .maximum_landing_plane_residual_m = 0.05,
+      .landing_lateral_margin_m = 0.2,
+      .flight_map_margin_m = 0.2,
+      .reachability_delta_v_margin_ratio = 0.1,
+      .standard_gravity_mps2 = 9.80665,
       .body_half_extent_m = {0.35, 0.25, 0.5},
       .platform_mass_kg = 10.0,
       .gravity_mps2 = {0.0, 0.0, -1.62},

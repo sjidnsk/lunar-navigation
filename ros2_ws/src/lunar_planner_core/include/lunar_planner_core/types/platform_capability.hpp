@@ -36,6 +36,14 @@ struct WheelMotionPrimitive final {
 
 struct WheeledCapability final {
   std::vector<Vec2> footprint_xy_m;
+  Vec3 body_extent_m;
+  double wheel_diameter_m{};
+  double wheel_width_m{};
+  double wheelbase_m{};
+  double track_width_m{};
+  double minimum_underbody_clearance_m{};
+  double maximum_local_obstacle_relief_m{};
+  bool allow_unsupported_gap{};
   double minimum_body_z_m{};
   double maximum_body_z_m{};
   double maximum_forward_speed_mps{};
@@ -69,13 +77,17 @@ struct LeggedBodyPrimitive final {
 };
 
 struct LeggedCapability final {
+  Vec3 body_extent_m;
   Vec3 body_half_extent_m;
+  double platform_mass_kg{};
+  double maximum_payload_kg{};
   double maximum_slope_rad{};
   double maximum_roughness_m{};
   double maximum_step_height_m{};
   double maximum_gap_width_m{};
   double minimum_confidence{};
   double minimum_body_clearance_m{};
+  double step_vertical_rate_mps{};
   Interval body_height_m;
   Interval forward_speed_mps;
   Interval lateral_speed_mps;
@@ -87,6 +99,14 @@ struct LeggedCapability final {
 };
 
 struct HopperCapability final {
+  double specific_impulse_s{};
+  double landing_support_radius_m{};
+  double flight_collision_radius_m{};
+  double maximum_landing_plane_residual_m{};
+  double landing_lateral_margin_m{};
+  double flight_map_margin_m{};
+  double reachability_delta_v_margin_ratio{};
+  double standard_gravity_mps2{};
   Vec3 body_half_extent_m;
   double platform_mass_kg{};
   Vec3 gravity_mps2{0.0, 0.0, -1.62};

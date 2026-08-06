@@ -184,6 +184,14 @@ inline lunar::planning::WheeledCapability MakeWheeledCapability() {
   return lunar::planning::WheeledCapability{
       .footprint_xy_m =
           {{-0.2, -0.2}, {0.2, -0.2}, {0.2, 0.2}, {-0.2, 0.2}},
+      .body_extent_m = {1.182, 0.818, 1.29996},
+      .wheel_diameter_m = 0.319,
+      .wheel_width_m = 0.148,
+      .wheelbase_m = 0.8175,
+      .track_width_m = 0.67,
+      .minimum_underbody_clearance_m = 0.21,
+      .maximum_local_obstacle_relief_m = 0.2,
+      .allow_unsupported_gap = false,
       .minimum_body_z_m = -0.1,
       .maximum_body_z_m = 0.5,
       .maximum_forward_speed_mps = 1.0,

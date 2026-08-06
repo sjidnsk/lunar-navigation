@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -23,6 +24,7 @@ struct LoadedCapabilities final {
   std::string actuator_profile_id;
   std::optional<double> maximum_obstacle_height_m;
   std::vector<std::string> source_motion_primitive_ids;
+  std::map<std::string, std::string, std::less<>> field_source_types;
   std::filesystem::path urdf_path;
   std::vector<std::filesystem::path> mesh_paths;
   ObservationCapability observation;

@@ -110,7 +110,7 @@
 - Modify: `ros2_ws/src/lunar_planner_core/test/test_fixtures.hpp`
 - Modify: `tests/fixtures/capabilities/test-only/{wheeled,legged,hopper}.yaml`
 
-- [ ] **Step 1: Add failing type/loader tests**
+- [x] **Step 1: Add failing type/loader tests**
 
   Require the following public shapes:
 
@@ -145,17 +145,19 @@
 
   Remove physical roughness/confidence fields from legged capability, remove wheel fixed primitive duration, and reject every retired hopper v1 field with `CAPABILITY_SCHEMA_VERSION_INCOMPATIBLE`.
 
-- [ ] **Step 2: Verify compile/test RED**
+- [x] **Step 2: Verify compile/test RED**
 
   Build only `lunar_planner_core`/`lunar_planner_ros` tests and confirm new assertions fail before implementation.
 
-- [ ] **Step 3: Implement v2 parsing and validation**
+- [x] **Step 3: Implement v2 parsing and validation**
 
   Parse `platform-control-capability-source/v2`, preserve source metadata/digest in `LoadedCapabilities`, accept `base_footprint` for wheel and `base_link` for legged/hopper, validate derived wheel geometry, and reject unknown/retired keys rather than ignoring them.
 
-- [ ] **Step 4: Migrate test builders and commit**
+- [x] **Step 4: Migrate test builders and commit**
 
   Keep fixtures explicitly `test-only`; do not rename them as formal material.
+
+  分阶段迁移说明：v2 加载器已经拒绝所有旧 schema/飞跃式 v1 字段；为保持每次提交均可构建，旧后端仍依赖的内部兼容成员在本步只做隔离赋值，并在 Task 6、7、9 替换对应算法时随同删除。它们不再是 v2 外部输入合同。
 
   Commit: `refactor: adopt platform capability schema v2`
 

@@ -1,4 +1,4 @@
-schema_version: lunar-test-capability/v1
+schema_version: lunar-test-capability/v2
 authority: test-only/non-authoritative
 runtime_eligible: false
 platform: legged
@@ -8,11 +8,15 @@ map:
   height_m: 50.0
   resolution_m: 0.2
 capability:
+  body_extent_m: [0.68, 0.33, 0.35]
   body_half_extent_m: [0.2, 0.2, 0.3]
+  platform_mass_kg: 15.89
+  maximum_payload_kg: 10.0
   maximum_slope_rad: 0.4
-  maximum_roughness_m: 0.2
   maximum_step_height_m: 0.3
   maximum_gap_width_m: 0.4
   minimum_body_clearance_m: 0.1
+  step_vertical_rate_mps: 0.1
+  roughness_handling: DIAGNOSTIC_ONLY
   xy_resolution_m: 0.2
   primitive_translation_m: 0.2

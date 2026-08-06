@@ -24,7 +24,7 @@ namespace lunar::planning::ros {
 namespace {
 
 constexpr std::string_view kPlatformSchema =
-    "platform-control-capability-source/v1";
+    "platform-control-capability-source/v2";
 constexpr double kProjectMaximumSlopeRad = std::numbers::pi / 6.0;
 
 class LoadFailure final : public std::runtime_error {
@@ -47,6 +47,14 @@ class LoadFailure final : public std::runtime_error {
   throw LoadFailure{
       CapabilityLoadErrorCode::kSchemaInvalid,
       "CAPABILITY_SCHEMA_INVALID",
+      detail,
+  };
+}
+
+[[noreturn]] void SchemaCompatibilityFailure(const std::string& detail) {
+  throw LoadFailure{
+      CapabilityLoadErrorCode::kSchemaInvalid,
+      "CAPABILITY_SCHEMA_VERSION_INCOMPATIBLE",
       detail,
   };
 }
@@ -168,6 +176,41 @@ class LoadFailure final : public std::runtime_error {
     return node.as<double>();
   } catch (const YAML::Exception&) {
     SchemaFailure("invalid number: " + key);
+  }
+}
+
+[[nodiscard]] bool RequireBool(
+    const YAML::Node& parent,
+    const std::string& key) {
+  const YAML::Node node = parent[key];
+  if (!node || !node.IsScalar()) {
+    SchemaFailure("missing bool: " + key);
+  }
+  try {
+    return node.as<bool>();
+  } catch (const YAML::Exception&) {
+    SchemaFailure("invalid bool: " + key);
+  }
+}
+
+void RejectUnexpectedKeys(
+    const YAML::Node& node,
+    const std::set<std::string, std::less<>>& allowed,
+    const std::string& section) {
+  if (!node || !node.IsMap()) {
+    SchemaFailure("expected map: " + section);
+  }
+  for (const auto& entry : node) {
+    std::string key;
+    try {
+      key = entry.first.as<std::string>();
+    } catch (const YAML::Exception&) {
+      SchemaFailure("non-string key in: " + section);
+    }
+    if (!allowed.contains(key)) {
+      SchemaCompatibilityFailure(
+          "retired or unknown " + section + " field: " + key);
+    }
   }
 }
 
@@ -389,6 +432,35 @@ void RecordPrimitiveId(
     const YAML::Node& root,
     LoadedCapabilities& loaded) {
   const YAML::Node node = RequireMap(root, "wheeled");
+  RejectUnexpectedKeys(
+      node,
+      {"footprint_xy_m",
+       "body_extent_m",
+       "reference_point",
+       "wheel_diameter_m",
+       "wheel_width_m",
+       "wheelbase_m",
+       "track_width_m",
+       "minimum_underbody_clearance_m",
+       "maximum_local_obstacle_relief_m",
+       "allow_unsupported_gap",
+       "maximum_forward_speed_mps",
+       "maximum_reverse_speed_mps",
+       "maximum_spin_rate_radps",
+       "maximum_acceleration_mps2",
+       "maximum_braking_deceleration_mps2",
+       "maximum_yaw_acceleration_radps2",
+       "maximum_lateral_acceleration_mps2",
+       "maximum_curvature_per_m",
+       "maximum_slope_rad",
+       "minimum_clearance_m",
+       "roughness_handling",
+       "motion_primitives"},
+      "wheeled");
+  loaded.reference_point = RequireString(node, "reference_point");
+  if (loaded.reference_point != "base_footprint") {
+    ValueFailure("wheeled.reference_point must be base_footprint");
+  }
   const YAML::Node footprint_node =
       RequireSequence(node, "footprint_xy_m", 3U);
   std::vector<lunar::planning::Vec2> footprint;
@@ -403,16 +475,39 @@ void RecordPrimitiveId(
     footprint.push_back(vertex);
   }
 
-  const double minimum_body_z =
-      Finite(RequireDouble(node, "minimum_body_z_m"), "minimum_body_z_m");
-  const double maximum_body_z =
-      Finite(RequireDouble(node, "maximum_body_z_m"), "maximum_body_z_m");
-  if (minimum_body_z > maximum_body_z) {
-    ValueFailure("minimum_body_z_m exceeds maximum_body_z_m");
+  const auto body_extent = Vec3(
+      RequireSequence(node, "body_extent_m"), "body_extent_m");
+  if (body_extent.x <= 0.0 || body_extent.y <= 0.0 || body_extent.z <= 0.0) {
+    ValueFailure("body_extent_m must be positive");
   }
-  loaded.maximum_obstacle_height_m = NonNegative(
-      RequireDouble(node, "maximum_obstacle_height_m"),
-      "maximum_obstacle_height_m");
+  const double wheel_diameter = Positive(
+      RequireDouble(node, "wheel_diameter_m"), "wheel_diameter_m");
+  const double wheel_width = Positive(
+      RequireDouble(node, "wheel_width_m"), "wheel_width_m");
+  const double wheelbase = Positive(
+      RequireDouble(node, "wheelbase_m"), "wheelbase_m");
+  const double track_width = Positive(
+      RequireDouble(node, "track_width_m"), "track_width_m");
+  if (wheel_width >= body_extent.y || wheelbase >= body_extent.x ||
+      std::abs(track_width - (body_extent.y - wheel_width)) > 1.0e-6) {
+    ValueFailure("wheeled wheel geometry is inconsistent with body extent");
+  }
+  const double underbody_clearance = Positive(
+      RequireDouble(node, "minimum_underbody_clearance_m"),
+      "minimum_underbody_clearance_m");
+  const double local_relief = NonNegative(
+      RequireDouble(node, "maximum_local_obstacle_relief_m"),
+      "maximum_local_obstacle_relief_m");
+  const bool allow_unsupported_gap =
+      RequireBool(node, "allow_unsupported_gap");
+  const double maximum_forward_speed = Positive(
+      RequireDouble(node, "maximum_forward_speed_mps"),
+      "maximum_forward_speed_mps");
+  const std::string roughness_handling =
+      RequireString(node, "roughness_handling");
+  if (roughness_handling != "COST_SPEED_AND_LOCAL_RECHECK") {
+    ValueFailure("unsupported wheeled roughness_handling");
+  }
 
   std::vector<lunar::planning::WheelMotionPrimitive> primitives;
   const YAML::Node primitive_nodes =
@@ -432,18 +527,24 @@ void RecordPrimitiveId(
             Pose(RequireMap(primitive, "relative_end_pose"),
                  "motion_primitives.relative_end_pose"),
         .nominal_duration = Duration(
-            RequireDouble(primitive, "nominal_duration_s"),
-            "motion_primitives.nominal_duration_s"),
+            1.0 / maximum_forward_speed,
+            "derived motion primitive duration"),
     });
   }
 
   return lunar::planning::WheeledCapability{
       .footprint_xy_m = std::move(footprint),
-      .minimum_body_z_m = minimum_body_z,
-      .maximum_body_z_m = maximum_body_z,
-      .maximum_forward_speed_mps = Positive(
-          RequireDouble(node, "maximum_forward_speed_mps"),
-          "maximum_forward_speed_mps"),
+      .body_extent_m = body_extent,
+      .wheel_diameter_m = wheel_diameter,
+      .wheel_width_m = wheel_width,
+      .wheelbase_m = wheelbase,
+      .track_width_m = track_width,
+      .minimum_underbody_clearance_m = underbody_clearance,
+      .maximum_local_obstacle_relief_m = local_relief,
+      .allow_unsupported_gap = allow_unsupported_gap,
+      .minimum_body_z_m = 0.0,
+      .maximum_body_z_m = body_extent.z,
+      .maximum_forward_speed_mps = maximum_forward_speed,
       .maximum_reverse_speed_mps = NonNegative(
           RequireDouble(node, "maximum_reverse_speed_mps"),
           "maximum_reverse_speed_mps"),
@@ -479,12 +580,49 @@ void RecordPrimitiveId(
     const YAML::Node& root,
     LoadedCapabilities& loaded) {
   const YAML::Node node = RequireMap(root, "legged");
+  RejectUnexpectedKeys(
+      node,
+      {"reference_point",
+       "body_extent_m",
+       "platform_mass_kg",
+       "maximum_payload_kg",
+       "maximum_slope_rad",
+       "maximum_step_height_m",
+       "maximum_gap_width_m",
+       "minimum_body_clearance_m",
+       "step_vertical_rate_mps",
+       "body_height_m",
+       "forward_speed_mps",
+       "lateral_speed_mps",
+       "yaw_rate_radps",
+       "maximum_linear_acceleration_mps2",
+       "maximum_yaw_acceleration_radps2",
+       "roughness_handling",
+       "motion_primitives"},
+      "legged");
   loaded.reference_point = RequireString(node, "reference_point");
-  const auto body_half_extent = Vec3(
-      RequireSequence(node, "body_half_extent_m"), "body_half_extent_m");
-  if (body_half_extent.x <= 0.0 || body_half_extent.y <= 0.0 ||
-      body_half_extent.z <= 0.0) {
-    ValueFailure("body_half_extent_m must be positive");
+  if (loaded.reference_point != "base_link") {
+    ValueFailure("legged.reference_point must be base_link");
+  }
+  const auto body_extent = Vec3(
+      RequireSequence(node, "body_extent_m"), "body_extent_m");
+  if (body_extent.x <= 0.0 || body_extent.y <= 0.0 || body_extent.z <= 0.0) {
+    ValueFailure("body_extent_m must be positive");
+  }
+  const auto body_half_extent = lunar::planning::Vec3{
+      .x = body_extent.x / 2.0,
+      .y = body_extent.y / 2.0,
+      .z = body_extent.z / 2.0,
+  };
+  const double platform_mass = Positive(
+      RequireDouble(node, "platform_mass_kg"), "platform_mass_kg");
+  const double maximum_payload = Positive(
+      RequireDouble(node, "maximum_payload_kg"), "maximum_payload_kg");
+  const double step_vertical_rate = Positive(
+      RequireDouble(node, "step_vertical_rate_mps"),
+      "step_vertical_rate_mps");
+  if (RequireString(node, "roughness_handling") != "DIAGNOSTIC_ONLY") {
+    ValueFailure("unsupported legged roughness_handling");
   }
 
   std::vector<lunar::planning::LeggedBodyPrimitive> primitives;
@@ -507,9 +645,7 @@ void RecordPrimitiveId(
         .yaw_change_rad = Finite(
             RequireDouble(primitive, "yaw_change_rad"),
             "motion_primitives.yaw_change_rad"),
-        .nominal_duration = Duration(
-            RequireDouble(primitive, "nominal_duration_s"),
-            "motion_primitives.nominal_duration_s"),
+        .nominal_duration = std::chrono::seconds{1},
     });
   }
 
@@ -519,23 +655,24 @@ void RecordPrimitiveId(
     ValueFailure("body_height_m must be non-negative");
   }
   return lunar::planning::LeggedCapability{
+      .body_extent_m = body_extent,
       .body_half_extent_m = body_half_extent,
+      .platform_mass_kg = platform_mass,
+      .maximum_payload_kg = maximum_payload,
       .maximum_slope_rad = Slope(
           RequireDouble(node, "maximum_slope_rad"), "maximum_slope_rad"),
-      .maximum_roughness_m = NonNegative(
-          RequireDouble(node, "maximum_roughness_m"),
-          "maximum_roughness_m"),
+      .maximum_roughness_m = std::numeric_limits<double>::max(),
       .maximum_step_height_m = NonNegative(
           RequireDouble(node, "maximum_step_height_m"),
           "maximum_step_height_m"),
       .maximum_gap_width_m = NonNegative(
           RequireDouble(node, "maximum_gap_width_m"),
           "maximum_gap_width_m"),
-      .minimum_confidence = UnitInterval(
-          RequireDouble(node, "minimum_confidence"), "minimum_confidence"),
+      .minimum_confidence = 0.0,
       .minimum_body_clearance_m = NonNegative(
           RequireDouble(node, "minimum_body_clearance_m"),
           "minimum_body_clearance_m"),
+      .step_vertical_rate_mps = step_vertical_rate,
       .body_height_m = body_height,
       .forward_speed_mps = Interval(
           RequireSequence(node, "forward_speed_mps"),
@@ -543,9 +680,7 @@ void RecordPrimitiveId(
       .lateral_speed_mps = Interval(
           RequireSequence(node, "lateral_speed_mps"),
           "lateral_speed_mps", true),
-      .vertical_speed_mps = Interval(
-          RequireSequence(node, "vertical_speed_mps"),
-          "vertical_speed_mps", true),
+      .vertical_speed_mps = {-step_vertical_rate, step_vertical_rate},
       .yaw_rate_radps = Interval(
           RequireSequence(node, "yaw_rate_radps"),
           "yaw_rate_radps", true),
@@ -562,96 +697,76 @@ void RecordPrimitiveId(
 [[nodiscard]] lunar::planning::HopperCapability ParseHopper(
     const YAML::Node& root,
     LoadedCapabilities& loaded) {
+  static_cast<void>(loaded);
   const YAML::Node node = RequireMap(root, "hopper");
-  const auto body_half_extent = Vec3(
-      RequireSequence(node, "body_half_extent_m"), "body_half_extent_m");
-  if (body_half_extent.x <= 0.0 || body_half_extent.y <= 0.0 ||
-      body_half_extent.z <= 0.0) {
-    ValueFailure("body_half_extent_m must be positive");
-  }
-  const auto gravity =
-      Vec3(RequireSequence(node, "gravity_mps2"), "gravity_mps2");
-  if (gravity.z >= 0.0 ||
-      std::hypot(gravity.x, gravity.y, gravity.z) <= 0.0) {
-    ValueFailure("gravity_mps2 must point downward");
-  }
-  const auto minimum_flight = Duration(
-      RequireDouble(node, "minimum_flight_time_s"),
-      "minimum_flight_time_s");
-  const auto maximum_flight = Duration(
-      RequireDouble(node, "maximum_flight_time_s"),
-      "maximum_flight_time_s");
-  if (minimum_flight > maximum_flight) {
-    ValueFailure("minimum_flight_time_s exceeds maximum_flight_time_s");
-  }
-  const YAML::Node profile =
-      RequireMap(node, "actuator_or_impulse_profile");
-  loaded.actuator_profile_id = RequireString(profile, "profile_id");
-
-  const YAML::Node primitive_nodes =
-      RequireSequence(node, "motion_primitives", 1U);
-  std::set<std::string, std::less<>> primitive_ids;
-  for (std::size_t index = 0U; index < primitive_nodes.size(); ++index) {
-    if (!primitive_nodes[index].IsMap()) {
-      SchemaFailure("hopper motion primitive must be a map");
-    }
-    const std::string id =
-        RequireString(primitive_nodes[index], "primitive_id");
-    RecordPrimitiveId(id, primitive_ids, loaded.source_motion_primitive_ids);
-  }
+  RejectUnexpectedKeys(
+      node,
+      {"specific_impulse_s",
+       "landing_support_radius_m",
+       "flight_collision_radius_m",
+       "maximum_landing_slope_rad",
+       "maximum_landing_plane_residual_m",
+       "landing_lateral_margin_m",
+       "flight_map_margin_m",
+       "reachability_delta_v_margin_ratio",
+       "standard_gravity_mps2"},
+      "hopper");
+  const double specific_impulse = Positive(
+      RequireDouble(node, "specific_impulse_s"), "specific_impulse_s");
+  const double landing_support_radius = Positive(
+      RequireDouble(node, "landing_support_radius_m"),
+      "landing_support_radius_m");
+  const double flight_collision_radius = Positive(
+      RequireDouble(node, "flight_collision_radius_m"),
+      "flight_collision_radius_m");
+  const double landing_plane_residual = NonNegative(
+      RequireDouble(node, "maximum_landing_plane_residual_m"),
+      "maximum_landing_plane_residual_m");
+  const double landing_lateral_margin = NonNegative(
+      RequireDouble(node, "landing_lateral_margin_m"),
+      "landing_lateral_margin_m");
+  const double flight_map_margin = NonNegative(
+      RequireDouble(node, "flight_map_margin_m"), "flight_map_margin_m");
+  const double delta_v_margin = NonNegative(
+      RequireDouble(node, "reachability_delta_v_margin_ratio"),
+      "reachability_delta_v_margin_ratio");
+  const double standard_gravity = Positive(
+      RequireDouble(node, "standard_gravity_mps2"),
+      "standard_gravity_mps2");
 
   return lunar::planning::HopperCapability{
-      .body_half_extent_m = body_half_extent,
-      .platform_mass_kg = Positive(
-          RequireDouble(node, "platform_mass_kg"), "platform_mass_kg"),
-      .gravity_mps2 = gravity,
+      .specific_impulse_s = specific_impulse,
+      .landing_support_radius_m = landing_support_radius,
+      .flight_collision_radius_m = flight_collision_radius,
+      .maximum_landing_plane_residual_m = landing_plane_residual,
+      .landing_lateral_margin_m = landing_lateral_margin,
+      .flight_map_margin_m = flight_map_margin,
+      .reachability_delta_v_margin_ratio = delta_v_margin,
+      .standard_gravity_mps2 = standard_gravity,
+      .body_half_extent_m = {flight_collision_radius,
+                             flight_collision_radius,
+                             flight_collision_radius},
+      .platform_mass_kg = 20.0,
+      .gravity_mps2 = {0.0, 0.0, -1.62},
       .maximum_landing_slope_rad = Slope(
           RequireDouble(node, "maximum_landing_slope_rad"),
           "maximum_landing_slope_rad"),
-      .maximum_landing_roughness_m = NonNegative(
-          RequireDouble(node, "maximum_landing_roughness_m"),
-          "maximum_landing_roughness_m"),
-      .maximum_plane_residual_m = NonNegative(
-          RequireDouble(node, "maximum_plane_residual_m"),
-          "maximum_plane_residual_m"),
-      .minimum_overhead_clearance_m = NonNegative(
-          RequireDouble(node, "minimum_overhead_clearance_m"),
-          "minimum_overhead_clearance_m"),
-      .minimum_lateral_clearance_m = NonNegative(
-          RequireDouble(node, "minimum_lateral_clearance_m"),
-          "minimum_lateral_clearance_m"),
-      .minimum_landing_region_area_m2 = Positive(
-          RequireDouble(node, "minimum_landing_region_area_m2"),
-          "minimum_landing_region_area_m2"),
-      .maximum_launch_speed_mps = Positive(
-          RequireDouble(node, "maximum_launch_speed_mps"),
-          "maximum_launch_speed_mps"),
-      .maximum_launch_impulse_newton_seconds = Positive(
-          RequireDouble(node, "maximum_launch_impulse_newton_seconds"),
-          "maximum_launch_impulse_newton_seconds"),
-      .minimum_flight_time = minimum_flight,
-      .maximum_flight_time = maximum_flight,
-      .maximum_landing_speed_mps = Positive(
-          RequireDouble(node, "maximum_landing_speed_mps"),
-          "maximum_landing_speed_mps"),
-      .minimum_downward_impact_speed_mps = NonNegative(
-          RequireDouble(node, "minimum_downward_impact_speed_mps"),
-          "minimum_downward_impact_speed_mps"),
-      .minimum_landing_clearance_m = NonNegative(
-          RequireDouble(node, "minimum_landing_clearance_m"),
-          "minimum_landing_clearance_m"),
-      .maximum_angular_speed_radps = Positive(
-          RequireDouble(node, "maximum_angular_speed_radps"),
-          "maximum_angular_speed_radps"),
-      .maximum_angular_acceleration_radps2 = Positive(
-          RequireDouble(node, "maximum_angular_acceleration_radps2"),
-          "maximum_angular_acceleration_radps2"),
-      .maximum_initial_angular_speed_radps = NonNegative(
-          RequireDouble(node, "maximum_initial_angular_speed_radps"),
-          "maximum_initial_angular_speed_radps"),
-      .minimum_settle_guard = Duration(
-          RequireDouble(node, "minimum_settle_guard_s"),
-          "minimum_settle_guard_s", true),
+      .maximum_landing_roughness_m = std::numeric_limits<double>::max(),
+      .maximum_plane_residual_m = landing_plane_residual,
+      .minimum_overhead_clearance_m = flight_map_margin,
+      .minimum_lateral_clearance_m = landing_lateral_margin,
+      .minimum_landing_region_area_m2 = 0.01,
+      .maximum_launch_speed_mps = 100.0,
+      .maximum_launch_impulse_newton_seconds = 10'000.0,
+      .minimum_flight_time = std::chrono::milliseconds{10},
+      .maximum_flight_time = std::chrono::seconds{300},
+      .maximum_landing_speed_mps = 100.0,
+      .minimum_downward_impact_speed_mps = 0.0,
+      .minimum_landing_clearance_m = landing_lateral_margin,
+      .maximum_angular_speed_radps = 100.0,
+      .maximum_angular_acceleration_radps2 = 100.0,
+      .maximum_initial_angular_speed_radps = 100.0,
+      .minimum_settle_guard = std::chrono::nanoseconds{0},
   };
 }
 
@@ -785,7 +900,7 @@ void AddMesh(
     SchemaFailure("capability documents must be objects");
   }
   if (RequireString(platform_document, "schema_version") != kPlatformSchema) {
-    SchemaFailure("unsupported platform capability schema");
+    SchemaCompatibilityFailure("unsupported platform capability schema");
   }
 
   LoadedCapabilities loaded;
@@ -794,8 +909,30 @@ void AddMesh(
   const std::string platform_type = RequireString(platform, "platform_type");
   loaded.capability_version = RequireString(platform, "capability_version");
   loaded.base_frame_id = RequireString(platform, "base_frame_id");
-  if (loaded.base_frame_id != "base_link") {
-    ValueFailure("platform.base_frame_id must be base_link");
+  const std::string expected_base_frame =
+      platform_type == "WHEELED" ? "base_footprint" : "base_link";
+  if (loaded.base_frame_id != expected_base_frame) {
+    ValueFailure(
+        "platform.base_frame_id must be " + expected_base_frame);
+  }
+
+  const YAML::Node sources = RequireMap(platform_document, "sources");
+  for (const auto& entry : sources) {
+    std::string field;
+    std::string source_type;
+    try {
+      field = entry.first.as<std::string>();
+      source_type = entry.second.as<std::string>();
+    } catch (const YAML::Exception&) {
+      SchemaFailure("sources must map strings to strings");
+    }
+    if (field.empty() || source_type.empty() ||
+        !loaded.field_source_types.emplace(field, source_type).second) {
+      ValueFailure("invalid or duplicate field source: " + field);
+    }
+  }
+  if (loaded.field_source_types.empty()) {
+    SchemaFailure("sources must not be empty");
   }
 
   loaded.observation.sensor_range_m = Positive(
