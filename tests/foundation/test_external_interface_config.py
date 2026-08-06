@@ -91,6 +91,26 @@ EXPECTED_DOCUMENT = {
                 "science_regions",
             ],
         },
+        "motion_execution_feedback": {
+            "name": "/execution/motion_feedback",
+            "type": "lunar_navigation_msgs/msg/MotionExecutionFeedback",
+            "owner": "external",
+            "frame": "platform_base_frame",
+            "qos": {
+                "reliability": "reliable",
+                "durability": "volatile",
+                "depth": 10,
+            },
+            "required_fields": [
+                "header",
+                "sequence",
+                "platform_type",
+                "plan_id",
+                "segment_id",
+                "state",
+                "reason_code",
+            ],
+        },
     },
     "tf": {
         "topic": "/tf",
@@ -160,6 +180,24 @@ float64 roi_max_x_m
 float64 roi_max_y_m
 lunar_navigation_msgs/ScienceTargetRegion[<=64] science_regions
 """
+VALID_MOTION_EXECUTION_FEEDBACK = """uint8 WHEELED=1
+uint8 LEGGED=2
+uint8 HOPPER=3
+uint8 IDLE=0
+uint8 ACCEPTED=1
+uint8 EXECUTING=2
+uint8 SEGMENT_COMPLETE=3
+uint8 LANDED_HOLD=4
+uint8 FAILED=5
+uint8 CANCELED=6
+std_msgs/Header header
+uint64 sequence
+uint8 platform_type
+string plan_id
+string segment_id
+uint8 state
+string reason_code
+"""
 
 
 def complete_valid_config() -> dict[str, object]:
@@ -222,6 +260,9 @@ def source_aware_ros_runner(lunar_prefix: Path) -> SourceAwareRosRunner:
             "lunar_navigation_msgs/msg/LocalizationStatus": VALID_LOCALIZATION_STATUS,
             "lunar_navigation_msgs/msg/ScienceTargetRegion": VALID_SCIENCE_TARGET_REGION,
             "lunar_navigation_msgs/msg/ExplorationTask": VALID_EXPLORATION_TASK,
+            "lunar_navigation_msgs/msg/MotionExecutionFeedback": (
+                VALID_MOTION_EXECUTION_FEEDBACK
+            ),
         }
     )
     return SourceAwareRosRunner(lunar_prefix.resolve(), outputs)
@@ -501,3 +542,25 @@ def test_rejects_provisional_declaration_drift(tmp_path):
         ament_prefix_path=f"{expected}:/opt/ros/humble",
     )
     assert any("declaration mismatch" in error for error in errors)
+
+
+def test_rejects_motion_execution_feedback_declaration_drift(tmp_path):
+    from tools.check_external_interfaces import check_interfaces
+
+    expected = make_package_provider(tmp_path / "expected", "lunar_navigation_msgs")
+    run = source_aware_ros_runner(lunar_prefix=expected)
+    run.interface_outputs[
+        "lunar_navigation_msgs/msg/MotionExecutionFeedback"
+    ] = VALID_MOTION_EXECUTION_FEEDBACK.replace(
+        "uint64 sequence\n", "uint32 sequence\n"
+    )
+    errors = check_interfaces(
+        write_config(tmp_path / "interfaces.yaml", complete_valid_config()),
+        expected_lunar_navigation_prefix=expected,
+        run=run,
+        ament_prefix_path=f"{expected}:/opt/ros/humble",
+    )
+    assert any(
+        "MotionExecutionFeedback" in error and "declaration mismatch" in error
+        for error in errors
+    )

@@ -32,6 +32,24 @@ float64 roi_max_x_m
 float64 roi_max_y_m
 lunar_navigation_msgs/ScienceTargetRegion[<=64] science_regions
 """,
+    "MotionExecutionFeedback.msg": """uint8 WHEELED=1
+uint8 LEGGED=2
+uint8 HOPPER=3
+uint8 IDLE=0
+uint8 ACCEPTED=1
+uint8 EXECUTING=2
+uint8 SEGMENT_COMPLETE=3
+uint8 LANDED_HOLD=4
+uint8 FAILED=5
+uint8 CANCELED=6
+std_msgs/Header header
+uint64 sequence
+uint8 platform_type
+string plan_id
+string segment_id
+uint8 state
+string reason_code
+""",
 }
 
 

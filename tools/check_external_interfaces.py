@@ -52,10 +52,32 @@ EXPLORATION_TASK_DECLARATIONS = (
     "float64 roi_max_y_m",
     "lunar_navigation_msgs/ScienceTargetRegion[<=64] science_regions",
 )
+MOTION_EXECUTION_FEEDBACK_DECLARATIONS = (
+    "uint8 WHEELED=1",
+    "uint8 LEGGED=2",
+    "uint8 HOPPER=3",
+    "uint8 IDLE=0",
+    "uint8 ACCEPTED=1",
+    "uint8 EXECUTING=2",
+    "uint8 SEGMENT_COMPLETE=3",
+    "uint8 LANDED_HOLD=4",
+    "uint8 FAILED=5",
+    "uint8 CANCELED=6",
+    "std_msgs/Header header",
+    "uint64 sequence",
+    "uint8 platform_type",
+    "string plan_id",
+    "string segment_id",
+    "uint8 state",
+    "string reason_code",
+)
 _PROVISIONAL_DECLARATIONS = {
     "lunar_navigation_msgs/msg/LocalizationStatus": LOCALIZATION_STATUS_DECLARATIONS,
     "lunar_navigation_msgs/msg/ScienceTargetRegion": SCIENCE_TARGET_REGION_DECLARATIONS,
     "lunar_navigation_msgs/msg/ExplorationTask": EXPLORATION_TASK_DECLARATIONS,
+    "lunar_navigation_msgs/msg/MotionExecutionFeedback": (
+        MOTION_EXECUTION_FEEDBACK_DECLARATIONS
+    ),
 }
 _SYSTEM_PREFIX = Path("/opt/ros/humble").resolve()
 _TOPICS = {
@@ -121,6 +143,26 @@ _TOPICS = {
             "roi_max_x_m",
             "roi_max_y_m",
             "science_regions",
+        ],
+    },
+    "motion_execution_feedback": {
+        "name": "/execution/motion_feedback",
+        "type": "lunar_navigation_msgs/msg/MotionExecutionFeedback",
+        "owner": "external",
+        "frame": "platform_base_frame",
+        "qos": {
+            "reliability": "reliable",
+            "durability": "volatile",
+            "depth": 10,
+        },
+        "required_fields": [
+            "header",
+            "sequence",
+            "platform_type",
+            "plan_id",
+            "segment_id",
+            "state",
+            "reason_code",
         ],
     },
 }

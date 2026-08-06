@@ -10,6 +10,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LocalizationStatus.msg"
   "msg/ScienceTargetRegion.msg"
   "msg/ExplorationTask.msg"
+  "msg/MotionExecutionFeedback.msg"
   DEPENDENCIES geometry_msgs std_msgs
 )
 

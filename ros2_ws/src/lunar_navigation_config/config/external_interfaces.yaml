@@ -39,6 +39,16 @@ topics:
     owner: external
     frame: map
     required_fields: [header, mission_id, revision, desired_state, roi_min_x_m, roi_min_y_m, roi_max_x_m, roi_max_y_m, science_regions]
+  motion_execution_feedback:
+    name: /execution/motion_feedback
+    type: lunar_navigation_msgs/msg/MotionExecutionFeedback
+    owner: external
+    frame: platform_base_frame
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
+    required_fields: [header, sequence, platform_type, plan_id, segment_id, state, reason_code]
 tf:
   topic: /tf
   type: tf2_msgs/msg/TFMessage

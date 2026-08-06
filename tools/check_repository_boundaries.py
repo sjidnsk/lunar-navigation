@@ -46,6 +46,7 @@ ALLOWED_PROVISIONAL_INTERFACES = {
     Path("msg/LocalizationStatus.msg"),
     Path("msg/ScienceTargetRegion.msg"),
     Path("msg/ExplorationTask.msg"),
+    Path("msg/MotionExecutionFeedback.msg"),
 }
 
 _LARGE_ARTIFACT_SUFFIXES = FORBIDDEN_SUFFIXES | {".mcap"}

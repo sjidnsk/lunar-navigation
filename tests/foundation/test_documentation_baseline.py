@@ -63,6 +63,19 @@ def test_external_baseline_declares_provisional_schema_authority():
     assert "不得据此复制" not in text
 
 
+def test_external_baseline_declares_motion_execution_feedback_contract():
+    text = (ROOT / "docs/interfaces/external-input-baseline.md").read_text(encoding="utf-8")
+    assert "/execution/motion_feedback" in text
+    assert "lunar_navigation_msgs/msg/MotionExecutionFeedback" in text
+    assert "Topic 数据生产者仍由外部项目拥有" in text
+    assert "sequence" in text
+    assert "plan_id" in text
+    assert "segment_id" in text
+    assert "reliable" in text
+    assert "volatile" in text
+    assert "depth 10" in text
+
+
 def test_agent_rules_record_the_approved_provisional_exception():
     text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     assert "暂定提供同名 schema" in text
