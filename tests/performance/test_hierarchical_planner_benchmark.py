@@ -11,13 +11,66 @@ import pytest
 
 
 RUNNER_ENVIRONMENT_VARIABLE = "LUNAR_HIERARCHICAL_PLANNER_BENCHMARK"
-SCHEMA_VERSION = "lunar-hierarchical-benchmark/v2"
+SCHEMA_VERSION = "lunar-three-platform-qualification/v1"
+FREEZE_SHA256 = "60e258be85edd779d9acdc282bbde3d5cb914bce98c86c244a46a772fda5ee95"
+MEASURED_RUNS = 20
 CASES = {
-    "wheel_positive": ("WHEELED", 2.0),
-    "legged_positive": ("LEGGED", 2.0),
-    "hopper_direct_positive": ("HOPPER", 1.0),
-    "hopper_multihop_positive": ("HOPPER", 5.0),
-    "hopper_complete_negative": ("HOPPER", 5.0),
+    "wheel_50m_l0": {
+        "platform": "WHEELED",
+        "capability_version": "wheeled-engineering-baseline-v1",
+        "map": (50.0, 50.0, 0.2, 0, 250 * 250),
+        "threshold_s": 2.0,
+        "outcome": "NEW_REFERENCE_AVAILABLE",
+        "reason": "WHEEL_PLAN_AVAILABLE",
+    },
+    "legged_50m_l0": {
+        "platform": "LEGGED",
+        "capability_version": "quad48-approved-baseline-v1",
+        "map": (50.0, 50.0, 0.2, 0, 250 * 250),
+        "threshold_s": 3.0,
+        "outcome": "NEW_REFERENCE_AVAILABLE",
+        "reason": "LEGGED_BODY_PLAN_AVAILABLE",
+    },
+    "wheel_1km_l3": {
+        "platform": "WHEELED",
+        "capability_version": "wheeled-engineering-baseline-v1",
+        "map": (1000.0, 1000.0, 1.6, 3, 625 * 625),
+        "threshold_s": 3.0,
+        "outcome": "NEW_REFERENCE_AVAILABLE",
+        "reason": "WHEEL_PLAN_AVAILABLE",
+    },
+    "legged_1km_l3": {
+        "platform": "LEGGED",
+        "capability_version": "quad48-approved-baseline-v1",
+        "map": (1000.0, 1000.0, 1.6, 3, 625 * 625),
+        "threshold_s": 3.0,
+        "outcome": "NEW_REFERENCE_AVAILABLE",
+        "reason": "LEGGED_BODY_PLAN_AVAILABLE",
+    },
+    "hopper_direct_100m": {
+        "platform": "HOPPER",
+        "capability_version": "hopper-engineering-baseline-v1",
+        "map": (112.0, 12.0, 0.2, 0, 560 * 60),
+        "threshold_s": 1.0,
+        "outcome": "NEW_REFERENCE_AVAILABLE",
+        "reason": "HOPPER_SINGLE_HOP_AVAILABLE",
+    },
+    "hopper_alternate_time_100m": {
+        "platform": "HOPPER",
+        "capability_version": "hopper-engineering-baseline-v1",
+        "map": (112.0, 12.0, 0.2, 0, 560 * 60),
+        "threshold_s": 2.0,
+        "outcome": "NEW_REFERENCE_AVAILABLE",
+        "reason": "HOPPER_SINGLE_HOP_AVAILABLE",
+    },
+    "hopper_complete_blocked_100m": {
+        "platform": "HOPPER",
+        "capability_version": "hopper-engineering-baseline-v1",
+        "map": (112.0, 12.0, 0.2, 0, 560 * 60),
+        "threshold_s": 5.0,
+        "outcome": "NO_KNOWN_SAFE_ROUTE",
+        "reason": "HOPPER_ALL_FLIGHT_TUBES_BLOCKED",
+    },
 }
 STAGES = {
     "global_search",
@@ -32,12 +85,7 @@ COUNTS = {
     "open_peak",
     "peak_work_memory_bytes",
     "peak_resident_memory_bytes",
-    "safe_landing_nodes",
-    "candidate_edges_evaluated",
-    "coarse_edges_rejected",
-    "full_edges_certified",
-    "full_edges_invalidated",
-    "edge_certificate_cache_hits",
+    "hopper_certification_attempts",
 }
 
 
@@ -52,7 +100,7 @@ def _runner() -> Path:
 
 @pytest.fixture(scope="module")
 def benchmark_document(tmp_path_factory: pytest.TempPathFactory) -> dict[str, object]:
-    output = tmp_path_factory.mktemp("hierarchical-benchmark") / "benchmark.json"
+    output = tmp_path_factory.mktemp("three-platform-benchmark") / "benchmark.json"
     completed = subprocess.run(
         [str(_runner()), "--output", str(output)],
         check=False,
@@ -64,45 +112,51 @@ def benchmark_document(tmp_path_factory: pytest.TempPathFactory) -> dict[str, ob
     return json.loads(output.read_text(encoding="utf-8"))
 
 
-def test_fixed_all_platform_release_contract(
+def test_release_document_is_bound_to_the_approved_freeze(
     benchmark_document: dict[str, object],
 ) -> None:
-    assert benchmark_document["schema_version"] == SCHEMA_VERSION
-    assert benchmark_document["build_type"] == "Release"
-    assert benchmark_document["warmup_runs"] >= 1
-    assert benchmark_document["measured_runs"] == 30
-    assert benchmark_document["timing_unit"] == "s"
-    assert benchmark_document["map"] == {
-        "width_m": 50.0,
-        "height_m": 50.0,
-        "resolution_m": 0.2,
-        "cells": 250 * 250,
+    assert benchmark_document == {
+        **benchmark_document,
+        "schema_version": SCHEMA_VERSION,
+        "build_type": "Release",
+        "warmup_runs": 1,
+        "measured_runs": MEASURED_RUNS,
+        "timing_unit": "s",
+        "capability_authority": "approved-engineering-baseline",
+        "capability_freeze_sha256": FREEZE_SHA256,
+        "ubuntu_amd64_release_evaluated": True,
+        "jetson_agx_orin_evaluated": False,
     }
-    assert benchmark_document["capability_authority"] == (
-        "test-only/non-authoritative"
-    )
-    assert benchmark_document["ubuntu_amd64_release_evaluated"] is True
-    assert benchmark_document["jetson_agx_orin_evaluated"] is False
+    assert set(benchmark_document["cases"]) == set(CASES)
     assert len(benchmark_document["results"]) == len(CASES)
 
 
-def test_cases_report_deterministic_counts_and_stage_timings(
+def test_cases_report_map_level_mode_counts_and_deterministic_timings(
     benchmark_document: dict[str, object],
 ) -> None:
-    for case_name, (platform, threshold_s) in CASES.items():
-        case = benchmark_document[case_name]
-        assert case["schema_version"] == SCHEMA_VERSION
-        assert case["platform"] == platform
-        assert case["fixture"] == case_name
-        assert case["authority"] == "test-only/non-authoritative"
-        assert case["runs"] == 30
-        assert case["cells"] == 250 * 250
-        assert case["width_m"] == 50.0
-        assert case["height_m"] == 50.0
-        assert case["resolution_m"] == 0.2
-        assert re.fullmatch(r"[0-9a-f]{16}", case["route_hash"])
+    for case_name, expected in CASES.items():
+        case = benchmark_document["cases"][case_name]
+        width, height, resolution, level, cells = expected["map"]
+        assert case["case_id"] == case_name
+        assert case["platform"] == expected["platform"]
+        assert case["capability_version"] == expected["capability_version"]
+        assert case["map"] == {
+            "width_m": width,
+            "height_m": height,
+            "resolution_m": resolution,
+            "level": level,
+            "cells": cells,
+        }
+        assert case["local_map"]["resolution_m"] == 0.2
+        assert case["runs"] == MEASURED_RUNS
+        assert re.fullmatch(r"[0-9a-f]{16}", case["reference_hash"])
         assert case["deterministic"] is True
-        assert case["ubuntu_release_p95_threshold_s"] == threshold_s
+        assert case["mode"] in {
+            "OPTIMIZED",
+            "DISCRETE_FALLBACK",
+            "CERTIFIED_HOP",
+            "NO_REFERENCE",
+        }
         for key in ("p50_s", "p95_s", "maximum_s"):
             assert math.isfinite(case[key]) and case[key] >= 0.0
         assert case["p50_s"] <= case["p95_s"] <= case["maximum_s"]
@@ -113,30 +167,39 @@ def test_cases_report_deterministic_counts_and_stage_timings(
             assert all(math.isfinite(value) and value >= 0.0 for value in timing.values())
         for key in COUNTS:
             assert isinstance(case[key], int) and case[key] >= 0
+        if expected["platform"] == "HOPPER" and expected["outcome"] == "NEW_REFERENCE_AVAILABLE":
+            assert math.isfinite(case["hop_flight_time_s"])
+            assert case["hop_flight_time_s"] > 0.0
+        else:
+            assert case["hop_flight_time_s"] is None
 
 
-def test_ubuntu_release_thresholds_and_expected_outcomes(
+def test_release_thresholds_and_expected_platform_outcomes(
     benchmark_document: dict[str, object],
 ) -> None:
-    for case_name, (_, threshold_s) in CASES.items():
-        case = benchmark_document[case_name]
-        assert case["p95_s"] <= threshold_s
-        assert case["ubuntu_threshold_passed"] is True
-        if case_name == "hopper_complete_negative":
-            assert case["planning_outcome"] == "NO_KNOWN_SAFE_ROUTE"
-            assert case["reason_code"] == "GLOBAL_NO_KNOWN_SAFE_ROUTE"
-        elif case_name.startswith("hopper_"):
-            assert case["planning_outcome"] == "NEW_REFERENCE_AVAILABLE"
-            assert case["reason_code"] == "HOPPER_FIRST_HOP_AVAILABLE"
-            assert case["safe_landing_nodes"] > 0
-            assert case["candidate_edges_evaluated"] > 0
-        elif case_name == "legged_positive":
-            assert case["reason_code"] == "LEGGED_BODY_PLAN_AVAILABLE"
-        else:
-            assert case["reason_code"] == "WHEEL_PLAN_AVAILABLE"
+    cases = benchmark_document["cases"]
+    for case_name, expected in CASES.items():
+        case = cases[case_name]
+        assert case["planning_outcome"] == expected["outcome"]
+        assert case["reason_code"] == expected["reason"]
+        assert case["release_p95_threshold_s"] == expected["threshold_s"]
+        assert case["p95_s"] <= expected["threshold_s"]
+        assert case["release_threshold_passed"] is True
+
+    assert cases["hopper_direct_100m"]["mode"] == "CERTIFIED_HOP"
+    assert cases["hopper_alternate_time_100m"]["mode"] == "CERTIFIED_HOP"
+    assert cases["hopper_complete_blocked_100m"]["mode"] == "NO_REFERENCE"
+    assert (
+        cases["hopper_alternate_time_100m"]["hopper_certification_attempts"]
+        >= cases["hopper_direct_100m"]["hopper_certification_attempts"]
+    )
+    assert (
+        cases["hopper_alternate_time_100m"]["hop_flight_time_s"]
+        > cases["hopper_direct_100m"]["hop_flight_time_s"]
+    )
 
 
-def test_capability_documents_are_explicitly_non_authoritative() -> None:
+def test_test_only_capability_documents_are_not_runtime_authority() -> None:
     fixture_root = Path(__file__).parents[1] / "fixtures" / "capabilities" / "test-only"
     for platform in ("wheeled", "legged", "hopper"):
         text = (fixture_root / f"{platform}.yaml").read_text(encoding="utf-8")

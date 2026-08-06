@@ -421,15 +421,15 @@
 - Modify: `docs/migration/volume-2-completion.md`
 - Modify: `docs/superpowers/plans/2026-08-07-three-platform-capability-implementation.md`
 
-- [ ] **Step 1: Replace legacy benchmark fixtures**
+- [x] **Step 1: Replace legacy benchmark fixtures**
 
   Use the approved v2 values and emit build type, map extent/resolution/level, expansions, p50/p95/max, peak memory, mode and reason. Ground benchmarks include the existing `50×50 m @ 0.20 m` plus a larger dyadic-map case; hopper includes 100 m direct, alternate-time-safe, and complete blocked cases.
 
-- [ ] **Step 2: Enforce Release-only regression thresholds**
+- [x] **Step 2: Enforce Release-only regression thresholds**
 
   Assert wheel `50×50 m p95 <= 2.0 s`; hopper direct `<=1.0 s`, alternate-time `<=2.0 s`, fully blocked `<=5.0 s`. Record, but do not use thresholds as production stop conditions. Freeze legged/large-map thresholds from the first verified Release baseline and document them before final qualification.
 
-- [ ] **Step 3: Run the full qualification suite**
+- [x] **Step 3: Run the full qualification suite**
 
   Build to `/home/kai/CodexDownloads/lunar_navigation/three_platform_capability/final` with `-DCMAKE_BUILD_TYPE=Release`, then run:
 
@@ -444,7 +444,7 @@
   git diff --check
   ```
 
-- [ ] **Step 4: Record evidence and commit**
+- [x] **Step 4: Record evidence and commit**
 
   The validation document must distinguish: approved engineering baseline, current Ubuntu simulation qualification, not Isaac dynamics acceptance, not formal PPO training completion, and not AGX acceptance.
 

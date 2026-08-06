@@ -155,4 +155,12 @@ def test_python_astar_and_cpp_v3_agree_on_safety_semantics(
     else:
         assert result.path == ()
         assert math.isinf(result.total_cost)
-        assert cpp["cost"] is None
+        if cpp["planning_outcome"] == "GOAL_INFEASIBLE":
+            # The hierarchical facade reports the finite global-route cost
+            # even when the final platform-specific goal connector is
+            # infeasible. This remains diagnostic evidence, not reachability.
+            cpp_cost = cpp["cost"]
+            assert isinstance(cpp_cost, (int, float))
+            assert math.isfinite(cpp_cost) and cpp_cost >= 0.0
+        else:
+            assert cpp["cost"] is None

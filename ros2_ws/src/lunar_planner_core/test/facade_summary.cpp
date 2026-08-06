@@ -68,7 +68,7 @@ void MakeGoalKnownInfeasible(
   if (platform == PlatformType::kHopper) {
     input.goal_map.target = PointGoal{
         .position_m = {4.25, 3.25, 0.0},
-        .tolerance_m = 0.05,
+        .tolerance_m = 0.0,
     };
     forbidden[6U * input.world.local_map.width + 8U] = 1U;
     return;
@@ -131,8 +131,15 @@ void MakeGoalKnownInfeasible(
   }
   if (platform == PlatformType::kHopper) {
     const auto* hop = std::get_if<HopReference>(&reference->data);
-    return hop != nullptr && !hop->segments.empty() &&
-           !hop->segments.front().landing_region_boundary_m.empty();
+    if (hop == nullptr || hop->segments.size() != 1U) {
+      return false;
+    }
+    const HopSegment& segment = hop->segments.front();
+    return !segment.landing_region_boundary_m.empty() &&
+           segment.certified_fuel_required_kg >=
+               segment.ideal_fuel_required_kg &&
+           segment.available_delta_v_mps >= segment.required_delta_v_mps &&
+           !segment.capability_version.empty();
   }
   const auto* trajectory = std::get_if<TrajectoryReference>(&reference->data);
   if (trajectory == nullptr || trajectory->points.empty()) {

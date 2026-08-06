@@ -6,15 +6,15 @@
     "wheel-goal-infeasible": 4.571428571428571,
     "wheel-numerical-failure": null,
     "wheel-deterministic-repeat": 4.571428571428571,
-    "legged-safe-corridor": 5.371988807405744,
+    "legged-safe-corridor": 3.7478992087500433,
     "legged-no-safe-route": null,
-    "legged-goal-infeasible": 5.371988807405744,
+    "legged-goal-infeasible": 3.7478992087500433,
     "legged-numerical-failure": null,
-    "legged-deterministic-repeat": 5.371988807405744,
-    "hopper-safe-corridor": 1.1314877291375824,
+    "legged-deterministic-repeat": 3.7478992087500433,
+    "hopper-safe-corridor": 0.019514728460754756,
     "hopper-no-safe-route": null,
     "hopper-goal-infeasible": null,
     "hopper-numerical-failure": null,
-    "hopper-deterministic-repeat": 1.1314877291375824
+    "hopper-deterministic-repeat": 0.019514728460754756
   }
 }

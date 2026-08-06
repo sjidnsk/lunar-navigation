@@ -11,6 +11,27 @@ Volume 2 已在 `volume-2-planner-ros` 分支完成冻结范围内的实现与�
 设备性能、功耗或四小时稳定性验收完成，也不替代后续卷的
 `model-package-ready -> device-verified -> policy-pipeline-v1` 状态链。
 
+## 2026-08-07 三平台能力增量
+
+Volume 2 原始交接之后，轮式、足式和飞跃式平台的批准工程基线已在功能分支完成增量实现，
+目标集成主线为 `integration`。该增量不移动 `volume-2-planner-ros` 里程碑分支，也不改写
+`planner-action-v1` 的历史含义。
+
+增量内容包括：
+
+- 能力 schema v2 与三平台版本化冻结；
+- 轮式真实几何、运动原语和 `0.20 m` 障碍净空；
+- Quad48 身体规划、`0.50 m` 越障、`0.30 m` 跨沟和条件净空投影；
+- 飞跃平台剩余燃料输入、精确单跳落点、简单抛物线与完整飞行管认证；
+- 三平台 ROS 输出不变量和 RViz 尺寸、路线、落区、弹道、燃料证据；
+- 无固定搜索计数上限的有限地图搜索，以及正式能力 Release 性能回归。
+
+批准能力的规范化 SHA-256 为
+`60e258be85edd779d9acdc282bbde3d5cb914bce98c86c244a46a772fda5ee95`。完整范围、
+性能表、复现命令和验收边界见
+`docs/validation/three-platform-capability-qualification.md`。该资格只表示 Ubuntu 自动化规划
+验证通过，不表示 Isaac Sim 动力学、实际平台、正式 PPO 训练或 AGX 验收完成。
+
 ## 交付位置
 
 | 内容 | 位置 |
