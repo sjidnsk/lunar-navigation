@@ -82,6 +82,12 @@ ReferenceComposeResult ComposeReference(const PlannerInput &input,
   if (!ValidPreview(global_route)) {
     return Failure("REFERENCE_GLOBAL_PREVIEW_NONFINITE");
   }
+  std::vector<Pose3> preview = ThinRoutePreview(
+      global_route.poses_map,
+      input.config.global_search.maximum_preview_points);
+  if (preview.empty()) {
+    return Failure("REFERENCE_PREVIEW_CONFIGURATION_INVALID");
+  }
   if (!SuccessfulLocalOutput(local_output) ||
       !local_output.reference.has_value()) {
     return Failure("REFERENCE_LOCAL_DATA_MISSING");
@@ -110,7 +116,7 @@ ReferenceComposeResult ComposeReference(const PlannerInput &input,
               .input_time = input.state_time,
               .preview =
                   GlobalRoutePreview{
-                      .poses_map = global_route.poses_map,
+                      .poses_map = std::move(preview),
                   },
               .data = std::move(local_output.reference->data),
           },

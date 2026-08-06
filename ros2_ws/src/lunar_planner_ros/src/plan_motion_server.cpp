@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -56,6 +57,23 @@ using CallbackReturn =
 using namespace std::chrono_literals;
 
 constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
+constexpr std::array<std::string_view, 15U> kRetiredSearchParameters{
+    "global_search.maximum_expanded_states",
+    "global_search.maximum_reopened_states",
+    "global_search.maximum_generated_candidates",
+    "global_search.maximum_open_states",
+    "global_search.maximum_memory_bytes",
+    "global_search.resources.maximum_expanded_states",
+    "global_search.resources.maximum_reopened_states",
+    "global_search.resources.maximum_generated_candidates",
+    "global_search.resources.maximum_open_states",
+    "global_search.resources.maximum_memory_bytes",
+    "hopper.maximum_landing_regions",
+    "hopper.maximum_graph_nodes",
+    "hopper.maximum_graph_out_degree",
+    "hopper.maximum_nominal_aim_points_per_region",
+    "hopper.maximum_certification_attempts",
+};
 
 [[nodiscard]] std::optional<lunar::planning::TimePoint> TimePointFromStamp(
     const builtin_interfaces::msg::Time& stamp) noexcept {
@@ -529,6 +547,17 @@ struct PlanMotionServer::Impl final {
     return config;
   }
 
+  void RejectRetiredSearchParameters() const {
+    const auto& overrides = node.get_node_parameters_interface()
+                                ->get_parameter_overrides();
+    for (const std::string_view name : kRetiredSearchParameters) {
+      if (overrides.contains(std::string{name})) {
+        throw std::invalid_argument{
+            "retired planner search parameter: " + std::string{name}};
+      }
+    }
+  }
+
   [[nodiscard]] LoadedCapabilities LoadCapabilities() const {
     if (dependencies.preloaded_capabilities) {
       return *dependencies.preloaded_capabilities;
@@ -570,6 +599,7 @@ struct PlanMotionServer::Impl final {
     try {
       StopAndJoinWorker("NODE_RECONFIGURED");
       ResetSubscriptions();
+      RejectRetiredSearchParameters();
       const SnapshotPolicy policy = ReadPolicy();
       const auto feedback_max_age =
           RequiredDuration("execution_feedback_max_age");

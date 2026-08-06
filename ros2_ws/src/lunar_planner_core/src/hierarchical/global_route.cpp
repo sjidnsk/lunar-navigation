@@ -117,4 +117,26 @@ SimplifyRouteSupercover(const shared::SafeProjection &projection,
   return simplified;
 }
 
+std::vector<Pose3> ThinRoutePreview(const std::span<const Pose3> route,
+                                    const std::size_t maximum_points) {
+  if (route.empty() || maximum_points == 0U) {
+    return {};
+  }
+  if (route.size() <= maximum_points) {
+    return {route.begin(), route.end()};
+  }
+  if (maximum_points == 1U) {
+    return {route.back()};
+  }
+
+  std::vector<Pose3> preview;
+  preview.reserve(maximum_points);
+  const std::size_t last = route.size() - 1U;
+  const std::size_t intervals = maximum_points - 1U;
+  for (std::size_t index = 0U; index < maximum_points; ++index) {
+    preview.push_back(route[index * last / intervals]);
+  }
+  return preview;
+}
+
 } // namespace lunar::planning::hierarchical

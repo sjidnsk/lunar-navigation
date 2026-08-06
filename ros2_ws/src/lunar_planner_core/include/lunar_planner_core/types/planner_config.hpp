@@ -90,7 +90,6 @@ struct GlobalSearchConfig final {
 struct LocalFrontierConfig final {
   double wheel_horizon_m{4.0};
   double legged_horizon_m{3.0};
-  std::size_t maximum_attempts{3U};
   double additional_corridor_margin_m{0.4};
 };
 

@@ -320,10 +320,10 @@ GlobalRoutePlanResult PlanGroundGlobalRoute(const PlannerInput &input) {
   }
   std::vector<shared::GridCell> simplified = SimplifyRouteSupercover(
       *projection.projection, search.path_cells,
-      input.config.global_search.maximum_preview_points);
+      search.path_cells.size());
   if (simplified.empty()) {
-    return Failure(PlanningOutcome::kResourceExhausted,
-                   "GLOBAL_SEARCH_RESOURCE_LIMIT", started, level);
+    return Failure(PlanningOutcome::kNumericalFailure,
+                   "GLOBAL_ROUTE_SIMPLIFICATION_FAILED", started, level);
   }
   std::vector<Pose3> poses =
       BuildPoses(*map.snapshot, simplified, input.goal_map, *start_pose_map);

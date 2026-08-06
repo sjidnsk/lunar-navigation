@@ -26,4 +26,7 @@ SimplifyRouteSupercover(const shared::SafeProjection &projection,
                         std::span<const shared::GridCell> route,
                         std::size_t maximum_points);
 
+[[nodiscard]] std::vector<Pose3>
+ThinRoutePreview(std::span<const Pose3> route, std::size_t maximum_points);
+
 } // namespace lunar::planning::hierarchical

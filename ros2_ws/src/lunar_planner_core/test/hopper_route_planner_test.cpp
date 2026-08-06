@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "hierarchical/hopper_route_planner.hpp"
+#include "hierarchical/route_continuation.hpp"
 #include "hopper/flight_tube_certifier.hpp"
 #include "lunar_planner_core/planner.hpp"
 #include "shared/map_snapshot.hpp"
@@ -465,6 +466,25 @@ TEST(HopperRoutePlanner, PublishesTheFullPreviewButAuthorizesOnlyOneHop) {
   EXPECT_EQ(output.reference->preview.poses_map.size(), 4U);
   EXPECT_TRUE(HasWarning(output, "HOPPER_REMAINING_HOPS_PREVIEW_ONLY"));
   EXPECT_TRUE(HasWarning(output, "HOPPER_AUTHORIZATION_CLAMPED_TO_ONE"));
+}
+
+TEST(HopperRoutePlanner, ThinsPreviewWithoutTruncatingTheCertifiedHopChain) {
+  Planner planner;
+  PlannerInput input = ThreeHopInput();
+  input.config.global_search.maximum_preview_points = 2U;
+
+  const PlannerOutput output = planner.Plan(input);
+
+  ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << output.reason_code;
+  ASSERT_TRUE(output.reference.has_value());
+  ASSERT_NE(output.continuation, nullptr);
+  ASSERT_EQ(output.reference->preview.poses_map.size(), 2U);
+  EXPECT_EQ(output.reference->preview.poses_map.front(),
+            output.continuation->global_route().poses_map.front());
+  EXPECT_EQ(output.reference->preview.poses_map.back(),
+            output.continuation->global_route().poses_map.back());
+  EXPECT_EQ(output.continuation->certified_hops().size(), 3U);
 }
 
 TEST(HopperRoutePlanner, RejectsWhenTheFirstLocalFlightTubeIsBlocked) {

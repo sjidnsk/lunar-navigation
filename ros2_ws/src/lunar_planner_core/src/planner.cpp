@@ -1,5 +1,6 @@
 #include "lunar_planner_core/planner.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -280,6 +281,7 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
     const auto local_started = std::chrono::steady_clock::now();
     std::uint64_t local_expanded = 0U;
     std::optional<std::string> specific_local_failure;
+    std::vector<std::string> local_failure_reasons;
     for (std::size_t attempt = 0U; attempt < frontiers.problems.size();
          ++attempt) {
       PlannerOutput local =
@@ -362,6 +364,12 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
                                      frontiers.frontier_distances_m[attempt],
                                      local_elapsed));
       }
+      if (!local.reason_code.empty() &&
+          std::find(local_failure_reasons.begin(),
+                    local_failure_reasons.end(), local.reason_code) ==
+              local_failure_reasons.end()) {
+        local_failure_reasons.push_back(local.reason_code);
+      }
       if (local.reason_code == "WHEEL_START_CONNECTOR_INFEASIBLE" ||
           local.reason_code == "LEGGED_START_CONNECTOR_INFEASIBLE" ||
           local.reason_code == "WHEEL_SMOOTHED_EXECUTION_REQUIRED" ||
@@ -377,7 +385,7 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
         ExecutionDirective::kNoSafeReference,
         specific_local_failure.value_or("LOCAL_SEGMENT_INFEASIBLE"),
         started, global.route->expanded_states + local_expanded,
-        global.route->cost, {},
+        global.route->cost, std::move(local_failure_reasons),
         GroundMetrics(input, global, &frontiers, local_expanded,
                       frontiers.problems.size(),
                       frontiers.frontier_distances_m.back(), local_elapsed));

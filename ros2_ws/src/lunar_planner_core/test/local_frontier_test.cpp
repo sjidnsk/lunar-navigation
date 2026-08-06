@@ -3,6 +3,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <numbers>
 #include <stop_token>
 #include <string>
 #include <variant>
@@ -13,6 +14,7 @@
 #include "hierarchical/local_frontier.hpp"
 #include "legged/legged_planner.hpp"
 #include "test_fixtures.hpp"
+#include "wheel/wheel_lattice.hpp"
 #include "wheel/wheel_planner.hpp"
 
 namespace lunar::planning::hierarchical {
@@ -69,6 +71,19 @@ static_assert(!PlansProblem<legged::LeggedPlanner, PlannerInput>);
   };
 }
 
+[[nodiscard]] GlobalRoute AngledRoute() {
+  return GlobalRoute{
+      .raw_cells = {{2, 3}, {10, 7}},
+      .simplified_cells = {{2, 3}, {10, 7}},
+      .poses_map =
+          {
+              Pose3{.position_m = {12.5, 4.5, 0.0}},
+              Pose3{.position_m = {20.5, 8.5, 0.0}},
+          },
+      .cost = std::hypot(8.0, 4.0),
+  };
+}
+
 [[nodiscard]] Vec3 PointTarget(const GoalRegion &goal) {
   return std::get<PointGoal>(goal.target).position_m;
 }
@@ -88,7 +103,7 @@ void SetValid(GridMap &map, const std::size_t x, const std::size_t y,
   return std::hypot(point.x - nearest_x, point.y - y);
 }
 
-TEST(LocalFrontier, TransformsRouteAndReturnsThreeWheelCandidatesFarToNear) {
+TEST(LocalFrontier, TransformsRouteAndReturnsEveryWheelCandidateFarToNear) {
   const PlannerInput input = FrontierInput(PlatformType::kWheeled);
 
   const LocalFrontierResult result =
@@ -96,14 +111,42 @@ TEST(LocalFrontier, TransformsRouteAndReturnsThreeWheelCandidatesFarToNear) {
 
   ASSERT_TRUE(result.ok()) << result.reason_code;
   EXPECT_EQ(result.reason_code, "LOCAL_FRONTIERS_AVAILABLE");
-  ASSERT_EQ(result.problems.size(), 3U);
+  ASSERT_EQ(result.problems.size(), 4U);
   ASSERT_EQ(result.frontier_distances_m.size(), result.problems.size());
   EXPECT_NEAR(result.frontier_distances_m[0], 4.0, 1.0e-9);
   EXPECT_GT(result.frontier_distances_m[0], result.frontier_distances_m[1]);
   EXPECT_GT(result.frontier_distances_m[1], result.frontier_distances_m[2]);
+  EXPECT_GT(result.frontier_distances_m[2], result.frontier_distances_m[3]);
   EXPECT_NEAR(PointTarget(result.problems[0].goal_odom).x, 6.5, 1.0e-9);
   EXPECT_NEAR(PointTarget(result.problems[0].goal_odom).y, 3.5, 1.0e-9);
   EXPECT_EQ(result.problems[0].local_map_view.frame_id, "odom");
+}
+
+TEST(LocalFrontier, WheelTurnFrontierRejectsAHeadingThatMissesTheRouteTurn) {
+  PlannerInput input = FrontierInput(PlatformType::kWheeled);
+  std::get<WheeledCapability>(input.capability).motion_primitives.push_back(
+      WheelMotionPrimitive{
+          .primitive_id = "production-sized-turn",
+          .kind = WheelPrimitiveKind::kSpinCounterclockwise,
+          .relative_end_pose =
+              Pose3{.orientation = test::YawQuaternion(
+                        std::numbers::pi / 4.0)},
+          .nominal_duration = std::chrono::seconds{1},
+      });
+
+  const LocalFrontierResult result =
+      BuildLocalFrontiers(input, AngledRoute());
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_FALSE(result.problems.empty());
+  const GoalRegion &goal = result.problems.front().goal_odom;
+  const Vec3 target = PointTarget(goal);
+  EXPECT_FALSE(wheel::GoalContainsPose(
+      goal, wheel::WheelPose{.position_m = target, .yaw_rad = 0.0}));
+  EXPECT_TRUE(wheel::GoalContainsPose(
+      goal,
+      wheel::WheelPose{
+          .position_m = target, .yaw_rad = std::numbers::pi / 4.0}));
 }
 
 TEST(LocalFrontier, AppliesThreeMetreLeggedHorizon) {

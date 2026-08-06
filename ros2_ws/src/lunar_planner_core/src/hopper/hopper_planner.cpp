@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "hierarchical/frame_transform.hpp"
+#include "hierarchical/global_route.hpp"
 #include "hierarchical/hopper_route_planner.hpp"
 #include "hierarchical/local_planning_problem.hpp"
 #include "hierarchical/map_level.hpp"
@@ -291,7 +292,10 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_hopper";
           .plan_id = plan_id,
           .platform_type = PlatformType::kHopper,
           .input_time = input.state_time,
-          .preview = GlobalRoutePreview{.poses_map = std::move(route_preview)},
+          .preview = GlobalRoutePreview{
+              .poses_map = hierarchical::ThinRoutePreview(
+                  route_preview,
+                  input.config.global_search.maximum_preview_points)},
           .data = HopReference{.segments = {segment}},
       },
       .diagnostics = PlannerDiagnostics{
@@ -804,7 +808,9 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
           .platform_type = PlatformType::kHopper,
           .input_time = input.state_time,
           .preview = GlobalRoutePreview{
-              .poses_map = global.route->poses_map,
+              .poses_map = hierarchical::ThinRoutePreview(
+                  global.route->poses_map,
+                  input.config.global_search.maximum_preview_points),
           },
           .data = std::move(reference),
       },

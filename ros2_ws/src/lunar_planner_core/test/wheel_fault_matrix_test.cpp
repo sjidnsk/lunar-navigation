@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include <numbers>
 #include <stop_token>
 #include <string>
 #include <utility>
@@ -72,6 +73,38 @@ TEST(WheelFaultMatrix, RejectsObstacleIntersectingContinuousFootprintSweep) {
 
   EXPECT_FALSE(result.valid);
   EXPECT_EQ(result.reason_code, "WHEEL_SWEEP_COLLISION");
+}
+
+TEST(WheelFaultMatrix, IgnoresUnsafeCellsOutsideTheRotatedFootprintPolygon) {
+  auto input = test::MakeValidWheelInput();
+  SetObstacle(input.world.local_map, 4U, 4U);
+  auto capability = std::get<WheeledCapability>(input.capability);
+  capability.footprint_xy_m = {
+      {-0.6, -0.2}, {0.6, -0.2}, {0.6, 0.2}, {-0.6, 0.2}};
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, PlatformCapability{capability},
+      input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  const wheel::WheelSweepValidator validator{
+      *projection.projection, capability,
+      input.config.wheel.continuous_validation_maximum_subdivisions};
+  const wheel::WheelTransition transition{
+      .source_pose = wheel::WheelPose{
+          .position_m = {3.5, 3.5, 0.0},
+          .yaw_rad = std::numbers::pi / 4.0,
+      },
+      .target_pose = wheel::WheelPose{
+          .position_m = {3.5, 3.5, 0.0},
+          .yaw_rad = std::numbers::pi / 4.0,
+      },
+  };
+
+  const auto result = validator.Validate(transition, {});
+
+  EXPECT_TRUE(result.valid) << result.reason_code;
+  EXPECT_EQ(result.reason_code, "WHEEL_SWEEP_VALID");
 }
 
 TEST(WheelFaultMatrix, ReportsNoPathAcrossFullBarrier) {

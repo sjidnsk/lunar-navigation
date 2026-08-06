@@ -1,10 +1,12 @@
 #include "wheel/wheel_sweep_validator.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <ranges>
 #include <utility>
 #include <vector>
 
@@ -27,6 +29,112 @@ constexpr double kComparisonTolerance = 1.0e-9;
   return std::isfinite(pose.position_m.x) &&
          std::isfinite(pose.position_m.y) &&
          std::isfinite(pose.position_m.z) && std::isfinite(pose.yaw_rad);
+}
+
+[[nodiscard]] double Cross(
+    const Vec2& first, const Vec2& second, const Vec2& third) noexcept {
+  return (second.x - first.x) * (third.y - first.y) -
+         (second.y - first.y) * (third.x - first.x);
+}
+
+[[nodiscard]] bool PointOnSegment(
+    const Vec2& point, const Vec2& start, const Vec2& finish) noexcept {
+  return std::abs(Cross(start, finish, point)) <= kComparisonTolerance &&
+         point.x + kComparisonTolerance >= std::min(start.x, finish.x) &&
+         point.x <= std::max(start.x, finish.x) + kComparisonTolerance &&
+         point.y + kComparisonTolerance >= std::min(start.y, finish.y) &&
+         point.y <= std::max(start.y, finish.y) + kComparisonTolerance;
+}
+
+[[nodiscard]] bool SegmentsIntersect(
+    const Vec2& first_start, const Vec2& first_finish,
+    const Vec2& second_start, const Vec2& second_finish) noexcept {
+  const double first_side_start =
+      Cross(first_start, first_finish, second_start);
+  const double first_side_finish =
+      Cross(first_start, first_finish, second_finish);
+  const double second_side_start =
+      Cross(second_start, second_finish, first_start);
+  const double second_side_finish =
+      Cross(second_start, second_finish, first_finish);
+  const bool proper_crossing =
+      ((first_side_start > kComparisonTolerance &&
+        first_side_finish < -kComparisonTolerance) ||
+       (first_side_start < -kComparisonTolerance &&
+        first_side_finish > kComparisonTolerance)) &&
+      ((second_side_start > kComparisonTolerance &&
+        second_side_finish < -kComparisonTolerance) ||
+       (second_side_start < -kComparisonTolerance &&
+        second_side_finish > kComparisonTolerance));
+  return proper_crossing ||
+      PointOnSegment(second_start, first_start, first_finish) ||
+      PointOnSegment(second_finish, first_start, first_finish) ||
+      PointOnSegment(first_start, second_start, second_finish) ||
+      PointOnSegment(first_finish, second_start, second_finish);
+}
+
+[[nodiscard]] bool PointInPolygon(
+    const Vec2& point, const std::vector<Vec2>& polygon) noexcept {
+  bool inside = false;
+  for (std::size_t current = 0U, previous = polygon.size() - 1U;
+       current < polygon.size(); previous = current++) {
+    const Vec2& start = polygon[previous];
+    const Vec2& finish = polygon[current];
+    if (PointOnSegment(point, start, finish)) {
+      return true;
+    }
+    if ((start.y > point.y) == (finish.y > point.y)) {
+      continue;
+    }
+    const double crossing_x = start.x +
+        (point.y - start.y) * (finish.x - start.x) /
+            (finish.y - start.y);
+    if (point.x < crossing_x) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+[[nodiscard]] bool PolygonIntersectsCell(
+    const std::vector<Vec2>& polygon,
+    const double minimum_x, const double minimum_y,
+    const double maximum_x, const double maximum_y) noexcept {
+  const auto inside_cell = [&](const Vec2& point) {
+    return point.x + kComparisonTolerance >= minimum_x &&
+        point.x <= maximum_x + kComparisonTolerance &&
+        point.y + kComparisonTolerance >= minimum_y &&
+        point.y <= maximum_y + kComparisonTolerance;
+  };
+  if (std::ranges::any_of(polygon, inside_cell)) {
+    return true;
+  }
+  const std::array<Vec2, 4U> corners{
+      Vec2{minimum_x, minimum_y},
+      Vec2{maximum_x, minimum_y},
+      Vec2{maximum_x, maximum_y},
+      Vec2{minimum_x, maximum_y},
+  };
+  if (std::ranges::any_of(
+          corners,
+          [&](const Vec2& corner) { return PointInPolygon(corner, polygon); })) {
+    return true;
+  }
+  for (std::size_t polygon_index = 0U;
+       polygon_index < polygon.size(); ++polygon_index) {
+    const Vec2& polygon_start = polygon[polygon_index];
+    const Vec2& polygon_finish =
+        polygon[(polygon_index + 1U) % polygon.size()];
+    for (std::size_t cell_index = 0U;
+         cell_index < corners.size(); ++cell_index) {
+      if (SegmentsIntersect(
+              polygon_start, polygon_finish, corners[cell_index],
+              corners[(cell_index + 1U) % corners.size()])) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 }  // namespace
@@ -122,12 +230,15 @@ WheelSweepValidation WheelSweepValidator::Validate(
     double maximum_x = -std::numeric_limits<double>::infinity();
     double minimum_y = std::numeric_limits<double>::infinity();
     double maximum_y = -std::numeric_limits<double>::infinity();
+    std::vector<Vec2> footprint;
+    footprint.reserve(capability_->footprint_xy_m.size());
     for (const Vec2& vertex : capability_->footprint_xy_m) {
       if (!std::isfinite(vertex.x) || !std::isfinite(vertex.y)) {
         return Failure("WHEEL_FOOTPRINT_NONFINITE", sample_count);
       }
       const double x = center_x + cosine * vertex.x - sine * vertex.y;
       const double y = center_y + sine * vertex.x + cosine * vertex.y;
+      footprint.push_back(Vec2{.x = x, .y = y});
       minimum_x = std::min(minimum_x, x);
       maximum_x = std::max(maximum_x, x);
       minimum_y = std::min(minimum_y, y);
@@ -148,10 +259,17 @@ WheelSweepValidation WheelSweepValidator::Validate(
     }
     for (std::int64_t y = minimum_cell_y; y <= maximum_cell_y; ++y) {
       for (std::int64_t x = minimum_cell_x; x <= maximum_cell_x; ++x) {
-        if (!projection_->HardFeasible(shared::GridCell{
-                .x = static_cast<std::int32_t>(x),
-                .y = static_cast<std::int32_t>(y),
-            })) {
+        const shared::GridCell cell{
+            .x = static_cast<std::int32_t>(x),
+            .y = static_cast<std::int32_t>(y),
+        };
+        if (!projection_->HardFeasible(cell) &&
+            PolygonIntersectsCell(
+                footprint,
+                origin_x + static_cast<double>(x) * resolution,
+                origin_y + static_cast<double>(y) * resolution,
+                origin_x + static_cast<double>(x + 1) * resolution,
+                origin_y + static_cast<double>(y + 1) * resolution)) {
           return Failure("WHEEL_SWEEP_COLLISION", sample_count);
         }
       }

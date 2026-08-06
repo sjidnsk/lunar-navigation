@@ -27,6 +27,8 @@ FORBIDDEN_TOKENS = (
     "schema" + "_codec",
     "registry" + "_handle",
     "legacy" + "_v3_adapter",
+    "GLOBAL_SEARCH_" + "RESOURCE_LIMIT",
+    "HOPPER_GLOBAL_ROUTE_" + "RESOURCE_LIMIT",
 )
 
 

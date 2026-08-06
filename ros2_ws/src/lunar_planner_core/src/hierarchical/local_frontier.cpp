@@ -17,6 +17,7 @@
 #include "hierarchical/frame_transform.hpp"
 #include "shared/map_snapshot.hpp"
 #include "shared/safe_projection.hpp"
+#include "wheel/wheel_types.hpp"
 
 namespace lunar::planning::hierarchical {
 namespace {
@@ -189,8 +190,7 @@ ValidPlatformGeometry(const PlatformGeometry &geometry,
          std::isfinite(geometry.minimum_clearance_m) &&
          geometry.minimum_clearance_m >= 0.0 &&
          std::isfinite(config.additional_corridor_margin_m) &&
-         config.additional_corridor_margin_m >= 0.0 &&
-         config.maximum_attempts > 0U;
+         config.additional_corridor_margin_m >= 0.0;
 }
 
 [[nodiscard]] bool HasEdgeMargin(const shared::MapSnapshot &map,
@@ -317,6 +317,21 @@ PrefixPolyline(const std::vector<Vec3> &route_odom, const double distance_m,
                                       const FrontierSample &sample,
                                       const double resolution_m,
                                       const std::size_t attempt_index) {
+  double tangent_yaw_tolerance_rad = std::numbers::pi / 4.0;
+  if (const auto *capability =
+          std::get_if<WheeledCapability>(&input.capability)) {
+    double minimum_turn_rad = std::numeric_limits<double>::infinity();
+    for (const WheelMotionPrimitive &primitive : capability->motion_primitives) {
+      const auto yaw = wheel::YawFromQuaternion(
+          primitive.relative_end_pose.orientation);
+      if (yaw.has_value() && std::abs(*yaw) > kTolerance) {
+        minimum_turn_rad = std::min(minimum_turn_rad, std::abs(*yaw));
+      }
+    }
+    if (std::isfinite(minimum_turn_rad)) {
+      tangent_yaw_tolerance_rad = 0.5 * minimum_turn_rad;
+    }
+  }
   GoalRegion goal{
       .goal_id = input.goal_map.goal_id + "/local-frontier-" +
                  std::to_string(attempt_index),
@@ -326,7 +341,7 @@ PrefixPolyline(const std::vector<Vec3> &route_odom, const double distance_m,
               .tolerance_m = std::max(0.25 * resolution_m, 0.1),
           },
       .yaw_rad = sample.tangent_yaw_rad,
-      .yaw_tolerance_rad = std::numbers::pi / 4.0,
+      .yaw_tolerance_rad = tangent_yaw_tolerance_rad,
   };
   if (sample.is_route_end && input.goal_map.yaw_rad.has_value()) {
     const auto transformed =
@@ -541,8 +556,7 @@ LocalFrontierResult BuildLocalFrontiers(const PlannerInput &input,
                    "LOCAL_MAP_COVERAGE_INSUFFICIENT", corridor_half_width);
   }
 
-  const std::size_t attempt_count =
-      std::min(input.config.local_frontier.maximum_attempts, covered.size());
+  const std::size_t attempt_count = covered.size();
   LocalFrontierResult result{
       .status = LocalFrontierStatus::kReady,
       .corridor_half_width_m = corridor_half_width,

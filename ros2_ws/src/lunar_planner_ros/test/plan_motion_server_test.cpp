@@ -492,6 +492,24 @@ TEST_F(PlanMotionServerTest, ConfigureFailsWhenAnyRequiredTimeLimitIsMissing) {
   node.reset();
 }
 
+TEST_F(PlanMotionServerTest, ConfigureRejectsRetiredGlobalSearchParameters) {
+  auto options = ValidOptions();
+  options.parameter_overrides().emplace_back(
+      "global_search.maximum_expanded_states", 128);
+  options.parameter_overrides().emplace_back(
+      "hopper.maximum_graph_nodes", 64);
+  auto node = std::make_shared<PlanMotionServer>(
+      options, DefaultDependencies());
+
+  const auto state = node->configure();
+
+  EXPECT_EQ(state.id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_EQ(
+      node->last_diagnostic_reason_for_testing(),
+      "PLANNER_CONFIGURE_FAILED");
+  node.reset();
+}
+
 TEST_F(PlanMotionServerTest, ConfiguresAndActivatesWithExplicitSnapshotPolicy) {
   auto node = std::make_shared<PlanMotionServer>(
       ValidOptions(), DefaultDependencies());

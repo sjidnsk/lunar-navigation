@@ -82,6 +82,7 @@ TEST(GlobalRoutePlanner, KeepsWheelFootprintClearOfGlobalObstacles) {
   capability.footprint_xy_m = {
       {-0.9, -0.9}, {0.9, -0.9}, {0.9, 0.9}, {-0.9, 0.9}};
   capability.minimum_clearance_m = 0.0;
+  input.config.global_search.maximum_preview_points = 2U;
   input.goal_map.target = PointGoal{
       .position_m = {10.5, 4.5, 0.0},
       .tolerance_m = 0.2,
@@ -92,6 +93,9 @@ TEST(GlobalRoutePlanner, KeepsWheelFootprintClearOfGlobalObstacles) {
 
   ASSERT_TRUE(result.ok());
   ASSERT_GT(result.route->poses_map.size(), 2U);
+  EXPECT_NE(
+      result.reason_code,
+      std::string{"GLOBAL_SEARCH_"} + "RESOURCE_LIMIT");
   EXPECT_TRUE(std::ranges::all_of(
       result.route->raw_cells, [](const shared::GridCell cell) {
         const double center_x = static_cast<double>(cell.x) + 0.5;
