@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -22,6 +23,12 @@ struct SnapshotStoreView final {
   std::vector<geometry_msgs::msg::TransformStamped> transforms;
 };
 
+struct SnapshotContentGenerations final {
+  std::uint64_t global_map{};
+  std::uint64_t local_map{};
+  std::uint64_t map_from_odom{};
+};
+
 class SnapshotStore final {
  public:
   explicit SnapshotStore(std::size_t maximum_transform_samples = 256U);
@@ -34,12 +41,21 @@ class SnapshotStore final {
   void UpdateTransforms(const tf2_msgs::msg::TFMessage& message);
   void ClearTransforms();
 
+  [[nodiscard]] SnapshotContentGenerations ResolveContentGenerations(
+      std::uint64_t global_map_identity,
+      std::uint64_t local_map_identity,
+      std::uint64_t map_from_odom_identity);
+
   [[nodiscard]] SnapshotStoreView Capture() const;
 
  private:
   std::size_t maximum_transform_samples_;
   mutable std::mutex mutex_;
   SnapshotStoreView view_;
+  std::optional<std::uint64_t> global_map_identity_;
+  std::optional<std::uint64_t> local_map_identity_;
+  std::optional<std::uint64_t> map_from_odom_identity_;
+  SnapshotContentGenerations generations_;
 };
 
 }  // namespace lunar::planning::ros

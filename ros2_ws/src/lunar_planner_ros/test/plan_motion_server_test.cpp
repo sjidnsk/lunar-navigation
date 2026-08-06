@@ -20,11 +20,13 @@
 #include <gtest/gtest.h>
 #include <lifecycle_msgs/msg/state.hpp>
 #include <lunar_navigation_msgs/msg/exploration_task.hpp>
+#include <lunar_navigation_msgs/msg/motion_execution_feedback.hpp>
 #include <lunar_planning_msgs/action/plan_motion.hpp>
 #include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/create_client.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include "test_fixtures.hpp"
 
@@ -77,6 +79,67 @@ LoadedCapabilities WheelCapabilities() {
       .mesh_paths = {},
       .observation = {},
       .platform = test::MakeWheeledCapability(),
+  };
+}
+
+lunar::planning::HopperCapability MakeHopperCapability();
+
+LoadedCapabilities HopperCapabilities() {
+  return LoadedCapabilities{
+      .platform_id = "test-hopper",
+      .capability_version = "test-v1",
+      .base_frame_id = "base_link",
+      .reference_point = {},
+      .actuator_profile_id = {},
+      .maximum_obstacle_height_m = std::nullopt,
+      .source_motion_primitive_ids = {},
+      .urdf_path = {},
+      .mesh_paths = {},
+      .observation = {},
+      .platform = MakeHopperCapability(),
+  };
+}
+
+lunar::planning::PlannerOutput WheelReferenceOutput(
+    const lunar::planning::PlannerInput& input,
+    std::shared_ptr<const lunar::planning::RouteContinuation> continuation) {
+  return lunar::planning::PlannerOutput{
+      .outcome = lunar::planning::PlanningOutcome::kNewReferenceAvailable,
+      .directive = lunar::planning::ExecutionDirective::kActivateNewReference,
+      .reason_code = "WHEEL_REFERENCE_AVAILABLE",
+      .reference = lunar::planning::MotionReference{
+          .plan_id = "wheel/rolling-1",
+          .platform_type = lunar::planning::PlatformType::kWheeled,
+          .input_time = input.state_time,
+          .preview = lunar::planning::GlobalRoutePreview{
+              .poses_map = {
+                  lunar::planning::Pose3{
+                      .position_m = {10.5, 0.5, 0.2},
+                      .orientation = {},
+                  },
+                  lunar::planning::Pose3{
+                      .position_m = {12.0, 0.5, 0.2},
+                      .orientation = {},
+                  },
+              },
+          },
+          .data = lunar::planning::TrajectoryReference{
+              .semantics =
+                  lunar::planning::TrajectorySemantics::kWheeledBase,
+              .points = {
+                  lunar::planning::TrajectoryPoint{
+                      .time_from_start = 100ms,
+                      .pose = {
+                          .position_m = {0.5, 0.5, 0.2},
+                          .orientation = {},
+                      },
+                      .velocity = {},
+                  },
+              },
+          },
+      },
+      .diagnostics = {},
+      .continuation = std::move(continuation),
   };
 }
 
@@ -168,12 +231,23 @@ class RunningSystem final {
         lunar_navigation_msgs::msg::ExplorationTask>(
         "/mission/exploration_task",
         rclcpp::QoS{1}.reliable().transient_local());
+    execution_feedback_publisher = client_node->create_publisher<
+        lunar_navigation_msgs::msg::MotionExecutionFeedback>(
+        "/execution/motion_feedback", rclcpp::QoS{10}.reliable());
     diagnostics_subscription = client_node->create_subscription<
         diagnostic_msgs::msg::DiagnosticArray>(
         "/diagnostics", rclcpp::QoS{10}.reliable(),
         [this](const diagnostic_msgs::msg::DiagnosticArray::SharedPtr message) {
           std::scoped_lock lock{diagnostics_mutex};
           diagnostics.push_back(*message);
+        });
+    marker_subscription = client_node->create_subscription<
+        visualization_msgs::msg::MarkerArray>(
+        "/planning/certified_route_markers",
+        rclcpp::QoS{1}.reliable().transient_local(),
+        [this](const visualization_msgs::msg::MarkerArray::SharedPtr message) {
+          std::scoped_lock lock{marker_mutex};
+          marker_arrays.push_back(*message);
         });
     action_client = rclcpp_action::create_client<Action>(
         client_node, "/plan_motion");
@@ -286,6 +360,37 @@ class RunningSystem final {
     return future.get();
   }
 
+  void PublishExecutionFeedback(
+      const std::string& plan_id,
+      const std::string& segment_id,
+      const std::uint8_t platform_type,
+      const std::uint8_t state,
+      const std::uint64_t sequence = 1U) {
+    ASSERT_TRUE(WaitFor([&] {
+      return execution_feedback_publisher->get_subscription_count() > 0U;
+    }));
+    lunar_navigation_msgs::msg::MotionExecutionFeedback message;
+    message.header.frame_id = "base_link";
+    message.header.stamp = server->now();
+    message.sequence = sequence;
+    message.platform_type = platform_type;
+    message.plan_id = plan_id;
+    message.segment_id = segment_id;
+    message.state = state;
+    execution_feedback_publisher->publish(message);
+  }
+
+  [[nodiscard]] bool SawMarker(
+      const std::string& marker_namespace,
+      const std::int32_t action) const {
+    std::scoped_lock lock{marker_mutex};
+    return std::ranges::any_of(marker_arrays, [&](const auto& array) {
+      return std::ranges::any_of(array.markers, [&](const auto& marker) {
+        return marker.ns == marker_namespace && marker.action == action;
+      });
+    });
+  }
+
   [[nodiscard]] bool SawDiagnostic(const std::string& reason) const {
     std::scoped_lock lock{diagnostics_mutex};
     return std::ranges::any_of(diagnostics, [&](const auto& array) {
@@ -334,11 +439,18 @@ class RunningSystem final {
   rclcpp::Publisher<
       lunar_navigation_msgs::msg::ExplorationTask>::SharedPtr
       mission_publisher;
+  rclcpp::Publisher<
+      lunar_navigation_msgs::msg::MotionExecutionFeedback>::SharedPtr
+      execution_feedback_publisher;
   rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
       diagnostics_subscription;
+  rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr
+      marker_subscription;
   builtin_interfaces::msg::Time last_stamp;
   mutable std::mutex diagnostics_mutex;
   std::vector<diagnostic_msgs::msg::DiagnosticArray> diagnostics;
+  mutable std::mutex marker_mutex;
+  std::vector<visualization_msgs::msg::MarkerArray> marker_arrays;
 
  private:
   static std::string UniqueName() {
@@ -600,6 +712,232 @@ TEST_F(PlanMotionServerTest, PublishesStableLocalTrajectoryEvidence) {
       0.125);
 }
 
+TEST_F(
+    PlanMotionServerTest,
+    PassesValidatedExecutionFeedbackAndContinuationToSameGoalRequest) {
+  auto owner = std::make_shared<int>(42);
+  std::shared_ptr<const lunar::planning::RouteContinuation> continuation(
+      owner,
+      reinterpret_cast<const lunar::planning::RouteContinuation*>(owner.get()));
+  std::atomic<int> calls{0};
+  std::mutex capture_mutex;
+  std::optional<lunar::planning::ExecutionContext> previous_execution;
+  const lunar::planning::RouteContinuation* received_continuation = nullptr;
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [&](const lunar::planning::PlannerInput& input) {
+        if (calls.fetch_add(1) == 0) {
+          return WheelReferenceOutput(input, continuation);
+        }
+        {
+          std::scoped_lock lock{capture_mutex};
+          previous_execution = input.previous_execution;
+          received_continuation = input.continuation.get();
+        }
+        return NoRouteOutput("ROLLING_REQUEST_OBSERVED");
+      },
+      .preloaded_capabilities = WheelCapabilities(),
+  }};
+  system.PublishInputs();
+  const auto first = system.SendGoal(system.Goal("rolling-first"));
+  ASSERT_NE(first, nullptr);
+  ASSERT_EQ(system.Result(first).code, rclcpp_action::ResultCode::SUCCEEDED);
+
+  using Feedback = lunar_navigation_msgs::msg::MotionExecutionFeedback;
+  system.PublishExecutionFeedback(
+      "wheel/rolling-1", "wheel/rolling-1", Feedback::WHEELED,
+      Feedback::EXECUTING);
+  std::this_thread::sleep_for(30ms);
+
+  const auto second = system.SendGoal(system.Goal("rolling-second"));
+  ASSERT_NE(second, nullptr);
+  ASSERT_EQ(system.Result(second).code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_EQ(calls.load(), 2);
+  std::scoped_lock lock{capture_mutex};
+  ASSERT_TRUE(previous_execution.has_value());
+  const auto* ground = std::get_if<lunar::planning::GroundExecutionContext>(
+      &*previous_execution);
+  ASSERT_NE(ground, nullptr);
+  EXPECT_EQ(ground->active_plan_id, "wheel/rolling-1");
+  EXPECT_EQ(ground->active_segment_id, "wheel/rolling-1");
+  EXPECT_EQ(received_continuation, continuation.get());
+}
+
+TEST_F(PlanMotionServerTest, HoldsSameGoalContinuationUntilFeedbackIsFresh) {
+  auto owner = std::make_shared<int>(9);
+  std::shared_ptr<const lunar::planning::RouteContinuation> continuation(
+      owner,
+      reinterpret_cast<const lunar::planning::RouteContinuation*>(owner.get()));
+  std::atomic<int> calls{0};
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [&](const lunar::planning::PlannerInput& input) {
+        if (calls.fetch_add(1) == 0) {
+          return WheelReferenceOutput(input, continuation);
+        }
+        return NoRouteOutput("FRESH_FEEDBACK_OBSERVED");
+      },
+      .preloaded_capabilities = WheelCapabilities(),
+  }};
+  system.PublishInputs();
+  const auto first = system.SendGoal(system.Goal("feedback-gate-first"));
+  ASSERT_NE(first, nullptr);
+  ASSERT_EQ(system.Result(first).code, rclcpp_action::ResultCode::SUCCEEDED);
+
+  const auto held = system.SendGoal(system.Goal("feedback-gate-held"));
+  ASSERT_NE(held, nullptr);
+  const auto held_result = system.Result(held);
+  ASSERT_EQ(held_result.code, rclcpp_action::ResultCode::SUCCEEDED);
+  EXPECT_EQ(held_result.result->planning_outcome, Action::Result::STALE_INPUT);
+  EXPECT_EQ(
+      held_result.result->execution_directive, Action::Result::HOLD_POSITION);
+  EXPECT_EQ(
+      held_result.result->reason_code,
+      "EXECUTION_FEEDBACK_MISSING_OR_STALE");
+  EXPECT_EQ(calls.load(), 1);
+
+  using Feedback = lunar_navigation_msgs::msg::MotionExecutionFeedback;
+  system.PublishExecutionFeedback(
+      "wheel/rolling-1", "wheel/rolling-1", Feedback::WHEELED,
+      Feedback::EXECUTING);
+  std::this_thread::sleep_for(30ms);
+  const auto resumed = system.SendGoal(system.Goal("feedback-gate-resumed"));
+  ASSERT_NE(resumed, nullptr);
+  EXPECT_EQ(system.Result(resumed).result->reason_code, "FRESH_FEEDBACK_OBSERVED");
+  EXPECT_EQ(calls.load(), 2);
+}
+
+TEST_F(PlanMotionServerTest, ClearsContinuationBeforePlanningAChangedTarget) {
+  auto owner = std::make_shared<int>(7);
+  std::shared_ptr<const lunar::planning::RouteContinuation> continuation(
+      owner,
+      reinterpret_cast<const lunar::planning::RouteContinuation*>(owner.get()));
+  std::atomic<int> calls{0};
+  const lunar::planning::RouteContinuation* received_continuation = nullptr;
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [&](const lunar::planning::PlannerInput& input) {
+        if (calls.fetch_add(1) == 0) {
+          return WheelReferenceOutput(input, continuation);
+        }
+        received_continuation = input.continuation.get();
+        return NoRouteOutput("CHANGED_TARGET_OBSERVED");
+      },
+      .preloaded_capabilities = WheelCapabilities(),
+  }};
+  system.PublishInputs();
+  const auto first = system.SendGoal(system.Goal("target-first"));
+  ASSERT_NE(first, nullptr);
+  ASSERT_EQ(system.Result(first).code, rclcpp_action::ResultCode::SUCCEEDED);
+
+  auto changed_goal = system.Goal("target-changed");
+  changed_goal.goal.point.x += 1.0;
+  const auto second = system.SendGoal(changed_goal);
+  ASSERT_NE(second, nullptr);
+  ASSERT_EQ(system.Result(second).code, rclcpp_action::ResultCode::SUCCEEDED);
+  EXPECT_EQ(calls.load(), 2);
+  EXPECT_EQ(received_continuation, nullptr);
+}
+
+TEST_F(
+    PlanMotionServerTest,
+    PublishesCertifiedHopperMarkersAndDeletesOwnedMarkersOnDeactivate) {
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [](const lunar::planning::PlannerInput& input) {
+        auto output = lunar::planning::PlannerOutput{
+            .outcome =
+                lunar::planning::PlanningOutcome::kNewReferenceAvailable,
+            .directive =
+                lunar::planning::ExecutionDirective::kActivateNewReference,
+            .reason_code = "HOPPER_ROUTE_AVAILABLE",
+            .reference = lunar::planning::MotionReference{
+                .plan_id = "hopper/marker-plan",
+                .platform_type = lunar::planning::PlatformType::kHopper,
+                .input_time = input.state_time,
+                .preview = lunar::planning::GlobalRoutePreview{
+                    .poses_map = {
+                        lunar::planning::Pose3{
+                            .position_m = {10.5, 0.5, 0.2},
+                            .orientation = {},
+                        },
+                        lunar::planning::Pose3{
+                            .position_m = {12.0, 0.5, 0.2},
+                            .orientation = {},
+                        },
+                    },
+                },
+                .data = lunar::planning::HopReference{
+                    .segments = {
+                        lunar::planning::HopSegment{
+                            .segment_id = "hop-marker-1",
+                            .launch_pose = {},
+                            .landing_region_boundary_m = {
+                                {1.0, -0.5, 0.0},
+                                {2.0, -0.5, 0.0},
+                                {2.0, 0.5, 0.0},
+                                {1.0, 0.5, 0.0},
+                            },
+                            .flight_time = 2s,
+                            .launch_velocity_mps = {1.0, 0.0, 2.0},
+                            .flight_tube_radius_m = 0.2,
+                        },
+                    },
+                },
+            },
+            .diagnostics = {},
+        };
+        for (std::size_t index = 0U; index < 2U; ++index) {
+          const double x = 10.5 + 2.0 * static_cast<double>(index);
+          output.certified_hops.push_back(
+              lunar::planning::CertifiedHopPreview{
+                  .segment_id = "hop-marker-" + std::to_string(index + 1U),
+                  .launch_pose_map = {
+                      .position_m = {x, 0.5, 0.2},
+                      .orientation = {},
+                  },
+                  .landing_pose_map = {
+                      .position_m = {x + 2.0, 0.5, 0.2},
+                      .orientation = {},
+                  },
+                  .launch_velocity_mps = {1.0, 0.0, 2.0},
+                  .flight_time = 2s,
+                  .flight_tube_radius_m = 0.2,
+                  .landing_region_map = {
+                      {x + 1.5, 0.0, 0.0},
+                      {x + 2.5, 0.0, 0.0},
+                      {x + 2.5, 1.0, 0.0},
+                      {x + 1.5, 1.0, 0.0},
+                  },
+                  .promotion_region_map = {
+                      {x + 1.7, 0.2, 0.0},
+                      {x + 2.3, 0.2, 0.0},
+                      {x + 2.3, 0.8, 0.0},
+                      {x + 1.7, 0.8, 0.0},
+                  },
+              });
+        }
+        return output;
+      },
+      .preloaded_capabilities = HopperCapabilities(),
+  }};
+  system.PublishInputs();
+  const auto goal = system.SendGoal(system.Goal("hopper-markers"));
+  ASSERT_NE(goal, nullptr);
+  ASSERT_EQ(system.Result(goal).code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_TRUE(WaitFor([&] {
+    return system.SawMarker(
+        "certified_hop_promotion_region",
+        visualization_msgs::msg::Marker::ADD);
+  }));
+
+  ASSERT_EQ(
+      system.server->deactivate().id(),
+      lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  EXPECT_TRUE(WaitFor([&] {
+    return system.SawMarker(
+        "certified_hop_arc", visualization_msgs::msg::Marker::DELETE);
+  }));
+  EXPECT_FALSE(system.SawMarker(
+      "certified_hop_arc", visualization_msgs::msg::Marker::DELETEALL));
+}
+
 TEST_F(PlanMotionServerTest, RejectsSecondGoalAndSerializesExplicitReplacement) {
   struct PlannerState final {
     std::atomic<int> calls{0};
@@ -718,19 +1056,6 @@ TEST_F(PlanMotionServerTest, RejectsOldRevisionAndPausingCancelsUncommittedWork)
 }
 
 TEST_F(PlanMotionServerTest, LocksNewGoalsAfterActivatingHopperReference) {
-  LoadedCapabilities hopper_capabilities{
-      .platform_id = "test-hopper",
-      .capability_version = "test-v1",
-      .base_frame_id = "base_link",
-      .reference_point = {},
-      .actuator_profile_id = {},
-      .maximum_obstacle_height_m = std::nullopt,
-      .source_motion_primitive_ids = {},
-      .urdf_path = {},
-      .mesh_paths = {},
-      .observation = {},
-      .platform = MakeHopperCapability(),
-  };
   RunningSystem system{PlanMotionServerDependencies{
       .planner = [](const lunar::planning::PlannerInput& input) {
         lunar::planning::HopReference hops{
@@ -772,7 +1097,7 @@ TEST_F(PlanMotionServerTest, LocksNewGoalsAfterActivatingHopperReference) {
             .diagnostics = {},
         };
       },
-      .preloaded_capabilities = std::move(hopper_capabilities),
+      .preloaded_capabilities = HopperCapabilities(),
   }};
   system.PublishInputs();
   const auto first = system.SendGoal(system.Goal("hop"));

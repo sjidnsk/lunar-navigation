@@ -15,6 +15,7 @@
 #include <stop_token>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -25,6 +26,7 @@
 #include <lifecycle_msgs/msg/state.hpp>
 #include <lunar_navigation_msgs/msg/exploration_task.hpp>
 #include <lunar_navigation_msgs/msg/localization_status.hpp>
+#include <lunar_navigation_msgs/msg/motion_execution_feedback.hpp>
 #include <lunar_planning_msgs/action/plan_motion.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/callback_group.hpp>
@@ -34,10 +36,13 @@
 #include <rclcpp_action/server.hpp>
 #include <rclcpp_action/server_goal_handle.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include "lunar_planner_core/planner.hpp"
+#include "lunar_planner_ros/execution_feedback_tracker.hpp"
 #include "lunar_planner_ros/message_conversion.hpp"
 #include "lunar_planner_ros/reference_guard.hpp"
+#include "lunar_planner_ros/route_marker_publisher.hpp"
 #include "lunar_planner_ros/snapshot_builder.hpp"
 #include "lunar_planner_ros/snapshot_store.hpp"
 
@@ -176,16 +181,77 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
   return joined;
 }
 
+[[nodiscard]] std::string GoalIdentity(
+    const lunar::planning::GoalRegion& goal) {
+  std::ostringstream stream;
+  stream.imbue(std::locale::classic());
+  stream << std::setprecision(std::numeric_limits<double>::max_digits10)
+         << goal.goal_id << '|';
+  std::visit(
+      [&stream](const auto& target) {
+        using Target = std::decay_t<decltype(target)>;
+        if constexpr (std::is_same_v<Target, lunar::planning::PointGoal>) {
+          stream << "point|" << target.position_m.x << '|'
+                 << target.position_m.y << '|' << target.position_m.z << '|'
+                 << target.tolerance_m;
+        } else {
+          stream << "region|" << target.normal_tolerance_m << '|'
+                 << target.boundary_m.size();
+          for (const auto& point : target.boundary_m) {
+            stream << '|' << point.x << '|' << point.y << '|' << point.z;
+          }
+        }
+      },
+      goal.target);
+  stream << "|yaw|";
+  if (goal.yaw_rad.has_value()) {
+    stream << *goal.yaw_rad;
+  } else {
+    stream << "none";
+  }
+  stream << '|' << goal.yaw_tolerance_rad;
+  return stream.str();
+}
+
+[[nodiscard]] bool FeedbackStateAllowsRolling(
+    const lunar::planning::PlatformType platform,
+    const std::optional<lunar::planning::ExecutionContext>& context) noexcept {
+  if (!context.has_value()) {
+    return false;
+  }
+  if (platform == lunar::planning::PlatformType::kHopper) {
+    return std::holds_alternative<lunar::planning::HopperExecutionContext>(
+        *context);
+  }
+  const auto* ground =
+      std::get_if<lunar::planning::GroundExecutionContext>(&*context);
+  return ground != nullptr &&
+      (ground->state == lunar::planning::GroundExecutionState::kExecuting ||
+       ground->state == lunar::planning::GroundExecutionState::kHolding);
+}
+
 }  // namespace
 
 struct PlanMotionServer::Impl final {
   struct PendingGoal final {
     std::string request_id;
+    std::string mission_id;
     std::string frame_id;
     rclcpp::Time stamp;
     lunar::planning::GoalRegion goal;
     std::uint64_t mission_revision{};
     bool replace_active_request{};
+  };
+
+  struct CachedRoute final {
+    std::shared_ptr<const lunar::planning::RouteContinuation> continuation;
+    std::string route_id;
+    std::string mission_id;
+    std::uint64_t mission_revision{};
+    std::string platform_id;
+    std::string capability_version;
+    std::uint64_t global_map_generation{};
+    std::string goal_identity;
   };
 
   PlanMotionServer& node;
@@ -206,9 +272,14 @@ struct PlanMotionServer::Impl final {
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr tf_sub;
   rclcpp::Subscription<
       lunar_navigation_msgs::msg::ExplorationTask>::SharedPtr mission_sub;
+  rclcpp::Subscription<
+      lunar_navigation_msgs::msg::MotionExecutionFeedback>::SharedPtr
+      execution_feedback_sub;
   rclcpp_action::Server<Action>::SharedPtr action_server;
   rclcpp_lifecycle::LifecyclePublisher<
       diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_publisher;
+  rclcpp_lifecycle::LifecyclePublisher<
+      visualization_msgs::msg::MarkerArray>::SharedPtr route_marker_publisher;
 
   mutable std::mutex state_mutex;
   mutable std::mutex diagnostic_mutex;
@@ -221,6 +292,11 @@ struct PlanMotionServer::Impl final {
   std::unique_ptr<ReferenceGuard> reference_guard;
   std::optional<lunar_navigation_msgs::msg::ExplorationTask> mission;
   std::optional<PendingGoal> pending_goal;
+  std::optional<CachedRoute> cached_route;
+  std::chrono::nanoseconds execution_feedback_max_age{1s};
+  ExecutionFeedbackTracker execution_feedback_tracker;
+  RouteMarkerPublisher route_markers;
+  std::mutex route_marker_mutex;
   std::shared_ptr<GoalHandle> active_goal;
   std::unique_ptr<std::jthread> worker;
   bool worker_running{};
@@ -256,6 +332,10 @@ struct PlanMotionServer::Impl final {
     diagnostics_publisher =
         node.create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
             "/diagnostics", rclcpp::QoS{10}.reliable());
+    route_marker_publisher =
+        node.create_publisher<visualization_msgs::msg::MarkerArray>(
+            "/planning/certified_route_markers",
+            rclcpp::QoS{1}.reliable().transient_local());
     action_server = rclcpp_action::create_server<Action>(
         node.get_node_base_interface(),
         node.get_node_clock_interface(),
@@ -291,6 +371,7 @@ struct PlanMotionServer::Impl final {
     }
     node.declare_parameter<double>("degraded_pose_covariance_limit", 0.5);
     node.declare_parameter<double>("degraded_twist_covariance_limit", 0.5);
+    node.declare_parameter<double>("execution_feedback_max_age", 1.0);
     node.declare_parameter<std::int64_t>("maximum_transform_samples", 256);
     node.declare_parameter<double>("base_resolution_m", 0.2);
     node.declare_parameter<std::int64_t>("maximum_global_level", 4);
@@ -411,6 +492,8 @@ struct PlanMotionServer::Impl final {
       StopAndJoinWorker("NODE_RECONFIGURED");
       ResetSubscriptions();
       const SnapshotPolicy policy = ReadPolicy();
+      const auto feedback_max_age =
+          RequiredDuration("execution_feedback_max_age");
       lunar::planning::PlannerConfig planner_config = ReadPlannerConfig();
       LoadedCapabilities loaded = LoadCapabilities();
       const auto transform_samples =
@@ -422,7 +505,8 @@ struct PlanMotionServer::Impl final {
       auto new_store = std::make_shared<SnapshotStore>(
           static_cast<std::size_t>(transform_samples));
       auto new_builder = std::make_unique<SnapshotBuilder>(
-          new_store, policy, loaded.platform, std::move(planner_config));
+          new_store, policy, loaded.platform, std::move(planner_config),
+          loaded.base_frame_id);
       auto new_guard = std::make_unique<ReferenceGuard>(
           GuardLimits(loaded.platform));
 
@@ -434,9 +518,16 @@ struct PlanMotionServer::Impl final {
         reference_guard = std::move(new_guard);
         mission.reset();
         pending_goal.reset();
+        cached_route.reset();
+        execution_feedback_max_age = feedback_max_age;
         configured = true;
         active = false;
         faulted = false;
+      }
+      execution_feedback_tracker.Clear();
+      {
+        std::scoped_lock marker_lock{route_marker_mutex};
+        (void)route_markers.DeleteOwned(node.now());
       }
       {
         std::scoped_lock lock{diagnostic_mutex};
@@ -460,7 +551,9 @@ struct PlanMotionServer::Impl final {
         reference_guard.reset();
         mission.reset();
         pending_goal.reset();
+        cached_route.reset();
       }
+      execution_feedback_tracker.Clear();
       ResetSubscriptions();
       PublishDiagnostic(
           diagnostic_msgs::msg::DiagnosticStatus::ERROR,
@@ -478,6 +571,7 @@ struct PlanMotionServer::Impl final {
       active = true;
     }
     diagnostics_publisher->on_activate();
+    route_marker_publisher->on_activate();
     PublishDiagnostic(
         diagnostic_msgs::msg::DiagnosticStatus::OK,
         "PLANNER_ACTIVE");
@@ -489,6 +583,7 @@ struct PlanMotionServer::Impl final {
       std::scoped_lock lock{state_mutex};
       active = false;
       pending_goal.reset();
+      cached_route.reset();
     }
     StopAndJoinWorker(reason);
     {
@@ -497,11 +592,16 @@ struct PlanMotionServer::Impl final {
         reference_guard->Reset();
       }
     }
+    execution_feedback_tracker.Clear();
+    PublishOwnedMarkerDeletes();
     PublishDiagnostic(
         diagnostic_msgs::msg::DiagnosticStatus::WARN,
         reason);
     if (diagnostics_publisher->is_activated()) {
       diagnostics_publisher->on_deactivate();
+    }
+    if (route_marker_publisher->is_activated()) {
+      route_marker_publisher->on_deactivate();
     }
     return CallbackReturn::SUCCESS;
   }
@@ -517,6 +617,7 @@ struct PlanMotionServer::Impl final {
     capabilities.reset();
     reference_guard.reset();
     mission.reset();
+    cached_route.reset();
     return CallbackReturn::SUCCESS;
   }
 
@@ -527,6 +628,7 @@ struct PlanMotionServer::Impl final {
       configured = false;
       faulted = true;
       pending_goal.reset();
+      cached_route.reset();
     }
     RequestWorkerStop("PLANNER_INTERNAL_INVARIANT");
     ResetSubscriptions();
@@ -541,8 +643,13 @@ struct PlanMotionServer::Impl final {
       reference_guard.reset();
       mission.reset();
     }
+    execution_feedback_tracker.Clear();
+    PublishOwnedMarkerDeletes();
     if (diagnostics_publisher->is_activated()) {
       diagnostics_publisher->on_deactivate();
+    }
+    if (route_marker_publisher->is_activated()) {
+      route_marker_publisher->on_deactivate();
     }
     return CallbackReturn::SUCCESS;
   }
@@ -613,6 +720,21 @@ struct PlanMotionServer::Impl final {
               OnMission(*message);
             },
             mission_options);
+
+    execution_feedback_sub = node.create_subscription<
+        lunar_navigation_msgs::msg::MotionExecutionFeedback>(
+        "/execution/motion_feedback", rclcpp::QoS{10}.reliable(),
+        [this](const lunar_navigation_msgs::msg::MotionExecutionFeedback::
+                   SharedPtr message) {
+          const FeedbackAcceptResult accepted =
+              execution_feedback_tracker.Accept(*message, node.now());
+          if (!accepted.ok()) {
+            PublishDiagnostic(
+                diagnostic_msgs::msg::DiagnosticStatus::WARN,
+                accepted.reason_code);
+          }
+        },
+        mission_options);
   }
 
   void ResetSubscriptions() {
@@ -622,6 +744,7 @@ struct PlanMotionServer::Impl final {
     localization_status_sub.reset();
     tf_sub.reset();
     mission_sub.reset();
+    execution_feedback_sub.reset();
   }
 
   [[nodiscard]] std::shared_ptr<SnapshotStore> Store() const {
@@ -675,6 +798,7 @@ struct PlanMotionServer::Impl final {
       return;
     }
     bool stop = false;
+    bool invalidate_route = false;
     {
       std::scoped_lock lock{state_mutex};
       if (mission && mission->mission_id == message.mission_id &&
@@ -684,6 +808,16 @@ struct PlanMotionServer::Impl final {
       mission = message;
       stop = message.desired_state == message.PAUSED ||
           message.desired_state == message.CANCELED;
+      if (cached_route &&
+          (cached_route->mission_id != message.mission_id ||
+           cached_route->mission_revision != message.revision || stop)) {
+        cached_route.reset();
+        invalidate_route = true;
+      }
+    }
+    if (invalidate_route) {
+      execution_feedback_tracker.Clear();
+      PublishOwnedMarkerDeletes();
     }
     if (stop) {
       RequestStopIfReplaceable(
@@ -783,6 +917,7 @@ struct PlanMotionServer::Impl final {
 
     pending_goal = PendingGoal{
         .request_id = goal->request_id,
+        .mission_id = goal->mission_id,
         .frame_id = goal->goal.header.frame_id,
         .stamp = *stamp,
         .goal = *converted.goal,
@@ -872,12 +1007,21 @@ struct PlanMotionServer::Impl final {
 
     SnapshotBuilder* builder = nullptr;
     lunar::planning::PlatformType configured_platform{};
+    std::string platform_id;
+    std::string capability_version;
+    std::shared_ptr<const lunar::planning::RouteContinuation>
+        continuation_candidate;
     {
       std::scoped_lock lock{state_mutex};
       builder = snapshot_builder.get();
       if (capabilities) {
         configured_platform =
             lunar::planning::CapabilityPlatform(capabilities->platform);
+        platform_id = capabilities->platform_id;
+        capability_version = capabilities->capability_version;
+      }
+      if (cached_route) {
+        continuation_candidate = cached_route->continuation;
       }
     }
     if (!builder) {
@@ -886,15 +1030,22 @@ struct PlanMotionServer::Impl final {
           "SNAPSHOT_BUILDER_MISSING");
       return;
     }
+    const auto previous_execution =
+        execution_feedback_tracker.context(node.now());
 
     PublishFeedback(goal_handle, Action::Feedback::BUILDING_SNAPSHOT, started);
-    const SnapshotBuildResult snapshot = builder->Freeze(
+    SnapshotBuildResult snapshot = builder->Freeze(
         GoalRequest{
             .request_id = request.request_id,
+            .mission_id = request.mission_id,
+            .mission_revision = request.mission_revision,
+            .platform_id = std::move(platform_id),
+            .capability_version = std::move(capability_version),
             .frame_id = request.frame_id,
             .stamp = request.stamp,
             .goal = std::move(request.goal),
-            .previous_execution = std::nullopt,
+            .previous_execution = previous_execution,
+            .continuation = continuation_candidate,
             .stop_token = stop_token,
         },
         node.now());
@@ -903,9 +1054,52 @@ struct PlanMotionServer::Impl final {
       return;
     }
     if (!snapshot.ok()) {
+      ClearRollingRoute();
       CompleteSnapshotFailure(
           goal_handle, request.mission_revision, generation,
           snapshot.error, started);
+      return;
+    }
+
+    bool cache_matches = false;
+    std::string route_id;
+    {
+      std::scoped_lock lock{state_mutex};
+      if (cached_route && cached_route->continuation != nullptr) {
+        cache_matches =
+            cached_route->mission_id == snapshot.input->mission_id &&
+            cached_route->mission_revision ==
+                snapshot.input->mission_revision &&
+            cached_route->platform_id == snapshot.input->platform_id &&
+            cached_route->capability_version ==
+                snapshot.input->capability_version &&
+            cached_route->global_map_generation ==
+                snapshot.input->global_map_generation &&
+            cached_route->goal_identity ==
+                GoalIdentity(snapshot.input->goal_map);
+        if (!cache_matches) {
+          cached_route.reset();
+        } else {
+          route_id = cached_route->route_id;
+        }
+      }
+      snapshot.input->continuation =
+          cache_matches ? snapshot.input->continuation : nullptr;
+    }
+    if (!cache_matches && continuation_candidate != nullptr) {
+      PublishOwnedMarkerDeletes();
+    }
+    if (cache_matches && !previous_execution.has_value()) {
+      CompleteExecutionFeedbackFailure(
+          goal_handle, request.mission_revision, generation,
+          "EXECUTION_FEEDBACK_MISSING_OR_STALE", started);
+      return;
+    }
+    if (cache_matches &&
+        !FeedbackStateAllowsRolling(configured_platform, previous_execution)) {
+      CompleteExecutionFeedbackFailure(
+          goal_handle, request.mission_revision, generation,
+          "EXECUTION_FEEDBACK_STATE_NOT_READY", started);
       return;
     }
 
@@ -961,6 +1155,48 @@ struct PlanMotionServer::Impl final {
       }
     }
 
+    const bool successful_reference =
+        converted.result->has_reference && output.continuation != nullptr &&
+        (output.outcome ==
+             lunar::planning::PlanningOutcome::kNewReferenceAvailable ||
+         output.outcome ==
+             lunar::planning::PlanningOutcome::kSafeFrontierReferenceAvailable);
+    if (successful_reference) {
+      if (route_id.empty()) {
+        route_id = "route/" + request.request_id;
+      }
+      {
+        std::scoped_lock lock{state_mutex};
+        cached_route = CachedRoute{
+            .continuation = output.continuation,
+            .route_id = route_id,
+            .mission_id = snapshot.input->mission_id,
+            .mission_revision = snapshot.input->mission_revision,
+            .platform_id = snapshot.input->platform_id,
+            .capability_version = snapshot.input->capability_version,
+            .global_map_generation = snapshot.input->global_map_generation,
+            .goal_identity = GoalIdentity(snapshot.input->goal_map),
+        };
+      }
+    } else {
+      ClearRollingRoute();
+    }
+    if (route_id.empty()) {
+      route_id = "route/" + request.request_id;
+    }
+
+    if (converted.result->has_reference && output.reference.has_value() &&
+        converted.result->execution_directive ==
+            Action::Result::ACTIVATE_NEW_REFERENCE) {
+      SetExpectedExecution(*output.reference);
+    }
+    if (!output.certified_hops.empty() && output.reference.has_value()) {
+      PublishCertifiedRouteMarkers(
+          output, *snapshot.input, route_id);
+    } else {
+      PublishOwnedMarkerDeletes();
+    }
+
     auto result = std::make_shared<Action::Result>(std::move(*converted.result));
     PublishDiagnostic(
         diagnostic_msgs::msg::DiagnosticStatus::OK,
@@ -971,6 +1207,121 @@ struct PlanMotionServer::Impl final {
     } catch (const std::exception& error) {
       RCLCPP_ERROR(
           node.get_logger(), "failed to succeed action goal: %s", error.what());
+    }
+    FinishWorker(generation, goal_handle);
+  }
+
+  void SetExpectedExecution(
+      const lunar::planning::MotionReference& reference) {
+    std::string base_frame_id;
+    std::chrono::nanoseconds maximum_age;
+    {
+      std::scoped_lock lock{state_mutex};
+      if (!capabilities) {
+        execution_feedback_tracker.Clear();
+        return;
+      }
+      base_frame_id = capabilities->base_frame_id;
+      maximum_age = execution_feedback_max_age;
+    }
+    std::string segment_id = reference.plan_id;
+    if (reference.platform_type == lunar::planning::PlatformType::kHopper) {
+      const auto* hops = std::get_if<lunar::planning::HopReference>(
+          &reference.data);
+      if (hops == nullptr || hops->segments.size() != 1U ||
+          hops->segments.front().segment_id.empty()) {
+        execution_feedback_tracker.Clear();
+        return;
+      }
+      segment_id = hops->segments.front().segment_id;
+    }
+    execution_feedback_tracker.SetExpected(ExpectedExecution{
+        .platform_type = reference.platform_type,
+        .base_frame_id = std::move(base_frame_id),
+        .plan_id = reference.plan_id,
+        .segment_id = std::move(segment_id),
+        .maximum_age = maximum_age,
+    });
+  }
+
+  void PublishCertifiedRouteMarkers(
+      const lunar::planning::PlannerOutput& output,
+      const lunar::planning::PlannerInput& input,
+      const std::string& route_id) {
+    if (!route_marker_publisher || !route_marker_publisher->is_activated() ||
+        !output.reference.has_value()) {
+      return;
+    }
+    std::string authorized_segment;
+    if (const auto* hops = std::get_if<lunar::planning::HopReference>(
+            &output.reference->data);
+        hops != nullptr && !hops->segments.empty()) {
+      authorized_segment = hops->segments.front().segment_id;
+    }
+    lunar::planning::Vec3 gravity{};
+    if (const auto* hopper =
+            std::get_if<lunar::planning::HopperCapability>(&input.capability)) {
+      gravity = hopper->gravity_mps2;
+    }
+    std::scoped_lock marker_lock{route_marker_mutex};
+    auto markers = route_markers.Replace(
+        output.certified_hops,
+        RouteMarkerContext{
+            .stamp = node.now(),
+            .route_id = route_id,
+            .reference_plan_id = output.reference->plan_id,
+            .authorized_segment_id = std::move(authorized_segment),
+            .map_from_odom = input.world.map_from_odom,
+            .gravity_mps2 = gravity,
+        });
+    if (!markers.markers.empty()) {
+      route_marker_publisher->publish(markers);
+    }
+  }
+
+  void PublishOwnedMarkerDeletes() {
+    std::scoped_lock marker_lock{route_marker_mutex};
+    auto markers = route_markers.DeleteOwned(node.now());
+    if (!markers.markers.empty() && route_marker_publisher &&
+        route_marker_publisher->is_activated()) {
+      route_marker_publisher->publish(markers);
+    }
+  }
+
+  void ClearRollingRoute() {
+    {
+      std::scoped_lock lock{state_mutex};
+      cached_route.reset();
+    }
+    PublishOwnedMarkerDeletes();
+  }
+
+  void CompleteExecutionFeedbackFailure(
+      const std::shared_ptr<GoalHandle>& goal_handle,
+      const std::uint64_t mission_revision,
+      const std::uint64_t generation,
+      std::string reason_code,
+      const std::chrono::steady_clock::time_point started) {
+    auto result = std::make_shared<Action::Result>();
+    result->planning_outcome = Action::Result::STALE_INPUT;
+    result->execution_directive = Action::Result::HOLD_POSITION;
+    result->reason_code = std::move(reason_code);
+    result->mission_revision = mission_revision;
+    result->has_reference = false;
+    result->reference = lunar_planning_msgs::msg::MotionReference{};
+    PopulateLatestStamps(*result);
+    result->diagnostics.planner_name = "execution_feedback_tracker";
+    result->diagnostics.elapsed_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started).count();
+    PublishDiagnostic(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN,
+        result->reason_code);
+    try {
+      goal_handle->succeed(result);
+    } catch (const std::exception& error) {
+      RCLCPP_ERROR(
+          node.get_logger(), "failed to return feedback hold result: %s",
+          error.what());
     }
     FinishWorker(generation, goal_handle);
   }

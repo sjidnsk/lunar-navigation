@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -35,6 +36,29 @@ TEST(GridMapAdapter, UnwrapsCircularBufferIntoTypedRowMajorLayers) {
       std::get<std::vector<std::uint32_t>>(
           result.map->layers.at("observation_count").values),
       (std::vector<std::uint32_t>(test::kMapWidth * test::kMapHeight, 2U)));
+}
+
+TEST(GridMapAdapter, FingerprintsCanonicalPlanningContentWithoutHeaderStamp) {
+  auto first = test::MakeGridMap("odom", 0U, 0U);
+  auto same_content = test::MakeGridMap("odom", 1U, 1U);
+  same_content.header.stamp = test::Stamp(11'000'000'000LL);
+  std::reverse(same_content.layers.begin(), same_content.layers.end());
+  std::reverse(same_content.data.begin(), same_content.data.end());
+
+  const auto first_result = GridMapAdapter{}.Adapt(first, "odom");
+  const auto same_result = GridMapAdapter{}.Adapt(same_content, "odom");
+  ASSERT_TRUE(first_result.ok());
+  ASSERT_TRUE(same_result.ok());
+  EXPECT_NE(first_result.content_identity, 0U);
+  EXPECT_EQ(first_result.content_identity, same_result.content_identity);
+
+  auto changed = same_content;
+  const auto obstacle = test::LayerIndex(changed, "obstacle");
+  ASSERT_LT(obstacle, changed.data.size());
+  changed.data[obstacle].data.front() = 1.0F;
+  const auto changed_result = GridMapAdapter{}.Adapt(changed, "odom");
+  ASSERT_TRUE(changed_result.ok());
+  EXPECT_NE(changed_result.content_identity, first_result.content_identity);
 }
 
 TEST(GridMapAdapter, RejectsDuplicateAndMissingRequiredLayers) {

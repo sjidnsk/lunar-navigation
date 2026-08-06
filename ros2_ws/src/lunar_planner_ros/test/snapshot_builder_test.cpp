@@ -32,6 +32,10 @@ SnapshotPolicy ValidPolicy() {
 GoalRequest ValidGoal() {
   return GoalRequest{
       .request_id = "request-1",
+      .mission_id = "mission-1",
+      .mission_revision = 7U,
+      .platform_id = "test-rover",
+      .capability_version = "test-v1",
       .frame_id = "map",
       .stamp = rclcpp::Time{10'000'000'000LL},
       .goal =
@@ -45,6 +49,7 @@ GoalRequest ValidGoal() {
               .yaw_tolerance_rad = 0.0,
           },
       .previous_execution = std::nullopt,
+      .continuation = nullptr,
       .stop_token = {},
   };
 }
@@ -60,7 +65,7 @@ std::shared_ptr<SnapshotStore> ValidStore() {
 }
 
 SnapshotBuilder MakeBuilder(
-    std::shared_ptr<const SnapshotStore> store,
+    std::shared_ptr<SnapshotStore> store,
     const SnapshotPolicy policy = ValidPolicy(),
     lunar::planning::PlannerConfig config = {}) {
   config.global_map.base_resolution_m = 1.0;
@@ -97,6 +102,74 @@ TEST(SnapshotBuilder, FreezesExactlyOneValidMapFrameInput) {
   EXPECT_EQ(
       result.input->config.maximum_input_skew,
       ValidPolicy().max_pairwise_skew);
+  EXPECT_EQ(result.input->mission_id, "mission-1");
+  EXPECT_EQ(result.input->mission_revision, 7U);
+  EXPECT_EQ(result.input->platform_id, "test-rover");
+  EXPECT_EQ(result.input->capability_version, "test-v1");
+  EXPECT_GT(result.input->global_map_generation, 0U);
+  EXPECT_GT(result.input->local_map_generation, 0U);
+  EXPECT_GT(result.input->map_from_odom_generation, 0U);
+}
+
+TEST(SnapshotBuilder, KeepsContentGenerationsStableAndPropagatesUncertainty) {
+  auto store = ValidStore();
+  auto odometry = test::MakeOdometry();
+  odometry.pose.covariance[0] = 0.04;
+  odometry.pose.covariance[7] = 0.09;
+  odometry.pose.covariance[14] = 0.01;
+  odometry.twist.covariance[0] = 0.01;
+  odometry.twist.covariance[7] = 0.16;
+  odometry.twist.covariance[14] = 0.04;
+  store->UpdateOdometry(odometry);
+  auto builder = MakeBuilder(store);
+
+  const auto first = builder.Freeze(
+      ValidGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(first.ok());
+  EXPECT_NEAR(first.input->position_uncertainty_m, 0.9, 1.0e-12);
+  EXPECT_NEAR(first.input->velocity_uncertainty_mps, 1.2, 1.0e-12);
+
+  auto repeated_global = test::MakeGridMap("map");
+  repeated_global.header.stamp = test::Stamp(10'050'000'000LL);
+  auto repeated_local = test::MakeGridMap("odom");
+  repeated_local.header.stamp = test::Stamp(10'050'000'000LL);
+  store->UpdateGlobalMap(repeated_global);
+  store->UpdateLocalMap(repeated_local);
+  const auto repeated = builder.Freeze(
+      ValidGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(repeated.ok());
+  EXPECT_EQ(
+      repeated.input->global_map_generation,
+      first.input->global_map_generation);
+  EXPECT_EQ(
+      repeated.input->local_map_generation,
+      first.input->local_map_generation);
+
+  auto changed_global = repeated_global;
+  const auto obstacle = test::LayerIndex(changed_global, "obstacle");
+  ASSERT_LT(obstacle, changed_global.data.size());
+  changed_global.data[obstacle].data[0] = 1.0F;
+  store->UpdateGlobalMap(changed_global);
+  const auto changed = builder.Freeze(
+      ValidGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(changed.ok());
+  EXPECT_GT(
+      changed.input->global_map_generation,
+      repeated.input->global_map_generation);
+  EXPECT_EQ(
+      changed.input->local_map_generation,
+      repeated.input->local_map_generation);
+
+  store->ClearTransforms();
+  auto transforms = test::MakeTransforms();
+  transforms.transforms.front().transform.translation.x += 0.01;
+  store->UpdateTransforms(transforms);
+  const auto moved_tf = builder.Freeze(
+      ValidGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(moved_tf.ok());
+  EXPECT_GT(
+      moved_tf.input->map_from_odom_generation,
+      changed.input->map_from_odom_generation);
 }
 
 TEST(SnapshotBuilder, TransformsOdomPointPolygonAndYawIntoMap) {

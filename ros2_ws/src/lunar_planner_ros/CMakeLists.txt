@@ -15,17 +15,21 @@ find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(tf2_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(urdf REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
   src/capability_loader.cpp
+  src/execution_feedback_tracker.cpp
   src/grid_map_adapter.cpp
   src/message_conversion.cpp
   src/plan_motion_server.cpp
   src/reference_guard.cpp
+  src/route_marker_publisher.cpp
   src/snapshot_builder.cpp
   src/snapshot_store.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
@@ -47,9 +51,11 @@ ament_target_dependencies(${PROJECT_NAME}
   rclcpp
   rclcpp_action
   rclcpp_lifecycle
+  std_msgs
   tf2_msgs
   trajectory_msgs
-  urdf)
+  urdf
+  visualization_msgs)
 target_link_libraries(${PROJECT_NAME} yaml-cpp)
 
 add_executable(lunar_planner_node src/main.cpp)
@@ -83,9 +89,11 @@ ament_export_dependencies(
   rclcpp
   rclcpp_action
   rclcpp_lifecycle
+  std_msgs
   tf2_msgs
   trajectory_msgs
   urdf
+  visualization_msgs
   yaml-cpp)
 ament_export_include_directories(include)
 
@@ -102,6 +110,16 @@ if(BUILD_TESTING)
     test/snapshot_builder_test.cpp)
   target_include_directories(lunar_planner_ros_snapshot_builder_test PRIVATE test)
   target_link_libraries(lunar_planner_ros_snapshot_builder_test ${PROJECT_NAME})
+
+  ament_add_gtest(lunar_planner_ros_execution_feedback_tracker_test
+    test/execution_feedback_tracker_test.cpp)
+  target_link_libraries(
+    lunar_planner_ros_execution_feedback_tracker_test ${PROJECT_NAME})
+
+  ament_add_gtest(lunar_planner_ros_route_marker_publisher_test
+    test/route_marker_publisher_test.cpp)
+  target_link_libraries(
+    lunar_planner_ros_route_marker_publisher_test ${PROJECT_NAME})
 
   ament_add_gtest(lunar_planner_ros_capability_loader_test
     test/capability_loader_test.cpp)

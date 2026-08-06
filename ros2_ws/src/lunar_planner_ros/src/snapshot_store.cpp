@@ -49,6 +49,28 @@ void SnapshotStore::ClearTransforms() {
   view_.transforms.clear();
 }
 
+SnapshotContentGenerations SnapshotStore::ResolveContentGenerations(
+    const std::uint64_t global_map_identity,
+    const std::uint64_t local_map_identity,
+    const std::uint64_t map_from_odom_identity) {
+  std::scoped_lock lock{mutex_};
+  const auto update = [](const std::uint64_t identity,
+                         std::optional<std::uint64_t>& previous,
+                         std::uint64_t& generation) {
+    if (!previous.has_value() || *previous != identity) {
+      previous = identity;
+      ++generation;
+    }
+  };
+  update(global_map_identity, global_map_identity_, generations_.global_map);
+  update(local_map_identity, local_map_identity_, generations_.local_map);
+  update(
+      map_from_odom_identity,
+      map_from_odom_identity_,
+      generations_.map_from_odom);
+  return generations_;
+}
+
 SnapshotStoreView SnapshotStore::Capture() const {
   std::scoped_lock lock{mutex_};
   return view_;

@@ -57,10 +57,15 @@ struct SnapshotPolicy final {
 
 struct GoalRequest final {
   std::string request_id;
+  std::string mission_id;
+  std::uint64_t mission_revision{};
+  std::string platform_id;
+  std::string capability_version;
   std::string frame_id;
   rclcpp::Time stamp;
   lunar::planning::GoalRegion goal;
   std::optional<lunar::planning::ExecutionContext> previous_execution;
+  std::shared_ptr<const lunar::planning::RouteContinuation> continuation;
   std::stop_token stop_token;
 };
 
@@ -76,20 +81,22 @@ struct SnapshotBuildResult final {
 class SnapshotBuilder final {
  public:
   SnapshotBuilder(
-      std::shared_ptr<const SnapshotStore> store,
+      std::shared_ptr<SnapshotStore> store,
       SnapshotPolicy policy,
       lunar::planning::PlatformCapability capability,
-      lunar::planning::PlannerConfig planner_config);
+      lunar::planning::PlannerConfig planner_config,
+      std::string base_frame_id = "base_link");
 
   [[nodiscard]] SnapshotBuildResult Freeze(
       const GoalRequest& request,
       rclcpp::Time now) const;
 
  private:
-  std::shared_ptr<const SnapshotStore> store_;
+  std::shared_ptr<SnapshotStore> store_;
   SnapshotPolicy policy_;
   lunar::planning::PlatformCapability capability_;
   lunar::planning::PlannerConfig planner_config_;
+  std::string base_frame_id_;
   GridMapAdapter grid_map_adapter_;
 };
 

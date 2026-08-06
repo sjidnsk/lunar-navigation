@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -163,9 +164,10 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
 }
 
 [[nodiscard]] bool IsFiniteOdometry(
-    const nav_msgs::msg::Odometry& odometry) noexcept {
+    const nav_msgs::msg::Odometry& odometry,
+    const std::string_view base_frame_id) noexcept {
   if (odometry.header.frame_id != "odom" ||
-      odometry.child_frame_id != "base_link" ||
+      odometry.child_frame_id != base_frame_id ||
       !IsFinite(odometry.pose.pose.position) ||
       !IsUnitQuaternion(odometry.pose.pose.orientation) ||
       !IsFinite(odometry.twist.twist.linear) ||
@@ -186,6 +188,63 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
     }
   }
   return true;
+}
+
+[[nodiscard]] double ThreeSigmaPosition(
+    const nav_msgs::msg::Odometry& odometry) noexcept {
+  const double maximum = std::max({
+      odometry.pose.covariance[0],
+      odometry.pose.covariance[7],
+      odometry.pose.covariance[14],
+  });
+  return 3.0 * std::sqrt(maximum);
+}
+
+[[nodiscard]] double ThreeSigmaLinearVelocity(
+    const nav_msgs::msg::Odometry& odometry) noexcept {
+  const double maximum = std::max({
+      odometry.twist.covariance[0],
+      odometry.twist.covariance[7],
+      odometry.twist.covariance[14],
+  });
+  return 3.0 * std::sqrt(maximum);
+}
+
+[[nodiscard]] std::uint64_t TransformIdentity(
+    const geometry_msgs::msg::TransformStamped& transform) noexcept {
+  std::uint64_t value = 14'695'981'039'346'656'037ULL;
+  const auto add_byte = [&value](const std::uint8_t byte) {
+    value ^= byte;
+    value *= 1'099'511'628'211ULL;
+  };
+  const auto add_u64 = [&add_byte](const std::uint64_t number) {
+    for (std::size_t index = 0U; index < sizeof(number); ++index) {
+      add_byte(static_cast<std::uint8_t>(
+          number >> static_cast<unsigned>(index * 8U)));
+    }
+  };
+  const auto add_string = [&add_byte, &add_u64](const std::string_view text) {
+    add_u64(text.size());
+    for (const unsigned char character : text) {
+      add_byte(character);
+    }
+  };
+  const auto add_double = [&add_u64](double number) {
+    if (number == 0.0) {
+      number = 0.0;
+    }
+    add_u64(std::bit_cast<std::uint64_t>(number));
+  };
+  add_string(transform.header.frame_id);
+  add_string(transform.child_frame_id);
+  add_double(transform.transform.translation.x);
+  add_double(transform.transform.translation.y);
+  add_double(transform.transform.translation.z);
+  add_double(transform.transform.rotation.w);
+  add_double(transform.transform.rotation.x);
+  add_double(transform.transform.rotation.y);
+  add_double(transform.transform.rotation.z);
+  return value == 0U ? 1U : value;
 }
 
 [[nodiscard]] bool CovarianceWithinDegradedLimits(
@@ -442,20 +501,24 @@ bool ValidateSnapshotPolicy(const SnapshotPolicy& policy) noexcept {
 }
 
 SnapshotBuilder::SnapshotBuilder(
-    std::shared_ptr<const SnapshotStore> store,
+    std::shared_ptr<SnapshotStore> store,
     SnapshotPolicy policy,
     lunar::planning::PlatformCapability capability,
-    lunar::planning::PlannerConfig planner_config)
+    lunar::planning::PlannerConfig planner_config,
+    std::string base_frame_id)
     : store_(std::move(store)),
       policy_(policy),
       capability_(std::move(capability)),
-      planner_config_(std::move(planner_config)) {}
+      planner_config_(std::move(planner_config)),
+      base_frame_id_(std::move(base_frame_id)) {}
 
 SnapshotBuildResult SnapshotBuilder::Freeze(
     const GoalRequest& request,
     const rclcpp::Time now) const {
   if (store_ == nullptr || !ValidateSnapshotPolicy(policy_) ||
-      now.nanoseconds() <= 0) {
+      now.nanoseconds() <= 0 || base_frame_id_.empty() ||
+      request.mission_id.empty() || request.mission_revision == 0U ||
+      request.platform_id.empty() || request.capability_version.empty()) {
     return Failure(
         SnapshotErrorCode::kConfigurationInvalid,
         "SNAPSHOT_CONFIGURATION_INVALID");
@@ -518,7 +581,8 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
   const auto odometry_stamp = StampNanoseconds(view.odometry->header.stamp);
   const auto localization_stamp =
       StampNanoseconds(view.localization_status->header.stamp);
-  if (!odometry_stamp.has_value() || !IsFiniteOdometry(*view.odometry)) {
+  if (!odometry_stamp.has_value() ||
+      !IsFiniteOdometry(*view.odometry, base_frame_id_)) {
     return Failure(
         SnapshotErrorCode::kInvalidOdometry, "ODOMETRY_INVALID");
   }
@@ -585,7 +649,7 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
       view.transforms, "map", "odom", *odometry_stamp,
       now_stamp, policy_);
   const auto odom_from_base = SelectTransform(
-      view.transforms, "odom", "base_link", *odometry_stamp,
+      view.transforms, "odom", base_frame_id_, *odometry_stamp,
       now_stamp, policy_);
   if (!map_from_odom.has_value() || !odom_from_base.has_value()) {
     return Failure(SnapshotErrorCode::kStaleTf, "STALE_TF");
@@ -621,8 +685,20 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
           .z = map_from_odom->transform.rotation.z,
       },
   };
+  const SnapshotContentGenerations generations =
+      store_->ResolveContentGenerations(
+          global.content_identity,
+          local.content_identity,
+          TransformIdentity(*map_from_odom));
   lunar::planning::PlannerInput input{
       .request_id = request.request_id,
+      .mission_id = request.mission_id,
+      .mission_revision = request.mission_revision,
+      .platform_id = request.platform_id,
+      .capability_version = request.capability_version,
+      .global_map_generation = generations.global_map,
+      .local_map_generation = generations.local_map,
+      .map_from_odom_generation = generations.map_from_odom,
       .state_time = lunar::planning::TimePoint{
           .nanoseconds_since_epoch = *odometry_stamp,
       },
@@ -635,6 +711,9 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
       .config = std::move(planner_config),
       .previous_execution = request.previous_execution,
       .stop_token = request.stop_token,
+      .position_uncertainty_m = ThreeSigmaPosition(*view.odometry),
+      .velocity_uncertainty_mps = ThreeSigmaLinearVelocity(*view.odometry),
+      .continuation = request.continuation,
   };
   return SnapshotBuildResult{.input = std::move(input), .error = std::nullopt};
 }

@@ -32,6 +32,7 @@ struct GridMapError final {
 struct GridMapAdaptResult final {
   std::optional<lunar::planning::GridMap> map;
   std::optional<GridMapError> error;
+  std::uint64_t content_identity{};
 
   [[nodiscard]] bool ok() const noexcept {
     return map.has_value() && !error.has_value();

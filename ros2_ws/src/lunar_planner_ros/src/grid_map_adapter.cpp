@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -10,6 +11,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -57,6 +59,52 @@ constexpr std::array<LayerRequirement, 10> kRequiredLayers{
 struct Layout final {
   bool row_major{};
   std::size_t offset{};
+};
+
+class Fingerprint final {
+ public:
+  void AddByte(const std::uint8_t value) noexcept {
+    value_ ^= value;
+    value_ *= 1'099'511'628'211ULL;
+  }
+
+  template<typename Integer>
+  void AddInteger(const Integer value) noexcept {
+    using Unsigned = std::make_unsigned_t<Integer>;
+    const Unsigned unsigned_value = static_cast<Unsigned>(value);
+    for (std::size_t index = 0U; index < sizeof(Unsigned); ++index) {
+      AddByte(static_cast<std::uint8_t>(
+          unsigned_value >> static_cast<unsigned>(index * 8U)));
+    }
+  }
+
+  void AddString(const std::string_view value) noexcept {
+    AddInteger(value.size());
+    for (const unsigned char character : value) {
+      AddByte(character);
+    }
+  }
+
+  void AddFloat(float value) noexcept {
+    if (value == 0.0F) {
+      value = 0.0F;
+    }
+    AddInteger(std::bit_cast<std::uint32_t>(value));
+  }
+
+  void AddDouble(double value) noexcept {
+    if (value == 0.0) {
+      value = 0.0;
+    }
+    AddInteger(std::bit_cast<std::uint64_t>(value));
+  }
+
+  [[nodiscard]] std::uint64_t value() const noexcept {
+    return value_ == 0U ? 1U : value_;
+  }
+
+ private:
+  std::uint64_t value_{14'695'981'039'346'656'037ULL};
 };
 
 [[nodiscard]] std::string Upper(std::string_view text) {
@@ -298,6 +346,15 @@ GridMapAdaptResult GridMapAdapter::Adapt(
       },
       .layers = {},
   };
+  Fingerprint fingerprint;
+  fingerprint.AddString("lunar-grid-map-planning-content/v1");
+  fingerprint.AddString(map.frame_id);
+  fingerprint.AddInteger(map.width);
+  fingerprint.AddInteger(map.height);
+  fingerprint.AddDouble(map.resolution_m);
+  fingerprint.AddDouble(map.origin_m.x);
+  fingerprint.AddDouble(map.origin_m.y);
+  fingerprint.AddDouble(map.origin_m.z);
 
   for (const LayerRequirement& required : kRequiredLayers) {
     const auto found = layer_indices.find(required.name);
@@ -332,11 +389,20 @@ GridMapAdaptResult GridMapAdapter::Adapt(
             std::string{required.name});
       }
     }
+    fingerprint.AddString(required.name);
+    fingerprint.AddInteger(static_cast<std::uint8_t>(required.kind));
+    for (const float value : values) {
+      fingerprint.AddFloat(value);
+    }
     map.layers.emplace(
         std::string{required.name}, ToTypedLayer(values, required.kind));
   }
 
-  return GridMapAdaptResult{.map = std::move(map), .error = std::nullopt};
+  return GridMapAdaptResult{
+      .map = std::move(map),
+      .error = std::nullopt,
+      .content_identity = fingerprint.value(),
+  };
 }
 
 }  // namespace lunar::planning::ros
