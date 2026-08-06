@@ -27,6 +27,7 @@
     "local_map_max_age",
     "odometry_max_age",
     "localization_status_max_age",
+    "propellant_state_max_age",
     "tf_max_age",
     "max_pairwise_skew"
   ],
@@ -41,6 +42,9 @@
       "$ref": "#/$defs/positive_duration"
     },
     "localization_status_max_age": {
+      "$ref": "#/$defs/positive_duration"
+    },
+    "propellant_state_max_age": {
       "$ref": "#/$defs/positive_duration"
     },
     "tf_max_age": {

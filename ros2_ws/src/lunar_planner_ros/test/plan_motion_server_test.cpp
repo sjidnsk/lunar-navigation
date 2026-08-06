@@ -20,6 +20,7 @@
 #include <gtest/gtest.h>
 #include <lifecycle_msgs/msg/state.hpp>
 #include <lunar_navigation_msgs/msg/exploration_task.hpp>
+#include <lunar_navigation_msgs/msg/hopper_propellant_state.hpp>
 #include <lunar_navigation_msgs/msg/motion_execution_feedback.hpp>
 #include <lunar_planning_msgs/action/plan_motion.hpp>
 #include <rclcpp/executors/multi_threaded_executor.hpp>
@@ -184,6 +185,7 @@ rclcpp::NodeOptions ValidOptions() {
       rclcpp::Parameter{"local_map_max_age", 5.0},
       rclcpp::Parameter{"odometry_max_age", 5.0},
       rclcpp::Parameter{"localization_status_max_age", 5.0},
+      rclcpp::Parameter{"propellant_state_max_age", 0.5},
       rclcpp::Parameter{"tf_max_age", 5.0},
       rclcpp::Parameter{"max_pairwise_skew", 0.2},
       rclcpp::Parameter{"base_resolution_m", 1.0},
@@ -234,6 +236,9 @@ class RunningSystem final {
     execution_feedback_publisher = client_node->create_publisher<
         lunar_navigation_msgs::msg::MotionExecutionFeedback>(
         "/execution/motion_feedback", rclcpp::QoS{10}.reliable());
+    propellant_publisher = client_node->create_publisher<
+        lunar_navigation_msgs::msg::HopperPropellantState>(
+        "/platform/hopper_propellant_state", rclcpp::QoS{10}.reliable());
     diagnostics_subscription = client_node->create_subscription<
         diagnostic_msgs::msg::DiagnosticArray>(
         "/diagnostics", rclcpp::QoS{10}.reliable(),
@@ -282,7 +287,8 @@ class RunningSystem final {
   void PublishInputs(
       const std::uint64_t revision = 7U,
       const std::uint8_t desired_state =
-          lunar_navigation_msgs::msg::ExplorationTask::ACTIVE) {
+          lunar_navigation_msgs::msg::ExplorationTask::ACTIVE,
+      const bool publish_propellant = true) {
     const rclcpp::Time now = server->now();
     last_stamp = now;
     const std::int64_t nanoseconds = now.nanoseconds();
@@ -306,6 +312,13 @@ class RunningSystem final {
     mission.roi_min_y_m = -10.0;
     mission.roi_max_x_m = 10.0;
     mission.roi_max_y_m = 10.0;
+    lunar_navigation_msgs::msg::HopperPropellantState propellant;
+    propellant.header.frame_id = "base_link";
+    propellant.header.stamp = last_stamp;
+    propellant.platform_id = "test-hopper";
+    propellant.capability_version = "test-v1";
+    propellant.total_mass_kg = 20.0;
+    propellant.remaining_usable_fuel_mass_kg = 0.2;
 
     for (std::size_t attempt = 0U; attempt < 3U; ++attempt) {
       global_map_publisher->publish(global_map);
@@ -314,6 +327,9 @@ class RunningSystem final {
       localization_publisher->publish(localization);
       tf_publisher->publish(transforms);
       mission_publisher->publish(mission);
+      if (publish_propellant) {
+        propellant_publisher->publish(propellant);
+      }
       std::this_thread::sleep_for(20ms);
     }
     ASSERT_TRUE(WaitFor([&] {
@@ -340,7 +356,7 @@ class RunningSystem final {
     goal.goal.goal_type = goal.goal.POINT;
     goal.goal.point.x = 12.0;
     goal.goal.point.y = 0.5;
-    goal.goal.position_tolerance_m = 0.25;
+    goal.goal.position_tolerance_m = 0.0;
     goal.goal.yaw_tolerance_rad = 0.1;
     return goal;
   }
@@ -442,6 +458,9 @@ class RunningSystem final {
   rclcpp::Publisher<
       lunar_navigation_msgs::msg::MotionExecutionFeedback>::SharedPtr
       execution_feedback_publisher;
+  rclcpp::Publisher<
+      lunar_navigation_msgs::msg::HopperPropellantState>::SharedPtr
+      propellant_publisher;
   rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
       diagnostics_subscription;
   rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr
@@ -473,10 +492,10 @@ class PlanMotionServerTest : public ::testing::Test {
   }
 };
 
-TEST_F(PlanMotionServerTest, UsesFiveDistinctMutuallyExclusiveCallbackGroups) {
+TEST_F(PlanMotionServerTest, UsesSixDistinctMutuallyExclusiveCallbackGroups) {
   auto node = std::make_shared<PlanMotionServer>(
       ValidOptions(), DefaultDependencies());
-  EXPECT_EQ(node->callback_group_count_for_testing(), 5U);
+  EXPECT_EQ(node->callback_group_count_for_testing(), 6U);
   EXPECT_TRUE(node->callback_groups_mutually_exclusive_for_testing());
   node.reset();
 }
@@ -582,6 +601,55 @@ TEST_F(PlanMotionServerTest, ReturnsNoRouteAsSucceededActionWithEmptyReference) 
     return std::ranges::find(phases, Action::Feedback::SEARCHING) !=
         phases.end();
   }));
+}
+
+TEST_F(PlanMotionServerTest, PassesFrozenPropellantStateOnlyForHopper) {
+  std::mutex observed_mutex;
+  std::optional<lunar::planning::HopperPropellantState> observed;
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [&](const lunar::planning::PlannerInput& input) {
+        std::scoped_lock lock{observed_mutex};
+        observed = input.hopper_propellant;
+        return NoRouteOutput("HOPPER_INPUT_OBSERVED");
+      },
+      .preloaded_capabilities = HopperCapabilities(),
+  }};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("hopper-propellant"));
+  ASSERT_NE(handle, nullptr);
+  const auto result = system.Result(handle);
+
+  ASSERT_EQ(result.code, rclcpp_action::ResultCode::SUCCEEDED);
+  std::scoped_lock lock{observed_mutex};
+  ASSERT_TRUE(observed.has_value());
+  EXPECT_EQ(observed->platform_id, "test-hopper");
+  EXPECT_EQ(observed->capability_version, "test-v1");
+  EXPECT_DOUBLE_EQ(observed->total_mass_kg, 20.0);
+  EXPECT_DOUBLE_EQ(observed->remaining_usable_fuel_mass_kg, 0.2);
+}
+
+TEST_F(PlanMotionServerTest, RejectsHopperBeforeCoreWhenPropellantIsMissing) {
+  std::atomic<int> planner_calls{0};
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [&](const lunar::planning::PlannerInput&) {
+        planner_calls.fetch_add(1);
+        return NoRouteOutput();
+      },
+      .preloaded_capabilities = HopperCapabilities(),
+  }};
+  system.PublishInputs(
+      7U, lunar_navigation_msgs::msg::ExplorationTask::ACTIVE, false);
+
+  const auto handle = system.SendGoal(system.Goal("hopper-missing-fuel"));
+  ASSERT_NE(handle, nullptr);
+  const auto result = system.Result(handle);
+
+  ASSERT_EQ(result.code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_NE(result.result, nullptr);
+  EXPECT_EQ(result.result->planning_outcome, Action::Result::INVALID_REQUEST);
+  EXPECT_EQ(result.result->reason_code, "HOPPER_PROPELLANT_STATE_INVALID");
+  EXPECT_EQ(planner_calls.load(), 0);
 }
 
 TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {

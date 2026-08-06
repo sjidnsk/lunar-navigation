@@ -130,7 +130,7 @@ TEST(MessageConversion, RejectsMalformedGoalMessages) {
   EXPECT_EQ(ConvertGoalMessage(message).reason_code, "GOAL_TYPE_INVALID");
   message = PointGoalMessage();
   message.position_tolerance_m = 0.0;
-  EXPECT_EQ(ConvertGoalMessage(message).reason_code, "GOAL_TOLERANCE_INVALID");
+  EXPECT_TRUE(ConvertGoalMessage(message).ok());
 }
 
 TEST(MessageConversion, EmitsDefaultReferenceWhenPlannerHasNone) {

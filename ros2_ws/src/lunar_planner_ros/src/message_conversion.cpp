@@ -361,7 +361,7 @@ GoalMessageConversion ConvertGoalMessage(
   }
   if (!Finite(message.position_tolerance_m) ||
       (message.goal_type == message.POINT &&
-       message.position_tolerance_m <= 0.0) ||
+       message.position_tolerance_m < 0.0) ||
       (message.goal_type == message.PLANAR_REGION &&
        message.position_tolerance_m < 0.0) ||
       !Finite(message.yaw_tolerance_rad) || message.yaw_tolerance_rad < 0.0 ||

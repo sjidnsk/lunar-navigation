@@ -397,7 +397,7 @@ SelectTransform(
         using Target = std::decay_t<decltype(target)>;
         if constexpr (std::is_same_v<Target, lunar::planning::PointGoal>) {
           if (!FiniteCoreVector(target.position_m) ||
-              !IsFinite(target.tolerance_m) || target.tolerance_m <= 0.0) {
+              !IsFinite(target.tolerance_m) || target.tolerance_m < 0.0) {
             return false;
           }
           if (transform) {
@@ -492,6 +492,7 @@ bool ValidateSnapshotPolicy(const SnapshotPolicy& policy) noexcept {
       policy.local_map_max_age.count() > 0 &&
       policy.odometry_max_age.count() > 0 &&
       policy.localization_status_max_age.count() > 0 &&
+      policy.propellant_state_max_age.count() > 0 &&
       policy.tf_max_age.count() > 0 &&
       policy.max_pairwise_skew.count() > 0 &&
       std::isfinite(policy.degraded_pose_covariance_limit) &&
@@ -524,6 +525,9 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
         "SNAPSHOT_CONFIGURATION_INVALID");
   }
   const SnapshotStoreView view = store_->Capture();
+  const bool hopper =
+      lunar::planning::CapabilityPlatform(capability_) ==
+      lunar::planning::PlatformType::kHopper;
   if (!view.global_map.has_value()) {
     return Failure(SnapshotErrorCode::kMissingGlobalMap, "GLOBAL_MAP_MISSING");
   }
@@ -594,6 +598,48 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
   }
 
   const std::int64_t now_stamp = now.nanoseconds();
+  std::optional<lunar::planning::HopperPropellantState> hopper_propellant;
+  std::optional<std::int64_t> propellant_stamp;
+  if (hopper) {
+    if (!view.hopper_propellant_state.has_value()) {
+      return Failure(
+          SnapshotErrorCode::kInvalidHopperPropellant,
+          "HOPPER_PROPELLANT_STATE_INVALID", "state is missing");
+    }
+    const auto& propellant = *view.hopper_propellant_state;
+    propellant_stamp = StampNanoseconds(propellant.header.stamp);
+    if (!propellant_stamp.has_value() || *propellant_stamp > now_stamp ||
+        propellant.header.frame_id != base_frame_id_ ||
+        propellant.platform_id != request.platform_id ||
+        propellant.capability_version != request.capability_version ||
+        !std::isfinite(propellant.total_mass_kg) ||
+        !std::isfinite(propellant.remaining_usable_fuel_mass_kg) ||
+        propellant.total_mass_kg <= 0.0 ||
+        propellant.remaining_usable_fuel_mass_kg <= 0.0 ||
+        propellant.remaining_usable_fuel_mass_kg >=
+            propellant.total_mass_kg) {
+      return Failure(
+          SnapshotErrorCode::kInvalidHopperPropellant,
+          "HOPPER_PROPELLANT_STATE_INVALID");
+    }
+    if (!Fresh(
+            now_stamp, *propellant_stamp,
+            policy_.propellant_state_max_age)) {
+      return Failure(
+          SnapshotErrorCode::kStaleHopperPropellant,
+          "HOPPER_PROPELLANT_STATE_STALE");
+    }
+    hopper_propellant = lunar::planning::HopperPropellantState{
+        .stamp = lunar::planning::TimePoint{
+            .nanoseconds_since_epoch = *propellant_stamp,
+        },
+        .platform_id = propellant.platform_id,
+        .capability_version = propellant.capability_version,
+        .total_mass_kg = propellant.total_mass_kg,
+        .remaining_usable_fuel_mass_kg =
+            propellant.remaining_usable_fuel_mass_kg,
+    };
+  }
   if (!Fresh(
           now_stamp, world.global_map.stamp.nanoseconds_since_epoch,
           policy_.global_map_max_age)) {
@@ -626,6 +672,15 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
       std::ranges::minmax_element(input_stamps);
   if (*maximum_stamp - *minimum_stamp > policy_.max_pairwise_skew.count()) {
     return Failure(SnapshotErrorCode::kInputSkew, "INPUT_TIME_SKEW");
+  }
+  if (propellant_stamp.has_value() &&
+      std::ranges::any_of(input_stamps, [&](const std::int64_t stamp) {
+        return std::abs(stamp - *propellant_stamp) >
+            policy_.max_pairwise_skew.count();
+      })) {
+    return Failure(
+        SnapshotErrorCode::kStaleHopperPropellant,
+        "HOPPER_PROPELLANT_STATE_STALE", "input time skew");
   }
 
   const std::uint8_t localization_state = view.localization_status->status;
@@ -663,6 +718,14 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
   const auto goal = ConvertGoal(request, map_from_odom->transform);
   if (!goal.has_value()) {
     return Failure(SnapshotErrorCode::kInvalidGoal, "GOAL_INVALID");
+  }
+  if (hopper) {
+    const auto* point = std::get_if<lunar::planning::PointGoal>(&goal->target);
+    if (point == nullptr || point->tolerance_m != 0.0 ||
+        goal->yaw_rad.has_value()) {
+      return Failure(
+          SnapshotErrorCode::kInvalidGoal, "HOPPER_GOAL_INVALID");
+    }
   }
 
   lunar::planning::PlannerConfig planner_config = planner_config_;
@@ -705,6 +768,7 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
       .current_state = ToPlatformState(
           *view.odometry,
           lunar::planning::CapabilityPlatform(capability_)),
+      .hopper_propellant = std::move(hopper_propellant),
       .goal_map = *goal,
       .world = std::move(world),
       .capability = capability_,

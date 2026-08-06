@@ -7,6 +7,7 @@
 #include <variant>
 
 #include <gtest/gtest.h>
+#include <lunar_navigation_msgs/msg/hopper_propellant_state.hpp>
 
 #include "lunar_planner_ros/snapshot_builder.hpp"
 #include "test_fixtures.hpp"
@@ -22,10 +23,38 @@ SnapshotPolicy ValidPolicy() {
       .local_map_max_age = 500ms,
       .odometry_max_age = 500ms,
       .localization_status_max_age = 500ms,
+      .propellant_state_max_age = 500ms,
       .tf_max_age = 500ms,
       .max_pairwise_skew = 200ms,
       .degraded_pose_covariance_limit = 0.5,
       .degraded_twist_covariance_limit = 0.5,
+  };
+}
+
+lunar_navigation_msgs::msg::HopperPropellantState ValidPropellant(
+    const std::int64_t nanoseconds = 10'000'000'000LL) {
+  lunar_navigation_msgs::msg::HopperPropellantState message;
+  message.header.stamp = test::Stamp(nanoseconds);
+  message.header.frame_id = "base_link";
+  message.platform_id = "test-hopper";
+  message.capability_version = "test-v1";
+  message.total_mass_kg = 20.0;
+  message.remaining_usable_fuel_mass_kg = 0.2;
+  return message;
+}
+
+lunar::planning::HopperCapability HopperCapability() {
+  return lunar::planning::HopperCapability{
+      .specific_impulse_s = 301.0,
+      .landing_support_radius_m = 0.45,
+      .flight_collision_radius_m = 0.55,
+      .maximum_landing_plane_residual_m = 0.05,
+      .landing_lateral_margin_m = 0.2,
+      .flight_map_margin_m = 0.2,
+      .reachability_delta_v_margin_ratio = 0.1,
+      .standard_gravity_mps2 = 9.80665,
+      .gravity_mps2 = {0.0, 0.0, -1.62},
+      .maximum_landing_slope_rad = 0.17453292519943295,
   };
 }
 
@@ -74,6 +103,29 @@ SnapshotBuilder MakeBuilder(
       std::move(config)};
 }
 
+SnapshotBuilder MakeHopperBuilder(
+    std::shared_ptr<SnapshotStore> store,
+    const SnapshotPolicy policy = ValidPolicy()) {
+  lunar::planning::PlannerConfig config;
+  config.global_map.base_resolution_m = 1.0;
+  return SnapshotBuilder{
+      std::move(store), policy, HopperCapability(), std::move(config),
+      "base_link"};
+}
+
+GoalRequest ValidHopperGoal() {
+  GoalRequest request = ValidGoal();
+  request.platform_id = "test-hopper";
+  request.capability_version = "test-v1";
+  request.goal.target = lunar::planning::PointGoal{
+      .position_m = {12.0, 0.5, 0.0},
+      .tolerance_m = 0.0,
+  };
+  request.goal.yaw_rad.reset();
+  request.goal.yaw_tolerance_rad = 0.0;
+  return request;
+}
+
 void SetResolution(
     grid_map_msgs::msg::GridMap& map, const double resolution_m) {
   map.info.resolution = resolution_m;
@@ -109,6 +161,129 @@ TEST(SnapshotBuilder, FreezesExactlyOneValidMapFrameInput) {
   EXPECT_GT(result.input->global_map_generation, 0U);
   EXPECT_GT(result.input->local_map_generation, 0U);
   EXPECT_GT(result.input->map_from_odom_generation, 0U);
+}
+
+TEST(SnapshotBuilder, BindsValidHopperPropellantIntoImmutableInput) {
+  auto store = ValidStore();
+  store->UpdateHopperPropellantState(ValidPropellant());
+
+  const auto result = MakeHopperBuilder(store).Freeze(
+      ValidHopperGoal(), rclcpp::Time{10'100'000'000LL});
+
+  ASSERT_TRUE(result.ok())
+      << (result.error ? result.error->reason_code : "");
+  ASSERT_TRUE(result.input->hopper_propellant.has_value());
+  EXPECT_EQ(result.input->hopper_propellant->stamp.nanoseconds_since_epoch,
+            10'000'000'000LL);
+  EXPECT_EQ(result.input->hopper_propellant->platform_id, "test-hopper");
+  EXPECT_EQ(result.input->hopper_propellant->capability_version, "test-v1");
+  EXPECT_DOUBLE_EQ(result.input->hopper_propellant->total_mass_kg, 20.0);
+  EXPECT_DOUBLE_EQ(
+      result.input->hopper_propellant->remaining_usable_fuel_mass_kg, 0.2);
+}
+
+TEST(SnapshotBuilder, GroundPlatformsDoNotRequirePropellantState) {
+  const auto result = MakeBuilder(ValidStore()).Freeze(
+      ValidGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(result.ok());
+  EXPECT_FALSE(result.input->hopper_propellant.has_value());
+}
+
+TEST(SnapshotBuilder, RejectsMissingStaleFutureAndSkewedHopperPropellant) {
+  const auto missing = MakeHopperBuilder(ValidStore()).Freeze(
+      ValidHopperGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(missing.error.has_value());
+  EXPECT_EQ(missing.error->code,
+            SnapshotErrorCode::kInvalidHopperPropellant);
+  EXPECT_EQ(missing.error->reason_code,
+            "HOPPER_PROPELLANT_STATE_INVALID");
+
+  auto stale_store = ValidStore();
+  stale_store->UpdateHopperPropellantState(
+      ValidPropellant(9'500'000'000LL));
+  const auto stale = MakeHopperBuilder(stale_store).Freeze(
+      ValidHopperGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(stale.error.has_value());
+  EXPECT_EQ(stale.error->code,
+            SnapshotErrorCode::kStaleHopperPropellant);
+  EXPECT_EQ(stale.error->reason_code,
+            "HOPPER_PROPELLANT_STATE_STALE");
+
+  auto future_store = ValidStore();
+  future_store->UpdateHopperPropellantState(
+      ValidPropellant(10'200'000'000LL));
+  const auto future = MakeHopperBuilder(future_store).Freeze(
+      ValidHopperGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(future.error.has_value());
+  EXPECT_EQ(future.error->code,
+            SnapshotErrorCode::kInvalidHopperPropellant);
+
+  auto skewed_store = ValidStore();
+  skewed_store->UpdateHopperPropellantState(
+      ValidPropellant(9'750'000'000LL));
+  const auto skewed = MakeHopperBuilder(skewed_store).Freeze(
+      ValidHopperGoal(), rclcpp::Time{10'100'000'000LL});
+  ASSERT_TRUE(skewed.error.has_value());
+  EXPECT_EQ(skewed.error->code,
+            SnapshotErrorCode::kStaleHopperPropellant);
+}
+
+TEST(SnapshotBuilder, RejectsInvalidHopperPropellantIdentityFrameAndMass) {
+  const auto evaluate = [](auto mutate) {
+    auto store = ValidStore();
+    auto message = ValidPropellant();
+    mutate(message);
+    store->UpdateHopperPropellantState(message);
+    return MakeHopperBuilder(store).Freeze(
+        ValidHopperGoal(), rclcpp::Time{10'100'000'000LL});
+  };
+  for (const auto& result : {
+           evaluate([](auto& value) {
+             value.header.stamp.sec = 0;
+             value.header.stamp.nanosec = 0U;
+           }),
+           evaluate([](auto& value) { value.header.frame_id = "odom"; }),
+           evaluate([](auto& value) { value.platform_id = "other"; }),
+           evaluate([](auto& value) { value.capability_version = "other"; }),
+           evaluate([](auto& value) { value.total_mass_kg = 0.0; }),
+           evaluate([](auto& value) {
+             value.remaining_usable_fuel_mass_kg = value.total_mass_kg;
+           }),
+       }) {
+    ASSERT_TRUE(result.error.has_value());
+    EXPECT_EQ(result.error->code,
+              SnapshotErrorCode::kInvalidHopperPropellant);
+    EXPECT_EQ(result.error->reason_code,
+              "HOPPER_PROPELLANT_STATE_INVALID");
+  }
+}
+
+TEST(SnapshotBuilder, RequiresExactPointGoalWithoutYawForHopper) {
+  const auto evaluate = [](GoalRequest request) {
+    auto store = ValidStore();
+    store->UpdateHopperPropellantState(ValidPropellant());
+    return MakeHopperBuilder(store).Freeze(
+        request, rclcpp::Time{10'100'000'000LL});
+  };
+
+  auto tolerance = ValidHopperGoal();
+  std::get<lunar::planning::PointGoal>(tolerance.goal.target).tolerance_m =
+      0.01;
+  auto yaw = ValidHopperGoal();
+  yaw.goal.yaw_rad = 0.0;
+  auto region = ValidHopperGoal();
+  region.goal.target = lunar::planning::PlanarRegionGoal{
+      .boundary_m = {{1.0, 0.0, 0.0},
+                     {2.0, 0.0, 0.0},
+                     {1.0, 1.0, 0.0}},
+      .normal_tolerance_m = 0.0,
+  };
+  for (const auto& result :
+       {evaluate(tolerance), evaluate(yaw), evaluate(region)}) {
+    ASSERT_TRUE(result.error.has_value());
+    EXPECT_EQ(result.error->code, SnapshotErrorCode::kInvalidGoal);
+    EXPECT_EQ(result.error->reason_code, "HOPPER_GOAL_INVALID");
+  }
 }
 
 TEST(SnapshotBuilder, KeepsContentGenerationsStableAndPropagatesUncertainty) {

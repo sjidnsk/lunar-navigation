@@ -32,6 +32,12 @@ void SnapshotStore::UpdateLocalizationStatus(
   view_.localization_status = message;
 }
 
+void SnapshotStore::UpdateHopperPropellantState(
+    const lunar_navigation_msgs::msg::HopperPropellantState& message) {
+  std::scoped_lock lock{mutex_};
+  view_.hopper_propellant_state = message;
+}
+
 void SnapshotStore::UpdateTransforms(const tf2_msgs::msg::TFMessage& message) {
   std::scoped_lock lock{mutex_};
   for (const auto& transform : message.transforms) {

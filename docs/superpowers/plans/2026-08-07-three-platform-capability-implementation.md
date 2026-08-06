@@ -303,11 +303,11 @@
 - Modify: `ros2_ws/src/lunar_planner_ros/src/plan_motion_server.cpp`
 - Modify: `ros2_ws/src/lunar_planner_ros/test/{snapshot_builder_test,plan_motion_server_test}.cpp`
 
-- [ ] **Step 1: Add snapshot RED tests**
+- [x] **Step 1: Add snapshot RED tests**
 
   Test missing, zero/future/older-than-0.5s, frame/platform/version mismatch, invalid mass/fuel and >0.25s skew. Verify wheel/legged do not require propellant state. Require hopper `POINT`, tolerance exactly zero, no yaw.
 
-- [ ] **Step 2: Add immutable core state**
+- [x] **Step 2: Add immutable core state**
 
   ```cpp
   struct HopperPropellantState {
@@ -321,11 +321,11 @@
 
   Add `std::optional<HopperPropellantState> hopper_propellant` to `PlannerInput`; bind it to the same frozen request.
 
-- [ ] **Step 3: Wire ROS subscription/store/freeze**
+- [x] **Step 3: Wire ROS subscription/store/freeze**
 
   Use its own mutually-exclusive callback group and reliable/volatile/depth-10 QoS. Map failures to `HOPPER_PROPELLANT_STATE_INVALID` or `HOPPER_PROPELLANT_STATE_STALE` before calling C++.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
   Commit: `feat: bind hopper propellant state to planning snapshots`
 

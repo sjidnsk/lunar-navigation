@@ -107,6 +107,14 @@ struct HopperState final {
   Twist3 velocity;
 };
 
+struct HopperPropellantState final {
+  TimePoint stamp;
+  std::string platform_id;
+  std::string capability_version;
+  double total_mass_kg{};
+  double remaining_usable_fuel_mass_kg{};
+};
+
 using PlatformState = std::variant<WheeledState, LeggedState, HopperState>;
 
 struct CertifiedHopPreview final {
@@ -133,6 +141,7 @@ struct PlannerInput final {
   std::uint64_t map_from_odom_generation{};
   TimePoint state_time;
   PlatformState current_state;
+  std::optional<HopperPropellantState> hopper_propellant;
   GoalRegion goal_map;
   WorldSnapshot world;
   PlatformCapability capability;

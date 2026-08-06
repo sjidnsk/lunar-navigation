@@ -26,6 +26,7 @@
 #include <grid_map_msgs/msg/grid_map.hpp>
 #include <lifecycle_msgs/msg/state.hpp>
 #include <lunar_navigation_msgs/msg/exploration_task.hpp>
+#include <lunar_navigation_msgs/msg/hopper_propellant_state.hpp>
 #include <lunar_navigation_msgs/msg/localization_status.hpp>
 #include <lunar_navigation_msgs/msg/motion_execution_feedback.hpp>
 #include <lunar_planning_msgs/action/plan_motion.hpp>
@@ -136,6 +137,7 @@ constexpr std::array<std::string_view, 15U> kRetiredSearchParameters{
     case SnapshotErrorCode::kStaleLocalMap:
     case SnapshotErrorCode::kStaleOdometry:
     case SnapshotErrorCode::kStaleLocalizationStatus:
+    case SnapshotErrorCode::kStaleHopperPropellant:
     case SnapshotErrorCode::kInputSkew:
     case SnapshotErrorCode::kInvalidLocalization:
     case SnapshotErrorCode::kCovarianceLimit:
@@ -145,6 +147,7 @@ constexpr std::array<std::string_view, 15U> kRetiredSearchParameters{
     case SnapshotErrorCode::kInvalidGlobalMap:
     case SnapshotErrorCode::kInvalidLocalMap:
     case SnapshotErrorCode::kInvalidOdometry:
+    case SnapshotErrorCode::kInvalidHopperPropellant:
     case SnapshotErrorCode::kInvalidGoal:
       return false;
   }
@@ -356,6 +359,7 @@ struct PlanMotionServer::Impl final {
 
   rclcpp::CallbackGroup::SharedPtr map_group;
   rclcpp::CallbackGroup::SharedPtr localization_group;
+  rclcpp::CallbackGroup::SharedPtr propellant_group;
   rclcpp::CallbackGroup::SharedPtr tf_group;
   rclcpp::CallbackGroup::SharedPtr mission_group;
   rclcpp::CallbackGroup::SharedPtr action_group;
@@ -366,6 +370,9 @@ struct PlanMotionServer::Impl final {
   rclcpp::Subscription<
       lunar_navigation_msgs::msg::LocalizationStatus>::SharedPtr
       localization_status_sub;
+  rclcpp::Subscription<
+      lunar_navigation_msgs::msg::HopperPropellantState>::SharedPtr
+      hopper_propellant_state_sub;
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr tf_sub;
   rclcpp::Subscription<
       lunar_navigation_msgs::msg::ExplorationTask>::SharedPtr mission_sub;
@@ -419,6 +426,8 @@ struct PlanMotionServer::Impl final {
         rclcpp::CallbackGroupType::MutuallyExclusive);
     localization_group = node.create_callback_group(
         rclcpp::CallbackGroupType::MutuallyExclusive);
+    propellant_group = node.create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
     tf_group = node.create_callback_group(
         rclcpp::CallbackGroupType::MutuallyExclusive);
     mission_group = node.create_callback_group(
@@ -463,7 +472,8 @@ struct PlanMotionServer::Impl final {
     for (const char* name : {
              "global_map_max_age", "local_map_max_age",
              "odometry_max_age", "localization_status_max_age",
-             "tf_max_age", "max_pairwise_skew"}) {
+             "propellant_state_max_age", "tf_max_age",
+             "max_pairwise_skew"}) {
       node.declare_parameter(name, rclcpp::ParameterType::PARAMETER_DOUBLE);
     }
     node.declare_parameter<double>("degraded_pose_covariance_limit", 0.5);
@@ -502,6 +512,8 @@ struct PlanMotionServer::Impl final {
         .odometry_max_age = RequiredDuration("odometry_max_age"),
         .localization_status_max_age =
             RequiredDuration("localization_status_max_age"),
+        .propellant_state_max_age =
+            RequiredDuration("propellant_state_max_age"),
         .tf_max_age = RequiredDuration("tf_max_age"),
         .max_pairwise_skew = RequiredDuration("max_pairwise_skew"),
         .degraded_pose_covariance_limit = pose_limit,
@@ -805,6 +817,20 @@ struct PlanMotionServer::Impl final {
             },
             localization_options);
 
+    rclcpp::SubscriptionOptions propellant_options;
+    propellant_options.callback_group = propellant_group;
+    hopper_propellant_state_sub = node.create_subscription<
+        lunar_navigation_msgs::msg::HopperPropellantState>(
+        "/platform/hopper_propellant_state", rclcpp::QoS{10}.reliable(),
+        [this](const lunar_navigation_msgs::msg::HopperPropellantState::
+                   SharedPtr message) {
+          const auto store = Store();
+          if (store) {
+            store->UpdateHopperPropellantState(*message);
+          }
+        },
+        propellant_options);
+
     rclcpp::SubscriptionOptions tf_options;
     tf_options.callback_group = tf_group;
     tf_sub = node.create_subscription<tf2_msgs::msg::TFMessage>(
@@ -851,6 +877,7 @@ struct PlanMotionServer::Impl final {
     local_map_sub.reset();
     odometry_sub.reset();
     localization_status_sub.reset();
+    hopper_propellant_state_sub.reset();
     tf_sub.reset();
     mission_sub.reset();
     execution_feedback_sub.reset();
@@ -1798,9 +1825,10 @@ struct PlanMotionServer::Impl final {
     diagnostics_publisher->publish(array);
   }
 
-  [[nodiscard]] std::array<rclcpp::CallbackGroup::SharedPtr, 5U>
+  [[nodiscard]] std::array<rclcpp::CallbackGroup::SharedPtr, 6U>
   CallbackGroups() const {
-    return {map_group, localization_group, tf_group, mission_group, action_group};
+    return {map_group, localization_group, propellant_group, tf_group,
+            mission_group, action_group};
   }
 };
 
