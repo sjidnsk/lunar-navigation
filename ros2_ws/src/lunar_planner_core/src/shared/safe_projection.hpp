@@ -15,6 +15,11 @@ namespace lunar::planning::shared {
 
 struct SafeProjectionBuildResult;
 
+struct SafeProjectionClearanceMargins final {
+  double hazard_m{};
+  double boundary_m{};
+};
+
 class SafeProjection final {
  public:
   [[nodiscard]] const std::shared_ptr<const MapSnapshot>& source_map()
@@ -34,7 +39,8 @@ class SafeProjection final {
   friend struct SafeProjectionBuildResult;
   friend SafeProjectionBuildResult BuildSafeProjection(
       std::shared_ptr<const MapSnapshot>, const PlatformCapability&,
-      const MapSafetyConfig&, std::stop_token);
+      const MapSafetyConfig&, std::stop_token,
+      SafeProjectionClearanceMargins);
 
   std::shared_ptr<const MapSnapshot> source_map_;
   PlatformType platform_type_{PlatformType::kWheeled};
@@ -61,6 +67,7 @@ struct SafeProjectionBuildResult final {
     std::shared_ptr<const MapSnapshot> map,
     const PlatformCapability& capability,
     const MapSafetyConfig& config,
-    std::stop_token stop_token);
+    std::stop_token stop_token,
+    SafeProjectionClearanceMargins clearance_margins = {});
 
 }  // namespace lunar::planning::shared

@@ -36,6 +36,7 @@ namespace {
     const MapSnapshot& map,
     const std::vector<std::uint8_t>& hazard_mask,
     std::vector<float>& clearance_m,
+    const SafeProjectionClearanceMargins clearance_margins,
     const std::stop_token stop_token) {
   using QueueEntry = std::pair<double, std::size_t>;
   std::priority_queue<
@@ -95,8 +96,12 @@ namespace {
              static_cast<double>(cell.y) - 0.5});
     const double boundary_distance_m =
         boundary_distance_cells * map.resolution_m();
+    const double hazard_clearance_m =
+        distance[index] - clearance_margins.hazard_m;
+    const double boundary_clearance_m =
+        boundary_distance_m - clearance_margins.boundary_m;
     clearance_m[index] = static_cast<float>(
-        std::min(distance[index], boundary_distance_m));
+        std::min(hazard_clearance_m, boundary_clearance_m));
   }
   return true;
 }
@@ -168,12 +173,19 @@ SafeProjectionBuildResult BuildSafeProjection(
     std::shared_ptr<const MapSnapshot> map,
     const PlatformCapability& capability,
     const MapSafetyConfig& config,
-    const std::stop_token stop_token) {
+    const std::stop_token stop_token,
+    const SafeProjectionClearanceMargins clearance_margins) {
   if (stop_token.stop_requested()) {
     return Failure("REQUEST_CANCELED");
   }
   if (map == nullptr) {
     return Failure("MAP_SNAPSHOT_REQUIRED");
+  }
+  if (!std::isfinite(clearance_margins.hazard_m) ||
+      clearance_margins.hazard_m < 0.0 ||
+      !std::isfinite(clearance_margins.boundary_m) ||
+      clearance_margins.boundary_m < 0.0) {
+    return Failure("SAFE_PROJECTION_CLEARANCE_MARGIN_INVALID");
   }
   const TerrainLimitsResult resolved =
       ResolveTerrainLimits(capability, config);
@@ -209,7 +221,7 @@ SafeProjectionBuildResult BuildSafeProjection(
   }
   if (!ComputeClearance(
           *projection.source_map_, hazard_mask,
-          projection.clearance_m_, stop_token)) {
+          projection.clearance_m_, clearance_margins, stop_token)) {
     return Failure("REQUEST_CANCELED");
   }
 

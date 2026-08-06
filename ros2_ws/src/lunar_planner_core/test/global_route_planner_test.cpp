@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -69,6 +70,34 @@ TEST(GlobalRoutePlanner, PlansCompleteDeterministicWheelRoute) {
   EXPECT_NEAR(first.route->poses_map.front().position_m.y, 5.5, 1.0e-9);
   EXPECT_NEAR(first.route->poses_map.back().position_m.x, 18.5, 0.2);
   EXPECT_NEAR(first.route->poses_map.back().position_m.y, 5.5, 0.2);
+}
+
+TEST(GlobalRoutePlanner, KeepsWheelFootprintClearOfGlobalObstacles) {
+  PlannerInput input = GroundInput(PlatformType::kWheeled);
+  input.world.global_map = test::MakeFlatMap("map", 12U, 9U, 1.0);
+  input.world.local_map = test::MakeFlatMap("odom", 12U, 9U, 1.0);
+  auto &state = std::get<WheeledState>(input.current_state);
+  state.pose.position_m = {1.5, 4.5, 0.0};
+  auto &capability = std::get<WheeledCapability>(input.capability);
+  capability.footprint_xy_m = {
+      {-0.9, -0.9}, {0.9, -0.9}, {0.9, 0.9}, {-0.9, 0.9}};
+  capability.minimum_clearance_m = 0.0;
+  input.goal_map.target = PointGoal{
+      .position_m = {10.5, 4.5, 0.0},
+      .tolerance_m = 0.2,
+  };
+  SetObstacle(input.world.global_map, 6U, 5U);
+
+  const auto result = PlanGroundGlobalRoute(input);
+
+  ASSERT_TRUE(result.ok());
+  ASSERT_GT(result.route->poses_map.size(), 2U);
+  EXPECT_TRUE(std::ranges::all_of(
+      result.route->raw_cells, [](const shared::GridCell cell) {
+        const double center_x = static_cast<double>(cell.x) + 0.5;
+        const double center_y = static_cast<double>(cell.y) + 0.5;
+        return std::hypot(center_x - 6.5, center_y - 5.5) >= 2.68;
+      }));
 }
 
 TEST(GlobalRoutePlanner, DistinguishesGoalInfeasibleFromDisconnectedRoute) {

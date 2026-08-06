@@ -55,6 +55,25 @@ CurrentPose(const PlannerInput &input) noexcept {
   return std::nullopt;
 }
 
+[[nodiscard]] shared::SafeProjectionClearanceMargins
+CenterlineClearanceMargins(const PlatformCapability &capability,
+                           const double resolution_m) {
+  double support_radius_m = 0.0;
+  if (const auto *wheel = std::get_if<WheeledCapability>(&capability)) {
+    for (const Vec2 vertex : wheel->footprint_xy_m) {
+      support_radius_m =
+          std::max(support_radius_m, std::hypot(vertex.x, vertex.y));
+    }
+  } else if (const auto *legged = std::get_if<LeggedCapability>(&capability)) {
+    support_radius_m = std::hypot(legged->body_half_extent_m.x,
+                                  legged->body_half_extent_m.y);
+  }
+  return shared::SafeProjectionClearanceMargins{
+      .hazard_m = support_radius_m + std::numbers::sqrt2 * resolution_m,
+      .boundary_m = support_radius_m,
+  };
+}
+
 [[nodiscard]] bool PointOnSegment(const Vec2 point, const Vec2 start,
                                   const Vec2 end) noexcept {
   constexpr double kTolerance = 1.0e-9;
@@ -240,9 +259,12 @@ GlobalRoutePlanResult PlanGroundGlobalRoute(const PlannerInput &input) {
     return Failure(PlanningOutcome::kInvalidRequest, map.reason_code, started,
                    level);
   }
-  const auto projection =
-      shared::BuildSafeProjection(map.snapshot, input.capability,
-                                  input.config.map_safety, input.stop_token);
+  const shared::SafeProjectionClearanceMargins centerline_margins =
+      CenterlineClearanceMargins(input.capability,
+                                 map.snapshot->resolution_m());
+  const auto projection = shared::BuildSafeProjection(
+      map.snapshot, input.capability, input.config.map_safety,
+      input.stop_token, centerline_margins);
   if (!projection.ok()) {
     const PlanningOutcome outcome = projection.reason_code == "REQUEST_CANCELED"
                                         ? PlanningOutcome::kCanceled

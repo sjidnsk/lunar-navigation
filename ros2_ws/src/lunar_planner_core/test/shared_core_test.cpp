@@ -173,6 +173,27 @@ TEST(SafeProjection, AppliesClearanceAndMinimumSlopeLimit) {
       GridCell{.x = 2, .y = 2}));
 }
 
+TEST(SafeProjection, SeparatesHazardAndBoundaryClearanceMargins) {
+  auto map = test::MakeFlatMap("odom", 7U, 1U, 1.0);
+  SetByte(map, "obstacle", 3U, 1U);
+  const auto input = test::MakeValidWheelInput();
+  auto wheel = std::get<WheeledCapability>(input.capability);
+  wheel.minimum_clearance_m = 0.1;
+
+  const auto projection = BuildSafeProjection(
+      MakeSnapshot(map), PlatformCapability{wheel}, input.config.map_safety, {},
+      SafeProjectionClearanceMargins{
+          .hazard_m = 1.1,
+          .boundary_m = 0.2,
+      });
+
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  EXPECT_FALSE(
+      projection.projection->HardFeasible(GridCell{.x = 2, .y = 0}));
+  EXPECT_TRUE(
+      projection.projection->HardFeasible(GridCell{.x = 1, .y = 0}));
+}
+
 TEST(ConvexCorridor, BuildsCertifiedCellsAndHonorsCancellation) {
   const auto input = test::MakeValidWheelInput();
   const auto projection = BuildSafeProjection(
