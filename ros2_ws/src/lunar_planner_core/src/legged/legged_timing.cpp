@@ -48,8 +48,7 @@ constexpr double kTolerance = 1.0e-12;
 [[nodiscard]] std::optional<std::chrono::nanoseconds> DurationFor(
     const LeggedTransition& transition,
     const LeggedCapability& capability) noexcept {
-  if (transition.nominal_duration.count() <= 0 ||
-      !std::isfinite(transition.path_length_m) ||
+  if (!std::isfinite(transition.path_length_m) ||
       transition.path_length_m < 0.0) {
     return std::nullopt;
   }
@@ -66,12 +65,10 @@ constexpr double kTolerance = 1.0e-12;
   const double yaw = ShortestYawDelta(
       transition.source_pose.yaw_rad,
       transition.target_pose.yaw_rad);
-  double seconds =
-      std::chrono::duration<double>(transition.nominal_duration).count();
-  const std::array<std::pair<double, Interval>, 4> components{
+  double seconds = std::abs(dz) / capability.step_vertical_rate_mps;
+  const std::array<std::pair<double, Interval>, 3> components{
       std::pair{forward, capability.forward_speed_mps},
       std::pair{lateral, capability.lateral_speed_mps},
-      std::pair{dz, capability.vertical_speed_mps},
       std::pair{yaw, capability.yaw_rate_radps},
   };
   for (const auto& [displacement, interval] : components) {
@@ -141,8 +138,9 @@ LeggedTimingResult ParameterizeLeggedBodyTiming(
   }
   if (!ValidVelocityInterval(capability.forward_speed_mps) ||
       !ValidVelocityInterval(capability.lateral_speed_mps) ||
-      !ValidVelocityInterval(capability.vertical_speed_mps) ||
       !ValidVelocityInterval(capability.yaw_rate_radps) ||
+      !std::isfinite(capability.step_vertical_rate_mps) ||
+      capability.step_vertical_rate_mps <= 0.0 ||
       !std::isfinite(capability.maximum_linear_acceleration_mps2) ||
       capability.maximum_linear_acceleration_mps2 <= 0.0 ||
       !std::isfinite(capability.maximum_yaw_acceleration_radps2) ||

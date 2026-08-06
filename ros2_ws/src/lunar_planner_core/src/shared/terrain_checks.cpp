@@ -266,31 +266,23 @@ TerrainLimitsResult ResolveTerrainLimits(
         } else if constexpr (std::is_same_v<Capability, LeggedCapability>) {
           const double maximum_speed = std::hypot(
               MaximumAbsolute(concrete.forward_speed_mps),
-              MaximumAbsolute(concrete.lateral_speed_mps),
-              MaximumAbsolute(concrete.vertical_speed_mps));
+              MaximumAbsolute(concrete.lateral_speed_mps));
           if (!IsFiniteOrdered(concrete.forward_speed_mps) ||
               !IsFiniteOrdered(concrete.lateral_speed_mps) ||
-              !IsFiniteOrdered(concrete.vertical_speed_mps) ||
               !IsFiniteOrdered(concrete.yaw_rate_radps) ||
               !IsFinitePositive(maximum_speed) ||
-              !IsFiniteNonNegative(concrete.maximum_roughness_m) ||
               !IsFiniteNonNegative(concrete.maximum_step_height_m) ||
-              !IsFiniteNonNegative(concrete.minimum_body_clearance_m) ||
-              !std::isfinite(concrete.minimum_confidence) ||
-              concrete.minimum_confidence < 0.0 ||
-              concrete.minimum_confidence > 1.0) {
+              !IsFiniteNonNegative(concrete.minimum_body_clearance_m)) {
             return Invalid("LEGGED_TERRAIN_CAPABILITY_INVALID");
           }
           return TerrainLimitsResult{
               .limits = TerrainLimits{
                   .platform_type = PlatformType::kLegged,
                   .maximum_slope_rad = maximum_slope,
-                  .maximum_roughness_m = concrete.maximum_roughness_m,
-                  .maximum_step_height_m = concrete.maximum_step_height_m,
+                  .maximum_roughness_m = std::nullopt,
+                  .maximum_step_height_m = std::nullopt,
                   .minimum_clearance_m = concrete.minimum_body_clearance_m,
-                  .minimum_confidence = std::max(
-                      config.minimum_observation_quality,
-                      concrete.minimum_confidence),
+                  .minimum_confidence = config.minimum_observation_quality,
                   .maximum_speed_mps = maximum_speed,
               },
               .reason_code = {},

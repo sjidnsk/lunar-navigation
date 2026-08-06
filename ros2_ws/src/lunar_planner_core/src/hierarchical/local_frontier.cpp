@@ -171,8 +171,8 @@ ResolvePlatformGeometry(const PlannerInput &input) noexcept {
     return PlatformGeometry{
         .current_position_odom = state->body_pose.position_m,
         .horizon_m = input.config.local_frontier.legged_horizon_m,
-        .support_radius_m = std::hypot(capability->body_half_extent_m.x,
-                                       capability->body_half_extent_m.y),
+        .support_radius_m = std::hypot(capability->body_extent_m.x / 2.0,
+                                       capability->body_extent_m.y / 2.0),
         .minimum_clearance_m = capability->minimum_body_clearance_m,
     };
   }

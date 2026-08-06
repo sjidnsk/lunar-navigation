@@ -72,6 +72,18 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_legged";
   }
   GoalRegion position_goal = goal;
   position_goal.yaw_rad.reset();
+  if (const auto* point = std::get_if<PointGoal>(&goal.target)) {
+    const auto cell = projection.source_map()->PositionToCell(Vec2{
+        .x = point->position_m.x,
+        .y = point->position_m.y,
+    });
+    if (!cell.has_value()) {
+      return false;
+    }
+    const LeggedTerrainEvaluation terrain = EvaluateLeggedTerrainCell(
+        projection, capability, *cell, stop_token);
+    return terrain.hard_feasible;
+  }
   for (std::size_t y = 0U; y < projection.source_map()->height(); ++y) {
     for (std::size_t x = 0U; x < projection.source_map()->width(); ++x) {
       if (stop_token.stop_requested()) {
@@ -186,8 +198,7 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_legged";
     }
     const LeggedSweepResult sweep = ValidateLeggedBodySweep(
         transition.source_pose, transition.target_pose, source_interval,
-        transition.nominal_duration, projection, capability,
-        stop_token);
+        projection, capability, stop_token);
     if (!sweep.valid) {
       return false;
     }
@@ -334,8 +345,8 @@ PlannerOutput LeggedPlanner::Plan(
     trajectory = StationaryTrajectory(*current_state);
   } else {
     const double support_radius = std::hypot(
-        capability->body_half_extent_m.x,
-        capability->body_half_extent_m.y);
+        capability->body_extent_m.x / 2.0,
+        capability->body_extent_m.y / 2.0);
     const shared::CorridorResult corridor = shared::BuildConvexCorridor(
         *projection.projection, Centerline(discrete->transitions),
         shared::CorridorTightening{

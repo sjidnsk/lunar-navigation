@@ -1,7 +1,6 @@
 #include "legged/legged_lattice.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -110,24 +109,6 @@ struct OrderedPrimitive final {
   };
 }
 
-[[nodiscard]] LeggedPose StatePose(
-    const LeggedLatticeState& state,
-    const shared::MapSnapshot& map,
-    const std::size_t yaw_bin_count) noexcept {
-  Vec3 position = map.CellCenter(shared::GridCell{
-      .x = state.cell_x,
-      .y = state.cell_y,
-  });
-  position.z = ValidInterval(state.reachable_body_z_m)
-      ? 0.5 * (state.reachable_body_z_m.lower +
-               state.reachable_body_z_m.upper)
-      : position.z;
-  return LeggedPose{
-      .position_m = position,
-      .yaw_rad = BinToYaw(state.yaw_bin, yaw_bin_count),
-  };
-}
-
 [[nodiscard]] bool ValidCapability(
     const LeggedCapability& capability,
     const PlannerConfig& config) noexcept {
@@ -135,15 +116,16 @@ struct OrderedPrimitive final {
     return ValidInterval(interval) && interval.lower <= 0.0 &&
            interval.upper >= 0.0 && interval.lower < interval.upper;
   };
-  if (!IsFinite(capability.body_half_extent_m) ||
-      capability.body_half_extent_m.x <= 0.0 ||
-      capability.body_half_extent_m.y <= 0.0 ||
-      capability.body_half_extent_m.z <= 0.0 ||
+  if (!IsFinite(capability.body_extent_m) ||
+      capability.body_extent_m.x <= 0.0 ||
+      capability.body_extent_m.y <= 0.0 ||
+      capability.body_extent_m.z <= 0.0 ||
       !ValidInterval(capability.body_height_m) ||
       !valid_interval(capability.forward_speed_mps) ||
       !valid_interval(capability.lateral_speed_mps) ||
-      !valid_interval(capability.vertical_speed_mps) ||
       !valid_interval(capability.yaw_rate_radps) ||
+      !std::isfinite(capability.step_vertical_rate_mps) ||
+      capability.step_vertical_rate_mps <= 0.0 ||
       capability.motion_primitives.empty() ||
       !std::isfinite(config.legged.xy_resolution_m) ||
       config.legged.xy_resolution_m <= 0.0 ||
@@ -155,9 +137,43 @@ struct OrderedPrimitive final {
       [](const LeggedBodyPrimitive& primitive) {
         return !primitive.primitive_id.empty() &&
             IsFinite(primitive.body_frame_displacement_m) &&
-            std::isfinite(primitive.yaw_change_rad) &&
-            primitive.nominal_duration.count() > 0;
+            std::isfinite(primitive.yaw_change_rad);
       });
+}
+
+[[nodiscard]] double TransitionDurationLowerBound(
+    const LeggedTransition& transition,
+    const LeggedCapability& capability) noexcept {
+  const double cosine = std::cos(transition.source_pose.yaw_rad);
+  const double sine = std::sin(transition.source_pose.yaw_rad);
+  const double dx = transition.target_pose.position_m.x -
+      transition.source_pose.position_m.x;
+  const double dy = transition.target_pose.position_m.y -
+      transition.source_pose.position_m.y;
+  const double dz = transition.target_pose.position_m.z -
+      transition.source_pose.position_m.z;
+  const double forward = cosine * dx + sine * dy;
+  const double lateral = -sine * dx + cosine * dy;
+  const double yaw = ShortestYawDelta(
+      transition.source_pose.yaw_rad, transition.target_pose.yaw_rad);
+  const auto duration = [](const double displacement, const Interval limits) {
+    if (std::abs(displacement) <= kComparisonTolerance) {
+      return 0.0;
+    }
+    const double speed = displacement > 0.0 ? limits.upper : -limits.lower;
+    return speed > 0.0 ? std::abs(displacement) / speed
+                       : std::numeric_limits<double>::infinity();
+  };
+  double seconds = std::max(
+      {duration(forward, capability.forward_speed_mps),
+       duration(lateral, capability.lateral_speed_mps),
+       std::abs(dz) / capability.step_vertical_rate_mps,
+       duration(yaw, capability.yaw_rate_radps),
+       std::sqrt(6.0 * transition.path_length_m /
+                 capability.maximum_linear_acceleration_mps2),
+       std::sqrt(6.0 * std::abs(yaw) /
+                 capability.maximum_yaw_acceleration_radps2)});
+  return seconds;
 }
 
 [[nodiscard]] double MaximumPlanarSpeed(
@@ -169,6 +185,29 @@ struct OrderedPrimitive final {
       std::abs(capability.lateral_speed_mps.lower),
       std::abs(capability.lateral_speed_mps.upper));
   return std::hypot(forward, lateral);
+}
+
+[[nodiscard]] double MaximumPrimitiveTranslation(
+    const LeggedCapability& capability) noexcept {
+  double maximum = 0.0;
+  for (const LeggedBodyPrimitive& primitive : capability.motion_primitives) {
+    maximum = std::max(
+        maximum,
+        std::hypot(primitive.body_frame_displacement_m.x,
+                   primitive.body_frame_displacement_m.y));
+  }
+  return maximum;
+}
+
+[[nodiscard]] double MaximumPrimitiveYaw(
+    const LeggedCapability& capability,
+    const PlannerConfig& config) noexcept {
+  double maximum = 2.0 * std::numbers::pi /
+      static_cast<double>(config.legged.yaw_bin_count);
+  for (const LeggedBodyPrimitive& primitive : capability.motion_primitives) {
+    maximum = std::max(maximum, std::abs(primitive.yaw_change_rad));
+  }
+  return maximum;
 }
 
 [[nodiscard]] double GoalDistance(
@@ -225,9 +264,7 @@ struct OrderedPrimitive final {
   };
   target.position_m.z = raw_target.z;
   const LeggedSweepResult sweep = ValidateLeggedBodySweep(
-      source, target, source_body_z_m,
-      primitive.nominal_duration, projection, capability,
-      stop_token);
+      source, target, source_body_z_m, projection, capability, stop_token);
   if (sweep.canceled) {
     canceled = true;
     return std::nullopt;
@@ -244,12 +281,75 @@ struct OrderedPrimitive final {
       .target_body_z_m = sweep.reachable_body_z_m,
       .primitive_index = primitive_index,
       .primitive_kind = primitive.kind,
-      .nominal_duration = primitive.nominal_duration,
       .path_length_m = std::hypot(
           std::hypot(
               target.position_m.x - source.position_m.x,
               target.position_m.y - source.position_m.y),
           target.position_m.z - source.position_m.z),
+  };
+}
+
+[[nodiscard]] std::optional<LeggedTransition> ApplyPointGoalConnector(
+    const LeggedPose& source, const Interval& source_body_z_m,
+    const PointGoal& point_goal, const std::optional<double> goal_yaw,
+    const double maximum_translation, const double maximum_yaw,
+    const shared::SafeProjection& projection,
+    const LeggedCapability& capability, const std::stop_token stop_token,
+    bool& canceled) {
+  const double distance = std::hypot(
+      point_goal.position_m.x - source.position_m.x,
+      point_goal.position_m.y - source.position_m.y);
+  const double target_yaw = goal_yaw.value_or(source.yaw_rad);
+  const double yaw_delta =
+      std::abs(ShortestYawDelta(source.yaw_rad, target_yaw));
+  if (distance > maximum_translation + kComparisonTolerance ||
+      yaw_delta > maximum_yaw + kComparisonTolerance ||
+      (distance <= kComparisonTolerance &&
+       yaw_delta <= kComparisonTolerance)) {
+    return std::nullopt;
+  }
+  const shared::MapSnapshot& map = *projection.source_map();
+  const auto target_cell = map.PositionToCell(Vec2{
+      .x = point_goal.position_m.x,
+      .y = point_goal.position_m.y,
+  });
+  if (!target_cell.has_value()) {
+    return std::nullopt;
+  }
+  const LeggedTerrainEvaluation terrain = EvaluateLeggedTerrainCell(
+      projection, capability, *target_cell, stop_token);
+  if (terrain.canceled) {
+    canceled = true;
+    return std::nullopt;
+  }
+  if (!terrain.hard_feasible) {
+    return std::nullopt;
+  }
+  LeggedPose target{
+      .position_m = point_goal.position_m,
+      .yaw_rad = target_yaw,
+  };
+  target.position_m.z = 0.5 *
+      (terrain.body_height_m.lower + terrain.body_height_m.upper);
+  const LeggedSweepResult sweep = ValidateLeggedBodySweep(
+      source, target, source_body_z_m, projection, capability, stop_token);
+  if (sweep.canceled) {
+    canceled = true;
+    return std::nullopt;
+  }
+  if (!sweep.valid) {
+    return std::nullopt;
+  }
+  target.position_m.z = 0.5 *
+      (sweep.reachable_body_z_m.lower + sweep.reachable_body_z_m.upper);
+  return LeggedTransition{
+      .source_pose = source,
+      .target_pose = target,
+      .target_body_z_m = sweep.reachable_body_z_m,
+      .primitive_index = std::numeric_limits<std::size_t>::max(),
+      .primitive_kind = LeggedPrimitiveKind::kCoupled,
+      .path_length_m = std::hypot(
+          distance, target.position_m.z - source.position_m.z),
   };
 }
 
@@ -360,10 +460,17 @@ LeggedLatticeBuildResult BuildLeggedLattice(
       .reachable_body_z_m = start_terrain.body_height_m,
   };
   graph.states.push_back(start);
+  graph.state_poses.push_back(graph.true_start_pose);
   graph.search_problem.outgoing_edges.emplace_back();
   std::map<LeggedStateKey, std::size_t> state_indices;
+  state_indices.emplace(KeyOf(start), 0U);
   std::queue<std::size_t> pending;
   pending.push(0U);
+  const auto* point_goal = std::get_if<PointGoal>(&goal.target);
+  const double maximum_goal_translation =
+      MaximumPrimitiveTranslation(capability) +
+      projection.source_map()->resolution_m() * std::numbers::sqrt2 / 2.0;
+  const double maximum_goal_yaw = MaximumPrimitiveYaw(capability, config);
   while (!pending.empty()) {
     if (stop_token.stop_requested()) {
       return Failure(LeggedLatticeStatus::kCanceled, "REQUEST_CANCELED");
@@ -371,13 +478,53 @@ LeggedLatticeBuildResult BuildLeggedLattice(
     const std::size_t source_index = pending.front();
     pending.pop();
     const LeggedLatticeState source_state = graph.states[source_index];
-    const LeggedPose source_pose = source_index == 0U
-        ? graph.true_start_pose
-        : StatePose(source_state, *projection.source_map(),
-                    config.legged.yaw_bin_count);
+    const LeggedPose source_pose = graph.state_poses[source_index];
     const Interval source_body_z_m = source_index == 0U
         ? graph.true_start_body_z_m
         : source_state.reachable_body_z_m;
+    if (point_goal != nullptr) {
+      bool canceled = false;
+      auto connector = ApplyPointGoalConnector(
+          source_pose, source_body_z_m, *point_goal, goal.yaw_rad,
+          maximum_goal_translation, maximum_goal_yaw, projection, capability,
+          stop_token, canceled);
+      if (canceled) {
+        return Failure(LeggedLatticeStatus::kCanceled, "REQUEST_CANCELED");
+      }
+      if (connector.has_value()) {
+        const auto target_cell = projection.source_map()->PositionToCell(Vec2{
+            .x = connector->target_pose.position_m.x,
+            .y = connector->target_pose.position_m.y,
+        });
+        if (target_cell.has_value()) {
+          const std::size_t target_index = graph.states.size();
+          graph.states.push_back(LeggedLatticeState{
+              .cell_x = target_cell->x,
+              .cell_y = target_cell->y,
+              .yaw_bin = YawToBin(
+                  connector->target_pose.yaw_rad,
+                  config.legged.yaw_bin_count),
+              .reachable_body_z_m = connector->target_body_z_m,
+          });
+          graph.state_poses.push_back(connector->target_pose);
+          graph.search_problem.outgoing_edges.emplace_back();
+          connector->stable_index = graph.transitions.size();
+          const double edge_cost =
+              TransitionDurationLowerBound(*connector, capability) +
+              0.5 * connector->path_length_m +
+              0.25 * std::abs(ShortestYawDelta(
+                  connector->source_pose.yaw_rad,
+                  connector->target_pose.yaw_rad));
+          graph.transitions.push_back(*connector);
+          graph.search_problem.outgoing_edges[source_index].push_back(
+              shared::GraphEdge{
+                  .target_state = target_index,
+                  .cost = edge_cost,
+                  .stable_index = connector->stable_index,
+              });
+        }
+      }
+    }
     for (const OrderedPrimitive& ordered : ordered_primitives) {
       bool canceled = false;
       auto transition = ApplyPrimitive(
@@ -410,6 +557,7 @@ LeggedLatticeBuildResult BuildLeggedLattice(
       if (found == state_indices.end()) {
         target_index = graph.states.size();
         graph.states.push_back(target_state);
+        graph.state_poses.push_back(transition->target_pose);
         graph.search_problem.outgoing_edges.emplace_back();
         state_indices.emplace(KeyOf(target_state), target_index);
         pending.push(target_index);
@@ -418,7 +566,7 @@ LeggedLatticeBuildResult BuildLeggedLattice(
       }
       transition->stable_index = graph.transitions.size();
       const double edge_cost =
-          std::chrono::duration<double>(transition->nominal_duration).count() +
+          TransitionDurationLowerBound(*transition, capability) +
           0.5 * transition->path_length_m +
           0.25 * std::abs(ShortestYawDelta(
               transition->source_pose.yaw_rad,
@@ -444,10 +592,7 @@ LeggedLatticeBuildResult BuildLeggedLattice(
   graph.search_problem.goal_mask.assign(graph.states.size(), 0U);
   const double maximum_speed = MaximumPlanarSpeed(capability);
   for (std::size_t index = 0U; index < graph.states.size(); ++index) {
-    const LeggedPose pose = index == 0U
-        ? graph.true_start_pose
-        : StatePose(graph.states[index], *projection.source_map(),
-                    config.legged.yaw_bin_count);
+    const LeggedPose pose = graph.state_poses[index];
     double heuristic = GoalDistance(goal, pose) / maximum_speed;
     if (goal.yaw_rad.has_value()) {
       const double yaw_speed = std::max(
@@ -460,7 +605,17 @@ LeggedLatticeBuildResult BuildLeggedLattice(
     }
     graph.search_problem.heuristic.push_back(
         std::isfinite(heuristic) ? heuristic : 0.0);
-    if (GoalContainsBodyPose(goal, pose)) {
+    bool is_goal = GoalContainsBodyPose(goal, pose);
+    if (point_goal != nullptr) {
+      is_goal =
+          std::hypot(pose.position_m.x - point_goal->position_m.x,
+                     pose.position_m.y - point_goal->position_m.y) <=
+              kComparisonTolerance &&
+          (!goal.yaw_rad.has_value() ||
+           std::abs(ShortestYawDelta(pose.yaw_rad, *goal.yaw_rad)) <=
+               kComparisonTolerance);
+    }
+    if (is_goal) {
       graph.search_problem.goal_mask[index] = 1U;
     }
   }

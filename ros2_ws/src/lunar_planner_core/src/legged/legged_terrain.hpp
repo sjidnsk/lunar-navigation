@@ -42,7 +42,6 @@ struct LeggedSweepResult final {
     const LeggedPose& source,
     const LeggedPose& target,
     const Interval& source_body_z_m,
-    std::chrono::nanoseconds nominal_duration,
     const shared::SafeProjection& projection,
     const LeggedCapability& capability,
     std::stop_token stop_token);

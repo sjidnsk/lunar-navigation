@@ -15,6 +15,7 @@ namespace lunar::planning::legged {
 struct LeggedLatticeGraph final {
   shared::AraStarProblem search_problem;
   std::vector<LeggedLatticeState> states;
+  std::vector<LeggedPose> state_poses;
   std::vector<LeggedTransition> transitions;
   LeggedPose true_start_pose;
   Interval true_start_body_z_m;

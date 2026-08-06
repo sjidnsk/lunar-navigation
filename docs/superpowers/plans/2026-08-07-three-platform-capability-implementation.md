@@ -265,11 +265,11 @@
 - Modify: `ros2_ws/src/lunar_planner_core/src/legged/legged_planner.cpp`
 - Modify: `ros2_ws/src/lunar_planner_core/test/{legged_planner_test,legged_fault_matrix_test}.cpp`
 
-- [ ] **Step 1: Add Quad48 RED tests**
+- [x] **Step 1: Add Quad48 RED tests**
 
   Cover `30°`, `0.50 m` step, directional unsupported spans `0.30 m`/`0.40 m`, diagonal metric gap, roughness invariance, unknown hard rejection, lateral travel, task yaw, exact start/end, rotated rectangle cases where AABB/circumcircle would misreject, and smooth/fallback evidence.
 
-- [ ] **Step 2: Implement ordinary-edge terrain semantics**
+- [x] **Step 2: Implement ordinary-edge terrain semantics**
 
   Treat step/gap as normal feasible edges. Compute execution lower bound:
 
@@ -283,11 +283,11 @@
 
   Roughness is diagnostic only and cannot alter feasibility, cost or speed.
 
-- [ ] **Step 3: Implement oriented rectangle sweep**
+- [x] **Step 3: Implement oriented rectangle sweep**
 
   Replace rotated-AABB occupancy with rectangle-vs-full-cell SAT intersection and spatial sampling `<=0.05 m`. Retain yaw only in the L0 local state; global state remains `(x,y)`.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
   Commit: `feat: implement approved Quad48 planning semantics`
 

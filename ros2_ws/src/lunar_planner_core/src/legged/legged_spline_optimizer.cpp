@@ -255,22 +255,12 @@ void AddSmoothness(
         return Result(controls, false, false,
                       "LEGGED_OPTIMIZATION_CURVE_OUTSIDE_CORRIDOR");
       }
-      const std::int64_t duration_begin =
-          control.nominal_duration.count() *
-          static_cast<std::int64_t>(sample - 1U) /
-          static_cast<std::int64_t>(count);
-      const std::int64_t duration_end =
-          control.nominal_duration.count() *
-          static_cast<std::int64_t>(sample) /
-          static_cast<std::int64_t>(count);
       result.push_back(LeggedTransition{
           .source_pose = source,
           .target_pose = target,
           .target_body_z_m = control.target_body_z_m,
           .primitive_index = control.primitive_index,
           .primitive_kind = control.primitive_kind,
-          .nominal_duration =
-              std::chrono::nanoseconds{duration_end - duration_begin},
           .path_length_m = std::hypot(
               std::hypot(target.position_m.x - source.position_m.x,
                          target.position_m.y - source.position_m.y),

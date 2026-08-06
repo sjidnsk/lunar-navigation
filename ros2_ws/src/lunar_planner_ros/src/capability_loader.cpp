@@ -606,11 +606,6 @@ void RecordPrimitiveId(
   if (body_extent.x <= 0.0 || body_extent.y <= 0.0 || body_extent.z <= 0.0) {
     ValueFailure("body_extent_m must be positive");
   }
-  const auto body_half_extent = lunar::planning::Vec3{
-      .x = body_extent.x / 2.0,
-      .y = body_extent.y / 2.0,
-      .z = body_extent.z / 2.0,
-  };
   const double platform_mass = Positive(
       RequireDouble(node, "platform_mass_kg"), "platform_mass_kg");
   const double maximum_payload = Positive(
@@ -642,7 +637,6 @@ void RecordPrimitiveId(
         .yaw_change_rad = Finite(
             RequireDouble(primitive, "yaw_change_rad"),
             "motion_primitives.yaw_change_rad"),
-        .nominal_duration = std::chrono::seconds{1},
     });
   }
 
@@ -653,19 +647,16 @@ void RecordPrimitiveId(
   }
   return lunar::planning::LeggedCapability{
       .body_extent_m = body_extent,
-      .body_half_extent_m = body_half_extent,
       .platform_mass_kg = platform_mass,
       .maximum_payload_kg = maximum_payload,
       .maximum_slope_rad = Slope(
           RequireDouble(node, "maximum_slope_rad"), "maximum_slope_rad"),
-      .maximum_roughness_m = std::numeric_limits<double>::max(),
       .maximum_step_height_m = NonNegative(
           RequireDouble(node, "maximum_step_height_m"),
           "maximum_step_height_m"),
       .maximum_gap_width_m = NonNegative(
           RequireDouble(node, "maximum_gap_width_m"),
           "maximum_gap_width_m"),
-      .minimum_confidence = 0.0,
       .minimum_body_clearance_m = NonNegative(
           RequireDouble(node, "minimum_body_clearance_m"),
           "minimum_body_clearance_m"),
@@ -677,7 +668,6 @@ void RecordPrimitiveId(
       .lateral_speed_mps = Interval(
           RequireSequence(node, "lateral_speed_mps"),
           "lateral_speed_mps", true),
-      .vertical_speed_mps = {-step_vertical_rate, step_vertical_rate},
       .yaw_rate_radps = Interval(
           RequireSequence(node, "yaw_rate_radps"),
           "yaw_rate_radps", true),

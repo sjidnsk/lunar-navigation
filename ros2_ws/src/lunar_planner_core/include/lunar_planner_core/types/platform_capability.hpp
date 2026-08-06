@@ -72,25 +72,20 @@ struct LeggedBodyPrimitive final {
   LeggedPrimitiveKind kind{};
   Vec3 body_frame_displacement_m;
   double yaw_change_rad{};
-  std::chrono::nanoseconds nominal_duration{};
 };
 
 struct LeggedCapability final {
   Vec3 body_extent_m;
-  Vec3 body_half_extent_m;
   double platform_mass_kg{};
   double maximum_payload_kg{};
   double maximum_slope_rad{};
-  double maximum_roughness_m{};
   double maximum_step_height_m{};
   double maximum_gap_width_m{};
-  double minimum_confidence{};
   double minimum_body_clearance_m{};
   double step_vertical_rate_mps{};
   Interval body_height_m;
   Interval forward_speed_mps;
   Interval lateral_speed_mps;
-  Interval vertical_speed_mps;
   Interval yaw_rate_radps;
   double maximum_linear_acceleration_mps2{};
   double maximum_yaw_acceleration_radps2{};

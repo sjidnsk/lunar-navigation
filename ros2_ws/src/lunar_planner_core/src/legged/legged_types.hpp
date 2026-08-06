@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -33,7 +32,6 @@ struct LeggedTransition final {
   Interval target_body_z_m;
   std::size_t primitive_index{};
   LeggedPrimitiveKind primitive_kind{LeggedPrimitiveKind::kForward};
-  std::chrono::nanoseconds nominal_duration{};
   double path_length_m{};
   std::size_t stable_index{};
 

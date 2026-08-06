@@ -8,6 +8,7 @@
 
 #include "legged/legged_terrain.hpp"
 #include "legged/legged_spline_optimizer.hpp"
+#include "legged/legged_timing.hpp"
 #include "lunar_planner_core/planner.hpp"
 #include "shared/map_snapshot.hpp"
 #include "shared/safe_projection.hpp"
@@ -81,12 +82,6 @@ TEST(LeggedPlanner, ProducesOnlyBodyReferenceWithBoundedKinematics) {
         point.velocity.linear_mps.y,
         capability.lateral_speed_mps.upper + 1.0e-9);
     EXPECT_GE(
-        point.velocity.linear_mps.z,
-        capability.vertical_speed_mps.lower - 1.0e-9);
-    EXPECT_LE(
-        point.velocity.linear_mps.z,
-        capability.vertical_speed_mps.upper + 1.0e-9);
-    EXPECT_GE(
         point.velocity.angular_radps.z,
         capability.yaw_rate_radps.lower - 1.0e-9);
     EXPECT_LE(
@@ -137,7 +132,7 @@ TEST(LeggedPlanner, DerivesLongSweepSamplingWithoutAFixedCeiling) {
       legged::LeggedPose{.position_m = {1.0, 2.5, 0.5}},
       legged::LeggedPose{.position_m = {4.0, 2.5, 0.5}},
       Interval{.lower = 0.5, .upper = 0.5},
-      std::chrono::seconds{3}, *projection.projection, capability, {});
+      *projection.projection, capability, {});
 
   EXPECT_TRUE(result.valid) << result.reason_code;
   EXPECT_GT(result.sample_count, 32U);
@@ -226,7 +221,6 @@ TEST(LeggedPlanner, SmoothsLateralPositionHeightAndYawIndependently) {
           .position_m = {2.5, 4.5, 0.55}, .yaw_rad = 0.6},
       .target_body_z_m = {.lower = 0.4, .upper = 0.6},
       .primitive_kind = LeggedPrimitiveKind::kLateralLeft,
-      .nominal_duration = std::chrono::seconds{1},
       .path_length_m = std::hypot(1.0, 0.1),
   };
   const shared::CorridorResult corridor{
@@ -261,6 +255,48 @@ TEST(LeggedPlanner, SmoothsLateralPositionHeightAndYawIndependently) {
             transition.source_pose.yaw_rad < 1.0 &&
             transition.target_pose.yaw_rad < 1.0;
       }));
+}
+
+TEST(LeggedPlanner, UsesStepVerticalRateAsTimingLowerBound) {
+  const auto input = test::MakeValidLeggedInput();
+  const auto capability = std::get<LeggedCapability>(input.capability);
+  const legged::LeggedTransition transition{
+      .source_pose = {{1.0, 1.0, 0.5}, 0.0},
+      .target_pose = {{1.2, 1.0, 1.0}, 0.0},
+      .target_body_z_m = {.lower = 0.9, .upper = 1.1},
+      .primitive_kind = LeggedPrimitiveKind::kForward,
+      .path_length_m = std::hypot(0.2, 0.5),
+  };
+
+  const auto timed = legged::ParameterizeLeggedBodyTiming(
+      {transition}, capability, 64U, {});
+
+  ASSERT_TRUE(timed.ok()) << timed.reason_code;
+  ASSERT_FALSE(timed.trajectory->points.empty());
+  EXPECT_GE(timed.trajectory->points.back().time_from_start,
+            std::chrono::seconds{5});
+}
+
+TEST(LeggedPlanner, ReachesExactOffCellGoalAndTaskYaw) {
+  Planner planner;
+  auto input = test::MakeValidLeggedInput();
+  input.request_id = "legged-exact-goal";
+  input.goal_map.target = PointGoal{
+      .position_m = {4.37, 3.63, 0.0},
+      .tolerance_m = 0.01,
+  };
+  input.goal_map.yaw_rad = 0.23;
+  input.goal_map.yaw_tolerance_rad = 0.01;
+
+  const PlannerOutput output = planner.Plan(input);
+
+  ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << output.reason_code;
+  const Pose3& endpoint = LeggedTrajectory(output).points.back().pose;
+  EXPECT_NEAR(endpoint.position_m.x, 4.37, 1.0e-9);
+  EXPECT_NEAR(endpoint.position_m.y, 3.63, 1.0e-9);
+  EXPECT_NEAR(Yaw(endpoint.orientation), 0.23, 1.0e-9);
+  EXPECT_NEAR(LeggedDiagnostics(output).endpoint_error_m, 0.0, 1.0e-9);
 }
 
 TEST(LeggedPlanner, IsDeterministicForSameTypedSnapshot) {

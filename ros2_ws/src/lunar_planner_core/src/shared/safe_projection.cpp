@@ -334,9 +334,18 @@ BuildSafeProjection(std::shared_ptr<const MapSnapshot> map,
     const TerrainCellEvaluation intrinsic =
         EvaluateTerrainCell(*projection.source_map_, cell, limits, config,
                             std::numeric_limits<double>::infinity());
+    const bool legged_slope_only =
+        limits.platform_type == PlatformType::kLegged &&
+        !intrinsic.hard_feasible &&
+        std::ranges::all_of(
+            intrinsic.rejection_codes, [](const std::string& code) {
+              return code == "SLOPE_LIMIT";
+            });
+    const bool intrinsically_feasible =
+        intrinsic.hard_feasible || legged_slope_only;
     projection.intrinsic_feasible_mask_[index] =
-        static_cast<std::uint8_t>(intrinsic.hard_feasible);
-    hazard_mask[index] = static_cast<std::uint8_t>(!intrinsic.hard_feasible);
+        static_cast<std::uint8_t>(intrinsically_feasible);
+    hazard_mask[index] = static_cast<std::uint8_t>(!intrinsically_feasible);
   }
   const double exact_clearance_limit_m =
       clearance_bands->unconditional_at_or_above_m +
@@ -371,7 +380,10 @@ BuildSafeProjection(std::shared_ptr<const MapSnapshot> map,
     projection.traversal_cost_[index] = static_cast<float>(
         projection.source_map_->resolution_m() /
             evaluation.conservative_speed_mps +
-        evaluation.roughness_m + evaluation.slope_rad * evaluation.slope_rad);
+        (limits.platform_type == PlatformType::kLegged
+             ? 0.0
+             : evaluation.roughness_m) +
+        evaluation.slope_rad * evaluation.slope_rad);
   }
 
   if (!LabelConnectedComponents(*projection.source_map_,
