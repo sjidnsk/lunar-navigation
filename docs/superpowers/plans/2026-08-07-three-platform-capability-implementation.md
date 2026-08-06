@@ -73,15 +73,15 @@
 - Modify: `ros2_ws/src/lunar_navigation_config/CMakeLists.txt`
 - Modify: `docs/interfaces/external-input-baseline.md`
 
-- [ ] **Step 1: Write failing freeze validation tests**
+- [x] **Step 1: Write failing freeze validation tests**
 
   Require exactly `WHEELED`, `LEGGED`, `HOPPER`, distinct increasing capability versions, per-field source type, explicit wheel unknown fields, no `0.16 m` legged climb, no historical wheel proxy values, hopper reference mass only under `reference_conditions`, and a deterministic SHA-256 over canonicalized platform payloads.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
   Run: `python3 -m pytest -q tests/foundation/test_platform_capability_freeze.py`
 
-- [ ] **Step 3: Implement the consumer schema and approved freeze**
+- [x] **Step 3: Implement the consumer schema and approved freeze**
 
   Freeze these approved values:
 
@@ -91,7 +91,7 @@
 
   The file explicitly declares external ownership and project engineering provenance; it is not an external publisher implementation.
 
-- [ ] **Step 4: Validate digest, UTF-8, and commit**
+- [x] **Step 4: Validate digest, UTF-8, and commit**
 
   Run checker directly and its pytest; read both YAML files with UTF-8.
 

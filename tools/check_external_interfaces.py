@@ -230,9 +230,9 @@ _STATIC_INPUTS = {
     },
     "platform_capability": {
         "owner": "external",
-        "schema": "platform-control-capability-source/v1",
+        "schema": "platform-control-capability-source/v2",
         "formats": ["yaml", "json", "urdf"],
-        "required_fields": ["platform", "geometry_source"],
+        "required_fields": ["platform", "geometry_source", "sources"],
     },
 }
 

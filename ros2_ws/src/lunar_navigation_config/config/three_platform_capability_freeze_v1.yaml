@@ -1,0 +1,178 @@
+schema_version: lunar-platform-capability-freeze/v1
+capability_schema: platform-control-capability-source/v2
+freeze_version: three-platform-capability-freeze-v1
+ownership:
+  producer: external_platform_control
+  consumer: lunar_navigation
+  repository_role: provisional_schema_and_approved_engineering_baseline
+platforms:
+  WHEELED:
+    platform_id: wheeled-lunar-explorer
+    platform_type: WHEELED
+    capability_version: wheeled-engineering-baseline-v1
+    base_frame_id: base_footprint
+    provenance:
+      level: approved_engineering_baseline
+      design_document: docs/superpowers/specs/2026-08-07-wheeled-platform-capability-design.md
+    geometry:
+      reference_point: base_footprint
+      body_extent_m: [1.182, 0.818, 1.29996]
+      footprint_xy_m: [[0.591, 0.409], [0.591, -0.409], [-0.591, -0.409], [-0.591, 0.409]]
+      wheel_count: 4
+      wheel_diameter_m: 0.319
+      wheel_width_m: 0.148
+      wheelbase_m: 0.8175
+      track_width_m: 0.67
+      wheel_center_xy_m: [[0.40875, 0.335], [0.40875, -0.335], [-0.40875, -0.335], [-0.40875, 0.335]]
+      minimum_underbody_clearance_m: 0.21
+      minimum_clearance_m: 0.2
+    kinematics:
+      maximum_forward_speed_mps: 1.5
+      maximum_reverse_speed_mps: 1.5
+      maximum_spin_rate_radps: 1.0
+      maximum_acceleration_mps2: 0.5
+      maximum_braking_deceleration_mps2: 0.5
+      maximum_yaw_acceleration_radps2: 0.5
+      maximum_lateral_acceleration_mps2: 0.5
+      maximum_curvature_per_m: 1.0
+    terrain:
+      maximum_surface_slope_rad: 0.3490658503988659
+      maximum_local_obstacle_relief_m: 0.2
+      allow_unsupported_gap: false
+      roughness_handling: COST_SPEED_AND_LOCAL_RECHECK
+    motion:
+      xy_resolution_m: 0.2
+      yaw_bin_count: 32
+      arc_radius_m: 1.0
+      arc_yaw_change_rad: 0.19634954084936207
+      primitive_types: [FORWARD, REVERSE, FORWARD_ARC, REVERSE_ARC, SPIN_CLOCKWISE, SPIN_COUNTERCLOCKWISE, STOP_AND_SWITCH]
+    unknown_fields: [bare_mass_kg, nominal_payload_kg, maximum_payload_kg, center_of_mass_height_m, suspension_type, maximum_drive_effort, manufacturer_rated_speed_mps, longitudinal_traction_coefficient, lateral_traction_coefficient, verified_cross_slope_limit_rad]
+    sources:
+      reference_point: derived
+      body_extent_m: user_provided_dimension
+      footprint_xy_m: derived
+      wheel_count: user_confirmed_capability
+      wheel_diameter_m: user_provided_dimension
+      wheel_width_m: user_provided_dimension
+      wheelbase_m: user_provided_dimension
+      track_width_m: derived
+      wheel_center_xy_m: derived
+      minimum_underbody_clearance_m: user_approximate_measurement
+      minimum_clearance_m: user_approved_planning_policy
+      maximum_forward_speed_mps: user_approved_planning_policy
+      maximum_reverse_speed_mps: user_approved_planning_policy
+      maximum_spin_rate_radps: user_approved_planning_policy
+      maximum_acceleration_mps2: user_approved_planning_policy
+      maximum_braking_deceleration_mps2: user_approved_planning_policy
+      maximum_yaw_acceleration_radps2: user_approved_planning_policy
+      maximum_lateral_acceleration_mps2: user_approved_planning_policy
+      maximum_curvature_per_m: user_approved_planning_policy
+      maximum_surface_slope_rad: user_approved_planning_policy
+      maximum_local_obstacle_relief_m: user_confirmed_capability
+      allow_unsupported_gap: user_approved_planning_policy
+      roughness_handling: user_approved_planning_policy
+      motion_primitives: user_approved_planning_policy
+  LEGGED:
+    platform_id: yobotics-quad48
+    platform_type: LEGGED
+    capability_version: quad48-approved-baseline-v1
+    base_frame_id: base_link
+    provenance:
+      level: approved_mixed_evidence_baseline
+      design_document: docs/superpowers/specs/2026-08-06-quad48-legged-platform-capability-design.md
+      upstream_commit: 4cc726374ee423c64c6682ef419e16ec2cb49a00
+      user_spec_sha256: 1e3db711caf733c685eceef8893a189af4f34476573c38bd91298c06fd6107e5
+    geometry:
+      reference_point: base_link
+      body_extent_m: [0.68, 0.33, 0.35]
+      nominal_body_height_m: 0.33
+      body_height_m: [0.28, 0.38]
+    physical:
+      platform_mass_kg: 15.89
+      nominal_payload_kg: 8.0
+      maximum_payload_kg: 10.0
+    kinematics:
+      maximum_forward_speed_mps: 1.5
+      maximum_reverse_speed_mps: 1.5
+      maximum_lateral_speed_mps: 0.8
+      maximum_yaw_rate_radps: 1.0
+      maximum_linear_acceleration_mps2: 1.0
+      maximum_yaw_acceleration_radps2: 1.0
+    terrain:
+      maximum_surface_slope_rad: 0.5235987755982988
+      maximum_step_height_m: 0.5
+      maximum_gap_width_m: 0.3
+      minimum_body_clearance_m: 0.3
+      step_vertical_rate_mps: 0.1
+      roughness_handling: DIAGNOSTIC_ONLY
+      unknown_is_traversable: false
+    motion:
+      local_xy_resolution_m: 0.2
+      output_semantics: LEGGED_BODY_REFERENCE
+    unknown_fields: []
+    sources:
+      reference_point: upstream_model
+      body_extent_m: user_spec_material
+      platform_mass_kg: derived
+      nominal_payload_kg: user_spec_material
+      maximum_payload_kg: user_spec_material
+      nominal_body_height_m: derived
+      body_height_m: planning_policy
+      maximum_forward_speed_mps: planning_policy
+      maximum_reverse_speed_mps: planning_policy
+      maximum_lateral_speed_mps: upstream_config
+      maximum_yaw_rate_radps: upstream_config
+      maximum_linear_acceleration_mps2: planning_policy
+      maximum_yaw_acceleration_radps2: planning_policy
+      maximum_surface_slope_rad: user_spec_material
+      maximum_step_height_m: user_confirmed_upgrade
+      maximum_gap_width_m: user_spec_material
+      minimum_body_clearance_m: planning_policy
+      step_vertical_rate_mps: planning_policy
+      roughness_handling: planning_policy
+      unknown_is_traversable: planning_policy
+  HOPPER:
+    platform_id: hopper-lunar-explorer
+    platform_type: HOPPER
+    capability_version: hopper-engineering-baseline-v1
+    base_frame_id: base_link
+    provenance:
+      level: project_engineering_baseline
+      design_document: docs/superpowers/specs/2026-08-07-hopper-platform-capability-design.md
+    propulsion:
+      specific_impulse_s: 301.0
+    landing:
+      landing_support_radius_m: 0.45
+      maximum_landing_slope_rad: 0.17453292519943295
+      maximum_landing_plane_residual_m: 0.05
+    safety:
+      flight_collision_radius_m: 0.55
+      landing_lateral_margin_m: 0.2
+      flight_map_margin_m: 0.2
+      reachability_delta_v_margin_ratio: 0.1
+    environment:
+      gravity_mps2: [0.0, 0.0, -1.62]
+      standard_gravity_mps2: 9.80665
+    reference_conditions:
+      reference_total_mass_kg: 20.0
+      reference_remaining_usable_fuel_mass_kg: 0.2
+      reference_horizontal_range_m: 100.0
+      reference_elevation_delta_m: 0.0
+      runtime_fallback_allowed: false
+    unknown_fields: []
+    sources:
+      specific_impulse_s: project_engineering_baseline
+      landing_support_radius_m: project_engineering_baseline
+      flight_collision_radius_m: project_engineering_baseline
+      maximum_landing_slope_rad: planning_safety_baseline
+      maximum_landing_plane_residual_m: planning_safety_baseline
+      landing_lateral_margin_m: planning_safety_baseline
+      flight_map_margin_m: planning_safety_baseline
+      reachability_delta_v_margin_ratio: planning_safety_baseline
+      gravity_mps2: planning_safety_baseline
+      standard_gravity_mps2: planning_safety_baseline
+      reference_total_mass_kg: project_engineering_baseline
+      reference_remaining_usable_fuel_mass_kg: project_engineering_baseline
+      reference_horizontal_range_m: project_engineering_baseline
+      reference_elevation_delta_m: project_engineering_baseline
+freeze_digest_sha256: 60e258be85edd779d9acdc282bbde3d5cb914bce98c86c244a46a772fda5ee95

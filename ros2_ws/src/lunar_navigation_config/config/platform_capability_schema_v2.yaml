@@ -1,0 +1,34 @@
+schema_version: platform-control-capability-source/v2
+freeze_schema_version: lunar-platform-capability-freeze/v1
+ownership: external_platform_control
+repository_role: provisional_consumer_schema
+allowed_source_types:
+  - upstream_model
+  - upstream_config
+  - user_spec_material
+  - user_confirmed_upgrade
+  - user_provided_dimension
+  - user_approximate_measurement
+  - user_confirmed_capability
+  - user_approved_planning_policy
+  - derived
+  - planning_policy
+  - project_engineering_baseline
+  - planning_safety_baseline
+  - unknown
+platforms:
+  WHEELED:
+    allowed_keys: [platform_id, platform_type, capability_version, base_frame_id, provenance, geometry, kinematics, terrain, motion, unknown_fields, sources]
+    required_sources: [body_extent_m, footprint_xy_m, wheel_count, wheel_diameter_m, wheel_width_m, wheelbase_m, track_width_m, wheel_center_xy_m, minimum_underbody_clearance_m, minimum_clearance_m, maximum_forward_speed_mps, maximum_reverse_speed_mps, maximum_spin_rate_radps, maximum_acceleration_mps2, maximum_braking_deceleration_mps2, maximum_yaw_acceleration_radps2, maximum_lateral_acceleration_mps2, maximum_curvature_per_m, maximum_surface_slope_rad, maximum_local_obstacle_relief_m, allow_unsupported_gap, roughness_handling, reference_point, motion_primitives]
+    exact_unknown_fields: [bare_mass_kg, nominal_payload_kg, maximum_payload_kg, center_of_mass_height_m, suspension_type, maximum_drive_effort, manufacturer_rated_speed_mps, longitudinal_traction_coefficient, lateral_traction_coefficient, verified_cross_slope_limit_rad]
+    retired_fields: [platform_mass_kg, nominal_duration_s, maximum_obstacle_height_m]
+  LEGGED:
+    allowed_keys: [platform_id, platform_type, capability_version, base_frame_id, provenance, geometry, physical, kinematics, terrain, motion, unknown_fields, sources]
+    required_sources: [body_extent_m, platform_mass_kg, nominal_payload_kg, maximum_payload_kg, nominal_body_height_m, body_height_m, maximum_forward_speed_mps, maximum_reverse_speed_mps, maximum_lateral_speed_mps, maximum_yaw_rate_radps, maximum_linear_acceleration_mps2, maximum_yaw_acceleration_radps2, maximum_surface_slope_rad, maximum_step_height_m, maximum_gap_width_m, minimum_body_clearance_m, step_vertical_rate_mps, roughness_handling, unknown_is_traversable, reference_point]
+    exact_unknown_fields: []
+    retired_fields: [maximum_roughness_m, minimum_confidence, nominal_duration_s]
+  HOPPER:
+    allowed_keys: [platform_id, platform_type, capability_version, base_frame_id, provenance, propulsion, landing, safety, environment, reference_conditions, unknown_fields, sources]
+    required_sources: [specific_impulse_s, landing_support_radius_m, flight_collision_radius_m, maximum_landing_slope_rad, maximum_landing_plane_residual_m, landing_lateral_margin_m, flight_map_margin_m, reachability_delta_v_margin_ratio, gravity_mps2, standard_gravity_mps2, reference_total_mass_kg, reference_remaining_usable_fuel_mass_kg, reference_horizontal_range_m, reference_elevation_delta_m]
+    exact_unknown_fields: []
+    retired_fields: [body_half_extent_m, platform_mass_kg, maximum_landing_roughness_m, minimum_overhead_clearance_m, minimum_lateral_clearance_m, minimum_landing_region_area_m2, maximum_launch_speed_mps, maximum_launch_impulse_newton_seconds, minimum_flight_time_s, maximum_flight_time_s, maximum_landing_speed_mps, minimum_downward_impact_speed_mps, minimum_landing_clearance_m, maximum_angular_speed_radps, maximum_angular_acceleration_radps2, maximum_initial_angular_speed_radps, minimum_settle_guard_s, actuator_or_impulse_profile, motion_primitives]
