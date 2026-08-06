@@ -166,7 +166,7 @@ constexpr double kTolerance = 1.0e-9;
   if (reason_code == "HOPPER_FLIGHT_TUBE_INPUT_INVALID") {
     return HopCertificationStatus::kInvalid;
   }
-  if (reason_code == "HOPPER_FLIGHT_TUBE_NUMERICAL_FAILURE") {
+  if (reason_code == "HOPPER_FLIGHT_TUBE_NUMERICAL_INDETERMINATE") {
     return HopCertificationStatus::kNumericalIndeterminate;
   }
   return HopCertificationStatus::kInfeasible;

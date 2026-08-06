@@ -27,6 +27,8 @@ public:
   [[nodiscard]] std::span<const LandingNodeId> SafeCenterIds() const noexcept;
   [[nodiscard]] std::shared_ptr<const shared::MapSnapshot>
   SourceMap() const noexcept;
+  [[nodiscard]] double
+  SupportRadiusMeters(shared::GridCell cell) const noexcept;
   [[nodiscard]] double RequiredRadiusMeters() const noexcept;
   [[nodiscard]] std::size_t EstimatedWorkMemoryBytes() const noexcept;
 
@@ -40,6 +42,7 @@ private:
   std::vector<std::uint8_t> base_safe_;
   std::vector<std::uint8_t> center_safe_;
   std::vector<double> squared_distance_cells_;
+  std::vector<double> support_radius_m_;
   std::vector<LandingNodeId> safe_center_ids_;
   double required_radius_m_{};
 };

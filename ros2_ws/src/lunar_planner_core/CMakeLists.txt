@@ -31,6 +31,7 @@ add_library(${PROJECT_NAME} SHARED
   src/hierarchical/local_frontier.cpp
   src/hierarchical/map_level.cpp
   src/hierarchical/reference_composer.cpp
+  src/hierarchical/route_continuation.cpp
   src/hopper/ballistic_envelope.cpp
   src/hopper/ballistic_kinematics.cpp
   src/hopper/commitment_state_machine.cpp

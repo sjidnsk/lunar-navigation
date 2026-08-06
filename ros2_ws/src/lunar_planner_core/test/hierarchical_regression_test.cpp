@@ -106,17 +106,17 @@ void AddVerticalWall(GridMap & map, const std::size_t x)
 {
   PlannerInput input = test::MakeValidHopperInput();
   input.request_id = "regression-three-hop";
-  input.world.global_map = test::MakeFlatMap("map", 20U, 1U, 0.5);
-  input.world.local_map = test::MakeFlatMap("odom", 20U, 1U, 0.5);
+  input.world.global_map = test::MakeFlatMap("map", 20U, 7U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 20U, 7U, 0.5);
   input.config.global_map.base_resolution_m = 0.5;
   input.config.global_map.maximum_cells = 1'024U;
   input.config.global_map.maximum_axis_cells = 1'024U;
   input.current_state = HopperState{
-    .pose = Pose3{.position_m = {1.5, 0.25, 0.5}},
+    .pose = Pose3{.position_m = {1.5, 1.75, 0.5}},
   };
   input.goal_map = GoalRegion{
     .goal_id = "distant-hopper-goal",
-    .target = PointGoal{.position_m = {7.5, 0.25, 0.0},
+    .target = PointGoal{.position_m = {7.25, 1.75, 0.0},
       .tolerance_m = 0.1},
   };
   auto & capability = std::get<HopperCapability>(input.capability);
@@ -309,7 +309,9 @@ TEST(
 
   PlannerInput broken = ThreeHopInput();
   for (std::size_t x = 7U; x <= 11U; ++x) {
-    SetByte(broken.world.global_map, "valid_mask", x, 0U, 0U);
+    for (std::size_t y = 0U; y < broken.world.global_map.height; ++y) {
+      SetByte(broken.world.global_map, "valid_mask", x, y, 0U);
+    }
   }
   const PlannerOutput no_chain = planner.Plan(broken);
   EXPECT_EQ(no_chain.outcome, PlanningOutcome::kNoKnownSafeRoute);

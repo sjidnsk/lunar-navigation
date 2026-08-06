@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <numbers>
 #include <optional>
 #include <string>
@@ -15,7 +16,9 @@
 #include "hierarchical/frame_transform.hpp"
 #include "hierarchical/hopper_route_planner.hpp"
 #include "hierarchical/local_planning_problem.hpp"
+#include "hierarchical/route_continuation.hpp"
 #include "hopper/commitment_state_machine.hpp"
+#include "hopper/flight_tube_certifier.hpp"
 #include "hopper/hop_certifier.hpp"
 #include "hopper/landing_region.hpp"
 #include "shared/map_snapshot.hpp"
@@ -202,6 +205,13 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
         PlanningOutcome::kInvalidRequest,
         ExecutionDirective::kNoSafeReference,
         "HOPPER_REQUEST_INVALID", started);
+  }
+  if (Norm(state->velocity.angular_radps) >
+      capability->maximum_initial_angular_speed_radps + 1.0e-9) {
+    return Failure(
+        PlanningOutcome::kNoKnownSafeRoute,
+        ExecutionDirective::kNoSafeReference,
+        "HOPPER_ATTITUDE_NOT_CERTIFIED", started);
   }
   if (!ValidResources(input.config.hopper)) {
     return Failure(
@@ -416,8 +426,112 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
         global.expanded_nodes + landing_work);
   }
 
-  HopCertificationResult certified = CertifyFirstHop(
-      local_problem, *source.region, *target.region);
+  if (global.certified_hops.size() != global.route_hops ||
+      global.nominal_hops.size() != global.route_hops ||
+      global.certified_hops.empty()) {
+    return Failure(
+        PlanningOutcome::kNumericalFailure,
+        ExecutionDirective::kNoSafeReference,
+        "HOPPER_GLOBAL_ROUTE_RESULT_INVALID", started,
+        global.expanded_nodes + landing_work);
+  }
+  const CertifiedHopPreview& first_preview = global.certified_hops.front();
+  const hierarchical::NominalHopEdge& first_edge = global.nominal_hops.front();
+  const auto launch_pose_odom = hierarchical::TransformPose(
+      first_preview.launch_pose_map, input.world.map_from_odom,
+      hierarchical::TransformDirection::kParentToChild);
+  const auto landing_pose_odom = hierarchical::TransformPose(
+      first_preview.landing_pose_map, input.world.map_from_odom,
+      hierarchical::TransformDirection::kParentToChild);
+  RigidTransform vector_rotation = input.world.map_from_odom;
+  vector_rotation.translation_m = {};
+  const auto launch_velocity_odom = hierarchical::TransformPoint(
+      first_preview.launch_velocity_mps, vector_rotation,
+      hierarchical::TransformDirection::kParentToChild);
+  const auto gravity_odom = hierarchical::TransformPoint(
+      first_edge.arc.gravity_mps2, vector_rotation,
+      hierarchical::TransformDirection::kParentToChild);
+  std::vector<Vec3> landing_region_odom;
+  landing_region_odom.reserve(first_preview.landing_region_map.size());
+  bool landing_region_transform_ok = true;
+  for (const Vec3 vertex_map : first_preview.landing_region_map) {
+    const auto vertex_odom = hierarchical::TransformPoint(
+        vertex_map, input.world.map_from_odom,
+        hierarchical::TransformDirection::kParentToChild);
+    if (!vertex_odom.has_value()) {
+      landing_region_transform_ok = false;
+      break;
+    }
+    landing_region_odom.push_back(*vertex_odom);
+  }
+  if (!launch_pose_odom.has_value() || !landing_pose_odom.has_value() ||
+      !launch_velocity_odom.has_value() || !gravity_odom.has_value() ||
+      !landing_region_transform_ok || landing_region_odom.size() < 3U ||
+      first_preview.flight_time.count() <= 0 ||
+      PositionError(launch_pose_odom->position_m, state->pose.position_m) >
+          1.0e-6) {
+    return Failure(
+        PlanningOutcome::kInvalidRequest,
+        ExecutionDirective::kNoSafeReference,
+        "FRAME_TRANSFORM_INVALID", started,
+        global.expanded_nodes + landing_work);
+  }
+  const double certified_flight_s =
+      std::chrono::duration<double>(first_preview.flight_time).count();
+  const BallisticArc local_arc{
+      .launch_position_m = state->pose.position_m,
+      .landing_position_m = landing_pose_odom->position_m,
+      .gravity_mps2 = *gravity_odom,
+      .launch_velocity_mps = *launch_velocity_odom,
+      .landing_velocity_mps =
+          Vec3{
+              launch_velocity_odom->x + gravity_odom->x * certified_flight_s,
+              launch_velocity_odom->y + gravity_odom->y * certified_flight_s,
+              launch_velocity_odom->z + gravity_odom->z * certified_flight_s,
+          },
+      .flight_time_s = certified_flight_s,
+  };
+  CertifiedLandingRegion exact_target_region = *target.region;
+  exact_target_region.aim_position_on_surface_m = Vec3{
+      .x = landing_pose_odom->position_m.x,
+      .y = landing_pose_odom->position_m.y,
+      .z = landing_pose_odom->position_m.z - capability->body_half_extent_m.z,
+  };
+  exact_target_region.boundary_m = landing_region_odom;
+  const FlightTubeCertificationResult local_tube = CertifyFlightTube(
+      local_arc, *map.snapshot, *source.region, exact_target_region,
+      *capability, local_problem.config, local_problem.stop_token,
+      first_edge.tube_expansion_margin_m);
+  HopCertificationResult certified;
+  certified.examined_intervals = local_tube.overlapped_cell_count;
+  if (local_tube.canceled) {
+    certified.status = HopCertificationStatus::kCanceled;
+    certified.reason_code = "REQUEST_CANCELED";
+  } else if (!local_tube.certified) {
+    certified.reason_code = local_tube.reason_code;
+    if (local_tube.reason_code == "HOPPER_FLIGHT_TUBE_RESOURCE_EXHAUSTED") {
+      certified.status = HopCertificationStatus::kResourceExhausted;
+    } else if (local_tube.reason_code ==
+               "HOPPER_FLIGHT_TUBE_INPUT_INVALID") {
+      certified.status = HopCertificationStatus::kInvalid;
+    } else if (local_tube.reason_code ==
+               "HOPPER_FLIGHT_TUBE_NUMERICAL_INDETERMINATE") {
+      certified.status = HopCertificationStatus::kNumericalIndeterminate;
+    } else {
+      certified.status = HopCertificationStatus::kInfeasible;
+    }
+  } else {
+    certified.status = HopCertificationStatus::kCertified;
+    certified.segment = HopSegment{
+        .segment_id = first_preview.segment_id,
+        .launch_pose = state->pose,
+        .landing_region_boundary_m = std::move(landing_region_odom),
+        .flight_time = first_preview.flight_time,
+        .launch_velocity_mps = *launch_velocity_odom,
+        .flight_tube_radius_m = local_tube.radius_m,
+    };
+    certified.cost = first_edge.cost;
+  }
   const std::uint64_t total_work = global.expanded_nodes + landing_work +
       static_cast<std::uint64_t>(certified.examined_intervals);
   if (!certified.ok()) {
@@ -497,6 +611,9 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
   HopReference reference{
       .segments = {std::move(*certified.segment)},
   };
+  auto continuation = std::make_shared<const RouteContinuation>(
+      "hopper/" + input.request_id, PlatformType::kHopper, *global.route,
+      global.certified_hops, 0U);
   return PlannerOutput{
       .outcome = PlanningOutcome::kNewReferenceAvailable,
       .directive = ExecutionDirective::kActivateNewReference,
@@ -548,6 +665,8 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
           },
           .local_trajectory = local_diagnostics,
       },
+      .certified_hops = global.certified_hops,
+      .continuation = std::move(continuation),
   };
 }
 

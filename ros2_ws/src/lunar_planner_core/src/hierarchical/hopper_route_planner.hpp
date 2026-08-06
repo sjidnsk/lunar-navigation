@@ -19,17 +19,26 @@ struct NominalHopEdge final {
   LandingNodeId target_id{};
   double cost{};
   hopper::BallisticArc arc;
+  hopper::CertifiedLandingRegion landing_region;
+  std::vector<Vec3> promotion_region_map;
+  double flight_tube_radius_m{};
+  double tube_expansion_margin_m{};
 };
 
 struct HopperRoutePlanResult final {
   PlanningOutcome outcome{PlanningOutcome::kInvalidRequest};
   std::optional<GlobalRoute> route;
   std::vector<NominalHopEdge> nominal_hops;
+  std::vector<CertifiedHopPreview> certified_hops;
   std::optional<std::size_t> global_level;
   double maximum_horizontal_reach_m{};
   std::size_t graph_nodes{};
   std::size_t graph_edges{};
   std::size_t evaluated_edge_pairs{};
+  std::size_t coarse_edges_rejected{};
+  std::size_t full_edges_certified{};
+  std::size_t full_edges_invalidated{};
+  std::size_t edge_certificate_cache_hits{};
   std::size_t route_hops{};
   std::uint64_t expanded_nodes{};
   std::chrono::nanoseconds landing_field_elapsed{};
@@ -40,6 +49,7 @@ struct HopperRoutePlanResult final {
     return outcome == PlanningOutcome::kNewReferenceAvailable &&
            route.has_value() && route_hops > 0U &&
            nominal_hops.size() == route_hops &&
+           certified_hops.size() == route_hops &&
            reason_code == "HOPPER_GLOBAL_ROUTE_AVAILABLE";
   }
 };

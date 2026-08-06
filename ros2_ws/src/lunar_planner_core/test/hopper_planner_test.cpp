@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include "hierarchical/route_continuation.hpp"
 #include "lunar_planner_core/planner.hpp"
 #include "test_fixtures.hpp"
 
@@ -174,6 +175,28 @@ TEST(HopperPlanner, ClampsAuthorizationToTheFirstHop) {
   EXPECT_NE(std::ranges::find(output.diagnostics.warning_codes,
                               "HOPPER_AUTHORIZATION_CLAMPED_TO_ONE"),
             output.diagnostics.warning_codes.end());
+}
+
+TEST(HopperPlanner, PublishesCertifiedRouteAndImmutableContinuation) {
+  Planner planner;
+  const PlannerInput input = test::MakeValidHopperInput();
+
+  const PlannerOutput output = planner.Plan(input);
+
+  ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << output.reason_code;
+  ASSERT_NE(output.continuation, nullptr);
+  EXPECT_FALSE(output.continuation->route_id().empty());
+  ASSERT_FALSE(output.certified_hops.empty());
+  EXPECT_EQ(HopperReference(output).segments.size(), 1U);
+  EXPECT_EQ(output.certified_hops.front().segment_id,
+            HopperReference(output).segments.front().segment_id);
+  EXPECT_FALSE(output.certified_hops.front().landing_region_map.empty());
+  EXPECT_FALSE(output.certified_hops.front().promotion_region_map.empty());
+  EXPECT_DOUBLE_EQ(output.certified_hops.front().position_uncertainty_m,
+                   input.position_uncertainty_m);
+  EXPECT_DOUBLE_EQ(output.certified_hops.front().velocity_uncertainty_mps,
+                   input.velocity_uncertainty_mps);
 }
 
 TEST(HopperPlanner, IsDeterministicForSameTypedSnapshot) {

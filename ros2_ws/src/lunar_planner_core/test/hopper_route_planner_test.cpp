@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <ranges>
 #include <stop_token>
 #include <string>
@@ -11,7 +12,9 @@
 #include <gtest/gtest.h>
 
 #include "hierarchical/hopper_route_planner.hpp"
+#include "hopper/flight_tube_certifier.hpp"
 #include "lunar_planner_core/planner.hpp"
+#include "shared/map_snapshot.hpp"
 #include "test_fixtures.hpp"
 
 namespace lunar::planning::hierarchical {
@@ -27,8 +30,8 @@ concept HasTruncatingHopperGraphLimits = requires(Config config) {
 [[nodiscard]] PlannerInput ThreeHopInput() {
   PlannerInput input = test::MakeValidHopperInput();
   input.request_id = "three-hop-route";
-  input.world.global_map = test::MakeFlatMap("map", 20U, 1U, 0.5);
-  input.world.local_map = test::MakeFlatMap("odom", 20U, 1U, 0.5);
+  input.world.global_map = test::MakeFlatMap("map", 20U, 7U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 20U, 7U, 0.5);
   input.world.map_from_odom = RigidTransform{
       .parent_frame = "map",
       .child_frame = "odom",
@@ -38,13 +41,13 @@ concept HasTruncatingHopperGraphLimits = requires(Config config) {
   input.config.global_map.maximum_cells = 1'024U;
   input.config.global_map.maximum_axis_cells = 1'024U;
   input.current_state = HopperState{
-      .pose = Pose3{.position_m = {1.5, 0.25, 0.5}},
+      .pose = Pose3{.position_m = {1.5, 1.75, 0.5}},
   };
   input.goal_map = GoalRegion{
       .goal_id = "far-hopper-goal",
       .target =
           PointGoal{
-              .position_m = {7.5, 0.25, 0.0},
+              .position_m = {7.25, 1.75, 0.0},
               .tolerance_m = 0.1,
           },
   };
@@ -98,12 +101,12 @@ concept HasTruncatingHopperGraphLimits = requires(Config config) {
 [[nodiscard]] PlannerInput LongChainBeyondLegacyNodeCap() {
   PlannerInput input = ThreeHopInput();
   input.request_id = "complete-long-hopper-chain";
-  input.world.global_map = test::MakeFlatMap("map", 720U, 1U, 0.5);
-  input.world.local_map = test::MakeFlatMap("odom", 720U, 1U, 0.5);
-  input.config.global_map.maximum_cells = 2'048U;
+  input.world.global_map = test::MakeFlatMap("map", 720U, 7U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 720U, 7U, 0.5);
+  input.config.global_map.maximum_cells = 8'192U;
   input.config.global_map.maximum_axis_cells = 2'048U;
   input.goal_map.target = PointGoal{
-      .position_m = {350.25, 0.25, 0.0},
+      .position_m = {350.25, 1.75, 0.0},
       .tolerance_m = 0.1,
   };
   return input;
@@ -135,10 +138,10 @@ concept HasTruncatingHopperGraphLimits = requires(Config config) {
           }
         }
       };
-  mark_rectangle(2U, 30U, 8U, 12U);
-  mark_rectangle(2U, 10U, 8U, 26U);
-  mark_rectangle(2U, 48U, 22U, 26U);
-  mark_rectangle(44U, 48U, 8U, 26U);
+  mark_rectangle(0U, 30U, 6U, 14U);
+  mark_rectangle(0U, 12U, 6U, 28U);
+  mark_rectangle(0U, 50U, 20U, 28U);
+  mark_rectangle(42U, 50U, 6U, 28U);
   return input;
 }
 
@@ -152,6 +155,11 @@ void SetFloat(GridMap &map, const std::string &layer, const std::size_t x,
               const std::size_t y, const float value) {
   std::get<std::vector<float>>(map.layers.at(layer).values)
       .at(y * map.width + x) = value;
+}
+
+void AddTallObstacle(GridMap &map, const std::size_t x, const std::size_t y) {
+  SetByte(map, "obstacle", x, y, 1U);
+  SetFloat(map, "obstacle_height", x, y, 4.0F);
 }
 
 [[nodiscard]] bool HasWarning(const PlannerOutput &output,
@@ -257,10 +265,109 @@ TEST(HopperRoutePlanner, FallsBackToCompleteSearchAfterAGreedyCulDeSac) {
   EXPECT_GT(maximum_y.position_m.y, 10.0);
 }
 
+TEST(HopperRoutePlanner, InvalidatesBlockedCandidateEdgeAndFindsAlternative) {
+  PlannerInput input = ThreeHopInput();
+  input.world.global_map = test::MakeFlatMap("map", 20U, 15U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 20U, 15U, 0.5);
+  input.current_state = HopperState{
+      .pose = Pose3{.position_m = {1.5, 3.75, 0.5}},
+  };
+  input.goal_map.target = PointGoal{
+      .position_m = {7.25, 3.75, 0.0},
+      .tolerance_m = 0.1,
+  };
+  AddTallObstacle(input.world.global_map, 9U, 7U);
+
+  const HopperRoutePlanResult result = PlanHopperGlobalRoute(input);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_GE(result.full_edges_invalidated, 1U);
+  EXPECT_EQ(result.certified_hops.size(), result.route_hops);
+  EXPECT_TRUE(std::ranges::all_of(result.certified_hops,
+                                  [](const CertifiedHopPreview &hop) {
+                                    return hop.flight_tube_radius_m > 0.0 &&
+                                           !hop.landing_region_map.empty() &&
+                                           !hop.promotion_region_map.empty();
+                                  }));
+}
+
+TEST(HopperRoutePlanner, ContractsPromotionRegionByRuntimeUncertaintyAndCell) {
+  const PlannerInput input = ThreeHopInput();
+
+  const HopperRoutePlanResult result = PlanHopperGlobalRoute(input);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_FALSE(result.certified_hops.empty());
+  const CertifiedHopPreview &hop = result.certified_hops.front();
+  const auto x_extent = [](const std::vector<Vec3> &points) {
+    const auto [minimum, maximum] = std::ranges::minmax(
+        points, {}, [](const Vec3 point) { return point.x; });
+    return maximum.x - minimum.x;
+  };
+  const double expected_contraction =
+      input.position_uncertainty_m + input.world.global_map.resolution_m;
+  EXPECT_NEAR(0.5 * (x_extent(hop.landing_region_map) -
+                     x_extent(hop.promotion_region_map)),
+              expected_contraction, 1.0e-12);
+}
+
+TEST(HopperRoutePlanner, PreservesNumericalIndeterminacyFromFlightTube) {
+  const shared::MapSnapshotBuildResult map =
+      shared::MapSnapshot::Create(test::MakeFlatMap("map", 8U, 8U, 1.0));
+  ASSERT_TRUE(map.ok()) << map.reason_code;
+  const PlannerInput input = test::MakeValidHopperInput();
+  const HopperCapability capability =
+      std::get<HopperCapability>(input.capability);
+  const hopper::CertifiedLandingRegion region{
+      .seed_cell = {.x = 3, .y = 3},
+      .aim_position_on_surface_m = {3.5, 3.5, 0.0},
+      .plane_normal = {0.0, 0.0, 1.0},
+      .boundary_m = {{3.0, 3.0, 0.0},
+                     {4.0, 3.0, 0.0},
+                     {4.0, 4.0, 0.0},
+                     {3.0, 4.0, 0.0}},
+      .area_m2 = 1.0,
+  };
+  const double huge = std::numeric_limits<double>::max() / 2.0;
+  const hopper::BallisticArc nonrepresentable_sweep{
+      .launch_position_m = {huge, 3.5, 0.5},
+      .landing_position_m = {huge, 3.5, 0.5},
+      .gravity_mps2 = {0.0, 0.0, -1.62},
+      .launch_velocity_mps = {huge, 0.0, 1.62},
+      .landing_velocity_mps = {huge, 0.0, -1.62},
+      .flight_time_s = 128.0,
+  };
+
+  const hopper::FlightTubeCertificationResult certified =
+      hopper::CertifyFlightTube(nonrepresentable_sweep, *map.snapshot, region,
+                                region, capability, input.config, {});
+
+  EXPECT_FALSE(certified.certified);
+  EXPECT_FALSE(certified.canceled);
+  EXPECT_EQ(certified.reason_code,
+            "HOPPER_FLIGHT_TUBE_NUMERICAL_INDETERMINATE");
+}
+
+TEST(HopperRoutePlanner, RejectsAMidArcRockAcrossTheOnlyPassage) {
+  PlannerInput input = ThreeHopInput();
+  for (std::size_t y = 0U; y < input.world.global_map.height; ++y) {
+    AddTallObstacle(input.world.global_map, 8U, y);
+  }
+
+  const HopperRoutePlanResult result = PlanHopperGlobalRoute(input);
+
+  EXPECT_EQ(result.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(result.reason_code, "GLOBAL_NO_KNOWN_SAFE_ROUTE");
+  EXPECT_GE(result.full_edges_invalidated, 1U);
+  EXPECT_TRUE(result.certified_hops.empty());
+}
+
 TEST(HopperRoutePlanner, ExhaustsACompleteBrokenChainBeforeReportingNoRoute) {
   PlannerInput broken = ThreeHopInput();
   for (std::size_t x = 7U; x <= 11U; ++x) {
-    SetByte(broken.world.global_map, "valid_mask", x, 0U, 0U);
+    for (std::size_t y = 0U; y < broken.world.global_map.height; ++y) {
+      SetByte(broken.world.global_map, "valid_mask", x, y, 0U);
+    }
   }
 
   const HopperRoutePlanResult no_path = PlanHopperGlobalRoute(broken);
@@ -316,7 +423,7 @@ TEST(HopperRoutePlanner, HonorsCancellationBeforeBuildingTheGraph) {
 TEST(HopperRoutePlanner, BoundsEdgeEvaluationToExpandedReachableFrontier) {
   PlannerInput input = ThreeHopInput();
   input.goal_map.target = PointGoal{
-      .position_m = {3.75, 0.25, 0.0},
+      .position_m = {3.75, 1.75, 0.0},
       .tolerance_m = 0.05,
   };
 
@@ -351,11 +458,11 @@ TEST(HopperRoutePlanner, RejectsWhenTheFirstLocalFlightTubeIsBlocked) {
   Planner planner;
   PlannerInput input = ThreeHopInput();
   input.goal_map.target = PointGoal{
-      .position_m = {3.75, 0.25, 0.0},
+      .position_m = {3.75, 1.75, 0.0},
       .tolerance_m = 0.05,
   };
-  SetByte(input.world.local_map, "obstacle", 5U, 0U, 1U);
-  SetFloat(input.world.local_map, "obstacle_height", 5U, 0U, 4.0F);
+  SetByte(input.world.local_map, "obstacle", 5U, 3U, 1U);
+  SetFloat(input.world.local_map, "obstacle_height", 5U, 3U, 4.0F);
 
   const PlannerOutput output = planner.Plan(input);
 

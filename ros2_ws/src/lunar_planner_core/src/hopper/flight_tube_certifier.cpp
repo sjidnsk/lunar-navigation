@@ -86,16 +86,19 @@ struct Bounds3 final {
     const shared::MapSnapshot& map,
     const shared::GridCell cell,
     const Vec3 contact_position,
-    const HopperCapability& capability) noexcept {
+    const HopperCapability& capability,
+    const double additional_radius_m) noexcept {
   const Vec3 center = map.CellCenter(cell);
   const double half_cell = 0.5 * map.resolution_m();
   return std::abs(center.x - contact_position.x) <=
-             capability.body_half_extent_m.x +
-                 capability.minimum_lateral_clearance_m + half_cell +
+      capability.body_half_extent_m.x +
+          capability.minimum_lateral_clearance_m + additional_radius_m +
+          half_cell +
                  kTolerance &&
       std::abs(center.y - contact_position.y) <=
-             capability.body_half_extent_m.y +
-                 capability.minimum_lateral_clearance_m + half_cell +
+      capability.body_half_extent_m.y +
+          capability.minimum_lateral_clearance_m + additional_radius_m +
+          half_cell +
                  kTolerance;
 }
 
@@ -126,11 +129,12 @@ FlightTubeCertificationResult CertifyFlightTube(
     const CertifiedLandingRegion& target_region,
     const HopperCapability& capability,
     const PlannerConfig& config,
-    const std::stop_token stop_token) {
+    const std::stop_token stop_token,
+    const double additional_radius_m) {
   const double horizontal_x = capability.body_half_extent_m.x +
-      capability.minimum_lateral_clearance_m;
+      capability.minimum_lateral_clearance_m + additional_radius_m;
   const double horizontal_y = capability.body_half_extent_m.y +
-      capability.minimum_lateral_clearance_m;
+      capability.minimum_lateral_clearance_m + additional_radius_m;
   const double radius = std::hypot(horizontal_x, horizontal_y);
   if (stop_token.stop_requested()) {
     return Failure("REQUEST_CANCELED", 0U, 0U, 0.0, radius, true);
@@ -138,6 +142,7 @@ FlightTubeCertificationResult CertifyFlightTube(
   if (!IsFinite(arc.launch_position_m) || !IsFinite(arc.landing_position_m) ||
       !IsFinite(arc.launch_velocity_mps) || !IsFinite(arc.gravity_mps2) ||
       !std::isfinite(arc.flight_time_s) || arc.flight_time_s <= 0.0 ||
+      !std::isfinite(additional_radius_m) || additional_radius_m < 0.0 ||
       !std::isfinite(radius) || radius <= 0.0) {
     return Failure(
         "HOPPER_FLIGHT_TUBE_INPUT_INVALID", 0U, 0U, 0.0, radius);
@@ -188,7 +193,7 @@ FlightTubeCertificationResult CertifyFlightTube(
     };
     if (!IsFinite(bounds.minimum) || !IsFinite(bounds.maximum)) {
       return Failure(
-          "HOPPER_FLIGHT_TUBE_NUMERICAL_FAILURE", section, overlapped,
+          "HOPPER_FLIGHT_TUBE_NUMERICAL_INDETERMINATE", section, overlapped,
           0.0, radius);
     }
     const auto cell_index = [&](const double coordinate, const double origin) {
@@ -232,11 +237,11 @@ FlightTubeCertificationResult CertifyFlightTube(
         const bool source_contact = section == 0U &&
             ContactFootprintContains(
                 map, cell, source_region.aim_position_on_surface_m,
-                capability);
+                capability, additional_radius_m);
         const bool target_contact = section + 1U == section_count &&
             ContactFootprintContains(
                 map, cell, target_region.aim_position_on_surface_m,
-                capability);
+                capability, additional_radius_m);
         if (clearance < -kTolerance && !source_contact && !target_contact) {
           return Failure(
               "HOPPER_FLIGHT_TUBE_TERRAIN_COLLISION", section, overlapped,

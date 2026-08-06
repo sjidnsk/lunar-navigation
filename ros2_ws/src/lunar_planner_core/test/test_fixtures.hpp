@@ -159,6 +159,8 @@ inline PlannerInput MakeValidWheelInput() {
                   },
           },
       .config = PlannerConfig{},
+      .position_uncertainty_m = 0.05,
+      .velocity_uncertainty_mps = 0.02,
   };
   input.config.wheel.xy_resolution_m = 1.0;
   input.config.legged.xy_resolution_m = 1.0;

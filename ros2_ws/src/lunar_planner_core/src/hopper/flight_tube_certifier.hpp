@@ -16,6 +16,7 @@ namespace lunar::planning::hopper {
     const CertifiedLandingRegion& target_region,
     const HopperCapability& capability,
     const PlannerConfig& config,
-    std::stop_token stop_token);
+    std::stop_token stop_token,
+    double additional_radius_m = 0.0);
 
 }  // namespace lunar::planning::hopper

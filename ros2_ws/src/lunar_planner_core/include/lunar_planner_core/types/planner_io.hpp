@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -18,6 +19,8 @@
 #include "lunar_planner_core/types/world_snapshot.hpp"
 
 namespace lunar::planning {
+
+class RouteContinuation;
 
 enum class PlanningOutcome : std::uint8_t {
   kNewReferenceAvailable = 0,
@@ -106,6 +109,19 @@ struct HopperState final {
 
 using PlatformState = std::variant<WheeledState, LeggedState, HopperState>;
 
+struct CertifiedHopPreview final {
+  std::string segment_id;
+  Pose3 launch_pose_map;
+  Pose3 landing_pose_map;
+  Vec3 launch_velocity_mps;
+  std::chrono::nanoseconds flight_time{};
+  double flight_tube_radius_m{};
+  std::vector<Vec3> landing_region_map;
+  std::vector<Vec3> promotion_region_map;
+  double position_uncertainty_m{};
+  double velocity_uncertainty_mps{};
+};
+
 struct PlannerInput final {
   std::string request_id;
   TimePoint state_time;
@@ -116,6 +132,9 @@ struct PlannerInput final {
   PlannerConfig config;
   std::optional<ExecutionContext> previous_execution;
   std::stop_token stop_token;
+  double position_uncertainty_m{};
+  double velocity_uncertainty_mps{};
+  std::shared_ptr<const RouteContinuation> continuation;
 };
 
 struct HierarchicalPlannerMetrics final {
@@ -155,6 +174,8 @@ struct PlannerOutput final {
   std::string reason_code;
   std::optional<MotionReference> reference;
   PlannerDiagnostics diagnostics;
+  std::vector<CertifiedHopPreview> certified_hops;
+  std::shared_ptr<const RouteContinuation> continuation;
 };
 
 } // namespace lunar::planning

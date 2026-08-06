@@ -26,6 +26,7 @@
 #include "hierarchical/landing_support_field.hpp"
 #include "hierarchical/map_level.hpp"
 #include "hopper/ballistic_envelope.hpp"
+#include "hopper/flight_tube_certifier.hpp"
 #include "shared/map_snapshot.hpp"
 #include "shared/safe_projection.hpp"
 
@@ -40,6 +41,7 @@ enum class EdgeBuildStatus : std::uint8_t {
   kInfeasible,
   kInvalid,
   kCanceled,
+  kResourceExhausted,
   kNumericalIndeterminate,
 };
 
@@ -47,6 +49,15 @@ struct EdgeBuildResult final {
   EdgeBuildStatus status{EdgeBuildStatus::kInvalid};
   std::optional<NominalHopEdge> edge;
   std::string reason_code;
+  bool coarse_rejected{};
+  bool full_certification_attempted{};
+  bool full_invalidated{};
+};
+
+struct NodeCertificationRegion final {
+  hopper::CertifiedLandingRegion landing;
+  std::vector<Vec3> promotion_region_map;
+  double promotion_deviation_m{};
 };
 
 using EdgeKey = std::pair<LandingNodeId, LandingNodeId>;
@@ -63,6 +74,7 @@ Failure(const PlanningOutcome outcome, std::string reason_code,
       .outcome = outcome,
       .route = std::nullopt,
       .nominal_hops = {},
+      .certified_hops = {},
       .global_level = level,
       .maximum_horizontal_reach_m = reach_m,
       .graph_nodes = graph_nodes,
@@ -145,19 +157,16 @@ ValidReachCapability(const HopperCapability &capability) noexcept {
   return inside;
 }
 
-[[nodiscard]] bool GoalIntersectsCell(const GoalRegion &goal, const Vec3 center,
-                                      const double resolution_m) noexcept {
+[[nodiscard]] bool GoalContainsCenter(const GoalRegion &goal,
+                                      const Vec3 center) noexcept {
   if (const auto *point = std::get_if<PointGoal>(&goal.target)) {
     if (!Finite(point->position_m) || !std::isfinite(point->tolerance_m) ||
         point->tolerance_m < 0.0) {
       return false;
     }
-    const double half = resolution_m / 2.0;
-    const double dx =
-        std::max(std::abs(center.x - point->position_m.x) - half, 0.0);
-    const double dy =
-        std::max(std::abs(center.y - point->position_m.y) - half, 0.0);
-    return std::hypot(dx, dy) <= point->tolerance_m + kTolerance;
+    return std::hypot(center.x - point->position_m.x,
+                      center.y - point->position_m.y) <=
+           point->tolerance_m + kTolerance;
   }
   const auto *region = std::get_if<PlanarRegionGoal>(&goal.target);
   return region != nullptr && region->boundary_m.size() >= 3U &&
@@ -245,12 +254,94 @@ BodyPositionForNode(const LandingNodeId id, const LandingNodeId start_id,
   };
 }
 
-[[nodiscard]] EdgeBuildResult
-BuildNominalEdge(const LandingNodeId source_id, const LandingNodeId target_id,
-                 const LandingNodeId start_id, const Pose3 &start_pose_map,
-                 const Vec3 start_velocity_map, const shared::MapSnapshot &map,
-                 const HopperCapability &capability,
-                 const std::stop_token stop_token) {
+[[nodiscard]] std::optional<NodeCertificationRegion>
+BuildNodeCertificationRegion(const LandingNodeId id,
+                             const LandingNodeId start_id,
+                             const Pose3 &start_pose_map,
+                             const shared::MapSnapshot &map,
+                             const LandingSupportField &landing_field,
+                             const HopperCapability &capability,
+                             const double position_uncertainty_m) {
+  std::optional<shared::GridCell> resolved_cell;
+  if (id == start_id) {
+    resolved_cell = map.PositionToCell(
+        Vec2{start_pose_map.position_m.x, start_pose_map.position_m.y});
+  } else {
+    const shared::GridCell cell = CellForNode(id, start_id, {}, map);
+    if (map.InBounds(cell)) {
+      resolved_cell = cell;
+    }
+  }
+  if (!resolved_cell.has_value()) {
+    return std::nullopt;
+  }
+  const shared::GridCell cell = *resolved_cell;
+  const Vec3 cell_surface = map.CellCenter(cell);
+  const Vec3 body_position =
+      BodyPositionForNode(id, start_id, start_pose_map, map, capability);
+  const Vec3 surface_position{
+      .x = body_position.x,
+      .y = body_position.y,
+      .z = body_position.z - capability.body_half_extent_m.z,
+  };
+  const double center_offset_m = std::hypot(
+      surface_position.x - cell_surface.x, surface_position.y - cell_surface.y);
+  const double usable_radius_m =
+      landing_field.SupportRadiusMeters(cell) - center_offset_m;
+  const double contraction_m = position_uncertainty_m + map.resolution_m();
+  const double minimum_half_extent_m =
+      0.5 * std::sqrt(capability.minimum_landing_region_area_m2);
+  const double landing_half_extent_m =
+      std::max(minimum_half_extent_m, contraction_m + 0.5 * map.resolution_m());
+  const double promotion_half_extent_m = landing_half_extent_m - contraction_m;
+  if (!std::isfinite(usable_radius_m) || !std::isfinite(contraction_m) ||
+      !std::isfinite(landing_half_extent_m) ||
+      !std::isfinite(promotion_half_extent_m) || contraction_m < 0.0 ||
+      promotion_half_extent_m <= kTolerance ||
+      usable_radius_m + kTolerance <
+          std::numbers::sqrt2 * landing_half_extent_m) {
+    return std::nullopt;
+  }
+  const auto square = [&](const double half_extent_m) {
+    return std::vector<Vec3>{
+        {surface_position.x - half_extent_m, surface_position.y - half_extent_m,
+         surface_position.z},
+        {surface_position.x + half_extent_m, surface_position.y - half_extent_m,
+         surface_position.z},
+        {surface_position.x + half_extent_m, surface_position.y + half_extent_m,
+         surface_position.z},
+        {surface_position.x - half_extent_m, surface_position.y + half_extent_m,
+         surface_position.z},
+    };
+  };
+  std::vector<Vec3> landing_boundary = square(landing_half_extent_m);
+  std::vector<Vec3> promotion_boundary = square(promotion_half_extent_m);
+  return NodeCertificationRegion{
+      .landing =
+          hopper::CertifiedLandingRegion{
+              .seed_cell = cell,
+              .aim_position_on_surface_m = surface_position,
+              .plane_normal = {0.0, 0.0, 1.0},
+              .boundary_m = std::move(landing_boundary),
+              .area_m2 = 4.0 * landing_half_extent_m * landing_half_extent_m,
+              .maximum_slope_rad = 0.0,
+              .maximum_roughness_m = 0.0,
+              .maximum_plane_residual_m = 0.0,
+              .minimum_clearance_m = usable_radius_m,
+          },
+      .promotion_region_map = std::move(promotion_boundary),
+      .promotion_deviation_m = std::numbers::sqrt2 * promotion_half_extent_m,
+  };
+}
+
+[[nodiscard]] EdgeBuildResult BuildNominalEdge(
+    const LandingNodeId source_id, const LandingNodeId target_id,
+    const LandingNodeId start_id, const Pose3 &start_pose_map,
+    const Vec3 start_velocity_map, const shared::MapSnapshot &map,
+    const LandingSupportField &landing_field,
+    const HopperCapability &capability, const PlannerConfig &config,
+    const double position_uncertainty_m, const double velocity_uncertainty_mps,
+    const std::stop_token stop_token) {
   if (stop_token.stop_requested()) {
     return EdgeBuildResult{
         .status = EdgeBuildStatus::kCanceled,
@@ -269,6 +360,7 @@ BuildNominalEdge(const LandingNodeId source_id, const LandingNodeId target_id,
         .status = EdgeBuildStatus::kInfeasible,
         .edge = std::nullopt,
         .reason_code = "HOPPER_BALLISTIC_INFEASIBLE",
+        .coarse_rejected = true,
     };
   }
   const Vec3 initial_velocity =
@@ -296,6 +388,7 @@ BuildNominalEdge(const LandingNodeId source_id, const LandingNodeId target_id,
         .status = status,
         .edge = std::nullopt,
         .reason_code = solved.reason_code,
+        .coarse_rejected = status == EdgeBuildStatus::kInfeasible,
     };
   }
   if (!solved.arc.has_value()) {
@@ -303,6 +396,64 @@ BuildNominalEdge(const LandingNodeId source_id, const LandingNodeId target_id,
         .status = EdgeBuildStatus::kNumericalIndeterminate,
         .edge = std::nullopt,
         .reason_code = "HOPPER_BALLISTIC_NUMERICAL_INDETERMINATE",
+    };
+  }
+  const std::optional<NodeCertificationRegion> source_region =
+      BuildNodeCertificationRegion(source_id, start_id, start_pose_map, map,
+                                   landing_field, capability,
+                                   position_uncertainty_m);
+  const std::optional<NodeCertificationRegion> target_region =
+      BuildNodeCertificationRegion(target_id, start_id, start_pose_map, map,
+                                   landing_field, capability,
+                                   position_uncertainty_m);
+  if (!source_region.has_value() || !target_region.has_value()) {
+    return EdgeBuildResult{
+        .status = EdgeBuildStatus::kInfeasible,
+        .edge = std::nullopt,
+        .reason_code = "HOPPER_PROMOTION_REGION_EMPTY",
+        .full_invalidated = true,
+    };
+  }
+  const double source_position_deviation_m =
+      source_id == start_id ? position_uncertainty_m
+                            : source_region->promotion_deviation_m;
+  const double tube_expansion_margin_m =
+      source_position_deviation_m +
+      velocity_uncertainty_mps * solved.arc->flight_time_s;
+  if (!std::isfinite(tube_expansion_margin_m) ||
+      tube_expansion_margin_m < 0.0) {
+    return EdgeBuildResult{
+        .status = EdgeBuildStatus::kNumericalIndeterminate,
+        .edge = std::nullopt,
+        .reason_code = "HOPPER_FLIGHT_TUBE_NUMERICAL_INDETERMINATE",
+    };
+  }
+  const hopper::FlightTubeCertificationResult tube = hopper::CertifyFlightTube(
+      *solved.arc, map, source_region->landing, target_region->landing,
+      capability, config, stop_token, tube_expansion_margin_m);
+  if (!tube.certified) {
+    EdgeBuildStatus status = EdgeBuildStatus::kInfeasible;
+    bool full_invalidated = true;
+    if (tube.canceled || tube.reason_code == "REQUEST_CANCELED") {
+      status = EdgeBuildStatus::kCanceled;
+      full_invalidated = false;
+    } else if (tube.reason_code ==
+               "HOPPER_FLIGHT_TUBE_NUMERICAL_INDETERMINATE") {
+      status = EdgeBuildStatus::kNumericalIndeterminate;
+      full_invalidated = false;
+    } else if (tube.reason_code == "HOPPER_FLIGHT_TUBE_INPUT_INVALID") {
+      status = EdgeBuildStatus::kInvalid;
+      full_invalidated = false;
+    } else if (tube.reason_code == "HOPPER_FLIGHT_TUBE_RESOURCE_EXHAUSTED") {
+      status = EdgeBuildStatus::kResourceExhausted;
+      full_invalidated = false;
+    }
+    return EdgeBuildResult{
+        .status = status,
+        .edge = std::nullopt,
+        .reason_code = tube.reason_code,
+        .full_certification_attempted = true,
+        .full_invalidated = full_invalidated,
     };
   }
   const Vec3 velocity_change{
@@ -339,8 +490,13 @@ BuildNominalEdge(const LandingNodeId source_id, const LandingNodeId target_id,
               .target_id = target_id,
               .cost = cost,
               .arc = *solved.arc,
+              .landing_region = target_region->landing,
+              .promotion_region_map = target_region->promotion_region_map,
+              .flight_tube_radius_m = tube.radius_m,
+              .tube_expansion_margin_m = tube_expansion_margin_m,
           },
       .reason_code = {},
+      .full_certification_attempted = true,
   };
 }
 
@@ -351,6 +507,8 @@ FatalOutcome(const EdgeBuildStatus status) noexcept {
     return PlanningOutcome::kInvalidRequest;
   case EdgeBuildStatus::kCanceled:
     return PlanningOutcome::kCanceled;
+  case EdgeBuildStatus::kResourceExhausted:
+    return PlanningOutcome::kResourceExhausted;
   case EdgeBuildStatus::kNumericalIndeterminate:
     return PlanningOutcome::kNumericalFailure;
   case EdgeBuildStatus::kValid:
@@ -421,7 +579,11 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
     const auto *state = std::get_if<HopperState>(&input.current_state);
     const auto *capability = std::get_if<HopperCapability>(&input.capability);
     if (state == nullptr || capability == nullptr ||
-        !ValidReachCapability(*capability)) {
+        !ValidReachCapability(*capability) ||
+        !std::isfinite(input.position_uncertainty_m) ||
+        input.position_uncertainty_m < 0.0 ||
+        !std::isfinite(input.velocity_uncertainty_mps) ||
+        input.velocity_uncertainty_mps < 0.0) {
       return Failure(PlanningOutcome::kInvalidRequest,
                      "HOPPER_GLOBAL_CONFIGURATION_INVALID", started);
     }
@@ -527,9 +689,8 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
           .x = static_cast<std::int32_t>(id % snapshot.snapshot->width()),
           .y = static_cast<std::int32_t>(id / snapshot.snapshot->width()),
       };
-      if (GoalIntersectsCell(input.goal_map,
-                             snapshot.snapshot->CellCenter(cell),
-                             snapshot.snapshot->resolution_m())) {
+      if (GoalContainsCenter(input.goal_map,
+                             snapshot.snapshot->CellCenter(cell))) {
         goal_mask[id] = 1U;
         ++goal_count;
       }
@@ -547,17 +708,31 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
     std::map<EdgeKey, EdgeBuildResult> edge_cache;
     std::size_t graph_edge_count = 0U;
     std::size_t evaluated_edge_pairs = 0U;
+    std::size_t coarse_edges_rejected = 0U;
+    std::size_t full_edges_certified = 0U;
+    std::size_t full_edges_invalidated = 0U;
+    std::size_t edge_certificate_cache_hits = 0U;
     const auto get_edge =
         [&](const LandingNodeId source_id,
             const LandingNodeId target_id) -> const EdgeBuildResult & {
       const EdgeKey key{source_id, target_id};
       if (const auto found = edge_cache.find(key); found != edge_cache.end()) {
+        ++edge_certificate_cache_hits;
         return found->second;
       }
       ++evaluated_edge_pairs;
       EdgeBuildResult built = BuildNominalEdge(
           source_id, target_id, start_id, *start_pose_map, *start_velocity_map,
-          *snapshot.snapshot, *capability, input.stop_token);
+          *snapshot.snapshot, *landing_field.field, *capability, input.config,
+          input.position_uncertainty_m, input.velocity_uncertainty_mps,
+          input.stop_token);
+      coarse_edges_rejected += static_cast<std::size_t>(built.coarse_rejected);
+      if (built.full_certification_attempted) {
+        full_edges_certified +=
+            static_cast<std::size_t>(built.status == EdgeBuildStatus::kValid);
+      }
+      full_edges_invalidated +=
+          static_cast<std::size_t>(built.full_invalidated);
       if (built.status == EdgeBuildStatus::kValid) {
         ++graph_edge_count;
       }
@@ -693,15 +868,39 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
           landing_field.field->EstimatedWorkMemoryBytes() +
           spatial_index.EstimatedWorkMemoryBytes() + working_memory_bytes +
           edge_cache.size() * (sizeof(EdgeKey) + sizeof(EdgeBuildResult));
+      std::vector<CertifiedHopPreview> certified_hops;
+      certified_hops.reserve(nominal_hops.size());
+      for (std::size_t index = 0U; index < nominal_hops.size(); ++index) {
+        const NominalHopEdge &edge = nominal_hops[index];
+        certified_hops.push_back(CertifiedHopPreview{
+            .segment_id =
+                "hopper/" + input.request_id + "/hop/" + std::to_string(index),
+            .launch_pose_map = route.poses_map[index],
+            .landing_pose_map = route.poses_map[index + 1U],
+            .launch_velocity_mps = edge.arc.launch_velocity_mps,
+            .flight_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::duration<double>{edge.arc.flight_time_s}),
+            .flight_tube_radius_m = edge.flight_tube_radius_m,
+            .landing_region_map = edge.landing_region.boundary_m,
+            .promotion_region_map = edge.promotion_region_map,
+            .position_uncertainty_m = input.position_uncertainty_m,
+            .velocity_uncertainty_mps = input.velocity_uncertainty_mps,
+        });
+      }
       return HopperRoutePlanResult{
           .outcome = PlanningOutcome::kNewReferenceAvailable,
           .route = std::move(route),
           .nominal_hops = std::move(nominal_hops),
+          .certified_hops = std::move(certified_hops),
           .global_level = levels.global_level,
           .maximum_horizontal_reach_m = reach,
           .graph_nodes = graph_node_count,
           .graph_edges = graph_edge_count,
           .evaluated_edge_pairs = evaluated_edge_pairs,
+          .coarse_edges_rejected = coarse_edges_rejected,
+          .full_edges_certified = full_edges_certified,
+          .full_edges_invalidated = full_edges_invalidated,
+          .edge_certificate_cache_hits = edge_certificate_cache_hits,
           .route_hops = node_path.size() - 1U,
           .expanded_nodes = expanded,
           .landing_field_elapsed = landing_field.elapsed,
@@ -963,11 +1162,16 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
       }
 
       if (!reached_goal.has_value()) {
-        return Failure(PlanningOutcome::kNoKnownSafeRoute,
-                       "GLOBAL_NO_KNOWN_SAFE_ROUTE", started, reach,
-                       levels.global_level, graph_node_count, graph_edge_count,
-                       total_expanded, evaluated_edge_pairs,
-                       landing_field.elapsed);
+        HopperRoutePlanResult failure = Failure(
+            PlanningOutcome::kNoKnownSafeRoute, "GLOBAL_NO_KNOWN_SAFE_ROUTE",
+            started, reach, levels.global_level, graph_node_count,
+            graph_edge_count, total_expanded, evaluated_edge_pairs,
+            landing_field.elapsed);
+        failure.coarse_edges_rejected = coarse_edges_rejected;
+        failure.full_edges_certified = full_edges_certified;
+        failure.full_edges_invalidated = full_edges_invalidated;
+        failure.edge_certificate_cache_hits = edge_certificate_cache_hits;
+        return failure;
       }
 
       std::vector<LandingNodeId> node_path;
