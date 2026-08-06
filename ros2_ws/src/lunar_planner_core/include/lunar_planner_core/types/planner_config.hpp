@@ -69,9 +69,6 @@ struct LeggedPlannerConfig final {
 };
 
 struct HopperPlannerConfig final {
-  std::size_t maximum_landing_regions{64U};
-  std::size_t maximum_graph_nodes{128U};
-  std::size_t maximum_graph_out_degree{8U};
   std::size_t maximum_flight_tube_sections{128U};
   std::size_t maximum_authorized_hops{1U};
 };

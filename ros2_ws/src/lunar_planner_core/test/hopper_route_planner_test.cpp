@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -15,6 +16,13 @@
 
 namespace lunar::planning::hierarchical {
 namespace {
+
+template <typename Config>
+concept HasTruncatingHopperGraphLimits = requires(Config config) {
+  config.maximum_landing_regions;
+  config.maximum_graph_nodes;
+  config.maximum_graph_out_degree;
+};
 
 [[nodiscard]] PlannerInput ThreeHopInput() {
   PlannerInput input = test::MakeValidHopperInput();
@@ -84,8 +92,53 @@ namespace {
       .position_m = {17.25, 7.25, 0.0},
       .tolerance_m = 0.1,
   };
-  input.config.hopper.maximum_landing_regions = 64U;
-  input.config.hopper.maximum_graph_nodes = 128U;
+  return input;
+}
+
+[[nodiscard]] PlannerInput LongChainBeyondLegacyNodeCap() {
+  PlannerInput input = ThreeHopInput();
+  input.request_id = "complete-long-hopper-chain";
+  input.world.global_map = test::MakeFlatMap("map", 720U, 1U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 720U, 1U, 0.5);
+  input.config.global_map.maximum_cells = 2'048U;
+  input.config.global_map.maximum_axis_cells = 2'048U;
+  input.goal_map.target = PointGoal{
+      .position_m = {350.25, 0.25, 0.0},
+      .tolerance_m = 0.1,
+  };
+  return input;
+}
+
+[[nodiscard]] PlannerInput CulDeSacWithCompleteDetour() {
+  PlannerInput input = ThreeHopInput();
+  input.request_id = "hopper-complete-detour";
+  input.world.global_map = test::MakeFlatMap("map", 52U, 32U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 52U, 32U, 0.5);
+  input.config.global_map.maximum_cells = 4'096U;
+  input.config.global_map.maximum_axis_cells = 4'096U;
+  input.current_state = HopperState{
+      .pose = Pose3{.position_m = {2.25, 5.25, 0.5}},
+  };
+  input.goal_map.target = PointGoal{
+      .position_m = {23.25, 5.25, 0.0},
+      .tolerance_m = 0.1,
+  };
+  auto &valid = std::get<std::vector<std::uint8_t>>(
+      input.world.global_map.layers.at("valid_mask").values);
+  std::fill(valid.begin(), valid.end(), 0U);
+  const auto mark_rectangle =
+      [&](const std::size_t minimum_x, const std::size_t maximum_x,
+          const std::size_t minimum_y, const std::size_t maximum_y) {
+        for (std::size_t y = minimum_y; y <= maximum_y; ++y) {
+          for (std::size_t x = minimum_x; x <= maximum_x; ++x) {
+            valid[y * input.world.global_map.width + x] = 1U;
+          }
+        }
+      };
+  mark_rectangle(2U, 30U, 8U, 12U);
+  mark_rectangle(2U, 10U, 8U, 26U);
+  mark_rectangle(2U, 48U, 22U, 26U);
+  mark_rectangle(44U, 48U, 8U, 26U);
   return input;
 }
 
@@ -135,8 +188,7 @@ TEST(HopperRoutePlanner,
                            << " nodes=" << result.graph_nodes
                            << " edges=" << result.graph_edges
                            << " expanded=" << result.expanded_nodes
-                           << " evaluated=" << result.evaluated_edge_pairs
-                           << " truncated=" << result.graph_truncated;
+                           << " evaluated=" << result.evaluated_edge_pairs;
   ASSERT_TRUE(result.route.has_value());
   EXPECT_EQ(result.reason_code, "HOPPER_GLOBAL_ROUTE_AVAILABLE");
   EXPECT_EQ(result.route_hops, 1U);
@@ -156,13 +208,56 @@ TEST(HopperRoutePlanner,
                            << " nodes=" << result.graph_nodes
                            << " edges=" << result.graph_edges
                            << " expanded=" << result.expanded_nodes
-                           << " evaluated=" << result.evaluated_edge_pairs
-                           << " truncated=" << result.graph_truncated;
+                           << " evaluated=" << result.evaluated_edge_pairs;
   EXPECT_GT(result.route_hops, 1U);
-  EXPECT_LE(result.graph_nodes, input.config.hopper.maximum_graph_nodes);
+  EXPECT_GT(result.graph_nodes, 128U);
 }
 
-TEST(HopperRoutePlanner, DistinguishesACompleteBrokenChainFromResourceLimits) {
+TEST(HopperRoutePlanner, SolvesAChainRequiringMoreThan128LandingNodes) {
+  const HopperRoutePlanResult result =
+      PlanHopperGlobalRoute(LongChainBeyondLegacyNodeCap());
+
+  ASSERT_TRUE(result.ok()) << result.reason_code
+                           << " nodes=" << result.graph_nodes
+                           << " edges=" << result.graph_edges
+                           << " expanded=" << result.expanded_nodes;
+  EXPECT_GT(result.route_hops, 128U);
+  EXPECT_GT(result.graph_nodes, 128U);
+  ASSERT_TRUE(result.route.has_value());
+  EXPECT_EQ(result.route->poses_map.size(), result.route_hops + 1U);
+}
+
+TEST(HopperRoutePlanner, ConnectsAlreadyIndexedNonGoalLandingCenters) {
+  const PlannerInput input = ReachableFrontierInput();
+  const HopperRoutePlanResult result = PlanHopperGlobalRoute(input);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_GT(result.nominal_hops.size(), 1U);
+  EXPECT_EQ(result.nominal_hops.size(), result.route_hops);
+  for (std::size_t index = 1U; index < result.nominal_hops.size(); ++index) {
+    EXPECT_EQ(result.nominal_hops[index].source_id,
+              result.nominal_hops[index - 1U].target_id);
+    EXPECT_LT(result.nominal_hops[index].source_id,
+              input.world.global_map.CellCount());
+  }
+}
+
+TEST(HopperRoutePlanner, FallsBackToCompleteSearchAfterAGreedyCulDeSac) {
+  const HopperRoutePlanResult result =
+      PlanHopperGlobalRoute(CulDeSacWithCompleteDetour());
+
+  ASSERT_TRUE(result.ok()) << result.reason_code
+                           << " nodes=" << result.graph_nodes
+                           << " edges=" << result.graph_edges
+                           << " expanded=" << result.expanded_nodes;
+  ASSERT_TRUE(result.route.has_value());
+  const auto maximum_y =
+      std::ranges::max(result.route->poses_map, {},
+                       [](const Pose3 &pose) { return pose.position_m.y; });
+  EXPECT_GT(maximum_y.position_m.y, 10.0);
+}
+
+TEST(HopperRoutePlanner, ExhaustsACompleteBrokenChainBeforeReportingNoRoute) {
   PlannerInput broken = ThreeHopInput();
   for (std::size_t x = 7U; x <= 11U; ++x) {
     SetByte(broken.world.global_map, "valid_mask", x, 0U, 0U);
@@ -172,21 +267,7 @@ TEST(HopperRoutePlanner, DistinguishesACompleteBrokenChainFromResourceLimits) {
 
   EXPECT_EQ(no_path.outcome, PlanningOutcome::kNoKnownSafeRoute);
   EXPECT_EQ(no_path.reason_code, "GLOBAL_NO_KNOWN_SAFE_ROUTE");
-  EXPECT_FALSE(no_path.graph_truncated);
-
-  PlannerInput nodes = ThreeHopInput();
-  nodes.config.hopper.maximum_graph_nodes = 2U;
-  const HopperRoutePlanResult node_limit = PlanHopperGlobalRoute(nodes);
-  EXPECT_EQ(node_limit.outcome, PlanningOutcome::kResourceExhausted);
-  EXPECT_EQ(node_limit.reason_code, "HOPPER_GLOBAL_ROUTE_RESOURCE_LIMIT");
-  EXPECT_TRUE(node_limit.graph_truncated);
-
-  PlannerInput degree = ThreeHopInput();
-  degree.config.hopper.maximum_graph_out_degree = 1U;
-  const HopperRoutePlanResult degree_limit = PlanHopperGlobalRoute(degree);
-  ASSERT_TRUE(degree_limit.ok()) << degree_limit.reason_code;
-  EXPECT_EQ(degree_limit.reason_code, "HOPPER_GLOBAL_ROUTE_AVAILABLE");
-  EXPECT_TRUE(degree_limit.graph_truncated);
+  EXPECT_GT(no_path.expanded_nodes, 0U);
 }
 
 TEST(HopperRoutePlanner, RejectsAGlobalCellWiderThanHalfTheHopReach) {
@@ -244,9 +325,8 @@ TEST(HopperRoutePlanner, BoundsEdgeEvaluationToExpandedReachableFrontier) {
   ASSERT_TRUE(result.ok()) << result.reason_code;
   EXPECT_GT(result.evaluated_edge_pairs, 0U);
   EXPECT_LE(result.evaluated_edge_pairs,
-            result.expanded_nodes *
-                (input.config.hopper.maximum_landing_regions + 1U));
-  EXPECT_LT(result.expanded_nodes, result.graph_nodes);
+            result.expanded_nodes * result.graph_nodes);
+  EXPECT_LE(result.expanded_nodes, result.graph_nodes);
 }
 
 TEST(HopperRoutePlanner, PublishesTheFullPreviewButAuthorizesOnlyOneHop) {
@@ -283,6 +363,8 @@ TEST(HopperRoutePlanner, RejectsWhenTheFirstLocalFlightTubeIsBlocked) {
   EXPECT_EQ(output.reason_code, "HOPPER_FLIGHT_TUBE_OBSTACLE_COLLISION");
   EXPECT_FALSE(output.reference.has_value());
 }
+
+static_assert(!HasTruncatingHopperGraphLimits<HopperPlannerConfig>);
 
 } // namespace
 } // namespace lunar::planning::hierarchical

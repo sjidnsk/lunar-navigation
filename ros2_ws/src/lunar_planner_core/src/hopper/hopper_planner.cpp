@@ -127,10 +127,7 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_hopper";
 }
 
 [[nodiscard]] bool ValidResources(const HopperPlannerConfig& config) noexcept {
-  return config.maximum_landing_regions > 0U &&
-      config.maximum_graph_nodes > 0U &&
-      config.maximum_graph_out_degree > 0U &&
-      config.maximum_flight_tube_sections >= 2U &&
+  return config.maximum_flight_tube_sections >= 2U &&
       config.maximum_authorized_hops > 0U;
 }
 

@@ -261,11 +261,6 @@ TEST(HierarchicalRegression, FiftyMetreFailuresRemainExplicitAndBounded) {
   EXPECT_EQ(
     insufficient.reason_code, "HOPPER_START_REGION_AREA_INSUFFICIENT");
 
-  PlannerInput hopper = FiftyMetreInput(PlatformType::kHopper);
-  hopper.config.hopper.maximum_graph_nodes = 2U;
-  const PlannerOutput resource = planner.Plan(hopper);
-  EXPECT_EQ(resource.outcome, PlanningOutcome::kResourceExhausted);
-  EXPECT_EQ(resource.reason_code, "HOPPER_GLOBAL_ROUTE_RESOURCE_LIMIT");
 }
 
 TEST(HierarchicalRegression, LeggedPassesTerrainRejectedForWheel) {
@@ -299,7 +294,7 @@ TEST(HierarchicalRegression, LeggedPassesTerrainRejectedForWheel) {
 
 TEST(
   HierarchicalRegression,
-  HopperDistinguishesMultiHopChainResolutionAndResourceFailures) {
+  HopperDistinguishesMultiHopChainResolutionAndCompleteNoRoute) {
   Planner planner;
   const PlannerInput input = ThreeHopInput();
   const HopperRoutePlanResult route = PlanHopperGlobalRoute(input);
@@ -328,11 +323,6 @@ TEST(
   EXPECT_EQ(resolution.outcome, PlanningOutcome::kResourceExhausted);
   EXPECT_EQ(resolution.reason_code, "HOPPER_GLOBAL_RESOLUTION_INSUFFICIENT");
 
-  PlannerInput limited = ThreeHopInput();
-  limited.config.hopper.maximum_graph_nodes = 2U;
-  const PlannerOutput resource = planner.Plan(limited);
-  EXPECT_EQ(resource.outcome, PlanningOutcome::kResourceExhausted);
-  EXPECT_EQ(resource.reason_code, "HOPPER_GLOBAL_ROUTE_RESOURCE_LIMIT");
 }
 
 TEST(HierarchicalRegression, SeparatesGlobalSuccessFromLocalCoverageFailure) {

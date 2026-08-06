@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <vector>
@@ -15,12 +16,17 @@
 
 namespace lunar::planning::hierarchical {
 
+using LandingNodeId = std::size_t;
+
 struct LandingSupportFieldBuildResult;
 
 class LandingSupportField final {
 public:
   [[nodiscard]] bool BaseSafe(shared::GridCell cell) const noexcept;
   [[nodiscard]] bool CenterSafe(shared::GridCell cell) const noexcept;
+  [[nodiscard]] std::span<const LandingNodeId> SafeCenterIds() const noexcept;
+  [[nodiscard]] std::shared_ptr<const shared::MapSnapshot>
+  SourceMap() const noexcept;
   [[nodiscard]] double RequiredRadiusMeters() const noexcept;
   [[nodiscard]] std::size_t EstimatedWorkMemoryBytes() const noexcept;
 
@@ -34,6 +40,7 @@ private:
   std::vector<std::uint8_t> base_safe_;
   std::vector<std::uint8_t> center_safe_;
   std::vector<double> squared_distance_cells_;
+  std::vector<LandingNodeId> safe_center_ids_;
   double required_radius_m_{};
 };
 

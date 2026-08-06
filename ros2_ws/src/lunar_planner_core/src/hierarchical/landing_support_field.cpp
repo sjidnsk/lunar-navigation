@@ -256,6 +256,7 @@ BuildLandingSupportField(const shared::SafeProjection &projection,
   const double resolution = field.map_->resolution_m();
   const double half_diagonal = resolution * std::numbers::sqrt2 / 2.0;
   field.center_safe_.assign(field.map_->cell_count(), 0U);
+  field.safe_center_ids_.reserve(field.map_->cell_count());
   for (std::size_t index = 0U; index < field.map_->cell_count(); ++index) {
     if (stop_token.stop_requested()) {
       return Failure(started, "REQUEST_CANCELED");
@@ -280,6 +281,9 @@ BuildLandingSupportField(const shared::SafeProjection &projection,
         std::min(boundary_distance_m, unsafe_distance_m);
     field.center_safe_[index] = static_cast<std::uint8_t>(
         support_radius_m + kTolerance >= field.required_radius_m_);
+    if (field.center_safe_[index] != 0U) {
+      field.safe_center_ids_.push_back(index);
+    }
   }
 
   return LandingSupportFieldBuildResult{
@@ -301,6 +305,16 @@ bool LandingSupportField::CenterSafe(
          center_safe_[map_->Index(cell)] != 0U;
 }
 
+std::span<const LandingNodeId>
+LandingSupportField::SafeCenterIds() const noexcept {
+  return safe_center_ids_;
+}
+
+std::shared_ptr<const shared::MapSnapshot>
+LandingSupportField::SourceMap() const noexcept {
+  return map_;
+}
+
 double LandingSupportField::RequiredRadiusMeters() const noexcept {
   return required_radius_m_;
 }
@@ -313,6 +327,7 @@ std::size_t LandingSupportField::EstimatedWorkMemoryBytes() const noexcept {
   return base_safe_.capacity() * sizeof(std::uint8_t) +
          center_safe_.capacity() * sizeof(std::uint8_t) +
          squared_distance_cells_.capacity() * sizeof(double) +
+         safe_center_ids_.capacity() * sizeof(LandingNodeId) +
          map_->cell_count() * sizeof(double) +
          maximum_axis *
              (2U * sizeof(double) + sizeof(std::size_t) + sizeof(double));

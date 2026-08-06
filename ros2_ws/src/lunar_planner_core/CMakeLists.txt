@@ -26,6 +26,7 @@ add_library(${PROJECT_NAME} SHARED
   src/hierarchical/global_route_planner.cpp
   src/hierarchical/grid_search.cpp
   src/hierarchical/hopper_route_planner.cpp
+  src/hierarchical/landing_spatial_index.cpp
   src/hierarchical/landing_support_field.cpp
   src/hierarchical/local_frontier.cpp
   src/hierarchical/map_level.cpp
@@ -193,6 +194,14 @@ if(BUILD_TESTING)
   target_link_libraries(
     lunar_planner_core_ballistic_envelope_test ${PROJECT_NAME})
   lunar_enable_sanitizers(lunar_planner_core_ballistic_envelope_test)
+
+  ament_add_gtest(lunar_planner_core_landing_spatial_index_test
+    test/landing_spatial_index_test.cpp)
+  target_include_directories(
+    lunar_planner_core_landing_spatial_index_test PRIVATE src test)
+  target_link_libraries(
+    lunar_planner_core_landing_spatial_index_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_landing_spatial_index_test)
 
   ament_add_gtest(lunar_planner_core_hopper_route_planner_test
     test/hopper_route_planner_test.cpp)
