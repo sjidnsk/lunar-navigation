@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <memory>
 #include <new>
 #include <optional>
 #include <string>
@@ -17,6 +18,7 @@
 #include "hierarchical/local_frontier.hpp"
 #include "hierarchical/map_level.hpp"
 #include "hierarchical/reference_composer.hpp"
+#include "hierarchical/route_continuation.hpp"
 #include "hopper/commitment_state_machine.hpp"
 #include "hopper/hopper_planner.hpp"
 #include "legged/legged_planner.hpp"
@@ -96,7 +98,10 @@ GroundMetrics(const PlannerInput &input,
               const std::uint64_t local_expanded_states,
               const std::size_t local_attempts,
               const double frontier_distance_m,
-              const std::chrono::nanoseconds local_elapsed) {
+              const std::chrono::nanoseconds local_elapsed,
+              const bool route_reused = false,
+              const std::size_t route_cursor = 0U,
+              const std::uint64_t rolling_request_count = 1U) {
   const hierarchical::GlobalRoute *route =
       global.route.has_value() ? &*global.route : nullptr;
   return HierarchicalPlannerMetrics{
@@ -117,7 +122,17 @@ GroundMetrics(const PlannerInput &input,
       .local_attempts = local_attempts,
       .corridor_width_m =
           frontiers == nullptr ? 0.0 : 2.0 * frontiers->corridor_half_width_m,
+      .route_reused = route_reused,
+      .route_cursor = route_cursor,
+      .rolling_request_count = rolling_request_count,
   };
+}
+
+[[nodiscard]] std::string GroundRouteId(const PlatformType platform,
+                                        const std::string &request_id) {
+  return (platform == PlatformType::kWheeled ? "wheel-route/"
+                                             : "legged-route/") +
+         request_id;
 }
 
 } // namespace
@@ -197,15 +212,53 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
                      "PLANNER_BACKEND_NOT_CONFIGURED", started);
     }
 
-    const hierarchical::GlobalRoutePlanResult global =
-        hierarchical::PlanGroundGlobalRoute(input);
+    bool route_reused = false;
+    std::size_t route_cursor = 0U;
+    std::uint64_t rolling_request_count = 1U;
+    hierarchical::GlobalRoutePlanResult global;
+    if (input.continuation != nullptr) {
+      hierarchical::GroundRouteReuseResult reused =
+          hierarchical::TryReuseGroundRoute(input, *input.continuation);
+      if (reused.ok()) {
+        route_reused = true;
+        route_cursor = reused.route_cursor;
+        rolling_request_count =
+            input.continuation->rolling_request_count() + 1U;
+        global = hierarchical::GlobalRoutePlanResult{
+            .outcome = PlanningOutcome::kNewReferenceAvailable,
+            .reason_code = "GLOBAL_ROUTE_AVAILABLE",
+            .route = std::move(reused.route),
+            .global_level = levels.global_level,
+            .elapsed = {},
+        };
+      }
+    }
+    if (!route_reused) {
+      global = hierarchical::PlanGroundGlobalRoute(input);
+    }
     if (!global.ok()) {
       return Failure(global.outcome, FailureDirective(global.outcome),
                      global.reason_code, started, 0U, std::nullopt, {},
                      GroundMetrics(input, global, nullptr, 0U, 0U, 0.0, {}));
     }
-    const hierarchical::LocalFrontierResult frontiers =
+    hierarchical::LocalFrontierResult frontiers =
         hierarchical::BuildLocalFrontiers(input, *global.route);
+    if (!frontiers.ok() && route_reused) {
+      global = hierarchical::PlanGroundGlobalRoute(input);
+      route_reused = false;
+      route_cursor = 0U;
+      rolling_request_count = 1U;
+      if (global.ok()) {
+        frontiers = hierarchical::BuildLocalFrontiers(input, *global.route);
+      }
+    }
+    if (!global.ok()) {
+      return Failure(global.outcome, FailureDirective(global.outcome),
+                     global.reason_code, started, 0U, std::nullopt, {},
+                     GroundMetrics(input, global, nullptr, 0U, 0U, 0.0, {},
+                                   route_reused, route_cursor,
+                                   rolling_request_count));
+    }
     if (!frontiers.ok()) {
       PlanningOutcome outcome = PlanningOutcome::kInvalidRequest;
       if (frontiers.status ==
@@ -262,6 +315,16 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
                             frontiers.frontier_distances_m[attempt],
                             local_elapsed));
         }
+        const std::string reference_plan_id = composed.reference->plan_id;
+        const std::string route_id =
+            route_reused ? input.continuation->route_id()
+                         : GroundRouteId(platform, input.request_id);
+        const hierarchical::GlobalRoute &continuation_route =
+            route_reused ? input.continuation->global_route() : *global.route;
+        auto continuation = std::make_shared<const RouteContinuation>(
+            route_id, reference_plan_id, input, continuation_route,
+            std::vector<CertifiedHopPreview>{}, route_cursor,
+            frontiers.corridor_half_width_m, rolling_request_count);
         return PlannerOutput{
             .outcome = outcome,
             .directive = directive,
@@ -279,9 +342,11 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
                     .warning_codes = std::move(warnings),
                     .hierarchical = GroundMetrics(
                         input, global, &frontiers, local_expanded, attempts,
-                        frontiers.frontier_distances_m[attempt], local_elapsed),
+                        frontiers.frontier_distances_m[attempt], local_elapsed,
+                        route_reused, route_cursor, rolling_request_count),
                     .local_trajectory = std::move(local_trajectory),
                 },
+            .continuation = std::move(continuation),
         };
       }
       if (local.outcome == PlanningOutcome::kCanceled ||

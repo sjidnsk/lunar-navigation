@@ -118,6 +118,14 @@ if(BUILD_TESTING)
     lunar_planner_core_hierarchical_planner_test ${PROJECT_NAME})
   lunar_enable_sanitizers(lunar_planner_core_hierarchical_planner_test)
 
+  ament_add_gtest(lunar_planner_core_route_continuation_test
+    test/route_continuation_test.cpp)
+  target_include_directories(
+    lunar_planner_core_route_continuation_test PRIVATE src test)
+  target_link_libraries(
+    lunar_planner_core_route_continuation_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_route_continuation_test)
+
   ament_add_gtest(lunar_planner_core_hierarchical_regression_test
     test/hierarchical_regression_test.cpp)
   target_include_directories(

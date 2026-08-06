@@ -124,6 +124,13 @@ struct CertifiedHopPreview final {
 
 struct PlannerInput final {
   std::string request_id;
+  std::string mission_id;
+  std::uint64_t mission_revision{};
+  std::string platform_id;
+  std::string capability_version;
+  std::uint64_t global_map_generation{};
+  std::uint64_t local_map_generation{};
+  std::uint64_t map_from_odom_generation{};
   TimePoint state_time;
   PlatformState current_state;
   GoalRegion goal_map;
@@ -156,6 +163,9 @@ struct HierarchicalPlannerMetrics final {
   std::size_t hopper_graph_edges{};
   std::size_t hopper_route_hops{};
   std::size_t hopper_certification_attempts{};
+  bool route_reused{};
+  std::size_t route_cursor{};
+  std::uint64_t rolling_request_count{1U};
 };
 
 struct PlannerDiagnostics final {

@@ -125,11 +125,9 @@ CommitmentTransition CommitmentStateMachine::Transition(
         if (!Matches(current, event, false)) {
           return Reject(current, "COMMITMENT_ID_MISMATCH");
         }
-        return Accept(HopperExecutionContext{
-            .state = HopperExecutionState::kLandedHold,
-            .active_plan_id = std::nullopt,
-            .active_segment_id = std::nullopt,
-        });
+        HopperExecutionContext next = current;
+        next.state = HopperExecutionState::kLandedHold;
+        return Accept(std::move(next));
       }
       if (event.type == CommitmentEventType::kInvalidateCommittedHop) {
         HopperExecutionContext next = current;

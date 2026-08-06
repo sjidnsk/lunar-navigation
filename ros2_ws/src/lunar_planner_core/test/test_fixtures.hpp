@@ -63,6 +63,13 @@ inline Quaternion YawQuaternion(const double yaw_rad) {
 inline PlannerInput MakeValidWheelInput() {
   PlannerInput input{
       .request_id = "public-api-wheel",
+      .mission_id = "test-mission",
+      .mission_revision = 1U,
+      .platform_id = "test-wheel",
+      .capability_version = "test-wheel-capability-v1",
+      .global_map_generation = 1U,
+      .local_map_generation = 1U,
+      .map_from_odom_generation = 1U,
       .state_time = TimePoint{.nanoseconds_since_epoch = 1'000'000'000},
       .current_state =
           WheeledState{
@@ -171,6 +178,8 @@ inline PlannerInput MakeValidWheelInput() {
 inline PlannerInput MakeValidLeggedInput() {
   PlannerInput input = MakeValidWheelInput();
   input.request_id = "public-api-legged";
+  input.platform_id = "test-legged";
+  input.capability_version = "test-legged-capability-v1";
   input.current_state = LeggedState{
       .body_pose = Pose3{.position_m = {2.5, 3.5, 0.5}},
   };
@@ -229,6 +238,8 @@ inline PlannerInput MakeValidLeggedInput() {
 inline PlannerInput MakeValidHopperInput() {
   PlannerInput input = MakeValidWheelInput();
   input.request_id = "public-api-hopper";
+  input.platform_id = "test-hopper";
+  input.capability_version = "test-hopper-capability-v1";
   input.current_state = HopperState{
       .pose = Pose3{.position_m = {3.0, 3.0, 0.5}},
   };

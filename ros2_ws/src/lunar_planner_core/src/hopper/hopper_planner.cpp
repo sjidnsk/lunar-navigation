@@ -16,6 +16,7 @@
 #include "hierarchical/frame_transform.hpp"
 #include "hierarchical/hopper_route_planner.hpp"
 #include "hierarchical/local_planning_problem.hpp"
+#include "hierarchical/map_level.hpp"
 #include "hierarchical/route_continuation.hpp"
 #include "hopper/commitment_state_machine.hpp"
 #include "hopper/flight_tube_certifier.hpp"
@@ -167,6 +168,139 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_hopper";
       "REQUEST_CANCELED", started, expanded_states);
 }
 
+[[nodiscard]] PlannerOutput PromoteCertifiedHop(
+    const PlannerInput& input, const HopperState& state,
+    const RouteContinuation& previous,
+    const hierarchical::HopperHopPromotionResult& promotion,
+    const std::chrono::steady_clock::time_point started) {
+  if (!promotion.ok() || !promotion.hop.has_value()) {
+    return Failure(
+        PlanningOutcome::kNumericalFailure,
+        ExecutionDirective::kNoSafeReference,
+        "HOPPER_PROMOTION_RESULT_INVALID", started);
+  }
+  const CertifiedHopPreview& preview = *promotion.hop;
+  const auto actual_map = hierarchical::TransformPose(
+      state.pose, input.world.map_from_odom,
+      hierarchical::TransformDirection::kChildToParent);
+  RigidTransform vector_rotation = input.world.map_from_odom;
+  vector_rotation.translation_m = {};
+  const auto launch_velocity_odom = hierarchical::TransformPoint(
+      preview.launch_velocity_mps, vector_rotation,
+      hierarchical::TransformDirection::kParentToChild);
+  std::vector<Vec3> landing_region_odom;
+  landing_region_odom.reserve(preview.landing_region_map.size());
+  for (const Vec3 vertex_map : preview.landing_region_map) {
+    const auto vertex_odom = hierarchical::TransformPoint(
+        vertex_map, input.world.map_from_odom,
+        hierarchical::TransformDirection::kParentToChild);
+    if (!vertex_odom.has_value()) {
+      return Failure(
+          PlanningOutcome::kInvalidRequest,
+          ExecutionDirective::kNoSafeReference,
+          "FRAME_TRANSFORM_INVALID", started);
+    }
+    landing_region_odom.push_back(*vertex_odom);
+  }
+  if (!actual_map.has_value() || !launch_velocity_odom.has_value() ||
+      landing_region_odom.size() < 3U || preview.flight_time.count() <= 0 ||
+      !std::isfinite(preview.flight_tube_radius_m) ||
+      preview.flight_tube_radius_m <= 0.0) {
+    return Failure(
+        PlanningOutcome::kInvalidRequest,
+        ExecutionDirective::kNoSafeReference,
+        "FRAME_TRANSFORM_INVALID", started);
+  }
+
+  const HopSegment segment{
+      .segment_id = preview.segment_id,
+      .launch_pose = state.pose,
+      .landing_region_boundary_m = std::move(landing_region_odom),
+      .flight_time = preview.flight_time,
+      .launch_velocity_mps = *launch_velocity_odom,
+      .flight_tube_radius_m = preview.flight_tube_radius_m,
+  };
+  std::vector<Pose3> route_preview;
+  route_preview.reserve(previous.certified_hops().size() -
+                        promotion.route_cursor + 1U);
+  route_preview.push_back(*actual_map);
+  for (std::size_t index = promotion.route_cursor;
+       index < previous.certified_hops().size(); ++index) {
+    route_preview.push_back(previous.certified_hops()[index].landing_pose_map);
+  }
+  const std::string plan_id = "hopper/" + input.request_id;
+  auto continuation = std::make_shared<const RouteContinuation>(
+      previous.route_id(), plan_id, input, previous.global_route(),
+      previous.certified_hops(), promotion.route_cursor, 0.0,
+      previous.rolling_request_count() + 1U);
+  const double size_x_m = static_cast<double>(input.world.global_map.width) *
+                          input.world.global_map.resolution_m;
+  const double size_y_m = static_cast<double>(input.world.global_map.height) *
+                          input.world.global_map.resolution_m;
+  const hierarchical::ExpectedMapLevelResult map_level =
+      hierarchical::ExpectedGlobalMapLevel(size_x_m, size_y_m,
+                                           input.config.global_map);
+  const double local_distance = std::hypot(
+      preview.landing_pose_map.position_m.x - actual_map->position_m.x,
+      preview.landing_pose_map.position_m.y - actual_map->position_m.y);
+  std::vector<std::string> warnings{"HOPPER_FIRST_HOP_ONLY"};
+  if (promotion.route_cursor + 1U < previous.certified_hops().size()) {
+    warnings.emplace_back("HOPPER_REMAINING_HOPS_PREVIEW_ONLY");
+  }
+  return PlannerOutput{
+      .outcome = PlanningOutcome::kNewReferenceAvailable,
+      .directive = ExecutionDirective::kActivateNewReference,
+      .reason_code = "HOPPER_NEXT_HOP_AVAILABLE",
+      .reference = MotionReference{
+          .plan_id = plan_id,
+          .platform_type = PlatformType::kHopper,
+          .input_time = input.state_time,
+          .preview = GlobalRoutePreview{.poses_map = std::move(route_preview)},
+          .data = HopReference{.segments = {segment}},
+      },
+      .diagnostics = PlannerDiagnostics{
+          .planner_name = std::string{kPlannerName},
+          .elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - started),
+          .expanded_states = 0U,
+          .best_cost = previous.global_route().cost,
+          .warning_codes = std::move(warnings),
+          .hierarchical = HierarchicalPlannerMetrics{
+              .global_level = map_level.level.value_or(0U),
+              .global_resolution_m = input.world.global_map.resolution_m,
+              .global_cells = input.world.global_map.CellCount(),
+              .global_elapsed = {},
+              .local_elapsed =
+                  std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now() - started),
+              .global_expanded_states = 0U,
+              .local_expanded_states = 0U,
+              .global_open_peak = 0U,
+              .estimated_work_memory_bytes = 0U,
+              .raw_route_points = previous.global_route().raw_cells.size(),
+              .simplified_route_points =
+                  previous.global_route().simplified_cells.size(),
+              .local_frontier_distance_m = local_distance,
+              .local_attempts = 1U,
+              .hopper_route_hops = previous.certified_hops().size(),
+              .route_reused = true,
+              .route_cursor = promotion.route_cursor,
+              .rolling_request_count =
+                  previous.rolling_request_count() + 1U,
+          },
+          .local_trajectory = LocalTrajectoryDiagnostics{
+              .trajectory_mode = TrajectoryMode::kCertifiedHop,
+              .start_anchor_error_m = 0.0,
+              .endpoint_error_m = 0.0,
+              .maximum_curvature_per_m = 0.0,
+              .collision_validation = CollisionValidation::kCertified,
+          },
+      },
+      .certified_hops = previous.certified_hops(),
+      .continuation = std::move(continuation),
+  };
+}
+
 }  // namespace
 
 PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
@@ -218,6 +352,15 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
         PlanningOutcome::kResourceExhausted,
         ExecutionDirective::kNoSafeReference,
         "HOPPER_RESOURCE_LIMIT_INVALID", started);
+  }
+
+  if (input.continuation != nullptr) {
+    const hierarchical::HopperHopPromotionResult promotion =
+        hierarchical::TryPromoteHopperHop(input, *input.continuation);
+    if (promotion.ok()) {
+      return PromoteCertifiedHop(input, *state, *input.continuation,
+                                 promotion, started);
+    }
   }
 
   const hierarchical::HopperRoutePlanResult global =
@@ -611,15 +754,16 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
   HopReference reference{
       .segments = {std::move(*certified.segment)},
   };
+  const std::string plan_id = "hopper/" + input.request_id;
   auto continuation = std::make_shared<const RouteContinuation>(
-      "hopper/" + input.request_id, PlatformType::kHopper, *global.route,
+      "hopper-route/" + input.request_id, plan_id, input, *global.route,
       global.certified_hops, 0U);
   return PlannerOutput{
       .outcome = PlanningOutcome::kNewReferenceAvailable,
       .directive = ExecutionDirective::kActivateNewReference,
       .reason_code = "HOPPER_FIRST_HOP_AVAILABLE",
       .reference = MotionReference{
-          .plan_id = "hopper/" + input.request_id,
+          .plan_id = plan_id,
           .platform_type = PlatformType::kHopper,
           .input_time = input.state_time,
           .preview = GlobalRoutePreview{

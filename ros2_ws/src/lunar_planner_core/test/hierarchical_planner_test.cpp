@@ -146,6 +146,7 @@ TEST(HierarchicalPlanner, ReturnsCompleteGlobalPreviewAndOneLocalSegment) {
   ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
       << output.reason_code;
   ASSERT_TRUE(output.reference.has_value());
+  ASSERT_NE(output.continuation, nullptr);
   EXPECT_EQ(output.diagnostics.planner_name, "cpp_v3_hierarchical");
   ASSERT_TRUE(output.diagnostics.best_cost.has_value());
   EXPECT_DOUBLE_EQ(*output.diagnostics.best_cost, global.route->cost);
@@ -157,6 +158,9 @@ TEST(HierarchicalPlanner, ReturnsCompleteGlobalPreviewAndOneLocalSegment) {
   EXPECT_LT(trajectory->points.back().pose.position_m.x,
             output.reference->preview.poses_map.back().position_m.x);
   ASSERT_TRUE(output.diagnostics.hierarchical.has_value());
+  EXPECT_FALSE(output.diagnostics.hierarchical->route_reused);
+  EXPECT_EQ(output.diagnostics.hierarchical->route_cursor, 0U);
+  EXPECT_EQ(output.diagnostics.hierarchical->rolling_request_count, 1U);
   EXPECT_GE(output.diagnostics.expanded_states,
             output.diagnostics.hierarchical->global_expanded_states);
 }

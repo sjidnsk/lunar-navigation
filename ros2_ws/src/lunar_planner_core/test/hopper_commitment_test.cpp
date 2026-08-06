@@ -56,8 +56,8 @@ TEST(HopperCommitment, FollowsReadyCommittedFlightAndLandingLifecycle) {
       });
   ASSERT_TRUE(transition.accepted) << transition.reason_code;
   EXPECT_EQ(transition.next.state, HopperExecutionState::kLandedHold);
-  EXPECT_FALSE(transition.next.active_plan_id.has_value());
-  EXPECT_FALSE(transition.next.active_segment_id.has_value());
+  EXPECT_EQ(transition.next.active_plan_id, "plan-1");
+  EXPECT_EQ(transition.next.active_segment_id, "hop-1");
   EXPECT_TRUE(machine.MayPublishNewHop(transition.next));
 }
 
