@@ -434,6 +434,21 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
         .flight_time = flight_time,
         .launch_velocity_mps = *launch_velocity_odom,
         .flight_tube_radius_m = certified.flight_tube.radius_m,
+        .nominal_landing_point_m =
+            landing.region->aim_position_on_surface_m,
+        .ideal_fuel_required_kg =
+            certified.propellant.ideal_fuel_required_kg,
+        .certified_fuel_required_kg =
+            certified.propellant.certified_fuel_required_kg,
+        .expected_remaining_usable_fuel_kg =
+            certified.propellant.expected_remaining_usable_fuel_kg,
+        .required_delta_v_mps =
+            certified.propellant.certified_delta_v_mps,
+        .available_delta_v_mps =
+            certified.propellant.available_delta_v_mps,
+        .capability_version = input.capability_version,
+        .global_map_generation = input.global_map_generation,
+        .local_map_generation = input.local_map_generation,
     };
     CertifiedHopPreview preview{
         .segment_id = segment_id,

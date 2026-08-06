@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <limits>
+#include <utility>
 #include <variant>
 
 #include <gtest/gtest.h>
@@ -32,6 +33,10 @@ PlannerResultContext Context() {
       .local_map_stamp = {10'100'000'000LL},
       .state_stamp = {10'200'000'000LL},
       .mission_revision = 7U,
+      .capability_version = "hopper-capability-v1",
+      .global_map_generation = 31U,
+      .local_map_generation = 37U,
+      .hopper_remaining_usable_fuel_kg = 0.2,
       .preview_frame = "map",
       .execution_frame = "odom",
   };
@@ -195,6 +200,15 @@ TEST(MessageConversion, ConvertsHopperSegmentsWithExecutableTiming) {
               .flight_time = 2s,
               .launch_velocity_mps = {1.0, 0.0, 2.0},
               .flight_tube_radius_m = 0.2,
+              .nominal_landing_point_m = {2.0, 0.0, 0.76},
+              .ideal_fuel_required_kg = 0.08,
+              .certified_fuel_required_kg = 0.1,
+              .expected_remaining_usable_fuel_kg = 0.1,
+              .required_delta_v_mps = 7.0,
+              .available_delta_v_mps = 8.0,
+              .capability_version = "hopper-capability-v1",
+              .global_map_generation = 31U,
+              .local_map_generation = 37U,
           },
       },
   };
@@ -227,6 +241,30 @@ TEST(MessageConversion, ConvertsHopperSegmentsWithExecutableTiming) {
   EXPECT_EQ(converted.result->reference.hops.front().segment_id, "hop-a");
   EXPECT_EQ(converted.result->reference.hops.front().header.frame_id, "odom");
   EXPECT_EQ(converted.result->reference.hops.front().flight_time.sec, 2);
+  EXPECT_DOUBLE_EQ(
+      converted.result->reference.hops.front().nominal_landing_point.x, 2.0);
+  EXPECT_DOUBLE_EQ(
+      converted.result->reference.hops.front().nominal_landing_point.z, 0.76);
+  EXPECT_DOUBLE_EQ(
+      converted.result->reference.hops.front().ideal_fuel_required_kg, 0.08);
+  EXPECT_DOUBLE_EQ(
+      converted.result->reference.hops.front().certified_fuel_required_kg,
+      0.1);
+  EXPECT_DOUBLE_EQ(
+      converted.result->reference.hops.front()
+          .expected_remaining_usable_fuel_kg,
+      0.1);
+  EXPECT_DOUBLE_EQ(
+      converted.result->reference.hops.front().required_delta_v_mps, 7.0);
+  EXPECT_DOUBLE_EQ(
+      converted.result->reference.hops.front().available_delta_v_mps, 8.0);
+  EXPECT_EQ(
+      converted.result->reference.hops.front().capability_version,
+      "hopper-capability-v1");
+  EXPECT_EQ(
+      converted.result->reference.hops.front().global_map_generation, 31U);
+  EXPECT_EQ(
+      converted.result->reference.hops.front().local_map_generation, 37U);
   EXPECT_EQ(converted.result->reference.header.frame_id, "map");
   EXPECT_EQ(converted.result->reference.path_preview.header.frame_id, "map");
   ASSERT_EQ(converted.result->reference.path_preview.poses.size(), 3U);
@@ -242,6 +280,101 @@ TEST(MessageConversion, ConvertsHopperSegmentsWithExecutableTiming) {
   EXPECT_EQ(
       ConvertPlannerOutput(multiple_hops, Context()).reason_code,
       "REFERENCE_HOP_AUTHORIZATION_INVALID");
+}
+
+TEST(MessageConversion, RejectsEmptySingleHopAuthorization) {
+  auto output = WheelOutput();
+  output.reference = lunar::planning::MotionReference{
+      .plan_id = "hop-plan",
+      .platform_type = lunar::planning::PlatformType::kHopper,
+      .input_time = {10'200'000'000LL},
+      .preview = lunar::planning::GlobalRoutePreview{
+          .poses_map = {
+              lunar::planning::Pose3{},
+              lunar::planning::Pose3{.position_m = {2.0, 0.0, 0.76}},
+          },
+      },
+      .data = lunar::planning::HopReference{},
+  };
+  EXPECT_EQ(
+      ConvertPlannerOutput(output, Context()).reason_code,
+      "REFERENCE_HOPS_EMPTY");
+}
+
+TEST(MessageConversion, RejectsHopEvidenceAndSnapshotDrift) {
+  lunar::planning::HopSegment valid{
+      .segment_id = "hop-a",
+      .launch_pose = {},
+      .landing_region_boundary_m = {
+          {1.0, -1.0, 0.0}, {3.0, -1.0, 0.0},
+          {3.0, 1.0, 0.0}, {1.0, 1.0, 0.0}},
+      .flight_time = 2s,
+      .launch_velocity_mps = {1.0, 0.0, 2.0},
+      .flight_tube_radius_m = 0.2,
+      .nominal_landing_point_m = {2.0, 0.0, 0.76},
+      .ideal_fuel_required_kg = 0.08,
+      .certified_fuel_required_kg = 0.1,
+      .expected_remaining_usable_fuel_kg = 0.1,
+      .required_delta_v_mps = 7.0,
+      .available_delta_v_mps = 8.0,
+      .capability_version = "hopper-capability-v1",
+      .global_map_generation = 31U,
+      .local_map_generation = 37U,
+  };
+  const auto make_output = [&](lunar::planning::HopSegment segment) {
+    auto output = WheelOutput();
+    output.reference = lunar::planning::MotionReference{
+        .plan_id = "hop-plan",
+        .platform_type = lunar::planning::PlatformType::kHopper,
+        .input_time = {10'200'000'000LL},
+        .preview = lunar::planning::GlobalRoutePreview{
+            .poses_map = {
+                lunar::planning::Pose3{},
+                lunar::planning::Pose3{.position_m = {2.0, 0.0, 0.76}},
+            },
+        },
+        .data = lunar::planning::HopReference{
+            .segments = {std::move(segment)},
+        },
+    };
+    return output;
+  };
+
+  auto invalid = valid;
+  invalid.certified_fuel_required_kg = 0.07;
+  EXPECT_EQ(
+      ConvertPlannerOutput(make_output(invalid), Context()).reason_code,
+      "REFERENCE_HOP_EVIDENCE_INVALID");
+
+  invalid = valid;
+  invalid.available_delta_v_mps = 6.9;
+  EXPECT_EQ(
+      ConvertPlannerOutput(make_output(invalid), Context()).reason_code,
+      "REFERENCE_HOP_EVIDENCE_INVALID");
+
+  invalid = valid;
+  invalid.expected_remaining_usable_fuel_kg = 0.09;
+  EXPECT_EQ(
+      ConvertPlannerOutput(make_output(invalid), Context()).reason_code,
+      "REFERENCE_HOP_PROPELLANT_INCONSISTENT");
+
+  invalid = valid;
+  invalid.capability_version = "stale";
+  EXPECT_EQ(
+      ConvertPlannerOutput(make_output(invalid), Context()).reason_code,
+      "REFERENCE_HOP_SNAPSHOT_MISMATCH");
+
+  invalid = valid;
+  invalid.global_map_generation = 30U;
+  EXPECT_EQ(
+      ConvertPlannerOutput(make_output(invalid), Context()).reason_code,
+      "REFERENCE_HOP_SNAPSHOT_MISMATCH");
+
+  invalid = valid;
+  invalid.nominal_landing_point_m.x += 0.01;
+  EXPECT_EQ(
+      ConvertPlannerOutput(make_output(invalid), Context()).reason_code,
+      "REFERENCE_HOP_BALLISTIC_INCONSISTENT");
 }
 
 TEST(MessageConversion, RejectsResultInvariantViolations) {

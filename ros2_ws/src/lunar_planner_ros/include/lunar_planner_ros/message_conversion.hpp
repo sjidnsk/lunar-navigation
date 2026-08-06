@@ -25,6 +25,10 @@ struct PlannerResultContext final {
   lunar::planning::TimePoint local_map_stamp;
   lunar::planning::TimePoint state_stamp;
   std::uint64_t mission_revision{};
+  std::string capability_version;
+  std::uint64_t global_map_generation{};
+  std::uint64_t local_map_generation{};
+  std::optional<double> hopper_remaining_usable_fuel_kg;
   std::string preview_frame{"map"};
   std::string execution_frame{"odom"};
 };

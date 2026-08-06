@@ -378,15 +378,15 @@
 - Modify: `ros2_ws/src/lunar_planner_ros/test/{message_conversion_test,reference_guard_test}.cpp`
 - Modify: `tests/foundation/test_planning_message_package.py`
 
-- [ ] **Step 1: Add output RED tests**
+- [x] **Step 1: Add output RED tests**
 
   Require nominal landing point, ideal/certified/remaining fuel, required/available delta-v, capability version and both map generations. Reject hopper output with zero or more than one segment at the conversion boundary.
 
-- [ ] **Step 2: Implement lossless conversion**
+- [x] **Step 2: Implement lossless conversion**
 
   Ensure finite nonnegative fuel/delta-v, `certified >= ideal`, expected remaining consistency, exact map generations, and a reconstruction-consistent launch velocity/flight time.
 
-- [ ] **Step 3: Verify guard behavior and commit**
+- [x] **Step 3: Verify guard behavior and commit**
 
   Commit: `feat: publish certified single-hop evidence`
 

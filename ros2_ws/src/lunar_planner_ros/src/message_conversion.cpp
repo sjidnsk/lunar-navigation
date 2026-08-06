@@ -22,6 +22,7 @@ namespace lunar::planning::ros {
 namespace {
 
 constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
+constexpr double kLunarGravityMps2 = -1.62;
 
 [[nodiscard]] bool Finite(const double value) noexcept {
   return std::isfinite(value);
@@ -48,6 +49,16 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
 
 [[nodiscard]] bool Finite(const lunar::planning::Twist3& value) noexcept {
   return Finite(value.linear_mps) && Finite(value.angular_radps);
+}
+
+[[nodiscard]] bool NearlyEqual(
+    const double lhs, const double rhs,
+    const double relative_tolerance = 1.0e-9) noexcept {
+  if (!Finite(lhs) || !Finite(rhs)) {
+    return false;
+  }
+  return std::abs(lhs - rhs) <= relative_tolerance *
+      std::max({1.0, std::abs(lhs), std::abs(rhs)});
 }
 
 [[nodiscard]] bool FinitePoint(const geometry_msgs::msg::Point& point) noexcept {
@@ -285,6 +296,7 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
     const lunar::planning::HopReference& hops,
     const builtin_interfaces::msg::Time& input_time,
     const std::string& frame,
+    const PlannerResultContext& context,
     lunar_planning_msgs::msg::MotionReference& message) {
   if (reference.platform_type != lunar::planning::PlatformType::kHopper) {
     return "REFERENCE_PLATFORM_DATA_MISMATCH";
@@ -296,6 +308,14 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
     return "REFERENCE_HOP_AUTHORIZATION_INVALID";
   }
   message.platform_type = message.HOPPER;
+  if (context.capability_version.empty() ||
+      context.global_map_generation == 0U ||
+      context.local_map_generation == 0U ||
+      !context.hopper_remaining_usable_fuel_kg.has_value() ||
+      !Finite(*context.hopper_remaining_usable_fuel_kg) ||
+      *context.hopper_remaining_usable_fuel_kg <= 0.0) {
+    return "REFERENCE_HOP_CONTEXT_INVALID";
+  }
 
   std::chrono::nanoseconds elapsed{};
   for (const auto& segment : hops.segments) {
@@ -306,6 +326,31 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
         !Finite(segment.flight_tube_radius_m) ||
         segment.flight_tube_radius_m <= 0.0) {
       return "REFERENCE_HOP_INVALID";
+    }
+    if (!Finite(segment.nominal_landing_point_m) ||
+        !Finite(segment.ideal_fuel_required_kg) ||
+        segment.ideal_fuel_required_kg < 0.0 ||
+        !Finite(segment.certified_fuel_required_kg) ||
+        segment.certified_fuel_required_kg <
+            segment.ideal_fuel_required_kg ||
+        !Finite(segment.expected_remaining_usable_fuel_kg) ||
+        segment.expected_remaining_usable_fuel_kg < 0.0 ||
+        !Finite(segment.required_delta_v_mps) ||
+        segment.required_delta_v_mps < 0.0 ||
+        !Finite(segment.available_delta_v_mps) ||
+        segment.available_delta_v_mps < segment.required_delta_v_mps) {
+      return "REFERENCE_HOP_EVIDENCE_INVALID";
+    }
+    if (segment.capability_version != context.capability_version ||
+        segment.global_map_generation != context.global_map_generation ||
+        segment.local_map_generation != context.local_map_generation) {
+      return "REFERENCE_HOP_SNAPSHOT_MISMATCH";
+    }
+    if (!NearlyEqual(
+            segment.certified_fuel_required_kg +
+                segment.expected_remaining_usable_fuel_kg,
+            *context.hopper_remaining_usable_fuel_kg)) {
+      return "REFERENCE_HOP_PROPELLANT_INCONSISTENT";
     }
     if (segment.flight_time.count() >
         std::numeric_limits<std::int64_t>::max() - elapsed.count()) {
@@ -319,6 +364,28 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
     if (!start_time || !landing_time || !flight_time) {
       return "REFERENCE_TIME_INVALID";
     }
+    const double flight_seconds =
+        std::chrono::duration<double>(segment.flight_time).count();
+    const lunar::planning::Vec3 reconstructed_landing{
+        .x = segment.launch_pose.position_m.x +
+            segment.launch_velocity_mps.x * flight_seconds,
+        .y = segment.launch_pose.position_m.y +
+            segment.launch_velocity_mps.y * flight_seconds,
+        .z = segment.launch_pose.position_m.z +
+            segment.launch_velocity_mps.z * flight_seconds +
+            0.5 * kLunarGravityMps2 * flight_seconds * flight_seconds,
+    };
+    if (!NearlyEqual(
+            reconstructed_landing.x, segment.nominal_landing_point_m.x,
+            1.0e-6) ||
+        !NearlyEqual(
+            reconstructed_landing.y, segment.nominal_landing_point_m.y,
+            1.0e-6) ||
+        !NearlyEqual(
+            reconstructed_landing.z, segment.nominal_landing_point_m.z,
+            1.0e-6)) {
+      return "REFERENCE_HOP_BALLISTIC_INCONSISTENT";
+    }
 
     lunar_planning_msgs::msg::HopSegment hop;
     hop.header.frame_id = frame;
@@ -330,6 +397,18 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
     hop.launch_velocity.y = segment.launch_velocity_mps.y;
     hop.launch_velocity.z = segment.launch_velocity_mps.z;
     hop.flight_tube_radius_m = segment.flight_tube_radius_m;
+    hop.nominal_landing_point.x = segment.nominal_landing_point_m.x;
+    hop.nominal_landing_point.y = segment.nominal_landing_point_m.y;
+    hop.nominal_landing_point.z = segment.nominal_landing_point_m.z;
+    hop.ideal_fuel_required_kg = segment.ideal_fuel_required_kg;
+    hop.certified_fuel_required_kg = segment.certified_fuel_required_kg;
+    hop.expected_remaining_usable_fuel_kg =
+        segment.expected_remaining_usable_fuel_kg;
+    hop.required_delta_v_mps = segment.required_delta_v_mps;
+    hop.available_delta_v_mps = segment.available_delta_v_mps;
+    hop.capability_version = segment.capability_version;
+    hop.global_map_generation = segment.global_map_generation;
+    hop.local_map_generation = segment.local_map_generation;
 
     for (const auto& point : segment.landing_region_boundary_m) {
       if (!FitsPoint32(point)) {
@@ -496,7 +575,7 @@ ActionResultConversion ConvertPlannerOutput(
         } else {
           return ConvertHops(
               *output.reference, data, *input_time,
-              context.execution_frame, reference);
+              context.execution_frame, context, reference);
         }
       },
       output.reference->data);

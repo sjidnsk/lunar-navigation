@@ -1,5 +1,6 @@
 #include "lunar_planner_ros/reference_guard.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -14,6 +15,26 @@ namespace {
 
 [[nodiscard]] bool ValidPoint(const geometry_msgs::msg::Point32& point) noexcept {
   return Finite(point.x) && Finite(point.y) && Finite(point.z);
+}
+
+[[nodiscard]] bool ValidPoint(const geometry_msgs::msg::Point& point) noexcept {
+  return Finite(point.x) && Finite(point.y) && Finite(point.z);
+}
+
+[[nodiscard]] bool ValidPose(const geometry_msgs::msg::Pose& pose) noexcept {
+  const auto& q = pose.orientation;
+  const double norm = std::hypot(
+      std::hypot(q.w, q.x), std::hypot(q.y, q.z));
+  return ValidPoint(pose.position) && Finite(norm) &&
+      std::abs(norm - 1.0) <= 1.0e-6;
+}
+
+[[nodiscard]] bool NearlyEqual(
+    const double lhs, const double rhs,
+    const double relative_tolerance = 1.0e-6) noexcept {
+  return Finite(lhs) && Finite(rhs) &&
+      std::abs(lhs - rhs) <= relative_tolerance *
+          std::max({1.0, std::abs(lhs), std::abs(rhs)});
 }
 
 [[nodiscard]] bool OnSegment(
@@ -86,15 +107,50 @@ namespace {
   if (reference.plan_id.empty() || reference.header.frame_id != "map" ||
       reference.hops.size() != 1U || hop.segment_id.empty() ||
       hop.header.frame_id != "odom" ||
-      hop.landing_region.points.size() < 3U) {
+      hop.landing_region.points.size() < 3U || !ValidPose(hop.launch_pose) ||
+      !ValidPoint(hop.nominal_landing_point) ||
+      !Finite(hop.launch_velocity.x) || !Finite(hop.launch_velocity.y) ||
+      !Finite(hop.launch_velocity.z) ||
+      !Finite(hop.flight_tube_radius_m) ||
+      hop.flight_tube_radius_m <= 0.0 ||
+      !Finite(hop.ideal_fuel_required_kg) ||
+      hop.ideal_fuel_required_kg < 0.0 ||
+      !Finite(hop.certified_fuel_required_kg) ||
+      hop.certified_fuel_required_kg < hop.ideal_fuel_required_kg ||
+      !Finite(hop.expected_remaining_usable_fuel_kg) ||
+      hop.expected_remaining_usable_fuel_kg < 0.0 ||
+      !Finite(hop.required_delta_v_mps) ||
+      hop.required_delta_v_mps < 0.0 ||
+      !Finite(hop.available_delta_v_mps) ||
+      hop.available_delta_v_mps < hop.required_delta_v_mps ||
+      hop.capability_version.empty() || hop.global_map_generation == 0U ||
+      hop.local_map_generation == 0U ||
+      !Contains(
+          hop.landing_region, hop.nominal_landing_point.x,
+          hop.nominal_landing_point.y)) {
     return false;
   }
+  double flight_seconds = 0.0;
   try {
     if (rclcpp::Time{hop.header.stamp, RCL_ROS_TIME}.nanoseconds() <= 0 ||
         rclcpp::Duration{hop.flight_time}.nanoseconds() <= 0) {
       return false;
     }
+    flight_seconds = rclcpp::Duration{hop.flight_time}.seconds();
   } catch (const std::exception&) {
+    return false;
+  }
+  constexpr double kLunarGravityMps2 = -1.62;
+  const double landing_x = hop.launch_pose.position.x +
+      hop.launch_velocity.x * flight_seconds;
+  const double landing_y = hop.launch_pose.position.y +
+      hop.launch_velocity.y * flight_seconds;
+  const double landing_z = hop.launch_pose.position.z +
+      hop.launch_velocity.z * flight_seconds +
+      0.5 * kLunarGravityMps2 * flight_seconds * flight_seconds;
+  if (!NearlyEqual(landing_x, hop.nominal_landing_point.x) ||
+      !NearlyEqual(landing_y, hop.nominal_landing_point.y) ||
+      !NearlyEqual(landing_z, hop.nominal_landing_point.z)) {
     return false;
   }
   for (const auto& point : hop.landing_region.points) {

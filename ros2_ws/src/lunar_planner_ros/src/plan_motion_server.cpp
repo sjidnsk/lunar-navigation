@@ -1261,6 +1261,15 @@ struct PlanMotionServer::Impl final {
             .local_map_stamp = snapshot.input->world.local_map.stamp,
             .state_stamp = snapshot.input->state_time,
             .mission_revision = request.mission_revision,
+            .capability_version = snapshot.input->capability_version,
+            .global_map_generation = snapshot.input->global_map_generation,
+            .local_map_generation = snapshot.input->local_map_generation,
+            .hopper_remaining_usable_fuel_kg =
+                snapshot.input->hopper_propellant.has_value()
+                    ? std::optional<double>{
+                          snapshot.input->hopper_propellant
+                              ->remaining_usable_fuel_mass_kg}
+                    : std::nullopt,
             .preview_frame = "map",
             .execution_frame = "odom",
         });

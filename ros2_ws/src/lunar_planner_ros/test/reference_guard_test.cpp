@@ -32,6 +32,20 @@ lunar_planning_msgs::msg::MotionReference HopperReference() {
   hop.landing_region.points[3].x = 1.0F;
   hop.landing_region.points[3].y = 1.0F;
   hop.flight_time.sec = 2;
+  hop.launch_pose.orientation.w = 1.0;
+  hop.launch_velocity.x = 1.0;
+  hop.launch_velocity.z = 2.0;
+  hop.flight_tube_radius_m = 0.75;
+  hop.nominal_landing_point.x = 2.0;
+  hop.nominal_landing_point.z = 0.76;
+  hop.ideal_fuel_required_kg = 0.08;
+  hop.certified_fuel_required_kg = 0.1;
+  hop.expected_remaining_usable_fuel_kg = 0.1;
+  hop.required_delta_v_mps = 7.0;
+  hop.available_delta_v_mps = 8.0;
+  hop.capability_version = "hopper-capability-v1";
+  hop.global_map_generation = 31U;
+  hop.local_map_generation = 37U;
   reference.hops.push_back(hop);
   return reference;
 }
@@ -69,6 +83,12 @@ TEST(ReferenceGuard, AllowsReplacementOnGroundAndRejectsInvalidCommit) {
   EXPECT_FALSE(guard.Commit(invalid));
   invalid = HopperReference();
   invalid.hops.push_back(invalid.hops.front());
+  EXPECT_FALSE(guard.Commit(invalid));
+  invalid = HopperReference();
+  invalid.hops.front().certified_fuel_required_kg = 0.07;
+  EXPECT_FALSE(guard.Commit(invalid));
+  invalid = HopperReference();
+  invalid.hops.front().nominal_landing_point.x += 0.01;
   EXPECT_FALSE(guard.Commit(invalid));
   EXPECT_EQ(guard.state(), ReferenceGuardState::kGroundHold);
 }

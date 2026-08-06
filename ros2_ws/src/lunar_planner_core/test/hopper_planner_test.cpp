@@ -85,8 +85,23 @@ TEST(HopperPlanner, ProducesOneExactFuelCertifiedHopWithoutContinuation) {
   EXPECT_NEAR(landing.x, goal.position_m.x, 1.0e-8);
   EXPECT_NEAR(landing.y, goal.position_m.y, 1.0e-8);
   EXPECT_NEAR(landing.z, 0.0, 1.0e-8);
+  EXPECT_NEAR(segment.nominal_landing_point_m.x, landing.x, 1.0e-8);
+  EXPECT_NEAR(segment.nominal_landing_point_m.y, landing.y, 1.0e-8);
+  EXPECT_NEAR(segment.nominal_landing_point_m.z, landing.z, 1.0e-8);
+  EXPECT_GE(
+      segment.certified_fuel_required_kg,
+      segment.ideal_fuel_required_kg);
+  EXPECT_NEAR(
+      segment.certified_fuel_required_kg +
+          segment.expected_remaining_usable_fuel_kg,
+      input.hopper_propellant->remaining_usable_fuel_mass_kg, 1.0e-12);
+  EXPECT_GE(segment.available_delta_v_mps, segment.required_delta_v_mps);
+  EXPECT_EQ(segment.capability_version, input.capability_version);
+  EXPECT_EQ(segment.global_map_generation, input.global_map_generation);
+  EXPECT_EQ(segment.local_map_generation, input.local_map_generation);
   ASSERT_TRUE(output.diagnostics.best_cost.has_value());
-  EXPECT_GT(*output.diagnostics.best_cost, 0.0);
+  EXPECT_DOUBLE_EQ(
+      *output.diagnostics.best_cost, segment.certified_fuel_required_kg);
   EXPECT_LT(*output.diagnostics.best_cost,
             input.hopper_propellant->remaining_usable_fuel_mass_kg);
 }
