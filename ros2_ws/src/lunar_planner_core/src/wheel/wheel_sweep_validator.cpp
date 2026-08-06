@@ -141,11 +141,9 @@ constexpr double kComparisonTolerance = 1.0e-9;
 
 WheelSweepValidator::WheelSweepValidator(
     const shared::SafeProjection& projection,
-    const WheeledCapability& capability,
-    const std::size_t maximum_subdivisions) noexcept
+    const WheeledCapability& capability) noexcept
     : projection_(&projection),
-      capability_(&capability),
-      maximum_subdivisions_(maximum_subdivisions) {
+      capability_(&capability) {
   for (const Vec2& vertex : capability.footprint_xy_m) {
     footprint_support_radius_m_ = std::max(
         footprint_support_radius_m_, std::hypot(vertex.x, vertex.y));
@@ -165,7 +163,6 @@ WheelSweepValidation WheelSweepValidator::Validate(
   }
   if (projection_ == nullptr || projection_->source_map() == nullptr ||
       capability_ == nullptr || capability_->footprint_xy_m.size() < 3U ||
-      maximum_subdivisions_ == 0U ||
       !IsFinite(transition.source_pose) ||
       !IsFinite(transition.target_pose) ||
       !std::isfinite(transition.curvature_per_m) ||
@@ -192,10 +189,6 @@ WheelSweepValidation WheelSweepValidator::Validate(
   const std::size_t required_subdivisions = std::max<std::size_t>(
       1U, static_cast<std::size_t>(
               std::ceil(swept_distance_m / maximum_step_m)));
-  if (required_subdivisions > maximum_subdivisions_) {
-    return Failure("WHEEL_SWEEP_RESOLUTION_LIMIT");
-  }
-
   const auto& map = *projection_->source_map();
   const double resolution = map.resolution_m();
   const double origin_x = map.origin_m().x;

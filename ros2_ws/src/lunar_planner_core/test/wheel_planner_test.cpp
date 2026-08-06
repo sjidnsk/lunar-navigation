@@ -137,18 +137,6 @@ TEST(WheelPlanner, CapsEmittedSamplesEvenWhenOptimizationFallsBack) {
             TrajectoryMode::kDiscreteFallback);
 }
 
-TEST(WheelPlanner, RejectsValidationSubdivisionBudgetAboveHardCeiling) {
-  Planner planner;
-  auto input = test::MakeValidWheelInput();
-  input.config.wheel.continuous_validation_maximum_subdivisions = 33U;
-
-  const PlannerOutput output = planner.Plan(input);
-
-  EXPECT_EQ(output.outcome, PlanningOutcome::kInvalidRequest);
-  EXPECT_EQ(output.reason_code, "WHEEL_LATTICE_REQUEST_INVALID");
-  EXPECT_FALSE(output.reference.has_value());
-}
-
 TEST(WheelPlanner, PreservesTheTrueOffCenterStartPoseInTrajectoryAndPreview) {
   Planner planner;
   auto input = test::MakeValidWheelInput();

@@ -175,7 +175,6 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_legged";
     const Interval& start_interval,
     const shared::SafeProjection& projection,
     const LeggedCapability& capability,
-    const PlannerConfig& config,
     const std::stop_token stop_token) {
   Interval source_interval = start_interval;
   for (const LeggedTransition& transition : transitions) {
@@ -188,9 +187,6 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_legged";
     const LeggedSweepResult sweep = ValidateLeggedBodySweep(
         transition.source_pose, transition.target_pose, source_interval,
         transition.nominal_duration, projection, capability,
-        std::min(
-            config.legged.continuous_validation_maximum_subdivisions,
-            config.legged.maximum_height_interval_splits),
         stop_token);
     if (!sweep.valid) {
       return false;
@@ -378,7 +374,7 @@ PlannerOutput LeggedPlanner::Plan(
     std::vector<LeggedTransition> selected = std::move(optimized.transitions);
     if (!ValidateTransitions(
             selected, true_start_height,
-            *projection.projection, *capability, problem.config,
+            *projection.projection, *capability,
             problem.stop_token)) {
       if (problem.stop_token.stop_requested()) {
         return Canceled(started, search.expanded_states);
@@ -389,7 +385,7 @@ PlannerOutput LeggedPlanner::Plan(
     }
     if (!ValidateTransitions(
             selected, true_start_height,
-            *projection.projection, *capability, problem.config,
+            *projection.projection, *capability,
             problem.stop_token)) {
       return Failure(
           PlanningOutcome::kNumericalFailure,

@@ -35,8 +35,7 @@ TEST(WheelFaultMatrix, EnforcesCurvatureLimitBeforeSweep) {
       input.config.map_safety, {});
   ASSERT_TRUE(projection.ok()) << projection.reason_code;
   const wheel::WheelSweepValidator validator{
-      *projection.projection, capability,
-      input.config.wheel.continuous_validation_maximum_subdivisions};
+      *projection.projection, capability};
   const wheel::WheelTransition transition{
       .source_pose = wheel::WheelPose{.position_m = {2.5, 3.5, 0.0}},
       .target_pose = wheel::WheelPose{
@@ -62,8 +61,7 @@ TEST(WheelFaultMatrix, RejectsObstacleIntersectingContinuousFootprintSweep) {
       snapshot.snapshot, input.capability, input.config.map_safety, {});
   ASSERT_TRUE(projection.ok()) << projection.reason_code;
   const wheel::WheelSweepValidator validator{
-      *projection.projection, capability,
-      input.config.wheel.continuous_validation_maximum_subdivisions};
+      *projection.projection, capability};
   const wheel::WheelTransition transition{
       .source_pose = wheel::WheelPose{.position_m = {2.5, 3.5, 0.0}},
       .target_pose = wheel::WheelPose{.position_m = {4.5, 3.5, 0.0}},
@@ -88,8 +86,7 @@ TEST(WheelFaultMatrix, IgnoresUnsafeCellsOutsideTheRotatedFootprintPolygon) {
       input.config.map_safety, {});
   ASSERT_TRUE(projection.ok()) << projection.reason_code;
   const wheel::WheelSweepValidator validator{
-      *projection.projection, capability,
-      input.config.wheel.continuous_validation_maximum_subdivisions};
+      *projection.projection, capability};
   const wheel::WheelTransition transition{
       .source_pose = wheel::WheelPose{
           .position_m = {3.5, 3.5, 0.0},
@@ -105,6 +102,28 @@ TEST(WheelFaultMatrix, IgnoresUnsafeCellsOutsideTheRotatedFootprintPolygon) {
 
   EXPECT_TRUE(result.valid) << result.reason_code;
   EXPECT_EQ(result.reason_code, "WHEEL_SWEEP_VALID");
+}
+
+TEST(WheelFaultMatrix, DerivesLongSweepSamplingWithoutAFixedCeiling) {
+  auto input = test::MakeValidWheelInput();
+  input.world.local_map = test::MakeFlatMap("odom", 200U, 100U, 0.05);
+  const auto capability = std::get<WheeledCapability>(input.capability);
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  const wheel::WheelSweepValidator validator{
+      *projection.projection, capability};
+  const wheel::WheelTransition transition{
+      .source_pose = wheel::WheelPose{.position_m = {1.0, 2.5, 0.0}},
+      .target_pose = wheel::WheelPose{.position_m = {5.0, 2.5, 0.0}},
+  };
+
+  const auto result = validator.Validate(transition, {});
+
+  EXPECT_TRUE(result.valid) << result.reason_code;
+  EXPECT_GT(result.sample_count, 32U);
 }
 
 TEST(WheelFaultMatrix, ReportsNoPathAcrossFullBarrier) {

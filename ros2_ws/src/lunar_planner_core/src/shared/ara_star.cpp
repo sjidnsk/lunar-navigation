@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <new>
 #include <optional>
 #include <set>
 #include <string>
@@ -75,14 +76,6 @@ struct OpenEntryLess final {
        problem.config.epsilon_decrement <= 0.0)) {
     return "SEARCH_EPSILON_INVALID";
   }
-  const SearchResourceLimits& resources = problem.config.resources;
-  if (resources.maximum_expanded_states == 0U ||
-      resources.maximum_reopened_states == 0U ||
-      resources.maximum_generated_candidates == 0U ||
-      resources.maximum_open_states == 0U ||
-      resources.maximum_memory_bytes == 0U) {
-    return "SEARCH_RESOURCE_LIMIT_INVALID";
-  }
   if (std::ranges::none_of(problem.goal_mask, [](const std::uint8_t value) {
         return value != 0U;
       })) {
@@ -107,21 +100,6 @@ struct OpenEntryLess final {
       return "SEARCH_MEMORY_LIMIT";
     }
     edge_count += edges.size();
-  }
-  constexpr std::size_t kBytesPerState =
-      sizeof(SearchNode) + sizeof(std::optional<OpenEntry>) +
-      sizeof(std::uint8_t);
-  if (problem.state_count >
-          std::numeric_limits<std::size_t>::max() / kBytesPerState ||
-      edge_count >
-          std::numeric_limits<std::size_t>::max() / sizeof(GraphEdge)) {
-    return "SEARCH_MEMORY_LIMIT";
-  }
-  const std::size_t state_bytes = problem.state_count * kBytesPerState;
-  const std::size_t edge_bytes = edge_count * sizeof(GraphEdge);
-  if (state_bytes > problem.config.resources.maximum_memory_bytes ||
-      edge_bytes > problem.config.resources.maximum_memory_bytes - state_bytes) {
-    return "SEARCH_MEMORY_LIMIT";
   }
   return {};
 }
@@ -203,15 +181,12 @@ struct OpenEntryLess final {
 }  // namespace
 
 AraStarResult SearchAraStar(
-    const AraStarProblem& problem, const std::stop_token stop_token) {
+    const AraStarProblem& problem, const std::stop_token stop_token) try {
   if (stop_token.stop_requested()) {
     return Failure(AraStarStatus::kCanceled, "REQUEST_CANCELED");
   }
   if (const std::string reason = ValidateProblem(problem); !reason.empty()) {
-    const AraStarStatus status = reason == "SEARCH_MEMORY_LIMIT"
-        ? AraStarStatus::kResourceExhausted
-        : AraStarStatus::kInvalidProblem;
-    return Failure(status, reason);
+    return Failure(AraStarStatus::kInvalidProblem, reason);
   }
 
   std::vector<SearchNode> nodes(problem.state_count);
@@ -275,12 +250,6 @@ AraStarResult SearchAraStar(
                  candidate->stable_edge_indices;
         });
     if (existing == candidates.end()) {
-      if (candidates.size() >=
-          problem.config.resources.maximum_generated_candidates) {
-        return finish(
-            AraStarStatus::kResourceExhausted,
-            "SEARCH_CANDIDATE_LIMIT");
-      }
       candidates.push_back(*candidate);
     } else if (candidate->cost + kCostTolerance < existing->cost) {
       *existing = *candidate;
@@ -311,13 +280,6 @@ AraStarResult SearchAraStar(
               open.begin()->weighted_cost + kCostTolerance) {
         break;
       }
-      if (expansions >=
-          problem.config.resources.maximum_expanded_states) {
-        return finish(
-            AraStarStatus::kResourceExhausted,
-            "SEARCH_EXPANSION_LIMIT");
-      }
-
       const OpenEntry current = *open.begin();
       open.erase(open.begin());
       open_by_state[current.state].reset();
@@ -350,22 +312,10 @@ AraStarResult SearchAraStar(
 
         if (closed[edge.target_state] != 0U) {
           if (incons.insert(edge.target_state).second) {
-            if (reopens >=
-                problem.config.resources.maximum_reopened_states) {
-              return finish(
-                  AraStarStatus::kResourceExhausted,
-                  "SEARCH_REOPEN_LIMIT");
-            }
             ++reopens;
           }
         } else {
           put_open(edge.target_state, false);
-          if (open.size() >
-              problem.config.resources.maximum_open_states) {
-            return finish(
-                AraStarStatus::kResourceExhausted,
-                "SEARCH_OPEN_LIMIT");
-          }
         }
 
         if (problem.goal_mask[edge.target_state] != 0U) {
@@ -412,14 +362,12 @@ AraStarResult SearchAraStar(
     incons.clear();
     for (const std::size_t state : next_open_states) {
       put_open(state, true);
-      if (open.size() >
-          problem.config.resources.maximum_open_states) {
-        return finish(
-            AraStarStatus::kResourceExhausted,
-            "SEARCH_OPEN_LIMIT");
-      }
     }
   }
+} catch (const std::bad_alloc&) {
+  return Failure(
+      AraStarStatus::kResourceExhausted,
+      "SEARCH_ALLOCATION_FAILED");
 }
 
 }  // namespace lunar::planning::shared

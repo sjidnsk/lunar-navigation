@@ -175,13 +175,13 @@
 - Modify: `ros2_ws/src/lunar_planner_core/test/{shared_core_determinism_test,global_grid_search_test,wheel_planner_test,legged_planner_test}.cpp`
 - Modify: `ros2_ws/src/lunar_planner_ros/test/plan_motion_server_test.cpp`
 
-- [ ] **Step 1: Add old-limit regression tests**
+- [x] **Step 1: Add old-limit regression tests**
 
   Construct routes that exceed prior expanded/generated/open/terminal/subdivision values and assert success or true Open exhaustion; separately assert stop-token cancellation and `std::bad_alloc` mapping remain “search incomplete”.
 
-- [ ] **Step 2: Verify RED against current guards**
+- [x] **Step 2: Verify RED against current guards**
 
-- [ ] **Step 3: Delete production count ceilings**
+- [x] **Step 3: Delete production count ceilings**
 
   Remove `SearchResourceLimits`, terminal candidate caps and fixed continuous subdivision caps from production config. Generate neighbors lazily and derive collision samples as:
 
@@ -192,7 +192,7 @@
 
   Retain cancellation checks at expansion/section boundaries. Catch actual allocation failures at the planner facade and return `SEARCH_RESOURCE_FAILURE`/platform-specific allocation failure.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
   Commit: `fix: exhaust finite searches without count ceilings`
 

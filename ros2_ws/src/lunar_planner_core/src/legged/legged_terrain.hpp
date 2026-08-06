@@ -45,7 +45,6 @@ struct LeggedSweepResult final {
     std::chrono::nanoseconds nominal_duration,
     const shared::SafeProjection& projection,
     const LeggedCapability& capability,
-    std::size_t maximum_subdivisions,
     std::stop_token stop_token);
 
 }  // namespace lunar::planning::legged

@@ -21,8 +21,7 @@ class WheelSweepValidator final {
  public:
   WheelSweepValidator(
       const shared::SafeProjection& projection,
-      const WheeledCapability& capability,
-      std::size_t maximum_subdivisions) noexcept;
+      const WheeledCapability& capability) noexcept;
 
   [[nodiscard]] WheelSweepValidation Validate(
       const WheelTransition& transition,
@@ -31,7 +30,6 @@ class WheelSweepValidator final {
  private:
   const shared::SafeProjection* projection_{};
   const WheeledCapability* capability_{};
-  std::size_t maximum_subdivisions_{};
   double footprint_support_radius_m_{};
 };
 

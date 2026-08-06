@@ -11,6 +11,27 @@
 namespace lunar::planning::shared {
 namespace {
 
+template <typename Config>
+concept HasFixedSearchResources = requires(Config config) {
+  config.resources;
+};
+
+template <typename Config>
+concept HasFixedTerminalCandidateLimit = requires(Config config) {
+  config.maximum_terminal_candidates;
+};
+
+template <typename Config>
+concept HasFixedValidationSubdivisionLimit = requires(Config config) {
+  config.continuous_validation_maximum_subdivisions;
+};
+
+static_assert(!HasFixedSearchResources<AraStarConfig>);
+static_assert(!HasFixedTerminalCandidateLimit<WheelPlannerConfig>);
+static_assert(!HasFixedTerminalCandidateLimit<LeggedPlannerConfig>);
+static_assert(!HasFixedValidationSubdivisionLimit<WheelPlannerConfig>);
+static_assert(!HasFixedValidationSubdivisionLimit<LeggedPlannerConfig>);
+
 AraStarProblem MakeDiamondProblem() {
   AraStarProblem problem;
   problem.state_count = 4U;
@@ -104,6 +125,33 @@ TEST(AraStar, ChecksCancellationAtExpansionBoundary) {
   EXPECT_EQ(result.reason_code, "REQUEST_CANCELED");
   EXPECT_EQ(result.expanded_states, 0U);
   EXPECT_TRUE(result.candidates.empty());
+}
+
+TEST(AraStar, ExhaustsFiniteGraphWithoutFormerCountCeilings) {
+  constexpr std::size_t kStateCount = 257U;
+  AraStarProblem problem;
+  problem.state_count = kStateCount;
+  problem.start_state = 0U;
+  problem.goal_mask.assign(kStateCount, 0U);
+  problem.goal_mask.back() = 1U;
+  problem.heuristic.assign(kStateCount, 0.0);
+  problem.outgoing_edges.resize(kStateCount);
+  for (std::size_t state = 0U; state + 1U < kStateCount; ++state) {
+    problem.outgoing_edges[state].push_back(GraphEdge{
+        .target_state = state + 1U,
+        .cost = 1.0,
+        .stable_index = state,
+    });
+  }
+  problem.config.initial_epsilon = 1.0;
+  problem.config.target_epsilon = 1.0;
+
+  const AraStarResult result = SearchAraStar(problem, {});
+
+  ASSERT_EQ(result.status, AraStarStatus::kSolved) << result.reason_code;
+  ASSERT_EQ(result.candidates.size(), 1U);
+  EXPECT_EQ(result.candidates.front().states.size(), kStateCount);
+  EXPECT_EQ(result.expanded_states, kStateCount - 1U);
 }
 
 TEST(BoundedQpSolver, ChecksCancellationAtIterationBoundary) {

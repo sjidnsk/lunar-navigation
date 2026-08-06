@@ -6,8 +6,11 @@
 
 #include <gtest/gtest.h>
 
+#include "legged/legged_terrain.hpp"
 #include "legged/legged_spline_optimizer.hpp"
 #include "lunar_planner_core/planner.hpp"
+#include "shared/map_snapshot.hpp"
+#include "shared/safe_projection.hpp"
 #include "test_fixtures.hpp"
 
 namespace lunar::planning {
@@ -120,16 +123,24 @@ TEST(LeggedPlanner, ProducesOnlyBodyReferenceWithBoundedKinematics) {
   }
 }
 
-TEST(LeggedPlanner, RejectsValidationSubdivisionBudgetAboveHardCeiling) {
-  Planner planner;
+TEST(LeggedPlanner, DerivesLongSweepSamplingWithoutAFixedCeiling) {
   auto input = test::MakeValidLeggedInput();
-  input.config.legged.continuous_validation_maximum_subdivisions = 33U;
+  input.world.local_map = test::MakeFlatMap("odom", 120U, 100U, 0.05);
+  const auto capability = std::get<LeggedCapability>(input.capability);
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
 
-  const PlannerOutput output = planner.Plan(input);
+  const legged::LeggedSweepResult result = legged::ValidateLeggedBodySweep(
+      legged::LeggedPose{.position_m = {1.0, 2.5, 0.5}},
+      legged::LeggedPose{.position_m = {4.0, 2.5, 0.5}},
+      Interval{.lower = 0.5, .upper = 0.5},
+      std::chrono::seconds{3}, *projection.projection, capability, {});
 
-  EXPECT_EQ(output.outcome, PlanningOutcome::kInvalidRequest);
-  EXPECT_EQ(output.reason_code, "LEGGED_LATTICE_REQUEST_INVALID");
-  EXPECT_FALSE(output.reference.has_value());
+  EXPECT_TRUE(result.valid) << result.reason_code;
+  EXPECT_GT(result.sample_count, 32U);
 }
 
 TEST(LeggedPlanner, HonorsRequiredSmoothingPolicy) {

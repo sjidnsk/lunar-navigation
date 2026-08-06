@@ -335,9 +335,7 @@ PlannerOutput WheelPlanner::Plan(
       used_discrete_fallback = true;
     }
     std::vector<WheelTransition> selected = std::move(optimized.transitions);
-    WheelSweepValidator validator{
-        *projection.projection, *capability,
-        problem.config.wheel.continuous_validation_maximum_subdivisions};
+    WheelSweepValidator validator{*projection.projection, *capability};
     const bool optimized_valid = std::ranges::all_of(
         selected, [&](const WheelTransition& transition) {
           return validator.Validate(transition, problem.stop_token).valid;

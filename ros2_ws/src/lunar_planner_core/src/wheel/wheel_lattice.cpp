@@ -273,10 +273,7 @@ struct OrderedPrimitive final {
       capability.maximum_curvature_per_m <= 0.0 ||
       !std::isfinite(config.wheel.xy_resolution_m) ||
       config.wheel.xy_resolution_m <= 0.0 ||
-      config.wheel.yaw_bin_count < 4U ||
-      config.wheel.maximum_terminal_candidates == 0U ||
-      config.wheel.continuous_validation_maximum_subdivisions == 0U ||
-      config.wheel.continuous_validation_maximum_subdivisions > 32U) {
+      config.wheel.yaw_bin_count < 4U) {
     return false;
   }
   if (!std::ranges::all_of(capability.footprint_xy_m, [](const Vec2& value) {
@@ -397,18 +394,7 @@ WheelLatticeBuildResult BuildWheelLattice(
   std::map<WheelLatticeState, std::size_t> state_indices;
   std::queue<std::size_t> pending;
   pending.push(0U);
-  const std::size_t per_map_upper_bound = projection.source_map()->cell_count() >
-          std::numeric_limits<std::size_t>::max() /
-              config.wheel.yaw_bin_count / 3U
-      ? std::numeric_limits<std::size_t>::max()
-      : projection.source_map()->cell_count() *
-            config.wheel.yaw_bin_count * 3U;
-  const std::size_t maximum_states = std::min(
-      per_map_upper_bound,
-      config.search.resources.maximum_generated_candidates);
-  WheelSweepValidator validator{
-      projection, capability,
-      config.wheel.continuous_validation_maximum_subdivisions};
+  WheelSweepValidator validator{projection, capability};
 
   while (!pending.empty()) {
     if (stop_token.stop_requested()) {
@@ -449,11 +435,6 @@ WheelLatticeBuildResult BuildWheelLattice(
       std::size_t target_index{};
       const auto found = state_indices.find(target_state);
       if (found == state_indices.end()) {
-        if (graph.states.size() >= maximum_states) {
-          return Failure(
-              WheelLatticeStatus::kResourceExhausted,
-              "WHEEL_LATTICE_STATE_LIMIT");
-        }
         target_index = graph.states.size();
         graph.states.push_back(target_state);
         graph.search_problem.outgoing_edges.emplace_back();

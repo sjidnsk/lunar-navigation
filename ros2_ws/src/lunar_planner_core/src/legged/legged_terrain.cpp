@@ -157,7 +157,6 @@ LeggedSweepResult ValidateLeggedBodySweep(
     const std::chrono::nanoseconds nominal_duration,
     const shared::SafeProjection& projection,
     const LeggedCapability& capability,
-    const std::size_t maximum_subdivisions,
     const std::stop_token stop_token) {
   if (stop_token.stop_requested()) {
     return LeggedSweepResult{
@@ -171,7 +170,7 @@ LeggedSweepResult ValidateLeggedBodySweep(
   if (!IsFinite(source) || !IsFinite(target) ||
       !ValidInterval(source_body_z_m) || nominal_duration.count() <= 0 ||
       projection.source_map() == nullptr ||
-      !ValidCapability(capability) || maximum_subdivisions == 0U) {
+      !ValidCapability(capability)) {
     return SweepFailure("LEGGED_SWEEP_REQUEST_INVALID");
   }
   const double support_radius = std::hypot(
@@ -186,9 +185,6 @@ LeggedSweepResult ValidateLeggedBodySweep(
       projection.source_map()->resolution_m() * 0.25;
   const std::size_t subdivisions = std::max<std::size_t>(
       1U, static_cast<std::size_t>(std::ceil(swept_distance / maximum_step)));
-  if (subdivisions > maximum_subdivisions) {
-    return SweepFailure("LEGGED_SWEEP_RESOLUTION_LIMIT");
-  }
   const double duration_s =
       std::chrono::duration<double>(nominal_duration).count();
   const double sample_duration_s =

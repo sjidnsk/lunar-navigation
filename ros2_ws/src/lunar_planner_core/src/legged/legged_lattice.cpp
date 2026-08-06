@@ -147,11 +147,7 @@ struct OrderedPrimitive final {
       capability.motion_primitives.empty() ||
       !std::isfinite(config.legged.xy_resolution_m) ||
       config.legged.xy_resolution_m <= 0.0 ||
-      config.legged.yaw_bin_count < 4U ||
-      config.legged.maximum_terminal_candidates == 0U ||
-      config.legged.maximum_height_interval_splits == 0U ||
-      config.legged.continuous_validation_maximum_subdivisions == 0U ||
-      config.legged.continuous_validation_maximum_subdivisions > 32U) {
+      config.legged.yaw_bin_count < 4U) {
     return false;
   }
   return std::ranges::all_of(
@@ -231,9 +227,6 @@ struct OrderedPrimitive final {
   const LeggedSweepResult sweep = ValidateLeggedBodySweep(
       source, target, source_body_z_m,
       primitive.nominal_duration, projection, capability,
-      std::min(
-          config.legged.continuous_validation_maximum_subdivisions,
-          config.legged.maximum_height_interval_splits),
       stop_token);
   if (sweep.canceled) {
     canceled = true;
@@ -371,15 +364,6 @@ LeggedLatticeBuildResult BuildLeggedLattice(
   std::map<LeggedStateKey, std::size_t> state_indices;
   std::queue<std::size_t> pending;
   pending.push(0U);
-  const std::size_t map_cells = projection.source_map()->cell_count();
-  const std::size_t upper_bound = map_cells >
-          std::numeric_limits<std::size_t>::max() /
-              config.legged.yaw_bin_count
-      ? std::numeric_limits<std::size_t>::max()
-      : map_cells * config.legged.yaw_bin_count;
-  const std::size_t maximum_states = std::min(
-      upper_bound, config.search.resources.maximum_generated_candidates);
-
   while (!pending.empty()) {
     if (stop_token.stop_requested()) {
       return Failure(LeggedLatticeStatus::kCanceled, "REQUEST_CANCELED");
@@ -424,11 +408,6 @@ LeggedLatticeBuildResult BuildLeggedLattice(
       std::size_t target_index{};
       const auto found = state_indices.find(KeyOf(target_state));
       if (found == state_indices.end()) {
-        if (graph.states.size() >= maximum_states) {
-          return Failure(
-              LeggedLatticeStatus::kResourceExhausted,
-              "LEGGED_LATTICE_STATE_LIMIT");
-        }
         target_index = graph.states.size();
         graph.states.push_back(target_state);
         graph.search_problem.outgoing_edges.emplace_back();
@@ -464,7 +443,6 @@ LeggedLatticeBuildResult BuildLeggedLattice(
   graph.search_problem.heuristic.reserve(graph.states.size());
   graph.search_problem.goal_mask.assign(graph.states.size(), 0U);
   const double maximum_speed = MaximumPlanarSpeed(capability);
-  std::size_t terminal_count = 0U;
   for (std::size_t index = 0U; index < graph.states.size(); ++index) {
     const LeggedPose pose = index == 0U
         ? graph.true_start_pose
@@ -482,10 +460,8 @@ LeggedLatticeBuildResult BuildLeggedLattice(
     }
     graph.search_problem.heuristic.push_back(
         std::isfinite(heuristic) ? heuristic : 0.0);
-    if (terminal_count < config.legged.maximum_terminal_candidates &&
-        GoalContainsBodyPose(goal, pose)) {
+    if (GoalContainsBodyPose(goal, pose)) {
       graph.search_problem.goal_mask[index] = 1U;
-      ++terminal_count;
     }
   }
   if (graph.search_problem.goal_mask.front() == 0U &&

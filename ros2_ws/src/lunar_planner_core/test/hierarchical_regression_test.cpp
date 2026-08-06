@@ -84,7 +84,6 @@ void SetFloat(
   } else if (platform == PlatformType::kLegged) {
     input.config.legged.xy_resolution_m = 0.2;
     input.config.local_frontier.legged_horizon_m = 2.0;
-    input.config.legged.maximum_height_interval_splits = 32U;
     std::get<LeggedState>(input.current_state).body_pose.position_m = {
       2.1, 25.1, 0.5};
   } else {

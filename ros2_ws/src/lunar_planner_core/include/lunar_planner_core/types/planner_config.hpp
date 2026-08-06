@@ -9,19 +9,10 @@
 
 namespace lunar::planning {
 
-struct SearchResourceLimits final {
-  std::size_t maximum_expanded_states{100'000U};
-  std::size_t maximum_reopened_states{50'000U};
-  std::size_t maximum_generated_candidates{100'000U};
-  std::size_t maximum_open_states{100'000U};
-  std::size_t maximum_memory_bytes{256U * 1024U * 1024U};
-};
-
 struct AraStarConfig final {
   double initial_epsilon{2.0};
   double epsilon_decrement{0.25};
   double target_epsilon{1.0};
-  SearchResourceLimits resources;
 };
 
 struct CorridorConfig final {
@@ -56,16 +47,11 @@ struct MapSafetyConfig final {
 struct WheelPlannerConfig final {
   double xy_resolution_m{0.25};
   std::size_t yaw_bin_count{32U};
-  std::size_t maximum_terminal_candidates{64U};
-  std::size_t continuous_validation_maximum_subdivisions{32U};
 };
 
 struct LeggedPlannerConfig final {
   double xy_resolution_m{0.25};
   std::size_t yaw_bin_count{32U};
-  std::size_t maximum_terminal_candidates{64U};
-  std::size_t maximum_height_interval_splits{16U};
-  std::size_t continuous_validation_maximum_subdivisions{32U};
 };
 
 struct HopperPlannerConfig final {
