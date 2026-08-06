@@ -232,11 +232,11 @@
 - Modify: `ros2_ws/src/lunar_planner_core/src/wheel/wheel_planner.cpp`
 - Modify: `ros2_ws/src/lunar_planner_core/test/{wheel_planner_test,wheel_fault_matrix_test}.cpp`
 
-- [ ] **Step 1: Add terrain and primitive RED tests**
+- [x] **Step 1: Add terrain and primitive RED tests**
 
   Cover four-wheel support-plane fitting; arbitrary-direction `20°`; continuous `0.20 m` positive relief; `>0.20 m` and vertical discontinuity rejection; no unsupported gap; `0.210 m` underbody clearance; roughness affecting cost/speed but not hard feasibility; uncertainty remaining a hard map policy; forward/reverse arcs, spin, stop-and-switch, continuous primitive endpoints and exact start/end anchors.
 
-- [ ] **Step 2: Implement independent physical roughness**
+- [x] **Step 2: Implement independent physical roughness**
 
   Derive roughness from L0 elevation residuals relative to the support plane. Do not reuse `elevation_variance`. Use:
 
@@ -245,11 +245,11 @@
   speed = kinematic_speed * cos(surface_slope) * scale;
   ```
 
-- [ ] **Step 3: Implement lazy continuous wheel search and timing**
+- [x] **Step 3: Implement lazy continuous wheel search and timing**
 
   Preserve continuous endpoint pose in every node while using `(cell,yaw_bin,mode)` only as search key. Generate the approved 0.20 m straight, 1 m radius arc, spin and switch primitives on expansion. Derive trapezoidal/triangular segment time from current velocity, slope, roughness, curvature, acceleration and braking; no fixed nominal duration.
 
-- [ ] **Step 4: Run focused tests and commit**
+- [x] **Step 4: Run focused tests and commit**
 
   Commit: `feat: implement approved wheeled capability semantics`
 

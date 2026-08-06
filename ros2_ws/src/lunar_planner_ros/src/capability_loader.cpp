@@ -526,9 +526,6 @@ void RecordPrimitiveId(
         .relative_end_pose =
             Pose(RequireMap(primitive, "relative_end_pose"),
                  "motion_primitives.relative_end_pose"),
-        .nominal_duration = Duration(
-            1.0 / maximum_forward_speed,
-            "derived motion primitive duration"),
     });
   }
 

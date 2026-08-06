@@ -237,14 +237,6 @@ struct CubicSample final {
         return Result(controls, false, false,
                       "WHEEL_OPTIMIZATION_CURVE_OUTSIDE_CORRIDOR");
       }
-      const std::int64_t duration_begin =
-          control.nominal_duration.count() *
-          static_cast<std::int64_t>(sample - 1U) /
-          static_cast<std::int64_t>(count);
-      const std::int64_t duration_end =
-          control.nominal_duration.count() *
-          static_cast<std::int64_t>(sample) /
-          static_cast<std::int64_t>(count);
       const double path_length = std::hypot(
           target.position_m.x - source.position_m.x,
           target.position_m.y - source.position_m.y);
@@ -262,9 +254,9 @@ struct CubicSample final {
           .primitive_kind = control.primitive_kind,
           .source_mode = control.source_mode,
           .target_mode = control.target_mode,
-          .nominal_duration =
-              std::chrono::nanoseconds{duration_end - duration_begin},
           .path_length_m = path_length,
+          .surface_slope_rad = control.surface_slope_rad,
+          .roughness_m = control.roughness_m,
           .reverse = control.reverse,
           .stable_index = control.stable_index,
       });
@@ -330,12 +322,6 @@ WheelOptimizationResult OptimizeWheelSpline(
   if (discrete_transitions.empty()) {
     return Result({}, false, false, "WHEEL_OPTIMIZATION_PATH_EMPTY");
   }
-  if (corridor.status != shared::CorridorStatus::kCertified ||
-      corridor.cells.empty()) {
-    return Result(
-        discrete_transitions, false, false,
-        "WHEEL_OPTIMIZATION_DISCRETE_FALLBACK");
-  }
   if (config.maximum_smoothing_control_points < 2U ||
       config.maximum_smoothing_control_points > kHardMaximumControlPoints ||
       config.maximum_smoothing_samples <= kTimingSamplesPerTransition ||
@@ -354,6 +340,12 @@ WheelOptimizationResult OptimizeWheelSpline(
     return Result(
         discrete_transitions, false, false,
         "WHEEL_OPTIMIZATION_CONFIG_INVALID");
+  }
+  if (corridor.status != shared::CorridorStatus::kCertified ||
+      corridor.cells.empty()) {
+    return Result(
+        discrete_transitions, false, false,
+        "WHEEL_OPTIMIZATION_DISCRETE_FALLBACK");
   }
 
   std::vector<Vec2> points;

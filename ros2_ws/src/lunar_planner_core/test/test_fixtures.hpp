@@ -95,7 +95,10 @@ inline PlannerInput MakeValidWheelInput() {
       .capability =
           WheeledCapability{
               .footprint_xy_m =
-                  {{-0.2, -0.2}, {0.2, -0.2}, {0.2, 0.2}, {-0.2, 0.2}},
+                  {{-0.591, -0.409},
+                   {0.591, -0.409},
+                   {0.591, 0.409},
+                   {-0.591, 0.409}},
               .body_extent_m = {1.182, 0.818, 1.29996},
               .wheel_diameter_m = 0.319,
               .wheel_width_m = 0.148,
@@ -122,7 +125,6 @@ inline PlannerInput MakeValidWheelInput() {
                           .primitive_id = "forward",
                           .kind = WheelPrimitiveKind::kForward,
                           .relative_end_pose = Pose3{.position_m = {1.0, 0.0, 0.0}},
-                          .nominal_duration = std::chrono::seconds{1},
                       },
                       WheelMotionPrimitive{
                           .primitive_id = "forward-arc",
@@ -133,13 +135,11 @@ inline PlannerInput MakeValidWheelInput() {
                                   .orientation =
                                       YawQuaternion(1.5707963267948966),
                               },
-                          .nominal_duration = std::chrono::seconds{1},
                       },
                       WheelMotionPrimitive{
                           .primitive_id = "reverse",
                           .kind = WheelPrimitiveKind::kReverse,
                           .relative_end_pose = Pose3{.position_m = {-1.0, 0.0, 0.0}},
-                          .nominal_duration = std::chrono::seconds{1},
                       },
                       WheelMotionPrimitive{
                           .primitive_id = "reverse-arc",
@@ -150,26 +150,22 @@ inline PlannerInput MakeValidWheelInput() {
                                   .orientation =
                                       YawQuaternion(-1.5707963267948966),
                               },
-                          .nominal_duration = std::chrono::seconds{1},
                       },
                       WheelMotionPrimitive{
                           .primitive_id = "spin-left",
                           .kind = WheelPrimitiveKind::kSpinCounterclockwise,
                           .relative_end_pose =
                               Pose3{.orientation = YawQuaternion(1.5707963267948966)},
-                          .nominal_duration = std::chrono::milliseconds{500},
                       },
                       WheelMotionPrimitive{
                           .primitive_id = "spin-right",
                           .kind = WheelPrimitiveKind::kSpinClockwise,
                           .relative_end_pose =
                               Pose3{.orientation = YawQuaternion(-1.5707963267948966)},
-                          .nominal_duration = std::chrono::milliseconds{500},
                       },
                       WheelMotionPrimitive{
                           .primitive_id = "stop-switch",
                           .kind = WheelPrimitiveKind::kStopAndSwitch,
-                          .nominal_duration = std::chrono::milliseconds{100},
                       },
                   },
           },

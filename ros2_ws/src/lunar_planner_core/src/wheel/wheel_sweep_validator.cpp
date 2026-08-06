@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include "shared/terrain_checks.hpp"
+
 namespace lunar::planning::wheel {
 namespace {
 
@@ -191,6 +193,11 @@ WheelSweepValidator::Validate(const WheelTransition &transition,
   const double signed_yaw_delta = ShortestYawDelta(
       transition.source_pose.yaw_rad, transition.target_pose.yaw_rad);
   std::size_t sample_count = 0U;
+  double maximum_surface_slope_rad = 0.0;
+  double maximum_roughness_m = 0.0;
+  double maximum_positive_relief_m = 0.0;
+  double minimum_underbody_clearance_m =
+      std::numeric_limits<double>::infinity();
   for (std::size_t sample = 0U; sample <= required_subdivisions; ++sample) {
     if (stop_token.stop_requested()) {
       return WheelSweepValidation{
@@ -211,6 +218,25 @@ WheelSweepValidator::Validate(const WheelTransition &transition,
                                      transition.source_pose.position_m.y);
     const double yaw =
         transition.source_pose.yaw_rad + ratio * signed_yaw_delta;
+    const shared::WheelTerrainPoseEvaluation terrain =
+        shared::EvaluateWheelTerrainPose(
+            map, Vec2{.x = center_x, .y = center_y}, yaw, *capability_);
+    if (!terrain.feasible) {
+      return Failure(
+          terrain.rejection_codes.empty()
+              ? "WHEEL_TERRAIN_POSE_INVALID"
+              : terrain.rejection_codes.front(),
+          sample_count);
+    }
+    maximum_surface_slope_rad = std::max(
+        maximum_surface_slope_rad, terrain.surface_slope_rad);
+    maximum_roughness_m = std::max(
+        maximum_roughness_m, terrain.roughness_m);
+    maximum_positive_relief_m = std::max(
+        maximum_positive_relief_m, terrain.maximum_positive_relief_m);
+    minimum_underbody_clearance_m = std::min(
+        minimum_underbody_clearance_m,
+        terrain.minimum_underbody_clearance_m);
     const double cosine = std::cos(yaw);
     const double sine = std::sin(yaw);
     double minimum_x = std::numeric_limits<double>::infinity();
@@ -265,6 +291,10 @@ WheelSweepValidator::Validate(const WheelTransition &transition,
       .valid = true,
       .canceled = false,
       .sample_count = sample_count,
+      .maximum_surface_slope_rad = maximum_surface_slope_rad,
+      .maximum_roughness_m = maximum_roughness_m,
+      .maximum_positive_relief_m = maximum_positive_relief_m,
+      .minimum_underbody_clearance_m = minimum_underbody_clearance_m,
       .reason_code = "WHEEL_SWEEP_VALID",
   };
 }

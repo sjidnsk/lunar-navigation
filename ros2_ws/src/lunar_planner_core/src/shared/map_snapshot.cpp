@@ -242,6 +242,61 @@ std::optional<GridCell> MapSnapshot::PositionToCell(
   return InBounds(cell) ? std::optional<GridCell>{cell} : std::nullopt;
 }
 
+std::optional<double> MapSnapshot::SampleElevationBilinear(
+    const Vec2 position_m) const noexcept {
+  if (!std::isfinite(position_m.x) || !std::isfinite(position_m.y)) {
+    return std::nullopt;
+  }
+  const double sample_x =
+      (position_m.x - map_.origin_m.x) / map_.resolution_m - 0.5;
+  const double sample_y =
+      (position_m.y - map_.origin_m.y) / map_.resolution_m - 0.5;
+  if (!std::isfinite(sample_x) || !std::isfinite(sample_y)) {
+    return std::nullopt;
+  }
+  const auto x0 = static_cast<std::int64_t>(std::floor(sample_x));
+  const auto y0 = static_cast<std::int64_t>(std::floor(sample_y));
+  const double fraction_x = sample_x - static_cast<double>(x0);
+  const double fraction_y = sample_y - static_cast<double>(y0);
+  const auto valid = ByteLayer("valid_mask");
+  const auto elevation = FloatLayer("elevation");
+  double result = 0.0;
+  double total_weight = 0.0;
+  for (std::int64_t dy = 0; dy <= 1; ++dy) {
+    const double weight_y = dy == 0 ? 1.0 - fraction_y : fraction_y;
+    for (std::int64_t dx = 0; dx <= 1; ++dx) {
+      const double weight_x = dx == 0 ? 1.0 - fraction_x : fraction_x;
+      const double weight = weight_x * weight_y;
+      if (weight <= 1.0e-15) {
+        continue;
+      }
+      const auto x = x0 + dx;
+      const auto y = y0 + dy;
+      if (x < 0 || y < 0 ||
+          x > static_cast<std::int64_t>(
+                  std::numeric_limits<std::int32_t>::max()) ||
+          y > static_cast<std::int64_t>(
+                  std::numeric_limits<std::int32_t>::max())) {
+        return std::nullopt;
+      }
+      const GridCell cell{.x = static_cast<std::int32_t>(x),
+                          .y = static_cast<std::int32_t>(y)};
+      if (!InBounds(cell)) {
+        return std::nullopt;
+      }
+      const std::size_t index = Index(cell);
+      if (valid[index] == 0U) {
+        return std::nullopt;
+      }
+      result += weight * static_cast<double>(elevation[index]);
+      total_weight += weight;
+    }
+  }
+  return total_weight > 0.0
+             ? std::optional<double>{result / total_weight}
+             : std::nullopt;
+}
+
 Vec3 MapSnapshot::CellCenter(const GridCell cell) const noexcept {
   if (!InBounds(cell)) {
     return {};

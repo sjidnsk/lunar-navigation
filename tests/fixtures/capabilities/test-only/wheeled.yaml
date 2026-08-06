@@ -9,10 +9,10 @@ map:
   resolution_m: 0.2
 capability:
   footprint_xy_m:
-    - [-0.05, -0.05]
-    - [0.05, -0.05]
-    - [0.05, 0.05]
-    - [-0.05, 0.05]
+    - [-0.591, -0.409]
+    - [0.591, -0.409]
+    - [0.591, 0.409]
+    - [-0.591, 0.409]
   body_extent_m: [1.182, 0.818, 1.29996]
   wheel_diameter_m: 0.319
   wheel_width_m: 0.148
@@ -21,6 +21,6 @@ capability:
   minimum_underbody_clearance_m: 0.21
   maximum_local_obstacle_relief_m: 0.2
   allow_unsupported_gap: false
-  minimum_clearance_m: 0.0
+  minimum_clearance_m: 0.2
   xy_resolution_m: 0.2
   primitive_translation_m: 0.2

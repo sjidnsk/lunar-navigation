@@ -142,7 +142,6 @@ TEST(LocalFrontier, WheelTurnFrontierRejectsAHeadingThatMissesTheRouteTurn) {
           .kind = WheelPrimitiveKind::kSpinCounterclockwise,
           .relative_end_pose =
               Pose3{.orientation = test::YawQuaternion(std::numbers::pi / 4.0)},
-          .nominal_duration = std::chrono::seconds{1},
       });
 
   const LocalFrontierResult result = BuildLocalFrontiers(input, AngledRoute());

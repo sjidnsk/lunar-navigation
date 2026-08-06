@@ -14,6 +14,10 @@ struct WheelSweepValidation final {
   bool valid{};
   bool canceled{};
   std::size_t sample_count{};
+  double maximum_surface_slope_rad{};
+  double maximum_roughness_m{};
+  double maximum_positive_relief_m{};
+  double minimum_underbody_clearance_m{};
   std::string reason_code;
 };
 

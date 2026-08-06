@@ -71,7 +71,7 @@ std::string CommonHeader(const std::string& type) {
 
 std::string WheeledYaml(const std::string& forward_speed = "1.0") {
   return CommonHeader("WHEELED") + R"(wheeled:
-  footprint_xy_m: [[-0.2, -0.2], [0.2, -0.2], [0.2, 0.2], [-0.2, 0.2]]
+  footprint_xy_m: [[-0.591, -0.409], [0.591, -0.409], [0.591, 0.409], [-0.591, 0.409]]
   body_extent_m: [1.182, 0.818, 1.29996]
   reference_point: base_footprint
   wheel_diameter_m: 0.319
@@ -97,6 +97,36 @@ std::string WheeledYaml(const std::string& forward_speed = "1.0") {
       kind: FORWARD
       relative_end_pose:
         position_m: [0.2, 0.0, 0.0]
+        orientation_wxyz: [1.0, 0.0, 0.0, 0.0]
+    - primitive_id: reverse
+      kind: REVERSE
+      relative_end_pose:
+        position_m: [-0.2, 0.0, 0.0]
+        orientation_wxyz: [1.0, 0.0, 0.0, 0.0]
+    - primitive_id: forward-arc-left
+      kind: FORWARD_ARC
+      relative_end_pose:
+        position_m: [0.19509032201612825, 0.01921471959676957, 0.0]
+        orientation_wxyz: [0.9951847266721969, 0.0, 0.0, 0.0980171403295606]
+    - primitive_id: reverse-arc-right
+      kind: REVERSE_ARC
+      relative_end_pose:
+        position_m: [-0.19509032201612825, 0.01921471959676957, 0.0]
+        orientation_wxyz: [0.9951847266721969, 0.0, 0.0, -0.0980171403295606]
+    - primitive_id: spin-left
+      kind: SPIN_COUNTERCLOCKWISE
+      relative_end_pose:
+        position_m: [0.0, 0.0, 0.0]
+        orientation_wxyz: [0.9951847266721969, 0.0, 0.0, 0.0980171403295606]
+    - primitive_id: spin-right
+      kind: SPIN_CLOCKWISE
+      relative_end_pose:
+        position_m: [0.0, 0.0, 0.0]
+        orientation_wxyz: [0.9951847266721969, 0.0, 0.0, -0.0980171403295606]
+    - primitive_id: stop-switch
+      kind: STOP_AND_SWITCH
+      relative_end_pose:
+        position_m: [0.0, 0.0, 0.0]
         orientation_wxyz: [1.0, 0.0, 0.0, 0.0]
 )";
 }
@@ -178,8 +208,10 @@ TEST(CapabilityLoader, LoadsV2WheelGeometryAndSourcesWithoutProxyValues) {
   EXPECT_DOUBLE_EQ(wheel.minimum_underbody_clearance_m, 0.21);
   EXPECT_DOUBLE_EQ(wheel.maximum_local_obstacle_relief_m, 0.2);
   EXPECT_FALSE(wheel.allow_unsupported_gap);
-  ASSERT_EQ(wheel.motion_primitives.size(), 1U);
+  ASSERT_EQ(wheel.motion_primitives.size(), 7U);
   EXPECT_EQ(wheel.motion_primitives.front().primitive_id, "forward");
+  EXPECT_EQ(wheel.motion_primitives.back().kind,
+            lunar::planning::WheelPrimitiveKind::kStopAndSwitch);
   EXPECT_EQ(result.capabilities->field_source_types.at("baseline"),
             "project_engineering_baseline");
 }

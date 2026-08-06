@@ -315,6 +315,14 @@ PrefixPolyline(const std::vector<Vec3> &route_odom, const double distance_m,
                                       const FrontierSample &sample,
                                       const double resolution_m,
                                       const std::size_t attempt_index) {
+  if (sample.is_route_end) {
+    const auto transformed =
+        TransformGoal(input.goal_map, input.world.map_from_odom,
+                      TransformDirection::kParentToChild);
+    if (transformed.has_value()) {
+      return *transformed;
+    }
+  }
   double tangent_yaw_tolerance_rad = std::numbers::pi / 4.0;
   if (const auto *capability =
           std::get_if<WheeledCapability>(&input.capability)) {
@@ -342,15 +350,6 @@ PrefixPolyline(const std::vector<Vec3> &route_odom, const double distance_m,
       .yaw_rad = sample.tangent_yaw_rad,
       .yaw_tolerance_rad = tangent_yaw_tolerance_rad,
   };
-  if (sample.is_route_end && input.goal_map.yaw_rad.has_value()) {
-    const auto transformed =
-        TransformGoal(input.goal_map, input.world.map_from_odom,
-                      TransformDirection::kParentToChild);
-    if (transformed.has_value() && transformed->yaw_rad.has_value()) {
-      goal.yaw_rad = transformed->yaw_rad;
-      goal.yaw_tolerance_rad = transformed->yaw_tolerance_rad;
-    }
-  }
   return goal;
 }
 

@@ -31,7 +31,6 @@ struct WheelMotionPrimitive final {
   std::string primitive_id;
   WheelPrimitiveKind kind{};
   Pose3 relative_end_pose;
-  std::chrono::nanoseconds nominal_duration{};
 };
 
 struct WheeledCapability final {

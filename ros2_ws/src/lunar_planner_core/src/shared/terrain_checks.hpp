@@ -38,6 +38,15 @@ struct TerrainCellEvaluation final {
   std::vector<std::string> rejection_codes;
 };
 
+struct WheelTerrainPoseEvaluation final {
+  bool feasible{};
+  double surface_slope_rad{};
+  double roughness_m{};
+  double maximum_positive_relief_m{};
+  double minimum_underbody_clearance_m{};
+  std::vector<std::string> rejection_codes;
+};
+
 [[nodiscard]] double EffectiveMaximumSlopeRad(
     const PlatformCapability& capability,
     const MapSafetyConfig& config) noexcept;
@@ -51,6 +60,13 @@ struct TerrainCellEvaluation final {
 
 [[nodiscard]] double ComputeMaximumNeighborStep(
     const MapSnapshot& map, GridCell cell) noexcept;
+
+[[nodiscard]] double ComputeSpatialRoughnessMeters(
+    const MapSnapshot& map, GridCell cell) noexcept;
+
+[[nodiscard]] WheelTerrainPoseEvaluation EvaluateWheelTerrainPose(
+    const MapSnapshot& map, Vec2 center_m, double yaw_rad,
+    const WheeledCapability& capability);
 
 [[nodiscard]] TerrainCellEvaluation EvaluateTerrainCell(
     const MapSnapshot& map, GridCell cell, const TerrainLimits& limits,

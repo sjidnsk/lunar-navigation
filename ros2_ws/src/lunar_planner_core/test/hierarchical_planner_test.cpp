@@ -229,7 +229,7 @@ TEST(HierarchicalPlanner, DistinguishesGlobalAndLocalRejections) {
   EXPECT_FALSE(local.reference.has_value());
 }
 
-TEST(HierarchicalPlanner, BacksOffToANearerReachableFrontier) {
+TEST(HierarchicalPlanner, UsesExactTerminalConnectorBeforeFrontierBackoff) {
   Planner planner;
   PlannerInput input = DistantWheelInput();
   auto &capability = std::get<WheeledCapability>(input.capability);
@@ -238,7 +238,6 @@ TEST(HierarchicalPlanner, BacksOffToANearerReachableFrontier) {
           .primitive_id = "three-metre-forward",
           .kind = WheelPrimitiveKind::kForward,
           .relative_end_pose = Pose3{.position_m = {3.0, 0.0, 0.0}},
-          .nominal_duration = std::chrono::seconds{3},
       },
   };
 
@@ -247,14 +246,14 @@ TEST(HierarchicalPlanner, BacksOffToANearerReachableFrontier) {
   ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
       << output.reason_code;
   ASSERT_TRUE(output.diagnostics.hierarchical.has_value());
-  EXPECT_EQ(output.diagnostics.hierarchical->local_attempts, 2U);
-  EXPECT_NE(std::ranges::find(output.diagnostics.warning_codes,
+  EXPECT_EQ(output.diagnostics.hierarchical->local_attempts, 1U);
+  EXPECT_EQ(std::ranges::find(output.diagnostics.warning_codes,
                               "LOCAL_FRONTIER_BACKOFF"),
             output.diagnostics.warning_codes.end());
   const auto *trajectory =
       std::get_if<TrajectoryReference>(&output.reference->data);
   ASSERT_NE(trajectory, nullptr);
-  EXPECT_NEAR(trajectory->points.back().pose.position_m.x, 5.5, 0.25);
+  EXPECT_NEAR(trajectory->points.back().pose.position_m.x, 6.5, 1.0e-9);
 }
 
 TEST(HierarchicalPlanner, ReportsTheLocalBackendReasonAfterAllFrontiersFail) {
@@ -268,7 +267,6 @@ TEST(HierarchicalPlanner, ReportsTheLocalBackendReasonAfterAllFrontiersFail) {
           .relative_end_pose =
               Pose3{.orientation = Quaternion{.w = 0.9238795325112867,
                                               .z = 0.3826834323650898}},
-          .nominal_duration = std::chrono::seconds{1},
       },
   };
 
@@ -289,6 +287,9 @@ TEST(HierarchicalPlanner, ReroutesAfterAConditionalCorridorFailsLocalSweep) {
   input.world.local_map = test::MakeFlatMap("odom", 14U, 13U, 1.0);
   input.config.global_map.base_resolution_m = 1.0;
   input.config.local_frontier.wheel_horizon_m = 20.0;
+  // The coarse 1 m test lattice needs room to realize the rerouted Manhattan
+  // turns; production L0 uses the approved 0.20 m primitives.
+  input.config.local_frontier.additional_corridor_margin_m = 0.8;
   auto &state = std::get<WheeledState>(input.current_state);
   state.pose.position_m = {1.5, 4.5, 0.0};
   auto &capability = std::get<WheeledCapability>(input.capability);
@@ -312,7 +313,11 @@ TEST(HierarchicalPlanner, ReroutesAfterAConditionalCorridorFailsLocalSweep) {
 
   const PlannerOutput output = planner.Plan(input);
 
-  ASSERT_TRUE(output.reference.has_value()) << output.reason_code;
+  ASSERT_TRUE(output.reference.has_value())
+      << output.reason_code << " first_warning="
+      << (output.diagnostics.warning_codes.empty()
+              ? std::string{"none"}
+              : output.diagnostics.warning_codes.front());
   EXPECT_NE(std::ranges::find(output.diagnostics.warning_codes,
                               "GLOBAL_CONDITIONAL_CORRIDOR_RETRY"),
             output.diagnostics.warning_codes.end());

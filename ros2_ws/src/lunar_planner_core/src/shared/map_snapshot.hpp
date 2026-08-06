@@ -46,6 +46,8 @@ class MapSnapshot final {
   [[nodiscard]] std::size_t Index(GridCell cell) const noexcept;
   [[nodiscard]] std::optional<GridCell> PositionToCell(
       Vec2 position_m) const noexcept;
+  [[nodiscard]] std::optional<double> SampleElevationBilinear(
+      Vec2 position_m) const noexcept;
   [[nodiscard]] Vec3 CellCenter(GridCell cell) const noexcept;
   [[nodiscard]] std::span<const float> FloatLayer(
       std::string_view name) const noexcept;

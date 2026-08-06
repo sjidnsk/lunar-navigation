@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include <cmath>
 #include <compare>
 #include <cstddef>
@@ -45,8 +44,9 @@ struct WheelTransition final {
   WheelPrimitiveKind primitive_kind{WheelPrimitiveKind::kForward};
   WheelMotionMode source_mode{WheelMotionMode::kStart};
   WheelMotionMode target_mode{WheelMotionMode::kStart};
-  std::chrono::nanoseconds nominal_duration{};
   double path_length_m{};
+  double surface_slope_rad{};
+  double roughness_m{};
   bool reverse{};
   std::size_t stable_index{};
 

@@ -183,7 +183,10 @@ inline tf2_msgs::msg::TFMessage MakeTransforms(
 inline lunar::planning::WheeledCapability MakeWheeledCapability() {
   return lunar::planning::WheeledCapability{
       .footprint_xy_m =
-          {{-0.2, -0.2}, {0.2, -0.2}, {0.2, 0.2}, {-0.2, 0.2}},
+          {{-0.591, -0.409},
+           {0.591, -0.409},
+           {0.591, 0.409},
+           {-0.591, 0.409}},
       .body_extent_m = {1.182, 0.818, 1.29996},
       .wheel_diameter_m = 0.319,
       .wheel_width_m = 0.148,
@@ -213,7 +216,6 @@ inline lunar::planning::WheeledCapability MakeWheeledCapability() {
                       .position_m = {1.0, 0.0, 0.0},
                       .orientation = {},
                   },
-              .nominal_duration = std::chrono::seconds{1},
           }},
   };
 }
