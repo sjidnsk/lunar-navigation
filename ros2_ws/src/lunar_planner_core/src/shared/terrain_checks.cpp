@@ -288,26 +288,20 @@ TerrainLimitsResult ResolveTerrainLimits(
               .reason_code = {},
           };
         } else {
-          const double minimum_clearance = std::max(
-              {concrete.minimum_overhead_clearance_m,
-               concrete.minimum_lateral_clearance_m,
-               concrete.minimum_landing_clearance_m});
-          if (!IsFinitePositive(concrete.maximum_launch_speed_mps) ||
-              !IsFiniteNonNegative(concrete.maximum_landing_roughness_m) ||
-              !IsFiniteNonNegative(minimum_clearance)) {
+          if (!IsFinitePositive(concrete.landing_support_radius_m) ||
+              !IsFinitePositive(concrete.flight_collision_radius_m)) {
             return Invalid("HOPPER_TERRAIN_CAPABILITY_INVALID");
           }
           return TerrainLimitsResult{
               .limits = TerrainLimits{
                   .platform_type = PlatformType::kHopper,
                   .maximum_slope_rad = maximum_slope,
-                  .maximum_roughness_m =
-                      concrete.maximum_landing_roughness_m,
+                  .maximum_roughness_m = std::nullopt,
                   .maximum_step_height_m = std::nullopt,
-                  .minimum_clearance_m = minimum_clearance,
+                  .minimum_clearance_m = 0.0,
                   .minimum_confidence =
                       config.minimum_observation_quality,
-                  .maximum_speed_mps = concrete.maximum_launch_speed_mps,
+                  .maximum_speed_mps = 1.0,
               },
               .reason_code = {},
           };

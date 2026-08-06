@@ -5,7 +5,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <numbers>
+#include <numeric>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "hopper/ballistic_kinematics.hpp"
 
@@ -14,27 +18,103 @@ namespace {
 
 constexpr double kTolerance = 1.0e-9;
 
+struct TimeSection final {
+  double begin_s{};
+  double end_s{};
+  bool launch_contact{};
+  bool landing_contact{};
+};
+
 struct Bounds3 final {
   Vec3 minimum;
   Vec3 maximum;
 };
 
-[[nodiscard]] bool IsFinite(const Vec3 value) noexcept {
+[[nodiscard]] bool Finite(const Vec3 value) noexcept {
   return std::isfinite(value.x) && std::isfinite(value.y) &&
       std::isfinite(value.z);
+}
+
+[[nodiscard]] double Distance(const Vec3 lhs, const Vec3 rhs) noexcept {
+  return std::hypot(
+      std::hypot(lhs.x - rhs.x, lhs.y - rhs.y), lhs.z - rhs.z);
+}
+
+[[nodiscard]] double Norm(const Vec3 value) noexcept {
+  return std::hypot(std::hypot(value.x, value.y), value.z);
+}
+
+[[nodiscard]] double PlanarPointSegmentDistance(
+    const Vec3 point, const Vec3 begin, const Vec3 end) noexcept {
+  const double dx = end.x - begin.x;
+  const double dy = end.y - begin.y;
+  const double squared_length = dx * dx + dy * dy;
+  if (squared_length <= std::numeric_limits<double>::epsilon()) {
+    return std::hypot(point.x - begin.x, point.y - begin.y);
+  }
+  const double projection = std::clamp(
+      ((point.x - begin.x) * dx + (point.y - begin.y) * dy) /
+          squared_length,
+      0.0, 1.0);
+  return std::hypot(
+      point.x - (begin.x + projection * dx),
+      point.y - (begin.y + projection * dy));
+}
+
+[[nodiscard]] double PointRectangleDistance(
+    const Vec3 point, const double x0, const double x1,
+    const double y0, const double y1) noexcept {
+  const double nearest_x = std::clamp(point.x, x0, x1);
+  const double nearest_y = std::clamp(point.y, y0, y1);
+  return std::hypot(point.x - nearest_x, point.y - nearest_y);
+}
+
+[[nodiscard]] bool SegmentIntersectsRectangle(
+    const Vec3 begin, const Vec3 end, const double x0, const double x1,
+    const double y0, const double y1) noexcept {
+  double lower = 0.0;
+  double upper = 1.0;
+  const double dx = end.x - begin.x;
+  const double dy = end.y - begin.y;
+  const auto clip = [&](const double p, const double q) {
+    if (std::abs(p) <= std::numeric_limits<double>::epsilon()) {
+      return q >= 0.0;
+    }
+    const double ratio = q / p;
+    if (p < 0.0) {
+      lower = std::max(lower, ratio);
+    } else {
+      upper = std::min(upper, ratio);
+    }
+    return lower <= upper;
+  };
+  return clip(-dx, begin.x - x0) && clip(dx, x1 - begin.x) &&
+      clip(-dy, begin.y - y0) && clip(dy, y1 - begin.y);
+}
+
+[[nodiscard]] double SegmentRectangleDistance(
+    const Vec3 begin, const Vec3 end, const double x0, const double x1,
+    const double y0, const double y1) noexcept {
+  if (SegmentIntersectsRectangle(begin, end, x0, x1, y0, y1)) {
+    return 0.0;
+  }
+  double distance = std::min(
+      PointRectangleDistance(begin, x0, x1, y0, y1),
+      PointRectangleDistance(end, x0, x1, y0, y1));
+  for (const Vec3 corner : {
+           Vec3{x0, y0, 0.0}, Vec3{x1, y0, 0.0},
+           Vec3{x1, y1, 0.0}, Vec3{x0, y1, 0.0}}) {
+    distance = std::min(
+        distance, PlanarPointSegmentDistance(corner, begin, end));
+  }
+  return distance;
 }
 
 [[nodiscard]] std::pair<double, double> CoordinateRange(
     const BallisticArc& arc, const std::size_t axis,
     const double begin_s, const double end_s) noexcept {
   const auto coordinate = [axis](const Vec3 value) {
-    if (axis == 0U) {
-      return value.x;
-    }
-    if (axis == 1U) {
-      return value.y;
-    }
-    return value.z;
+    return axis == 0U ? value.x : (axis == 1U ? value.y : value.z);
   };
   const double p0 = coordinate(arc.launch_position_m);
   const double velocity = coordinate(arc.launch_velocity_mps);
@@ -45,7 +125,7 @@ struct Bounds3 final {
   };
   double minimum = std::min(value(begin_s), value(end_s));
   double maximum = std::max(value(begin_s), value(end_s));
-  if (std::abs(acceleration) > 1.0e-15) {
+  if (std::abs(acceleration) > std::numeric_limits<double>::epsilon()) {
     const double stationary = -velocity / acceleration;
     if (stationary > begin_s && stationary < end_s) {
       minimum = std::min(minimum, value(stationary));
@@ -55,61 +135,39 @@ struct Bounds3 final {
   return {minimum, maximum};
 }
 
-[[nodiscard]] bool CertificationDataKnown(
-    const shared::MapSnapshot& map,
-    const std::size_t index,
+[[nodiscard]] bool Known(
+    const shared::MapSnapshot& map, const std::size_t index,
     const MapSafetyConfig& config) noexcept {
-  const auto valid = map.ByteLayer("valid_mask");
-  const auto elevation_variance = map.FloatLayer("elevation_variance");
-  const auto obstacle_variance = map.FloatLayer("obstacle_variance");
-  const auto observation_age = map.FloatLayer("observation_age_s");
-  const auto observation_quality = map.FloatLayer("observation_quality");
-  const auto observation_count = map.CountLayer("observation_count");
-  return index < valid.size() && valid[index] != 0U &&
-      index < elevation_variance.size() &&
-      static_cast<double>(elevation_variance[index]) <=
-          config.maximum_elevation_variance_m2 + kTolerance &&
-      index < obstacle_variance.size() &&
-      static_cast<double>(obstacle_variance[index]) <=
+  return map.ByteLayer("valid_mask")[index] != 0U &&
+      static_cast<double>(map.FloatLayer("obstacle_variance")[index]) <=
           config.maximum_obstacle_variance_m2 + kTolerance &&
-      index < observation_age.size() &&
-      static_cast<double>(observation_age[index]) <=
+      static_cast<double>(map.FloatLayer("observation_age_s")[index]) <=
           config.maximum_observation_age_s + kTolerance &&
-      index < observation_quality.size() &&
-      static_cast<double>(observation_quality[index]) + kTolerance >=
+      static_cast<double>(map.FloatLayer("observation_quality")[index]) +
+              kTolerance >=
           config.minimum_observation_quality &&
-      index < observation_count.size() &&
-      observation_count[index] >= config.minimum_observation_count;
+      map.CountLayer("observation_count")[index] >=
+          config.minimum_observation_count;
 }
 
-[[nodiscard]] bool ContactFootprintContains(
-    const shared::MapSnapshot& map,
-    const shared::GridCell cell,
-    const Vec3 contact_position,
-    const HopperCapability& capability,
-    const double additional_radius_m) noexcept {
-  const Vec3 center = map.CellCenter(cell);
-  const double half_cell = 0.5 * map.resolution_m();
-  return std::abs(center.x - contact_position.x) <=
-      capability.body_half_extent_m.x +
-          capability.minimum_lateral_clearance_m + additional_radius_m +
-          half_cell +
-                 kTolerance &&
-      std::abs(center.y - contact_position.y) <=
-      capability.body_half_extent_m.y +
-          capability.minimum_lateral_clearance_m + additional_radius_m +
-          half_cell +
-                 kTolerance;
+[[nodiscard]] bool ContactCell(
+    const shared::MapSnapshot& map, const shared::GridCell cell,
+    const Vec3 contact, const double radius_m) noexcept {
+  const double x0 = map.origin_m().x + static_cast<double>(cell.x) *
+      map.resolution_m();
+  const double y0 = map.origin_m().y + static_cast<double>(cell.y) *
+      map.resolution_m();
+  return PointRectangleDistance(
+             contact, x0, x0 + map.resolution_m(), y0,
+             y0 + map.resolution_m()) <=
+      radius_m + kTolerance;
 }
 
 [[nodiscard]] FlightTubeCertificationResult Failure(
-    std::string reason_code,
-    const std::size_t section_count,
-    const std::size_t overlapped_cell_count,
-    const double minimum_clearance_m,
-    const double radius_m,
-    const bool canceled = false) {
-  return FlightTubeCertificationResult{
+    std::string reason_code, const std::size_t section_count,
+    const std::size_t overlapped_cell_count, const double minimum_clearance_m,
+    const double radius_m, const bool canceled = false) {
+  return {
       .certified = false,
       .canceled = canceled,
       .section_count = section_count,
@@ -123,143 +181,180 @@ struct Bounds3 final {
 }  // namespace
 
 FlightTubeCertificationResult CertifyFlightTube(
-    const BallisticArc& arc,
-    const shared::MapSnapshot& map,
-    const CertifiedLandingRegion& source_region,
-    const CertifiedLandingRegion& target_region,
-    const HopperCapability& capability,
-    const PlannerConfig& config,
-    const std::stop_token stop_token,
-    const double additional_radius_m) {
-  const double horizontal_x = capability.body_half_extent_m.x +
-      capability.minimum_lateral_clearance_m + additional_radius_m;
-  const double horizontal_y = capability.body_half_extent_m.y +
-      capability.minimum_lateral_clearance_m + additional_radius_m;
-  const double radius = std::hypot(horizontal_x, horizontal_y);
+    const BallisticArc& arc, const shared::MapSnapshot& map,
+    const HopperCapability& capability, const MapSafetyConfig& map_safety,
+    const std::stop_token stop_token, const double additional_radius_m) {
+  const double radius = capability.flight_collision_radius_m +
+      capability.flight_map_margin_m + additional_radius_m;
   if (stop_token.stop_requested()) {
     return Failure("REQUEST_CANCELED", 0U, 0U, 0.0, radius, true);
   }
-  if (!IsFinite(arc.launch_position_m) || !IsFinite(arc.landing_position_m) ||
-      !IsFinite(arc.launch_velocity_mps) || !IsFinite(arc.gravity_mps2) ||
+  if (!Finite(arc.launch_position_m) || !Finite(arc.landing_position_m) ||
+      !Finite(arc.launch_velocity_mps) || !Finite(arc.gravity_mps2) ||
       !std::isfinite(arc.flight_time_s) || arc.flight_time_s <= 0.0 ||
-      !std::isfinite(additional_radius_m) || additional_radius_m < 0.0 ||
-      !std::isfinite(radius) || radius <= 0.0) {
+      !std::isfinite(radius) || radius <= 0.0 ||
+      !std::isfinite(additional_radius_m) || additional_radius_m < 0.0) {
     return Failure(
         "HOPPER_FLIGHT_TUBE_INPUT_INVALID", 0U, 0U, 0.0, radius);
   }
-  if (config.hopper.maximum_flight_tube_sections < 2U) {
-    return Failure(
-        "HOPPER_FLIGHT_TUBE_RESOURCE_EXHAUSTED", 0U, 0U, 0.0, radius);
-  }
-  const std::size_t section_count = std::min<std::size_t>(
-      config.hopper.maximum_flight_tube_sections, 64U);
-  const auto elevations = map.FloatLayer("elevation");
-  const auto obstacles = map.ByteLayer("obstacle");
-  const auto forbidden = map.ByteLayer("forbidden");
-  const auto obstacle_heights = map.FloatLayer("obstacle_height");
-  std::size_t overlapped = 0U;
-  double minimum_clearance = std::numeric_limits<double>::infinity();
 
-  for (std::size_t section = 0U; section < section_count; ++section) {
+  const double spatial_tolerance = 0.25 * map.resolution_m();
+  std::vector<TimeSection> pending{
+      TimeSection{
+          .begin_s = 0.0,
+          .end_s = arc.flight_time_s,
+          .launch_contact = true,
+          .landing_contact = true,
+      },
+  };
+  std::vector<TimeSection> sections;
+  while (!pending.empty()) {
     if (stop_token.stop_requested()) {
       return Failure(
-          "REQUEST_CANCELED", section, overlapped,
+          "REQUEST_CANCELED", sections.size(), 0U, 0.0, radius, true);
+    }
+    const TimeSection section = pending.back();
+    pending.pop_back();
+    const double midpoint = std::midpoint(section.begin_s, section.end_s);
+    if (!(midpoint > section.begin_s && midpoint < section.end_s)) {
+      return Failure(
+          "HOPPER_FLIGHT_TUBE_NUMERICAL_INDETERMINATE", sections.size(),
+          0U, 0.0, radius);
+    }
+    const Vec3 begin = EvaluateBallisticState(arc, section.begin_s).position_m;
+    const Vec3 end = EvaluateBallisticState(arc, section.end_s).position_m;
+    const double duration = section.end_s - section.begin_s;
+    const double chord_length = Distance(begin, end);
+    const double curvature_deviation =
+        Norm(arc.gravity_mps2) * duration * duration / 8.0;
+    if (!std::isfinite(chord_length) || !std::isfinite(curvature_deviation)) {
+      return Failure(
+          "HOPPER_FLIGHT_TUBE_NUMERICAL_INDETERMINATE", sections.size(),
+          0U, 0.0, radius);
+    }
+    if (std::max(chord_length, curvature_deviation) > spatial_tolerance) {
+      pending.push_back(TimeSection{
+          .begin_s = midpoint,
+          .end_s = section.end_s,
+          .launch_contact = false,
+          .landing_contact = section.landing_contact,
+      });
+      pending.push_back(TimeSection{
+          .begin_s = section.begin_s,
+          .end_s = midpoint,
+          .launch_contact = section.launch_contact,
+          .landing_contact = false,
+      });
+      continue;
+    }
+    sections.push_back(section);
+  }
+  std::ranges::sort(sections, {}, &TimeSection::begin_s);
+
+  std::size_t overlapped = 0U;
+  double minimum_clearance = std::numeric_limits<double>::infinity();
+  for (std::size_t section_index = 0U; section_index < sections.size();
+       ++section_index) {
+    if (stop_token.stop_requested()) {
+      return Failure(
+          "REQUEST_CANCELED", section_index, overlapped,
           std::isfinite(minimum_clearance) ? minimum_clearance : 0.0,
           radius, true);
     }
-    const double begin_s = arc.flight_time_s *
-        static_cast<double>(section) / static_cast<double>(section_count);
-    const double end_s = arc.flight_time_s *
-        static_cast<double>(section + 1U) /
-        static_cast<double>(section_count);
+    const TimeSection& section = sections[section_index];
+    const Vec3 section_begin =
+        EvaluateBallisticState(arc, section.begin_s).position_m;
+    const Vec3 section_end =
+        EvaluateBallisticState(arc, section.end_s).position_m;
     const auto [minimum_x, maximum_x] =
-        CoordinateRange(arc, 0U, begin_s, end_s);
+        CoordinateRange(arc, 0U, section.begin_s, section.end_s);
     const auto [minimum_y, maximum_y] =
-        CoordinateRange(arc, 1U, begin_s, end_s);
+        CoordinateRange(arc, 1U, section.begin_s, section.end_s);
     const auto [minimum_z, maximum_z] =
-        CoordinateRange(arc, 2U, begin_s, end_s);
+        CoordinateRange(arc, 2U, section.begin_s, section.end_s);
     const Bounds3 bounds{
-        .minimum = Vec3{
-            minimum_x - horizontal_x,
-            minimum_y - horizontal_y,
-            minimum_z - capability.body_half_extent_m.z,
-        },
-        .maximum = Vec3{
-            maximum_x + horizontal_x,
-            maximum_y + horizontal_y,
-            maximum_z + capability.body_half_extent_m.z +
-                capability.minimum_overhead_clearance_m,
-        },
+        .minimum = {minimum_x - radius, minimum_y - radius,
+                    minimum_z - radius},
+        .maximum = {maximum_x + radius, maximum_y + radius,
+                    maximum_z + radius},
     };
-    if (!IsFinite(bounds.minimum) || !IsFinite(bounds.maximum)) {
+    if (!Finite(bounds.minimum) || !Finite(bounds.maximum)) {
       return Failure(
-          "HOPPER_FLIGHT_TUBE_NUMERICAL_INDETERMINATE", section, overlapped,
-          0.0, radius);
+          "HOPPER_FLIGHT_TUBE_NUMERICAL_INDETERMINATE", section_index,
+          overlapped, 0.0, radius);
     }
     const auto cell_index = [&](const double coordinate, const double origin) {
       return static_cast<long long>(
           std::floor((coordinate - origin) / map.resolution_m()));
     };
-    const long long minimum_cell_x =
-        cell_index(bounds.minimum.x, map.origin_m().x);
-    const long long maximum_cell_x =
-        cell_index(bounds.maximum.x, map.origin_m().x);
-    const long long minimum_cell_y =
-        cell_index(bounds.minimum.y, map.origin_m().y);
-    const long long maximum_cell_y =
-        cell_index(bounds.maximum.y, map.origin_m().y);
-    if (minimum_cell_x < 0 || minimum_cell_y < 0 ||
-        maximum_cell_x >= static_cast<long long>(map.width()) ||
-        maximum_cell_y >= static_cast<long long>(map.height())) {
+    const long long x0 = cell_index(bounds.minimum.x, map.origin_m().x);
+    const long long x1 = cell_index(bounds.maximum.x, map.origin_m().x);
+    const long long y0 = cell_index(bounds.minimum.y, map.origin_m().y);
+    const long long y1 = cell_index(bounds.maximum.y, map.origin_m().y);
+    if (x0 < 0 || y0 < 0 || x1 >= static_cast<long long>(map.width()) ||
+        y1 >= static_cast<long long>(map.height())) {
       return Failure(
-          "HOPPER_FLIGHT_TUBE_OUTSIDE_MAP", section, overlapped,
-          std::isfinite(minimum_clearance) ? minimum_clearance : 0.0,
-          radius);
+          "HOPPER_FLIGHT_TUBE_OUTSIDE_MAP", section_index, overlapped,
+          std::isfinite(minimum_clearance) ? minimum_clearance : 0.0, radius);
     }
-
-    for (long long y = minimum_cell_y; y <= maximum_cell_y; ++y) {
-      for (long long x = minimum_cell_x; x <= maximum_cell_x; ++x) {
+    for (long long y = y0; y <= y1; ++y) {
+      for (long long x = x0; x <= x1; ++x) {
         ++overlapped;
         const shared::GridCell cell{
             .x = static_cast<std::int32_t>(x),
             .y = static_cast<std::int32_t>(y),
         };
+        const Vec3 cell_center = map.CellCenter(cell);
+        const double cell_x0 = map.origin_m().x +
+            static_cast<double>(cell.x) * map.resolution_m();
+        const double cell_y0 = map.origin_m().y +
+            static_cast<double>(cell.y) * map.resolution_m();
+        const double planar_distance = SegmentRectangleDistance(
+            section_begin, section_end, cell_x0,
+            cell_x0 + map.resolution_m(), cell_y0,
+            cell_y0 + map.resolution_m());
+        if (planar_distance > radius + kTolerance) {
+          continue;
+        }
         const std::size_t index = map.Index(cell);
-        if (!CertificationDataKnown(map, index, config.map_safety)) {
+        if (!Known(map, index, map_safety)) {
           return Failure(
-              "HOPPER_FLIGHT_TUBE_UNKNOWN", section, overlapped,
+              "HOPPER_FLIGHT_TUBE_UNKNOWN", section_index, overlapped,
               std::isfinite(minimum_clearance) ? minimum_clearance : 0.0,
               radius);
         }
-        const double terrain = static_cast<double>(elevations[index]);
-        const double clearance = bounds.minimum.z - terrain;
+        if (map.ByteLayer("forbidden")[index] != 0U) {
+          return Failure(
+              "HOPPER_FLIGHT_TUBE_FORBIDDEN", section_index, overlapped,
+              std::isfinite(minimum_clearance) ? minimum_clearance : 0.0,
+              radius);
+        }
+        const double terrain =
+            static_cast<double>(map.FloatLayer("elevation")[index]);
+        const double vertical_radius = std::sqrt(std::max(
+            0.0, radius * radius - planar_distance * planar_distance));
+        const double lower_tube_z = minimum_z - vertical_radius;
+        const double clearance = lower_tube_z - terrain;
         minimum_clearance = std::min(minimum_clearance, clearance);
-        const bool source_contact = section == 0U &&
-            ContactFootprintContains(
-                map, cell, source_region.aim_position_on_surface_m,
-                capability, additional_radius_m);
-        const bool target_contact = section + 1U == section_count &&
-            ContactFootprintContains(
-                map, cell, target_region.aim_position_on_surface_m,
-                capability, additional_radius_m);
-        if (clearance < -kTolerance && !source_contact && !target_contact) {
+        const bool contact =
+            ContactCell(
+                map, cell, arc.launch_position_m,
+                radius + std::numbers::sqrt2 * 0.5 * map.resolution_m()) ||
+            ContactCell(
+                map, cell, arc.landing_position_m,
+                radius + std::numbers::sqrt2 * 0.5 * map.resolution_m());
+        if (clearance < -kTolerance && !contact) {
           return Failure(
-              "HOPPER_FLIGHT_TUBE_TERRAIN_COLLISION", section, overlapped,
-              clearance, radius);
+              "HOPPER_FLIGHT_TUBE_TERRAIN_COLLISION", section_index,
+              overlapped, clearance, radius);
         }
-        if (forbidden[index] != 0U) {
-          return Failure(
-              "HOPPER_FLIGHT_TUBE_FORBIDDEN", section, overlapped,
-              clearance, radius);
-        }
-        if (obstacles[index] != 0U) {
+        if (map.ByteLayer("obstacle")[index] != 0U) {
           const double obstacle_top = terrain + std::max(
-              static_cast<double>(obstacle_heights[index]),
+              static_cast<double>(map.FloatLayer("obstacle_height")[index]),
               map.resolution_m());
-          if (obstacle_top + capability.minimum_overhead_clearance_m >=
-              bounds.minimum.z - kTolerance) {
+          if (obstacle_top >= lower_tube_z - kTolerance) {
             return Failure(
-                "HOPPER_FLIGHT_TUBE_OBSTACLE_COLLISION", section,
+                "HOPPER_FLIGHT_TUBE_OBSTACLE_COLLISION", section_index,
                 overlapped, clearance, radius);
           }
         }
@@ -267,18 +362,25 @@ FlightTubeCertificationResult CertifyFlightTube(
     }
   }
 
-  return FlightTubeCertificationResult{
+  return {
       .certified = true,
-      .canceled = false,
-      .section_count = section_count,
+      .section_count = sections.size(),
       .overlapped_cell_count = overlapped,
-      .minimum_clearance_m =
-          std::isfinite(minimum_clearance)
-              ? std::max(0.0, minimum_clearance)
-              : 0.0,
+      .minimum_clearance_m = std::isfinite(minimum_clearance)
+          ? std::max(0.0, minimum_clearance)
+          : 0.0,
       .radius_m = radius,
-      .reason_code = {},
   };
+}
+
+FlightTubeCertificationResult CertifyFlightTube(
+    const BallisticArc& arc, const shared::MapSnapshot& map,
+    const CertifiedLandingRegion&, const CertifiedLandingRegion&,
+    const HopperCapability& capability, const PlannerConfig& config,
+    const std::stop_token stop_token, const double additional_radius_m) {
+  return CertifyFlightTube(
+      arc, map, capability, config.map_safety, stop_token,
+      additional_radius_m);
 }
 
 }  // namespace lunar::planning::hopper

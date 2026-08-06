@@ -244,13 +244,20 @@ inline PlannerInput MakeValidHopperInput() {
   };
   input.goal_map.target = PointGoal{
       .position_m = {4.0, 3.0, 0.0},
-      .tolerance_m = 0.5,
+      .tolerance_m = 0.0,
   };
-  input.goal_map.yaw_rad = 0.0;
-  input.goal_map.yaw_tolerance_rad = 0.1;
+  input.goal_map.yaw_rad = std::nullopt;
+  input.goal_map.yaw_tolerance_rad = 0.0;
   input.world.global_map = MakeFlatMap("map", 16U, 12U, 0.5);
   input.world.local_map = MakeFlatMap("odom", 16U, 12U, 0.5);
   input.config.global_map.base_resolution_m = 0.5;
+  input.hopper_propellant = HopperPropellantState{
+      .stamp = input.state_time,
+      .platform_id = input.platform_id,
+      .capability_version = input.capability_version,
+      .total_mass_kg = 20.0,
+      .remaining_usable_fuel_mass_kg = 0.20,
+  };
   input.capability = HopperCapability{
       .specific_impulse_s = 301.0,
       .landing_support_radius_m = 0.45,
@@ -260,26 +267,7 @@ inline PlannerInput MakeValidHopperInput() {
       .flight_map_margin_m = 0.2,
       .reachability_delta_v_margin_ratio = 0.1,
       .standard_gravity_mps2 = 9.80665,
-      .body_half_extent_m = {0.35, 0.25, 0.5},
-      .platform_mass_kg = 10.0,
-      .gravity_mps2 = {0.0, 0.0, -1.62},
-      .maximum_landing_slope_rad = 0.4,
-      .maximum_landing_roughness_m = 0.1,
-      .maximum_plane_residual_m = 0.05,
-      .minimum_overhead_clearance_m = 0.0,
-      .minimum_lateral_clearance_m = 0.0,
-      .minimum_landing_region_area_m2 = 0.2,
-      .maximum_launch_speed_mps = 8.0,
-      .maximum_launch_impulse_newton_seconds = 100.0,
-      .minimum_flight_time = std::chrono::milliseconds{500},
-      .maximum_flight_time = std::chrono::seconds{10},
-      .maximum_landing_speed_mps = 8.0,
-      .minimum_downward_impact_speed_mps = 0.1,
-      .minimum_landing_clearance_m = 0.0,
-      .maximum_angular_speed_radps = 2.0,
-      .maximum_angular_acceleration_radps2 = 4.0,
-      .maximum_initial_angular_speed_radps = 0.2,
-      .minimum_settle_guard = std::chrono::milliseconds{100},
+      .maximum_landing_slope_rad = 0.174533,
   };
   return input;
 }

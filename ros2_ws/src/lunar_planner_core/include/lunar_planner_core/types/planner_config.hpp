@@ -54,10 +54,7 @@ struct LeggedPlannerConfig final {
   std::size_t yaw_bin_count{32U};
 };
 
-struct HopperPlannerConfig final {
-  std::size_t maximum_flight_tube_sections{128U};
-  std::size_t maximum_authorized_hops{1U};
-};
+struct HopperPlannerConfig final {};
 
 struct GlobalMapConfig final {
   double base_resolution_m{0.2};

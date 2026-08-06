@@ -146,26 +146,15 @@ lunar::planning::PlannerOutput WheelReferenceOutput(
 
 lunar::planning::HopperCapability MakeHopperCapability() {
   return lunar::planning::HopperCapability{
-      .body_half_extent_m = {0.2, 0.2, 0.2},
-      .platform_mass_kg = 10.0,
-      .gravity_mps2 = {0.0, 0.0, -1.62},
-      .maximum_landing_slope_rad = 0.3,
-      .maximum_landing_roughness_m = 0.05,
-      .maximum_plane_residual_m = 0.02,
-      .minimum_overhead_clearance_m = 0.5,
-      .minimum_lateral_clearance_m = 0.2,
-      .minimum_landing_region_area_m2 = 0.5,
-      .maximum_launch_speed_mps = 5.0,
-      .maximum_launch_impulse_newton_seconds = 50.0,
-      .minimum_flight_time = 100ms,
-      .maximum_flight_time = 10s,
-      .maximum_landing_speed_mps = 0.2,
-      .minimum_downward_impact_speed_mps = 0.1,
-      .minimum_landing_clearance_m = 0.1,
-      .maximum_angular_speed_radps = 0.1,
-      .maximum_angular_acceleration_radps2 = 1.0,
-      .maximum_initial_angular_speed_radps = 0.1,
-      .minimum_settle_guard = 500ms,
+      .specific_impulse_s = 301.0,
+      .landing_support_radius_m = 0.45,
+      .flight_collision_radius_m = 0.55,
+      .maximum_landing_plane_residual_m = 0.05,
+      .landing_lateral_margin_m = 0.2,
+      .flight_map_margin_m = 0.2,
+      .reachability_delta_v_margin_ratio = 0.1,
+      .standard_gravity_mps2 = 9.80665,
+      .maximum_landing_slope_rad = 0.17453292519943295,
   };
 }
 

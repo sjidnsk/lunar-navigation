@@ -243,10 +243,15 @@ void MarkValidRectangle(
   input.world.local_map = test::MakeFlatMap(
     "odom", 250U, 250U, kResolutionM);
   input.config.global_map.base_resolution_m = kResolutionM;
-  input.config.hopper.maximum_flight_tube_sections = 128U;
-  input.config.hopper.maximum_authorized_hops = 1U;
   input.position_uncertainty_m = 0.0;
   input.velocity_uncertainty_mps = 0.0;
+  input.hopper_propellant = HopperPropellantState{
+    .stamp = input.state_time,
+    .platform_id = input.platform_id,
+    .capability_version = input.capability_version,
+    .total_mass_kg = 20.0,
+    .remaining_usable_fuel_mass_kg = 0.20,
+  };
 
   constexpr std::size_t start_x = 30U;
   constexpr std::size_t center_y = 125U;
@@ -273,16 +278,8 @@ void MarkValidRectangle(
     .goal_id = "benchmark-hopper-goal",
     .target = PointGoal{
       .position_m = {CellCenter(goal_x), CellCenter(center_y), 0.0},
-      .tolerance_m = 0.05},
+      .tolerance_m = 0.0},
   };
-  auto & capability = std::get<HopperCapability>(input.capability);
-  capability.body_half_extent_m = {0.1, 0.1, 0.5};
-  capability.minimum_landing_region_area_m2 = 0.1;
-  capability.maximum_launch_speed_mps = 2.0;
-  capability.maximum_launch_impulse_newton_seconds = 100.0;
-  capability.minimum_flight_time = std::chrono::milliseconds{500};
-  capability.maximum_flight_time = std::chrono::seconds{3};
-  capability.maximum_landing_speed_mps = 2.0;
   return input;
 }
 

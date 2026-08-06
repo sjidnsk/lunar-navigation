@@ -250,16 +250,13 @@ ResolveClearanceBands(const PlatformCapability &capability) noexcept {
                   concrete.minimum_body_clearance_m,
           };
         } else {
-          const double minimum_clearance =
-              std::max({concrete.minimum_overhead_clearance_m,
-                        concrete.minimum_lateral_clearance_m,
-                        concrete.minimum_landing_clearance_m});
-          if (!std::isfinite(minimum_clearance) || minimum_clearance < 0.0) {
+          if (!std::isfinite(concrete.landing_support_radius_m) ||
+              concrete.landing_support_radius_m <= 0.0) {
             return std::nullopt;
           }
           return ClearanceBands{
-              .rejected_below_m = minimum_clearance,
-              .unconditional_at_or_above_m = minimum_clearance,
+              .rejected_below_m = 0.0,
+              .unconditional_at_or_above_m = 0.0,
           };
         }
       },

@@ -101,26 +101,7 @@ struct HopperCapability final {
   double flight_map_margin_m{};
   double reachability_delta_v_margin_ratio{};
   double standard_gravity_mps2{};
-  Vec3 body_half_extent_m;
-  double platform_mass_kg{};
-  Vec3 gravity_mps2{0.0, 0.0, -1.62};
   double maximum_landing_slope_rad{};
-  double maximum_landing_roughness_m{};
-  double maximum_plane_residual_m{};
-  double minimum_overhead_clearance_m{};
-  double minimum_lateral_clearance_m{};
-  double minimum_landing_region_area_m2{};
-  double maximum_launch_speed_mps{};
-  double maximum_launch_impulse_newton_seconds{};
-  std::chrono::nanoseconds minimum_flight_time{};
-  std::chrono::nanoseconds maximum_flight_time{};
-  double maximum_landing_speed_mps{};
-  double minimum_downward_impact_speed_mps{};
-  double minimum_landing_clearance_m{};
-  double maximum_angular_speed_radps{};
-  double maximum_angular_acceleration_radps2{};
-  double maximum_initial_angular_speed_radps{};
-  std::chrono::nanoseconds minimum_settle_guard{};
 };
 
 using PlatformCapability =

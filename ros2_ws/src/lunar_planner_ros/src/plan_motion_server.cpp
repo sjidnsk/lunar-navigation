@@ -592,12 +592,11 @@ struct PlanMotionServer::Impl final {
 
   [[nodiscard]] ReferenceGuardLimits GuardLimits(
       const lunar::planning::PlatformCapability& capability) const {
-    if (const auto* hopper =
-            std::get_if<lunar::planning::HopperCapability>(&capability)) {
+    if (std::holds_alternative<lunar::planning::HopperCapability>(capability)) {
       return ReferenceGuardLimits{
-          .minimum_settle_guard = hopper->minimum_settle_guard,
-          .maximum_landing_speed_mps = hopper->maximum_landing_speed_mps,
-          .maximum_angular_speed_radps = hopper->maximum_angular_speed_radps,
+          .minimum_settle_guard = 500ms,
+          .maximum_landing_speed_mps = 0.2,
+          .maximum_angular_speed_radps = 0.1,
       };
     }
     return ReferenceGuardLimits{
@@ -1395,11 +1394,11 @@ struct PlanMotionServer::Impl final {
         hops != nullptr && !hops->segments.empty()) {
       authorized_segment = hops->segments.front().segment_id;
     }
-    lunar::planning::Vec3 gravity{};
-    if (const auto* hopper =
-            std::get_if<lunar::planning::HopperCapability>(&input.capability)) {
-      gravity = hopper->gravity_mps2;
-    }
+    const lunar::planning::Vec3 gravity =
+        std::holds_alternative<lunar::planning::HopperCapability>(
+            input.capability)
+            ? lunar::planning::Vec3{0.0, 0.0, -1.62}
+            : lunar::planning::Vec3{};
     std::scoped_lock marker_lock{route_marker_mutex};
     auto markers = route_markers.Replace(
         output.certified_hops,

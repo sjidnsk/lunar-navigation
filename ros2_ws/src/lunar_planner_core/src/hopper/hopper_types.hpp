@@ -85,17 +85,4 @@ enum class HopCertificationStatus : std::uint8_t {
   kNumericalIndeterminate,
 };
 
-struct HopCertificationResult final {
-  HopCertificationStatus status{HopCertificationStatus::kInvalid};
-  std::optional<HopSegment> segment;
-  std::size_t examined_intervals{};
-  double cost{};
-  std::string reason_code;
-
-  [[nodiscard]] bool ok() const noexcept {
-    return status == HopCertificationStatus::kCertified &&
-        segment.has_value() && reason_code.empty();
-  }
-};
-
 }  // namespace lunar::planning::hopper

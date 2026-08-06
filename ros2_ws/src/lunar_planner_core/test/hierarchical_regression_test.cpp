@@ -12,7 +12,6 @@
 #include <gtest/gtest.h>
 
 #include "hierarchical/global_route_planner.hpp"
-#include "hierarchical/hopper_route_planner.hpp"
 #include "lunar_planner_core/planner.hpp"
 #include "test_fixtures.hpp"
 
@@ -75,7 +74,7 @@ void SetFloat(
   input.goal_map = GoalRegion{
     .goal_id = "regression-50m-goal",
     .target = PointGoal{.position_m = {47.9, 25.1, 0.0},
-      .tolerance_m = 0.2},
+      .tolerance_m = platform == PlatformType::kHopper ? 0.0 : 0.2},
   };
   if (platform == PlatformType::kWheeled) {
     input.config.wheel.xy_resolution_m = 0.2;
@@ -99,35 +98,6 @@ void AddVerticalWall(GridMap & map, const std::size_t x)
     SetByte(map, "obstacle", x, y, 1U);
     SetFloat(map, "obstacle_height", x, y, 2.0F);
   }
-}
-
-[[nodiscard]] PlannerInput ThreeHopInput()
-{
-  PlannerInput input = test::MakeValidHopperInput();
-  input.request_id = "regression-three-hop";
-  input.world.global_map = test::MakeFlatMap("map", 20U, 7U, 0.5);
-  input.world.local_map = test::MakeFlatMap("odom", 20U, 7U, 0.5);
-  input.config.global_map.base_resolution_m = 0.5;
-  input.config.global_map.maximum_cells = 1'024U;
-  input.config.global_map.maximum_axis_cells = 1'024U;
-  input.current_state = HopperState{
-    .pose = Pose3{.position_m = {1.5, 1.75, 0.5}},
-  };
-  input.goal_map = GoalRegion{
-    .goal_id = "distant-hopper-goal",
-    .target = PointGoal{.position_m = {7.25, 1.75, 0.0},
-      .tolerance_m = 0.1},
-  };
-  auto & capability = std::get<HopperCapability>(input.capability);
-  capability.body_half_extent_m.x = 0.1;
-  capability.body_half_extent_m.y = 0.1;
-  capability.minimum_landing_region_area_m2 = 0.1;
-  capability.maximum_launch_speed_mps = 2.0;
-  capability.maximum_launch_impulse_newton_seconds = 100.0;
-  capability.maximum_landing_speed_mps = 2.0;
-  capability.minimum_flight_time = std::chrono::milliseconds{500};
-  capability.maximum_flight_time = std::chrono::seconds{3};
-  return input;
 }
 
 void ExpectSameGroundReference(
@@ -253,12 +223,10 @@ TEST(HierarchicalRegression, FiftyMetreFailuresRemainExplicitAndBounded) {
     legged_blocked.reason_code, "LEGGED_START_CONNECTOR_INFEASIBLE");
 
   PlannerInput support = FiftyMetreInput(PlatformType::kHopper);
-  std::get<HopperCapability>(
-    support.capability).minimum_landing_region_area_m2 = std::numbers::pi;
-  SetByte(support.world.global_map, "obstacle", 15U, 125U, 1U);
+  SetByte(support.world.local_map, "obstacle", 239U, 125U, 1U);
   const PlannerOutput insufficient = planner.Plan(support);
   EXPECT_EQ(
-    insufficient.reason_code, "HOPPER_START_REGION_AREA_INSUFFICIENT");
+    insufficient.reason_code, "HOPPER_LANDING_TARGET_OCCUPIED");
 
 }
 
@@ -291,39 +259,16 @@ TEST(HierarchicalRegression, LeggedPassesTerrainRejectedForWheel) {
   EXPECT_NE(wheel_route.reason_code, legged_route.reason_code);
 }
 
-TEST(
-  HierarchicalRegression,
-  HopperDistinguishesMultiHopChainResolutionAndCompleteNoRoute) {
+TEST(HierarchicalRegression, HopperUsesOneDirectRequestWithoutGlobalChain) {
   Planner planner;
-  const PlannerInput input = ThreeHopInput();
-  const HopperRoutePlanResult route = PlanHopperGlobalRoute(input);
-  const PlannerOutput success = planner.Plan(input);
-  ASSERT_TRUE(route.ok()) << route.reason_code;
-  EXPECT_EQ(route.route_hops, 3U);
+  const PlannerOutput success =
+    planner.Plan(FiftyMetreInput(PlatformType::kHopper));
   ASSERT_EQ(success.outcome, PlanningOutcome::kNewReferenceAvailable)
     << success.reason_code;
   ASSERT_TRUE(success.reference.has_value());
-  EXPECT_EQ(success.reference->preview.poses_map.size(), 4U);
+  EXPECT_EQ(success.reference->preview.poses_map.size(), 2U);
   EXPECT_EQ(std::get<HopReference>(success.reference->data).segments.size(), 1U);
-
-  PlannerInput broken = ThreeHopInput();
-  for (std::size_t x = 7U; x <= 11U; ++x) {
-    for (std::size_t y = 0U; y < broken.world.global_map.height; ++y) {
-      SetByte(broken.world.global_map, "valid_mask", x, y, 0U);
-    }
-  }
-  const PlannerOutput no_chain = planner.Plan(broken);
-  EXPECT_EQ(no_chain.outcome, PlanningOutcome::kNoKnownSafeRoute);
-  EXPECT_EQ(no_chain.reason_code, "GLOBAL_NO_KNOWN_SAFE_ROUTE");
-
-  PlannerInput coarse = ThreeHopInput();
-  coarse.world.global_map = test::MakeFlatMap("map", 5U, 1U, 2.0);
-  coarse.world.local_map = test::MakeFlatMap("odom", 5U, 1U, 2.0);
-  coarse.config.global_map.base_resolution_m = 2.0;
-  const PlannerOutput resolution = planner.Plan(coarse);
-  EXPECT_EQ(resolution.outcome, PlanningOutcome::kResourceExhausted);
-  EXPECT_EQ(resolution.reason_code, "HOPPER_GLOBAL_RESOLUTION_INSUFFICIENT");
-
+  EXPECT_EQ(success.continuation, nullptr);
 }
 
 TEST(HierarchicalRegression, SeparatesGlobalSuccessFromLocalCoverageFailure) {

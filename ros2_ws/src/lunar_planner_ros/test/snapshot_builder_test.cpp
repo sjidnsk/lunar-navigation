@@ -53,7 +53,6 @@ lunar::planning::HopperCapability HopperCapability() {
       .flight_map_margin_m = 0.2,
       .reachability_delta_v_margin_ratio = 0.1,
       .standard_gravity_mps2 = 9.80665,
-      .gravity_mps2 = {0.0, 0.0, -1.62},
       .maximum_landing_slope_rad = 0.17453292519943295,
   };
 }

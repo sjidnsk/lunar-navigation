@@ -12,6 +12,14 @@ namespace lunar::planning::hopper {
 [[nodiscard]] FlightTubeCertificationResult CertifyFlightTube(
     const BallisticArc& arc,
     const shared::MapSnapshot& map,
+    const HopperCapability& capability,
+    const MapSafetyConfig& map_safety,
+    std::stop_token stop_token,
+    double additional_radius_m = 0.0);
+
+[[nodiscard]] FlightTubeCertificationResult CertifyFlightTube(
+    const BallisticArc& arc,
+    const shared::MapSnapshot& map,
     const CertifiedLandingRegion& source_region,
     const CertifiedLandingRegion& target_region,
     const HopperCapability& capability,

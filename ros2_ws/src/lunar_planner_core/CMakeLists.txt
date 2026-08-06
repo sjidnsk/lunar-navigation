@@ -25,20 +25,17 @@ add_library(${PROJECT_NAME} SHARED
   src/hierarchical/global_route.cpp
   src/hierarchical/global_route_planner.cpp
   src/hierarchical/grid_search.cpp
-  src/hierarchical/hopper_route_planner.cpp
-  src/hierarchical/landing_spatial_index.cpp
-  src/hierarchical/landing_support_field.cpp
   src/hierarchical/local_frontier.cpp
   src/hierarchical/map_level.cpp
   src/hierarchical/reference_composer.cpp
   src/hierarchical/route_continuation.cpp
-  src/hopper/ballistic_envelope.cpp
   src/hopper/ballistic_kinematics.cpp
   src/hopper/commitment_state_machine.cpp
   src/hopper/flight_tube_certifier.cpp
   src/hopper/hop_certifier.cpp
   src/hopper/hopper_planner.cpp
   src/hopper/landing_region.cpp
+  src/hopper/propellant_model.cpp
   src/legged/legged_lattice.cpp
   src/legged/legged_planner.cpp
   src/legged/legged_spline_optimizer.cpp
@@ -196,29 +193,13 @@ if(BUILD_TESTING)
     lunar_planner_core_hopper_planner_test ${PROJECT_NAME})
   lunar_enable_sanitizers(lunar_planner_core_hopper_planner_test)
 
-  ament_add_gtest(lunar_planner_core_ballistic_envelope_test
-    test/ballistic_envelope_test.cpp)
+  ament_add_gtest(lunar_planner_core_propellant_model_test
+    test/propellant_model_test.cpp)
   target_include_directories(
-    lunar_planner_core_ballistic_envelope_test PRIVATE src test)
+    lunar_planner_core_propellant_model_test PRIVATE src test)
   target_link_libraries(
-    lunar_planner_core_ballistic_envelope_test ${PROJECT_NAME})
-  lunar_enable_sanitizers(lunar_planner_core_ballistic_envelope_test)
-
-  ament_add_gtest(lunar_planner_core_landing_spatial_index_test
-    test/landing_spatial_index_test.cpp)
-  target_include_directories(
-    lunar_planner_core_landing_spatial_index_test PRIVATE src test)
-  target_link_libraries(
-    lunar_planner_core_landing_spatial_index_test ${PROJECT_NAME})
-  lunar_enable_sanitizers(lunar_planner_core_landing_spatial_index_test)
-
-  ament_add_gtest(lunar_planner_core_hopper_route_planner_test
-    test/hopper_route_planner_test.cpp)
-  target_include_directories(
-    lunar_planner_core_hopper_route_planner_test PRIVATE src test)
-  target_link_libraries(
-    lunar_planner_core_hopper_route_planner_test ${PROJECT_NAME})
-  lunar_enable_sanitizers(lunar_planner_core_hopper_route_planner_test)
+    lunar_planner_core_propellant_model_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(lunar_planner_core_propellant_model_test)
 
   ament_add_gtest(lunar_planner_core_hopper_commitment_test
     test/hopper_commitment_test.cpp)

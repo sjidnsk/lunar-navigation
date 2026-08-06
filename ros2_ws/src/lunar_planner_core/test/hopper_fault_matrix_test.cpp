@@ -1,10 +1,10 @@
-#include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
+#include <numbers>
 #include <stop_token>
-#include <string>
+#include <string_view>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -15,148 +15,161 @@
 namespace lunar::planning {
 namespace {
 
-void SetFloat(GridMap &map, const std::string &layer, const std::size_t x,
-              const std::size_t y, const float value) {
-  std::get<std::vector<float>>(map.layers.at(layer).values)
-      .at(y * map.width + x) = value;
-}
-
-void SetByte(GridMap &map, const std::string &layer, const std::size_t x,
-             const std::size_t y, const std::uint8_t value) {
+void SetByte(
+    GridMap& map, const std::string& layer, const std::size_t x,
+    const std::size_t y, const std::uint8_t value) {
   std::get<std::vector<std::uint8_t>>(map.layers.at(layer).values)
       .at(y * map.width + x) = value;
 }
 
-void MakeExactCellGoal(PlannerInput &input) {
-  input.goal_map.target = PointGoal{
-      .position_m = {4.25, 3.25, 0.0},
-      .tolerance_m = 0.05,
-  };
+void SetFloat(
+    GridMap& map, const std::string& layer, const std::size_t x,
+    const std::size_t y, const float value) {
+  std::get<std::vector<float>>(map.layers.at(layer).values)
+      .at(y * map.width + x) = value;
 }
 
-void ExpectNoNewHop(const PlannerOutput &output) {
-  EXPECT_NE(output.outcome, PlanningOutcome::kNewReferenceAvailable)
-      << output.reason_code;
+void ExpectFailure(
+    const PlannerOutput& output, const PlanningOutcome outcome,
+    const std::string_view reason_code) {
+  EXPECT_EQ(output.outcome, outcome);
+  EXPECT_EQ(output.reason_code, reason_code);
+  EXPECT_FALSE(output.reference.has_value());
   EXPECT_NE(output.directive, ExecutionDirective::kActivateNewReference);
-  EXPECT_FALSE(output.reference.has_value());
 }
 
-TEST(HopperFaultMatrix, RejectsLandingSlopeRoughnessAndPlaneResidual) {
+TEST(HopperFaultMatrix, RequiresAnExactPointWithoutYaw) {
   Planner planner;
 
-  auto slope = test::MakeValidHopperInput();
-  MakeExactCellGoal(slope);
-  SetFloat(slope.world.local_map, "elevation", 9U, 6U, 1.0F);
-  ExpectNoNewHop(planner.Plan(slope));
+  PlannerInput tolerance = test::MakeValidHopperInput();
+  std::get<PointGoal>(tolerance.goal_map.target).tolerance_m = 0.01;
+  ExpectFailure(
+      planner.Plan(tolerance), PlanningOutcome::kInvalidRequest,
+      "HOPPER_EXACT_POINT_REQUIRED");
 
-  auto roughness = test::MakeValidHopperInput();
-  MakeExactCellGoal(roughness);
-  SetFloat(roughness.world.local_map, "elevation_variance", 8U, 6U, 0.0225F);
-  ExpectNoNewHop(planner.Plan(roughness));
+  PlannerInput yaw = test::MakeValidHopperInput();
+  yaw.goal_map.yaw_rad = 0.0;
+  ExpectFailure(
+      planner.Plan(yaw), PlanningOutcome::kInvalidRequest,
+      "HOPPER_EXACT_POINT_REQUIRED");
 
-  auto residual = test::MakeValidHopperInput();
-  MakeExactCellGoal(residual);
-  residual.config.map_safety.project_maximum_slope_rad = 0.5;
-  SetFloat(residual.world.local_map, "elevation", 8U, 6U, 0.08F);
-  SetFloat(residual.world.local_map, "elevation", 7U, 6U, 0.0F);
-  SetFloat(residual.world.local_map, "elevation", 9U, 6U, 0.0F);
-  ExpectNoNewHop(planner.Plan(residual));
+  PlannerInput region = test::MakeValidHopperInput();
+  region.goal_map.target = PlanarRegionGoal{
+      .boundary_m = {{3.0, 2.0, 0.0}, {5.0, 2.0, 0.0},
+                     {5.0, 4.0, 0.0}},
+  };
+  ExpectFailure(
+      planner.Plan(region), PlanningOutcome::kInvalidRequest,
+      "HOPPER_EXACT_POINT_REQUIRED");
 }
 
-TEST(HopperFaultMatrix, RejectsInsufficientLandingAreaAndClearance) {
+TEST(HopperFaultMatrix, RejectsMissingInvalidAndInsufficientPropellant) {
   Planner planner;
 
-  auto area = test::MakeValidHopperInput();
-  MakeExactCellGoal(area);
-  std::get<HopperCapability>(area.capability).minimum_landing_region_area_m2 =
-      0.3;
-  SetByte(area.world.global_map, "valid_mask", 9U, 6U, 0U);
-  SetByte(area.world.local_map, "valid_mask", 9U, 6U, 0U);
-  ExpectNoNewHop(planner.Plan(area));
+  PlannerInput missing = test::MakeValidHopperInput();
+  missing.hopper_propellant.reset();
+  ExpectFailure(
+      planner.Plan(missing), PlanningOutcome::kInvalidRequest,
+      "HOPPER_PROPELLANT_STATE_INVALID");
 
-  auto lateral = test::MakeValidHopperInput();
-  MakeExactCellGoal(lateral);
-  std::get<HopperCapability>(lateral.capability).minimum_lateral_clearance_m =
-      0.3;
-  SetByte(lateral.world.local_map, "obstacle", 9U, 6U, 1U);
-  SetFloat(lateral.world.local_map, "obstacle_height", 9U, 6U, 1.0F);
-  ExpectNoNewHop(planner.Plan(lateral));
+  PlannerInput invalid = test::MakeValidHopperInput();
+  invalid.hopper_propellant->total_mass_kg = 0.0;
+  ExpectFailure(
+      planner.Plan(invalid), PlanningOutcome::kInvalidRequest,
+      "HOPPER_TOTAL_MASS_INVALID");
 
-  auto overhead = test::MakeValidHopperInput();
-  MakeExactCellGoal(overhead);
-  std::get<HopperCapability>(overhead.capability).minimum_overhead_clearance_m =
-      0.2;
-  SetByte(overhead.world.local_map, "obstacle", 7U, 6U, 1U);
-  SetFloat(overhead.world.local_map, "obstacle_height", 7U, 6U, 4.0F);
-  ExpectNoNewHop(planner.Plan(overhead));
+  PlannerInput insufficient = test::MakeValidHopperInput();
+  insufficient.hopper_propellant->remaining_usable_fuel_mass_kg = 1.0e-6;
+  ExpectFailure(
+      planner.Plan(insufficient), PlanningOutcome::kGoalInfeasible,
+      "HOPPER_FUEL_INSUFFICIENT");
 }
 
-TEST(HopperFaultMatrix, RejectsLaunchImpulseFlightAndLandingLimits) {
+TEST(HopperFaultMatrix, RejectsSupportDiskObstacleForbiddenUnknownAndBoundary) {
   Planner planner;
 
-  auto launch_speed = test::MakeValidHopperInput();
-  std::get<HopperCapability>(launch_speed.capability).maximum_launch_speed_mps =
-      0.5;
-  ExpectNoNewHop(planner.Plan(launch_speed));
+  PlannerInput obstacle = test::MakeValidHopperInput();
+  SetByte(obstacle.world.local_map, "obstacle", 8U, 6U, 1U);
+  SetFloat(obstacle.world.local_map, "obstacle_height", 8U, 6U, 0.4F);
+  ExpectFailure(
+      planner.Plan(obstacle), PlanningOutcome::kGoalInfeasible,
+      "HOPPER_LANDING_TARGET_OCCUPIED");
 
-  auto impulse = test::MakeValidHopperInput();
-  std::get<HopperCapability>(impulse.capability)
-      .maximum_launch_impulse_newton_seconds = 1.0;
-  ExpectNoNewHop(planner.Plan(impulse));
+  PlannerInput forbidden = test::MakeValidHopperInput();
+  SetByte(forbidden.world.local_map, "forbidden", 8U, 6U, 1U);
+  ExpectFailure(
+      planner.Plan(forbidden), PlanningOutcome::kGoalInfeasible,
+      "HOPPER_LANDING_TARGET_OCCUPIED");
 
-  auto flight_time = test::MakeValidHopperInput();
-  auto &flight_capability = std::get<HopperCapability>(flight_time.capability);
-  flight_capability.minimum_flight_time = std::chrono::seconds{2};
-  flight_capability.maximum_flight_time = std::chrono::seconds{1};
-  const PlannerOutput invalid_time = planner.Plan(flight_time);
-  EXPECT_EQ(invalid_time.outcome, PlanningOutcome::kInvalidRequest);
-  ExpectNoNewHop(invalid_time);
-
-  auto landing_speed = test::MakeValidHopperInput();
-  std::get<HopperCapability>(landing_speed.capability)
-      .maximum_landing_speed_mps = 0.5;
-  ExpectNoNewHop(planner.Plan(landing_speed));
-}
-
-TEST(HopperFaultMatrix, RejectsAttitudeUnknownAndNumericalUncertainty) {
-  Planner planner;
-
-  auto attitude = test::MakeValidHopperInput();
-  std::get<HopperState>(attitude.current_state).velocity.angular_radps.z = 0.3;
-  ExpectNoNewHop(planner.Plan(attitude));
-
-  auto unknown = test::MakeValidHopperInput();
-  MakeExactCellGoal(unknown);
+  PlannerInput unknown = test::MakeValidHopperInput();
   SetByte(unknown.world.local_map, "valid_mask", 8U, 6U, 0U);
-  ExpectNoNewHop(planner.Plan(unknown));
+  ExpectFailure(
+      planner.Plan(unknown), PlanningOutcome::kGoalInfeasible,
+      "LANDING_EVIDENCE_INSUFFICIENT");
 
-  auto uncertainty = test::MakeValidHopperInput();
-  MakeExactCellGoal(uncertainty);
-  SetFloat(uncertainty.world.local_map, "obstacle_variance", 8U, 6U, 0.05F);
-  ExpectNoNewHop(planner.Plan(uncertainty));
-
-  auto nonfinite = test::MakeValidHopperInput();
-  std::get<HopperState>(nonfinite.current_state).pose.position_m.z =
-      std::numeric_limits<double>::quiet_NaN();
-  const PlannerOutput invalid_state = planner.Plan(nonfinite);
-  EXPECT_EQ(invalid_state.outcome, PlanningOutcome::kInvalidRequest);
-  ExpectNoNewHop(invalid_state);
+  PlannerInput boundary = test::MakeValidHopperInput();
+  std::get<PointGoal>(boundary.goal_map.target).position_m = {0.1, 0.1, 0.0};
+  ExpectFailure(
+      planner.Plan(boundary), PlanningOutcome::kGoalInfeasible,
+      "LANDING_EVIDENCE_INSUFFICIENT");
 }
 
-TEST(HopperFaultMatrix, CancelsWithoutPublishingAReference) {
+TEST(HopperFaultMatrix, EnforcesSlopeAndPlaneResidualButNotRoughness) {
   Planner planner;
-  auto input = test::MakeValidHopperInput();
-  std::stop_source stop_source;
-  stop_source.request_stop();
-  input.stop_token = stop_source.get_token();
 
-  const PlannerOutput output = planner.Plan(input);
+  PlannerInput slope = test::MakeValidHopperInput();
+  auto& elevations = std::get<std::vector<float>>(
+      slope.world.local_map.layers.at("elevation").values);
+  const double gradient = std::tan(11.0 * std::numbers::pi / 180.0);
+  for (std::size_t y = 0U; y < slope.world.local_map.height; ++y) {
+    for (std::size_t x = 0U; x < slope.world.local_map.width; ++x) {
+      elevations[y * slope.world.local_map.width + x] =
+          static_cast<float>((static_cast<double>(x) + 0.5) *
+                             slope.world.local_map.resolution_m * gradient);
+    }
+  }
+  ExpectFailure(
+      planner.Plan(slope), PlanningOutcome::kGoalInfeasible,
+      "HOPPER_LANDING_SLOPE_EXCEEDED");
 
-  EXPECT_EQ(output.outcome, PlanningOutcome::kCanceled);
-  EXPECT_EQ(output.directive, ExecutionDirective::kHoldPosition);
-  EXPECT_EQ(output.reason_code, "REQUEST_CANCELED");
-  EXPECT_FALSE(output.reference.has_value());
+  PlannerInput residual = test::MakeValidHopperInput();
+  SetFloat(residual.world.local_map, "elevation", 8U, 6U, 0.20F);
+  ExpectFailure(
+      planner.Plan(residual), PlanningOutcome::kGoalInfeasible,
+      "HOPPER_LANDING_PLANE_RESIDUAL_EXCEEDED");
+
+  PlannerInput rough = test::MakeValidHopperInput();
+  auto& variance = std::get<std::vector<float>>(
+      rough.world.local_map.layers.at("elevation_variance").values);
+  std::ranges::fill(variance, 0.25F);
+  const PlannerOutput rough_result = planner.Plan(rough);
+  EXPECT_EQ(rough_result.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << rough_result.reason_code;
 }
 
-} // namespace
-} // namespace lunar::planning
+TEST(HopperFaultMatrix, ReportsCompleteFlightTubeBlockageWithoutAReference) {
+  Planner planner;
+  PlannerInput blocked = test::MakeValidHopperInput();
+  for (std::size_t y = 0U; y < blocked.world.global_map.height; ++y) {
+    SetByte(blocked.world.global_map, "forbidden", 7U, y, 1U);
+  }
+
+  ExpectFailure(
+      planner.Plan(blocked), PlanningOutcome::kNoKnownSafeRoute,
+      "HOPPER_ALL_FLIGHT_TUBES_BLOCKED");
+}
+
+TEST(HopperFaultMatrix, CancellationNeverPublishesAReference) {
+  Planner planner;
+  PlannerInput input = test::MakeValidHopperInput();
+  std::stop_source stop;
+  stop.request_stop();
+  input.stop_token = stop.get_token();
+
+  ExpectFailure(
+      planner.Plan(input), PlanningOutcome::kCanceled,
+      "REQUEST_CANCELED");
+}
+
+}  // namespace
+}  // namespace lunar::planning

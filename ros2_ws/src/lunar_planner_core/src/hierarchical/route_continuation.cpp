@@ -429,78 +429,9 @@ GroundRouteReuseResult TryReuseGroundRoute(
 
 HopperHopPromotionResult TryPromoteHopperHop(
     const PlannerInput &input, const RouteContinuation &continuation) {
-  if (const std::string mismatch = IdentityMismatch(input, continuation);
-      !mismatch.empty()) {
-    return PromotionFailure(mismatch);
-  }
-  const auto *state = std::get_if<HopperState>(&input.current_state);
-  const auto *capability = std::get_if<HopperCapability>(&input.capability);
-  if (state == nullptr || capability == nullptr ||
-      continuation.platform_type() != PlatformType::kHopper ||
-      continuation.certified_hops().empty()) {
-    return PromotionFailure("HOPPER_ROUTE_CONTINUATION_INVALID");
-  }
-  const double maximum_tf_translation =
-      input.world.global_map.resolution_m + input.position_uncertainty_m;
-  if (!TransformDeltaWithin(input.world.map_from_odom,
-                            continuation.map_from_odom_at_issue(),
-                            maximum_tf_translation)) {
-    return PromotionFailure("ROUTE_TF_DELTA_REPLAN_REQUIRED");
-  }
-  const auto *execution =
-      input.previous_execution.has_value()
-          ? std::get_if<HopperExecutionContext>(&*input.previous_execution)
-          : nullptr;
-  if (execution == nullptr ||
-      execution->state != HopperExecutionState::kLandedHold ||
-      !execution->active_plan_id.has_value() ||
-      !execution->active_segment_id.has_value()) {
-    return PromotionFailure("HOP_LANDING_CONTEXT_INVALID");
-  }
-  if (!FreshPromotionSnapshot(input)) {
-    return PromotionFailure("HOP_LANDING_STATE_STALE");
-  }
-  if (continuation.route_cursor() >= continuation.certified_hops().size()) {
-    return PromotionFailure("HOPPER_ROUTE_CONTINUATION_INVALID");
-  }
-  const CertifiedHopPreview &completed =
-      continuation.certified_hops()[continuation.route_cursor()];
-  if (*execution->active_plan_id != continuation.current_reference_plan_id() ||
-      *execution->active_segment_id != completed.segment_id) {
-    return PromotionFailure("HOP_EXECUTION_ID_MISMATCH");
-  }
-  if (!std::isfinite(input.velocity_uncertainty_mps) ||
-      input.velocity_uncertainty_mps < 0.0 ||
-      Norm(state->velocity.linear_mps) >
-          input.velocity_uncertainty_mps + kTolerance ||
-      Norm(state->velocity.angular_radps) >
-          capability->maximum_initial_angular_speed_radps + kTolerance) {
-    return PromotionFailure("HOP_LANDING_NOT_STABLE");
-  }
-  if (input.position_uncertainty_m >
-          completed.position_uncertainty_m + kTolerance ||
-      input.velocity_uncertainty_mps >
-          completed.velocity_uncertainty_mps + kTolerance) {
-    return PromotionFailure("HOP_UNCERTAINTY_EXCEEDS_CERTIFICATE");
-  }
-  const auto pose_map = TransformPose(state->pose, input.world.map_from_odom,
-                                      TransformDirection::kChildToParent);
-  if (!pose_map.has_value()) {
-    return PromotionFailure("FRAME_TRANSFORM_INVALID");
-  }
-  if (!PointInPolygon(Vec2{pose_map->position_m.x, pose_map->position_m.y},
-                      completed.promotion_region_map)) {
-    return PromotionFailure("HOP_LANDING_DEVIATION_REPLAN_REQUIRED");
-  }
-  const std::size_t next_cursor = continuation.route_cursor() + 1U;
-  if (next_cursor >= continuation.certified_hops().size()) {
-    return PromotionFailure("HOP_ROUTE_COMPLETE");
-  }
-  return HopperHopPromotionResult{
-      .hop = continuation.certified_hops()[next_cursor],
-      .route_cursor = next_cursor,
-      .reason_code = "HOPPER_HOP_PROMOTED",
-  };
+  static_cast<void>(input);
+  static_cast<void>(continuation);
+  return PromotionFailure("HOPPER_MULTIHOP_PROMOTION_RETIRED");
 }
 
 }  // namespace hierarchical

@@ -55,66 +55,6 @@ void SetRollingIdentity(PlannerInput &input, const std::string &platform_id,
   return next;
 }
 
-[[nodiscard]] PlannerInput ThreeHopInput() {
-  PlannerInput input = test::MakeValidHopperInput();
-  input.request_id = "rolling-hopper-0";
-  input.world.global_map = test::MakeFlatMap("map", 20U, 7U, 0.5);
-  input.world.local_map = test::MakeFlatMap("odom", 20U, 7U, 0.5);
-  input.world.map_from_odom = RigidTransform{
-      .parent_frame = "map",
-      .child_frame = "odom",
-      .stamp = input.state_time,
-  };
-  input.config.global_map.base_resolution_m = 0.5;
-  input.config.global_map.maximum_cells = 1'024U;
-  input.config.global_map.maximum_axis_cells = 1'024U;
-  input.current_state = HopperState{
-      .pose = Pose3{.position_m = {1.5, 1.75, 0.5}},
-  };
-  input.goal_map = GoalRegion{
-      .goal_id = "rolling-hopper-goal",
-      .target =
-          PointGoal{
-              .position_m = {7.25, 1.75, 0.0},
-              .tolerance_m = 0.1,
-          },
-  };
-  auto &capability = std::get<HopperCapability>(input.capability);
-  capability.body_half_extent_m.x = 0.1;
-  capability.body_half_extent_m.y = 0.1;
-  capability.minimum_landing_region_area_m2 = 0.1;
-  capability.maximum_launch_speed_mps = 2.0;
-  capability.maximum_launch_impulse_newton_seconds = 100.0;
-  capability.maximum_landing_speed_mps = 2.0;
-  capability.minimum_flight_time = std::chrono::milliseconds{500};
-  capability.maximum_flight_time = std::chrono::seconds{3};
-  SetRollingIdentity(input, "hopper-alpha", "hopper-test-v1");
-  return input;
-}
-
-[[nodiscard]] PlannerInput LandedAfterAuthorizedHop(
-    const PlannerInput &initial, const PlannerOutput &first) {
-  PlannerInput next = initial;
-  next.request_id = "rolling-hopper-1";
-  next.local_map_generation += 1U;
-  next.continuation = first.continuation;
-  const CertifiedHopPreview &completed = first.certified_hops.front();
-  const auto landed_odom = hierarchical::TransformPose(
-      completed.landing_pose_map, next.world.map_from_odom,
-      hierarchical::TransformDirection::kParentToChild);
-  EXPECT_TRUE(landed_odom.has_value());
-  next.current_state = HopperState{
-      .pose = landed_odom.value_or(Pose3{}),
-      .velocity = {},
-  };
-  next.previous_execution = ExecutionContext{HopperExecutionContext{
-      .state = HopperExecutionState::kLandedHold,
-      .active_plan_id = first.reference->plan_id,
-      .active_segment_id = completed.segment_id,
-  }};
-  return next;
-}
-
 TEST(RouteContinuation, ReusesGroundRouteForSmallRealPoseDeviation) {
   Planner planner;
   const PlannerInput initial = DistantWheelInput();
@@ -252,67 +192,17 @@ TEST(RouteContinuation, FallsBackToFreshGroundRouteOnIdentityMismatch) {
   EXPECT_NE(replanned.continuation->route_id(), first.continuation->route_id());
 }
 
-TEST(RouteContinuation, PromotesOnlyStableLandingInsidePromotionRegion) {
+TEST(RouteContinuation, HopperSingleHopDoesNotCreateOrPromoteAContinuation) {
   Planner planner;
-  const PlannerInput initial = ThreeHopInput();
-  const PlannerOutput first = planner.Plan(initial);
-  ASSERT_TRUE(first.reference.has_value()) << first.reason_code;
-  ASSERT_NE(first.continuation, nullptr);
-  ASSERT_GT(first.certified_hops.size(), 1U);
-  PlannerInput landed = LandedAfterAuthorizedHop(initial, first);
+  const PlannerOutput output = planner.Plan(test::MakeValidHopperInput());
 
-  const hierarchical::HopperHopPromotionResult promoted =
-      hierarchical::TryPromoteHopperHop(landed, *first.continuation);
-
-  ASSERT_TRUE(promoted.ok()) << promoted.reason_code;
-  ASSERT_TRUE(promoted.hop.has_value());
-  EXPECT_EQ(promoted.hop->segment_id, first.certified_hops[1U].segment_id);
-  EXPECT_EQ(promoted.route_cursor, 1U);
-
-  PlannerInput outside = landed;
-  auto &outside_state = std::get<HopperState>(outside.current_state);
-  outside_state.pose.position_m.y += 2.0;
-  EXPECT_EQ(hierarchical::TryPromoteHopperHop(outside, *first.continuation)
-                .reason_code,
-            "HOP_LANDING_DEVIATION_REPLAN_REQUIRED");
-
-  PlannerInput moving = landed;
-  std::get<HopperState>(moving.current_state).velocity.linear_mps.x = 0.5;
-  EXPECT_EQ(hierarchical::TryPromoteHopperHop(moving, *first.continuation)
-                .reason_code,
-            "HOP_LANDING_NOT_STABLE");
-
-  PlannerInput stale = landed;
-  stale.state_time.nanoseconds_since_epoch +=
-      std::chrono::seconds{2}.count() * 1'000'000'000LL;
-  EXPECT_EQ(
-      hierarchical::TryPromoteHopperHop(stale, *first.continuation).reason_code,
-      "HOP_LANDING_STATE_STALE");
-}
-
-TEST(RouteContinuation, PromotesExactlyOneNextCertifiedHopThroughPlanner) {
-  Planner planner;
-  const PlannerInput initial = ThreeHopInput();
-  const PlannerOutput first = planner.Plan(initial);
-  ASSERT_NE(first.continuation, nullptr) << first.reason_code;
-  ASSERT_GT(first.certified_hops.size(), 1U);
-  PlannerInput landed = LandedAfterAuthorizedHop(initial, first);
-
-  const PlannerOutput second = planner.Plan(landed);
-
-  ASSERT_TRUE(second.reference.has_value()) << second.reason_code;
-  ASSERT_TRUE(second.diagnostics.hierarchical.has_value());
-  EXPECT_TRUE(second.diagnostics.hierarchical->route_reused);
-  EXPECT_EQ(second.diagnostics.hierarchical->route_cursor, 1U);
-  const auto *hops = std::get_if<HopReference>(&second.reference->data);
+  ASSERT_TRUE(output.reference.has_value()) << output.reason_code;
+  const auto *hops = std::get_if<HopReference>(&output.reference->data);
   ASSERT_NE(hops, nullptr);
   ASSERT_EQ(hops->segments.size(), 1U);
-  EXPECT_EQ(hops->segments.front().segment_id,
-            first.certified_hops[1U].segment_id);
-  EXPECT_EQ(hops->segments.front().launch_pose,
-            std::get<HopperState>(landed.current_state).pose);
-  ASSERT_NE(second.continuation, nullptr);
-  EXPECT_EQ(second.continuation->route_id(), first.continuation->route_id());
+  EXPECT_EQ(output.continuation, nullptr);
+  ASSERT_EQ(output.certified_hops.size(), 1U);
+  EXPECT_TRUE(output.certified_hops.front().promotion_region_map.empty());
 }
 
 }  // namespace

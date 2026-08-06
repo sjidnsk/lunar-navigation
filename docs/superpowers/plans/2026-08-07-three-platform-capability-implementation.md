@@ -340,11 +340,11 @@
 - Modify: `ros2_ws/src/lunar_planner_core/src/hierarchical/hopper_route_planner.{hpp,cpp}`
 - Modify: `ros2_ws/src/lunar_planner_core/test/{ballistic_envelope_test,hopper_planner_test,hopper_fault_matrix_test,hopper_route_planner_test}.cpp`
 
-- [ ] **Step 1: Add mathematical RED tests**
+- [x] **Step 1: Add mathematical RED tests**
 
   Freeze the 100 m reference: launch speed `12.727922`, time `11.111111 s`, apex `25 m`, ideal delta-v `25.455844`, certified delta-v `28.001429`, certified fuel about `0.188827 kg`. Add monotonic mass/fuel, elevation, boundary fuel, numerical-domain and deterministic tests.
 
-- [ ] **Step 2: Implement rocket equation and full feasible-time search**
+- [x] **Step 2: Implement rocket equation and full feasible-time search**
 
   ```cpp
   available_dv = isp * g0 * log(m0 / (m0 - fuel));
@@ -355,15 +355,15 @@
 
   Search the complete fuel-feasible time interval with deterministic adaptive interval branch-and-bound. Fixed sample arrays or candidate/section caps are prohibited. Unresolved intervals return `NUMERICAL_FAILURE`, not infeasible.
 
-- [ ] **Step 3: Certify exact target, continuous tube, and strong convex region**
+- [x] **Step 3: Certify exact target, continuous tube, and strong convex region**
 
   Use exact requested `x/y`, terrain-derived `z`, full `0.65 m` L0 landing support disk, slope `10°`, plane residual `0.05 m`, and continuous `0.75 m` flight tube. Grow a positive-area convex region only where every interior landing center retains terrain, fuel and tube proof; never snap or substitute the target.
 
-- [ ] **Step 4: Remove multi-hop semantics**
+- [x] **Step 4: Remove multi-hop semantics**
 
   Bypass landing-node graph, promotion, route cursor and automatic continuation. A successful hopper request emits exactly one certified segment; preserve commitment protection only.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
   Commit: `feat: certify exact single hopper flight from fuel state`
 
