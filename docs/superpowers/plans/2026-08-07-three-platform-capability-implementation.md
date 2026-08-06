@@ -32,17 +32,17 @@
 - Modify: `tests/foundation/test_external_interface_config.py`
 - Modify: `tests/foundation/test_navigation_message_package.py`
 
-- [ ] **Step 1: Write failing contract tests**
+- [x] **Step 1: Write failing contract tests**
 
   Add exact message declarations and require external topic `/platform/hopper_propellant_state`, reliable/volatile/depth 10, frame `platform_base_frame`, max age `0.5 s`, and fields `header/platform_id/capability_version/total_mass_kg/remaining_usable_fuel_mass_kg`. Bump the external interface document to `lunar-external-interfaces/v4`.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
   Run: `python3 -m pytest -q tests/foundation/test_external_interface_config.py tests/foundation/test_navigation_message_package.py`
 
   Expected: failures for the absent message and topic contract.
 
-- [ ] **Step 3: Implement the provisional message and contract**
+- [x] **Step 3: Implement the provisional message and contract**
 
   Message body:
 
@@ -56,7 +56,7 @@
 
   Register it in `rosidl_generate_interfaces`; update checker declarations and documentation while retaining `owner: external` and `replacement_policy: atomic`.
 
-- [ ] **Step 4: Verify GREEN and commit**
+- [x] **Step 4: Verify GREEN and commit**
 
   Run the focused tests plus `python3 tools/check_repository_boundaries.py .`.
 
@@ -463,4 +463,3 @@
 - [ ] **Step 3: Verify merged HEAD**
 
   Re-run repository boundaries and focused capability/interface tests on `integration`; do not push any remote branch.
-

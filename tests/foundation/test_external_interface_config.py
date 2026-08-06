@@ -17,7 +17,7 @@ CONFIG = REPOSITORY_ROOT / "ros2_ws/src/lunar_navigation_config/config/external_
 PACKAGE_XML = REPOSITORY_ROOT / "ros2_ws/src/lunar_navigation_config/package.xml"
 
 EXPECTED_DOCUMENT = {
-    "schema_version": "lunar-external-interfaces/v3",
+    "schema_version": "lunar-external-interfaces/v4",
     "interface_packages": {
         "lunar_navigation_msgs": {
             "schema_provider": "in_repository_provisional",
@@ -111,6 +111,25 @@ EXPECTED_DOCUMENT = {
                 "reason_code",
             ],
         },
+        "hopper_propellant_state": {
+            "name": "/platform/hopper_propellant_state",
+            "type": "lunar_navigation_msgs/msg/HopperPropellantState",
+            "owner": "external",
+            "frame": "platform_base_frame",
+            "maximum_age_s": 0.5,
+            "qos": {
+                "reliability": "reliable",
+                "durability": "volatile",
+                "depth": 10,
+            },
+            "required_fields": [
+                "header",
+                "platform_id",
+                "capability_version",
+                "total_mass_kg",
+                "remaining_usable_fuel_mass_kg",
+            ],
+        },
     },
     "tf": {
         "topic": "/tf",
@@ -198,6 +217,12 @@ string segment_id
 uint8 state
 string reason_code
 """
+VALID_HOPPER_PROPELLANT_STATE = """std_msgs/Header header
+string platform_id
+string capability_version
+float64 total_mass_kg
+float64 remaining_usable_fuel_mass_kg
+"""
 
 
 def complete_valid_config() -> dict[str, object]:
@@ -262,6 +287,9 @@ def source_aware_ros_runner(lunar_prefix: Path) -> SourceAwareRosRunner:
             "lunar_navigation_msgs/msg/ExplorationTask": VALID_EXPLORATION_TASK,
             "lunar_navigation_msgs/msg/MotionExecutionFeedback": (
                 VALID_MOTION_EXECUTION_FEEDBACK
+            ),
+            "lunar_navigation_msgs/msg/HopperPropellantState": (
+                VALID_HOPPER_PROPELLANT_STATE
             ),
         }
     )
@@ -359,7 +387,7 @@ def test_check_interfaces_rejects_missing_required_contract_sections_without_ros
 @pytest.mark.parametrize(
     ("path", "value", "expected_error"),
     [
-        (("schema_version",), "wrong/v1", "config error: schema_version must be 'lunar-external-interfaces/v3'"),
+        (("schema_version",), "wrong/v1", "config error: schema_version must be 'lunar-external-interfaces/v4'"),
         (("topics", "map_global", "owner"), "internal", "config error: topics.map_global.owner must be 'external'"),
         (("topics", "map_global", "type"), "nav_msgs/msg/Path", "config error: topics.map_global.type must be 'grid_map_msgs/msg/GridMap'"),
         (("topics", "map_global", "frame"), "odom", "config error: topics.map_global.frame must be 'map'"),
@@ -562,5 +590,29 @@ def test_rejects_motion_execution_feedback_declaration_drift(tmp_path):
     )
     assert any(
         "MotionExecutionFeedback" in error and "declaration mismatch" in error
+        for error in errors
+    )
+
+
+def test_rejects_hopper_propellant_state_declaration_drift(tmp_path):
+    """Changing hopper mass precision would silently change reachability."""
+    from tools.check_external_interfaces import check_interfaces
+
+    expected = make_package_provider(tmp_path / "expected", "lunar_navigation_msgs")
+    run = source_aware_ros_runner(lunar_prefix=expected)
+    run.interface_outputs[
+        "lunar_navigation_msgs/msg/HopperPropellantState"
+    ] = VALID_HOPPER_PROPELLANT_STATE.replace(
+        "float64 total_mass_kg\n", "float32 total_mass_kg\n"
+    )
+    errors = check_interfaces(
+        write_config(tmp_path / "interfaces.yaml", complete_valid_config()),
+        expected_lunar_navigation_prefix=expected,
+        run=run,
+        ament_prefix_path=f"{expected}:/opt/ros/humble",
+    )
+
+    assert any(
+        "HopperPropellantState" in error and "declaration mismatch" in error
         for error in errors
     )

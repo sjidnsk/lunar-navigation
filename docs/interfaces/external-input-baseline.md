@@ -7,7 +7,7 @@
 - 外部/legacy 交接来源（不复制入本仓）：`课题四未知场景无人平台自主探索与规划外部输入.md`
 - SHA-256：`a4c2db0a6647d59fa7cee5cf8048d18f7bca7c7b11a591a32d33d237c0c06e78`
 - `grid_map_msgs`、`nav_msgs` 和 `tf2_msgs` 仍来自 ROS/外部系统；定位与任务系统仍负责消息数据的发布和演进协商。
-- 本仓暂定提供四个 `lunar_navigation_msgs` schema；Topic 数据生产者仍由外部项目拥有。
+- 本仓暂定提供五个 `lunar_navigation_msgs` schema；Topic 数据生产者仍由外部项目拥有。
 - 本项目只声明依赖、直接订阅、适配和运行时校验；上游尚未定义时，本仓 `.msg`、配置和检查器以本文为准。未来切换必须固定唯一上游 tag 或 commit、执行 schema 对比并原子替换，不得与上游同名包共存。
 
 ## Topic 与接收字段
@@ -21,6 +21,7 @@
 | `/tf` | `tf2_msgs/msg/TFMessage` | 外部 TF 发布者 | `transforms[]`，形成 `map -> odom -> base_link` |
 | `/mission/exploration_task` | `lunar_navigation_msgs/msg/ExplorationTask` | 外部任务系统 | `header`、`mission_id`、`revision`、`desired_state`、ROI、`science_regions`；状态为 `ACTIVE/PAUSED/CANCELED` |
 | `/execution/motion_feedback` | `lunar_navigation_msgs/msg/MotionExecutionFeedback` | 外部运动执行/控制系统 | `header`、`sequence`、`platform_type`、`plan_id`、`segment_id`、`state`、`reason_code`；状态为 `IDLE/ACCEPTED/EXECUTING/SEGMENT_COMPLETE/LANDED_HOLD/FAILED/CANCELED` |
+| `/platform/hopper_propellant_state` | `lunar_navigation_msgs/msg/HopperPropellantState` | 外部推进或飞行控制系统 | `header`、`platform_id`、`capability_version`、`total_mass_kg`、`remaining_usable_fuel_mass_kg`；`reliable`、`volatile`、depth 10，最大年龄 `0.5 s` |
 | `science_regions[]` | `lunar_navigation_msgs/msg/ScienceTargetRegion` | 外部任务系统 | `region_id`、`objective_id`、`boundary`、`priority` |
 
 ## 暂定消息 schema
@@ -83,6 +84,16 @@ string plan_id
 string segment_id
 uint8 state
 string reason_code
+```
+
+### `HopperPropellantState.msg`
+
+```text
+std_msgs/Header header
+string platform_id
+string capability_version
+float64 total_mass_kg
+float64 remaining_usable_fuel_mass_kg
 ```
 
 ## 地图与定位字段
@@ -151,6 +162,12 @@ max(ceil(Sx / r_l), ceil(Sy / r_l)) <= 4096
 `platform_type` 必须与当前活动平台一致；`plan_id` 和 `segment_id` 必须非空并与当前授权参考完全匹配。轮式和足式反馈固定使用 `plan_id=segment_id=MotionReference.plan_id`；飞跃式反馈使用 `plan_id=MotionReference.plan_id`、`segment_id=HopSegment.segment_id`。`LANDED_HOLD` 只对飞跃式合法，轮式和足式使用 `SEGMENT_COMPLETE`；`FAILED` 或 `CANCELED` 时 `reason_code` 必须非空。执行反馈不能替代 Odometry，完成、稳定着陆和偏离判断必须同时使用身份匹配的反馈与新鲜状态估计。
 
 订阅 QoS 固定为 `reliable`、`volatile`、`depth 10`。上游正式定义该消息后，必须与其余暂定 schema 一样执行固定版本、逐字段对比和同名包原子替换，不得让两个 provider 共存。
+
+## 飞跃式推进剂状态字段
+
+`HopperPropellantState` 的发布者属于外部推进或飞行控制系统；本仓只暂定 schema、订阅、校验和适配。`header.stamp` 必须非零、不得来自未来且最大年龄为 `0.5 s`，`header.frame_id` 必须等于当前平台能力资料的 `base_frame_id`。`platform_id` 和 `capability_version` 必须与当前 Action 和已加载能力完全一致。`total_mass_kg` 与 `remaining_usable_fuel_mass_kg` 必须为有限值，且满足 `0 < remaining_usable_fuel_mass_kg < total_mass_kg`。该状态必须与 Odometry、L0 地图和 TF 满足最大 `0.25 s` 的成对时差；参考工况不能作为缺失状态的运行时回退。
+
+订阅 QoS 固定为 `reliable`、`volatile`、`depth 10`。上游正式定义该消息后，必须执行固定版本、逐字段对比和同名包原子替换，不得让两个 provider 共存。
 
 ## 静态能力资料字段
 

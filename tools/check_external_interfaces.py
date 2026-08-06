@@ -14,7 +14,7 @@ import yaml
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 _FIELD_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
-_SCHEMA_VERSION = "lunar-external-interfaces/v3"
+_SCHEMA_VERSION = "lunar-external-interfaces/v4"
 _INTERFACE_PACKAGES = {
     "lunar_navigation_msgs": {
         "schema_provider": "in_repository_provisional",
@@ -71,12 +71,22 @@ MOTION_EXECUTION_FEEDBACK_DECLARATIONS = (
     "uint8 state",
     "string reason_code",
 )
+HOPPER_PROPELLANT_STATE_DECLARATIONS = (
+    "std_msgs/Header header",
+    "string platform_id",
+    "string capability_version",
+    "float64 total_mass_kg",
+    "float64 remaining_usable_fuel_mass_kg",
+)
 _PROVISIONAL_DECLARATIONS = {
     "lunar_navigation_msgs/msg/LocalizationStatus": LOCALIZATION_STATUS_DECLARATIONS,
     "lunar_navigation_msgs/msg/ScienceTargetRegion": SCIENCE_TARGET_REGION_DECLARATIONS,
     "lunar_navigation_msgs/msg/ExplorationTask": EXPLORATION_TASK_DECLARATIONS,
     "lunar_navigation_msgs/msg/MotionExecutionFeedback": (
         MOTION_EXECUTION_FEEDBACK_DECLARATIONS
+    ),
+    "lunar_navigation_msgs/msg/HopperPropellantState": (
+        HOPPER_PROPELLANT_STATE_DECLARATIONS
     ),
 }
 _SYSTEM_PREFIX = Path("/opt/ros/humble").resolve()
@@ -163,6 +173,25 @@ _TOPICS = {
             "segment_id",
             "state",
             "reason_code",
+        ],
+    },
+    "hopper_propellant_state": {
+        "name": "/platform/hopper_propellant_state",
+        "type": "lunar_navigation_msgs/msg/HopperPropellantState",
+        "owner": "external",
+        "frame": "platform_base_frame",
+        "maximum_age_s": 0.5,
+        "qos": {
+            "reliability": "reliable",
+            "durability": "volatile",
+            "depth": 10,
+        },
+        "required_fields": [
+            "header",
+            "platform_id",
+            "capability_version",
+            "total_mass_kg",
+            "remaining_usable_fuel_mass_kg",
         ],
     },
 }

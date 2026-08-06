@@ -196,3 +196,18 @@ def test_rejects_unapproved_provisional_interface(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert any("unapproved lunar_navigation_msgs interface" in error for error in check_repository(tmp_path))
+
+
+def test_allows_approved_hopper_propellant_interface(tmp_path: Path) -> None:
+    """Forgetting the approved propellant message would reject the canonical package."""
+    package = tmp_path / "ros2_ws/src/lunar_navigation_msgs"
+    (package / "msg").mkdir(parents=True)
+    (package / "msg/HopperPropellantState.msg").write_text(
+        "std_msgs/Header header\n",
+        encoding="utf-8",
+    )
+
+    assert not any(
+        "unapproved lunar_navigation_msgs interface" in error
+        for error in check_repository(tmp_path)
+    )

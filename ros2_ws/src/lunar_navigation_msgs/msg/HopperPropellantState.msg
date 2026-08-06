@@ -1,0 +1,5 @@
+std_msgs/Header header
+string platform_id
+string capability_version
+float64 total_mass_kg
+float64 remaining_usable_fuel_mass_kg

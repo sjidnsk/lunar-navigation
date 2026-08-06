@@ -11,6 +11,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ScienceTargetRegion.msg"
   "msg/ExplorationTask.msg"
   "msg/MotionExecutionFeedback.msg"
+  "msg/HopperPropellantState.msg"
   DEPENDENCIES geometry_msgs std_msgs
 )
 

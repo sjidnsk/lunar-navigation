@@ -47,6 +47,7 @@ ALLOWED_PROVISIONAL_INTERFACES = {
     Path("msg/ScienceTargetRegion.msg"),
     Path("msg/ExplorationTask.msg"),
     Path("msg/MotionExecutionFeedback.msg"),
+    Path("msg/HopperPropellantState.msg"),
 }
 
 _LARGE_ARTIFACT_SUFFIXES = FORBIDDEN_SUFFIXES | {".mcap"}
