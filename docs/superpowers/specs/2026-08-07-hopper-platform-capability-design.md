@@ -1,8 +1,10 @@
 # 飞跃式平台单跳落区规划与能力基线设计
 
-**状态：** 已完成逐段设计确认，等待书面规格审阅  
-**适用平台：** `HOPPER`  
-**能力版本建议：** `hopper-engineering-baseline-v1`  
+**状态：** 已完成逐段设计确认，等待书面规格审阅
+
+**适用平台：** `HOPPER`
+
+**能力版本建议：** `hopper-engineering-baseline-v1`
 **来源等级：** `project_engineering_baseline`，不是厂家实测或飞行鉴定值
 
 ## 1. 目标与范围
