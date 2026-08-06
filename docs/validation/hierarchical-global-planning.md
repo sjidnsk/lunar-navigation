@@ -41,34 +41,40 @@
 
 ## 3. 性能基准
 
-基准 schema 为 `lunar-hierarchical-benchmark/v1`。每个规模档位覆盖 `open`、
-`fixed-obstacle`、`narrow-channel` 和 `no-route`，预热后各测量 30 次。`global_p95_s`
-来自生产规划诊断的 `hierarchical.global_elapsed`；展开状态、Open 峰值和内存来自规划器搜索
-计数，不使用进程 RSS 推算。
+当前基准 schema 为 `lunar-hierarchical-benchmark/v2`。五个 fixture 都固定为
+50×50 m、0.2 m、250×250 栅格，预热后测量 30 次；起点、终点、障碍和安全落区均为字面
+坐标，运行时不扫描或重采样目标。能力文档位于 `tests/fixtures/capabilities/test-only/`，统一
+声明 `authority: test-only/non-authoritative` 和 `runtime_eligible: false`，不得替换生产能力。
 
-以下为各档位四类 fixture 中最慢的 p95；三档最慢项均为 `fixed-obstacle`：
+Ubuntu amd64 Release 结果：
 
-| 栅格数 | 全局 p95 | Ubuntu 门槛 | 完整核心 p95 | Ubuntu 门槛 | 最大规划器工作内存 |
-|---:|---:|---:|---:|---:|---:|
-| 65,536 | 0.082583 s | 0.5 s | 0.092056 s | 2.0 s | 1,164,032 B |
-| 262,144 | 0.329242 s | 1.0 s | 0.338979 s | 3.0 s | 4,557,848 B |
-| 1,048,576 | 1.370176 s | 2.0 s | 1.380653 s | 4.0 s | 18,027,952 B |
+| fixture | 完整核心 p50 | 完整核心 p95 | 门槛 | 展开节点 | 候选边 | 结果 |
+|---|---:|---:|---:|---:|---:|---|
+| wheel_positive | 0.080197 s | 0.081283 s | 2.0 s | 39,257 | 0 | 通过 |
+| legged_positive | 0.126760 s | 0.129120 s | 2.0 s | 34,157 | 0 | 通过 |
+| hopper_direct_positive | 0.658525 s | 0.669625 s | 1.0 s | 1 | 1 | 通过 |
+| hopper_multihop_positive | 0.881612 s | 0.906888 s | 5.0 s | 5 | 5 | 通过 |
+| hopper_complete_negative | 0.073390 s | 0.079129 s | 5.0 s | 740 | 32 | 通过 |
 
-12 组结果均通过 Ubuntu 门槛且 30 次路线哈希稳定。新增阶段证据中，平滑阶段最慢 p95
-为 `0.001124782 s`；该基准只运行轮式平台，因此落区场耗时为零。9 组成功 fixture 中，
-7 组的 210 次测量为 `OPTIMIZED`，2 组的 60 次测量明确记录为
-`DISCRETE_FALLBACK`；3 组无路 fixture 的 90 次测量为 `NONE`。AGX 档位只写出设备
-门槛，不在 Ubuntu 上求值：全局 p95 为 `1/2/4 s`，完整核心 p95 为 `3/4/6 s`。
+所有用例的 30 次路线哈希、结果类别、原因码和诊断计数一致。报告同时记录完整核心以及
+`global_search`、`local_planning`、`landing_field`、`spatial_index`、`ballistic_solve`、
+`flight_tube_certification` 各阶段的 p50/p95/最大值，并分别保存规划器估算工作内存和 Linux
+进程峰值 RSS。诊断计数只在搜索/认证之后累加和上报，不参与终止判断或候选裁剪。
 
 完整 JSON 位于仓库外：
 
 ```text
-/home/kai/CodexDownloads/lunar_navigation/planner_correctness/release/evidence/ubuntu-hierarchical-benchmark.json
-SHA-256 452b62de28c27204cd421f67bbef959e9096b8bb91d22b95fe8284660b145066
+/home/kai/CodexDownloads/lunar_navigation/task9-rolling-NVeOXrwF/task10-release-benchmark.json
+SHA-256 fec795506a0be0170e572d2521d23893d30877446828c1363fdd7000add56a9b
 ```
 
 权威性能构建显式使用 `-DCMAKE_BUILD_TYPE=Release`。一次无优化的空 `CMAKE_BUILD_TYPE`
 试跑在发现配置不适合作为性能证据后终止，未计入上述结果。
+
+标准 `/diagnostics` 及 RViz 交互状态面板同时镜像全局/局部耗时、落区场、空间索引、弹道
+求解、飞行管认证、展开/Open 峰值、安全落点、候选/粗筛/完整认证/失效/缓存计数、路线复用
+与游标、滚动请求计数，以及活动 plan/segment 和执行状态。旧的
+`hierarchical_*` 键继续保留，避免破坏已有观察工具。
 
 ## 4. PPO 行为兼容性
 

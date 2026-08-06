@@ -11,50 +11,33 @@ import pytest
 
 
 RUNNER_ENVIRONMENT_VARIABLE = "LUNAR_HIERARCHICAL_PLANNER_BENCHMARK"
-SCHEMA_VERSION = "lunar-hierarchical-benchmark/v1"
-CELL_TIERS = (65_536, 262_144, 1_048_576)
-FIXTURES = ("open", "fixed-obstacle", "narrow-channel", "no-route")
-UBUNTU_GLOBAL_P95_S = {
-    "65536": 0.5,
-    "262144": 1.0,
-    "1048576": 2.0,
+SCHEMA_VERSION = "lunar-hierarchical-benchmark/v2"
+CASES = {
+    "wheel_positive": ("WHEELED", 2.0),
+    "legged_positive": ("LEGGED", 2.0),
+    "hopper_direct_positive": ("HOPPER", 1.0),
+    "hopper_multihop_positive": ("HOPPER", 5.0),
+    "hopper_complete_negative": ("HOPPER", 5.0),
 }
-UBUNTU_COMPLETE_P95_S = {
-    "65536": 2.0,
-    "262144": 3.0,
-    "1048576": 4.0,
+STAGES = {
+    "global_search",
+    "local_planning",
+    "landing_field",
+    "spatial_index",
+    "ballistic_solve",
+    "flight_tube_certification",
 }
-AGX_GLOBAL_P95_S = {
-    "65536": 1.0,
-    "262144": 2.0,
-    "1048576": 4.0,
-}
-AGX_COMPLETE_P95_S = {
-    "65536": 3.0,
-    "262144": 4.0,
-    "1048576": 6.0,
-}
-REQUIRED_RESULT_KEYS = {
-    "schema_version",
-    "platform",
-    "fixture",
-    "cells",
-    "resolution_m",
-    "runs",
-    "p50_s",
-    "p95_s",
-    "maximum_s",
+COUNTS = {
     "expanded_states",
     "open_peak",
-    "peak_memory_bytes",
-    "route_hash",
-    "smoothing_p50_s",
-    "smoothing_p95_s",
-    "smoothing_maximum_s",
-    "landing_field_p50_s",
-    "landing_field_p95_s",
-    "landing_field_maximum_s",
-    "trajectory_mode_counts",
+    "peak_work_memory_bytes",
+    "peak_resident_memory_bytes",
+    "safe_landing_nodes",
+    "candidate_edges_evaluated",
+    "coarse_edges_rejected",
+    "full_edges_certified",
+    "full_edges_invalidated",
+    "edge_certificate_cache_hits",
 }
 
 
@@ -77,10 +60,11 @@ def benchmark_document(tmp_path_factory: pytest.TempPathFactory) -> dict[str, ob
         text=True,
     )
     assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == ""
     return json.loads(output.read_text(encoding="utf-8"))
 
 
-def test_benchmark_contract_covers_all_tiers_and_fixtures(
+def test_fixed_all_platform_release_contract(
     benchmark_document: dict[str, object],
 ) -> None:
     assert benchmark_document["schema_version"] == SCHEMA_VERSION
@@ -88,93 +72,73 @@ def test_benchmark_contract_covers_all_tiers_and_fixtures(
     assert benchmark_document["warmup_runs"] >= 1
     assert benchmark_document["measured_runs"] == 30
     assert benchmark_document["timing_unit"] == "s"
-    assert benchmark_document["memory_semantics"] == (
-        "planner_estimated_peak_work_memory_bytes"
+    assert benchmark_document["map"] == {
+        "width_m": 50.0,
+        "height_m": 50.0,
+        "resolution_m": 0.2,
+        "cells": 250 * 250,
+    }
+    assert benchmark_document["capability_authority"] == (
+        "test-only/non-authoritative"
     )
-    profiles = benchmark_document["threshold_profiles"]
-    assert profiles == {
-        "ubuntu_amd64": {
-            "evaluated": True,
-            "global_p95_s": UBUNTU_GLOBAL_P95_S,
-            "complete_core_p95_s": UBUNTU_COMPLETE_P95_S,
-        },
-        "jetson_agx_orin": {
-            "evaluated": False,
-            "global_p95_s": AGX_GLOBAL_P95_S,
-            "complete_core_p95_s": AGX_COMPLETE_P95_S,
-        },
-    }
-
-    results = benchmark_document["results"]
-    assert len(results) == len(CELL_TIERS) * len(FIXTURES)
-    assert {(item["cells"], item["fixture"]) for item in results} == {
-        (cells, fixture) for cells in CELL_TIERS for fixture in FIXTURES
-    }
-
-    for result in results:
-        assert REQUIRED_RESULT_KEYS <= set(result)
-        assert result["schema_version"] == SCHEMA_VERSION
-        assert result["platform"] == "WHEELED"
-        assert result["cells"] in CELL_TIERS
-        assert result["fixture"] in FIXTURES
-        assert result["resolution_m"] == 0.2
-        assert result["runs"] == 30
-        assert re.fullmatch(r"[0-9a-f]{16}", result["route_hash"])
-        for key in (
-            "p50_s",
-            "p95_s",
-            "maximum_s",
-            "global_p50_s",
-            "global_p95_s",
-            "global_maximum_s",
-            "smoothing_p50_s",
-            "smoothing_p95_s",
-            "smoothing_maximum_s",
-            "landing_field_p50_s",
-            "landing_field_p95_s",
-            "landing_field_maximum_s",
-        ):
-            assert math.isfinite(result[key]) and result[key] >= 0.0
-        assert result["p50_s"] <= result["p95_s"] <= result["maximum_s"]
-        assert (
-            result["global_p50_s"]
-            <= result["global_p95_s"]
-            <= result["global_maximum_s"]
-        )
-        for key in ("expanded_states", "open_peak", "peak_memory_bytes"):
-            assert isinstance(result[key], int) and result[key] >= 0
-        assert result["peak_memory_bytes"] <= 256 * 1024 * 1024
-        assert result["trajectory_mode_counts"].keys() == {
-            "STATIONARY",
-            "OPTIMIZED",
-            "DISCRETE_FALLBACK",
-            "CERTIFIED_HOP",
-            "NONE",
-        }
-        assert sum(result["trajectory_mode_counts"].values()) == 30
+    assert benchmark_document["ubuntu_amd64_release_evaluated"] is True
+    assert benchmark_document["jetson_agx_orin_evaluated"] is False
+    assert len(benchmark_document["results"]) == len(CASES)
 
 
-def test_ubuntu_thresholds_are_enforced_and_agx_is_device_only(
+def test_cases_report_deterministic_counts_and_stage_timings(
     benchmark_document: dict[str, object],
 ) -> None:
-    for result in benchmark_document["results"]:
-        tier = str(result["cells"])
-        assert result["global_p95_s"] <= UBUNTU_GLOBAL_P95_S[tier]
-        assert result["p95_s"] <= UBUNTU_COMPLETE_P95_S[tier]
-        assert result["ubuntu_threshold_passed"] is True
-    assert benchmark_document["threshold_profiles"]["jetson_agx_orin"][
-        "evaluated"
-    ] is False
+    for case_name, (platform, threshold_s) in CASES.items():
+        case = benchmark_document[case_name]
+        assert case["schema_version"] == SCHEMA_VERSION
+        assert case["platform"] == platform
+        assert case["fixture"] == case_name
+        assert case["authority"] == "test-only/non-authoritative"
+        assert case["runs"] == 30
+        assert case["cells"] == 250 * 250
+        assert case["width_m"] == 50.0
+        assert case["height_m"] == 50.0
+        assert case["resolution_m"] == 0.2
+        assert re.fullmatch(r"[0-9a-f]{16}", case["route_hash"])
+        assert case["deterministic"] is True
+        assert case["ubuntu_release_p95_threshold_s"] == threshold_s
+        for key in ("p50_s", "p95_s", "maximum_s"):
+            assert math.isfinite(case[key]) and case[key] >= 0.0
+        assert case["p50_s"] <= case["p95_s"] <= case["maximum_s"]
+        assert set(case["stage_timings_s"]) == STAGES
+        for timing in case["stage_timings_s"].values():
+            assert set(timing) == {"p50_s", "p95_s", "maximum_s"}
+            assert timing["p50_s"] <= timing["p95_s"] <= timing["maximum_s"]
+            assert all(math.isfinite(value) and value >= 0.0 for value in timing.values())
+        for key in COUNTS:
+            assert isinstance(case[key], int) and case[key] >= 0
 
 
-def test_routes_and_failure_classes_are_deterministic(
+def test_ubuntu_release_thresholds_and_expected_outcomes(
     benchmark_document: dict[str, object],
 ) -> None:
-    for result in benchmark_document["results"]:
-        assert result["deterministic"] is True
-        if result["fixture"] == "no-route":
-            assert result["planning_outcome"] == "NO_KNOWN_SAFE_ROUTE"
-            assert result["reason_code"] == "GLOBAL_NO_KNOWN_SAFE_ROUTE"
+    for case_name, (_, threshold_s) in CASES.items():
+        case = benchmark_document[case_name]
+        assert case["p95_s"] <= threshold_s
+        assert case["ubuntu_threshold_passed"] is True
+        if case_name == "hopper_complete_negative":
+            assert case["planning_outcome"] == "NO_KNOWN_SAFE_ROUTE"
+            assert case["reason_code"] == "GLOBAL_NO_KNOWN_SAFE_ROUTE"
+        elif case_name.startswith("hopper_"):
+            assert case["planning_outcome"] == "NEW_REFERENCE_AVAILABLE"
+            assert case["reason_code"] == "HOPPER_FIRST_HOP_AVAILABLE"
+            assert case["safe_landing_nodes"] > 0
+            assert case["candidate_edges_evaluated"] > 0
+        elif case_name == "legged_positive":
+            assert case["reason_code"] == "LEGGED_BODY_PLAN_AVAILABLE"
         else:
-            assert result["planning_outcome"] == "NEW_REFERENCE_AVAILABLE"
-            assert result["reason_code"] == "WHEEL_PLAN_AVAILABLE"
+            assert case["reason_code"] == "WHEEL_PLAN_AVAILABLE"
+
+
+def test_capability_documents_are_explicitly_non_authoritative() -> None:
+    fixture_root = Path(__file__).parents[1] / "fixtures" / "capabilities" / "test-only"
+    for platform in ("wheeled", "legged", "hopper"):
+        text = (fixture_root / f"{platform}.yaml").read_text(encoding="utf-8")
+        assert "authority: test-only/non-authoritative" in text
+        assert "runtime_eligible: false" in text

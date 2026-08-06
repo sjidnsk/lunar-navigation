@@ -184,6 +184,19 @@ TEST(HopperRoutePlanner, BuildsADeterministicThreeHopLandingChain) {
   EXPECT_DOUBLE_EQ(first.route->cost, second.route->cost);
   EXPECT_GT(first.maximum_horizontal_reach_m, 2.0);
   EXPECT_LT(first.maximum_horizontal_reach_m, 2.5);
+  EXPECT_EQ(first.safe_landing_nodes, second.safe_landing_nodes);
+  EXPECT_EQ(first.evaluated_edge_pairs, second.evaluated_edge_pairs);
+  EXPECT_EQ(first.coarse_edges_rejected, second.coarse_edges_rejected);
+  EXPECT_EQ(first.full_edges_certified, second.full_edges_certified);
+  EXPECT_EQ(first.full_edges_invalidated, second.full_edges_invalidated);
+  EXPECT_EQ(
+      first.edge_certificate_cache_hits, second.edge_certificate_cache_hits);
+  EXPECT_EQ(first.expanded_nodes, second.expanded_nodes);
+  EXPECT_EQ(first.open_peak, second.open_peak);
+  EXPECT_GT(first.safe_landing_nodes, 0U);
+  EXPECT_GT(first.spatial_index_elapsed.count(), 0);
+  EXPECT_GT(first.ballistic_solve_elapsed.count(), 0);
+  EXPECT_GT(first.flight_tube_certification_elapsed.count(), 0);
 }
 
 TEST(HopperRoutePlanner,

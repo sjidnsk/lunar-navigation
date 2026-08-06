@@ -588,6 +588,19 @@ TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
       .hopper_graph_edges = 17U,
       .hopper_route_hops = 3U,
       .hopper_certification_attempts = 1U,
+      .landing_field_elapsed = 4ms,
+      .spatial_index_elapsed = 5ms,
+      .ballistic_solve_elapsed = 6ms,
+      .flight_tube_certification_elapsed = 7ms,
+      .safe_landing_nodes = 101U,
+      .candidate_edges_evaluated = 102U,
+      .coarse_edges_rejected = 103U,
+      .full_edges_certified = 104U,
+      .full_edges_invalidated = 105U,
+      .edge_certificate_cache_hits = 106U,
+      .route_reused = true,
+      .route_cursor = 4U,
+      .rolling_request_count = 5U,
   };
   RunningSystem system{PlanMotionServerDependencies{
       .planner = [output](const lunar::planning::PlannerInput&) {
@@ -619,6 +632,26 @@ TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
       "hierarchical_hopper_graph_edges",
       "hierarchical_hopper_route_hops",
       "hierarchical_hopper_certification_attempts",
+      "global_search_elapsed_s",
+      "local_planning_elapsed_s",
+      "landing_field_elapsed_s",
+      "spatial_index_elapsed_s",
+      "ballistic_solve_elapsed_s",
+      "flight_tube_certification_elapsed_s",
+      "global_expanded_nodes",
+      "open_peak",
+      "safe_landing_nodes",
+      "candidate_edges_evaluated",
+      "coarse_edges_rejected",
+      "full_edges_certified",
+      "full_edges_invalidated",
+      "edge_certificate_cache_hits",
+      "route_reused",
+      "route_cursor",
+      "rolling_request_count",
+      "active_plan_id",
+      "active_segment_id",
+      "execution_state",
   };
   ASSERT_TRUE(WaitFor([&] {
     return std::ranges::all_of(expected_keys, [&](const auto& key) {
@@ -641,6 +674,21 @@ TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
       std::stod(*system.DiagnosticValue(
           "HIERARCHICAL_NO_ROUTE", "hierarchical_global_elapsed_s")),
       0.012);
+  EXPECT_DOUBLE_EQ(
+      std::stod(*system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE", "global_search_elapsed_s")),
+      0.012);
+  EXPECT_DOUBLE_EQ(
+      std::stod(*system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE", "spatial_index_elapsed_s")),
+      0.005);
+  EXPECT_EQ(
+      system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE", "candidate_edges_evaluated"),
+      "102");
+  EXPECT_EQ(
+      system.DiagnosticValue("HIERARCHICAL_NO_ROUTE", "route_reused"),
+      "true");
 }
 
 TEST_F(PlanMotionServerTest, PublishesStableLocalTrajectoryEvidence) {
@@ -741,6 +789,17 @@ TEST_F(
   const auto first = system.SendGoal(system.Goal("rolling-first"));
   ASSERT_NE(first, nullptr);
   ASSERT_EQ(system.Result(first).code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_TRUE(WaitFor([&] {
+    return system.DiagnosticValue(
+               "WHEEL_REFERENCE_AVAILABLE", "active_plan_id") ==
+               "wheel/rolling-1" &&
+        system.DiagnosticValue(
+               "WHEEL_REFERENCE_AVAILABLE", "active_segment_id") ==
+               "wheel/rolling-1" &&
+        system.DiagnosticValue(
+               "WHEEL_REFERENCE_AVAILABLE", "execution_state") ==
+               "AWAITING_FEEDBACK";
+  }));
 
   using Feedback = lunar_navigation_msgs::msg::MotionExecutionFeedback;
   system.PublishExecutionFeedback(
@@ -752,6 +811,14 @@ TEST_F(
   ASSERT_NE(second, nullptr);
   ASSERT_EQ(system.Result(second).code, rclcpp_action::ResultCode::SUCCEEDED);
   ASSERT_EQ(calls.load(), 2);
+  ASSERT_TRUE(WaitFor([&] {
+    return system.DiagnosticValue(
+               "ROLLING_REQUEST_OBSERVED", "active_plan_id") ==
+               "wheel/rolling-1" &&
+        system.DiagnosticValue(
+               "ROLLING_REQUEST_OBSERVED", "execution_state") ==
+               "EXECUTING";
+  }));
   std::scoped_lock lock{capture_mutex};
   ASSERT_TRUE(previous_execution.has_value());
   const auto* ground = std::get_if<lunar::planning::GroundExecutionContext>(

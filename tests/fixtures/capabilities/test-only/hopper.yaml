@@ -1,0 +1,24 @@
+schema_version: lunar-test-capability/v1
+authority: test-only/non-authoritative
+runtime_eligible: false
+platform: hopper
+fixtures:
+  - hopper_direct_positive
+  - hopper_multihop_positive
+  - hopper_complete_negative
+map:
+  width_m: 50.0
+  height_m: 50.0
+  resolution_m: 0.2
+capability:
+  body_half_extent_m: [0.1, 0.1, 0.5]
+  platform_mass_kg: 10.0
+  gravity_mps2: [0.0, 0.0, -1.62]
+  minimum_landing_region_area_m2: 0.1
+  maximum_launch_speed_mps: 2.0
+  maximum_launch_impulse_newton_seconds: 100.0
+  minimum_flight_time_s: 0.5
+  maximum_flight_time_s: 3.0
+  maximum_landing_speed_mps: 2.0
+  position_uncertainty_m: 0.0
+  velocity_uncertainty_mps: 0.0

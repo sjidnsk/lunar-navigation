@@ -41,7 +41,12 @@ struct HopperRoutePlanResult final {
   std::size_t edge_certificate_cache_hits{};
   std::size_t route_hops{};
   std::uint64_t expanded_nodes{};
+  std::size_t open_peak{};
+  std::size_t safe_landing_nodes{};
   std::chrono::nanoseconds landing_field_elapsed{};
+  std::chrono::nanoseconds spatial_index_elapsed{};
+  std::chrono::nanoseconds ballistic_solve_elapsed{};
+  std::chrono::nanoseconds flight_tube_certification_elapsed{};
   std::chrono::nanoseconds elapsed{};
   std::string reason_code;
 

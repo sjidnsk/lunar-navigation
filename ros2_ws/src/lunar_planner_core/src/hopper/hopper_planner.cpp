@@ -135,6 +135,40 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_hopper";
       config.maximum_authorized_hops > 0U;
 }
 
+[[nodiscard]] HierarchicalPlannerMetrics HopperGlobalMetrics(
+    const PlannerInput& input,
+    const hierarchical::HopperRoutePlanResult& global) {
+  const hierarchical::GlobalRoute* route =
+      global.route.has_value() ? &*global.route : nullptr;
+  return HierarchicalPlannerMetrics{
+      .global_level = global.global_level.value_or(0U),
+      .global_resolution_m = input.world.global_map.resolution_m,
+      .global_cells = input.world.global_map.CellCount(),
+      .global_elapsed = global.elapsed,
+      .global_expanded_states = global.expanded_nodes,
+      .global_open_peak = global.open_peak,
+      .estimated_work_memory_bytes =
+          route == nullptr ? 0U : route->estimated_work_memory_bytes,
+      .raw_route_points = route == nullptr ? 0U : route->raw_cells.size(),
+      .simplified_route_points =
+          route == nullptr ? 0U : route->simplified_cells.size(),
+      .hopper_graph_nodes = global.graph_nodes,
+      .hopper_graph_edges = global.graph_edges,
+      .hopper_route_hops = global.route_hops,
+      .landing_field_elapsed = global.landing_field_elapsed,
+      .spatial_index_elapsed = global.spatial_index_elapsed,
+      .ballistic_solve_elapsed = global.ballistic_solve_elapsed,
+      .flight_tube_certification_elapsed =
+          global.flight_tube_certification_elapsed,
+      .safe_landing_nodes = global.safe_landing_nodes,
+      .candidate_edges_evaluated = global.evaluated_edge_pairs,
+      .coarse_edges_rejected = global.coarse_edges_rejected,
+      .full_edges_certified = global.full_edges_certified,
+      .full_edges_invalidated = global.full_edges_invalidated,
+      .edge_certificate_cache_hits = global.edge_certificate_cache_hits,
+  };
+}
+
 [[nodiscard]] PlannerOutput Failure(
     const PlanningOutcome outcome,
     const ExecutionDirective directive,
@@ -142,7 +176,8 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_hopper";
     const std::chrono::steady_clock::time_point started,
     const std::uint64_t expanded_states = 0U,
     std::optional<double> best_cost = std::nullopt,
-    std::vector<std::string> warning_codes = {}) {
+    std::vector<std::string> warning_codes = {},
+    std::optional<HierarchicalPlannerMetrics> hierarchical = std::nullopt) {
   return PlannerOutput{
       .outcome = outcome,
       .directive = directive,
@@ -155,6 +190,7 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_hopper";
           .expanded_states = expanded_states,
           .best_cost = best_cost,
           .warning_codes = std::move(warning_codes),
+          .hierarchical = std::move(hierarchical),
       },
   };
 }
@@ -373,7 +409,8 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
     }
     return Failure(
         global.outcome, directive, global.reason_code, started,
-        global.expanded_nodes);
+        global.expanded_nodes, std::nullopt, {},
+        HopperGlobalMetrics(input, global));
   }
   if (!global.route.has_value() || global.route->poses_map.size() < 2U) {
     return Failure(
@@ -806,6 +843,18 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
               .hopper_route_hops = global.route_hops,
               .hopper_certification_attempts =
                   certified.examined_intervals,
+              .landing_field_elapsed = global.landing_field_elapsed,
+              .spatial_index_elapsed = global.spatial_index_elapsed,
+              .ballistic_solve_elapsed = global.ballistic_solve_elapsed,
+              .flight_tube_certification_elapsed =
+                  global.flight_tube_certification_elapsed,
+              .safe_landing_nodes = global.safe_landing_nodes,
+              .candidate_edges_evaluated = global.evaluated_edge_pairs,
+              .coarse_edges_rejected = global.coarse_edges_rejected,
+              .full_edges_certified = global.full_edges_certified,
+              .full_edges_invalidated = global.full_edges_invalidated,
+              .edge_certificate_cache_hits =
+                  global.edge_certificate_cache_hits,
           },
           .local_trajectory = local_diagnostics,
       },

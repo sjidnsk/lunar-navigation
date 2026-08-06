@@ -163,6 +163,16 @@ struct HierarchicalPlannerMetrics final {
   std::size_t hopper_graph_edges{};
   std::size_t hopper_route_hops{};
   std::size_t hopper_certification_attempts{};
+  std::chrono::nanoseconds landing_field_elapsed{};
+  std::chrono::nanoseconds spatial_index_elapsed{};
+  std::chrono::nanoseconds ballistic_solve_elapsed{};
+  std::chrono::nanoseconds flight_tube_certification_elapsed{};
+  std::size_t safe_landing_nodes{};
+  std::size_t candidate_edges_evaluated{};
+  std::size_t coarse_edges_rejected{};
+  std::size_t full_edges_certified{};
+  std::size_t full_edges_invalidated{};
+  std::size_t edge_certificate_cache_hits{};
   bool route_reused{};
   std::size_t route_cursor{};
   std::uint64_t rolling_request_count{1U};

@@ -181,6 +181,85 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
   return joined;
 }
 
+struct ExecutionDiagnosticInfo final {
+  std::string plan_id;
+  std::string segment_id;
+  std::string state{"IDLE"};
+};
+
+[[nodiscard]] std::string GroundExecutionStateName(
+    const lunar::planning::GroundExecutionState state) {
+  switch (state) {
+    case lunar::planning::GroundExecutionState::kIdle:
+      return "IDLE";
+    case lunar::planning::GroundExecutionState::kExecuting:
+      return "EXECUTING";
+    case lunar::planning::GroundExecutionState::kHolding:
+      return "HOLDING";
+    case lunar::planning::GroundExecutionState::kFault:
+      return "FAULT";
+  }
+  return "UNKNOWN";
+}
+
+[[nodiscard]] std::string HopperExecutionStateName(
+    const lunar::planning::HopperExecutionState state) {
+  switch (state) {
+    case lunar::planning::HopperExecutionState::kGroundHold:
+      return "GROUND_HOLD";
+    case lunar::planning::HopperExecutionState::kJumpReady:
+      return "JUMP_READY";
+    case lunar::planning::HopperExecutionState::kJumpCommitted:
+      return "JUMP_COMMITTED";
+    case lunar::planning::HopperExecutionState::kInFlight:
+      return "IN_FLIGHT";
+    case lunar::planning::HopperExecutionState::kLandedHold:
+      return "LANDED_HOLD";
+    case lunar::planning::HopperExecutionState::kEmergencyDelegated:
+      return "EMERGENCY_DELEGATED";
+  }
+  return "UNKNOWN";
+}
+
+[[nodiscard]] ExecutionDiagnosticInfo ExecutionDiagnostic(
+    const std::optional<lunar::planning::ExecutionContext>& context,
+    const lunar::planning::MotionReference* reference) {
+  if (reference != nullptr) {
+    ExecutionDiagnosticInfo info{
+        .plan_id = reference->plan_id,
+        .segment_id = reference->plan_id,
+        .state = "AWAITING_FEEDBACK",
+    };
+    if (const auto* hops =
+            std::get_if<lunar::planning::HopReference>(&reference->data);
+        hops != nullptr && !hops->segments.empty()) {
+      info.segment_id = hops->segments.front().segment_id;
+    }
+    return info;
+  }
+  if (!context.has_value()) {
+    return {};
+  }
+  return std::visit(
+      [](const auto& execution) {
+        using Context = std::decay_t<decltype(execution)>;
+        std::string state;
+        if constexpr (std::is_same_v<
+                          Context,
+                          lunar::planning::GroundExecutionContext>) {
+          state = GroundExecutionStateName(execution.state);
+        } else {
+          state = HopperExecutionStateName(execution.state);
+        }
+        return ExecutionDiagnosticInfo{
+            .plan_id = execution.active_plan_id.value_or(""),
+            .segment_id = execution.active_segment_id.value_or(""),
+            .state = std::move(state),
+        };
+      },
+      *context);
+}
+
 [[nodiscard]] std::string GoalIdentity(
     const lunar::planning::GoalRegion& goal) {
   std::ostringstream stream;
@@ -1201,7 +1280,8 @@ struct PlanMotionServer::Impl final {
     PublishDiagnostic(
         diagnostic_msgs::msg::DiagnosticStatus::OK,
         result->reason_code,
-        &output.diagnostics);
+        &output.diagnostics,
+        output.reference.has_value() ? &*output.reference : nullptr);
     try {
       goal_handle->succeed(result);
     } catch (const std::exception& error) {
@@ -1520,7 +1600,8 @@ struct PlanMotionServer::Impl final {
   void PublishDiagnostic(
       const std::uint8_t level,
       const std::string& reason_code,
-      const lunar::planning::PlannerDiagnostics* diagnostics = nullptr) {
+      const lunar::planning::PlannerDiagnostics* diagnostics = nullptr,
+      const lunar::planning::MotionReference* active_reference = nullptr) {
     std::scoped_lock lock{diagnostic_mutex};
     last_diagnostic_reason = reason_code;
     if (!diagnostics_publisher || !diagnostics_publisher->is_activated()) {
@@ -1601,6 +1682,57 @@ struct PlanMotionServer::Impl final {
       append(
           "hierarchical_hopper_certification_attempts",
           std::to_string(hierarchical.hopper_certification_attempts));
+      append(
+          "global_search_elapsed_s",
+          DiagnosticDouble(std::chrono::duration<double>(
+              hierarchical.global_elapsed).count()));
+      append(
+          "local_planning_elapsed_s",
+          DiagnosticDouble(std::chrono::duration<double>(
+              hierarchical.local_elapsed).count()));
+      append(
+          "landing_field_elapsed_s",
+          DiagnosticDouble(std::chrono::duration<double>(
+              hierarchical.landing_field_elapsed).count()));
+      append(
+          "spatial_index_elapsed_s",
+          DiagnosticDouble(std::chrono::duration<double>(
+              hierarchical.spatial_index_elapsed).count()));
+      append(
+          "ballistic_solve_elapsed_s",
+          DiagnosticDouble(std::chrono::duration<double>(
+              hierarchical.ballistic_solve_elapsed).count()));
+      append(
+          "flight_tube_certification_elapsed_s",
+          DiagnosticDouble(std::chrono::duration<double>(
+              hierarchical.flight_tube_certification_elapsed).count()));
+      append(
+          "global_expanded_nodes",
+          std::to_string(hierarchical.global_expanded_states));
+      append("open_peak", std::to_string(hierarchical.global_open_peak));
+      append(
+          "safe_landing_nodes",
+          std::to_string(hierarchical.safe_landing_nodes));
+      append(
+          "candidate_edges_evaluated",
+          std::to_string(hierarchical.candidate_edges_evaluated));
+      append(
+          "coarse_edges_rejected",
+          std::to_string(hierarchical.coarse_edges_rejected));
+      append(
+          "full_edges_certified",
+          std::to_string(hierarchical.full_edges_certified));
+      append(
+          "full_edges_invalidated",
+          std::to_string(hierarchical.full_edges_invalidated));
+      append(
+          "edge_certificate_cache_hits",
+          std::to_string(hierarchical.edge_certificate_cache_hits));
+      append("route_reused", hierarchical.route_reused ? "true" : "false");
+      append("route_cursor", std::to_string(hierarchical.route_cursor));
+      append(
+          "rolling_request_count",
+          std::to_string(hierarchical.rolling_request_count));
     }
     if (diagnostics != nullptr && diagnostics->local_trajectory) {
       const auto& local = *diagnostics->local_trajectory;
@@ -1618,13 +1750,20 @@ struct PlanMotionServer::Impl final {
       append(
           "smoothing_elapsed_s",
           DiagnosticDouble(local.smoothing_elapsed_s));
-      append(
-          "landing_field_elapsed_s",
-          DiagnosticDouble(local.landing_field_elapsed_s));
+      if (!diagnostics->hierarchical.has_value()) {
+        append(
+            "landing_field_elapsed_s",
+            DiagnosticDouble(local.landing_field_elapsed_s));
+      }
     }
     if (diagnostics != nullptr) {
       append("warning_codes", JoinWarningCodes(diagnostics->warning_codes));
     }
+    const ExecutionDiagnosticInfo execution = ExecutionDiagnostic(
+        execution_feedback_tracker.context(), active_reference);
+    append("active_plan_id", execution.plan_id);
+    append("active_segment_id", execution.segment_id);
+    append("execution_state", execution.state);
     array.status.push_back(std::move(status));
     diagnostics_publisher->publish(array);
   }

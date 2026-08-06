@@ -16,6 +16,10 @@
 #include <variant>
 #include <vector>
 
+#if defined(__linux__)
+#include <sys/resource.h>
+#endif
+
 #include <nlohmann/json.hpp>
 
 #include "hierarchical/global_route_planner.hpp"
@@ -31,24 +35,11 @@ using Clock = std::chrono::steady_clock;
 using Json = nlohmann::json;
 
 constexpr std::string_view kSchemaVersion =
-  "lunar-hierarchical-benchmark/v1";
+  "lunar-hierarchical-benchmark/v2";
 constexpr std::string_view kBuildType = LUNAR_BUILD_TYPE;
 constexpr std::size_t kWarmupRuns = 1U;
 constexpr std::size_t kMeasuredRuns = 30U;
-constexpr std::size_t kMaximumBenchmarkMemoryBytes =
-  256U * 1024U * 1024U;
 constexpr double kResolutionM = 0.2;
-constexpr std::array<std::size_t, 3> kAxisTiers{256U, 512U, 1'024U};
-constexpr std::array<std::string_view, 4> kFixtures{
-  "open", "fixed-obstacle", "narrow-channel", "no-route"};
-constexpr std::array<std::string_view, 5> kTrajectoryModes{
-  "STATIONARY", "OPTIMIZED", "DISCRETE_FALLBACK", "CERTIFIED_HOP", "NONE"};
-
-struct Thresholds final
-{
-  double global_s{};
-  double complete_s{};
-};
 
 struct Arguments final
 {
@@ -60,6 +51,12 @@ struct SearchMetrics final
   std::uint64_t expanded_states{};
   std::size_t open_peak{};
   std::size_t peak_memory_bytes{};
+  std::size_t safe_landing_nodes{};
+  std::size_t candidate_edges_evaluated{};
+  std::size_t coarse_edges_rejected{};
+  std::size_t full_edges_certified{};
+  std::size_t full_edges_invalidated{};
+  std::size_t edge_certificate_cache_hits{};
 
   auto operator<=>(const SearchMetrics &) const = default;
 };
@@ -183,6 +180,123 @@ void AddNoRouteWall(GridMap & map)
   return input;
 }
 
+void ClearValidity(GridMap & map)
+{
+  auto & valid = std::get<std::vector<std::uint8_t>>(
+    map.layers.at("valid_mask").values);
+  std::ranges::fill(valid, 0U);
+}
+
+void MarkValidRectangle(
+  GridMap & map, const std::size_t minimum_x, const std::size_t maximum_x,
+  const std::size_t minimum_y, const std::size_t maximum_y)
+{
+  auto & valid = std::get<std::vector<std::uint8_t>>(
+    map.layers.at("valid_mask").values);
+  for (std::size_t y = minimum_y; y <= maximum_y; ++y) {
+    for (std::size_t x = minimum_x; x <= maximum_x; ++x) {
+      valid.at(y * map.width + x) = 1U;
+    }
+  }
+}
+
+[[nodiscard]] double CellCenter(const std::size_t cell)
+{
+  return (static_cast<double>(cell) + 0.5) * kResolutionM;
+}
+
+[[nodiscard]] PlannerInput MakeFixedGroundInput(const bool legged)
+{
+  PlannerInput input = MakeInput(250U, "fixed-obstacle");
+  input.request_id = legged ? "benchmark-legged-positive" :
+    "benchmark-wheel-positive";
+  if (!legged) {
+    return input;
+  }
+
+  const PlannerInput source = test::MakeValidLeggedInput();
+  const Vec3 start = std::get<WheeledState>(input.current_state).pose.position_m;
+  input.platform_id = "benchmark-legged";
+  input.capability_version = "test-only-legged-v1";
+  input.current_state = LeggedState{
+    .body_pose = Pose3{.position_m = {start.x, start.y, 0.5}},
+  };
+  input.capability = std::get<LeggedCapability>(source.capability);
+  auto & capability = std::get<LeggedCapability>(input.capability);
+  for (auto & primitive : capability.motion_primitives) {
+    primitive.body_frame_displacement_m.x *= kResolutionM;
+    primitive.body_frame_displacement_m.y *= kResolutionM;
+  }
+  input.config.legged.xy_resolution_m = kResolutionM;
+  return input;
+}
+
+[[nodiscard]] PlannerInput MakeFixedHopperInput(
+  const std::string_view fixture)
+{
+  PlannerInput input = test::MakeValidHopperInput();
+  input.request_id = "benchmark-" + std::string{fixture};
+  input.platform_id = "benchmark-hopper";
+  input.capability_version = "test-only-hopper-v1";
+  input.world.global_map = test::MakeFlatMap(
+    "map", 250U, 250U, kResolutionM);
+  input.world.local_map = test::MakeFlatMap(
+    "odom", 250U, 250U, kResolutionM);
+  input.config.global_map.base_resolution_m = kResolutionM;
+  input.config.hopper.maximum_flight_tube_sections = 128U;
+  input.config.hopper.maximum_authorized_hops = 1U;
+  input.position_uncertainty_m = 0.0;
+  input.velocity_uncertainty_mps = 0.0;
+
+  constexpr std::size_t start_x = 30U;
+  constexpr std::size_t center_y = 125U;
+  std::size_t goal_x = 40U;
+  ClearValidity(input.world.global_map);
+  if (fixture == "hopper_direct_positive") {
+    MarkValidRectangle(input.world.global_map, 20U, 60U, 112U, 138U);
+  } else if (fixture == "hopper_multihop_positive") {
+    goal_x = 90U;
+    MarkValidRectangle(input.world.global_map, 20U, 100U, 112U, 138U);
+  } else if (fixture == "hopper_complete_negative") {
+    goal_x = 100U;
+    MarkValidRectangle(input.world.global_map, 20U, 55U, 112U, 138U);
+    MarkValidRectangle(input.world.global_map, 90U, 120U, 112U, 138U);
+  } else {
+    throw std::invalid_argument{"unknown hopper benchmark fixture"};
+  }
+
+  input.current_state = HopperState{
+    .pose = Pose3{
+      .position_m = {CellCenter(start_x), CellCenter(center_y), 0.5}},
+  };
+  input.goal_map = GoalRegion{
+    .goal_id = "benchmark-hopper-goal",
+    .target = PointGoal{
+      .position_m = {CellCenter(goal_x), CellCenter(center_y), 0.0},
+      .tolerance_m = 0.05},
+  };
+  auto & capability = std::get<HopperCapability>(input.capability);
+  capability.body_half_extent_m = {0.1, 0.1, 0.5};
+  capability.minimum_landing_region_area_m2 = 0.1;
+  capability.maximum_launch_speed_mps = 2.0;
+  capability.maximum_launch_impulse_newton_seconds = 100.0;
+  capability.minimum_flight_time = std::chrono::milliseconds{500};
+  capability.maximum_flight_time = std::chrono::seconds{3};
+  capability.maximum_landing_speed_mps = 2.0;
+  return input;
+}
+
+[[nodiscard]] PlannerInput MakeFixedInput(const std::string_view fixture)
+{
+  if (fixture == "wheel_positive") {
+    return MakeFixedGroundInput(false);
+  }
+  if (fixture == "legged_positive") {
+    return MakeFixedGroundInput(true);
+  }
+  return MakeFixedHopperInput(fixture);
+}
+
 [[nodiscard]] std::string OutcomeName(const PlanningOutcome outcome)
 {
   switch (outcome) {
@@ -262,24 +376,6 @@ void AddNoRouteWall(GridMap & map)
   return signature;
 }
 
-[[nodiscard]] std::size_t TrajectoryModeIndex(const PlannerOutput & output)
-{
-  if (!output.diagnostics.local_trajectory) {
-    return kTrajectoryModes.size() - 1U;
-  }
-  switch (output.diagnostics.local_trajectory->trajectory_mode) {
-    case TrajectoryMode::kStationary:
-      return 0U;
-    case TrajectoryMode::kOptimized:
-      return 1U;
-    case TrajectoryMode::kDiscreteFallback:
-      return 2U;
-    case TrajectoryMode::kCertifiedHop:
-      return 3U;
-  }
-  throw std::logic_error{"unknown trajectory mode"};
-}
-
 [[nodiscard]] std::string HashSignature(const Json & signature)
 {
   constexpr std::uint64_t kOffsetBasis = 14'695'981'039'346'656'037ULL;
@@ -306,30 +402,88 @@ void AddNoRouteWall(GridMap & map)
     metrics.peak_memory_bytes = std::max(
       metrics.peak_memory_bytes,
       output.diagnostics.hierarchical->estimated_work_memory_bytes);
+    metrics.safe_landing_nodes =
+      output.diagnostics.hierarchical->safe_landing_nodes;
+    metrics.candidate_edges_evaluated =
+      output.diagnostics.hierarchical->candidate_edges_evaluated;
+    metrics.coarse_edges_rejected =
+      output.diagnostics.hierarchical->coarse_edges_rejected;
+    metrics.full_edges_certified =
+      output.diagnostics.hierarchical->full_edges_certified;
+    metrics.full_edges_invalidated =
+      output.diagnostics.hierarchical->full_edges_invalidated;
+    metrics.edge_certificate_cache_hits =
+      output.diagnostics.hierarchical->edge_certificate_cache_hits;
   }
   return metrics;
 }
 
-void RequireExpected(
-  const std::string_view fixture,
-  const PlannerOutput & output)
+void RequireFixedExpected(
+  const std::string_view fixture, const PlannerOutput & output)
 {
-  if (fixture == "no-route") {
+  if (fixture == "hopper_complete_negative") {
     if (output.outcome != PlanningOutcome::kNoKnownSafeRoute ||
       output.reason_code != "GLOBAL_NO_KNOWN_SAFE_ROUTE" ||
       output.reference.has_value())
     {
-      throw std::runtime_error{"no-route fixture produced unexpected result"};
+      throw std::runtime_error{
+              "complete hopper negative produced unexpected result: " +
+              output.reason_code};
     }
     return;
   }
   if (output.outcome != PlanningOutcome::kNewReferenceAvailable ||
-    output.reason_code != "WHEEL_PLAN_AVAILABLE" ||
     !output.reference.has_value())
   {
     throw std::runtime_error{
-            "success fixture produced unexpected result: " + output.reason_code};
+            "fixed positive produced unexpected result: " + output.reason_code};
   }
+  if (fixture == "wheel_positive" &&
+    output.reason_code != "WHEEL_PLAN_AVAILABLE")
+  {
+    throw std::runtime_error{"wheel positive reason mismatch"};
+  }
+  if (fixture == "legged_positive" &&
+    output.reason_code != "LEGGED_BODY_PLAN_AVAILABLE")
+  {
+    throw std::runtime_error{"legged positive reason mismatch"};
+  }
+  if (fixture == "hopper_direct_positive") {
+    if (output.reason_code != "HOPPER_FIRST_HOP_AVAILABLE" ||
+      output.certified_hops.size() != 1U)
+    {
+      throw std::runtime_error{"direct hopper route is not exactly one hop"};
+    }
+  }
+  if (fixture == "hopper_multihop_positive") {
+    if (output.reason_code != "HOPPER_FIRST_HOP_AVAILABLE" ||
+      output.certified_hops.size() <= 1U)
+    {
+      throw std::runtime_error{"hopper multihop fixture did not use multiple hops"};
+    }
+  }
+}
+
+[[nodiscard]] std::string FixedPlatformName(const std::string_view fixture)
+{
+  if (fixture == "wheel_positive") {
+    return "WHEELED";
+  }
+  if (fixture == "legged_positive") {
+    return "LEGGED";
+  }
+  return "HOPPER";
+}
+
+[[nodiscard]] double FixedThreshold(const std::string_view fixture)
+{
+  if (fixture == "wheel_positive" || fixture == "legged_positive") {
+    return 2.0;
+  }
+  if (fixture == "hopper_direct_positive") {
+    return 1.0;
+  }
+  return 5.0;
 }
 
 [[nodiscard]] double Seconds(const Clock::duration duration)
@@ -356,145 +510,137 @@ void RequireExpected(
   };
 }
 
-[[nodiscard]] Thresholds UbuntuThresholds(const std::size_t cells)
+[[nodiscard]] Json TimingJson(const Timings & timing)
 {
-  if (cells == 65'536U) {
-    return Thresholds{.global_s = 0.5, .complete_s = 2.0};
-  }
-  if (cells == 262'144U) {
-    return Thresholds{.global_s = 1.0, .complete_s = 3.0};
-  }
-  if (cells == 1'048'576U) {
-    return Thresholds{.global_s = 2.0, .complete_s = 4.0};
-  }
-  throw std::logic_error{"unsupported benchmark tier"};
+  return Json{
+    {"p50_s", timing.p50_s},
+    {"p95_s", timing.p95_s},
+    {"maximum_s", timing.maximum_s},
+  };
 }
 
-[[nodiscard]] Json RunCase(
-  const std::size_t axis,
-  const std::string_view fixture)
+[[nodiscard]] std::size_t PeakResidentMemoryBytes()
 {
-  const PlannerInput input = MakeInput(axis, fixture);
+#if defined(__linux__)
+  rusage usage{};
+  if (getrusage(RUSAGE_SELF, &usage) == 0 && usage.ru_maxrss >= 0) {
+    return static_cast<std::size_t>(usage.ru_maxrss) * 1024U;
+  }
+#endif
+  return 0U;
+}
+
+[[nodiscard]] Json RunFixedCase(const std::string_view fixture)
+{
+  const PlannerInput input = MakeFixedInput(fixture);
   Planner planner;
   for (std::size_t run = 0U; run < kWarmupRuns; ++run) {
-    const auto output = planner.Plan(input);
-    RequireExpected(fixture, output);
+    RequireFixedExpected(fixture, planner.Plan(input));
   }
 
-  std::vector<double> global_seconds;
   std::vector<double> complete_seconds;
-  std::vector<double> smoothing_seconds;
+  std::vector<double> global_seconds;
+  std::vector<double> local_seconds;
   std::vector<double> landing_field_seconds;
-  global_seconds.reserve(kMeasuredRuns);
-  complete_seconds.reserve(kMeasuredRuns);
-  smoothing_seconds.reserve(kMeasuredRuns);
-  landing_field_seconds.reserve(kMeasuredRuns);
-  std::array<std::size_t, kTrajectoryModes.size()> trajectory_mode_counts{};
+  std::vector<double> spatial_index_seconds;
+  std::vector<double> ballistic_solve_seconds;
+  std::vector<double> flight_tube_seconds;
+  for (auto * values : {
+      &complete_seconds, &global_seconds, &local_seconds,
+      &landing_field_seconds, &spatial_index_seconds,
+      &ballistic_solve_seconds, &flight_tube_seconds})
+  {
+    values->reserve(kMeasuredRuns);
+  }
+
+  bool first = true;
   std::string stable_hash;
   SearchMetrics stable_metrics;
-  bool first = true;
   PlanningOutcome stable_outcome = PlanningOutcome::kInvalidRequest;
   std::string stable_reason;
   for (std::size_t run = 0U; run < kMeasuredRuns; ++run) {
-    const auto complete_started = Clock::now();
+    const Clock::time_point complete_started = Clock::now();
     const PlannerOutput output = planner.Plan(input);
     complete_seconds.push_back(Seconds(Clock::now() - complete_started));
-    RequireExpected(fixture, output);
-    if (!output.diagnostics.hierarchical) {
-      throw std::runtime_error{"hierarchical metrics are missing"};
+    RequireFixedExpected(fixture, output);
+    if (!output.diagnostics.hierarchical.has_value()) {
+      throw std::runtime_error{"fixed benchmark hierarchical metrics missing"};
     }
+    const auto & hierarchical = *output.diagnostics.hierarchical;
     global_seconds.push_back(
+      std::chrono::duration<double>{hierarchical.global_elapsed}.count());
+    local_seconds.push_back(
+      std::chrono::duration<double>{hierarchical.local_elapsed}.count());
+    landing_field_seconds.push_back(
+      std::chrono::duration<double>{hierarchical.landing_field_elapsed}.count());
+    spatial_index_seconds.push_back(
+      std::chrono::duration<double>{hierarchical.spatial_index_elapsed}.count());
+    ballistic_solve_seconds.push_back(
+      std::chrono::duration<double>{hierarchical.ballistic_solve_elapsed}.count());
+    flight_tube_seconds.push_back(
       std::chrono::duration<double>{
-          output.diagnostics.hierarchical->global_elapsed}.count());
-    if (output.diagnostics.local_trajectory) {
-      smoothing_seconds.push_back(
-        output.diagnostics.local_trajectory->smoothing_elapsed_s);
-      landing_field_seconds.push_back(
-        output.diagnostics.local_trajectory->landing_field_elapsed_s);
-    } else {
-      smoothing_seconds.push_back(0.0);
-      landing_field_seconds.push_back(0.0);
-    }
-    ++trajectory_mode_counts[TrajectoryModeIndex(output)];
+        hierarchical.flight_tube_certification_elapsed}.count());
+
     const std::string hash = HashSignature(StableSignature(output));
     const SearchMetrics metrics = Metrics(output);
     if (first) {
+      first = false;
       stable_hash = hash;
       stable_metrics = metrics;
       stable_outcome = output.outcome;
       stable_reason = output.reason_code;
-      first = false;
     } else if (hash != stable_hash || metrics != stable_metrics ||
-      output.outcome != stable_outcome ||
-      output.reason_code != stable_reason)
+      output.outcome != stable_outcome || output.reason_code != stable_reason)
     {
-      throw std::runtime_error{"benchmark result is not deterministic"};
-    }
-    if (metrics.peak_memory_bytes > kMaximumBenchmarkMemoryBytes)
-    {
-      throw std::runtime_error{"benchmark memory ceiling exceeded"};
+      throw std::runtime_error{
+              "fixed benchmark route, outcome, or diagnostic counts changed"};
     }
   }
 
-  const Timings global = Summarize(std::move(global_seconds));
   const Timings complete = Summarize(std::move(complete_seconds));
-  const Timings smoothing = Summarize(std::move(smoothing_seconds));
-  const Timings landing_field = Summarize(std::move(landing_field_seconds));
-  Json mode_counts = Json::object();
-  for (std::size_t index = 0U; index < kTrajectoryModes.size(); ++index) {
-    mode_counts[std::string{kTrajectoryModes[index]}] =
-      trajectory_mode_counts[index];
-  }
-  const std::size_t cells = axis * axis;
-  const Thresholds thresholds = UbuntuThresholds(cells);
+  const double threshold_s = FixedThreshold(fixture);
   return Json{
     {"schema_version", kSchemaVersion},
-    {"platform", "WHEELED"},
+    {"platform", FixedPlatformName(fixture)},
     {"fixture", fixture},
-    {"cells", cells},
+    {"authority", "test-only/non-authoritative"},
+    {"cells", 250U * 250U},
+    {"width_m", 50.0},
+    {"height_m", 50.0},
     {"resolution_m", kResolutionM},
     {"runs", kMeasuredRuns},
     {"p50_s", complete.p50_s},
     {"p95_s", complete.p95_s},
     {"maximum_s", complete.maximum_s},
-    {"global_p50_s", global.p50_s},
-    {"global_p95_s", global.p95_s},
-    {"global_maximum_s", global.maximum_s},
-    {"smoothing_p50_s", smoothing.p50_s},
-    {"smoothing_p95_s", smoothing.p95_s},
-    {"smoothing_maximum_s", smoothing.maximum_s},
-    {"landing_field_p50_s", landing_field.p50_s},
-    {"landing_field_p95_s", landing_field.p95_s},
-    {"landing_field_maximum_s", landing_field.maximum_s},
-    {"trajectory_mode_counts", std::move(mode_counts)},
+    {"stage_timings_s",
+      {{"global_search", TimingJson(Summarize(std::move(global_seconds)))},
+        {"local_planning", TimingJson(Summarize(std::move(local_seconds)))},
+        {"landing_field", TimingJson(
+            Summarize(std::move(landing_field_seconds)))},
+        {"spatial_index", TimingJson(
+            Summarize(std::move(spatial_index_seconds)))},
+        {"ballistic_solve", TimingJson(
+            Summarize(std::move(ballistic_solve_seconds)))},
+        {"flight_tube_certification", TimingJson(
+            Summarize(std::move(flight_tube_seconds)))}}},
     {"expanded_states", stable_metrics.expanded_states},
     {"open_peak", stable_metrics.open_peak},
-    {"peak_memory_bytes", stable_metrics.peak_memory_bytes},
+    {"peak_work_memory_bytes", stable_metrics.peak_memory_bytes},
+    {"peak_resident_memory_bytes", PeakResidentMemoryBytes()},
+    {"safe_landing_nodes", stable_metrics.safe_landing_nodes},
+    {"candidate_edges_evaluated",
+      stable_metrics.candidate_edges_evaluated},
+    {"coarse_edges_rejected", stable_metrics.coarse_edges_rejected},
+    {"full_edges_certified", stable_metrics.full_edges_certified},
+    {"full_edges_invalidated", stable_metrics.full_edges_invalidated},
+    {"edge_certificate_cache_hits",
+      stable_metrics.edge_certificate_cache_hits},
     {"route_hash", stable_hash},
     {"planning_outcome", OutcomeName(stable_outcome)},
     {"reason_code", stable_reason},
     {"deterministic", true},
-    {"ubuntu_threshold_passed",
-      global.p95_s <= thresholds.global_s &&
-      complete.p95_s <= thresholds.complete_s},
-  };
-}
-
-[[nodiscard]] Json ThresholdProfile(
-  const bool evaluated,
-  const std::array<double, 3> global,
-  const std::array<double, 3> complete)
-{
-  return Json{
-    {"evaluated", evaluated},
-    {"global_p95_s",
-      {{"65536", global[0]},
-        {"262144", global[1]},
-        {"1048576", global[2]}}},
-    {"complete_core_p95_s",
-      {{"65536", complete[0]},
-        {"262144", complete[1]},
-        {"1048576", complete[2]}}},
+    {"ubuntu_release_p95_threshold_s", threshold_s},
+    {"ubuntu_threshold_passed", complete.p95_s <= threshold_s},
   };
 }
 
@@ -503,32 +649,38 @@ void RequireExpected(
   if (kBuildType != "Release") {
     throw std::runtime_error{"PERFORMANCE_BUILD_NOT_RELEASE"};
   }
+  constexpr std::array<std::string_view, 5U> fixed_fixtures{
+    "wheel_positive",
+    "legged_positive",
+    "hopper_direct_positive",
+    "hopper_multihop_positive",
+    "hopper_complete_negative",
+  };
   Json results = Json::array();
-  for (const std::size_t axis : kAxisTiers) {
-    for (const std::string_view fixture : kFixtures) {
-      try {
-        results.push_back(RunCase(axis, fixture));
-      } catch (const std::exception & error) {
-        throw std::runtime_error{"tier " + std::to_string(axis * axis) +
-                " fixture " + std::string{fixture} + ": " +
-                error.what()};
-      }
-    }
-  }
-  return Json{
+  Json document{
     {"schema_version", kSchemaVersion},
     {"build_type", kBuildType},
     {"warmup_runs", kWarmupRuns},
     {"measured_runs", kMeasuredRuns},
     {"timing_unit", "s"},
-    {"memory_semantics", "planner_estimated_peak_work_memory_bytes"},
-    {"threshold_profiles",
-      {{"ubuntu_amd64",
-        ThresholdProfile(true, {0.5, 1.0, 2.0}, {2.0, 3.0, 4.0})},
-        {"jetson_agx_orin",
-          ThresholdProfile(false, {1.0, 2.0, 4.0}, {3.0, 4.0, 6.0})}}},
-    {"results", std::move(results)},
+    {"map", {{"width_m", 50.0}, {"height_m", 50.0},
+        {"resolution_m", kResolutionM}, {"cells", 250U * 250U}}},
+    {"capability_authority", "test-only/non-authoritative"},
+    {"ubuntu_amd64_release_evaluated", true},
+    {"jetson_agx_orin_evaluated", false},
   };
+  for (const std::string_view fixture : fixed_fixtures) {
+    try {
+      Json result = RunFixedCase(fixture);
+      document[std::string{fixture}] = result;
+      results.push_back(std::move(result));
+    } catch (const std::exception & error) {
+      throw std::runtime_error{
+              "fixture " + std::string{fixture} + ": " + error.what()};
+    }
+  }
+  document["results"] = std::move(results);
+  return document;
 }
 
 void Write(const std::string & path, const Json & document)

@@ -52,6 +52,8 @@ struct EdgeBuildResult final {
   bool coarse_rejected{};
   bool full_certification_attempted{};
   bool full_invalidated{};
+  std::chrono::nanoseconds ballistic_solve_elapsed{};
+  std::chrono::nanoseconds flight_tube_certification_elapsed{};
 };
 
 struct NodeCertificationRegion final {
@@ -342,6 +344,14 @@ BuildNodeCertificationRegion(const LandingNodeId id,
     const HopperCapability &capability, const PlannerConfig &config,
     const double position_uncertainty_m, const double velocity_uncertainty_mps,
     const std::stop_token stop_token) {
+  std::chrono::nanoseconds ballistic_solve_elapsed{};
+  std::chrono::nanoseconds flight_tube_certification_elapsed{};
+  const auto with_timings = [&](EdgeBuildResult result) {
+    result.ballistic_solve_elapsed = ballistic_solve_elapsed;
+    result.flight_tube_certification_elapsed =
+        flight_tube_certification_elapsed;
+    return result;
+  };
   if (stop_token.stop_requested()) {
     return EdgeBuildResult{
         .status = EdgeBuildStatus::kCanceled,
@@ -365,8 +375,12 @@ BuildNodeCertificationRegion(const LandingNodeId id,
   }
   const Vec3 initial_velocity =
       source_id == start_id ? start_velocity_map : Vec3{};
+  const Clock::time_point ballistic_started = Clock::now();
   const hopper::BallisticEnvelopeResult solved = hopper::SolveBallisticEnvelope(
       launch, landing, initial_velocity, capability, 0.0, stop_token);
+  ballistic_solve_elapsed =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
+                                                           ballistic_started);
   if (!solved.ok()) {
     EdgeBuildStatus status = EdgeBuildStatus::kNumericalIndeterminate;
     switch (solved.status) {
@@ -384,19 +398,19 @@ BuildNodeCertificationRegion(const LandingNodeId id,
       status = EdgeBuildStatus::kNumericalIndeterminate;
       break;
     }
-    return EdgeBuildResult{
+    return with_timings(EdgeBuildResult{
         .status = status,
         .edge = std::nullopt,
         .reason_code = solved.reason_code,
         .coarse_rejected = status == EdgeBuildStatus::kInfeasible,
-    };
+    });
   }
   if (!solved.arc.has_value()) {
-    return EdgeBuildResult{
+    return with_timings(EdgeBuildResult{
         .status = EdgeBuildStatus::kNumericalIndeterminate,
         .edge = std::nullopt,
         .reason_code = "HOPPER_BALLISTIC_NUMERICAL_INDETERMINATE",
-    };
+    });
   }
   const std::optional<NodeCertificationRegion> source_region =
       BuildNodeCertificationRegion(source_id, start_id, start_pose_map, map,
@@ -407,12 +421,12 @@ BuildNodeCertificationRegion(const LandingNodeId id,
                                    landing_field, capability,
                                    position_uncertainty_m);
   if (!source_region.has_value() || !target_region.has_value()) {
-    return EdgeBuildResult{
+    return with_timings(EdgeBuildResult{
         .status = EdgeBuildStatus::kInfeasible,
         .edge = std::nullopt,
         .reason_code = "HOPPER_PROMOTION_REGION_EMPTY",
         .full_invalidated = true,
-    };
+    });
   }
   const double source_position_deviation_m =
       source_id == start_id ? position_uncertainty_m
@@ -422,15 +436,19 @@ BuildNodeCertificationRegion(const LandingNodeId id,
       velocity_uncertainty_mps * solved.arc->flight_time_s;
   if (!std::isfinite(tube_expansion_margin_m) ||
       tube_expansion_margin_m < 0.0) {
-    return EdgeBuildResult{
+    return with_timings(EdgeBuildResult{
         .status = EdgeBuildStatus::kNumericalIndeterminate,
         .edge = std::nullopt,
         .reason_code = "HOPPER_FLIGHT_TUBE_NUMERICAL_INDETERMINATE",
-    };
+    });
   }
+  const Clock::time_point tube_started = Clock::now();
   const hopper::FlightTubeCertificationResult tube = hopper::CertifyFlightTube(
       *solved.arc, map, source_region->landing, target_region->landing,
       capability, config, stop_token, tube_expansion_margin_m);
+  flight_tube_certification_elapsed =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
+                                                           tube_started);
   if (!tube.certified) {
     EdgeBuildStatus status = EdgeBuildStatus::kInfeasible;
     bool full_invalidated = true;
@@ -448,13 +466,13 @@ BuildNodeCertificationRegion(const LandingNodeId id,
       status = EdgeBuildStatus::kResourceExhausted;
       full_invalidated = false;
     }
-    return EdgeBuildResult{
+    return with_timings(EdgeBuildResult{
         .status = status,
         .edge = std::nullopt,
         .reason_code = tube.reason_code,
         .full_certification_attempted = true,
         .full_invalidated = full_invalidated,
-    };
+    });
   }
   const Vec3 velocity_change{
       .x = solved.arc->launch_velocity_mps.x - initial_velocity.x,
@@ -466,23 +484,23 @@ BuildNodeCertificationRegion(const LandingNodeId id,
       std::chrono::duration<double>(capability.maximum_flight_time).count();
   if (!std::isfinite(impulse) || !std::isfinite(maximum_time) ||
       maximum_time <= 0.0) {
-    return EdgeBuildResult{
+    return with_timings(EdgeBuildResult{
         .status = EdgeBuildStatus::kNumericalIndeterminate,
         .edge = std::nullopt,
         .reason_code = "HOPPER_BALLISTIC_NUMERICAL_INDETERMINATE",
-    };
+    });
   }
   const double cost =
       1.0 + solved.arc->flight_time_s / maximum_time +
       impulse / capability.maximum_launch_impulse_newton_seconds;
   if (!std::isfinite(cost) || cost <= 0.0) {
-    return EdgeBuildResult{
+    return with_timings(EdgeBuildResult{
         .status = EdgeBuildStatus::kNumericalIndeterminate,
         .edge = std::nullopt,
         .reason_code = "HOPPER_BALLISTIC_NUMERICAL_INDETERMINATE",
-    };
+    });
   }
-  return EdgeBuildResult{
+  return with_timings(EdgeBuildResult{
       .status = EdgeBuildStatus::kValid,
       .edge =
           NominalHopEdge{
@@ -497,7 +515,7 @@ BuildNodeCertificationRegion(const LandingNodeId id,
           },
       .reason_code = {},
       .full_certification_attempted = true,
-  };
+  });
 }
 
 [[nodiscard]] std::optional<PlanningOutcome>
@@ -636,8 +654,12 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
                      landing_field.reason_code, started, reach,
                      levels.global_level);
     }
+    const Clock::time_point spatial_index_started = Clock::now();
     LandingSpatialIndex spatial_index(*landing_field.field, reach,
                                       input.stop_token);
+    const std::chrono::nanoseconds spatial_index_elapsed =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            Clock::now() - spatial_index_started);
     if (!spatial_index.ok()) {
       return Failure(spatial_index.reason_code() == "REQUEST_CANCELED"
                          ? PlanningOutcome::kCanceled
@@ -712,6 +734,8 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
     std::size_t full_edges_certified = 0U;
     std::size_t full_edges_invalidated = 0U;
     std::size_t edge_certificate_cache_hits = 0U;
+    std::chrono::nanoseconds ballistic_solve_elapsed{};
+    std::chrono::nanoseconds flight_tube_certification_elapsed{};
     const auto get_edge =
         [&](const LandingNodeId source_id,
             const LandingNodeId target_id) -> const EdgeBuildResult & {
@@ -733,6 +757,9 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
       }
       full_edges_invalidated +=
           static_cast<std::size_t>(built.full_invalidated);
+      ballistic_solve_elapsed += built.ballistic_solve_elapsed;
+      flight_tube_certification_elapsed +=
+          built.flight_tube_certification_elapsed;
       if (built.status == EdgeBuildStatus::kValid) {
         ++graph_edge_count;
       }
@@ -903,7 +930,13 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
           .edge_certificate_cache_hits = edge_certificate_cache_hits,
           .route_hops = node_path.size() - 1U,
           .expanded_nodes = expanded,
+          .open_peak = open_peak,
+          .safe_landing_nodes = landing_field.field->SafeCenterIds().size(),
           .landing_field_elapsed = landing_field.elapsed,
+          .spatial_index_elapsed = spatial_index_elapsed,
+          .ballistic_solve_elapsed = ballistic_solve_elapsed,
+          .flight_tube_certification_elapsed =
+              flight_tube_certification_elapsed,
           .elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
               Clock::now() - started),
           .reason_code = "HOPPER_GLOBAL_ROUTE_AVAILABLE",
@@ -1171,6 +1204,13 @@ HopperRoutePlanResult PlanHopperGlobalRoute(const PlannerInput &input) {
         failure.full_edges_certified = full_edges_certified;
         failure.full_edges_invalidated = full_edges_invalidated;
         failure.edge_certificate_cache_hits = edge_certificate_cache_hits;
+        failure.open_peak = overall_open_peak;
+        failure.safe_landing_nodes =
+            landing_field.field->SafeCenterIds().size();
+        failure.spatial_index_elapsed = spatial_index_elapsed;
+        failure.ballistic_solve_elapsed = ballistic_solve_elapsed;
+        failure.flight_tube_certification_elapsed =
+            flight_tube_certification_elapsed;
         return failure;
       }
 
