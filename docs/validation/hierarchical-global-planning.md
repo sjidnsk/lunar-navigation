@@ -140,9 +140,101 @@ git diff --check
 `lunar_navigation_msgs` 使用 colcon 隔离安装，因此检查器参数必须是实际包前缀
 `.../install/lunar_navigation_msgs`，不能传安装根目录。
 
-## 7. 未验证边界
+## 7. 完整搜索与滚动规划最终资格（2026-08-06）
+
+本节覆盖取消固定全局搜索截断、三平台滚动协调和 RViz 完成态显示后的最终增量资格；前面
+2026-08-05 的结果保留为历史基线。实现提交为：
+
+- 主仓实现：`73128ecff737b362243067a9ecfd3ffc13059a83`；
+- 外部 RViz/Action 实现：`a14745b580c285ee0d878019d0288848b9137414`；
+- 外部操作文档：`f7dc9dfb63932707c07d746d0df375d2e223c6d9`。
+
+验证记录所在的主仓文档提交不能在自身内容中自引用，以 Git 历史为准。生产能力 YAML 和三类
+平台运动能力数值未改；`maximum_authorized_hops=1`、Action/`MotionReference` schema 与外部
+地图所有权均保持不变。
+
+### 7.1 新鲜 Release 构建与测试
+
+所有产物位于仓库外：
+
+```text
+/home/kai/CodexDownloads/lunar_navigation/complete-rolling-final-Nzp9RH
+```
+
+主仓从空 `build/install/test-results` 构建，`CMAKE_BUILD_TYPE=Release`：
+
+- 6 个包构建通过；
+- `colcon test-result --verbose`：34 tests，0 errors，0 failures，0 skipped；
+- `tests/foundation`：127 passed；
+- 外部接口和仓库边界检查通过；
+- `git diff --check` 通过。
+
+外部 overlay run id 为 `20260806T111057997490Z`，`build.json` 同时记录 `Release`、本次主仓
+worktree 和独立 install 路径：
+
+- 源码 pytest：568 passed，2 skipped；历史快照契约通过显式
+  `LUNAR_INTERACTIVE_SNAPSHOT_MANIFEST` 读取仓库外保留快照；
+- merged overlay CTest：502 tests，0 errors，0 failures，2 skipped；
+- merged install 中仅排除不适用于混合头目录的
+  `lunar_planner_core_public_header_boundary`，随后把安装出的 9 个核心头复制到隔离视图，使用
+  原测试脚本验证 1/1 通过，且安装/隔离逐文件 SHA-256 完全一致。
+
+### 7.2 三平台固定 Action 正反例与滚动完成
+
+固定地图为 `synthetic-ad8056e0fcc3a848`：50×50 m、0.2 m/cell、250×250 栅格、seed
+`20260805`。进程级测试对 wheel、legged、hopper 依次执行障碍目标负例和远目标正例，并要求
+每个平台都从首个局部授权继续滚动到 `ROLLING_GOAL_COMPLETE`；最后还验证服务器已接收请求
+后的取消路径。结果为 1 passed，耗时 52.68 s，日志保存在：
+
+```text
+/home/kai/CodexDownloads/lunar_navigation/complete-rolling-final-Nzp9RH/external/artifacts/20260806T111057997490Z/synthetic-process
+```
+
+地面平台的下一段只在 bridge 回显同一代 canonical odometry 后发起；取消等待中的续段会清空
+待发命令，迟到回显不能启动新 Action。轮式转角局部目标使用能力运动原语推导的航向容差，旋转
+矩形碰撞复检使用真实 footprint 与栅格相交，不再把包围盒角落误判为碰撞。
+
+### 7.3 30 次 Release 性能结果
+
+报告及 SHA-256：
+
+```text
+/home/kai/CodexDownloads/lunar_navigation/complete-rolling-final-Nzp9RH/main/benchmark/complete-rolling-release.json
+69cd118cd44a83a6b79224e3b16fd08181d2b4742f7d9348904ffa1ff59bfa34
+```
+
+| fixture | p50 | p95 | 门槛 | 结果 |
+|---|---:|---:|---:|---|
+| wheel_positive | 0.077295 s | 0.083870 s | 2.0 s | 通过 |
+| legged_positive | 0.114696 s | 0.116464 s | 2.0 s | 通过 |
+| hopper_direct_positive | 0.601238 s | 0.634274 s | 1.0 s | 通过 |
+| hopper_multihop_positive | 0.877334 s | 0.884558 s | 5.0 s | 通过 |
+| hopper_complete_negative | 0.073642 s | 0.074597 s | 5.0 s | 通过 |
+
+五个 fixture 均运行 30 次，路线哈希和结果确定；能力来源为
+`test-only/non-authoritative`，不能替代正式平台参数。
+
+### 7.4 真实 RViz 窗口证据
+
+在 X11 RViz2 会话 `20260806T112050570664Z` 中，三平台都使用远目标滚动到完成态；面板同时
+显示 `FEASIBLE`、`COMPLETED` 和 `ROLLING_GOAL_COMPLETE`。另分别捕获规划路线、飞跃式当前
+授权弹道/飞行管，以及障碍目标 `INFEASIBLE / GOAL_OBSTACLE`。九张规范截图和逐文件
+SHA-256 位于：
+
+```text
+/home/kai/CodexDownloads/lunar_navigation/complete-rolling-final-Nzp9RH/external/screenshots
+```
+
+文件为 `wheel-completed.png`、`legged-completed.png`、`hopper-completed.png`、
+`wheel-route.png`、`legged-route.png`、`hopper-route-ballistic.png`，以及三份
+`<platform>-negative-goal-obstacle.png`。会话通过启动器
+自有 PID 正常清理；controller/RViz 日志未发现 traceback、fatal 或崩溃。该证据使用独立合成
+地图，不连接 Isaac Sim，也不代表真实平台执行性能。
+
+## 8. 未验证边界
 
 | 项目 | 状态 | 说明 |
 |---|---|---|
 | AGX performance | 未验证 | 必须在 Jetson AGX Orin 原生 Release 构建上执行设备档位基准 |
-| live Isaac Sim/RViz operator run | 未验证 | 自动化已验证 ROS/RViz 逻辑，不代表现场图形会话验收 |
+| live synthetic RViz operator run | 已验证 | 覆盖三平台路线、弹道/飞行管、完成态和障碍目标反例 |
+| live Isaac Sim scene replay | 未验证 | 本轮按批准范围与 Isaac Sim 无关，不能替代当前 USD 场景回放验收 |
