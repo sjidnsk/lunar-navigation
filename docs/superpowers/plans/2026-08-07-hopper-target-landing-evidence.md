@@ -109,10 +109,10 @@
   ```python
   result.successful is True
   bridge._local_map_message.info.pose.position.x == pytest.approx(0.0)
-  bridge._local_map_message.info.pose.position.y == pytest.approx(16.0)
+  bridge._local_map_message.info.pose.position.y == pytest.approx(12.0)
   ```
 
-  The target `(0.0, 16.0)` is 18 m from the synthetic hopper start `(-18.0, 16.0)`, beyond the old 12 m half extent. Add rejection cases for one-coordinate-only updates, non-finite values, wheel sessions, non-L0 source data, and targets outside the source map. Add a hopper odometry case proving the prepared target center remains unchanged while the same odometry still recenters wheel/legged windows.
+  The target `(0.0, 12.0)` is about 18.44 m from the synthetic hopper start `(-18.0, 16.0)`, beyond the old 12 m half extent and far enough from map boundaries for an exact-centered window. Add rejection cases for one-coordinate-only updates, non-finite values, wheel sessions, non-L0 source data, and targets outside the source map. Add a hopper odometry case proving the prepared target center remains unchanged while the same odometry still recenters wheel/legged windows.
 
 - [ ] **Step 3: Run focused tests and verify RED**
 
@@ -163,7 +163,7 @@
       self.events.append(f"prepare:{target_xy[0]}:{target_xy[1]}:{timeout_s}")
   ```
 
-  Assert a hopper refresh produces `prepare:0.0:16.0:9.0` immediately before `ready:9.0`; a wheel refresh with a landing target raises `LANDING_EVIDENCE_TARGET_INVALID`; and an injected preparation failure does not call ready.
+  Assert a hopper refresh produces `prepare:0.0:12.0:9.0` immediately before `ready:9.0`; a wheel refresh with a landing target raises `LANDING_EVIDENCE_TARGET_INVALID`; and an injected preparation failure does not call ready.
 
 - [ ] **Step 2: Run session tests and verify RED**
 
@@ -189,7 +189,7 @@
   Update the fake supervisor signature, capture each `landing_target_xy`, and assert:
 
   ```python
-  hopper goal (0.0, 16.0) -> refresh_generation((0.0, 16.0)) -> Action send
+  hopper goal (0.0, 12.0) -> refresh_generation((0.0, 12.0)) -> Action send
   wheel/legged goal         -> refresh_generation(None)       -> Action send
   preparation failure      -> no Action, status LANDING_EVIDENCE_PREPARATION_FAILED
   committed hopper reset   -> switch hopper -> prepare target -> ready -> Action send
@@ -226,7 +226,7 @@
 
 - [ ] **Step 1: Write the failing integration test**
 
-  Use deterministic synthetic seed `20260805`, select hopper, and use fixed safe target `(0.0, 16.0)`, which is 18 m from `(-18.0, 16.0)`. Assert before Action completion:
+  Use deterministic synthetic seed `20260805`, select hopper, and use fixed safe target `(0.0, 12.0)`, which is about 18.44 m from `(-18.0, 16.0)`. Assert before Action completion:
 
   ```python
   math.dist(start_xy, target_xy) > 12.0
@@ -243,7 +243,7 @@
 
 - [ ] **Step 3: Bind the fixed target to the frozen map fixture**
 
-  Assert the full 0.65 m support disk around `(0.0, 16.0)` is valid, obstacle-free and non-forbidden in seed `20260805`; fail the fixture rather than scanning for a replacement. Do not change platform capabilities or obstacle occupancy.
+  Assert the full 0.65 m support disk around `(0.0, 12.0)` is valid, obstacle-free and non-forbidden in seed `20260805`; fail the fixture rather than scanning for a replacement. Do not change platform capabilities or obstacle occupancy.
 
 - [ ] **Step 4: Run integration and focused external suites**
 
