@@ -38,6 +38,8 @@ RViz 面板目前已有 `Global / local time` 和 `Search / local time` 两行�
    `stop_token` 仍是自然搜索边界；2 秒只作为 Release 性能回归门槛。
 5. 不降低轮式外形、0.20 m 障碍净空、扫掠碰撞验证、坡度/越障限制或确定性要求。
 6. 不修改 ROS Action 或消息 schema。
+7. 本设计只定义轮式搜索与计时；同一轮获批的飞跃式连续 Goal、地面滚动连续性和路线分层显示，
+   分别由同目录的配套设计冻结，并在同一个组合 Release 资格构建中验收。
 
 其中 `p95` 使用 1 次预热加至少 20 次测量；测试报告同时保存 `p50`、`p95`、最大值、
 逻辑前沿数、实际格点遍历数和展开状态。RViz 的 `PASS/FAIL` 始终按当前这一次请求判断，
@@ -171,4 +173,5 @@ Global replans         0
 - 主仓改动位于 `feature/wheel-local-2s-rviz-timing`，通过资格检查后快进合入 `integration`。
 - 外部 RViz 改动位于其独立同名功能分支，通过组合构建后合入外部 `main`。
 - 不把外部源码、地图 artifact、build/install/log 或性能报告提交到主仓。
-- 本轮不修改平台能力数值、飞跃状态机、足式算法或 ROS schema。
+- 本轮不修改平台能力数值、足式搜索算法或 ROS schema。飞跃执行状态机和地面测试执行器的修复
+  按配套设计实施，不改变核心规划能力数值。
