@@ -256,6 +256,63 @@ SHA-256 位于：
 完整外部 RViz 目标窗同步、超过旧 12 m 半径的 Action 结果和最终 Release 资格证据将在本节
 后续以追加方式记录，不覆盖前述历史基线。
 
+### 8.1 目标中心落区证据实现与最终资格结果
+
+本轮主仓资格提交为 `1fb2920e9ce8b83b02e824d70c3d3fb811ade83c`，外部
+`isaac_ros_action_regression` 资格提交为
+`0861e54383c6e9c7a3f52d88f1c5a5533cbfaefe`。飞跃式接收 RViz 目标后，外部控制器先通过
+标准原子参数服务把 24×24 m、0.20 m/cell 的 L0 局部图中心移动到目标，再等待同代全局图、
+局部图和动态输入就绪，最后才发送 Action。桥接器在就绪响应前等待可靠全局图与局部图的 DDS
+确认；确认超时会保持未就绪并重试，不能把旧落区图提交给规划器。轮式和足式局部图的
+平台中心语义未改。
+
+固定合成地图为
+`/home/kai/CodexDownloads/lunar_navigation/ros_random_maps/synthetic-ad1d8d34d49c1056/map_manifest.json`。
+飞跃式从 `(-18.0, 16.0)` 规划至 `(0.0, 12.0)`，直线距离约 `18.4391 m`；测试锁定目标
+`0.65 m` 支撑圆相交的 52 个栅格全部有效、无障碍且非 `forbidden`，并验证目标局部图中心
+为 `(0.0, 12.0)`、尺寸为 24×24 m。Action 返回
+`HOPPER_SINGLE_HOP_AVAILABLE`，RViz 证据同时包含 `hopper_flight_tube`、
+`hopper_landing_region_boundary` 和 `hopper_landing_region_filled`。这证明旧 12 m 起点中心
+窗口不再限制目标选择；局部窗只提供落区 L0 证据，不是飞跃距离或搜索窗口。
+
+有限高度越障从最终 Release 二进制单独复核：
+
+- `SearchesAnAlternateFeasibleTimeWhenMinimumArcIsBlocked`：最低能量弧被 6 m 障碍挡住后，搜索
+  更高的燃料可行抛物线并通过；
+- `RejectsObstacleThatIntersectsEveryFuelFeasibleFlightTube`：1000 m 障碍与所有燃料可行飞行管
+  相交，返回 `HOPPER_ALL_FLIGHT_TUBES_BLOCKED`；
+- 两项共 `2 passed`。因此普通有限高度障碍允许从上方飞越，落区仍必须安全，`forbidden`
+  仍是绝对禁入层。
+
+新鲜 Release 资格产物位于：
+
+```text
+/home/kai/CodexDownloads/lunar_navigation/hopper_target_landing_evidence/qualification
+```
+
+结果如下：
+
+- 主仓 6 个 ROS 包 Release 构建通过；CTest：32 tests，0 errors，0 failures，0 skipped；
+- 主仓仓库边界检查通过；边界 pytest：13 passed；中文文档 UTF-8 读取与 `git diff --check`
+  通过；
+- 外部仓源码 pytest：591 passed，12 skipped；跳过项为显式历史快照或进程/图形环境门控；
+- 外部 merged Release run id：`20260807T044817001592Z`；6 个包构建通过；CTest：
+  526 tests，0 errors，0 failures，2 skipped；混合安装树排除仅适用于隔离 include 根的
+  `lunar_planner_core_public_header_boundary`，而同一主仓提交已在独立主仓 Release CTest 中
+  执行并通过该检查；
+- 最终 merged install 三平台进程回归：1 passed in 124.51 s；此前针对桥接器可靠确认的单元
+  测试 8 passed，交互桥/会话/控制器聚焦测试 82 passed。
+
+外部构建前检查、构建记录和最终安装树分别位于：
+
+```text
+/home/kai/CodexDownloads/lunar_navigation/hopper_target_landing_evidence/qualification/external/artifacts/20260807T044817001592Z
+/home/kai/CodexDownloads/lunar_navigation/hopper_target_landing_evidence/qualification/external/install/20260807T044817001592Z
+```
+
+本轮没有连接 Isaac Sim，没有修改三平台能力数值、消息 schema、地图 Topic、燃料基准或单跳
+授权数，也不构成图形窗口人工验收。
+
 ## 9. 未验证边界
 
 | 项目 | 状态 | 说明 |
