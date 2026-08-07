@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <span>
 #include <stop_token>
 #include <string>
 
@@ -21,6 +22,7 @@ enum class WheelLatticeStatus {
 struct WheelLatticeSearchResult final {
   WheelLatticeStatus status{WheelLatticeStatus::kInvalidRequest};
   std::optional<WheelDiscretePlan> plan;
+  std::optional<std::size_t> selected_goal_index;
   std::string reason_code;
 
   [[nodiscard]] bool ok() const noexcept {
@@ -37,6 +39,17 @@ struct WheelLatticeSearchResult final {
 [[nodiscard]] WheelLatticeSearchResult SearchWheelLattice(
     const WheeledState& current_state,
     const GoalRegion& goal,
+    const shared::SafeProjection& projection,
+    const WheeledCapability& capability,
+    const PlannerConfig& config,
+    std::stop_token stop_token);
+
+// Searches the farthest ranked goal once. If that goal is unreachable after
+// the finite lattice is exhausted, the already explored tree is reused to
+// connect the first reachable nearer goal. Goals must be ordered far-to-near.
+[[nodiscard]] WheelLatticeSearchResult SearchWheelLatticeRanked(
+    const WheeledState& current_state,
+    std::span<const GoalRegion> ranked_goals,
     const shared::SafeProjection& projection,
     const WheeledCapability& capability,
     const PlannerConfig& config,

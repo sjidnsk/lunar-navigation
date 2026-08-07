@@ -92,13 +92,24 @@ FailureDirective(const PlanningOutcome outcome) noexcept {
   return ExecutionDirective::kNoSafeReference;
 }
 
+struct GroundAccumulation final {
+  std::chrono::nanoseconds global_elapsed{};
+  std::chrono::nanoseconds local_elapsed{};
+  std::uint64_t local_expanded_states{};
+  std::size_t local_frontier_attempts{};
+  std::size_t local_search_runs{};
+  std::size_t global_replans{};
+  std::size_t global_projection_cache_hits{};
+  std::size_t local_projection_cache_hits{};
+};
+
 [[nodiscard]] HierarchicalPlannerMetrics GroundMetrics(
     const PlannerInput &input,
     const hierarchical::GlobalRoutePlanResult &global,
+    const GroundAccumulation &accumulated,
     const hierarchical::LocalFrontierResult *frontiers,
-    const std::uint64_t local_expanded_states, const std::size_t local_attempts,
+    const std::uint64_t, const std::size_t,
     const double frontier_distance_m,
-    const std::chrono::nanoseconds local_elapsed,
     const bool route_reused = false, const std::size_t route_cursor = 0U,
     const std::uint64_t rolling_request_count = 1U) {
   const hierarchical::GlobalRoute *route =
@@ -107,10 +118,10 @@ FailureDirective(const PlanningOutcome outcome) noexcept {
       .global_level = global.global_level.value_or(0U),
       .global_resolution_m = input.world.global_map.resolution_m,
       .global_cells = input.world.global_map.CellCount(),
-      .global_elapsed = global.elapsed,
-      .local_elapsed = local_elapsed,
+      .global_elapsed = accumulated.global_elapsed,
+      .local_elapsed = accumulated.local_elapsed,
       .global_expanded_states = route == nullptr ? 0U : route->expanded_states,
-      .local_expanded_states = local_expanded_states,
+      .local_expanded_states = accumulated.local_expanded_states,
       .global_open_peak = route == nullptr ? 0U : route->open_peak,
       .estimated_work_memory_bytes =
           route == nullptr ? 0U : route->estimated_work_memory_bytes,
@@ -118,7 +129,13 @@ FailureDirective(const PlanningOutcome outcome) noexcept {
       .simplified_route_points =
           route == nullptr ? 0U : route->simplified_cells.size(),
       .local_frontier_distance_m = frontier_distance_m,
-      .local_attempts = local_attempts,
+      .local_attempts = accumulated.local_frontier_attempts,
+      .local_search_runs = accumulated.local_search_runs,
+      .global_replans = accumulated.global_replans,
+      .global_projection_cache_hits =
+          accumulated.global_projection_cache_hits,
+      .local_projection_cache_hits =
+          accumulated.local_projection_cache_hits,
       .corridor_width_m =
           frontiers == nullptr ? 0.0 : 2.0 * frontiers->corridor_half_width_m,
       .route_reused = route_reused,
@@ -150,6 +167,7 @@ FailureDirective(const PlanningOutcome outcome) noexcept {
 } // namespace
 
 struct Planner::Impl final {
+  shared::ProjectionCache global_projection_cache;
   hopper::HopperPlanner hopper_planner;
   legged::LeggedPlanner legged_planner;
   wheel::WheelPlanner wheel_planner;
@@ -164,6 +182,12 @@ Planner::Planner(Planner &&) noexcept = default;
 Planner &Planner::operator=(Planner &&) noexcept = default;
 
 PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
+  return Plan(input, {});
+}
+
+PlannerOutput Planner::Plan(
+    const PlannerInput &input,
+    const ProvisionalRouteObserver &provisional_route_observer) noexcept {
   const auto started = std::chrono::steady_clock::now();
   try {
     if (impl_ == nullptr) {
@@ -227,6 +251,7 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
     bool route_reused = false;
     std::size_t route_cursor = 0U;
     std::uint64_t rolling_request_count = 1U;
+    GroundAccumulation accumulated;
     hierarchical::GlobalRoutePlanResult global;
     if (input.continuation != nullptr) {
       hierarchical::GroundRouteReuseResult reused =
@@ -246,7 +271,11 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
       }
     }
     if (!route_reused) {
-      global = hierarchical::PlanGroundGlobalRoute(input);
+      global = hierarchical::PlanGroundGlobalRoute(
+          input, {}, &impl_->global_projection_cache);
+      accumulated.global_elapsed += global.elapsed;
+      accumulated.global_projection_cache_hits +=
+          global.projection_cache_hit ? 1U : 0U;
     }
     std::vector<shared::GridCell> excluded_conditional_cells;
     std::vector<std::string> conditional_retry_warnings;
@@ -254,12 +283,32 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
       if (!global.ok()) {
         return Failure(global.outcome, FailureDirective(global.outcome),
                        global.reason_code, started, 0U, std::nullopt, {},
-                       GroundMetrics(input, global, nullptr, 0U, 0U, 0.0, {}));
+                       GroundMetrics(
+                           input, global, accumulated, nullptr, 0U, 0U, 0.0));
+      }
+      if (provisional_route_observer) {
+        try {
+          provisional_route_observer(ProvisionalGlobalRoute{
+              .request_id = input.request_id,
+              .route_id = route_reused && input.continuation != nullptr
+                  ? input.continuation->route_id()
+                  : GroundRouteId(platform, input.request_id),
+              .platform_type = platform,
+              .poses_map = global.route->poses_map,
+          });
+        } catch (...) {
+          // Visualization observers are non-authoritative and must never
+          // change a planning result.
+        }
       }
       hierarchical::LocalFrontierResult frontiers =
           hierarchical::BuildLocalFrontiers(input, *global.route);
       if (!frontiers.ok() && route_reused) {
-        global = hierarchical::PlanGroundGlobalRoute(input);
+        global = hierarchical::PlanGroundGlobalRoute(
+            input, {}, &impl_->global_projection_cache);
+        accumulated.global_elapsed += global.elapsed;
+        accumulated.global_projection_cache_hits +=
+            global.projection_cache_hit ? 1U : 0U;
         route_reused = false;
         route_cursor = 0U;
         rolling_request_count = 1U;
@@ -270,9 +319,10 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
       if (!global.ok()) {
         return Failure(global.outcome, FailureDirective(global.outcome),
                        global.reason_code, started, 0U, std::nullopt, {},
-                       GroundMetrics(input, global, nullptr, 0U, 0U, 0.0, {},
-                                     route_reused, route_cursor,
-                                     rolling_request_count));
+                       GroundMetrics(
+                           input, global, accumulated, nullptr, 0U, 0U, 0.0,
+                           route_reused, route_cursor,
+                           rolling_request_count));
       }
       if (!frontiers.ok()) {
         PlanningOutcome outcome = PlanningOutcome::kInvalidRequest;
@@ -289,25 +339,51 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
         return Failure(
             outcome, FailureDirective(outcome), frontiers.reason_code, started,
             global.route->expanded_states, global.route->cost, {},
-            GroundMetrics(input, global, &frontiers, 0U, 0U, 0.0, {}));
+            GroundMetrics(
+                input, global, accumulated, &frontiers, 0U, 0U, 0.0));
       }
 
-      const auto local_started = std::chrono::steady_clock::now();
       std::uint64_t local_expanded = 0U;
       std::optional<std::string> specific_local_failure;
       std::vector<std::string> local_failure_reasons;
       bool retry_global_route = false;
-      for (std::size_t attempt = 0U; attempt < frontiers.problems.size();
-           ++attempt) {
-        PlannerOutput local =
-            platform == PlatformType::kWheeled
-                ? impl_->wheel_planner.Plan(frontiers.problems[attempt])
-                : impl_->legged_planner.Plan(frontiers.problems[attempt]);
-        local_expanded += local.diagnostics.expanded_states;
-        const std::size_t attempts = attempt + 1U;
-        const auto local_elapsed =
+      std::optional<wheel::WheelRankedPlanResult> ranked_wheel;
+      if (platform == PlatformType::kWheeled) {
+        const auto search_started = std::chrono::steady_clock::now();
+        ranked_wheel = impl_->wheel_planner.PlanRanked(frontiers.problems);
+        accumulated.local_elapsed +=
             std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - local_started);
+                std::chrono::steady_clock::now() - search_started);
+        ++accumulated.local_search_runs;
+        accumulated.local_projection_cache_hits +=
+            ranked_wheel->projection_cache_hit ? 1U : 0U;
+      }
+      const std::size_t local_iterations =
+          platform == PlatformType::kWheeled
+              ? 1U
+              : frontiers.problems.size();
+      for (std::size_t iteration = 0U; iteration < local_iterations;
+           ++iteration) {
+        std::size_t attempt = iteration;
+        PlannerOutput local;
+        if (platform == PlatformType::kWheeled) {
+          attempt = ranked_wheel->selected_problem_index.value_or(
+              frontiers.problems.size() - 1U);
+          local = std::move(ranked_wheel->output);
+        } else {
+          const auto search_started = std::chrono::steady_clock::now();
+          local = impl_->legged_planner.Plan(frontiers.problems[attempt]);
+          accumulated.local_elapsed +=
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::steady_clock::now() - search_started);
+          ++accumulated.local_search_runs;
+        }
+        local_expanded += local.diagnostics.expanded_states;
+        accumulated.local_expanded_states +=
+            local.diagnostics.expanded_states;
+        const std::size_t attempts = attempt + 1U;
+        accumulated.local_frontier_attempts +=
+            platform == PlatformType::kWheeled ? attempts : 1U;
         if (local.outcome == PlanningOutcome::kNewReferenceAvailable ||
             local.outcome == PlanningOutcome::kSafeFrontierReferenceAvailable) {
           if (attempt > 0U && AppendNewConditionalCorridorCells(
@@ -320,7 +396,12 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
                   "GLOBAL_CONDITIONAL_CORRIDOR_RETRY");
             }
             global = hierarchical::PlanGroundGlobalRoute(
-                input, excluded_conditional_cells);
+                input, excluded_conditional_cells,
+                &impl_->global_projection_cache);
+            accumulated.global_elapsed += global.elapsed;
+            accumulated.global_projection_cache_hits +=
+                global.projection_cache_hit ? 1U : 0U;
+            ++accumulated.global_replans;
             retry_global_route = true;
             break;
           }
@@ -344,9 +425,9 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
                 ExecutionDirective::kNoSafeReference, composed.reason_code,
                 started, global.route->expanded_states + local_expanded,
                 global.route->cost, std::move(warnings),
-                GroundMetrics(input, global, &frontiers, local_expanded,
-                              attempts, frontiers.frontier_distances_m[attempt],
-                              local_elapsed));
+                GroundMetrics(
+                    input, global, accumulated, &frontiers, local_expanded,
+                    attempts, frontiers.frontier_distances_m[attempt]));
           }
           const std::string reference_plan_id = composed.reference->plan_id;
           const std::string route_id =
@@ -374,9 +455,10 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
                       .best_cost = global.route->cost,
                       .warning_codes = std::move(warnings),
                       .hierarchical = GroundMetrics(
-                          input, global, &frontiers, local_expanded, attempts,
-                          frontiers.frontier_distances_m[attempt],
-                          local_elapsed, route_reused, route_cursor,
+                          input, global, accumulated, &frontiers,
+                          local_expanded, attempts,
+                          frontiers.frontier_distances_m[attempt], route_reused,
+                          route_cursor,
                           rolling_request_count),
                       .local_trajectory = std::move(local_trajectory),
                   },
@@ -392,9 +474,9 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
               local.outcome, local.directive, local.reason_code, started,
               global.route->expanded_states + local_expanded,
               global.route->cost, local.diagnostics.warning_codes,
-              GroundMetrics(input, global, &frontiers, local_expanded, attempts,
-                            frontiers.frontier_distances_m[attempt],
-                            local_elapsed));
+              GroundMetrics(
+                  input, global, accumulated, &frontiers, local_expanded,
+                  attempts, frontiers.frontier_distances_m[attempt]));
         }
         if (!local.reason_code.empty() &&
             std::find(local_failure_reasons.begin(),
@@ -412,9 +494,6 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
       if (retry_global_route) {
         continue;
       }
-      const auto local_elapsed =
-          std::chrono::duration_cast<std::chrono::nanoseconds>(
-              std::chrono::steady_clock::now() - local_started);
       if (AppendNewConditionalCorridorCells(frontiers,
                                             excluded_conditional_cells)) {
         route_reused = false;
@@ -425,7 +504,12 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
               "GLOBAL_CONDITIONAL_CORRIDOR_RETRY");
         }
         global = hierarchical::PlanGroundGlobalRoute(
-            input, excluded_conditional_cells);
+            input, excluded_conditional_cells,
+            &impl_->global_projection_cache);
+        accumulated.global_elapsed += global.elapsed;
+        accumulated.global_projection_cache_hits +=
+            global.projection_cache_hit ? 1U : 0U;
+        ++accumulated.global_replans;
         continue;
       }
       local_failure_reasons.insert(local_failure_reasons.end(),
@@ -437,9 +521,10 @@ PlannerOutput Planner::Plan(const PlannerInput &input) noexcept {
           specific_local_failure.value_or("LOCAL_SEGMENT_INFEASIBLE"), started,
           global.route->expanded_states + local_expanded, global.route->cost,
           std::move(local_failure_reasons),
-          GroundMetrics(input, global, &frontiers, local_expanded,
-                        frontiers.problems.size(),
-                        frontiers.frontier_distances_m.back(), local_elapsed));
+          GroundMetrics(
+              input, global, accumulated, &frontiers, local_expanded,
+              frontiers.problems.size(),
+              frontiers.frontier_distances_m.back()));
     }
   } catch (const std::bad_alloc &) {
     return Failure(PlanningOutcome::kResourceExhausted,

@@ -8,6 +8,7 @@
 #include <limits>
 #include <optional>
 #include <ranges>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -17,6 +18,7 @@
 
 #include "shared/convex_corridor.hpp"
 #include "shared/map_snapshot.hpp"
+#include "shared/projection_cache.hpp"
 #include "shared/safe_projection.hpp"
 #include "wheel/wheel_lattice.hpp"
 #include "wheel/wheel_spline_optimizer.hpp"
@@ -181,14 +183,26 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_wheel";
 
 }  // namespace
 
-PlannerOutput WheelPlanner::Plan(
-    const hierarchical::LocalPlanningProblem& problem) const {
+namespace {
+
+[[nodiscard]] PlannerOutput PlanRankedOutput(
+    const std::span<const hierarchical::LocalPlanningProblem> problems,
+    std::optional<std::size_t>& selected_problem_index,
+    bool& projection_cache_hit,
+    shared::ProjectionCache& projection_cache) {
   const auto started = std::chrono::steady_clock::now();
-  if (problem.stop_token.stop_requested()) {
+  if (problems.empty()) {
+    return Failure(
+        PlanningOutcome::kInvalidRequest,
+        ExecutionDirective::kNoSafeReference,
+        "WHEEL_RANKED_PROBLEMS_EMPTY", started);
+  }
+  const hierarchical::LocalPlanningProblem& common = problems.front();
+  if (common.stop_token.stop_requested()) {
     return Canceled(started);
   }
-  const auto* current_state = std::get_if<WheeledState>(&problem.current_state);
-  const auto* capability = std::get_if<WheeledCapability>(&problem.capability);
+  const auto* current_state = std::get_if<WheeledState>(&common.current_state);
+  const auto* capability = std::get_if<WheeledCapability>(&common.capability);
   if (current_state == nullptr || capability == nullptr) {
     return Failure(
         PlanningOutcome::kInvalidRequest,
@@ -196,18 +210,14 @@ PlannerOutput WheelPlanner::Plan(
         "WHEEL_PLATFORM_TYPE_MISMATCH", started);
   }
 
-  const shared::MapSnapshotBuildResult map =
-      shared::MapSnapshot::Create(problem.local_map_view);
-  if (!map.ok()) {
-    return Failure(
-        PlanningOutcome::kInvalidRequest,
-        ExecutionDirective::kNoSafeReference,
-        map.reason_code, started);
-  }
-  const shared::SafeProjectionBuildResult projection =
-      shared::BuildSafeProjection(
-          map.snapshot, problem.capability, problem.config.map_safety,
-          problem.stop_token);
+  const shared::ProjectionContextResult projection =
+      projection_cache.GetOrBuild(
+          shared::MakeProjectionCacheKey(
+              common.local_map_generation, common.platform_id,
+              common.capability_version, common.local_map_view,
+              common.capability, common.config.map_safety),
+          common.local_map_view, common.capability, common.config.map_safety,
+          common.stop_token);
   if (!projection.ok()) {
     if (projection.reason_code == "REQUEST_CANCELED") {
       return Canceled(started);
@@ -217,16 +227,27 @@ PlannerOutput WheelPlanner::Plan(
         ExecutionDirective::kNoSafeReference,
         projection.reason_code, started);
   }
-  if (!HasFeasibleGoalPosition(problem.goal_odom, *projection.projection)) {
+  projection_cache_hit = projection.cache_hit;
+  const shared::SafeProjection& safe_projection =
+      *projection.context->projection;
+  std::vector<GoalRegion> ranked_goals;
+  ranked_goals.reserve(problems.size());
+  bool has_feasible_goal = false;
+  for (const hierarchical::LocalPlanningProblem& problem : problems) {
+    ranked_goals.push_back(problem.goal_odom);
+    has_feasible_goal = has_feasible_goal ||
+        HasFeasibleGoalPosition(problem.goal_odom, safe_projection);
+  }
+  if (!has_feasible_goal) {
     return Failure(
         PlanningOutcome::kGoalInfeasible,
         ExecutionDirective::kHoldPosition,
         "WHEEL_GOAL_INFEASIBLE", started);
   }
 
-  WheelLatticeSearchResult search = SearchWheelLattice(
-      *current_state, problem.goal_odom, *projection.projection, *capability,
-      problem.config, problem.stop_token);
+  WheelLatticeSearchResult search = SearchWheelLatticeRanked(
+      *current_state, ranked_goals, safe_projection, *capability,
+      common.config, common.stop_token);
   if (!search.ok()) {
     const std::size_t expanded_states = search.plan.has_value()
         ? search.plan->expanded_states
@@ -266,6 +287,17 @@ PlannerOutput WheelPlanner::Plan(
         ExecutionDirective::kHoldPosition,
         "WHEEL_SEARCH_RESULT_INVALID", started);
   }
+  if (!search.selected_goal_index.has_value() ||
+      *search.selected_goal_index >= problems.size()) {
+    return Failure(
+        PlanningOutcome::kNumericalFailure,
+        ExecutionDirective::kHoldPosition,
+        "WHEEL_SELECTED_FRONTIER_INVALID", started,
+        search.plan->expanded_states);
+  }
+  selected_problem_index = search.selected_goal_index;
+  const hierarchical::LocalPlanningProblem& problem =
+      problems[*selected_problem_index];
   const WheelDiscretePlan& discrete = *search.plan;
 
   std::vector<std::string> warnings;
@@ -279,7 +311,7 @@ PlannerOutput WheelPlanner::Plan(
     trajectory = StationaryTrajectory(*current_state);
   } else {
     const shared::CorridorResult corridor = shared::BuildConvexCorridor(
-        *projection.projection, Centerline(discrete.transitions),
+        safe_projection, Centerline(discrete.transitions),
         shared::CorridorTightening{
             .footprint_support_radius_m =
                 FootprintSupportRadius(*capability),
@@ -311,7 +343,7 @@ PlannerOutput WheelPlanner::Plan(
       used_discrete_fallback = true;
     }
     std::vector<WheelTransition> selected = std::move(optimized.transitions);
-    WheelSweepValidator validator{*projection.projection, *capability};
+    WheelSweepValidator validator{safe_projection, *capability};
     const bool optimized_valid = std::ranges::all_of(
         selected, [&](const WheelTransition& transition) {
           return validator.Validate(transition, problem.stop_token).valid;
@@ -422,6 +454,27 @@ PlannerOutput WheelPlanner::Plan(
           .local_trajectory = local_diagnostics,
       },
   };
+}
+
+}  // namespace
+
+WheelRankedPlanResult WheelPlanner::PlanRanked(
+    const std::span<const hierarchical::LocalPlanningProblem> problems) const {
+  std::optional<std::size_t> selected_problem_index;
+  bool projection_cache_hit = false;
+  PlannerOutput output = PlanRankedOutput(
+      problems, selected_problem_index, projection_cache_hit,
+      projection_cache_);
+  return WheelRankedPlanResult{
+      .output = std::move(output),
+      .selected_problem_index = selected_problem_index,
+      .projection_cache_hit = projection_cache_hit,
+  };
+}
+
+PlannerOutput WheelPlanner::Plan(
+    const hierarchical::LocalPlanningProblem& problem) const {
+  return PlanRanked(std::span{&problem, std::size_t{1U}}).output;
 }
 
 }  // namespace lunar::planning::wheel

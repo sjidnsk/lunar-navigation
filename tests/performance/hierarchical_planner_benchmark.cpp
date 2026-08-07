@@ -43,6 +43,7 @@ constexpr double kBaseResolutionM = 0.2;
 
 enum class Scenario : std::uint8_t {
   kWheel50,
+  kWheelLocalFrontierStress,
   kLegged50,
   kWheelOneKilometer,
   kLeggedOneKilometer,
@@ -63,10 +64,21 @@ struct CaseDefinition final {
   double release_threshold_s{};
 };
 
-constexpr std::array<CaseDefinition, 7U> kCases{
+constexpr std::array<CaseDefinition, 8U> kCases{
     CaseDefinition{
         .id = "wheel_50m_l0",
         .scenario = Scenario::kWheel50,
+        .platform = PlatformType::kWheeled,
+        .capability_version = "wheeled-engineering-baseline-v1",
+        .global_width = 250U,
+        .global_height = 250U,
+        .global_resolution_m = 0.2,
+        .global_level = 0U,
+        .release_threshold_s = 2.0,
+    },
+    CaseDefinition{
+        .id = "wheel_local_frontier_stress",
+        .scenario = Scenario::kWheelLocalFrontierStress,
         .platform = PlatformType::kWheeled,
         .capability_version = "wheeled-engineering-baseline-v1",
         .global_width = 250U,
@@ -393,6 +405,26 @@ void AddGroundObstacleCourse(GridMap& map) {
   }
 }
 
+void AddWheelLocalStressField(GridMap& map) {
+  const std::size_t center_y = map.height / 2U;
+  for (std::size_t y = 2U; y + 2U < map.height; ++y) {
+    for (std::size_t x = 2U; x + 2U < map.width; ++x) {
+      const std::size_t corridor_distance =
+          y > center_y ? y - center_y : center_y - y;
+      if (corridor_distance <= 8U) {
+        continue;
+      }
+      const std::uint64_t mixed =
+          (static_cast<std::uint64_t>(x) * 73'856'093ULL) ^
+          (static_cast<std::uint64_t>(y) * 19'349'663ULL) ^
+          0x9e3779b97f4a7c15ULL;
+      if (mixed % 100U < 18U) {
+        SetObstacle(map, x, y, 1.0F);
+      }
+    }
+  }
+}
+
 [[nodiscard]] PlannerInput MakeGroundInput(const CaseDefinition& definition) {
   const bool wheeled = definition.platform == PlatformType::kWheeled;
   PlannerInput input = wheeled ? test::MakeValidWheelInput()
@@ -406,7 +438,8 @@ void AddGroundObstacleCourse(GridMap& map) {
   input.world.global_map = test::MakeFlatMap(
       "map", definition.global_width, definition.global_height,
       definition.global_resolution_m);
-  constexpr std::size_t local_axis = 100U;
+  const std::size_t local_axis =
+      definition.scenario == Scenario::kWheelLocalFrontierStress ? 56U : 100U;
   input.world.local_map = test::MakeFlatMap(
       "odom", local_axis, local_axis, kBaseResolutionM);
   input.world.map_from_odom = RigidTransform{
@@ -458,6 +491,9 @@ void AddGroundObstacleCourse(GridMap& map) {
   }
   if (!large) {
     AddGroundObstacleCourse(input.world.global_map);
+  }
+  if (definition.scenario == Scenario::kWheelLocalFrontierStress) {
+    AddWheelLocalStressField(input.world.local_map);
   }
   return input;
 }

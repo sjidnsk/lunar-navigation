@@ -23,6 +23,14 @@ CASES = {
         "outcome": "NEW_REFERENCE_AVAILABLE",
         "reason": "WHEEL_PLAN_AVAILABLE",
     },
+    "wheel_local_frontier_stress": {
+        "platform": "WHEELED",
+        "capability_version": "wheeled-engineering-baseline-v1",
+        "map": (50.0, 50.0, 0.2, 0, 250 * 250),
+        "threshold_s": 2.0,
+        "outcome": "NEW_REFERENCE_AVAILABLE",
+        "reason": "WHEEL_PLAN_AVAILABLE",
+    },
     "legged_50m_l0": {
         "platform": "LEGGED",
         "capability_version": "quad48-approved-baseline-v1",

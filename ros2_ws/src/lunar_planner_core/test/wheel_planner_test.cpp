@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstddef>
 #include <numbers>
+#include <vector>
 #include <variant>
 
 #include <gtest/gtest.h>
@@ -14,6 +15,7 @@
 #include "shared/safe_projection.hpp"
 #include "test_fixtures.hpp"
 #include "wheel/wheel_lattice.hpp"
+#include "wheel/wheel_planner.hpp"
 #include "wheel/wheel_spline_optimizer.hpp"
 #include "wheel/wheel_timing.hpp"
 
@@ -104,6 +106,162 @@ TEST(WheelPlanner, LazySearchPreservesContinuousStartAndExactPointGoal) {
             std::get<WheeledState>(input.current_state).pose.position_m);
   EXPECT_EQ(search.plan->transitions.back().target_pose.position_m,
             std::get<PointGoal>(input.goal_map.target).position_m);
+}
+
+TEST(WheelPlanner, RankedSearchReusesExhaustedTreeForNearerFrontier) {
+  const auto input = test::MakeValidWheelInput();
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  const std::vector<GoalRegion> ranked_goals{
+      GoalRegion{
+          .goal_id = "outside-local-window",
+          .target = PointGoal{
+              .position_m = {1000.0, 1000.0, 0.0}, .tolerance_m = 0.0},
+      },
+      input.goal_map,
+  };
+
+  const auto search = wheel::SearchWheelLatticeRanked(
+      std::get<WheeledState>(input.current_state), ranked_goals,
+      *projection.projection, std::get<WheeledCapability>(input.capability),
+      input.config, {});
+
+  ASSERT_TRUE(search.ok()) << search.reason_code;
+  ASSERT_TRUE(search.selected_goal_index.has_value());
+  EXPECT_EQ(*search.selected_goal_index, 1U);
+  ASSERT_TRUE(search.plan.has_value());
+  ASSERT_FALSE(search.plan->transitions.empty());
+  EXPECT_EQ(search.plan->transitions.back().target_pose.position_m,
+            std::get<PointGoal>(input.goal_map.target).position_m);
+}
+
+TEST(WheelPlanner, RankedPlannerBuildsProjectionOnceAndReportsChosenProblem) {
+  const auto input = test::MakeValidWheelInput();
+  std::vector<hierarchical::LocalPlanningProblem> problems{
+      hierarchical::LocalPlanningProblem{
+          .request_id = "far",
+          .state_time = input.state_time,
+          .current_state = input.current_state,
+          .goal_odom = GoalRegion{
+              .goal_id = "outside-local-window",
+              .target = PointGoal{
+                  .position_m = {1000.0, 1000.0, 0.0}, .tolerance_m = 0.0},
+          },
+          .local_map_view = input.world.local_map,
+          .capability = input.capability,
+          .config = input.config,
+      },
+      hierarchical::LocalPlanningProblem{
+          .request_id = "near",
+          .state_time = input.state_time,
+          .current_state = input.current_state,
+          .goal_odom = input.goal_map,
+          .local_map_view = input.world.local_map,
+          .capability = input.capability,
+          .config = input.config,
+      },
+  };
+
+  const wheel::WheelRankedPlanResult result =
+      wheel::WheelPlanner{}.PlanRanked(problems);
+
+  ASSERT_EQ(result.output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << result.output.reason_code;
+  ASSERT_TRUE(result.selected_problem_index.has_value());
+  EXPECT_EQ(*result.selected_problem_index, 1U);
+  ASSERT_TRUE(result.output.reference.has_value());
+  EXPECT_EQ(result.output.reference->plan_id, "wheel/near");
+}
+
+TEST(WheelPlanner, RankedIndexedSearchIsDeterministicAcrossTwentyRuns) {
+  const auto input = test::MakeValidWheelInput();
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  const std::vector<GoalRegion> ranked_goals{
+      GoalRegion{
+          .goal_id = "outside-local-window",
+          .target = PointGoal{
+              .position_m = {1000.0, 1000.0, 0.0}, .tolerance_m = 0.0},
+      },
+      input.goal_map,
+  };
+  std::optional<wheel::WheelDiscretePlan> expected_plan;
+  std::optional<std::size_t> expected_goal;
+
+  for (std::size_t run = 0U; run < 20U; ++run) {
+    const auto search = wheel::SearchWheelLatticeRanked(
+        std::get<WheeledState>(input.current_state), ranked_goals,
+        *projection.projection, std::get<WheeledCapability>(input.capability),
+        input.config, {});
+    ASSERT_TRUE(search.ok()) << "run=" << run << ' ' << search.reason_code;
+    if (run == 0U) {
+      expected_plan = search.plan;
+      expected_goal = search.selected_goal_index;
+    } else {
+      EXPECT_EQ(search.selected_goal_index, expected_goal);
+      ASSERT_TRUE(search.plan.has_value());
+      ASSERT_TRUE(expected_plan.has_value());
+      EXPECT_EQ(search.plan->transitions, expected_plan->transitions);
+      EXPECT_DOUBLE_EQ(search.plan->cost, expected_plan->cost);
+      EXPECT_EQ(search.plan->expanded_states, expected_plan->expanded_states);
+    }
+  }
+}
+
+TEST(WheelPlanner, ReusesLocalProjectionOnlyForAnIdenticalContentKey) {
+  const auto input = test::MakeValidWheelInput();
+  hierarchical::LocalPlanningProblem problem{
+      .request_id = "cached-local",
+      .platform_id = input.platform_id,
+      .capability_version = input.capability_version,
+      .local_map_generation = input.local_map_generation,
+      .state_time = input.state_time,
+      .current_state = input.current_state,
+      .goal_odom = input.goal_map,
+      .local_map_view = input.world.local_map,
+      .capability = input.capability,
+      .config = input.config,
+  };
+  wheel::WheelPlanner planner;
+
+  const auto cold = planner.PlanRanked(std::span{&problem, 1U});
+  const auto warm = planner.PlanRanked(std::span{&problem, 1U});
+  auto changed_generation = problem;
+  ++changed_generation.local_map_generation;
+  const auto generation_miss =
+      planner.PlanRanked(std::span{&changed_generation, 1U});
+  auto changed_capability = changed_generation;
+  std::get<WheeledCapability>(changed_capability.capability).wheelbase_m += 0.01;
+  const auto capability_miss =
+      planner.PlanRanked(std::span{&changed_capability, 1U});
+  auto changed_safety = changed_capability;
+  changed_safety.config.map_safety.minimum_observation_quality -= 0.01;
+  const auto safety_miss =
+      planner.PlanRanked(std::span{&changed_safety, 1U});
+
+  ASSERT_TRUE(cold.output.reference.has_value()) << cold.output.reason_code;
+  ASSERT_TRUE(warm.output.reference.has_value()) << warm.output.reason_code;
+  EXPECT_FALSE(cold.projection_cache_hit);
+  EXPECT_TRUE(warm.projection_cache_hit);
+  EXPECT_FALSE(generation_miss.projection_cache_hit);
+  EXPECT_FALSE(capability_miss.projection_cache_hit);
+  EXPECT_FALSE(safety_miss.projection_cache_hit);
+  const auto& cold_trajectory = WheelTrajectory(cold.output);
+  const auto& warm_trajectory = WheelTrajectory(warm.output);
+  ASSERT_EQ(cold_trajectory.points.size(), warm_trajectory.points.size());
+  EXPECT_EQ(cold_trajectory.points.front().pose,
+            warm_trajectory.points.front().pose);
+  EXPECT_EQ(cold_trajectory.points.back().pose,
+            warm_trajectory.points.back().pose);
+  EXPECT_EQ(cold.output.diagnostics.best_cost,
+            warm.output.diagnostics.best_cost);
+  EXPECT_EQ(cold.output.reason_code, warm.output.reason_code);
 }
 
 TEST(WheelPlanner, PlansToExactOffCellGoalWithSmallExecutionTolerance) {

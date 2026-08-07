@@ -5,12 +5,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <map>
 #include <new>
 #include <numbers>
 #include <optional>
+#include <queue>
 #include <ranges>
-#include <set>
+#include <span>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -49,17 +49,39 @@ struct OpenEntry final {
   std::size_t sequence{};
 };
 
-struct OpenLess final {
+struct OpenGreater final {
   [[nodiscard]] bool operator()(
       const OpenEntry& lhs, const OpenEntry& rhs) const noexcept {
     return std::tie(
                lhs.estimated_total_cost, lhs.path_cost, lhs.key,
-               lhs.sequence, lhs.node_index) <
+               lhs.sequence, lhs.node_index) >
         std::tie(
                rhs.estimated_total_cost, rhs.path_cost, rhs.key,
                rhs.sequence, rhs.node_index);
   }
 };
+
+[[nodiscard]] std::optional<std::size_t> DenseStateIndex(
+    const WheelLatticeState& state, const std::size_t width,
+    const std::size_t height, const std::size_t yaw_bin_count) noexcept {
+  if (state.cell_x < 0 || state.cell_y < 0 || state.yaw_bin < 0 ||
+      static_cast<std::size_t>(state.cell_x) >= width ||
+      static_cast<std::size_t>(state.cell_y) >= height ||
+      static_cast<std::size_t>(state.yaw_bin) >= yaw_bin_count) {
+    return std::nullopt;
+  }
+  constexpr std::size_t kMotionModeCount = 3U;
+  const auto mode = static_cast<std::size_t>(state.motion_mode);
+  if (mode >= kMotionModeCount) {
+    return std::nullopt;
+  }
+  return (((static_cast<std::size_t>(state.cell_y) * width +
+            static_cast<std::size_t>(state.cell_x)) *
+               yaw_bin_count +
+           static_cast<std::size_t>(state.yaw_bin)) *
+              kMotionModeCount +
+          mode);
+}
 
 [[nodiscard]] WheelLatticeSearchResult Failure(
     const WheelLatticeStatus status, std::string reason_code,
@@ -595,21 +617,23 @@ bool GoalContainsPose(
           goal.yaw_tolerance_rad + kComparisonTolerance;
 }
 
-WheelLatticeSearchResult SearchWheelLattice(
-    const WheeledState& current_state, const GoalRegion& goal,
+WheelLatticeSearchResult SearchWheelLatticeRanked(
+    const WheeledState& current_state,
+    const std::span<const GoalRegion> ranked_goals,
     const shared::SafeProjection& projection,
     const WheeledCapability& capability, const PlannerConfig& config,
     const std::stop_token stop_token) try {
   if (stop_token.stop_requested()) {
     return Failure(WheelLatticeStatus::kCanceled, "REQUEST_CANCELED");
   }
-  if (projection.source_map() == nullptr ||
+  if (ranked_goals.empty() || projection.source_map() == nullptr ||
       !ValidateCapability(capability, config) ||
       !IsFinite(current_state.pose)) {
     return Failure(
         WheelLatticeStatus::kInvalidRequest,
         "WHEEL_LATTICE_REQUEST_INVALID");
   }
+  const GoalRegion& goal = ranked_goals.front();
   const auto current_yaw = YawFromQuaternion(current_state.pose.orientation);
   const auto current_cell = projection.source_map()->PositionToCell(Vec2{
       .x = current_state.pose.position_m.x,
@@ -630,6 +654,7 @@ WheelLatticeSearchResult SearchWheelLattice(
         .status = WheelLatticeStatus::kSolved,
         .plan = WheelDiscretePlan{
             .transitions = {}, .cost = 0.0, .expanded_states = 0U},
+        .selected_goal_index = 0U,
         .reason_code = {},
     };
   }
@@ -689,10 +714,41 @@ WheelLatticeSearchResult SearchWheelLattice(
       .open_sequence = 0U,
       .closed = false,
   });
-  std::map<WheelLatticeState, std::size_t> node_by_key;
-  node_by_key.emplace(start_key, 0U);
-  std::set<OpenEntry, OpenLess> open;
-  std::vector<std::optional<OpenEntry>> open_by_node(1U);
+  constexpr std::size_t kMotionModeCount = 3U;
+  const std::size_t width = projection.source_map()->width();
+  const std::size_t height = projection.source_map()->height();
+  if (height != 0U && width > std::numeric_limits<std::size_t>::max() / height) {
+    return Failure(
+        WheelLatticeStatus::kResourceExhausted,
+        "WHEEL_SEARCH_STATE_SPACE_OVERFLOW");
+  }
+  const std::size_t cell_count = width * height;
+  if (config.wheel.yaw_bin_count != 0U &&
+      cell_count > std::numeric_limits<std::size_t>::max() /
+                       config.wheel.yaw_bin_count) {
+    return Failure(
+        WheelLatticeStatus::kResourceExhausted,
+        "WHEEL_SEARCH_STATE_SPACE_OVERFLOW");
+  }
+  const std::size_t oriented_cell_count =
+      cell_count * config.wheel.yaw_bin_count;
+  if (oriented_cell_count >
+      std::numeric_limits<std::size_t>::max() / kMotionModeCount) {
+    return Failure(
+        WheelLatticeStatus::kResourceExhausted,
+        "WHEEL_SEARCH_STATE_SPACE_OVERFLOW");
+  }
+  std::vector<std::size_t> node_by_state(
+      oriented_cell_count * kMotionModeCount, kNoParent);
+  const auto start_state_index = DenseStateIndex(
+      start_key, width, height, config.wheel.yaw_bin_count);
+  if (!start_state_index.has_value()) {
+    return Failure(
+        WheelLatticeStatus::kInvalidRequest,
+        "WHEEL_START_STATE_INVALID");
+  }
+  node_by_state[*start_state_index] = 0U;
+  std::priority_queue<OpenEntry, std::vector<OpenEntry>, OpenGreater> open;
   const OpenEntry start_open{
       .estimated_total_cost = heuristic(true_start),
       .path_cost = 0.0,
@@ -700,8 +756,7 @@ WheelLatticeSearchResult SearchWheelLattice(
       .node_index = 0U,
       .sequence = 0U,
   };
-  open.insert(start_open);
-  open_by_node[0U] = start_open;
+  open.push(start_open);
   std::size_t next_sequence = 1U;
   std::size_t expanded_states = 0U;
   std::optional<double> best_goal_cost;
@@ -732,17 +787,17 @@ WheelLatticeSearchResult SearchWheelLattice(
           expanded_states);
     }
     if (best_goal_cost.has_value() &&
-        open.begin()->estimated_total_cost + kComparisonTolerance >=
+        open.top().estimated_total_cost + kComparisonTolerance >=
             *best_goal_cost) {
       break;
     }
-    const OpenEntry current_entry = *open.begin();
-    open.erase(open.begin());
-    open_by_node[current_entry.node_index].reset();
+    const OpenEntry current_entry = open.top();
+    open.pop();
     SearchNode& current = nodes[current_entry.node_index];
     if (current.closed ||
         std::abs(current.path_cost - current_entry.path_cost) >
-            kComparisonTolerance) {
+            kComparisonTolerance ||
+        current.open_sequence != current_entry.sequence) {
       continue;
     }
     current.closed = true;
@@ -810,25 +865,27 @@ WheelLatticeSearchResult SearchWheelLattice(
       }
       const double candidate_cost = current_snapshot.path_cost + edge_cost;
       std::size_t target_index{};
-      const auto found = node_by_key.find(target_key);
-      if (found == node_by_key.end()) {
+      const auto dense_target_index = DenseStateIndex(
+          target_key, width, height, config.wheel.yaw_bin_count);
+      if (!dense_target_index.has_value()) {
+        return Failure(
+            WheelLatticeStatus::kInvalidRequest,
+            "WHEEL_LATTICE_EDGE_STATE_INVALID", expanded_states);
+      }
+      const std::size_t found = node_by_state[*dense_target_index];
+      if (found == kNoParent) {
         target_index = nodes.size();
         nodes.push_back(SearchNode{
             .key = target_key,
             .pose = transition->target_pose,
         });
-        node_by_key.emplace(target_key, target_index);
-        open_by_node.emplace_back();
+        node_by_state[*dense_target_index] = target_index;
       } else {
-        target_index = found->second;
+        target_index = found;
       }
       SearchNode& target = nodes[target_index];
       if (candidate_cost + kComparisonTolerance >= target.path_cost) {
         continue;
-      }
-      if (open_by_node[target_index].has_value()) {
-        open.erase(*open_by_node[target_index]);
-        open_by_node[target_index].reset();
       }
       target.pose = transition->target_pose;
       target.path_cost = candidate_cost;
@@ -843,8 +900,45 @@ WheelLatticeSearchResult SearchWheelLattice(
           .node_index = target_index,
           .sequence = target.open_sequence,
       };
-      open.insert(entry);
-      open_by_node[target_index] = entry;
+      open.push(entry);
+    }
+  }
+
+  std::size_t selected_goal_index = 0U;
+  if (!best_goal_cost.has_value() && start_has_valid_edge) {
+    for (std::size_t goal_index = 1U;
+         goal_index < ranked_goals.size() && !best_goal_cost.has_value();
+         ++goal_index) {
+      const GoalRegion& fallback_goal = ranked_goals[goal_index];
+      for (std::size_t node_index = 0U; node_index < nodes.size();
+           ++node_index) {
+        if (stop_token.stop_requested()) {
+          return Failure(
+              WheelLatticeStatus::kCanceled, "REQUEST_CANCELED",
+              expanded_states);
+        }
+        const SearchNode& node = nodes[node_index];
+        if (!std::isfinite(node.path_cost)) {
+          continue;
+        }
+        if (std::holds_alternative<PlanarRegionGoal>(fallback_goal.target) &&
+            GoalContainsPose(fallback_goal, node.pose)) {
+          update_goal(node_index, std::nullopt, node.path_cost);
+          continue;
+        }
+        if (auto terminal = ExactGoalConnector(
+                node, fallback_goal, maximum_connector_length_m, projection,
+                capability, config, validator, stop_token);
+            terminal.has_value()) {
+          const double terminal_cost = EdgeCost(
+              *terminal, projection, capability);
+          update_goal(
+              node_index, std::move(terminal), node.path_cost + terminal_cost);
+        }
+      }
+      if (best_goal_cost.has_value()) {
+        selected_goal_index = goal_index;
+      }
     }
   }
 
@@ -869,12 +963,23 @@ WheelLatticeSearchResult SearchWheelLattice(
   return WheelLatticeSearchResult{
       .status = WheelLatticeStatus::kSolved,
       .plan = std::move(plan),
+      .selected_goal_index = selected_goal_index,
       .reason_code = {},
   };
 } catch (const std::bad_alloc&) {
   return Failure(
       WheelLatticeStatus::kResourceExhausted,
       "WHEEL_SEARCH_ALLOCATION_FAILURE");
+}
+
+WheelLatticeSearchResult SearchWheelLattice(
+    const WheeledState& current_state, const GoalRegion& goal,
+    const shared::SafeProjection& projection,
+    const WheeledCapability& capability, const PlannerConfig& config,
+    const std::stop_token stop_token) {
+  return SearchWheelLatticeRanked(
+      current_state, std::span<const GoalRegion>{&goal, 1U}, projection,
+      capability, config, stop_token);
 }
 
 }  // namespace lunar::planning::wheel

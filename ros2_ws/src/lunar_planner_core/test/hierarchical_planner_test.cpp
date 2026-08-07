@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <variant>
@@ -318,6 +320,12 @@ TEST(HierarchicalPlanner, ReroutesAfterAConditionalCorridorFailsLocalSweep) {
       << (output.diagnostics.warning_codes.empty()
               ? std::string{"none"}
               : output.diagnostics.warning_codes.front());
+  ASSERT_TRUE(output.diagnostics.hierarchical.has_value());
+  const auto &metrics = *output.diagnostics.hierarchical;
+  EXPECT_GE(metrics.global_replans, 1U);
+  EXPECT_GE(metrics.local_search_runs, 2U);
+  EXPECT_GE(metrics.global_elapsed, std::chrono::nanoseconds::zero());
+  EXPECT_GE(metrics.local_elapsed, std::chrono::nanoseconds::zero());
   EXPECT_NE(std::ranges::find(output.diagnostics.warning_codes,
                               "GLOBAL_CONDITIONAL_CORRIDOR_RETRY"),
             output.diagnostics.warning_codes.end());
@@ -345,6 +353,44 @@ TEST(HierarchicalPlanner, IsStatelessAcrossCancellationAndRepeatedRequests) {
             second.reference->preview.poses_map);
   EXPECT_EQ(first.reference->plan_id, second.reference->plan_id);
   EXPECT_EQ(first.diagnostics.best_cost, second.diagnostics.best_cost);
+}
+
+TEST(HierarchicalPlanner, ReportsGlobalAndWheelLocalProjectionCacheHits) {
+  Planner planner;
+  const PlannerInput input = DistantWheelInput();
+
+  const PlannerOutput cold = planner.Plan(input);
+  const PlannerOutput warm = planner.Plan(input);
+
+  ASSERT_TRUE(cold.reference.has_value()) << cold.reason_code;
+  ASSERT_TRUE(warm.reference.has_value()) << warm.reason_code;
+  ASSERT_TRUE(cold.diagnostics.hierarchical.has_value());
+  ASSERT_TRUE(warm.diagnostics.hierarchical.has_value());
+  EXPECT_EQ(cold.diagnostics.hierarchical->global_projection_cache_hits, 0U);
+  EXPECT_EQ(cold.diagnostics.hierarchical->local_projection_cache_hits, 0U);
+  EXPECT_EQ(warm.diagnostics.hierarchical->global_projection_cache_hits, 1U);
+  EXPECT_EQ(warm.diagnostics.hierarchical->local_projection_cache_hits, 1U);
+  EXPECT_EQ(cold.reference->preview.poses_map,
+            warm.reference->preview.poses_map);
+}
+
+TEST(HierarchicalPlanner, PublishesProvisionalRouteAndIsolatesObserverErrors) {
+  Planner planner;
+  const PlannerInput input = DistantWheelInput();
+  std::optional<ProvisionalGlobalRoute> observed;
+
+  const PlannerOutput output = planner.Plan(
+      input, [&](const ProvisionalGlobalRoute &route) {
+        observed = route;
+        throw std::runtime_error{"non-authoritative observer failure"};
+      });
+
+  ASSERT_TRUE(output.reference.has_value()) << output.reason_code;
+  ASSERT_TRUE(observed.has_value());
+  EXPECT_EQ(observed->request_id, input.request_id);
+  EXPECT_EQ(observed->route_id, "wheel-route/" + input.request_id);
+  EXPECT_EQ(observed->platform_type, PlatformType::kWheeled);
+  EXPECT_EQ(observed->poses_map, output.reference->preview.poses_map);
 }
 
 } // namespace

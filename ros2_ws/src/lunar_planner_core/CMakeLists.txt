@@ -46,6 +46,7 @@ add_library(${PROJECT_NAME} SHARED
   src/shared/candidate_ranker.cpp
   src/shared/convex_corridor.cpp
   src/shared/map_snapshot.cpp
+  src/shared/projection_cache.cpp
   src/shared/safe_projection.cpp
   src/shared/terrain_checks.cpp
   src/wheel/wheel_lattice.cpp

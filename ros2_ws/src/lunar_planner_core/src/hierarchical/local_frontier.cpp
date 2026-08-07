@@ -458,6 +458,9 @@ LocalFrontierResult BuildLocalFrontiers(const PlannerInput &input,
     };
     stationary.problems.push_back(LocalPlanningProblem{
         .request_id = input.request_id + "/local-0",
+        .platform_id = input.platform_id,
+        .capability_version = input.capability_version,
+        .local_map_generation = input.local_map_generation,
         .state_time = input.state_time,
         .current_state = input.current_state,
         .goal_odom = *goal_odom,
@@ -615,6 +618,9 @@ LocalFrontierResult BuildLocalFrontiers(const PlannerInput &input,
         route_odom, candidate.route_distance_m, candidate.position_odom);
     result.problems.push_back(LocalPlanningProblem{
         .request_id = input.request_id + "/local-" + std::to_string(attempt),
+        .platform_id = input.platform_id,
+        .capability_version = input.capability_version,
+        .local_map_generation = input.local_map_generation,
         .state_time = input.state_time,
         .current_state = input.current_state,
         .goal_odom = FrontierGoal(input, candidate,

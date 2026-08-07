@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -15,6 +16,9 @@ namespace lunar::planning::hierarchical {
 
 struct LocalPlanningProblem final {
   std::string request_id;
+  std::string platform_id;
+  std::string capability_version;
+  std::uint64_t local_map_generation{};
   TimePoint state_time;
   PlatformState current_state;
   GoalRegion goal_odom;

@@ -167,6 +167,10 @@ struct HierarchicalPlannerMetrics final {
   std::size_t simplified_route_points{};
   double local_frontier_distance_m{};
   std::size_t local_attempts{};
+  std::size_t local_search_runs{};
+  std::size_t global_replans{};
+  std::size_t global_projection_cache_hits{};
+  std::size_t local_projection_cache_hits{};
   double corridor_width_m{};
   std::size_t hopper_graph_nodes{};
   std::size_t hopper_graph_edges{};

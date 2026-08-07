@@ -17,6 +17,7 @@
 #include "hierarchical/grid_search.hpp"
 #include "hierarchical/map_level.hpp"
 #include "shared/map_snapshot.hpp"
+#include "shared/projection_cache.hpp"
 #include "shared/safe_projection.hpp"
 #include "shared/terrain_checks.hpp"
 
@@ -208,7 +209,8 @@ SearchFailure(const GlobalGridSearchResult &search,
 
 GlobalRoutePlanResult
 PlanGroundGlobalRoute(const PlannerInput &input,
-                      const std::span<const shared::GridCell> excluded_cells) {
+                      const std::span<const shared::GridCell> excluded_cells,
+                      shared::ProjectionCache *const projection_cache) {
   const Clock::time_point started = Clock::now();
   if (input.stop_token.stop_requested()) {
     return Failure(PlanningOutcome::kCanceled, "REQUEST_CANCELED", started);
@@ -237,26 +239,24 @@ PlanGroundGlobalRoute(const PlannerInput &input,
   }
   const std::size_t level = *levels.global_level;
 
-  const auto map = shared::MapSnapshot::Create(input.world.global_map);
-  if (!map.ok()) {
-    return Failure(PlanningOutcome::kInvalidRequest, map.reason_code, started,
-                   level);
-  }
-  const auto projection =
-      shared::BuildSafeProjection(map.snapshot, input.capability,
-                                  input.config.map_safety, input.stop_token);
+  shared::ProjectionCache local_cache;
+  shared::ProjectionCache &cache =
+      projection_cache == nullptr ? local_cache : *projection_cache;
+  const shared::ProjectionContextResult projection = cache.GetOrBuild(
+      shared::MakeProjectionCacheKey(
+          input.global_map_generation, input.platform_id,
+          input.capability_version, input.world.global_map, input.capability,
+          input.config.map_safety),
+      input.world.global_map, input.capability, input.config.map_safety,
+      input.stop_token);
   if (!projection.ok()) {
     const PlanningOutcome outcome = projection.reason_code == "REQUEST_CANCELED"
                                         ? PlanningOutcome::kCanceled
                                         : PlanningOutcome::kInvalidRequest;
     return Failure(outcome, projection.reason_code, started, level);
   }
-  const auto terrain_limits =
-      shared::ResolveTerrainLimits(input.capability, input.config.map_safety);
-  if (!terrain_limits.ok()) {
-    return Failure(PlanningOutcome::kInvalidRequest, terrain_limits.reason_code,
-                   started, level);
-  }
+  const auto &map = projection.context->map;
+  const auto &safe_projection = projection.context->projection;
 
   const auto current_pose = CurrentPose(input);
   const auto start_pose_map =
@@ -267,15 +267,15 @@ PlanGroundGlobalRoute(const PlannerInput &input,
     return Failure(PlanningOutcome::kInvalidRequest,
                    "GLOBAL_START_TRANSFORM_INVALID", started, level);
   }
-  const auto start_cell = map.snapshot->PositionToCell(
+  const auto start_cell = map->PositionToCell(
       Vec2{start_pose_map->position_m.x, start_pose_map->position_m.y});
-  if (!start_cell || !projection.projection->HardFeasible(*start_cell)) {
+  if (!start_cell || !safe_projection->HardFeasible(*start_cell)) {
     return Failure(PlanningOutcome::kNoKnownSafeRoute,
                    "GLOBAL_NO_KNOWN_SAFE_ROUTE", started, level);
   }
 
   std::vector<std::uint8_t> goal_mask =
-      BuildGoalMask(input.goal_map, *projection.projection, input.stop_token);
+      BuildGoalMask(input.goal_map, *safe_projection, input.stop_token);
   if (input.stop_token.stop_requested()) {
     return Failure(PlanningOutcome::kCanceled, "REQUEST_CANCELED", started,
                    level);
@@ -287,21 +287,21 @@ PlanGroundGlobalRoute(const PlannerInput &input,
                    started, level);
   }
 
-  std::vector<std::uint8_t> excluded_mask(map.snapshot->cell_count(), 0U);
+  std::vector<std::uint8_t> excluded_mask(map->cell_count(), 0U);
   for (const shared::GridCell cell : excluded_cells) {
-    if (!map.snapshot->InBounds(cell)) {
+    if (!map->InBounds(cell)) {
       return Failure(PlanningOutcome::kNumericalFailure,
                      "GLOBAL_EXCLUDED_CORRIDOR_INVALID", started, level);
     }
-    excluded_mask[map.snapshot->Index(cell)] = 1U;
+    excluded_mask[map->Index(cell)] = 1U;
   }
 
   GlobalGridSearchResult search = SearchGlobalGrid(GlobalGridSearchProblem{
-      .projection = *projection.projection,
+      .projection = *safe_projection,
       .start = *start_cell,
       .goal_mask = goal_mask,
       .excluded_mask = excluded_mask,
-      .maximum_speed_mps = terrain_limits.limits->maximum_speed_mps,
+      .maximum_speed_mps = projection.context->terrain_limits.maximum_speed_mps,
       .config = input.config.global_search,
       .stop_token = input.stop_token,
   });
@@ -309,14 +309,14 @@ PlanGroundGlobalRoute(const PlannerInput &input,
     return SearchFailure(search, started, level);
   }
   std::vector<shared::GridCell> simplified =
-      SimplifyRouteSupercover(*projection.projection, search.path_cells,
+      SimplifyRouteSupercover(*safe_projection, search.path_cells,
                               search.path_cells.size(), excluded_mask);
   if (simplified.empty()) {
     return Failure(PlanningOutcome::kNumericalFailure,
                    "GLOBAL_ROUTE_SIMPLIFICATION_FAILED", started, level);
   }
   std::vector<Pose3> poses =
-      BuildPoses(*map.snapshot, simplified, input.goal_map, *start_pose_map);
+      BuildPoses(*map, simplified, input.goal_map, *start_pose_map);
   if (poses.empty()) {
     return Failure(PlanningOutcome::kNumericalFailure,
                    "GLOBAL_ROUTE_RESULT_INVALID", started, level);
@@ -324,7 +324,7 @@ PlanGroundGlobalRoute(const PlannerInput &input,
   std::vector<shared::GridCell> conditional_cells;
   std::ranges::copy_if(search.path_cells, std::back_inserter(conditional_cells),
                        [&](const shared::GridCell cell) {
-                         return projection.projection->ClearanceClassification(
+                         return safe_projection->ClearanceClassification(
                                     cell) ==
                                 shared::ClearanceClass::kConditional;
                        });
@@ -346,6 +346,7 @@ PlanGroundGlobalRoute(const PlannerInput &input,
       .global_level = level,
       .elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
           Clock::now() - started),
+      .projection_cache_hit = projection.cache_hit,
   };
 }
 
