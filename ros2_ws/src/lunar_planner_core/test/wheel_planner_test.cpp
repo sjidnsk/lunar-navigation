@@ -286,6 +286,7 @@ TEST(WheelPlanner, PlansToExactOffCellGoalWithSmallExecutionTolerance) {
 TEST(WheelPlanner, ConnectsAnExactNearGoalAcrossThePointTwoMeterGridGap) {
   auto input = test::MakeValidWheelInput();
   input.request_id = "wheel-near-goal-grid-gap";
+  input.config.optimization.maximum_iterations = 0U;
   input.world.global_map = test::MakeFlatMap("map", 250U, 250U, 0.2);
   input.world.global_map.origin_m = {-25.0, -25.0, 0.0};
   input.world.local_map = test::MakeFlatMap("odom", 56U, 56U, 0.2);
@@ -367,6 +368,36 @@ TEST(WheelPlanner, ConnectsAnExactNearGoalAcrossThePointTwoMeterGridGap) {
   ASSERT_TRUE(search.ok()) << search.reason_code;
   ASSERT_TRUE(search.plan.has_value());
   ASSERT_FALSE(search.plan->transitions.empty());
+  const auto synthetic_begin =
+      std::ranges::find_if(search.plan->transitions, [&](const auto& transition) {
+        return transition.primitive_index >=
+            std::get<WheeledCapability>(input.capability)
+                .motion_primitives.size();
+      });
+  ASSERT_NE(synthetic_begin, search.plan->transitions.end());
+  for (auto transition = synthetic_begin;
+       transition != search.plan->transitions.end(); ++transition) {
+    const double dx = transition->target_pose.position_m.x -
+        transition->source_pose.position_m.x;
+    const double dy = transition->target_pose.position_m.y -
+        transition->source_pose.position_m.y;
+    if (transition->path_length_m <= 1.0e-9) {
+      EXPECT_NEAR(std::hypot(dx, dy), 0.0, 1.0e-9);
+      continue;
+    }
+    const double travel_heading = std::atan2(dy, dx);
+    const double body_heading = transition->reverse
+        ? wheel::NormalizeYaw(travel_heading + std::numbers::pi)
+        : travel_heading;
+    EXPECT_NEAR(
+        wheel::ShortestYawDelta(
+            transition->source_pose.yaw_rad, body_heading),
+        0.0, 1.0e-9);
+    EXPECT_NEAR(
+        wheel::ShortestYawDelta(
+            transition->target_pose.yaw_rad, body_heading),
+        0.0, 1.0e-9);
+  }
   const auto& terminal = search.plan->transitions.back().target_pose;
   EXPECT_NEAR(terminal.position_m.x, 18.0, 1.0e-9);
   EXPECT_NEAR(terminal.position_m.y, -14.8, 1.0e-9);
@@ -406,6 +437,16 @@ TEST(WheelPlanner, ConnectsAnExactNearGoalAcrossThePointTwoMeterGridGap) {
   const PlannerOutput output = Planner{}.Plan(input);
   ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
       << output.reason_code;
+  EXPECT_EQ(
+      LocalDiagnostics(output).trajectory_mode,
+      TrajectoryMode::kDiscreteFallback);
+  for (const auto& point : WheelTrajectory(output).points) {
+    const double yaw = Yaw(point.pose.orientation);
+    const double lateral_velocity =
+        -std::sin(yaw) * point.velocity.linear_mps.x +
+        std::cos(yaw) * point.velocity.linear_mps.y;
+    EXPECT_NEAR(lateral_velocity, 0.0, 1.0e-8);
+  }
 }
 
 TEST(WheelPlanner, LazySearchAcceptsAtLeastOneHierarchicalFrontier) {

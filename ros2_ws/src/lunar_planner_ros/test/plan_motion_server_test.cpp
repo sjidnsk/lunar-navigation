@@ -1295,8 +1295,19 @@ TEST_F(PlanMotionServerTest, RejectsSecondGoalAndSerializesExplicitReplacement) 
 TEST_F(PlanMotionServerTest, CooperativelyCancelsActiveGoal) {
   std::atomic<int> calls{0};
   RunningSystem system{PlanMotionServerDependencies{
-      .planner = [&](const lunar::planning::PlannerInput& input) {
+      .observing_planner = [&](
+          const lunar::planning::PlannerInput& input,
+          const lunar::planning::ProvisionalRouteObserver& observer) {
         calls.fetch_add(1);
+        observer(lunar::planning::ProvisionalGlobalRoute{
+            .request_id = input.request_id,
+            .route_id = "wheel-route/" + input.request_id,
+            .platform_type = lunar::planning::PlatformType::kWheeled,
+            .poses_map = {
+                lunar::planning::Pose3{.position_m = {0.5, 0.5, 0.2}},
+                lunar::planning::Pose3{.position_m = {12.0, 0.5, 0.2}},
+            },
+        });
         while (!input.stop_token.stop_requested()) {
           std::this_thread::sleep_for(1ms);
         }
@@ -1313,7 +1324,10 @@ TEST_F(PlanMotionServerTest, CooperativelyCancelsActiveGoal) {
   system.PublishInputs();
   const auto handle = system.SendGoal(system.Goal("cancel"));
   ASSERT_NE(handle, nullptr);
-  ASSERT_TRUE(WaitFor([&] { return calls.load() == 1; }));
+  ASSERT_TRUE(WaitFor([&] {
+    return calls.load() == 1 && system.SawProvisionalMarker(
+        "provisional_global_route", visualization_msgs::msg::Marker::ADD);
+  }));
 
   auto cancel_future = system.action_client->async_cancel_goal(handle);
   ASSERT_EQ(cancel_future.wait_for(3s), std::future_status::ready);
@@ -1322,6 +1336,10 @@ TEST_F(PlanMotionServerTest, CooperativelyCancelsActiveGoal) {
   EXPECT_EQ(result.code, rclcpp_action::ResultCode::CANCELED);
   EXPECT_EQ(result.result->planning_outcome, Action::Result::CANCELED);
   EXPECT_EQ(result.result->reason_code, "REQUEST_CANCELED");
+  EXPECT_TRUE(WaitFor([&] {
+    return system.SawProvisionalMarker(
+        "provisional_global_route", visualization_msgs::msg::Marker::DELETE);
+  }));
 }
 
 TEST_F(PlanMotionServerTest, RejectsOldRevisionAndPausingCancelsUncommittedWork) {

@@ -136,6 +136,52 @@ TEST(
       "wheel/pending");
 }
 
+TEST(
+    ExecutionFeedbackTracker,
+    RejectsLatePendingAndForeignFeedbackWithoutClearingCurrentPlan) {
+  ExecutionFeedbackTracker tracker;
+  tracker.SetExpected(GroundExpected("wheel/current"));
+  auto current = GroundFeedback(1U);
+  current.plan_id = "wheel/current";
+  current.segment_id = "wheel/current";
+  ASSERT_TRUE(
+      tracker.Accept(current, rclcpp::Time{10'100'000'000LL}).ok());
+
+  tracker.SetExpected(GroundExpected("wheel/pending"));
+  auto pending = GroundFeedback(2U);
+  pending.plan_id = "wheel/pending";
+  pending.segment_id = "wheel/pending";
+  pending.header.stamp.nanosec = 200'000'000U;
+  EXPECT_EQ(
+      tracker.Accept(pending, rclcpp::Time{10'200'000'000LL}).reason_code,
+      "EXECUTION_FEEDBACK_SEQUENCE_MISMATCH");
+  auto context = tracker.context();
+  ASSERT_TRUE(context.has_value());
+  EXPECT_EQ(
+      std::get<lunar::planning::GroundExecutionContext>(*context)
+          .active_plan_id,
+      "wheel/current");
+
+  auto foreign = GroundFeedback(1U);
+  foreign.plan_id = "wheel/foreign";
+  foreign.segment_id = "wheel/foreign";
+  foreign.header.stamp.nanosec = 250'000'000U;
+  EXPECT_EQ(
+      tracker.Accept(foreign, rclcpp::Time{10'250'000'000LL}).reason_code,
+      "EXECUTION_FEEDBACK_PLAN_MISMATCH");
+  context = tracker.context();
+  ASSERT_TRUE(context.has_value());
+  EXPECT_EQ(
+      std::get<lunar::planning::GroundExecutionContext>(*context)
+          .active_plan_id,
+      "wheel/current");
+
+  current.sequence = 2U;
+  current.header.stamp.nanosec = 300'000'000U;
+  EXPECT_TRUE(
+      tracker.Accept(current, rclcpp::Time{10'300'000'000LL}).ok());
+}
+
 TEST(ExecutionFeedbackTracker, MapsHopperLandingAndRejectsGroundOnlyState) {
   ExecutionFeedbackTracker tracker;
   ExpectedExecution expected{

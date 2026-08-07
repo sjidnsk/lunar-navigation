@@ -49,6 +49,11 @@ struct OpenEntry final {
   std::size_t sequence{};
 };
 
+struct ExactConnector final {
+  std::vector<WheelTransition> transitions;
+  double cost{};
+};
+
 struct OpenGreater final {
   [[nodiscard]] bool operator()(
       const OpenEntry& lhs, const OpenEntry& rhs) const noexcept {
@@ -414,12 +419,11 @@ struct OpenGreater final {
   return cost;
 }
 
-[[nodiscard]] std::optional<WheelTransition> ExactGoalConnector(
+[[nodiscard]] std::optional<ExactConnector> ExactGoalConnector(
     const SearchNode& source, const GoalRegion& goal,
     const double maximum_connector_length_m,
     const shared::SafeProjection& projection,
     const WheeledCapability& capability,
-    const PlannerConfig& config,
     const WheelSweepValidator& validator,
     const std::stop_token stop_token) {
   const auto* point = std::get_if<PointGoal>(&goal.target);
@@ -432,97 +436,6 @@ struct OpenGreater final {
   if (distance > maximum_connector_length_m + kComparisonTolerance) {
     return std::nullopt;
   }
-  bool reverse = false;
-  WheelPrimitiveKind kind = WheelPrimitiveKind::kForward;
-  double target_yaw = goal.yaw_rad.value_or(source.pose.yaw_rad);
-  double connector_curvature = 0.0;
-  if (distance > kComparisonTolerance) {
-    const double direction = std::atan2(dy, dx);
-    const double forward_delta = ShortestYawDelta(
-        source.pose.yaw_rad, direction);
-    const double reverse_direction =
-        NormalizeYaw(direction + std::numbers::pi);
-    const double reverse_delta = ShortestYawDelta(
-        source.pose.yaw_rad, reverse_direction);
-    const double forward_error = std::abs(forward_delta);
-    const double reverse_error = std::abs(reverse_delta);
-    const double heading_tolerance = std::numbers::pi /
-        static_cast<double>(config.wheel.yaw_bin_count) +
-        kComparisonTolerance;
-    const double reachable_heading_change =
-        capability.maximum_curvature_per_m * distance + heading_tolerance;
-    if (forward_error <= reachable_heading_change &&
-        (source.key.motion_mode == WheelMotionMode::kStart ||
-         source.key.motion_mode == WheelMotionMode::kForward)) {
-      if (!goal.yaw_rad.has_value()) {
-        target_yaw = direction;
-      }
-      kind = goal.yaw_rad.has_value() &&
-              std::abs(ShortestYawDelta(source.pose.yaw_rad, target_yaw)) >
-                  kComparisonTolerance
-          ? WheelPrimitiveKind::kForwardArc
-          : WheelPrimitiveKind::kForward;
-      const double terminal_heading_error = std::abs(ShortestYawDelta(
-          target_yaw, direction));
-      connector_curvature = std::copysign(
-          std::max({
-              std::abs(ShortestYawDelta(
-                  source.pose.yaw_rad, target_yaw)) / distance,
-              2.0 * forward_error / distance,
-              2.0 * terminal_heading_error / distance}),
-          std::abs(forward_delta) > kComparisonTolerance
-              ? forward_delta
-              : ShortestYawDelta(source.pose.yaw_rad, target_yaw));
-    } else if (reverse_error <= reachable_heading_change &&
-               (source.key.motion_mode == WheelMotionMode::kStart ||
-                source.key.motion_mode == WheelMotionMode::kReverse)) {
-      reverse = true;
-      if (!goal.yaw_rad.has_value()) {
-        target_yaw = reverse_direction;
-      }
-      kind = goal.yaw_rad.has_value() &&
-              std::abs(ShortestYawDelta(source.pose.yaw_rad, target_yaw)) >
-                  kComparisonTolerance
-          ? WheelPrimitiveKind::kReverseArc
-          : WheelPrimitiveKind::kReverse;
-      const double terminal_heading_error = std::abs(ShortestYawDelta(
-          target_yaw, reverse_direction));
-      connector_curvature = std::copysign(
-          std::max({
-              std::abs(ShortestYawDelta(
-                  source.pose.yaw_rad, target_yaw)) / distance,
-              2.0 * reverse_error / distance,
-              2.0 * terminal_heading_error / distance}),
-          std::abs(reverse_delta) > kComparisonTolerance
-              ? reverse_delta
-              : ShortestYawDelta(source.pose.yaw_rad, target_yaw));
-    } else {
-      return std::nullopt;
-    }
-  } else if (goal.yaw_rad.has_value()) {
-    kind = ShortestYawDelta(source.pose.yaw_rad, target_yaw) >= 0.0
-        ? WheelPrimitiveKind::kSpinCounterclockwise
-        : WheelPrimitiveKind::kSpinClockwise;
-  } else {
-    return std::nullopt;
-  }
-  WheelTransition transition{
-      .source_pose = source.pose,
-      .target_pose = WheelPose{
-          .position_m = point->position_m,
-          .yaw_rad = NormalizeYaw(target_yaw),
-      },
-      .curvature_per_m = connector_curvature,
-      .primitive_index = capability.motion_primitives.size(),
-      .primitive_kind = kind,
-      .source_mode = source.key.motion_mode,
-      .target_mode = distance <= kComparisonTolerance
-          ? WheelMotionMode::kStart
-          : (reverse ? WheelMotionMode::kReverse
-                     : WheelMotionMode::kForward),
-      .path_length_m = distance,
-      .reverse = reverse,
-  };
   const auto target_cell = projection.source_map()->PositionToCell(Vec2{
       .x = point->position_m.x,
       .y = point->position_m.y,
@@ -531,23 +444,144 @@ struct OpenGreater final {
       !projection.HardFeasible(*target_cell)) {
     return std::nullopt;
   }
-  const WheelSweepValidation sweep = validator.Validate(transition, stop_token);
-  if (!sweep.valid) {
-    return std::nullopt;
+
+  const auto supports = [&](const WheelPrimitiveKind kind) {
+    return std::ranges::any_of(
+        capability.motion_primitives,
+        [kind](const WheelMotionPrimitive& primitive) {
+          return primitive.kind == kind;
+        });
+  };
+  const auto build = [&](const bool reverse)
+      -> std::optional<ExactConnector> {
+    ExactConnector connector;
+    WheelPose pose = source.pose;
+    WheelMotionMode mode = source.key.motion_mode;
+    auto append = [&](WheelTransition transition) {
+      const WheelSweepValidation sweep =
+          validator.Validate(transition, stop_token);
+      if (!sweep.valid) {
+        return false;
+      }
+      transition.surface_slope_rad = sweep.maximum_surface_slope_rad;
+      transition.roughness_m = sweep.maximum_roughness_m;
+      const double edge_cost = EdgeCost(transition, projection, capability);
+      if (!std::isfinite(edge_cost) || edge_cost <= 0.0) {
+        return false;
+      }
+      connector.cost += edge_cost;
+      pose = transition.target_pose;
+      mode = transition.target_mode;
+      connector.transitions.push_back(std::move(transition));
+      return true;
+    };
+    auto append_spin = [&](const double requested_yaw) {
+      const double target_yaw = NormalizeYaw(requested_yaw);
+      const double delta = ShortestYawDelta(pose.yaw_rad, target_yaw);
+      if (std::abs(delta) <= kComparisonTolerance) {
+        return true;
+      }
+      const WheelPrimitiveKind kind = delta >= 0.0
+          ? WheelPrimitiveKind::kSpinCounterclockwise
+          : WheelPrimitiveKind::kSpinClockwise;
+      return supports(kind) && append(WheelTransition{
+          .source_pose = pose,
+          .target_pose = WheelPose{
+              .position_m = pose.position_m,
+              .yaw_rad = target_yaw,
+          },
+          .curvature_per_m = 0.0,
+          .primitive_index = capability.motion_primitives.size(),
+          .primitive_kind = kind,
+          .source_mode = mode,
+          .target_mode = WheelMotionMode::kStart,
+          .path_length_m = 0.0,
+          .reverse = false,
+      });
+    };
+    auto append_stop = [&]() {
+      if (mode == WheelMotionMode::kStart) {
+        return true;
+      }
+      return supports(WheelPrimitiveKind::kStopAndSwitch) &&
+          append(WheelTransition{
+              .source_pose = pose,
+              .target_pose = pose,
+              .curvature_per_m = 0.0,
+              .primitive_index = capability.motion_primitives.size(),
+              .primitive_kind = WheelPrimitiveKind::kStopAndSwitch,
+              .source_mode = mode,
+              .target_mode = WheelMotionMode::kStart,
+              .path_length_m = 0.0,
+              .reverse = false,
+          });
+    };
+
+    if (distance <= kComparisonTolerance) {
+      if (!goal.yaw_rad.has_value() || !append_spin(*goal.yaw_rad)) {
+        return std::nullopt;
+      }
+      return connector.transitions.empty()
+          ? std::nullopt
+          : std::optional<ExactConnector>{std::move(connector)};
+    }
+
+    const double travel_heading = std::atan2(dy, dx);
+    const double body_heading = reverse
+        ? NormalizeYaw(travel_heading + std::numbers::pi)
+        : travel_heading;
+    const WheelPrimitiveKind translation_kind = reverse
+        ? WheelPrimitiveKind::kReverse
+        : WheelPrimitiveKind::kForward;
+    const WheelMotionMode translation_mode = reverse
+        ? WheelMotionMode::kReverse
+        : WheelMotionMode::kForward;
+    if (!supports(translation_kind) || !append_spin(body_heading)) {
+      return std::nullopt;
+    }
+    if (mode != WheelMotionMode::kStart && mode != translation_mode &&
+        !append_stop()) {
+      return std::nullopt;
+    }
+    if (!append(WheelTransition{
+            .source_pose = pose,
+            .target_pose = WheelPose{
+                .position_m = point->position_m,
+                .yaw_rad = NormalizeYaw(body_heading),
+            },
+            .curvature_per_m = 0.0,
+            .primitive_index = capability.motion_primitives.size(),
+            .primitive_kind = translation_kind,
+            .source_mode = mode,
+            .target_mode = translation_mode,
+            .path_length_m = distance,
+            .reverse = reverse,
+        })) {
+      return std::nullopt;
+    }
+    if (goal.yaw_rad.has_value() && !append_spin(*goal.yaw_rad)) {
+      return std::nullopt;
+    }
+    return connector;
+  };
+
+  std::optional<ExactConnector> best;
+  for (const bool reverse : {false, true}) {
+    auto candidate = build(reverse);
+    if (candidate.has_value() &&
+        (!best.has_value() ||
+         candidate->cost + kComparisonTolerance < best->cost)) {
+      best = std::move(candidate);
+    }
   }
-  transition.surface_slope_rad = sweep.maximum_surface_slope_rad;
-  transition.roughness_m = sweep.maximum_roughness_m;
-  return transition;
+  return best;
 }
 
 [[nodiscard]] std::optional<WheelDiscretePlan> Reconstruct(
     const std::vector<SearchNode>& nodes, std::size_t terminal_parent,
-    const std::optional<WheelTransition>& terminal_transition,
+    const std::vector<WheelTransition>& terminal_transitions,
     const double cost, const std::size_t expanded_states) {
   std::vector<WheelTransition> reversed;
-  if (terminal_transition.has_value()) {
-    reversed.push_back(*terminal_transition);
-  }
   std::size_t current = terminal_parent;
   while (current != 0U) {
     if (current >= nodes.size() || nodes[current].parent == kNoParent ||
@@ -561,6 +595,8 @@ struct OpenGreater final {
     }
   }
   std::reverse(reversed.begin(), reversed.end());
+  reversed.insert(
+      reversed.end(), terminal_transitions.begin(), terminal_transitions.end());
   for (std::size_t index = 0U; index < reversed.size(); ++index) {
     reversed[index].stable_index = index;
   }
@@ -679,8 +715,9 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
   // A corridor-masked local view can legitimately leave only its centerline
   // feasible, so requiring an extra lattice state before connecting creates a
   // false no-route result near an otherwise safe point goal.  Two primitive
-  // lengths plus half a cell diagonal cover that discretization gap; the
-  // connector is still curvature-checked and fully sweep-validated below.
+  // lengths plus half a cell diagonal cover that discretization gap.  The
+  // synthetic connector is decomposed into supported in-place spins and one
+  // body-aligned translation, with every component sweep-validated below.
   maximum_connector_length_m =
       2.0 * maximum_connector_length_m +
       std::numbers::sqrt2 * 0.5 * projection.source_map()->resolution_m();
@@ -768,13 +805,13 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
   std::size_t expanded_states = 0U;
   std::optional<double> best_goal_cost;
   std::size_t best_goal_parent = kNoParent;
-  std::optional<WheelTransition> best_terminal_transition;
+  std::vector<WheelTransition> best_terminal_transitions;
   bool start_has_valid_edge = false;
   WheelSweepValidator validator{projection, capability};
 
   const auto update_goal = [&](
                                const std::size_t parent,
-                               std::optional<WheelTransition> terminal,
+                               std::vector<WheelTransition> terminal,
                                const double cost) {
     if (!std::isfinite(cost)) {
       return;
@@ -783,7 +820,7 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
         cost + kComparisonTolerance < *best_goal_cost) {
       best_goal_cost = cost;
       best_goal_parent = parent;
-      best_terminal_transition = std::move(terminal);
+      best_terminal_transitions = std::move(terminal);
     }
   };
 
@@ -814,21 +851,19 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
     if (std::holds_alternative<PlanarRegionGoal>(goal.target) &&
         GoalContainsPose(goal, current_snapshot.pose)) {
       update_goal(
-          current_entry.node_index, std::nullopt,
+          current_entry.node_index, {},
           current_snapshot.path_cost);
     }
     if (auto terminal = ExactGoalConnector(
             current_snapshot, goal, maximum_connector_length_m, projection,
-            capability, config, validator, stop_token);
+            capability, validator, stop_token);
         terminal.has_value()) {
       if (current_entry.node_index == 0U) {
         start_has_valid_edge = true;
       }
-      const double terminal_cost = EdgeCost(
-          *terminal, projection, capability);
       update_goal(
-          current_entry.node_index, std::move(terminal),
-          current_snapshot.path_cost + terminal_cost);
+          current_entry.node_index, std::move(terminal->transitions),
+          current_snapshot.path_cost + terminal->cost);
     }
 
     for (const OrderedPrimitive& ordered : ordered_primitives) {
@@ -930,17 +965,16 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
         }
         if (std::holds_alternative<PlanarRegionGoal>(fallback_goal.target) &&
             GoalContainsPose(fallback_goal, node.pose)) {
-          update_goal(node_index, std::nullopt, node.path_cost);
+          update_goal(node_index, {}, node.path_cost);
           continue;
         }
         if (auto terminal = ExactGoalConnector(
                 node, fallback_goal, maximum_connector_length_m, projection,
-                capability, config, validator, stop_token);
+                capability, validator, stop_token);
             terminal.has_value()) {
-          const double terminal_cost = EdgeCost(
-              *terminal, projection, capability);
           update_goal(
-              node_index, std::move(terminal), node.path_cost + terminal_cost);
+              node_index, std::move(terminal->transitions),
+              node.path_cost + terminal->cost);
         }
       }
       if (best_goal_cost.has_value()) {
@@ -960,7 +994,7 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
         "WHEEL_NO_KNOWN_SAFE_ROUTE", expanded_states);
   }
   const auto plan = Reconstruct(
-      nodes, best_goal_parent, best_terminal_transition,
+      nodes, best_goal_parent, best_terminal_transitions,
       *best_goal_cost, expanded_states);
   if (!plan.has_value()) {
     return Failure(

@@ -1577,6 +1577,7 @@ struct PlanMotionServer::Impl final {
     auto result = CanceledResult(
         mission_revision, reason.empty() ? "REQUEST_CANCELED" : reason);
     PopulateLatestStamps(*result);
+    PublishProvisionalMarkerDeletes();
     PublishDiagnostic(
         diagnostic_msgs::msg::DiagnosticStatus::WARN,
         result->reason_code);
