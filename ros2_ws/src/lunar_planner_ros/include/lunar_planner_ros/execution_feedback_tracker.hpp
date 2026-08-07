@@ -54,6 +54,7 @@ class ExecutionFeedbackTracker final {
  private:
   mutable std::mutex mutex_;
   std::optional<ExpectedExecution> expected_;
+  std::optional<ExpectedExecution> pending_expected_;
   std::optional<lunar::planning::ExecutionContext> context_;
   std::uint64_t last_sequence_{};
   std::int64_t last_stamp_nanoseconds_{};

@@ -675,8 +675,15 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
             primitive.relative_end_pose.position_m.x,
             primitive.relative_end_pose.position_m.y));
   }
-  maximum_connector_length_m +=
-      0.51 * projection.source_map()->resolution_m();
+  // Keep the exact connector long enough to bridge the terminal lattice gap.
+  // A corridor-masked local view can legitimately leave only its centerline
+  // feasible, so requiring an extra lattice state before connecting creates a
+  // false no-route result near an otherwise safe point goal.  Two primitive
+  // lengths plus half a cell diagonal cover that discretization gap; the
+  // connector is still curvature-checked and fully sweep-validated below.
+  maximum_connector_length_m =
+      2.0 * maximum_connector_length_m +
+      std::numbers::sqrt2 * 0.5 * projection.source_map()->resolution_m();
   std::stable_sort(
       ordered_primitives.begin(), ordered_primitives.end(),
       [](const OrderedPrimitive& lhs, const OrderedPrimitive& rhs) {

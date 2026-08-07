@@ -283,6 +283,131 @@ TEST(WheelPlanner, PlansToExactOffCellGoalWithSmallExecutionTolerance) {
   EXPECT_NEAR(LocalDiagnostics(output).endpoint_error_m, 0.0, 1.0e-9);
 }
 
+TEST(WheelPlanner, ConnectsAnExactNearGoalAcrossThePointTwoMeterGridGap) {
+  auto input = test::MakeValidWheelInput();
+  input.request_id = "wheel-near-goal-grid-gap";
+  input.world.global_map = test::MakeFlatMap("map", 250U, 250U, 0.2);
+  input.world.global_map.origin_m = {-25.0, -25.0, 0.0};
+  input.world.local_map = test::MakeFlatMap("odom", 56U, 56U, 0.2);
+  input.world.local_map.origin_m = {11.2, -20.4, 0.0};
+  input.config.global_map.base_resolution_m = 0.2;
+  input.config.wheel.xy_resolution_m = 0.2;
+  std::get<WheeledCapability>(input.capability).motion_primitives = {
+      WheelMotionPrimitive{
+          .primitive_id = "forward",
+          .kind = WheelPrimitiveKind::kForward,
+          .relative_end_pose = Pose3{.position_m = {0.2, 0.0, 0.0}},
+      },
+      WheelMotionPrimitive{
+          .primitive_id = "reverse",
+          .kind = WheelPrimitiveKind::kReverse,
+          .relative_end_pose = Pose3{.position_m = {-0.2, 0.0, 0.0}},
+      },
+      WheelMotionPrimitive{
+          .primitive_id = "forward-arc-left",
+          .kind = WheelPrimitiveKind::kForwardArc,
+          .relative_end_pose = Pose3{
+              .position_m = {0.19509032201612825, 0.01921471959676957, 0.0},
+              .orientation = test::YawQuaternion(0.19634954084936207),
+          },
+      },
+      WheelMotionPrimitive{
+          .primitive_id = "forward-arc-right",
+          .kind = WheelPrimitiveKind::kForwardArc,
+          .relative_end_pose = Pose3{
+              .position_m = {0.19509032201612825, -0.01921471959676957, 0.0},
+              .orientation = test::YawQuaternion(-0.19634954084936207),
+          },
+      },
+      WheelMotionPrimitive{
+          .primitive_id = "spin-left",
+          .kind = WheelPrimitiveKind::kSpinCounterclockwise,
+          .relative_end_pose = Pose3{
+              .orientation = test::YawQuaternion(0.19634954084936207),
+          },
+      },
+      WheelMotionPrimitive{
+          .primitive_id = "spin-right",
+          .kind = WheelPrimitiveKind::kSpinClockwise,
+          .relative_end_pose = Pose3{
+              .orientation = test::YawQuaternion(-0.19634954084936207),
+          },
+      },
+      WheelMotionPrimitive{
+          .primitive_id = "stop-switch",
+          .kind = WheelPrimitiveKind::kStopAndSwitch,
+      },
+  };
+  input.current_state = WheeledState{
+      .pose = Pose3{
+          .position_m = {17.5, -14.9, 0.0},
+          .orientation = test::YawQuaternion(0.0),
+      },
+  };
+  input.goal_map = GoalRegion{
+      .goal_id = "near-exact-goal",
+      .target = PointGoal{
+          .position_m = {18.0, -14.8, 0.0},
+          .tolerance_m = 0.2,
+      },
+      .yaw_rad = 0.0,
+      .yaw_tolerance_rad = 0.05,
+  };
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+
+  const auto search = wheel::SearchWheelLattice(
+      std::get<WheeledState>(input.current_state), input.goal_map,
+      *projection.projection, std::get<WheeledCapability>(input.capability),
+      input.config, {});
+
+  ASSERT_TRUE(search.ok()) << search.reason_code;
+  ASSERT_TRUE(search.plan.has_value());
+  ASSERT_FALSE(search.plan->transitions.empty());
+  const auto& terminal = search.plan->transitions.back().target_pose;
+  EXPECT_NEAR(terminal.position_m.x, 18.0, 1.0e-9);
+  EXPECT_NEAR(terminal.position_m.y, -14.8, 1.0e-9);
+  EXPECT_NEAR(terminal.yaw_rad, 0.0, 1.0e-9);
+
+  const auto global = hierarchical::PlanGroundGlobalRoute(input);
+  ASSERT_TRUE(global.ok()) << global.reason_code;
+  const auto frontiers = hierarchical::BuildLocalFrontiers(input, *global.route);
+  ASSERT_TRUE(frontiers.ok()) << frontiers.reason_code;
+  ASSERT_FALSE(frontiers.problems.empty());
+  bool solved_frontier = false;
+  std::string frontier_reasons;
+  for (const auto& problem : frontiers.problems) {
+    const auto local_snapshot =
+        shared::MapSnapshot::Create(problem.local_map_view);
+    ASSERT_TRUE(local_snapshot.ok()) << local_snapshot.reason_code;
+    const auto local_projection = shared::BuildSafeProjection(
+        local_snapshot.snapshot, problem.capability,
+        problem.config.map_safety, {});
+    ASSERT_TRUE(local_projection.ok()) << local_projection.reason_code;
+    const auto local_search = wheel::SearchWheelLattice(
+        std::get<WheeledState>(problem.current_state), problem.goal_odom,
+        *local_projection.projection,
+        std::get<WheeledCapability>(problem.capability), problem.config, {});
+    solved_frontier = solved_frontier || local_search.ok();
+    const auto& frontier = std::get<PointGoal>(problem.goal_odom.target);
+    frontier_reasons += local_search.reason_code + " goal=(" +
+        std::to_string(frontier.position_m.x) + "," +
+        std::to_string(frontier.position_m.y) + ") yaw=" +
+        (problem.goal_odom.yaw_rad.has_value()
+             ? std::to_string(*problem.goal_odom.yaw_rad)
+             : std::string{"none"}) + " tol=" +
+        std::to_string(frontier.tolerance_m) + ";";
+  }
+  EXPECT_TRUE(solved_frontier) << frontier_reasons;
+
+  const PlannerOutput output = Planner{}.Plan(input);
+  ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << output.reason_code;
+}
+
 TEST(WheelPlanner, LazySearchAcceptsAtLeastOneHierarchicalFrontier) {
   const auto input = test::MakeValidWheelInput();
   const auto global = hierarchical::PlanGroundGlobalRoute(input);

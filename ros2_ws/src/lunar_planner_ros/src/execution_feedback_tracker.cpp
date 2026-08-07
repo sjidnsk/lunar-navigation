@@ -110,17 +110,27 @@ constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
 
 void ExecutionFeedbackTracker::SetExpected(ExpectedExecution expected) {
   std::scoped_lock lock{mutex_};
-  if (!expected_.has_value() || *expected_ != expected) {
-    expected_ = std::move(expected);
-    context_.reset();
-    last_sequence_ = 0U;
-    last_stamp_nanoseconds_ = 0;
+  if (expected_.has_value() && *expected_ == expected) {
+    return;
   }
+  if (pending_expected_.has_value() && *pending_expected_ == expected) {
+    return;
+  }
+  if (expected_.has_value() && context_.has_value()) {
+    pending_expected_ = std::move(expected);
+    return;
+  }
+  expected_ = std::move(expected);
+  pending_expected_.reset();
+  context_.reset();
+  last_sequence_ = 0U;
+  last_stamp_nanoseconds_ = 0;
 }
 
 void ExecutionFeedbackTracker::Clear() {
   std::scoped_lock lock{mutex_};
   expected_.reset();
+  pending_expected_.reset();
   context_.reset();
   last_sequence_ = 0U;
   last_stamp_nanoseconds_ = 0;
@@ -145,7 +155,11 @@ FeedbackAcceptResult ExecutionFeedbackTracker::Accept(
   if (!expected_.has_value() || !ValidExpected(*expected_)) {
     return reject("EXECUTION_FEEDBACK_EXPECTATION_INVALID");
   }
-  if (message.header.frame_id != expected_->base_frame_id) {
+  const bool pending_plan = pending_expected_.has_value() &&
+      message.plan_id == pending_expected_->plan_id;
+  const ExpectedExecution& selected =
+      pending_plan ? *pending_expected_ : *expected_;
+  if (message.header.frame_id != selected.base_frame_id) {
     return reject("EXECUTION_FEEDBACK_FRAME_MISMATCH");
   }
   const auto stamp = StampNanoseconds(message.header.stamp);
@@ -153,22 +167,23 @@ FeedbackAcceptResult ExecutionFeedbackTracker::Accept(
     return reject("EXECUTION_FEEDBACK_STAMP_INVALID");
   }
   if (*stamp > now.nanoseconds() ||
-      now.nanoseconds() - *stamp > expected_->maximum_age.count()) {
+      now.nanoseconds() - *stamp > selected.maximum_age.count()) {
     return reject("EXECUTION_FEEDBACK_STALE");
   }
-  if (message.platform_type != PlatformMessageValue(expected_->platform_type)) {
+  if (message.platform_type != PlatformMessageValue(selected.platform_type)) {
     return reject("EXECUTION_FEEDBACK_PLATFORM_MISMATCH");
   }
-  if (message.plan_id.empty() || message.plan_id != expected_->plan_id) {
+  if (message.plan_id.empty() || message.plan_id != selected.plan_id) {
     return reject("EXECUTION_FEEDBACK_PLAN_MISMATCH");
   }
   if (message.segment_id.empty() ||
-      message.segment_id != expected_->segment_id) {
+      message.segment_id != selected.segment_id) {
     return reject("EXECUTION_FEEDBACK_SEGMENT_MISMATCH");
   }
-  if (message.sequence == 0U ||
-      message.sequence != last_sequence_ + 1U ||
-      *stamp < last_stamp_nanoseconds_) {
+  const std::uint64_t expected_sequence =
+      pending_plan ? 1U : last_sequence_ + 1U;
+  if (message.sequence == 0U || message.sequence != expected_sequence ||
+      (!pending_plan && *stamp < last_stamp_nanoseconds_)) {
     return reject("EXECUTION_FEEDBACK_SEQUENCE_MISMATCH");
   }
   using Message = lunar_navigation_msgs::msg::MotionExecutionFeedback;
@@ -177,11 +192,15 @@ FeedbackAcceptResult ExecutionFeedbackTracker::Accept(
       message.reason_code.empty()) {
     return reject("EXECUTION_FEEDBACK_REASON_REQUIRED");
   }
-  auto context = MapContext(message, *expected_);
+  auto context = MapContext(message, selected);
   if (!context.has_value()) {
     return reject("EXECUTION_FEEDBACK_STATE_INVALID");
   }
 
+  if (pending_plan) {
+    expected_ = std::move(pending_expected_);
+    pending_expected_.reset();
+  }
   last_sequence_ = message.sequence;
   last_stamp_nanoseconds_ = *stamp;
   context_ = std::move(context);
