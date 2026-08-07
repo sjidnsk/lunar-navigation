@@ -242,6 +242,16 @@ class RunningSystem final {
         [this](const visualization_msgs::msg::MarkerArray::SharedPtr message) {
           std::scoped_lock lock{marker_mutex};
           marker_arrays.push_back(*message);
+          marker_event_names.emplace_back("certified");
+        });
+    provisional_marker_subscription = client_node->create_subscription<
+        visualization_msgs::msg::MarkerArray>(
+        "/planning/provisional_route_markers",
+        rclcpp::QoS{1}.reliable().transient_local(),
+        [this](const visualization_msgs::msg::MarkerArray::SharedPtr message) {
+          std::scoped_lock lock{marker_mutex};
+          provisional_marker_arrays.push_back(*message);
+          marker_event_names.emplace_back("provisional");
         });
     action_client = rclcpp_action::create_client<Action>(
         client_node, "/plan_motion");
@@ -268,6 +278,7 @@ class RunningSystem final {
     executor.remove_node(client_node);
     executor.remove_node(server->get_node_base_interface());
     diagnostics_subscription.reset();
+    provisional_marker_subscription.reset();
     action_client.reset();
     client_node.reset();
     server.reset();
@@ -396,6 +407,27 @@ class RunningSystem final {
     });
   }
 
+  [[nodiscard]] bool SawProvisionalMarker(
+      const std::string& marker_namespace,
+      const std::int32_t action) const {
+    std::scoped_lock lock{marker_mutex};
+    return std::ranges::any_of(
+        provisional_marker_arrays, [&](const auto& array) {
+          return std::ranges::any_of(array.markers, [&](const auto& marker) {
+            return marker.ns == marker_namespace && marker.action == action;
+          });
+        });
+  }
+
+  [[nodiscard]] bool ProvisionalPrecedesCertified() const {
+    std::scoped_lock lock{marker_mutex};
+    const auto provisional = std::ranges::find(
+        marker_event_names, "provisional");
+    const auto certified = std::ranges::find(marker_event_names, "certified");
+    return provisional != marker_event_names.end() &&
+        certified != marker_event_names.end() && provisional < certified;
+  }
+
   [[nodiscard]] bool SawDiagnostic(const std::string& reason) const {
     std::scoped_lock lock{diagnostics_mutex};
     return std::ranges::any_of(diagnostics, [&](const auto& array) {
@@ -454,11 +486,15 @@ class RunningSystem final {
       diagnostics_subscription;
   rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr
       marker_subscription;
+  rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr
+      provisional_marker_subscription;
   builtin_interfaces::msg::Time last_stamp;
   mutable std::mutex diagnostics_mutex;
   std::vector<diagnostic_msgs::msg::DiagnosticArray> diagnostics;
   mutable std::mutex marker_mutex;
   std::vector<visualization_msgs::msg::MarkerArray> marker_arrays;
+  std::vector<visualization_msgs::msg::MarkerArray> provisional_marker_arrays;
+  std::vector<std::string> marker_event_names;
 
  private:
   static std::string UniqueName() {
@@ -644,6 +680,7 @@ TEST_F(PlanMotionServerTest, RejectsHopperBeforeCoreWhenPropellantIsMissing) {
 TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
   auto output = NoRouteOutput("HIERARCHICAL_NO_ROUTE");
   output.diagnostics.planner_name = "cpp_v3_hierarchical";
+  output.diagnostics.elapsed = 19ms;
   output.diagnostics.hierarchical = lunar::planning::HierarchicalPlannerMetrics{
       .global_level = 2U,
       .global_resolution_m = 0.8,
@@ -658,6 +695,10 @@ TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
       .simplified_route_points = 12U,
       .local_frontier_distance_m = 4.0,
       .local_attempts = 2U,
+      .local_search_runs = 3U,
+      .global_replans = 1U,
+      .global_projection_cache_hits = 4U,
+      .local_projection_cache_hits = 5U,
       .corridor_width_m = 0.6,
       .hopper_graph_nodes = 11U,
       .hopper_graph_edges = 17U,
@@ -689,6 +730,7 @@ TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
   ASSERT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::SUCCEEDED);
 
   const std::vector<std::string> expected_keys{
+      "planner_total_elapsed_s",
       "hierarchical_global_level",
       "hierarchical_global_resolution_m",
       "hierarchical_global_cells",
@@ -702,6 +744,10 @@ TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
       "hierarchical_simplified_route_points",
       "hierarchical_local_frontier_distance_m",
       "hierarchical_local_attempts",
+      "hierarchical_local_search_runs",
+      "hierarchical_global_replans",
+      "hierarchical_global_projection_cache_hits",
+      "hierarchical_local_projection_cache_hits",
       "hierarchical_corridor_width_m",
       "hierarchical_hopper_graph_nodes",
       "hierarchical_hopper_graph_edges",
@@ -733,6 +779,28 @@ TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
       return system.DiagnosticValue("HIERARCHICAL_NO_ROUTE", key).has_value();
     });
   }));
+  EXPECT_DOUBLE_EQ(
+      std::stod(*system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE", "planner_total_elapsed_s")),
+      0.019);
+  EXPECT_EQ(
+      system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE", "hierarchical_local_search_runs"),
+      "3");
+  EXPECT_EQ(
+      system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE", "hierarchical_global_replans"),
+      "1");
+  EXPECT_EQ(
+      system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE",
+          "hierarchical_global_projection_cache_hits"),
+      "4");
+  EXPECT_EQ(
+      system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE",
+          "hierarchical_local_projection_cache_hits"),
+      "5");
   EXPECT_EQ(
       system.DiagnosticValue(
           "HIERARCHICAL_NO_ROUTE", "hierarchical_global_level"),
@@ -764,6 +832,44 @@ TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
   EXPECT_EQ(
       system.DiagnosticValue("HIERARCHICAL_NO_ROUTE", "route_reused"),
       "true");
+}
+
+TEST_F(PlanMotionServerTest, PublishesProvisionalRouteBeforeCertifiedResult) {
+  RunningSystem system{PlanMotionServerDependencies{
+      .observing_planner = [](
+          const lunar::planning::PlannerInput& input,
+          const lunar::planning::ProvisionalRouteObserver& observer) {
+        observer(lunar::planning::ProvisionalGlobalRoute{
+            .request_id = input.request_id,
+            .route_id = "wheel-route/" + input.request_id,
+            .platform_type = lunar::planning::PlatformType::kWheeled,
+            .poses_map = {
+                lunar::planning::Pose3{
+                    .position_m = {0.5, 0.5, 0.2}},
+                lunar::planning::Pose3{
+                    .position_m = {12.0, 0.5, 0.2}},
+            },
+        });
+        std::this_thread::sleep_for(30ms);
+        return WheelReferenceOutput(input, nullptr);
+      },
+      .preloaded_capabilities = WheelCapabilities(),
+  }};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("provisional-order"));
+  ASSERT_NE(handle, nullptr);
+  ASSERT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::SUCCEEDED);
+
+  ASSERT_TRUE(WaitFor([&] {
+    return system.SawProvisionalMarker(
+               "provisional_global_route",
+               visualization_msgs::msg::Marker::ADD) &&
+        system.SawMarker(
+            "certified_local_execution",
+            visualization_msgs::msg::Marker::ADD);
+  }));
+  EXPECT_TRUE(system.ProvisionalPrecedesCertified());
 }
 
 TEST_F(PlanMotionServerTest, PublishesStableLocalTrajectoryEvidence) {
@@ -945,6 +1051,53 @@ TEST_F(PlanMotionServerTest, HoldsSameGoalContinuationUntilFeedbackIsFresh) {
   ASSERT_NE(resumed, nullptr);
   EXPECT_EQ(system.Result(resumed).result->reason_code, "FRESH_FEEDBACK_OBSERVED");
   EXPECT_EQ(calls.load(), 2);
+}
+
+TEST_F(
+    PlanMotionServerTest,
+    WaitsForExecutionFeedbackDuringRollingReferenceHandoff) {
+  auto owner = std::make_shared<int>(17);
+  std::shared_ptr<const lunar::planning::RouteContinuation> continuation(
+      owner,
+      reinterpret_cast<const lunar::planning::RouteContinuation*>(owner.get()));
+  std::atomic<int> calls{0};
+  std::mutex capture_mutex;
+  std::optional<lunar::planning::ExecutionContext> observed_execution;
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [&](const lunar::planning::PlannerInput& input) {
+        if (calls.fetch_add(1) == 0) {
+          return WheelReferenceOutput(input, continuation);
+        }
+        {
+          std::scoped_lock lock{capture_mutex};
+          observed_execution = input.previous_execution;
+        }
+        return NoRouteOutput("DELAYED_FEEDBACK_OBSERVED");
+      },
+      .preloaded_capabilities = WheelCapabilities(),
+  }};
+  system.PublishInputs();
+  const auto first = system.SendGoal(system.Goal("handoff-first"));
+  ASSERT_NE(first, nullptr);
+  ASSERT_EQ(system.Result(first).code, rclcpp_action::ResultCode::SUCCEEDED);
+
+  std::jthread delayed_feedback([&] {
+    std::this_thread::sleep_for(30ms);
+    using Feedback = lunar_navigation_msgs::msg::MotionExecutionFeedback;
+    system.PublishExecutionFeedback(
+        "wheel/rolling-1", "wheel/rolling-1", Feedback::WHEELED,
+        Feedback::EXECUTING);
+  });
+  const auto second = system.SendGoal(system.Goal("handoff-second"));
+  ASSERT_NE(second, nullptr);
+  const auto result = system.Result(second);
+
+  ASSERT_EQ(result.code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_NE(result.result, nullptr);
+  EXPECT_EQ(result.result->reason_code, "DELAYED_FEEDBACK_OBSERVED");
+  EXPECT_EQ(calls.load(), 2);
+  std::scoped_lock lock{capture_mutex};
+  ASSERT_TRUE(observed_execution.has_value());
 }
 
 TEST_F(PlanMotionServerTest, ClearsContinuationBeforePlanningAChangedTarget) {

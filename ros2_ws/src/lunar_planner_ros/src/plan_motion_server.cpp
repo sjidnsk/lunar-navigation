@@ -44,6 +44,7 @@
 #include "lunar_planner_ros/execution_feedback_tracker.hpp"
 #include "lunar_planner_ros/message_conversion.hpp"
 #include "lunar_planner_ros/reference_guard.hpp"
+#include "lunar_planner_ros/provisional_route_marker_publisher.hpp"
 #include "lunar_planner_ros/route_marker_publisher.hpp"
 #include "lunar_planner_ros/snapshot_builder.hpp"
 #include "lunar_planner_ros/snapshot_store.hpp"
@@ -58,6 +59,8 @@ using CallbackReturn =
 using namespace std::chrono_literals;
 
 constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
+constexpr auto kExecutionFeedbackSynchronizationGrace = 250ms;
+constexpr auto kExecutionFeedbackPollInterval = 2ms;
 constexpr std::array<std::string_view, 15U> kRetiredSearchParameters{
     "global_search.maximum_expanded_states",
     "global_search.maximum_reopened_states",
@@ -384,6 +387,9 @@ struct PlanMotionServer::Impl final {
       diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_publisher;
   rclcpp_lifecycle::LifecyclePublisher<
       visualization_msgs::msg::MarkerArray>::SharedPtr route_marker_publisher;
+  rclcpp_lifecycle::LifecyclePublisher<
+      visualization_msgs::msg::MarkerArray>::SharedPtr
+      provisional_route_marker_publisher;
 
   mutable std::mutex state_mutex;
   mutable std::mutex diagnostic_mutex;
@@ -400,6 +406,7 @@ struct PlanMotionServer::Impl final {
   std::chrono::nanoseconds execution_feedback_max_age{1s};
   ExecutionFeedbackTracker execution_feedback_tracker;
   RouteMarkerPublisher route_markers;
+  ProvisionalRouteMarkerPublisher provisional_route_markers;
   std::mutex route_marker_mutex;
   std::shared_ptr<GoalHandle> active_goal;
   std::unique_ptr<std::jthread> worker;
@@ -413,12 +420,13 @@ struct PlanMotionServer::Impl final {
       PlanMotionServer& owner,
       PlanMotionServerDependencies injected_dependencies)
       : node(owner), dependencies(std::move(injected_dependencies)) {
-    if (!dependencies.planner) {
+    if (!dependencies.planner && !dependencies.observing_planner) {
       auto planner = std::make_shared<lunar::planning::Planner>();
-      dependencies.planner =
+      dependencies.observing_planner =
           [planner = std::move(planner)](
-              const lunar::planning::PlannerInput& input) {
-            return planner->Plan(input);
+              const lunar::planning::PlannerInput& input,
+              const lunar::planning::ProvisionalRouteObserver& observer) {
+            return planner->Plan(input, observer);
           };
     }
 
@@ -441,6 +449,10 @@ struct PlanMotionServer::Impl final {
     route_marker_publisher =
         node.create_publisher<visualization_msgs::msg::MarkerArray>(
             "/planning/certified_route_markers",
+            rclcpp::QoS{1}.reliable().transient_local());
+    provisional_route_marker_publisher =
+        node.create_publisher<visualization_msgs::msg::MarkerArray>(
+            "/planning/provisional_route_markers",
             rclcpp::QoS{1}.reliable().transient_local());
     action_server = rclcpp_action::create_server<Action>(
         node.get_node_base_interface(),
@@ -648,6 +660,7 @@ struct PlanMotionServer::Impl final {
       {
         std::scoped_lock marker_lock{route_marker_mutex};
         (void)route_markers.DeleteOwned(node.now());
+        (void)provisional_route_markers.DeleteOwned(node.now());
       }
       {
         std::scoped_lock lock{diagnostic_mutex};
@@ -692,6 +705,7 @@ struct PlanMotionServer::Impl final {
     }
     diagnostics_publisher->on_activate();
     route_marker_publisher->on_activate();
+    provisional_route_marker_publisher->on_activate();
     PublishDiagnostic(
         diagnostic_msgs::msg::DiagnosticStatus::OK,
         "PLANNER_ACTIVE");
@@ -722,6 +736,9 @@ struct PlanMotionServer::Impl final {
     }
     if (route_marker_publisher->is_activated()) {
       route_marker_publisher->on_deactivate();
+    }
+    if (provisional_route_marker_publisher->is_activated()) {
+      provisional_route_marker_publisher->on_deactivate();
     }
     return CallbackReturn::SUCCESS;
   }
@@ -770,6 +787,9 @@ struct PlanMotionServer::Impl final {
     }
     if (route_marker_publisher->is_activated()) {
       route_marker_publisher->on_deactivate();
+    }
+    if (provisional_route_marker_publisher->is_activated()) {
+      provisional_route_marker_publisher->on_deactivate();
     }
     return CallbackReturn::SUCCESS;
   }
@@ -1107,6 +1127,7 @@ struct PlanMotionServer::Impl final {
     StopAndJoinWorker(
         accepted->replace_active_request
             ? "REQUEST_REPLACED" : "PREVIOUS_WORKER_COMPLETE");
+    PublishProvisionalMarkerDeletes();
 
     std::uint64_t generation = 0U;
     {
@@ -1165,7 +1186,7 @@ struct PlanMotionServer::Impl final {
           "SNAPSHOT_BUILDER_MISSING");
       return;
     }
-    const auto previous_execution =
+    auto previous_execution =
         execution_feedback_tracker.context(node.now());
 
     PublishFeedback(goal_handle, Action::Feedback::BUILDING_SNAPSHOT, started);
@@ -1225,6 +1246,23 @@ struct PlanMotionServer::Impl final {
       PublishOwnedMarkerDeletes();
     }
     if (cache_matches && !previous_execution.has_value()) {
+      const auto feedback_deadline = std::chrono::steady_clock::now() +
+          kExecutionFeedbackSynchronizationGrace;
+      while (!stop_token.stop_requested() &&
+             std::chrono::steady_clock::now() < feedback_deadline) {
+        std::this_thread::sleep_for(kExecutionFeedbackPollInterval);
+        previous_execution = execution_feedback_tracker.context(node.now());
+        if (previous_execution.has_value()) {
+          snapshot.input->previous_execution = previous_execution;
+          break;
+        }
+      }
+    }
+    if (stop_token.stop_requested()) {
+      CompleteCanceled(goal_handle, request.mission_revision, generation);
+      return;
+    }
+    if (cache_matches && !previous_execution.has_value()) {
       CompleteExecutionFeedbackFailure(
           goal_handle, request.mission_revision, generation,
           "EXECUTION_FEEDBACK_MISSING_OR_STALE", started);
@@ -1239,7 +1277,13 @@ struct PlanMotionServer::Impl final {
     }
 
     PublishFeedback(goal_handle, Action::Feedback::SEARCHING, started);
-    lunar::planning::PlannerOutput output = dependencies.planner(*snapshot.input);
+    lunar::planning::PlannerOutput output = dependencies.observing_planner
+        ? dependencies.observing_planner(
+              *snapshot.input,
+              [this](const lunar::planning::ProvisionalGlobalRoute& route) {
+                PublishProvisionalRoute(route);
+              })
+        : dependencies.planner(*snapshot.input);
     if (stop_token.stop_requested() ||
         output.outcome == lunar::planning::PlanningOutcome::kCanceled) {
       CompleteCanceled(goal_handle, request.mission_revision, generation);
@@ -1323,7 +1367,7 @@ struct PlanMotionServer::Impl final {
         };
       }
     } else {
-      ClearRollingRoute();
+      ClearRollingRoute(false);
     }
     if (route_id.empty()) {
       route_id = "route/" + request.request_id;
@@ -1338,7 +1382,7 @@ struct PlanMotionServer::Impl final {
       PublishRouteMarkers(
           output, *snapshot.input, route_id);
     } else {
-      PublishOwnedMarkerDeletes();
+      PublishCertifiedMarkerDeletes();
     }
 
     auto result = std::make_shared<Action::Result>(std::move(*converted.result));
@@ -1409,7 +1453,20 @@ struct PlanMotionServer::Impl final {
     }
   }
 
-  void PublishOwnedMarkerDeletes() {
+  void PublishProvisionalRoute(
+      const lunar::planning::ProvisionalGlobalRoute& route) {
+    if (!provisional_route_marker_publisher ||
+        !provisional_route_marker_publisher->is_activated()) {
+      return;
+    }
+    std::scoped_lock marker_lock{route_marker_mutex};
+    auto markers = provisional_route_markers.Replace(route, node.now());
+    if (!markers.markers.empty()) {
+      provisional_route_marker_publisher->publish(markers);
+    }
+  }
+
+  void PublishCertifiedMarkerDeletes() {
     std::scoped_lock marker_lock{route_marker_mutex};
     auto markers = route_markers.DeleteOwned(node.now());
     if (!markers.markers.empty() && route_marker_publisher &&
@@ -1418,12 +1475,29 @@ struct PlanMotionServer::Impl final {
     }
   }
 
-  void ClearRollingRoute() {
+  void PublishProvisionalMarkerDeletes() {
+    std::scoped_lock marker_lock{route_marker_mutex};
+    auto markers = provisional_route_markers.DeleteOwned(node.now());
+    if (!markers.markers.empty() && provisional_route_marker_publisher &&
+        provisional_route_marker_publisher->is_activated()) {
+      provisional_route_marker_publisher->publish(markers);
+    }
+  }
+
+  void PublishOwnedMarkerDeletes() {
+    PublishCertifiedMarkerDeletes();
+    PublishProvisionalMarkerDeletes();
+  }
+
+  void ClearRollingRoute(const bool clear_provisional_markers = true) {
     {
       std::scoped_lock lock{state_mutex};
       cached_route.reset();
     }
-    PublishOwnedMarkerDeletes();
+    PublishCertifiedMarkerDeletes();
+    if (clear_provisional_markers) {
+      PublishProvisionalMarkerDeletes();
+    }
   }
 
   void CompleteExecutionFeedbackFailure(
@@ -1674,6 +1748,12 @@ struct PlanMotionServer::Impl final {
       entry.value = std::move(value);
       status.values.push_back(std::move(entry));
     };
+    if (diagnostics != nullptr) {
+      append(
+          "planner_total_elapsed_s",
+          DiagnosticDouble(std::chrono::duration<double>(
+              diagnostics->elapsed).count()));
+    }
     if (diagnostics != nullptr && diagnostics->hierarchical) {
       const auto& hierarchical = *diagnostics->hierarchical;
       append(
@@ -1717,6 +1797,18 @@ struct PlanMotionServer::Impl final {
       append(
           "hierarchical_local_attempts",
           std::to_string(hierarchical.local_attempts));
+      append(
+          "hierarchical_local_search_runs",
+          std::to_string(hierarchical.local_search_runs));
+      append(
+          "hierarchical_global_replans",
+          std::to_string(hierarchical.global_replans));
+      append(
+          "hierarchical_global_projection_cache_hits",
+          std::to_string(hierarchical.global_projection_cache_hits));
+      append(
+          "hierarchical_local_projection_cache_hits",
+          std::to_string(hierarchical.local_projection_cache_hits));
       append(
           "hierarchical_corridor_width_m",
           DiagnosticDouble(hierarchical.corridor_width_m));

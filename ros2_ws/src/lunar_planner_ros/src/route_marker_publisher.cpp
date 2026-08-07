@@ -162,15 +162,6 @@ void AddCommonReferenceMarkers(
     start.scale.z = 0.35;
     markers.push_back(std::move(start));
 
-    std::vector<lunar::planning::Vec3> route;
-    route.reserve(reference.preview.poses_map.size());
-    for (const auto& pose : reference.preview.poses_map) {
-      route.push_back(pose.position_m);
-    }
-    markers.push_back(LineMarker(
-        "planning_global_route", 0, "map", context.stamp, 0.08,
-        Color(0.15F, 0.65F, 1.0F, 0.95F), route));
-
     if (reference.platform_type != lunar::planning::PlatformType::kHopper) {
       const std::array<std::pair<const char*, std_msgs::msg::ColorRGBA>, 3>
           semantics{
@@ -227,8 +218,8 @@ void AddCommonReferenceMarkers(
     local.push_back(point.pose.position_m);
   }
   markers.push_back(LineMarker(
-      "planning_current_segment", 0, "odom", context.stamp, 0.11,
-      Color(1.0F, 0.75F, 0.05F, 1.0F), local));
+      "certified_local_execution", 0, "odom", context.stamp, 0.12,
+      Color(0.10F, 1.0F, 0.25F, 1.0F), local));
   if (local.size() >= 2U && local.front() != local.back()) {
     Marker direction = BaseMarker(
         "planning_direction", 0, Marker::ARROW, "odom", context.stamp,

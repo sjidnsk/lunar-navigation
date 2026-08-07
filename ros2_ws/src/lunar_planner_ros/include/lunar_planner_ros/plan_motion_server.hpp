@@ -10,16 +10,20 @@
 #include <rclcpp/node_options.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 
-#include "lunar_planner_core/types/planner_io.hpp"
+#include "lunar_planner_core/planner.hpp"
 #include "lunar_planner_ros/capability_loader.hpp"
 
 namespace lunar::planning::ros {
 
 using PlannerFunction = std::function<lunar::planning::PlannerOutput(
     const lunar::planning::PlannerInput&)>;
+using ObservingPlannerFunction = std::function<lunar::planning::PlannerOutput(
+    const lunar::planning::PlannerInput&,
+    const lunar::planning::ProvisionalRouteObserver&)>;
 
 struct PlanMotionServerDependencies final {
   PlannerFunction planner;
+  ObservingPlannerFunction observing_planner;
   std::optional<LoadedCapabilities> preloaded_capabilities;
 };
 

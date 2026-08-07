@@ -204,8 +204,8 @@ TEST(RouteMarkerPublisher, RendersWheeledGeometryRouteMarginAndDirection) {
   EXPECT_NEAR(margin->points.front().y, -0.609, 1.0e-12);
   EXPECT_NE(Find(markers, "planning_start"), nullptr);
   EXPECT_NE(Find(markers, "planning_goal"), nullptr);
-  EXPECT_NE(Find(markers, "planning_global_route"), nullptr);
-  EXPECT_NE(Find(markers, "planning_current_segment"), nullptr);
+  EXPECT_EQ(Find(markers, "planning_global_route"), nullptr);
+  EXPECT_NE(Find(markers, "certified_local_execution"), nullptr);
   EXPECT_NE(Find(markers, "planning_direction"), nullptr);
   const Marker* roughness = Find(markers, "terrain_semantics", 0);
   const Marker* obstacle = Find(markers, "terrain_semantics", 1);
@@ -235,8 +235,8 @@ TEST(RouteMarkerPublisher, RendersLeggedBodyAndGroundRouteEvidence) {
   EXPECT_DOUBLE_EQ(body->scale.z, 0.35);
   EXPECT_NE(Find(markers, "planning_start"), nullptr);
   EXPECT_NE(Find(markers, "planning_goal"), nullptr);
-  EXPECT_NE(Find(markers, "planning_global_route"), nullptr);
-  EXPECT_NE(Find(markers, "planning_current_segment"), nullptr);
+  EXPECT_EQ(Find(markers, "planning_global_route"), nullptr);
+  EXPECT_NE(Find(markers, "certified_local_execution"), nullptr);
   EXPECT_EQ(Find(markers, "wheeled_platform_body"), nullptr);
 }
 

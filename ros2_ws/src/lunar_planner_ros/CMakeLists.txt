@@ -28,6 +28,7 @@ add_library(${PROJECT_NAME} SHARED
   src/grid_map_adapter.cpp
   src/message_conversion.cpp
   src/plan_motion_server.cpp
+  src/provisional_route_marker_publisher.cpp
   src/reference_guard.cpp
   src/route_marker_publisher.cpp
   src/snapshot_builder.cpp
@@ -120,6 +121,11 @@ if(BUILD_TESTING)
     test/route_marker_publisher_test.cpp)
   target_link_libraries(
     lunar_planner_ros_route_marker_publisher_test ${PROJECT_NAME})
+
+  ament_add_gtest(lunar_planner_ros_provisional_route_marker_publisher_test
+    test/provisional_route_marker_publisher_test.cpp)
+  target_link_libraries(
+    lunar_planner_ros_provisional_route_marker_publisher_test ${PROJECT_NAME})
 
   ament_add_gtest(lunar_planner_ros_capability_loader_test
     test/capability_loader_test.cpp)
