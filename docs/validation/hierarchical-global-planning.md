@@ -231,7 +231,32 @@ SHA-256 位于：
 自有 PID 正常清理；controller/RViz 日志未发现 traceback、fatal 或崩溃。该证据使用独立合成
 地图，不连接 Isaac Sim，也不代表真实平台执行性能。
 
-## 8. 未验证边界
+## 8. 飞跃式目标着陆证据与有限高度越障（2026-08-07）
+
+本轮保持单跳、正式能力数值、Action/消息接口和地图 Topic 不变，把飞跃式 `local_map` 明确为
+目标着陆区域 L0 证据窗；起点到目标的完整三维飞行管继续由 `global_map` 认证。普通
+`obstacle` 使用 `obstacle_height` 表达有限顶面，允许飞行管从上方通过；`forbidden` 仍按绝对
+禁入层处理。
+
+开始实施前，在隔离工作树的 Release 基线中验证：
+
+- `lunar_planner_core`：23 tests，0 errors，0 failures，0 skipped；
+- `lunar_planner_core_hopper_planner_test`：通过；
+- `SearchesAnAlternateFeasibleTimeWhenMinimumArcIsBlocked` 证明 20 m 单跳面对 6 m 障碍时会
+  搜索更高可行抛物线；
+- 新增 `RejectsObstacleThatIntersectsEveryFuelFeasibleFlightTube`，使用 1000 m 障碍锁定
+  `HOPPER_ALL_FLIGHT_TUBES_BLOCKED` 反例，目标测试继续通过。
+
+基线及增量构建产物位于：
+
+```text
+/home/kai/CodexDownloads/lunar_navigation/hopper_target_landing_evidence/baseline
+```
+
+完整外部 RViz 目标窗同步、超过旧 12 m 半径的 Action 结果和最终 Release 资格证据将在本节
+后续以追加方式记录，不覆盖前述历史基线。
+
+## 9. 未验证边界
 
 | 项目 | 状态 | 说明 |
 |---|---|---|

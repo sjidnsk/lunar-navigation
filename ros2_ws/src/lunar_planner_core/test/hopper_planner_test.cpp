@@ -138,6 +138,18 @@ TEST(HopperPlanner, SearchesAnAlternateFeasibleTimeWhenMinimumArcIsBlocked) {
   EXPECT_GT(output.diagnostics.hierarchical->hopper_certification_attempts, 2U);
 }
 
+TEST(HopperPlanner, RejectsObstacleThatIntersectsEveryFuelFeasibleFlightTube) {
+  Planner planner;
+  PlannerInput input = LongHopInput(20.0);
+  SetObstacle(input.world.global_map, 15.0, 5.0, 1000.0F);
+
+  const PlannerOutput output = planner.Plan(input);
+
+  EXPECT_EQ(output.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_FALSE(output.reference.has_value());
+  EXPECT_EQ(output.reason_code, "HOPPER_ALL_FLIGHT_TUBES_BLOCKED");
+}
+
 TEST(HopperPlanner, IgnoresCurrentVelocityForStationaryLaunchModel) {
   Planner planner;
   PlannerInput moving = test::MakeValidHopperInput();
