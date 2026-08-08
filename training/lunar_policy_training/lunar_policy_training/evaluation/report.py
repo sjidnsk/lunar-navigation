@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -20,9 +21,10 @@ from ..policy.cross_attention import CrossAttentionPolicy, sample_action
 from ..policy.observation import PolicyBatch
 from ..proxy_scenario import ProxyEnvironmentFactory, proxy_observation
 from ..reward import compute_transition_reward, reward_weights_sha256
+from ..training_semantics import FORMAL_SUCCESS_COVERAGE_RATIO
 
 
-EVALUATION_SCHEMA_VERSION = "lunar-policy-release-evaluation/v2"
+EVALUATION_SCHEMA_VERSION = "lunar-policy-release-evaluation/v3"
 DEVELOPMENT_EVALUATION_SCHEMA_VERSION = (
     "lunar-policy-development-evaluation/v2"
 )
@@ -31,6 +33,33 @@ REQUIRED_METHODS = (
     "nearest_frontier",
     "gain_over_cost_frontier",
 )
+FORMAL_EVALUATION_SPLITS = ("validation", "test", "holdout")
+FORMAL_EVALUATION_WATCHDOG_MAX_STEPS = 4096
+FORMAL_EVALUATION_WATCHDOG_SECONDS = 3600.0
+
+
+class FormalEvaluationIncomplete(RuntimeError):
+    """A technical watchdog expired before every natural terminal."""
+
+
+def mission_coverage_ratio(observations: PolicyBatch) -> np.ndarray:
+    """Return the controller-owned 0.2 m ROI coverage for every row."""
+    if not isinstance(observations, PolicyBatch):
+        raise ValueError("mission coverage requires PolicyBatch")
+    values = (
+        observations.pose_features[:, 4]
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float32, copy=True)
+    )
+    if (
+        values.ndim != 1
+        or not np.isfinite(values).all()
+        or ((values < 0.0) | (values > 1.0)).any()
+    ):
+        raise ValueError("mission coverage must be finite in [0,1]")
+    return values
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +138,7 @@ class PlatformMetrics:
 class MethodEvaluation:
     method: str
     per_platform: Mapping[str, PlatformMetrics]
+    per_split: Mapping[str, Mapping[str, PlatformMetrics]] | None = None
 
     def __post_init__(self) -> None:
         if self.method not in REQUIRED_METHODS:
@@ -118,6 +148,19 @@ class MethodEvaluation:
             for platform in PLATFORMS
         ):
             raise ValueError("method evaluation must contain three platforms")
+        if self.per_split is None:
+            object.__setattr__(self, "per_split", {})
+        elif not isinstance(self.per_split, Mapping) or any(
+            split not in FORMAL_EVALUATION_SPLITS
+            or not isinstance(metrics, Mapping)
+            or set(metrics) != set(PLATFORMS)
+            or any(
+                not isinstance(metrics[platform], PlatformMetrics)
+                for platform in PLATFORMS
+            )
+            for split, metrics in self.per_split.items()
+        ):
+            raise ValueError("method split evaluation structure is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +192,16 @@ class EvaluationReport:
                 raise ValueError("proxy scenario schedule identity is missing")
         elif self.run_identity.run_kind != "formal":
             raise ValueError("formal evaluation requires formal run identity")
+        if self.proxy:
+            if any(method.per_split for method in self.methods):
+                raise ValueError("proxy evaluation must not claim formal splits")
+        elif any(
+            set(method.per_split) != set(FORMAL_EVALUATION_SPLITS)
+            for method in self.methods
+        ):
+            raise ValueError(
+                "formal evaluation must report every non-training split"
+            )
         if len(self.reward_hash) != 64 or len(self.checkpoint_sha256) != 64:
             raise ValueError("evaluation hashes must be SHA-256 hex digests")
         if self.reward_hash != self.run_identity.reward_sha256:
@@ -173,8 +226,16 @@ class EvaluationReport:
         current = self.method(method)
         changed = dict(current.per_platform)
         changed[platform_type] = metrics
+        changed_splits = {
+            split: {**split_metrics, platform_type: metrics}
+            for split, split_metrics in current.per_split.items()
+        }
         return self.replace_method(
-            MethodEvaluation(method=current.method, per_platform=changed)
+            MethodEvaluation(
+                method=current.method,
+                per_platform=changed,
+                per_split=changed_splits,
+            )
         )
 
     def replace_method(self, changed: MethodEvaluation) -> "EvaluationReport":
@@ -201,6 +262,21 @@ class EvaluationReport:
                         platform: asdict(method.per_platform[platform])
                         for platform in PLATFORMS
                     },
+                    **(
+                        {
+                            "per_split": {
+                                split: {
+                                    platform: asdict(
+                                        method.per_split[split][platform]
+                                    )
+                                    for platform in PLATFORMS
+                                }
+                                for split in FORMAL_EVALUATION_SPLITS
+                            }
+                        }
+                        if method.per_split
+                        else {}
+                    ),
                 }
                 for method in sorted(self.methods, key=lambda value: value.method)
             ],
@@ -301,7 +377,11 @@ def _aggregate_platform_metrics(
     return PlatformMetrics(
         scenario_seeds=tuple(item.scenario_seed for item in scenarios),
         success_coverage_rate=(
-            sum(item.final_coverage >= 0.95 for item in scenarios)
+            sum(
+                item.final_coverage
+                >= FORMAL_SUCCESS_COVERAGE_RATIO - 1.0e-6
+                for item in scenarios
+            )
             / scenario_count
         ),
         safety_violation_count=sum(
@@ -367,13 +447,20 @@ def select_best_candidate(
         raise ValueError("at least one candidate evaluation is required")
 
     def ranking(candidate: CandidateEvaluation) -> tuple[float, float, float, str]:
-        metrics = candidate.report.method("ppo_policy").per_platform
+        method = candidate.report.method("ppo_policy")
+        metrics = (
+            tuple(
+                method.per_split[split][platform]
+                for split in FORMAL_EVALUATION_SPLITS
+                for platform in PLATFORMS
+            )
+            if method.per_split
+            else tuple(method.per_platform[platform] for platform in PLATFORMS)
+        )
         return (
-            -min(
-                metrics[platform].success_coverage_rate for platform in PLATFORMS
-            ),
-            max(metrics[platform].planner_failure_rate for platform in PLATFORMS),
-            max(metrics[platform].completion_time_s for platform in PLATFORMS),
+            -min(metric.success_coverage_rate for metric in metrics),
+            max(metric.planner_failure_rate for metric in metrics),
+            max(metric.completion_time_s for metric in metrics),
             candidate.checkpoint,
         )
 
@@ -457,6 +544,7 @@ def evaluate_formal_policy(
         by_platform: dict[str, list[_ScenarioEvidence]] = {
             platform: [] for platform in PLATFORMS
         }
+        by_split: dict[str, Mapping[str, tuple[_ScenarioEvidence, ...]]] = {}
         for batch in formal_batches:
             batch_results = _evaluate_formal_batch(
                 policy,
@@ -464,6 +552,7 @@ def evaluate_formal_policy(
                 device=target_device,
                 batch=batch,
             )
+            by_split[batch.split] = batch_results
             for platform in PLATFORMS:
                 by_platform[platform].extend(batch_results[platform])
         per_platform: dict[str, PlatformMetrics] = {}
@@ -472,7 +561,23 @@ def evaluate_formal_policy(
                 tuple(by_platform[platform]),
                 theta_active=platform != "HOPPER",
             )
-        methods.append(MethodEvaluation(method=method, per_platform=per_platform))
+        per_split = {
+            split: {
+                platform: _aggregate_platform_metrics(
+                    by_split[split][platform],
+                    theta_active=platform != "HOPPER",
+                )
+                for platform in PLATFORMS
+            }
+            for split in FORMAL_EVALUATION_SPLITS
+        }
+        methods.append(
+            MethodEvaluation(
+                method=method,
+                per_platform=per_platform,
+                per_split=per_split,
+            )
+        )
     return EvaluationReport(
         proxy=False,
         scenario_schedule_id=f"formal-evaluation/{schedule_digest}",
@@ -522,7 +627,18 @@ def _evaluate_formal_chunk(
     batch: FormalEvaluationBatch,
     scenario_offset: int,
     scenario_seeds: tuple[int, ...],
+    watchdog_max_steps: int = FORMAL_EVALUATION_WATCHDOG_MAX_STEPS,
+    watchdog_seconds: float = FORMAL_EVALUATION_WATCHDOG_SECONDS,
 ) -> Mapping[str, tuple[_ScenarioEvidence, ...]]:
+    if type(watchdog_max_steps) is not int or watchdog_max_steps <= 0:
+        raise ValueError("formal evaluation watchdog steps must be positive")
+    if (
+        not isinstance(watchdog_seconds, (int, float))
+        or isinstance(watchdog_seconds, bool)
+        or not math.isfinite(float(watchdog_seconds))
+        or watchdog_seconds <= 0.0
+    ):
+        raise ValueError("formal evaluation watchdog seconds must be positive")
     count = len(scenario_seeds)
     row_schedule = tuple(
         (platform, local_index, scenario_seed)
@@ -554,7 +670,19 @@ def _evaluate_formal_chunk(
         completion_steps = np.zeros(row_count, dtype=np.int64)
         final_coverage = np.zeros(row_count, dtype=np.float32)
         theta_samples: list[list[float]] = [[] for _ in range(row_count)]
-        for step_index in range(1, 4):
+        step_index = 0
+        deadline = time.monotonic() + float(watchdog_seconds)
+        while not bool(np.all(completion_steps > 0)):
+            if (
+                step_index >= watchdog_max_steps
+                or time.monotonic() >= deadline
+            ):
+                unfinished = int(np.count_nonzero(completion_steps == 0))
+                raise FormalEvaluationIncomplete(
+                    "EVALUATION_INCOMPLETE: formal watchdog expired with "
+                    f"{unfinished} unfinished rows"
+                )
+            step_index += 1
             prepared = pool.prepare_decision_boundaries(policy_version=0)
             no_action_workers = tuple(
                 int(index)
@@ -563,10 +691,20 @@ def _evaluate_formal_chunk(
                 .tolist()
             )
             if no_action_workers:
-                if any(completion_steps[index] == 0 for index in no_action_workers):
-                    raise ValueError(
-                        "formal evaluation scenario has no actionable boundary"
-                    )
+                prepared_coverage = mission_coverage_ratio(
+                    prepared.observations
+                )
+                for index in no_action_workers:
+                    if completion_steps[index] != 0:
+                        continue
+                    if executed_steps[index] <= 0:
+                        raise ValueError(
+                            "formal evaluation started without an actionable boundary"
+                        )
+                    completion_steps[index] = step_index - 1
+                    final_coverage[index] = prepared_coverage[index]
+                if bool(np.all(completion_steps > 0)):
+                    break
                 pool.reset_terminated_workers(
                     no_action_workers, policy_version=0
                 )
@@ -616,13 +754,7 @@ def _evaluate_formal_chunk(
             ):
                 raise ValueError("formal evaluation worker evidence is missing")
             finite_rows = _finite_output_rows(stepped.observations, stepped.rewards)
-            coverage = (
-                stepped.observations.coverage_summary[:, 0]
-                .mean(dim=(1, 2))
-                .detach()
-                .cpu()
-                .numpy()
-            )
+            coverage = mission_coverage_ratio(stepped.observations)
             for index, outcome in enumerate(stepped.planning_outcomes):
                 if completion_steps[index] != 0:
                     continue
@@ -668,7 +800,7 @@ def _evaluate_formal_chunk(
                 .flatten()
                 .tolist()
             )
-            if terminated_workers and step_index < 3:
+            if terminated_workers and not bool(np.all(completion_steps > 0)):
                 pool.reset_terminated_workers(
                     terminated_workers, policy_version=0
                 )
@@ -691,7 +823,7 @@ def _evaluate_formal_chunk(
                 deterministic_match_count=int(deterministic_matches[index]),
                 planner_failure_count=int(planner_failures[index]),
                 executed_step_count=int(executed_steps[index]),
-                completion_step_count=int(completion_steps[index] or 3),
+                completion_step_count=int(completion_steps[index]),
                 selected_thetas_rad=tuple(theta_samples[index]),
             )
             for index, (row_platform, _, scenario_seed) in enumerate(row_schedule)
@@ -1032,6 +1164,8 @@ __all__ = [
     "DEVELOPMENT_EVALUATION_SCHEMA_VERSION",
     "EVALUATION_SCHEMA_VERSION",
     "EvaluationReport",
+    "FORMAL_EVALUATION_SPLITS",
+    "FormalEvaluationIncomplete",
     "FormalEvaluationBatch",
     "MethodEvaluation",
     "PlatformMetrics",
@@ -1039,6 +1173,7 @@ __all__ = [
     "report_sha256",
     "evaluate_formal_policy",
     "evaluate_proxy_policy",
+    "mission_coverage_ratio",
     "select_best_candidate",
     "write_report",
 ]

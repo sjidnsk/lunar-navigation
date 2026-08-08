@@ -9,7 +9,11 @@ from typing import Mapping
 import yaml
 
 from ..curriculum import PLATFORMS
-from .report import EvaluationReport, REQUIRED_METHODS
+from .report import (
+    EvaluationReport,
+    FORMAL_EVALUATION_SPLITS,
+    REQUIRED_METHODS,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,19 +83,22 @@ def evaluate_release_gate(
             formal_candidate_eligible=True,
         )
     ppo = report.method("ppo_policy")
-    for platform in PLATFORMS:
-        metrics = ppo.per_platform[platform]
-        for rule_name, threshold in rules.per_platform_rules.items():
-            if rule_name.endswith("_min"):
-                metric_name = rule_name[: -len("_min")]
-                passed = float(getattr(metrics, metric_name)) >= threshold
-            elif rule_name.endswith("_max"):
-                metric_name = rule_name[: -len("_max")]
-                passed = float(getattr(metrics, metric_name)) <= threshold
-            else:
-                raise ValueError(f"gate rule lacks _min/_max suffix: {rule_name}")
-            if not passed:
-                failed.append(f"{platform}.{rule_name}")
+    for split in FORMAL_EVALUATION_SPLITS:
+        for platform in PLATFORMS:
+            metrics = ppo.per_split[split][platform]
+            for rule_name, threshold in rules.per_platform_rules.items():
+                if rule_name.endswith("_min"):
+                    metric_name = rule_name[: -len("_min")]
+                    passed = float(getattr(metrics, metric_name)) >= threshold
+                elif rule_name.endswith("_max"):
+                    metric_name = rule_name[: -len("_max")]
+                    passed = float(getattr(metrics, metric_name)) <= threshold
+                else:
+                    raise ValueError(
+                        f"gate rule lacks _min/_max suffix: {rule_name}"
+                    )
+                if not passed:
+                    failed.append(f"{split}.{platform}.{rule_name}")
     return GateResult(
         passed=not failed,
         failed_rules=tuple(failed),

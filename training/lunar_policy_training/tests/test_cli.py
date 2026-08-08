@@ -683,7 +683,17 @@ def test_formal_evaluation_artifacts_are_non_proxy_and_gate_bound(
         ),
         reward_hash=development.reward_hash,
         checkpoint_sha256=development.checkpoint_sha256,
-        methods=development.methods,
+        methods=tuple(
+            MethodEvaluation(
+                method=method.method,
+                per_platform=method.per_platform,
+                per_split={
+                    split: dict(method.per_platform)
+                    for split in ("validation", "test", "holdout")
+                },
+            )
+            for method in development.methods
+        ),
     )
     gate_result = evaluate_release_gate(
         report,

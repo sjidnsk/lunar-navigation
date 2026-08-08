@@ -48,7 +48,18 @@ def _report(
         "HOPPER": _platform_metrics(hopper),
     }
     methods = tuple(
-        MethodEvaluation(method=method, per_platform=platforms)
+        MethodEvaluation(
+            method=method,
+            per_platform=platforms,
+            per_split=(
+                None
+                if proxy
+                else {
+                    split: dict(platforms)
+                    for split in ("validation", "test", "holdout")
+                }
+            ),
+        )
         for method in (
             "ppo_policy",
             "nearest_frontier",
@@ -82,7 +93,11 @@ def test_gate_fails_when_only_hopper_is_below_95_percent() -> None:
     )
 
     assert result.passed is False
-    assert result.failed_rules == ("HOPPER.success_coverage_rate_min",)
+    assert result.failed_rules == (
+        "validation.HOPPER.success_coverage_rate_min",
+        "test.HOPPER.success_coverage_rate_min",
+        "holdout.HOPPER.success_coverage_rate_min",
+    )
     assert result.formal_candidate_eligible is True
 
 
@@ -116,7 +131,9 @@ def test_release_gate_adds_action_safety_and_repeat_rules() -> None:
     )
 
     assert result.failed_rules == (
-        "HOPPER.deterministic_repeat_match_rate_min",
+        "validation.HOPPER.deterministic_repeat_match_rate_min",
+        "test.HOPPER.deterministic_repeat_match_rate_min",
+        "holdout.HOPPER.deterministic_repeat_match_rate_min",
     )
 
 
@@ -155,10 +172,18 @@ def test_candidate_gate_rejects_event_derived_execution_violations() -> None:
     )
 
     assert result.failed_rules == (
-        "HOPPER.safety_violation_count_max",
-        "HOPPER.invalid_action_count_max",
-        "HOPPER.platform_reference_mismatch_count_max",
-        "HOPPER.hopper_commitment_violation_count_max",
+        "validation.HOPPER.safety_violation_count_max",
+        "validation.HOPPER.invalid_action_count_max",
+        "validation.HOPPER.platform_reference_mismatch_count_max",
+        "validation.HOPPER.hopper_commitment_violation_count_max",
+        "test.HOPPER.safety_violation_count_max",
+        "test.HOPPER.invalid_action_count_max",
+        "test.HOPPER.platform_reference_mismatch_count_max",
+        "test.HOPPER.hopper_commitment_violation_count_max",
+        "holdout.HOPPER.safety_violation_count_max",
+        "holdout.HOPPER.invalid_action_count_max",
+        "holdout.HOPPER.platform_reference_mismatch_count_max",
+        "holdout.HOPPER.hopper_commitment_violation_count_max",
     )
 
 
@@ -172,3 +197,31 @@ def test_baselines_are_required_but_do_not_need_to_beat_ppo() -> None:
 
     assert result.passed is True
     assert result.failed_rules == ()
+
+
+def test_holdout_failure_cannot_be_hidden_by_validation_and_test_average() -> None:
+    report = _report(wheeled=0.97, legged=0.97, hopper=0.97)
+    ppo = report.method("ppo_policy")
+    holdout = {
+        platform: _platform_metrics(0.0)
+        for platform in ("WHEELED", "LEGGED", "HOPPER")
+    }
+    changed = report.replace_method(
+        MethodEvaluation(
+            method="ppo_policy",
+            per_platform=ppo.per_platform,
+            per_split={**ppo.per_split, "holdout": holdout},
+        )
+    )
+
+    result = evaluate_release_gate(
+        changed,
+        load_gate_rules(ROOT / "training/configs/candidate_gate_v1.yaml"),
+    )
+
+    assert result.passed is False
+    assert result.failed_rules == (
+        "holdout.WHEELED.success_coverage_rate_min",
+        "holdout.LEGGED.success_coverage_rate_min",
+        "holdout.HOPPER.success_coverage_rate_min",
+    )

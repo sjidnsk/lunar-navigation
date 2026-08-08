@@ -436,7 +436,7 @@ def test_formal_builder_rejects_preflight_cache_by_default(
         ).build()
 
 
-def test_formal_evaluation_batch_executes_real_three_platform_workers(
+def test_formal_evaluation_watchdog_classifies_real_unfinished_workers(
     tmp_path: pathlib.Path,
 ) -> None:
     assembly, _, _ = _assembly(tmp_path)
@@ -447,12 +447,17 @@ def test_formal_evaluation_batch_executes_real_three_platform_workers(
         scenario_seeds=(409000,),
     )
 
-    result = report_module._evaluate_formal_batch(
-        CrossAttentionPolicy(),
-        method="nearest_frontier",
-        device=torch.device("cpu"),
-        batch=batch,
-    )
-
-    assert set(result) == {"WHEELED", "LEGGED", "HOPPER"}
-    assert all(values[0].executed_step_count > 0 for values in result.values())
+    with pytest.raises(
+        report_module.FormalEvaluationIncomplete,
+        match="EVALUATION_INCOMPLETE",
+    ):
+        report_module._evaluate_formal_chunk(
+            CrossAttentionPolicy(),
+            method="nearest_frontier",
+            device=torch.device("cpu"),
+            batch=batch,
+            scenario_offset=0,
+            scenario_seeds=(409000,),
+            watchdog_max_steps=1,
+            watchdog_seconds=60.0,
+        )
