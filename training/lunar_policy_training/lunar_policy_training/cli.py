@@ -1229,7 +1229,12 @@ def _formal_evaluation_batches(
 ) -> tuple[FormalEvaluationBatch, ...]:
     """Bind cache-order scene seeds to the three non-training factories."""
     expected_splits = ("validation", "test", "holdout")
-    if set(assemblies) != set(expected_splits):
+    assembly_splits = set(assemblies)
+    non_training_splits = set(expected_splits)
+    if assembly_splits not in (
+        non_training_splits,
+        non_training_splits | {"train"},
+    ):
         raise PreflightError(
             "formal evaluation requires validation, test, and holdout assemblies"
         )

@@ -600,7 +600,7 @@ def test_cli_development_evaluation_artifacts_cannot_be_mistaken_for_release(
     }
 
 
-def test_formal_evaluation_batches_follow_cache_schedule_and_holdout_seed(
+def test_formal_evaluation_batches_ignore_preflight_train_assembly(
     tmp_path: pathlib.Path,
 ) -> None:
     scenario_path = tmp_path / "scenario-manifest.json"
@@ -647,7 +647,7 @@ def test_formal_evaluation_batches_follow_cache_schedule_and_holdout_seed(
             factory=SimpleNamespace(scenario_schedule_id=f"cache/{split}/v3"),
             observation_template=template,
         )
-        for split in ("validation", "test", "holdout")
+        for split in ("train", "validation", "test", "holdout")
     }
 
     batches = cli_module._formal_evaluation_batches(cache, assemblies)
