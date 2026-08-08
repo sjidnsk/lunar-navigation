@@ -805,7 +805,7 @@ def test_cpu_pretraining_smoke_links_data_v3_update_checkpoint_and_resume(
     def current_global_map(
         current_inputs: _SyntheticPolarInputs,
     ) -> bridge_api.GridMap:
-        scale = 4
+        scale = 1
         observed = np.repeat(
             np.repeat(current_inputs.world.observed_mask, scale, axis=0),
             scale,
@@ -842,7 +842,7 @@ def test_cpu_pretraining_smoke_links_data_v3_update_checkpoint_and_resume(
         grid.stamp.nanoseconds_since_epoch = 1_000_000_000
         grid.width = observed.shape[1]
         grid.height = observed.shape[0]
-        grid.resolution_m = 1.0
+        grid.resolution_m = canvas.geometry.resolution_m
         grid.origin_m = _bridge_vec3(
             canvas.bounds_m[0], canvas.bounds_m[1], 0.0
         )

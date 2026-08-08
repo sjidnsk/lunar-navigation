@@ -28,7 +28,9 @@ from lunar_policy_training.cli import (  # noqa: E402
     TrainingBoundaryLoop,
     _checkpoint_target,
     _formal_sensor_performance_preflight,
+    _formal_run_identity,
     _freeze_task4_manifest,
+    _freeze_formal_environment_manifest,
     _load_calibrated_run_state,
     _run_curriculum_training,
     _update_run_manifest,
@@ -43,6 +45,7 @@ from lunar_policy_training.config import (
 )
 from lunar_policy_training.checkpoint import RunIdentity
 from lunar_policy_training.curriculum import CurriculumSchedule
+from lunar_policy_training.polar_data.formal_cache import FormalCacheIdentity
 from lunar_policy_training.evaluation.release_gate import (
     evaluate_release_gate,
     load_gate_rules,
@@ -78,9 +81,13 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
         [
             "calibrate",
             "--config",
-            "training/configs/rtx4080_super_smoke.yaml",
+            "training/configs/rtx4080_super_v3_joint.yaml",
             "--artifact-root",
             "/tmp/lunar-task4",
+            "--cache-manifest",
+            "/tmp/formal-cache/cache-manifest.json",
+            "--sensor-performance-report",
+            "/tmp/sensor-performance.json",
         ]
     )
 
@@ -127,6 +134,8 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
     assert prepare.materialization == "full"
     assert prepare.preflight_scenario_limit is None
     assert calibrate.command == "calibrate"
+    assert calibrate.cache_manifest == "/tmp/formal-cache/cache-manifest.json"
+    assert calibrate.sensor_performance_report == "/tmp/sensor-performance.json"
     assert train.command == "train"
     assert train.sensor_performance_report is None
     assert resume.command == "resume"
@@ -135,6 +144,59 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
     assert evaluate.sensor_performance_report is None
     assert extension.command == "extend-budget"
     assert extension.blocks == 2
+
+
+def test_formal_calibrate_rejects_cache_before_cuda_or_artifact_creation(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "formal-run"
+    cache_manifest = tmp_path / "preflight-cache" / "cache-manifest.json"
+    sensor_report = tmp_path / "sensor-performance.json"
+    touched: list[str] = []
+    bundle = FrozenCapabilityBundle(
+        schema="lunar-training-capability-freeze/v1",
+        platforms=(),
+        bundle_sha256="b" * 64,
+        formal_eligible=True,
+    )
+    monkeypatch.setattr(
+        cli_module, "_formal_capability_preflight", lambda _root: bundle
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_formal_sensor_performance_preflight",
+        lambda *args, **kwargs: "s" * 64,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_build_formal_environment",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            PreflightError("formal command requires a full cache")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        torch.cuda, "is_available", lambda: touched.append("cuda") or True
+    )
+
+    with pytest.raises(PreflightError, match="full cache"):
+        cli_module.main(
+            [
+                "calibrate",
+                "--config",
+                str(REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"),
+                "--artifact-root",
+                str(artifact_root),
+                "--cache-manifest",
+                str(cache_manifest),
+                "--sensor-performance-report",
+                str(sensor_report),
+            ]
+        )
+
+    assert touched == []
+    assert not artifact_root.exists()
 
 
 def test_prepare_data_delegates_to_formal_cache_without_touching_cuda(
@@ -290,6 +352,39 @@ def test_training_configs_explicitly_separate_formal_and_development_smoke() -> 
     leaked["proxy"] = True
     with pytest.raises(TrainingConfigError, match="exactly"):
         resolve_training_config(leaked)
+
+
+def test_formal_run_identity_is_derived_only_from_verified_cache_identity() -> None:
+    cache_identity = FormalCacheIdentity(
+        source_lock_file_sha256="1" * 64,
+        source_sha256s={
+            "NASA_LOLA_87S_DEM": "2" * 64,
+            "NASA_LOLA_87S_COUNT": "3" * 64,
+            "JAXA_LUPEX_DATA_S1": "4" * 64,
+        },
+        split_manifest_file_sha256="5" * 64,
+        split_sha256="6" * 64,
+        scenario_manifest_sha256="7" * 64,
+        generator_sha256="8" * 64,
+        capability_sha256="9" * 64,
+        reward_sha256=reward_weights_sha256(),
+        training_semantics_sha256="b" * 64,
+        v3_source_commit="c" * 40,
+        v3_sha256="d" * 64,
+    )
+
+    identity = _formal_run_identity(cache_identity)
+
+    assert identity == RunIdentity(
+        run_kind="formal",
+        data_sha256="1" * 64,
+        split_sha256="6" * 64,
+        generator_sha256="8" * 64,
+        capability_sha256="9" * 64,
+        reward_sha256=reward_weights_sha256(),
+        v3_sha256="d" * 64,
+        training_semantics_sha256="b" * 64,
+    )
 
 
 @pytest.mark.parametrize("command", ("train", "resume"))
@@ -613,6 +708,104 @@ def test_calibration_freezes_reward_schedule_and_one_shared_budget(
     assert state.formal_seed == 4080
     assert state.reward_calibration_seeds == (4081, 4082, 4083)
     assert state.allocation == {"WHEELED": 8, "LEGGED": 8, "HOPPER": 8}
+
+
+def test_formal_calibration_manifest_is_non_proxy_and_cache_bound(
+    tmp_path: pathlib.Path,
+) -> None:
+    root = tmp_path / "formal-calibrated"
+    root.mkdir()
+    cache_manifest = tmp_path / "cache-manifest.json"
+    cache_manifest.write_text("{}\n", encoding="utf-8")
+    config = yaml.safe_load(
+        (
+            REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    cache_identity = FormalCacheIdentity(
+        source_lock_file_sha256="1" * 64,
+        source_sha256s={
+            "NASA_LOLA_87S_DEM": "2" * 64,
+            "NASA_LOLA_87S_COUNT": "3" * 64,
+            "JAXA_LUPEX_DATA_S1": "4" * 64,
+        },
+        split_manifest_file_sha256="5" * 64,
+        split_sha256="6" * 64,
+        scenario_manifest_sha256="7" * 64,
+        generator_sha256="8" * 64,
+        capability_sha256="9" * 64,
+        reward_sha256=reward_weights_sha256(),
+        training_semantics_sha256="b" * 64,
+        v3_source_commit="c" * 40,
+        v3_sha256="d" * 64,
+    )
+    run_identity = _formal_run_identity(cache_identity)
+    (root / "run-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "lunar-training-run/v1",
+                "frozen_config": config,
+                "runtime_calibration": {
+                    "selected_workers": 24,
+                    "selected_micro_batch": 2,
+                    "compared_workers": [18, 24],
+                    "measurements": [],
+                },
+                "consumed_gpu_seconds": 12.5,
+                "budget_extension_blocks": 0,
+                "total_gpu_budget_seconds": 86400,
+            }
+        ),
+        encoding="utf-8",
+    )
+    schedule_id = "cache-sha/train/v2"
+    _freeze_formal_environment_manifest(
+        root / "run-manifest.json",
+        cache_manifest_path=cache_manifest,
+        cache_manifest_sha256="e" * 64,
+        scenario_schedule_id=schedule_id,
+        sensor_performance_sha256="f" * 64,
+    )
+    _update_run_manifest(
+        root / "run-manifest.json",
+        source_commit=cli_module._source_commit(REPOSITORY_ROOT),
+        config_hash=cli_module.config_sha256(config),
+        run_identity=run_identity,
+        global_step=0,
+        consumed_gpu_seconds=12.5,
+        platform_allocation={"WHEELED": 8, "LEGGED": 8, "HOPPER": 8},
+    )
+    _freeze_task4_manifest(
+        root / "run-manifest.json",
+        schedule=CurriculumSchedule(),
+        reward_hash=reward_weights_sha256(),
+        reward_seed_results=tuple(
+            {
+                "seed": seed,
+                "platform_mean_rewards": {
+                    "WHEELED": 0.1,
+                    "LEGGED": 0.2,
+                    "HOPPER": 0.3,
+                },
+                "rollout_sha256": str(index) * 64,
+            }
+            for index, seed in enumerate((4081, 4082, 4083), start=1)
+        ),
+        proxy=False,
+        scenario_schedule_id=schedule_id,
+    )
+
+    state = _load_calibrated_run_state(root)
+    manifest = json.loads(
+        (root / "run-manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert manifest["task4_calibration"]["proxy"] is False
+    assert state.run_identity.run_kind == "formal"
+    assert state.scenario_schedule_id == schedule_id
+    assert state.cache_manifest_path == cache_manifest
+    assert state.cache_manifest_sha256 == "e" * 64
+    assert state.sensor_performance_sha256 == "f" * 64
 
 
 def test_train_consumes_existing_calibrated_root_without_recalibration(

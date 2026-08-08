@@ -31,9 +31,14 @@ from .capability_freeze import (
 )
 from .project_capability import load_project_formal_capability
 from .polar_data.formal_cache import (
+    FormalCache,
     FormalCacheError,
+    FormalCacheIdentity,
+    current_v3_identity,
+    load_formal_cache,
     prepare_formal_training_cache,
 )
+from .polar_data.multires_scene import GENERATOR_SHA256
 from .budget import (
     BudgetExceededError,
     CalibrationMeasurement,
@@ -65,6 +70,10 @@ from .environment.parallel_pool import (
     ParallelEnvPool,
     ParallelPoolError,
     joint_worker_allocation,
+)
+from .environment.formal_builder import (
+    FormalEnvironmentAssembly,
+    FormalEnvironmentBuilder,
 )
 from .environment.macro_step import PlannerTransition
 from .environment.v3_environment import PreparedPlanRequest, create_v3_environment
@@ -180,6 +189,9 @@ class CalibratedRunState:
     reward_calibration_seeds: tuple[int, int, int]
     calibration_end_gpu_seconds: float
     run_identity: RunIdentity
+    cache_manifest_path: Path | None
+    cache_manifest_sha256: str | None
+    sensor_performance_sha256: str | None
 
 
 class _ParallelPoolVectorEnv:
@@ -555,14 +567,50 @@ def _is_within(path: Path, parent: Path) -> bool:
         return False
 
 
+def _freeze_formal_environment_manifest(
+    path: Path,
+    *,
+    cache_manifest_path: Path,
+    cache_manifest_sha256: str,
+    scenario_schedule_id: str,
+    sensor_performance_sha256: str,
+) -> None:
+    resolved_cache = cache_manifest_path.resolve(strict=True)
+    digests = (cache_manifest_sha256, sensor_performance_sha256)
+    if any(
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+        for value in digests
+    ):
+        raise ArtifactRootError("formal environment digest is invalid")
+    if not isinstance(scenario_schedule_id, str) or not scenario_schedule_id:
+        raise ArtifactRootError("formal scenario schedule identity is invalid")
+    frozen = {
+        "schema_version": "lunar-formal-run-environment/v1",
+        "cache_manifest_path": str(resolved_cache),
+        "cache_manifest_sha256": cache_manifest_sha256,
+        "scenario_schedule_id": scenario_schedule_id,
+        "sensor_performance_sha256": sensor_performance_sha256,
+    }
+    payload = _read_run_manifest(path)
+    existing = payload.get("formal_environment")
+    if existing is not None and existing != frozen:
+        raise ArtifactRootError("formal environment identity cannot drift")
+    payload["formal_environment"] = frozen
+    _write_manifest_payload(path, payload)
+
+
 def _freeze_task4_manifest(
     path: Path,
     *,
     schedule: CurriculumSchedule,
     reward_hash: str,
     reward_seed_results: tuple[dict[str, object], ...],
+    proxy: bool = True,
+    scenario_schedule_id: str | None = None,
 ) -> None:
-    """Freeze the Task 4 reward, proxy schedule, curriculum and formal seed."""
+    """Freeze reward, scenario schedule, curriculum and the formal seed."""
     if not isinstance(schedule, CurriculumSchedule):
         raise ArtifactRootError("Task 4 curriculum schedule is invalid")
     if len(reward_hash) != 64 or any(
@@ -575,18 +623,44 @@ def _freeze_task4_manifest(
         != REWARD_CALIBRATION_SEEDS
     ):
         raise ArtifactRootError("three reward calibration seed results are required")
-    for result in reward_seed_results:
-        score = result.get("minimum_platform_score")
-        digest = result.get("report_sha256")
-        if (
-            not isinstance(score, (int, float))
-            or isinstance(score, bool)
-            or not math.isfinite(float(score))
-            or not 0.0 <= float(score) <= 1.0
-            or not isinstance(digest, str)
-            or len(digest) != 64
-        ):
-            raise ArtifactRootError("reward calibration seed result is invalid")
+    if type(proxy) is not bool:
+        raise ArtifactRootError("calibration proxy flag must be boolean")
+    if proxy:
+        resolved_schedule_id = schedule.scenario_schedule_id
+        if scenario_schedule_id not in (None, resolved_schedule_id):
+            raise ArtifactRootError("proxy calibration schedule identity differs")
+        for result in reward_seed_results:
+            score = result.get("minimum_platform_score")
+            digest = result.get("report_sha256")
+            if (
+                not isinstance(score, (int, float))
+                or isinstance(score, bool)
+                or not math.isfinite(float(score))
+                or not 0.0 <= float(score) <= 1.0
+                or not isinstance(digest, str)
+                or len(digest) != 64
+            ):
+                raise ArtifactRootError("reward calibration seed result is invalid")
+    else:
+        resolved_schedule_id = scenario_schedule_id
+        if not isinstance(resolved_schedule_id, str) or not resolved_schedule_id:
+            raise ArtifactRootError("formal calibration schedule identity is missing")
+        for result in reward_seed_results:
+            rewards = result.get("platform_mean_rewards")
+            digest = result.get("rollout_sha256")
+            if (
+                not isinstance(rewards, dict)
+                or set(rewards) != {"WHEELED", "LEGGED", "HOPPER"}
+                or any(
+                    not isinstance(value, (int, float))
+                    or isinstance(value, bool)
+                    or not math.isfinite(float(value))
+                    for value in rewards.values()
+                )
+                or not isinstance(digest, str)
+                or len(digest) != 64
+            ):
+                raise ArtifactRootError("formal reward calibration result is invalid")
     payload = _read_run_manifest(path)
     calibration_end = payload.get("consumed_gpu_seconds")
     if (
@@ -597,13 +671,13 @@ def _freeze_task4_manifest(
     ):
         raise ArtifactRootError("calibration GPU budget state is invalid")
     frozen = {
-        "schema_version": "lunar-policy-calibration/v1",
-        "proxy": True,
+        "schema_version": "lunar-policy-calibration/v2",
+        "proxy": proxy,
         "reward_hash": reward_hash,
         "reward_selection": "single-approved-shared-weight-set/v1",
         "reward_calibration_seeds": list(REWARD_CALIBRATION_SEEDS),
         "reward_seed_results": [dict(result) for result in reward_seed_results],
-        "scenario_schedule_id": schedule.scenario_schedule_id,
+        "scenario_schedule_id": resolved_schedule_id,
         "formal_seed": FORMAL_SEED,
         "calibration_end_gpu_seconds": float(calibration_end),
         "curriculum": {
@@ -637,13 +711,72 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
     if not isinstance(task4, dict):
         raise ArtifactRootError("Task 4 calibration is missing; run calibrate first")
     schedule = CurriculumSchedule()
+    config = resolve_training_config(frozen_config)
+    if config.run_kind != run_identity.run_kind:
+        raise ArtifactRootError("run manifest kind differs from frozen config")
+    formal_environment = manifest.get("formal_environment")
+    cache_manifest_path: Path | None = None
+    cache_manifest_sha256: str | None = None
+    sensor_performance_sha256: str | None = None
+    if config.run_kind == "formal":
+        required_environment = {
+            "schema_version",
+            "cache_manifest_path",
+            "cache_manifest_sha256",
+            "scenario_schedule_id",
+            "sensor_performance_sha256",
+        }
+        if (
+            not isinstance(formal_environment, dict)
+            or set(formal_environment) != required_environment
+            or formal_environment.get("schema_version")
+            != "lunar-formal-run-environment/v1"
+        ):
+            raise ArtifactRootError("formal run environment identity is invalid")
+        cache_path_value = formal_environment["cache_manifest_path"]
+        scenario_value = formal_environment["scenario_schedule_id"]
+        if (
+            not isinstance(cache_path_value, str)
+            or not cache_path_value
+            or not isinstance(scenario_value, str)
+            or not scenario_value
+        ):
+            raise ArtifactRootError("formal run environment identity is invalid")
+        cache_manifest_path = Path(cache_path_value)
+        cache_manifest_sha256 = formal_environment["cache_manifest_sha256"]
+        sensor_performance_sha256 = formal_environment[
+            "sensor_performance_sha256"
+        ]
+        if (
+            not cache_manifest_path.is_absolute()
+            or not isinstance(cache_manifest_sha256, str)
+            or len(cache_manifest_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in cache_manifest_sha256
+            )
+            or not isinstance(sensor_performance_sha256, str)
+            or len(sensor_performance_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in sensor_performance_sha256
+            )
+        ):
+            raise ArtifactRootError("formal run environment identity is invalid")
+        expected_proxy = False
+        expected_schedule_id = scenario_value
+    else:
+        if formal_environment is not None:
+            raise ArtifactRootError("development calibration cannot bind formal cache")
+        expected_proxy = True
+        expected_schedule_id = schedule.scenario_schedule_id
     expected_static = {
-        "schema_version": "lunar-policy-calibration/v1",
-        "proxy": True,
+        "schema_version": "lunar-policy-calibration/v2",
+        "proxy": expected_proxy,
         "reward_hash": reward_weights_sha256(),
         "reward_selection": "single-approved-shared-weight-set/v1",
         "reward_calibration_seeds": list(REWARD_CALIBRATION_SEEDS),
-        "scenario_schedule_id": schedule.scenario_schedule_id,
+        "scenario_schedule_id": expected_schedule_id,
         "formal_seed": FORMAL_SEED,
         "curriculum": {
             "calibration_limit_s": schedule.calibration_limit_s,
@@ -678,11 +811,6 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
     if type(selected_workers) is not int or type(micro_batch_size) is not int:
         raise ArtifactRootError("runtime calibration selection is invalid")
     consumed = manifest.get("consumed_gpu_seconds")
-    config = resolve_training_config(frozen_config)
-    if config.run_kind != run_identity.run_kind:
-        raise ArtifactRootError("run manifest kind differs from frozen config")
-    if task4.get("proxy") is True and run_identity.run_kind != "development-smoke":
-        raise ArtifactRootError("proxy calibration cannot identify a formal run")
     budget = TrainingBudget(
         total_gpu_seconds=manifest.get("total_gpu_budget_seconds"),
         consumed_gpu_seconds=consumed,
@@ -700,6 +828,9 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
         reward_calibration_seeds=tuple(task4["reward_calibration_seeds"]),
         calibration_end_gpu_seconds=float(calibration_end),
         run_identity=run_identity,
+        cache_manifest_path=cache_manifest_path,
+        cache_manifest_sha256=cache_manifest_sha256,
+        sensor_performance_sha256=sensor_performance_sha256,
     )
 
 
@@ -724,6 +855,8 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate = subparsers.add_parser("calibrate")
     calibrate.add_argument("--config", required=True)
     calibrate.add_argument("--artifact-root", required=True)
+    calibrate.add_argument("--cache-manifest", required=True)
+    calibrate.add_argument("--sensor-performance-report", required=True)
 
     train = subparsers.add_parser("train")
     train.add_argument("--config", required=True)
@@ -818,10 +951,30 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     elif arguments.command == "calibrate":
+        requested_config = load_training_config(Path(arguments.config))
+        if requested_config.run_kind != "formal":
+            raise PreflightError("public calibrate requires the formal config")
+        capability_bundle = _formal_capability_preflight(repository_root)
+        sensor_report_sha256 = _formal_sensor_performance_preflight(
+            arguments.sensor_performance_report,
+            capability_bundle=capability_bundle,
+            repository_root=repository_root,
+        )
+        formal_cache, formal_assembly = _build_formal_environment(
+            Path(arguments.cache_manifest),
+            capability_bundle=capability_bundle,
+            repository_root=repository_root,
+            split="train",
+        )
         _calibrate_training_run(
             config_path=Path(arguments.config),
             artifact_root=Path(arguments.artifact_root),
             repository_root=repository_root,
+            capability_bundle=capability_bundle,
+            formal_cache=formal_cache,
+            formal_environment_assembly=formal_assembly,
+            cache_manifest_path=Path(arguments.cache_manifest),
+            sensor_performance_sha256=sensor_report_sha256,
         )
     elif arguments.command == "train":
         requested_config = load_training_config(Path(arguments.config))
@@ -830,13 +983,20 @@ def main(argv: list[str] | None = None) -> int:
                 "public train is formal; use the development-smoke helper"
             )
         capability_bundle = _formal_capability_preflight(repository_root)
-        _formal_sensor_performance_preflight(
+        sensor_performance_sha256 = _formal_sensor_performance_preflight(
             arguments.sensor_performance_report,
             capability_bundle=capability_bundle,
             repository_root=repository_root,
         )
         if not Path(arguments.artifact_root).is_dir():
             raise ArtifactRootError("run calibrate before public train")
+        formal_assembly = _formal_environment_from_calibrated_root(
+            Path(arguments.artifact_root),
+            capability_bundle=capability_bundle,
+            repository_root=repository_root,
+            sensor_performance_sha256=sensor_performance_sha256,
+            split="train",
+        )
         _start_training_run(
             config_path=Path(arguments.config),
             artifact_root=Path(arguments.artifact_root),
@@ -844,13 +1004,22 @@ def main(argv: list[str] | None = None) -> int:
             max_updates=None,
             interrupt_first_update=False,
             capability_bundle=capability_bundle,
+            formal_environment_factory=formal_assembly.factory,
+            formal_observation_template=formal_assembly.observation_template,
         )
     elif arguments.command == "resume":
         capability_bundle = _formal_capability_preflight(repository_root)
-        _formal_sensor_performance_preflight(
+        sensor_performance_sha256 = _formal_sensor_performance_preflight(
             arguments.sensor_performance_report,
             capability_bundle=capability_bundle,
             repository_root=repository_root,
+        )
+        formal_assembly = _formal_environment_from_calibrated_root(
+            Path(arguments.artifact_root),
+            capability_bundle=capability_bundle,
+            repository_root=repository_root,
+            sensor_performance_sha256=sensor_performance_sha256,
+            split="train",
         )
         _resume_training_run(
             artifact_root=Path(arguments.artifact_root),
@@ -858,6 +1027,8 @@ def main(argv: list[str] | None = None) -> int:
             repository_root=repository_root,
             max_updates=None,
             capability_bundle=capability_bundle,
+            formal_environment_factory=formal_assembly.factory,
+            formal_observation_template=formal_assembly.observation_template,
         )
     elif arguments.command == "evaluate":
         capability_bundle = _formal_capability_preflight(repository_root)
@@ -892,6 +1063,78 @@ def _formal_capability_preflight(
         return load_project_formal_capability(repository_root)
     except CapabilityFreezeError as error:
         raise PreflightError(f"project formal capability is invalid: {error}") from error
+
+
+def _build_formal_environment(
+    cache_manifest_path: Path,
+    *,
+    capability_bundle: FrozenCapabilityBundle,
+    repository_root: Path,
+    split: str,
+) -> tuple[FormalCache, FormalEnvironmentAssembly]:
+    """Validate every current identity before constructing one formal factory."""
+    try:
+        cache = load_formal_cache(cache_manifest_path, require_full=True)
+        identity = cache.identity
+        current_v3_commit, current_v3_sha256 = current_v3_identity(repository_root)
+        expected = {
+            "generator_sha256": GENERATOR_SHA256,
+            "capability_sha256": capability_bundle.bundle_sha256,
+            "reward_sha256": reward_weights_sha256(),
+            "training_semantics_sha256": training_semantics_sha256(),
+            "v3_source_commit": current_v3_commit,
+            "v3_sha256": current_v3_sha256,
+        }
+        for name, value in expected.items():
+            if getattr(identity, name) != value:
+                raise FormalCacheError(
+                    f"cache identity {name} differs from the current project"
+                )
+        assembly = FormalEnvironmentBuilder(
+            cache_manifest_path=cache_manifest_path,
+            capability_bundle=capability_bundle,
+            split=split,
+        ).build()
+    except (FormalCacheError, ValueError) as error:
+        raise PreflightError(f"formal environment is invalid: {error}") from error
+    return cache, assembly
+
+
+def _formal_environment_from_calibrated_root(
+    artifact_root: Path,
+    *,
+    capability_bundle: FrozenCapabilityBundle,
+    repository_root: Path,
+    sensor_performance_sha256: str,
+    split: str,
+) -> FormalEnvironmentAssembly:
+    root = validate_artifact_root(
+        artifact_root, repository_root=repository_root
+    )
+    if not root.is_dir():
+        raise ArtifactRootError("formal calibrated run root is missing")
+    calibrated = _load_calibrated_run_state(root)
+    if calibrated.run_identity.run_kind != "formal":
+        raise PreflightError("formal command rejects a proxy calibrated root")
+    if calibrated.sensor_performance_sha256 != sensor_performance_sha256:
+        raise PreflightError("formal sensor performance identity differs from calibration")
+    if calibrated.cache_manifest_path is None:
+        raise PreflightError("formal cache manifest identity is missing")
+    cache, assembly = _build_formal_environment(
+        calibrated.cache_manifest_path,
+        capability_bundle=capability_bundle,
+        repository_root=repository_root,
+        split=split,
+    )
+    if cache.manifest["cache_manifest_sha256"] != calibrated.cache_manifest_sha256:
+        raise PreflightError("formal cache manifest differs from calibration")
+    if _formal_run_identity(cache.identity) != calibrated.run_identity:
+        raise PreflightError("formal cache run identity differs from calibration")
+    if split == "train" and (
+        assembly.scenario_schedule_id != calibrated.scenario_schedule_id
+    ):
+        raise PreflightError("formal training scenario schedule differs from calibration")
+    return assembly
 
 
 def _formal_sensor_performance_preflight(
@@ -971,15 +1214,51 @@ def _calibrate_training_run(
     config_path: Path,
     artifact_root: Path,
     repository_root: Path,
+    capability_bundle: FrozenCapabilityBundle | None = None,
+    formal_cache: FormalCache | None = None,
+    formal_environment_assembly: FormalEnvironmentAssembly | None = None,
+    cache_manifest_path: Path | None = None,
+    sensor_performance_sha256: str | None = None,
+    calibration_micro_batch_candidates: tuple[int, ...] | None = None,
 ) -> CalibratedRunState:
-    """Run runtime probes plus three real proxy-v3 reward calibration seeds."""
+    """Freeze runtime and reward calibration against one explicit environment."""
     config = load_training_config(config_path)
-    if config.run_kind != "development-smoke":
-        raise PreflightError(
-            "formal runtime calibration requires the future non-proxy environment"
-        )
     source_commit = _source_commit(repository_root)
-    run_identity = _development_run_identity(source_commit)
+    formal = config.run_kind == "formal"
+    if formal:
+        if (
+            not isinstance(capability_bundle, FrozenCapabilityBundle)
+            or not isinstance(formal_cache, FormalCache)
+            or not formal_cache.formal_eligible
+            or not isinstance(
+                formal_environment_assembly, FormalEnvironmentAssembly
+            )
+            or cache_manifest_path is None
+            or not isinstance(sensor_performance_sha256, str)
+            or len(sensor_performance_sha256) != 64
+        ):
+            raise PreflightError("formal calibration inputs are incomplete")
+        if formal_environment_assembly.factory.bundle is not capability_bundle:
+            raise PreflightError("formal calibration capability bundle is not shared")
+        if (
+            formal_environment_assembly.cache_manifest_sha256
+            != formal_cache.manifest["cache_manifest_sha256"]
+        ):
+            raise PreflightError("formal calibration cache identity differs")
+        run_identity = _formal_run_identity(formal_cache.identity)
+    else:
+        if any(
+            value is not None
+            for value in (
+                capability_bundle,
+                formal_cache,
+                formal_environment_assembly,
+                cache_manifest_path,
+                sensor_performance_sha256,
+            )
+        ):
+            raise PreflightError("development calibration rejects formal inputs")
+        run_identity = _development_run_identity(source_commit)
     root = validate_artifact_root(
         artifact_root, repository_root=repository_root
     )
@@ -991,52 +1270,87 @@ def _calibrate_training_run(
     budget = TrainingBudget(
         total_gpu_seconds=float(config.total_gpu_budget_seconds)
     )
-    workload = _CudaPlannerCalibrationWorkload(config.ppo)
+    workload = _CudaPlannerCalibrationWorkload(
+        config.ppo,
+        environment_factory=(
+            formal_environment_assembly.factory if formal else None
+        ),
+        observation_template=(
+            formal_environment_assembly.observation_template if formal else None
+        ),
+    )
     try:
         calibration = calibrate_runtime(
             config=config,
             workload=workload,
             budget=budget,
             manifest_path=root / "run-manifest.json",
-            micro_batch_candidates=(1, 2, 4),
+            micro_batch_candidates=(
+                (1, 2, 4)
+                if calibration_micro_batch_candidates is None
+                else calibration_micro_batch_candidates
+            ),
         )
     finally:
         workload.close()
-    reward_results: list[dict[str, object]] = []
     schedule = CurriculumSchedule()
-    for seed in REWARD_CALIBRATION_SEEDS:
-        _seed_everything(seed)
-        start = time.monotonic()
-        budget.begin_gpu_interval(
-            monotonic_seconds=start,
-            upper_bound_gpu_seconds=TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS,
-        )
-        try:
-            report = evaluate_proxy_policy(
-                CrossAttentionPolicy(),
-                device="cuda",
-                checkpoint_sha256=hashlib.sha256(
-                    f"reward-calibration-{seed}".encode("utf-8")
-                ).hexdigest(),
-                schedule=schedule,
-                run_identity=run_identity,
+    if formal:
+        assert formal_environment_assembly is not None
+        assert formal_cache is not None
+        assert cache_manifest_path is not None
+        assert sensor_performance_sha256 is not None
+        reward_results = list(
+            _formal_reward_seed_results(
+                factory=formal_environment_assembly.factory,
+                observation_template=formal_environment_assembly.observation_template,
+                selected_workers=calibration.selected_workers,
+                budget=budget,
             )
-            torch.cuda.synchronize()
-        except BaseException:
-            budget.end_gpu_interval(monotonic_seconds=time.monotonic())
-            raise
-        else:
-            budget.end_gpu_interval(monotonic_seconds=time.monotonic())
-        ppo = report.method("ppo_policy").per_platform
-        reward_results.append(
-            {
-                "seed": seed,
-                "minimum_platform_score": min(
-                    metrics.success_coverage_rate for metrics in ppo.values()
-                ),
-                "report_sha256": report_sha256(report),
-            }
         )
+        _freeze_formal_environment_manifest(
+            root / "run-manifest.json",
+            cache_manifest_path=cache_manifest_path,
+            cache_manifest_sha256=str(
+                formal_cache.manifest["cache_manifest_sha256"]
+            ),
+            scenario_schedule_id=formal_environment_assembly.scenario_schedule_id,
+            sensor_performance_sha256=sensor_performance_sha256,
+        )
+    else:
+        reward_results = []
+        for seed in REWARD_CALIBRATION_SEEDS:
+            _seed_everything(seed)
+            start = time.monotonic()
+            budget.begin_gpu_interval(
+                monotonic_seconds=start,
+                upper_bound_gpu_seconds=TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS,
+            )
+            try:
+                report = evaluate_proxy_policy(
+                    CrossAttentionPolicy(),
+                    device="cuda",
+                    checkpoint_sha256=hashlib.sha256(
+                        f"reward-calibration-{seed}".encode("utf-8")
+                    ).hexdigest(),
+                    schedule=schedule,
+                    run_identity=run_identity,
+                )
+                torch.cuda.synchronize()
+            except BaseException:
+                budget.end_gpu_interval(monotonic_seconds=time.monotonic())
+                raise
+            else:
+                budget.end_gpu_interval(monotonic_seconds=time.monotonic())
+            ppo = report.method("ppo_policy").per_platform
+            reward_results.append(
+                {
+                    "seed": seed,
+                    "minimum_platform_score": min(
+                        metrics.success_coverage_rate for metrics in ppo.values()
+                    ),
+                    "report_sha256": report_sha256(report),
+                }
+            )
     allocation = _allocation_for_workers(calibration.selected_workers)
     _update_run_manifest(
         root / "run-manifest.json",
@@ -1052,8 +1366,85 @@ def _calibrate_training_run(
         schedule=schedule,
         reward_hash=reward_weights_sha256(),
         reward_seed_results=tuple(reward_results),
+        proxy=not formal,
+        scenario_schedule_id=(
+            formal_environment_assembly.scenario_schedule_id
+            if formal_environment_assembly is not None
+            else None
+        ),
     )
     return _load_calibrated_run_state(root)
+
+
+def _formal_reward_seed_results(
+    *,
+    factory: FrozenCapabilityEnvironmentFactory,
+    observation_template: PolicyBatch,
+    selected_workers: int,
+    budget: TrainingBudget,
+) -> tuple[dict[str, object], ...]:
+    """Measure the approved reward on real formal transitions for three seeds."""
+    allocation = _allocation_for_workers(selected_workers)
+    results: list[dict[str, object]] = []
+    for seed in REWARD_CALIBRATION_SEEDS:
+        _seed_everything(seed)
+        start = time.monotonic()
+        budget.begin_gpu_interval(
+            monotonic_seconds=start,
+            upper_bound_gpu_seconds=TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS,
+        )
+        pool: ParallelEnvPool | None = None
+        try:
+            pool = ParallelEnvPool(
+                allocation=allocation,
+                observation_template=observation_template,
+                environment_factory=factory,
+                reward_fn=compute_transition_reward,
+                worker_timeout_seconds=60.0,
+            )
+            environment = _ParallelPoolVectorEnv(pool, policy_version=seed)
+            collected = collect_ppo_rollout(
+                environment,
+                CrossAttentionPolicy(),
+                CollectorConfig(horizon=1, deterministic=True),
+                device="cuda",
+            )
+            torch.cuda.synchronize()
+            platform_rewards: dict[str, float] = {}
+            offset = 0
+            for platform, count in allocation.items():
+                values = collected.rewards[:, offset : offset + count]
+                platform_rewards[platform] = float(values.mean())
+                offset += count
+            evidence = {
+                "seed": seed,
+                "rewards": collected.rewards.tolist(),
+                "dones": collected.dones.tolist(),
+                "planning_outcomes": [
+                    int(outcome) for outcome in environment.planning_outcomes
+                ],
+                "reason_codes": list(environment.reason_codes),
+            }
+            digest = hashlib.sha256(
+                json.dumps(
+                    evidence,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            results.append(
+                {
+                    "seed": seed,
+                    "platform_mean_rewards": platform_rewards,
+                    "rollout_sha256": digest,
+                }
+            )
+        finally:
+            if pool is not None:
+                pool.close()
+            budget.end_gpu_interval(monotonic_seconds=time.monotonic())
+    return tuple(results)
 
 
 def _write_development_evaluation_artifacts(
@@ -1200,6 +1591,14 @@ def _run_curriculum_training(
     """Run one smoke override or advance across four active-GPU phases."""
     if calibrated.config.run_kind == "formal":
         _validate_formal_bundle_identity(capability_bundle, calibrated.run_identity)
+        if not isinstance(
+            formal_environment_factory, FrozenCapabilityEnvironmentFactory
+        ) or formal_environment_factory.scenario_schedule_id != (
+            calibrated.scenario_schedule_id
+        ):
+            raise PreflightError(
+                "formal training factory differs from calibrated scenario schedule"
+            )
         if (
             formal_environment_factory is not None
             and formal_environment_factory.bundle is not capability_bundle
@@ -1657,8 +2056,29 @@ def _run_updates(
 class _CudaPlannerCalibrationWorkload:
     """Same real PlannerBridge + policy workload at 18 and 24 workers."""
 
-    def __init__(self, ppo_config: PPOConfig) -> None:
+    def __init__(
+        self,
+        ppo_config: PPOConfig,
+        *,
+        environment_factory: FrozenCapabilityEnvironmentFactory | None = None,
+        observation_template: PolicyBatch | None = None,
+    ) -> None:
         _validated_cuda_device()
+        if (environment_factory is None) != (observation_template is None):
+            raise PreflightError(
+                "formal calibration factory and observation template are inseparable"
+            )
+        if environment_factory is not None and not isinstance(
+            environment_factory, FrozenCapabilityEnvironmentFactory
+        ):
+            raise PreflightError("formal calibration factory is invalid")
+        if observation_template is not None and not isinstance(
+            observation_template, PolicyBatch
+        ):
+            raise PreflightError("formal calibration observation template is invalid")
+        self._environment_factory = environment_factory
+        self._observation_template = observation_template
+        self._formal = environment_factory is not None
         self._pool: ParallelEnvPool | None = None
         self._environment: _ParallelPoolVectorEnv | None = None
         self._workers: int | None = None
@@ -1698,6 +2118,10 @@ class _CudaPlannerCalibrationWorkload:
                 collected.rollout, micro_batch_size=micro_batch
             )
             optimizer_steps = metrics.optimizer_steps
+            if self._formal:
+                self._environment.rollover_all_workers(
+                    policy_version=self._policy_version
+                )
             end_event.record()
             torch.cuda.synchronize()
             gpu_seconds = max(start_event.elapsed_time(end_event) / 1000.0, 0.0)
@@ -1747,8 +2171,16 @@ class _CudaPlannerCalibrationWorkload:
         allocation = _allocation_for_workers(workers)
         self._pool = ParallelEnvPool(
             allocation=allocation,
-            observation_template=proxy_observation(0, "WHEELED", step=0),
-            environment_factory=proxy_environment_factory,
+            observation_template=(
+                self._observation_template
+                if self._observation_template is not None
+                else proxy_observation(0, "WHEELED", step=0)
+            ),
+            environment_factory=(
+                self._environment_factory
+                if self._environment_factory is not None
+                else proxy_environment_factory
+            ),
             reward_fn=compute_transition_reward,
             worker_timeout_seconds=60.0,
         )
@@ -1966,6 +2398,22 @@ def _development_run_identity(source_commit: str) -> RunIdentity:
         reward_sha256=reward_weights_sha256(),
         v3_sha256=digest(f"lunar-planner-v3-source:{source_commit}"),
         training_semantics_sha256=training_semantics_sha256(),
+    )
+
+
+def _formal_run_identity(identity: FormalCacheIdentity) -> RunIdentity:
+    """Project one verified full-cache identity into the resumable run identity."""
+    if not isinstance(identity, FormalCacheIdentity):
+        raise PreflightError("formal run identity requires a verified cache identity")
+    return RunIdentity(
+        run_kind="formal",
+        data_sha256=identity.source_lock_file_sha256,
+        split_sha256=identity.split_sha256,
+        generator_sha256=identity.generator_sha256,
+        capability_sha256=identity.capability_sha256,
+        reward_sha256=identity.reward_sha256,
+        v3_sha256=identity.v3_sha256,
+        training_semantics_sha256=identity.training_semantics_sha256,
     )
 
 
