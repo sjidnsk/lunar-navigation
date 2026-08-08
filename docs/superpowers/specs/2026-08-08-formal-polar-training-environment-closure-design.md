@@ -3,6 +3,12 @@
 日期：2026-08-08
 状态：已批准，作为正式训练前数据、场景、缓存和运行入口的现行权威
 
+> **2026-08-09 生命周期修订：** 本文关于固定决策预算、`pose_features` 剩余预算字段、
+> optimizer update 后统一 episode rollover、仅保存 episode cursor 和固定三步正式评估的内容，
+> 已由
+> [`2026-08-09-unbounded-formal-episode-design.md`](2026-08-09-unbounded-formal-episode-design.md)
+> 原子取代。数据、场景、地图分辨率、传感器和平台能力部分继续有效。
+
 ## 目标与结论
 
 本设计定义并已闭合 seed `4080` 正式 PPO 训练前的数据与运行链：把已经锁定的月球极区数据、

@@ -1,5 +1,11 @@
 # Formal Polar Training Environment Closure Implementation Plan
 
+> **2026-08-09 supersession:** Task 6's all-worker optimizer-boundary rollover,
+> cursor-only resume evidence, fixed-budget episode behavior, and fixed-step formal
+> evaluation are superseded by
+> [`2026-08-09-unbounded-formal-episode.md`](2026-08-09-unbounded-formal-episode.md).
+> Completed data/cache/sensor/platform work in this plan remains authoritative.
+
 > **For Codex:** execute this plan task by task with TDD. Generated data and runtime artifacts must stay under `/home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure`; do not start the 24-hour seed-4080 run.
 
 **Goal:** Make the locked lunar-polar data and current three-platform C++ v3 stack executable through one formal `prepare-data -> calibrate -> train/resume -> evaluate` environment, then produce current-host preflight evidence and mark the repository ready for—but not running—formal training.
