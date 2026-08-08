@@ -230,8 +230,8 @@ class ObservationBoundaryController:
         elapsed_ns = int(round(float(evidence.elapsed_s) * 1_000_000_000.0))
         if elapsed_ns < 0 or elapsed_ns > (1 << 63) - 1 - self._state_time_ns:
             raise ValueError("sensor boundary elapsed time is out of range")
-        delta = self._sensor_state.observe(
-            pose_cell, elapsed_s=float(evidence.elapsed_s)
+        delta = self._sensor_state.observe_world(
+            evidence.pose_map, elapsed_s=float(evidence.elapsed_s)
         )
         self._state_time_ns += elapsed_ns
         self._observation_revision += 1

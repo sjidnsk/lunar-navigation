@@ -354,6 +354,20 @@ class SceneTileProvider:
     def cache_size(self) -> int:
         return len(self._cache)
 
+    @property
+    def detail_cells_per_axis(self) -> int:
+        return self.tiles_per_axis * self.tile_geometry.cells
+
+    def world_to_detail(self, x_m: float, y_m: float) -> tuple[int, int]:
+        left, bottom, right, top = self.scene.base_canvas.bounds_m
+        if not (left <= x_m < right and bottom < y_m <= top):
+            raise ValueError("detail world point lies outside the scene")
+        resolution = self.tile_geometry.resolution_m
+        return (
+            int(math.floor((top - y_m) / resolution)),
+            int(math.floor((x_m - left) / resolution)),
+        )
+
     def tile(self, tile_row: int, tile_column: int) -> ProjectedScene:
         if not (
             0 <= tile_row < self.tiles_per_axis
@@ -379,6 +393,92 @@ class SceneTileProvider:
         while len(self._cache) > self.capacity:
             self._cache.popitem(last=False)
         return projected
+
+    def read_window(
+        self, start_row: int, start_column: int, *, cells: int
+    ) -> ProjectedScene:
+        """Compose an aligned square detail window from fixed cached tiles."""
+        if (
+            type(start_row) is not int
+            or type(start_column) is not int
+            or type(cells) is not int
+            or cells < 1
+            or start_row < 0
+            or start_column < 0
+            or start_row + cells > self.detail_cells_per_axis
+            or start_column + cells > self.detail_cells_per_axis
+        ):
+            raise ValueError("detail window lies outside the scene")
+        fields = (
+            "crater_elevation_delta_m",
+            "physical_obstacle_ratio",
+            "physical_obstacle_height_m",
+            "forbidden_ratio",
+            "elevation_m",
+        )
+        arrays = {
+            name: np.empty((cells, cells), dtype=np.float32) for name in fields
+        }
+        valid = np.empty((cells, cells), dtype=np.bool_)
+        tile_cells = self.tile_geometry.cells
+        first_tile_row = start_row // tile_cells
+        last_tile_row = (start_row + cells - 1) // tile_cells
+        first_tile_column = start_column // tile_cells
+        last_tile_column = (start_column + cells - 1) // tile_cells
+        for tile_row in range(first_tile_row, last_tile_row + 1):
+            for tile_column in range(
+                first_tile_column, last_tile_column + 1
+            ):
+                tile = self.tile(tile_row, tile_column)
+                tile_start_row = tile_row * tile_cells
+                tile_start_column = tile_column * tile_cells
+                global_row0 = max(start_row, tile_start_row)
+                global_row1 = min(start_row + cells, tile_start_row + tile_cells)
+                global_column0 = max(start_column, tile_start_column)
+                global_column1 = min(
+                    start_column + cells, tile_start_column + tile_cells
+                )
+                destination = (
+                    slice(global_row0 - start_row, global_row1 - start_row),
+                    slice(
+                        global_column0 - start_column,
+                        global_column1 - start_column,
+                    ),
+                )
+                source = (
+                    slice(
+                        global_row0 - tile_start_row,
+                        global_row1 - tile_start_row,
+                    ),
+                    slice(
+                        global_column0 - tile_start_column,
+                        global_column1 - tile_start_column,
+                    ),
+                )
+                for name in fields:
+                    arrays[name][destination] = getattr(tile, name)[source]
+                valid[destination] = tile.valid_mask[source]
+        resolution = self.tile_geometry.resolution_m
+        geometry = GridGeometry(cells * resolution, resolution, cells)
+        left, _, _, top = self.scene.base_canvas.bounds_m
+        window_left = left + start_column * resolution
+        window_top = top - start_row * resolution
+        canvas = MapCanvas(
+            self.scene.base_canvas.window_sha256,
+            (
+                window_left,
+                window_top - geometry.size_m,
+                window_left + geometry.size_m,
+                window_top,
+            ),
+            geometry,
+        )
+        return ProjectedScene(
+            vector_sha256=self.scene.hazards.vector_sha256,
+            canvas=canvas,
+            valid_mask=valid,
+            **arrays,
+        )
 
 
 __all__ = [

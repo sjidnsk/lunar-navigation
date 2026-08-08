@@ -10,6 +10,7 @@ import numpy as np
 from ..polar_data.hazards import CanvasRatioLayer
 from ..polar_data.raster import MapCanvas
 from .observation_builder import LocalObservation, ObservedWorld
+from .observation_builder import Pose2
 from .visibility import VisibilityEstimator
 
 
@@ -364,6 +365,17 @@ class SensorObservationState:
             mission_observed_delta_m2=mission_delta,
             priority_observed_delta_m2=priority_delta,
         )
+
+    def observe_world(
+        self, pose: Pose2, *, elapsed_s: float
+    ) -> ObservationDelta:
+        if not isinstance(pose, Pose2) or pose.frame_id != "map":
+            raise ValueError("observation pose must be a map-frame Pose2")
+        try:
+            pose_cell = self.truth.canvas.world_to_grid(pose.x_m, pose.y_m)
+        except ValueError as error:
+            raise ValueError("observation pose is outside the grid") from error
+        return self.observe(pose_cell, elapsed_s=elapsed_s)
 
 
 __all__ = [
