@@ -675,6 +675,35 @@ def test_production_pool_adapter_collects_real_v3_reward_gae_at_one_policy_versi
     assert np.isfinite(collected.rollout.advantages).all()
 
 
+def test_policy_update_after_step_32_keeps_the_same_active_episode() -> None:
+    """Would fail if a PPO batch boundary were also an episode boundary."""
+    with ParallelEnvPool(
+        allocation={"WHEELED": 1},
+        observation_template=_real_v3_worker(0, "WHEELED").initial_observation,
+        environment_factory=_real_v3_worker,
+        reward_fn=_planner_transition_reward,
+        worker_timeout_seconds=5.0,
+    ) as pool:
+        environment = _ParallelPoolVectorEnv(pool, policy_version=17)
+        initial = environment.reset()
+        initial_identity = initial.observation_identities[0]
+        action_indices = np.zeros((1,), dtype=np.int64)
+        action_thetas = np.zeros((1,), dtype=np.float32)
+
+        for _ in range(32):
+            environment.step(action_indices, action_thetas)
+
+        environment.advance_policy_version(18)
+        after_update = environment.step(action_indices, action_thetas)
+
+        assert pool.episode_cursors == (0,)
+
+    assert after_update.observations.observation_identities[0].episode_id == (
+        initial_identity.episode_id
+    )
+    assert environment.policy_versions == [18]
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     (

@@ -227,6 +227,15 @@ class _ParallelPoolVectorEnv:
         self.planning_outcomes.clear()
         self.reason_codes.clear()
 
+    def advance_policy_version(self, policy_version: int) -> PolicyBatch:
+        """Start a new on-policy batch without replacing active episodes."""
+        if self._current is None:
+            raise ValueError(
+                "parallel rollout adapter must be initialized before policy advance"
+            )
+        self.set_policy_version(policy_version)
+        return self._current.observations
+
     def reset(self) -> PolicyBatch:
         if self._current is None:
             self._current = self._pool.reset()
@@ -274,15 +283,6 @@ class _ParallelPoolVectorEnv:
             rewards=np.zeros((self.env_count,), dtype=np.float32),
             dones=step.dones.numpy().astype(np.bool_, copy=True),
         )
-
-    def rollover_all_workers(self, *, policy_version: int) -> PolicyBatch:
-        """Install one fresh synchronized scene batch after an optimizer update."""
-        self.set_policy_version(policy_version)
-        self._current = self._pool.rollover_all_workers(
-            policy_version=policy_version
-        )
-        return self._current.observations
-
 
 class ResumablePPOTrainer:
     """Task 1 PPO core plus an injectable Task 4-compatible reward boundary."""
@@ -2187,10 +2187,7 @@ def _run_updates(
             trainer.update(rollout, micro_batch_size=micro_batch_size)
             scheduler.step()
             rollout_policy_version += 1
-            if config.run_kind == "formal":
-                environment.rollover_all_workers(
-                    policy_version=rollout_policy_version
-                )
+            environment.advance_policy_version(rollout_policy_version)
         finally:
             if timer is not None:
                 timer.join()
@@ -2357,10 +2354,6 @@ class _CudaPlannerCalibrationWorkload:
                 collected.rollout, micro_batch_size=micro_batch
             )
             optimizer_steps = metrics.optimizer_steps
-            if self._formal:
-                self._environment.rollover_all_workers(
-                    policy_version=self._policy_version
-                )
             end_event.record()
             torch.cuda.synchronize()
             gpu_seconds = max(start_event.elapsed_time(end_event) / 1000.0, 0.0)
