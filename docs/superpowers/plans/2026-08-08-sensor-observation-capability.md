@@ -699,7 +699,7 @@ git add docs/migration/volume-3-pretraining-readiness.md \
 git commit -m "docs: qualify sensor observation capability"
 ```
 
-- [ ] **Step 5: Run final branch audit**
+- [x] **Step 5: Run final branch audit**
 
 ```bash
 git status --short --branch
