@@ -273,6 +273,57 @@ def test_rollout_horizon_selection_rejects_fast_but_semantically_invalid_candida
     assert result.selected_rollout_horizon == 32
 
 
+def test_incomplete_horizon_probe_is_recorded_but_cannot_be_selected(
+    tmp_path: pathlib.Path,
+) -> None:
+    config = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+
+    def probe(
+        workers: int,
+        micro_batch: int,
+        rollout_horizon: int,
+        transitions_per_worker: int,
+    ) -> HorizonCalibrationMeasurement:
+        completed = 0 if rollout_horizon == 64 else 64 // rollout_horizon
+        return HorizonCalibrationMeasurement(
+            workers=workers,
+            micro_batch=micro_batch,
+            rollout_horizon=rollout_horizon,
+            total_transitions=workers * transitions_per_worker,
+            completed_updates=completed,
+            throughput_transitions_per_second=float(rollout_horizon),
+            mean_update_wall_seconds=1.0,
+            peak_gpu_memory_fraction=0.5,
+            worker_wait_ratio=0.25,
+            planner_timeouts=0,
+            oom=False,
+            gpu_seconds=1.0,
+            ipc_failures=int(completed == 0),
+            approximate_kl=0.01,
+            value_loss=0.2,
+            advantages_finite=True,
+            returns_finite=True,
+            update_boundary_continuity_verified=completed > 0,
+            resume_digest="c" * 64 if completed else None,
+            resume_verified=completed > 0,
+            failure_reason="worker exited" if completed == 0 else None,
+        )
+
+    result = calibrate_runtime(
+        config=config,
+        workload=_CalibrationProbe(),
+        horizon_workload=probe,
+        budget=TrainingBudget(),
+        manifest_path=tmp_path / "run-manifest.json",
+        micro_batch_candidates=(1, 2, 4),
+    )
+
+    assert result.selected_rollout_horizon == 32
+    assert result.horizon_measurements[-1].failure_reason == "worker exited"
+
+
 @pytest.mark.parametrize("bad_24", ["oom", "timeout", "throughput"])
 def test_calibration_falls_back_to_18_when_24_is_not_safe_or_faster(
     tmp_path: pathlib.Path, bad_24: str

@@ -109,6 +109,7 @@ class HorizonCalibrationMeasurement:
     update_boundary_continuity_verified: bool
     resume_digest: str | None
     resume_verified: bool
+    failure_reason: str | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -167,6 +168,12 @@ class HorizonCalibrationMeasurement:
         if self.resume_verified and self.resume_digest is None:
             raise CalibrationError(
                 "verified horizon calibration resume requires a digest"
+            )
+        if self.failure_reason is not None and (
+            not isinstance(self.failure_reason, str) or not self.failure_reason
+        ):
+            raise CalibrationError(
+                "horizon calibration failure reason must be non-empty"
             )
 
 
@@ -505,8 +512,6 @@ def calibrate_runtime(
                     or measurement.micro_batch != selected_micro_batch
                     or measurement.rollout_horizon != rollout_horizon
                     or measurement.total_transitions != expected_total
-                    or measurement.completed_updates
-                    != horizon_transitions_per_worker // rollout_horizon
                 ):
                     raise CalibrationError(
                         "horizon calibration workload mislabeled unequal work"
@@ -531,6 +536,8 @@ def calibrate_runtime(
                 and measurement.update_boundary_continuity_verified
                 and measurement.resume_verified
                 and measurement.throughput_transitions_per_second > 0.0
+                and measurement.completed_updates
+                == horizon_transitions_per_worker // rollout_horizon
             ):
                 qualified_horizons.append(measurement)
         if not qualified_horizons:

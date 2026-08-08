@@ -876,7 +876,7 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
             or measurement.rollout_horizon != candidate
             or measurement.total_transitions != expected_total
             or measurement.completed_updates
-            != ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER // candidate
+            > ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER // candidate
             for candidate, measurement in zip(
                 ROLLOUT_HORIZON_CANDIDATES,
                 parsed_horizons,
@@ -898,6 +898,9 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
             and measurement.update_boundary_continuity_verified
             and measurement.resume_verified
             and measurement.throughput_transitions_per_second > 0.0
+            and measurement.completed_updates
+            == ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER
+            // measurement.rollout_horizon
         )
         if not qualified:
             raise ArtifactRootError(
@@ -2563,7 +2566,6 @@ class _CudaPlannerCalibrationWorkload:
         assert self._observation_template is not None
         self.close()
         _seed_everything(FORMAL_SEED)
-        torch.cuda.empty_cache()
         self._trainer = None
         torch.cuda.empty_cache()
         selected_ppo_config = replace(
@@ -2599,6 +2601,7 @@ class _CudaPlannerCalibrationWorkload:
         end_event = torch.cuda.Event(enable_timing=True)
         wall_start = time.perf_counter()
         gpu_seconds = 0.0
+        failure_reason: str | None = None
         try:
             pool = ParallelEnvPool(
                 allocation=allocation,
@@ -2694,10 +2697,12 @@ class _CudaPlannerCalibrationWorkload:
             )
         except torch.cuda.OutOfMemoryError:
             oom = True
+            failure_reason = "CUDA_OUT_OF_MEMORY"
             torch.cuda.synchronize()
             gpu_seconds = max(time.perf_counter() - wall_start, 0.0)
-        except ParallelPoolError:
+        except ParallelPoolError as error:
             ipc_failures = 1
+            failure_reason = str(error)
             torch.cuda.synchronize()
             gpu_seconds = max(time.perf_counter() - wall_start, 0.0)
         finally:
@@ -2746,6 +2751,7 @@ class _CudaPlannerCalibrationWorkload:
             update_boundary_continuity_verified=continuity_verified,
             resume_digest=resume_digest,
             resume_verified=resume_verified,
+            failure_reason=failure_reason,
         )
 
     def close(self) -> None:
