@@ -16,7 +16,7 @@ from .raster import GLOBAL_GEOMETRY, GridGeometry, MapCanvas
 
 
 GENERATOR_VERSION = "lunar-polar-hazards/v1"
-FORMAL_GENERATOR_VERSION = "lunar-polar-multires-hazards/v2"
+FORMAL_GENERATOR_VERSION = "lunar-polar-multires-hazards/v3"
 FORMAL_ROCK_COUNT = 260
 FORMAL_CRATER_COUNT = 32
 FORMAL_NO_GO_COUNT = 8

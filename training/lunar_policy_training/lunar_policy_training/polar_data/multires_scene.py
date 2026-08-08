@@ -301,11 +301,28 @@ class MultiResolutionScene:
             + source[row1[:, None], column1[None, :]] * wx
         )
         elevation = north * (1.0 - wy) + south * wy
+        weight_epsilon = 64.0 * np.finfo(np.float64).eps
+        northwest_weight = (1.0 - wy) * (1.0 - wx)
+        northeast_weight = (1.0 - wy) * wx
+        southwest_weight = wy * (1.0 - wx)
+        southeast_weight = wy * wx
         valid = (
-            self.base_valid_mask[row0[:, None], column0[None, :]]
-            & self.base_valid_mask[row0[:, None], column1[None, :]]
-            & self.base_valid_mask[row1[:, None], column0[None, :]]
-            & self.base_valid_mask[row1[:, None], column1[None, :]]
+            (
+                self.base_valid_mask[row0[:, None], column0[None, :]]
+                | (northwest_weight <= weight_epsilon)
+            )
+            & (
+                self.base_valid_mask[row0[:, None], column1[None, :]]
+                | (northeast_weight <= weight_epsilon)
+            )
+            & (
+                self.base_valid_mask[row1[:, None], column0[None, :]]
+                | (southwest_weight <= weight_epsilon)
+            )
+            & (
+                self.base_valid_mask[row1[:, None], column1[None, :]]
+                | (southeast_weight <= weight_epsilon)
+            )
         )
         return elevation.astype(np.float32), valid
 

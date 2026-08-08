@@ -169,6 +169,38 @@ def test_multires_scene_interpolates_locked_dem_before_adding_same_hazards() -> 
     assert fine.local_detail_provenance == LOCAL_DETAIL_PROVENANCE
 
 
+def test_aligned_projection_preserves_sparse_validity_without_recursive_erosion() -> None:
+    canvas = _canvas()
+    base = np.add.outer(
+        np.arange(8, dtype=np.float32), np.arange(8, dtype=np.float32)
+    )
+    valid = np.ones((8, 8), dtype=bool)
+    valid[3, 4] = False
+    vector = generate_vector_hazard_scene(
+        canvas.window_sha256,
+        408005,
+        canvas=canvas,
+        rock_count=0,
+        crater_count=0,
+        no_go_count=0,
+    )
+
+    first = MultiResolutionScene(canvas, base, valid, vector).project(canvas)
+    second = MultiResolutionScene(
+        canvas,
+        np.where(first.valid_mask, first.elevation_m, 0.0),
+        first.valid_mask,
+        vector,
+    ).project(canvas)
+
+    np.testing.assert_array_equal(first.valid_mask, valid)
+    np.testing.assert_array_equal(second.valid_mask, valid)
+    np.testing.assert_array_equal(first.elevation_m[valid], base[valid])
+    np.testing.assert_array_equal(
+        second.elevation_m[valid], first.elevation_m[valid]
+    )
+
+
 def test_tile_provider_is_bounded_and_regeneration_is_exact() -> None:
     geometry = GridGeometry(size_m=16.0, resolution_m=1.0, cells=16)
     canvas = MapCanvas("b" * 64, (0.0, 0.0, 16.0, 16.0), geometry)
