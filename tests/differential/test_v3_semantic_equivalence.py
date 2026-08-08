@@ -176,7 +176,7 @@ def test_ppo_behavior_compatibility_gate_fails_closed_until_retraining(
     header = PLANNER_IO_HEADER.read_text(encoding="utf-8")
     assert "GoalRegion goal_map;" in header
     bridge_request = TRAINING_BRIDGE_REQUEST.read_text(encoding="utf-8")
-    assert "HopperPropellantState" in bridge_request
+    assert "HopperPropellantState" not in bridge_request
     assert "capability_version" in bridge_request
     assert "global_map_generation" in bridge_request
     assert compatibility == {

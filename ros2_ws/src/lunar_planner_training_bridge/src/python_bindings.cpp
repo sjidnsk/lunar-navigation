@@ -296,18 +296,6 @@ void BindGoalsAndState(py::module_ &module) {
       .def(py::init<>())
       .def_readwrite("pose", &planning::HopperState::pose)
       .def_readwrite("velocity", &planning::HopperState::velocity);
-  py::class_<planning::HopperPropellantState>(module, "HopperPropellantState")
-      .def(py::init<>())
-      .def_readwrite("stamp", &planning::HopperPropellantState::stamp)
-      .def_readwrite("platform_id",
-                     &planning::HopperPropellantState::platform_id)
-      .def_readwrite("capability_version",
-                     &planning::HopperPropellantState::capability_version)
-      .def_readwrite("total_mass_kg",
-                     &planning::HopperPropellantState::total_mass_kg)
-      .def_readwrite(
-          "remaining_usable_fuel_mass_kg",
-          &planning::HopperPropellantState::remaining_usable_fuel_mass_kg);
 }
 
 void BindCapabilities(py::module_ &module) {
@@ -438,6 +426,11 @@ void BindCapabilities(py::module_ &module) {
       .def(py::init<>())
       .def_readwrite("specific_impulse_s",
                      &planning::HopperCapability::specific_impulse_s)
+      .def_readwrite("reference_total_mass_kg",
+                     &planning::HopperCapability::reference_total_mass_kg)
+      .def_readwrite(
+          "reference_propellant_mass_kg",
+          &planning::HopperCapability::reference_propellant_mass_kg)
       .def_readwrite("landing_support_radius_m",
                      &planning::HopperCapability::landing_support_radius_m)
       .def_readwrite("flight_collision_radius_m",
@@ -910,8 +903,6 @@ void BindRequest(py::module_ &module) {
       .def_readwrite("state_time", &training::TrainingPlanRequest::state_time)
       .def_readwrite("current_state",
                      &training::TrainingPlanRequest::current_state)
-      .def_readwrite("hopper_propellant",
-                     &training::TrainingPlanRequest::hopper_propellant)
       .def_readwrite("goal", &training::TrainingPlanRequest::goal)
       .def_readwrite("world", &training::TrainingPlanRequest::world)
       .def_readwrite("capability", &training::TrainingPlanRequest::capability)

@@ -14,7 +14,7 @@ import yaml
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 _FIELD_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
-_SCHEMA_VERSION = "lunar-external-interfaces/v4"
+_SCHEMA_VERSION = "lunar-external-interfaces/v5"
 _INTERFACE_PACKAGES = {
     "lunar_navigation_msgs": {
         "schema_provider": "in_repository_provisional",
@@ -173,25 +173,6 @@ _TOPICS = {
             "segment_id",
             "state",
             "reason_code",
-        ],
-    },
-    "hopper_propellant_state": {
-        "name": "/platform/hopper_propellant_state",
-        "type": "lunar_navigation_msgs/msg/HopperPropellantState",
-        "owner": "external",
-        "frame": "platform_base_frame",
-        "maximum_age_s": 0.5,
-        "qos": {
-            "reliability": "reliable",
-            "durability": "volatile",
-            "depth": 10,
-        },
-        "required_fields": [
-            "header",
-            "platform_id",
-            "capability_version",
-            "total_mass_kg",
-            "remaining_usable_fuel_mass_kg",
         ],
     },
 }
@@ -433,6 +414,9 @@ def _interface_specs() -> list[tuple[str, tuple[str, ...]]]:
         (topic["type"], tuple(topic["required_fields"])) for topic in _TOPICS.values()
     ]
     specs.append(("lunar_navigation_msgs/msg/ScienceTargetRegion", ()))
+    # Compatibility-only schema: generated and checked, but not an active
+    # planner input topic in external_interfaces.yaml.
+    specs.append(("lunar_navigation_msgs/msg/HopperPropellantState", ()))
     specs.append((_TF["type"], ()))
     return specs
 

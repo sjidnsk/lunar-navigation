@@ -20,7 +20,6 @@
 #include <gtest/gtest.h>
 #include <lifecycle_msgs/msg/state.hpp>
 #include <lunar_navigation_msgs/msg/exploration_task.hpp>
-#include <lunar_navigation_msgs/msg/hopper_propellant_state.hpp>
 #include <lunar_navigation_msgs/msg/motion_execution_feedback.hpp>
 #include <lunar_planning_msgs/action/plan_motion.hpp>
 #include <rclcpp/executors/multi_threaded_executor.hpp>
@@ -147,6 +146,8 @@ lunar::planning::PlannerOutput WheelReferenceOutput(
 lunar::planning::HopperCapability MakeHopperCapability() {
   return lunar::planning::HopperCapability{
       .specific_impulse_s = 301.0,
+      .reference_total_mass_kg = 20.0,
+      .reference_propellant_mass_kg = 0.2,
       .landing_support_radius_m = 0.45,
       .flight_collision_radius_m = 0.55,
       .maximum_landing_plane_residual_m = 0.05,
@@ -174,7 +175,6 @@ rclcpp::NodeOptions ValidOptions() {
       rclcpp::Parameter{"local_map_max_age", 5.0},
       rclcpp::Parameter{"odometry_max_age", 5.0},
       rclcpp::Parameter{"localization_status_max_age", 5.0},
-      rclcpp::Parameter{"propellant_state_max_age", 0.5},
       rclcpp::Parameter{"tf_max_age", 5.0},
       rclcpp::Parameter{"max_pairwise_skew", 0.2},
       rclcpp::Parameter{"base_resolution_m", 1.0},
@@ -225,9 +225,6 @@ class RunningSystem final {
     execution_feedback_publisher = client_node->create_publisher<
         lunar_navigation_msgs::msg::MotionExecutionFeedback>(
         "/execution/motion_feedback", rclcpp::QoS{10}.reliable());
-    propellant_publisher = client_node->create_publisher<
-        lunar_navigation_msgs::msg::HopperPropellantState>(
-        "/platform/hopper_propellant_state", rclcpp::QoS{10}.reliable());
     diagnostics_subscription = client_node->create_subscription<
         diagnostic_msgs::msg::DiagnosticArray>(
         "/diagnostics", rclcpp::QoS{10}.reliable(),
@@ -287,8 +284,7 @@ class RunningSystem final {
   void PublishInputs(
       const std::uint64_t revision = 7U,
       const std::uint8_t desired_state =
-          lunar_navigation_msgs::msg::ExplorationTask::ACTIVE,
-      const bool publish_propellant = true) {
+          lunar_navigation_msgs::msg::ExplorationTask::ACTIVE) {
     const rclcpp::Time now = server->now();
     last_stamp = now;
     const std::int64_t nanoseconds = now.nanoseconds();
@@ -312,14 +308,6 @@ class RunningSystem final {
     mission.roi_min_y_m = -10.0;
     mission.roi_max_x_m = 10.0;
     mission.roi_max_y_m = 10.0;
-    lunar_navigation_msgs::msg::HopperPropellantState propellant;
-    propellant.header.frame_id = "base_link";
-    propellant.header.stamp = last_stamp;
-    propellant.platform_id = "test-hopper";
-    propellant.capability_version = "test-v1";
-    propellant.total_mass_kg = 20.0;
-    propellant.remaining_usable_fuel_mass_kg = 0.2;
-
     for (std::size_t attempt = 0U; attempt < 3U; ++attempt) {
       global_map_publisher->publish(global_map);
       local_map_publisher->publish(local_map);
@@ -327,9 +315,6 @@ class RunningSystem final {
       localization_publisher->publish(localization);
       tf_publisher->publish(transforms);
       mission_publisher->publish(mission);
-      if (publish_propellant) {
-        propellant_publisher->publish(propellant);
-      }
       std::this_thread::sleep_for(20ms);
     }
     ASSERT_TRUE(WaitFor([&] {
@@ -479,9 +464,6 @@ class RunningSystem final {
   rclcpp::Publisher<
       lunar_navigation_msgs::msg::MotionExecutionFeedback>::SharedPtr
       execution_feedback_publisher;
-  rclcpp::Publisher<
-      lunar_navigation_msgs::msg::HopperPropellantState>::SharedPtr
-      propellant_publisher;
   rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
       diagnostics_subscription;
   rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr
@@ -517,10 +499,10 @@ class PlanMotionServerTest : public ::testing::Test {
   }
 };
 
-TEST_F(PlanMotionServerTest, UsesSixDistinctMutuallyExclusiveCallbackGroups) {
+TEST_F(PlanMotionServerTest, UsesFiveDistinctMutuallyExclusiveCallbackGroups) {
   auto node = std::make_shared<PlanMotionServer>(
       ValidOptions(), DefaultDependencies());
-  EXPECT_EQ(node->callback_group_count_for_testing(), 6U);
+  EXPECT_EQ(node->callback_group_count_for_testing(), 5U);
   EXPECT_TRUE(node->callback_groups_mutually_exclusive_for_testing());
   node.reset();
 }
@@ -628,53 +610,29 @@ TEST_F(PlanMotionServerTest, ReturnsNoRouteAsSucceededActionWithEmptyReference) 
   }));
 }
 
-TEST_F(PlanMotionServerTest, PassesFrozenPropellantStateOnlyForHopper) {
-  std::mutex observed_mutex;
-  std::optional<lunar::planning::HopperPropellantState> observed;
+TEST_F(PlanMotionServerTest, HopperPlansWithoutPropellantSubscription) {
+  std::atomic<int> planner_calls{0};
   RunningSystem system{PlanMotionServerDependencies{
-      .planner = [&](const lunar::planning::PlannerInput& input) {
-        std::scoped_lock lock{observed_mutex};
-        observed = input.hopper_propellant;
+      .planner = [&](const lunar::planning::PlannerInput&) {
+        planner_calls.fetch_add(1);
         return NoRouteOutput("HOPPER_INPUT_OBSERVED");
       },
       .preloaded_capabilities = HopperCapabilities(),
   }};
   system.PublishInputs();
+  EXPECT_EQ(
+      system.client_node->count_subscribers(
+          "/platform/hopper_propellant_state"),
+      0U);
 
-  const auto handle = system.SendGoal(system.Goal("hopper-propellant"));
-  ASSERT_NE(handle, nullptr);
-  const auto result = system.Result(handle);
-
-  ASSERT_EQ(result.code, rclcpp_action::ResultCode::SUCCEEDED);
-  std::scoped_lock lock{observed_mutex};
-  ASSERT_TRUE(observed.has_value());
-  EXPECT_EQ(observed->platform_id, "test-hopper");
-  EXPECT_EQ(observed->capability_version, "test-v1");
-  EXPECT_DOUBLE_EQ(observed->total_mass_kg, 20.0);
-  EXPECT_DOUBLE_EQ(observed->remaining_usable_fuel_mass_kg, 0.2);
-}
-
-TEST_F(PlanMotionServerTest, RejectsHopperBeforeCoreWhenPropellantIsMissing) {
-  std::atomic<int> planner_calls{0};
-  RunningSystem system{PlanMotionServerDependencies{
-      .planner = [&](const lunar::planning::PlannerInput&) {
-        planner_calls.fetch_add(1);
-        return NoRouteOutput();
-      },
-      .preloaded_capabilities = HopperCapabilities(),
-  }};
-  system.PublishInputs(
-      7U, lunar_navigation_msgs::msg::ExplorationTask::ACTIVE, false);
-
-  const auto handle = system.SendGoal(system.Goal("hopper-missing-fuel"));
+  const auto handle = system.SendGoal(system.Goal("hopper-no-propellant"));
   ASSERT_NE(handle, nullptr);
   const auto result = system.Result(handle);
 
   ASSERT_EQ(result.code, rclcpp_action::ResultCode::SUCCEEDED);
   ASSERT_NE(result.result, nullptr);
-  EXPECT_EQ(result.result->planning_outcome, Action::Result::INVALID_REQUEST);
-  EXPECT_EQ(result.result->reason_code, "HOPPER_PROPELLANT_STATE_INVALID");
-  EXPECT_EQ(planner_calls.load(), 0);
+  EXPECT_EQ(result.result->reason_code, "HOPPER_INPUT_OBSERVED");
+  EXPECT_EQ(planner_calls.load(), 1);
 }
 
 TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
@@ -1173,9 +1131,6 @@ TEST_F(
                             .launch_velocity_mps = {1.0, 0.0, 2.0},
                             .flight_tube_radius_m = 0.2,
                             .nominal_landing_point_m = {2.0, 0.0, 0.76},
-                            .ideal_fuel_required_kg = 0.08,
-                            .certified_fuel_required_kg = 0.1,
-                            .expected_remaining_usable_fuel_kg = 0.1,
                             .required_delta_v_mps = 7.0,
                             .available_delta_v_mps = 8.0,
                             .capability_version = input.capability_version,
@@ -1388,9 +1343,6 @@ TEST_F(PlanMotionServerTest, LocksNewGoalsAfterActivatingHopperReference) {
                 .launch_velocity_mps = {0.4, 0.0, 4.05},
                 .flight_tube_radius_m = 0.2,
                 .nominal_landing_point_m = {2.0, 0.0, 0.0},
-                .ideal_fuel_required_kg = 0.08,
-                .certified_fuel_required_kg = 0.1,
-                .expected_remaining_usable_fuel_kg = 0.1,
                 .required_delta_v_mps = 7.0,
                 .available_delta_v_mps = 8.0,
                 .capability_version = input.capability_version,

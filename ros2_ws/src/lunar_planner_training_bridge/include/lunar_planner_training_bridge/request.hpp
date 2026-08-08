@@ -20,7 +20,6 @@ struct TrainingPlanRequest final {
   std::uint64_t map_from_odom_generation{};
   lunar::planning::TimePoint state_time;
   lunar::planning::PlatformState current_state;
-  std::optional<lunar::planning::HopperPropellantState> hopper_propellant;
   lunar::planning::GoalRegion goal;
   lunar::planning::WorldSnapshot world;
   lunar::planning::PlatformCapability capability;

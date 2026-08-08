@@ -132,6 +132,8 @@ def _legged_capability() -> bridge_api.LeggedCapability:
 def _hopper_capability() -> bridge_api.HopperCapability:
     capability = bridge_api.HopperCapability()
     capability.specific_impulse_s = 301.0
+    capability.reference_total_mass_kg = 20.0
+    capability.reference_propellant_mass_kg = 0.2
     capability.landing_support_radius_m = 0.45
     capability.flight_collision_radius_m = 0.55
     capability.maximum_landing_plane_residual_m = 0.05
@@ -272,13 +274,6 @@ def easy_request():
             state.pose = _pose(3.0, 3.0, 0.5)
             request.current_state = state
             request.capability = _hopper_capability()
-            propellant = bridge_api.HopperPropellantState()
-            propellant.stamp.nanoseconds_since_epoch = 1_000_000_000
-            propellant.platform_id = request.platform_id
-            propellant.capability_version = request.capability_version
-            propellant.total_mass_kg = 20.0
-            propellant.remaining_usable_fuel_mass_kg = 0.2
-            request.hopper_propellant = propellant
 
         map_kwargs = (
             {"width": 16, "height": 12, "resolution_m": 0.5}
@@ -311,6 +306,13 @@ def test_bridge_uses_matching_v3_planner(bridge, easy_request, platform_type):
     if output.reference is not None:
         assert output.reference.platform_type == platform_type
     assert output.diagnostics.planner_name == "cpp_v3_hierarchical"
+
+
+def test_hopper_request_has_no_dynamic_propellant_contract(easy_request) -> None:
+    request = easy_request("HOPPER")
+
+    assert not hasattr(request, "hopper_propellant")
+    assert not hasattr(bridge_api, "HopperPropellantState")
 
 
 @pytest.mark.parametrize("platform_type", ["WHEELED", "LEGGED", "HOPPER"])

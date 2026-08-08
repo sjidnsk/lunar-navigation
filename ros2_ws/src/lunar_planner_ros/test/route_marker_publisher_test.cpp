@@ -149,9 +149,6 @@ PlannerOutput HopperOutput() {
                   .launch_velocity_mps = {2.0, 0.0, 2.0},
                   .flight_tube_radius_m = 0.75,
                   .nominal_landing_point_m = {4.0, 0.0, 0.76},
-                  .ideal_fuel_required_kg = 0.08,
-                  .certified_fuel_required_kg = 0.10,
-                  .expected_remaining_usable_fuel_kg = 0.10,
                   .required_delta_v_mps = 28.0,
                   .available_delta_v_mps = 29.0,
                   .capability_version = "capability-v1",
@@ -275,7 +272,8 @@ TEST(RouteMarkerPublisher, RendersHopperTargetRegionTubeAndAuditText) {
   EXPECT_DOUBLE_EQ(tube->scale.x, 1.50);
   const Marker* evidence = Find(markers, "hopper_certification_evidence");
   ASSERT_NE(evidence, nullptr);
-  EXPECT_NE(evidence->text.find("fuel=0.100000 kg"), std::string::npos);
+  EXPECT_NE(evidence->text.find("dv=28.000000/29.000000 m/s"),
+            std::string::npos);
   EXPECT_NE(evidence->text.find("dv=28.000000/29.000000 m/s"),
             std::string::npos);
   EXPECT_NE(evidence->text.find("version=capability-v1"),

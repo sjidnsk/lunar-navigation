@@ -310,10 +310,7 @@ constexpr double kLunarGravityMps2 = -1.62;
   message.platform_type = message.HOPPER;
   if (context.capability_version.empty() ||
       context.global_map_generation == 0U ||
-      context.local_map_generation == 0U ||
-      !context.hopper_remaining_usable_fuel_kg.has_value() ||
-      !Finite(*context.hopper_remaining_usable_fuel_kg) ||
-      *context.hopper_remaining_usable_fuel_kg <= 0.0) {
+      context.local_map_generation == 0U) {
     return "REFERENCE_HOP_CONTEXT_INVALID";
   }
 
@@ -328,13 +325,6 @@ constexpr double kLunarGravityMps2 = -1.62;
       return "REFERENCE_HOP_INVALID";
     }
     if (!Finite(segment.nominal_landing_point_m) ||
-        !Finite(segment.ideal_fuel_required_kg) ||
-        segment.ideal_fuel_required_kg < 0.0 ||
-        !Finite(segment.certified_fuel_required_kg) ||
-        segment.certified_fuel_required_kg <
-            segment.ideal_fuel_required_kg ||
-        !Finite(segment.expected_remaining_usable_fuel_kg) ||
-        segment.expected_remaining_usable_fuel_kg < 0.0 ||
         !Finite(segment.required_delta_v_mps) ||
         segment.required_delta_v_mps < 0.0 ||
         !Finite(segment.available_delta_v_mps) ||
@@ -345,12 +335,6 @@ constexpr double kLunarGravityMps2 = -1.62;
         segment.global_map_generation != context.global_map_generation ||
         segment.local_map_generation != context.local_map_generation) {
       return "REFERENCE_HOP_SNAPSHOT_MISMATCH";
-    }
-    if (!NearlyEqual(
-            segment.certified_fuel_required_kg +
-                segment.expected_remaining_usable_fuel_kg,
-            *context.hopper_remaining_usable_fuel_kg)) {
-      return "REFERENCE_HOP_PROPELLANT_INCONSISTENT";
     }
     if (segment.flight_time.count() >
         std::numeric_limits<std::int64_t>::max() - elapsed.count()) {
@@ -400,10 +384,6 @@ constexpr double kLunarGravityMps2 = -1.62;
     hop.nominal_landing_point.x = segment.nominal_landing_point_m.x;
     hop.nominal_landing_point.y = segment.nominal_landing_point_m.y;
     hop.nominal_landing_point.z = segment.nominal_landing_point_m.z;
-    hop.ideal_fuel_required_kg = segment.ideal_fuel_required_kg;
-    hop.certified_fuel_required_kg = segment.certified_fuel_required_kg;
-    hop.expected_remaining_usable_fuel_kg =
-        segment.expected_remaining_usable_fuel_kg;
     hop.required_delta_v_mps = segment.required_delta_v_mps;
     hop.available_delta_v_mps = segment.available_delta_v_mps;
     hop.capability_version = segment.capability_version;

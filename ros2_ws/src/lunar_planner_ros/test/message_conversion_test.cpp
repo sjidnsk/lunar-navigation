@@ -36,7 +36,6 @@ PlannerResultContext Context() {
       .capability_version = "hopper-capability-v1",
       .global_map_generation = 31U,
       .local_map_generation = 37U,
-      .hopper_remaining_usable_fuel_kg = 0.2,
       .preview_frame = "map",
       .execution_frame = "odom",
   };
@@ -201,9 +200,6 @@ TEST(MessageConversion, ConvertsHopperSegmentsWithExecutableTiming) {
               .launch_velocity_mps = {1.0, 0.0, 2.0},
               .flight_tube_radius_m = 0.2,
               .nominal_landing_point_m = {2.0, 0.0, 0.76},
-              .ideal_fuel_required_kg = 0.08,
-              .certified_fuel_required_kg = 0.1,
-              .expected_remaining_usable_fuel_kg = 0.1,
               .required_delta_v_mps = 7.0,
               .available_delta_v_mps = 8.0,
               .capability_version = "hopper-capability-v1",
@@ -245,15 +241,6 @@ TEST(MessageConversion, ConvertsHopperSegmentsWithExecutableTiming) {
       converted.result->reference.hops.front().nominal_landing_point.x, 2.0);
   EXPECT_DOUBLE_EQ(
       converted.result->reference.hops.front().nominal_landing_point.z, 0.76);
-  EXPECT_DOUBLE_EQ(
-      converted.result->reference.hops.front().ideal_fuel_required_kg, 0.08);
-  EXPECT_DOUBLE_EQ(
-      converted.result->reference.hops.front().certified_fuel_required_kg,
-      0.1);
-  EXPECT_DOUBLE_EQ(
-      converted.result->reference.hops.front()
-          .expected_remaining_usable_fuel_kg,
-      0.1);
   EXPECT_DOUBLE_EQ(
       converted.result->reference.hops.front().required_delta_v_mps, 7.0);
   EXPECT_DOUBLE_EQ(
@@ -312,9 +299,6 @@ TEST(MessageConversion, RejectsHopEvidenceAndSnapshotDrift) {
       .launch_velocity_mps = {1.0, 0.0, 2.0},
       .flight_tube_radius_m = 0.2,
       .nominal_landing_point_m = {2.0, 0.0, 0.76},
-      .ideal_fuel_required_kg = 0.08,
-      .certified_fuel_required_kg = 0.1,
-      .expected_remaining_usable_fuel_kg = 0.1,
       .required_delta_v_mps = 7.0,
       .available_delta_v_mps = 8.0,
       .capability_version = "hopper-capability-v1",
@@ -341,22 +325,10 @@ TEST(MessageConversion, RejectsHopEvidenceAndSnapshotDrift) {
   };
 
   auto invalid = valid;
-  invalid.certified_fuel_required_kg = 0.07;
-  EXPECT_EQ(
-      ConvertPlannerOutput(make_output(invalid), Context()).reason_code,
-      "REFERENCE_HOP_EVIDENCE_INVALID");
-
-  invalid = valid;
   invalid.available_delta_v_mps = 6.9;
   EXPECT_EQ(
       ConvertPlannerOutput(make_output(invalid), Context()).reason_code,
       "REFERENCE_HOP_EVIDENCE_INVALID");
-
-  invalid = valid;
-  invalid.expected_remaining_usable_fuel_kg = 0.09;
-  EXPECT_EQ(
-      ConvertPlannerOutput(make_output(invalid), Context()).reason_code,
-      "REFERENCE_HOP_PROPELLANT_INCONSISTENT");
 
   invalid = valid;
   invalid.capability_version = "stale";

@@ -392,6 +392,8 @@ class FrozenPlatformCapability:
         value = bridge_api.HopperCapability()
         for field in (
             "specific_impulse_s",
+            "reference_total_mass_kg",
+            "reference_propellant_mass_kg",
             "landing_support_radius_m",
             "flight_collision_radius_m",
             "maximum_landing_plane_residual_m",

@@ -483,10 +483,7 @@ void AddHopperMarkers(
   evidence.scale.z = 0.28;
   std::ostringstream text;
   text << std::fixed << std::setprecision(6)
-       << "fuel=" << segment.certified_fuel_required_kg
-       << " kg ideal=" << segment.ideal_fuel_required_kg
-       << " kg remaining=" << segment.expected_remaining_usable_fuel_kg
-       << " kg dv=" << segment.required_delta_v_mps << "/"
+       << "dv=" << segment.required_delta_v_mps << "/"
        << segment.available_delta_v_mps << " m/s version="
        << segment.capability_version << " maps="
        << segment.global_map_generation << "/"

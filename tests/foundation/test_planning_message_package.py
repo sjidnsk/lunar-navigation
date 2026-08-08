@@ -26,9 +26,6 @@ builtin_interfaces/Duration flight_time
 geometry_msgs/Vector3 launch_velocity
 float64 flight_tube_radius_m
 geometry_msgs/Point nominal_landing_point
-float64 ideal_fuel_required_kg
-float64 certified_fuel_required_kg
-float64 expected_remaining_usable_fuel_kg
 float64 required_delta_v_mps
 float64 available_delta_v_mps
 string capability_version

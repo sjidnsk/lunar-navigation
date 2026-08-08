@@ -160,6 +160,8 @@ std::string LeggedYaml() {
 std::string HopperYaml() {
   return CommonHeader("HOPPER") + R"(hopper:
   specific_impulse_s: 301.0
+  reference_total_mass_kg: 20.0
+  reference_propellant_mass_kg: 0.2
   landing_support_radius_m: 0.45
   flight_collision_radius_m: 0.55
   maximum_landing_slope_rad: 0.17453292519943295
@@ -243,6 +245,8 @@ TEST(CapabilityLoader, AdaptsLeggedAndHopperSourcesToTypedCapabilities) {
       0.17453292519943295,
       1.0e-12);
   EXPECT_DOUBLE_EQ(typed.specific_impulse_s, 301.0);
+  EXPECT_DOUBLE_EQ(typed.reference_total_mass_kg, 20.0);
+  EXPECT_DOUBLE_EQ(typed.reference_propellant_mass_kg, 0.2);
   EXPECT_DOUBLE_EQ(typed.landing_support_radius_m, 0.45);
   EXPECT_DOUBLE_EQ(typed.flight_collision_radius_m, 0.55);
   EXPECT_DOUBLE_EQ(typed.maximum_landing_plane_residual_m, 0.05);

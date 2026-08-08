@@ -32,7 +32,6 @@ PlannerOutput PlannerBridge::Plan(const TrainingPlanRequest &request) noexcept {
         .map_from_odom_generation = request.map_from_odom_generation,
         .state_time = request.state_time,
         .current_state = request.current_state,
-        .hopper_propellant = request.hopper_propellant,
         .goal_map = request.goal,
         .world = request.world,
         .capability = request.capability,

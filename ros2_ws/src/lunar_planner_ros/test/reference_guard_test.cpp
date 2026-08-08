@@ -38,9 +38,6 @@ lunar_planning_msgs::msg::MotionReference HopperReference() {
   hop.flight_tube_radius_m = 0.75;
   hop.nominal_landing_point.x = 2.0;
   hop.nominal_landing_point.z = 0.76;
-  hop.ideal_fuel_required_kg = 0.08;
-  hop.certified_fuel_required_kg = 0.1;
-  hop.expected_remaining_usable_fuel_kg = 0.1;
   hop.required_delta_v_mps = 7.0;
   hop.available_delta_v_mps = 8.0;
   hop.capability_version = "hopper-capability-v1";
@@ -85,7 +82,7 @@ TEST(ReferenceGuard, AllowsReplacementOnGroundAndRejectsInvalidCommit) {
   invalid.hops.push_back(invalid.hops.front());
   EXPECT_FALSE(guard.Commit(invalid));
   invalid = HopperReference();
-  invalid.hops.front().certified_fuel_required_kg = 0.07;
+  invalid.hops.front().available_delta_v_mps = 6.9;
   EXPECT_FALSE(guard.Commit(invalid));
   invalid = HopperReference();
   invalid.hops.front().nominal_landing_point.x += 0.01;

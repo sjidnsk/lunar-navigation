@@ -1,4 +1,4 @@
-schema_version: lunar-external-interfaces/v4
+schema_version: lunar-external-interfaces/v5
 interface_packages:
   lunar_navigation_msgs:
     schema_provider: in_repository_provisional
@@ -49,17 +49,6 @@ topics:
       durability: volatile
       depth: 10
     required_fields: [header, sequence, platform_type, plan_id, segment_id, state, reason_code]
-  hopper_propellant_state:
-    name: /platform/hopper_propellant_state
-    type: lunar_navigation_msgs/msg/HopperPropellantState
-    owner: external
-    frame: platform_base_frame
-    maximum_age_s: 0.5
-    qos:
-      reliability: reliable
-      durability: volatile
-      depth: 10
-    required_fields: [header, platform_id, capability_version, total_mass_kg, remaining_usable_fuel_mass_kg]
 tf:
   topic: /tf
   type: tf2_msgs/msg/TFMessage

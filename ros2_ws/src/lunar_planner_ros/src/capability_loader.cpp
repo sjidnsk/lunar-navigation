@@ -689,6 +689,8 @@ void RecordPrimitiveId(
   RejectUnexpectedKeys(
       node,
       {"specific_impulse_s",
+       "reference_total_mass_kg",
+       "reference_propellant_mass_kg",
        "landing_support_radius_m",
        "flight_collision_radius_m",
        "maximum_landing_slope_rad",
@@ -700,6 +702,17 @@ void RecordPrimitiveId(
       "hopper");
   const double specific_impulse = Positive(
       RequireDouble(node, "specific_impulse_s"), "specific_impulse_s");
+  const double reference_total_mass = Positive(
+      RequireDouble(node, "reference_total_mass_kg"),
+      "reference_total_mass_kg");
+  const double reference_propellant_mass = Positive(
+      RequireDouble(node, "reference_propellant_mass_kg"),
+      "reference_propellant_mass_kg");
+  if (reference_propellant_mass >= reference_total_mass) {
+    ValueFailure(
+        "reference_propellant_mass_kg must be less than "
+        "reference_total_mass_kg");
+  }
   const double landing_support_radius = Positive(
       RequireDouble(node, "landing_support_radius_m"),
       "landing_support_radius_m");
@@ -723,6 +736,8 @@ void RecordPrimitiveId(
 
   return lunar::planning::HopperCapability{
       .specific_impulse_s = specific_impulse,
+      .reference_total_mass_kg = reference_total_mass,
+      .reference_propellant_mass_kg = reference_propellant_mass,
       .landing_support_radius_m = landing_support_radius,
       .flight_collision_radius_m = flight_collision_radius,
       .maximum_landing_plane_residual_m = landing_plane_residual,

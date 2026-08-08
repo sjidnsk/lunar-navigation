@@ -21,8 +21,6 @@ enum class SnapshotErrorCode : std::uint8_t {
   kMissingLocalMap,
   kMissingOdometry,
   kMissingLocalizationStatus,
-  kInvalidHopperPropellant,
-  kStaleHopperPropellant,
   kInvalidGlobalMap,
   kInvalidLocalMap,
   kStaleGlobalMap,
@@ -48,7 +46,6 @@ struct SnapshotPolicy final {
   std::chrono::nanoseconds local_map_max_age{};
   std::chrono::nanoseconds odometry_max_age{};
   std::chrono::nanoseconds localization_status_max_age{};
-  std::chrono::nanoseconds propellant_state_max_age{};
   std::chrono::nanoseconds tf_max_age{};
   std::chrono::nanoseconds max_pairwise_skew{};
   double degraded_pose_covariance_limit{};

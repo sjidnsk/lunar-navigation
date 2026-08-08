@@ -113,12 +113,6 @@ namespace {
       !Finite(hop.launch_velocity.z) ||
       !Finite(hop.flight_tube_radius_m) ||
       hop.flight_tube_radius_m <= 0.0 ||
-      !Finite(hop.ideal_fuel_required_kg) ||
-      hop.ideal_fuel_required_kg < 0.0 ||
-      !Finite(hop.certified_fuel_required_kg) ||
-      hop.certified_fuel_required_kg < hop.ideal_fuel_required_kg ||
-      !Finite(hop.expected_remaining_usable_fuel_kg) ||
-      hop.expected_remaining_usable_fuel_kg < 0.0 ||
       !Finite(hop.required_delta_v_mps) ||
       hop.required_delta_v_mps < 0.0 ||
       !Finite(hop.available_delta_v_mps) ||

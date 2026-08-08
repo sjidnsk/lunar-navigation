@@ -17,7 +17,7 @@ CONFIG = REPOSITORY_ROOT / "ros2_ws/src/lunar_navigation_config/config/external_
 PACKAGE_XML = REPOSITORY_ROOT / "ros2_ws/src/lunar_navigation_config/package.xml"
 
 EXPECTED_DOCUMENT = {
-    "schema_version": "lunar-external-interfaces/v4",
+    "schema_version": "lunar-external-interfaces/v5",
     "interface_packages": {
         "lunar_navigation_msgs": {
             "schema_provider": "in_repository_provisional",
@@ -109,25 +109,6 @@ EXPECTED_DOCUMENT = {
                 "segment_id",
                 "state",
                 "reason_code",
-            ],
-        },
-        "hopper_propellant_state": {
-            "name": "/platform/hopper_propellant_state",
-            "type": "lunar_navigation_msgs/msg/HopperPropellantState",
-            "owner": "external",
-            "frame": "platform_base_frame",
-            "maximum_age_s": 0.5,
-            "qos": {
-                "reliability": "reliable",
-                "durability": "volatile",
-                "depth": 10,
-            },
-            "required_fields": [
-                "header",
-                "platform_id",
-                "capability_version",
-                "total_mass_kg",
-                "remaining_usable_fuel_mass_kg",
             ],
         },
     },
@@ -387,7 +368,7 @@ def test_check_interfaces_rejects_missing_required_contract_sections_without_ros
 @pytest.mark.parametrize(
     ("path", "value", "expected_error"),
     [
-        (("schema_version",), "wrong/v1", "config error: schema_version must be 'lunar-external-interfaces/v4'"),
+        (("schema_version",), "wrong/v1", "config error: schema_version must be 'lunar-external-interfaces/v5'"),
         (("topics", "map_global", "owner"), "internal", "config error: topics.map_global.owner must be 'external'"),
         (("topics", "map_global", "type"), "nav_msgs/msg/Path", "config error: topics.map_global.type must be 'grid_map_msgs/msg/GridMap'"),
         (("topics", "map_global", "frame"), "odom", "config error: topics.map_global.frame must be 'map'"),

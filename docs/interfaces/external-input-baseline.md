@@ -2,6 +2,8 @@
 
 > **这是本项目暂定消息字段与语义的唯一权威基线。** `lunar_navigation_msgs` 上游尚未定义期间，本仓 `.msg`、配置和检查器必须与本文一致；Topic 数据生产者仍由外部项目拥有。未来切换上游必须执行固定版本、schema 对比和原子替换，不能叠加同名包。
 
+当前接收合同版本为 `lunar-external-interfaces/v5`。
+
 ## 来源与所有权
 
 - 外部/legacy 交接来源（不复制入本仓）：`课题四未知场景无人平台自主探索与规划外部输入.md`
@@ -21,7 +23,6 @@
 | `/tf` | `tf2_msgs/msg/TFMessage` | 外部 TF 发布者 | `transforms[]`，形成 `map -> odom -> base_link` |
 | `/mission/exploration_task` | `lunar_navigation_msgs/msg/ExplorationTask` | 外部任务系统 | `header`、`mission_id`、`revision`、`desired_state`、ROI、`science_regions`；状态为 `ACTIVE/PAUSED/CANCELED` |
 | `/execution/motion_feedback` | `lunar_navigation_msgs/msg/MotionExecutionFeedback` | 外部运动执行/控制系统 | `header`、`sequence`、`platform_type`、`plan_id`、`segment_id`、`state`、`reason_code`；状态为 `IDLE/ACCEPTED/EXECUTING/SEGMENT_COMPLETE/LANDED_HOLD/FAILED/CANCELED` |
-| `/platform/hopper_propellant_state` | `lunar_navigation_msgs/msg/HopperPropellantState` | 外部推进或飞行控制系统 | `header`、`platform_id`、`capability_version`、`total_mass_kg`、`remaining_usable_fuel_mass_kg`；`reliable`、`volatile`、depth 10，最大年龄 `0.5 s` |
 | `science_regions[]` | `lunar_navigation_msgs/msg/ScienceTargetRegion` | 外部任务系统 | `region_id`、`objective_id`、`boundary`、`priority` |
 
 ## 暂定消息 schema
@@ -86,7 +87,7 @@ uint8 state
 string reason_code
 ```
 
-### `HopperPropellantState.msg`
+### `HopperPropellantState.msg`（历史兼容，不是活动输入）
 
 ```text
 std_msgs/Header header
@@ -95,6 +96,9 @@ string capability_version
 float64 total_mass_kg
 float64 remaining_usable_fuel_mass_kg
 ```
+
+该消息仅为旧 Isaac/ROS 证据的源码兼容而继续生成和校验；v5 接收合同不声明对应 Topic，
+规划节点不订阅、快照不冻结、训练桥不暴露该状态。新实现不得发布或消费它。
 
 ## 地图与定位字段
 
@@ -135,7 +139,7 @@ max(ceil(Sx / r_l), ceil(Sy / r_l)) <= 4096
 
 飞跃式普通障碍按有限高度三维几何解释：单元水平范围取完整栅格方形，顶面为
 `elevation + max(obstacle_height, resolution)`。飞行管下表面能证明高于顶面时允许从上方
-穿越；相交时该候选抛物线无效，并可在燃料与速度约束内继续尝试更高弹道。`forbidden` 在当前
+穿越；相交时该候选抛物线无效，并可在固定单跳 Δv 包络与速度约束内继续尝试更高弹道。`forbidden` 在当前
 schema 中仍是绝对禁入层；在正式拆分“禁止着陆”和“禁止进入空域”图层之前不得把它按普通
 有限高度障碍放行。
 
@@ -176,11 +180,11 @@ schema 中仍是绝对禁入层；在正式拆分“禁止着陆”和“禁止�
 
 订阅 QoS 固定为 `reliable`、`volatile`、`depth 10`。上游正式定义该消息后，必须与其余暂定 schema 一样执行固定版本、逐字段对比和同名包原子替换，不得让两个 provider 共存。
 
-## 飞跃式推进剂状态字段
+## 飞跃式推进剂状态边界
 
-`HopperPropellantState` 的发布者属于外部推进或飞行控制系统；本仓只暂定 schema、订阅、校验和适配。`header.stamp` 必须非零、不得来自未来且最大年龄为 `0.5 s`，`header.frame_id` 必须等于当前平台能力资料的 `base_frame_id`。`platform_id` 和 `capability_version` 必须与当前 Action 和已加载能力完全一致。`total_mass_kg` 与 `remaining_usable_fuel_mass_kg` 必须为有限值，且满足 `0 < remaining_usable_fuel_mass_kg < total_mass_kg`。该状态必须与 Odometry、L0 地图和 TF 满足最大 `0.25 s` 的成对时差；参考工况不能作为缺失状态的运行时回退。
-
-订阅 QoS 固定为 `reliable`、`volatile`、`depth 10`。上游正式定义该消息后，必须执行固定版本、逐字段对比和同名包原子替换，不得让两个 provider 共存。
+本项目不接收实时推进剂状态，不累计单跳燃料消耗，也不因历史跳跃次数终止探索 episode。
+飞跃可达性只使用正式能力 v2 中固定的参考总质量、参考推进剂质量、比冲和安全裕量，计算每次
+相同且可重复的单跳 Δv 包络；该参考量不是会随规划次数递减的库存。
 
 ## 静态能力资料字段
 
@@ -189,7 +193,7 @@ schema 中仍是绝对禁入层；在正式拆分“禁止着陆”和“禁止�
 | 观测能力 | YAML/JSON | 传感与融合系统 | `sensor_range_m`、`sensor_fov_deg` |
 | 平台能力 | `platform-control-capability-source/v2`，YAML/JSON/URDF/mesh | 平台控制单位 | `platform.platform_id`、`platform.platform_type`、`platform.capability_version`、`platform.base_frame_id`、`geometry_source.urdf_file`、URDF 引用 mesh 与逐字段 `sources` |
 
-平台类型为 `WHEELED`、`LEGGED` 或 `HOPPER`。v2 轮式资料接收正式几何、轮胎/轴距/轨距、底盘净空、支撑面局部凸起、连续运动约束和几何原语；足式资料接收 Quad48 机身、质量/载荷、机身高度、坡度/台阶/方向沟隙、速度和加速度；飞跃式资料只接收比冲、着陆支撑半径、飞行碰撞半径、着陆坡度/平面残差及规划裕量。实时总质量和可用燃料只能来自推进剂 Topic。每个运行时能力字段必须具有已批准的 `sources` 来源类型；v1 旧飞跃速度、冲量、固定飞行时间窗、多跳原语和固定着陆区域面积字段不兼容且必须拒绝。
+平台类型为 `WHEELED`、`LEGGED` 或 `HOPPER`。v2 轮式资料接收正式几何、轮胎/轴距/轨距、底盘净空、支撑面局部凸起、连续运动约束和几何原语；足式资料接收 Quad48 机身、质量/载荷、机身高度、坡度/台阶/方向沟隙、速度和加速度；飞跃式资料接收比冲、固定参考总质量、固定参考推进剂质量、着陆支撑半径、飞行碰撞半径、着陆坡度/平面残差及规划裕量。参考质量只定义可重复的单跳 Δv 能力包络，不表示运行时库存。每个运行时能力字段必须具有已批准的 `sources` 来源类型；v1 旧飞跃速度、冲量、固定飞行时间窗、多跳原语和固定着陆区域面积字段不兼容且必须拒绝。
 
 本仓的 `platform_capability_schema_v2.yaml` 与 `three_platform_capability_freeze_v1.yaml` 是 provisional 消费合同和已批准工程基线，不是外部平台控制单位的数据发布实现。正式外部 provider 出现后仍须逐字段比对并原子切换。
 
