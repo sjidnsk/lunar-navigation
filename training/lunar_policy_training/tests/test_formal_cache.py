@@ -53,7 +53,11 @@ def _identity(scenario_sha256: str) -> FormalCacheIdentity:
     )
 
 
-def _scene(scene_id: str) -> StaticSceneData:
+def _scene(
+    scene_id: str,
+    *,
+    qualified_start_cells: dict[str, tuple[int, int] | None] | None = None,
+) -> StaticSceneData:
     shape = (256, 256)
     hard = {
         platform: np.ones(shape, dtype=np.uint8)
@@ -80,6 +84,15 @@ def _scene(scene_id: str) -> StaticSceneData:
         no_go_vertices=np.empty((0, 6, 2), np.float64),
         hard_feasible=hard,
         clearance_margin_norm=clearance,
+        qualified_start_cells=(
+            {
+                "WHEELED": (127, 127),
+                "LEGGED": (127, 127),
+                "HOPPER": (127, 127),
+            }
+            if qualified_start_cells is None
+            else qualified_start_cells
+        ),
     )
 
 
@@ -134,6 +147,16 @@ def test_preflight_cache_round_trip_is_ineligible_for_formal_use(
     arrays = cache.load_scene(_sha("scene"))
 
     assert manifest["materialization"] == "preflight"
+    assert manifest["start_eligible_scene_count"] == 1
+    assert manifest["start_eligible_split_counts"] == {"train": 1}
+    assert manifest["scenes"][0]["start_qualification"] == {
+        "common_eligible": True,
+        "platform_start_cells": {
+            "HOPPER": [127, 127],
+            "LEGGED": [127, 127],
+            "WHEELED": [127, 127],
+        },
+    }
     assert cache.formal_eligible is False
     assert arrays["elevation_m"].shape == (256, 256)
     assert arrays["wheeled_hard_feasible"].dtype == np.uint8
@@ -143,6 +166,44 @@ def test_preflight_cache_round_trip_is_ineligible_for_formal_use(
             expected_identity=identity,
             require_full=True,
         )
+
+
+def test_cache_records_a_scene_as_not_common_start_eligible(
+    tmp_path: pathlib.Path,
+) -> None:
+    scene_id = _sha("unstartable-scene")
+    scenario = _scenario_document(scene_id)
+    identity = _identity(str(scenario["scenario_manifest_sha256"]))
+    root = tmp_path / "unstartable-cache"
+
+    manifest = write_formal_cache(
+        root,
+        identity=identity,
+        scenario_manifest=scenario,
+        materialization="preflight",
+        scenes=(
+            _scene(
+                scene_id,
+                qualified_start_cells={
+                    "WHEELED": (127, 127),
+                    "LEGGED": (127, 127),
+                    "HOPPER": None,
+                },
+            ),
+        ),
+        repository_root=REPOSITORY_ROOT,
+    )
+
+    assert manifest["start_eligible_scene_count"] == 0
+    assert manifest["start_eligible_split_counts"] == {"train": 0}
+    assert manifest["scenes"][0]["start_qualification"] == {
+        "common_eligible": False,
+        "platform_start_cells": {
+            "HOPPER": None,
+            "LEGGED": [127, 127],
+            "WHEELED": [127, 127],
+        },
+    }
 
 
 @pytest.mark.parametrize("drift", ("missing", "extra", "hash"))

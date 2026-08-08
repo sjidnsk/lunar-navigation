@@ -16,6 +16,10 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 import numpy as np
 
 from ..capability_freeze import FrozenCapabilityBundle, FrozenPlatformCapability
+from ..environment.formal_start_qualification import (
+    FORMAL_BOUNDARY_MARGIN_CELLS,
+    qualify_initial_start_cell,
+)
 from ..reward import reward_weights_sha256
 from ..training_semantics import training_semantics_sha256
 from .hazards import (
@@ -34,7 +38,7 @@ from .scenario_manifest import (
 from .source_lock import load_aggregate_source_lock
 
 
-FORMAL_CACHE_SCHEMA = "lunar-formal-training-cache/v1"
+FORMAL_CACHE_SCHEMA = "lunar-formal-training-cache/v2"
 _SOURCE_IDS = (
     "NASA_LOLA_87S_DEM",
     "NASA_LOLA_87S_COUNT",
@@ -169,6 +173,7 @@ class StaticSceneData:
     no_go_vertices: np.ndarray
     hard_feasible: Mapping[str, np.ndarray]
     clearance_margin_norm: Mapping[str, np.ndarray]
+    qualified_start_cells: Mapping[str, tuple[int, int] | None]
 
     def __post_init__(self) -> None:
         _require_sha(self.scene_id, "scene_id")
@@ -221,6 +226,45 @@ class StaticSceneData:
             self.clearance_margin_norm
         ) != set(_PLATFORMS):
             raise FormalCacheError("scene projections must contain three platforms")
+        if set(self.qualified_start_cells) != set(_PLATFORMS):
+            raise FormalCacheError(
+                "scene start qualification must contain three platforms"
+            )
+        checked_starts: dict[str, tuple[int, int] | None] = {}
+        for platform in _PLATFORMS:
+            cell = self.qualified_start_cells[platform]
+            if cell is None:
+                checked_starts[platform] = None
+                continue
+            if (
+                not isinstance(cell, tuple)
+                or len(cell) != 2
+                or any(type(value) is not int for value in cell)
+                or any(value < 0 or value >= 256 for value in cell)
+            ):
+                raise FormalCacheError("qualified start cell is invalid")
+            row, column = cell
+            margin = FORMAL_BOUNDARY_MARGIN_CELLS
+            hard = np.asarray(self.hard_feasible[platform], dtype=np.bool_)
+            clearance = np.asarray(
+                self.clearance_margin_norm[platform], dtype=np.float32
+            )
+            if (
+                row < margin
+                or row >= 256 - margin
+                or column < margin
+                or column >= 256 - margin
+                or not bool(valid[row, column])
+                or not bool(hard[row, column])
+                or not float(clearance[row, column]) > 0.0
+            ):
+                raise FormalCacheError("qualified start cell is not physically safe")
+            checked_starts[platform] = cell
+        object.__setattr__(
+            self,
+            "qualified_start_cells",
+            MappingProxyType(checked_starts),
+        )
 
     def arrays(self) -> dict[str, np.ndarray]:
         output = {
@@ -331,6 +375,14 @@ def _array_metadata(values: np.ndarray) -> dict[str, object]:
 def _scene_entry(scene: StaticSceneData, path: Path, root: Path) -> dict[str, object]:
     arrays = scene.arrays()
     _deterministic_npz(path, arrays)
+    start_cells = {
+        platform: (
+            None
+            if scene.qualified_start_cells[platform] is None
+            else list(scene.qualified_start_cells[platform])
+        )
+        for platform in _PLATFORMS
+    }
     return {
         "scene_id": scene.scene_id,
         "source": scene.source,
@@ -343,6 +395,12 @@ def _scene_entry(scene: StaticSceneData, path: Path, root: Path) -> dict[str, ob
         "sha256": _file_sha(path),
         "arrays": {
             name: _array_metadata(values) for name, values in sorted(arrays.items())
+        },
+        "start_qualification": {
+            "common_eligible": all(
+                start_cells[platform] is not None for platform in _PLATFORMS
+            ),
+            "platform_start_cells": start_cells,
         },
     }
 
@@ -391,6 +449,22 @@ def write_formal_cache(
             _scene_entry(scene, scene_root / f"{scene.scene_id}.npz", root)
         )
     entries.sort(key=lambda value: str(value["scene_id"]))
+    split_totals: dict[str, int] = {}
+    split_eligible: dict[str, int] = {}
+    for entry in entries:
+        split = str(entry["split"])
+        split_totals[split] = split_totals.get(split, 0) + 1
+        split_eligible.setdefault(split, 0)
+        if bool(entry["start_qualification"]["common_eligible"]):
+            split_eligible[split] += 1
+    qualification_complete = (
+        split_eligible.get("train", 0) > 0
+        and all(
+            split_totals.get(split, 0) > 0
+            and split_eligible.get(split, 0) == split_totals[split]
+            for split in ("validation", "test", "holdout")
+        )
+    )
     inventory = [
         {
             "relative_path": "scenario-manifest.json",
@@ -409,10 +483,12 @@ def write_formal_cache(
     body: dict[str, object] = {
         "schema": FORMAL_CACHE_SCHEMA,
         "materialization": materialization,
-        "formal_eligible": materialization == "full",
+        "formal_eligible": materialization == "full" and qualification_complete,
         "identity": identity.to_dict(),
         "scenario_manifest": inventory[0],
         "scene_count": len(entries),
+        "start_eligible_scene_count": sum(split_eligible.values()),
+        "start_eligible_split_counts": dict(sorted(split_eligible.items())),
         "scenes": entries,
         "inventory": inventory,
     }
@@ -522,10 +598,13 @@ def load_formal_cache(
     materialization = value.get("materialization")
     if materialization not in {"preflight", "full"}:
         raise FormalCacheError("cache materialization is invalid")
-    if value.get("formal_eligible") is not (materialization == "full"):
+    formal_eligible = value.get("formal_eligible")
+    if type(formal_eligible) is not bool or (materialization != "full" and formal_eligible):
         raise FormalCacheError("cache formal eligibility is invalid")
-    if require_full and materialization != "full":
-        raise FormalCacheError("formal command requires a full cache")
+    if require_full and (materialization != "full" or not formal_eligible):
+        raise FormalCacheError(
+            "formal command requires a full, start-qualified cache"
+        )
     identity = FormalCacheIdentity.from_dict(value.get("identity"))
     if expected_identity is not None:
         actual = identity.to_dict()
@@ -539,6 +618,58 @@ def load_formal_cache(
     scene_ids = [entry.get("scene_id") for entry in scenes if isinstance(entry, Mapping)]
     if len(scene_ids) != len(scenes) or len(set(scene_ids)) != len(scene_ids):
         raise FormalCacheError("cache scene identity inventory is invalid")
+    split_totals: dict[str, int] = {}
+    split_eligible: dict[str, int] = {}
+    for entry in scenes:
+        split = entry.get("split")
+        qualification = entry.get("start_qualification")
+        if not isinstance(split, str) or not isinstance(qualification, Mapping):
+            raise FormalCacheError("cache scene start qualification is invalid")
+        if set(qualification) != {"common_eligible", "platform_start_cells"}:
+            raise FormalCacheError("cache scene start qualification is invalid")
+        start_cells = qualification.get("platform_start_cells")
+        if not isinstance(start_cells, Mapping) or set(start_cells) != set(_PLATFORMS):
+            raise FormalCacheError("cache platform start qualification is invalid")
+        parsed_cells: dict[str, tuple[int, int] | None] = {}
+        for platform in _PLATFORMS:
+            cell = start_cells[platform]
+            if cell is None:
+                parsed_cells[platform] = None
+            elif (
+                isinstance(cell, list)
+                and len(cell) == 2
+                and all(type(value) is int and 0 <= value < 256 for value in cell)
+            ):
+                parsed_cells[platform] = (cell[0], cell[1])
+            else:
+                raise FormalCacheError("cache qualified start cell is invalid")
+        common = qualification.get("common_eligible")
+        expected_common = all(
+            parsed_cells[platform] is not None for platform in _PLATFORMS
+        )
+        if type(common) is not bool or common is not expected_common:
+            raise FormalCacheError("cache common start qualification is invalid")
+        split_totals[split] = split_totals.get(split, 0) + 1
+        split_eligible.setdefault(split, 0)
+        if common:
+            split_eligible[split] += 1
+    if (
+        value.get("start_eligible_scene_count") != sum(split_eligible.values())
+        or value.get("start_eligible_split_counts")
+        != dict(sorted(split_eligible.items()))
+    ):
+        raise FormalCacheError("cache start qualification counts differ")
+    expected_formal_eligible = (
+        materialization == "full"
+        and split_eligible.get("train", 0) > 0
+        and all(
+            split_totals.get(split, 0) > 0
+            and split_eligible.get(split, 0) == split_totals[split]
+            for split in ("validation", "test", "holdout")
+        )
+    )
+    if formal_eligible is not expected_formal_eligible:
+        raise FormalCacheError("cache formal start eligibility is invalid")
     _validate_inventory(path.parent, value)
     return FormalCache(path.parent, value, identity)
 
@@ -1004,6 +1135,27 @@ def _static_scene_data(
             / sensor_range,
             0.0,
         ).astype(np.float32)
+    qualification_arrays = {
+        "elevation_m": projected.elevation_m,
+        "valid_mask": projected.valid_mask,
+        "forbidden_ratio": projected.forbidden_ratio,
+        **{
+            f"{platform.lower()}_hard_feasible": hard[platform]
+            for platform in _PLATFORMS
+        },
+        **{
+            f"{platform.lower()}_clearance_margin_norm": clearance[platform]
+            for platform in _PLATFORMS
+        },
+    }
+    qualified_start_cells = {
+        platform: qualify_initial_start_cell(
+            scene=multires,
+            arrays=qualification_arrays,
+            capability=capability_bundle.for_platform(platform),
+        )
+        for platform in _PLATFORMS
+    }
     rocks = np.asarray(
         [
             (item.x_m, item.y_m, item.radius_m, item.height_m)
@@ -1042,6 +1194,7 @@ def _static_scene_data(
         no_go_vertices=no_go,
         hard_feasible=hard,
         clearance_margin_norm=clearance,
+        qualified_start_cells=qualified_start_cells,
     )
 
 
@@ -1095,6 +1248,10 @@ def prepare_formal_training_cache(
     )
     if materialization == "full" and manifest.get("scene_count") != 1734:
         raise FormalCacheError("full cache must contain exactly 1734 scenes")
+    if materialization == "full" and not manifest.get("formal_eligible"):
+        raise FormalCacheError(
+            "full cache has an unstartable evaluation split or no startable training scene"
+        )
     return manifest
 
 

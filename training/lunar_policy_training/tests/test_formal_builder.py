@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import pathlib
 
 import numpy as np
@@ -8,12 +9,16 @@ import pytest
 import torch
 
 from lunar_policy_training.environment.formal_builder import (
+    FormalEpisode,
     FormalEnvironmentBuilder,
     _formal_schedule_index,
 )
 from lunar_policy_training.environment.formal_episode_state import (
     FormalWorkerState,
     policy_batch_sha256,
+)
+from lunar_policy_training.environment.formal_start_qualification import (
+    qualify_initial_start_cell,
 )
 from lunar_policy_training.environment.macro_step import PolicyAction
 from lunar_policy_training.environment.parallel_pool import (
@@ -113,6 +118,11 @@ def _cache(tmp_path: pathlib.Path):
         no_go_vertices=np.empty((0, 6, 2), np.float64),
         hard_feasible=hard,
         clearance_margin_norm=clearance,
+        qualified_start_cells={
+            "WHEELED": (127, 127),
+            "LEGGED": (127, 127),
+            "HOPPER": (127, 127),
+        },
     )
     root = tmp_path / "cache"
     write_formal_cache(
@@ -124,6 +134,112 @@ def _cache(tmp_path: pathlib.Path):
         repository_root=REPOSITORY_ROOT,
     )
     return root / "cache-manifest.json", bundle, scene_id
+
+
+def _cache_with_common_unstartable_scene(
+    tmp_path: pathlib.Path,
+    *,
+    include_eligible: bool = True,
+):
+    manifest_path, bundle, eligible_scene_id = _cache(tmp_path)
+    original = json.loads(manifest_path.read_text(encoding="utf-8"))
+    scenario_path = manifest_path.parent / "scenario-manifest.json"
+    scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+    ineligible_scene_id = _sha("formal-builder-common-unstartable")
+    ineligible_scenario = {
+        **scenario["scenarios"][0],
+        "scene_id": ineligible_scene_id,
+        "scenario_seed": 408001,
+        "scene_seed": scene_seed(
+            "d" * 64,
+            408001,
+            generator_version=FORMAL_GENERATOR_VERSION,
+        ),
+    }
+    scenarios = [ineligible_scenario]
+    if include_eligible:
+        scenarios.append(scenario["scenarios"][0])
+    scenario_sha = _sha(
+        "formal-builder-two-scene-manifest"
+        if include_eligible
+        else "formal-builder-unstartable-only-manifest"
+    )
+    scenario_manifest = {
+        **scenario,
+        "scenario_manifest_sha256": scenario_sha,
+        "scenarios": scenarios,
+    }
+    identity = FormalCacheIdentity(
+        **{
+            **original["identity"],
+            "scenario_manifest_sha256": scenario_sha,
+        }
+    )
+    shape = (256, 256)
+    hard = {
+        platform: np.ones(shape, np.uint8)
+        for platform in ("WHEELED", "LEGGED", "HOPPER")
+    }
+    clearance = {
+        platform: np.ones(shape, np.float32)
+        for platform in ("WHEELED", "LEGGED", "HOPPER")
+    }
+
+    def record(
+        scene_id: str,
+        starts: dict[str, tuple[int, int] | None],
+    ) -> StaticSceneData:
+        return StaticSceneData(
+            scene_id=scene_id,
+            source="NASA_LOLA",
+            split="train",
+            window_id="flat-window",
+            window_sha256="d" * 64,
+            world_bounds_m=(0.0, 0.0, 1024.0, 1024.0),
+            elevation_m=np.full(shape, 7.0, np.float32),
+            valid_mask=np.ones(shape, bool),
+            physical_obstacle_ratio=np.zeros(shape, np.float32),
+            physical_obstacle_height_m=np.zeros(shape, np.float32),
+            forbidden_ratio=np.zeros(shape, np.float32),
+            rocks=np.empty((0, 4), np.float64),
+            craters=np.empty((0, 4), np.float64),
+            no_go_vertices=np.empty((0, 6, 2), np.float64),
+            hard_feasible=hard,
+            clearance_margin_norm=clearance,
+            qualified_start_cells=starts,
+        )
+
+    root = tmp_path / "qualified-cache"
+    records = [
+        record(
+            ineligible_scene_id,
+            {
+                "WHEELED": (127, 127),
+                "LEGGED": (127, 127),
+                "HOPPER": None,
+            },
+        )
+    ]
+    if include_eligible:
+        records.append(
+            record(
+                eligible_scene_id,
+                {
+                    "WHEELED": (127, 127),
+                    "LEGGED": (127, 127),
+                    "HOPPER": (127, 127),
+                },
+            )
+        )
+    write_formal_cache(
+        root,
+        identity=identity,
+        scenario_manifest=scenario_manifest,
+        materialization="preflight",
+        scenes=records,
+        repository_root=REPOSITORY_ROOT,
+    )
+    return root / "cache-manifest.json", bundle, eligible_scene_id
 
 
 def _assembly(tmp_path: pathlib.Path):
@@ -157,6 +273,40 @@ def test_formal_worker_uses_one_scene_current_capability_and_safe_start(
     )
 
 
+def test_cache_start_qualification_matches_the_episode_candidate_semantics(
+    tmp_path: pathlib.Path,
+) -> None:
+    assembly, bundle, _ = _assembly(tmp_path)
+    worker = assembly.factory(0, "WHEELED")
+    loaded = worker.episode.loaded
+
+    qualified = qualify_initial_start_cell(
+        scene=loaded.scene,
+        arrays=loaded.arrays,
+        capability=bundle.for_platform("WHEELED"),
+    )
+    no_roi_arrays = {
+        **loaded.arrays,
+        "forbidden_ratio": np.ones((256, 256), np.float32),
+    }
+
+    assert qualified is not None
+    qualified_episode = FormalEpisode(
+        worker_index=worker.episode.worker_index,
+        platform_type="WHEELED",
+        capability=bundle.for_platform("WHEELED"),
+        scenario_identity=worker.episode.scenario_identity,
+        loaded=loaded,
+        start_cell=qualified,
+    )
+    assert bool(qualified_episode.initial_observation.candidate_mask.any())
+    assert qualify_initial_start_cell(
+        scene=loaded.scene,
+        arrays=no_roi_arrays,
+        capability=bundle.for_platform("WHEELED"),
+    ) is None
+
+
 def test_three_platforms_share_physical_scene_but_keep_distinct_projection(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -173,6 +323,50 @@ def test_three_platforms_share_physical_scene_but_keep_distinct_projection(
         tuple(worker.initial_observation.platform_context[0].tolist())
         for worker in workers.values()
     } == {(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)}
+
+
+def test_three_platforms_share_only_common_start_eligible_scenes(
+    tmp_path: pathlib.Path,
+) -> None:
+    manifest, bundle, eligible_scene_id = _cache_with_common_unstartable_scene(
+        tmp_path
+    )
+    assembly = FormalEnvironmentBuilder(
+        cache_manifest_path=manifest,
+        capability_bundle=bundle,
+        split="train",
+        allow_preflight=True,
+    ).build()
+
+    workers = {
+        platform: assembly.factory(0, platform)
+        for platform in ("WHEELED", "LEGGED", "HOPPER")
+    }
+
+    assert {worker.episode.scene_id for worker in workers.values()} == {
+        eligible_scene_id
+    }
+    assert all(
+        bool(worker.initial_observation.candidate_mask.any())
+        for worker in workers.values()
+    )
+
+
+def test_formal_builder_rejects_a_split_without_common_start_eligible_scenes(
+    tmp_path: pathlib.Path,
+) -> None:
+    manifest, bundle, _ = _cache_with_common_unstartable_scene(
+        tmp_path,
+        include_eligible=False,
+    )
+
+    with pytest.raises(ValueError, match="common start-eligible"):
+        FormalEnvironmentBuilder(
+            cache_manifest_path=manifest,
+            capability_bundle=bundle,
+            split="train",
+            allow_preflight=True,
+        ).build()
 
 
 def test_formal_episode_cursor_is_deterministic_and_resume_exact(

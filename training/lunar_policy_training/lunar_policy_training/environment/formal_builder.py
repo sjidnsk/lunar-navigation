@@ -40,6 +40,10 @@ from .formal_episode_state import (
     FormalWorkerState,
     policy_batch_sha256,
 )
+from .formal_start_qualification import (
+    build_formal_mission_roi,
+    formal_safe_start_cells,
+)
 from .macro_step import ExecutionEvents, PolicyAction
 from .multires_observation import DetailObservedWindow, MultiresSensorObservationState
 from .observation_boundary import (
@@ -64,12 +68,6 @@ from .visibility import NativeVisibilityEstimator, SensorGeometry
 
 
 _PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
-_BOUNDARY_MARGIN_CELLS = math.ceil(
-    (FORMAL_SENSOR_RANGE_M + LOCAL_GEOMETRY.size_m / 2.0)
-    / GLOBAL_GEOMETRY.resolution_m
-)
-
-
 def _formal_schedule_index(
     worker_index: int,
     episode_cursor: int,
@@ -523,14 +521,7 @@ class FormalEpisode:
         )
 
     def _build_mission_roi(self) -> np.ndarray:
-        roi = np.asarray(self.loaded.arrays["valid_mask"], dtype=np.bool_).copy()
-        margin = _BOUNDARY_MARGIN_CELLS
-        roi[:margin] = False
-        roi[-margin:] = False
-        roi[:, :margin] = False
-        roi[:, -margin:] = False
-        roi &= self.loaded.arrays["forbidden_ratio"] == 0.0
-        return roi
+        return build_formal_mission_roi(self.loaded.arrays)
 
     def _observed_maps(self) -> tuple[object, object, DetailObservedWindow]:
         observed = self.sensor_state.observed
@@ -920,12 +911,22 @@ class FormalWorkerBuilder:
         scenario_identity: ScenarioIdentity,
     ) -> FormalEnvironmentWorker:
         loaded = self._load_scheduled_scene(worker_index, scenario_identity)
-        safe = self._safe_start_cells(loaded, platform_type)
+        safe = list(self._safe_start_cells(loaded, platform_type))
         start_seed = _formal_episode_seed("start", scenario_identity)
         if safe:
             offset = int(start_seed[:16], 16) % len(safe)
             safe = safe[offset:] + safe[:offset]
-        for start_cell in safe:
+        qualification = loaded.entry["start_qualification"]
+        fallback_raw = qualification["platform_start_cells"][platform_type]
+        if not isinstance(fallback_raw, list) or len(fallback_raw) != 2:
+            raise ValueError("formal scheduled scene has no qualified platform start")
+        fallback = (int(fallback_raw[0]), int(fallback_raw[1]))
+        if fallback not in safe:
+            raise ValueError("formal cached qualified start is not platform-safe")
+        trial_cells = [safe[0]]
+        if fallback != trial_cells[0]:
+            trial_cells.append(fallback)
+        for start_cell in trial_cells:
             episode = FormalEpisode(
                 worker_index=worker_index,
                 platform_type=platform_type,
@@ -937,7 +938,7 @@ class FormalWorkerBuilder:
             if bool(episode.initial_observation.candidate_mask.any()):
                 return self._make_worker(episode)
         raise ValueError(
-            "formal scene has no deterministic safe start with an observed-only candidate"
+            "formal cached start qualification differs from the observed-only candidate"
         )
 
     def restore(
@@ -989,10 +990,15 @@ class FormalWorkerBuilder:
         if scenario_identity.scenario_schedule_id != self.scenario_schedule_id:
             raise ValueError("formal worker scenario schedule identity differs")
         entries = [
-            entry for entry in cache.manifest["scenes"] if entry["split"] == self.split
+            entry
+            for entry in cache.manifest["scenes"]
+            if entry["split"] == self.split
+            and entry["start_qualification"]["common_eligible"]
         ]
         if not entries:
-            raise ValueError("formal cache has no scenes for the requested split")
+            raise ValueError(
+                "formal cache has no common start-eligible scenes for the requested split"
+            )
         base_index = _formal_schedule_index(
             worker_index,
             scenario_identity.episode_cursor,
@@ -1032,29 +1038,7 @@ class FormalWorkerBuilder:
     def _safe_start_cells(
         loaded: _LoadedScene, platform_type: str
     ) -> tuple[tuple[int, int], ...]:
-        hard = loaded.arrays[f"{platform_type.lower()}_hard_feasible"].astype(bool)
-        clearance = loaded.arrays[
-            f"{platform_type.lower()}_clearance_margin_norm"
-        ]
-        valid = loaded.arrays["valid_mask"].astype(bool)
-        mask = hard & valid & (clearance > 0.0)
-        margin = _BOUNDARY_MARGIN_CELLS
-        mask[:margin] = False
-        mask[-margin:] = False
-        mask[:, :margin] = False
-        mask[:, -margin:] = False
-        rows, columns = np.nonzero(mask)
-        center = (GLOBAL_GEOMETRY.cells - 1) / 2.0
-        return tuple(
-            sorted(
-                zip(rows.tolist(), columns.tolist(), strict=True),
-                key=lambda value: (
-                    (value[0] - center) ** 2 + (value[1] - center) ** 2,
-                    value[0],
-                    value[1],
-                ),
-            )
-        )
+        return formal_safe_start_cells(loaded.arrays, platform_type)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1075,7 +1059,7 @@ class FormalEnvironmentBuilder:
         if self.split not in {"train", "validation", "test", "holdout"}:
             raise ValueError("formal environment split is invalid")
         schedule_id = (
-            f"{cache.manifest['cache_manifest_sha256']}/{self.split}/v3"
+            f"{cache.manifest['cache_manifest_sha256']}/{self.split}/v4"
         )
         worker_builder = FormalWorkerBuilder(
             str(self.cache_manifest_path),
