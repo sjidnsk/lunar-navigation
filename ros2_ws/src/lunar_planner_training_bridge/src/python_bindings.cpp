@@ -19,6 +19,7 @@
 #include <urdf_model/link.h>
 
 #include "lunar_planner_training_bridge/request.hpp"
+#include "lunar_planner_training_bridge/visibility.hpp"
 
 namespace py = pybind11;
 namespace planning = lunar::planning;
@@ -101,6 +102,39 @@ void AddUrdfMeshFilename(
     };
   }
   throw py::type_error("grid layer dtype must be float32, uint8, or uint32");
+}
+
+void RequireExactArray(const py::array &values, const py::dtype &dtype,
+                       const py::ssize_t dimensions,
+                       const char *const name,
+                       const char *const dtype_name) {
+  if ((values.flags() & py::array::c_style) == 0) {
+    throw py::value_error(std::string{name} + " must be C-contiguous");
+  }
+  if (values.ndim() != dimensions) {
+    throw py::value_error(std::string{name} + " has invalid dimensions");
+  }
+  if (!values.dtype().is(dtype)) {
+    throw py::type_error(std::string{name} + " dtype must be " + dtype_name);
+  }
+}
+
+void RequireSameGridShape(const py::array &reference,
+                          const py::array &values,
+                          const char *const name) {
+  if (reference.shape(0) != values.shape(0) ||
+      reference.shape(1) != values.shape(1)) {
+    throw py::value_error(std::string{name} + " shape mismatch");
+  }
+}
+
+void RequireFiniteFloatArray(const py::array &values,
+                             const char *const name) {
+  const auto *data = static_cast<const float *>(values.data());
+  if (!std::all_of(data, data + values.size(),
+                   [](const float value) { return std::isfinite(value); })) {
+    throw py::value_error(std::string{name} + " must be finite");
+  }
 }
 
 template <typename Value>
@@ -708,6 +742,154 @@ void BindProjection(py::module_ &module) {
           });
 }
 
+void BindVisibility(py::module_ &module) {
+  py::class_<training::VisibilityKernel>(module, "VisibilityKernel")
+      .def(py::init<double, double>(), py::arg("resolution_m"),
+           py::arg("range_m"))
+      .def_property_readonly("resolution_m",
+                             &training::VisibilityKernel::resolution_m)
+      .def_property_readonly("range_m",
+                             &training::VisibilityKernel::range_m)
+      .def(
+          "estimate_candidate_gains",
+          [](const training::VisibilityKernel &self,
+             const py::array &observed, const py::array &obstacle_ratio,
+             const py::array &roi_ratio,
+             const py::array &priority_weight,
+             const py::array &candidate_cells) {
+            RequireExactArray(observed, py::dtype::of<bool>(), 2,
+                              "observed", "bool");
+            RequireExactArray(obstacle_ratio, py::dtype::of<float>(), 2,
+                              "obstacle ratio", "float32");
+            RequireExactArray(roi_ratio, py::dtype::of<float>(), 2,
+                              "ROI ratio", "float32");
+            RequireExactArray(priority_weight, py::dtype::of<float>(), 2,
+                              "priority weight", "float32");
+            RequireExactArray(candidate_cells,
+                              py::dtype::of<std::int32_t>(), 2,
+                              "candidate cells", "int32");
+            if (candidate_cells.shape(1) != 2) {
+              throw py::value_error("candidate cells must have shape [N,2]");
+            }
+            RequireSameGridShape(observed, obstacle_ratio, "obstacle ratio");
+            RequireSameGridShape(observed, roi_ratio, "ROI ratio");
+            RequireSameGridShape(
+                observed, priority_weight, "priority weight");
+            RequireFiniteFloatArray(obstacle_ratio, "obstacle ratio");
+            RequireFiniteFloatArray(roi_ratio, "ROI ratio");
+            RequireFiniteFloatArray(priority_weight, "priority weight");
+
+            const training::GridShape shape{
+                .height = static_cast<std::size_t>(observed.shape(0)),
+                .width = static_cast<std::size_t>(observed.shape(1)),
+            };
+            const auto *observed_data =
+                static_cast<const bool *>(observed.data());
+            std::vector<std::uint8_t> observed_copy(
+                static_cast<std::size_t>(observed.size()), 0U);
+            std::transform(
+                observed_data, observed_data + observed.size(),
+                observed_copy.begin(),
+                [](const bool value) { return value ? 1U : 0U; });
+            const auto *candidate_data =
+                static_cast<const std::int32_t *>(candidate_cells.data());
+            std::vector<training::GridCell> candidates;
+            candidates.reserve(
+                static_cast<std::size_t>(candidate_cells.shape(0)));
+            for (py::ssize_t index = 0; index < candidate_cells.shape(0);
+                 ++index) {
+              candidates.push_back(training::GridCell{
+                  .row = candidate_data[index * 2],
+                  .column = candidate_data[index * 2 + 1],
+              });
+              if (candidates.back().row < 0 ||
+                  candidates.back().column < 0 ||
+                  static_cast<std::size_t>(candidates.back().row) >=
+                      shape.height ||
+                  static_cast<std::size_t>(candidates.back().column) >=
+                      shape.width) {
+                throw py::value_error("candidate cell is outside the grid");
+              }
+            }
+
+            std::vector<training::CandidateGain> gains;
+            {
+              py::gil_scoped_release release;
+              gains = self.EstimateCandidateGains(
+                  shape, observed_copy,
+                  std::span<const float>{
+                      static_cast<const float *>(obstacle_ratio.data()),
+                      static_cast<std::size_t>(obstacle_ratio.size())},
+                  std::span<const float>{
+                      static_cast<const float *>(roi_ratio.data()),
+                      static_cast<std::size_t>(roi_ratio.size())},
+                  std::span<const float>{
+                      static_cast<const float *>(priority_weight.data()),
+                      static_cast<std::size_t>(priority_weight.size())},
+                  candidates);
+            }
+            py::array_t<float> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(gains.size()),
+                static_cast<py::ssize_t>(2)});
+            auto *output = result.mutable_data();
+            for (std::size_t index = 0U; index < gains.size(); ++index) {
+              output[index * 2U] = gains[index].roi;
+              output[index * 2U + 1U] = gains[index].priority;
+            }
+            return result;
+          },
+          py::arg("observed"), py::arg("obstacle_ratio"),
+          py::arg("roi_ratio"), py::arg("priority_weight"),
+          py::arg("candidate_cells"))
+      .def(
+          "reveal_from_pose",
+          [](const training::VisibilityKernel &self,
+             const py::array &truth_obstacle_ratio,
+             const std::int32_t pose_row,
+             const std::int32_t pose_column) {
+            RequireExactArray(truth_obstacle_ratio,
+                              py::dtype::of<float>(), 2,
+                              "truth obstacle ratio", "float32");
+            RequireFiniteFloatArray(
+                truth_obstacle_ratio, "truth obstacle ratio");
+            const training::GridShape shape{
+                .height = static_cast<std::size_t>(
+                    truth_obstacle_ratio.shape(0)),
+                .width = static_cast<std::size_t>(
+                    truth_obstacle_ratio.shape(1)),
+            };
+            if (pose_row < 0 || pose_column < 0 ||
+                static_cast<std::size_t>(pose_row) >= shape.height ||
+                static_cast<std::size_t>(pose_column) >= shape.width) {
+              throw py::value_error("visibility pose is outside the grid");
+            }
+            std::vector<std::uint8_t> visible;
+            {
+              py::gil_scoped_release release;
+              visible = self.RevealFromPose(
+                  shape,
+                  training::GridCell{
+                      .row = pose_row,
+                      .column = pose_column,
+                  },
+                  std::span<const float>{
+                      static_cast<const float *>(
+                          truth_obstacle_ratio.data()),
+                      static_cast<std::size_t>(
+                          truth_obstacle_ratio.size())});
+            }
+            py::array_t<bool> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(shape.height),
+                static_cast<py::ssize_t>(shape.width)});
+            std::transform(visible.begin(), visible.end(),
+                           result.mutable_data(),
+                           [](const auto value) { return value != 0U; });
+            return result;
+          },
+          py::arg("truth_obstacle_ratio"), py::arg("pose_row"),
+          py::arg("pose_column"));
+}
+
 void BindRequest(py::module_ &module) {
   py::class_<training::TrainingPlanRequest>(module, "TrainingPlanRequest")
       .def(py::init<>())
@@ -772,5 +954,6 @@ PYBIND11_MODULE(_lunar_planner_training_bridge, module) {
   BindExecution(module);
   BindOutput(module);
   BindProjection(module);
+  BindVisibility(module);
   BindRequest(module);
 }

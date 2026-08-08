@@ -212,7 +212,7 @@ git commit -m "feat: freeze formal sensor training semantics"
 - Consumes: C-contiguous `bool`/`float32` grids and `int32 [N,2]` row-column candidates.
 - Produces: `VisibilityKernel(resolution_m: float, range_m: float)`, `estimate_candidate_gains(...) -> float32[N,2]`, and `reveal_from_pose(...) -> bool[H,W]`.
 
-- [ ] **Step 1: Write failing C++ tests for exact ray and occlusion semantics**
+- [x] **Step 1: Write failing C++ tests for exact ray and occlusion semantics**
 
 Cover all octants, map edges, repeated rays, any-positive obstacle ratio, first-obstacle visibility, behind-obstacle invisibility, and forbidden independence. Assert deterministic offset order and this public surface:
 
@@ -225,7 +225,7 @@ EXPECT_TRUE(visible[CellIndex(3U, 5U, 7U)]);
 EXPECT_FALSE(visible[CellIndex(3U, 6U, 7U)]);
 ```
 
-- [ ] **Step 2: Build the test and verify RED**
+- [x] **Step 2: Build the test and verify RED**
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -239,13 +239,13 @@ colcon --log-base "$artifact_root/log" build --merge-install \
 
 Expected: compile failure because `visibility.hpp`/`VisibilityKernel` is absent.
 
-- [ ] **Step 3: Implement the C++ kernel and precomputed stencil**
+- [x] **Step 3: Implement the C++ kernel and precomputed stencil**
 
 Implement one immutable stencil per `(resolution_m, range_m)`. Sort endpoint offsets row-major; build each Bresenham sequence once; validate finite positive geometry; use checked multiplication for `height*width`; never read beyond the provided spans. Candidate gain accepts every candidate in one call and follows observed-only intermediate-cell rules. Reveal walks truth-free cells, marks the first blocking cell, and stops that ray.
 
 Build `src/visibility.cpp` as a position-independent `lunar_training_visibility` static library. Link both the pybind module and `visibility_test.cpp` against this target so tests exercise the exact implementation exported to Python.
 
-- [ ] **Step 4: Add pybind wrappers with validation before GIL release**
+- [x] **Step 4: Add pybind wrappers with validation before GIL release**
 
 Validate dtype, dimensionality, equal shape, finite floats, candidate bounds, and C-contiguity while holding the GIL; then execute:
 
@@ -258,7 +258,7 @@ Validate dtype, dimensionality, equal shape, finite floats, candidate bounds, an
 
 Expose no implicit dtype casting and no Python fallback from the production wrapper.
 
-- [ ] **Step 5: Build, run native and binding tests, then commit**
+- [x] **Step 5: Build, run native and binding tests, then commit**
 
 ```bash
 source /opt/ros/humble/setup.bash

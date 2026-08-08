@@ -172,6 +172,67 @@ def test_urdf_validation_uses_authoritative_model_parser() -> None:
         bridge_api.validate_urdf_geometry(missing_name, "base_link")
 
 
+def test_visibility_binding_preserves_exact_batch_and_reveal_contract() -> None:
+    kernel = bridge_api.VisibilityKernel(1.0, 3.0)
+    observed = np.zeros((7, 7), dtype=np.bool_)
+    obstacle = np.zeros((7, 7), dtype=np.float32)
+    roi = np.zeros((7, 7), dtype=np.float32)
+    priority = np.zeros((7, 7), dtype=np.float32)
+    observed[3, 3:5] = True
+    roi[3, 5] = 0.25
+    priority[3, 5] = 0.75
+    candidates = np.asarray(((3, 3), (1, 1)), dtype=np.int32)
+
+    gains = kernel.estimate_candidate_gains(
+        observed, obstacle, roi, priority, candidates
+    )
+    obstacle[3, 5] = 0.001
+    visible = kernel.reveal_from_pose(obstacle, 3, 3)
+
+    assert kernel.resolution_m == 1.0
+    assert kernel.range_m == 3.0
+    assert gains.shape == (2, 2)
+    assert gains.dtype == np.float32
+    assert gains.flags.c_contiguous
+    np.testing.assert_array_equal(gains[0], (0.25, 0.75))
+    np.testing.assert_array_equal(gains[1], (0.0, 0.0))
+    assert visible.shape == (7, 7)
+    assert visible.dtype == np.bool_
+    assert visible.flags.c_contiguous
+    assert visible[3, 5]
+    assert not visible[3, 6]
+
+
+@pytest.mark.parametrize(
+    ("argument", "values", "message"),
+    (
+        ("observed", np.zeros((7, 7), dtype=np.uint8), "bool"),
+        ("obstacle", np.zeros((7, 7), dtype=np.float64), "float32"),
+        ("candidates", np.zeros((2, 2), dtype=np.int64), "int32"),
+        (
+            "roi",
+            np.zeros((7, 14), dtype=np.float32)[:, ::2],
+            "C-contiguous",
+        ),
+    ),
+)
+def test_visibility_binding_rejects_inexact_or_strided_arrays(
+    argument: str, values: np.ndarray, message: str
+) -> None:
+    kernel = bridge_api.VisibilityKernel(1.0, 3.0)
+    arguments = {
+        "observed": np.zeros((7, 7), dtype=np.bool_),
+        "obstacle": np.zeros((7, 7), dtype=np.float32),
+        "roi": np.zeros((7, 7), dtype=np.float32),
+        "priority": np.zeros((7, 7), dtype=np.float32),
+        "candidates": np.asarray(((3, 3),), dtype=np.int32),
+    }
+    arguments[argument] = values
+
+    with pytest.raises((TypeError, ValueError), match=message):
+        kernel.estimate_candidate_gains(*arguments.values())
+
+
 @pytest.fixture
 def easy_request():
     def make(platform_type: str) -> bridge_api.TrainingPlanRequest:
