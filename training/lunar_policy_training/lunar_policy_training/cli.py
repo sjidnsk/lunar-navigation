@@ -2259,7 +2259,12 @@ def _start_training_run(
         )
     calibrated = _load_calibrated_run_state(root)
     config = calibrated.config
-    if requested_config.as_frozen_dict() != config.as_frozen_dict():
+    expected_config = (
+        with_rollout_horizon(requested_config, calibrated.rollout_horizon)
+        if requested_config.run_kind == "formal"
+        else requested_config
+    )
+    if expected_config.as_frozen_dict() != config.as_frozen_dict():
         raise ArtifactRootError("train config differs from calibrated run")
     if config.run_kind == "formal":
         _validate_formal_bundle_identity(capability_bundle, calibrated.run_identity)

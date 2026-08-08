@@ -42,6 +42,7 @@ from lunar_policy_training.config import (
     TrainingConfigError,
     load_training_config,
     resolve_training_config,
+    with_rollout_horizon,
 )
 from lunar_policy_training.checkpoint import RunIdentity
 from lunar_policy_training.curriculum import CurriculumSchedule
@@ -1136,6 +1137,61 @@ def test_train_consumes_existing_calibrated_root_without_recalibration(
     assert payload["task4_calibration"]["scenario_schedule_id"] == (
         CurriculumSchedule().scenario_schedule_id
     )
+
+
+def test_formal_train_uses_the_calibrated_horizon_not_the_bootstrap_value(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Would fail when train compares bootstrap 32 directly with selected 16."""
+    root = tmp_path / "formal-calibrated"
+    root.mkdir()
+    requested = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+    assert requested.ppo.rollout_horizon == 32
+    frozen = with_rollout_horizon(requested, 16)
+    identity = RunIdentity(
+        run_kind="formal",
+        data_sha256="1" * 64,
+        split_sha256="2" * 64,
+        generator_sha256="3" * 64,
+        capability_sha256="4" * 64,
+        reward_sha256="5" * 64,
+        v3_sha256="6" * 64,
+        training_semantics_sha256="7" * 64,
+    )
+    calibrated = SimpleNamespace(
+        config=frozen,
+        rollout_horizon=16,
+        run_identity=identity,
+        formal_seed=4080,
+    )
+    sentinel = object()
+    monkeypatch.setattr(
+        cli_module, "_load_calibrated_run_state", lambda _root: calibrated
+    )
+    monkeypatch.setattr(
+        cli_module, "_validate_formal_bundle_identity", lambda *args: None
+    )
+    monkeypatch.setattr(cli_module, "_source_commit", lambda _root: "a" * 40)
+    monkeypatch.setattr(cli_module, "_seed_everything", lambda _seed: None)
+    monkeypatch.setattr(
+        cli_module, "_run_curriculum_training", lambda **kwargs: sentinel
+    )
+
+    result = cli_module._start_training_run(
+        config_path=(
+            REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+        ),
+        artifact_root=root,
+        repository_root=REPOSITORY_ROOT,
+        max_updates=None,
+        interrupt_first_update=False,
+        capability_bundle=object(),
+    )
+
+    assert result is sentinel
+    assert calibrated.config.ppo.rollout_horizon == 16
 
 
 def test_sigterm_during_update_saves_only_after_complete_update_boundary() -> None:
