@@ -18,6 +18,11 @@ from lunar_planner_training_bridge import (
 
 from ..policy.observation import ObservationIdentity, PolicyBatch
 from .macro_step import ExecutionEvents, PlannerTransition, PolicyAction
+from .observation_boundary import (
+    BoundaryObservationResult,
+    ObservationBoundaryController,
+    SensorBoundaryEvidence,
+)
 
 
 _REFERENCE_OUTPUTS = frozenset(
@@ -113,6 +118,7 @@ class CommittedHopExecutionFeedback:
     hard_safety_violation: bool
     terminated: bool
     execution_events: ExecutionEvents = ExecutionEvents()
+    sensor_boundary_evidence: SensorBoundaryEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -137,6 +143,7 @@ class ReferenceExecutionResult:
     terminated: bool
     execution_state: str
     execution_events: ExecutionEvents = ExecutionEvents()
+    sensor_boundary_evidence: SensorBoundaryEvidence | None = None
 
 
 class V3ExplorationEnvironment:
@@ -150,6 +157,10 @@ class V3ExplorationEnvironment:
         request_builder: Callable[..., object],
         initial_observation: PolicyBatch,
         observation_provider: Callable[[], PolicyBatch] | None = None,
+        observation_boundary_controller: (
+            ObservationBoundaryController | None
+        ) = None,
+        require_sensor_closed_loop: bool = False,
         require_identity_bound_request: bool = False,
         reference_executor: Callable[
             [MotionReference], ReferenceExecutionResult
@@ -188,11 +199,45 @@ class V3ExplorationEnvironment:
             )
         if observation_provider is not None and not callable(observation_provider):
             raise ValueError("observation provider must be callable")
+        if type(require_sensor_closed_loop) is not bool:
+            raise ValueError("sensor-closed-loop flag must be boolean")
+        if require_sensor_closed_loop:
+            if not isinstance(
+                observation_boundary_controller, ObservationBoundaryController
+            ):
+                raise ValueError(
+                    "sensor-closed environment requires an observation boundary controller"
+                )
+            if not observation_boundary_controller.initialized:
+                raise ValueError(
+                    "observation boundary controller must perform its initial reveal"
+                )
+            if observation_boundary_controller.platform_type != platform_type:
+                raise ValueError("observation boundary controller platform mismatch")
+            if observation_provider is not None:
+                raise ValueError(
+                    "sensor-closed environment cannot use an observation provider"
+                )
+            boundary_observation = (
+                observation_boundary_controller.current_observation
+            )
+            if not _same_observation(
+                boundary_observation, initial_observation
+            ):
+                raise ValueError(
+                    "initial observation is not owned by the boundary controller"
+                )
+        elif observation_boundary_controller is not None:
+            raise ValueError(
+                "observation boundary controller requires sensor-closed-loop mode"
+            )
         if type(require_identity_bound_request) is not bool:
             raise ValueError("identity-bound request flag must be boolean")
         self._observation = _clone_observation(initial_observation)
         self._rejected_candidates: set[int] = set()
         self._observation_provider = observation_provider
+        self._observation_boundary_controller = observation_boundary_controller
+        self._require_sensor_closed_loop = require_sensor_closed_loop
         self._require_identity_bound_request = require_identity_bound_request
         self._total_decision_budget = total_decision_budget
         self._remaining_decisions = remaining_decision_budget
@@ -215,6 +260,10 @@ class V3ExplorationEnvironment:
     @property
     def training_stopped(self) -> bool:
         return self._training_stopped
+
+    @property
+    def sensor_closed_loop(self) -> bool:
+        return self._require_sensor_closed_loop
 
     @property
     def current_observation(self) -> PolicyBatch:
@@ -474,7 +523,25 @@ class V3ExplorationEnvironment:
             "LANDED_HOLD",
         }:
             self._fail_closed("committed hop feedback has invalid execution state")
-        self._install_observation(feedback.next_observation)
+        if self._require_sensor_closed_loop:
+            boundary = self._apply_sensor_boundary(
+                feedback.execution_state,
+                feedback.sensor_boundary_evidence,
+            )
+            if boundary.updated:
+                self._install_observation(boundary.next_observation)
+            feedback = replace(
+                feedback,
+                next_observation=_clone_observation(self._observation),
+                mission_observed_delta=boundary.mission_observed_delta,
+                priority_observed_delta=boundary.priority_observed_delta,
+                executed_without_new_coverage=(
+                    boundary.mission_observed_delta == 0.0
+                    and boundary.priority_observed_delta == 0.0
+                ),
+            )
+        else:
+            self._install_observation(feedback.next_observation)
         self._execution_state = feedback.execution_state
         return feedback
 
@@ -691,8 +758,26 @@ class V3ExplorationEnvironment:
         execution = self._reference_executor(output.reference)
         if not isinstance(execution, ReferenceExecutionResult):
             self._fail_closed("reference executor returned an invalid result")
-        self._install_observation(execution.next_observation)
         self._execution_state = execution.execution_state
+        if self._require_sensor_closed_loop:
+            boundary = self._apply_sensor_boundary(
+                execution.execution_state,
+                execution.sensor_boundary_evidence,
+            )
+            if boundary.updated:
+                self._install_observation(boundary.next_observation)
+            execution = replace(
+                execution,
+                next_observation=_clone_observation(self._observation),
+                mission_observed_delta=boundary.mission_observed_delta,
+                priority_observed_delta=boundary.priority_observed_delta,
+                executed_without_new_coverage=(
+                    boundary.mission_observed_delta == 0.0
+                    and boundary.priority_observed_delta == 0.0
+                ),
+            )
+        else:
+            self._install_observation(execution.next_observation)
         if self._platform_type == "HOPPER" and self._execution_state in {
             "JUMP_COMMITTED",
             "IN_FLIGHT",
@@ -728,6 +813,23 @@ class V3ExplorationEnvironment:
             terminated=execution.terminated,
             execution_events=execution.execution_events,
         )
+
+    def _apply_sensor_boundary(
+        self,
+        execution_state: str,
+        evidence: SensorBoundaryEvidence | None,
+    ) -> BoundaryObservationResult:
+        controller = self._observation_boundary_controller
+        if not isinstance(controller, ObservationBoundaryController):
+            self._fail_closed("observation boundary controller is unavailable")
+        try:
+            return controller.after_execution(
+                platform_type=self._platform_type,
+                execution_state=execution_state,
+                evidence=evidence,
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            self._fail_closed(str(error))
 
     def _fail_closed(self, message: str) -> None:
         self._rollout_discarded = True
@@ -777,6 +879,16 @@ def _clone_observation(observation: PolicyBatch) -> PolicyBatch:
     )
 
 
+def _same_observation(left: PolicyBatch, right: PolicyBatch) -> bool:
+    return (
+        left.observation_identities == right.observation_identities
+        and all(
+            getattr(left, name).equal(getattr(right, name))
+            for name in left.input_names
+        )
+    )
+
+
 def create_v3_environment(
     *,
     platform_type: str,
@@ -785,6 +897,10 @@ def create_v3_environment(
     ],
     initial_observation: PolicyBatch,
     observation_provider: Callable[[], PolicyBatch] | None = None,
+    observation_boundary_controller: (
+        ObservationBoundaryController | None
+    ) = None,
+    require_sensor_closed_loop: bool = False,
     reference_executor: Callable[
         [MotionReference], ReferenceExecutionResult
     ] | None = None,
@@ -799,12 +915,20 @@ def create_v3_environment(
     """Compose the supported training environment with the real C++ v3 bridge."""
     if platform_type == "HOPPER" and committed_hop_executor is None:
         raise ValueError("production HOPPER requires a committed hop executor")
+    if require_sensor_closed_loop and not isinstance(
+        observation_boundary_controller, ObservationBoundaryController
+    ):
+        raise ValueError(
+            "sensor-closed environment requires an observation boundary controller"
+        )
     return V3ExplorationEnvironment(
         platform_type=platform_type,
         bridge=PlannerBridge(),
         request_builder=request_builder,
         initial_observation=initial_observation,
         observation_provider=observation_provider,
+        observation_boundary_controller=observation_boundary_controller,
+        require_sensor_closed_loop=require_sensor_closed_loop,
         require_identity_bound_request=True,
         reference_executor=reference_executor,
         committed_hop_executor=committed_hop_executor,

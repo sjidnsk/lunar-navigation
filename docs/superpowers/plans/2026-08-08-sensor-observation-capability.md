@@ -413,7 +413,7 @@ git commit -m "feat: close truth-to-observed sensor updates"
 - Consumes: `SensorObservationState`, pose at an execution boundary, elapsed physical macro-step time, mission/projection builders, and platform type.
 - Produces: `SensorBoundaryEvidence`, `ObservationBoundaryController.reset(...)`, and `.after_execution(...) -> BoundaryObservationResult` with the next `PolicyBatch` and normalized coverage deltas.
 
-- [ ] **Step 1: Write failing boundary and end-to-end tests**
+- [x] **Step 1: Write failing boundary and end-to-end tests**
 
 Prove one reset reveal before the first candidate; one reveal per ground exploration decision boundary; zero reveal for hopper `JUMP_COMMITTED` and `IN_FLIGHT`; exactly one reveal at `LANDED_HOLD`; and reward deltas equal newly observed area rather than candidate predicted gain.
 
@@ -428,7 +428,7 @@ assert controller.after_execution(
 
 Extend the same-world training smoke through: truth -> reset reveal -> candidate -> policy action -> C++ v3 request -> certified reference -> boundary reveal -> actual coverage reward.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 ```bash
 source /home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/native-green/install/setup.bash
@@ -439,7 +439,7 @@ PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
   training/lunar_policy_training/tests/test_training_smoke.py
 ```
 
-- [ ] **Step 3: Implement the boundary controller and V3 invariant**
+- [x] **Step 3: Implement the boundary controller and V3 invariant**
 
 The controller owns observation revision and map-snapshot identity. `V3ExplorationEnvironment` accepts an optional typed boundary controller only from formal/sensor-closed builders; if present, executable references cannot supply self-reported coverage. A ground executor reports final pose/time, while hopper feedback reports pose/time only at `LANDED_HOLD`. The controller builds the next observation and reward facts atomically.
 
@@ -461,11 +461,11 @@ class BoundaryObservationResult:
 
 `ReferenceExecutionResult` and `CommittedHopExecutionFeedback` gain `sensor_boundary_evidence: SensorBoundaryEvidence | None = None`. When `require_sensor_closed_loop=True`, ground decision boundaries and hopper `LANDED_HOLD` require evidence; `JUMP_COMMITTED`/`IN_FLIGHT` forbid it. The environment replaces executor-supplied observation/deltas with the controller result.
 
-- [ ] **Step 4: Preserve legacy development-smoke isolation**
+- [x] **Step 4: Preserve legacy development-smoke isolation**
 
 The existing handcrafted proxy remains explicitly `development-smoke` and cannot satisfy the formal sensor-closed flag. It may keep test-only coverage behavior, but formal factory construction without `ObservationBoundaryController` fails before worker startup.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 ```bash
 source /home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/native-green/install/setup.bash

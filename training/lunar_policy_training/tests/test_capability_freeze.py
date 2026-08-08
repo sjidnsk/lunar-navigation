@@ -771,8 +771,27 @@ def test_complete_typed_bundle_maps_all_platforms_to_v3_bridge(
     assert hopper_bridge.specific_impulse_s == 301.0
 
 
+class _SensorClosedEnvironment:
+    sensor_closed_loop = True
+
+
+class _FormalWorkerRecord:
+    def __init__(self, *payload) -> None:
+        self.environment = _SensorClosedEnvironment()
+        self.payload = payload
+
+
 def _record_injected_capability(worker_index, platform_type, capability, scenario):
-    return worker_index, platform_type, capability, scenario
+    return _FormalWorkerRecord(
+        worker_index, platform_type, capability, scenario
+    )
+
+
+_record_injected_capability.sensor_closed_loop = True
+
+
+def _record_legacy_environment(worker_index, platform_type, capability, scenario):
+    return object()
 
 
 def test_environment_factory_uses_loaded_bundle_without_source_reread(
@@ -798,7 +817,21 @@ def test_environment_factory_uses_loaded_bundle_without_source_reread(
 
     result = pickle.loads(pickle.dumps(factory))(7, "LEGGED")
 
-    assert result[2] == bundle.for_platform("LEGGED")
-    assert result[3].capability_version == result[2].capability_version
-    assert result[3].capability_sha256 == result[2].content_sha256
-    assert result[3].scenario_schedule_id == "nasa-polar-train/v1"
+    assert result.payload[2] == bundle.for_platform("LEGGED")
+    assert result.payload[3].capability_version == result.payload[2].capability_version
+    assert result.payload[3].capability_sha256 == result.payload[2].content_sha256
+    assert result.payload[3].scenario_schedule_id == "nasa-polar-train/v1"
+
+
+def test_formal_environment_factory_rejects_legacy_non_sensor_loop(
+    tmp_path: Path,
+) -> None:
+    bundle = load_frozen_capability_bundle(
+        _write_bundle(tmp_path / "formal-sensor-gate"), run_kind="formal"
+    )
+    with pytest.raises(CapabilityFreezeError, match="sensor-closed"):
+        FrozenCapabilityEnvironmentFactory(
+            bundle=bundle,
+            scenario_schedule_id="nasa-polar-train/v1",
+            builder=_record_legacy_environment,
+        )

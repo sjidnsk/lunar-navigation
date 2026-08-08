@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import math
 import pathlib
 import subprocess
 import sys
@@ -51,6 +52,15 @@ from lunar_policy_training.checkpoint import (  # noqa: E402
 from lunar_policy_training.config import load_training_config  # noqa: E402
 from lunar_policy_training.environment.candidate_builder import (  # noqa: E402
     CandidateBuilderV2,
+)
+from lunar_policy_training.environment.observation_boundary import (  # noqa: E402
+    ObservationBoundaryController,
+    SensorBoundaryEvidence,
+)
+from lunar_policy_training.environment.sensor_observation import (  # noqa: E402
+    SensorObservationState,
+    TrainingObservedGrid,
+    TrainingWorldTruth,
 )
 from lunar_policy_training.environment.visibility import (  # noqa: E402
     NativeVisibilityEstimator,
@@ -726,6 +736,356 @@ def test_cpu_pretraining_smoke_links_data_v3_update_checkpoint_and_resume(
         projection.traversable_ratio,
         batch.prior_channels[0, 3].numpy(),
     )
+
+    # Close one same-world sensor loop before policy selection.  The initial
+    # reveal is deliberately reward-free; the next reveal is driven only by
+    # the endpoint of a reference certified by the current C++ v3 planner.
+    feasible = projection.traversable_ratio > 0.0
+    feasible_cells = [
+        (row, column)
+        for row in range(2, feasible.shape[0] - 2)
+        for column in range(112, 121)
+        if feasible[row - 1 : row + 2, column : column + 8].all()
+    ]
+    assert feasible_cells
+    sensor_row, sensor_column = min(
+        feasible_cells,
+        key=lambda cell: (math.dist(cell, (128, 120)), cell),
+    )
+    sensor_x, sensor_y = canvas.grid_center_world(sensor_row, sensor_column)
+    sensor_pose = Pose2(
+        sensor_x,
+        sensor_y,
+        elevation_m=float(inputs.world.elevation_m[sensor_row, sensor_column]),
+    )
+    initial_known = inputs.world.observed_mask.copy()
+    initial_known[:, sensor_column + 6 :] = False
+    zeros = np.zeros(initial_known.shape, dtype=np.float32)
+    sensor_state = SensorObservationState(
+        truth=TrainingWorldTruth(
+            canvas,
+            inputs.world.elevation_m,
+            inputs.world.physical_obstacle_layer.values,
+        ),
+        observed=TrainingObservedGrid(
+            canvas=canvas,
+            elevation_m=np.where(
+                initial_known, inputs.world.elevation_m, 0.0
+            ).astype(np.float32),
+            physical_obstacle_ratio=np.where(
+                initial_known,
+                inputs.world.physical_obstacle_layer.values,
+                0.0,
+            ).astype(np.float32),
+            valid_mask=initial_known,
+            observation_age_s=zeros,
+            observation_quality=initial_known.astype(np.float32),
+            elevation_variance=zeros,
+            obstacle_variance=zeros,
+            observation_count=initial_known.astype(np.uint32),
+        ),
+        mission_roi_ratio=inputs.mission.roi_ratio,
+        mission_priority=inputs.mission.priority,
+        forbidden_mask=inputs.forbidden_ratio > 0.0,
+        visibility_estimator=NativeVisibilityEstimator(
+            SensorGeometry(
+                FORMAL_SENSOR_RANGE_M,
+                FORMAL_SENSOR_FOV_RAD,
+            ),
+            resolution_m=canvas.geometry.resolution_m,
+        ),
+    )
+    boundary_artifacts: dict[str, object] = {}
+
+    def current_global_map(
+        current_inputs: _SyntheticPolarInputs,
+    ) -> bridge_api.GridMap:
+        scale = 4
+        observed = np.repeat(
+            np.repeat(current_inputs.world.observed_mask, scale, axis=0),
+            scale,
+            axis=1,
+        )
+        elevation = np.repeat(
+            np.repeat(current_inputs.world.elevation_m, scale, axis=0),
+            scale,
+            axis=1,
+        )
+        physical = np.repeat(
+            np.repeat(
+                current_inputs.world.physical_obstacle_layer.values,
+                scale,
+                axis=0,
+            ),
+            scale,
+            axis=1,
+        )
+        forbidden = np.repeat(
+            np.repeat(current_inputs.forbidden_ratio, scale, axis=0),
+            scale,
+            axis=1,
+        )
+
+        def layer(values: np.ndarray, dtype) -> bridge_api.GridLayer:
+            south_up = np.ascontiguousarray(
+                np.flipud(np.asarray(values)).astype(dtype, copy=False).reshape(-1)
+            )
+            return bridge_api.GridLayer(south_up)
+
+        grid = bridge_api.GridMap()
+        grid.frame_id = "map"
+        grid.stamp.nanoseconds_since_epoch = 1_000_000_000
+        grid.width = observed.shape[1]
+        grid.height = observed.shape[0]
+        grid.resolution_m = 1.0
+        grid.origin_m = _bridge_vec3(
+            canvas.bounds_m[0], canvas.bounds_m[1], 0.0
+        )
+        zeros_global = np.zeros(observed.shape, dtype=np.float32)
+        grid.layers = {
+            "elevation": layer(
+                np.where(observed, elevation, 0.0), np.float32
+            ),
+            "valid_mask": layer(observed, np.uint8),
+            "obstacle": layer(observed & (physical > 0.0), np.uint8),
+            "obstacle_height": layer(
+                np.where(observed, physical * 0.5, 0.0), np.float32
+            ),
+            "observation_age_s": layer(zeros_global, np.float32),
+            "observation_quality": layer(observed, np.float32),
+            "elevation_variance": layer(zeros_global, np.float32),
+            "obstacle_variance": layer(zeros_global, np.float32),
+            "observation_count": layer(observed, np.uint32),
+            "forbidden": layer(observed & (forbidden > 0.0), np.uint8),
+        }
+        return grid
+
+    def current_local_map(
+        current_inputs: _SyntheticPolarInputs,
+    ) -> bridge_api.GridMap:
+        local_cells = 300
+        local_resolution_m = 0.25
+        pose = current_inputs.pose
+        origin_x = pose.x_m - (local_cells // 2 + 0.5) * local_resolution_m
+        origin_y = pose.y_m - (local_cells // 2 + 0.5) * local_resolution_m
+        x = origin_x + (np.arange(local_cells) + 0.5) * local_resolution_m
+        y = (
+            origin_y
+            + local_cells * local_resolution_m
+            - (np.arange(local_cells) + 0.5) * local_resolution_m
+        )
+        left, _, _, top = canvas.bounds_m
+        columns = np.floor(
+            (x - left) / canvas.geometry.resolution_m
+        ).astype(np.intp)
+        rows = np.floor(
+            (top - y) / canvas.geometry.resolution_m
+        ).astype(np.intp)
+        assert rows.min() >= 0 and rows.max() < canvas.geometry.cells
+        assert columns.min() >= 0 and columns.max() < canvas.geometry.cells
+        observed = current_inputs.world.observed_mask[np.ix_(rows, columns)]
+        elevation = current_inputs.world.elevation_m[np.ix_(rows, columns)]
+        physical = current_inputs.world.physical_obstacle_layer.values[
+            np.ix_(rows, columns)
+        ]
+        forbidden = current_inputs.forbidden_ratio[np.ix_(rows, columns)]
+
+        def layer(values: np.ndarray, dtype) -> bridge_api.GridLayer:
+            south_up = np.ascontiguousarray(
+                np.flipud(np.asarray(values)).astype(dtype, copy=False).reshape(-1)
+            )
+            return bridge_api.GridLayer(south_up)
+
+        grid = bridge_api.GridMap()
+        grid.frame_id = "odom"
+        grid.stamp.nanoseconds_since_epoch = 1_000_000_000
+        grid.width = local_cells
+        grid.height = local_cells
+        grid.resolution_m = local_resolution_m
+        grid.origin_m = _bridge_vec3(origin_x, origin_y, 0.0)
+        zeros_local = np.zeros(observed.shape, dtype=np.float32)
+        grid.layers = {
+            "elevation": layer(
+                np.where(observed, elevation, 0.0), np.float32
+            ),
+            "valid_mask": layer(observed, np.uint8),
+            "obstacle": layer(observed & (physical > 0.0), np.uint8),
+            "obstacle_height": layer(
+                np.where(observed, physical * 0.5, 0.0), np.float32
+            ),
+            "observation_age_s": layer(zeros_local, np.float32),
+            "observation_quality": layer(observed, np.float32),
+            "elevation_variance": layer(zeros_local, np.float32),
+            "obstacle_variance": layer(zeros_local, np.float32),
+            "observation_count": layer(observed, np.uint32),
+            "forbidden": layer(observed & (forbidden > 0.0), np.uint8),
+        }
+        return grid
+
+    def add_current_wheel_smoke_primitives(
+        current_request: bridge_api.TrainingPlanRequest,
+    ) -> None:
+        capability = current_request.capability
+        capability.maximum_acceleration_mps2 = 0.5
+        capability.maximum_braking_deceleration_mps2 = 0.5
+        capability.maximum_yaw_acceleration_radps2 = 0.5
+        capability.maximum_lateral_acceleration_mps2 = 0.5
+        primitives = []
+        arc_yaw = np.pi / 16.0
+        arc_x = math.sin(arc_yaw)
+        arc_y = 1.0 - math.cos(arc_yaw)
+        for primitive_id, kind, translation_x, translation_y, yaw in (
+            (
+                "current-forward",
+                bridge_api.WheelPrimitiveKind.FORWARD,
+                0.25,
+                0.0,
+                0.0,
+            ),
+            (
+                "current-reverse",
+                bridge_api.WheelPrimitiveKind.REVERSE,
+                -0.25,
+                0.0,
+                0.0,
+            ),
+            (
+                "current-forward-arc-left",
+                bridge_api.WheelPrimitiveKind.FORWARD_ARC,
+                arc_x,
+                arc_y,
+                arc_yaw,
+            ),
+            (
+                "current-forward-arc-right",
+                bridge_api.WheelPrimitiveKind.FORWARD_ARC,
+                arc_x,
+                -arc_y,
+                -arc_yaw,
+            ),
+            (
+                "current-reverse-arc-left",
+                bridge_api.WheelPrimitiveKind.REVERSE_ARC,
+                -arc_x,
+                -arc_y,
+                arc_yaw,
+            ),
+            (
+                "current-reverse-arc-right",
+                bridge_api.WheelPrimitiveKind.REVERSE_ARC,
+                -arc_x,
+                arc_y,
+                -arc_yaw,
+            ),
+            (
+                "current-spin-left",
+                bridge_api.WheelPrimitiveKind.SPIN_COUNTERCLOCKWISE,
+                0.0,
+                0.0,
+                np.pi / 8.0,
+            ),
+            (
+                "current-spin-right",
+                bridge_api.WheelPrimitiveKind.SPIN_CLOCKWISE,
+                0.0,
+                0.0,
+                -np.pi / 8.0,
+            ),
+            (
+                "current-stop-switch",
+                bridge_api.WheelPrimitiveKind.STOP_AND_SWITCH,
+                0.0,
+                0.0,
+                0.0,
+            ),
+        ):
+            primitive = bridge_api.WheelMotionPrimitive()
+            primitive.primitive_id = primitive_id
+            primitive.kind = kind
+            pose = bridge_api.Pose3()
+            pose.position_m.x = translation_x
+            pose.position_m.y = translation_y
+            pose.orientation.w = math.cos(yaw / 2.0)
+            pose.orientation.z = math.sin(yaw / 2.0)
+            primitive.relative_end_pose = pose
+            primitives.append(primitive)
+        capability.motion_primitives = primitives
+        current_request.capability = capability
+        current_request.config.wheel.xy_resolution_m = 0.25
+        current_request.config.wheel.yaw_bin_count = 64
+
+    def build_boundary_policy(
+        observed: TrainingObservedGrid, pose: Pose2
+    ) -> PolicyBatch:
+        local = LocalObservation(
+            canvas_id=canvas.identity,
+            bounds_m=(
+                pose.x_m - 4.0,
+                pose.y_m - 4.0,
+                pose.x_m + 4.0,
+                pose.y_m + 4.0,
+            ),
+            elevation_m=_sample_local(canvas, pose, observed.elevation_m),
+            observed_mask=_sample_local(canvas, pose, observed.valid_mask),
+            physical_obstacle_ratio=_sample_local(
+                canvas, pose, observed.physical_obstacle_ratio
+            ),
+        )
+        world = observed.to_observed_world(local=local)
+        current_inputs = _SyntheticPolarInputs(
+            world=world,
+            mission=inputs.mission,
+            pose=pose,
+            forbidden_ratio=inputs.forbidden_ratio,
+        )
+        current_request = _synthetic_bridge_request(current_inputs, wheeled)
+        add_current_wheel_smoke_primitives(current_request)
+        current_cpp_projection = bridge.project_traversability(current_request)
+        current_projection = _platform_projection_from_cpp(
+            current_inputs,
+            current_cpp_projection,
+            capability_sha256=wheeled.content_sha256,
+            sensor_range_m=wheeled.observation_capability.sensor_range_m,
+        )
+        current_request.world.global_map = current_global_map(current_inputs)
+        current_request.world.local_map = current_local_map(current_inputs)
+        current_request.config.global_map.base_resolution_m = 0.25
+        current_batch, current_candidates = _policy_batch_from_projection(
+            current_inputs, current_projection
+        )
+        boundary_artifacts.update(
+            inputs=current_inputs,
+            request=current_request,
+            projection=current_projection,
+            candidates=current_candidates,
+        )
+        return current_batch
+
+    controller = ObservationBoundaryController(
+        platform_type="WHEELED",
+        sensor_state=sensor_state,
+        policy_observation_builder=build_boundary_policy,
+        episode_id="polar-sensor-smoke",
+        mission_revision=1,
+    )
+    initial_boundary = controller.reset(sensor_pose)
+    assert initial_boundary.mission_observed_delta == 0.0
+    assert initial_boundary.priority_observed_delta == 0.0
+    assert np.count_nonzero(sensor_state.observed.valid_mask) > np.count_nonzero(
+        initial_known
+    )
+    current_inputs = boundary_artifacts["inputs"]
+    current_request = boundary_artifacts["request"]
+    current_projection = boundary_artifacts["projection"]
+    current_candidates = boundary_artifacts["candidates"]
+    assert isinstance(current_inputs, _SyntheticPolarInputs)
+    assert isinstance(current_request, bridge_api.TrainingPlanRequest)
+    assert isinstance(current_projection, PlatformProjection)
+    inputs = current_inputs
+    request = current_request
+    projection = current_projection
+    candidates = current_candidates
+    batch = initial_boundary.next_observation
     policy = CrossAttentionPolicy()
     rollout, sampled = _one_row_rollout(batch, policy)
 
@@ -757,6 +1117,37 @@ def test_cpu_pretraining_smoke_links_data_v3_update_checkpoint_and_resume(
         PlanningOutcome.CANCELED,
     }
     assert planner_output.reason_code
+    assert planner_output.outcome == PlanningOutcome.NEW_REFERENCE_AVAILABLE, (
+        planner_output.reason_code
+    )
+    assert planner_output.reference is not None
+    known_before_execution = int(
+        np.count_nonzero(sensor_state.observed.valid_mask)
+    )
+    boundary = controller.after_execution(
+        platform_type="WHEELED",
+        execution_state="DECISION_BOUNDARY",
+        evidence=SensorBoundaryEvidence(
+            Pose2(
+                selected_x,
+                selected_y,
+                float(sampled.selected_theta.item()),
+                elevation_m=inputs.pose.elevation_m,
+            ),
+            planner_output.diagnostics.elapsed.total_seconds(),
+        ),
+    )
+    newly_observed = (
+        int(np.count_nonzero(sensor_state.observed.valid_mask))
+        - known_before_execution
+    )
+    assert boundary.mission_observed_delta == pytest.approx(
+        newly_observed / float(np.sum(inputs.mission.roi_ratio))
+    )
+    assert boundary.priority_observed_delta == pytest.approx(
+        newly_observed
+        / float(np.sum(inputs.mission.priority * inputs.mission.roi_ratio))
+    )
 
     config = load_training_config(
         REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"

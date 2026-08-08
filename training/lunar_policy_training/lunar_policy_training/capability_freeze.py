@@ -440,6 +440,10 @@ class FrozenCapabilityEnvironmentFactory:
             raise CapabilityFreezeError("scenario schedule identity is missing")
         if not callable(self.builder):
             raise CapabilityFreezeError("capability environment builder is not callable")
+        if getattr(self.builder, "sensor_closed_loop", None) is not True:
+            raise CapabilityFreezeError(
+                "formal environment builder must declare the sensor-closed loop"
+            )
 
     def __call__(self, worker_index: int, platform_type: str) -> object:
         if type(worker_index) is not int or worker_index < 0:
@@ -452,7 +456,13 @@ class FrozenCapabilityEnvironmentFactory:
             capability_version=capability.capability_version,
             capability_sha256=capability.content_sha256,
         )
-        return self.builder(worker_index, platform_type, capability, scenario)
+        worker = self.builder(worker_index, platform_type, capability, scenario)
+        environment = getattr(worker, "environment", None)
+        if getattr(environment, "sensor_closed_loop", None) is not True:
+            raise CapabilityFreezeError(
+                "formal environment must use the sensor-closed observation loop"
+            )
+        return worker
 
 
 @dataclass(frozen=True, slots=True)
