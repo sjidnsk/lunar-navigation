@@ -19,6 +19,10 @@ from .budget import (
     BUDGET_EXTENSION_BLOCK_SECONDS,
     INITIAL_GPU_BUDGET_SECONDS,
 )
+from .environment.formal_episode_state import (
+    FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
+    FormalWorkerState,
+)
 from .ppo.checkpoint import (
     CheckpointError,
     _capture_rng_state,
@@ -32,7 +36,6 @@ from .ppo.checkpoint import (
 
 CHECKPOINT_SCHEMA_VERSION = "lunar-ppo-checkpoint/v6"
 OBSERVATION_CONTRACT_VERSION = ObservationContractV3.version
-FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION = "lunar-formal-episode-cursors/v1"
 _LEGACY_V5_SCHEMA_VERSION = "lunar-ppo-checkpoint/v5"
 _LEGACY_V4_SCHEMA_VERSION = "lunar-ppo-checkpoint/v4"
 _LEGACY_V3_SCHEMA_VERSION = "lunar-ppo-checkpoint/v3"
@@ -643,7 +646,7 @@ def _validate_environment_state(
     required = {
         "schema_version",
         "scenario_schedule_id",
-        "worker_episode_cursors",
+        "worker_episode_states",
     }
     if not isinstance(value, Mapping) or set(value) != required:
         raise CheckpointError("checkpoint environment state structure is invalid")
@@ -652,13 +655,19 @@ def _validate_environment_state(
     schedule_id = value["scenario_schedule_id"]
     if not isinstance(schedule_id, str) or not schedule_id:
         raise CheckpointError("checkpoint environment state schedule is invalid")
-    cursors = value["worker_episode_cursors"]
+    states = value["worker_episode_states"]
+    if not isinstance(states, list) or len(states) != worker_count:
+        raise CheckpointError("checkpoint environment worker states are invalid")
+    try:
+        parsed = tuple(FormalWorkerState.from_dict(state) for state in states)
+    except ValueError as error:
+        raise CheckpointError("checkpoint environment worker state is invalid") from error
     if (
-        not isinstance(cursors, list)
-        or len(cursors) != worker_count
-        or any(type(cursor) is not int or cursor < 0 for cursor in cursors)
+        tuple(state.worker_index for state in parsed)
+        != tuple(range(worker_count))
+        or any(state.scenario_schedule_id != schedule_id for state in parsed)
     ):
-        raise CheckpointError("checkpoint environment state cursors are invalid")
+        raise CheckpointError("checkpoint environment worker identity is invalid")
 
 
 def _validate_v2_body(body: object) -> None:

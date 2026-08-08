@@ -253,6 +253,66 @@ class V3ExplorationEnvironment:
         """Return a detached copy of the environment-owned current observation."""
         return _clone_observation(self._observation)
 
+    def snapshot_stable_state(self) -> dict[str, object]:
+        """Return the dynamic fields not owned by the observation controller."""
+        if self._execution_state not in {
+            "DECISION_BOUNDARY",
+            "GROUND_HOLD",
+            "LANDED_HOLD",
+        }:
+            raise EnvironmentInvariantError(
+                "formal snapshot requires a stable execution boundary"
+            )
+        return {
+            "execution_state": self._execution_state,
+            "rejected_candidate_indices": sorted(self._rejected_candidates),
+        }
+
+    def restore_stable_state(
+        self,
+        *,
+        execution_state: str,
+        rejected_candidate_indices: tuple[int, ...],
+    ) -> None:
+        """Reapply non-reveal state after deterministic observation replay."""
+        if execution_state not in {
+            "DECISION_BOUNDARY",
+            "GROUND_HOLD",
+            "LANDED_HOLD",
+        }:
+            raise EnvironmentInvariantError(
+                "formal restore requires a stable execution boundary"
+            )
+        identity = self._observation.observation_identities[0]
+        if identity.execution_state != execution_state:
+            raise EnvironmentInvariantError(
+                "restored execution state differs from observation identity"
+            )
+        if (
+            not isinstance(rejected_candidate_indices, tuple)
+            or tuple(sorted(set(rejected_candidate_indices)))
+            != rejected_candidate_indices
+            or any(
+                type(index) is not int
+                or index < 0
+                or index >= self._observation.candidate_mask.shape[1]
+                for index in rejected_candidate_indices
+            )
+        ):
+            raise EnvironmentInvariantError(
+                "restored rejected candidate indices are invalid"
+            )
+        restored = _clone_observation(self._observation)
+        for index in rejected_candidate_indices:
+            if not bool(restored.candidate_mask[0, index].item()):
+                raise EnvironmentInvariantError(
+                    "restored rejected candidate was not active before masking"
+                )
+            restored.candidate_mask[0, index] = False
+        self._rejected_candidates = set(rejected_candidate_indices)
+        self._execution_state = execution_state
+        self._observation = restored
+
     def step(
         self,
         action: PolicyAction,

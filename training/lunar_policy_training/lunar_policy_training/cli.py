@@ -2127,18 +2127,10 @@ def _run_updates(
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         trainer.optimizer, lr_lambda=lambda step: 1.0
     )
-    if restore_checkpoint is not None:
-        restore_training_state(
-            restore_checkpoint,
-            trainer.policy,
-            trainer.optimizer,
-            scheduler,
-            normalization_state=trainer.normalization,
-        )
     stop_flag = SignalStopFlag()
     sent_interrupt = False
     rollout_policy_version = initial_global_step
-    initial_episode_cursors: tuple[int, ...] | None = None
+    initial_episode_states: tuple[Mapping[str, object], ...] | None = None
     if config.run_kind == "formal" and restore_checkpoint is not None:
         environment_state = restore_checkpoint.environment_state
         if (
@@ -2146,8 +2138,8 @@ def _run_updates(
             != environment_factory.scenario_schedule_id
         ):
             raise PreflightError("checkpoint formal scenario schedule mismatch")
-        initial_episode_cursors = tuple(
-            environment_state["worker_episode_cursors"]
+        initial_episode_states = tuple(
+            environment_state["worker_episode_states"]
         )
     pool = ParallelEnvPool(
         allocation=allocation,
@@ -2155,12 +2147,24 @@ def _run_updates(
         environment_factory=environment_factory,
         reward_fn=reward_fn,
         worker_timeout_seconds=60.0,
-        initial_episode_cursors=initial_episode_cursors,
+        initial_episode_states=initial_episode_states,
     )
     environment = _ParallelPoolVectorEnv(
         pool, policy_version=rollout_policy_version
     )
     environment.use_normalization_state(trainer.normalization)
+    environment.reset()
+    if restore_checkpoint is not None:
+        # Process creation and shared-buffer setup are outside the durable RNG
+        # boundary.  Restore last so resumed update N+1 starts at exactly the
+        # same Python/NumPy/Torch RNG state as uninterrupted update N+1.
+        restore_training_state(
+            restore_checkpoint,
+            trainer.policy,
+            trainer.optimizer,
+            scheduler,
+            normalization_state=trainer.normalization,
+        )
 
     def collect_rollout() -> RolloutBatch:
         environment.set_policy_version(rollout_policy_version)
@@ -2218,7 +2222,11 @@ def _run_updates(
                 {
                     "schema_version": FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
                     "scenario_schedule_id": environment_factory.scenario_schedule_id,
-                    "worker_episode_cursors": list(pool.episode_cursors),
+                    "worker_episode_states": list(
+                        pool.snapshot_episode_states(
+                            policy_version=rollout_policy_version
+                        )
+                    ),
                 }
                 if config.run_kind == "formal"
                 else {}

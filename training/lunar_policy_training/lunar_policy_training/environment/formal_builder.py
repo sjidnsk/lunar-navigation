@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -33,6 +34,12 @@ from ..policy.action_semantics import apply_goal_theta
 from ..policy.observation import ObservationIdentity, PolicyBatch
 from ..training_semantics import FORMAL_SENSOR_FOV_RAD, FORMAL_SENSOR_RANGE_M
 from .candidate_builder import CandidateBatch, CandidateBuilderV2
+from .formal_episode_state import (
+    FormalPoseState,
+    FormalRevealState,
+    FormalWorkerState,
+    policy_batch_sha256,
+)
 from .macro_step import ExecutionEvents, PolicyAction
 from .multires_observation import DetailObservedWindow, MultiresSensorObservationState
 from .observation_boundary import (
@@ -94,6 +101,27 @@ def _formal_schedule_index(
     ) % scene_count
 
 
+def _formal_episode_seed(kind: str, identity: ScenarioIdentity) -> str:
+    if kind not in {"start", "episode"}:
+        raise ValueError("formal episode seed kind is invalid")
+    if kind == "episode":
+        # Matching platform-local lanes traverse the same physical scenes.
+        payload = (
+            f"{identity.scenario_schedule_id}\0{kind}\0"
+            f"{identity.platform_worker_index}\0"
+            f"{identity.platform_worker_count}\0{identity.episode_cursor}"
+        )
+    else:
+        # Starts remain platform-specific because feasibility projections differ.
+        payload = (
+            f"{identity.scenario_schedule_id}\0{kind}\0"
+            f"{identity.platform_type}\0{identity.worker_index}\0"
+            f"{identity.platform_worker_index}\0"
+            f"{identity.platform_worker_count}\0{identity.episode_cursor}"
+        )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class _LoadedScene:
     scene: MultiResolutionScene
@@ -113,6 +141,9 @@ class _MapSnapshot:
 @dataclass(frozen=True, slots=True)
 class FormalEnvironmentWorker(ParallelEnvironmentWorker):
     episode: "FormalEpisode"
+
+    def snapshot_episode_state(self) -> dict[str, object]:
+        return self.episode.snapshot_state(self.environment).to_dict()
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +333,9 @@ class FormalEpisode:
         self.episode_cursor = scenario_identity.episode_cursor
         self.loaded = loaded
         self.scene_id = loaded.scene.scene_id
+        self.scene_seed = str(loaded.scenario.get("scene_seed"))
+        self.start_seed = _formal_episode_seed("start", scenario_identity)
+        self.episode_seed = _formal_episode_seed("episode", scenario_identity)
         self._static_hard = loaded.arrays[
             f"{platform_type.lower()}_hard_feasible"
         ].astype(bool)
@@ -343,6 +377,7 @@ class FormalEpisode:
         self._pending_hop_landing: Pose2 | None = None
         self._hopper_feedback_phase = 0
         self.last_hop_available_delta_v_mps = 0.0
+        self._reveal_history: list[FormalRevealState] = []
         self.controller = ObservationBoundaryController(
             platform_type=platform_type,
             sensor_state=self.sensor_state,
@@ -356,6 +391,136 @@ class FormalEpisode:
         )
         initial = self.controller.reset(self.current_pose)
         self.initial_observation = initial.next_observation
+
+    @staticmethod
+    def _pose_state(pose: Pose2) -> FormalPoseState:
+        return FormalPoseState(
+            x_m=float(pose.x_m),
+            y_m=float(pose.y_m),
+            yaw_rad=float(pose.yaw_rad),
+            elevation_m=float(pose.elevation_m),
+            frame_id=pose.frame_id,
+        )
+
+    @staticmethod
+    def _pose_from_state(pose: FormalPoseState) -> Pose2:
+        return Pose2(
+            pose.x_m,
+            pose.y_m,
+            pose.yaw_rad,
+            pose.frame_id,
+            pose.elevation_m,
+        )
+
+    def _record_reveal(
+        self,
+        evidence: SensorBoundaryEvidence,
+        execution_state: str,
+    ) -> None:
+        self._reveal_history.append(
+            FormalRevealState(
+                pose=self._pose_state(evidence.pose_map),
+                elapsed_s=float(evidence.elapsed_s),
+                execution_state=execution_state,
+                legged_body_z_m=float(self._current_legged_body_z_m),
+            )
+        )
+
+    def replay_state(self, state: FormalWorkerState) -> None:
+        """Rebuild dynamic sensor state from frozen truth and reveal history."""
+        expected = (
+            state.scenario_schedule_id == self.scenario_identity.scenario_schedule_id
+            and state.platform_type == self.platform_type
+            and state.worker_index == self.worker_index
+            and state.platform_worker_index
+            == self.scenario_identity.platform_worker_index
+            and state.platform_worker_count
+            == self.scenario_identity.platform_worker_count
+            and state.episode_cursor == self.episode_cursor
+            and state.scene_id == self.scene_id
+            and state.scene_seed == self.scene_seed
+            and state.start_seed == self.start_seed
+            and state.episode_seed == self.episode_seed
+            and state.start_cell == self.start_cell
+        )
+        if not expected:
+            raise ValueError("formal replay identity differs from frozen episode")
+        for reveal in state.reveal_history:
+            self.current_pose = self._pose_from_state(reveal.pose)
+            self._current_legged_body_z_m = reveal.legged_body_z_m
+            evidence = SensorBoundaryEvidence(
+                self.current_pose, reveal.elapsed_s
+            )
+            boundary = self.controller.after_execution(
+                platform_type=self.platform_type,
+                execution_state=reveal.execution_state,
+                evidence=evidence,
+            )
+            if not boundary.updated:
+                raise ValueError("formal replay did not produce an observation")
+            self._record_reveal(evidence, reveal.execution_state)
+        self.initial_observation = self.controller.current_observation
+        self.last_hop_available_delta_v_mps = (
+            state.last_hop_available_delta_v_mps
+        )
+        if (
+            self._revision != state.observation_revision
+            or self.current_pose != self._pose_from_state(state.current_pose)
+            or not math.isclose(
+                self._current_legged_body_z_m,
+                state.legged_body_z_m,
+                rel_tol=0.0,
+                abs_tol=0.0,
+            )
+        ):
+            raise ValueError("formal replay dynamic state differs")
+
+    def snapshot_state(self, environment: object) -> FormalWorkerState:
+        observation = environment.current_observation
+        identities = observation.observation_identities
+        if identities is None or len(identities) != 1:
+            raise ValueError("formal snapshot observation identity is missing")
+        dynamic = environment.snapshot_stable_state()
+        identity = identities[0]
+        return FormalWorkerState.from_dict(
+            {
+                "scenario_schedule_id": self.scenario_identity.scenario_schedule_id,
+                "platform_type": self.platform_type,
+                "worker_index": self.worker_index,
+                "platform_worker_index": self.scenario_identity.platform_worker_index,
+                "platform_worker_count": self.scenario_identity.platform_worker_count,
+                "episode_cursor": self.episode_cursor,
+                "scene_id": self.scene_id,
+                "scene_seed": self.scene_seed,
+                "start_seed": self.start_seed,
+                "episode_seed": self.episode_seed,
+                "start_cell": list(self.start_cell),
+                "current_pose": self._pose_state(self.current_pose).to_dict(),
+                "legged_body_z_m": float(self._current_legged_body_z_m),
+                "execution_state": dynamic["execution_state"],
+                "observation_revision": self._revision,
+                "state_time_ns": identity.state_time_ns,
+                "reveal_history": [
+                    reveal.to_dict() for reveal in self._reveal_history
+                ],
+                "observation_identity": {
+                    "episode_id": identity.episode_id,
+                    "mission_revision": identity.mission_revision,
+                    "map_snapshot_id": identity.map_snapshot_id,
+                    "robot_state_id": identity.robot_state_id,
+                    "state_time_ns": identity.state_time_ns,
+                    "execution_state": identity.execution_state,
+                    "candidate_set_id": identity.candidate_set_id,
+                },
+                "policy_batch_sha256": policy_batch_sha256(observation),
+                "rejected_candidate_indices": dynamic[
+                    "rejected_candidate_indices"
+                ],
+                "last_hop_available_delta_v_mps": float(
+                    self.last_hop_available_delta_v_mps
+                ),
+            }
+        )
 
     def _build_mission_roi(self) -> np.ndarray:
         roi = np.asarray(self.loaded.arrays["valid_mask"], dtype=np.bool_).copy()
@@ -575,6 +740,11 @@ class FormalEpisode:
             terrain_z,
         )
         self.current_pose = next_pose
+        evidence = SensorBoundaryEvidence(
+            next_pose,
+            points[-1].time_from_start.total_seconds(),
+        )
+        self._record_reveal(evidence, "DECISION_BOUNDARY")
         return ReferenceExecutionResult(
             next_observation=self.controller.current_observation,
             mission_observed_delta=0.0,
@@ -591,10 +761,7 @@ class FormalEpisode:
                 reference_samples_consumed=len(points),
                 selected_action_observed_safe=True,
             ),
-            sensor_boundary_evidence=SensorBoundaryEvidence(
-                next_pose,
-                points[-1].time_from_start.total_seconds(),
-            ),
+            sensor_boundary_evidence=evidence,
         )
 
     def _terrain_elevation_m(self, x_m: float, y_m: float) -> float:
@@ -677,6 +844,8 @@ class FormalEpisode:
         self._pending_hop_landing = None
         self._hopper_feedback_phase = 0
         self.current_pose = landing
+        evidence = SensorBoundaryEvidence(landing, 1.0)
+        self._record_reveal(evidence, "LANDED_HOLD")
         return CommittedHopExecutionFeedback(
             execution_state="LANDED_HOLD",
             next_observation=self.controller.current_observation,
@@ -692,7 +861,7 @@ class FormalEpisode:
             execution_events=ExecutionEvents(
                 hopper_commitment_states=("LANDED_HOLD",)
             ),
-            sensor_boundary_evidence=SensorBoundaryEvidence(landing, 1.0),
+            sensor_boundary_evidence=evidence,
         )
 
     def _execution_failure(self, *, hopper: bool = False) -> ReferenceExecutionResult:
@@ -750,27 +919,12 @@ class FormalWorkerBuilder:
         capability: FrozenPlatformCapability,
         scenario_identity: ScenarioIdentity,
     ) -> FormalEnvironmentWorker:
-        cache = load_formal_cache(
-            Path(self.cache_manifest_path), require_full=not self.allow_preflight
-        )
-        if scenario_identity.scenario_schedule_id != self.scenario_schedule_id:
-            raise ValueError("formal worker scenario schedule identity differs")
-        entries = [
-            entry for entry in cache.manifest["scenes"] if entry["split"] == self.split
-        ]
-        if not entries:
-            raise ValueError("formal cache has no scenes for the requested split")
-        entry = entries[
-            _formal_schedule_index(
-                worker_index,
-                scenario_identity.episode_cursor,
-                len(entries),
-                platform_worker_index=scenario_identity.platform_worker_index,
-                platform_worker_count=scenario_identity.platform_worker_count,
-            )
-        ]
-        loaded = _load_multires_scene(cache, str(entry["scene_id"]))
+        loaded = self._load_scheduled_scene(worker_index, scenario_identity)
         safe = self._safe_start_cells(loaded, platform_type)
+        start_seed = _formal_episode_seed("start", scenario_identity)
+        if safe:
+            offset = int(start_seed[:16], 16) % len(safe)
+            safe = safe[offset:] + safe[:offset]
         for start_cell in safe:
             episode = FormalEpisode(
                 worker_index=worker_index,
@@ -781,28 +935,97 @@ class FormalWorkerBuilder:
                 start_cell=start_cell,
             )
             if bool(episode.initial_observation.candidate_mask.any()):
-                environment = create_v3_environment(
-                    platform_type=platform_type,
-                    request_builder=episode.build_request,
-                    initial_observation=episode.initial_observation,
-                    observation_boundary_controller=episode.controller,
-                    require_sensor_closed_loop=True,
-                    reference_executor=episode.execute_reference,
-                    committed_hop_executor=(
-                        episode.committed_hop_feedback
-                        if platform_type == "HOPPER"
-                        else None
-                    ),
-                    plan_cost_scale=100.0,
-                    planner_elapsed_scale_s=2.0,
-                )
-                return FormalEnvironmentWorker(
-                    environment=environment,
-                    initial_observation=episode.initial_observation,
-                    episode=episode,
-                )
+                return self._make_worker(episode)
         raise ValueError(
             "formal scene has no deterministic safe start with an observed-only candidate"
+        )
+
+    def restore(
+        self,
+        worker_index: int,
+        platform_type: str,
+        capability: FrozenPlatformCapability,
+        scenario_identity: ScenarioIdentity,
+        state: object,
+    ) -> FormalEnvironmentWorker:
+        restored = FormalWorkerState.from_dict(state)
+        loaded = self._load_scheduled_scene(worker_index, scenario_identity)
+        if restored.scene_id != loaded.scene.scene_id:
+            raise ValueError("formal restored scene differs from schedule")
+        safe = self._safe_start_cells(loaded, platform_type)
+        if restored.start_cell not in safe:
+            raise ValueError("formal restored start is not platform-safe")
+        episode = FormalEpisode(
+            worker_index=worker_index,
+            platform_type=platform_type,
+            capability=capability,
+            scenario_identity=scenario_identity,
+            loaded=loaded,
+            start_cell=restored.start_cell,
+        )
+        episode.replay_state(restored)
+        worker = self._make_worker(episode)
+        worker.environment.restore_stable_state(
+            execution_state=restored.execution_state,
+            rejected_candidate_indices=restored.rejected_candidate_indices,
+        )
+        observation = worker.environment.current_observation
+        if (
+            observation.observation_identities != (restored.observation_identity,)
+            or policy_batch_sha256(observation)
+            != restored.policy_batch_sha256
+        ):
+            raise ValueError("formal restored observation digest differs")
+        return worker
+
+    def _load_scheduled_scene(
+        self,
+        worker_index: int,
+        scenario_identity: ScenarioIdentity,
+    ) -> _LoadedScene:
+        cache = load_formal_cache(
+            Path(self.cache_manifest_path), require_full=not self.allow_preflight
+        )
+        if scenario_identity.scenario_schedule_id != self.scenario_schedule_id:
+            raise ValueError("formal worker scenario schedule identity differs")
+        entries = [
+            entry for entry in cache.manifest["scenes"] if entry["split"] == self.split
+        ]
+        if not entries:
+            raise ValueError("formal cache has no scenes for the requested split")
+        base_index = _formal_schedule_index(
+            worker_index,
+            scenario_identity.episode_cursor,
+            len(entries),
+            platform_worker_index=scenario_identity.platform_worker_index,
+            platform_worker_count=scenario_identity.platform_worker_count,
+        )
+        episode_seed = _formal_episode_seed("episode", scenario_identity)
+        entry = entries[(base_index + int(episode_seed[:16], 16)) % len(entries)]
+        return _load_multires_scene(cache, str(entry["scene_id"]))
+
+    @staticmethod
+    def _make_worker(episode: FormalEpisode) -> FormalEnvironmentWorker:
+        platform_type = episode.platform_type
+        environment = create_v3_environment(
+            platform_type=platform_type,
+            request_builder=episode.build_request,
+            initial_observation=episode.initial_observation,
+            observation_boundary_controller=episode.controller,
+            require_sensor_closed_loop=True,
+            reference_executor=episode.execute_reference,
+            committed_hop_executor=(
+                episode.committed_hop_feedback
+                if platform_type == "HOPPER"
+                else None
+            ),
+            plan_cost_scale=100.0,
+            planner_elapsed_scale_s=2.0,
+        )
+        return FormalEnvironmentWorker(
+            environment=environment,
+            initial_observation=episode.initial_observation,
+            episode=episode,
         )
 
     @staticmethod

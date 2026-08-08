@@ -20,7 +20,7 @@ from .checkpoint import RunIdentity
 from .config import PLATFORMS
 from .environment.formal_builder import FormalEnvironmentAssembly
 from .environment.macro_step import PolicyAction
-from .environment.parallel_pool import ParallelEnvPool
+from .environment.parallel_pool import ParallelActions, ParallelEnvPool
 from .evaluation.report import (
     FormalEvaluationBatch,
     evaluate_formal_policy,
@@ -367,23 +367,36 @@ def _resume_check(assembly: FormalEnvironmentAssembly) -> None:
         reward_fn=compute_transition_reward,
         worker_timeout_seconds=60.0,
     ) as first:
-        first.reset()
-        rolled = first.rollover_all_workers(policy_version=0)
-        cursors = first.episode_cursors
-        rolled_digest = _batch_digest(rolled.observations)
-    if cursors != (1, 1, 1):
-        raise FormalPreflightError("formal episode cursor did not advance exactly")
+        initial = first.reset()
+        candidate_indices = torch.tensor(
+            [
+                int(initial.observations.candidate_mask[index].nonzero()[0])
+                for index in range(3)
+            ],
+            dtype=torch.int64,
+        )
+        stepped = first.step(
+            ParallelActions(
+                candidate_indices=candidate_indices,
+                thetas=torch.zeros((3,), dtype=torch.float32),
+            ),
+            policy_version=0,
+        )
+        states = first.snapshot_episode_states(policy_version=0)
+        active_digest = _batch_digest(stepped.observations)
     with ParallelEnvPool(
         allocation=allocation,
         observation_template=assembly.observation_template,
         environment_factory=assembly.factory,
         reward_fn=compute_transition_reward,
         worker_timeout_seconds=60.0,
-        initial_episode_cursors=cursors,
+        initial_episode_states=states,
     ) as resumed:
         resumed_digest = _batch_digest(resumed.reset().observations)
-    if rolled_digest != resumed_digest:
-        raise FormalPreflightError("resumed formal observations differ at update boundary")
+    if active_digest != resumed_digest:
+        raise FormalPreflightError(
+            "resumed formal observations differ at update boundary"
+        )
 
 
 def _qualify_worker_candidate(

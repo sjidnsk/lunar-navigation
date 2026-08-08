@@ -500,6 +500,57 @@ class FrozenCapabilityEnvironmentFactory:
             )
         return worker
 
+    def restore_for_episode(
+        self,
+        *,
+        worker_index: int,
+        platform_type: str,
+        episode_cursor: int,
+        platform_worker_index: int,
+        platform_worker_count: int,
+        state: object,
+    ) -> object:
+        """Restore one active formal worker through its bound replay builder."""
+        restore = getattr(self.builder, "restore", None)
+        if not callable(restore):
+            raise CapabilityFreezeError(
+                "formal environment builder does not support active restore"
+            )
+        if (
+            type(worker_index) is not int
+            or worker_index < 0
+            or type(episode_cursor) is not int
+            or episode_cursor < 0
+            or type(platform_worker_index) is not int
+            or type(platform_worker_count) is not int
+            or platform_worker_index < 0
+            or platform_worker_count <= platform_worker_index
+        ):
+            raise CapabilityFreezeError("formal restore worker identity is invalid")
+        capability = self.bundle.for_platform(platform_type)
+        scenario = ScenarioIdentity(
+            platform_type=platform_type,
+            scenario_schedule_id=self.scenario_schedule_id,
+            worker_index=worker_index,
+            episode_cursor=episode_cursor,
+            platform_worker_index=platform_worker_index,
+            platform_worker_count=platform_worker_count,
+            capability_version=capability.capability_version,
+            capability_sha256=capability.content_sha256,
+        )
+        worker = restore(
+            worker_index,
+            platform_type,
+            capability,
+            scenario,
+            state,
+        )
+        if getattr(getattr(worker, "environment", None), "sensor_closed_loop", None) is not True:
+            raise CapabilityFreezeError(
+                "restored formal environment must use the sensor-closed loop"
+            )
+        return worker
+
 
 @dataclass(frozen=True, slots=True)
 class _ParsedContent:

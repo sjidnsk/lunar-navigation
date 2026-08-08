@@ -11,10 +11,20 @@ from lunar_policy_training.environment.formal_builder import (
     FormalEnvironmentBuilder,
     _formal_schedule_index,
 )
+from lunar_policy_training.environment.formal_episode_state import (
+    FormalWorkerState,
+    policy_batch_sha256,
+)
 from lunar_policy_training.environment.macro_step import PolicyAction
+from lunar_policy_training.environment.parallel_pool import (
+    ParallelActions,
+    ParallelEnvPool,
+)
 from lunar_policy_training.evaluation import report as report_module
 from lunar_policy_training.evaluation.report import FormalEvaluationBatch
+from lunar_policy_training.formal_preflight import _request_signature
 from lunar_policy_training.policy.cross_attention import CrossAttentionPolicy
+from lunar_policy_training.reward import compute_transition_reward
 from lunar_policy_training.polar_data.formal_cache import (
     FormalCacheIdentity,
     StaticSceneData,
@@ -157,6 +167,8 @@ def test_three_platforms_share_physical_scene_but_keep_distinct_projection(
     }
 
     assert {worker.episode.scene_id for worker in workers.values()} == {scene_id}
+    assert len({worker.episode.episode_seed for worker in workers.values()}) == 1
+    assert len({worker.episode.start_seed for worker in workers.values()}) == 3
     assert {
         tuple(worker.initial_observation.platform_context[0].tolist())
         for worker in workers.values()
@@ -174,6 +186,8 @@ def test_formal_episode_cursor_is_deterministic_and_resume_exact(
 
     assert first.episode.scene_id == resumed.episode.scene_id == scene_id
     assert first.episode.current_pose == resumed.episode.current_pose
+    assert first.episode.start_seed == resumed.episode.start_seed
+    assert first.episode.episode_seed == resumed.episode.episode_seed
     assert (
         first.initial_observation.observation_identities
         == resumed.initial_observation.observation_identities
@@ -183,6 +197,125 @@ def test_formal_episode_cursor_is_deterministic_and_resume_exact(
     assert (
         next_episode.initial_observation.observation_identities[0].episode_id
         != first.initial_observation.observation_identities[0].episode_id
+    )
+    assert next_episode.episode.start_seed != first.episode.start_seed
+    assert next_episode.episode.episode_seed != first.episode.episode_seed
+
+
+@pytest.mark.parametrize("platform", ("WHEELED", "LEGGED", "HOPPER"))
+def test_active_formal_episode_replays_to_exact_observation_and_request(
+    tmp_path: pathlib.Path, platform: str,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    worker = assembly.factory.create_for_episode(
+        0,
+        platform,
+        4,
+        platform_worker_index=0,
+        platform_worker_count=1,
+    )
+    initial = worker.environment.current_observation
+    candidate = int(initial.candidate_mask[0].nonzero()[0])
+    result = worker.environment.advance_prepared_action(
+        PolicyAction(candidate, 0.0),
+        expected_identity=initial.observation_identities[0],
+    )
+    assert not result.transition.terminated
+    state = FormalWorkerState.from_dict(worker.snapshot_episode_state())
+
+    restored = assembly.factory.restore_for_episode(
+        worker_index=0,
+        platform_type=platform,
+        episode_cursor=4,
+        platform_worker_index=0,
+        platform_worker_count=1,
+        state=state.to_dict(),
+    )
+
+    uninterrupted_observation = worker.environment.current_observation
+    restored_observation = restored.environment.current_observation
+    assert restored_observation.observation_identities == (
+        uninterrupted_observation.observation_identities
+    )
+    assert policy_batch_sha256(restored_observation) == policy_batch_sha256(
+        uninterrupted_observation
+    )
+    next_candidate = int(uninterrupted_observation.candidate_mask[0].nonzero()[0])
+    action = PolicyAction(next_candidate, 0.25)
+    uninterrupted_request = worker.episode.build_request(
+        action, uninterrupted_observation.observation_identities[0]
+    ).request
+    restored_request = restored.episode.build_request(
+        action, restored_observation.observation_identities[0]
+    ).request
+    assert _request_signature(restored_request) == _request_signature(
+        uninterrupted_request
+    )
+
+
+def test_rejected_candidate_mask_survives_active_episode_replay(
+    tmp_path: pathlib.Path,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    worker = assembly.factory(0, "WHEELED")
+    candidate = int(worker.initial_observation.candidate_mask[0].nonzero()[0])
+    worker.environment._mask_rejected_candidate(candidate)
+    state = worker.snapshot_episode_state()
+
+    restored = assembly.factory.restore_for_episode(
+        worker_index=0,
+        platform_type="WHEELED",
+        episode_cursor=0,
+        platform_worker_index=0,
+        platform_worker_count=1,
+        state=state,
+    )
+
+    assert not bool(
+        restored.environment.current_observation.candidate_mask[0, candidate]
+    )
+    assert restored.snapshot_episode_state() == state
+
+
+def test_parallel_pool_snapshots_and_restores_the_active_formal_episode(
+    tmp_path: pathlib.Path,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    with ParallelEnvPool(
+        allocation={"WHEELED": 1},
+        observation_template=assembly.observation_template,
+        environment_factory=assembly.factory,
+        reward_fn=compute_transition_reward,
+        worker_timeout_seconds=20.0,
+        initial_episode_cursors=(4,),
+    ) as uninterrupted:
+        initial = uninterrupted.reset()
+        candidate = int(initial.observations.candidate_mask[0].nonzero()[0])
+        stepped = uninterrupted.step(
+            ParallelActions(
+                candidate_indices=torch.tensor([candidate], dtype=torch.int64),
+                thetas=torch.tensor([0.0], dtype=torch.float32),
+            ),
+            policy_version=9,
+        )
+        states = uninterrupted.snapshot_episode_states(policy_version=9)
+
+    with ParallelEnvPool(
+        allocation={"WHEELED": 1},
+        observation_template=assembly.observation_template,
+        environment_factory=assembly.factory,
+        reward_fn=compute_transition_reward,
+        worker_timeout_seconds=20.0,
+        initial_episode_states=states,
+    ) as resumed:
+        restored = resumed.reset()
+
+    assert resumed.episode_cursors == (4,)
+    assert restored.observations.observation_identities == (
+        stepped.observations.observation_identities
+    )
+    assert policy_batch_sha256(restored.observations) == policy_batch_sha256(
+        stepped.observations
     )
 
 

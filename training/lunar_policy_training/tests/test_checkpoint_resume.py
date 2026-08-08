@@ -119,13 +119,60 @@ def test_resume_preserves_consumed_gpu_budget(tmp_path: pathlib.Path) -> None:
     assert budget.remaining_gpu_seconds == 86400.0 - 7200.0
 
 
-def test_formal_checkpoint_roundtrips_exact_worker_episode_cursors(
+def _formal_worker_state(index: int) -> dict[str, object]:
+    platform_index, lane = divmod(index, 8)
+    platform = ("WHEELED", "LEGGED", "HOPPER")[platform_index]
+    execution_state = "GROUND_HOLD" if platform == "HOPPER" else "DECISION_BOUNDARY"
+    episode_id = f"scene/{platform.lower()}/{index}/episode-{index}"
+    pose = {
+        "x_m": 100.0 + index,
+        "y_m": 200.0,
+        "yaw_rad": 0.0,
+        "elevation_m": 7.0,
+        "frame_id": "map",
+    }
+    return {
+        "scenario_schedule_id": "cache-sha/train/v3",
+        "platform_type": platform,
+        "worker_index": index,
+        "platform_worker_index": lane,
+        "platform_worker_count": 8,
+        "episode_cursor": index,
+        "scene_id": f"{index + 1:064x}",
+        "scene_seed": f"{index + 101:064x}",
+        "start_seed": f"{index + 201:064x}",
+        "episode_seed": f"{index + 301:064x}",
+        "start_cell": [64, 96],
+        "current_pose": pose,
+        "legged_body_z_m": 7.0,
+        "execution_state": execution_state,
+        "observation_revision": 1,
+        "state_time_ns": 1_000_000_000,
+        "reveal_history": [],
+        "observation_identity": {
+            "episode_id": episode_id,
+            "mission_revision": 1,
+            "map_snapshot_id": f"{index + 401:064x}",
+            "robot_state_id": f"{index + 501:064x}",
+            "state_time_ns": 1_000_000_000,
+            "execution_state": execution_state,
+            "candidate_set_id": f"{index + 601:064x}",
+        },
+        "policy_batch_sha256": f"{index + 701:064x}",
+        "rejected_candidate_indices": [],
+        "last_hop_available_delta_v_mps": 0.0,
+    }
+
+
+def test_formal_checkpoint_roundtrips_exact_active_worker_states(
     tmp_path: pathlib.Path,
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-episode-cursors/v1",
-        "scenario_schedule_id": "cache-sha/train/v2",
-        "worker_episode_cursors": list(range(24)),
+        "schema_version": "lunar-formal-environment-state/v2",
+        "scenario_schedule_id": "cache-sha/train/v3",
+        "worker_episode_states": [
+            _formal_worker_state(index) for index in range(24)
+        ],
     }
     checkpoint = _checkpoint(
         consumed_gpu_seconds=25.0,

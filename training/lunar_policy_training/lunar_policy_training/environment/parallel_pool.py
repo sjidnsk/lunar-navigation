@@ -22,6 +22,7 @@ from ..policy.observation import (
     validate_policy_batch,
 )
 from .macro_step import ExecutionEvents, PlannerTransition, PolicyAction
+from .formal_episode_state import FormalWorkerState
 
 
 _OBSERVATION_FIELDS = ObservationContractV3.input_names
@@ -78,6 +79,7 @@ class ParallelEnvPool:
         worker_timeout_seconds: float = 30.0,
         auto_reset: bool = True,
         initial_episode_cursors: tuple[int, ...] | None = None,
+        initial_episode_states: tuple[Mapping[str, object], ...] | None = None,
     ) -> None:
         self._platforms = _expanded_platforms(allocation)
         self.worker_count = len(self._platforms)
@@ -104,6 +106,43 @@ class ParallelEnvPool:
             or worker_timeout_seconds <= 0.0
         ):
             raise ParallelPoolError("worker timeout must be finite and positive")
+        parsed_initial_states: tuple[FormalWorkerState, ...] | None = None
+        if initial_episode_states is not None:
+            if (
+                not isinstance(initial_episode_states, tuple)
+                or len(initial_episode_states) != self.worker_count
+            ):
+                raise ParallelPoolError(
+                    "initial episode states must contain one mapping per worker"
+                )
+            try:
+                parsed_initial_states = tuple(
+                    FormalWorkerState.from_dict(value)
+                    for value in initial_episode_states
+                )
+            except ValueError as error:
+                raise ParallelPoolError("initial episode state is invalid") from error
+            for index, state in enumerate(parsed_initial_states):
+                if (
+                    state.worker_index != index
+                    or state.platform_type != self._platforms[index]
+                    or state.platform_worker_index
+                    != self._platform_worker_indices[index]
+                    or state.platform_worker_count
+                    != self._platform_worker_counts[index]
+                ):
+                    raise ParallelPoolError(
+                        "initial episode state worker identity differs"
+                    )
+            restored_cursors = tuple(
+                state.episode_cursor for state in parsed_initial_states
+            )
+            if initial_episode_cursors is None:
+                initial_episode_cursors = restored_cursors
+            elif initial_episode_cursors != restored_cursors:
+                raise ParallelPoolError(
+                    "initial episode cursors differ from active states"
+                )
         if initial_episode_cursors is None:
             initial_episode_cursors = (0,) * self.worker_count
         if (
@@ -127,6 +166,11 @@ class ParallelEnvPool:
         self._reset = False
         self._buffer_index = 0
         self._episode_cursors = initial_episode_cursors
+        self._initial_episode_states = (
+            None
+            if parsed_initial_states is None
+            else tuple(state.to_dict() for state in parsed_initial_states)
+        )
         self.worker_pids: list[int] = []
         self.worker_thread_limits: list[tuple[str, str]] = []
         self._buffer_identities: list[tuple[ObservationIdentity, ...] | None] = [
@@ -222,6 +266,11 @@ class ParallelEnvPool:
                         initial_episode_cursors[worker_index],
                         self._platform_worker_indices[worker_index],
                         self._platform_worker_counts[worker_index],
+                        (
+                            None
+                            if self._initial_episode_states is None
+                            else self._initial_episode_states[worker_index]
+                        ),
                     ),
                 )
                 process.start()
@@ -257,6 +306,50 @@ class ParallelEnvPool:
         self._shared_dones[0].zero_()
         self._shared_policy_versions[0].fill_(-1)
         return self._stage_buffer(0)
+
+    def snapshot_episode_states(
+        self, *, policy_version: int
+    ) -> tuple[dict[str, object], ...]:
+        """Capture every active formal worker at one stable decision boundary."""
+        if self._closed or self.training_stopped:
+            raise ParallelPoolError("parallel pool is stopped")
+        if not self._reset:
+            raise ParallelPoolError(
+                "parallel pool must be reset before episode snapshot"
+            )
+        if type(policy_version) is not int or policy_version < 0:
+            raise ParallelPoolError(
+                "policy version must be a non-negative integer"
+            )
+        identities = self._buffer_identities[self._buffer_index]
+        if identities is None:
+            raise ParallelPoolError("current observation identities are missing")
+        if any(
+            identity.execution_state
+            not in {"DECISION_BOUNDARY", "GROUND_HOLD", "LANDED_HOLD"}
+            for identity in identities
+        ):
+            raise ParallelPoolError(
+                "episode snapshot requires stable observation identities"
+            )
+        try:
+            for index, command_queue in enumerate(self._command_queues):
+                command_queue.put(
+                    (
+                        "snapshot_episode_state",
+                        policy_version,
+                        identities[index],
+                    )
+                )
+            return self._await_episode_states(policy_version)
+        except ParallelPoolError as error:
+            if not self.training_stopped:
+                self._fail_closed(str(error))
+            raise
+        except Exception as error:
+            return self._fail_closed(
+                "episode snapshot failed", cause=error
+            )
 
     def step(
         self, actions: ParallelActions, *, policy_version: int
@@ -424,46 +517,6 @@ class ParallelEnvPool:
             raise
         except Exception as error:
             return self._fail_closed("explicit worker reset failed", cause=error)
-
-    def rollover_all_workers(self, *, policy_version: int) -> ParallelRolloutStep:
-        """Replace every episode together at one completed optimizer boundary."""
-        if self._closed or self.training_stopped:
-            raise ParallelPoolError("parallel pool is stopped")
-        if not self._reset:
-            return self._fail_closed("parallel pool must be reset before rollover")
-        try:
-            if type(policy_version) is not int or policy_version < 0:
-                raise ParallelPoolError(
-                    "policy version must be a non-negative integer"
-                )
-            current_identities = self._buffer_identities[self._buffer_index]
-            if current_identities is None:
-                raise ParallelPoolError("current observation identities are missing")
-            safe_states = {"DECISION_BOUNDARY", "GROUND_HOLD", "LANDED_HOLD"}
-            if any(
-                identity.execution_state not in safe_states
-                for identity in current_identities
-            ):
-                raise ParallelPoolError(
-                    "episode rollover requires completed decision-boundary observations"
-                )
-            target_buffer = 1 - self._buffer_index
-            for command_queue in self._command_queues:
-                command_queue.put(("rollover", target_buffer, policy_version))
-            identities = self._await_rollovers(target_buffer, policy_version)
-            self._buffer_identities[target_buffer] = identities
-            self.validate_policy_versions(
-                self._shared_policy_versions[target_buffer],
-                expected_policy_version=policy_version,
-            )
-            self._buffer_index = target_buffer
-            return self._stage_buffer(target_buffer)
-        except ParallelPoolError as error:
-            if not self.training_stopped:
-                return self._fail_closed(str(error))
-            raise
-        except Exception as error:
-            return self._fail_closed("episode rollover failed", cause=error)
 
     def validate_policy_versions(
         self,
@@ -699,14 +752,12 @@ class ParallelEnvPool:
             pending.remove(worker_index)
         return rows
 
-    def _await_rollovers(
-        self, buffer_index: int, policy_version: int
-    ) -> tuple[ObservationIdentity, ...]:
-        completed: set[int] = set()
-        identities: dict[int, ObservationIdentity] = {}
-        cursors: dict[int, int] = {}
+    def _await_episode_states(
+        self, policy_version: int
+    ) -> tuple[dict[str, object], ...]:
+        states: dict[int, dict[str, object]] = {}
         deadline = time.monotonic() + self._worker_timeout_seconds
-        while len(completed) < self.worker_count:
+        while len(states) < self.worker_count:
             message = self._next_result(deadline)
             kind, worker_index, *values = message
             if kind == "error":
@@ -714,22 +765,27 @@ class ParallelEnvPool:
                     f"worker {worker_index} failed: {values[0]}"
                 )
             if (
-                kind != "rollover"
-                or worker_index in completed
-                or len(values) != 4
-                or values[:2] != [buffer_index, policy_version]
-                or not isinstance(values[2], ObservationIdentity)
-                or type(values[3]) is not int
-                or values[3] < 0
+                kind != "episode_state"
+                or worker_index in states
+                or len(values) != 2
+                or values[0] != policy_version
             ):
-                raise ParallelPoolError("worker rollover protocol failed")
-            identities[worker_index] = values[2]
-            cursors[worker_index] = values[3]
-            completed.add(worker_index)
-        self._episode_cursors = tuple(
-            cursors[index] for index in range(self.worker_count)
-        )
-        return tuple(identities[index] for index in range(self.worker_count))
+                raise ParallelPoolError("worker episode snapshot protocol failed")
+            try:
+                parsed = FormalWorkerState.from_dict(values[1])
+            except ValueError as error:
+                raise ParallelPoolError(
+                    "worker episode snapshot state is invalid"
+                ) from error
+            if (
+                parsed.worker_index != worker_index
+                or parsed.episode_cursor != self._episode_cursors[worker_index]
+            ):
+                raise ParallelPoolError(
+                    "worker episode snapshot identity differs"
+                )
+            states[worker_index] = parsed.to_dict()
+        return tuple(states[index] for index in range(self.worker_count))
 
     def _stage_buffer(
         self,
@@ -818,9 +874,24 @@ def _create_environment_for_episode(
     episode_cursor: int,
     platform_worker_index: int,
     platform_worker_count: int,
+    restore_state: Mapping[str, object] | None = None,
 ) -> ParallelEnvironmentWorker:
+    restore_for_episode = getattr(environment_factory, "restore_for_episode", None)
     create_for_episode = getattr(environment_factory, "create_for_episode", None)
-    if callable(create_for_episode):
+    if restore_state is not None:
+        if not callable(restore_for_episode):
+            raise ParallelPoolError(
+                "environment factory does not support active episode restore"
+            )
+        worker = restore_for_episode(
+            worker_index=worker_index,
+            platform_type=platform_type,
+            episode_cursor=episode_cursor,
+            platform_worker_index=platform_worker_index,
+            platform_worker_count=platform_worker_count,
+            state=restore_state,
+        )
+    elif callable(create_for_episode):
         worker = create_for_episode(
             worker_index,
             platform_type,
@@ -853,6 +924,7 @@ def _worker_main(
     initial_episode_cursor: int,
     platform_worker_index: int,
     platform_worker_count: int,
+    initial_episode_state: Mapping[str, object] | None,
 ) -> None:
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
@@ -868,6 +940,7 @@ def _worker_main(
             episode_cursor,
             platform_worker_index,
             platform_worker_count,
+            initial_episode_state,
         )
         current_observation = _environment_current_observation(worker)
         _write_observation(observation_buffers[0], worker_index, current_observation)
@@ -890,38 +963,46 @@ def _worker_main(
                 return
             if not isinstance(command, tuple) or not command:
                 raise ParallelPoolError("worker command protocol failed")
-            if command[0] == "rollover":
-                if len(command) != 3:
-                    raise ParallelPoolError("worker rollover command failed")
-                _, buffer_index, policy_version = command
-                episode_cursor += 1
-                worker = _create_environment_for_episode(
-                    environment_factory,
-                    worker_index,
-                    platform_type,
-                    episode_cursor,
-                    platform_worker_index,
-                    platform_worker_count,
-                )
-                terminal_transition = None
-                no_action_terminal = None
+            if command[0] == "snapshot_episode_state":
+                if (
+                    len(command) != 3
+                    or type(command[1]) is not int
+                    or command[1] < 0
+                    or not isinstance(command[2], ObservationIdentity)
+                ):
+                    raise ParallelPoolError(
+                        "worker episode snapshot command failed"
+                    )
+                _, policy_version, expected_identity = command
                 current_observation = _environment_current_observation(worker)
-                _write_observation(
-                    observation_buffers[buffer_index],
-                    worker_index,
-                    current_observation,
-                )
-                reward_buffers[buffer_index][worker_index] = 0.0
-                done_buffers[buffer_index][worker_index] = False
-                policy_version_buffers[buffer_index][worker_index] = policy_version
+                if (
+                    current_observation.observation_identities[0]
+                    != expected_identity
+                ):
+                    raise ParallelPoolError(
+                        "worker episode snapshot observation is stale"
+                    )
+                snapshot = getattr(worker, "snapshot_episode_state", None)
+                if not callable(snapshot):
+                    raise ParallelPoolError(
+                        "worker does not support active episode snapshots"
+                    )
+                state = FormalWorkerState.from_dict(snapshot())
+                if (
+                    state.worker_index != worker_index
+                    or state.platform_type != platform_type
+                    or state.episode_cursor != episode_cursor
+                    or state.observation_identity != expected_identity
+                ):
+                    raise ParallelPoolError(
+                        "worker episode snapshot identity differs"
+                    )
                 result_queue.put(
                     (
-                        "rollover",
+                        "episode_state",
                         worker_index,
-                        buffer_index,
                         policy_version,
-                        current_observation.observation_identities[0],
-                        episode_cursor,
+                        state.to_dict(),
                     )
                 )
                 continue
