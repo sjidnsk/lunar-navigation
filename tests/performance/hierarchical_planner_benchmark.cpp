@@ -125,10 +125,10 @@ constexpr std::array<CaseDefinition, 8U> kCases{
         .scenario = Scenario::kHopperDirect,
         .platform = PlatformType::kHopper,
         .capability_version = "hopper-engineering-baseline-v1",
-        .global_width = 560U,
-        .global_height = 60U,
-        .global_resolution_m = 0.2,
-        .global_level = 0U,
+        .global_width = 140U,
+        .global_height = 15U,
+        .global_resolution_m = 0.8,
+        .global_level = 2U,
         .release_threshold_s = 1.0,
     },
     CaseDefinition{
@@ -136,10 +136,10 @@ constexpr std::array<CaseDefinition, 8U> kCases{
         .scenario = Scenario::kHopperAlternateTime,
         .platform = PlatformType::kHopper,
         .capability_version = "hopper-engineering-baseline-v1",
-        .global_width = 560U,
-        .global_height = 60U,
-        .global_resolution_m = 0.2,
-        .global_level = 0U,
+        .global_width = 140U,
+        .global_height = 15U,
+        .global_resolution_m = 0.8,
+        .global_level = 2U,
         .release_threshold_s = 2.0,
     },
     CaseDefinition{
@@ -147,10 +147,10 @@ constexpr std::array<CaseDefinition, 8U> kCases{
         .scenario = Scenario::kHopperBlocked,
         .platform = PlatformType::kHopper,
         .capability_version = "hopper-engineering-baseline-v1",
-        .global_width = 560U,
-        .global_height = 60U,
-        .global_resolution_m = 0.2,
-        .global_level = 0U,
+        .global_width = 140U,
+        .global_height = 15U,
+        .global_resolution_m = 0.8,
+        .global_level = 2U,
         .release_threshold_s = 5.0,
     },
 };
@@ -524,9 +524,14 @@ void AddHopperBlockingColumn(GridMap& map, const float height_m) {
   input.world.global_map = test::MakeFlatMap(
       "map", definition.global_width, definition.global_height,
       definition.global_resolution_m);
+  const auto local_width = static_cast<std::size_t>(std::llround(
+      static_cast<double>(definition.global_width) *
+      definition.global_resolution_m / kBaseResolutionM));
+  const auto local_height = static_cast<std::size_t>(std::llround(
+      static_cast<double>(definition.global_height) *
+      definition.global_resolution_m / kBaseResolutionM));
   input.world.local_map = test::MakeFlatMap(
-      "odom", definition.global_width, definition.global_height,
-      kBaseResolutionM);
+      "odom", local_width, local_height, kBaseResolutionM);
   input.world.map_from_odom = RigidTransform{
       .parent_frame = "map",
       .child_frame = "odom",

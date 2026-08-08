@@ -164,6 +164,18 @@ struct GroundAccumulation final {
   return added;
 }
 
+void ApplyValidatedGlobalMapLevel(
+    PlannerOutput &output, const PlannerInput &input,
+    const hierarchical::MapLevelValidationResult &levels) {
+  if (!output.diagnostics.hierarchical.has_value()) {
+    output.diagnostics.hierarchical.emplace();
+  }
+  HierarchicalPlannerMetrics &metrics = *output.diagnostics.hierarchical;
+  metrics.global_level = levels.global_level.value_or(0U);
+  metrics.global_resolution_m = input.world.global_map.resolution_m;
+  metrics.global_cells = input.world.global_map.CellCount();
+}
+
 } // namespace
 
 struct Planner::Impl final {
@@ -235,6 +247,7 @@ PlannerOutput Planner::Plan(
       output.diagnostics.elapsed =
           std::chrono::duration_cast<std::chrono::nanoseconds>(
               std::chrono::steady_clock::now() - started);
+      ApplyValidatedGlobalMapLevel(output, input, levels);
       if (output.reason_code == "HOPPER_GLOBAL_RESOLUTION_INSUFFICIENT") {
         output.outcome = PlanningOutcome::kResourceExhausted;
         output.directive = ExecutionDirective::kNoSafeReference;

@@ -271,6 +271,26 @@ TEST(HierarchicalRegression, HopperUsesOneDirectRequestWithoutGlobalChain) {
   EXPECT_EQ(success.continuation, nullptr);
 }
 
+TEST(HierarchicalRegression, HopperReportsTheValidatedGlobalMapLevel) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 140U, 15U, 0.8);
+  input.world.local_map = test::MakeFlatMap("odom", 560U, 60U, 0.2);
+  input.config.global_map.base_resolution_m = 0.2;
+  std::get<HopperState>(input.current_state).pose.position_m = {
+    5.0, 5.0, 0.0};
+  input.goal_map.target = PointGoal{
+    .position_m = {105.0, 5.0, 0.0}, .tolerance_m = 0.0};
+
+  const PlannerOutput output = Planner{}.Plan(input);
+
+  ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
+    << output.reason_code;
+  ASSERT_TRUE(output.diagnostics.hierarchical.has_value());
+  EXPECT_EQ(output.diagnostics.hierarchical->global_level, 2U);
+  EXPECT_DOUBLE_EQ(output.diagnostics.hierarchical->global_resolution_m, 0.8);
+  EXPECT_EQ(output.diagnostics.hierarchical->global_cells, 140U * 15U);
+}
+
 TEST(HierarchicalRegression, SeparatesGlobalSuccessFromLocalCoverageFailure) {
   PlannerInput input = DistantGroundInput(PlatformType::kWheeled);
   const GlobalRoutePlanResult global = PlanGroundGlobalRoute(input);

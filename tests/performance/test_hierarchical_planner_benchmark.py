@@ -58,7 +58,7 @@ CASES = {
     "hopper_direct_100m": {
         "platform": "HOPPER",
         "capability_version": "hopper-engineering-baseline-v1",
-        "map": (112.0, 12.0, 0.2, 0, 560 * 60),
+        "map": (112.0, 12.0, 0.8, 2, 140 * 15),
         "threshold_s": 1.0,
         "outcome": "NEW_REFERENCE_AVAILABLE",
         "reason": "HOPPER_SINGLE_HOP_AVAILABLE",
@@ -66,7 +66,7 @@ CASES = {
     "hopper_alternate_time_100m": {
         "platform": "HOPPER",
         "capability_version": "hopper-engineering-baseline-v1",
-        "map": (112.0, 12.0, 0.2, 0, 560 * 60),
+        "map": (112.0, 12.0, 0.8, 2, 140 * 15),
         "threshold_s": 2.0,
         "outcome": "NEW_REFERENCE_AVAILABLE",
         "reason": "HOPPER_SINGLE_HOP_AVAILABLE",
@@ -74,7 +74,7 @@ CASES = {
     "hopper_complete_blocked_100m": {
         "platform": "HOPPER",
         "capability_version": "hopper-engineering-baseline-v1",
-        "map": (112.0, 12.0, 0.2, 0, 560 * 60),
+        "map": (112.0, 12.0, 0.8, 2, 140 * 15),
         "threshold_s": 5.0,
         "outcome": "NO_KNOWN_SAFE_ROUTE",
         "reason": "HOPPER_ALL_FLIGHT_TUBES_BLOCKED",
