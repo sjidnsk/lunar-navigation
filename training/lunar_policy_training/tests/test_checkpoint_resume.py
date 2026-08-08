@@ -31,6 +31,9 @@ from lunar_policy_training.ppo.checkpoint import (  # noqa: E402
     CheckpointError,
     _semantic_sha256,
 )
+from lunar_policy_training.training_semantics import (  # noqa: E402
+    training_semantics_sha256,
+)
 
 
 def _identity(
@@ -44,6 +47,7 @@ def _identity(
         "capability_sha256": "4" * 64,
         "reward_sha256": "5" * 64,
         "v3_sha256": "6" * 64,
+        "training_semantics_sha256": training_semantics_sha256(),
     }
     fields.update(changes)
     return RunIdentity(**fields)
@@ -98,7 +102,7 @@ def test_resume_preserves_consumed_gpu_budget(tmp_path: pathlib.Path) -> None:
     budget = TrainingBudget.from_checkpoint(resumed)
 
     assert resumed.schema_version == CHECKPOINT_SCHEMA_VERSION
-    assert resumed.schema_version == "lunar-ppo-checkpoint/v3"
+    assert resumed.schema_version == "lunar-ppo-checkpoint/v4"
     assert resumed.run_identity == _identity()
     assert resumed.contract_version == "ObservationContractV1"
     assert resumed.consumed_gpu_seconds == 7200.0
@@ -414,9 +418,10 @@ def test_resume_rejects_frozen_runtime_identity_drift(
         "capability_sha256",
         "reward_sha256",
         "v3_sha256",
+        "training_semantics_sha256",
     ),
 )
-def test_resume_rejects_each_v3_run_identity_field(
+def test_resume_rejects_each_v4_run_identity_field(
     tmp_path: pathlib.Path, field: str
 ) -> None:
     """Would fail if any frozen data/capability/reward/v3 identity could drift."""
@@ -462,3 +467,34 @@ def test_v2_checkpoint_requires_explicit_development_smoke_reader(
     loaded = load_checkpoint(path, run_kind="development-smoke")
     assert loaded.schema_version == "lunar-ppo-checkpoint/v2"
     assert loaded.global_step == checkpoint.global_step
+
+
+def test_v3_checkpoint_is_read_only_development_evidence(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Unknown historical semantics may be inspected but never resumed."""
+    checkpoint = _checkpoint(consumed_gpu_seconds=10.0)
+    body = _body_from_checkpoint(checkpoint)
+    body["run_identity"].pop("training_semantics_sha256")
+    body["schema_version"] = "lunar-ppo-checkpoint/v3"
+    path = tmp_path / "legacy-v3.pt"
+    torch.save(
+        {"body": body, "body_sha256": _semantic_sha256(body)},
+        path,
+    )
+
+    with pytest.raises(CheckpointError, match="explicit development-smoke"):
+        load_checkpoint(path)
+    with pytest.raises(CheckpointError, match="formal"):
+        load_checkpoint(path, run_kind="formal")
+
+    loaded = load_checkpoint(path, run_kind="development-smoke")
+    assert loaded.schema_version == "lunar-ppo-checkpoint/v3"
+    with pytest.raises(CheckpointError, match="read-only"):
+        load_checkpoint_for_resume(
+            path,
+            expected_contract_version="ObservationContractV1",
+            expected_config_hash=checkpoint.config_hash,
+            expected_source_commit=checkpoint.source_commit,
+            expected_run_identity=checkpoint.run_identity,
+        )

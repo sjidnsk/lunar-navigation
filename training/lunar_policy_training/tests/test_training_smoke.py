@@ -89,6 +89,9 @@ from lunar_policy_training.policy.observation import PolicyBatch  # noqa: E402
 from lunar_policy_training.ppo.rollout import RolloutBatch  # noqa: E402
 from lunar_policy_training.ppo.trainer import PPOTrainer  # noqa: E402
 from lunar_policy_training.reward import reward_weights_sha256  # noqa: E402
+from lunar_policy_training.training_semantics import (  # noqa: E402
+    training_semantics_sha256,
+)
 
 
 def _transition() -> PlannerTransition:
@@ -760,6 +763,7 @@ def test_cpu_pretraining_smoke_links_data_v3_update_checkpoint_and_resume(
         capability_sha256=capability_bundle.bundle_sha256,
         reward_sha256=reward_weights_sha256(),
         v3_sha256=digest(f"lunar-planner-v3-source:{source_commit}".encode("utf-8")),
+        training_semantics_sha256=training_semantics_sha256(),
     )
     trainer = PPOTrainer(policy, config=config.ppo, device="cpu")
     scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -875,7 +879,7 @@ def test_cpu_pretraining_smoke_links_data_v3_update_checkpoint_and_resume(
 
     final_checkpoint = load_checkpoint(checkpoint_path)
     final_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert final_checkpoint.schema_version == "lunar-ppo-checkpoint/v3"
+    assert final_checkpoint.schema_version == "lunar-ppo-checkpoint/v4"
     assert final_checkpoint.global_step == final_manifest["global_step"] == 2
     assert final_checkpoint.run_identity.to_dict() == final_manifest["run_identity"]
     assert final_checkpoint.run_identity == identity
@@ -941,7 +945,7 @@ def test_cuda_interrupt_resume_preserves_step_budget_and_allocation(
     )
     assert evidence.platform_allocation == {"WHEELED": selected_workers}
     checkpoint = load_checkpoint(artifact_root / "checkpoints/latest.pt")
-    assert checkpoint.schema_version == "lunar-ppo-checkpoint/v3"
+    assert checkpoint.schema_version == "lunar-ppo-checkpoint/v4"
     assert checkpoint.run_identity.run_kind == "development-smoke"
     assert manifest["run_identity"] == checkpoint.run_identity.to_dict()
     assert checkpoint.worker_allocation == evidence.platform_allocation

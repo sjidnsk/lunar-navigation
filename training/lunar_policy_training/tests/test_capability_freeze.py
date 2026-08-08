@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import pickle
 import sys
 from pathlib import Path
@@ -13,6 +14,7 @@ from lunar_policy_training.capability_freeze import (
     CAPABILITY_TYPES,
     CapabilityFreezeError,
     FrozenCapabilityEnvironmentFactory,
+    FrozenObservationCapability,
     load_frozen_capability_bundle,
 )
 
@@ -259,6 +261,34 @@ def _rewrite_locked_resource(
     lock_path.write_text(json.dumps(lock), encoding="utf-8")
 
 
+def _rewrite_observation_source_and_content(
+    lock_path: Path,
+    platform: str,
+    *,
+    sensor_range_m: float,
+    sensor_fov_deg: float,
+) -> None:
+    observation = {
+        "sensor_range_m": sensor_range_m,
+        "sensor_fov_deg": sensor_fov_deg,
+    }
+    _rewrite_content(
+        lock_path,
+        platform,
+        lambda document: document["content"].__setitem__(
+            "observation", observation
+        ),
+    )
+    _rewrite_locked_resource(
+        lock_path,
+        platform,
+        f"{platform.lower()}/observation.json",
+        (json.dumps(observation, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        ),
+    )
+
+
 def _rewrite_typed_source_and_content(
     lock_path: Path,
     platform: str,
@@ -301,8 +331,53 @@ def test_formal_bundle_is_canonical_pickle_safe_and_relocation_independent(
     assert tuple(item.platform_type for item in first.platforms) == PLATFORMS
     assert first.formal_eligible is True
     assert first.bundle_sha256 == second.bundle_sha256
+    assert all(
+        platform.observation_capability
+        == FrozenObservationCapability(
+            sensor_range_m=30.0,
+            sensor_fov_rad=2.0 * math.pi,
+        )
+        for platform in first.platforms
+    )
     assert pickle.loads(pickle.dumps(first)) == first
     assert str(tmp_path) not in repr(first)
+
+
+def test_formal_bundle_rejects_shared_nonapproved_observation_capability(
+    tmp_path: Path,
+) -> None:
+    """A self-consistent 120-degree bundle must not become formal eligible."""
+    lock_path = _write_bundle(tmp_path / "formal-120-degree")
+    for platform in PLATFORMS:
+        _rewrite_observation_source_and_content(
+            lock_path,
+            platform,
+            sensor_range_m=30.0,
+            sensor_fov_deg=120.0,
+        )
+
+    with pytest.raises(
+        CapabilityFreezeError, match="formal observation capability"
+    ):
+        load_frozen_capability_bundle(lock_path, run_kind="formal")
+
+
+def test_formal_bundle_rejects_per_platform_observation_drift(
+    tmp_path: Path,
+) -> None:
+    """All three platforms share one conservative system-level observation."""
+    lock_path = _write_bundle(tmp_path / "formal-platform-drift")
+    _rewrite_observation_source_and_content(
+        lock_path,
+        "LEGGED",
+        sensor_range_m=29.0,
+        sensor_fov_deg=360.0,
+    )
+
+    with pytest.raises(
+        CapabilityFreezeError, match="formal observation capability"
+    ):
+        load_frozen_capability_bundle(lock_path, run_kind="formal")
 
 
 @pytest.mark.parametrize("failure", ("missing", "duplicate", "unknown"))

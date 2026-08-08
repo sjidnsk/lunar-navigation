@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from lunar_policy_training.checkpoint import RunIdentity
+from lunar_policy_training.training_semantics import training_semantics_sha256
 
 from lunar_policy_training.evaluation.release_gate import (
     evaluate_release_gate,
@@ -63,6 +64,7 @@ def _report(
             capability_sha256="4" * 64,
             reward_sha256="a" * 64,
             v3_sha256="6" * 64,
+            training_semantics_sha256=training_semantics_sha256(),
         ),
         reward_hash="a" * 64,
         checkpoint_sha256="b" * 64,

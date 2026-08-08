@@ -6,6 +6,7 @@ from lunar_planner_training_bridge import ExecutionDirective, PlanningOutcome
 
 from lunar_policy_training.curriculum import CurriculumSchedule
 from lunar_policy_training.checkpoint import RunIdentity
+from lunar_policy_training.training_semantics import training_semantics_sha256
 
 from lunar_policy_training.evaluation.report import (
     CandidateEvaluation,
@@ -77,6 +78,7 @@ def _run_identity(run_kind: str = "development-smoke") -> RunIdentity:
         capability_sha256="4" * 64,
         reward_sha256=reward_weights_sha256(),
         v3_sha256="6" * 64,
+        training_semantics_sha256=training_semantics_sha256(),
     )
 
 

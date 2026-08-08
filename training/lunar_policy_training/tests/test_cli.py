@@ -241,6 +241,9 @@ def _perfect_development_report() -> EvaluationReport:
             capability_sha256="4" * 64,
             reward_sha256="5" * 64,
             v3_sha256="6" * 64,
+            training_semantics_sha256=(
+                cli_module.training_semantics_sha256()
+            ),
         ),
         reward_hash="5" * 64,
         checkpoint_sha256="7" * 64,

@@ -12,6 +12,11 @@ from typing import TypeAlias
 
 import yaml
 
+from .training_semantics import (
+    FORMAL_SENSOR_FOV_RAD,
+    FORMAL_SENSOR_RANGE_M,
+)
+
 
 CAPABILITY_FREEZE_SCHEMA = "lunar-training-capability-freeze/v1"
 _PLATFORM_SOURCE_SCHEMA = "platform-control-capability-source/v2"
@@ -514,6 +519,18 @@ def load_frozen_capability_bundle(
     if seen != set(PLATFORMS):
         raise CapabilityFreezeError("capability platforms must be WHEELED, LEGGED and HOPPER")
     ordered = tuple(sorted(parsed, key=lambda item: PLATFORMS.index(item.platform_type)))
+    if run_kind == "formal":
+        expected_observation = FrozenObservationCapability(
+            sensor_range_m=FORMAL_SENSOR_RANGE_M,
+            sensor_fov_rad=FORMAL_SENSOR_FOV_RAD,
+        )
+        if any(
+            platform.observation_capability != expected_observation
+            for platform in ordered
+        ):
+            raise CapabilityFreezeError(
+                "formal observation capability must be shared 30 m/360 degrees"
+            )
     identity = {
         "schema": CAPABILITY_FREEZE_SCHEMA,
         "platforms": [

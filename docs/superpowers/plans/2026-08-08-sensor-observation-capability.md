@@ -139,7 +139,7 @@ Expected commit subject: `merge: integrate qualified volume 3 training baseline`
 - Consumes: `FrozenObservationCapability`, `FrozenCapabilityBundle`, and `RunIdentity` from the imported baseline.
 - Produces: `FORMAL_SENSOR_RANGE_M`, `FORMAL_SENSOR_FOV_RAD`, `TRAINING_SEMANTICS_VERSION`, `training_semantics_sha256()`, and checkpoint schema `lunar-ppo-checkpoint/v4`.
 
-- [ ] **Step 1: Write failing capability and checkpoint identity tests**
+- [x] **Step 1: Write failing capability and checkpoint identity tests**
 
 Add tests proving that a formal bundle accepts three identical 30 m/360° observation documents, rejects 30 m/120°, rejects per-platform observation drift, and that a v4 resume rejects a changed training-semantics hash. The central expectation is:
 
@@ -152,7 +152,7 @@ with pytest.raises(CapabilityFreezeError, match="formal observation capability")
     load_frozen_capability_bundle(lock_120_deg, run_kind="formal")
 ```
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 ```bash
 PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
@@ -164,7 +164,7 @@ PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
 
 Expected: failures for missing formal observation validation and missing `training_semantics_sha256` identity.
 
-- [ ] **Step 3: Implement immutable semantics constants and hash**
+- [x] **Step 3: Implement immutable semantics constants and hash**
 
 ```python
 FORMAL_SENSOR_RANGE_M = 30.0
@@ -179,11 +179,11 @@ def training_semantics_sha256() -> str:
 
 Formal bundle loading validates exact shared observation values after resource/hash closure verification. Development-smoke fixtures may use explicit alternative values but cannot become formal eligible.
 
-- [ ] **Step 4: Upgrade run identity/checkpoint semantics**
+- [x] **Step 4: Upgrade run identity/checkpoint semantics**
 
 Add `training_semantics_sha256` to `RunIdentity`, `_RUN_IDENTITY_FIELDS`, serialized bodies, CLI manifest construction, and resume equality checks; bump the complete-run schema to `lunar-ppo-checkpoint/v4`. Keep v3 read-only for explicit development smoke and reject it for formal runs.
 
-- [ ] **Step 5: Run focused tests and commit**
+- [x] **Step 5: Run focused tests and commit**
 
 ```bash
 PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \

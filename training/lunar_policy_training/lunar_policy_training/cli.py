@@ -62,6 +62,7 @@ from .environment.parallel_pool import (
 )
 from .environment.macro_step import PlannerTransition
 from .environment.v3_environment import PreparedPlanRequest, create_v3_environment
+from .training_semantics import training_semantics_sha256
 from .curriculum import (
     CurriculumSchedule,
     FORMAL_SEED,
@@ -1813,6 +1814,7 @@ def _development_run_identity(source_commit: str) -> RunIdentity:
         ),
         reward_sha256=reward_weights_sha256(),
         v3_sha256=digest(f"lunar-planner-v3-source:{source_commit}"),
+        training_semantics_sha256=training_semantics_sha256(),
     )
 
 
