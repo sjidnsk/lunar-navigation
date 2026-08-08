@@ -10,9 +10,10 @@ from pathlib import Path
 import tempfile
 from typing import Mapping
 
+from .hazards import FORMAL_GENERATOR_VERSION, formal_hazard_distribution
+
 
 SCENARIO_MANIFEST_SCHEMA = "lunar-formal-scenario-manifest/v1"
-FORMAL_GENERATOR_VERSION = "lunar-polar-multires-hazards/v2"
 TRAIN_SCENARIO_SEEDS = tuple(range(408000, 408008))
 VALIDATION_SCENARIO_SEEDS = tuple(range(409000, 409002))
 TEST_SCENARIO_SEEDS = tuple(range(410000, 410002))
@@ -211,6 +212,7 @@ def build_scenario_manifest_document(
         "split_manifest_file_sha256": split_file_sha,
         "split_sha256": _require_sha(split_document.get("split_sha256"), "split"),
         "generator_version": FORMAL_GENERATOR_VERSION,
+        "object_distribution": formal_hazard_distribution(),
         "geometry": {
             "global": {"size_m": 1024.0, "resolution_m": 4.0, "cells": 256},
             "local_tile": {"size_m": 64.0, "resolution_m": 0.2, "cells": 320},

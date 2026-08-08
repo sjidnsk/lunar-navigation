@@ -113,6 +113,19 @@ def test_formal_catalog_expands_exact_frozen_scene_families() -> None:
 
     assert manifest["schema"] == "lunar-formal-scenario-manifest/v1"
     assert manifest["generator_version"] == "lunar-polar-multires-hazards/v2"
+    assert manifest["object_distribution"] == {
+        "rocks": {"count": 260, "radius_m": [0.15, 1.2]},
+        "craters": {
+            "count": 32,
+            "radius_m": [2.0, 16.0],
+            "depth_m": [0.05, 1.0],
+        },
+        "no_go_polygons": {
+            "count": 8,
+            "circumradius_m": [2.0, 8.0],
+            "vertices": 6,
+        },
+    }
     assert manifest["scenario_counts"] == {
         "train": 1536,
         "validation": 96,

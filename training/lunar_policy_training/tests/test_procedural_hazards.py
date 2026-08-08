@@ -73,3 +73,7 @@ def test_hazard_scene_rejects_obstacle_layer_from_another_canvas() -> None:
 
     with pytest.raises(ValueError, match="hazard.*canvas identity"):
         replace(scene, physical_obstacle_layer=CanvasRatioLayer(other_canvas, np.zeros((8, 8), dtype=np.float32)))
+
+
+def test_historical_v1_generator_identity_remains_unchanged() -> None:
+    assert GENERATOR_VERSION == "lunar-polar-hazards/v1"

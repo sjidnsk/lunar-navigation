@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
+import json
+import math
 
 import numpy as np
 from shapely import from_wkb, to_wkb
@@ -14,6 +16,91 @@ from .raster import GLOBAL_GEOMETRY, GridGeometry, MapCanvas
 
 
 GENERATOR_VERSION = "lunar-polar-hazards/v1"
+FORMAL_GENERATOR_VERSION = "lunar-polar-multires-hazards/v2"
+FORMAL_ROCK_COUNT = 260
+FORMAL_CRATER_COUNT = 32
+FORMAL_NO_GO_COUNT = 8
+
+
+def formal_hazard_distribution() -> dict[str, object]:
+    """Return a fresh canonical document of the frozen v2 distribution."""
+    return {
+        "rocks": {"count": FORMAL_ROCK_COUNT, "radius_m": [0.15, 1.2]},
+        "craters": {
+            "count": FORMAL_CRATER_COUNT,
+            "radius_m": [2.0, 16.0],
+            "depth_m": [0.05, 1.0],
+        },
+        "no_go_polygons": {
+            "count": FORMAL_NO_GO_COUNT,
+            "circumradius_m": [2.0, 8.0],
+            "vertices": 6,
+        },
+    }
+
+
+@dataclass(frozen=True)
+class RockCircle:
+    """Resolution-independent circular rock footprint in map metres."""
+
+    x_m: float
+    y_m: float
+    radius_m: float
+
+
+@dataclass(frozen=True)
+class CraterBowl:
+    """Resolution-independent conical crater depression."""
+
+    x_m: float
+    y_m: float
+    radius_m: float
+    depth_m: float
+
+
+@dataclass(frozen=True)
+class NoGoPolygon:
+    """Resolution-independent convex no-go polygon."""
+
+    vertices_m: tuple[tuple[float, float], ...]
+
+
+@dataclass(frozen=True)
+class VectorHazardScene:
+    """One formal hazard definition shared by every raster resolution."""
+
+    seed: str
+    canvas: MapCanvas
+    rocks: tuple[RockCircle, ...]
+    craters: tuple[CraterBowl, ...]
+    no_go_polygons: tuple[NoGoPolygon, ...]
+    generator_version: str = FORMAL_GENERATOR_VERSION
+
+    def __post_init__(self) -> None:
+        if self.generator_version != FORMAL_GENERATOR_VERSION:
+            raise ValueError("formal vector scene generator version is unsupported")
+        if len(self.seed) != 64:
+            raise ValueError("formal vector scene seed must be a SHA-256")
+
+    @property
+    def vector_sha256(self) -> str:
+        """Content digest of the overlay, distinct from a catalogue scene ID."""
+        payload = {
+            "canvas_identity": self.canvas.identity,
+            "seed": self.seed,
+            "generator_version": self.generator_version,
+            "rocks": [vars(value) for value in self.rocks],
+            "craters": [vars(value) for value in self.craters],
+            "no_go_polygons": [value.vertices_m for value in self.no_go_polygons],
+        }
+        return sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -66,6 +153,89 @@ def scene_seed(window_sha256: str, scenario_seed: int, *, generator_version: str
 def _stream(seed: str, name: str) -> np.random.Generator:
     value = int.from_bytes(sha256(f"{seed}:{name}".encode("utf-8")).digest()[:8], "big")
     return np.random.default_rng(value)
+
+
+def generate_vector_hazard_scene(
+    window_sha256: str,
+    scenario_seed: int,
+    *,
+    canvas: MapCanvas,
+    rock_count: int = FORMAL_ROCK_COUNT,
+    crater_count: int = FORMAL_CRATER_COUNT,
+    no_go_count: int = FORMAL_NO_GO_COUNT,
+) -> VectorHazardScene:
+    """Generate the formal v2 vector scene using three independent RNG streams."""
+    if canvas.window_sha256 != window_sha256:
+        raise ValueError("formal vector scene canvas identity mismatch")
+    if min(rock_count, crater_count, no_go_count) < 0:
+        raise ValueError("hazard counts must be non-negative")
+    seed = scene_seed(
+        window_sha256,
+        scenario_seed,
+        generator_version=FORMAL_GENERATOR_VERSION,
+    )
+    left, bottom, right, top = canvas.bounds_m
+    size_m = min(right - left, top - bottom)
+
+    def bounded_radius(
+        rng: np.random.Generator, minimum: float, maximum: float
+    ) -> float:
+        upper = min(maximum, size_m / 2.0 - 1e-6)
+        if upper <= 0.0:
+            raise ValueError("canvas is too small for formal hazards")
+        lower = min(minimum, upper)
+        return float(rng.uniform(lower, upper)) if lower < upper else upper
+
+    rock_rng = _stream(seed, "rocks")
+    rocks: list[RockCircle] = []
+    for _ in range(rock_count):
+        radius = bounded_radius(rock_rng, 0.15, 1.2)
+        rocks.append(
+            RockCircle(
+                x_m=float(rock_rng.uniform(left + radius, right - radius)),
+                y_m=float(rock_rng.uniform(bottom + radius, top - radius)),
+                radius_m=radius,
+            )
+        )
+
+    crater_rng = _stream(seed, "craters")
+    craters: list[CraterBowl] = []
+    for _ in range(crater_count):
+        radius = bounded_radius(crater_rng, 2.0, 16.0)
+        craters.append(
+            CraterBowl(
+                x_m=float(crater_rng.uniform(left + radius, right - radius)),
+                y_m=float(crater_rng.uniform(bottom + radius, top - radius)),
+                radius_m=radius,
+                depth_m=float(crater_rng.uniform(0.05, 1.0)),
+            )
+        )
+
+    no_go_rng = _stream(seed, "no-go-polygons")
+    no_go_polygons: list[NoGoPolygon] = []
+    for _ in range(no_go_count):
+        radius = bounded_radius(no_go_rng, 2.0, 8.0)
+        center_x = float(no_go_rng.uniform(left + radius, right - radius))
+        center_y = float(no_go_rng.uniform(bottom + radius, top - radius))
+        rotation = float(no_go_rng.uniform(-math.pi, math.pi))
+        aspect = float(no_go_rng.uniform(0.55, 1.0))
+        vertices = tuple(
+            (
+                center_x + radius * math.cos(rotation + index * math.pi / 3.0),
+                center_y
+                + radius * aspect * math.sin(rotation + index * math.pi / 3.0),
+            )
+            for index in range(6)
+        )
+        no_go_polygons.append(NoGoPolygon(vertices))
+
+    return VectorHazardScene(
+        seed=seed,
+        canvas=canvas,
+        rocks=tuple(rocks),
+        craters=tuple(craters),
+        no_go_polygons=tuple(no_go_polygons),
+    )
 
 
 def physical_obstacle_ratio(footprints: tuple[object, ...], geometry: GridGeometry = GLOBAL_GEOMETRY, *, canvas: MapCanvas | None = None) -> np.ndarray:
@@ -140,4 +310,21 @@ def generate_hazard_scene(window_sha256: str, scenario_seed: int, *, canvas: Map
     )
 
 
-__all__ = ["CanvasRatioLayer", "GENERATOR_VERSION", "HazardScene", "generate_hazard_scene", "physical_obstacle_ratio", "scene_seed"]
+__all__ = [
+    "CanvasRatioLayer",
+    "CraterBowl",
+    "FORMAL_GENERATOR_VERSION",
+    "FORMAL_CRATER_COUNT",
+    "FORMAL_NO_GO_COUNT",
+    "FORMAL_ROCK_COUNT",
+    "GENERATOR_VERSION",
+    "HazardScene",
+    "NoGoPolygon",
+    "RockCircle",
+    "VectorHazardScene",
+    "generate_hazard_scene",
+    "generate_vector_hazard_scene",
+    "formal_hazard_distribution",
+    "physical_obstacle_ratio",
+    "scene_seed",
+]
