@@ -57,10 +57,27 @@ from .visibility import NativeVisibilityEstimator, SensorGeometry
 
 
 _PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
+_FORMAL_SCENE_LANES = 8
 _BOUNDARY_MARGIN_CELLS = math.ceil(
     (FORMAL_SENSOR_RANGE_M + LOCAL_GEOMETRY.size_m / 2.0)
     / GLOBAL_GEOMETRY.resolution_m
 )
+
+
+def _formal_schedule_index(
+    worker_index: int,
+    episode_cursor: int,
+    scene_count: int,
+) -> int:
+    """Map a fixed platform lane and episode ordinal onto the scene inventory."""
+    if type(worker_index) is not int or worker_index < 0:
+        raise ValueError("formal worker index must be non-negative")
+    if type(episode_cursor) is not int or episode_cursor < 0:
+        raise ValueError("formal episode cursor must be non-negative")
+    if type(scene_count) is not int or scene_count <= 0:
+        raise ValueError("formal scene count must be positive")
+    lane = worker_index % _FORMAL_SCENE_LANES
+    return (episode_cursor * _FORMAL_SCENE_LANES + lane) % scene_count
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +285,7 @@ class FormalEpisode:
         self.platform_type = platform_type
         self.capability = capability
         self.scenario_identity = scenario_identity
+        self.episode_cursor = scenario_identity.episode_cursor
         self.loaded = loaded
         self.scene_id = loaded.scene.scene_id
         self._static_hard = loaded.arrays[
@@ -318,6 +336,7 @@ class FormalEpisode:
             policy_observation_builder=self.build_policy_observation,
             episode_id=(
                 f"{self.scene_id}/{platform_type.lower()}/{worker_index}"
+                f"/episode-{self.episode_cursor}"
             ),
             mission_revision=1,
             initial_state_time_ns=1_000_000_000,
@@ -728,7 +747,13 @@ class FormalWorkerBuilder:
         ]
         if not entries:
             raise ValueError("formal cache has no scenes for the requested split")
-        entry = entries[worker_index % len(entries)]
+        entry = entries[
+            _formal_schedule_index(
+                worker_index,
+                scenario_identity.episode_cursor,
+                len(entries),
+            )
+        ]
         loaded = _load_multires_scene(cache, str(entry["scene_id"]))
         safe = self._safe_start_cells(loaded, platform_type)
         for start_cell in safe:
@@ -812,7 +837,7 @@ class FormalEnvironmentBuilder:
         if self.split not in {"train", "validation", "test", "holdout"}:
             raise ValueError("formal environment split is invalid")
         schedule_id = (
-            f"{cache.manifest['cache_manifest_sha256']}/{self.split}/v1"
+            f"{cache.manifest['cache_manifest_sha256']}/{self.split}/v2"
         )
         worker_builder = FormalWorkerBuilder(
             str(self.cache_manifest_path),

@@ -206,6 +206,37 @@ class _NoActionThenReadyFactory:
         )
 
 
+class _EpisodeCursorFactory:
+    def __call__(
+        self, worker_index: int, platform_type: str
+    ) -> ParallelEnvironmentWorker:
+        return self.create_for_episode(worker_index, platform_type, 0)
+
+    def create_for_episode(
+        self,
+        worker_index: int,
+        platform_type: str,
+        episode_cursor: int,
+    ) -> ParallelEnvironmentWorker:
+        observation = _observation(worker_index, platform_type)
+        identity = observation.observation_identities[0]
+        observation.observation_identities = (
+            ObservationIdentity(
+                episode_id=f"cursor-{worker_index}-{episode_cursor}",
+                mission_revision=identity.mission_revision,
+                map_snapshot_id=f"map-{episode_cursor}",
+                robot_state_id=identity.robot_state_id,
+                state_time_ns=identity.state_time_ns,
+                execution_state=identity.execution_state,
+                candidate_set_id=identity.candidate_set_id,
+            ),
+        )
+        return ParallelEnvironmentWorker(
+            environment=_PreparationOnlyEnvironment(observation),
+            initial_observation=observation,
+        )
+
+
 def _actions(worker_count: int) -> ParallelActions:
     return ParallelActions(
         candidate_indices=torch.zeros((worker_count,), dtype=torch.int64),
@@ -424,3 +455,36 @@ def test_targeted_reset_preserves_every_unselected_worker_field() -> None:
     assert reset.dones[1].item() == source_done
     assert reset.observations.observation_identities[1] == source_identity
     assert source_version == 51
+
+
+def test_update_boundary_rollover_advances_and_restores_each_episode_cursor() -> None:
+    """Would fail if resume repeated scenes or rollover retained stale workers."""
+    with ParallelEnvPool(
+        allocation={"WHEELED": 2},
+        observation_template=_observation(0, "WHEELED"),
+        environment_factory=_EpisodeCursorFactory(),
+        reward_fn=_zero_reward,
+        worker_timeout_seconds=5.0,
+        initial_episode_cursors=(4, 9),
+    ) as pool:
+        initial = pool.reset()
+        first = pool.rollover_all_workers(policy_version=31)
+        second = pool.rollover_all_workers(policy_version=32)
+
+        assert pool.episode_cursors == (6, 11)
+
+    assert [
+        identity.episode_id
+        for identity in initial.observations.observation_identities
+    ] == ["cursor-0-4", "cursor-1-9"]
+    assert [
+        identity.episode_id
+        for identity in first.observations.observation_identities
+    ] == ["cursor-0-5", "cursor-1-10"]
+    assert [
+        identity.episode_id
+        for identity in second.observations.observation_identities
+    ] == ["cursor-0-6", "cursor-1-11"]
+    assert first.rewards.tolist() == [0.0, 0.0]
+    assert first.dones.tolist() == [False, False]
+    assert first.policy_versions.tolist() == [31, 31]

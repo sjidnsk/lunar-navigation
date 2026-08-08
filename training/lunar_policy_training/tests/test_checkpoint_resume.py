@@ -65,6 +65,8 @@ def _checkpoint(
     *,
     worker_allocation: dict[str, int] | None = None,
     budget_extension_blocks: int = 0,
+    run_kind: str = "development-smoke",
+    environment_state: dict[str, object] | None = None,
 ):
     torch.manual_seed(17)
     model = torch.nn.Linear(3, 2)
@@ -82,7 +84,7 @@ def _checkpoint(
         curriculum_phase="joint",
         normalization={"reward_mean": 0.25, "reward_var": 1.5},
         frozen_config={"total_gpu_budget_seconds": 86400},
-        run_identity=_identity(),
+        run_identity=_identity(run_kind=run_kind),
         source_commit="a0cc8dfd9210e1badcbe883e6178b1b27888bd93",
         consumed_gpu_seconds=consumed_gpu_seconds,
         budget_extension_blocks=budget_extension_blocks,
@@ -97,6 +99,7 @@ def _checkpoint(
         micro_batch_size=2,
         latest_checkpoint_gpu_seconds=consumed_gpu_seconds,
         candidate_checkpoint_gpu_seconds=min(consumed_gpu_seconds, 3600.0),
+        environment_state=environment_state,
     )
 
 
@@ -109,11 +112,49 @@ def test_resume_preserves_consumed_gpu_budget(tmp_path: pathlib.Path) -> None:
     budget = TrainingBudget.from_checkpoint(resumed)
 
     assert resumed.schema_version == CHECKPOINT_SCHEMA_VERSION
-    assert resumed.schema_version == "lunar-ppo-checkpoint/v4"
+    assert resumed.schema_version == "lunar-ppo-checkpoint/v5"
     assert resumed.run_identity == _identity()
     assert resumed.contract_version == OBSERVATION_CONTRACT_VERSION
     assert resumed.consumed_gpu_seconds == 7200.0
     assert budget.remaining_gpu_seconds == 86400.0 - 7200.0
+
+
+def test_formal_checkpoint_roundtrips_exact_worker_episode_cursors(
+    tmp_path: pathlib.Path,
+) -> None:
+    environment_state = {
+        "schema_version": "lunar-formal-episode-cursors/v1",
+        "scenario_schedule_id": "cache-sha/train/v2",
+        "worker_episode_cursors": list(range(24)),
+    }
+    checkpoint = _checkpoint(
+        consumed_gpu_seconds=25.0,
+        worker_allocation={"WHEELED": 8, "LEGGED": 8, "HOPPER": 8},
+        run_kind="formal",
+        environment_state=environment_state,
+    )
+    path = tmp_path / "formal.pt"
+    save_checkpoint_atomic(path, checkpoint)
+
+    resumed = load_checkpoint_for_resume(
+        path,
+        expected_contract_version=OBSERVATION_CONTRACT_VERSION,
+        expected_config_hash=checkpoint.config_hash,
+        expected_source_commit=checkpoint.source_commit,
+        expected_run_identity=_identity(run_kind="formal"),
+        expected_worker_allocation={"WHEELED": 8, "LEGGED": 8, "HOPPER": 8},
+    )
+
+    assert resumed.environment_state == environment_state
+
+
+def test_formal_checkpoint_rejects_missing_episode_cursor_state() -> None:
+    with pytest.raises(CheckpointError, match="environment state"):
+        _checkpoint(
+            consumed_gpu_seconds=0.0,
+            worker_allocation={"WHEELED": 8, "LEGGED": 8, "HOPPER": 8},
+            run_kind="formal",
+        )
 
 
 def test_checkpoint_roundtrips_extended_budget_without_resetting_consumed(
@@ -428,7 +469,7 @@ def test_resume_rejects_frozen_runtime_identity_drift(
         "training_semantics_sha256",
     ),
 )
-def test_resume_rejects_each_v4_run_identity_field(
+def test_resume_rejects_each_v5_run_identity_field(
     tmp_path: pathlib.Path, field: str
 ) -> None:
     """Would fail if any frozen data/capability/reward/v3 identity could drift."""
@@ -458,6 +499,7 @@ def test_v2_checkpoint_requires_explicit_development_smoke_reader(
     """Would fail if legacy v2 were inferred or admitted into a formal run."""
     checkpoint = _checkpoint(consumed_gpu_seconds=10.0)
     body = _body_from_checkpoint(checkpoint)
+    body.pop("environment_state")
     body.pop("run_identity")
     body["schema_version"] = "lunar-ppo-checkpoint/v2"
     body["contract_version"] = "ObservationContractV1"
@@ -483,6 +525,7 @@ def test_v3_checkpoint_is_read_only_development_evidence(
     """Unknown historical semantics may be inspected but never resumed."""
     checkpoint = _checkpoint(consumed_gpu_seconds=10.0)
     body = _body_from_checkpoint(checkpoint)
+    body.pop("environment_state")
     body["run_identity"].pop("training_semantics_sha256")
     body["schema_version"] = "lunar-ppo-checkpoint/v3"
     body["contract_version"] = "ObservationContractV1"
@@ -499,6 +542,36 @@ def test_v3_checkpoint_is_read_only_development_evidence(
 
     loaded = load_checkpoint(path, run_kind="development-smoke")
     assert loaded.schema_version == "lunar-ppo-checkpoint/v3"
+    with pytest.raises(CheckpointError, match="read-only"):
+        load_checkpoint_for_resume(
+            path,
+            expected_contract_version=OBSERVATION_CONTRACT_VERSION,
+            expected_config_hash=checkpoint.config_hash,
+            expected_source_commit=checkpoint.source_commit,
+            expected_run_identity=checkpoint.run_identity,
+        )
+
+
+def test_v4_checkpoint_is_read_only_development_evidence(
+    tmp_path: pathlib.Path,
+) -> None:
+    checkpoint = _checkpoint(consumed_gpu_seconds=10.0)
+    body = _body_from_checkpoint(checkpoint)
+    body.pop("environment_state")
+    body["schema_version"] = "lunar-ppo-checkpoint/v4"
+    path = tmp_path / "legacy-v4.pt"
+    torch.save(
+        {"body": body, "body_sha256": _semantic_sha256(body)},
+        path,
+    )
+
+    with pytest.raises(CheckpointError, match="explicit development-smoke"):
+        load_checkpoint(path)
+    with pytest.raises(CheckpointError, match="formal"):
+        load_checkpoint(path, run_kind="formal")
+
+    loaded = load_checkpoint(path, run_kind="development-smoke")
+    assert loaded.schema_version == "lunar-ppo-checkpoint/v4"
     with pytest.raises(CheckpointError, match="read-only"):
         load_checkpoint_for_resume(
             path,

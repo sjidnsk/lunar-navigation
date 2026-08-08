@@ -425,6 +425,7 @@ class ScenarioIdentity:
     platform_type: str
     scenario_schedule_id: str
     worker_index: int
+    episode_cursor: int
     capability_version: str
     capability_sha256: str
 
@@ -452,13 +453,24 @@ class FrozenCapabilityEnvironmentFactory:
             )
 
     def __call__(self, worker_index: int, platform_type: str) -> object:
+        return self.create_for_episode(worker_index, platform_type, 0)
+
+    def create_for_episode(
+        self,
+        worker_index: int,
+        platform_type: str,
+        episode_cursor: int,
+    ) -> object:
         if type(worker_index) is not int or worker_index < 0:
             raise CapabilityFreezeError("worker index must be non-negative")
+        if type(episode_cursor) is not int or episode_cursor < 0:
+            raise CapabilityFreezeError("episode cursor must be non-negative")
         capability = self.bundle.for_platform(platform_type)
         scenario = ScenarioIdentity(
             platform_type=platform_type,
             scenario_schedule_id=self.scenario_schedule_id,
             worker_index=worker_index,
+            episode_cursor=episode_cursor,
             capability_version=capability.capability_version,
             capability_sha256=capability.content_sha256,
         )

@@ -6,7 +6,10 @@ import pathlib
 import numpy as np
 import pytest
 
-from lunar_policy_training.environment.formal_builder import FormalEnvironmentBuilder
+from lunar_policy_training.environment.formal_builder import (
+    FormalEnvironmentBuilder,
+    _formal_schedule_index,
+)
 from lunar_policy_training.environment.macro_step import PolicyAction
 from lunar_policy_training.polar_data.formal_cache import (
     FormalCacheIdentity,
@@ -154,6 +157,41 @@ def test_three_platforms_share_physical_scene_but_keep_distinct_projection(
         tuple(worker.initial_observation.platform_context[0].tolist())
         for worker in workers.values()
     } == {(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)}
+
+
+def test_formal_episode_cursor_is_deterministic_and_resume_exact(
+    tmp_path: pathlib.Path,
+) -> None:
+    assembly, _, scene_id = _assembly(tmp_path)
+
+    first = assembly.factory.create_for_episode(0, "WHEELED", 5)
+    resumed = assembly.factory.create_for_episode(0, "WHEELED", 5)
+    next_episode = assembly.factory.create_for_episode(0, "WHEELED", 6)
+
+    assert first.episode.scene_id == resumed.episode.scene_id == scene_id
+    assert first.episode.current_pose == resumed.episode.current_pose
+    assert (
+        first.initial_observation.observation_identities
+        == resumed.initial_observation.observation_identities
+    )
+    assert first.episode.scenario_identity.episode_cursor == 5
+    assert "/episode-5" in first.initial_observation.observation_identities[0].episode_id
+    assert (
+        next_episode.initial_observation.observation_identities[0].episode_id
+        != first.initial_observation.observation_identities[0].episode_id
+    )
+
+
+def test_formal_schedule_uses_shared_eight_worker_scene_lanes() -> None:
+    assert [_formal_schedule_index(index, 0, 192) for index in range(8)] == list(
+        range(8)
+    )
+    assert [_formal_schedule_index(index, 1, 192) for index in range(8)] == list(
+        range(8, 16)
+    )
+    assert _formal_schedule_index(0, 3, 192) == 24
+    assert _formal_schedule_index(8, 3, 192) == 24
+    assert _formal_schedule_index(16, 3, 192) == 24
 
 
 def test_policy_input_and_request_are_observed_only_identity_bound_and_multires(

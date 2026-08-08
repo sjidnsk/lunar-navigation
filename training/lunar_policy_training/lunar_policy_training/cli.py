@@ -43,6 +43,7 @@ from .budget import (
     extend_budget_manifest,
 )
 from .checkpoint import (
+    FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
     OBSERVATION_CONTRACT_VERSION,
     RunIdentity,
     build_training_checkpoint,
@@ -258,6 +259,14 @@ class _ParallelPoolVectorEnv:
             rewards=np.zeros((self.env_count,), dtype=np.float32),
             dones=step.dones.numpy().astype(np.bool_, copy=True),
         )
+
+    def rollover_all_workers(self, *, policy_version: int) -> PolicyBatch:
+        """Install one fresh synchronized scene batch after an optimizer update."""
+        self.set_policy_version(policy_version)
+        self._current = self._pool.rollover_all_workers(
+            policy_version=policy_version
+        )
+        return self._current.observations
 
 
 class ResumablePPOTrainer:
@@ -1491,12 +1500,24 @@ def _run_updates(
     stop_flag = SignalStopFlag()
     sent_interrupt = False
     rollout_policy_version = initial_global_step
+    initial_episode_cursors: tuple[int, ...] | None = None
+    if config.run_kind == "formal" and restore_checkpoint is not None:
+        environment_state = restore_checkpoint.environment_state
+        if (
+            environment_state["scenario_schedule_id"]
+            != environment_factory.scenario_schedule_id
+        ):
+            raise PreflightError("checkpoint formal scenario schedule mismatch")
+        initial_episode_cursors = tuple(
+            environment_state["worker_episode_cursors"]
+        )
     pool = ParallelEnvPool(
         allocation=allocation,
         observation_template=observation_template,
         environment_factory=environment_factory,
         reward_fn=reward_fn,
         worker_timeout_seconds=60.0,
+        initial_episode_cursors=initial_episode_cursors,
     )
     environment = _ParallelPoolVectorEnv(
         pool, policy_version=rollout_policy_version
@@ -1528,6 +1549,10 @@ def _run_updates(
             trainer.update(rollout, micro_batch_size=micro_batch_size)
             scheduler.step()
             rollout_policy_version += 1
+            if config.run_kind == "formal":
+                environment.rollover_all_workers(
+                    policy_version=rollout_policy_version
+                )
         finally:
             if timer is not None:
                 timer.join()
@@ -1553,6 +1578,15 @@ def _run_updates(
             ),
             candidate_checkpoint_gpu_seconds=(
                 state.candidate_checkpoint_gpu_seconds
+            ),
+            environment_state=(
+                {
+                    "schema_version": FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
+                    "scenario_schedule_id": environment_factory.scenario_schedule_id,
+                    "worker_episode_cursors": list(pool.episode_cursors),
+                }
+                if config.run_kind == "formal"
+                else {}
             ),
         )
         target = _checkpoint_target(
