@@ -56,7 +56,6 @@ private:
   std::vector<GridCell> endpoint_offsets_;
   std::vector<Ray> rays_;
   std::vector<std::uint32_t> ray_cell_indices_;
-  std::vector<std::uint16_t> baseline_support_counts_;
   std::vector<std::uint32_t> reverse_offsets_;
   std::vector<std::uint32_t> occurrence_rays_;
   std::vector<std::uint16_t> occurrence_positions_;

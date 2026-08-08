@@ -145,7 +145,6 @@ VisibilityKernel::VisibilityKernel(const double resolution_m,
     relative_cell_lookup[lookup_index] = static_cast<std::uint32_t>(index);
   }
   rays_.reserve(endpoint_offsets_.size());
-  baseline_support_counts_.assign(endpoint_offsets_.size(), 0U);
   for (const GridCell endpoint : endpoint_offsets_) {
     const std::vector<GridCell> cells = Bresenham(endpoint);
     if (ray_cell_indices_.size() >= missing ||
@@ -163,12 +162,6 @@ VisibilityKernel::VisibilityKernel(const double resolution_m,
         throw std::logic_error("visibility ray cell is outside the disk");
       }
       ray_cell_indices_.push_back(relative_index);
-      if (baseline_support_counts_[relative_index] ==
-          std::numeric_limits<std::uint16_t>::max()) {
-        throw std::length_error(
-            "visibility support count exceeds index domain");
-      }
-      ++baseline_support_counts_[relative_index];
     }
     rays_.push_back(Ray{
         .cell_offset = cell_offset,
@@ -320,29 +313,18 @@ std::vector<std::uint8_t> VisibilityKernel::RevealFromPose(
       }
       return visible;
     }
-    thread_local std::vector<std::uint16_t> remaining_support;
-    remaining_support.assign(baseline_support_counts_.begin(),
-                             baseline_support_counts_.end());
-    for (std::size_t ray_index = 0U; ray_index < rays_.size(); ++ray_index) {
-      const std::uint32_t obstacle_position = nearest_obstacle[ray_index];
-      if (obstacle_position == std::numeric_limits<std::uint32_t>::max()) {
-        continue;
-      }
-      const Ray ray = rays_[ray_index];
-      for (std::uint32_t position = obstacle_position + 1U;
-           position < ray.cell_count; ++position) {
-        const std::uint32_t cell_index =
-            ray_cell_indices_[ray.cell_offset + position];
-        if (remaining_support[cell_index] == 0U) {
-          throw std::logic_error("visibility support count underflow");
-        }
-        --remaining_support[cell_index];
-      }
-    }
     for (std::size_t cell_index = 0U; cell_index < endpoint_offsets_.size();
          ++cell_index) {
-      if (remaining_support[cell_index] != 0U) {
-        visible[Index(shape, Add(pose, endpoint_offsets_[cell_index]))] = 1U;
+      const std::uint32_t occurrence_begin = reverse_offsets_[cell_index];
+      const std::uint32_t occurrence_end = reverse_offsets_[cell_index + 1U];
+      for (std::uint32_t occurrence = occurrence_begin;
+           occurrence < occurrence_end; ++occurrence) {
+        const std::uint32_t ray_index = occurrence_rays_[occurrence];
+        const std::uint32_t position = occurrence_positions_[occurrence];
+        if (position <= nearest_obstacle[ray_index]) {
+          visible[Index(shape, Add(pose, endpoint_offsets_[cell_index]))] = 1U;
+          break;
+        }
       }
     }
     return visible;
