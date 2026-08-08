@@ -131,6 +131,25 @@ def test_candidate_builder_returns_all_false_instead_of_robot_fallback_when_los_
     np.testing.assert_array_equal(batch.mask, CandidateBatch.empty().mask)
 
 
+def test_candidate_builder_excludes_the_robot_cell_from_exploration_targets() -> None:
+    canvas = _canvas()
+    robot_cell = (128, 128)
+    robot_x_m, robot_y_m = canvas.grid_center_world(*robot_cell)
+    observed = np.zeros((256, 256), dtype=bool)
+    observed[robot_cell] = True
+    roi = np.zeros((256, 256), dtype=bool)
+    roi[127:130, 127:130] = True
+
+    batch = _builder().build(
+        _world(observed),
+        _mission_for_roi(roi),
+        Pose2(robot_x_m, robot_y_m),
+        _projection(),
+    )
+
+    assert batch.count == 0
+
+
 def test_sensor_geometry_and_obstacle_or_zero_traversable_reject_candidates() -> None:
     sensor = SensorGeometry(range_m=24.0, fov_rad=2.0 * np.pi)
     assert sensor.anchor_spacing_m > 0.0

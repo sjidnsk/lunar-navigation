@@ -160,6 +160,8 @@ class CandidateBuilderV2:
                 standoff = (row + int(np.sign(robot[0] - row)) * step, column + int(np.sign(robot[1] - column)) * step)
                 if not (0 <= standoff[0] < cells and 0 <= standoff[1] < cells and observed[standoff]):
                     standoff = (row, column)
+                if standoff == robot:
+                    continue
                 if projection.traversable_ratio[standoff] == 0.0 or not _clear_observed(world, _ray_cells(robot, standoff)):
                     continue
                 if self._candidate_within_sensor(canvas, pose_map, standoff):
