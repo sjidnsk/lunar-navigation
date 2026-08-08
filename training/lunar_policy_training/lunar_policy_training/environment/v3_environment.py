@@ -507,6 +507,14 @@ class V3ExplorationEnvironment:
                     boundary.mission_observed_delta == 0.0
                     and boundary.priority_observed_delta == 0.0
                 ),
+                success_first_crossing=boundary.success_first_crossing,
+                episode_ended_without_success=(
+                    feedback.episode_ended_without_success
+                    and not boundary.success_first_crossing
+                ),
+                terminated=(
+                    feedback.terminated or boundary.success_first_crossing
+                ),
             )
         else:
             self._install_observation(feedback.next_observation)
@@ -742,6 +750,14 @@ class V3ExplorationEnvironment:
                 executed_without_new_coverage=(
                     boundary.mission_observed_delta == 0.0
                     and boundary.priority_observed_delta == 0.0
+                ),
+                success_first_crossing=boundary.success_first_crossing,
+                episode_ended_without_success=(
+                    execution.episode_ended_without_success
+                    and not boundary.success_first_crossing
+                ),
+                terminated=(
+                    execution.terminated or boundary.success_first_crossing
                 ),
             )
         else:

@@ -16,6 +16,7 @@ from ..policy.observation import (
     PolicyBatch,
     validate_policy_batch,
 )
+from ..training_semantics import FORMAL_SUCCESS_COVERAGE_RATIO
 from .observation_builder import Pose2
 from .sensor_observation import SensorObservationState, TrainingObservedGrid
 
@@ -59,6 +60,8 @@ class BoundaryObservationResult:
     next_observation: PolicyBatch
     mission_observed_delta: float
     priority_observed_delta: float
+    mission_observed_ratio: float
+    success_first_crossing: bool
     updated: bool
 
     def __post_init__(self) -> None:
@@ -72,6 +75,7 @@ class BoundaryObservationResult:
         for name, value in (
             ("mission", self.mission_observed_delta),
             ("priority", self.priority_observed_delta),
+            ("mission observed ratio", self.mission_observed_ratio),
         ):
             if (
                 not isinstance(value, (int, float))
@@ -82,6 +86,8 @@ class BoundaryObservationResult:
                 raise ValueError(f"boundary {name} delta must be in [0,1]")
         if type(self.updated) is not bool:
             raise ValueError("boundary updated flag must be boolean")
+        if type(self.success_first_crossing) is not bool:
+            raise ValueError("boundary success crossing flag must be boolean")
 
 
 PolicyObservationBuilder = Callable[
@@ -122,6 +128,7 @@ class ObservationBoundaryController:
         self._observation_revision = 0
         self._state_time_ns = initial_state_time_ns
         self._current_observation: PolicyBatch | None = None
+        self._mission_observed_area_m2 = 0.0
 
         resolution = sensor_state.truth.canvas.geometry.resolution_m
         cell_area_m2 = resolution * resolution
@@ -164,11 +171,13 @@ class ObservationBoundaryController:
             if self._platform_type == "HOPPER"
             else "DECISION_BOUNDARY"
         )
-        self._observe(evidence, execution_state)
+        _, mission_ratio, crossing = self._observe(evidence, execution_state)
         return BoundaryObservationResult(
             next_observation=self.current_observation,
             mission_observed_delta=0.0,
             priority_observed_delta=0.0,
+            mission_observed_ratio=mission_ratio,
+            success_first_crossing=crossing,
             updated=True,
         )
 
@@ -193,6 +202,8 @@ class ObservationBoundaryController:
                 next_observation=self.current_observation,
                 mission_observed_delta=0.0,
                 priority_observed_delta=0.0,
+                mission_observed_ratio=self._mission_observed_ratio(),
+                success_first_crossing=False,
                 updated=False,
             )
         expected_state = (
@@ -202,7 +213,9 @@ class ObservationBoundaryController:
             raise ValueError("execution state is not an exploration boundary")
         if not isinstance(evidence, SensorBoundaryEvidence):
             raise ValueError("sensor boundary evidence is required")
-        delta = self._observe(evidence, execution_state)
+        delta, mission_ratio, crossing = self._observe(
+            evidence, execution_state
+        )
         mission_delta = (
             delta.mission_observed_delta_m2 / self._mission_area_m2
             if self._mission_area_m2 > 0.0
@@ -217,6 +230,8 @@ class ObservationBoundaryController:
             next_observation=self.current_observation,
             mission_observed_delta=mission_delta,
             priority_observed_delta=priority_delta,
+            mission_observed_ratio=mission_ratio,
+            success_first_crossing=crossing,
             updated=True,
         )
 
@@ -233,8 +248,18 @@ class ObservationBoundaryController:
         elapsed_ns = int(round(float(evidence.elapsed_s) * 1_000_000_000.0))
         if elapsed_ns < 0 or elapsed_ns > (1 << 63) - 1 - self._state_time_ns:
             raise ValueError("sensor boundary elapsed time is out of range")
+        previous_ratio = self._mission_observed_ratio()
         delta = self._sensor_state.observe_world(
             evidence.pose_map, elapsed_s=float(evidence.elapsed_s)
+        )
+        self._mission_observed_area_m2 = min(
+            self._mission_area_m2,
+            self._mission_observed_area_m2
+            + float(delta.mission_observed_delta_m2),
+        )
+        mission_ratio = self._mission_observed_ratio()
+        crossing = (
+            previous_ratio < FORMAL_SUCCESS_COVERAGE_RATIO <= mission_ratio
         )
         self._state_time_ns += elapsed_ns
         self._observation_revision += 1
@@ -245,6 +270,9 @@ class ObservationBoundaryController:
             raise ValueError("policy observation builder returned invalid data")
         if observation.observation_identities is not None:
             raise ValueError("sensor boundary owns observation identities")
+        if observation.pose_features.shape != (1, 5):
+            raise ValueError("policy observation pose features must be [1,5]")
+        observation.pose_features[0, 4] = mission_ratio
         try:
             validate_policy_batch(observation)
         except ValueError as error:
@@ -260,7 +288,15 @@ class ObservationBoundaryController:
         self._current_observation = _clone_policy_batch(
             observation, identity=identity
         )
-        return delta
+        return delta, mission_ratio, crossing
+
+    def _mission_observed_ratio(self) -> float:
+        if self._mission_area_m2 <= 0.0:
+            return 0.0
+        return min(
+            1.0,
+            max(0.0, self._mission_observed_area_m2 / self._mission_area_m2),
+        )
 
     def _make_identity(
         self,

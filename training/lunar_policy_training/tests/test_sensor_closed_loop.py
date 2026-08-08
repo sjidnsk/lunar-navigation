@@ -74,6 +74,60 @@ class _PolicyBuilder:
         )
 
 
+class _SequencedVisibilityEstimator:
+    def __init__(self, masks: tuple[np.ndarray, ...], resolution_m: float) -> None:
+        self.sensor = object()
+        self.resolution_m = resolution_m
+        self._masks = list(masks)
+
+    def reveal_from_pose(
+        self,
+        physical_obstacle_ratio: np.ndarray,
+        pose_cell: tuple[int, int],
+    ) -> np.ndarray:
+        del physical_obstacle_ratio, pose_cell
+        if not self._masks:
+            raise AssertionError("visibility sequence exhausted")
+        return self._masks.pop(0).copy()
+
+
+def _coverage_controller(
+    platform_type: str,
+) -> tuple[ObservationBoundaryController, MapCanvas]:
+    geometry = GridGeometry(size_m=10.0, resolution_m=1.0, cells=10)
+    canvas = MapCanvas("e" * 64, (0.0, 0.0, 10.0, 10.0), geometry)
+    mask_94 = np.zeros((10, 10), dtype=np.bool_)
+    mask_94.flat[:94] = True
+    mask_96 = mask_94.copy()
+    mask_96.flat[94:96] = True
+    truth = TrainingWorldTruth(
+        canvas,
+        np.zeros((10, 10), dtype=np.float32),
+        np.zeros((10, 10), dtype=np.float32),
+    )
+    sensor_state = SensorObservationState(
+        truth=truth,
+        observed=TrainingObservedGrid.empty(canvas),
+        mission_roi_ratio=np.ones((10, 10), dtype=np.float32),
+        mission_priority=np.ones((10, 10), dtype=np.float32),
+        forbidden_mask=np.zeros((10, 10), dtype=np.bool_),
+        visibility_estimator=_SequencedVisibilityEstimator(
+            (mask_94, mask_96, mask_96),
+            resolution_m=1.0,
+        ),
+    )
+    return (
+        ObservationBoundaryController(
+            platform_type=platform_type,
+            sensor_state=sensor_state,
+            policy_observation_builder=_PolicyBuilder(platform_type),
+            episode_id="coverage-crossing",
+            mission_revision=1,
+        ),
+        canvas,
+    )
+
+
 def _controller(
     platform_type: str,
 ) -> tuple[ObservationBoundaryController, _PolicyBuilder, MapCanvas]:
@@ -179,6 +233,50 @@ def test_reset_reveals_before_candidates_and_ground_boundary_uses_actual_area() 
     assert identity.state_time_ns == 2_000_000_000
 
 
+def test_roi_success_is_emitted_only_on_the_first_95_percent_crossing() -> None:
+    controller, canvas = _coverage_controller("WHEELED")
+
+    initial = controller.reset(_pose(canvas, 5, 5))
+    crossing = controller.after_execution(
+        platform_type="WHEELED",
+        execution_state="DECISION_BOUNDARY",
+        evidence=SensorBoundaryEvidence(_pose(canvas, 5, 5), 1.0),
+    )
+    repeated = controller.after_execution(
+        platform_type="WHEELED",
+        execution_state="DECISION_BOUNDARY",
+        evidence=SensorBoundaryEvidence(_pose(canvas, 5, 5), 1.0),
+    )
+
+    assert initial.mission_observed_ratio == pytest.approx(0.94)
+    assert initial.success_first_crossing is False
+    assert crossing.mission_observed_ratio == pytest.approx(0.96)
+    assert crossing.success_first_crossing is True
+    assert repeated.mission_observed_ratio == pytest.approx(0.96)
+    assert repeated.success_first_crossing is False
+
+
+def test_hopper_can_cross_success_only_at_landed_hold() -> None:
+    controller, canvas = _coverage_controller("HOPPER")
+    controller.reset(_pose(canvas, 5, 5))
+
+    in_flight = controller.after_execution(
+        platform_type="HOPPER",
+        execution_state="IN_FLIGHT",
+        evidence=None,
+    )
+    landed = controller.after_execution(
+        platform_type="HOPPER",
+        execution_state="LANDED_HOLD",
+        evidence=SensorBoundaryEvidence(_pose(canvas, 5, 5), 1.0),
+    )
+
+    assert in_flight.mission_observed_ratio == pytest.approx(0.94)
+    assert in_flight.success_first_crossing is False
+    assert landed.mission_observed_ratio == pytest.approx(0.96)
+    assert landed.success_first_crossing is True
+
+
 def test_hopper_updates_once_at_landed_hold_and_never_in_flight() -> None:
     controller, builder, canvas = _controller("HOPPER")
     controller.reset(_pose(canvas, 5, 2))
@@ -247,6 +345,33 @@ def test_sensor_closed_ground_environment_ignores_executor_coverage_claims() -> 
         0.999
     )
     assert transition.executed_without_new_coverage is False
+
+
+def test_sensor_boundary_crossing_overrides_executor_false_and_terminates() -> None:
+    controller, canvas = _coverage_controller("WHEELED")
+    initial = controller.reset(_pose(canvas, 5, 5)).next_observation
+    execution = _execution_result(
+        initial,
+        execution_state="DECISION_BOUNDARY",
+        evidence=SensorBoundaryEvidence(_pose(canvas, 5, 5), 1.0),
+    )
+    environment = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(_reference_output("WHEELED")),
+        request_builder=lambda action: action,
+        initial_observation=initial,
+        reference_executor=lambda reference: execution,
+        observation_boundary_controller=controller,
+        require_sensor_closed_loop=True,
+    )
+
+    transition = environment.step(PolicyAction(0, 0.0))
+
+    assert execution.success_first_crossing is False
+    assert execution.terminated is False
+    assert transition.success_first_crossing is True
+    assert transition.terminated is True
+    assert transition.episode_ended_without_success is False
 
 
 def test_sensor_closed_environment_fails_before_accepting_missing_evidence() -> None:
@@ -353,6 +478,56 @@ def test_sensor_closed_hopper_ignores_in_flight_claims_and_reveals_on_landing() 
         newly_visible / 121.0
     )
     assert result.transition.mission_observed_delta != pytest.approx(2.7)
+
+
+def test_sensor_closed_hopper_success_comes_from_landing_boundary() -> None:
+    controller, canvas = _coverage_controller("HOPPER")
+    initial = controller.reset(_pose(canvas, 5, 5)).next_observation
+    output = PlannerOutput()
+    output.outcome = PlanningOutcome.SAFE_FRONTIER_REFERENCE_AVAILABLE
+    output.directive = ExecutionDirective.CONTINUE_COMMITTED_HOP
+    output.reason_code = "COMMITTED_HOP_CONTINUES"
+    feedback = iter(
+        CommittedHopExecutionFeedback(
+            execution_state=state,
+            next_observation=initial,
+            mission_observed_delta=0.0,
+            priority_observed_delta=0.0,
+            normalized_execution_cost_contribution=0.0,
+            normalized_execution_time_contribution=0.1,
+            executed_without_new_coverage=False,
+            success_first_crossing=False,
+            episode_ended_without_success=False,
+            hard_safety_violation=False,
+            terminated=False,
+            sensor_boundary_evidence=(
+                SensorBoundaryEvidence(_pose(canvas, 5, 5), 1.0)
+                if state == "LANDED_HOLD"
+                else None
+            ),
+        )
+        for state in ("JUMP_COMMITTED", "IN_FLIGHT", "LANDED_HOLD")
+    )
+    environment = V3ExplorationEnvironment(
+        platform_type="HOPPER",
+        bridge=_Bridge(output),
+        request_builder=lambda action: action,
+        initial_observation=initial,
+        committed_hop_executor=lambda: next(feedback),
+        observation_boundary_controller=controller,
+        require_sensor_closed_loop=True,
+    )
+
+    result = environment.advance_prepared_action(
+        PolicyAction(0, 0.0),
+        expected_identity=initial.observation_identities[0],
+    )
+
+    assert result.transition is not None
+    assert result.execution_state == "LANDED_HOLD"
+    assert result.transition.success_first_crossing is True
+    assert result.transition.terminated is True
+    assert result.transition.episode_ended_without_success is False
 
 
 def test_formal_factory_requires_initialized_sensor_closed_controller() -> None:
