@@ -39,18 +39,18 @@ CASES = {
         "outcome": "NEW_REFERENCE_AVAILABLE",
         "reason": "LEGGED_BODY_PLAN_AVAILABLE",
     },
-    "wheel_1km_l3": {
+    "wheel_1km_l5": {
         "platform": "WHEELED",
         "capability_version": "wheeled-engineering-baseline-v1",
-        "map": (1000.0, 1000.0, 1.6, 3, 625 * 625),
+        "map": (1000.0, 1000.0, 4.0, 5, 250 * 250),
         "threshold_s": 3.0,
         "outcome": "NEW_REFERENCE_AVAILABLE",
         "reason": "WHEEL_PLAN_AVAILABLE",
     },
-    "legged_1km_l3": {
+    "legged_1km_l5": {
         "platform": "LEGGED",
         "capability_version": "quad48-approved-baseline-v1",
-        "map": (1000.0, 1000.0, 1.6, 3, 625 * 625),
+        "map": (1000.0, 1000.0, 4.0, 5, 250 * 250),
         "threshold_s": 3.0,
         "outcome": "NEW_REFERENCE_AVAILABLE",
         "reason": "LEGGED_BODY_PLAN_AVAILABLE",
