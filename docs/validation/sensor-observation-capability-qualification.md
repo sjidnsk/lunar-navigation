@@ -74,12 +74,13 @@ Isaac/ROS 外部仓的 `30 m/120°` `capability_provenance.json` 继续冻结为
 本轮无燃料状态闭包使用的仓库外 Release 安装目录为：
 
 ```text
-/home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/main-install
+/home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/final-33df16e/install
 ```
 
 资格结果：
 
-- Release 构建 7 个 ROS 包成功，包括消息、配置、core、training bridge 和 ROS server；
+- Release 构建 8 个 ROS 包成功，包括两组消息、配置、core、model contract、Nav2 adapter、
+  training bridge 和 ROS server；
 - core 聚焦回归：24 tests，0 errors，0 failures；
 - message/core/bridge/ROS 干净结果：36 tests，0 errors，0 failures；
 - `model_contract/tests`、完整训练测试、差分和性能测试：645 passed，16 skipped；
@@ -155,3 +156,21 @@ export PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training${PYTH
 
 正式 `train/resume/evaluate` 使用该外部 JSON 路径进行性能预检，同时自行加载仓库内正式
 capability v2。本轮完成的是训练资格闭包，未启动正式 PPO 训练。
+
+## 外部 Isaac/ROS/RViz 桥同步
+
+独立外部仓
+`/home/kai/CodexDownloads/lunar_navigation/isaac_ros_action_regression` 使用分支
+`feature/hopper-no-fuel-budget-sync` 完成同步，当前提交为 `dbfdb43`。该分支不再发布
+`/platform/hopper_propellant_state`，不含燃料提交 API 或燃料提交失败状态；外部 hopper
+capability 使用 `20.0 kg` 参考总质量和 `0.2 kg` 参考推进剂计算每次相同的单跳包线。
+
+跨仓 Release 构建使用本报告中的主仓 install，结果为：
+
+- 外部源码 pytest：608 passed，12 skipped；
+- 2 个外部包构建成功，colcon 结果 513 tests、0 errors、0 failures、2 skipped；
+- 50×50 m 合成图真实 ROS 进程回归：1 passed in 361.24 s；
+- 飞跃式目标 A 和目标 B 均完成抛物线与落地稳定；两次 `active_plan_id`、
+  `active_segment_id` 均不同，目标 A 之后无陈旧 `CANCELED`，ROS graph 中不存在推进剂 Topic。
+
+外部仓保持独立 Git 根，本轮未将其源码、历史或运行 artifact 导入主仓，也未自动合并或推送。

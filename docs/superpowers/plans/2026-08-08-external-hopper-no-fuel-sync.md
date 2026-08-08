@@ -30,7 +30,7 @@
 - Consumes: `HopSegment` geometry, `required_delta_v_mps`, and `available_delta_v_mps`.
 - Produces: landing/settle feedback with no `hopper_fuel_commit_kg` field.
 
-- [ ] **Step 1: Write failing no-commit tests**
+- [x] **Step 1: Write failing no-commit tests**
 
 ```python
 def test_hopper_settle_completes_without_fuel_commit() -> None:
@@ -52,7 +52,7 @@ for these tests; `delta_v_only_reference`, `hopper_session`, `drive_to_canonical
 `execute_hopper_goal` in the sketch denote thin test-local wrappers around those existing fixtures and must not
 enter production code.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -63,11 +63,11 @@ python3 -m pytest -q \
 
 Expected: old update still exposes `hopper_fuel_commit_kg` and old reference parsing expects three fuel fields.
 
-- [ ] **Step 3: Remove fuel evidence and commit emission**
+- [x] **Step 3: Remove fuel evidence and commit emission**
 
 Delete fuel members from the internal hopper reference dataclass, conversion tuple, validation, and `RollingExecutionUpdate`. Keep required/available delta-v validation and all trajectory, map-generation, version, commitment, settle, cancellation, and collision evidence checks unchanged.
 
-- [ ] **Step 4: Run rolling tests and commit**
+- [x] **Step 4: Run rolling tests and commit**
 
 ```bash
 PYTHONPATH="$PWD/ros2_ws/src/lunar_isaac_validation" \
@@ -94,19 +94,19 @@ git commit -m "refactor: remove hopper fuel transaction from rolling execution"
 - Consumes: platform selection, maps, odometry, planner Action results, and execution feedback.
 - Produces: no `/platform/hopper_propellant_state` publisher and no parameter-service fuel update.
 
-- [ ] **Step 1: Write failing bridge-boundary tests**
+- [x] **Step 1: Write failing bridge-boundary tests**
 
 Add assertions that a hopper bridge has no simulated-fuel parameter or publisher, `InteractiveSessionSupervisor` has no `commit_hopper_fuel` method, and a completed first Goal immediately permits a second Goal without any parameter transaction.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run the three interactive test modules. Expected: old APIs, parameter callbacks, and fuel-commit invocation still exist.
 
-- [ ] **Step 3: Remove the obsolete APIs**
+- [x] **Step 3: Remove the obsolete APIs**
 
 Delete `_SIMULATED_REMAINING_FUEL`, dry-mass derivation, propellant message/timer/publisher, atomic fuel parameter validation, transport/supervisor `commit_hopper_fuel`, node-side commit exception handling, and `HOPPER_FUEL_COMMIT_FAILED`. Do not change goal-session cleanup, landed pose handoff, or platform selection.
 
-- [ ] **Step 4: Run external Python closure and commit**
+- [x] **Step 4: Run external Python closure and commit**
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -126,7 +126,7 @@ git commit -m "refactor: stop publishing and committing simulated hopper fuel"
 - Consumes: main repository Release install containing the updated messages and planner.
 - Produces: an external branch proven source-compatible with the main feature branch.
 
-- [ ] **Step 1: Build against the main feature install**
+- [x] **Step 1: Build against the main feature install**
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -140,7 +140,7 @@ colcon --log-base /home/kai/CodexDownloads/lunar_navigation/formal_capability_no
 
 Expected: external packages compile against the delta-v-only `HopSegment`.
 
-- [ ] **Step 2: Run all external tests**
+- [x] **Step 2: Run all external tests**
 
 ```bash
 colcon test \
@@ -154,11 +154,11 @@ colcon test-result \
 
 Expected: zero errors and zero failures.
 
-- [ ] **Step 3: Run the two-goal process regression**
+- [x] **Step 3: Run the two-goal process regression**
 
 In an isolated ROS domain, execute “select HOPPER -> Goal A -> parabola -> landed settle -> Goal B -> parabola -> landed settle”. Require two distinct plan/segment IDs, two movements, no stale `CANCELED`, no propellant Topic, and no fuel-related reason code.
 
-- [ ] **Step 4: Audit and document**
+- [x] **Step 4: Audit and document**
 
 ```bash
 if rg -n \
@@ -172,7 +172,7 @@ git status --short --branch
 
 Update docs to state that delta-v is per-hop reachability evidence and repeated Goals do not share a resource budget.
 
-- [ ] **Step 5: Commit documentation and leave branch ready**
+- [x] **Step 5: Commit documentation and leave branch ready**
 
 ```bash
 git add docs ros2_ws/src/lunar_isaac_validation

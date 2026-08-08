@@ -36,7 +36,7 @@
 - Produces: `load_project_formal_capability(repository_root: str | Path) -> FrozenCapabilityBundle` and `project_capability_paths(repository_root: str | Path) -> tuple[Path, Path]`.
 - Invariant: `FrozenCapabilityBundle.bundle_sha256` equals the canonical YAML `freeze_digest_sha256`; `formal_eligible` is always `True`.
 
-- [ ] **Step 1: Write failing canonical-source tests**
+- [x] **Step 1: Write failing canonical-source tests**
 
 ```python
 def test_project_formal_capability_uses_approved_freeze() -> None:
@@ -63,7 +63,7 @@ In this test module, implement `copy_project_capability_tree` by copying only th
 their repository-relative paths under `tmp_path`, and implement `rewrite_yaml` with `yaml.safe_load`, explicit
 dotted-key traversal, and `yaml.safe_dump(sort_keys=False)`.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run:
 
@@ -75,7 +75,7 @@ python3 -m pytest -q \
 
 Expected: collection fails because `project_capability` and `load_project_formal_capability` do not exist.
 
-- [ ] **Step 3: Implement strict YAML validation and typed conversion**
+- [x] **Step 3: Implement strict YAML validation and typed conversion**
 
 Implement a loader that:
 
@@ -101,7 +101,7 @@ def load_project_formal_capability(
 
 Derive wheel and legged motion primitives exactly from the current approved 0.2 m local-planner geometry; do not read any retired Volume 3 primitive values. Store hopper `reference_total_mass_kg=20.0` and `reference_propellant_mass_kg=0.2` in `FrozenHopperCapability` for single-hop envelope conversion.
 
-- [ ] **Step 4: Run adapter and existing capability tests**
+- [x] **Step 4: Run adapter and existing capability tests**
 
 Run:
 
@@ -115,7 +115,7 @@ python3 -m pytest -q \
 
 Expected: all pass; legacy development-smoke bundle parsing remains test-only.
 
-- [ ] **Step 5: Commit Task 1**
+- [x] **Step 5: Commit Task 1**
 
 ```bash
 git add \
@@ -150,7 +150,7 @@ git commit -m "feat: load approved project capability as formal authority"
 - Produces: `AvailableSingleHopDeltaV(const HopperCapability&)` and `EvaluateSingleHopEnvelope(const BallisticArc&, const HopperCapability&)`.
 - `PlannerInput` no longer contains `hopper_propellant`; `HopSegment` contains only `required_delta_v_mps` and `available_delta_v_mps` for reachability evidence.
 
-- [ ] **Step 1: Write failing core behavior tests**
+- [x] **Step 1: Write failing core behavior tests**
 
 Add tests equivalent to:
 
@@ -173,7 +173,7 @@ TEST(BallisticEnvelope, RejectsOnlyWhenFixedSingleHopDeltaVIsExceeded) {
 }
 ```
 
-- [ ] **Step 2: Build the focused tests and verify RED**
+- [x] **Step 2: Build the focused tests and verify RED**
 
 Run:
 
@@ -190,7 +190,7 @@ colcon --log-base /home/kai/CodexDownloads/lunar_navigation/formal_capability_no
 
 Expected: compilation fails on the missing fixed-envelope interface or the old mandatory propellant assertion fails.
 
-- [ ] **Step 3: Implement the fixed envelope**
+- [x] **Step 3: Implement the fixed envelope**
 
 Use the rocket equation only to derive a repeatable capability envelope:
 
@@ -203,11 +203,11 @@ required_delta_v = (1.0 + margin) *
 
 Validate both reference masses in `ValidCapability`. Remove the `HopperPropellantState*` member from `SingleHopCertificationProblem`, remove all remaining-fuel arithmetic, and map an envelope miss to `HOPPER_SINGLE_HOP_ENVELOPE_EXCEEDED`. Preserve cancellation, numerical-indeterminate, landing-region, and flight-tube semantics.
 
-- [ ] **Step 4: Remove fuel fields from planner inputs and references**
+- [x] **Step 4: Remove fuel fields from planner inputs and references**
 
 Delete the planner-core `HopperPropellantState` input type and `PlannerInput.hopper_propellant`. Delete the three `*_fuel_*_kg` fields from core `HopSegment`; keep `required_delta_v_mps` and `available_delta_v_mps`. Update every aggregate initializer and validation test deliberately—do not add default fallback values that hide an incomplete capability.
 
-- [ ] **Step 5: Run the core test closure**
+- [x] **Step 5: Run the core test closure**
 
 Run:
 
@@ -225,7 +225,7 @@ colcon test-result \
 
 Expected: all core tests pass and no active core source contains `remaining_usable_fuel` or `HOPPER_FUEL_INSUFFICIENT`.
 
-- [ ] **Step 6: Commit Task 2**
+- [x] **Step 6: Commit Task 2**
 
 ```bash
 git add ros2_ws/src/lunar_planner_core tests/performance
@@ -255,7 +255,7 @@ git commit -m "refactor: make hopper reachability a repeatable single-hop envelo
 - Produces: a propellant-independent `PlannerInput` and `HopSegment` wire result with delta-v evidence only.
 - The legacy `lunar_navigation_msgs/msg/HopperPropellantState.msg` remains generated but is not subscribed to or consumed.
 
-- [ ] **Step 1: Write failing ROS and bridge tests**
+- [x] **Step 1: Write failing ROS and bridge tests**
 
 Add assertions that:
 
@@ -273,15 +273,15 @@ TEST(PlanMotionServer, HopperDoesNotCreatePropellantSubscription) {
 
 Update Python bridge tests so a `TrainingPlanRequest` has no `hopper_propellant` property and can plan a hopper request using only the typed capability.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run the ROS/bridge package tests from the existing Release build roots. Expected: the snapshot still reports `HOPPER_PROPELLANT_STATE_INVALID`, the subscription exists, and old message fields are still required.
 
-- [ ] **Step 3: Remove the active propellant data flow**
+- [x] **Step 3: Remove the active propellant data flow**
 
 Remove the propellant callback group, subscription, age parameter, snapshot-store member, validation, pairwise-skew check, planner input conversion, bridge property, and reference guard's remaining-fuel identity. Remove fuel fields from `HopSegment.msg` and conversion code. Keep the legacy message definition only for source compatibility and mark it unused in the external-input baseline.
 
-- [ ] **Step 4: Extend capability loading with formal reference conditions**
+- [x] **Step 4: Extend capability loading with formal reference conditions**
 
 Require these two fields in v2 hopper content and map them to `HopperCapability`:
 
@@ -292,7 +292,7 @@ reference_propellant_mass_kg: 0.2
 
 The repository canonical adapter maps them from `reference_conditions.reference_total_mass_kg` and `reference_conditions.reference_remaining_usable_fuel_mass_kg`; the latter YAML name remains frozen to avoid silently changing its approved digest, but the active typed field is explicitly a non-decrementing reference quantity.
 
-- [ ] **Step 5: Run ROS and bridge test closure**
+- [x] **Step 5: Run ROS and bridge test closure**
 
 Run:
 
@@ -314,7 +314,7 @@ colcon test-result \
 
 Expected: zero failures across message, core, bridge, and ROS packages.
 
-- [ ] **Step 6: Commit Task 3**
+- [x] **Step 6: Commit Task 3**
 
 ```bash
 git add ros2_ws/src docs/interfaces/external-input-baseline.md
@@ -340,7 +340,7 @@ git commit -m "refactor: remove hopper fuel from active planning interfaces"
 - Produces: formal preflight and sensor performance evidence bound directly to the project capability digest; no formal `--capability-lock` input.
 - Development-smoke may retain its explicit test-only bundle loader but cannot be promoted to formal.
 
-- [ ] **Step 1: Write failing formal-entry tests**
+- [x] **Step 1: Write failing formal-entry tests**
 
 ```python
 @pytest.mark.parametrize("command", ("train", "resume", "evaluate"))
@@ -359,7 +359,7 @@ Build `formal_args` from the existing per-command fixtures in `test_cli.py`. Imp
 `run_benchmark_without_capability_lock` by invoking the tool's `main()` with its native-runner and throughput
 calls patched to deterministic successful evidence; assert the real canonical loader is not patched.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run:
 
@@ -373,15 +373,15 @@ python3 -m pytest -q \
 
 Expected: parser and benchmark still require `--capability-lock`.
 
-- [ ] **Step 3: Replace formal external-lock loading**
+- [x] **Step 3: Replace formal external-lock loading**
 
 Change `_formal_capability_preflight` to accept `repository_root`, call `load_project_formal_capability`, and fail before artifacts/CUDA/workers only on canonical schema/digest errors. Remove `--capability-lock` from formal CLI and from the performance tool. Keep the sensor performance report gate because it measures runtime performance rather than supplying capability values.
 
-- [ ] **Step 4: Remove hopper fuel from training requests and state assertions**
+- [x] **Step 4: Remove hopper fuel from training requests and state assertions**
 
 Delete all construction, mutation, observation, reward, checkpoint, or episode assertions involving `HopperPropellantState`. The request builder sets the typed capability's fixed reference conditions; repeated hopper macro steps must produce identical `available_delta_v_mps` and never carry a previous result field into the next request.
 
-- [ ] **Step 5: Run all training tests**
+- [x] **Step 5: Run all training tests**
 
 Run:
 
@@ -397,7 +397,7 @@ python3 -m pytest -q \
 
 Expected: all non-device tests pass; device-gated skips remain explicitly reported.
 
-- [ ] **Step 6: Commit Task 4**
+- [x] **Step 6: Commit Task 4**
 
 ```bash
 git add training model_contract tests
@@ -417,11 +417,11 @@ git commit -m "feat: bind formal training to project capability authority"
 - Consumes: clean committed sensor/planner source, Release native benchmark, canonical project capability, and 24 workers.
 - Produces: a formal `sensor-observation-performance/v1` JSON bound to current host, source commit, capability digest, and sensor semantics digest.
 
-- [ ] **Step 1: Build a clean Release closure**
+- [x] **Step 1: Build a clean Release closure**
 
 Run the full `colcon build` command from Task 3 in a new source-commit-named external directory. Confirm the native runner reports `build_type=Release`.
 
-- [ ] **Step 2: Run formal performance qualification without a capability lock**
+- [x] **Step 2: Run formal performance qualification without a capability lock**
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -435,11 +435,11 @@ python3 training/tools/benchmark_sensor_observation.py \
 
 Expected: `passed: true`; report capability SHA equals the canonical freeze digest. Do not start PPO training in this task.
 
-- [ ] **Step 3: Update qualification and migration documents**
+- [x] **Step 3: Update qualification and migration documents**
 
 Record that capability closure is complete from the approved project freeze, remove the false external-provider blocker, record the formal report path/SHA and actual performance metrics, and state that training is eligible for its next independent environment/data gate. Mark the old external-lock and cumulative-fuel sections as superseded rather than deleting historical evidence.
 
-- [ ] **Step 4: Run repository and UTF-8 checks**
+- [x] **Step 4: Run repository and UTF-8 checks**
 
 ```bash
 python3 tools/check_platform_capability_freeze.py \
@@ -452,7 +452,7 @@ git diff --check
 
 Expected: all checks pass and no generated artifact is tracked.
 
-- [ ] **Step 5: Commit Task 5**
+- [x] **Step 5: Commit Task 5**
 
 ```bash
 git add docs
@@ -468,18 +468,19 @@ git commit -m "docs: qualify built-in formal capability and no-fuel hopper"
 - Consumes: Tasks 1-5.
 - Produces: one clean feature branch ready for review and later fast-forward integration.
 
-- [ ] **Step 1: Run the full Release ROS result check**
+- [x] **Step 1: Run the full Release ROS result check**
 
 Run `colcon test` for all built packages and require `colcon test-result --verbose` to report zero errors and zero failures.
 
-- [ ] **Step 2: Run the complete Python and boundary suite**
+- [x] **Step 2: Run the complete Python and boundary suite**
 
 Run the Task 4 full pytest command plus platform-freeze and repository-boundary checks.
 
-- [ ] **Step 3: Audit retired semantics**
+- [x] **Step 3: Audit retired semantics**
 
 ```bash
 if rg -n \
+  --glob '!**/test/**' \
   "HOPPER_FUEL_INSUFFICIENT|expected_remaining_usable_fuel|hopper_propellant" \
   ros2_ws/src/lunar_planner_core \
   ros2_ws/src/lunar_planner_ros \
@@ -491,11 +492,11 @@ fi
 
 Expected: no active production occurrence. Historical design documents and the unused legacy message are excluded from this audit.
 
-- [ ] **Step 4: Confirm Git boundaries**
+- [x] **Step 4: Confirm Git boundaries**
 
 Confirm the feature worktree is clean, root `integration` still only has its pre-existing `.vscode/`, and the external Isaac/RViz repository has not been imported into this repository.
 
-- [ ] **Step 5: Commit plan completion**
+- [x] **Step 5: Commit plan completion**
 
 ```bash
 git add docs/superpowers/plans/2026-08-08-project-formal-capability-and-hopper-no-fuel-budget.md
