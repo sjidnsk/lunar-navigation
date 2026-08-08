@@ -12,6 +12,7 @@ from pathlib import Path
 
 EXPECTED_HEADERS = {
     "lunar_planner_core/planner.hpp",
+    "lunar_planner_core/traversability_projection.hpp",
     "lunar_planner_core/types/execution_context.hpp",
     "lunar_planner_core/types/geometry.hpp",
     "lunar_planner_core/types/goal.hpp",
@@ -37,9 +38,12 @@ def check_headers(include_root: Path, compiler: str) -> list[str]:
     errors: list[str] = []
     if not include_root.is_dir():
         return [f"installed include root is absent: {include_root}"]
+    package_include_root = include_root / "lunar_planner_core"
+    if not package_include_root.is_dir():
+        return [f"installed package include root is absent: {package_include_root}"]
     headers = {
         path.relative_to(include_root).as_posix()
-        for path in include_root.rglob("*.hpp")
+        for path in package_include_root.rglob("*.hpp")
     }
     if headers != EXPECTED_HEADERS:
         errors.append(

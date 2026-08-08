@@ -1,0 +1,8 @@
+{
+  "schema": "lunar-polar-source-registry/v1",
+  "sources": [
+    {"id": "NASA_LOLA_87S_DEM", "url": "https://pgda.gsfc.nasa.gov/data/LOLA_5mpp/87S/ldem_87s_5mpp.tif", "filename": "ldem_87s_5mpp.tif", "expected_size_bytes": 3465285714, "citation": "NASA PGDA product 81; Barker et al. 2021, https://doi.org/10.1016/j.pss.2020.105119", "license": "NASA reproduction guidance: https://www.nasa.gov/nasa-brand-center/images-and-media/; U.S. Government data semantics (no SPDX identifier)"},
+    {"id": "NASA_LOLA_87S_COUNT", "url": "https://pgda.gsfc.nasa.gov/data/LOLA_5mpp/87S/ldec_87s_5mpp.tif", "filename": "ldec_87s_5mpp.tif", "expected_size_bytes": 145895726, "citation": "NASA PGDA product 81; Barker et al. 2021, https://doi.org/10.1016/j.pss.2020.105119", "license": "NASA reproduction guidance: https://www.nasa.gov/nasa-brand-center/images-and-media/; U.S. Government data semantics (no SPDX identifier)"},
+    {"id": "JAXA_LUPEX_DATA_S1", "record_api": "https://zenodo.org/api/records/17153447", "filename": "DataS1.zip", "expected_size_bytes": 76134049, "citation": "JAXA LUPEX Candidate Sites DTMs and Orthomosaics; https://doi.org/10.5281/zenodo.17153447", "license": "cc-by-4.0"}
+  ]
+}

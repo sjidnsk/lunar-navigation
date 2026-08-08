@@ -46,12 +46,12 @@ struct MapSafetyConfig final {
 
 struct WheelPlannerConfig final {
   double xy_resolution_m{0.25};
-  std::size_t yaw_bin_count{32U};
+  std::size_t yaw_bin_count{64U};
 };
 
 struct LeggedPlannerConfig final {
   double xy_resolution_m{0.25};
-  std::size_t yaw_bin_count{32U};
+  std::size_t yaw_bin_count{64U};
 };
 
 struct HopperPlannerConfig final {};

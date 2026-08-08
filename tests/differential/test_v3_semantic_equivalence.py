@@ -39,6 +39,12 @@ PLANNER_IO_HEADER = (
 TRAINING_BRIDGE_ROOT = (
     REPOSITORY_ROOT / "ros2_ws" / "src" / "lunar_planner_training_bridge"
 )
+TRAINING_BRIDGE_REQUEST = (
+    TRAINING_BRIDGE_ROOT
+    / "include"
+    / "lunar_planner_training_bridge"
+    / "request.hpp"
+)
 RUNNER_ENVIRONMENT_VARIABLE = "LUNAR_PLANNER_FACADE_SUMMARY"
 EXPECTED_DIRECTIVE = {
     "NEW_REFERENCE_AVAILABLE": "ACTIVATE_NEW_REFERENCE",
@@ -169,7 +175,10 @@ def test_ppo_behavior_compatibility_gate_fails_closed_until_retraining(
     )
     header = PLANNER_IO_HEADER.read_text(encoding="utf-8")
     assert "GoalRegion goal_map;" in header
-    assert not TRAINING_BRIDGE_ROOT.exists()
+    bridge_request = TRAINING_BRIDGE_REQUEST.read_text(encoding="utf-8")
+    assert "HopperPropellantState" in bridge_request
+    assert "capability_version" in bridge_request
+    assert "global_map_generation" in bridge_request
     assert compatibility == {
         "schema_version": "lunar-ppo-behavior-compatibility/v1",
         "required_comparison": (

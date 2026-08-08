@@ -1,0 +1,143 @@
+"""Deterministic procedural rocks and craters for a source-bound polar window."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from hashlib import sha256
+
+import numpy as np
+from shapely import from_wkb, to_wkb
+from shapely.geometry import Point, box
+from shapely.ops import unary_union
+
+from .raster import GLOBAL_GEOMETRY, GridGeometry, MapCanvas
+
+
+GENERATOR_VERSION = "lunar-polar-hazards/v1"
+
+
+@dataclass(frozen=True)
+class CanvasRatioLayer:
+    """A finite ratio raster bound to its absolute map canvas."""
+
+    canvas: MapCanvas
+    values: np.ndarray
+
+    def __post_init__(self) -> None:
+        values = np.asarray(self.values, dtype=np.float32)
+        cells = self.canvas.geometry.cells
+        if values.shape != (cells, cells):
+            raise ValueError(f"canvas ratio layer must have shape [{cells},{cells}]")
+        if not np.isfinite(values).all() or ((values < 0.0) | (values > 1.0)).any():
+            raise ValueError("canvas ratio layer must be finite and in [0,1]")
+        object.__setattr__(self, "values", values)
+
+
+@dataclass(frozen=True)
+class HazardScene:
+    """Generated hazards separated into terrain truth and physical obstacles."""
+
+    seed: str
+    canvas: MapCanvas
+    rock_footprints_wkb: tuple[bytes, ...]
+    crater_polygons_wkb: tuple[bytes, ...]
+    no_go_polygons_wkb: tuple[bytes, ...]
+    crater_elevation_delta_m: np.ndarray
+    physical_obstacle_layer: CanvasRatioLayer
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.physical_obstacle_layer, CanvasRatioLayer):
+            raise ValueError("hazard physical obstacle input must be a canvas-bound ratio layer")
+        if self.physical_obstacle_layer.canvas.identity != self.canvas.identity:
+            raise ValueError("hazard obstacle layer canvas identity does not match scene")
+
+    @property
+    def rock_footprints(self) -> tuple[object, ...]:
+        return tuple(from_wkb(value) for value in self.rock_footprints_wkb)
+
+
+def scene_seed(window_sha256: str, scenario_seed: int, *, generator_version: str = GENERATOR_VERSION) -> str:
+    """Return the required identity binding for a generated scene."""
+    if len(window_sha256) != 64 or any(character not in "0123456789abcdef" for character in window_sha256):
+        raise ValueError("window_sha256 must be exactly 64 lowercase hexadecimal characters")
+    return sha256(f"{window_sha256}:{scenario_seed}:{generator_version}".encode("utf-8")).hexdigest()
+
+
+def _stream(seed: str, name: str) -> np.random.Generator:
+    value = int.from_bytes(sha256(f"{seed}:{name}".encode("utf-8")).digest()[:8], "big")
+    return np.random.default_rng(value)
+
+
+def physical_obstacle_ratio(footprints: tuple[object, ...], geometry: GridGeometry = GLOBAL_GEOMETRY, *, canvas: MapCanvas | None = None) -> np.ndarray:
+    """Rasterize the union of rock footprints by exact polygon-cell area."""
+    result = np.zeros((geometry.cells, geometry.cells), dtype=np.float32)
+    if not footprints:
+        return result
+    union = unary_union(footprints)
+    cell_area = geometry.resolution_m * geometry.resolution_m
+    for row in range(geometry.cells):
+        y0 = (canvas.bounds_m[3] - (row + 1) * geometry.resolution_m) if canvas else row * geometry.resolution_m
+        for column in range(geometry.cells):
+            x0 = (canvas.bounds_m[0] + column * geometry.resolution_m) if canvas else column * geometry.resolution_m
+            cell = box(x0, y0, x0 + geometry.resolution_m, y0 + geometry.resolution_m)
+            if union.intersects(cell):
+                result[row, column] = np.float32(min(1.0, union.intersection(cell).area / cell_area))
+    return result
+
+
+def generate_hazard_scene(window_sha256: str, scenario_seed: int, *, canvas: MapCanvas, geometry: GridGeometry = GLOBAL_GEOMETRY, rock_count: int = 32, crater_count: int = 8, no_go_count: int | None = None) -> HazardScene:
+    """Generate independent rock, crater-height and no-go polygon streams.
+
+    Only rock footprints are physical obstacles.  Crater geometry contributes
+    elevation truth only; slope and clearance are owned by injected C++
+    capability projection rather than recomputed in Python.
+    """
+    if rock_count < 0 or crater_count < 0 or (no_go_count is not None and no_go_count < 0):
+        raise ValueError("hazard counts must be non-negative")
+    if no_go_count is None:
+        no_go_count = crater_count
+    seed = scene_seed(window_sha256, scenario_seed)
+    if canvas.window_sha256 != window_sha256 or canvas.geometry != geometry:
+        raise ValueError("hazard canvas identity/geometry mismatch")
+    left, bottom, _, top = canvas.bounds_m
+    rock_rng, crater_rng, no_go_rng = _stream(seed, "rocks"), _stream(seed, "crater-heights"), _stream(seed, "no-go-polygons")
+    rocks = []
+    for _ in range(rock_count):
+        radius = float(rock_rng.uniform(0.15, 1.2))
+        x, y = rock_rng.uniform(radius, geometry.size_m - radius, size=2)
+        rocks.append(Point(left + float(x), bottom + float(y)).buffer(radius, quad_segs=12))
+    craters = []
+    delta = np.zeros((geometry.cells, geometry.cells), dtype=np.float32)
+    yy, xx = np.meshgrid(
+        canvas.bounds_m[3] - (np.arange(geometry.cells, dtype=np.float32) + 0.5) * geometry.resolution_m,
+        canvas.bounds_m[0] + (np.arange(geometry.cells, dtype=np.float32) + 0.5) * geometry.resolution_m,
+        indexing="ij",
+    )
+    for _ in range(crater_count):
+        maximum_radius = min(16.0, geometry.size_m / 2.0 - 1e-6)
+        if maximum_radius <= 0.15:
+            raise ValueError("geometry is too small for procedural craters")
+        radius = float(crater_rng.uniform(min(2.0, maximum_radius), maximum_radius))
+        x, y = crater_rng.uniform(radius, geometry.size_m - radius, size=2)
+        depth = float(crater_rng.uniform(0.05, 1.0))
+        distance = np.hypot(xx - (left + x), yy - (bottom + y))
+        delta -= (depth * np.clip(1.0 - distance / radius, 0.0, 1.0)).astype(np.float32)
+        craters.append(Point(left + float(x), bottom + float(y)).buffer(radius, quad_segs=12))
+    no_go_polygons = []
+    for _ in range(no_go_count):
+        radius = float(no_go_rng.uniform(0.25, min(8.0, geometry.size_m / 2.0 - 1e-6)))
+        x, y = no_go_rng.uniform(radius, geometry.size_m - radius, size=2)
+        no_go_polygons.append(Point(left + float(x), bottom + float(y)).buffer(radius, quad_segs=8))
+    ratio = physical_obstacle_ratio(tuple(rocks), geometry, canvas=canvas)
+    return HazardScene(
+        seed=seed,
+        canvas=canvas,
+        rock_footprints_wkb=tuple(to_wkb(item) for item in rocks),
+        crater_polygons_wkb=tuple(to_wkb(item) for item in craters),
+        no_go_polygons_wkb=tuple(to_wkb(item) for item in no_go_polygons),
+        crater_elevation_delta_m=delta,
+        physical_obstacle_layer=CanvasRatioLayer(canvas, ratio),
+    )
+
+
+__all__ = ["CanvasRatioLayer", "GENERATOR_VERSION", "HazardScene", "generate_hazard_scene", "physical_obstacle_ratio", "scene_seed"]

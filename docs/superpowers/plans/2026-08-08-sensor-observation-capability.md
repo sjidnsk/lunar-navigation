@@ -40,8 +40,9 @@
 **Interfaces:**
 - Consumes: current `integration` planner behavior at `b33d437` and qualified Volume 3 training tree at `f8cea6a`.
 - Produces: one integration-based tree containing `training/`, `model_contract/`, `lunar_planner_training_bridge`, and traversability projection without restoring obsolete planner limits.
+- Authority rule: current `integration` hierarchical planning, exact single-hop fuel chain, and platform capability schema v2 override every stale planner, request, and motion-capability assumption imported from Volume 3. Volume 3 contributes only still-valid policy/data/training structure.
 
-- [ ] **Step 1: Start the explicit history-preserving merge**
+- [x] **Step 1: Start the explicit history-preserving merge**
 
 ```bash
 git merge --no-ff volume-3-policy-pipeline
@@ -49,7 +50,7 @@ git merge --no-ff volume-3-policy-pipeline
 
 Expected: conflicts only in the known planner CMake/config/API and repository-boundary files; do not advance `volume-3-policy-pipeline`.
 
-- [ ] **Step 2: Resolve planner files by preserving integration behavior and adding only required Volume 3 surfaces**
+- [x] **Step 2: Resolve planner files by preserving integration behavior and adding only required Volume 3 surfaces**
 
 Keep every current hierarchical, propellant, projection-cache, rolling, smoothing, benchmark, and no-fixed-resource-limit source/test. Add:
 
@@ -65,7 +66,7 @@ std::size_t yaw_bin_count{64U};
 
 for wheel and legged defaults. Do not import `SearchResourceLimits`, `maximum_terminal_candidates`, graph-node caps, or validation-subdivision caps.
 
-- [ ] **Step 3: Resolve API and repository-boundary tests as unions**
+- [x] **Step 3: Resolve API and repository-boundary tests as unions**
 
 Keep the integration smoothing/diagnostic assertions and approved `MotionExecutionFeedback.msg`/`HopperPropellantState.msg`. Add the traversability public include/default-64-yaw test and forbidden raster/archive suffixes:
 
@@ -73,7 +74,7 @@ Keep the integration smoothing/diagnostic assertions and approved `MotionExecuti
 ".tif", ".tiff", ".dem", ".dtm", ".img", ".vrt", ".zip"
 ```
 
-- [ ] **Step 4: Build the merged baseline in Release outside the repository**
+- [x] **Step 4: Build the merged baseline in Release outside the repository**
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -90,13 +91,16 @@ colcon --log-base "$artifact_root/log" build \
 
 Expected: `lunar_planner_core` and `lunar_planner_training_bridge` build successfully.
 
-- [ ] **Step 5: Run baseline boundary, native, bridge, and Python tests**
+If the imported bridge references retired planner or capability fields, migrate the bridge and its training adapters to the current public API. Do not add compatibility aliases for retired duration, graph-cap, impulse, roughness, or resource-limit fields.
+
+- [x] **Step 5: Run baseline boundary, native, bridge, and Python tests**
 
 ```bash
 python3 tools/check_repository_boundaries.py .
 python3 -m pytest -q tests/foundation/test_repository_boundaries.py
 source /home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/baseline/install/setup.bash
 colcon --log-base /home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/baseline/test-log test \
+  --merge-install \
   --build-base /home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/baseline/build \
   --install-base /home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/baseline/install \
   --packages-select lunar_planner_core lunar_planner_training_bridge \
@@ -108,7 +112,7 @@ PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
 
 Expected: repository boundaries OK; all selected tests pass. Any inherited failure is fixed before sensor work begins.
 
-- [ ] **Step 6: Finish the merge commit**
+- [x] **Step 6: Finish the merge commit**
 
 ```bash
 git add ros2_ws model_contract training migration tools tests docs .superpowers

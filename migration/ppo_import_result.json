@@ -1,0 +1,466 @@
+{
+  "files": [
+    {
+      "adaptation": {
+        "kind": "shared_observation_constants",
+        "public_adapter": "policy/observation.py",
+        "required_2b": [
+          "seven_input_contract",
+          "platform_context"
+        ]
+      },
+      "group": "policy",
+      "mode": "extract",
+      "omit_imports": [
+        "lunar_exploration_ppo.env.frontier",
+        "lunar_exploration_ppo.env.map_state",
+        "lunar_exploration_ppo.env.scenario",
+        "lunar_exploration_ppo.utils.geometry"
+      ],
+      "provenance": {
+        "commit": "7309e93fdb85c60ff3736efe1a7f3c7eb640ee78",
+        "origin": "git@github.com:sjidnsk/lunar-path-planning.git",
+        "repository": "legacy_root"
+      },
+      "rename": {
+        "OBSERVATION_SCHEMA_VERSION": "SOURCE_OBSERVATION_SCHEMA_VERSION"
+      },
+      "requested_symbols": [
+        "OBSERVATION_SCHEMA_VERSION",
+        "GLOBAL_PRIOR_CHANNELS",
+        "COVERAGE_SUMMARY_CHANNELS",
+        "LOCAL_CROP_CHANNELS",
+        "FRONTIER_FEATURE_FIELDS",
+        "POSE_FEATURE_FIELDS"
+      ],
+      "resolved_symbols": [
+        "OBSERVATION_SCHEMA_VERSION",
+        "GLOBAL_PRIOR_CHANNELS",
+        "COVERAGE_SUMMARY_CHANNELS",
+        "LOCAL_CROP_CHANNELS",
+        "FRONTIER_FEATURE_FIELDS",
+        "POSE_FEATURE_FIELDS"
+      ],
+      "sha256": "a3fc7e08e68c00ce140e62b0fa0f5a46495c0afd49eaec0bd98568afe35b8d21",
+      "size_bytes": 11929,
+      "source": "src/lunar_exploration_ppo/policy/observation.py",
+      "source_blob_oid": "a17feb2f9c1d0cddd82dfdc62a26600a6b5b1b46",
+      "source_sha256": "a3fc7e08e68c00ce140e62b0fa0f5a46495c0afd49eaec0bd98568afe35b8d21",
+      "source_size_bytes": 11929,
+      "string_replacements": [
+        {
+          "count": 1,
+          "new": "Observed-only hierarchical policy observation constants.",
+          "old": "Observed-only hierarchical policy observation for Stage 2."
+        }
+      ],
+      "target": "training/lunar_policy_training/lunar_policy_training/policy/observation_core.py"
+    },
+    {
+      "adaptation": {
+        "kind": "seven_input_backbone",
+        "public_adapter": "policy/cross_attention.py",
+        "required_2b": [
+          "build_public_seven_input_policy",
+          "use_core_encoders_and_helpers",
+          "add_platform_encoder"
+        ]
+      },
+      "group": "policy",
+      "mode": "extract",
+      "omit_imports": [
+        "lunar_exploration_ppo.policy.observation"
+      ],
+      "provenance": {
+        "commit": "7309e93fdb85c60ff3736efe1a7f3c7eb640ee78",
+        "origin": "git@github.com:sjidnsk/lunar-path-planning.git",
+        "repository": "legacy_root"
+      },
+      "rename": {},
+      "requested_symbols": [
+        "TOKEN_DIM",
+        "MAP_POOL_SHAPE",
+        "ATTENTION_HEADS",
+        "CROSS_ATTENTION_LAYERS",
+        "FFN_HIDDEN_DIM",
+        "ACTION_HIDDEN_DIM",
+        "DROPOUT",
+        "INVALID_LOGIT_VALUE",
+        "INITIAL_KAPPA_RAW",
+        "PolicyActionError",
+        "MapEncoder",
+        "CrossAttentionBlock",
+        "_normalize_angle",
+        "normalize_theta",
+        "_validated_masked_logits",
+        "_gather_candidate",
+        "_safe_theta_mu",
+        "_masked_mean_max",
+        "_map_position_encoding"
+      ],
+      "resolved_symbols": [
+        "TOKEN_DIM",
+        "MAP_POOL_SHAPE",
+        "ATTENTION_HEADS",
+        "CROSS_ATTENTION_LAYERS",
+        "FFN_HIDDEN_DIM",
+        "ACTION_HIDDEN_DIM",
+        "DROPOUT",
+        "INVALID_LOGIT_VALUE",
+        "INITIAL_KAPPA_RAW",
+        "PolicyActionError",
+        "MapEncoder",
+        "CrossAttentionBlock",
+        "_normalize_angle",
+        "normalize_theta",
+        "_validated_masked_logits",
+        "_gather_candidate",
+        "_safe_theta_mu",
+        "_masked_mean_max",
+        "_map_position_encoding"
+      ],
+      "sha256": "d8ff3f8f30dc814881579c03e3396af0a7d8b8b244d9a038a4bb178fc78d69f4",
+      "size_bytes": 30594,
+      "source": "src/lunar_exploration_ppo/policy/cross_attention.py",
+      "source_blob_oid": "d1b3b0e7ab9094f6c5698cb41f4c89d8ab67f206",
+      "source_sha256": "d8ff3f8f30dc814881579c03e3396af0a7d8b8b244d9a038a4bb178fc78d69f4",
+      "source_size_bytes": 30594,
+      "string_replacements": [
+        {
+          "count": 1,
+          "new": "Stateless cross-attention policy backbone.",
+          "old": "Stage 3 无状态 cross-attention frontier policy。"
+        },
+        {
+          "count": 1,
+          "new": "动作或分布输入违反共享策略合同。",
+          "old": "动作或分布输入违反 Stage 3 合同。"
+        }
+      ],
+      "target": "training/lunar_policy_training/lunar_policy_training/policy/backbone_core.py"
+    },
+    {
+      "adaptation": {
+        "kind": "in_memory_vector_env",
+        "require_target_in_2b": true
+      },
+      "group": "ppo",
+      "mode": "manual_thin_adapter",
+      "omit_imports": [],
+      "provenance": {
+        "commit": "7309e93fdb85c60ff3736efe1a7f3c7eb640ee78",
+        "origin": "git@github.com:sjidnsk/lunar-path-planning.git",
+        "repository": "legacy_root"
+      },
+      "rename": {},
+      "requested_symbols": [],
+      "resolved_symbols": [],
+      "sha256": "736040998ab0fef99d691e0c6adbff7a17955c4287439bfc274ab8914da701d2",
+      "size_bytes": 64754,
+      "source": "src/lunar_exploration_ppo/ppo/collector.py",
+      "source_blob_oid": "0d3f95ff62f18e588aabdcd8ea45c87ad306e12d",
+      "source_sha256": "736040998ab0fef99d691e0c6adbff7a17955c4287439bfc274ab8914da701d2",
+      "source_size_bytes": 64754,
+      "string_replacements": [],
+      "target": "training/lunar_policy_training/lunar_policy_training/ppo/collector.py",
+      "target_sha256": "64882c7b49bb0e7552935acff6d5eaf6413f444107a1e476760fe3d7e91092ea",
+      "target_size_bytes": 8710,
+      "target_validation": {
+        "ast": "parsed-and-compiled",
+        "imports": "static-allowlist-and-no-dynamic-imports",
+        "kind": "manual-python-adapter"
+      }
+    },
+    {
+      "adaptation": {
+        "kind": "gae_math",
+        "public_adapter": "ppo/rollout.py",
+        "required_2b": [
+          "seven_input_ephemeral_batch"
+        ]
+      },
+      "group": "ppo",
+      "mode": "extract",
+      "omit_imports": [
+        "lunar_exploration_ppo.policy.observation",
+        "lunar_exploration_ppo.utils.artifact_io",
+        "lunar_exploration_ppo.utils.geometry"
+      ],
+      "provenance": {
+        "commit": "7309e93fdb85c60ff3736efe1a7f3c7eb640ee78",
+        "origin": "git@github.com:sjidnsk/lunar-path-planning.git",
+        "repository": "legacy_root"
+      },
+      "rename": {},
+      "requested_symbols": [
+        "GAMMA",
+        "GAE_LAMBDA",
+        "RolloutContractError",
+        "GAEResult",
+        "compute_gae"
+      ],
+      "resolved_symbols": [
+        "GAMMA",
+        "GAE_LAMBDA",
+        "RolloutContractError",
+        "GAEResult",
+        "compute_gae"
+      ],
+      "sha256": "5935d59c9c21c2d0eb49d96838c2fec7a824cfcd9028815bbbbe192624b6bb16",
+      "size_bytes": 39562,
+      "source": "src/lunar_exploration_ppo/ppo/rollout.py",
+      "source_blob_oid": "b05783152658f04c446ba23391104d0d0fe65305",
+      "source_sha256": "5935d59c9c21c2d0eb49d96838c2fec7a824cfcd9028815bbbbe192624b6bb16",
+      "source_size_bytes": 39562,
+      "string_replacements": [
+        {
+          "count": 1,
+          "new": "Rollout generalized advantage estimation mathematical core.",
+          "old": "Stage 4 rollout snapshot、transition、buffer 与 GAE 合同。"
+        },
+        {
+          "count": 1,
+          "new": "Rollout inputs violate the generalized advantage estimation contract.",
+          "old": "Rollout bytes or metadata violate the frozen Stage 4 contract."
+        }
+      ],
+      "target": "training/lunar_policy_training/lunar_policy_training/ppo/rollout_core.py"
+    },
+    {
+      "adaptation": {
+        "kind": "ppo_update_math",
+        "public_adapter": "ppo/trainer.py",
+        "required_2b": [
+          "seven_input_update_loop",
+          "lightweight_update_metrics"
+        ]
+      },
+      "group": "ppo",
+      "mode": "extract",
+      "omit_imports": [
+        "lunar_exploration_ppo.policy.cross_attention",
+        "lunar_exploration_ppo.ppo.rollout"
+      ],
+      "provenance": {
+        "commit": "7309e93fdb85c60ff3736efe1a7f3c7eb640ee78",
+        "origin": "git@github.com:sjidnsk/lunar-path-planning.git",
+        "repository": "legacy_root"
+      },
+      "rename": {},
+      "requested_symbols": [
+        "PPOTrainingError",
+        "PPOLossTerms",
+        "compute_ppo_loss_terms",
+        "policy_state_sha256",
+        "physical_microbatch_slices",
+        "_gradient_norm",
+        "_parameter_change_l2"
+      ],
+      "resolved_symbols": [
+        "PPOTrainingError",
+        "PPOLossTerms",
+        "compute_ppo_loss_terms",
+        "policy_state_sha256",
+        "physical_microbatch_slices",
+        "_gradient_norm",
+        "_parameter_change_l2"
+      ],
+      "sha256": "e5d2e41bf38a50c76c5fdf01cb3adae8c25b280261f7ac731295376d781295fa",
+      "size_bytes": 41657,
+      "source": "src/lunar_exploration_ppo/ppo/trainer.py",
+      "source_blob_oid": "16a3272ead848207ca252e44e8ba4d2de7615ab9",
+      "source_sha256": "e5d2e41bf38a50c76c5fdf01cb3adae8c25b280261f7ac731295376d781295fa",
+      "source_size_bytes": 41657,
+      "string_replacements": [
+        {
+          "count": 1,
+          "new": "Strict FP32 PPO update mathematical core.",
+          "old": "Stage 4 严格 FP32 PPO update。"
+        }
+      ],
+      "target": "training/lunar_policy_training/lunar_policy_training/ppo/trainer_core.py"
+    },
+    {
+      "adaptation": {
+        "kind": "single_file_checkpoint",
+        "require_target_in_2b": true
+      },
+      "group": "ppo",
+      "mode": "manual_thin_adapter",
+      "omit_imports": [],
+      "provenance": {
+        "commit": "7309e93fdb85c60ff3736efe1a7f3c7eb640ee78",
+        "origin": "git@github.com:sjidnsk/lunar-path-planning.git",
+        "repository": "legacy_root"
+      },
+      "rename": {},
+      "requested_symbols": [],
+      "resolved_symbols": [],
+      "sha256": "7726ed6b33f4d89cc5633077c3b330fb39f91eeff90cd803fc4041480a8cde56",
+      "size_bytes": 84329,
+      "source": "src/lunar_exploration_ppo/ppo/checkpoint.py",
+      "source_blob_oid": "e3e5b00dae4623509a144d686dd2f9c8f91b641c",
+      "source_sha256": "7726ed6b33f4d89cc5633077c3b330fb39f91eeff90cd803fc4041480a8cde56",
+      "source_size_bytes": 84329,
+      "string_replacements": [],
+      "target": "training/lunar_policy_training/lunar_policy_training/ppo/checkpoint.py",
+      "target_sha256": "a62bbf31a54f12141e277326c193a69728a42b25fb8c029af4d0cd5d203a14be",
+      "target_size_bytes": 17214,
+      "target_validation": {
+        "ast": "parsed-and-compiled",
+        "imports": "static-allowlist-and-no-dynamic-imports",
+        "kind": "manual-python-adapter"
+      }
+    },
+    {
+      "adaptation": {
+        "kind": "candidate_selection_math",
+        "public_adapter": "eval/baselines.py",
+        "required_2b": [
+          "implement_public_action_selection",
+          "use_seven_input_contract_and_policy_output"
+        ]
+      },
+      "group": "evaluation",
+      "mode": "extract",
+      "omit_imports": [
+        "lunar_exploration_ppo.env.env",
+        "lunar_exploration_ppo.policy.cross_attention",
+        "lunar_exploration_ppo.policy.observation"
+      ],
+      "provenance": {
+        "commit": "7309e93fdb85c60ff3736efe1a7f3c7eb640ee78",
+        "origin": "git@github.com:sjidnsk/lunar-path-planning.git",
+        "repository": "legacy_root"
+      },
+      "rename": {},
+      "requested_symbols": [
+        "BASELINE_METHODS",
+        "ALL_METHODS",
+        "_DISTANCE_FEATURE",
+        "_POTENTIAL_GAIN_FEATURE",
+        "_RECOMMENDED_THETA_SIN_FEATURE",
+        "_RECOMMENDED_THETA_COS_FEATURE",
+        "_REACHABLE_COST_FEATURE",
+        "_MIN_DIRECTION_NORM",
+        "BaselineSelectionError",
+        "NoCandidateAction",
+        "reconstruct_recommended_theta",
+        "validate_selected_index"
+      ],
+      "resolved_symbols": [
+        "BASELINE_METHODS",
+        "ALL_METHODS",
+        "_DISTANCE_FEATURE",
+        "_POTENTIAL_GAIN_FEATURE",
+        "_RECOMMENDED_THETA_SIN_FEATURE",
+        "_RECOMMENDED_THETA_COS_FEATURE",
+        "_REACHABLE_COST_FEATURE",
+        "_MIN_DIRECTION_NORM",
+        "BaselineSelectionError",
+        "NoCandidateAction",
+        "reconstruct_recommended_theta",
+        "validate_selected_index"
+      ],
+      "sha256": "a3c6496720e7d778d02207607a5f8f806363202eb6e9b3762337c59056f29070",
+      "size_bytes": 6772,
+      "source": "src/lunar_exploration_ppo/eval/baselines.py",
+      "source_blob_oid": "2c9e70576969c8953ead6635098e657462e2fac9",
+      "source_sha256": "a3c6496720e7d778d02207607a5f8f806363202eb6e9b3762337c59056f29070",
+      "source_size_bytes": 6772,
+      "string_replacements": [
+        {
+          "count": 1,
+          "new": "Observed-only baseline candidate selection mathematical core.",
+          "old": "Stage 5 observed-only baseline and deterministic PPO action selection."
+        },
+        {
+          "count": 1,
+          "new": "A baseline decision input violates the fail-closed contract.",
+          "old": "A baseline decision input violates the Stage 5 fail-closed contract."
+        }
+      ],
+      "target": "training/lunar_policy_training/lunar_policy_training/eval/baseline_core.py"
+    },
+    {
+      "adaptation": {
+        "kind": "deterministic_evaluation_math",
+        "public_adapter": "eval/metrics.py",
+        "required_2b": [
+          "neutralize_stage_text"
+        ]
+      },
+      "group": "evaluation",
+      "mode": "extract",
+      "omit_imports": [],
+      "provenance": {
+        "commit": "7309e93fdb85c60ff3736efe1a7f3c7eb640ee78",
+        "origin": "git@github.com:sjidnsk/lunar-path-planning.git",
+        "repository": "legacy_root"
+      },
+      "rename": {},
+      "requested_symbols": [
+        "EPISODE_FIELDS",
+        "BOOTSTRAP_METRICS",
+        "ZERO_DISTANCE_POLICY",
+        "_TERMINATION_REASONS",
+        "MetricError",
+        "EpisodeResult",
+        "build_episode_result",
+        "validate_episode_result",
+        "episode_record",
+        "bootstrap_episode_indices",
+        "bootstrap_indices_sha256",
+        "summarize_episodes",
+        "_episode_order_key",
+        "_summary_values",
+        "_finite_mean"
+      ],
+      "resolved_symbols": [
+        "EPISODE_FIELDS",
+        "BOOTSTRAP_METRICS",
+        "ZERO_DISTANCE_POLICY",
+        "_TERMINATION_REASONS",
+        "MetricError",
+        "EpisodeResult",
+        "build_episode_result",
+        "validate_episode_result",
+        "episode_record",
+        "bootstrap_episode_indices",
+        "bootstrap_indices_sha256",
+        "summarize_episodes",
+        "_episode_order_key",
+        "_summary_values",
+        "_finite_mean"
+      ],
+      "sha256": "263e51f81cd843f7fa7e3a2a5b58cbba5cfcff3503c890c5bb35b0b2f05757fc",
+      "size_bytes": 16190,
+      "source": "src/lunar_exploration_ppo/eval/metrics.py",
+      "source_blob_oid": "6b0e4594ed974f6dcc973e6f93cc68e5a4964003",
+      "source_sha256": "263e51f81cd843f7fa7e3a2a5b58cbba5cfcff3503c890c5bb35b0b2f05757fc",
+      "source_size_bytes": 16190,
+      "string_replacements": [
+        {
+          "count": 1,
+          "new": "Unified episode metrics and fixed-seed episode bootstrap confidence intervals.",
+          "old": "Unified Stage 5 episode metrics and fixed-seed episode bootstrap CIs."
+        },
+        {
+          "count": 1,
+          "new": "Episode or aggregate metrics violate the deterministic evaluation contract.",
+          "old": "Episode or aggregate metrics violate the deterministic Stage 5 contract."
+        },
+        {
+          "count": 1,
+          "new": "episode method is not a supported evaluation method",
+          "old": "episode method is not a Stage 5 method"
+        }
+      ],
+      "target": "training/lunar_policy_training/lunar_policy_training/eval/metrics_core.py"
+    }
+  ],
+  "schema_version": "lunar-ppo-import-result/v1",
+  "source_commit": "7309e93fdb85c60ff3736efe1a7f3c7eb640ee78",
+  "source_origin": "git@github.com:sjidnsk/lunar-path-planning.git",
+  "source_repository": "legacy_root"
+}
