@@ -166,13 +166,13 @@ struct MinimumArcResult final {
 }
 
 [[nodiscard]] SingleHopCertificationResult Certified(
-    const BallisticArc& arc, const PropellantEvidence& propellant,
+    const BallisticArc& arc, const SingleHopEnvelopeEvidence& envelope,
     FlightTubeCertificationResult tube, const std::size_t examined) {
   return {
       .status = HopCertificationStatus::kCertified,
       .certification = CertifiedSingleHop{
           .arc = arc,
-          .propellant = propellant,
+          .envelope = envelope,
           .flight_tube = std::move(tube),
       },
       .examined_intervals = examined,
@@ -189,8 +189,8 @@ SingleHopCertificationResult CertifySingleHop(
         .reason_code = "REQUEST_CANCELED",
     };
   }
-  if (problem.flight_map == nullptr || problem.propellant == nullptr ||
-      problem.capability == nullptr || problem.map_safety == nullptr ||
+  if (problem.flight_map == nullptr || problem.capability == nullptr ||
+      problem.map_safety == nullptr ||
       !Finite(problem.launch_position_m) ||
       !Finite(problem.landing_position_m) ||
       !Finite(problem.gravity_mps2)) {
@@ -199,8 +199,8 @@ SingleHopCertificationResult CertifySingleHop(
         .reason_code = "HOPPER_CAPABILITY_INVALID",
     };
   }
-  const AvailableDeltaVResult available =
-      AvailableDeltaV(*problem.propellant, *problem.capability);
+  const AvailableSingleHopDeltaVResult available =
+      AvailableSingleHopDeltaV(*problem.capability);
   if (!available.ok()) {
     return {
         .status = HopCertificationStatus::kInvalid,
@@ -218,7 +218,7 @@ SingleHopCertificationResult CertifySingleHop(
       *available.delta_v_mps) {
     return {
         .status = HopCertificationStatus::kInfeasible,
-        .reason_code = "HOPPER_FUEL_INSUFFICIENT",
+        .reason_code = "HOPPER_SINGLE_HOP_ENVELOPE_EXCEEDED",
     };
   }
 
@@ -261,15 +261,16 @@ SingleHopCertificationResult CertifySingleHop(
   }
 
   std::size_t examined = 1U;
-  PropellantEvaluationResult minimum_propellant = EvaluatePropellant(
-      minimum.timed_arc->arc, *problem.propellant, *problem.capability);
-  if (!minimum_propellant.ok()) {
+  SingleHopEnvelopeResult minimum_envelope = EvaluateSingleHopEnvelope(
+      minimum.timed_arc->arc, *problem.capability);
+  if (!minimum_envelope.ok()) {
     return {
-        .status = minimum_propellant.reason_code == "HOPPER_FUEL_INSUFFICIENT"
+        .status = minimum_envelope.reason_code ==
+                "HOPPER_SINGLE_HOP_ENVELOPE_EXCEEDED"
             ? HopCertificationStatus::kInfeasible
             : HopCertificationStatus::kNumericalIndeterminate,
         .examined_intervals = examined,
-        .reason_code = minimum_propellant.reason_code,
+        .reason_code = minimum_envelope.reason_code,
     };
   }
   FlightTubeCertificationResult minimum_tube = CertifyFlightTube(
@@ -284,7 +285,7 @@ SingleHopCertificationResult CertifySingleHop(
   }
   if (minimum_tube.certified) {
     return Certified(
-        minimum.timed_arc->arc, *minimum_propellant.evidence,
+        minimum.timed_arc->arc, *minimum_envelope.evidence,
         std::move(minimum_tube), examined);
   }
   if (NumericalTubeFailure(minimum_tube)) {
@@ -298,9 +299,9 @@ SingleHopCertificationResult CertifySingleHop(
   const TimedArc upper_arc = AtTime(
       problem.launch_position_m, problem.landing_position_m,
       problem.gravity_mps2, feasible_upper, *problem.capability);
-  PropellantEvaluationResult upper_propellant = EvaluatePropellant(
-      upper_arc.arc, *problem.propellant, *problem.capability);
-  if (!upper_propellant.ok()) {
+  SingleHopEnvelopeResult upper_envelope = EvaluateSingleHopEnvelope(
+      upper_arc.arc, *problem.capability);
+  if (!upper_envelope.ok()) {
     return {
         .status = HopCertificationStatus::kNumericalIndeterminate,
         .examined_intervals = examined,
@@ -333,7 +334,7 @@ SingleHopCertificationResult CertifySingleHop(
   double blocked_time = minimum_time;
   double safe_time = feasible_upper;
   TimedArc safe_arc = upper_arc;
-  PropellantEvaluationResult safe_propellant = std::move(upper_propellant);
+  SingleHopEnvelopeResult safe_envelope = std::move(upper_envelope);
   FlightTubeCertificationResult safe_tube = std::move(upper_tube);
   const double gravity_norm = Norm(problem.gravity_mps2);
   while (gravity_norm *
@@ -358,9 +359,9 @@ SingleHopCertificationResult CertifySingleHop(
     const TimedArc candidate = AtTime(
         problem.launch_position_m, problem.landing_position_m,
         problem.gravity_mps2, midpoint, *problem.capability);
-    PropellantEvaluationResult candidate_propellant = EvaluatePropellant(
-        candidate.arc, *problem.propellant, *problem.capability);
-    if (!candidate_propellant.ok()) {
+    SingleHopEnvelopeResult candidate_envelope = EvaluateSingleHopEnvelope(
+        candidate.arc, *problem.capability);
+    if (!candidate_envelope.ok()) {
       return {
           .status = HopCertificationStatus::kNumericalIndeterminate,
           .examined_intervals = examined,
@@ -381,7 +382,7 @@ SingleHopCertificationResult CertifySingleHop(
     if (candidate_tube.certified) {
       safe_time = midpoint;
       safe_arc = candidate;
-      safe_propellant = std::move(candidate_propellant);
+      safe_envelope = std::move(candidate_envelope);
       safe_tube = std::move(candidate_tube);
     } else if (NumericalTubeFailure(candidate_tube)) {
       return {
@@ -394,7 +395,7 @@ SingleHopCertificationResult CertifySingleHop(
     }
   }
   return Certified(
-      safe_arc.arc, *safe_propellant.evidence, std::move(safe_tube), examined);
+      safe_arc.arc, *safe_envelope.evidence, std::move(safe_tube), examined);
 }
 
 }  // namespace lunar::planning::hopper

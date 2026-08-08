@@ -251,15 +251,10 @@ inline PlannerInput MakeValidHopperInput() {
   input.world.global_map = MakeFlatMap("map", 16U, 12U, 0.5);
   input.world.local_map = MakeFlatMap("odom", 16U, 12U, 0.5);
   input.config.global_map.base_resolution_m = 0.5;
-  input.hopper_propellant = HopperPropellantState{
-      .stamp = input.state_time,
-      .platform_id = input.platform_id,
-      .capability_version = input.capability_version,
-      .total_mass_kg = 20.0,
-      .remaining_usable_fuel_mass_kg = 0.20,
-  };
   input.capability = HopperCapability{
       .specific_impulse_s = 301.0,
+      .reference_total_mass_kg = 20.0,
+      .reference_propellant_mass_kg = 0.20,
       .landing_support_radius_m = 0.45,
       .flight_collision_radius_m = 0.55,
       .maximum_landing_plane_residual_m = 0.05,

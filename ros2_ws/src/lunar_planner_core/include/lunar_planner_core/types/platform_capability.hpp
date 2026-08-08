@@ -94,6 +94,8 @@ struct LeggedCapability final {
 
 struct HopperCapability final {
   double specific_impulse_s{};
+  double reference_total_mass_kg{};
+  double reference_propellant_mass_kg{};
   double landing_support_radius_m{};
   double flight_collision_radius_m{};
   double maximum_landing_plane_residual_m{};

@@ -136,8 +136,6 @@ void MakeGoalKnownInfeasible(
     }
     const HopSegment& segment = hop->segments.front();
     return !segment.landing_region_boundary_m.empty() &&
-           segment.certified_fuel_required_kg >=
-               segment.ideal_fuel_required_kg &&
            segment.available_delta_v_mps >= segment.required_delta_v_mps &&
            !segment.capability_version.empty();
   }

@@ -20,7 +20,6 @@
 #include "hopper/flight_tube_certifier.hpp"
 #include "hopper/hop_certifier.hpp"
 #include "hopper/landing_region.hpp"
-#include "hopper/propellant_model.hpp"
 #include "shared/map_snapshot.hpp"
 
 namespace lunar::planning::hopper {
@@ -55,6 +54,12 @@ constexpr Vec3 kLunarGravityMps2{0.0, 0.0, -1.62};
     const HopperCapability& capability) noexcept {
   return std::isfinite(capability.specific_impulse_s) &&
       capability.specific_impulse_s > 0.0 &&
+      std::isfinite(capability.reference_total_mass_kg) &&
+      capability.reference_total_mass_kg > 0.0 &&
+      std::isfinite(capability.reference_propellant_mass_kg) &&
+      capability.reference_propellant_mass_kg > 0.0 &&
+      capability.reference_propellant_mass_kg <
+          capability.reference_total_mass_kg &&
       std::isfinite(capability.landing_support_radius_m) &&
       capability.landing_support_radius_m > 0.0 &&
       std::isfinite(capability.flight_collision_radius_m) &&
@@ -202,16 +207,8 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
         ExecutionDirective::kNoSafeReference,
         "HOPPER_EXACT_POINT_REQUIRED", started);
   }
-  if (!input.hopper_propellant.has_value() ||
-      input.hopper_propellant->platform_id != input.platform_id ||
-      input.hopper_propellant->capability_version != input.capability_version) {
-    return Failure(
-        PlanningOutcome::kInvalidRequest,
-        ExecutionDirective::kNoSafeReference,
-        "HOPPER_PROPELLANT_STATE_INVALID", started);
-  }
-  const AvailableDeltaVResult available =
-      AvailableDeltaV(*input.hopper_propellant, *capability);
+  const AvailableSingleHopDeltaVResult available =
+      AvailableSingleHopDeltaV(*capability);
   if (!available.ok()) {
     return Failure(
         PlanningOutcome::kInvalidRequest,
@@ -287,7 +284,6 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
             .landing_position_m = *landing_map,
             .gravity_mps2 = kLunarGravityMps2,
             .flight_map = global_map.snapshot.get(),
-            .propellant = &*input.hopper_propellant,
             .capability = capability,
             .map_safety = &input.config.map_safety,
             .stop_token = input.stop_token,
@@ -314,12 +310,9 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
               ExecutionDirective::kNoSafeReference,
               hop.reason_code, started, total_work);
         case HopCertificationStatus::kInfeasible: {
-          const bool fuel = hop.reason_code == "HOPPER_FUEL_INSUFFICIENT";
           return Failure(
-              fuel ? PlanningOutcome::kGoalInfeasible
-                   : PlanningOutcome::kNoKnownSafeRoute,
-              fuel ? ExecutionDirective::kHoldPosition
-                   : ExecutionDirective::kNoSafeReference,
+              PlanningOutcome::kNoKnownSafeRoute,
+              ExecutionDirective::kNoSafeReference,
               hop.reason_code, started, total_work);
         }
         case HopCertificationStatus::kCertified:
@@ -336,7 +329,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
         std::sqrt(std::numeric_limits<double>::epsilon());
     while (true) {
       double region_radius = 0.0;
-      bool corners_fuel_certified = true;
+      bool corners_envelope_certified = true;
       for (const Vec3 vertex : landing_boundary_map) {
         region_radius = std::max(
             region_radius,
@@ -352,22 +345,23 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
               "HOPPER_LANDING_REGION_NUMERICAL_INDETERMINATE", started,
               total_work);
         }
-        const PropellantEvaluationResult vertex_fuel = EvaluatePropellant(
-            *vertex_arc.arc, *input.hopper_propellant, *capability);
-        if (!vertex_fuel.ok()) {
-          if (vertex_fuel.reason_code != "HOPPER_FUEL_INSUFFICIENT") {
+        const SingleHopEnvelopeResult vertex_envelope =
+            EvaluateSingleHopEnvelope(*vertex_arc.arc, *capability);
+        if (!vertex_envelope.ok()) {
+          if (vertex_envelope.reason_code !=
+              "HOPPER_SINGLE_HOP_ENVELOPE_EXCEEDED") {
             return Failure(
                 PlanningOutcome::kNumericalFailure,
                 ExecutionDirective::kNoSafeReference,
                 "HOPPER_LANDING_REGION_NUMERICAL_INDETERMINATE", started,
                 total_work);
           }
-          corners_fuel_certified = false;
+          corners_envelope_certified = false;
           break;
         }
       }
       FlightTubeCertificationResult region_tube;
-      if (corners_fuel_certified) {
+      if (corners_envelope_certified) {
         region_tube = CertifyFlightTube(
             certified.arc, *global_map.snapshot, *capability,
             input.config.map_safety, input.stop_token, region_radius);
@@ -383,7 +377,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
               total_work);
         }
       }
-      if (corners_fuel_certified && region_tube.certified) {
+      if (corners_envelope_certified && region_tube.certified) {
         break;
       }
       if (!(region_radius > minimum_region_radius)) {
@@ -436,16 +430,10 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
         .flight_tube_radius_m = certified.flight_tube.radius_m,
         .nominal_landing_point_m =
             landing.region->aim_position_on_surface_m,
-        .ideal_fuel_required_kg =
-            certified.propellant.ideal_fuel_required_kg,
-        .certified_fuel_required_kg =
-            certified.propellant.certified_fuel_required_kg,
-        .expected_remaining_usable_fuel_kg =
-            certified.propellant.expected_remaining_usable_fuel_kg,
         .required_delta_v_mps =
-            certified.propellant.certified_delta_v_mps,
+            certified.envelope.required_delta_v_mps,
         .available_delta_v_mps =
-            certified.propellant.available_delta_v_mps,
+            certified.envelope.available_delta_v_mps,
         .capability_version = input.capability_version,
         .global_map_generation = input.global_map_generation,
         .local_map_generation = input.local_map_generation,
@@ -491,7 +479,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
             .planner_name = std::string{kPlannerName},
             .elapsed = elapsed,
             .expanded_states = total_work,
-            .best_cost = certified.propellant.certified_fuel_required_kg,
+            .best_cost = certified.envelope.required_delta_v_mps,
             .hierarchical = Metrics(
                 input, landing.inspected_cells, hop.examined_intervals,
                 elapsed),

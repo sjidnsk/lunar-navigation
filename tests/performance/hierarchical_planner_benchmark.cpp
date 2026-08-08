@@ -368,6 +368,8 @@ struct TimingSamples final {
 [[nodiscard]] HopperCapability ApprovedHopperCapability() {
   return {
       .specific_impulse_s = 301.0,
+      .reference_total_mass_kg = 20.0,
+      .reference_propellant_mass_kg = 0.20,
       .landing_support_radius_m = 0.45,
       .flight_collision_radius_m = 0.55,
       .maximum_landing_plane_residual_m = 0.05,
@@ -543,13 +545,6 @@ void AddHopperBlockingColumn(GridMap& map, const float height_m) {
       .yaw_rad = std::nullopt,
       .yaw_tolerance_rad = 0.0,
   };
-  input.hopper_propellant = HopperPropellantState{
-      .stamp = input.state_time,
-      .platform_id = input.platform_id,
-      .capability_version = input.capability_version,
-      .total_mass_kg = 20.0,
-      .remaining_usable_fuel_mass_kg = 0.20,
-  };
   if (definition.scenario == Scenario::kHopperAlternateTime) {
     AddHopperBlockingColumn(input.world.global_map, 35.0F);
     AddHopperBlockingColumn(input.world.local_map, 35.0F);
@@ -716,7 +711,7 @@ void RequireExpected(
           {"nominal_landing",
            {hop.nominal_landing_point_m.x, hop.nominal_landing_point_m.y,
             hop.nominal_landing_point_m.z}},
-          {"certified_fuel_kg", hop.certified_fuel_required_kg},
+          {"available_delta_v_mps", hop.available_delta_v_mps},
           {"required_delta_v_mps", hop.required_delta_v_mps},
       });
     }

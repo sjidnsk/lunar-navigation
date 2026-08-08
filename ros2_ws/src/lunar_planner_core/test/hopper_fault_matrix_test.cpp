@@ -63,26 +63,21 @@ TEST(HopperFaultMatrix, RequiresAnExactPointWithoutYaw) {
       "HOPPER_EXACT_POINT_REQUIRED");
 }
 
-TEST(HopperFaultMatrix, RejectsMissingInvalidAndInsufficientPropellant) {
+TEST(HopperFaultMatrix, RejectsInvalidAndExceededSingleHopEnvelope) {
   Planner planner;
 
-  PlannerInput missing = test::MakeValidHopperInput();
-  missing.hopper_propellant.reset();
-  ExpectFailure(
-      planner.Plan(missing), PlanningOutcome::kInvalidRequest,
-      "HOPPER_PROPELLANT_STATE_INVALID");
-
   PlannerInput invalid = test::MakeValidHopperInput();
-  invalid.hopper_propellant->total_mass_kg = 0.0;
+  std::get<HopperCapability>(invalid.capability).reference_total_mass_kg = 0.0;
   ExpectFailure(
       planner.Plan(invalid), PlanningOutcome::kInvalidRequest,
-      "HOPPER_TOTAL_MASS_INVALID");
+      "HOPPER_CAPABILITY_INVALID");
 
-  PlannerInput insufficient = test::MakeValidHopperInput();
-  insufficient.hopper_propellant->remaining_usable_fuel_mass_kg = 1.0e-6;
+  PlannerInput exceeded = test::MakeValidHopperInput();
+  std::get<HopperCapability>(exceeded.capability)
+      .reference_propellant_mass_kg = 1.0e-6;
   ExpectFailure(
-      planner.Plan(insufficient), PlanningOutcome::kGoalInfeasible,
-      "HOPPER_FUEL_INSUFFICIENT");
+      planner.Plan(exceeded), PlanningOutcome::kNoKnownSafeRoute,
+      "HOPPER_SINGLE_HOP_ENVELOPE_EXCEEDED");
 }
 
 TEST(HopperFaultMatrix, RejectsSupportDiskObstacleForbiddenUnknownAndBoundary) {

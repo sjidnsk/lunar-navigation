@@ -120,6 +120,8 @@ void HashPose(std::uint64_t& hash, const Pose3& pose) noexcept {
           }
         } else {
           HashPod(hash, typed.specific_impulse_s);
+          HashPod(hash, typed.reference_total_mass_kg);
+          HashPod(hash, typed.reference_propellant_mass_kg);
           HashPod(hash, typed.landing_support_radius_m);
           HashPod(hash, typed.flight_collision_radius_m);
           HashPod(hash, typed.maximum_landing_plane_residual_m);

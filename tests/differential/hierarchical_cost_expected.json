@@ -11,10 +11,10 @@
     "legged-goal-infeasible": 3.7478992087500433,
     "legged-numerical-failure": null,
     "legged-deterministic-repeat": 3.7478992087500433,
-    "hopper-safe-corridor": 0.019514728460754756,
+    "hopper-safe-corridor": 2.8815864466462027,
     "hopper-no-safe-route": null,
     "hopper-goal-infeasible": null,
     "hopper-numerical-failure": null,
-    "hopper-deterministic-repeat": 0.019514728460754756
+    "hopper-deterministic-repeat": 2.8815864466462027
   }
 }

@@ -35,9 +35,6 @@ struct HopSegment final {
   Vec3 launch_velocity_mps;
   double flight_tube_radius_m{};
   Vec3 nominal_landing_point_m;
-  double ideal_fuel_required_kg{};
-  double certified_fuel_required_kg{};
-  double expected_remaining_usable_fuel_kg{};
   double required_delta_v_mps{};
   double available_delta_v_mps{};
   std::string capability_version;

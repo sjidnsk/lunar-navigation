@@ -49,7 +49,7 @@ void SetObstacle(
       map.layers.at("obstacle_height").values)[index] = height_m;
 }
 
-TEST(HopperPlanner, ProducesOneExactFuelCertifiedHopWithoutContinuation) {
+TEST(HopperPlanner, ProducesOneExactEnvelopeCertifiedHopWithoutContinuation) {
   Planner planner;
   const PlannerInput input = test::MakeValidHopperInput();
 
@@ -88,22 +88,32 @@ TEST(HopperPlanner, ProducesOneExactFuelCertifiedHopWithoutContinuation) {
   EXPECT_NEAR(segment.nominal_landing_point_m.x, landing.x, 1.0e-8);
   EXPECT_NEAR(segment.nominal_landing_point_m.y, landing.y, 1.0e-8);
   EXPECT_NEAR(segment.nominal_landing_point_m.z, landing.z, 1.0e-8);
-  EXPECT_GE(
-      segment.certified_fuel_required_kg,
-      segment.ideal_fuel_required_kg);
-  EXPECT_NEAR(
-      segment.certified_fuel_required_kg +
-          segment.expected_remaining_usable_fuel_kg,
-      input.hopper_propellant->remaining_usable_fuel_mass_kg, 1.0e-12);
   EXPECT_GE(segment.available_delta_v_mps, segment.required_delta_v_mps);
   EXPECT_EQ(segment.capability_version, input.capability_version);
   EXPECT_EQ(segment.global_map_generation, input.global_map_generation);
   EXPECT_EQ(segment.local_map_generation, input.local_map_generation);
   ASSERT_TRUE(output.diagnostics.best_cost.has_value());
   EXPECT_DOUBLE_EQ(
-      *output.diagnostics.best_cost, segment.certified_fuel_required_kg);
-  EXPECT_LT(*output.diagnostics.best_cost,
-            input.hopper_propellant->remaining_usable_fuel_mass_kg);
+      *output.diagnostics.best_cost, segment.required_delta_v_mps);
+}
+
+TEST(HopperPlanner, RepeatsSingleHopPlanningWithoutDynamicFuelState) {
+  Planner planner;
+  PlannerInput first_input = test::MakeValidHopperInput();
+  PlannerInput second_input = first_input;
+  second_input.request_id = "public-api-hopper-second";
+
+  const PlannerOutput first = planner.Plan(first_input);
+  const PlannerOutput second = planner.Plan(second_input);
+
+  ASSERT_EQ(first.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << first.reason_code;
+  ASSERT_EQ(second.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << second.reason_code;
+  const HopSegment& first_hop = HopperReferenceOf(first).segments.front();
+  const HopSegment& second_hop = HopperReferenceOf(second).segments.front();
+  EXPECT_DOUBLE_EQ(first_hop.available_delta_v_mps,
+                   second_hop.available_delta_v_mps);
 }
 
 TEST(HopperPlanner, HasNoHardCodedDistanceLimitAtHundredMeters) {
@@ -115,7 +125,8 @@ TEST(HopperPlanner, HasNoHardCodedDistanceLimitAtHundredMeters) {
   ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
       << output.reason_code;
   ASSERT_EQ(HopperReferenceOf(output).segments.size(), 1U);
-  EXPECT_LT(*output.diagnostics.best_cost, 0.20);
+  const HopSegment& segment = HopperReferenceOf(output).segments.front();
+  EXPECT_GE(segment.available_delta_v_mps, segment.required_delta_v_mps);
   const double seconds = std::chrono::duration<double>(
       HopperReferenceOf(output).segments.front().flight_time).count();
   EXPECT_GT(seconds, 0.0);
