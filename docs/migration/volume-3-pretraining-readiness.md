@@ -78,14 +78,14 @@ capability、reward 和源码 SHA-256 外，还绑定训练语义 SHA-256；旧 
 
 2026-08-08 在 Ubuntu 22.04 amd64 + ROS 2 Humble + RTX 4080 SUPER 主机完成以下验证：
 
-- 当前规划器、bridge、ROS 的外置 Release 构建成功；`colcon test-result` 为 292 tests，
-  0 errors，0 failures，0 skipped；
+- 当前规划器、bridge、ROS 和 model contract 的干净 8 包 Release 构建成功；
+  `colcon test-result` 为 36 tests，0 errors，0 failures，0 skipped；
 - model contract、训练、差分和性能 Python 回归为 645 passed，16 skipped；
-- 原生可见性候选 p95 为 0.128879 ms，30 m reveal p95 为 1.206533 ms；
-- 24-worker 当前规划器/正式 capability v2 回归的观测吞吐降幅为 1.761604%，低于 10% 门限；
+- 原生可见性候选 p95 为 0.126391 ms，30 m reveal p95 为 1.328467 ms；
+- 24-worker 当前规划器/正式 capability v2 回归的观测吞吐降幅为 2.808589%，低于 10% 门限；
 - 正式性能报告为
-  `/home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/sensor-performance.json`，
-  文件 SHA-256 为 `5d1cf5b390cb1d5e3985d56cfbf18ff61c260c8af6934fff3ba55db74426e690`；
+  `/home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/sensor-performance.json`，
+  文件 SHA-256 为 `2f05a5f6d46a051801aa61a19ea3befc1ddb8925429bb5a8bccc111a97a4862d`；
 - 仓库边界专项 14 passed，能力 v2 冻结校验通过。
 
 完整主机信息、命令、性能 fixture 和正式/测试证据边界见

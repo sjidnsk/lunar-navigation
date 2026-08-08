@@ -62,7 +62,7 @@ Isaac/ROS 外部仓的 `30 m/120°` `capability_provenance.json` 继续冻结为
 ## 验证主机和源码身份
 
 - 分支：`feature/sensor-observation-capability-design`；
-- 当前正式性能证据所绑定源码提交：`44df8814e6e4d29dca41134354f86bc1ac3577af`；
+- 当前正式性能证据所绑定源码提交：`c8cf14e167345150ba64dd141cfec5470e09ba41`；
 - OS：Ubuntu 22.04.5 LTS，Linux `6.8.0-124-generic`，`x86_64`；
 - ROS：ROS 2 Humble；
 - 编译器：GCC 11.4.0，CMake 3.22.1，Python 3.10.12；
@@ -76,7 +76,7 @@ Isaac/ROS 外部仓的 `30 m/120°` `capability_provenance.json` 继续冻结为
 本轮无燃料状态闭包使用的仓库外 Release 安装目录为：
 
 ```text
-/home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/final-33df16e/install
+/home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/install
 ```
 
 资格结果：
@@ -100,16 +100,16 @@ Isaac/ROS 外部仓的 `30 m/120°` `capability_provenance.json` 继续冻结为
 正式报告和原生 runner：
 
 ```text
-/home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/sensor-performance.json
-/home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/main-install/lib/lunar_planner_training_bridge/lunar_training_visibility_benchmark
+/home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/sensor-performance.json
+/home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/install/lib/lunar_planner_training_bridge/lunar_training_visibility_benchmark
 ```
 
 固定 50 次预热、200 次测量的结果：
 
 | 工作负载 | fixture | p50 | p95 | 门限 | 结果 |
 | --- | --- | ---: | ---: | ---: | --- |
-| 候选信息增益 | 256×256，4.0 m，30 m，64 candidates | 0.118651 ms | 0.128879 ms | 5 ms | 通过 |
-| 实际观测 reveal | 320×320，0.2 m，30 m | 1.079292 ms | 1.206533 ms | 2 ms | 通过 |
+| 候选信息增益 | 256×256，4.0 m，30 m，64 candidates | 0.119465 ms | 0.126391 ms | 5 ms | 通过 |
+| 实际观测 reveal | 320×320，0.2 m，30 m | 1.157882 ms | 1.328467 ms | 2 ms | 通过 |
 
 原生程序自报 `build_type=Release`、GCC 11.4.0 和 schema
 `native-visibility-benchmark/v1`。此前稳定性资格还连续执行了 8 轮相同 50/200 fixture，
@@ -121,15 +121,15 @@ reveal p95 范围为 1.289822–1.555860 ms，8/8 均低于门限。
 
 | 指标 | 结果 |
 | --- | ---: |
-| 禁用观测闭环 | 14.307369 step/s |
-| 启用观测闭环 | 14.055330 step/s |
-| 吞吐降幅 | 1.761604% |
+| 禁用观测闭环 | 14.215455 step/s |
+| 启用观测闭环 | 13.816201 step/s |
+| 吞吐降幅 | 2.808589% |
 | 门限 | <= 10% |
 
 该 24-worker 用例直接通过项目正式能力适配器加载当前 capability v2；工作负载标识为
 `cpp-v3-current-capability-v2`。报告内摘要为
-`22e258b2f8d4da517acbcc414e5eb3d5ea9b4b3a57b0856f0fd39e58ed744f45`，外部 JSON 文件
-SHA-256 为 `5d1cf5b390cb1d5e3985d56cfbf18ff61c260c8af6934fff3ba55db74426e690`，结果
+`201f872a3b67e8fc24b5d8c5fc1c24ff97f1515e6918b31de975fec861d7ebcf`，外部 JSON 文件
+SHA-256 为 `2f05a5f6d46a051801aa61a19ea3befc1ddb8925429bb5a8bccc111a97a4862d`，结果
 `passed: true`。
 
 ## 正式训练后续边界
@@ -148,13 +148,13 @@ SHA-256 为 `5d1cf5b390cb1d5e3985d56cfbf18ff61c260c8af6934fff3ba55db74426e690`�
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/main-install/setup.bash
+source /home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/install/setup.bash
 export PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training${PYTHONPATH:+:$PYTHONPATH}"
 
 /home/kai/CodexDownloads/lunar_navigation/volume3/venv/bin/python \
   training/tools/benchmark_sensor_observation.py \
-  --output /home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/sensor-performance.json \
-  --native-benchmark /home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/main-install/lib/lunar_planner_training_bridge/lunar_training_visibility_benchmark \
+  --output /home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/sensor-performance.json \
+  --native-benchmark /home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/install/lib/lunar_planner_training_bridge/lunar_training_visibility_benchmark \
   --workers 24
 ```
 

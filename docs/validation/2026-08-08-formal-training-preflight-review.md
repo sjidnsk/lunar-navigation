@@ -120,6 +120,19 @@ traversability/candidate cache，但仓库中还没有对应生成命令、manif
 
 在这五项完成前，不得把状态写成 `formal-training-ready`，也不得启动正式 rollout。
 
+## 本次复审资格证据
+
+- 源码提交：`c8cf14e167345150ba64dd141cfec5470e09ba41`；
+- 干净 Release 构建：8 packages；
+- ROS/C++：36 tests，0 errors，0 failures，0 skipped；
+- Python 契约、训练、差分与性能：645 passed，16 skipped；
+- 正式 24-worker 性能报告：
+  `/home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/sensor-performance.json`；
+- 报告内部 SHA-256：`201f872a3b67e8fc24b5d8c5fc1c24ff97f1515e6918b31de975fec861d7ebcf`；
+- JSON 文件 SHA-256：`2f05a5f6d46a051801aa61a19ea3befc1ddb8925429bb5a8bccc111a97a4862d`；
+- 候选 p95 `0.126391 ms`，reveal p95 `1.328467 ms`，24-worker 吞吐降幅
+  `2.808589%`，全部通过冻结门限。
+
 ## 文档权威顺序
 
 现行解释按以下顺序读取：
