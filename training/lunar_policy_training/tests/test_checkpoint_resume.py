@@ -18,6 +18,7 @@ from lunar_policy_training.budget import TrainingBudget  # noqa: E402
 from lunar_policy_training.cli import SignalStopFlag, TrainingBoundaryLoop  # noqa: E402
 from lunar_policy_training.checkpoint import (  # noqa: E402
     CHECKPOINT_SCHEMA_VERSION,
+    OBSERVATION_CONTRACT_VERSION,
     RunIdentity,
     build_training_checkpoint,
     config_sha256,
@@ -34,6 +35,7 @@ from lunar_policy_training.ppo.checkpoint import (  # noqa: E402
 from lunar_policy_training.training_semantics import (  # noqa: E402
     training_semantics_sha256,
 )
+from lunar_model_contract import ObservationContractV2  # noqa: E402
 
 
 def _identity(
@@ -51,6 +53,11 @@ def _identity(
     }
     fields.update(changes)
     return RunIdentity(**fields)
+
+
+def test_complete_checkpoint_identity_uses_current_observation_contract() -> None:
+    """Would fail if V2 tensors were mislabeled with the imported core's V1 tag."""
+    assert OBSERVATION_CONTRACT_VERSION == ObservationContractV2.version
 
 
 def _checkpoint(
@@ -104,7 +111,7 @@ def test_resume_preserves_consumed_gpu_budget(tmp_path: pathlib.Path) -> None:
     assert resumed.schema_version == CHECKPOINT_SCHEMA_VERSION
     assert resumed.schema_version == "lunar-ppo-checkpoint/v4"
     assert resumed.run_identity == _identity()
-    assert resumed.contract_version == "ObservationContractV1"
+    assert resumed.contract_version == OBSERVATION_CONTRACT_VERSION
     assert resumed.consumed_gpu_seconds == 7200.0
     assert budget.remaining_gpu_seconds == 86400.0 - 7200.0
 
@@ -139,7 +146,7 @@ def test_pre_extension_checkpoint_may_resume_against_extended_manifest_identity(
 
     resumed = load_checkpoint_for_resume(
         path,
-        expected_contract_version="ObservationContractV1",
+        expected_contract_version=OBSERVATION_CONTRACT_VERSION,
         expected_config_hash=checkpoint.config_hash,
         expected_source_commit=checkpoint.source_commit,
         expected_run_identity=checkpoint.run_identity,
@@ -165,7 +172,7 @@ def test_checkpoint_cannot_claim_more_budget_than_manifest(
     with pytest.raises(CheckpointError, match="budget"):
         load_checkpoint_for_resume(
             path,
-            expected_contract_version="ObservationContractV1",
+            expected_contract_version=OBSERVATION_CONTRACT_VERSION,
             expected_config_hash=checkpoint.config_hash,
             expected_source_commit=checkpoint.source_commit,
             expected_run_identity=checkpoint.run_identity,
@@ -247,7 +254,7 @@ def test_resume_rejects_contract_config_or_source_drift(
     path = tmp_path / "latest.pt"
     save_checkpoint_atomic(path, checkpoint)
     expected = {
-        "contract": "ObservationContractV1",
+        "contract": OBSERVATION_CONTRACT_VERSION,
         "config_hash": checkpoint.config_hash,
         "source_commit": checkpoint.source_commit,
     }
@@ -399,7 +406,7 @@ def test_resume_rejects_frozen_runtime_identity_drift(
     with pytest.raises(CheckpointError, match=message):
         load_checkpoint_for_resume(
             path,
-            expected_contract_version="ObservationContractV1",
+            expected_contract_version=OBSERVATION_CONTRACT_VERSION,
             expected_config_hash=checkpoint.config_hash,
             expected_source_commit=checkpoint.source_commit,
             expected_run_identity=checkpoint.run_identity,
@@ -438,7 +445,7 @@ def test_resume_rejects_each_v4_run_identity_field(
     with pytest.raises(CheckpointError, match=field.replace("_", " ")):
         load_checkpoint_for_resume(
             path,
-            expected_contract_version="ObservationContractV1",
+            expected_contract_version=OBSERVATION_CONTRACT_VERSION,
             expected_config_hash=checkpoint.config_hash,
             expected_source_commit=checkpoint.source_commit,
             expected_run_identity=expected,
@@ -453,6 +460,7 @@ def test_v2_checkpoint_requires_explicit_development_smoke_reader(
     body = _body_from_checkpoint(checkpoint)
     body.pop("run_identity")
     body["schema_version"] = "lunar-ppo-checkpoint/v2"
+    body["contract_version"] = "ObservationContractV1"
     path = tmp_path / "legacy-v2.pt"
     torch.save(
         {"body": body, "body_sha256": _semantic_sha256(body)},
@@ -477,6 +485,7 @@ def test_v3_checkpoint_is_read_only_development_evidence(
     body = _body_from_checkpoint(checkpoint)
     body["run_identity"].pop("training_semantics_sha256")
     body["schema_version"] = "lunar-ppo-checkpoint/v3"
+    body["contract_version"] = "ObservationContractV1"
     path = tmp_path / "legacy-v3.pt"
     torch.save(
         {"body": body, "body_sha256": _semantic_sha256(body)},
@@ -493,7 +502,7 @@ def test_v3_checkpoint_is_read_only_development_evidence(
     with pytest.raises(CheckpointError, match="read-only"):
         load_checkpoint_for_resume(
             path,
-            expected_contract_version="ObservationContractV1",
+            expected_contract_version=OBSERVATION_CONTRACT_VERSION,
             expected_config_hash=checkpoint.config_hash,
             expected_source_commit=checkpoint.source_commit,
             expected_run_identity=checkpoint.run_identity,

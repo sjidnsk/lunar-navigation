@@ -13,13 +13,13 @@ from pathlib import Path
 
 import torch
 from torch import nn
+from lunar_model_contract import ObservationContractV2
 
 from .budget import (
     BUDGET_EXTENSION_BLOCK_SECONDS,
     INITIAL_GPU_BUDGET_SECONDS,
 )
 from .ppo.checkpoint import (
-    OBSERVATION_CONTRACT_VERSION,
     CheckpointError,
     _capture_rng_state,
     _cpu_copy,
@@ -31,8 +31,10 @@ from .ppo.checkpoint import (
 
 
 CHECKPOINT_SCHEMA_VERSION = "lunar-ppo-checkpoint/v4"
+OBSERVATION_CONTRACT_VERSION = ObservationContractV2.version
 _LEGACY_V3_SCHEMA_VERSION = "lunar-ppo-checkpoint/v3"
 _LEGACY_V2_SCHEMA_VERSION = "lunar-ppo-checkpoint/v2"
+_LEGACY_OBSERVATION_CONTRACT_VERSION = "ObservationContractV1"
 _RUN_IDENTITY_FIELDS = (
     "run_kind",
     "data_sha256",
@@ -546,8 +548,14 @@ def _validate_body(body: object) -> None:
 def _validate_v2_body(body: object) -> None:
     if not isinstance(body, Mapping) or set(body) != _V2_BODY_FIELDS:
         raise CheckpointError("v2 checkpoint body structure is invalid")
+    if body["contract_version"] not in (
+        OBSERVATION_CONTRACT_VERSION,
+        _LEGACY_OBSERVATION_CONTRACT_VERSION,
+    ):
+        raise CheckpointError("checkpoint contract version mismatch")
     promoted = dict(body)
     promoted["schema_version"] = CHECKPOINT_SCHEMA_VERSION
+    promoted["contract_version"] = OBSERVATION_CONTRACT_VERSION
     promoted["run_identity"] = RunIdentity(
         run_kind="development-smoke",
         data_sha256="0" * 64,
@@ -564,9 +572,15 @@ def _validate_v2_body(body: object) -> None:
 def _validate_v3_body(body: object) -> None:
     if not isinstance(body, Mapping) or set(body) != _BODY_FIELDS:
         raise CheckpointError("v3 checkpoint body structure is invalid")
+    if body["contract_version"] not in (
+        OBSERVATION_CONTRACT_VERSION,
+        _LEGACY_OBSERVATION_CONTRACT_VERSION,
+    ):
+        raise CheckpointError("checkpoint contract version mismatch")
     legacy_identity = _legacy_v3_run_identity_from_mapping(body["run_identity"])
     promoted = dict(body)
     promoted["schema_version"] = CHECKPOINT_SCHEMA_VERSION
+    promoted["contract_version"] = OBSERVATION_CONTRACT_VERSION
     promoted["run_identity"] = {
         **{
             field: getattr(legacy_identity, field)
@@ -752,6 +766,7 @@ def _is_source_commit(value: object) -> bool:
 
 __all__ = [
     "CHECKPOINT_SCHEMA_VERSION",
+    "OBSERVATION_CONTRACT_VERSION",
     "LegacyRunIdentityV3",
     "RunIdentity",
     "TrainingCheckpointV2",

@@ -39,6 +39,7 @@ from .budget import (
     extend_budget_manifest,
 )
 from .checkpoint import (
+    OBSERVATION_CONTRACT_VERSION,
     RunIdentity,
     build_training_checkpoint,
     config_sha256,
@@ -1060,7 +1061,7 @@ def _evaluate_checkpoint(
         )
     checkpoint = load_checkpoint_for_resume(
         checkpoint_target,
-        expected_contract_version="ObservationContractV1",
+        expected_contract_version=OBSERVATION_CONTRACT_VERSION,
         expected_config_hash=config_sha256(calibrated.config.as_frozen_dict()),
         expected_source_commit=_source_commit(repository_root),
         expected_run_identity=calibrated.run_identity,
@@ -1303,7 +1304,7 @@ def _resume_training_run(
         raise ArtifactRootError("resume checkpoint must be under checkpoints/")
     checkpoint = load_checkpoint_for_resume(
         target,
-        expected_contract_version="ObservationContractV1",
+        expected_contract_version=OBSERVATION_CONTRACT_VERSION,
         expected_config_hash=config_sha256(config.as_frozen_dict()),
         expected_source_commit=source_commit,
         expected_run_identity=calibrated.run_identity,
