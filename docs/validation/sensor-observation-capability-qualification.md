@@ -11,9 +11,8 @@
 本报告不表示正式 PPO 训练已经开始。正式运动能力 closure 已由仓库内批准的三平台
 capability v2 闭合；`30 m/360°` 观测语义和 Release 性能门也已闭合。正式训练不再等待
 外部 `lunar-training-capability-freeze/v1`，也不把 URDF/mesh 资源包当作运动能力的重复证明。
-当前正式 `sensor-observation-performance/v1` 报告已经生成并通过，训练代码已具备进入下一项
-独立数据/运行环境门的资格，但尚不具备启动 formal rollout 的完整公开命令链。正式 cache、
-环境 builder、calibrate/train/resume/evaluate 闭环的复审结论见
+当前正式 `sensor-observation-performance/v1` 报告已经生成并通过；正式 cache、统一环境
+builder、calibrate/train/resume/evaluate 和 formal preflight 也已闭合。训练前状态见
 `docs/validation/2026-08-08-formal-training-preflight-review.md`。
 
 ## 权威基线和历史边界
@@ -61,8 +60,9 @@ Isaac/ROS 外部仓的 `30 m/120°` `capability_provenance.json` 继续冻结为
 
 ## 验证主机和源码身份
 
-- 分支：`feature/sensor-observation-capability-design`；
-- 当前正式性能证据所绑定源码提交：`c8cf14e167345150ba64dd141cfec5470e09ba41`；
+- 分支：`feature/formal-training-environment-closure`；
+- 当前正式性能证据所绑定传感/训练源码提交：
+  `e7c0c3b0c1563c99ec8d6b59454c42aa8e58aa98`；
 - OS：Ubuntu 22.04.5 LTS，Linux `6.8.0-124-generic`，`x86_64`；
 - ROS：ROS 2 Humble；
 - 编译器：GCC 11.4.0，CMake 3.22.1，Python 3.10.12；
@@ -76,91 +76,80 @@ Isaac/ROS 外部仓的 `30 m/120°` `capability_provenance.json` 继续冻结为
 本轮无燃料状态闭包使用的仓库外 Release 安装目录为：
 
 ```text
-/home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/install
+/home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-install
 ```
 
 资格结果：
 
-- Release 构建 8 个 ROS 包成功，包括两组消息、配置、core、model contract、Nav2 adapter、
-  training bridge 和 ROS server；
-- core 聚焦回归：24 tests，0 errors，0 failures；
-- message/core/bridge/ROS 干净结果：36 tests，0 errors，0 failures；
-- `model_contract/tests`、完整训练测试、差分和性能测试：645 passed，16 skipped；
-- 原生/参考可见性随机小图等价回归：9 passed；
-- 性能门、sensor 和 CLI 聚焦回归：57 passed；
+- Release 构建 7 个 ROS 包成功，包括两组消息、配置、core、Nav2 adapter、training bridge 和
+  ROS server；`colcon test-result` 为 302 tests、0 errors、0 failures、0 skipped；
+- `model_contract/tests` 与完整训练测试：690 passed、1 skipped；
+- 规划、ROS、差分和性能仓库级回归：179 passed、2 skipped；
 - 仓库边界检查：`repository boundaries: OK`，专项测试 14 passed；
 - 能力 schema v2 冻结校验：通过，规范化 SHA-256 与本报告记录一致；
 - UTF-8 读取和 `git diff --check integration...HEAD`：通过。
 
-跳过项是需要显式设备或资格开关的测试，不被当成通过项；24-worker 资格用例已另行显式
-打开并执行。
+跳过项是需要显式设备或资格开关的测试，不被当成通过项；24-worker 资格用例已另行显式执行。
 
 ## Release 性能证据
 
 正式报告和原生 runner：
 
 ```text
-/home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/sensor-performance.json
-/home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/install/lib/lunar_planner_training_bridge/lunar_training_visibility_benchmark
+/home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/e7c0c3b/sensor-performance.json
+/home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-install/lib/lunar_planner_training_bridge/lunar_training_visibility_benchmark
 ```
 
 固定 50 次预热、200 次测量的结果：
 
 | 工作负载 | fixture | p50 | p95 | 门限 | 结果 |
 | --- | --- | ---: | ---: | ---: | --- |
-| 候选信息增益 | 256×256，4.0 m，30 m，64 candidates | 0.119465 ms | 0.126391 ms | 5 ms | 通过 |
-| 实际观测 reveal | 320×320，0.2 m，30 m | 1.157882 ms | 1.328467 ms | 2 ms | 通过 |
+| 候选信息增益 | 256×256，4.0 m，30 m，64 candidates | 0.119669 ms | 0.132299 ms | 5 ms | 通过 |
+| 实际观测 reveal | 320×320，0.2 m，30 m | 1.212102 ms | 1.381889 ms | 2 ms | 通过 |
 
 原生程序自报 `build_type=Release`、GCC 11.4.0 和 schema
 `native-visibility-benchmark/v1`。此前稳定性资格还连续执行了 8 轮相同 50/200 fixture，
 reveal p95 范围为 1.289822–1.555860 ms，8/8 均低于门限。
 
 24-worker 回归使用当前 `PlannerBridge` 和当前 C++ v3 规划器，三平台各 8 worker；全局图
-为通用多分辨率 `640×640 @ 1.6 m`，局部图为 `320×320 @ 0.2 m`。每个 worker 的规划输入
+为通用多分辨率 `256×256 @ 4.0 m`，局部图为 `320×320 @ 0.2 m`。每个 worker 的规划输入
 通过 `Frozen*Capability.to_bridge_capability()` 注入 schema-valid v2 能力。结果为：
 
 | 指标 | 结果 |
 | --- | ---: |
-| 禁用观测闭环 | 14.215455 step/s |
-| 启用观测闭环 | 13.816201 step/s |
-| 吞吐降幅 | 2.808589% |
+| 禁用观测闭环 | 15.471201 step/s |
+| 启用观测闭环 | 14.403742 step/s |
+| 吞吐降幅 | 6.899653% |
 | 门限 | <= 10% |
 
 该 24-worker 用例直接通过项目正式能力适配器加载当前 capability v2；工作负载标识为
 `cpp-v3-current-capability-v2`。报告内摘要为
-`201f872a3b67e8fc24b5d8c5fc1c24ff97f1515e6918b31de975fec861d7ebcf`，外部 JSON 文件
-SHA-256 为 `2f05a5f6d46a051801aa61a19ea3befc1ddb8925429bb5a8bccc111a97a4862d`，结果
+`95ba584aa18b9f57ec087f295215ecc6c185dd0a3ad725ebb27ecbb525a9a1d4`，外部 JSON 文件
+SHA-256 为 `c919f9beb2c9d255d1c599b134561f69c9f485f520009e3a8593a655d3f952ff`，结果
 `passed: true`。
 
-## 正式训练后续边界
+## 正式训练边界
 
-运动能力、观测语义和性能门已经闭合；正式数据/cache/环境/CLI 链尚未闭合。后续按独立流程完成：
-
-1. 实现并生成项目正式三平台 traversability/candidate cache，绑定正式能力、数据、训练语义和
-   当前规划器身份；旧 Volume 3 cache/checkpoint 不得续用。
-2. 闭合公开 `calibrate/train/resume/evaluate` 的正式环境 builder 与观测模板注入。
-3. 使用本报告的正式性能 JSON 执行进程级 formal preflight，通过后冻结 worker/micro-batch 并
-   启动 seed 4080。
-4. ONNX、TensorRT、AGX 和实际
-   平台验收仍属于后续独立门。
+运动能力、观测语义、性能门和正式数据/cache/环境/CLI 链均已闭合。当前状态是
+`formal-training-ready / training-not-started`；本报告不授权或声称 seed 4080 已启动。
+ONNX、TensorRT、AGX 和实际平台验收仍属于后续独立门。
 
 正式性能命令为：
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/install/setup.bash
+source /home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-install/setup.bash
 export PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training${PYTHONPATH:+:$PYTHONPATH}"
 
 /home/kai/CodexDownloads/lunar_navigation/volume3/venv/bin/python \
   training/tools/benchmark_sensor_observation.py \
-  --output /home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/sensor-performance.json \
-  --native-benchmark /home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/install/lib/lunar_planner_training_bridge/lunar_training_visibility_benchmark \
+  --output /home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/e7c0c3b/sensor-performance.json \
+  --native-benchmark /home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-install/lib/lunar_planner_training_bridge/lunar_training_visibility_benchmark \
   --workers 24
 ```
 
 正式 `train/resume/evaluate` 使用该外部 JSON 路径进行性能预检，同时自行加载仓库内正式
-capability v2。本轮完成的是运动能力、观测语义与性能资格闭包；正式 cache、环境 builder 和
-公开 CLI 链仍未闭合，也未启动正式 PPO 训练。
+capability v2。本轮没有启动正式 PPO 训练。
 
 ## 外部 Isaac/ROS/RViz 桥同步
 

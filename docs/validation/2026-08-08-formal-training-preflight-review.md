@@ -4,17 +4,15 @@
 
 ## 结论
 
-当前功能分支可以合入 `integration`，因为现行 C++ v3 规划、三平台 capability v2、
-`30 m/360°` 观测闭环、平台动作语义和飞跃式无累计燃料合同已经一致实现并完成资格验证。
-
-正式 PPO 训练仍不能启动。阻断原因不是能力资料、传感器标定、安全审计或通用代码质量，而是
-正式训练自身的数据与运行链还没有闭合：正式 cache 没有生成/加载入口，公开 `calibrate` 不接受
-formal 配置，公开 `train/resume` 没有构造正式环境工厂和正式观测模板，公开 `evaluate` 明确拒绝
-formal 评估。因此本次合并状态定义为：
+现行 C++ v3 规划、三平台 capability v2、`30 m/360°` 观测闭环、平台动作语义、飞跃式无累计
+燃料合同、正式极区场景/cache 和公开 formal 运行链已经一致闭合。当前状态定义为：
 
 ```text
-integration-qualified / formal-training-blocked-on-environment-and-cache
+formal-training-ready / training-not-started
 ```
+
+本结论只表示启动正式训练前的输入、环境、身份、恢复和评估入口已经准备完毕。校准 manifest
+的 `global_step=0`，未产生正式 checkpoint，也未执行 seed 4080 的 PPO 参数更新。
 
 ## 复审范围
 
@@ -76,62 +74,51 @@ PPO loss 中统一 mask，并以无目标 yaw 的请求调用规划器。
 奖励、终止条件和下一 Goal 都不存在上一跳剩余燃料。外部 RViz/Isaac 桥同样不发布推进剂 Topic
 或执行燃料提交。
 
-## 尚未闭合的正式训练链
+## 已闭合的正式训练链
 
-### 1. 正式 cache 没有可执行生产入口
+### 1. 正式场景与 cache
 
-文档要求按当前 capability v2、数据 source/split、观测语义和当前 C++ v3 规划器重新生成三平台
-traversability/candidate cache，但仓库中还没有对应生成命令、manifest schema、正式加载器和
-身份校验。旧 Volume 3 cache 不允许复用。
+`prepare-data` 已按 source/split v2、确定性场景生成器、capability v2、训练语义和当前 C++ v3
+规划器生成 full cache。生产加载器校验完整 inventory、每文件摘要和统一 RunIdentity；旧 Volume 3
+cache 不能通过该身份门。
 
-### 2. formal calibrate 不可执行
+### 2. formal calibrate 可执行
 
-公开 `calibrate` 调用 `_calibrate_training_run()`，该函数只接受 `development-smoke`，formal
-配置会以 `formal runtime calibration requires the future non-proxy environment` 拒绝。与此同时，
-公开 `train` 又要求已存在且已冻结的 calibrated artifact root，形成无法通过公开命令闭合的前后
-依赖。
+公开 `calibrate` 只接受正式配置、full cache 和当前主机/源码的传感器性能报告。当前主机实测
+18/24 worker 与 micro-batch 1/2/4 后，冻结为 24 workers、micro-batch 4，并把 cache、场景
+schedule、能力、训练语义和源码身份写入 run manifest。
 
-### 3. formal train/resume 缺少环境绑定
+### 3. formal train/resume 使用同一环境
 
-`_start_training_run()` 和 `_resume_training_run()` 支持内部注入
-`FrozenCapabilityEnvironmentFactory` 与 `PolicyBatch`，但公开 CLI 只传入 capability bundle。
-`_run_updates()` 因而会拒绝缺失的正式环境工厂或正式观测模板。当前只有测试代码构造该工厂，
-没有生产 builder 把正式数据窗口、当前 capability、传感器闭环、请求身份和执行器装配成 worker。
+唯一 `FormalEnvironmentBuilder` 从 cache manifest 构造正式数据窗口、当前 capability、传感器
+闭环、请求身份和执行器；公开 `train/resume` 均从已校准 run root 重新装配同一 factory 与
+observation template。update boundary 保存/恢复场景游标和 RNG，不允许从半个 episode 恢复。
 
-### 4. formal evaluate 明确未实现
+### 4. formal evaluate 与 preflight
 
-`_evaluate_checkpoint()` 对 formal run 无条件返回
-`formal evaluation environment is not configured yet`。因此即使绕过入口启动训练，也无法完成同一
-正式环境上的评估闭环。
+公开 `evaluate` 固定使用 validation、test 和六站点 JAXA holdout，不读取 train split；PPO 与
+基线在同一场景、起点和请求序列上比较。进程级 `formal-preflight` 已验证非 proxy evaluation、
+三平台 worker、同世界/同请求、4 m/0.2 m 映射、无累计燃料和确定恢复，且不创建 checkpoint。
 
-## 启动正式训练前必须满足的唯一后续门
+## 启动正式训练的边界
 
-下一阶段只实施以下直接闭环，不扩展范围：
-
-1. 生成并冻结当前三平台正式 traversability/candidate cache，manifest 同时绑定 data、split、
-   generator、capability、训练语义和当前规划器源码身份；
-2. 提供唯一的正式环境 builder，并由公开 CLI 构造
-   `FrozenCapabilityEnvironmentFactory` 和正式观测模板；
-3. 让 `calibrate -> train -> checkpoint -> resume -> evaluate` 全部通过同一数据、世界、请求、
-   capability 和传感器边界；
-4. 增加一个不消耗正式 24 小时预算的进程级 formal preflight，证明公开命令不会落回 proxy、旧
-   planner、旧 capability 或旧 cache；
-5. 完成上述闭环后再冻结 worker/micro-batch，并启动 seed 4080。
-
-在这五项完成前，不得把状态写成 `formal-training-ready`，也不得启动正式 rollout。
+训练前准备门已经满足，但本轮授权明确不启动 24 小时训练。后续启动必须显式运行公开
+`train`，复用本资格报告记录的 calibrated root；任何 cache、能力、训练语义、C++ v3 或传感器
+报告身份漂移都应先重新生成 cache、preflight 和校准证据，而不是绕过校验。
 
 ## 本次复审资格证据
 
-- 源码提交：`c8cf14e167345150ba64dd141cfec5470e09ba41`；
-- 干净 Release 构建：8 packages；
-- ROS/C++：36 tests，0 errors，0 failures，0 skipped；
-- Python 契约、训练、差分与性能：645 passed，16 skipped；
-- 正式 24-worker 性能报告：
-  `/home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/sensor-performance.json`；
-- 报告内部 SHA-256：`201f872a3b67e8fc24b5d8c5fc1c24ff97f1515e6918b31de975fec861d7ebcf`；
-- JSON 文件 SHA-256：`2f05a5f6d46a051801aa61a19ea3befc1ddb8925429bb5a8bccc111a97a4862d`；
-- 候选 p95 `0.126391 ms`，reveal p95 `1.328467 ms`，24-worker 吞吐降幅
-  `2.808589%`，全部通过冻结门限。
+- 功能源码提交：`e7c0c3b0c1563c99ec8d6b59454c42aa8e58aa98`；
+- full cache：1734 场景，内部 manifest SHA-256
+  `e8b2321507217fbb69a30ba7948d18a8d7309eb52ed13ef8e3ecbdedeca5d01c`；
+- 正式传感器报告内部 SHA-256：
+  `95ba584aa18b9f57ec087f295215ecc6c185dd0a3ad725ebb27ecbb525a9a1d4`；
+- formal preflight 九项检查全部通过，报告内部 SHA-256：
+  `14ab85bc7f977da962452bce663202320c1fcf49806e4d0a95c4326053ef9c1d`；
+- 校准选择 24 workers、micro-batch 4，`global_step=0`。
+
+所有路径、外部文件 SHA-256、分场景数量、Release 结果和复现命令统一记录在
+`docs/validation/2026-08-08-formal-training-environment-qualification.md`。
 
 ## 文档权威边界
 

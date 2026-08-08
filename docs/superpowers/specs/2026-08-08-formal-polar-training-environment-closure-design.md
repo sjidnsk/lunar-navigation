@@ -5,7 +5,7 @@
 
 ## 目标与结论
 
-本设计补齐 seed `4080` 正式 PPO 训练前唯一尚未闭合的链：把已经锁定的月球极区数据、
+本设计定义并已闭合 seed `4080` 正式 PPO 训练前的数据与运行链：把已经锁定的月球极区数据、
 确定性随机障碍、三平台 capability v2、`30 m/360°` 观测抽象和当前 C++ v3 规划器装配成
 同一个可复现训练环境，并让公开命令完整支持：
 
@@ -23,8 +23,10 @@ worker 与 micro-batch，并证明上述公开入口使用同一份正式世界�
 
 - 仓库外 `polar_source_lock_v1.json` 所锁定的 NASA LOLA 南极 DEM、count 栅格和 JAXA
   LUPEX DataS1；
-- 仓库外 `polar_split_v1.json`，内部 split SHA-256 为
-  `5d458081972e1ee767c5f91dd5cb42d519214a0111a6e28dfaa7283025ec99e2`；
+- 仓库外 `polar_split_v2.json`，文件 SHA-256 为
+  `4434b342dddd184ac7ce2cd5b5c2e5e199ef28247f2602c7d9cfa5dfc51e1e2d`，内部
+  split SHA-256 为
+  `6da68f54d7349142f787d0e82e3cc08b44770f99ae6deddb9f98b7cc5bfcbd18`；
 - 仓库内项目正式 capability v2，包含轮式、足式、飞跃式和统一 `30 m/360°` 观测能力；
 - `integration` 当前 C++ v3 planner 与 `lunar_planner_training_bridge`；
 - 当前 reward、七输入观测合同和飞跃式无累计燃料语义。
@@ -163,7 +165,8 @@ artifact 都位于仓库外。
 - 高程、障碍与不确定度只由已观测子单元聚合；
 - 网络 32×32 局部裁剪直接读取 0.2 m 已观测状态，未知单元仍为零且由 mask 表达。
 
-候选潜在增益继续在 4 m observed-only 图上快速估算，不能修改上述观测状态或 reward。
+候选潜在增益继续在 4 m observed-only 图上快速估算，不能修改上述观测状态或 reward。机器人
+当前所在的 4 m 全局栅格必须在估算前排除；原地不动不构成探索候选，也不能触发平台规划。
 
 ## 平台投影、起点和请求
 

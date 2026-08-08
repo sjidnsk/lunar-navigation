@@ -1,6 +1,6 @@
 # Volume 3 月球极区 PPO 训练前状态交接
 
-状态：`integration-qualified / formal-training-blocked-on-environment-and-cache`
+状态：`formal-training-ready / training-not-started`
 
 ## 当前结论
 
@@ -17,11 +17,11 @@ typed capability。URDF/mesh 继续服务于仿真外观、碰撞代理和设备
 计算该包线，不是 episode 燃料状态；训练请求、观测、奖励和终止条件均不累计燃料，也不会因
 先前跳跃次数降低下一跳可达性。
 
-2026-08-08 最终训练前复审确认：上述现行算法与能力基础设施可以合入 `integration`，但公开
-formal 训练链尚未闭合。`calibrate` 当前只接受 development-smoke；`train/resume` 没有从公开
-入口构造正式环境工厂和观测模板；`evaluate` 明确拒绝 formal；正式 traversability/candidate
-cache 也还没有生成与加载入口。因此本状态不等于 `formal-training-ready`。完整证据见
-`docs/validation/2026-08-08-formal-training-preflight-review.md`。
+2026-08-08 最终训练前复审确认：正式 full cache、统一环境 builder、公开
+`calibrate/train/resume/evaluate`、非 proxy 评估与进程级 formal preflight 已闭合。当前主机已
+冻结 `24 workers（WHEELED/LEGGED/HOPPER 各 8）+ micro-batch 4`；校准 manifest 的
+`global_step=0`，没有正式 rollout、checkpoint 或参数更新。完整证据见
+`docs/validation/2026-08-08-formal-training-environment-qualification.md`。
 
 ## 现行权威覆盖规则
 
@@ -49,7 +49,10 @@ NASA/JAXA 极区数据 source/split 锁仍然有效，因为它们固定的是�
 算法或平台运动能力。seed `4080` 的 split 为：NASA train 192、validation 48、test 48；
 JAXA `CR1`、`GR1`、`GR2`、`LP1`、`MP1`、`MP2` 六站点只进入 holdout。内部
 `split_sha256` 为
-`5d458081972e1ee767c5f91dd5cb42d519214a0111a6e28dfaa7283025ec99e2`。
+`6da68f54d7349142f787d0e82e3cc08b44770f99ae6deddb9f98b7cc5bfcbd18`；现行外部文件是
+`polar_split_v2.json`，文件 SHA-256 为
+`4434b342dddd184ac7ce2cd5b5c2e5e199ef28247f2602c7d9cfa5dfc51e1e2d`。v1 只保留为历史
+划分证据，正式 cache 不读取它。
 
 当前 `ObservationContractV2` 保持七输入：
 
@@ -74,37 +77,30 @@ checkpoint 已升级为 `lunar-ppo-checkpoint/v4`。`RunIdentity` 除 data、spl
 capability、reward 和源码 SHA-256 外，还绑定训练语义 SHA-256；旧 v3 checkpoint 只允许
 显式 development-smoke 读取，正式 resume 必须拒绝。
 
-## 新观测闭环资格
+## 正式环境与观测闭环资格
 
-2026-08-08 在 Ubuntu 22.04 amd64 + ROS 2 Humble + RTX 4080 SUPER 主机完成以下验证：
+2026-08-08 在 Ubuntu 22.04 amd64 + ROS 2 Humble + RTX 4080 SUPER 主机完成以下现行验证：
 
-- 当前规划器、bridge、ROS 和 model contract 的干净 8 包 Release 构建成功；
-  `colcon test-result` 为 36 tests，0 errors，0 failures，0 skipped；
-- model contract、训练、差分和性能 Python 回归为 645 passed，16 skipped；
-- 原生可见性候选 p95 为 0.126391 ms，30 m reveal p95 为 1.328467 ms；
-- 24-worker 当前规划器/正式 capability v2 回归的观测吞吐降幅为 2.808589%，低于 10% 门限；
-- 正式性能报告为
-  `/home/kai/CodexDownloads/lunar_navigation/formal_training_preflight/c8cf14e/sensor-performance.json`，
-  文件 SHA-256 为 `2f05a5f6d46a051801aa61a19ea3befc1ddb8925429bb5a8bccc111a97a4862d`；
-- 仓库边界专项 14 passed，能力 v2 冻结校验通过。
+- full cache 共 1734 个冻结场景：NASA train 1536、validation 96、test 96，另有 6 个 JAXA
+  holdout；cache manifest 内部摘要为
+  `e8b2321507217fbb69a30ba7948d18a8d7309eb52ed13ef8e3ecbdedeca5d01c`；
+- 全局候选和网络状态使用 `256×256 @ 4.0 m`，局部规划/reveal 使用
+  `320×320 @ 0.2 m`，网络局部裁剪为 `32×32 @ 0.2 m`；三者来自同一场景定义；
+- 最新传感器报告中，候选 p95 为 `0.132299 ms`，30 m reveal p95 为 `1.381889 ms`，
+  24-worker 观测吞吐降幅为 `6.899653%`，均通过冻结门限；
+- formal preflight 的九项检查全部通过，包含三平台、同世界、4 m/0.2 m、无累计燃料、
+  update-boundary resume 和非 proxy evaluation；
+- 正式校准选择 24 workers 与 micro-batch 4，`global_step=0`。
 
 完整主机信息、命令、性能 fixture 和正式/测试证据边界见
 `docs/validation/sensor-observation-capability-qualification.md`。
 
-## 正式训练阻断与后续顺序
+## 正式训练启动边界
 
-当前正式能力与 `sensor-observation-performance/v1` 已闭合。历史 Isaac/ROS
-`capability_provenance.json` 是 30 m/120° 旧 schema 证据，只保留为历史快照；正式工具不再
-接收可替换项目权威的 `--capability-lock`。
+正式训练前的项目内准备已经完成。历史 Isaac/ROS `capability_provenance.json` 是
+30 m/120° 旧 schema 证据，只保留为历史快照；正式工具不接收可替换项目权威的
+`--capability-lock`。下一步只能由用户另行授权执行 seed 4080 的正式 `train`；启动时必须复用
+已经校准的 full cache、传感器报告和 run root，不得重用旧 Volume 3 cache/checkpoint，也不得
+回退到 proxy。
 
-后续顺序是：
-
-1. 实现正式 traversability/candidate cache 的生成、manifest、加载和身份校验；旧 Volume 3
-   cache/checkpoint 不得沿用。
-2. 用唯一正式环境 builder 闭合公开 `calibrate/train/resume/evaluate`，并确保四个入口都使用
-   当前 capability v2、当前 C++ v3、30 m/360° 观测边界和同一数据身份。
-3. 以已通过的正式性能 JSON 运行不消耗正式训练预算的进程级 formal preflight。
-4. preflight 通过后重新冻结 worker 与 micro-batch，再启动 seed 4080 的可暂停训练。
-
-正式训练、完整评估、ONNX/TensorRT、AGX 和实际平台资格仍分别受后续门控制；本交接不会
-把开发态或 Ubuntu 仿真结果升级成这些状态。
+本交接不声称正式训练、完整模型评估、ONNX/TensorRT、AGX 或实际平台资格已经完成。

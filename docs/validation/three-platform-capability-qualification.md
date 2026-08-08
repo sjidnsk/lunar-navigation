@@ -66,43 +66,45 @@ SHA-256 为：
 
 基准为 CPU 规划测试；记录 GPU 仅用于复现整机环境，不表示规划器使用 GPU。
 
-## Release 性能资格
+## Release 性能资格（2026-08-08 现行 4 m 修订）
 
 基准 schema 为 `lunar-three-platform-qualification/v1`。每个用例预热 1 次、测量 20 次，
 并要求规划结果、原因码、模式、路线哈希、展开计数和峰值计数在重复运行间一致。L0 基础
-分辨率为 `0.20 m`；千米用例按通用二进制多分辨率规则使用 L3 `1.60 m` 全局图，同时保留
-L0 `0.20 m` 局部图。
+分辨率为 `0.20 m`；现行通用尺度因子为 `[1,2,4,8,16,20]`，并选择每轴不超过目标
+`256` 格的最细层。千米用例因此使用 `250×250 @ 4.0 m` 的 L5 全局图，同时保留
+L0 `0.20 m` 局部图。该选择来自统一公式，不是千米范围特判。
 
 足式 50 m 和两个千米用例的 `3.0 s` 门限由首个验证通过的 Release 基线冻结；其他门限
 来自批准实施计划。所有门限都只用于自动化回归。
 
 | 用例 | 全局地图 | p50 | p95 | max | P95 门限 | 结果 |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
-| `wheel_50m_l0` | 50×50 m，0.20 m，L0 | 0.638637 s | 0.645472 s | 0.647349 s | 2.0 s | 通过 |
-| `legged_50m_l0` | 50×50 m，0.20 m，L0 | 1.082798 s | 1.099636 s | 1.101909 s | 3.0 s | 通过 |
-| `wheel_1km_l3` | 1000×1000 m，1.60 m，L3 | 0.844383 s | 0.854068 s | 0.859400 s | 3.0 s | 通过 |
-| `legged_1km_l3` | 1000×1000 m，1.60 m，L3 | 1.790700 s | 1.813373 s | 1.818184 s | 3.0 s | 通过 |
-| `hopper_direct_100m` | 112×12 m，0.20 m，L0 | 0.347620 s | 0.353342 s | 0.353598 s | 1.0 s | 通过 |
-| `hopper_alternate_time_100m` | 112×12 m，0.20 m，L0 | 0.368295 s | 0.376066 s | 0.377887 s | 2.0 s | 通过 |
-| `hopper_complete_blocked_100m` | 112×12 m，0.20 m，L0 | 0.025003 s | 0.025602 s | 0.026496 s | 5.0 s | 通过 |
+| `wheel_50m_l0` | 50×50 m，0.20 m，L0 | 0.444684 s | 0.454381 s | 0.454786 s | 2.0 s | 通过 |
+| `wheel_local_frontier_stress` | 50×50 m，0.20 m，L0 | 0.435236 s | 0.436207 s | 0.437474 s | 2.0 s | 通过 |
+| `legged_50m_l0` | 50×50 m，0.20 m，L0 | 0.948130 s | 0.964901 s | 0.973578 s | 3.0 s | 通过 |
+| `wheel_1km_l5` | 1000×1000 m，4.00 m，L5 | 0.194370 s | 0.195302 s | 0.196432 s | 3.0 s | 通过 |
+| `legged_1km_l5` | 1000×1000 m，4.00 m，L5 | 1.125778 s | 1.164988 s | 1.173191 s | 3.0 s | 通过 |
+| `hopper_direct_100m` | 112×12 m，0.80 m，L2 | 0.003447 s | 0.003482 s | 0.003496 s | 1.0 s | 通过 |
+| `hopper_alternate_time_100m` | 112×12 m，0.80 m，L2 | 0.012670 s | 0.012820 s | 0.012953 s | 2.0 s | 通过 |
+| `hopper_complete_blocked_100m` | 112×12 m，0.80 m，L2 | 0.001830 s | 0.001864 s | 0.001881 s | 5.0 s | 通过 |
 
-开阔 100 m 用例产生 `13.261949858 s` 的认证弹道；中部 `35 m` 障碍使规划器选择更高的
-`13.292073651 s` 弹道；`100 m` 高的完整阻断柱返回
+开阔 100 m 用例产生 `11.111111013 s` 的认证弹道；中部 `35 m` 障碍使规划器选择更高的
+`13.304123168 s` 弹道；`100 m` 高的完整阻断柱返回
 `HOPPER_ALL_FLIGHT_TUBES_BLOCKED`，不产生引用。完整 JSON 同时记录各阶段耗时、展开数、
 Open 峰值、工作内存、进程峰值 RSS、认证尝试数、模式和原因码。
 
 权威性能证据位于仓库外：
 
 ```text
-/home/kai/CodexDownloads/lunar_navigation/three_platform_capability/final/evidence/three-platform-release-benchmark.json
-SHA-256 46be6e8dd66508a3c91c01cda9b8a5f6a824773bc61a3e0bf7649837cd8c730c
+/home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/360fe26/evidence/three-platform-release-benchmark.json
+SHA-256 9887c4e5cdf774d720651b1570949abba73578ae9bb3d01d91169c99787b87e9
 ```
 
 ## 自动化结果
 
-- 外部干净目录 Release 构建：4 个包完成；
-- `colcon test-result --verbose`：243 tests，0 errors，0 failures，0 skipped；
-- `tests/foundation tests/ros tests/differential tests/performance`：175 passed；
+- 外部干净目录 Release 构建：7 个包完成；
+- `colcon test-result --verbose`：302 tests，0 errors，0 failures，0 skipped；
+- `tests/foundation tests/ros tests/differential tests/performance`：179 passed、2 skipped；
 - 能力冻结 schema 与规范化 SHA-256 检查：通过；
 - ROS 外部接口实际安装前缀检查：通过；
 - 仓库边界检查及 13 项专项测试：通过；
@@ -120,29 +122,33 @@ SHA-256 46be6e8dd66508a3c91c01cda9b8a5f6a824773bc61a3e0bf7649837cd8c730c
 source /opt/ros/humble/setup.bash
 test "$ROS_DISTRO" = humble
 
-colcon --log-base /home/kai/CodexDownloads/lunar_navigation/three_platform_capability/final/log build \
+colcon --log-base /home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-log build \
+  --merge-install \
   --base-paths ros2_ws/src \
-  --build-base /home/kai/CodexDownloads/lunar_navigation/three_platform_capability/final/build \
-  --install-base /home/kai/CodexDownloads/lunar_navigation/three_platform_capability/final/install \
-  --packages-up-to lunar_planner_ros \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release
+  --build-base /home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-build \
+  --install-base /home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-install \
+  --packages-select lunar_planning_msgs lunar_navigation_msgs lunar_navigation_config \
+    lunar_planner_core lunar_nav2_adapter lunar_planner_ros lunar_planner_training_bridge \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
-source /home/kai/CodexDownloads/lunar_navigation/three_platform_capability/final/install/setup.bash
-colcon --log-base /home/kai/CodexDownloads/lunar_navigation/three_platform_capability/final/test-log test \
-  --build-base /home/kai/CodexDownloads/lunar_navigation/three_platform_capability/final/build \
-  --install-base /home/kai/CodexDownloads/lunar_navigation/three_platform_capability/final/install \
-  --packages-select lunar_navigation_msgs lunar_planning_msgs lunar_planner_core lunar_planner_ros
+source /home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-install/setup.bash
+colcon --log-base /home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-test-log test \
+  --merge-install \
+  --build-base /home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-build \
+  --install-base /home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-install \
+  --packages-select lunar_planning_msgs lunar_navigation_msgs lunar_navigation_config \
+    lunar_planner_core lunar_nav2_adapter lunar_planner_ros lunar_planner_training_bridge
 colcon test-result \
-  --test-result-base /home/kai/CodexDownloads/lunar_navigation/three_platform_capability/final/build \
+  --test-result-base /home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-build \
   --verbose
 ```
 
 运行仓库级 pytest 前设置三个 runner：
 
 ```bash
-export LUNAR_PLANNER_FACADE_SUMMARY=/home/kai/CodexDownloads/lunar_navigation/three_platform_capability/final/build/lunar_planner_core/lunar_planner_facade_summary
-export LUNAR_HIERARCHICAL_PLANNER_BENCHMARK=/home/kai/CodexDownloads/lunar_navigation/three_platform_capability/final/build/lunar_planner_core/lunar_hierarchical_planner_benchmark
-export LUNAR_PLANNER_CORE_BENCHMARK=/home/kai/CodexDownloads/lunar_navigation/three_platform_capability/final/build/lunar_planner_core/lunar_planner_core_benchmark
+export LUNAR_PLANNER_FACADE_SUMMARY=/home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-build/lunar_planner_core/lunar_planner_facade_summary
+export LUNAR_HIERARCHICAL_PLANNER_BENCHMARK=/home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-build/lunar_planner_core/lunar_hierarchical_planner_benchmark
+export LUNAR_PLANNER_CORE_BENCHMARK=/home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/34679db/native-build/lunar_planner_core/lunar_planner_core_benchmark
 python3 -m pytest -q tests/foundation tests/ros tests/differential tests/performance
 ```
 
