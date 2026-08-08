@@ -52,6 +52,10 @@ from lunar_policy_training.config import load_training_config  # noqa: E402
 from lunar_policy_training.environment.candidate_builder import (  # noqa: E402
     CandidateBuilderV2,
 )
+from lunar_policy_training.environment.visibility import (  # noqa: E402
+    NativeVisibilityEstimator,
+    SensorGeometry,
+)
 from lunar_policy_training.environment.macro_step import (  # noqa: E402
     ExecutionEvents,
     PlannerTransition,
@@ -90,6 +94,8 @@ from lunar_policy_training.ppo.rollout import RolloutBatch  # noqa: E402
 from lunar_policy_training.ppo.trainer import PPOTrainer  # noqa: E402
 from lunar_policy_training.reward import reward_weights_sha256  # noqa: E402
 from lunar_policy_training.training_semantics import (  # noqa: E402
+    FORMAL_SENSOR_FOV_RAD,
+    FORMAL_SENSOR_RANGE_M,
     training_semantics_sha256,
 )
 
@@ -549,7 +555,15 @@ def _policy_batch_from_projection(
     inputs: _SyntheticPolarInputs,
     projection: PlatformProjection,
 ) -> tuple[PolicyBatch, object]:
-    candidates = CandidateBuilderV2().build(
+    candidates = CandidateBuilderV2(
+        NativeVisibilityEstimator(
+            SensorGeometry(
+                FORMAL_SENSOR_RANGE_M,
+                FORMAL_SENSOR_FOV_RAD,
+            ),
+            resolution_m=inputs.world.canvas.geometry.resolution_m,
+        )
+    ).build(
         inputs.world,
         inputs.mission,
         inputs.pose,

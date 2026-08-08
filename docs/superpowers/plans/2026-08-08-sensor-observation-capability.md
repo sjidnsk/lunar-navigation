@@ -291,7 +291,7 @@ git commit -m "feat: add native sensor visibility kernel"
 - Consumes: `FrozenObservationCapability` and native `VisibilityKernel`.
 - Produces: required `SensorGeometry`, `NativeVisibilityEstimator`, and a test-only `SlowVisibilityReference` with identical batch signatures.
 
-- [ ] **Step 1: Write failing tests for required injection, one-call batching, and equivalence**
+- [x] **Step 1: Write failing tests for required injection, one-call batching, and equivalence**
 
 Tests must prove `CandidateBuilderV2()` raises `TypeError`, formal construction uses 30 m/2π, 360° gains are yaw invariant, all feasible anchors are sent in one estimator call, and random small-grid native outputs exactly equal the slow reference.
 
@@ -302,7 +302,7 @@ np.testing.assert_array_equal(native.visible_mask, slow.visible_mask)
 np.testing.assert_allclose(native.gains, slow.gains, rtol=0.0, atol=1e-7)
 ```
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 ```bash
 source /home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/native-green/install/setup.bash
@@ -312,15 +312,15 @@ PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
   training/lunar_policy_training/tests/test_visibility_equivalence.py
 ```
 
-- [ ] **Step 3: Implement the explicit reference/native boundary**
+- [x] **Step 3: Implement the explicit reference/native boundary**
 
 Keep `_ray_cells()` as the readable reference. `SlowVisibilityReference` is importable only from a test-support path or under an explicit test-only constructor. `NativeVisibilityEstimator` constructs the bridge kernel once and accepts all current anchors in one call.
 
-- [ ] **Step 4: Refactor candidate feature construction**
+- [x] **Step 4: Refactor candidate feature construction**
 
 Generate feasible standoff anchors first, invoke native gains once, then construct the existing 12 fields and deterministic representative/farthest subset. Remove the `unknown_points` nested loop and `SensorGeometry(80.0, 2*pi)` default. In the 360° fast path, retain the 30 m robot-to-candidate bound but skip angular/trigonometric filtering.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 ```bash
 source /home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/native-green/install/setup.bash

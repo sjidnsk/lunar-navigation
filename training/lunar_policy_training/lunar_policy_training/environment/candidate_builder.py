@@ -10,24 +10,7 @@ import numpy as np
 from lunar_model_contract import ObservationContractV2
 
 from .observation_builder import MissionRaster, ObservedWorld, PlatformProjection, Pose2
-
-
-@dataclass(frozen=True)
-class SensorGeometry:
-    range_m: float
-    fov_rad: float
-
-    def __post_init__(self) -> None:
-        if not math.isfinite(self.range_m) or self.range_m <= 0.0 or not 0.0 < self.fov_rad <= 2.0 * math.pi:
-            raise ValueError("sensor range/FOV are invalid")
-
-    @property
-    def anchor_spacing_m(self) -> float:
-        return max(4.0, self.range_m / 8.0)
-
-    @property
-    def standoff_m(self) -> float:
-        return max(4.0, self.range_m / 16.0)
+from .visibility import SensorGeometry, VisibilityEstimator, _ray_cells
 
 
 @dataclass(frozen=True)
@@ -54,20 +37,6 @@ class CandidateBatch:
 
 def _neighbors(row: int, column: int, cells: int) -> tuple[tuple[int, int], ...]:
     return tuple((row + dr, column + dc) for dr, dc in ((-1, 0), (0, -1), (0, 1), (1, 0)) if 0 <= row + dr < cells and 0 <= column + dc < cells)
-
-
-def _ray_cells(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
-    row0, column0 = start; row1, column1 = end
-    dc, dr = abs(column1 - column0), abs(row1 - row0)
-    sc, sr = (1 if column0 < column1 else -1), (1 if row0 < row1 else -1)
-    error, result = dc - dr, []
-    while True:
-        result.append((row0, column0))
-        if (row0, column0) == (row1, column1):
-            return result
-        doubled = 2 * error
-        if doubled > -dr: error -= dr; column0 += sc
-        if doubled < dc: error += dc; row0 += sr
 
 
 def _clear_observed(world: ObservedWorld, cells: list[tuple[int, int]], *, unknown_endpoint_allowed: bool = False) -> bool:
@@ -154,8 +123,17 @@ def _select_anchors(anchors: list[_FeasibleAnchor], segment_count: int, limit: i
 
 
 class CandidateBuilderV2:
-    def __init__(self, sensor: SensorGeometry = SensorGeometry(80.0, 2.0 * math.pi)) -> None:
+    def __init__(self, visibility_estimator: VisibilityEstimator) -> None:
+        sensor = getattr(visibility_estimator, "sensor", None)
+        estimate = getattr(visibility_estimator, "estimate_candidate_gains", None)
+        if not isinstance(sensor, SensorGeometry) or not callable(estimate):
+            raise TypeError("candidate builder requires a visibility estimator")
+        self._visibility_estimator = visibility_estimator
         self._sensor = sensor
+
+    @property
+    def sensor(self) -> SensorGeometry:
+        return self._sensor
 
     def build(self, world: ObservedWorld, mission: MissionRaster, pose_map: Pose2, projection: PlatformProjection) -> CandidateBatch:
         if pose_map.frame_id != "map" or world.canvas != mission.canvas or world.canvas != projection.canvas:
@@ -174,9 +152,8 @@ class CandidateBuilderV2:
         boundary = observed & roi & adjacent_unknown
         segments = _segments(_points(boundary), cells)
         spacing = max(1, math.ceil(self._sensor.anchor_spacing_m / canvas.geometry.resolution_m))
-        chosen: list[_FeasibleAnchor] = []
+        feasible: list[tuple[int, tuple[int, int]]] = []
         total_roi, total_priority = float(mission.roi_ratio.sum()), float((mission.priority * mission.roi_ratio).sum())
-        unknown_points = _points(unknown_roi)
         step = max(1, round(self._sensor.standoff_m / canvas.geometry.resolution_m))
         for segment_id, segment in enumerate(segments):
             for row, column in _spaced_anchors(segment, spacing):
@@ -185,34 +162,79 @@ class CandidateBuilderV2:
                     standoff = (row, column)
                 if projection.traversable_ratio[standoff] == 0.0 or not _clear_observed(world, _ray_cells(robot, standoff)):
                     continue
-                feature = self._feature(world, mission, projection, pose_map, robot, standoff, total_roi, total_priority, unknown_points)
-                if feature is not None:
-                    chosen.append(_FeasibleAnchor(segment_id, standoff, feature))
-        deduplicated: list[_FeasibleAnchor] = []
-        for anchor in sorted(chosen, key=lambda item: (item.segment_id, item.point, _anchor_key(item))):
-            if not deduplicated or (anchor.segment_id, anchor.point) != (deduplicated[-1].segment_id, deduplicated[-1].point):
-                deduplicated.append(anchor)
-        chosen = _select_anchors(deduplicated, len(segments))
+                if self._candidate_within_sensor(canvas, pose_map, standoff):
+                    feasible.append((segment_id, standoff))
+        feasible = sorted(set(feasible))
+        if not feasible:
+            return CandidateBatch.empty(canvas.identity)
+        candidate_cells = np.ascontiguousarray(
+            [point for _, point in feasible], dtype=np.int32
+        )
+        gains = self._visibility_estimator.estimate_candidate_gains(
+            np.ascontiguousarray(world.observed_mask, dtype=np.bool_),
+            np.ascontiguousarray(
+                world.physical_obstacle_layer.values, dtype=np.float32
+            ),
+            np.ascontiguousarray(mission.roi_ratio, dtype=np.float32),
+            np.ascontiguousarray(
+                mission.priority * mission.roi_ratio, dtype=np.float32
+            ),
+            candidate_cells,
+        )
+        if (
+            not isinstance(gains, np.ndarray)
+            or gains.shape != (len(feasible), 2)
+            or gains.dtype != np.dtype(np.float32)
+            or not gains.flags.c_contiguous
+            or not np.isfinite(gains).all()
+            or (gains < 0.0).any()
+        ):
+            raise RuntimeError("candidate visibility estimator result is invalid")
+        chosen: list[_FeasibleAnchor] = []
+        for (segment_id, point), (gain, priority_gain) in zip(
+            feasible, gains, strict=True
+        ):
+            feature = self._feature(
+                world,
+                mission,
+                projection,
+                pose_map,
+                point,
+                total_roi,
+                total_priority,
+                float(gain),
+                float(priority_gain),
+            )
+            if feature is not None:
+                chosen.append(_FeasibleAnchor(segment_id, point, feature))
+        chosen = _select_anchors(chosen, len(segments))
         output = np.zeros((64, 12), np.float32); mask = np.zeros(64, bool)
         for index, anchor in enumerate(chosen): output[index] = anchor.feature; mask[index] = True
         return CandidateBatch(output, mask, canvas.identity)
 
-    def _feature(self, world: ObservedWorld, mission: MissionRaster, projection: PlatformProjection, pose: Pose2, robot: tuple[int, int], point: tuple[int, int], total_roi: float, total_priority: float, unknown_points: list[tuple[int, int]]) -> np.ndarray | None:
+    def _candidate_within_sensor(
+        self,
+        canvas,
+        pose: Pose2,
+        point: tuple[int, int],
+    ) -> bool:
+        x, y = canvas.grid_center_world(*point)
+        bearing = math.atan2(y - pose.y_m, x - pose.x_m)
+        distance = math.hypot(x - pose.x_m, y - pose.y_m)
+        if distance > self._sensor.range_m:
+            return False
+        if self._sensor.is_full_circle:
+            return True
+        relative = math.atan2(
+            math.sin(bearing - pose.yaw_rad),
+            math.cos(bearing - pose.yaw_rad),
+        )
+        return abs(relative) <= self._sensor.fov_rad / 2.0
+
+    def _feature(self, world: ObservedWorld, mission: MissionRaster, projection: PlatformProjection, pose: Pose2, point: tuple[int, int], total_roi: float, total_priority: float, gain: float, priority_gain: float) -> np.ndarray | None:
         canvas = world.canvas; x, y = canvas.grid_center_world(*point)
         dx, dy = x - pose.x_m, y - pose.y_m; distance = math.hypot(dx, dy)
         bearing = math.atan2(dy, dx)
-        if distance > self._sensor.range_m or abs(math.atan2(math.sin(bearing - pose.yaw_rad), math.cos(bearing - pose.yaw_rad))) > self._sensor.fov_rad / 2.0:
-            return None
-        gain = priority_gain = 0.0
-        for row, column in unknown_points:
-            tx, ty = canvas.grid_center_world(row, column)
-            if math.hypot(tx - x, ty - y) > self._sensor.range_m:
-                continue
-            target_bearing = math.atan2(ty - y, tx - x)
-            if abs(math.atan2(math.sin(target_bearing - bearing), math.cos(target_bearing - bearing))) > self._sensor.fov_rad / 2.0:
-                continue
-            if _clear_observed(world, _ray_cells(point, (row, column)), unknown_endpoint_allowed=True):
-                gain += float(mission.roi_ratio[row, column]); priority_gain += float(mission.priority[row, column] * mission.roi_ratio[row, column])
         if gain == 0.0:
             return None
         normal = np.array([0.0, 0.0])
