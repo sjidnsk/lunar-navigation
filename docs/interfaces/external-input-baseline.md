@@ -195,7 +195,11 @@ schema 中仍是绝对禁入层；在正式拆分“禁止着陆”和“禁止�
 
 平台类型为 `WHEELED`、`LEGGED` 或 `HOPPER`。v2 轮式资料接收正式几何、轮胎/轴距/轨距、底盘净空、支撑面局部凸起、连续运动约束和几何原语；足式资料接收 Quad48 机身、质量/载荷、机身高度、坡度/台阶/方向沟隙、速度和加速度；飞跃式资料接收比冲、固定参考总质量、固定参考推进剂质量、着陆支撑半径、飞行碰撞半径、着陆坡度/平面残差及规划裕量。参考质量只定义可重复的单跳 Δv 能力包络，不表示运行时库存。每个运行时能力字段必须具有已批准的 `sources` 来源类型；v1 旧飞跃速度、冲量、固定飞行时间窗、多跳原语和固定着陆区域面积字段不兼容且必须拒绝。
 
-本仓的 `platform_capability_schema_v2.yaml` 与 `three_platform_capability_freeze_v1.yaml` 是 provisional 消费合同和已批准工程基线，不是外部平台控制单位的数据发布实现。正式外部 provider 出现后仍须逐字段比对并原子切换。
+本仓的 `platform_capability_schema_v2.yaml` 与 `three_platform_capability_freeze_v1.yaml` 是当前
+规划和正式训练的唯一能力权威，也是尚待外部 provider 对接的 provisional 消费合同。这里的
+`provisional` 只表示外部数据发布实现尚未交付，不降低这组已批准值在本项目中的正式身份。
+正式外部 provider 出现后必须先逐字段等价，再原子切换数据来源；不能在运行时静默改变能力值、
+版本或摘要。
 
 ## 消费边界
 

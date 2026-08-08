@@ -1,4 +1,4 @@
-"""Deterministic, typed external capability closure for formal Volume 3 runs."""
+"""Typed capabilities plus legacy external-bundle compatibility for smoke tests."""
 
 from __future__ import annotations
 
@@ -154,7 +154,7 @@ _LEGGED_KINDS = frozenset(
 
 
 class CapabilityFreezeError(ValueError):
-    """An external capability closure is incomplete, mutable, or mislabeled."""
+    """A capability payload is incomplete, mutable, or mislabeled."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,7 +431,7 @@ class ScenarioIdentity:
 
 @dataclass(frozen=True, slots=True)
 class FrozenCapabilityEnvironmentFactory:
-    """Bind parsed capabilities to workers without reopening closure files."""
+    """Bind one validated capability bundle to formal sensor-closed workers."""
 
     bundle: FrozenCapabilityBundle
     scenario_schedule_id: str
@@ -495,7 +495,11 @@ class _ParsedContent:
 def load_frozen_capability_bundle(
     lock_path: str | Path, *, run_kind: str
 ) -> FrozenCapabilityBundle:
-    """Verify and parse one external closure into an immutable process payload."""
+    """Load the legacy external-bundle format used by compatibility tests.
+
+    Production formal commands use ``load_project_formal_capability`` instead;
+    this parser remains available for development-smoke and migration evidence.
+    """
     if run_kind not in RUN_KINDS:
         raise CapabilityFreezeError("run kind must be formal or development-smoke")
     target = Path(lock_path)

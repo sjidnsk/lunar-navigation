@@ -1,6 +1,6 @@
-# Volume 3 月球极区 PPO 训练前就绪交接
+# Volume 3 月球极区 PPO 训练前状态交接
 
-状态：`sensor-closed-loop-qualified / project-capability-closed / formal-training-not-started`
+状态：`integration-qualified / formal-training-blocked-on-environment-and-cache`
 
 ## 当前结论
 
@@ -16,6 +16,12 @@ typed capability。URDF/mesh 继续服务于仿真外观、碰撞代理和设备
 飞跃式能力只保留每次独立规划的固定单跳 `delta-v` 包线。参考质量、比冲和参考推进剂用于
 计算该包线，不是 episode 燃料状态；训练请求、观测、奖励和终止条件均不累计燃料，也不会因
 先前跳跃次数降低下一跳可达性。
+
+2026-08-08 最终训练前复审确认：上述现行算法与能力基础设施可以合入 `integration`，但公开
+formal 训练链尚未闭合。`calibrate` 当前只接受 development-smoke；`train/resume` 没有从公开
+入口构造正式环境工厂和观测模板；`evaluate` 明确拒绝 formal；正式 traversability/candidate
+cache 也还没有生成与加载入口。因此本状态不等于 `formal-training-ready`。完整证据见
+`docs/validation/2026-08-08-formal-training-preflight-review.md`。
 
 ## 现行权威覆盖规则
 
@@ -85,7 +91,7 @@ capability、reward 和源码 SHA-256 外，还绑定训练语义 SHA-256；旧 
 完整主机信息、命令、性能 fixture 和正式/测试证据边界见
 `docs/validation/sensor-observation-capability-qualification.md`。
 
-## 正式训练后续顺序
+## 正式训练阻断与后续顺序
 
 当前正式能力与 `sensor-observation-performance/v1` 已闭合。历史 Isaac/ROS
 `capability_provenance.json` 是 30 m/120° 旧 schema 证据，只保留为历史快照；正式工具不再
@@ -93,10 +99,12 @@ capability、reward 和源码 SHA-256 外，还绑定训练语义 SHA-256；旧 
 
 后续顺序是：
 
-1. 用项目正式 capability v2 重新生成三平台 traversability/candidate cache，并重新冻结 worker 与
-   micro-batch；旧 Volume 3 cache/checkpoint 不得沿用。
-2. 以已通过的正式性能 JSON 对 `train/resume/evaluate` 执行 formal preflight。
-3. 在独立训练流程中启动一个正式 seed 4080 的可暂停训练。
+1. 实现正式 traversability/candidate cache 的生成、manifest、加载和身份校验；旧 Volume 3
+   cache/checkpoint 不得沿用。
+2. 用唯一正式环境 builder 闭合公开 `calibrate/train/resume/evaluate`，并确保四个入口都使用
+   当前 capability v2、当前 C++ v3、30 m/360° 观测边界和同一数据身份。
+3. 以已通过的正式性能 JSON 运行不消耗正式训练预算的进程级 formal preflight。
+4. preflight 通过后重新冻结 worker 与 micro-batch，再启动 seed 4080 的可暂停训练。
 
 正式训练、完整评估、ONNX/TensorRT、AGX 和实际平台资格仍分别受后续门控制；本交接不会
 把开发态或 Ubuntu 仿真结果升级成这些状态。

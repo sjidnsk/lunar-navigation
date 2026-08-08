@@ -12,7 +12,9 @@
 capability v2 闭合；`30 m/360°` 观测语义和 Release 性能门也已闭合。正式训练不再等待
 外部 `lunar-training-capability-freeze/v1`，也不把 URDF/mesh 资源包当作运动能力的重复证明。
 当前正式 `sensor-observation-performance/v1` 报告已经生成并通过，训练代码已具备进入下一项
-独立数据/运行环境门的资格。
+独立数据/运行环境门的资格，但尚不具备启动 formal rollout 的完整公开命令链。正式 cache、
+环境 builder、calibrate/train/resume/evaluate 闭环的复审结论见
+`docs/validation/2026-08-08-formal-training-preflight-review.md`。
 
 ## 权威基线和历史边界
 
@@ -132,12 +134,14 @@ SHA-256 为 `5d1cf5b390cb1d5e3985d56cfbf18ff61c260c8af6934fff3ba55db74426e690`�
 
 ## 正式训练后续边界
 
-运动能力、观测语义和性能门已经闭合。后续正式训练按独立流程完成：
+运动能力、观测语义和性能门已经闭合；正式数据/cache/环境/CLI 链尚未闭合。后续按独立流程完成：
 
-1. 使用项目正式能力重新生成三平台 traversability/candidate cache，重新冻结 worker 和
-   micro-batch；旧 Volume 3 cache/checkpoint 不得续用。
-2. 使用本报告的正式性能 JSON 执行 formal preflight，之后按独立训练作业启动 seed 4080。
-3. ONNX、TensorRT、AGX 和实际
+1. 实现并生成项目正式三平台 traversability/candidate cache，绑定正式能力、数据、训练语义和
+   当前规划器身份；旧 Volume 3 cache/checkpoint 不得续用。
+2. 闭合公开 `calibrate/train/resume/evaluate` 的正式环境 builder 与观测模板注入。
+3. 使用本报告的正式性能 JSON 执行进程级 formal preflight，通过后冻结 worker/micro-batch 并
+   启动 seed 4080。
+4. ONNX、TensorRT、AGX 和实际
    平台验收仍属于后续独立门。
 
 正式性能命令为：

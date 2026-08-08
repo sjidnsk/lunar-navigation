@@ -155,6 +155,8 @@ platforms:
       standard_gravity_mps2: 9.80665
     reference_conditions:
       reference_total_mass_kg: 20.0
+      # Legacy key spelling retained to preserve the approved semantic digest.
+      # This is a non-decrementing single-hop reference, not runtime remaining fuel.
       reference_remaining_usable_fuel_mass_kg: 0.2
       reference_horizontal_range_m: 100.0
       reference_elevation_delta_m: 0.0

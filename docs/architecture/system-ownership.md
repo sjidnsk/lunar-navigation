@@ -14,6 +14,10 @@
 | 外部项目 | 地图、定位、TF、任务、能力资料及其 Topic 数据 | 本仓内部 `lunar_planning_msgs` |
 | 本项目 | C++ v3、`PlanMotion`、PPO 推理调度、内部配置与外部输入适配，以及上游未定义期间的暂定 `lunar_navigation_msgs` schema | 外部 Topic 数据和执行器命令 |
 
+能力资料的“外部所有权”表示未来正式 provider 和运行时数据生产职责，不表示当前训练等待外部
+closure。本仓批准的 capability v2 freeze 是现阶段规划与正式训练的唯一数值权威；未来 provider
+只能在逐字段等价后原子接管发布，不能静默改变能力版本或摘要。
+
 ## 外部接口边界
 
 外部 Topic、字段和资料包的接收基线见 [`../interfaces/external-input-baseline.md`](../interfaces/external-input-baseline.md)。该文件是暂定消息字段与语义的唯一权威基线；上游未定义期间，本仓提供同名 `lunar_navigation_msgs` schema，但 Topic 数据生产者仍由外部项目拥有。不得与上游同名包共存，未来只能原子切换。

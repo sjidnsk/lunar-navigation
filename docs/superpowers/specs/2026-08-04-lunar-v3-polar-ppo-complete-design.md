@@ -1,5 +1,12 @@
 # 月球极区三平台 v3 单网络 PPO 完整设计
 
+> **历史设计，已部分取代（2026-08-08）：** 本文的数据、七输入、共享 PPO 与 checkpoint
+> 骨架仍可参考；外置 capability bundle、旧平台能力、旧路径算法、旧观测默认值及“能力冻结后
+> 即可训练”的表述已过时。现行权威见
+> `2026-08-08-formal-capability-and-hopper-no-fuel-budget-design.md`、
+> `2026-08-08-sensor-observation-capability-design.md` 和
+> `../../validation/2026-08-08-formal-training-preflight-review.md`。
+
 ## 状态与权威关系
 
 本文冻结 2026-08-04 已确认的卷三训练架构，覆盖月球极区数据、观测、候选、动作、共享网络、C++ v3 闭环、奖励、训练、恢复和验收。与下列旧文档冲突时以本文为准：

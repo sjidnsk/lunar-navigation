@@ -28,6 +28,8 @@ platforms:
     exact_unknown_fields: []
     retired_fields: [maximum_roughness_m, minimum_confidence, nominal_duration_s]
   HOPPER:
+    # reference_remaining_usable_fuel_mass_kg is a legacy source-field spelling.
+    # It denotes one non-decrementing per-plan reference quantity, never runtime fuel state.
     allowed_keys: [platform_id, platform_type, capability_version, base_frame_id, provenance, propulsion, landing, safety, environment, reference_conditions, unknown_fields, sources]
     required_sources: [specific_impulse_s, landing_support_radius_m, flight_collision_radius_m, maximum_landing_slope_rad, maximum_landing_plane_residual_m, landing_lateral_margin_m, flight_map_margin_m, reachability_delta_v_margin_ratio, gravity_mps2, standard_gravity_mps2, reference_total_mass_kg, reference_remaining_usable_fuel_mass_kg, reference_horizontal_range_m, reference_elevation_delta_m]
     exact_unknown_fields: []

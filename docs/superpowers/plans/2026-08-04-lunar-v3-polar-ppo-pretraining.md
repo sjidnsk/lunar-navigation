@@ -1,5 +1,12 @@
 # Lunar Navigation 卷三：月球极区 PPO 正式训练前置实施计划
 
+> **历史计划，已部分取代（2026-08-08）：** 外置 capability bundle、URDF/mesh closure 和
+> `blocked-on-capability` 结论不再是现行训练门。当前能力权威与实际训练阻断以
+> `2026-08-08-formal-capability-and-hopper-no-fuel-budget-design.md`、
+> `volume-3-pretraining-readiness.md` 和
+> `2026-08-08-formal-training-preflight-review.md` 为准。本文保留为实现历史，不得直接照其
+> Final Stop Condition 启动或阻止训练。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将现有三平台 proxy PPO 骨架迁移到冻结的月球极区 V2 合同，取得并锁定真实极区数据，完成能力无关训练组件和 capability-freeze 硬门，最终停在正式 seed 4080 rollout 之前。

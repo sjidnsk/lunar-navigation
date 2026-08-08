@@ -1,4 +1,10 @@
-# 三平台正式能力实现 Ubuntu 资格报告
+# 三平台正式能力实现 Ubuntu 资格报告（历史燃料链已取代）
+
+> **2026-08-08 修订：** 本报告的三平台几何、运动能力、落区、抛物线、飞行管和性能证据继续
+> 有效；实时剩余燃料输入、认证燃料/剩余燃料输出及其连续递减结论已经失效。现行实现不接收
+> `HopperPropellantState`，只输出每次可重复的 required/available Δv。当前资格结果见
+> `sensor-observation-capability-qualification.md`，现行训练启动状态见
+> `2026-08-08-formal-training-preflight-review.md`。
 
 日期：2026-08-07
 

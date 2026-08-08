@@ -1,5 +1,10 @@
 # Three-Platform Capability Implementation Plan
 
+> **历史实施计划，已部分取代（2026-08-08）：** 实时推进剂 Topic、燃料递减、燃料提交和
+> fuel evidence 已从现行规划、训练与外部桥移除。当前飞跃式只保留可重复的固定单跳 Δv 包络。
+> 现行合同以 `2026-08-08-project-formal-capability-and-hopper-no-fuel-budget.md` 为准；本文仅保留
+> RED/GREEN 实施历史。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将已批准的轮式、Quad48 足式和飞跃式设计落实为同一版本化能力合同、可执行 C++/ROS 规划语义、可审计 RViz 证据和正式 capability freeze，并保持完整搜索与单段滚动授权语义。
