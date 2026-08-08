@@ -109,11 +109,11 @@ def test_polar_data_package_exports_formal_scenario_api_lazily() -> None:
 
 
 def test_formal_catalog_expands_exact_frozen_scene_families() -> None:
-    """Catches a seed/count change that would silently alter training data."""
+    """Catches a generator identity or seed/count change in training data."""
     manifest = _build()
 
     assert manifest["schema"] == "lunar-formal-scenario-manifest/v1"
-    assert manifest["generator_version"] == "lunar-polar-multires-hazards/v2"
+    assert manifest["generator_version"] == "lunar-polar-multires-hazards/v3"
     assert manifest["object_distribution"] == {
         "rocks": {
             "count": 260,
