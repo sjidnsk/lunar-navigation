@@ -10,7 +10,7 @@ FORMAL_SENSOR_RANGE_M = 30.0
 FORMAL_SENSOR_FOV_RAD = 2.0 * math.pi
 FORMAL_SUCCESS_COVERAGE_RATIO = 0.95
 TRAINING_SEMANTICS_VERSION = (
-    "lunar-training-semantics/sensor-30m-360-theta-mask-roi95-unbounded-start-qualified/v4"
+    "lunar-training-semantics/sensor-30m-360-theta-mask-roi95-unbounded-common-start-subset/v5"
 )
 
 

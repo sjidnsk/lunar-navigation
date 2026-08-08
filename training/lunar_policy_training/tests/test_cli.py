@@ -615,6 +615,12 @@ def test_formal_evaluation_batches_ignore_preflight_train_assembly(
                         "scene_seed": "1" * 64,
                     },
                     {
+                        "scene_id": "d" * 64,
+                        "split": "validation",
+                        "scenario_seed": 409001,
+                        "scene_seed": "4" * 64,
+                    },
+                    {
                         "scene_id": "b" * 64,
                         "split": "test",
                         "scenario_seed": 410000,
@@ -635,9 +641,26 @@ def test_formal_evaluation_batches_ignore_preflight_train_assembly(
         root=tmp_path,
         manifest={
             "scenes": [
-                {"scene_id": "c" * 64, "split": "holdout"},
-                {"scene_id": "a" * 64, "split": "validation"},
-                {"scene_id": "b" * 64, "split": "test"},
+                {
+                    "scene_id": "c" * 64,
+                    "split": "holdout",
+                    "start_qualification": {"common_eligible": True},
+                },
+                {
+                    "scene_id": "d" * 64,
+                    "split": "validation",
+                    "start_qualification": {"common_eligible": False},
+                },
+                {
+                    "scene_id": "a" * 64,
+                    "split": "validation",
+                    "start_qualification": {"common_eligible": True},
+                },
+                {
+                    "scene_id": "b" * 64,
+                    "split": "test",
+                    "start_qualification": {"common_eligible": True},
+                },
             ]
         },
     )

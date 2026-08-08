@@ -1375,6 +1375,8 @@ def _formal_evaluation_batches(
             entry
             for entry in cache.manifest["scenes"]
             if entry.get("split") == split
+            and entry.get("start_qualification", {}).get("common_eligible")
+            is True
         ]
         seeds: list[int] = []
         for entry in entries:

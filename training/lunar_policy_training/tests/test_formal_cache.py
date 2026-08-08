@@ -12,6 +12,7 @@ from lunar_policy_training.polar_data.formal_cache import (
     FormalCacheError,
     FormalCacheIdentity,
     StaticSceneData,
+    _formal_start_qualification_ready,
     load_formal_cache,
     write_formal_cache,
 )
@@ -204,6 +205,32 @@ def test_cache_records_a_scene_as_not_common_start_eligible(
             "WHEELED": [127, 127],
         },
     }
+
+
+def test_formal_start_qualification_uses_a_common_subset_without_diluting_holdout(
+) -> None:
+    totals = {"train": 1536, "validation": 96, "test": 96, "holdout": 6}
+
+    assert _formal_start_qualification_ready(
+        "full",
+        totals,
+        {"train": 1475, "validation": 90, "test": 95, "holdout": 6},
+    )
+    assert not _formal_start_qualification_ready(
+        "preflight",
+        totals,
+        {"train": 1475, "validation": 90, "test": 95, "holdout": 6},
+    )
+    assert not _formal_start_qualification_ready(
+        "full",
+        totals,
+        {"train": 1475, "validation": 86, "test": 95, "holdout": 6},
+    )
+    assert not _formal_start_qualification_ready(
+        "full",
+        totals,
+        {"train": 1475, "validation": 90, "test": 95, "holdout": 5},
+    )
 
 
 @pytest.mark.parametrize("drift", ("missing", "extra", "hash"))

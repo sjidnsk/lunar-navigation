@@ -38,13 +38,19 @@ from .scenario_manifest import (
 from .source_lock import load_aggregate_source_lock
 
 
-FORMAL_CACHE_SCHEMA = "lunar-formal-training-cache/v2"
+FORMAL_CACHE_SCHEMA = "lunar-formal-training-cache/v3"
 _SOURCE_IDS = (
     "NASA_LOLA_87S_DEM",
     "NASA_LOLA_87S_COUNT",
     "JAXA_LUPEX_DATA_S1",
 )
 _PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
+_MINIMUM_COMMON_START_ELIGIBLE_RATIO = 0.90
+_START_QUALIFICATION_POLICY = {
+    "evaluation_uses_common_eligible_subset": True,
+    "minimum_nasa_split_eligible_ratio": _MINIMUM_COMMON_START_ELIGIBLE_RATIO,
+    "holdout_requires_all_eligible": True,
+}
 _IDENTITY_FIELDS = (
     "source_lock_file_sha256",
     "source_sha256s",
@@ -62,6 +68,36 @@ _IDENTITY_FIELDS = (
 
 class FormalCacheError(ValueError):
     """The cache is incomplete, drifted, unsafe, or not formally eligible."""
+
+
+def _formal_start_qualification_ready(
+    materialization: str,
+    split_totals: Mapping[str, int],
+    split_eligible: Mapping[str, int],
+) -> bool:
+    """Gate a capability-bound common subset while retaining all holdout worlds."""
+    if materialization != "full":
+        return False
+    for split in ("train", "validation", "test"):
+        total = split_totals.get(split, 0)
+        eligible = split_eligible.get(split, 0)
+        if (
+            type(total) is not int
+            or type(eligible) is not int
+            or total <= 0
+            or eligible < 0
+            or eligible > total
+            or eligible / total < _MINIMUM_COMMON_START_ELIGIBLE_RATIO
+        ):
+            return False
+    holdout_total = split_totals.get("holdout", 0)
+    holdout_eligible = split_eligible.get("holdout", 0)
+    return (
+        type(holdout_total) is int
+        and type(holdout_eligible) is int
+        and holdout_total > 0
+        and holdout_eligible == holdout_total
+    )
 
 
 def _require_sha(value: object, name: str, *, length: int = 64) -> str:
@@ -457,13 +493,10 @@ def write_formal_cache(
         split_eligible.setdefault(split, 0)
         if bool(entry["start_qualification"]["common_eligible"]):
             split_eligible[split] += 1
-    qualification_complete = (
-        split_eligible.get("train", 0) > 0
-        and all(
-            split_totals.get(split, 0) > 0
-            and split_eligible.get(split, 0) == split_totals[split]
-            for split in ("validation", "test", "holdout")
-        )
+    qualification_complete = _formal_start_qualification_ready(
+        materialization,
+        split_totals,
+        split_eligible,
     )
     inventory = [
         {
@@ -489,6 +522,7 @@ def write_formal_cache(
         "scene_count": len(entries),
         "start_eligible_scene_count": sum(split_eligible.values()),
         "start_eligible_split_counts": dict(sorted(split_eligible.items())),
+        "start_qualification_policy": dict(_START_QUALIFICATION_POLICY),
         "scenes": entries,
         "inventory": inventory,
     }
@@ -657,16 +691,14 @@ def load_formal_cache(
         value.get("start_eligible_scene_count") != sum(split_eligible.values())
         or value.get("start_eligible_split_counts")
         != dict(sorted(split_eligible.items()))
+        or value.get("start_qualification_policy")
+        != _START_QUALIFICATION_POLICY
     ):
         raise FormalCacheError("cache start qualification counts differ")
-    expected_formal_eligible = (
-        materialization == "full"
-        and split_eligible.get("train", 0) > 0
-        and all(
-            split_totals.get(split, 0) > 0
-            and split_eligible.get(split, 0) == split_totals[split]
-            for split in ("validation", "test", "holdout")
-        )
+    expected_formal_eligible = _formal_start_qualification_ready(
+        materialization,
+        split_totals,
+        split_eligible,
     )
     if formal_eligible is not expected_formal_eligible:
         raise FormalCacheError("cache formal start eligibility is invalid")
@@ -1250,7 +1282,7 @@ def prepare_formal_training_cache(
         raise FormalCacheError("full cache must contain exactly 1734 scenes")
     if materialization == "full" and not manifest.get("formal_eligible"):
         raise FormalCacheError(
-            "full cache has an unstartable evaluation split or no startable training scene"
+            "full cache common-start subset is below the frozen split qualification"
         )
     return manifest
 

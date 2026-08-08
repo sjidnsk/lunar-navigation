@@ -1059,7 +1059,7 @@ class FormalEnvironmentBuilder:
         if self.split not in {"train", "validation", "test", "holdout"}:
             raise ValueError("formal environment split is invalid")
         schedule_id = (
-            f"{cache.manifest['cache_manifest_sha256']}/{self.split}/v4"
+            f"{cache.manifest['cache_manifest_sha256']}/{self.split}/v5"
         )
         worker_builder = FormalWorkerBuilder(
             str(self.cache_manifest_path),
