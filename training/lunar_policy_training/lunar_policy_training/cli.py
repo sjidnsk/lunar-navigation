@@ -63,6 +63,13 @@ from .environment.parallel_pool import (
 from .environment.macro_step import PlannerTransition
 from .environment.v3_environment import PreparedPlanRequest, create_v3_environment
 from .training_semantics import training_semantics_sha256
+from .sensor_performance import (
+    SensorPerformanceError,
+    current_host_identity,
+    load_sensor_performance_report,
+    sensor_source_commit,
+    validate_sensor_performance_report,
+)
 from .curriculum import (
     CurriculumSchedule,
     FORMAL_SEED,
@@ -694,17 +701,20 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--config", required=True)
     train.add_argument("--artifact-root", required=True)
     train.add_argument("--capability-lock")
+    train.add_argument("--sensor-performance-report")
 
     resume = subparsers.add_parser("resume")
     resume.add_argument("--artifact-root", required=True)
     resume.add_argument("--checkpoint", required=True)
     resume.add_argument("--capability-lock")
+    resume.add_argument("--sensor-performance-report")
 
     evaluate = subparsers.add_parser("evaluate")
     evaluate.add_argument("--checkpoint", required=True)
     evaluate.add_argument("--gate", required=True)
     evaluate.add_argument("--artifact-root", required=True)
     evaluate.add_argument("--capability-lock")
+    evaluate.add_argument("--sensor-performance-report")
 
     extend_budget = subparsers.add_parser("extend-budget")
     extend_budget.add_argument("--artifact-root", required=True)
@@ -744,6 +754,11 @@ def main(argv: list[str] | None = None) -> int:
         capability_bundle = _formal_capability_preflight(
             arguments.capability_lock
         )
+        _formal_sensor_performance_preflight(
+            arguments.sensor_performance_report,
+            capability_bundle=capability_bundle,
+            repository_root=repository_root,
+        )
         if not Path(arguments.artifact_root).is_dir():
             raise ArtifactRootError("run calibrate before public train")
         _start_training_run(
@@ -758,6 +773,11 @@ def main(argv: list[str] | None = None) -> int:
         capability_bundle = _formal_capability_preflight(
             arguments.capability_lock
         )
+        _formal_sensor_performance_preflight(
+            arguments.sensor_performance_report,
+            capability_bundle=capability_bundle,
+            repository_root=repository_root,
+        )
         _resume_training_run(
             artifact_root=Path(arguments.artifact_root),
             checkpoint_path=Path(arguments.checkpoint),
@@ -768,6 +788,11 @@ def main(argv: list[str] | None = None) -> int:
     elif arguments.command == "evaluate":
         capability_bundle = _formal_capability_preflight(
             arguments.capability_lock
+        )
+        _formal_sensor_performance_preflight(
+            arguments.sensor_performance_report,
+            capability_bundle=capability_bundle,
+            repository_root=repository_root,
         )
         _evaluate_checkpoint(
             checkpoint_path=Path(arguments.checkpoint),
@@ -797,6 +822,30 @@ def _formal_capability_preflight(
         return load_frozen_capability_bundle(Path(lock_path), run_kind="formal")
     except CapabilityFreezeError as error:
         raise PreflightError(f"formal capability bundle is invalid: {error}") from error
+
+
+def _formal_sensor_performance_preflight(
+    report_path: str | None,
+    *,
+    capability_bundle: FrozenCapabilityBundle,
+    repository_root: str | Path,
+) -> str:
+    """Require host- and source-bound Release evidence before formal artifacts."""
+    if report_path is None:
+        raise PreflightError("formal sensor performance report is required")
+    try:
+        report = load_sensor_performance_report(Path(report_path))
+        return validate_sensor_performance_report(
+            report,
+            expected_host=current_host_identity(),
+            expected_source_commit=sensor_source_commit(repository_root),
+            expected_capability_sha256=capability_bundle.bundle_sha256,
+            expected_training_semantics_sha256=training_semantics_sha256(),
+        )
+    except SensorPerformanceError as error:
+        raise PreflightError(
+            f"formal sensor performance report is invalid: {error}"
+        ) from error
 
 
 def _validate_formal_bundle_identity(

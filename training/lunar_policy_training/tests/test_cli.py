@@ -27,6 +27,7 @@ from lunar_policy_training.cli import (  # noqa: E402
     SignalStopFlag,
     TrainingBoundaryLoop,
     _checkpoint_target,
+    _formal_sensor_performance_preflight,
     _freeze_task4_manifest,
     _load_calibrated_run_state,
     _run_curriculum_training,
@@ -34,6 +35,7 @@ from lunar_policy_training.cli import (  # noqa: E402
     build_parser,
     validate_artifact_root,
 )
+from lunar_policy_training.capability_freeze import FrozenCapabilityBundle  # noqa: E402
 from lunar_policy_training.config import (
     TrainingConfigError,
     load_training_config,
@@ -109,10 +111,53 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
 
     assert calibrate.command == "calibrate"
     assert train.command == "train"
+    assert train.sensor_performance_report is None
     assert resume.command == "resume"
+    assert resume.sensor_performance_report is None
     assert evaluate.command == "evaluate"
+    assert evaluate.sensor_performance_report is None
     assert extension.command == "extend-budget"
     assert extension.blocks == 2
+
+
+def test_formal_sensor_performance_report_is_required_before_artifacts(
+    tmp_path: pathlib.Path,
+) -> None:
+    bundle = FrozenCapabilityBundle(
+        schema="lunar-training-capability-freeze/v1",
+        platforms=(),
+        bundle_sha256="b" * 64,
+        formal_eligible=True,
+    )
+
+    with pytest.raises(PreflightError, match="sensor performance report"):
+        _formal_sensor_performance_preflight(
+            None,
+            capability_bundle=bundle,
+            repository_root=REPOSITORY_ROOT,
+        )
+
+    assert not tuple(tmp_path.iterdir())
+
+
+def test_formal_sensor_performance_preflight_translates_strict_report_failure(
+    tmp_path: pathlib.Path,
+) -> None:
+    report = tmp_path / "sensor-performance.json"
+    report.write_text("{}\n", encoding="utf-8")
+    bundle = FrozenCapabilityBundle(
+        schema="lunar-training-capability-freeze/v1",
+        platforms=(),
+        bundle_sha256="b" * 64,
+        formal_eligible=True,
+    )
+
+    with pytest.raises(PreflightError, match="sensor performance report"):
+        _formal_sensor_performance_preflight(
+            str(report),
+            capability_bundle=bundle,
+            repository_root=REPOSITORY_ROOT,
+        )
 
 
 def test_training_configs_explicitly_separate_formal_and_development_smoke() -> None:

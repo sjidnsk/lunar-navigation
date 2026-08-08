@@ -17,6 +17,17 @@ target_include_directories(lunar_training_visibility PUBLIC
 set_target_properties(lunar_training_visibility PROPERTIES
   POSITION_INDEPENDENT_CODE ON)
 
+add_executable(lunar_training_visibility_benchmark
+  test/visibility_benchmark.cpp)
+target_compile_features(lunar_training_visibility_benchmark PRIVATE cxx_std_20)
+target_include_directories(lunar_training_visibility_benchmark PRIVATE include)
+target_link_libraries(lunar_training_visibility_benchmark PRIVATE
+  lunar_training_visibility)
+target_compile_definitions(lunar_training_visibility_benchmark PRIVATE
+  LUNAR_VISIBILITY_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+  LUNAR_VISIBILITY_COMPILER_ID="${CMAKE_CXX_COMPILER_ID}"
+  LUNAR_VISIBILITY_COMPILER_VERSION="${CMAKE_CXX_COMPILER_VERSION}")
+
 pybind11_add_module(_lunar_planner_training_bridge MODULE NO_EXTRAS
   src/conversions.cpp
   src/python_bindings.cpp)
@@ -31,8 +42,10 @@ ament_python_install_package(${PROJECT_NAME}
   PACKAGE_DIR python/${PROJECT_NAME})
 ament_get_python_install_dir(PYTHON_INSTALL_DIR)
 install(TARGETS _lunar_planner_training_bridge lunar_training_visibility
+  lunar_training_visibility_benchmark
   LIBRARY DESTINATION ${PYTHON_INSTALL_DIR}/${PROJECT_NAME}
-  ARCHIVE DESTINATION lib)
+  ARCHIVE DESTINATION lib
+  RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 
 if(BUILD_TESTING)

@@ -16,7 +16,7 @@ struct GridCell final {
   std::int32_t row{};
   std::int32_t column{};
 
-  bool operator==(const GridCell&) const = default;
+  bool operator==(const GridCell &) const = default;
 };
 
 struct CandidateGain final {
@@ -25,7 +25,7 @@ struct CandidateGain final {
 };
 
 class VisibilityKernel final {
- public:
+public:
   VisibilityKernel(double resolution_m, double range_m);
 
   [[nodiscard]] double resolution_m() const noexcept { return resolution_m_; }
@@ -36,25 +36,30 @@ class VisibilityKernel final {
 
   [[nodiscard]] std::vector<CandidateGain> EstimateCandidateGains(
       GridShape shape, std::span<const std::uint8_t> observed,
-      std::span<const float> obstacle_ratio,
-      std::span<const float> roi_ratio,
+      std::span<const float> obstacle_ratio, std::span<const float> roi_ratio,
       std::span<const float> priority_weight,
       std::span<const GridCell> candidates) const;
 
-  [[nodiscard]] std::vector<std::uint8_t> RevealFromPose(
-      GridShape shape, GridCell pose,
-      std::span<const float> truth_obstacle_ratio) const;
+  [[nodiscard]] std::vector<std::uint8_t>
+  RevealFromPose(GridShape shape, GridCell pose,
+                 std::span<const float> truth_obstacle_ratio) const;
 
- private:
+private:
   struct Ray final {
-    GridCell endpoint;
-    std::vector<GridCell> cells;
+    std::uint32_t cell_offset{};
+    std::uint32_t cell_count{};
   };
 
   double resolution_m_{};
   double range_m_{};
+  std::int32_t radius_cells_{};
   std::vector<GridCell> endpoint_offsets_;
   std::vector<Ray> rays_;
+  std::vector<std::uint32_t> ray_cell_indices_;
+  std::vector<std::uint16_t> baseline_support_counts_;
+  std::vector<std::uint32_t> reverse_offsets_;
+  std::vector<std::uint32_t> occurrence_rays_;
+  std::vector<std::uint16_t> occurrence_positions_;
 };
 
-}  // namespace lunar::planning::training
+} // namespace lunar::planning::training
