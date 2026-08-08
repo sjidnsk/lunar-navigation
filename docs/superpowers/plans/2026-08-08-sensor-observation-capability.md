@@ -8,6 +8,11 @@
 
 **Tech Stack:** C++20, CMake/ament, pybind11, ROS 2 Humble, Python 3.10, NumPy, PyTorch PPO, pytest, GoogleTest, YAML/JSON capability closures.
 
+**2026-08-08 amendment:** The approved in-repository capability v2 is the formal authority. The later
+implementation in `2026-08-08-project-formal-capability-and-hopper-no-fuel-budget.md` supersedes every
+step below that asks for an external capability lock, URDF/mesh training closure, or cumulative hopper
+fuel. Formal tools now load the project authority directly; current C++ v3 planning remains authoritative.
+
 ## Global Constraints
 
 - Work only in `/mnt/data/WS/.lunar-navigation-worktrees/sensor-observation-capability-design` on `feature/sensor-observation-capability-design`; preserve `/mnt/data/WS/lunar-navigation/.vscode/`.
@@ -636,9 +641,10 @@ git commit -m "test: gate sensor observation performance"
 
 The gate implementation landed in `e648e29`; checkpoint identity and reveal-latency stability fixes
 landed in `c3ef0f5` and `452183c`. Raw Release latency and the
-24-worker current-planner/schema-v2 fixture pass their thresholds. A formal report was intentionally
-not generated because no external 30 m/360° `lunar-training-capability-freeze/v1` exists yet; the old
-Isaac/ROS 30 m/120° provenance is rejected before benchmark execution and remains historical evidence.
+24-worker current-planner/schema-v2 fixture passed their thresholds. The earlier conclusion that no
+formal report could exist without an external closure is superseded: commit `44df881` binds the formal
+tool to the approved project capability and generated a passing report at
+`/home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/sensor-performance.json`.
 
 ---
 
@@ -650,7 +656,7 @@ Isaac/ROS 30 m/120° provenance is rejected before benchmark execution and remai
 - Modify: `docs/superpowers/plans/2026-08-08-sensor-observation-capability.md`
 
 **Interfaces:**
-- Consumes: all task commits, raw Release evidence, and the external performance report when a current formal capability closure is available.
+- Consumes: all task commits, raw Release evidence, and the formal performance report bound to the approved project capability v2.
 - Produces: reproducible qualification evidence and a clean feature branch ready for review/merge, not a formal trained model.
 
 - [x] **Step 1: Run UTF-8, diff, boundary, and Python qualification**
@@ -688,7 +694,7 @@ colcon test-result --test-result-base "$artifact_root/build" --verbose
 
 - [x] **Step 3: Record exact evidence without committing artifacts**
 
-The qualification document records commit SHA, branch, Ubuntu/ROS/compiler, Release build paths, test totals, measured p50/p95/throughput, capability/training-semantics hashes, and remaining external gates. If the formal capability closure is unavailable, it records the rejected historical input and explicit absence of a formal performance report/path/SHA instead of substituting fixture evidence. It explicitly states that formal training has not started and the Isaac snapshot remains historical.
+The qualification document records commit SHA, branch, Ubuntu/ROS/compiler, Release build paths, test totals, measured p50/p95/throughput, capability/training-semantics hashes, and remaining independent training gates. The old external-lock blocker is superseded, the project capability v2 is the formal source, formal performance evidence is recorded, and the Isaac snapshot remains historical. Formal PPO training itself has not started in this task.
 
 - [x] **Step 4: Mark all plan checkboxes and commit qualification**
 

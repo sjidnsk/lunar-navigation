@@ -8,11 +8,11 @@
 三平台动作语义和正式训练前置门。当前功能分支在 Ubuntu amd64 Release 环境通过了跨层
 正确性、ROS/C++、性能和仓库边界回归，可以合入 `integration` 继续准备训练。
 
-本报告不表示正式 PPO 训练已经开始，也不表示正式能力 closure 已齐备。当前缺少的是由
-外部平台资料形成、同时包含三平台 v2 运动能力、30 m/360° 观测文档、URDF 和 mesh 哈希
-closure 的 `lunar-training-capability-freeze/v1`。因此没有生成可授权正式训练的
-`sensor-observation-performance/v1` 报告，也没有该报告的 SHA-256。这是 fail-closed 的
-预期结果，不是以旧资料或测试夹具补齐的软门。
+本报告不表示正式 PPO 训练已经开始。正式运动能力 closure 已由仓库内批准的三平台
+capability v2 闭合；`30 m/360°` 观测语义和 Release 性能门也已闭合。正式训练不再等待
+外部 `lunar-training-capability-freeze/v1`，也不把 URDF/mesh 资源包当作运动能力的重复证明。
+当前正式 `sensor-observation-performance/v1` 报告已经生成并通过，训练代码已具备进入下一项
+独立数据/运行环境门的资格。
 
 ## 权威基线和历史边界
 
@@ -34,14 +34,8 @@ checkpoint 或性能结论均不再具有现行权威。训练环境目录名中
 依赖环境的历史位置，不改变上述权威关系。
 
 Isaac/ROS 外部仓的 `30 m/120°` `capability_provenance.json` 继续冻结为历史验证证据，不能
-重新定基线，也不能转换成 30 m/360° 正式能力。正式性能工具实测以该文件作为
-`--capability-lock` 时返回：
-
-```text
-error: formal capability lock is invalid: capability lock schema fields are invalid
-exit_code=2
-formal_report=absent
-```
+重新定基线，也不能转换成 30 m/360° 正式能力。正式入口已取消可替换权威的
+`--capability-lock`；它们只读取并验证上述仓库内批准能力。
 
 ## 已实现语义
 
@@ -57,13 +51,16 @@ formal_report=absent
 - `theta` 表示到达候选后的绝对 `map` 机体 yaw，不是传感器视线。轮式和足式保留
   `theta` 的运动学学习信号；飞跃式在当前项目中只选择安全且简单抛物线可达的落区，
   `theta` 被 mask，且不进入 PPO loss。
+- 飞跃式每次动作都使用 capability v2 的固定参考质量、比冲和参考推进剂计算同一个单跳
+  `delta-v` 包线。该参考推进剂是标定条件，不是 episode 状态；规划、观测、奖励和终止条件
+  均不累计燃料消耗，连续规划不会因前一跳而缩小可达范围。
 - 正式 `train`、`resume` 和 `evaluate` 在创建 worker、CUDA 上下文或输出 artifact 前，
-  必须同时校验能力 closure、训练语义和同主机/同源码 Release 性能报告。
+  必须同时校验项目正式能力摘要、训练语义和同主机/同源码 Release 性能报告。
 
 ## 验证主机和源码身份
 
 - 分支：`feature/sensor-observation-capability-design`；
-- 传感器实现提交：`452183c7ce6415adb79175c91afd629d5d98706b`；
+- 当前正式性能证据所绑定源码提交：`44df8814e6e4d29dca41134354f86bc1ac3577af`；
 - OS：Ubuntu 22.04.5 LTS，Linux `6.8.0-124-generic`，`x86_64`；
 - ROS：ROS 2 Humble；
 - 编译器：GCC 11.4.0，CMake 3.22.1，Python 3.10.12；
@@ -74,19 +71,18 @@ formal_report=absent
 
 ## 正确性与构建结果
 
-仓库外最终 Release 根目录为：
+本轮无燃料状态闭包使用的仓库外 Release 安装目录为：
 
 ```text
-/home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/final-452183c
+/home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/main-install
 ```
 
 资格结果：
 
-- 外部干净目录构建 5 个包：`lunar_navigation_msgs`、`lunar_planning_msgs`、
-  `lunar_planner_core`、`lunar_planner_training_bridge`、`lunar_planner_ros`；
-- 选定 core/bridge/ROS 的 `colcon test-result --verbose`：292 tests，0 errors，
-  0 failures，0 skipped；
-- `model_contract/tests`、完整训练测试和性能测试：622 passed，7 skipped；
+- Release 构建 7 个 ROS 包成功，包括消息、配置、core、training bridge 和 ROS server；
+- core 聚焦回归：24 tests，0 errors，0 failures；
+- message/core/bridge/ROS 干净结果：36 tests，0 errors，0 failures；
+- `model_contract/tests`、完整训练测试、差分和性能测试：645 passed，16 skipped；
 - 原生/参考可见性随机小图等价回归：9 passed；
 - 性能门、sensor 和 CLI 聚焦回归：57 passed；
 - 仓库边界检查：`repository boundaries: OK`，专项测试 14 passed；
@@ -98,22 +94,23 @@ formal_report=absent
 
 ## Release 性能证据
 
-最终安装中的原生 runner：
+正式报告和原生 runner：
 
 ```text
-/home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/final-452183c/install/lunar_planner_training_bridge/lib/lunar_planner_training_bridge/lunar_training_visibility_benchmark
+/home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/sensor-performance.json
+/home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/main-install/lib/lunar_planner_training_bridge/lunar_training_visibility_benchmark
 ```
 
 固定 50 次预热、200 次测量的结果：
 
 | 工作负载 | fixture | p50 | p95 | 门限 | 结果 |
 | --- | --- | ---: | ---: | ---: | --- |
-| 候选信息增益 | 256×256，4.0 m，30 m，64 candidates | 0.118707 ms | 0.124662 ms | 5 ms | 通过 |
-| 实际观测 reveal | 320×320，0.2 m，30 m | 1.196305 ms | 1.334282 ms | 2 ms | 通过 |
+| 候选信息增益 | 256×256，4.0 m，30 m，64 candidates | 0.118651 ms | 0.128879 ms | 5 ms | 通过 |
+| 实际观测 reveal | 320×320，0.2 m，30 m | 1.079292 ms | 1.206533 ms | 2 ms | 通过 |
 
-checksum 为 `272617000`。原生程序自报 `build_type=Release`、GCC 11.4.0 和 schema
-`native-visibility-benchmark/v1`。为排除 powersave 主机上的偶然调度抖动，优化后额外连续
-执行 8 轮相同 50/200 fixture，reveal p95 范围为 1.289822–1.555860 ms，8/8 均低于门限。
+原生程序自报 `build_type=Release`、GCC 11.4.0 和 schema
+`native-visibility-benchmark/v1`。此前稳定性资格还连续执行了 8 轮相同 50/200 fixture，
+reveal p95 范围为 1.289822–1.555860 ms，8/8 均低于门限。
 
 24-worker 回归使用当前 `PlannerBridge` 和当前 C++ v3 规划器，三平台各 8 worker；全局图
 为通用多分辨率 `640×640 @ 1.6 m`，局部图为 `320×320 @ 0.2 m`。每个 worker 的规划输入
@@ -121,43 +118,40 @@ checksum 为 `272617000`。原生程序自报 `build_type=Release`、GCC 11.4.0 
 
 | 指标 | 结果 |
 | --- | ---: |
-| 禁用观测闭环 | 53.741206 step/s |
-| 启用观测闭环 | 51.488771 step/s |
-| 吞吐降幅 | 4.191261% |
+| 禁用观测闭环 | 14.307369 step/s |
+| 启用观测闭环 | 14.055330 step/s |
+| 吞吐降幅 | 1.761604% |
 | 门限 | <= 10% |
 
-该 24-worker 用例使用测试代码即时生成的 schema-valid v2 closure，只证明当前规划器、三平台
-类型转换和观测开销的回归性质；它不是外部正式能力证据，不能生成正式性能报告或解锁训练。
+该 24-worker 用例直接通过项目正式能力适配器加载当前 capability v2；工作负载标识为
+`cpp-v3-current-capability-v2`。报告内摘要为
+`22e258b2f8d4da517acbcc414e5eb3d5ea9b4b3a57b0856f0fd39e58ed744f45`，外部 JSON 文件
+SHA-256 为 `5d1cf5b390cb1d5e3985d56cfbf18ff61c260c8af6934fff3ba55db74426e690`，结果
+`passed: true`。
 
-## 正式训练剩余门
+## 正式训练后续边界
 
-下一步必须按顺序完成：
+运动能力、观测语义和性能门已经闭合。后续正式训练按独立流程完成：
 
-1. 外部平台资料提供方生成三平台 `lunar-training-capability-freeze/v1`；每个平台的 typed
-   capability 必须与当前能力 schema v2/批准值一致，且同一 closure 中包含 30 m/360°
-   observation、URDF、mesh、版本和 SHA-256。
-2. 使用该正式 lock 和本报告中的 Release runner 执行 24-worker 性能工具，生成仓库外
-   `sensor-observation-performance/v1`。工具会绑定主机、传感器源码提交、能力 bundle hash、
-   训练语义 hash 和阈值结论。
-3. 使用同一正式能力重新生成三平台 traversability/candidate cache，重新冻结 worker 和
+1. 使用项目正式能力重新生成三平台 traversability/candidate cache，重新冻结 worker 和
    micro-batch；旧 Volume 3 cache/checkpoint 不得续用。
-4. 重新执行 formal preflight 后，才允许启动 seed 4080 训练。ONNX、TensorRT、AGX 和实际
+2. 使用本报告的正式性能 JSON 执行 formal preflight，之后按独立训练作业启动 seed 4080。
+3. ONNX、TensorRT、AGX 和实际
    平台验收仍属于后续独立门。
 
 正式性能命令为：
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/final-452183c/install/setup.bash
+source /home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/main-install/setup.bash
 export PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training${PYTHONPATH:+:$PYTHONPATH}"
 
 /home/kai/CodexDownloads/lunar_navigation/volume3/venv/bin/python \
   training/tools/benchmark_sensor_observation.py \
-  --output /home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/final-452183c/sensor-performance.json \
-  --capability-lock /absolute/path/to/current-capability-lock.json \
-  --native-benchmark /home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/final-452183c/install/lunar_planner_training_bridge/lib/lunar_planner_training_bridge/lunar_training_visibility_benchmark \
+  --output /home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/sensor-performance.json \
+  --native-benchmark /home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/main-install/lib/lunar_planner_training_bridge/lunar_training_visibility_benchmark \
   --workers 24
 ```
 
-只有命令返回 `passed: true` 后，该外部 JSON 路径及其 SHA-256 才能进入正式
-`train/resume/evaluate`。本轮未伪造该缺失证据，也未启动正式训练。
+正式 `train/resume/evaluate` 使用该外部 JSON 路径进行性能预检，同时自行加载仓库内正式
+capability v2。本轮完成的是训练资格闭包，未启动正式 PPO 训练。

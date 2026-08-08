@@ -1,6 +1,6 @@
 # Volume 3 月球极区 PPO 训练前就绪交接
 
-状态：`sensor-closed-loop-ready / blocked-on-formal-capability-closure`
+状态：`sensor-closed-loop-qualified / project-capability-closed / formal-training-not-started`
 
 ## 当前结论
 
@@ -8,10 +8,14 @@
 `theta` 语义和 Release 性能前置门。正式 seed 4080 rollout 尚未启动，也没有生成 ONNX、
 TensorRT engine、四文件模型候选、`model-package-ready` 或 AGX 标签。
 
-当前唯一未闭合的训练输入门是外部 `lunar-training-capability-freeze/v1`：它必须同时封装
-现行三平台能力 v2、共享 30 m/360° 观测文档以及 URDF/mesh 资源哈希。仓库内已批准的工程
-能力值已经确定并通过 Ubuntu 规划资格，但不能用缺少外部资源 closure 的仓库配置文件或
-测试夹具冒充正式训练 bundle。
+仓库内已批准的 capability v2 就是正式运动能力源，不再等待外部
+`lunar-training-capability-freeze/v1`，也不要求用 URDF/mesh 重复闭合训练能力。正式入口直接
+校验 `three_platform_capability_freeze_v1.yaml` 的规范化摘要并转换为当前 C++ v3 planner 的
+typed capability。URDF/mesh 继续服务于仿真外观、碰撞代理和设备集成，但不是 PPO 训练门。
+
+飞跃式能力只保留每次独立规划的固定单跳 `delta-v` 包线。参考质量、比冲和参考推进剂用于
+计算该包线，不是 episode 燃料状态；训练请求、观测、奖励和终止条件均不累计燃料，也不会因
+先前跳跃次数降低下一跳可达性。
 
 ## 现行权威覆盖规则
 
@@ -70,32 +74,29 @@ capability、reward 和源码 SHA-256 外，还绑定训练语义 SHA-256；旧 
 
 - 当前规划器、bridge、ROS 的外置 Release 构建成功；`colcon test-result` 为 292 tests，
   0 errors，0 failures，0 skipped；
-- model contract、训练和性能 Python 回归为 622 passed，7 skipped；
-- 原生可见性候选 p95 为 0.124662 ms，30 m reveal p95 为 1.334282 ms；
-- 24-worker 当前规划器/schema-valid v2 测试 closure 回归的观测吞吐降幅为 4.191261%，
-  低于 10% 门限；该 fixture 不具正式授权能力；
+- model contract、训练、差分和性能 Python 回归为 645 passed，16 skipped；
+- 原生可见性候选 p95 为 0.128879 ms，30 m reveal p95 为 1.206533 ms；
+- 24-worker 当前规划器/正式 capability v2 回归的观测吞吐降幅为 1.761604%，低于 10% 门限；
+- 正式性能报告为
+  `/home/kai/CodexDownloads/lunar_navigation/formal_capability_no_fuel/sensor-performance.json`，
+  文件 SHA-256 为 `5d1cf5b390cb1d5e3985d56cfbf18ff61c260c8af6934fff3ba55db74426e690`；
 - 仓库边界专项 14 passed，能力 v2 冻结校验通过。
 
 完整主机信息、命令、性能 fixture 和正式/测试证据边界见
 `docs/validation/sensor-observation-capability-qualification.md`。
 
-## 正式能力门与解锁顺序
+## 正式训练后续顺序
 
-当前没有满足新语义的外部正式能力 lock，所以没有正式
-`sensor-observation-performance/v1` 路径或 SHA-256。历史 Isaac/ROS
-`capability_provenance.json` 是 30 m/120° 旧 schema 证据，输入正式工具时会在 benchmark
-前被拒绝，且不会创建报告。
+当前正式能力与 `sensor-observation-performance/v1` 已闭合。历史 Isaac/ROS
+`capability_provenance.json` 是 30 m/120° 旧 schema 证据，只保留为历史快照；正式工具不再
+接收可替换项目权威的 `--capability-lock`。
 
-唯一解锁顺序是：
+后续顺序是：
 
-1. 外部平台资料提供方把当前三平台 capability v2、30 m/360° observation、URDF 和 mesh
-   组成完整 `lunar-training-capability-freeze/v1`，并通过内容一致性和 SHA-256 校验。
-2. 用该 lock 在当前传感器源码提交和同一 Release 主机运行 24-worker 性能工具，生成并验证
-   `sensor-observation-performance/v1`。
-3. 用同一 bundle 重新生成三平台 traversability/candidate cache，并重新冻结 worker 与
+1. 用项目正式 capability v2 重新生成三平台 traversability/candidate cache，并重新冻结 worker 与
    micro-batch；旧 Volume 3 cache/checkpoint 不得沿用。
-4. 对 `train/resume/evaluate` 重新执行 formal preflight，之后才允许启动一个正式 seed
-   4080 的可暂停训练。
+2. 以已通过的正式性能 JSON 对 `train/resume/evaluate` 执行 formal preflight。
+3. 在独立训练流程中启动一个正式 seed 4080 的可暂停训练。
 
 正式训练、完整评估、ONNX/TensorRT、AGX 和实际平台资格仍分别受后续门控制；本交接不会
 把开发态或 Ubuntu 仿真结果升级成这些状态。

@@ -1,5 +1,11 @@
 # 多模态传感器保守观测能力与探索闭环设计
 
+修订状态（2026-08-08）：项目内批准的 capability v2 已确认为正式运动能力源；原文中等待
+外部 capability closure、URDF 或 mesh 才能进入训练的表述由
+`2026-08-08-formal-capability-and-hopper-no-fuel-budget-design.md` 取代。当前路径规划只使用
+integration 上的 C++ v3 算法和 capability v2；旧 Volume 3 路径算法、平台能力与缓存均不再
+具有权威。飞跃式参考推进剂只用于固定单跳 `delta-v` 包线，不进入探索状态且不会跨跳扣减。
+
 ## 背景与已批准结论
 
 用户提供的《多模态传感器架构_v3.xlsx》描述了多模态感知系统使用的 RGB、SWIR、事件相机、激光雷达、ToF 和 IMU 等设备。本项目不复现多模态融合、目标识别、辐射特性或具体传感器成像过程，只建立一个保守、确定且计算高效的几何观测抽象，用于闭合探索候选、PPO 决策、规划执行和实际覆盖奖励。
@@ -140,7 +146,10 @@ Basler blaze ToF 的表中范围约为 10 m，因此 30 m 不能解释成 ToF �
 
 ### 能力注入
 
-生产候选生成器不得保留当前 `80 m/360°` 默认参数。观测能力必须从已验证的外部 capability 文档注入，并进入 capability bundle 哈希。缺失参数、范围/FOV 非有限、FOV 超界、正式训练中的 hash 漂移或 checkpoint 与运行能力不一致均 fail closed。
+生产候选生成器不得保留当前 `80 m/360°` 默认参数。正式入口必须从仓库内项目正式能力适配器
+注入 capability v2 与 `30 m/360°` 观测语义，并将两者摘要写入运行身份。缺失参数、范围/FOV
+非有限、FOV 超界、仓库批准能力摘要漂移或 checkpoint 与运行能力不一致均 fail closed；正式
+入口不接受可替换这一权威的外部 capability lock。
 
 正式训练 manifest、checkpoint、评估报告和最终四文件模型包必须记录同一观测 capability 标识与内容哈希。改变 30 m、360°、遮挡规则或观测边界语义后，旧 checkpoint 不得继续训练，旧模型不得直接重新发布；必须重新生成候选缓存并重新训练和资格评估。
 
@@ -220,7 +229,10 @@ log_prob_total = log_prob_frontier + theta_action_mask * log_prob_theta
 
 本规格应先进入 `integration`。训练实现依赖当前 Volume 3 策略流水线材料；在实现合入前，必须按仓库分支规则把所需的已资格代码带入基于 `integration` 的功能分支，不能继续推进 `volume-3-policy-pipeline` 里程碑分支，也不能把外部仓 artifact 导入本仓。
 
-部署侧继续只消费外部传感与融合系统发布的地图和 observation capability。本仓实现候选估算、训练 reveal 抽象、PPO `theta` mask、能力哈希校验和回归门，不取得真实传感器数据所有权。
+部署侧继续只消费外部传感与融合系统发布的地图。本仓实现候选估算、训练 reveal 抽象、PPO
+`theta` mask、项目正式能力哈希校验和回归门，不取得真实传感器数据所有权。未来外部感知系统
+若发布新的 observation capability，只能通过新的项目 capability 版本显式评审和切换，不能在
+运行时静默覆盖本轮训练身份。
 
 完成标准为：
 
