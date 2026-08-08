@@ -68,7 +68,7 @@ def test_observation_identity_is_immutable_non_network_metadata() -> None:
 def _observation(
     platform_index: int = 0,
     *,
-    candidate_mask: tuple[bool, bool] = (True, False),
+    candidate_mask: tuple[bool, ...] = (True, False),
     identity: ObservationIdentity | None = None,
 ) -> PolicyBatch:
     platform_context = torch.zeros((1, 3), dtype=torch.float32)
@@ -78,7 +78,7 @@ def _observation(
         coverage_summary=torch.zeros((1, 8, 4, 4), dtype=torch.float32),
         local_crop=torch.zeros((1, 8, 4, 4), dtype=torch.float32),
         frontier_features=torch.zeros((1, 2, 22), dtype=torch.float32),
-        pose_features=torch.zeros((1, 6), dtype=torch.float32),
+        pose_features=torch.zeros((1, 5), dtype=torch.float32),
         candidate_mask=torch.tensor([candidate_mask], dtype=torch.bool),
         platform_context=platform_context,
         observation_identities=(identity or _identity(),),
@@ -199,12 +199,38 @@ def test_normal_v3_rejection_consumes_decision_and_masks_only_selected_candidate
 
     result = env.advance_until_decision_boundary(policy)
 
-    assert result.decision_budget_consumed == 1
+    assert result.policy_decisions_consumed == 1
     assert result.transition is not None
     assert policy_masks[0].tolist() == [[True, True]]
     assert result.transition.next_observation.candidate_mask.tolist() == [
         [False, True]
     ]
+
+
+def test_ninth_policy_decision_is_not_a_task_terminal() -> None:
+    rejected = PlannerOutput()
+    rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+    rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    rejected.reason_code = "CANDIDATE_REJECTED"
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(rejected),
+        request_builder=lambda action: action,
+        initial_observation=_observation(candidate_mask=(True,) * 10),
+    )
+
+    for frontier_index in range(9):
+        result = env.advance_until_decision_boundary(
+            lambda _observation, index=frontier_index: PolicyAction(
+                frontier_index=index,
+                theta_rad=0.0,
+            )
+        )
+        assert result.policy_decisions_consumed == 1
+        assert result.transition is not None
+        assert result.transition.terminated is False
+
+    assert env.refresh_decision_boundary().execution_state == "DECISION_READY"
 
 
 @pytest.mark.parametrize(
@@ -413,7 +439,7 @@ def test_prepared_action_does_not_refresh_producer_after_policy_boundary() -> No
     )
 
     assert boundary.execution_state == "DECISION_READY"
-    assert result.decision_budget_consumed == 1
+    assert result.policy_decisions_consumed == 1
     assert provider.calls == 1
     assert result.transition is not None
     assert (
@@ -457,8 +483,8 @@ def test_identity_bound_request_rejects_snapshot_drift_before_bridge_plan() -> N
         )
 
 
-def test_installed_observation_is_cloned_before_private_budget_update() -> None:
-    """Would fail if environment budget writes mutated producer-owned tensors."""
+def test_installed_observation_is_cloned_from_producer_owned_tensors() -> None:
+    """Would fail if environment state aliased producer-owned tensors."""
     output = PlannerOutput()
     output.outcome = PlanningOutcome.INVALID_REQUEST
     output.directive = ExecutionDirective.NO_SAFE_REFERENCE
@@ -468,7 +494,7 @@ def test_installed_observation_is_cloned_before_private_budget_update() -> None:
         candidate_mask=(True, True),
         identity=_identity(map_snapshot_id="map-2"),
     )
-    producer_refresh.pose_features[0, 5] = 0.625
+    producer_refresh.pose_features[0, 4] = 0.625
     provider = _ObservationProvider(producer_refresh)
     env = V3ExplorationEnvironment(
         platform_type="WHEELED",
@@ -476,48 +502,20 @@ def test_installed_observation_is_cloned_before_private_budget_update() -> None:
         request_builder=lambda action: action,
         initial_observation=initial,
         observation_provider=provider,
-        total_decision_budget=4,
-        remaining_decision_budget=3,
     )
 
     env.advance_until_decision_boundary(
         lambda observation: PolicyAction(frontier_index=0, theta_rad=0.0)
     )
     published = env.current_observation
-    published.pose_features[0, 5] = 0.0
+    published.pose_features[0, 4] = 0.0
 
-    assert float(producer_refresh.pose_features[0, 5]) == pytest.approx(0.625)
+    assert float(producer_refresh.pose_features[0, 4]) == pytest.approx(0.625)
     assert producer_refresh.candidate_mask.tolist() == [[True, True]]
-    assert float(env.current_observation.pose_features[0, 5]) == pytest.approx(0.5)
+    assert float(env.current_observation.pose_features[0, 4]) == pytest.approx(0.625)
 
 
-@pytest.mark.parametrize(
-    ("total", "remaining", "expected_ratio"),
-    ((8, 8, 1.0), (8, 3, 0.375), (1, 0, 0.0)),
-)
-def test_initial_and_resumed_decision_budget_publish_exact_ratio(
-    total: int, remaining: int, expected_ratio: float
-) -> None:
-    producer = _observation(candidate_mask=(True, True))
-    producer.pose_features[0, 5] = 0.123
-
-    env = V3ExplorationEnvironment(
-        platform_type="WHEELED",
-        bridge=_Bridge(PlannerOutput()),
-        request_builder=lambda action: action,
-        initial_observation=producer,
-        total_decision_budget=total,
-        remaining_decision_budget=remaining,
-    )
-
-    assert float(env.current_observation.pose_features[0, 5]) == pytest.approx(
-        expected_ratio
-    )
-    assert float(producer.pose_features[0, 5]) == pytest.approx(0.123)
-
-
-def test_policy_decision_consumes_real_budget_and_updates_network_ratio() -> None:
-    """Would fail if budget accounting remained helper-only metadata."""
+def test_policy_decision_count_is_metadata_not_a_remaining_resource() -> None:
     output = PlannerOutput()
     output.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
     output.directive = ExecutionDirective.NO_SAFE_REFERENCE
@@ -527,22 +525,16 @@ def test_policy_decision_consumes_real_budget_and_updates_network_ratio() -> Non
         bridge=_Bridge(output),
         request_builder=lambda action: action,
         initial_observation=_observation(candidate_mask=(True, True)),
-        total_decision_budget=4,
-        remaining_decision_budget=4,
     )
-    ratios: list[float] = []
 
     result = env.advance_until_decision_boundary(
-        lambda observation: (
-            ratios.append(float(observation.pose_features[0, 5].item()))
-            or PolicyAction(frontier_index=0, theta_rad=0.0)
-        )
+        lambda _observation: PolicyAction(frontier_index=0, theta_rad=0.0)
     )
 
-    assert result.decision_budget_consumed == 1
-    assert ratios == pytest.approx([1.0])
+    assert result.policy_decisions_consumed == 1
     assert result.transition is not None
-    assert float(result.transition.next_observation.pose_features[0, 5]) == pytest.approx(0.75)
+    assert result.transition.next_observation.pose_features.shape == (1, 5)
+    assert result.transition.terminated is False
 
 
 def test_all_false_candidates_bypass_policy_without_fallback() -> None:
@@ -568,7 +560,7 @@ def test_all_false_candidates_bypass_policy_without_fallback() -> None:
     assert policy_called is False
     assert result.execution_state == "NO_CANDIDATES"
     assert result.transition is None
-    assert result.decision_budget_consumed == 0
+    assert result.policy_decisions_consumed == 0
 
 
 @pytest.mark.parametrize(
@@ -614,7 +606,6 @@ def test_ground_reference_executes_to_next_decision_boundary(
     assert len(executor.references) == 1
     assert transition.next_observation is not next_observation
     assert transition.next_observation.pose_features[0, 0].item() == pytest.approx(0.5)
-    assert next_observation.pose_features[0, 5].item() == pytest.approx(0.0)
     assert transition.mission_observed_delta == 0.2
     assert transition.priority_observed_delta == 0.1
     assert transition.normalized_plan_or_execution_cost == pytest.approx(0.8)
@@ -815,7 +806,6 @@ def test_current_cpp_v3_committed_hop_output_uses_execution_feedback() -> None:
     transition = env.step(PolicyAction(frontier_index=0, theta_rad=0.0))
 
     assert transition.next_observation is not observation
-    assert observation.pose_features[0, 5].item() == pytest.approx(0.0)
     assert transition.mission_observed_delta == 0.2
     assert transition.priority_observed_delta == 0.3
     assert transition.executed_without_new_coverage is True

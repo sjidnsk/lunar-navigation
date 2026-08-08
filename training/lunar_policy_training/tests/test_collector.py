@@ -55,8 +55,7 @@ def _policy_batch(step: int = 0) -> PolicyBatch:
     frontier[..., 0] = float(step) / 10.0
     mask = torch.zeros((batch_size, 64), dtype=torch.bool)
     mask[:, :3] = True
-    pose_features = torch.zeros((batch_size, 6), dtype=torch.float32)
-    pose_features[:, 5] = 1.0
+    pose_features = torch.zeros((batch_size, 5), dtype=torch.float32)
     return PolicyBatch(
         prior_channels=torch.full(
             (batch_size, 4, 256, 256), float(step) / 100.0, dtype=torch.float32
@@ -238,31 +237,28 @@ def test_collector_bypasses_all_false_candidate_rows_before_policy_forward() -> 
     assert policy.forward_calls == 0
 
 
-def test_collector_rejects_exhausted_budget_without_resolver_before_policy() -> None:
-    """Would fail if budget-zero rows entered policy on a generic vector env."""
+def test_zero_mission_coverage_does_not_bypass_policy() -> None:
+    """Mission coverage is an observation, not a hidden action budget."""
     environment = DeterministicVectorEnv()
     original_reset = environment.reset
 
-    def reset_with_exhausted_budget() -> PolicyBatch:
+    def reset_with_zero_coverage() -> PolicyBatch:
         batch = original_reset()
-        batch.pose_features[1, 5] = 0.0
-        batch.pose_features[[0, 2], 5] = 1.0
+        batch.pose_features[:, 4] = 0.0
         return batch
 
-    environment.reset = reset_with_exhausted_budget
+    environment.reset = reset_with_zero_coverage
     policy = _CountingPolicy().eval()
 
-    with pytest.raises(
-        CollectorError, match="must bypass rollout collection"
-    ):
-        collect_rollout(
-            environment,
-            policy,
-            CollectorConfig(horizon=1, deterministic=True),
-            device="cpu",
-        )
+    collected = collect_rollout(
+        environment,
+        policy,
+        CollectorConfig(horizon=1, deterministic=True),
+        device="cpu",
+    )
 
-    assert policy.forward_calls == 0
+    assert len(collected.rollout) == environment.env_count
+    assert policy.forward_calls == 2
 
 
 def _real_v3_worker(
@@ -273,7 +269,7 @@ def _real_v3_worker(
         coverage_summary=torch.zeros((1, 3, 256, 256), dtype=torch.float32),
         local_crop=torch.zeros((1, 4, 32, 32), dtype=torch.float32),
         frontier_features=torch.zeros((1, 64, 12), dtype=torch.float32),
-        pose_features=torch.zeros((1, 6), dtype=torch.float32),
+        pose_features=torch.zeros((1, 5), dtype=torch.float32),
         candidate_mask=torch.tensor([[True, True, True] + [False] * 61], dtype=torch.bool),
         platform_context=torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32),
         observation_identities=(
@@ -320,7 +316,7 @@ def _boundary_observation(*, all_false: bool, generation: int) -> PolicyBatch:
         coverage_summary=torch.zeros((1, 3, 256, 256), dtype=torch.float32),
         local_crop=torch.zeros((1, 4, 32, 32), dtype=torch.float32),
         frontier_features=torch.zeros((1, 64, 12), dtype=torch.float32),
-        pose_features=torch.tensor([[0.0, 0.0, 0.0, 1.0, 0.0, 1.0]], dtype=torch.float32),
+        pose_features=torch.tensor([[0.0, 0.0, 0.0, 1.0, 0.0]], dtype=torch.float32),
         candidate_mask=torch.tensor([mask], dtype=torch.bool),
         platform_context=torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32),
         observation_identities=(
@@ -348,10 +344,6 @@ class _BoundaryProtocolEnvironment:
     def refresh_decision_boundary(self) -> DecisionBoundaryResult:
         if not bool(self.observation.candidate_mask.any()):
             return DecisionBoundaryResult(execution_state="NO_CANDIDATES")
-        if float(self.observation.pose_features[0, 5]) <= 0.0:
-            return DecisionBoundaryResult(
-                execution_state="DECISION_BUDGET_EXHAUSTED"
-            )
         return DecisionBoundaryResult(execution_state="DECISION_READY")
 
     def advance_until_decision_boundary(self, policy) -> DecisionBoundaryResult:
@@ -362,7 +354,6 @@ class _BoundaryProtocolEnvironment:
             all_false=True,
             generation=self.observation.observation_identities[0].state_time_ns,
         )
-        next_observation.pose_features[0, 5] = 0.875
         self.observation = next_observation
         return DecisionBoundaryResult(
             execution_state="DECISION_BOUNDARY",
@@ -384,7 +375,7 @@ class _BoundaryProtocolEnvironment:
                 terminated=False,
                 execution_events=ExecutionEvents(),
             ),
-            decision_budget_consumed=1,
+            policy_decisions_consumed=1,
         )
 
     def advance_prepared_action(
@@ -414,48 +405,13 @@ class _ResettingBoundaryFactory:
         )
 
 
-class _BudgetOneFactory:
-    def __init__(self, *, total: int = 1, remaining: int = 1) -> None:
-        self.calls = 0
-        self.total = total
-        self.remaining = remaining
-
-    def __call__(
-        self, worker_index: int, platform_type: str
-    ) -> ParallelEnvironmentWorker:
-        self.calls += 1
-        observation = _boundary_observation(all_false=False, generation=self.calls)
-        observation.pose_features[0, 5] = 0.777
-        request = TrainingPlanRequest()
-        request.request_id = f"budget-one-{self.calls}"
-
-        def build_request(action, identity):
-            request.state_time.nanoseconds_since_epoch = identity.state_time_ns
-            return PreparedPlanRequest(request=request, identity=identity)
-
-        environment = create_v3_environment(
-            platform_type=platform_type,
-            request_builder=build_request,
-            initial_observation=observation,
-            observation_provider=lambda: observation,
-            total_decision_budget=self.total,
-            remaining_decision_budget=self.remaining,
-        )
-        return ParallelEnvironmentWorker(
-            environment=environment,
-            initial_observation=observation,
-        )
-
-
 class _CountingPolicy(CrossAttentionPolicy):
     def __init__(self) -> None:
         super().__init__()
         self.forward_calls = 0
-        self.budget_ratios: list[list[float]] = []
 
     def forward(self, batch: PolicyBatch):
         self.forward_calls += 1
-        self.budget_ratios.append(batch.pose_features[:, 5].tolist())
         return super().forward(batch)
 
 
@@ -481,10 +437,7 @@ class _StaticPlannerBridge:
 
 
 class _LastRealActionFactory:
-    """Create a real V3 action that exhausts candidates or decision budget."""
-
-    def __init__(self, terminal_cause: str) -> None:
-        self.terminal_cause = terminal_cause
+    """Create a real V3 action that exhausts the final candidate."""
 
     def __call__(
         self, worker_index: int, platform_type: str
@@ -493,13 +446,6 @@ class _LastRealActionFactory:
             all_false=False,
             generation=worker_index + 1,
         )
-        if self.terminal_cause == "budget":
-            observation.candidate_mask[0, 1] = True
-            total_decision_budget = 1
-        elif self.terminal_cause == "candidates":
-            total_decision_budget = 8
-        else:
-            raise AssertionError("unsupported real-action terminal cause")
         output = PlannerOutput()
         if worker_index == 0:
             output.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
@@ -514,8 +460,6 @@ class _LastRealActionFactory:
             bridge=_StaticPlannerBridge(output),
             request_builder=lambda action: action,
             initial_observation=observation,
-            total_decision_budget=total_decision_budget,
-            remaining_decision_budget=total_decision_budget,
         )
         return ParallelEnvironmentWorker(
             environment=environment,
@@ -620,32 +564,7 @@ def _quarter_reward(transition: PlannerTransition) -> float:
     return 0.25 * transition.next_observation.observation_identities[0].state_time_ns
 
 
-def test_budget_exhaustion_resolves_before_next_policy_forward() -> None:
-    """Would fail if a budget-zero row reached policy before done/reset."""
-    template = _boundary_observation(all_false=False, generation=1)
-    policy = _CountingPolicy().eval()
-    with ParallelEnvPool(
-        allocation={"WHEELED": 1},
-        observation_template=template,
-        environment_factory=_BudgetOneFactory(),
-        reward_fn=_quarter_reward,
-        worker_timeout_seconds=5.0,
-    ) as pool:
-        collected = collect_rollout(
-            _ParallelPoolVectorEnv(pool, policy_version=29),
-            policy,
-            CollectorConfig(horizon=2, deterministic=True),
-            device="cpu",
-        )
-
-    assert policy.forward_calls == 3  # two real actions plus valid bootstrap
-    assert len(collected.rollout) == 2
-    assert collected.dones.tolist() == [[True], [True]]
-
-
-@pytest.mark.parametrize("terminal_cause", ["candidates", "budget"])
 def test_last_real_action_receives_unsuccessful_terminal_reward_before_reset(
-    terminal_cause: str,
 ) -> None:
     """Would fail if no-action resolution appended done after reward calculation."""
     template = _boundary_observation(all_false=False, generation=1)
@@ -653,7 +572,7 @@ def test_last_real_action_receives_unsuccessful_terminal_reward_before_reset(
     with ParallelEnvPool(
         allocation={"WHEELED": 2},
         observation_template=template,
-        environment_factory=_LastRealActionFactory(terminal_cause),
+        environment_factory=_LastRealActionFactory(),
         reward_fn=compute_transition_reward,
         worker_timeout_seconds=5.0,
     ) as pool:
@@ -668,27 +587,6 @@ def test_last_real_action_receives_unsuccessful_terminal_reward_before_reset(
     assert len(collected.rollout) == 2
     assert collected.rewards.tolist() == [[-13.0, -12.0]]
     assert collected.dones.tolist() == [[True, True]]
-
-
-def test_first_production_policy_forward_sees_restored_budget_ratio() -> None:
-    """Would fail if pool preparation published producer's stale ratio."""
-    template = _boundary_observation(all_false=False, generation=1)
-    policy = _CountingPolicy().eval()
-    with ParallelEnvPool(
-        allocation={"WHEELED": 1},
-        observation_template=template,
-        environment_factory=_BudgetOneFactory(total=4, remaining=1),
-        reward_fn=_quarter_reward,
-        worker_timeout_seconds=5.0,
-    ) as pool:
-        collect_rollout(
-            _ParallelPoolVectorEnv(pool, policy_version=31),
-            policy,
-            CollectorConfig(horizon=2, deterministic=True),
-            device="cpu",
-        )
-
-    assert policy.budget_ratios[0] == pytest.approx([0.25])
 
 
 def test_hopper_pool_collector_returns_one_complete_landed_macro_sample() -> None:

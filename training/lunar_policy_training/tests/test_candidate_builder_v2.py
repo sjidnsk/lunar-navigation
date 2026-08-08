@@ -48,13 +48,13 @@ def _world(observed: np.ndarray) -> ObservedWorld:
 
 def _mission_for_roi(roi: np.ndarray) -> MissionRaster:
     ratio = roi.astype(np.float32)
-    return MissionRaster(_canvas(), ratio.copy(), ratio, 1.0)
+    return MissionRaster(_canvas(), ratio.copy(), ratio)
 
 
 def _mission() -> MissionRaster:
     roi = np.zeros((256, 256), dtype=np.float32)
     roi[116:140, 96:144] = 1.0
-    return MissionRaster(_canvas(), roi.copy(), roi, 1.0)
+    return MissionRaster(_canvas(), roi.copy(), roi)
 
 
 def _projection() -> PlatformProjection:
@@ -113,7 +113,7 @@ def test_candidate_builder_is_observed_only_uses_exact_12_fields_and_stable_64_p
 
 def test_candidate_gain_ratios_use_fractional_roi_area_instead_of_cell_count() -> None:
     mission = _mission()
-    mission = MissionRaster(_canvas(), mission.priority, mission.roi_ratio * 0.1, 1.0)
+    mission = MissionRaster(_canvas(), mission.priority, mission.roi_ratio * 0.1)
     batch = _builder().build(_world_with_frontier(), mission, Pose2(500.0, 512.0), _projection())
     valid = batch.features[batch.mask]
     assert np.all(valid[:, 5] <= 1.0)

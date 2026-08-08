@@ -39,7 +39,7 @@ def _policy_batch() -> PolicyBatch:
         coverage_summary=torch.zeros((2, 3, 256, 256), dtype=torch.float32),
         local_crop=torch.zeros((2, 4, 32, 32), dtype=torch.float32),
         frontier_features=torch.zeros((2, 64, 12), dtype=torch.float32),
-        pose_features=torch.zeros((2, 6), dtype=torch.float32),
+        pose_features=torch.zeros((2, 5), dtype=torch.float32),
         candidate_mask=mask,
         platform_context=torch.tensor(
             [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=torch.float32

@@ -7,7 +7,7 @@ import math
 
 import numpy as np
 
-from lunar_model_contract import ObservationContractV2
+from lunar_model_contract import ObservationContractV3
 
 from .observation_builder import MissionRaster, ObservedWorld, PlatformProjection, Pose2
 from .visibility import SensorGeometry, VisibilityEstimator, _ray_cells
@@ -21,7 +21,7 @@ class CandidateBatch:
 
     def __post_init__(self) -> None:
         features, mask = np.asarray(self.features, dtype=np.float32), np.asarray(self.mask, dtype=bool)
-        if features.shape != (64, len(ObservationContractV2.frontier_fields)) or mask.shape != (64,) or not np.isfinite(features).all():
+        if features.shape != (64, len(ObservationContractV3.frontier_fields)) or mask.shape != (64,) or not np.isfinite(features).all():
             raise ValueError("candidate batch must use finite [64,12] and [64]")
         object.__setattr__(self, "features", features)
         object.__setattr__(self, "mask", mask)

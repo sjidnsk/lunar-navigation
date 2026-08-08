@@ -13,6 +13,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from lunar_model_contract.observation import (  # noqa: E402
     ObservationContractError,
     ObservationContractV2,
+    ObservationContractV3,
     validate_observation_inputs,
 )
 
@@ -23,7 +24,7 @@ def _valid_inputs(batch_size: int = 2) -> dict[str, np.ndarray]:
         "coverage_summary": np.zeros((batch_size, 3, 256, 256), dtype=np.float32),
         "local_crop": np.zeros((batch_size, 4, 32, 32), dtype=np.float32),
         "frontier_features": np.zeros((batch_size, 64, 12), dtype=np.float32),
-        "pose_features": np.zeros((batch_size, 6), dtype=np.float32),
+        "pose_features": np.zeros((batch_size, 5), dtype=np.float32),
         "candidate_mask": np.zeros((batch_size, 64), dtype=np.bool_),
         "platform_context": np.tile(
             np.asarray([[1.0, 0.0, 0.0]], dtype=np.float32), (batch_size, 1)
@@ -82,7 +83,23 @@ def test_v2_contract_freezes_exact_shapes_channels_and_fields() -> None:
     )
 
 
-def test_v2_validator_accepts_exact_inputs_with_all_false_candidate_mask() -> None:
+def test_v3_contract_removes_only_the_decision_budget_pose_field() -> None:
+    assert ObservationContractV3.version == "lunar-observation-contract/v3"
+    assert ObservationContractV3.input_names == ObservationContractV2.input_names
+    assert ObservationContractV3.shapes == {
+        **ObservationContractV2.shapes,
+        "pose_features": (None, 5),
+    }
+    assert ObservationContractV3.pose_fields == (
+        "x_norm",
+        "y_norm",
+        "sin_yaw",
+        "cos_yaw",
+        "mission_observed_ratio",
+    )
+
+
+def test_v3_validator_accepts_exact_inputs_with_all_false_candidate_mask() -> None:
     validate_observation_inputs(_valid_inputs())
 
 
@@ -115,9 +132,9 @@ def test_v2_validator_accepts_exact_inputs_with_all_false_candidate_mask() -> No
         ),
         (
             lambda inputs: inputs.__setitem__(
-                "pose_features", np.zeros((2, 5), dtype=np.float32)
+                "pose_features", np.zeros((2, 6), dtype=np.float32)
             ),
-            "pose_features must have shape [B,6]",
+            "pose_features must have shape [B,5]",
         ),
         (
             lambda inputs: inputs.__setitem__(
@@ -133,7 +150,7 @@ def test_v2_validator_accepts_exact_inputs_with_all_false_candidate_mask() -> No
         ),
         (
             lambda inputs: inputs.__setitem__(
-                "pose_features", np.full((2, 6), np.inf, dtype=np.float32)
+                "pose_features", np.full((2, 5), np.inf, dtype=np.float32)
             ),
             "pose_features must contain only finite values",
         ),
@@ -145,7 +162,7 @@ def test_v2_validator_accepts_exact_inputs_with_all_false_candidate_mask() -> No
         ),
     ),
 )
-def test_v2_validator_rejects_malformed_inputs(mutate, message: str) -> None:
+def test_v3_validator_rejects_malformed_inputs(mutate, message: str) -> None:
     inputs = _valid_inputs()
     mutate(inputs)
 
@@ -153,7 +170,7 @@ def test_v2_validator_rejects_malformed_inputs(mutate, message: str) -> None:
         validate_observation_inputs(inputs)
 
 
-def test_v2_validator_rejects_wrong_names_and_inconsistent_batch() -> None:
+def test_v3_validator_rejects_wrong_names_and_inconsistent_batch() -> None:
     inputs = _valid_inputs()
     inputs["unexpected"] = inputs.pop("pose_features")
     with pytest.raises(ObservationContractError, match="names must exactly match"):

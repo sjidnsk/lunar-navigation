@@ -126,7 +126,7 @@ class DecisionBoundaryResult:
     execution_state: str
     transition: PlannerTransition | None = None
     execution_feedback: CommittedHopExecutionFeedback | None = None
-    decision_budget_consumed: int = 0
+    policy_decisions_consumed: int = 0
 
 
 @dataclass(frozen=True)
@@ -168,8 +168,6 @@ class V3ExplorationEnvironment:
         committed_hop_executor: Callable[
             [], CommittedHopExecutionFeedback
         ] | None = None,
-        total_decision_budget: int = 8,
-        remaining_decision_budget: int | None = None,
         plan_cost_scale: float = 1.0,
         planner_elapsed_scale_s: float = 1.0,
     ) -> None:
@@ -184,18 +182,6 @@ class V3ExplorationEnvironment:
         ):
             raise EnvironmentInvariantError(
                 "V3 observation requires one producer-owned observation identity"
-            )
-        if type(total_decision_budget) is not int or total_decision_budget <= 0:
-            raise ValueError("total decision budget must be a positive integer")
-        if remaining_decision_budget is None:
-            remaining_decision_budget = total_decision_budget
-        if (
-            type(remaining_decision_budget) is not int
-            or remaining_decision_budget < 0
-            or remaining_decision_budget > total_decision_budget
-        ):
-            raise ValueError(
-                "remaining decision budget must be within total decision budget"
             )
         if observation_provider is not None and not callable(observation_provider):
             raise ValueError("observation provider must be callable")
@@ -239,9 +225,6 @@ class V3ExplorationEnvironment:
         self._observation_boundary_controller = observation_boundary_controller
         self._require_sensor_closed_loop = require_sensor_closed_loop
         self._require_identity_bound_request = require_identity_bound_request
-        self._total_decision_budget = total_decision_budget
-        self._remaining_decisions = remaining_decision_budget
-        self._set_network_budget_ratio()
         self._reference_executor = reference_executor
         self._committed_hop_executor = committed_hop_executor
         self._plan_cost_scale = plan_cost_scale
@@ -367,10 +350,6 @@ class V3ExplorationEnvironment:
             self._fail_closed("prepared action observation identity is stale")
         if not bool(self._observation.candidate_mask.any().item()):
             return DecisionBoundaryResult(execution_state="NO_CANDIDATES")
-        if self._remaining_decisions <= 0:
-            return DecisionBoundaryResult(execution_state="DECISION_BUDGET_EXHAUSTED")
-        self._remaining_decisions -= 1
-        self._set_network_budget_ratio()
         transition = self.step(action, expected_identity=expected_identity)
         if self._platform_type == "HOPPER" and self._execution_state in {
             "JUMP_COMMITTED",
@@ -381,11 +360,8 @@ class V3ExplorationEnvironment:
             not transition.terminated
             and not transition.success_first_crossing
             and not transition.hard_safety_violation
-            and (
-                self._remaining_decisions <= 0
-                or not bool(
-                    transition.next_observation.candidate_mask.any().item()
-                )
+            and not bool(
+                transition.next_observation.candidate_mask.any().item()
             )
         ):
             transition = replace(
@@ -396,7 +372,7 @@ class V3ExplorationEnvironment:
         return DecisionBoundaryResult(
             execution_state=self._execution_state,
             transition=transition,
-            decision_budget_consumed=1,
+            policy_decisions_consumed=1,
         )
 
     def refresh_decision_boundary(self) -> DecisionBoundaryResult:
@@ -408,8 +384,6 @@ class V3ExplorationEnvironment:
         self._refresh_ground_observation()
         if not bool(self._observation.candidate_mask.any().item()):
             return DecisionBoundaryResult(execution_state="NO_CANDIDATES")
-        if self._remaining_decisions <= 0:
-            return DecisionBoundaryResult(execution_state="DECISION_BUDGET_EXHAUSTED")
         return DecisionBoundaryResult(execution_state="DECISION_READY")
 
     def _mask_rejected_candidate(self, candidate_index: int) -> None:
@@ -473,7 +447,6 @@ class V3ExplorationEnvironment:
             if candidate_index < installed.candidate_mask.shape[1]:
                 installed.candidate_mask[0, candidate_index] = False
         self._observation = installed
-        self._set_network_budget_ratio()
         return self._observation
 
     def _refresh_ground_observation(self) -> None:
@@ -483,11 +456,6 @@ class V3ExplorationEnvironment:
         if not isinstance(observation, PolicyBatch):
             self._fail_closed("observation provider returned invalid data")
         self._install_observation(observation)
-
-    def _set_network_budget_ratio(self) -> None:
-        self._observation.pose_features[0, 5] = (
-            self._remaining_decisions / self._total_decision_budget
-        )
 
     def _advance_committed_hop_without_policy(
         self, output: PlannerOutput
@@ -907,8 +875,6 @@ def create_v3_environment(
     committed_hop_executor: Callable[
         [], CommittedHopExecutionFeedback
     ] | None = None,
-    total_decision_budget: int = 8,
-    remaining_decision_budget: int | None = None,
     plan_cost_scale: float = 1.0,
     planner_elapsed_scale_s: float = 1.0,
 ) -> V3ExplorationEnvironment:
@@ -932,8 +898,6 @@ def create_v3_environment(
         require_identity_bound_request=True,
         reference_executor=reference_executor,
         committed_hop_executor=committed_hop_executor,
-        total_decision_budget=total_decision_budget,
-        remaining_decision_budget=remaining_decision_budget,
         plan_cost_scale=plan_cost_scale,
         planner_elapsed_scale_s=planner_elapsed_scale_s,
     )

@@ -51,7 +51,7 @@ def _observation() -> PolicyBatch:
         coverage_summary=torch.zeros((1, 3, 256, 256), dtype=torch.float32),
         local_crop=torch.zeros((1, 4, 32, 32), dtype=torch.float32),
         frontier_features=torch.zeros((1, 64, 12), dtype=torch.float32),
-        pose_features=torch.zeros((1, 6), dtype=torch.float32),
+        pose_features=torch.zeros((1, 5), dtype=torch.float32),
         candidate_mask=torch.ones((1, 64), dtype=torch.bool),
         platform_context=torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32),
     )

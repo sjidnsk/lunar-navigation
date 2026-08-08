@@ -324,7 +324,6 @@ class FormalEpisode:
             loaded.scene.base_canvas,
             priority=self._mission_roi.astype(np.float32),
             roi_ratio=self._mission_roi.astype(np.float32),
-            remaining_decision_budget_ratio=1.0,
         )
         self.sensor_state = MultiresSensorObservationState(
             scene=loaded.scene,

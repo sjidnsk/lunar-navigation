@@ -1,4 +1,4 @@
-"""Observed-only construction of the frozen V2 policy observation."""
+"""Observed-only construction of the active V3 policy observation."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from lunar_model_contract import ObservationContractV2, validate_observation_inputs
+from lunar_model_contract import ObservationContractV3, validate_observation_inputs
 from lunar_model_contract.observation import PLATFORM_CONTEXTS
 
 from ..polar_data.hazards import CanvasRatioLayer
@@ -121,13 +121,10 @@ class MissionRaster:
     canvas: MapCanvas
     priority: np.ndarray
     roi_ratio: np.ndarray
-    remaining_decision_budget_ratio: float
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "priority", _ratio("mission priority", self.priority, GLOBAL_GEOMETRY.cells))
         object.__setattr__(self, "roi_ratio", _ratio("mission ROI", self.roi_ratio, GLOBAL_GEOMETRY.cells))
-        if not 0.0 <= self.remaining_decision_budget_ratio <= 1.0:
-            raise ValueError("remaining decision budget ratio must be in [0,1]")
 
 
 @dataclass(frozen=True)
@@ -173,7 +170,7 @@ class ObservationBuilderV2:
         total = float(mission.roi_ratio.sum())
         observed_ratio = float((observed * mission.roi_ratio).sum() / total) if total else 0.0
         canvas = world.canvas
-        pose_features = np.asarray([[(pose_map.x_m - canvas.bounds_m[0]) / canvas.geometry.size_m, (canvas.bounds_m[3] - pose_map.y_m) / canvas.geometry.size_m, math.sin(pose_map.yaw_rad), math.cos(pose_map.yaw_rad), observed_ratio, mission.remaining_decision_budget_ratio]], dtype=np.float32)
+        pose_features = np.asarray([[(pose_map.x_m - canvas.bounds_m[0]) / canvas.geometry.size_m, (canvas.bounds_m[3] - pose_map.y_m) / canvas.geometry.size_m, math.sin(pose_map.yaw_rad), math.cos(pose_map.yaw_rad), observed_ratio]], dtype=np.float32)
         result = {"prior_channels": prior, "coverage_summary": coverage, "local_crop": local_crop, "frontier_features": candidates.features[None], "pose_features": pose_features, "candidate_mask": candidates.mask[None], "platform_context": np.asarray([PLATFORM_CONTEXTS[platform_type]], dtype=np.float32)}
         for name in ("coverage_summary",):
             if ((result[name] < 0.0) | (result[name] > 1.0)).any():

@@ -7,7 +7,7 @@ from typing import Protocol
 
 import numpy as np
 import torch
-from lunar_model_contract import ObservationContractV2
+from lunar_model_contract import ObservationContractV3
 
 from ..policy.cross_attention import (
     CrossAttentionPolicy,
@@ -92,7 +92,7 @@ def collect_rollout(
     )
 
     observation_rows: dict[str, list[np.ndarray]] = {
-        name: [] for name in ObservationContractV2.input_names
+        name: [] for name in ObservationContractV3.input_names
     }
     selected_indices: list[np.ndarray] = []
     selected_thetas: list[np.ndarray] = []
@@ -231,20 +231,14 @@ def _prepare_policy_observations(
         return prepared, boundary_dones
     unavailable = _unavailable_decision_rows(observations)
     if bool(unavailable.any()):
-        if bool((~observations.candidate_mask.any(dim=1)).any()):
-            raise CollectorError(
-                "all-false candidate rows must bypass rollout collection"
-            )
         raise CollectorError(
-            "exhausted-budget rows must bypass rollout collection"
+            "all-false candidate rows must bypass rollout collection"
         )
     return observations, np.zeros((env_count,), dtype=np.bool_)
 
 
 def _unavailable_decision_rows(observations: PolicyBatch) -> torch.Tensor:
-    has_candidate = observations.candidate_mask.any(dim=1)
-    has_budget = observations.pose_features[:, 5] > 0.0
-    return ~(has_candidate & has_budget)
+    return ~observations.candidate_mask.any(dim=1)
 
 
 def _validated_transition(

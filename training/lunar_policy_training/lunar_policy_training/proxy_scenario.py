@@ -305,7 +305,6 @@ def proxy_observation(
             0.0,
             1.0,
             coverage,
-            max(0.0, 1.0 - step / 8.0),
         ]],
         dtype=torch.float32,
     )

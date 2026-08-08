@@ -57,7 +57,7 @@ def _hopper_observation(execution_state: str = "GROUND_HOLD") -> PolicyBatch:
         coverage_summary=torch.zeros((1, 8, 4, 4), dtype=torch.float32),
         local_crop=torch.zeros((1, 8, 4, 4), dtype=torch.float32),
         frontier_features=torch.zeros((1, 2, 22), dtype=torch.float32),
-        pose_features=torch.zeros((1, 6), dtype=torch.float32),
+        pose_features=torch.zeros((1, 5), dtype=torch.float32),
         candidate_mask=torch.tensor([[True, False]], dtype=torch.bool),
         platform_context=torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32),
         observation_identities=(
@@ -172,7 +172,7 @@ def test_prepared_hopper_action_aggregates_until_landed_hold() -> None:
     )
 
     assert result.execution_state == "LANDED_HOLD"
-    assert result.decision_budget_consumed == 1
+    assert result.policy_decisions_consumed == 1
     assert result.transition is not None
     assert result.transition.next_observation.pose_features[0, 0].item() == 3.0
     assert result.transition.mission_observed_delta == pytest.approx(0.75)
@@ -323,8 +323,7 @@ def test_hopper_resumes_policy_only_after_landed_hold() -> None:
     policy_observation = policy_spy.call_args.args[0]
     assert policy_observation is not landed.next_observation
     assert policy_observation.pose_features[0, 0].item() == pytest.approx(3.0)
-    assert policy_observation.pose_features[0, 5].item() == pytest.approx(1.0)
-    assert landed.next_observation.pose_features[0, 5].item() == pytest.approx(0.0)
+    assert policy_observation.pose_features.shape == (1, 5)
     assert landed_result.execution_state == "LANDED_HOLD"
     assert landed_result.execution_feedback is landed
     assert landed_result.execution_feedback.mission_observed_delta == 0.25

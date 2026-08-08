@@ -13,7 +13,7 @@ from pathlib import Path
 
 import torch
 from torch import nn
-from lunar_model_contract import ObservationContractV2
+from lunar_model_contract import ObservationContractV2, ObservationContractV3
 
 from .budget import (
     BUDGET_EXTENSION_BLOCK_SECONDS,
@@ -30,13 +30,15 @@ from .ppo.checkpoint import (
 )
 
 
-CHECKPOINT_SCHEMA_VERSION = "lunar-ppo-checkpoint/v5"
-OBSERVATION_CONTRACT_VERSION = ObservationContractV2.version
+CHECKPOINT_SCHEMA_VERSION = "lunar-ppo-checkpoint/v6"
+OBSERVATION_CONTRACT_VERSION = ObservationContractV3.version
 FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION = "lunar-formal-episode-cursors/v1"
+_LEGACY_V5_SCHEMA_VERSION = "lunar-ppo-checkpoint/v5"
 _LEGACY_V4_SCHEMA_VERSION = "lunar-ppo-checkpoint/v4"
 _LEGACY_V3_SCHEMA_VERSION = "lunar-ppo-checkpoint/v3"
 _LEGACY_V2_SCHEMA_VERSION = "lunar-ppo-checkpoint/v2"
 _LEGACY_OBSERVATION_CONTRACT_VERSION = "ObservationContractV1"
+_LEGACY_V2_OBSERVATION_CONTRACT_VERSION = ObservationContractV2.version
 _RUN_IDENTITY_FIELDS = (
     "run_kind",
     "data_sha256",
@@ -104,7 +106,35 @@ class RunIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class TrainingCheckpointV6:
+    schema_version: str
+    contract_version: str
+    model_state: Mapping[object, object]
+    optimizer_state: Mapping[object, object]
+    scheduler_state: Mapping[object, object]
+    global_step: int
+    curriculum_phase: str
+    normalization: Mapping[object, object]
+    rng_state: Mapping[object, object]
+    frozen_config: dict[str, object]
+    environment_state: dict[str, object]
+    run_identity: RunIdentity
+    config_hash: str
+    source_commit: str
+    consumed_gpu_seconds: float
+    budget_extension_blocks: int
+    total_gpu_budget_seconds: float
+    worker_allocation: dict[str, int]
+    micro_batch_size: int
+    latest_checkpoint_gpu_seconds: float
+    candidate_checkpoint_gpu_seconds: float
+    payload_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class TrainingCheckpointV5:
+    """Read-only legacy state using ObservationContractV2."""
+
     schema_version: str
     contract_version: str
     model_state: Mapping[object, object]
@@ -241,7 +271,7 @@ def build_training_checkpoint(
     latest_checkpoint_gpu_seconds: float,
     candidate_checkpoint_gpu_seconds: float,
     environment_state: Mapping[str, object] | None = None,
-) -> TrainingCheckpointV5:
+) -> TrainingCheckpointV6:
     """Capture a complete run state with the PPO core's strict validators."""
     if not isinstance(model, nn.Module):
         raise CheckpointError("model must be a Torch module")
@@ -282,13 +312,13 @@ def build_training_checkpoint(
 
 def save_checkpoint_atomic(
     path: str | Path,
-    checkpoint: TrainingCheckpointV5,
+    checkpoint: TrainingCheckpointV6,
     *,
     overwrite: bool = True,
 ) -> None:
     """Flush one same-directory temporary file before atomically replacing target."""
-    if not isinstance(checkpoint, TrainingCheckpointV5):
-        raise CheckpointError("checkpoint must use TrainingCheckpointV5")
+    if not isinstance(checkpoint, TrainingCheckpointV6):
+        raise CheckpointError("checkpoint must use TrainingCheckpointV6")
     target = _validated_target(path)
     if not overwrite and target.exists():
         raise CheckpointError("immutable checkpoint already exists")
@@ -330,7 +360,8 @@ def save_checkpoint_atomic(
 def load_checkpoint(
     path: str | Path, *, run_kind: str | None = None
 ) -> (
-    TrainingCheckpointV5
+    TrainingCheckpointV6
+    | TrainingCheckpointV5
     | TrainingCheckpointV4
     | TrainingCheckpointV3
     | TrainingCheckpointV2
@@ -353,6 +384,9 @@ def load_checkpoint(
     schema = body.get("schema_version") if isinstance(body, Mapping) else None
     if schema == CHECKPOINT_SCHEMA_VERSION:
         _validate_body(body)
+    elif schema == _LEGACY_V5_SCHEMA_VERSION:
+        _require_explicit_legacy_development_reader(run_kind, "v5")
+        _validate_v5_body(body)
     elif schema == _LEGACY_V4_SCHEMA_VERSION:
         _require_explicit_legacy_development_reader(run_kind, "v4")
         _validate_v4_body(body)
@@ -374,6 +408,8 @@ def load_checkpoint(
         return _checkpoint_v2_from_body(body, payload_sha256)
     if schema == _LEGACY_V4_SCHEMA_VERSION:
         return _checkpoint_v4_from_body(body, payload_sha256)
+    if schema == _LEGACY_V5_SCHEMA_VERSION:
+        return _checkpoint_v5_from_body(body, payload_sha256)
     return _checkpoint_from_body(body, payload_sha256)
 
 
@@ -401,12 +437,12 @@ def load_checkpoint_for_resume(
     expected_micro_batch_size: int | None = None,
     expected_budget_extension_blocks: int | None = None,
     expected_total_gpu_budget_seconds: float | None = None,
-) -> TrainingCheckpointV5:
+) -> TrainingCheckpointV6:
     """Reject any run identity drift before live state can be mutated."""
     if not isinstance(expected_run_identity, RunIdentity):
         raise CheckpointError("expected run identity must use RunIdentity")
     checkpoint = load_checkpoint(path, run_kind=expected_run_identity.run_kind)
-    if not isinstance(checkpoint, TrainingCheckpointV5):
+    if not isinstance(checkpoint, TrainingCheckpointV6):
         raise CheckpointError("legacy checkpoint is read-only and cannot resume")
     if checkpoint.contract_version != expected_contract_version:
         raise CheckpointError("checkpoint contract version mismatch")
@@ -453,7 +489,7 @@ def load_checkpoint_for_resume(
 
 
 def restore_training_state(
-    checkpoint: TrainingCheckpointV5,
+    checkpoint: TrainingCheckpointV6,
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
@@ -461,8 +497,8 @@ def restore_training_state(
     normalization_state: MutableMapping[object, object] | None = None,
 ) -> None:
     """Restore complete train/RNG state, rolling live objects back on failure."""
-    if not isinstance(checkpoint, TrainingCheckpointV5):
-        raise CheckpointError("checkpoint must use TrainingCheckpointV5")
+    if not isinstance(checkpoint, TrainingCheckpointV6):
+        raise CheckpointError("checkpoint must use TrainingCheckpointV6")
     if not isinstance(model, nn.Module):
         raise CheckpointError("model must be a Torch module")
     if not isinstance(optimizer, torch.optim.Optimizer):
@@ -630,6 +666,7 @@ def _validate_v2_body(body: object) -> None:
         raise CheckpointError("v2 checkpoint body structure is invalid")
     if body["contract_version"] not in (
         OBSERVATION_CONTRACT_VERSION,
+        _LEGACY_V2_OBSERVATION_CONTRACT_VERSION,
         _LEGACY_OBSERVATION_CONTRACT_VERSION,
     ):
         raise CheckpointError("checkpoint contract version mismatch")
@@ -650,13 +687,32 @@ def _validate_v2_body(body: object) -> None:
     _validate_body(promoted)
 
 
+def _validate_v5_body(body: object) -> None:
+    if not isinstance(body, Mapping) or set(body) != _BODY_FIELDS:
+        raise CheckpointError("v5 checkpoint body structure is invalid")
+    if body["schema_version"] != _LEGACY_V5_SCHEMA_VERSION:
+        raise CheckpointError("v5 checkpoint schema version mismatch")
+    if body["contract_version"] != _LEGACY_V2_OBSERVATION_CONTRACT_VERSION:
+        raise CheckpointError("v5 checkpoint contract version mismatch")
+    promoted = dict(body)
+    promoted["schema_version"] = CHECKPOINT_SCHEMA_VERSION
+    promoted["contract_version"] = OBSERVATION_CONTRACT_VERSION
+    _validate_body(promoted)
+
+
 def _validate_v4_body(body: object) -> None:
     if not isinstance(body, Mapping) or set(body) != _V4_BODY_FIELDS:
         raise CheckpointError("v4 checkpoint body structure is invalid")
     if body["schema_version"] != _LEGACY_V4_SCHEMA_VERSION:
         raise CheckpointError("v4 checkpoint schema version mismatch")
+    if body["contract_version"] not in (
+        OBSERVATION_CONTRACT_VERSION,
+        _LEGACY_V2_OBSERVATION_CONTRACT_VERSION,
+    ):
+        raise CheckpointError("v4 checkpoint contract version mismatch")
     promoted = dict(body)
     promoted["schema_version"] = CHECKPOINT_SCHEMA_VERSION
+    promoted["contract_version"] = OBSERVATION_CONTRACT_VERSION
     promoted["environment_state"] = {}
     _validate_body(promoted)
 
@@ -666,6 +722,7 @@ def _validate_v3_body(body: object) -> None:
         raise CheckpointError("v3 checkpoint body structure is invalid")
     if body["contract_version"] not in (
         OBSERVATION_CONTRACT_VERSION,
+        _LEGACY_V2_OBSERVATION_CONTRACT_VERSION,
         _LEGACY_OBSERVATION_CONTRACT_VERSION,
     ):
         raise CheckpointError("checkpoint contract version mismatch")
@@ -685,6 +742,39 @@ def _validate_v3_body(body: object) -> None:
 
 
 def _checkpoint_from_body(
+    body: Mapping[object, object], payload_sha256: str
+) -> TrainingCheckpointV6:
+    return TrainingCheckpointV6(
+        schema_version=body["schema_version"],
+        contract_version=body["contract_version"],
+        model_state=body["model_state"],
+        optimizer_state=body["optimizer_state"],
+        scheduler_state=body["scheduler_state"],
+        global_step=body["global_step"],
+        curriculum_phase=body["curriculum_phase"],
+        normalization=body["normalization"],
+        rng_state=body["rng_state"],
+        frozen_config=dict(body["frozen_config"]),
+        environment_state=dict(body["environment_state"]),
+        run_identity=_run_identity_from_mapping(body["run_identity"]),
+        config_hash=body["config_hash"],
+        source_commit=body["source_commit"],
+        consumed_gpu_seconds=float(body["consumed_gpu_seconds"]),
+        budget_extension_blocks=body["budget_extension_blocks"],
+        total_gpu_budget_seconds=float(body["total_gpu_budget_seconds"]),
+        worker_allocation=dict(body["worker_allocation"]),
+        micro_batch_size=body["micro_batch_size"],
+        latest_checkpoint_gpu_seconds=float(
+            body["latest_checkpoint_gpu_seconds"]
+        ),
+        candidate_checkpoint_gpu_seconds=float(
+            body["candidate_checkpoint_gpu_seconds"]
+        ),
+        payload_sha256=payload_sha256,
+    )
+
+
+def _checkpoint_v5_from_body(
     body: Mapping[object, object], payload_sha256: str
 ) -> TrainingCheckpointV5:
     return TrainingCheckpointV5(
@@ -814,7 +904,7 @@ def _checkpoint_v2_from_body(
     )
 
 
-def _body_from_checkpoint(checkpoint: TrainingCheckpointV5) -> dict[str, object]:
+def _body_from_checkpoint(checkpoint: TrainingCheckpointV6) -> dict[str, object]:
     return {
         name: (
             checkpoint.run_identity.to_dict()
@@ -900,6 +990,7 @@ __all__ = [
     "TrainingCheckpointV3",
     "TrainingCheckpointV4",
     "TrainingCheckpointV5",
+    "TrainingCheckpointV6",
     "build_training_checkpoint",
     "config_sha256",
     "load_checkpoint",

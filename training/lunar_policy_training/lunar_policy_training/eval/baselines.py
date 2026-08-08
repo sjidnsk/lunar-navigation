@@ -7,18 +7,18 @@ import math
 
 import numpy as np
 import torch
-from lunar_model_contract import ActionContractV2, ObservationContractV2
+from lunar_model_contract import ActionContractV2, ObservationContractV3
 
 from ..policy.cross_attention import PolicyOutput
 from . import baseline_core
 
 
-_DISTANCE_FIELD = ObservationContractV2.frontier_fields.index(
+_DISTANCE_FIELD = ObservationContractV3.frontier_fields.index(
     "distance_from_robot_norm"
 )
-_BEARING_SIN_FIELD = ObservationContractV2.frontier_fields.index("bearing_sin")
-_BEARING_COS_FIELD = ObservationContractV2.frontier_fields.index("bearing_cos")
-_POTENTIAL_GAIN_FIELD = ObservationContractV2.frontier_fields.index(
+_BEARING_SIN_FIELD = ObservationContractV3.frontier_fields.index("bearing_sin")
+_BEARING_COS_FIELD = ObservationContractV3.frontier_fields.index("bearing_cos")
+_POTENTIAL_GAIN_FIELD = ObservationContractV3.frontier_fields.index(
     "potential_coverage_gain_ratio"
 )
 
@@ -48,7 +48,7 @@ def select_baseline_action(
     mask = np.asarray(candidate_mask)
     if features.shape != (
         ActionContractV2.candidate_count,
-        len(ObservationContractV2.frontier_fields),
+        len(ObservationContractV3.frontier_fields),
     ) or mask.shape != (ActionContractV2.candidate_count,) or mask.dtype != np.bool_:
         raise baseline_core.BaselineSelectionError(
             "baseline candidate feature or mask shape is invalid"

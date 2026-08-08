@@ -11,7 +11,7 @@ import torch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "model_contract"))
 
-from lunar_model_contract import ActionContractV2, ObservationContractV2  # noqa: E402
+from lunar_model_contract import ActionContractV2, ObservationContractV3  # noqa: E402
 
 from lunar_policy_training.policy.cross_attention import (  # noqa: E402
     CrossAttentionPolicy,
@@ -55,13 +55,14 @@ def test_policy_public_types_and_module_graph_use_the_frozen_backbone_core() -> 
     )
     assert policy.platform_encoder.in_features == 3
     assert policy.platform_encoder.out_features == backbone_core.TOKEN_DIM
-    assert make_v2_batch().input_names == ObservationContractV2.input_names
+    assert policy.pose_encoder[0].in_features == 5
+    assert make_v3_batch().input_names == ObservationContractV3.input_names
 
 
 def test_sampled_joint_log_prob_equals_immediate_recomputation() -> None:
     """Would fail if sampling and PPO recomputation used different masked distributions."""
     policy = CrossAttentionPolicy().eval()
-    batch = make_v2_batch()
+    batch = make_v3_batch()
 
     with torch.no_grad():
         output = policy(batch)
@@ -93,7 +94,7 @@ def test_sampled_joint_log_prob_equals_immediate_recomputation() -> None:
     assert sample.theta_entropy.shape == (2,)
     assert bool(torch.isfinite(sample.theta_entropy).all())
 
-def make_v2_batch(batch_size: int = 2, device: str = "cpu") -> PolicyBatch:
+def make_v3_batch(batch_size: int = 2, device: str = "cpu") -> PolicyBatch:
     mask = torch.zeros((batch_size, 64), dtype=torch.bool, device=device)
     mask[:, :3] = True
     return PolicyBatch(
@@ -101,7 +102,7 @@ def make_v2_batch(batch_size: int = 2, device: str = "cpu") -> PolicyBatch:
         coverage_summary=torch.zeros((batch_size, 3, 256, 256), dtype=torch.float32, device=device),
         local_crop=torch.zeros((batch_size, 4, 32, 32), dtype=torch.float32, device=device),
         frontier_features=torch.zeros((batch_size, 64, 12), dtype=torch.float32, device=device),
-        pose_features=torch.zeros((batch_size, 6), dtype=torch.float32, device=device),
+        pose_features=torch.zeros((batch_size, 5), dtype=torch.float32, device=device),
         candidate_mask=mask,
         platform_context=torch.tensor(
             [[1.0, 0.0, 0.0]],
@@ -114,7 +115,7 @@ def make_v2_batch(batch_size: int = 2, device: str = "cpu") -> PolicyBatch:
 def test_policy_returns_finite_shared_outputs_and_never_selects_masked_candidate() -> None:
     """Would fail if the shared policy lost an output or masked candidates leaked."""
     policy = CrossAttentionPolicy().eval()
-    batch = make_v2_batch()
+    batch = make_v3_batch()
 
     with torch.no_grad():
         output = policy(batch)
@@ -131,8 +132,8 @@ def test_policy_returns_finite_shared_outputs_and_never_selects_masked_candidate
     assert bool(batch.candidate_mask.gather(1, selected.unsqueeze(1)).all())
 
 
-def test_v2_encoders_emit_fixed_global_and_local_token_geometries() -> None:
-    """Would fail if a V2 map encoder silently changed its fixed token grid."""
+def test_v3_encoders_emit_fixed_global_and_local_token_geometries() -> None:
+    """Would fail if a V3 map encoder silently changed its fixed token grid."""
     policy = CrossAttentionPolicy().eval()
     token_counts: list[int] = []
     global_hook = policy.global_encoder.register_forward_hook(
@@ -143,7 +144,7 @@ def test_v2_encoders_emit_fixed_global_and_local_token_geometries() -> None:
     )
     try:
         with torch.no_grad():
-            policy(make_v2_batch())
+            policy(make_v3_batch())
     finally:
         global_hook.remove()
         local_hook.remove()
@@ -154,7 +155,7 @@ def test_v2_encoders_emit_fixed_global_and_local_token_geometries() -> None:
 def test_v2_von_mises_initialization_sampling_and_log_prob_recomputation() -> None:
     """Would fail if angle means fell back to candidate data or kappa left V2 limits."""
     policy = CrossAttentionPolicy().eval()
-    batch = make_v2_batch()
+    batch = make_v3_batch()
 
     with torch.no_grad():
         output = policy(batch)
@@ -192,7 +193,7 @@ def test_v2_von_mises_initialization_sampling_and_log_prob_recomputation() -> No
 def test_action_distribution_fails_closed_for_an_all_false_mask_row() -> None:
     """Would fail if sampling could construct an action distribution without a candidate."""
     policy = CrossAttentionPolicy().eval()
-    batch = make_v2_batch()
+    batch = make_v3_batch()
 
     with torch.no_grad():
         output = policy(batch)
@@ -271,7 +272,7 @@ def test_mixed_platform_theta_mask_removes_hopper_angle_from_joint_action() -> N
 
 def test_policy_rejects_non_one_hot_platform_context() -> None:
     """Would fail if unsupported mixed platforms entered the shared policy."""
-    batch = make_v2_batch()
+    batch = make_v3_batch()
     batch.platform_context[0] = torch.tensor([1.0, 1.0, 0.0])
 
     with pytest.raises(ValueError, match="platform_context must be one-hot"):
@@ -286,9 +287,9 @@ def test_policy_cuda_forward_is_finite_and_masks_candidates() -> None:
     policy = CrossAttentionPolicy().cuda().eval()
 
     with torch.no_grad():
-        output = policy(make_v2_batch(device="cuda"))
+        output = policy(make_v3_batch(device="cuda"))
 
     assert output.frontier_logits.dtype == torch.float32
     assert torch.isfinite(output.frontier_logits).all()
     selected = output.frontier_logits.argmax(dim=1)
-    assert bool(make_v2_batch(device="cuda").candidate_mask.gather(1, selected.unsqueeze(1)).all())
+    assert bool(make_v3_batch(device="cuda").candidate_mask.gather(1, selected.unsqueeze(1)).all())

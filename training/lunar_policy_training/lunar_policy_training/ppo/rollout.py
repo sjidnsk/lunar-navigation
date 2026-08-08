@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from lunar_model_contract import ObservationContractV2, validate_observation_inputs
+from lunar_model_contract import ObservationContractV3, validate_observation_inputs
 
 from ..policy.observation import PolicyBatch, validate_policy_batch
 from .rollout_core import (
@@ -70,7 +70,7 @@ class RolloutBatch:
             validate_observation_inputs(
                 {
                     name: getattr(self, name)
-                    for name in ObservationContractV2.input_names
+                    for name in ObservationContractV3.input_names
                 }
             )
         except ValueError as error:

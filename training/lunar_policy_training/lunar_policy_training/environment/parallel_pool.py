@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import torch
 from lunar_planner_training_bridge import PlanningOutcome
-from lunar_model_contract import ObservationContractV2
+from lunar_model_contract import ObservationContractV3
 
 from ..capability_freeze import FrozenPlatformCapability, ScenarioIdentity
 from ..config import PLATFORMS
@@ -24,7 +24,7 @@ from ..policy.observation import (
 from .macro_step import ExecutionEvents, PlannerTransition, PolicyAction
 
 
-_OBSERVATION_FIELDS = ObservationContractV2.input_names
+_OBSERVATION_FIELDS = ObservationContractV3.input_names
 
 
 class ParallelPoolError(RuntimeError):
@@ -58,7 +58,7 @@ class ParallelRolloutStep:
     rewards: torch.Tensor
     dones: torch.Tensor
     policy_versions: torch.Tensor
-    decision_budget_consumed: torch.Tensor
+    policy_decisions_consumed: torch.Tensor
     buffer_index: int
     planning_outcomes: tuple[PlanningOutcome, ...] = ()
     reason_codes: tuple[str, ...] = ()
@@ -293,7 +293,7 @@ class ParallelEnvPool:
                 reason_codes,
                 execution_events,
                 identities,
-                decision_budget_consumed,
+                policy_decisions_consumed,
             ) = self._await_step(
                 target_buffer, policy_version
             )
@@ -308,7 +308,7 @@ class ParallelEnvPool:
                 planning_outcomes=planning_outcomes,
                 reason_codes=reason_codes,
                 execution_events=execution_events,
-                decision_budget_consumed=decision_budget_consumed,
+                policy_decisions_consumed=policy_decisions_consumed,
             )
         except ParallelPoolError as error:
             if not self.training_stopped:
@@ -571,7 +571,7 @@ class ParallelEnvPool:
                 reason_code,
                 execution_events,
                 identity,
-                decision_budget_consumed,
+                policy_decisions_consumed,
                 episode_cursor,
             ) = values[2:]
             if (
@@ -579,7 +579,7 @@ class ParallelEnvPool:
                 or not isinstance(reason_code, str)
                 or not isinstance(execution_events, ExecutionEvents)
                 or not isinstance(identity, ObservationIdentity)
-                or decision_budget_consumed not in (0, 1)
+                or policy_decisions_consumed not in (0, 1)
                 or type(episode_cursor) is not int
                 or episode_cursor < 0
             ):
@@ -595,7 +595,7 @@ class ParallelEnvPool:
                 reason_code,
                 execution_events,
                 identity,
-                decision_budget_consumed,
+                policy_decisions_consumed,
                 episode_cursor,
             )
             completed.add(worker_index)
@@ -738,7 +738,7 @@ class ParallelEnvPool:
         planning_outcomes: tuple[PlanningOutcome, ...] = (),
         reason_codes: tuple[str, ...] = (),
         execution_events: tuple[ExecutionEvents, ...] = (),
-        decision_budget_consumed: torch.Tensor | None = None,
+        policy_decisions_consumed: torch.Tensor | None = None,
     ) -> ParallelRolloutStep:
         try:
             for name, shared in self.shared_observation_buffers[buffer_index].items():
@@ -763,10 +763,10 @@ class ParallelEnvPool:
                 dones=self._staging_dones[buffer_index],
                 policy_versions=self._staging_policy_versions[buffer_index],
                 buffer_index=buffer_index,
-                decision_budget_consumed=(
+                policy_decisions_consumed=(
                     torch.zeros((self.worker_count,), dtype=torch.int64)
-                    if decision_budget_consumed is None
-                    else decision_budget_consumed
+                    if policy_decisions_consumed is None
+                    else policy_decisions_consumed
                 ),
                 planning_outcomes=planning_outcomes,
                 reason_codes=reason_codes,
@@ -975,19 +975,15 @@ def _worker_main(
                 boundary = worker.environment.refresh_decision_boundary()
                 if (
                     boundary.transition is not None
-                    or boundary.decision_budget_consumed != 0
+                    or boundary.policy_decisions_consumed != 0
                 ):
                     raise ParallelPoolError(
                         "boundary preparation must not create an action transition"
                     )
-                terminal_boundary = boundary.execution_state in {
-                    "NO_CANDIDATES",
-                    "DECISION_BUDGET_EXHAUSTED",
-                }
+                terminal_boundary = boundary.execution_state == "NO_CANDIDATES"
                 if boundary.execution_state not in {
                     "DECISION_READY",
                     "NO_CANDIDATES",
-                    "DECISION_BUDGET_EXHAUSTED",
                 }:
                     raise ParallelPoolError(
                         "worker returned invalid decision-boundary state"
@@ -1048,12 +1044,12 @@ def _worker_main(
                     raise ParallelPoolError(
                         "worker environment must return PlannerTransition"
                     )
-                if boundary.decision_budget_consumed != 1:
+                if boundary.policy_decisions_consumed != 1:
                     raise ParallelPoolError(
-                        "worker policy decision must consume exactly one budget unit"
+                        "worker action must consume exactly one policy decision"
                     )
                 reward = reward_fn(transition)
-                decision_budget_consumed = boundary.decision_budget_consumed
+                policy_decisions_consumed = boundary.policy_decisions_consumed
             else:
                 raise ParallelPoolError(
                     "terminated worker requires reset before another action"
@@ -1098,7 +1094,7 @@ def _worker_main(
                     transition.reason_code,
                     transition.execution_events,
                     next_observation.observation_identities[0],
-                    decision_budget_consumed,
+                    policy_decisions_consumed,
                     episode_cursor,
                 )
             )

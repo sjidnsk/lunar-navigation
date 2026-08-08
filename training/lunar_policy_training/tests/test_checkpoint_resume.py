@@ -35,7 +35,7 @@ from lunar_policy_training.ppo.checkpoint import (  # noqa: E402
 from lunar_policy_training.training_semantics import (  # noqa: E402
     training_semantics_sha256,
 )
-from lunar_model_contract import ObservationContractV2  # noqa: E402
+from lunar_model_contract import ObservationContractV2, ObservationContractV3  # noqa: E402
 
 
 def _identity(
@@ -56,8 +56,8 @@ def _identity(
 
 
 def test_complete_checkpoint_identity_uses_current_observation_contract() -> None:
-    """Would fail if V2 tensors were mislabeled with the imported core's V1 tag."""
-    assert OBSERVATION_CONTRACT_VERSION == ObservationContractV2.version
+    """Would fail if V3 tensors were mislabeled with the legacy V2 tag."""
+    assert OBSERVATION_CONTRACT_VERSION == ObservationContractV3.version
 
 
 def _checkpoint(
@@ -112,7 +112,7 @@ def test_resume_preserves_consumed_gpu_budget(tmp_path: pathlib.Path) -> None:
     budget = TrainingBudget.from_checkpoint(resumed)
 
     assert resumed.schema_version == CHECKPOINT_SCHEMA_VERSION
-    assert resumed.schema_version == "lunar-ppo-checkpoint/v5"
+    assert resumed.schema_version == "lunar-ppo-checkpoint/v6"
     assert resumed.run_identity == _identity()
     assert resumed.contract_version == OBSERVATION_CONTRACT_VERSION
     assert resumed.consumed_gpu_seconds == 7200.0
@@ -469,7 +469,7 @@ def test_resume_rejects_frozen_runtime_identity_drift(
         "training_semantics_sha256",
     ),
 )
-def test_resume_rejects_each_v5_run_identity_field(
+def test_resume_rejects_each_v6_run_identity_field(
     tmp_path: pathlib.Path, field: str
 ) -> None:
     """Would fail if any frozen data/capability/reward/v3 identity could drift."""
@@ -542,6 +542,37 @@ def test_v3_checkpoint_is_read_only_development_evidence(
 
     loaded = load_checkpoint(path, run_kind="development-smoke")
     assert loaded.schema_version == "lunar-ppo-checkpoint/v3"
+    with pytest.raises(CheckpointError, match="read-only"):
+        load_checkpoint_for_resume(
+            path,
+            expected_contract_version=OBSERVATION_CONTRACT_VERSION,
+            expected_config_hash=checkpoint.config_hash,
+            expected_source_commit=checkpoint.source_commit,
+            expected_run_identity=checkpoint.run_identity,
+        )
+
+
+def test_v5_checkpoint_is_explicit_read_only_v2_evidence(
+    tmp_path: pathlib.Path,
+) -> None:
+    checkpoint = _checkpoint(consumed_gpu_seconds=10.0)
+    body = _body_from_checkpoint(checkpoint)
+    body["schema_version"] = "lunar-ppo-checkpoint/v5"
+    body["contract_version"] = ObservationContractV2.version
+    path = tmp_path / "legacy-v5.pt"
+    torch.save(
+        {"body": body, "body_sha256": _semantic_sha256(body)},
+        path,
+    )
+
+    with pytest.raises(CheckpointError, match="explicit development-smoke"):
+        load_checkpoint(path)
+    with pytest.raises(CheckpointError, match="formal"):
+        load_checkpoint(path, run_kind="formal")
+
+    loaded = load_checkpoint(path, run_kind="development-smoke")
+    assert loaded.schema_version == "lunar-ppo-checkpoint/v5"
+    assert loaded.contract_version == ObservationContractV2.version
     with pytest.raises(CheckpointError, match="read-only"):
         load_checkpoint_for_resume(
             path,

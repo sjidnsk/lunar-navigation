@@ -2435,7 +2435,7 @@ def _calibration_observation(
     platform_index = {"WHEELED": 0, "LEGGED": 1, "HOPPER": 2}[platform_type]
     platform_context = torch.zeros((1, 3), dtype=torch.float32)
     platform_context[0, platform_index] = 1.0
-    pose_features = torch.zeros((1, 6), dtype=torch.float32)
+    pose_features = torch.zeros((1, 5), dtype=torch.float32)
     pose_features[0, 0] = float(worker_index)
     frontier_features = torch.zeros((1, 2, 22), dtype=torch.float32)
     frontier_features[..., 15] = 1.0

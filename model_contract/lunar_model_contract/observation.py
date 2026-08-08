@@ -83,6 +83,26 @@ class ObservationContractV2:
     )
 
 
+class ObservationContractV3(ObservationContractV2):
+    """Active observation schema without an artificial decision budget."""
+
+    version: Final = "lunar-observation-contract/v3"
+    shapes: Final = {
+        **ObservationContractV2.shapes,
+        "pose_features": (None, 5),
+    }
+    pose_fields: Final = (
+        "x_norm",
+        "y_norm",
+        "sin_yaw",
+        "cos_yaw",
+        "mission_observed_ratio",
+    )
+
+
+ACTIVE_OBSERVATION_CONTRACT: Final = ObservationContractV3
+
+
 def _require_float32_finite(name: str, array: np.ndarray) -> None:
     if array.dtype != np.float32:
         raise ObservationContractError(f"{name} must be float32")
@@ -95,7 +115,7 @@ def _shape_text(shape: tuple[int | None, ...]) -> str:
 
 
 def _require_shape(name: str, array: np.ndarray, batch_size: int) -> None:
-    expected_shape = ObservationContractV2.shapes[name]
+    expected_shape = ACTIVE_OBSERVATION_CONTRACT.shapes[name]
     if array.ndim != len(expected_shape) or array.shape[1:] != expected_shape[1:]:
         raise ObservationContractError(f"{name} must have shape {_shape_text(expected_shape)}")
     if array.shape[0] != batch_size:
@@ -113,17 +133,17 @@ def validate_platform_context(array: np.ndarray) -> None:
 
 
 def validate_observation_inputs(mapping: Mapping[str, np.ndarray]) -> None:
-    """Validate one batch of the complete V2 observation mapping.
+    """Validate one batch of the active V3 observation mapping.
 
     A batch with an all-false candidate mask is valid: the builder owns the
     explicit bypass when no frontier candidate can be selected.
     """
-    if set(mapping) != set(ObservationContractV2.input_names) or len(mapping) != len(
-        ObservationContractV2.input_names
+    if set(mapping) != set(ACTIVE_OBSERVATION_CONTRACT.input_names) or len(mapping) != len(
+        ACTIVE_OBSERVATION_CONTRACT.input_names
     ):
         raise ObservationContractError("observation input names must exactly match contract")
 
-    first_name = ObservationContractV2.input_names[0]
+    first_name = ACTIVE_OBSERVATION_CONTRACT.input_names[0]
     first_array = mapping[first_name]
     if not isinstance(first_array, np.ndarray) or first_array.ndim == 0:
         raise ObservationContractError(f"{first_name} must have shape [B,4,256,256]")
@@ -131,7 +151,7 @@ def validate_observation_inputs(mapping: Mapping[str, np.ndarray]) -> None:
     if batch_size < 1:
         raise ObservationContractError("observation batch size must be positive")
 
-    for name in ObservationContractV2.input_names:
+    for name in ACTIVE_OBSERVATION_CONTRACT.input_names:
         array = mapping[name]
         if not isinstance(array, np.ndarray):
             raise ObservationContractError(f"{name} must be a numpy array")

@@ -434,7 +434,6 @@ def _performance_boundary_controller(
                 0.0,
                 1.0,
                 coverage_ratio,
-                1.0,
             ]],
             dtype=torch.float32,
         )

@@ -13,7 +13,7 @@ from typing import Mapping, Sequence
 
 import numpy as np
 import torch
-from lunar_model_contract import ObservationContractV2
+from lunar_model_contract import ObservationContractV3
 from lunar_planner_training_bridge import PlannerBridge
 
 from .checkpoint import RunIdentity
@@ -184,7 +184,7 @@ def write_formal_preflight_report(
 
 def _batch_digest(batch: PolicyBatch) -> str:
     digest = hashlib.sha256()
-    for name in ObservationContractV2.input_names:
+    for name in ObservationContractV3.input_names:
         values = getattr(batch, name).detach().cpu().contiguous().numpy()
         digest.update(name.encode("utf-8"))
         digest.update(values.dtype.str.encode("ascii"))

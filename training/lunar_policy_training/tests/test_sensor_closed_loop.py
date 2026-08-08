@@ -56,7 +56,7 @@ class _PolicyBuilder:
         self.visible_counts.append(visible_count)
         platform_context = torch.zeros((1, 3), dtype=torch.float32)
         platform_context[0, _PLATFORM_INDEX[self.platform_type]] = 1.0
-        pose = torch.zeros((1, 6), dtype=torch.float32)
+        pose = torch.zeros((1, 5), dtype=torch.float32)
         pose[0, 0] = float(visible_count) / 1000.0
         pose[0, 1] = pose_map.x_m / 100.0
         return PolicyBatch(
