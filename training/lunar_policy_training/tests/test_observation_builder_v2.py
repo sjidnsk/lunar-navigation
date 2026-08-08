@@ -23,6 +23,7 @@ from lunar_policy_training.environment.observation_builder import (  # noqa: E40
     TransformUnavailable,
     resolve_map_pose,
 )
+from lunar_policy_training.environment.sensor_observation import TrainingWorldTruth  # noqa: E402
 from lunar_policy_training.polar_data.hazards import CanvasRatioLayer  # noqa: E402
 from lunar_policy_training.polar_data.raster import GLOBAL_GEOMETRY, LOCAL_GEOMETRY, MapCanvas, WorldTruth  # noqa: E402
 
@@ -112,6 +113,21 @@ def test_builder_rejects_full_dem_truth_to_keep_network_input_observed_only() ->
         ObservationBuilderV2().build(
             truth, _mission := MissionRaster(_canvas(), np.ones((256, 256), dtype=np.float32), np.ones((256, 256), dtype=np.float32), 1.0),
             Pose2(512.0, 512.0), _test_only_projection(), CandidateBatch.empty(), "WHEELED",
+        )
+
+    training_truth = TrainingWorldTruth(
+        _canvas(),
+        np.zeros((256, 256), dtype=np.float32),
+        np.zeros((256, 256), dtype=np.float32),
+    )
+    with pytest.raises(ValueError, match="ObservedWorld"):
+        ObservationBuilderV2().build(
+            training_truth,
+            _mission,
+            Pose2(512.0, 512.0),
+            _test_only_projection(),
+            CandidateBatch.empty(),
+            "WHEELED",
         )
 
 

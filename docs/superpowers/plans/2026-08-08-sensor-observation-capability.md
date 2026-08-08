@@ -347,7 +347,7 @@ git commit -m "perf: batch observed-only candidate visibility"
 - Consumes: native `VisibilityKernel`, map geometry, mission ROI/priority, and a map-frame pose.
 - Produces: `TrainingWorldTruth`, `TrainingObservedGrid`, `ObservationDelta`, and `SensorObservationState.observe(pose_cell, elapsed_s)`.
 
-- [ ] **Step 1: Write failing reveal-state tests**
+- [x] **Step 1: Write failing reveal-state tests**
 
 Test initial observation, free-space continuation, first-obstacle visibility, behind-obstacle unknown, forbidden non-occlusion, repeated observation zero delta, age increment, quality reset, count saturation, geometry mismatch, out-of-map pose, and truth rejection by `ObservationBuilderV2`.
 
@@ -360,7 +360,7 @@ assert delta.mission_observed_delta_m2 > 0.0
 assert state.observe((10, 10), elapsed_s=0.0).mission_observed_delta_m2 == 0.0
 ```
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 ```bash
 source /home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/native-green/install/setup.bash
@@ -368,11 +368,11 @@ PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
   python3 -m pytest -q training/lunar_policy_training/tests/test_sensor_observation.py
 ```
 
-- [ ] **Step 3: Implement strict truth/observed types and state updates**
+- [x] **Step 3: Implement strict truth/observed types and state updates**
 
 `TrainingWorldTruth` is never a subclass of `ObservedWorld`. `TrainingObservedGrid` owns finite arrays for elevation, obstacle, age, quality, variances, count, and valid mask. `observe()` ages prior known cells, invokes native reveal, copies truth only for visible cells, sets quality to `1.0`, resets age, saturates `uint32` counts, and computes new ROI/priority physical area from previously unknown cells only.
 
-- [ ] **Step 4: Add explicit conversion to policy-facing `ObservedWorld`**
+- [x] **Step 4: Add explicit conversion to policy-facing `ObservedWorld`**
 
 Expose only:
 
@@ -385,7 +385,7 @@ def to_observed_world(
 
 No builder overload accepts `TrainingWorldTruth`. Geometry/canvas mismatch raises before any partial mutation.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 ```bash
 source /home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/native-green/install/setup.bash
