@@ -25,7 +25,11 @@ FORMAL_NO_GO_COUNT = 8
 def formal_hazard_distribution() -> dict[str, object]:
     """Return a fresh canonical document of the frozen v2 distribution."""
     return {
-        "rocks": {"count": FORMAL_ROCK_COUNT, "radius_m": [0.15, 1.2]},
+        "rocks": {
+            "count": FORMAL_ROCK_COUNT,
+            "radius_m": [0.15, 1.2],
+            "height_to_radius": [0.6, 1.5],
+        },
         "craters": {
             "count": FORMAL_CRATER_COUNT,
             "radius_m": [2.0, 16.0],
@@ -46,6 +50,7 @@ class RockCircle:
     x_m: float
     y_m: float
     radius_m: float
+    height_m: float
 
 
 @dataclass(frozen=True)
@@ -190,11 +195,13 @@ def generate_vector_hazard_scene(
     rocks: list[RockCircle] = []
     for _ in range(rock_count):
         radius = bounded_radius(rock_rng, 0.15, 1.2)
+        height = radius * float(rock_rng.uniform(0.6, 1.5))
         rocks.append(
             RockCircle(
                 x_m=float(rock_rng.uniform(left + radius, right - radius)),
                 y_m=float(rock_rng.uniform(bottom + radius, top - radius)),
                 radius_m=radius,
+                height_m=height,
             )
         )
 

@@ -65,7 +65,7 @@ def _row_key(row: Mapping[str, object]) -> tuple[int, str, str]:
 
 
 def _validated_rows(split_document: Mapping[str, object]) -> list[Mapping[str, object]]:
-    if split_document.get("schema") != "lunar-polar-split-manifest/v1":
+    if split_document.get("schema") != "lunar-polar-split-manifest/v2":
         raise ScenarioManifestError("split manifest schema is unsupported")
     if split_document.get("seed") != 4080:
         raise ScenarioManifestError("formal split seed must be 4080")
@@ -82,6 +82,14 @@ def _validated_rows(split_document: Mapping[str, object]) -> list[Mapping[str, o
     if nasa != Counter(_NASA_COUNTS):
         raise ScenarioManifestError(
             "formal NASA split must contain exactly 192 train, 48 validation and 48 test windows"
+        )
+    if any(
+        row.get("valid_fraction") != 1.0
+        for row in rows
+        if row.get("source") == "NASA_LOLA"
+    ):
+        raise ScenarioManifestError(
+            "formal NASA windows must be fully valid with no NoData"
         )
     holdout = sorted(
         row.get("window_id")

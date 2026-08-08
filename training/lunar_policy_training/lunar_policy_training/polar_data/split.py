@@ -22,7 +22,7 @@ NASA_WINDOW_METERS = 1024
 MIN_CROSS_SPLIT_CENTER_DISTANCE_METERS = 2000
 NASA_SPLIT_COUNTS = {"train": 192, "validation": 48, "test": 48}
 JAXA_SITE_IDS = ("CR1", "GR1", "GR2", "LP1", "MP1", "MP2")
-SPLIT_MANIFEST_SCHEMA = "lunar-polar-split-manifest/v1"
+SPLIT_MANIFEST_SCHEMA = "lunar-polar-split-manifest/v2"
 
 
 class SplitError(ValueError):
@@ -42,6 +42,7 @@ class PolarWindow:
     source_sha256: str = "synthetic-nasa-87s"
     count_sha256: str = "synthetic-count-87s"
     count_quality: float = 0.0
+    valid_fraction: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class SplitCatalogRow:
     width_m: int | None
     height_m: int | None
     split_sha256: str
+    valid_fraction: float | None = None
     source_pixel_bounds: tuple[float, float, float, float] | None = None
     world_bounds_m: tuple[float, float, float, float] | None = None
     read_pixel_envelope: tuple[int, int, int, int] | None = None
@@ -143,10 +145,24 @@ def nasa_windows_from_dem(path: str | Path, source_sha256: str, count_path: str 
                     )
                     envelope = candidate.read_pixel_envelope
                     assert envelope is not None
-                    quality = float(count_dataset.read(1, window=rasterio.windows.Window(
-                        envelope[0], envelope[1], envelope[2] - envelope[0], envelope[3] - envelope[1]
-                    )).mean())
-                    windows.append(replace(candidate, count_quality=quality))
+                    window = rasterio.windows.Window(
+                        envelope[0],
+                        envelope[1],
+                        envelope[2] - envelope[0],
+                        envelope[3] - envelope[1],
+                    )
+                    valid_fraction = float(
+                        dataset.read_masks(1, window=window).astype(bool).mean()
+                    )
+                    if math.isclose(valid_fraction, 1.0, rel_tol=0.0, abs_tol=0.0):
+                        quality = float(count_dataset.read(1, window=window).mean())
+                        windows.append(
+                            replace(
+                                candidate,
+                                count_quality=quality,
+                                valid_fraction=valid_fraction,
+                            )
+                        )
                     column += 1
                 row += 1
             return _select_count_stratified_windows(windows, seed=4080)
@@ -180,12 +196,14 @@ def build_split_catalog(nasa_candidates: Iterable[PolarWindow], jaxa_holdout_sit
             world_bounds_m=candidate.world_bounds_m,
             read_pixel_envelope=candidate.read_pixel_envelope,
             window_sha256=_window_sha256(candidate),
+            valid_fraction=candidate.valid_fraction,
         )
         for candidate in sorted(candidates, key=lambda item: item.window_id)
     ]
     rows.extend(SplitCatalogRow(
         source="JAXA_LUPEX", split="holdout", window_id=site.site_id, center_x_m=None,
         center_y_m=None, width_m=None, height_m=None, split_sha256="",
+        valid_fraction=None,
         archive_sha256=site.archive_sha256 or None,
         archive_member_paths=site.archive_member_paths or None,
         archive_member_sha256s=site.archive_member_sha256s or None,
@@ -261,6 +279,10 @@ def _validate_nasa_windows(candidates: tuple[PolarWindow, ...]) -> None:
     for candidate in candidates:
         if candidate.width_m != NASA_WINDOW_METERS or candidate.height_m != NASA_WINDOW_METERS:
             raise SplitError("NASA windows must be fixed 1024 m squares")
+        if not math.isclose(
+            candidate.valid_fraction, 1.0, rel_tol=0.0, abs_tol=0.0
+        ):
+            raise SplitError("NASA windows must be fully valid with no NoData")
     for index, left in enumerate(candidates):
         for right in candidates[index + 1:]:
             if abs(left.center_x_m - right.center_x_m) < NASA_WINDOW_METERS and abs(left.center_y_m - right.center_y_m) < NASA_WINDOW_METERS:
@@ -277,7 +299,7 @@ def _validate_cross_split_distance(candidates: tuple[PolarWindow, ...], assignme
 
 
 def _window_sha256(window: PolarWindow) -> str:
-    return sha256(json.dumps({"source_sha256": window.source_sha256, "count_sha256": window.count_sha256, "window_id": window.window_id, "world_bounds_m": window.world_bounds_m, "source_pixel_bounds": window.source_pixel_bounds}, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return sha256(json.dumps({"source_sha256": window.source_sha256, "count_sha256": window.count_sha256, "window_id": window.window_id, "world_bounds_m": window.world_bounds_m, "source_pixel_bounds": window.source_pixel_bounds, "valid_fraction": window.valid_fraction}, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _atomic_manifest_write(path: str | Path, document: dict[str, object], repository_root: str | Path) -> None:

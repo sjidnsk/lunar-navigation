@@ -50,6 +50,7 @@ def _split_document() -> dict[str, object]:
                         float(index * 2048 + 1024),
                         1024.0,
                     ],
+                    "valid_fraction": 1.0,
                     "split_sha256": "5" * 64,
                 }
             )
@@ -73,7 +74,7 @@ def _split_document() -> dict[str, object]:
             }
         )
     return {
-        "schema": "lunar-polar-split-manifest/v1",
+        "schema": "lunar-polar-split-manifest/v2",
         "seed": 4080,
         "split_sha256": "5" * 64,
         "sources": [
@@ -114,7 +115,11 @@ def test_formal_catalog_expands_exact_frozen_scene_families() -> None:
     assert manifest["schema"] == "lunar-formal-scenario-manifest/v1"
     assert manifest["generator_version"] == "lunar-polar-multires-hazards/v2"
     assert manifest["object_distribution"] == {
-        "rocks": {"count": 260, "radius_m": [0.15, 1.2]},
+        "rocks": {
+            "count": 260,
+            "radius_m": [0.15, 1.2],
+            "height_to_radius": [0.6, 1.5],
+        },
         "craters": {
             "count": 32,
             "radius_m": [2.0, 16.0],

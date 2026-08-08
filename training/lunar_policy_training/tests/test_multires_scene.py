@@ -100,7 +100,9 @@ def test_global_and_local_projection_share_one_vector_scene_and_provenance() -> 
     assert global_projection.local_detail_provenance == LOCAL_DETAIL_PROVENANCE
     assert local_projection.local_detail_provenance == LOCAL_DETAIL_PROVENANCE
     assert global_projection.physical_obstacle_ratio[global_row, global_column] > 0.0
+    assert global_projection.physical_obstacle_height_m[global_row, global_column] > 0.0
     assert np.max(local_projection.physical_obstacle_ratio) > 0.0
+    assert np.max(local_projection.physical_obstacle_height_m) > 0.0
 
 
 def test_overlapping_aligned_projections_are_bit_identical() -> None:
@@ -127,6 +129,10 @@ def test_overlapping_aligned_projections_are_bit_identical() -> None:
     np.testing.assert_array_equal(
         west_projection.physical_obstacle_ratio[:, 8:],
         east_projection.physical_obstacle_ratio[:, :8],
+    )
+    np.testing.assert_array_equal(
+        west_projection.physical_obstacle_height_m[:, 8:],
+        east_projection.physical_obstacle_height_m[:, :8],
     )
     np.testing.assert_array_equal(
         west_projection.forbidden_ratio[:, 8:],

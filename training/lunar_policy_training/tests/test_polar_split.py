@@ -213,6 +213,53 @@ def test_count_quality_stratification_changes_selected_candidate_set(tmp_path: P
     assert {window.count_sha256 for window in flat_selection} != {window.count_sha256 for window in banded_selection}
 
 
+def test_dem_candidates_exclude_any_window_containing_nodata(tmp_path: Path) -> None:
+    dem = tmp_path / "dem.tif"
+    count = tmp_path / "count.tif"
+    transform = from_origin(0.0, 60_000.0, 256.0, 256.0)
+    elevation = np.zeros((1, 240, 400), dtype="float32")
+    elevation[:, 10:16, :8] = -9999.0
+    with rasterio.open(
+        dem,
+        "w",
+        driver="GTiff",
+        height=240,
+        width=400,
+        count=1,
+        dtype="float32",
+        crs="EPSG:3031",
+        transform=transform,
+        nodata=-9999.0,
+    ) as dataset:
+        dataset.write(elevation)
+    with rasterio.open(
+        count,
+        "w",
+        driver="GTiff",
+        height=240,
+        width=400,
+        count=1,
+        dtype="uint8",
+        crs="EPSG:3031",
+        transform=transform,
+    ) as dataset:
+        dataset.write(np.ones((1, 240, 400), dtype="uint8"))
+
+    selected = nasa_windows_from_dem(dem, "d" * 64, count, "c" * 64)
+
+    assert len(selected) == 288
+    assert {window.valid_fraction for window in selected} == {1.0}
+    assert not any(window.window_id == "nasa-87s-000-000" for window in selected)
+
+
+def test_catalog_rejects_a_nodata_candidate_even_if_supplied_directly() -> None:
+    windows = list(nasa_windows())
+    windows[0] = replace(windows[0], valid_fraction=0.99)
+
+    with pytest.raises(SplitError, match="fully valid"):
+        build_split_catalog(windows, jaxa_sites(), seed=4080)
+
+
 def test_split_manifest_rejects_dem_count_alignment_drift(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()

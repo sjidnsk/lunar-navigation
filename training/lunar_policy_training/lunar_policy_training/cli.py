@@ -30,6 +30,10 @@ from .capability_freeze import (
     FrozenCapabilityEnvironmentFactory,
 )
 from .project_capability import load_project_formal_capability
+from .polar_data.formal_cache import (
+    FormalCacheError,
+    prepare_formal_training_cache,
+)
 from .budget import (
     BudgetExceededError,
     CalibrationMeasurement,
@@ -694,6 +698,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lunar-policy-training")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    prepare_data = subparsers.add_parser("prepare-data")
+    prepare_data.add_argument("--source-lock", required=True)
+    prepare_data.add_argument("--split-manifest", required=True)
+    prepare_data.add_argument("--cache-root", required=True)
+    prepare_data.add_argument(
+        "--materialization",
+        required=True,
+        choices=("preflight", "full"),
+    )
+    prepare_data.add_argument(
+        "--preflight-scenario-limit",
+        type=_positive_scenario_count,
+    )
+
     calibrate = subparsers.add_parser("calibrate")
     calibrate.add_argument("--config", required=True)
     calibrate.add_argument("--artifact-root", required=True)
@@ -734,10 +752,63 @@ def _positive_block_count(value: str) -> int:
     return blocks
 
 
+def _positive_scenario_count(value: str) -> int:
+    try:
+        count = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "preflight scenario limit must be a positive integer"
+        ) from error
+    if str(count) != value or count <= 0:
+        raise argparse.ArgumentTypeError(
+            "preflight scenario limit must be a positive integer"
+        )
+    return count
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     repository_root = Path(__file__).resolve().parents[3]
-    if arguments.command == "calibrate":
+    if arguments.command == "prepare-data":
+        if (
+            arguments.materialization == "full"
+            and arguments.preflight_scenario_limit is not None
+        ):
+            raise PreflightError("full materialization rejects a scenario limit")
+        if (
+            arguments.materialization == "preflight"
+            and arguments.preflight_scenario_limit is None
+        ):
+            raise PreflightError(
+                "preflight materialization requires --preflight-scenario-limit"
+            )
+        capability_bundle = _formal_capability_preflight(repository_root)
+        try:
+            manifest = prepare_formal_training_cache(
+                source_lock_path=Path(arguments.source_lock),
+                split_manifest_path=Path(arguments.split_manifest),
+                cache_root=Path(arguments.cache_root),
+                materialization=arguments.materialization,
+                preflight_scenario_limit=arguments.preflight_scenario_limit,
+                capability_bundle=capability_bundle,
+                repository_root=repository_root,
+            )
+        except FormalCacheError as error:
+            raise PreflightError(f"formal cache preparation failed: {error}") from error
+        print(
+            json.dumps(
+                {
+                    "cache_manifest": str(
+                        Path(arguments.cache_root) / "cache-manifest.json"
+                    ),
+                    "cache_manifest_sha256": manifest["cache_manifest_sha256"],
+                    "materialization": manifest["materialization"],
+                    "scene_count": manifest["scene_count"],
+                },
+                sort_keys=True,
+            )
+        )
+    elif arguments.command == "calibrate":
         _calibrate_training_run(
             config_path=Path(arguments.config),
             artifact_root=Path(arguments.artifact_root),

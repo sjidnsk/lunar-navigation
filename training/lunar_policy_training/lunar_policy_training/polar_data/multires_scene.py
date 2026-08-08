@@ -36,6 +36,7 @@ class ProjectedHazards:
     canvas: MapCanvas
     crater_elevation_delta_m: np.ndarray
     physical_obstacle_ratio: np.ndarray
+    physical_obstacle_height_m: np.ndarray
     forbidden_ratio: np.ndarray
     local_detail_provenance: str = LOCAL_DETAIL_PROVENANCE
 
@@ -56,6 +57,15 @@ class ProjectedHazards:
             if not np.isfinite(values).all() or ((values < 0.0) | (values > 1.0)).any():
                 raise ValueError(f"{name} must be finite and in [0,1]")
             object.__setattr__(self, name, values)
+        obstacle_height = _readonly_grid(
+            "physical_obstacle_height_m",
+            self.physical_obstacle_height_m,
+            cells,
+            np.float32,
+        )
+        if not np.isfinite(obstacle_height).all() or (obstacle_height < 0.0).any():
+            raise ValueError("physical_obstacle_height_m must be finite and non-negative")
+        object.__setattr__(self, "physical_obstacle_height_m", obstacle_height)
         if self.local_detail_provenance != LOCAL_DETAIL_PROVENANCE:
             raise ValueError("local detail provenance is unsupported")
 
@@ -176,8 +186,8 @@ def project_vector_scene(
             0.0,
             1.0,
         )
-    rocks = tuple(
-        Point(rock.x_m, rock.y_m).buffer(rock.radius_m, quad_segs=24)
+    relevant_rocks = tuple(
+        rock
         for rock in scene.rocks
         if not (
             rock.x_m + rock.radius_m <= target_left
@@ -186,6 +196,22 @@ def project_vector_scene(
             or rock.y_m - rock.radius_m >= target_top
         )
     )
+    rocks = tuple(
+        Point(rock.x_m, rock.y_m).buffer(rock.radius_m, quad_segs=24)
+        for rock in relevant_rocks
+    )
+    obstacle_height = np.zeros(xx.shape, dtype=np.float32)
+    half = target_canvas.geometry.resolution_m / 2.0
+    for rock in relevant_rocks:
+        dx = np.maximum(np.abs(x - rock.x_m) - half, 0.0)
+        dy = np.maximum(np.abs(y - rock.y_m) - half, 0.0)
+        intersects = (
+            dy[:, None] * dy[:, None] + dx[None, :] * dx[None, :]
+            <= rock.radius_m * rock.radius_m
+        )
+        obstacle_height[intersects] = np.maximum(
+            obstacle_height[intersects], np.float32(rock.height_m)
+        )
     no_go = tuple(
         polygon
         for value in scene.no_go_polygons
@@ -203,6 +229,7 @@ def project_vector_scene(
         canvas=target_canvas,
         crater_elevation_delta_m=delta.astype(np.float32),
         physical_obstacle_ratio=_exact_area_ratio(rocks, x, y, resolution),
+        physical_obstacle_height_m=obstacle_height,
         forbidden_ratio=_exact_area_ratio(no_go, x, y, resolution),
     )
 
@@ -292,6 +319,7 @@ class MultiResolutionScene:
             canvas=target_canvas,
             crater_elevation_delta_m=hazards.crater_elevation_delta_m,
             physical_obstacle_ratio=hazards.physical_obstacle_ratio,
+            physical_obstacle_height_m=hazards.physical_obstacle_height_m,
             forbidden_ratio=hazards.forbidden_ratio,
             elevation_m=elevation,
             valid_mask=valid,

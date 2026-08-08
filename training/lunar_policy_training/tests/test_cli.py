@@ -60,6 +60,20 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
     """Would fail if the approved calibration/evaluation handoff were missing."""
     parser = build_parser()
 
+    prepare = parser.parse_args(
+        [
+            "prepare-data",
+            "--source-lock",
+            "/tmp/polar-source-lock.json",
+            "--split-manifest",
+            "/tmp/polar-split.json",
+            "--cache-root",
+            "/tmp/formal-cache",
+            "--materialization",
+            "full",
+        ]
+    )
+
     calibrate = parser.parse_args(
         [
             "calibrate",
@@ -109,6 +123,9 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
         ]
     )
 
+    assert prepare.command == "prepare-data"
+    assert prepare.materialization == "full"
+    assert prepare.preflight_scenario_limit is None
     assert calibrate.command == "calibrate"
     assert train.command == "train"
     assert train.sensor_performance_report is None
@@ -118,6 +135,101 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
     assert evaluate.sensor_performance_report is None
     assert extension.command == "extend-budget"
     assert extension.blocks == 2
+
+
+def test_prepare_data_delegates_to_formal_cache_without_touching_cuda(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[dict[str, object]] = []
+    bundle = FrozenCapabilityBundle(
+        schema="lunar-training-capability-freeze/v1",
+        platforms=(),
+        bundle_sha256="b" * 64,
+        formal_eligible=True,
+    )
+    monkeypatch.setattr(cli_module, "_formal_capability_preflight", lambda _root: bundle)
+    monkeypatch.setattr(
+        cli_module,
+        "prepare_formal_training_cache",
+        lambda **kwargs: calls.append(kwargs)
+        or {
+            "cache_manifest_sha256": "c" * 64,
+            "materialization": "preflight",
+            "scene_count": 4,
+        },
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "is_available",
+        lambda: pytest.fail("prepare-data must not initialize CUDA"),
+    )
+
+    assert (
+        cli_module.main(
+            [
+                "prepare-data",
+                "--source-lock",
+                str(tmp_path / "source.json"),
+                "--split-manifest",
+                str(tmp_path / "split.json"),
+                "--cache-root",
+                str(tmp_path / "cache"),
+                "--materialization",
+                "preflight",
+                "--preflight-scenario-limit",
+                "4",
+            ]
+        )
+        == 0
+    )
+    assert calls[0]["preflight_scenario_limit"] == 4
+    assert calls[0]["capability_bundle"] is bundle
+    assert json.loads(capsys.readouterr().out)["scene_count"] == 4
+
+
+@pytest.mark.parametrize(
+    "arguments,message",
+    (
+        (
+            ["--materialization", "preflight"],
+            "preflight.*requires",
+        ),
+        (
+            [
+                "--materialization",
+                "full",
+                "--preflight-scenario-limit",
+                "1",
+            ],
+            "full.*rejects",
+        ),
+    ),
+)
+def test_prepare_data_rejects_ambiguous_materialization_before_capability(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    message: str,
+) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "_formal_capability_preflight",
+        lambda _root: pytest.fail("materialization must fail first"),
+    )
+    prefix = [
+        "prepare-data",
+        "--source-lock",
+        str(tmp_path / "source.json"),
+        "--split-manifest",
+        str(tmp_path / "split.json"),
+        "--cache-root",
+        str(tmp_path / "cache"),
+    ]
+
+    with pytest.raises(PreflightError, match=message):
+        cli_module.main([*prefix, *arguments])
 
 
 def test_formal_sensor_performance_report_is_required_before_artifacts(
