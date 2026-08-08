@@ -34,6 +34,7 @@ def _resume_equivalence() -> dict[str, object]:
         "checkpoint_relative_path": "resume-equivalence/update-1.pt",
         "checkpoint_sha256": "f" * 64,
         "checkpoint_roundtrip": True,
+        "rollout_exact": True,
         "model_exact": True,
         "optimizer_exact": True,
         "rng_exact": True,

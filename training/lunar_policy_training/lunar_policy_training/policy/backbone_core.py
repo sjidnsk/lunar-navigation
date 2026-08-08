@@ -19,21 +19,47 @@ class PolicyActionError(ValueError):
 class MapEncoder(nn.Module):
     """Encode maps into the contract-selected fixed token grid."""
 
-    def __init__(self, input_channels: int, output_grid: tuple[int, int]) -> None:
+    def __init__(
+        self,
+        input_channels: int,
+        input_grid: tuple[int, int],
+        output_grid: tuple[int, int],
+    ) -> None:
         super().__init__()
         if (
-            not isinstance(output_grid, tuple)
+            not isinstance(input_grid, tuple)
+            or len(input_grid) != 2
+            or any(type(size) is not int or size <= 0 for size in input_grid)
+            or not isinstance(output_grid, tuple)
             or len(output_grid) != 2
             or any(type(size) is not int or size <= 0 for size in output_grid)
         ):
-            raise ValueError("output_grid must be two positive integers")
+            raise ValueError("input_grid and output_grid must be positive pairs")
         self.input_channels = input_channels
+        self.input_grid = input_grid
         self.output_grid = output_grid
         self.features = nn.Sequential(nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=2), nn.GroupNorm(8, 32), nn.GELU(), nn.Conv2d(32, 64, kernel_size=3, padding=1), nn.GroupNorm(8, 64), nn.GELU(), nn.Conv2d(64, TOKEN_DIM, kernel_size=3, padding=1), nn.GroupNorm(16, TOKEN_DIM), nn.GELU())
-        self.pool = nn.AdaptiveAvgPool2d(output_grid)
+        feature_grid = tuple((size + 1) // 2 for size in input_grid)
+        if any(
+            feature_size < output_size
+            or feature_size % output_size != 0
+            for feature_size, output_size in zip(feature_grid, output_grid)
+        ):
+            raise ValueError("fixed feature grid must divide into output_grid")
+        kernel = tuple(
+            feature_size // output_size
+            for feature_size, output_size in zip(feature_grid, output_grid)
+        )
+        self.pool = (
+            nn.Identity()
+            if kernel == (1, 1)
+            else nn.AvgPool2d(kernel_size=kernel, stride=kernel)
+        )
         self.register_buffer('position_encoding', _map_position_encoding(output_grid), persistent=False)
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
+        if tuple(value.shape[-2:]) != self.input_grid:
+            raise ValueError("map tensor differs from the fixed encoder grid")
         feature_map = self.pool(self.features(value))
         tokens = feature_map.flatten(2).transpose(1, 2)
         return tokens + self.position_encoding.to(dtype=tokens.dtype)

@@ -32,7 +32,7 @@ from .polar_data.formal_cache import FormalCache
 from .reward import compute_transition_reward
 
 
-FORMAL_PREFLIGHT_SCHEMA = "lunar-formal-training-preflight/v3"
+FORMAL_PREFLIGHT_SCHEMA = "lunar-formal-training-preflight/v4"
 REQUIRED_PREFLIGHT_CHECKS = (
     "cache_and_identity",
     "three_platform_worker_construction",
@@ -50,6 +50,7 @@ _RESUME_EQUIVALENCE_FIELDS = {
     "checkpoint_relative_path",
     "checkpoint_sha256",
     "checkpoint_roundtrip",
+    "rollout_exact",
     "model_exact",
     "optimizer_exact",
     "rng_exact",

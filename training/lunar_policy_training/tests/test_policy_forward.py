@@ -152,6 +152,14 @@ def test_v3_encoders_emit_fixed_global_and_local_token_geometries() -> None:
     assert token_counts == [1024, 256]
 
 
+def test_v3_map_encoders_use_deterministic_fixed_grid_pooling() -> None:
+    """Would fail if CUDA resume depended on adaptive-pool backward atomics."""
+    policy = CrossAttentionPolicy()
+
+    assert isinstance(policy.global_encoder.pool, torch.nn.AvgPool2d)
+    assert isinstance(policy.local_encoder.pool, torch.nn.Identity)
+
+
 def test_v2_von_mises_initialization_sampling_and_log_prob_recomputation() -> None:
     """Would fail if angle means fell back to candidate data or kappa left V2 limits."""
     policy = CrossAttentionPolicy().eval()

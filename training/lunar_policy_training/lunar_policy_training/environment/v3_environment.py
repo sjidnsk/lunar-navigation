@@ -170,6 +170,7 @@ class V3ExplorationEnvironment:
         ] | None = None,
         plan_cost_scale: float = 1.0,
         planner_elapsed_scale_s: float = 1.0,
+        include_planner_wall_time_in_reward: bool = True,
     ) -> None:
         self._platform_type = platform_type
         self._bridge = bridge
@@ -219,6 +220,8 @@ class V3ExplorationEnvironment:
             )
         if type(require_identity_bound_request) is not bool:
             raise ValueError("identity-bound request flag must be boolean")
+        if type(include_planner_wall_time_in_reward) is not bool:
+            raise ValueError("planner wall-time reward flag must be boolean")
         self._observation = _clone_observation(initial_observation)
         self._rejected_candidates: set[int] = set()
         self._observation_provider = observation_provider
@@ -229,6 +232,9 @@ class V3ExplorationEnvironment:
         self._committed_hop_executor = committed_hop_executor
         self._plan_cost_scale = plan_cost_scale
         self._planner_elapsed_scale_s = planner_elapsed_scale_s
+        self._include_planner_wall_time_in_reward = (
+            include_planner_wall_time_in_reward
+        )
         self._rollout_discarded = False
         self._training_stopped = False
         self._committed_output: PlannerOutput | None = None
@@ -762,11 +768,9 @@ class V3ExplorationEnvironment:
             ),
             normalized_macro_step_time=(
                 feedback.normalized_execution_time_contribution
-                + (
-                    output.diagnostics.elapsed.total_seconds()
-                    / self._planner_elapsed_scale_s
-                    if include_planner_contribution
-                    else 0.0
+                + self._normalized_planner_wall_time(
+                    output,
+                    include=include_planner_contribution,
                 )
             ),
             executed_without_new_coverage=(
@@ -838,8 +842,7 @@ class V3ExplorationEnvironment:
             ),
             normalized_macro_step_time=(
                 execution.normalized_execution_time_contribution
-                + output.diagnostics.elapsed.total_seconds()
-                / self._planner_elapsed_scale_s
+                + self._normalized_planner_wall_time(output)
             ),
             executed_without_new_coverage=(
                 execution.executed_without_new_coverage
@@ -895,6 +898,8 @@ class V3ExplorationEnvironment:
             normalized_plan_or_execution_cost=0.0,
             normalized_macro_step_time=(
                 planner_elapsed.total_seconds() / self._planner_elapsed_scale_s
+                if self._include_planner_wall_time_in_reward
+                else 0.0
             ),
             executed_without_new_coverage=False,
             success_first_crossing=False,
@@ -907,6 +912,19 @@ class V3ExplorationEnvironment:
             reason_code=reason_code,
             terminated=False,
             execution_events=ExecutionEvents(),
+        )
+
+    def _normalized_planner_wall_time(
+        self,
+        output: PlannerOutput,
+        *,
+        include: bool = True,
+    ) -> float:
+        if not include or not self._include_planner_wall_time_in_reward:
+            return 0.0
+        return (
+            output.diagnostics.elapsed.total_seconds()
+            / self._planner_elapsed_scale_s
         )
 
 
@@ -953,6 +971,7 @@ def create_v3_environment(
     ] | None = None,
     plan_cost_scale: float = 1.0,
     planner_elapsed_scale_s: float = 1.0,
+    include_planner_wall_time_in_reward: bool = True,
 ) -> V3ExplorationEnvironment:
     """Compose the supported training environment with the real C++ v3 bridge."""
     if platform_type == "HOPPER" and committed_hop_executor is None:
@@ -976,6 +995,9 @@ def create_v3_environment(
         committed_hop_executor=committed_hop_executor,
         plan_cost_scale=plan_cost_scale,
         planner_elapsed_scale_s=planner_elapsed_scale_s,
+        include_planner_wall_time_in_reward=(
+            include_planner_wall_time_in_reward
+        ),
     )
 
 

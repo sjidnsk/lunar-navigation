@@ -52,8 +52,16 @@ class CrossAttentionPolicy(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.global_encoder = backbone_core.MapEncoder(input_channels=7, output_grid=(32, 32))
-        self.local_encoder = backbone_core.MapEncoder(input_channels=4, output_grid=(16, 16))
+        self.global_encoder = backbone_core.MapEncoder(
+            input_channels=7,
+            input_grid=(256, 256),
+            output_grid=(32, 32),
+        )
+        self.local_encoder = backbone_core.MapEncoder(
+            input_channels=4,
+            input_grid=(32, 32),
+            output_grid=(16, 16),
+        )
         self.pose_encoder = nn.Sequential(
             nn.Linear(5, backbone_core.TOKEN_DIM),
             nn.LayerNorm(backbone_core.TOKEN_DIM),

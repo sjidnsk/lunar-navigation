@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 import pathlib
 import subprocess
 import sys
@@ -1393,6 +1394,7 @@ def test_formal_resume_equivalence_rejects_optimizer_drift() -> None:
             checkpoint_relative_path="resume-equivalence/update-1.pt",
             checkpoint_sha256="a" * 64,
             checkpoint_roundtrip=True,
+            rollout_exact=True,
             uninterrupted=uninterrupted,
             resumed=resumed,
             uninterrupted_observation_sha256="b" * 64,
@@ -1415,3 +1417,17 @@ def test_formal_rollout_samples_policy_while_deployment_style_smoke_is_determini
 
     assert training_cli._collector_config_for_run(formal).deterministic is False
     assert training_cli._collector_config_for_run(smoke).deterministic is True
+
+
+def test_formal_resume_preflight_uses_the_fixed_three_platform_order() -> None:
+    """Would fail if the real resume helper omitted the curriculum platform set."""
+    assert training_cli.PLATFORMS == ("WHEELED", "LEGGED", "HOPPER")
+
+
+def test_formal_seed_enables_exact_cuda_replay_algorithms() -> None:
+    training_cli._seed_everything(4080)
+
+    assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
+    assert torch.are_deterministic_algorithms_enabled()
+    assert torch.backends.cudnn.benchmark is False
+    assert torch.backends.cudnn.deterministic is True

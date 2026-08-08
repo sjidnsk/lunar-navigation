@@ -340,7 +340,11 @@ Add a `snapshot_episode_state` command. Reject any identity outside `DECISION_BO
 
 Use `lunar-formal-environment-state/v2` inside the V6 checkpoint introduced by Task 1. Formal restore passes the saved worker states before processes start; V2 observation/V5 checkpoints cannot resume a formal V3 run.
 
-- [ ] **Step 7: Run GREEN tests and commit**
+- [ ] **Step 7: Remove nondeterministic time and CUDA kernels from formal reward replay**
+
+Use certified trajectory/hop duration divided by `2.0 s` as the formal macro-step time contribution. Exclude planner wall time from reward while retaining it in performance evidence. Replace adaptive average pooling with fixed-grid average pooling and require the fixed cuBLAS workspace plus deterministic PyTorch/cuDNN algorithms. Prove the uninterrupted/restored rollout fields, model, optimizer and RNG are exact at update two.
+
+- [ ] **Step 8: Run GREEN tests and commit**
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q \

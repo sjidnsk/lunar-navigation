@@ -207,6 +207,10 @@ evaluate 和 formal-preflight 全部调用这一入口，不允许各自复制�
 worker reset 时按冻结 schedule 前进到下一场景。checkpoint/run manifest 记录场景 schedule ID、
 各 worker episode cursor 和训练 RNG；resume 对这些字段进行完全相等校验。
 
+正式训练的时间奖励来自 reference 内的确定性物理执行时长；planner diagnostics 的墙钟耗时仅作
+性能证据，不进入 reward。CUDA 使用固定 cuBLAS workspace 和 deterministic algorithms，V3
+固定尺寸地图编码器使用定长平均池化，以保证同一 checkpoint 的下一次更新可逐字节重放。
+
 ## 公开命令
 
 ### prepare-data

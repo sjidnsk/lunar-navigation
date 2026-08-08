@@ -140,6 +140,13 @@ closed。checkpoint 只允许稳定 `DECISION_BOUNDARY`、`GROUND_HOLD` 或 `LAN
 update 2 的模型、优化器、RNG、scene、start、observation、candidate tensors 和首个 planner
 request digest 相等。
 
+为使该等价性具有明确物理语义，正式 reward 的 `normalized_macro_step_time` 只使用认证轨迹或
+单跳参考中的物理执行时长，并统一除以 `2.0 s`；没有 reference 的拒绝动作对应零物理宏步时长。
+C++ diagnostics 中的 planner 墙钟耗时受线程与主机调度影响，只进入独立性能统计，禁止进入
+PPO reward。正式 CUDA 更新固定 `CUBLAS_WORKSPACE_CONFIG=:4096:8`、PyTorch deterministic
+algorithms 和 deterministic cuDNN；地图编码器使用与 V3 固定输入尺寸对应的定长平均池化，
+禁止使用 CUDA backward 不可精确重放的 adaptive average pooling。
+
 ## 完整回合评估
 
 正式 evaluation 不得复用 proxy 的固定三步循环。每个 scenario 从初始 reveal 运行到自然
@@ -200,6 +207,7 @@ PPO update 或 86400 秒边界伪造成功。
 - ROI 95% 首次跨越只产生一次成功，正式评估可得到非零成功率；
 - 无候选自然失败，不存在 budget exhaustion 状态；
 - 活动 episode checkpoint/resume 与连续运行 update 2 完全相等；
+- 正式 reward 不读取 planner 墙钟时间，CUDA update 2 的 rollout、模型和优化器逐字节相等；
 - 16/32/64 校准后冻结唯一 horizon；
 - 更新所有正式训练就绪文档并重新生成 preflight/calibration 证据；
 - 不启动 seed 4080 正式训练。

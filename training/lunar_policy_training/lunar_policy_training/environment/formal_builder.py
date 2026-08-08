@@ -68,6 +68,7 @@ from .visibility import NativeVisibilityEstimator, SensorGeometry
 
 
 _PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
+_FORMAL_MACRO_STEP_TIME_SCALE_S = 2.0
 
 
 def _formal_scheduled_entries(
@@ -405,6 +406,7 @@ class FormalEpisode:
         self._snapshot: _MapSnapshot | None = None
         self._revision = 0
         self._pending_hop_landing: Pose2 | None = None
+        self._pending_hop_elapsed_s = 0.0
         self._hopper_feedback_phase = 0
         self.last_hop_available_delta_v_mps = 0.0
         self._reveal_history: list[FormalRevealState] = []
@@ -763,17 +765,17 @@ class FormalEpisode:
             terrain_z,
         )
         self.current_pose = next_pose
-        evidence = SensorBoundaryEvidence(
-            next_pose,
-            points[-1].time_from_start.total_seconds(),
-        )
+        elapsed_s = points[-1].time_from_start.total_seconds()
+        evidence = SensorBoundaryEvidence(next_pose, elapsed_s)
         self._record_reveal(evidence, "DECISION_BOUNDARY")
         return ReferenceExecutionResult(
             next_observation=self.controller.current_observation,
             mission_observed_delta=0.0,
             priority_observed_delta=0.0,
             normalized_execution_cost_contribution=0.0,
-            normalized_execution_time_contribution=0.0,
+            normalized_execution_time_contribution=(
+                elapsed_s / _FORMAL_MACRO_STEP_TIME_SCALE_S
+            ),
             executed_without_new_coverage=False,
             success_first_crossing=False,
             episode_ended_without_success=False,
@@ -819,6 +821,9 @@ class FormalEpisode:
         self._pending_hop_landing = Pose2(
             landing.x, landing.y, 0.0, "map", landing.z
         )
+        self._pending_hop_elapsed_s = float(
+            segment.flight_time.total_seconds()
+        )
         self.last_hop_available_delta_v_mps = float(
             segment.available_delta_v_mps
         )
@@ -828,7 +833,10 @@ class FormalEpisode:
             mission_observed_delta=0.0,
             priority_observed_delta=0.0,
             normalized_execution_cost_contribution=0.0,
-            normalized_execution_time_contribution=0.0,
+            normalized_execution_time_contribution=(
+                self._pending_hop_elapsed_s
+                / _FORMAL_MACRO_STEP_TIME_SCALE_S
+            ),
             executed_without_new_coverage=True,
             success_first_crossing=False,
             episode_ended_without_success=False,
@@ -865,9 +873,11 @@ class FormalEpisode:
                 ),
             )
         self._pending_hop_landing = None
+        elapsed_s = self._pending_hop_elapsed_s
+        self._pending_hop_elapsed_s = 0.0
         self._hopper_feedback_phase = 0
         self.current_pose = landing
-        evidence = SensorBoundaryEvidence(landing, 1.0)
+        evidence = SensorBoundaryEvidence(landing, elapsed_s)
         self._record_reveal(evidence, "LANDED_HOLD")
         return CommittedHopExecutionFeedback(
             execution_state="LANDED_HOLD",
@@ -1061,7 +1071,8 @@ class FormalWorkerBuilder:
                 else None
             ),
             plan_cost_scale=100.0,
-            planner_elapsed_scale_s=2.0,
+            planner_elapsed_scale_s=_FORMAL_MACRO_STEP_TIME_SCALE_S,
+            include_planner_wall_time_in_reward=False,
         )
         return FormalEnvironmentWorker(
             environment=environment,

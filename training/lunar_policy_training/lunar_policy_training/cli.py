@@ -101,6 +101,7 @@ from .sensor_performance import (
 from .curriculum import (
     CurriculumSchedule,
     FORMAL_SEED,
+    PLATFORMS,
     REWARD_CALIBRATION_SEEDS,
 )
 from .evaluation.release_gate import (
@@ -143,6 +144,7 @@ def _build_formal_resume_equivalence_evidence(
     checkpoint_relative_path: str,
     checkpoint_sha256: str,
     checkpoint_roundtrip: bool,
+    rollout_exact: bool,
     uninterrupted: object,
     resumed: object,
     uninterrupted_observation_sha256: str,
@@ -159,6 +161,7 @@ def _build_formal_resume_equivalence_evidence(
         or Path(checkpoint_relative_path).is_absolute()
         or ".." in Path(checkpoint_relative_path).parts
         or checkpoint_roundtrip is not True
+        or rollout_exact is not True
         or not isinstance(checkpoint_sha256, str)
         or len(checkpoint_sha256) != 64
     ):
@@ -214,6 +217,7 @@ def _build_formal_resume_equivalence_evidence(
         "checkpoint_relative_path": checkpoint_relative_path,
         "checkpoint_sha256": checkpoint_sha256,
         "checkpoint_roundtrip": True,
+        "rollout_exact": True,
         "model_exact": True,
         "optimizer_exact": True,
         "rng_exact": True,
@@ -2639,6 +2643,35 @@ def _candidate_batch_digest(batch: PolicyBatch) -> str:
     )
 
 
+def _rollout_batch_field_digests(batch: RolloutBatch) -> dict[str, str]:
+    if not isinstance(batch, RolloutBatch):
+        raise PreflightError("formal resume rollout proof is invalid")
+    output: dict[str, str] = {}
+    for name in (
+        "prior_channels",
+        "coverage_summary",
+        "local_crop",
+        "frontier_features",
+        "pose_features",
+        "candidate_mask",
+        "platform_context",
+        "selected_frontier_indices",
+        "selected_thetas",
+        "old_log_prob_total",
+        "old_values",
+        "advantages",
+        "returns",
+    ):
+        digest = hashlib.sha256()
+        values = np.ascontiguousarray(getattr(batch, name))
+        digest.update(name.encode("ascii"))
+        digest.update(str(values.dtype).encode("ascii"))
+        digest.update(repr(values.shape).encode("ascii"))
+        digest.update(values.view(np.uint8).tobytes())
+        output[name] = digest.hexdigest()
+    return output
+
+
 def _first_formal_request_digest(
     factory: FrozenCapabilityEnvironmentFactory,
     states: tuple[Mapping[str, object], ...],
@@ -2728,7 +2761,9 @@ def _formal_resume_equivalence_check(
         environment.reset()
         return trainer, scheduler, pool, environment
 
-    def update_once(trainer, scheduler, environment, *, policy_version: int) -> None:
+    def update_once(
+        trainer, scheduler, environment, *, policy_version: int
+    ) -> dict[str, str]:
         environment.set_policy_version(policy_version)
         collected = collect_ppo_rollout(
             environment,
@@ -2736,10 +2771,21 @@ def _formal_resume_equivalence_check(
             _collector_config_for_run(config, horizon=1),
             device="cuda",
         )
+        rollout_sha256s = _rollout_batch_field_digests(collected.rollout)
+        rollout_sha256s["step_rewards"] = _semantic_sha256(
+            torch.from_numpy(collected.rewards)
+        )
+        rollout_sha256s["step_dones"] = _semantic_sha256(
+            torch.from_numpy(collected.dones)
+        )
+        rollout_sha256s["final_observation"] = _policy_batch_digest(
+            environment.current_observations
+        )
         trainer.update(collected.rollout, micro_batch_size=micro_batch_size)
         scheduler.step()
         environment.advance_policy_version(policy_version + 1)
         torch.cuda.synchronize()
+        return rollout_sha256s
 
     def environment_state(
         pool: ParallelEnvPool, *, policy_version: int
@@ -2812,7 +2858,33 @@ def _formal_resume_equivalence_check(
             and loaded.environment_state == update_one.environment_state
         )
 
-        update_once(trainer, scheduler, environment, policy_version=1)
+        uninterrupted_pre = checkpoint_for(
+            trainer,
+            scheduler,
+            global_step=1,
+            state=update_one_state,
+        )
+        for name in (
+            "model_state",
+            "optimizer_state",
+            "scheduler_state",
+            "normalization",
+            "rng_state",
+            "environment_state",
+        ):
+            if _semantic_sha256(getattr(uninterrupted_pre, name)) != (
+                _semantic_sha256(getattr(loaded, name))
+            ):
+                raise PreflightError(
+                    f"formal resume uninterrupted pre-update {name} differs"
+                )
+        uninterrupted_pre_observation_sha256 = _policy_batch_digest(
+            environment.current_observations
+        )
+
+        uninterrupted_rollout_sha256 = update_once(
+            trainer, scheduler, environment, policy_version=1
+        )
         uninterrupted_state, uninterrupted_states = environment_state(
             pool, policy_version=2
         )
@@ -2851,12 +2923,52 @@ def _formal_resume_equivalence_check(
             resumed_scheduler,
             normalization_state=resumed_trainer.normalization,
         )
-        update_once(
+        resumed_pre_state, _ = environment_state(
+            resumed_pool, policy_version=1
+        )
+        resumed_pre = checkpoint_for(
+            resumed_trainer,
+            resumed_scheduler,
+            global_step=1,
+            state=resumed_pre_state,
+        )
+        for name in (
+            "model_state",
+            "optimizer_state",
+            "scheduler_state",
+            "normalization",
+            "rng_state",
+            "environment_state",
+        ):
+            if _semantic_sha256(getattr(resumed_pre, name)) != (
+                _semantic_sha256(getattr(loaded, name))
+            ):
+                raise PreflightError(
+                    f"formal resume restored pre-update {name} differs"
+                )
+        if _policy_batch_digest(
+            resumed_environment.current_observations
+        ) != uninterrupted_pre_observation_sha256:
+            raise PreflightError(
+                "formal resume restored pre-update observation differs"
+            )
+        resumed_rollout_sha256 = update_once(
             resumed_trainer,
             resumed_scheduler,
             resumed_environment,
             policy_version=1,
         )
+        if resumed_rollout_sha256 != uninterrupted_rollout_sha256:
+            differing_fields = tuple(
+                name
+                for name in uninterrupted_rollout_sha256
+                if uninterrupted_rollout_sha256[name]
+                != resumed_rollout_sha256.get(name)
+            )
+            raise PreflightError(
+                "formal resume rollout differs at update two: "
+                + ",".join(differing_fields)
+            )
         resumed_state, resumed_states = environment_state(
             resumed_pool, policy_version=2
         )
@@ -2874,6 +2986,7 @@ def _formal_resume_equivalence_check(
             checkpoint_relative_path=checkpoint_relative_path,
             checkpoint_sha256=loaded.payload_sha256,
             checkpoint_roundtrip=checkpoint_roundtrip,
+            rollout_exact=True,
             uninterrupted=uninterrupted,
             resumed=resumed,
             uninterrupted_observation_sha256=(
@@ -3415,6 +3528,11 @@ def _validated_cuda_device() -> str:
 
 
 def _seed_everything(seed: int) -> None:
+    if os.environ.get("CUBLAS_WORKSPACE_CONFIG") != ":4096:8":
+        raise RuntimeError("exact CUDA replay requires CUBLAS_WORKSPACE_CONFIG=:4096:8")
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

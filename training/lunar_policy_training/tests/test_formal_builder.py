@@ -449,6 +449,21 @@ def test_active_formal_episode_replays_to_exact_observation_and_request(
         uninterrupted_request
     )
 
+    uninterrupted_result = worker.environment.advance_prepared_action(
+        action,
+        expected_identity=uninterrupted_observation.observation_identities[0],
+    )
+    restored_result = restored.environment.advance_prepared_action(
+        action,
+        expected_identity=restored_observation.observation_identities[0],
+    )
+    assert policy_batch_sha256(
+        restored_result.transition.next_observation
+    ) == policy_batch_sha256(uninterrupted_result.transition.next_observation)
+    assert compute_transition_reward(restored_result.transition) == (
+        compute_transition_reward(uninterrupted_result.transition)
+    )
+
 
 def test_rejected_candidate_mask_survives_active_episode_replay(
     tmp_path: pathlib.Path,
