@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from typing import ClassVar, Mapping
+from typing import ClassVar, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -68,6 +68,38 @@ from .visibility import NativeVisibilityEstimator, SensorGeometry
 
 
 _PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
+
+
+def _formal_scheduled_entries(
+    entries: Sequence[Mapping[str, object]],
+    *,
+    scenario_schedule_id: str,
+) -> tuple[Mapping[str, object], ...]:
+    """Return one stable seeded permutation of a split inventory."""
+    if not isinstance(scenario_schedule_id, str) or not scenario_schedule_id:
+        raise ValueError("formal scenario schedule identity is missing")
+    materialized = tuple(entries)
+    scene_ids: list[str] = []
+    for entry in materialized:
+        if not isinstance(entry, Mapping):
+            raise ValueError("formal scheduled scene entry is invalid")
+        scene_id = entry.get("scene_id")
+        if not isinstance(scene_id, str) or len(scene_id) != 64:
+            raise ValueError("formal scheduled scene ID is invalid")
+        scene_ids.append(scene_id)
+    if len(set(scene_ids)) != len(scene_ids):
+        raise ValueError("formal scheduled scene IDs are not unique")
+
+    def schedule_key(entry: Mapping[str, object]) -> tuple[str, str]:
+        scene_id = str(entry["scene_id"])
+        digest = hashlib.sha256(
+            f"{scenario_schedule_id}\0scene\0{scene_id}".encode("utf-8")
+        ).hexdigest()
+        return digest, scene_id
+
+    return tuple(sorted(materialized, key=schedule_key))
+
+
 def _formal_schedule_index(
     worker_index: int,
     episode_cursor: int,
@@ -989,16 +1021,20 @@ class FormalWorkerBuilder:
         )
         if scenario_identity.scenario_schedule_id != self.scenario_schedule_id:
             raise ValueError("formal worker scenario schedule identity differs")
-        entries = [
+        eligible_entries = [
             entry
             for entry in cache.manifest["scenes"]
             if entry["split"] == self.split
             and entry["start_qualification"]["common_eligible"]
         ]
-        if not entries:
+        if not eligible_entries:
             raise ValueError(
                 "formal cache has no common start-eligible scenes for the requested split"
             )
+        entries = _formal_scheduled_entries(
+            eligible_entries,
+            scenario_schedule_id=self.scenario_schedule_id,
+        )
         base_index = _formal_schedule_index(
             worker_index,
             scenario_identity.episode_cursor,
@@ -1006,8 +1042,7 @@ class FormalWorkerBuilder:
             platform_worker_index=scenario_identity.platform_worker_index,
             platform_worker_count=scenario_identity.platform_worker_count,
         )
-        episode_seed = _formal_episode_seed("episode", scenario_identity)
-        entry = entries[(base_index + int(episode_seed[:16], 16)) % len(entries)]
+        entry = entries[base_index]
         return _load_multires_scene(cache, str(entry["scene_id"]))
 
     @staticmethod
@@ -1059,7 +1094,7 @@ class FormalEnvironmentBuilder:
         if self.split not in {"train", "validation", "test", "holdout"}:
             raise ValueError("formal environment split is invalid")
         schedule_id = (
-            f"{cache.manifest['cache_manifest_sha256']}/{self.split}/v5"
+            f"{cache.manifest['cache_manifest_sha256']}/{self.split}/v6"
         )
         worker_builder = FormalWorkerBuilder(
             str(self.cache_manifest_path),

@@ -145,6 +145,7 @@ def test_candidate_gate_rejects_event_derived_execution_violations() -> None:
             _ScenarioEvidence(
                 scenario_seed=12000,
                 final_coverage=1.0,
+                success_first_crossing=True,
                 safety_violation_count=1,
                 invalid_action_count=1,
                 output_finite=True,

@@ -7,7 +7,11 @@ import sys
 import pytest
 import torch
 
-from lunar_planner_training_bridge import TrainingPlanRequest
+from lunar_planner_training_bridge import (
+    ExecutionDirective,
+    PlanningOutcome,
+    TrainingPlanRequest,
+)
 
 
 PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -22,6 +26,10 @@ from lunar_policy_training.environment.parallel_pool import (  # noqa: E402
     ParallelEnvPool,
     ParallelPoolError,
     joint_worker_allocation,
+)
+from lunar_policy_training.environment.macro_step import (  # noqa: E402
+    ExecutionEvents,
+    PlannerTransition,
 )
 from lunar_policy_training.environment.v3_environment import (  # noqa: E402
     DecisionBoundaryResult,
@@ -146,6 +154,47 @@ class _PreparationOnlyEnvironment:
         return DecisionBoundaryResult(execution_state="DECISION_READY")
 
 
+class _TerminalSuccessEnvironment:
+    def __init__(self, observation: PolicyBatch) -> None:
+        self.current_observation = observation
+
+    def advance_prepared_action(self, action, *, expected_identity):
+        return DecisionBoundaryResult(
+            execution_state="DECISION_BOUNDARY",
+            transition=PlannerTransition(
+                next_observation=self.current_observation,
+                mission_observed_delta=0.01,
+                priority_observed_delta=0.0,
+                normalized_plan_or_execution_cost=0.0,
+                normalized_macro_step_time=0.0,
+                executed_without_new_coverage=False,
+                success_first_crossing=True,
+                episode_ended_without_success=False,
+                hard_safety_violation=False,
+                cancellation_expected=False,
+                cpp_exception=None,
+                planning_outcome=PlanningOutcome.NEW_REFERENCE_AVAILABLE,
+                execution_directive=ExecutionDirective.ACTIVATE_NEW_REFERENCE,
+                reason_code="SUCCESS_FIRST_CROSSING",
+                terminated=True,
+                execution_events=ExecutionEvents(
+                    selected_action_observed_safe=True
+                ),
+            ),
+            policy_decisions_consumed=1,
+        )
+
+
+def _terminal_success_worker_factory(
+    worker_index: int, platform_type: str
+) -> ParallelEnvironmentWorker:
+    observation = _observation(worker_index, platform_type)
+    return ParallelEnvironmentWorker(
+        environment=_TerminalSuccessEnvironment(observation),
+        initial_observation=observation,
+    )
+
+
 class _NoActionThenReadyFactory:
     def __init__(self, *, mixed_workers: bool = False) -> None:
         self.mixed_workers = mixed_workers
@@ -227,6 +276,25 @@ def test_parallel_pool_uses_real_worker_processes_shared_double_buffers() -> Non
             [0.0, 1.0, 0.0],
             [0.0, 0.0, 1.0],
         ]
+
+
+def test_parallel_pool_preserves_authoritative_success_first_crossing() -> None:
+    """Would fail if evaluation had to infer success from rounded coverage."""
+    with ParallelEnvPool(
+        allocation={"WHEELED": 1},
+        observation_template=_observation(0, "WHEELED"),
+        environment_factory=_terminal_success_worker_factory,
+        reward_fn=_zero_reward,
+        worker_timeout_seconds=5.0,
+        auto_reset=False,
+    ) as pool:
+        pool.reset()
+        stepped = pool.step(_actions(1), policy_version=0)
+
+    assert stepped.dones.tolist() == [True]
+    assert stepped.success_first_crossings.tolist() == [True]
+
+
 def test_mixed_policy_versions_fail_closed_and_discard_rollout() -> None:
     """Would fail if samples from different policy versions reached one update."""
     pool = ParallelEnvPool(

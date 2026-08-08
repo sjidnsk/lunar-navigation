@@ -60,6 +60,7 @@ class ParallelRolloutStep:
     dones: torch.Tensor
     policy_versions: torch.Tensor
     policy_decisions_consumed: torch.Tensor
+    success_first_crossings: torch.Tensor
     buffer_index: int
     planning_outcomes: tuple[PlanningOutcome, ...] = ()
     reason_codes: tuple[str, ...] = ()
@@ -387,6 +388,7 @@ class ParallelEnvPool:
                 execution_events,
                 identities,
                 policy_decisions_consumed,
+                success_first_crossings,
             ) = self._await_step(
                 target_buffer, policy_version
             )
@@ -402,6 +404,7 @@ class ParallelEnvPool:
                 reason_codes=reason_codes,
                 execution_events=execution_events,
                 policy_decisions_consumed=policy_decisions_consumed,
+                success_first_crossings=success_first_crossings,
             )
         except ParallelPoolError as error:
             if not self.training_stopped:
@@ -591,6 +594,7 @@ class ParallelEnvPool:
         tuple[ExecutionEvents, ...],
         tuple[ObservationIdentity, ...],
         torch.Tensor,
+        torch.Tensor,
     ]:
         completed: set[int] = set()
         metadata: dict[
@@ -601,6 +605,7 @@ class ParallelEnvPool:
                 ExecutionEvents,
                 ObservationIdentity,
                 int,
+                bool,
                 int,
             ],
         ] = {}
@@ -615,7 +620,7 @@ class ParallelEnvPool:
             if (
                 kind != "step"
                 or worker_index in completed
-                or len(values) != 8
+                or len(values) != 9
                 or values[:2] != [buffer_index, policy_version]
             ):
                 raise ParallelPoolError("worker step protocol failed")
@@ -625,6 +630,7 @@ class ParallelEnvPool:
                 execution_events,
                 identity,
                 policy_decisions_consumed,
+                success_first_crossing,
                 episode_cursor,
             ) = values[2:]
             if (
@@ -633,6 +639,7 @@ class ParallelEnvPool:
                 or not isinstance(execution_events, ExecutionEvents)
                 or not isinstance(identity, ObservationIdentity)
                 or policy_decisions_consumed not in (0, 1)
+                or type(success_first_crossing) is not bool
                 or type(episode_cursor) is not int
                 or episode_cursor < 0
             ):
@@ -649,11 +656,12 @@ class ParallelEnvPool:
                 execution_events,
                 identity,
                 policy_decisions_consumed,
+                success_first_crossing,
                 episode_cursor,
             )
             completed.add(worker_index)
         self._episode_cursors = tuple(
-            metadata[index][5] for index in range(self.worker_count)
+            metadata[index][6] for index in range(self.worker_count)
         )
         return (
             tuple(metadata[index][0] for index in range(self.worker_count)),
@@ -663,6 +671,10 @@ class ParallelEnvPool:
             torch.tensor(
                 [metadata[index][4] for index in range(self.worker_count)],
                 dtype=torch.int64,
+            ),
+            torch.tensor(
+                [metadata[index][5] for index in range(self.worker_count)],
+                dtype=torch.bool,
             ),
         )
 
@@ -795,6 +807,7 @@ class ParallelEnvPool:
         reason_codes: tuple[str, ...] = (),
         execution_events: tuple[ExecutionEvents, ...] = (),
         policy_decisions_consumed: torch.Tensor | None = None,
+        success_first_crossings: torch.Tensor | None = None,
     ) -> ParallelRolloutStep:
         try:
             for name, shared in self.shared_observation_buffers[buffer_index].items():
@@ -823,6 +836,11 @@ class ParallelEnvPool:
                     torch.zeros((self.worker_count,), dtype=torch.int64)
                     if policy_decisions_consumed is None
                     else policy_decisions_consumed
+                ),
+                success_first_crossings=(
+                    torch.zeros((self.worker_count,), dtype=torch.bool)
+                    if success_first_crossings is None
+                    else success_first_crossings
                 ),
                 planning_outcomes=planning_outcomes,
                 reason_codes=reason_codes,
@@ -1176,6 +1194,7 @@ def _worker_main(
                     transition.execution_events,
                     next_observation.observation_identities[0],
                     policy_decisions_consumed,
+                    transition.success_first_crossing,
                     episode_cursor,
                 )
             )

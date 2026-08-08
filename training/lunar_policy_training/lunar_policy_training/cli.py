@@ -78,11 +78,17 @@ from .environment.parallel_pool import (
 from .environment.formal_builder import (
     FormalEnvironmentAssembly,
     FormalEnvironmentBuilder,
+    _formal_scheduled_entries,
 )
-from .environment.macro_step import PlannerTransition
+from .environment.formal_episode_state import FormalWorkerState
+from .environment.macro_step import PlannerTransition, PolicyAction
 from .environment.v3_environment import PreparedPlanRequest, create_v3_environment
 from .training_semantics import training_semantics_sha256
-from .formal_preflight import FormalPreflightError, run_formal_preflight
+from .formal_preflight import (
+    FormalPreflightError,
+    _request_signature,
+    run_formal_preflight,
+)
 from .sensor_performance import (
     SensorPerformanceError,
     current_host_identity,
@@ -113,6 +119,7 @@ from .policy.action_semantics import apply_goal_theta
 from .policy.observation import ObservationIdentity, PolicyBatch
 from .proxy_scenario import proxy_environment_factory, proxy_observation
 from .ppo.collector import CollectorConfig, EnvStep, collect_rollout as collect_ppo_rollout
+from .ppo.checkpoint import _semantic_sha256
 from .ppo.rollout import RolloutBatch
 from .ppo.trainer import PPOTrainer
 from .reward import compute_transition_reward, reward_weights_sha256
@@ -127,6 +134,116 @@ class ArtifactRootError(ValueError):
 
 class PreflightError(ValueError):
     """A formal command failed before artifact or accelerator access."""
+
+
+def _build_formal_resume_equivalence_evidence(
+    *,
+    checkpoint_relative_path: str,
+    checkpoint_sha256: str,
+    checkpoint_roundtrip: bool,
+    uninterrupted: object,
+    resumed: object,
+    uninterrupted_observation_sha256: str,
+    resumed_observation_sha256: str,
+    uninterrupted_candidate_sha256: str,
+    resumed_candidate_sha256: str,
+    uninterrupted_request_sha256: str,
+    resumed_request_sha256: str,
+) -> dict[str, object]:
+    """Fail closed unless update two is exact across every resumed boundary."""
+    if (
+        not isinstance(checkpoint_relative_path, str)
+        or not checkpoint_relative_path
+        or Path(checkpoint_relative_path).is_absolute()
+        or ".." in Path(checkpoint_relative_path).parts
+        or checkpoint_roundtrip is not True
+        or not isinstance(checkpoint_sha256, str)
+        or len(checkpoint_sha256) != 64
+    ):
+        raise PreflightError("formal resume checkpoint roundtrip is invalid")
+    if any(
+        getattr(value, "schema_version", None) != "lunar-ppo-checkpoint/v6"
+        for value in (uninterrupted, resumed)
+    ):
+        raise PreflightError("formal resume checkpoint schema differs")
+
+    comparisons = {
+        "model": (
+            _semantic_sha256(getattr(uninterrupted, "model_state")),
+            _semantic_sha256(getattr(resumed, "model_state")),
+        ),
+        "optimizer": (
+            _semantic_sha256(getattr(uninterrupted, "optimizer_state")),
+            _semantic_sha256(getattr(resumed, "optimizer_state")),
+        ),
+        "rng": (
+            _semantic_sha256(getattr(uninterrupted, "rng_state")),
+            _semantic_sha256(getattr(resumed, "rng_state")),
+        ),
+        "environment_state": (
+            _semantic_sha256(getattr(uninterrupted, "environment_state")),
+            _semantic_sha256(getattr(resumed, "environment_state")),
+        ),
+        "observation": (
+            uninterrupted_observation_sha256,
+            resumed_observation_sha256,
+        ),
+        "candidate": (
+            uninterrupted_candidate_sha256,
+            resumed_candidate_sha256,
+        ),
+        "first_request": (
+            uninterrupted_request_sha256,
+            resumed_request_sha256,
+        ),
+    }
+    for name, (left, right) in comparisons.items():
+        if (
+            not isinstance(left, str)
+            or len(left) != 64
+            or not isinstance(right, str)
+            or len(right) != 64
+            or left != right
+        ):
+            raise PreflightError(f"formal resume {name} differs at update two")
+
+    body: dict[str, object] = {
+        "checkpoint_schema": "lunar-ppo-checkpoint/v6",
+        "checkpoint_relative_path": checkpoint_relative_path,
+        "checkpoint_sha256": checkpoint_sha256,
+        "checkpoint_roundtrip": True,
+        "model_exact": True,
+        "optimizer_exact": True,
+        "rng_exact": True,
+        "environment_state_exact": True,
+        "observation_exact": True,
+        "candidate_exact": True,
+        "first_request_exact": True,
+        "uninterrupted_update": 2,
+        "resumed_update": 2,
+    }
+    body["evidence_sha256"] = hashlib.sha256(
+        json.dumps(
+            {**body, "comparison_sha256s": comparisons},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return body
+
+
+def _collector_config_for_run(
+    config: ResolvedTrainingConfig,
+    *,
+    horizon: int | None = None,
+) -> CollectorConfig:
+    """Sample formal PPO actions; keep bounded development smoke repeatable."""
+    if not isinstance(config, ResolvedTrainingConfig):
+        raise ValueError("rollout collection requires resolved training config")
+    return CollectorConfig(
+        horizon=config.ppo.rollout_horizon if horizon is None else horizon,
+        deterministic=config.run_kind != "formal",
+    )
 
 
 @dataclass(slots=True)
@@ -1218,6 +1335,17 @@ def main(argv: list[str] | None = None) -> int:
                 "formal-preflight artifact root cannot contain checkpoints"
             )
         try:
+            resume_equivalence = _formal_resume_equivalence_check(
+                config=requested_config,
+                assembly=train_assembly,
+                run_identity=_formal_run_identity(cache.identity),
+                source_commit=_source_commit(repository_root),
+                artifact_root=preflight_root,
+                selected_workers=max(
+                    requested_config.parallel.worker_candidates
+                ),
+                micro_batch_size=2,
+            )
             report, report_path = run_formal_preflight(
                 cache=cache,
                 assemblies=assemblies,
@@ -1231,6 +1359,7 @@ def main(argv: list[str] | None = None) -> int:
                 selected_rollout_horizon=(
                     requested_config.ppo.rollout_horizon
                 ),
+                resume_equivalence=resume_equivalence,
             )
         except FormalPreflightError as error:
             raise PreflightError(f"formal preflight failed: {error}") from error
@@ -1371,13 +1500,16 @@ def _formal_evaluation_batches(
         raise PreflightError("formal evaluation scenario IDs are not unique")
     batches: list[FormalEvaluationBatch] = []
     for split in expected_splits:
-        entries = [
-            entry
-            for entry in cache.manifest["scenes"]
-            if entry.get("split") == split
-            and entry.get("start_qualification", {}).get("common_eligible")
-            is True
-        ]
+        entries = _formal_scheduled_entries(
+            [
+                entry
+                for entry in cache.manifest["scenes"]
+                if entry.get("split") == split
+                and entry.get("start_qualification", {}).get("common_eligible")
+                is True
+            ],
+            scenario_schedule_id=assemblies[split].scenario_schedule_id,
+        )
         seeds: list[int] = []
         for entry in entries:
             scenario = by_id.get(str(entry.get("scene_id")))
@@ -2297,10 +2429,7 @@ def _run_updates(
         return collect_ppo_rollout(
             environment,
             trainer.policy,
-            CollectorConfig(
-                horizon=config.ppo.rollout_horizon,
-                deterministic=True,
-            ),
+            _collector_config_for_run(config),
             device="cuda",
         ).rollout
 
@@ -2441,6 +2570,275 @@ def _policy_batch_digest(batch: PolicyBatch) -> str:
         digest.update(values.tobytes(order="C"))
     digest.update(repr(batch.observation_identities).encode("utf-8"))
     return digest.hexdigest()
+
+
+def _candidate_batch_digest(batch: PolicyBatch) -> str:
+    return _semantic_sha256(
+        {
+            "frontier_features": batch.frontier_features,
+            "candidate_mask": batch.candidate_mask,
+        }
+    )
+
+
+def _first_formal_request_digest(
+    factory: FrozenCapabilityEnvironmentFactory,
+    states: tuple[Mapping[str, object], ...],
+) -> str:
+    """Rebuild one active worker per platform and hash its next real request."""
+    signatures: dict[str, str] = {}
+    for raw in states:
+        state = FormalWorkerState.from_dict(raw)
+        if state.platform_type in signatures:
+            continue
+        worker = factory.restore_for_episode(
+            worker_index=state.worker_index,
+            platform_type=state.platform_type,
+            episode_cursor=state.episode_cursor,
+            platform_worker_index=state.platform_worker_index,
+            platform_worker_count=state.platform_worker_count,
+            state=raw,
+        )
+        observation = worker.environment.current_observation
+        candidates = observation.candidate_mask[0].nonzero().flatten()
+        if candidates.numel() == 0:
+            raise PreflightError(
+                "formal resume request proof reached a terminal observation"
+            )
+        action = PolicyAction(int(candidates[0].item()), 0.0)
+        prepared = worker.episode.build_request(
+            action,
+            observation.observation_identities[0],
+        )
+        signatures[state.platform_type] = _request_signature(prepared.request)
+    if set(signatures) != set(PLATFORMS):
+        raise PreflightError("formal resume request proof missed a platform")
+    return hashlib.sha256(
+        json.dumps(signatures, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _formal_resume_equivalence_check(
+    *,
+    config: ResolvedTrainingConfig,
+    assembly: FormalEnvironmentAssembly,
+    run_identity: RunIdentity,
+    source_commit: str,
+    artifact_root: Path,
+    selected_workers: int,
+    micro_batch_size: int,
+) -> dict[str, object]:
+    """Run update one, persist V6, then compare update two across resume."""
+    _validated_cuda_device()
+    if selected_workers not in (18, 24):
+        raise PreflightError("formal resume proof requires 18 or 24 workers")
+    allocation = {
+        platform: selected_workers // len(PLATFORMS) for platform in PLATFORMS
+    }
+    resume_root = artifact_root / "resume-equivalence"
+    resume_root.mkdir(parents=True, exist_ok=False)
+    checkpoint_path = resume_root / "update-1.pt"
+    checkpoint_relative_path = checkpoint_path.relative_to(artifact_root).as_posix()
+
+    def runtime(
+        *,
+        policy_version: int,
+        initial_states: tuple[Mapping[str, object], ...] | None = None,
+    ):
+        policy = CrossAttentionPolicy()
+        trainer = ResumablePPOTrainer(
+            policy,
+            reward_fn=compute_transition_reward,
+            ppo_config=config.ppo,
+            device="cuda",
+        )
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            trainer.optimizer, lr_lambda=lambda _step: 1.0
+        )
+        pool = ParallelEnvPool(
+            allocation=allocation,
+            observation_template=assembly.observation_template,
+            environment_factory=assembly.factory,
+            reward_fn=compute_transition_reward,
+            worker_timeout_seconds=120.0,
+            initial_episode_states=initial_states,
+        )
+        environment = _ParallelPoolVectorEnv(pool, policy_version=policy_version)
+        environment.use_normalization_state(trainer.normalization)
+        environment.reset()
+        return trainer, scheduler, pool, environment
+
+    def update_once(trainer, scheduler, environment, *, policy_version: int) -> None:
+        environment.set_policy_version(policy_version)
+        collected = collect_ppo_rollout(
+            environment,
+            trainer.policy,
+            _collector_config_for_run(config, horizon=1),
+            device="cuda",
+        )
+        trainer.update(collected.rollout, micro_batch_size=micro_batch_size)
+        scheduler.step()
+        environment.advance_policy_version(policy_version + 1)
+        torch.cuda.synchronize()
+
+    def environment_state(
+        pool: ParallelEnvPool, *, policy_version: int
+    ) -> tuple[dict[str, object], tuple[Mapping[str, object], ...]]:
+        states = pool.snapshot_episode_states(policy_version=policy_version)
+        return (
+            {
+                "schema_version": FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
+                "scenario_schedule_id": assembly.scenario_schedule_id,
+                "worker_episode_states": list(states),
+            },
+            states,
+        )
+
+    def checkpoint_for(
+        trainer,
+        scheduler,
+        *,
+        global_step: int,
+        state: Mapping[str, object],
+    ):
+        return build_training_checkpoint(
+            model=trainer.policy,
+            optimizer=trainer.optimizer,
+            scheduler=scheduler,
+            global_step=global_step,
+            curriculum_phase="preflight_resume_equivalence",
+            normalization=trainer.normalization,
+            frozen_config=config.as_frozen_dict(),
+            run_identity=run_identity,
+            source_commit=source_commit,
+            consumed_gpu_seconds=0.0,
+            budget_extension_blocks=0,
+            total_gpu_budget_seconds=float(config.total_gpu_budget_seconds),
+            worker_allocation=allocation,
+            micro_batch_size=micro_batch_size,
+            latest_checkpoint_gpu_seconds=0.0,
+            candidate_checkpoint_gpu_seconds=0.0,
+            environment_state=state,
+        )
+
+    _seed_everything(FORMAL_SEED)
+    trainer = scheduler = pool = environment = None
+    resumed_pool = None
+    try:
+        trainer, scheduler, pool, environment = runtime(policy_version=0)
+        update_once(trainer, scheduler, environment, policy_version=0)
+        update_one_state, _ = environment_state(
+            pool, policy_version=1
+        )
+        update_one = checkpoint_for(
+            trainer, scheduler, global_step=1, state=update_one_state
+        )
+        save_checkpoint_atomic(checkpoint_path, update_one, overwrite=False)
+        loaded = load_checkpoint_for_resume(
+            checkpoint_path,
+            expected_contract_version=OBSERVATION_CONTRACT_VERSION,
+            expected_config_hash=config_sha256(config.as_frozen_dict()),
+            expected_source_commit=source_commit,
+            expected_run_identity=run_identity,
+            expected_worker_allocation=allocation,
+            expected_micro_batch_size=micro_batch_size,
+            expected_budget_extension_blocks=0,
+            expected_total_gpu_budget_seconds=float(
+                config.total_gpu_budget_seconds
+            ),
+        )
+        checkpoint_roundtrip = (
+            loaded.payload_sha256 == update_one.payload_sha256
+            and loaded.environment_state == update_one.environment_state
+        )
+
+        update_once(trainer, scheduler, environment, policy_version=1)
+        uninterrupted_state, uninterrupted_states = environment_state(
+            pool, policy_version=2
+        )
+        uninterrupted_observation = environment.current_observations
+        uninterrupted_request = _first_formal_request_digest(
+            assembly.factory, uninterrupted_states
+        )
+        uninterrupted = checkpoint_for(
+            trainer,
+            scheduler,
+            global_step=2,
+            state=uninterrupted_state,
+        )
+        uninterrupted_observation_sha256 = _policy_batch_digest(
+            uninterrupted_observation
+        )
+        uninterrupted_candidate_sha256 = _candidate_batch_digest(
+            uninterrupted_observation
+        )
+        pool.close()
+        pool = None
+
+        _seed_everything(FORMAL_SEED + 999)
+        resumed_trainer, resumed_scheduler, resumed_pool, resumed_environment = (
+            runtime(
+                policy_version=1,
+                initial_states=tuple(
+                    loaded.environment_state["worker_episode_states"]
+                ),
+            )
+        )
+        restore_training_state(
+            loaded,
+            resumed_trainer.policy,
+            resumed_trainer.optimizer,
+            resumed_scheduler,
+            normalization_state=resumed_trainer.normalization,
+        )
+        update_once(
+            resumed_trainer,
+            resumed_scheduler,
+            resumed_environment,
+            policy_version=1,
+        )
+        resumed_state, resumed_states = environment_state(
+            resumed_pool, policy_version=2
+        )
+        resumed_observation = resumed_environment.current_observations
+        resumed_request = _first_formal_request_digest(
+            assembly.factory, resumed_states
+        )
+        resumed = checkpoint_for(
+            resumed_trainer,
+            resumed_scheduler,
+            global_step=2,
+            state=resumed_state,
+        )
+        evidence = _build_formal_resume_equivalence_evidence(
+            checkpoint_relative_path=checkpoint_relative_path,
+            checkpoint_sha256=loaded.payload_sha256,
+            checkpoint_roundtrip=checkpoint_roundtrip,
+            uninterrupted=uninterrupted,
+            resumed=resumed,
+            uninterrupted_observation_sha256=(
+                uninterrupted_observation_sha256
+            ),
+            resumed_observation_sha256=_policy_batch_digest(
+                resumed_observation
+            ),
+            uninterrupted_candidate_sha256=(
+                uninterrupted_candidate_sha256
+            ),
+            resumed_candidate_sha256=_candidate_batch_digest(
+                resumed_observation
+            ),
+            uninterrupted_request_sha256=uninterrupted_request,
+            resumed_request_sha256=resumed_request,
+        )
+    finally:
+        if pool is not None:
+            pool.close()
+        if resumed_pool is not None:
+            resumed_pool.close()
+    return evidence
 
 
 class _CudaPlannerCalibrationWorkload:

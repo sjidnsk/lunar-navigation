@@ -649,7 +649,7 @@ def test_formal_evaluation_batches_ignore_preflight_train_assembly(
                 {
                     "scene_id": "d" * 64,
                     "split": "validation",
-                    "start_qualification": {"common_eligible": False},
+                    "start_qualification": {"common_eligible": True},
                 },
                 {
                     "scene_id": "a" * 64,
@@ -667,7 +667,8 @@ def test_formal_evaluation_batches_ignore_preflight_train_assembly(
     template = proxy_observation(0, "WHEELED", step=0)
     assemblies = {
         split: SimpleNamespace(
-            factory=SimpleNamespace(scenario_schedule_id=f"cache/{split}/v3"),
+            factory=SimpleNamespace(scenario_schedule_id=f"cache/{split}/v6"),
+            scenario_schedule_id=f"cache/{split}/v6",
             observation_template=template,
         )
         for split in ("train", "validation", "test", "holdout")
@@ -680,7 +681,7 @@ def test_formal_evaluation_batches_ignore_preflight_train_assembly(
         "test",
         "holdout",
     )
-    assert batches[0].scenario_seeds == (409000,)
+    assert batches[0].scenario_seeds == (409000, 409001)
     assert batches[1].scenario_seeds == (410000,)
     assert batches[2].scenario_seeds == (int("fedcba9876543210", 16),)
 

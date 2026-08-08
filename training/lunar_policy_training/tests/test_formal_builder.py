@@ -8,9 +8,12 @@ import numpy as np
 import pytest
 import torch
 
+from lunar_policy_training.capability_freeze import ScenarioIdentity
+from lunar_policy_training.environment import formal_builder as formal_builder_module
 from lunar_policy_training.environment.formal_builder import (
     FormalEpisode,
     FormalEnvironmentBuilder,
+    FormalWorkerBuilder,
     _formal_schedule_index,
 )
 from lunar_policy_training.environment.formal_episode_state import (
@@ -541,6 +544,95 @@ def test_formal_schedule_uses_platform_local_scene_lanes_at_any_allocation() -> 
         platform_worker_index=2,
         platform_worker_count=3,
     ) == 8
+
+
+def test_formal_scene_schedule_is_one_seeded_permutation_without_replacement() -> None:
+    """Would fail if a per-episode hash offset duplicated or skipped scenes."""
+    entries = tuple(
+        {
+            "scene_id": character * 64,
+            "split": "validation",
+            "start_qualification": {"common_eligible": True},
+        }
+        for character in "abcde"
+    )
+
+    scheduled = formal_builder_module._formal_scheduled_entries(
+        tuple(reversed(entries)),
+        scenario_schedule_id="formal-cache/validation/v6",
+    )
+    repeated = formal_builder_module._formal_scheduled_entries(
+        entries,
+        scenario_schedule_id="formal-cache/validation/v6",
+    )
+
+    assert tuple(entry["scene_id"] for entry in scheduled) == (
+        "b" * 64,
+        "d" * 64,
+        "e" * 64,
+        "c" * 64,
+        "a" * 64,
+    )
+    assert tuple(entry["scene_id"] for entry in repeated) == tuple(
+        entry["scene_id"] for entry in scheduled
+    )
+    assert {entry["scene_id"] for entry in scheduled} == {
+        entry["scene_id"] for entry in entries
+    }
+
+
+def test_formal_worker_traverses_the_seeded_scene_permutation_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Would fail if the worker added a cursor-varying offset to the permutation."""
+    schedule_id = "formal-cache/validation/v6"
+    entries = tuple(
+        {
+            "scene_id": character * 64,
+            "split": "validation",
+            "start_qualification": {"common_eligible": True},
+        }
+        for character in reversed("abcde")
+    )
+    cache = type("Cache", (), {"manifest": {"scenes": entries}})()
+    monkeypatch.setattr(
+        formal_builder_module,
+        "load_formal_cache",
+        lambda *_args, **_kwargs: cache,
+    )
+    monkeypatch.setattr(
+        formal_builder_module,
+        "_load_multires_scene",
+        lambda _cache, scene_id: scene_id,
+    )
+    builder = FormalWorkerBuilder(
+        cache_manifest_path="/unused/cache-manifest.json",
+        split="validation",
+        allow_preflight=True,
+        scenario_schedule_id=schedule_id,
+    )
+
+    loaded = []
+    for cursor in range(5):
+        identity = ScenarioIdentity(
+            platform_type="WHEELED",
+            scenario_schedule_id=schedule_id,
+            worker_index=0,
+            episode_cursor=cursor,
+            platform_worker_index=0,
+            platform_worker_count=1,
+            capability_version="test/v1",
+            capability_sha256="f" * 64,
+        )
+        loaded.append(builder._load_scheduled_scene(0, identity))
+
+    assert tuple(loaded) == (
+        "b" * 64,
+        "d" * 64,
+        "e" * 64,
+        "c" * 64,
+        "a" * 64,
+    )
 
 
 def test_policy_input_and_request_are_observed_only_identity_bound_and_multires(

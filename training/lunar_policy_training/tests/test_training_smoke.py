@@ -8,6 +8,7 @@ import pathlib
 import subprocess
 import sys
 from dataclasses import dataclass
+from types import SimpleNamespace
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import lunar_planner_training_bridge as bridge_api
@@ -1367,3 +1368,50 @@ def test_cuda_interrupt_resume_preserves_step_budget_and_allocation(
     assert checkpoint.latest_checkpoint_gpu_seconds == (
         checkpoint.consumed_gpu_seconds
     )
+
+
+def test_formal_resume_equivalence_rejects_optimizer_drift() -> None:
+    """Would fail if preflight called update-two exact without comparing optimizer."""
+    common = {
+        "schema_version": "lunar-ppo-checkpoint/v6",
+        "payload_sha256": "a" * 64,
+        "model_state": {"weight": torch.tensor([1.0])},
+        "rng_state": {"python": (1, 2, 3)},
+        "environment_state": {"worker_episode_states": [{"scene_id": "s"}]},
+    }
+    uninterrupted = SimpleNamespace(
+        **common,
+        optimizer_state={"state": {0: {"step": torch.tensor(2.0)}}},
+    )
+    resumed = SimpleNamespace(
+        **common,
+        optimizer_state={"state": {0: {"step": torch.tensor(1.0)}}},
+    )
+
+    with pytest.raises(PreflightError, match="optimizer"):
+        training_cli._build_formal_resume_equivalence_evidence(
+            checkpoint_relative_path="resume-equivalence/update-1.pt",
+            checkpoint_sha256="a" * 64,
+            checkpoint_roundtrip=True,
+            uninterrupted=uninterrupted,
+            resumed=resumed,
+            uninterrupted_observation_sha256="b" * 64,
+            resumed_observation_sha256="b" * 64,
+            uninterrupted_candidate_sha256="c" * 64,
+            resumed_candidate_sha256="c" * 64,
+            uninterrupted_request_sha256="d" * 64,
+            resumed_request_sha256="d" * 64,
+        )
+
+
+def test_formal_rollout_samples_policy_while_deployment_style_smoke_is_deterministic() -> None:
+    """Would fail if formal PPO used argmax actions instead of policy samples."""
+    formal = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+    smoke = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
+    )
+
+    assert training_cli._collector_config_for_run(formal).deterministic is False
+    assert training_cli._collector_config_for_run(smoke).deterministic is True

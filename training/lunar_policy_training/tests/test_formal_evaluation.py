@@ -64,6 +64,7 @@ def test_formal_evaluation_covers_three_non_train_splits_without_proxy(
                 report_module._ScenarioEvidence(
                     scenario_seed=scenario_seed,
                     final_coverage=0.5,
+                    success_first_crossing=False,
                     safety_violation_count=0,
                     invalid_action_count=0,
                     output_finite=True,
@@ -190,6 +191,9 @@ class _VariableLengthFormalPool:
             planning_outcomes=tuple(
                 PlanningOutcome.NEW_REFERENCE_AVAILABLE for _ in range(rows)
             ),
+            success_first_crossings=torch.full(
+                (rows,), done and coverage >= 0.95, dtype=torch.bool
+            ),
         )
 
     def reset_terminated_workers(self, worker_indices, *, policy_version: int):
@@ -223,6 +227,36 @@ def test_formal_evaluation_runs_past_three_to_the_natural_terminal(
     assert all(values[0].completion_step_count == 5 for values in result.values())
     assert all(values[0].executed_step_count == 5 for values in result.values())
     assert all(values[0].final_coverage == pytest.approx(0.95) for values in result.values())
+
+
+def test_formal_success_rate_uses_crossing_not_float32_coverage_tolerance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RoundedFailurePool(_VariableLengthFormalPool):
+        terminal_step = 1
+
+        def step(self, actions, *, policy_version: int):
+            result = super().step(actions, policy_version=policy_version)
+            result.observations.pose_features[:, 4] = 0.9499995
+            result.success_first_crossings.zero_()
+            return result
+
+    monkeypatch.setattr(report_module, "ParallelEnvPool", RoundedFailurePool)
+    result = report_module._evaluate_formal_chunk(
+        CrossAttentionPolicy(),
+        method="nearest_frontier",
+        device=torch.device("cpu"),
+        batch=_one_scenario_batch(),
+        scenario_offset=0,
+        scenario_seeds=(11,),
+        watchdog_max_steps=2,
+    )
+
+    metrics = report_module._aggregate_platform_metrics(
+        result["WHEELED"], theta_active=True
+    )
+    assert result["WHEELED"][0].final_coverage == pytest.approx(0.9499995)
+    assert metrics.success_coverage_rate == 0.0
 
 
 def test_formal_evaluation_watchdog_never_becomes_a_failed_scenario(

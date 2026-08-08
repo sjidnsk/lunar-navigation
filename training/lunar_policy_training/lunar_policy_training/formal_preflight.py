@@ -32,7 +32,7 @@ from .polar_data.formal_cache import FormalCache
 from .reward import compute_transition_reward
 
 
-FORMAL_PREFLIGHT_SCHEMA = "lunar-formal-training-preflight/v2"
+FORMAL_PREFLIGHT_SCHEMA = "lunar-formal-training-preflight/v3"
 REQUIRED_PREFLIGHT_CHECKS = (
     "cache_and_identity",
     "three_platform_worker_construction",
@@ -45,6 +45,30 @@ REQUIRED_PREFLIGHT_CHECKS = (
     "qualified_worker_configuration",
     "nonproxy_evaluation",
 )
+_RESUME_EQUIVALENCE_FIELDS = {
+    "checkpoint_schema",
+    "checkpoint_relative_path",
+    "checkpoint_sha256",
+    "checkpoint_roundtrip",
+    "model_exact",
+    "optimizer_exact",
+    "rng_exact",
+    "environment_state_exact",
+    "observation_exact",
+    "candidate_exact",
+    "first_request_exact",
+    "uninterrupted_update",
+    "resumed_update",
+    "evidence_sha256",
+}
+_RESUME_EQUIVALENCE_BOOLEAN_FIELDS = _RESUME_EQUIVALENCE_FIELDS - {
+    "checkpoint_schema",
+    "checkpoint_relative_path",
+    "checkpoint_sha256",
+    "uninterrupted_update",
+    "resumed_update",
+    "evidence_sha256",
+}
 
 
 class FormalPreflightError(RuntimeError):
@@ -94,6 +118,7 @@ def build_formal_preflight_report(
     selected_micro_batch: int,
     selected_rollout_horizon: int,
     evaluation_report_sha256: str,
+    resume_equivalence: Mapping[str, object],
 ) -> FormalPreflightReport:
     if not _is_sha(source_commit, length=40):
         raise FormalPreflightError("source commit is invalid")
@@ -140,6 +165,27 @@ def build_formal_preflight_report(
         raise FormalPreflightError("preflight rollout horizon is not calibrated")
     if not _is_sha(evaluation_report_sha256):
         raise FormalPreflightError("preflight evaluation digest is invalid")
+    if (
+        not isinstance(resume_equivalence, Mapping)
+        or set(resume_equivalence) != _RESUME_EQUIVALENCE_FIELDS
+        or resume_equivalence.get("checkpoint_schema")
+        != "lunar-ppo-checkpoint/v6"
+        or not isinstance(
+            resume_equivalence.get("checkpoint_relative_path"), str
+        )
+        or Path(str(resume_equivalence["checkpoint_relative_path"])).is_absolute()
+        or ".."
+        in Path(str(resume_equivalence["checkpoint_relative_path"])).parts
+        or any(
+            resume_equivalence.get(field) is not True
+            for field in _RESUME_EQUIVALENCE_BOOLEAN_FIELDS
+        )
+        or resume_equivalence.get("uninterrupted_update") != 2
+        or resume_equivalence.get("resumed_update") != 2
+        or not _is_sha(resume_equivalence.get("checkpoint_sha256"))
+        or not _is_sha(resume_equivalence.get("evidence_sha256"))
+    ):
+        raise FormalPreflightError("preflight resume equivalence is invalid")
     payload: dict[str, object] = {
         "schema_version": FORMAL_PREFLIGHT_SCHEMA,
         "source_commit": source_commit,
@@ -158,6 +204,7 @@ def build_formal_preflight_report(
         "selected_rollout_horizon": selected_rollout_horizon,
         "episode_decision_limit": None,
         "evaluation_report_sha256": evaluation_report_sha256,
+        "resume_equivalence": dict(sorted(resume_equivalence.items())),
         "proxy": False,
         "training_started": False,
     }
@@ -436,8 +483,9 @@ def run_formal_preflight(
     worker_candidates: tuple[int, ...] = (18, 24),
     selected_micro_batch: int = 2,
     selected_rollout_horizon: int = 32,
+    resume_equivalence: Mapping[str, object] | None = None,
 ) -> tuple[FormalPreflightReport, Path]:
-    """Execute current formal wiring without creating or advancing a checkpoint."""
+    """Execute formal wiring and record the supplied V6 resume proof."""
     expected_splits = {"train", "validation", "test", "holdout"}
     if set(assemblies) != expected_splits:
         raise FormalPreflightError("formal preflight assemblies are incomplete")
@@ -484,6 +532,8 @@ def run_formal_preflight(
         raise FormalPreflightError("formal preflight evaluation fell back to proxy")
 
     checks = {name: True for name in REQUIRED_PREFLIGHT_CHECKS}
+    if resume_equivalence is None:
+        raise FormalPreflightError("formal preflight resume equivalence is missing")
     report = build_formal_preflight_report(
         source_commit=source_commit,
         cache_manifest_sha256=str(cache.manifest["cache_manifest_sha256"]),
@@ -500,6 +550,7 @@ def run_formal_preflight(
         selected_micro_batch=selected_micro_batch,
         selected_rollout_horizon=selected_rollout_horizon,
         evaluation_report_sha256=report_sha256(evaluation),
+        resume_equivalence=resume_equivalence,
     )
     return report, write_formal_preflight_report(artifact_root, report)
 

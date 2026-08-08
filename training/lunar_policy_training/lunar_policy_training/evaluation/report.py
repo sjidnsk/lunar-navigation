@@ -318,6 +318,7 @@ class FormalEvaluationBatch:
 class _ScenarioEvidence:
     scenario_seed: int
     final_coverage: float
+    success_first_crossing: bool
     safety_violation_count: int
     invalid_action_count: int
     output_finite: bool
@@ -377,11 +378,7 @@ def _aggregate_platform_metrics(
     return PlatformMetrics(
         scenario_seeds=tuple(item.scenario_seed for item in scenarios),
         success_coverage_rate=(
-            sum(
-                item.final_coverage
-                >= FORMAL_SUCCESS_COVERAGE_RATIO - 1.0e-6
-                for item in scenarios
-            )
+            sum(item.success_first_crossing for item in scenarios)
             / scenario_count
         ),
         safety_violation_count=sum(
@@ -669,6 +666,7 @@ def _evaluate_formal_chunk(
         output_finite = np.ones(row_count, dtype=np.bool_)
         completion_steps = np.zeros(row_count, dtype=np.int64)
         final_coverage = np.zeros(row_count, dtype=np.float32)
+        success_first_crossings = np.zeros(row_count, dtype=np.bool_)
         theta_samples: list[list[float]] = [[] for _ in range(row_count)]
         step_index = 0
         deadline = time.monotonic() + float(watchdog_seconds)
@@ -792,6 +790,10 @@ def _evaluate_formal_chunk(
                     output_finite[index] and finite_rows[index]
                 )
                 final_coverage[index] = coverage[index]
+                success_first_crossings[index] = bool(
+                    success_first_crossings[index]
+                    or stepped.success_first_crossings[index].item()
+                )
                 if bool(stepped.dones[index].item()):
                     completion_steps[index] = step_index
             terminated_workers = tuple(
@@ -810,6 +812,7 @@ def _evaluate_formal_chunk(
             _ScenarioEvidence(
                 scenario_seed=scenario_seed,
                 final_coverage=float(final_coverage[index]),
+                success_first_crossing=bool(success_first_crossings[index]),
                 safety_violation_count=int(safety_violations[index]),
                 invalid_action_count=int(invalid_actions[index]),
                 output_finite=bool(output_finite[index]),
@@ -921,6 +924,7 @@ def _evaluate_method(
         output_finite = np.ones(row_count, dtype=np.bool_)
         completion_steps = np.zeros(row_count, dtype=np.int64)
         final_coverage = np.full(row_count, 0.05, dtype=np.float32)
+        success_first_crossings = np.zeros(row_count, dtype=np.bool_)
         theta_samples: list[list[float]] = [[] for _ in range(row_count)]
         for step_index in range(1, 4):
             prepared = pool.prepare_decision_boundaries(policy_version=0)
@@ -1027,6 +1031,10 @@ def _evaluate_method(
                     output_finite[index] and finite_rows[index]
                 )
                 final_coverage[index] = observed_coverage[index]
+                success_first_crossings[index] = bool(
+                    success_first_crossings[index]
+                    or stepped.success_first_crossings[index].item()
+                )
                 if bool(stepped.dones[index].item()):
                     completion_steps[index] = step_index
             terminated_workers = tuple(
@@ -1049,6 +1057,7 @@ def _evaluate_method(
                     scenario_index=scenario_index,
                 ).scenario_seed,
                 final_coverage=float(final_coverage[index]),
+                success_first_crossing=bool(success_first_crossings[index]),
                 safety_violation_count=int(safety_violations[index]),
                 invalid_action_count=int(invalid_actions[index]),
                 output_finite=bool(output_finite[index]),

@@ -111,6 +111,7 @@ def test_platform_metrics_aggregate_observed_execution_events() -> None:
             _ScenarioEvidence(
                 scenario_seed=10,
                 final_coverage=0.96,
+                success_first_crossing=True,
                 safety_violation_count=1,
                 invalid_action_count=0,
                 output_finite=True,
@@ -126,6 +127,7 @@ def test_platform_metrics_aggregate_observed_execution_events() -> None:
             _ScenarioEvidence(
                 scenario_seed=11,
                 final_coverage=0.50,
+                success_first_crossing=False,
                 safety_violation_count=4,
                 invalid_action_count=5,
                 output_finite=False,

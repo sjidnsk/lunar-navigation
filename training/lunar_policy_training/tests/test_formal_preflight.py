@@ -28,7 +28,26 @@ def _identity() -> RunIdentity:
     )
 
 
-def test_preflight_report_is_canonical_non_proxy_and_never_a_checkpoint(
+def _resume_equivalence() -> dict[str, object]:
+    return {
+        "checkpoint_schema": "lunar-ppo-checkpoint/v6",
+        "checkpoint_relative_path": "resume-equivalence/update-1.pt",
+        "checkpoint_sha256": "f" * 64,
+        "checkpoint_roundtrip": True,
+        "model_exact": True,
+        "optimizer_exact": True,
+        "rng_exact": True,
+        "environment_state_exact": True,
+        "observation_exact": True,
+        "candidate_exact": True,
+        "first_request_exact": True,
+        "uninterrupted_update": 2,
+        "resumed_update": 2,
+        "evidence_sha256": "e" * 64,
+    }
+
+
+def test_preflight_report_is_canonical_non_proxy_and_records_real_v6_resume(
     tmp_path: pathlib.Path,
 ) -> None:
     report = build_formal_preflight_report(
@@ -47,6 +66,7 @@ def test_preflight_report_is_canonical_non_proxy_and_never_a_checkpoint(
         selected_micro_batch=2,
         selected_rollout_horizon=32,
         evaluation_report_sha256="d" * 64,
+        resume_equivalence=_resume_equivalence(),
     )
 
     first = write_formal_preflight_report(tmp_path, report)
@@ -60,6 +80,7 @@ def test_preflight_report_is_canonical_non_proxy_and_never_a_checkpoint(
     assert payload["rollout_horizon_candidates"] == [16, 32, 64]
     assert payload["selected_rollout_horizon"] == 32
     assert payload["episode_decision_limit"] is None
+    assert payload["resume_equivalence"] == _resume_equivalence()
     assert len(payload["preflight_report_sha256"]) == 64
     assert not (tmp_path / "checkpoints").exists()
 
@@ -85,4 +106,30 @@ def test_preflight_report_rejects_an_unclosed_required_check() -> None:
             selected_micro_batch=1,
             selected_rollout_horizon=32,
             evaluation_report_sha256="d" * 64,
+            resume_equivalence=_resume_equivalence(),
+        )
+
+
+def test_preflight_report_rejects_claimed_resume_without_exact_update_two() -> None:
+    resume = _resume_equivalence()
+    resume["optimizer_exact"] = False
+
+    with pytest.raises(FormalPreflightError, match="resume equivalence"):
+        build_formal_preflight_report(
+            source_commit="a" * 40,
+            cache_manifest_sha256="b" * 64,
+            sensor_performance_sha256="c" * 64,
+            run_identity=_identity(),
+            scenario_schedule_ids={
+                split: f"cache/{split}/v6"
+                for split in ("train", "validation", "test", "holdout")
+            },
+            checks={name: True for name in REQUIRED_PREFLIGHT_CHECKS},
+            timings_seconds={},
+            qualified_worker_candidates=(18,),
+            selected_workers=18,
+            selected_micro_batch=1,
+            selected_rollout_horizon=32,
+            evaluation_report_sha256="d" * 64,
+            resume_equivalence=resume,
         )
