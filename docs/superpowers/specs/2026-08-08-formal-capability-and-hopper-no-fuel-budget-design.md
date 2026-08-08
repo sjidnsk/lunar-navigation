@@ -63,16 +63,19 @@ capability v2 中；训练不因缺少与这些数值重复的资源包而被阻
 探索策略输入中不增加燃料通道；候选特征、价值网络和 PPO loss 不读取燃料。奖励不奖励节油、
 不惩罚推进剂等价值，也不因“燃料耗尽”终止 episode。
 
-C++ 规划器不得要求新鲜 `HopperPropellantState` 才能规划。现有消息和 Action 中的燃料字段为避免
-一次性破坏外部兼容可暂时保留，但必须满足：
+C++ 规划器不得要求新鲜 `HopperPropellantState` 才能规划。该 Topic 从本项目的活动输入基线和
+`PlanMotion` 快照构建中移除；消息定义可以暂留为未使用的兼容 schema，但不会再创建订阅或参与
+输入时序校验。
 
-- 动态 `remaining_usable_fuel_mass_kg` 不参与可达性或结果判定；
-- `HOPPER_FUEL_INSUFFICIENT` 不再是本项目的规划失败原因；
-- `expected_remaining_usable_fuel_kg` 不得提交给下一请求，也不得驱动训练状态；
-- 单跳等效推进剂数值若继续输出，只能作为抛物线计算诊断，必须明确标记为非累计、非资源账本。
+`HopSegment` 不再输出 `ideal_fuel_required_kg`、`certified_fuel_required_kg` 或
+`expected_remaining_usable_fuel_kg`。对外只保留 `required_delta_v_mps` 和
+`available_delta_v_mps`，分别说明本跳带安全裕度的需求和固定正式单跳包络。内部可用火箭方程把
+正式参考质量、比冲和参考推进剂换算成 `available_delta_v_mps`，但不产生任何可提交的剩余量。
+`HOPPER_FUEL_INSUFFICIENT` 由 `HOPPER_SINGLE_HOP_ENVELOPE_EXCEEDED` 取代。
 
-仓库外 Isaac/ROS/RViz 测试桥停止执行 `0.200 -> 0.189 -> ...` 的递减链。为兼容尚未升级的旧消息
-消费者，可以继续发布固定参考快照，但不得在落地后更新它，也不得用它阻止下一次 Goal。
+仓库外 Isaac/ROS/RViz 测试桥停止执行 `0.200 -> 0.189 -> ...` 的递减链，不再发布推进剂 Topic、
+提交落地后的剩余量或因提交失败阻止下一次 Goal。第二跳只依赖新着陆位姿、新地图和同一个正式
+单跳能力。
 
 ## 5. 数据流
 
@@ -106,7 +109,8 @@ fail closed。这里拒绝的是能力文件篡改，而不是等待另一资料
 - 修改任一正式能力值但不更新版本/摘要时，正式入口在副作用前拒绝；
 - 正式性能工具无需外部 capability lock，并把当前 capability v2 摘要写入报告；
 - 两次及更多连续飞跃规划使用相同的固定单跳能力，均不携带上一跳的剩余燃料；
-- 缺失、过期或极低的 `HopperPropellantState` 不改变探索规划结果；
+- 缺失 `HopperPropellantState` 时飞跃规划正常工作，ROS 节点也不订阅或等待该 Topic；
+- `HopSegment` 对外只携带单跳 required/available delta-v，不携带消耗量或剩余量；
 - 飞跃式策略观测、奖励、checkpoint 和 episode 终止原因均不存在累计燃料状态；
 - 质量、比冲或参考标定值改变时，单跳可达性边界按新的正式能力版本变化；
 - 当前路径规划完整搜索、三平台正反例、30 m/360° 观测闭环和性能门全部回归通过；
