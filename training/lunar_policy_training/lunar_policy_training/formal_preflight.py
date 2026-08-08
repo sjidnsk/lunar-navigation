@@ -23,8 +23,7 @@ from .environment.macro_step import PolicyAction
 from .environment.parallel_pool import ParallelActions, ParallelEnvPool
 from .evaluation.report import (
     FormalEvaluationBatch,
-    evaluate_formal_policy,
-    report_sha256,
+    formal_evaluation_probe,
 )
 from .policy.cross_attention import CrossAttentionPolicy
 from .policy.observation import PolicyBatch
@@ -32,7 +31,7 @@ from .polar_data.formal_cache import FormalCache
 from .reward import compute_transition_reward
 
 
-FORMAL_PREFLIGHT_SCHEMA = "lunar-formal-training-preflight/v4"
+FORMAL_PREFLIGHT_SCHEMA = "lunar-formal-training-preflight/v5"
 REQUIRED_PREFLIGHT_CHECKS = (
     "cache_and_identity",
     "three_platform_worker_construction",
@@ -43,7 +42,7 @@ REQUIRED_PREFLIGHT_CHECKS = (
     "update_boundary_resume",
     "rollout_horizon_not_episode_limit",
     "qualified_worker_configuration",
-    "nonproxy_evaluation",
+    "nonproxy_evaluation_probe",
 )
 _RESUME_EQUIVALENCE_FIELDS = {
     "checkpoint_schema",
@@ -118,7 +117,7 @@ def build_formal_preflight_report(
     selected_workers: int,
     selected_micro_batch: int,
     selected_rollout_horizon: int,
-    evaluation_report_sha256: str,
+    evaluation_probe_sha256: str,
     resume_equivalence: Mapping[str, object],
 ) -> FormalPreflightReport:
     if not _is_sha(source_commit, length=40):
@@ -164,7 +163,7 @@ def build_formal_preflight_report(
         raise FormalPreflightError("preflight worker recommendation is invalid")
     if selected_rollout_horizon not in ROLLOUT_HORIZON_CANDIDATES:
         raise FormalPreflightError("preflight rollout horizon is not calibrated")
-    if not _is_sha(evaluation_report_sha256):
+    if not _is_sha(evaluation_probe_sha256):
         raise FormalPreflightError("preflight evaluation digest is invalid")
     if (
         not isinstance(resume_equivalence, Mapping)
@@ -204,7 +203,7 @@ def build_formal_preflight_report(
         "rollout_horizon_candidates": list(ROLLOUT_HORIZON_CANDIDATES),
         "selected_rollout_horizon": selected_rollout_horizon,
         "episode_decision_limit": None,
-        "evaluation_report_sha256": evaluation_report_sha256,
+        "evaluation_probe_sha256": evaluation_probe_sha256,
         "resume_equivalence": dict(sorted(resume_equivalence.items())),
         "proxy": False,
         "training_started": False,
@@ -525,17 +524,20 @@ def run_formal_preflight(
         for batch in evaluation_batches
     )
     started = time.monotonic()
-    evaluation = evaluate_formal_policy(
+    evaluation_probe = formal_evaluation_probe(
         CrossAttentionPolicy(),
         device="cpu",
-        checkpoint_sha256=hashlib.sha256(
-            b"formal-preflight-random-untrained-policy"
-        ).hexdigest(),
         run_identity=run_identity,
         batches=bounded_batches,
     )
-    timings["nonproxy_evaluation"] = time.monotonic() - started
-    if evaluation.proxy:
+    timings["nonproxy_evaluation_probe"] = time.monotonic() - started
+    if (
+        evaluation_probe.get("proxy") is not False
+        or evaluation_probe.get("schema_version")
+        != "lunar-formal-evaluation-probe/v1"
+        or evaluation_probe.get("row_count") != 27
+        or not _is_sha(evaluation_probe.get("probe_sha256"))
+    ):
         raise FormalPreflightError("formal preflight evaluation fell back to proxy")
 
     checks = {name: True for name in REQUIRED_PREFLIGHT_CHECKS}
@@ -556,7 +558,7 @@ def run_formal_preflight(
         selected_workers=selected_workers,
         selected_micro_batch=selected_micro_batch,
         selected_rollout_horizon=selected_rollout_horizon,
-        evaluation_report_sha256=report_sha256(evaluation),
+        evaluation_probe_sha256=str(evaluation_probe["probe_sha256"]),
         resume_equivalence=resume_equivalence,
     )
     return report, write_formal_preflight_report(artifact_root, report)

@@ -140,6 +140,11 @@ closed。checkpoint 只允许稳定 `DECISION_BOUNDARY`、`GROUND_HOLD` 或 `LAN
 update 2 的模型、优化器、RNG、scene、start、observation、candidate tensors 和首个 planner
 request digest 相等。
 
+preflight 的 evaluation 检查是有界的真实链路探针：validation、test、holdout × PPO、nearest、
+gain-over-cost × 三平台各执行一个真实宏步，共 27 条 evidence；它证明非 proxy 场景、候选、
+规划、执行与观测链可运行，但不计算发布成功率。只有公开正式 `evaluate` 才运行全部 eligible
+scene 到自然 terminal 并执行发布门，不能用该探针摘要替代。
+
 为使该等价性具有明确物理语义，正式 reward 的 `normalized_macro_step_time` 只使用认证轨迹或
 单跳参考中的物理执行时长，并统一除以 `2.0 s`；没有 reference 的拒绝动作对应零物理宏步时长。
 C++ diagnostics 中的 planner 墙钟耗时受线程与主机调度影响，只进入独立性能统计，禁止进入
@@ -210,4 +215,5 @@ PPO update 或 86400 秒边界伪造成功。
 - 正式 reward 不读取 planner 墙钟时间，CUDA update 2 的 rollout、模型和优化器逐字节相等；
 - 16/32/64 校准后冻结唯一 horizon；
 - 更新所有正式训练就绪文档并重新生成 preflight/calibration 证据；
-- 不启动 seed 4080 正式训练。
+- preflight 通过前不得启动 seed 4080 正式训练；通过后是否启动由后续明确授权决定，运行状态
+  记录在仓库外 calibration `run-manifest.json`，不复制为静态文档事实。

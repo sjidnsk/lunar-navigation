@@ -585,6 +585,140 @@ def evaluate_formal_policy(
     )
 
 
+def formal_evaluation_probe(
+    policy: CrossAttentionPolicy,
+    *,
+    device: torch.device | str,
+    run_identity: RunIdentity,
+    batches: Sequence[FormalEvaluationBatch],
+) -> Mapping[str, object]:
+    """Execute one real macro-step per split/method without simulating a release gate."""
+    if not isinstance(policy, CrossAttentionPolicy):
+        raise ValueError("formal evaluation probe requires CrossAttentionPolicy")
+    if not isinstance(run_identity, RunIdentity) or run_identity.run_kind != "formal":
+        raise ValueError("formal evaluation probe requires formal run identity")
+    formal_batches = tuple(batches)
+    by_split = {batch.split: batch for batch in formal_batches}
+    if set(by_split) != set(FORMAL_EVALUATION_SPLITS) or len(formal_batches) != 3:
+        raise ValueError(
+            "formal evaluation probe requires validation, test, and holdout"
+        )
+    target_device = torch.device(device)
+    if target_device.type == "cuda" and not torch.cuda.is_available():
+        raise ValueError("CUDA formal evaluation probe requested without CUDA")
+
+    rows: list[dict[str, object]] = []
+    for method in REQUIRED_METHODS:
+        for split in FORMAL_EVALUATION_SPLITS:
+            batch = by_split[split]
+            scenario_seed = batch.scenario_seeds[0]
+            row_schedule = tuple(
+                (platform, 0, scenario_seed) for platform in PLATFORMS
+            )
+            with ParallelEnvPool(
+                allocation={platform: 1 for platform in PLATFORMS},
+                observation_template=batch.observation_template,
+                environment_factory=batch.factory,
+                reward_fn=_evaluation_reward,
+                worker_timeout_seconds=30.0,
+                auto_reset=False,
+                initial_episode_cursors=(0, 0, 0),
+            ) as pool:
+                pool.reset()
+                prepared = pool.prepare_decision_boundaries(policy_version=0)
+                if bool(prepared.dones.any()):
+                    raise ValueError(
+                        "formal evaluation probe has no actionable boundary"
+                    )
+                indices, thetas = _select_formal_actions(
+                    policy,
+                    method=method,
+                    observations=prepared.observations,
+                    device=target_device,
+                    row_schedule=row_schedule,
+                )
+                repeated_indices, repeated_thetas = _select_formal_actions(
+                    policy,
+                    method=method,
+                    observations=prepared.observations,
+                    device=target_device,
+                    row_schedule=row_schedule,
+                )
+                if not np.array_equal(indices, repeated_indices) or not np.array_equal(
+                    thetas, repeated_thetas
+                ):
+                    raise ValueError("formal evaluation probe action differs on repeat")
+                masks = prepared.observations.candidate_mask.detach().cpu().numpy()
+                if any(
+                    not 0 <= int(index) < masks.shape[1]
+                    or not bool(masks[row, int(index)])
+                    or not math.isfinite(float(thetas[row]))
+                    for row, index in enumerate(indices)
+                ):
+                    raise ValueError("formal evaluation probe selected an invalid action")
+                stepped = pool.step(
+                    ParallelActions(
+                        candidate_indices=torch.from_numpy(indices),
+                        thetas=torch.from_numpy(thetas),
+                    ),
+                    policy_version=0,
+                )
+                row_count = len(PLATFORMS)
+                if (
+                    len(stepped.execution_events) != row_count
+                    or len(stepped.planning_outcomes) != row_count
+                    or len(stepped.reason_codes) != row_count
+                    or stepped.policy_decisions_consumed.shape != (row_count,)
+                    or not bool((stepped.policy_decisions_consumed == 1).all())
+                    or not bool(_finite_output_rows(
+                        stepped.observations, stepped.rewards
+                    ).all())
+                ):
+                    raise ValueError("formal evaluation probe evidence is incomplete")
+                coverage = mission_coverage_ratio(stepped.observations)
+                for row, platform in enumerate(PLATFORMS):
+                    rows.append(
+                        {
+                            "method": method,
+                            "split": split,
+                            "platform": platform,
+                            "scenario_seed": scenario_seed,
+                            "selected_frontier_index": int(indices[row]),
+                            "selected_theta_hex": float(thetas[row]).hex(),
+                            "reward_hex": float(stepped.rewards[row]).hex(),
+                            "coverage_hex": float(coverage[row]).hex(),
+                            "done": bool(stepped.dones[row]),
+                            "success_first_crossing": bool(
+                                stepped.success_first_crossings[row]
+                            ),
+                            "planning_outcome": stepped.planning_outcomes[
+                                row
+                            ].name,
+                            "reason_code": stepped.reason_codes[row],
+                            "execution_events": asdict(
+                                stepped.execution_events[row]
+                            ),
+                        }
+                    )
+    body: dict[str, object] = {
+        "schema_version": "lunar-formal-evaluation-probe/v1",
+        "proxy": False,
+        "methods": list(REQUIRED_METHODS),
+        "splits": list(FORMAL_EVALUATION_SPLITS),
+        "row_count": len(rows),
+        "rows": rows,
+    }
+    body["probe_sha256"] = hashlib.sha256(
+        json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return body
+
+
 def _evaluate_formal_batch(
     policy: CrossAttentionPolicy,
     *,
@@ -1181,6 +1315,7 @@ __all__ = [
     "REQUIRED_METHODS",
     "report_sha256",
     "evaluate_formal_policy",
+    "formal_evaluation_probe",
     "evaluate_proxy_policy",
     "mission_coverage_ratio",
     "select_best_candidate",

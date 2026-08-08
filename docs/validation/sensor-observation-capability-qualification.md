@@ -2,7 +2,7 @@
 
 日期：2026-08-09
 
-状态：`formal-training-ready / training-not-started`
+状态：`sensor-qualified / runtime-state-external`
 
 ## 结论
 
@@ -11,7 +11,7 @@
 不会自动把圆内栅格写成已知；策略状态和奖励只读取实际 reveal 产生的 valid/age/quality/count
 及新增 ROI 覆盖。
 
-本报告不表示正式训练已经开始。完整训练前状态以
+本报告只表示传感器观测链具备正式训练资格，不复制训练实时状态。完整资格与外部运行状态入口以
 `docs/validation/2026-08-08-formal-training-environment-qualification.md` 为准。
 
 ## 唯一现行语义

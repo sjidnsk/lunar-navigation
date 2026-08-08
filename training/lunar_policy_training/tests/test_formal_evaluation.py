@@ -22,6 +22,7 @@ from lunar_policy_training.evaluation.report import (  # noqa: E402
     FormalEvaluationIncomplete,
     REQUIRED_METHODS,
     evaluate_formal_policy,
+    formal_evaluation_probe,
     mission_coverage_ratio,
 )
 from lunar_policy_training.environment.macro_step import ExecutionEvents  # noqa: E402
@@ -151,6 +152,7 @@ def _repeat_batch(template: PolicyBatch, rows: int) -> PolicyBatch:
 
 class _VariableLengthFormalPool:
     terminal_step: int | None = 5
+    total_step_calls = 0
 
     def __init__(self, **kwargs) -> None:
         rows = sum(kwargs["allocation"].values())
@@ -175,6 +177,7 @@ class _VariableLengthFormalPool:
         )
 
     def step(self, actions, *, policy_version: int):
+        type(self).total_step_calls += 1
         self.step_count += 1
         coverage = min(0.95, 0.19 * self.step_count)
         self.observations.pose_features[:, 4] = coverage
@@ -191,6 +194,8 @@ class _VariableLengthFormalPool:
             planning_outcomes=tuple(
                 PlanningOutcome.NEW_REFERENCE_AVAILABLE for _ in range(rows)
             ),
+            reason_codes=tuple("REFERENCE_READY" for _ in range(rows)),
+            policy_decisions_consumed=torch.ones(rows, dtype=torch.int64),
             success_first_crossings=torch.full(
                 (rows,), done and coverage >= 0.95, dtype=torch.bool
             ),
@@ -227,6 +232,41 @@ def test_formal_evaluation_runs_past_three_to_the_natural_terminal(
     assert all(values[0].completion_step_count == 5 for values in result.values())
     assert all(values[0].executed_step_count == 5 for values in result.values())
     assert all(values[0].final_coverage == pytest.approx(0.95) for values in result.values())
+
+
+def test_formal_preflight_probe_executes_one_real_macro_step_per_split_method(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _VariableLengthFormalPool.total_step_calls = 0
+    monkeypatch.setattr(report_module, "ParallelEnvPool", _VariableLengthFormalPool)
+    batches = tuple(
+        FormalEvaluationBatch(
+            split=split,
+            factory=SimpleNamespace(scenario_schedule_id=f"cache/{split}/v6"),
+            observation_template=proxy_observation(0, "WHEELED", step=0),
+            scenario_seeds=(seed,),
+        )
+        for split, seed in (
+            ("validation", 11),
+            ("test", 22),
+            ("holdout", 33),
+        )
+    )
+
+    probe = formal_evaluation_probe(
+        CrossAttentionPolicy(),
+        device="cpu",
+        run_identity=_identity(),
+        batches=batches,
+    )
+
+    assert probe["schema_version"] == "lunar-formal-evaluation-probe/v1"
+    assert probe["proxy"] is False
+    assert probe["methods"] == list(REQUIRED_METHODS)
+    assert probe["splits"] == ["validation", "test", "holdout"]
+    assert probe["row_count"] == 27
+    assert len(probe["probe_sha256"]) == 64
+    assert _VariableLengthFormalPool.total_step_calls == 9
 
 
 def test_formal_success_rate_uses_crossing_not_float32_coverage_tolerance(

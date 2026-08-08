@@ -152,7 +152,7 @@ resume 必须恢复同一场景游标和 RNG，不能从 worker index 重新开�
 
 ### cache manifest
 
-cache schema 为 `lunar-formal-training-cache/v1`，绑定：
+cache schema 为 `lunar-formal-training-cache/v3`，绑定：
 
 ```text
 source + split + scenario manifest + generator + geometry
@@ -246,7 +246,8 @@ gain-over-cost 三种方法必须在同一物理场景、同一起点和同一�
 
 ### formal-preflight
 
-该命令不创建正式 checkpoint、不消耗 24 小时预算，只验证：
+该命令不创建可续跑的正式训练 checkpoint、不消耗 24 小时预算。它只创建仓库外的
+preflight-only V6 `update-1.pt` 来证明真实保存/加载等价，并验证：
 
 1. cache inventory 与所有身份；
 2. 三平台各一个 worker 能创建、初始 reveal、构造候选和调用 C++ v3；
@@ -254,8 +255,13 @@ gain-over-cost 三种方法必须在同一物理场景、同一起点和同一�
 4. 0.2 m reveal、4 m 汇总和局部裁剪来自同一世界；
 5. 飞跃式连续两次 episode 不出现燃料递减；
 6. worker 进程可退出，18/24 配置可由正式环境执行；
-7. checkpoint/resume 的场景游标与 RNG 可确定恢复；
-8. formal evaluate 能生成非 proxy 报告。
+7. uninterrupted update 2 与 resumed update 2 的 rollout、模型、优化器、RNG、活动 episode、
+   observation、candidate 和首个 planner request 完全相等；
+8. validation、test、holdout × PPO、nearest、gain-over-cost × 三平台各执行一个真实宏步，
+   共 27 条非 proxy evidence，并生成规范摘要。
+
+第 8 项是短时链路探针，不冒充发布评估。正式 `evaluate` 仍必须对每个 eligible scene 恰好执行
+一次并运行到自然 terminal；preflight 不以随机未训练策略模拟完整发布门。
 
 ## 错误边界
 
@@ -278,5 +284,6 @@ gain-over-cost 三种方法必须在同一物理场景、同一起点和同一�
 - train/resume/evaluate 都能从该 root 和同一 cache 构造正式环境；
 - formal-preflight 通过三平台、同世界、无 proxy、无累计燃料和确定恢复检查；
 - 24 worker 若通过则冻结为 24；只有既有性能门明确失败时才冻结已资格的 18 worker；
-- 文档状态更新为 `formal-training-ready / training-not-started`；
-- 未启动正式 seed 4080 的 24 小时训练。
+- 文档状态更新为 `formal-training-qualified`；训练是否运行只由仓库外 calibration
+  `run-manifest.json` 的动态状态和进程证据判定，避免静态文档在启动后失真；
+- 正式 seed 4080 训练只能在上述资格门全部通过并获得明确启动授权后开始。

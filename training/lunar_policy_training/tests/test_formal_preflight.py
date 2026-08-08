@@ -66,7 +66,7 @@ def test_preflight_report_is_canonical_non_proxy_and_records_real_v6_resume(
         selected_workers=24,
         selected_micro_batch=2,
         selected_rollout_horizon=32,
-        evaluation_report_sha256="d" * 64,
+        evaluation_probe_sha256="d" * 64,
         resume_equivalence=_resume_equivalence(),
     )
 
@@ -81,6 +81,9 @@ def test_preflight_report_is_canonical_non_proxy_and_records_real_v6_resume(
     assert payload["rollout_horizon_candidates"] == [16, 32, 64]
     assert payload["selected_rollout_horizon"] == 32
     assert payload["episode_decision_limit"] is None
+    assert payload["schema_version"] == "lunar-formal-training-preflight/v5"
+    assert payload["evaluation_probe_sha256"] == "d" * 64
+    assert "evaluation_report_sha256" not in payload
     assert payload["resume_equivalence"] == _resume_equivalence()
     assert len(payload["preflight_report_sha256"]) == 64
     assert not (tmp_path / "checkpoints").exists()
@@ -106,7 +109,7 @@ def test_preflight_report_rejects_an_unclosed_required_check() -> None:
             selected_workers=18,
             selected_micro_batch=1,
             selected_rollout_horizon=32,
-            evaluation_report_sha256="d" * 64,
+            evaluation_probe_sha256="d" * 64,
             resume_equivalence=_resume_equivalence(),
         )
 
@@ -131,6 +134,6 @@ def test_preflight_report_rejects_claimed_resume_without_exact_update_two() -> N
             selected_workers=18,
             selected_micro_batch=1,
             selected_rollout_horizon=32,
-            evaluation_report_sha256="d" * 64,
+            evaluation_probe_sha256="d" * 64,
             resume_equivalence=resume,
         )

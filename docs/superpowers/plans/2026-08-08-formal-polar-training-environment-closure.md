@@ -176,5 +176,5 @@
 2. Run repository boundary checker/tests, UTF-8 read, `git diff --check`, and the clean Release colcon suite.
 3. Review only logic closure, semantic uniqueness, design consistency and documentation authority. Correct any ambiguity or stale formal gate wording.
 4. Request code review, address substantiated findings, then rerun the affected and full gates.
-5. Update status to `formal-training-ready / training-not-started`, including exact artifact paths and hashes; explicitly state that seed 4080 training has not started.
+5. Update status to `formal-training-qualified / runtime-state-external`; keep exact runtime values and the seed 4080 live phase authoritative in the external calibration manifest.
 6. Use the finishing-branch workflow: verify the feature branch is clean, fast-forward it into `integration`, rerun merged-head smoke/boundary checks, and leave remote push/publication untouched.

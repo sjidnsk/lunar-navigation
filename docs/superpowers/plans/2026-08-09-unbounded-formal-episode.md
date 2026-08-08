@@ -456,9 +456,16 @@ git diff --check
 
 Use a new source-commit artifact root. Run calibration before formal preflight, require preflight to consume the calibrated root and record the same workers, micro-batch and horizon, reopen every JSON/checkpoint with production loaders, and do not run `train`.
 
+The preflight evaluation check executes exactly one real macro-step for every
+validation/test/holdout × required method × platform combination (27 evidence rows).
+It does not run the random untrained policy to natural terminal and does not compute a
+release gate; the public formal evaluator retains those full-episode responsibilities.
+
 - [ ] **Step 6: Update readiness documents and commit**
 
-Document the selected horizon, active V3 contract, unbounded episode semantics, exact artifact paths/hashes and `training-not-started` status.
+Document the active V3 contract, unbounded episode semantics and exact artifact roots. Keep
+the selected runtime values and live training phase authoritative in the external calibration
+manifest so a later launch does not make the tracked qualification document false.
 
 ```bash
 git add training model_contract docs
@@ -499,3 +506,15 @@ Run the full Python suite, current Release colcon suite, external-interface chec
 - [ ] **Step 4: Finish the branch**
 
 If the branch is clean and every gate is green, fast-forward into local `integration`, rerun merged-head smoke/boundary checks, and leave remote push/publication untouched.
+
+### Task 9: Launch the separately authorized formal run
+
+This task is outside the implementation-only gate above and requires an explicit user launch
+authorization.
+
+- [ ] Reopen the final sensor report, calibration manifest, preflight report and V6 resume
+  checkpoint with production loaders; require matching clean source commit and identities.
+- [ ] Start seed 4080 `train` from merged `integration`, consuming that exact calibration root.
+- [ ] Confirm the process remains alive and the manifest records the first completed PPO update;
+  do not call the run complete until a frozen checkpoint passes every split × platform release
+  gate.

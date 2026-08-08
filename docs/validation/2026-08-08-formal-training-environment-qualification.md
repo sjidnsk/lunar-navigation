@@ -2,7 +2,7 @@
 
 日期：2026-08-09
 
-状态：`formal-training-ready / training-not-started`
+状态：`formal-training-qualified / runtime-state-external`
 
 ## 结论
 
@@ -23,9 +23,9 @@ checkpoint 是 `lunar-ppo-checkpoint/v6`。`rollout_horizon` 仅定义 PPO updat
 ```
 
 这些 JSON/checkpoint 内部记录完整 source commit、内容摘要和当前能力/训练语义身份，是精确数值
-证据；本文不复制会因重新资格运行而漂移的文件哈希。资格运行必须在干净提交上生成，正式
-`train` 只能消费同一 `calibration` root。当前没有执行 seed 4080 策略更新，校准 manifest 的
-`global_step` 必须为 0。
+证据；本文不复制会因重新资格运行而漂移的文件哈希或选择值。资格运行必须在干净提交上生成，
+正式 `train` 只能消费同一 `calibration` root。preflight 完成时 manifest 的 `global_step` 必须为
+0；训练启动后的实时 phase、global step、预算和 checkpoint 只以该外部 manifest 为准。
 
 ## 唯一现行数据流
 
@@ -77,17 +77,18 @@ benchmark、capability v2、训练语义和干净 source commit。
 runtime calibration 固定比较 18/24 workers、micro-batch 候选和 horizon 16/32/64。三个
 horizon 使用每 worker 64 transitions 的等工作量，并验证有限 advantage/return、无 OOM/IPC/
 planner timeout、跨 update 连续和 resume digest。吞吐达到最佳值 99% 的候选视为近似等价，
-优先较短 update；当前资格选择为：
+优先较短 update。配置中的 horizon 32 只是 bootstrap；当前 source commit 的唯一正式选择必须
+从 `calibration/run-manifest.json` 的以下字段读取：
 
 ```text
-workers = 24
-WHEELED/LEGGED/HOPPER = 8/8/8
-micro_batch = 4
-rollout_horizon = 16
-formal_seed = 4080
-global_step = 0
-episode_decision_limit = none
+runtime_calibration.selected_workers
+runtime_calibration.selected_micro_batch
+runtime_calibration.selected_rollout_horizon
+run_identity.formal_seed
+global_step
 ```
+
+`episode_decision_limit` 必须为 `none`；任何文档复制值都不能覆盖 manifest。
 
 ## Formal preflight
 
@@ -96,11 +97,15 @@ preflight 必须在 calibration 之后运行并读取同一 calibrated root。�
 - full cache、RunIdentity、三平台 worker 与同一物理场景闭合；
 - 4 m global / 0.2 m local、多平台当前 capability 和飞跃式无累计燃料语义；
 - seeded scene permutation 与报告 scenario seed 一一对应，不重复、不漏评；
-- 非 proxy 自然终态 evaluation 使用 controller 的 `success_first_crossing`；
+- validation/test/holdout × 三种方法 × 三平台各完成一个真实宏步，共 27 条非 proxy probe
+  evidence；该探针不计算发布成功率；
 - 实际创建 V6 `update-1.pt`，保存/加载后 uninterrupted update 2 与 resumed update 2 的模型、
   optimizer、RNG、环境状态、observation、candidate 和首个 planner request 摘要完全相等；
-- 报告选择与 calibration 同为 24 workers、micro-batch 4、horizon 16；
-- `training_started=false`。
+- 报告选择字段与同一 calibration manifest 完全一致；
+- `training_started=false` 只描述 preflight 报告生成时刻，不是启动后的实时状态。
+
+公开正式 `evaluate` 仍对 validation 90、test 95、holdout 6 的每个 eligible scene 恰好执行一次，
+运行到自然 terminal，并只使用 controller 的 `success_first_crossing` 计算成功率。
 
 ## 正式训练与完成判定
 
@@ -112,7 +117,8 @@ preflight 必须在 calibration 之后运行并读取同一 calibrated root。�
 `release-gate-passed`，表示本轮训练成功完成。达到 86400 GPU seconds 但未通过时只能记为
 `not-converged`：运行结束但训练不成功，不得导出正式模型包。
 
-本资格不代表训练、ONNX/TensorRT、AGX 或实际平台验收完成。
+本资格只表示训练入口可启动；是否正在训练及是否收敛由外部 manifest 与发布评估判定。它不代表
+ONNX/TensorRT、AGX 或实际平台验收完成。
 
 ## 复现入口
 

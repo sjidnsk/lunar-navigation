@@ -1,12 +1,12 @@
 # Volume 3 月球极区 PPO 训练前状态交接
 
-状态：`formal-training-ready / training-not-started`
+状态：`formal-training-qualified / runtime-state-external`
 
 ## 当前结论
 
-项目内正式训练输入和运行链已经闭合，但 seed 4080 尚未开始，没有正式策略更新、训练候选、
-ONNX、TensorRT 或 AGX 结论。训练必须使用仓库内 capability v2、当前 C++ v3 planner、
-30 m/360° 观测、formal cache v3、ObservationContractV3 和 checkpoint v6；早期 Volume 3
+项目内正式训练输入和运行链已经闭合。seed 4080 是否已开始、当前步数和预算只以仓库外
+calibration manifest 为准；本交接不复制易漂移的实时状态。训练必须使用仓库内 capability v2、
+当前 C++ v3 planner、30 m/360° 观测、formal cache v3、ObservationContractV3 和 checkpoint v6；早期 Volume 3
 规划算法、平台代理、燃料库存、固定 8-step 和旧 checkpoint/cache 不得进入 formal 命令。
 
 飞跃式每次规划重新由正式能力换算相同的单跳可用 delta-v；参考推进剂不是可累计资源。PPO
@@ -63,10 +63,11 @@ schema 为 `lunar-formal-training-cache/v3`，内容 SHA-256 为
 /home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/qualified-current/
 ```
 
-当前校准冻结：24 workers，WHEELED/LEGGED/HOPPER 各 8，micro-batch 4，rollout horizon 16，
-formal seed 4080，episode decision limit 为 none。16 是 16/32/64 等工作量实测后得到的 update
-批长，不是探索动作上限。formal preflight 必须消费同一 calibration root，并用真实 V6 文件
-证明 update-2 resume 等价；报告必须保持 `training_started=false`、`global_step=0`。
+正式选择由同一 root 的 `runtime_calibration.selected_workers`、`selected_micro_batch` 和
+`selected_rollout_horizon` 唯一给出；配置中的 32 只是 bootstrap，不能覆盖校准结果。formal
+seed 为 4080，episode decision limit 为 none。formal preflight 必须消费同一 calibration root，
+用真实 V6 文件证明 update-2 resume 等价，并在生成时保持 `training_started=false`、
+`global_step=0`；训练启动后实时状态仍由 manifest 接管。
 
 ## 后续正式训练计划
 
@@ -78,4 +79,4 @@ formal seed 4080，episode decision limit 为 none。16 是 16/32/64 等工作�
 若累计预算耗尽仍无通过候选，必须记为 `not-converged`；这只是训练运行结束，不允许进入正式
 模型包导出。
 
-本交接不声称训练、模型选择、ONNX/TensorRT、AGX 或实际平台资格已经完成。
+本交接只声明训练前资格，不声称模型已收敛，也不声称 ONNX/TensorRT、AGX 或实际平台资格完成。

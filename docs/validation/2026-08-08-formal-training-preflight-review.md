@@ -2,7 +2,7 @@
 
 日期：2026-08-09
 
-状态：`formal-training-ready / training-not-started`
+状态：`formal-training-qualified / runtime-state-external`
 
 ## 复审结论
 
@@ -37,6 +37,10 @@ update 保持 scene/start/pose/累计观测，已自然结束的 worker 才单�
 preflight 必须真实保存 V6 update-1 checkpoint，并逐项证明连续 update 2 与恢复 update 2 的
 model、optimizer、RNG、活动 episode、observation、candidate 和首 planner request 完全相等。
 
+preflight 的 evaluation 检查只执行 validation/test/holdout × 三种方法 × 三平台各一个真实宏步，
+形成 27 条非 proxy evidence；它验证链路，不计算发布成功率。正式 `evaluate` 才负责全部 eligible
+scene 的自然终态评估与 split×platform 发布门。
+
 ### 场景调度与评估
 
 1734 个冻结数据场景保留不变；1666 个三平台都有合格起点的共同可行动场景构成正式任务域。
@@ -47,13 +51,13 @@ model、optimizer、RNG、活动 episode、observation、candidate 和首 planne
 ### 校准与 preflight 顺序
 
 配置文件的 `rollout_horizon=32` 只是 bootstrap。校准用相同 64 transitions/worker 比较
-16/32/64；通过者中先取最高吞吐的 99% 近似等价集，再优先更短 update。当前冻结值是 16。
-formal preflight 必须读取同一 calibration root，并记录 24 workers、micro-batch 4、horizon 16；
-不允许把 bootstrap 32 写成校准结论。
+16/32/64；通过者中先取最高吞吐的 99% 近似等价集，再优先更短 update。formal preflight 必须
+读取同一 calibration root，并逐项复用 manifest 选择；不允许把 bootstrap 32 或旧资格运行的
+数值写成当前校准结论。
 
 ## 训练完成的唯一解释
 
-- `training-not-started`：只有训练前报告与 `global_step=0`；当前状态。
+- `formal-training-qualified`：训练前报告完成且当时 `global_step=0`；这是本静态文档状态。
 - `training-running`：seed 4080 已产生参数更新，但没有冻结的通过候选。
 - `release-gate-passed`：同一 checkpoint 在 validation/test/holdout 的每个 split×platform 均达到
   95% 成功率及既定一致性门；才表示本轮训练成功完成。
@@ -61,6 +65,8 @@ formal preflight 必须读取同一 calibration root，并记录 24 workers、mi
 
 loss 下降、生成 checkpoint、完成预热或耗尽时间都不能单独称为训练完成。ONNX、TensorRT 与
 AGX 是通过候选之后的独立阶段。
+
+实时状态只读取仓库外 calibration `run-manifest.json`，不由本静态文档复制。
 
 ## 权威文件
 
