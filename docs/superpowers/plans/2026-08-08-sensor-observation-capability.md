@@ -23,6 +23,7 @@
 - Native visibility code is internally single-threaded, releases the GIL, uses no GPU/OpenMP, and is qualified only in Release.
 - Do not alter or rebaseline the external Isaac/ROS `30 m/120°` historical snapshot.
 - Do not launch formal 24-hour PPO training in this plan; completion makes the code eligible for the separately controlled formal-training gate.
+- The current `integration` C++ v3 planner and three-platform capability schema v2 override obsolete Volume 3 path-planning, proxy-capability, search-limit, cache, and checkpoint assumptions. Volume 3 contributes only the policy/data/training structure that has been migrated to these current inputs.
 
 ---
 
@@ -584,11 +585,11 @@ git commit -m "fix: mask inactive hopper theta training"
 - Consumes: Release native benchmark executable, formal capability hash, source commit, 64-candidate and 0.2 m reveal fixtures.
 - Produces: immutable JSON `sensor-observation-performance/v1` and `validate_sensor_performance_report(...)` required by formal CLI startup.
 
-- [ ] **Step 1: Write failing report-contract and CLI-gate tests**
+- [x] **Step 1: Write failing report-contract and CLI-gate tests**
 
 Require finite p50/p95 values, exact host/build/capability/source identity, candidate p95 <= 5 ms, reveal p95 <= 2 ms, and 24-worker throughput drop <= 10%. Formal CLI rejects a missing, stale, Debug, wrong-host, wrong-capability, or failing report; development smoke does not claim formal eligibility.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 ```bash
 PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
@@ -598,15 +599,15 @@ PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
   tests/performance/test_sensor_visibility_benchmark.py
 ```
 
-- [ ] **Step 3: Implement native and 24-worker benchmark collection**
+- [x] **Step 3: Implement native and 24-worker benchmark collection**
 
 The native executable reports build type and warmed p50/p95 for `256x256 x 64` candidate gains plus one `0.2 m/30 m` reveal. The Python tool compares the same fixed-seed 24-worker workload with the observation controller enabled and disabled, then writes outside the repository using atomic replace.
 
-- [ ] **Step 4: Implement strict report validation and CLI preflight**
+- [x] **Step 4: Implement strict report validation and CLI preflight**
 
 Validate exact schema fields, SHA-256 identities, host architecture, Release build, sample count, thresholds, and current source/capability hashes before constructing formal workers. A failure raises a preflight error; it never becomes a PPO negative reward and never reduces candidate count.
 
-- [ ] **Step 5: Build Release, run the benchmark gate, test, and commit**
+- [x] **Step 5: Build Release, run the benchmark gate, test, and commit**
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -616,17 +617,28 @@ colcon --log-base "$artifact_root/log" build --merge-install \
   --base-paths ros2_ws/src --packages-select lunar_planner_training_bridge \
   --cmake-args -DCMAKE_BUILD_TYPE=Release
 source "$artifact_root/install/setup.bash"
+training_python=/home/kai/CodexDownloads/lunar_navigation/volume3/venv/bin/python
+export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
-  python3 training/tools/benchmark_sensor_observation.py \
-  --output "$artifact_root/sensor-performance.json" --workers 24
+  "$training_python" training/tools/benchmark_sensor_observation.py \
+  --output "$artifact_root/sensor-performance.json" \
+  --capability-lock /absolute/path/to/current-capability-lock.json \
+  --native-benchmark "$artifact_root/install/lib/lunar_planner_training_bridge/lunar_training_visibility_benchmark" \
+  --workers 24
 PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
-  python3 -m pytest -q \
+  "$training_python" -m pytest -q \
   training/lunar_policy_training/tests/test_sensor_performance.py \
   tests/performance/test_sensor_visibility_benchmark.py \
   training/lunar_policy_training/tests/test_cli.py
 git add ros2_ws/src/lunar_planner_training_bridge training tests/performance
 git commit -m "test: gate sensor observation performance"
 ```
+
+The gate implementation landed in `e648e29`; checkpoint identity and reveal-latency stability fixes
+landed in `c3ef0f5` and `452183c`. Raw Release latency and the
+24-worker current-planner/schema-v2 fixture pass their thresholds. A formal report was intentionally
+not generated because no external 30 m/360° `lunar-training-capability-freeze/v1` exists yet; the old
+Isaac/ROS 30 m/120° provenance is rejected before benchmark execution and remains historical evidence.
 
 ---
 
@@ -638,26 +650,29 @@ git commit -m "test: gate sensor observation performance"
 - Modify: `docs/superpowers/plans/2026-08-08-sensor-observation-capability.md`
 
 **Interfaces:**
-- Consumes: all task commits and external performance report path.
+- Consumes: all task commits, raw Release evidence, and the external performance report when a current formal capability closure is available.
 - Produces: reproducible qualification evidence and a clean feature branch ready for review/merge, not a formal trained model.
 
-- [ ] **Step 1: Run UTF-8, diff, boundary, and Python qualification**
+- [x] **Step 1: Run UTF-8, diff, boundary, and Python qualification**
 
 ```bash
 git diff --check integration...HEAD
 python3 tools/check_repository_boundaries.py .
 python3 -m pytest -q tests/foundation/test_repository_boundaries.py
 source /home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/performance/install/setup.bash
+training_python=/home/kai/CodexDownloads/lunar_navigation/volume3/venv/bin/python
+export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
-  python3 -m pytest -q model_contract/tests training/lunar_policy_training/tests tests/performance
+  "$training_python" -m pytest -q \
+  model_contract/tests training/lunar_policy_training/tests tests/performance
 ```
 
-- [ ] **Step 2: Run native Release qualification**
+- [x] **Step 2: Run native Release qualification**
 
 ```bash
 source /opt/ros/humble/setup.bash
 test "$ROS_DISTRO" = humble
-artifact_root=/home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/final
+artifact_root=/home/kai/CodexDownloads/lunar_navigation/sensor_observation_capability/final-452183c
 colcon --log-base "$artifact_root/log" build --merge-install \
   --build-base "$artifact_root/build" --install-base "$artifact_root/install" \
   --base-paths ros2_ws/src \
@@ -671,11 +686,11 @@ colcon --log-base "$artifact_root/test-log" test \
 colcon test-result --test-result-base "$artifact_root/build" --verbose
 ```
 
-- [ ] **Step 3: Record exact evidence without committing artifacts**
+- [x] **Step 3: Record exact evidence without committing artifacts**
 
-The qualification document records commit SHA, branch, Ubuntu/ROS/compiler, Release build paths, test totals, performance report path/SHA, measured p50/p95/throughput, capability/training-semantics hashes, and remaining external gates. It explicitly states that formal training has not started and the Isaac snapshot remains historical.
+The qualification document records commit SHA, branch, Ubuntu/ROS/compiler, Release build paths, test totals, measured p50/p95/throughput, capability/training-semantics hashes, and remaining external gates. If the formal capability closure is unavailable, it records the rejected historical input and explicit absence of a formal performance report/path/SHA instead of substituting fixture evidence. It explicitly states that formal training has not started and the Isaac snapshot remains historical.
 
-- [ ] **Step 4: Mark all plan checkboxes and commit qualification**
+- [x] **Step 4: Mark all plan checkboxes and commit qualification**
 
 ```bash
 git add docs/migration/volume-3-pretraining-readiness.md \

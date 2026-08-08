@@ -1,48 +1,47 @@
 # Volume 3 月球极区 PPO 训练前就绪交接
 
-状态：`pretraining-ready / blocked-on-capability`
+状态：`sensor-closed-loop-ready / blocked-on-formal-capability-closure`
 
-## 边界与结论
+## 当前结论
 
-Ubuntu 22.04 amd64 + ROS 2 Humble + RTX 4080 SUPER 上的训练前代码、短程验证和只读监督入口已经形成。当前证据只证明开发态前置链路可执行、可中断恢复，并证明正式入口在能力资料缺失或仅提供 test-only/proxy bundle 时会提前拒绝。
+训练代码已具备 30 m/360° 保守观测、truth/observed 隔离、三平台宏步闭环、平台正确的
+`theta` 语义和 Release 性能前置门。正式 seed 4080 rollout 尚未启动，也没有生成 ONNX、
+TensorRT engine、四文件模型候选、`model-package-ready` 或 AGX 标签。
 
-本交接没有启动 seed 4080 正式 rollout，没有消耗正式 24 小时 GPU 预算，也没有生成 ONNX、TensorRT engine、四文件候选、`model-package-ready` 或任何 AGX 标签。
+当前唯一未闭合的训练输入门是外部 `lunar-training-capability-freeze/v1`：它必须同时封装
+现行三平台能力 v2、共享 30 m/360° 观测文档以及 URDF/mesh 资源哈希。仓库内已批准的工程
+能力值已经确定并通过 Ubuntu 规划资格，但不能用缺少外部资源 closure 的仓库配置文件或
+测试夹具冒充正式训练 bundle。
 
-## 相关提交与冻结合同
+## 现行权威覆盖规则
 
-| 范围 | 提交 | 已冻结事实 |
-| --- | --- | --- |
-| 完整设计与执行计划 | `d0c127b`、`57a6262` | 月球极区真实数据、三平台共享 PPO、能力资料后置冻结 |
-| Observation/Action V2 | `caedfb9`、`8a6b0c7`、`a6f2e65` | 七输入固定 shape、64 候选和连续 `theta` |
-| 共享 policy/rollout | `de93c70`、`d446ef8` | 单一三平台网络和 development-smoke padding |
-| 极区数据与地图链路 | `bfbd89c` 至 `5864348` | source lock、split、固定地图、危险物和确定性候选 |
-| C++ v3 投影与环境边界 | `2d36778` 至 `c56a16e` | 同一 v3 bridge 的 traversability/plan、64 yaw bins、决策身份 |
-| Reward V2/PPO/预算 | `b1cca75`、`ddd7b48` | 成功主导奖励、固定 PPO、30 分钟 latest checkpoint、显式预算扩展 |
-| capability/checkpoint v3 门 | `536e371`、`d12eb02`、`bdc8553`、`b5bd229` | 三平台外部 closure、formal 前置拒绝、完整 run identity |
-| 官方极区数据锁 | `4734ef9`、`a6c4648` | NASA DEM/count、JAXA 六站点 holdout、seed 4080 固定 split |
+自 2026-08-08 起，本交接中的规划与平台能力按以下优先级解释：
 
-## 官方极区数据身份
+1. `integration` 当前 C++ v3 分层全局规划、有限地图完整搜索、局部物理认证、滚动协调和
+   ROS Action 行为是唯一路径规划权威。
+2. `platform-control-capability-source/v2` 及
+   `three_platform_capability_freeze_v1.yaml` 是当前轮式、足式、飞跃式批准工程能力权威；
+   规范化 SHA-256 为
+   `60e258be85edd779d9acdc282bbde3d5cb914bce98c86c244a46a772fda5ee95`。
+3. 传感器训练语义是三平台共享 `30 m/360°`，语义版本
+   `lunar-training-semantics/sensor-30m-360-theta-mask/v1`，SHA-256 为
+   `739ce3e1f6eaab4ee44a0136ff848f246d158a15ebb7f8b6c8b2c7ec1bca8cb5`。
 
-仓库外 aggregate source lock 为 `16,707` bytes，文件 SHA-256 为
-`8d422cd9ef478ca15e7e36831ea14e9ba09e9af72565adbf0625a9137b1acab0`。其三个官方源为：
+旧 Volume 3 的路径算法、平台代理、运动能力字段、固定 search limit、80 m 观测默认值和
+旧 checkpoint v3 身份均已过时。它们只允许作为历史迁移证据或显式 development-smoke
+fixture，不得进入现行规划请求、正式 cache、性能报告、训练 manifest、resume 或模型发布。
+从旧分支合入的 policy、数据、PPO、checkpoint 编排和 C++ bridge 代码只有在适配上述现行
+权威后才继续有效；一次 Git 合并不会把旧规划语义恢复为权威。
 
-| source id | bytes | SHA-256 |
-| --- | ---: | --- |
-| `NASA_LOLA_87S_DEM` | 3,465,285,714 | `417a85715406c346e2ecb2fc3abc93d3717121466e3d4950e1a6b977f207b881` |
-| `NASA_LOLA_87S_COUNT` | 145,895,726 | `dab531d817b9e7cfddf8ac23ffde9ccfe737efe526e98763ca7ded7a2afcae04` |
-| `JAXA_LUPEX_DATA_S1` | 76,134,049 | `4a2cbb1d9f6ed4a1abd804f9faeee45c6c1f847030b31ba7fb986f280e8ecd77` |
+## 仍有效的数据与模型合同
 
-seed `4080` 的 split manifest 共 294 行：NASA 为 train 192、validation 48、test 48；
-JAXA 的 `CR1`、`GR1`、`GR2`、`LP1`、`MP1`、`MP2` 六站点只进入 holdout，archive
-inventory 共 18 个 GeoTIFF 成员。内部 `split_sha256` 为
-`5d458081972e1ee767c5f91dd5cb42d519214a0111a6e28dfaa7283025ec99e2`；split manifest
-文件为 `162,602` bytes，文件 SHA-256 为
-`d51b9b824e5e9b2ebe67da70ab9a46c6d4a66489ec8ff063a766347058ba4a2e`。
+NASA/JAXA 极区数据 source/split 锁仍然有效，因为它们固定的是数据身份和划分，而不是路径
+算法或平台运动能力。seed `4080` 的 split 为：NASA train 192、validation 48、test 48；
+JAXA `CR1`、`GR1`、`GR2`、`LP1`、`MP1`、`MP2` 六站点只进入 holdout。内部
+`split_sha256` 为
+`5d458081972e1ee767c5f91dd5cb42d519214a0111a6e28dfaa7283025ec99e2`。
 
-这些锁只固定数据身份和划分，不解除正式训练的 capability gate；数据文件、锁文件和 split
-manifest 均保持在仓库外。
-
-`ObservationContractV2` 的网络输入顺序和 shape 为：
+当前 `ObservationContractV2` 保持七输入：
 
 ```text
 prior_channels    float32 [B,4,256,256]
@@ -54,30 +53,49 @@ candidate_mask    bool    [B,64]
 platform_context  float32 [B,3]
 ```
 
-`platform_context` 仅是一项固定长度的平台类别 one-hot，不包含尚未确定的运动能力数值。候选不足 64 项时只做零填充并置 mask；全 false 时绕过策略，不制造当前位置候选。动作由 masked 64-way frontier 和所选候选条件下的连续 `theta` 组成。
+`platform_context` 只表示平台类别，运动能力通过当前 capability v2 注入 C++ 规划器，不把
+能力数值复制进网络输入。候选不足 64 项时只做零填充并置 mask；全 false 时绕过策略。
 
-`RewardWeightsV2` 的成功首次跨越奖励为 `+50`，大于覆盖与优先级的全部正向 dense shaping 上限；无成功终止为 `-10`，硬安全违规再扣 `-50`。冻结权重 SHA-256 为 `46f0400e934113cfb863c4e4b64174027eac667f8654d14b2e5d333657335bd4`。
+动作继续由 masked 64-way frontier 和候选条件下的连续 `theta` 组成。`theta` 是候选点处的
+绝对 `map` 机体 yaw：轮式和足式参与训练，飞跃式 mask 掉该维的策略、熵和 PPO loss。
+360° FOV 只让即时观测增益与 yaw 无关，不会抹掉地面平台的运动学代价。
 
-checkpoint 使用 `lunar-ppo-checkpoint/v3`。`RunIdentity` 固定 `run_kind` 以及 data、split、generator、capability、reward、v3 六项 SHA-256；resume 逐项比较，checkpoint 与 run manifest 必须保持相同 identity 和 global step。development-smoke 的 checkpoint、proxy 评估和 test-only capability 永远不能晋级正式候选。
+checkpoint 已升级为 `lunar-ppo-checkpoint/v4`。`RunIdentity` 除 data、split、generator、
+capability、reward 和源码 SHA-256 外，还绑定训练语义 SHA-256；旧 v3 checkpoint 只允许
+显式 development-smoke 读取，正式 resume 必须拒绝。
 
-## 前置验证证据
+## 新观测闭环资格
 
-验证日期为 2026-08-05，测试 artifact 均位于 pytest 临时目录或仓库外部 build/install/log 目录。
+2026-08-08 在 Ubuntu 22.04 amd64 + ROS 2 Humble + RTX 4080 SUPER 主机完成以下验证：
 
-- 只读 watcher：`13 passed`。覆盖 600 秒默认节拍、`--once` 单次 JSON、pause 优先、能力 closure 完整校验、PID/cmdline 所有权、checkpoint 陈旧、finite manifest 指标、GPU 查询、磁盘阈值和 symlink 拒绝；watcher 不启动、重启、终止进程，不修复 manifest，不改预算或激活状态。
-- CPU development smoke：合成 DEM/count/JAXA archive 经 aggregate source lock 和 288+6 split，生成程序月岩/月坑/no-go，构造 V2 observation/candidates，经共享 policy 选择动作；同一个 `PlannerBridge` 依次执行真实 C++ v3 traversability projection 和 plan。随后完成第一个 PPO update、checkpoint v3、restore 和第二个 update，并验证 manifest/checkpoint identity 与 global step 一致。
-- formal 前置拒绝：公共 `train`、`resume`、`evaluate` 在 capability lock 完全缺失时均在 artifact/CUDA 前拒绝；完整三平台 `formal_eligible=false`、`test_only=true`、`proxy=true` bundle 也在 artifact/CUDA/worker 前拒绝。
-- 完整非 CUDA model-contract/training：`566 passed, 1 skipped, 3 deselected`。
-- RTX 4080 SUPER 有界 CUDA：`2 passed, 12 deselected`；包括 FP32 forward、完整 update 边界中断、latest checkpoint 和恢复后一项 update，总计不超过两个 update。
-- ROS core/bridge：外置 Humble 构建目录执行 core 15 个 CTest 和 bridge 17 个 pytest，`80 tests, 0 errors, 0 failures, 0 skipped`。
-- 仓库边界与 foundation：`repository boundaries: OK`，`13 passed`。
-- Python 编译、UTF-8 读取和 `git diff --check` 通过；Git 未跟踪任何 `.tif/.tiff/.zip/.npy/.npz/.pt/.pth/.onnx/.engine` 训练或发布 artifact。
+- 当前规划器、bridge、ROS 的外置 Release 构建成功；`colcon test-result` 为 292 tests，
+  0 errors，0 failures，0 skipped；
+- model contract、训练和性能 Python 回归为 622 passed，7 skipped；
+- 原生可见性候选 p95 为 0.124662 ms，30 m reveal p95 为 1.334282 ms；
+- 24-worker 当前规划器/schema-valid v2 测试 closure 回归的观测吞吐降幅为 4.191261%，
+  低于 10% 门限；该 fixture 不具正式授权能力；
+- 仓库边界专项 14 passed，能力 v2 冻结校验通过。
 
-## 能力阻塞与唯一解锁顺序
+完整主机信息、命令、性能 fixture 和正式/测试证据边界见
+`docs/validation/sensor-observation-capability-qualification.md`。
 
-尚未确定轮式、足式、飞跃式三份实际运动能力资料。下一阶段必须按以下顺序解锁：
+## 正式能力门与解锁顺序
 
-1. 由外部平台项目提供三份明确版本的 platform/observation/URDF/mesh 资料和运动能力数值。
-2. 生成 `lunar-training-capability-freeze/v1`，通过 schema、三平台精确集合、资源 closure、内容一致性和 SHA-256 校验。
-3. 使用冻结能力重新生成平台化 traversability/candidate cache，并重新冻结 worker 数和 micro-batch。
-4. 重新执行前置回归后，才允许启动一个正式 seed 4080 的可暂停训练；正式验收、ONNX/TensorRT 和 AGX 流程仍按后续卷独立推进。
+当前没有满足新语义的外部正式能力 lock，所以没有正式
+`sensor-observation-performance/v1` 路径或 SHA-256。历史 Isaac/ROS
+`capability_provenance.json` 是 30 m/120° 旧 schema 证据，输入正式工具时会在 benchmark
+前被拒绝，且不会创建报告。
+
+唯一解锁顺序是：
+
+1. 外部平台资料提供方把当前三平台 capability v2、30 m/360° observation、URDF 和 mesh
+   组成完整 `lunar-training-capability-freeze/v1`，并通过内容一致性和 SHA-256 校验。
+2. 用该 lock 在当前传感器源码提交和同一 Release 主机运行 24-worker 性能工具，生成并验证
+   `sensor-observation-performance/v1`。
+3. 用同一 bundle 重新生成三平台 traversability/candidate cache，并重新冻结 worker 与
+   micro-batch；旧 Volume 3 cache/checkpoint 不得沿用。
+4. 对 `train/resume/evaluate` 重新执行 formal preflight，之后才允许启动一个正式 seed
+   4080 的可暂停训练。
+
+正式训练、完整评估、ONNX/TensorRT、AGX 和实际平台资格仍分别受后续门控制；本交接不会
+把开发态或 Ubuntu 仿真结果升级成这些状态。
