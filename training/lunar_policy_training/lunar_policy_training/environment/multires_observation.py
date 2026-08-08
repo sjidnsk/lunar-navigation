@@ -8,7 +8,7 @@ import math
 import numpy as np
 
 from ..polar_data.multires_scene import MultiResolutionScene, SceneTileProvider
-from ..polar_data.raster import GLOBAL_GEOMETRY, LOCAL_GEOMETRY
+from ..polar_data.raster import GLOBAL_GEOMETRY, LOCAL_GEOMETRY, MapCanvas
 from ..training_semantics import FORMAL_SENSOR_FOV_RAD, FORMAL_SENSOR_RANGE_M
 from .observation_builder import LocalObservation, Pose2
 from .sensor_observation import (
@@ -30,6 +30,8 @@ _CENTRAL_SUBCELLS = (slice(9, 11), slice(9, 11))
 class _ObservedDetailTile:
     elevation_m: np.ndarray
     physical_obstacle_ratio: np.ndarray
+    physical_obstacle_height_m: np.ndarray
+    forbidden_ratio: np.ndarray
     valid_mask: np.ndarray
     observation_age_s: np.ndarray
     observation_quality: np.ndarray
@@ -42,11 +44,26 @@ class _ObservedDetailTile:
         return cls(
             elevation_m=zeros(),
             physical_obstacle_ratio=zeros(),
+            physical_obstacle_height_m=zeros(),
+            forbidden_ratio=zeros(),
             valid_mask=np.zeros(shape, dtype=np.bool_),
             observation_age_s=zeros(),
             observation_quality=zeros(),
             observation_count=np.zeros(shape, dtype=np.uint32),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class DetailObservedWindow:
+    canvas: MapCanvas
+    elevation_m: np.ndarray
+    physical_obstacle_ratio: np.ndarray
+    physical_obstacle_height_m: np.ndarray
+    forbidden_ratio: np.ndarray
+    valid_mask: np.ndarray
+    observation_age_s: np.ndarray
+    observation_quality: np.ndarray
+    observation_count: np.ndarray
 
 
 class MultiresSensorObservationState(SensorObservationState):
@@ -103,6 +120,8 @@ class MultiresSensorObservationState(SensorObservationState):
         self.scene = scene
         self.tile_provider = tile_provider
         self._detail_tiles: dict[tuple[int, int], _ObservedDetailTile] = {}
+        self.coarse_obstacle_height_m = np.zeros(shape, dtype=np.float32)
+        self.coarse_forbidden_ratio = np.zeros(shape, dtype=np.float32)
 
     @staticmethod
     def _coarse_ratio(
@@ -254,6 +273,11 @@ class MultiresSensorObservationState(SensorObservationState):
                     tile.physical_obstacle_ratio,
                     truth.physical_obstacle_ratio,
                 ),
+                (
+                    tile.physical_obstacle_height_m,
+                    truth.physical_obstacle_height_m,
+                ),
+                (tile.forbidden_ratio, truth.forbidden_ratio),
             ):
                 target_view = target[tile_slice]
                 target_view[visible_part] = source[window_slice][visible_part]
@@ -343,6 +367,10 @@ class MultiresSensorObservationState(SensorObservationState):
         obstacle = self._detail_block(
             row, column, "physical_obstacle_ratio"
         )
+        obstacle_height = self._detail_block(
+            row, column, "physical_obstacle_height_m"
+        )
+        forbidden = self._detail_block(row, column, "forbidden_ratio")
         age = self._detail_block(row, column, "observation_age_s")
         quality = self._detail_block(row, column, "observation_quality")
         count = self._detail_count_block(row, column)
@@ -351,6 +379,12 @@ class MultiresSensorObservationState(SensorObservationState):
         )
         self.observed.physical_obstacle_ratio[row, column] = np.float32(
             obstacle[valid].max(initial=0.0)
+        )
+        self.coarse_obstacle_height_m[row, column] = np.float32(
+            obstacle_height[valid].max(initial=0.0)
+        )
+        self.coarse_forbidden_ratio[row, column] = np.float32(
+            forbidden[valid].max(initial=0.0)
         )
         self.observed.valid_mask[row, column] = True
         self.observed.observation_age_s[row, column] = np.float32(
@@ -405,14 +439,13 @@ class MultiresSensorObservationState(SensorObservationState):
             raise ValueError("local observation pose must be map-frame")
         half = LOCAL_GEOMETRY.size_m / 2.0
         left, _, _, top = self.scene.base_canvas.bounds_m
-        raw_column = (pose.x_m - half - left) / LOCAL_GEOMETRY.resolution_m
-        raw_row = (top - (pose.y_m + half)) / LOCAL_GEOMETRY.resolution_m
-        start_column = round(raw_column)
-        start_row = round(raw_row)
-        if not math.isclose(raw_column, start_column, abs_tol=1e-8) or not math.isclose(
-            raw_row, start_row, abs_tol=1e-8
-        ):
-            raise ValueError("local observation bounds must align to 0.2 m detail")
+        resolution = LOCAL_GEOMETRY.resolution_m
+        start_column = math.floor(
+            (pose.x_m - half + 0.5 * resolution - left) / resolution
+        )
+        start_row = math.floor(
+            (top - (pose.y_m + half - 0.5 * resolution)) / resolution
+        )
         cells = LOCAL_GEOMETRY.cells
         total = self.tile_provider.detail_cells_per_axis
         if (
@@ -452,5 +485,45 @@ class MultiresSensorObservationState(SensorObservationState):
             physical_obstacle_ratio=obstacle,
         )
 
+    def planning_observation(self, pose: Pose2) -> DetailObservedWindow:
+        """Return the observed-only 64 m map consumed by C++ local planning."""
+        cells = self.tile_provider.tile_geometry.cells
+        start_row, start_column, _, _ = self._detail_window(pose, cells)
+        shape = (cells, cells)
+        float_names = (
+            "elevation_m",
+            "physical_obstacle_ratio",
+            "physical_obstacle_height_m",
+            "forbidden_ratio",
+            "observation_age_s",
+            "observation_quality",
+        )
+        arrays = {name: np.zeros(shape, np.float32) for name in float_names}
+        valid = np.zeros(shape, np.bool_)
+        count = np.zeros(shape, np.uint32)
+        for tile_row, tile_column, window_slice, tile_slice in self._window_slices(
+            start_row, start_column, cells
+        ):
+            tile = self._existing_tile(tile_row, tile_column)
+            if tile is None:
+                continue
+            local_valid = tile.valid_mask[tile_slice]
+            valid[window_slice] = local_valid
+            for name in float_names:
+                destination = arrays[name][window_slice]
+                source = getattr(tile, name)[tile_slice]
+                destination[local_valid] = source[local_valid]
+            destination_count = count[window_slice]
+            source_count = tile.observation_count[tile_slice]
+            destination_count[local_valid] = source_count[local_valid]
+        truth_window = self.tile_provider.read_window(
+            start_row, start_column, cells=cells
+        )
+        return DetailObservedWindow(
+            canvas=truth_window.canvas,
+            valid_mask=valid,
+            observation_count=count,
+            **arrays,
+        )
 
-__all__ = ["MultiresSensorObservationState"]
+__all__ = ["DetailObservedWindow", "MultiresSensorObservationState"]

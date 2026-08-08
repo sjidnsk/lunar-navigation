@@ -100,6 +100,7 @@ class ObservationBoundaryController:
         policy_observation_builder: PolicyObservationBuilder,
         episode_id: str,
         mission_revision: int,
+        initial_state_time_ns: int = 0,
     ) -> None:
         if platform_type not in _PLATFORMS:
             raise ValueError("sensor boundary platform is invalid")
@@ -111,13 +112,15 @@ class ObservationBoundaryController:
             raise ValueError("sensor boundary episode identity is missing")
         if type(mission_revision) is not int or mission_revision < 0:
             raise ValueError("sensor boundary mission revision is invalid")
+        if type(initial_state_time_ns) is not int or initial_state_time_ns < 0:
+            raise ValueError("sensor boundary initial state time is invalid")
         self._platform_type = platform_type
         self._sensor_state = sensor_state
         self._policy_observation_builder = policy_observation_builder
         self._episode_id = episode_id
         self._mission_revision = mission_revision
         self._observation_revision = 0
-        self._state_time_ns = 0
+        self._state_time_ns = initial_state_time_ns
         self._current_observation: PolicyBatch | None = None
 
         resolution = sensor_state.truth.canvas.geometry.resolution_m
