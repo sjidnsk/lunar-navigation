@@ -159,13 +159,14 @@ export PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training${PYTH
 ```
 
 正式 `train/resume/evaluate` 使用该外部 JSON 路径进行性能预检，同时自行加载仓库内正式
-capability v2。本轮完成的是训练资格闭包，未启动正式 PPO 训练。
+capability v2。本轮完成的是运动能力、观测语义与性能资格闭包；正式 cache、环境 builder 和
+公开 CLI 链仍未闭合，也未启动正式 PPO 训练。
 
 ## 外部 Isaac/ROS/RViz 桥同步
 
 独立外部仓
-`/home/kai/CodexDownloads/lunar_navigation/isaac_ros_action_regression` 使用分支
-`feature/hopper-no-fuel-budget-sync` 完成同步，当前提交为 `d173f09`。该分支不再发布
+`/home/kai/CodexDownloads/lunar_navigation/isaac_ros_action_regression` 已将同步结果快进合入
+`main`，当前提交为 `649818b`。该主线不再发布
 `/platform/hopper_propellant_state`，不含燃料提交 API 或燃料提交失败状态；外部 hopper
 capability 使用 `20.0 kg` 参考总质量和 `0.2 kg` 参考推进剂计算每次相同的单跳包线。
 
@@ -177,4 +178,5 @@ capability 使用 `20.0 kg` 参考总质量和 `0.2 kg` 参考推进剂计算每
 - 飞跃式目标 A 和目标 B 均完成抛物线与落地稳定；两次 `active_plan_id`、
   `active_segment_id` 均不同，目标 A 之后无陈旧 `CANCELED`，ROS graph 中不存在推进剂 Topic。
 
-外部仓保持独立 Git 根，本轮未将其源码、历史或运行 artifact 导入主仓，也未自动合并或推送。
+外部仓保持独立 Git 根，本轮未将其源码、历史或运行 artifact 导入主仓；只完成本地 `main`
+快进合并，未向远端推送。

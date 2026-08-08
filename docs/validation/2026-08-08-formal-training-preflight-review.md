@@ -133,15 +133,16 @@ traversability/candidate cache，但仓库中还没有对应生成命令、manif
 - 候选 p95 `0.126391 ms`，reveal p95 `1.328467 ms`，24-worker 吞吐降幅
   `2.808589%`，全部通过冻结门限。
 
-## 文档权威顺序
+## 文档权威边界
 
-现行解释按以下顺序读取：
+不同文档分别回答不同问题，不使用一个含混的全局先后顺序：
 
-1. `docs/superpowers/specs/2026-08-08-formal-capability-and-hopper-no-fuel-budget-design.md`；
-2. `docs/superpowers/specs/2026-08-08-sensor-observation-capability-design.md`；
-3. `docs/migration/volume-3-pretraining-readiness.md`；
-4. `docs/validation/sensor-observation-capability-qualification.md`；
-5. 本复审。
+- 规划能力与飞跃式无累计燃料接口以
+  `docs/superpowers/specs/2026-08-08-formal-capability-and-hopper-no-fuel-budget-design.md` 为准；
+- 探索观测、theta 和 reward 语义以
+  `docs/superpowers/specs/2026-08-08-sensor-observation-capability-design.md` 为准；
+- 能否启动正式训练以本复审为准，`docs/migration/volume-3-pretraining-readiness.md` 记录同一状态；
+- 自动化数值和性能证据以 `docs/validation/sensor-observation-capability-qualification.md` 为准。
 
 2026-08-07 及更早的外部 capability closure、实时/累计燃料和旧 Volume 3 规划表述只保留为历史
 证据；与上述文档冲突时一律不具有现行操作效力。
