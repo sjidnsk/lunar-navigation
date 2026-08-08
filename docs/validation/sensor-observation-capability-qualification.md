@@ -165,7 +165,7 @@ capability v2。本轮完成的是训练资格闭包，未启动正式 PPO 训�
 
 独立外部仓
 `/home/kai/CodexDownloads/lunar_navigation/isaac_ros_action_regression` 使用分支
-`feature/hopper-no-fuel-budget-sync` 完成同步，当前提交为 `dbfdb43`。该分支不再发布
+`feature/hopper-no-fuel-budget-sync` 完成同步，当前提交为 `d173f09`。该分支不再发布
 `/platform/hopper_propellant_state`，不含燃料提交 API 或燃料提交失败状态；外部 hopper
 capability 使用 `20.0 kg` 参考总质量和 `0.2 kg` 参考推进剂计算每次相同的单跳包线。
 
