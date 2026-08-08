@@ -34,6 +34,23 @@
 开始时的同一 policy version 产生；段末使用 `V(s_T)` bootstrap。下一段允许使用更新后的 policy
 继续同一环境状态，这是标准 on-policy 采集，不需要为了更新网络而重置世界。
 
+## 正式任务场景全集与共同可行动子集
+
+冻结 source/split 仍完整保存 1734 个物理场景，不因平台能力删除数据。正式三平台训练与评估的
+任务全集定义为其中的“共同可行动子集”：同一场景必须能按 capability v2 为轮式、足式和飞跃式
+各确定一个安全、初始 reveal 后可产生候选的起点。只有三平台全部满足时，
+`start_qualification.common_eligible=true`。
+
+该筛选是任务定义，不是用训练结果挑简单样本：资格在 PPO 之前由静态投影确定，精确场景 ID、
+三平台起点及排除原因写入 content-addressed cache。NASA 的 train/validation/test 每个 split
+共同可行动比例必须至少为 90%，六个 JAXA holdout 必须全部可行动；达不到即禁止正式训练。
+当前 cache 的共同可行动数量为 train 1475、validation 90、test 95、holdout 6，共 1666；其余
+68 个均因飞跃式没有合格起点而处于任务域外，不能计为成功或失败，也不能进入评估分母。
+
+每个平台对应 lane 使用同一 seeded permutation，按一轮不放回、轮末再循环的方式遍历共同子集；
+评估对每个 eligible scene 恰好执行一次。报告必须按 split×platform 给出分母，validation、test
+和 holdout 分别过门，禁止用合并平均掩盖任一 split。
+
 ## ObservationContractV3
 
 旧 `pose_features [B,6]` 的第六项 `remaining_decision_budget_ratio` 在无固定预算任务中没有真实
@@ -130,6 +147,11 @@ terminal，覆盖率按
 `sum(observed_ratio * mission_roi_ratio) / sum(mission_roi_ratio)` 计算。已经完成的 row
 冻结其 evidence，不得用后续自动重置 episode 覆盖结果。
 
+场景身份使用 cache 中共同可行动场景的固定 seeded permutation。报告中的 `scenario_seed` 必须
+与 worker 实际执行的 `scene_id` 一一对应；不得再对 episode cursor 叠加带放回 hash 偏移。
+成功率只读取 controller 产生的 `success_first_crossing` 事件，不能从 float32 最终覆盖率按容差
+反推成功。
+
 为防止基础设施无限挂起，评估器可使用独立 watchdog；watchdog 不进入观测、不改变策略、不
 产生失败 reward。超出后整个对应评估批次以 `EVALUATION_INCOMPLETE` 退出，不生成可通过发布门
 的报告。
@@ -144,8 +166,31 @@ terminal，覆盖率按
 - KL、value loss、advantage/return 有限性；
 - update-boundary checkpoint/resume digest。
 
-候选必须通过相同语义回归和资源稳定性门；在通过者中选吞吐最高者。选择结果写入 calibration
-manifest 和 frozen config。任何 horizon 都不得出现在 episode terminal 判断中。
+候选必须通过相同语义回归和资源稳定性门。先找实测最高吞吐；吞吐达到最高值 99% 的候选视为
+工程近似等价，再优先选择单次 update wall time 更短、最后选择较小 horizon，避免亚百分之一的
+测量噪声把训练冻结到更长更新边界。选择结果写入 calibration manifest 和 frozen config。
+任何 horizon 都不得出现在 episode terminal 判断中；formal preflight 必须读取该 calibration
+root，不能把配置文件中的 bootstrap 值 `32` 写成已校准结果。
+
+## 正式训练计划与“训练完成”定义
+
+训练使用 seed 4080 和累计 86400 GPU seconds 上限。校准阶段最多 2 小时；随后轮式、足式、
+飞跃式各最多 2 小时预热；节余时间全部进入三平台 8+8+8 联合训练，联合阶段至少保留 16 小时。
+`latest.pt` 每 30 分钟保存恢复状态，联合阶段每 1 小时保存不可变候选。episode 不因阶段、保存、
+PPO update 或 86400 秒边界伪造成功。
+
+以下三个状态必须区分：
+
+1. `training-running`：预算未结束，也没有冻结的通过候选；
+2. `release-gate-passed`：某个冻结 checkpoint 在 validation、test、holdout 的每个
+   split×platform 上分别满足覆盖成功率不低于 0.95、零安全/非法/平台错配/飞跃承诺违规、
+   finite rate 1.0、observed-safe rate 1.0 和 deterministic repeat rate 1.0；这才表示本轮 PPO
+   训练成功完成；
+3. `not-converged`：累计 GPU 预算耗尽仍无 checkpoint 通过。此时训练运行已经结束，但不能说
+   模型训练成功，也不能进入 ONNX/TensorRT/AGX 发布链。
+
+训练曲线变平、loss 下降、达到 24 小时或生成 `latest.pt` 都不是完成标准。ONNX 等价、TensorRT
+构建和 AGX 验收是通过候选之后的独立阶段，不反向改变 PPO 是否收敛的判定。
 
 ## 完成标准
 

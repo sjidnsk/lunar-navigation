@@ -1,5 +1,9 @@
 # 月球极区正式训练环境闭环设计
 
+> 2026-08-09 现行修订：本文的 source/split、多分辨率 truth/observed 和确定性场景生成仍有效；
+> cache schema、共同起点任务域、ObservationContract、episode 生命周期、checkpoint、场景调度与
+> 评估完成语义已由 `2026-08-09-unbounded-formal-episode-design.md` 取代。冲突时以后者为准。
+
 日期：2026-08-08
 状态：已批准，作为正式训练前数据、场景、缓存和运行入口的现行权威
 

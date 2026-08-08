@@ -29,6 +29,7 @@ TOTAL_GPU_BUDGET_SECONDS = INITIAL_GPU_BUDGET_SECONDS
 CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS = 600.0
 TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS = 600.0
 ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER = 64
+ROLLOUT_HORIZON_THROUGHPUT_NEAR_TIE_RATIO = 0.99
 
 
 class BudgetError(ValueError):
@@ -185,6 +186,38 @@ class CalibrationResult:
     compared_workers: tuple[int, ...]
     measurements: tuple[CalibrationMeasurement, ...]
     horizon_measurements: tuple[HorizonCalibrationMeasurement, ...]
+
+
+def select_qualified_rollout_horizon(
+    measurements: Iterable[HorizonCalibrationMeasurement],
+) -> int:
+    """Prefer a shorter update when throughput is within one percent of best."""
+    candidates = tuple(measurements)
+    if not candidates or any(
+        not isinstance(value, HorizonCalibrationMeasurement)
+        or value.throughput_transitions_per_second <= 0.0
+        for value in candidates
+    ):
+        raise CalibrationError(
+            "rollout horizon selection requires qualified measurements"
+        )
+    fastest = max(
+        value.throughput_transitions_per_second for value in candidates
+    )
+    near_ties = tuple(
+        value
+        for value in candidates
+        if value.throughput_transitions_per_second
+        >= fastest * ROLLOUT_HORIZON_THROUGHPUT_NEAR_TIE_RATIO
+    )
+    return min(
+        near_ties,
+        key=lambda value: (
+            value.mean_update_wall_seconds,
+            value.rollout_horizon,
+            -value.throughput_transitions_per_second,
+        ),
+    ).rollout_horizon
 
 
 @dataclass(slots=True)
@@ -542,14 +575,9 @@ def calibrate_runtime(
                 qualified_horizons.append(measurement)
         if not qualified_horizons:
             raise CalibrationError("no rollout horizon passed semantic calibration")
-        selected_rollout_horizon = min(
-            qualified_horizons,
-            key=lambda value: (
-                -value.throughput_transitions_per_second,
-                value.mean_update_wall_seconds,
-                value.rollout_horizon,
-            ),
-        ).rollout_horizon
+        selected_rollout_horizon = select_qualified_rollout_horizon(
+            qualified_horizons
+        )
     frozen_config = with_rollout_horizon(config, selected_rollout_horizon)
     result = CalibrationResult(
         selected_workers=selected_workers,
@@ -701,7 +729,9 @@ __all__ = [
     "HorizonCalibrationMeasurement",
     "CalibrationResult",
     "ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER",
+    "ROLLOUT_HORIZON_THROUGHPUT_NEAR_TIE_RATIO",
     "TrainingBudget",
     "calibrate_runtime",
+    "select_qualified_rollout_horizon",
     "extend_budget_manifest",
 ]

@@ -1,5 +1,9 @@
 # 月球极区三平台 v3 单网络 PPO 完整设计
 
+> 2026-08-09 补充：本文的 `pose_features [B,6]`、固定 `rollout_horizon=32` 及早期
+> checkpoint/cache 不是现行正式训练合同；以
+> `2026-08-09-unbounded-formal-episode-design.md` 和当前资格报告为准。
+
 > **历史设计，已部分取代（2026-08-08）：** 本文的数据、七输入、共享 PPO 与 checkpoint
 > 骨架仍可参考；外置 capability bundle、旧平台能力、旧路径算法、旧观测默认值及“能力冻结后
 > 即可训练”的表述已过时。现行权威见

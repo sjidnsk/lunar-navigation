@@ -435,7 +435,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q \
 
 - [ ] **Step 3: Implement candidate calibration and manifest selection**
 
-Keep horizon out of environment constructors and terminal logic. Freeze the highest-throughput qualified candidate; ties prefer the smaller update latency, then the smaller horizon.
+Keep horizon out of environment constructors and terminal logic. Find the highest-throughput qualified candidate, treat candidates within 1% of that throughput as engineering near-ties, then prefer the smaller update latency and smaller horizon.
 
 - [ ] **Step 4: Run all affected and full test suites**
 
@@ -450,7 +450,7 @@ git diff --check
 
 - [ ] **Step 5: Regenerate external preflight/calibration evidence**
 
-Use a new source-commit artifact root, reopen every JSON/checkpoint with production loaders, and do not run `train`.
+Use a new source-commit artifact root. Run calibration before formal preflight, require preflight to consume the calibrated root and record the same workers, micro-batch and horizon, reopen every JSON/checkpoint with production loaders, and do not run `train`.
 
 - [ ] **Step 6: Update readiness documents and commit**
 

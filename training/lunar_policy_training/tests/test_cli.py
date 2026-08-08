@@ -131,6 +131,8 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
             "/tmp/formal-cache/cache-manifest.json",
             "--artifact-root",
             "/tmp/formal-preflight",
+            "--calibration-root",
+            "/tmp/lunar-task4",
             "--sensor-performance-report",
             "/tmp/sensor-performance.json",
         ]
@@ -158,6 +160,7 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
     assert evaluate.command == "evaluate"
     assert formal_preflight.command == "formal-preflight"
     assert formal_preflight.cache_manifest.endswith("cache-manifest.json")
+    assert formal_preflight.calibration_root == "/tmp/lunar-task4"
     assert evaluate.sensor_performance_report is None
     assert extension.command == "extend-budget"
     assert extension.blocks == 2

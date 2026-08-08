@@ -48,6 +48,7 @@ from .budget import (
     TrainingBudget,
     calibrate_runtime,
     extend_budget_manifest,
+    select_qualified_rollout_horizon,
 )
 from .checkpoint import (
     FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
@@ -93,6 +94,7 @@ from .sensor_performance import (
     SensorPerformanceError,
     current_host_identity,
     load_sensor_performance_report,
+    require_clean_sensor_source,
     sensor_source_commit,
     validate_sensor_performance_report,
 )
@@ -1023,14 +1025,7 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
             raise ArtifactRootError(
                 "formal rollout horizon calibration has no qualified candidate"
             )
-        expected_selection = min(
-            qualified,
-            key=lambda value: (
-                -value.throughput_transitions_per_second,
-                value.mean_update_wall_seconds,
-                value.rollout_horizon,
-            ),
-        ).rollout_horizon
+        expected_selection = select_qualified_rollout_horizon(qualified)
         if selected_rollout_horizon != expected_selection:
             raise ArtifactRootError(
                 "formal rollout horizon selection differs from evidence"
@@ -1112,6 +1107,7 @@ def build_parser() -> argparse.ArgumentParser:
     formal_preflight.add_argument("--config", required=True)
     formal_preflight.add_argument("--cache-manifest", required=True)
     formal_preflight.add_argument("--artifact-root", required=True)
+    formal_preflight.add_argument("--calibration-root", required=True)
     formal_preflight.add_argument("--sensor-performance-report", required=True)
 
     extend_budget = subparsers.add_parser("extend-budget")
@@ -1327,6 +1323,15 @@ def main(argv: list[str] | None = None) -> int:
                 split=split,
             )
         evaluation_batches = _formal_evaluation_batches(cache, assemblies)
+        calibrated = _validated_formal_preflight_calibration(
+            calibration_root=Path(arguments.calibration_root),
+            requested_config=requested_config,
+            cache=cache,
+            train_assembly=train_assembly,
+            cache_manifest_path=Path(arguments.cache_manifest),
+            sensor_performance_sha256=sensor_report_sha256,
+            repository_root=repository_root,
+        )
         preflight_root = validate_artifact_root(
             Path(arguments.artifact_root), repository_root=repository_root
         )
@@ -1336,15 +1341,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         try:
             resume_equivalence = _formal_resume_equivalence_check(
-                config=requested_config,
+                config=calibrated.config,
                 assembly=train_assembly,
                 run_identity=_formal_run_identity(cache.identity),
                 source_commit=_source_commit(repository_root),
                 artifact_root=preflight_root,
-                selected_workers=max(
-                    requested_config.parallel.worker_candidates
-                ),
-                micro_batch_size=2,
+                selected_workers=calibrated.selected_workers,
+                micro_batch_size=calibrated.micro_batch_size,
             )
             report, report_path = run_formal_preflight(
                 cache=cache,
@@ -1355,10 +1358,9 @@ def main(argv: list[str] | None = None) -> int:
                 sensor_performance_sha256=sensor_performance_sha256,
                 artifact_root=preflight_root,
                 worker_candidates=requested_config.parallel.worker_candidates,
-                selected_micro_batch=2,
-                selected_rollout_horizon=(
-                    requested_config.ppo.rollout_horizon
-                ),
+                selected_workers=calibrated.selected_workers,
+                selected_micro_batch=calibrated.micro_batch_size,
+                selected_rollout_horizon=calibrated.rollout_horizon,
                 resume_equivalence=resume_equivalence,
             )
         except FormalPreflightError as error:
@@ -1467,6 +1469,62 @@ def _formal_environment_from_calibrated_root(
     ):
         raise PreflightError("formal training scenario schedule differs from calibration")
     return assembly
+
+
+def _validated_formal_preflight_calibration(
+    *,
+    calibration_root: Path,
+    requested_config: ResolvedTrainingConfig,
+    cache: FormalCache,
+    train_assembly: FormalEnvironmentAssembly,
+    cache_manifest_path: Path,
+    sensor_performance_sha256: str,
+    repository_root: Path,
+) -> CalibratedRunState:
+    """Bind preflight evidence to the exact frozen calibration selection."""
+    try:
+        require_clean_sensor_source(repository_root)
+    except SensorPerformanceError as error:
+        raise PreflightError(
+            f"formal preflight requires a clean source tree: {error}"
+        ) from error
+    root = validate_artifact_root(
+        calibration_root, repository_root=repository_root
+    )
+    calibrated = _load_calibrated_run_state(root)
+    manifest = _read_run_manifest(root / "run-manifest.json")
+    expected_config = with_rollout_horizon(
+        requested_config, calibrated.rollout_horizon
+    )
+    expected_cache_path = cache_manifest_path.resolve(strict=True)
+    if calibrated.config != expected_config:
+        raise PreflightError("formal preflight config differs from calibration")
+    if (
+        manifest.get("source_commit") != _source_commit(repository_root)
+        or manifest.get("global_step") != 0
+        or (root / "checkpoints").exists()
+    ):
+        raise PreflightError(
+            "formal preflight requires current unstarted calibration evidence"
+        )
+    if (
+        calibrated.run_identity != _formal_run_identity(cache.identity)
+        or calibrated.cache_manifest_path is None
+        or calibrated.cache_manifest_path.resolve(strict=True)
+        != expected_cache_path
+        or calibrated.cache_manifest_sha256
+        != cache.manifest["cache_manifest_sha256"]
+        or calibrated.sensor_performance_sha256
+        != sensor_performance_sha256
+        or calibrated.scenario_schedule_id
+        != train_assembly.scenario_schedule_id
+        or calibrated.selected_workers
+        not in requested_config.parallel.worker_candidates
+    ):
+        raise PreflightError(
+            "formal preflight environment differs from calibration"
+        )
+    return calibrated
 
 
 def _formal_evaluation_batches(

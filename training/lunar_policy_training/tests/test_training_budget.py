@@ -224,6 +224,57 @@ def test_rollout_horizon_calibration_uses_equal_work_and_freezes_selection(
     assert len(payload["runtime_calibration"]["horizon_measurements"]) == 3
 
 
+def test_rollout_horizon_near_ties_prefer_the_shorter_update_boundary(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if measurement noise selected a much longer update."""
+    config = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+
+    def horizon_probe(
+        workers: int,
+        micro_batch: int,
+        rollout_horizon: int,
+        transitions_per_worker: int,
+    ) -> HorizonCalibrationMeasurement:
+        throughput = {16: 100.0, 32: 100.5, 64: 100.8}[rollout_horizon]
+        update_wall = {16: 2.0, 32: 4.0, 64: 8.0}[rollout_horizon]
+        return HorizonCalibrationMeasurement(
+            workers=workers,
+            micro_batch=micro_batch,
+            rollout_horizon=rollout_horizon,
+            total_transitions=workers * transitions_per_worker,
+            completed_updates=transitions_per_worker // rollout_horizon,
+            throughput_transitions_per_second=throughput,
+            mean_update_wall_seconds=update_wall,
+            peak_gpu_memory_fraction=0.5,
+            worker_wait_ratio=0.25,
+            planner_timeouts=0,
+            oom=False,
+            gpu_seconds=1.0,
+            ipc_failures=0,
+            approximate_kl=0.01,
+            value_loss=0.2,
+            advantages_finite=True,
+            returns_finite=True,
+            update_boundary_continuity_verified=True,
+            resume_digest="a" * 64,
+            resume_verified=True,
+        )
+
+    result = calibrate_runtime(
+        config=config,
+        workload=_CalibrationProbe(),
+        horizon_workload=horizon_probe,
+        budget=TrainingBudget(),
+        manifest_path=tmp_path / "run-manifest.json",
+        micro_batch_candidates=(1, 2, 4),
+    )
+
+    assert result.selected_rollout_horizon == 16
+
+
 def test_rollout_horizon_selection_rejects_fast_but_semantically_invalid_candidate(
     tmp_path: pathlib.Path,
 ) -> None:

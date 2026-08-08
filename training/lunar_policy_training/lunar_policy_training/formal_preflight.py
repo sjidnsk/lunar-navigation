@@ -481,6 +481,7 @@ def run_formal_preflight(
     sensor_performance_sha256: str,
     artifact_root: Path,
     worker_candidates: tuple[int, ...] = (18, 24),
+    selected_workers: int | None = None,
     selected_micro_batch: int = 2,
     selected_rollout_horizon: int = 32,
     resume_equivalence: Mapping[str, object] | None = None,
@@ -506,7 +507,12 @@ def run_formal_preflight(
         qualified.append(workers)
     if not qualified:
         raise FormalPreflightError("no formal worker configuration qualified")
-    selected_workers = max(qualified)
+    if selected_workers is None:
+        selected_workers = max(qualified)
+    elif selected_workers not in qualified:
+        raise FormalPreflightError(
+            "calibrated worker selection did not pass preflight"
+        )
 
     bounded_batches = tuple(
         FormalEvaluationBatch(
