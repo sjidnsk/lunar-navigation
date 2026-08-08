@@ -235,6 +235,8 @@ def _legged_capability() -> bridge_api.LeggedCapability:
 def _hopper_capability() -> bridge_api.HopperCapability:
     capability = bridge_api.HopperCapability()
     capability.specific_impulse_s = 301.0
+    capability.reference_total_mass_kg = 20.0
+    capability.reference_propellant_mass_kg = 0.2
     capability.landing_support_radius_m = 0.45
     capability.flight_collision_radius_m = 0.55
     capability.maximum_landing_plane_residual_m = 0.05
@@ -443,13 +445,6 @@ class _ProxyEpisode:
             state.pose = _pose(*self.position, 0.5)
             request.current_state = state
             request.capability = _hopper_capability()
-            propellant = bridge_api.HopperPropellantState()
-            propellant.stamp.nanoseconds_since_epoch = stamp_ns
-            propellant.platform_id = request.platform_id
-            propellant.capability_version = request.capability_version
-            propellant.total_mass_kg = 20.0
-            propellant.remaining_usable_fuel_mass_kg = 0.2
-            request.hopper_propellant = propellant
         request.world.global_map = _flat_proxy_map(
             "map",
             platform_type=self.platform_type,

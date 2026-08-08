@@ -22,11 +22,10 @@ def _load_watcher():
     return module
 
 
-def _write_inputs(root: Path, *, capability: bool = True) -> dict[str, Path]:
+def _write_inputs(root: Path) -> dict[str, Path]:
     manifest = root / "run-manifest.json"
     checkpoint = root / "latest.pt"
     pause = root / "pause.marker"
-    capability_lock = root / "capability-lock.json"
     manifest.write_text(
         json.dumps(
             {
@@ -40,26 +39,12 @@ def _write_inputs(root: Path, *, capability: bool = True) -> dict[str, Path]:
         encoding="utf-8",
     )
     checkpoint.write_bytes(b"inert-checkpoint-metadata")
-    if capability:
-        capability_lock.write_text(
-            json.dumps(
-                {
-                    "schema": "lunar-training-capability-freeze/v1",
-                    "formal_eligible": True,
-                    "test_only": False,
-                    "proxy": False,
-                    "platforms": [{}, {}, {}],
-                }
-            ),
-            encoding="utf-8",
-        )
     os.utime(manifest, (1_000.0, 1_000.0))
     os.utime(checkpoint, (1_000.0, 1_000.0))
     return {
         "manifest": manifest,
         "checkpoint": checkpoint,
         "pause": pause,
-        "capability": capability_lock,
     }
 
 
@@ -70,7 +55,7 @@ def _inspect(watcher, paths: dict[str, Path], **overrides):
         "manifest_path": paths["manifest"],
         "checkpoint_path": paths["checkpoint"],
         "pause_marker_path": paths["pause"],
-        "capability_lock_path": paths["capability"],
+        "repository_root": REPOSITORY_ROOT,
         "disk_path": paths["manifest"].parent,
         "stale_after_seconds": 300.0,
         "minimum_disk_free_bytes": 1024,
@@ -83,7 +68,7 @@ def _inspect(watcher, paths: dict[str, Path], **overrides):
         ),
         "capability_probe": lambda path: {
             "formal_eligible": True,
-            "reason": "formal-lock-present",
+            "reason": "project-formal-capability",
         },
         "gpu_probe": lambda: watcher.GpuEvidence(
             ok=True,
@@ -134,11 +119,11 @@ def test_healthy_inspection_is_deterministic_and_read_only(tmp_path: Path) -> No
     assert after == before
 
 
-def test_pause_marker_precedes_missing_capability_and_live_probes(tmp_path: Path) -> None:
+def test_pause_marker_precedes_capability_and_live_probes(tmp_path: Path) -> None:
     """Would fail if automation acted past an explicit operator pause."""
     watcher = _load_watcher()
     assert watcher is not None, "watch_training.py is not implemented"
-    paths = _write_inputs(tmp_path, capability=False)
+    paths = _write_inputs(tmp_path)
     paths["pause"].write_text("paused\n", encoding="utf-8")
 
     result = _inspect(
@@ -157,16 +142,19 @@ def test_pause_marker_precedes_missing_capability_and_live_probes(tmp_path: Path
     assert result["pause_marker"]["present"] is True
 
 
-def test_missing_formal_capability_blocks_before_runtime_probes(tmp_path: Path) -> None:
-    """Would fail if watcher called an unresolved capability state healthy."""
+def test_invalid_project_capability_blocks_before_runtime_probes(tmp_path: Path) -> None:
+    """Would fail if watcher called an unresolved project capability healthy."""
     watcher = _load_watcher()
     assert watcher is not None, "watch_training.py is not implemented"
-    paths = _write_inputs(tmp_path, capability=False)
+    paths = _write_inputs(tmp_path)
 
     result = _inspect(
         watcher,
         paths,
-        capability_probe=watcher._capability_evidence,
+        capability_probe=lambda _root: {
+            "formal_eligible": False,
+            "reason": "invalid",
+        },
         process_probe=lambda pid: (_ for _ in ()).throw(
             AssertionError("capability gate must precede process probes")
         ),
@@ -178,14 +166,14 @@ def test_missing_formal_capability_blocks_before_runtime_probes(tmp_path: Path) 
     assert result["state"] == "blocked-capability"
     assert result["capability"] == {
         "formal_eligible": False,
-        "reason": "missing",
+        "reason": "invalid",
     }
 
 
-def test_flagged_but_incomplete_capability_lock_remains_blocked(
+def test_missing_project_capability_files_remain_blocked(
     tmp_path: Path,
 ) -> None:
-    """Would fail if watcher trusted labels without verifying resource closure."""
+    """Would fail if watcher trusted a repository path without canonical files."""
     watcher = _load_watcher()
     assert watcher is not None, "watch_training.py is not implemented"
     paths = _write_inputs(tmp_path)
@@ -193,6 +181,7 @@ def test_flagged_but_incomplete_capability_lock_remains_blocked(
     result = _inspect(
         watcher,
         paths,
+        repository_root=tmp_path,
         capability_probe=watcher._capability_evidence,
         process_probe=lambda pid: (_ for _ in ()).throw(
             AssertionError("invalid capability must precede process probes")
@@ -339,8 +328,6 @@ def test_once_cli_emits_exactly_one_sorted_json_line(
             "/tmp/latest.pt",
             "--pause-marker",
             "/tmp/pause.marker",
-            "--capability-lock",
-            "/tmp/capability-lock.json",
             "--disk-path",
             "/tmp",
         ]

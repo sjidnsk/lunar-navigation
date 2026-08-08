@@ -649,7 +649,19 @@ void BindOutput(py::module_ &module) {
       .def_readwrite("launch_velocity_mps",
                      &planning::HopSegment::launch_velocity_mps)
       .def_readwrite("flight_tube_radius_m",
-                     &planning::HopSegment::flight_tube_radius_m);
+                     &planning::HopSegment::flight_tube_radius_m)
+      .def_readwrite("nominal_landing_point_m",
+                     &planning::HopSegment::nominal_landing_point_m)
+      .def_readwrite("required_delta_v_mps",
+                     &planning::HopSegment::required_delta_v_mps)
+      .def_readwrite("available_delta_v_mps",
+                     &planning::HopSegment::available_delta_v_mps)
+      .def_readwrite("capability_version",
+                     &planning::HopSegment::capability_version)
+      .def_readwrite("global_map_generation",
+                     &planning::HopSegment::global_map_generation)
+      .def_readwrite("local_map_generation",
+                     &planning::HopSegment::local_map_generation);
   py::class_<planning::HopReference>(module, "HopReference")
       .def(py::init<>())
       .def_readwrite("segments", &planning::HopReference::segments);

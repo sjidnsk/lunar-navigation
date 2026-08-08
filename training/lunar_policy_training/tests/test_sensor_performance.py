@@ -14,6 +14,10 @@ from lunar_policy_training.sensor_performance import (
     validate_sensor_performance_report,
     write_sensor_performance_report_atomic,
 )
+from lunar_policy_training.project_capability import (
+    APPROVED_PROJECT_CAPABILITY_SHA256,
+)
+from training.tools import benchmark_sensor_observation as benchmark_tool
 
 
 HOST = {
@@ -151,6 +155,39 @@ def test_report_builder_seals_exact_current_planner_fixture() -> None:
     )
     assert report["passed"] is True
     assert report["report_sha256"] == sensor_performance_sha256(report)
+
+
+def test_formal_benchmark_uses_project_capability_without_external_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "sensor-performance.json"
+    monkeypatch.setattr(
+        benchmark_tool, "require_clean_sensor_source", lambda _root: None
+    )
+    monkeypatch.setattr(
+        benchmark_tool, "_native_executable", lambda _path: tmp_path / "native"
+    )
+    monkeypatch.setattr(
+        benchmark_tool, "_run_native_benchmark", lambda _path: _native_benchmark()
+    )
+    monkeypatch.setattr(
+        benchmark_tool,
+        "benchmark_observation_throughput",
+        lambda **_kwargs: {
+            "observation_disabled": 100.0,
+            "observation_enabled": 95.0,
+        },
+    )
+    monkeypatch.setattr(
+        benchmark_tool, "sensor_source_commit", lambda _root: SOURCE_COMMIT
+    )
+
+    assert benchmark_tool.main(["--output", str(output)]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["capability_sha256"] == APPROVED_PROJECT_CAPABILITY_SHA256
+    parsed = benchmark_tool.build_parser().parse_args(["--output", str(output)])
+    assert not hasattr(parsed, "capability_lock")
 
 
 def test_formal_throughput_rejects_missing_current_capability_or_worker_fallback() -> None:

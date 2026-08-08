@@ -170,18 +170,12 @@ def _capability_fixture_module():
 
 
 @pytest.mark.parametrize("command", ("train", "resume", "evaluate"))
-def test_public_formal_commands_reject_test_only_bundle_before_side_effects(
+def test_public_formal_commands_reject_external_bundle_argument_before_side_effects(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     command: str,
 ) -> None:
-    """Would fail if a complete development bundle reached artifacts/CUDA/workers."""
-    lock = _capability_fixture_module()._write_bundle(
-        tmp_path / "test-only-capabilities",
-        formal_eligible=False,
-        test_only=True,
-        proxy=True,
-    )
+    """An external development bundle cannot override the project authority."""
     artifact_root = tmp_path / "formal-artifacts"
     touched: list[str] = []
     monkeypatch.setattr(
@@ -213,10 +207,10 @@ def test_public_formal_commands_reject_test_only_bundle_before_side_effects(
         "--artifact-root",
         str(artifact_root),
         "--capability-lock",
-        str(lock),
+        str(tmp_path / "test-only-capabilities.json"),
     ]
 
-    with pytest.raises(PreflightError, match="formal capability bundle"):
+    with pytest.raises(SystemExit):
         training_cli.main(arguments)
 
     assert touched == []

@@ -286,7 +286,7 @@ def test_hopper_proxy_request_ignores_theta_and_uses_exact_point() -> None:
     assert request.goal.yaw_rad is None
     assert request.goal.yaw_tolerance_rad == 0.0
     assert request.goal.target.tolerance_m == 0.0
-    assert request.hopper_propellant is not None
+    assert not hasattr(request, "hopper_propellant")
 
 
 @pytest.mark.parametrize("platform_type", ["WHEELED", "LEGGED"])

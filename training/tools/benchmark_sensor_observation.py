@@ -16,9 +16,9 @@ from typing import Sequence
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "lunar_policy_training"
 sys.path.insert(0, str(PACKAGE_ROOT))
 
-from lunar_policy_training.capability_freeze import (  # noqa: E402
-    CapabilityFreezeError,
-    load_frozen_capability_bundle,
+from lunar_policy_training.capability_freeze import CapabilityFreezeError  # noqa: E402
+from lunar_policy_training.project_capability import (  # noqa: E402
+    load_project_formal_capability,
 )
 from lunar_policy_training.sensor_performance import (  # noqa: E402
     NATIVE_SAMPLE_COUNT,
@@ -41,7 +41,6 @@ from lunar_policy_training.training_semantics import (  # noqa: E402
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--capability-lock", type=Path)
     parser.add_argument("--native-benchmark", type=Path)
     parser.add_argument("--workers", type=int, default=REQUIRED_WORKERS)
     parser.add_argument(
@@ -61,9 +60,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "sensor performance qualification requires exactly 24 workers"
             )
         if arguments.diagnostic_only:
-            if arguments.output is not None or arguments.capability_lock is not None:
+            if arguments.output is not None:
                 raise SensorPerformanceError(
-                    "diagnostic-only does not accept formal output or capability lock"
+                    "diagnostic-only does not accept formal output"
                 )
             throughput = benchmark_observation_throughput(
                 workers=arguments.workers,
@@ -83,19 +82,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
-        if arguments.output is None or arguments.capability_lock is None:
-            raise SensorPerformanceError(
-                "formal benchmark requires --output and --capability-lock"
-            )
+        if arguments.output is None:
+            raise SensorPerformanceError("formal benchmark requires --output")
         output = _external_output(arguments.output, repository_root)
         require_clean_sensor_source(repository_root)
         try:
-            capability = load_frozen_capability_bundle(
-                arguments.capability_lock, run_kind="formal"
-            )
+            capability = load_project_formal_capability(repository_root)
         except CapabilityFreezeError as error:
             raise SensorPerformanceError(
-                f"formal capability lock is invalid: {error}"
+                f"project formal capability is invalid: {error}"
             ) from error
         native = _run_native_benchmark(_native_executable(arguments.native_benchmark))
         throughput = benchmark_observation_throughput(

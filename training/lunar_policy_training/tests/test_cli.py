@@ -198,12 +198,12 @@ def test_formal_parser_has_no_max_updates_escape_hatch(command: str) -> None:
 
 
 @pytest.mark.parametrize("command", ("train", "resume", "evaluate"))
-def test_formal_without_capability_lock_fails_before_artifact_or_cuda(
+def test_formal_uses_project_capability_before_artifact_or_cuda(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     command: str,
 ) -> None:
-    """Would fail if a formal entry touched artifacts/CUDA before capability gate."""
+    """Formal entry uses the project freeze and reaches the performance gate first."""
     artifact_root = tmp_path / command
     touched: list[str] = []
     monkeypatch.setattr(
@@ -226,11 +226,34 @@ def test_formal_without_capability_lock_fails_before_artifact_or_cuda(
         ]
     arguments += ["--artifact-root", str(artifact_root)]
 
-    with pytest.raises(PreflightError, match="formal capability bundle"):
+    parsed = build_parser().parse_args(arguments)
+    assert not hasattr(parsed, "capability_lock")
+
+    with pytest.raises(PreflightError, match="sensor performance report"):
         cli_module.main(arguments)
 
     assert touched == []
     assert not artifact_root.exists()
+
+
+@pytest.mark.parametrize("command", ("train", "resume", "evaluate"))
+def test_formal_parser_rejects_external_capability_lock(command: str) -> None:
+    arguments = [command]
+    if command == "train":
+        arguments += ["--config", "formal.yaml"]
+    elif command == "resume":
+        arguments += ["--checkpoint", "latest.pt"]
+    else:
+        arguments += ["--checkpoint", "latest.pt", "--gate", "gate.yaml"]
+    arguments += [
+        "--artifact-root",
+        "/tmp/formal",
+        "--capability-lock",
+        "/tmp/stale-lock.json",
+    ]
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(arguments)
 
 
 def test_development_smoke_is_proxy_only_and_bounded_to_two_updates(

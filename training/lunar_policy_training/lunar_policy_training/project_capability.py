@@ -289,6 +289,9 @@ def _hopper_payload(raw: Mapping[str, object]) -> dict[str, object]:
     safety = _required_mapping(raw, "safety")
     environment = _required_mapping(raw, "environment")
     reference = _required_mapping(raw, "reference_conditions")
+    # The approved freeze keeps its historical source-field spelling so its
+    # digest stays stable. It is adapted once into a non-decrementing reference
+    # envelope quantity; it is never exposed as runtime remaining fuel.
     return {
         "specific_impulse_s": propulsion["specific_impulse_s"],
         "reference_total_mass_kg": reference["reference_total_mass_kg"],

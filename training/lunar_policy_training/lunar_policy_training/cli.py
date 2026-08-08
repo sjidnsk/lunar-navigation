@@ -1,4 +1,4 @@
-"""Volume 3 training entry point; Task 4 extends this parser later."""
+"""Current formal and development-smoke training entry point."""
 
 from __future__ import annotations
 
@@ -28,8 +28,8 @@ from .capability_freeze import (
     CapabilityFreezeError,
     FrozenCapabilityBundle,
     FrozenCapabilityEnvironmentFactory,
-    load_frozen_capability_bundle,
 )
+from .project_capability import load_project_formal_capability
 from .budget import (
     BudgetExceededError,
     CalibrationMeasurement,
@@ -701,20 +701,17 @@ def build_parser() -> argparse.ArgumentParser:
     train = subparsers.add_parser("train")
     train.add_argument("--config", required=True)
     train.add_argument("--artifact-root", required=True)
-    train.add_argument("--capability-lock")
     train.add_argument("--sensor-performance-report")
 
     resume = subparsers.add_parser("resume")
     resume.add_argument("--artifact-root", required=True)
     resume.add_argument("--checkpoint", required=True)
-    resume.add_argument("--capability-lock")
     resume.add_argument("--sensor-performance-report")
 
     evaluate = subparsers.add_parser("evaluate")
     evaluate.add_argument("--checkpoint", required=True)
     evaluate.add_argument("--gate", required=True)
     evaluate.add_argument("--artifact-root", required=True)
-    evaluate.add_argument("--capability-lock")
     evaluate.add_argument("--sensor-performance-report")
 
     extend_budget = subparsers.add_parser("extend-budget")
@@ -752,9 +749,7 @@ def main(argv: list[str] | None = None) -> int:
             raise PreflightError(
                 "public train is formal; use the development-smoke helper"
             )
-        capability_bundle = _formal_capability_preflight(
-            arguments.capability_lock
-        )
+        capability_bundle = _formal_capability_preflight(repository_root)
         _formal_sensor_performance_preflight(
             arguments.sensor_performance_report,
             capability_bundle=capability_bundle,
@@ -771,9 +766,7 @@ def main(argv: list[str] | None = None) -> int:
             capability_bundle=capability_bundle,
         )
     elif arguments.command == "resume":
-        capability_bundle = _formal_capability_preflight(
-            arguments.capability_lock
-        )
+        capability_bundle = _formal_capability_preflight(repository_root)
         _formal_sensor_performance_preflight(
             arguments.sensor_performance_report,
             capability_bundle=capability_bundle,
@@ -787,9 +780,7 @@ def main(argv: list[str] | None = None) -> int:
             capability_bundle=capability_bundle,
         )
     elif arguments.command == "evaluate":
-        capability_bundle = _formal_capability_preflight(
-            arguments.capability_lock
-        )
+        capability_bundle = _formal_capability_preflight(repository_root)
         _formal_sensor_performance_preflight(
             arguments.sensor_performance_report,
             capability_bundle=capability_bundle,
@@ -815,14 +806,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _formal_capability_preflight(
-    lock_path: str | None,
+    repository_root: Path,
 ) -> FrozenCapabilityBundle:
-    if lock_path is None:
-        raise PreflightError("formal capability bundle is required")
     try:
-        return load_frozen_capability_bundle(Path(lock_path), run_kind="formal")
+        return load_project_formal_capability(repository_root)
     except CapabilityFreezeError as error:
-        raise PreflightError(f"formal capability bundle is invalid: {error}") from error
+        raise PreflightError(f"project formal capability is invalid: {error}") from error
 
 
 def _formal_sensor_performance_preflight(

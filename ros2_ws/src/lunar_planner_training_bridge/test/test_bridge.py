@@ -308,11 +308,23 @@ def test_bridge_uses_matching_v3_planner(bridge, easy_request, platform_type):
     assert output.diagnostics.planner_name == "cpp_v3_hierarchical"
 
 
-def test_hopper_request_has_no_dynamic_propellant_contract(easy_request) -> None:
+def test_hopper_request_has_repeatable_delta_v_and_no_dynamic_propellant_contract(
+    bridge, easy_request
+) -> None:
     request = easy_request("HOPPER")
 
     assert not hasattr(request, "hopper_propellant")
     assert not hasattr(bridge_api, "HopperPropellantState")
+    first = bridge.plan(request)
+    request.request_id = "training-hopper-repeat"
+    second = bridge.plan(request)
+    assert first.reference is not None, first.reason_code
+    assert second.reference is not None, second.reason_code
+    first_hop = first.reference.data.segments[0]
+    second_hop = second.reference.data.segments[0]
+    assert first_hop.available_delta_v_mps == second_hop.available_delta_v_mps
+    assert first_hop.required_delta_v_mps == second_hop.required_delta_v_mps
+    assert not hasattr(first_hop, "expected_remaining_usable_fuel_kg")
 
 
 @pytest.mark.parametrize("platform_type", ["WHEELED", "LEGGED", "HOPPER"])

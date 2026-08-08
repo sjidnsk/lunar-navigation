@@ -21,7 +21,9 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 
 from lunar_policy_training.capability_freeze import (  # noqa: E402
     CapabilityFreezeError,
-    load_frozen_capability_bundle,
+)
+from lunar_policy_training.project_capability import (  # noqa: E402
+    load_project_formal_capability,
 )
 
 
@@ -65,19 +67,15 @@ def _load_json(path: Path) -> object:
     )
 
 
-def _capability_evidence(path: Path) -> dict[str, object]:
-    state = _safe_regular_file(path, allow_missing=True)
-    if state == "missing":
-        return {"formal_eligible": False, "reason": "missing"}
-    if state != "regular":
-        return {"formal_eligible": False, "reason": "unsafe"}
+def _capability_evidence(repository_root: Path) -> dict[str, object]:
     try:
-        bundle = load_frozen_capability_bundle(path, run_kind="formal")
-    except CapabilityFreezeError:
+        bundle = load_project_formal_capability(repository_root)
+    except (CapabilityFreezeError, OSError):
         return {"formal_eligible": False, "reason": "invalid"}
     return {
         "formal_eligible": bundle.formal_eligible,
-        "reason": "formal-lock-present",
+        "reason": "project-formal-capability",
+        "capability_sha256": bundle.bundle_sha256,
     }
 
 
@@ -195,7 +193,7 @@ def inspect_training(
     manifest_path: str | Path,
     checkpoint_path: str | Path,
     pause_marker_path: str | Path,
-    capability_lock_path: str | Path,
+    repository_root: str | Path,
     disk_path: str | Path,
     stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
     minimum_disk_free_bytes: int = DEFAULT_MINIMUM_DISK_FREE_BYTES,
@@ -225,7 +223,7 @@ def inspect_training(
             "reasons": ["pause-marker-unsafe"],
         }
 
-    capability = capability_probe(Path(capability_lock_path))
+    capability = capability_probe(Path(repository_root))
     if not capability["formal_eligible"]:
         return {
             "state": "blocked-capability",
@@ -345,7 +343,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--pause-marker", required=True)
-    parser.add_argument("--capability-lock", required=True)
     parser.add_argument("--disk-path", required=True)
     parser.add_argument(
         "--stale-after-seconds",
@@ -368,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
         manifest_path=arguments.manifest,
         checkpoint_path=arguments.checkpoint,
         pause_marker_path=arguments.pause_marker,
-        capability_lock_path=arguments.capability_lock,
+        repository_root=Path(__file__).resolve().parents[2],
         disk_path=arguments.disk_path,
         stale_after_seconds=arguments.stale_after_seconds,
         minimum_disk_free_bytes=arguments.minimum_disk_free_bytes,

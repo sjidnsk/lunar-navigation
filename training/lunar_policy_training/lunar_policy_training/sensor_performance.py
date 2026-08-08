@@ -234,13 +234,6 @@ def _performance_planner_workload(capability, suffix: str):
         state = bridge_api.HopperState()
         state.pose = _performance_pose(bridge_api, *start)
         request.current_state = state
-        propellant = bridge_api.HopperPropellantState()
-        propellant.stamp.nanoseconds_since_epoch = 1_000_000_000
-        propellant.platform_id = request.platform_id
-        propellant.capability_version = request.capability_version
-        propellant.total_mass_kg = 20.0
-        propellant.remaining_usable_fuel_mass_kg = 0.2
-        request.hopper_propellant = propellant
     else:
         start = (32.1, 32.1, 0.0)
         target = (40.1, 32.1, 0.0)
