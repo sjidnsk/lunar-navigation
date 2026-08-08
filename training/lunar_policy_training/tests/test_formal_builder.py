@@ -5,12 +5,16 @@ import pathlib
 
 import numpy as np
 import pytest
+import torch
 
 from lunar_policy_training.environment.formal_builder import (
     FormalEnvironmentBuilder,
     _formal_schedule_index,
 )
 from lunar_policy_training.environment.macro_step import PolicyAction
+from lunar_policy_training.evaluation import report as report_module
+from lunar_policy_training.evaluation.report import FormalEvaluationBatch
+from lunar_policy_training.policy.cross_attention import CrossAttentionPolicy
 from lunar_policy_training.polar_data.formal_cache import (
     FormalCacheIdentity,
     StaticSceneData,
@@ -182,16 +186,34 @@ def test_formal_episode_cursor_is_deterministic_and_resume_exact(
     )
 
 
-def test_formal_schedule_uses_shared_eight_worker_scene_lanes() -> None:
-    assert [_formal_schedule_index(index, 0, 192) for index in range(8)] == list(
-        range(8)
-    )
-    assert [_formal_schedule_index(index, 1, 192) for index in range(8)] == list(
-        range(8, 16)
-    )
-    assert _formal_schedule_index(0, 3, 192) == 24
-    assert _formal_schedule_index(8, 3, 192) == 24
-    assert _formal_schedule_index(16, 3, 192) == 24
+def test_formal_schedule_uses_platform_local_scene_lanes_at_any_allocation() -> None:
+    assert [
+        _formal_schedule_index(
+            index,
+            0,
+            192,
+            platform_worker_index=index,
+            platform_worker_count=24,
+        )
+        for index in range(24)
+    ] == list(range(24))
+    assert [
+        _formal_schedule_index(
+            global_index,
+            1,
+            192,
+            platform_worker_index=local_index,
+            platform_worker_count=3,
+        )
+        for global_index, local_index in ((0, 0), (3, 0), (6, 0))
+    ] == [3, 3, 3]
+    assert _formal_schedule_index(
+        5,
+        2,
+        192,
+        platform_worker_index=2,
+        platform_worker_count=3,
+    ) == 8
 
 
 def test_policy_input_and_request_are_observed_only_identity_bound_and_multires(
@@ -279,3 +301,25 @@ def test_formal_builder_rejects_preflight_cache_by_default(
             capability_bundle=bundle,
             split="train",
         ).build()
+
+
+def test_formal_evaluation_batch_executes_real_three_platform_workers(
+    tmp_path: pathlib.Path,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    batch = FormalEvaluationBatch(
+        split="validation",
+        factory=assembly.factory,
+        observation_template=assembly.observation_template,
+        scenario_seeds=(409000,),
+    )
+
+    result = report_module._evaluate_formal_batch(
+        CrossAttentionPolicy(),
+        method="nearest_frontier",
+        device=torch.device("cpu"),
+        batch=batch,
+    )
+
+    assert set(result) == {"WHEELED", "LEGGED", "HOPPER"}
+    assert all(values[0].executed_step_count > 0 for values in result.values())

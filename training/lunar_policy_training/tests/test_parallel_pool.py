@@ -210,13 +210,22 @@ class _EpisodeCursorFactory:
     def __call__(
         self, worker_index: int, platform_type: str
     ) -> ParallelEnvironmentWorker:
-        return self.create_for_episode(worker_index, platform_type, 0)
+        return self.create_for_episode(
+            worker_index,
+            platform_type,
+            0,
+            platform_worker_index=worker_index,
+            platform_worker_count=worker_index + 1,
+        )
 
     def create_for_episode(
         self,
         worker_index: int,
         platform_type: str,
         episode_cursor: int,
+        *,
+        platform_worker_index: int,
+        platform_worker_count: int,
     ) -> ParallelEnvironmentWorker:
         observation = _observation(worker_index, platform_type)
         identity = observation.observation_identities[0]

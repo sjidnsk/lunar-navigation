@@ -52,10 +52,12 @@ from lunar_policy_training.evaluation.release_gate import (
 )
 from lunar_policy_training.evaluation.report import (
     EvaluationReport,
+    FormalEvaluationBatch,
     MethodEvaluation,
     PlatformMetrics,
     REQUIRED_METHODS,
 )
+from lunar_policy_training.proxy_scenario import proxy_observation
 from lunar_policy_training.reward import reward_weights_sha256
 
 
@@ -120,6 +122,19 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
             "/tmp/lunar-task4",
         ]
     )
+    formal_preflight = parser.parse_args(
+        [
+            "formal-preflight",
+            "--config",
+            "training/configs/rtx4080_super_v3_joint.yaml",
+            "--cache-manifest",
+            "/tmp/formal-cache/cache-manifest.json",
+            "--artifact-root",
+            "/tmp/formal-preflight",
+            "--sensor-performance-report",
+            "/tmp/sensor-performance.json",
+        ]
+    )
     extension = parser.parse_args(
         [
             "extend-budget",
@@ -141,6 +156,8 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
     assert resume.command == "resume"
     assert resume.sensor_performance_report is None
     assert evaluate.command == "evaluate"
+    assert formal_preflight.command == "formal-preflight"
+    assert formal_preflight.cache_manifest.endswith("cache-manifest.json")
     assert evaluate.sensor_performance_report is None
     assert extension.command == "extend-budget"
     assert extension.blocks == 2
@@ -581,6 +598,117 @@ def test_cli_development_evaluation_artifacts_cannot_be_mistaken_for_release(
         "proxy": True,
         "formal_candidate_eligible": False,
     }
+
+
+def test_formal_evaluation_batches_follow_cache_schedule_and_holdout_seed(
+    tmp_path: pathlib.Path,
+) -> None:
+    scenario_path = tmp_path / "scenario-manifest.json"
+    scenario_path.write_text(
+        json.dumps(
+            {
+                "scenarios": [
+                    {
+                        "scene_id": "a" * 64,
+                        "split": "validation",
+                        "scenario_seed": 409000,
+                        "scene_seed": "1" * 64,
+                    },
+                    {
+                        "scene_id": "b" * 64,
+                        "split": "test",
+                        "scenario_seed": 410000,
+                        "scene_seed": "2" * 64,
+                    },
+                    {
+                        "scene_id": "c" * 64,
+                        "split": "holdout",
+                        "scenario_seed": None,
+                        "scene_seed": "fedcba9876543210" + "3" * 48,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    cache = SimpleNamespace(
+        root=tmp_path,
+        manifest={
+            "scenes": [
+                {"scene_id": "c" * 64, "split": "holdout"},
+                {"scene_id": "a" * 64, "split": "validation"},
+                {"scene_id": "b" * 64, "split": "test"},
+            ]
+        },
+    )
+    template = proxy_observation(0, "WHEELED", step=0)
+    assemblies = {
+        split: SimpleNamespace(
+            factory=SimpleNamespace(scenario_schedule_id=f"cache/{split}/v3"),
+            observation_template=template,
+        )
+        for split in ("validation", "test", "holdout")
+    }
+
+    batches = cli_module._formal_evaluation_batches(cache, assemblies)
+
+    assert tuple(batch.split for batch in batches) == (
+        "validation",
+        "test",
+        "holdout",
+    )
+    assert batches[0].scenario_seeds == (409000,)
+    assert batches[1].scenario_seeds == (410000,)
+    assert batches[2].scenario_seeds == (int("fedcba9876543210", 16),)
+
+
+def test_formal_evaluation_artifacts_are_non_proxy_and_gate_bound(
+    tmp_path: pathlib.Path,
+) -> None:
+    root = tmp_path / "run"
+    root.mkdir()
+    (root / "run-manifest.json").write_text(
+        json.dumps({"schema_version": "lunar-training-run/v1"}),
+        encoding="utf-8",
+    )
+    development = _perfect_development_report()
+    report = EvaluationReport(
+        proxy=False,
+        scenario_schedule_id="formal/evaluation",
+        run_identity=RunIdentity(
+            **{
+                **development.run_identity.to_dict(),
+                "run_kind": "formal",
+            }
+        ),
+        reward_hash=development.reward_hash,
+        checkpoint_sha256=development.checkpoint_sha256,
+        methods=development.methods,
+    )
+    gate_result = evaluate_release_gate(
+        report,
+        load_gate_rules(REPOSITORY_ROOT / "training/configs/release_gate_v1.yaml"),
+    )
+
+    digest = cli_module._write_formal_evaluation_artifacts(
+        root=root,
+        checkpoint_path=root / "checkpoints/latest.pt",
+        report=report,
+        gate_result=gate_result,
+    )
+
+    result = json.loads(
+        (root / "evaluation/formal-result.json").read_text(encoding="utf-8")
+    )
+    assert (root / "evaluation/formal-report.json").is_file()
+    assert result["report_sha256"] == digest
+    assert result["run_kind"] == "formal"
+    assert result["proxy"] is False
+    assert result["formal_candidate_eligible"] is True
+    manifest = json.loads(
+        (root / "run-manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["last_evaluation"]["report_sha256"] == digest
 
 
 @pytest.mark.parametrize("blocks", ["0", "-1", "1.5", "not-an-int"])

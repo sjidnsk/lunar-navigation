@@ -426,6 +426,8 @@ class ScenarioIdentity:
     scenario_schedule_id: str
     worker_index: int
     episode_cursor: int
+    platform_worker_index: int
+    platform_worker_count: int
     capability_version: str
     capability_sha256: str
 
@@ -460,17 +462,33 @@ class FrozenCapabilityEnvironmentFactory:
         worker_index: int,
         platform_type: str,
         episode_cursor: int,
+        *,
+        platform_worker_index: int | None = None,
+        platform_worker_count: int | None = None,
     ) -> object:
         if type(worker_index) is not int or worker_index < 0:
             raise CapabilityFreezeError("worker index must be non-negative")
         if type(episode_cursor) is not int or episode_cursor < 0:
             raise CapabilityFreezeError("episode cursor must be non-negative")
+        if platform_worker_index is None:
+            platform_worker_index = worker_index
+        if platform_worker_count is None:
+            platform_worker_count = platform_worker_index + 1
+        if (
+            type(platform_worker_index) is not int
+            or type(platform_worker_count) is not int
+            or platform_worker_index < 0
+            or platform_worker_count <= platform_worker_index
+        ):
+            raise CapabilityFreezeError("platform worker lane is invalid")
         capability = self.bundle.for_platform(platform_type)
         scenario = ScenarioIdentity(
             platform_type=platform_type,
             scenario_schedule_id=self.scenario_schedule_id,
             worker_index=worker_index,
             episode_cursor=episode_cursor,
+            platform_worker_index=platform_worker_index,
+            platform_worker_count=platform_worker_count,
             capability_version=capability.capability_version,
             capability_sha256=capability.content_sha256,
         )

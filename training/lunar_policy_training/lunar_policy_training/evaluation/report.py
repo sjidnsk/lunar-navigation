@@ -214,6 +214,31 @@ class CandidateEvaluation:
 
 
 @dataclass(frozen=True, slots=True)
+class FormalEvaluationBatch:
+    """One frozen non-training split evaluated on an identical scene order."""
+
+    split: str
+    factory: object
+    observation_template: PolicyBatch
+    scenario_seeds: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if self.split not in {"validation", "test", "holdout"}:
+            raise ValueError("formal evaluation split is invalid")
+        schedule_id = getattr(self.factory, "scenario_schedule_id", None)
+        if not isinstance(schedule_id, str) or not schedule_id:
+            raise ValueError("formal evaluation factory schedule identity is missing")
+        if not isinstance(self.observation_template, PolicyBatch):
+            raise ValueError("formal evaluation observation template is invalid")
+        if (
+            not isinstance(self.scenario_seeds, tuple)
+            or not self.scenario_seeds
+            or any(type(seed) is not int for seed in self.scenario_seeds)
+        ):
+            raise ValueError("formal evaluation requires integer scenario seeds")
+
+
+@dataclass(frozen=True, slots=True)
 class _ScenarioEvidence:
     scenario_seed: int
     final_coverage: float
@@ -388,6 +413,343 @@ def evaluate_proxy_policy(
         checkpoint_sha256=checkpoint_sha256,
         methods=methods,
     )
+
+
+def evaluate_formal_policy(
+    policy: CrossAttentionPolicy,
+    *,
+    device: torch.device | str,
+    checkpoint_sha256: str,
+    run_identity: RunIdentity,
+    batches: Sequence[FormalEvaluationBatch],
+) -> EvaluationReport:
+    """Compare all required methods on fixed validation, test, and holdout worlds."""
+    if not isinstance(policy, CrossAttentionPolicy):
+        raise ValueError("formal evaluation requires CrossAttentionPolicy")
+    if not isinstance(run_identity, RunIdentity) or run_identity.run_kind != "formal":
+        raise ValueError("formal evaluation requires formal run identity")
+    formal_batches = tuple(batches)
+    if (
+        len(formal_batches) != 3
+        or any(not isinstance(batch, FormalEvaluationBatch) for batch in formal_batches)
+        or {batch.split for batch in formal_batches}
+        != {"validation", "test", "holdout"}
+    ):
+        raise ValueError(
+            "formal evaluation requires validation, test, and holdout exactly once"
+        )
+    target_device = torch.device(device)
+    if target_device.type == "cuda" and not torch.cuda.is_available():
+        raise ValueError("CUDA formal evaluation requested without CUDA")
+    schedule_payload = tuple(
+        (
+            batch.split,
+            getattr(batch.factory, "scenario_schedule_id"),
+            batch.scenario_seeds,
+        )
+        for batch in sorted(formal_batches, key=lambda value: value.split)
+    )
+    schedule_digest = hashlib.sha256(
+        json.dumps(schedule_payload, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    methods: list[MethodEvaluation] = []
+    for method in REQUIRED_METHODS:
+        by_platform: dict[str, list[_ScenarioEvidence]] = {
+            platform: [] for platform in PLATFORMS
+        }
+        for batch in formal_batches:
+            batch_results = _evaluate_formal_batch(
+                policy,
+                method=method,
+                device=target_device,
+                batch=batch,
+            )
+            for platform in PLATFORMS:
+                by_platform[platform].extend(batch_results[platform])
+        per_platform: dict[str, PlatformMetrics] = {}
+        for platform in PLATFORMS:
+            per_platform[platform] = _aggregate_platform_metrics(
+                tuple(by_platform[platform]),
+                theta_active=platform != "HOPPER",
+            )
+        methods.append(MethodEvaluation(method=method, per_platform=per_platform))
+    return EvaluationReport(
+        proxy=False,
+        scenario_schedule_id=f"formal-evaluation/{schedule_digest}",
+        run_identity=run_identity,
+        reward_hash=reward_weights_sha256(),
+        checkpoint_sha256=checkpoint_sha256,
+        methods=tuple(methods),
+    )
+
+
+def _evaluate_formal_batch(
+    policy: CrossAttentionPolicy,
+    *,
+    method: str,
+    device: torch.device,
+    batch: FormalEvaluationBatch,
+) -> Mapping[str, tuple[_ScenarioEvidence, ...]]:
+    """Bound formal evaluation to nine concurrent workers per process group."""
+    collected: dict[str, list[_ScenarioEvidence]] = {
+        platform: [] for platform in PLATFORMS
+    }
+    chunks: list[tuple[int, tuple[int, ...]]] = []
+    full_count = len(batch.scenario_seeds) - len(batch.scenario_seeds) % 3
+    for offset in range(0, full_count, 3):
+        chunks.append((offset, batch.scenario_seeds[offset : offset + 3]))
+    for offset in range(full_count, len(batch.scenario_seeds)):
+        chunks.append((offset, batch.scenario_seeds[offset : offset + 1]))
+    for offset, seeds in chunks:
+        chunk = _evaluate_formal_chunk(
+            policy,
+            method=method,
+            device=device,
+            batch=batch,
+            scenario_offset=offset,
+            scenario_seeds=seeds,
+        )
+        for platform in PLATFORMS:
+            collected[platform].extend(chunk[platform])
+    return {platform: tuple(collected[platform]) for platform in PLATFORMS}
+
+
+def _evaluate_formal_chunk(
+    policy: CrossAttentionPolicy,
+    *,
+    method: str,
+    device: torch.device,
+    batch: FormalEvaluationBatch,
+    scenario_offset: int,
+    scenario_seeds: tuple[int, ...],
+) -> Mapping[str, tuple[_ScenarioEvidence, ...]]:
+    count = len(scenario_seeds)
+    row_schedule = tuple(
+        (platform, local_index, scenario_seed)
+        for platform in PLATFORMS
+        for local_index, scenario_seed in enumerate(scenario_seeds)
+    )
+    row_count = len(row_schedule)
+    episode_cursor = _formal_chunk_episode_cursor(scenario_offset, count)
+    cursors = (episode_cursor,) * row_count
+    with ParallelEnvPool(
+        allocation={platform: count for platform in PLATFORMS},
+        observation_template=batch.observation_template,
+        environment_factory=batch.factory,
+        reward_fn=_evaluation_reward,
+        worker_timeout_seconds=30.0,
+        auto_reset=False,
+        initial_episode_cursors=cursors,
+    ) as pool:
+        pool.reset()
+        planner_failures = np.zeros(row_count, dtype=np.int64)
+        executed_steps = np.zeros(row_count, dtype=np.int64)
+        deterministic_matches = np.zeros(row_count, dtype=np.int64)
+        selected_safe_actions = np.zeros(row_count, dtype=np.int64)
+        safety_violations = np.zeros(row_count, dtype=np.int64)
+        invalid_actions = np.zeros(row_count, dtype=np.int64)
+        reference_mismatches = np.zeros(row_count, dtype=np.int64)
+        hopper_commitment_violations = np.zeros(row_count, dtype=np.int64)
+        output_finite = np.ones(row_count, dtype=np.bool_)
+        completion_steps = np.zeros(row_count, dtype=np.int64)
+        final_coverage = np.zeros(row_count, dtype=np.float32)
+        theta_samples: list[list[float]] = [[] for _ in range(row_count)]
+        for step_index in range(1, 4):
+            prepared = pool.prepare_decision_boundaries(policy_version=0)
+            no_action_workers = tuple(
+                int(index)
+                for index in torch.nonzero(prepared.dones, as_tuple=False)
+                .flatten()
+                .tolist()
+            )
+            if no_action_workers:
+                if any(completion_steps[index] == 0 for index in no_action_workers):
+                    raise ValueError(
+                        "formal evaluation scenario has no actionable boundary"
+                    )
+                pool.reset_terminated_workers(
+                    no_action_workers, policy_version=0
+                )
+                prepared = pool.prepare_decision_boundaries(policy_version=0)
+                if bool(prepared.dones.any()):
+                    raise ValueError(
+                        "formal evaluation reset did not reach an actionable boundary"
+                    )
+            first_indices, first_thetas = _select_formal_actions(
+                policy,
+                method=method,
+                observations=prepared.observations,
+                device=device,
+                row_schedule=row_schedule,
+            )
+            repeated_indices, repeated_thetas = _select_formal_actions(
+                policy,
+                method=method,
+                observations=prepared.observations,
+                device=device,
+                row_schedule=row_schedule,
+            )
+            deterministic_rows = np.logical_and(
+                first_indices == repeated_indices,
+                first_thetas == repeated_thetas,
+            )
+            masks = prepared.observations.candidate_mask.detach().cpu().numpy()
+            selected_action_valid = np.asarray(
+                [
+                    0 <= candidate_index < masks.shape[1]
+                    and bool(masks[row, candidate_index])
+                    and math.isfinite(float(first_thetas[row]))
+                    for row, candidate_index in enumerate(first_indices)
+                ],
+                dtype=np.bool_,
+            )
+            stepped = pool.step(
+                ParallelActions(
+                    candidate_indices=torch.from_numpy(first_indices),
+                    thetas=torch.from_numpy(first_thetas),
+                ),
+                policy_version=0,
+            )
+            if (
+                len(stepped.execution_events) != row_count
+                or len(stepped.planning_outcomes) != row_count
+            ):
+                raise ValueError("formal evaluation worker evidence is missing")
+            finite_rows = _finite_output_rows(stepped.observations, stepped.rewards)
+            coverage = (
+                stepped.observations.coverage_summary[:, 0]
+                .mean(dim=(1, 2))
+                .detach()
+                .cpu()
+                .numpy()
+            )
+            for index, outcome in enumerate(stepped.planning_outcomes):
+                if completion_steps[index] != 0:
+                    continue
+                executed_steps[index] += 1
+                theta_samples[index].append(float(first_thetas[index]))
+                deterministic_matches[index] += int(deterministic_rows[index])
+                events = stepped.execution_events[index]
+                safety_violations[index] += events.safety_violation_count
+                invalid_actions[index] += events.invalid_action_count + int(
+                    not selected_action_valid[index]
+                )
+                reference_mismatches[index] += (
+                    events.platform_reference_mismatch_count
+                )
+                hopper_commitment_violations[index] += (
+                    events.hopper_commitment_violation_count
+                )
+                selected_safe_actions[index] += int(
+                    events.selected_action_observed_safe
+                )
+                accepted = (
+                    outcome.name == "NEW_REFERENCE_AVAILABLE"
+                    and events.execution_failure_count == 0
+                )
+                planner_failures[index] += int(not accepted)
+                platform, _, _ = row_schedule[index]
+                if (
+                    accepted
+                    and platform == "HOPPER"
+                    and events.hopper_commitment_states
+                    != ("JUMP_COMMITTED", "IN_FLIGHT", "LANDED_HOLD")
+                ):
+                    hopper_commitment_violations[index] += 1
+                output_finite[index] = bool(
+                    output_finite[index] and finite_rows[index]
+                )
+                final_coverage[index] = coverage[index]
+                if bool(stepped.dones[index].item()):
+                    completion_steps[index] = step_index
+            terminated_workers = tuple(
+                int(index)
+                for index in torch.nonzero(stepped.dones, as_tuple=False)
+                .flatten()
+                .tolist()
+            )
+            if terminated_workers and step_index < 3:
+                pool.reset_terminated_workers(
+                    terminated_workers, policy_version=0
+                )
+    result: dict[str, tuple[_ScenarioEvidence, ...]] = {}
+    for platform in PLATFORMS:
+        result[platform] = tuple(
+            _ScenarioEvidence(
+                scenario_seed=scenario_seed,
+                final_coverage=float(final_coverage[index]),
+                safety_violation_count=int(safety_violations[index]),
+                invalid_action_count=int(invalid_actions[index]),
+                output_finite=bool(output_finite[index]),
+                platform_reference_mismatch_count=int(reference_mismatches[index]),
+                hopper_commitment_violation_count=int(
+                    hopper_commitment_violations[index]
+                ),
+                selected_action_observed_safe_count=int(
+                    selected_safe_actions[index]
+                ),
+                deterministic_match_count=int(deterministic_matches[index]),
+                planner_failure_count=int(planner_failures[index]),
+                executed_step_count=int(executed_steps[index]),
+                completion_step_count=int(completion_steps[index] or 3),
+                selected_thetas_rad=tuple(theta_samples[index]),
+            )
+            for index, (row_platform, _, scenario_seed) in enumerate(row_schedule)
+            if row_platform == platform
+        )
+    return result
+
+
+def _formal_chunk_episode_cursor(scenario_offset: int, worker_lanes: int) -> int:
+    if worker_lanes == 3 and scenario_offset % 3 == 0:
+        return scenario_offset // 3
+    if worker_lanes == 1:
+        return scenario_offset
+    raise ValueError("formal evaluation chunk cannot preserve cache order")
+
+
+def _select_formal_actions(
+    policy: CrossAttentionPolicy,
+    *,
+    method: str,
+    observations: PolicyBatch,
+    device: torch.device,
+    row_schedule: tuple[tuple[str, int, int], ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    if method == "ppo_policy":
+        model_input = _move_batch(observations, device)
+        policy.to(device).eval()
+        with torch.no_grad():
+            selected = sample_action(
+                policy(model_input),
+                model_input.candidate_mask,
+                model_input.platform_context,
+                deterministic=True,
+            )
+        return (
+            selected.selected_frontier_index.detach()
+            .cpu()
+            .numpy()
+            .astype(np.int64, copy=True),
+            selected.selected_theta.detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32, copy=True),
+        )
+    features = observations.frontier_features.detach().cpu().numpy()
+    masks = observations.candidate_mask.detach().cpu().numpy()
+    indices: list[int] = []
+    thetas: list[float] = []
+    for row, (platform, _, scenario_seed) in enumerate(row_schedule):
+        selected = select_baseline_action(
+            method,
+            features[row],
+            masks[row],
+            np.random.Generator(np.random.PCG64(scenario_seed)),
+        )
+        indices.append(selected.candidate_index)
+        thetas.append(0.0 if platform == "HOPPER" else selected.theta)
+    return np.asarray(indices, dtype=np.int64), np.asarray(thetas, dtype=np.float32)
 
 
 def _evaluate_method(
@@ -670,10 +1032,12 @@ __all__ = [
     "DEVELOPMENT_EVALUATION_SCHEMA_VERSION",
     "EVALUATION_SCHEMA_VERSION",
     "EvaluationReport",
+    "FormalEvaluationBatch",
     "MethodEvaluation",
     "PlatformMetrics",
     "REQUIRED_METHODS",
     "report_sha256",
+    "evaluate_formal_policy",
     "evaluate_proxy_policy",
     "select_best_candidate",
     "write_report",

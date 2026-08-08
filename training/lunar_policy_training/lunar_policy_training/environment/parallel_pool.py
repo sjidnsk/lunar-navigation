@@ -81,6 +81,15 @@ class ParallelEnvPool:
     ) -> None:
         self._platforms = _expanded_platforms(allocation)
         self.worker_count = len(self._platforms)
+        local_counts = {platform: 0 for platform in PLATFORMS}
+        platform_worker_indices: list[int] = []
+        for platform in self._platforms:
+            platform_worker_indices.append(local_counts[platform])
+            local_counts[platform] += 1
+        self._platform_worker_indices = tuple(platform_worker_indices)
+        self._platform_worker_counts = tuple(
+            local_counts[platform] for platform in self._platforms
+        )
         _validate_template(observation_template)
         if not callable(environment_factory):
             raise ParallelPoolError("environment factory must be callable")
@@ -211,6 +220,8 @@ class ParallelEnvPool:
                         self._shared_dones,
                         self._shared_policy_versions,
                         initial_episode_cursors[worker_index],
+                        self._platform_worker_indices[worker_index],
+                        self._platform_worker_counts[worker_index],
                     ),
                 )
                 process.start()
@@ -805,10 +816,18 @@ def _create_environment_for_episode(
     worker_index: int,
     platform_type: str,
     episode_cursor: int,
+    platform_worker_index: int,
+    platform_worker_count: int,
 ) -> ParallelEnvironmentWorker:
     create_for_episode = getattr(environment_factory, "create_for_episode", None)
     if callable(create_for_episode):
-        worker = create_for_episode(worker_index, platform_type, episode_cursor)
+        worker = create_for_episode(
+            worker_index,
+            platform_type,
+            episode_cursor,
+            platform_worker_index=platform_worker_index,
+            platform_worker_count=platform_worker_count,
+        )
     else:
         worker = environment_factory(worker_index, platform_type)
     if not isinstance(worker, ParallelEnvironmentWorker):
@@ -832,6 +851,8 @@ def _worker_main(
     done_buffers: tuple[torch.Tensor, ...],
     policy_version_buffers: tuple[torch.Tensor, ...],
     initial_episode_cursor: int,
+    platform_worker_index: int,
+    platform_worker_count: int,
 ) -> None:
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
@@ -841,7 +862,12 @@ def _worker_main(
             raise ParallelPoolError("worker episode cursor is invalid")
         episode_cursor = initial_episode_cursor
         worker = _create_environment_for_episode(
-            environment_factory, worker_index, platform_type, episode_cursor
+            environment_factory,
+            worker_index,
+            platform_type,
+            episode_cursor,
+            platform_worker_index,
+            platform_worker_count,
         )
         current_observation = _environment_current_observation(worker)
         _write_observation(observation_buffers[0], worker_index, current_observation)
@@ -874,6 +900,8 @@ def _worker_main(
                     worker_index,
                     platform_type,
                     episode_cursor,
+                    platform_worker_index,
+                    platform_worker_count,
                 )
                 terminal_transition = None
                 no_action_terminal = None
@@ -911,6 +939,8 @@ def _worker_main(
                     worker_index,
                     platform_type,
                     episode_cursor,
+                    platform_worker_index,
+                    platform_worker_count,
                 )
                 terminal_transition = None
                 no_action_terminal = None
@@ -970,6 +1000,8 @@ def _worker_main(
                             worker_index,
                             platform_type,
                             episode_cursor,
+                            platform_worker_index,
+                            platform_worker_count,
                         )
                     else:
                         no_action_terminal = boundary.execution_state
@@ -1040,6 +1072,8 @@ def _worker_main(
                     worker_index,
                     platform_type,
                     episode_cursor,
+                    platform_worker_index,
+                    platform_worker_count,
                 )
                 worker = reset_worker
                 next_observation = _environment_current_observation(worker)

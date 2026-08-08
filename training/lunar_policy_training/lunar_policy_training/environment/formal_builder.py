@@ -57,7 +57,6 @@ from .visibility import NativeVisibilityEstimator, SensorGeometry
 
 
 _PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
-_FORMAL_SCENE_LANES = 8
 _BOUNDARY_MARGIN_CELLS = math.ceil(
     (FORMAL_SENSOR_RANGE_M + LOCAL_GEOMETRY.size_m / 2.0)
     / GLOBAL_GEOMETRY.resolution_m
@@ -68,6 +67,9 @@ def _formal_schedule_index(
     worker_index: int,
     episode_cursor: int,
     scene_count: int,
+    *,
+    platform_worker_index: int | None = None,
+    platform_worker_count: int | None = None,
 ) -> int:
     """Map a fixed platform lane and episode ordinal onto the scene inventory."""
     if type(worker_index) is not int or worker_index < 0:
@@ -76,8 +78,20 @@ def _formal_schedule_index(
         raise ValueError("formal episode cursor must be non-negative")
     if type(scene_count) is not int or scene_count <= 0:
         raise ValueError("formal scene count must be positive")
-    lane = worker_index % _FORMAL_SCENE_LANES
-    return (episode_cursor * _FORMAL_SCENE_LANES + lane) % scene_count
+    if platform_worker_index is None:
+        platform_worker_index = worker_index
+    if platform_worker_count is None:
+        platform_worker_count = platform_worker_index + 1
+    if (
+        type(platform_worker_index) is not int
+        or type(platform_worker_count) is not int
+        or platform_worker_index < 0
+        or platform_worker_count <= platform_worker_index
+    ):
+        raise ValueError("formal platform worker lane is invalid")
+    return (
+        episode_cursor * platform_worker_count + platform_worker_index
+    ) % scene_count
 
 
 @dataclass(frozen=True, slots=True)
@@ -752,6 +766,8 @@ class FormalWorkerBuilder:
                 worker_index,
                 scenario_identity.episode_cursor,
                 len(entries),
+                platform_worker_index=scenario_identity.platform_worker_index,
+                platform_worker_count=scenario_identity.platform_worker_count,
             )
         ]
         loaded = _load_multires_scene(cache, str(entry["scene_id"]))
@@ -837,7 +853,7 @@ class FormalEnvironmentBuilder:
         if self.split not in {"train", "validation", "test", "holdout"}:
             raise ValueError("formal environment split is invalid")
         schedule_id = (
-            f"{cache.manifest['cache_manifest_sha256']}/{self.split}/v2"
+            f"{cache.manifest['cache_manifest_sha256']}/{self.split}/v3"
         )
         worker_builder = FormalWorkerBuilder(
             str(self.cache_manifest_path),

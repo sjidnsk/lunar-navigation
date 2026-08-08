@@ -78,6 +78,7 @@ from .environment.formal_builder import (
 from .environment.macro_step import PlannerTransition
 from .environment.v3_environment import PreparedPlanRequest, create_v3_environment
 from .training_semantics import training_semantics_sha256
+from .formal_preflight import FormalPreflightError, run_formal_preflight
 from .sensor_performance import (
     SensorPerformanceError,
     current_host_identity,
@@ -97,6 +98,8 @@ from .evaluation.release_gate import (
 )
 from .evaluation.report import (
     EvaluationReport,
+    FormalEvaluationBatch,
+    evaluate_formal_policy,
     evaluate_proxy_policy,
     report_sha256,
     write_report,
@@ -874,6 +877,12 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--artifact-root", required=True)
     evaluate.add_argument("--sensor-performance-report")
 
+    formal_preflight = subparsers.add_parser("formal-preflight")
+    formal_preflight.add_argument("--config", required=True)
+    formal_preflight.add_argument("--cache-manifest", required=True)
+    formal_preflight.add_argument("--artifact-root", required=True)
+    formal_preflight.add_argument("--sensor-performance-report", required=True)
+
     extend_budget = subparsers.add_parser("extend-budget")
     extend_budget.add_argument("--artifact-root", required=True)
     extend_budget.add_argument("--blocks", required=True, type=_positive_block_count)
@@ -1032,17 +1041,94 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif arguments.command == "evaluate":
         capability_bundle = _formal_capability_preflight(repository_root)
-        _formal_sensor_performance_preflight(
+        sensor_performance_sha256 = _formal_sensor_performance_preflight(
             arguments.sensor_performance_report,
             capability_bundle=capability_bundle,
             repository_root=repository_root,
         )
+        calibrated = _load_calibrated_run_state(Path(arguments.artifact_root))
+        if calibrated.cache_manifest_path is None:
+            raise PreflightError("formal evaluation cache manifest is missing")
+        assemblies = {
+            split: _formal_environment_from_calibrated_root(
+                Path(arguments.artifact_root),
+                capability_bundle=capability_bundle,
+                repository_root=repository_root,
+                sensor_performance_sha256=sensor_performance_sha256,
+                split=split,
+            )
+            for split in ("validation", "test", "holdout")
+        }
+        formal_cache = load_formal_cache(
+            calibrated.cache_manifest_path, require_full=True
+        )
+        formal_batches = _formal_evaluation_batches(formal_cache, assemblies)
         _evaluate_checkpoint(
             checkpoint_path=Path(arguments.checkpoint),
             gate_path=Path(arguments.gate),
             artifact_root=Path(arguments.artifact_root),
             repository_root=repository_root,
             capability_bundle=capability_bundle,
+            formal_batches=formal_batches,
+        )
+    elif arguments.command == "formal-preflight":
+        requested_config = load_training_config(Path(arguments.config))
+        if requested_config.run_kind != "formal":
+            raise PreflightError("formal-preflight requires the formal config")
+        capability_bundle = _formal_capability_preflight(repository_root)
+        sensor_performance_sha256 = _formal_sensor_performance_preflight(
+            arguments.sensor_performance_report,
+            capability_bundle=capability_bundle,
+            repository_root=repository_root,
+        )
+        cache, train_assembly = _build_formal_environment(
+            Path(arguments.cache_manifest),
+            capability_bundle=capability_bundle,
+            repository_root=repository_root,
+            split="train",
+        )
+        assemblies = {"train": train_assembly}
+        for split in ("validation", "test", "holdout"):
+            _, assemblies[split] = _build_formal_environment(
+                Path(arguments.cache_manifest),
+                capability_bundle=capability_bundle,
+                repository_root=repository_root,
+                split=split,
+            )
+        evaluation_batches = _formal_evaluation_batches(cache, assemblies)
+        preflight_root = validate_artifact_root(
+            Path(arguments.artifact_root), repository_root=repository_root
+        )
+        if (preflight_root / "checkpoints").exists():
+            raise PreflightError(
+                "formal-preflight artifact root cannot contain checkpoints"
+            )
+        try:
+            report, report_path = run_formal_preflight(
+                cache=cache,
+                assemblies=assemblies,
+                evaluation_batches=evaluation_batches,
+                run_identity=_formal_run_identity(cache.identity),
+                source_commit=_source_commit(repository_root),
+                sensor_performance_sha256=sensor_performance_sha256,
+                artifact_root=preflight_root,
+                worker_candidates=requested_config.parallel.worker_candidates,
+                selected_micro_batch=2,
+            )
+        except FormalPreflightError as error:
+            raise PreflightError(f"formal preflight failed: {error}") from error
+        print(
+            json.dumps(
+                {
+                    "formal_preflight_report": str(report_path),
+                    "selected_workers": report.payload["selected_workers"],
+                    "selected_micro_batch": report.payload[
+                        "selected_micro_batch"
+                    ],
+                    "training_started": False,
+                },
+                sort_keys=True,
+            )
         )
     elif arguments.command == "extend-budget":
         root = validate_artifact_root(
@@ -1135,6 +1221,75 @@ def _formal_environment_from_calibrated_root(
     ):
         raise PreflightError("formal training scenario schedule differs from calibration")
     return assembly
+
+
+def _formal_evaluation_batches(
+    cache: FormalCache,
+    assemblies: Mapping[str, FormalEnvironmentAssembly],
+) -> tuple[FormalEvaluationBatch, ...]:
+    """Bind cache-order scene seeds to the three non-training factories."""
+    expected_splits = ("validation", "test", "holdout")
+    if set(assemblies) != set(expected_splits):
+        raise PreflightError(
+            "formal evaluation requires validation, test, and holdout assemblies"
+        )
+    try:
+        document = json.loads(
+            (cache.root / "scenario-manifest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise PreflightError("formal evaluation scenario manifest is invalid") from error
+    scenarios = document.get("scenarios") if isinstance(document, Mapping) else None
+    if not isinstance(scenarios, list) or any(
+        not isinstance(item, Mapping) for item in scenarios
+    ):
+        raise PreflightError("formal evaluation scenario inventory is invalid")
+    by_id = {str(item.get("scene_id")): item for item in scenarios}
+    if len(by_id) != len(scenarios):
+        raise PreflightError("formal evaluation scenario IDs are not unique")
+    batches: list[FormalEvaluationBatch] = []
+    for split in expected_splits:
+        entries = [
+            entry
+            for entry in cache.manifest["scenes"]
+            if entry.get("split") == split
+        ]
+        seeds: list[int] = []
+        for entry in entries:
+            scenario = by_id.get(str(entry.get("scene_id")))
+            if scenario is None or scenario.get("split") != split:
+                raise PreflightError(
+                    "formal evaluation cache order differs from scenario manifest"
+                )
+            scenario_seed = scenario.get("scenario_seed")
+            if type(scenario_seed) is int:
+                seeds.append(scenario_seed)
+                continue
+            scene_seed = scenario.get("scene_seed")
+            if (
+                split != "holdout"
+                or not isinstance(scene_seed, str)
+                or len(scene_seed) != 64
+            ):
+                raise PreflightError("formal evaluation scenario seed is invalid")
+            try:
+                seeds.append(int(scene_seed[:16], 16))
+            except ValueError as error:
+                raise PreflightError(
+                    "formal evaluation holdout seed is invalid"
+                ) from error
+        if not seeds:
+            raise PreflightError(f"formal evaluation split {split} is empty")
+        assembly = assemblies[split]
+        batches.append(
+            FormalEvaluationBatch(
+                split=split,
+                factory=assembly.factory,
+                observation_template=assembly.observation_template,
+                scenario_seeds=tuple(seeds),
+            )
+        )
+    return tuple(batches)
 
 
 def _formal_sensor_performance_preflight(
@@ -1495,6 +1650,56 @@ def _write_development_evaluation_artifacts(
     return digest
 
 
+def _write_formal_evaluation_artifacts(
+    *,
+    root: Path,
+    checkpoint_path: Path,
+    report: EvaluationReport,
+    gate_result: GateResult,
+) -> str:
+    """Persist an explicitly non-proxy release evaluation and its gate result."""
+    if (
+        not isinstance(report, EvaluationReport)
+        or report.proxy
+        or report.run_identity.run_kind != "formal"
+        or not isinstance(gate_result, GateResult)
+        or gate_result.proxy
+        or gate_result.run_kind != "formal"
+        or not gate_result.formal_candidate_eligible
+    ):
+        raise PreflightError(
+            "formal evaluation artifacts require an eligible non-proxy result"
+        )
+    evaluation_dir = root / "evaluation"
+    evaluation_dir.mkdir(parents=True, exist_ok=True)
+    digest = write_report(evaluation_dir / "formal-report.json", report)
+    result_payload = {
+        "schema_version": "lunar-policy-formal-evaluation-result/v1",
+        "report_sha256": digest,
+        "run_kind": gate_result.run_kind,
+        "proxy": gate_result.proxy,
+        "formal_candidate_eligible": gate_result.formal_candidate_eligible,
+        "release_gate_passed": gate_result.passed,
+        "failed_rules": list(gate_result.failed_rules),
+    }
+    (evaluation_dir / "formal-result.json").write_text(
+        json.dumps(result_payload, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    manifest_path = root / "run-manifest.json"
+    manifest = _read_run_manifest(manifest_path)
+    manifest["last_evaluation"] = {
+        "checkpoint": str(checkpoint_path),
+        "report_sha256": digest,
+        "run_kind": gate_result.run_kind,
+        "proxy": gate_result.proxy,
+        "formal_candidate_eligible": gate_result.formal_candidate_eligible,
+        "release_gate_passed": gate_result.passed,
+    }
+    _write_manifest_payload(manifest_path, manifest)
+    return digest
+
+
 def _evaluate_checkpoint(
     *,
     checkpoint_path: Path,
@@ -1502,17 +1707,29 @@ def _evaluate_checkpoint(
     artifact_root: Path,
     repository_root: Path,
     capability_bundle: FrozenCapabilityBundle | None = None,
+    formal_batches: tuple[FormalEvaluationBatch, ...] | None = None,
 ):
-    """Evaluate one explicit checkpoint through proxy-v3 using the run budget."""
+    """Evaluate one explicit checkpoint using its calibrated environment kind."""
     root = validate_artifact_root(
         artifact_root, repository_root=repository_root
     )
     calibrated = _load_calibrated_run_state(root)
     if calibrated.config.run_kind == "formal":
         _validate_formal_bundle_identity(capability_bundle, calibrated.run_identity)
-        raise PreflightError("formal evaluation environment is not configured yet")
-    if capability_bundle is not None:
-        raise PreflightError("development-smoke evaluation rejects formal capability")
+        if (
+            not isinstance(formal_batches, tuple)
+            or len(formal_batches) != 3
+            or any(
+                not isinstance(batch, FormalEvaluationBatch)
+                for batch in formal_batches
+            )
+        ):
+            raise PreflightError("formal evaluation environments are required")
+    else:
+        if capability_bundle is not None or formal_batches is not None:
+            raise PreflightError(
+                "development-smoke evaluation rejects formal environment inputs"
+            )
     checkpoint_target = checkpoint_path.resolve(strict=True)
     authoritative_parent = (root / "checkpoints").resolve(strict=True)
     if checkpoint_target.parent != authoritative_parent:
@@ -1542,13 +1759,22 @@ def _evaluate_checkpoint(
         upper_bound_gpu_seconds=TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS,
     )
     try:
-        report = evaluate_proxy_policy(
-            policy,
-            device="cuda",
-            checkpoint_sha256=checkpoint.payload_sha256,
-            schedule=CurriculumSchedule(),
-            run_identity=calibrated.run_identity,
-        )
+        if calibrated.config.run_kind == "formal":
+            report = evaluate_formal_policy(
+                policy,
+                device="cuda",
+                checkpoint_sha256=checkpoint.payload_sha256,
+                run_identity=calibrated.run_identity,
+                batches=formal_batches,
+            )
+        else:
+            report = evaluate_proxy_policy(
+                policy,
+                device="cuda",
+                checkpoint_sha256=checkpoint.payload_sha256,
+                schedule=CurriculumSchedule(),
+                run_identity=calibrated.run_identity,
+            )
         torch.cuda.synchronize()
     except BaseException:
         calibrated.budget.end_gpu_interval(monotonic_seconds=time.monotonic())
@@ -1565,12 +1791,20 @@ def _evaluate_checkpoint(
         consumed_gpu_seconds=calibrated.budget.consumed_gpu_seconds,
         platform_allocation=calibrated.allocation,
     )
-    _write_development_evaluation_artifacts(
-        root=root,
-        checkpoint_path=checkpoint_target,
-        report=report,
-        gate_result=gate_result,
-    )
+    if calibrated.config.run_kind == "formal":
+        _write_formal_evaluation_artifacts(
+            root=root,
+            checkpoint_path=checkpoint_target,
+            report=report,
+            gate_result=gate_result,
+        )
+    else:
+        _write_development_evaluation_artifacts(
+            root=root,
+            checkpoint_path=checkpoint_target,
+            report=report,
+            gate_result=gate_result,
+        )
     return report, gate_result
 
 
