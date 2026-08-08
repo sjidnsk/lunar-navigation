@@ -530,7 +530,9 @@ void BindConfig(py::module_ &module) {
       .def_readwrite("maximum_cells",
                      &planning::GlobalMapConfig::maximum_cells)
       .def_readwrite("maximum_axis_cells",
-                     &planning::GlobalMapConfig::maximum_axis_cells);
+                     &planning::GlobalMapConfig::maximum_axis_cells)
+      .def_readwrite("target_axis_cells",
+                     &planning::GlobalMapConfig::target_axis_cells);
   py::class_<planning::GlobalSearchConfig>(module, "GlobalSearchConfig")
       .def(py::init<>())
       .def_readwrite("maximum_preview_points",

@@ -1,6 +1,7 @@
 #include "hierarchical/map_level.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -11,13 +12,16 @@ namespace lunar::planning::hierarchical {
 namespace {
 
 constexpr double kRelativeTolerance = 1.0e-9;
-constexpr std::size_t kSupportedMaximumLevel = 4U;
+constexpr std::array<std::size_t, 6U> kScaleFactors{1U, 2U, 4U, 8U, 16U,
+                                                    20U};
+constexpr std::size_t kSupportedMaximumLevel = kScaleFactors.size() - 1U;
 
 [[nodiscard]] bool ValidConfig(const GlobalMapConfig &config) noexcept {
   return std::isfinite(config.base_resolution_m) &&
          config.base_resolution_m > 0.0 &&
          config.maximum_level == kSupportedMaximumLevel &&
-         config.maximum_cells > 0U && config.maximum_axis_cells > 0U;
+         config.maximum_cells > 0U && config.maximum_axis_cells > 0U &&
+         config.target_axis_cells > 0U;
 }
 
 [[nodiscard]] std::optional<std::size_t>
@@ -62,8 +66,8 @@ ExpectedGlobalMapLevel(const double size_x_m, const double size_y_m,
     };
   }
   for (std::size_t level = 0U; level <= config.maximum_level; ++level) {
-    const double resolution =
-        std::ldexp(config.base_resolution_m, static_cast<int>(level));
+    const double resolution = config.base_resolution_m *
+                              static_cast<double>(kScaleFactors[level]);
     const auto width = CeilCells(size_x_m, resolution);
     const auto height = CeilCells(size_y_m, resolution);
     if (!width || !height) {
@@ -71,7 +75,11 @@ ExpectedGlobalMapLevel(const double size_x_m, const double size_y_m,
           .reason_code = "GLOBAL_MAP_CONFIGURATION_INVALID",
       };
     }
-    if (*width <= config.maximum_axis_cells &&
+    const std::size_t target_axis_cells =
+        std::min(config.target_axis_cells, config.maximum_axis_cells);
+    if (*width <= target_axis_cells &&
+        *height <= target_axis_cells &&
+        *width <= config.maximum_axis_cells &&
         *height <= config.maximum_axis_cells &&
         ProductWithin(*width, *height, config.maximum_cells)) {
       return ExpectedMapLevelResult{

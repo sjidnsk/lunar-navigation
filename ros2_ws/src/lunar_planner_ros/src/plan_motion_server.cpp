@@ -483,9 +483,10 @@ struct PlanMotionServer::Impl final {
     node.declare_parameter<double>("execution_feedback_max_age", 1.0);
     node.declare_parameter<std::int64_t>("maximum_transform_samples", 256);
     node.declare_parameter<double>("base_resolution_m", 0.2);
-    node.declare_parameter<std::int64_t>("maximum_global_level", 4);
+    node.declare_parameter<std::int64_t>("maximum_global_level", 5);
     node.declare_parameter<std::int64_t>("maximum_global_cells", 1'048'576);
     node.declare_parameter<std::int64_t>("maximum_global_axis_cells", 4'096);
+    node.declare_parameter<std::int64_t>("target_global_axis_cells", 256);
     node.declare_parameter(
         "capability_package", rclcpp::ParameterType::PARAMETER_STRING);
     node.declare_parameter(
@@ -546,9 +547,9 @@ struct PlanMotionServer::Impl final {
     }
     const std::size_t maximum_level =
         RequiredSizeParameter("maximum_global_level");
-    if (maximum_level != 4U) {
+    if (maximum_level != 5U) {
       throw std::invalid_argument{
-          "maximum_global_level must equal the supported level 4"};
+          "maximum_global_level must equal the supported level 5"};
     }
     config.global_map.base_resolution_m = base_resolution_m;
     config.global_map.maximum_level = maximum_level;
@@ -556,6 +557,8 @@ struct PlanMotionServer::Impl final {
         RequiredSizeParameter("maximum_global_cells");
     config.global_map.maximum_axis_cells =
         RequiredSizeParameter("maximum_global_axis_cells");
+    config.global_map.target_axis_cells =
+        RequiredSizeParameter("target_global_axis_cells");
     return config;
   }
 

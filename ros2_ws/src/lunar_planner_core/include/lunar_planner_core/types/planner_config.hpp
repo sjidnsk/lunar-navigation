@@ -58,9 +58,10 @@ struct HopperPlannerConfig final {};
 
 struct GlobalMapConfig final {
   double base_resolution_m{0.2};
-  std::size_t maximum_level{4U};
+  std::size_t maximum_level{5U};
   std::size_t maximum_cells{1'048'576U};
   std::size_t maximum_axis_cells{4'096U};
+  std::size_t target_axis_cells{256U};
 };
 
 struct GlobalSearchConfig final {

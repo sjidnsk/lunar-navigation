@@ -178,9 +178,10 @@ rclcpp::NodeOptions ValidOptions() {
       rclcpp::Parameter{"tf_max_age", 5.0},
       rclcpp::Parameter{"max_pairwise_skew", 0.2},
       rclcpp::Parameter{"base_resolution_m", 1.0},
-      rclcpp::Parameter{"maximum_global_level", 4},
+      rclcpp::Parameter{"maximum_global_level", 5},
       rclcpp::Parameter{"maximum_global_cells", 1'048'576},
       rclcpp::Parameter{"maximum_global_axis_cells", 4'096},
+      rclcpp::Parameter{"target_global_axis_cells", 256},
   });
   return options;
 }

@@ -1,3 +1,4 @@
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -18,20 +19,36 @@ const HopReference& HopperReferenceOf(const PlannerOutput& output) {
 
 PlannerInput LongHopInput(const double distance_m) {
   PlannerInput input = test::MakeValidHopperInput();
-  constexpr double resolution_m = 0.2;
-  const std::size_t width = static_cast<std::size_t>(
-      std::ceil((distance_m + 12.0) / resolution_m));
+  constexpr double local_resolution_m = 0.2;
+  constexpr std::array<std::size_t, 6U> scale_factors{1U, 2U, 4U, 8U,
+                                                      16U, 20U};
+  const double physical_width_m = distance_m + 12.0;
+  double global_resolution_m = local_resolution_m;
+  for (const std::size_t factor : scale_factors) {
+    global_resolution_m =
+        local_resolution_m * static_cast<double>(factor);
+    if (std::ceil(physical_width_m / global_resolution_m) <= 256.0) {
+      break;
+    }
+  }
+  const std::size_t global_width = static_cast<std::size_t>(
+      std::ceil(physical_width_m / global_resolution_m));
+  const std::size_t local_width = static_cast<std::size_t>(
+      std::ceil(physical_width_m / local_resolution_m));
   input.world.global_map =
-      test::MakeFlatMap("map", width, 60U, resolution_m);
+      test::MakeFlatMap(
+          "map", global_width,
+          static_cast<std::size_t>(std::ceil(12.0 / global_resolution_m)),
+          global_resolution_m);
   input.world.local_map =
-      test::MakeFlatMap("odom", width, 60U, resolution_m);
+      test::MakeFlatMap("odom", local_width, 60U, local_resolution_m);
   auto& state = std::get<HopperState>(input.current_state);
   state.pose.position_m = {5.0, 5.0, 0.0};
   input.goal_map.target = PointGoal{
       .position_m = {5.0 + distance_m, 5.0, 12.0},
       .tolerance_m = 0.0,
   };
-  input.config.global_map.base_resolution_m = resolution_m;
+  input.config.global_map.base_resolution_m = local_resolution_m;
   return input;
 }
 

@@ -96,7 +96,7 @@ _TOPICS = {
         "type": "grid_map_msgs/msg/GridMap",
         "owner": "external",
         "frame": "map",
-        "level_semantics": "selected_dyadic_global",
+        "level_semantics": "selected_configured_global",
         "required_fields": [
             "header",
             "info",
@@ -195,10 +195,11 @@ _REQUIRED_GRID_LAYERS = [
 ]
 _MAP_PYRAMID = {
     "base_resolution_m": 0.2,
-    "resolution_scale_per_level": 2,
-    "maximum_level": 4,
+    "resolution_scale_factors": [1, 2, 4, 8, 16, 20],
+    "maximum_level": 5,
     "maximum_cells": 1_048_576,
     "maximum_axis_cells": 4_096,
+    "target_axis_cells": 256,
     "global_selection": "smallest_admissible_level",
     "local_level": 0,
     "aggregation_version": "lunar-conservative-grid-aggregation/v1",

@@ -55,9 +55,10 @@ TEST(HierarchicalTypes, FreezesApprovedMapAndLocalRules) {
   const PlannerConfig config;
 
   EXPECT_DOUBLE_EQ(config.global_map.base_resolution_m, 0.2);
-  EXPECT_EQ(config.global_map.maximum_level, 4U);
+  EXPECT_EQ(config.global_map.maximum_level, 5U);
   EXPECT_EQ(config.global_map.maximum_cells, 1'048'576U);
   EXPECT_EQ(config.global_map.maximum_axis_cells, 4'096U);
+  EXPECT_EQ(config.global_map.target_axis_cells, 256U);
   EXPECT_EQ(config.global_search.maximum_preview_points, 4'096U);
   EXPECT_DOUBLE_EQ(config.local_frontier.wheel_horizon_m, 4.0);
   EXPECT_DOUBLE_EQ(config.local_frontier.legged_horizon_m, 3.0);
@@ -65,31 +66,32 @@ TEST(HierarchicalTypes, FreezesApprovedMapAndLocalRules) {
   EXPECT_DOUBLE_EQ(config.local_frontier.additional_corridor_margin_m, 0.4);
 }
 
-TEST(HierarchicalTypes, SelectsSmallestAdmissibleDyadicLevel) {
+TEST(HierarchicalTypes, SelectsSmallestAdmissibleConfiguredLevel) {
   const GlobalMapConfig config;
 
-  const auto l0 = ExpectedGlobalMapLevel(204.8, 204.8, config);
+  const auto l0 = ExpectedGlobalMapLevel(51.2, 51.2, config);
   ASSERT_TRUE(l0.ok());
   EXPECT_EQ(l0.level, 0U);
-  EXPECT_EQ(l0.width, 1'024U);
-  EXPECT_EQ(l0.height, 1'024U);
+  EXPECT_EQ(l0.width, 256U);
+  EXPECT_EQ(l0.height, 256U);
   EXPECT_DOUBLE_EQ(l0.resolution_m, 0.2);
 
-  const auto l1 = ExpectedGlobalMapLevel(204.9, 204.8, config);
+  const auto l1 = ExpectedGlobalMapLevel(51.3, 51.2, config);
   ASSERT_TRUE(l1.ok());
   EXPECT_EQ(l1.level, 1U);
-  EXPECT_EQ(l1.width, 513U);
-  EXPECT_EQ(l1.height, 512U);
+  EXPECT_EQ(l1.width, 129U);
+  EXPECT_EQ(l1.height, 128U);
   EXPECT_DOUBLE_EQ(l1.resolution_m, 0.4);
 
-  const auto axis_l1 = ExpectedGlobalMapLevel(819.21, 0.2, config);
-  ASSERT_TRUE(axis_l1.ok());
-  EXPECT_EQ(axis_l1.level, 1U);
-  EXPECT_EQ(axis_l1.width, 2'049U);
+  const auto terminal = ExpectedGlobalMapLevel(1024.0, 1024.0, config);
+  ASSERT_TRUE(terminal.ok());
+  EXPECT_EQ(terminal.level, 5U);
+  EXPECT_EQ(terminal.width, 256U);
+  EXPECT_DOUBLE_EQ(terminal.resolution_m, 4.0);
 }
 
-TEST(HierarchicalTypes, RejectsPhysicalExtentThatExceedsLevelFour) {
-  const auto result = ExpectedGlobalMapLevel(13'107.21, 0.2, GlobalMapConfig{});
+TEST(HierarchicalTypes, RejectsPhysicalExtentThatExceedsTerminalLevel) {
+  const auto result = ExpectedGlobalMapLevel(1'024.01, 0.2, GlobalMapConfig{});
 
   EXPECT_FALSE(result.ok());
   EXPECT_EQ(result.reason_code, "GLOBAL_MAP_SCALE_UNSUPPORTED");
@@ -97,7 +99,7 @@ TEST(HierarchicalTypes, RejectsPhysicalExtentThatExceedsLevelFour) {
 
 TEST(HierarchicalTypes, ValidatesGlobalAndLocalMapLevelsTogether) {
   const WorldSnapshot valid{
-      .global_map = Map("map", 513U, 512U, 0.4),
+      .global_map = Map("map", 129U, 128U, 0.4),
       .local_map = Map("odom", 40U, 30U, 0.2),
   };
   const auto accepted = ValidateMapLevels(valid, GlobalMapConfig{});
@@ -105,7 +107,7 @@ TEST(HierarchicalTypes, ValidatesGlobalAndLocalMapLevelsTogether) {
   EXPECT_EQ(accepted.global_level, 1U);
 
   WorldSnapshot coarse = valid;
-  coarse.global_map = Map("map", 257U, 256U, 0.8);
+  coarse.global_map = Map("map", 65U, 64U, 0.8);
   const auto rejected_coarse = ValidateMapLevels(coarse, GlobalMapConfig{});
   EXPECT_FALSE(rejected_coarse.ok());
   EXPECT_EQ(rejected_coarse.reason_code, "GLOBAL_MAP_LEVEL_INVALID");
@@ -116,6 +118,25 @@ TEST(HierarchicalTypes, ValidatesGlobalAndLocalMapLevelsTogether) {
       ValidateMapLevels(non_l0_local, GlobalMapConfig{});
   EXPECT_FALSE(rejected_local.ok());
   EXPECT_EQ(rejected_local.reason_code, "LOCAL_MAP_LEVEL_INVALID");
+}
+
+TEST(HierarchicalTypes, SelectsFourMetreTerminalLevelForConfiguredAxisBudget) {
+  GlobalMapConfig config;
+
+  const auto expected = ExpectedGlobalMapLevel(1024.0, 1024.0, config);
+  ASSERT_TRUE(expected.ok());
+  EXPECT_EQ(expected.level, 5U);
+  EXPECT_EQ(expected.width, 256U);
+  EXPECT_EQ(expected.height, 256U);
+  EXPECT_DOUBLE_EQ(expected.resolution_m, 4.0);
+
+  const WorldSnapshot world{
+      .global_map = Map("map", 256U, 256U, 4.0),
+      .local_map = Map("odom", 320U, 320U, 0.2),
+  };
+  const auto accepted = ValidateMapLevels(world, config);
+  ASSERT_TRUE(accepted.ok());
+  EXPECT_EQ(accepted.global_level, 5U);
 }
 
 TEST(HierarchicalTypes, AppliesAndInvertsNonUnitRigidTransform) {

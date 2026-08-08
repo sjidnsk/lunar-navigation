@@ -183,7 +183,7 @@ constexpr double kLunarGravityMps2 = -1.62;
 
 [[nodiscard]] bool ValidHierarchicalMetrics(
     const lunar::planning::HierarchicalPlannerMetrics& metrics) noexcept {
-  return metrics.global_level <= 4U &&
+  return metrics.global_level <= 5U &&
       Finite(metrics.global_resolution_m) &&
       metrics.global_resolution_m > 0.0 && metrics.global_cells > 0U &&
       metrics.global_elapsed >= std::chrono::nanoseconds::zero() &&
