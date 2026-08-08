@@ -501,7 +501,7 @@ git commit -m "feat: bind observations to exploration boundaries"
 - Consumes: validated `[B,3]` platform context and the existing four policy outputs.
 - Produces: `theta_action_mask(platform_context) -> bool[B]`, masked joint log probability, active-row theta entropy, and hopper planner requests with `yaw_rad=None`.
 
-- [ ] **Step 1: Write failing mixed-platform action/loss tests**
+- [x] **Step 1: Write failing mixed-platform action/loss tests**
 
 Use one row per platform. Assert wheel/legged masks true, hopper false; changing hopper theta does not change joint log probability, PPO ratio, KL, or theta entropy; changing wheel theta does. Assert no-active-row theta entropy is exactly FP32 zero.
 
@@ -513,7 +513,7 @@ assert evaluation.log_prob_total[2] == evaluation.log_prob_frontier[2]
 
 Also assert hopper request `goal.yaw_rad is None` while wheel/legged receive sampled theta with `pi/24` tolerance.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 ```bash
 PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
@@ -524,7 +524,7 @@ PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
   training/lunar_policy_training/tests/test_curriculum.py
 ```
 
-- [ ] **Step 3: Implement platform-derived masking**
+- [x] **Step 3: Implement platform-derived masking**
 
 Require `platform_context` in `sample_action()` and `recompute_action_log_probs()`. For inactive rows set selected theta deterministically to zero, set `log_prob_theta=0`, and compute:
 
@@ -536,19 +536,22 @@ log_prob_total = log_prob_frontier + torch.where(
 
 Pass `theta_active` into the PPO loss and compute theta entropy as `sum(active * entropy) / sum(active)`, or exact zero when the active count is zero. Old and new policy paths derive the mask from the rollout's stored `platform_context`.
 
-- [ ] **Step 4: Remove the hopper yaw constraint at every request adapter**
+- [x] **Step 4: Remove the hopper yaw constraint at every request adapter**
 
 Centralize:
 
 ```python
 def apply_goal_theta(goal, platform_type: str, theta_rad: float) -> None:
     goal.yaw_rad = None if platform_type == "HOPPER" else float(theta_rad)
-    goal.yaw_tolerance_rad = math.pi / 24.0
+    goal.yaw_tolerance_rad = 0.0 if platform_type == "HOPPER" else math.pi / 24.0
 ```
+
+The zero hopper tolerance is required by the authoritative current exact-point
+single-hop planner; do not restore the stale Volume 3 yaw-tolerance assumption.
 
 Use it in proxy, calibration, smoke, and formal request builders; do not alter the exported output tensor names/shapes.
 
-- [ ] **Step 5: Add yaw-sensitive diagnostics and commit**
+- [x] **Step 5: Add yaw-sensitive diagnostics and commit**
 
 Add deterministic wheel/legged fixtures where the same candidate with different theta changes planner cost/time or next yaw. Report per-platform theta concentration and fixed-yaw counterfactual values in evaluation diagnostics without adding a new release threshold.
 

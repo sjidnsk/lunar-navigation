@@ -122,6 +122,7 @@ class PPOTrainer:
                     policy_batch.candidate_mask,
                     selected_indices,
                     selected_thetas,
+                    policy_batch.platform_context,
                 )
                 terms = self.loss_function(
                     new_log_prob_total=evaluation.log_prob_total,
@@ -132,6 +133,7 @@ class PPOTrainer:
                     returns=returns,
                     frontier_entropy=evaluation.frontier_entropy,
                     theta_entropy=evaluation.theta_entropy,
+                    theta_active=evaluation.theta_active,
                     config=self.config,
                 )
                 weight = (stop - start) / len(rollout)

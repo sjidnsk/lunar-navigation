@@ -34,6 +34,8 @@ def _platform_metrics(coverage: float) -> PlatformMetrics:
         deterministic_repeat_match_rate=1.0,
         planner_failure_rate=0.0,
         completion_time_s=10.0,
+        theta_mean_resultant_length=0.0,
+        fixed_yaw_mean_abs_delta_rad=0.0,
     )
 
 
@@ -136,8 +138,10 @@ def test_candidate_gate_rejects_event_derived_execution_violations() -> None:
                 planner_failure_count=0,
                 executed_step_count=1,
                 completion_step_count=1,
+                selected_thetas_rad=(0.0,),
             ),
-        )
+        ),
+        theta_active=False,
     )
     changed = report.replace_platform_metrics(
         method="ppo_policy",

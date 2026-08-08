@@ -110,6 +110,7 @@ def collect_rollout(
             sampled = sample_action(
                 output,
                 observations.candidate_mask,
+                observations.platform_context,
                 deterministic=config.deterministic,
             )
             recomputed = recompute_action_log_probs(
@@ -117,6 +118,7 @@ def collect_rollout(
                 observations.candidate_mask,
                 sampled.selected_frontier_index,
                 sampled.selected_theta,
+                observations.platform_context,
             )
         if not torch.equal(sampled.log_prob_total, recomputed.log_prob_total):
             raise CollectorError("sample and recomputed joint log probability differ")

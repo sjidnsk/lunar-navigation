@@ -15,6 +15,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "model_cont
 
 from lunar_policy_training.policy.cross_attention import (  # noqa: E402
     CrossAttentionPolicy,
+    PolicyOutput,
+    recompute_action_log_probs,
     sample_action,
 )
 from lunar_policy_training.policy.observation import PolicyBatch  # noqa: E402
@@ -58,7 +60,12 @@ def _rollout_from_current_policy(
     policy_batch = _policy_batch()
     with torch.no_grad():
         output = policy(policy_batch)
-        sample = sample_action(output, policy_batch.candidate_mask, deterministic=True)
+        sample = sample_action(
+            output,
+            policy_batch.candidate_mask,
+            policy_batch.platform_context,
+            deterministic=True,
+        )
     return RolloutBatch(
         prior_channels=policy_batch.prior_channels.numpy(),
         coverage_summary=policy_batch.coverage_summary.numpy(),
@@ -203,6 +210,7 @@ def test_loss_uses_separate_frontier_and_conditional_theta_entropy_terms() -> No
         returns=torch.ones((1,), dtype=torch.float32),
         frontier_entropy=torch.tensor([2.0], dtype=torch.float32),
         theta_entropy=torch.tensor([3.0], dtype=torch.float32),
+        theta_active=torch.ones((1,), dtype=torch.bool),
         config=_ppo_config(),
     )
 
@@ -210,6 +218,87 @@ def test_loss_uses_separate_frontier_and_conditional_theta_entropy_terms() -> No
     assert terms.frontier_entropy.item() == pytest.approx(2.0)
     assert terms.theta_entropy.item() == pytest.approx(3.0)
     assert terms.total_loss.item() == pytest.approx(0.477)
+
+
+def test_mixed_platform_ppo_ignores_hopper_theta_and_averages_active_entropy() -> None:
+    """Inactive hopper theta cannot change ratio, KL, or the entropy bonus."""
+    platform_context = torch.eye(3, dtype=torch.float32)
+    candidate_mask = torch.ones((3, 64), dtype=torch.bool)
+    output = PolicyOutput(
+        frontier_logits=torch.zeros((3, 64), dtype=torch.float32),
+        theta_mu=torch.zeros((3, 64), dtype=torch.float32),
+        theta_kappa=torch.ones((3, 64), dtype=torch.float32),
+        value=torch.zeros((3,), dtype=torch.float32),
+    )
+    selected_indices = torch.zeros((3,), dtype=torch.int64)
+    baseline = recompute_action_log_probs(
+        output,
+        candidate_mask,
+        selected_indices,
+        torch.zeros((3,), dtype=torch.float32),
+        platform_context,
+    )
+    changed_hopper = recompute_action_log_probs(
+        output,
+        candidate_mask,
+        selected_indices,
+        torch.tensor([0.0, 0.0, 2.0], dtype=torch.float32),
+        platform_context,
+    )
+    changed_wheel = recompute_action_log_probs(
+        output,
+        candidate_mask,
+        selected_indices,
+        torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32),
+        platform_context,
+    )
+    common = {
+        "old_log_prob_total": baseline.log_prob_total,
+        "normalized_advantage": torch.ones((3,), dtype=torch.float32),
+        "new_value": torch.zeros((3,), dtype=torch.float32),
+        "old_value": torch.zeros((3,), dtype=torch.float32),
+        "returns": torch.zeros((3,), dtype=torch.float32),
+        "frontier_entropy": torch.zeros((3,), dtype=torch.float32),
+        "theta_entropy": torch.tensor([2.0, 4.0, 99.0], dtype=torch.float32),
+        "theta_active": baseline.theta_active,
+        "config": _ppo_config(),
+    }
+
+    terms = trainer_core.compute_ppo_loss_terms(
+        new_log_prob_total=changed_hopper.log_prob_total,
+        **common,
+    )
+
+    assert torch.equal(terms.ratio, torch.ones((3,), dtype=torch.float32))
+    assert terms.approx_kl.item() == 0.0
+    assert terms.theta_entropy.item() == pytest.approx(3.0)
+
+    wheel_terms = trainer_core.compute_ppo_loss_terms(
+        new_log_prob_total=changed_wheel.log_prob_total,
+        **common,
+    )
+    assert wheel_terms.ratio[0].item() != pytest.approx(1.0)
+    assert wheel_terms.approx_kl.item() > 0.0
+
+
+def test_all_hopper_ppo_batch_has_exact_zero_theta_entropy() -> None:
+    zeros = torch.zeros((2,), dtype=torch.float32)
+
+    terms = trainer_core.compute_ppo_loss_terms(
+        new_log_prob_total=zeros,
+        old_log_prob_total=zeros,
+        normalized_advantage=zeros,
+        new_value=zeros,
+        old_value=zeros,
+        returns=zeros,
+        frontier_entropy=zeros,
+        theta_entropy=torch.tensor([7.0, 9.0], dtype=torch.float32),
+        theta_active=torch.zeros((2,), dtype=torch.bool),
+        config=_ppo_config(),
+    )
+
+    assert terms.theta_entropy.dtype == torch.float32
+    assert terms.theta_entropy.item() == 0.0
 
 
 def test_real_update_clips_gradients_and_reports_target_kl_early_stop() -> None:
@@ -382,6 +471,7 @@ def test_ppo_consumers_revalidate_unchecked_typed_config(consumer: str) -> None:
                 returns=scalar,
                 frontier_entropy=scalar,
                 theta_entropy=scalar,
+                theta_active=torch.ones((1,), dtype=torch.bool),
                 config=config,
             )
 

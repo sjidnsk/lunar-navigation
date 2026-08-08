@@ -19,6 +19,9 @@ from lunar_policy_training.policy.cross_attention import (  # noqa: E402
     recompute_action_log_probs,
     sample_action,
 )
+from lunar_policy_training.policy.action_semantics import (  # noqa: E402
+    theta_action_mask,
+)
 from lunar_policy_training.policy.observation import (  # noqa: E402
     PolicyBatch,
 )
@@ -62,12 +65,18 @@ def test_sampled_joint_log_prob_equals_immediate_recomputation() -> None:
 
     with torch.no_grad():
         output = policy(batch)
-        sample = sample_action(output, batch.candidate_mask, deterministic=True)
+        sample = sample_action(
+            output,
+            batch.candidate_mask,
+            batch.platform_context,
+            deterministic=True,
+        )
         recomputed = recompute_action_log_probs(
             output,
             batch.candidate_mask,
             sample.selected_frontier_index,
             sample.selected_theta,
+            batch.platform_context,
         )
 
     assert torch.equal(
@@ -149,13 +158,24 @@ def test_v2_von_mises_initialization_sampling_and_log_prob_recomputation() -> No
 
     with torch.no_grad():
         output = policy(batch)
-        deterministic = sample_action(output, batch.candidate_mask, deterministic=True)
-        sampled = sample_action(output, batch.candidate_mask, deterministic=False)
+        deterministic = sample_action(
+            output,
+            batch.candidate_mask,
+            batch.platform_context,
+            deterministic=True,
+        )
+        sampled = sample_action(
+            output,
+            batch.candidate_mask,
+            batch.platform_context,
+            deterministic=False,
+        )
         recomputed = recompute_action_log_probs(
             output,
             batch.candidate_mask,
             sampled.selected_frontier_index,
             sampled.selected_theta,
+            batch.platform_context,
         )
 
     assert torch.equal(output.theta_mu, torch.zeros_like(output.theta_mu))
@@ -181,7 +201,72 @@ def test_action_distribution_fails_closed_for_an_all_false_mask_row() -> None:
         backbone_core.PolicyActionError,
         match="each distribution row must contain a valid candidate",
     ):
-        sample_action(output, torch.zeros_like(batch.candidate_mask), deterministic=True)
+        sample_action(
+            output,
+            torch.zeros_like(batch.candidate_mask),
+            batch.platform_context,
+            deterministic=True,
+        )
+
+
+def test_mixed_platform_theta_mask_removes_hopper_angle_from_joint_action() -> None:
+    """Hopper theta is neither sampled nor charged to the joint policy."""
+    platform_context = torch.eye(3, dtype=torch.float32)
+    candidate_mask = torch.ones((3, 64), dtype=torch.bool)
+    output = PolicyOutput(
+        frontier_logits=torch.zeros((3, 64), dtype=torch.float32),
+        theta_mu=torch.tensor(
+            [[0.0], [0.25], [1.25]],
+            dtype=torch.float32,
+        ).repeat(1, 64),
+        theta_kappa=torch.ones((3, 64), dtype=torch.float32),
+        value=torch.zeros((3,), dtype=torch.float32),
+    )
+    selected_indices = torch.zeros((3,), dtype=torch.int64)
+    selected_theta = torch.zeros((3,), dtype=torch.float32)
+
+    baseline = recompute_action_log_probs(
+        output,
+        candidate_mask,
+        selected_indices,
+        selected_theta,
+        platform_context,
+    )
+    hopper_changed = recompute_action_log_probs(
+        output,
+        candidate_mask,
+        selected_indices,
+        torch.tensor([0.0, 0.0, -2.0], dtype=torch.float32),
+        platform_context,
+    )
+    wheel_changed = recompute_action_log_probs(
+        output,
+        candidate_mask,
+        selected_indices,
+        torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32),
+        platform_context,
+    )
+    deterministic = sample_action(
+        output,
+        candidate_mask,
+        platform_context,
+        deterministic=True,
+    )
+
+    assert theta_action_mask(platform_context).tolist() == [True, True, False]
+    assert baseline.theta_active.tolist() == [True, True, False]
+    assert baseline.log_prob_theta[2].item() == 0.0
+    assert torch.equal(
+        baseline.log_prob_total[2], baseline.log_prob_frontier[2]
+    )
+    assert torch.equal(
+        hopper_changed.log_prob_total, baseline.log_prob_total
+    )
+    assert not torch.equal(
+        wheel_changed.log_prob_total[0], baseline.log_prob_total[0]
+    )
+    assert deterministic.selected_theta[2].item() == 0.0
+    assert deterministic.theta_active.tolist() == [True, True, False]
 
 
 def test_policy_rejects_non_one_hot_platform_context() -> None:

@@ -99,6 +99,7 @@ from lunar_policy_training.policy.cross_attention import (  # noqa: E402
     CrossAttentionPolicy,
     sample_action,
 )
+from lunar_policy_training.policy.action_semantics import apply_goal_theta  # noqa: E402
 from lunar_policy_training.policy.observation import PolicyBatch  # noqa: E402
 from lunar_policy_training.ppo.rollout import RolloutBatch  # noqa: E402
 from lunar_policy_training.ppo.trainer import PPOTrainer  # noqa: E402
@@ -496,7 +497,7 @@ def _synthetic_bridge_request(
     goal.tolerance_m = inputs.world.canvas.geometry.resolution_m
     request.goal.goal_id = f"polar-frontier/{canvas_id}"
     request.goal.target = goal
-    request.goal.yaw_tolerance_rad = np.pi / 24.0
+    apply_goal_theta(request.goal, "WHEELED", 0.0)
     request.world.global_map = _bridge_grid_map(
         inputs,
         frame_id="map",
@@ -597,7 +598,12 @@ def _policy_batch_from_projection(
 def _one_row_rollout(batch: PolicyBatch, policy: CrossAttentionPolicy) -> tuple[RolloutBatch, object]:
     with torch.no_grad():
         output = policy(batch)
-        action = sample_action(output, batch.candidate_mask, deterministic=True)
+        action = sample_action(
+            output,
+            batch.candidate_mask,
+            batch.platform_context,
+            deterministic=True,
+        )
     arrays = {
         name: getattr(batch, name).detach().cpu().numpy().copy()
         for name in batch.input_names
@@ -1096,7 +1102,11 @@ def test_cpu_pretraining_smoke_links_data_v3_update_checkpoint_and_resume(
     selected_y = top - float(selected_features[1]) * canvas.geometry.size_m
     request.goal.target.position_m.x = selected_x
     request.goal.target.position_m.y = selected_y
-    request.goal.yaw_rad = float(sampled.selected_theta.item())
+    apply_goal_theta(
+        request.goal,
+        "WHEELED",
+        float(sampled.selected_theta.item()),
+    )
     request.goal.goal_id = f"polar-frontier/{canvas.identity}/{selected}"
     assert request.goal.target.position_m.x == pytest.approx(selected_x)
     assert request.goal.target.position_m.y == pytest.approx(selected_y)

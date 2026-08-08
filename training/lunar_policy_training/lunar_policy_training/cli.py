@@ -80,6 +80,7 @@ from .evaluation.report import (
     write_report,
 )
 from .policy.cross_attention import CrossAttentionPolicy, sample_action
+from .policy.action_semantics import apply_goal_theta
 from .policy.observation import ObservationIdentity, PolicyBatch
 from .proxy_scenario import proxy_environment_factory, proxy_observation
 from .ppo.collector import CollectorConfig, EnvStep, collect_rollout as collect_ppo_rollout
@@ -1658,6 +1659,7 @@ def _calibration_environment_factory(
 
     def build_request(action, identity):
         request.state_time.nanoseconds_since_epoch = identity.state_time_ns
+        apply_goal_theta(request.goal, platform_type, action.theta_rad)
         return PreparedPlanRequest(request=request, identity=identity)
 
     environment = create_v3_environment(
@@ -1716,7 +1718,12 @@ def _proxy_rollout(
     batch = _proxy_policy_batch(sample_count, device="cuda")
     with torch.no_grad():
         output = policy(batch)
-        action = sample_action(output, batch.candidate_mask, deterministic=True)
+        action = sample_action(
+            output,
+            batch.candidate_mask,
+            batch.platform_context,
+            deterministic=True,
+        )
     advantages = torch.ones((sample_count,), dtype=torch.float32, device="cuda")
     advantages[1::2] = -1.0
 

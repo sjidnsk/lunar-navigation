@@ -18,6 +18,7 @@ from .environment.v3_environment import (
     ReferenceExecutionResult,
     create_v3_environment,
 )
+from .policy.action_semantics import apply_goal_theta
 from .policy.observation import ObservationIdentity, PolicyBatch
 
 
@@ -426,9 +427,7 @@ class _ProxyEpisode:
         goal.tolerance_m = 0.0 if self.platform_type == "HOPPER" else 0.2
         request.goal.goal_id = f"proxy-frontier-{target_index}"
         request.goal.target = goal
-        if self.platform_type != "HOPPER":
-            request.goal.yaw_rad = float(action.theta_rad)
-            request.goal.yaw_tolerance_rad = math.pi / 24.0
+        apply_goal_theta(request.goal, self.platform_type, action.theta_rad)
         if self.platform_type == "WHEELED":
             state = bridge_api.WheeledState()
             state.pose = _pose(*self.position, 0.0)

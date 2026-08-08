@@ -226,6 +226,8 @@ def _perfect_development_report() -> EvaluationReport:
         deterministic_repeat_match_rate=1.0,
         planner_failure_rate=0.0,
         completion_time_s=1.0,
+        theta_mean_resultant_length=0.0,
+        fixed_yaw_mean_abs_delta_rad=0.0,
     )
     per_platform = {
         platform: metrics for platform in ("WHEELED", "LEGGED", "HOPPER")

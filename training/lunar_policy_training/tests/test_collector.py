@@ -178,6 +178,31 @@ def test_collect_rollout_runs_real_vector_env_actions_and_hand_computed_gae() ->
     assert abs(float(collected.rollout.advantages.mean())) < 1.0e-6
 
 
+def test_collector_emits_zero_theta_for_hopper_only() -> None:
+    """Rollout storage must contain the executed masked hopper action."""
+    environment = DeterministicVectorEnv()
+    policy = _zero_value_policy()
+    with torch.no_grad():
+        policy.theta_sin_head.bias.fill_(1.0)
+        policy.theta_cos_head.bias.zero_()
+
+    collected = collect_rollout(
+        environment,
+        policy,
+        CollectorConfig(horizon=1, deterministic=True),
+        device="cpu",
+    )
+
+    executed_thetas = environment.actions[0][1]
+    assert executed_thetas[0] == pytest.approx(np.pi / 2.0)
+    assert executed_thetas[1] == pytest.approx(np.pi / 2.0)
+    assert executed_thetas[2] == 0.0
+    np.testing.assert_array_equal(
+        collected.rollout.selected_thetas,
+        executed_thetas,
+    )
+
+
 def test_collector_bypasses_all_false_candidate_rows_before_policy_forward() -> None:
     """Would fail if a no-candidate row could enter policy action sampling."""
     environment = DeterministicVectorEnv()

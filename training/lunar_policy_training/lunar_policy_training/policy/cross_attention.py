@@ -10,6 +10,7 @@ from torch import nn
 from lunar_model_contract import ActionContractV2
 
 from . import backbone_core
+from .action_semantics import theta_action_mask
 from .observation import PolicyBatch, validate_policy_batch
 
 
@@ -30,6 +31,7 @@ class ActionEvaluation:
     log_prob_total: torch.Tensor
     frontier_entropy: torch.Tensor
     theta_entropy: torch.Tensor
+    theta_active: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,7 @@ class ActionSample:
     log_prob_total: torch.Tensor
     frontier_entropy: torch.Tensor
     theta_entropy: torch.Tensor
+    theta_active: torch.Tensor
     value: torch.Tensor
 
 
@@ -181,6 +184,7 @@ def recompute_action_log_probs(
     candidate_mask: torch.Tensor,
     selected_frontier_index: torch.Tensor,
     selected_theta: torch.Tensor,
+    platform_context: torch.Tensor,
 ) -> ActionEvaluation:
     """Recompute the masked categorical and conditional angle log-probability."""
     _validate_policy_output(output, candidate_mask)
@@ -212,6 +216,17 @@ def recompute_action_log_probs(
         raise backbone_core.PolicyActionError(
             "selected theta must be float32 [B] on the policy device"
         )
+    try:
+        theta_active = theta_action_mask(platform_context)
+    except ValueError as error:
+        raise backbone_core.PolicyActionError(str(error)) from error
+    if (
+        theta_active.shape != (batch_size,)
+        or theta_active.device != candidate_mask.device
+    ):
+        raise backbone_core.PolicyActionError(
+            "platform_context batch and device must match policy actions"
+        )
     normalized_theta = backbone_core.normalize_theta(selected_theta)
     masked_logits = backbone_core._validated_masked_logits(
         output.frontier_logits, candidate_mask
@@ -227,13 +242,19 @@ def recompute_action_log_probs(
     log_prob_frontier = frontier_distribution.log_prob(
         selected_frontier_index
     ).to(torch.float32)
-    log_prob_theta = theta_distribution.log_prob(normalized_theta).to(torch.float32)
+    raw_log_prob_theta = theta_distribution.log_prob(normalized_theta).to(
+        torch.float32
+    )
+    raw_theta_entropy = _von_mises_entropy(selected_kappa)
+    zero = torch.zeros_like(raw_log_prob_theta)
+    log_prob_theta = torch.where(theta_active, raw_log_prob_theta, zero)
     evaluation = ActionEvaluation(
         log_prob_frontier=log_prob_frontier,
         log_prob_theta=log_prob_theta,
         log_prob_total=log_prob_frontier + log_prob_theta,
         frontier_entropy=frontier_distribution.entropy().to(torch.float32),
-        theta_entropy=_von_mises_entropy(selected_kappa),
+        theta_entropy=torch.where(theta_active, raw_theta_entropy, zero),
+        theta_active=theta_active,
     )
     _require_finite_action_tensors(
         evaluation.log_prob_frontier,
@@ -248,6 +269,7 @@ def recompute_action_log_probs(
 def sample_action(
     output: PolicyOutput,
     candidate_mask: torch.Tensor,
+    platform_context: torch.Tensor,
     deterministic: bool,
 ) -> ActionSample:
     """Sample one valid candidate and its conditional angle."""
@@ -276,7 +298,16 @@ def sample_action(
             .to(torch.float32)
         )
     evaluation = recompute_action_log_probs(
-        output, candidate_mask, selected_index, selected_theta
+        output,
+        candidate_mask,
+        selected_index,
+        selected_theta,
+        platform_context,
+    )
+    selected_theta = torch.where(
+        evaluation.theta_active,
+        selected_theta,
+        torch.zeros_like(selected_theta),
     )
     sample = ActionSample(
         selected_frontier_index=selected_index,
@@ -286,6 +317,7 @@ def sample_action(
         log_prob_total=evaluation.log_prob_total,
         frontier_entropy=evaluation.frontier_entropy,
         theta_entropy=evaluation.theta_entropy,
+        theta_active=evaluation.theta_active,
         value=output.value,
     )
     _require_finite_action_tensors(

@@ -305,6 +305,48 @@ def test_ground_proxy_capability_can_plan_non_cardinal_sampled_yaw(
     assert output.reference is not None, output.reason_code
 
 
+@pytest.mark.parametrize("platform_type", ["WHEELED", "LEGGED"])
+def test_ground_theta_changes_terminal_yaw_and_execution_time(
+    platform_type: str,
+) -> None:
+    """The current planner gives ground theta a learnable non-coverage signal."""
+    outputs = []
+    for theta in (0.0, -1.125):
+        episode = _ProxyEpisode(0, platform_type, scenario_index=0)
+        request = _build_episode_request(
+            episode,
+            PolicyAction(frontier_index=0, theta_rad=theta),
+        )
+        output = PlannerBridge().plan(request)
+        assert output.reference is not None, output.reason_code
+        outputs.append(output.reference.data)
+
+    final_points = tuple(output.points[-1] for output in outputs)
+    final_yaws = tuple(
+        math.atan2(
+            2.0
+            * (
+                point.pose.orientation.w * point.pose.orientation.z
+                + point.pose.orientation.x * point.pose.orientation.y
+            ),
+            1.0
+            - 2.0
+            * (
+                point.pose.orientation.y * point.pose.orientation.y
+                + point.pose.orientation.z * point.pose.orientation.z
+            ),
+        )
+        for point in final_points
+    )
+    durations = tuple(
+        point.time_from_start.total_seconds() for point in final_points
+    )
+
+    assert final_yaws[0] == pytest.approx(0.0, abs=1.0e-6)
+    assert final_yaws[1] == pytest.approx(-1.125, abs=1.0e-6)
+    assert durations[0] != durations[1]
+
+
 def test_proxy_executor_rejects_unexecutable_reference_without_success_gain() -> None:
     """Would fail if an empty C++ reference still received synthetic coverage."""
     episode = _ProxyEpisode(0, "WHEELED", scenario_index=0)

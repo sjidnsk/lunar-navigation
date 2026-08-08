@@ -40,6 +40,7 @@ def compute_ppo_loss_terms(
     returns: torch.Tensor,
     frontier_entropy: torch.Tensor,
     theta_entropy: torch.Tensor,
+    theta_active: torch.Tensor,
     config: PPOConfig,
 ) -> PPOLossTerms:
     """Compute clipped joint-policy/value PPO with separate action entropies."""
@@ -74,6 +75,15 @@ def compute_ppo_loss_terms(
     if len({value.device for value in tensors}) != 1:
         raise PPOTrainingError("PPO loss inputs must share one device")
     device = new_log_prob_total.device
+    if (
+        not isinstance(theta_active, torch.Tensor)
+        or theta_active.dtype != torch.bool
+        or theta_active.shape != shape
+        or theta_active.device != device
+    ):
+        raise PPOTrainingError(
+            "theta_active must be bool [N] on the PPO device"
+        )
     try:
         autocast_enabled = torch.is_autocast_enabled(device.type)
     except TypeError:
@@ -102,7 +112,11 @@ def compute_ppo_loss_terms(
         (value_clipped - returns).square(),
     ).mean(dtype=torch.float32)
     frontier_entropy_mean = frontier_entropy.mean(dtype=torch.float32)
-    theta_entropy_mean = theta_entropy.mean(dtype=torch.float32)
+    theta_weights = theta_active.to(dtype=torch.float32)
+    theta_entropy_mean = (
+        (theta_entropy * theta_weights).sum(dtype=torch.float32)
+        / theta_weights.sum(dtype=torch.float32).clamp_min(1.0)
+    )
     total_loss = (
         policy_loss
         + config.value_loss_coefficient * value_loss

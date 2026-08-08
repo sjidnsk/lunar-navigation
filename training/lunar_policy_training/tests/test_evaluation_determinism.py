@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 from lunar_planner_training_bridge import ExecutionDirective, PlanningOutcome
@@ -42,6 +44,8 @@ def _metrics(coverage: float, *, failures: float = 0.0, seconds: float = 5.0):
         deterministic_repeat_match_rate=1.0,
         planner_failure_rate=failures,
         completion_time_s=seconds,
+        theta_mean_resultant_length=0.0,
+        fixed_yaw_mean_abs_delta_rad=0.0,
     )
 
 
@@ -87,7 +91,7 @@ def test_same_scenario_report_has_identical_canonical_hash() -> None:
     first = _report((0.95, 0.96, 0.97))
     second = _report((0.95, 0.96, 0.97))
 
-    assert first.schema_version == "lunar-policy-development-evaluation/v1"
+    assert first.schema_version == "lunar-policy-development-evaluation/v2"
     assert report_sha256(first) == report_sha256(second)
     assert first.to_dict() == second.to_dict()
 
@@ -117,6 +121,7 @@ def test_platform_metrics_aggregate_observed_execution_events() -> None:
                 planner_failure_count=0,
                 executed_step_count=2,
                 completion_step_count=2,
+                selected_thetas_rad=(0.0, math.pi / 2.0),
             ),
             _ScenarioEvidence(
                 scenario_seed=11,
@@ -131,8 +136,10 @@ def test_platform_metrics_aggregate_observed_execution_events() -> None:
                 planner_failure_count=2,
                 executed_step_count=2,
                 completion_step_count=3,
+                selected_thetas_rad=(-math.pi / 2.0, 0.0),
             ),
-        )
+        ),
+        theta_active=True,
     )
 
     assert metrics.scenario_seeds == (10, 11)
@@ -146,6 +153,8 @@ def test_platform_metrics_aggregate_observed_execution_events() -> None:
     assert metrics.deterministic_repeat_match_rate == 0.25
     assert metrics.planner_failure_rate == 0.5
     assert metrics.completion_time_s == 2.5
+    assert metrics.theta_mean_resultant_length == pytest.approx(0.5, abs=1.0e-7)
+    assert metrics.fixed_yaw_mean_abs_delta_rad == pytest.approx(math.pi / 4.0)
 
 
 @pytest.mark.parametrize(
@@ -248,6 +257,12 @@ def test_real_proxy_evaluation_is_deterministic_and_compares_three_methods() -> 
     for method in first.methods:
         for platform, metrics in method.per_platform.items():
             assert metrics.scenario_seeds == expected_seeds[platform]
+            if platform == "HOPPER":
+                assert metrics.theta_mean_resultant_length == 0.0
+                assert metrics.fixed_yaw_mean_abs_delta_rad == 0.0
+            else:
+                assert 0.0 <= metrics.theta_mean_resultant_length <= 1.0
+                assert 0.0 <= metrics.fixed_yaw_mean_abs_delta_rad <= math.pi
     gain_over_cost = first.method("gain_over_cost_frontier")
     assert all(
         metrics.success_coverage_rate == 1.0
