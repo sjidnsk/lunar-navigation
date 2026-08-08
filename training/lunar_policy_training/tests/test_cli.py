@@ -166,6 +166,92 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
     assert extension.blocks == 2
 
 
+def test_formal_preflight_passes_the_validated_sensor_digest_to_calibration(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Would fail if the formal-preflight handoff used an unbound alias."""
+    sensor_digest = "s" * 64
+    bundle = FrozenCapabilityBundle(
+        schema="lunar-training-capability-freeze/v1",
+        platforms=(),
+        bundle_sha256="b" * 64,
+        formal_eligible=True,
+    )
+    cache = SimpleNamespace(identity=object())
+    assembly = SimpleNamespace()
+    config = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+    calibrated = SimpleNamespace(
+        config=config,
+        selected_workers=24,
+        micro_batch_size=4,
+        rollout_horizon=16,
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module, "_formal_capability_preflight", lambda _root: bundle
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_formal_sensor_performance_preflight",
+        lambda *args, **kwargs: sensor_digest,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_build_formal_environment",
+        lambda *args, **kwargs: (cache, assembly),
+    )
+    monkeypatch.setattr(
+        cli_module, "_formal_evaluation_batches", lambda *args: ()
+    )
+
+    def validated_calibration(**kwargs):
+        captured.update(kwargs)
+        return calibrated
+
+    monkeypatch.setattr(
+        cli_module,
+        "_validated_formal_preflight_calibration",
+        validated_calibration,
+    )
+    monkeypatch.setattr(
+        cli_module, "_formal_run_identity", lambda _identity: object()
+    )
+    monkeypatch.setattr(
+        cli_module, "_formal_resume_equivalence_check", lambda **kwargs: {}
+    )
+    report = SimpleNamespace(
+        payload={
+            "selected_workers": 24,
+            "selected_micro_batch": 4,
+        }
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "run_formal_preflight",
+        lambda **kwargs: (report, tmp_path / "preflight" / "formal-preflight.json"),
+    )
+
+    assert cli_module.main(
+        [
+            "formal-preflight",
+            "--config",
+            str(REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"),
+            "--cache-manifest",
+            str(tmp_path / "cache-manifest.json"),
+            "--artifact-root",
+            str(tmp_path / "preflight"),
+            "--calibration-root",
+            str(tmp_path / "calibration"),
+            "--sensor-performance-report",
+            str(tmp_path / "sensor-performance.json"),
+        ]
+    ) == 0
+    assert captured["sensor_performance_sha256"] == sensor_digest
+
+
 def test_formal_calibrate_rejects_cache_before_cuda_or_artifact_creation(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,

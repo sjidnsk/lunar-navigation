@@ -1329,7 +1329,7 @@ def main(argv: list[str] | None = None) -> int:
             cache=cache,
             train_assembly=train_assembly,
             cache_manifest_path=Path(arguments.cache_manifest),
-            sensor_performance_sha256=sensor_report_sha256,
+            sensor_performance_sha256=sensor_performance_sha256,
             repository_root=repository_root,
         )
         preflight_root = validate_artifact_root(
