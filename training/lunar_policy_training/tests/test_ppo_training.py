@@ -25,6 +25,7 @@ from lunar_policy_training.config import (  # noqa: E402
     TrainingConfigError,
     load_training_config,
     resolve_training_config,
+    validate_ppo_config,
 )
 from lunar_policy_training.ppo import rollout_core, trainer_core  # noqa: E402
 from lunar_policy_training.ppo.rollout import RolloutBatch, compute_gae  # noqa: E402
@@ -388,6 +389,15 @@ def _unchecked_ppo_config(**changes: object) -> PPOConfig:
     for field, value in values.items():
         object.__setattr__(config, field, value)
     return config
+
+
+@pytest.mark.parametrize("rollout_horizon", [16, 32, 64])
+def test_rollout_horizon_accepts_only_calibratable_batch_boundaries(
+    rollout_horizon: int,
+) -> None:
+    config = _unchecked_ppo_config(rollout_horizon=rollout_horizon)
+
+    assert validate_ppo_config(config) is config
 
 
 @pytest.mark.parametrize(

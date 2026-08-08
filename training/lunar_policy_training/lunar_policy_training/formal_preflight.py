@@ -17,7 +17,7 @@ from lunar_model_contract import ObservationContractV3
 from lunar_planner_training_bridge import PlannerBridge
 
 from .checkpoint import RunIdentity
-from .config import PLATFORMS
+from .config import PLATFORMS, ROLLOUT_HORIZON_CANDIDATES
 from .environment.formal_builder import FormalEnvironmentAssembly
 from .environment.macro_step import PolicyAction
 from .environment.parallel_pool import ParallelActions, ParallelEnvPool
@@ -32,7 +32,7 @@ from .polar_data.formal_cache import FormalCache
 from .reward import compute_transition_reward
 
 
-FORMAL_PREFLIGHT_SCHEMA = "lunar-formal-training-preflight/v1"
+FORMAL_PREFLIGHT_SCHEMA = "lunar-formal-training-preflight/v2"
 REQUIRED_PREFLIGHT_CHECKS = (
     "cache_and_identity",
     "three_platform_worker_construction",
@@ -41,6 +41,7 @@ REQUIRED_PREFLIGHT_CHECKS = (
     "multiresolution_4m_global_0p2m_local",
     "hopper_no_cumulative_fuel",
     "update_boundary_resume",
+    "rollout_horizon_not_episode_limit",
     "qualified_worker_configuration",
     "nonproxy_evaluation",
 )
@@ -91,6 +92,7 @@ def build_formal_preflight_report(
     qualified_worker_candidates: tuple[int, ...],
     selected_workers: int,
     selected_micro_batch: int,
+    selected_rollout_horizon: int,
     evaluation_report_sha256: str,
 ) -> FormalPreflightReport:
     if not _is_sha(source_commit, length=40):
@@ -134,6 +136,8 @@ def build_formal_preflight_report(
         or selected_micro_batch <= 0
     ):
         raise FormalPreflightError("preflight worker recommendation is invalid")
+    if selected_rollout_horizon not in ROLLOUT_HORIZON_CANDIDATES:
+        raise FormalPreflightError("preflight rollout horizon is not calibrated")
     if not _is_sha(evaluation_report_sha256):
         raise FormalPreflightError("preflight evaluation digest is invalid")
     payload: dict[str, object] = {
@@ -150,6 +154,9 @@ def build_formal_preflight_report(
         "qualified_worker_candidates": list(qualified_worker_candidates),
         "selected_workers": selected_workers,
         "selected_micro_batch": selected_micro_batch,
+        "rollout_horizon_candidates": list(ROLLOUT_HORIZON_CANDIDATES),
+        "selected_rollout_horizon": selected_rollout_horizon,
+        "episode_decision_limit": None,
         "evaluation_report_sha256": evaluation_report_sha256,
         "proxy": False,
         "training_started": False,
@@ -428,6 +435,7 @@ def run_formal_preflight(
     artifact_root: Path,
     worker_candidates: tuple[int, ...] = (18, 24),
     selected_micro_batch: int = 2,
+    selected_rollout_horizon: int = 32,
 ) -> tuple[FormalPreflightReport, Path]:
     """Execute current formal wiring without creating or advancing a checkpoint."""
     expected_splits = {"train", "validation", "test", "holdout"}
@@ -490,6 +498,7 @@ def run_formal_preflight(
         qualified_worker_candidates=tuple(qualified),
         selected_workers=selected_workers,
         selected_micro_batch=selected_micro_batch,
+        selected_rollout_horizon=selected_rollout_horizon,
         evaluation_report_sha256=report_sha256(evaluation),
     )
     return report, write_formal_preflight_report(artifact_root, report)

@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import FrameType
 from typing import TypeVar
@@ -42,6 +42,8 @@ from .polar_data.multires_scene import GENERATOR_SHA256
 from .budget import (
     BudgetExceededError,
     CalibrationMeasurement,
+    HorizonCalibrationMeasurement,
+    ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER,
     TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS,
     TrainingBudget,
     calibrate_runtime,
@@ -60,9 +62,11 @@ from .checkpoint import (
 )
 from .config import (
     PPOConfig,
+    ROLLOUT_HORIZON_CANDIDATES,
     ResolvedTrainingConfig,
     load_training_config,
     resolve_training_config,
+    with_rollout_horizon,
 )
 from .environment.parallel_pool import (
     ParallelActions,
@@ -186,6 +190,7 @@ class CalibratedRunState:
     allocation: dict[str, int]
     selected_workers: int
     micro_batch_size: int
+    rollout_horizon: int
     reward_hash: str
     scenario_schedule_id: str
     formal_seed: int
@@ -209,6 +214,7 @@ class _ParallelPoolVectorEnv:
         self.policy_versions: list[int] = []
         self.planning_outcomes: list[object] = []
         self.reason_codes: list[str] = []
+        self.worker_wait_seconds = 0.0
         self._normalization_state: Mapping[str, object] | None = None
         self.set_policy_version(policy_version)
 
@@ -226,6 +232,13 @@ class _ParallelPoolVectorEnv:
         self.policy_versions.clear()
         self.planning_outcomes.clear()
         self.reason_codes.clear()
+        self.worker_wait_seconds = 0.0
+
+    @property
+    def current_observations(self) -> PolicyBatch:
+        if self._current is None:
+            raise ValueError("parallel rollout adapter is not initialized")
+        return self._current.observations
 
     def advance_policy_version(self, policy_version: int) -> PolicyBatch:
         """Start a new on-policy batch without replacing active episodes."""
@@ -244,13 +257,17 @@ class _ParallelPoolVectorEnv:
     def step(
         self, candidate_indices: np.ndarray, thetas: np.ndarray
     ) -> EnvStep:
-        step = self._pool.step(
-            ParallelActions(
-                candidate_indices=torch.from_numpy(candidate_indices),
-                thetas=torch.from_numpy(thetas),
-            ),
-            policy_version=self._policy_version,
-        )
+        started = time.perf_counter()
+        try:
+            step = self._pool.step(
+                ParallelActions(
+                    candidate_indices=torch.from_numpy(candidate_indices),
+                    thetas=torch.from_numpy(thetas),
+                ),
+                policy_version=self._policy_version,
+            )
+        finally:
+            self.worker_wait_seconds += time.perf_counter() - started
         self._current = step
         self.policy_versions.append(self._policy_version)
         self.planning_outcomes.extend(step.planning_outcomes)
@@ -274,9 +291,13 @@ class _ParallelPoolVectorEnv:
 
     def prepare_decision_boundaries(self) -> EnvStep:
         """Refresh producers and resolve no-action rows before policy forward."""
-        step = self._pool.prepare_decision_boundaries(
-            policy_version=self._policy_version,
-        )
+        started = time.perf_counter()
+        try:
+            step = self._pool.prepare_decision_boundaries(
+                policy_version=self._policy_version,
+            )
+        finally:
+            self.worker_wait_seconds += time.perf_counter() - started
         self._current = step
         return EnvStep(
             observations=step.observations,
@@ -811,8 +832,97 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
         raise ArtifactRootError("Task 4 calibration end is invalid")
     selected_workers = runtime.get("selected_workers")
     micro_batch_size = runtime.get("selected_micro_batch")
-    if type(selected_workers) is not int or type(micro_batch_size) is not int:
+    selected_rollout_horizon = runtime.get("selected_rollout_horizon")
+    if (
+        type(selected_workers) is not int
+        or type(micro_batch_size) is not int
+        or type(selected_rollout_horizon) is not int
+        or selected_rollout_horizon != config.ppo.rollout_horizon
+    ):
         raise ArtifactRootError("runtime calibration selection is invalid")
+    horizon_candidates = runtime.get("rollout_horizon_candidates")
+    horizon_work = runtime.get("horizon_transitions_per_worker")
+    horizon_measurements = runtime.get("horizon_measurements")
+    if config.run_kind == "formal":
+        if (
+            horizon_candidates != list(ROLLOUT_HORIZON_CANDIDATES)
+            or horizon_work != ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER
+            or not isinstance(horizon_measurements, list)
+            or len(horizon_measurements) != len(ROLLOUT_HORIZON_CANDIDATES)
+        ):
+            raise ArtifactRootError(
+                "formal rollout horizon calibration evidence is incomplete"
+            )
+        try:
+            parsed_horizons = tuple(
+                HorizonCalibrationMeasurement(**value)
+                for value in horizon_measurements
+                if isinstance(value, dict)
+            )
+        except Exception as error:
+            raise ArtifactRootError(
+                "formal rollout horizon measurement is invalid"
+            ) from error
+        if len(parsed_horizons) != len(ROLLOUT_HORIZON_CANDIDATES):
+            raise ArtifactRootError(
+                "formal rollout horizon measurement is invalid"
+            )
+        expected_total = (
+            selected_workers * ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER
+        )
+        if any(
+            measurement.workers != selected_workers
+            or measurement.micro_batch != micro_batch_size
+            or measurement.rollout_horizon != candidate
+            or measurement.total_transitions != expected_total
+            or measurement.completed_updates
+            != ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER // candidate
+            for candidate, measurement in zip(
+                ROLLOUT_HORIZON_CANDIDATES,
+                parsed_horizons,
+            )
+        ):
+            raise ArtifactRootError(
+                "formal rollout horizon probes did not use equal work"
+            )
+        qualified = tuple(
+            measurement
+            for measurement in parsed_horizons
+            if not measurement.oom
+            and measurement.ipc_failures == 0
+            and measurement.planner_timeouts == 0
+            and measurement.peak_gpu_memory_fraction
+            <= config.parallel.gpu_memory_fraction_max
+            and measurement.advantages_finite
+            and measurement.returns_finite
+            and measurement.update_boundary_continuity_verified
+            and measurement.resume_verified
+            and measurement.throughput_transitions_per_second > 0.0
+        )
+        if not qualified:
+            raise ArtifactRootError(
+                "formal rollout horizon calibration has no qualified candidate"
+            )
+        expected_selection = min(
+            qualified,
+            key=lambda value: (
+                -value.throughput_transitions_per_second,
+                value.mean_update_wall_seconds,
+                value.rollout_horizon,
+            ),
+        ).rollout_horizon
+        if selected_rollout_horizon != expected_selection:
+            raise ArtifactRootError(
+                "formal rollout horizon selection differs from evidence"
+            )
+    elif (
+        horizon_candidates != []
+        or horizon_work != 0
+        or horizon_measurements != []
+    ):
+        raise ArtifactRootError(
+            "development calibration cannot contain formal horizon evidence"
+        )
     consumed = manifest.get("consumed_gpu_seconds")
     budget = TrainingBudget(
         total_gpu_seconds=manifest.get("total_gpu_budget_seconds"),
@@ -825,6 +935,7 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
         allocation=_allocation_for_workers(selected_workers),
         selected_workers=selected_workers,
         micro_batch_size=micro_batch_size,
+        rollout_horizon=selected_rollout_horizon,
         reward_hash=task4["reward_hash"],
         scenario_schedule_id=task4["scenario_schedule_id"],
         formal_seed=task4["formal_seed"],
@@ -1114,6 +1225,9 @@ def main(argv: list[str] | None = None) -> int:
                 artifact_root=preflight_root,
                 worker_candidates=requested_config.parallel.worker_candidates,
                 selected_micro_batch=2,
+                selected_rollout_horizon=(
+                    requested_config.ppo.rollout_horizon
+                ),
             )
         except FormalPreflightError as error:
             raise PreflightError(f"formal preflight failed: {error}") from error
@@ -1443,6 +1557,9 @@ def _calibrate_training_run(
         calibration = calibrate_runtime(
             config=config,
             workload=workload,
+            horizon_workload=(
+                workload.measure_rollout_horizon if formal else None
+            ),
             budget=budget,
             manifest_path=root / "run-manifest.json",
             micro_batch_candidates=(
@@ -1453,6 +1570,10 @@ def _calibrate_training_run(
         )
     finally:
         workload.close()
+    config = with_rollout_horizon(
+        config,
+        calibration.selected_rollout_horizon,
+    )
     schedule = CurriculumSchedule()
     if formal:
         assert formal_environment_assembly is not None
@@ -2297,8 +2418,30 @@ def _run_updates(
     )
 
 
+def _policy_batch_digest(batch: PolicyBatch) -> str:
+    digest = hashlib.sha256()
+    for name in (
+        "prior_channels",
+        "coverage_summary",
+        "local_crop",
+        "frontier_features",
+        "pose_features",
+        "candidate_mask",
+        "platform_context",
+    ):
+        values = getattr(batch, name).detach().cpu().contiguous().numpy()
+        digest.update(name.encode("utf-8"))
+        digest.update(values.dtype.str.encode("ascii"))
+        digest.update(str(values.shape).encode("ascii"))
+        digest.update(values.tobytes(order="C"))
+    digest.update(repr(batch.observation_identities).encode("utf-8"))
+    return digest.hexdigest()
+
+
 class _CudaPlannerCalibrationWorkload:
     """Same real PlannerBridge + policy workload at 18 and 24 workers."""
+
+    _RUNTIME_PROBE_HORIZON = 4
 
     def __init__(
         self,
@@ -2323,11 +2466,12 @@ class _CudaPlannerCalibrationWorkload:
         self._environment_factory = environment_factory
         self._observation_template = observation_template
         self._formal = environment_factory is not None
+        self._ppo_config = ppo_config
         self._pool: ParallelEnvPool | None = None
         self._environment: _ParallelPoolVectorEnv | None = None
         self._workers: int | None = None
         self._policy_version = 0
-        self._trainer = ResumablePPOTrainer(
+        self._trainer: ResumablePPOTrainer | None = ResumablePPOTrainer(
             CrossAttentionPolicy(),
             reward_fn=compute_transition_reward,
             ppo_config=ppo_config,
@@ -2338,6 +2482,7 @@ class _CudaPlannerCalibrationWorkload:
         self._ensure_pool(workers)
         assert self._pool is not None
         assert self._environment is not None
+        assert self._trainer is not None
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
         start_event = torch.cuda.Event(enable_timing=True)
@@ -2355,7 +2500,10 @@ class _CudaPlannerCalibrationWorkload:
             collected = collect_ppo_rollout(
                 self._environment,
                 self._trainer.policy,
-                CollectorConfig(horizon=micro_batch, deterministic=True),
+                CollectorConfig(
+                    horizon=self._RUNTIME_PROBE_HORIZON,
+                    deterministic=True,
+                ),
                 device="cuda",
             )
             metrics = self._trainer.update(
@@ -2384,7 +2532,7 @@ class _CudaPlannerCalibrationWorkload:
         wall_seconds = max(time.perf_counter() - wall_start, 1.0e-9)
         total_memory = torch.cuda.get_device_properties(0).total_memory
         peak_fraction = torch.cuda.max_memory_allocated() / total_memory
-        samples = workers * micro_batch
+        samples = workers * self._RUNTIME_PROBE_HORIZON
         return CalibrationMeasurement(
             workers=workers,
             micro_batch=micro_batch,
@@ -2395,6 +2543,209 @@ class _CudaPlannerCalibrationWorkload:
             gpu_seconds=gpu_seconds,
             ipc_failures=ipc_failures,
             optimizer_steps=optimizer_steps,
+        )
+
+    def measure_rollout_horizon(
+        self,
+        workers: int,
+        micro_batch: int,
+        rollout_horizon: int,
+        transitions_per_worker: int,
+    ) -> HorizonCalibrationMeasurement:
+        """Compare one horizon using equal transitions and a fresh seeded run."""
+        if not self._formal:
+            raise PreflightError(
+                "rollout horizon calibration requires the formal environment"
+            )
+        if transitions_per_worker % rollout_horizon:
+            raise PreflightError("rollout horizon probe work is not divisible")
+        assert self._environment_factory is not None
+        assert self._observation_template is not None
+        self.close()
+        _seed_everything(FORMAL_SEED)
+        torch.cuda.empty_cache()
+        self._trainer = None
+        torch.cuda.empty_cache()
+        selected_ppo_config = replace(
+            self._ppo_config,
+            rollout_horizon=rollout_horizon,
+        )
+        trainer = ResumablePPOTrainer(
+            CrossAttentionPolicy(),
+            reward_fn=compute_transition_reward,
+            ppo_config=selected_ppo_config,
+            device="cuda",
+        )
+        allocation = _allocation_for_workers(workers)
+        pool: ParallelEnvPool | None = None
+        resumed_pool: ParallelEnvPool | None = None
+        environment: _ParallelPoolVectorEnv | None = None
+        planner_timeouts = 0
+        ipc_failures = 0
+        completed_updates = 0
+        update_walls: list[float] = []
+        approximate_kls: list[float] = []
+        value_losses: list[float] = []
+        advantages_finite = True
+        returns_finite = True
+        continuity_verified = True
+        resume_verified = False
+        resume_digest: str | None = None
+        oom = False
+        worker_wait_seconds = 0.0
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        wall_start = time.perf_counter()
+        gpu_seconds = 0.0
+        try:
+            pool = ParallelEnvPool(
+                allocation=allocation,
+                observation_template=self._observation_template,
+                environment_factory=self._environment_factory,
+                reward_fn=compute_transition_reward,
+                worker_timeout_seconds=60.0,
+            )
+            environment = _ParallelPoolVectorEnv(pool, policy_version=0)
+            environment.reset()
+            start_event.record()
+            for policy_version in range(
+                transitions_per_worker // rollout_horizon
+            ):
+                environment.set_policy_version(policy_version)
+                collected = collect_ppo_rollout(
+                    environment,
+                    trainer.policy,
+                    CollectorConfig(
+                        horizon=rollout_horizon,
+                        deterministic=True,
+                    ),
+                    device="cuda",
+                )
+                worker_wait_seconds += environment.worker_wait_seconds
+                planner_timeouts += sum(
+                    outcome == PlanningOutcome.RESOURCE_EXHAUSTED
+                    and "TIMEOUT" in reason.upper()
+                    for outcome, reason in zip(
+                        environment.planning_outcomes,
+                        environment.reason_codes,
+                    )
+                )
+                advantages_finite &= bool(
+                    np.isfinite(collected.rollout.advantages).all()
+                )
+                returns_finite &= bool(
+                    np.isfinite(collected.rollout.returns).all()
+                )
+                boundary_digest = _policy_batch_digest(
+                    environment.current_observations
+                )
+                update_started = time.perf_counter()
+                metrics = trainer.update(
+                    collected.rollout,
+                    micro_batch_size=micro_batch,
+                )
+                update_walls.append(time.perf_counter() - update_started)
+                approximate_kls.append(metrics.approx_kl)
+                value_losses.append(metrics.value_loss)
+                completed_updates += 1
+                advanced = environment.advance_policy_version(
+                    policy_version + 1
+                )
+                continuity_verified &= (
+                    boundary_digest == _policy_batch_digest(advanced)
+                )
+            states = pool.snapshot_episode_states(
+                policy_version=completed_updates
+            )
+            active_digest = _policy_batch_digest(
+                environment.current_observations
+            )
+            resume_digest = hashlib.sha256(
+                (
+                    json.dumps(
+                        states,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    )
+                    + active_digest
+                ).encode("utf-8")
+            ).hexdigest()
+            pool.close()
+            pool = None
+            resumed_pool = ParallelEnvPool(
+                allocation=allocation,
+                observation_template=self._observation_template,
+                environment_factory=self._environment_factory,
+                reward_fn=compute_transition_reward,
+                worker_timeout_seconds=60.0,
+                initial_episode_states=states,
+            )
+            restored = resumed_pool.reset().observations
+            resume_verified = active_digest == _policy_batch_digest(restored)
+            end_event.record()
+            torch.cuda.synchronize()
+            gpu_seconds = max(
+                start_event.elapsed_time(end_event) / 1000.0,
+                0.0,
+            )
+        except torch.cuda.OutOfMemoryError:
+            oom = True
+            torch.cuda.synchronize()
+            gpu_seconds = max(time.perf_counter() - wall_start, 0.0)
+        except ParallelPoolError:
+            ipc_failures = 1
+            torch.cuda.synchronize()
+            gpu_seconds = max(time.perf_counter() - wall_start, 0.0)
+        finally:
+            if pool is not None:
+                pool.close()
+            if resumed_pool is not None:
+                resumed_pool.close()
+        wall_seconds = max(time.perf_counter() - wall_start, 1.0e-9)
+        completed_transitions = (
+            completed_updates * workers * rollout_horizon
+        )
+        total_memory = torch.cuda.get_device_properties(0).total_memory
+        peak_fraction = torch.cuda.max_memory_allocated() / total_memory
+        return HorizonCalibrationMeasurement(
+            workers=workers,
+            micro_batch=micro_batch,
+            rollout_horizon=rollout_horizon,
+            total_transitions=workers * transitions_per_worker,
+            completed_updates=completed_updates,
+            throughput_transitions_per_second=(
+                completed_transitions / wall_seconds
+            ),
+            mean_update_wall_seconds=(
+                sum(update_walls) / len(update_walls)
+                if update_walls
+                else wall_seconds
+            ),
+            peak_gpu_memory_fraction=float(peak_fraction),
+            worker_wait_ratio=min(worker_wait_seconds / wall_seconds, 1.0),
+            planner_timeouts=planner_timeouts,
+            oom=oom,
+            gpu_seconds=gpu_seconds,
+            ipc_failures=ipc_failures,
+            approximate_kl=(
+                sum(approximate_kls) / len(approximate_kls)
+                if approximate_kls
+                else 0.0
+            ),
+            value_loss=(
+                sum(value_losses) / len(value_losses)
+                if value_losses
+                else 0.0
+            ),
+            advantages_finite=advantages_finite,
+            returns_finite=returns_finite,
+            update_boundary_continuity_verified=continuity_verified,
+            resume_digest=resume_digest,
+            resume_verified=resume_verified,
         )
 
     def close(self) -> None:

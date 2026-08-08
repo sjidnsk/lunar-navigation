@@ -785,8 +785,12 @@ def _write_calibrated_manifest(root: pathlib.Path, *, consumed: float = 12.5) ->
                 "runtime_calibration": {
                     "selected_workers": 24,
                     "selected_micro_batch": 2,
+                    "selected_rollout_horizon": 32,
                     "compared_workers": [18, 24],
                     "measurements": [],
+                    "rollout_horizon_candidates": [],
+                    "horizon_transitions_per_worker": 0,
+                    "horizon_measurements": [],
                 },
                 "consumed_gpu_seconds": consumed,
                 "budget_extension_blocks": 0,
@@ -800,11 +804,57 @@ def _write_calibrated_manifest(root: pathlib.Path, *, consumed: float = 12.5) ->
         schedule=CurriculumSchedule(),
         reward_hash=reward_weights_sha256(),
         reward_seed_results=(
-            {"seed": 4081, "minimum_platform_score": 0.5, "report_sha256": "1" * 64},
-            {"seed": 4082, "minimum_platform_score": 0.5, "report_sha256": "2" * 64},
-            {"seed": 4083, "minimum_platform_score": 0.5, "report_sha256": "3" * 64},
+            {
+                "seed": 4081,
+                "minimum_platform_score": 0.5,
+                "report_sha256": "1" * 64,
+            },
+            {
+                "seed": 4082,
+                "minimum_platform_score": 0.5,
+                "report_sha256": "2" * 64,
+            },
+            {
+                "seed": 4083,
+                "minimum_platform_score": 0.5,
+                "report_sha256": "3" * 64,
+            },
         ),
     )
+
+
+def _formal_horizon_measurements() -> list[dict[str, object]]:
+    values: list[dict[str, object]] = []
+    for horizon, throughput, update_wall in (
+        (16, 90.0, 2.0),
+        (32, 120.0, 3.0),
+        (64, 110.0, 5.0),
+    ):
+        values.append(
+            {
+                "workers": 24,
+                "micro_batch": 2,
+                "rollout_horizon": horizon,
+                "total_transitions": 24 * 64,
+                "completed_updates": 64 // horizon,
+                "throughput_transitions_per_second": throughput,
+                "mean_update_wall_seconds": update_wall,
+                "peak_gpu_memory_fraction": 0.5,
+                "worker_wait_ratio": 0.25,
+                "planner_timeouts": 0,
+                "oom": False,
+                "gpu_seconds": 1.0,
+                "ipc_failures": 0,
+                "approximate_kl": 0.01,
+                "value_loss": 0.2,
+                "advantages_finite": True,
+                "returns_finite": True,
+                "update_boundary_continuity_verified": True,
+                "resume_digest": f"{horizon // 16:x}" * 64,
+                "resume_verified": True,
+            }
+        )
+    return values
 
 
 def test_extend_budget_cli_atomically_updates_only_run_budget_state(
@@ -846,6 +896,7 @@ def test_calibration_freezes_reward_schedule_and_one_shared_budget(
     assert state.formal_seed == 4080
     assert state.reward_calibration_seeds == (4081, 4082, 4083)
     assert state.allocation == {"WHEELED": 8, "LEGGED": 8, "HOPPER": 8}
+    assert state.rollout_horizon == 32
 
 
 def test_formal_calibration_manifest_is_non_proxy_and_cache_bound(
@@ -886,8 +937,12 @@ def test_formal_calibration_manifest_is_non_proxy_and_cache_bound(
                 "runtime_calibration": {
                     "selected_workers": 24,
                     "selected_micro_batch": 2,
+                    "selected_rollout_horizon": 32,
                     "compared_workers": [18, 24],
                     "measurements": [],
+                    "rollout_horizon_candidates": [16, 32, 64],
+                    "horizon_transitions_per_worker": 64,
+                    "horizon_measurements": _formal_horizon_measurements(),
                 },
                 "consumed_gpu_seconds": 12.5,
                 "budget_extension_blocks": 0,

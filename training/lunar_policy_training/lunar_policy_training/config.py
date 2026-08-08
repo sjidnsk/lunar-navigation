@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
@@ -11,6 +11,7 @@ import yaml
 
 
 PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
+ROLLOUT_HORIZON_CANDIDATES = (16, 32, 64)
 _CONFIG_FIELDS = {
     "parallel",
     "ppo",
@@ -41,7 +42,6 @@ _FROZEN_PPO_FIELDS: tuple[tuple[str, type[object], object], ...] = (
     ("frontier_entropy_coef", float, 0.01),
     ("theta_entropy_coef", float, 0.001),
     ("max_grad_norm", float, 0.5),
-    ("rollout_horizon", int, 32),
     ("dtype", str, "float32"),
 )
 
@@ -301,7 +301,25 @@ def validate_ppo_config(config: PPOConfig) -> PPOConfig:
             )
         if actual != expected_value:
             raise TrainingConfigError(f"PPO field {field} changes a frozen value")
+    if type(config.rollout_horizon) is not int:
+        raise TrainingConfigError("PPO field rollout_horizon must have exact type int")
+    if config.rollout_horizon not in ROLLOUT_HORIZON_CANDIDATES:
+        raise TrainingConfigError(
+            "PPO rollout horizon must be one of the calibrated candidates"
+        )
     return config
+
+
+def with_rollout_horizon(
+    config: ResolvedTrainingConfig, rollout_horizon: int
+) -> ResolvedTrainingConfig:
+    """Return the immutable run config selected by equal-work calibration."""
+    if not isinstance(config, ResolvedTrainingConfig):
+        raise TrainingConfigError("rollout horizon selection requires resolved config")
+    return replace(
+        config,
+        ppo=replace(config.ppo, rollout_horizon=rollout_horizon),
+    )
 
 
 def _integer(value: object, name: str) -> int:

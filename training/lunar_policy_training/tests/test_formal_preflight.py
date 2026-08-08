@@ -45,6 +45,7 @@ def test_preflight_report_is_canonical_non_proxy_and_never_a_checkpoint(
         qualified_worker_candidates=(18, 24),
         selected_workers=24,
         selected_micro_batch=2,
+        selected_rollout_horizon=32,
         evaluation_report_sha256="d" * 64,
     )
 
@@ -56,6 +57,9 @@ def test_preflight_report_is_canonical_non_proxy_and_never_a_checkpoint(
     assert payload["proxy"] is False
     assert payload["training_started"] is False
     assert payload["selected_workers"] == 24
+    assert payload["rollout_horizon_candidates"] == [16, 32, 64]
+    assert payload["selected_rollout_horizon"] == 32
+    assert payload["episode_decision_limit"] is None
     assert len(payload["preflight_report_sha256"]) == 64
     assert not (tmp_path / "checkpoints").exists()
 
@@ -79,5 +83,6 @@ def test_preflight_report_rejects_an_unclosed_required_check() -> None:
             qualified_worker_candidates=(18,),
             selected_workers=18,
             selected_micro_batch=1,
+            selected_rollout_horizon=32,
             evaluation_report_sha256="d" * 64,
         )

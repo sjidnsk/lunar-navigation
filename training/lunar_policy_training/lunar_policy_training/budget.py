@@ -28,6 +28,7 @@ TOTAL_GPU_BUDGET_SECONDS = INITIAL_GPU_BUDGET_SECONDS
 # synchronization. Training uses the same conservative complete-update bound.
 CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS = 600.0
 TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS = 600.0
+ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER = 64
 
 
 class BudgetError(ValueError):
@@ -85,11 +86,98 @@ class CalibrationMeasurement:
 
 
 @dataclass(frozen=True, slots=True)
+class HorizonCalibrationMeasurement:
+    """One equal-work rollout/update probe for a candidate batch boundary."""
+
+    workers: int
+    micro_batch: int
+    rollout_horizon: int
+    total_transitions: int
+    completed_updates: int
+    throughput_transitions_per_second: float
+    mean_update_wall_seconds: float
+    peak_gpu_memory_fraction: float
+    worker_wait_ratio: float
+    planner_timeouts: int
+    oom: bool
+    gpu_seconds: float
+    ipc_failures: int
+    approximate_kl: float
+    value_loss: float
+    advantages_finite: bool
+    returns_finite: bool
+    update_boundary_continuity_verified: bool
+    resume_digest: str | None
+    resume_verified: bool
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("workers", self.workers),
+            ("micro-batch", self.micro_batch),
+            ("rollout horizon", self.rollout_horizon),
+            ("total transitions", self.total_transitions),
+        ):
+            if type(value) is not int or value <= 0:
+                raise CalibrationError(f"horizon calibration {name} must be positive")
+        if type(self.completed_updates) is not int or self.completed_updates < 0:
+            raise CalibrationError(
+                "horizon calibration completed updates must be non-negative"
+            )
+        _finite_nonnegative(
+            self.throughput_transitions_per_second,
+            "horizon calibration throughput",
+        )
+        _finite_positive(
+            self.mean_update_wall_seconds,
+            "horizon calibration update wall time",
+        )
+        memory = _finite_nonnegative(
+            self.peak_gpu_memory_fraction,
+            "horizon calibration memory fraction",
+        )
+        wait_ratio = _finite_nonnegative(
+            self.worker_wait_ratio,
+            "horizon calibration worker wait ratio",
+        )
+        if memory > 1.0 or wait_ratio > 1.0:
+            raise CalibrationError("horizon calibration fraction exceeds one")
+        for name, value in (
+            ("planner timeout count", self.planner_timeouts),
+            ("IPC failure count", self.ipc_failures),
+        ):
+            if type(value) is not int or value < 0:
+                raise CalibrationError(f"horizon calibration {name} is invalid")
+        for name, value in (
+            ("OOM flag", self.oom),
+            ("advantage finite flag", self.advantages_finite),
+            ("return finite flag", self.returns_finite),
+            (
+                "update-boundary continuity flag",
+                self.update_boundary_continuity_verified,
+            ),
+            ("resume verification flag", self.resume_verified),
+        ):
+            if type(value) is not bool:
+                raise CalibrationError(f"horizon calibration {name} must be boolean")
+        _finite_nonnegative(self.gpu_seconds, "horizon calibration GPU seconds")
+        _finite_number(self.approximate_kl, "horizon calibration approximate KL")
+        _finite_nonnegative(self.value_loss, "horizon calibration value loss")
+        if self.resume_digest is not None and not _is_sha256(self.resume_digest):
+            raise CalibrationError("horizon calibration resume digest is invalid")
+        if self.resume_verified and self.resume_digest is None:
+            raise CalibrationError(
+                "verified horizon calibration resume requires a digest"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class CalibrationResult:
     selected_workers: int
     selected_micro_batch: int
+    selected_rollout_horizon: int
     compared_workers: tuple[int, ...]
     measurements: tuple[CalibrationMeasurement, ...]
+    horizon_measurements: tuple[HorizonCalibrationMeasurement, ...]
 
 
 @dataclass(slots=True)
@@ -254,13 +342,25 @@ def calibrate_runtime(
     *,
     config: "ResolvedTrainingConfig",
     workload: Callable[[int, int], CalibrationMeasurement],
+    horizon_workload: Callable[
+        [int, int, int, int], HorizonCalibrationMeasurement
+    ]
+    | None = None,
     budget: TrainingBudget,
     manifest_path: str | Path,
     micro_batch_candidates: Iterable[int] = (1, 2, 4, 8, 16, 32),
+    horizon_candidates: Iterable[int] = (16, 32, 64),
+    horizon_transitions_per_worker: int = (
+        ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER
+    ),
     clock: Callable[[], float] = time.monotonic,
 ) -> CalibrationResult:
     """Measure both worker candidates and freeze the safe fastest selection."""
-    from .config import ResolvedTrainingConfig
+    from .config import (
+        ROLLOUT_HORIZON_CANDIDATES,
+        ResolvedTrainingConfig,
+        with_rollout_horizon,
+    )
 
     if not isinstance(config, ResolvedTrainingConfig):
         raise CalibrationError("calibration requires resolved training config")
@@ -268,6 +368,8 @@ def calibrate_runtime(
         raise CalibrationError("calibration requires the run TrainingBudget")
     if not callable(workload):
         raise CalibrationError("calibration workload must be callable")
+    if horizon_workload is not None and not callable(horizon_workload):
+        raise CalibrationError("horizon calibration workload must be callable")
     if not callable(clock):
         raise CalibrationError("calibration clock must be callable")
     target = Path(manifest_path)
@@ -288,6 +390,17 @@ def calibrate_runtime(
     ):
         raise CalibrationError(
             "micro-batch candidates must be strictly increasing positive integers"
+        )
+    horizons = tuple(horizon_candidates)
+    if horizon_workload is not None and horizons != ROLLOUT_HORIZON_CANDIDATES:
+        raise CalibrationError("formal horizon calibration must compare 16, 32, 64")
+    if (
+        type(horizon_transitions_per_worker) is not int
+        or horizon_transitions_per_worker <= 0
+        or any(horizon_transitions_per_worker % value for value in horizons)
+    ):
+        raise CalibrationError(
+            "horizon calibration work must divide equally across every candidate"
         )
 
     measurements: list[CalibrationMeasurement] = []
@@ -359,20 +472,106 @@ def calibrate_runtime(
         >= best[18].throughput_samples_per_second
     ):
         selected_workers = 24
+    selected_micro_batch = best[selected_workers].micro_batch
+    horizon_measurements: list[HorizonCalibrationMeasurement] = []
+    selected_rollout_horizon = config.ppo.rollout_horizon
+    if horizon_workload is not None:
+        if selected_workers != config.parallel.preferred_workers:
+            raise CalibrationError(
+                "24-worker control must qualify before formal horizon calibration"
+            )
+        qualified_horizons: list[HorizonCalibrationMeasurement] = []
+        expected_total = selected_workers * horizon_transitions_per_worker
+        for rollout_horizon in horizons:
+            budget.begin_gpu_interval(
+                monotonic_seconds=clock(),
+                upper_bound_gpu_seconds=(
+                    CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS
+                ),
+            )
+            try:
+                measurement = horizon_workload(
+                    selected_workers,
+                    selected_micro_batch,
+                    rollout_horizon,
+                    horizon_transitions_per_worker,
+                )
+                if not isinstance(measurement, HorizonCalibrationMeasurement):
+                    raise CalibrationError(
+                        "horizon workload must return HorizonCalibrationMeasurement"
+                    )
+                if (
+                    measurement.workers != selected_workers
+                    or measurement.micro_batch != selected_micro_batch
+                    or measurement.rollout_horizon != rollout_horizon
+                    or measurement.total_transitions != expected_total
+                    or measurement.completed_updates
+                    != horizon_transitions_per_worker // rollout_horizon
+                ):
+                    raise CalibrationError(
+                        "horizon calibration workload mislabeled unequal work"
+                    )
+            except BaseException:
+                budget.end_gpu_interval(monotonic_seconds=clock())
+                raise
+            else:
+                budget.end_gpu_interval(
+                    monotonic_seconds=clock(),
+                    measured_gpu_seconds=measurement.gpu_seconds,
+                )
+            horizon_measurements.append(measurement)
+            if (
+                not measurement.oom
+                and measurement.ipc_failures == 0
+                and measurement.planner_timeouts == 0
+                and measurement.peak_gpu_memory_fraction
+                <= config.parallel.gpu_memory_fraction_max
+                and measurement.advantages_finite
+                and measurement.returns_finite
+                and measurement.update_boundary_continuity_verified
+                and measurement.resume_verified
+                and measurement.throughput_transitions_per_second > 0.0
+            ):
+                qualified_horizons.append(measurement)
+        if not qualified_horizons:
+            raise CalibrationError("no rollout horizon passed semantic calibration")
+        selected_rollout_horizon = min(
+            qualified_horizons,
+            key=lambda value: (
+                -value.throughput_transitions_per_second,
+                value.mean_update_wall_seconds,
+                value.rollout_horizon,
+            ),
+        ).rollout_horizon
+    frozen_config = with_rollout_horizon(config, selected_rollout_horizon)
     result = CalibrationResult(
         selected_workers=selected_workers,
-        selected_micro_batch=best[selected_workers].micro_batch,
+        selected_micro_batch=selected_micro_batch,
+        selected_rollout_horizon=selected_rollout_horizon,
         compared_workers=compared,
         measurements=tuple(measurements),
+        horizon_measurements=tuple(horizon_measurements),
     )
     payload = {
         "schema_version": "lunar-training-run/v1",
-        "frozen_config": config.as_frozen_dict(),
+        "frozen_config": frozen_config.as_frozen_dict(),
         "runtime_calibration": {
             "selected_workers": result.selected_workers,
             "selected_micro_batch": result.selected_micro_batch,
+            "selected_rollout_horizon": result.selected_rollout_horizon,
             "compared_workers": list(result.compared_workers),
             "measurements": [asdict(value) for value in result.measurements],
+            "rollout_horizon_candidates": (
+                list(horizons) if horizon_workload is not None else []
+            ),
+            "horizon_transitions_per_worker": (
+                horizon_transitions_per_worker
+                if horizon_workload is not None
+                else 0
+            ),
+            "horizon_measurements": [
+                asdict(value) for value in result.horizon_measurements
+            ],
         },
         "consumed_gpu_seconds": budget.consumed_gpu_seconds,
         "budget_extension_blocks": budget.budget_extension_blocks,
@@ -457,6 +656,24 @@ def _finite_nonnegative(value: object, name: str) -> float:
     return float(value)
 
 
+def _finite_number(value: object, name: str) -> float:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+    ):
+        raise BudgetError(f"{name} must be finite")
+    return float(value)
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _finite_positive(value: object, name: str) -> float:
     result = _finite_nonnegative(value, name)
     if result <= 0.0:
@@ -474,7 +691,9 @@ __all__ = [
     "BudgetExceededError",
     "CalibrationError",
     "CalibrationMeasurement",
+    "HorizonCalibrationMeasurement",
     "CalibrationResult",
+    "ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER",
     "TrainingBudget",
     "calibrate_runtime",
     "extend_budget_manifest",

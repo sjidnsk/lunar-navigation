@@ -18,6 +18,7 @@ from lunar_policy_training.budget import (  # noqa: E402
     BudgetError,
     BudgetExceededError,
     CalibrationError,
+    HorizonCalibrationMeasurement,
     CalibrationMeasurement,
     TrainingBudget,
     calibrate_runtime,
@@ -97,6 +98,46 @@ class _CalibrationProbe:
         )
 
 
+class _HorizonProbe:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, int, int, int]] = []
+
+    def __call__(
+        self,
+        workers: int,
+        micro_batch: int,
+        rollout_horizon: int,
+        transitions_per_worker: int,
+    ) -> HorizonCalibrationMeasurement:
+        self.calls.append(
+            (workers, micro_batch, rollout_horizon, transitions_per_worker)
+        )
+        throughput = {16: 90.0, 32: 120.0, 64: 120.0}[rollout_horizon]
+        update_wall = {16: 2.0, 32: 3.0, 64: 5.0}[rollout_horizon]
+        return HorizonCalibrationMeasurement(
+            workers=workers,
+            micro_batch=micro_batch,
+            rollout_horizon=rollout_horizon,
+            total_transitions=workers * transitions_per_worker,
+            completed_updates=transitions_per_worker // rollout_horizon,
+            throughput_transitions_per_second=throughput,
+            mean_update_wall_seconds=update_wall,
+            peak_gpu_memory_fraction=0.5,
+            worker_wait_ratio=0.25,
+            planner_timeouts=0,
+            oom=False,
+            gpu_seconds=1.0,
+            ipc_failures=0,
+            approximate_kl=0.01,
+            value_loss=0.2,
+            advantages_finite=True,
+            returns_finite=True,
+            update_boundary_continuity_verified=True,
+            resume_digest="a" * 64,
+            resume_verified=True,
+        )
+
+
 def test_calibration_really_compares_18_and_24_and_freezes_manifest(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -141,6 +182,95 @@ def test_calibration_really_compares_18_and_24_and_freezes_manifest(
             manifest_path=manifest,
             micro_batch_candidates=(1, 2, 4),
         )
+
+
+def test_rollout_horizon_calibration_uses_equal_work_and_freezes_selection(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if horizon changed episode semantics or compared unequal work."""
+    config = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+    horizon_probe = _HorizonProbe()
+
+    result = calibrate_runtime(
+        config=config,
+        workload=_CalibrationProbe(),
+        horizon_workload=horizon_probe,
+        budget=TrainingBudget(),
+        manifest_path=tmp_path / "run-manifest.json",
+        micro_batch_candidates=(1, 2, 4),
+    )
+
+    assert horizon_probe.calls == [
+        (24, 2, 16, 64),
+        (24, 2, 32, 64),
+        (24, 2, 64, 64),
+    ]
+    assert result.selected_rollout_horizon == 32
+    assert {item.total_transitions for item in result.horizon_measurements} == {
+        24 * 64
+    }
+    payload = json.loads(
+        (tmp_path / "run-manifest.json").read_text(encoding="utf-8")
+    )
+    assert payload["frozen_config"]["ppo"]["rollout_horizon"] == 32
+    assert payload["runtime_calibration"]["rollout_horizon_candidates"] == [
+        16,
+        32,
+        64,
+    ]
+    assert payload["runtime_calibration"]["selected_rollout_horizon"] == 32
+    assert len(payload["runtime_calibration"]["horizon_measurements"]) == 3
+
+
+def test_rollout_horizon_selection_rejects_fast_but_semantically_invalid_candidate(
+    tmp_path: pathlib.Path,
+) -> None:
+    config = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+
+    def probe(
+        workers: int,
+        micro_batch: int,
+        rollout_horizon: int,
+        transitions_per_worker: int,
+    ) -> HorizonCalibrationMeasurement:
+        valid = rollout_horizon != 64
+        return HorizonCalibrationMeasurement(
+            workers=workers,
+            micro_batch=micro_batch,
+            rollout_horizon=rollout_horizon,
+            total_transitions=workers * transitions_per_worker,
+            completed_updates=transitions_per_worker // rollout_horizon,
+            throughput_transitions_per_second=float(rollout_horizon * 10),
+            mean_update_wall_seconds=float(rollout_horizon),
+            peak_gpu_memory_fraction=0.5,
+            worker_wait_ratio=0.25,
+            planner_timeouts=0,
+            oom=False,
+            gpu_seconds=1.0,
+            ipc_failures=0,
+            approximate_kl=0.01,
+            value_loss=0.2,
+            advantages_finite=True,
+            returns_finite=True,
+            update_boundary_continuity_verified=valid,
+            resume_digest="b" * 64,
+            resume_verified=valid,
+        )
+
+    result = calibrate_runtime(
+        config=config,
+        workload=_CalibrationProbe(),
+        horizon_workload=probe,
+        budget=TrainingBudget(),
+        manifest_path=tmp_path / "run-manifest.json",
+        micro_batch_candidates=(1, 2, 4),
+    )
+
+    assert result.selected_rollout_horizon == 32
 
 
 @pytest.mark.parametrize("bad_24", ["oom", "timeout", "throughput"])
