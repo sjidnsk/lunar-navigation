@@ -212,6 +212,8 @@ def _test_typed_content(platform: str) -> dict[str, object]:
         }
     return {
         "specific_impulse_s": 301.0,
+        "reference_total_mass_kg": 20.0,
+        "reference_propellant_mass_kg": 0.2,
         "landing_support_radius_m": 0.45,
         "flight_collision_radius_m": 0.55,
         "maximum_landing_plane_residual_m": 0.05,

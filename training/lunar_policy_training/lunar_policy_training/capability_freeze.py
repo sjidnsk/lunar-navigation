@@ -125,6 +125,8 @@ _LEGGED_FIELDS = frozenset(
 _HOPPER_FIELDS = frozenset(
     (
         "specific_impulse_s",
+        "reference_total_mass_kg",
+        "reference_propellant_mass_kg",
         "landing_support_radius_m",
         "flight_collision_radius_m",
         "maximum_landing_plane_residual_m",
@@ -259,6 +261,8 @@ class FrozenLeggedCapability:
 @dataclass(frozen=True, slots=True)
 class FrozenHopperCapability:
     specific_impulse_s: float
+    reference_total_mass_kg: float
+    reference_propellant_mass_kg: float
     landing_support_radius_m: float
     flight_collision_radius_m: float
     maximum_landing_plane_residual_m: float
@@ -1045,9 +1049,16 @@ def _parse_legged(value: object) -> FrozenLeggedCapability:
 
 def _parse_hopper(value: object) -> FrozenHopperCapability:
     node = _require_exact_object(value, _HOPPER_FIELDS, "hopper capability")
-    return FrozenHopperCapability(
+    parsed = FrozenHopperCapability(
         specific_impulse_s=_positive(
             node["specific_impulse_s"], "specific_impulse_s"
+        ),
+        reference_total_mass_kg=_positive(
+            node["reference_total_mass_kg"], "reference_total_mass_kg"
+        ),
+        reference_propellant_mass_kg=_positive(
+            node["reference_propellant_mass_kg"],
+            "reference_propellant_mass_kg",
         ),
         landing_support_radius_m=_positive(
             node["landing_support_radius_m"], "landing_support_radius_m"
@@ -1076,6 +1087,11 @@ def _parse_hopper(value: object) -> FrozenHopperCapability:
             node["maximum_landing_slope_rad"], "maximum_landing_slope_rad"
         ),
     )
+    if parsed.reference_propellant_mass_kg >= parsed.reference_total_mass_kg:
+        raise CapabilityFreezeError(
+            "reference_propellant_mass_kg must be less than reference_total_mass_kg"
+        )
+    return parsed
 
 
 def _require_exact_object(
