@@ -37,7 +37,8 @@ class GridGeometry:
 
 
 GLOBAL_GEOMETRY = GridGeometry(size_m=1024.0, resolution_m=4.0, cells=256)
-LOCAL_GEOMETRY = GridGeometry(size_m=8.0, resolution_m=0.25, cells=32)
+LOCAL_TILE_GEOMETRY = GridGeometry(size_m=64.0, resolution_m=0.2, cells=320)
+LOCAL_GEOMETRY = GridGeometry(size_m=6.4, resolution_m=0.2, cells=32)
 
 
 def _require_sha(value: str) -> None:
@@ -224,6 +225,7 @@ def resample_average(values: np.ndarray, output_shape: tuple[int, int]) -> np.nd
 __all__ = [
     "GLOBAL_GEOMETRY",
     "LOCAL_GEOMETRY",
+    "LOCAL_TILE_GEOMETRY",
     "GridGeometry",
     "LoadedPolarWindow",
     "MapCanvas",

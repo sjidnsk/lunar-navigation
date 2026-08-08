@@ -36,13 +36,13 @@ def _world_with_frontier(*, occlude: bool = False) -> ObservedWorld:
     if occlude:
         observed[128, 110:120] = False
     canvas = _canvas()
-    local = LocalObservation(canvas.identity, (508.0, 508.0, 516.0, 516.0), np.zeros((32, 32), dtype=np.float32), np.ones((32, 32), dtype=bool), np.zeros((32, 32), dtype=np.float32))
+    local = LocalObservation(canvas.identity, (508.8, 508.8, 515.2, 515.2), np.zeros((32, 32), dtype=np.float32), np.ones((32, 32), dtype=bool), np.zeros((32, 32), dtype=np.float32))
     return ObservedWorld(canvas, np.zeros((256, 256), dtype=np.float32), observed, _obstacle_layer(canvas), local)
 
 
 def _world(observed: np.ndarray) -> ObservedWorld:
     canvas = _canvas()
-    local = LocalObservation(canvas.identity, (508.0, 508.0, 516.0, 516.0), np.zeros((32, 32), dtype=np.float32), np.ones((32, 32), dtype=bool), np.zeros((32, 32), dtype=np.float32))
+    local = LocalObservation(canvas.identity, (508.8, 508.8, 515.2, 515.2), np.zeros((32, 32), dtype=np.float32), np.ones((32, 32), dtype=bool), np.zeros((32, 32), dtype=np.float32))
     return ObservedWorld(canvas, np.zeros((256, 256), dtype=np.float32), observed, _obstacle_layer(canvas), local)
 
 
@@ -124,7 +124,7 @@ def test_candidate_gain_ratios_use_fractional_roi_area_instead_of_cell_count() -
 def test_candidate_builder_returns_all_false_instead_of_robot_fallback_when_los_has_no_frontier() -> None:
     observed = np.ones((256, 256), dtype=bool)
     canvas = _canvas()
-    world = ObservedWorld(canvas, np.zeros((256, 256), dtype=np.float32), observed, _obstacle_layer(canvas), LocalObservation(canvas.identity, (508.0, 508.0, 516.0, 516.0), np.zeros((32, 32), dtype=np.float32), np.ones((32, 32), dtype=bool), np.zeros((32, 32), dtype=np.float32)))
+    world = ObservedWorld(canvas, np.zeros((256, 256), dtype=np.float32), observed, _obstacle_layer(canvas), LocalObservation(canvas.identity, (508.8, 508.8, 515.2, 515.2), np.zeros((32, 32), dtype=np.float32), np.ones((32, 32), dtype=bool), np.zeros((32, 32), dtype=np.float32)))
     batch = _builder().build(world, _mission(), Pose2(512.0, 512.0), _projection())
     assert batch.count == 0
     np.testing.assert_array_equal(batch.features, CandidateBatch.empty().features)

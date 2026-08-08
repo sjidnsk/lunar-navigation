@@ -4,13 +4,18 @@ from .source_lock import PolarSourceLock, SourceLockError, verify_source_lock
 
 __all__ = [
     "PolarSourceLock",
+    "SCENARIO_MANIFEST_SCHEMA",
+    "ScenarioManifestError",
     "SourceLockError",
     "SplitCatalogRow",
     "SplitError",
     "build_split_catalog",
+    "build_scenario_manifest_document",
     "jaxa_sites",
+    "load_scenario_manifest",
     "nasa_windows",
     "verify_source_lock",
+    "write_scenario_manifest",
 ]
 
 
@@ -26,4 +31,14 @@ def __getattr__(name: str) -> object:
         from . import split
 
         return getattr(split, name)
+    if name in {
+        "SCENARIO_MANIFEST_SCHEMA",
+        "ScenarioManifestError",
+        "build_scenario_manifest_document",
+        "load_scenario_manifest",
+        "write_scenario_manifest",
+    }:
+        from . import scenario_manifest
+
+        return getattr(scenario_manifest, name)
     raise AttributeError(name)

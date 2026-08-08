@@ -78,7 +78,10 @@ class LocalObservation:
     def __post_init__(self) -> None:
         left, bottom, right, top = self.bounds_m
         if not math.isclose(right - left, LOCAL_GEOMETRY.size_m) or not math.isclose(top - bottom, LOCAL_GEOMETRY.size_m):
-            raise ValueError("local bounds must be map-axis 8m square")
+            raise ValueError(
+                "local bounds must be a map-axis "
+                f"{LOCAL_GEOMETRY.size_m:g}m square"
+            )
         elevation = _grid("local_elevation_m", self.elevation_m, LOCAL_GEOMETRY.cells, finite=False)
         observed = np.asarray(self.observed_mask, dtype=bool)
         if observed.shape != elevation.shape or not np.isfinite(elevation[observed]).all():

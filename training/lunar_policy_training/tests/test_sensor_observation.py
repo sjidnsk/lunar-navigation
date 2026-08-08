@@ -202,7 +202,7 @@ def test_observed_grid_converts_explicitly_to_policy_world() -> None:
     observed.elevation_m[128, 128] = 3.0
     local = LocalObservation(
         canvas.identity,
-        (508.0, 508.0, 516.0, 516.0),
+        (508.8, 508.8, 515.2, 515.2),
         np.zeros((32, 32), np.float32),
         np.ones((32, 32), bool),
         np.zeros((32, 32), np.float32),

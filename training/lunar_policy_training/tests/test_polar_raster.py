@@ -11,6 +11,7 @@ from rasterio.transform import from_origin
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+import lunar_policy_training.polar_data.raster as raster_module  # noqa: E402
 from lunar_policy_training.polar_data.raster import (  # noqa: E402
     GLOBAL_GEOMETRY,
     LOCAL_GEOMETRY,
@@ -26,9 +27,17 @@ from lunar_policy_training.polar_data.raster import (  # noqa: E402
 
 
 def test_fixed_axis_aligned_global_and_local_geometries() -> None:
+    local_tile_geometry = getattr(raster_module, "LOCAL_TILE_GEOMETRY", None)
+    assert local_tile_geometry is not None, "formal 0.2 m tile geometry is missing"
     assert GLOBAL_GEOMETRY == GridGeometry(size_m=1024.0, resolution_m=4.0, cells=256)
-    assert LOCAL_GEOMETRY == GridGeometry(size_m=8.0, resolution_m=0.25, cells=32)
+    assert local_tile_geometry == GridGeometry(
+        size_m=64.0,
+        resolution_m=0.2,
+        cells=320,
+    )
+    assert LOCAL_GEOMETRY == GridGeometry(size_m=6.4, resolution_m=0.2, cells=32)
     assert GLOBAL_GEOMETRY.axis_aligned
+    assert local_tile_geometry.axis_aligned
     assert LOCAL_GEOMETRY.axis_aligned
 
 

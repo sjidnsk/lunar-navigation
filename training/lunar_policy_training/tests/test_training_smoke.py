@@ -373,7 +373,12 @@ def _synthetic_polar_inputs(
     pose = Pose2(robot_x, robot_y, elevation_m=float(elevation[128, 120]))
     local = LocalObservation(
         canvas_id=canvas.identity,
-        bounds_m=(robot_x - 4.0, robot_y - 4.0, robot_x + 4.0, robot_y + 4.0),
+        bounds_m=(
+            robot_x - LOCAL_GEOMETRY.size_m / 2.0,
+            robot_y - LOCAL_GEOMETRY.size_m / 2.0,
+            robot_x + LOCAL_GEOMETRY.size_m / 2.0,
+            robot_y + LOCAL_GEOMETRY.size_m / 2.0,
+        ),
         elevation_m=_sample_local(canvas, pose, elevation),
         observed_mask=_sample_local(canvas, pose, observed),
         physical_obstacle_ratio=_sample_local(
@@ -1020,10 +1025,10 @@ def test_cpu_pretraining_smoke_links_data_v3_update_checkpoint_and_resume(
         local = LocalObservation(
             canvas_id=canvas.identity,
             bounds_m=(
-                pose.x_m - 4.0,
-                pose.y_m - 4.0,
-                pose.x_m + 4.0,
-                pose.y_m + 4.0,
+                pose.x_m - LOCAL_GEOMETRY.size_m / 2.0,
+                pose.y_m - LOCAL_GEOMETRY.size_m / 2.0,
+                pose.x_m + LOCAL_GEOMETRY.size_m / 2.0,
+                pose.y_m + LOCAL_GEOMETRY.size_m / 2.0,
             ),
             elevation_m=_sample_local(canvas, pose, observed.elevation_m),
             observed_mask=_sample_local(canvas, pose, observed.valid_mask),
