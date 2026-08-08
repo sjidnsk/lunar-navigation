@@ -252,7 +252,7 @@ def _performance_planner_workload(capability, suffix: str):
     request.goal.target = point
     apply_goal_theta(request.goal, platform, 0.0)
     request.world.global_map = _performance_grid_map(
-        bridge_api, np, "map", 640, 640, 1.6, origin_m=-0.7
+        bridge_api, np, "map", 256, 256, 4.0, origin_m=-1.9
     )
     request.world.local_map = _performance_grid_map(
         bridge_api, np, "odom", 320, 320, 0.2
