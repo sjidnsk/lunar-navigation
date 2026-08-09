@@ -1,0 +1,60 @@
+schema_version: lunar-interface-profile/v1
+project_id: current-provisional-provider
+channels:
+  # 大地图和标准 ROS 类型只做 launch remap，避免在 Python 中复制大消息。
+  map_global:
+    mode: direct_remap
+    input_topic: /environment/map_global
+    output_topic: /environment/map_global
+    input_type: grid_map_msgs/msg/GridMap
+    output_type: grid_map_msgs/msg/GridMap
+    frame: map
+  map_local:
+    mode: direct_remap
+    input_topic: /environment/map_local
+    output_topic: /environment/map_local
+    input_type: grid_map_msgs/msg/GridMap
+    output_type: grid_map_msgs/msg/GridMap
+    frame: odom
+  odometry:
+    mode: direct_remap
+    input_topic: /localization/odometry
+    output_topic: /localization/odometry
+    input_type: nav_msgs/msg/Odometry
+    output_type: nav_msgs/msg/Odometry
+    frame: odom
+  localization_status:
+    mode: converter
+    converter: localization_status_v1
+    input_topic: /localization/status
+    output_topic: /lunar/input/localization_status
+    input_type: lunar_navigation_msgs/msg/LocalizationStatus
+    output_type: lunar_navigation_msgs/msg/LocalizationStatus
+    frame: odom
+  exploration_task:
+    mode: converter
+    converter: exploration_task_v1
+    input_topic: /mission/exploration_task
+    output_topic: /lunar/input/exploration_task
+    input_type: lunar_navigation_msgs/msg/ExplorationTask
+    output_type: lunar_navigation_msgs/msg/ExplorationTask
+    frame: map
+  motion_execution_feedback:
+    mode: converter
+    converter: motion_execution_feedback_v1
+    input_topic: /execution/motion_feedback
+    output_topic: /lunar/input/motion_execution_feedback
+    input_type: lunar_navigation_msgs/msg/MotionExecutionFeedback
+    output_type: lunar_navigation_msgs/msg/MotionExecutionFeedback
+    frame: platform_base_frame
+  tf:
+    mode: direct_remap
+    input_topic: /tf
+    output_topic: /tf
+    input_type: tf2_msgs/msg/TFMessage
+    output_type: tf2_msgs/msg/TFMessage
+    frame: map
+qos:
+  reliability: reliable
+  durability: volatile
+  depth: 10

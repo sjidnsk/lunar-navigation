@@ -217,6 +217,24 @@ URDF/mesh 位于可选 `assets` 段。缺少资源只影响可视化或几何调
 静态能力和真实设备数据的所有权仍属于外部平台与传感系统。正式 provider 出现后必须先逐字段
 核对，再原子替换固定路径上的完整文件；不得让 provisional 文件与正式 provider 同时生效。
 
+## 外部接口适配 profile
+
+外部项目的 Topic 名称或自定义消息类型与本基线不一致时，只替换以下固定文件并重启：
+
+```text
+/etc/lunar_navigation/interface_profile.yaml
+```
+
+该文件使用 `lunar-interface-profile/v1`，完整声明七个输入通道、外部/内部 Topic、消息类型、
+frame、QoS 和固定 converter 名称。`GridMap`、`Odometry`、`TFMessage` 等标准类型只通过 launch
+remap 接入，不经过 Python 复制；三种本仓暂定消息只允许调用编译进代码的显式转换函数。配置
+不得包含字段表达式、`eval`、按同名字段自动复制或运行时动态代码。converter 的输入与输出 Topic
+必须不同，转换失败的单条消息只记录诊断并丢弃，不能向稳定内部 Topic 发布半有效数据。
+
+当前工程基线为 `config/interface_profiles/default.yaml`。未来对接正式 provider 时，ROS 内部
+`PlanMotion`、地图语义及规划器输入保持不变；只替换 profile，并在确有字段差异时修改对应的
+一个显式转换函数。接口 profile 属于本仓部署配置，不改变外部系统对原始 Topic 数据的所有权。
+
 ## 消费边界
 
 本项目在运行时校验字段、时间、坐标系和范围，并以双方确认的 rosbag 执行兼容性测试。缺少派生地图层的前提时必须拒绝快照，不能用零值、空数组或 synthetic 数据冒充真实输入；概率障碍层不能直接标为确定物理障碍。

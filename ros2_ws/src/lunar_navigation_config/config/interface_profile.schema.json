@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lunar-navigation.local/schemas/interface_profile.schema.json",
+  "title": "Replaceable external ROS interface profile",
+  "description": "Maps one external provider into the stable lunar_navigation input boundary without dynamic field expressions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "project_id", "channels", "qos"],
+  "properties": {
+    "schema_version": {
+      "const": "lunar-interface-profile/v1"
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "channels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "map_global",
+        "map_local",
+        "odometry",
+        "localization_status",
+        "exploration_task",
+        "motion_execution_feedback",
+        "tf"
+      ],
+      "properties": {
+        "map_global": {"$ref": "#/$defs/channel"},
+        "map_local": {"$ref": "#/$defs/channel"},
+        "odometry": {"$ref": "#/$defs/channel"},
+        "localization_status": {"$ref": "#/$defs/channel"},
+        "exploration_task": {"$ref": "#/$defs/channel"},
+        "motion_execution_feedback": {"$ref": "#/$defs/channel"},
+        "tf": {"$ref": "#/$defs/channel"}
+      }
+    },
+    "qos": {
+      "$ref": "#/$defs/qos"
+    }
+  },
+  "$defs": {
+    "channel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "input_topic",
+        "output_topic",
+        "input_type",
+        "output_type",
+        "frame"
+      ],
+      "properties": {
+        "mode": {
+          "enum": ["direct_remap", "converter"]
+        },
+        "converter": {
+          "enum": [
+            "localization_status_v1",
+            "exploration_task_v1",
+            "motion_execution_feedback_v1"
+          ]
+        },
+        "input_topic": {
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9_/]+$"
+        },
+        "output_topic": {
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9_/]+$"
+        },
+        "input_type": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*/msg/[A-Za-z][A-Za-z0-9_]*$"
+        },
+        "output_type": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*/msg/[A-Za-z][A-Za-z0-9_]*$"
+        },
+        "frame": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"mode": {"const": "converter"}}
+          },
+          "then": {"required": ["converter"]},
+          "else": {"not": {"required": ["converter"]}}
+        }
+      ]
+    },
+    "qos": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reliability", "durability", "depth"],
+      "properties": {
+        "reliability": {
+          "enum": ["reliable", "best_effort"]
+        },
+        "durability": {
+          "enum": ["volatile", "transient_local"]
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      }
+    }
+  }
+}

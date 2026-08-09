@@ -148,6 +148,13 @@ EXPECTED_DOCUMENT = {
             "required_sections": ["platform", "observation", "assets", "sources"],
             "runtime_path": "/etc/lunar_navigation/platform_profile.yaml",
         },
+        "interface_profile": {
+            "owner": "lunar_navigation",
+            "schema": "lunar-interface-profile/v1",
+            "formats": ["yaml"],
+            "required_sections": ["schema_version", "project_id", "channels", "qos"],
+            "runtime_path": "/etc/lunar_navigation/interface_profile.yaml",
+        },
     },
 }
 
