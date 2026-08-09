@@ -260,6 +260,9 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
                 "global_step": checkpoint.global_step,
                 "consumed_gpu_seconds": checkpoint.consumed_gpu_seconds,
                 "platform_allocation": checkpoint.worker_allocation,
+                "formal_environment": {
+                    "sensor_performance_sha256": "7" * 64,
+                },
             }
         ),
         encoding="utf-8",
@@ -274,6 +277,15 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
         "_commit_changed_paths",
         lambda *args, **kwargs: ("training/fix.py",),
     )
+    monkeypatch.setattr(
+        cli_module,
+        "_validated_source_migration_sensor_reports",
+        lambda **kwargs: ("7" * 64, "8" * 64),
+    )
+    previous_sensor = tmp_path / "previous-sensor.json"
+    current_sensor = tmp_path / "current-sensor.json"
+    previous_sensor.write_text("{}", encoding="utf-8")
+    current_sensor.write_text("{}", encoding="utf-8")
 
     migrated_path = cli_module._prepare_source_migrated_resume_checkpoint(
         artifact_root=root,
@@ -281,6 +293,8 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
         repository_root=REPOSITORY_ROOT,
         expected_old_source_commit=checkpoint.source_commit,
         expected_global_step=12,
+        previous_sensor_performance_report=previous_sensor,
+        current_sensor_performance_report=current_sensor,
     )
 
     migrated = load_checkpoint(migrated_path)
@@ -300,6 +314,9 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
         checkpoint.source_commit
     )
     assert manifest["source_migrations"][-1]["to_source_commit"] == new_commit
+    assert manifest["formal_environment"]["sensor_performance_sha256"] == (
+        "8" * 64
+    )
 
 
 def test_formal_checkpoint_rejects_missing_episode_cursor_state() -> None:

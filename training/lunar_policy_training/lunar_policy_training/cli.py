@@ -4076,6 +4076,43 @@ def _copy_regular_file_exclusive(source: Path, target: Path) -> None:
         raise
 
 
+def _validated_source_migration_sensor_reports(
+    *,
+    previous_report_path: Path,
+    current_report_path: Path,
+    repository_root: Path,
+    expected_old_source_commit: str,
+    run_identity: RunIdentity,
+) -> tuple[str, str]:
+    try:
+        previous = load_sensor_performance_report(previous_report_path)
+        current = load_sensor_performance_report(current_report_path)
+        expected_host = current_host_identity()
+        previous_sha256 = validate_sensor_performance_report(
+            previous,
+            expected_host=expected_host,
+            expected_source_commit=expected_old_source_commit,
+            expected_capability_sha256=run_identity.capability_sha256,
+            expected_training_semantics_sha256=(
+                run_identity.training_semantics_sha256
+            ),
+        )
+        current_sha256 = validate_sensor_performance_report(
+            current,
+            expected_host=expected_host,
+            expected_source_commit=sensor_source_commit(repository_root),
+            expected_capability_sha256=run_identity.capability_sha256,
+            expected_training_semantics_sha256=(
+                run_identity.training_semantics_sha256
+            ),
+        )
+    except SensorPerformanceError as error:
+        raise PreflightError(
+            f"source migration sensor evidence is invalid: {error}"
+        ) from error
+    return previous_sha256, current_sha256
+
+
 def _prepare_source_migrated_resume_checkpoint(
     *,
     artifact_root: Path,
@@ -4083,6 +4120,8 @@ def _prepare_source_migrated_resume_checkpoint(
     repository_root: Path,
     expected_old_source_commit: str,
     expected_global_step: int,
+    previous_sensor_performance_report: Path,
+    current_sensor_performance_report: Path,
 ) -> Path:
     """Create an immutable, audited resume copy for an in-line code repair."""
     root = validate_artifact_root(
@@ -4136,6 +4175,25 @@ def _prepare_source_migrated_resume_checkpoint(
         != checkpoint.worker_allocation
     ):
         raise ArtifactRootError("source migration manifest differs from checkpoint")
+    formal_environment = manifest.get("formal_environment")
+    if not isinstance(formal_environment, dict):
+        raise ArtifactRootError("source migration formal environment is missing")
+    previous_sensor_sha256, current_sensor_sha256 = (
+        _validated_source_migration_sensor_reports(
+            previous_report_path=previous_sensor_performance_report,
+            current_report_path=current_sensor_performance_report,
+            repository_root=repository_root,
+            expected_old_source_commit=expected_old_source_commit,
+            run_identity=checkpoint.run_identity,
+        )
+    )
+    if (
+        formal_environment.get("sensor_performance_sha256")
+        != previous_sensor_sha256
+    ):
+        raise ArtifactRootError(
+            "source migration previous sensor evidence differs from manifest"
+        )
     backup_path = checkpoints / (
         f"source-checkpoint-step-{checkpoint.global_step}-"
         f"{expected_old_source_commit[:12]}.pt"
@@ -4188,10 +4246,20 @@ def _prepare_source_migrated_resume_checkpoint(
             "original_file_sha256": _file_sha256(checkpoint_target),
             "original_payload_sha256": checkpoint.payload_sha256,
             "migrated_payload_sha256": verified.payload_sha256,
+            "previous_sensor_performance_report": str(
+                previous_sensor_performance_report.resolve(strict=True)
+            ),
+            "previous_sensor_performance_sha256": previous_sensor_sha256,
+            "current_sensor_performance_report": str(
+                current_sensor_performance_report.resolve(strict=True)
+            ),
+            "current_sensor_performance_sha256": current_sensor_sha256,
             "changed_paths": list(changed_paths),
         }
     )
     manifest["source_commit"] = new_source_commit
+    formal_environment["sensor_performance_sha256"] = current_sensor_sha256
+    manifest["formal_environment"] = formal_environment
     manifest["source_migrations"] = migrations
     _write_manifest_payload(manifest_path, manifest)
     return migrated_path

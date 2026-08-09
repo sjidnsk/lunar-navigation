@@ -223,6 +223,8 @@ Load it with the production restricted loader, derive `warmup_legged`, construct
 
 Write RED/GREEN tests for a pure v6 source transform and the operational artifact transaction. Preserve an exact-byte immutable copy of the old `latest.pt`; create a distinct `resume-step-118-<commit>.pt` whose body changes only `source_commit`; require descendant ancestry and record hashes, paths, step, budget, changed files, and both commits in `run-manifest.json`.
 
+Re-run the fixed 24-worker sensor benchmark against the unchanged Release native executable because the formal performance gate binds the training implementation source. Validate both the previous and current reports against the same host/capability/training semantics, then atomically migrate the manifest's sensor report hash with the source evidence.
+
 - [ ] **Step 6: Update qualification evidence and commit**
 
 Record the source commit, test commands, step-118 hash, derived phase, allocation and artifact paths without copying runtime outputs into Git.

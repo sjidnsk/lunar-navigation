@@ -88,6 +88,9 @@ manifest 的 `last_evaluation` 记录 checkpoint、评估开始/完成 GPU secon
 - source 迁移只接受旧提交到当前后代提交、显式 step 118 和权威 `latest.pt`，并在 manifest 记录
   新旧提交、两个 payload hash、原文件 hash、备份/副本路径和实际变更文件清单。正式 `resume`
   使用迁移副本；原 step 118 文件在成功写出 step 119 前不被修改；
+- 因传感器性能门把训练实现目录纳入 source identity，修复提交后必须在相同 Release native、24
+  worker 和当前主机上重新运行固定性能基准。迁移同时验证旧、新报告的 host、能力、训练语义、
+  source commit 和通过状态，仅把 manifest 的性能报告 hash 从已验证旧值原子切换到已验证新值；
 - 训练、指标、评估报告和检查点全部留在仓库外，不提交运行 artifact。
 
 ## 验证
@@ -101,4 +104,5 @@ manifest 的 `last_evaluation` 记录 checkpoint、评估开始/完成 GPU secon
 5. joint 三小时边界选择最新 candidate、关闭训练池后共用预算评估；未通过继续，通过则结束；
 6. step 118 真实检查点预检能够建立 `LEGGED×24` 池而不消耗一个训练 update；
 7. source 迁移前后除提交字段和 payload hash 外的语义 body 完全相同，原文件有字节级备份；
-8. 训练相关 Python 测试、CUDA 短恢复测试、仓库边界检查全部通过。
+8. 新传感器报告通过固定性能阈值，旧、新报告身份与 manifest 迁移记录一致；
+9. 训练相关 Python 测试、CUDA 短恢复测试、仓库边界检查全部通过。
