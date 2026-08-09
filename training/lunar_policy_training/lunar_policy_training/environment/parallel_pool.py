@@ -78,6 +78,7 @@ class ParallelEnvPool:
         environment_factory: EnvironmentFactory,
         reward_fn: Callable[[PlannerTransition], float],
         worker_timeout_seconds: float = 30.0,
+        worker_startup_timeout_seconds: float | None = None,
         auto_reset: bool = True,
         initial_episode_cursors: tuple[int, ...] | None = None,
         initial_episode_states: tuple[Mapping[str, object], ...] | None = None,
@@ -107,6 +108,17 @@ class ParallelEnvPool:
             or worker_timeout_seconds <= 0.0
         ):
             raise ParallelPoolError("worker timeout must be finite and positive")
+        if worker_startup_timeout_seconds is None:
+            worker_startup_timeout_seconds = float(worker_timeout_seconds)
+        elif (
+            not isinstance(worker_startup_timeout_seconds, (int, float))
+            or isinstance(worker_startup_timeout_seconds, bool)
+            or not math.isfinite(float(worker_startup_timeout_seconds))
+            or worker_startup_timeout_seconds <= 0.0
+        ):
+            raise ParallelPoolError(
+                "worker startup timeout must be finite and positive"
+            )
         parsed_initial_states: tuple[FormalWorkerState, ...] | None = None
         if initial_episode_states is not None:
             if (
@@ -161,6 +173,9 @@ class ParallelEnvPool:
         self._reward_fn = reward_fn
         self._auto_reset = auto_reset
         self._worker_timeout_seconds = float(worker_timeout_seconds)
+        self._worker_startup_timeout_seconds = float(
+            worker_startup_timeout_seconds
+        )
         self.rollout_discarded = False
         self.training_stopped = False
         self._closed = False
@@ -555,7 +570,7 @@ class ParallelEnvPool:
 
     def _await_ready(self) -> None:
         ready: dict[int, tuple[int, str, str, int, ObservationIdentity]] = {}
-        deadline = time.monotonic() + self._worker_timeout_seconds
+        deadline = time.monotonic() + self._worker_startup_timeout_seconds
         while len(ready) < self.worker_count:
             message = self._next_result(deadline)
             kind, worker_index, *values = message

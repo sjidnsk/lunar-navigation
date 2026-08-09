@@ -19,6 +19,7 @@ REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PACKAGE_ROOT))
 sys.path.insert(0, str(REPOSITORY_ROOT / "model_contract"))
 
+import lunar_policy_training.environment.parallel_pool as parallel_pool_module  # noqa: E402
 from lunar_policy_training.config import load_training_config  # noqa: E402
 from lunar_policy_training.environment.parallel_pool import (  # noqa: E402
     ParallelActions,
@@ -64,6 +65,38 @@ def test_checkpoint_interval_is_thirty_minutes(resolved_config) -> None:
 def test_joint_candidate_interval_is_one_hour(resolved_config) -> None:
     """Would fail if immutable joint candidates did not use one-hour boundaries."""
     assert resolved_config.candidate_checkpoint_interval_seconds == 3600
+
+
+def test_parallel_pool_uses_distinct_startup_and_runtime_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow restore may wait longer without relaxing live worker failures."""
+    pool = object.__new__(ParallelEnvPool)
+    pool.worker_count = 1
+    pool._worker_timeout_seconds = 60.0
+    pool._worker_startup_timeout_seconds = 300.0
+    pool._buffer_identities = [None, None]
+    identity = _observation(0, "WHEELED").observation_identities[0]
+    messages = iter(
+        (
+            ("ready", 0, 1234, "1", "1", 0, identity),
+            ("worker_reset", 0, 0, 7, identity, 0),
+        )
+    )
+    deadlines: list[float] = []
+
+    def next_result(deadline: float):
+        deadlines.append(deadline)
+        return next(messages)
+
+    pool._next_result = next_result
+    monkeypatch.setattr(parallel_pool_module.time, "monotonic", lambda: 100.0)
+
+    pool._await_ready()
+    reset_rows = pool._await_worker_resets((0,), 0, 7)
+
+    assert deadlines == [400.0, 160.0]
+    assert reset_rows == {0: (identity, 0)}
 
 
 def _observation(worker_index: int, platform_type: str) -> PolicyBatch:

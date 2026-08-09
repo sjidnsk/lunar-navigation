@@ -2729,6 +2729,13 @@ def _resume_training_run(
     )
 
 
+def _parallel_pool_startup_timeout_seconds(
+    initial_episode_states: tuple[Mapping[str, object], ...] | None,
+) -> float:
+    """Give active-episode reconstruction headroom without loosening steps."""
+    return 300.0 if initial_episode_states is not None else 60.0
+
+
 def _run_updates(
     *,
     config: ResolvedTrainingConfig,
@@ -2813,6 +2820,9 @@ def _run_updates(
         environment_factory=environment_factory,
         reward_fn=reward_fn,
         worker_timeout_seconds=60.0,
+        worker_startup_timeout_seconds=(
+            _parallel_pool_startup_timeout_seconds(initial_episode_states)
+        ),
         initial_episode_states=initial_episode_states,
     )
     environment = _ParallelPoolVectorEnv(
