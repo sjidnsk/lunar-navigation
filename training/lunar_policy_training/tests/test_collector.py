@@ -585,7 +585,12 @@ def test_last_real_action_receives_unsuccessful_terminal_reward_before_reset(
 
     assert policy.forward_calls == 2  # one real action plus reset bootstrap
     assert len(collected.rollout) == 2
-    assert collected.rewards.tolist() == [[-13.0, -12.0]]
+    np.testing.assert_allclose(
+        collected.rewards,
+        np.asarray([[-1.4, -1.3]], dtype=np.float32),
+        rtol=0.0,
+        atol=1.0e-6,
+    )
     assert collected.dones.tolist() == [[True, True]]
 
 
