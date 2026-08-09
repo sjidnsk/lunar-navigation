@@ -142,7 +142,13 @@ def qualify_initial_start_cell(
         sensor_state.observe_world(pose, elapsed_s=0.0)
         local = sensor_state.local_observation(pose)
         world = sensor_state.observed.to_observed_world(local=local)
-        candidates = candidate_builder.build(world, mission, pose, projection)
+        candidates = candidate_builder.build(
+            world,
+            mission,
+            pose,
+            projection,
+            platform_type=platform_type,
+        )
         if candidates.count > 0:
             return start_cell
     return None

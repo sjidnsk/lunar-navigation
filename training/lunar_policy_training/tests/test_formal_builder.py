@@ -10,6 +10,8 @@ import torch
 
 from lunar_policy_training.capability_freeze import ScenarioIdentity
 from lunar_policy_training.environment import formal_builder as formal_builder_module
+from lunar_policy_training.environment import candidate_builder as candidate_builder_module
+from lunar_policy_training.environment.candidate_builder import CandidateBuilderV2
 from lunar_policy_training.environment.formal_builder import (
     FormalEpisode,
     FormalEnvironmentBuilder,
@@ -287,6 +289,30 @@ def test_formal_worker_uses_one_scene_current_capability_and_safe_start(
     )
 
 
+def test_formal_episode_passes_exact_platform_and_exposes_candidate_diagnostics(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    original_build = CandidateBuilderV2.build
+    platform_calls: list[str] = []
+
+    def record_platform(self, *args, **kwargs):
+        platform_calls.append(kwargs["platform_type"])
+        return original_build(self, *args, **kwargs)
+
+    monkeypatch.setattr(CandidateBuilderV2, "build", record_platform)
+    worker = assembly.factory(0, "HOPPER")
+
+    assert platform_calls
+    assert set(platform_calls) == {"HOPPER"}
+    diagnostics = worker.episode.current_candidate_diagnostics()
+    assert worker.current_candidate_diagnostics() == diagnostics
+    assert diagnostics.emitted_count == int(
+        worker.environment.current_observation.candidate_mask.sum()
+    )
+
+
 def test_cache_start_qualification_matches_the_episode_candidate_semantics(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -551,6 +577,70 @@ def test_restore_preserves_one_legacy_coarse_gain_boundary_then_enables_detail(
     )
     assert restored.episode._detail_candidate_gain_enabled is True
     assert restored.snapshot_episode_state()["candidate_gain_resolution_m"] == 4.0
+
+
+def test_restore_preserves_legacy_platform_filter_boundary_then_enables_repair(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assembly, bundle, _ = _assembly(tmp_path)
+    current = assembly.factory.create_for_episode(
+        0,
+        "WHEELED",
+        4,
+        platform_worker_index=0,
+        platform_worker_count=1,
+    )
+    template = current.episode
+    legacy_episode = FormalEpisode(
+        worker_index=template.worker_index,
+        platform_type="WHEELED",
+        capability=bundle.for_platform("WHEELED"),
+        scenario_identity=template.scenario_identity,
+        loaded=template.loaded,
+        start_cell=template.start_cell,
+        platform_candidate_reachability_enabled=False,
+    )
+    legacy = FormalWorkerBuilder._make_worker(legacy_episode)
+    state = legacy.snapshot_episode_state()
+    legacy_digest = policy_batch_sha256(legacy.environment.current_observation)
+
+    def reject_new_ground_filter(world, projection, robot):
+        return np.zeros_like(world.observed_mask)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            candidate_builder_module,
+            "_ground_reachable_mask",
+            reject_new_ground_filter,
+        )
+        restored = assembly.factory.restore_for_episode(
+            worker_index=0,
+            platform_type="WHEELED",
+            episode_cursor=4,
+            platform_worker_index=0,
+            platform_worker_count=1,
+            state=state,
+        )
+
+    assert policy_batch_sha256(restored.environment.current_observation) == legacy_digest
+    assert restored.episode._platform_candidate_reachability_enabled is True
+
+    enabled_calls: list[bool] = []
+    original_build = CandidateBuilderV2.build
+
+    def record_filter(self, *args, **kwargs):
+        enabled_calls.append(kwargs["platform_reachability_filter_enabled"])
+        return original_build(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(CandidateBuilderV2, "build", record_filter)
+        restored.episode.build_policy_observation(
+            restored.episode.sensor_state.observed,
+            restored.episode.current_pose,
+        )
+
+    assert enabled_calls == [True]
 
 
 @pytest.mark.parametrize("platform", ("WHEELED", "LEGGED", "HOPPER"))

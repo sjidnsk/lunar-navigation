@@ -33,7 +33,11 @@ from ..polar_data.raster import GLOBAL_GEOMETRY, LOCAL_GEOMETRY, MapCanvas
 from ..policy.action_semantics import apply_goal_theta
 from ..policy.observation import ObservationIdentity, PolicyBatch
 from ..training_semantics import FORMAL_SENSOR_FOV_RAD, FORMAL_SENSOR_RANGE_M
-from .candidate_builder import CandidateBatch, CandidateBuilderV2
+from .candidate_builder import (
+    CandidateBatch,
+    CandidateBuilderV2,
+    CandidateDiagnostics,
+)
 from .formal_episode_state import (
     FormalPoseState,
     FormalRevealState,
@@ -176,6 +180,9 @@ class FormalEnvironmentWorker(ParallelEnvironmentWorker):
 
     def snapshot_episode_state(self) -> dict[str, object]:
         return self.episode.snapshot_state(self.environment).to_dict()
+
+    def current_candidate_diagnostics(self) -> CandidateDiagnostics:
+        return self.episode.current_candidate_diagnostics()
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,10 +366,12 @@ class FormalEpisode:
         start_cell: tuple[int, int],
         visited_candidate_filter_enabled: bool = True,
         detail_candidate_gain_enabled: bool = True,
+        platform_candidate_reachability_enabled: bool = True,
     ) -> None:
         if (
             type(visited_candidate_filter_enabled) is not bool
             or type(detail_candidate_gain_enabled) is not bool
+            or type(platform_candidate_reachability_enabled) is not bool
         ):
             raise TypeError("formal candidate compatibility flags must be boolean")
         self.worker_index = worker_index
@@ -412,6 +421,9 @@ class FormalEpisode:
             )
         )
         self._detail_candidate_gain_enabled = detail_candidate_gain_enabled
+        self._platform_candidate_reachability_enabled = (
+            platform_candidate_reachability_enabled
+        )
         self._current_candidate_gain_resolution_m: float | None = None
         self._observation_builder = ObservationBuilderV2()
         self._bridge = bridge_api.PlannerBridge()
@@ -577,6 +589,12 @@ class FormalEpisode:
             }
         )
 
+    def current_candidate_diagnostics(self) -> CandidateDiagnostics:
+        snapshot = self._snapshot
+        if snapshot is None:
+            return CandidateDiagnostics()
+        return snapshot.candidates.diagnostics
+
     def _build_mission_roi(self) -> np.ndarray:
         return build_formal_mission_roi(self.loaded.arrays)
 
@@ -710,6 +728,10 @@ class FormalEpisode:
             self.mission,
             pose,
             projection,
+            platform_type=self.platform_type,
+            platform_reachability_filter_enabled=(
+                self._platform_candidate_reachability_enabled
+            ),
             excluded_cells=(
                 self._visited_candidate_cells
                 if self._visited_candidate_filter_enabled
@@ -1043,6 +1065,7 @@ class FormalWorkerBuilder:
         def restore_with_filters(
             visited_enabled: bool,
             detail_gain_enabled: bool,
+            platform_reachability_enabled: bool,
         ) -> FormalEnvironmentWorker:
             episode = FormalEpisode(
                 worker_index=worker_index,
@@ -1053,6 +1076,9 @@ class FormalWorkerBuilder:
                 start_cell=restored.start_cell,
                 visited_candidate_filter_enabled=visited_enabled,
                 detail_candidate_gain_enabled=detail_gain_enabled,
+                platform_candidate_reachability_enabled=(
+                    platform_reachability_enabled
+                ),
             )
             episode.replay_state(restored)
             worker = self._make_worker(episode)
@@ -1078,33 +1104,41 @@ class FormalWorkerBuilder:
         def is_compatibility_error(error: Exception) -> bool:
             return str(error) in compatibility_errors
 
-        def restore_legacy() -> FormalEnvironmentWorker:
-            try:
-                legacy_worker = restore_with_filters(True, False)
-            except (ValueError, EnvironmentInvariantError) as coarse_error:
-                if not is_compatibility_error(coarse_error):
-                    raise
-                legacy_worker = restore_with_filters(False, False)
-            # Preserve the exact legacy boundary, then enable both repairs for
-            # every observation built after it.
-            legacy_worker.episode._visited_candidate_filter_enabled = True
-            legacy_worker.episode._detail_candidate_gain_enabled = True
-            return legacy_worker
-
         if restored.candidate_gain_resolution_m == LOCAL_GEOMETRY.resolution_m:
+            attempts = (
+                (True, True, True),
+                (True, True, False),
+                (True, False, False),
+                (False, False, False),
+            )
+        else:
+            attempts = (
+                (True, False, False),
+                (False, False, False),
+                (True, True, True),
+                (True, True, False),
+            )
+        last_error: ValueError | EnvironmentInvariantError | None = None
+        for visited_enabled, detail_enabled, platform_enabled in attempts:
             try:
-                return restore_with_filters(True, True)
-            except (ValueError, EnvironmentInvariantError) as current_error:
-                if not is_compatibility_error(current_error):
+                worker = restore_with_filters(
+                    visited_enabled,
+                    detail_enabled,
+                    platform_enabled,
+                )
+            except (ValueError, EnvironmentInvariantError) as error:
+                if not is_compatibility_error(error):
                     raise
-            return restore_legacy()
-
-        try:
-            return restore_legacy()
-        except (ValueError, EnvironmentInvariantError) as legacy_error:
-            if not is_compatibility_error(legacy_error):
-                raise
-        return restore_with_filters(True, True)
+                last_error = error
+                continue
+            # Preserve the exact matched boundary, then enable every repair for
+            # observations built after it.
+            worker.episode._visited_candidate_filter_enabled = True
+            worker.episode._detail_candidate_gain_enabled = True
+            worker.episode._platform_candidate_reachability_enabled = True
+            return worker
+        assert last_error is not None
+        raise last_error
 
     def _load_scheduled_scene(
         self,

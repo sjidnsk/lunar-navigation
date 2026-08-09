@@ -579,6 +579,7 @@ def _policy_batch_from_projection(
         inputs.mission,
         inputs.pose,
         projection,
+        platform_type="WHEELED",
     )
     assert candidates.count > 0
     arrays = ObservationBuilderV2().build(
