@@ -4181,7 +4181,10 @@ def _validated_source_migration_sensor_reports(
         previous_sha256 = validate_sensor_performance_report(
             previous,
             expected_host=expected_host,
-            expected_source_commit=expected_old_source_commit,
+            expected_source_commit=sensor_source_commit(
+                repository_root,
+                revision=expected_old_source_commit,
+            ),
             expected_capability_sha256=run_identity.capability_sha256,
             expected_training_semantics_sha256=(
                 run_identity.training_semantics_sha256

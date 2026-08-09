@@ -466,9 +466,15 @@ def current_host_identity() -> dict[str, str]:
     }
 
 
-def sensor_source_commit(repository_root: str | Path) -> str:
-    """Return the newest commit touching sensor/training implementation sources."""
+def sensor_source_commit(
+    repository_root: str | Path,
+    *,
+    revision: str | None = None,
+) -> str:
+    """Return the newest relevant source commit reachable from one revision."""
     root = Path(repository_root).resolve()
+    if revision is not None and not _is_hex(revision, 40):
+        raise SensorPerformanceError("sensor source revision is invalid")
     try:
         completed = subprocess.run(
             [
@@ -476,6 +482,7 @@ def sensor_source_commit(repository_root: str | Path) -> str:
                 "log",
                 "-1",
                 "--format=%H",
+                revision or "HEAD",
                 "--",
                 *_SENSOR_SOURCE_PATHS,
             ],

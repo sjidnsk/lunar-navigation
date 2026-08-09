@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -10,6 +11,7 @@ from lunar_policy_training.sensor_performance import (
     SensorPerformanceError,
     benchmark_observation_throughput,
     build_sensor_performance_report,
+    sensor_source_commit,
     sensor_performance_sha256,
     validate_sensor_performance_report,
     write_sensor_performance_report_atomic,
@@ -29,6 +31,59 @@ HOST = {
 SOURCE_COMMIT = "a" * 40
 CAPABILITY_SHA256 = "b" * 64
 SEMANTICS_SHA256 = "c" * 64
+
+
+def test_sensor_source_commit_resolves_paths_at_a_historical_revision(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "training-test@example.invalid"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Training Test"],
+        cwd=tmp_path,
+        check=True,
+    )
+    source = (
+        tmp_path
+        / "training/lunar_policy_training/lunar_policy_training/marker.py"
+    )
+    source.parent.mkdir(parents=True)
+    source.write_text("first\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "sensor source"], cwd=tmp_path, check=True
+    )
+    sensor_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (tmp_path / "README.md").write_text("unrelated\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "unrelated"], cwd=tmp_path, check=True
+    )
+    unrelated_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source.write_text("second\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "new sensor source"], cwd=tmp_path, check=True
+    )
+
+    assert sensor_source_commit(tmp_path, revision=unrelated_commit) == sensor_commit
+    assert sensor_source_commit(tmp_path) != sensor_commit
 
 
 def _valid_report() -> dict[str, object]:
