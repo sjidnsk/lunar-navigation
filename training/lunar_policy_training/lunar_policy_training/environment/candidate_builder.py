@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 
 import numpy as np
@@ -14,16 +15,45 @@ from .observation_builder import MissionRaster, ObservedWorld, PlatformProjectio
 from .visibility import SensorGeometry, VisibilityEstimator, _ray_cells
 
 
+_GROUND_PLATFORM_TYPES = frozenset(("WHEELED", "LEGGED"))
+_PLATFORM_TYPES = _GROUND_PLATFORM_TYPES | {"HOPPER"}
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateDiagnostics:
+    frontier_anchor_count: int = 0
+    platform_filter_rejected_count: int = 0
+    emitted_count: int = 0
+
+    def __post_init__(self) -> None:
+        values = (
+            self.frontier_anchor_count,
+            self.platform_filter_rejected_count,
+            self.emitted_count,
+        )
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in values):
+            raise ValueError("candidate diagnostics must contain non-negative integers")
+        if self.platform_filter_rejected_count > self.frontier_anchor_count:
+            raise ValueError("candidate diagnostics rejected count exceeds anchors")
+        if self.emitted_count > self.frontier_anchor_count:
+            raise ValueError("candidate diagnostics emitted count exceeds anchors")
+
+
 @dataclass(frozen=True)
 class CandidateBatch:
     features: np.ndarray
     mask: np.ndarray
     canvas_id: str | None = None
+    diagnostics: CandidateDiagnostics = field(default_factory=CandidateDiagnostics)
 
     def __post_init__(self) -> None:
         features, mask = np.asarray(self.features, dtype=np.float32), np.asarray(self.mask, dtype=bool)
         if features.shape != (64, len(ObservationContractV3.frontier_fields)) or mask.shape != (64,) or not np.isfinite(features).all():
             raise ValueError("candidate batch must use finite [64,12] and [64]")
+        if not isinstance(self.diagnostics, CandidateDiagnostics):
+            raise TypeError("candidate diagnostics are required")
+        if self.diagnostics.emitted_count != int(mask.sum()):
+            raise ValueError("candidate diagnostics emitted count must match mask")
         object.__setattr__(self, "features", features)
         object.__setattr__(self, "mask", mask)
 
@@ -32,8 +62,17 @@ class CandidateBatch:
         return int(self.mask.sum())
 
     @classmethod
-    def empty(cls, canvas_id: str | None = None) -> "CandidateBatch":
-        return cls(np.zeros((64, 12), np.float32), np.zeros(64, bool), canvas_id)
+    def empty(
+        cls,
+        canvas_id: str | None = None,
+        diagnostics: CandidateDiagnostics | None = None,
+    ) -> "CandidateBatch":
+        return cls(
+            np.zeros((64, 12), np.float32),
+            np.zeros(64, bool),
+            canvas_id,
+            diagnostics or CandidateDiagnostics(),
+        )
 
 
 def _neighbors(row: int, column: int, cells: int) -> tuple[tuple[int, int], ...]:
@@ -44,6 +83,31 @@ def _clear_observed(world: ObservedWorld, cells: list[tuple[int, int]], *, unkno
     check = cells[:-1] if unknown_endpoint_allowed else cells
     obstacle_ratio = world.physical_obstacle_layer.values
     return bool(check) and all(world.observed_mask[row, column] and obstacle_ratio[row, column] == 0.0 for row, column in check)
+
+
+def _ground_reachable_mask(
+    world: ObservedWorld,
+    projection: PlatformProjection,
+    robot: tuple[int, int],
+) -> np.ndarray:
+    passable = (
+        world.observed_mask
+        & (world.physical_obstacle_layer.values == 0.0)
+        & (projection.traversable_ratio > 0.0)
+    )
+    reachable = np.zeros_like(passable)
+    if not passable[robot]:
+        return reachable
+    reachable[robot] = True
+    queue: deque[tuple[int, int]] = deque((robot,))
+    cells = world.canvas.geometry.cells
+    while queue:
+        row, column = queue.popleft()
+        for neighbor in _neighbors(row, column, cells):
+            if passable[neighbor] and not reachable[neighbor]:
+                reachable[neighbor] = True
+                queue.append(neighbor)
+    return reachable
 
 
 def _segments(points: list[tuple[int, int]], cells: int) -> list[list[tuple[int, int]]]:
@@ -143,8 +207,12 @@ class CandidateBuilderV2:
         pose_map: Pose2,
         projection: PlatformProjection,
         *,
+        platform_type: str,
+        platform_reachability_filter_enabled: bool = True,
         excluded_cells: Collection[tuple[int, int]] = (),
     ) -> CandidateBatch:
+        if platform_type not in _PLATFORM_TYPES:
+            raise ValueError("platform_type must be WHEELED, LEGGED, or HOPPER")
         if pose_map.frame_id != "map" or world.canvas != mission.canvas or world.canvas != projection.canvas:
             return CandidateBatch.empty()
         canvas, cells, observed, roi = world.canvas, world.canvas.geometry.cells, world.observed_mask, mission.roi_ratio > 0.0
@@ -161,7 +229,7 @@ class CandidateBuilderV2:
         boundary = observed & roi & adjacent_unknown
         segments = _segments(_points(boundary), cells)
         spacing = max(1, math.ceil(self._sensor.anchor_spacing_m / canvas.geometry.resolution_m))
-        feasible: list[tuple[int, tuple[int, int]]] = []
+        raw_anchors: list[tuple[int, tuple[int, int]]] = []
         total_roi, total_priority = float(mission.roi_ratio.sum()), float((mission.priority * mission.roi_ratio).sum())
         step = max(1, round(self._sensor.standoff_m / canvas.geometry.resolution_m))
         for segment_id, segment in enumerate(segments):
@@ -171,13 +239,36 @@ class CandidateBuilderV2:
                     standoff = (row, column)
                 if standoff == robot or standoff in excluded_cells:
                     continue
-                if projection.traversable_ratio[standoff] == 0.0 or not _clear_observed(world, _ray_cells(robot, standoff)):
-                    continue
                 if self._candidate_within_sensor(canvas, pose_map, standoff):
-                    feasible.append((segment_id, standoff))
-        feasible = sorted(set(feasible))
+                    raw_anchors.append((segment_id, standoff))
+        raw_anchors = sorted(set(raw_anchors))
+        reachable = None
+        if platform_reachability_filter_enabled and platform_type in _GROUND_PLATFORM_TYPES:
+            reachable = _ground_reachable_mask(world, projection, robot)
+        feasible: list[tuple[int, tuple[int, int]]] = []
+        for anchor in raw_anchors:
+            point = anchor[1]
+            if projection.traversable_ratio[point] == 0.0:
+                continue
+            if not platform_reachability_filter_enabled:
+                accepted = _clear_observed(world, _ray_cells(robot, point))
+            elif platform_type in _GROUND_PLATFORM_TYPES:
+                assert reachable is not None
+                accepted = bool(reachable[point])
+            else:
+                accepted = bool(
+                    observed[point]
+                    and roi[point]
+                    and world.physical_obstacle_layer.values[point] == 0.0
+                )
+            if accepted:
+                feasible.append(anchor)
+        diagnostics = CandidateDiagnostics(
+            frontier_anchor_count=len(raw_anchors),
+            platform_filter_rejected_count=len(raw_anchors) - len(feasible),
+        )
         if not feasible:
-            return CandidateBatch.empty(canvas.identity)
+            return CandidateBatch.empty(canvas.identity, diagnostics)
         candidate_cells = np.ascontiguousarray(
             [point for _, point in feasible], dtype=np.int32
         )
@@ -221,7 +312,16 @@ class CandidateBuilderV2:
         chosen = _select_anchors(chosen, len(segments))
         output = np.zeros((64, 12), np.float32); mask = np.zeros(64, bool)
         for index, anchor in enumerate(chosen): output[index] = anchor.feature; mask[index] = True
-        return CandidateBatch(output, mask, canvas.identity)
+        return CandidateBatch(
+            output,
+            mask,
+            canvas.identity,
+            CandidateDiagnostics(
+                frontier_anchor_count=diagnostics.frontier_anchor_count,
+                platform_filter_rejected_count=diagnostics.platform_filter_rejected_count,
+                emitted_count=len(chosen),
+            ),
+        )
 
     def _candidate_within_sensor(
         self,
@@ -255,4 +355,9 @@ class CandidateBuilderV2:
         return np.asarray(((x - canvas.bounds_m[0]) / canvas.geometry.size_m, (canvas.bounds_m[3] - y) / canvas.geometry.size_m, min(1.0, distance / (math.sqrt(2.0) * canvas.geometry.size_m)), math.sin(bearing), math.cos(bearing), min(1.0, gain / total_roi) if total_roi else 0.0, min(1.0, priority_gain / total_priority) if total_priority else 0.0, -normal[0] / magnitude if magnitude else 0.0, normal[1] / magnitude if magnitude else 1.0, min(1.0, magnitude / 2.0), projection.clearance_margin_norm[point], remaining), dtype=np.float32)
 
 
-__all__ = ["CandidateBatch", "CandidateBuilderV2", "SensorGeometry"]
+__all__ = [
+    "CandidateBatch",
+    "CandidateBuilderV2",
+    "CandidateDiagnostics",
+    "SensorGeometry",
+]
