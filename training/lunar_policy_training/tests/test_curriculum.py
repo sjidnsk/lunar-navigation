@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import torch
 import pytest
 from lunar_planner_training_bridge import MotionReference, PlannerBridge
 
-from lunar_policy_training.curriculum import CurriculumSchedule
+from lunar_policy_training.curriculum import (
+    CurriculumSchedule,
+    resume_worker_episode_states,
+)
 from lunar_policy_training.capability_freeze import (
     FrozenInterval,
     FrozenLeggedBodyPrimitive,
@@ -99,6 +103,107 @@ def test_active_gpu_phase_order_and_allocations_prepare_formal_train() -> None:
         "LEGGED": 6,
         "HOPPER": 6,
     }
+
+
+def _resume_checkpoint(
+    phase: str, allocation: dict[str, int]
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        curriculum_phase=phase,
+        worker_allocation=allocation,
+        environment_state={
+            "worker_episode_states": [
+                {"worker_index": index, "platform_type": next(iter(allocation))}
+                for index in range(sum(allocation.values()))
+            ]
+        },
+    )
+
+
+def test_resume_worker_episode_states_preserves_exact_allocation() -> None:
+    checkpoint = _resume_checkpoint("warmup_wheeled", {"WHEELED": 24})
+
+    states = resume_worker_episode_states(
+        checkpoint,
+        target_phase="warmup_wheeled",
+        target_allocation={"WHEELED": 24},
+    )
+
+    assert states == tuple(checkpoint.environment_state["worker_episode_states"])
+
+
+@pytest.mark.parametrize(
+    ("source_phase", "source_allocation", "target_phase", "target_allocation"),
+    [
+        (
+            "warmup_wheeled",
+            {"WHEELED": 24},
+            "warmup_legged",
+            {"LEGGED": 24},
+        ),
+        (
+            "warmup_legged",
+            {"LEGGED": 24},
+            "warmup_hopper",
+            {"HOPPER": 24},
+        ),
+        (
+            "warmup_hopper",
+            {"HOPPER": 24},
+            "joint",
+            {"WHEELED": 8, "LEGGED": 8, "HOPPER": 8},
+        ),
+    ],
+)
+def test_resume_worker_episode_states_retires_adjacent_platform_allocation(
+    source_phase: str,
+    source_allocation: dict[str, int],
+    target_phase: str,
+    target_allocation: dict[str, int],
+) -> None:
+    checkpoint = _resume_checkpoint(source_phase, source_allocation)
+
+    assert (
+        resume_worker_episode_states(
+            checkpoint,
+            target_phase=target_phase,
+            target_allocation=target_allocation,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("source_phase", "source_allocation", "target_phase", "target_allocation"),
+    [
+        (
+            "warmup_wheeled",
+            {"WHEELED": 24},
+            "warmup_hopper",
+            {"HOPPER": 24},
+        ),
+        (
+            "warmup_wheeled",
+            {"WHEELED": 24},
+            "warmup_wheeled",
+            {"WHEELED": 18},
+        ),
+    ],
+)
+def test_resume_worker_episode_states_rejects_unapproved_allocation_drift(
+    source_phase: str,
+    source_allocation: dict[str, int],
+    target_phase: str,
+    target_allocation: dict[str, int],
+) -> None:
+    checkpoint = _resume_checkpoint(source_phase, source_allocation)
+
+    with pytest.raises(ValueError, match="curriculum"):
+        resume_worker_episode_states(
+            checkpoint,
+            target_phase=target_phase,
+            target_allocation=target_allocation,
+        )
 
 
 def test_curriculum_sampler_is_proxy_and_deterministic() -> None:

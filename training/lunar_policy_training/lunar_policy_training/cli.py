@@ -103,6 +103,7 @@ from .curriculum import (
     FORMAL_SEED,
     PLATFORMS,
     REWARD_CALIBRATION_SEEDS,
+    resume_worker_episode_states,
 )
 from .evaluation.release_gate import (
     GateResult,
@@ -2463,8 +2464,10 @@ def _run_updates(
             != environment_factory.scenario_schedule_id
         ):
             raise PreflightError("checkpoint formal scenario schedule mismatch")
-        initial_episode_states = tuple(
-            environment_state["worker_episode_states"]
+        initial_episode_states = resume_worker_episode_states(
+            restore_checkpoint,
+            target_phase=curriculum_phase,
+            target_allocation=allocation,
         )
     pool = ParallelEnvPool(
         allocation=allocation,

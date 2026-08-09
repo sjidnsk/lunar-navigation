@@ -13,6 +13,12 @@ from .capability_freeze import FrozenPlatformCapability
 
 
 PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
+ACTIVE_PHASES = (
+    "warmup_wheeled",
+    "warmup_legged",
+    "warmup_hopper",
+    "joint",
+)
 FORMAL_SEED = 4080
 REWARD_CALIBRATION_SEEDS = (4081, 4082, 4083)
 _COMPLETE_UPDATE_RESERVE_S = 600
@@ -228,6 +234,39 @@ class CurriculumSchedule:
             raise ValueError("unknown curriculum phase")
         per_platform = selected_workers // 3
         return {platform: per_platform for platform in PLATFORMS}
+
+
+def resume_worker_episode_states(
+    checkpoint: object,
+    *,
+    target_phase: str,
+    target_allocation: Mapping[str, int],
+) -> tuple[Mapping[str, object], ...] | None:
+    """Restore workers only when the frozen curriculum allocation is unchanged."""
+    source_phase = getattr(checkpoint, "curriculum_phase", None)
+    source_allocation = getattr(checkpoint, "worker_allocation", None)
+    environment_state = getattr(checkpoint, "environment_state", None)
+    if (
+        source_phase not in ACTIVE_PHASES
+        or target_phase not in ACTIVE_PHASES
+        or not isinstance(source_allocation, Mapping)
+        or not isinstance(target_allocation, Mapping)
+        or not isinstance(environment_state, Mapping)
+    ):
+        raise ValueError("curriculum checkpoint state is invalid")
+    source = dict(source_allocation)
+    target = dict(target_allocation)
+    if source_phase == target_phase and source == target:
+        states = environment_state.get("worker_episode_states")
+        if not isinstance(states, list) or len(states) != sum(target.values()):
+            raise ValueError("curriculum worker episode states are invalid")
+        return tuple(states)
+    if (
+        ACTIVE_PHASES.index(target_phase) == ACTIVE_PHASES.index(source_phase) + 1
+        and source != target
+    ):
+        return None
+    raise ValueError("curriculum phase or allocation drift is invalid")
 
 
 def _bounded_seconds(value: float, *, name: str, upper: float) -> float:
