@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from lunar_planner_training_bridge import PlanningOutcome
 
+from lunar_policy_training.environment.candidate_builder import CandidateDiagnostics
 from lunar_policy_training.ppo.trainer import PPOUpdateMetrics
 from lunar_policy_training.training_metrics import (
     TrainingMetricsError,
@@ -50,6 +51,13 @@ def _record(global_step: int) -> dict[str, object]:
             PlanningOutcome.NEW_REFERENCE_AVAILABLE,
             PlanningOutcome.INVALID_REQUEST,
         ),
+        candidate_diagnostics=(
+            CandidateDiagnostics(5, 1, 4),
+            CandidateDiagnostics(6, 2, 4),
+            CandidateDiagnostics(7, 3, 4),
+            CandidateDiagnostics(8, 4, 4),
+        ),
+        no_candidate_terminations=(False, True, False, False),
         ppo_metrics=_ppo_metrics(),
         collect_wall_seconds=5.0,
         update_wall_seconds=0.25,
@@ -81,12 +89,76 @@ def test_build_training_update_record_preserves_learning_and_rollout_facts() -> 
         "RESOURCE_EXHAUSTED": 1,
     }
     assert record["planner"]["success_rate"] == pytest.approx(0.5)
+    assert record["planner"]["outcome_counts_by_platform"] == {
+        "LEGGED": {
+            "INVALID_REQUEST": 1,
+            "NEW_REFERENCE_AVAILABLE": 2,
+            "RESOURCE_EXHAUSTED": 1,
+        }
+    }
+    assert record["candidate"]["by_platform"] == {
+        "LEGGED": {
+            "frontier_anchor_count": 26,
+            "platform_filter_rejected_count": 10,
+            "emitted_count": 16,
+            "no_candidate_termination_count": 1,
+            "planner_rejected_exhaustion_count": 1,
+        }
+    }
     assert record["ppo"]["approx_kl"] == pytest.approx(0.0125)
     assert record["ppo"]["gradient_norm"] == pytest.approx(0.8)
     assert record["timing"] == {
         "collect_wall_seconds": pytest.approx(5.0),
         "update_wall_seconds": pytest.approx(0.25),
         "worker_wait_seconds": pytest.approx(4.0),
+    }
+
+
+def test_candidate_and_planner_diagnostics_preserve_worker_platform_alignment() -> None:
+    record = build_training_update_record(
+        global_step=1,
+        timestamp_utc="2026-08-09T02:00:00Z",
+        curriculum_phase="joint",
+        platform_allocation={"WHEELED": 1, "HOPPER": 1},
+        worker_platforms=("WHEELED", "HOPPER"),
+        rollout_horizon=1,
+        raw_rewards=np.asarray([[1.0, -1.0]], dtype=np.float32),
+        dones=np.asarray([[False, True]], dtype=np.bool_),
+        start_coverage=np.asarray([0.1, 0.2], dtype=np.float32),
+        end_coverage=np.asarray([0.2, 0.2], dtype=np.float32),
+        success_first_crossings=(False, False),
+        planning_outcomes=(
+            PlanningOutcome.NEW_REFERENCE_AVAILABLE,
+            PlanningOutcome.NO_KNOWN_SAFE_ROUTE,
+        ),
+        candidate_diagnostics=(
+            CandidateDiagnostics(3, 1, 2),
+            CandidateDiagnostics(11, 4, 7),
+        ),
+        no_candidate_terminations=(False, True),
+        ppo_metrics=_ppo_metrics(),
+        collect_wall_seconds=1.0,
+        update_wall_seconds=0.5,
+        worker_wait_seconds=0.25,
+    )
+
+    assert record["candidate"]["by_platform"]["WHEELED"] == {
+        "frontier_anchor_count": 3,
+        "platform_filter_rejected_count": 1,
+        "emitted_count": 2,
+        "no_candidate_termination_count": 0,
+        "planner_rejected_exhaustion_count": 0,
+    }
+    assert record["candidate"]["by_platform"]["HOPPER"] == {
+        "frontier_anchor_count": 11,
+        "platform_filter_rejected_count": 4,
+        "emitted_count": 7,
+        "no_candidate_termination_count": 1,
+        "planner_rejected_exhaustion_count": 1,
+    }
+    assert record["planner"]["outcome_counts_by_platform"] == {
+        "HOPPER": {"NO_KNOWN_SAFE_ROUTE": 1},
+        "WHEELED": {"NEW_REFERENCE_AVAILABLE": 1},
     }
 
 

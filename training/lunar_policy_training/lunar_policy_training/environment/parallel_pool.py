@@ -23,6 +23,7 @@ from ..policy.observation import (
 )
 from .macro_step import ExecutionEvents, PlannerTransition, PolicyAction
 from .formal_episode_state import FormalWorkerState
+from .candidate_builder import CandidateDiagnostics
 
 
 _OBSERVATION_FIELDS = ObservationContractV3.input_names
@@ -65,6 +66,8 @@ class ParallelRolloutStep:
     planning_outcomes: tuple[PlanningOutcome, ...] = ()
     reason_codes: tuple[str, ...] = ()
     execution_events: tuple[ExecutionEvents, ...] = ()
+    candidate_diagnostics: tuple[CandidateDiagnostics, ...] = ()
+    no_candidate_terminations: tuple[bool, ...] = ()
 
 
 class ParallelEnvPool:
@@ -401,6 +404,7 @@ class ParallelEnvPool:
                 planning_outcomes,
                 reason_codes,
                 execution_events,
+                candidate_diagnostics,
                 identities,
                 policy_decisions_consumed,
                 success_first_crossings,
@@ -418,6 +422,7 @@ class ParallelEnvPool:
                 planning_outcomes=planning_outcomes,
                 reason_codes=reason_codes,
                 execution_events=execution_events,
+                candidate_diagnostics=candidate_diagnostics,
                 policy_decisions_consumed=policy_decisions_consumed,
                 success_first_crossings=success_first_crossings,
             )
@@ -446,14 +451,22 @@ class ParallelEnvPool:
                 command_queue.put(
                     ("prepare_decision_boundary", target_buffer, policy_version)
                 )
-            identities = self._await_resolution(target_buffer, policy_version)
+            (
+                identities,
+                candidate_diagnostics,
+                no_candidate_terminations,
+            ) = self._await_resolution(target_buffer, policy_version)
             self._buffer_identities[target_buffer] = identities
             self.validate_policy_versions(
                 self._shared_policy_versions[target_buffer],
                 expected_policy_version=policy_version,
             )
             self._buffer_index = target_buffer
-            return self._stage_buffer(target_buffer)
+            return self._stage_buffer(
+                target_buffer,
+                candidate_diagnostics=candidate_diagnostics,
+                no_candidate_terminations=no_candidate_terminations,
+            )
         except ParallelPoolError as error:
             if not self.training_stopped:
                 return self._fail_closed(str(error))
@@ -607,6 +620,7 @@ class ParallelEnvPool:
         tuple[PlanningOutcome, ...],
         tuple[str, ...],
         tuple[ExecutionEvents, ...],
+        tuple[CandidateDiagnostics, ...],
         tuple[ObservationIdentity, ...],
         torch.Tensor,
         torch.Tensor,
@@ -618,6 +632,7 @@ class ParallelEnvPool:
                 PlanningOutcome,
                 str,
                 ExecutionEvents,
+                CandidateDiagnostics,
                 ObservationIdentity,
                 int,
                 bool,
@@ -635,7 +650,7 @@ class ParallelEnvPool:
             if (
                 kind != "step"
                 or worker_index in completed
-                or len(values) != 9
+                or len(values) != 10
                 or values[:2] != [buffer_index, policy_version]
             ):
                 raise ParallelPoolError("worker step protocol failed")
@@ -643,6 +658,7 @@ class ParallelEnvPool:
                 outcome_value,
                 reason_code,
                 execution_events,
+                candidate_diagnostics,
                 identity,
                 policy_decisions_consumed,
                 success_first_crossing,
@@ -652,6 +668,7 @@ class ParallelEnvPool:
                 type(outcome_value) is not int
                 or not isinstance(reason_code, str)
                 or not isinstance(execution_events, ExecutionEvents)
+                or not isinstance(candidate_diagnostics, CandidateDiagnostics)
                 or not isinstance(identity, ObservationIdentity)
                 or policy_decisions_consumed not in (0, 1)
                 or type(success_first_crossing) is not bool
@@ -669,6 +686,7 @@ class ParallelEnvPool:
                 outcome,
                 reason_code,
                 execution_events,
+                candidate_diagnostics,
                 identity,
                 policy_decisions_consumed,
                 success_first_crossing,
@@ -676,19 +694,20 @@ class ParallelEnvPool:
             )
             completed.add(worker_index)
         self._episode_cursors = tuple(
-            metadata[index][6] for index in range(self.worker_count)
+            metadata[index][7] for index in range(self.worker_count)
         )
         return (
             tuple(metadata[index][0] for index in range(self.worker_count)),
             tuple(metadata[index][1] for index in range(self.worker_count)),
             tuple(metadata[index][2] for index in range(self.worker_count)),
             tuple(metadata[index][3] for index in range(self.worker_count)),
+            tuple(metadata[index][4] for index in range(self.worker_count)),
             torch.tensor(
-                [metadata[index][4] for index in range(self.worker_count)],
+                [metadata[index][5] for index in range(self.worker_count)],
                 dtype=torch.int64,
             ),
             torch.tensor(
-                [metadata[index][5] for index in range(self.worker_count)],
+                [metadata[index][6] for index in range(self.worker_count)],
                 dtype=torch.bool,
             ),
         )
@@ -719,9 +738,15 @@ class ParallelEnvPool:
 
     def _await_resolution(
         self, buffer_index: int, policy_version: int
-    ) -> tuple[ObservationIdentity, ...]:
+    ) -> tuple[
+        tuple[ObservationIdentity, ...],
+        tuple[CandidateDiagnostics, ...],
+        tuple[bool, ...],
+    ]:
         completed: set[int] = set()
         identities: dict[int, ObservationIdentity] = {}
+        diagnostics: dict[int, CandidateDiagnostics] = {}
+        no_candidate_terminations: dict[int, bool] = {}
         cursors: dict[int, int] = {}
         deadline = time.monotonic() + self._worker_timeout_seconds
         while len(completed) < self.worker_count:
@@ -734,20 +759,31 @@ class ParallelEnvPool:
             if (
                 kind != "resolved"
                 or worker_index in completed
-                or len(values) != 4
+                or len(values) != 6
                 or values[:2] != [buffer_index, policy_version]
-                or not isinstance(values[2], ObservationIdentity)
-                or type(values[3]) is not int
-                or values[3] < 0
+                or not isinstance(values[2], CandidateDiagnostics)
+                or type(values[3]) is not bool
+                or not isinstance(values[4], ObservationIdentity)
+                or type(values[5]) is not int
+                or values[5] < 0
             ):
                 raise ParallelPoolError("worker resolution protocol failed")
-            identities[worker_index] = values[2]
-            cursors[worker_index] = values[3]
+            diagnostics[worker_index] = values[2]
+            no_candidate_terminations[worker_index] = values[3]
+            identities[worker_index] = values[4]
+            cursors[worker_index] = values[5]
             completed.add(worker_index)
         self._episode_cursors = tuple(
             cursors[index] for index in range(self.worker_count)
         )
-        return tuple(identities[index] for index in range(self.worker_count))
+        return (
+            tuple(identities[index] for index in range(self.worker_count)),
+            tuple(diagnostics[index] for index in range(self.worker_count)),
+            tuple(
+                no_candidate_terminations[index]
+                for index in range(self.worker_count)
+            ),
+        )
 
     def _await_worker_resets(
         self,
@@ -821,6 +857,8 @@ class ParallelEnvPool:
         planning_outcomes: tuple[PlanningOutcome, ...] = (),
         reason_codes: tuple[str, ...] = (),
         execution_events: tuple[ExecutionEvents, ...] = (),
+        candidate_diagnostics: tuple[CandidateDiagnostics, ...] = (),
+        no_candidate_terminations: tuple[bool, ...] = (),
         policy_decisions_consumed: torch.Tensor | None = None,
         success_first_crossings: torch.Tensor | None = None,
     ) -> ParallelRolloutStep:
@@ -860,6 +898,8 @@ class ParallelEnvPool:
                 planning_outcomes=planning_outcomes,
                 reason_codes=reason_codes,
                 execution_events=execution_events,
+                candidate_diagnostics=candidate_diagnostics,
+                no_candidate_terminations=no_candidate_terminations,
             )
         except ParallelPoolError:
             raise
@@ -939,6 +979,20 @@ def _create_environment_for_episode(
             "environment factory must return ParallelEnvironmentWorker"
         )
     return worker
+
+
+def _current_candidate_diagnostics(
+    worker: ParallelEnvironmentWorker,
+) -> CandidateDiagnostics:
+    getter = getattr(worker, "current_candidate_diagnostics", None)
+    if getter is None:
+        return CandidateDiagnostics()
+    if not callable(getter):
+        raise ParallelPoolError("worker candidate diagnostics accessor is invalid")
+    diagnostics = getter()
+    if not isinstance(diagnostics, CandidateDiagnostics):
+        raise ParallelPoolError("worker candidate diagnostics are invalid")
+    return diagnostics
 
 
 def _worker_main(
@@ -1086,6 +1140,7 @@ def _worker_main(
                     raise ParallelPoolError(
                         "terminated worker requires reset before preparation"
                     )
+                candidate_diagnostics = _current_candidate_diagnostics(worker)
                 boundary = worker.environment.refresh_decision_boundary()
                 if (
                     boundary.transition is not None
@@ -1130,6 +1185,8 @@ def _worker_main(
                         worker_index,
                         buffer_index,
                         policy_version,
+                        candidate_diagnostics,
+                        terminal_boundary,
                         current_observation.observation_identities[0],
                         episode_cursor,
                     )
@@ -1149,6 +1206,7 @@ def _worker_main(
                 theta_rad=float(action_buffers[buffer_index]["thetas"][worker_index]),
             )
             if terminal_transition is None and no_action_terminal is None:
+                candidate_diagnostics = _current_candidate_diagnostics(worker)
                 boundary = worker.environment.advance_prepared_action(
                     action,
                     expected_identity=expected_identity,
@@ -1207,6 +1265,7 @@ def _worker_main(
                     int(transition.planning_outcome),
                     transition.reason_code,
                     transition.execution_events,
+                    candidate_diagnostics,
                     next_observation.observation_identities[0],
                     policy_decisions_consumed,
                     transition.success_first_crossing,

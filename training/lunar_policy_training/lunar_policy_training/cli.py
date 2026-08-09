@@ -80,6 +80,7 @@ from .environment.parallel_pool import (
     ParallelPoolError,
     joint_worker_allocation,
 )
+from .environment.candidate_builder import CandidateDiagnostics
 from .environment.formal_builder import (
     FormalEnvironmentAssembly,
     FormalEnvironmentBuilder,
@@ -330,6 +331,8 @@ class _CollectedTrainingRollout:
     end_coverage: np.ndarray
     success_first_crossings: tuple[bool, ...]
     planning_outcomes: tuple[PlanningOutcome, ...]
+    candidate_diagnostics: tuple[CandidateDiagnostics, ...]
+    no_candidate_terminations: tuple[bool, ...]
     collect_wall_seconds: float
     worker_wait_seconds: float
 
@@ -371,6 +374,8 @@ class _ParallelPoolVectorEnv:
         self.policy_versions: list[int] = []
         self.planning_outcomes: list[object] = []
         self.reason_codes: list[str] = []
+        self.candidate_diagnostics: list[CandidateDiagnostics] = []
+        self.no_candidate_terminations: list[bool] = []
         self.raw_rewards: list[float] = []
         self.success_first_crossings: list[bool] = []
         self.worker_wait_seconds = 0.0
@@ -391,6 +396,8 @@ class _ParallelPoolVectorEnv:
         self.policy_versions.clear()
         self.planning_outcomes.clear()
         self.reason_codes.clear()
+        self.candidate_diagnostics.clear()
+        self.no_candidate_terminations.clear()
         self.raw_rewards.clear()
         self.success_first_crossings.clear()
         self.worker_wait_seconds = 0.0
@@ -433,6 +440,7 @@ class _ParallelPoolVectorEnv:
         self.policy_versions.append(self._policy_version)
         self.planning_outcomes.extend(step.planning_outcomes)
         self.reason_codes.extend(step.reason_codes)
+        self.candidate_diagnostics.extend(step.candidate_diagnostics)
         self.raw_rewards.extend(float(value) for value in step.rewards.tolist())
         self.success_first_crossings.extend(
             bool(value) for value in step.success_first_crossings.tolist()
@@ -464,6 +472,9 @@ class _ParallelPoolVectorEnv:
         finally:
             self.worker_wait_seconds += time.perf_counter() - started
         self._current = step
+        self.no_candidate_terminations.extend(
+            step.no_candidate_terminations
+        )
         return EnvStep(
             observations=step.observations,
             rewards=np.zeros((self.env_count,), dtype=np.float32),
@@ -2949,6 +2960,10 @@ def _run_updates(
                 environment.success_first_crossings
             ),
             planning_outcomes=tuple(environment.planning_outcomes),
+            candidate_diagnostics=tuple(environment.candidate_diagnostics),
+            no_candidate_terminations=tuple(
+                environment.no_candidate_terminations
+            ),
             collect_wall_seconds=collect_wall_seconds,
             worker_wait_seconds=environment.worker_wait_seconds,
         )
@@ -3006,6 +3021,10 @@ def _run_updates(
                     rollout.success_first_crossings
                 ),
                 planning_outcomes=rollout.planning_outcomes,
+                candidate_diagnostics=rollout.candidate_diagnostics,
+                no_candidate_terminations=(
+                    rollout.no_candidate_terminations
+                ),
                 ppo_metrics=result.ppo_metrics,
                 collect_wall_seconds=rollout.collect_wall_seconds,
                 update_wall_seconds=result.update_wall_seconds,

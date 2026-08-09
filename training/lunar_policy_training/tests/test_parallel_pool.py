@@ -3,6 +3,7 @@ from __future__ import annotations
 import pathlib
 import os
 import sys
+from dataclasses import dataclass
 
 import pytest
 import torch
@@ -28,6 +29,7 @@ from lunar_policy_training.environment.parallel_pool import (  # noqa: E402
     ParallelPoolError,
     joint_worker_allocation,
 )
+from lunar_policy_training.environment.candidate_builder import CandidateDiagnostics  # noqa: E402
 from lunar_policy_training.environment.macro_step import (  # noqa: E402
     ExecutionEvents,
     PlannerTransition,
@@ -218,6 +220,14 @@ class _TerminalSuccessEnvironment:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _DiagnosticParallelWorker(ParallelEnvironmentWorker):
+    diagnostics: CandidateDiagnostics
+
+    def current_candidate_diagnostics(self) -> CandidateDiagnostics:
+        return self.diagnostics
+
+
 def _terminal_success_worker_factory(
     worker_index: int, platform_type: str
 ) -> ParallelEnvironmentWorker:
@@ -225,6 +235,17 @@ def _terminal_success_worker_factory(
     return ParallelEnvironmentWorker(
         environment=_TerminalSuccessEnvironment(observation),
         initial_observation=observation,
+    )
+
+
+def _diagnostic_terminal_success_worker_factory(
+    worker_index: int, platform_type: str
+) -> ParallelEnvironmentWorker:
+    observation = _observation(worker_index, platform_type)
+    return _DiagnosticParallelWorker(
+        environment=_TerminalSuccessEnvironment(observation),
+        initial_observation=observation,
+        diagnostics=CandidateDiagnostics(9, 4, 3),
     )
 
 
@@ -241,9 +262,15 @@ class _NoActionThenReadyFactory:
         selected = worker_index == 0 or not self.mixed_workers
         if selected and self.calls == 1:
             observation.candidate_mask.zero_()
-        return ParallelEnvironmentWorker(
+        diagnostics = (
+            CandidateDiagnostics(5, 5, 0)
+            if not bool(observation.candidate_mask.any())
+            else CandidateDiagnostics(5, 2, 3)
+        )
+        return _DiagnosticParallelWorker(
             environment=_PreparationOnlyEnvironment(observation),
             initial_observation=observation,
+            diagnostics=diagnostics,
         )
 
 
@@ -408,6 +435,8 @@ def test_preserved_no_action_terminal_can_be_explicitly_reset(
         prepared_consumed = prepared.policy_decisions_consumed.tolist()
         prepared_outcomes = prepared.planning_outcomes
         prepared_events = prepared.execution_events
+        prepared_diagnostics = prepared.candidate_diagnostics
+        prepared_no_candidates = prepared.no_candidate_terminations
         reset = pool.reset_terminated_workers((0,), policy_version=42)
         reset_dones = reset.dones.tolist()
         actionable = pool.prepare_decision_boundaries(policy_version=42)
@@ -416,9 +445,27 @@ def test_preserved_no_action_terminal_can_be_explicitly_reset(
     assert prepared_consumed == [0]
     assert prepared_outcomes == ()
     assert prepared_events == ()
+    assert prepared_diagnostics == (CandidateDiagnostics(5, 5, 0),)
+    assert prepared_no_candidates == (True,)
     assert reset_dones == [False]
     assert actionable.dones.tolist() == [False]
     assert bool(actionable.observations.candidate_mask[0].any())
+
+
+def test_step_reports_candidate_diagnostics_from_selected_observation() -> None:
+    with ParallelEnvPool(
+        allocation={"WHEELED": 1},
+        observation_template=_observation(0, "WHEELED"),
+        environment_factory=_diagnostic_terminal_success_worker_factory,
+        reward_fn=_zero_reward,
+        worker_timeout_seconds=5.0,
+        auto_reset=False,
+    ) as pool:
+        pool.reset()
+        stepped = pool.step(_actions(1), policy_version=43)
+
+    assert stepped.candidate_diagnostics == (CandidateDiagnostics(9, 4, 3),)
+    assert stepped.no_candidate_terminations == ()
 
 
 def test_targeted_reset_preserves_every_unselected_worker_field() -> None:

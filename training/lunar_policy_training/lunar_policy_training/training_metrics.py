@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 from lunar_planner_training_bridge import PlanningOutcome
 
+from .environment.candidate_builder import CandidateDiagnostics
 from .ppo.trainer import PPOUpdateMetrics
 
 
@@ -37,6 +38,8 @@ def build_training_update_record(
     end_coverage: np.ndarray,
     success_first_crossings: Sequence[bool],
     planning_outcomes: Sequence[PlanningOutcome],
+    candidate_diagnostics: Sequence[CandidateDiagnostics],
+    no_candidate_terminations: Sequence[bool],
     ppo_metrics: PPOUpdateMetrics,
     collect_wall_seconds: float,
     update_wall_seconds: float,
@@ -95,14 +98,26 @@ def build_training_update_record(
         raise TrainingMetricsError("metrics coverage must be finite [E] in [0,1]")
     success = tuple(success_first_crossings)
     outcomes = tuple(planning_outcomes)
+    candidates = tuple(candidate_diagnostics)
+    no_candidates = tuple(no_candidate_terminations)
     transition_count = rollout_horizon * worker_count
     if (
         len(success) != transition_count
         or any(type(value) is not bool for value in success)
         or len(outcomes) != transition_count
         or any(not isinstance(value, PlanningOutcome) for value in outcomes)
+        or len(candidates) != transition_count
+        or any(not isinstance(value, CandidateDiagnostics) for value in candidates)
     ):
         raise TrainingMetricsError("metrics transition diagnostics are incomplete")
+    if (
+        not no_candidates
+        or len(no_candidates) % worker_count != 0
+        or any(type(value) is not bool for value in no_candidates)
+    ):
+        raise TrainingMetricsError(
+            "metrics no-candidate diagnostics are incomplete"
+        )
     if not isinstance(ppo_metrics, PPOUpdateMetrics):
         raise TrainingMetricsError("metrics require PPOUpdateMetrics")
     timings = (
@@ -128,6 +143,46 @@ def build_training_update_record(
         for platform in allocation
     }
     outcome_counts = Counter(value.name for value in outcomes)
+    outcome_counts_by_platform = {
+        platform: dict(
+            sorted(
+                Counter(
+                    outcomes[index].name
+                    for index in range(transition_count)
+                    if platforms[index % worker_count] == platform
+                ).items()
+            )
+        )
+        for platform in sorted(allocation)
+    }
+    candidate_by_platform: dict[str, dict[str, int]] = {
+        platform: {
+            "frontier_anchor_count": 0,
+            "platform_filter_rejected_count": 0,
+            "emitted_count": 0,
+            "no_candidate_termination_count": 0,
+            "planner_rejected_exhaustion_count": 0,
+        }
+        for platform in sorted(allocation)
+    }
+    for index, diagnostics in enumerate(candidates):
+        values = candidate_by_platform[platforms[index % worker_count]]
+        values["frontier_anchor_count"] += diagnostics.frontier_anchor_count
+        values["platform_filter_rejected_count"] += (
+            diagnostics.platform_filter_rejected_count
+        )
+        values["emitted_count"] += diagnostics.emitted_count
+    for index, terminated_without_candidates in enumerate(no_candidates):
+        if terminated_without_candidates:
+            candidate_by_platform[platforms[index % worker_count]][
+                "no_candidate_termination_count"
+            ] += 1
+    flat_dones = dones.reshape(-1)
+    for index, (done, outcome) in enumerate(zip(flat_dones, outcomes, strict=True)):
+        if done and outcome != PlanningOutcome.NEW_REFERENCE_AVAILABLE:
+            candidate_by_platform[platforms[index % worker_count]][
+                "planner_rejected_exhaustion_count"
+            ] += 1
     start_mean = float(start_coverage.astype(np.float64).mean())
     end_mean = float(end_coverage.astype(np.float64).mean())
     record: dict[str, object] = {
@@ -152,8 +207,10 @@ def build_training_update_record(
         },
         "terminal_count": int(dones.sum(dtype=np.int64)),
         "success_first_crossing_count": sum(success),
+        "candidate": {"by_platform": candidate_by_platform},
         "planner": {
             "outcome_counts": dict(sorted(outcome_counts.items())),
+            "outcome_counts_by_platform": outcome_counts_by_platform,
             "success_rate": (
                 outcome_counts[PlanningOutcome.NEW_REFERENCE_AVAILABLE.name]
                 / transition_count
