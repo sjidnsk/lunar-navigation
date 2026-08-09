@@ -1,4 +1,4 @@
-"""Frozen success-led V2 reward for v3 planner transitions."""
+"""Frozen coverage-first V3 reward for v3 planner transitions."""
 
 from __future__ import annotations
 
@@ -17,27 +17,24 @@ class InvalidTransition(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class RewardWeightsV2:
-    mission_observed: float = 20.0
-    priority_observed: float = 5.0
-    normalized_plan_or_execution_cost: float = 0.10
-    normalized_macro_step_time: float = 0.05
-    executed_without_new_coverage: float = 0.20
-    success_first_crossing: float = 50.0
-    episode_ended_without_success: float = 10.0
-    hard_safety_violation: float = 50.0
-    goal_infeasible: float = 2.0
-    no_known_safe_route: float = 3.0
-    resource_exhausted: float = 1.5
+class RewardWeightsV3:
+    mission_observed_delta: float = 100.0
+    executed_without_new_mission_coverage: float = 0.10
+    goal_infeasible: float = 0.20
+    no_known_safe_route: float = 0.30
+    unsuccessful_remaining_coverage: float = 1.00
+    success_first_crossing: float = 5.00
 
 
-DEFAULT_REWARD_WEIGHTS = RewardWeightsV2()
+REWARD_SCHEMA_VERSION = "lunar-reward/v3"
+DEFAULT_REWARD_WEIGHTS = RewardWeightsV3()
 
 
 @dataclass(frozen=True, slots=True)
-class RewardInputsV2:
+class RewardInputsV3:
     platform_type: str
     mission_observed_delta: float
+    mission_observed_ratio_after: float
     priority_observed_delta: float
     normalized_plan_or_execution_cost: float
     normalized_macro_step_time: float
@@ -56,12 +53,18 @@ class RewardInputsV2:
     @classmethod
     def from_transition(
         cls, transition: PlannerTransition, *, platform_type: str
-    ) -> "RewardInputsV2":
+    ) -> "RewardInputsV3":
         if not isinstance(transition, PlannerTransition):
             raise InvalidTransition("reward input is not a PlannerTransition")
         return cls(
             platform_type=platform_type,
             mission_observed_delta=transition.mission_observed_delta,
+            mission_observed_ratio_after=float(
+                transition.next_observation.pose_features[0, 4]
+                .detach()
+                .cpu()
+                .item()
+            ),
             priority_observed_delta=transition.priority_observed_delta,
             normalized_plan_or_execution_cost=(
                 transition.normalized_plan_or_execution_cost
@@ -97,6 +100,7 @@ _INVALID_OUTCOMES = frozenset(
         PlanningOutcome.INVALID_REQUEST,
         PlanningOutcome.STALE_INPUT,
         PlanningOutcome.NUMERICAL_FAILURE,
+        PlanningOutcome.RESOURCE_EXHAUSTED,
     }
 )
 _BOOLEAN_FIELDS = (
@@ -110,13 +114,13 @@ _BOOLEAN_FIELDS = (
 
 
 def reward_weights_sha256(
-    weights: RewardWeightsV2 = DEFAULT_REWARD_WEIGHTS,
+    weights: RewardWeightsV3 = DEFAULT_REWARD_WEIGHTS,
     *,
     platform_type: str | None = None,
 ) -> str:
-    """Return one platform-independent identity for the complete V2 weight set."""
-    if not isinstance(weights, RewardWeightsV2):
-        raise ValueError("reward weights must use RewardWeightsV2")
+    """Return one platform-independent identity for the complete V3 reward."""
+    if not isinstance(weights, RewardWeightsV3):
+        raise ValueError("reward weights must use RewardWeightsV3")
     if platform_type is not None and platform_type not in _PLATFORMS:
         raise ValueError("platform type must be WHEELED, LEGGED, or HOPPER")
     values = tuple(asdict(weights).values())
@@ -129,22 +133,28 @@ def reward_weights_sha256(
     ):
         raise ValueError("reward weights must be finite and non-negative")
     payload = json.dumps(
-        asdict(weights), sort_keys=True, separators=(",", ":"), allow_nan=False
+        {
+            "schema_version": REWARD_SCHEMA_VERSION,
+            "weights": asdict(weights),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 
 def compute_reward(
-    inputs: RewardInputsV2,
-    weights: RewardWeightsV2 = DEFAULT_REWARD_WEIGHTS,
+    inputs: RewardInputsV3,
+    weights: RewardWeightsV3 = DEFAULT_REWARD_WEIGHTS,
 ) -> float:
-    """Compute the frozen shared V2 reward or reject an invalid sample."""
-    if not isinstance(inputs, RewardInputsV2):
-        raise InvalidTransition("reward inputs must use RewardInputsV2")
+    """Compute the frozen shared V3 reward or reject an invalid sample."""
+    if not isinstance(inputs, RewardInputsV3):
+        raise InvalidTransition("reward inputs must use RewardInputsV3")
     if inputs.platform_type not in _PLATFORMS:
         raise InvalidTransition("reward platform type is invalid")
-    if not isinstance(weights, RewardWeightsV2) or weights != DEFAULT_REWARD_WEIGHTS:
-        raise InvalidTransition("reward weights differ from the frozen V2 baseline")
+    if not isinstance(weights, RewardWeightsV3) or weights != DEFAULT_REWARD_WEIGHTS:
+        raise InvalidTransition("reward weights differ from the frozen V3 baseline")
     if inputs.cpp_exception is not None:
         raise InvalidTransition("C++ exception transition cannot enter rollout")
     if any(type(getattr(inputs, field)) is not bool for field in _BOOLEAN_FIELDS):
@@ -152,6 +162,7 @@ def compute_reward(
 
     values = (
         inputs.mission_observed_delta,
+        inputs.mission_observed_ratio_after,
         inputs.priority_observed_delta,
         inputs.normalized_plan_or_execution_cost,
         inputs.normalized_macro_step_time,
@@ -165,6 +176,8 @@ def compute_reward(
         raise InvalidTransition("reward input contains a non-finite scalar")
     if not 0.0 <= float(inputs.mission_observed_delta) <= 1.0:
         raise InvalidTransition("mission observed delta is outside [0,1] range")
+    if not 0.0 <= float(inputs.mission_observed_ratio_after) <= 1.0:
+        raise InvalidTransition("mission observed ratio is outside [0,1] range")
     if not 0.0 <= float(inputs.priority_observed_delta) <= 1.0:
         raise InvalidTransition("priority observed delta is outside [0,1] range")
     if (
@@ -194,6 +207,8 @@ def compute_reward(
         raise InvalidTransition("terminal state and reward terminal facts disagree")
     if inputs.hard_safety_violation and not inputs.episode_ended_without_success:
         raise InvalidTransition("hard safety requires an unsuccessful terminal")
+    if inputs.hard_safety_violation:
+        raise InvalidTransition("hard safety transition cannot enter rollout")
     if not isinstance(inputs.planning_outcome, PlanningOutcome):
         raise InvalidTransition("planning outcome is invalid")
     if inputs.planning_outcome in _INVALID_OUTCOMES:
@@ -205,16 +220,12 @@ def compute_reward(
         and not inputs.cancellation_expected
     ):
         raise InvalidTransition("unexpected canceled transition cannot enter rollout")
+    if inputs.planning_outcome == PlanningOutcome.CANCELED:
+        return 0.0
 
-    reward = (
-        float(inputs.mission_observed_delta) * weights.mission_observed
-        + float(inputs.priority_observed_delta) * weights.priority_observed
-        - float(inputs.normalized_plan_or_execution_cost)
-        * weights.normalized_plan_or_execution_cost
-        - float(inputs.normalized_macro_step_time) * weights.normalized_macro_step_time
-    )
-    if inputs.executed_without_new_coverage:
-        reward -= weights.executed_without_new_coverage
+    reward = float(inputs.mission_observed_delta) * weights.mission_observed_delta
+    if inputs.mission_observed_delta == 0.0:
+        reward -= weights.executed_without_new_mission_coverage
     if inputs.planning_outcome == PlanningOutcome.GOAL_INFEASIBLE:
         reward -= weights.goal_infeasible
     elif inputs.planning_outcome in {
@@ -222,14 +233,12 @@ def compute_reward(
         PlanningOutcome.ACTIVE_REFERENCE_INVALIDATED,
     }:
         reward -= weights.no_known_safe_route
-    elif inputs.planning_outcome == PlanningOutcome.RESOURCE_EXHAUSTED:
-        reward -= weights.resource_exhausted
     if inputs.success_first_crossing:
         reward += weights.success_first_crossing
     if inputs.episode_ended_without_success:
-        reward -= weights.episode_ended_without_success
-    if inputs.hard_safety_violation:
-        reward -= weights.hard_safety_violation
+        reward -= weights.unsuccessful_remaining_coverage * (
+            1.0 - float(inputs.mission_observed_ratio_after)
+        )
     if not math.isfinite(reward):
         raise InvalidTransition("computed reward is non-finite")
     return reward
@@ -250,15 +259,16 @@ def compute_transition_reward(transition: PlannerTransition) -> float:
     if values.count(1.0) != 1 or any(value not in (0.0, 1.0) for value in values):
         raise InvalidTransition("transition platform context is invalid")
     return compute_reward(
-        RewardInputsV2.from_transition(transition, platform_type=platform_type)
+        RewardInputsV3.from_transition(transition, platform_type=platform_type)
     )
 
 
 __all__ = [
     "DEFAULT_REWARD_WEIGHTS",
     "InvalidTransition",
-    "RewardInputsV2",
-    "RewardWeightsV2",
+    "REWARD_SCHEMA_VERSION",
+    "RewardInputsV3",
+    "RewardWeightsV3",
     "compute_reward",
     "compute_transition_reward",
     "reward_weights_sha256",
