@@ -1493,6 +1493,52 @@ def _formal_capability_preflight(
         raise PreflightError(f"project formal capability is invalid: {error}") from error
 
 
+_CACHE_SAFE_V3_RUNTIME_REPAIR_PATHS = frozenset(
+    {
+        "ros2_ws/src/lunar_planner_training_bridge/include/"
+        "lunar_planner_training_bridge/visibility.hpp",
+        "ros2_ws/src/lunar_planner_training_bridge/src/visibility.cpp",
+        "ros2_ws/src/lunar_planner_training_bridge/test/"
+        "visibility_benchmark.cpp",
+    }
+)
+_V3_SOURCE_PREFIXES = (
+    "ros2_ws/src/lunar_navigation_msgs/",
+    "ros2_ws/src/lunar_planning_msgs/",
+    "ros2_ws/src/lunar_planner_core/",
+    "ros2_ws/src/lunar_planner_training_bridge/",
+)
+
+
+def _cache_accepts_runtime_only_v3_repair(
+    repository_root: Path,
+    *,
+    cached_commit: str,
+    current_commit: str,
+) -> bool:
+    """Allow an old static cache only for the audited visibility runtime repair."""
+    if cached_commit == current_commit:
+        return False
+    try:
+        if not _commit_is_ancestor(
+            repository_root, cached_commit, current_commit
+        ):
+            return False
+        changed_paths = _commit_changed_paths(
+            repository_root, cached_commit, current_commit
+        )
+    except RuntimeError:
+        return False
+    v3_changes = {
+        path
+        for path in changed_paths
+        if path.startswith(_V3_SOURCE_PREFIXES)
+    }
+    return bool(v3_changes) and v3_changes.issubset(
+        _CACHE_SAFE_V3_RUNTIME_REPAIR_PATHS
+    )
+
+
 def _build_formal_environment(
     cache_manifest_path: Path,
     *,
@@ -1510,14 +1556,29 @@ def _build_formal_environment(
             "capability_sha256": capability_bundle.bundle_sha256,
             "reward_sha256": reward_weights_sha256(),
             "training_semantics_sha256": training_semantics_sha256(),
-            "v3_source_commit": current_v3_commit,
-            "v3_sha256": current_v3_sha256,
         }
         for name, value in expected.items():
             if getattr(identity, name) != value:
                 raise FormalCacheError(
                     f"cache identity {name} differs from the current project"
                 )
+        v3_identity_matches = (
+            identity.v3_source_commit == current_v3_commit
+            and identity.v3_sha256 == current_v3_sha256
+        )
+        runtime_only_repair = (
+            identity.v3_source_commit != current_v3_commit
+            and identity.v3_sha256 != current_v3_sha256
+            and _cache_accepts_runtime_only_v3_repair(
+                repository_root,
+                cached_commit=identity.v3_source_commit,
+                current_commit=current_v3_commit,
+            )
+        )
+        if not v3_identity_matches and not runtime_only_repair:
+            raise FormalCacheError(
+                "cache identity v3 differs from the current project"
+            )
         assembly = FormalEnvironmentBuilder(
             cache_manifest_path=cache_manifest_path,
             capability_bundle=capability_bundle,

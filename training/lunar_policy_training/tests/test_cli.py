@@ -308,6 +308,56 @@ def test_formal_calibrate_rejects_cache_before_cuda_or_artifact_creation(
     assert not artifact_root.exists()
 
 
+def test_cache_accepts_runtime_only_visibility_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli_module, "_commit_is_ancestor", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_commit_changed_paths",
+        lambda *_args: (
+            "docs/runtime-repair.md",
+            "training/lunar_policy_training/lunar_policy_training/environment/"
+            "multires_observation.py",
+            "ros2_ws/src/lunar_planner_training_bridge/include/"
+            "lunar_planner_training_bridge/visibility.hpp",
+            "ros2_ws/src/lunar_planner_training_bridge/src/visibility.cpp",
+            "ros2_ws/src/lunar_planner_training_bridge/test/"
+            "visibility_benchmark.cpp",
+        ),
+    )
+
+    assert cli_module._cache_accepts_runtime_only_v3_repair(
+        REPOSITORY_ROOT,
+        cached_commit="a" * 40,
+        current_commit="b" * 40,
+    )
+
+
+def test_cache_rejects_runtime_repair_that_changes_planner_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli_module, "_commit_is_ancestor", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_commit_changed_paths",
+        lambda *_args: (
+            "ros2_ws/src/lunar_planner_training_bridge/src/visibility.cpp",
+            "ros2_ws/src/lunar_planner_training_bridge/src/bindings.cpp",
+        ),
+    )
+
+    assert not cli_module._cache_accepts_runtime_only_v3_repair(
+        REPOSITORY_ROOT,
+        cached_commit="a" * 40,
+        current_commit="b" * 40,
+    )
+
+
 def test_prepare_data_delegates_to_formal_cache_without_touching_cuda(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
