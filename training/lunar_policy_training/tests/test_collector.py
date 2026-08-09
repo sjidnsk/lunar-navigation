@@ -670,6 +670,8 @@ def test_production_pool_adapter_collects_real_v3_reward_gae_at_one_policy_versi
         PlanningOutcome.INVALID_REQUEST,
         PlanningOutcome.INVALID_REQUEST,
     ]
+    assert environment.raw_rewards == [0.5, 0.5]
+    assert environment.success_first_crossings == [False, False]
     assert all(environment.reason_codes)
     assert collected.rollout.returns.tolist() == pytest.approx([0.972625, 0.5])
     assert np.isfinite(collected.rollout.advantages).all()

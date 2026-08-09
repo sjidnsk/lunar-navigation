@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -122,11 +123,20 @@ from .policy.cross_attention import CrossAttentionPolicy, sample_action
 from .policy.action_semantics import apply_goal_theta
 from .policy.observation import ObservationIdentity, PolicyBatch
 from .proxy_scenario import proxy_environment_factory, proxy_observation
-from .ppo.collector import CollectorConfig, EnvStep, collect_rollout as collect_ppo_rollout
+from .ppo.collector import (
+    CollectedRollout,
+    CollectorConfig,
+    EnvStep,
+    collect_rollout as collect_ppo_rollout,
+)
 from .ppo.checkpoint import _semantic_sha256
 from .ppo.rollout import RolloutBatch
-from .ppo.trainer import PPOTrainer
+from .ppo.trainer import PPOTrainer, PPOUpdateMetrics
 from .reward import compute_transition_reward, reward_weights_sha256
+from .training_metrics import (
+    TrainingMetricsJournal,
+    build_training_update_record,
+)
 
 
 _Rollout = TypeVar("_Rollout")
@@ -308,6 +318,24 @@ class _RunEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class _CollectedTrainingRollout:
+    collected: CollectedRollout
+    raw_rewards: np.ndarray
+    start_coverage: np.ndarray
+    end_coverage: np.ndarray
+    success_first_crossings: tuple[bool, ...]
+    planning_outcomes: tuple[PlanningOutcome, ...]
+    collect_wall_seconds: float
+    worker_wait_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class _CompletedTrainingUpdate:
+    ppo_metrics: PPOUpdateMetrics
+    update_wall_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class CalibratedRunState:
     config: ResolvedTrainingConfig
     budget: TrainingBudget
@@ -338,6 +366,8 @@ class _ParallelPoolVectorEnv:
         self.policy_versions: list[int] = []
         self.planning_outcomes: list[object] = []
         self.reason_codes: list[str] = []
+        self.raw_rewards: list[float] = []
+        self.success_first_crossings: list[bool] = []
         self.worker_wait_seconds = 0.0
         self._normalization_state: Mapping[str, object] | None = None
         self.set_policy_version(policy_version)
@@ -356,6 +386,8 @@ class _ParallelPoolVectorEnv:
         self.policy_versions.clear()
         self.planning_outcomes.clear()
         self.reason_codes.clear()
+        self.raw_rewards.clear()
+        self.success_first_crossings.clear()
         self.worker_wait_seconds = 0.0
 
     @property
@@ -396,6 +428,10 @@ class _ParallelPoolVectorEnv:
         self.policy_versions.append(self._policy_version)
         self.planning_outcomes.extend(step.planning_outcomes)
         self.reason_codes.extend(step.reason_codes)
+        self.raw_rewards.extend(float(value) for value in step.rewards.tolist())
+        self.success_first_crossings.extend(
+            bool(value) for value in step.success_first_crossings.tolist()
+        )
         rewards = step.rewards.numpy().astype(np.float32, copy=True)
         if self._normalization_state is not None:
             mean = float(self._normalization_state["reward_mean"])
@@ -563,9 +599,12 @@ class TrainingBoundaryLoop:
         self,
         *,
         collect_rollout: Callable[[], _Rollout],
-        update_rollout: Callable[[_Rollout], None],
+        update_rollout: Callable[[_Rollout], object],
         save_checkpoint: Callable[[str, TrainingLoopState], None],
         max_updates: int,
+        record_update: (
+            Callable[[_Rollout, object, TrainingLoopState], None] | None
+        ) = None,
     ) -> TrainingLoopState:
         if not all(
             callable(value)
@@ -574,6 +613,8 @@ class TrainingBoundaryLoop:
             raise ValueError("boundary loop callbacks must be callable")
         if type(max_updates) is not int or max_updates <= 0:
             raise ValueError("max updates must be a positive integer")
+        if record_update is not None and not callable(record_update):
+            raise ValueError("update recorder must be callable")
         updates = 0
         while updates < max_updates:
             if (
@@ -607,6 +648,7 @@ class TrainingBoundaryLoop:
             update_error: BaseException | None = None
             budget_error: BudgetExceededError | None = None
             rollout = None
+            update_result = None
             update_completed = False
             try:
                 rollout = collect_rollout()
@@ -615,7 +657,7 @@ class TrainingBoundaryLoop:
                 collection_error = error
             if collection_error is None and not self._stop_flag.requested:
                 try:
-                    update_rollout(rollout)
+                    update_result = update_rollout(rollout)
                     self._synchronize_device()
                     update_completed = True
                 except BaseException as error:
@@ -639,6 +681,12 @@ class TrainingBoundaryLoop:
             if update_completed:
                 self._global_step += 1
                 updates += 1
+                if record_update is not None:
+                    record_update(
+                        rollout,
+                        update_result,
+                        self._state(rollout_discarded=False),
+                    )
             if budget_error is not None:
                 self._latest_checkpoint_gpu_seconds = (
                     self._budget.consumed_gpu_seconds
@@ -2480,6 +2528,15 @@ def _run_updates(
     environment = _ParallelPoolVectorEnv(
         pool, policy_version=rollout_policy_version
     )
+    metrics_journal = TrainingMetricsJournal(
+        artifact_root / "metrics" / "train.jsonl",
+        resume_global_step=initial_global_step,
+    )
+    worker_platforms = tuple(
+        platform
+        for platform, count in allocation.items()
+        for _ in range(count)
+    )
     environment.use_normalization_state(trainer.normalization)
     environment.reset()
     if restore_checkpoint is not None:
@@ -2494,16 +2551,50 @@ def _run_updates(
             normalization_state=trainer.normalization,
         )
 
-    def collect_rollout() -> RolloutBatch:
+    def collect_rollout() -> _CollectedTrainingRollout:
         environment.set_policy_version(rollout_policy_version)
-        return collect_ppo_rollout(
+        started = time.perf_counter()
+        collected = collect_ppo_rollout(
             environment,
             trainer.policy,
             _collector_config_for_run(config),
             device="cuda",
-        ).rollout
+        )
+        collect_wall_seconds = time.perf_counter() - started
+        horizon = config.ppo.rollout_horizon
+        worker_count = pool.worker_count
+        raw_rewards = np.asarray(
+            environment.raw_rewards, dtype=np.float32
+        ).reshape(horizon, worker_count)
+        start_coverage = (
+            collected.rollout.pose_features.reshape(
+                horizon, worker_count, -1
+            )[0, :, 4]
+            .astype(np.float32, copy=True)
+        )
+        end_coverage = (
+            environment.current_observations.pose_features[:, 4]
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32, copy=True)
+        )
+        return _CollectedTrainingRollout(
+            collected=collected,
+            raw_rewards=raw_rewards,
+            start_coverage=start_coverage,
+            end_coverage=end_coverage,
+            success_first_crossings=tuple(
+                environment.success_first_crossings
+            ),
+            planning_outcomes=tuple(environment.planning_outcomes),
+            collect_wall_seconds=collect_wall_seconds,
+            worker_wait_seconds=environment.worker_wait_seconds,
+        )
 
-    def update_rollout(rollout: RolloutBatch) -> None:
+    def update_rollout(
+        rollout: _CollectedTrainingRollout,
+    ) -> _CompletedTrainingUpdate:
         nonlocal sent_interrupt, rollout_policy_version
         timer: threading.Timer | None = None
         if interrupt_first_update and not sent_interrupt:
@@ -2513,13 +2604,53 @@ def _run_updates(
             )
             timer.start()
         try:
-            trainer.update(rollout, micro_batch_size=micro_batch_size)
+            started = time.perf_counter()
+            metrics = trainer.update(
+                rollout.collected.rollout,
+                micro_batch_size=micro_batch_size,
+            )
             scheduler.step()
             rollout_policy_version += 1
             environment.advance_policy_version(rollout_policy_version)
+            return _CompletedTrainingUpdate(
+                ppo_metrics=metrics,
+                update_wall_seconds=time.perf_counter() - started,
+            )
         finally:
             if timer is not None:
                 timer.join()
+
+    def record_update(
+        rollout: _CollectedTrainingRollout,
+        result: object,
+        state: TrainingLoopState,
+    ) -> None:
+        if not isinstance(result, _CompletedTrainingUpdate):
+            raise RuntimeError("completed training update metrics are missing")
+        metrics_journal.append(
+            build_training_update_record(
+                global_step=state.global_step,
+                timestamp_utc=datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                curriculum_phase=curriculum_phase,
+                platform_allocation=allocation,
+                worker_platforms=worker_platforms,
+                rollout_horizon=config.ppo.rollout_horizon,
+                raw_rewards=rollout.raw_rewards,
+                dones=rollout.collected.dones,
+                start_coverage=rollout.start_coverage,
+                end_coverage=rollout.end_coverage,
+                success_first_crossings=(
+                    rollout.success_first_crossings
+                ),
+                planning_outcomes=rollout.planning_outcomes,
+                ppo_metrics=result.ppo_metrics,
+                collect_wall_seconds=rollout.collect_wall_seconds,
+                update_wall_seconds=result.update_wall_seconds,
+                worker_wait_seconds=rollout.worker_wait_seconds,
+            )
+        )
 
     def save(kind: str, state: TrainingLoopState) -> None:
         checkpoint = build_training_checkpoint(
@@ -2571,6 +2702,9 @@ def _run_updates(
             global_step=state.global_step,
             consumed_gpu_seconds=budget.consumed_gpu_seconds,
             platform_allocation=allocation,
+            training_metrics=metrics_journal.checkpoint_summary(
+                artifact_root=artifact_root
+            ),
         )
 
     loop = TrainingBoundaryLoop(
@@ -2600,6 +2734,7 @@ def _run_updates(
             state = loop.run(
                 collect_rollout=collect_rollout,
                 update_rollout=update_rollout,
+                record_update=record_update,
                 save_checkpoint=save,
                 max_updates=max_updates,
             )
@@ -3619,6 +3754,7 @@ def _update_run_manifest(
     global_step: int,
     consumed_gpu_seconds: float,
     platform_allocation: dict[str, int],
+    training_metrics: Mapping[str, object] | None = None,
 ) -> None:
     payload = _read_run_manifest(path)
     if "runtime_calibration" not in payload:
@@ -3641,6 +3777,21 @@ def _update_run_manifest(
         )
     except (BudgetExceededError, ValueError) as error:
         raise ArtifactRootError("run manifest budget identity is invalid") from error
+    if training_metrics is not None:
+        metrics = dict(training_metrics)
+        if (
+            metrics.get("schema_version")
+            != "lunar-training-metrics-summary/v1"
+            or metrics.get("path") != "metrics/train.jsonl"
+            or metrics.get("last_global_step") != global_step
+            or not isinstance(metrics.get("sha256"), str)
+            or len(metrics["sha256"]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in metrics["sha256"]
+            )
+        ):
+            raise ArtifactRootError("run manifest training metrics are invalid")
     payload.update(
         {
             "source_commit": source_commit,
@@ -3654,6 +3805,8 @@ def _update_run_manifest(
             "platform_allocation": dict(platform_allocation),
         }
     )
+    if training_metrics is not None:
+        payload["training_metrics"] = dict(training_metrics)
     _write_manifest_payload(path, payload)
 
 

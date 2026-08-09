@@ -1299,6 +1299,58 @@ def test_rollout_and_failed_update_both_settle_the_same_active_gpu_budget() -> N
     assert budget.interval_active is False
 
 
+def test_training_boundary_records_only_a_completed_update() -> None:
+    timestamps = iter((10.0, 12.0))
+    events: list[object] = []
+    loop = TrainingBoundaryLoop(
+        budget=TrainingBudget(),
+        stop_flag=SignalStopFlag(),
+        checkpoint_interval_seconds=1800,
+        candidate_checkpoint_interval_seconds=3600,
+        curriculum_phase="warmup_legged",
+        clock=lambda: next(timestamps),
+    )
+
+    state = loop.run(
+        collect_rollout=lambda: "rollout",
+        update_rollout=lambda rollout: {"ppo": rollout},
+        record_update=lambda rollout, result, boundary: events.append(
+            (rollout, result, boundary.global_step, boundary.latest_checkpoint_gpu_seconds)
+        ),
+        save_checkpoint=lambda kind, boundary: None,
+        max_updates=1,
+    )
+
+    assert state.global_step == 1
+    assert events == [("rollout", {"ppo": "rollout"}, 1, 0.0)]
+
+
+def test_training_boundary_does_not_record_a_failed_update() -> None:
+    timestamps = iter((10.0, 12.0))
+    records: list[object] = []
+    loop = TrainingBoundaryLoop(
+        budget=TrainingBudget(),
+        stop_flag=SignalStopFlag(),
+        checkpoint_interval_seconds=1800,
+        candidate_checkpoint_interval_seconds=3600,
+        curriculum_phase="warmup_legged",
+        clock=lambda: next(timestamps),
+    )
+
+    with pytest.raises(RuntimeError, match="update failed"):
+        loop.run(
+            collect_rollout=lambda: "rollout",
+            update_rollout=lambda rollout: (_ for _ in ()).throw(
+                RuntimeError("update failed")
+            ),
+            record_update=lambda rollout, result, boundary: records.append(result),
+            save_checkpoint=lambda kind, boundary: None,
+            max_updates=1,
+        )
+
+    assert records == []
+
+
 def test_resume_continues_latest_and_candidate_rhythms_from_active_gpu_markers() -> None:
     """Would fail if pause/resume restarted the 30/60-minute checkpoint clocks."""
     timestamps = iter((0.0, 1.0))
@@ -1521,6 +1573,43 @@ def test_run_manifest_keeps_extended_budget_active_at_initial_limit(
     assert payload["budget_extension_blocks"] == 1
     assert payload["total_gpu_budget_seconds"] == 108000
     assert payload["consumed_gpu_seconds"] == 86400.0
+
+
+def test_run_manifest_records_the_checkpointed_metrics_journal(
+    tmp_path: pathlib.Path,
+) -> None:
+    manifest = tmp_path / "run-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "lunar-training-run/v1",
+                "runtime_calibration": {"selected_workers": 24},
+                "budget_extension_blocks": 0,
+                "total_gpu_budget_seconds": 86400,
+            }
+        ),
+        encoding="utf-8",
+    )
+    summary = {
+        "schema_version": "lunar-training-metrics-summary/v1",
+        "path": "metrics/train.jsonl",
+        "last_global_step": 119,
+        "sha256": "c" * 64,
+    }
+
+    _update_run_manifest(
+        manifest,
+        source_commit="a" * 40,
+        config_hash="b" * 64,
+        run_identity=cli_module._development_run_identity("a" * 40),
+        global_step=119,
+        consumed_gpu_seconds=7300.0,
+        platform_allocation={"LEGGED": 24},
+        training_metrics=summary,
+    )
+
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["training_metrics"] == summary
 
 
 def test_training_overrun_saves_terminal_latest_after_complete_update() -> None:
