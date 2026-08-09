@@ -47,6 +47,11 @@ native runner 生成，并同时通过：
 精确 p50/p95、吞吐、主机、compiler、source commit、能力摘要和训练语义摘要以该 JSON 内部字段
 为准；正式 `calibrate/train/resume/evaluate/formal-preflight` 必须严格重验同一报告身份。
 
+2026-08-09 的阶段恢复与训练指标修复改变了被性能门覆盖的训练实现 source identity，因此报告
+已在同一主机、同一 Release native 和固定 24-worker 工作负载上重新生成并通过。旧报告以带旧
+提交后缀的外部文件保留为历史证据；`run-manifest.json` 只能通过受控 source migration 从已验证
+旧 hash 切换到当前正式报告 hash，不能手工跳过身份检查。
+
 ## 复现命令
 
 ```bash

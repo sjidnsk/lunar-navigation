@@ -17,6 +17,8 @@ checkpoint 是 `lunar-ppo-checkpoint/v6`。`rollout_horizon` 仅定义 PPO updat
 /home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/qualified-current/
 ├── sensor-performance.json
 ├── calibration/run-manifest.json
+├── calibration/metrics/train.jsonl
+├── calibration/evaluation/candidate-step-*/
 └── preflight/
     ├── formal-preflight.json
     └── resume-equivalence/update-1.pt
@@ -90,6 +92,34 @@ global_step
 
 `episode_decision_limit` 必须为 `none`；任何文档复制值都不能覆盖 manifest。
 
+## Step 118 阶段恢复复审
+
+正式运行在 `global_step=118`、`7269.1511032514145` 累计 GPU seconds 的轮式预热安全边界
+停止。原因是旧恢复逻辑把 `WHEELED×24` 活动 episode 注入下一阶段 `LEGGED×24`，worker
+身份门正确拒绝。现行实现只在相邻课程阶段且 allocation 改变时退役旧平台 episode；模型、
+optimizer、scheduler、normalization、RNG、global step 和预算仍从 v6 checkpoint 恢复。同阶段
+同 allocation 的恢复仍要求完整活动 episode 精确一致。
+
+训练实现提交 `6585c3d0bc72e5c6e5db0c464d4268f9699d2c70` 完成以下复审：
+
+- 非 CUDA 训练测试：`732 passed, 1 skipped, 3 deselected`；
+- CUDA 正式标记测试：`3 passed, 733 deselected`，包含真实中断后恢复回归；
+- repository boundary：脚本 `OK`，foundation 测试 `14 passed`；
+- step 118 生产 loader 预演推导出 `warmup_legged / LEGGED×24`，没有注入旧 episode，reset
+  得到 24 条观测，snapshot 也是 24 个 `LEGGED` 状态；没有执行 rollout 或 optimizer update；
+- 预演前后原 `latest.pt` 文件 SHA-256 均为
+  `43f7b3717ccf264a505f8a5e0c871b14893dfce4efcde254142178fa9cdf01a0`。
+
+修复后逐 update 指标写入 `metrics/train.jsonl`，历史 step 1--118 不伪造，第一条必须是 step
+119。联合阶段首次在 joint 起点后 10800 累计 GPU seconds、之后按最近一次评估开始点每 10800
+seconds 串行评估最新 immutable candidate；评估使用同一预算，单次保留 3600 seconds watchdog，
+并保存 validation/test/holdout 独立门控证据。
+
+由于严格 checkpoint 和传感器性能报告均绑定 source，恢复前必须运行受控迁移：保留 step 118
+原文件字节级备份，生成只改变 `source_commit`/payload hash 的独立 resume 副本，同时验证新旧
+传感器报告仍绑定同一 host、capability 和 training semantics。最终新旧提交、文件和 payload
+hash、性能报告 hash、变更路径及预算由外部 manifest 的 `source_migrations` 精确记录。
+
 ## Formal preflight
 
 preflight 必须在 calibration 之后运行并读取同一 calibrated root。报告至少证明：
@@ -111,6 +141,7 @@ preflight 必须在 calibration 之后运行并读取同一 calibrated root。�
 
 训练累计 GPU 上限为 86400 秒：校准最多 2 小时，三平台各最多 2 小时预热，联合训练至少
 16 小时。每 30 分钟更新 `latest.pt`，联合阶段每小时保存候选；episode 可跨任意多个 update。
+每个完成的 update 立即追加指标，因此健康趋势不再等到 30 分钟 checkpoint 才可见。
 
 只有冻结 checkpoint 在 validation、test、holdout 的每个 split×platform 上分别达到覆盖成功率
 不低于 0.95，并通过既定有限输出、动作/参考一致性及确定性门，才记为
