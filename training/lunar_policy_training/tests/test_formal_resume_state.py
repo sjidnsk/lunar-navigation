@@ -74,6 +74,17 @@ def test_formal_worker_state_roundtrips_as_strict_json() -> None:
     assert state.to_dict() == payload
     assert state.episode_cursor == 4
     assert state.rejected_candidate_indices == (1, 3)
+    assert state.candidate_gain_resolution_m is None
+
+
+def test_formal_worker_state_roundtrips_detail_gain_marker() -> None:
+    payload = _worker_state()
+    payload["candidate_gain_resolution_m"] = 0.2
+
+    state = FormalWorkerState.from_dict(payload)
+
+    assert state.to_dict() == payload
+    assert state.candidate_gain_resolution_m == 0.2
 
 
 @pytest.mark.parametrize(
@@ -100,6 +111,12 @@ def test_formal_worker_state_roundtrips_as_strict_json() -> None:
                 "rejected_candidate_indices", [3, 1]
             ),
             "candidate",
+        ),
+        (
+            lambda value: value.__setitem__(
+                "candidate_gain_resolution_m", 1.0
+            ),
+            "candidate gain resolution",
         ),
     ),
 )

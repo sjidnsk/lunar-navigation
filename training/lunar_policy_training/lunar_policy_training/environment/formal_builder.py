@@ -412,6 +412,7 @@ class FormalEpisode:
             )
         )
         self._detail_candidate_gain_enabled = detail_candidate_gain_enabled
+        self._current_candidate_gain_resolution_m: float | None = None
         self._observation_builder = ObservationBuilderV2()
         self._bridge = bridge_api.PlannerBridge()
         self._snapshot: _MapSnapshot | None = None
@@ -570,6 +571,9 @@ class FormalEpisode:
                 "last_hop_available_delta_v_mps": float(
                     self.last_hop_available_delta_v_mps
                 ),
+                "candidate_gain_resolution_m": (
+                    self._current_candidate_gain_resolution_m
+                ),
             }
         )
 
@@ -695,6 +699,11 @@ class FormalEpisode:
             self._candidate_builder
             if self._detail_candidate_gain_enabled
             else self._legacy_candidate_builder
+        )
+        self._current_candidate_gain_resolution_m = (
+            self.sensor_state.resolution_m
+            if self._detail_candidate_gain_enabled
+            else GLOBAL_GEOMETRY.resolution_m
         )
         candidates = candidate_builder.build(
             world,
@@ -1069,23 +1078,33 @@ class FormalWorkerBuilder:
         def is_compatibility_error(error: Exception) -> bool:
             return str(error) in compatibility_errors
 
+        def restore_legacy() -> FormalEnvironmentWorker:
+            try:
+                legacy_worker = restore_with_filters(True, False)
+            except (ValueError, EnvironmentInvariantError) as coarse_error:
+                if not is_compatibility_error(coarse_error):
+                    raise
+                legacy_worker = restore_with_filters(False, False)
+            # Preserve the exact legacy boundary, then enable both repairs for
+            # every observation built after it.
+            legacy_worker.episode._visited_candidate_filter_enabled = True
+            legacy_worker.episode._detail_candidate_gain_enabled = True
+            return legacy_worker
+
+        if restored.candidate_gain_resolution_m == LOCAL_GEOMETRY.resolution_m:
+            try:
+                return restore_with_filters(True, True)
+            except (ValueError, EnvironmentInvariantError) as current_error:
+                if not is_compatibility_error(current_error):
+                    raise
+            return restore_legacy()
+
         try:
-            return restore_with_filters(True, True)
-        except (ValueError, EnvironmentInvariantError) as current_error:
-            if not is_compatibility_error(current_error):
+            return restore_legacy()
+        except (ValueError, EnvironmentInvariantError) as legacy_error:
+            if not is_compatibility_error(legacy_error):
                 raise
-        try:
-            legacy_worker = restore_with_filters(True, False)
-        except (ValueError, EnvironmentInvariantError) as coarse_error:
-            if not is_compatibility_error(coarse_error):
-                raise
-            legacy_worker = restore_with_filters(False, False)
-        # A source-migrated checkpoint may contain one observation built
-        # before either repair existed. Preserve that exact boundary, then
-        # enable both repairs for every following observation.
-        legacy_worker.episode._visited_candidate_filter_enabled = True
-        legacy_worker.episode._detail_candidate_gain_enabled = True
-        return legacy_worker
+        return restore_with_filters(True, True)
 
     def _load_scheduled_scene(
         self,

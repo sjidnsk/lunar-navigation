@@ -469,6 +469,7 @@ def test_formal_episode_estimates_candidate_gain_from_detail_observation(
 
     assert estimator is worker.episode.sensor_state
     assert estimator.resolution_m == 0.2
+    assert worker.snapshot_episode_state()["candidate_gain_resolution_m"] == 0.2
 
 
 def test_restore_preserves_one_legacy_coarse_gain_boundary_then_enables_detail(
@@ -511,6 +512,7 @@ def test_restore_preserves_one_legacy_coarse_gain_boundary_then_enables_detail(
             platform_worker_count=1,
         )
         legacy_state = legacy.snapshot_episode_state()
+        legacy_state.pop("candidate_gain_resolution_m", None)
         legacy_digest = policy_batch_sha256(
             legacy.environment.current_observation
         )
@@ -526,19 +528,29 @@ def test_restore_preserves_one_legacy_coarse_gain_boundary_then_enables_detail(
         legacy_digest
     )
 
-    restored = assembly.factory.restore_for_episode(
-        worker_index=0,
-        platform_type="WHEELED",
-        episode_cursor=4,
-        platform_worker_index=0,
-        platform_worker_count=1,
-        state=legacy_state,
-    )
+    def reject_detail_restore(*_args, **_kwargs) -> np.ndarray:
+        raise AssertionError("legacy state must not replay the detail path first")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            MultiresSensorObservationState,
+            "estimate_candidate_gains",
+            reject_detail_restore,
+        )
+        restored = assembly.factory.restore_for_episode(
+            worker_index=0,
+            platform_type="WHEELED",
+            episode_cursor=4,
+            platform_worker_index=0,
+            platform_worker_count=1,
+            state=legacy_state,
+        )
 
     assert policy_batch_sha256(restored.environment.current_observation) == (
         legacy_digest
     )
     assert restored.episode._detail_candidate_gain_enabled is True
+    assert restored.snapshot_episode_state()["candidate_gain_resolution_m"] == 4.0
 
 
 @pytest.mark.parametrize("platform", ("WHEELED", "LEGGED", "HOPPER"))

@@ -59,6 +59,8 @@ _WORKER_FIELDS = frozenset(
         "last_hop_available_delta_v_mps",
     }
 )
+_WORKER_MARKED_FIELDS = _WORKER_FIELDS | {"candidate_gain_resolution_m"}
+_CANDIDATE_GAIN_RESOLUTIONS_M = frozenset({0.2, 4.0})
 
 
 def _finite(value: object, name: str) -> float:
@@ -217,11 +219,25 @@ class FormalWorkerState:
     policy_batch_sha256: str
     rejected_candidate_indices: tuple[int, ...]
     last_hop_available_delta_v_mps: float
+    candidate_gain_resolution_m: float | None = None
 
     @classmethod
     def from_dict(cls, value: object) -> "FormalWorkerState":
-        if not isinstance(value, Mapping) or set(value) != _WORKER_FIELDS:
+        if not isinstance(value, Mapping) or set(value) not in (
+            _WORKER_FIELDS,
+            _WORKER_MARKED_FIELDS,
+        ):
             raise ValueError("formal worker state structure is invalid")
+        candidate_gain_resolution_m = None
+        if "candidate_gain_resolution_m" in value:
+            candidate_gain_resolution_m = _finite(
+                value["candidate_gain_resolution_m"],
+                "candidate gain resolution",
+            )
+            if candidate_gain_resolution_m not in _CANDIDATE_GAIN_RESOLUTIONS_M:
+                raise ValueError(
+                    "formal candidate gain resolution is invalid"
+                )
         schedule_id = value["scenario_schedule_id"]
         if not isinstance(schedule_id, str) or not schedule_id:
             raise ValueError("formal scenario schedule identity is invalid")
@@ -309,10 +325,11 @@ class FormalWorkerState:
             ),
             rejected_candidate_indices=tuple(candidates),
             last_hop_available_delta_v_mps=last_delta_v,
+            candidate_gain_resolution_m=candidate_gain_resolution_m,
         )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload = {
             "scenario_schedule_id": self.scenario_schedule_id,
             "platform_type": self.platform_type,
             "worker_index": self.worker_index,
@@ -337,6 +354,11 @@ class FormalWorkerState:
             "rejected_candidate_indices": list(self.rejected_candidate_indices),
             "last_hop_available_delta_v_mps": self.last_hop_available_delta_v_mps,
         }
+        if self.candidate_gain_resolution_m is not None:
+            payload["candidate_gain_resolution_m"] = (
+                self.candidate_gain_resolution_m
+            )
+        return payload
 
 
 def policy_batch_sha256(batch: PolicyBatch) -> str:
