@@ -2,7 +2,7 @@
 <package format="3">
   <name>lunar_navigation_config</name>
   <version>0.1.0</version>
-  <description>External ROS interface contract configuration for lunar navigation.</description>
+  <description>Runtime platform profiles and external ROS interface contracts for lunar navigation.</description>
   <maintainer email="maintainers@example.invalid">Lunar Navigation Maintainers</maintainer>
   <license>Apache-2.0</license>
 

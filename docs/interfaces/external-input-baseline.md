@@ -194,18 +194,28 @@ schema 中仍是绝对禁入层；在正式拆分“禁止着陆”和“禁止�
 
 ## 静态能力资料字段
 
-| 资料 | 类型 | 外部所有权 | 接收字段 |
-|---|---|---|---|
-| 观测能力 | YAML/JSON | 传感与融合系统 | `sensor_range_m`、`sensor_fov_deg` |
-| 平台能力 | `platform-control-capability-source/v2`，YAML/JSON/URDF/mesh | 平台控制单位 | `platform.platform_id`、`platform.platform_type`、`platform.capability_version`、`platform.base_frame_id`、`geometry_source.urdf_file`、URDF 引用 mesh 与逐字段 `sources` |
+运行时只接收一个完整 `lunar-platform-profile/v1` YAML，固定路径为：
 
-平台类型为 `WHEELED`、`LEGGED` 或 `HOPPER`。v2 轮式资料接收正式几何、轮胎/轴距/轨距、底盘净空、支撑面局部凸起、连续运动约束和几何原语；足式资料接收 Quad48 机身、质量/载荷、机身高度、坡度/台阶/方向沟隙、速度和加速度；飞跃式资料接收比冲、固定参考总质量、固定参考推进剂质量、着陆支撑半径、飞行碰撞半径、着陆坡度/平面残差及规划裕量。参考质量只定义可重复的单跳 Δv 能力包络，不表示运行时库存。每个运行时能力字段必须具有已批准的 `sources` 来源类型；v1 旧飞跃速度、冲量、固定飞行时间窗、多跳原语和固定着陆区域面积字段不兼容且必须拒绝。
+```text
+/etc/lunar_navigation/platform_profile.yaml
+```
 
-本仓的 `platform_capability_schema_v2.yaml` 与 `three_platform_capability_freeze_v1.yaml` 是当前
-规划和正式训练的唯一能力权威，也是尚待外部 provider 对接的 provisional 消费合同。这里的
-`provisional` 只表示外部数据发布实现尚未交付，不降低这组已批准值在本项目中的正式身份。
-正式外部 provider 出现后必须先逐字段等价，再原子切换数据来源；不能在运行时静默改变能力值、
-版本或摘要。
+文件同时包含 `platform`、`observation`、`assets`、`sources` 和当前平台专属段。平台类型只允许
+`WHEELED`、`LEGGED` 或 `HOPPER`；观测段固定承载 `sensor_range_m`、`sensor_fov_deg`，不再通过
+第二个观测能力文件拼接。轮式段包含正式几何、轮胎/轴距/轨距、底盘净空、连续运动约束和真实
+运动原语；足式段包含 Quad48 机身、质量/载荷、机身高度、坡度/台阶/方向沟隙、速度和加速度；
+飞跃式段包含比冲、固定单跳参考质量/推进剂量、着陆支撑、飞行碰撞包络及规划裕量。
+
+URDF/mesh 位于可选 `assets` 段。缺少资源只影响可视化或几何调试，不能阻止依赖 YAML 数值的
+规划节点启动，也不能用资源中的值覆盖已审查数值。替换文件后必须重启，运行中不热加载。
+
+仓库中的 `platform_profiles/wheeled.yaml`、`legged.yaml`、`hopper.yaml` 是当前已批准工程基线。
+正在运行的本轮正式训练仍以 `three_platform_capability_freeze_v1.yaml` 和既有摘要作为不可变历史
+输入；`check_platform_profiles.py` 证明三份新文件的运行数值与该冻结等价。训练完成后，后续训练、
+规划和部署直接读取三份 profile，旧聚合文件只保留为本次模型证据。
+
+静态能力和真实设备数据的所有权仍属于外部平台与传感系统。正式 provider 出现后必须先逐字段
+核对，再原子替换固定路径上的完整文件；不得让 provisional 文件与正式 provider 同时生效。
 
 ## 消费边界
 

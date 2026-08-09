@@ -141,16 +141,12 @@ EXPECTED_DOCUMENT = {
         "aggregation_version": "lunar-conservative-grid-aggregation/v1",
     },
     "static_inputs": {
-        "observation_capability": {
+        "platform_profile": {
             "owner": "external",
-            "formats": ["yaml", "json"],
-            "required_fields": ["sensor_range_m", "sensor_fov_deg"],
-        },
-        "platform_capability": {
-            "owner": "external",
-            "schema": "platform-control-capability-source/v2",
-            "formats": ["yaml", "json", "urdf"],
-            "required_fields": ["platform", "geometry_source", "sources"],
+            "schema": "lunar-platform-profile/v1",
+            "formats": ["yaml"],
+            "required_sections": ["platform", "observation", "assets", "sources"],
+            "runtime_path": "/etc/lunar_navigation/platform_profile.yaml",
         },
     },
 }
@@ -385,7 +381,8 @@ def test_check_interfaces_rejects_missing_required_contract_sections_without_ros
         (("map_pyramid", "local_level"), 1, "config error: map_pyramid.local_level must be 0"),
         (("map_pyramid", "aggregation_version"), "unsafe-average/v1", "config error: map_pyramid.aggregation_version must be 'lunar-conservative-grid-aggregation/v1'"),
         (("tf", "chain"), ["odom", "map", "base_link"], "config error: tf.chain must be ['map', 'odom', 'base_link']"),
-        (("static_inputs", "platform_capability", "schema"), "wrong/v1", "config error: static_inputs.platform_capability.schema must be 'platform-control-capability-source/v2'"),
+        (("static_inputs", "platform_profile", "schema"), "wrong/v1", "config error: static_inputs.platform_profile.schema must be 'lunar-platform-profile/v1'"),
+        (("static_inputs", "platform_profile", "runtime_path"), "/tmp/profile.yaml", "config error: static_inputs.platform_profile.runtime_path must be '/etc/lunar_navigation/platform_profile.yaml'"),
     ],
 )
 def test_check_interfaces_rejects_wrong_fixed_contract_values_without_ros(

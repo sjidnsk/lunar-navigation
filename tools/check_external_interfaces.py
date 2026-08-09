@@ -205,16 +205,12 @@ _MAP_PYRAMID = {
     "aggregation_version": "lunar-conservative-grid-aggregation/v1",
 }
 _STATIC_INPUTS = {
-    "observation_capability": {
+    "platform_profile": {
         "owner": "external",
-        "formats": ["yaml", "json"],
-        "required_fields": ["sensor_range_m", "sensor_fov_deg"],
-    },
-    "platform_capability": {
-        "owner": "external",
-        "schema": "platform-control-capability-source/v2",
-        "formats": ["yaml", "json", "urdf"],
-        "required_fields": ["platform", "geometry_source", "sources"],
+        "schema": "lunar-platform-profile/v1",
+        "formats": ["yaml"],
+        "required_sections": ["platform", "observation", "assets", "sources"],
+        "runtime_path": "/etc/lunar_navigation/platform_profile.yaml",
     },
 }
 

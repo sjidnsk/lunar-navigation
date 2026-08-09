@@ -1,0 +1,93 @@
+schema_version: lunar-platform-profile/v1
+ownership:
+  producer: external_platform_and_sensor_systems
+  consumer: lunar_navigation
+  repository_role: provisional_schema_and_approved_engineering_baseline
+platform:
+  platform_id: yobotics-quad48
+  platform_type: LEGGED
+  capability_version: quad48-approved-baseline-v1
+  base_frame_id: base_link
+observation:
+  # 观测包络不直接改写已知区域，真实覆盖率来自地图中的观测状态字段。
+  sensor_range_m: 30.0
+  sensor_fov_deg: 360.0
+assets:
+  # 没有 URDF/mesh 时仍可使用数值机身尺寸和地形能力进行规划。
+  urdf: null
+  meshes: []
+sources:
+  sensor_range_m: user_approved_planning_policy
+  sensor_fov_deg: user_approved_planning_policy
+  reference_point: upstream_model
+  body_extent_m: user_spec_material
+  platform_mass_kg: derived
+  nominal_payload_kg: user_spec_material
+  maximum_payload_kg: user_spec_material
+  nominal_body_height_m: derived
+  body_height_m: planning_policy
+  maximum_forward_speed_mps: planning_policy
+  maximum_reverse_speed_mps: planning_policy
+  maximum_lateral_speed_mps: upstream_config
+  maximum_yaw_rate_radps: upstream_config
+  maximum_linear_acceleration_mps2: planning_policy
+  maximum_yaw_acceleration_radps2: planning_policy
+  maximum_surface_slope_rad: user_spec_material
+  maximum_step_height_m: user_confirmed_upgrade
+  maximum_gap_width_m: user_spec_material
+  minimum_body_clearance_m: planning_policy
+  step_vertical_rate_mps: planning_policy
+  roughness_handling: planning_policy
+  unknown_is_traversable: planning_policy
+  motion_primitives: user_approved_planning_policy
+  local_xy_resolution_m: planning_policy
+  output_semantics: planning_policy
+legged:
+  reference_point: base_link
+  body_extent_m: [0.68, 0.33, 0.35]
+  nominal_body_height_m: 0.33
+  body_height_m: [0.28, 0.38]
+  platform_mass_kg: 15.89
+  nominal_payload_kg: 8.0
+  maximum_payload_kg: 10.0
+  maximum_forward_speed_mps: 1.5
+  maximum_reverse_speed_mps: 1.5
+  maximum_lateral_speed_mps: 0.8
+  maximum_yaw_rate_radps: 1.0
+  maximum_linear_acceleration_mps2: 1.0
+  maximum_yaw_acceleration_radps2: 1.0
+  maximum_surface_slope_rad: 0.5235987755982988
+  # 0.5 m 是连续越障能力；规划输出仍是普通机身参考，只需在困难地形降低速度。
+  maximum_step_height_m: 0.5
+  maximum_gap_width_m: 0.3
+  minimum_body_clearance_m: 0.3
+  step_vertical_rate_mps: 0.1
+  roughness_handling: DIAGNOSTIC_ONLY
+  unknown_is_traversable: false
+  local_xy_resolution_m: 0.2
+  output_semantics: LEGGED_BODY_REFERENCE
+  motion_primitives:
+    - primitive_id: forward
+      kind: FORWARD
+      body_frame_displacement_m: [0.2, 0.0, 0.0]
+      yaw_change_rad: 0.0
+    - primitive_id: backward
+      kind: BACKWARD
+      body_frame_displacement_m: [-0.2, 0.0, 0.0]
+      yaw_change_rad: 0.0
+    - primitive_id: left
+      kind: LATERAL_LEFT
+      body_frame_displacement_m: [0.0, 0.2, 0.0]
+      yaw_change_rad: 0.0
+    - primitive_id: right
+      kind: LATERAL_RIGHT
+      body_frame_displacement_m: [0.0, -0.2, 0.0]
+      yaw_change_rad: 0.0
+    - primitive_id: spin-left
+      kind: SPIN
+      body_frame_displacement_m: [0.0, 0.0, 0.0]
+      yaw_change_rad: 0.19634954084936207
+    - primitive_id: spin-right
+      kind: SPIN
+      body_frame_displacement_m: [0.0, 0.0, 0.0]
+      yaw_change_rad: -0.19634954084936207

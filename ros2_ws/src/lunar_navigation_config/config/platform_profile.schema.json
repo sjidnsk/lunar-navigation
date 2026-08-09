@@ -1,0 +1,448 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lunar-navigation.local/schemas/platform_profile.schema.json",
+  "title": "Lunar navigation single-platform runtime profile",
+  "description": "每台设备直接安装一个完整平台与观测能力文件；不提供隐式默认值。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ownership",
+    "platform",
+    "observation",
+    "assets",
+    "sources"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "lunar-platform-profile/v1"
+    },
+    "ownership": {
+      "$ref": "#/$defs/ownership"
+    },
+    "platform": {
+      "$ref": "#/$defs/platform"
+    },
+    "observation": {
+      "$ref": "#/$defs/observation"
+    },
+    "assets": {
+      "$ref": "#/$defs/assets"
+    },
+    "sources": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "wheeled": {
+      "$ref": "#/$defs/wheeled"
+    },
+    "legged": {
+      "$ref": "#/$defs/legged"
+    },
+    "hopper": {
+      "$ref": "#/$defs/hopper"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "properties": {
+              "platform_type": {
+                "const": "WHEELED"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": ["wheeled"],
+        "not": {
+          "anyOf": [
+            {"required": ["legged"]},
+            {"required": ["hopper"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "properties": {
+              "platform_type": {
+                "const": "LEGGED"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": ["legged"],
+        "not": {
+          "anyOf": [
+            {"required": ["wheeled"]},
+            {"required": ["hopper"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "properties": {
+              "platform_type": {
+                "const": "HOPPER"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": ["hopper"],
+        "not": {
+          "anyOf": [
+            {"required": ["wheeled"]},
+            {"required": ["legged"]}
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "positive": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "nonnegative": {
+      "type": "number",
+      "minimum": 0
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "vec2": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"type": "number"}
+    },
+    "vec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"type": "number"}
+    },
+    "ownership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["producer", "consumer", "repository_role"],
+      "properties": {
+        "producer": {"const": "external_platform_and_sensor_systems"},
+        "consumer": {"const": "lunar_navigation"},
+        "repository_role": {
+          "const": "provisional_schema_and_approved_engineering_baseline"
+        }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform_id",
+        "platform_type",
+        "capability_version",
+        "base_frame_id"
+      ],
+      "properties": {
+        "platform_id": {"type": "string", "minLength": 1},
+        "platform_type": {
+          "enum": ["WHEELED", "LEGGED", "HOPPER"]
+        },
+        "capability_version": {"type": "string", "minLength": 1},
+        "base_frame_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sensor_range_m", "sensor_fov_deg"],
+      "properties": {
+        "sensor_range_m": {"$ref": "#/$defs/positive"},
+        "sensor_fov_deg": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 360
+        }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["urdf", "meshes"],
+      "properties": {
+        "urdf": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/asset"}
+          ]
+        },
+        "meshes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/asset"}
+        }
+      }
+    },
+    "wheel_primitive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primitive_id", "kind", "relative_end_pose"],
+      "properties": {
+        "primitive_id": {"type": "string", "minLength": 1},
+        "kind": {
+          "enum": [
+            "FORWARD",
+            "REVERSE",
+            "FORWARD_ARC",
+            "REVERSE_ARC",
+            "SPIN_CLOCKWISE",
+            "SPIN_COUNTERCLOCKWISE",
+            "STOP_AND_SWITCH"
+          ]
+        },
+        "relative_end_pose": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["position_m", "orientation_wxyz"],
+          "properties": {
+            "position_m": {"$ref": "#/$defs/vec3"},
+            "orientation_wxyz": {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": {"type": "number"}
+            }
+          }
+        }
+      }
+    },
+    "wheeled": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference_point",
+        "footprint_xy_m",
+        "body_extent_m",
+        "wheel_count",
+        "wheel_diameter_m",
+        "wheel_width_m",
+        "wheelbase_m",
+        "track_width_m",
+        "wheel_center_xy_m",
+        "minimum_underbody_clearance_m",
+        "minimum_clearance_m",
+        "maximum_forward_speed_mps",
+        "maximum_reverse_speed_mps",
+        "maximum_spin_rate_radps",
+        "maximum_acceleration_mps2",
+        "maximum_braking_deceleration_mps2",
+        "maximum_yaw_acceleration_radps2",
+        "maximum_lateral_acceleration_mps2",
+        "maximum_curvature_per_m",
+        "maximum_surface_slope_rad",
+        "maximum_local_obstacle_relief_m",
+        "allow_unsupported_gap",
+        "roughness_handling",
+        "xy_resolution_m",
+        "yaw_bin_count",
+        "arc_radius_m",
+        "arc_yaw_change_rad",
+        "motion_primitives"
+      ],
+      "properties": {
+        "reference_point": {"const": "base_footprint"},
+        "footprint_xy_m": {
+          "type": "array",
+          "minItems": 3,
+          "items": {"$ref": "#/$defs/vec2"}
+        },
+        "body_extent_m": {"$ref": "#/$defs/vec3"},
+        "wheel_count": {"type": "integer", "minimum": 1},
+        "wheel_diameter_m": {"$ref": "#/$defs/positive"},
+        "wheel_width_m": {"$ref": "#/$defs/positive"},
+        "wheelbase_m": {"$ref": "#/$defs/positive"},
+        "track_width_m": {"$ref": "#/$defs/positive"},
+        "wheel_center_xy_m": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/vec2"}
+        },
+        "minimum_underbody_clearance_m": {"$ref": "#/$defs/positive"},
+        "minimum_clearance_m": {"$ref": "#/$defs/nonnegative"},
+        "maximum_forward_speed_mps": {"$ref": "#/$defs/positive"},
+        "maximum_reverse_speed_mps": {"$ref": "#/$defs/nonnegative"},
+        "maximum_spin_rate_radps": {"$ref": "#/$defs/positive"},
+        "maximum_acceleration_mps2": {"$ref": "#/$defs/positive"},
+        "maximum_braking_deceleration_mps2": {"$ref": "#/$defs/positive"},
+        "maximum_yaw_acceleration_radps2": {"$ref": "#/$defs/positive"},
+        "maximum_lateral_acceleration_mps2": {"$ref": "#/$defs/positive"},
+        "maximum_curvature_per_m": {"$ref": "#/$defs/positive"},
+        "maximum_surface_slope_rad": {"$ref": "#/$defs/nonnegative"},
+        "maximum_local_obstacle_relief_m": {"$ref": "#/$defs/nonnegative"},
+        "allow_unsupported_gap": {"type": "boolean"},
+        "roughness_handling": {"const": "COST_SPEED_AND_LOCAL_RECHECK"},
+        "xy_resolution_m": {"$ref": "#/$defs/positive"},
+        "yaw_bin_count": {"type": "integer", "minimum": 1},
+        "arc_radius_m": {"$ref": "#/$defs/positive"},
+        "arc_yaw_change_rad": {"$ref": "#/$defs/positive"},
+        "motion_primitives": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/wheel_primitive"}
+        }
+      }
+    },
+    "legged_primitive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primitive_id",
+        "kind",
+        "body_frame_displacement_m",
+        "yaw_change_rad"
+      ],
+      "properties": {
+        "primitive_id": {"type": "string", "minLength": 1},
+        "kind": {
+          "enum": [
+            "FORWARD",
+            "BACKWARD",
+            "LATERAL_LEFT",
+            "LATERAL_RIGHT",
+            "SPIN",
+            "COUPLED"
+          ]
+        },
+        "body_frame_displacement_m": {"$ref": "#/$defs/vec3"},
+        "yaw_change_rad": {"type": "number"}
+      }
+    },
+    "legged": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference_point",
+        "body_extent_m",
+        "nominal_body_height_m",
+        "body_height_m",
+        "platform_mass_kg",
+        "nominal_payload_kg",
+        "maximum_payload_kg",
+        "maximum_forward_speed_mps",
+        "maximum_reverse_speed_mps",
+        "maximum_lateral_speed_mps",
+        "maximum_yaw_rate_radps",
+        "maximum_linear_acceleration_mps2",
+        "maximum_yaw_acceleration_radps2",
+        "maximum_surface_slope_rad",
+        "maximum_step_height_m",
+        "maximum_gap_width_m",
+        "minimum_body_clearance_m",
+        "step_vertical_rate_mps",
+        "roughness_handling",
+        "unknown_is_traversable",
+        "local_xy_resolution_m",
+        "output_semantics",
+        "motion_primitives"
+      ],
+      "properties": {
+        "reference_point": {"const": "base_link"},
+        "body_extent_m": {"$ref": "#/$defs/vec3"},
+        "nominal_body_height_m": {"$ref": "#/$defs/positive"},
+        "body_height_m": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/nonnegative"}
+        },
+        "platform_mass_kg": {"$ref": "#/$defs/positive"},
+        "nominal_payload_kg": {"$ref": "#/$defs/nonnegative"},
+        "maximum_payload_kg": {"$ref": "#/$defs/positive"},
+        "maximum_forward_speed_mps": {"$ref": "#/$defs/positive"},
+        "maximum_reverse_speed_mps": {"$ref": "#/$defs/nonnegative"},
+        "maximum_lateral_speed_mps": {"$ref": "#/$defs/nonnegative"},
+        "maximum_yaw_rate_radps": {"$ref": "#/$defs/nonnegative"},
+        "maximum_linear_acceleration_mps2": {"$ref": "#/$defs/positive"},
+        "maximum_yaw_acceleration_radps2": {"$ref": "#/$defs/positive"},
+        "maximum_surface_slope_rad": {"$ref": "#/$defs/nonnegative"},
+        "maximum_step_height_m": {"$ref": "#/$defs/nonnegative"},
+        "maximum_gap_width_m": {"$ref": "#/$defs/nonnegative"},
+        "minimum_body_clearance_m": {"$ref": "#/$defs/nonnegative"},
+        "step_vertical_rate_mps": {"$ref": "#/$defs/positive"},
+        "roughness_handling": {"const": "DIAGNOSTIC_ONLY"},
+        "unknown_is_traversable": {"type": "boolean"},
+        "local_xy_resolution_m": {"$ref": "#/$defs/positive"},
+        "output_semantics": {"const": "LEGGED_BODY_REFERENCE"},
+        "motion_primitives": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/legged_primitive"}
+        }
+      }
+    },
+    "hopper": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "specific_impulse_s",
+        "reference_total_mass_kg",
+        "reference_propellant_mass_kg",
+        "reference_horizontal_range_m",
+        "reference_elevation_delta_m",
+        "runtime_fallback_allowed",
+        "landing_support_radius_m",
+        "flight_collision_radius_m",
+        "maximum_landing_slope_rad",
+        "maximum_landing_plane_residual_m",
+        "landing_lateral_margin_m",
+        "flight_map_margin_m",
+        "reachability_delta_v_margin_ratio",
+        "gravity_mps2",
+        "standard_gravity_mps2"
+      ],
+      "properties": {
+        "specific_impulse_s": {"$ref": "#/$defs/positive"},
+        "reference_total_mass_kg": {"$ref": "#/$defs/positive"},
+        "reference_propellant_mass_kg": {"$ref": "#/$defs/positive"},
+        "reference_horizontal_range_m": {"$ref": "#/$defs/positive"},
+        "reference_elevation_delta_m": {"type": "number"},
+        "runtime_fallback_allowed": {"type": "boolean"},
+        "landing_support_radius_m": {"$ref": "#/$defs/positive"},
+        "flight_collision_radius_m": {"$ref": "#/$defs/positive"},
+        "maximum_landing_slope_rad": {"$ref": "#/$defs/nonnegative"},
+        "maximum_landing_plane_residual_m": {"$ref": "#/$defs/nonnegative"},
+        "landing_lateral_margin_m": {"$ref": "#/$defs/nonnegative"},
+        "flight_map_margin_m": {"$ref": "#/$defs/nonnegative"},
+        "reachability_delta_v_margin_ratio": {"$ref": "#/$defs/nonnegative"},
+        "gravity_mps2": {"$ref": "#/$defs/vec3"},
+        "standard_gravity_mps2": {"$ref": "#/$defs/positive"}
+      }
+    }
+  }
+}

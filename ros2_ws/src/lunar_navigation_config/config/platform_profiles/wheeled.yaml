@@ -1,0 +1,132 @@
+schema_version: lunar-platform-profile/v1
+ownership:
+  producer: external_platform_and_sensor_systems
+  consumer: lunar_navigation
+  repository_role: provisional_schema_and_approved_engineering_baseline
+platform:
+  platform_id: wheeled-lunar-explorer
+  platform_type: WHEELED
+  capability_version: wheeled-engineering-baseline-v1
+  base_frame_id: base_footprint
+observation:
+  # 30 m/360°只定义保守探测包络；地图观测字段仍决定栅格是否已知。
+  sensor_range_m: 30.0
+  sensor_fov_deg: 360.0
+assets:
+  # 数值规划只使用本文件中的几何和净空；URDF/mesh 是可选调试资源。
+  urdf: null
+  meshes: []
+sources:
+  sensor_range_m: user_approved_planning_policy
+  sensor_fov_deg: user_approved_planning_policy
+  reference_point: derived
+  body_extent_m: user_provided_dimension
+  footprint_xy_m: derived
+  wheel_count: user_confirmed_capability
+  wheel_diameter_m: user_provided_dimension
+  wheel_width_m: user_provided_dimension
+  wheelbase_m: user_provided_dimension
+  track_width_m: derived
+  wheel_center_xy_m: derived
+  minimum_underbody_clearance_m: user_approximate_measurement
+  minimum_clearance_m: user_approved_planning_policy
+  maximum_forward_speed_mps: user_approved_planning_policy
+  maximum_reverse_speed_mps: user_approved_planning_policy
+  maximum_spin_rate_radps: user_approved_planning_policy
+  maximum_acceleration_mps2: user_approved_planning_policy
+  maximum_braking_deceleration_mps2: user_approved_planning_policy
+  maximum_yaw_acceleration_radps2: user_approved_planning_policy
+  maximum_lateral_acceleration_mps2: user_approved_planning_policy
+  maximum_curvature_per_m: user_approved_planning_policy
+  maximum_surface_slope_rad: user_approved_planning_policy
+  maximum_local_obstacle_relief_m: user_confirmed_capability
+  allow_unsupported_gap: user_approved_planning_policy
+  roughness_handling: user_approved_planning_policy
+  motion_primitives: user_approved_planning_policy
+  xy_resolution_m: user_approved_planning_policy
+  yaw_bin_count: user_approved_planning_policy
+  arc_radius_m: user_approved_planning_policy
+  arc_yaw_change_rad: user_approved_planning_policy
+wheeled:
+  reference_point: base_footprint
+  body_extent_m: [1.182, 0.818, 1.29996]
+  footprint_xy_m:
+    - [0.591, 0.409]
+    - [0.591, -0.409]
+    - [-0.591, -0.409]
+    - [-0.591, 0.409]
+  wheel_count: 4
+  wheel_diameter_m: 0.319
+  wheel_width_m: 0.148
+  wheelbase_m: 0.8175
+  track_width_m: 0.67
+  wheel_center_xy_m:
+    - [0.40875, 0.335]
+    - [0.40875, -0.335]
+    - [-0.40875, -0.335]
+    - [-0.40875, 0.335]
+  minimum_underbody_clearance_m: 0.21
+  minimum_clearance_m: 0.2
+  maximum_forward_speed_mps: 1.5
+  maximum_reverse_speed_mps: 1.5
+  maximum_spin_rate_radps: 1.0
+  maximum_acceleration_mps2: 0.5
+  maximum_braking_deceleration_mps2: 0.5
+  maximum_yaw_acceleration_radps2: 0.5
+  maximum_lateral_acceleration_mps2: 0.5
+  maximum_curvature_per_m: 1.0
+  maximum_surface_slope_rad: 0.3490658503988659
+  maximum_local_obstacle_relief_m: 0.2
+  allow_unsupported_gap: false
+  roughness_handling: COST_SPEED_AND_LOCAL_RECHECK
+  xy_resolution_m: 0.2
+  yaw_bin_count: 32
+  arc_radius_m: 1.0
+  arc_yaw_change_rad: 0.19634954084936207
+  # 原语端点、朝向、扫掠和计时必须引用同一段真实运动几何。
+  motion_primitives:
+    - primitive_id: forward
+      kind: FORWARD
+      relative_end_pose:
+        position_m: [0.2, 0.0, 0.0]
+        orientation_wxyz: [1.0, 0.0, 0.0, 0.0]
+    - primitive_id: reverse
+      kind: REVERSE
+      relative_end_pose:
+        position_m: [-0.2, 0.0, 0.0]
+        orientation_wxyz: [1.0, 0.0, 0.0, 0.0]
+    - primitive_id: forward-arc-left
+      kind: FORWARD_ARC
+      relative_end_pose:
+        position_m: [0.19509032201612825, 0.01921471959676957, 0.0]
+        orientation_wxyz: [0.9951847266721969, 0.0, 0.0, 0.0980171403295606]
+    - primitive_id: forward-arc-right
+      kind: FORWARD_ARC
+      relative_end_pose:
+        position_m: [0.19509032201612825, -0.01921471959676957, 0.0]
+        orientation_wxyz: [0.9951847266721969, 0.0, 0.0, -0.0980171403295606]
+    - primitive_id: reverse-arc-left
+      kind: REVERSE_ARC
+      relative_end_pose:
+        position_m: [-0.19509032201612825, 0.01921471959676957, 0.0]
+        orientation_wxyz: [0.9951847266721969, 0.0, 0.0, -0.0980171403295606]
+    - primitive_id: reverse-arc-right
+      kind: REVERSE_ARC
+      relative_end_pose:
+        position_m: [-0.19509032201612825, -0.01921471959676957, 0.0]
+        orientation_wxyz: [0.9951847266721969, 0.0, 0.0, 0.0980171403295606]
+    - primitive_id: spin-left
+      kind: SPIN_COUNTERCLOCKWISE
+      relative_end_pose:
+        position_m: [0.0, 0.0, 0.0]
+        orientation_wxyz: [0.9951847266721969, 0.0, 0.0, 0.0980171403295606]
+    - primitive_id: spin-right
+      kind: SPIN_CLOCKWISE
+      relative_end_pose:
+        position_m: [0.0, 0.0, 0.0]
+        orientation_wxyz: [0.9951847266721969, 0.0, 0.0, -0.0980171403295606]
+    - primitive_id: stop-switch
+      kind: STOP_AND_SWITCH
+      relative_end_pose:
+        position_m: [0.0, 0.0, 0.0]
+        orientation_wxyz: [1.0, 0.0, 0.0, 0.0]

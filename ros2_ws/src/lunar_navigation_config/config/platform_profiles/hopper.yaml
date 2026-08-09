@@ -1,0 +1,53 @@
+schema_version: lunar-platform-profile/v1
+ownership:
+  producer: external_platform_and_sensor_systems
+  consumer: lunar_navigation
+  repository_role: provisional_schema_and_approved_engineering_baseline
+platform:
+  platform_id: hopper-lunar-explorer
+  platform_type: HOPPER
+  capability_version: hopper-engineering-baseline-v1
+  base_frame_id: base_link
+observation:
+  # 360°用于候选收益估计；飞跃目标仍必须位于真实安全着陆凸区域。
+  sensor_range_m: 30.0
+  sensor_fov_deg: 360.0
+assets:
+  # 可选视觉资产不参与着陆支撑、抛物线或飞行管认证。
+  urdf: null
+  meshes: []
+sources:
+  sensor_range_m: user_approved_planning_policy
+  sensor_fov_deg: user_approved_planning_policy
+  specific_impulse_s: project_engineering_baseline
+  landing_support_radius_m: project_engineering_baseline
+  flight_collision_radius_m: project_engineering_baseline
+  maximum_landing_slope_rad: planning_safety_baseline
+  maximum_landing_plane_residual_m: planning_safety_baseline
+  landing_lateral_margin_m: planning_safety_baseline
+  flight_map_margin_m: planning_safety_baseline
+  reachability_delta_v_margin_ratio: planning_safety_baseline
+  gravity_mps2: planning_safety_baseline
+  standard_gravity_mps2: planning_safety_baseline
+  reference_total_mass_kg: project_engineering_baseline
+  reference_propellant_mass_kg: project_engineering_baseline
+  reference_horizontal_range_m: project_engineering_baseline
+  reference_elevation_delta_m: project_engineering_baseline
+  runtime_fallback_allowed: planning_safety_baseline
+hopper:
+  specific_impulse_s: 301.0
+  reference_total_mass_kg: 20.0
+  # 这是每次规划相同的单跳参考推进剂量，不是随跳跃次数递减的运行时库存。
+  reference_propellant_mass_kg: 0.2
+  reference_horizontal_range_m: 100.0
+  reference_elevation_delta_m: 0.0
+  runtime_fallback_allowed: false
+  landing_support_radius_m: 0.45
+  flight_collision_radius_m: 0.55
+  maximum_landing_slope_rad: 0.17453292519943295
+  maximum_landing_plane_residual_m: 0.05
+  landing_lateral_margin_m: 0.2
+  flight_map_margin_m: 0.2
+  reachability_delta_v_margin_ratio: 0.1
+  gravity_mps2: [0.0, 0.0, -1.62]
+  standard_gravity_mps2: 9.80665
