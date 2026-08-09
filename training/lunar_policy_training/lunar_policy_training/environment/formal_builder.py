@@ -60,6 +60,7 @@ from .observation_builder import (
 from .parallel_pool import ParallelEnvironmentWorker
 from .v3_environment import (
     CommittedHopExecutionFeedback,
+    EnvironmentInvariantError,
     PreparedPlanRequest,
     ReferenceExecutionResult,
     create_v3_environment,
@@ -410,6 +411,8 @@ class FormalEpisode:
         self._hopper_feedback_phase = 0
         self.last_hop_available_delta_v_mps = 0.0
         self._reveal_history: list[FormalRevealState] = []
+        self._visited_candidate_cells = {start_cell}
+        self._visited_candidate_filter_enabled = True
         self.controller = ObservationBoundaryController(
             platform_type=platform_type,
             sensor_state=self.sensor_state,
@@ -449,6 +452,12 @@ class FormalEpisode:
         evidence: SensorBoundaryEvidence,
         execution_state: str,
     ) -> None:
+        self._visited_candidate_cells.add(
+            self.loaded.scene.base_canvas.world_to_grid(
+                evidence.pose_map.x_m,
+                evidence.pose_map.y_m,
+            )
+        )
         self._reveal_history.append(
             FormalRevealState(
                 pose=self._pose_state(evidence.pose_map),
@@ -673,7 +682,15 @@ class FormalEpisode:
             source=f"cpp_v3/{self.capability.content_sha256}",
         )
         candidates = self._candidate_builder.build(
-            world, self.mission, pose, projection
+            world,
+            self.mission,
+            pose,
+            projection,
+            excluded_cells=(
+                self._visited_candidate_cells
+                if self._visited_candidate_filter_enabled
+                else ()
+            ),
         )
         arrays = self._observation_builder.build(
             world,
@@ -998,28 +1015,47 @@ class FormalWorkerBuilder:
         safe = self._safe_start_cells(loaded, platform_type)
         if restored.start_cell not in safe:
             raise ValueError("formal restored start is not platform-safe")
-        episode = FormalEpisode(
-            worker_index=worker_index,
-            platform_type=platform_type,
-            capability=capability,
-            scenario_identity=scenario_identity,
-            loaded=loaded,
-            start_cell=restored.start_cell,
-        )
-        episode.replay_state(restored)
-        worker = self._make_worker(episode)
-        worker.environment.restore_stable_state(
-            execution_state=restored.execution_state,
-            rejected_candidate_indices=restored.rejected_candidate_indices,
-        )
-        observation = worker.environment.current_observation
-        if (
-            observation.observation_identities != (restored.observation_identity,)
-            or policy_batch_sha256(observation)
-            != restored.policy_batch_sha256
-        ):
-            raise ValueError("formal restored observation digest differs")
-        return worker
+
+        def restore_with_filter(enabled: bool) -> FormalEnvironmentWorker:
+            episode = FormalEpisode(
+                worker_index=worker_index,
+                platform_type=platform_type,
+                capability=capability,
+                scenario_identity=scenario_identity,
+                loaded=loaded,
+                start_cell=restored.start_cell,
+            )
+            episode._visited_candidate_filter_enabled = enabled
+            episode.replay_state(restored)
+            worker = self._make_worker(episode)
+            worker.environment.restore_stable_state(
+                execution_state=restored.execution_state,
+                rejected_candidate_indices=restored.rejected_candidate_indices,
+            )
+            observation = worker.environment.current_observation
+            if (
+                observation.observation_identities
+                != (restored.observation_identity,)
+                or policy_batch_sha256(observation)
+                != restored.policy_batch_sha256
+            ):
+                raise ValueError("formal restored observation digest differs")
+            return worker
+
+        try:
+            return restore_with_filter(True)
+        except (ValueError, EnvironmentInvariantError) as error:
+            if str(error) not in {
+                "formal restored observation digest differs",
+                "restored rejected candidate was not active before masking",
+            }:
+                raise
+            legacy_worker = restore_with_filter(False)
+            # A source-migrated checkpoint may contain one observation built
+            # before visited-cell filtering existed.  Preserve that exact
+            # boundary, then enable filtering for every following observation.
+            legacy_worker.episode._visited_candidate_filter_enabled = True
+            return legacy_worker
 
     def _load_scheduled_scene(
         self,

@@ -150,6 +150,25 @@ def test_candidate_builder_excludes_the_robot_cell_from_exploration_targets() ->
     assert batch.count == 0
 
 
+def test_candidate_builder_excludes_visited_landing_cells_only() -> None:
+    batch = _builder().build(
+        _world_with_frontier(),
+        _mission(),
+        Pose2(500.0, 512.0),
+        _projection(),
+        excluded_cells={(121, 121)},
+    )
+
+    positions = batch.features[batch.mask, :2]
+    assert batch.count == 23
+    assert not np.any(
+        np.all(positions == np.asarray([0.474609375, 0.474609375]), axis=1)
+    )
+    assert np.any(
+        np.all(positions == np.asarray([0.474609375, 0.525390625]), axis=1)
+    )
+
+
 def test_sensor_geometry_and_obstacle_or_zero_traversable_reject_candidates() -> None:
     sensor = SensorGeometry(range_m=24.0, fov_rad=2.0 * np.pi)
     assert sensor.anchor_spacing_m > 0.0

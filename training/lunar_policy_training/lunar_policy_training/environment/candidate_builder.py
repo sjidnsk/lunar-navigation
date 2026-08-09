@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 import math
 
@@ -135,7 +136,15 @@ class CandidateBuilderV2:
     def sensor(self) -> SensorGeometry:
         return self._sensor
 
-    def build(self, world: ObservedWorld, mission: MissionRaster, pose_map: Pose2, projection: PlatformProjection) -> CandidateBatch:
+    def build(
+        self,
+        world: ObservedWorld,
+        mission: MissionRaster,
+        pose_map: Pose2,
+        projection: PlatformProjection,
+        *,
+        excluded_cells: Collection[tuple[int, int]] = (),
+    ) -> CandidateBatch:
         if pose_map.frame_id != "map" or world.canvas != mission.canvas or world.canvas != projection.canvas:
             return CandidateBatch.empty()
         canvas, cells, observed, roi = world.canvas, world.canvas.geometry.cells, world.observed_mask, mission.roi_ratio > 0.0
@@ -160,7 +169,7 @@ class CandidateBuilderV2:
                 standoff = (row + int(np.sign(robot[0] - row)) * step, column + int(np.sign(robot[1] - column)) * step)
                 if not (0 <= standoff[0] < cells and 0 <= standoff[1] < cells and observed[standoff]):
                     standoff = (row, column)
-                if standoff == robot:
+                if standoff == robot or standoff in excluded_cells:
                     continue
                 if projection.traversable_ratio[standoff] == 0.0 or not _clear_observed(world, _ray_cells(robot, standoff)):
                     continue

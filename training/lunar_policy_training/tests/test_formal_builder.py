@@ -24,6 +24,10 @@ from lunar_policy_training.environment.formal_start_qualification import (
     qualify_initial_start_cell,
 )
 from lunar_policy_training.environment.macro_step import PolicyAction
+from lunar_policy_training.environment.observation_boundary import (
+    SensorBoundaryEvidence,
+)
+from lunar_policy_training.environment.observation_builder import Pose2
 from lunar_policy_training.environment.parallel_pool import (
     ParallelActions,
     ParallelEnvPool,
@@ -397,6 +401,49 @@ def test_formal_episode_cursor_is_deterministic_and_resume_exact(
     )
     assert next_episode.episode.start_seed != first.episode.start_seed
     assert next_episode.episode.episode_seed != first.episode.episode_seed
+
+
+def test_formal_episode_excludes_a_recorded_landing_from_future_candidates(
+    tmp_path: pathlib.Path,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    worker = assembly.factory.create_for_episode(
+        0,
+        "HOPPER",
+        4,
+        platform_worker_index=0,
+        platform_worker_count=1,
+    )
+    episode = worker.episode
+    initial = worker.environment.current_observation
+    candidate = int(initial.candidate_mask[0].nonzero()[0])
+    visited_position = initial.frontier_features[0, candidate, :2].clone()
+    canvas = episode.loaded.scene.base_canvas
+    target_x = canvas.bounds_m[0] + float(visited_position[0]) * canvas.geometry.size_m
+    target_y = canvas.bounds_m[3] - float(visited_position[1]) * canvas.geometry.size_m
+    target_cell = canvas.world_to_grid(target_x, target_y)
+    episode._record_reveal(
+        SensorBoundaryEvidence(
+            Pose2(
+                target_x,
+                target_y,
+                0.0,
+                "map",
+                float(episode.loaded.arrays["elevation_m"][target_cell]),
+            ),
+            1.0,
+        ),
+        "LANDED_HOLD",
+    )
+
+    rebuilt = episode.build_policy_observation(
+        episode.sensor_state.observed,
+        episode.current_pose,
+    )
+    rebuilt_positions = rebuilt.frontier_features[0, rebuilt.candidate_mask[0], :2]
+
+    assert int(rebuilt.candidate_mask.sum()) == int(initial.candidate_mask.sum()) - 1
+    assert not torch.any(torch.all(rebuilt_positions == visited_position, dim=1))
 
 
 @pytest.mark.parametrize("platform", ("WHEELED", "LEGGED", "HOPPER"))
