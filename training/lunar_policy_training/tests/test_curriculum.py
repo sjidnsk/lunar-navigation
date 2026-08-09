@@ -9,6 +9,7 @@ from lunar_planner_training_bridge import MotionReference, PlannerBridge
 
 from lunar_policy_training.curriculum import (
     CurriculumSchedule,
+    next_joint_evaluation_gpu_seconds,
     resume_worker_episode_states,
 )
 from lunar_policy_training.capability_freeze import (
@@ -204,6 +205,30 @@ def test_resume_worker_episode_states_rejects_unapproved_allocation_drift(
             target_phase=target_phase,
             target_allocation=target_allocation,
         )
+
+
+def test_next_joint_evaluation_uses_three_gpu_hours_after_joint_start() -> None:
+    schedule = CurriculumSchedule()
+    calibration_end = 649.5
+    joint_start = (
+        calibration_end
+        + 3 * schedule.platform_warmup_limit_s
+        - 600.0
+    )
+
+    first = next_joint_evaluation_gpu_seconds(
+        schedule=schedule,
+        calibration_end_gpu_seconds=calibration_end,
+        last_evaluation_started_gpu_seconds=None,
+    )
+    second = next_joint_evaluation_gpu_seconds(
+        schedule=schedule,
+        calibration_end_gpu_seconds=calibration_end,
+        last_evaluation_started_gpu_seconds=first,
+    )
+
+    assert first == joint_start + schedule.evaluation_interval_s
+    assert second == first + schedule.evaluation_interval_s
 
 
 def test_curriculum_sampler_is_proxy_and_deterministic() -> None:

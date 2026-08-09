@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Source commit and formal cache/capability/reward/training-semantics identities remain frozen.
+- Formal cache/capability/reward/training-semantics identities remain frozen. The source commit changes only through the audited step-118 migration required to execute this repair.
 - Runtime artifacts stay below `/home/kai/CodexDownloads/lunar_navigation`; no checkpoint, JSONL, report, or service log enters Git.
 - A curriculum allocation transition does not emit reward, done, success, or failure for retired worker episodes.
 - Same-allocation checkpoint resume remains exact and fail-closed.
@@ -185,6 +185,9 @@ git commit -m "feat(training): evaluate joint candidates automatically"
 ### Task 4: Real checkpoint recovery rehearsal and full verification
 
 **Files:**
+- Modify: `training/lunar_policy_training/lunar_policy_training/checkpoint.py`
+- Modify: `training/lunar_policy_training/lunar_policy_training/cli.py`
+- Test: `training/lunar_policy_training/tests/test_checkpoint_resume.py`
 - Modify: `docs/validation/2026-08-08-formal-training-environment-qualification.md`
 - Runtime-only: `/home/kai/CodexDownloads/lunar_navigation/formal_training_environment_closure/qualified-current`
 
@@ -216,15 +219,19 @@ Use the formal venv, ROS Humble setup and frozen native bridge. Run the CUDA int
 
 Load it with the production restricted loader, derive `warmup_legged`, construct the `LEGGED×24` pool with no old worker states, reset to 24 valid decision observations, close the pool, and verify the checkpoint file hash did not change.
 
-- [ ] **Step 5: Update qualification evidence and commit**
+- [ ] **Step 5: Create an audited source-migrated resume copy**
+
+Write RED/GREEN tests for a pure v6 source transform and the operational artifact transaction. Preserve an exact-byte immutable copy of the old `latest.pt`; create a distinct `resume-step-118-<commit>.pt` whose body changes only `source_commit`; require descendant ancestry and record hashes, paths, step, budget, changed files, and both commits in `run-manifest.json`.
+
+- [ ] **Step 6: Update qualification evidence and commit**
 
 Record the source commit, test commands, step-118 hash, derived phase, allocation and artifact paths without copying runtime outputs into Git.
 
-- [ ] **Step 6: Fast-forward integration and restart**
+- [ ] **Step 7: Fast-forward integration and restart**
 
 Fast-forward `integration` to the qualified feature branch. Start a transient user service with the formal `resume` command, the step-118 latest checkpoint, ROS/native setup and append-only runtime log.
 
-- [ ] **Step 7: Verify live continuation**
+- [ ] **Step 8: Verify live continuation**
 
 Confirm the service is active, allocation becomes `LEGGED×24`, the first metric row is step 119, manifest/checkpoint progress increases, GPU/CPU/memory remain finite, and no `initial episode state worker identity differs` traceback recurs.
 

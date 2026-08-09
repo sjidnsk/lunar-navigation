@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pathlib
 import random
+import json
 import sys
 
 import numpy as np
@@ -15,6 +16,7 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 sys.path.insert(0, str(REPOSITORY_ROOT / "model_contract"))
 
 from lunar_policy_training.budget import TrainingBudget  # noqa: E402
+import lunar_policy_training.cli as cli_module  # noqa: E402
 from lunar_policy_training.cli import SignalStopFlag, TrainingBoundaryLoop  # noqa: E402
 from lunar_policy_training.checkpoint import (  # noqa: E402
     CHECKPOINT_SCHEMA_VERSION,
@@ -24,6 +26,7 @@ from lunar_policy_training.checkpoint import (  # noqa: E402
     config_sha256,
     load_checkpoint,
     load_checkpoint_for_resume,
+    migrate_checkpoint_source_commit,
     restore_training_state,
     save_checkpoint_atomic,
     _body_from_checkpoint,
@@ -119,6 +122,36 @@ def test_resume_preserves_consumed_gpu_budget(tmp_path: pathlib.Path) -> None:
     assert budget.remaining_gpu_seconds == 86400.0 - 7200.0
 
 
+def test_source_migration_changes_only_commit_and_payload_hash() -> None:
+    checkpoint = _checkpoint(consumed_gpu_seconds=7200.0)
+
+    migrated = migrate_checkpoint_source_commit(
+        checkpoint,
+        expected_source_commit=checkpoint.source_commit,
+        new_source_commit="b" * 40,
+    )
+
+    original_body = _body_from_checkpoint(checkpoint)
+    migrated_body = _body_from_checkpoint(migrated)
+    assert original_body.pop("source_commit") == checkpoint.source_commit
+    assert migrated_body.pop("source_commit") == "b" * 40
+    assert _semantic_sha256(original_body) == _semantic_sha256(migrated_body)
+    assert migrated.payload_sha256 != checkpoint.payload_sha256
+    assert migrated.global_step == checkpoint.global_step
+    assert migrated.consumed_gpu_seconds == checkpoint.consumed_gpu_seconds
+
+
+def test_source_migration_rejects_unexpected_checkpoint_commit() -> None:
+    checkpoint = _checkpoint(consumed_gpu_seconds=7200.0)
+
+    with pytest.raises(CheckpointError, match="source commit"):
+        migrate_checkpoint_source_commit(
+            checkpoint,
+            expected_source_commit="c" * 40,
+            new_source_commit="b" * 40,
+        )
+
+
 def _formal_worker_state(index: int) -> dict[str, object]:
     platform_index, lane = divmod(index, 8)
     platform = ("WHEELED", "LEGGED", "HOPPER")[platform_index]
@@ -193,6 +226,80 @@ def test_formal_checkpoint_roundtrips_exact_active_worker_states(
     )
 
     assert resumed.environment_state == environment_state
+
+
+def test_formal_source_migration_preserves_original_and_records_evidence(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment_state = {
+        "schema_version": "lunar-formal-environment-state/v2",
+        "scenario_schedule_id": "cache-sha/train/v3",
+        "worker_episode_states": [
+            _formal_worker_state(index) for index in range(24)
+        ],
+    }
+    checkpoint = _checkpoint(
+        consumed_gpu_seconds=7200.0,
+        worker_allocation={"WHEELED": 8, "LEGGED": 8, "HOPPER": 8},
+        run_kind="formal",
+        environment_state=environment_state,
+    )
+    root = tmp_path / "run"
+    checkpoints = root / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    latest = checkpoints / "latest.pt"
+    save_checkpoint_atomic(latest, checkpoint)
+    original_bytes = latest.read_bytes()
+    (root / "run-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "lunar-training-run/v1",
+                "source_commit": checkpoint.source_commit,
+                "config_hash": checkpoint.config_hash,
+                "run_identity": checkpoint.run_identity.to_dict(),
+                "global_step": checkpoint.global_step,
+                "consumed_gpu_seconds": checkpoint.consumed_gpu_seconds,
+                "platform_allocation": checkpoint.worker_allocation,
+            }
+        ),
+        encoding="utf-8",
+    )
+    new_commit = "b" * 40
+    monkeypatch.setattr(cli_module, "_source_commit", lambda _root: new_commit)
+    monkeypatch.setattr(
+        cli_module, "_commit_is_ancestor", lambda *args, **kwargs: True
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_commit_changed_paths",
+        lambda *args, **kwargs: ("training/fix.py",),
+    )
+
+    migrated_path = cli_module._prepare_source_migrated_resume_checkpoint(
+        artifact_root=root,
+        checkpoint_path=latest,
+        repository_root=REPOSITORY_ROOT,
+        expected_old_source_commit=checkpoint.source_commit,
+        expected_global_step=12,
+    )
+
+    migrated = load_checkpoint(migrated_path)
+    manifest = json.loads(
+        (root / "run-manifest.json").read_text(encoding="utf-8")
+    )
+    backup = checkpoints / (
+        f"source-checkpoint-step-12-{checkpoint.source_commit[:12]}.pt"
+    )
+    assert latest.read_bytes() == original_bytes
+    assert backup.read_bytes() == original_bytes
+    assert migrated.source_commit == new_commit
+    assert migrated.global_step == checkpoint.global_step
+    assert migrated.consumed_gpu_seconds == checkpoint.consumed_gpu_seconds
+    assert manifest["source_commit"] == new_commit
+    assert manifest["source_migrations"][-1]["from_source_commit"] == (
+        checkpoint.source_commit
+    )
+    assert manifest["source_migrations"][-1]["to_source_commit"] == new_commit
 
 
 def test_formal_checkpoint_rejects_missing_episode_cursor_state() -> None:

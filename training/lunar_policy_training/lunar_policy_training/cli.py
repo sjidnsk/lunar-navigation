@@ -10,6 +10,7 @@ import json
 import math
 import os
 import random
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -55,10 +56,12 @@ from .checkpoint import (
     FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
     OBSERVATION_CONTRACT_VERSION,
     RunIdentity,
+    TrainingCheckpointV6,
     build_training_checkpoint,
     config_sha256,
     load_checkpoint,
     load_checkpoint_for_resume,
+    migrate_checkpoint_source_commit,
     restore_training_state,
     save_checkpoint_atomic,
 )
@@ -104,6 +107,7 @@ from .curriculum import (
     FORMAL_SEED,
     PLATFORMS,
     REWARD_CALIBRATION_SEEDS,
+    next_joint_evaluation_gpu_seconds,
     resume_worker_episode_states,
 )
 from .evaluation.release_gate import (
@@ -113,6 +117,7 @@ from .evaluation.release_gate import (
 )
 from .evaluation.report import (
     EvaluationReport,
+    FORMAL_EVALUATION_WATCHDOG_SECONDS,
     FormalEvaluationBatch,
     evaluate_formal_policy,
     evaluate_proxy_policy,
@@ -527,6 +532,7 @@ class TrainingBoundaryLoop:
         candidate_checkpoint_interval_seconds: int,
         curriculum_phase: str,
         phase_end_gpu_seconds: float | None = None,
+        pause_after_gpu_seconds: float | None = None,
         initial_global_step: int = 0,
         initial_latest_checkpoint_gpu_seconds: float = 0.0,
         initial_candidate_checkpoint_gpu_seconds: float = 0.0,
@@ -585,6 +591,21 @@ class TrainingBoundaryLoop:
             if phase_end_gpu_seconds is None
             else float(phase_end_gpu_seconds)
         )
+        if pause_after_gpu_seconds is not None and (
+            curriculum_phase != "joint"
+            or not isinstance(pause_after_gpu_seconds, (int, float))
+            or isinstance(pause_after_gpu_seconds, bool)
+            or not math.isfinite(float(pause_after_gpu_seconds))
+            or not 0.0
+            <= float(pause_after_gpu_seconds)
+            <= budget.total_gpu_seconds
+        ):
+            raise ValueError("joint evaluation pause boundary is invalid")
+        self._pause_after_gpu_seconds = (
+            None
+            if pause_after_gpu_seconds is None
+            else float(pause_after_gpu_seconds)
+        )
         self._global_step = initial_global_step
         self._latest_checkpoint_gpu_seconds = float(
             initial_latest_checkpoint_gpu_seconds
@@ -617,6 +638,17 @@ class TrainingBoundaryLoop:
             raise ValueError("update recorder must be callable")
         updates = 0
         while updates < max_updates:
+            if (
+                self._pause_after_gpu_seconds is not None
+                and self._budget.consumed_gpu_seconds
+                >= self._pause_after_gpu_seconds
+            ):
+                self._latest_checkpoint_gpu_seconds = (
+                    self._budget.consumed_gpu_seconds
+                )
+                state = self._state(rollout_discarded=False)
+                save_checkpoint("latest", state)
+                return state
             if (
                 self._phase_end_gpu_seconds is not None
                 and self._phase_end_gpu_seconds
@@ -1286,6 +1318,12 @@ def main(argv: list[str] | None = None) -> int:
             sensor_performance_sha256=sensor_performance_sha256,
             split="train",
         )
+        formal_batches = _formal_evaluation_batches_from_calibrated_root(
+            Path(arguments.artifact_root),
+            capability_bundle=capability_bundle,
+            repository_root=repository_root,
+            sensor_performance_sha256=sensor_performance_sha256,
+        )
         _start_training_run(
             config_path=Path(arguments.config),
             artifact_root=Path(arguments.artifact_root),
@@ -1295,6 +1333,10 @@ def main(argv: list[str] | None = None) -> int:
             capability_bundle=capability_bundle,
             formal_environment_factory=formal_assembly.factory,
             formal_observation_template=formal_assembly.observation_template,
+            formal_evaluation_batches=formal_batches,
+            formal_gate_path=(
+                repository_root / "training/configs/candidate_gate_v1.yaml"
+            ),
         )
     elif arguments.command == "resume":
         capability_bundle = _formal_capability_preflight(repository_root)
@@ -1310,6 +1352,12 @@ def main(argv: list[str] | None = None) -> int:
             sensor_performance_sha256=sensor_performance_sha256,
             split="train",
         )
+        formal_batches = _formal_evaluation_batches_from_calibrated_root(
+            Path(arguments.artifact_root),
+            capability_bundle=capability_bundle,
+            repository_root=repository_root,
+            sensor_performance_sha256=sensor_performance_sha256,
+        )
         _resume_training_run(
             artifact_root=Path(arguments.artifact_root),
             checkpoint_path=Path(arguments.checkpoint),
@@ -1318,6 +1366,10 @@ def main(argv: list[str] | None = None) -> int:
             capability_bundle=capability_bundle,
             formal_environment_factory=formal_assembly.factory,
             formal_observation_template=formal_assembly.observation_template,
+            formal_evaluation_batches=formal_batches,
+            formal_gate_path=(
+                repository_root / "training/configs/candidate_gate_v1.yaml"
+            ),
         )
     elif arguments.command == "evaluate":
         capability_bundle = _formal_capability_preflight(repository_root)
@@ -1326,23 +1378,12 @@ def main(argv: list[str] | None = None) -> int:
             capability_bundle=capability_bundle,
             repository_root=repository_root,
         )
-        calibrated = _load_calibrated_run_state(Path(arguments.artifact_root))
-        if calibrated.cache_manifest_path is None:
-            raise PreflightError("formal evaluation cache manifest is missing")
-        assemblies = {
-            split: _formal_environment_from_calibrated_root(
-                Path(arguments.artifact_root),
-                capability_bundle=capability_bundle,
-                repository_root=repository_root,
-                sensor_performance_sha256=sensor_performance_sha256,
-                split=split,
-            )
-            for split in ("validation", "test", "holdout")
-        }
-        formal_cache = load_formal_cache(
-            calibrated.cache_manifest_path, require_full=True
+        formal_batches = _formal_evaluation_batches_from_calibrated_root(
+            Path(arguments.artifact_root),
+            capability_bundle=capability_bundle,
+            repository_root=repository_root,
+            sensor_performance_sha256=sensor_performance_sha256,
         )
-        formal_batches = _formal_evaluation_batches(formal_cache, assemblies)
         _evaluate_checkpoint(
             checkpoint_path=Path(arguments.checkpoint),
             gate_path=Path(arguments.gate),
@@ -1657,6 +1698,33 @@ def _formal_evaluation_batches(
             )
         )
     return tuple(batches)
+
+
+def _formal_evaluation_batches_from_calibrated_root(
+    artifact_root: Path,
+    *,
+    capability_bundle: FrozenCapabilityBundle,
+    repository_root: Path,
+    sensor_performance_sha256: str,
+) -> tuple[FormalEvaluationBatch, ...]:
+    """Construct all frozen non-training batches for manual or periodic gates."""
+    calibrated = _load_calibrated_run_state(artifact_root)
+    if calibrated.cache_manifest_path is None:
+        raise PreflightError("formal evaluation cache manifest is missing")
+    assemblies = {
+        split: _formal_environment_from_calibrated_root(
+            artifact_root,
+            capability_bundle=capability_bundle,
+            repository_root=repository_root,
+            sensor_performance_sha256=sensor_performance_sha256,
+            split=split,
+        )
+        for split in ("validation", "test", "holdout")
+    }
+    formal_cache = load_formal_cache(
+        calibrated.cache_manifest_path, require_full=True
+    )
+    return _formal_evaluation_batches(formal_cache, assemblies)
 
 
 def _formal_sensor_performance_preflight(
@@ -2030,6 +2098,8 @@ def _write_formal_evaluation_artifacts(
     checkpoint_path: Path,
     report: EvaluationReport,
     gate_result: GateResult,
+    started_gpu_seconds: float | None = None,
+    completed_gpu_seconds: float | None = None,
 ) -> str:
     """Persist an explicitly non-proxy release evaluation and its gate result."""
     if (
@@ -2044,18 +2114,67 @@ def _write_formal_evaluation_artifacts(
         raise PreflightError(
             "formal evaluation artifacts require an eligible non-proxy result"
         )
+    if (started_gpu_seconds is None) != (completed_gpu_seconds is None):
+        raise PreflightError("formal evaluation GPU interval is incomplete")
+    if started_gpu_seconds is not None:
+        if (
+            not isinstance(started_gpu_seconds, (int, float))
+            or isinstance(started_gpu_seconds, bool)
+            or not math.isfinite(float(started_gpu_seconds))
+            or not isinstance(completed_gpu_seconds, (int, float))
+            or isinstance(completed_gpu_seconds, bool)
+            or not math.isfinite(float(completed_gpu_seconds))
+            or float(completed_gpu_seconds) < float(started_gpu_seconds)
+        ):
+            raise PreflightError("formal evaluation GPU interval is invalid")
     evaluation_dir = root / "evaluation"
     evaluation_dir.mkdir(parents=True, exist_ok=True)
-    digest = write_report(evaluation_dir / "formal-report.json", report)
     result_payload = {
         "schema_version": "lunar-policy-formal-evaluation-result/v1",
-        "report_sha256": digest,
         "run_kind": gate_result.run_kind,
         "proxy": gate_result.proxy,
         "formal_candidate_eligible": gate_result.formal_candidate_eligible,
         "release_gate_passed": gate_result.passed,
         "failed_rules": list(gate_result.failed_rules),
     }
+    if started_gpu_seconds is not None:
+        result_payload.update(
+            {
+                "started_gpu_seconds": float(started_gpu_seconds),
+                "completed_gpu_seconds": float(completed_gpu_seconds),
+            }
+        )
+    candidate_name = checkpoint_path.stem
+    if checkpoint_path.name.startswith("candidate-step-"):
+        immutable_dir = evaluation_dir / candidate_name
+        if immutable_dir.exists() or immutable_dir.is_symlink():
+            raise PreflightError("formal candidate evaluation already exists")
+        temporary_dir = Path(
+            tempfile.mkdtemp(
+                dir=evaluation_dir,
+                prefix=f".{candidate_name}.",
+            )
+        )
+        try:
+            immutable_digest = write_report(
+                temporary_dir / "formal-report.json", report
+            )
+            immutable_result = {
+                **result_payload,
+                "report_sha256": immutable_digest,
+            }
+            (temporary_dir / "formal-result.json").write_text(
+                json.dumps(immutable_result, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.rename(temporary_dir, immutable_dir)
+        except Exception:
+            for child in temporary_dir.iterdir():
+                child.unlink()
+            temporary_dir.rmdir()
+            raise
+    digest = write_report(evaluation_dir / "formal-report.json", report)
+    result_payload["report_sha256"] = digest
     (evaluation_dir / "formal-result.json").write_text(
         json.dumps(result_payload, sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
@@ -2070,6 +2189,13 @@ def _write_formal_evaluation_artifacts(
         "formal_candidate_eligible": gate_result.formal_candidate_eligible,
         "release_gate_passed": gate_result.passed,
     }
+    if started_gpu_seconds is not None:
+        manifest["last_evaluation"].update(
+            {
+                "started_gpu_seconds": float(started_gpu_seconds),
+                "completed_gpu_seconds": float(completed_gpu_seconds),
+            }
+        )
     _write_manifest_payload(manifest_path, manifest)
     return digest
 
@@ -2082,12 +2208,40 @@ def _evaluate_checkpoint(
     repository_root: Path,
     capability_bundle: FrozenCapabilityBundle | None = None,
     formal_batches: tuple[FormalEvaluationBatch, ...] | None = None,
+    shared_budget: TrainingBudget | None = None,
+    evaluation_started_gpu_seconds: float | None = None,
+    calibrated_state: CalibratedRunState | None = None,
 ):
     """Evaluate one explicit checkpoint using its calibrated environment kind."""
     root = validate_artifact_root(
         artifact_root, repository_root=repository_root
     )
-    calibrated = _load_calibrated_run_state(root)
+    calibrated = (
+        _load_calibrated_run_state(root)
+        if calibrated_state is None
+        else calibrated_state
+    )
+    if not isinstance(calibrated, CalibratedRunState):
+        raise PreflightError("formal evaluation calibrated state is invalid")
+    budget = calibrated.budget if shared_budget is None else shared_budget
+    if not isinstance(budget, TrainingBudget):
+        raise PreflightError("formal evaluation shared budget is invalid")
+    if shared_budget is not None and budget is not calibrated.budget:
+        raise PreflightError(
+            "formal evaluation must share the calibrated training budget"
+        )
+    if evaluation_started_gpu_seconds is None:
+        evaluation_started = budget.consumed_gpu_seconds
+    elif (
+        shared_budget is None
+        or not isinstance(evaluation_started_gpu_seconds, (int, float))
+        or isinstance(evaluation_started_gpu_seconds, bool)
+        or not math.isfinite(float(evaluation_started_gpu_seconds))
+        or float(evaluation_started_gpu_seconds) != budget.consumed_gpu_seconds
+    ):
+        raise PreflightError("formal evaluation start differs from shared budget")
+    else:
+        evaluation_started = float(evaluation_started_gpu_seconds)
     if calibrated.config.run_kind == "formal":
         _validate_formal_bundle_identity(capability_bundle, calibrated.run_identity)
         if (
@@ -2127,10 +2281,36 @@ def _evaluate_checkpoint(
     )
     policy = CrossAttentionPolicy()
     policy.load_state_dict(dict(checkpoint.model_state), strict=True)
+
+    def persist_budget_position() -> None:
+        current_manifest = _read_run_manifest(root / "run-manifest.json")
+        current_step = current_manifest.get("global_step")
+        current_allocation = current_manifest.get("platform_allocation")
+        if type(current_step) is not int or not isinstance(
+            current_allocation, dict
+        ):
+            raise ArtifactRootError("run manifest training position is invalid")
+        _update_run_manifest(
+            root / "run-manifest.json",
+            source_commit=checkpoint.source_commit,
+            config_hash=checkpoint.config_hash,
+            run_identity=calibrated.run_identity,
+            global_step=current_step,
+            consumed_gpu_seconds=budget.consumed_gpu_seconds,
+            platform_allocation={
+                str(name): int(count)
+                for name, count in current_allocation.items()
+            },
+        )
+
     start = time.monotonic()
-    calibrated.budget.begin_gpu_interval(
+    budget.begin_gpu_interval(
         monotonic_seconds=start,
-        upper_bound_gpu_seconds=TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS,
+        upper_bound_gpu_seconds=(
+            FORMAL_EVALUATION_WATCHDOG_SECONDS
+            if calibrated.config.run_kind == "formal"
+            else TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS
+        ),
     )
     try:
         if calibrated.config.run_kind == "formal":
@@ -2151,26 +2331,26 @@ def _evaluate_checkpoint(
             )
         torch.cuda.synchronize()
     except BaseException:
-        calibrated.budget.end_gpu_interval(monotonic_seconds=time.monotonic())
+        try:
+            budget.end_gpu_interval(monotonic_seconds=time.monotonic())
+        finally:
+            persist_budget_position()
         raise
     else:
-        calibrated.budget.end_gpu_interval(monotonic_seconds=time.monotonic())
+        try:
+            budget.end_gpu_interval(monotonic_seconds=time.monotonic())
+        finally:
+            persist_budget_position()
+    evaluation_completed = budget.consumed_gpu_seconds
     gate_result = evaluate_release_gate(report, load_gate_rules(gate_path))
-    _update_run_manifest(
-        root / "run-manifest.json",
-        source_commit=checkpoint.source_commit,
-        config_hash=checkpoint.config_hash,
-        run_identity=calibrated.run_identity,
-        global_step=checkpoint.global_step,
-        consumed_gpu_seconds=calibrated.budget.consumed_gpu_seconds,
-        platform_allocation=calibrated.allocation,
-    )
     if calibrated.config.run_kind == "formal":
         _write_formal_evaluation_artifacts(
             root=root,
             checkpoint_path=checkpoint_target,
             report=report,
             gate_result=gate_result,
+            started_gpu_seconds=evaluation_started,
+            completed_gpu_seconds=evaluation_completed,
         )
     else:
         _write_development_evaluation_artifacts(
@@ -2195,6 +2375,9 @@ def _run_curriculum_training(
     capability_bundle: FrozenCapabilityBundle | None = None,
     formal_environment_factory: FrozenCapabilityEnvironmentFactory | None = None,
     formal_observation_template: PolicyBatch | None = None,
+    evaluate_candidate: (
+        Callable[[Path, TrainingBudget, float], GateResult] | None
+    ) = None,
 ) -> _RunEvidence:
     """Run one smoke override or advance across four active-GPU phases."""
     if calibrated.config.run_kind == "formal":
@@ -2236,6 +2419,22 @@ def _run_curriculum_training(
         )
         if phase == "joint":
             phase_end = calibrated.budget.total_gpu_seconds
+        evaluation_due_gpu_seconds: float | None = None
+        if phase == "joint" and evaluate_candidate is not None:
+            manifest = _read_run_manifest(artifact_root / "run-manifest.json")
+            last_evaluation = manifest.get("last_evaluation")
+            last_started = (
+                last_evaluation.get("started_gpu_seconds")
+                if isinstance(last_evaluation, dict)
+                else None
+            )
+            evaluation_due_gpu_seconds = next_joint_evaluation_gpu_seconds(
+                schedule=schedule,
+                calibration_end_gpu_seconds=(
+                    calibrated.calibration_end_gpu_seconds
+                ),
+                last_evaluation_started_gpu_seconds=last_started,
+            )
         evidence = _run_updates(
             config=calibrated.config,
             artifact_root=artifact_root,
@@ -2250,12 +2449,17 @@ def _run_curriculum_training(
             restore_checkpoint=checkpoint,
             curriculum_phase=phase,
             phase_end_gpu_seconds=phase_end,
+            pause_after_gpu_seconds=evaluation_due_gpu_seconds,
             rollout_environment_factory=rollout_factory,
             rollout_observation_template=formal_observation_template,
             rollout_reward_fn=compute_transition_reward,
             run_identity=calibrated.run_identity,
         )
-        if max_updates is not None or calibrated.budget.exhausted:
+        if (
+            max_updates is not None
+            or calibrated.budget.exhausted
+            or evidence.signal_observed_at_update_boundary
+        ):
             return evidence
         latest = load_checkpoint(
             _checkpoint_target(
@@ -2266,6 +2470,29 @@ def _run_curriculum_training(
             consumed_gpu_s=calibrated.budget.consumed_gpu_seconds,
             calibration_end_gpu_s=calibrated.calibration_end_gpu_seconds,
         )
+        if (
+            phase == "joint"
+            and evaluate_candidate is not None
+            and evaluation_due_gpu_seconds is not None
+            and calibrated.budget.consumed_gpu_seconds
+            >= evaluation_due_gpu_seconds
+        ):
+            evaluation_started = calibrated.budget.consumed_gpu_seconds
+            gate_result = evaluate_candidate(
+                _latest_candidate_checkpoint(artifact_root),
+                calibrated.budget,
+                evaluation_started,
+            )
+            if not isinstance(gate_result, GateResult):
+                raise PreflightError(
+                    "automatic candidate evaluation returned invalid gate result"
+                )
+            if gate_result.passed or calibrated.budget.exhausted:
+                return evidence
+            checkpoint = latest
+            global_step = latest.global_step
+            interrupt_first_update = False
+            continue
         if next_phase == phase:
             return evidence
         checkpoint = latest
@@ -2283,15 +2510,19 @@ def _start_training_run(
     capability_bundle: FrozenCapabilityBundle | None = None,
     formal_environment_factory: FrozenCapabilityEnvironmentFactory | None = None,
     formal_observation_template: PolicyBatch | None = None,
+    formal_evaluation_batches: tuple[FormalEvaluationBatch, ...] | None = None,
+    formal_gate_path: Path | None = None,
 ) -> _RunEvidence:
     requested_config = load_training_config(config_path)
+    if (formal_evaluation_batches is None) != (formal_gate_path is None):
+        raise PreflightError("automatic formal evaluation inputs are incomplete")
     if requested_config.run_kind == "formal":
         if max_updates is not None:
             raise PreflightError("formal train cannot bound updates")
         if capability_bundle is None:
             raise PreflightError("formal capability bundle is required")
     else:
-        if capability_bundle is not None:
+        if capability_bundle is not None or formal_evaluation_batches is not None:
             raise PreflightError("development-smoke rejects formal capability bundle")
         if type(max_updates) is not int or not 1 <= max_updates <= 2:
             raise PreflightError("development-smoke permits only one or two updates")
@@ -2319,6 +2550,27 @@ def _start_training_run(
         _validate_formal_bundle_identity(capability_bundle, calibrated.run_identity)
     source_commit = _source_commit(repository_root)
     _seed_everything(calibrated.formal_seed)
+
+    def evaluate_candidate(
+        checkpoint: Path,
+        budget: TrainingBudget,
+        started_gpu_seconds: float,
+    ) -> GateResult:
+        if formal_evaluation_batches is None or formal_gate_path is None:
+            raise PreflightError("automatic formal evaluation inputs are missing")
+        _, result = _evaluate_checkpoint(
+            checkpoint_path=checkpoint,
+            gate_path=formal_gate_path,
+            artifact_root=root,
+            repository_root=repository_root,
+            capability_bundle=capability_bundle,
+            formal_batches=formal_evaluation_batches,
+            shared_budget=budget,
+            evaluation_started_gpu_seconds=started_gpu_seconds,
+            calibrated_state=calibrated,
+        )
+        return result
+
     return _run_curriculum_training(
         calibrated=calibrated,
         artifact_root=root,
@@ -2331,6 +2583,12 @@ def _start_training_run(
         capability_bundle=capability_bundle,
         formal_environment_factory=formal_environment_factory,
         formal_observation_template=formal_observation_template,
+        evaluate_candidate=(
+            evaluate_candidate
+            if formal_evaluation_batches is not None
+            and formal_gate_path is not None
+            else None
+        ),
     )
 
 
@@ -2343,6 +2601,8 @@ def _resume_training_run(
     capability_bundle: FrozenCapabilityBundle | None = None,
     formal_environment_factory: FrozenCapabilityEnvironmentFactory | None = None,
     formal_observation_template: PolicyBatch | None = None,
+    formal_evaluation_batches: tuple[FormalEvaluationBatch, ...] | None = None,
+    formal_gate_path: Path | None = None,
 ) -> _RunEvidence:
     root = validate_artifact_root(
         artifact_root, repository_root=repository_root
@@ -2353,12 +2613,14 @@ def _resume_training_run(
     if not isinstance(frozen_config, dict):
         raise ArtifactRootError("run manifest frozen config is missing")
     config = resolve_training_config(frozen_config)
+    if (formal_evaluation_batches is None) != (formal_gate_path is None):
+        raise PreflightError("automatic formal evaluation inputs are incomplete")
     if config.run_kind == "formal":
         if max_updates is not None:
             raise PreflightError("formal resume cannot bound updates")
         _validate_formal_bundle_identity(capability_bundle, calibrated.run_identity)
     else:
-        if capability_bundle is not None:
+        if capability_bundle is not None or formal_evaluation_batches is not None:
             raise PreflightError("development-smoke rejects formal capability bundle")
         if type(max_updates) is not int or not 1 <= max_updates <= 2:
             raise PreflightError("development-smoke permits only one or two updates")
@@ -2425,6 +2687,27 @@ def _resume_training_run(
         != 1
     ):
         raise ArtifactRootError("checkpoint curriculum phase differs from GPU budget")
+
+    def evaluate_candidate(
+        candidate: Path,
+        budget: TrainingBudget,
+        started_gpu_seconds: float,
+    ) -> GateResult:
+        if formal_evaluation_batches is None or formal_gate_path is None:
+            raise PreflightError("automatic formal evaluation inputs are missing")
+        _, result = _evaluate_checkpoint(
+            checkpoint_path=candidate,
+            gate_path=formal_gate_path,
+            artifact_root=root,
+            repository_root=repository_root,
+            capability_bundle=capability_bundle,
+            formal_batches=formal_evaluation_batches,
+            shared_budget=budget,
+            evaluation_started_gpu_seconds=started_gpu_seconds,
+            calibrated_state=calibrated,
+        )
+        return result
+
     return _run_curriculum_training(
         calibrated=calibrated,
         artifact_root=root,
@@ -2437,6 +2720,12 @@ def _resume_training_run(
         capability_bundle=capability_bundle,
         formal_environment_factory=formal_environment_factory,
         formal_observation_template=formal_observation_template,
+        evaluate_candidate=(
+            evaluate_candidate
+            if formal_evaluation_batches is not None
+            and formal_gate_path is not None
+            else None
+        ),
     )
 
 
@@ -2455,6 +2744,7 @@ def _run_updates(
     restore_checkpoint,
     curriculum_phase: str = "joint",
     phase_end_gpu_seconds: float | None = None,
+    pause_after_gpu_seconds: float | None = None,
     rollout_environment_factory: Callable[
         [int, str], ParallelEnvironmentWorker
     ] | None = None,
@@ -2716,6 +3006,7 @@ def _run_updates(
         ),
         curriculum_phase=curriculum_phase,
         phase_end_gpu_seconds=phase_end_gpu_seconds,
+        pause_after_gpu_seconds=pause_after_gpu_seconds,
         initial_global_step=initial_global_step,
         initial_latest_checkpoint_gpu_seconds=(
             restore_checkpoint.latest_checkpoint_gpu_seconds
@@ -3659,6 +3950,30 @@ def _checkpoint_target(
     return artifact_root / "checkpoints" / name
 
 
+def _latest_candidate_checkpoint(artifact_root: Path) -> Path:
+    """Return the regular candidate file with the greatest numeric step."""
+    checkpoints = artifact_root / "checkpoints"
+    if not checkpoints.is_dir() or checkpoints.is_symlink():
+        raise ArtifactRootError("candidate checkpoint directory is missing")
+    candidates: list[tuple[int, Path]] = []
+    for path in checkpoints.iterdir():
+        prefix = "candidate-step-"
+        suffix = ".pt"
+        if (
+            not path.name.startswith(prefix)
+            or not path.name.endswith(suffix)
+            or path.is_symlink()
+            or not path.is_file()
+        ):
+            continue
+        step_text = path.name[len(prefix) : -len(suffix)]
+        if step_text.isdigit():
+            candidates.append((int(step_text), path))
+    if not candidates:
+        raise ArtifactRootError("no immutable candidate checkpoint exists")
+    return max(candidates, key=lambda value: value[0])[1]
+
+
 def _validated_cuda_device() -> str:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable for the training smoke")
@@ -3696,6 +4011,190 @@ def _source_commit(repository_root: Path) -> str:
     ):
         raise RuntimeError("repository HEAD is not a full source commit")
     return commit
+
+
+def _commit_is_ancestor(
+    repository_root: Path, ancestor: str, descendant: str
+) -> bool:
+    completed = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=repository_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode not in (0, 1):
+        raise RuntimeError("source migration ancestry check failed")
+    return completed.returncode == 0
+
+
+def _commit_changed_paths(
+    repository_root: Path, ancestor: str, descendant: str
+) -> tuple[str, ...]:
+    completed = subprocess.run(
+        ["git", "diff", "--name-only", f"{ancestor}..{descendant}"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return tuple(line for line in completed.stdout.splitlines() if line)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _copy_regular_file_exclusive(source: Path, target: Path) -> None:
+    if target.exists() or target.is_symlink():
+        if not target.is_file() or _file_sha256(target) != _file_sha256(source):
+            raise ArtifactRootError("source checkpoint backup already differs")
+        return
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with source.open("rb") as input_stream, os.fdopen(
+            descriptor, "wb"
+        ) as output_stream:
+            descriptor = -1
+            shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
+            output_stream.flush()
+            os.fsync(output_stream.fileno())
+        directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if target.exists() and target.is_file():
+            target.unlink()
+        raise
+
+
+def _prepare_source_migrated_resume_checkpoint(
+    *,
+    artifact_root: Path,
+    checkpoint_path: Path,
+    repository_root: Path,
+    expected_old_source_commit: str,
+    expected_global_step: int,
+) -> Path:
+    """Create an immutable, audited resume copy for an in-line code repair."""
+    root = validate_artifact_root(
+        artifact_root, repository_root=repository_root
+    )
+    if type(expected_global_step) is not int or expected_global_step < 0:
+        raise PreflightError("source migration expected step is invalid")
+    checkpoint_target = checkpoint_path.resolve(strict=True)
+    checkpoints = (root / "checkpoints").resolve(strict=True)
+    if (
+        checkpoint_target.parent != checkpoints
+        or checkpoint_target.name != "latest.pt"
+    ):
+        raise ArtifactRootError(
+            "source migration requires the authoritative latest checkpoint"
+        )
+    checkpoint = load_checkpoint(checkpoint_target)
+    if (
+        not isinstance(checkpoint, TrainingCheckpointV6)
+        or checkpoint.run_identity.run_kind != "formal"
+        or checkpoint.source_commit != expected_old_source_commit
+        or checkpoint.global_step != expected_global_step
+    ):
+        raise PreflightError("source migration checkpoint identity differs")
+    new_source_commit = _source_commit(repository_root)
+    if not _commit_is_ancestor(
+        repository_root, expected_old_source_commit, new_source_commit
+    ):
+        raise PreflightError("source migration is not a descendant repair")
+    changed_paths = _commit_changed_paths(
+        repository_root,
+        expected_old_source_commit,
+        new_source_commit,
+    )
+    manifest_path = root / "run-manifest.json"
+    manifest = _read_run_manifest(manifest_path)
+    try:
+        manifest_identity = RunIdentity.from_mapping(manifest.get("run_identity"))
+    except Exception as error:
+        raise ArtifactRootError(
+            "source migration manifest identity is invalid"
+        ) from error
+    if (
+        manifest.get("source_commit") != expected_old_source_commit
+        or manifest.get("global_step") != checkpoint.global_step
+        or manifest.get("config_hash") != checkpoint.config_hash
+        or manifest_identity != checkpoint.run_identity
+        or manifest.get("consumed_gpu_seconds")
+        != checkpoint.consumed_gpu_seconds
+        or manifest.get("platform_allocation")
+        != checkpoint.worker_allocation
+    ):
+        raise ArtifactRootError("source migration manifest differs from checkpoint")
+    backup_path = checkpoints / (
+        f"source-checkpoint-step-{checkpoint.global_step}-"
+        f"{expected_old_source_commit[:12]}.pt"
+    )
+    _copy_regular_file_exclusive(checkpoint_target, backup_path)
+    migrated = migrate_checkpoint_source_commit(
+        checkpoint,
+        expected_source_commit=expected_old_source_commit,
+        new_source_commit=new_source_commit,
+    )
+    migrated_path = checkpoints / (
+        f"resume-step-{checkpoint.global_step}-{new_source_commit[:12]}.pt"
+    )
+    if migrated_path.exists() or migrated_path.is_symlink():
+        existing_migrated = load_checkpoint(migrated_path)
+        if (
+            not isinstance(existing_migrated, TrainingCheckpointV6)
+            or existing_migrated.payload_sha256 != migrated.payload_sha256
+        ):
+            raise ArtifactRootError("existing source-migrated checkpoint differs")
+    else:
+        save_checkpoint_atomic(migrated_path, migrated, overwrite=False)
+    verified = load_checkpoint_for_resume(
+        migrated_path,
+        expected_contract_version=OBSERVATION_CONTRACT_VERSION,
+        expected_config_hash=checkpoint.config_hash,
+        expected_source_commit=new_source_commit,
+        expected_run_identity=checkpoint.run_identity,
+        expected_worker_allocation=checkpoint.worker_allocation,
+        expected_micro_batch_size=checkpoint.micro_batch_size,
+        expected_budget_extension_blocks=checkpoint.budget_extension_blocks,
+        expected_total_gpu_budget_seconds=checkpoint.total_gpu_budget_seconds,
+    )
+    migrations = manifest.get("source_migrations", [])
+    if not isinstance(migrations, list):
+        raise ArtifactRootError("source migration manifest history is invalid")
+    migrations.append(
+        {
+            "schema_version": "lunar-training-source-migration/v1",
+            "created_at_utc": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "from_source_commit": expected_old_source_commit,
+            "to_source_commit": new_source_commit,
+            "global_step": checkpoint.global_step,
+            "consumed_gpu_seconds": checkpoint.consumed_gpu_seconds,
+            "original_checkpoint": str(checkpoint_target),
+            "original_backup": str(backup_path),
+            "migrated_checkpoint": str(migrated_path),
+            "original_file_sha256": _file_sha256(checkpoint_target),
+            "original_payload_sha256": checkpoint.payload_sha256,
+            "migrated_payload_sha256": verified.payload_sha256,
+            "changed_paths": list(changed_paths),
+        }
+    )
+    manifest["source_commit"] = new_source_commit
+    manifest["source_migrations"] = migrations
+    _write_manifest_payload(manifest_path, manifest)
+    return migrated_path
 
 
 def _development_run_identity(source_commit: str) -> RunIdentity:

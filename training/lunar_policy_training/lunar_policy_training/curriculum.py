@@ -269,6 +269,35 @@ def resume_worker_episode_states(
     raise ValueError("curriculum phase or allocation drift is invalid")
 
 
+def next_joint_evaluation_gpu_seconds(
+    *,
+    schedule: CurriculumSchedule,
+    calibration_end_gpu_seconds: float,
+    last_evaluation_started_gpu_seconds: float | None,
+) -> float:
+    """Return the next three-hour joint evaluation start boundary."""
+    if not isinstance(schedule, CurriculumSchedule):
+        raise ValueError("joint evaluation requires CurriculumSchedule")
+    calibration_end = _bounded_absolute_seconds(
+        calibration_end_gpu_seconds, "calibration end"
+    )
+    joint_start = (
+        calibration_end
+        + len(PLATFORMS) * schedule.platform_warmup_limit_s
+        - _COMPLETE_UPDATE_RESERVE_S
+    )
+    if last_evaluation_started_gpu_seconds is None:
+        anchor = joint_start
+    else:
+        anchor = _bounded_absolute_seconds(
+            last_evaluation_started_gpu_seconds,
+            "last joint evaluation start",
+        )
+        if anchor < joint_start:
+            raise ValueError("last joint evaluation precedes joint training")
+    return anchor + schedule.evaluation_interval_s
+
+
 def _bounded_seconds(value: float, *, name: str, upper: float) -> float:
     if (
         not isinstance(value, (int, float))

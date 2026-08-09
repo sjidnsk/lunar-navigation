@@ -32,6 +32,7 @@ from lunar_policy_training.cli import (  # noqa: E402
     _freeze_task4_manifest,
     _freeze_formal_environment_manifest,
     _load_calibrated_run_state,
+    _latest_candidate_checkpoint,
     _run_curriculum_training,
     _update_run_manifest,
     build_parser,
@@ -48,6 +49,7 @@ from lunar_policy_training.checkpoint import RunIdentity
 from lunar_policy_training.curriculum import CurriculumSchedule
 from lunar_policy_training.polar_data.formal_cache import FormalCacheIdentity
 from lunar_policy_training.evaluation.release_gate import (
+    GateResult,
     evaluate_release_gate,
     load_gate_rules,
 )
@@ -638,6 +640,33 @@ def _perfect_development_report() -> EvaluationReport:
     )
 
 
+def _perfect_formal_report() -> EvaluationReport:
+    development = _perfect_development_report()
+    return EvaluationReport(
+        proxy=False,
+        scenario_schedule_id="formal/evaluation",
+        run_identity=RunIdentity(
+            **{
+                **development.run_identity.to_dict(),
+                "run_kind": "formal",
+            }
+        ),
+        reward_hash=development.reward_hash,
+        checkpoint_sha256=development.checkpoint_sha256,
+        methods=tuple(
+            MethodEvaluation(
+                method=method.method,
+                per_platform=method.per_platform,
+                per_split={
+                    split: dict(method.per_platform)
+                    for split in ("validation", "test", "holdout")
+                },
+            )
+            for method in development.methods
+        ),
+    )
+
+
 def test_cli_development_evaluation_artifacts_cannot_be_mistaken_for_release(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -785,30 +814,7 @@ def test_formal_evaluation_artifacts_are_non_proxy_and_gate_bound(
         json.dumps({"schema_version": "lunar-training-run/v1"}),
         encoding="utf-8",
     )
-    development = _perfect_development_report()
-    report = EvaluationReport(
-        proxy=False,
-        scenario_schedule_id="formal/evaluation",
-        run_identity=RunIdentity(
-            **{
-                **development.run_identity.to_dict(),
-                "run_kind": "formal",
-            }
-        ),
-        reward_hash=development.reward_hash,
-        checkpoint_sha256=development.checkpoint_sha256,
-        methods=tuple(
-            MethodEvaluation(
-                method=method.method,
-                per_platform=method.per_platform,
-                per_split={
-                    split: dict(method.per_platform)
-                    for split in ("validation", "test", "holdout")
-                },
-            )
-            for method in development.methods
-        ),
-    )
+    report = _perfect_formal_report()
     gate_result = evaluate_release_gate(
         report,
         load_gate_rules(REPOSITORY_ROOT / "training/configs/release_gate_v1.yaml"),
@@ -816,16 +822,29 @@ def test_formal_evaluation_artifacts_are_non_proxy_and_gate_bound(
 
     digest = cli_module._write_formal_evaluation_artifacts(
         root=root,
-        checkpoint_path=root / "checkpoints/latest.pt",
+        checkpoint_path=root / "checkpoints/candidate-step-42.pt",
         report=report,
         gate_result=gate_result,
+        started_gpu_seconds=32400.0,
+        completed_gpu_seconds=32412.5,
     )
 
     result = json.loads(
         (root / "evaluation/formal-result.json").read_text(encoding="utf-8")
     )
     assert (root / "evaluation/formal-report.json").is_file()
+    assert (
+        root / "evaluation/candidate-step-42/formal-report.json"
+    ).is_file()
+    immutable_result = json.loads(
+        (
+            root / "evaluation/candidate-step-42/formal-result.json"
+        ).read_text(encoding="utf-8")
+    )
     assert result["report_sha256"] == digest
+    assert immutable_result["report_sha256"] == digest
+    assert immutable_result["started_gpu_seconds"] == 32400.0
+    assert immutable_result["completed_gpu_seconds"] == 32412.5
     assert result["run_kind"] == "formal"
     assert result["proxy"] is False
     assert result["formal_candidate_eligible"] is True
@@ -833,6 +852,137 @@ def test_formal_evaluation_artifacts_are_non_proxy_and_gate_bound(
         (root / "run-manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["last_evaluation"]["report_sha256"] == digest
+    assert manifest["last_evaluation"]["started_gpu_seconds"] == 32400.0
+    assert manifest["last_evaluation"]["completed_gpu_seconds"] == 32412.5
+
+    with pytest.raises(PreflightError, match="already exists"):
+        cli_module._write_formal_evaluation_artifacts(
+            root=root,
+            checkpoint_path=root / "checkpoints/candidate-step-42.pt",
+            report=report,
+            gate_result=gate_result,
+            started_gpu_seconds=32400.0,
+            completed_gpu_seconds=32412.5,
+        )
+
+
+def test_formal_evaluation_uses_shared_budget_and_preserves_training_position(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "run"
+    checkpoints = root / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    candidate = checkpoints / "candidate-step-7.pt"
+    candidate.write_bytes(b"checkpoint")
+    report = _perfect_formal_report()
+    allocation = {"WHEELED": 24}
+    source_commit = "a" * 40
+    budget = TrainingBudget(consumed_gpu_seconds=100.0)
+    config = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+    calibrated = cli_module.CalibratedRunState(
+        config=config,
+        budget=budget,
+        allocation=allocation,
+        selected_workers=24,
+        micro_batch_size=2,
+        rollout_horizon=config.ppo.rollout_horizon,
+        reward_hash=report.reward_hash,
+        scenario_schedule_id="formal/train",
+        formal_seed=4080,
+        reward_calibration_seeds=(4081, 4082, 4083),
+        calibration_end_gpu_seconds=600.0,
+        run_identity=report.run_identity,
+        cache_manifest_path=tmp_path / "cache.json",
+        cache_manifest_sha256="8" * 64,
+        sensor_performance_sha256="9" * 64,
+    )
+    (root / "run-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "lunar-training-run/v1",
+                "runtime_calibration": {},
+                "budget_extension_blocks": 0,
+                "total_gpu_budget_seconds": 86400,
+                "consumed_gpu_seconds": 100.0,
+                "global_step": 118,
+                "platform_allocation": allocation,
+                "run_identity": report.run_identity.to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    checkpoint = SimpleNamespace(
+        model_state={},
+        payload_sha256=report.checkpoint_sha256,
+        source_commit=source_commit,
+        config_hash="b" * 64,
+        global_step=7,
+    )
+    template = proxy_observation(0, "WHEELED", step=0)
+    batches = tuple(
+        FormalEvaluationBatch(
+            split=split,
+            factory=SimpleNamespace(scenario_schedule_id=f"formal/{split}"),
+            observation_template=template,
+            scenario_seeds=(1,),
+        )
+        for split in ("validation", "test", "holdout")
+    )
+    monkeypatch.setattr(
+        cli_module, "_validate_formal_bundle_identity", lambda *args: None
+    )
+    monkeypatch.setattr(
+        cli_module, "load_checkpoint_for_resume", lambda *args, **kwargs: checkpoint
+    )
+    monkeypatch.setattr(cli_module, "_source_commit", lambda _root: source_commit)
+    monkeypatch.setattr(
+        cli_module,
+        "CrossAttentionPolicy",
+        lambda: SimpleNamespace(load_state_dict=lambda *args, **kwargs: None),
+    )
+    monkeypatch.setattr(
+        cli_module, "evaluate_formal_policy", lambda *args, **kwargs: report
+    )
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    timestamps = iter((10.0, 15.0))
+    monkeypatch.setattr(cli_module.time, "monotonic", lambda: next(timestamps))
+    reserved: list[float] = []
+    original_begin = TrainingBudget.begin_gpu_interval
+
+    def begin_interval(self, *, monotonic_seconds, upper_bound_gpu_seconds):
+        reserved.append(float(upper_bound_gpu_seconds))
+        return original_begin(
+            self,
+            monotonic_seconds=monotonic_seconds,
+            upper_bound_gpu_seconds=upper_bound_gpu_seconds,
+        )
+
+    monkeypatch.setattr(TrainingBudget, "begin_gpu_interval", begin_interval)
+
+    _, gate_result = cli_module._evaluate_checkpoint(
+        checkpoint_path=candidate,
+        gate_path=REPOSITORY_ROOT / "training/configs/candidate_gate_v1.yaml",
+        artifact_root=root,
+        repository_root=REPOSITORY_ROOT,
+        capability_bundle=object(),
+        formal_batches=batches,
+        shared_budget=budget,
+        evaluation_started_gpu_seconds=100.0,
+        calibrated_state=calibrated,
+    )
+
+    manifest = json.loads(
+        (root / "run-manifest.json").read_text(encoding="utf-8")
+    )
+    assert reserved == [3600.0]
+    assert budget.consumed_gpu_seconds == 105.0
+    assert manifest["global_step"] == 118
+    assert manifest["platform_allocation"] == allocation
+    assert manifest["last_evaluation"]["started_gpu_seconds"] == 100.0
+    assert manifest["last_evaluation"]["completed_gpu_seconds"] == 105.0
+    assert gate_result.formal_candidate_eligible is True
 
 
 @pytest.mark.parametrize("blocks", ["0", "-1", "1.5", "not-an-int"])
@@ -1351,6 +1501,48 @@ def test_training_boundary_does_not_record_a_failed_update() -> None:
     assert records == []
 
 
+def test_training_boundary_pauses_after_crossing_joint_evaluation_target() -> None:
+    timestamps = iter((10.0, 15.0))
+    budget = TrainingBudget(consumed_gpu_seconds=100.0)
+    events: list[str] = []
+    loop = TrainingBoundaryLoop(
+        budget=budget,
+        stop_flag=SignalStopFlag(),
+        checkpoint_interval_seconds=1800,
+        candidate_checkpoint_interval_seconds=3600,
+        curriculum_phase="joint",
+        pause_after_gpu_seconds=103.0,
+        clock=lambda: next(timestamps),
+    )
+
+    state = loop.run(
+        collect_rollout=lambda: events.append("collect") or object(),
+        update_rollout=lambda rollout: events.append("update"),
+        save_checkpoint=lambda kind, boundary: events.append(
+            f"save-{kind}-step-{boundary.global_step}"
+        ),
+        max_updates=5,
+    )
+
+    assert events == ["collect", "update", "save-latest-step-1"]
+    assert state.global_step == 1
+    assert budget.consumed_gpu_seconds == 105.0
+
+
+def test_latest_candidate_checkpoint_uses_numeric_global_step(
+    tmp_path: pathlib.Path,
+) -> None:
+    checkpoints = tmp_path / "checkpoints"
+    checkpoints.mkdir()
+    (checkpoints / "candidate-step-9.pt").write_bytes(b"nine")
+    expected = checkpoints / "candidate-step-120.pt"
+    expected.write_bytes(b"one-twenty")
+    (checkpoints / "candidate-step-invalid.pt").write_bytes(b"invalid")
+    (checkpoints / "latest.pt").write_bytes(b"latest")
+
+    assert _latest_candidate_checkpoint(tmp_path) == expected
+
+
 def test_resume_continues_latest_and_candidate_rhythms_from_active_gpu_markers() -> None:
     """Would fail if pause/resume restarted the 30/60-minute checkpoint clocks."""
     timestamps = iter((0.0, 1.0))
@@ -1495,6 +1687,88 @@ def test_formal_curriculum_invocation_advances_all_phases_without_restart(
         ("joint", {"WHEELED": 8, "LEGGED": 8, "HOPPER": 8}),
     ]
     assert result.global_step == 4
+    assert calibrated.budget.exhausted is True
+
+
+def test_joint_curriculum_evaluates_latest_candidate_and_continues_same_budget(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "calibrated"
+    _write_calibrated_manifest(root)
+    calibrated = _load_calibrated_run_state(root)
+    schedule = CurriculumSchedule()
+    joint_start = (
+        calibrated.calibration_end_gpu_seconds
+        + 3 * schedule.platform_warmup_limit_s
+        - 600.0
+    )
+    calibrated.budget.consume(
+        joint_start - calibrated.budget.consumed_gpu_seconds
+    )
+    checkpoints = root / "checkpoints"
+    checkpoints.mkdir()
+    candidate = checkpoints / "candidate-step-5.pt"
+    candidate.write_bytes(b"candidate")
+    calls: list[tuple[str, object]] = []
+    update_calls = 0
+
+    def run_joint(**kwargs):
+        nonlocal update_calls
+        update_calls += 1
+        budget = kwargs["budget"]
+        assert budget is calibrated.budget
+        assert kwargs["curriculum_phase"] == "joint"
+        if update_calls == 1:
+            due = kwargs["pause_after_gpu_seconds"]
+            budget.consume(due - budget.consumed_gpu_seconds)
+        else:
+            budget.consume(budget.remaining_gpu_seconds)
+        return SimpleNamespace(
+            global_step=update_calls,
+            consumed_gpu_seconds=budget.consumed_gpu_seconds,
+            platform_allocation=kwargs["allocation"],
+            signal_observed_at_update_boundary=False,
+        )
+
+    def evaluate_candidate(checkpoint, budget, started_gpu_seconds):
+        calls.append(("evaluate", checkpoint))
+        assert checkpoint == candidate
+        assert budget is calibrated.budget
+        assert started_gpu_seconds == budget.consumed_gpu_seconds
+        budget.consume(1.0)
+        return GateResult(
+            passed=False,
+            failed_rules=("validation.WHEELED.success_coverage_rate_min",),
+            run_kind="formal",
+            proxy=False,
+            formal_candidate_eligible=True,
+        )
+
+    monkeypatch.setattr(cli_module, "_run_updates", run_joint)
+    monkeypatch.setattr(
+        cli_module,
+        "load_checkpoint",
+        lambda path: SimpleNamespace(
+            global_step=update_calls,
+            curriculum_phase="joint",
+        ),
+    )
+
+    result = _run_curriculum_training(
+        calibrated=calibrated,
+        artifact_root=root,
+        repository_root=REPOSITORY_ROOT,
+        source_commit="a" * 40,
+        initial_global_step=0,
+        max_updates=None,
+        interrupt_first_update=False,
+        restore_checkpoint=None,
+        evaluate_candidate=evaluate_candidate,
+    )
+
+    assert calls == [("evaluate", candidate)]
+    assert update_calls == 2
+    assert result.global_step == 2
     assert calibrated.budget.exhausted is True
 
 

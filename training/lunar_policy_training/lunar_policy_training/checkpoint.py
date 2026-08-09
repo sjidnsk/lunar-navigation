@@ -313,6 +313,32 @@ def build_training_checkpoint(
     return _checkpoint_from_body(body, _semantic_sha256(body))
 
 
+def migrate_checkpoint_source_commit(
+    checkpoint: TrainingCheckpointV6,
+    *,
+    expected_source_commit: str,
+    new_source_commit: str,
+) -> TrainingCheckpointV6:
+    """Rebind one validated checkpoint after an explicit in-line code repair.
+
+    The caller remains responsible for preserving the original checkpoint and
+    recording operational evidence.  This pure transform changes no model,
+    optimizer, RNG, environment, progress, budget, or identity field.
+    """
+    if not isinstance(checkpoint, TrainingCheckpointV6):
+        raise CheckpointError("source migration requires a v6 checkpoint")
+    if checkpoint.source_commit != expected_source_commit:
+        raise CheckpointError("checkpoint source commit differs from migration")
+    if not _is_source_commit(new_source_commit):
+        raise CheckpointError("new checkpoint source commit is invalid")
+    if new_source_commit == expected_source_commit:
+        raise CheckpointError("checkpoint source commit did not change")
+    body = _body_from_checkpoint(checkpoint)
+    body["source_commit"] = new_source_commit
+    _validate_body(body)
+    return _checkpoint_from_body(body, _semantic_sha256(body))
+
+
 def save_checkpoint_atomic(
     path: str | Path,
     checkpoint: TrainingCheckpointV6,

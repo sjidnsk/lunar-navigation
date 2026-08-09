@@ -81,7 +81,13 @@ manifest 的 `last_evaluation` 记录 checkpoint、评估开始/完成 GPU secon
 - 指标 JSON 非有限、schema 不符、步号倒退或同一步重复时立即停止训练；
 - 自动评估异常或 watchdog 超时保留 latest/candidate 和错误日志，但不把它记为策略不可行；
 - 阶段切换只接受冻结课程中的相邻变化；其他 worker 身份不匹配仍由 `ParallelEnvPool` 拒绝；
-- 当前 step 118 检查点保持原文件不变，修复通过后使用正式 `resume` 命令继续；
+- 修复提交改变了严格检查点中的 `source_commit`，因此不能绕过校验直接恢复。先把 step 118 原文件
+  复制为不可变备份，再生成一个只改变 `source_commit` 和随之变化的 payload hash 的 v6 resume
+  副本；模型、优化器、scheduler、normalization、RNG、episode、step、预算和所有正式 run identity
+  字段必须逐项保持不变；
+- source 迁移只接受旧提交到当前后代提交、显式 step 118 和权威 `latest.pt`，并在 manifest 记录
+  新旧提交、两个 payload hash、原文件 hash、备份/副本路径和实际变更文件清单。正式 `resume`
+  使用迁移副本；原 step 118 文件在成功写出 step 119 前不被修改；
 - 训练、指标、评估报告和检查点全部留在仓库外，不提交运行 artifact。
 
 ## 验证
@@ -94,4 +100,5 @@ manifest 的 `last_evaluation` 记录 checkpoint、评估开始/完成 GPU secon
 4. 指标中的 reward、覆盖、success、planner outcome 和 PPO 数值来自真实 rollout/metrics；
 5. joint 三小时边界选择最新 candidate、关闭训练池后共用预算评估；未通过继续，通过则结束；
 6. step 118 真实检查点预检能够建立 `LEGGED×24` 池而不消耗一个训练 update；
-7. 训练相关 Python 测试、CUDA 短恢复测试、仓库边界检查全部通过。
+7. source 迁移前后除提交字段和 payload hash 外的语义 body 完全相同，原文件有字节级备份；
+8. 训练相关 Python 测试、CUDA 短恢复测试、仓库边界检查全部通过。
