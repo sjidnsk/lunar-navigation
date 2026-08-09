@@ -2805,7 +2805,7 @@ def _parallel_pool_startup_timeout_seconds(
     initial_episode_states: tuple[Mapping[str, object], ...] | None,
 ) -> float:
     """Give active-episode reconstruction headroom without loosening steps."""
-    return 300.0 if initial_episode_states is not None else 60.0
+    return 600.0 if initial_episode_states is not None else 60.0
 
 
 def _run_updates(
