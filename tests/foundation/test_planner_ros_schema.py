@@ -33,3 +33,16 @@ def test_schema_explicitly_retires_global_search_truncation_parameters() -> None
     assert schema["additionalProperties"] is False
     assert set(schema["x-retired-parameters"]) == RETIRED_PARAMETERS
     assert RETIRED_PARAMETERS.isdisjoint(schema["properties"])
+
+
+def test_schema_declares_only_the_single_replaceable_platform_profile() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    profile = schema["properties"]["platform_profile_file"]
+    assert profile["type"] == "string"
+    assert profile["default"] == "/etc/lunar_navigation/platform_profile.yaml"
+    assert {
+        "capability_package",
+        "platform_capability_file",
+        "observation_capability_file",
+    }.isdisjoint(schema["properties"])

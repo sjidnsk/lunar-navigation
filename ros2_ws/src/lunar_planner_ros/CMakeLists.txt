@@ -12,6 +12,7 @@ find_package(lunar_navigation_msgs REQUIRED)
 find_package(lunar_planner_core REQUIRED)
 find_package(lunar_planning_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(OpenSSL REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
@@ -57,7 +58,7 @@ ament_target_dependencies(${PROJECT_NAME}
   trajectory_msgs
   urdf
   visualization_msgs)
-target_link_libraries(${PROJECT_NAME} yaml-cpp)
+target_link_libraries(${PROJECT_NAME} yaml-cpp OpenSSL::Crypto)
 
 add_executable(lunar_planner_node src/main.cpp)
 target_compile_features(lunar_planner_node PRIVATE cxx_std_20)

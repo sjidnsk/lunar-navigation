@@ -392,6 +392,7 @@ struct PlanMotionServer::Impl final {
   std::shared_ptr<SnapshotStore> snapshot_store;
   std::unique_ptr<SnapshotBuilder> snapshot_builder;
   std::optional<LoadedCapabilities> capabilities;
+  std::vector<CapabilityLoadWarning> capability_load_warnings;
   std::unique_ptr<ReferenceGuard> reference_guard;
   std::optional<lunar_navigation_msgs::msg::ExplorationTask> mission;
   std::optional<PendingGoal> pending_goal;
@@ -487,12 +488,9 @@ struct PlanMotionServer::Impl final {
     node.declare_parameter<std::int64_t>("maximum_global_cells", 1'048'576);
     node.declare_parameter<std::int64_t>("maximum_global_axis_cells", 4'096);
     node.declare_parameter<std::int64_t>("target_global_axis_cells", 256);
-    node.declare_parameter(
-        "capability_package", rclcpp::ParameterType::PARAMETER_STRING);
-    node.declare_parameter(
-        "platform_capability_file", rclcpp::ParameterType::PARAMETER_STRING);
-    node.declare_parameter(
-        "observation_capability_file", rclcpp::ParameterType::PARAMETER_STRING);
+    node.declare_parameter<std::string>(
+        "platform_profile_file",
+        "/etc/lunar_navigation/platform_profile.yaml");
   }
 
   [[nodiscard]] std::chrono::nanoseconds RequiredDuration(
@@ -573,22 +571,25 @@ struct PlanMotionServer::Impl final {
     }
   }
 
-  [[nodiscard]] LoadedCapabilities LoadCapabilities() const {
+  [[nodiscard]] LoadedCapabilities LoadCapabilities() {
     if (dependencies.preloaded_capabilities) {
+      capability_load_warnings.clear();
       return *dependencies.preloaded_capabilities;
     }
-    const std::string package =
-        node.get_parameter("capability_package").as_string();
-    const std::string platform_file =
-        node.get_parameter("platform_capability_file").as_string();
-    const std::string observation_file =
-        node.get_parameter("observation_capability_file").as_string();
-    const CapabilityLoadResult loaded = CapabilityLoader{}.LoadFromPackageShare(
-        package, platform_file, observation_file);
+    const std::string profile_file =
+        node.get_parameter("platform_profile_file").as_string();
+    const CapabilityLoadResult loaded =
+        CapabilityLoader{}.LoadFromFile(profile_file);
     if (!loaded.ok()) {
       throw std::runtime_error{
           loaded.error ? loaded.error->reason_code :
                          std::string{"CAPABILITY_LOAD_FAILED"}};
+    }
+    capability_load_warnings = loaded.warnings;
+    for (const auto& warning : capability_load_warnings) {
+      RCLCPP_WARN(
+          node.get_logger(), "%s: %s", warning.reason_code.c_str(),
+          warning.detail.c_str());
     }
     return *loaded.capabilities;
   }
@@ -700,6 +701,11 @@ struct PlanMotionServer::Impl final {
     PublishDiagnostic(
         diagnostic_msgs::msg::DiagnosticStatus::OK,
         "PLANNER_ACTIVE");
+    for (const auto& warning : capability_load_warnings) {
+      PublishDiagnostic(
+          diagnostic_msgs::msg::DiagnosticStatus::WARN,
+          warning.reason_code);
+    }
     return CallbackReturn::SUCCESS;
   }
 
@@ -743,6 +749,7 @@ struct PlanMotionServer::Impl final {
     snapshot_builder.reset();
     snapshot_store.reset();
     capabilities.reset();
+    capability_load_warnings.clear();
     reference_guard.reset();
     mission.reset();
     cached_route.reset();

@@ -5,10 +5,14 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numbers>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -16,15 +20,14 @@
 #include <vector>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <openssl/evp.h>
 #include <urdf/model.h>
-#include <urdf_model/link.h>
 #include <yaml-cpp/yaml.h>
 
 namespace lunar::planning::ros {
 namespace {
 
-constexpr std::string_view kPlatformSchema =
-    "platform-control-capability-source/v2";
+constexpr std::string_view kPlatformSchema = "lunar-platform-profile/v1";
 constexpr double kProjectMaximumSlopeRad = std::numbers::pi / 6.0;
 
 class LoadFailure final : public std::runtime_error {
@@ -76,6 +79,49 @@ class LoadFailure final : public std::runtime_error {
           .detail = failure.detail,
       },
   };
+}
+
+[[nodiscard]] std::string ReadBytes(const std::filesystem::path& path) {
+  std::ifstream stream{path, std::ios::binary};
+  if (!stream.good()) {
+    throw LoadFailure{
+        CapabilityLoadErrorCode::kFileMissing,
+        "PLATFORM_PROFILE_FILE_MISSING",
+        path.string(),
+    };
+  }
+  return {
+      std::istreambuf_iterator<char>{stream},
+      std::istreambuf_iterator<char>{}};
+}
+
+[[nodiscard]] std::string Sha256(const std::string_view bytes) {
+  std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context{
+      EVP_MD_CTX_new(), EVP_MD_CTX_free};
+  if (!context || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1 ||
+      EVP_DigestUpdate(context.get(), bytes.data(), bytes.size()) != 1) {
+    throw std::runtime_error{"unable to initialize SHA-256"};
+  }
+  unsigned char digest[EVP_MAX_MD_SIZE]{};
+  unsigned int digest_size = 0U;
+  if (EVP_DigestFinal_ex(context.get(), digest, &digest_size) != 1 ||
+      digest_size != 32U) {
+    throw std::runtime_error{"unable to finalize SHA-256"};
+  }
+  std::ostringstream encoded;
+  encoded << std::hex << std::setfill('0');
+  for (unsigned int index = 0U; index < digest_size; ++index) {
+    encoded << std::setw(2) << static_cast<unsigned int>(digest[index]);
+  }
+  return encoded.str();
+}
+
+[[nodiscard]] bool IsSha256(const std::string_view value) noexcept {
+  return value.size() == 64U &&
+      std::ranges::all_of(value, [](const char character) {
+        return (character >= '0' && character <= '9') ||
+            (character >= 'a' && character <= 'f');
+      });
 }
 
 [[nodiscard]] bool IsSafeRelativePath(
@@ -437,10 +483,12 @@ void RecordPrimitiveId(
       {"footprint_xy_m",
        "body_extent_m",
        "reference_point",
+       "wheel_count",
        "wheel_diameter_m",
        "wheel_width_m",
        "wheelbase_m",
        "track_width_m",
+       "wheel_center_xy_m",
        "minimum_underbody_clearance_m",
        "maximum_local_obstacle_relief_m",
        "allow_unsupported_gap",
@@ -452,9 +500,13 @@ void RecordPrimitiveId(
        "maximum_yaw_acceleration_radps2",
        "maximum_lateral_acceleration_mps2",
        "maximum_curvature_per_m",
-       "maximum_slope_rad",
+       "maximum_surface_slope_rad",
        "minimum_clearance_m",
        "roughness_handling",
+       "xy_resolution_m",
+       "yaw_bin_count",
+       "arc_radius_m",
+       "arc_yaw_change_rad",
        "motion_primitives"},
       "wheeled");
   loaded.reference_point = RequireString(node, "reference_point");
@@ -488,6 +540,21 @@ void RecordPrimitiveId(
       RequireDouble(node, "wheelbase_m"), "wheelbase_m");
   const double track_width = Positive(
       RequireDouble(node, "track_width_m"), "track_width_m");
+  const double wheel_count_value = Positive(
+      RequireDouble(node, "wheel_count"), "wheel_count");
+  if (std::floor(wheel_count_value) != wheel_count_value) {
+    ValueFailure("wheel_count must be an integer");
+  }
+  const YAML::Node wheel_centers =
+      RequireSequence(node, "wheel_center_xy_m", 1U);
+  if (wheel_centers.size() != static_cast<std::size_t>(wheel_count_value)) {
+    ValueFailure("wheel_center_xy_m count must equal wheel_count");
+  }
+  for (std::size_t index = 0U; index < wheel_centers.size(); ++index) {
+    static_cast<void>(Vec2(
+        wheel_centers[index],
+        "wheeled.wheel_center_xy_m[" + std::to_string(index) + "]"));
+  }
   if (wheel_width >= body_extent.y || wheelbase >= body_extent.x ||
       std::abs(track_width - (body_extent.y - wheel_width)) > 1.0e-6) {
     ValueFailure("wheeled wheel geometry is inconsistent with body extent");
@@ -508,6 +575,17 @@ void RecordPrimitiveId(
   if (roughness_handling != "COST_SPEED_AND_LOCAL_RECHECK") {
     ValueFailure("unsupported wheeled roughness_handling");
   }
+  static_cast<void>(Positive(
+      RequireDouble(node, "xy_resolution_m"), "xy_resolution_m"));
+  const double yaw_bins = Positive(
+      RequireDouble(node, "yaw_bin_count"), "yaw_bin_count");
+  if (std::floor(yaw_bins) != yaw_bins) {
+    ValueFailure("yaw_bin_count must be an integer");
+  }
+  static_cast<void>(Positive(
+      RequireDouble(node, "arc_radius_m"), "arc_radius_m"));
+  static_cast<void>(Finite(
+      RequireDouble(node, "arc_yaw_change_rad"), "arc_yaw_change_rad"));
 
   std::vector<lunar::planning::WheelMotionPrimitive> primitives;
   const YAML::Node primitive_nodes =
@@ -518,14 +596,23 @@ void RecordPrimitiveId(
     if (!primitive.IsMap()) {
       SchemaFailure("wheel motion primitive must be a map");
     }
+    RejectUnexpectedKeys(
+        primitive,
+        {"primitive_id", "kind", "relative_end_pose"},
+        "wheel motion primitive");
+    const YAML::Node relative_end_pose =
+        RequireMap(primitive, "relative_end_pose");
+    RejectUnexpectedKeys(
+        relative_end_pose,
+        {"position_m", "orientation_wxyz"},
+        "wheel relative_end_pose");
     const std::string id = RequireString(primitive, "primitive_id");
     RecordPrimitiveId(id, primitive_ids, loaded.source_motion_primitive_ids);
     primitives.push_back(lunar::planning::WheelMotionPrimitive{
         .primitive_id = id,
         .kind = WheelKind(RequireString(primitive, "kind")),
-        .relative_end_pose =
-            Pose(RequireMap(primitive, "relative_end_pose"),
-                 "motion_primitives.relative_end_pose"),
+        .relative_end_pose = Pose(
+            relative_end_pose, "motion_primitives.relative_end_pose"),
     });
   }
 
@@ -564,8 +651,8 @@ void RecordPrimitiveId(
           RequireDouble(node, "maximum_curvature_per_m"),
           "maximum_curvature_per_m"),
       .maximum_slope_rad = Slope(
-          RequireDouble(node, "maximum_slope_rad"),
-          "maximum_slope_rad"),
+          RequireDouble(node, "maximum_surface_slope_rad"),
+          "maximum_surface_slope_rad"),
       .minimum_clearance_m = NonNegative(
           RequireDouble(node, "minimum_clearance_m"),
           "minimum_clearance_m"),
@@ -581,20 +668,26 @@ void RecordPrimitiveId(
       node,
       {"reference_point",
        "body_extent_m",
+       "nominal_body_height_m",
        "platform_mass_kg",
+       "nominal_payload_kg",
        "maximum_payload_kg",
-       "maximum_slope_rad",
+       "maximum_forward_speed_mps",
+       "maximum_reverse_speed_mps",
+       "maximum_lateral_speed_mps",
+       "maximum_yaw_rate_radps",
+       "maximum_surface_slope_rad",
        "maximum_step_height_m",
        "maximum_gap_width_m",
        "minimum_body_clearance_m",
        "step_vertical_rate_mps",
        "body_height_m",
-       "forward_speed_mps",
-       "lateral_speed_mps",
-       "yaw_rate_radps",
        "maximum_linear_acceleration_mps2",
        "maximum_yaw_acceleration_radps2",
        "roughness_handling",
+       "unknown_is_traversable",
+       "local_xy_resolution_m",
+       "output_semantics",
        "motion_primitives"},
       "legged");
   loaded.reference_point = RequireString(node, "reference_point");
@@ -610,11 +703,29 @@ void RecordPrimitiveId(
       RequireDouble(node, "platform_mass_kg"), "platform_mass_kg");
   const double maximum_payload = Positive(
       RequireDouble(node, "maximum_payload_kg"), "maximum_payload_kg");
+  const double nominal_payload = NonNegative(
+      RequireDouble(node, "nominal_payload_kg"), "nominal_payload_kg");
+  if (nominal_payload > maximum_payload) {
+    ValueFailure("nominal_payload_kg exceeds maximum_payload_kg");
+  }
+  static_cast<void>(Positive(
+      RequireDouble(node, "nominal_body_height_m"),
+      "nominal_body_height_m"));
   const double step_vertical_rate = Positive(
       RequireDouble(node, "step_vertical_rate_mps"),
       "step_vertical_rate_mps");
   if (RequireString(node, "roughness_handling") != "DIAGNOSTIC_ONLY") {
     ValueFailure("unsupported legged roughness_handling");
+  }
+  if (RequireBool(node, "unknown_is_traversable")) {
+    ValueFailure("legged unknown_is_traversable must be false");
+  }
+  static_cast<void>(Positive(
+      RequireDouble(node, "local_xy_resolution_m"),
+      "local_xy_resolution_m"));
+  if (RequireString(node, "output_semantics") !=
+      "LEGGED_BODY_REFERENCE") {
+    ValueFailure("unsupported legged output_semantics");
   }
 
   std::vector<lunar::planning::LeggedBodyPrimitive> primitives;
@@ -626,6 +737,11 @@ void RecordPrimitiveId(
     if (!primitive.IsMap()) {
       SchemaFailure("legged motion primitive must be a map");
     }
+    RejectUnexpectedKeys(
+        primitive,
+        {"primitive_id", "kind", "body_frame_displacement_m",
+         "yaw_change_rad"},
+        "legged motion primitive");
     const std::string id = RequireString(primitive, "primitive_id");
     RecordPrimitiveId(id, primitive_ids, loaded.source_motion_primitive_ids);
     primitives.push_back(lunar::planning::LeggedBodyPrimitive{
@@ -650,7 +766,8 @@ void RecordPrimitiveId(
       .platform_mass_kg = platform_mass,
       .maximum_payload_kg = maximum_payload,
       .maximum_slope_rad = Slope(
-          RequireDouble(node, "maximum_slope_rad"), "maximum_slope_rad"),
+          RequireDouble(node, "maximum_surface_slope_rad"),
+          "maximum_surface_slope_rad"),
       .maximum_step_height_m = NonNegative(
           RequireDouble(node, "maximum_step_height_m"),
           "maximum_step_height_m"),
@@ -662,15 +779,26 @@ void RecordPrimitiveId(
           "minimum_body_clearance_m"),
       .step_vertical_rate_mps = step_vertical_rate,
       .body_height_m = body_height,
-      .forward_speed_mps = Interval(
-          RequireSequence(node, "forward_speed_mps"),
-          "forward_speed_mps", true),
-      .lateral_speed_mps = Interval(
-          RequireSequence(node, "lateral_speed_mps"),
-          "lateral_speed_mps", true),
-      .yaw_rate_radps = Interval(
-          RequireSequence(node, "yaw_rate_radps"),
-          "yaw_rate_radps", true),
+      .forward_speed_mps = lunar::planning::Interval{
+          .lower = -Positive(
+              RequireDouble(node, "maximum_reverse_speed_mps"),
+              "maximum_reverse_speed_mps"),
+          .upper = Positive(
+              RequireDouble(node, "maximum_forward_speed_mps"),
+              "maximum_forward_speed_mps"),
+      },
+      .lateral_speed_mps = [&node]() {
+        const double maximum = Positive(
+            RequireDouble(node, "maximum_lateral_speed_mps"),
+            "maximum_lateral_speed_mps");
+        return lunar::planning::Interval{.lower = -maximum, .upper = maximum};
+      }(),
+      .yaw_rate_radps = [&node]() {
+        const double maximum = Positive(
+            RequireDouble(node, "maximum_yaw_rate_radps"),
+            "maximum_yaw_rate_radps");
+        return lunar::planning::Interval{.lower = -maximum, .upper = maximum};
+      }(),
       .maximum_linear_acceleration_mps2 = Positive(
           RequireDouble(node, "maximum_linear_acceleration_mps2"),
           "maximum_linear_acceleration_mps2"),
@@ -691,6 +819,9 @@ void RecordPrimitiveId(
       {"specific_impulse_s",
        "reference_total_mass_kg",
        "reference_propellant_mass_kg",
+       "reference_horizontal_range_m",
+       "reference_elevation_delta_m",
+       "runtime_fallback_allowed",
        "landing_support_radius_m",
        "flight_collision_radius_m",
        "maximum_landing_slope_rad",
@@ -698,6 +829,7 @@ void RecordPrimitiveId(
        "landing_lateral_margin_m",
        "flight_map_margin_m",
        "reachability_delta_v_margin_ratio",
+       "gravity_mps2",
        "standard_gravity_mps2"},
       "hopper");
   const double specific_impulse = Positive(
@@ -712,6 +844,20 @@ void RecordPrimitiveId(
     ValueFailure(
         "reference_propellant_mass_kg must be less than "
         "reference_total_mass_kg");
+  }
+  static_cast<void>(Positive(
+      RequireDouble(node, "reference_horizontal_range_m"),
+      "reference_horizontal_range_m"));
+  static_cast<void>(Finite(
+      RequireDouble(node, "reference_elevation_delta_m"),
+      "reference_elevation_delta_m"));
+  if (RequireBool(node, "runtime_fallback_allowed")) {
+    ValueFailure("hopper runtime_fallback_allowed must be false");
+  }
+  const auto gravity = Vec3(
+      RequireSequence(node, "gravity_mps2"), "gravity_mps2");
+  if (gravity.z >= 0.0 || std::hypot(gravity.x, gravity.y) > 1.0e-9) {
+    ValueFailure("gravity_mps2 must be vertical and downward");
   }
   const double landing_support_radius = Positive(
       RequireDouble(node, "landing_support_radius_m"),
@@ -751,125 +897,114 @@ void RecordPrimitiveId(
   };
 }
 
-[[nodiscard]] std::filesystem::path ResolveMeshPath(
-    const std::filesystem::path& share,
-    const std::filesystem::path& urdf_path,
-    const std::string& filename) {
-  constexpr std::string_view kPackagePrefix = "package://";
-  if (filename.starts_with(kPackagePrefix)) {
-    const std::string remainder = filename.substr(kPackagePrefix.size());
-    const std::size_t separator = remainder.find('/');
-    if (separator == std::string::npos || separator == 0U) {
-      throw LoadFailure{
-          CapabilityLoadErrorCode::kUnsafePath,
-          "MESH_URI_INVALID",
-          filename,
-      };
-    }
-    const std::string package_name = remainder.substr(0U, separator);
-    const std::filesystem::path relative = remainder.substr(separator + 1U);
-    try {
-      const auto package_share =
-          ament_index_cpp::get_package_share_directory(package_name);
-      return ResolveFile(
-          package_share, relative,
-          CapabilityLoadErrorCode::kMeshMissing,
-          "CAPABILITY_MESH_MISSING");
-    } catch (const LoadFailure&) {
-      throw;
-    } catch (const std::exception&) {
-      throw LoadFailure{
-          CapabilityLoadErrorCode::kMeshMissing,
-          "CAPABILITY_MESH_PACKAGE_MISSING",
-          filename,
-      };
-    }
-  }
-  const std::filesystem::path mesh_path{filename};
-  if (!IsSafeRelativePath(mesh_path)) {
-    throw LoadFailure{
-        CapabilityLoadErrorCode::kUnsafePath,
-        "MESH_PATH_UNSAFE",
-        filename,
-    };
-  }
-  const auto relative =
-      std::filesystem::relative(urdf_path.parent_path() / mesh_path, share);
-  return ResolveFile(
-      share, relative,
-      CapabilityLoadErrorCode::kMeshMissing,
-      "CAPABILITY_MESH_MISSING");
+void AddOptionalAssetWarning(
+    std::vector<CapabilityLoadWarning>& warnings,
+    const std::string& reason_code,
+    const std::string& detail) {
+  warnings.push_back(CapabilityLoadWarning{
+      .reason_code = reason_code,
+      .detail = detail,
+  });
 }
 
-void AddMesh(
-    const urdf::GeometrySharedPtr& geometry,
-    const std::filesystem::path& share,
-    const std::filesystem::path& urdf_path,
-    std::set<std::filesystem::path>& mesh_paths) {
-  if (geometry == nullptr || geometry->type != urdf::Geometry::MESH) {
-    return;
+[[nodiscard]] std::optional<std::filesystem::path> ResolveOptionalAsset(
+    const YAML::Node& asset,
+    const std::filesystem::path& root,
+    const std::string& reason_code,
+    std::vector<CapabilityLoadWarning>& warnings) {
+  if (!asset || !asset.IsMap()) {
+    AddOptionalAssetWarning(warnings, reason_code, "asset entry is not a map");
+    return std::nullopt;
   }
-  const auto mesh = std::static_pointer_cast<urdf::Mesh>(geometry);
-  if (mesh->filename.empty() || !std::isfinite(mesh->scale.x) ||
-      !std::isfinite(mesh->scale.y) || !std::isfinite(mesh->scale.z) ||
-      mesh->scale.x <= 0.0 || mesh->scale.y <= 0.0 || mesh->scale.z <= 0.0) {
-    throw LoadFailure{
-        CapabilityLoadErrorCode::kUrdfInvalid,
-        "CAPABILITY_URDF_MESH_INVALID",
-        urdf_path.string(),
-    };
-  }
-  mesh_paths.insert(ResolveMeshPath(
-      share, urdf_path, mesh->filename));
-}
-
-[[nodiscard]] std::vector<std::filesystem::path> ValidateGeometry(
-    const std::filesystem::path& share,
-    const std::filesystem::path& urdf_path,
-    const std::string& base_frame_id) {
-  urdf::Model model;
-  if (!model.initFile(urdf_path.string()) ||
-      model.getLink(base_frame_id) == nullptr) {
-    throw LoadFailure{
-        CapabilityLoadErrorCode::kUrdfInvalid,
-        "CAPABILITY_URDF_INVALID",
-        urdf_path.string(),
-    };
-  }
-  std::vector<urdf::LinkSharedPtr> links;
-  model.getLinks(links);
-  std::set<std::filesystem::path> mesh_paths;
-  for (const auto& link : links) {
-    for (const auto& visual : link->visual_array) {
-      if (visual != nullptr) {
-        AddMesh(visual->geometry, share, urdf_path, mesh_paths);
-      }
-    }
-    for (const auto& collision : link->collision_array) {
-      if (collision != nullptr) {
-        AddMesh(collision->geometry, share, urdf_path, mesh_paths);
-      }
-    }
-  }
-  if (mesh_paths.empty()) {
-    throw LoadFailure{
-        CapabilityLoadErrorCode::kUrdfInvalid,
-        "CAPABILITY_URDF_MESH_REQUIRED",
-        urdf_path.string(),
-    };
-  }
-  return {mesh_paths.begin(), mesh_paths.end()};
-}
-
-[[nodiscard]] LoadedCapabilities LoadDocuments(
-    const std::filesystem::path& share,
-    const std::filesystem::path& platform_path,
-    const std::filesystem::path& observation_path) {
-  YAML::Node platform_document;
-  YAML::Node observation_document;
+  RejectUnexpectedKeys(asset, {"path", "sha256"}, "asset");
+  std::string relative_text;
+  std::string expected_sha256;
   try {
-    platform_document = YAML::LoadFile(platform_path.string());
-    observation_document = YAML::LoadFile(observation_path.string());
+    relative_text = RequireString(asset, "path");
+    expected_sha256 = RequireString(asset, "sha256");
+  } catch (const LoadFailure& failure) {
+    AddOptionalAssetWarning(warnings, reason_code, failure.detail);
+    return std::nullopt;
+  }
+  const std::filesystem::path relative{relative_text};
+  if (!IsSafeRelativePath(relative) || !IsSha256(expected_sha256)) {
+    AddOptionalAssetWarning(warnings, reason_code, relative_text);
+    return std::nullopt;
+  }
+  const auto canonical_root = std::filesystem::weakly_canonical(root);
+  const auto candidate = std::filesystem::weakly_canonical(root / relative);
+  if (!IsWithin(canonical_root, candidate) ||
+      !std::filesystem::is_regular_file(candidate)) {
+    AddOptionalAssetWarning(warnings, reason_code, candidate.string());
+    return std::nullopt;
+  }
+  try {
+    if (Sha256(ReadBytes(candidate)) != expected_sha256) {
+      AddOptionalAssetWarning(
+          warnings, reason_code, "SHA-256 mismatch: " + candidate.string());
+      return std::nullopt;
+    }
+  } catch (const std::exception& error) {
+    AddOptionalAssetWarning(warnings, reason_code, error.what());
+    return std::nullopt;
+  }
+  return candidate;
+}
+
+void LoadOptionalAssets(
+    const YAML::Node& root,
+    const std::filesystem::path& profile_directory,
+    LoadedCapabilities& loaded,
+    std::vector<CapabilityLoadWarning>& warnings) {
+  const YAML::Node assets = RequireMap(root, "assets");
+  RejectUnexpectedKeys(assets, {"urdf", "meshes"}, "assets");
+  const YAML::Node urdf_node = assets["urdf"];
+  if (!urdf_node) {
+    SchemaFailure("missing assets.urdf");
+  }
+  if (!urdf_node.IsNull()) {
+    const auto urdf_path = ResolveOptionalAsset(
+        urdf_node,
+        profile_directory,
+        "CAPABILITY_OPTIONAL_URDF_UNAVAILABLE",
+        warnings);
+    if (urdf_path) {
+      urdf::Model model;
+      if (model.initFile(urdf_path->string()) &&
+          model.getLink(loaded.base_frame_id) != nullptr) {
+        loaded.urdf_path = *urdf_path;
+      } else {
+        AddOptionalAssetWarning(
+            warnings,
+            "CAPABILITY_OPTIONAL_URDF_UNAVAILABLE",
+            "URDF does not contain base frame: " + loaded.base_frame_id);
+      }
+    }
+  }
+
+  const YAML::Node meshes = assets["meshes"];
+  if (!meshes || !meshes.IsSequence()) {
+    SchemaFailure("assets.meshes must be a sequence");
+  }
+  for (const YAML::Node& mesh : meshes) {
+    const auto mesh_path = ResolveOptionalAsset(
+        mesh,
+        profile_directory,
+        "CAPABILITY_OPTIONAL_MESH_UNAVAILABLE",
+        warnings);
+    if (mesh_path) {
+      loaded.mesh_paths.push_back(*mesh_path);
+    }
+  }
+}
+
+[[nodiscard]] LoadedCapabilities LoadDocument(
+    const std::filesystem::path& profile_path,
+    const std::string& bytes,
+    std::vector<CapabilityLoadWarning>& warnings) {
+  YAML::Node document;
+  try {
+    document = YAML::Load(bytes);
   } catch (const YAML::Exception& error) {
     throw LoadFailure{
         CapabilityLoadErrorCode::kParseError,
@@ -877,15 +1012,36 @@ void AddMesh(
         error.what(),
     };
   }
-  if (!platform_document.IsMap() || !observation_document.IsMap()) {
-    SchemaFailure("capability documents must be objects");
+  if (!document.IsMap()) {
+    SchemaFailure("platform profile must be an object");
   }
-  if (RequireString(platform_document, "schema_version") != kPlatformSchema) {
-    SchemaCompatibilityFailure("unsupported platform capability schema");
+  RejectUnexpectedKeys(
+      document,
+      {"schema_version", "ownership", "platform", "observation", "assets",
+       "sources", "wheeled", "legged", "hopper"},
+      "platform profile");
+  if (RequireString(document, "schema_version") != kPlatformSchema) {
+    SchemaCompatibilityFailure("unsupported platform profile schema");
+  }
+
+  const YAML::Node ownership = RequireMap(document, "ownership");
+  RejectUnexpectedKeys(
+      ownership, {"producer", "consumer", "repository_role"}, "ownership");
+  if (RequireString(ownership, "producer") !=
+          "external_platform_and_sensor_systems" ||
+      RequireString(ownership, "consumer") != "lunar_navigation" ||
+      RequireString(ownership, "repository_role") !=
+          "provisional_schema_and_approved_engineering_baseline") {
+    ValueFailure("ownership boundary does not match the approved profile");
   }
 
   LoadedCapabilities loaded;
-  const YAML::Node platform = RequireMap(platform_document, "platform");
+  loaded.profile_sha256 = Sha256(bytes);
+  const YAML::Node platform = RequireMap(document, "platform");
+  RejectUnexpectedKeys(
+      platform,
+      {"platform_id", "platform_type", "capability_version", "base_frame_id"},
+      "platform");
   loaded.platform_id = RequireString(platform, "platform_id");
   const std::string platform_type = RequireString(platform, "platform_type");
   loaded.capability_version = RequireString(platform, "capability_version");
@@ -893,11 +1049,10 @@ void AddMesh(
   const std::string expected_base_frame =
       platform_type == "WHEELED" ? "base_footprint" : "base_link";
   if (loaded.base_frame_id != expected_base_frame) {
-    ValueFailure(
-        "platform.base_frame_id must be " + expected_base_frame);
+    ValueFailure("platform.base_frame_id must be " + expected_base_frame);
   }
 
-  const YAML::Node sources = RequireMap(platform_document, "sources");
+  const YAML::Node sources = RequireMap(document, "sources");
   for (const auto& entry : sources) {
     std::string field;
     std::string source_type;
@@ -916,91 +1071,63 @@ void AddMesh(
     SchemaFailure("sources must not be empty");
   }
 
+  const YAML::Node observation = RequireMap(document, "observation");
+  RejectUnexpectedKeys(
+      observation, {"sensor_range_m", "sensor_fov_deg"}, "observation");
   loaded.observation.sensor_range_m = Positive(
-      RequireDouble(observation_document, "sensor_range_m"),
-      "sensor_range_m");
+      RequireDouble(observation, "sensor_range_m"), "sensor_range_m");
   const double fov_degrees = Positive(
-      RequireDouble(observation_document, "sensor_fov_deg"),
-      "sensor_fov_deg");
+      RequireDouble(observation, "sensor_fov_deg"), "sensor_fov_deg");
   if (fov_degrees > 360.0) {
     ValueFailure("sensor_fov_deg exceeds 360 degrees");
   }
   loaded.observation.sensor_fov_rad =
       fov_degrees * std::numbers::pi / 180.0;
 
-  const YAML::Node geometry = RequireMap(platform_document, "geometry_source");
-  const std::filesystem::path urdf_relative =
-      RequireString(geometry, "urdf_file");
-  loaded.urdf_path = ResolveFile(
-      share, urdf_relative,
-      CapabilityLoadErrorCode::kFileMissing,
-      "CAPABILITY_URDF_MISSING");
-  loaded.mesh_paths =
-      ValidateGeometry(share, loaded.urdf_path, loaded.base_frame_id);
-
   if (platform_type == "WHEELED") {
-    loaded.platform = ParseWheeled(platform_document, loaded);
+    if (document["legged"] || document["hopper"]) {
+      SchemaCompatibilityFailure("wheeled profile contains another platform");
+    }
+    loaded.platform = ParseWheeled(document, loaded);
   } else if (platform_type == "LEGGED") {
-    loaded.platform = ParseLegged(platform_document, loaded);
+    if (document["wheeled"] || document["hopper"]) {
+      SchemaCompatibilityFailure("legged profile contains another platform");
+    }
+    loaded.platform = ParseLegged(document, loaded);
   } else if (platform_type == "HOPPER") {
-    loaded.platform = ParseHopper(platform_document, loaded);
+    if (document["wheeled"] || document["legged"]) {
+      SchemaCompatibilityFailure("hopper profile contains another platform");
+    }
+    loaded.platform = ParseHopper(document, loaded);
   } else {
     ValueFailure("unknown platform.platform_type: " + platform_type);
   }
+
+  LoadOptionalAssets(document, profile_path.parent_path(), loaded, warnings);
   return loaded;
 }
 
 }  // namespace
 
-CapabilityLoadResult CapabilityLoader::LoadFromPackageShare(
-    const std::string& package_name,
-    const std::filesystem::path& platform_capability_file,
-    const std::filesystem::path& observation_capability_file) const {
+CapabilityLoadResult CapabilityLoader::LoadFromFile(
+    const std::filesystem::path& platform_profile_file) const {
   try {
-    if (package_name.empty()) {
-      throw std::runtime_error{"package name is empty"};
-    }
-    const std::filesystem::path share =
-        ament_index_cpp::get_package_share_directory(package_name);
-    return LoadFromShareDirectory(
-        share, platform_capability_file, observation_capability_file);
-  } catch (const std::exception& error) {
-    return CapabilityLoadResult{
-        .capabilities = std::nullopt,
-        .error = CapabilityLoadError{
-            .code = CapabilityLoadErrorCode::kPackageNotFound,
-            .reason_code = "CAPABILITY_PACKAGE_NOT_FOUND",
-            .detail = error.what(),
-        },
-    };
-  }
-}
-
-CapabilityLoadResult CapabilityLoader::LoadFromShareDirectory(
-    const std::filesystem::path& package_share_directory,
-    const std::filesystem::path& platform_capability_file,
-    const std::filesystem::path& observation_capability_file) const {
-  try {
-    if (!std::filesystem::is_directory(package_share_directory)) {
+    if (!std::filesystem::is_regular_file(platform_profile_file)) {
       throw LoadFailure{
           CapabilityLoadErrorCode::kFileMissing,
-          "CAPABILITY_SHARE_MISSING",
-          package_share_directory.string(),
+          "PLATFORM_PROFILE_FILE_MISSING",
+          platform_profile_file.string(),
       };
     }
-    const auto platform_path = ResolveFile(
-        package_share_directory, platform_capability_file,
-        CapabilityLoadErrorCode::kFileMissing,
-        "PLATFORM_CAPABILITY_FILE_MISSING");
-    const auto observation_path = ResolveFile(
-        package_share_directory, observation_capability_file,
-        CapabilityLoadErrorCode::kFileMissing,
-        "OBSERVATION_CAPABILITY_FILE_MISSING");
+    const auto canonical_path =
+        std::filesystem::weakly_canonical(platform_profile_file);
+    const std::string bytes = ReadBytes(canonical_path);
+    std::vector<CapabilityLoadWarning> warnings;
+    LoadedCapabilities loaded = LoadDocument(canonical_path, bytes, warnings);
     return CapabilityLoadResult{
-        .capabilities = LoadDocuments(
-            std::filesystem::weakly_canonical(package_share_directory),
-            platform_path, observation_path),
+        .capabilities = std::move(loaded),
         .error = std::nullopt,
+        .warnings = std::move(warnings),
     };
   } catch (const LoadFailure& failure) {
     return Failure(failure);
@@ -1016,6 +1143,41 @@ CapabilityLoadResult CapabilityLoader::LoadFromShareDirectory(
         "CAPABILITY_LOAD_ERROR",
         error.what(),
     });
+  }
+}
+
+CapabilityLoadResult CapabilityLoader::LoadFromPackageShare(
+    const std::string& package_name,
+    const std::filesystem::path& platform_profile_file) const {
+  try {
+    if (!IsSafeRelativePath(platform_profile_file)) {
+      throw LoadFailure{
+          CapabilityLoadErrorCode::kUnsafePath,
+          "CAPABILITY_PATH_UNSAFE",
+          platform_profile_file.string(),
+      };
+    }
+    if (package_name.empty()) {
+      throw std::runtime_error{"package name is empty"};
+    }
+    const std::filesystem::path share =
+        ament_index_cpp::get_package_share_directory(package_name);
+    const auto profile_path = ResolveFile(
+        share, platform_profile_file,
+        CapabilityLoadErrorCode::kFileMissing,
+        "PLATFORM_PROFILE_FILE_MISSING");
+    return LoadFromFile(profile_path);
+  } catch (const LoadFailure& failure) {
+    return Failure(failure);
+  } catch (const std::exception& error) {
+    return CapabilityLoadResult{
+        .capabilities = std::nullopt,
+        .error = CapabilityLoadError{
+            .code = CapabilityLoadErrorCode::kPackageNotFound,
+            .reason_code = "CAPABILITY_PACKAGE_NOT_FOUND",
+            .detail = error.what(),
+        },
+    };
   }
 }
 

@@ -17,6 +17,7 @@ struct ObservationCapability final {
 };
 
 struct LoadedCapabilities final {
+  std::string profile_sha256;
   std::string platform_id;
   std::string capability_version;
   std::string base_frame_id;
@@ -48,9 +49,15 @@ struct CapabilityLoadError final {
   std::string detail;
 };
 
+struct CapabilityLoadWarning final {
+  std::string reason_code;
+  std::string detail;
+};
+
 struct CapabilityLoadResult final {
   std::optional<LoadedCapabilities> capabilities;
   std::optional<CapabilityLoadError> error;
+  std::vector<CapabilityLoadWarning> warnings;
 
   [[nodiscard]] bool ok() const noexcept {
     return capabilities.has_value() && !error.has_value();
@@ -59,15 +66,12 @@ struct CapabilityLoadResult final {
 
 class CapabilityLoader final {
  public:
+  [[nodiscard]] CapabilityLoadResult LoadFromFile(
+      const std::filesystem::path& platform_profile_file) const;
+
   [[nodiscard]] CapabilityLoadResult LoadFromPackageShare(
       const std::string& package_name,
-      const std::filesystem::path& platform_capability_file,
-      const std::filesystem::path& observation_capability_file) const;
-
-  [[nodiscard]] CapabilityLoadResult LoadFromShareDirectory(
-      const std::filesystem::path& package_share_directory,
-      const std::filesystem::path& platform_capability_file,
-      const std::filesystem::path& observation_capability_file) const;
+      const std::filesystem::path& platform_profile_file) const;
 };
 
 }  // namespace lunar::planning::ros

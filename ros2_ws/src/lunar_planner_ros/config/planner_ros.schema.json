@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://lunar-navigation.local/schemas/planner_ros.schema.json",
   "title": "Lunar planner ROS snapshot policy",
-  "description": "Required time-consistency limits for freezing one planner input snapshot. Duration values are expressed in seconds. Retired global and hopper search truncation parameters are rejected instead of silently limiting reachability.",
+  "description": "Required time-consistency limits and the single replaceable platform-profile path for the planner. Duration values are expressed in seconds. Retired global and hopper search truncation parameters are rejected instead of silently limiting reachability.",
   "x-retired-parameters": [
     "global_search.maximum_expanded_states",
     "global_search.maximum_reopened_states",
@@ -31,6 +31,12 @@
     "max_pairwise_skew"
   ],
   "properties": {
+    "platform_profile_file": {
+      "type": "string",
+      "minLength": 1,
+      "default": "/etc/lunar_navigation/platform_profile.yaml",
+      "description": "Complete lunar-platform-profile/v1 file. Replace this fixed-path file and restart the service to change the platform capability."
+    },
     "global_map_max_age": {
       "$ref": "#/$defs/positive_duration"
     },

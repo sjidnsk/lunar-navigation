@@ -508,6 +508,20 @@ TEST_F(PlanMotionServerTest, UsesFiveDistinctMutuallyExclusiveCallbackGroups) {
   node.reset();
 }
 
+TEST_F(PlanMotionServerTest, DeclaresOneReplaceablePlatformProfilePath) {
+  auto node = std::make_shared<PlanMotionServer>(
+      ValidOptions(), DefaultDependencies());
+
+  EXPECT_TRUE(node->has_parameter("platform_profile_file"));
+  EXPECT_EQ(
+      node->get_parameter("platform_profile_file").as_string(),
+      "/etc/lunar_navigation/platform_profile.yaml");
+  EXPECT_FALSE(node->has_parameter("capability_package"));
+  EXPECT_FALSE(node->has_parameter("platform_capability_file"));
+  EXPECT_FALSE(node->has_parameter("observation_capability_file"));
+  node.reset();
+}
+
 TEST_F(PlanMotionServerTest, ConfigureFailsWhenAnyRequiredTimeLimitIsMissing) {
   auto node = std::make_shared<PlanMotionServer>(
       rclcpp::NodeOptions{}, DefaultDependencies());
