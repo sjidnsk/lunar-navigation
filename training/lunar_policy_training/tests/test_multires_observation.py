@@ -133,3 +133,55 @@ def test_sensor_geometry_remains_formal_thirty_metre_full_circle() -> None:
     assert state.visibility_estimator.sensor.range_m == 30.0
     assert state.visibility_estimator.sensor.fov_rad == pytest.approx(2.0 * math.pi)
     assert state.visibility_estimator.resolution_m == 0.2
+
+
+def test_candidate_gains_use_one_observed_only_detail_window_and_physical_area() -> None:
+    state, _ = _state()
+    state.observe_world(Pose2(512.0, 512.0, elevation_m=7.0), elapsed_s=0.0)
+    calls: list[tuple[np.ndarray, ...]] = []
+
+    class RecordingDetailEstimator:
+        sensor = state.visibility_estimator.sensor
+        resolution_m = 0.2
+
+        def estimate_candidate_gains(
+            self,
+            observed_mask: np.ndarray,
+            obstacle_ratio: np.ndarray,
+            roi_ratio: np.ndarray,
+            priority_weight: np.ndarray,
+            candidate_cells: np.ndarray,
+        ) -> np.ndarray:
+            calls.append(
+                (
+                    observed_mask.copy(),
+                    obstacle_ratio.copy(),
+                    roi_ratio.copy(),
+                    priority_weight.copy(),
+                    candidate_cells.copy(),
+                )
+            )
+            return np.ascontiguousarray(
+                np.tile(np.asarray([[400.0, 200.0]], np.float32), (len(candidate_cells), 1))
+            )
+
+    state.visibility_estimator = RecordingDetailEstimator()
+    candidate_cells = np.ascontiguousarray([[127, 127], [128, 128]], np.int32)
+
+    gains = state.estimate_candidate_gains(
+        state.observed.valid_mask,
+        state.observed.physical_obstacle_ratio,
+        state.mission_roi_ratio,
+        state.mission_priority * state.mission_roi_ratio,
+        candidate_cells,
+    )
+
+    assert len(calls) == 1
+    observed, obstacles, roi, priority, local_candidates = calls[0]
+    assert observed.shape == obstacles.shape == roi.shape == priority.shape
+    assert observed.shape[0] >= 301 and observed.shape[1] >= 301
+    assert observed.dtype == np.bool_
+    assert obstacles.dtype == roi.dtype == priority.dtype == np.float32
+    assert local_candidates.dtype == np.int32
+    assert np.all(obstacles[~observed] == 0.0)
+    np.testing.assert_allclose(gains, [[1.0, 0.5], [1.0, 0.5]])

@@ -27,10 +27,17 @@ from lunar_policy_training.environment.macro_step import PolicyAction
 from lunar_policy_training.environment.observation_boundary import (
     SensorBoundaryEvidence,
 )
+from lunar_policy_training.environment.multires_observation import (
+    MultiresSensorObservationState,
+)
 from lunar_policy_training.environment.observation_builder import Pose2
 from lunar_policy_training.environment.parallel_pool import (
     ParallelActions,
     ParallelEnvPool,
+)
+from lunar_policy_training.environment.visibility import (
+    NativeVisibilityEstimator,
+    SensorGeometry,
 )
 from lunar_policy_training.evaluation import report as report_module
 from lunar_policy_training.evaluation.report import FormalEvaluationBatch
@@ -444,6 +451,94 @@ def test_formal_episode_excludes_a_recorded_landing_from_future_candidates(
 
     assert int(rebuilt.candidate_mask.sum()) == int(initial.candidate_mask.sum()) - 1
     assert not torch.any(torch.all(rebuilt_positions == visited_position, dim=1))
+
+
+def test_formal_episode_estimates_candidate_gain_from_detail_observation(
+    tmp_path: pathlib.Path,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    worker = assembly.factory.create_for_episode(
+        0,
+        "WHEELED",
+        4,
+        platform_worker_index=0,
+        platform_worker_count=1,
+    )
+
+    estimator = worker.episode._candidate_builder._visibility_estimator
+
+    assert estimator is worker.episode.sensor_state
+    assert estimator.resolution_m == 0.2
+
+
+def test_restore_preserves_one_legacy_coarse_gain_boundary_then_enables_detail(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    coarse = NativeVisibilityEstimator(
+        SensorGeometry(30.0, 2.0 * np.pi),
+        resolution_m=4.0,
+    )
+
+    def estimate_coarse(
+        _self: MultiresSensorObservationState,
+        observed_mask: np.ndarray,
+        obstacle_ratio: np.ndarray,
+        roi_ratio: np.ndarray,
+        priority_weight: np.ndarray,
+        candidate_cells: np.ndarray,
+    ) -> np.ndarray:
+        return coarse.estimate_candidate_gains(
+            observed_mask,
+            obstacle_ratio,
+            roi_ratio,
+            priority_weight,
+            candidate_cells,
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            MultiresSensorObservationState,
+            "estimate_candidate_gains",
+            estimate_coarse,
+        )
+        legacy = assembly.factory.create_for_episode(
+            0,
+            "WHEELED",
+            4,
+            platform_worker_index=0,
+            platform_worker_count=1,
+        )
+        legacy_state = legacy.snapshot_episode_state()
+        legacy_digest = policy_batch_sha256(
+            legacy.environment.current_observation
+        )
+
+    detail = assembly.factory.create_for_episode(
+        0,
+        "WHEELED",
+        4,
+        platform_worker_index=0,
+        platform_worker_count=1,
+    )
+    assert policy_batch_sha256(detail.environment.current_observation) != (
+        legacy_digest
+    )
+
+    restored = assembly.factory.restore_for_episode(
+        worker_index=0,
+        platform_type="WHEELED",
+        episode_cursor=4,
+        platform_worker_index=0,
+        platform_worker_count=1,
+        state=legacy_state,
+    )
+
+    assert policy_batch_sha256(restored.environment.current_observation) == (
+        legacy_digest
+    )
+    assert restored.episode._detail_candidate_gain_enabled is True
 
 
 @pytest.mark.parametrize("platform", ("WHEELED", "LEGGED", "HOPPER"))

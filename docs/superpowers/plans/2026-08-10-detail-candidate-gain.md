@@ -13,7 +13,7 @@
 - 只读取已观测 `valid_mask` 与对应已观测物理障碍；未知障碍值保持零且由 mask 决定不可穿越。
 - 传感器保持 `30 m / 360 deg`，候选上限保持 `64`，reward 仍由执行后的真实新增覆盖产生。
 - 不改 PPO、平台能力、候选落点或规划器合同。
-- 当前正式训练在代码和验证完成前继续运行；切换时不得伪装成同一训练语义。
+- 当前正式训练在代码和验证完成前继续运行；切换使用现有受审计 source migration，并精确保留 checkpoint 中尚未执行的一次旧候选边界。
 
 ---
 
@@ -65,17 +65,16 @@
 - [ ] 在遍历射线前检查倒数第二格是否已观测且无障碍。
 - [ ] 运行 C++ 等价测试和 Release 基准。
 
-### Task 4: 语义身份与完整验证
+### Task 4: 来源身份与完整验证
 
 **Files:**
-- Modify: `training/lunar_policy_training/lunar_policy_training/training_semantics.py`
 - Modify: `docs/superpowers/specs/2026-08-08-sensor-observation-capability-design.md`
 - Modify: `docs/superpowers/specs/2026-08-08-formal-polar-training-environment-closure-design.md`
 
 **Interfaces:**
 - Consumes: 已验证的新候选增益语义。
-- Produces: 新训练语义身份；旧 checkpoint 不会被静默当作同语义续训。
+- Produces: 新 source commit 和传感器性能报告；旧 checkpoint 只通过已有受审计迁移入口续训。
 
-- [ ] 将训练语义版本升级并同步两份冻结设计中的候选增益分辨率。
+- [ ] 保持 `30 m / 360 deg`、observed-only、reward 和 observation boundary 语义哈希不变，同步两份冻结设计中的候选增益精度修复。
 - [ ] 运行 Python 定向/回归测试、C++ 测试、边界检查和差异检查。
 - [ ] 只提交本任务文件；在停止当前训练前报告 checkpoint 切换约束。

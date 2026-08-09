@@ -357,7 +357,14 @@ class FormalEpisode:
         scenario_identity: ScenarioIdentity,
         loaded: _LoadedScene,
         start_cell: tuple[int, int],
+        visited_candidate_filter_enabled: bool = True,
+        detail_candidate_gain_enabled: bool = True,
     ) -> None:
+        if (
+            type(visited_candidate_filter_enabled) is not bool
+            or type(detail_candidate_gain_enabled) is not bool
+        ):
+            raise TypeError("formal candidate compatibility flags must be boolean")
         self.worker_index = worker_index
         self.platform_type = platform_type
         self.capability = capability
@@ -397,11 +404,14 @@ class FormalEpisode:
             mission_roi_ratio=self.mission.roi_ratio,
             mission_priority=self.mission.priority,
         )
-        self._global_visibility = NativeVisibilityEstimator(
-            SensorGeometry(FORMAL_SENSOR_RANGE_M, FORMAL_SENSOR_FOV_RAD),
-            resolution_m=GLOBAL_GEOMETRY.resolution_m,
+        self._candidate_builder = CandidateBuilderV2(self.sensor_state)
+        self._legacy_candidate_builder = CandidateBuilderV2(
+            NativeVisibilityEstimator(
+                SensorGeometry(FORMAL_SENSOR_RANGE_M, FORMAL_SENSOR_FOV_RAD),
+                resolution_m=GLOBAL_GEOMETRY.resolution_m,
+            )
         )
-        self._candidate_builder = CandidateBuilderV2(self._global_visibility)
+        self._detail_candidate_gain_enabled = detail_candidate_gain_enabled
         self._observation_builder = ObservationBuilderV2()
         self._bridge = bridge_api.PlannerBridge()
         self._snapshot: _MapSnapshot | None = None
@@ -412,7 +422,7 @@ class FormalEpisode:
         self.last_hop_available_delta_v_mps = 0.0
         self._reveal_history: list[FormalRevealState] = []
         self._visited_candidate_cells = {start_cell}
-        self._visited_candidate_filter_enabled = True
+        self._visited_candidate_filter_enabled = visited_candidate_filter_enabled
         self.controller = ObservationBoundaryController(
             platform_type=platform_type,
             sensor_state=self.sensor_state,
@@ -681,7 +691,12 @@ class FormalEpisode:
             clearance_margin_norm=self._static_clearance,
             source=f"cpp_v3/{self.capability.content_sha256}",
         )
-        candidates = self._candidate_builder.build(
+        candidate_builder = (
+            self._candidate_builder
+            if self._detail_candidate_gain_enabled
+            else self._legacy_candidate_builder
+        )
+        candidates = candidate_builder.build(
             world,
             self.mission,
             pose,
@@ -1016,7 +1031,10 @@ class FormalWorkerBuilder:
         if restored.start_cell not in safe:
             raise ValueError("formal restored start is not platform-safe")
 
-        def restore_with_filter(enabled: bool) -> FormalEnvironmentWorker:
+        def restore_with_filters(
+            visited_enabled: bool,
+            detail_gain_enabled: bool,
+        ) -> FormalEnvironmentWorker:
             episode = FormalEpisode(
                 worker_index=worker_index,
                 platform_type=platform_type,
@@ -1024,8 +1042,9 @@ class FormalWorkerBuilder:
                 scenario_identity=scenario_identity,
                 loaded=loaded,
                 start_cell=restored.start_cell,
+                visited_candidate_filter_enabled=visited_enabled,
+                detail_candidate_gain_enabled=detail_gain_enabled,
             )
-            episode._visited_candidate_filter_enabled = enabled
             episode.replay_state(restored)
             worker = self._make_worker(episode)
             worker.environment.restore_stable_state(
@@ -1042,20 +1061,31 @@ class FormalWorkerBuilder:
                 raise ValueError("formal restored observation digest differs")
             return worker
 
+        compatibility_errors = {
+            "formal restored observation digest differs",
+            "restored rejected candidate was not active before masking",
+        }
+
+        def is_compatibility_error(error: Exception) -> bool:
+            return str(error) in compatibility_errors
+
         try:
-            return restore_with_filter(True)
-        except (ValueError, EnvironmentInvariantError) as error:
-            if str(error) not in {
-                "formal restored observation digest differs",
-                "restored rejected candidate was not active before masking",
-            }:
+            return restore_with_filters(True, True)
+        except (ValueError, EnvironmentInvariantError) as current_error:
+            if not is_compatibility_error(current_error):
                 raise
-            legacy_worker = restore_with_filter(False)
-            # A source-migrated checkpoint may contain one observation built
-            # before visited-cell filtering existed.  Preserve that exact
-            # boundary, then enable filtering for every following observation.
-            legacy_worker.episode._visited_candidate_filter_enabled = True
-            return legacy_worker
+        try:
+            legacy_worker = restore_with_filters(True, False)
+        except (ValueError, EnvironmentInvariantError) as coarse_error:
+            if not is_compatibility_error(coarse_error):
+                raise
+            legacy_worker = restore_with_filters(False, False)
+        # A source-migrated checkpoint may contain one observation built
+        # before either repair existed. Preserve that exact boundary, then
+        # enable both repairs for every following observation.
+        legacy_worker.episode._visited_candidate_filter_enabled = True
+        legacy_worker.episode._detail_candidate_gain_enabled = True
+        return legacy_worker
 
     def _load_scheduled_scene(
         self,

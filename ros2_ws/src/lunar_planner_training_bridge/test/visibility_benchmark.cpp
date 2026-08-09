@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <numbers>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -28,10 +29,10 @@
 namespace lunar::planning::training {
 namespace {
 
-constexpr std::size_t kCandidateHeight = 256U;
-constexpr std::size_t kCandidateWidth = 256U;
+constexpr std::size_t kCandidateHeight = 601U;
+constexpr std::size_t kCandidateWidth = 601U;
 constexpr std::size_t kCandidateCount = 64U;
-constexpr double kCandidateResolutionM = 4.0;
+constexpr double kCandidateResolutionM = 0.2;
 constexpr double kRangeM = 30.0;
 constexpr std::size_t kRevealHeight = 320U;
 constexpr std::size_t kRevealWidth = 320U;
@@ -110,8 +111,8 @@ void PrintJson(const std::size_t warmup_count, const std::size_t sample_count,
             << "\"warmup_count\":" << warmup_count << ','
             << "\"sample_count\":" << sample_count << ','
             << "\"timing_unit\":\"ms\","
-            << "\"candidate_fixture\":{\"height\":256,\"width\":256,"
-               "\"resolution_m\":4.0,\"range_m\":30.0,"
+            << "\"candidate_fixture\":{\"height\":601,\"width\":601,"
+               "\"resolution_m\":0.2,\"range_m\":30.0,"
                "\"candidate_count\":64},"
             << "\"reveal_fixture\":{\"height\":320,\"width\":320,"
                "\"resolution_m\":0.2,\"range_m\":30.0},"
@@ -163,29 +164,51 @@ int main(int argc, char **argv) {
                                         .width = kCandidateWidth};
     const std::size_t candidate_cells =
         candidate_shape.height * candidate_shape.width;
-    std::vector<std::uint8_t> observed(candidate_cells, 1U);
+    std::vector<std::uint8_t> observed(candidate_cells, 0U);
     std::vector<float> obstacles(candidate_cells, 0.0F);
     std::vector<float> roi(candidate_cells, 0.0F);
     std::vector<float> priority(candidate_cells, 0.0F);
     std::uint32_t random_state = 4080U;
-    for (std::size_t index = 0U; index < candidate_cells; ++index) {
-      const std::uint32_t sample = NextRandom(random_state);
-      observed[index] = (sample % 5U == 0U) ? 0U : 1U;
-      obstacles[index] = (sample % 97U == 0U) ? 1.0F : 0.0F;
-      roi[index] = static_cast<float>((sample >> 8U) % 101U) / 100.0F;
-      priority[index] = static_cast<float>((sample >> 16U) % 101U) / 100.0F;
+    constexpr std::int32_t center = 300;
+    constexpr std::int32_t observed_radius = 150;
+    for (std::int32_t row = 0;
+         row < static_cast<std::int32_t>(candidate_shape.height); ++row) {
+      for (std::int32_t column = 0;
+           column < static_cast<std::int32_t>(candidate_shape.width);
+           ++column) {
+        const std::size_t index =
+            static_cast<std::size_t>(row) * candidate_shape.width +
+            static_cast<std::size_t>(column);
+        const std::uint32_t sample = NextRandom(random_state);
+        const std::int64_t delta_row = row - center;
+        const std::int64_t delta_column = column - center;
+        observed[index] = delta_row * delta_row + delta_column * delta_column <=
+                                  observed_radius * observed_radius
+                              ? 1U
+                              : 0U;
+        obstacles[index] = 0.0F;
+        roi[index] = static_cast<float>((sample >> 8U) % 101U) / 100.0F;
+        priority[index] = static_cast<float>((sample >> 16U) % 101U) / 100.0F;
+      }
     }
     std::vector<GridCell> candidates;
     candidates.reserve(kCandidateCount);
-    for (std::int32_t row = 0; row < 8; ++row) {
-      for (std::int32_t column = 0; column < 8; ++column) {
-        const GridCell candidate{.row = 96 + row * 8,
-                                 .column = 96 + column * 8};
-        candidates.push_back(candidate);
-        observed[static_cast<std::size_t>(candidate.row) *
-                     candidate_shape.width +
-                 static_cast<std::size_t>(candidate.column)] = 1U;
-      }
+    constexpr double candidate_radius = 120.0;
+    for (std::size_t index = 0U; index < kCandidateCount; ++index) {
+      const double angle = 2.0 * std::numbers::pi * static_cast<double>(index) /
+                           static_cast<double>(kCandidateCount);
+      const GridCell candidate{
+          .row = center + static_cast<std::int32_t>(
+                              std::llround(candidate_radius * std::sin(angle))),
+          .column = center + static_cast<std::int32_t>(std::llround(
+                                 candidate_radius * std::cos(angle))),
+      };
+      candidates.push_back(candidate);
+      const std::size_t candidate_index =
+          static_cast<std::size_t>(candidate.row) * candidate_shape.width +
+          static_cast<std::size_t>(candidate.column);
+      observed[candidate_index] = 1U;
+      obstacles[candidate_index] = 0.0F;
     }
     const VisibilityKernel candidate_kernel{kCandidateResolutionM, kRangeM};
     std::uint64_t checksum = 0U;

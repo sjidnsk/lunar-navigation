@@ -32,9 +32,9 @@ REVEAL_P95_LIMIT_MS = 2.0
 THROUGHPUT_DROP_LIMIT_RATIO = 0.10
 
 _CANDIDATE_FIXTURE = {
-    "height": 256,
-    "width": 256,
-    "resolution_m": 4.0,
+    "height": 601,
+    "width": 601,
+    "resolution_m": 0.2,
     "range_m": 30.0,
     "candidate_count": 64,
 }

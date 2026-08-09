@@ -140,6 +140,14 @@ class MultiresSensorObservationState(SensorObservationState):
     def allocated_detail_tiles(self) -> int:
         return len(self._detail_tiles)
 
+    @property
+    def sensor(self) -> SensorGeometry:
+        return self.visibility_estimator.sensor
+
+    @property
+    def resolution_m(self) -> float:
+        return float(self.visibility_estimator.resolution_m)
+
     def _tile(self, tile_row: int, tile_column: int) -> _ObservedDetailTile:
         key = tile_row, tile_column
         tile = self._detail_tiles.get(key)
@@ -154,22 +162,28 @@ class MultiresSensorObservationState(SensorObservationState):
         return self._detail_tiles.get((tile_row, tile_column))
 
     def _window_slices(
-        self, start_row: int, start_column: int, cells: int
+        self,
+        start_row: int,
+        start_column: int,
+        rows: int,
+        columns: int | None = None,
     ):
+        if columns is None:
+            columns = rows
         tile_cells = self.tile_provider.tile_geometry.cells
         first_row = start_row // tile_cells
-        last_row = (start_row + cells - 1) // tile_cells
+        last_row = (start_row + rows - 1) // tile_cells
         first_column = start_column // tile_cells
-        last_column = (start_column + cells - 1) // tile_cells
+        last_column = (start_column + columns - 1) // tile_cells
         for tile_row in range(first_row, last_row + 1):
             for tile_column in range(first_column, last_column + 1):
                 tile_start_row = tile_row * tile_cells
                 tile_start_column = tile_column * tile_cells
                 global_row0 = max(start_row, tile_start_row)
-                global_row1 = min(start_row + cells, tile_start_row + tile_cells)
+                global_row1 = min(start_row + rows, tile_start_row + tile_cells)
                 global_column0 = max(start_column, tile_start_column)
                 global_column1 = min(
-                    start_column + cells, tile_start_column + tile_cells
+                    start_column + columns, tile_start_column + tile_cells
                 )
                 window_slice = (
                     slice(global_row0 - start_row, global_row1 - start_row),
@@ -189,6 +203,119 @@ class MultiresSensorObservationState(SensorObservationState):
                     ),
                 )
                 yield tile_row, tile_column, window_slice, tile_slice
+
+    def estimate_candidate_gains(
+        self,
+        observed_mask: np.ndarray,
+        obstacle_ratio: np.ndarray,
+        roi_ratio: np.ndarray,
+        priority_weight: np.ndarray,
+        candidate_cells: np.ndarray,
+    ) -> np.ndarray:
+        """Estimate gains from the sparse observed-only 0.2 m detail state."""
+        coarse_shape = (GLOBAL_GEOMETRY.cells, GLOBAL_GEOMETRY.cells)
+        grids = (
+            ("observed mask", observed_mask, np.dtype(np.bool_)),
+            ("obstacle ratio", obstacle_ratio, np.dtype(np.float32)),
+            ("ROI ratio", roi_ratio, np.dtype(np.float32)),
+            ("priority weight", priority_weight, np.dtype(np.float32)),
+        )
+        for name, values, dtype in grids:
+            if (
+                not isinstance(values, np.ndarray)
+                or values.shape != coarse_shape
+                or values.dtype != dtype
+                or not values.flags.c_contiguous
+            ):
+                raise ValueError(f"candidate {name} must match the global grid")
+            if np.issubdtype(dtype, np.floating) and (
+                not np.isfinite(values).all() or (values < 0.0).any()
+            ):
+                raise ValueError(f"candidate {name} values are invalid")
+        candidates = np.asarray(candidate_cells)
+        if (
+            candidates.dtype != np.dtype(np.int32)
+            or candidates.ndim != 2
+            or candidates.shape[1:] != (2,)
+            or not candidates.flags.c_contiguous
+        ):
+            raise ValueError("candidate cells must be C-contiguous int32 [N,2]")
+        if candidates.size and (
+            (candidates < 0).any()
+            or (candidates >= GLOBAL_GEOMETRY.cells).any()
+        ):
+            raise ValueError("candidate cell is outside the global grid")
+        if candidates.shape[0] == 0:
+            return np.zeros((0, 2), dtype=np.float32)
+
+        detail_candidates = np.ascontiguousarray(
+            candidates * _DETAIL_PER_GLOBAL + _DETAIL_PER_GLOBAL // 2,
+            dtype=np.int32,
+        )
+        radius_cells = math.floor(self.sensor.range_m / self.resolution_m)
+        total = self.tile_provider.detail_cells_per_axis
+        start_row = max(0, int(detail_candidates[:, 0].min()) - radius_cells)
+        start_column = max(
+            0, int(detail_candidates[:, 1].min()) - radius_cells
+        )
+        end_row = min(
+            total, int(detail_candidates[:, 0].max()) + radius_cells + 1
+        )
+        end_column = min(
+            total, int(detail_candidates[:, 1].max()) + radius_cells + 1
+        )
+        rows = end_row - start_row
+        columns = end_column - start_column
+        detail_observed = np.zeros((rows, columns), dtype=np.bool_)
+        detail_obstacle = np.zeros((rows, columns), dtype=np.float32)
+        for tile_row, tile_column, window_slice, tile_slice in self._window_slices(
+            start_row, start_column, rows, columns
+        ):
+            tile = self._existing_tile(tile_row, tile_column)
+            if tile is None:
+                continue
+            valid = tile.valid_mask[tile_slice]
+            detail_observed[window_slice] = valid
+            destination = detail_obstacle[window_slice]
+            source = tile.physical_obstacle_ratio[tile_slice]
+            destination[valid] = source[valid]
+
+        coarse_rows = np.arange(start_row, end_row) // _DETAIL_PER_GLOBAL
+        coarse_columns = (
+            np.arange(start_column, end_column) // _DETAIL_PER_GLOBAL
+        )
+        detail_roi = np.ascontiguousarray(
+            roi_ratio[np.ix_(coarse_rows, coarse_columns)], dtype=np.float32
+        )
+        detail_priority = np.ascontiguousarray(
+            priority_weight[np.ix_(coarse_rows, coarse_columns)],
+            dtype=np.float32,
+        )
+        local_candidates = np.ascontiguousarray(
+            detail_candidates - np.asarray([start_row, start_column], np.int32),
+            dtype=np.int32,
+        )
+        detail_gains = self.visibility_estimator.estimate_candidate_gains(
+            detail_observed,
+            detail_obstacle,
+            detail_roi,
+            detail_priority,
+            local_candidates,
+        )
+        expected_shape = (candidates.shape[0], 2)
+        if (
+            not isinstance(detail_gains, np.ndarray)
+            or detail_gains.shape != expected_shape
+            or detail_gains.dtype != np.dtype(np.float32)
+            or not detail_gains.flags.c_contiguous
+            or not np.isfinite(detail_gains).all()
+            or (detail_gains < 0.0).any()
+        ):
+            raise RuntimeError("detail candidate visibility result is invalid")
+        area_scale = np.float32(
+            (self.resolution_m / GLOBAL_GEOMETRY.resolution_m) ** 2
+        )
+        return np.ascontiguousarray(detail_gains * area_scale, dtype=np.float32)
 
     def _detail_window(
         self, pose: Pose2, cells: int

@@ -54,6 +54,7 @@ private:
   double range_m_{};
   std::int32_t radius_cells_{};
   std::vector<GridCell> endpoint_offsets_;
+  std::vector<std::uint32_t> relative_cell_lookup_;
   std::vector<Ray> rays_;
   std::vector<std::uint32_t> ray_cell_indices_;
   std::vector<std::uint32_t> reverse_offsets_;

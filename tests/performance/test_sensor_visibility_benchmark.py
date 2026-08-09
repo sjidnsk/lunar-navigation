@@ -46,9 +46,9 @@ def test_release_native_visibility_benchmark_meets_frozen_latency_contract() -> 
     assert document["sample_count"] == 200
     assert document["timing_unit"] == "ms"
     assert document["candidate_fixture"] == {
-        "height": 256,
-        "width": 256,
-        "resolution_m": 4.0,
+        "height": 601,
+        "width": 601,
+        "resolution_m": 0.2,
         "range_m": 30.0,
         "candidate_count": 64,
     }
