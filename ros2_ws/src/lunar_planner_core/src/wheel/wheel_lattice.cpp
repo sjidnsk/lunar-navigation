@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "wheel/wheel_sweep_validator.hpp"
+#include "wheel/wheel_primitive_expansion.hpp"
 
 namespace lunar::planning::wheel {
 namespace {
@@ -177,16 +178,7 @@ struct OpenGreater final {
     const WheelPose& pose, const WheelMotionMode mode,
     const shared::MapSnapshot& map,
     const std::size_t yaw_bin_count) noexcept {
-  const auto cell = map.PositionToCell(Vec2{
-      .x = pose.position_m.x,
-      .y = pose.position_m.y,
-  });
-  return WheelLatticeState{
-      .cell_x = cell.has_value() ? cell->x : -1,
-      .cell_y = cell.has_value() ? cell->y : -1,
-      .yaw_bin = YawToBin(pose.yaw_rad, yaw_bin_count),
-      .motion_mode = mode,
-  };
+  return WheelPrimitivePoseKey(pose, mode, map, yaw_bin_count);
 }
 
 [[nodiscard]] double ArcLength(
@@ -211,70 +203,8 @@ struct OpenGreater final {
     const std::size_t primitive_index,
     const shared::MapSnapshot& map,
     const std::size_t yaw_bin_count) {
-  if (!ModeAllows(source_state.motion_mode, primitive.kind)) {
-    return std::nullopt;
-  }
-  const auto relative_yaw = YawFromQuaternion(
-      primitive.relative_end_pose.orientation);
-  if (!relative_yaw.has_value()) {
-    return std::nullopt;
-  }
-  const double cosine = std::cos(source.yaw_rad);
-  const double sine = std::sin(source.yaw_rad);
-  const Vec3& relative = primitive.relative_end_pose.position_m;
-  Vec3 target_position{
-      .x = source.position_m.x + cosine * relative.x - sine * relative.y,
-      .y = source.position_m.y + sine * relative.x + cosine * relative.y,
-      .z = source.position_m.z + relative.z,
-  };
-  if (primitive.kind == WheelPrimitiveKind::kStopAndSwitch) {
-    target_position = source.position_m;
-  }
-  const auto target_cell = map.PositionToCell(Vec2{
-      .x = target_position.x,
-      .y = target_position.y,
-  });
-  if (!target_cell.has_value()) {
-    return std::nullopt;
-  }
-  const double target_yaw =
-      primitive.kind == WheelPrimitiveKind::kStopAndSwitch
-      ? source.yaw_rad
-      : NormalizeYaw(source.yaw_rad + *relative_yaw);
-  const WheelMotionMode target_mode = TargetMode(primitive.kind);
-  const WheelLatticeState target_state{
-      .cell_x = target_cell->x,
-      .cell_y = target_cell->y,
-      .yaw_bin = YawToBin(target_yaw, yaw_bin_count),
-      .motion_mode = target_mode,
-  };
-  if (target_state == source_state) {
-    return std::nullopt;
-  }
-  const double chord_m = std::hypot(
-      target_position.x - source.position_m.x,
-      target_position.y - source.position_m.y);
-  const double yaw_delta = ShortestYawDelta(source.yaw_rad, target_yaw);
-  const double path_length_m = ArcLength(
-      primitive.kind, chord_m, yaw_delta);
-  const double curvature_per_m =
-      path_length_m > kComparisonTolerance && !IsSpin(primitive.kind)
-      ? yaw_delta / path_length_m
-      : 0.0;
-  return WheelTransition{
-      .source_pose = source,
-      .target_pose = WheelPose{
-          .position_m = target_position,
-          .yaw_rad = target_yaw,
-      },
-      .curvature_per_m = curvature_per_m,
-      .primitive_index = primitive_index,
-      .primitive_kind = primitive.kind,
-      .source_mode = source_state.motion_mode,
-      .target_mode = target_mode,
-      .path_length_m = path_length_m,
-      .reverse = IsReverse(primitive.kind),
-  };
+  return ApplyWheelPrimitiveKinematics(
+      source_state, source, primitive, primitive_index, map, yaw_bin_count);
 }
 
 [[nodiscard]] double GoalDistance(
@@ -327,96 +257,14 @@ struct OpenGreater final {
 [[nodiscard]] bool ValidateCapability(
     const WheeledCapability& capability,
     const PlannerConfig& config) noexcept {
-  if (capability.footprint_xy_m.size() < 3U ||
-      capability.motion_primitives.empty() ||
-      !std::isfinite(capability.wheel_diameter_m) ||
-      !std::isfinite(capability.wheelbase_m) ||
-      !std::isfinite(capability.track_width_m) ||
-      !std::isfinite(capability.minimum_underbody_clearance_m) ||
-      !std::isfinite(capability.maximum_local_obstacle_relief_m) ||
-      !std::isfinite(capability.maximum_forward_speed_mps) ||
-      !std::isfinite(capability.maximum_reverse_speed_mps) ||
-      !std::isfinite(capability.maximum_spin_rate_radps) ||
-      !std::isfinite(capability.maximum_acceleration_mps2) ||
-      !std::isfinite(capability.maximum_braking_deceleration_mps2) ||
-      !std::isfinite(capability.maximum_yaw_acceleration_radps2) ||
-      !std::isfinite(capability.maximum_lateral_acceleration_mps2) ||
-      !std::isfinite(capability.maximum_curvature_per_m) ||
-      capability.wheel_diameter_m <= 0.0 ||
-      capability.wheelbase_m <= 0.0 ||
-      capability.track_width_m <= 0.0 ||
-      capability.minimum_underbody_clearance_m <= 0.0 ||
-      capability.maximum_local_obstacle_relief_m < 0.0 ||
-      capability.maximum_forward_speed_mps <= 0.0 ||
-      capability.maximum_reverse_speed_mps <= 0.0 ||
-      capability.maximum_spin_rate_radps <= 0.0 ||
-      capability.maximum_acceleration_mps2 <= 0.0 ||
-      capability.maximum_braking_deceleration_mps2 <= 0.0 ||
-      capability.maximum_yaw_acceleration_radps2 <= 0.0 ||
-      capability.maximum_lateral_acceleration_mps2 <= 0.0 ||
-      capability.maximum_curvature_per_m <= 0.0 ||
-      !std::isfinite(config.wheel.xy_resolution_m) ||
-      config.wheel.xy_resolution_m <= 0.0 ||
-      config.wheel.yaw_bin_count < 4U) {
-    return false;
-  }
-  if (!std::ranges::all_of(
-          capability.footprint_xy_m, [](const Vec2& value) {
-            return std::isfinite(value.x) && std::isfinite(value.y);
-          })) {
-    return false;
-  }
-  return std::ranges::all_of(
-      capability.motion_primitives,
-      [](const WheelMotionPrimitive& primitive) {
-        return !primitive.primitive_id.empty() &&
-            IsFinite(primitive.relative_end_pose) &&
-            YawFromQuaternion(
-                primitive.relative_end_pose.orientation).has_value();
-      });
+  return ValidateWheelPrimitiveCapability(capability, config);
 }
 
 [[nodiscard]] double EdgeCost(
     const WheelTransition& transition,
     const shared::SafeProjection& projection,
     const WheeledCapability& capability) noexcept {
-  const double yaw_distance = std::abs(ShortestYawDelta(
-      transition.source_pose.yaw_rad, transition.target_pose.yaw_rad));
-  double cost = 0.0;
-  if (transition.path_length_m > kComparisonTolerance) {
-    double speed_limit = transition.reverse
-        ? capability.maximum_reverse_speed_mps
-        : capability.maximum_forward_speed_mps;
-    const double curvature = std::abs(transition.curvature_per_m);
-    if (curvature > kComparisonTolerance) {
-      speed_limit = std::min(
-          {speed_limit,
-           capability.maximum_spin_rate_radps / curvature,
-           std::sqrt(
-               capability.maximum_lateral_acceleration_mps2 / curvature)});
-    }
-    const double ratio =
-        transition.roughness_m / kWheelRoughnessReferenceM;
-    const double roughness_scale = 1.0 / (1.0 + ratio * ratio);
-    speed_limit *=
-        std::max(0.0, std::cos(transition.surface_slope_rad)) *
-        roughness_scale;
-    cost = transition.path_length_m / speed_limit;
-  } else if (yaw_distance > kComparisonTolerance) {
-    cost = yaw_distance / capability.maximum_spin_rate_radps;
-  } else {
-    cost = 1.0e-3;
-  }
-  const auto target_cell = projection.source_map()->PositionToCell(Vec2{
-      .x = transition.target_pose.position_m.x,
-      .y = transition.target_pose.position_m.y,
-  });
-  if (target_cell.has_value() &&
-      transition.path_length_m > kComparisonTolerance) {
-    cost += 0.6 * static_cast<double>(
-        projection.TraversalCost(*target_cell));
-  }
-  return cost;
+  return WheelPrimitiveEdgeCost(transition, projection, capability);
 }
 
 [[nodiscard]] std::optional<ExactConnector> ExactGoalConnector(

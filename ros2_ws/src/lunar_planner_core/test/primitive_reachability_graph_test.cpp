@@ -11,8 +11,12 @@
 #include <gtest/gtest.h>
 
 #include "lunar_planner_core/primitive_reachability.hpp"
+#include "shared/map_snapshot.hpp"
 #include "shared/primitive_reachability_graph.hpp"
+#include "shared/safe_projection.hpp"
 #include "shared/sha256.hpp"
+#include "test_fixtures.hpp"
+#include "wheel/wheel_primitive_expansion.hpp"
 
 namespace lunar::planning::shared {
 namespace {
@@ -229,6 +233,115 @@ TEST(PrimitiveReachabilityGraph, RejectsMalformedOrCanceledGraphs) {
   EXPECT_EQ(FinalizePrimitiveGraph(MakeDirectedFixture(),
                                    stop_source.get_token()).reason_code,
             "REQUEST_CANCELED");
+}
+
+PrimitiveReachabilityResult BuildWheelFixture(PlannerInput input) {
+  const auto map = MapSnapshot::Create(input.world.global_map);
+  if (!map.ok()) {
+    return PrimitiveReachabilityResult{.reason_code = map.reason_code};
+  }
+  const auto safe = BuildSafeProjection(
+      map.snapshot, input.capability, input.config.map_safety,
+      input.stop_token);
+  if (!safe.ok()) {
+    return PrimitiveReachabilityResult{.reason_code = safe.reason_code};
+  }
+  return FinalizePrimitiveGraph(
+      wheel::BuildWheelPrimitiveGraph(
+          std::get<WheeledState>(input.current_state), *safe.projection,
+          std::get<WheeledCapability>(input.capability), input.config,
+          input.stop_token),
+      input.stop_token);
+}
+
+TEST(PrimitiveReachabilityGraph,
+     WheelProjectionDoesNotConfuseConnectedGroundWithPrimitiveReachability) {
+  PlannerInput input = test::MakeValidWheelInput();
+  input.world.global_map = test::MakeFlatMap("map", 8U, 5U, 1.0);
+  input.world.local_map = input.world.global_map;
+  auto capability = std::get<WheeledCapability>(input.capability);
+  capability.motion_primitives.erase(
+      std::remove_if(
+          capability.motion_primitives.begin(),
+          capability.motion_primitives.end(),
+          [](const WheelMotionPrimitive& primitive) {
+            return primitive.kind != WheelPrimitiveKind::kForward &&
+                primitive.kind != WheelPrimitiveKind::kReverse &&
+                primitive.kind != WheelPrimitiveKind::kStopAndSwitch;
+          }),
+      capability.motion_primitives.end());
+  input.capability = capability;
+  std::get<WheeledState>(input.current_state).pose.position_m =
+      {2.5, 2.5, 0.0};
+
+  const auto map = MapSnapshot::Create(input.world.global_map);
+  ASSERT_TRUE(map.ok()) << map.reason_code;
+  const auto safe = BuildSafeProjection(
+      map.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(safe.ok()) << safe.reason_code;
+  const GridCell start{.x = 2, .y = 2};
+  const GridCell side{.x = 2, .y = 3};
+  ASSERT_TRUE(safe.projection->HardFeasible(side));
+  ASSERT_EQ(safe.projection->ConnectedComponent(start),
+            safe.projection->ConnectedComponent(side));
+
+  const PrimitiveReachabilityResult result = BuildWheelFixture(input);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_EQ(result.snapshot->algorithm_id,
+            "cpp-wheel-motion-primitive-recoverable-graph/v1");
+  EXPECT_EQ(result.snapshot->reachable[3U * 8U + 2U], 0U);
+  EXPECT_EQ(result.snapshot->reachable[2U * 8U + 3U], 1U);
+  const auto same_cell_states = std::count_if(
+      result.snapshot->states.begin(), result.snapshot->states.end(),
+      [](const PrimitiveReachabilityState& state) {
+        return state.cell_x == 3 && state.cell_y == 2 &&
+            state.yaw_bin == 0;
+      });
+  EXPECT_GE(same_cell_states, 2);
+}
+
+TEST(PrimitiveReachabilityGraph, WheelExcludesOutboundOnlyState) {
+  PlannerInput input = test::MakeValidWheelInput();
+  input.world.global_map = test::MakeFlatMap("map", 7U, 5U, 1.0);
+  input.world.local_map = input.world.global_map;
+  auto capability = std::get<WheeledCapability>(input.capability);
+  capability.motion_primitives.erase(
+      std::remove_if(
+          capability.motion_primitives.begin(),
+          capability.motion_primitives.end(),
+          [](const WheelMotionPrimitive& primitive) {
+            return primitive.kind != WheelPrimitiveKind::kForward;
+          }),
+      capability.motion_primitives.end());
+  input.capability = capability;
+  std::get<WheeledState>(input.current_state).pose.position_m =
+      {2.5, 2.5, 0.0};
+
+  const PrimitiveReachabilityResult result = BuildWheelFixture(input);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  const auto* outbound = FindState(*result.snapshot, 3, 0, 1);
+  ASSERT_NE(outbound, nullptr);
+  EXPECT_EQ(outbound->forward_reachable, 1U);
+  EXPECT_EQ(outbound->returnable, 0U);
+  EXPECT_EQ(result.snapshot->reachable[2U * 7U + 3U], 0U);
+}
+
+TEST(PrimitiveReachabilityGraph, StatefulEnginePublishesWheelGraphSnapshots) {
+  PlannerInput input = test::MakeValidWheelInput();
+  PrimitiveReachabilityEngine engine;
+
+  const PrimitiveReachabilityResult first = engine.Update(input, std::nullopt);
+  const PrimitiveReachabilityResult second = engine.Update(input, 30.0);
+
+  ASSERT_TRUE(first.ok()) << first.reason_code;
+  ASSERT_TRUE(second.ok()) << second.reason_code;
+  EXPECT_EQ(first.snapshot->algorithm_id,
+            "cpp-wheel-motion-primitive-recoverable-graph/v1");
+  EXPECT_EQ(first.snapshot->revision, 1U);
+  EXPECT_EQ(second.snapshot->revision, 2U);
+  EXPECT_EQ(first.snapshot->graph_sha256, second.snapshot->graph_sha256);
 }
 
 }  // namespace

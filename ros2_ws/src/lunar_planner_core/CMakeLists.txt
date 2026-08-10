@@ -55,6 +55,7 @@ add_library(${PROJECT_NAME} SHARED
   src/shared/terrain_checks.cpp
   src/wheel/wheel_lattice.cpp
   src/wheel/wheel_planner.cpp
+  src/wheel/wheel_primitive_expansion.cpp
   src/wheel/wheel_spline_optimizer.cpp
   src/wheel/wheel_sweep_validator.cpp
   src/wheel/wheel_timing.cpp)

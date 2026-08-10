@@ -177,22 +177,22 @@ shared::PrimitiveGraphBuildResult BuildWheelPrimitiveGraph(
     std::stop_token stop_token);
 ```
 
-- [ ] **Step 1: Write WHEELED RED tests**
+- [x] **Step 1: Write WHEELED RED tests**
 
 Create one 2-D connected fixture where available primitives cannot turn into a side corridor, one fixture where the same cell has reachable and unreachable yaw/mode states, and one directed primitive fixture whose endpoint cannot return. Assert the old connected-component mask would include each target while the new recoverable projection excludes it.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 ctest --test-dir "$NATIVE_ROOT/build/lunar_planner_core" \
   -R 'primitive_reachability_graph|wheel_planner' --output-on-failure
 ```
 
-- [ ] **Step 3: Extract one primitive expansion authority and build the full finite graph**
+- [x] **Step 3: Extract one primitive expansion authority and build the full finite graph**
 
 Use a deterministic Dijkstra worklist over the existing dense state index. Record every certified directed edge, re-open a state when a lower-cost representative changes, and derive direct successors from the current exact start. Do not use a goal heuristic or the connected-component label as acceptance authority.
 
-- [ ] **Step 4: Run GREEN plus established wheel tests and commit**
+- [x] **Step 4: Run GREEN plus established wheel tests and commit**
 
 ```bash
 colcon --log-base "$NATIVE_ROOT/log-build" build --merge-install \

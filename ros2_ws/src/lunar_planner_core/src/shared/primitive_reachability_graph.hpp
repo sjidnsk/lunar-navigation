@@ -34,6 +34,7 @@ struct PrimitiveGraphBuildResult final {
   std::uint64_t revision{};
   std::size_t invalidated_edge_count{};
   std::size_t revalidated_edge_count{};
+  std::string reason_code;
 };
 
 [[nodiscard]] PrimitiveReachabilityResult FinalizePrimitiveGraph(

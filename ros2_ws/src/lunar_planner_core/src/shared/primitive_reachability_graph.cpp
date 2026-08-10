@@ -16,7 +16,11 @@
 #include <variant>
 #include <vector>
 
+#include "hierarchical/frame_transform.hpp"
+#include "shared/map_snapshot.hpp"
+#include "shared/safe_projection.hpp"
 #include "shared/sha256.hpp"
+#include "wheel/wheel_primitive_expansion.hpp"
 
 namespace lunar::planning {
 namespace {
@@ -73,6 +77,35 @@ PrimitiveReachabilityResult PrimitiveReachabilityEngine::Update(
   const PlatformType platform = CapabilityPlatform(input.capability);
   if (!StateMatchesPlatform(input.current_state, platform)) {
     return Failure("PLATFORM_STATE_CAPABILITY_MISMATCH");
+  }
+  const shared::MapSnapshotBuildResult map =
+      shared::MapSnapshot::Create(input.world.global_map);
+  if (!map.ok()) {
+    return Failure(map.reason_code);
+  }
+  const shared::SafeProjectionBuildResult safe = shared::BuildSafeProjection(
+      map.snapshot, input.capability, input.config.map_safety,
+      input.stop_token);
+  if (!safe.ok()) {
+    return Failure(safe.reason_code);
+  }
+  if (platform == PlatformType::kWheeled) {
+    WheeledState state = std::get<WheeledState>(input.current_state);
+    const auto pose_map = hierarchical::TransformPose(
+        state.pose, input.world.map_from_odom,
+        hierarchical::TransformDirection::kChildToParent);
+    if (!pose_map.has_value()) {
+      return Failure("FRAME_TRANSFORM_INVALID");
+    }
+    state.pose = *pose_map;
+    shared::PrimitiveGraphBuildResult graph =
+        wheel::BuildWheelPrimitiveGraph(
+            state, *safe.projection,
+            std::get<WheeledCapability>(input.capability), input.config,
+            input.stop_token);
+    graph.revision = ++impl_->revision;
+    return shared::FinalizePrimitiveGraph(
+        std::move(graph), input.stop_token);
   }
   return Failure("PRIMITIVE_REACHABILITY_PLATFORM_NOT_IMPLEMENTED");
 }
@@ -216,6 +249,9 @@ void VisitFromAnchor(
 
 PrimitiveReachabilityResult FinalizePrimitiveGraph(
     PrimitiveGraphBuildResult graph, const std::stop_token stop_token) {
+  if (!graph.reason_code.empty()) {
+    return Failure(std::move(graph.reason_code));
+  }
   if (stop_token.stop_requested()) {
     return Failure("REQUEST_CANCELED");
   }
