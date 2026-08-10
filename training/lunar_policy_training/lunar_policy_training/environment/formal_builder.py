@@ -39,6 +39,7 @@ from .candidate_builder import (
     CandidateDiagnostics,
 )
 from .formal_episode_state import (
+    FormalPathSampleState,
     FormalPoseState,
     FormalRevealState,
     FormalWorkerState,
@@ -57,6 +58,7 @@ from .multires_observation import DetailObservedWindow, MultiresSensorObservatio
 from .observation_boundary import (
     ObservationBoundaryController,
     SensorBoundaryEvidence,
+    SensorPathSample,
 )
 from .observation_builder import (
     LocalObservation,
@@ -79,6 +81,7 @@ from .visibility import NativeVisibilityEstimator, SensorGeometry
 
 _PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
 _FORMAL_MACRO_STEP_TIME_SCALE_S = 2.0
+_MAX_GROUND_SENSOR_SAMPLE_SPACING_M = 1.0
 
 
 def _formal_scheduled_entries(
@@ -532,6 +535,13 @@ class FormalEpisode:
             FormalRevealState(
                 pose=self._pose_state(evidence.pose_map),
                 elapsed_s=float(evidence.elapsed_s),
+                path_samples=tuple(
+                    FormalPathSampleState(
+                        pose=self._pose_state(sample.pose_map),
+                        elapsed_s=float(sample.elapsed_s),
+                    )
+                    for sample in evidence.path_samples
+                ),
                 execution_state=execution_state,
                 legged_body_z_m=float(self._current_legged_body_z_m),
             )
@@ -562,7 +572,15 @@ class FormalEpisode:
             self.current_pose = self._pose_from_state(reveal.pose)
             self._current_legged_body_z_m = reveal.legged_body_z_m
             evidence = SensorBoundaryEvidence(
-                self.current_pose, reveal.elapsed_s
+                self.current_pose,
+                reveal.elapsed_s,
+                path_samples=tuple(
+                    SensorPathSample(
+                        self._pose_from_state(sample.pose),
+                        sample.elapsed_s,
+                    )
+                    for sample in reveal.path_samples
+                ),
             )
             boundary = self.controller.after_execution(
                 platform_type=self.platform_type,
@@ -917,23 +935,15 @@ class FormalEpisode:
             (self.current_pose.x_m, self.current_pose.y_m),
         ) > 0.5:
             return self._execution_failure()
+        try:
+            evidence = self._ground_sensor_evidence(points)
+        except (OverflowError, TypeError, ValueError):
+            return self._execution_failure()
         end = points[-1].pose
-        terrain_z = end.position_m.z
         if self.platform_type == "LEGGED":
-            self._current_legged_body_z_m = end.position_m.z
-            terrain_z = self._terrain_elevation_m(
-                end.position_m.x, end.position_m.y
-            )
-        next_pose = Pose2(
-            end.position_m.x,
-            end.position_m.y,
-            _yaw_from_pose(end),
-            "map",
-            terrain_z,
-        )
-        self.current_pose = next_pose
-        elapsed_s = points[-1].time_from_start.total_seconds()
-        evidence = SensorBoundaryEvidence(next_pose, elapsed_s)
+            self._current_legged_body_z_m = float(end.position_m.z)
+        self.current_pose = evidence.pose_map
+        elapsed_s = evidence.elapsed_s
         self._record_reveal(evidence, "DECISION_BOUNDARY")
         return ReferenceExecutionResult(
             next_observation=self.controller.current_observation,
@@ -954,6 +964,128 @@ class FormalEpisode:
                 selected_action_observed_safe=True,
             ),
             sensor_boundary_evidence=evidence,
+        )
+
+    def _ground_sensor_evidence(
+        self, points: tuple[object, ...]
+    ) -> SensorBoundaryEvidence:
+        timestamps_s = tuple(
+            float(point.time_from_start.total_seconds()) for point in points
+        )
+        positions = tuple(
+            (
+                float(point.pose.position_m.x),
+                float(point.pose.position_m.y),
+                float(point.pose.position_m.z),
+            )
+            for point in points
+        )
+        yaws = tuple(float(_yaw_from_pose(point.pose)) for point in points)
+        if (
+            not all(math.isfinite(value) for value in timestamps_s)
+            or not all(
+                math.isfinite(value)
+                for position in positions
+                for value in position
+            )
+            or not all(math.isfinite(value) for value in yaws)
+            or timestamps_s[0] < 0.0
+            or any(
+                right < left
+                for left, right in zip(timestamps_s, timestamps_s[1:])
+            )
+        ):
+            raise ValueError("ground reference path is invalid")
+        timestamps_ns = tuple(
+            int(round(value * 1_000_000_000.0)) for value in timestamps_s
+        )
+        if timestamps_ns[-1] > (1 << 63) - 1:
+            raise OverflowError("ground reference elapsed time is out of range")
+
+        def interpolated_pose(index: int, alpha: float) -> Pose2:
+            left = positions[index]
+            right = positions[index + 1]
+            if alpha >= 1.0:
+                x_m, y_m, body_or_terrain_z_m = right
+                yaw_rad = yaws[index + 1]
+            else:
+                x_m = left[0] + alpha * (right[0] - left[0])
+                y_m = left[1] + alpha * (right[1] - left[1])
+                body_or_terrain_z_m = left[2] + alpha * (
+                    right[2] - left[2]
+                )
+                yaw_delta = math.atan2(
+                    math.sin(yaws[index + 1] - yaws[index]),
+                    math.cos(yaws[index + 1] - yaws[index]),
+                )
+                yaw_rad = yaws[index] + alpha * yaw_delta
+                yaw_rad = math.atan2(math.sin(yaw_rad), math.cos(yaw_rad))
+            terrain_z_m = (
+                self._terrain_elevation_m(x_m, y_m)
+                if self.platform_type == "LEGGED"
+                else body_or_terrain_z_m
+            )
+            return Pose2(x_m, y_m, yaw_rad, "map", terrain_z_m)
+
+        samples: list[SensorPathSample] = []
+        previous_time_ns = 0
+        first_distance_m = math.dist(
+            (self.current_pose.x_m, self.current_pose.y_m),
+            positions[0][:2],
+        )
+        if first_distance_m > 1.0e-12:
+            first_pose = Pose2(
+                positions[0][0],
+                positions[0][1],
+                yaws[0],
+                "map",
+                (
+                    self._terrain_elevation_m(*positions[0][:2])
+                    if self.platform_type == "LEGGED"
+                    else positions[0][2]
+                ),
+            )
+            samples.append(
+                SensorPathSample(
+                    first_pose,
+                    timestamps_ns[0] / 1_000_000_000.0,
+                )
+            )
+            previous_time_ns = timestamps_ns[0]
+        for index, (left, right) in enumerate(
+            zip(positions, positions[1:])
+        ):
+            distance_m = math.dist(left[:2], right[:2])
+            steps = max(
+                1,
+                int(
+                    math.ceil(
+                        distance_m / _MAX_GROUND_SENSOR_SAMPLE_SPACING_M
+                    )
+                ),
+            )
+            segment_ns = timestamps_ns[index + 1] - timestamps_ns[index]
+            for step in range(1, steps + 1):
+                alpha = step / steps
+                sample_time_ns = timestamps_ns[index] + int(
+                    round(alpha * segment_ns)
+                )
+                if sample_time_ns < previous_time_ns:
+                    raise ValueError("ground reference sample time regressed")
+                samples.append(
+                    SensorPathSample(
+                        interpolated_pose(index, alpha),
+                        (sample_time_ns - previous_time_ns)
+                        / 1_000_000_000.0,
+                    )
+                )
+                previous_time_ns = sample_time_ns
+        if not samples or previous_time_ns != timestamps_ns[-1]:
+            raise ValueError("ground reference endpoint sample is missing")
+        return SensorBoundaryEvidence(
+            samples[-1].pose_map,
+            timestamps_ns[-1] / 1_000_000_000.0,
+            path_samples=tuple(samples),
         )
 
     def _terrain_elevation_m(self, x_m: float, y_m: float) -> float:

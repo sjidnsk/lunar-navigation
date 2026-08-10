@@ -247,7 +247,7 @@ def _policy_parent_checkpoint(
         candidate_checkpoint_gpu_seconds=7200.0,
         environment_state=(
             {
-                "schema_version": "lunar-formal-environment-state/v3",
+                "schema_version": "lunar-formal-environment-state/v4",
                 "scenario_schedule_id": "cache-sha/train/v3",
                 "worker_episode_states": [
                     _formal_worker_state(index) for index in range(24)
@@ -387,7 +387,7 @@ def test_formal_checkpoint_roundtrips_exact_active_worker_states(
     tmp_path: pathlib.Path,
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v3",
+        "schema_version": "lunar-formal-environment-state/v4",
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)
@@ -418,7 +418,7 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v3",
+        "schema_version": "lunar-formal-environment-state/v4",
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)

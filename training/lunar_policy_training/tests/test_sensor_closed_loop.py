@@ -16,6 +16,7 @@ from lunar_policy_training.environment.macro_step import PolicyAction
 from lunar_policy_training.environment.observation_boundary import (
     ObservationBoundaryController,
     SensorBoundaryEvidence,
+    SensorPathSample,
 )
 from lunar_policy_training.environment.observation_builder import Pose2
 from lunar_policy_training.environment.sensor_observation import (
@@ -233,6 +234,51 @@ def test_reset_reveals_before_candidates_and_ground_boundary_uses_actual_area() 
     assert identity.state_time_ns == 2_000_000_000
 
 
+def test_ground_path_samples_reveal_the_whole_route_with_one_policy_revision() -> None:
+    controller, builder, canvas = _controller("WHEELED")
+    controller.reset(_pose(canvas, 5, 2))
+    before = controller.current_observation.observation_identities[0]
+    samples = tuple(
+        SensorPathSample(_pose(canvas, 5, column), 1.0)
+        for column in range(3, 9)
+    )
+
+    updated = controller.after_execution(
+        platform_type="WHEELED",
+        execution_state="DECISION_BOUNDARY",
+        evidence=SensorBoundaryEvidence(
+            _pose(canvas, 5, 8),
+            6.0,
+            path_samples=samples,
+        ),
+    )
+
+    assert controller.sensor_state.observed.valid_mask[3, 5]
+    assert len(builder.visible_counts) == 2
+    assert updated.mission_observed_delta == pytest.approx(
+        (builder.visible_counts[1] - builder.visible_counts[0]) / 121.0
+    )
+    after = updated.next_observation.observation_identities[0]
+    assert after.state_time_ns - before.state_time_ns == 6_000_000_000
+
+
+def test_sensor_path_evidence_requires_exact_endpoint_and_elapsed_sum() -> None:
+    _, _, canvas = _controller("WHEELED")
+
+    with pytest.raises(ValueError, match="final"):
+        SensorBoundaryEvidence(
+            _pose(canvas, 5, 8),
+            1.0,
+            path_samples=(SensorPathSample(_pose(canvas, 5, 7), 1.0),),
+        )
+    with pytest.raises(ValueError, match="elapsed"):
+        SensorBoundaryEvidence(
+            _pose(canvas, 5, 8),
+            2.0,
+            path_samples=(SensorPathSample(_pose(canvas, 5, 8), 1.0),),
+        )
+
+
 def test_roi_success_is_emitted_only_on_the_first_95_percent_crossing() -> None:
     controller, canvas = _coverage_controller("WHEELED")
 
@@ -310,6 +356,19 @@ def test_hopper_updates_once_at_landed_hold_and_never_in_flight() -> None:
             platform_type="HOPPER",
             execution_state="IN_FLIGHT",
             evidence=SensorBoundaryEvidence(_pose(canvas, 5, 8), 1.0),
+        )
+
+    with pytest.raises(ValueError, match="path samples"):
+        controller.after_execution(
+            platform_type="HOPPER",
+            execution_state="LANDED_HOLD",
+            evidence=SensorBoundaryEvidence(
+                _pose(canvas, 5, 8),
+                1.0,
+                path_samples=(
+                    SensorPathSample(_pose(canvas, 5, 8), 1.0),
+                ),
+            ),
         )
 
 

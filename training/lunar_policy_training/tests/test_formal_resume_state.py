@@ -56,6 +56,19 @@ def _worker_state() -> dict[str, object]:
             {
                 "pose": pose,
                 "elapsed_s": 1.25,
+                "path_samples": [
+                    {
+                        "pose": {
+                            **pose,
+                            "x_m": 127.5,
+                        },
+                        "elapsed_s": 0.5,
+                    },
+                    {
+                        "pose": pose,
+                        "elapsed_s": 0.75,
+                    },
+                ],
                 "execution_state": "DECISION_BOUNDARY",
                 "legged_body_z_m": 7.0,
             }
@@ -76,6 +89,7 @@ def test_formal_worker_state_roundtrips_as_strict_json() -> None:
     assert state.episode_cursor == 4
     assert state.rejected_candidate_indices == (1, 3)
     assert state.candidate_gain_resolution_m is None
+    assert len(state.reveal_history[0].path_samples) == 2
 
 
 def test_formal_worker_state_roundtrips_detail_gain_marker() -> None:

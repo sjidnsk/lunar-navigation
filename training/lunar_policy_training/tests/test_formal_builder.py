@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import timedelta
 import hashlib
 import json
+import math
 import pathlib
 
 import numpy as np
@@ -565,6 +567,71 @@ def test_formal_episode_navigation_stack_preserves_exact_parent_pose(
     )
 
     assert episode._navigation_stack == [episode.current_pose]
+
+
+def test_formal_ground_reference_interpolates_one_metre_sensor_samples(
+    tmp_path: pathlib.Path,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    episode = assembly.factory.create_for_episode(
+        0,
+        "WHEELED",
+        4,
+        platform_worker_index=0,
+        platform_worker_count=1,
+    ).episode
+    start = episode.current_pose
+    direction = (
+        1.0
+        if start.x_m + 4.0 < episode.loaded.scene.base_canvas.bounds_m[2]
+        else -1.0
+    )
+    end = Pose2(
+        start.x_m + 4.0 * direction,
+        start.y_m,
+        yaw_rad=math.pi / 2.0,
+        elevation_m=start.elevation_m,
+    )
+    bridge = formal_builder_module.bridge_api
+    trajectory = bridge.TrajectoryReference()
+    trajectory.semantics = bridge.TrajectorySemantics.WHEELED_BASE
+    points = []
+    for pose, elapsed_s in ((start, 0.0), (end, 4.0)):
+        point = bridge.TrajectoryPoint()
+        point.pose = formal_builder_module._pose3(pose)
+        point.time_from_start = timedelta(seconds=elapsed_s)
+        points.append(point)
+    trajectory.points = points
+    reference = bridge.MotionReference()
+    reference.plan_id = "path-observation-test"
+    reference.platform_type = "WHEELED"
+    reference.data = trajectory
+    before_revision = episode._revision
+
+    execution = episode.execute_reference(reference)
+
+    evidence = execution.sensor_boundary_evidence
+    assert evidence is not None
+    assert evidence.path_samples[-1].pose_map == evidence.pose_map
+    assert evidence.pose_map.x_m == end.x_m
+    assert evidence.pose_map.y_m == end.y_m
+    assert evidence.pose_map.yaw_rad == pytest.approx(end.yaw_rad)
+    assert sum(sample.elapsed_s for sample in evidence.path_samples) == pytest.approx(
+        4.0
+    )
+    path = (start,) + tuple(sample.pose_map for sample in evidence.path_samples)
+    assert all(
+        math.dist((left.x_m, left.y_m), (right.x_m, right.y_m)) <= 1.0
+        for left, right in zip(path, path[1:])
+    )
+    assert episode._reveal_history[-1].path_samples
+
+    episode.controller.after_execution(
+        platform_type="WHEELED",
+        execution_state="DECISION_BOUNDARY",
+        evidence=evidence,
+    )
+    assert episode._revision == before_revision + 1
 
 
 def test_formal_episode_estimates_candidate_gain_from_detail_observation(

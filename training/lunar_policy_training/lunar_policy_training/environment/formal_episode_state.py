@@ -12,7 +12,7 @@ import torch
 from ..policy.observation import ObservationIdentity, PolicyBatch
 
 
-FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION = "lunar-formal-environment-state/v3"
+FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION = "lunar-formal-environment-state/v4"
 STABLE_EXECUTION_STATES = frozenset(
     {"DECISION_BOUNDARY", "GROUND_HOLD", "LANDED_HOLD"}
 )
@@ -21,8 +21,9 @@ _POSE_FIELDS = frozenset(
     {"x_m", "y_m", "yaw_rad", "elevation_m", "frame_id"}
 )
 _REVEAL_FIELDS = frozenset(
-    {"pose", "elapsed_s", "execution_state", "legged_body_z_m"}
+    {"pose", "elapsed_s", "path_samples", "execution_state", "legged_body_z_m"}
 )
+_PATH_SAMPLE_FIELDS = frozenset({"pose", "elapsed_s"})
 _IDENTITY_FIELDS = frozenset(
     {
         "episode_id",
@@ -122,9 +123,36 @@ class FormalPoseState:
 
 
 @dataclass(frozen=True, slots=True)
+class FormalPathSampleState:
+    pose: FormalPoseState
+    elapsed_s: float
+
+    @classmethod
+    def from_dict(cls, value: object) -> "FormalPathSampleState":
+        if not isinstance(value, Mapping) or set(value) != _PATH_SAMPLE_FIELDS:
+            raise ValueError("formal path sample structure is invalid")
+        elapsed_s = _finite(value["elapsed_s"], "path sample elapsed time")
+        if elapsed_s < 0.0:
+            raise ValueError(
+                "formal path sample elapsed time must be non-negative"
+            )
+        return cls(
+            pose=FormalPoseState.from_dict(value["pose"]),
+            elapsed_s=elapsed_s,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "pose": self.pose.to_dict(),
+            "elapsed_s": self.elapsed_s,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class FormalRevealState:
     pose: FormalPoseState
     elapsed_s: float
+    path_samples: tuple[FormalPathSampleState, ...]
     execution_state: str
     legged_body_z_m: float
 
@@ -138,9 +166,26 @@ class FormalRevealState:
         elapsed_s = _finite(value["elapsed_s"], "reveal elapsed time")
         if elapsed_s < 0.0:
             raise ValueError("formal reveal elapsed time must be non-negative")
+        samples_value = value["path_samples"]
+        if not isinstance(samples_value, list):
+            raise ValueError("formal path sample list is invalid")
+        path_samples = tuple(
+            FormalPathSampleState.from_dict(item) for item in samples_value
+        )
+        pose = FormalPoseState.from_dict(value["pose"])
+        if path_samples and path_samples[-1].pose != pose:
+            raise ValueError("formal final path sample differs from reveal pose")
+        elapsed_ns = int(round(elapsed_s * 1_000_000_000.0))
+        sample_elapsed_ns = sum(
+            int(round(sample.elapsed_s * 1_000_000_000.0))
+            for sample in path_samples
+        )
+        if path_samples and sample_elapsed_ns != elapsed_ns:
+            raise ValueError("formal path sample elapsed time differs from reveal")
         return cls(
-            pose=FormalPoseState.from_dict(value["pose"]),
+            pose=pose,
             elapsed_s=elapsed_s,
+            path_samples=path_samples,
             execution_state=str(execution_state),
             legged_body_z_m=_finite(
                 value["legged_body_z_m"], "legged body height"
@@ -151,6 +196,7 @@ class FormalRevealState:
         return {
             "pose": self.pose.to_dict(),
             "elapsed_s": self.elapsed_s,
+            "path_samples": [sample.to_dict() for sample in self.path_samples],
             "execution_state": self.execution_state,
             "legged_body_z_m": self.legged_body_z_m,
         }
@@ -394,6 +440,7 @@ def policy_batch_sha256(batch: PolicyBatch) -> str:
 
 __all__ = [
     "FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION",
+    "FormalPathSampleState",
     "FormalPoseState",
     "FormalRevealState",
     "FormalWorkerState",

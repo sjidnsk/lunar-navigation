@@ -18,7 +18,11 @@ from ..policy.observation import (
 )
 from ..training_semantics import FORMAL_SUCCESS_COVERAGE_RATIO
 from .observation_builder import Pose2
-from .sensor_observation import SensorObservationState, TrainingObservedGrid
+from .sensor_observation import (
+    ObservationDelta,
+    SensorObservationState,
+    TrainingObservedGrid,
+)
 
 
 _PLATFORMS = frozenset(PLATFORM_CONTEXTS)
@@ -27,8 +31,8 @@ _HOPPER_NO_OBSERVATION_STATES = frozenset({"JUMP_COMMITTED", "IN_FLIGHT"})
 
 
 @dataclass(frozen=True, slots=True)
-class SensorBoundaryEvidence:
-    """Physical pose and elapsed macro-step time supplied by execution."""
+class SensorPathSample:
+    """One physical sensor pose and elapsed time since the previous sample."""
 
     pose_map: Pose2
     elapsed_s: float
@@ -51,6 +55,34 @@ class SensorBoundaryEvidence:
             or self.elapsed_s < 0.0
         ):
             raise ValueError("sensor boundary elapsed time is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class SensorBoundaryEvidence:
+    """Final pose, total elapsed time, and optional ground-path samples."""
+
+    pose_map: Pose2
+    elapsed_s: float
+    path_samples: tuple[SensorPathSample, ...] = ()
+
+    def __post_init__(self) -> None:
+        SensorPathSample(self.pose_map, self.elapsed_s)
+        if not isinstance(self.path_samples, tuple) or any(
+            not isinstance(sample, SensorPathSample)
+            for sample in self.path_samples
+        ):
+            raise ValueError("sensor boundary path samples are invalid")
+        if not self.path_samples:
+            return
+        if self.path_samples[-1].pose_map != self.pose_map:
+            raise ValueError("sensor boundary final path sample differs from pose")
+        elapsed_ns = int(round(float(self.elapsed_s) * 1_000_000_000.0))
+        sample_elapsed_ns = sum(
+            int(round(float(sample.elapsed_s) * 1_000_000_000.0))
+            for sample in self.path_samples
+        )
+        if sample_elapsed_ns != elapsed_ns:
+            raise ValueError("sensor boundary path elapsed time differs from total")
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +256,8 @@ class ObservationBoundaryController:
             raise ValueError("execution state is not an exploration boundary")
         if not isinstance(evidence, SensorBoundaryEvidence):
             raise ValueError("sensor boundary evidence is required")
+        if platform_type == "HOPPER" and evidence.path_samples:
+            raise ValueError("hopper landing evidence must not contain path samples")
         delta, mission_ratio, crossing = self._observe(
             evidence, execution_state
         )
@@ -250,18 +284,42 @@ class ObservationBoundaryController:
         self, evidence: SensorBoundaryEvidence, execution_state: str
     ):
         canvas = self._sensor_state.truth.canvas
-        try:
-            pose_cell = canvas.world_to_grid(
-                evidence.pose_map.x_m, evidence.pose_map.y_m
-            )
-        except ValueError as error:
-            raise ValueError("sensor boundary pose is outside the grid") from error
         elapsed_ns = int(round(float(evidence.elapsed_s) * 1_000_000_000.0))
         if elapsed_ns < 0 or elapsed_ns > (1 << 63) - 1 - self._state_time_ns:
             raise ValueError("sensor boundary elapsed time is out of range")
         previous_ratio = self._mission_observed_ratio()
-        delta = self._sensor_state.observe_world(
-            evidence.pose_map, elapsed_s=float(evidence.elapsed_s)
+        samples = evidence.path_samples or (
+            SensorPathSample(evidence.pose_map, evidence.elapsed_s),
+        )
+        visible_cells = 0
+        newly_observed_cells = 0
+        mission_observed_delta_m2 = 0.0
+        priority_observed_delta_m2 = 0.0
+        for sample in samples:
+            try:
+                canvas.world_to_grid(
+                    sample.pose_map.x_m, sample.pose_map.y_m
+                )
+            except ValueError as error:
+                raise ValueError(
+                    "sensor boundary pose is outside the grid"
+                ) from error
+            sample_delta = self._sensor_state.observe_world(
+                sample.pose_map, elapsed_s=float(sample.elapsed_s)
+            )
+            visible_cells += int(sample_delta.visible_cells)
+            newly_observed_cells += int(sample_delta.newly_observed_cells)
+            mission_observed_delta_m2 += float(
+                sample_delta.mission_observed_delta_m2
+            )
+            priority_observed_delta_m2 += float(
+                sample_delta.priority_observed_delta_m2
+            )
+        delta = ObservationDelta(
+            visible_cells=visible_cells,
+            newly_observed_cells=newly_observed_cells,
+            mission_observed_delta_m2=mission_observed_delta_m2,
+            priority_observed_delta_m2=priority_observed_delta_m2,
         )
         self._mission_observed_area_m2 = min(
             self._mission_area_m2,
@@ -390,4 +448,5 @@ __all__ = [
     "BoundaryObservationResult",
     "ObservationBoundaryController",
     "SensorBoundaryEvidence",
+    "SensorPathSample",
 ]
