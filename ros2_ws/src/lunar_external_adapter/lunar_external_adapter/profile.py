@@ -47,18 +47,10 @@ class ChannelProfile:
 
 
 @dataclass(frozen=True)
-class QosProfile:
-    reliability: str
-    durability: str
-    depth: int
-
-
-@dataclass(frozen=True)
 class InterfaceProfile:
     schema_version: str
     project_id: str
     channels: dict[str, ChannelProfile]
-    qos: QosProfile
 
 
 def _mapping(value: Any, path: str) -> dict[str, Any]:
@@ -171,37 +163,6 @@ def _channel(name: str, value: Any) -> ChannelProfile:
     )
 
 
-def _qos(value: Any) -> QosProfile:
-    document = _mapping(value, "qos")
-    _exact_keys(
-        document,
-        required={"reliability", "durability", "depth"},
-        path="qos",
-    )
-    reliability = _nonempty_string(
-        document["reliability"], "qos.reliability"
-    )
-    durability = _nonempty_string(document["durability"], "qos.durability")
-    if reliability not in {"reliable", "best_effort"}:
-        raise InterfaceProfileError("qos.reliability is unsupported")
-    if durability not in {"volatile", "transient_local"}:
-        raise InterfaceProfileError("qos.durability is unsupported")
-    depth = document["depth"]
-    if (
-        isinstance(depth, bool)
-        or not isinstance(depth, int)
-        or not 1 <= depth <= 1000
-    ):
-        raise InterfaceProfileError(
-            "qos.depth must be an integer in [1, 1000]"
-        )
-    return QosProfile(
-        reliability=reliability,
-        durability=durability,
-        depth=depth,
-    )
-
-
 def resolve_converter(name: str) -> Callable[[Any], Any]:
     """Resolve only a compiled-in converter.
 
@@ -227,7 +188,7 @@ def load_interface_profile(path: str | Path) -> InterfaceProfile:
     root = _mapping(document, "profile")
     _exact_keys(
         root,
-        required={"schema_version", "project_id", "channels", "qos"},
+        required={"schema_version", "project_id", "channels"},
         path="profile",
     )
     schema_version = _nonempty_string(root["schema_version"], "schema_version")
@@ -250,7 +211,6 @@ def load_interface_profile(path: str | Path) -> InterfaceProfile:
         schema_version=schema_version,
         project_id=project_id,
         channels=channels,
-        qos=_qos(root["qos"]),
     )
 
 

@@ -60,6 +60,44 @@ def validate_session_signature(inputs: Sequence[Any], outputs: Sequence[Any]) ->
             raise PolicyRuntimeError(f"ONNX output {item.name} dtype is invalid")
 
 
+def validate_golden_equivalence(
+    session: Any,
+    model_dir: str | Path,
+    *,
+    atol: float,
+    rtol: float,
+) -> None:
+    """启动时真实执行 ONNX，并与冻结 golden outputs 逐输出比较。"""
+    root = Path(model_dir)
+    try:
+        with np.load(root / "golden_inputs.npz", allow_pickle=False) as archive:
+            inputs = {name: archive[name] for name in archive.files}
+        with np.load(root / "golden_outputs.npz", allow_pickle=False) as archive:
+            expected = {name: archive[name] for name in archive.files}
+        values = session.run(
+            list(ActionContractV2.output_names),
+            {name: inputs[name] for name in ObservationContractV3.input_names},
+        )
+    except Exception as error:
+        raise PolicyRuntimeError(f"cannot execute golden inference: {error}") from error
+    actual = {
+        name: value
+        for name, value in zip(ActionContractV2.output_names, values, strict=True)
+    }
+    try:
+        validate_observation_inputs(inputs)
+        ActionContractV2.validate_outputs(actual)
+    except (ObservationContractError, ActionContractError) as error:
+        raise PolicyRuntimeError(str(error)) from error
+    if set(expected) != set(ActionContractV2.output_names):
+        raise PolicyRuntimeError("golden output names differ from Action V2")
+    for name in ActionContractV2.output_names:
+        if not np.allclose(
+            actual[name], expected[name], atol=atol, rtol=rtol, equal_nan=False
+        ):
+            raise PolicyRuntimeError(f"golden output mismatch for {name}")
+
+
 class OnnxPolicyRuntime:
     """启动时验证一次包身份，每次推理继续验证动态张量。"""
 
@@ -77,6 +115,12 @@ class OnnxPolicyRuntime:
             raise PolicyRuntimeError(f"cannot create ONNX session: {error}") from error
         validate_session_signature(
             self._session.get_inputs(), self._session.get_outputs()
+        )
+        validate_golden_equivalence(
+            self._session,
+            model_dir,
+            atol=self.manifest.atol,
+            rtol=self.manifest.rtol,
         )
 
     def infer(
@@ -107,5 +151,6 @@ class OnnxPolicyRuntime:
 __all__ = [
     "OnnxPolicyRuntime",
     "PolicyRuntimeError",
+    "validate_golden_equivalence",
     "validate_session_signature",
 ]

@@ -6,6 +6,7 @@ import math
 
 from lunar_navigation_msgs.msg import MotionExecutionFeedback
 from lunar_planning_msgs.action import PlanMotion
+from lunar_planning_msgs.msg import MotionReference
 
 from lunar_policy_training.environment.observation_builder import Pose2
 
@@ -56,7 +57,13 @@ def planner_goal_to_ros(goal: PlannerGoal, *, stamp_ns: int):
     return message
 
 
-def feedback_from_ros(message: MotionExecutionFeedback) -> ExecutionFeedback:
+def feedback_from_ros(
+    message: MotionExecutionFeedback,
+    *,
+    expected_frame: str,
+    now_ns: int,
+    maximum_age_ns: int,
+) -> ExecutionFeedback:
     if not isinstance(message, MotionExecutionFeedback):
         raise TypeError("message must use MotionExecutionFeedback")
     try:
@@ -64,7 +71,56 @@ def feedback_from_ros(message: MotionExecutionFeedback) -> ExecutionFeedback:
         state = _EXECUTION_STATES[message.state]
     except KeyError as error:
         raise ValueError("execution feedback enum is invalid") from error
-    return ExecutionFeedback(int(message.sequence), platform, message.plan_id, state)
+    if not message.plan_id or not message.segment_id:
+        raise ValueError("execution feedback identity is incomplete")
+    stamp_ns = (
+        int(message.header.stamp.sec) * 1_000_000_000
+        + int(message.header.stamp.nanosec)
+    )
+    if stamp_ns <= 0:
+        raise ValueError("execution feedback stamp is invalid")
+    if message.header.frame_id != expected_frame:
+        raise ValueError("execution feedback frame is invalid")
+    if (
+        type(now_ns) is not int
+        or type(maximum_age_ns) is not int
+        or maximum_age_ns <= 0
+        or stamp_ns > now_ns
+        or now_ns - stamp_ns > maximum_age_ns
+    ):
+        raise ValueError("execution feedback is stale or future-dated")
+    return ExecutionFeedback(
+        int(message.sequence),
+        platform,
+        message.plan_id,
+        state,
+        message.segment_id,
+        stamp_ns,
+    )
+
+
+def reference_segment_id(
+    reference: MotionReference, platform_type: str
+) -> str:
+    """提取外部执行反馈必须回传的唯一 segment 身份。"""
+    if not isinstance(reference, MotionReference):
+        raise TypeError("reference must use MotionReference")
+    expected = {
+        "WHEELED": MotionReference.WHEELED,
+        "LEGGED": MotionReference.LEGGED,
+        "HOPPER": MotionReference.HOPPER,
+    }
+    try:
+        expected_type = expected[platform_type]
+    except KeyError as error:
+        raise ValueError("platform_type is invalid") from error
+    if reference.platform_type != expected_type or not reference.plan_id:
+        raise ValueError("motion reference identity is invalid")
+    if platform_type != "HOPPER":
+        return reference.plan_id
+    if len(reference.hops) != 1 or not reference.hops[0].segment_id:
+        raise ValueError("hopper reference requires one identified hop segment")
+    return reference.hops[0].segment_id
 
 
 def _normalize_angle(value: float) -> float:
@@ -94,4 +150,9 @@ def map_pose_from_odom(
     )
 
 
-__all__ = ["feedback_from_ros", "map_pose_from_odom", "planner_goal_to_ros"]
+__all__ = [
+    "feedback_from_ros",
+    "map_pose_from_odom",
+    "planner_goal_to_ros",
+    "reference_segment_id",
+]

@@ -11,6 +11,12 @@ TRAINING_PACKAGES = find_namespace_packages(
     where=str(TRAINING_ROOT),
     include=("lunar_policy_training", "lunar_policy_training.*"),
 )
+# ament_python 要求 data_files 的源路径相对 setup.py 所在包目录。
+CAPABILITY_CONFIG = Path("../lunar_navigation_config/config")
+CAPABILITY_SHARE = (
+    f"share/{PACKAGE_NAME}/runtime_repository/ros2_ws/src/"
+    "lunar_navigation_config/config"
+)
 
 
 setup(
@@ -26,6 +32,13 @@ setup(
         ("share/ament_index/resource_index/packages", [f"resource/{PACKAGE_NAME}"]),
         (f"share/{PACKAGE_NAME}", ["package.xml"]),
         (f"share/{PACKAGE_NAME}/launch", glob("launch/*.launch.py")),
+        (
+            CAPABILITY_SHARE,
+            [
+                str(CAPABILITY_CONFIG / "platform_capability_schema_v2.yaml"),
+                str(CAPABILITY_CONFIG / "three_platform_capability_freeze_v1.yaml"),
+            ],
+        ),
     ],
     install_requires=["setuptools", "numpy", "PyYAML", "rasterio", "shapely"],
     zip_safe=True,

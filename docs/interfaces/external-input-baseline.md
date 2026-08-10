@@ -39,6 +39,13 @@
 `MotionExecutionFeedback`。Topic 可用 ROS remap 调整；若外部项目更换消息类型，应在外部适配器边界新增显式
 converter，策略、规划器和旧模型合同内部仍保持上述类型，不能用 YAML 静默改变字段语义。
 
+接口 YAML 只允许替换 Topic、类型、frame 和显式 converter，不拥有 QoS。内部通道的 DDS
+语义固定为：地图 `reliable + transient_local + depth 1`，里程计采用 ROS 2 sensor-data
+QoS，TF 为 `best_effort + volatile + depth 100`，任务为
+`reliable + transient_local + depth 1`，定位状态与执行反馈均为
+`reliable + volatile + depth 10`。更换外部项目时必须在 adapter 边界满足这些固定通道合同，
+不能通过替换 YAML 悄悄改变消费者的 QoS。
+
 ## 暂定消息 schema
 
 ### `LocalizationStatus.msg`

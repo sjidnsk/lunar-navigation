@@ -105,11 +105,13 @@ def test_real_onnx_runs_two_complete_decision_boundaries(platform: str) -> None:
     first = coordinator.start_decision(_snapshot(platform, 1), mission_id="mission")
     first_message = planner_goal_to_ros(first, stamp_ns=1_000_000_000)
     coordinator.accept_planner_result(
-        PlannerResult(first.request_id, True, "plan-1", "REFERENCE_AVAILABLE")
+        PlannerResult(
+            first.request_id, True, "plan-1", "REFERENCE_AVAILABLE", "segment-1"
+        )
     )
     terminal = "LANDED_HOLD" if platform == "HOPPER" else "SEGMENT_COMPLETE"
     assert coordinator.accept_feedback(
-        ExecutionFeedback(1, platform, "plan-1", terminal)
+        ExecutionFeedback(1, platform, "plan-1", terminal, "segment-1", 10)
     )
 
     second = coordinator.start_decision(_snapshot(platform, 2), mission_id="mission")

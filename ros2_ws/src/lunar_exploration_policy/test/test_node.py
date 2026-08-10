@@ -8,7 +8,10 @@ import rclpy
 from rclpy.parameter import Parameter
 from lunar_planning_msgs.action import PlanMotion
 
-from lunar_exploration_policy.node import InterfaceV1PolicyNode
+from lunar_exploration_policy.node import (
+    InterfaceV1PolicyNode,
+    _timestamps_are_usable,
+)
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -30,11 +33,40 @@ def _configured_node(profile: Path) -> InterfaceV1PolicyNode:
             Parameter("model_dir", value=str(_real_model_dir())),
             Parameter("platform_profile_file", value=str(profile)),
             Parameter("interface_profile_file", value=str(INTERFACE)),
-            Parameter("repository_root", value=str(ROOT)),
         ]
     )
     node.trigger_configure()
     return node
+
+
+def test_state_timestamps_must_follow_terminal_feedback_boundary() -> None:
+    assert not _timestamps_are_usable(
+        (100, 101, 102, 103, 104),
+        now_ns=120,
+        minimum_state_time_ns=100,
+        maximum_age_ns=30,
+        maximum_skew_ns=10,
+    )
+    assert _timestamps_are_usable(
+        (101, 102, 103, 104, 105),
+        now_ns=120,
+        minimum_state_time_ns=100,
+        maximum_age_ns=30,
+        maximum_skew_ns=10,
+    )
+
+
+def test_state_timestamps_reject_stale_future_or_skewed_snapshots() -> None:
+    common = {
+        "now_ns": 1_000,
+        "minimum_state_time_ns": 0,
+        "maximum_age_ns": 100,
+        "maximum_skew_ns": 10,
+    }
+    assert not _timestamps_are_usable((899, 995), **common)
+    assert not _timestamps_are_usable((995, 1_001), **common)
+    assert not _timestamps_are_usable((980, 995), **common)
+    assert _timestamps_are_usable((990, 995), **common)
 
 
 def test_real_model_and_frozen_profile_configure_lifecycle_node() -> None:
@@ -87,6 +119,7 @@ def test_successful_plan_result_is_published_for_external_execution() -> None:
     result = PlanMotion.Result()
     result.has_reference = True
     result.reference.plan_id = "plan-fed9-1"
+    result.reference.platform_type = result.reference.WHEELED
     result.reason_code = "OK"
 
     rclpy.init()
@@ -94,6 +127,7 @@ def test_successful_plan_result_is_published_for_external_execution() -> None:
     accepted = []
     recorder = _Recorder()
     node._enabled = True
+    node._platform_type = "WHEELED"
     node._reference_publisher = recorder
     node._accept_planner_result = lambda value: accepted.append(value) or True
     try:
@@ -101,6 +135,7 @@ def test_successful_plan_result_is_published_for_external_execution() -> None:
         assert [message.plan_id for message in recorder.messages] == ["plan-fed9-1"]
         assert len(accepted) == 1
         assert accepted[0].has_reference is True
+        assert accepted[0].segment_id == "plan-fed9-1"
     finally:
         node.destroy_node()
         rclpy.shutdown()
@@ -128,6 +163,7 @@ def test_late_plan_result_after_deactivate_is_not_published() -> None:
     result = PlanMotion.Result()
     result.has_reference = True
     result.reference.plan_id = "late-plan"
+    result.reference.platform_type = result.reference.WHEELED
     result.reason_code = "OK"
 
     rclpy.init()
@@ -135,6 +171,7 @@ def test_late_plan_result_after_deactivate_is_not_published() -> None:
     accepted = []
     recorder = _Recorder()
     node._enabled = False
+    node._platform_type = "WHEELED"
     node._reference_publisher = recorder
     node._accept_planner_result = lambda value: accepted.append(value) or True
     try:
@@ -168,12 +205,14 @@ def test_result_rejected_by_current_coordinator_is_not_published() -> None:
     result = PlanMotion.Result()
     result.has_reference = True
     result.reference.plan_id = "foreign-plan"
+    result.reference.platform_type = result.reference.WHEELED
     result.reason_code = "OK"
 
     rclpy.init()
     node = InterfaceV1PolicyNode()
     recorder = _Recorder()
     node._enabled = True
+    node._platform_type = "WHEELED"
     node._reference_publisher = recorder
     node._accept_planner_result = lambda value: False
     try:
@@ -204,6 +243,7 @@ def test_reference_publish_failure_does_not_leave_executing_context() -> None:
     result = PlanMotion.Result()
     result.has_reference = True
     result.reference.plan_id = "plan-undelivered"
+    result.reference.platform_type = result.reference.WHEELED
     result.reason_code = "OK"
 
     rclpy.init()
@@ -211,6 +251,7 @@ def test_reference_publish_failure_does_not_leave_executing_context() -> None:
     accepted = []
     halted = []
     node._enabled = True
+    node._platform_type = "WHEELED"
     node._reference_publisher = _FailingPublisher()
     node._accept_planner_result = lambda value: accepted.append(value) or True
     node._halt_current = halted.append

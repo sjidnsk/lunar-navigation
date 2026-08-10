@@ -51,6 +51,7 @@ class PlannerResult:
     has_reference: bool
     plan_id: str
     reason_code: str
+    segment_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,8 @@ class ExecutionFeedback:
     platform_type: str
     plan_id: str
     state: str
+    segment_id: str
+    stamp_ns: int
 
 
 class ClosedLoopCoordinator:
@@ -70,10 +73,12 @@ class ClosedLoopCoordinator:
         self._policy = policy
         self.state = CoordinatorState.WAITING_INPUTS
         self.active_plan_id: str | None = None
+        self.active_segment_id: str | None = None
         self.last_reason = "WAITING_INPUTS"
         self._pending_request_id: str | None = None
         self._platform_type: str | None = None
         self._last_feedback_sequence = 0
+        self._last_feedback_stamp_ns = 0
         self._last_identity: DecisionIdentity | None = None
 
     def start_decision(
@@ -99,14 +104,24 @@ class ClosedLoopCoordinator:
             raise CoordinatorError("HOLD_ERROR requires a new decision boundary")
         self.state = CoordinatorState.READY
         self.state = CoordinatorState.INFERENCING
-        action = self._policy.decide(snapshot.arrays, snapshot.platform_type)
         self._last_identity = snapshot.identity
         self._platform_type = snapshot.platform_type
-        if action is None:
+        try:
+            action = self._policy.decide(snapshot.arrays, snapshot.platform_type)
+            if action is None:
+                self.state = CoordinatorState.HOLD_ERROR
+                self.last_reason = "NO_CANDIDATE"
+                return None
+            goal = self._goal(snapshot, mission_id, action)
+        except Exception as error:
+            self._pending_request_id = None
+            self.active_plan_id = None
+            self.active_segment_id = None
+            self._platform_type = None
+            self._last_identity = None
             self.state = CoordinatorState.HOLD_ERROR
-            self.last_reason = "NO_CANDIDATE"
-            return None
-        goal = self._goal(snapshot, mission_id, action)
+            self.last_reason = "POLICY_DECISION_FAILED"
+            raise CoordinatorError("policy decision failed") from error
         self._pending_request_id = goal.request_id
         self.state = CoordinatorState.PLANNING
         self.last_reason = "PLANNING"
@@ -164,12 +179,17 @@ class ClosedLoopCoordinator:
         self.last_reason = result.reason_code
         if not result.has_reference:
             self.active_plan_id = None
+            self.active_segment_id = None
             self.state = CoordinatorState.HOLD_ERROR
             return
-        if not result.plan_id:
-            raise CoordinatorError("planner reference requires a plan_id")
+        if not result.plan_id or not result.segment_id:
+            raise CoordinatorError(
+                "planner reference requires plan_id and segment_id"
+            )
         self.active_plan_id = result.plan_id
+        self.active_segment_id = result.segment_id
         self._last_feedback_sequence = 0
+        self._last_feedback_stamp_ns = 0
         self.state = (
             CoordinatorState.LANDED_HOLD
             if self._platform_type == "HOPPER"
@@ -187,13 +207,26 @@ class ClosedLoopCoordinator:
         if (
             feedback.platform_type != self._platform_type
             or feedback.plan_id != self.active_plan_id
+            or feedback.segment_id != self.active_segment_id
             or type(feedback.sequence) is not int
-            or feedback.sequence <= self._last_feedback_sequence
+            or feedback.sequence != self._last_feedback_sequence + 1
+            or type(feedback.stamp_ns) is not int
+            or feedback.stamp_ns <= 0
+            or feedback.stamp_ns < self._last_feedback_stamp_ns
         ):
+            return False
+        allowed_states = (
+            {"IDLE", "ACCEPTED", "EXECUTING", "LANDED_HOLD", "FAILED", "CANCELED"}
+            if self._platform_type == "HOPPER"
+            else {"IDLE", "ACCEPTED", "EXECUTING", "SEGMENT_COMPLETE", "FAILED", "CANCELED"}
+        )
+        if feedback.state not in allowed_states:
             return False
         if feedback.state in ("FAILED", "CANCELED"):
             self._last_feedback_sequence = feedback.sequence
+            self._last_feedback_stamp_ns = feedback.stamp_ns
             self.active_plan_id = None
+            self.active_segment_id = None
             self._platform_type = None
             self.state = CoordinatorState.HOLD_ERROR
             self.last_reason = feedback.state
@@ -204,9 +237,13 @@ class ClosedLoopCoordinator:
             else feedback.state == "SEGMENT_COMPLETE"
         )
         if not terminal:
+            self._last_feedback_sequence = feedback.sequence
+            self._last_feedback_stamp_ns = feedback.stamp_ns
             return False
         self._last_feedback_sequence = feedback.sequence
+        self._last_feedback_stamp_ns = feedback.stamp_ns
         self.active_plan_id = None
+        self.active_segment_id = None
         self._platform_type = None
         self.state = CoordinatorState.WAITING_INPUTS
         self.last_reason = feedback.state
@@ -217,9 +254,11 @@ class ClosedLoopCoordinator:
         if not isinstance(reason, str) or not reason:
             raise ValueError("reset reason must be non-empty")
         self.active_plan_id = None
+        self.active_segment_id = None
         self._pending_request_id = None
         self._platform_type = None
         self._last_feedback_sequence = 0
+        self._last_feedback_stamp_ns = 0
         self.state = CoordinatorState.WAITING_INPUTS
         self.last_reason = reason
 

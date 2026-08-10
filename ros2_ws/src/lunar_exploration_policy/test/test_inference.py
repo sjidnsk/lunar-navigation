@@ -10,6 +10,7 @@ import pytest
 from lunar_exploration_policy.inference import (
     OnnxPolicyRuntime,
     PolicyRuntimeError,
+    validate_golden_equivalence,
     validate_session_signature,
 )
 
@@ -84,4 +85,41 @@ def test_real_four_file_package_reproduces_golden_outputs() -> None:
             expected[name],
             atol=runtime.manifest.atol,
             rtol=runtime.manifest.rtol,
+        )
+
+
+def test_runtime_startup_rejects_onnx_that_does_not_match_golden_outputs(
+    tmp_path: Path,
+) -> None:
+    class _Session:
+        def run(self, names, inputs):
+            del names, inputs
+            return [
+                np.ones((3, 64), np.float32),
+                np.zeros((3, 64), np.float32),
+                np.ones((3, 64), np.float32),
+                np.zeros((3,), np.float32),
+            ]
+
+    inputs = {
+        "prior_channels": np.zeros((3, 4, 256, 256), np.float32),
+        "coverage_summary": np.zeros((3, 3, 256, 256), np.float32),
+        "local_crop": np.zeros((3, 4, 32, 32), np.float32),
+        "frontier_features": np.zeros((3, 64, 12), np.float32),
+        "pose_features": np.zeros((3, 5), np.float32),
+        "candidate_mask": np.ones((3, 64), np.bool_),
+        "platform_context": np.eye(3, dtype=np.float32),
+    }
+    outputs = {
+        "frontier_logits": np.zeros((3, 64), np.float32),
+        "theta_mu": np.zeros((3, 64), np.float32),
+        "theta_kappa": np.ones((3, 64), np.float32),
+        "value": np.zeros((3,), np.float32),
+    }
+    np.savez(tmp_path / "golden_inputs.npz", **inputs)
+    np.savez(tmp_path / "golden_outputs.npz", **outputs)
+
+    with pytest.raises(PolicyRuntimeError, match="golden output mismatch"):
+        validate_golden_equivalence(
+            _Session(), tmp_path, atol=1e-5, rtol=1e-4
         )

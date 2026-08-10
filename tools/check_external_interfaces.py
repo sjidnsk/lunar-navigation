@@ -216,7 +216,7 @@ _STATIC_INPUTS = {
         "owner": "lunar_navigation",
         "schema": "lunar-interface-profile/v1",
         "formats": ["yaml"],
-        "required_sections": ["schema_version", "project_id", "channels", "qos"],
+        "required_sections": ["schema_version", "project_id", "channels"],
         "runtime_path": "/etc/lunar_navigation/interface_profile.yaml",
     },
 }

@@ -20,6 +20,12 @@ from .observation import ObservationContractError, validate_observation_inputs
 INTERFACE_MODEL_PACKAGE_FILES: Final = frozenset(
     {*MODEL_CONTENT_FILES, "manifest.json"}
 )
+APPROVED_INTERFACE_V1_FILE_SHA256: Final = {
+    "policy.onnx": "19a2d6db4633987d9ef70a73716794f742508bf691865bd27ee9a86d9b390dd3",
+    "golden_inputs.npz": "3dbb359c789d9b0d9c40fa29bda341339ee426c5bc448609fd4f4cde8efe0203",
+    "golden_outputs.npz": "8d9608377a34c09f924e0fd497cf67315e6b3b5928ec9d4896365d98b71e8c97",
+    "manifest.json": "de85c37ea42e7f6045420a5d645f0f4ea98e7298a47143bd21ac8256fcde9550",
+}
 
 
 class InterfaceModelPackageError(ValueError):
@@ -47,8 +53,12 @@ def _load_npz(path: Path, names: set[str]) -> dict[str, np.ndarray]:
 
 def validate_interface_model_package(
     path: str | Path,
+    *,
+    require_approved_identity: bool = True,
 ) -> InterfaceModelManifest:
-    """先验证目录与 hash，再验证三平台 golden 张量。"""
+    """验证四文件包；运行时默认只接受已冻结的 fed9/step251 实物。"""
+    if type(require_approved_identity) is not bool:
+        raise TypeError("require_approved_identity must be bool")
     try:
         root = Path(path).resolve(strict=True)
     except OSError as error:
@@ -69,6 +79,14 @@ def validate_interface_model_package(
         raise InterfaceModelPackageError("model package entries must be regular files")
     if any(entry.stat().st_size == 0 for entry in entries):
         raise InterfaceModelPackageError("model package entries must not be empty")
+    if require_approved_identity:
+        for name, expected in APPROVED_INTERFACE_V1_FILE_SHA256.items():
+            actual = sha256_file(root / name)
+            if actual != expected:
+                raise InterfaceModelPackageError(
+                    f"approved identity mismatch for {name}: "
+                    f"expected {expected}, got {actual}"
+                )
     try:
         manifest = InterfaceModelManifest.from_path(root / "manifest.json")
     except InterfaceModelManifestError as error:
@@ -104,6 +122,7 @@ def validate_interface_model_package(
 
 
 __all__ = [
+    "APPROVED_INTERFACE_V1_FILE_SHA256",
     "INTERFACE_MODEL_PACKAGE_FILES",
     "InterfaceModelPackageError",
     "validate_interface_model_package",

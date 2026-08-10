@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from lunar_navigation_msgs.msg import MotionExecutionFeedback
+from lunar_planning_msgs.msg import HopSegment, MotionReference
 
 from lunar_exploration_policy.coordinator import (
     ExecutionFeedback,
@@ -13,6 +16,7 @@ from lunar_exploration_policy.ros_runtime import (
     feedback_from_ros,
     map_pose_from_odom,
     planner_goal_to_ros,
+    reference_segment_id,
 )
 
 
@@ -55,13 +59,63 @@ def test_hopper_planner_goal_has_no_yaw_constraint() -> None:
 def test_feedback_mapping_is_explicit() -> None:
     message = MotionExecutionFeedback()
     message.sequence = 9
+    message.header.stamp.sec = 7
+    message.header.frame_id = "base_footprint"
     message.platform_type = message.LEGGED
     message.plan_id = "plan"
+    message.segment_id = "plan"
     message.state = message.SEGMENT_COMPLETE
 
-    assert feedback_from_ros(message) == ExecutionFeedback(
-        9, "LEGGED", "plan", "SEGMENT_COMPLETE"
+    assert feedback_from_ros(
+        message,
+        expected_frame="base_footprint",
+        now_ns=8_000_000_000,
+        maximum_age_ns=2_000_000_000,
+    ) == ExecutionFeedback(
+        9, "LEGGED", "plan", "SEGMENT_COMPLETE", "plan", 7_000_000_000
     )
+
+
+def test_feedback_rejects_stale_or_wrong_frame() -> None:
+    message = MotionExecutionFeedback()
+    message.sequence = 1
+    message.header.stamp.sec = 7
+    message.header.frame_id = "wrong_frame"
+    message.platform_type = message.WHEELED
+    message.plan_id = "plan"
+    message.segment_id = "plan"
+    message.state = message.SEGMENT_COMPLETE
+
+    with pytest.raises(ValueError, match="frame"):
+        feedback_from_ros(
+            message,
+            expected_frame="base_footprint",
+            now_ns=8_000_000_000,
+            maximum_age_ns=2_000_000_000,
+        )
+    message.header.frame_id = "base_footprint"
+    with pytest.raises(ValueError, match="stale"):
+        feedback_from_ros(
+            message,
+            expected_frame="base_footprint",
+            now_ns=10_000_000_000,
+            maximum_age_ns=2_000_000_000,
+        )
+
+
+def test_reference_segment_identity_is_platform_specific() -> None:
+    ground = MotionReference()
+    ground.platform_type = ground.WHEELED
+    ground.plan_id = "ground-plan"
+    assert reference_segment_id(ground, "WHEELED") == "ground-plan"
+
+    hopper = MotionReference()
+    hopper.platform_type = hopper.HOPPER
+    hopper.plan_id = "hop-plan"
+    hop = HopSegment()
+    hop.segment_id = "hop-segment"
+    hopper.hops = [hop]
+    assert reference_segment_id(hopper, "HOPPER") == "hop-segment"
 
 
 def test_planar_map_from_odom_composition() -> None:
@@ -76,4 +130,3 @@ def test_planar_map_from_odom_composition() -> None:
     assert math.isclose(pose.y_m, 22.0, abs_tol=1e-12)
     assert math.isclose(pose.elevation_m, 1.5, abs_tol=1e-12)
     assert math.isclose(pose.yaw_rad, -math.pi, abs_tol=1e-12)
-

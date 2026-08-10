@@ -312,7 +312,10 @@ def export_interface_v1_package(
             json.dumps(_manifest(files, profile_paths), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        validate_interface_model_package(staging)
+        # 导出阶段验证结构与内部 hash；批准身份由审阅后的固定 hash 清单提供。
+        validate_interface_model_package(
+            staging, require_approved_identity=False
+        )
         os.rename(staging, target)
     except Exception as error:
         raise InterfaceExportError(

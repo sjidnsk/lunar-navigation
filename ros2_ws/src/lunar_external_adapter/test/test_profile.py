@@ -65,11 +65,9 @@ def test_default_profile_uses_direct_remap_for_standard_types() -> None:
 
 
 def test_exploration_task_converter_preserves_transient_local_delivery() -> None:
-    profile = load_interface_profile(DEFAULT_PROFILE)
-
-    task_qos = ExternalAdapter._channel_qos(profile.qos, "exploration_task")
+    task_qos = ExternalAdapter._channel_qos("exploration_task")
     feedback_qos = ExternalAdapter._channel_qos(
-        profile.qos, "motion_execution_feedback"
+        "motion_execution_feedback"
     )
 
     assert task_qos.depth == 1
@@ -126,10 +124,6 @@ def test_unknown_converter_is_rejected(tmp_path: Path) -> None:
             lambda document: document["channels"]["odometry"].update(frame=""),
             "frame",
         ),
-        (
-            lambda document: document["qos"].update(depth=0),
-            "qos.depth",
-        ),
     ],
 )
 def test_invalid_channel_contract_is_rejected(
@@ -148,6 +142,20 @@ def test_unknown_profile_keys_are_rejected(tmp_path: Path) -> None:
         tmp_path,
         lambda document: document.update(dynamic_fields="forbidden"),
     )
+
+    with pytest.raises(InterfaceProfileError, match="unknown keys"):
+        load_interface_profile(path)
+
+
+def test_profile_cannot_override_internal_channel_qos(tmp_path: Path) -> None:
+    document = yaml.safe_load(DEFAULT_PROFILE.read_text(encoding="utf-8"))
+    document["qos"] = {
+        "reliability": "best_effort",
+        "durability": "volatile",
+        "depth": 100,
+    }
+    path = tmp_path / "interface_profile.yaml"
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
     with pytest.raises(InterfaceProfileError, match="unknown keys"):
         load_interface_profile(path)

@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from grid_map_msgs.msg import GridMap
+from ament_index_python.packages import get_package_share_directory
 from lunar_navigation_msgs.msg import (
     ExplorationTask,
     LocalizationStatus,
@@ -23,7 +24,12 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.lifecycle import LifecycleNode, State, TransitionCallbackReturn
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import (
+    DurabilityPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 
@@ -43,13 +49,37 @@ from .coordinator import (
 from .cpp_projection import CppV3Projector
 from .grid_map_runtime import DecodedGridMap, decode_grid_map
 from .inference import OnnxPolicyRuntime
-from .ros_runtime import feedback_from_ros, map_pose_from_odom, planner_goal_to_ros
+from .ros_runtime import (
+    feedback_from_ros,
+    map_pose_from_odom,
+    planner_goal_to_ros,
+    reference_segment_id,
+)
 from .snapshot_assembler import MissionDefinition, SnapshotAssembler
 from lunar_external_adapter.profile import load_interface_profile
 
 
 def _stamp_ns(stamp) -> int:
     return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+
+def _timestamps_are_usable(
+    stamps: tuple[int, ...],
+    *,
+    now_ns: int,
+    minimum_state_time_ns: int,
+    maximum_age_ns: int,
+    maximum_skew_ns: int,
+) -> bool:
+    """确保一次决策只消费反馈后的、新鲜且属于同一时间窗的状态。"""
+    return bool(stamps) and not (
+        any(stamp <= minimum_state_time_ns for stamp in stamps)
+        or any(
+            stamp > now_ns or now_ns - stamp > maximum_age_ns
+            for stamp in stamps
+        )
+        or max(stamps) - min(stamps) > maximum_skew_ns
+    )
 
 
 def _yaw(quaternion) -> float:
@@ -76,8 +106,9 @@ class InterfaceV1PolicyNode(LifecycleNode):
         self.declare_parameter(
             "interface_profile_file", "/etc/lunar_navigation/interface_profile.yaml"
         )
-        self.declare_parameter("repository_root", "/opt/lunar_navigation/src/lunar-navigation")
         self.declare_parameter("decision_period_s", 0.1)
+        self.declare_parameter("input_max_age_s", 5.0)
+        self.declare_parameter("max_pairwise_skew_s", 0.2)
         self._lock = threading.RLock()
         self._enabled = False
         self._subscriptions: list[Any] = []
@@ -88,13 +119,17 @@ class InterfaceV1PolicyNode(LifecycleNode):
         self._assembler = None
         self._coordinator = None
         self._platform_type = ""
+        self._base_frame_id = ""
         self._global_map: DecodedGridMap | None = None
         self._local_map: DecodedGridMap | None = None
         self._odometry: Odometry | None = None
         self._localization: LocalizationStatus | None = None
         self._mission: ExplorationTask | None = None
         self._map_from_odom = None
-        self._last_decision_boundary: tuple[str, str, int] | None = None
+        self._last_decision_boundary: tuple[object, ...] | None = None
+        self._minimum_state_time_ns = 0
+        self._input_max_age_ns = 5_000_000_000
+        self._max_pairwise_skew_ns = 200_000_000
         self._active_goal_handle = None
         self._last_elapsed_s = 0.0
 
@@ -102,8 +137,9 @@ class InterfaceV1PolicyNode(LifecycleNode):
         del state
         try:
             model_dir = Path(self.get_parameter("model_dir").value).resolve(strict=True)
-            repository_root = Path(
-                self.get_parameter("repository_root").value
+            capability_root = (
+                Path(get_package_share_directory("lunar_exploration_policy"))
+                / "runtime_repository"
             ).resolve(strict=True)
             profile_file = Path(
                 self.get_parameter("platform_profile_file").value
@@ -113,7 +149,7 @@ class InterfaceV1PolicyNode(LifecycleNode):
             ).resolve(strict=True)
             load_interface_profile(interface_profile)
             runtime = OnnxPolicyRuntime(model_dir)
-            projector = CppV3Projector(repository_root, profile_file)
+            projector = CppV3Projector(capability_root, profile_file)
             record = runtime.manifest.capability_profiles[projector.platform_type]
             if (
                 record.sha256 != projector.profile_sha256
@@ -128,23 +164,54 @@ class InterfaceV1PolicyNode(LifecycleNode):
             )
             self._coordinator = ClosedLoopCoordinator(DeterministicPolicy(runtime))
             self._platform_type = projector.platform_type
-            qos = QoSProfile(depth=10)
+            self._base_frame_id = projector.capability.base_frame_id
+            input_max_age_s = float(self.get_parameter("input_max_age_s").value)
+            max_pairwise_skew_s = float(
+                self.get_parameter("max_pairwise_skew_s").value
+            )
+            if (
+                not math.isfinite(input_max_age_s)
+                or input_max_age_s <= 0.0
+                or not math.isfinite(max_pairwise_skew_s)
+                or max_pairwise_skew_s <= 0.0
+                or max_pairwise_skew_s > input_max_age_s
+            ):
+                raise ValueError("input age/skew parameters are invalid")
+            self._input_max_age_ns = int(input_max_age_s * 1_000_000_000)
+            self._max_pairwise_skew_ns = int(
+                max_pairwise_skew_s * 1_000_000_000
+            )
+            reliable_qos = QoSProfile(
+                depth=10,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE,
+            )
+            map_qos = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            tf_qos = QoSProfile(
+                depth=100,
+                reliability=ReliabilityPolicy.BEST_EFFORT,
+                durability=DurabilityPolicy.VOLATILE,
+            )
             mission_qos = QoSProfile(
                 depth=1,
                 reliability=ReliabilityPolicy.RELIABLE,
                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
             )
             self._subscriptions = [
-                self.create_subscription(GridMap, "/environment/map_global", self._on_global_map, qos),
-                self.create_subscription(GridMap, "/environment/map_local", self._on_local_map, qos),
-                self.create_subscription(Odometry, "/localization/odometry", self._on_odometry, qos),
-                self.create_subscription(LocalizationStatus, "/localization/status", self._on_localization, qos),
+                self.create_subscription(GridMap, "/environment/map_global", self._on_global_map, map_qos),
+                self.create_subscription(GridMap, "/environment/map_local", self._on_local_map, map_qos),
+                self.create_subscription(Odometry, "/localization/odometry", self._on_odometry, qos_profile_sensor_data),
+                self.create_subscription(LocalizationStatus, "/localization/status", self._on_localization, reliable_qos),
                 self.create_subscription(ExplorationTask, "/mission/exploration_task", self._on_mission, mission_qos),
-                self.create_subscription(MotionExecutionFeedback, "/execution/motion_feedback", self._on_feedback, qos),
-                self.create_subscription(TFMessage, "/tf", self._on_tf, qos),
+                self.create_subscription(MotionExecutionFeedback, "/execution/motion_feedback", self._on_feedback, reliable_qos),
+                self.create_subscription(TFMessage, "/tf", self._on_tf, tf_qos),
             ]
             self._status_publisher = self.create_lifecycle_publisher(
-                String, "/lunar/interface_v1/status", qos
+                String, "/lunar/interface_v1/status", reliable_qos
             )
             # 外部执行控制器消费该参考。volatile 可避免控制器重启后重放旧命令。
             reference_qos = QoSProfile(
@@ -242,6 +309,18 @@ class InterfaceV1PolicyNode(LifecycleNode):
             if not message.mission_id or message.revision <= 0:
                 raise ValueError("mission identity is invalid")
             with self._lock:
+                previous = self._mission
+                if (
+                    previous is not None
+                    and message.mission_id == previous.mission_id
+                    and message.revision <= previous.revision
+                ):
+                    raise ValueError("mission revision must increase")
+                if previous is not None and (
+                    message.mission_id != previous.mission_id
+                    or message.revision != previous.revision
+                ):
+                    self._halt_current("MISSION_REPLACED")
                 self._mission = message
                 if message.desired_state != ExplorationTask.ACTIVE:
                     self._halt_current("MISSION_NOT_ACTIVE")
@@ -262,9 +341,15 @@ class InterfaceV1PolicyNode(LifecycleNode):
 
     def _on_feedback(self, message: MotionExecutionFeedback) -> None:
         try:
-            feedback = feedback_from_ros(message)
+            feedback = feedback_from_ros(
+                message,
+                expected_frame=self._base_frame_id,
+                now_ns=self.get_clock().now().nanoseconds,
+                maximum_age_ns=self._input_max_age_ns,
+            )
             with self._lock:
                 if self._coordinator is not None and self._coordinator.accept_feedback(feedback):
+                    self._minimum_state_time_ns = feedback.stamp_ns
                     self._publish_status("DECISION_BOUNDARY")
         except Exception as error:
             self._reject("motion_feedback", error)
@@ -294,10 +379,32 @@ class InterfaceV1PolicyNode(LifecycleNode):
             CoordinatorState.HOLD_ERROR,
         ):
             return None
+        stamps = (
+            self._global_map.stamp_ns,
+            self._local_map.stamp_ns,
+            _stamp_ns(self._odometry.header.stamp),
+            _stamp_ns(self._localization.header.stamp),
+            _stamp_ns(self._map_from_odom.header.stamp),
+        )
+        now_ns = self.get_clock().now().nanoseconds
+        if not _timestamps_are_usable(
+            stamps,
+            now_ns=now_ns,
+            minimum_state_time_ns=self._minimum_state_time_ns,
+            maximum_age_ns=self._input_max_age_ns,
+            maximum_skew_ns=self._max_pairwise_skew_ns,
+        ):
+            return None
         boundary = (
             self._global_map.content_id,
+            self._global_map.stamp_ns,
             self._local_map.content_id,
+            self._local_map.stamp_ns,
             _stamp_ns(self._odometry.header.stamp),
+            _stamp_ns(self._localization.header.stamp),
+            _stamp_ns(self._map_from_odom.header.stamp),
+            self._mission.mission_id,
+            int(self._mission.revision),
         )
         if boundary == self._last_decision_boundary:
             return None
@@ -359,6 +466,7 @@ class InterfaceV1PolicyNode(LifecycleNode):
             except CoordinatorError as error:
                 self._last_elapsed_s = time.perf_counter() - started
                 self._reject("decision", error)
+                self._publish_status(self._coordinator.last_reason)
             except Exception as error:
                 self._last_elapsed_s = time.perf_counter() - started
                 self._reject("snapshot", error)
@@ -417,6 +525,11 @@ class InterfaceV1PolicyNode(LifecycleNode):
                     bool(result.has_reference),
                     result.reference.plan_id if result.has_reference else "",
                     result.reason_code,
+                    (
+                        reference_segment_id(result.reference, self._platform_type)
+                        if result.has_reference
+                        else ""
+                    ),
                 )
                 if self._accept_planner_result(planner_result) and result.has_reference:
                     # 协调器先验证 request_id 和状态，再把同一参考交给执行器。
@@ -445,11 +558,20 @@ class InterfaceV1PolicyNode(LifecycleNode):
                 self._global_map is not None
                 and self._local_map is not None
                 and self._odometry is not None
+                and self._localization is not None
+                and self._map_from_odom is not None
+                and self._mission is not None
             ):
                 self._last_decision_boundary = (
                     self._global_map.content_id,
+                    self._global_map.stamp_ns,
                     self._local_map.content_id,
+                    self._local_map.stamp_ns,
                     _stamp_ns(self._odometry.header.stamp),
+                    _stamp_ns(self._localization.header.stamp),
+                    _stamp_ns(self._map_from_odom.header.stamp),
+                    self._mission.mission_id,
+                    int(self._mission.revision),
                 )
             self._publish_status(reason)
 

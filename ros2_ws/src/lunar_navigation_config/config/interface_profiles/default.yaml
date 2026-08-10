@@ -54,7 +54,3 @@ channels:
     input_type: tf2_msgs/msg/TFMessage
     output_type: tf2_msgs/msg/TFMessage
     frame: map
-qos:
-  reliability: reliable
-  durability: volatile
-  depth: 10

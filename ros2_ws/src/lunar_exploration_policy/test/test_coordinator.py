@@ -80,11 +80,11 @@ def test_ground_platform_feedback_allows_second_fresh_decision(platform: str) ->
     assert first.tolerance_m == pytest.approx(0.2)
     assert first.theta_rad == pytest.approx(0.4)
     coordinator.accept_planner_result(
-        PlannerResult(first.request_id, True, "plan-1", "REFERENCE_READY")
+        PlannerResult(first.request_id, True, "plan-1", "REFERENCE_READY", "plan-1")
     )
 
     accepted = coordinator.accept_feedback(
-        ExecutionFeedback(1, platform, "plan-1", "SEGMENT_COMPLETE")
+        ExecutionFeedback(1, platform, "plan-1", "SEGMENT_COMPLETE", "plan-1", 10)
     )
     second = coordinator.start_decision(
         _snapshot(
@@ -111,12 +111,12 @@ def test_hopper_landing_rebuilds_state_before_second_goal() -> None:
     assert first.tolerance_m == 0.0
     assert first.theta_rad is None
     coordinator.accept_planner_result(
-        PlannerResult(first.request_id, True, "hop-1", "REFERENCE_READY")
+        PlannerResult(first.request_id, True, "hop-1", "REFERENCE_READY", "segment-1")
     )
     assert coordinator.state is CoordinatorState.LANDED_HOLD
 
     assert coordinator.accept_feedback(
-        ExecutionFeedback(1, "HOPPER", "hop-1", "LANDED_HOLD")
+        ExecutionFeedback(1, "HOPPER", "hop-1", "LANDED_HOLD", "segment-1", 10)
     )
     second = coordinator.start_decision(
         _snapshot(
@@ -137,14 +137,28 @@ def test_foreign_or_late_feedback_does_not_clear_current_plan() -> None:
     coordinator = ClosedLoopCoordinator(_FixedPolicy(0, 0.0))
     goal = coordinator.start_decision(_snapshot("WHEELED"), mission_id="mission")
     coordinator.accept_planner_result(
-        PlannerResult(goal.request_id, True, "plan-current", "REFERENCE_READY")
+        PlannerResult(
+            goal.request_id, True, "plan-current", "REFERENCE_READY", "plan-current"
+        )
     )
 
     assert not coordinator.accept_feedback(
-        ExecutionFeedback(1, "WHEELED", "foreign", "SEGMENT_COMPLETE")
+        ExecutionFeedback(1, "WHEELED", "foreign", "SEGMENT_COMPLETE", "foreign", 10)
     )
     assert not coordinator.accept_feedback(
-        ExecutionFeedback(0, "WHEELED", "plan-current", "SEGMENT_COMPLETE")
+        ExecutionFeedback(
+            0, "WHEELED", "plan-current", "SEGMENT_COMPLETE", "plan-current", 10
+        )
+    )
+    assert not coordinator.accept_feedback(
+        ExecutionFeedback(
+            1, "WHEELED", "plan-current", "SEGMENT_COMPLETE", "foreign-segment", 10
+        )
+    )
+    assert not coordinator.accept_feedback(
+        ExecutionFeedback(
+            2, "WHEELED", "plan-current", "SEGMENT_COMPLETE", "plan-current", 10
+        )
     )
     assert coordinator.state is CoordinatorState.EXECUTING
     assert coordinator.active_plan_id == "plan-current"
@@ -154,11 +168,11 @@ def test_matching_execution_failure_enters_hold_error() -> None:
     coordinator = ClosedLoopCoordinator(_FixedPolicy(0, 0.0))
     goal = coordinator.start_decision(_snapshot("WHEELED"), mission_id="mission")
     coordinator.accept_planner_result(
-        PlannerResult(goal.request_id, True, "plan", "REFERENCE_READY")
+        PlannerResult(goal.request_id, True, "plan", "REFERENCE_READY", "plan")
     )
 
     assert not coordinator.accept_feedback(
-        ExecutionFeedback(1, "WHEELED", "plan", "FAILED")
+        ExecutionFeedback(1, "WHEELED", "plan", "FAILED", "plan", 10)
     )
 
     assert coordinator.state is CoordinatorState.HOLD_ERROR
@@ -183,7 +197,7 @@ def test_new_decision_is_forbidden_before_matching_execution_feedback() -> None:
     coordinator = ClosedLoopCoordinator(_FixedPolicy(0, 0.0))
     goal = coordinator.start_decision(_snapshot("WHEELED"), mission_id="mission")
     coordinator.accept_planner_result(
-        PlannerResult(goal.request_id, True, "plan", "REFERENCE_READY")
+        PlannerResult(goal.request_id, True, "plan", "REFERENCE_READY", "plan")
     )
 
     with pytest.raises(CoordinatorError, match="EXECUTING"):
@@ -196,7 +210,7 @@ def test_lifecycle_reset_discards_owned_plan_context() -> None:
     coordinator = ClosedLoopCoordinator(_FixedPolicy(0, 0.0))
     goal = coordinator.start_decision(_snapshot("WHEELED"), mission_id="mission")
     coordinator.accept_planner_result(
-        PlannerResult(goal.request_id, True, "plan", "REFERENCE_READY")
+        PlannerResult(goal.request_id, True, "plan", "REFERENCE_READY", "plan")
     )
 
     coordinator.reset("DEACTIVATED")
@@ -204,3 +218,20 @@ def test_lifecycle_reset_discards_owned_plan_context() -> None:
     assert coordinator.state is CoordinatorState.WAITING_INPUTS
     assert coordinator.active_plan_id is None
     assert coordinator.last_reason == "DEACTIVATED"
+
+
+def test_policy_failure_enters_diagnostic_hold_instead_of_stalling() -> None:
+    class _FailingPolicy:
+        def decide(self, inputs, platform_type):
+            del inputs, platform_type
+            raise RuntimeError("invalid model output")
+
+    coordinator = ClosedLoopCoordinator(_FailingPolicy())
+
+    with pytest.raises(CoordinatorError, match="policy decision failed"):
+        coordinator.start_decision(_snapshot("WHEELED"), mission_id="mission")
+
+    assert coordinator.state is CoordinatorState.HOLD_ERROR
+    assert coordinator.last_reason == "POLICY_DECISION_FAILED"
+    assert coordinator._platform_type is None
+    assert coordinator._last_identity is None

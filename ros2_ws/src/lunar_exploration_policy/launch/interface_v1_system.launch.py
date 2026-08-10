@@ -9,7 +9,6 @@ from lunar_exploration_policy.launch_support import consumer_remappings
 
 def _nodes(context):
     model_dir = LaunchConfiguration("model_dir").perform(context)
-    repository_root = LaunchConfiguration("repository_root").perform(context)
     platform_profile = LaunchConfiguration("platform_profile_file").perform(context)
     interface_profile = LaunchConfiguration("interface_profile_file").perform(context)
     remappings = list(consumer_remappings(load_interface_profile(interface_profile)))
@@ -50,7 +49,6 @@ def _nodes(context):
                 "model_dir": model_dir,
                 "platform_profile_file": platform_profile,
                 "interface_profile_file": interface_profile,
-                "repository_root": repository_root,
             }],
         ),
     ]
@@ -59,7 +57,6 @@ def _nodes(context):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("model_dir"),
-        DeclareLaunchArgument("repository_root"),
         DeclareLaunchArgument(
             "platform_profile_file",
             default_value="/etc/lunar_navigation/platform_profile.yaml",

@@ -5,7 +5,7 @@
   "description": "Maps one external provider into the stable lunar_navigation input boundary without dynamic field expressions.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "project_id", "channels", "qos"],
+  "required": ["schema_version", "project_id", "channels"],
   "properties": {
     "schema_version": {
       "const": "lunar-interface-profile/v1"
@@ -35,9 +35,6 @@
         "motion_execution_feedback": {"$ref": "#/$defs/channel"},
         "tf": {"$ref": "#/$defs/channel"}
       }
-    },
-    "qos": {
-      "$ref": "#/$defs/qos"
     }
   },
   "$defs": {
@@ -93,24 +90,6 @@
           "else": {"not": {"required": ["converter"]}}
         }
       ]
-    },
-    "qos": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["reliability", "durability", "depth"],
-      "properties": {
-        "reliability": {
-          "enum": ["reliable", "best_effort"]
-        },
-        "durability": {
-          "enum": ["volatile", "transient_local"]
-        },
-        "depth": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 1000
-        }
-      }
     }
   }
 }

@@ -34,25 +34,14 @@ class ExternalAdapter(LifecycleNode):
         self._subscriptions: list[Any] = []
 
     @staticmethod
-    def _qos(profile) -> QoSProfile:
-        return QoSProfile(
+    def _channel_qos(channel_name: str) -> QoSProfile:
+        """返回固定内部 QoS；外部项目 YAML 不得改变 DDS 语义。"""
+        qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=profile.depth,
-            reliability=(
-                ReliabilityPolicy.RELIABLE
-                if profile.reliability == "reliable"
-                else ReliabilityPolicy.BEST_EFFORT
-            ),
-            durability=(
-                DurabilityPolicy.VOLATILE
-                if profile.durability == "volatile"
-                else DurabilityPolicy.TRANSIENT_LOCAL
-            ),
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
         )
-
-    @classmethod
-    def _channel_qos(cls, profile, channel_name: str) -> QoSProfile:
-        qos = cls._qos(profile)
         if channel_name == "exploration_task":
             qos.depth = 1
             qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -66,7 +55,7 @@ class ExternalAdapter(LifecycleNode):
             ).get_parameter_value().string_value
             profile = load_interface_profile(profile_path)
             for channel_name, channel in profile.channels.items():
-                qos = self._channel_qos(profile.qos, channel_name)
+                qos = self._channel_qos(channel_name)
                 input_type = get_message(channel.input_type)
                 output_type = get_message(channel.output_type)
                 if channel.mode == "direct_remap":

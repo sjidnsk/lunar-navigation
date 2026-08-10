@@ -37,15 +37,14 @@ sudo ./scripts/install_interface_v1_config.sh \
 
 ## 3. 启动并激活
 
-统一 launch 会读取 interface YAML：标准消息直接连接 provider Topic，自定义消息连接显式 converter 输出。因此以后修改外部 Topic 或消息适配只替换文件并重启，不要手工修改 planner/policy 订阅：
+统一 launch 会读取 interface YAML：标准消息直接连接 provider Topic，自定义消息连接显式 converter 输出。因此以后修改外部 Topic 或消息适配只替换文件并重启，不要手工修改 planner/policy 订阅。QoS 按通道固定并由节点实现，不能通过 YAML 改写。安装包已经自带 fed9 能力冻结资料，启动和 configure 不依赖源码仓路径：
 
 ```bash
 source /opt/ros/humble/setup.bash
 source "$LUNAR_VOLUME1_OUTPUT/runtime/install/setup.bash"
 export PYTHONPATH="$HOME/CodexDownloads/lunar_navigation/interface_v1/runtime-venv/lib/python3.10/site-packages${PYTHONPATH:+:$PYTHONPATH}"
 ros2 launch lunar_exploration_policy interface_v1_system.launch.py \
-  model_dir:="$HOME/CodexDownloads/lunar_navigation/interface_v1/model-fed9-step251-20260811" \
-  repository_root:="$PWD"
+  model_dir:="$HOME/CodexDownloads/lunar_navigation/interface_v1/model-fed9-step251-20260811"
 ```
 
 三个节点均为 lifecycle 节点；确认输入发布方已运行后执行：
@@ -69,8 +68,9 @@ ros2 topic echo /lunar/interface_v1/status
 
 外部执行器订阅 `/lunar/motion_reference`，完成后以其中相同的 `plan_id/segment_id`
 发布 `/execution/motion_feedback`。状态消息包含当前平台、状态机、原因码和最近一次观测/推理耗时。
-地面平台只在匹配 `SEGMENT_COMPLETE` 且收到新地图或里程计状态后发下一次目标；飞跃式只在匹配
-`LANDED_HOLD` 且收到新状态后再次选点。若对接项目只需修改 Topic 名，使用 ROS remap；若修改消息字段，
+地面平台只在匹配 `SEGMENT_COMPLETE`，且全局图、局部图、里程计、定位状态和 map→odom TF
+都晚于完成反馈后发下一次目标；飞跃式只在匹配 `LANDED_HOLD` 且同一组状态全部更新后再次选点。
+输入还必须满足 5 秒新鲜度和 0.2 秒组内时间偏差限制。若对接项目只需修改 Topic 名，使用 ROS remap；若修改消息字段，
 在 `lunar_external_adapter` 增加显式 converter，不修改旧模型观测、动作和权重定义。
 
 ## 5. 回归和停止

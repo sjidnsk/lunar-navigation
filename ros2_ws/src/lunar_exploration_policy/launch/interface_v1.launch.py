@@ -9,7 +9,6 @@ def generate_launch_description():
         DeclareLaunchArgument("model_dir"),
         DeclareLaunchArgument("platform_profile_file"),
         DeclareLaunchArgument("interface_profile_file"),
-        DeclareLaunchArgument("repository_root"),
     ]
     node = LifecycleNode(
         package="lunar_exploration_policy",
@@ -22,7 +21,6 @@ def generate_launch_description():
                 "model_dir": LaunchConfiguration("model_dir"),
                 "platform_profile_file": LaunchConfiguration("platform_profile_file"),
                 "interface_profile_file": LaunchConfiguration("interface_profile_file"),
-                "repository_root": LaunchConfiguration("repository_root"),
             }
         ],
     )

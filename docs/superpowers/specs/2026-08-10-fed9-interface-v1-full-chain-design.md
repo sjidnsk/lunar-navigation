@@ -72,7 +72,7 @@ interface-v1 以 Git 提交 `fed9ea92c8ae55eb8423a008598935f515e801a3` 为唯一
 - `/mission/exploration_task`
 - `/execution/motion_feedback`
 
-接口 profile 负责 Topic 名、QoS 和适配方式，源码中的业务算法不硬编码其他项目的 Topic。未来上游定义正式同名消息包时只能原子替换 schema provider，不允许两个同名包共存。
+接口 profile 负责 Topic 名、消息类型、frame 和显式适配方式，源码中的业务算法不硬编码其他项目的 Topic。每个内部通道的 QoS 由节点按接收合同固定，不能由可替换 YAML 改写；外部 provider 必须匹配该通道 QoS。未来上游定义正式同名消息包时只能原子替换 schema provider，不允许两个同名包共存。
 
 ## 6. 模型包和运行时
 

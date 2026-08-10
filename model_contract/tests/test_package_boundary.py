@@ -68,10 +68,21 @@ def _package(root: Path) -> Path:
 def test_valid_package_has_exact_four_regular_files(tmp_path: Path) -> None:
     root = _package(tmp_path / "model")
 
-    manifest = validate_interface_model_package(root)
+    manifest = validate_interface_model_package(
+        root, require_approved_identity=False
+    )
 
     assert {item.name for item in root.iterdir()} == INTERFACE_MODEL_PACKAGE_FILES
     assert manifest.qualification == "integration_only"
+
+
+def test_runtime_validator_rejects_coherently_replaced_four_file_package(
+    tmp_path: Path,
+) -> None:
+    root = _package(tmp_path / "model")
+
+    with pytest.raises(InterfaceModelPackageError, match="approved identity"):
+        validate_interface_model_package(root)
 
 
 @pytest.mark.parametrize("extra", ("checkpoint.pt", "optimizer.json"))
@@ -82,7 +93,7 @@ def test_package_rejects_training_state_or_extra_file(
     (root / extra).write_bytes(b"forbidden")
 
     with pytest.raises(InterfaceModelPackageError, match="unexpected"):
-        validate_interface_model_package(root)
+        validate_interface_model_package(root, require_approved_identity=False)
 
 
 def test_package_rejects_model_hash_drift(tmp_path: Path) -> None:
@@ -90,7 +101,7 @@ def test_package_rejects_model_hash_drift(tmp_path: Path) -> None:
     (root / "policy.onnx").write_bytes(b"mutated")
 
     with pytest.raises(InterfaceModelPackageError, match="SHA-256"):
-        validate_interface_model_package(root)
+        validate_interface_model_package(root, require_approved_identity=False)
 
 
 def test_package_rejects_non_three_platform_golden_batch(tmp_path: Path) -> None:
@@ -103,4 +114,4 @@ def test_package_rejects_non_three_platform_golden_batch(tmp_path: Path) -> None
     (root / "manifest.json").write_text(json.dumps(document), encoding="utf-8")
 
     with pytest.raises(InterfaceModelPackageError, match="platform order"):
-        validate_interface_model_package(root)
+        validate_interface_model_package(root, require_approved_identity=False)
