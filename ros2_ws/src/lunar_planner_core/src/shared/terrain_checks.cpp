@@ -72,23 +72,34 @@ constexpr double kElevationComparisonToleranceM = 1.0e-6;
   return static_cast<double>(map.FloatLayer("elevation")[map.Index(cell)]);
 }
 
+[[nodiscard]] bool KnownAt(
+    const MapSnapshot& map, const GridCell cell) noexcept {
+  return map.InBounds(cell) &&
+      map.ByteLayer("valid_mask")[map.Index(cell)] != 0U;
+}
+
 [[nodiscard]] double AxisGradient(
     const MapSnapshot& map, const GridCell cell,
     const std::int32_t dx, const std::int32_t dy) noexcept {
   const GridCell negative{.x = cell.x - dx, .y = cell.y - dy};
   const GridCell positive{.x = cell.x + dx, .y = cell.y + dy};
+  if (!KnownAt(map, cell)) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
   const double center = ElevationAt(map, cell);
-  if (map.InBounds(negative) && map.InBounds(positive)) {
+  const bool negative_known = KnownAt(map, negative);
+  const bool positive_known = KnownAt(map, positive);
+  if (negative_known && positive_known) {
     return (ElevationAt(map, positive) - ElevationAt(map, negative)) /
            (2.0 * map.resolution_m());
   }
-  if (map.InBounds(positive)) {
+  if (positive_known) {
     return (ElevationAt(map, positive) - center) / map.resolution_m();
   }
-  if (map.InBounds(negative)) {
+  if (negative_known) {
     return (center - ElevationAt(map, negative)) / map.resolution_m();
   }
-  return 0.0;
+  return std::numeric_limits<double>::quiet_NaN();
 }
 
 struct PlaneFit final {
@@ -317,10 +328,14 @@ double ComputeSlopeRadians(
   }
   const double gradient_x = AxisGradient(map, cell, 1, 0);
   const double gradient_y = AxisGradient(map, cell, 0, 1);
-  if (!std::isfinite(gradient_x) || !std::isfinite(gradient_y)) {
+  const bool x_supported = std::isfinite(gradient_x);
+  const bool y_supported = std::isfinite(gradient_y);
+  if (!x_supported && !y_supported) {
     return std::numeric_limits<double>::infinity();
   }
-  return std::atan(std::hypot(gradient_x, gradient_y));
+  return std::atan(std::hypot(
+      x_supported ? gradient_x : 0.0,
+      y_supported ? gradient_y : 0.0));
 }
 
 double ComputeMaximumNeighborStep(
