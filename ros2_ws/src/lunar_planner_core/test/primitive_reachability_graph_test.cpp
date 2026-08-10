@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <numbers>
 #include <stop_token>
 #include <string>
 #include <utility>
@@ -327,6 +328,91 @@ TEST(PrimitiveReachabilityGraph, WheelExcludesOutboundOnlyState) {
   EXPECT_EQ(outbound->forward_reachable, 1U);
   EXPECT_EQ(outbound->returnable, 0U);
   EXPECT_EQ(result.snapshot->reachable[2U * 7U + 3U], 0U);
+}
+
+TEST(PrimitiveReachabilityGraph,
+     WheelFrozenPrimitiveMixRetainsRecoverableTranslations) {
+  PlannerInput input = test::MakeValidWheelInput();
+  input.world.global_map = test::MakeFlatMap("map", 12U, 7U, 4.0);
+  input.world.local_map = input.world.global_map;
+  input.config.global_map.base_resolution_m = 4.0;
+  input.config.wheel.xy_resolution_m = 4.0;
+  input.config.wheel.yaw_bin_count = 64U;
+  auto capability = std::get<WheeledCapability>(input.capability);
+  const double yaw = std::numbers::pi / 16.0;
+  const double arc_x = std::sin(yaw);
+  const double arc_y = 1.0 - std::cos(yaw);
+  capability.motion_primitives = {
+      WheelMotionPrimitive{
+          .primitive_id = "forward",
+          .kind = WheelPrimitiveKind::kForward,
+          .relative_end_pose = Pose3{.position_m = {4.0, 0.0, 0.0}},
+      },
+      WheelMotionPrimitive{
+          .primitive_id = "reverse",
+          .kind = WheelPrimitiveKind::kReverse,
+          .relative_end_pose = Pose3{.position_m = {-4.0, 0.0, 0.0}},
+      },
+      WheelMotionPrimitive{
+          .primitive_id = "forward-arc-left",
+          .kind = WheelPrimitiveKind::kForwardArc,
+          .relative_end_pose = Pose3{
+              .position_m = {arc_x, arc_y, 0.0},
+              .orientation = test::YawQuaternion(yaw),
+          },
+      },
+      WheelMotionPrimitive{
+          .primitive_id = "forward-arc-right",
+          .kind = WheelPrimitiveKind::kForwardArc,
+          .relative_end_pose = Pose3{
+              .position_m = {arc_x, -arc_y, 0.0},
+              .orientation = test::YawQuaternion(-yaw),
+          },
+      },
+      WheelMotionPrimitive{
+          .primitive_id = "reverse-arc-left",
+          .kind = WheelPrimitiveKind::kReverseArc,
+          .relative_end_pose = Pose3{
+              .position_m = {-arc_x, arc_y, 0.0},
+              .orientation = test::YawQuaternion(-yaw),
+          },
+      },
+      WheelMotionPrimitive{
+          .primitive_id = "reverse-arc-right",
+          .kind = WheelPrimitiveKind::kReverseArc,
+          .relative_end_pose = Pose3{
+              .position_m = {-arc_x, -arc_y, 0.0},
+              .orientation = test::YawQuaternion(yaw),
+          },
+      },
+      WheelMotionPrimitive{
+          .primitive_id = "spin-left",
+          .kind = WheelPrimitiveKind::kSpinCounterclockwise,
+          .relative_end_pose = Pose3{
+              .orientation = test::YawQuaternion(yaw),
+          },
+      },
+      WheelMotionPrimitive{
+          .primitive_id = "spin-right",
+          .kind = WheelPrimitiveKind::kSpinClockwise,
+          .relative_end_pose = Pose3{
+              .orientation = test::YawQuaternion(-yaw),
+          },
+      },
+      WheelMotionPrimitive{
+          .primitive_id = "stop-switch",
+          .kind = WheelPrimitiveKind::kStopAndSwitch,
+      },
+  };
+  input.capability = capability;
+  std::get<WheeledState>(input.current_state).pose.position_m =
+      {22.0, 14.0, 0.0};
+
+  const PrimitiveReachabilityResult result = BuildWheelFixture(input);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_EQ(result.snapshot->reachable[3U * 12U + 4U], 1U);
+  EXPECT_EQ(result.snapshot->reachable[3U * 12U + 6U], 1U);
 }
 
 TEST(PrimitiveReachabilityGraph, StatefulEnginePublishesWheelGraphSnapshots) {

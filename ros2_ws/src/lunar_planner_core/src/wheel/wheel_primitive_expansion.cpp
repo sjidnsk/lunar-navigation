@@ -129,18 +129,6 @@ constexpr std::size_t kNoNode = std::numeric_limits<std::size_t>::max();
            static_cast<std::size_t>(state.yaw_bin)) * kModeCount + mode);
 }
 
-[[nodiscard]] bool SamePose(
-    const WheelPose& lhs, const WheelPose& rhs) noexcept {
-  return std::abs(lhs.position_m.x - rhs.position_m.x) <=
-             kComparisonTolerance &&
-      std::abs(lhs.position_m.y - rhs.position_m.y) <=
-             kComparisonTolerance &&
-      std::abs(lhs.position_m.z - rhs.position_m.z) <=
-             kComparisonTolerance &&
-      std::abs(ShortestYawDelta(lhs.yaw_rad, rhs.yaw_rad)) <=
-             kComparisonTolerance;
-}
-
 void AppendUint32(
     std::vector<std::uint8_t>& output, const std::uint32_t value) {
   for (std::size_t index = 0U; index < 4U; ++index) {
@@ -218,11 +206,10 @@ struct OpenGreater final {
 struct PendingEdge final {
   std::size_t source{};
   std::size_t target{};
+  std::size_t source_sequence{};
   std::size_t primitive_index{};
   std::string primitive_id;
   double cost{};
-  WheelPose source_pose;
-  WheelPose target_pose;
 };
 
 [[nodiscard]] shared::PrimitiveGraphBuildResult Failure(
@@ -543,11 +530,10 @@ shared::PrimitiveGraphBuildResult BuildWheelPrimitiveGraph(
       pending_edges.push_back(PendingEdge{
           .source = entry.node_index,
           .target = target_index,
+          .source_sequence = entry.sequence,
           .primitive_index = ordered.original_index,
           .primitive_id = ordered.primitive->primitive_id,
           .cost = edge_cost,
-          .source_pose = source_pose,
-          .target_pose = transition->target_pose,
       });
       const double candidate_cost = source_cost + edge_cost;
       GraphNode& target = nodes[target_index];
@@ -590,8 +576,7 @@ shared::PrimitiveGraphBuildResult BuildWheelPrimitiveGraph(
     });
   }
   for (const PendingEdge& edge : pending_edges) {
-    if (SamePose(edge.source_pose, nodes[edge.source].pose) &&
-        SamePose(edge.target_pose, nodes[edge.target].pose)) {
+    if (edge.source_sequence == nodes[edge.source].sequence) {
       graph.potential_edges.push_back(shared::PrimitiveGraphPotentialEdge{
           .source_state_index = edge.source,
           .target_state_index = edge.target,
