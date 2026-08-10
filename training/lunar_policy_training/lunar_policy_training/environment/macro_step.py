@@ -3,10 +3,51 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 from lunar_planner_training_bridge import ExecutionDirective, PlanningOutcome
 
 from ..policy.observation import PolicyBatch
+from .candidate_builder import CandidateDiagnostics
+
+
+class TerminalReason(str, Enum):
+    """One authoritative reason for every completed episode."""
+
+    SUCCESS = "SUCCESS"
+    NO_FRONTIER_ANCHOR = "NO_FRONTIER_ANCHOR"
+    VISITED_EXHAUSTED = "VISITED_EXHAUSTED"
+    PLATFORM_UNREACHABLE = "PLATFORM_UNREACHABLE"
+    ZERO_GAIN = "ZERO_GAIN"
+    PLANNER_REJECTED_ALL = "PLANNER_REJECTED_ALL"
+    HARD_FAILURE = "HARD_FAILURE"
+    CANCELED = "CANCELED"
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalAudit:
+    """Out-of-band terminal evidence that never enters policy or reward."""
+
+    reason: TerminalReason
+    oracle_opportunity_count: int
+    candidate_diagnostics: CandidateDiagnostics
+    remaining_coverable_detail_cell_count: int | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reason, TerminalReason):
+            raise ValueError("terminal audit reason is invalid")
+        if (
+            type(self.oracle_opportunity_count) is not int
+            or self.oracle_opportunity_count < 0
+        ):
+            raise ValueError("terminal oracle opportunity count is invalid")
+        if not isinstance(self.candidate_diagnostics, CandidateDiagnostics):
+            raise ValueError("terminal candidate diagnostics are invalid")
+        remaining = self.remaining_coverable_detail_cell_count
+        if remaining is not None and (
+            type(remaining) is not int or remaining < 0
+        ):
+            raise ValueError("terminal remaining-coverable count is invalid")
 
 
 @dataclass(frozen=True)
@@ -47,6 +88,15 @@ class PlannerTransition:
     reason_code: str
     terminated: bool
     execution_events: ExecutionEvents
+    terminal_reason: TerminalReason | None = None
+    oracle_opportunity_count: int = 0
+    remaining_coverable_detail_cell_count: int | None = None
 
 
-__all__ = ["ExecutionEvents", "PlannerTransition", "PolicyAction"]
+__all__ = [
+    "ExecutionEvents",
+    "PlannerTransition",
+    "PolicyAction",
+    "TerminalAudit",
+    "TerminalReason",
+]

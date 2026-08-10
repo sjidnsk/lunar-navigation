@@ -7,6 +7,10 @@ import pytest
 from lunar_planner_training_bridge import PlanningOutcome
 
 from lunar_policy_training.environment.candidate_builder import CandidateDiagnostics
+from lunar_policy_training.environment.macro_step import (
+    TerminalAudit,
+    TerminalReason,
+)
 from lunar_policy_training.ppo.trainer import PPOUpdateMetrics
 from lunar_policy_training.training_metrics import (
     TrainingMetricsError,
@@ -44,7 +48,7 @@ def _record(global_step: int) -> dict[str, object]:
         dones=np.asarray([[False, True], [True, False]], dtype=np.bool_),
         start_coverage=np.asarray([0.1, 0.2], dtype=np.float32),
         end_coverage=np.asarray([0.3, 0.5], dtype=np.float32),
-        success_first_crossings=(False, True, False, True),
+        success_first_crossings=(False, False, True, False),
         planning_outcomes=(
             PlanningOutcome.NEW_REFERENCE_AVAILABLE,
             PlanningOutcome.RESOURCE_EXHAUSTED,
@@ -52,12 +56,52 @@ def _record(global_step: int) -> dict[str, object]:
             PlanningOutcome.INVALID_REQUEST,
         ),
         candidate_diagnostics=(
-            CandidateDiagnostics(5, 1, 4),
-            CandidateDiagnostics(6, 2, 4),
-            CandidateDiagnostics(7, 3, 4),
-            CandidateDiagnostics(8, 4, 4),
+            CandidateDiagnostics(
+                frontier_anchor_count=5,
+                platform_unreachable_count=1,
+                emitted_count=4,
+            ),
+            CandidateDiagnostics(
+                frontier_anchor_count=6,
+                platform_unreachable_count=2,
+                emitted_count=4,
+            ),
+            CandidateDiagnostics(
+                frontier_anchor_count=7,
+                platform_unreachable_count=3,
+                emitted_count=4,
+            ),
+            CandidateDiagnostics(
+                frontier_anchor_count=8,
+                platform_unreachable_count=4,
+                emitted_count=4,
+            ),
         ),
         no_candidate_terminations=(False, True, False, False),
+        terminal_audits=(
+            None,
+            TerminalAudit(
+                reason=TerminalReason.HARD_FAILURE,
+                oracle_opportunity_count=0,
+                candidate_diagnostics=CandidateDiagnostics(
+                    frontier_anchor_count=6,
+                    platform_unreachable_count=2,
+                    emitted_count=4,
+                ),
+                remaining_coverable_detail_cell_count=90,
+            ),
+            TerminalAudit(
+                reason=TerminalReason.SUCCESS,
+                oracle_opportunity_count=0,
+                candidate_diagnostics=CandidateDiagnostics(
+                    frontier_anchor_count=7,
+                    platform_unreachable_count=3,
+                    emitted_count=4,
+                ),
+                remaining_coverable_detail_cell_count=0,
+            ),
+            None,
+        ),
         ppo_metrics=_ppo_metrics(),
         collect_wall_seconds=5.0,
         update_wall_seconds=0.25,
@@ -68,7 +112,7 @@ def _record(global_step: int) -> dict[str, object]:
 def test_build_training_update_record_preserves_learning_and_rollout_facts() -> None:
     record = _record(119)
 
-    assert record["schema_version"] == "lunar-training-update-metrics/v1"
+    assert record["schema_version"] == "lunar-training-update-metrics/v2"
     assert record["global_step"] == 119
     assert record["transition_count"] == 4
     assert record["reward"]["mean"] == pytest.approx(2.5)
@@ -82,7 +126,7 @@ def test_build_training_update_record_preserves_learning_and_rollout_facts() -> 
         "delta_mean": pytest.approx(0.25),
     }
     assert record["terminal_count"] == 2
-    assert record["success_first_crossing_count"] == 2
+    assert record["success_first_crossing_count"] == 1
     assert record["planner"]["outcome_counts"] == {
         "INVALID_REQUEST": 1,
         "NEW_REFERENCE_AVAILABLE": 2,
@@ -99,11 +143,39 @@ def test_build_training_update_record_preserves_learning_and_rollout_facts() -> 
     assert record["candidate"]["by_platform"] == {
         "LEGGED": {
             "frontier_anchor_count": 26,
-            "platform_filter_rejected_count": 10,
+            "visited_excluded_count": 0,
+            "static_infeasible_count": 0,
+            "platform_unreachable_count": 10,
+            "zero_gain_count": 0,
             "emitted_count": 16,
+            "planner_rejected_count": 0,
             "no_candidate_termination_count": 1,
-            "planner_rejected_exhaustion_count": 1,
+            "planner_rejected_exhaustion_count": 0,
         }
+    }
+    assert record["terminal"] == {
+        "reason_counts": {"HARD_FAILURE": 1, "SUCCESS": 1},
+        "reason_counts_by_platform": {
+            "LEGGED": {"HARD_FAILURE": 1, "SUCCESS": 1}
+        },
+        "candidate_diagnostics_by_platform": {
+            "LEGGED": {
+                "frontier_anchor_count": 13,
+                "visited_excluded_count": 0,
+                "static_infeasible_count": 0,
+                "platform_unreachable_count": 5,
+                "zero_gain_count": 0,
+                "emitted_count": 8,
+                "planner_rejected_count": 0,
+            }
+        },
+        "oracle_opportunity_count": 0,
+        "oracle_contradiction_count": 0,
+        "remaining_coverable_detail_cell_count": {
+            "count": 2,
+            "min": 0,
+            "max": 90,
+        },
     }
     assert record["ppo"]["approx_kl"] == pytest.approx(0.0125)
     assert record["ppo"]["gradient_norm"] == pytest.approx(0.8)
@@ -132,10 +204,33 @@ def test_candidate_and_planner_diagnostics_preserve_worker_platform_alignment() 
             PlanningOutcome.NO_KNOWN_SAFE_ROUTE,
         ),
         candidate_diagnostics=(
-            CandidateDiagnostics(3, 1, 2),
-            CandidateDiagnostics(11, 4, 7),
+            CandidateDiagnostics(
+                frontier_anchor_count=3,
+                platform_unreachable_count=1,
+                emitted_count=2,
+            ),
+            CandidateDiagnostics(
+                frontier_anchor_count=11,
+                platform_unreachable_count=4,
+                emitted_count=7,
+                planner_rejected_count=7,
+            ),
         ),
         no_candidate_terminations=(False, True),
+        terminal_audits=(
+            None,
+            TerminalAudit(
+                reason=TerminalReason.PLANNER_REJECTED_ALL,
+                oracle_opportunity_count=0,
+                candidate_diagnostics=CandidateDiagnostics(
+                    frontier_anchor_count=11,
+                    platform_unreachable_count=4,
+                    emitted_count=7,
+                    planner_rejected_count=7,
+                ),
+                remaining_coverable_detail_cell_count=123,
+            ),
+        ),
         ppo_metrics=_ppo_metrics(),
         collect_wall_seconds=1.0,
         update_wall_seconds=0.5,
@@ -144,17 +239,29 @@ def test_candidate_and_planner_diagnostics_preserve_worker_platform_alignment() 
 
     assert record["candidate"]["by_platform"]["WHEELED"] == {
         "frontier_anchor_count": 3,
-        "platform_filter_rejected_count": 1,
+        "visited_excluded_count": 0,
+        "static_infeasible_count": 0,
+        "platform_unreachable_count": 1,
+        "zero_gain_count": 0,
         "emitted_count": 2,
+        "planner_rejected_count": 0,
         "no_candidate_termination_count": 0,
         "planner_rejected_exhaustion_count": 0,
     }
     assert record["candidate"]["by_platform"]["HOPPER"] == {
         "frontier_anchor_count": 11,
-        "platform_filter_rejected_count": 4,
+        "visited_excluded_count": 0,
+        "static_infeasible_count": 0,
+        "platform_unreachable_count": 4,
+        "zero_gain_count": 0,
         "emitted_count": 7,
+        "planner_rejected_count": 7,
         "no_candidate_termination_count": 1,
         "planner_rejected_exhaustion_count": 1,
+    }
+    assert record["terminal"]["reason_counts_by_platform"] == {
+        "HOPPER": {"PLANNER_REJECTED_ALL": 1},
+        "WHEELED": {},
     }
     assert record["planner"]["outcome_counts_by_platform"] == {
         "HOPPER": {"NO_KNOWN_SAFE_ROUTE": 1},
@@ -173,7 +280,7 @@ def test_training_metrics_journal_appends_exact_resume_sequence(tmp_path) -> Non
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert [row["global_step"] for row in rows] == [119, 120]
     assert all(
-        row["schema_version"] == "lunar-training-update-metrics/v1"
+        row["schema_version"] == "lunar-training-update-metrics/v2"
         for row in rows
     )
 

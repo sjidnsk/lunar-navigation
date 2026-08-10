@@ -87,7 +87,7 @@ from .environment.formal_builder import (
     _formal_scheduled_entries,
 )
 from .environment.formal_episode_state import FormalWorkerState
-from .environment.macro_step import PlannerTransition, PolicyAction
+from .environment.macro_step import PlannerTransition, PolicyAction, TerminalAudit
 from .environment.v3_environment import PreparedPlanRequest, create_v3_environment
 from .training_semantics import training_semantics_sha256
 from .formal_preflight import (
@@ -333,6 +333,7 @@ class _CollectedTrainingRollout:
     planning_outcomes: tuple[PlanningOutcome, ...]
     candidate_diagnostics: tuple[CandidateDiagnostics, ...]
     no_candidate_terminations: tuple[bool, ...]
+    terminal_audits: tuple[TerminalAudit | None, ...]
     collect_wall_seconds: float
     worker_wait_seconds: float
 
@@ -376,6 +377,7 @@ class _ParallelPoolVectorEnv:
         self.reason_codes: list[str] = []
         self.candidate_diagnostics: list[CandidateDiagnostics] = []
         self.no_candidate_terminations: list[bool] = []
+        self.terminal_audits: list[TerminalAudit | None] = []
         self.raw_rewards: list[float] = []
         self.success_first_crossings: list[bool] = []
         self.worker_wait_seconds = 0.0
@@ -398,6 +400,7 @@ class _ParallelPoolVectorEnv:
         self.reason_codes.clear()
         self.candidate_diagnostics.clear()
         self.no_candidate_terminations.clear()
+        self.terminal_audits.clear()
         self.raw_rewards.clear()
         self.success_first_crossings.clear()
         self.worker_wait_seconds = 0.0
@@ -441,6 +444,7 @@ class _ParallelPoolVectorEnv:
         self.planning_outcomes.extend(step.planning_outcomes)
         self.reason_codes.extend(step.reason_codes)
         self.candidate_diagnostics.extend(step.candidate_diagnostics)
+        self.terminal_audits.extend(step.terminal_audits)
         self.raw_rewards.extend(float(value) for value in step.rewards.tolist())
         self.success_first_crossings.extend(
             bool(value) for value in step.success_first_crossings.tolist()
@@ -475,6 +479,7 @@ class _ParallelPoolVectorEnv:
         self.no_candidate_terminations.extend(
             step.no_candidate_terminations
         )
+        self.terminal_audits.extend(step.terminal_audits)
         return EnvStep(
             observations=step.observations,
             rewards=np.zeros((self.env_count,), dtype=np.float32),
@@ -2974,6 +2979,7 @@ def _run_updates(
             no_candidate_terminations=tuple(
                 environment.no_candidate_terminations
             ),
+            terminal_audits=tuple(environment.terminal_audits),
             collect_wall_seconds=collect_wall_seconds,
             worker_wait_seconds=environment.worker_wait_seconds,
         )
@@ -3035,6 +3041,7 @@ def _run_updates(
                 no_candidate_terminations=(
                     rollout.no_candidate_terminations
                 ),
+                terminal_audits=rollout.terminal_audits,
                 ppo_metrics=result.ppo_metrics,
                 collect_wall_seconds=rollout.collect_wall_seconds,
                 update_wall_seconds=result.update_wall_seconds,

@@ -26,6 +26,7 @@ from lunar_policy_training.cli import (  # noqa: E402
     PreflightError,
     SignalStopFlag,
     TrainingBoundaryLoop,
+    _ParallelPoolVectorEnv,
     _checkpoint_target,
     _formal_sensor_performance_preflight,
     _formal_run_identity,
@@ -37,6 +38,17 @@ from lunar_policy_training.cli import (  # noqa: E402
     _update_run_manifest,
     build_parser,
     validate_artifact_root,
+)
+from lunar_policy_training.environment.candidate_builder import (  # noqa: E402
+    CandidateDiagnostics,
+)
+from lunar_policy_training.environment.macro_step import (  # noqa: E402
+    TerminalAudit,
+    TerminalReason,
+)
+from lunar_policy_training.environment.parallel_pool import (  # noqa: E402
+    ParallelEnvPool,
+    ParallelRolloutStep,
 )
 from lunar_policy_training.capability_freeze import FrozenCapabilityBundle  # noqa: E402
 from lunar_policy_training.config import (
@@ -62,6 +74,51 @@ from lunar_policy_training.evaluation.report import (
 )
 from lunar_policy_training.proxy_scenario import proxy_observation
 from lunar_policy_training.reward import reward_weights_sha256
+
+
+def test_parallel_adapter_preserves_terminal_audit_outside_policy_inputs() -> None:
+    observation = proxy_observation(0, "WHEELED", step=0)
+    audit = TerminalAudit(
+        reason=TerminalReason.ZERO_GAIN,
+        oracle_opportunity_count=0,
+        candidate_diagnostics=CandidateDiagnostics(
+            frontier_anchor_count=3,
+            zero_gain_count=3,
+        ),
+        remaining_coverable_detail_cell_count=42,
+    )
+    prepared = ParallelRolloutStep(
+        observations=observation,
+        rewards=torch.zeros(1, dtype=torch.float32),
+        dones=torch.ones(1, dtype=torch.bool),
+        policy_versions=torch.zeros(1, dtype=torch.int64),
+        policy_decisions_consumed=torch.zeros(1, dtype=torch.int64),
+        success_first_crossings=torch.zeros(1, dtype=torch.bool),
+        buffer_index=0,
+        candidate_diagnostics=(audit.candidate_diagnostics,),
+        no_candidate_terminations=(True,),
+        terminal_audits=(audit,),
+    )
+    pool = object.__new__(ParallelEnvPool)
+    pool.worker_count = 1
+    pool.reset = lambda: prepared
+    pool.prepare_decision_boundaries = lambda **kwargs: prepared
+    adapter = _ParallelPoolVectorEnv(pool, policy_version=0)
+
+    adapter.reset()
+    result = adapter.prepare_decision_boundaries()
+
+    assert result.dones.tolist() == [True]
+    assert adapter.terminal_audits == [audit]
+    assert observation.input_names == (
+        "prior_channels",
+        "coverage_summary",
+        "local_crop",
+        "frontier_features",
+        "pose_features",
+        "candidate_mask",
+        "platform_context",
+    )
 
 
 def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:

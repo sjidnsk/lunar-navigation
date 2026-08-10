@@ -44,6 +44,10 @@ from .formal_episode_state import (
     FormalWorkerState,
     policy_batch_sha256,
 )
+from .frontier_oracle import (
+    FrontierOpportunityOracle,
+    FrontierOracleResult,
+)
 from .formal_start_qualification import (
     build_formal_mission_roi,
     formal_safe_start_cells,
@@ -173,6 +177,9 @@ class _MapSnapshot:
     candidates: CandidateBatch
     global_map: object
     local_map: object
+    world: object
+    projection: PlatformProjection
+    platform_reachability: PlatformCandidateReachability
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,7 +190,13 @@ class FormalEnvironmentWorker(ParallelEnvironmentWorker):
         return self.episode.snapshot_state(self.environment).to_dict()
 
     def current_candidate_diagnostics(self) -> CandidateDiagnostics:
-        return self.episode.current_candidate_diagnostics()
+        getter = getattr(self.environment, "current_candidate_diagnostics", None)
+        if not callable(getter):
+            raise ValueError("formal environment diagnostics are unavailable")
+        diagnostics = getter()
+        if not isinstance(diagnostics, CandidateDiagnostics):
+            raise ValueError("formal environment diagnostics are invalid")
+        return diagnostics
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,6 +445,7 @@ class FormalEpisode:
             ),
         )
         self._candidate_builder = CandidateBuilderV2(self.sensor_state)
+        self._frontier_oracle = FrontierOpportunityOracle(self.sensor_state)
         self._legacy_candidate_builder = CandidateBuilderV2(
             NativeVisibilityEstimator(
                 SensorGeometry(FORMAL_SENSOR_RANGE_M, FORMAL_SENSOR_FOV_RAD),
@@ -618,6 +632,23 @@ class FormalEpisode:
             return CandidateDiagnostics()
         return snapshot.candidates.diagnostics
 
+    def frontier_oracle_result(self) -> FrontierOracleResult:
+        snapshot = self._snapshot
+        if snapshot is None:
+            raise RuntimeError("formal frontier oracle has no observed snapshot")
+        return self._frontier_oracle.evaluate(
+            snapshot.world,
+            self.mission,
+            snapshot.projection,
+            platform_reachability=snapshot.platform_reachability,
+        )
+
+    def remaining_coverable_detail_cell_count(self) -> int:
+        remaining = self.sensor_state.remaining_coverable_detail_cell_count
+        if remaining is None:
+            raise RuntimeError("formal coverability truth diagnostic is unavailable")
+        return remaining
+
     def _build_mission_roi(self) -> np.ndarray:
         return build_formal_mission_roi(self.loaded.arrays)
 
@@ -747,6 +778,14 @@ class FormalEpisode:
             if self._detail_candidate_gain_enabled
             else GLOBAL_GEOMETRY.resolution_m
         )
+        platform_reachability = PlatformCandidateReachability(
+            platform_type=self.platform_type,
+            canvas=world.canvas,
+            pose_map=pose,
+            observed_elevation_m=world.elevation_m,
+            bridge=self._bridge,
+            request=projection_request,
+        )
         candidates = candidate_builder.build(
             world,
             self.mission,
@@ -757,14 +796,7 @@ class FormalEpisode:
                 self._platform_candidate_reachability_enabled
             ),
             platform_reachability=(
-                PlatformCandidateReachability(
-                    platform_type=self.platform_type,
-                    canvas=world.canvas,
-                    pose_map=pose,
-                    observed_elevation_m=world.elevation_m,
-                    bridge=self._bridge,
-                    request=projection_request,
-                )
+                platform_reachability
                 if self._platform_candidate_reachability_enabled
                 else None
             ),
@@ -783,7 +815,13 @@ class FormalEpisode:
             self.platform_type,
         )
         self._snapshot = _MapSnapshot(
-            self._revision, candidates, global_map, local_map
+            self._revision,
+            candidates,
+            global_map,
+            local_map,
+            world,
+            projection,
+            platform_reachability,
         )
         return PolicyBatch(
             **{
@@ -1251,6 +1289,13 @@ class FormalWorkerBuilder:
                 episode.committed_hop_feedback
                 if platform_type == "HOPPER"
                 else None
+            ),
+            candidate_diagnostics_provider=(
+                episode.current_candidate_diagnostics
+            ),
+            frontier_oracle=episode.frontier_oracle_result,
+            remaining_coverable_detail_cell_count_provider=(
+                episode.remaining_coverable_detail_cell_count
             ),
             plan_cost_scale=100.0,
             planner_elapsed_scale_s=_FORMAL_MACRO_STEP_TIME_SCALE_S,

@@ -20,7 +20,16 @@ from lunar_planner_training_bridge import (  # noqa: E402
 import torch  # noqa: E402
 import pytest  # noqa: E402
 
-from lunar_policy_training.environment.macro_step import PolicyAction  # noqa: E402
+from lunar_policy_training.environment.candidate_builder import (  # noqa: E402
+    CandidateDiagnostics,
+)
+from lunar_policy_training.environment.frontier_oracle import (  # noqa: E402
+    FrontierOracleResult,
+)
+from lunar_policy_training.environment.macro_step import (  # noqa: E402
+    PolicyAction,
+    TerminalReason,
+)
 from lunar_policy_training.environment.v3_environment import (  # noqa: E402
     CommittedHopExecutionFeedback,
     EnvironmentInvariantError,
@@ -561,6 +570,153 @@ def test_all_false_candidates_bypass_policy_without_fallback() -> None:
     assert result.execution_state == "NO_CANDIDATES"
     assert result.transition is None
     assert result.policy_decisions_consumed == 0
+
+
+def test_empty_production_candidates_with_oracle_opportunity_fail_closed() -> None:
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(PlannerOutput()),
+        request_builder=lambda action: action,
+        initial_observation=_observation(candidate_mask=(False, False)),
+        candidate_diagnostics_provider=lambda: CandidateDiagnostics(
+            frontier_anchor_count=2,
+            emitted_count=0,
+        ),
+        frontier_oracle=lambda: FrontierOracleResult(
+            frontier_anchor_count=2,
+            observed_safe_pose_count=2,
+            platform_reachable_pose_count=2,
+            opportunity_count=1,
+        ),
+    )
+
+    with pytest.raises(EnvironmentInvariantError, match="oracle"):
+        env.refresh_decision_boundary()
+
+    assert env.rollout_discarded is True
+    assert env.training_stopped is True
+
+
+def test_legal_empty_boundary_reports_latest_stage_and_truth_diagnostic() -> None:
+    env = V3ExplorationEnvironment(
+        platform_type="HOPPER",
+        bridge=_Bridge(PlannerOutput()),
+        request_builder=lambda action: action,
+        initial_observation=_observation(
+            platform_index=2, candidate_mask=(False, False)
+        ),
+        candidate_diagnostics_provider=lambda: CandidateDiagnostics(
+            frontier_anchor_count=7,
+            visited_excluded_count=1,
+            platform_unreachable_count=4,
+            zero_gain_count=2,
+        ),
+        frontier_oracle=lambda: FrontierOracleResult(
+            frontier_anchor_count=7,
+            observed_safe_pose_count=6,
+            platform_reachable_pose_count=2,
+            opportunity_count=0,
+        ),
+        remaining_coverable_detail_cell_count_provider=lambda: 1234,
+    )
+
+    result = env.refresh_decision_boundary()
+
+    assert result.execution_state == "NO_CANDIDATES"
+    assert result.terminal_reason is TerminalReason.ZERO_GAIN
+    assert result.oracle_opportunity_count == 0
+    assert result.remaining_coverable_detail_cell_count == 1234
+
+
+def test_last_planner_rejection_reruns_oracle_and_reports_one_terminal_reason() -> None:
+    rejected = PlannerOutput()
+    rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+    rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    rejected.reason_code = "NO_ROUTE"
+    oracle_calls = 0
+
+    def oracle() -> FrontierOracleResult:
+        nonlocal oracle_calls
+        oracle_calls += 1
+        return FrontierOracleResult(1, 1, 0, 0)
+
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(rejected),
+        request_builder=lambda action: action,
+        initial_observation=_observation(candidate_mask=(True, False)),
+        candidate_diagnostics_provider=lambda: CandidateDiagnostics(
+            frontier_anchor_count=1,
+            emitted_count=1,
+        ),
+        frontier_oracle=oracle,
+        remaining_coverable_detail_cell_count_provider=lambda: 88,
+    )
+
+    result = env.advance_prepared_action(
+        PolicyAction(frontier_index=0, theta_rad=0.0),
+        expected_identity=env.current_observation.observation_identities[0],
+    )
+
+    assert oracle_calls == 1
+    assert result.transition is not None
+    assert result.transition.terminated is True
+    assert result.transition.terminal_reason is TerminalReason.PLANNER_REJECTED_ALL
+    assert result.transition.oracle_opportunity_count == 0
+    assert result.transition.remaining_coverable_detail_cell_count == 88
+
+
+@pytest.mark.parametrize(
+    ("outcome", "directive", "expected_reason"),
+    (
+        (
+            PlanningOutcome.INVALID_REQUEST,
+            ExecutionDirective.NO_SAFE_REFERENCE,
+            TerminalReason.HARD_FAILURE,
+        ),
+        (
+            PlanningOutcome.NUMERICAL_FAILURE,
+            ExecutionDirective.NO_SAFE_REFERENCE,
+            TerminalReason.HARD_FAILURE,
+        ),
+        (
+            PlanningOutcome.RESOURCE_EXHAUSTED,
+            ExecutionDirective.NO_SAFE_REFERENCE,
+            TerminalReason.HARD_FAILURE,
+        ),
+        (
+            PlanningOutcome.CANCELED,
+            ExecutionDirective.HOLD_POSITION,
+            TerminalReason.CANCELED,
+        ),
+    ),
+)
+def test_planner_hard_outcomes_never_become_legal_exploration_exhaustion(
+    outcome: PlanningOutcome,
+    directive: ExecutionDirective,
+    expected_reason: TerminalReason,
+) -> None:
+    output = PlannerOutput()
+    output.outcome = outcome
+    output.directive = directive
+    output.reason_code = "HARD_OUTCOME"
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(output),
+        request_builder=lambda action: action,
+        initial_observation=_observation(candidate_mask=(True, False)),
+        remaining_coverable_detail_cell_count_provider=lambda: 456,
+    )
+
+    result = env.advance_prepared_action(
+        PolicyAction(frontier_index=0, theta_rad=0.0),
+        expected_identity=env.current_observation.observation_identities[0],
+    )
+
+    assert result.transition is not None
+    assert result.transition.terminated is True
+    assert result.transition.terminal_reason is expected_reason
+    assert result.transition.remaining_coverable_detail_cell_count == 456
 
 
 @pytest.mark.parametrize(

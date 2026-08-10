@@ -17,7 +17,14 @@ from lunar_planner_training_bridge import (
 )
 
 from ..policy.observation import ObservationIdentity, PolicyBatch
-from .macro_step import ExecutionEvents, PlannerTransition, PolicyAction
+from .candidate_builder import CandidateDiagnostics
+from .frontier_oracle import FrontierOracleResult
+from .macro_step import (
+    ExecutionEvents,
+    PlannerTransition,
+    PolicyAction,
+    TerminalReason,
+)
 from .observation_boundary import (
     BoundaryObservationResult,
     ObservationBoundaryController,
@@ -127,6 +134,9 @@ class DecisionBoundaryResult:
     transition: PlannerTransition | None = None
     execution_feedback: CommittedHopExecutionFeedback | None = None
     policy_decisions_consumed: int = 0
+    terminal_reason: TerminalReason | None = None
+    oracle_opportunity_count: int = 0
+    remaining_coverable_detail_cell_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +178,13 @@ class V3ExplorationEnvironment:
         committed_hop_executor: Callable[
             [], CommittedHopExecutionFeedback
         ] | None = None,
+        candidate_diagnostics_provider: (
+            Callable[[], CandidateDiagnostics] | None
+        ) = None,
+        frontier_oracle: Callable[[], FrontierOracleResult] | None = None,
+        remaining_coverable_detail_cell_count_provider: (
+            Callable[[], int | None] | None
+        ) = None,
         plan_cost_scale: float = 1.0,
         planner_elapsed_scale_s: float = 1.0,
         include_planner_wall_time_in_reward: bool = True,
@@ -222,6 +239,16 @@ class V3ExplorationEnvironment:
             raise ValueError("identity-bound request flag must be boolean")
         if type(include_planner_wall_time_in_reward) is not bool:
             raise ValueError("planner wall-time reward flag must be boolean")
+        for name, callback in (
+            ("candidate diagnostics provider", candidate_diagnostics_provider),
+            ("frontier oracle", frontier_oracle),
+            (
+                "remaining-coverable provider",
+                remaining_coverable_detail_cell_count_provider,
+            ),
+        ):
+            if callback is not None and not callable(callback):
+                raise ValueError(f"{name} must be callable")
         self._observation = _clone_observation(initial_observation)
         self._rejected_candidates: set[int] = set()
         self._observation_provider = observation_provider
@@ -230,6 +257,11 @@ class V3ExplorationEnvironment:
         self._require_identity_bound_request = require_identity_bound_request
         self._reference_executor = reference_executor
         self._committed_hop_executor = committed_hop_executor
+        self._candidate_diagnostics_provider = candidate_diagnostics_provider
+        self._frontier_oracle = frontier_oracle
+        self._remaining_coverable_detail_cell_count_provider = (
+            remaining_coverable_detail_cell_count_provider
+        )
         self._plan_cost_scale = plan_cost_scale
         self._planner_elapsed_scale_s = planner_elapsed_scale_s
         self._include_planner_wall_time_in_reward = (
@@ -258,6 +290,30 @@ class V3ExplorationEnvironment:
     def current_observation(self) -> PolicyBatch:
         """Return a detached copy of the environment-owned current observation."""
         return _clone_observation(self._observation)
+
+    def current_candidate_diagnostics(self) -> CandidateDiagnostics:
+        """Return producer stages plus planner rejections at this boundary."""
+        if self._candidate_diagnostics_provider is None:
+            emitted = int(
+                self._observation.candidate_mask.sum().item()
+            ) + len(self._rejected_candidates)
+            diagnostics = CandidateDiagnostics(
+                frontier_anchor_count=emitted,
+                emitted_count=emitted,
+            )
+        else:
+            diagnostics = self._candidate_diagnostics_provider()
+            if not isinstance(diagnostics, CandidateDiagnostics):
+                self._fail_closed(
+                    "candidate diagnostics provider returned invalid data"
+                )
+        try:
+            return replace(
+                diagnostics,
+                planner_rejected_count=len(self._rejected_candidates),
+            )
+        except ValueError as error:
+            self._fail_closed(str(error))
 
     def snapshot_stable_state(self) -> dict[str, object]:
         """Return the dynamic fields not owned by the observation controller."""
@@ -335,6 +391,27 @@ class V3ExplorationEnvironment:
         if output.reference is None:
             if (output.outcome, output.directive) in _REJECTED_ACTION_OUTPUTS:
                 self._mask_rejected_candidate(action.frontier_index)
+            if output.outcome == PlanningOutcome.CANCELED:
+                return self._hold_transition(
+                    outcome=output.outcome,
+                    directive=output.directive,
+                    reason_code=output.reason_code,
+                    planner_elapsed=output.diagnostics.elapsed,
+                    terminal_reason=TerminalReason.CANCELED,
+                )
+            if output.outcome in {
+                PlanningOutcome.INVALID_REQUEST,
+                PlanningOutcome.NUMERICAL_FAILURE,
+                PlanningOutcome.RESOURCE_EXHAUSTED,
+                PlanningOutcome.ACTIVE_REFERENCE_INVALIDATED,
+            }:
+                return self._hold_transition(
+                    outcome=output.outcome,
+                    directive=output.directive,
+                    reason_code=output.reason_code,
+                    planner_elapsed=output.diagnostics.elapsed,
+                    terminal_reason=TerminalReason.HARD_FAILURE,
+                )
             return self._hold_transition(
                 outcome=output.outcome,
                 directive=output.directive,
@@ -392,6 +469,19 @@ class V3ExplorationEnvironment:
                 execution_state=self._execution_state,
                 transition=transition,
                 execution_feedback=feedback,
+                terminal_reason=(
+                    None if transition is None else transition.terminal_reason
+                ),
+                oracle_opportunity_count=(
+                    0
+                    if transition is None
+                    else transition.oracle_opportunity_count
+                ),
+                remaining_coverable_detail_cell_count=(
+                    None
+                    if transition is None
+                    else transition.remaining_coverable_detail_cell_count
+                ),
             )
         boundary = self.refresh_decision_boundary()
         if boundary.execution_state != "DECISION_READY":
@@ -415,7 +505,7 @@ class V3ExplorationEnvironment:
         if expected_identity != current_identity:
             self._fail_closed("prepared action observation identity is stale")
         if not bool(self._observation.candidate_mask.any().item()):
-            return DecisionBoundaryResult(execution_state="NO_CANDIDATES")
+            return self._no_candidate_boundary()
         transition = self.step(action, expected_identity=expected_identity)
         if self._platform_type == "HOPPER" and self._execution_state in {
             "JUMP_COMMITTED",
@@ -430,15 +520,26 @@ class V3ExplorationEnvironment:
                 transition.next_observation.candidate_mask.any().item()
             )
         ):
+            reason, oracle_count, remaining = self._audit_exhaustion()
             transition = replace(
                 transition,
                 episode_ended_without_success=True,
                 terminated=True,
+                terminal_reason=reason,
+                oracle_opportunity_count=oracle_count,
+                remaining_coverable_detail_cell_count=remaining,
             )
+        elif transition.terminated and transition.terminal_reason is None:
+            transition = self._with_flag_terminal_reason(transition)
         return DecisionBoundaryResult(
             execution_state=self._execution_state,
             transition=transition,
             policy_decisions_consumed=1,
+            terminal_reason=transition.terminal_reason,
+            oracle_opportunity_count=transition.oracle_opportunity_count,
+            remaining_coverable_detail_cell_count=(
+                transition.remaining_coverable_detail_cell_count
+            ),
         )
 
     def refresh_decision_boundary(self) -> DecisionBoundaryResult:
@@ -449,8 +550,78 @@ class V3ExplorationEnvironment:
             )
         self._refresh_ground_observation()
         if not bool(self._observation.candidate_mask.any().item()):
-            return DecisionBoundaryResult(execution_state="NO_CANDIDATES")
+            return self._no_candidate_boundary()
         return DecisionBoundaryResult(execution_state="DECISION_READY")
+
+    def _no_candidate_boundary(self) -> DecisionBoundaryResult:
+        reason, oracle_count, remaining = self._audit_exhaustion()
+        return DecisionBoundaryResult(
+            execution_state="NO_CANDIDATES",
+            terminal_reason=reason,
+            oracle_opportunity_count=oracle_count,
+            remaining_coverable_detail_cell_count=remaining,
+        )
+
+    def _audit_exhaustion(self) -> tuple[TerminalReason, int, int | None]:
+        diagnostics = self.current_candidate_diagnostics()
+        if self._frontier_oracle is None:
+            oracle = FrontierOracleResult(0, 0, 0, 0)
+        else:
+            oracle = self._frontier_oracle()
+            if not isinstance(oracle, FrontierOracleResult):
+                self._fail_closed("frontier oracle returned invalid data")
+        if oracle.opportunity_count > 0:
+            self._fail_closed(
+                "production candidates are empty while frontier oracle found opportunities"
+            )
+        if (
+            diagnostics.emitted_count > 0
+            and diagnostics.planner_rejected_count
+            == diagnostics.emitted_count
+        ):
+            reason = TerminalReason.PLANNER_REJECTED_ALL
+        elif diagnostics.zero_gain_count > 0:
+            reason = TerminalReason.ZERO_GAIN
+        elif (
+            diagnostics.platform_unreachable_count > 0
+            or diagnostics.static_infeasible_count > 0
+        ):
+            reason = TerminalReason.PLATFORM_UNREACHABLE
+        elif diagnostics.visited_excluded_count > 0:
+            reason = TerminalReason.VISITED_EXHAUSTED
+        elif diagnostics.frontier_anchor_count == 0:
+            reason = TerminalReason.NO_FRONTIER_ANCHOR
+        else:
+            self._fail_closed(
+                "empty production candidates have no auditable exhaustion stage"
+            )
+        return reason, oracle.opportunity_count, self._remaining_coverable_count()
+
+    def _remaining_coverable_count(self) -> int | None:
+        provider = self._remaining_coverable_detail_cell_count_provider
+        remaining = None if provider is None else provider()
+        if remaining is not None and (
+            type(remaining) is not int or remaining < 0
+        ):
+            self._fail_closed("remaining-coverable provider returned invalid data")
+        return remaining
+
+    def _with_flag_terminal_reason(
+        self, transition: PlannerTransition
+    ) -> PlannerTransition:
+        if transition.success_first_crossing:
+            reason = TerminalReason.SUCCESS
+        elif transition.terminated:
+            reason = TerminalReason.HARD_FAILURE
+        else:
+            return transition
+        return replace(
+            transition,
+            terminal_reason=reason,
+            remaining_coverable_detail_cell_count=(
+                self._remaining_coverable_count()
+            ),
+        )
 
     def _mask_rejected_candidate(self, candidate_index: int) -> None:
         mask = self._observation.candidate_mask
@@ -701,6 +872,11 @@ class V3ExplorationEnvironment:
             reason_code=transitions[0].reason_code,
             terminated=final.terminated,
             execution_events=self._aggregate_execution_events(transitions),
+            terminal_reason=final.terminal_reason,
+            oracle_opportunity_count=final.oracle_opportunity_count,
+            remaining_coverable_detail_cell_count=(
+                final.remaining_coverable_detail_cell_count
+            ),
         )
 
     def _aggregate_execution_events(
@@ -788,6 +964,20 @@ class V3ExplorationEnvironment:
             reason_code=output.reason_code,
             terminated=feedback.terminated,
             execution_events=feedback.execution_events,
+            terminal_reason=(
+                TerminalReason.SUCCESS
+                if feedback.success_first_crossing
+                else (
+                    TerminalReason.HARD_FAILURE
+                    if feedback.terminated
+                    else None
+                )
+            ),
+            remaining_coverable_detail_cell_count=(
+                self._remaining_coverable_count()
+                if feedback.terminated
+                else None
+            ),
         )
 
     def _execute_reference_until_decision_boundary(
@@ -859,6 +1049,20 @@ class V3ExplorationEnvironment:
             reason_code=output.reason_code,
             terminated=execution.terminated,
             execution_events=execution.execution_events,
+            terminal_reason=(
+                TerminalReason.SUCCESS
+                if execution.success_first_crossing
+                else (
+                    TerminalReason.HARD_FAILURE
+                    if execution.terminated
+                    else None
+                )
+            ),
+            remaining_coverable_detail_cell_count=(
+                self._remaining_coverable_count()
+                if execution.terminated
+                else None
+            ),
         )
 
     def _apply_sensor_boundary(
@@ -890,6 +1094,7 @@ class V3ExplorationEnvironment:
         directive: ExecutionDirective,
         reason_code: str,
         planner_elapsed: timedelta,
+        terminal_reason: TerminalReason | None = None,
     ) -> PlannerTransition:
         return PlannerTransition(
             next_observation=_clone_observation(self._observation),
@@ -903,15 +1108,21 @@ class V3ExplorationEnvironment:
             ),
             executed_without_new_coverage=False,
             success_first_crossing=False,
-            episode_ended_without_success=False,
+            episode_ended_without_success=terminal_reason is not None,
             hard_safety_violation=False,
-            cancellation_expected=False,
+            cancellation_expected=terminal_reason is TerminalReason.CANCELED,
             cpp_exception=None,
             planning_outcome=outcome,
             execution_directive=directive,
             reason_code=reason_code,
-            terminated=False,
+            terminated=terminal_reason is not None,
             execution_events=ExecutionEvents(),
+            terminal_reason=terminal_reason,
+            remaining_coverable_detail_cell_count=(
+                self._remaining_coverable_count()
+                if terminal_reason is not None
+                else None
+            ),
         )
 
     def _normalized_planner_wall_time(
@@ -969,6 +1180,13 @@ def create_v3_environment(
     committed_hop_executor: Callable[
         [], CommittedHopExecutionFeedback
     ] | None = None,
+    candidate_diagnostics_provider: (
+        Callable[[], CandidateDiagnostics] | None
+    ) = None,
+    frontier_oracle: Callable[[], FrontierOracleResult] | None = None,
+    remaining_coverable_detail_cell_count_provider: (
+        Callable[[], int | None] | None
+    ) = None,
     plan_cost_scale: float = 1.0,
     planner_elapsed_scale_s: float = 1.0,
     include_planner_wall_time_in_reward: bool = True,
@@ -993,6 +1211,11 @@ def create_v3_environment(
         require_identity_bound_request=True,
         reference_executor=reference_executor,
         committed_hop_executor=committed_hop_executor,
+        candidate_diagnostics_provider=candidate_diagnostics_provider,
+        frontier_oracle=frontier_oracle,
+        remaining_coverable_detail_cell_count_provider=(
+            remaining_coverable_detail_cell_count_provider
+        ),
         plan_cost_scale=plan_cost_scale,
         planner_elapsed_scale_s=planner_elapsed_scale_s,
         include_planner_wall_time_in_reward=(

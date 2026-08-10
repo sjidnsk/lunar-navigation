@@ -8,7 +8,7 @@ import os
 import queue
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 from lunar_planner_training_bridge import PlanningOutcome
@@ -21,7 +21,13 @@ from ..policy.observation import (
     PolicyBatch,
     validate_policy_batch,
 )
-from .macro_step import ExecutionEvents, PlannerTransition, PolicyAction
+from .macro_step import (
+    ExecutionEvents,
+    PlannerTransition,
+    PolicyAction,
+    TerminalAudit,
+    TerminalReason,
+)
 from .formal_episode_state import FormalWorkerState
 from .candidate_builder import CandidateDiagnostics
 
@@ -68,6 +74,7 @@ class ParallelRolloutStep:
     execution_events: tuple[ExecutionEvents, ...] = ()
     candidate_diagnostics: tuple[CandidateDiagnostics, ...] = ()
     no_candidate_terminations: tuple[bool, ...] = ()
+    terminal_audits: tuple[TerminalAudit | None, ...] = ()
 
 
 class ParallelEnvPool:
@@ -405,6 +412,7 @@ class ParallelEnvPool:
                 reason_codes,
                 execution_events,
                 candidate_diagnostics,
+                terminal_audits,
                 identities,
                 policy_decisions_consumed,
                 success_first_crossings,
@@ -423,6 +431,7 @@ class ParallelEnvPool:
                 reason_codes=reason_codes,
                 execution_events=execution_events,
                 candidate_diagnostics=candidate_diagnostics,
+                terminal_audits=terminal_audits,
                 policy_decisions_consumed=policy_decisions_consumed,
                 success_first_crossings=success_first_crossings,
             )
@@ -455,6 +464,7 @@ class ParallelEnvPool:
                 identities,
                 candidate_diagnostics,
                 no_candidate_terminations,
+                terminal_audits,
             ) = self._await_resolution(target_buffer, policy_version)
             self._buffer_identities[target_buffer] = identities
             self.validate_policy_versions(
@@ -466,6 +476,7 @@ class ParallelEnvPool:
                 target_buffer,
                 candidate_diagnostics=candidate_diagnostics,
                 no_candidate_terminations=no_candidate_terminations,
+                terminal_audits=terminal_audits,
             )
         except ParallelPoolError as error:
             if not self.training_stopped:
@@ -621,6 +632,7 @@ class ParallelEnvPool:
         tuple[str, ...],
         tuple[ExecutionEvents, ...],
         tuple[CandidateDiagnostics, ...],
+        tuple[TerminalAudit | None, ...],
         tuple[ObservationIdentity, ...],
         torch.Tensor,
         torch.Tensor,
@@ -633,6 +645,7 @@ class ParallelEnvPool:
                 str,
                 ExecutionEvents,
                 CandidateDiagnostics,
+                TerminalAudit | None,
                 ObservationIdentity,
                 int,
                 bool,
@@ -650,7 +663,7 @@ class ParallelEnvPool:
             if (
                 kind != "step"
                 or worker_index in completed
-                or len(values) != 10
+                or len(values) != 11
                 or values[:2] != [buffer_index, policy_version]
             ):
                 raise ParallelPoolError("worker step protocol failed")
@@ -659,6 +672,7 @@ class ParallelEnvPool:
                 reason_code,
                 execution_events,
                 candidate_diagnostics,
+                terminal_audit,
                 identity,
                 policy_decisions_consumed,
                 success_first_crossing,
@@ -669,6 +683,10 @@ class ParallelEnvPool:
                 or not isinstance(reason_code, str)
                 or not isinstance(execution_events, ExecutionEvents)
                 or not isinstance(candidate_diagnostics, CandidateDiagnostics)
+                or (
+                    terminal_audit is not None
+                    and not isinstance(terminal_audit, TerminalAudit)
+                )
                 or not isinstance(identity, ObservationIdentity)
                 or policy_decisions_consumed not in (0, 1)
                 or type(success_first_crossing) is not bool
@@ -687,6 +705,7 @@ class ParallelEnvPool:
                 reason_code,
                 execution_events,
                 candidate_diagnostics,
+                terminal_audit,
                 identity,
                 policy_decisions_consumed,
                 success_first_crossing,
@@ -694,7 +713,7 @@ class ParallelEnvPool:
             )
             completed.add(worker_index)
         self._episode_cursors = tuple(
-            metadata[index][7] for index in range(self.worker_count)
+            metadata[index][8] for index in range(self.worker_count)
         )
         return (
             tuple(metadata[index][0] for index in range(self.worker_count)),
@@ -702,12 +721,13 @@ class ParallelEnvPool:
             tuple(metadata[index][2] for index in range(self.worker_count)),
             tuple(metadata[index][3] for index in range(self.worker_count)),
             tuple(metadata[index][4] for index in range(self.worker_count)),
+            tuple(metadata[index][5] for index in range(self.worker_count)),
             torch.tensor(
-                [metadata[index][5] for index in range(self.worker_count)],
+                [metadata[index][6] for index in range(self.worker_count)],
                 dtype=torch.int64,
             ),
             torch.tensor(
-                [metadata[index][6] for index in range(self.worker_count)],
+                [metadata[index][7] for index in range(self.worker_count)],
                 dtype=torch.bool,
             ),
         )
@@ -742,11 +762,13 @@ class ParallelEnvPool:
         tuple[ObservationIdentity, ...],
         tuple[CandidateDiagnostics, ...],
         tuple[bool, ...],
+        tuple[TerminalAudit | None, ...],
     ]:
         completed: set[int] = set()
         identities: dict[int, ObservationIdentity] = {}
         diagnostics: dict[int, CandidateDiagnostics] = {}
         no_candidate_terminations: dict[int, bool] = {}
+        terminal_audits: dict[int, TerminalAudit | None] = {}
         cursors: dict[int, int] = {}
         deadline = time.monotonic() + self._worker_timeout_seconds
         while len(completed) < self.worker_count:
@@ -759,19 +781,25 @@ class ParallelEnvPool:
             if (
                 kind != "resolved"
                 or worker_index in completed
-                or len(values) != 6
+                or len(values) != 7
                 or values[:2] != [buffer_index, policy_version]
                 or not isinstance(values[2], CandidateDiagnostics)
                 or type(values[3]) is not bool
-                or not isinstance(values[4], ObservationIdentity)
-                or type(values[5]) is not int
-                or values[5] < 0
+                or (
+                    values[4] is not None
+                    and not isinstance(values[4], TerminalAudit)
+                )
+                or values[3] != (values[4] is not None)
+                or not isinstance(values[5], ObservationIdentity)
+                or type(values[6]) is not int
+                or values[6] < 0
             ):
                 raise ParallelPoolError("worker resolution protocol failed")
             diagnostics[worker_index] = values[2]
             no_candidate_terminations[worker_index] = values[3]
-            identities[worker_index] = values[4]
-            cursors[worker_index] = values[5]
+            terminal_audits[worker_index] = values[4]
+            identities[worker_index] = values[5]
+            cursors[worker_index] = values[6]
             completed.add(worker_index)
         self._episode_cursors = tuple(
             cursors[index] for index in range(self.worker_count)
@@ -782,6 +810,9 @@ class ParallelEnvPool:
             tuple(
                 no_candidate_terminations[index]
                 for index in range(self.worker_count)
+            ),
+            tuple(
+                terminal_audits[index] for index in range(self.worker_count)
             ),
         )
 
@@ -859,6 +890,7 @@ class ParallelEnvPool:
         execution_events: tuple[ExecutionEvents, ...] = (),
         candidate_diagnostics: tuple[CandidateDiagnostics, ...] = (),
         no_candidate_terminations: tuple[bool, ...] = (),
+        terminal_audits: tuple[TerminalAudit | None, ...] = (),
         policy_decisions_consumed: torch.Tensor | None = None,
         success_first_crossings: torch.Tensor | None = None,
     ) -> ParallelRolloutStep:
@@ -900,6 +932,7 @@ class ParallelEnvPool:
                 execution_events=execution_events,
                 candidate_diagnostics=candidate_diagnostics,
                 no_candidate_terminations=no_candidate_terminations,
+                terminal_audits=terminal_audits,
             )
         except ParallelPoolError:
             raise
@@ -993,6 +1026,35 @@ def _current_candidate_diagnostics(
     if not isinstance(diagnostics, CandidateDiagnostics):
         raise ParallelPoolError("worker candidate diagnostics are invalid")
     return diagnostics
+
+
+def _terminal_audit(
+    *,
+    terminated: bool,
+    terminal_reason: TerminalReason | None,
+    oracle_opportunity_count: int,
+    remaining_coverable_detail_cell_count: int | None,
+    candidate_diagnostics: CandidateDiagnostics,
+) -> TerminalAudit | None:
+    if type(terminated) is not bool:
+        raise ParallelPoolError("worker terminal flag is invalid")
+    if not terminated:
+        if terminal_reason is not None:
+            raise ParallelPoolError("nonterminal worker has a terminal reason")
+        return None
+    if not isinstance(terminal_reason, TerminalReason):
+        raise ParallelPoolError("terminated worker has no terminal reason")
+    try:
+        return TerminalAudit(
+            reason=terminal_reason,
+            oracle_opportunity_count=oracle_opportunity_count,
+            candidate_diagnostics=candidate_diagnostics,
+            remaining_coverable_detail_cell_count=(
+                remaining_coverable_detail_cell_count
+            ),
+        )
+    except ValueError as error:
+        raise ParallelPoolError("worker terminal audit is invalid") from error
 
 
 def _worker_main(
@@ -1140,7 +1202,6 @@ def _worker_main(
                     raise ParallelPoolError(
                         "terminated worker requires reset before preparation"
                     )
-                candidate_diagnostics = _current_candidate_diagnostics(worker)
                 boundary = worker.environment.refresh_decision_boundary()
                 if (
                     boundary.transition is not None
@@ -1157,6 +1218,16 @@ def _worker_main(
                     raise ParallelPoolError(
                         "worker returned invalid decision-boundary state"
                     )
+                candidate_diagnostics = _current_candidate_diagnostics(worker)
+                terminal_audit = _terminal_audit(
+                    terminated=terminal_boundary,
+                    terminal_reason=boundary.terminal_reason,
+                    oracle_opportunity_count=boundary.oracle_opportunity_count,
+                    remaining_coverable_detail_cell_count=(
+                        boundary.remaining_coverable_detail_cell_count
+                    ),
+                    candidate_diagnostics=candidate_diagnostics,
+                )
                 if terminal_boundary:
                     if auto_reset:
                         episode_cursor += 1
@@ -1187,6 +1258,7 @@ def _worker_main(
                         policy_version,
                         candidate_diagnostics,
                         terminal_boundary,
+                        terminal_audit,
                         current_observation.observation_identities[0],
                         episode_cursor,
                     )
@@ -1222,6 +1294,24 @@ def _worker_main(
                     )
                 reward = reward_fn(transition)
                 policy_decisions_consumed = boundary.policy_decisions_consumed
+                current_diagnostics = _current_candidate_diagnostics(worker)
+                candidate_diagnostics = replace(
+                    candidate_diagnostics,
+                    planner_rejected_count=(
+                        current_diagnostics.planner_rejected_count
+                    ),
+                )
+                terminal_audit = _terminal_audit(
+                    terminated=transition.terminated,
+                    terminal_reason=transition.terminal_reason,
+                    oracle_opportunity_count=(
+                        transition.oracle_opportunity_count
+                    ),
+                    remaining_coverable_detail_cell_count=(
+                        transition.remaining_coverable_detail_cell_count
+                    ),
+                    candidate_diagnostics=candidate_diagnostics,
+                )
             else:
                 raise ParallelPoolError(
                     "terminated worker requires reset before another action"
@@ -1266,6 +1356,7 @@ def _worker_main(
                     transition.reason_code,
                     transition.execution_events,
                     candidate_diagnostics,
+                    terminal_audit,
                     next_observation.observation_identities[0],
                     policy_decisions_consumed,
                     transition.success_first_crossing,

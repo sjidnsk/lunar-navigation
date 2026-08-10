@@ -14,10 +14,11 @@ import numpy as np
 from lunar_planner_training_bridge import PlanningOutcome
 
 from .environment.candidate_builder import CandidateDiagnostics
+from .environment.macro_step import TerminalAudit, TerminalReason
 from .ppo.trainer import PPOUpdateMetrics
 
 
-TRAINING_UPDATE_METRICS_SCHEMA = "lunar-training-update-metrics/v1"
+TRAINING_UPDATE_METRICS_SCHEMA = "lunar-training-update-metrics/v2"
 
 
 class TrainingMetricsError(ValueError):
@@ -40,6 +41,7 @@ def build_training_update_record(
     planning_outcomes: Sequence[PlanningOutcome],
     candidate_diagnostics: Sequence[CandidateDiagnostics],
     no_candidate_terminations: Sequence[bool],
+    terminal_audits: Sequence[TerminalAudit | None],
     ppo_metrics: PPOUpdateMetrics,
     collect_wall_seconds: float,
     update_wall_seconds: float,
@@ -100,6 +102,7 @@ def build_training_update_record(
     outcomes = tuple(planning_outcomes)
     candidates = tuple(candidate_diagnostics)
     no_candidates = tuple(no_candidate_terminations)
+    audits = tuple(terminal_audits)
     transition_count = rollout_horizon * worker_count
     if (
         len(success) != transition_count
@@ -117,6 +120,29 @@ def build_training_update_record(
     ):
         raise TrainingMetricsError(
             "metrics no-candidate diagnostics are incomplete"
+        )
+    if (
+        not audits
+        or len(audits) % worker_count != 0
+        or any(
+            audit is not None and not isinstance(audit, TerminalAudit)
+            for audit in audits
+        )
+    ):
+        raise TrainingMetricsError("metrics terminal audits are incomplete")
+    materialized_audits = tuple(
+        audit for audit in audits if audit is not None
+    )
+    if len(materialized_audits) != int(dones.sum(dtype=np.int64)):
+        raise TrainingMetricsError(
+            "metrics terminal audits differ from rollout terminals"
+        )
+    if sum(
+        audit.reason is TerminalReason.SUCCESS
+        for audit in materialized_audits
+    ) != sum(success):
+        raise TrainingMetricsError(
+            "metrics success crossings differ from terminal reasons"
         )
     if not isinstance(ppo_metrics, PPOUpdateMetrics):
         raise TrainingMetricsError("metrics require PPOUpdateMetrics")
@@ -158,8 +184,12 @@ def build_training_update_record(
     candidate_by_platform: dict[str, dict[str, int]] = {
         platform: {
             "frontier_anchor_count": 0,
-            "platform_filter_rejected_count": 0,
+            "visited_excluded_count": 0,
+            "static_infeasible_count": 0,
+            "platform_unreachable_count": 0,
+            "zero_gain_count": 0,
             "emitted_count": 0,
+            "planner_rejected_count": 0,
             "no_candidate_termination_count": 0,
             "planner_rejected_exhaustion_count": 0,
         }
@@ -167,20 +197,63 @@ def build_training_update_record(
     }
     for index, diagnostics in enumerate(candidates):
         values = candidate_by_platform[platforms[index % worker_count]]
-        values["frontier_anchor_count"] += diagnostics.frontier_anchor_count
-        values["platform_filter_rejected_count"] += (
-            diagnostics.platform_filter_rejected_count
-        )
-        values["emitted_count"] += diagnostics.emitted_count
+        for name in (
+            "frontier_anchor_count",
+            "visited_excluded_count",
+            "static_infeasible_count",
+            "platform_unreachable_count",
+            "zero_gain_count",
+            "emitted_count",
+            "planner_rejected_count",
+        ):
+            values[name] += getattr(diagnostics, name)
     for index, terminated_without_candidates in enumerate(no_candidates):
         if terminated_without_candidates:
             candidate_by_platform[platforms[index % worker_count]][
                 "no_candidate_termination_count"
             ] += 1
-    flat_dones = dones.reshape(-1)
-    for index, (done, outcome) in enumerate(zip(flat_dones, outcomes, strict=True)):
-        if done and outcome != PlanningOutcome.NEW_REFERENCE_AVAILABLE:
-            candidate_by_platform[platforms[index % worker_count]][
+    terminal_reason_counts: Counter[str] = Counter()
+    terminal_reason_counts_by_platform: dict[str, Counter[str]] = {
+        platform: Counter() for platform in sorted(allocation)
+    }
+    terminal_candidate_by_platform = {
+        platform: {
+            name: 0
+            for name in (
+                "frontier_anchor_count",
+                "visited_excluded_count",
+                "static_infeasible_count",
+                "platform_unreachable_count",
+                "zero_gain_count",
+                "emitted_count",
+                "planner_rejected_count",
+            )
+        }
+        for platform in sorted(allocation)
+    }
+    remaining_counts: list[int] = []
+    oracle_opportunity_count = 0
+    oracle_contradiction_count = 0
+    for index, audit in enumerate(audits):
+        if audit is None:
+            continue
+        platform = platforms[index % worker_count]
+        reason = audit.reason.value
+        terminal_reason_counts[reason] += 1
+        terminal_reason_counts_by_platform[platform][reason] += 1
+        for name in terminal_candidate_by_platform[platform]:
+            terminal_candidate_by_platform[platform][name] += getattr(
+                audit.candidate_diagnostics, name
+            )
+        oracle_opportunity_count += audit.oracle_opportunity_count
+        if audit.oracle_opportunity_count > 0:
+            oracle_contradiction_count += 1
+        if audit.remaining_coverable_detail_cell_count is not None:
+            remaining_counts.append(
+                audit.remaining_coverable_detail_cell_count
+            )
+        if audit.reason is TerminalReason.PLANNER_REJECTED_ALL:
+            candidate_by_platform[platform][
                 "planner_rejected_exhaustion_count"
             ] += 1
     start_mean = float(start_coverage.astype(np.float64).mean())
@@ -208,6 +281,25 @@ def build_training_update_record(
         "terminal_count": int(dones.sum(dtype=np.int64)),
         "success_first_crossing_count": sum(success),
         "candidate": {"by_platform": candidate_by_platform},
+        "terminal": {
+            "reason_counts": dict(sorted(terminal_reason_counts.items())),
+            "reason_counts_by_platform": {
+                platform: dict(
+                    sorted(terminal_reason_counts_by_platform[platform].items())
+                )
+                for platform in sorted(allocation)
+            },
+            "candidate_diagnostics_by_platform": (
+                terminal_candidate_by_platform
+            ),
+            "oracle_opportunity_count": oracle_opportunity_count,
+            "oracle_contradiction_count": oracle_contradiction_count,
+            "remaining_coverable_detail_cell_count": {
+                "count": len(remaining_counts),
+                "min": min(remaining_counts) if remaining_counts else None,
+                "max": max(remaining_counts) if remaining_counts else None,
+            },
+        },
         "planner": {
             "outcome_counts": dict(sorted(outcome_counts.items())),
             "outcome_counts_by_platform": outcome_counts_by_platform,

@@ -33,6 +33,7 @@ from lunar_policy_training.environment.candidate_builder import CandidateDiagnos
 from lunar_policy_training.environment.macro_step import (  # noqa: E402
     ExecutionEvents,
     PlannerTransition,
+    TerminalReason,
 )
 from lunar_policy_training.environment.v3_environment import (  # noqa: E402
     DecisionBoundaryResult,
@@ -185,7 +186,12 @@ class _PreparationOnlyEnvironment:
 
     def refresh_decision_boundary(self) -> DecisionBoundaryResult:
         if not bool(self._observation.candidate_mask.any()):
-            return DecisionBoundaryResult(execution_state="NO_CANDIDATES")
+            return DecisionBoundaryResult(
+                execution_state="NO_CANDIDATES",
+                terminal_reason=TerminalReason.VISITED_EXHAUSTED,
+                oracle_opportunity_count=0,
+                remaining_coverable_detail_cell_count=77,
+            )
         return DecisionBoundaryResult(execution_state="DECISION_READY")
 
 
@@ -215,6 +221,9 @@ class _TerminalSuccessEnvironment:
                 execution_events=ExecutionEvents(
                     selected_action_observed_safe=True
                 ),
+                terminal_reason=TerminalReason.SUCCESS,
+                oracle_opportunity_count=0,
+                remaining_coverable_detail_cell_count=0,
             ),
             policy_decisions_consumed=1,
         )
@@ -447,6 +456,15 @@ def test_preserved_no_action_terminal_can_be_explicitly_reset(
     assert prepared_events == ()
     assert prepared_diagnostics == (CandidateDiagnostics(5, 5, 0),)
     assert prepared_no_candidates == (True,)
+    assert len(prepared.terminal_audits) == 1
+    assert prepared.terminal_audits[0] is not None
+    assert prepared.terminal_audits[0].reason is TerminalReason.VISITED_EXHAUSTED
+    assert prepared.terminal_audits[0].oracle_opportunity_count == 0
+    assert prepared.terminal_audits[0].remaining_coverable_detail_cell_count == 77
+    assert prepared.terminal_audits[0].candidate_diagnostics == CandidateDiagnostics(
+        frontier_anchor_count=5,
+        visited_excluded_count=5,
+    )
     assert reset_dones == [False]
     assert actionable.dones.tolist() == [False]
     assert bool(actionable.observations.candidate_mask[0].any())
@@ -466,6 +484,9 @@ def test_step_reports_candidate_diagnostics_from_selected_observation() -> None:
 
     assert stepped.candidate_diagnostics == (CandidateDiagnostics(9, 4, 3),)
     assert stepped.no_candidate_terminations == ()
+    assert len(stepped.terminal_audits) == 1
+    assert stepped.terminal_audits[0] is not None
+    assert stepped.terminal_audits[0].reason is TerminalReason.SUCCESS
 
 
 def test_targeted_reset_preserves_every_unselected_worker_field() -> None:
