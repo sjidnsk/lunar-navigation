@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close the remaining planner/action/sensor/gain mismatch, prove deterministic 99% platform-coverable exploration, then launch a brand-new formal PPO run at step 0.
+**Goal:** Close the remaining planner/action/sensor/gain mismatch, prove deterministic 95% platform-coverable exploration, then launch a brand-new formal PPO run at step 0.
 
 **Architecture:** Keep cache v4's exact platform/start-specific `0.2 m` coverable mask as the coverage authority. Add a locally certified start connector before conservative global search, persist one selected ground candidate across rolling C++ references, accumulate real sensor evidence along the certified path, and compute observed-only optimistic gain with candidate-set normalization. Bump success/reward/training identities, rebuild external cache artifacts, pass one-scene and 24-scene x three-platform natural-terminal gates, then start with randomly initialized policy/value/optimizer state.
 
@@ -17,7 +17,7 @@
 - Use `/home/kai/CodexDownloads/lunar_navigation/volume3/venv/bin/python` and `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` for training tests.
 - Every behavior change follows RED -> observe intended failure -> minimal GREEN -> focused regression -> scoped commit.
 - Do not change the PPO topology, seven input names, `[64,12]` action shape, `1024 m` scene, `30 m / 360 deg` sensor, `0.2 m` reveal, capability, source/split, or unbounded episode lifetime.
-- `mission_coverable_fraction >= 0.95` remains task feasibility. Episode success is exact coverage `>=0.99` of the platform-coverable denominator.
+- `mission_coverable_fraction >= 0.95` remains task feasibility. Episode success is exact coverage `>=0.95` of the platform-coverable denominator; historical 99% performance is not a launch gate for this run.
 - Training stays stopped until Task 7's gates pass. The authorized launch uses neither resume nor warm start.
 
 ---
@@ -283,7 +283,7 @@ git commit -m "fix(training): persist ground goals across rolling references"
 
 ---
 
-### Task 5: Freeze 99% success, reward v4 and fully fresh run identity
+### Task 5: Freeze 95% success, reward v4 and fully fresh run identity
 
 **Files:**
 
@@ -304,15 +304,15 @@ git commit -m "fix(training): persist ground goals across rolling references"
 
 **Interfaces:**
 
-- Success ratio is exactly `0.99`; semantics are `lunar-training-semantics/sensor-30m-360-platform-coverable-detail99-ground-option-path-observation/v7`.
+- Success ratio is exactly `0.95`; semantics are `lunar-training-semantics/sensor-30m-360-platform-coverable-detail95-ground-option-path-observation/v7`.
 - Reward schema is `lunar-reward/v4`; coverage scale stays `100.0`, first-success bonus becomes `100.0`, and cost/time/priority remain validated telemetry.
-- Initial eligibility is `<0.99`, mission feasibility remains `>=0.95`, and closed-loop final coverage is `>=0.99`.
+- Initial eligibility is `<0.95`, mission feasibility remains `>=0.95`, and closed-loop final coverage is `>=0.95`.
 - Pre-v7/pre-v4 resume and warm start fail closed.
 - Launch without either flag records null parents and initializes complete model/value/optimizer/RNG/normalization at step 0.
 
 - [ ] **Step 1: Write failing literal tests**
 
-Assert `0.989999` is not success, `0.989 -> 0.99` fires once, a later step has no second bonus, zero-gain success reward is `99.9`, `0.95` gate coverage fails, `0.99` passes, and fresh manifest parents are null at step 0.
+Assert `0.949999` is not success, `0.949 -> 0.95` fires once, a later step has no second bonus, zero-gain success reward is `99.9`, `0.949999` gate coverage fails, `0.95` passes, and fresh manifest parents are null at step 0.
 
 - [ ] **Step 2: Run RED**
 
@@ -349,7 +349,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "$PYTHON" -m pytest -q \
 
 ```bash
 git add training/lunar_policy_training
-git commit -m "feat(training): freeze detail99 fresh-run semantics"
+git commit -m "fix(training): set current formal success gate to 95 percent"
 ```
 
 ---
@@ -405,13 +405,13 @@ Any correction gets its own RED/GREEN. Source must be committed and clean before
 
 ---
 
-### Task 7: Prove 99% closure, rebuild cache and launch fresh training
+### Task 7: Prove 95% closure, rebuild cache and launch fresh training
 
 **Files:** Verify `closed_loop_gate.py`, `formal_preflight.py` and `cli.py`; all resulting caches, traces, reports, logs and checkpoints remain external.
 
 **Interfaces:**
 
-- Replays `b230277e630f34f194195f87321ea1ae5be7c25e40b597e429150c375dceeaf7`/WHEELED to natural success `>=0.99`, then representative exact LEGGED and HOPPER cases.
+- Replays `b230277e630f34f194195f87321ea1ae5be7c25e40b597e429150c375dceeaf7`/WHEELED to natural success `>=0.95`, then representative exact LEGGED and HOPPER cases.
 - Requires zero oracle contradictions/safety violations/systematic planner rejection and target/reference progress evidence.
 - Runs the first 24 exact-common frozen scenes x three platforms twice; both reports require `72/72` success and identical canonical digests.
 - Full cache and final preflight precede launch.
@@ -421,7 +421,7 @@ Any correction gets its own RED/GREEN. Source must be committed and clean before
 
 ```bash
 SOURCE_COMMIT=$(git rev-parse --verify HEAD)
-PREFLIGHT_ROOT=/home/kai/CodexDownloads/lunar_navigation/platform_coverable_exploration/preflight-detail99-${SOURCE_COMMIT:0:12}
+PREFLIGHT_ROOT=/home/kai/CodexDownloads/lunar_navigation/platform_coverable_exploration/preflight-detail95-${SOURCE_COMMIT:0:12}
 set +u
 source /opt/ros/humble/setup.bash
 source "/home/kai/CodexDownloads/lunar_navigation/platform_coverable_exploration/verification-${SOURCE_COMMIT:0:12}/install/setup.bash"
@@ -436,7 +436,7 @@ PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
 
 - [ ] **Step 2: Run single-case natural-terminal diagnostics**
 
-Use the closed-loop case runner and frozen schedule. Do not replace cases based on outcomes. Require b230/WHEELED plus the first exact-common LEGGED and HOPPER cases to terminate `SUCCESS >=0.99`.
+Use the closed-loop case runner and frozen schedule. Do not replace cases based on outcomes. Require b230/WHEELED plus the first exact-common LEGGED and HOPPER cases to terminate `SUCCESS >=0.95`.
 
 - [ ] **Step 3: Run 24x3 gate twice**
 
@@ -455,7 +455,7 @@ Compare `closed_loop_evidence_sha256`; only timing and artifact paths already ex
 - [ ] **Step 4: Materialize full cache and run formal preflight**
 
 ```bash
-FULL_ROOT=/home/kai/CodexDownloads/lunar_navigation/platform_coverable_exploration/full-detail99-${SOURCE_COMMIT:0:12}
+FULL_ROOT=/home/kai/CodexDownloads/lunar_navigation/platform_coverable_exploration/full-detail95-${SOURCE_COMMIT:0:12}
 PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
   "$PYTHON" -m lunar_policy_training.cli prepare-data \
   --source-lock /home/kai/CodexDownloads/lunar_navigation/volume3/data/locks/polar_source_lock_v1.json \
@@ -482,7 +482,7 @@ If a gate fails, return to its owning task with a new RED test and do not launch
 
 1. Tasks 1-5 have observed RED/GREEN evidence and scoped commits.
 2. Full Python, native Release and repository-boundary checks pass at the final source commit.
-3. b230/WHEELED and representative LEGGED/HOPPER traces naturally reach `>=0.99`.
+3. b230/WHEELED and representative LEGGED/HOPPER traces naturally reach `>=0.95`.
 4. Both 24x3 reports pass with identical canonical digests.
 5. Full cache and formal-preflight identities are exact and external.
 6. A randomly initialized formal run is alive from step 0 with finite first metrics and a valid first checkpoint.

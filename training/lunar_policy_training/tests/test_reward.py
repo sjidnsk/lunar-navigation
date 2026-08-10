@@ -167,7 +167,7 @@ def test_continuous_coverage_and_first_success_have_exact_v4_rewards() -> None:
     first = compute_reward(
         _inputs(
             mission_observed_delta=0.01,
-            mission_observed_ratio_after=0.99,
+            mission_observed_ratio_after=0.95,
             success_first_crossing=True,
             terminated=True,
         )
@@ -183,7 +183,7 @@ def test_zero_gain_first_success_restores_the_full_completion_signal() -> None:
     assert compute_reward(
         _inputs(
             mission_observed_delta=0.0,
-            mission_observed_ratio_after=0.99,
+            mission_observed_ratio_after=0.95,
             success_first_crossing=True,
             terminated=True,
         )

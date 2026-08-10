@@ -24,11 +24,11 @@ from lunar_policy_training.training_semantics import (
 
 _V7 = (
     "lunar-training-semantics/"
-    "sensor-30m-360-platform-coverable-detail99-ground-option-path-observation/v7"
+    "sensor-30m-360-platform-coverable-detail95-ground-option-path-observation/v7"
 )
 
 
-def test_formal_training_semantics_names_detail99_ground_option_v7() -> None:
+def test_formal_training_semantics_names_detail95_ground_option_v7() -> None:
     """Would fail if a new run retained the old full-ROI/common-subset identity."""
     assert FORMAL_TRAINING_SEMANTICS_VERSION == _V7
     assert TRAINING_SEMANTICS_VERSION == _V7
@@ -132,15 +132,8 @@ def test_platform_coverability_validates_exact_masks_counts_hashes_and_ratio() -
             1,
             IneligibleReason.MISSION_COVERABLE_BELOW_95,
         ),
-        (
-            (1, 1),
-            100,
-            95,
-            0.95,
-            0,
-            IneligibleReason.NO_INITIAL_CANDIDATE,
-        ),
-        ((1, 1), 100, 95, 0.99, 1, IneligibleReason.INITIAL_ALREADY_SUCCESS),
+        ((1, 1), 100, 95, 0.94, 0, IneligibleReason.NO_INITIAL_CANDIDATE),
+        ((1, 1), 100, 95, 0.95, 1, IneligibleReason.INITIAL_ALREADY_SUCCESS),
         ((1, 1), 100, 95, 0.10, 0, IneligibleReason.NO_INITIAL_CANDIDATE),
         ((1, 1), 100, 95, 0.10, 1, None),
     ],

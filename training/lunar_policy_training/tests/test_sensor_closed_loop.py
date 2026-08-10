@@ -101,10 +101,10 @@ def _coverage_controller(
 ) -> tuple[ObservationBoundaryController, MapCanvas]:
     geometry = GridGeometry(size_m=10.0, resolution_m=1.0, cells=10)
     canvas = MapCanvas("e" * 64, (0.0, 0.0, 10.0, 10.0), geometry)
-    mask_98 = np.zeros((10, 10), dtype=np.bool_)
-    mask_98.flat[:98] = True
-    mask_99 = mask_98.copy()
-    mask_99.flat[98:99] = True
+    mask_94 = np.zeros((10, 10), dtype=np.bool_)
+    mask_94.flat[:94] = True
+    mask_95 = mask_94.copy()
+    mask_95.flat[94:95] = True
     truth = TrainingWorldTruth(
         canvas,
         np.zeros((10, 10), dtype=np.float32),
@@ -117,7 +117,7 @@ def _coverage_controller(
         mission_priority=np.ones((10, 10), dtype=np.float32),
         forbidden_mask=np.zeros((10, 10), dtype=np.bool_),
         visibility_estimator=_SequencedVisibilityEstimator(
-            (mask_98, mask_99, mask_99),
+            (mask_94, mask_95, mask_95),
             resolution_m=1.0,
         ),
     )
@@ -283,7 +283,7 @@ def test_sensor_path_evidence_requires_exact_endpoint_and_elapsed_sum() -> None:
         )
 
 
-def test_roi_success_is_emitted_only_on_the_first_99_percent_crossing() -> None:
+def test_roi_success_is_emitted_only_on_the_first_95_percent_crossing() -> None:
     controller, canvas = _coverage_controller("WHEELED")
 
     initial = controller.reset(_pose(canvas, 5, 5))
@@ -298,15 +298,15 @@ def test_roi_success_is_emitted_only_on_the_first_99_percent_crossing() -> None:
         evidence=SensorBoundaryEvidence(_pose(canvas, 5, 5), 1.0),
     )
 
-    assert FORMAL_SUCCESS_COVERAGE_RATIO == 0.99
-    assert 0.989999 < FORMAL_SUCCESS_COVERAGE_RATIO
-    assert not formal_success_first_crossing(0.0, 0.989999)
-    assert formal_success_first_crossing(0.989, 0.99)
-    assert initial.mission_observed_ratio == pytest.approx(0.98)
+    assert FORMAL_SUCCESS_COVERAGE_RATIO == 0.95
+    assert 0.949999 < FORMAL_SUCCESS_COVERAGE_RATIO
+    assert not formal_success_first_crossing(0.0, 0.949999)
+    assert formal_success_first_crossing(0.949, 0.95)
+    assert initial.mission_observed_ratio == pytest.approx(0.94)
     assert initial.success_first_crossing is False
-    assert crossing.mission_observed_ratio == pytest.approx(0.99)
+    assert crossing.mission_observed_ratio == pytest.approx(0.95)
     assert crossing.success_first_crossing is True
-    assert repeated.mission_observed_ratio == pytest.approx(0.99)
+    assert repeated.mission_observed_ratio == pytest.approx(0.95)
     assert repeated.success_first_crossing is False
 
 
@@ -325,9 +325,9 @@ def test_hopper_can_cross_success_only_at_landed_hold() -> None:
         evidence=SensorBoundaryEvidence(_pose(canvas, 5, 5), 1.0),
     )
 
-    assert in_flight.mission_observed_ratio == pytest.approx(0.98)
+    assert in_flight.mission_observed_ratio == pytest.approx(0.94)
     assert in_flight.success_first_crossing is False
-    assert landed.mission_observed_ratio == pytest.approx(0.99)
+    assert landed.mission_observed_ratio == pytest.approx(0.95)
     assert landed.success_first_crossing is True
 
 

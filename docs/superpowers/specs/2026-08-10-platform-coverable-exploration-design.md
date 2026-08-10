@@ -154,8 +154,9 @@ coverage =
     / popcount(coverable_detail_mask)
 ```
 
-分母必须大于零。初始 reveal 计入 numerator，但不得在初始状态达到 `0.99`；首次从 `<0.99`
-跨到 `>=0.99` 仍是唯一 `SUCCESS` 事件。
+分母必须大于零。初始 reveal 计入 numerator，但不得在初始状态达到当前批准的 `0.95`；首次从
+`<0.95` 跨到 `>=0.95` 仍是唯一 `SUCCESS` 事件。旧仓的 `0.99` 能力保留为后续诊断目标，
+不作为本轮恢复训练的成功门槛。
 
 ## 4. 真值与策略边界
 
@@ -228,7 +229,7 @@ ineligible_reason                      enum|null
 1. 起点安全且属于 reachable mask；
 2. `coverable_detail_cell_count > 0`；
 3. `mission_coverable_fraction = coverable / mission_target >= 0.95`；
-4. `initial_coverable_fraction < 0.99`；
+4. `initial_coverable_fraction < 0.95`；
 5. 初始 reveal 后至少有一个经平台检查的 observed-only 候选；
 6. reachability、detail target、LOS 和掩码哈希全部精确完成。
 
@@ -387,9 +388,9 @@ production_candidate_count == 0 AND oracle_opportunity_count > 0
 
 production_candidate_count == 0 AND oracle_opportunity_count == 0
     -> LEGAL_EXHAUSTION(<最后实际耗尽候选的阶段>)
-    -> 未达到 0.99 时按该阶段原因合法失败终止
+    -> 未达到 0.95 时按该阶段原因合法失败终止
 
-coverage 首次达到 0.99
+coverage 首次达到 0.95
     -> SUCCESS
 ```
 
@@ -431,7 +432,7 @@ cache、候选特征、动作聚合、成功阈值、reward 和 replay state 均
 - run manifest 中 `resume_parent` 与 `warm_start_parent` 均为 null，并记录旧运行仅作为历史审计。
 
 训练语义升级为
-`lunar-training-semantics/sensor-30m-360-platform-coverable-detail99-ground-option-path-observation/v7`。
+`lunar-training-semantics/sensor-30m-360-platform-coverable-detail95-ground-option-path-observation/v7`。
 cache v4 的数组 schema 不变，但旧 manifest 的语义哈希、源码提交和 reward 哈希必须失配；必须在
 仓库外完整重建，禁止就地改写旧 cache。
 
@@ -469,7 +470,7 @@ cache v4 的数组 schema 不变，但旧 manifest 的语义哈希、源码提�
 11. 一次地面 action 跨多个滚动 reference 仍只产生一个 transition，目标坐标不漂移；
 12. 路径样本间距 `<=1.0 m`、replay 位相同且 Hopper 飞行中不观测；
 13. 未知不阻挡预计增益、已知障碍阻挡，且候选最大正增益归一化为 `1.0`；
-14. `0.99` 首次越界只触发一次 `SUCCESS`，reward v4 的成功奖励为 `100.0`。
+14. `0.95` 首次越界只触发一次 `SUCCESS`，reward v4 的成功奖励为 `100.0`。
 
 ### 9.3 固定场景闭环门
 
@@ -478,7 +479,7 @@ cache v4 的数组 schema 不变，但旧 manifest 的语义哈希、源码提�
 
 - `exact=true`；
 - `mission_coverable_fraction >= 0.95`；
-- 基线最终覆盖率 `>=0.99`；
+- 基线最终覆盖率 `>=0.95`；
 - `ORACLE_CONTRADICTION=0`；
 - 平台候选发布后无系统性规划器语义拒绝；
 - 每个 terminal reason 完整；
@@ -487,7 +488,8 @@ cache v4 的数组 schema 不变，但旧 manifest 的语义哈希、源码提�
 这里的“24 个”是三平台 `exact-common` 的门禁分母，不是 preflight cache 的原始场景上限。
 若首批 24 个原始场景经平台资格计算后不足 24 个 `exact-common`，必须扩大确定性的 preflight
 物理场景前缀，再由冻结 common schedule 选取前 24 个；不得按闭环结果挑选成功场景，也不得降低
-`0.95` 任务可行性资格门或 `0.99` 成功阈值。固定场景闭环使用独立的 `closed-loop-gate` 命令和仓库外报告；现有
+当前明确批准的 `0.95` 任务可行性资格门和 `0.95` 成功阈值。固定场景闭环使用独立的
+`closed-loop-gate` 命令和仓库外报告；现有
 `formal-preflight` 的一步非代理探针与启动身份检查仍属于 full cache 生成后的启动前校准门，
 不能冒充本节的自然终止闭环门。
 
@@ -511,7 +513,7 @@ Humble 环境、仓库外 build/install/log 目录中构建并运行 `lunar_plan
 5. 接入精确 detail coverage numerator/denominator；
 6. 接入统一平台候选可达性、分阶段诊断和 observed-only oracle；
 7. 接入持续地面目标、路径观测和一个 action 的 transition 聚合；
-8. 升级预计增益、候选归一化、`0.99` 成功和 reward v4；
+8. 升级预计增益、候选归一化、`0.95` 成功和 reward v4；
 9. 完成新 run manifest 的随机初始化边界；
 10. 生成 preflight v4 cache，执行单场景和固定场景闭环门；
 11. 生成 full v4 cache并复核数据分布；
@@ -530,8 +532,9 @@ Humble 环境、仓库外 build/install/log 目录中构建并运行 `lunar_plan
 - C++ v3 对最终 reference 的安全所有权；
 - source/split 原始数据和 hazard 生成器。
 
-本文也不把旧仓地面实现直接复制给 Hopper，不用降低成功阈值掩盖任务不可行，不以继续消耗 GPU
-代替环境闭环验证。
+本文也不把旧仓地面实现直接复制给 Hopper。当前 `0.95` 是用户明确批准的本轮训练目标，仍要求
+`mission_coverable_fraction >=0.95` 和自然终止闭环通过，不能靠继续缩小分母或消耗 GPU 掩盖任务
+不可行。
 
 ## 12. 完成标准
 
