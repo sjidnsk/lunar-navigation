@@ -26,6 +26,7 @@ from lunar_policy_training.cli import _ParallelPoolVectorEnv  # noqa: E402
 from lunar_policy_training.environment.macro_step import (  # noqa: E402
     ExecutionEvents,
     PlannerTransition,
+    TerminalReason,
 )
 from lunar_policy_training.environment.parallel_pool import (  # noqa: E402
     ParallelEnvironmentWorker,
@@ -304,7 +305,11 @@ def _real_v3_worker(
 
 def _planner_transition_reward(transition: PlannerTransition) -> float:
     assert isinstance(transition, PlannerTransition)
-    return 0.5 if transition.planning_outcome == PlanningOutcome.INVALID_REQUEST else 0.0
+    if transition.planning_outcome != PlanningOutcome.INVALID_REQUEST:
+        return 0.0
+    identity = transition.next_observation.observation_identities[0]
+    worker_index = int(identity.episode_id.rsplit("-", maxsplit=1)[1])
+    return 0.5 + 0.5 * worker_index
 
 
 def _boundary_observation(*, all_false: bool, generation: int) -> PolicyBatch:
@@ -343,12 +348,18 @@ class _BoundaryProtocolEnvironment:
 
     def refresh_decision_boundary(self) -> DecisionBoundaryResult:
         if not bool(self.observation.candidate_mask.any()):
-            return DecisionBoundaryResult(execution_state="NO_CANDIDATES")
+            return DecisionBoundaryResult(
+                execution_state="NO_CANDIDATES",
+                terminal_reason=TerminalReason.NO_FRONTIER_ANCHOR,
+            )
         return DecisionBoundaryResult(execution_state="DECISION_READY")
 
     def advance_until_decision_boundary(self, policy) -> DecisionBoundaryResult:
         if not bool(self.observation.candidate_mask.any()):
-            return DecisionBoundaryResult(execution_state="NO_CANDIDATES")
+            return DecisionBoundaryResult(
+                execution_state="NO_CANDIDATES",
+                terminal_reason=TerminalReason.NO_FRONTIER_ANCHOR,
+            )
         policy(self.observation)
         next_observation = _boundary_observation(
             all_false=True,
@@ -434,6 +445,52 @@ class _StaticPlannerBridge:
 
     def plan(self, request) -> PlannerOutput:
         return self.output
+
+
+def _continuing_v3_worker(
+    worker_index: int, platform_type: str
+) -> ParallelEnvironmentWorker:
+    generation = 1
+    episode_id = f"continuing-{worker_index}"
+
+    def observation_for_generation(value: int) -> PolicyBatch:
+        observation = _boundary_observation(all_false=False, generation=value)
+        observation.candidate_mask[0, 1] = True
+        observation.observation_identities = (
+            ObservationIdentity(
+                episode_id=episode_id,
+                mission_revision=value,
+                map_snapshot_id=f"continuing-map-{value}",
+                robot_state_id=f"continuing-state-{value}",
+                state_time_ns=value,
+                execution_state="DECISION_BOUNDARY",
+                candidate_set_id=f"continuing-candidates-{value}",
+            ),
+        )
+        return observation
+
+    initial = observation_for_generation(generation)
+
+    def refresh() -> PolicyBatch:
+        nonlocal generation
+        generation += 1
+        return observation_for_generation(generation)
+
+    output = PlannerOutput()
+    output.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+    output.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    output.reason_code = "RETRY_NEXT_BOUNDARY"
+    environment = V3ExplorationEnvironment(
+        platform_type=platform_type,
+        bridge=_StaticPlannerBridge(output),
+        request_builder=lambda action: action,
+        initial_observation=initial,
+        observation_provider=refresh,
+    )
+    return ParallelEnvironmentWorker(
+        environment=environment,
+        initial_observation=initial,
+    )
 
 
 class _LastRealActionFactory:
@@ -655,7 +712,7 @@ def test_production_collector_resolves_initial_or_final_all_false_without_policy
 def test_production_pool_adapter_collects_real_v3_reward_gae_at_one_policy_version() -> None:
     """Would fail if train/resume could replace the Task 2/C++ rollout with a proxy."""
     with ParallelEnvPool(
-        allocation={"WHEELED": 1},
+        allocation={"WHEELED": 2},
         observation_template=_real_v3_worker(0, "WHEELED").initial_observation,
         environment_factory=_real_v3_worker,
         reward_fn=_planner_transition_reward,
@@ -669,16 +726,22 @@ def test_production_pool_adapter_collects_real_v3_reward_gae_at_one_policy_versi
             device="cpu",
         )
 
-    assert collected.rewards.tolist() == [[0.5], [0.5]]
+    assert collected.rewards.tolist() == [[0.5, 1.0], [0.5, 1.0]]
+    assert collected.dones.tolist() == [[True, True], [True, True]]
     assert environment.policy_versions == [17, 17]
     assert environment.planning_outcomes == [
         PlanningOutcome.INVALID_REQUEST,
         PlanningOutcome.INVALID_REQUEST,
+        PlanningOutcome.INVALID_REQUEST,
+        PlanningOutcome.INVALID_REQUEST,
     ]
-    assert environment.raw_rewards == [0.5, 0.5]
-    assert environment.success_first_crossings == [False, False]
+    assert environment.raw_rewards == [0.5, 1.0, 0.5, 1.0]
+    assert environment.success_first_crossings == [False, False, False, False]
+    assert [
+        audit.reason for audit in environment.terminal_audits if audit is not None
+    ] == [TerminalReason.HARD_FAILURE] * 4
     assert all(environment.reason_codes)
-    assert collected.rollout.returns.tolist() == pytest.approx([0.972625, 0.5])
+    assert collected.rollout.returns.tolist() == pytest.approx([0.5, 1.0, 0.5, 1.0])
     assert np.isfinite(collected.rollout.advantages).all()
 
 
@@ -686,8 +749,10 @@ def test_policy_update_after_step_32_keeps_the_same_active_episode() -> None:
     """Would fail if a PPO batch boundary were also an episode boundary."""
     with ParallelEnvPool(
         allocation={"WHEELED": 1},
-        observation_template=_real_v3_worker(0, "WHEELED").initial_observation,
-        environment_factory=_real_v3_worker,
+        observation_template=_continuing_v3_worker(
+            0, "WHEELED"
+        ).initial_observation,
+        environment_factory=_continuing_v3_worker,
         reward_fn=_planner_transition_reward,
         worker_timeout_seconds=5.0,
     ) as pool:
@@ -698,9 +763,11 @@ def test_policy_update_after_step_32_keeps_the_same_active_episode() -> None:
         action_thetas = np.zeros((1,), dtype=np.float32)
 
         for _ in range(32):
+            environment.prepare_decision_boundaries()
             environment.step(action_indices, action_thetas)
 
         environment.advance_policy_version(18)
+        environment.prepare_decision_boundaries()
         after_update = environment.step(action_indices, action_thetas)
 
         assert pool.episode_cursors == (0,)
