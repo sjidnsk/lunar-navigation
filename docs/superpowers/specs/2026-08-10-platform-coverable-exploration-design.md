@@ -278,6 +278,11 @@ ineligible_reason                      enum|null
 worker 必须始终使用该缓存起点状态，不再先尝试随机安全起点。增加多起点需要新的 start profile
 schema，不在本文范围。
 
+canonical 起点状态沿用当前正式环境并冻结为：`x/y` 是合格 `4.0 m` 单元格心，地形 `z` 来自该格，
+`yaw=0.0`；WHEELED 的 motion mode 为 `START`；LEGGED 的 body `z` 为地形 `z` 加 capability
+`body_height_m` 区间中点，并携带该起始可达高度区间；HOPPER 使用格心附近通过精细落区认证的实际
+aim pose。任一字段变化都必须改变 start-state identity 和图 hash。
+
 场景—平台 `eligible=true` 必须同时满足：
 
 1. 起点状态安全且属于 recoverable states；
@@ -315,12 +320,11 @@ schema，不在本文范围。
 
 ```text
 PrimitiveReachabilityEngine.update(
-    previous_snapshot,
     observed_world_revision,
-    changed_detail_tiles,
     current_platform_state,
     frozen_safe_anchor,
     platform_capability,
+    maximum_action_distance_m_or_none,
 ) -> PrimitiveReachabilitySnapshot
 
 CandidateBuilder.build(
@@ -337,7 +341,8 @@ reachable mask 只用于快速空间查询和可视化，不能替代状态 ID�
 
 每次 reveal 后按以下顺序增量更新：
 
-1. 根据变化的 `0.2 m` tile 找出扫掠包围盒与之相交的原语边，并使这些边失效；
+1. 引擎比较前后 world revision 的定坐标 tile 内容哈希，根据变化的 `0.2 m` tile 找出扫掠包围盒
+   与之相交的原语边，并使这些边失效；调用方不得用遗漏变化的提示绕过该比较；
 2. 对新增已观测安全区域附近的状态和边执行正式平台原语认证；
 3. 保留未受影响且输入证据哈希未变的认证结果；
 4. 在更新后的有向图上确定性重算 forward/reverse reachability 标签；
