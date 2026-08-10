@@ -15,18 +15,16 @@ from ..training_semantics import FORMAL_SENSOR_FOV_RAD, FORMAL_SENSOR_RANGE_M
 from .candidate_builder import CandidateBuilderV2
 from .multires_observation import MultiresSensorObservationState
 from .observation_builder import MissionRaster, Pose2
-from .primitive_reachability import ObservedPrimitiveReachability
+from .primitive_reachability import (
+    ObservedPrimitiveReachability,
+    native_start_failure_is_ineligible,
+)
 
 
 FORMAL_BOUNDARY_MARGIN_CELLS = math.ceil(
     (FORMAL_SENSOR_RANGE_M + LOCAL_GEOMETRY.size_m / 2.0)
     / GLOBAL_GEOMETRY.resolution_m
 )
-_UNSAFE_NATIVE_START_REASONS = {
-    "WHEELED": "WHEEL_START_NOT_SAFE",
-    "LEGGED": "LEGGED_START_NOT_SAFE",
-    "HOPPER": "HOPPER_START_NOT_SAFE",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,7 +215,7 @@ def qualify_initial_start(
                 observation_revision=1,
             )
         except RuntimeError as error:
-            if str(error) == _UNSAFE_NATIVE_START_REASONS[platform_type]:
+            if native_start_failure_is_ineligible(platform_type, error):
                 continue
             raise
         candidates = CandidateBuilderV2(sensor_state).build_from_primitive_graph(

@@ -5,9 +5,12 @@ import hashlib
 import json
 import pathlib
 import threading
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
+import lunar_policy_training.polar_data.formal_cache as formal_cache_module
 
 from lunar_policy_training.environment.coverability import (
     IneligibleReason,
@@ -241,6 +244,73 @@ def test_hopper_landing_targets_exclude_nodata_cells_in_row_major_order() -> Non
         ),
     )
     assert targets.flags.c_contiguous
+
+
+def test_truth_graph_start_failure_marks_only_that_platform_ineligible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CapabilityBundle:
+        @staticmethod
+        def for_platform(platform_type: str) -> object:
+            assert platform_type == "HOPPER"
+            return object()
+
+    def reject_start(**_kwargs):
+        raise RuntimeError("HOPPER_START_LANDING_NOT_CERTIFIED")
+
+    monkeypatch.setattr(
+        formal_cache_module,
+        "_build_truth_primitive_reachability",
+        reject_start,
+    )
+
+    result = formal_cache_module._build_scene_platform_coverability(
+        platform_type="HOPPER",
+        capability_bundle=CapabilityBundle(),
+        qualification=SimpleNamespace(cell=(3, 4), initial_candidate_count=1),
+        scene=object(),
+        projected=object(),
+        mission_roi=np.ones((2, 2), dtype=np.bool_),
+        detail_shape=(256, 256),
+    )
+
+    assert result.eligible is False
+    assert result.ineligible_reason is IneligibleReason.UNSAFE_START
+    assert result.qualified_start_cell is None
+
+
+def test_truth_graph_does_not_hide_a_non_start_native_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CapabilityBundle:
+        @staticmethod
+        def for_platform(_platform_type: str) -> object:
+            return object()
+
+    def fail_graph(**_kwargs):
+        raise RuntimeError("HOPPER_REACHABILITY_CERTIFICATION_INVALID")
+
+    monkeypatch.setattr(
+        formal_cache_module,
+        "_build_truth_primitive_reachability",
+        fail_graph,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="HOPPER_REACHABILITY_CERTIFICATION_INVALID",
+    ):
+        formal_cache_module._build_scene_platform_coverability(
+            platform_type="HOPPER",
+            capability_bundle=CapabilityBundle(),
+            qualification=SimpleNamespace(
+                cell=(3, 4), initial_candidate_count=1
+            ),
+            scene=object(),
+            projected=object(),
+            mission_roi=np.ones((2, 2), dtype=np.bool_),
+            detail_shape=(256, 256),
+        )
 
 
 def test_cache_root_must_be_absolute_and_outside_git() -> None:

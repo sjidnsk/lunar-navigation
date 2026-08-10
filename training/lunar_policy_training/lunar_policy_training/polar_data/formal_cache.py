@@ -23,6 +23,9 @@ from ..environment.formal_start_qualification import (
     build_formal_mission_roi,
     qualify_initial_start,
 )
+from ..environment.primitive_reachability import (
+    native_start_failure_is_ineligible,
+)
 from ..environment.coverability import (
     IneligibleReason,
     PlatformCoverability,
@@ -1938,18 +1941,23 @@ def _build_scene_platform_coverability(
 
     platform = capability_bundle.for_platform(platform_type)
     bridge = bridge_api.PlannerBridge()
-    (
-        primitive_graph,
-        reachable,
-        recoverable_observation_positions,
-        qualified_start_state,
-    ) = _build_truth_primitive_reachability(
-        platform=platform,
-        scene=scene,
-        projected=projected,
-        start_cell=qualification.cell,
-        bridge=bridge,
-    )
+    try:
+        (
+            primitive_graph,
+            reachable,
+            recoverable_observation_positions,
+            qualified_start_state,
+        ) = _build_truth_primitive_reachability(
+            platform=platform,
+            scene=scene,
+            projected=projected,
+            start_cell=qualification.cell,
+            bridge=bridge,
+        )
+    except RuntimeError as error:
+        if native_start_failure_is_ineligible(platform_type, error):
+            return _unsafe_platform_coverability(platform_type, detail_shape)
+        raise
     if not bool(reachable[qualification.cell]):
         zero = _unsafe_platform_coverability(platform_type, detail_shape)
         return PlatformCoverability(

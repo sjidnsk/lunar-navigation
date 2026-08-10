@@ -11,6 +11,28 @@ import numpy as np
 
 _PLATFORMS = frozenset(("WHEELED", "LEGGED", "HOPPER"))
 _SHA256_LENGTH = 64
+_NATIVE_UNSAFE_START_REASONS = {
+    "WHEELED": frozenset(("WHEEL_START_NOT_SAFE",)),
+    "LEGGED": frozenset(("LEGGED_START_NOT_SAFE",)),
+    "HOPPER": frozenset(
+        (
+            "HOPPER_START_NOT_SAFE",
+            "HOPPER_START_LANDING_NOT_CERTIFIED",
+        )
+    ),
+}
+
+
+def native_start_failure_is_ineligible(
+    platform_type: str,
+    error: BaseException,
+) -> bool:
+    """Classify only native failures proving that one start is unusable."""
+    return (
+        platform_type in _NATIVE_UNSAFE_START_REASONS
+        and isinstance(error, RuntimeError)
+        and str(error) in _NATIVE_UNSAFE_START_REASONS[platform_type]
+    )
 
 
 def _sha256(name: str, value: object) -> str:
@@ -423,4 +445,5 @@ class ObservedPrimitiveReachability:
 __all__ = [
     "ObservedPrimitiveReachability",
     "ObservedPrimitiveSnapshot",
+    "native_start_failure_is_ineligible",
 ]
