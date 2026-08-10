@@ -355,7 +355,9 @@ connected-component mask。HOPPER 的精细落区证据同样优先于粗格近�
 
 候选生成固定为：
 
-1. 查询相对当前精确位姿在 `30.0 m` 动作包络内、同时 forward reachable 与 returnable 的状态；
+1. WHEELED/LEGGED 查询相对当前精确位姿在 `30.0 m` 动作包络内、同时 forward reachable 与
+   returnable 的状态；HOPPER 只查询当前状态的一条已认证出边所到达且可返回的直接后继，不能把
+   truth/observed 图中的多跳远端节点冒充为一个策略动作；
 2. 只保留可作为安全观测位姿的精确状态，并用其 `30 m/360°` footprint 查找未观测任务 ROI；
 3. 使用当前 `0.2 m` observed map 计算预计 mission/priority gain；
 4. 对正增益状态按空间分段、路径代价和稳定状态 ID 去重排序；
@@ -537,12 +539,13 @@ cache v5 保留主要 mask 数组形状，但增加原语状态图身份；旧 m
 5. Hopper 能通过认证单跳跨越地面不连通间隙，而正向或反向落区、`delta-v`、flight tube 任一失败
    都拒绝对应边；
 6. `30.0 m` 只限制运行时候选查询，真值图能通过多次合法宏动作到达更远状态；
-7. 新观测障碍与原语扫掠区域相交时只失效受影响边，并更新 forward/returnable 标签；
-8. 新增已观测安全证据能够加入原语边和新的可恢复状态；
-9. 同一输入重复计算的状态、边、reachable mask、诊断计数和哈希逐位一致；
-10. 数值失败、取消和资源耗尽不会被降级为普通不可达；
-11. global 起点 unknown、local 起点安全时只能通过已认证原语 portal 连接；
-12. portal 原语链不完整或 global 目标不可达时仍 fail closed。
+7. HOPPER 真值多跳图可以覆盖远端落点，但运行时候选只包含当前状态的一跳直接后继；
+8. 新观测障碍与原语扫掠区域相交时只失效受影响边，并更新 forward/returnable 标签；
+9. 新增已观测安全证据能够加入原语边和新的可恢复状态；
+10. 同一输入重复计算的状态、边、reachable mask、诊断计数和哈希逐位一致；
+11. 数值失败、取消和资源耗尽不会被降级为普通不可达；
+12. global 起点 unknown、local 起点安全时只能通过已认证原语 portal 连接；
+13. portal 原语链不完整或 global 目标不可达时仍 fail closed。
 
 ### 9.2 Python 单元与集成测试
 
