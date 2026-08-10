@@ -55,12 +55,14 @@ from .budget import (
 from .checkpoint import (
     FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
     OBSERVATION_CONTRACT_VERSION,
+    PolicyWarmStartEvidence,
     RunIdentity,
     TrainingCheckpointV6,
     build_training_checkpoint,
     config_sha256,
     load_checkpoint,
     load_checkpoint_for_resume,
+    load_policy_warm_start,
     migrate_checkpoint_source_commit,
     restore_training_state,
     save_checkpoint_atomic,
@@ -845,6 +847,27 @@ def _freeze_formal_environment_manifest(
     _write_manifest_payload(path, payload)
 
 
+def _freeze_policy_warm_start_manifest(
+    path: Path,
+    *,
+    evidence: PolicyWarmStartEvidence,
+) -> None:
+    """Bind a policy-only parent to an otherwise fresh step-0 run."""
+    if not isinstance(evidence, PolicyWarmStartEvidence):
+        raise ArtifactRootError("policy warm-start evidence is invalid")
+    payload = _read_run_manifest(path)
+    if payload.get("global_step") != 0 or "training_metrics" in payload:
+        raise ArtifactRootError(
+            "policy warm-start requires a fresh step-zero run manifest"
+        )
+    frozen = evidence.to_manifest_dict()
+    existing = payload.get("policy_warm_start")
+    if existing is not None and existing != frozen:
+        raise ArtifactRootError("policy warm-start identity cannot drift")
+    payload["policy_warm_start"] = frozen
+    _write_manifest_payload(path, payload)
+
+
 def _freeze_task4_manifest(
     path: Path,
     *,
@@ -1192,6 +1215,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--config", required=True)
     train.add_argument("--artifact-root", required=True)
     train.add_argument("--sensor-performance-report")
+    train.add_argument("--warm-start-checkpoint")
 
     resume = subparsers.add_parser("resume")
     resume.add_argument("--artifact-root", required=True)
@@ -1346,6 +1370,11 @@ def main(argv: list[str] | None = None) -> int:
             repository_root=repository_root,
             max_updates=None,
             interrupt_first_update=False,
+            warm_start_checkpoint_path=(
+                Path(arguments.warm_start_checkpoint)
+                if arguments.warm_start_checkpoint is not None
+                else None
+            ),
             capability_bundle=capability_bundle,
             formal_environment_factory=formal_assembly.factory,
             formal_observation_template=formal_assembly.observation_template,
@@ -2459,6 +2488,7 @@ def _run_curriculum_training(
     max_updates: int | None,
     interrupt_first_update: bool,
     restore_checkpoint,
+    warm_start_checkpoint_path: Path | None = None,
     capability_bundle: FrozenCapabilityBundle | None = None,
     formal_environment_factory: FrozenCapabilityEnvironmentFactory | None = None,
     formal_observation_template: PolicyBatch | None = None,
@@ -2467,6 +2497,8 @@ def _run_curriculum_training(
     ) = None,
 ) -> _RunEvidence:
     """Run one smoke override or advance across four active-GPU phases."""
+    if restore_checkpoint is not None and warm_start_checkpoint_path is not None:
+        raise PreflightError("resume and policy warm-start are mutually exclusive")
     if calibrated.config.run_kind == "formal":
         _validate_formal_bundle_identity(capability_bundle, calibrated.run_identity)
         if not isinstance(
@@ -2491,6 +2523,7 @@ def _run_curriculum_training(
         rollout_factory = proxy_environment_factory
     schedule = CurriculumSchedule()
     checkpoint = restore_checkpoint
+    pending_warm_start = warm_start_checkpoint_path
     global_step = initial_global_step
     while True:
         phase = schedule.phase_for(
@@ -2541,7 +2574,20 @@ def _run_curriculum_training(
             rollout_observation_template=formal_observation_template,
             rollout_reward_fn=compute_transition_reward,
             run_identity=calibrated.run_identity,
+            warm_start_checkpoint_path=(
+                pending_warm_start
+                if checkpoint is None and global_step == 0
+                else None
+            ),
+            warm_start_seed=(
+                calibrated.formal_seed
+                if pending_warm_start is not None
+                and checkpoint is None
+                and global_step == 0
+                else None
+            ),
         )
+        pending_warm_start = None
         if (
             max_updates is not None
             or calibrated.budget.exhausted
@@ -2594,6 +2640,7 @@ def _start_training_run(
     repository_root: Path,
     max_updates: int | None,
     interrupt_first_update: bool,
+    warm_start_checkpoint_path: Path | None = None,
     capability_bundle: FrozenCapabilityBundle | None = None,
     formal_environment_factory: FrozenCapabilityEnvironmentFactory | None = None,
     formal_observation_template: PolicyBatch | None = None,
@@ -2609,6 +2656,8 @@ def _start_training_run(
         if capability_bundle is None:
             raise PreflightError("formal capability bundle is required")
     else:
+        if warm_start_checkpoint_path is not None:
+            raise PreflightError("policy warm-start is formal-only")
         if capability_bundle is not None or formal_evaluation_batches is not None:
             raise PreflightError("development-smoke rejects formal capability bundle")
         if type(max_updates) is not int or not 1 <= max_updates <= 2:
@@ -2635,6 +2684,22 @@ def _start_training_run(
         raise ArtifactRootError("train config differs from calibrated run")
     if config.run_kind == "formal":
         _validate_formal_bundle_identity(capability_bundle, calibrated.run_identity)
+    if warm_start_checkpoint_path is not None:
+        manifest = _read_run_manifest(root / "run-manifest.json")
+        checkpoint_root = root / "checkpoints"
+        metrics_path = root / "metrics" / "train.jsonl"
+        if (
+            manifest.get("global_step") != 0
+            or "training_metrics" in manifest
+            or metrics_path.exists()
+            or (
+                checkpoint_root.exists()
+                and any(checkpoint_root.iterdir())
+            )
+        ):
+            raise PreflightError(
+                "policy warm-start requires an unstarted step-zero run"
+            )
     source_commit = _source_commit(repository_root)
     _seed_everything(calibrated.formal_seed)
 
@@ -2667,6 +2732,7 @@ def _start_training_run(
         max_updates=max_updates,
         interrupt_first_update=interrupt_first_update,
         restore_checkpoint=None,
+        warm_start_checkpoint_path=warm_start_checkpoint_path,
         capability_bundle=capability_bundle,
         formal_environment_factory=formal_environment_factory,
         formal_observation_template=formal_observation_template,
@@ -2845,6 +2911,8 @@ def _run_updates(
     rollout_observation_template: PolicyBatch | None = None,
     rollout_reward_fn: Callable[[PlannerTransition], float] | None = None,
     run_identity: RunIdentity,
+    warm_start_checkpoint_path: Path | None = None,
+    warm_start_seed: int | None = None,
 ) -> _RunEvidence:
     if type(max_updates) is not int or max_updates <= 0:
         raise ValueError("max updates must be a positive integer")
@@ -2852,6 +2920,17 @@ def _run_updates(
         run_identity.run_kind != config.run_kind
     ):
         raise PreflightError("training run identity differs from configuration")
+    if restore_checkpoint is not None and warm_start_checkpoint_path is not None:
+        raise PreflightError("resume and policy warm-start are mutually exclusive")
+    if warm_start_checkpoint_path is not None:
+        if config.run_kind != "formal":
+            raise PreflightError("policy warm-start is formal-only")
+        if initial_global_step != 0:
+            raise PreflightError("policy warm-start requires global step zero")
+        if type(warm_start_seed) is not int or warm_start_seed < 0:
+            raise PreflightError("policy warm-start seed is invalid")
+    elif warm_start_seed is not None:
+        raise PreflightError("policy warm-start seed has no parent checkpoint")
     if config.run_kind == "formal":
         if not isinstance(
             rollout_environment_factory, FrozenCapabilityEnvironmentFactory
@@ -2876,6 +2955,15 @@ def _run_updates(
     _validated_cuda_device()
     reward_fn = rollout_reward_fn or compute_transition_reward
     policy = CrossAttentionPolicy()
+    warm_start_evidence = (
+        load_policy_warm_start(
+            warm_start_checkpoint_path,
+            policy,
+            value_head_seed=warm_start_seed,
+        )
+        if warm_start_checkpoint_path is not None
+        else None
+    )
     trainer = ResumablePPOTrainer(
         policy,
         reward_fn=reward_fn,
@@ -2885,6 +2973,11 @@ def _run_updates(
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         trainer.optimizer, lr_lambda=lambda step: 1.0
     )
+    if warm_start_evidence is not None:
+        _freeze_policy_warm_start_manifest(
+            artifact_root / "run-manifest.json",
+            evidence=warm_start_evidence,
+        )
     stop_flag = SignalStopFlag()
     sent_interrupt = False
     rollout_policy_version = initial_global_step

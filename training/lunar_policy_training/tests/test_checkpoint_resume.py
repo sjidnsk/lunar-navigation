@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import pathlib
 import random
 import json
@@ -21,18 +23,25 @@ from lunar_policy_training.cli import SignalStopFlag, TrainingBoundaryLoop  # no
 from lunar_policy_training.checkpoint import (  # noqa: E402
     CHECKPOINT_SCHEMA_VERSION,
     OBSERVATION_CONTRACT_VERSION,
+    POLICY_WARM_START_PREFIXES,
+    PolicyWarmStartEvidence,
     RunIdentity,
     build_training_checkpoint,
     config_sha256,
     load_checkpoint,
     load_checkpoint_for_resume,
+    load_policy_warm_start,
     migrate_checkpoint_source_commit,
     restore_training_state,
     save_checkpoint_atomic,
     _body_from_checkpoint,
 )
+from lunar_policy_training.policy.cross_attention import (  # noqa: E402
+    CrossAttentionPolicy,
+)
 from lunar_policy_training.ppo.checkpoint import (  # noqa: E402
     CheckpointError,
+    _capture_rng_state,
     _semantic_sha256,
 )
 from lunar_policy_training.training_semantics import (  # noqa: E402
@@ -175,6 +184,7 @@ def _formal_worker_state(index: int) -> dict[str, object]:
         "scene_seed": f"{index + 101:064x}",
         "start_seed": f"{index + 201:064x}",
         "episode_seed": f"{index + 301:064x}",
+        "coverability_mask_sha256": f"{index + 801:064x}",
         "start_cell": [64, 96],
         "current_pose": pose,
         "legged_body_z_m": 7.0,
@@ -197,11 +207,187 @@ def _formal_worker_state(index: int) -> dict[str, object]:
     }
 
 
+def _policy_parent_checkpoint(
+    path: pathlib.Path,
+    *,
+    run_kind: str = "formal",
+) -> tuple[object, dict[str, torch.Tensor]]:
+    torch.manual_seed(91)
+    model = CrossAttentionPolicy()
+    with torch.no_grad():
+        for name, value in model.state_dict().items():
+            value.fill_(
+                7.0
+                if name.startswith("value_mlp.")
+                else (sum(name.encode("utf-8")) % 31 + 1) / 100.0
+            )
+    parent_state = {
+        name: value.detach().clone() for name, value in model.state_dict().items()
+    }
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda=lambda _step: 1.0
+    )
+    checkpoint = build_training_checkpoint(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        global_step=906,
+        curriculum_phase="joint",
+        normalization={"reward_mean": 3.0, "reward_var": 4.0},
+        frozen_config={"total_gpu_budget_seconds": 86400},
+        run_identity=_identity(run_kind=run_kind),
+        source_commit="a0cc8dfd9210e1badcbe883e6178b1b27888bd93",
+        consumed_gpu_seconds=7200.0,
+        budget_extension_blocks=0,
+        total_gpu_budget_seconds=86400,
+        worker_allocation={"WHEELED": 8, "LEGGED": 8, "HOPPER": 8},
+        micro_batch_size=4,
+        latest_checkpoint_gpu_seconds=7200.0,
+        candidate_checkpoint_gpu_seconds=7200.0,
+        environment_state=(
+            {
+                "schema_version": "lunar-formal-environment-state/v3",
+                "scenario_schedule_id": "cache-sha/train/v3",
+                "worker_episode_states": [
+                    _formal_worker_state(index) for index in range(24)
+                ],
+            }
+            if run_kind == "formal"
+            else None
+        ),
+    )
+    save_checkpoint_atomic(path, checkpoint)
+    return checkpoint, parent_state
+
+
+def test_policy_warm_start_transfers_only_approved_weights(
+    tmp_path: pathlib.Path,
+) -> None:
+    parent_path = tmp_path / "parent.pt"
+    parent, parent_state = _policy_parent_checkpoint(parent_path)
+    torch.manual_seed(1234)
+    target = CrossAttentionPolicy()
+    optimizer = torch.optim.AdamW(target.parameters(), lr=9.0e-4)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda=lambda _step: 1.0
+    )
+    optimizer_before = copy.deepcopy(optimizer.state_dict())
+    scheduler_before = copy.deepcopy(scheduler.state_dict())
+    rng_before = _semantic_sha256(_capture_rng_state())
+
+    evidence = load_policy_warm_start(parent_path, target, value_head_seed=4080)
+
+    target_state = target.state_dict()
+    assert isinstance(evidence, PolicyWarmStartEvidence)
+    assert evidence.parent_checkpoint_sha256 == hashlib.sha256(
+        parent_path.read_bytes()
+    ).hexdigest()
+    assert evidence.parent_payload_sha256 == parent.payload_sha256
+    assert evidence.parent_global_step == 906
+    assert evidence.loaded_prefixes == POLICY_WARM_START_PREFIXES
+    assert evidence.value_head_seed == 4080
+    assert all(
+        torch.equal(target_state[name], parent_state[name])
+        for name in target_state
+        if not name.startswith("value_mlp.")
+    )
+    assert all(
+        not torch.equal(target_state[name], parent_state[name])
+        for name in target_state
+        if name.startswith("value_mlp.")
+    )
+    assert optimizer.state_dict() == optimizer_before
+    assert scheduler.state_dict() == scheduler_before
+    assert _semantic_sha256(_capture_rng_state()) == rng_before
+
+    repeated = CrossAttentionPolicy()
+    repeated_evidence = load_policy_warm_start(
+        parent_path, repeated, value_head_seed=4080
+    )
+    assert (
+        repeated_evidence.value_head_reinitialization_sha256
+        == evidence.value_head_reinitialization_sha256
+    )
+    assert all(
+        torch.equal(repeated.state_dict()[name], target_state[name])
+        for name in target_state
+        if name.startswith("value_mlp.")
+    )
+
+
+def test_policy_warm_start_keeps_obsolete_episode_state_inert(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "old-environment-parent.pt"
+    _policy_parent_checkpoint(path)
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    environment = payload["body"]["environment_state"]
+    environment["schema_version"] = "lunar-formal-environment-state/v2"
+    for worker in environment["worker_episode_states"]:
+        worker.pop("coverability_mask_sha256")
+    payload["body"]["run_identity"]["training_semantics_sha256"] = "8" * 64
+    payload["body_sha256"] = _semantic_sha256(payload["body"])
+    torch.save(payload, path)
+
+    evidence = load_policy_warm_start(
+        path, CrossAttentionPolicy(), value_head_seed=4080
+    )
+
+    assert evidence.parent_global_step == 906
+    with pytest.raises(CheckpointError, match="environment state schema"):
+        load_checkpoint(path)
+
+
+@pytest.mark.parametrize("corruption", ("missing", "unexpected", "shape", "dtype"))
+def test_policy_warm_start_rejects_architecture_drift_without_mutating_target(
+    tmp_path: pathlib.Path,
+    corruption: str,
+) -> None:
+    path = tmp_path / f"parent-{corruption}.pt"
+    _policy_parent_checkpoint(path)
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    state = payload["body"]["model_state"]
+    first_name = next(iter(state))
+    if corruption == "missing":
+        state.pop(first_name)
+    elif corruption == "unexpected":
+        state["unexpected.weight"] = torch.zeros(1)
+    elif corruption == "shape":
+        state[first_name] = state[first_name].reshape(-1)[:1]
+    else:
+        state[first_name] = state[first_name].to(torch.float64)
+    payload["body_sha256"] = _semantic_sha256(payload["body"])
+    torch.save(payload, path)
+    target = CrossAttentionPolicy()
+    before = {
+        name: value.detach().clone() for name, value in target.state_dict().items()
+    }
+
+    with pytest.raises(CheckpointError, match="warm-start"):
+        load_policy_warm_start(path, target, value_head_seed=4080)
+
+    assert all(
+        torch.equal(target.state_dict()[name], value)
+        for name, value in before.items()
+    )
+
+
+def test_policy_warm_start_rejects_nonformal_parent(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "development-parent.pt"
+    _policy_parent_checkpoint(path, run_kind="development-smoke")
+
+    with pytest.raises(CheckpointError, match="formal"):
+        load_policy_warm_start(path, CrossAttentionPolicy(), value_head_seed=4080)
+
+
 def test_formal_checkpoint_roundtrips_exact_active_worker_states(
     tmp_path: pathlib.Path,
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v2",
+        "schema_version": "lunar-formal-environment-state/v3",
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)
@@ -232,7 +418,7 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v2",
+        "schema_version": "lunar-formal-environment-state/v3",
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)

@@ -32,6 +32,7 @@ from lunar_policy_training.cli import (  # noqa: E402
     _formal_run_identity,
     _freeze_task4_manifest,
     _freeze_formal_environment_manifest,
+    _freeze_policy_warm_start_manifest,
     _load_calibrated_run_state,
     _latest_candidate_checkpoint,
     _run_curriculum_training,
@@ -57,7 +58,7 @@ from lunar_policy_training.config import (
     resolve_training_config,
     with_rollout_horizon,
 )
-from lunar_policy_training.checkpoint import RunIdentity
+from lunar_policy_training.checkpoint import PolicyWarmStartEvidence, RunIdentity
 from lunar_policy_training.curriculum import CurriculumSchedule
 from lunar_policy_training.polar_data.formal_cache import FormalCacheIdentity
 from lunar_policy_training.evaluation.release_gate import (
@@ -160,6 +161,8 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
             "training/configs/rtx4080_super_smoke.yaml",
             "--artifact-root",
             "/tmp/lunar-task3",
+            "--warm-start-checkpoint",
+            "/tmp/parent-policy.pt",
         ]
     )
     resume = parser.parse_args(
@@ -215,6 +218,7 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
     assert calibrate.sensor_performance_report == "/tmp/sensor-performance.json"
     assert train.command == "train"
     assert train.sensor_performance_report is None
+    assert train.warm_start_checkpoint == "/tmp/parent-policy.pt"
     assert resume.command == "resume"
     assert resume.sensor_performance_report is None
     assert evaluate.command == "evaluate"
@@ -702,6 +706,88 @@ def test_development_smoke_is_proxy_only_and_bounded_to_two_updates(
 
     assert touched == []
     assert not artifact_root.exists()
+
+
+def test_development_smoke_rejects_policy_warm_start_before_artifact_access(
+    tmp_path: pathlib.Path,
+) -> None:
+    artifact_root = tmp_path / "smoke-warm-start"
+
+    with pytest.raises(PreflightError, match="formal-only"):
+        cli_module._start_training_run(
+            config_path=(
+                REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
+            ),
+            artifact_root=artifact_root,
+            repository_root=REPOSITORY_ROOT,
+            max_updates=1,
+            interrupt_first_update=False,
+            warm_start_checkpoint_path=tmp_path / "parent.pt",
+        )
+
+    assert not artifact_root.exists()
+
+
+def test_policy_warm_start_manifest_is_exact_immutable_step_zero_evidence(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "run-manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "lunar-training-run/v1",
+                "global_step": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    evidence = PolicyWarmStartEvidence(
+        parent_checkpoint_sha256="1" * 64,
+        parent_payload_sha256="2" * 64,
+        parent_global_step=906,
+        loaded_prefixes=("global_encoder", "frontier_logit_head"),
+        value_head_reinitialization_sha256="3" * 64,
+        value_head_seed=4080,
+    )
+
+    _freeze_policy_warm_start_manifest(path, evidence=evidence)
+    _freeze_policy_warm_start_manifest(path, evidence=evidence)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["global_step"] == 0
+    assert payload["policy_warm_start"] == {
+        "schema_version": "lunar-policy-warm-start/v1",
+        "mode": "policy-only",
+        "warm_start_parent_checkpoint_sha256": "1" * 64,
+        "warm_start_parent_payload_sha256": "2" * 64,
+        "warm_start_parent_global_step": 906,
+        "loaded_parameter_prefixes": [
+            "global_encoder",
+            "frontier_logit_head",
+        ],
+        "value_head_reinitialized": True,
+        "value_head_reinitialization_sha256": "3" * 64,
+        "value_head_seed": 4080,
+        "fresh_training_state": {
+            "global_step": 0,
+            "optimizer": True,
+            "scheduler": True,
+            "normalization": True,
+            "rng": True,
+            "worker_episode_state": True,
+            "metrics_journal": True,
+        },
+    }
+    changed = PolicyWarmStartEvidence(
+        parent_checkpoint_sha256="4" * 64,
+        parent_payload_sha256="2" * 64,
+        parent_global_step=906,
+        loaded_prefixes=evidence.loaded_prefixes,
+        value_head_reinitialization_sha256="3" * 64,
+        value_head_seed=4080,
+    )
+    with pytest.raises(ArtifactRootError, match="cannot drift"):
+        _freeze_policy_warm_start_manifest(path, evidence=changed)
 
 
 def _perfect_development_report() -> EvaluationReport:

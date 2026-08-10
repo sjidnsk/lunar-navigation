@@ -10,9 +10,16 @@ import pytest
 import torch
 
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(PACKAGE_ROOT))
+sys.path.insert(0, str(REPOSITORY_ROOT / "model_contract"))
 
 import lunar_policy_training.ppo.checkpoint as checkpoint_module  # noqa: E402
+from lunar_policy_training.checkpoint import load_policy_warm_start  # noqa: E402
+from lunar_policy_training.policy.cross_attention import (  # noqa: E402
+    CrossAttentionPolicy,
+)
 from lunar_policy_training.ppo.checkpoint import (  # noqa: E402
     OBSERVATION_CONTRACT_VERSION,
     CheckpointError,
@@ -25,6 +32,26 @@ from lunar_policy_training.ppo.checkpoint import (  # noqa: E402
 class UnsafeCheckpointValue:
     def __init__(self) -> None:
         self.value = "must not be constructed by the restricted loader"
+
+
+def test_policy_warm_start_uses_restricted_checkpoint_loader(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "unsafe-policy-parent.pt"
+    torch.save(
+        {
+            "body": UnsafeCheckpointValue(),
+            "body_sha256": "0" * 64,
+        },
+        path,
+    )
+
+    with pytest.raises(CheckpointError, match="restricted loader"):
+        load_policy_warm_start(
+            path,
+            CrossAttentionPolicy(),
+            value_head_seed=4080,
+        )
 
 
 def _trained_components() -> tuple[torch.nn.Linear, torch.optim.Adam]:

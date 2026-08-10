@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
@@ -42,6 +43,21 @@ _LEGACY_V3_SCHEMA_VERSION = "lunar-ppo-checkpoint/v3"
 _LEGACY_V2_SCHEMA_VERSION = "lunar-ppo-checkpoint/v2"
 _LEGACY_OBSERVATION_CONTRACT_VERSION = "ObservationContractV1"
 _LEGACY_V2_OBSERVATION_CONTRACT_VERSION = ObservationContractV2.version
+POLICY_WARM_START_PREFIXES = (
+    "global_encoder",
+    "local_encoder",
+    "pose_encoder",
+    "platform_encoder",
+    "frontier_encoder",
+    "frontier_position_encoder",
+    "cross_attention_blocks",
+    "action_output_mlp",
+    "frontier_logit_head",
+    "theta_sin_head",
+    "theta_cos_head",
+    "theta_kappa_head",
+)
+_POLICY_WARM_START_EXCLUDED_PREFIX = "value_mlp"
 _RUN_IDENTITY_FIELDS = (
     "run_kind",
     "data_sha256",
@@ -106,6 +122,66 @@ class RunIdentity:
     @classmethod
     def from_mapping(cls, value: object) -> "RunIdentity":
         return _run_identity_from_mapping(value)
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyWarmStartEvidence:
+    """Auditable evidence for a policy-only import into a fresh run."""
+
+    parent_checkpoint_sha256: str
+    parent_payload_sha256: str
+    parent_global_step: int
+    loaded_prefixes: tuple[str, ...]
+    value_head_reinitialization_sha256: str
+    value_head_seed: int
+
+    def __post_init__(self) -> None:
+        if not _is_sha256(self.parent_checkpoint_sha256) or not _is_sha256(
+            self.parent_payload_sha256
+        ):
+            raise CheckpointError("policy warm-start parent digest is invalid")
+        if type(self.parent_global_step) is not int or self.parent_global_step < 0:
+            raise CheckpointError("policy warm-start parent step is invalid")
+        if (
+            not isinstance(self.loaded_prefixes, tuple)
+            or not self.loaded_prefixes
+            or len(set(self.loaded_prefixes)) != len(self.loaded_prefixes)
+            or any(
+                not isinstance(prefix, str) or not prefix
+                for prefix in self.loaded_prefixes
+            )
+        ):
+            raise CheckpointError("policy warm-start prefix evidence is invalid")
+        if not _is_sha256(self.value_head_reinitialization_sha256):
+            raise CheckpointError("policy warm-start value-head digest is invalid")
+        if type(self.value_head_seed) is not int or self.value_head_seed < 0:
+            raise CheckpointError("policy warm-start value-head seed is invalid")
+
+    def to_manifest_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": "lunar-policy-warm-start/v1",
+            "mode": "policy-only",
+            "warm_start_parent_checkpoint_sha256": (
+                self.parent_checkpoint_sha256
+            ),
+            "warm_start_parent_payload_sha256": self.parent_payload_sha256,
+            "warm_start_parent_global_step": self.parent_global_step,
+            "loaded_parameter_prefixes": list(self.loaded_prefixes),
+            "value_head_reinitialized": True,
+            "value_head_reinitialization_sha256": (
+                self.value_head_reinitialization_sha256
+            ),
+            "value_head_seed": self.value_head_seed,
+            "fresh_training_state": {
+                "global_step": 0,
+                "optimizer": True,
+                "scheduler": True,
+                "normalization": True,
+                "rng": True,
+                "worker_episode_state": True,
+                "metrics_journal": True,
+            },
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,6 +516,186 @@ def load_checkpoint(
     if schema == _LEGACY_V5_SCHEMA_VERSION:
         return _checkpoint_v5_from_body(body, payload_sha256)
     return _checkpoint_from_body(body, payload_sha256)
+
+
+def load_policy_warm_start(
+    path: str | Path,
+    model: nn.Module,
+    *,
+    value_head_seed: int,
+) -> PolicyWarmStartEvidence:
+    """Import only the approved policy tensors from an inert formal parent."""
+    if not isinstance(model, nn.Module):
+        raise CheckpointError("policy warm-start target must be a Torch module")
+    if type(value_head_seed) is not int or value_head_seed < 0:
+        raise CheckpointError("policy warm-start value-head seed is invalid")
+    target_state = model.state_dict()
+    if not target_state or any(
+        not isinstance(name, str) or not isinstance(value, torch.Tensor)
+        for name, value in target_state.items()
+    ):
+        raise CheckpointError("policy warm-start target state is invalid")
+    if any(value.device.type != "cpu" for value in target_state.values()):
+        raise CheckpointError("policy warm-start target must remain on CPU")
+
+    allowed_names = {
+        name
+        for name in target_state
+        if any(
+            name.startswith(f"{prefix}.")
+            for prefix in POLICY_WARM_START_PREFIXES
+        )
+    }
+    value_names = {
+        name
+        for name in target_state
+        if name.startswith(f"{_POLICY_WARM_START_EXCLUDED_PREFIX}.")
+    }
+    if (
+        allowed_names | value_names != set(target_state)
+        or allowed_names & value_names
+        or not value_names
+        or any(
+            not any(name.startswith(f"{prefix}.") for name in allowed_names)
+            for prefix in POLICY_WARM_START_PREFIXES
+        )
+    ):
+        raise CheckpointError(
+            "policy warm-start target architecture is outside the allow-list"
+        )
+
+    body, parent_file_sha256, parent_payload_sha256 = (
+        _load_policy_warm_start_parent(path)
+    )
+    parent_state = body["model_state"]
+    if set(parent_state) != set(target_state) or any(
+        not isinstance(name, str) for name in parent_state
+    ):
+        raise CheckpointError("policy warm-start model keys differ")
+    for name, target_value in target_state.items():
+        parent_value = parent_state[name]
+        if not isinstance(parent_value, torch.Tensor):
+            raise CheckpointError("policy warm-start model tensor is invalid")
+        if parent_value.layout != target_value.layout:
+            raise CheckpointError("policy warm-start tensor layout differs")
+        if parent_value.shape != target_value.shape:
+            raise CheckpointError("policy warm-start tensor shape differs")
+        if parent_value.dtype != target_value.dtype:
+            raise CheckpointError("policy warm-start tensor dtype differs")
+
+    live_state = _cpu_copy(target_state)
+    try:
+        with torch.no_grad(), torch.random.fork_rng(devices=[]):
+            for name in sorted(allowed_names):
+                target_state[name].copy_(parent_state[name])
+            torch.random.default_generator.manual_seed(value_head_seed)
+            value_module = getattr(
+                model, _POLICY_WARM_START_EXCLUDED_PREFIX, None
+            )
+            if not isinstance(value_module, nn.Module):
+                raise CheckpointError(
+                    "policy warm-start value head is unavailable"
+                )
+            for module in value_module.modules():
+                reset_parameters = getattr(module, "reset_parameters", None)
+                if callable(reset_parameters):
+                    reset_parameters()
+        loaded_state = model.state_dict()
+        _validate_finite_tensors(
+            loaded_state, state_name="policy warm-start model"
+        )
+        value_digest = _semantic_sha256(
+            {
+                name: loaded_state[name].detach().cpu().clone()
+                for name in sorted(value_names)
+            }
+        )
+    except Exception as error:
+        try:
+            model.load_state_dict(dict(live_state), strict=True)
+        except Exception as rollback_error:
+            raise CheckpointError(
+                "policy warm-start rollback failed"
+            ) from rollback_error
+        if isinstance(error, CheckpointError):
+            raise
+        raise CheckpointError("policy warm-start could not be applied") from error
+
+    return PolicyWarmStartEvidence(
+        parent_checkpoint_sha256=parent_file_sha256,
+        parent_payload_sha256=parent_payload_sha256,
+        parent_global_step=body["global_step"],
+        loaded_prefixes=POLICY_WARM_START_PREFIXES,
+        value_head_reinitialization_sha256=value_digest,
+        value_head_seed=value_head_seed,
+    )
+
+
+def _load_policy_warm_start_parent(
+    path: str | Path,
+) -> tuple[Mapping[object, object], str, str]:
+    """Read old formal state without admitting its episode state to resume."""
+    target = Path(path)
+    if target.is_symlink() or not target.is_file():
+        raise CheckpointError(
+            "policy warm-start checkpoint must be an existing regular file"
+        )
+    try:
+        checkpoint_bytes = target.read_bytes()
+        payload = torch.load(
+            io.BytesIO(checkpoint_bytes),
+            map_location="cpu",
+            weights_only=True,
+        )
+    except Exception as error:
+        raise CheckpointError(
+            "policy warm-start restricted loader rejected payload"
+        ) from error
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "body",
+        "body_sha256",
+    }:
+        raise CheckpointError("policy warm-start payload structure is invalid")
+    body = payload["body"]
+    payload_sha256 = payload["body_sha256"]
+    if not isinstance(body, Mapping) or set(body) != _BODY_FIELDS:
+        raise CheckpointError("policy warm-start body structure is invalid")
+    schema = body.get("schema_version")
+    contract = body.get("contract_version")
+    if schema not in (CHECKPOINT_SCHEMA_VERSION, _LEGACY_V5_SCHEMA_VERSION):
+        raise CheckpointError("policy warm-start checkpoint schema is unsupported")
+    if (
+        schema == CHECKPOINT_SCHEMA_VERSION
+        and contract != OBSERVATION_CONTRACT_VERSION
+    ) or (
+        schema == _LEGACY_V5_SCHEMA_VERSION
+        and contract != _LEGACY_V2_OBSERVATION_CONTRACT_VERSION
+    ):
+        raise CheckpointError("policy warm-start observation contract differs")
+    if not _is_sha256(payload_sha256):
+        raise CheckpointError("policy warm-start payload hash is invalid")
+    try:
+        computed_payload_sha256 = _semantic_sha256(body)
+    except CheckpointError as error:
+        raise CheckpointError("policy warm-start payload cannot be hashed") from error
+    if computed_payload_sha256 != payload_sha256:
+        raise CheckpointError("policy warm-start payload hash mismatch")
+    identity = _run_identity_from_mapping(body.get("run_identity"))
+    if identity.run_kind != "formal":
+        raise CheckpointError("policy warm-start parent must be formal")
+    if type(body.get("global_step")) is not int or body["global_step"] < 0:
+        raise CheckpointError("policy warm-start parent step is invalid")
+    model_state = body.get("model_state")
+    if not isinstance(model_state, Mapping):
+        raise CheckpointError("policy warm-start model state is invalid")
+    _validate_finite_tensors(
+        model_state, state_name="policy warm-start model"
+    )
+    return (
+        body,
+        hashlib.sha256(checkpoint_bytes).hexdigest(),
+        payload_sha256,
+    )
 
 
 def _require_explicit_legacy_development_reader(
@@ -1019,7 +1275,9 @@ __all__ = [
     "CHECKPOINT_SCHEMA_VERSION",
     "OBSERVATION_CONTRACT_VERSION",
     "FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION",
+    "POLICY_WARM_START_PREFIXES",
     "LegacyRunIdentityV3",
+    "PolicyWarmStartEvidence",
     "RunIdentity",
     "TrainingCheckpointV2",
     "TrainingCheckpointV3",
@@ -1030,6 +1288,7 @@ __all__ = [
     "config_sha256",
     "load_checkpoint",
     "load_checkpoint_for_resume",
+    "load_policy_warm_start",
     "restore_training_state",
     "save_checkpoint_atomic",
 ]
