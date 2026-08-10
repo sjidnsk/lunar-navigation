@@ -1,6 +1,7 @@
 #include "legged/legged_lattice.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -635,6 +636,280 @@ LeggedLatticeBuildResult BuildLeggedLattice(
       .status = LeggedLatticeStatus::kReady,
       .graph = std::move(graph),
       .reason_code = {},
+  };
+}
+
+shared::PrimitiveGraphBuildResult BuildLeggedPrimitiveGraph(
+    const LeggedState& current_state,
+    const shared::SafeProjection& projection,
+    const LeggedCapability& capability,
+    const PlannerConfig& config,
+    const std::stop_token stop_token) try {
+  const auto fail = [](std::string reason_code) {
+    return shared::PrimitiveGraphBuildResult{
+        .reason_code = std::move(reason_code),
+    };
+  };
+  if (stop_token.stop_requested()) {
+    return fail("REQUEST_CANCELED");
+  }
+  if (projection.source_map() == nullptr ||
+      !ValidCapability(capability, config) ||
+      !IsFinite(current_state.body_pose)) {
+    return fail("LEGGED_PRIMITIVE_GRAPH_REQUEST_INVALID");
+  }
+  const auto current_yaw =
+      YawFromQuaternion(current_state.body_pose.orientation);
+  const auto start_cell = projection.source_map()->PositionToCell(Vec2{
+      .x = current_state.body_pose.position_m.x,
+      .y = current_state.body_pose.position_m.y,
+  });
+  if (!current_yaw.has_value() || !start_cell.has_value()) {
+    return fail("LEGGED_START_NOT_SAFE");
+  }
+  const LeggedTerrainEvaluation start_terrain = EvaluateLeggedTerrainCell(
+      projection, capability, *start_cell, stop_token);
+  if (start_terrain.canceled) {
+    return fail("REQUEST_CANCELED");
+  }
+  if (!start_terrain.hard_feasible ||
+      current_state.body_pose.position_m.z <
+          start_terrain.body_height_m.lower - kComparisonTolerance ||
+      current_state.body_pose.position_m.z >
+          start_terrain.body_height_m.upper + kComparisonTolerance) {
+    return fail("LEGGED_START_NOT_SAFE");
+  }
+
+  std::vector<OrderedPrimitive> ordered_primitives;
+  ordered_primitives.reserve(capability.motion_primitives.size());
+  for (std::size_t index = 0U;
+       index < capability.motion_primitives.size(); ++index) {
+    if (index > std::numeric_limits<std::uint32_t>::max()) {
+      return fail("LEGGED_PRIMITIVE_INDEX_OVERFLOW");
+    }
+    ordered_primitives.push_back(OrderedPrimitive{
+        .original_index = index,
+        .primitive = &capability.motion_primitives[index],
+    });
+  }
+  std::stable_sort(
+      ordered_primitives.begin(), ordered_primitives.end(),
+      [](const OrderedPrimitive& lhs, const OrderedPrimitive& rhs) {
+        return std::tie(lhs.primitive->primitive_id, lhs.original_index) <
+            std::tie(rhs.primitive->primitive_id, rhs.original_index);
+      });
+
+  const auto normalized_bits = [](double value) {
+    if (value == 0.0) {
+      value = 0.0;
+    }
+    return std::bit_cast<std::uint64_t>(value);
+  };
+  using StateKey = std::tuple<
+      std::int32_t, std::int32_t, std::int32_t,
+      std::uint64_t, std::uint64_t>;
+  const auto state_key = [&](const LeggedLatticeState& state) {
+    return StateKey{
+        state.cell_x,
+        state.cell_y,
+        state.yaw_bin,
+        normalized_bits(state.reachable_body_z_m.lower),
+        normalized_bits(state.reachable_body_z_m.upper),
+    };
+  };
+  struct GraphNode final {
+    LeggedLatticeState state;
+    LeggedPose pose;
+    double path_cost{std::numeric_limits<double>::infinity()};
+    bool closed{};
+  };
+  struct PendingEdge final {
+    std::size_t source{};
+    std::size_t target{};
+    std::uint32_t primitive_index{};
+    std::string primitive_id;
+    double cost{};
+  };
+
+  const Interval start_interval = start_terrain.body_height_m;
+  LeggedPose start_pose{
+      .position_m = current_state.body_pose.position_m,
+      .yaw_rad = *current_yaw,
+  };
+  start_pose.position_m.z =
+      0.5 * (start_interval.lower + start_interval.upper);
+  const LeggedLatticeState start_state{
+      .cell_x = start_cell->x,
+      .cell_y = start_cell->y,
+      .yaw_bin = YawToBin(*current_yaw, config.legged.yaw_bin_count),
+      .reachable_body_z_m = start_interval,
+  };
+  std::vector<GraphNode> nodes{
+      GraphNode{
+          .state = start_state,
+          .pose = start_pose,
+          .path_cost = 0.0,
+      },
+  };
+  std::map<StateKey, std::size_t> state_indices;
+  state_indices.emplace(state_key(start_state), 0U);
+  using OpenEntry = std::pair<double, std::size_t>;
+  std::priority_queue<
+      OpenEntry, std::vector<OpenEntry>, std::greater<OpenEntry>> open;
+  open.emplace(0.0, 0U);
+  std::vector<PendingEdge> pending_edges;
+
+  while (!open.empty()) {
+    if (stop_token.stop_requested()) {
+      return fail("REQUEST_CANCELED");
+    }
+    const auto [queued_cost, source_index] = open.top();
+    open.pop();
+    GraphNode& source = nodes[source_index];
+    if (source.closed ||
+        std::abs(queued_cost - source.path_cost) > kComparisonTolerance) {
+      continue;
+    }
+    source.closed = true;
+    const LeggedPose source_pose = source.pose;
+    const Interval source_interval = source.state.reachable_body_z_m;
+    const double source_cost = source.path_cost;
+    for (const OrderedPrimitive& ordered : ordered_primitives) {
+      bool canceled = false;
+      auto transition = ApplyPrimitive(
+          source_pose, source_interval, *ordered.primitive,
+          ordered.original_index, projection, capability, config,
+          stop_token, canceled);
+      if (canceled) {
+        return fail("REQUEST_CANCELED");
+      }
+      if (!transition.has_value()) {
+        continue;
+      }
+      const auto target_cell = projection.source_map()->PositionToCell(Vec2{
+          .x = transition->target_pose.position_m.x,
+          .y = transition->target_pose.position_m.y,
+      });
+      if (!target_cell.has_value()) {
+        continue;
+      }
+      const LeggedLatticeState target_state{
+          .cell_x = target_cell->x,
+          .cell_y = target_cell->y,
+          .yaw_bin = YawToBin(
+              transition->target_pose.yaw_rad,
+              config.legged.yaw_bin_count),
+          .reachable_body_z_m = transition->target_body_z_m,
+      };
+      const StateKey key = state_key(target_state);
+      std::size_t target_index{};
+      const auto found = state_indices.find(key);
+      if (found == state_indices.end()) {
+        target_index = nodes.size();
+        nodes.push_back(GraphNode{
+            .state = target_state,
+            .pose = transition->target_pose,
+        });
+        state_indices.emplace(key, target_index);
+      } else {
+        target_index = found->second;
+      }
+      const double edge_cost =
+          TransitionDurationLowerBound(*transition, capability) +
+          0.5 * transition->path_length_m +
+          0.25 * std::abs(ShortestYawDelta(
+              transition->source_pose.yaw_rad,
+              transition->target_pose.yaw_rad));
+      if (!std::isfinite(edge_cost) || edge_cost <= 0.0) {
+        return fail("LEGGED_LATTICE_EDGE_COST_INVALID");
+      }
+      pending_edges.push_back(PendingEdge{
+          .source = source_index,
+          .target = target_index,
+          .primitive_index =
+              static_cast<std::uint32_t>(ordered.original_index),
+          .primitive_id = ordered.primitive->primitive_id,
+          .cost = edge_cost,
+      });
+      const double candidate_cost = source_cost + edge_cost;
+      GraphNode& target = nodes[target_index];
+      if (candidate_cost + kComparisonTolerance < target.path_cost) {
+        target.path_cost = candidate_cost;
+        target.closed = false;
+        open.emplace(candidate_cost, target_index);
+      }
+    }
+  }
+
+  std::vector<std::uint8_t> primitive_bytes;
+  const auto append_uint64 = [&](const std::uint64_t value) {
+    for (std::size_t index = 0U; index < 8U; ++index) {
+      primitive_bytes.push_back(
+          static_cast<std::uint8_t>(value >> (index * 8U)));
+    }
+  };
+  const auto append_double = [&](double value) {
+    if (value == 0.0) {
+      value = 0.0;
+    }
+    append_uint64(std::bit_cast<std::uint64_t>(value));
+  };
+  const auto append_string = [&](const std::string& value) {
+    append_uint64(static_cast<std::uint64_t>(value.size()));
+    primitive_bytes.insert(
+        primitive_bytes.end(), value.begin(), value.end());
+  };
+  append_string("legged-body-primitives/v1");
+  append_uint64(
+      static_cast<std::uint64_t>(capability.motion_primitives.size()));
+  for (const LeggedBodyPrimitive& primitive : capability.motion_primitives) {
+    append_string(primitive.primitive_id);
+    primitive_bytes.push_back(static_cast<std::uint8_t>(primitive.kind));
+    append_double(primitive.body_frame_displacement_m.x);
+    append_double(primitive.body_frame_displacement_m.y);
+    append_double(primitive.body_frame_displacement_m.z);
+    append_double(primitive.yaw_change_rad);
+  }
+
+  shared::PrimitiveGraphBuildResult graph{
+      .platform_type = PlatformType::kLegged,
+      .width = projection.source_map()->width(),
+      .height = projection.source_map()->height(),
+      .anchor_state_index = 0U,
+      .algorithm_id =
+          "cpp-legged-motion-primitive-recoverable-graph/v1",
+      .state_schema = "legged-lattice-state/v1",
+      .primitive_set_canonical_bytes = std::move(primitive_bytes),
+  };
+  graph.states.reserve(nodes.size());
+  for (const GraphNode& node : nodes) {
+    graph.states.push_back(PrimitiveReachabilityState{
+        .position_m = node.pose.position_m,
+        .yaw_rad = node.pose.yaw_rad,
+        .cell_x = node.state.cell_x,
+        .cell_y = node.state.cell_y,
+        .yaw_bin = node.state.yaw_bin,
+        .motion_mode = 1,
+        .body_z_m = node.state.reachable_body_z_m,
+        .path_cost = node.path_cost,
+        .observation_state = 1U,
+    });
+  }
+  graph.potential_edges.reserve(pending_edges.size());
+  for (const PendingEdge& edge : pending_edges) {
+    graph.potential_edges.push_back(shared::PrimitiveGraphPotentialEdge{
+        .source_state_index = edge.source,
+        .target_state_index = edge.target,
+        .primitive_index = edge.primitive_index,
+        .primitive_id = edge.primitive_id,
+        .cost = edge.cost,
+        .certified = true,
+    });
+  }
+  return graph;
+} catch (const std::bad_alloc&) {
+  return shared::PrimitiveGraphBuildResult{
+      .reason_code = "LEGGED_SEARCH_ALLOCATION_FAILURE",
   };
 }
 

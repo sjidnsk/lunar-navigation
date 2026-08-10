@@ -231,11 +231,11 @@ LeggedLatticeBuildResult BuildLeggedPrimitiveGraph(
     std::stop_token stop_token);
 ```
 
-- [ ] **Step 1: Add RED fixtures for body-height and returnability**
+- [x] **Step 1: Add RED fixtures for body-height and returnability**
 
 Assert a 2-D connected target is excluded when the reachable body-height interval becomes empty, support rejects an edge, or only a directed outbound chain exists. Assert the same cell/yaw with different interval state is not silently merged.
 
-- [ ] **Step 2: Run RED, implement goal-independent expansion, and run GREEN**
+- [x] **Step 2: Run RED, implement goal-independent expansion, and run GREEN**
 
 ```bash
 ctest --test-dir "$NATIVE_ROOT/build/lunar_planner_core" \
@@ -249,7 +249,7 @@ ctest --test-dir "$NATIVE_ROOT/build/lunar_planner_core" \
   --output-on-failure
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add ros2_ws/src/lunar_planner_core

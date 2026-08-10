@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "hierarchical/frame_transform.hpp"
+#include "legged/legged_lattice.hpp"
 #include "shared/map_snapshot.hpp"
 #include "shared/safe_projection.hpp"
 #include "shared/sha256.hpp"
@@ -102,6 +103,24 @@ PrimitiveReachabilityResult PrimitiveReachabilityEngine::Update(
         wheel::BuildWheelPrimitiveGraph(
             state, *safe.projection,
             std::get<WheeledCapability>(input.capability), input.config,
+            input.stop_token);
+    graph.revision = ++impl_->revision;
+    return shared::FinalizePrimitiveGraph(
+        std::move(graph), input.stop_token);
+  }
+  if (platform == PlatformType::kLegged) {
+    LeggedState state = std::get<LeggedState>(input.current_state);
+    const auto pose_map = hierarchical::TransformPose(
+        state.body_pose, input.world.map_from_odom,
+        hierarchical::TransformDirection::kChildToParent);
+    if (!pose_map.has_value()) {
+      return Failure("FRAME_TRANSFORM_INVALID");
+    }
+    state.body_pose = *pose_map;
+    shared::PrimitiveGraphBuildResult graph =
+        legged::BuildLeggedPrimitiveGraph(
+            state, *safe.projection,
+            std::get<LeggedCapability>(input.capability), input.config,
             input.stop_token);
     graph.revision = ++impl_->revision;
     return shared::FinalizePrimitiveGraph(

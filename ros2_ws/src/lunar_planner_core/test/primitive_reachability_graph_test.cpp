@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include "legged/legged_lattice.hpp"
 #include "lunar_planner_core/primitive_reachability.hpp"
 #include "shared/map_snapshot.hpp"
 #include "shared/primitive_reachability_graph.hpp"
@@ -342,6 +343,123 @@ TEST(PrimitiveReachabilityGraph, StatefulEnginePublishesWheelGraphSnapshots) {
   EXPECT_EQ(first.snapshot->revision, 1U);
   EXPECT_EQ(second.snapshot->revision, 2U);
   EXPECT_EQ(first.snapshot->graph_sha256, second.snapshot->graph_sha256);
+}
+
+PrimitiveReachabilityResult BuildLeggedFixture(PlannerInput input) {
+  const auto map = MapSnapshot::Create(input.world.global_map);
+  if (!map.ok()) {
+    return PrimitiveReachabilityResult{.reason_code = map.reason_code};
+  }
+  const auto safe = BuildSafeProjection(
+      map.snapshot, input.capability, input.config.map_safety,
+      input.stop_token);
+  if (!safe.ok()) {
+    return PrimitiveReachabilityResult{.reason_code = safe.reason_code};
+  }
+  return FinalizePrimitiveGraph(
+      legged::BuildLeggedPrimitiveGraph(
+          std::get<LeggedState>(input.current_state), *safe.projection,
+          std::get<LeggedCapability>(input.capability), input.config,
+          input.stop_token),
+      input.stop_token);
+}
+
+TEST(PrimitiveReachabilityGraph,
+     LeggedProjectionUsesPrimitiveDirectionsAndReturnability) {
+  PlannerInput input = test::MakeValidLeggedInput();
+  input.world.global_map = test::MakeFlatMap("map", 8U, 5U, 1.0);
+  input.world.local_map = input.world.global_map;
+  auto capability = std::get<LeggedCapability>(input.capability);
+  capability.motion_primitives.erase(
+      std::remove_if(
+          capability.motion_primitives.begin(),
+          capability.motion_primitives.end(),
+          [](const LeggedBodyPrimitive& primitive) {
+            return primitive.kind != LeggedPrimitiveKind::kForward &&
+                primitive.kind != LeggedPrimitiveKind::kBackward;
+          }),
+      capability.motion_primitives.end());
+  input.capability = capability;
+  std::get<LeggedState>(input.current_state).body_pose.position_m =
+      {2.5, 2.5, 0.5};
+
+  const auto map = MapSnapshot::Create(input.world.global_map);
+  ASSERT_TRUE(map.ok()) << map.reason_code;
+  const auto safe = BuildSafeProjection(
+      map.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(safe.ok()) << safe.reason_code;
+  const GridCell start{.x = 2, .y = 2};
+  const GridCell side{.x = 2, .y = 3};
+  ASSERT_TRUE(safe.projection->HardFeasible(side));
+  ASSERT_EQ(safe.projection->ConnectedComponent(start),
+            safe.projection->ConnectedComponent(side));
+
+  const PrimitiveReachabilityResult result = BuildLeggedFixture(input);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_EQ(result.snapshot->algorithm_id,
+            "cpp-legged-motion-primitive-recoverable-graph/v1");
+  EXPECT_EQ(result.snapshot->reachable[3U * 8U + 2U], 0U);
+  EXPECT_EQ(result.snapshot->reachable[2U * 8U + 3U], 1U);
+}
+
+TEST(PrimitiveReachabilityGraph, LeggedExcludesOutboundOnlyState) {
+  PlannerInput input = test::MakeValidLeggedInput();
+  input.world.global_map = test::MakeFlatMap("map", 7U, 5U, 1.0);
+  input.world.local_map = input.world.global_map;
+  auto capability = std::get<LeggedCapability>(input.capability);
+  capability.motion_primitives.erase(
+      std::remove_if(
+          capability.motion_primitives.begin(),
+          capability.motion_primitives.end(),
+          [](const LeggedBodyPrimitive& primitive) {
+            return primitive.kind != LeggedPrimitiveKind::kForward;
+          }),
+      capability.motion_primitives.end());
+  input.capability = capability;
+  std::get<LeggedState>(input.current_state).body_pose.position_m =
+      {2.5, 2.5, 0.5};
+
+  const PrimitiveReachabilityResult result = BuildLeggedFixture(input);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  const auto iterator = std::find_if(
+      result.snapshot->states.begin(), result.snapshot->states.end(),
+      [](const PrimitiveReachabilityState& state) {
+        return state.cell_x == 3 && state.cell_y == 2;
+      });
+  ASSERT_NE(iterator, result.snapshot->states.end());
+  EXPECT_EQ(iterator->forward_reachable, 1U);
+  EXPECT_EQ(iterator->returnable, 0U);
+  EXPECT_EQ(result.snapshot->reachable[2U * 7U + 3U], 0U);
+}
+
+TEST(PrimitiveReachabilityGraph, LeggedIntervalsRemainDistinctStateKeys) {
+  PrimitiveGraphBuildResult graph = MakeDirectedFixture();
+  graph.states[1U].body_z_m = Interval{0.4, 0.6};
+  graph.states[3U].cell_x = graph.states[1U].cell_x;
+  graph.states[3U].cell_y = graph.states[1U].cell_y;
+  graph.states[3U].yaw_bin = graph.states[1U].yaw_bin;
+  graph.states[3U].motion_mode = graph.states[1U].motion_mode;
+  graph.states[3U].position_m = graph.states[1U].position_m;
+  graph.states[3U].yaw_rad = graph.states[1U].yaw_rad;
+  graph.states[3U].body_z_m = Interval{0.5, 0.6};
+
+  const PrimitiveReachabilityResult result =
+      FinalizePrimitiveGraph(std::move(graph), {});
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_EQ(result.snapshot->states.size(), 4U);
+}
+
+TEST(PrimitiveReachabilityGraph, StatefulEnginePublishesLeggedGraphSnapshot) {
+  PrimitiveReachabilityEngine engine;
+  const PrimitiveReachabilityResult result =
+      engine.Update(test::MakeValidLeggedInput(), std::nullopt);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_EQ(result.snapshot->algorithm_id,
+            "cpp-legged-motion-primitive-recoverable-graph/v1");
 }
 
 }  // namespace

@@ -8,6 +8,7 @@
 #include "legged/legged_types.hpp"
 #include "lunar_planner_core/types/planner_io.hpp"
 #include "shared/ara_star.hpp"
+#include "shared/primitive_reachability_graph.hpp"
 #include "shared/safe_projection.hpp"
 
 namespace lunar::planning::legged {
@@ -44,6 +45,13 @@ struct LeggedLatticeBuildResult final {
 [[nodiscard]] LeggedLatticeBuildResult BuildLeggedLattice(
     const LeggedState& current_state,
     const GoalRegion& goal,
+    const shared::SafeProjection& projection,
+    const LeggedCapability& capability,
+    const PlannerConfig& config,
+    std::stop_token stop_token);
+
+[[nodiscard]] shared::PrimitiveGraphBuildResult BuildLeggedPrimitiveGraph(
+    const LeggedState& current_state,
     const shared::SafeProjection& projection,
     const LeggedCapability& capability,
     const PlannerConfig& config,
