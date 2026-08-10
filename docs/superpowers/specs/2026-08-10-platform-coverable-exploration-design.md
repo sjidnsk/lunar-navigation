@@ -358,6 +358,18 @@ WHEELED/LEGGED 对执行 reference 的折线按累计路程插值，观测样本
 零增益诊断，稳定排序仍使用确定性 tie-break。该变化不改变 `[64,12]` 形状，但属于策略输入语义
 变化，必须升级训练语义并从新模型开始。
 
+### 6.5 稀疏主候选必须补入平台认证的备用观测位姿
+
+生产候选不能因为“已有一个正增益 frontier 点”就跳过全部回退。当主候选经过访问、静态、平台
+可达性和正增益筛选后少于 8 个，必须从当前传感器范围内的已观测安全 ROI 位姿中补充备用点，
+并与主候选一起重新执行同一平台可达性筛选和同批增益归一化。最终仍按确定性分段/空间规则截断为
+现有 `[64,12]` 动作合同，不扩大动作维度。
+
+WHEELED/LEGGED 的连通投影和 HOPPER 的落区/单跳认证只是候选前置筛选；完整 C++ 规划器仍是
+reference 可生成性的最终裁判。规划器拒绝一个候选时只屏蔽该候选，继续使用同一批备用候选；
+只有整批候选均被拒绝时才允许进入 `PLANNER_REJECTED_ALL`。这样不会把 oracle 候选直接喂给策略，
+也不会降低安全标准，但消除了单个粗可达候选造成的不可学习终止上限。
+
 ## 7. 候选耗尽与独立 Oracle
 
 `CandidateDiagnostics` 扩展为分阶段计数：
@@ -440,7 +452,7 @@ cache、候选特征、动作聚合、成功阈值、reward 和 replay state 均
 - run manifest 中 `resume_parent` 与 `warm_start_parent` 均为 null，并记录旧运行仅作为历史审计。
 
 训练语义升级为
-`lunar-training-semantics/sensor-30m-360-platform-coverable-detail95-ground-option-path-observation-auditable-failure/v8`。
+`lunar-training-semantics/sensor-30m-360-platform-coverable-detail95-ground-option-path-observation-platform-reserve-auditable-failure/v9`。
 cache v4 的数组 schema 不变，但旧 manifest 的语义哈希、源码提交和 reward 哈希必须失配；必须在
 仓库外完整重建，禁止就地改写旧 cache。
 

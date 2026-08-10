@@ -18,6 +18,7 @@ from .visibility import SensorGeometry, VisibilityEstimator, _ray_cells
 
 _GROUND_PLATFORM_TYPES = frozenset(("WHEELED", "LEGGED"))
 _PLATFORM_TYPES = _GROUND_PLATFORM_TYPES | {"HOPPER"}
+_MIN_PLATFORM_CANDIDATE_RESERVE = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,8 +275,9 @@ class CandidateBuilderV2:
                     standoff = (row, column)
                 if self._candidate_within_sensor(canvas, pose_map, standoff):
                     raw_anchors.append((segment_id, standoff))
+        qualified_anchors = sorted(set(raw_anchors))
         chosen, diagnostics = self._qualify_anchors(
-            sorted(set(raw_anchors)),
+            qualified_anchors,
             world,
             mission,
             pose_map,
@@ -291,16 +293,24 @@ class CandidateBuilderV2:
         )
         segment_count = len(segments)
         transit_allowed = bool(boundary.any())
-        if not chosen and platform_reachability_filter_enabled:
-            fallback_anchors = [
-                (0, point)
+        if (
+            len(chosen) < _MIN_PLATFORM_CANDIDATE_RESERVE
+            and transit_allowed
+            and platform_reachability_filter_enabled
+        ):
+            primary_points = {point for _, point in qualified_anchors}
+            reserve_segment_id = segment_count
+            reserve_anchors = [
+                (reserve_segment_id, point)
                 for point in self._fallback_observation_poses(
                     world, mission, pose_map, projection
                 )
+                if point not in primary_points
             ]
-            if fallback_anchors:
+            if reserve_anchors:
+                qualified_anchors = [*qualified_anchors, *reserve_anchors]
                 chosen, diagnostics = self._qualify_anchors(
-                    fallback_anchors,
+                    qualified_anchors,
                     world,
                     mission,
                     pose_map,
@@ -315,24 +325,30 @@ class CandidateBuilderV2:
                     allow_zero_gain=False,
                     exact_target_poses={},
                 )
-                segment_count = 1
-                if not chosen and transit_allowed:
-                    chosen, diagnostics = self._qualify_anchors(
-                        fallback_anchors,
-                        world,
-                        mission,
-                        pose_map,
-                        projection,
-                        platform_type=platform_type,
-                        platform_reachability_filter_enabled=(
-                            platform_reachability_filter_enabled
-                        ),
-                        platform_reachability=platform_reachability,
-                        excluded_cells=excluded_cells,
-                        total_roi=total_roi,
-                        allow_zero_gain=True,
-                        exact_target_poses={},
-                    )
+                segment_count += 1
+        if (
+            not chosen
+            and transit_allowed
+            and platform_reachability_filter_enabled
+            and qualified_anchors
+        ):
+            chosen, diagnostics = self._qualify_anchors(
+                qualified_anchors,
+                world,
+                mission,
+                pose_map,
+                projection,
+                platform_type=platform_type,
+                platform_reachability_filter_enabled=(
+                    platform_reachability_filter_enabled
+                ),
+                platform_reachability=platform_reachability,
+                excluded_cells=excluded_cells,
+                total_roi=total_roi,
+                allow_zero_gain=True,
+                exact_target_poses={},
+            )
+        if not chosen and platform_reachability_filter_enabled:
             if (
                 not chosen
                 and transit_allowed
@@ -347,7 +363,7 @@ class CandidateBuilderV2:
                 except ValueError:
                     backtrack_cell = None
                 if backtrack_cell is not None:
-                    segment_count = 1
+                    segment_count = max(segment_count, 1)
                     chosen, diagnostics = self._qualify_anchors(
                         [(0, backtrack_cell)],
                         world,

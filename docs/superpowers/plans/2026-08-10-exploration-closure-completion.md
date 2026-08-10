@@ -18,7 +18,7 @@
 - Every behavior change follows RED -> observe intended failure -> minimal GREEN -> focused regression -> scoped commit.
 - Do not change the PPO topology, seven input names, `[64,12]` action shape, `1024 m` scene, `30 m / 360 deg` sensor, `0.2 m` reveal, capability, source/split, or unbounded episode lifetime.
 - `mission_coverable_fraction >= 0.95` remains task feasibility. Episode success is exact coverage `>=0.95` of the platform-coverable denominator; historical 99% performance is not a launch gate for this run.
-- Training stays stopped until Task 7's gates pass. The authorized launch uses neither resume nor warm start.
+- Training stays stopped until Task 8's gates pass. The authorized launch uses neither resume nor warm start.
 
 ---
 
@@ -304,10 +304,10 @@ git commit -m "fix(training): persist ground goals across rolling references"
 
 **Interfaces:**
 
-- Success ratio is exactly `0.95`; semantics are `lunar-training-semantics/sensor-30m-360-platform-coverable-detail95-ground-option-path-observation-auditable-failure/v8`.
+- Success ratio is exactly `0.95`; semantics are `lunar-training-semantics/sensor-30m-360-platform-coverable-detail95-ground-option-path-observation-platform-reserve-auditable-failure/v9`.
 - Reward schema is `lunar-reward/v4`; coverage scale stays `100.0`, first-success bonus becomes `100.0`, and cost/time/priority remain validated telemetry.
 - Initial eligibility is `<0.95`, mission feasibility remains `>=0.95`, and closed-loop final coverage may be below `0.95` when paired with an auditable natural-failure reason.
-- Pre-v8/pre-v4 resume and warm start fail closed.
+- Pre-v9/pre-v4 resume and warm start fail closed.
 - Launch without either flag records null parents and initializes complete model/value/optimizer/RNG/normalization at step 0.
 
 - [ ] **Step 1: Write failing literal tests**
@@ -327,9 +327,9 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "$PYTHON" -m pytest -q \
   training/lunar_policy_training/tests/test_cli.py
 ```
 
-- [ ] **Step 3: Implement v8/v4 and fresh-launch boundary**
+- [ ] **Step 3: Implement v9/v4 and fresh-launch boundary**
 
-Keep the existing inert warm-start reader but make it incompatible with this formal v8 launch. Do not introduce efficiency reward terms.
+Keep the existing inert warm-start reader but make it incompatible with this formal v9 launch. Do not introduce efficiency reward terms.
 
 - [ ] **Step 4: Run GREEN**
 
@@ -354,7 +354,46 @@ git commit -m "fix(training): set current formal success gate to 95 percent"
 
 ---
 
-### Task 6: Verify the complete source before materialization
+### Task 6: Fill sparse platform candidate sets before planner exhaustion
+
+**Files:** Modify `candidate_builder.py`, `test_candidate_builder_v2.py`, `training_semantics.py`, `test_coverability.py`, and the frozen design/plan.
+
+**Interfaces:**
+
+- Preserve the `[64,12]` frontier tensor and `[64]` mask.
+- If the positive primary set has fewer than 8 candidates, add observed-safe poses within the current sensor range and re-run the same platform reachability filter over the combined set.
+- Normalize mission/priority gain over the final combined reachable batch, then use existing deterministic segment/spatial selection to cap at 64.
+- A planner rejection masks only that candidate; the environment may report `PLANNER_REJECTED_ALL` only after every emitted primary/reserve candidate is rejected.
+
+- [ ] **Step 1: Write and run the sparse-primary RED test**
+
+Assert one positive primary candidate triggers a second, larger platform-filtered gain batch and emits more than one candidate. Preserve the existing multi-candidate single-batch path.
+
+- [ ] **Step 2: Implement the minimum reserve and v9 identity**
+
+Do not call the oracle from production generation and do not pre-run the full planner for all candidates.
+
+- [ ] **Step 3: Run focused GREEN and source regressions**
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "$PYTHON" -m pytest -q \
+  training/lunar_policy_training/tests/test_candidate_builder_v2.py \
+  training/lunar_policy_training/tests/test_frontier_oracle.py \
+  training/lunar_policy_training/tests/test_v3_environment.py \
+  training/lunar_policy_training/tests/test_formal_builder.py \
+  training/lunar_policy_training/tests/test_coverability.py
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add training/lunar_policy_training docs/superpowers
+git commit -m "fix(training): retain platform candidate reserves"
+```
+
+---
+
+### Task 7: Verify the complete source before materialization
 
 **Files:** Verify all Task 1-5 files; write generated artifacts only below `/home/kai/CodexDownloads/lunar_navigation/platform_coverable_exploration`.
 
@@ -406,7 +445,7 @@ Any correction gets its own RED/GREEN. Source must be committed and clean before
 
 ---
 
-### Task 7: Qualify the executable loop, rebuild cache and launch fresh training
+### Task 8: Qualify the executable loop, rebuild cache and launch fresh training
 
 **Files:** Verify `closed_loop_gate.py`, `formal_preflight.py` and `cli.py`; all resulting caches, traces, reports, logs and checkpoints remain external.
 
@@ -479,7 +518,7 @@ If a gate fails, return to its owning task with a new RED test and do not launch
 
 ## Completion Evidence
 
-1. Tasks 1-5 have observed RED/GREEN evidence and scoped commits.
+1. Tasks 1-6 have observed RED/GREEN evidence and scoped commits.
 2. Full Python, native Release and repository-boundary checks pass at the final source commit.
 3. The first exact-common scene on WHEELED, LEGGED and HOPPER reaches an auditable natural terminal with real reference execution and no infrastructure or safety failure.
 4. Each startup row is either `SUCCESS >=0.95` or a consistent legal failure below `0.95`; the later 24x3 evaluation remains non-blocking.

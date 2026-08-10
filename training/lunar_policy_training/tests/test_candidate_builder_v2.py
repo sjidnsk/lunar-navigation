@@ -372,6 +372,71 @@ def test_candidate_builder_batches_all_feasible_anchors_once_and_is_yaw_invarian
     np.testing.assert_array_equal(first.mask, second.mask)
 
 
+def test_sparse_primary_candidates_add_platform_checked_observation_reserves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Would fail when one coarse-reachable goal can end the whole episode."""
+
+    class SparsePrimaryEstimator(_RecordingEstimator):
+        def estimate_candidate_gains(self, *args) -> np.ndarray:
+            candidates = args[-1]
+            self.calls.append(candidates.copy())
+            gains = np.ones((len(candidates), 2), dtype=np.float32)
+            if len(self.calls) == 1:
+                gains.fill(0.0)
+                gains[0] = (1.0, 1.0)
+            return gains
+
+    reachability_calls: list[np.ndarray] = []
+
+    def platform_filter(
+        _self,
+        candidate_cells: np.ndarray,
+        *,
+        target_positions_map: np.ndarray | None = None,
+    ) -> CandidateReachabilityResult:
+        del target_positions_map
+        reachability_calls.append(candidate_cells.copy())
+        accepted = np.ascontiguousarray(
+            candidate_cells[:, 1] % 2 == 0, dtype=np.bool_
+        )
+        return CandidateReachabilityResult(
+            accepted,
+            {
+                "platform_unreachable_count": int(
+                    (~accepted).sum(dtype=np.int64)
+                )
+            },
+        )
+
+    monkeypatch.setattr(
+        PlatformCandidateReachability,
+        "filter",
+        platform_filter,
+    )
+    reachability = object.__new__(PlatformCandidateReachability)
+    estimator = SparsePrimaryEstimator()
+
+    batch = CandidateBuilderV2(estimator).build(
+        _world_with_frontier(),
+        _mission(),
+        Pose2(500.0, 512.0),
+        _projection(),
+        platform_type="WHEELED",
+        platform_reachability=reachability,
+    )
+
+    assert len(estimator.calls) == 2
+    assert len(reachability_calls) == 2
+    assert estimator.calls[0].shape[0] > 0
+    assert estimator.calls[1].shape[0] > estimator.calls[0].shape[0]
+    assert set(map(tuple, estimator.calls[0])) < set(
+        map(tuple, estimator.calls[1])
+    )
+    assert batch.count > 1
+    assert batch.diagnostics.emitted_count == batch.count
+
+
 def test_ground_platform_keeps_candidate_when_observed_detour_exists() -> None:
     world, mission, projection, pose, target = _detour_fixture()
     estimator = _RecordingEstimator()
@@ -394,7 +459,10 @@ def test_ground_platform_keeps_candidate_when_observed_detour_exists() -> None:
     )
 
     assert target in map(tuple, estimator.calls[0])
-    assert len(estimator.calls) == 1
+    assert len(estimator.calls) == 2
+    assert set(map(tuple, estimator.calls[0])) < set(
+        map(tuple, estimator.calls[1])
+    )
     assert legacy.count == 0
     assert batch.count > legacy.count
     assert batch.diagnostics.emitted_count == batch.count
@@ -428,7 +496,10 @@ def test_hopper_keeps_observed_landing_when_ground_ray_is_blocked() -> None:
     )
 
     assert target in map(tuple, estimator.calls[0])
-    assert len(estimator.calls) == 1
+    assert len(estimator.calls) == 2
+    assert set(map(tuple, estimator.calls[0])) < set(
+        map(tuple, estimator.calls[1])
+    )
     assert legacy.count == 0
     assert batch.count > legacy.count
 
