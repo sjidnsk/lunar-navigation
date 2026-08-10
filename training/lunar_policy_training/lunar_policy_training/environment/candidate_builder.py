@@ -265,7 +265,7 @@ class CandidateBuilderV2:
         segments = _segments(_points(boundary), cells)
         spacing = max(1, math.ceil(self._sensor.anchor_spacing_m / canvas.geometry.resolution_m))
         raw_anchors: list[tuple[int, tuple[int, int]]] = []
-        total_roi, total_priority = float(mission.roi_ratio.sum()), float((mission.priority * mission.roi_ratio).sum())
+        total_roi = float(mission.roi_ratio.sum())
         step = max(1, round(self._sensor.standoff_m / canvas.geometry.resolution_m))
         for segment_id, segment in enumerate(segments):
             for row, column in _spaced_anchors(segment, spacing):
@@ -287,7 +287,6 @@ class CandidateBuilderV2:
             platform_reachability=platform_reachability,
             excluded_cells=excluded_cells,
             total_roi=total_roi,
-            total_priority=total_priority,
             allow_zero_gain=False,
         )
         segment_count = len(segments)
@@ -313,7 +312,6 @@ class CandidateBuilderV2:
                     platform_reachability=platform_reachability,
                     excluded_cells=excluded_cells,
                     total_roi=total_roi,
-                    total_priority=total_priority,
                     allow_zero_gain=False,
                     exact_target_poses={},
                 )
@@ -332,7 +330,6 @@ class CandidateBuilderV2:
                         platform_reachability=platform_reachability,
                         excluded_cells=excluded_cells,
                         total_roi=total_roi,
-                        total_priority=total_priority,
                         allow_zero_gain=True,
                         exact_target_poses={},
                     )
@@ -364,7 +361,6 @@ class CandidateBuilderV2:
                         platform_reachability=platform_reachability,
                         excluded_cells=(),
                         total_roi=total_roi,
-                        total_priority=total_priority,
                         allow_zero_gain=True,
                         exact_target_poses={backtrack_cell: backtrack_pose},
                     )
@@ -403,7 +399,6 @@ class CandidateBuilderV2:
         platform_reachability: PlatformCandidateReachability | None,
         excluded_cells: Collection[tuple[int, int]],
         total_roi: float,
-        total_priority: float,
         allow_zero_gain: bool,
         exact_target_poses: Mapping[tuple[int, int], Pose2] | None = None,
     ) -> tuple[list[_FeasibleAnchor], CandidateDiagnostics]:
@@ -519,6 +514,8 @@ class CandidateBuilderV2:
             raise RuntimeError("candidate visibility estimator result is invalid")
         chosen: list[_FeasibleAnchor] = []
         zero_gain_count = 0
+        gain_normalizer = float(gains[:, 0].max())
+        priority_gain_normalizer = float(gains[:, 1].max())
         admit_zero_gain = allow_zero_gain and not bool(
             np.any(gains[:, 0] > np.float32(0.0))
         )
@@ -532,9 +529,10 @@ class CandidateBuilderV2:
                 pose_map,
                 point,
                 total_roi,
-                total_priority,
                 float(gain),
                 float(priority_gain),
+                gain_normalizer,
+                priority_gain_normalizer,
                 allow_zero_gain=admit_zero_gain,
                 target_pose=exact_target_poses.get(point),
             )
@@ -603,7 +601,7 @@ class CandidateBuilderV2:
         )
         return abs(relative) <= self._sensor.fov_rad / 2.0
 
-    def _feature(self, world: ObservedWorld, mission: MissionRaster, projection: PlatformProjection, pose: Pose2, point: tuple[int, int], total_roi: float, total_priority: float, gain: float, priority_gain: float, *, allow_zero_gain: bool = False, target_pose: Pose2 | None = None) -> np.ndarray | None:
+    def _feature(self, world: ObservedWorld, mission: MissionRaster, projection: PlatformProjection, pose: Pose2, point: tuple[int, int], total_roi: float, gain: float, priority_gain: float, gain_normalizer: float, priority_gain_normalizer: float, *, allow_zero_gain: bool = False, target_pose: Pose2 | None = None) -> np.ndarray | None:
         canvas = world.canvas
         x, y = (
             canvas.grid_center_world(*point)
@@ -618,7 +616,7 @@ class CandidateBuilderV2:
         for neighbor in _neighbors(*point, canvas.geometry.cells):
             if mission.roi_ratio[neighbor] > 0 and not world.observed_mask[neighbor]: normal += (neighbor[0] - point[0], neighbor[1] - point[1])
         magnitude = float(np.linalg.norm(normal)); remaining = float((mission.roi_ratio * ~world.observed_mask).sum() / total_roi) if total_roi else 0.0
-        return np.asarray(((x - canvas.bounds_m[0]) / canvas.geometry.size_m, (canvas.bounds_m[3] - y) / canvas.geometry.size_m, min(1.0, distance / (math.sqrt(2.0) * canvas.geometry.size_m)), math.sin(bearing), math.cos(bearing), min(1.0, gain / total_roi) if total_roi else 0.0, min(1.0, priority_gain / total_priority) if total_priority else 0.0, -normal[0] / magnitude if magnitude else 0.0, normal[1] / magnitude if magnitude else 1.0, min(1.0, magnitude / 2.0), projection.clearance_margin_norm[point], remaining), dtype=np.float32)
+        return np.asarray(((x - canvas.bounds_m[0]) / canvas.geometry.size_m, (canvas.bounds_m[3] - y) / canvas.geometry.size_m, min(1.0, distance / (math.sqrt(2.0) * canvas.geometry.size_m)), math.sin(bearing), math.cos(bearing), min(1.0, gain / gain_normalizer) if gain_normalizer else 0.0, min(1.0, priority_gain / priority_gain_normalizer) if priority_gain_normalizer else 0.0, -normal[0] / magnitude if magnitude else 0.0, normal[1] / magnitude if magnitude else 1.0, min(1.0, magnitude / 2.0), projection.clearance_margin_norm[point], remaining), dtype=np.float32)
 
 
 __all__ = [

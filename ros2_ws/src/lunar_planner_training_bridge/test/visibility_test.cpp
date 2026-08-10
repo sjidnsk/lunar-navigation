@@ -93,7 +93,7 @@ TEST(VisibilityKernel, ForbiddenValuesCannotAffectReveal) {
                                   [](const auto value) { return value == 1U; }));
 }
 
-TEST(VisibilityKernel, EstimatesObservedOnlyWeightedCandidateGainsInOneBatch) {
+TEST(VisibilityKernel, EstimatesOptimisticWeightedCandidateGainsInOneBatch) {
   const VisibilityKernel kernel{1.0, 3.0};
   constexpr GridShape shape{.height = 7U, .width = 7U};
   std::vector<std::uint8_t> observed(shape.height * shape.width, 0U);
@@ -113,12 +113,41 @@ TEST(VisibilityKernel, EstimatesObservedOnlyWeightedCandidateGainsInOneBatch) {
       shape, observed, obstacles, roi, priority, candidates);
 
   ASSERT_EQ(gains.size(), candidates.size());
-  EXPECT_FLOAT_EQ(gains[0].roi, 0.25F);
-  EXPECT_FLOAT_EQ(gains[0].priority, 0.75F);
+  EXPECT_FLOAT_EQ(gains[0].roi, 1.25F);
+  EXPECT_FLOAT_EQ(gains[0].priority, 1.75F);
   EXPECT_FLOAT_EQ(gains[1].roi, 0.0F);
   EXPECT_FLOAT_EQ(gains[1].priority, 0.0F);
 
   obstacles[Index(shape, 3, 4)] = 0.01F;
+  const auto blocked = kernel.EstimateCandidateGains(shape, observed, obstacles,
+                                                     roi, priority, candidates);
+  EXPECT_FLOAT_EQ(blocked[0].roi, 0.0F);
+  EXPECT_FLOAT_EQ(blocked[0].priority, 0.0F);
+}
+
+TEST(VisibilityKernel, SeesUnknownRoiUntilAKnownObstacleBlocksTheRay) {
+  const VisibilityKernel kernel{1.0, 6.0};
+  constexpr GridShape shape{.height = 7U, .width = 7U};
+  std::vector<std::uint8_t> observed(shape.height * shape.width, 0U);
+  std::vector<float> obstacles(shape.height * shape.width, 0.0F);
+  std::vector<float> roi(shape.height * shape.width, 0.0F);
+  std::vector<float> priority(shape.height * shape.width, 0.0F);
+  observed[Index(shape, 3, 0)] = 1U;
+  roi[Index(shape, 3, 4)] = 2.0F;
+  roi[Index(shape, 3, 6)] = 8.0F;
+  priority[Index(shape, 3, 4)] = 3.0F;
+  priority[Index(shape, 3, 6)] = 5.0F;
+  const std::vector<GridCell> candidates{{3, 0}};
+
+  const auto optimistic = kernel.EstimateCandidateGains(
+      shape, observed, obstacles, roi, priority, candidates);
+
+  ASSERT_EQ(optimistic.size(), 1U);
+  EXPECT_FLOAT_EQ(optimistic[0].roi, 10.0F);
+  EXPECT_FLOAT_EQ(optimistic[0].priority, 8.0F);
+
+  observed[Index(shape, 3, 2)] = 1U;
+  obstacles[Index(shape, 3, 2)] = 1.0F;
   const auto blocked = kernel.EstimateCandidateGains(
       shape, observed, obstacles, roi, priority, candidates);
   EXPECT_FLOAT_EQ(blocked[0].roi, 0.0F);

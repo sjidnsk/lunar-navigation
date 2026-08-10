@@ -183,10 +183,17 @@ def test_visibility_binding_preserves_exact_batch_and_reveal_contract() -> None:
     observed[3, 3:5] = True
     roi[3, 5] = 0.25
     priority[3, 5] = 0.75
+    roi[3, 6] = 1.0
+    priority[3, 6] = 1.0
     candidates = np.asarray(((3, 3), (1, 1)), dtype=np.int32)
 
     gains = kernel.estimate_candidate_gains(
         observed, obstacle, roi, priority, candidates
+    )
+    known_block = obstacle.copy()
+    known_block[3, 4] = 0.001
+    blocked_gains = kernel.estimate_candidate_gains(
+        observed, known_block, roi, priority, candidates
     )
     obstacle[3, 5] = 0.001
     visible = kernel.reveal_from_pose(obstacle, 3, 3)
@@ -196,8 +203,9 @@ def test_visibility_binding_preserves_exact_batch_and_reveal_contract() -> None:
     assert gains.shape == (2, 2)
     assert gains.dtype == np.float32
     assert gains.flags.c_contiguous
-    np.testing.assert_array_equal(gains[0], (0.25, 0.75))
+    np.testing.assert_array_equal(gains[0], (1.25, 1.75))
     np.testing.assert_array_equal(gains[1], (0.0, 0.0))
+    np.testing.assert_array_equal(blocked_gains[0], (0.0, 0.0))
     assert visible.shape == (7, 7)
     assert visible.dtype == np.bool_
     assert visible.flags.c_contiguous

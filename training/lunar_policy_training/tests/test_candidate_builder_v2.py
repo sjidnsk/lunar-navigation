@@ -177,6 +177,29 @@ def test_candidate_gain_ratios_use_fractional_roi_area_instead_of_cell_count() -
     assert np.all(valid[:, 11] <= 1.0)
 
 
+def test_candidate_gain_features_are_normalized_against_the_reachable_batch() -> None:
+    class UnequalGainEstimator(_RecordingEstimator):
+        def estimate_candidate_gains(self, *args) -> np.ndarray:
+            candidates = args[-1]
+            self.calls.append(candidates.copy())
+            gains = np.full((len(candidates), 2), (8.0, 16.0), np.float32)
+            gains[0] = (2.0, 4.0)
+            return gains
+
+    batch = CandidateBuilderV2(UnequalGainEstimator()).build(
+        _world_with_frontier(),
+        _mission(),
+        Pose2(500.0, 512.0),
+        _projection(),
+        platform_type="WHEELED",
+    )
+
+    assert batch.count >= 2
+    valid = batch.features[batch.mask]
+    np.testing.assert_allclose(np.unique(valid[:, 5]), [0.25, 1.0])
+    np.testing.assert_allclose(np.unique(valid[:, 6]), [0.25, 1.0])
+
+
 def test_candidate_builder_returns_all_false_instead_of_robot_fallback_when_los_has_no_frontier() -> None:
     observed = np.ones((256, 256), dtype=bool)
     canvas = _canvas()

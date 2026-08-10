@@ -286,6 +286,9 @@ class SlowVisibilityReference:
         for candidate_index, (candidate_row, candidate_column) in enumerate(
             candidates.tolist()
         ):
+            candidate = candidate_row, candidate_column
+            if not observed[candidate] or obstacle[candidate] != 0.0:
+                continue
             roi_gain = 0.0
             priority_gain = 0.0
             for offset_row, offset_column in self._offsets:
@@ -301,8 +304,8 @@ class SlowVisibilityReference:
                     (candidate_row, candidate_column), endpoint
                 )
                 if all(
-                    observed[cell] and obstacle[cell] == 0.0
-                    for cell in path[:-1]
+                    not observed[cell] or obstacle[cell] == 0.0
+                    for cell in path[1:-1]
                 ):
                     roi_gain += float(roi[endpoint])
                     priority_gain += float(priority[endpoint])

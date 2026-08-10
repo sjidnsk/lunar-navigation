@@ -227,47 +227,19 @@ std::vector<CandidateGain> VisibilityKernel::EstimateCandidateGains(
     }
   }
 
-  std::vector<std::uint8_t> potential_endpoint_mask(cell_count, 0U);
-  std::vector<GridCell> potential_endpoints;
+  std::vector<GridCell> known_obstacles;
   for (std::size_t row = 0U; row < shape.height; ++row) {
     for (std::size_t column = 0U; column < shape.width; ++column) {
-      const GridCell observed_cell{
+      const GridCell cell{
           .row = static_cast<std::int32_t>(row),
           .column = static_cast<std::int32_t>(column),
       };
-      const std::size_t observed_index = Index(shape, observed_cell);
-      if (observed[observed_index] == 0U ||
-          obstacle_ratio[observed_index] != 0.0F) {
-        continue;
-      }
-      for (std::int32_t delta_row = -1; delta_row <= 1; ++delta_row) {
-        for (std::int32_t delta_column = -1; delta_column <= 1;
-             ++delta_column) {
-          if (delta_row == 0 && delta_column == 0) {
-            continue;
-          }
-          const GridCell endpoint{
-              .row = observed_cell.row + delta_row,
-              .column = observed_cell.column + delta_column,
-          };
-          if (!InBounds(shape, endpoint)) {
-            continue;
-          }
-          const std::size_t endpoint_index = Index(shape, endpoint);
-          if (observed[endpoint_index] == 0U &&
-              (roi_ratio[endpoint_index] != 0.0F ||
-               priority_weight[endpoint_index] != 0.0F) &&
-              potential_endpoint_mask[endpoint_index] == 0U) {
-            potential_endpoint_mask[endpoint_index] = 1U;
-            potential_endpoints.push_back(endpoint);
-          }
-        }
+      const std::size_t index = Index(shape, cell);
+      if (observed[index] != 0U && obstacle_ratio[index] > 0.0F) {
+        known_obstacles.push_back(cell);
       }
     }
   }
-  std::ranges::sort(potential_endpoints, {}, [](const GridCell cell) {
-    return std::pair{cell.row, cell.column};
-  });
 
   std::vector<CandidateGain> output;
   output.reserve(candidates.size());
@@ -283,48 +255,97 @@ std::vector<CandidateGain> VisibilityKernel::EstimateCandidateGains(
       output.push_back(CandidateGain{});
       continue;
     }
-    for (const GridCell endpoint : potential_endpoints) {
-      const std::int64_t relative_row =
-          static_cast<std::int64_t>(endpoint.row) - candidate.row;
-      const std::int64_t relative_column =
-          static_cast<std::int64_t>(endpoint.column) - candidate.column;
-      if (std::abs(relative_row) > radius_cells_ ||
-          std::abs(relative_column) > radius_cells_) {
-        continue;
+
+    const bool full_disk_in_bounds =
+        candidate.row >= radius_cells_ && candidate.column >= radius_cells_ &&
+        static_cast<std::size_t>(candidate.row + radius_cells_) <
+            shape.height &&
+        static_cast<std::size_t>(candidate.column + radius_cells_) <
+            shape.width;
+    if (full_disk_in_bounds) {
+      thread_local std::vector<std::uint32_t> nearest_obstacle;
+      bool has_known_obstacle = false;
+      if (!known_obstacles.empty()) {
+        nearest_obstacle.assign(rays_.size(), missing);
       }
-      const std::size_t endpoint_index = Index(shape, endpoint);
-      const std::size_t lookup_index =
-          static_cast<std::size_t>(relative_row + radius_cells_) * diameter +
-          static_cast<std::size_t>(relative_column + radius_cells_);
-      const std::uint32_t ray_index = relative_cell_lookup_[lookup_index];
-      if (ray_index == missing) {
-        continue;
-      }
-      const Ray ray = rays_[ray_index];
-      if (ray.cell_count > 1U) {
-        const GridCell penultimate =
-            Add(candidate,
-                endpoint_offsets_[ray_cell_indices_[ray.cell_offset +
-                                                    ray.cell_count - 2U]]);
-        const std::size_t penultimate_index = Index(shape, penultimate);
-        if (observed[penultimate_index] == 0U ||
-            obstacle_ratio[penultimate_index] != 0.0F) {
+      for (const GridCell obstacle : known_obstacles) {
+        const std::int64_t relative_row =
+            static_cast<std::int64_t>(obstacle.row) - candidate.row;
+        const std::int64_t relative_column =
+            static_cast<std::int64_t>(obstacle.column) - candidate.column;
+        if (std::abs(relative_row) > radius_cells_ ||
+            std::abs(relative_column) > radius_cells_) {
           continue;
         }
+        const std::size_t lookup_index =
+            static_cast<std::size_t>(relative_row + radius_cells_) * diameter +
+            static_cast<std::size_t>(relative_column + radius_cells_);
+        const std::uint32_t cell_index = relative_cell_lookup_[lookup_index];
+        if (cell_index == missing) {
+          continue;
+        }
+        has_known_obstacle = true;
+        const std::uint32_t occurrence_begin = reverse_offsets_[cell_index];
+        const std::uint32_t occurrence_end = reverse_offsets_[cell_index + 1U];
+        for (std::uint32_t occurrence = occurrence_begin;
+             occurrence < occurrence_end; ++occurrence) {
+          const std::uint32_t ray_index = occurrence_rays_[occurrence];
+          nearest_obstacle[ray_index] = std::min(
+              nearest_obstacle[ray_index],
+              static_cast<std::uint32_t>(occurrence_positions_[occurrence]));
+        }
       }
-      bool clear = true;
-      for (std::uint32_t position = 0U; clear && position + 1U < ray.cell_count;
-           ++position) {
-        const GridCell absolute = Add(
-            candidate,
-            endpoint_offsets_[ray_cell_indices_[ray.cell_offset + position]]);
-        const std::size_t cell_index = Index(shape, absolute);
-        clear =
-            observed[cell_index] != 0U && obstacle_ratio[cell_index] == 0.0F;
+      for (std::size_t cell_index = 0U; cell_index < endpoint_offsets_.size();
+           ++cell_index) {
+        const std::size_t absolute_index =
+            Index(shape, Add(candidate, endpoint_offsets_[cell_index]));
+        if (observed[absolute_index] != 0U ||
+            (roi_ratio[absolute_index] == 0.0F &&
+             priority_weight[absolute_index] == 0.0F)) {
+          continue;
+        }
+        bool visible = !has_known_obstacle;
+        if (has_known_obstacle) {
+          const std::uint32_t occurrence_begin = reverse_offsets_[cell_index];
+          const std::uint32_t occurrence_end =
+              reverse_offsets_[cell_index + 1U];
+          for (std::uint32_t occurrence = occurrence_begin;
+               occurrence < occurrence_end; ++occurrence) {
+            const std::uint32_t ray_index = occurrence_rays_[occurrence];
+            const std::uint32_t position = occurrence_positions_[occurrence];
+            if (position <= nearest_obstacle[ray_index]) {
+              visible = true;
+              break;
+            }
+          }
+        }
+        if (visible) {
+          roi_gain += roi_ratio[absolute_index];
+          priority_gain += priority_weight[absolute_index];
+        }
       }
-      if (clear) {
-        roi_gain += roi_ratio[endpoint_index];
-        priority_gain += priority_weight[endpoint_index];
+    } else {
+      for (std::size_t ray_index = 0U; ray_index < rays_.size(); ++ray_index) {
+        const GridCell endpoint = Add(candidate, endpoint_offsets_[ray_index]);
+        if (!InBounds(shape, endpoint)) {
+          continue;
+        }
+        const Ray ray = rays_[ray_index];
+        bool visible = true;
+        for (std::uint32_t position = 0U;
+             visible && position + 1U < ray.cell_count; ++position) {
+          const std::size_t absolute_index = Index(
+              shape, Add(candidate,
+                         endpoint_offsets_[ray_cell_indices_[ray.cell_offset +
+                                                             position]]));
+          visible = observed[absolute_index] == 0U ||
+                    obstacle_ratio[absolute_index] == 0.0F;
+        }
+        const std::size_t endpoint_index = Index(shape, endpoint);
+        if (visible && observed[endpoint_index] == 0U) {
+          roi_gain += roi_ratio[endpoint_index];
+          priority_gain += priority_weight[endpoint_index];
+        }
       }
     }
     output.push_back(CandidateGain{
