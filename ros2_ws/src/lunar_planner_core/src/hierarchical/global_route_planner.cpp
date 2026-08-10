@@ -9,6 +9,7 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -205,6 +206,41 @@ SearchFailure(const GlobalGridSearchResult &search,
                  "GLOBAL_SEARCH_RESULT_INVALID", started, level);
 }
 
+struct LocalStartPortal final {
+  shared::GridCell global_cell;
+  GlobalGridSearchResult connector;
+  Pose3 portal_pose_map;
+};
+
+[[nodiscard]] std::vector<Pose3>
+BuildConnectorPoses(const shared::MapSnapshot &local_map,
+                    const shared::SafeProjection &local_projection,
+                    const GlobalGridSearchResult &connector,
+                    const Pose3 &start_pose_map,
+                    const RigidTransform &map_from_odom) {
+  std::vector<shared::GridCell> simplified = SimplifyRouteSupercover(
+      local_projection, connector.path_cells, connector.path_cells.size());
+  if (simplified.empty()) {
+    return {};
+  }
+  std::vector<Pose3> poses{start_pose_map};
+  poses.reserve(simplified.size() + 1U);
+  for (auto cell = std::next(simplified.begin()); cell != simplified.end();
+       ++cell) {
+    const auto pose_map = TransformPose(
+        Pose3{
+            .position_m = local_map.CellCenter(*cell),
+            .orientation = start_pose_map.orientation,
+        },
+        map_from_odom, TransformDirection::kChildToParent);
+    if (!pose_map.has_value()) {
+      return {};
+    }
+    poses.push_back(*pose_map);
+  }
+  return poses;
+}
+
 } // namespace
 
 GlobalRoutePlanResult
@@ -269,7 +305,7 @@ PlanGroundGlobalRoute(const PlannerInput &input,
   }
   const auto start_cell = map->PositionToCell(
       Vec2{start_pose_map->position_m.x, start_pose_map->position_m.y});
-  if (!start_cell || !safe_projection->HardFeasible(*start_cell)) {
+  if (!start_cell) {
     return Failure(PlanningOutcome::kNoKnownSafeRoute,
                    "GLOBAL_NO_KNOWN_SAFE_ROUTE", started, level);
   }
@@ -296,15 +332,151 @@ PlanGroundGlobalRoute(const PlannerInput &input,
     excluded_mask[map->Index(cell)] = 1U;
   }
 
-  GlobalGridSearchResult search = SearchGlobalGrid(GlobalGridSearchProblem{
-      .projection = *safe_projection,
-      .start = *start_cell,
-      .goal_mask = goal_mask,
-      .excluded_mask = excluded_mask,
-      .maximum_speed_mps = projection.context->terrain_limits.maximum_speed_mps,
-      .config = input.config.global_search,
-      .stop_token = input.stop_token,
-  });
+  std::optional<LocalStartPortal> selected_portal;
+  GlobalGridSearchResult search;
+  if (safe_projection->HardFeasible(*start_cell) &&
+      excluded_mask[map->Index(*start_cell)] == 0U) {
+    search = SearchGlobalGrid(GlobalGridSearchProblem{
+        .projection = *safe_projection,
+        .start = *start_cell,
+        .goal_mask = goal_mask,
+        .excluded_mask = excluded_mask,
+        .maximum_speed_mps =
+            projection.context->terrain_limits.maximum_speed_mps,
+        .config = input.config.global_search,
+        .stop_token = input.stop_token,
+    });
+  } else {
+    const shared::MapSnapshotBuildResult local_map =
+        shared::MapSnapshot::Create(input.world.local_map);
+    if (!local_map.ok()) {
+      return Failure(PlanningOutcome::kInvalidRequest, local_map.reason_code,
+                     started, level);
+    }
+    const shared::SafeProjectionBuildResult local_projection =
+        shared::BuildSafeProjection(local_map.snapshot, input.capability,
+                                    input.config.map_safety, input.stop_token);
+    if (!local_projection.ok()) {
+      const PlanningOutcome outcome =
+          local_projection.reason_code == "REQUEST_CANCELED"
+              ? PlanningOutcome::kCanceled
+              : PlanningOutcome::kInvalidRequest;
+      return Failure(outcome, local_projection.reason_code, started, level);
+    }
+    const auto current_pose_odom = CurrentPose(input);
+    const auto local_start = current_pose_odom
+                                 ? local_map.snapshot->PositionToCell(Vec2{
+                                       current_pose_odom->position_m.x,
+                                       current_pose_odom->position_m.y,
+                                   })
+                                 : std::nullopt;
+    if (!local_start.has_value() ||
+        !local_projection.projection->HardFeasible(*local_start)) {
+      return Failure(PlanningOutcome::kNoKnownSafeRoute,
+                     "GLOBAL_NO_KNOWN_SAFE_ROUTE", started, level);
+    }
+    const std::int32_t local_component =
+        local_projection.projection->ConnectedComponent(*local_start);
+    std::vector<LocalStartPortal> portals;
+    for (std::size_t index = 0U; index < map->cell_count(); ++index) {
+      if (input.stop_token.stop_requested()) {
+        return Failure(PlanningOutcome::kCanceled, "REQUEST_CANCELED", started,
+                       level);
+      }
+      const shared::GridCell global_cell{
+          .x = static_cast<std::int32_t>(index % map->width()),
+          .y = static_cast<std::int32_t>(index / map->width()),
+      };
+      if (excluded_mask[index] != 0U ||
+          !safe_projection->HardFeasible(global_cell)) {
+        continue;
+      }
+      const auto portal_pose_odom = TransformPose(
+          Pose3{
+              .position_m = map->CellCenter(global_cell),
+              .orientation = current_pose_odom->orientation,
+          },
+          input.world.map_from_odom, TransformDirection::kParentToChild);
+      if (!portal_pose_odom.has_value()) {
+        return Failure(PlanningOutcome::kInvalidRequest,
+                       "GLOBAL_START_TRANSFORM_INVALID", started, level);
+      }
+      const auto local_cell = local_map.snapshot->PositionToCell(Vec2{
+          portal_pose_odom->position_m.x,
+          portal_pose_odom->position_m.y,
+      });
+      if (!local_cell.has_value() ||
+          !local_projection.projection->HardFeasible(*local_cell) ||
+          local_projection.projection->ConnectedComponent(*local_cell) !=
+              local_component) {
+        continue;
+      }
+      std::vector<std::uint8_t> portal_mask(local_map.snapshot->cell_count(),
+                                            0U);
+      portal_mask[local_map.snapshot->Index(*local_cell)] = 1U;
+      GlobalGridSearchResult connector =
+          SearchGlobalGrid(GlobalGridSearchProblem{
+              .projection = *local_projection.projection,
+              .start = *local_start,
+              .goal_mask = portal_mask,
+              .excluded_mask = {},
+              .maximum_speed_mps =
+                  projection.context->terrain_limits.maximum_speed_mps,
+              .config = input.config.global_search,
+              .stop_token = input.stop_token,
+          });
+      if (!connector.ok()) {
+        if (connector.status == GlobalSearchStatus::kNoPath) {
+          continue;
+        }
+        return SearchFailure(connector, started, level);
+      }
+      const auto portal_pose_map = TransformPose(
+          Pose3{
+              .position_m = local_map.snapshot->CellCenter(*local_cell),
+              .orientation = current_pose_odom->orientation,
+          },
+          input.world.map_from_odom, TransformDirection::kChildToParent);
+      if (!portal_pose_map.has_value()) {
+        return Failure(PlanningOutcome::kInvalidRequest,
+                       "GLOBAL_START_TRANSFORM_INVALID", started, level);
+      }
+      portals.push_back(LocalStartPortal{
+          .global_cell = global_cell,
+          .connector = std::move(connector),
+          .portal_pose_map = *portal_pose_map,
+      });
+    }
+    std::ranges::sort(portals, {}, [](const LocalStartPortal &portal) {
+      return std::tuple{portal.connector.cost, portal.global_cell.y,
+                        portal.global_cell.x};
+    });
+    for (LocalStartPortal &portal : portals) {
+      GlobalGridSearchResult candidate =
+          SearchGlobalGrid(GlobalGridSearchProblem{
+              .projection = *safe_projection,
+              .start = portal.global_cell,
+              .goal_mask = goal_mask,
+              .excluded_mask = excluded_mask,
+              .maximum_speed_mps =
+                  projection.context->terrain_limits.maximum_speed_mps,
+              .config = input.config.global_search,
+              .stop_token = input.stop_token,
+          });
+      if (candidate.ok()) {
+        search = std::move(candidate);
+        selected_portal = std::move(portal);
+        break;
+      }
+      if (candidate.status != GlobalSearchStatus::kNoPath) {
+        return SearchFailure(candidate, started, level);
+      }
+    }
+    if (!selected_portal.has_value()) {
+      return Failure(PlanningOutcome::kNoKnownSafeRoute,
+                     "GLOBAL_NO_KNOWN_SAFE_ROUTE", started, level);
+    }
+  }
   if (!search.ok()) {
     return SearchFailure(search, started, level);
   }
@@ -315,8 +487,34 @@ PlanGroundGlobalRoute(const PlannerInput &input,
     return Failure(PlanningOutcome::kNumericalFailure,
                    "GLOBAL_ROUTE_SIMPLIFICATION_FAILED", started, level);
   }
-  std::vector<Pose3> poses =
-      BuildPoses(*map, simplified, input.goal_map, *start_pose_map);
+  std::vector<Pose3> poses;
+  if (selected_portal.has_value()) {
+    const shared::MapSnapshotBuildResult local_map =
+        shared::MapSnapshot::Create(input.world.local_map);
+    const shared::SafeProjectionBuildResult local_projection =
+        local_map.ok()
+            ? shared::BuildSafeProjection(local_map.snapshot, input.capability,
+                                          input.config.map_safety,
+                                          input.stop_token)
+            : shared::SafeProjectionBuildResult{};
+    if (!local_map.ok() || !local_projection.ok()) {
+      return Failure(PlanningOutcome::kNumericalFailure,
+                     "GLOBAL_START_CONNECTOR_INVALID", started, level);
+    }
+    poses = BuildConnectorPoses(
+        *local_map.snapshot, *local_projection.projection,
+        selected_portal->connector, *start_pose_map, input.world.map_from_odom);
+    std::vector<Pose3> global_poses = BuildPoses(
+        *map, simplified, input.goal_map, selected_portal->portal_pose_map);
+    if (poses.empty() || global_poses.empty()) {
+      return Failure(PlanningOutcome::kNumericalFailure,
+                     "GLOBAL_START_CONNECTOR_INVALID", started, level);
+    }
+    poses.insert(poses.end(), std::next(global_poses.begin()),
+                 global_poses.end());
+  } else {
+    poses = BuildPoses(*map, simplified, input.goal_map, *start_pose_map);
+  }
   if (poses.empty()) {
     return Failure(PlanningOutcome::kNumericalFailure,
                    "GLOBAL_ROUTE_RESULT_INVALID", started, level);
@@ -338,10 +536,23 @@ PlanGroundGlobalRoute(const PlannerInput &input,
               .conditional_cells = std::move(conditional_cells),
               .simplified_cells = std::move(simplified),
               .poses_map = std::move(poses),
-              .cost = search.cost,
-              .expanded_states = search.expanded_states,
-              .open_peak = search.open_peak,
-              .estimated_work_memory_bytes = search.estimated_work_memory_bytes,
+              .cost = search.cost + (selected_portal.has_value()
+                                         ? selected_portal->connector.cost
+                                         : 0.0),
+              .expanded_states =
+                  search.expanded_states +
+                  (selected_portal.has_value()
+                       ? selected_portal->connector.expanded_states
+                       : 0U),
+              .open_peak = std::max(search.open_peak,
+                                    selected_portal.has_value()
+                                        ? selected_portal->connector.open_peak
+                                        : 0U),
+              .estimated_work_memory_bytes =
+                  search.estimated_work_memory_bytes +
+                  (selected_portal.has_value()
+                       ? selected_portal->connector.estimated_work_memory_bytes
+                       : 0U),
           },
       .global_level = level,
       .elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(

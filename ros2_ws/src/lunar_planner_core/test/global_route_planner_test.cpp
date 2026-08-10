@@ -52,6 +52,13 @@ void SetElevation(GridMap &map, const std::size_t x, const std::size_t y,
   values.at(y * map.width + x) = elevation_m;
 }
 
+void SetKnown(GridMap &map, const std::size_t x, const std::size_t y,
+              const bool known) {
+  auto &values =
+      std::get<std::vector<std::uint8_t>>(map.layers.at("valid_mask").values);
+  values.at(y * map.width + x) = static_cast<std::uint8_t>(known);
+}
+
 TEST(GlobalRoutePlanner, PlansCompleteDeterministicWheelRoute) {
   const PlannerInput input = GroundInput(PlatformType::kWheeled);
 
@@ -70,6 +77,65 @@ TEST(GlobalRoutePlanner, PlansCompleteDeterministicWheelRoute) {
   EXPECT_NEAR(first.route->poses_map.front().position_m.y, 5.5, 1.0e-9);
   EXPECT_NEAR(first.route->poses_map.back().position_m.x, 18.5, 0.2);
   EXPECT_NEAR(first.route->poses_map.back().position_m.y, 5.5, 0.2);
+}
+
+TEST(GlobalRoutePlanner, AnchorsAPartiallyObservedGlobalStartFromLocalDetail) {
+  PlannerInput input = GroundInput(PlatformType::kWheeled);
+  SetKnown(input.world.global_map, 1U, 5U, false);
+
+  const auto result = PlanGroundGlobalRoute(input);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_FALSE(result.route->raw_cells.empty());
+  EXPECT_NE(result.route->raw_cells.front(), (shared::GridCell{1, 5}));
+  ASSERT_FALSE(result.route->poses_map.empty());
+  EXPECT_NEAR(result.route->poses_map.front().position_m.x, 1.5, 1.0e-9);
+  EXPECT_NEAR(result.route->poses_map.front().position_m.y, 5.5, 1.0e-9);
+}
+
+TEST(GlobalRoutePlanner,
+     AnchorsALeggedPartialGlobalStartThroughTheLocalComponent) {
+  PlannerInput input = GroundInput(PlatformType::kLegged);
+  SetKnown(input.world.global_map, 1U, 5U, false);
+
+  const auto result = PlanGroundGlobalRoute(input);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_FALSE(result.route->raw_cells.empty());
+  EXPECT_NE(result.route->raw_cells.front(), (shared::GridCell{1, 5}));
+  ASSERT_FALSE(result.route->poses_map.empty());
+  EXPECT_NEAR(result.route->poses_map.front().position_m.x, 1.5, 1.0e-9);
+  EXPECT_NEAR(result.route->poses_map.front().position_m.y, 5.5, 1.0e-9);
+}
+
+TEST(GlobalRoutePlanner, DoesNotUseAnExcludedCellAsTheLocalStartPortal) {
+  PlannerInput input = GroundInput(PlatformType::kWheeled);
+  SetKnown(input.world.global_map, 1U, 5U, false);
+  const std::vector<shared::GridCell> excluded{{2, 5}};
+
+  const auto result = PlanGroundGlobalRoute(input, excluded);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_FALSE(result.route->raw_cells.empty());
+  EXPECT_NE(result.route->raw_cells.front(), excluded.front());
+}
+
+TEST(GlobalRoutePlanner, RejectsAPartialStartWithoutALocalPortal) {
+  PlannerInput input = GroundInput(PlatformType::kWheeled);
+  SetKnown(input.world.global_map, 1U, 5U, false);
+  for (std::size_t y = 4U; y <= 6U; ++y) {
+    for (std::size_t x = 0U; x <= 2U; ++x) {
+      if (x != 1U || y != 5U) {
+        SetObstacle(input.world.local_map, x, y);
+      }
+    }
+  }
+
+  const auto result = PlanGroundGlobalRoute(input);
+
+  EXPECT_EQ(result.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(result.reason_code, "GLOBAL_NO_KNOWN_SAFE_ROUTE");
+  EXPECT_FALSE(result.route.has_value());
 }
 
 TEST(GlobalRoutePlanner, MarksANarrowGlobalPassageForLocalCertification) {
