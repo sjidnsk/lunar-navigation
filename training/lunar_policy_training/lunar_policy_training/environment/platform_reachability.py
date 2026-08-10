@@ -252,7 +252,10 @@ class PlatformCandidateReachability:
             & (target_cells[:, 1] >= 0)
             & (target_cells[:, 1] < height)
         )
-        accepted = np.zeros(len(candidates), dtype=np.bool_)
+        # The local detail map is only a refinement window around the robot.
+        # Refine targets represented by that window, but preserve the global
+        # C++ component result for macro targets outside it.
+        accepted = np.ones(len(candidates), dtype=np.bool_)
         indices = np.flatnonzero(inside)
         if len(indices):
             columns = target_cells[indices, 0]

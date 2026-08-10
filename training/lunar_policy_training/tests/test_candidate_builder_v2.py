@@ -760,16 +760,20 @@ def test_ground_reachability_intersects_global_and_observed_detail_components() 
         bridge=RecordingBridge(),
         request=request,
     )
-    candidates = np.asarray(((255, 0), (255, 1)), dtype=np.int32)
+    candidates = np.asarray(((255, 0), (255, 1), (255, 3)), dtype=np.int32)
     exact_targets = np.asarray(
-        ((3.9, 2.0, 0.0), (6.0, 2.0, 0.0)), dtype=np.float64
+        ((3.9, 2.0, 0.0), (6.0, 2.0, 0.0), (12.0, 2.0, 0.0)),
+        dtype=np.float64,
     )
 
     result = reachability.filter(
         candidates, target_positions_map=exact_targets
     )
 
-    assert result.accepted_mask.tolist() == [True, False]
+    # The detail projection can refine candidates inside its 10 m window, but
+    # it must not reject a globally reachable macro target merely because that
+    # target lies outside the local window.
+    assert result.accepted_mask.tolist() == [True, False, True]
     assert dict(result.reason_counts) == {"platform_unreachable_count": 1}
 
 
