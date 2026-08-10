@@ -50,6 +50,14 @@ class ExternalAdapter(LifecycleNode):
             ),
         )
 
+    @classmethod
+    def _channel_qos(cls, profile, channel_name: str) -> QoSProfile:
+        qos = cls._qos(profile)
+        if channel_name == "exploration_task":
+            qos.depth = 1
+            qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        return qos
+
     def on_configure(self, state: State) -> TransitionCallbackReturn:
         del state
         try:
@@ -57,8 +65,8 @@ class ExternalAdapter(LifecycleNode):
                 "interface_profile_file"
             ).get_parameter_value().string_value
             profile = load_interface_profile(profile_path)
-            qos = self._qos(profile.qos)
             for channel_name, channel in profile.channels.items():
+                qos = self._channel_qos(profile.qos, channel_name)
                 input_type = get_message(channel.input_type)
                 output_type = get_message(channel.output_type)
                 if channel.mode == "direct_remap":
@@ -132,6 +140,9 @@ def main(args: list[str] | None = None) -> None:
     node = ExternalAdapter()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

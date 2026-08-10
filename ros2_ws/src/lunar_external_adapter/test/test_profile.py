@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 import yaml
+from rclpy.qos import DurabilityPolicy
+
+from lunar_external_adapter.node import ExternalAdapter
 
 from lunar_external_adapter.profile import (
     InterfaceProfileError,
@@ -59,6 +62,19 @@ def test_default_profile_uses_direct_remap_for_standard_types() -> None:
     assert profile.channels["localization_status"].converter == (
         "localization_status_v1"
     )
+
+
+def test_exploration_task_converter_preserves_transient_local_delivery() -> None:
+    profile = load_interface_profile(DEFAULT_PROFILE)
+
+    task_qos = ExternalAdapter._channel_qos(profile.qos, "exploration_task")
+    feedback_qos = ExternalAdapter._channel_qos(
+        profile.qos, "motion_execution_feedback"
+    )
+
+    assert task_qos.depth == 1
+    assert task_qos.durability == DurabilityPolicy.TRANSIENT_LOCAL
+    assert feedback_qos.durability == DurabilityPolicy.VOLATILE
 
 
 def test_schema_and_default_profile_define_same_closed_channels() -> None:

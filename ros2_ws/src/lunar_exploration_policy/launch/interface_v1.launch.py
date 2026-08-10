@@ -15,6 +15,7 @@ def generate_launch_description():
         package="lunar_exploration_policy",
         executable="interface_v1_policy",
         name="lunar_interface_v1_policy",
+        namespace="",
         output="screen",
         parameters=[
             {

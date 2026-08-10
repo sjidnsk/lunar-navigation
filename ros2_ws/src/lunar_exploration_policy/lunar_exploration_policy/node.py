@@ -17,12 +17,13 @@ from lunar_navigation_msgs.msg import (
     MotionExecutionFeedback,
 )
 from lunar_planning_msgs.action import PlanMotion
+from lunar_planning_msgs.msg import MotionReference
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.lifecycle import LifecycleNode, State, TransitionCallbackReturn
-from rclpy.qos import QoSProfile
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 
@@ -81,6 +82,7 @@ class InterfaceV1PolicyNode(LifecycleNode):
         self._enabled = False
         self._subscriptions: list[Any] = []
         self._status_publisher = None
+        self._reference_publisher = None
         self._timer = None
         self._action_client = None
         self._assembler = None
@@ -127,17 +129,31 @@ class InterfaceV1PolicyNode(LifecycleNode):
             self._coordinator = ClosedLoopCoordinator(DeterministicPolicy(runtime))
             self._platform_type = projector.platform_type
             qos = QoSProfile(depth=10)
+            mission_qos = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
             self._subscriptions = [
                 self.create_subscription(GridMap, "/environment/map_global", self._on_global_map, qos),
                 self.create_subscription(GridMap, "/environment/map_local", self._on_local_map, qos),
                 self.create_subscription(Odometry, "/localization/odometry", self._on_odometry, qos),
                 self.create_subscription(LocalizationStatus, "/localization/status", self._on_localization, qos),
-                self.create_subscription(ExplorationTask, "/mission/exploration_task", self._on_mission, qos),
+                self.create_subscription(ExplorationTask, "/mission/exploration_task", self._on_mission, mission_qos),
                 self.create_subscription(MotionExecutionFeedback, "/execution/motion_feedback", self._on_feedback, qos),
                 self.create_subscription(TFMessage, "/tf", self._on_tf, qos),
             ]
             self._status_publisher = self.create_lifecycle_publisher(
                 String, "/lunar/interface_v1/status", qos
+            )
+            # 外部执行控制器消费该参考。volatile 可避免控制器重启后重放旧命令。
+            reference_qos = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE,
+            )
+            self._reference_publisher = self.create_lifecycle_publisher(
+                MotionReference, "/lunar/motion_reference", reference_qos
             )
             self._action_client = ActionClient(self, PlanMotion, "/plan_motion")
             period = float(self.get_parameter("decision_period_s").value)
@@ -178,10 +194,13 @@ class InterfaceV1PolicyNode(LifecycleNode):
             self.destroy_subscription(subscription)
         if self._status_publisher is not None:
             self.destroy_publisher(self._status_publisher)
+        if self._reference_publisher is not None:
+            self.destroy_publisher(self._reference_publisher)
         self._subscriptions.clear()
         self._timer = None
         self._action_client = None
         self._status_publisher = None
+        self._reference_publisher = None
 
     def _reject(self, channel: str, error: Exception) -> None:
         self.get_logger().warning(
@@ -388,15 +407,20 @@ class InterfaceV1PolicyNode(LifecycleNode):
     def _on_action_result(self, future, request_id: str) -> None:
         try:
             result = future.result().result
-            self._active_goal_handle = None
-            self._accept_planner_result(
-                PlannerResult(
+            with self._lock:
+                self._active_goal_handle = None
+                if not self._enabled:
+                    # deactivate/reset 后到达的 Action 结果属于旧上下文，禁止下发。
+                    return
+                planner_result = PlannerResult(
                     request_id,
                     bool(result.has_reference),
                     result.reference.plan_id if result.has_reference else "",
                     result.reason_code,
                 )
-            )
+                if self._accept_planner_result(planner_result) and result.has_reference:
+                    # 协调器先验证 request_id 和状态，再把同一参考交给执行器。
+                    self._reference_publisher.publish(result.reference)
         except Exception as error:
             self._reject("plan_motion_result", error)
             self._accept_planner_result(
@@ -425,15 +449,17 @@ class InterfaceV1PolicyNode(LifecycleNode):
                 )
             self._publish_status(reason)
 
-    def _accept_planner_result(self, result: PlannerResult) -> None:
+    def _accept_planner_result(self, result: PlannerResult) -> bool:
         with self._lock:
             try:
                 self._coordinator.accept_planner_result(result)
                 self._publish_status(
                     "REFERENCE_AVAILABLE" if result.has_reference else result.reason_code
                 )
+                return True
             except CoordinatorError as error:
                 self._reject("plan_motion_result", error)
+                return False
 
     def _publish_status(self, event: str) -> None:
         if self._status_publisher is None:
@@ -467,10 +493,13 @@ def main(args: list[str] | None = None) -> None:
     executor.add_node(node)
     try:
         executor.spin()
+    except KeyboardInterrupt:
+        pass
     finally:
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 __all__ = ["InterfaceV1PolicyNode", "main"]

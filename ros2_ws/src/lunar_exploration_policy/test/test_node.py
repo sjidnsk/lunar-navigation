@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import rclpy
 from rclpy.parameter import Parameter
+from lunar_planning_msgs.action import PlanMotion
 
 from lunar_exploration_policy.node import InterfaceV1PolicyNode
 
@@ -44,6 +45,7 @@ def test_real_model_and_frozen_profile_configure_lifecycle_node() -> None:
         assert node._assembler is not None
         assert node._platform_type == "WHEELED"
         assert len(node._subscriptions) == 7
+        assert node._reference_publisher is not None
     finally:
         node.trigger_cleanup()
         node.destroy_node()
@@ -62,3 +64,121 @@ def test_modified_profile_fails_closed(tmp_path: Path) -> None:
         node.destroy_node()
         rclpy.shutdown()
 
+
+def test_successful_plan_result_is_published_for_external_execution() -> None:
+    class _Completed:
+        def __init__(self, result):
+            self.result = result
+
+    class _Future:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return _Completed(self._result)
+
+    class _Recorder:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    result = PlanMotion.Result()
+    result.has_reference = True
+    result.reference.plan_id = "plan-fed9-1"
+    result.reason_code = "OK"
+
+    rclpy.init()
+    node = InterfaceV1PolicyNode()
+    accepted = []
+    recorder = _Recorder()
+    node._enabled = True
+    node._reference_publisher = recorder
+    node._accept_planner_result = lambda value: accepted.append(value) or True
+    try:
+        node._on_action_result(_Future(result), "request-fed9-1")
+        assert [message.plan_id for message in recorder.messages] == ["plan-fed9-1"]
+        assert len(accepted) == 1
+        assert accepted[0].has_reference is True
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_late_plan_result_after_deactivate_is_not_published() -> None:
+    class _Completed:
+        def __init__(self, result):
+            self.result = result
+
+    class _Future:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return _Completed(self._result)
+
+    class _Recorder:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    result = PlanMotion.Result()
+    result.has_reference = True
+    result.reference.plan_id = "late-plan"
+    result.reason_code = "OK"
+
+    rclpy.init()
+    node = InterfaceV1PolicyNode()
+    accepted = []
+    recorder = _Recorder()
+    node._enabled = False
+    node._reference_publisher = recorder
+    node._accept_planner_result = lambda value: accepted.append(value) or True
+    try:
+        node._on_action_result(_Future(result), "old-request")
+        assert recorder.messages == []
+        assert accepted == []
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_result_rejected_by_current_coordinator_is_not_published() -> None:
+    class _Completed:
+        def __init__(self, result):
+            self.result = result
+
+    class _Future:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return _Completed(self._result)
+
+    class _Recorder:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    result = PlanMotion.Result()
+    result.has_reference = True
+    result.reference.plan_id = "foreign-plan"
+    result.reason_code = "OK"
+
+    rclpy.init()
+    node = InterfaceV1PolicyNode()
+    recorder = _Recorder()
+    node._enabled = True
+    node._reference_publisher = recorder
+    node._accept_planner_result = lambda value: False
+    try:
+        node._on_action_result(_Future(result), "foreign-request")
+        assert recorder.messages == []
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
