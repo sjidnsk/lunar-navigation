@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import lunar_policy_training.closed_loop_gate as gate_module
 from lunar_policy_training.closed_loop_gate import (
     CLOSED_LOOP_GATE_SCHEMA,
     CLOSED_LOOP_MINIMUM_SCENES,
@@ -141,6 +142,26 @@ def test_gate_keeps_full_source_head_distinct_from_v3_cache_commit() -> None:
             cache_identity=identity,
             expected_cache_identity=expected,
         )
+
+
+def test_checked_gate_worker_identifies_the_failed_scene_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work = SimpleNamespace(
+        case=SimpleNamespace(scene_id=_scene_id(99)),
+        platform="HOPPER",
+    )
+    monkeypatch.setattr(
+        gate_module,
+        "_run_closed_loop_work",
+        lambda _work: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(
+        ClosedLoopGateError,
+        match=f"{_scene_id(99)}/HOPPER: boom",
+    ):
+        gate_module._run_closed_loop_work_checked(work)
 
 
 def test_select_closed_loop_gate_cases_binds_schedule_cursor_and_coverability() -> None:

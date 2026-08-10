@@ -10,7 +10,6 @@ import os
 import subprocess
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import IO, Mapping, Sequence
@@ -495,7 +494,7 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
     if terminal_reason is None:
         raise ClosedLoopGateError("gate natural terminal has no reason")
     binding = work.case.for_platform(work.platform)
-    return {
+    row = {
         "scene_id": work.case.scene_id,
         "split": work.case.split,
         "platform": work.platform,
@@ -519,6 +518,8 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         "request_sequence_sha256": request_chain.hexdigest(),
         "planner_sequence_sha256": planner_chain.hexdigest(),
     }
+    _validate_row(row, work.case, work.platform)
+    return row
 
 
 def _validate_row(
@@ -573,6 +574,16 @@ def _validate_row(
         or row["coverable_mask_sha256"] != binding.coverable_mask_sha256
     ):
         raise ClosedLoopGateError("closed-loop coverability identity differs")
+
+
+def _run_closed_loop_work_checked(work: _ClosedLoopWork) -> dict[str, object]:
+    try:
+        return _run_closed_loop_work(work)
+    except Exception as error:
+        raise ClosedLoopGateError(
+            "closed-loop scene-platform execution failed: "
+            f"{work.case.scene_id}/{work.platform}: {error}"
+        ) from error
 
 
 def build_closed_loop_gate_report(
@@ -781,24 +792,15 @@ def run_closed_loop_gate(
     started = time.monotonic()
     rows: list[dict[str, object]] = []
     context = mp.get_context("spawn")
-    with ProcessPoolExecutor(
-        max_workers=min(max_workers, len(work_items)),
-        mp_context=context,
-    ) as executor:
-        futures = {
-            executor.submit(_run_closed_loop_work, work): work
-            for work in work_items
-        }
+    pool = context.Pool(processes=min(max_workers, len(work_items)))
+    try:
         completed = 0
-        for future in as_completed(futures):
-            work = futures[future]
-            try:
-                rows.append(future.result())
-            except Exception as error:
-                raise ClosedLoopGateError(
-                    "closed-loop scene-platform execution failed: "
-                    f"{work.case.scene_id}/{work.platform}: {error}"
-                ) from error
+        for row in pool.imap_unordered(
+            _run_closed_loop_work_checked,
+            work_items,
+            chunksize=1,
+        ):
+            rows.append(row)
             completed += 1
             if progress_stream is not None:
                 print(
@@ -806,14 +808,25 @@ def run_closed_loop_gate(
                         {
                             "closed_loop_completed": completed,
                             "closed_loop_total": len(work_items),
-                            "scene_id": work.case.scene_id,
-                            "platform": work.platform,
+                            "scene_id": row["scene_id"],
+                            "platform": row["platform"],
+                            "executed_step_count": row["executed_step_count"],
+                            "final_coverage": float.fromhex(
+                                str(row["final_coverage_hex"])
+                            ),
+                            "terminal_reason": row["terminal_reason"],
                         },
                         sort_keys=True,
                     ),
                     file=progress_stream,
                     flush=True,
                 )
+        pool.close()
+    except BaseException:
+        pool.terminate()
+        raise
+    finally:
+        pool.join()
     report = build_closed_loop_gate_report(
         source_commit=source_commit,
         cache_manifest_sha256=str(cache.manifest["cache_manifest_sha256"]),
