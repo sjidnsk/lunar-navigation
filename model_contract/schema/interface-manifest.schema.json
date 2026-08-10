@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lunar-navigation.local/schema/interface-manifest-v1.json",
+  "title": "Lunar policy interface-only manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "qualification", "model_id", "version",
+    "source_commit", "checkpoint", "onnx_opset",
+    "observation_contract", "action_contract", "training_identity",
+    "capability_profiles", "inputs", "outputs", "normalization",
+    "files", "tolerances", "export_environment"
+  ],
+  "properties": {
+    "schema_version": {"const": "lunar-policy-interface-manifest/v1"},
+    "qualification": {"const": "integration_only"},
+    "model_id": {"type": "string", "minLength": 1},
+    "version": {"type": "string", "minLength": 1},
+    "source_commit": {"const": "fed9ea92c8ae55eb8423a008598935f515e801a3"},
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "step", "file_sha256", "body_sha256"],
+      "properties": {
+        "schema_version": {"const": "lunar-ppo-checkpoint/v6"},
+        "step": {"const": 251},
+        "file_sha256": {"const": "5c19113953bc91854abac88835a833e7bebe25ed6865cf0a09f36e828b359727"},
+        "body_sha256": {"const": "001ad541eb4ba19930350c70cfd86d392c6443e73f0914bcde5f32dacdadb101"}
+      }
+    },
+    "onnx_opset": {"const": 17},
+    "observation_contract": {"const": "lunar-observation-contract/v3"},
+    "action_contract": {"const": "lunar-action-contract/v2"},
+    "training_identity": {"type": "object"},
+    "capability_profiles": {"type": "object"},
+    "inputs": {"type": "array", "minItems": 7, "maxItems": 7},
+    "outputs": {"type": "array", "minItems": 4, "maxItems": 4},
+    "normalization": {"type": "object"},
+    "files": {"type": "object"},
+    "tolerances": {"type": "object"},
+    "export_environment": {"type": "object"}
+  }
+}
