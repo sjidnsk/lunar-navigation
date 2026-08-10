@@ -14,6 +14,7 @@ import torch
 from lunar_policy_training.capability_freeze import ScenarioIdentity
 from lunar_policy_training.environment import formal_builder as formal_builder_module
 from lunar_policy_training.environment import candidate_builder as candidate_builder_module
+from lunar_policy_training.environment import formal_start_qualification as qualification_module
 from lunar_policy_training.environment.candidate_builder import CandidateBuilderV2
 from lunar_policy_training.environment.coverability import (
     IneligibleReason,
@@ -484,6 +485,62 @@ def test_cache_start_qualification_matches_the_episode_candidate_semantics(
         arrays=no_roi_arrays,
         capability=bundle.for_platform("WHEELED"),
     ) is None
+
+
+def test_start_qualification_skips_a_native_unsafe_start_candidate(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assembly, bundle, _ = _assembly(tmp_path)
+    worker = assembly.factory(0, "WHEELED")
+    original_update = qualification_module.ObservedPrimitiveReachability.update
+    calls = 0
+
+    def reject_first_start(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("WHEEL_START_NOT_SAFE")
+        return original_update(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        qualification_module.ObservedPrimitiveReachability,
+        "update",
+        reject_first_start,
+    )
+
+    qualified = qualify_initial_start_cell(
+        scene=worker.episode.loaded.scene,
+        arrays=worker.episode.loaded.arrays,
+        capability=bundle.for_platform("WHEELED"),
+    )
+
+    assert calls >= 2
+    assert qualified is not None
+
+
+def test_start_qualification_does_not_hide_other_native_failures(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assembly, bundle, _ = _assembly(tmp_path)
+    worker = assembly.factory(0, "LEGGED")
+
+    def fail_graph(*_args, **_kwargs):
+        raise RuntimeError("PRIMITIVE_GRAPH_FAILED")
+
+    monkeypatch.setattr(
+        qualification_module.ObservedPrimitiveReachability,
+        "update",
+        fail_graph,
+    )
+
+    with pytest.raises(RuntimeError, match="PRIMITIVE_GRAPH_FAILED"):
+        qualify_initial_start_cell(
+            scene=worker.episode.loaded.scene,
+            arrays=worker.episode.loaded.arrays,
+            capability=bundle.for_platform("LEGGED"),
+        )
 
 
 def test_three_platforms_share_physical_scene_but_keep_distinct_projection(

@@ -22,6 +22,11 @@ FORMAL_BOUNDARY_MARGIN_CELLS = math.ceil(
     (FORMAL_SENSOR_RANGE_M + LOCAL_GEOMETRY.size_m / 2.0)
     / GLOBAL_GEOMETRY.resolution_m
 )
+_UNSAFE_NATIVE_START_REASONS = {
+    "WHEELED": "WHEEL_START_NOT_SAFE",
+    "LEGGED": "LEGGED_START_NOT_SAFE",
+    "HOPPER": "HOPPER_START_NOT_SAFE",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,10 +209,17 @@ def qualify_initial_start(
         request.config.wheel.yaw_bin_count = 32
         request.config.legged.xy_resolution_m = 2.0
         request.config.legged.yaw_bin_count = 32
-        primitive_graph = ObservedPrimitiveReachability(platform_type).update(
-            request,
-            observation_revision=1,
-        )
+        try:
+            primitive_graph = ObservedPrimitiveReachability(
+                platform_type
+            ).update(
+                request,
+                observation_revision=1,
+            )
+        except RuntimeError as error:
+            if str(error) == _UNSAFE_NATIVE_START_REASONS[platform_type]:
+                continue
+            raise
         candidates = CandidateBuilderV2(sensor_state).build_from_primitive_graph(
             world,
             mission,
