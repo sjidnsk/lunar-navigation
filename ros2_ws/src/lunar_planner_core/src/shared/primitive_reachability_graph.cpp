@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "hierarchical/frame_transform.hpp"
+#include "hopper/hopper_reachability_graph.hpp"
 #include "legged/legged_lattice.hpp"
 #include "shared/map_snapshot.hpp"
 #include "shared/safe_projection.hpp"
@@ -122,6 +123,20 @@ PrimitiveReachabilityResult PrimitiveReachabilityEngine::Update(
             state, *safe.projection,
             std::get<LeggedCapability>(input.capability), input.config,
             input.stop_token);
+    graph.revision = ++impl_->revision;
+    return shared::FinalizePrimitiveGraph(
+        std::move(graph), input.stop_token);
+  }
+  if (platform == PlatformType::kHopper) {
+    const shared::MapSnapshotBuildResult local_map =
+        shared::MapSnapshot::Create(input.world.local_map);
+    if (!local_map.ok()) {
+      return Failure(local_map.reason_code);
+    }
+    shared::PrimitiveGraphBuildResult graph =
+        hopper::BuildHopperPrimitiveGraph(
+            input, map.snapshot, local_map.snapshot, *safe.projection,
+            maximum_action_distance_m);
     graph.revision = ++impl_->revision;
     return shared::FinalizePrimitiveGraph(
         std::move(graph), input.stop_token);

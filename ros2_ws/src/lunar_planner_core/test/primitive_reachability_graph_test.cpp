@@ -462,5 +462,58 @@ TEST(PrimitiveReachabilityGraph, StatefulEnginePublishesLeggedGraphSnapshot) {
             "cpp-legged-motion-primitive-recoverable-graph/v1");
 }
 
+void KeepOnlyHopperLandingPatches(
+    GridMap& map,
+    const std::vector<std::pair<std::size_t, std::size_t>>& centers) {
+  auto& valid = std::get<std::vector<std::uint8_t>>(
+      map.layers.at("valid_mask").values);
+  std::fill(valid.begin(), valid.end(), 0U);
+  for (const auto [row_center, column_center] : centers) {
+    for (std::size_t row = row_center - 2U; row <= row_center + 2U; ++row) {
+      for (std::size_t column = column_center - 2U;
+           column <= column_center + 2U; ++column) {
+        valid.at(row * map.width + column) = 1U;
+      }
+    }
+  }
+}
+
+TEST(PrimitiveReachabilityGraph,
+     HopperPublishesMultiHopReachabilityButOnlyDirectSuccessors) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 80U, 16U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 80U, 16U, 0.5);
+  input.config.global_map.base_resolution_m = 0.5;
+  std::get<HopperState>(input.current_state).pose.position_m =
+      {3.25, 4.25, 0.0};
+  KeepOnlyHopperLandingPatches(
+      input.world.local_map, {{8U, 6U}, {8U, 40U}, {8U, 74U}});
+  PrimitiveReachabilityEngine engine;
+
+  const PrimitiveReachabilityResult result = engine.Update(input, 30.0);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_EQ(result.snapshot->algorithm_id,
+            "cpp-hopper-certified-recoverable-state-graph/v4");
+  const auto state_at = [&](const std::int32_t cell_x) {
+    return std::find_if(
+        result.snapshot->states.begin(), result.snapshot->states.end(),
+        [cell_x](const PrimitiveReachabilityState& state) {
+          return state.cell_x == cell_x && state.cell_y == 8;
+        });
+  };
+  const auto middle = state_at(40);
+  const auto remote = state_at(74);
+  ASSERT_NE(middle, result.snapshot->states.end());
+  ASSERT_NE(remote, result.snapshot->states.end());
+  EXPECT_EQ(middle->forward_reachable, 1U);
+  EXPECT_EQ(middle->returnable, 1U);
+  EXPECT_EQ(middle->direct_successor, 1U);
+  EXPECT_EQ(remote->forward_reachable, 1U);
+  EXPECT_EQ(remote->returnable, 1U);
+  EXPECT_EQ(remote->direct_successor, 0U);
+  EXPECT_EQ(result.snapshot->reachable[8U * 80U + 74U], 1U);
+}
+
 }  // namespace
 }  // namespace lunar::planning::shared

@@ -36,6 +36,7 @@ add_library(${PROJECT_NAME} SHARED
   src/hopper/flight_tube_certifier.cpp
   src/hopper/hop_certifier.cpp
   src/hopper/hopper_planner.cpp
+  src/hopper/hopper_reachability_graph.cpp
   src/hopper/landing_region.cpp
   src/hopper/ballistic_envelope.cpp
   src/legged/legged_lattice.cpp

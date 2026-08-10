@@ -276,11 +276,11 @@ git commit -m "feat(planner): project legged primitive reachability"
 - Truth projection may traverse multiple certified hops. Runtime `direct_successor` is true only for a certified edge whose source is the current exact landing state.
 - The old `ProjectReachability` wrapper may delegate for compatibility, but formal cache/runtime code must use `PrimitiveReachabilityEngine`.
 
-- [ ] **Step 1: Add RED tests for multi-hop truth versus direct runtime candidates**
+- [x] **Step 1: Add RED tests for multi-hop truth versus direct runtime candidates**
 
 Use three landing patches A-B-C where A-B and B-C certify but A-C does not. Assert truth recoverable projection includes C, A's direct successors include B but not C, and any forward/reverse landing, delta-v, ballistic envelope, flight tube, forbidden, clearance, or support failure rejects the edge without turning numerical failure into ordinary infeasibility.
 
-- [ ] **Step 2: Implement common HOPPER states/edges and run GREEN**
+- [x] **Step 2: Implement common HOPPER states/edges and run GREEN**
 
 ```bash
 colcon --log-base "$NATIVE_ROOT/log-build" build --merge-install \
@@ -292,7 +292,7 @@ ctest --test-dir "$NATIVE_ROOT/build/lunar_planner_core" \
   --output-on-failure
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add ros2_ws/src/lunar_planner_core
