@@ -157,17 +157,20 @@ class PlatformCandidateReachability:
             reachable[candidates[:, 0], candidates[:, 1]], dtype=np.bool_
         )
         if self._platform_type != "HOPPER":
-            accepted &= self._ground_local_reachable(candidates, positions)
+            local_inside, local_accepted = self._ground_local_reachability(
+                candidates, positions
+            )
+            accepted[local_inside] = local_accepted[local_inside]
         return CandidateReachabilityResult(
             accepted,
             {"platform_unreachable_count": int((~accepted).sum(dtype=np.int64))},
         )
 
-    def _ground_local_reachable(
+    def _ground_local_reachability(
         self,
         candidates: np.ndarray,
         target_positions_map: np.ndarray | None,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, np.ndarray]:
         projection = self._local_traversability
         local_map = getattr(getattr(self._request, "world", None), "local_map", None)
         transform = getattr(
@@ -233,29 +236,32 @@ class PlatformCandidateReachability:
                 np.int64
             )
 
+        target_cells = cells_for(targets_local)
+        inside = np.ascontiguousarray(
+            (target_cells[:, 0] >= 0)
+            & (target_cells[:, 0] < width)
+            & (target_cells[:, 1] >= 0)
+            & (target_cells[:, 1] < height),
+            dtype=np.bool_,
+        )
+        accepted = np.zeros(len(candidates), dtype=np.bool_)
         start_cell = cells_for(start_local.reshape(1, 3))[0]
         if not (
             0 <= start_cell[0] < width and 0 <= start_cell[1] < height
         ):
-            return np.zeros(len(candidates), dtype=np.bool_)
+            return inside, accepted
         start_component = int(components[start_cell[1], start_cell[0]])
         if (
             hard[start_cell[1], start_cell[0]] == 0
             or start_component < 0
         ):
-            return np.zeros(len(candidates), dtype=np.bool_)
+            return inside, accepted
 
-        target_cells = cells_for(targets_local)
-        inside = (
-            (target_cells[:, 0] >= 0)
-            & (target_cells[:, 0] < width)
-            & (target_cells[:, 1] >= 0)
-            & (target_cells[:, 1] < height)
-        )
-        # The local detail map is only a refinement window around the robot.
-        # Refine targets represented by that window, but preserve the global
-        # C++ component result for macro targets outside it.
-        accepted = np.ones(len(candidates), dtype=np.bool_)
+        # The observed detail component is the strongest available authority
+        # inside the local map. In particular, it remains valid when the robot's
+        # enclosing 4 m global cell is only partially observed and therefore
+        # makes the conservative global projection empty. Targets outside this
+        # window retain the global C++ component result in filter().
         indices = np.flatnonzero(inside)
         if len(indices):
             columns = target_cells[indices, 0]
@@ -264,7 +270,7 @@ class PlatformCandidateReachability:
                 (hard[rows, columns] != 0)
                 & (components[rows, columns] == start_component)
             )
-        return np.ascontiguousarray(accepted)
+        return inside, np.ascontiguousarray(accepted)
 
     @staticmethod
     def _map_to_odom(points_map: np.ndarray, transform: object) -> np.ndarray:

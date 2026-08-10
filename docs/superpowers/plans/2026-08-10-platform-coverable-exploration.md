@@ -555,6 +555,23 @@ had positive observed-only `0.2 m` gain. The bounded repair is therefore:
   directly in both directions and may not accept a candidate merely because it
   is reachable through another candidate node.
 
+The first exact WHEELED replay then exposed a separate cross-resolution authority
+failure on scene `b230277e...`: after 241 safe decisions, the current `4 m` cell
+contained 378/400 observed detail cells. The global start cell was consequently
+unknown, `cpp-ground-start-connected-component/v1` returned zero reachable cells,
+and the just-executed parent was rejected even though the `0.2 m` local component
+accepted it. The bounded ground repair is therefore:
+
+- inside the observed `0.2 m` local-map window, use the local hard-feasible
+  connected component as the WHEELED/LEGGED candidate authority;
+- outside that window, retain the conservative `4 m` global component result;
+- do not unconditionally intersect the two masks, and do not weaken the global
+  rule that a coarse cell becomes known only after all 400 detail cells are known;
+- keep Hopper on its independently certified landing/hop path;
+- cover the split authority with a regression where global reachability is empty,
+  one in-window target is local-reachable, another is in a different local
+  component, and an out-of-window target follows the global result.
+
 - [ ] **Step 1: Commit the clean implementation source**
 
 ```bash

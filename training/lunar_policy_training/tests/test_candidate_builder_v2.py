@@ -676,12 +676,12 @@ def test_stage_diagnostics_isolate_platform_unreachable_and_zero_gain() -> None:
                     rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
                 ),
             )
-        ),
-        local_traversability_projection=SimpleNamespace(
-            hard_feasible=np.ones((256, 256), dtype=np.uint8),
-            connected_component=np.ones((256, 256), dtype=np.int32),
-        ),
-    )
+            ),
+            local_traversability_projection=SimpleNamespace(
+                hard_feasible=np.zeros((256, 256), dtype=np.uint8),
+                connected_component=np.full((256, 256), -1, dtype=np.int32),
+            ),
+        )
     unreachable = CandidateBuilderV2(_RecordingEstimator()).build(
         world,
         mission,
@@ -713,7 +713,7 @@ def test_stage_diagnostics_isolate_platform_unreachable_and_zero_gain() -> None:
     assert zero_gain.diagnostics.zero_gain_count > 0
 
 
-def test_ground_reachability_intersects_global_and_observed_detail_components() -> None:
+def test_ground_reachability_uses_local_detail_authority_inside_window_and_global_outside() -> None:
     canvas = _canvas()
     pose = Pose2(2.0, 2.0)
     local_shape = (50, 50)
@@ -724,8 +724,10 @@ def test_ground_reachability_intersects_global_and_observed_detail_components() 
     class RecordingBridge:
         def project_reachability(self, request, maximum_edge_distance_m):
             del request, maximum_edge_distance_m
+            reachable = np.zeros((256, 256), dtype=np.uint8)
+            reachable[0, 3] = 1
             return SimpleNamespace(
-                reachable=np.ones((256, 256), dtype=np.uint8)
+                reachable=reachable
             )
 
         def project_traversability(self, request):
@@ -770,9 +772,9 @@ def test_ground_reachability_intersects_global_and_observed_detail_components() 
         candidates, target_positions_map=exact_targets
     )
 
-    # The detail projection can refine candidates inside its 10 m window, but
-    # it must not reject a globally reachable macro target merely because that
-    # target lies outside the local window.
+    # The observed detail component is authoritative inside its window even
+    # when the partially observed 4 m start cell makes the global component
+    # empty. Targets outside the detail window retain the global result.
     assert result.accepted_mask.tolist() == [True, False, True]
     assert dict(result.reason_counts) == {"platform_unreachable_count": 1}
 
