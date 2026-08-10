@@ -144,6 +144,22 @@ reachability_algorithm_id
 状态可达，不能推导所有朝向或模式都可达。候选必须携带原图中的精确 `x/y/z/yaw` 和状态身份，不能
 从二维 mask 的格心重新构造目标。
 
+首版算法与状态 schema 身份固定为：
+
+| 平台 | `reachability_algorithm_id` | `primitive_state_schema` |
+|---|---|---|
+| WHEELED | `cpp-wheel-motion-primitive-recoverable-graph/v1` | `wheel-lattice-state/v1` |
+| LEGGED | `cpp-legged-motion-primitive-recoverable-graph/v1` | `legged-lattice-state/v1` |
+| HOPPER | `cpp-hopper-certified-recoverable-state-graph/v4` | `hopper-landing-state/v2` |
+
+truth 与 observed-only 实例使用相同 ID；`world_evidence_sha256` 和 snapshot revision 区分输入证据。
+图 canonical hash 按状态 canonical tuple 的字典序写状态记录，再按
+`(source_state_id, primitive_id, target_state_id)` 写边记录。整数使用定宽 little-endian，有限浮点使用
+IEEE-754 binary64 little-endian，`-0.0` 归一为 `+0.0`，字符串使用 UTF-8 长度前缀；任何非有限值
+使 materialization 硬失败。`primitive_set_sha256` 对原语定义的 canonical stream 计算；
+`reachability_graph_sha256` 对包含该 primitive-set hash 的状态/边 stream 计算。Python 只校验
+结果，不重新定义序列化。
+
 可恢复语义保证进入成功分母的观测位置能由同一探索轨迹访问并回到冻结安全锚点。只单向可达的状态
 不进入分母或运行时候选。数值不确定、取消或资源耗尽使场景—平台资格计算失败，不能降级为普通
 不可达边。实现必须进行批量多目标图展开；禁止为每个栅格单独调用一次完整 Planner。
