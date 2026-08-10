@@ -386,6 +386,56 @@ def test_bridge_projects_start_bound_reachability_with_exact_array_contract(
         assert projection.candidate_edges_evaluated == 0
 
 
+def test_bridge_streams_hopper_landing_evidence_into_reachability(
+    bridge, easy_request
+) -> None:
+    request = easy_request("HOPPER")
+    grid = request.world.global_map
+    targets = np.asarray(
+        [
+            (
+                grid.origin_m.x + (column + 0.5) * grid.resolution_m,
+                grid.origin_m.y + (row + 0.5) * grid.resolution_m,
+                0.0,
+            )
+            for row in range(grid.height)
+            for column in range(grid.width)
+        ],
+        dtype=np.float64,
+    )
+
+    projected = bridge.project_hopper_landing_evidence(request, targets)
+    shape = (grid.height, grid.width)
+    evidence = bridge_api.HopperLandingEvidenceGrid(
+        projected.certified.reshape(shape),
+        projected.aim_positions_m.reshape((*shape, 3)),
+        projected.boundary_m.reshape((*shape, 4, 3)),
+        projected.area_m2.reshape(shape),
+        projected.algorithm_id,
+    )
+    internal = bridge.project_reachability(request, 2.0)
+    external = bridge.project_reachability(request, 2.0, evidence)
+
+    assert projected.algorithm_id == "cpp-hopper-detail-landing-regions/v1"
+    assert projected.candidates_evaluated == targets.shape[0]
+    assert projected.certified_count == int(projected.certified.sum())
+    assert projected.certified.dtype == np.bool_
+    assert projected.aim_positions_m.shape == (targets.shape[0], 3)
+    assert projected.boundary_m.shape == (targets.shape[0], 4, 3)
+    assert evidence.width == grid.width
+    assert evidence.height == grid.height
+    np.testing.assert_array_equal(external.reachable, internal.reachable)
+
+    with pytest.raises(TypeError, match="bool"):
+        bridge_api.HopperLandingEvidenceGrid(
+            projected.certified.astype(np.uint8).reshape(shape),
+            projected.aim_positions_m.reshape((*shape, 3)),
+            projected.boundary_m.reshape((*shape, 4, 3)),
+            projected.area_m2.reshape(shape),
+            projected.algorithm_id,
+        )
+
+
 def test_bridge_projection_rejects_invalid_map_with_stable_reason(
     bridge, easy_request
 ) -> None:

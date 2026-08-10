@@ -137,6 +137,15 @@ void RequireFiniteFloatArray(const py::array &values,
   }
 }
 
+void RequireFiniteDoubleArray(const py::array &values,
+                              const char *const name) {
+  const auto *data = static_cast<const double *>(values.data());
+  if (!std::all_of(data, data + values.size(),
+                   [](const double value) { return std::isfinite(value); })) {
+    throw py::value_error(std::string{name} + " must be finite");
+  }
+}
+
 template <typename Value>
 [[nodiscard]] py::array_t<Value> CopyArray(const std::vector<Value> &values) {
   py::array_t<Value> result(py::array::ShapeContainer{
@@ -699,6 +708,72 @@ void BindOutput(py::module_ &module) {
       .def_readwrite("diagnostics", &planning::PlannerOutput::diagnostics);
 }
 
+[[nodiscard]] planning::HopperLandingEvidenceGrid HopperLandingGridFromArrays(
+    const py::array &certified,
+    const py::array &aim_positions_m,
+    const py::array &boundary_m,
+    const py::array &area_m2,
+    const std::string &algorithm_id) {
+  RequireExactArray(certified, py::dtype::of<bool>(), 2,
+                    "certified landing mask", "bool");
+  RequireExactArray(aim_positions_m, py::dtype::of<double>(), 3,
+                    "landing aim positions", "float64");
+  RequireExactArray(boundary_m, py::dtype::of<double>(), 4,
+                    "landing boundaries", "float64");
+  RequireExactArray(area_m2, py::dtype::of<double>(), 2,
+                    "landing areas", "float64");
+  if (certified.shape(0) <= 0 || certified.shape(1) <= 0 ||
+      aim_positions_m.shape(0) != certified.shape(0) ||
+      aim_positions_m.shape(1) != certified.shape(1) ||
+      aim_positions_m.shape(2) != 3 ||
+      boundary_m.shape(0) != certified.shape(0) ||
+      boundary_m.shape(1) != certified.shape(1) ||
+      boundary_m.shape(2) != 4 || boundary_m.shape(3) != 3 ||
+      area_m2.shape(0) != certified.shape(0) ||
+      area_m2.shape(1) != certified.shape(1)) {
+    throw py::value_error("hopper landing evidence shape mismatch");
+  }
+  if (algorithm_id.empty()) {
+    throw py::value_error("hopper landing evidence algorithm is missing");
+  }
+  RequireFiniteDoubleArray(aim_positions_m, "landing aim positions");
+  RequireFiniteDoubleArray(boundary_m, "landing boundaries");
+  RequireFiniteDoubleArray(area_m2, "landing areas");
+  const auto *certified_data = static_cast<const bool *>(certified.data());
+  const auto *aim_data = static_cast<const double *>(aim_positions_m.data());
+  const auto *boundary_data = static_cast<const double *>(boundary_m.data());
+  const auto *area_data = static_cast<const double *>(area_m2.data());
+  planning::HopperLandingEvidenceGrid result{
+      .width = static_cast<std::size_t>(certified.shape(1)),
+      .height = static_cast<std::size_t>(certified.shape(0)),
+      .algorithm_id = algorithm_id,
+  };
+  result.landings.reserve(static_cast<std::size_t>(certified.size()));
+  for (py::ssize_t index = 0; index < certified.size(); ++index) {
+    planning::HopperLandingEvidence evidence{
+        .certified = static_cast<std::uint8_t>(certified_data[index]),
+        .aim_position_on_surface_m = planning::Vec3{
+            .x = aim_data[index * 3],
+            .y = aim_data[index * 3 + 1],
+            .z = aim_data[index * 3 + 2],
+        },
+        .area_m2 = area_data[index],
+    };
+    for (std::size_t vertex = 0U; vertex < evidence.boundary_m.size();
+         ++vertex) {
+      const std::size_t offset =
+          static_cast<std::size_t>(index) * 12U + vertex * 3U;
+      evidence.boundary_m[vertex] = planning::Vec3{
+          .x = boundary_data[offset],
+          .y = boundary_data[offset + 1U],
+          .z = boundary_data[offset + 2U],
+      };
+    }
+    result.landings.push_back(std::move(evidence));
+  }
+  return result;
+}
+
 void BindProjection(py::module_ &module) {
   py::class_<planning::TraversabilityProjection>(
       module, "TraversabilityProjection")
@@ -781,6 +856,84 @@ void BindProjection(py::module_ &module) {
       .def_readonly(
           "maximum_certified_edge_distance_m",
           &planning::ReachabilityProjection::maximum_certified_edge_distance_m);
+  py::class_<planning::HopperLandingEvidenceGrid>(
+      module, "HopperLandingEvidenceGrid")
+      .def(py::init(&HopperLandingGridFromArrays),
+           py::arg("certified"), py::arg("aim_positions_m"),
+           py::arg("boundary_m"), py::arg("area_m2"),
+           py::arg("algorithm_id"))
+      .def_readonly("width", &planning::HopperLandingEvidenceGrid::width)
+      .def_readonly("height", &planning::HopperLandingEvidenceGrid::height)
+      .def_readonly("algorithm_id",
+                    &planning::HopperLandingEvidenceGrid::algorithm_id);
+  py::class_<planning::HopperLandingEvidenceProjection>(
+      module, "HopperLandingEvidenceProjection")
+      .def_property_readonly(
+          "certified",
+          [](const planning::HopperLandingEvidenceProjection &self) {
+            py::array_t<bool> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.landings.size())});
+            std::transform(
+                self.landings.begin(), self.landings.end(),
+                result.mutable_data(), [](const auto &landing) {
+                  return landing.certified != 0U;
+                });
+            return result;
+          })
+      .def_property_readonly(
+          "aim_positions_m",
+          [](const planning::HopperLandingEvidenceProjection &self) {
+            py::array_t<double> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.landings.size()),
+                static_cast<py::ssize_t>(3)});
+            double *output = result.mutable_data();
+            for (std::size_t index = 0U; index < self.landings.size();
+                 ++index) {
+              const auto value = self.landings[index].aim_position_on_surface_m;
+              output[index * 3U] = value.x;
+              output[index * 3U + 1U] = value.y;
+              output[index * 3U + 2U] = value.z;
+            }
+            return result;
+          })
+      .def_property_readonly(
+          "boundary_m",
+          [](const planning::HopperLandingEvidenceProjection &self) {
+            py::array_t<double> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.landings.size()),
+                static_cast<py::ssize_t>(4),
+                static_cast<py::ssize_t>(3)});
+            double *output = result.mutable_data();
+            for (std::size_t index = 0U; index < self.landings.size();
+                 ++index) {
+              for (std::size_t vertex = 0U; vertex < 4U; ++vertex) {
+                const auto value = self.landings[index].boundary_m[vertex];
+                const std::size_t offset = index * 12U + vertex * 3U;
+                output[offset] = value.x;
+                output[offset + 1U] = value.y;
+                output[offset + 2U] = value.z;
+              }
+            }
+            return result;
+          })
+      .def_property_readonly(
+          "area_m2",
+          [](const planning::HopperLandingEvidenceProjection &self) {
+            py::array_t<double> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.landings.size())});
+            std::transform(
+                self.landings.begin(), self.landings.end(),
+                result.mutable_data(),
+                [](const auto &landing) { return landing.area_m2; });
+            return result;
+          })
+      .def_readonly("algorithm_id",
+                    &planning::HopperLandingEvidenceProjection::algorithm_id)
+      .def_readonly(
+          "candidates_evaluated",
+          &planning::HopperLandingEvidenceProjection::candidates_evaluated)
+      .def_readonly("certified_count",
+                    &planning::HopperLandingEvidenceProjection::certified_count);
 }
 
 void BindVisibility(py::module_ &module) {
@@ -989,7 +1142,61 @@ void BindRequest(py::module_ &module) {
             return std::move(*result.projection);
           },
           py::arg("request"), py::arg("maximum_edge_distance_m"),
-          py::call_guard<py::gil_scoped_release>());
+          py::call_guard<py::gil_scoped_release>())
+      .def(
+          "project_reachability",
+          [](const training::PlannerBridge &self,
+             const training::TrainingPlanRequest &request,
+             const double maximum_edge_distance_m,
+             const planning::HopperLandingEvidenceGrid &evidence) {
+            auto result = self.ProjectReachability(
+                request, maximum_edge_distance_m, evidence);
+            if (!result.ok()) {
+              throw std::runtime_error(result.reason_code);
+            }
+            return std::move(*result.projection);
+          },
+          py::arg("request"), py::arg("maximum_edge_distance_m"),
+          py::arg("hopper_landing_evidence"),
+          py::call_guard<py::gil_scoped_release>())
+      .def(
+          "project_hopper_landing_evidence",
+          [](const training::PlannerBridge &self,
+             const training::TrainingPlanRequest &request,
+             const py::array &target_positions_m) {
+            RequireExactArray(
+                target_positions_m, py::dtype::of<double>(), 2,
+                "hopper landing targets", "float64");
+            if (target_positions_m.shape(1) != 3) {
+              throw py::value_error(
+                  "hopper landing targets must have shape [N,3]");
+            }
+            RequireFiniteDoubleArray(
+                target_positions_m, "hopper landing targets");
+            const auto *data =
+                static_cast<const double *>(target_positions_m.data());
+            std::vector<planning::Vec3> targets;
+            targets.reserve(
+                static_cast<std::size_t>(target_positions_m.shape(0)));
+            for (py::ssize_t index = 0;
+                 index < target_positions_m.shape(0); ++index) {
+              targets.push_back(planning::Vec3{
+                  .x = data[index * 3],
+                  .y = data[index * 3 + 1],
+                  .z = data[index * 3 + 2],
+              });
+            }
+            planning::HopperLandingEvidenceProjectionResult result;
+            {
+              py::gil_scoped_release release;
+              result = self.ProjectHopperLandingEvidence(request, targets);
+            }
+            if (!result.ok()) {
+              throw std::runtime_error(result.reason_code);
+            }
+            return std::move(*result.projection);
+          },
+          py::arg("request"), py::arg("target_positions_m"));
 }
 
 }  // namespace

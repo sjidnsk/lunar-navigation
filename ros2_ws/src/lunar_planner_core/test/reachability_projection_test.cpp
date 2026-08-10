@@ -334,5 +334,50 @@ TEST(ReachabilityProjection, CancellationAndInvalidDistanceFailClosed) {
             "REACHABILITY_MAXIMUM_EDGE_DISTANCE_INVALID");
 }
 
+TEST(ReachabilityProjection, DetailLandingEvidenceFeedsTheSameHopperGraph) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 80U, 16U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 80U, 16U, 0.5);
+  input.config.global_map.base_resolution_m = 0.5;
+  std::get<HopperState>(input.current_state).pose.position_m =
+      {3.25, 4.25, 0.0};
+  KeepOnlyLandingEvidencePatches(
+      input.world.local_map, {{8U, 6U}, {8U, 40U}});
+  const auto global = shared::MapSnapshot::Create(input.world.global_map);
+  ASSERT_TRUE(global.ok()) << global.reason_code;
+  std::vector<Vec3> targets;
+  targets.reserve(global.snapshot->cell_count());
+  for (std::size_t index = 0U; index < global.snapshot->cell_count(); ++index) {
+    targets.push_back(global.snapshot->CellCenter(shared::GridCell{
+        .x = static_cast<std::int32_t>(index % global.snapshot->width()),
+        .y = static_cast<std::int32_t>(index / global.snapshot->width()),
+    }));
+  }
+
+  const auto landing = ProjectHopperLandingEvidence(input, targets);
+  ASSERT_TRUE(landing.ok()) << landing.reason_code;
+  HopperLandingEvidenceGrid evidence{
+      .width = global.snapshot->width(),
+      .height = global.snapshot->height(),
+      .landings = landing.projection->landings,
+      .algorithm_id = landing.projection->algorithm_id,
+  };
+  const auto internal = ProjectReachability(input, 30.0);
+  const auto external = ProjectReachability(input, 30.0, evidence);
+
+  ASSERT_TRUE(internal.ok()) << internal.reason_code;
+  ASSERT_TRUE(external.ok()) << external.reason_code;
+  EXPECT_EQ(external.projection->reachable, internal.projection->reachable);
+  EXPECT_EQ(external.projection->certified_edges,
+            internal.projection->certified_edges);
+  EXPECT_EQ(external.projection->rejected_edges,
+            internal.projection->rejected_edges);
+
+  evidence.width = 79U;
+  const auto invalid = ProjectReachability(input, 30.0, evidence);
+  EXPECT_FALSE(invalid.ok());
+  EXPECT_EQ(invalid.reason_code, "HOPPER_LANDING_EVIDENCE_GEOMETRY_INVALID");
+}
+
 }  // namespace
 }  // namespace lunar::planning

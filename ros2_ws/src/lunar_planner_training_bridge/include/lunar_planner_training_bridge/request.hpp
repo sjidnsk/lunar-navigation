@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "lunar_planner_core/planner.hpp"
 #include "lunar_planner_core/reachability_projection.hpp"
@@ -37,6 +38,17 @@ class PlannerBridge final {
   [[nodiscard]] lunar::planning::ReachabilityProjectionResult
   ProjectReachability(const TrainingPlanRequest &request,
                       double maximum_edge_distance_m) const noexcept;
+  [[nodiscard]] lunar::planning::ReachabilityProjectionResult
+  ProjectReachability(
+      const TrainingPlanRequest &request,
+      double maximum_edge_distance_m,
+      const lunar::planning::HopperLandingEvidenceGrid &evidence)
+      const noexcept;
+  [[nodiscard]] lunar::planning::HopperLandingEvidenceProjectionResult
+  ProjectHopperLandingEvidence(
+      const TrainingPlanRequest &request,
+      const std::vector<lunar::planning::Vec3> &target_positions_map)
+      const noexcept;
   [[nodiscard]] lunar::planning::TraversabilityProjectionResult
   ProjectTraversability(const TrainingPlanRequest &request) const {
     return lunar::planning::ProjectTraversability(

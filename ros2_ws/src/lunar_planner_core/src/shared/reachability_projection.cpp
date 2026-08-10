@@ -10,6 +10,7 @@
 #include <numeric>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -28,6 +29,8 @@ namespace {
 
 constexpr Vec3 kLunarGravityMps2{0.0, 0.0, -1.62};
 constexpr double kDistanceToleranceM = 1.0e-9;
+constexpr std::string_view kHopperLandingEvidenceAlgorithm =
+    "cpp-hopper-detail-landing-regions/v1";
 
 [[nodiscard]] ReachabilityProjectionResult Failure(std::string reason_code) {
   return ReachabilityProjectionResult{
@@ -73,13 +76,11 @@ constexpr double kDistanceToleranceM = 1.0e-9;
 }
 
 [[nodiscard]] std::optional<hopper::CertifiedLandingRegion>
-CertifiedLandingAt(const shared::MapSnapshot& global_map,
-                   const shared::MapSnapshot& local_map,
-                   const shared::GridCell cell,
-                   const PlannerInput& input,
-                   const HopperCapability& capability,
-                   std::string& fatal_reason) {
-  const Vec3 center_map = global_map.CellCenter(cell);
+CertifiedLandingAtPosition(const Vec3 center_map,
+                           const shared::MapSnapshot& local_map,
+                           const PlannerInput& input,
+                           const HopperCapability& capability,
+                           std::string& fatal_reason) {
   const auto center_local = hierarchical::TransformPoint(
       center_map, input.world.map_from_odom,
       hierarchical::TransformDirection::kParentToChild);
@@ -139,6 +140,78 @@ CertifiedLandingAt(const shared::MapSnapshot& global_map,
     vertex = *value;
   }
   return transformed;
+}
+
+[[nodiscard]] std::optional<hopper::CertifiedLandingRegion>
+CertifiedLandingAt(const shared::MapSnapshot& global_map,
+                   const shared::MapSnapshot& local_map,
+                   const shared::GridCell cell,
+                   const PlannerInput& input,
+                   const HopperCapability& capability,
+                   std::string& fatal_reason) {
+  return CertifiedLandingAtPosition(
+      global_map.CellCenter(cell), local_map, input, capability,
+      fatal_reason);
+}
+
+[[nodiscard]] bool Finite(const Vec3 value) noexcept {
+  return std::isfinite(value.x) && std::isfinite(value.y) &&
+      std::isfinite(value.z);
+}
+
+struct ExternalLandingBuildResult final {
+  std::optional<
+      std::vector<std::optional<hopper::CertifiedLandingRegion>>> landings;
+  std::string reason_code;
+};
+
+[[nodiscard]] ExternalLandingBuildResult BuildExternalLandings(
+    const shared::MapSnapshot& global_map,
+    const HopperLandingEvidenceGrid& evidence) {
+  if (evidence.width != global_map.width() ||
+      evidence.height != global_map.height() ||
+      evidence.landings.size() != global_map.cell_count()) {
+    return {.reason_code = "HOPPER_LANDING_EVIDENCE_GEOMETRY_INVALID"};
+  }
+  if (evidence.algorithm_id != kHopperLandingEvidenceAlgorithm) {
+    return {.reason_code = "HOPPER_LANDING_EVIDENCE_ALGORITHM_INVALID"};
+  }
+  std::vector<std::optional<hopper::CertifiedLandingRegion>> output(
+      evidence.landings.size());
+  for (std::size_t index = 0U; index < evidence.landings.size(); ++index) {
+    const HopperLandingEvidence& landing = evidence.landings[index];
+    if (landing.certified > 1U) {
+      return {.reason_code = "HOPPER_LANDING_EVIDENCE_VALUE_INVALID"};
+    }
+    if (landing.certified == 0U) {
+      continue;
+    }
+    if (!Finite(landing.aim_position_on_surface_m) ||
+        !std::isfinite(landing.area_m2) || landing.area_m2 <= 0.0 ||
+        !std::ranges::all_of(landing.boundary_m, Finite)) {
+      return {.reason_code = "HOPPER_LANDING_EVIDENCE_VALUE_INVALID"};
+    }
+    const auto cell = global_map.PositionToCell(Vec2{
+        landing.aim_position_on_surface_m.x,
+        landing.aim_position_on_surface_m.y,
+    });
+    const shared::GridCell expected{
+        .x = static_cast<std::int32_t>(index % global_map.width()),
+        .y = static_cast<std::int32_t>(index / global_map.width()),
+    };
+    if (!cell.has_value() || cell->x != expected.x ||
+        cell->y != expected.y) {
+      return {.reason_code = "HOPPER_LANDING_EVIDENCE_CELL_INVALID"};
+    }
+    output[index] = hopper::CertifiedLandingRegion{
+        .seed_cell = expected,
+        .aim_position_on_surface_m = landing.aim_position_on_surface_m,
+        .boundary_m = std::vector<Vec3>(
+            landing.boundary_m.begin(), landing.boundary_m.end()),
+        .area_m2 = landing.area_m2,
+    };
+  }
+  return {.landings = std::move(output)};
 }
 
 struct LandingRegionHopResult final {
@@ -295,7 +368,8 @@ struct LandingRegionHopResult final {
     const std::shared_ptr<const shared::MapSnapshot>& local_map,
     const shared::SafeProjection& safe,
     const shared::GridCell start,
-    const double maximum_edge_distance_m) {
+    const double maximum_edge_distance_m,
+    const HopperLandingEvidenceGrid* const external_evidence) {
   const auto* capability = std::get_if<HopperCapability>(&input.capability);
   if (capability == nullptr) {
     return Failure("REACHABILITY_PLATFORM_STATE_MISMATCH");
@@ -309,24 +383,42 @@ struct LandingRegionHopResult final {
       .maximum_edge_distance_m = maximum_edge_distance_m,
   };
 
-  std::vector<std::optional<hopper::CertifiedLandingRegion>> landings(
-      global_map->cell_count());
-  for (std::size_t index = 0U; index < global_map->cell_count(); ++index) {
-    if (input.stop_token.stop_requested()) {
-      return Failure("REQUEST_CANCELED");
+  std::vector<std::optional<hopper::CertifiedLandingRegion>> landings;
+  if (external_evidence != nullptr) {
+    ExternalLandingBuildResult built =
+        BuildExternalLandings(*global_map, *external_evidence);
+    if (!built.landings.has_value()) {
+      return Failure(std::move(built.reason_code));
     }
+    landings = std::move(*built.landings);
+  } else {
+    landings.resize(global_map->cell_count());
+    for (std::size_t index = 0U; index < global_map->cell_count(); ++index) {
+      if (input.stop_token.stop_requested()) {
+        return Failure("REQUEST_CANCELED");
+      }
+      const shared::GridCell cell{
+          .x = static_cast<std::int32_t>(index % global_map->width()),
+          .y = static_cast<std::int32_t>(index / global_map->width()),
+      };
+      if (!safe.HardFeasible(cell)) {
+        continue;
+      }
+      std::string fatal_reason;
+      landings[index] = CertifiedLandingAt(
+          *global_map, *local_map, cell, input, *capability, fatal_reason);
+      if (!fatal_reason.empty()) {
+        return Failure(std::move(fatal_reason));
+      }
+    }
+  }
+  for (std::size_t index = 0U; index < landings.size(); ++index) {
     const shared::GridCell cell{
         .x = static_cast<std::int32_t>(index % global_map->width()),
         .y = static_cast<std::int32_t>(index / global_map->width()),
     };
     if (!safe.HardFeasible(cell)) {
-      continue;
-    }
-    std::string fatal_reason;
-    landings[index] = CertifiedLandingAt(
-        *global_map, *local_map, cell, input, *capability, fatal_reason);
-    if (!fatal_reason.empty()) {
-      return Failure(std::move(fatal_reason));
+      landings[index].reset();
     }
   }
 
@@ -453,8 +545,11 @@ struct LandingRegionHopResult final {
 
 }  // namespace
 
-ReachabilityProjectionResult ProjectReachability(
-    const PlannerInput& input, const double maximum_edge_distance_m) {
+namespace {
+
+[[nodiscard]] ReachabilityProjectionResult ProjectReachabilityImpl(
+    const PlannerInput& input, const double maximum_edge_distance_m,
+    const HopperLandingEvidenceGrid* const hopper_landing_evidence) {
   if (!std::isfinite(maximum_edge_distance_m) ||
       maximum_edge_distance_m <= 0.0) {
     return Failure("REACHABILITY_MAXIMUM_EDGE_DISTANCE_INVALID");
@@ -488,7 +583,10 @@ ReachabilityProjectionResult ProjectReachability(
     if (platform == PlatformType::kHopper) {
       return ProjectHopper(
           input, global.snapshot, local.snapshot, *built.projection, *start,
-          maximum_edge_distance_m);
+          maximum_edge_distance_m, hopper_landing_evidence);
+    }
+    if (hopper_landing_evidence != nullptr) {
+      return Failure("HOPPER_LANDING_EVIDENCE_PLATFORM_MISMATCH");
     }
     if (StatePose(input.current_state, platform) == nullptr) {
       return Failure("REACHABILITY_PLATFORM_STATE_MISMATCH");
@@ -500,6 +598,89 @@ ReachabilityProjectionResult ProjectReachability(
     return Failure("REACHABILITY_RESOURCE_EXHAUSTED");
   } catch (...) {
     return Failure("REACHABILITY_INTERNAL_FAILURE");
+  }
+}
+
+[[nodiscard]] HopperLandingEvidenceProjectionResult LandingFailure(
+    std::string reason_code) {
+  return HopperLandingEvidenceProjectionResult{
+      .projection = std::nullopt,
+      .reason_code = std::move(reason_code),
+  };
+}
+
+}  // namespace
+
+ReachabilityProjectionResult ProjectReachability(
+    const PlannerInput& input, const double maximum_edge_distance_m) {
+  return ProjectReachabilityImpl(input, maximum_edge_distance_m, nullptr);
+}
+
+ReachabilityProjectionResult ProjectReachability(
+    const PlannerInput& input, const double maximum_edge_distance_m,
+    const HopperLandingEvidenceGrid& hopper_landing_evidence) {
+  return ProjectReachabilityImpl(
+      input, maximum_edge_distance_m, &hopper_landing_evidence);
+}
+
+HopperLandingEvidenceProjectionResult ProjectHopperLandingEvidence(
+    const PlannerInput& input,
+    const std::span<const Vec3> target_positions_map) {
+  if (input.stop_token.stop_requested()) {
+    return LandingFailure("REQUEST_CANCELED");
+  }
+  const auto* capability = std::get_if<HopperCapability>(&input.capability);
+  if (capability == nullptr) {
+    return LandingFailure("HOPPER_LANDING_EVIDENCE_PLATFORM_MISMATCH");
+  }
+  try {
+    const shared::MapSnapshotBuildResult local =
+        shared::MapSnapshot::Create(input.world.local_map);
+    if (!local.ok()) {
+      return LandingFailure(local.reason_code);
+    }
+    HopperLandingEvidenceProjection projection{
+        .algorithm_id = std::string{kHopperLandingEvidenceAlgorithm},
+        .candidates_evaluated = target_positions_map.size(),
+    };
+    projection.landings.reserve(target_positions_map.size());
+    for (const Vec3 target : target_positions_map) {
+      if (input.stop_token.stop_requested()) {
+        return LandingFailure("REQUEST_CANCELED");
+      }
+      if (!Finite(target)) {
+        return LandingFailure("HOPPER_LANDING_EVIDENCE_TARGET_INVALID");
+      }
+      std::string fatal_reason;
+      const auto certified = CertifiedLandingAtPosition(
+          target, *local.snapshot, input, *capability, fatal_reason);
+      if (!fatal_reason.empty()) {
+        return LandingFailure(std::move(fatal_reason));
+      }
+      HopperLandingEvidence evidence;
+      if (certified.has_value()) {
+        if (certified->boundary_m.size() != evidence.boundary_m.size()) {
+          return LandingFailure("HOPPER_LANDING_EVIDENCE_BOUNDARY_INVALID");
+        }
+        evidence.certified = 1U;
+        evidence.aim_position_on_surface_m =
+            certified->aim_position_on_surface_m;
+        std::copy(
+            certified->boundary_m.begin(), certified->boundary_m.end(),
+            evidence.boundary_m.begin());
+        evidence.area_m2 = certified->area_m2;
+        ++projection.certified_count;
+      }
+      projection.landings.push_back(std::move(evidence));
+    }
+    return HopperLandingEvidenceProjectionResult{
+        .projection = std::move(projection),
+        .reason_code = {},
+    };
+  } catch (const std::bad_alloc&) {
+    return LandingFailure("REACHABILITY_RESOURCE_EXHAUSTED");
+  } catch (...) {
+    return LandingFailure("HOPPER_LANDING_EVIDENCE_INTERNAL_FAILURE");
   }
 }
 

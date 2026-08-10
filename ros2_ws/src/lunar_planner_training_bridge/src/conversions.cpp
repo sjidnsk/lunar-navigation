@@ -75,4 +75,44 @@ ReachabilityProjectionResult PlannerBridge::ProjectReachability(
   }
 }
 
+ReachabilityProjectionResult PlannerBridge::ProjectReachability(
+    const TrainingPlanRequest &request,
+    const double maximum_edge_distance_m,
+    const HopperLandingEvidenceGrid &evidence) const noexcept {
+  try {
+    return lunar::planning::ProjectReachability(
+        ToPlannerInput(request), maximum_edge_distance_m, evidence);
+  } catch (const std::bad_alloc &) {
+    return ReachabilityProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = "REACHABILITY_RESOURCE_EXHAUSTED",
+    };
+  } catch (...) {
+    return ReachabilityProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = "BRIDGE_REQUEST_CONVERSION_FAILED",
+    };
+  }
+}
+
+HopperLandingEvidenceProjectionResult
+PlannerBridge::ProjectHopperLandingEvidence(
+    const TrainingPlanRequest &request,
+    const std::vector<Vec3> &target_positions_map) const noexcept {
+  try {
+    return lunar::planning::ProjectHopperLandingEvidence(
+        ToPlannerInput(request), target_positions_map);
+  } catch (const std::bad_alloc &) {
+    return HopperLandingEvidenceProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = "REACHABILITY_RESOURCE_EXHAUSTED",
+    };
+  } catch (...) {
+    return HopperLandingEvidenceProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = "BRIDGE_REQUEST_CONVERSION_FAILED",
+    };
+  }
+}
+
 }  // namespace lunar::planning::training
