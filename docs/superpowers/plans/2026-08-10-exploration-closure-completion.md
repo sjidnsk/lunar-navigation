@@ -378,7 +378,8 @@ colcon --log-base "$VERIFY_ROOT/log-build" build --merge-install \
   --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
 colcon --log-base "$VERIFY_ROOT/log-test" test --base-paths ros2_ws/src \
   --packages-select lunar_planner_core lunar_planner_training_bridge \
-  --build-base "$VERIFY_ROOT/build" --event-handlers console_direct+
+  --build-base "$VERIFY_ROOT/build" --install-base "$VERIFY_ROOT/install" \
+  --merge-install --event-handlers console_direct+
 colcon test-result --test-result-base "$VERIFY_ROOT/build" --verbose
 ```
 
