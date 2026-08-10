@@ -101,7 +101,7 @@ git commit -m "feat(training): define platform coverability v6 contracts"
 - Extends: `TraversabilityProjection.intrinsic_feasible`, distinct from body-clearance `hard_feasible`.
 - Produces: `ProjectReachability(const PlannerInput&, double maximum_edge_distance_m)` returning an exact mask, algorithm ID and deterministic diagnostic counts.
 - Ground: selects the C++ `connected_component` containing the transformed start pose and never runs Python flood-fill.
-- Hopper: stable row-major BFS over safe landing cells; every edge within `30.0 m` is accepted only after the same exact landing-region and `CertifySingleHop` chain used by the current planner.
+- Hopper: stable row-major BFS over safe landing cells; every edge within `30.0 m` is accepted only after the same exact landing-region and `CertifySingleHop` chain succeeds in both directions, so every denominator pose remains returnable in one exploration trajectory.
 - Fail closed: cancellation, bad allocation, invalid/numerically indeterminate certification and resource exhaustion return a non-empty failure reason, never a false mask.
 - Bridge: `PlannerBridge.project_reachability(request, maximum_edge_distance_m)` releases the GIL and returns owned NumPy arrays.
 
@@ -305,7 +305,9 @@ git commit -m "fix(training): count exact platform-coverable detail coverage"
 **Interfaces:**
 
 - Produces: `PlatformCandidateReachability.filter(...) -> accepted_mask + reason_counts`.
-- Ground runtime filtering uses the C++ observed-map start component; Hopper uses C++ observed-map exact single-hop batch certification.
+- Ground runtime filtering uses the C++ observed-map start component; Hopper uses
+  C++ observed-map exact current-pose-to-candidate bidirectional single-hop batch
+  certification and never consumes the cache BFS result as an action mask.
 - `CandidateDiagnostics` fields are exactly `frontier_anchor_count`, `visited_excluded_count`, `static_infeasible_count`, `platform_unreachable_count`, `zero_gain_count`, `emitted_count`, `planner_rejected_count`.
 - Infrastructure errors propagate; they never increment `platform_unreachable_count`.
 
@@ -495,8 +497,17 @@ Only if a real regression required a production/test correction, repeat its RED/
 
 **Files:**
 
+- Modify after the observed Hopper exhaustion failure: `training/lunar_policy_training/lunar_policy_training/environment/candidate_builder.py`
+- Modify after the observed Hopper exhaustion failure: `training/lunar_policy_training/lunar_policy_training/environment/frontier_oracle.py`
+- Modify after observing unstable coarse-map return certification: `training/lunar_policy_training/lunar_policy_training/environment/multires_observation.py`
+- Modify after the observed Hopper coarse/detail conflict: `ros2_ws/src/lunar_planner_core/src/shared/reachability_projection.cpp`
+- Modify after the observed Hopper coarse/detail conflict: `ros2_ws/src/lunar_planner_core/test/reachability_projection_test.cpp`
+- Modify after the Hopper reachability algorithm bump: `ros2_ws/src/lunar_planner_training_bridge/test/test_bridge.py`
 - Modify if required by observed gate failures: `training/lunar_policy_training/lunar_policy_training/formal_preflight.py`
 - Modify if required by observed gate failures: `training/lunar_policy_training/lunar_policy_training/eval/baselines.py`
+- Modify after the observed Hopper exhaustion failure: `training/lunar_policy_training/tests/test_candidate_builder_v2.py`
+- Modify after the observed Hopper exhaustion failure: `training/lunar_policy_training/tests/test_frontier_oracle.py`
+- Modify after observing unstable coarse-map return certification: `training/lunar_policy_training/tests/test_multires_observation.py`
 - Modify if required by observed gate failures: `training/lunar_policy_training/tests/test_formal_preflight.py`
 - External artifacts only: v4 cache, native install, closed-loop report and prospective run manifest.
 
@@ -505,6 +516,39 @@ Only if a real regression required a production/test correction, repeat its RED/
 - A minimum of 24 frozen physical scenes is evaluated for all three platforms using deterministic observed-only gain-over-cost until natural terminal.
 - Every selected scene/platform has `exact=true`, mission coverable fraction `>=0.95`, final exact coverage `>=0.95`, zero oracle contradictions, complete terminal reason and repeat-identical masks/candidates/requests/final coverage.
 - Full v4 cache publishes split x platform feasibility and reason counts before a training command is prepared.
+
+The first real gate run found a Hopper legal-exhaustion false negative: at 20.18%
+exact coverage, no coarse frontier anchor was within the current 30 m hop, while
+113 observed-safe landing cells remained directly certifiable and seven of them
+had positive observed-only `0.2 m` gain. The bounded repair is therefore:
+
+- keep the existing coarse-frontier path as the primary candidate path;
+- only when it emits no candidate, scan observed-safe cells inside the current
+  action envelope, apply the same platform certification, then retain only cells
+  with positive observed-only detail gain;
+- make the independent oracle scan the same class of observation opportunities
+  without calling production ranking;
+- admit a zero-immediate-gain transit only after the primary frontier path and
+  positive-gain fallback are empty while an observed coarse frontier still
+  exists, including when all otherwise feasible frontier anchors currently have
+  zero predicted gain; prefer unvisited certified poses and
+  permit only the direct parent on a deterministic navigation stack when no
+  unvisited transit survives. Store and recertify the parent's executed exact
+  `x/y/z`, not its enclosing `4 m` cell center; pop on return and rebuild the
+  stack from reveal history;
+- make the independent oracle use the same exact current/target world positions,
+  `30 m` range and FOV as production; a coarse-cell index distance is not a
+  valid action-envelope approximation near cell boundaries;
+- do not admit truth-derived targets, a longer Hopper edge, a lower coverage
+  threshold, or a new policy tensor field.
+- when exact detail landing evidence is supplied, do not erase that certified
+  landing solely because its enclosing 4 m aggregate cell is hard-infeasible;
+  keep the coarse hard filter for the no-evidence path, require forward and
+  reverse certification, and bump the Hopper reachability algorithm identity.
+- keep the cache denominator's recoverable multi-hop BFS separate from runtime
+  action filtering: runtime must certify each current-pose-to-candidate edge
+  directly in both directions and may not accept a candidate merely because it
+  is reachable through another candidate node.
 
 - [ ] **Step 1: Commit the clean implementation source**
 
@@ -547,6 +591,17 @@ PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
 - [ ] **Step 5: Stop at the formal launch gate**
 
 Report the exact v4 manifest SHA, feasibility table, exclusion reasons, preflight report SHA, warm-start parent SHA/step and prospective new artifact root. Do not invoke the training command until all gates pass and the user explicitly authorizes the new step-0 run.
+
+## Execution Status (2026-08-10)
+
+- Tasks 1-8: complete with scoped RED/GREEN commits.
+- Task 9: complete; full Python suite reports `812 passed, 1 skipped`, native
+  Release verification reports `234 tests, 0 failures`, and repository boundary
+  verification reports `14 passed`.
+- Task 10 step 1: completed by the scoped source commit containing this status.
+- Task 10 steps 2-5: pending the new commit-bound v4 cache, two deterministic
+  24-scene x 3-platform closed-loop runs, full-cache publication and explicit
+  launch authorization. Formal training remains stopped until those gates pass.
 
 ## Completion Evidence
 

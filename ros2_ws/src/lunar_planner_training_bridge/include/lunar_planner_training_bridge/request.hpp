@@ -44,6 +44,12 @@ class PlannerBridge final {
       double maximum_edge_distance_m,
       const lunar::planning::HopperLandingEvidenceGrid &evidence)
       const noexcept;
+  [[nodiscard]] lunar::planning::ReachabilityProjectionResult
+  ProjectDirectHopperReachability(
+      const TrainingPlanRequest &request,
+      double maximum_edge_distance_m,
+      const lunar::planning::HopperLandingEvidenceGrid &evidence)
+      const noexcept;
   [[nodiscard]] lunar::planning::HopperLandingEvidenceProjectionResult
   ProjectHopperLandingEvidence(
       const TrainingPlanRequest &request,

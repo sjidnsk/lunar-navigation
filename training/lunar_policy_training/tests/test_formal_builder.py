@@ -524,7 +524,6 @@ def test_formal_episode_excludes_a_recorded_landing_from_future_candidates(
         ),
         "LANDED_HOLD",
     )
-
     rebuilt = episode.build_policy_observation(
         episode.sensor_state.observed,
         episode.current_pose,
@@ -533,6 +532,39 @@ def test_formal_episode_excludes_a_recorded_landing_from_future_candidates(
 
     assert int(rebuilt.candidate_mask.sum()) == int(initial.candidate_mask.sum()) - 1
     assert not torch.any(torch.all(rebuilt_positions == visited_position, dim=1))
+
+
+def test_formal_episode_navigation_stack_preserves_exact_parent_pose(
+    tmp_path: pathlib.Path,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    episode = assembly.factory.create_for_episode(
+        0,
+        "HOPPER",
+        4,
+        platform_worker_index=0,
+        platform_worker_count=1,
+    ).episode
+    canvas = episode.loaded.scene.base_canvas
+    target_cell = (episode.start_cell[0], episode.start_cell[1] + 1)
+    target_x, target_y = canvas.grid_center_world(*target_cell)
+    target = Pose2(
+        target_x + 0.02,
+        target_y - 0.02,
+        elevation_m=123.0,
+    )
+    episode._record_reveal(
+        SensorBoundaryEvidence(target, 1.0), "LANDED_HOLD"
+    )
+
+    assert episode._navigation_stack[-1] == target
+
+    episode._record_reveal(
+        SensorBoundaryEvidence(episode._navigation_stack[-2], 1.0),
+        "LANDED_HOLD",
+    )
+
+    assert episode._navigation_stack == [episode.current_pose]
 
 
 def test_formal_episode_estimates_candidate_gain_from_detail_observation(

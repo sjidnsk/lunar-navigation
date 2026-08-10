@@ -151,23 +151,27 @@ def test_rock_is_observed_but_occludes_cells_behind_it() -> None:
     assert not state.detail_observed_at(525.0, 512.0)
 
 
-def test_four_central_subcells_gate_conservative_four_metre_validity() -> None:
+def test_full_detail_block_gates_stable_four_metre_planning_validity() -> None:
     state, _ = _state()
     state.observe_world(Pose2(512.0, 512.0, elevation_m=7.0), elapsed_s=0.0)
 
     pose_row, pose_column = state.observed.canvas.world_to_grid(512.0, 512.0)
     assert state.observed.valid_mask[pose_row, pose_column]
-    assert state.detail_block_valid(pose_row, pose_column)[9:11, 9:11].all()
+    assert state.detail_block_valid(pose_row, pose_column).all()
 
     partial_cells = []
+    central_only_cells = []
     for row in range(max(0, pose_row - 9), min(256, pose_row + 10)):
         for column in range(
             max(0, pose_column - 9), min(256, pose_column + 10)
         ):
             block = state.detail_block_valid(row, column)
-            if block.any() and not block[9:11, 9:11].all():
+            if block.any() and not block.all():
                 partial_cells.append((row, column))
+            if block[9:11, 9:11].all() and not block.all():
+                central_only_cells.append((row, column))
     assert partial_cells
+    assert central_only_cells
     assert all(not state.observed.valid_mask[cell] for cell in partial_cells)
 
 

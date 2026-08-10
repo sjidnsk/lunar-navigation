@@ -63,7 +63,18 @@ class PlatformCandidateReachability:
             canvas.geometry.cells,
         ) or not np.isfinite(elevation).all():
             raise ValueError("candidate reachability elevation is invalid")
-        if not hasattr(bridge, "project_reachability"):
+        bridge_methods = (
+            (
+                "project_hopper_landing_evidence",
+                "project_direct_hopper_reachability",
+            )
+            if platform_type == "HOPPER"
+            else ("project_reachability",)
+        )
+        if any(
+            not callable(getattr(bridge, name, None))
+            for name in bridge_methods
+        ):
             raise TypeError("candidate reachability bridge is invalid")
         if (
             not isinstance(maximum_edge_distance_m, float)
@@ -79,7 +90,12 @@ class PlatformCandidateReachability:
         self._request = request
         self._maximum_edge_distance_m = maximum_edge_distance_m
 
-    def filter(self, candidate_cells: np.ndarray) -> CandidateReachabilityResult:
+    def filter(
+        self,
+        candidate_cells: np.ndarray,
+        *,
+        target_positions_map: np.ndarray | None = None,
+    ) -> CandidateReachabilityResult:
         candidates = np.asarray(candidate_cells)
         cells = self._canvas.geometry.cells
         if (
@@ -94,8 +110,25 @@ class PlatformCandidateReachability:
             return CandidateReachabilityResult(
                 np.zeros(0, dtype=np.bool_), {"platform_unreachable_count": 0}
             )
+        positions = None
+        if target_positions_map is not None:
+            positions = np.asarray(target_positions_map)
+            if (
+                positions.dtype != np.dtype(np.float64)
+                or positions.shape != (len(candidates), 3)
+                or not positions.flags.c_contiguous
+                or not np.isfinite(positions).all()
+            ):
+                raise ValueError(
+                    "candidate target positions must be float64 [N,3]"
+                )
+            for cell, position in zip(candidates, positions, strict=True):
+                if self._canvas.world_to_grid(
+                    float(position[0]), float(position[1])
+                ) != tuple(cell):
+                    raise ValueError("candidate target position leaves its cell")
         if self._platform_type == "HOPPER":
-            projection = self._hopper_projection(candidates)
+            projection = self._hopper_projection(candidates, positions)
         else:
             projection = self._bridge.project_reachability(
                 self._request, self._maximum_edge_distance_m
@@ -113,17 +146,41 @@ class PlatformCandidateReachability:
             {"platform_unreachable_count": int((~accepted).sum(dtype=np.int64))},
         )
 
-    def _hopper_projection(self, candidates: np.ndarray) -> object:
+    def _hopper_projection(
+        self,
+        candidates: np.ndarray,
+        target_positions_map: np.ndarray | None,
+    ) -> object:
         import lunar_planner_training_bridge as bridge_api
 
         start = self._canvas.world_to_grid(self._pose.x_m, self._pose.y_m)
         cells_to_certify = [start, *map(tuple, candidates.tolist())]
         cells_to_certify = list(dict.fromkeys(cells_to_certify))
+        exact_targets = (
+            {}
+            if target_positions_map is None
+            else {
+                tuple(cell): tuple(float(value) for value in position)
+                for cell, position in zip(
+                    candidates.tolist(), target_positions_map.tolist(), strict=True
+                )
+            }
+        )
         targets = np.asarray(
             [
                 (
-                    *self._canvas.grid_center_world(row, column),
-                    float(self._elevation[row, column]),
+                    (
+                        self._pose.x_m,
+                        self._pose.y_m,
+                        self._pose.elevation_m,
+                    )
+                    if (row, column) == start
+                    else exact_targets[(row, column)]
+                    if (row, column) in exact_targets
+                    else (
+                        *self._canvas.grid_center_world(row, column),
+                        float(self._elevation[row, column]),
+                    )
                 )
                 for row, column in cells_to_certify
             ],
@@ -149,7 +206,7 @@ class PlatformCandidateReachability:
             np.ascontiguousarray(np.flipud(area)),
             str(landing.algorithm_id),
         )
-        return self._bridge.project_reachability(
+        return self._bridge.project_direct_hopper_reachability(
             self._request, self._maximum_edge_distance_m, evidence
         )
 

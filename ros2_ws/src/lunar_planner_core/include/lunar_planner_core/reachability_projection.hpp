@@ -73,6 +73,11 @@ struct ReachabilityProjectionResult final {
     double maximum_edge_distance_m,
     const HopperLandingEvidenceGrid& hopper_landing_evidence);
 
+[[nodiscard]] ReachabilityProjectionResult ProjectDirectHopperReachability(
+    const PlannerInput& input,
+    double maximum_edge_distance_m,
+    const HopperLandingEvidenceGrid& hopper_landing_evidence);
+
 [[nodiscard]] HopperLandingEvidenceProjectionResult
 ProjectHopperLandingEvidence(
     const PlannerInput& input,

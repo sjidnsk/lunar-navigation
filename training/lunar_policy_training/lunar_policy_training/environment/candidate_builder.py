@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 import math
 
@@ -64,6 +64,7 @@ class CandidateBatch:
     mask: np.ndarray
     canvas_id: str | None = None
     diagnostics: CandidateDiagnostics = field(default_factory=CandidateDiagnostics)
+    target_elevation_m: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         features, mask = np.asarray(self.features, dtype=np.float32), np.asarray(self.mask, dtype=bool)
@@ -73,8 +74,20 @@ class CandidateBatch:
             raise TypeError("candidate diagnostics are required")
         if self.diagnostics.emitted_count != int(mask.sum()):
             raise ValueError("candidate diagnostics emitted count must match mask")
+        target_elevation = self.target_elevation_m
+        if target_elevation is None:
+            target_elevation = np.zeros(64, dtype=np.float64)
+        if (
+            not isinstance(target_elevation, np.ndarray)
+            or target_elevation.dtype != np.dtype(np.float64)
+            or target_elevation.shape != (64,)
+            or not target_elevation.flags.c_contiguous
+            or not np.isfinite(target_elevation).all()
+        ):
+            raise ValueError("candidate target elevation must be finite float64 [64]")
         object.__setattr__(self, "features", features)
         object.__setattr__(self, "mask", mask)
+        object.__setattr__(self, "target_elevation_m", target_elevation)
 
     @property
     def count(self) -> int:
@@ -159,6 +172,7 @@ class _FeasibleAnchor:
     segment_id: int
     point: tuple[int, int]
     feature: np.ndarray
+    elevation_m: float
 
 
 def _anchor_key(anchor: _FeasibleAnchor) -> tuple[object, ...]:
@@ -230,6 +244,7 @@ class CandidateBuilderV2:
         platform_reachability_filter_enabled: bool = True,
         platform_reachability: PlatformCandidateReachability | None = None,
         excluded_cells: Collection[tuple[int, int]] = (),
+        backtrack_pose: Pose2 | None = None,
     ) -> CandidateBatch:
         if platform_type not in _PLATFORM_TYPES:
             raise ValueError("platform_type must be WHEELED, LEGGED, or HOPPER")
@@ -259,7 +274,144 @@ class CandidateBuilderV2:
                     standoff = (row, column)
                 if self._candidate_within_sensor(canvas, pose_map, standoff):
                     raw_anchors.append((segment_id, standoff))
-        raw_anchors = sorted(set(raw_anchors))
+        chosen, diagnostics = self._qualify_anchors(
+            sorted(set(raw_anchors)),
+            world,
+            mission,
+            pose_map,
+            projection,
+            platform_type=platform_type,
+            platform_reachability_filter_enabled=(
+                platform_reachability_filter_enabled
+            ),
+            platform_reachability=platform_reachability,
+            excluded_cells=excluded_cells,
+            total_roi=total_roi,
+            total_priority=total_priority,
+            allow_zero_gain=False,
+        )
+        segment_count = len(segments)
+        transit_allowed = bool(boundary.any())
+        if not chosen and platform_reachability_filter_enabled:
+            fallback_anchors = [
+                (0, point)
+                for point in self._fallback_observation_poses(
+                    world, mission, pose_map, projection
+                )
+            ]
+            if fallback_anchors:
+                chosen, diagnostics = self._qualify_anchors(
+                    fallback_anchors,
+                    world,
+                    mission,
+                    pose_map,
+                    projection,
+                    platform_type=platform_type,
+                    platform_reachability_filter_enabled=(
+                        platform_reachability_filter_enabled
+                    ),
+                    platform_reachability=platform_reachability,
+                    excluded_cells=excluded_cells,
+                    total_roi=total_roi,
+                    total_priority=total_priority,
+                    allow_zero_gain=False,
+                    exact_target_poses={},
+                )
+                segment_count = 1
+                if not chosen and transit_allowed:
+                    chosen, diagnostics = self._qualify_anchors(
+                        fallback_anchors,
+                        world,
+                        mission,
+                        pose_map,
+                        projection,
+                        platform_type=platform_type,
+                        platform_reachability_filter_enabled=(
+                            platform_reachability_filter_enabled
+                        ),
+                        platform_reachability=platform_reachability,
+                        excluded_cells=excluded_cells,
+                        total_roi=total_roi,
+                        total_priority=total_priority,
+                        allow_zero_gain=True,
+                        exact_target_poses={},
+                    )
+            if (
+                not chosen
+                and transit_allowed
+                and isinstance(backtrack_pose, Pose2)
+                and backtrack_pose.frame_id == "map"
+                and self._position_within_sensor(pose_map, backtrack_pose)
+            ):
+                try:
+                    backtrack_cell = canvas.world_to_grid(
+                        backtrack_pose.x_m, backtrack_pose.y_m
+                    )
+                except ValueError:
+                    backtrack_cell = None
+                if backtrack_cell is not None:
+                    segment_count = 1
+                    chosen, diagnostics = self._qualify_anchors(
+                        [(0, backtrack_cell)],
+                        world,
+                        mission,
+                        pose_map,
+                        projection,
+                        platform_type=platform_type,
+                        platform_reachability_filter_enabled=(
+                            platform_reachability_filter_enabled
+                        ),
+                        platform_reachability=platform_reachability,
+                        excluded_cells=(),
+                        total_roi=total_roi,
+                        total_priority=total_priority,
+                        allow_zero_gain=True,
+                        exact_target_poses={backtrack_cell: backtrack_pose},
+                    )
+        chosen = _select_anchors(chosen, segment_count)
+        output = np.zeros((64, 12), np.float32); mask = np.zeros(64, bool)
+        target_elevation = np.zeros(64, dtype=np.float64)
+        for index, anchor in enumerate(chosen):
+            output[index] = anchor.feature
+            target_elevation[index] = anchor.elevation_m
+            mask[index] = True
+        return CandidateBatch(
+            output,
+            mask,
+            canvas.identity,
+            CandidateDiagnostics(
+                frontier_anchor_count=diagnostics.frontier_anchor_count,
+                visited_excluded_count=diagnostics.visited_excluded_count,
+                static_infeasible_count=diagnostics.static_infeasible_count,
+                platform_unreachable_count=diagnostics.platform_unreachable_count,
+                zero_gain_count=diagnostics.zero_gain_count,
+                emitted_count=len(chosen),
+            ),
+            target_elevation,
+        )
+
+    def _qualify_anchors(
+        self,
+        raw_anchors: list[tuple[int, tuple[int, int]]],
+        world: ObservedWorld,
+        mission: MissionRaster,
+        pose_map: Pose2,
+        projection: PlatformProjection,
+        *,
+        platform_type: str,
+        platform_reachability_filter_enabled: bool,
+        platform_reachability: PlatformCandidateReachability | None,
+        excluded_cells: Collection[tuple[int, int]],
+        total_roi: float,
+        total_priority: float,
+        allow_zero_gain: bool,
+        exact_target_poses: Mapping[tuple[int, int], Pose2] | None = None,
+    ) -> tuple[list[_FeasibleAnchor], CandidateDiagnostics]:
+        exact_target_poses = exact_target_poses or {}
+        canvas = world.canvas
+        observed = world.observed_mask
+        roi = mission.roi_ratio > 0.0
+        robot = canvas.world_to_grid(pose_map.x_m, pose_map.y_m)
         unvisited = [
             anchor
             for anchor in raw_anchors
@@ -286,10 +438,33 @@ class CandidateBuilderV2:
         if platform_reachability_filter_enabled and platform_reachability is not None:
             if not isinstance(platform_reachability, PlatformCandidateReachability):
                 raise TypeError("platform reachability filter is invalid")
-            result = platform_reachability.filter(
-                np.ascontiguousarray(
-                    [point for _, point in static_feasible], dtype=np.int32
-                ).reshape((-1, 2))
+            candidate_cells = np.ascontiguousarray(
+                [point for _, point in static_feasible], dtype=np.int32
+            ).reshape((-1, 2))
+            target_positions = None
+            if exact_target_poses:
+                target_positions = np.ascontiguousarray(
+                    [
+                        (
+                            exact_target_poses[point].x_m,
+                            exact_target_poses[point].y_m,
+                            exact_target_poses[point].elevation_m,
+                        )
+                        if point in exact_target_poses
+                        else (
+                            *canvas.grid_center_world(*point),
+                            float(world.elevation_m[point]),
+                        )
+                        for _, point in static_feasible
+                    ],
+                    dtype=np.float64,
+                )
+            result = (
+                platform_reachability.filter(candidate_cells)
+                if target_positions is None
+                else platform_reachability.filter(
+                    candidate_cells, target_positions_map=target_positions
+                )
             )
             accepted_mask = result.accepted_mask
         feasible: list[tuple[int, tuple[int, int]]] = []
@@ -318,7 +493,7 @@ class CandidateBuilderV2:
             platform_unreachable_count=platform_unreachable,
         )
         if not feasible:
-            return CandidateBatch.empty(canvas.identity, diagnostics)
+            return [], diagnostics
         candidate_cells = np.ascontiguousarray(
             [point for _, point in feasible], dtype=np.int32
         )
@@ -344,6 +519,9 @@ class CandidateBuilderV2:
             raise RuntimeError("candidate visibility estimator result is invalid")
         chosen: list[_FeasibleAnchor] = []
         zero_gain_count = 0
+        admit_zero_gain = allow_zero_gain and not bool(
+            np.any(gains[:, 0] > np.float32(0.0))
+        )
         for (segment_id, point), (gain, priority_gain) in zip(
             feasible, gains, strict=True
         ):
@@ -357,27 +535,51 @@ class CandidateBuilderV2:
                 total_priority,
                 float(gain),
                 float(priority_gain),
+                allow_zero_gain=admit_zero_gain,
+                target_pose=exact_target_poses.get(point),
             )
             if feature is not None:
-                chosen.append(_FeasibleAnchor(segment_id, point, feature))
+                target_pose = exact_target_poses.get(point)
+                chosen.append(
+                    _FeasibleAnchor(
+                        segment_id,
+                        point,
+                        feature,
+                        (
+                            float(world.elevation_m[point])
+                            if target_pose is None
+                            else float(target_pose.elevation_m)
+                        ),
+                    )
+                )
             else:
                 zero_gain_count += 1
-        chosen = _select_anchors(chosen, len(segments))
-        output = np.zeros((64, 12), np.float32); mask = np.zeros(64, bool)
-        for index, anchor in enumerate(chosen): output[index] = anchor.feature; mask[index] = True
-        return CandidateBatch(
-            output,
-            mask,
-            canvas.identity,
-            CandidateDiagnostics(
-                frontier_anchor_count=diagnostics.frontier_anchor_count,
-                visited_excluded_count=diagnostics.visited_excluded_count,
-                static_infeasible_count=diagnostics.static_infeasible_count,
-                platform_unreachable_count=diagnostics.platform_unreachable_count,
-                zero_gain_count=zero_gain_count,
-                emitted_count=len(chosen),
-            ),
+        return chosen, CandidateDiagnostics(
+            frontier_anchor_count=diagnostics.frontier_anchor_count,
+            visited_excluded_count=diagnostics.visited_excluded_count,
+            static_infeasible_count=diagnostics.static_infeasible_count,
+            platform_unreachable_count=diagnostics.platform_unreachable_count,
+            zero_gain_count=zero_gain_count,
         )
+
+    def _fallback_observation_poses(
+        self,
+        world: ObservedWorld,
+        mission: MissionRaster,
+        pose_map: Pose2,
+        projection: PlatformProjection,
+    ) -> list[tuple[int, int]]:
+        safe = (
+            world.observed_mask
+            & (mission.roi_ratio > 0.0)
+            & (world.physical_obstacle_layer.values == 0.0)
+            & (projection.traversable_ratio > 0.0)
+        )
+        return [
+            point
+            for point in _points(safe)
+            if self._candidate_within_sensor(world.canvas, pose_map, point)
+        ]
 
     def _candidate_within_sensor(
         self,
@@ -386,8 +588,11 @@ class CandidateBuilderV2:
         point: tuple[int, int],
     ) -> bool:
         x, y = canvas.grid_center_world(*point)
-        bearing = math.atan2(y - pose.y_m, x - pose.x_m)
-        distance = math.hypot(x - pose.x_m, y - pose.y_m)
+        return self._position_within_sensor(pose, Pose2(x, y))
+
+    def _position_within_sensor(self, pose: Pose2, target: Pose2) -> bool:
+        bearing = math.atan2(target.y_m - pose.y_m, target.x_m - pose.x_m)
+        distance = math.hypot(target.x_m - pose.x_m, target.y_m - pose.y_m)
         if distance > self._sensor.range_m:
             return False
         if self._sensor.is_full_circle:
@@ -398,11 +603,16 @@ class CandidateBuilderV2:
         )
         return abs(relative) <= self._sensor.fov_rad / 2.0
 
-    def _feature(self, world: ObservedWorld, mission: MissionRaster, projection: PlatformProjection, pose: Pose2, point: tuple[int, int], total_roi: float, total_priority: float, gain: float, priority_gain: float) -> np.ndarray | None:
-        canvas = world.canvas; x, y = canvas.grid_center_world(*point)
+    def _feature(self, world: ObservedWorld, mission: MissionRaster, projection: PlatformProjection, pose: Pose2, point: tuple[int, int], total_roi: float, total_priority: float, gain: float, priority_gain: float, *, allow_zero_gain: bool = False, target_pose: Pose2 | None = None) -> np.ndarray | None:
+        canvas = world.canvas
+        x, y = (
+            canvas.grid_center_world(*point)
+            if target_pose is None
+            else (target_pose.x_m, target_pose.y_m)
+        )
         dx, dy = x - pose.x_m, y - pose.y_m; distance = math.hypot(dx, dy)
         bearing = math.atan2(dy, dx)
-        if gain == 0.0:
+        if gain == 0.0 and not allow_zero_gain:
             return None
         normal = np.array([0.0, 0.0])
         for neighbor in _neighbors(*point, canvas.geometry.cells):

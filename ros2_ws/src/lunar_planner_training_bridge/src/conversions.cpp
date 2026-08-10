@@ -95,6 +95,26 @@ ReachabilityProjectionResult PlannerBridge::ProjectReachability(
   }
 }
 
+ReachabilityProjectionResult PlannerBridge::ProjectDirectHopperReachability(
+    const TrainingPlanRequest &request,
+    const double maximum_edge_distance_m,
+    const HopperLandingEvidenceGrid &evidence) const noexcept {
+  try {
+    return lunar::planning::ProjectDirectHopperReachability(
+        ToPlannerInput(request), maximum_edge_distance_m, evidence);
+  } catch (const std::bad_alloc &) {
+    return ReachabilityProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = "REACHABILITY_RESOURCE_EXHAUSTED",
+    };
+  } catch (...) {
+    return ReachabilityProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = "BRIDGE_REQUEST_CONVERSION_FAILED",
+    };
+  }
+}
+
 HopperLandingEvidenceProjectionResult
 PlannerBridge::ProjectHopperLandingEvidence(
     const TrainingPlanRequest &request,

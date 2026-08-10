@@ -317,6 +317,51 @@ struct LandingRegionHopResult final {
   }
 }
 
+[[nodiscard]] LandingRegionHopResult CertifyDirectedLandingRegionEdge(
+    const hopper::CertifiedLandingRegion& source,
+    const hopper::CertifiedLandingRegion& target,
+    const shared::MapSnapshot& flight_map,
+    const HopperCapability& capability,
+    const MapSafetyConfig& map_safety,
+    const std::stop_token stop_token) {
+  const hopper::SingleHopCertificationResult hop = hopper::CertifySingleHop(
+      hopper::SingleHopCertificationProblem{
+          .launch_position_m = source.aim_position_on_surface_m,
+          .landing_position_m = target.aim_position_on_surface_m,
+          .gravity_mps2 = kLunarGravityMps2,
+          .flight_map = &flight_map,
+          .capability = &capability,
+          .map_safety = &map_safety,
+          .stop_token = stop_token,
+      });
+  if (!hop.ok()) {
+    return {.status = hop.status, .reason_code = hop.reason_code};
+  }
+  return CertifyLandingRegionHop(
+      *hop.certification, target, flight_map, capability, map_safety,
+      stop_token);
+}
+
+[[nodiscard]] std::string EdgeFailureReason(
+    const LandingRegionHopResult& edge) {
+  switch (edge.status) {
+    case hopper::HopCertificationStatus::kCanceled:
+      return "REQUEST_CANCELED";
+    case hopper::HopCertificationStatus::kResourceExhausted:
+      return "REACHABILITY_RESOURCE_EXHAUSTED";
+    case hopper::HopCertificationStatus::kInvalid:
+    case hopper::HopCertificationStatus::kNumericalIndeterminate:
+      return edge.reason_code.empty()
+          ? "HOPPER_REACHABILITY_CERTIFICATION_INVALID"
+          : edge.reason_code;
+    case hopper::HopCertificationStatus::kCertified:
+      return "HOPPER_REACHABILITY_CERTIFICATION_INVALID";
+    case hopper::HopCertificationStatus::kInfeasible:
+      return {};
+  }
+  return "HOPPER_REACHABILITY_CERTIFICATION_INVALID";
+}
+
 [[nodiscard]] ReachabilityProjectionResult ProjectGround(
     const PlannerInput& input,
     const std::shared_ptr<const shared::MapSnapshot>& global_map,
@@ -369,7 +414,8 @@ struct LandingRegionHopResult final {
     const shared::SafeProjection& safe,
     const shared::GridCell start,
     const double maximum_edge_distance_m,
-    const HopperLandingEvidenceGrid* const external_evidence) {
+    const HopperLandingEvidenceGrid* const external_evidence,
+    const bool direct_only) {
   const auto* capability = std::get_if<HopperCapability>(&input.capability);
   if (capability == nullptr) {
     return Failure("REACHABILITY_PLATFORM_STATE_MISMATCH");
@@ -379,7 +425,9 @@ struct LandingRegionHopResult final {
       .width = global_map->width(),
       .height = global_map->height(),
       .reachable = std::vector<std::uint8_t>(global_map->cell_count(), 0U),
-      .algorithm_id = "cpp-hopper-certified-directed-bfs/v1",
+      .algorithm_id = direct_only
+          ? "cpp-hopper-certified-bidirectional-direct/v1"
+          : "cpp-hopper-certified-bidirectional-bfs/v3",
       .maximum_edge_distance_m = maximum_edge_distance_m,
   };
 
@@ -412,13 +460,15 @@ struct LandingRegionHopResult final {
       }
     }
   }
-  for (std::size_t index = 0U; index < landings.size(); ++index) {
-    const shared::GridCell cell{
-        .x = static_cast<std::int32_t>(index % global_map->width()),
-        .y = static_cast<std::int32_t>(index / global_map->width()),
-    };
-    if (!safe.HardFeasible(cell)) {
-      landings[index].reset();
+  if (external_evidence == nullptr) {
+    for (std::size_t index = 0U; index < landings.size(); ++index) {
+      const shared::GridCell cell{
+          .x = static_cast<std::int32_t>(index % global_map->width()),
+          .y = static_cast<std::int32_t>(index / global_map->width()),
+      };
+      if (!safe.HardFeasible(cell)) {
+        landings[index].reset();
+      }
     }
   }
 
@@ -430,6 +480,76 @@ struct LandingRegionHopResult final {
     };
   }
   projection.reachable[start_index] = 1U;
+
+  const auto certify_recoverable_edge =
+      [&](const std::size_t source_index,
+          const std::size_t target_index) -> std::pair<bool, std::string> {
+    ++projection.candidate_edges_evaluated;
+    const LandingRegionHopResult forward =
+        CertifyDirectedLandingRegionEdge(
+            *landings[source_index], *landings[target_index], *global_map,
+            *capability, input.config.map_safety, input.stop_token);
+    if (!forward.ok()) {
+      if (forward.status == hopper::HopCertificationStatus::kInfeasible) {
+        ++projection.rejected_edges;
+        return {false, {}};
+      }
+      return {false, EdgeFailureReason(forward)};
+    }
+    ++projection.certified_edges;
+    ++projection.candidate_edges_evaluated;
+    const LandingRegionHopResult reverse =
+        CertifyDirectedLandingRegionEdge(
+            *landings[target_index], *landings[source_index], *global_map,
+            *capability, input.config.map_safety, input.stop_token);
+    if (!reverse.ok()) {
+      if (reverse.status == hopper::HopCertificationStatus::kInfeasible) {
+        ++projection.rejected_edges;
+        return {false, {}};
+      }
+      return {false, EdgeFailureReason(reverse)};
+    }
+    ++projection.certified_edges;
+    return {true, {}};
+  };
+
+  if (direct_only) {
+    if (external_evidence == nullptr) {
+      return Failure("HOPPER_DIRECT_REACHABILITY_REQUIRES_LANDING_EVIDENCE");
+    }
+    const Vec3 source_position =
+        landings[start_index]->aim_position_on_surface_m;
+    for (std::size_t target_index = 0U;
+         target_index < landings.size(); ++target_index) {
+      if (target_index == start_index || !landings[target_index].has_value()) {
+        continue;
+      }
+      const Vec3 target_position =
+          landings[target_index]->aim_position_on_surface_m;
+      const double distance_m = std::hypot(
+          target_position.x - source_position.x,
+          target_position.y - source_position.y);
+      if (distance_m > maximum_edge_distance_m + kDistanceToleranceM) {
+        continue;
+      }
+      const auto [certified, fatal_reason] =
+          certify_recoverable_edge(start_index, target_index);
+      if (!fatal_reason.empty()) {
+        return Failure(fatal_reason);
+      }
+      if (!certified) {
+        continue;
+      }
+      projection.reachable[target_index] = 1U;
+      projection.maximum_certified_edge_distance_m = std::max(
+          projection.maximum_certified_edge_distance_m, distance_m);
+    }
+    return ReachabilityProjectionResult{
+        .projection = std::move(projection),
+        .reason_code = {},
+    };
+  }
+
   std::deque<std::size_t> queue{start_index};
 
   const auto cell_radius = static_cast<std::int32_t>(
@@ -472,69 +592,21 @@ struct LandingRegionHopResult final {
           !landings[target_index].has_value()) {
         continue;
       }
-      ++projection.candidate_edges_evaluated;
-      const hopper::SingleHopCertificationResult hop = hopper::CertifySingleHop(
-          hopper::SingleHopCertificationProblem{
-              .launch_position_m =
-                  landings[source_index]->aim_position_on_surface_m,
-              .landing_position_m =
-                  landings[target_index]->aim_position_on_surface_m,
-              .gravity_mps2 = kLunarGravityMps2,
-              .flight_map = global_map.get(),
-              .capability = capability,
-              .map_safety = &input.config.map_safety,
-              .stop_token = input.stop_token,
-          });
-      if (hop.ok()) {
-        const LandingRegionHopResult region_hop = CertifyLandingRegionHop(
-            *hop.certification, *landings[target_index], *global_map,
-            *capability, input.config.map_safety, input.stop_token);
-        if (!region_hop.ok()) {
-          switch (region_hop.status) {
-            case hopper::HopCertificationStatus::kInfeasible:
-              ++projection.rejected_edges;
-              continue;
-            case hopper::HopCertificationStatus::kCanceled:
-              return Failure("REQUEST_CANCELED");
-            case hopper::HopCertificationStatus::kResourceExhausted:
-              return Failure("REACHABILITY_RESOURCE_EXHAUSTED");
-            case hopper::HopCertificationStatus::kInvalid:
-            case hopper::HopCertificationStatus::kNumericalIndeterminate:
-              return Failure(
-                  region_hop.reason_code.empty()
-                      ? "HOPPER_REACHABILITY_CERTIFICATION_INVALID"
-                      : region_hop.reason_code);
-            case hopper::HopCertificationStatus::kCertified:
-              return Failure("HOPPER_REACHABILITY_CERTIFICATION_INVALID");
-          }
-        }
-        projection.reachable[target_index] = 1U;
-        ++projection.certified_edges;
-        projection.maximum_certified_edge_distance_m = std::max(
-            projection.maximum_certified_edge_distance_m,
-            std::hypot(
-                static_cast<double>(dx) * global_map->resolution_m(),
-                static_cast<double>(dy) * global_map->resolution_m()));
-        queue.push_back(target_index);
+      const auto [certified, fatal_reason] =
+          certify_recoverable_edge(source_index, target_index);
+      if (!fatal_reason.empty()) {
+        return Failure(fatal_reason);
+      }
+      if (!certified) {
         continue;
       }
-      switch (hop.status) {
-        case hopper::HopCertificationStatus::kInfeasible:
-          ++projection.rejected_edges;
-          break;
-        case hopper::HopCertificationStatus::kCanceled:
-          return Failure("REQUEST_CANCELED");
-        case hopper::HopCertificationStatus::kResourceExhausted:
-          return Failure("REACHABILITY_RESOURCE_EXHAUSTED");
-        case hopper::HopCertificationStatus::kInvalid:
-        case hopper::HopCertificationStatus::kNumericalIndeterminate:
-          return Failure(
-              hop.reason_code.empty()
-                  ? "HOPPER_REACHABILITY_CERTIFICATION_INVALID"
-                  : hop.reason_code);
-        case hopper::HopCertificationStatus::kCertified:
-          return Failure("HOPPER_REACHABILITY_CERTIFICATION_INVALID");
-      }
+      projection.reachable[target_index] = 1U;
+      projection.maximum_certified_edge_distance_m = std::max(
+          projection.maximum_certified_edge_distance_m,
+          std::hypot(
+              static_cast<double>(dx) * global_map->resolution_m(),
+              static_cast<double>(dy) * global_map->resolution_m()));
+      queue.push_back(target_index);
     }
   }
   return ReachabilityProjectionResult{
@@ -549,7 +621,8 @@ namespace {
 
 [[nodiscard]] ReachabilityProjectionResult ProjectReachabilityImpl(
     const PlannerInput& input, const double maximum_edge_distance_m,
-    const HopperLandingEvidenceGrid* const hopper_landing_evidence) {
+    const HopperLandingEvidenceGrid* const hopper_landing_evidence,
+    const bool direct_hopper) {
   if (!std::isfinite(maximum_edge_distance_m) ||
       maximum_edge_distance_m <= 0.0) {
     return Failure("REACHABILITY_MAXIMUM_EDGE_DISTANCE_INVALID");
@@ -583,7 +656,10 @@ namespace {
     if (platform == PlatformType::kHopper) {
       return ProjectHopper(
           input, global.snapshot, local.snapshot, *built.projection, *start,
-          maximum_edge_distance_m, hopper_landing_evidence);
+          maximum_edge_distance_m, hopper_landing_evidence, direct_hopper);
+    }
+    if (direct_hopper) {
+      return Failure("HOPPER_DIRECT_REACHABILITY_PLATFORM_MISMATCH");
     }
     if (hopper_landing_evidence != nullptr) {
       return Failure("HOPPER_LANDING_EVIDENCE_PLATFORM_MISMATCH");
@@ -613,14 +689,22 @@ namespace {
 
 ReachabilityProjectionResult ProjectReachability(
     const PlannerInput& input, const double maximum_edge_distance_m) {
-  return ProjectReachabilityImpl(input, maximum_edge_distance_m, nullptr);
+  return ProjectReachabilityImpl(
+      input, maximum_edge_distance_m, nullptr, false);
 }
 
 ReachabilityProjectionResult ProjectReachability(
     const PlannerInput& input, const double maximum_edge_distance_m,
     const HopperLandingEvidenceGrid& hopper_landing_evidence) {
   return ProjectReachabilityImpl(
-      input, maximum_edge_distance_m, &hopper_landing_evidence);
+      input, maximum_edge_distance_m, &hopper_landing_evidence, false);
+}
+
+ReachabilityProjectionResult ProjectDirectHopperReachability(
+    const PlannerInput& input, const double maximum_edge_distance_m,
+    const HopperLandingEvidenceGrid& hopper_landing_evidence) {
+  return ProjectReachabilityImpl(
+      input, maximum_edge_distance_m, &hopper_landing_evidence, true);
 }
 
 HopperLandingEvidenceProjectionResult ProjectHopperLandingEvidence(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pathlib
 import sys
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -14,7 +15,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "model_cont
 from lunar_policy_training.environment import candidate_builder as candidate_builder_module  # noqa: E402
 from lunar_policy_training.environment.candidate_builder import CandidateBatch, CandidateBuilderV2  # noqa: E402
 from lunar_policy_training.environment.observation_builder import LocalObservation, MissionRaster, ObservedWorld, PlatformProjection, Pose2  # noqa: E402
-from lunar_policy_training.environment.platform_reachability import PlatformCandidateReachability  # noqa: E402
+from lunar_policy_training.environment.platform_reachability import CandidateReachabilityResult, PlatformCandidateReachability  # noqa: E402
 from lunar_policy_training.environment.visibility import NativeVisibilityEstimator, SensorGeometry  # noqa: E402
 from lunar_policy_training.polar_data.hazards import CanvasRatioLayer  # noqa: E402
 from lunar_policy_training.polar_data.raster import MapCanvas  # noqa: E402
@@ -456,6 +457,174 @@ def test_hopper_rejects_unobserved_or_projection_infeasible_landings() -> None:
     assert unobserved.count == 0
 
 
+def test_hopper_falls_back_to_reachable_positive_gain_observation_pose() -> None:
+    canvas = _canvas()
+    robot = (128, 128)
+    robot_x_m, robot_y_m = canvas.grid_center_world(*robot)
+    observed = np.zeros((256, 256), dtype=np.bool_)
+    observed[127:130, 128:142] = True
+    roi = np.zeros((256, 256), dtype=np.bool_)
+    roi[127:130, 128:143] = True
+    estimator = _RecordingEstimator()
+
+    batch = CandidateBuilderV2(estimator).build(
+        _world(observed),
+        _mission_for_roi(roi),
+        Pose2(robot_x_m, robot_y_m),
+        _projection(),
+        platform_type="HOPPER",
+    )
+
+    assert batch.count > 0
+    assert len(estimator.calls) == 1
+    frontier_cell = (128, 141)
+    assert frontier_cell not in map(tuple, estimator.calls[0])
+    candidate_distances_m = np.linalg.norm(
+        estimator.calls[0] - np.asarray(robot), axis=1
+    ) * canvas.geometry.resolution_m
+    assert np.all(candidate_distances_m <= 30.0)
+    assert np.any(estimator.calls[0][:, 1] >= 135)
+
+
+def test_hopper_emits_truthful_zero_gain_transit_when_frontier_is_remote() -> None:
+    canvas = _canvas()
+    robot = (128, 128)
+    robot_x_m, robot_y_m = canvas.grid_center_world(*robot)
+    observed = np.zeros((256, 256), dtype=np.bool_)
+    observed[127:130, 128:142] = True
+    roi = np.zeros((256, 256), dtype=np.bool_)
+    roi[127:130, 128:143] = True
+
+    class ZeroGainEstimator(_RecordingEstimator):
+        def estimate_candidate_gains(self, *args) -> np.ndarray:
+            self.calls.append(args[-1].copy())
+            return np.zeros((len(args[-1]), 2), dtype=np.float32)
+
+    batch = CandidateBuilderV2(ZeroGainEstimator()).build(
+        _world(observed),
+        _mission_for_roi(roi),
+        Pose2(robot_x_m, robot_y_m),
+        _projection(),
+        platform_type="HOPPER",
+    )
+
+    assert batch.count > 0
+    assert np.all(batch.features[batch.mask, 5:7] == 0.0)
+    assert batch.diagnostics.zero_gain_count == 0
+
+
+def test_hopper_emits_zero_gain_transit_when_frontier_anchors_have_no_gain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _world_with_frontier()
+    mission = _mission()
+    projection = _projection()
+    pose = Pose2(500.0, 512.0)
+
+    class ZeroGainEstimator(_RecordingEstimator):
+        def estimate_candidate_gains(self, *args) -> np.ndarray:
+            self.calls.append(args[-1].copy())
+            return np.zeros((len(args[-1]), 2), dtype=np.float32)
+
+    def accept(
+        _self,
+        candidate_cells: np.ndarray,
+        *,
+        target_positions_map: np.ndarray | None = None,
+    ) -> CandidateReachabilityResult:
+        del target_positions_map
+        return CandidateReachabilityResult(
+            np.ones(len(candidate_cells), dtype=np.bool_),
+            {"platform_unreachable_count": 0},
+        )
+
+    monkeypatch.setattr(PlatformCandidateReachability, "filter", accept)
+    reachability = object.__new__(PlatformCandidateReachability)
+    batch = CandidateBuilderV2(ZeroGainEstimator()).build(
+        world,
+        mission,
+        pose,
+        projection,
+        platform_type="HOPPER",
+        platform_reachability=reachability,
+    )
+
+    assert batch.count > 0
+    assert np.all(batch.features[batch.mask, 5:7] == 0.0)
+
+
+def test_zero_gain_backtrack_preserves_exact_parent_pose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canvas = _canvas()
+    robot = (128, 128)
+    robot_x_m, robot_y_m = canvas.grid_center_world(*robot)
+    observed = np.zeros((256, 256), dtype=np.bool_)
+    observed[127:130, 128:142] = True
+    roi = np.zeros((256, 256), dtype=np.bool_)
+    roi[127:130, 128:143] = True
+    visited = set(map(tuple, np.column_stack(np.nonzero(observed))))
+
+    class ZeroGainEstimator(_RecordingEstimator):
+        def estimate_candidate_gains(self, *args) -> np.ndarray:
+            self.calls.append(args[-1].copy())
+            return np.zeros((len(args[-1]), 2), dtype=np.float32)
+
+    estimator = ZeroGainEstimator()
+    parent_cell = (128, 129)
+    parent_center_x, parent_center_y = canvas.grid_center_world(*parent_cell)
+    parent = Pose2(
+        parent_center_x + 0.02,
+        parent_center_y - 0.02,
+        elevation_m=123.0,
+    )
+    recorded_positions: list[np.ndarray | None] = []
+
+    def accept(
+        _self,
+        candidate_cells: np.ndarray,
+        target_positions_map: np.ndarray | None = None,
+    ) -> CandidateReachabilityResult:
+        recorded_positions.append(
+            None if target_positions_map is None else target_positions_map.copy()
+        )
+        return CandidateReachabilityResult(
+            np.ones(len(candidate_cells), dtype=np.bool_),
+            {"platform_unreachable_count": 0},
+        )
+
+    monkeypatch.setattr(PlatformCandidateReachability, "filter", accept)
+    reachability = object.__new__(PlatformCandidateReachability)
+    batch = CandidateBuilderV2(estimator).build(
+        _world(observed),
+        _mission_for_roi(roi),
+        Pose2(robot_x_m, robot_y_m),
+        _projection(),
+        platform_type="HOPPER",
+        platform_reachability=reachability,
+        excluded_cells=visited,
+        backtrack_pose=parent,
+    )
+
+    assert batch.count == 1
+    assert recorded_positions[-1] is not None
+    np.testing.assert_array_equal(
+        recorded_positions[-1],
+        np.asarray([[parent.x_m, parent.y_m, parent.elevation_m]]),
+    )
+    np.testing.assert_allclose(
+        batch.features[0, :2],
+        np.asarray(
+            [
+                (parent.x_m - canvas.bounds_m[0]) / canvas.geometry.size_m,
+                (canvas.bounds_m[3] - parent.y_m) / canvas.geometry.size_m,
+            ]
+        ),
+    )
+    assert batch.target_elevation_m[0] == 123.0
+    assert np.all(batch.features[0, 5:7] == 0.0)
+
+
 def test_platform_filter_rejects_unknown_platform_and_is_byte_deterministic() -> None:
     world, mission, projection, pose, _ = _detour_fixture()
     builder = CandidateBuilderV2(_RecordingEstimator())
@@ -513,6 +682,7 @@ def test_stage_diagnostics_isolate_platform_unreachable_and_zero_gain() -> None:
         pose,
         projection,
         platform_type="HOPPER",
+        platform_reachability_filter_enabled=False,
     )
 
     assert unreachable.count == 0
@@ -521,3 +691,61 @@ def test_stage_diagnostics_isolate_platform_unreachable_and_zero_gain() -> None:
     assert zero_gain.count == 0
     assert zero_gain.diagnostics.platform_unreachable_count == 0
     assert zero_gain.diagnostics.zero_gain_count > 0
+
+
+def test_hopper_reachability_uses_certified_pose_height_for_start() -> None:
+    canvas = _canvas()
+    start = (128, 128)
+    target = (128, 129)
+    start_x_m, start_y_m = canvas.grid_center_world(*start)
+    elevation = np.full((256, 256), 7.0, dtype=np.float32)
+
+    class RecordingBridge:
+        def __init__(self) -> None:
+            self.targets = None
+
+        def project_hopper_landing_evidence(self, request, targets):
+            del request
+            self.targets = targets.copy()
+            count = len(targets)
+            return SimpleNamespace(
+                certified=np.ones(count, dtype=np.bool_),
+                aim_positions_m=targets.copy(),
+                boundary_m=np.zeros((count, 4, 3), dtype=np.float64),
+                area_m2=np.ones(count, dtype=np.float64),
+                algorithm_id="test/landing-evidence/v1",
+            )
+
+        def project_direct_hopper_reachability(
+            self, request, maximum_edge_distance_m, evidence
+        ):
+            del request, maximum_edge_distance_m, evidence
+            return SimpleNamespace(
+                reachable=np.ones((256, 256), dtype=np.uint8)
+            )
+
+    bridge = RecordingBridge()
+    reachability = PlatformCandidateReachability(
+        platform_type="HOPPER",
+        canvas=canvas,
+        pose_map=Pose2(start_x_m, start_y_m, elevation_m=123.0),
+        observed_elevation_m=elevation,
+        bridge=bridge,
+        request=object(),
+    )
+
+    target_x_m, target_y_m = canvas.grid_center_world(*target)
+    exact_target = np.asarray(
+        [[target_x_m + 0.02, target_y_m - 0.02, 321.0]],
+        dtype=np.float64,
+    )
+    result = reachability.filter(
+        np.asarray([target], dtype=np.int32),
+        target_positions_map=exact_target,
+    )
+
+    assert result.accepted_mask.tolist() == [True]
+    np.testing.assert_array_equal(
+        bridge.targets[0], np.asarray([start_x_m, start_y_m, 123.0])
+    )
+    np.testing.assert_array_equal(bridge.targets[1], exact_target[0])

@@ -379,7 +379,7 @@ def test_bridge_projects_start_bound_reachability_with_exact_array_contract(
     assert projection.reachable.any()
     assert projection.maximum_edge_distance_m == 2.0
     if platform_type == "HOPPER":
-        assert projection.algorithm_id == "cpp-hopper-certified-directed-bfs/v1"
+        assert projection.algorithm_id == "cpp-hopper-certified-bidirectional-bfs/v3"
         assert projection.candidate_edges_evaluated > 0
     else:
         assert projection.algorithm_id == "cpp-ground-start-connected-component/v1"
@@ -415,6 +415,9 @@ def test_bridge_streams_hopper_landing_evidence_into_reachability(
     )
     internal = bridge.project_reachability(request, 2.0)
     external = bridge.project_reachability(request, 2.0, evidence)
+    direct = bridge.project_direct_hopper_reachability(
+        request, 2.0, evidence
+    )
 
     assert projected.algorithm_id == "cpp-hopper-detail-landing-regions/v1"
     assert projected.candidates_evaluated == targets.shape[0]
@@ -425,6 +428,12 @@ def test_bridge_streams_hopper_landing_evidence_into_reachability(
     assert evidence.width == grid.width
     assert evidence.height == grid.height
     np.testing.assert_array_equal(external.reachable, internal.reachable)
+    assert direct.algorithm_id == (
+        "cpp-hopper-certified-bidirectional-direct/v1"
+    )
+    assert direct.reachable.shape == external.reachable.shape
+    assert direct.reachable.dtype == np.uint8
+    assert direct.reachable.flags.c_contiguous
 
     with pytest.raises(TypeError, match="bool"):
         bridge_api.HopperLandingEvidenceGrid(

@@ -28,7 +28,6 @@ from .visibility import NativeVisibilityEstimator, SensorGeometry
 _DETAIL_PER_GLOBAL = int(
     round(GLOBAL_GEOMETRY.resolution_m / LOCAL_GEOMETRY.resolution_m)
 )
-_CENTRAL_SUBCELLS = (slice(9, 11), slice(9, 11))
 
 
 @dataclass(slots=True)
@@ -595,7 +594,7 @@ class MultiresSensorObservationState(SensorObservationState):
 
     def _aggregate_coarse_cell(self, row: int, column: int) -> None:
         valid = self._detail_block(row, column, "valid_mask")
-        if not valid[_CENTRAL_SUBCELLS].all():
+        if not valid.all():
             return
         elevation = self._detail_block(row, column, "elevation_m")
         obstacle = self._detail_block(

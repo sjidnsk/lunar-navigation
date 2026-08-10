@@ -1160,6 +1160,22 @@ void BindRequest(py::module_ &module) {
           py::arg("hopper_landing_evidence"),
           py::call_guard<py::gil_scoped_release>())
       .def(
+          "project_direct_hopper_reachability",
+          [](const training::PlannerBridge &self,
+             const training::TrainingPlanRequest &request,
+             const double maximum_edge_distance_m,
+             const planning::HopperLandingEvidenceGrid &evidence) {
+            auto result = self.ProjectDirectHopperReachability(
+                request, maximum_edge_distance_m, evidence);
+            if (!result.ok()) {
+              throw std::runtime_error(result.reason_code);
+            }
+            return std::move(*result.projection);
+          },
+          py::arg("request"), py::arg("maximum_edge_distance_m"),
+          py::arg("hopper_landing_evidence"),
+          py::call_guard<py::gil_scoped_release>())
+      .def(
           "project_hopper_landing_evidence",
           [](const training::PlannerBridge &self,
              const training::TrainingPlanRequest &request,

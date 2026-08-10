@@ -467,6 +467,7 @@ class FormalEpisode:
         self.last_hop_available_delta_v_mps = 0.0
         self._reveal_history: list[FormalRevealState] = []
         self._visited_candidate_cells = {start_cell}
+        self._navigation_stack = [self.current_pose]
         self._visited_candidate_filter_enabled = visited_candidate_filter_enabled
         self.controller = ObservationBoundaryController(
             platform_type=platform_type,
@@ -507,12 +508,26 @@ class FormalEpisode:
         evidence: SensorBoundaryEvidence,
         execution_state: str,
     ) -> None:
-        self._visited_candidate_cells.add(
-            self.loaded.scene.base_canvas.world_to_grid(
-                evidence.pose_map.x_m,
-                evidence.pose_map.y_m,
-            )
+        canvas = self.loaded.scene.base_canvas
+        cell = canvas.world_to_grid(
+            evidence.pose_map.x_m,
+            evidence.pose_map.y_m,
         )
+        if (
+            len(self._navigation_stack) >= 2
+            and cell
+            == canvas.world_to_grid(
+                self._navigation_stack[-2].x_m,
+                self._navigation_stack[-2].y_m,
+            )
+        ):
+            self._navigation_stack.pop()
+        elif cell != canvas.world_to_grid(
+            self._navigation_stack[-1].x_m,
+            self._navigation_stack[-1].y_m,
+        ):
+            self._navigation_stack.append(evidence.pose_map)
+        self._visited_candidate_cells.add(cell)
         self._reveal_history.append(
             FormalRevealState(
                 pose=self._pose_state(evidence.pose_map),
@@ -640,7 +655,14 @@ class FormalEpisode:
             snapshot.world,
             self.mission,
             snapshot.projection,
+            pose_map=self.current_pose,
             platform_reachability=snapshot.platform_reachability,
+            excluded_cells=self._visited_candidate_cells,
+            backtrack_pose=(
+                self._navigation_stack[-2]
+                if len(self._navigation_stack) >= 2
+                else None
+            ),
         )
 
     def remaining_coverable_detail_cell_count(self) -> int:
@@ -805,6 +827,11 @@ class FormalEpisode:
                 if self._visited_candidate_filter_enabled
                 else ()
             ),
+            backtrack_pose=(
+                self._navigation_stack[-2]
+                if len(self._navigation_stack) >= 2
+                else None
+            ),
         )
         arrays = self._observation_builder.build(
             world,
@@ -844,8 +871,10 @@ class FormalEpisode:
         canvas = self.loaded.scene.base_canvas
         target_x = canvas.bounds_m[0] + float(feature[0]) * canvas.geometry.size_m
         target_y = canvas.bounds_m[3] - float(feature[1]) * canvas.geometry.size_m
-        target_row, target_column = canvas.world_to_grid(target_x, target_y)
-        target_z = float(self.loaded.arrays["elevation_m"][target_row, target_column])
+        canvas.world_to_grid(target_x, target_y)
+        target_z = float(
+            snapshot.candidates.target_elevation_m[action.frontier_index]
+        )
         request = self._base_request(snapshot.global_map, snapshot.local_map)
         # The observation boundary owns the authoritative state clock.  Cache
         # map objects are materialized while the observation is being built,
