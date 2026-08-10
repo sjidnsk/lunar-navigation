@@ -5,6 +5,7 @@
 #include <string>
 
 #include "lunar_planner_core/planner.hpp"
+#include "lunar_planner_core/reachability_projection.hpp"
 #include "lunar_planner_core/traversability_projection.hpp"
 
 namespace lunar::planning::training {
@@ -33,6 +34,9 @@ class PlannerBridge final {
  public:
   [[nodiscard]] lunar::planning::PlannerOutput Plan(
       const TrainingPlanRequest &request) noexcept;
+  [[nodiscard]] lunar::planning::ReachabilityProjectionResult
+  ProjectReachability(const TrainingPlanRequest &request,
+                      double maximum_edge_distance_m) const noexcept;
   [[nodiscard]] lunar::planning::TraversabilityProjectionResult
   ProjectTraversability(const TrainingPlanRequest &request) const {
     return lunar::planning::ProjectTraversability(

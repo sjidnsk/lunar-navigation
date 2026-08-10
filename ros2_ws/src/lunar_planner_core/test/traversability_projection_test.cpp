@@ -50,8 +50,12 @@ TEST(TraversabilityProjection, SameTerrainDiffersByCapability) {
   ASSERT_TRUE(legged.ok()) << legged.reason_code;
   ASSERT_EQ(wheel.projection->hard_feasible.size(), 25U);
   ASSERT_EQ(legged.projection->hard_feasible.size(), 25U);
+  ASSERT_EQ(wheel.projection->intrinsic_feasible.size(), 25U);
+  ASSERT_EQ(legged.projection->intrinsic_feasible.size(), 25U);
   EXPECT_EQ(wheel.projection->hard_feasible[12U], 0U);
   EXPECT_EQ(legged.projection->hard_feasible[12U], 1U);
+  EXPECT_EQ(wheel.projection->intrinsic_feasible[12U], 0U);
+  EXPECT_EQ(legged.projection->intrinsic_feasible[12U], 1U);
 }
 
 TEST(TraversabilityProjection, RejectsInvalidLocalMapWithStableReasonCode) {

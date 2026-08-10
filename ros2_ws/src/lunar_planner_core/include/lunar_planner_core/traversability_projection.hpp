@@ -18,6 +18,7 @@ struct TraversabilityProjection final {
   std::size_t width{};
   std::size_t height{};
   std::vector<std::uint8_t> known;
+  std::vector<std::uint8_t> intrinsic_feasible;
   std::vector<std::uint8_t> hard_feasible;
   std::vector<float> clearance_m;
   std::vector<float> slope_rad;

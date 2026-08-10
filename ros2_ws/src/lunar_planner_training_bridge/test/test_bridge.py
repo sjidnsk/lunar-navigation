@@ -345,6 +345,7 @@ def test_bridge_projects_traversability_with_exact_array_contract(
     assert projection.height == expected_shape[0]
     expected_dtypes = {
         "known": np.uint8,
+        "intrinsic_feasible": np.uint8,
         "hard_feasible": np.uint8,
         "clearance_m": np.float32,
         "slope_rad": np.float32,
@@ -357,6 +358,32 @@ def test_bridge_projects_traversability_with_exact_array_contract(
         assert values.shape == expected_shape
         assert values.dtype == dtype
         assert values.flags.c_contiguous
+
+
+@pytest.mark.parametrize("platform_type", ["WHEELED", "LEGGED", "HOPPER"])
+def test_bridge_projects_start_bound_reachability_with_exact_array_contract(
+    bridge, easy_request, platform_type
+) -> None:
+    """Would fail if Python reused one generic ground reachability rule."""
+    request = easy_request(platform_type)
+
+    projection = bridge.project_reachability(request, 2.0)
+
+    assert projection.platform_type == platform_type
+    assert projection.reachable.shape == (
+        request.world.global_map.height,
+        request.world.global_map.width,
+    )
+    assert projection.reachable.dtype == np.uint8
+    assert projection.reachable.flags.c_contiguous
+    assert projection.reachable.any()
+    assert projection.maximum_edge_distance_m == 2.0
+    if platform_type == "HOPPER":
+        assert projection.algorithm_id == "cpp-hopper-certified-directed-bfs/v1"
+        assert projection.candidate_edges_evaluated > 0
+    else:
+        assert projection.algorithm_id == "cpp-ground-start-connected-component/v1"
+        assert projection.candidate_edges_evaluated == 0
 
 
 def test_bridge_projection_rejects_invalid_map_with_stable_reason(

@@ -1,0 +1,338 @@
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <stop_token>
+#include <variant>
+#include <vector>
+
+#include <gtest/gtest.h>
+
+#include "lunar_planner_core/reachability_projection.hpp"
+#include "lunar_planner_core/traversability_projection.hpp"
+#include "hopper/hop_certifier.hpp"
+#include "hopper/landing_region.hpp"
+#include "shared/map_snapshot.hpp"
+#include "shared/safe_projection.hpp"
+#include "test_fixtures.hpp"
+
+namespace lunar::planning {
+namespace {
+
+void SetObstacle(GridMap& map, const std::size_t row,
+                 const std::size_t column, const float height_m = 0.1F) {
+  const std::size_t index = row * map.width + column;
+  std::get<std::vector<std::uint8_t>>(
+      map.layers.at("obstacle").values).at(index) = 1U;
+  std::get<std::vector<float>>(
+      map.layers.at("obstacle_height").values).at(index) = height_m;
+}
+
+std::size_t Index(const GridMap& map, const std::size_t row,
+                  const std::size_t column) {
+  return row * map.width + column;
+}
+
+void KeepOnlyLandingEvidencePatches(
+    GridMap& map,
+    const std::vector<std::pair<std::size_t, std::size_t>>& centers) {
+  auto& valid = std::get<std::vector<std::uint8_t>>(
+      map.layers.at("valid_mask").values);
+  std::fill(valid.begin(), valid.end(), 0U);
+  for (const auto [center_row, center_column] : centers) {
+    for (std::size_t row = center_row - 2U; row <= center_row + 2U; ++row) {
+      for (std::size_t column = center_column - 2U;
+           column <= center_column + 2U; ++column) {
+        valid.at(Index(map, row, column)) = 1U;
+      }
+    }
+  }
+}
+
+TEST(ReachabilityProjection, GroundMaskIsTheCppStartConnectedComponent) {
+  PlannerInput input = test::MakeValidWheelInput();
+  input.world.global_map = test::MakeFlatMap("map", 12U, 8U, 1.0);
+  input.world.local_map = test::MakeFlatMap("odom", 12U, 8U, 1.0);
+  for (std::size_t row = 0U; row < input.world.local_map.height; ++row) {
+    SetObstacle(input.world.local_map, row, 6U);
+    SetObstacle(input.world.global_map, row, 6U);
+  }
+  auto& state = std::get<WheeledState>(input.current_state);
+  state.pose.position_m = {2.5, 3.5, 0.0};
+
+  const auto traversability = ProjectTraversability(
+      input.world, input.capability, input.config.map_safety, {});
+  const auto reachability = ProjectReachability(input, 30.0);
+
+  ASSERT_TRUE(traversability.ok()) << traversability.reason_code;
+  ASSERT_TRUE(reachability.ok()) << reachability.reason_code;
+  const std::size_t start = Index(input.world.local_map, 3U, 2U);
+  const std::int32_t component =
+      traversability.projection->connected_component.at(start);
+  ASSERT_GE(component, 0);
+  ASSERT_EQ(reachability.projection->reachable.size(),
+            traversability.projection->connected_component.size());
+  for (std::size_t index = 0U;
+       index < reachability.projection->reachable.size(); ++index) {
+    const bool expected =
+        traversability.projection->hard_feasible[index] != 0U &&
+        traversability.projection->connected_component[index] == component;
+    EXPECT_EQ(reachability.projection->reachable[index] != 0U, expected)
+        << "index=" << index;
+  }
+  EXPECT_EQ(reachability.projection->algorithm_id,
+            "cpp-ground-start-connected-component/v1");
+  EXPECT_EQ(reachability.projection->candidate_edges_evaluated, 0U);
+}
+
+TEST(ReachabilityProjection, HopperCertifiedHopCrossesGroundDisconnectedGap) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 80U, 16U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 80U, 16U, 0.5);
+  input.config.global_map.base_resolution_m = 0.5;
+  auto& state = std::get<HopperState>(input.current_state);
+  state.pose.position_m = {3.25, 4.25, 0.0};
+  for (std::size_t row = 0U; row < 16U; ++row) {
+    SetObstacle(input.world.global_map, row, 20U);
+  }
+  KeepOnlyLandingEvidencePatches(
+      input.world.local_map, {{8U, 6U}, {8U, 40U}});
+
+  const auto reachability = ProjectReachability(input, 30.0);
+
+  ASSERT_TRUE(reachability.ok()) << reachability.reason_code;
+  EXPECT_EQ(reachability.projection->algorithm_id,
+            "cpp-hopper-certified-directed-bfs/v1");
+  EXPECT_NE(reachability.projection->reachable[
+                Index(input.world.global_map, 8U, 40U)],
+            0U);
+  EXPECT_GT(reachability.projection->candidate_edges_evaluated, 0U);
+  EXPECT_GT(reachability.projection->certified_edges, 0U);
+}
+
+TEST(ReachabilityProjection, HopperFixtureHasCertifiedStartLandingAndLocalEdge) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 80U, 16U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 80U, 16U, 0.5);
+  input.config.global_map.base_resolution_m = 0.5;
+  auto& state = std::get<HopperState>(input.current_state);
+  state.pose.position_m = {3.25, 4.25, 0.0};
+  for (std::size_t row = 0U; row < 16U; ++row) {
+    SetObstacle(input.world.global_map, row, 20U);
+    SetObstacle(input.world.local_map, row, 20U);
+  }
+  const auto global = shared::MapSnapshot::Create(input.world.global_map);
+  const auto local = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(global.ok()) << global.reason_code;
+  ASSERT_TRUE(local.ok()) << local.reason_code;
+  const auto safe = shared::BuildSafeProjection(
+      global.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(safe.ok()) << safe.reason_code;
+  const shared::GridCell start_cell{.x = 6, .y = 8};
+  const shared::GridCell target_cell{.x = 40, .y = 8};
+  EXPECT_TRUE(safe.projection->HardFeasible(start_cell));
+  EXPECT_TRUE(safe.projection->HardFeasible(target_cell));
+  const auto capability = std::get<HopperCapability>(input.capability);
+  const auto landing = [&](const shared::GridCell cell) {
+    const Vec3 center = local.snapshot->CellCenter(cell);
+    return hopper::CertifyExactLandingRegion(
+        *local.snapshot,
+        GoalRegion{
+            .goal_id = "diagnostic",
+            .target = PointGoal{.position_m = center, .tolerance_m = 0.0},
+        },
+        capability, input.config.map_safety, {});
+  };
+  const auto source = landing(start_cell);
+  const auto target = landing(target_cell);
+  ASSERT_TRUE(source.ok()) << source.reason_code;
+  ASSERT_TRUE(target.ok()) << target.reason_code;
+  const auto hop = hopper::CertifySingleHop(
+      hopper::SingleHopCertificationProblem{
+          .launch_position_m = source.region->aim_position_on_surface_m,
+          .landing_position_m = target.region->aim_position_on_surface_m,
+          .gravity_mps2 = {0.0, 0.0, -1.62},
+          .flight_map = global.snapshot.get(),
+          .capability = &capability,
+          .map_safety = &input.config.map_safety,
+      });
+  ASSERT_TRUE(hop.ok()) << hop.reason_code;
+}
+
+TEST(ReachabilityProjection, HopperCannotUseAnEdgeBeyondTheRequestedDistance) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 80U, 16U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 80U, 16U, 0.5);
+  input.config.global_map.base_resolution_m = 0.5;
+  auto& state = std::get<HopperState>(input.current_state);
+  state.pose.position_m = {3.25, 4.25, 0.0};
+  KeepOnlyLandingEvidencePatches(
+      input.world.local_map, {{8U, 6U}, {8U, 74U}});
+
+  const auto reachability = ProjectReachability(input, 30.0);
+
+  ASSERT_TRUE(reachability.ok()) << reachability.reason_code;
+  EXPECT_EQ(reachability.projection->reachable[
+                Index(input.world.local_map, 8U, 74U)],
+            0U);
+  EXPECT_LE(reachability.projection->maximum_certified_edge_distance_m, 30.0);
+}
+
+TEST(ReachabilityProjection, HopperRejectsInsufficientDeltaVWithoutAborting) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 80U, 16U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 80U, 16U, 0.5);
+  input.config.global_map.base_resolution_m = 0.5;
+  std::get<HopperState>(input.current_state).pose.position_m =
+      {3.25, 4.25, 0.0};
+  KeepOnlyLandingEvidencePatches(
+      input.world.local_map, {{8U, 6U}, {8U, 40U}});
+  std::get<HopperCapability>(input.capability)
+      .reference_propellant_mass_kg = 0.001;
+
+  const auto reachability = ProjectReachability(input, 30.0);
+
+  ASSERT_TRUE(reachability.ok()) << reachability.reason_code;
+  EXPECT_EQ(reachability.projection->reachable[
+                Index(input.world.global_map, 8U, 40U)],
+            0U);
+  EXPECT_GT(reachability.projection->candidate_edges_evaluated, 0U);
+  EXPECT_GT(reachability.projection->rejected_edges, 0U);
+}
+
+TEST(ReachabilityProjection, HopperRejectsEveryBlockedFlightTube) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 80U, 16U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 80U, 16U, 0.5);
+  input.config.global_map.base_resolution_m = 0.5;
+  std::get<HopperState>(input.current_state).pose.position_m =
+      {3.25, 4.25, 0.0};
+  KeepOnlyLandingEvidencePatches(
+      input.world.local_map, {{8U, 6U}, {8U, 40U}});
+  for (std::size_t row = 0U; row < 16U; ++row) {
+    SetObstacle(input.world.global_map, row, 20U, 100.0F);
+  }
+
+  const auto reachability = ProjectReachability(input, 30.0);
+
+  ASSERT_TRUE(reachability.ok()) << reachability.reason_code;
+  EXPECT_EQ(reachability.projection->reachable[
+                Index(input.world.global_map, 8U, 40U)],
+            0U);
+  EXPECT_GT(reachability.projection->candidate_edges_evaluated, 0U);
+  EXPECT_GT(reachability.projection->rejected_edges, 0U);
+}
+
+TEST(ReachabilityProjection, HopperRejectsUncertifiableLandingRegionTube) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 80U, 16U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 80U, 16U, 0.5);
+  input.config.global_map.base_resolution_m = 0.5;
+  std::get<HopperState>(input.current_state).pose.position_m =
+      {3.25, 4.25, 0.0};
+  auto& capability = std::get<HopperCapability>(input.capability);
+  capability.flight_collision_radius_m = 0.55 - 2.0e-9;
+  KeepOnlyLandingEvidencePatches(
+      input.world.local_map, {{8U, 6U}, {8U, 40U}});
+  SetObstacle(input.world.global_map, 6U, 20U, 100.0F);
+  SetObstacle(input.world.global_map, 10U, 20U, 100.0F);
+
+  const auto global = shared::MapSnapshot::Create(input.world.global_map);
+  const auto local = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(global.ok()) << global.reason_code;
+  ASSERT_TRUE(local.ok()) << local.reason_code;
+  const auto source = hopper::CertifyExactLandingRegion(
+      *local.snapshot,
+      GoalRegion{
+          .goal_id = "source",
+          .target = PointGoal{
+              .position_m = {3.25, 4.25, 0.0}, .tolerance_m = 0.0},
+      },
+      capability, input.config.map_safety, {});
+  const auto target = hopper::CertifyExactLandingRegion(
+      *local.snapshot,
+      GoalRegion{
+          .goal_id = "target",
+          .target = PointGoal{
+              .position_m = {20.25, 4.25, 0.0}, .tolerance_m = 0.0},
+      },
+      capability, input.config.map_safety, {});
+  ASSERT_TRUE(source.ok()) << source.reason_code;
+  ASSERT_TRUE(target.ok()) << target.reason_code;
+  const auto center_hop = hopper::CertifySingleHop(
+      hopper::SingleHopCertificationProblem{
+          .launch_position_m = source.region->aim_position_on_surface_m,
+          .landing_position_m = target.region->aim_position_on_surface_m,
+          .gravity_mps2 = {0.0, 0.0, -1.62},
+          .flight_map = global.snapshot.get(),
+          .capability = &capability,
+          .map_safety = &input.config.map_safety,
+      });
+  ASSERT_TRUE(center_hop.ok()) << center_hop.reason_code;
+
+  const auto reachability = ProjectReachability(input, 30.0);
+
+  ASSERT_TRUE(reachability.ok()) << reachability.reason_code;
+  EXPECT_EQ(reachability.projection->reachable[
+                Index(input.world.global_map, 8U, 40U)],
+            0U);
+  EXPECT_GT(reachability.projection->rejected_edges, 0U);
+}
+
+TEST(ReachabilityProjection, HopperRejectsUncertifiedLandingCell) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 80U, 16U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 80U, 16U, 0.5);
+  input.config.global_map.base_resolution_m = 0.5;
+  std::get<HopperState>(input.current_state).pose.position_m =
+      {3.25, 4.25, 0.0};
+  KeepOnlyLandingEvidencePatches(input.world.local_map, {{8U, 6U}});
+
+  const auto reachability = ProjectReachability(input, 30.0);
+
+  ASSERT_TRUE(reachability.ok()) << reachability.reason_code;
+  EXPECT_EQ(reachability.projection->reachable[
+                Index(input.world.global_map, 8U, 40U)],
+            0U);
+}
+
+TEST(ReachabilityProjection, RepeatedInputIsBitAndDiagnosticIdentical) {
+  const PlannerInput input = test::MakeValidHopperInput();
+
+  const auto first = ProjectReachability(input, 2.0);
+  const auto second = ProjectReachability(input, 2.0);
+
+  ASSERT_TRUE(first.ok()) << first.reason_code;
+  ASSERT_TRUE(second.ok()) << second.reason_code;
+  EXPECT_EQ(first.projection->reachable, second.projection->reachable);
+  EXPECT_EQ(first.projection->candidate_edges_evaluated,
+            second.projection->candidate_edges_evaluated);
+  EXPECT_EQ(first.projection->certified_edges,
+            second.projection->certified_edges);
+  EXPECT_EQ(first.projection->rejected_edges,
+            second.projection->rejected_edges);
+  EXPECT_DOUBLE_EQ(first.projection->maximum_certified_edge_distance_m,
+                   second.projection->maximum_certified_edge_distance_m);
+}
+
+TEST(ReachabilityProjection, CancellationAndInvalidDistanceFailClosed) {
+  PlannerInput canceled = test::MakeValidHopperInput();
+  std::stop_source source;
+  source.request_stop();
+  canceled.stop_token = source.get_token();
+
+  const auto canceled_result = ProjectReachability(canceled, 30.0);
+  const auto invalid_result = ProjectReachability(
+      test::MakeValidHopperInput(), std::nan(""));
+
+  EXPECT_FALSE(canceled_result.ok());
+  EXPECT_FALSE(canceled_result.projection.has_value());
+  EXPECT_EQ(canceled_result.reason_code, "REQUEST_CANCELED");
+  EXPECT_FALSE(invalid_result.ok());
+  EXPECT_FALSE(invalid_result.projection.has_value());
+  EXPECT_EQ(invalid_result.reason_code,
+            "REACHABILITY_MAXIMUM_EDGE_DISTANCE_INVALID");
+}
+
+}  // namespace
+}  // namespace lunar::planning

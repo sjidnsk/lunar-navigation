@@ -17,30 +17,35 @@ namespace {
   return output;
 }
 
+[[nodiscard]] PlannerInput ToPlannerInput(
+    const TrainingPlanRequest &request) {
+  return PlannerInput{
+      .request_id = request.request_id,
+      .mission_id = request.mission_id,
+      .mission_revision = request.mission_revision,
+      .platform_id = request.platform_id,
+      .capability_version = request.capability_version,
+      .global_map_generation = request.global_map_generation,
+      .local_map_generation = request.local_map_generation,
+      .map_from_odom_generation = request.map_from_odom_generation,
+      .state_time = request.state_time,
+      .current_state = request.current_state,
+      .goal_map = request.goal,
+      .world = request.world,
+      .capability = request.capability,
+      .config = request.config,
+      .previous_execution = request.previous_execution,
+      .stop_token = std::stop_token{},
+      .position_uncertainty_m = request.position_uncertainty_m,
+      .velocity_uncertainty_mps = request.velocity_uncertainty_mps,
+  };
+}
+
 }  // namespace
 
 PlannerOutput PlannerBridge::Plan(const TrainingPlanRequest &request) noexcept {
   try {
-    PlannerOutput output = planner_.Plan(PlannerInput{
-        .request_id = request.request_id,
-        .mission_id = request.mission_id,
-        .mission_revision = request.mission_revision,
-        .platform_id = request.platform_id,
-        .capability_version = request.capability_version,
-        .global_map_generation = request.global_map_generation,
-        .local_map_generation = request.local_map_generation,
-        .map_from_odom_generation = request.map_from_odom_generation,
-        .state_time = request.state_time,
-        .current_state = request.current_state,
-        .goal_map = request.goal,
-        .world = request.world,
-        .capability = request.capability,
-        .config = request.config,
-        .previous_execution = request.previous_execution,
-        .stop_token = std::stop_token{},
-        .position_uncertainty_m = request.position_uncertainty_m,
-        .velocity_uncertainty_mps = request.velocity_uncertainty_mps,
-    });
+    PlannerOutput output = planner_.Plan(ToPlannerInput(request));
     return output;
   } catch (const std::bad_alloc &) {
     return BridgeFailure(PlanningOutcome::kResourceExhausted,
@@ -48,6 +53,25 @@ PlannerOutput PlannerBridge::Plan(const TrainingPlanRequest &request) noexcept {
   } catch (...) {
     return BridgeFailure(PlanningOutcome::kNumericalFailure,
                          "BRIDGE_REQUEST_CONVERSION_FAILED");
+  }
+}
+
+ReachabilityProjectionResult PlannerBridge::ProjectReachability(
+    const TrainingPlanRequest &request,
+    const double maximum_edge_distance_m) const noexcept {
+  try {
+    return lunar::planning::ProjectReachability(
+        ToPlannerInput(request), maximum_edge_distance_m);
+  } catch (const std::bad_alloc &) {
+    return ReachabilityProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = "REACHABILITY_RESOURCE_EXHAUSTED",
+    };
+  } catch (...) {
+    return ReachabilityProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = "BRIDGE_REQUEST_CONVERSION_FAILED",
+    };
   }
 }
 

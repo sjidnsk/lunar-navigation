@@ -44,6 +44,7 @@ TraversabilityProjectionResult ProjectTraversability(
   };
   const std::size_t count = map.snapshot->cell_count();
   projection.known.reserve(count);
+  projection.intrinsic_feasible.reserve(count);
   projection.hard_feasible.reserve(count);
   projection.clearance_m.reserve(count);
   projection.slope_rad.reserve(count);
@@ -56,6 +57,8 @@ TraversabilityProjectionResult ProjectTraversability(
         .y = static_cast<std::int32_t>(index / projection.width),
     };
     projection.known.push_back(static_cast<std::uint8_t>(source.Known(cell)));
+    projection.intrinsic_feasible.push_back(
+        static_cast<std::uint8_t>(source.IntrinsicFeasible(cell)));
     projection.hard_feasible.push_back(
         static_cast<std::uint8_t>(source.HardFeasible(cell)));
     projection.clearance_m.push_back(source.ClearanceMeters(cell));

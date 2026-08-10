@@ -715,6 +715,12 @@ void BindProjection(py::module_ &module) {
             return CopyArray2d(self.known, self.height, self.width);
           })
       .def_property_readonly(
+          "intrinsic_feasible",
+          [](const planning::TraversabilityProjection &self) {
+            return CopyArray2d(
+                self.intrinsic_feasible, self.height, self.width);
+          })
+      .def_property_readonly(
           "hard_feasible",
           [](const planning::TraversabilityProjection &self) {
             return CopyArray2d(
@@ -747,6 +753,34 @@ void BindProjection(py::module_ &module) {
             return CopyArray2d(
                 self.connected_component, self.height, self.width);
           });
+  py::class_<planning::ReachabilityProjection>(
+      module, "ReachabilityProjection")
+      .def_property_readonly(
+          "platform_type",
+          [](const planning::ReachabilityProjection &self) {
+            return PlatformTypeName(self.platform_type);
+          })
+      .def_readonly("width", &planning::ReachabilityProjection::width)
+      .def_readonly("height", &planning::ReachabilityProjection::height)
+      .def_property_readonly(
+          "reachable",
+          [](const planning::ReachabilityProjection &self) {
+            return CopyArray2d(self.reachable, self.height, self.width);
+          })
+      .def_readonly("algorithm_id",
+                    &planning::ReachabilityProjection::algorithm_id)
+      .def_readonly("maximum_edge_distance_m",
+                    &planning::ReachabilityProjection::maximum_edge_distance_m)
+      .def_readonly(
+          "candidate_edges_evaluated",
+          &planning::ReachabilityProjection::candidate_edges_evaluated)
+      .def_readonly("certified_edges",
+                    &planning::ReachabilityProjection::certified_edges)
+      .def_readonly("rejected_edges",
+                    &planning::ReachabilityProjection::rejected_edges)
+      .def_readonly(
+          "maximum_certified_edge_distance_m",
+          &planning::ReachabilityProjection::maximum_certified_edge_distance_m);
 }
 
 void BindVisibility(py::module_ &module) {
@@ -941,7 +975,21 @@ void BindRequest(py::module_ &module) {
             }
             return std::move(*result.projection);
           },
-          py::arg("request"), py::call_guard<py::gil_scoped_release>());
+          py::arg("request"), py::call_guard<py::gil_scoped_release>())
+      .def(
+          "project_reachability",
+          [](const training::PlannerBridge &self,
+             const training::TrainingPlanRequest &request,
+             const double maximum_edge_distance_m) {
+            auto result = self.ProjectReachability(
+                request, maximum_edge_distance_m);
+            if (!result.ok()) {
+              throw std::runtime_error(result.reason_code);
+            }
+            return std::move(*result.projection);
+          },
+          py::arg("request"), py::arg("maximum_edge_distance_m"),
+          py::call_guard<py::gil_scoped_release>());
 }
 
 }  // namespace
