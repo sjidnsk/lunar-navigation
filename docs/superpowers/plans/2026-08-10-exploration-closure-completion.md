@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close the remaining planner/action/sensor/gain mismatch, prove deterministic 95% platform-coverable exploration, then launch a brand-new formal PPO run at step 0.
+**Goal:** Close the remaining planner/action/sensor/gain mismatch, qualify an auditable untrained exploration loop, then launch a brand-new formal PPO run at step 0 without requiring the baseline to reach the 95% learned-task target.
 
-**Architecture:** Keep cache v4's exact platform/start-specific `0.2 m` coverable mask as the coverage authority. Add a locally certified start connector before conservative global search, persist one selected ground candidate across rolling C++ references, accumulate real sensor evidence along the certified path, and compute observed-only optimistic gain with candidate-set normalization. Bump success/reward/training identities, rebuild external cache artifacts, pass one-scene and 24-scene x three-platform natural-terminal gates, then start with randomly initialized policy/value/optimizer state.
+**Architecture:** Keep cache v4's exact platform/start-specific `0.2 m` coverable mask as the coverage authority. Add a locally certified start connector before conservative global search, persist one selected ground candidate across rolling C++ references, accumulate real sensor evidence along the certified path, and compute observed-only optimistic gain with candidate-set normalization. Bump success/reward/training identities, rebuild external cache artifacts, pass the first exact-common scene x three-platform executable-loop gate, retain 24x3 as post-launch evaluation, then start with randomly initialized policy/value/optimizer state.
 
 **Tech Stack:** C++20, ROS 2 Humble, GoogleTest, pybind11, Python 3.10, NumPy, PyTorch PPO, pytest, canonical JSON/NPZ artifacts.
 
@@ -327,9 +327,9 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "$PYTHON" -m pytest -q \
   training/lunar_policy_training/tests/test_cli.py
 ```
 
-- [ ] **Step 3: Implement v7/v4 and fresh-launch boundary**
+- [ ] **Step 3: Implement v8/v4 and fresh-launch boundary**
 
-Keep the existing inert warm-start reader but make it incompatible with this formal v7 launch. Do not introduce efficiency reward terms.
+Keep the existing inert warm-start reader but make it incompatible with this formal v8 launch. Do not introduce efficiency reward terms.
 
 - [ ] **Step 4: Run GREEN**
 
