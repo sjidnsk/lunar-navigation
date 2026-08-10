@@ -19,6 +19,7 @@ import torch
 
 from .capability_freeze import FrozenCapabilityEnvironmentFactory
 from .config import PLATFORMS
+from .environment.candidate_builder import CANDIDATE_DIAGNOSTIC_FIELDS
 from .eval.baselines import select_baseline_action
 from .polar_data.multires_scene import GENERATOR_SHA256
 from .project_capability import load_project_formal_capability
@@ -36,6 +37,9 @@ _SPLITS = ("train", "validation", "test", "holdout")
 _ROW_SHA_FIELDS = (
     "reachable_mask_sha256",
     "coverable_mask_sha256",
+    "primitive_set_sha256",
+    "world_evidence_sha256",
+    "reachability_graph_sha256",
     "candidate_sequence_sha256",
     "request_sequence_sha256",
     "planner_sequence_sha256",
@@ -52,6 +56,11 @@ class PlatformCoverabilityBinding:
     mission_coverable_fraction: float
     reachable_mask_sha256: str
     coverable_mask_sha256: str
+    reachability_algorithm_id: str
+    primitive_state_schema: str
+    primitive_set_sha256: str
+    world_evidence_sha256: str
+    reachability_graph_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,12 +200,34 @@ def _coverability_bindings(
         coverable = value.get("coverable_mask_sha256")
         if not _is_sha(reachable) or not _is_sha(coverable):
             raise ClosedLoopGateError("gate coverability mask identity is invalid")
+        reachability_algorithm_id = value.get("reachability_algorithm_id")
+        primitive_state_schema = value.get("primitive_state_schema")
+        primitive_set_sha256 = value.get("primitive_set_sha256")
+        world_evidence_sha256 = value.get("world_evidence_sha256")
+        reachability_graph_sha256 = value.get("reachability_graph_sha256")
+        if (
+            not isinstance(reachability_algorithm_id, str)
+            or not reachability_algorithm_id
+            or not isinstance(primitive_state_schema, str)
+            or not primitive_state_schema
+            or not _is_sha(primitive_set_sha256)
+            or not _is_sha(world_evidence_sha256)
+            or not _is_sha(reachability_graph_sha256)
+        ):
+            raise ClosedLoopGateError(
+                "gate primitive graph identity is invalid"
+            )
         bindings.append(
             PlatformCoverabilityBinding(
                 platform=platform,
                 mission_coverable_fraction=float(fraction),
                 reachable_mask_sha256=str(reachable),
                 coverable_mask_sha256=str(coverable),
+                reachability_algorithm_id=reachability_algorithm_id,
+                primitive_state_schema=primitive_state_schema,
+                primitive_set_sha256=str(primitive_set_sha256),
+                world_evidence_sha256=str(world_evidence_sha256),
+                reachability_graph_sha256=str(reachability_graph_sha256),
             )
         )
     return tuple(bindings)
@@ -211,8 +242,8 @@ def select_closed_loop_gate_cases(
     """Select the first stable exact-common schedule entries across all splits."""
     if type(minimum_scene_count) is not int or minimum_scene_count < 1:
         raise ClosedLoopGateError("gate minimum scene count must be positive")
-    if cache_manifest.get("schema") != "lunar-formal-training-cache/v4":
-        raise ClosedLoopGateError("gate requires formal cache v4")
+    if cache_manifest.get("schema") != "lunar-formal-training-cache/v5":
+        raise ClosedLoopGateError("gate requires formal cache v5")
     entries = cache_manifest.get("scenes")
     scenarios = scenario_document.get("scenarios")
     common = cache_manifest.get("exact_common_evaluation")
@@ -495,6 +526,7 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
     if terminal_reason is None:
         raise ClosedLoopGateError("gate natural terminal has no reason")
     binding = work.case.for_platform(work.platform)
+    diagnostics = worker.current_candidate_diagnostics()
     row = {
         "scene_id": work.case.scene_id,
         "split": work.case.split,
@@ -505,6 +537,11 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         ),
         "reachable_mask_sha256": binding.reachable_mask_sha256,
         "coverable_mask_sha256": binding.coverable_mask_sha256,
+        "reachability_algorithm_id": binding.reachability_algorithm_id,
+        "primitive_state_schema": binding.primitive_state_schema,
+        "primitive_set_sha256": binding.primitive_set_sha256,
+        "world_evidence_sha256": binding.world_evidence_sha256,
+        "reachability_graph_sha256": binding.reachability_graph_sha256,
         "final_coverage_hex": final_coverage.hex(),
         "success_first_crossing": success_first_crossing,
         "terminal_reason": terminal_reason.value,
@@ -518,6 +555,10 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         "candidate_sequence_sha256": candidate_chain.hexdigest(),
         "request_sequence_sha256": request_chain.hexdigest(),
         "planner_sequence_sha256": planner_chain.hexdigest(),
+        "candidate_diagnostics": {
+            name: getattr(diagnostics, name)
+            for name in CANDIDATE_DIAGNOSTIC_FIELDS
+        },
     }
     _validate_row(row, work.case, work.platform)
     return row
@@ -563,6 +604,18 @@ def _validate_row(
         for field in count_fields
     ):
         raise ClosedLoopGateError("closed-loop event count is invalid")
+    diagnostics = row.get("candidate_diagnostics")
+    if (
+        not isinstance(diagnostics, Mapping)
+        or set(diagnostics) != set(CANDIDATE_DIAGNOSTIC_FIELDS)
+        or any(
+            type(value) is not int or value < 0
+            for value in diagnostics.values()
+        )
+    ):
+        raise ClosedLoopGateError(
+            "closed-loop candidate diagnostics are invalid"
+        )
     if row["executed_step_count"] <= 0:
         raise ClosedLoopGateError("closed-loop executed step count is invalid")
     if row["planner_failure_count"] >= row["executed_step_count"]:
@@ -581,9 +634,9 @@ def _validate_row(
     terminal_reason = row.get("terminal_reason")
     success = terminal_reason == "SUCCESS"
     legal_failure_reasons = {
-        "NO_FRONTIER_ANCHOR",
+        "NO_RECOVERABLE_OBSERVATION_STATE",
         "VISITED_EXHAUSTED",
-        "PLATFORM_UNREACHABLE",
+        "NO_TRANSIT_OPPORTUNITY",
         "ZERO_GAIN",
         "PLANNER_REJECTED_ALL",
     }
@@ -629,6 +682,16 @@ def _validate_row(
         or row["coverable_mask_sha256"] != binding.coverable_mask_sha256
     ):
         raise ClosedLoopGateError("closed-loop coverability identity differs")
+    if (
+        row.get("reachability_algorithm_id")
+        != binding.reachability_algorithm_id
+        or row.get("primitive_state_schema") != binding.primitive_state_schema
+        or row.get("primitive_set_sha256") != binding.primitive_set_sha256
+        or row.get("world_evidence_sha256") != binding.world_evidence_sha256
+        or row.get("reachability_graph_sha256")
+        != binding.reachability_graph_sha256
+    ):
+        raise ClosedLoopGateError("closed-loop primitive graph identity differs")
 
 
 def _run_closed_loop_work_checked(work: _ClosedLoopWork) -> dict[str, object]:

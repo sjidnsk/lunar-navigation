@@ -145,6 +145,23 @@ BuildGoalMask(const GoalRegion &goal, const shared::SafeProjection &projection,
   return mask;
 }
 
+[[nodiscard]] bool
+GoalHasUnknownGlobalSupport(const GoalRegion &goal,
+                            const shared::SafeProjection &projection) {
+  const auto &map = projection.source_map();
+  for (std::size_t index = 0U; index < map->cell_count(); ++index) {
+    const shared::GridCell cell{
+        .x = static_cast<std::int32_t>(index % map->width()),
+        .y = static_cast<std::int32_t>(index / map->width()),
+    };
+    if (!projection.Known(cell) &&
+        GoalContains(goal, map->CellCenter(cell), map->resolution_m())) {
+      return true;
+    }
+  }
+  return false;
+}
+
 [[nodiscard]] Quaternion YawQuaternion(const double yaw_rad) noexcept {
   return Quaternion{
       .w = std::cos(yaw_rad / 2.0),
@@ -241,6 +258,106 @@ BuildConnectorPoses(const shared::MapSnapshot &local_map,
   return poses;
 }
 
+[[nodiscard]] std::optional<GlobalRoutePlanResult>
+PlanObservedLocalGoal(const PlannerInput &input, const Pose3 &start_pose_map,
+                      const Clock::time_point started,
+                      const std::size_t level) {
+  const shared::MapSnapshotBuildResult local_map =
+      shared::MapSnapshot::Create(input.world.local_map);
+  if (!local_map.ok()) {
+    return Failure(PlanningOutcome::kInvalidRequest, local_map.reason_code,
+                   started, level);
+  }
+  const shared::SafeProjectionBuildResult local_projection =
+      shared::BuildSafeProjection(local_map.snapshot, input.capability,
+                                  input.config.map_safety,
+                                  input.stop_token);
+  if (!local_projection.ok()) {
+    const PlanningOutcome outcome =
+        local_projection.reason_code == "REQUEST_CANCELED"
+            ? PlanningOutcome::kCanceled
+            : PlanningOutcome::kInvalidRequest;
+    return Failure(outcome, local_projection.reason_code, started, level);
+  }
+  const auto goal_odom =
+      TransformGoal(input.goal_map, input.world.map_from_odom,
+                    TransformDirection::kParentToChild);
+  if (!goal_odom.has_value()) {
+    return Failure(PlanningOutcome::kInvalidRequest,
+                   "FRAME_TRANSFORM_INVALID", started, level);
+  }
+  std::vector<std::uint8_t> goal_mask =
+      BuildGoalMask(*goal_odom, *local_projection.projection,
+                    input.stop_token);
+  if (input.stop_token.stop_requested()) {
+    return Failure(PlanningOutcome::kCanceled, "REQUEST_CANCELED", started,
+                   level);
+  }
+  if (goal_mask.empty() ||
+      std::ranges::none_of(
+          goal_mask, [](const std::uint8_t value) { return value != 0U; })) {
+    return std::nullopt;
+  }
+  const auto current_pose_odom = CurrentPose(input);
+  const auto start_cell =
+      current_pose_odom
+          ? local_map.snapshot->PositionToCell(
+                Vec2{.x = current_pose_odom->position_m.x,
+                     .y = current_pose_odom->position_m.y})
+          : std::nullopt;
+  if (!start_cell.has_value() ||
+      !local_projection.projection->HardFeasible(*start_cell)) {
+    return Failure(PlanningOutcome::kNoKnownSafeRoute,
+                   "GLOBAL_NO_KNOWN_SAFE_ROUTE", started, level);
+  }
+  GlobalGridSearchResult search =
+      SearchGlobalGrid(GlobalGridSearchProblem{
+          .projection = *local_projection.projection,
+          .start = *start_cell,
+          .goal_mask = goal_mask,
+          .excluded_mask = {},
+          .maximum_speed_mps = 1.0,
+          .config = input.config.global_search,
+          .stop_token = input.stop_token,
+      });
+  if (!search.ok()) {
+    return SearchFailure(search, started, level);
+  }
+  std::vector<Pose3> poses = BuildConnectorPoses(
+      *local_map.snapshot, *local_projection.projection, search,
+      start_pose_map, input.world.map_from_odom);
+  if (poses.size() < 2U) {
+    return Failure(PlanningOutcome::kNumericalFailure,
+                   "LOCAL_DETAIL_ROUTE_RESULT_INVALID", started, level);
+  }
+  const double cost = search.cost;
+  const std::uint64_t expanded_states = search.expanded_states;
+  const std::size_t open_peak = search.open_peak;
+  const std::size_t estimated_work_memory_bytes =
+      search.estimated_work_memory_bytes;
+  return GlobalRoutePlanResult{
+      .outcome = PlanningOutcome::kNewReferenceAvailable,
+      .reason_code = "GLOBAL_ROUTE_AVAILABLE",
+      .route =
+          GlobalRoute{
+              // These cells belong to the odom-local raster, not the global
+              // raster, so only the transformed pose chain crosses this API.
+              .raw_cells = {},
+              .conditional_cells = {},
+              .simplified_cells = {},
+              .poses_map = std::move(poses),
+              .cost = cost,
+              .expanded_states = expanded_states,
+              .open_peak = open_peak,
+              .estimated_work_memory_bytes = estimated_work_memory_bytes,
+          },
+      .global_level = level,
+      .elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          Clock::now() - started),
+      .projection_cache_hit = false,
+  };
+}
+
 } // namespace
 
 GlobalRoutePlanResult
@@ -319,6 +436,13 @@ PlanGroundGlobalRoute(const PlannerInput &input,
   if (goal_mask.empty() ||
       std::ranges::none_of(
           goal_mask, [](const std::uint8_t value) { return value != 0U; })) {
+    if (GoalHasUnknownGlobalSupport(input.goal_map, *safe_projection)) {
+      if (auto local =
+              PlanObservedLocalGoal(input, *start_pose_map, started, level);
+          local.has_value()) {
+        return std::move(*local);
+      }
+    }
     return Failure(PlanningOutcome::kGoalInfeasible, "GLOBAL_GOAL_INFEASIBLE",
                    started, level);
   }

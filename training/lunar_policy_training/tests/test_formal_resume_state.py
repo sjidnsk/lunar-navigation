@@ -82,6 +82,7 @@ def _worker_state() -> dict[str, object]:
         "policy_batch_sha256": "2" * 64,
         "rejected_candidate_indices": [1, 3],
         "last_hop_available_delta_v_mps": 0.0,
+        "candidate_gain_resolution_m": 0.2,
     }
 
 
@@ -93,18 +94,16 @@ def test_formal_worker_state_roundtrips_as_strict_json() -> None:
     assert state.to_dict() == payload
     assert state.episode_cursor == 4
     assert state.rejected_candidate_indices == (1, 3)
-    assert state.candidate_gain_resolution_m is None
+    assert state.candidate_gain_resolution_m == 0.2
     assert len(state.reveal_history[0].path_samples) == 2
 
 
-def test_formal_worker_state_roundtrips_detail_gain_marker() -> None:
+def test_formal_worker_state_rejects_missing_detail_gain_marker() -> None:
     payload = _worker_state()
-    payload["candidate_gain_resolution_m"] = 0.2
+    payload.pop("candidate_gain_resolution_m")
 
-    state = FormalWorkerState.from_dict(payload)
-
-    assert state.to_dict() == payload
-    assert state.candidate_gain_resolution_m == 0.2
+    with pytest.raises(ValueError, match="structure"):
+        FormalWorkerState.from_dict(payload)
 
 
 @pytest.mark.parametrize(

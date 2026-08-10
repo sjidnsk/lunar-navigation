@@ -78,7 +78,6 @@ from .observation_builder import (
     Pose2,
 )
 from .parallel_pool import ParallelEnvironmentWorker
-from .platform_reachability import PlatformCandidateReachability
 from .primitive_reachability import (
     ObservedPrimitiveReachability,
     ObservedPrimitiveSnapshot,
@@ -196,7 +195,6 @@ class _MapSnapshot:
     local_map: object
     world: object
     projection: PlatformProjection
-    platform_reachability: PlatformCandidateReachability
     primitive_reachability: ObservedPrimitiveSnapshot
 
 
@@ -580,6 +578,9 @@ class FormalEpisode:
         self.last_hop_available_delta_v_mps = 0.0
         self._reveal_history: list[FormalRevealState] = []
         self._visited_candidate_cells = {start_cell}
+        self._visited_primitive_pose_keys = {
+            self._primitive_pose_key(self.current_pose)
+        }
         self._navigation_stack = [self.current_pose]
         self._visited_candidate_filter_enabled = visited_candidate_filter_enabled
         self.controller = ObservationBoundaryController(
@@ -605,6 +606,37 @@ class FormalEpisode:
             elevation_m=float(pose.elevation_m),
             frame_id=pose.frame_id,
         )
+
+    @staticmethod
+    def _primitive_pose_key(pose: Pose2 | np.ndarray) -> tuple[int, int]:
+        if isinstance(pose, Pose2):
+            x_m, y_m = pose.x_m, pose.y_m
+        else:
+            values = np.asarray(pose, dtype=np.float64)
+            if values.shape != (3,) or not np.isfinite(values).all():
+                raise ValueError("formal visited primitive pose is invalid")
+            x_m, y_m = float(values[0]), float(values[1])
+        if not math.isfinite(x_m) or not math.isfinite(y_m):
+            raise ValueError("formal visited primitive pose is invalid")
+        resolution_m = 0.2
+        return (
+            int(math.floor(x_m / resolution_m)),
+            int(math.floor(y_m / resolution_m)),
+        )
+
+    def _visited_primitive_state_ids(
+        self, snapshot: ObservedPrimitiveSnapshot
+    ) -> set[int]:
+        if not self._visited_candidate_filter_enabled:
+            return set()
+        return {
+            int(state_id)
+            for state_id, position in zip(
+                snapshot.state_ids, snapshot.positions_m, strict=True
+            )
+            if self._primitive_pose_key(position)
+            in self._visited_primitive_pose_keys
+        }
 
     @staticmethod
     def _pose_from_state(pose: FormalPoseState) -> Pose2:
@@ -652,6 +684,11 @@ class FormalEpisode:
         ):
             self._navigation_stack.append(evidence.pose_map)
         self._visited_candidate_cells.add(cell)
+        visited_poses = [evidence.pose_map]
+        visited_poses.extend(sample.pose_map for sample in evidence.path_samples)
+        self._visited_primitive_pose_keys.update(
+            self._primitive_pose_key(pose) for pose in visited_poses
+        )
         self._reveal_history.append(
             FormalRevealState(
                 pose=self._pose_state(evidence.pose_map),
@@ -821,15 +858,8 @@ class FormalEpisode:
         return self._frontier_oracle.evaluate(
             snapshot.world,
             self.mission,
-            snapshot.projection,
             pose_map=self.current_pose,
-            platform_reachability=snapshot.platform_reachability,
-            excluded_cells=self._visited_candidate_cells,
-            backtrack_pose=(
-                self._navigation_stack[-2]
-                if len(self._navigation_stack) >= 2
-                else None
-            ),
+            primitive_graph=snapshot.primitive_reachability,
         )
 
     def remaining_coverable_detail_cell_count(self) -> int:
@@ -1030,21 +1060,15 @@ class FormalEpisode:
             if self._detail_candidate_gain_enabled
             else GLOBAL_GEOMETRY.resolution_m
         )
-        platform_reachability = PlatformCandidateReachability(
-            platform_type=self.platform_type,
-            canvas=world.canvas,
-            pose_map=pose,
-            observed_elevation_m=world.elevation_m,
-            bridge=self._bridge,
-            request=projection_request,
-            local_traversability_projection=local_cpp,
-        )
         candidates = candidate_builder.build_from_primitive_graph(
             world,
             self.mission,
             pose,
             primitive_snapshot,
             platform_type=self.platform_type,
+            excluded_state_ids=self._visited_primitive_state_ids(
+                primitive_snapshot
+            ),
         )
         arrays = self._observation_builder.build(
             world,
@@ -1061,7 +1085,6 @@ class FormalEpisode:
             local_map,
             world,
             projection,
-            platform_reachability,
             primitive_snapshot,
         )
         return PolicyBatch(
@@ -1090,7 +1113,6 @@ class FormalEpisode:
             local_map,
             snapshot.world,
             snapshot.projection,
-            snapshot.platform_reachability,
             primitive_snapshot,
         )
         previous = self.controller.current_observation
@@ -1630,11 +1652,7 @@ class FormalWorkerBuilder:
         ):
             raise ValueError("formal restored start is not platform-safe")
 
-        def restore_with_filters(
-            visited_enabled: bool,
-            detail_gain_enabled: bool,
-            platform_reachability_enabled: bool,
-        ) -> FormalEnvironmentWorker:
+        def restore_current_semantics() -> FormalEnvironmentWorker:
             episode = FormalEpisode(
                 worker_index=worker_index,
                 platform_type=platform_type,
@@ -1642,11 +1660,6 @@ class FormalWorkerBuilder:
                 scenario_identity=scenario_identity,
                 loaded=loaded,
                 start_cell=restored.start_cell,
-                visited_candidate_filter_enabled=visited_enabled,
-                detail_candidate_gain_enabled=detail_gain_enabled,
-                platform_candidate_reachability_enabled=(
-                    platform_reachability_enabled
-                ),
             )
             episode.replay_state(restored)
             worker = self._make_worker(episode)
@@ -1663,50 +1676,7 @@ class FormalWorkerBuilder:
             ):
                 raise ValueError("formal restored observation digest differs")
             return worker
-
-        compatibility_errors = {
-            "formal restored observation digest differs",
-            "restored rejected candidate was not active before masking",
-        }
-
-        def is_compatibility_error(error: Exception) -> bool:
-            return str(error) in compatibility_errors
-
-        if restored.candidate_gain_resolution_m == LOCAL_GEOMETRY.resolution_m:
-            attempts = (
-                (True, True, True),
-                (True, True, False),
-                (True, False, False),
-                (False, False, False),
-            )
-        else:
-            attempts = (
-                (True, False, False),
-                (False, False, False),
-                (True, True, True),
-                (True, True, False),
-            )
-        last_error: ValueError | EnvironmentInvariantError | None = None
-        for visited_enabled, detail_enabled, platform_enabled in attempts:
-            try:
-                worker = restore_with_filters(
-                    visited_enabled,
-                    detail_enabled,
-                    platform_enabled,
-                )
-            except (ValueError, EnvironmentInvariantError) as error:
-                if not is_compatibility_error(error):
-                    raise
-                last_error = error
-                continue
-            # Preserve the exact matched boundary, then enable every repair for
-            # observations built after it.
-            worker.episode._visited_candidate_filter_enabled = True
-            worker.episode._detail_candidate_gain_enabled = True
-            worker.episode._platform_candidate_reachability_enabled = True
-            return worker
-        assert last_error is not None
-        raise last_error
+        return restore_current_semantics()
 
     def _load_scheduled_scene(
         self,

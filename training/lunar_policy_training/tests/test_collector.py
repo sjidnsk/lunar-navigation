@@ -350,7 +350,7 @@ class _BoundaryProtocolEnvironment:
         if not bool(self.observation.candidate_mask.any()):
             return DecisionBoundaryResult(
                 execution_state="NO_CANDIDATES",
-                terminal_reason=TerminalReason.NO_FRONTIER_ANCHOR,
+                terminal_reason=TerminalReason.NO_RECOVERABLE_OBSERVATION_STATE,
             )
         return DecisionBoundaryResult(execution_state="DECISION_READY")
 
@@ -358,7 +358,7 @@ class _BoundaryProtocolEnvironment:
         if not bool(self.observation.candidate_mask.any()):
             return DecisionBoundaryResult(
                 execution_state="NO_CANDIDATES",
-                terminal_reason=TerminalReason.NO_FRONTIER_ANCHOR,
+                terminal_reason=TerminalReason.NO_RECOVERABLE_OBSERVATION_STATE,
             )
         policy(self.observation)
         next_observation = _boundary_observation(

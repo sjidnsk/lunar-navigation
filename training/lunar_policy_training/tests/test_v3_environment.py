@@ -641,6 +641,33 @@ def test_empty_production_candidates_with_oracle_opportunity_fail_closed() -> No
     assert env.training_stopped is True
 
 
+def test_partial_planner_rejection_cannot_masquerade_as_oracle_contradiction() -> None:
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(PlannerOutput()),
+        request_builder=lambda action: action,
+        initial_observation=_observation(candidate_mask=(False, False)),
+        candidate_diagnostics_provider=lambda: CandidateDiagnostics(
+            frontier_anchor_count=2,
+            primitive_state_count=2,
+            forward_reachable_state_count=2,
+            returnable_state_count=2,
+            recoverable_observation_state_count=2,
+            frontier_hint_count=2,
+            positive_gain_state_count=2,
+            emitted_count=2,
+            planner_rejected_count=1,
+        ),
+        frontier_oracle=lambda: FrontierOracleResult(1, 1, 1, 1),
+    )
+
+    with pytest.raises(EnvironmentInvariantError, match="accounting"):
+        env.refresh_decision_boundary()
+
+    assert env.rollout_discarded is True
+    assert env.training_stopped is True
+
+
 def test_legal_empty_boundary_reports_latest_stage_and_truth_diagnostic() -> None:
     env = V3ExplorationEnvironment(
         platform_type="HOPPER",

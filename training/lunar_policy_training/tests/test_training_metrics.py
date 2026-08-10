@@ -19,6 +19,19 @@ from lunar_policy_training.training_metrics import (
 )
 
 
+_ZERO_PRIMITIVE_DIAGNOSTICS = {
+    "primitive_state_count": 0,
+    "forward_reachable_state_count": 0,
+    "returnable_state_count": 0,
+    "recoverable_observation_state_count": 0,
+    "frontier_hint_count": 0,
+    "positive_gain_state_count": 0,
+    "transit_state_count": 0,
+    "invalidated_edge_count": 0,
+    "revalidated_edge_count": 0,
+}
+
+
 def _ppo_metrics() -> PPOUpdateMetrics:
     return PPOUpdateMetrics(
         total_loss=1.5,
@@ -112,7 +125,7 @@ def _record(global_step: int) -> dict[str, object]:
 def test_build_training_update_record_preserves_learning_and_rollout_facts() -> None:
     record = _record(119)
 
-    assert record["schema_version"] == "lunar-training-update-metrics/v2"
+    assert record["schema_version"] == "lunar-training-update-metrics/v3"
     assert record["global_step"] == 119
     assert record["transition_count"] == 4
     assert record["reward"]["mean"] == pytest.approx(2.5)
@@ -149,6 +162,7 @@ def test_build_training_update_record_preserves_learning_and_rollout_facts() -> 
             "zero_gain_count": 0,
             "emitted_count": 16,
             "planner_rejected_count": 0,
+            **_ZERO_PRIMITIVE_DIAGNOSTICS,
             "no_candidate_termination_count": 1,
             "planner_rejected_exhaustion_count": 0,
         }
@@ -167,6 +181,7 @@ def test_build_training_update_record_preserves_learning_and_rollout_facts() -> 
                 "zero_gain_count": 0,
                 "emitted_count": 8,
                 "planner_rejected_count": 0,
+                **_ZERO_PRIMITIVE_DIAGNOSTICS,
             }
         },
         "oracle_opportunity_count": 0,
@@ -208,12 +223,28 @@ def test_candidate_and_planner_diagnostics_preserve_worker_platform_alignment() 
                 frontier_anchor_count=3,
                 platform_unreachable_count=1,
                 emitted_count=2,
+                primitive_state_count=5,
+                forward_reachable_state_count=4,
+                returnable_state_count=4,
+                recoverable_observation_state_count=3,
+                frontier_hint_count=2,
+                positive_gain_state_count=2,
+                invalidated_edge_count=1,
+                revalidated_edge_count=8,
             ),
             CandidateDiagnostics(
                 frontier_anchor_count=11,
                 platform_unreachable_count=4,
                 emitted_count=7,
                 planner_rejected_count=7,
+                primitive_state_count=20,
+                forward_reachable_state_count=15,
+                returnable_state_count=12,
+                recoverable_observation_state_count=11,
+                frontier_hint_count=5,
+                positive_gain_state_count=7,
+                invalidated_edge_count=3,
+                revalidated_edge_count=30,
             ),
         ),
         no_candidate_terminations=(False, True),
@@ -227,6 +258,14 @@ def test_candidate_and_planner_diagnostics_preserve_worker_platform_alignment() 
                     platform_unreachable_count=4,
                     emitted_count=7,
                     planner_rejected_count=7,
+                    primitive_state_count=20,
+                    forward_reachable_state_count=15,
+                    returnable_state_count=12,
+                    recoverable_observation_state_count=11,
+                    frontier_hint_count=5,
+                    positive_gain_state_count=7,
+                    invalidated_edge_count=3,
+                    revalidated_edge_count=30,
                 ),
                 remaining_coverable_detail_cell_count=123,
             ),
@@ -245,6 +284,15 @@ def test_candidate_and_planner_diagnostics_preserve_worker_platform_alignment() 
         "zero_gain_count": 0,
         "emitted_count": 2,
         "planner_rejected_count": 0,
+        "primitive_state_count": 5,
+        "forward_reachable_state_count": 4,
+        "returnable_state_count": 4,
+        "recoverable_observation_state_count": 3,
+        "frontier_hint_count": 2,
+        "positive_gain_state_count": 2,
+        "transit_state_count": 0,
+        "invalidated_edge_count": 1,
+        "revalidated_edge_count": 8,
         "no_candidate_termination_count": 0,
         "planner_rejected_exhaustion_count": 0,
     }
@@ -256,6 +304,15 @@ def test_candidate_and_planner_diagnostics_preserve_worker_platform_alignment() 
         "zero_gain_count": 0,
         "emitted_count": 7,
         "planner_rejected_count": 7,
+        "primitive_state_count": 20,
+        "forward_reachable_state_count": 15,
+        "returnable_state_count": 12,
+        "recoverable_observation_state_count": 11,
+        "frontier_hint_count": 5,
+        "positive_gain_state_count": 7,
+        "transit_state_count": 0,
+        "invalidated_edge_count": 3,
+        "revalidated_edge_count": 30,
         "no_candidate_termination_count": 1,
         "planner_rejected_exhaustion_count": 1,
     }
@@ -280,7 +337,7 @@ def test_training_metrics_journal_appends_exact_resume_sequence(tmp_path) -> Non
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert [row["global_step"] for row in rows] == [119, 120]
     assert all(
-        row["schema_version"] == "lunar-training-update-metrics/v2"
+        row["schema_version"] == "lunar-training-update-metrics/v3"
         for row in rows
     )
 
@@ -306,6 +363,24 @@ def test_training_metrics_journal_rejects_nonfinite_metric(tmp_path) -> None:
     record["ppo"]["value_loss"] = float("inf")
 
     with pytest.raises(TrainingMetricsError, match="finite"):
+        journal.append(record)
+
+
+@pytest.mark.parametrize("bad_value", (None, -1))
+def test_training_metrics_journal_rejects_missing_or_negative_graph_diagnostic(
+    tmp_path, bad_value
+) -> None:
+    journal = TrainingMetricsJournal(
+        tmp_path / "metrics" / "train.jsonl", resume_global_step=118
+    )
+    record = _record(119)
+    diagnostics = record["candidate"]["by_platform"]["LEGGED"]
+    if bad_value is None:
+        diagnostics.pop("primitive_state_count")
+    else:
+        diagnostics["primitive_state_count"] = bad_value
+
+    with pytest.raises(TrainingMetricsError, match="diagnostics"):
         journal.append(record)
 
 

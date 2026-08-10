@@ -10,6 +10,7 @@ import numpy as np
 
 from .observation_builder import MissionRaster, ObservedWorld, PlatformProjection, Pose2
 from .platform_reachability import CandidateReachabilityResult
+from .primitive_reachability import ObservedPrimitiveSnapshot
 from .visibility import SensorGeometry
 
 
@@ -51,13 +52,23 @@ class FrontierOpportunityOracle:
         self,
         world: ObservedWorld,
         mission: MissionRaster,
-        projection: PlatformProjection,
+        projection: PlatformProjection | None = None,
         *,
         pose_map: Pose2,
-        platform_reachability: object,
+        platform_reachability: object | None = None,
+        primitive_graph: ObservedPrimitiveSnapshot | None = None,
         excluded_cells: Collection[tuple[int, int]] = (),
+        excluded_state_ids: Collection[int] = (),
         backtrack_pose: Pose2 | None = None,
     ) -> FrontierOracleResult:
+        if primitive_graph is not None:
+            return self._evaluate_primitive_graph(
+                world,
+                mission,
+                pose_map=pose_map,
+                primitive_graph=primitive_graph,
+                excluded_state_ids=excluded_state_ids,
+            )
         if (
             not isinstance(world, ObservedWorld)
             or not isinstance(mission, MissionRaster)
@@ -212,6 +223,153 @@ class FrontierOpportunityOracle:
             safe_count,
             safe_count,
             reachable_count,
+            opportunity_count,
+        )
+
+    def _evaluate_primitive_graph(
+        self,
+        world: ObservedWorld,
+        mission: MissionRaster,
+        *,
+        pose_map: Pose2,
+        primitive_graph: ObservedPrimitiveSnapshot,
+        excluded_state_ids: Collection[int],
+    ) -> FrontierOracleResult:
+        """Audit opportunities from edges without using production labels/sorting."""
+        if (
+            not isinstance(world, ObservedWorld)
+            or not isinstance(mission, MissionRaster)
+            or world.canvas != mission.canvas
+            or not isinstance(pose_map, Pose2)
+            or pose_map.frame_id != "map"
+            or not isinstance(primitive_graph, ObservedPrimitiveSnapshot)
+        ):
+            raise ValueError("primitive oracle map identities differ")
+        state_ids = primitive_graph.state_ids
+        index_by_id = {
+            int(state_id): index for index, state_id in enumerate(state_ids)
+        }
+        anchors = set(
+            int(state_ids[index])
+            for index in np.flatnonzero(primitive_graph.path_cost == 0.0)
+        )
+        if not anchors:
+            raise RuntimeError("primitive oracle graph has no anchor")
+        outgoing = {int(state_id): [] for state_id in state_ids}
+        incoming = {int(state_id): [] for state_id in state_ids}
+        for source, target in zip(
+            primitive_graph.edge_source_ids,
+            primitive_graph.edge_target_ids,
+            strict=True,
+        ):
+            source_id = int(source)
+            target_id = int(target)
+            outgoing[source_id].append(target_id)
+            incoming[target_id].append(source_id)
+
+        def closure(
+            seeds: set[int], adjacency: dict[int, list[int]]
+        ) -> set[int]:
+            reached = set(seeds)
+            queue = list(sorted(seeds, reverse=True))
+            while queue:
+                source = queue.pop()
+                for target in sorted(adjacency[source]):
+                    if target not in reached:
+                        reached.add(target)
+                        queue.append(target)
+            return reached
+
+        forward = closure(anchors, outgoing)
+        returnable = closure(anchors, incoming)
+        independently_recoverable = forward & returnable
+        excluded = {int(value) for value in excluded_state_ids}
+        if any(value < 0 for value in excluded):
+            raise ValueError("primitive oracle excluded state is invalid")
+        positions = primitive_graph.positions_m
+        distance = np.hypot(
+            positions[:, 0] - pose_map.x_m,
+            positions[:, 1] - pose_map.y_m,
+        )
+        raw_indices = [
+            int(index)
+            for index in np.flatnonzero(primitive_graph.observation_state)
+            if int(state_ids[index]) not in anchors
+        ]
+        spatial: list[tuple[int, tuple[int, int]]] = []
+        for index in raw_indices:
+            if int(state_ids[index]) in excluded:
+                continue
+            try:
+                cell = world.canvas.world_to_grid(
+                    float(positions[index, 0]), float(positions[index, 1])
+                )
+            except ValueError:
+                continue
+            spatial.append((index, cell))
+        direct_hopper_successors = {
+            target for anchor in anchors for target in outgoing[anchor]
+        }
+        reachable = [
+            (index, cell)
+            for index, cell in spatial
+            if int(state_ids[index]) in independently_recoverable
+            and distance[index] <= self._visibility_estimator.sensor.range_m + 1.0e-9
+            and (
+                primitive_graph.platform_type != "HOPPER"
+                or int(state_ids[index]) in direct_hopper_successors
+            )
+        ]
+        if not reachable:
+            return FrontierOracleResult(
+                len(raw_indices), len(spatial), 0, 0
+            )
+        cells = np.ascontiguousarray(
+            [cell for _, cell in reachable], dtype=np.int32
+        )
+        exact_positions = np.ascontiguousarray(
+            [positions[index] for index, _ in reachable], dtype=np.float64
+        )
+        exact_gain = getattr(
+            self._visibility_estimator,
+            "estimate_candidate_gains_at_positions",
+            None,
+        )
+        arguments = (
+            np.ascontiguousarray(world.observed_mask, dtype=np.bool_),
+            np.ascontiguousarray(
+                world.physical_obstacle_layer.values, dtype=np.float32
+            ),
+            np.ascontiguousarray(mission.roi_ratio, dtype=np.float32),
+            np.ascontiguousarray(
+                mission.priority * mission.roi_ratio, dtype=np.float32
+            ),
+        )
+        gains = (
+            exact_gain(*arguments, exact_positions)
+            if callable(exact_gain)
+            else self._visibility_estimator.estimate_candidate_gains(
+                *arguments, cells
+            )
+        )
+        if (
+            not isinstance(gains, np.ndarray)
+            or gains.shape != (len(reachable), 2)
+            or gains.dtype != np.dtype(np.float32)
+            or not gains.flags.c_contiguous
+            or not np.isfinite(gains).all()
+            or (gains < 0.0).any()
+        ):
+            raise RuntimeError("primitive oracle visibility result is invalid")
+        opportunity_count = int(np.count_nonzero(gains[:, 0] > 0.0))
+        if opportunity_count == 0 and bool(
+            np.any((mission.roi_ratio > 0.0) & ~world.observed_mask)
+        ):
+            opportunity_count = len(reachable)
+        return FrontierOracleResult(
+            len(raw_indices),
+            len(spatial),
+            len(reachable),
             opportunity_count,
         )
 

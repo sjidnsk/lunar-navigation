@@ -627,27 +627,41 @@ class V3ExplorationEnvironment:
             oracle = self._frontier_oracle()
             if not isinstance(oracle, FrontierOracleResult):
                 self._fail_closed("frontier oracle returned invalid data")
-        if not planner_rejected_all and oracle.opportunity_count > 0:
+        if diagnostics.emitted_count == 0 and oracle.opportunity_count > 0:
             self._fail_closed(
                 "production candidates are empty while frontier oracle found opportunities"
             )
+        if diagnostics.emitted_count > 0 and not planner_rejected_all:
+            self._fail_closed("terminal candidate accounting is incomplete")
         if planner_rejected_all:
             reason = TerminalReason.PLANNER_REJECTED_ALL
+        elif diagnostics.primitive_state_count > 0:
+            if diagnostics.recoverable_observation_state_count == 0:
+                reason = TerminalReason.NO_RECOVERABLE_OBSERVATION_STATE
+            elif (
+                diagnostics.visited_excluded_count
+                >= diagnostics.recoverable_observation_state_count
+            ):
+                reason = TerminalReason.VISITED_EXHAUSTED
+            elif (
+                diagnostics.zero_gain_count > 0
+                and diagnostics.frontier_hint_count == 0
+            ):
+                reason = TerminalReason.ZERO_GAIN
+            else:
+                reason = TerminalReason.NO_TRANSIT_OPPORTUNITY
         elif diagnostics.zero_gain_count > 0:
             reason = TerminalReason.ZERO_GAIN
+        elif diagnostics.visited_excluded_count > 0:
+            reason = TerminalReason.VISITED_EXHAUSTED
         elif (
             diagnostics.platform_unreachable_count > 0
             or diagnostics.static_infeasible_count > 0
+            or diagnostics.frontier_anchor_count == 0
         ):
-            reason = TerminalReason.PLATFORM_UNREACHABLE
-        elif diagnostics.visited_excluded_count > 0:
-            reason = TerminalReason.VISITED_EXHAUSTED
-        elif diagnostics.frontier_anchor_count == 0:
-            reason = TerminalReason.NO_FRONTIER_ANCHOR
+            reason = TerminalReason.NO_RECOVERABLE_OBSERVATION_STATE
         else:
-            self._fail_closed(
-                "empty production candidates have no auditable exhaustion stage"
-            )
+            reason = TerminalReason.NO_TRANSIT_OPPORTUNITY
         return reason, oracle.opportunity_count, self._remaining_coverable_count()
 
     def _remaining_coverable_count(self) -> int | None:

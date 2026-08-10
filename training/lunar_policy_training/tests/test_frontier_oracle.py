@@ -18,6 +18,9 @@ from lunar_policy_training.environment.observation_builder import (
 from lunar_policy_training.environment.platform_reachability import (
     CandidateReachabilityResult,
 )
+from lunar_policy_training.environment.primitive_reachability import (
+    ObservedPrimitiveSnapshot,
+)
 from lunar_policy_training.environment.visibility import SensorGeometry
 from lunar_policy_training.polar_data.hazards import CanvasRatioLayer
 from lunar_policy_training.polar_data.raster import MapCanvas
@@ -97,6 +100,81 @@ def _fixture():
         "test_only/proxy",
     )
     return world, mission, projection
+
+
+def _frozen(values: np.ndarray) -> np.ndarray:
+    result = np.ascontiguousarray(values)
+    result.setflags(write=False)
+    return result
+
+
+def _oracle_graph(canvas: MapCanvas) -> ObservedPrimitiveSnapshot:
+    cells = ((128, 128), (128, 129), (128, 130))
+    positions = np.asarray(
+        [(*canvas.grid_center_world(*cell), 0.0) for cell in cells],
+        dtype=np.float64,
+    )
+    labels = _frozen(np.ones(3, dtype=np.bool_))
+    return ObservedPrimitiveSnapshot(
+        platform_type="WHEELED",
+        width=32,
+        height=32,
+        algorithm_id="test-wheel/v1",
+        state_schema="test-wheel-state/v1",
+        primitive_set_sha256="1" * 64,
+        world_evidence_sha256="2" * 64,
+        graph_sha256="3" * 64,
+        revision=1,
+        invalidated_edge_count=0,
+        revalidated_edge_count=0,
+        state_ids=_frozen(np.asarray([1, 2, 3], dtype=np.uint64)),
+        positions_m=_frozen(positions),
+        yaw_rad=_frozen(np.zeros(3, dtype=np.float64)),
+        cells=_frozen(np.asarray(cells, dtype=np.int32)),
+        yaw_bin=_frozen(np.zeros(3, dtype=np.int32)),
+        motion_mode=_frozen(np.zeros(3, dtype=np.int32)),
+        body_z_m=_frozen(np.zeros((3, 2), dtype=np.float64)),
+        path_cost=_frozen(np.asarray([0.0, 1.0, 1.0], dtype=np.float64)),
+        forward_reachable=labels,
+        returnable=labels,
+        observation_state=labels,
+        recoverable=labels,
+        direct_successor=_frozen(
+            np.asarray([False, True, True], dtype=np.bool_)
+        ),
+        edge_source_ids=_frozen(np.asarray([1, 2, 1], dtype=np.uint64)),
+        edge_target_ids=_frozen(np.asarray([2, 1, 3], dtype=np.uint64)),
+        edge_primitive_indices=_frozen(np.zeros(3, dtype=np.uint32)),
+        edge_primitive_ids=("forward", "reverse", "outbound"),
+        edge_cost=_frozen(np.ones(3, dtype=np.float64)),
+    )
+
+
+def test_primitive_oracle_recomputes_returnability_from_edges(
+    monkeypatch,
+) -> None:
+    estimator = _GainEstimator()
+    world, mission, _ = _fixture()
+    graph = _oracle_graph(world.canvas)
+    monkeypatch.setattr(
+        CandidateBuilderV2,
+        "build_from_primitive_graph",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("oracle called production graph ranking")
+        ),
+    )
+
+    result = FrontierOpportunityOracle(estimator).evaluate(
+        world,
+        mission,
+        pose_map=Pose2(*world.canvas.grid_center_world(128, 128)),
+        primitive_graph=graph,
+    )
+
+    assert result.frontier_anchor_count == 2
+    assert result.platform_reachable_pose_count == 1
+    assert result.opportunity_count == 1
+    np.testing.assert_array_equal(estimator.calls[0], np.asarray([[128, 129]]))
 
 
 def test_oracle_finds_observed_safe_positive_gain_without_candidate_ranking(

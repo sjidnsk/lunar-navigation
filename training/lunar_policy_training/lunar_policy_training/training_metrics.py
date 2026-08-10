@@ -13,12 +13,15 @@ from pathlib import Path
 import numpy as np
 from lunar_planner_training_bridge import PlanningOutcome
 
-from .environment.candidate_builder import CandidateDiagnostics
+from .environment.candidate_builder import (
+    CANDIDATE_DIAGNOSTIC_FIELDS,
+    CandidateDiagnostics,
+)
 from .environment.macro_step import TerminalAudit, TerminalReason
 from .ppo.trainer import PPOUpdateMetrics
 
 
-TRAINING_UPDATE_METRICS_SCHEMA = "lunar-training-update-metrics/v2"
+TRAINING_UPDATE_METRICS_SCHEMA = "lunar-training-update-metrics/v3"
 
 
 class TrainingMetricsError(ValueError):
@@ -183,13 +186,7 @@ def build_training_update_record(
     }
     candidate_by_platform: dict[str, dict[str, int]] = {
         platform: {
-            "frontier_anchor_count": 0,
-            "visited_excluded_count": 0,
-            "static_infeasible_count": 0,
-            "platform_unreachable_count": 0,
-            "zero_gain_count": 0,
-            "emitted_count": 0,
-            "planner_rejected_count": 0,
+            **{name: 0 for name in CANDIDATE_DIAGNOSTIC_FIELDS},
             "no_candidate_termination_count": 0,
             "planner_rejected_exhaustion_count": 0,
         }
@@ -197,15 +194,7 @@ def build_training_update_record(
     }
     for index, diagnostics in enumerate(candidates):
         values = candidate_by_platform[platforms[index % worker_count]]
-        for name in (
-            "frontier_anchor_count",
-            "visited_excluded_count",
-            "static_infeasible_count",
-            "platform_unreachable_count",
-            "zero_gain_count",
-            "emitted_count",
-            "planner_rejected_count",
-        ):
+        for name in CANDIDATE_DIAGNOSTIC_FIELDS:
             values[name] += getattr(diagnostics, name)
     for index, terminated_without_candidates in enumerate(no_candidates):
         if terminated_without_candidates:
@@ -219,15 +208,7 @@ def build_training_update_record(
     terminal_candidate_by_platform = {
         platform: {
             name: 0
-            for name in (
-                "frontier_anchor_count",
-                "visited_excluded_count",
-                "static_infeasible_count",
-                "platform_unreachable_count",
-                "zero_gain_count",
-                "emitted_count",
-                "planner_rejected_count",
-            )
+            for name in CANDIDATE_DIAGNOSTIC_FIELDS
         }
         for platform in sorted(allocation)
     }
@@ -433,7 +414,45 @@ def _validate_record(record: object) -> None:
         raise TrainingMetricsError("metrics record schema differs")
     if type(record.get("global_step")) is not int or record["global_step"] <= 0:
         raise TrainingMetricsError("metrics record global step is invalid")
+    candidate = record.get("candidate")
+    candidate_by_platform = (
+        candidate.get("by_platform")
+        if isinstance(candidate, Mapping)
+        else None
+    )
+    if not isinstance(candidate_by_platform, Mapping) or not candidate_by_platform:
+        raise TrainingMetricsError("metrics candidate diagnostics are missing")
+    aggregate_fields = set(CANDIDATE_DIAGNOSTIC_FIELDS) | {
+        "no_candidate_termination_count",
+        "planner_rejected_exhaustion_count",
+    }
+    for values in candidate_by_platform.values():
+        _validate_diagnostic_counts(values, aggregate_fields)
+    terminal = record.get("terminal")
+    terminal_by_platform = (
+        terminal.get("candidate_diagnostics_by_platform")
+        if isinstance(terminal, Mapping)
+        else None
+    )
+    if not isinstance(terminal_by_platform, Mapping) or not terminal_by_platform:
+        raise TrainingMetricsError("metrics terminal diagnostics are missing")
+    for values in terminal_by_platform.values():
+        _validate_diagnostic_counts(values, set(CANDIDATE_DIAGNOSTIC_FIELDS))
     _validate_finite_json(record)
+
+
+def _validate_diagnostic_counts(
+    value: object, expected_fields: set[str]
+) -> None:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != expected_fields
+        or any(
+            type(count) is not int or count < 0
+            for count in value.values()
+        )
+    ):
+        raise TrainingMetricsError("metrics candidate diagnostics are invalid")
 
 
 def _validate_finite_json(value: object) -> None:

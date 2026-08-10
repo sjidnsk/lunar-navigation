@@ -462,11 +462,11 @@ class ObservedPrimitiveSnapshot:
 - Each `FormalEpisodeWorker` owns one native engine. Every reveal updates it before candidate construction; continuation replans refresh maps but cannot reuse a snapshot whose map revision differs.
 - Replay rebuilds the same graph sequence from reveal history and checks final graph SHA/revision. Environment state schema becomes `lunar-formal-environment-state/v5`.
 
-- [ ] **Step 1: Write observed graph and replay RED tests**
+- [x] **Step 1: Write observed graph and replay RED tests**
 
 Prove no truth object is accepted by the wrapper, revisions are strictly monotonic, no-change reveals preserve graph hash, changed evidence updates candidates, exact current state survives a partially observed 4 m global cell through local primitives, and snapshot/replay graph identity is byte-identical.
 
-- [ ] **Step 2: Run RED, implement episode ownership, and run GREEN**
+- [x] **Step 2: Run RED, implement episode ownership, and run GREEN**
 
 ```bash
 PYTHON=/home/kai/CodexDownloads/lunar_navigation/volume3/venv/bin/python
@@ -483,7 +483,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "$PYTHON" -m pytest -q \
   training/lunar_policy_training/tests/test_checkpoint_resume.py
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add training/lunar_policy_training
@@ -511,11 +511,11 @@ git commit -m "feat(training): maintain observed primitive graphs"
 - Gain remains observed-only at 0.2 m: unknown rays are transparent and known obstacles stop them. Frontier cells are optional search hints only.
 - Oracle independently recomputes forward/returnable labels from snapshot edges and enumerates information/transit opportunities without calling production sorting.
 
-- [ ] **Step 1: Add graph-first RED tests**
+- [x] **Step 1: Add graph-first RED tests**
 
 Assert every emitted state is recoverable in the current snapshot; an unreachable high-gain frontier is absent; a reachable positive-gain non-anchor state is emitted; HOPPER multi-hop non-successor is absent; more than 64 states truncate stably; fewer than 64 use only false padding; sparse positive sets scan further distance layers; zero-gain transit appears only when needed; truth mutation leaves output byte-identical; and `production empty + oracle opportunity` raises the invariant error.
 
-- [ ] **Step 2: Run RED, implement graph-first enumeration, and run GREEN**
+- [x] **Step 2: Run RED, implement graph-first enumeration, and run GREEN**
 
 ```bash
 PYTHON=/home/kai/CodexDownloads/lunar_navigation/volume3/venv/bin/python
@@ -531,7 +531,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "$PYTHON" -m pytest -q \
   training/lunar_policy_training/tests/test_formal_builder.py
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add training/lunar_policy_training
@@ -563,11 +563,11 @@ git commit -m "feat(training): generate candidates from primitive states"
 - Terminal reasons are `SUCCESS`, `NO_RECOVERABLE_OBSERVATION_STATE`, `VISITED_EXHAUSTED`, `ZERO_GAIN`, `NO_TRANSIT_OPPORTUNITY`, `PLANNER_REJECTED_ALL`, `HARD_FAILURE`, and `CANCELED`.
 - Metrics and JSON reports serialize every field explicitly; missing or negative values fail closed. Cache v5, environment-state v5, and training-semantics v10 reject all old checkpoints/manifests.
 
-- [ ] **Step 1: Write RED identity/diagnostic tests**
+- [x] **Step 1: Write RED identity/diagnostic tests**
 
 Assert exact terminal classification, diagnostics aggregation across workers, JSON round-trip, coverage monotonicity with a frozen denominator, old v9/v4 identities rejected, and a fresh run manifest has `global_step=0`, `resume_parent=null`, and `warm_start_parent=null`.
 
-- [ ] **Step 2: Run RED, implement identity propagation, and run GREEN**
+- [x] **Step 2: Run RED, implement identity propagation, and run GREEN**
 
 ```bash
 PYTHON=/home/kai/CodexDownloads/lunar_navigation/volume3/venv/bin/python
@@ -586,7 +586,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "$PYTHON" -m pytest -q \
   training/lunar_policy_training/tests/test_checkpoint_resume.py
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add training/lunar_policy_training

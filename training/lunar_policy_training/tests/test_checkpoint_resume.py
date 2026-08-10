@@ -209,6 +209,7 @@ def _formal_worker_state(index: int) -> dict[str, object]:
         "policy_batch_sha256": f"{index + 701:064x}",
         "rejected_candidate_indices": [],
         "last_hop_available_delta_v_mps": 0.0,
+        "candidate_gain_resolution_m": 0.2,
     }
 
 

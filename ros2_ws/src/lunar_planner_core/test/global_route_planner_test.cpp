@@ -108,6 +108,43 @@ TEST(GlobalRoutePlanner,
   EXPECT_NEAR(result.route->poses_map.front().position_m.y, 5.5, 1.0e-9);
 }
 
+TEST(GlobalRoutePlanner,
+     UsesObservedLocalDetailWhenTheGlobalGoalCellIsStillPartial) {
+  PlannerInput input = GroundInput(PlatformType::kLegged);
+  input.world.local_map = test::MakeFlatMap("odom", 20U, 12U, 1.0);
+  SetKnown(input.world.global_map, 18U, 5U, false);
+
+  const auto result = PlanGroundGlobalRoute(input);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_TRUE(result.route->raw_cells.empty());
+  ASSERT_GE(result.route->poses_map.size(), 2U);
+  EXPECT_NEAR(result.route->poses_map.front().position_m.x, 1.5, 1.0e-9);
+  EXPECT_NEAR(result.route->poses_map.back().position_m.x, 18.5, 1.0e-9);
+  EXPECT_NEAR(result.route->poses_map.back().position_m.y, 5.5, 1.0e-9);
+}
+
+TEST(GlobalRoutePlanner,
+     LocalDetailFallbackRoutesAroundKnownObstacles) {
+  PlannerInput input = GroundInput(PlatformType::kWheeled);
+  input.world.local_map = test::MakeFlatMap("odom", 20U, 12U, 1.0);
+  SetKnown(input.world.global_map, 18U, 5U, false);
+  for (std::size_t y = 1U; y < 11U; ++y) {
+    if (y != 7U) {
+      SetObstacle(input.world.local_map, 10U, y);
+    }
+  }
+
+  const auto result = PlanGroundGlobalRoute(input);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_GE(result.route->poses_map.size(), 3U);
+  EXPECT_TRUE(std::ranges::any_of(
+      result.route->poses_map,
+      [](const Pose3& pose) { return pose.position_m.y > 6.5; }));
+  EXPECT_NEAR(result.route->poses_map.back().position_m.x, 18.5, 1.0e-9);
+}
+
 TEST(GlobalRoutePlanner, DoesNotUseAnExcludedCellAsTheLocalStartPortal) {
   PlannerInput input = GroundInput(PlatformType::kWheeled);
   SetKnown(input.world.global_map, 1U, 5U, false);

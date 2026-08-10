@@ -197,6 +197,52 @@ def _primitive_snapshot(
     )
 
 
+def _primitive_snapshot_for_cells(
+    cells: tuple[tuple[int, int], ...],
+    *,
+    platform_type: str = "WHEELED",
+) -> ObservedPrimitiveSnapshot:
+    canvas = _canvas()
+    count = len(cells)
+    positions = np.asarray(
+        [(*canvas.grid_center_world(*cell), 0.0) for cell in cells],
+        dtype=np.float64,
+    )
+    state_ids = np.arange(1, count + 1, dtype=np.uint64)
+    reachable = np.ones(count, dtype=np.bool_)
+    return ObservedPrimitiveSnapshot(
+        platform_type=platform_type,
+        width=32,
+        height=32,
+        algorithm_id=f"test-{platform_type.lower()}/v1",
+        state_schema=f"test-{platform_type.lower()}-state/v1",
+        primitive_set_sha256="1" * 64,
+        world_evidence_sha256="2" * 64,
+        graph_sha256="3" * 64,
+        revision=4,
+        invalidated_edge_count=2,
+        revalidated_edge_count=7,
+        state_ids=_frozen(state_ids),
+        positions_m=_frozen(positions),
+        yaw_rad=_frozen(np.zeros(count, dtype=np.float64)),
+        cells=_frozen(np.asarray(cells, dtype=np.int32)),
+        yaw_bin=_frozen(np.zeros(count, dtype=np.int32)),
+        motion_mode=_frozen(np.zeros(count, dtype=np.int32)),
+        body_z_m=_frozen(np.zeros((count, 2), dtype=np.float64)),
+        path_cost=_frozen(np.arange(count, dtype=np.float64)),
+        forward_reachable=_frozen(reachable),
+        returnable=_frozen(reachable),
+        observation_state=_frozen(reachable),
+        recoverable=_frozen(reachable),
+        direct_successor=_frozen(reachable),
+        edge_source_ids=_frozen(np.zeros(0, dtype=np.uint64)),
+        edge_target_ids=_frozen(np.zeros(0, dtype=np.uint64)),
+        edge_primitive_indices=_frozen(np.zeros(0, dtype=np.uint32)),
+        edge_primitive_ids=(),
+        edge_cost=_frozen(np.zeros(0, dtype=np.float64)),
+    )
+
+
 def test_candidate_builder_requires_explicit_sensor_estimator() -> None:
     with pytest.raises(TypeError):
         CandidateBuilderV2()
@@ -246,6 +292,95 @@ def test_hopper_primitive_candidates_reject_recoverable_multihop_states() -> Non
     )
 
     assert set(batch.primitive_state_ids[batch.mask]) == {np.uint64(2)}
+
+
+def test_primitive_candidates_exclude_visited_state_id() -> None:
+    snapshot = _primitive_snapshot()
+
+    batch = CandidateBuilderV2(_RecordingEstimator()).build_from_primitive_graph(
+        _world_with_frontier(),
+        _mission(),
+        Pose2(*_canvas().grid_center_world(128, 128)),
+        snapshot,
+        platform_type="WHEELED",
+        excluded_state_ids={2},
+    )
+
+    assert batch.count == 0
+    assert batch.diagnostics.visited_excluded_count == 2
+
+
+def test_sparse_positive_primitive_candidates_add_recoverable_transit_reserve() -> None:
+    cells = (
+        (128, 128),
+        *tuple((128, column) for column in range(129, 136)),
+        (129, 128),
+        (129, 129),
+    )
+    snapshot = _primitive_snapshot_for_cells(cells)
+
+    class SparseGainEstimator(_RecordingEstimator):
+        def estimate_candidate_gains(self, *args) -> np.ndarray:
+            candidates = args[-1]
+            gains = np.zeros((len(candidates), 2), dtype=np.float32)
+            gains[0] = (1.0, 1.0)
+            return gains
+
+    batch = CandidateBuilderV2(SparseGainEstimator()).build_from_primitive_graph(
+        _world_with_frontier(),
+        _mission(),
+        Pose2(*_canvas().grid_center_world(128, 128)),
+        snapshot,
+        platform_type="WHEELED",
+    )
+
+    assert batch.count == 8
+    assert batch.diagnostics.positive_gain_state_count == 1
+    assert batch.diagnostics.transit_state_count == 7
+    assert batch.diagnostics.zero_gain_count == 1
+
+
+def test_primitive_candidates_spatially_truncate_more_than_64_states() -> None:
+    current = (128, 128)
+    remote = tuple(
+        (row, column)
+        for row in range(133, 135)
+        for column in range(133, 135)
+    )
+    clustered = tuple(
+        (row, column)
+        for row in range(123, 131)
+        for column in range(123, 131)
+        if (row, column) != current
+    )
+    cells = (current, *clustered, *remote)
+    snapshot = _primitive_snapshot_for_cells(cells)
+    pose = Pose2(*_canvas().grid_center_world(*current))
+    builder = CandidateBuilderV2(_RecordingEstimator())
+
+    first = builder.build_from_primitive_graph(
+        _world_with_frontier(),
+        _mission(),
+        pose,
+        snapshot,
+        platform_type="WHEELED",
+    )
+    second = builder.build_from_primitive_graph(
+        _world_with_frontier(),
+        _mission(),
+        pose,
+        snapshot,
+        platform_type="WHEELED",
+    )
+
+    assert first.count == 64
+    selected_cells = snapshot.cells[
+        first.primitive_state_ids[first.mask].astype(np.int64) - 1
+    ]
+    assert selected_cells[:, 0].max() >= 133
+    assert selected_cells[:, 1].max() >= 133
+    np.testing.assert_array_equal(first.features, second.features)
+    np.testing.assert_array_equal(first.primitive_state_ids, second.primitive_state_ids)
 
 
 def test_candidate_builder_is_observed_only_uses_exact_12_fields_and_stable_64_padding() -> None:

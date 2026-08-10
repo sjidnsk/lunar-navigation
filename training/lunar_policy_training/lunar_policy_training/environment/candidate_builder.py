@@ -22,6 +22,26 @@ _PLATFORM_TYPES = _GROUND_PLATFORM_TYPES | {"HOPPER"}
 _MIN_PLATFORM_CANDIDATE_RESERVE = 8
 
 
+CANDIDATE_DIAGNOSTIC_FIELDS = (
+    "frontier_anchor_count",
+    "visited_excluded_count",
+    "static_infeasible_count",
+    "platform_unreachable_count",
+    "zero_gain_count",
+    "emitted_count",
+    "planner_rejected_count",
+    "primitive_state_count",
+    "forward_reachable_state_count",
+    "returnable_state_count",
+    "recoverable_observation_state_count",
+    "frontier_hint_count",
+    "positive_gain_state_count",
+    "transit_state_count",
+    "invalidated_edge_count",
+    "revalidated_edge_count",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class CandidateDiagnostics:
     frontier_anchor_count: int = 0
@@ -31,6 +51,15 @@ class CandidateDiagnostics:
     zero_gain_count: int = 0
     emitted_count: int = 0
     planner_rejected_count: int = 0
+    primitive_state_count: int = 0
+    forward_reachable_state_count: int = 0
+    returnable_state_count: int = 0
+    recoverable_observation_state_count: int = 0
+    frontier_hint_count: int = 0
+    positive_gain_state_count: int = 0
+    transit_state_count: int = 0
+    invalidated_edge_count: int = 0
+    revalidated_edge_count: int = 0
 
     def __post_init__(self) -> None:
         values = (
@@ -41,6 +70,15 @@ class CandidateDiagnostics:
             self.zero_gain_count,
             self.emitted_count,
             self.planner_rejected_count,
+            self.primitive_state_count,
+            self.forward_reachable_state_count,
+            self.returnable_state_count,
+            self.recoverable_observation_state_count,
+            self.frontier_hint_count,
+            self.positive_gain_state_count,
+            self.transit_state_count,
+            self.invalidated_edge_count,
+            self.revalidated_edge_count,
         )
         if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in values):
             raise ValueError("candidate diagnostics must contain non-negative integers")
@@ -58,6 +96,20 @@ class CandidateDiagnostics:
             raise ValueError("candidate diagnostics emitted count exceeds survivors")
         if self.planner_rejected_count > self.emitted_count:
             raise ValueError("candidate planner rejection exceeds emitted count")
+        if self.primitive_state_count > 0 and (
+            self.forward_reachable_state_count > self.primitive_state_count
+            or self.returnable_state_count > self.primitive_state_count
+            or self.recoverable_observation_state_count
+            > min(
+                self.forward_reachable_state_count,
+                self.returnable_state_count,
+            )
+            or self.positive_gain_state_count + self.transit_state_count
+            > self.recoverable_observation_state_count
+            or self.emitted_count
+            > self.positive_gain_state_count + self.transit_state_count
+        ):
+            raise ValueError("candidate primitive graph counts are inconsistent")
 
 
 @dataclass(frozen=True)
@@ -133,12 +185,15 @@ class CandidateBatch:
         cls,
         canvas_id: str | None = None,
         diagnostics: CandidateDiagnostics | None = None,
+        *,
+        primitive_graph_revision: int = 0,
     ) -> "CandidateBatch":
         return cls(
             np.zeros((64, 12), np.float32),
             np.zeros(64, bool),
             canvas_id,
             diagnostics or CandidateDiagnostics(),
+            primitive_graph_revision=primitive_graph_revision,
         )
 
 
@@ -253,6 +308,116 @@ def _select_anchors(anchors: list[_FeasibleAnchor], segment_count: int, limit: i
         )
         selected.append(remaining.pop(next_index))
     return sorted(selected, key=_anchor_key)
+
+
+_PrimitiveCandidate = tuple[int, tuple[int, int], float, float]
+
+
+def _primitive_candidate_key(
+    candidate: _PrimitiveCandidate,
+    graph: ObservedPrimitiveSnapshot,
+) -> tuple[float, float, int]:
+    state_index, _, gain, _ = candidate
+    path_cost = float(graph.path_cost[state_index])
+    return (
+        -gain / (1.0 + path_cost),
+        path_cost,
+        int(graph.state_ids[state_index]),
+    )
+
+
+def _primitive_candidate_distance(
+    lhs: _PrimitiveCandidate,
+    rhs: _PrimitiveCandidate,
+    graph: ObservedPrimitiveSnapshot,
+) -> float:
+    lhs_position = graph.positions_m[lhs[0], :2]
+    rhs_position = graph.positions_m[rhs[0], :2]
+    return float(np.linalg.norm(lhs_position - rhs_position))
+
+
+def _farthest_primitive_subset(
+    candidates: list[_PrimitiveCandidate],
+    count: int,
+    graph: ObservedPrimitiveSnapshot,
+) -> list[_PrimitiveCandidate]:
+    remaining = sorted(
+        candidates, key=lambda candidate: _primitive_candidate_key(candidate, graph)
+    )
+    if not remaining or count <= 0:
+        return []
+    selected = [remaining.pop(0)]
+    while remaining and len(selected) < count:
+        next_index = min(
+            range(len(remaining)),
+            key=lambda index: (
+                -min(
+                    _primitive_candidate_distance(
+                        remaining[index], chosen, graph
+                    )
+                    for chosen in selected
+                ),
+                _primitive_candidate_key(remaining[index], graph),
+            ),
+        )
+        selected.append(remaining.pop(next_index))
+    return selected
+
+
+def _select_primitive_candidates(
+    candidates: list[_PrimitiveCandidate],
+    graph: ObservedPrimitiveSnapshot,
+    *,
+    canvas_cells: int,
+    limit: int = 64,
+) -> list[_PrimitiveCandidate]:
+    """Keep every spatial component represented before stable farthest fill."""
+    ordered = sorted(
+        candidates, key=lambda candidate: _primitive_candidate_key(candidate, graph)
+    )
+    if len(ordered) <= limit:
+        return ordered
+    segments = _segments(
+        sorted({candidate[1] for candidate in ordered}), canvas_cells
+    )
+    segment_by_cell = {
+        cell: segment_id
+        for segment_id, segment in enumerate(segments)
+        for cell in segment
+    }
+    by_segment: list[list[_PrimitiveCandidate]] = [
+        [] for _ in range(len(segments))
+    ]
+    for candidate in ordered:
+        by_segment[segment_by_cell[candidate[1]]].append(candidate)
+    representatives = [segment[0] for segment in by_segment if segment]
+    if len(representatives) > limit:
+        selected = _farthest_primitive_subset(representatives, limit, graph)
+    else:
+        representative_ids = {candidate[0] for candidate in representatives}
+        remaining = [
+            candidate
+            for candidate in ordered
+            if candidate[0] not in representative_ids
+        ]
+        selected = list(representatives)
+        while remaining and len(selected) < limit:
+            next_index = min(
+                range(len(remaining)),
+                key=lambda index: (
+                    -min(
+                        _primitive_candidate_distance(
+                            remaining[index], chosen, graph
+                        )
+                        for chosen in selected
+                    ),
+                    _primitive_candidate_key(remaining[index], graph),
+                ),
+            )
+            selected.append(remaining.pop(next_index))
+    return sorted(
+        selected, key=lambda candidate: _primitive_candidate_key(candidate, graph)
+    )
 
 
 class CandidateBuilderV2:
@@ -459,7 +624,10 @@ class CandidateBuilderV2:
             or world.canvas != mission.canvas
             or primitive_graph.revision <= 0
         ):
-            return CandidateBatch.empty(world.canvas.identity)
+            return CandidateBatch.empty(
+                world.canvas.identity,
+                primitive_graph_revision=primitive_graph.revision,
+            )
         excluded = {int(value) for value in excluded_state_ids}
         if any(value < 0 for value in excluded):
             raise ValueError("excluded primitive state identity is invalid")
@@ -500,14 +668,44 @@ class CandidateBuilderV2:
             )
         ]
         platform_unreachable = len(spatial) - len(feasible)
+        unknown_roi = (mission.roi_ratio > 0.0) & ~world.observed_mask
+        adjacent_unknown = np.zeros_like(unknown_roi)
+        adjacent_unknown[1:] |= unknown_roi[:-1]
+        adjacent_unknown[:-1] |= unknown_roi[1:]
+        adjacent_unknown[:, 1:] |= unknown_roi[:, :-1]
+        adjacent_unknown[:, :-1] |= unknown_roi[:, 1:]
+        frontier_hint_count = sum(
+            bool(world.observed_mask[cell] and adjacent_unknown[cell])
+            for _, cell in spatial
+        )
         diagnostics = CandidateDiagnostics(
             frontier_anchor_count=len(raw_indices),
             visited_excluded_count=visited_excluded,
             static_infeasible_count=static_infeasible,
             platform_unreachable_count=platform_unreachable,
+            primitive_state_count=len(primitive_graph.state_ids),
+            forward_reachable_state_count=int(
+                primitive_graph.forward_reachable.sum(dtype=np.int64)
+            ),
+            returnable_state_count=int(
+                primitive_graph.returnable.sum(dtype=np.int64)
+            ),
+            recoverable_observation_state_count=int(
+                (
+                    primitive_graph.recoverable
+                    & primitive_graph.observation_state
+                ).sum(dtype=np.int64)
+            ),
+            frontier_hint_count=frontier_hint_count,
+            invalidated_edge_count=primitive_graph.invalidated_edge_count,
+            revalidated_edge_count=primitive_graph.revalidated_edge_count,
         )
         if not feasible:
-            return CandidateBatch.empty(world.canvas.identity, diagnostics)
+            return CandidateBatch.empty(
+                world.canvas.identity,
+                diagnostics,
+                primitive_graph_revision=primitive_graph.revision,
+            )
 
         # A 360-degree sensor makes poses in the same observed 0.2 m cell
         # observationally equivalent. Keep the cheapest stable graph state.
@@ -569,42 +767,42 @@ class CandidateBuilderV2:
             or (gains < 0.0).any()
         ):
             raise RuntimeError("primitive candidate gain result is invalid")
-        positive = [
+        positive: list[_PrimitiveCandidate] = [
             (index, cell, float(gain), float(priority_gain))
             for (index, cell), (gain, priority_gain) in zip(
                 feasible, gains, strict=True
             )
             if gain > 0.0
         ]
-        selected = positive
+        selected = list(positive)
         transit_selected = 0
-        if not selected and bool(
+        unknown_roi_exists = bool(
             np.any((mission.roi_ratio > 0.0) & ~world.observed_mask)
-        ):
-            selected = [
-                min(
-                    (
-                        (index, cell, float(gain), float(priority_gain))
-                        for (index, cell), (gain, priority_gain) in zip(
-                            feasible, gains, strict=True
-                        )
-                    ),
-                    key=lambda item: (
-                        float(primitive_graph.path_cost[item[0]]),
-                        int(primitive_graph.state_ids[item[0]]),
-                    ),
-                )
-            ]
-            transit_selected = 1
-        selected.sort(
-            key=lambda item: (
-                -item[2]
-                / (1.0 + float(primitive_graph.path_cost[item[0]])),
-                float(primitive_graph.path_cost[item[0]]),
-                int(primitive_graph.state_ids[item[0]]),
-            )
         )
-        selected = selected[:64]
+        if len(selected) < _MIN_PLATFORM_CANDIDATE_RESERVE and unknown_roi_exists:
+            zero_gain = [
+                (index, cell, float(gain), float(priority_gain))
+                for (index, cell), (gain, priority_gain) in zip(
+                    feasible, gains, strict=True
+                )
+                if gain <= 0.0
+            ]
+            zero_gain.sort(
+                key=lambda item: (
+                    float(primitive_graph.path_cost[item[0]]),
+                    int(primitive_graph.state_ids[item[0]]),
+                )
+            )
+            reserve = zero_gain[
+                : _MIN_PLATFORM_CANDIDATE_RESERVE - len(selected)
+            ]
+            selected.extend(reserve)
+            transit_selected = len(reserve)
+        selected = _select_primitive_candidates(
+            selected,
+            primitive_graph,
+            canvas_cells=world.canvas.geometry.cells,
+        )
         output = np.zeros((64, 12), dtype=np.float32)
         mask = np.zeros(64, dtype=np.bool_)
         target_positions = np.zeros((64, 3), dtype=np.float64)
@@ -646,6 +844,19 @@ class CandidateBuilderV2:
                 platform_unreachable_count=diagnostics.platform_unreachable_count,
                 zero_gain_count=zero_discarded,
                 emitted_count=len(selected),
+                primitive_state_count=diagnostics.primitive_state_count,
+                forward_reachable_state_count=(
+                    diagnostics.forward_reachable_state_count
+                ),
+                returnable_state_count=diagnostics.returnable_state_count,
+                recoverable_observation_state_count=(
+                    diagnostics.recoverable_observation_state_count
+                ),
+                frontier_hint_count=diagnostics.frontier_hint_count,
+                positive_gain_state_count=len(positive),
+                transit_state_count=transit_selected,
+                invalidated_edge_count=diagnostics.invalidated_edge_count,
+                revalidated_edge_count=diagnostics.revalidated_edge_count,
             ),
             target_elevation,
             target_positions,
@@ -953,6 +1164,7 @@ class CandidateBuilderV2:
 
 
 __all__ = [
+    "CANDIDATE_DIAGNOSTIC_FIELDS",
     "CandidateBatch",
     "CandidateBuilderV2",
     "CandidateDiagnostics",

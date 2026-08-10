@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import pathlib
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -74,6 +75,24 @@ from lunar_policy_training.project_capability import load_project_formal_capabil
 
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
+
+
+def test_formal_episode_maps_visited_detail_poses_to_current_graph_state_ids() -> None:
+    episode = object.__new__(FormalEpisode)
+    episode._visited_candidate_filter_enabled = True
+    episode._visited_primitive_pose_keys = {(5, 10), (15, 20)}
+    snapshot = SimpleNamespace(
+        state_ids=np.asarray([11, 22, 33], dtype=np.uint64),
+        positions_m=np.asarray(
+            [[1.01, 2.01, 0.0], [3.01, 4.01, 0.0], [9.0, 9.0, 0.0]],
+            dtype=np.float64,
+        ),
+    )
+
+    assert episode._visited_primitive_state_ids(snapshot) == {11, 22}
+
+    episode._visited_candidate_filter_enabled = False
+    assert episode._visited_primitive_state_ids(snapshot) == set()
 
 
 def test_primitive_detail_aggregation_requires_complete_point_two_metre_evidence() -> None:
@@ -601,7 +620,8 @@ def test_formal_episode_excludes_a_recorded_landing_from_future_candidates(
     )
     rebuilt_positions = rebuilt.frontier_features[0, rebuilt.candidate_mask[0], :2]
 
-    assert int(rebuilt.candidate_mask.sum()) == int(initial.candidate_mask.sum()) - 1
+    assert int(rebuilt.candidate_mask.sum()) == int(initial.candidate_mask.sum())
+    assert episode.current_candidate_diagnostics().visited_excluded_count > 0
     assert not torch.any(torch.all(rebuilt_positions == visited_position, dim=1))
 
 
@@ -722,72 +742,22 @@ def test_formal_episode_estimates_candidate_gain_from_detail_observation(
     assert worker.snapshot_episode_state()["candidate_gain_resolution_m"] == 0.2
 
 
-def test_restore_preserves_one_legacy_coarse_gain_boundary_then_enables_detail(
+def test_restore_rejects_a_legacy_state_without_detail_gain_identity(
     tmp_path: pathlib.Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assembly, _, _ = _assembly(tmp_path)
-    coarse = NativeVisibilityEstimator(
-        SensorGeometry(30.0, 2.0 * np.pi),
-        resolution_m=4.0,
-    )
-
-    def estimate_coarse(
-        _self: MultiresSensorObservationState,
-        observed_mask: np.ndarray,
-        obstacle_ratio: np.ndarray,
-        roi_ratio: np.ndarray,
-        priority_weight: np.ndarray,
-        candidate_cells: np.ndarray,
-    ) -> np.ndarray:
-        return coarse.estimate_candidate_gains(
-            observed_mask,
-            obstacle_ratio,
-            roi_ratio,
-            priority_weight,
-            candidate_cells,
-        )
-
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            MultiresSensorObservationState,
-            "estimate_candidate_gains",
-            estimate_coarse,
-        )
-        legacy = assembly.factory.create_for_episode(
-            0,
-            "WHEELED",
-            4,
-            platform_worker_index=0,
-            platform_worker_count=1,
-        )
-        legacy_state = legacy.snapshot_episode_state()
-        legacy_state.pop("candidate_gain_resolution_m", None)
-        legacy_digest = policy_batch_sha256(
-            legacy.environment.current_observation
-        )
-
-    detail = assembly.factory.create_for_episode(
+    worker = assembly.factory.create_for_episode(
         0,
         "WHEELED",
         4,
         platform_worker_index=0,
         platform_worker_count=1,
     )
-    assert policy_batch_sha256(detail.environment.current_observation) != (
-        legacy_digest
-    )
+    legacy_state = worker.snapshot_episode_state()
+    legacy_state.pop("candidate_gain_resolution_m")
 
-    def reject_detail_restore(*_args, **_kwargs) -> np.ndarray:
-        raise AssertionError("legacy state must not replay the detail path first")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            MultiresSensorObservationState,
-            "estimate_candidate_gains",
-            reject_detail_restore,
-        )
-        restored = assembly.factory.restore_for_episode(
+    with pytest.raises(ValueError, match="structure"):
+        assembly.factory.restore_for_episode(
             worker_index=0,
             platform_type="WHEELED",
             episode_cursor=4,
@@ -796,75 +766,29 @@ def test_restore_preserves_one_legacy_coarse_gain_boundary_then_enables_detail(
             state=legacy_state,
         )
 
-    assert policy_batch_sha256(restored.environment.current_observation) == (
-        legacy_digest
-    )
-    assert restored.episode._detail_candidate_gain_enabled is True
-    assert restored.snapshot_episode_state()["candidate_gain_resolution_m"] == 4.0
 
-
-def test_restore_preserves_legacy_platform_filter_boundary_then_enables_repair(
+def test_formal_candidate_path_never_calls_the_legacy_frontier_builder(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assembly, bundle, _ = _assembly(tmp_path)
-    current = assembly.factory.create_for_episode(
+    assembly, _, _ = _assembly(tmp_path)
+    worker = assembly.factory.create_for_episode(
         0,
         "WHEELED",
         4,
         platform_worker_index=0,
         platform_worker_count=1,
     )
-    template = current.episode
-    legacy_episode = FormalEpisode(
-        worker_index=template.worker_index,
-        platform_type="WHEELED",
-        capability=bundle.for_platform("WHEELED"),
-        scenario_identity=template.scenario_identity,
-        loaded=template.loaded,
-        start_cell=template.start_cell,
-        platform_candidate_reachability_enabled=False,
-    )
-    legacy = FormalWorkerBuilder._make_worker(legacy_episode)
-    state = legacy.snapshot_episode_state()
-    legacy_digest = policy_batch_sha256(legacy.environment.current_observation)
 
-    def reject_new_ground_filter(world, projection, robot):
-        return np.zeros_like(world.observed_mask)
+    def reject_legacy(*_args, **_kwargs):
+        raise AssertionError("formal v10 must not call legacy frontier generation")
 
     with monkeypatch.context() as patch:
-        patch.setattr(
-            candidate_builder_module,
-            "_ground_reachable_mask",
-            reject_new_ground_filter,
+        patch.setattr(CandidateBuilderV2, "build", reject_legacy)
+        worker.episode.build_policy_observation(
+            worker.episode.sensor_state.observed,
+            worker.episode.current_pose,
         )
-        restored = assembly.factory.restore_for_episode(
-            worker_index=0,
-            platform_type="WHEELED",
-            episode_cursor=4,
-            platform_worker_index=0,
-            platform_worker_count=1,
-            state=state,
-        )
-
-    assert policy_batch_sha256(restored.environment.current_observation) == legacy_digest
-    assert restored.episode._platform_candidate_reachability_enabled is True
-
-    enabled_calls: list[bool] = []
-    original_build = CandidateBuilderV2.build
-
-    def record_filter(self, *args, **kwargs):
-        enabled_calls.append(kwargs["platform_reachability_filter_enabled"])
-        return original_build(self, *args, **kwargs)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(CandidateBuilderV2, "build", record_filter)
-        restored.episode.build_policy_observation(
-            restored.episode.sensor_state.observed,
-            restored.episode.current_pose,
-        )
-
-    assert enabled_calls == [True]
 
 
 @pytest.mark.parametrize("platform", ("WHEELED", "LEGGED", "HOPPER"))
@@ -1238,10 +1162,10 @@ def test_ground_option_rebuilds_candidates_only_at_final_policy_boundary(
     reference_count = 0
 
     class CountingCandidateBuilder:
-        def build(self, *args, **kwargs):
+        def build_from_primitive_graph(self, *args, **kwargs):
             nonlocal candidate_builds
             candidate_builds += 1
-            return original_builder.build(*args, **kwargs)
+            return original_builder.build_from_primitive_graph(*args, **kwargs)
 
     original_executor = worker.environment._reference_executor
 
