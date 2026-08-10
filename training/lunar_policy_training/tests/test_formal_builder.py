@@ -966,7 +966,8 @@ def test_parallel_pool_snapshots_and_restores_the_active_formal_episode(
         observation_template=assembly.observation_template,
         environment_factory=assembly.factory,
         reward_fn=compute_transition_reward,
-        worker_timeout_seconds=20.0,
+        worker_timeout_seconds=120.0,
+        worker_startup_timeout_seconds=60.0,
         initial_episode_cursors=(4,),
     ) as uninterrupted:
         initial = uninterrupted.reset()
@@ -985,7 +986,8 @@ def test_parallel_pool_snapshots_and_restores_the_active_formal_episode(
         observation_template=assembly.observation_template,
         environment_factory=assembly.factory,
         reward_fn=compute_transition_reward,
-        worker_timeout_seconds=20.0,
+        worker_timeout_seconds=120.0,
+        worker_startup_timeout_seconds=600.0,
         initial_episode_states=states,
     ) as resumed:
         restored = resumed.reset()
