@@ -50,6 +50,7 @@ struct PrimitiveReachabilitySnapshot final {
   std::string algorithm_id;
   std::string state_schema;
   std::string primitive_set_sha256;
+  std::string world_evidence_sha256;
   std::string graph_sha256;
   std::uint64_t revision{};
   std::size_t invalidated_edge_count{};

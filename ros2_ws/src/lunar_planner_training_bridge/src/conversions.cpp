@@ -135,4 +135,27 @@ PlannerBridge::ProjectHopperLandingEvidence(
   }
 }
 
+PrimitiveReachabilityResult TrainingPrimitiveReachabilityEngine::Update(
+    const TrainingPlanRequest& request,
+    const std::optional<double> maximum_action_distance_m) noexcept {
+  try {
+    return engine_.Update(
+        ToPlannerInput(request), maximum_action_distance_m);
+  } catch (const std::bad_alloc&) {
+    return PrimitiveReachabilityResult{
+        .snapshot = std::nullopt,
+        .reason_code = "REACHABILITY_RESOURCE_EXHAUSTED",
+    };
+  } catch (...) {
+    return PrimitiveReachabilityResult{
+        .snapshot = std::nullopt,
+        .reason_code = "BRIDGE_REQUEST_CONVERSION_FAILED",
+    };
+  }
+}
+
+void TrainingPrimitiveReachabilityEngine::Reset() noexcept {
+  engine_.Reset();
+}
+
 }  // namespace lunar::planning::training

@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -47,11 +48,160 @@ namespace {
   return false;
 }
 
+class EvidenceBytes final {
+ public:
+  void Byte(const std::uint8_t value) {
+    bytes_.push_back(value);
+  }
+
+  void Uint32(const std::uint32_t value) {
+    for (std::size_t index = 0U; index < 4U; ++index) {
+      Byte(static_cast<std::uint8_t>(value >> (index * 8U)));
+    }
+  }
+
+  void Uint64(const std::uint64_t value) {
+    for (std::size_t index = 0U; index < 8U; ++index) {
+      Byte(static_cast<std::uint8_t>(value >> (index * 8U)));
+    }
+  }
+
+  void Double(double value) {
+    if (value == 0.0) {
+      value = 0.0;
+    }
+    Uint64(std::bit_cast<std::uint64_t>(value));
+  }
+
+  void Float(float value) {
+    if (value == 0.0F) {
+      value = 0.0F;
+    }
+    Uint32(std::bit_cast<std::uint32_t>(value));
+  }
+
+  void String(const std::string& value) {
+    Uint64(static_cast<std::uint64_t>(value.size()));
+    bytes_.insert(bytes_.end(), value.begin(), value.end());
+  }
+
+  void Grid(const GridMap& map) {
+    String(map.frame_id);
+    Uint64(static_cast<std::uint64_t>(map.width));
+    Uint64(static_cast<std::uint64_t>(map.height));
+    Double(map.resolution_m);
+    Double(map.origin_m.x);
+    Double(map.origin_m.y);
+    Double(map.origin_m.z);
+    Uint64(static_cast<std::uint64_t>(map.layers.size()));
+    for (const auto& [name, layer] : map.layers) {
+      String(name);
+      Byte(static_cast<std::uint8_t>(layer.values.index()));
+      std::visit(
+          [this](const auto& values) {
+            Uint64(static_cast<std::uint64_t>(values.size()));
+            for (const auto value : values) {
+              using Value = std::remove_cvref_t<decltype(value)>;
+              if constexpr (std::is_same_v<Value, float>) {
+                Float(value);
+              } else if constexpr (std::is_same_v<Value, std::uint8_t>) {
+                Byte(value);
+              } else {
+                Uint32(value);
+              }
+            }
+          },
+          layer.values);
+    }
+  }
+
+  [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept {
+    return bytes_;
+  }
+
+ private:
+  std::vector<std::uint8_t> bytes_;
+};
+
+[[nodiscard]] std::string WorldEvidenceSha256(
+    const WorldSnapshot& world) {
+  EvidenceBytes bytes;
+  bytes.String("primitive-reachability-world-evidence/v1");
+  bytes.Grid(world.global_map);
+  bytes.Grid(world.local_map);
+  bytes.String(world.map_from_odom.parent_frame);
+  bytes.String(world.map_from_odom.child_frame);
+  bytes.Double(world.map_from_odom.translation_m.x);
+  bytes.Double(world.map_from_odom.translation_m.y);
+  bytes.Double(world.map_from_odom.translation_m.z);
+  bytes.Double(world.map_from_odom.rotation.w);
+  bytes.Double(world.map_from_odom.rotation.x);
+  bytes.Double(world.map_from_odom.rotation.y);
+  bytes.Double(world.map_from_odom.rotation.z);
+  return shared::Sha256Hex(bytes.bytes());
+}
+
 }  // namespace
 
 class PrimitiveReachabilityEngine::Impl final {
  public:
   std::uint64_t revision{};
+  bool has_previous{};
+  PlatformType previous_platform{};
+  std::string previous_algorithm_id;
+  std::string previous_state_schema;
+  std::string previous_primitive_set_sha256;
+  std::string previous_world_evidence_sha256;
+  std::size_t previous_edge_count{};
+
+  [[nodiscard]] PrimitiveReachabilityResult Publish(
+      PrimitiveReachabilityResult result,
+      const std::string& world_evidence_sha256) {
+    if (!result.ok()) {
+      return result;
+    }
+    PrimitiveReachabilitySnapshot& snapshot = *result.snapshot;
+    const bool compatible = has_previous &&
+        previous_platform == snapshot.platform_type &&
+        previous_algorithm_id == snapshot.algorithm_id &&
+        previous_state_schema == snapshot.state_schema &&
+        previous_primitive_set_sha256 == snapshot.primitive_set_sha256;
+    if (!compatible) {
+      revision = 1U;
+      snapshot.invalidated_edge_count = 0U;
+      snapshot.revalidated_edge_count = 0U;
+    } else {
+      ++revision;
+      if (previous_world_evidence_sha256 != world_evidence_sha256) {
+        snapshot.invalidated_edge_count = previous_edge_count;
+        snapshot.revalidated_edge_count = snapshot.edges.size();
+      } else {
+        snapshot.invalidated_edge_count = 0U;
+        snapshot.revalidated_edge_count = 0U;
+      }
+    }
+    snapshot.revision = revision;
+    snapshot.world_evidence_sha256 = world_evidence_sha256;
+    has_previous = true;
+    previous_platform = snapshot.platform_type;
+    previous_algorithm_id = snapshot.algorithm_id;
+    previous_state_schema = snapshot.state_schema;
+    previous_primitive_set_sha256 = snapshot.primitive_set_sha256;
+    previous_world_evidence_sha256 = world_evidence_sha256;
+    previous_edge_count = snapshot.edges.size();
+    return result;
+  }
+
+  void Reset() noexcept {
+    revision = 0U;
+    has_previous = false;
+    previous_platform = PlatformType{};
+    previous_algorithm_id.clear();
+    previous_state_schema.clear();
+    previous_primitive_set_sha256.clear();
+    previous_world_evidence_sha256.clear();
+    previous_edge_count = 0U;
+  }
 };
 
 PrimitiveReachabilityEngine::PrimitiveReachabilityEngine()
@@ -80,6 +230,8 @@ PrimitiveReachabilityResult PrimitiveReachabilityEngine::Update(
   if (!StateMatchesPlatform(input.current_state, platform)) {
     return Failure("PLATFORM_STATE_CAPABILITY_MISMATCH");
   }
+  const std::string world_evidence_sha256 =
+      WorldEvidenceSha256(input.world);
   const shared::MapSnapshotBuildResult map =
       shared::MapSnapshot::Create(input.world.global_map);
   if (!map.ok()) {
@@ -105,9 +257,9 @@ PrimitiveReachabilityResult PrimitiveReachabilityEngine::Update(
             state, *safe.projection,
             std::get<WheeledCapability>(input.capability), input.config,
             input.stop_token);
-    graph.revision = ++impl_->revision;
-    return shared::FinalizePrimitiveGraph(
-        std::move(graph), input.stop_token);
+    return impl_->Publish(
+        shared::FinalizePrimitiveGraph(std::move(graph), input.stop_token),
+        world_evidence_sha256);
   }
   if (platform == PlatformType::kLegged) {
     LeggedState state = std::get<LeggedState>(input.current_state);
@@ -123,9 +275,9 @@ PrimitiveReachabilityResult PrimitiveReachabilityEngine::Update(
             state, *safe.projection,
             std::get<LeggedCapability>(input.capability), input.config,
             input.stop_token);
-    graph.revision = ++impl_->revision;
-    return shared::FinalizePrimitiveGraph(
-        std::move(graph), input.stop_token);
+    return impl_->Publish(
+        shared::FinalizePrimitiveGraph(std::move(graph), input.stop_token),
+        world_evidence_sha256);
   }
   if (platform == PlatformType::kHopper) {
     const shared::MapSnapshotBuildResult local_map =
@@ -137,15 +289,15 @@ PrimitiveReachabilityResult PrimitiveReachabilityEngine::Update(
         hopper::BuildHopperPrimitiveGraph(
             input, map.snapshot, local_map.snapshot, *safe.projection,
             maximum_action_distance_m);
-    graph.revision = ++impl_->revision;
-    return shared::FinalizePrimitiveGraph(
-        std::move(graph), input.stop_token);
+    return impl_->Publish(
+        shared::FinalizePrimitiveGraph(std::move(graph), input.stop_token),
+        world_evidence_sha256);
   }
   return Failure("PRIMITIVE_REACHABILITY_PLATFORM_NOT_IMPLEMENTED");
 }
 
 void PrimitiveReachabilityEngine::Reset() noexcept {
-  impl_->revision = 0U;
+  impl_->Reset();
 }
 
 namespace shared {

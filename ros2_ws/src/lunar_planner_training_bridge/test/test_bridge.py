@@ -493,6 +493,148 @@ def test_bridge_projection_releases_gil(bridge, easy_request) -> None:
     assert counter[0] > before
 
 
+def test_primitive_reachability_engine_exposes_readonly_exact_arrays(
+    easy_request,
+) -> None:
+    request = easy_request("WHEELED")
+    engine = bridge_api.PrimitiveReachabilityEngine()
+
+    snapshot = engine.update(request, 30.0)
+
+    assert snapshot.platform_type == "WHEELED"
+    assert snapshot.algorithm_id == "cpp-wheel-motion-primitive-recoverable-graph/v1"
+    assert snapshot.state_schema == "wheel-lattice-state/v1"
+    assert snapshot.revision == 1
+    assert len(snapshot.primitive_set_sha256) == 64
+    assert len(snapshot.world_evidence_sha256) == 64
+    assert len(snapshot.graph_sha256) == 64
+    arrays = {
+        "state_ids": (np.uint64, (len(snapshot.state_ids),)),
+        "positions_m": (np.float64, (len(snapshot.state_ids), 3)),
+        "yaw_rad": (np.float64, (len(snapshot.state_ids),)),
+        "cells": (np.int32, (len(snapshot.state_ids), 2)),
+        "yaw_bin": (np.int32, (len(snapshot.state_ids),)),
+        "motion_mode": (np.int32, (len(snapshot.state_ids),)),
+        "body_z_m": (np.float64, (len(snapshot.state_ids), 2)),
+        "path_cost": (np.float64, (len(snapshot.state_ids),)),
+        "forward_reachable": (np.bool_, (len(snapshot.state_ids),)),
+        "returnable": (np.bool_, (len(snapshot.state_ids),)),
+        "observation_state": (np.bool_, (len(snapshot.state_ids),)),
+        "direct_successor": (np.bool_, (len(snapshot.state_ids),)),
+        "recoverable": (np.bool_, (len(snapshot.state_ids),)),
+        "edge_source_ids": (np.uint64, (len(snapshot.edge_source_ids),)),
+        "edge_target_ids": (np.uint64, (len(snapshot.edge_source_ids),)),
+        "edge_primitive_indices": (np.uint32, (len(snapshot.edge_source_ids),)),
+        "edge_cost": (np.float64, (len(snapshot.edge_source_ids),)),
+        "reachable": (
+            np.uint8,
+            (request.world.global_map.height, request.world.global_map.width),
+        ),
+    }
+    for name, (dtype, shape) in arrays.items():
+        values = getattr(snapshot, name)
+        assert values.dtype == dtype, name
+        assert values.shape == shape, name
+        assert values.flags.c_contiguous, name
+        assert not values.flags.writeable, name
+    assert len(snapshot.edge_primitive_ids) == len(snapshot.edge_source_ids)
+    np.testing.assert_array_equal(
+        snapshot.recoverable,
+        snapshot.forward_reachable & snapshot.returnable,
+    )
+
+    repeated = engine.update(request, None)
+    assert repeated.revision == 2
+    assert repeated.world_evidence_sha256 == snapshot.world_evidence_sha256
+    assert repeated.graph_sha256 == snapshot.graph_sha256
+    engine.reset()
+    reset = engine.update(request, 30.0)
+    assert reset.revision == 1
+
+
+def _set_map_byte(
+    grid: bridge_api.GridMap, layer_name: str, row: int, column: int, value: int
+) -> None:
+    layers = grid.layers
+    values = layers[layer_name].values
+    values[row * grid.width + column] = value
+    layers[layer_name] = bridge_api.GridLayer(values)
+    grid.layers = layers
+
+
+def test_primitive_reachability_engine_reports_content_change_revalidation(
+    easy_request,
+) -> None:
+    request = easy_request("WHEELED")
+    engine = bridge_api.PrimitiveReachabilityEngine()
+    baseline = engine.update(request, 30.0)
+    unchanged = engine.update(request, 30.0)
+    assert unchanged.invalidated_edge_count == 0
+    assert unchanged.revalidated_edge_count == 0
+
+    _set_map_byte(request.world.global_map, "obstacle", 3, 3, 1)
+    request.global_map_generation += 1
+    blocked = engine.update(request, 30.0)
+    assert blocked.world_evidence_sha256 != baseline.world_evidence_sha256
+    assert blocked.invalidated_edge_count > 0
+    assert len(blocked.state_ids) < len(baseline.state_ids)
+
+    newly_observed_request = easy_request("WHEELED")
+    _set_map_byte(newly_observed_request.world.global_map, "valid_mask", 3, 3, 0)
+    newly_observed_engine = bridge_api.PrimitiveReachabilityEngine()
+    unknown = newly_observed_engine.update(newly_observed_request, 30.0)
+    _set_map_byte(newly_observed_request.world.global_map, "valid_mask", 3, 3, 1)
+    newly_observed_request.global_map_generation += 1
+    observed = newly_observed_engine.update(newly_observed_request, 30.0)
+    assert observed.revalidated_edge_count > 0
+    assert len(observed.state_ids) > len(unknown.state_ids)
+
+
+def test_primitive_reachability_engine_resets_identity_on_contract_drift(
+    easy_request,
+) -> None:
+    engine = bridge_api.PrimitiveReachabilityEngine()
+    wheel_request = easy_request("WHEELED")
+    wheel = engine.update(wheel_request, 30.0)
+
+    changed_capability = _wheel_capability()
+    changed_primitives = changed_capability.motion_primitives
+    changed_primitives[0].relative_end_pose = _pose(2.0, 0.0, 0.0)
+    changed_capability.motion_primitives = changed_primitives
+    wheel_request.capability = changed_capability
+    capability_drift = engine.update(wheel_request, 30.0)
+
+    assert capability_drift.revision == 1
+    assert capability_drift.primitive_set_sha256 != wheel.primitive_set_sha256
+    assert capability_drift.invalidated_edge_count == 0
+    assert capability_drift.revalidated_edge_count == 0
+
+    legged_request = easy_request("LEGGED")
+    legged_state = bridge_api.LeggedState()
+    legged_state.body_pose = _pose(2.5, 3.5, 0.33)
+    legged_request.current_state = legged_state
+    legged = engine.update(legged_request, 30.0)
+    assert legged.platform_type == "LEGGED"
+    assert legged.revision == 1
+
+
+def test_primitive_reachability_engine_propagates_hard_failure_without_revision(
+    easy_request,
+) -> None:
+    request = easy_request("WHEELED")
+    engine = bridge_api.PrimitiveReachabilityEngine()
+    first = engine.update(request, 30.0)
+
+    with pytest.raises(
+        RuntimeError, match="PRIMITIVE_REACHABILITY_DISTANCE_INVALID"
+    ):
+        engine.update(request, 0.0)
+
+    after_failure = engine.update(request, 30.0)
+    assert first.revision == 1
+    assert after_failure.revision == 2
+
+
 def test_grid_layer_rejects_non_contiguous_numpy() -> None:
     """Would fail if a strided view crossed the zero-copy-sensitive boundary."""
     values = np.zeros((4, 4), dtype=np.float32)[:, ::2]

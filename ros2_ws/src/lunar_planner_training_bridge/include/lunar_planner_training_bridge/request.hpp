@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "lunar_planner_core/planner.hpp"
+#include "lunar_planner_core/primitive_reachability.hpp"
 #include "lunar_planner_core/reachability_projection.hpp"
 #include "lunar_planner_core/traversability_projection.hpp"
 
@@ -63,6 +64,17 @@ class PlannerBridge final {
 
  private:
   lunar::planning::Planner planner_;
+};
+
+class TrainingPrimitiveReachabilityEngine final {
+ public:
+  [[nodiscard]] lunar::planning::PrimitiveReachabilityResult Update(
+      const TrainingPlanRequest& request,
+      std::optional<double> maximum_action_distance_m) noexcept;
+  void Reset() noexcept;
+
+ private:
+  lunar::planning::PrimitiveReachabilityEngine engine_;
 };
 
 }  // namespace lunar::planning::training

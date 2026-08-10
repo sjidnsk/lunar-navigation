@@ -328,11 +328,11 @@ class TrainingPrimitiveReachabilityEngine final {
 - Python exposes immutable contiguous arrays for state IDs, positions, yaw, state fields, reachability flags, direct-successor flags, path costs, edge source/target IDs, and projected mask plus graph identity/diagnostics.
 - The engine compares world geometry/generation and per-tile content fingerprints. A changed tile invalidates cached accepted and rejected primitive edges whose swept AABB intersects it; unaffected edge certificates remain reusable. Forward/reverse labels are recomputed every revision.
 
-- [ ] **Step 1: Write bridge RED tests**
+- [x] **Step 1: Write bridge RED tests**
 
 Assert array shapes/dtypes and read-only ownership, deterministic repeated identity, no-change update with zero invalidations, a new obstacle with positive invalidation count and removed state, newly observed safe evidence with positive revalidation count and added state, platform/capability/schema drift reset, and hard failure propagation.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 BRIDGE_ROOT=/home/kai/CodexDownloads/lunar_navigation/primitive_reachability_v10/task5-bridge
@@ -348,7 +348,7 @@ colcon --log-base "$BRIDGE_ROOT/log-test" test --base-paths ros2_ws/src \
 colcon test-result --test-result-base "$BRIDGE_ROOT/build" --verbose
 ```
 
-- [ ] **Step 3: Implement bindings, run GREEN, and commit**
+- [x] **Step 3: Implement bindings, run GREEN, and commit**
 
 ```bash
 colcon --log-base "$BRIDGE_ROOT/log-build" build --merge-install \

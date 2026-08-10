@@ -7,7 +7,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <memory>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -165,6 +167,12 @@ template <typename Value>
       static_cast<py::ssize_t>(width),
   });
   std::copy(values.begin(), values.end(), result.mutable_data());
+  return result;
+}
+
+template <typename Value>
+[[nodiscard]] py::array_t<Value> ReadonlyArray(py::array_t<Value> result) {
+  result.attr("setflags")(false);
   return result;
 }
 
@@ -936,6 +944,258 @@ void BindProjection(py::module_ &module) {
                     &planning::HopperLandingEvidenceProjection::certified_count);
 }
 
+void BindPrimitiveReachability(py::module_& module) {
+  auto snapshot_class = py::class_<planning::PrimitiveReachabilitySnapshot>(
+      module, "PrimitiveReachabilitySnapshot")
+      .def_property_readonly(
+          "platform_type",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            return PlatformTypeName(self.platform_type);
+          })
+      .def_readonly("width", &planning::PrimitiveReachabilitySnapshot::width)
+      .def_readonly("height", &planning::PrimitiveReachabilitySnapshot::height)
+      .def_readonly(
+          "algorithm_id",
+          &planning::PrimitiveReachabilitySnapshot::algorithm_id)
+      .def_readonly(
+          "state_schema",
+          &planning::PrimitiveReachabilitySnapshot::state_schema)
+      .def_readonly(
+          "primitive_set_sha256",
+          &planning::PrimitiveReachabilitySnapshot::primitive_set_sha256)
+      .def_readonly(
+          "world_evidence_sha256",
+          &planning::PrimitiveReachabilitySnapshot::world_evidence_sha256)
+      .def_readonly(
+          "graph_sha256",
+          &planning::PrimitiveReachabilitySnapshot::graph_sha256)
+      .def_readonly(
+          "revision", &planning::PrimitiveReachabilitySnapshot::revision)
+      .def_readonly(
+          "invalidated_edge_count",
+          &planning::PrimitiveReachabilitySnapshot::invalidated_edge_count)
+      .def_readonly(
+          "revalidated_edge_count",
+          &planning::PrimitiveReachabilitySnapshot::revalidated_edge_count)
+      .def_property_readonly(
+          "state_ids",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            py::array_t<std::uint64_t> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.states.size())});
+            std::transform(
+                self.states.begin(), self.states.end(), result.mutable_data(),
+                [](const auto& state) { return state.state_id; });
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "positions_m",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            py::array_t<double> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.states.size()),
+                static_cast<py::ssize_t>(3)});
+            double* output = result.mutable_data();
+            for (std::size_t index = 0U; index < self.states.size(); ++index) {
+              output[index * 3U] = self.states[index].position_m.x;
+              output[index * 3U + 1U] = self.states[index].position_m.y;
+              output[index * 3U + 2U] = self.states[index].position_m.z;
+            }
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "yaw_rad",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            py::array_t<double> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.states.size())});
+            std::transform(
+                self.states.begin(), self.states.end(), result.mutable_data(),
+                [](const auto& state) { return state.yaw_rad; });
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "cells",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            py::array_t<std::int32_t> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.states.size()),
+                static_cast<py::ssize_t>(2)});
+            std::int32_t* output = result.mutable_data();
+            for (std::size_t index = 0U; index < self.states.size(); ++index) {
+              output[index * 2U] = self.states[index].cell_y;
+              output[index * 2U + 1U] = self.states[index].cell_x;
+            }
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "yaw_bin",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            py::array_t<std::int32_t> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.states.size())});
+            std::transform(
+                self.states.begin(), self.states.end(), result.mutable_data(),
+                [](const auto& state) { return state.yaw_bin; });
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "motion_mode",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            py::array_t<std::int32_t> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.states.size())});
+            std::transform(
+                self.states.begin(), self.states.end(), result.mutable_data(),
+                [](const auto& state) { return state.motion_mode; });
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "body_z_m",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            py::array_t<double> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.states.size()),
+                static_cast<py::ssize_t>(2)});
+            double* output = result.mutable_data();
+            for (std::size_t index = 0U; index < self.states.size(); ++index) {
+              output[index * 2U] = self.states[index].body_z_m.lower;
+              output[index * 2U + 1U] = self.states[index].body_z_m.upper;
+            }
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "path_cost",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            py::array_t<double> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.states.size())});
+            std::transform(
+                self.states.begin(), self.states.end(), result.mutable_data(),
+                [](const auto& state) { return state.path_cost; });
+            return ReadonlyArray(std::move(result));
+          });
+  const auto state_flag = [](
+                              const planning::PrimitiveReachabilitySnapshot& self,
+                              const auto predicate) {
+    py::array_t<bool> result(py::array::ShapeContainer{
+        static_cast<py::ssize_t>(self.states.size())});
+    std::transform(
+        self.states.begin(), self.states.end(), result.mutable_data(),
+        predicate);
+    return ReadonlyArray(std::move(result));
+  };
+  snapshot_class
+      .def_property_readonly(
+          "forward_reachable",
+          [state_flag](const planning::PrimitiveReachabilitySnapshot& self) {
+            return state_flag(self, [](const auto& state) {
+              return state.forward_reachable != 0U;
+            });
+          })
+      .def_property_readonly(
+          "returnable",
+          [state_flag](const planning::PrimitiveReachabilitySnapshot& self) {
+            return state_flag(self, [](const auto& state) {
+              return state.returnable != 0U;
+            });
+          })
+      .def_property_readonly(
+          "observation_state",
+          [state_flag](const planning::PrimitiveReachabilitySnapshot& self) {
+            return state_flag(self, [](const auto& state) {
+              return state.observation_state != 0U;
+            });
+          })
+      .def_property_readonly(
+          "direct_successor",
+          [state_flag](const planning::PrimitiveReachabilitySnapshot& self) {
+            return state_flag(self, [](const auto& state) {
+              return state.direct_successor != 0U;
+            });
+          })
+      .def_property_readonly(
+          "recoverable",
+          [state_flag](const planning::PrimitiveReachabilitySnapshot& self) {
+            return state_flag(self, [](const auto& state) {
+              return state.forward_reachable != 0U && state.returnable != 0U;
+            });
+          })
+      .def_property_readonly(
+          "edge_source_ids",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            py::array_t<std::uint64_t> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.edges.size())});
+            std::transform(
+                self.edges.begin(), self.edges.end(), result.mutable_data(),
+                [](const auto& edge) { return edge.source_state_id; });
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "edge_target_ids",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            py::array_t<std::uint64_t> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.edges.size())});
+            std::transform(
+                self.edges.begin(), self.edges.end(), result.mutable_data(),
+                [](const auto& edge) { return edge.target_state_id; });
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "edge_primitive_indices",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            py::array_t<std::uint32_t> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.edges.size())});
+            std::transform(
+                self.edges.begin(), self.edges.end(), result.mutable_data(),
+                [](const auto& edge) { return edge.primitive_index; });
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "edge_primitive_ids",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            std::vector<std::string> result;
+            result.reserve(self.edges.size());
+            std::transform(
+                self.edges.begin(), self.edges.end(),
+                std::back_inserter(result),
+                [](const auto& edge) { return edge.primitive_id; });
+            return result;
+          })
+      .def_property_readonly(
+          "edge_cost",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            py::array_t<double> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.edges.size())});
+            std::transform(
+                self.edges.begin(), self.edges.end(), result.mutable_data(),
+                [](const auto& edge) { return edge.cost; });
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "reachable",
+          [](const planning::PrimitiveReachabilitySnapshot& self) {
+            return ReadonlyArray(
+                CopyArray2d(self.reachable, self.height, self.width));
+          });
+
+  py::class_<training::TrainingPrimitiveReachabilityEngine>(
+      module, "PrimitiveReachabilityEngine")
+      .def(py::init<>())
+      .def(
+          "update",
+          [](training::TrainingPrimitiveReachabilityEngine& self,
+             const training::TrainingPlanRequest& request,
+             const std::optional<double> maximum_action_distance_m) {
+            planning::PrimitiveReachabilityResult result;
+            {
+              py::gil_scoped_release release;
+              result = self.Update(request, maximum_action_distance_m);
+            }
+            if (!result.ok()) {
+              throw std::runtime_error(result.reason_code);
+            }
+            return std::move(*result.snapshot);
+          },
+          py::arg("request"),
+          py::arg("maximum_action_distance_m") = std::nullopt)
+      .def(
+          "reset", &training::TrainingPrimitiveReachabilityEngine::Reset,
+          py::call_guard<py::gil_scoped_release>());
+}
+
 void BindVisibility(py::module_ &module) {
   py::class_<training::VisibilityKernel>(module, "VisibilityKernel")
       .def(py::init<double, double>(), py::arg("resolution_m"),
@@ -1232,4 +1492,5 @@ PYBIND11_MODULE(_lunar_planner_training_bridge, module) {
   BindProjection(module);
   BindVisibility(module);
   BindRequest(module);
+  BindPrimitiveReachability(module);
 }
