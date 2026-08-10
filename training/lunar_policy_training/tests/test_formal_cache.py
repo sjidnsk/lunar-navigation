@@ -246,6 +246,61 @@ def test_hopper_landing_targets_exclude_nodata_cells_in_row_major_order() -> Non
     assert targets.flags.c_contiguous
 
 
+def test_truth_hopper_graph_receives_streamed_detail_landing_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lunar_planner_training_bridge as bridge_api
+
+    request = object()
+    evidence = object()
+    calls: list[tuple[object, object, object]] = []
+    reachable = np.zeros((256, 256), dtype=np.uint8)
+    reachable[128, 128] = 1
+    output = SimpleNamespace(
+        platform_type="HOPPER",
+        reachable=reachable,
+        recoverable=np.asarray([True], dtype=np.bool_),
+        observation_state=np.asarray([True], dtype=np.bool_),
+        positions_m=np.asarray([[514.0, 514.0, 1.0]], dtype=np.float64),
+        path_cost=np.asarray([0.0], dtype=np.float64),
+        yaw_rad=np.asarray([0.0], dtype=np.float64),
+        motion_mode=np.asarray([0], dtype=np.int32),
+        body_z_m=np.asarray([[0.0, 0.0]], dtype=np.float64),
+    )
+
+    class Engine:
+        def update(self, *args: object) -> object:
+            calls.append(args)
+            return output
+
+    monkeypatch.setattr(bridge_api, "PrimitiveReachabilityEngine", Engine)
+    monkeypatch.setattr(
+        formal_cache_module,
+        "_projection_request",
+        lambda *_args, **_kwargs: request,
+    )
+    monkeypatch.setattr(
+        formal_cache_module,
+        "_hopper_landing_evidence",
+        lambda **_kwargs: evidence,
+    )
+
+    result, _, positions, start = (
+        formal_cache_module._build_truth_primitive_reachability(
+            platform=SimpleNamespace(platform_type="HOPPER"),
+            scene=object(),
+            projected=object(),
+            start_cell=(128, 128),
+            bridge=object(),
+        )
+    )
+
+    assert calls == [(request, None, evidence)]
+    assert result is output
+    np.testing.assert_array_equal(positions, output.positions_m)
+    assert start.position_m == (514.0, 514.0, 1.0)
+
+
 def test_truth_graph_start_failure_marks_only_that_platform_ineligible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

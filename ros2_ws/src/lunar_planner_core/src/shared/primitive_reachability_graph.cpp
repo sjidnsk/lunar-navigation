@@ -129,6 +129,25 @@ class EvidenceBytes final {
     }
   }
 
+  void HopperLandings(const HopperLandingEvidenceGrid& evidence) {
+    Uint64(static_cast<std::uint64_t>(evidence.width));
+    Uint64(static_cast<std::uint64_t>(evidence.height));
+    String(evidence.algorithm_id);
+    Uint64(static_cast<std::uint64_t>(evidence.landings.size()));
+    for (const HopperLandingEvidence& landing : evidence.landings) {
+      Byte(landing.certified);
+      Double(landing.aim_position_on_surface_m.x);
+      Double(landing.aim_position_on_surface_m.y);
+      Double(landing.aim_position_on_surface_m.z);
+      for (const Vec3 vertex : landing.boundary_m) {
+        Double(vertex.x);
+        Double(vertex.y);
+        Double(vertex.z);
+      }
+      Double(landing.area_m2);
+    }
+  }
+
   [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept {
     return bytes_;
   }
@@ -138,9 +157,13 @@ class EvidenceBytes final {
 };
 
 [[nodiscard]] std::string WorldEvidenceSha256(
-    const WorldSnapshot& world) {
+    const WorldSnapshot& world,
+    const HopperLandingEvidenceGrid* const hopper_landing_evidence) {
   EvidenceBytes bytes;
-  bytes.String("primitive-reachability-world-evidence/v1");
+  bytes.String(
+      hopper_landing_evidence == nullptr
+          ? "primitive-reachability-world-evidence/v1"
+          : "primitive-reachability-world-evidence/v2");
   bytes.Grid(world.global_map);
   bytes.Grid(world.local_map);
   bytes.String(world.map_from_odom.parent_frame);
@@ -152,6 +175,9 @@ class EvidenceBytes final {
   bytes.Double(world.map_from_odom.rotation.x);
   bytes.Double(world.map_from_odom.rotation.y);
   bytes.Double(world.map_from_odom.rotation.z);
+  if (hopper_landing_evidence != nullptr) {
+    bytes.HopperLandings(*hopper_landing_evidence);
+  }
   return shared::Sha256Hex(bytes.bytes());
 }
 
@@ -232,6 +258,21 @@ PrimitiveReachabilityEngine& PrimitiveReachabilityEngine::operator=(
 PrimitiveReachabilityResult PrimitiveReachabilityEngine::Update(
     const PlannerInput& input,
     const std::optional<double> maximum_action_distance_m) {
+  return UpdateImpl(input, maximum_action_distance_m, nullptr);
+}
+
+PrimitiveReachabilityResult PrimitiveReachabilityEngine::Update(
+    const PlannerInput& input,
+    const std::optional<double> maximum_action_distance_m,
+    const HopperLandingEvidenceGrid& hopper_landing_evidence) {
+  return UpdateImpl(
+      input, maximum_action_distance_m, &hopper_landing_evidence);
+}
+
+PrimitiveReachabilityResult PrimitiveReachabilityEngine::UpdateImpl(
+    const PlannerInput& input,
+    const std::optional<double> maximum_action_distance_m,
+    const HopperLandingEvidenceGrid* const hopper_landing_evidence) {
   if (input.stop_token.stop_requested()) {
     return Failure("REQUEST_CANCELED");
   }
@@ -244,8 +285,12 @@ PrimitiveReachabilityResult PrimitiveReachabilityEngine::Update(
   if (!StateMatchesPlatform(input.current_state, platform)) {
     return Failure("PLATFORM_STATE_CAPABILITY_MISMATCH");
   }
+  if (hopper_landing_evidence != nullptr &&
+      platform != PlatformType::kHopper) {
+    return Failure("HOPPER_LANDING_EVIDENCE_PLATFORM_INVALID");
+  }
   const std::string world_evidence_sha256 =
-      WorldEvidenceSha256(input.world);
+      WorldEvidenceSha256(input.world, hopper_landing_evidence);
   const shared::MapSnapshotBuildResult map =
       shared::MapSnapshot::Create(input.world.global_map);
   if (!map.ok()) {
@@ -333,7 +378,7 @@ PrimitiveReachabilityResult PrimitiveReachabilityEngine::Update(
     shared::PrimitiveGraphBuildResult graph =
         hopper::BuildHopperPrimitiveGraph(
             input, map.snapshot, local_map.snapshot, *safe.projection,
-            maximum_action_distance_m);
+            maximum_action_distance_m, hopper_landing_evidence);
     return impl_->Publish(
         shared::FinalizePrimitiveGraph(std::move(graph), input.stop_token),
         world_evidence_sha256);

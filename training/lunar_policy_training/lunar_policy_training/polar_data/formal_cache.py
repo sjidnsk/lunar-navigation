@@ -1806,7 +1806,18 @@ def _build_truth_primitive_reachability(
         start_cell=start_cell,
         compose_global_primitives=True,
     )
-    output = bridge_api.PrimitiveReachabilityEngine().update(request, None)
+    engine = bridge_api.PrimitiveReachabilityEngine()
+    if platform.platform_type == "HOPPER":
+        landing_evidence = _hopper_landing_evidence(
+            platform=platform,
+            scene=scene,
+            projected=projected,
+            start_cell=start_cell,
+            bridge=bridge,
+        )
+        output = engine.update(request, None, landing_evidence)
+    else:
+        output = engine.update(request, None)
     if output.platform_type != platform.platform_type:
         raise FormalCacheError("primitive graph platform identity differs")
     reachable = np.ascontiguousarray(

@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "lunar_planner_core/reachability_projection.hpp"
 #include "lunar_planner_core/types/planner_io.hpp"
 
 namespace lunar::planning {
@@ -80,9 +81,18 @@ class PrimitiveReachabilityEngine final {
   [[nodiscard]] PrimitiveReachabilityResult Update(
       const PlannerInput& input,
       std::optional<double> maximum_action_distance_m);
+  [[nodiscard]] PrimitiveReachabilityResult Update(
+      const PlannerInput& input,
+      std::optional<double> maximum_action_distance_m,
+      const HopperLandingEvidenceGrid& hopper_landing_evidence);
   void Reset() noexcept;
 
  private:
+  [[nodiscard]] PrimitiveReachabilityResult UpdateImpl(
+      const PlannerInput& input,
+      std::optional<double> maximum_action_distance_m,
+      const HopperLandingEvidenceGrid* hopper_landing_evidence);
+
   class Impl;
   std::unique_ptr<Impl> impl_;
 };

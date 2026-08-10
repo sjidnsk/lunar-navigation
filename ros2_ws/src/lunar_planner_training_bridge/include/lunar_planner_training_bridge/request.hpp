@@ -71,6 +71,11 @@ class TrainingPrimitiveReachabilityEngine final {
   [[nodiscard]] lunar::planning::PrimitiveReachabilityResult Update(
       const TrainingPlanRequest& request,
       std::optional<double> maximum_action_distance_m) noexcept;
+  [[nodiscard]] lunar::planning::PrimitiveReachabilityResult Update(
+      const TrainingPlanRequest& request,
+      std::optional<double> maximum_action_distance_m,
+      const lunar::planning::HopperLandingEvidenceGrid&
+          hopper_landing_evidence) noexcept;
   void Reset() noexcept;
 
  private:

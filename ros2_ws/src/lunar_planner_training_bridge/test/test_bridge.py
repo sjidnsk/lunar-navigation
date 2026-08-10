@@ -426,6 +426,9 @@ def test_bridge_streams_hopper_landing_evidence_into_reachability(
     direct = bridge.project_direct_hopper_reachability(
         request, 2.0, evidence
     )
+    primitive = bridge_api.PrimitiveReachabilityEngine().update(
+        request, 2.0, evidence
+    )
 
     assert projected.algorithm_id == "cpp-hopper-detail-landing-regions/v1"
     assert projected.candidates_evaluated == targets.shape[0]
@@ -442,6 +445,8 @@ def test_bridge_streams_hopper_landing_evidence_into_reachability(
     assert direct.reachable.shape == external.reachable.shape
     assert direct.reachable.dtype == np.uint8
     assert direct.reachable.flags.c_contiguous
+    assert primitive.platform_type == "HOPPER"
+    assert primitive.reachable.any()
 
     with pytest.raises(TypeError, match="bool"):
         bridge_api.HopperLandingEvidenceGrid(

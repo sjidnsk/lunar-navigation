@@ -20,6 +20,7 @@
 #include "hopper/ballistic_kinematics.hpp"
 #include "hopper/flight_tube_certifier.hpp"
 #include "hopper/hop_certifier.hpp"
+#include "hopper/landing_evidence.hpp"
 #include "hopper/landing_region.hpp"
 
 namespace lunar::planning::hopper {
@@ -302,7 +303,8 @@ shared::PrimitiveGraphBuildResult BuildHopperPrimitiveGraph(
     const std::shared_ptr<const shared::MapSnapshot>& global_map,
     const std::shared_ptr<const shared::MapSnapshot>& local_map,
     const shared::SafeProjection& safe,
-    const std::optional<double> maximum_edge_distance_m) try {
+    const std::optional<double> maximum_edge_distance_m,
+    const HopperLandingEvidenceGrid* const landing_evidence) try {
   if (input.stop_token.stop_requested()) {
     return Failure("REQUEST_CANCELED");
   }
@@ -328,25 +330,34 @@ shared::PrimitiveGraphBuildResult BuildHopperPrimitiveGraph(
     return Failure("HOPPER_START_NOT_SAFE");
   }
 
-  std::vector<std::optional<CertifiedLandingRegion>> landings(
-      global_map->cell_count());
-  for (std::size_t index = 0U; index < landings.size(); ++index) {
-    if (input.stop_token.stop_requested()) {
-      return Failure("REQUEST_CANCELED");
+  std::vector<std::optional<CertifiedLandingRegion>> landings;
+  if (landing_evidence != nullptr) {
+    ExternalLandingBuildResult built =
+        BuildExternalLandings(*global_map, *landing_evidence);
+    if (!built.ok()) {
+      return Failure(std::move(built.reason_code));
     }
-    const shared::GridCell cell{
-        .x = static_cast<std::int32_t>(index % global_map->width()),
-        .y = static_cast<std::int32_t>(index / global_map->width()),
-    };
-    if (!safe.HardFeasible(cell)) {
-      continue;
-    }
-    std::string fatal_reason;
-    landings[index] = CertifiedLandingAtPosition(
-        global_map->CellCenter(cell), *local_map, input, *capability,
-        fatal_reason);
-    if (!fatal_reason.empty()) {
-      return Failure(std::move(fatal_reason));
+    landings = std::move(*built.landings);
+  } else {
+    landings.resize(global_map->cell_count());
+    for (std::size_t index = 0U; index < landings.size(); ++index) {
+      if (input.stop_token.stop_requested()) {
+        return Failure("REQUEST_CANCELED");
+      }
+      const shared::GridCell cell{
+          .x = static_cast<std::int32_t>(index % global_map->width()),
+          .y = static_cast<std::int32_t>(index / global_map->width()),
+      };
+      if (!safe.HardFeasible(cell)) {
+        continue;
+      }
+      std::string fatal_reason;
+      landings[index] = CertifiedLandingAtPosition(
+          global_map->CellCenter(cell), *local_map, input, *capability,
+          fatal_reason);
+      if (!fatal_reason.empty()) {
+        return Failure(std::move(fatal_reason));
+      }
     }
   }
   const std::size_t start_grid_index = global_map->Index(*start_cell);

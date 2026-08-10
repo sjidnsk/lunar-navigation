@@ -1192,6 +1192,25 @@ void BindPrimitiveReachability(py::module_& module) {
           py::arg("request"),
           py::arg("maximum_action_distance_m") = std::nullopt)
       .def(
+          "update",
+          [](training::TrainingPrimitiveReachabilityEngine& self,
+             const training::TrainingPlanRequest& request,
+             const std::optional<double> maximum_action_distance_m,
+             const planning::HopperLandingEvidenceGrid& evidence) {
+            planning::PrimitiveReachabilityResult result;
+            {
+              py::gil_scoped_release release;
+              result = self.Update(
+                  request, maximum_action_distance_m, evidence);
+            }
+            if (!result.ok()) {
+              throw std::runtime_error(result.reason_code);
+            }
+            return std::move(*result.snapshot);
+          },
+          py::arg("request"), py::arg("maximum_action_distance_m"),
+          py::arg("hopper_landing_evidence"))
+      .def(
           "reset", &training::TrainingPrimitiveReachabilityEngine::Reset,
           py::call_guard<py::gil_scoped_release>());
 }
