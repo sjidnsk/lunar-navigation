@@ -343,6 +343,17 @@ class MultiResolutionScene:
         )
 
 
+@dataclass(frozen=True)
+class SceneTileWindow:
+    """One bounded square truth window plus the requested tile crop."""
+
+    projected: ProjectedScene
+    start_row: int
+    start_column: int
+    tile_rows: slice
+    tile_columns: slice
+
+
 class SceneTileProvider:
     """Bounded content-addressed LRU of fixed-coordinate detail tiles."""
 
@@ -410,6 +421,52 @@ class SceneTileProvider:
         while len(self._cache) > self.capacity:
             self._cache.popitem(last=False)
         return projected
+
+    def iter_tile_indices(self) -> tuple[tuple[int, int], ...]:
+        """Return the frozen row-major tile order used by cache materialization."""
+        return tuple(
+            (row, column)
+            for row in range(self.tiles_per_axis)
+            for column in range(self.tiles_per_axis)
+        )
+
+    def tile_with_halo(
+        self,
+        tile_row: int,
+        tile_column: int,
+        *,
+        halo_cells: int,
+    ) -> SceneTileWindow:
+        """Read one tile with a bounded terrain-neighbor halo and exact crop."""
+        if type(halo_cells) is not int or halo_cells < 0:
+            raise ValueError("tile halo must be a non-negative integer")
+        if not (
+            0 <= tile_row < self.tiles_per_axis
+            and 0 <= tile_column < self.tiles_per_axis
+        ):
+            raise ValueError("tile index lies outside the scene")
+        tile_cells = self.tile_geometry.cells
+        total = self.detail_cells_per_axis
+        window_cells = min(total, tile_cells + 2 * halo_cells)
+        tile_start_row = tile_row * tile_cells
+        tile_start_column = tile_column * tile_cells
+        start_row = min(
+            max(tile_start_row - halo_cells, 0), total - window_cells
+        )
+        start_column = min(
+            max(tile_start_column - halo_cells, 0), total - window_cells
+        )
+        row_offset = tile_start_row - start_row
+        column_offset = tile_start_column - start_column
+        return SceneTileWindow(
+            projected=self.read_window(
+                start_row, start_column, cells=window_cells
+            ),
+            start_row=start_row,
+            start_column=start_column,
+            tile_rows=slice(row_offset, row_offset + tile_cells),
+            tile_columns=slice(column_offset, column_offset + tile_cells),
+        )
 
     def read_window(
         self, start_row: int, start_column: int, *, cells: int
@@ -504,6 +561,7 @@ __all__ = [
     "MultiResolutionScene",
     "ProjectedHazards",
     "ProjectedScene",
+    "SceneTileWindow",
     "SceneTileProvider",
     "project_vector_scene",
 ]

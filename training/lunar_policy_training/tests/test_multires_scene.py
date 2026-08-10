@@ -3,6 +3,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from lunar_policy_training.environment.coverability import (
+    build_streamed_detail_coverability,
+    unpack_detail_mask,
+)
 from lunar_policy_training.polar_data.hazards import (
     FORMAL_GENERATOR_VERSION,
     generate_vector_hazard_scene,
@@ -232,6 +236,112 @@ def test_tile_provider_is_bounded_and_regeneration_is_exact() -> None:
         first.physical_obstacle_ratio,
         regenerated.physical_obstacle_ratio,
     )
+
+
+def test_tile_halo_preserves_exact_tile_at_both_scene_boundaries() -> None:
+    geometry = GridGeometry(size_m=16.0, resolution_m=1.0, cells=16)
+    canvas = MapCanvas("c" * 64, (0.0, 0.0, 16.0, 16.0), geometry)
+    elevation = np.arange(256, dtype=np.float32).reshape(16, 16)
+    vector = generate_vector_hazard_scene(
+        canvas.window_sha256,
+        408006,
+        canvas=canvas,
+        rock_count=0,
+        crater_count=0,
+        no_go_count=0,
+    )
+    scene = MultiResolutionScene(
+        canvas, elevation, np.ones((16, 16), bool), vector
+    )
+    tile_geometry = GridGeometry(size_m=8.0, resolution_m=1.0, cells=8)
+    provider = SceneTileProvider(scene, tile_geometry=tile_geometry, capacity=1)
+
+    northwest = provider.tile_with_halo(0, 0, halo_cells=1)
+    southeast = provider.tile_with_halo(1, 1, halo_cells=1)
+
+    assert provider.iter_tile_indices() == ((0, 0), (0, 1), (1, 0), (1, 1))
+    assert northwest.projected.elevation_m.shape == (10, 10)
+    assert southeast.projected.elevation_m.shape == (10, 10)
+    np.testing.assert_array_equal(
+        northwest.projected.elevation_m[
+            northwest.tile_rows, northwest.tile_columns
+        ],
+        provider.tile(0, 0).elevation_m,
+    )
+    np.testing.assert_array_equal(
+        southeast.projected.elevation_m[
+            southeast.tile_rows, southeast.tile_columns
+        ],
+        provider.tile(1, 1).elevation_m,
+    )
+    assert provider.cache_size == 1
+
+
+def test_streamed_coverability_matches_exact_pose_center_visibility() -> None:
+    canvas = MapCanvas(
+        "d" * 64,
+        (0.0, 0.0, 16.0, 16.0),
+        GridGeometry(size_m=16.0, resolution_m=4.0, cells=4),
+    )
+    vector = generate_vector_hazard_scene(
+        canvas.window_sha256,
+        408007,
+        canvas=canvas,
+        rock_count=0,
+        crater_count=0,
+        no_go_count=0,
+    )
+    scene = MultiResolutionScene(
+        canvas,
+        np.zeros((4, 4), dtype=np.float32),
+        np.ones((4, 4), dtype=np.bool_),
+        vector,
+    )
+    tile_geometry = GridGeometry(size_m=8.0, resolution_m=1.0, cells=8)
+    reachable = np.zeros((4, 4), dtype=np.bool_)
+    reachable[1, 1] = True
+
+    def intrinsic(projected) -> np.ndarray:
+        return np.ones(projected.elevation_m.shape, dtype=np.bool_)
+
+    def reveal(
+        truth_obstacle_ratio: np.ndarray,
+        pose_cell: tuple[int, int],
+    ) -> np.ndarray:
+        rows, columns = np.indices(truth_obstacle_ratio.shape)
+        return np.ascontiguousarray(
+            (rows - pose_cell[0]) ** 2 + (columns - pose_cell[1]) ** 2
+            <= 3**2,
+            dtype=np.bool_,
+        )
+
+    def build():
+        return build_streamed_detail_coverability(
+            tile_provider=SceneTileProvider(
+                scene, tile_geometry=tile_geometry, capacity=1
+            ),
+            inside_mission_roi=np.ones((4, 4), dtype=np.bool_),
+            reachable_pose_mask=reachable,
+            intrinsic_terrain_feasible=intrinsic,
+            reveal_from_pose=reveal,
+        )
+
+    first = build()
+    second = build()
+    expected = np.zeros((16, 16), dtype=np.bool_)
+    rows, columns = np.indices(expected.shape)
+    expected |= (rows - 6) ** 2 + (columns - 6) ** 2 <= 3**2
+
+    assert first.detail_shape == (16, 16)
+    assert first.mission_target_detail_cell_count == 256
+    assert first.coverable_detail_cell_count == int(expected.sum())
+    np.testing.assert_array_equal(
+        unpack_detail_mask(first.coverable_detail_bits, first.detail_shape),
+        expected,
+    )
+    np.testing.assert_array_equal(first.coverable_detail_bits, second.coverable_detail_bits)
+    np.testing.assert_array_equal(first.coverable_ratio, second.coverable_ratio)
+    assert first.coverable_mask_sha256 == second.coverable_mask_sha256
 
 
 def test_projection_rejects_a_target_grid_not_aligned_to_scene_origin() -> None:

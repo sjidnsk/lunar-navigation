@@ -20,6 +20,10 @@ from ..environment.formal_start_qualification import (
     FORMAL_BOUNDARY_MARGIN_CELLS,
     qualify_initial_start_cell,
 )
+from ..environment.coverability import (
+    StreamedDetailCoverability,
+    build_streamed_detail_coverability,
+)
 from ..reward import reward_weights_sha256
 from ..training_semantics import training_semantics_sha256
 from .hazards import (
@@ -29,7 +33,11 @@ from .hazards import (
     VectorHazardScene,
     generate_vector_hazard_scene,
 )
-from .multires_scene import GENERATOR_SHA256, MultiResolutionScene
+from .multires_scene import (
+    GENERATOR_SHA256,
+    MultiResolutionScene,
+    SceneTileProvider,
+)
 from .raster import MapCanvas, load_polar_window
 from .scenario_manifest import (
     build_scenario_manifest_document,
@@ -1056,11 +1064,17 @@ def _projection_request(
     valid_indices = np.argwhere(projected.valid_mask)
     if valid_indices.size == 0:
         raise FormalCacheError("scene has no valid source elevation")
-    center = np.asarray([127.5, 127.5])
+    projection_canvas = projected.canvas
+    center = np.asarray(
+        [
+            (projection_canvas.geometry.cells - 1) / 2.0,
+            (projection_canvas.geometry.cells - 1) / 2.0,
+        ]
+    )
     row, column = valid_indices[
         int(np.argmin(np.sum((valid_indices - center) ** 2, axis=1)))
     ]
-    x_m, y_m = scene.base_canvas.grid_center_world(int(row), int(column))
+    x_m, y_m = projection_canvas.grid_center_world(int(row), int(column))
     z_m = float(projected.elevation_m[row, column])
     request = bridge_api.TrainingPlanRequest()
     request.request_id = f"formal-cache/{scene.scene_id}/{platform.platform_type}"
@@ -1091,7 +1105,7 @@ def _projection_request(
     request.goal.target = goal
     apply_goal_theta(request.goal, platform.platform_type, 0.0)
     map_arguments = {
-        "canvas": scene.base_canvas,
+        "canvas": projection_canvas,
         "elevation_m": projected.elevation_m,
         "valid_mask": projected.valid_mask,
         "obstacle_ratio": projected.physical_obstacle_ratio,
@@ -1107,13 +1121,65 @@ def _projection_request(
     request.world.map_from_odom.parent_frame = "map"
     request.world.map_from_odom.child_frame = "odom"
     request.world.map_from_odom.stamp.nanoseconds_since_epoch = 1_000_000_000
-    resolution = scene.base_canvas.geometry.resolution_m
+    resolution = projection_canvas.geometry.resolution_m
     request.config.global_map.base_resolution_m = resolution
     request.config.wheel.xy_resolution_m = resolution
     request.config.wheel.yaw_bin_count = 64
     request.config.legged.xy_resolution_m = resolution
     request.config.legged.yaw_bin_count = 64
     return request
+
+
+def _detail_intrinsic_projection(
+    *,
+    platform: FrozenPlatformCapability,
+    scene: MultiResolutionScene,
+    projected: object,
+    bridge: object,
+) -> np.ndarray:
+    output = bridge.project_traversability(
+        _projection_request(platform, scene, projected)
+    )
+    intrinsic = np.ascontiguousarray(
+        np.flipud(output.intrinsic_feasible).astype(np.bool_)
+    )
+    if intrinsic.shape != projected.valid_mask.shape:
+        raise FormalCacheError("detail intrinsic projection geometry differs")
+    return intrinsic
+
+
+def _build_platform_detail_coverability(
+    *,
+    platform: FrozenPlatformCapability,
+    scene: MultiResolutionScene,
+    mission_roi: np.ndarray,
+    reachable_pose_mask: np.ndarray,
+    bridge: object,
+) -> StreamedDetailCoverability:
+    from ..environment.visibility import NativeVisibilityEstimator, SensorGeometry
+
+    provider = SceneTileProvider(scene, capacity=1)
+    observation = platform.observation_capability
+    estimator = NativeVisibilityEstimator(
+        SensorGeometry(observation.sensor_range_m, observation.sensor_fov_rad),
+        resolution_m=provider.tile_geometry.resolution_m,
+    )
+    return build_streamed_detail_coverability(
+        tile_provider=provider,
+        inside_mission_roi=np.ascontiguousarray(mission_roi, dtype=np.bool_),
+        reachable_pose_mask=np.ascontiguousarray(
+            reachable_pose_mask, dtype=np.bool_
+        ),
+        intrinsic_terrain_feasible=lambda projected: (
+            _detail_intrinsic_projection(
+                platform=platform,
+                scene=scene,
+                projected=projected,
+                bridge=bridge,
+            )
+        ),
+        reveal_from_pose=estimator.reveal_from_pose,
+    )
 
 
 def _static_scene_data(

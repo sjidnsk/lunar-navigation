@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 
 from lunar_policy_training.environment.coverability import (
+    build_coverable_detail_mask,
+    build_mission_target_detail_mask,
     CoverabilityError,
     IneligibleReason,
     PlatformCoverability,
@@ -177,3 +179,95 @@ def test_platform_coverability_rejects_eligibility_that_disagrees_with_gates() -
             eligible=False,
             ineligible_reason=IneligibleReason.UNSAFE_START,
         )
+
+
+def test_mission_target_excludes_obstacle_forbidden_invalid_and_intrinsic_faults() -> None:
+    """Would fail if observed evidence and success-target semantics were conflated."""
+    inside_roi = np.ones((3, 4), dtype=np.bool_)
+    valid = np.ones((3, 4), dtype=np.bool_)
+    forbidden = np.zeros((3, 4), dtype=np.float32)
+    obstacle = np.zeros((3, 4), dtype=np.float32)
+    intrinsic = np.ones((3, 4), dtype=np.bool_)
+    inside_roi[0, 0] = False
+    valid[0, 1] = False
+    forbidden[0, 2] = 0.01
+    obstacle[0, 3] = 0.01
+    intrinsic[1, 0] = False
+
+    target = build_mission_target_detail_mask(
+        inside_mission_roi=inside_roi,
+        detail_valid=valid,
+        forbidden_ratio=forbidden,
+        physical_obstacle_ratio=obstacle,
+        intrinsic_terrain_feasible=intrinsic,
+    )
+
+    assert target.dtype == np.bool_
+    assert target.flags.c_contiguous
+    assert not target[0].any()
+    assert not target[1, 0]
+    assert target[1, 1:].all()
+    assert target[2].all()
+
+
+def test_coverable_union_keeps_visible_nonoccupiable_cell_and_excludes_island() -> None:
+    """Would fail if coverability meant occupiable cells instead of visible targets."""
+    target = np.ones((6, 6), dtype=np.bool_)
+    reachable = np.zeros((3, 3), dtype=np.bool_)
+    reachable[0, 0] = True
+    visible = np.zeros((6, 6), dtype=np.bool_)
+    visible[:4, :4] = True
+    visible[2, 2] = True  # target need not itself be a reachable pose
+    visible[5, 5] = False  # enclosed/invisible free island
+    calls: list[tuple[int, int]] = []
+
+    def reveal(
+        truth_obstacle_ratio: np.ndarray,
+        pose_cell: tuple[int, int],
+    ) -> np.ndarray:
+        assert truth_obstacle_ratio.shape == target.shape
+        calls.append(pose_cell)
+        return visible.copy()
+
+    result = build_coverable_detail_mask(
+        mission_target_detail_mask=target,
+        truth_obstacle_ratio=np.zeros(target.shape, dtype=np.float32),
+        reachable_pose_mask=reachable,
+        reveal_from_pose=reveal,
+    )
+
+    assert calls == [(1, 1)]
+    assert result[2, 2]
+    assert not result[5, 5]
+
+
+def test_coverable_union_intersects_los_with_target_and_is_repeat_identical() -> None:
+    """Would fail if blocked/obstacle cells leaked into the exact packed denominator."""
+    target = np.ones((4, 4), dtype=np.bool_)
+    target[1, 2] = False
+    reachable = np.asarray([[True, False], [False, True]], dtype=np.bool_)
+
+    def reveal(
+        _truth_obstacle_ratio: np.ndarray,
+        pose_cell: tuple[int, int],
+    ) -> np.ndarray:
+        output = np.zeros((4, 4), dtype=np.bool_)
+        if pose_cell == (1, 1):
+            output[0:2, 0:3] = True
+        elif pose_cell == (3, 3):
+            output[2:4, 2:4] = True
+        return output
+
+    arguments = {
+        "mission_target_detail_mask": target,
+        "truth_obstacle_ratio": np.zeros(target.shape, dtype=np.float32),
+        "reachable_pose_mask": reachable,
+        "reveal_from_pose": reveal,
+    }
+    first = build_coverable_detail_mask(**arguments)
+    second = build_coverable_detail_mask(**arguments)
+
+    assert not first[1, 2]
+    assert np.array_equal(first, second)
+    assert np.array_equal(pack_detail_mask(first), pack_detail_mask(second))
+    assert mask_sha256(first) == mask_sha256(second)
