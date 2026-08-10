@@ -660,7 +660,27 @@ def test_stage_diagnostics_isolate_platform_unreachable_and_zero_gain() -> None:
         pose_map=pose,
         observed_elevation_m=world.elevation_m,
         bridge=RejectingBridge(),
-        request=object(),
+        request=SimpleNamespace(
+            world=SimpleNamespace(
+                local_map=SimpleNamespace(
+                    frame_id="odom",
+                    width=256,
+                    height=256,
+                    resolution_m=4.0,
+                    origin_m=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                ),
+                map_from_odom=SimpleNamespace(
+                    parent_frame="map",
+                    child_frame="odom",
+                    translation_m=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                    rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+                ),
+            )
+        ),
+        local_traversability_projection=SimpleNamespace(
+            hard_feasible=np.ones((256, 256), dtype=np.uint8),
+            connected_component=np.ones((256, 256), dtype=np.int32),
+        ),
     )
     unreachable = CandidateBuilderV2(_RecordingEstimator()).build(
         world,
@@ -691,6 +711,66 @@ def test_stage_diagnostics_isolate_platform_unreachable_and_zero_gain() -> None:
     assert zero_gain.count == 0
     assert zero_gain.diagnostics.platform_unreachable_count == 0
     assert zero_gain.diagnostics.zero_gain_count > 0
+
+
+def test_ground_reachability_intersects_global_and_observed_detail_components() -> None:
+    canvas = _canvas()
+    pose = Pose2(2.0, 2.0)
+    local_shape = (50, 50)
+    local_hard = np.ones(local_shape, dtype=np.uint8)
+    local_components = np.ones(local_shape, dtype=np.int32)
+    local_components[10, 30] = 2
+
+    class RecordingBridge:
+        def project_reachability(self, request, maximum_edge_distance_m):
+            del request, maximum_edge_distance_m
+            return SimpleNamespace(
+                reachable=np.ones((256, 256), dtype=np.uint8)
+            )
+
+        def project_traversability(self, request):
+            del request
+            return SimpleNamespace(
+                hard_feasible=local_hard,
+                connected_component=local_components,
+            )
+
+    request = SimpleNamespace(
+        world=SimpleNamespace(
+            local_map=SimpleNamespace(
+                frame_id="odom",
+                width=local_shape[1],
+                height=local_shape[0],
+                resolution_m=0.2,
+                origin_m=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+            ),
+            map_from_odom=SimpleNamespace(
+                parent_frame="map",
+                child_frame="odom",
+                translation_m=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+            ),
+        )
+    )
+    reachability = PlatformCandidateReachability(
+        platform_type="LEGGED",
+        canvas=canvas,
+        pose_map=pose,
+        observed_elevation_m=np.zeros((256, 256), dtype=np.float32),
+        bridge=RecordingBridge(),
+        request=request,
+    )
+    candidates = np.asarray(((255, 0), (255, 1)), dtype=np.int32)
+    exact_targets = np.asarray(
+        ((3.9, 2.0, 0.0), (6.0, 2.0, 0.0)), dtype=np.float64
+    )
+
+    result = reachability.filter(
+        candidates, target_positions_map=exact_targets
+    )
+
+    assert result.accepted_mask.tolist() == [True, False]
+    assert dict(result.reason_counts) == {"platform_unreachable_count": 1}
 
 
 def test_hopper_reachability_uses_certified_pose_height_for_start() -> None:

@@ -807,6 +807,7 @@ class FormalEpisode:
             observed_elevation_m=world.elevation_m,
             bridge=self._bridge,
             request=projection_request,
+            local_traversability_projection=local_cpp,
         )
         candidates = candidate_builder.build(
             world,

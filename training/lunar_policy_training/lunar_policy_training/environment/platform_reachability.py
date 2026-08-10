@@ -50,6 +50,7 @@ class PlatformCandidateReachability:
         bridge: object,
         request: object,
         maximum_edge_distance_m: float = 30.0,
+        local_traversability_projection: object | None = None,
     ) -> None:
         if platform_type not in _PLATFORMS:
             raise ValueError("candidate reachability platform is invalid")
@@ -69,7 +70,14 @@ class PlatformCandidateReachability:
                 "project_direct_hopper_reachability",
             )
             if platform_type == "HOPPER"
-            else ("project_reachability",)
+            else (
+                "project_reachability",
+                *(
+                    ()
+                    if local_traversability_projection is not None
+                    else ("project_traversability",)
+                ),
+            )
         )
         if any(
             not callable(getattr(bridge, name, None))
@@ -89,6 +97,13 @@ class PlatformCandidateReachability:
         self._bridge = bridge
         self._request = request
         self._maximum_edge_distance_m = maximum_edge_distance_m
+        self._local_traversability = (
+            None
+            if platform_type == "HOPPER"
+            else local_traversability_projection
+            if local_traversability_projection is not None
+            else bridge.project_traversability(request)
+        )
 
     def filter(
         self,
@@ -141,9 +156,158 @@ class PlatformCandidateReachability:
         accepted = np.ascontiguousarray(
             reachable[candidates[:, 0], candidates[:, 1]], dtype=np.bool_
         )
+        if self._platform_type != "HOPPER":
+            accepted &= self._ground_local_reachable(candidates, positions)
         return CandidateReachabilityResult(
             accepted,
             {"platform_unreachable_count": int((~accepted).sum(dtype=np.int64))},
+        )
+
+    def _ground_local_reachable(
+        self,
+        candidates: np.ndarray,
+        target_positions_map: np.ndarray | None,
+    ) -> np.ndarray:
+        projection = self._local_traversability
+        local_map = getattr(getattr(self._request, "world", None), "local_map", None)
+        transform = getattr(
+            getattr(self._request, "world", None), "map_from_odom", None
+        )
+        if projection is None or local_map is None or transform is None:
+            raise RuntimeError("ground local reachability inputs are unavailable")
+        width = getattr(local_map, "width", None)
+        height = getattr(local_map, "height", None)
+        resolution = getattr(local_map, "resolution_m", None)
+        origin = getattr(local_map, "origin_m", None)
+        if (
+            type(width) is not int
+            or type(height) is not int
+            or width <= 0
+            or height <= 0
+            or not isinstance(resolution, float)
+            or not np.isfinite(resolution)
+            or resolution <= 0.0
+            or origin is None
+            or getattr(local_map, "frame_id", None)
+            != getattr(transform, "child_frame", None)
+            or getattr(transform, "parent_frame", None) != "map"
+        ):
+            raise RuntimeError("ground local reachability geometry is invalid")
+        hard = np.asarray(getattr(projection, "hard_feasible", None))
+        components = np.asarray(getattr(projection, "connected_component", None))
+        if (
+            hard.shape != (height, width)
+            or components.shape != (height, width)
+            or hard.dtype != np.dtype(np.uint8)
+            or components.dtype != np.dtype(np.int32)
+        ):
+            raise RuntimeError("ground local reachability projection is invalid")
+
+        if target_positions_map is None:
+            target_positions_map = np.asarray(
+                [
+                    (
+                        *self._canvas.grid_center_world(int(row), int(column)),
+                        float(self._elevation[row, column]),
+                    )
+                    for row, column in candidates
+                ],
+                dtype=np.float64,
+            )
+        start_map = np.asarray(
+            [[self._pose.x_m, self._pose.y_m, self._pose.elevation_m]],
+            dtype=np.float64,
+        )
+        start_local = self._map_to_odom(start_map, transform)[0]
+        targets_local = self._map_to_odom(target_positions_map, transform)
+
+        origin_xy = np.asarray(
+            [getattr(origin, "x", np.nan), getattr(origin, "y", np.nan)],
+            dtype=np.float64,
+        )
+        if not np.isfinite(origin_xy).all():
+            raise RuntimeError("ground local reachability origin is invalid")
+
+        def cells_for(positions: np.ndarray) -> np.ndarray:
+            return np.floor((positions[:, :2] - origin_xy) / resolution).astype(
+                np.int64
+            )
+
+        start_cell = cells_for(start_local.reshape(1, 3))[0]
+        if not (
+            0 <= start_cell[0] < width and 0 <= start_cell[1] < height
+        ):
+            return np.zeros(len(candidates), dtype=np.bool_)
+        start_component = int(components[start_cell[1], start_cell[0]])
+        if (
+            hard[start_cell[1], start_cell[0]] == 0
+            or start_component < 0
+        ):
+            return np.zeros(len(candidates), dtype=np.bool_)
+
+        target_cells = cells_for(targets_local)
+        inside = (
+            (target_cells[:, 0] >= 0)
+            & (target_cells[:, 0] < width)
+            & (target_cells[:, 1] >= 0)
+            & (target_cells[:, 1] < height)
+        )
+        accepted = np.zeros(len(candidates), dtype=np.bool_)
+        indices = np.flatnonzero(inside)
+        if len(indices):
+            columns = target_cells[indices, 0]
+            rows = target_cells[indices, 1]
+            accepted[indices] = (
+                (hard[rows, columns] != 0)
+                & (components[rows, columns] == start_component)
+            )
+        return np.ascontiguousarray(accepted)
+
+    @staticmethod
+    def _map_to_odom(points_map: np.ndarray, transform: object) -> np.ndarray:
+        translation = getattr(transform, "translation_m", None)
+        rotation = getattr(transform, "rotation", None)
+        values = np.asarray(
+            [
+                getattr(translation, "x", np.nan),
+                getattr(translation, "y", np.nan),
+                getattr(translation, "z", np.nan),
+                getattr(rotation, "x", np.nan),
+                getattr(rotation, "y", np.nan),
+                getattr(rotation, "z", np.nan),
+                getattr(rotation, "w", np.nan),
+            ],
+            dtype=np.float64,
+        )
+        if not np.isfinite(values).all():
+            raise RuntimeError("ground local reachability transform is invalid")
+        tx, ty, tz, qx, qy, qz, qw = values
+        norm = float(np.linalg.norm(values[3:]))
+        if norm <= np.finfo(np.float64).eps:
+            raise RuntimeError("ground local reachability rotation is invalid")
+        qx, qy, qz, qw = qx / norm, qy / norm, qz / norm, qw / norm
+        rotation_child_to_parent = np.asarray(
+            [
+                [
+                    1.0 - 2.0 * (qy * qy + qz * qz),
+                    2.0 * (qx * qy - qz * qw),
+                    2.0 * (qx * qz + qy * qw),
+                ],
+                [
+                    2.0 * (qx * qy + qz * qw),
+                    1.0 - 2.0 * (qx * qx + qz * qz),
+                    2.0 * (qy * qz - qx * qw),
+                ],
+                [
+                    2.0 * (qx * qz - qy * qw),
+                    2.0 * (qy * qz + qx * qw),
+                    1.0 - 2.0 * (qx * qx + qy * qy),
+                ],
+            ],
+            dtype=np.float64,
+        )
+        return np.ascontiguousarray(
+            (points_map - np.asarray([tx, ty, tz])) @ rotation_child_to_parent
         )
 
     def _hopper_projection(
