@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
@@ -11,7 +12,7 @@ import os
 from pathlib import Path, PurePosixPath
 import subprocess
 from types import MappingProxyType
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Iterator, Mapping, TypeVar
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import numpy as np
@@ -96,10 +97,59 @@ _IDENTITY_FIELDS = (
     "v3_source_commit",
     "v3_sha256",
 )
+_PlatformResult = TypeVar("_PlatformResult")
+_ParallelItem = TypeVar("_ParallelItem")
+_ParallelResult = TypeVar("_ParallelResult")
 
 
 class FormalCacheError(ValueError):
     """The cache is incomplete, drifted, unsafe, or not formally eligible."""
+
+
+def _parallel_platform_map(
+    worker: Callable[[str], _PlatformResult],
+) -> dict[str, _PlatformResult]:
+    """Evaluate independent platform records concurrently in frozen order."""
+    with ThreadPoolExecutor(
+        max_workers=len(_PLATFORMS),
+        thread_name_prefix="formal-cache-platform",
+    ) as executor:
+        futures = {
+            platform: executor.submit(worker, platform)
+            for platform in _PLATFORMS
+        }
+        return {
+            platform: futures[platform].result()
+            for platform in _PLATFORMS
+        }
+
+
+def _ordered_bounded_process_map(
+    items: Iterable[_ParallelItem],
+    worker: Callable[[_ParallelItem], _ParallelResult],
+    *,
+    max_workers: int,
+) -> Iterator[_ParallelResult]:
+    """Compute bounded process work while preserving the frozen input order."""
+    if type(max_workers) is not int or max_workers < 1:
+        raise ValueError("process worker count must be a positive integer")
+    iterator = iter(items)
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        pending = []
+        for _ in range(max_workers):
+            try:
+                item = next(iterator)
+            except StopIteration:
+                break
+            pending.append(executor.submit(worker, item))
+        while pending:
+            future = pending.pop(0)
+            yield future.result()
+            try:
+                item = next(iterator)
+            except StopIteration:
+                continue
+            pending.append(executor.submit(worker, item))
 
 
 def _formal_platform_eligibility_ready(
@@ -1456,6 +1506,36 @@ def _build_platform_detail_coverability(
     )
 
 
+def _finite_hopper_landing_targets(
+    projected: object,
+    *,
+    row0: int,
+    row1: int,
+    column0: int,
+    column1: int,
+) -> tuple[list[tuple[int, int]], np.ndarray]:
+    """Return only valid finite landing cells in stable row-major order."""
+    cells = [
+        (row, column)
+        for row in range(row0, row1)
+        for column in range(column0, column1)
+        if bool(projected.valid_mask[row, column])
+    ]
+    targets = np.asarray(
+        [
+            (
+                *projected.canvas.grid_center_world(row, column),
+                float(projected.elevation_m[row, column]),
+            )
+            for row, column in cells
+        ],
+        dtype=np.float64,
+    ).reshape((-1, 3))
+    if not np.isfinite(targets).all():
+        raise FormalCacheError("valid Hopper landing target is non-finite")
+    return cells, np.ascontiguousarray(targets)
+
+
 def _hopper_landing_evidence(
     *,
     platform: FrozenPlatformCapability,
@@ -1495,21 +1575,15 @@ def _hopper_landing_evidence(
         column0 = tile_column * coarse_per_tile
         row1 = min(row0 + coarse_per_tile, coarse_cells)
         column1 = min(column0 + coarse_per_tile, coarse_cells)
-        cells = [
-            (row, column)
-            for row in range(row0, row1)
-            for column in range(column0, column1)
-        ]
-        targets = np.asarray(
-            [
-                (
-                    *projected.canvas.grid_center_world(row, column),
-                    float(projected.elevation_m[row, column]),
-                )
-                for row, column in cells
-            ],
-            dtype=np.float64,
+        cells, targets = _finite_hopper_landing_targets(
+            projected,
+            row0=row0,
+            row1=row1,
+            column0=column0,
+            column1=column1,
         )
+        if not cells:
+            continue
         result = bridge.project_hopper_landing_evidence(
             _projection_request(
                 platform,
@@ -1518,7 +1592,7 @@ def _hopper_landing_evidence(
                 start_cell=start_cell,
                 local_projected=window.projected,
             ),
-            np.ascontiguousarray(targets),
+            targets,
         )
         if algorithm_id is None:
             algorithm_id = str(result.algorithm_id)
@@ -1597,7 +1671,9 @@ def _initial_coverable_fraction(
     cells = provider.tile_geometry.cells
     start_row = pose_row - cells // 2
     start_column = pose_column - cells // 2
-    truth = provider.read_window(start_row, start_column, cells=cells)
+    truth_obstacle_ratio = provider.read_visibility_obstacle_window(
+        start_row, start_column, cells=cells
+    )
     visible = NativeVisibilityEstimator(
         SensorGeometry(
             platform.observation_capability.sensor_range_m,
@@ -1605,7 +1681,7 @@ def _initial_coverable_fraction(
         ),
         resolution_m=provider.tile_geometry.resolution_m,
     ).reveal_from_pose(
-        truth.physical_obstacle_ratio,
+        truth_obstacle_ratio,
         (pose_row - start_row, pose_column - start_column),
     )
     coverable = read_packed_detail_window(
@@ -1644,6 +1720,103 @@ def _unsafe_platform_coverability(
         exact=True,
         eligible=False,
         ineligible_reason=IneligibleReason.UNSAFE_START,
+    )
+
+
+def _build_scene_platform_coverability(
+    *,
+    platform_type: str,
+    capability_bundle: FrozenCapabilityBundle,
+    qualification: object,
+    scene: MultiResolutionScene,
+    projected: object,
+    mission_roi: np.ndarray,
+    detail_shape: tuple[int, int],
+) -> PlatformCoverability:
+    if qualification is None:
+        return _unsafe_platform_coverability(platform_type, detail_shape)
+
+    import lunar_planner_training_bridge as bridge_api
+
+    platform = capability_bundle.for_platform(platform_type)
+    bridge = bridge_api.PlannerBridge()
+    reachable, reachability_algorithm, _ = _build_reachable_pose_mask(
+        platform=platform,
+        scene=scene,
+        projected=projected,
+        start_cell=qualification.cell,
+        bridge=bridge,
+    )
+    if not bool(reachable[qualification.cell]):
+        zero = _unsafe_platform_coverability(platform_type, detail_shape)
+        return PlatformCoverability(
+            platform_type=platform_type,
+            qualified_start_cell=None,
+            reachable_pose_mask=reachable,
+            coverable_detail_shape=zero.coverable_detail_shape,
+            coverable_detail_bits=zero.coverable_detail_bits,
+            coverable_ratio=zero.coverable_ratio,
+            mission_target_detail_cell_count=0,
+            coverable_detail_cell_count=0,
+            mission_coverable_fraction=0.0,
+            initial_coverable_fraction=0.0,
+            initial_candidate_count=0,
+            reachability_algorithm_id=reachability_algorithm,
+            visibility_algorithm_id="not-run/unsafe-start",
+            reachable_mask_sha256=mask_sha256(reachable),
+            coverable_mask_sha256=zero.coverable_mask_sha256,
+            exact=True,
+            eligible=False,
+            ineligible_reason=IneligibleReason.UNSAFE_START,
+        )
+    detail = _build_platform_detail_coverability(
+        platform=platform,
+        scene=scene,
+        mission_roi=mission_roi,
+        reachable_pose_mask=reachable,
+        bridge=bridge,
+    )
+    initial_fraction = _initial_coverable_fraction(
+        platform=platform,
+        scene=scene,
+        start_cell=qualification.cell,
+        detail=detail,
+    )
+    reason = classify_ineligibility(
+        qualified_start_cell=qualification.cell,
+        mission_target_detail_cell_count=(
+            detail.mission_target_detail_cell_count
+        ),
+        coverable_detail_cell_count=detail.coverable_detail_cell_count,
+        initial_coverable_fraction=initial_fraction,
+        initial_candidate_count=qualification.initial_candidate_count,
+    )
+    return PlatformCoverability(
+        platform_type=platform_type,
+        qualified_start_cell=qualification.cell,
+        reachable_pose_mask=reachable,
+        coverable_detail_shape=detail.detail_shape,
+        coverable_detail_bits=detail.coverable_detail_bits,
+        coverable_ratio=detail.coverable_ratio,
+        mission_target_detail_cell_count=(
+            detail.mission_target_detail_cell_count
+        ),
+        coverable_detail_cell_count=detail.coverable_detail_cell_count,
+        mission_coverable_fraction=(
+            detail.coverable_detail_cell_count
+            / detail.mission_target_detail_cell_count
+            if detail.mission_target_detail_cell_count
+            else 0.0
+        ),
+        initial_coverable_fraction=initial_fraction,
+        initial_candidate_count=qualification.initial_candidate_count,
+        reachability_algorithm_id=reachability_algorithm,
+        visibility_algorithm_id="two-dimensional-detail-los/v1",
+        reachable_mask_sha256=mask_sha256(reachable),
+        coverable_mask_sha256=detail.coverable_mask_sha256,
+        exact=True,
+        eligible=reason is None,
+        ineligible_reason=reason,
     )
 
 
@@ -1723,94 +1896,17 @@ def _static_scene_data(
     detail_shape = (
         SceneTileProvider(multires, capacity=1).detail_cells_per_axis,
     ) * 2
-    coverability: dict[str, PlatformCoverability] = {}
-    for platform_type in _PLATFORMS:
-        platform = capability_bundle.for_platform(platform_type)
-        qualification = qualifications[platform_type]
-        if qualification is None:
-            coverability[platform_type] = _unsafe_platform_coverability(
-                platform_type, detail_shape
-            )
-            continue
-        reachable, reachability_algorithm, _ = _build_reachable_pose_mask(
-            platform=platform,
+    coverability = _parallel_platform_map(
+        lambda platform_type: _build_scene_platform_coverability(
+            platform_type=platform_type,
+            capability_bundle=capability_bundle,
+            qualification=qualifications[platform_type],
             scene=multires,
             projected=projected,
-            start_cell=qualification.cell,
-            bridge=bridge,
-        )
-        if not bool(reachable[qualification.cell]):
-            zero = _unsafe_platform_coverability(platform_type, detail_shape)
-            coverability[platform_type] = PlatformCoverability(
-                platform_type=platform_type,
-                qualified_start_cell=None,
-                reachable_pose_mask=reachable,
-                coverable_detail_shape=zero.coverable_detail_shape,
-                coverable_detail_bits=zero.coverable_detail_bits,
-                coverable_ratio=zero.coverable_ratio,
-                mission_target_detail_cell_count=0,
-                coverable_detail_cell_count=0,
-                mission_coverable_fraction=0.0,
-                initial_coverable_fraction=0.0,
-                initial_candidate_count=0,
-                reachability_algorithm_id=reachability_algorithm,
-                visibility_algorithm_id="not-run/unsafe-start",
-                reachable_mask_sha256=mask_sha256(reachable),
-                coverable_mask_sha256=zero.coverable_mask_sha256,
-                exact=True,
-                eligible=False,
-                ineligible_reason=IneligibleReason.UNSAFE_START,
-            )
-            continue
-        detail = _build_platform_detail_coverability(
-            platform=platform,
-            scene=multires,
             mission_roi=mission_roi,
-            reachable_pose_mask=reachable,
-            bridge=bridge,
+            detail_shape=detail_shape,
         )
-        initial_fraction = _initial_coverable_fraction(
-            platform=platform,
-            scene=multires,
-            start_cell=qualification.cell,
-            detail=detail,
-        )
-        reason = classify_ineligibility(
-            qualified_start_cell=qualification.cell,
-            mission_target_detail_cell_count=(
-                detail.mission_target_detail_cell_count
-            ),
-            coverable_detail_cell_count=detail.coverable_detail_cell_count,
-            initial_coverable_fraction=initial_fraction,
-            initial_candidate_count=qualification.initial_candidate_count,
-        )
-        coverability[platform_type] = PlatformCoverability(
-            platform_type=platform_type,
-            qualified_start_cell=qualification.cell,
-            reachable_pose_mask=reachable,
-            coverable_detail_shape=detail.detail_shape,
-            coverable_detail_bits=detail.coverable_detail_bits,
-            coverable_ratio=detail.coverable_ratio,
-            mission_target_detail_cell_count=(
-                detail.mission_target_detail_cell_count
-            ),
-            coverable_detail_cell_count=detail.coverable_detail_cell_count,
-            mission_coverable_fraction=(
-                detail.coverable_detail_cell_count
-                / detail.mission_target_detail_cell_count
-                if detail.mission_target_detail_cell_count
-                else 0.0
-            ),
-            initial_coverable_fraction=initial_fraction,
-            initial_candidate_count=qualification.initial_candidate_count,
-            reachability_algorithm_id=reachability_algorithm,
-            visibility_algorithm_id="two-dimensional-detail-los/v1",
-            reachable_mask_sha256=mask_sha256(reachable),
-            coverable_mask_sha256=detail.coverable_mask_sha256,
-            exact=True,
-            eligible=reason is None,
-            ineligible_reason=reason,
-        )
+    )
     rocks = np.asarray(
         [
             (item.x_m, item.y_m, item.radius_m, item.height_m)
@@ -1853,6 +1949,33 @@ def _static_scene_data(
     )
 
 
+@dataclass(frozen=True)
+class _StaticSceneWork:
+    scenario: dict[str, object]
+    source_paths: dict[str, Path]
+    capability_bundle: FrozenCapabilityBundle
+
+
+def _static_scene_process_worker(
+    work: _StaticSceneWork,
+) -> dict[str, object]:
+    """Build one scene in an isolated process and return a picklable payload."""
+    import lunar_planner_training_bridge as bridge_api
+
+    scene = _static_scene_data(
+        work.scenario,
+        source_paths=work.source_paths,
+        capability_bundle=work.capability_bundle,
+        bridge=bridge_api.PlannerBridge(),
+        base_cache={},
+    )
+    payload = dict(vars(scene))
+    payload["hard_feasible"] = dict(scene.hard_feasible)
+    payload["clearance_margin_norm"] = dict(scene.clearance_margin_norm)
+    payload["coverability"] = dict(scene.coverability)
+    return payload
+
+
 def prepare_formal_training_cache(
     *,
     source_lock_path: str | Path,
@@ -1880,18 +2003,30 @@ def prepare_formal_training_cache(
     )
 
     def records() -> Iterable[StaticSceneData]:
-        import lunar_planner_training_bridge as bridge_api
-
-        bridge = bridge_api.PlannerBridge()
-        base_cache: dict[str, tuple[MapCanvas, np.ndarray, np.ndarray]] = {}
-        for scenario in selected:
-            yield _static_scene_data(
-                scenario,
-                source_paths=verified.source_paths,
+        work_items = (
+            _StaticSceneWork(
+                scenario=dict(scenario),
+                source_paths={
+                    source: Path(path)
+                    for source, path in verified.source_paths.items()
+                },
                 capability_bundle=capability_bundle,
-                bridge=bridge,
-                base_cache=base_cache,
             )
+            for scenario in selected
+        )
+
+        cpu_count = os.cpu_count() or 1
+        worker_count = min(
+            len(selected),
+            max(1, min(8, cpu_count // len(_PLATFORMS))),
+        )
+        payloads = _ordered_bounded_process_map(
+            work_items,
+            _static_scene_process_worker,
+            max_workers=worker_count,
+        )
+        for payload in payloads:
+            yield StaticSceneData(**payload)
 
     manifest = write_formal_cache(
         cache_root,

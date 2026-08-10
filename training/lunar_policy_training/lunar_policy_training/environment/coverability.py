@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
 import math
-from typing import Callable
+from typing import Callable, Iterator
 
 import numpy as np
 
@@ -379,6 +379,49 @@ def _streamed_coarse_ratio(
     return np.ascontiguousarray(ratio), count
 
 
+def _spatially_prioritized_sources(
+    source_mask: np.ndarray,
+    *,
+    row_scale: int,
+    column_scale: int,
+    window_cells: int,
+) -> Iterator[tuple[int, int]]:
+    """Yield one central source per sensor-sized block before dense fallback."""
+    sources = np.argwhere(source_mask)
+    row_stride = max(1, window_cells // (2 * row_scale))
+    column_stride = max(1, window_cells // (2 * column_scale))
+    representatives: dict[
+        tuple[int, int], tuple[tuple[int, int, int], tuple[int, int]]
+    ] = {}
+    for row_value, column_value in sources:
+        row = int(row_value)
+        column = int(column_value)
+        bucket = (row // row_stride, column // column_stride)
+        row_start = bucket[0] * row_stride
+        column_start = bucket[1] * column_stride
+        row_end = min(row_start + row_stride, source_mask.shape[0])
+        column_end = min(
+            column_start + column_stride, source_mask.shape[1]
+        )
+        distance = (
+            (2 * row - (row_start + row_end - 1)) ** 2
+            + (2 * column - (column_start + column_end - 1)) ** 2
+        )
+        candidate = ((distance, row, column), (row, column))
+        current = representatives.get(bucket)
+        if current is None or candidate[0] < current[0]:
+            representatives[bucket] = candidate
+    selected = {
+        coordinate for _, coordinate in representatives.values()
+    }
+    for bucket in sorted(representatives):
+        yield representatives[bucket][1]
+    for row_value, column_value in sources:
+        coordinate = (int(row_value), int(column_value))
+        if coordinate not in selected:
+            yield coordinate
+
+
 @dataclass(frozen=True, slots=True)
 class StreamedDetailCoverability:
     """Bounded-memory exact target and coverable detail-mask build result."""
@@ -533,10 +576,15 @@ def build_streamed_detail_coverability(
         )
 
     observation_sources = reachable & roi
-    for coarse_row, coarse_column in np.argwhere(observation_sources):
-        pose_row = int(coarse_row) * row_scale + row_scale // 2
+    for coarse_row, coarse_column in _spatially_prioritized_sources(
+        observation_sources,
+        row_scale=row_scale,
+        column_scale=column_scale,
+        window_cells=tile_cells,
+    ):
+        pose_row = coarse_row * row_scale + row_scale // 2
         pose_column = (
-            int(coarse_column) * column_scale + column_scale // 2
+            coarse_column * column_scale + column_scale // 2
         )
         start_row = pose_row - tile_cells // 2
         start_column = pose_column - tile_cells // 2
@@ -564,11 +612,11 @@ def build_streamed_detail_coverability(
         remaining = target & ~already_coverable
         if not remaining.any():
             continue
-        truth = tile_provider.read_window(
+        truth_obstacle_ratio = tile_provider.read_visibility_obstacle_window(
             start_row, start_column, cells=tile_cells
         )
         visible = reveal_from_pose(
-            truth.physical_obstacle_ratio,
+            truth_obstacle_ratio,
             (pose_row - start_row, pose_column - start_column),
         )
         if (

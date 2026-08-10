@@ -4,6 +4,7 @@ from dataclasses import replace
 import hashlib
 import json
 import pathlib
+import threading
 
 import numpy as np
 import pytest
@@ -19,7 +20,10 @@ from lunar_policy_training.polar_data.formal_cache import (
     FormalCacheError,
     FormalCacheIdentity,
     StaticSceneData,
+    _finite_hopper_landing_targets,
     _formal_platform_eligibility_ready,
+    _ordered_bounded_process_map,
+    _parallel_platform_map,
     load_formal_cache,
     platform_scenario_schedule_id,
     write_formal_cache,
@@ -159,6 +163,66 @@ def _write(tmp_path: pathlib.Path):
         repository_root=REPOSITORY_ROOT,
     )
     return root, identity, manifest
+
+
+def test_platform_map_executes_independent_work_concurrently_in_fixed_order() -> None:
+    barrier = threading.Barrier(3, timeout=2.0)
+
+    def worker(platform: str) -> str:
+        barrier.wait()
+        return platform.lower()
+
+    result = _parallel_platform_map(worker)
+
+    assert list(result) == ["WHEELED", "LEGGED", "HOPPER"]
+    assert result == {
+        "WHEELED": "wheeled",
+        "LEGGED": "legged",
+        "HOPPER": "hopper",
+    }
+
+
+def test_bounded_process_map_yields_source_order() -> None:
+    result = list(
+        _ordered_bounded_process_map((-3, -1, 2), abs, max_workers=2)
+    )
+
+    assert result == [3, 1, 2]
+
+
+def test_hopper_landing_targets_exclude_nodata_cells_in_row_major_order() -> None:
+    class Canvas:
+        @staticmethod
+        def grid_center_world(row: int, column: int) -> tuple[float, float]:
+            return float(column) + 0.5, float(row) + 0.5
+
+    class Projected:
+        canvas = Canvas()
+        valid_mask = np.asarray(
+            [[True, False, True], [False, True, True]], dtype=np.bool_
+        )
+        elevation_m = np.asarray(
+            [[1.0, np.nan, 2.0], [np.nan, 3.0, 4.0]], dtype=np.float32
+        )
+
+    cells, targets = _finite_hopper_landing_targets(
+        Projected(), row0=0, row1=2, column0=0, column1=3
+    )
+
+    assert cells == [(0, 0), (0, 2), (1, 1), (1, 2)]
+    np.testing.assert_array_equal(
+        targets,
+        np.asarray(
+            [
+                [0.5, 0.5, 1.0],
+                [2.5, 0.5, 2.0],
+                [1.5, 1.5, 3.0],
+                [2.5, 1.5, 4.0],
+            ],
+            dtype=np.float64,
+        ),
+    )
+    assert targets.flags.c_contiguous
 
 
 def test_cache_root_must_be_absolute_and_outside_git() -> None:

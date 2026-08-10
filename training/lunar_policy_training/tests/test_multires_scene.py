@@ -277,6 +277,94 @@ def test_tile_halo_preserves_exact_tile_at_both_scene_boundaries() -> None:
     assert provider.cache_size == 1
 
 
+def test_detail_window_is_projected_once_without_rebuilding_crossed_tiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    geometry = GridGeometry(size_m=16.0, resolution_m=1.0, cells=16)
+    canvas = MapCanvas("e" * 64, (0.0, 0.0, 16.0, 16.0), geometry)
+    vector = generate_vector_hazard_scene(
+        canvas.window_sha256,
+        408008,
+        canvas=canvas,
+        rock_count=4,
+        crater_count=2,
+        no_go_count=1,
+    )
+    scene = MultiResolutionScene(
+        canvas,
+        np.arange(256, dtype=np.float32).reshape(16, 16),
+        np.ones((16, 16), dtype=np.bool_),
+        vector,
+    )
+    tile_geometry = GridGeometry(size_m=8.0, resolution_m=1.0, cells=8)
+    provider = SceneTileProvider(scene, tile_geometry=tile_geometry, capacity=1)
+    expected_canvas = MapCanvas(
+        canvas.window_sha256,
+        (4.0, 4.0, 12.0, 12.0),
+        tile_geometry,
+    )
+    expected = scene.project(expected_canvas)
+    original = MultiResolutionScene.project
+    projected_canvases: list[MapCanvas] = []
+
+    def counted_projection(self, target: MapCanvas):
+        projected_canvases.append(target)
+        return original(self, target)
+
+    monkeypatch.setattr(MultiResolutionScene, "project", counted_projection)
+
+    actual = provider.read_window(4, 4, cells=8)
+
+    assert [value.identity for value in projected_canvases] == [
+        expected_canvas.identity
+    ]
+    assert provider.cache_size == 0
+    np.testing.assert_array_equal(actual.valid_mask, expected.valid_mask)
+    np.testing.assert_array_equal(actual.elevation_m, expected.elevation_m)
+    np.testing.assert_array_equal(
+        actual.physical_obstacle_ratio,
+        expected.physical_obstacle_ratio,
+    )
+    np.testing.assert_array_equal(actual.forbidden_ratio, expected.forbidden_ratio)
+
+
+def test_visibility_obstacle_window_matches_exact_truth_without_sampling_dem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    geometry = GridGeometry(size_m=16.0, resolution_m=1.0, cells=16)
+    canvas = MapCanvas("f" * 64, (0.0, 0.0, 16.0, 16.0), geometry)
+    vector = generate_vector_hazard_scene(
+        canvas.window_sha256,
+        408009,
+        canvas=canvas,
+        rock_count=12,
+        crater_count=4,
+        no_go_count=2,
+    )
+    scene = MultiResolutionScene(
+        canvas,
+        np.arange(256, dtype=np.float32).reshape(16, 16),
+        np.ones((16, 16), dtype=np.bool_),
+        vector,
+    )
+    tile_geometry = GridGeometry(size_m=8.0, resolution_m=0.5, cells=16)
+    provider = SceneTileProvider(scene, tile_geometry=tile_geometry, capacity=1)
+    expected = provider.read_window(
+        8, 8, cells=16
+    ).physical_obstacle_ratio
+
+    def reject_dem_sampling(self, target: MapCanvas):
+        raise AssertionError("visibility-only projection sampled the DEM")
+
+    monkeypatch.setattr(MultiResolutionScene, "_sample_base", reject_dem_sampling)
+
+    actual = provider.read_visibility_obstacle_window(8, 8, cells=16)
+
+    assert actual.dtype == np.dtype(np.float32)
+    assert actual.flags.c_contiguous
+    np.testing.assert_array_equal(actual, expected)
+
+
 def test_streamed_coverability_matches_exact_pose_center_visibility() -> None:
     canvas = MapCanvas(
         "d" * 64,
@@ -342,6 +430,59 @@ def test_streamed_coverability_matches_exact_pose_center_visibility() -> None:
     np.testing.assert_array_equal(first.coverable_detail_bits, second.coverable_detail_bits)
     np.testing.assert_array_equal(first.coverable_ratio, second.coverable_ratio)
     assert first.coverable_mask_sha256 == second.coverable_mask_sha256
+
+
+def test_streamed_coverability_visits_spatial_representatives_before_dense_poses() -> None:
+    canvas = MapCanvas(
+        "1" * 64,
+        (0.0, 0.0, 64.0, 64.0),
+        GridGeometry(size_m=64.0, resolution_m=4.0, cells=16),
+    )
+    vector = generate_vector_hazard_scene(
+        canvas.window_sha256,
+        408010,
+        canvas=canvas,
+        rock_count=0,
+        crater_count=0,
+        no_go_count=0,
+    )
+    scene = MultiResolutionScene(
+        canvas,
+        np.zeros((16, 16), dtype=np.float32),
+        np.ones((16, 16), dtype=np.bool_),
+        vector,
+    )
+    provider = SceneTileProvider(
+        scene,
+        tile_geometry=GridGeometry(size_m=32.0, resolution_m=1.0, cells=32),
+        capacity=1,
+    )
+    reachable = np.zeros((16, 16), dtype=np.bool_)
+    reachable[4:12, 4:12] = True
+    roi = reachable.copy()
+    reveal_calls = 0
+
+    def reveal(
+        truth_obstacle_ratio: np.ndarray,
+        pose_cell: tuple[int, int],
+    ) -> np.ndarray:
+        nonlocal reveal_calls
+        reveal_calls += 1
+        return np.ones(truth_obstacle_ratio.shape, dtype=np.bool_)
+
+    detail = build_streamed_detail_coverability(
+        tile_provider=provider,
+        inside_mission_roi=roi,
+        reachable_pose_mask=reachable,
+        intrinsic_terrain_feasible=lambda projected: np.ones(
+            projected.valid_mask.shape, dtype=np.bool_
+        ),
+        reveal_from_pose=reveal,
+    )
+
+    assert detail.mission_target_detail_cell_count == 32 * 32
+    assert detail.coverable_detail_cell_count == 32 * 32
+    assert reveal_calls <= 4
 
 
 def test_projection_rejects_a_target_grid_not_aligned_to_scene_origin() -> None:

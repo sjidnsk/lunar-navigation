@@ -163,6 +163,51 @@ def _exact_area_ratio(
     return np.clip(result, 0.0, 1.0).astype(np.float32)
 
 
+def _relevant_rocks(
+    scene: VectorHazardScene,
+    target_canvas: MapCanvas,
+) -> tuple[object, ...]:
+    target_left, target_bottom, target_right, target_top = target_canvas.bounds_m
+    return tuple(
+        rock
+        for rock in scene.rocks
+        if not (
+            rock.x_m + rock.radius_m <= target_left
+            or rock.x_m - rock.radius_m >= target_right
+            or rock.y_m + rock.radius_m <= target_bottom
+            or rock.y_m - rock.radius_m >= target_top
+        )
+    )
+
+
+def _project_physical_obstacle_ratio(
+    scene: VectorHazardScene,
+    target_canvas: MapCanvas,
+    *,
+    relevant_rocks: tuple[object, ...] | None = None,
+) -> np.ndarray:
+    """Project exact obstacle area without sampling unrelated truth layers."""
+    x, y = _cell_coordinates(scene.canvas, target_canvas)
+    selected = (
+        _relevant_rocks(scene, target_canvas)
+        if relevant_rocks is None
+        else relevant_rocks
+    )
+    geometries = tuple(
+        Point(rock.x_m, rock.y_m).buffer(rock.radius_m, quad_segs=24)
+        for rock in selected
+    )
+    return np.ascontiguousarray(
+        _exact_area_ratio(
+            geometries,
+            x,
+            y,
+            target_canvas.geometry.resolution_m,
+        ),
+        dtype=np.float32,
+    )
+
+
 def project_vector_scene(
     scene: VectorHazardScene,
     target_canvas: MapCanvas,
@@ -186,20 +231,7 @@ def project_vector_scene(
             0.0,
             1.0,
         )
-    relevant_rocks = tuple(
-        rock
-        for rock in scene.rocks
-        if not (
-            rock.x_m + rock.radius_m <= target_left
-            or rock.x_m - rock.radius_m >= target_right
-            or rock.y_m + rock.radius_m <= target_bottom
-            or rock.y_m - rock.radius_m >= target_top
-        )
-    )
-    rocks = tuple(
-        Point(rock.x_m, rock.y_m).buffer(rock.radius_m, quad_segs=24)
-        for rock in relevant_rocks
-    )
+    relevant_rocks = _relevant_rocks(scene, target_canvas)
     obstacle_height = np.zeros(xx.shape, dtype=np.float32)
     half = target_canvas.geometry.resolution_m / 2.0
     for rock in relevant_rocks:
@@ -228,7 +260,11 @@ def project_vector_scene(
         vector_sha256=scene.vector_sha256,
         canvas=target_canvas,
         crater_elevation_delta_m=delta.astype(np.float32),
-        physical_obstacle_ratio=_exact_area_ratio(rocks, x, y, resolution),
+        physical_obstacle_ratio=_project_physical_obstacle_ratio(
+            scene,
+            target_canvas,
+            relevant_rocks=relevant_rocks,
+        ),
         physical_obstacle_height_m=obstacle_height,
         forbidden_ratio=_exact_area_ratio(no_go, x, y, resolution),
     )
@@ -468,10 +504,9 @@ class SceneTileProvider:
             tile_columns=slice(column_offset, column_offset + tile_cells),
         )
 
-    def read_window(
+    def _window_canvas(
         self, start_row: int, start_column: int, *, cells: int
-    ) -> ProjectedScene:
-        """Compose an aligned square detail window from fixed cached tiles."""
+    ) -> MapCanvas:
         if (
             type(start_row) is not int
             or type(start_column) is not int
@@ -483,61 +518,12 @@ class SceneTileProvider:
             or start_column + cells > self.detail_cells_per_axis
         ):
             raise ValueError("detail window lies outside the scene")
-        fields = (
-            "crater_elevation_delta_m",
-            "physical_obstacle_ratio",
-            "physical_obstacle_height_m",
-            "forbidden_ratio",
-            "elevation_m",
-        )
-        arrays = {
-            name: np.empty((cells, cells), dtype=np.float32) for name in fields
-        }
-        valid = np.empty((cells, cells), dtype=np.bool_)
-        tile_cells = self.tile_geometry.cells
-        first_tile_row = start_row // tile_cells
-        last_tile_row = (start_row + cells - 1) // tile_cells
-        first_tile_column = start_column // tile_cells
-        last_tile_column = (start_column + cells - 1) // tile_cells
-        for tile_row in range(first_tile_row, last_tile_row + 1):
-            for tile_column in range(
-                first_tile_column, last_tile_column + 1
-            ):
-                tile = self.tile(tile_row, tile_column)
-                tile_start_row = tile_row * tile_cells
-                tile_start_column = tile_column * tile_cells
-                global_row0 = max(start_row, tile_start_row)
-                global_row1 = min(start_row + cells, tile_start_row + tile_cells)
-                global_column0 = max(start_column, tile_start_column)
-                global_column1 = min(
-                    start_column + cells, tile_start_column + tile_cells
-                )
-                destination = (
-                    slice(global_row0 - start_row, global_row1 - start_row),
-                    slice(
-                        global_column0 - start_column,
-                        global_column1 - start_column,
-                    ),
-                )
-                source = (
-                    slice(
-                        global_row0 - tile_start_row,
-                        global_row1 - tile_start_row,
-                    ),
-                    slice(
-                        global_column0 - tile_start_column,
-                        global_column1 - tile_start_column,
-                    ),
-                )
-                for name in fields:
-                    arrays[name][destination] = getattr(tile, name)[source]
-                valid[destination] = tile.valid_mask[source]
         resolution = self.tile_geometry.resolution_m
         geometry = GridGeometry(cells * resolution, resolution, cells)
         left, _, _, top = self.scene.base_canvas.bounds_m
         window_left = left + start_column * resolution
         window_top = top - start_row * resolution
-        canvas = MapCanvas(
+        return MapCanvas(
             self.scene.base_canvas.window_sha256,
             (
                 window_left,
@@ -547,11 +533,22 @@ class SceneTileProvider:
             ),
             geometry,
         )
-        return ProjectedScene(
-            vector_sha256=self.scene.hazards.vector_sha256,
-            canvas=canvas,
-            valid_mask=valid,
-            **arrays,
+
+    def read_window(
+        self, start_row: int, start_column: int, *, cells: int
+    ) -> ProjectedScene:
+        """Project one aligned square window without retaining crossed tiles."""
+        return self.scene.project(
+            self._window_canvas(start_row, start_column, cells=cells)
+        )
+
+    def read_visibility_obstacle_window(
+        self, start_row: int, start_column: int, *, cells: int
+    ) -> np.ndarray:
+        """Project only the exact 0.2 m obstacle truth consumed by LOS."""
+        return _project_physical_obstacle_ratio(
+            self.scene.hazards,
+            self._window_canvas(start_row, start_column, cells=cells),
         )
 
 
