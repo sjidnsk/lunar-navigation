@@ -113,6 +113,23 @@ def _is_sha(value: object, *, length: int = 64) -> bool:
     )
 
 
+def _validate_bound_identities(
+    *,
+    source_commit: str,
+    head_commit: str,
+    cache_identity: object,
+    expected_cache_identity: Mapping[str, str],
+) -> None:
+    """Keep the full source HEAD distinct from the last C++ v3 commit."""
+    if source_commit != head_commit:
+        raise ClosedLoopGateError("closed-loop gate source commit differs from HEAD")
+    if any(
+        getattr(cache_identity, field, None) != value
+        for field, value in expected_cache_identity.items()
+    ):
+        raise ClosedLoopGateError("closed-loop cache identity differs from source")
+
+
 def _scenario_seed(value: Mapping[str, object]) -> int:
     scenario_seed = value.get("scenario_seed")
     if type(scenario_seed) is int:
@@ -709,6 +726,13 @@ def run_closed_loop_gate(
             capture_output=True,
             text=True,
         )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
     except (OSError, subprocess.CalledProcessError) as error:
         raise ClosedLoopGateError("could not verify the gate source tree") from error
     if status.stdout:
@@ -725,10 +749,12 @@ def run_closed_loop_gate(
         "reward_sha256": reward_weights_sha256(),
         "training_semantics_sha256": training_semantics_sha256(),
     }
-    if source_commit != current_commit or any(
-        getattr(identity, field) != value for field, value in expected.items()
-    ):
-        raise ClosedLoopGateError("closed-loop cache identity differs from source")
+    _validate_bound_identities(
+        source_commit=source_commit,
+        head_commit=head,
+        cache_identity=identity,
+        expected_cache_identity=expected,
+    )
     try:
         scenario_document = json.loads(
             (cache.root / "scenario-manifest.json").read_text(encoding="utf-8")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +10,7 @@ from lunar_policy_training.closed_loop_gate import (
     CLOSED_LOOP_GATE_SCHEMA,
     CLOSED_LOOP_MINIMUM_SCENES,
     ClosedLoopGateError,
+    _validate_bound_identities,
     build_closed_loop_gate_report,
     select_closed_loop_gate_cases,
     write_closed_loop_gate_report,
@@ -116,6 +118,29 @@ def test_select_closed_loop_gate_cases_requires_24_exact_common_scenes() -> None
 
     with pytest.raises(ClosedLoopGateError, match="at least 24"):
         select_closed_loop_gate_cases(manifest, scenario_document)
+
+
+def test_gate_keeps_full_source_head_distinct_from_v3_cache_commit() -> None:
+    expected = {
+        "v3_source_commit": "9" * 40,
+        "v3_sha256": _sha("1"),
+    }
+    identity = SimpleNamespace(**expected)
+
+    _validate_bound_identities(
+        source_commit="0" * 40,
+        head_commit="0" * 40,
+        cache_identity=identity,
+        expected_cache_identity=expected,
+    )
+
+    with pytest.raises(ClosedLoopGateError, match="differs from HEAD"):
+        _validate_bound_identities(
+            source_commit="8" * 40,
+            head_commit="0" * 40,
+            cache_identity=identity,
+            expected_cache_identity=expected,
+        )
 
 
 def test_select_closed_loop_gate_cases_binds_schedule_cursor_and_coverability() -> None:
