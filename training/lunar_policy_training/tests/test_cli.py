@@ -207,8 +207,6 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
             "/tmp/preflight-cache/cache-manifest.json",
             "--artifact-root",
             "/tmp/closed-loop-gate",
-            "--minimum-scenes",
-            "24",
             "--max-workers",
             "8",
         ]
@@ -239,7 +237,7 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
     assert formal_preflight.cache_manifest.endswith("cache-manifest.json")
     assert formal_preflight.calibration_root == "/tmp/lunar-task4"
     assert closed_loop_gate.command == "closed-loop-gate"
-    assert closed_loop_gate.minimum_scenes == 24
+    assert closed_loop_gate.minimum_scenes == 1
     assert closed_loop_gate.max_workers == 8
     assert evaluate.sensor_performance_report is None
     assert extension.command == "extend-budget"

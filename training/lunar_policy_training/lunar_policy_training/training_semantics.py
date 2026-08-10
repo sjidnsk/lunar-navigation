@@ -12,7 +12,8 @@ FORMAL_MINIMUM_MISSION_COVERABLE_RATIO = 0.95
 FORMAL_SUCCESS_COVERAGE_RATIO = 0.95
 FORMAL_TRAINING_SEMANTICS_VERSION = (
     "lunar-training-semantics/"
-    "sensor-30m-360-platform-coverable-detail95-ground-option-path-observation/v7"
+    "sensor-30m-360-platform-coverable-detail95-ground-option-path-observation-"
+    "auditable-failure/v8"
 )
 # Keep the established public name as an alias so every identity consumer moves
 # atomically without duplicating the semantic string.

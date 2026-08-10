@@ -22,16 +22,17 @@ from lunar_policy_training.training_semantics import (
 )
 
 
-_V7 = (
+_V8 = (
     "lunar-training-semantics/"
-    "sensor-30m-360-platform-coverable-detail95-ground-option-path-observation/v7"
+    "sensor-30m-360-platform-coverable-detail95-ground-option-path-observation-"
+    "auditable-failure/v8"
 )
 
 
-def test_formal_training_semantics_names_detail95_ground_option_v7() -> None:
+def test_formal_training_semantics_names_detail95_auditable_failure_v8() -> None:
     """Would fail if a new run retained the old full-ROI/common-subset identity."""
-    assert FORMAL_TRAINING_SEMANTICS_VERSION == _V7
-    assert TRAINING_SEMANTICS_VERSION == _V7
+    assert FORMAL_TRAINING_SEMANTICS_VERSION == _V8
+    assert TRAINING_SEMANTICS_VERSION == _V8
 
 
 def test_detail_mask_pack_is_row_major_and_rejects_nonzero_padding() -> None:

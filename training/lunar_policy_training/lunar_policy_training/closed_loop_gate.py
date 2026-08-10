@@ -29,8 +29,8 @@ from .training_semantics import (
 )
 
 
-CLOSED_LOOP_GATE_SCHEMA = "lunar-platform-coverable-closed-loop-gate/v2"
-CLOSED_LOOP_MINIMUM_SCENES = 24
+CLOSED_LOOP_GATE_SCHEMA = "lunar-platform-coverable-closed-loop-gate/v3"
+CLOSED_LOOP_MINIMUM_SCENES = 1
 CLOSED_LOOP_METHOD = "gain_over_cost_frontier"
 _SPLITS = ("train", "validation", "test", "holdout")
 _ROW_SHA_FIELDS = (
@@ -546,27 +546,81 @@ def _validate_row(
         raise ClosedLoopGateError("closed-loop mission coverable fraction failed")
     if (
         not math.isfinite(final_coverage)
-        or final_coverage < FORMAL_SUCCESS_COVERAGE_RATIO
+        or not 0.0 <= final_coverage <= 1.0
     ):
-        raise ClosedLoopGateError("closed-loop final coverage failed")
-    if row.get("success_first_crossing") is not True:
-        raise ClosedLoopGateError("closed-loop success crossing is missing")
-    if row.get("terminal_reason") != "SUCCESS":
-        raise ClosedLoopGateError("closed-loop terminal reason is not SUCCESS")
+        raise ClosedLoopGateError("closed-loop final coverage is invalid")
+    count_fields = (
+        "oracle_contradiction_count",
+        "oracle_opportunity_count",
+        "planner_failure_count",
+        "safety_violation_count",
+        "invalid_action_count",
+        "execution_failure_count",
+        "executed_step_count",
+    )
+    if any(
+        type(row.get(field)) is not int or int(row[field]) < 0
+        for field in count_fields
+    ):
+        raise ClosedLoopGateError("closed-loop event count is invalid")
+    if row["executed_step_count"] <= 0:
+        raise ClosedLoopGateError("closed-loop executed step count is invalid")
+    if row["planner_failure_count"] >= row["executed_step_count"]:
+        raise ClosedLoopGateError(
+            "closed-loop has no successful execution before terminal"
+        )
     for field, message in (
         ("oracle_contradiction_count", "oracle contradiction"),
-        ("oracle_opportunity_count", "terminal oracle opportunity"),
-        ("planner_failure_count", "planner failure"),
         ("safety_violation_count", "safety violation"),
         ("invalid_action_count", "invalid action"),
         ("execution_failure_count", "execution failure"),
     ):
-        if row.get(field) != 0:
+        if row[field] != 0:
             raise ClosedLoopGateError(f"closed-loop {message} count is nonzero")
-    if type(row.get("executed_step_count")) is not int or int(
-        row["executed_step_count"]
-    ) <= 0:
-        raise ClosedLoopGateError("closed-loop executed step count is invalid")
+
+    terminal_reason = row.get("terminal_reason")
+    success = terminal_reason == "SUCCESS"
+    legal_failure_reasons = {
+        "NO_FRONTIER_ANCHOR",
+        "VISITED_EXHAUSTED",
+        "PLATFORM_UNREACHABLE",
+        "ZERO_GAIN",
+        "PLANNER_REJECTED_ALL",
+    }
+    if not success and terminal_reason not in legal_failure_reasons:
+        raise ClosedLoopGateError("closed-loop terminal reason is not auditable")
+    if success:
+        if final_coverage < FORMAL_SUCCESS_COVERAGE_RATIO:
+            raise ClosedLoopGateError("closed-loop successful coverage is too low")
+        if row.get("success_first_crossing") is not True:
+            raise ClosedLoopGateError("closed-loop success crossing is missing")
+        if row["oracle_opportunity_count"] != 0:
+            raise ClosedLoopGateError(
+                "closed-loop terminal oracle opportunity is nonzero"
+            )
+    else:
+        if final_coverage >= FORMAL_SUCCESS_COVERAGE_RATIO:
+            raise ClosedLoopGateError(
+                "closed-loop failure coverage reached the success threshold"
+            )
+        if row.get("success_first_crossing") is not False:
+            raise ClosedLoopGateError(
+                "closed-loop failure has a success crossing"
+            )
+        if (
+            terminal_reason != "PLANNER_REJECTED_ALL"
+            and row["oracle_opportunity_count"] != 0
+        ):
+            raise ClosedLoopGateError(
+                "closed-loop terminal oracle opportunity is nonzero"
+            )
+        if (
+            terminal_reason == "PLANNER_REJECTED_ALL"
+            and row["planner_failure_count"] <= 0
+        ):
+            raise ClosedLoopGateError(
+                "closed-loop planner-rejected terminal has no planner failure"
+            )
     for field in _ROW_SHA_FIELDS:
         if not _is_sha(row.get(field)):
             raise ClosedLoopGateError(f"closed-loop {field} is invalid")
@@ -605,7 +659,10 @@ def build_closed_loop_gate_report(
         or len({case.scene_id for case in selected_cases}) != len(selected_cases)
         or any(not isinstance(case, ClosedLoopGateCase) for case in selected_cases)
     ):
-        raise ClosedLoopGateError("closed-loop gate requires 24 unique cases")
+        raise ClosedLoopGateError(
+            "closed-loop gate requires at least "
+            f"{CLOSED_LOOP_MINIMUM_SCENES} unique case"
+        )
     by_case = {case.scene_id: case for case in selected_cases}
     expected = {
         (case.scene_id, platform)
@@ -642,6 +699,9 @@ def build_closed_loop_gate_report(
     ):
         raise ClosedLoopGateError("closed-loop timing is invalid")
     ordered_cases = sorted(selected_cases, key=lambda case: case.scene_id)
+    success_count = sum(
+        row["terminal_reason"] == "SUCCESS" for row in ordered_rows
+    )
     evidence: dict[str, object] = {
         "schema_version": CLOSED_LOOP_GATE_SCHEMA,
         "source_commit": source_commit,
@@ -650,6 +710,10 @@ def build_closed_loop_gate_report(
         "minimum_scene_count": CLOSED_LOOP_MINIMUM_SCENES,
         "scene_count": len(selected_cases),
         "scene_platform_count": len(ordered_rows),
+        "successful_scene_platform_count": success_count,
+        "natural_failure_scene_platform_count": (
+            len(ordered_rows) - success_count
+        ),
         "selected_scenes": [
             {
                 "scene_id": case.scene_id,

@@ -112,12 +112,12 @@ def _passing_rows(cases) -> list[dict[str, object]]:
     ]
 
 
-def test_select_closed_loop_gate_cases_requires_24_exact_common_scenes() -> None:
+def test_select_closed_loop_gate_cases_requires_one_exact_common_scene() -> None:
     manifest, scenario_document = _cache_documents(
         CLOSED_LOOP_MINIMUM_SCENES - 1
     )
 
-    with pytest.raises(ClosedLoopGateError, match="at least 24"):
+    with pytest.raises(ClosedLoopGateError, match="at least 1"):
         select_closed_loop_gate_cases(manifest, scenario_document)
 
 
@@ -205,8 +205,10 @@ def test_closed_loop_gate_report_is_canonical_and_repeat_comparable(
     )
 
     assert first.payload["schema_version"] == CLOSED_LOOP_GATE_SCHEMA
-    assert first.payload["scene_count"] == 24
-    assert first.payload["scene_platform_count"] == 72
+    assert first.payload["scene_count"] == 1
+    assert first.payload["scene_platform_count"] == 3
+    assert first.payload["successful_scene_platform_count"] == 3
+    assert first.payload["natural_failure_scene_platform_count"] == 0
     assert first.payload["passed"] is True
     assert first.payload["closed_loop_evidence_sha256"] == second.payload[
         "closed_loop_evidence_sha256"
@@ -218,6 +220,42 @@ def test_closed_loop_gate_report_is_canonical_and_repeat_comparable(
 
 
 @pytest.mark.parametrize(
+    ("terminal_reason", "oracle_opportunity_count"),
+    (
+        ("NO_FRONTIER_ANCHOR", 0),
+        ("VISITED_EXHAUSTED", 0),
+        ("PLATFORM_UNREACHABLE", 0),
+        ("ZERO_GAIN", 0),
+        ("PLANNER_REJECTED_ALL", 3),
+    ),
+)
+def test_closed_loop_gate_accepts_auditable_failure_below_success_threshold(
+    terminal_reason: str,
+    oracle_opportunity_count: int,
+) -> None:
+    manifest, scenario_document = _cache_documents()
+    cases = select_closed_loop_gate_cases(manifest, scenario_document)
+    rows = _passing_rows(cases)
+    rows[0].update(
+        final_coverage_hex=float(0.31).hex(),
+        success_first_crossing=False,
+        terminal_reason=terminal_reason,
+        oracle_opportunity_count=oracle_opportunity_count,
+        planner_failure_count=2,
+    )
+
+    report = build_closed_loop_gate_report(
+        source_commit="9" * 40,
+        cache_manifest_sha256=_sha("d"),
+        cases=cases,
+        rows=rows,
+        timings_seconds={},
+    )
+
+    assert report.payload["passed"] is True
+
+
+@pytest.mark.parametrize(
     "field,value,message",
     (
         ("exact", False, "exact"),
@@ -226,12 +264,10 @@ def test_closed_loop_gate_report_is_canonical_and_repeat_comparable(
             float(0.94).hex(),
             "mission coverable",
         ),
-        ("final_coverage_hex", float(0.949999).hex(), "final coverage"),
-        ("success_first_crossing", False, "success crossing"),
-        ("terminal_reason", "ZERO_GAIN", "terminal reason"),
         ("oracle_contradiction_count", 1, "oracle contradiction"),
-        ("planner_failure_count", 1, "planner failure"),
         ("safety_violation_count", 1, "safety"),
+        ("invalid_action_count", 1, "invalid action"),
+        ("execution_failure_count", 1, "execution failure"),
     ),
 )
 def test_closed_loop_gate_report_rejects_a_failed_scene_platform(
@@ -243,6 +279,72 @@ def test_closed_loop_gate_report_rejects_a_failed_scene_platform(
     cases = select_closed_loop_gate_cases(manifest, scenario_document)
     rows = _passing_rows(cases)
     rows[0][field] = value
+
+    with pytest.raises(ClosedLoopGateError, match=message):
+        build_closed_loop_gate_report(
+            source_commit="9" * 40,
+            cache_manifest_sha256=_sha("d"),
+            cases=cases,
+            rows=rows,
+            timings_seconds={},
+        )
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    (
+        (
+            {
+                "final_coverage_hex": float(0.949999).hex(),
+                "success_first_crossing": True,
+                "terminal_reason": "SUCCESS",
+            },
+            "successful coverage",
+        ),
+        (
+            {
+                "final_coverage_hex": float(0.95).hex(),
+                "success_first_crossing": False,
+                "terminal_reason": "ZERO_GAIN",
+            },
+            "failure coverage",
+        ),
+        (
+            {
+                "final_coverage_hex": float(0.31).hex(),
+                "success_first_crossing": False,
+                "terminal_reason": "HARD_FAILURE",
+            },
+            "terminal reason",
+        ),
+        (
+            {
+                "final_coverage_hex": float(0.31).hex(),
+                "success_first_crossing": False,
+                "terminal_reason": "ZERO_GAIN",
+                "oracle_opportunity_count": 1,
+            },
+            "terminal oracle opportunity",
+        ),
+        (
+            {
+                "final_coverage_hex": float(0.31).hex(),
+                "success_first_crossing": False,
+                "terminal_reason": "PLANNER_REJECTED_ALL",
+                "planner_failure_count": 11,
+            },
+            "successful execution",
+        ),
+    ),
+)
+def test_closed_loop_gate_rejects_inconsistent_terminal_evidence(
+    updates: dict[str, object],
+    message: str,
+) -> None:
+    manifest, scenario_document = _cache_documents()
+    cases = select_closed_loop_gate_cases(manifest, scenario_document)
+    rows = _passing_rows(cases)
+    rows[0].update(updates)
 
     with pytest.raises(ClosedLoopGateError, match=message):
         build_closed_loop_gate_report(

@@ -616,21 +616,22 @@ class V3ExplorationEnvironment:
 
     def _audit_exhaustion(self) -> tuple[TerminalReason, int, int | None]:
         diagnostics = self.current_candidate_diagnostics()
+        planner_rejected_all = (
+            diagnostics.emitted_count > 0
+            and diagnostics.planner_rejected_count
+            == diagnostics.emitted_count
+        )
         if self._frontier_oracle is None:
             oracle = FrontierOracleResult(0, 0, 0, 0)
         else:
             oracle = self._frontier_oracle()
             if not isinstance(oracle, FrontierOracleResult):
                 self._fail_closed("frontier oracle returned invalid data")
-        if oracle.opportunity_count > 0:
+        if not planner_rejected_all and oracle.opportunity_count > 0:
             self._fail_closed(
                 "production candidates are empty while frontier oracle found opportunities"
             )
-        if (
-            diagnostics.emitted_count > 0
-            and diagnostics.planner_rejected_count
-            == diagnostics.emitted_count
-        ):
+        if planner_rejected_all:
             reason = TerminalReason.PLANNER_REJECTED_ALL
         elif diagnostics.zero_gain_count > 0:
             reason = TerminalReason.ZERO_GAIN

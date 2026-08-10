@@ -378,30 +378,38 @@ planner_rejected_count
 - HOPPER 独立生成稳定的 frontier 落脚代表点，并用当前已观测地图执行真实单跳认证；
 - oracle 不调用生产候选排序，不读取 truth coverable mask，不把结果输入策略或 reward。
 
-候选为空时执行以下状态机：
+候选为空时必须区分“生产端从未发出候选”和“生产端候选已被规划器逐个拒绝”。执行以下状态机：
 
 ```text
-production_candidate_count == 0 AND oracle_opportunity_count > 0
+producer_emitted_count == 0 AND oracle_opportunity_count > 0
     -> ORACLE_CONTRADICTION
     -> raise EnvironmentInvariantError
     -> 不进入 rollout
 
-production_candidate_count == 0 AND oracle_opportunity_count == 0
+producer_emitted_count == 0 AND oracle_opportunity_count == 0
     -> LEGAL_EXHAUSTION(<最后实际耗尽候选的阶段>)
     -> 未达到 0.95 时按该阶段原因合法失败终止
+
+producer_emitted_count > 0
+AND planner_rejected_count == producer_emitted_count
+    -> PLANNER_REJECTED_ALL
+    -> 未达到 0.95 时作为可审计探索失败终止
 
 coverage 首次达到 0.95
     -> SUCCESS
 ```
 
-规划器逐个拒绝全部候选时记录 `PLANNER_REJECTED_ALL`，并在终止前再次运行 oracle。硬安全、合同
-错配和非有限数值继续走 `HARD_FAILURE`，不能与普通探索耗尽合并。
+规划器逐个拒绝全部候选时仍运行 oracle，但此时 oracle 只证明 observed-only 几何机会，不等价于
+完整规划器能够生成 reference；其正数结果作为诊断保留，不得反过来误报为生产生成器为空。
+只有 `producer_emitted_count == 0` 时，oracle 正数才构成真正的生成器矛盾。硬安全、合同错配和
+非有限数值继续走 `HARD_FAILURE`，不能与普通探索耗尽合并。
 
 每个终止 episode 必须携带一个完整主原因：`SUCCESS`、`NO_FRONTIER_ANCHOR`、
 `VISITED_EXHAUSTED`、`PLATFORM_UNREACHABLE`、`ZERO_GAIN`、`PLANNER_REJECTED_ALL`、
-`HARD_FAILURE` 或 `CANCELED`。`oracle_opportunity_count=0` 是允许上述探索耗尽原因成为 terminal
-的审计事实，不是另一个主原因。若多个候选阶段同时为空，使用最晚一个实际消耗候选的阶段作为
-主原因，同时保留全部计数。
+`HARD_FAILURE` 或 `CANCELED`。除 `PLANNER_REJECTED_ALL` 外，
+`oracle_opportunity_count=0` 是允许候选耗尽原因成为 terminal 的审计事实，不是另一个主原因；
+`PLANNER_REJECTED_ALL` 可携带正 oracle 计数以说明“有几何机会、但完整规划失败”。若多个候选阶段
+同时为空，使用最晚一个实际消耗候选的阶段作为主原因，同时保留全部计数。
 
 环境可记录 `remaining_unobserved_coverable_count` 作为 truth-side 诊断，但不能用它生成候选或
 替代 observed-only oracle。
@@ -432,7 +440,7 @@ cache、候选特征、动作聚合、成功阈值、reward 和 replay state 均
 - run manifest 中 `resume_parent` 与 `warm_start_parent` 均为 null，并记录旧运行仅作为历史审计。
 
 训练语义升级为
-`lunar-training-semantics/sensor-30m-360-platform-coverable-detail95-ground-option-path-observation/v7`。
+`lunar-training-semantics/sensor-30m-360-platform-coverable-detail95-ground-option-path-observation-auditable-failure/v8`。
 cache v4 的数组 schema 不变，但旧 manifest 的语义哈希、源码提交和 reward 哈希必须失配；必须在
 仓库外完整重建，禁止就地改写旧 cache。
 
@@ -474,21 +482,24 @@ cache v4 的数组 schema 不变，但旧 manifest 的语义哈希、源码提�
 
 ### 9.3 固定场景闭环门
 
-先生成仓库外 preflight v4 cache，在至少 24 个冻结物理场景上对三平台执行 observed-only
-确定性 gain-over-cost 基线到自然 terminal。每个被选场景—平台必须满足：
+先生成仓库外 preflight v4 cache，在冻结 common schedule 的首个物理场景上对三平台执行
+observed-only 确定性 gain-over-cost 基线到自然 terminal。该启动门证明闭环可运行，而不是证明
+未训练网络或规则基线已经学会达到任务成功阈值。每个场景—平台必须满足：
 
 - `exact=true`；
 - `mission_coverable_fraction >= 0.95`；
-- 基线最终覆盖率 `>=0.95`；
+- 最终覆盖率有限且位于 `[0,1]`，并与 `SUCCESS`/合法失败原因一致；
 - `ORACLE_CONTRADICTION=0`；
-- 平台候选发布后无系统性规划器语义拒绝；
+- 至少成功执行过一条真实 reference；
+- 安全违规、无效 action、执行失败和硬错误均为零；
 - 每个 terminal reason 完整；
-- 重复运行的 mask、候选、请求和最终覆盖率一致。
+- `SUCCESS` 时覆盖率必须 `>=0.95`；未达到 `0.95` 时允许
+  `NO_FRONTIER_ANCHOR`、`VISITED_EXHAUSTED`、`PLATFORM_UNREACHABLE`、`ZERO_GAIN` 或
+  `PLANNER_REJECTED_ALL`。
 
-这里的“24 个”是三平台 `exact-common` 的门禁分母，不是 preflight cache 的原始场景上限。
-若首批 24 个原始场景经平台资格计算后不足 24 个 `exact-common`，必须扩大确定性的 preflight
-物理场景前缀，再由冻结 common schedule 选取前 24 个；不得按闭环结果挑选成功场景，也不得降低
-当前明确批准的 `0.95` 任务可行性资格门和 `0.95` 成功阈值。固定场景闭环使用独立的
+不得按闭环结果替换首个 common 场景，也不得降低当前明确批准的 `0.95` 任务可行性资格门和
+episode 的 `0.95` 成功阈值。24 个 exact-common 场景 × 三平台的覆盖分布与成功率改为训练启动后
+的首轮评估证据，不再阻止 step-0 启动。启动闭环使用独立的
 `closed-loop-gate` 命令和仓库外报告；现有
 `formal-preflight` 的一步非代理探针与启动身份检查仍属于 full cache 生成后的启动前校准门，
 不能冒充本节的自然终止闭环门。
@@ -515,7 +526,7 @@ Humble 环境、仓库外 build/install/log 目录中构建并运行 `lunar_plan
 7. 接入持续地面目标、路径观测和一个 action 的 transition 聚合；
 8. 升级预计增益、候选归一化、`0.95` 成功和 reward v4；
 9. 完成新 run manifest 的随机初始化边界；
-10. 生成 preflight v4 cache，执行单场景和固定场景闭环门；
+10. 生成 preflight v4 cache，执行首个 exact-common 场景的三平台启动闭环门；
 11. 生成 full v4 cache并复核数据分布；
 12. 使用本次已获授权的随机初始化配置启动新的 step-0 正式训练并检查首批指标。
 
@@ -532,9 +543,9 @@ Humble 环境、仓库外 build/install/log 目录中构建并运行 `lunar_plan
 - C++ v3 对最终 reference 的安全所有权；
 - source/split 原始数据和 hazard 生成器。
 
-本文也不把旧仓地面实现直接复制给 Hopper。当前 `0.95` 是用户明确批准的本轮训练目标，仍要求
-`mission_coverable_fraction >=0.95` 和自然终止闭环通过，不能靠继续缩小分母或消耗 GPU 掩盖任务
-不可行。
+本文也不把旧仓地面实现直接复制给 Hopper。当前 `0.95` 是用户明确批准的 episode 成功阈值，
+仍要求 `mission_coverable_fraction >=0.95` 和自然终止闭环通过；它不是未训练基线的逐案例启动
+门槛，不能靠继续缩小分母或伪造成功掩盖任务不可行。
 
 ## 12. 完成标准
 
@@ -547,6 +558,6 @@ Humble 环境、仓库外 build/install/log 目录中构建并运行 `lunar_plan
 - 训练和评估只调度对应平台 eligible 场景，并公开完整 feasibility rate；
 - 候选耗尽能够区分生成、访问、平台、增益和规划器原因；
 - observed-only oracle 能阻止错误的静默早停；
-- 24 场景三平台闭环门、完整测试、ROS 构建和仓库边界检查全部通过；
+- 单场景三平台启动闭环门、完整测试、ROS 构建和仓库边界检查全部通过；
 - 新训练使用全新模型、全新 optimizer、新身份和 step 0；
 - 单场景、三平台闭环、完整测试和 cache 门通过后，按本次用户授权直接启动并核验首批指标。

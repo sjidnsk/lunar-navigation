@@ -672,7 +672,7 @@ def test_legal_empty_boundary_reports_latest_stage_and_truth_diagnostic() -> Non
     assert result.remaining_coverable_detail_cell_count == 1234
 
 
-def test_last_planner_rejection_reruns_oracle_and_reports_one_terminal_reason() -> None:
+def test_last_planner_rejection_with_oracle_opportunity_reports_planner_failure() -> None:
     rejected = PlannerOutput()
     rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
     rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
@@ -682,7 +682,7 @@ def test_last_planner_rejection_reruns_oracle_and_reports_one_terminal_reason() 
     def oracle() -> FrontierOracleResult:
         nonlocal oracle_calls
         oracle_calls += 1
-        return FrontierOracleResult(1, 1, 0, 0)
+        return FrontierOracleResult(1, 1, 1, 1)
 
     env = V3ExplorationEnvironment(
         platform_type="WHEELED",
@@ -706,7 +706,7 @@ def test_last_planner_rejection_reruns_oracle_and_reports_one_terminal_reason() 
     assert result.transition is not None
     assert result.transition.terminated is True
     assert result.transition.terminal_reason is TerminalReason.PLANNER_REJECTED_ALL
-    assert result.transition.oracle_opportunity_count == 0
+    assert result.transition.oracle_opportunity_count == 1
     assert result.transition.remaining_coverable_detail_cell_count == 88
 
 

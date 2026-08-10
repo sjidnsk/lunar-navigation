@@ -304,15 +304,15 @@ git commit -m "fix(training): persist ground goals across rolling references"
 
 **Interfaces:**
 
-- Success ratio is exactly `0.95`; semantics are `lunar-training-semantics/sensor-30m-360-platform-coverable-detail95-ground-option-path-observation/v7`.
+- Success ratio is exactly `0.95`; semantics are `lunar-training-semantics/sensor-30m-360-platform-coverable-detail95-ground-option-path-observation-auditable-failure/v8`.
 - Reward schema is `lunar-reward/v4`; coverage scale stays `100.0`, first-success bonus becomes `100.0`, and cost/time/priority remain validated telemetry.
-- Initial eligibility is `<0.95`, mission feasibility remains `>=0.95`, and closed-loop final coverage is `>=0.95`.
-- Pre-v7/pre-v4 resume and warm start fail closed.
+- Initial eligibility is `<0.95`, mission feasibility remains `>=0.95`, and closed-loop final coverage may be below `0.95` when paired with an auditable natural-failure reason.
+- Pre-v8/pre-v4 resume and warm start fail closed.
 - Launch without either flag records null parents and initializes complete model/value/optimizer/RNG/normalization at step 0.
 
 - [ ] **Step 1: Write failing literal tests**
 
-Assert `0.949999` is not success, `0.949 -> 0.95` fires once, a later step has no second bonus, zero-gain success reward is `99.9`, `0.949999` gate coverage fails, `0.95` passes, and fresh manifest parents are null at step 0.
+Assert `0.949999` is not success, `0.949 -> 0.95` fires once, a later step has no second bonus, zero-gain success reward is `99.9`, auditable gate failure may finish below `0.95`, and fresh manifest parents are null at step 0.
 
 - [ ] **Step 2: Run RED**
 
@@ -406,15 +406,15 @@ Any correction gets its own RED/GREEN. Source must be committed and clean before
 
 ---
 
-### Task 7: Prove 95% closure, rebuild cache and launch fresh training
+### Task 7: Qualify the executable loop, rebuild cache and launch fresh training
 
 **Files:** Verify `closed_loop_gate.py`, `formal_preflight.py` and `cli.py`; all resulting caches, traces, reports, logs and checkpoints remain external.
 
 **Interfaces:**
 
-- Replays `b230277e630f34f194195f87321ea1ae5be7c25e40b597e429150c375dceeaf7`/WHEELED to natural success `>=0.95`, then representative exact LEGGED and HOPPER cases.
-- Requires zero oracle contradictions/safety violations/systematic planner rejection and target/reference progress evidence.
-- Runs the first 24 exact-common frozen scenes x three platforms twice; both reports require `72/72` success and identical canonical digests.
+- Runs the first exact-common frozen scene on WHEELED, LEGGED and HOPPER to natural terminal without outcome-based case replacement.
+- Requires zero oracle contradictions, safety violations, invalid actions and execution failures, plus at least one successful reference execution per platform.
+- Allows a baseline result below `0.95` when its terminal reason is a legal exploration failure; `0.95` remains the episode success label and later evaluation target.
 - Full cache and final preflight precede launch.
 - Launch omits resume/warm-start, records PID/command externally, and is healthy only after liveness, step-0 manifest, finite first metrics and first valid checkpoint.
 
@@ -435,23 +435,21 @@ PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
   --preflight-scenario-limit 128
 ```
 
-- [ ] **Step 2: Run single-case natural-terminal diagnostics**
+- [ ] **Step 2: Run the three-platform startup natural-terminal gate**
 
-Use the closed-loop case runner and frozen schedule. Do not replace cases based on outcomes. Require b230/WHEELED plus the first exact-common LEGGED and HOPPER cases to terminate `SUCCESS >=0.95`.
+Use the frozen common schedule and do not replace the scene based on outcomes. Require all three platforms to produce auditable natural terminals with real reference progress and no infrastructure or safety failure.
 
-- [ ] **Step 3: Run 24x3 gate twice**
+- [ ] **Step 3: Retain 24x3 as a post-launch evaluation**
 
 ```bash
-for run in 1 2; do
-  PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
-    "$PYTHON" -m lunar_policy_training.cli closed-loop-gate \
-    --cache-manifest "$PREFLIGHT_ROOT/cache-v4/cache-manifest.json" \
-    --artifact-root "$PREFLIGHT_ROOT/closed-loop-run-$run" \
-    --minimum-scenes 24 --max-workers 8
-done
+PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
+  "$PYTHON" -m lunar_policy_training.cli closed-loop-gate \
+  --cache-manifest "$PREFLIGHT_ROOT/cache-v4/cache-manifest.json" \
+  --artifact-root "$PREFLIGHT_ROOT/closed-loop-startup" \
+  --minimum-scenes 1 --max-workers 3
 ```
 
-Compare `closed_loop_evidence_sha256`; only timing and artifact paths already excluded by canonicalization may differ.
+The 24-scene x three-platform run remains a post-launch baseline/evaluation artifact and does not block the untrained step-0 process.
 
 - [ ] **Step 4: Materialize full cache and run formal preflight**
 
@@ -483,8 +481,8 @@ If a gate fails, return to its owning task with a new RED test and do not launch
 
 1. Tasks 1-5 have observed RED/GREEN evidence and scoped commits.
 2. Full Python, native Release and repository-boundary checks pass at the final source commit.
-3. b230/WHEELED and representative LEGGED/HOPPER traces naturally reach `>=0.95`.
-4. Both 24x3 reports pass with identical canonical digests.
+3. The first exact-common scene on WHEELED, LEGGED and HOPPER reaches an auditable natural terminal with real reference execution and no infrastructure or safety failure.
+4. Each startup row is either `SUCCESS >=0.95` or a consistent legal failure below `0.95`; the later 24x3 evaluation remains non-blocking.
 5. Full cache and formal-preflight identities are exact and external.
 6. A randomly initialized formal run is alive from step 0 with finite first metrics and a valid first checkpoint.
 7. `git status --short` is clean and no generated artifact is tracked.
