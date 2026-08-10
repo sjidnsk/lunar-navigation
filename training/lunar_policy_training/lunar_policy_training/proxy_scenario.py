@@ -371,6 +371,7 @@ class _ProxyEpisode:
         self.coverage = 0.05
         self.visited = {self.position}
         self.pending_target = self.position
+        self._active_ground_action: PolicyAction | None = None
         self.execution_state = (
             "GROUND_HOLD" if platform_type == "HOPPER" else "DECISION_BOUNDARY"
         )
@@ -470,6 +471,35 @@ class _ProxyEpisode:
             request=request,
             identity=expected_identity,
         )
+
+    def begin_ground_option(
+        self,
+        action: PolicyAction,
+        expected_identity: ObservationIdentity,
+    ) -> PreparedPlanRequest:
+        if self.platform_type not in {"WHEELED", "LEGGED"}:
+            raise ValueError("proxy ground option requires a ground platform")
+        if self._active_ground_action is not None:
+            raise ValueError("proxy episode already has an active ground option")
+        prepared = self.build_request(action, expected_identity)
+        self._active_ground_action = action
+        return prepared
+
+    def continue_ground_option(
+        self, expected_identity: ObservationIdentity
+    ) -> PreparedPlanRequest:
+        action = self._active_ground_action
+        if action is None:
+            raise RuntimeError("proxy episode has no active ground option")
+        return self.build_request(action, expected_identity)
+
+    def ground_option_distance_m(self) -> float:
+        if self._active_ground_action is None:
+            raise RuntimeError("proxy episode has no active ground option")
+        return math.dist(self.position, self.pending_target)
+
+    def clear_ground_option(self) -> None:
+        self._active_ground_action = None
 
     def execute_reference(
         self, reference: bridge_api.MotionReference
@@ -587,14 +617,21 @@ class _ProxyEpisode:
         hopper_commitment_states: tuple[str, ...] = (),
     ) -> ReferenceExecutionResult:
         tolerance = 0.5 if self.platform_type == "HOPPER" else 0.2
-        if math.dist(executed_position, self.pending_target) > tolerance:
+        target_distance = math.dist(executed_position, self.pending_target)
+        reached_target = target_distance <= tolerance + 1.0e-6
+        if self.platform_type == "HOPPER" and not reached_target:
             return self._execution_failure(safety_violation_count=1)
-        repeated = self.pending_target in self.visited
+        repeated = reached_target and self.pending_target in self.visited
         previous_coverage = self.coverage
         self.position = executed_position
-        self.visited.add(self.pending_target)
         self.step += 1
-        gain = 0.0 if repeated else min(0.475, 1.0 - self.coverage)
+        if reached_target:
+            self.visited.add(self.pending_target)
+        gain = (
+            0.0
+            if repeated or not reached_target
+            else min(0.475, 1.0 - self.coverage)
+        )
         self.coverage = min(1.0, self.coverage + gain)
         self.execution_state = execution_state
         success_first_crossing = previous_coverage < 0.95 <= self.coverage
@@ -709,12 +746,31 @@ def _create_proxy_environment(
     initial = episode.observation
     environment = create_v3_environment(
         platform_type=platform_type,
-        request_builder=episode.build_request,
+        request_builder=(
+            episode.build_request
+            if platform_type == "HOPPER"
+            else episode.begin_ground_option
+        ),
         initial_observation=initial,
         observation_provider=episode.produce_observation,
         reference_executor=episode.execute_reference,
         committed_hop_executor=(
             episode.committed_hop_feedback if platform_type == "HOPPER" else None
+        ),
+        ground_option_continuation_builder=(
+            episode.continue_ground_option
+            if platform_type != "HOPPER"
+            else None
+        ),
+        ground_option_distance_provider=(
+            episode.ground_option_distance_m
+            if platform_type != "HOPPER"
+            else None
+        ),
+        ground_option_clearer=(
+            episode.clear_ground_option
+            if platform_type != "HOPPER"
+            else None
         ),
         plan_cost_scale=100.0,
         planner_elapsed_scale_s=1.0,

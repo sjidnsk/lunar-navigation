@@ -78,6 +78,9 @@ _REJECTED_ACTION_OUTPUTS = frozenset(
     }
 )
 _MAX_COMMITTED_HOP_FEEDBACK_STEPS = 64
+_MAX_GROUND_OPTION_REFERENCES = 64
+_GROUND_OPTION_TARGET_TOLERANCE_M = 0.2
+_GROUND_OPTION_PROGRESS_EPSILON_M = 1.0e-6
 _EXECUTION_EVENT_COUNT_FIELDS = (
     "safety_violation_count",
     "invalid_action_count",
@@ -178,6 +181,11 @@ class V3ExplorationEnvironment:
         committed_hop_executor: Callable[
             [], CommittedHopExecutionFeedback
         ] | None = None,
+        ground_option_continuation_builder: (
+            Callable[[ObservationIdentity], object] | None
+        ) = None,
+        ground_option_distance_provider: Callable[[], float] | None = None,
+        ground_option_clearer: Callable[[], None] | None = None,
         candidate_diagnostics_provider: (
             Callable[[], CandidateDiagnostics] | None
         ) = None,
@@ -246,9 +254,29 @@ class V3ExplorationEnvironment:
                 "remaining-coverable provider",
                 remaining_coverable_detail_cell_count_provider,
             ),
+            (
+                "ground option continuation builder",
+                ground_option_continuation_builder,
+            ),
+            ("ground option distance provider", ground_option_distance_provider),
+            ("ground option clearer", ground_option_clearer),
         ):
             if callback is not None and not callable(callback):
                 raise ValueError(f"{name} must be callable")
+        ground_callbacks = (
+            ground_option_continuation_builder,
+            ground_option_distance_provider,
+            ground_option_clearer,
+        )
+        if any(callback is not None for callback in ground_callbacks) and not all(
+            callback is not None for callback in ground_callbacks
+        ):
+            raise ValueError("ground option callbacks must be configured together")
+        if all(callback is not None for callback in ground_callbacks):
+            if platform_type not in {"WHEELED", "LEGGED"}:
+                raise ValueError("ground option callbacks require a ground platform")
+            if not require_identity_bound_request:
+                raise ValueError("ground options require identity-bound requests")
         self._observation = _clone_observation(initial_observation)
         self._rejected_candidates: set[int] = set()
         self._observation_provider = observation_provider
@@ -257,6 +285,11 @@ class V3ExplorationEnvironment:
         self._require_identity_bound_request = require_identity_bound_request
         self._reference_executor = reference_executor
         self._committed_hop_executor = committed_hop_executor
+        self._ground_option_continuation_builder = (
+            ground_option_continuation_builder
+        )
+        self._ground_option_distance_provider = ground_option_distance_provider
+        self._ground_option_clearer = ground_option_clearer
         self._candidate_diagnostics_provider = candidate_diagnostics_provider
         self._frontier_oracle = frontier_oracle
         self._remaining_coverable_detail_cell_count_provider = (
@@ -386,10 +419,25 @@ class V3ExplorationEnvironment:
         request = self._build_plan_request(action, expected_identity)
         output = self._bridge.plan(request)
         self._validate_output(output)
+        return self._transition_for_output(
+            output, action, mask_rejected_action=True
+        )
+
+    def _transition_for_output(
+        self,
+        output: PlannerOutput,
+        action: PolicyAction,
+        *,
+        mask_rejected_action: bool,
+    ) -> PlannerTransition:
         if output.directive == ExecutionDirective.CONTINUE_COMMITTED_HOP:
             return self._advance_committed_hop_without_policy(output)
         if output.reference is None:
-            if (output.outcome, output.directive) in _REJECTED_ACTION_OUTPUTS:
+            if (
+                mask_rejected_action
+                and (output.outcome, output.directive)
+                in _REJECTED_ACTION_OUTPUTS
+            ):
                 self._mask_rejected_candidate(action.frontier_index)
             if output.outcome == PlanningOutcome.CANCELED:
                 return self._hold_transition(
@@ -506,7 +554,11 @@ class V3ExplorationEnvironment:
             self._fail_closed("prepared action observation identity is stale")
         if not bool(self._observation.candidate_mask.any().item()):
             return self._no_candidate_boundary()
-        transition = self.step(action, expected_identity=expected_identity)
+        transition = (
+            self._advance_ground_option(action, expected_identity)
+            if self._ground_option_continuation_builder is not None
+            else self.step(action, expected_identity=expected_identity)
+        )
         if self._platform_type == "HOPPER" and self._execution_state in {
             "JUMP_COMMITTED",
             "IN_FLIGHT",
@@ -664,6 +716,187 @@ class V3ExplorationEnvironment:
         ):
             self._fail_closed("request state time does not match observation identity")
         return prepared.request
+
+    def _build_ground_continuation_request(
+        self, expected_identity: ObservationIdentity
+    ) -> TrainingPlanRequest | object:
+        builder = self._ground_option_continuation_builder
+        if builder is None:
+            self._fail_closed("ground option continuation builder is unavailable")
+        prepared = builder(expected_identity)
+        if not isinstance(prepared, PreparedPlanRequest):
+            self._fail_closed(
+                "ground continuation builder must return PreparedPlanRequest"
+            )
+        if prepared.identity != expected_identity:
+            self._fail_closed("ground continuation observation identity is stale")
+        if (
+            prepared.request.state_time.nanoseconds_since_epoch
+            != expected_identity.state_time_ns
+        ):
+            self._fail_closed(
+                "ground continuation state time does not match observation identity"
+            )
+        return prepared.request
+
+    def _ground_option_distance_m(self) -> float:
+        provider = self._ground_option_distance_provider
+        if provider is None:
+            self._fail_closed("ground option distance provider is unavailable")
+        distance_m = provider()
+        if (
+            not isinstance(distance_m, (int, float))
+            or isinstance(distance_m, bool)
+            or not math.isfinite(float(distance_m))
+            or float(distance_m) < 0.0
+        ):
+            self._fail_closed("ground option distance is invalid")
+        return float(distance_m)
+
+    def _advance_ground_option(
+        self,
+        action: PolicyAction,
+        expected_identity: ObservationIdentity,
+    ) -> PlannerTransition:
+        clearer = self._ground_option_clearer
+        if clearer is None:
+            self._fail_closed("ground option clearer is unavailable")
+        transitions: list[PlannerTransition] = []
+        try:
+            request = self._build_plan_request(action, expected_identity)
+            previous_distance_m = self._ground_option_distance_m()
+            for reference_index in range(_MAX_GROUND_OPTION_REFERENCES):
+                output = self._bridge.plan(request)
+                self._validate_output(output)
+                transition = self._transition_for_output(
+                    output,
+                    action,
+                    mask_rejected_action=not transitions,
+                )
+                transitions.append(transition)
+                if output.reference is None:
+                    return self._aggregate_ground_transitions(transitions)
+                if (
+                    transition.terminated
+                    or transition.success_first_crossing
+                    or transition.hard_safety_violation
+                ):
+                    return self._aggregate_ground_transitions(transitions)
+                current_distance_m = self._ground_option_distance_m()
+                if current_distance_m <= (
+                    _GROUND_OPTION_TARGET_TOLERANCE_M
+                    + _GROUND_OPTION_PROGRESS_EPSILON_M
+                ):
+                    return self._aggregate_ground_transitions(transitions)
+                if (
+                    current_distance_m
+                    >= previous_distance_m - _GROUND_OPTION_PROGRESS_EPSILON_M
+                ):
+                    self._fail_closed(
+                        "ground option reference made no target-distance progress"
+                    )
+                previous_distance_m = current_distance_m
+                if reference_index + 1 >= _MAX_GROUND_OPTION_REFERENCES:
+                    self._fail_closed(
+                        "ground option did not finish within 64 references"
+                    )
+                continuation_identity = self._observation.observation_identities[0]
+                request = self._build_ground_continuation_request(
+                    continuation_identity
+                )
+            self._fail_closed("ground option reference loop is inconsistent")
+        finally:
+            clearer()
+
+    def _aggregate_ground_transitions(
+        self, transitions: list[PlannerTransition]
+    ) -> PlannerTransition:
+        if not transitions:
+            self._fail_closed("ground option aggregation is empty")
+        values = tuple(
+            float(value)
+            for transition in transitions
+            for value in (
+                transition.mission_observed_delta,
+                transition.priority_observed_delta,
+                transition.normalized_plan_or_execution_cost,
+                transition.normalized_macro_step_time,
+            )
+        )
+        if not all(math.isfinite(value) for value in values):
+            self._fail_closed("ground option aggregation contains non-finite data")
+        mission_observed_delta = sum(
+            transition.mission_observed_delta for transition in transitions
+        )
+        priority_observed_delta = sum(
+            transition.priority_observed_delta for transition in transitions
+        )
+        normalized_cost = sum(
+            transition.normalized_plan_or_execution_cost
+            for transition in transitions
+        )
+        normalized_time = sum(
+            transition.normalized_macro_step_time for transition in transitions
+        )
+        if not all(
+            math.isfinite(float(value))
+            for value in (
+                mission_observed_delta,
+                priority_observed_delta,
+                normalized_cost,
+                normalized_time,
+            )
+        ):
+            self._fail_closed("ground option totals are non-finite")
+        success_crossings = sum(
+            transition.success_first_crossing for transition in transitions
+        )
+        if success_crossings > 1:
+            self._fail_closed("ground option emitted success more than once")
+        final = transitions[-1]
+        return PlannerTransition(
+            next_observation=_clone_observation(final.next_observation),
+            mission_observed_delta=mission_observed_delta,
+            priority_observed_delta=priority_observed_delta,
+            normalized_plan_or_execution_cost=normalized_cost,
+            normalized_macro_step_time=normalized_time,
+            executed_without_new_coverage=all(
+                transition.executed_without_new_coverage
+                for transition in transitions
+            ),
+            success_first_crossing=success_crossings == 1,
+            episode_ended_without_success=(
+                final.episode_ended_without_success
+            ),
+            hard_safety_violation=any(
+                transition.hard_safety_violation for transition in transitions
+            ),
+            cancellation_expected=any(
+                transition.cancellation_expected for transition in transitions
+            ),
+            cpp_exception=next(
+                (
+                    transition.cpp_exception
+                    for transition in transitions
+                    if transition.cpp_exception is not None
+                ),
+                None,
+            ),
+            planning_outcome=final.planning_outcome,
+            execution_directive=final.execution_directive,
+            reason_code=final.reason_code,
+            terminated=final.terminated,
+            execution_events=self._aggregate_execution_events(
+                transitions,
+                context="ground option",
+                infer_missing_hopper_states=False,
+            ),
+            terminal_reason=final.terminal_reason,
+            oracle_opportunity_count=final.oracle_opportunity_count,
+            remaining_coverable_detail_cell_count=(
+                final.remaining_coverable_detail_cell_count
+            ),
+        )
 
     def _install_observation(self, observation: PolicyBatch) -> PolicyBatch:
         if (
@@ -882,6 +1115,9 @@ class V3ExplorationEnvironment:
     def _aggregate_execution_events(
         self,
         transitions: list[PlannerTransition],
+        *,
+        context: str = "committed hopper",
+        infer_missing_hopper_states: bool = True,
     ) -> ExecutionEvents:
         totals = {name: 0 for name in _EXECUTION_EVENT_COUNT_FIELDS}
         commitment_states: list[str] = []
@@ -889,16 +1125,16 @@ class V3ExplorationEnvironment:
         for transition in transitions:
             events = transition.execution_events
             if not isinstance(events, ExecutionEvents):
-                self._fail_closed("committed hopper execution events are invalid")
+                self._fail_closed(f"{context} execution events are invalid")
             for name in _EXECUTION_EVENT_COUNT_FIELDS:
                 value = getattr(events, name)
                 if type(value) is not int or value < 0:
                     self._fail_closed(
-                        "committed hopper event count must be non-negative"
+                        f"{context} event count must be non-negative"
                     )
                 totals[name] += value
             if type(events.selected_action_observed_safe) is not bool:
-                self._fail_closed("committed hopper safe-action fact is invalid")
+                self._fail_closed(f"{context} safe-action fact is invalid")
             selected_action_observed_safe = (
                 selected_action_observed_safe
                 or events.selected_action_observed_safe
@@ -908,10 +1144,14 @@ class V3ExplorationEnvironment:
                 state not in {"JUMP_COMMITTED", "IN_FLIGHT", "LANDED_HOLD"}
                 for state in states
             ):
-                self._fail_closed("committed hopper event states are invalid")
+                self._fail_closed(f"{context} event states are invalid")
             if states:
+                if not infer_missing_hopper_states:
+                    self._fail_closed(
+                        "ground option must not emit hopper commitment states"
+                    )
                 commitment_states.extend(states)
-            else:
+            elif infer_missing_hopper_states:
                 identity = transition.next_observation.observation_identities[0]
                 commitment_states.append(identity.execution_state)
         return ExecutionEvents(
@@ -1180,6 +1420,11 @@ def create_v3_environment(
     committed_hop_executor: Callable[
         [], CommittedHopExecutionFeedback
     ] | None = None,
+    ground_option_continuation_builder: (
+        Callable[[ObservationIdentity], PreparedPlanRequest] | None
+    ) = None,
+    ground_option_distance_provider: Callable[[], float] | None = None,
+    ground_option_clearer: Callable[[], None] | None = None,
     candidate_diagnostics_provider: (
         Callable[[], CandidateDiagnostics] | None
     ) = None,
@@ -1211,6 +1456,11 @@ def create_v3_environment(
         require_identity_bound_request=True,
         reference_executor=reference_executor,
         committed_hop_executor=committed_hop_executor,
+        ground_option_continuation_builder=(
+            ground_option_continuation_builder
+        ),
+        ground_option_distance_provider=ground_option_distance_provider,
+        ground_option_clearer=ground_option_clearer,
         candidate_diagnostics_provider=candidate_diagnostics_provider,
         frontier_oracle=frontier_oracle,
         remaining_coverable_detail_cell_count_provider=(

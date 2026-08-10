@@ -186,6 +186,16 @@ class _MapSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class _GroundOption:
+    target_x_m: float
+    target_y_m: float
+    target_z_m: float
+    tolerance_m: float
+    theta_rad: float
+    goal_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class FormalEnvironmentWorker(ParallelEnvironmentWorker):
     episode: "FormalEpisode"
 
@@ -467,6 +477,8 @@ class FormalEpisode:
         self._pending_hop_landing: Pose2 | None = None
         self._pending_hop_elapsed_s = 0.0
         self._hopper_feedback_phase = 0
+        self._active_ground_option: _GroundOption | None = None
+        self._defer_candidate_rebuild = False
         self.last_hop_available_delta_v_mps = 0.0
         self._reveal_history: list[FormalRevealState] = []
         self._visited_candidate_cells = {start_cell}
@@ -510,7 +522,18 @@ class FormalEpisode:
         self,
         evidence: SensorBoundaryEvidence,
         execution_state: str,
+        *,
+        defer_candidate_rebuild: bool | None = None,
     ) -> None:
+        if defer_candidate_rebuild is None:
+            option = self._active_ground_option
+            defer_candidate_rebuild = option is not None and math.hypot(
+                evidence.pose_map.x_m - option.target_x_m,
+                evidence.pose_map.y_m - option.target_y_m,
+            ) > option.tolerance_m + 1.0e-6
+        elif type(defer_candidate_rebuild) is not bool:
+            raise ValueError("formal reveal candidate rebuild flag is invalid")
+        self._defer_candidate_rebuild = defer_candidate_rebuild
         canvas = self.loaded.scene.base_canvas
         cell = canvas.world_to_grid(
             evidence.pose_map.x_m,
@@ -544,6 +567,7 @@ class FormalEpisode:
                 ),
                 execution_state=execution_state,
                 legged_body_z_m=float(self._current_legged_body_z_m),
+                defer_candidate_rebuild=defer_candidate_rebuild,
             )
         )
 
@@ -582,6 +606,11 @@ class FormalEpisode:
                     for sample in reveal.path_samples
                 ),
             )
+            self._record_reveal(
+                evidence,
+                reveal.execution_state,
+                defer_candidate_rebuild=reveal.defer_candidate_rebuild,
+            )
             boundary = self.controller.after_execution(
                 platform_type=self.platform_type,
                 execution_state=reveal.execution_state,
@@ -589,7 +618,6 @@ class FormalEpisode:
             )
             if not boundary.updated:
                 raise ValueError("formal replay did not produce an observation")
-            self._record_reveal(evidence, reveal.execution_state)
         self.initial_observation = self.controller.current_observation
         self.last_hop_available_delta_v_mps = (
             state.last_hop_available_delta_v_mps
@@ -607,6 +635,8 @@ class FormalEpisode:
             raise ValueError("formal replay dynamic state differs")
 
     def snapshot_state(self, environment: object) -> FormalWorkerState:
+        if self._active_ground_option is not None:
+            raise ValueError("formal snapshot cannot contain an active ground option")
         observation = environment.current_observation
         identities = observation.observation_identities
         if identities is None or len(identities) != 1:
@@ -778,6 +808,8 @@ class FormalEpisode:
         if pose != self.current_pose:
             raise ValueError("policy observation pose differs from episode state")
         self._revision += 1
+        if self._defer_candidate_rebuild:
+            return self._build_ground_continuation_observation(pose)
         local = self.sensor_state.local_observation(pose)
         world = observed.to_observed_world(local=local)
         global_map, local_map, _ = self._observed_maps()
@@ -876,6 +908,44 @@ class FormalEpisode:
             }
         )
 
+    def _build_ground_continuation_observation(
+        self, pose: Pose2
+    ) -> PolicyBatch:
+        """Refresh planning maps without rebuilding unused policy candidates."""
+        snapshot = self._snapshot
+        if snapshot is None:
+            raise RuntimeError("ground continuation has no prior map snapshot")
+        global_map, local_map, _ = self._observed_maps()
+        self._snapshot = _MapSnapshot(
+            self._revision,
+            snapshot.candidates,
+            global_map,
+            local_map,
+            snapshot.world,
+            snapshot.projection,
+            snapshot.platform_reachability,
+        )
+        previous = self.controller.current_observation
+        pose_features = previous.pose_features.clone()
+        canvas = self.loaded.scene.base_canvas
+        pose_features[0, 0] = (
+            pose.x_m - canvas.bounds_m[0]
+        ) / canvas.geometry.size_m
+        pose_features[0, 1] = (
+            canvas.bounds_m[3] - pose.y_m
+        ) / canvas.geometry.size_m
+        pose_features[0, 2] = math.sin(pose.yaw_rad)
+        pose_features[0, 3] = math.cos(pose.yaw_rad)
+        return PolicyBatch(
+            prior_channels=previous.prior_channels.clone(),
+            coverage_summary=previous.coverage_summary.clone(),
+            local_crop=previous.local_crop.clone(),
+            frontier_features=previous.frontier_features.clone(),
+            pose_features=pose_features,
+            candidate_mask=previous.candidate_mask.clone(),
+            platform_context=previous.platform_context.clone(),
+        )
+
     def build_request(
         self, action: PolicyAction, expected_identity: ObservationIdentity
     ) -> PreparedPlanRequest:
@@ -915,6 +985,90 @@ class FormalEpisode:
         request.goal.target = goal
         apply_goal_theta(request.goal, self.platform_type, action.theta_rad)
         return PreparedPlanRequest(request=request, identity=expected_identity)
+
+    def begin_ground_option(
+        self, action: PolicyAction, expected_identity: ObservationIdentity
+    ) -> PreparedPlanRequest:
+        if self.platform_type not in {"WHEELED", "LEGGED"}:
+            raise ValueError("ground option requires a ground platform")
+        if self._active_ground_option is not None:
+            raise ValueError("formal episode already has an active ground option")
+        prepared = self.build_request(action, expected_identity)
+        target = prepared.request.goal.target
+        if not isinstance(target, bridge_api.PointGoal):
+            raise ValueError("formal ground option requires a point goal")
+        position = target.position_m
+        values = (
+            position.x,
+            position.y,
+            position.z,
+            target.tolerance_m,
+            action.theta_rad,
+        )
+        if not all(math.isfinite(float(value)) for value in values):
+            raise ValueError("formal ground option contains non-finite values")
+        goal_id = (
+            f"ground-option/{expected_identity.map_snapshot_id}/"
+            f"{action.frontier_index}"
+        )
+        self._active_ground_option = _GroundOption(
+            target_x_m=float(position.x),
+            target_y_m=float(position.y),
+            target_z_m=float(position.z),
+            tolerance_m=float(target.tolerance_m),
+            theta_rad=float(action.theta_rad),
+            goal_id=goal_id,
+        )
+        prepared.request.goal.goal_id = goal_id
+        return prepared
+
+    def continue_ground_option(
+        self, expected_identity: ObservationIdentity
+    ) -> PreparedPlanRequest:
+        if not isinstance(expected_identity, ObservationIdentity):
+            raise ValueError("formal ground continuation requires an identity")
+        option = self._active_ground_option
+        if option is None:
+            raise RuntimeError("formal episode has no active ground option")
+        snapshot = self._snapshot
+        if snapshot is None:
+            raise RuntimeError("formal ground continuation has no map snapshot")
+        request = self._base_request(snapshot.global_map, snapshot.local_map)
+        state_time_ns = expected_identity.state_time_ns
+        request.state_time.nanoseconds_since_epoch = state_time_ns
+        request.world.global_map.stamp.nanoseconds_since_epoch = state_time_ns
+        request.world.local_map.stamp.nanoseconds_since_epoch = state_time_ns
+        request.world.map_from_odom.stamp.nanoseconds_since_epoch = state_time_ns
+        request.request_id = (
+            f"formal/{self.scene_id}/{expected_identity.map_snapshot_id}/"
+            f"{option.goal_id}"
+        )
+        goal = bridge_api.PointGoal()
+        goal.position_m = _vec3(
+            option.target_x_m,
+            option.target_y_m,
+            option.target_z_m,
+        )
+        goal.tolerance_m = option.tolerance_m
+        request.goal.goal_id = option.goal_id
+        request.goal.target = goal
+        apply_goal_theta(request.goal, self.platform_type, option.theta_rad)
+        return PreparedPlanRequest(request=request, identity=expected_identity)
+
+    def ground_option_distance_m(self) -> float:
+        option = self._active_ground_option
+        if option is None:
+            raise RuntimeError("formal episode has no active ground option")
+        distance_m = math.hypot(
+            self.current_pose.x_m - option.target_x_m,
+            self.current_pose.y_m - option.target_y_m,
+        )
+        if not math.isfinite(distance_m):
+            raise ValueError("formal ground option distance is non-finite")
+        return distance_m
+
+    def clear_ground_option(self) -> None:
+        self._active_ground_option = None
 
     def execute_reference(self, reference: object) -> ReferenceExecutionResult:
         if not isinstance(reference, bridge_api.MotionReference):
@@ -1442,7 +1596,11 @@ class FormalWorkerBuilder:
         platform_type = episode.platform_type
         environment = create_v3_environment(
             platform_type=platform_type,
-            request_builder=episode.build_request,
+            request_builder=(
+                episode.build_request
+                if platform_type == "HOPPER"
+                else episode.begin_ground_option
+            ),
             initial_observation=episode.initial_observation,
             observation_boundary_controller=episode.controller,
             require_sensor_closed_loop=True,
@@ -1450,6 +1608,21 @@ class FormalWorkerBuilder:
             committed_hop_executor=(
                 episode.committed_hop_feedback
                 if platform_type == "HOPPER"
+                else None
+            ),
+            ground_option_continuation_builder=(
+                episode.continue_ground_option
+                if platform_type != "HOPPER"
+                else None
+            ),
+            ground_option_distance_provider=(
+                episode.ground_option_distance_m
+                if platform_type != "HOPPER"
+                else None
+            ),
+            ground_option_clearer=(
+                episode.clear_ground_option
+                if platform_type != "HOPPER"
                 else None
             ),
             candidate_diagnostics_provider=(

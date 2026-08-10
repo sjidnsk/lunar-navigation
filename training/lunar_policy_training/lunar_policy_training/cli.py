@@ -3046,7 +3046,7 @@ def _run_updates(
         observation_template=observation_template,
         environment_factory=environment_factory,
         reward_fn=reward_fn,
-        worker_timeout_seconds=60.0,
+        worker_timeout_seconds=120.0,
         worker_startup_timeout_seconds=(
             _parallel_pool_startup_timeout_seconds(initial_episode_states)
         ),

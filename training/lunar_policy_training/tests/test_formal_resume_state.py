@@ -71,6 +71,7 @@ def _worker_state() -> dict[str, object]:
                 ],
                 "execution_state": "DECISION_BOUNDARY",
                 "legged_body_z_m": 7.0,
+                "defer_candidate_rebuild": False,
             }
         ],
         "observation_identity": identity,

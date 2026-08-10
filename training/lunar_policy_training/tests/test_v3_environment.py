@@ -27,6 +27,7 @@ from lunar_policy_training.environment.frontier_oracle import (  # noqa: E402
     FrontierOracleResult,
 )
 from lunar_policy_training.environment.macro_step import (  # noqa: E402
+    ExecutionEvents,
     PolicyAction,
     TerminalReason,
 )
@@ -118,6 +119,49 @@ class _ReferenceExecutor:
     def __call__(self, reference: MotionReference) -> ReferenceExecutionResult:
         self.references.append(reference)
         return self.result
+
+
+class _SequenceReferenceExecutor:
+    def __init__(self, results: list[ReferenceExecutionResult]) -> None:
+        self.results = iter(results)
+        self.references: list[MotionReference] = []
+
+    def __call__(self, reference: MotionReference) -> ReferenceExecutionResult:
+        self.references.append(reference)
+        return next(self.results)
+
+
+class _GroundOptionHarness:
+    def __init__(self, distances: list[float]) -> None:
+        self.distances = iter(distances)
+        self.begin_identities: list[ObservationIdentity] = []
+        self.continue_identities: list[ObservationIdentity] = []
+        self.clear_calls = 0
+
+    @staticmethod
+    def _prepared(identity: ObservationIdentity) -> PreparedPlanRequest:
+        request = TrainingPlanRequest()
+        request.state_time.nanoseconds_since_epoch = identity.state_time_ns
+        return PreparedPlanRequest(request=request, identity=identity)
+
+    def begin(
+        self, action: PolicyAction, identity: ObservationIdentity
+    ) -> PreparedPlanRequest:
+        del action
+        self.begin_identities.append(identity)
+        return self._prepared(identity)
+
+    def continue_(
+        self, identity: ObservationIdentity
+    ) -> PreparedPlanRequest:
+        self.continue_identities.append(identity)
+        return self._prepared(identity)
+
+    def distance(self) -> float:
+        return next(self.distances)
+
+    def clear(self) -> None:
+        self.clear_calls += 1
 
 
 class _ObservationProvider:
@@ -771,6 +815,252 @@ def test_ground_reference_executes_to_next_decision_boundary(
     assert transition.execution_directive == ExecutionDirective.ACTIVATE_NEW_REFERENCE
     assert transition.reason_code == "REFERENCE_READY"
     assert transition.terminated is False
+
+
+def _ground_result(
+    identity: ObservationIdentity,
+    *,
+    mission_delta: float,
+    priority_delta: float,
+    execution_cost: float,
+    execution_time: float,
+    sample_count: int,
+) -> ReferenceExecutionResult:
+    return ReferenceExecutionResult(
+        next_observation=_observation(identity=identity),
+        mission_observed_delta=mission_delta,
+        priority_observed_delta=priority_delta,
+        normalized_execution_cost_contribution=execution_cost,
+        normalized_execution_time_contribution=execution_time,
+        executed_without_new_coverage=mission_delta == 0.0,
+        success_first_crossing=False,
+        episode_ended_without_success=False,
+        hard_safety_violation=False,
+        terminated=False,
+        execution_state="DECISION_BOUNDARY",
+        execution_events=ExecutionEvents(
+            reference_samples_consumed=sample_count,
+            selected_action_observed_safe=True,
+        ),
+    )
+
+
+def test_one_ground_policy_action_aggregates_three_rolling_references() -> None:
+    identities = [
+        _identity(
+            map_snapshot_id=f"map-{index}",
+            robot_state_id=f"robot-{index}",
+            state_time_ns=1_000 * index,
+        )
+        for index in range(1, 5)
+    ]
+    harness = _GroundOptionHarness([10.0, 6.0, 2.0, 0.1])
+    executor = _SequenceReferenceExecutor(
+        [
+            _ground_result(
+                identities[index + 1],
+                mission_delta=0.1 * (index + 1),
+                priority_delta=0.01 * (index + 1),
+                execution_cost=0.2 * (index + 1),
+                execution_time=0.3 * (index + 1),
+                sample_count=index + 2,
+            )
+            for index in range(3)
+        ]
+    )
+    bridge = _SequenceBridge(
+        [
+            _reference_output(
+                "WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE
+            )
+            for _ in range(3)
+        ]
+    )
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=bridge,
+        request_builder=harness.begin,
+        initial_observation=_observation(identity=identities[0]),
+        require_identity_bound_request=True,
+        reference_executor=executor,
+        ground_option_continuation_builder=harness.continue_,
+        ground_option_distance_provider=harness.distance,
+        ground_option_clearer=harness.clear,
+        plan_cost_scale=4.0,
+        planner_elapsed_scale_s=2.0,
+    )
+    policy_calls = 0
+
+    def policy(_observation: PolicyBatch) -> PolicyAction:
+        nonlocal policy_calls
+        policy_calls += 1
+        return PolicyAction(0, 0.25)
+
+    result = env.advance_until_decision_boundary(policy)
+
+    assert policy_calls == 1
+    assert result.policy_decisions_consumed == 1
+    assert len(executor.references) == 3
+    assert harness.begin_identities == [identities[0]]
+    assert harness.continue_identities == identities[1:3]
+    assert harness.clear_calls == 1
+    transition = result.transition
+    assert transition is not None
+    assert transition.next_observation.observation_identities == (identities[3],)
+    assert transition.mission_observed_delta == pytest.approx(0.6)
+    assert transition.priority_observed_delta == pytest.approx(0.06)
+    assert transition.normalized_plan_or_execution_cost == pytest.approx(2.7)
+    assert transition.normalized_macro_step_time == pytest.approx(2.55)
+    assert transition.execution_events.reference_samples_consumed == 9
+    assert transition.execution_events.selected_action_observed_safe is True
+
+
+def test_ground_option_returns_aggregated_progress_when_refresh_rejects_goal() -> None:
+    first = _identity()
+    progressed = _identity(
+        map_snapshot_id="map-progress",
+        robot_state_id="robot-progress",
+        state_time_ns=2_000,
+    )
+    harness = _GroundOptionHarness([10.0, 5.0])
+    rejected = PlannerOutput()
+    rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+    rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    rejected.reason_code = "REFRESHED_GOAL_REJECTED"
+    rejected.diagnostics.elapsed = timedelta(milliseconds=250)
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_SequenceBridge(
+            [
+                _reference_output(
+                    "WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE
+                ),
+                rejected,
+            ]
+        ),
+        request_builder=harness.begin,
+        initial_observation=_observation(identity=first),
+        require_identity_bound_request=True,
+        reference_executor=_SequenceReferenceExecutor(
+            [
+                _ground_result(
+                    progressed,
+                    mission_delta=0.2,
+                    priority_delta=0.1,
+                    execution_cost=0.3,
+                    execution_time=0.4,
+                    sample_count=2,
+                )
+            ]
+        ),
+        ground_option_continuation_builder=harness.continue_,
+        ground_option_distance_provider=harness.distance,
+        ground_option_clearer=harness.clear,
+        planner_elapsed_scale_s=1.0,
+    )
+
+    result = env.advance_prepared_action(
+        PolicyAction(0, 0.0), expected_identity=first
+    )
+
+    assert result.policy_decisions_consumed == 1
+    assert result.transition is not None
+    assert result.transition.mission_observed_delta == pytest.approx(0.2)
+    assert result.transition.planning_outcome == PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+    assert result.transition.reason_code == "REFRESHED_GOAL_REJECTED"
+    assert result.transition.terminated is False
+    assert harness.clear_calls == 1
+
+
+def test_ground_option_fails_closed_on_no_progress_and_clears_target() -> None:
+    identity = _identity()
+    harness = _GroundOptionHarness([10.0, 10.0])
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(
+            _reference_output(
+                "WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE
+            )
+        ),
+        request_builder=harness.begin,
+        initial_observation=_observation(identity=identity),
+        require_identity_bound_request=True,
+        reference_executor=_ReferenceExecutor(
+            _ground_result(
+                _identity(map_snapshot_id="map-2", state_time_ns=2_000),
+                mission_delta=0.0,
+                priority_delta=0.0,
+                execution_cost=0.0,
+                execution_time=0.1,
+                sample_count=2,
+            )
+        ),
+        ground_option_continuation_builder=harness.continue_,
+        ground_option_distance_provider=harness.distance,
+        ground_option_clearer=harness.clear,
+    )
+
+    with pytest.raises(EnvironmentInvariantError, match="progress"):
+        env.advance_prepared_action(
+            PolicyAction(0, 0.0), expected_identity=identity
+        )
+
+    assert env.rollout_discarded
+    assert env.training_stopped
+    assert harness.clear_calls == 1
+
+
+def test_ground_option_fails_closed_before_a_sixty_fifth_reference() -> None:
+    identities = [
+        _identity(
+            map_snapshot_id=f"map-{index}",
+            robot_state_id=f"robot-{index}",
+            state_time_ns=1_000 * index,
+        )
+        for index in range(65)
+    ]
+    harness = _GroundOptionHarness(
+        [100.0 - 0.1 * index for index in range(65)]
+    )
+    executor = _SequenceReferenceExecutor(
+        [
+            _ground_result(
+                identities[index + 1],
+                mission_delta=0.0,
+                priority_delta=0.0,
+                execution_cost=0.0,
+                execution_time=0.1,
+                sample_count=2,
+            )
+            for index in range(64)
+        ]
+    )
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_SequenceBridge(
+            [
+                _reference_output(
+                    "WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE
+                )
+                for _ in range(65)
+            ]
+        ),
+        request_builder=harness.begin,
+        initial_observation=_observation(identity=identities[0]),
+        require_identity_bound_request=True,
+        reference_executor=executor,
+        ground_option_continuation_builder=harness.continue_,
+        ground_option_distance_provider=harness.distance,
+        ground_option_clearer=harness.clear,
+    )
+
+    with pytest.raises(EnvironmentInvariantError, match="64"):
+        env.advance_prepared_action(
+            PolicyAction(0, 0.0), expected_identity=identities[0]
+        )
+
+    assert len(executor.references) == 64
+    assert harness.clear_calls == 1
 
 
 def test_mismatched_reference_platform_discards_rollout_and_stops_training() -> None:

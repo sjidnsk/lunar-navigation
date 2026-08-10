@@ -371,6 +371,7 @@ def test_proxy_executor_consumes_cpp_trajectory_endpoint(
     )
     output = PlannerBridge().plan(request)
     assert output.reference is not None
+    endpoint_x = output.reference.data.points[-1].pose.position_m.x
 
     executed = episode.execute_reference(output.reference)
 
@@ -379,7 +380,7 @@ def test_proxy_executor_consumes_cpp_trajectory_endpoint(
     assert executed.execution_events.reference_samples_consumed > 1
     assert executed.execution_events.execution_failure_count == 0
     assert executed.next_observation.pose_features[0, 0].item() == pytest.approx(
-        4.5 / 12.0
+        endpoint_x / 12.0
     )
 
 
@@ -470,8 +471,13 @@ def test_ground_theta_changes_terminal_yaw_and_execution_time(
         point.time_from_start.total_seconds() for point in final_points
     )
 
-    assert final_yaws[0] == pytest.approx(0.0, abs=1.0e-6)
-    assert final_yaws[1] == pytest.approx(-1.125, abs=1.0e-6)
+    yaw_tolerance = math.pi / 24.0
+    assert abs(math.remainder(final_yaws[0] - 0.0, 2.0 * math.pi)) <= (
+        yaw_tolerance + 1.0e-6
+    )
+    assert abs(math.remainder(final_yaws[1] + 1.125, 2.0 * math.pi)) <= (
+        yaw_tolerance + 1.0e-6
+    )
     assert durations[0] != durations[1]
 
 

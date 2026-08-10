@@ -21,7 +21,14 @@ _POSE_FIELDS = frozenset(
     {"x_m", "y_m", "yaw_rad", "elevation_m", "frame_id"}
 )
 _REVEAL_FIELDS = frozenset(
-    {"pose", "elapsed_s", "path_samples", "execution_state", "legged_body_z_m"}
+    {
+        "pose",
+        "elapsed_s",
+        "path_samples",
+        "execution_state",
+        "legged_body_z_m",
+        "defer_candidate_rebuild",
+    }
 )
 _PATH_SAMPLE_FIELDS = frozenset({"pose", "elapsed_s"})
 _IDENTITY_FIELDS = frozenset(
@@ -155,6 +162,7 @@ class FormalRevealState:
     path_samples: tuple[FormalPathSampleState, ...]
     execution_state: str
     legged_body_z_m: float
+    defer_candidate_rebuild: bool
 
     @classmethod
     def from_dict(cls, value: object) -> "FormalRevealState":
@@ -163,6 +171,8 @@ class FormalRevealState:
         execution_state = value["execution_state"]
         if execution_state not in STABLE_EXECUTION_STATES:
             raise ValueError("formal reveal execution state is not stable")
+        if type(value["defer_candidate_rebuild"]) is not bool:
+            raise ValueError("formal reveal candidate rebuild flag is invalid")
         elapsed_s = _finite(value["elapsed_s"], "reveal elapsed time")
         if elapsed_s < 0.0:
             raise ValueError("formal reveal elapsed time must be non-negative")
@@ -190,6 +200,7 @@ class FormalRevealState:
             legged_body_z_m=_finite(
                 value["legged_body_z_m"], "legged body height"
             ),
+            defer_candidate_rebuild=value["defer_candidate_rebuild"],
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -199,6 +210,7 @@ class FormalRevealState:
             "path_samples": [sample.to_dict() for sample in self.path_samples],
             "execution_state": self.execution_state,
             "legged_body_z_m": self.legged_body_z_m,
+            "defer_candidate_rebuild": self.defer_candidate_rebuild,
         }
 
 

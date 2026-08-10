@@ -1102,6 +1102,39 @@ def test_policy_input_and_request_are_observed_only_identity_bound_and_multires(
     assert not hasattr(request, "hopper_propellant")
 
 
+def test_ground_option_freezes_target_when_candidate_arrays_refresh(
+    tmp_path: pathlib.Path,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    worker = assembly.factory(0, "WHEELED")
+    episode = worker.episode
+    observation = worker.initial_observation
+    identity = observation.observation_identities[0]
+    candidate = int(observation.candidate_mask[0].nonzero()[0])
+    action = PolicyAction(candidate, 0.4)
+
+    first = episode.begin_ground_option(action, identity).request
+    first_goal = first.goal.target.position_m
+    frozen = (first_goal.x, first_goal.y, first_goal.z, first.goal.goal_id)
+    episode._snapshot.candidates.features[candidate, :2] = (0.01, 0.99)
+
+    continued = episode.continue_ground_option(identity).request
+    continued_goal = continued.goal.target.position_m
+
+    assert (
+        continued_goal.x,
+        continued_goal.y,
+        continued_goal.z,
+        continued.goal.goal_id,
+    ) == frozen
+    with pytest.raises(ValueError, match="active ground option"):
+        worker.snapshot_episode_state()
+    episode.clear_ground_option()
+    worker.snapshot_episode_state()
+    with pytest.raises(RuntimeError, match="no active ground option"):
+        episode.ground_option_distance_m()
+
+
 @pytest.mark.parametrize("platform", ("WHEELED", "LEGGED"))
 def test_ground_reference_executes_to_certified_endpoint(
     tmp_path: pathlib.Path, platform: str
@@ -1120,6 +1153,44 @@ def test_ground_reference_executes_to_certified_endpoint(
     assert not result.transition.hard_safety_violation
     assert worker.episode.current_pose != before
     assert result.transition.execution_events.reference_samples_consumed >= 2
+
+
+def test_ground_option_rebuilds_candidates_only_at_final_policy_boundary(
+    tmp_path: pathlib.Path,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    worker = assembly.factory(0, "WHEELED")
+    episode = worker.episode
+    observation = worker.initial_observation
+    identity = observation.observation_identities[0]
+    candidate = int(observation.candidate_mask[0].nonzero()[2])
+    original_builder = episode._candidate_builder
+    candidate_builds = 0
+    reference_count = 0
+
+    class CountingCandidateBuilder:
+        def build(self, *args, **kwargs):
+            nonlocal candidate_builds
+            candidate_builds += 1
+            return original_builder.build(*args, **kwargs)
+
+    original_executor = worker.environment._reference_executor
+
+    def counting_executor(reference):
+        nonlocal reference_count
+        reference_count += 1
+        return original_executor(reference)
+
+    episode._candidate_builder = CountingCandidateBuilder()
+    worker.environment._reference_executor = counting_executor
+
+    result = worker.environment.advance_prepared_action(
+        PolicyAction(candidate, math.pi), expected_identity=identity
+    )
+
+    assert not result.transition.hard_safety_violation
+    assert reference_count > 1
+    assert candidate_builds == 1
 
 
 def test_hopper_executes_one_nominal_landing_without_cumulative_fuel(
