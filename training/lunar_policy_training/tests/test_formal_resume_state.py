@@ -51,6 +51,10 @@ def _worker_state() -> dict[str, object]:
         "legged_body_z_m": 7.0,
         "execution_state": "DECISION_BOUNDARY",
         "observation_revision": 2,
+        "primitive_graph_revision": 2,
+        "primitive_graph_sha256": "4" * 64,
+        "primitive_world_evidence_sha256": "5" * 64,
+        "primitive_set_sha256": "6" * 64,
         "state_time_ns": 2_250_000_000,
         "reveal_history": [
             {
@@ -121,6 +125,10 @@ def test_formal_worker_state_roundtrips_detail_gain_marker() -> None:
         (
             lambda value: value.__setitem__("observation_revision", 8),
             "revision",
+        ),
+        (
+            lambda value: value.__setitem__("primitive_graph_revision", 1),
+            "primitive graph revision",
         ),
         (
             lambda value: value.__setitem__(

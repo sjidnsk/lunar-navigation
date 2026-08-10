@@ -386,11 +386,11 @@ git commit -m "feat(training): expose incremental primitive reachability"
 - Cache v5 stores graph identity/counts and the projected bit mask; it does not persist the complete edge list.
 - Start qualification uses the initial reveal's observed-only graph and requires at least one legal graph-derived candidate.
 
-- [ ] **Step 1: Write cache-v5 RED tests**
+- [x] **Step 1: Write cache-v5 RED tests**
 
 Assert old v3/v4 manifests fail, graph identity fields are mandatory and hash-validated, the same 2-D map produces different WHEELED/LEGGED/HOPPER denominators when primitive capabilities differ, a sensor-visible non-standable target remains coverable, truth states beyond 30 m contribute after multiple primitives, and changing only truth graph topology cannot affect an observed candidate fixture.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 PYTHON=/home/kai/CodexDownloads/lunar_navigation/volume3/venv/bin/python
@@ -406,11 +406,11 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "$PYTHON" -m pytest -q \
   training/lunar_policy_training/tests/test_formal_start_qualification.py
 ```
 
-- [ ] **Step 3: Implement cache-v5 payload and exact-state LOS union**
+- [x] **Step 3: Implement cache-v5 payload and exact-state LOS union**
 
 Use the C++ graph's exact map-frame positions. Continue bit-packing the `5120 × 5120` coverable mask and computing the numerator by bit intersection. Never derive visibility from 4 m cell centers when an exact state pose is available.
 
-- [ ] **Step 4: Run GREEN and commit**
+- [x] **Step 4: Run GREEN and commit**
 
 ```bash
 PYTHON=/home/kai/CodexDownloads/lunar_navigation/volume3/venv/bin/python

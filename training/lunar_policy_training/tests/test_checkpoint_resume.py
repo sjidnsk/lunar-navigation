@@ -191,6 +191,10 @@ def _formal_worker_state(index: int) -> dict[str, object]:
         "legged_body_z_m": 7.0,
         "execution_state": execution_state,
         "observation_revision": 1,
+        "primitive_graph_revision": 1,
+        "primitive_graph_sha256": f"{index + 901:064x}",
+        "primitive_world_evidence_sha256": f"{index + 1001:064x}",
+        "primitive_set_sha256": f"{index + 1101:064x}",
         "state_time_ns": 1_000_000_000,
         "reveal_history": [],
         "observation_identity": {
@@ -248,7 +252,7 @@ def _policy_parent_checkpoint(
         candidate_checkpoint_gpu_seconds=7200.0,
         environment_state=(
             {
-                "schema_version": "lunar-formal-environment-state/v4",
+                "schema_version": "lunar-formal-environment-state/v5",
                 "scenario_schedule_id": "cache-sha/train/v3",
                 "worker_episode_states": [
                     _formal_worker_state(index) for index in range(24)
@@ -410,7 +414,7 @@ def test_formal_checkpoint_roundtrips_exact_active_worker_states(
     tmp_path: pathlib.Path,
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v4",
+        "schema_version": "lunar-formal-environment-state/v5",
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)
@@ -441,7 +445,7 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v4",
+        "schema_version": "lunar-formal-environment-state/v5",
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)

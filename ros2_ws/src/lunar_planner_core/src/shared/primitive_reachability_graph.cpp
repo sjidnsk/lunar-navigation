@@ -48,6 +48,20 @@ namespace {
   return false;
 }
 
+[[nodiscard]] bool CloseResolution(
+    const double lhs, const double rhs) noexcept {
+  return std::isfinite(lhs) && std::isfinite(rhs) &&
+      std::abs(lhs - rhs) <=
+          1.0e-9 * std::max({1.0, std::abs(lhs), std::abs(rhs)});
+}
+
+[[nodiscard]] double GroundGraphResolution(
+    const PlannerInput& input, const PlatformType platform) noexcept {
+  return platform == PlatformType::kWheeled
+      ? input.config.wheel.xy_resolution_m
+      : input.config.legged.xy_resolution_m;
+}
+
 class EvidenceBytes final {
  public:
   void Byte(const std::uint8_t value) {
@@ -243,18 +257,47 @@ PrimitiveReachabilityResult PrimitiveReachabilityEngine::Update(
   if (!safe.ok()) {
     return Failure(safe.reason_code);
   }
+  const bool ground_platform = platform == PlatformType::kWheeled ||
+      platform == PlatformType::kLegged;
+  const double graph_resolution_m =
+      ground_platform ? GroundGraphResolution(input, platform) : 0.0;
+  const bool use_local_ground_projection = ground_platform &&
+      !CloseResolution(map.snapshot->resolution_m(), graph_resolution_m) &&
+      CloseResolution(input.world.local_map.resolution_m, graph_resolution_m);
+  shared::MapSnapshotBuildResult local_ground_map;
+  shared::SafeProjectionBuildResult local_ground_safe;
+  const shared::SafeProjection* ground_projection = &*safe.projection;
+  if (use_local_ground_projection) {
+    if (input.world.local_map.frame_id !=
+        input.world.map_from_odom.child_frame) {
+      return Failure("LOCAL_MAP_FRAME_INVALID");
+    }
+    local_ground_map = shared::MapSnapshot::Create(input.world.local_map);
+    if (!local_ground_map.ok()) {
+      return Failure(local_ground_map.reason_code);
+    }
+    local_ground_safe = shared::BuildSafeProjection(
+        local_ground_map.snapshot, input.capability, input.config.map_safety,
+        input.stop_token);
+    if (!local_ground_safe.ok()) {
+      return Failure(local_ground_safe.reason_code);
+    }
+    ground_projection = &*local_ground_safe.projection;
+  }
   if (platform == PlatformType::kWheeled) {
     WheeledState state = std::get<WheeledState>(input.current_state);
-    const auto pose_map = hierarchical::TransformPose(
-        state.pose, input.world.map_from_odom,
-        hierarchical::TransformDirection::kChildToParent);
-    if (!pose_map.has_value()) {
-      return Failure("FRAME_TRANSFORM_INVALID");
+    if (!use_local_ground_projection) {
+      const auto pose_map = hierarchical::TransformPose(
+          state.pose, input.world.map_from_odom,
+          hierarchical::TransformDirection::kChildToParent);
+      if (!pose_map.has_value()) {
+        return Failure("FRAME_TRANSFORM_INVALID");
+      }
+      state.pose = *pose_map;
     }
-    state.pose = *pose_map;
     shared::PrimitiveGraphBuildResult graph =
         wheel::BuildWheelPrimitiveGraph(
-            state, *safe.projection,
+            state, *ground_projection,
             std::get<WheeledCapability>(input.capability), input.config,
             input.stop_token);
     return impl_->Publish(
@@ -263,16 +306,18 @@ PrimitiveReachabilityResult PrimitiveReachabilityEngine::Update(
   }
   if (platform == PlatformType::kLegged) {
     LeggedState state = std::get<LeggedState>(input.current_state);
-    const auto pose_map = hierarchical::TransformPose(
-        state.body_pose, input.world.map_from_odom,
-        hierarchical::TransformDirection::kChildToParent);
-    if (!pose_map.has_value()) {
-      return Failure("FRAME_TRANSFORM_INVALID");
+    if (!use_local_ground_projection) {
+      const auto pose_map = hierarchical::TransformPose(
+          state.body_pose, input.world.map_from_odom,
+          hierarchical::TransformDirection::kChildToParent);
+      if (!pose_map.has_value()) {
+        return Failure("FRAME_TRANSFORM_INVALID");
+      }
+      state.body_pose = *pose_map;
     }
-    state.body_pose = *pose_map;
     shared::PrimitiveGraphBuildResult graph =
         legged::BuildLeggedPrimitiveGraph(
-            state, *safe.projection,
+            state, *ground_projection,
             std::get<LeggedCapability>(input.capability), input.config,
             input.stop_token);
     return impl_->Publish(

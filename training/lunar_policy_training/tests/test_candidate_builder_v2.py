@@ -16,6 +16,7 @@ from lunar_policy_training.environment import candidate_builder as candidate_bui
 from lunar_policy_training.environment.candidate_builder import CandidateBatch, CandidateBuilderV2  # noqa: E402
 from lunar_policy_training.environment.observation_builder import LocalObservation, MissionRaster, ObservedWorld, PlatformProjection, Pose2  # noqa: E402
 from lunar_policy_training.environment.platform_reachability import CandidateReachabilityResult, PlatformCandidateReachability  # noqa: E402
+from lunar_policy_training.environment.primitive_reachability import ObservedPrimitiveSnapshot  # noqa: E402
 from lunar_policy_training.environment.visibility import NativeVisibilityEstimator, SensorGeometry  # noqa: E402
 from lunar_policy_training.polar_data.hazards import CanvasRatioLayer  # noqa: E402
 from lunar_policy_training.polar_data.raster import MapCanvas  # noqa: E402
@@ -138,6 +139,64 @@ def _builder(
     )
 
 
+def _frozen(values: np.ndarray) -> np.ndarray:
+    output = np.ascontiguousarray(values)
+    output.setflags(write=False)
+    return output
+
+
+def _primitive_snapshot(
+    *,
+    platform_type: str = "WHEELED",
+    recoverable: tuple[bool, ...] = (True, True, False),
+    direct_successor: tuple[bool, ...] = (False, True, True),
+) -> ObservedPrimitiveSnapshot:
+    canvas = _canvas()
+    cells = ((128, 128), (128, 130), (128, 132))[: len(recoverable)]
+    positions = np.asarray(
+        [(*canvas.grid_center_world(*cell), 0.0) for cell in cells],
+        dtype=np.float64,
+    )
+    state_ids = np.arange(1, len(cells) + 1, dtype=np.uint64)
+    edge_source = np.asarray([1, 2], dtype=np.uint64)[: max(0, len(cells) - 1)]
+    edge_target = np.asarray([2, 1], dtype=np.uint64)[: len(edge_source)]
+    forward = np.asarray(recoverable, dtype=np.bool_)
+    returnable = np.asarray(recoverable, dtype=np.bool_)
+    return ObservedPrimitiveSnapshot(
+        platform_type=platform_type,
+        width=32,
+        height=32,
+        algorithm_id=f"test-{platform_type.lower()}/v1",
+        state_schema=f"test-{platform_type.lower()}-state/v1",
+        primitive_set_sha256="1" * 64,
+        world_evidence_sha256="2" * 64,
+        graph_sha256="3" * 64,
+        revision=4,
+        invalidated_edge_count=0,
+        revalidated_edge_count=0,
+        state_ids=_frozen(state_ids),
+        positions_m=_frozen(positions),
+        yaw_rad=_frozen(np.zeros(len(cells), dtype=np.float64)),
+        cells=_frozen(np.asarray(cells, dtype=np.int32)),
+        yaw_bin=_frozen(np.zeros(len(cells), dtype=np.int32)),
+        motion_mode=_frozen(np.zeros(len(cells), dtype=np.int32)),
+        body_z_m=_frozen(np.zeros((len(cells), 2), dtype=np.float64)),
+        path_cost=_frozen(np.arange(len(cells), dtype=np.float64)),
+        forward_reachable=_frozen(forward),
+        returnable=_frozen(returnable),
+        observation_state=_frozen(np.ones(len(cells), dtype=np.bool_)),
+        recoverable=_frozen(forward & returnable),
+        direct_successor=_frozen(np.asarray(direct_successor, dtype=np.bool_)),
+        edge_source_ids=_frozen(edge_source),
+        edge_target_ids=_frozen(edge_target),
+        edge_primitive_indices=_frozen(
+            np.zeros(len(edge_source), dtype=np.uint32)
+        ),
+        edge_primitive_ids=tuple("primitive" for _ in edge_source),
+        edge_cost=_frozen(np.ones(len(edge_source), dtype=np.float64)),
+    )
+
+
 def test_candidate_builder_requires_explicit_sensor_estimator() -> None:
     with pytest.raises(TypeError):
         CandidateBuilderV2()
@@ -147,6 +206,46 @@ def test_candidate_builder_requires_explicit_sensor_estimator() -> None:
         range_m=30.0,
         fov_rad=2.0 * math.pi,
     )
+
+
+def test_primitive_candidates_only_emit_current_recoverable_graph_states() -> None:
+    estimator = _RecordingEstimator()
+    builder = CandidateBuilderV2(estimator)
+    snapshot = _primitive_snapshot()
+
+    batch = builder.build_from_primitive_graph(
+        _world_with_frontier(),
+        _mission(),
+        Pose2(*_canvas().grid_center_world(128, 128)),
+        snapshot,
+        platform_type="WHEELED",
+    )
+
+    assert batch.primitive_graph_revision == snapshot.revision
+    assert set(batch.primitive_state_ids[batch.mask]) == {np.uint64(2)}
+    assert np.all(batch.primitive_state_ids[~batch.mask] == 0)
+    np.testing.assert_allclose(
+        batch.target_positions_m[batch.mask], snapshot.positions_m[[1]]
+    )
+
+
+def test_hopper_primitive_candidates_reject_recoverable_multihop_states() -> None:
+    estimator = _RecordingEstimator()
+    snapshot = _primitive_snapshot(
+        platform_type="HOPPER",
+        recoverable=(True, True, True),
+        direct_successor=(False, True, False),
+    )
+
+    batch = CandidateBuilderV2(estimator).build_from_primitive_graph(
+        _world_with_frontier(),
+        _mission(),
+        Pose2(*_canvas().grid_center_world(128, 128)),
+        snapshot,
+        platform_type="HOPPER",
+    )
+
+    assert set(batch.primitive_state_ids[batch.mask]) == {np.uint64(2)}
 
 
 def test_candidate_builder_is_observed_only_uses_exact_12_fields_and_stable_64_padding() -> None:

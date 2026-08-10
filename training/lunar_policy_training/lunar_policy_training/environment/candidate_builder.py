@@ -13,6 +13,7 @@ from lunar_model_contract import ObservationContractV3
 
 from .observation_builder import MissionRaster, ObservedWorld, PlatformProjection, Pose2
 from .platform_reachability import PlatformCandidateReachability
+from .primitive_reachability import ObservedPrimitiveSnapshot
 from .visibility import SensorGeometry, VisibilityEstimator, _ray_cells
 
 
@@ -66,6 +67,10 @@ class CandidateBatch:
     canvas_id: str | None = None
     diagnostics: CandidateDiagnostics = field(default_factory=CandidateDiagnostics)
     target_elevation_m: np.ndarray | None = None
+    target_positions_m: np.ndarray | None = None
+    target_yaw_rad: np.ndarray | None = None
+    primitive_state_ids: np.ndarray | None = None
+    primitive_graph_revision: int = 0
 
     def __post_init__(self) -> None:
         features, mask = np.asarray(self.features, dtype=np.float32), np.asarray(self.mask, dtype=bool)
@@ -89,6 +94,35 @@ class CandidateBatch:
         object.__setattr__(self, "features", features)
         object.__setattr__(self, "mask", mask)
         object.__setattr__(self, "target_elevation_m", target_elevation)
+        target_positions = self.target_positions_m
+        if target_positions is None:
+            target_positions = np.zeros((64, 3), dtype=np.float64)
+        target_positions = np.ascontiguousarray(target_positions)
+        target_yaw = self.target_yaw_rad
+        if target_yaw is None:
+            target_yaw = np.zeros(64, dtype=np.float64)
+        target_yaw = np.ascontiguousarray(target_yaw)
+        state_ids = self.primitive_state_ids
+        if state_ids is None:
+            state_ids = np.zeros(64, dtype=np.uint64)
+        state_ids = np.ascontiguousarray(state_ids)
+        if (
+            target_positions.dtype != np.dtype(np.float64)
+            or target_positions.shape != (64, 3)
+            or not np.isfinite(target_positions).all()
+            or target_yaw.dtype != np.dtype(np.float64)
+            or target_yaw.shape != (64,)
+            or not np.isfinite(target_yaw).all()
+            or state_ids.dtype != np.dtype(np.uint64)
+            or state_ids.shape != (64,)
+            or type(self.primitive_graph_revision) is not int
+            or self.primitive_graph_revision < 0
+            or (state_ids[~mask] != 0).any()
+        ):
+            raise ValueError("candidate primitive targets are invalid")
+        object.__setattr__(self, "target_positions_m", target_positions)
+        object.__setattr__(self, "target_yaw_rad", target_yaw)
+        object.__setattr__(self, "primitive_state_ids", state_ids)
 
     @property
     def count(self) -> int:
@@ -400,6 +434,289 @@ class CandidateBuilderV2:
                 emitted_count=len(chosen),
             ),
             target_elevation,
+        )
+
+    def build_from_primitive_graph(
+        self,
+        world: ObservedWorld,
+        mission: MissionRaster,
+        pose_map: Pose2,
+        primitive_graph: ObservedPrimitiveSnapshot,
+        *,
+        platform_type: str,
+        excluded_state_ids: Collection[int] = (),
+    ) -> CandidateBatch:
+        """Build policy targets only from exact current graph states."""
+        if platform_type not in _PLATFORM_TYPES:
+            raise ValueError("platform_type must be WHEELED, LEGGED, or HOPPER")
+        if (
+            not isinstance(primitive_graph, ObservedPrimitiveSnapshot)
+            or primitive_graph.platform_type != platform_type
+        ):
+            raise TypeError("candidate primitive graph is invalid")
+        if (
+            pose_map.frame_id != "map"
+            or world.canvas != mission.canvas
+            or primitive_graph.revision <= 0
+        ):
+            return CandidateBatch.empty(world.canvas.identity)
+        excluded = {int(value) for value in excluded_state_ids}
+        if any(value < 0 for value in excluded):
+            raise ValueError("excluded primitive state identity is invalid")
+        positions = primitive_graph.positions_m
+        distances = np.hypot(
+            positions[:, 0] - pose_map.x_m,
+            positions[:, 1] - pose_map.y_m,
+        )
+        raw_indices = np.flatnonzero(primitive_graph.observation_state)
+        unvisited_indices = np.asarray(
+            [
+                index
+                for index in raw_indices
+                if int(primitive_graph.state_ids[index]) not in excluded
+                and primitive_graph.path_cost[index] > 0.0
+            ],
+            dtype=np.intp,
+        )
+        visited_excluded = len(raw_indices) - len(unvisited_indices)
+        spatial: list[tuple[int, tuple[int, int]]] = []
+        for index in unvisited_indices:
+            try:
+                cell = world.canvas.world_to_grid(
+                    float(positions[index, 0]), float(positions[index, 1])
+                )
+            except ValueError:
+                continue
+            spatial.append((int(index), cell))
+        static_infeasible = len(unvisited_indices) - len(spatial)
+        feasible = [
+            (index, cell)
+            for index, cell in spatial
+            if bool(primitive_graph.recoverable[index])
+            and distances[index] <= self._sensor.range_m + 1.0e-9
+            and (
+                platform_type != "HOPPER"
+                or bool(primitive_graph.direct_successor[index])
+            )
+        ]
+        platform_unreachable = len(spatial) - len(feasible)
+        diagnostics = CandidateDiagnostics(
+            frontier_anchor_count=len(raw_indices),
+            visited_excluded_count=visited_excluded,
+            static_infeasible_count=static_infeasible,
+            platform_unreachable_count=platform_unreachable,
+        )
+        if not feasible:
+            return CandidateBatch.empty(world.canvas.identity, diagnostics)
+
+        # A 360-degree sensor makes poses in the same observed 0.2 m cell
+        # observationally equivalent. Keep the cheapest stable graph state.
+        deduplicated: dict[tuple[int, int], tuple[int, tuple[int, int]]] = {}
+        detail_resolution = float(
+            getattr(self._visibility_estimator, "resolution_m", 0.2)
+        )
+        if not math.isfinite(detail_resolution) or detail_resolution <= 0.0:
+            detail_resolution = 0.2
+        for index, cell in feasible:
+            key = (
+                int(math.floor(positions[index, 0] / detail_resolution)),
+                int(math.floor(positions[index, 1] / detail_resolution)),
+            )
+            previous = deduplicated.get(key)
+            if previous is None or (
+                float(primitive_graph.path_cost[index]),
+                int(primitive_graph.state_ids[index]),
+            ) < (
+                float(primitive_graph.path_cost[previous[0]]),
+                int(primitive_graph.state_ids[previous[0]]),
+            ):
+                deduplicated[key] = (index, cell)
+        feasible = list(deduplicated.values())
+        candidate_cells = np.ascontiguousarray(
+            [cell for _, cell in feasible], dtype=np.int32
+        ).reshape((-1, 2))
+        exact_positions = np.ascontiguousarray(
+            [positions[index] for index, _ in feasible], dtype=np.float64
+        )
+        exact_gain = getattr(
+            self._visibility_estimator,
+            "estimate_candidate_gains_at_positions",
+            None,
+        )
+        gain_arguments = (
+            np.ascontiguousarray(world.observed_mask, dtype=np.bool_),
+            np.ascontiguousarray(
+                world.physical_obstacle_layer.values, dtype=np.float32
+            ),
+            np.ascontiguousarray(mission.roi_ratio, dtype=np.float32),
+            np.ascontiguousarray(
+                mission.priority * mission.roi_ratio, dtype=np.float32
+            ),
+        )
+        gains = (
+            exact_gain(*gain_arguments, exact_positions)
+            if callable(exact_gain)
+            else self._visibility_estimator.estimate_candidate_gains(
+                *gain_arguments, candidate_cells
+            )
+        )
+        if (
+            not isinstance(gains, np.ndarray)
+            or gains.dtype != np.dtype(np.float32)
+            or gains.shape != (len(feasible), 2)
+            or not gains.flags.c_contiguous
+            or not np.isfinite(gains).all()
+            or (gains < 0.0).any()
+        ):
+            raise RuntimeError("primitive candidate gain result is invalid")
+        positive = [
+            (index, cell, float(gain), float(priority_gain))
+            for (index, cell), (gain, priority_gain) in zip(
+                feasible, gains, strict=True
+            )
+            if gain > 0.0
+        ]
+        selected = positive
+        transit_selected = 0
+        if not selected and bool(
+            np.any((mission.roi_ratio > 0.0) & ~world.observed_mask)
+        ):
+            selected = [
+                min(
+                    (
+                        (index, cell, float(gain), float(priority_gain))
+                        for (index, cell), (gain, priority_gain) in zip(
+                            feasible, gains, strict=True
+                        )
+                    ),
+                    key=lambda item: (
+                        float(primitive_graph.path_cost[item[0]]),
+                        int(primitive_graph.state_ids[item[0]]),
+                    ),
+                )
+            ]
+            transit_selected = 1
+        selected.sort(
+            key=lambda item: (
+                -item[2]
+                / (1.0 + float(primitive_graph.path_cost[item[0]])),
+                float(primitive_graph.path_cost[item[0]]),
+                int(primitive_graph.state_ids[item[0]]),
+            )
+        )
+        selected = selected[:64]
+        output = np.zeros((64, 12), dtype=np.float32)
+        mask = np.zeros(64, dtype=np.bool_)
+        target_positions = np.zeros((64, 3), dtype=np.float64)
+        target_yaw = np.zeros(64, dtype=np.float64)
+        state_ids = np.zeros(64, dtype=np.uint64)
+        target_elevation = np.zeros(64, dtype=np.float64)
+        gain_normalizer = max((item[2] for item in selected), default=0.0)
+        priority_normalizer = max((item[3] for item in selected), default=0.0)
+        total_roi = float(mission.roi_ratio.sum(dtype=np.float64))
+        for output_index, (state_index, cell, gain, priority_gain) in enumerate(
+            selected
+        ):
+            output[output_index] = self._primitive_feature(
+                world,
+                mission,
+                pose_map,
+                cell,
+                positions[state_index],
+                gain=gain,
+                priority_gain=priority_gain,
+                gain_normalizer=gain_normalizer,
+                priority_gain_normalizer=priority_normalizer,
+                total_roi=total_roi,
+            )
+            mask[output_index] = True
+            target_positions[output_index] = positions[state_index]
+            target_yaw[output_index] = primitive_graph.yaw_rad[state_index]
+            state_ids[output_index] = primitive_graph.state_ids[state_index]
+            target_elevation[output_index] = positions[state_index, 2]
+        zero_discarded = max(0, len(feasible) - len(positive) - transit_selected)
+        return CandidateBatch(
+            output,
+            mask,
+            world.canvas.identity,
+            CandidateDiagnostics(
+                frontier_anchor_count=diagnostics.frontier_anchor_count,
+                visited_excluded_count=diagnostics.visited_excluded_count,
+                static_infeasible_count=diagnostics.static_infeasible_count,
+                platform_unreachable_count=diagnostics.platform_unreachable_count,
+                zero_gain_count=zero_discarded,
+                emitted_count=len(selected),
+            ),
+            target_elevation,
+            target_positions,
+            target_yaw,
+            state_ids,
+            primitive_graph.revision,
+        )
+
+    @staticmethod
+    def _primitive_feature(
+        world: ObservedWorld,
+        mission: MissionRaster,
+        pose: Pose2,
+        point: tuple[int, int],
+        target_position_m: np.ndarray,
+        *,
+        gain: float,
+        priority_gain: float,
+        gain_normalizer: float,
+        priority_gain_normalizer: float,
+        total_roi: float,
+    ) -> np.ndarray:
+        canvas = world.canvas
+        x = float(target_position_m[0])
+        y = float(target_position_m[1])
+        dx = x - pose.x_m
+        dy = y - pose.y_m
+        distance = math.hypot(dx, dy)
+        bearing = math.atan2(dy, dx)
+        normal = np.zeros(2, dtype=np.float64)
+        for neighbor in _neighbors(*point, canvas.geometry.cells):
+            if mission.roi_ratio[neighbor] > 0.0 and not world.observed_mask[neighbor]:
+                normal += (
+                    neighbor[0] - point[0],
+                    neighbor[1] - point[1],
+                )
+        magnitude = float(np.linalg.norm(normal))
+        remaining = (
+            float(
+                (mission.roi_ratio * ~world.observed_mask).sum(
+                    dtype=np.float64
+                )
+                / total_roi
+            )
+            if total_roi
+            else 0.0
+        )
+        return np.asarray(
+            (
+                (x - canvas.bounds_m[0]) / canvas.geometry.size_m,
+                (canvas.bounds_m[3] - y) / canvas.geometry.size_m,
+                min(
+                    1.0,
+                    distance
+                    / (math.sqrt(2.0) * canvas.geometry.size_m),
+                ),
+                math.sin(bearing),
+                math.cos(bearing),
+                min(1.0, gain / gain_normalizer)
+                if gain_normalizer
+                else 0.0,
+                min(1.0, priority_gain / priority_gain_normalizer)
+                if priority_gain_normalizer
+                else 0.0,
+                -normal[0] / magnitude if magnitude else 0.0,
+                normal[1] / magnitude if magnitude else 1.0,
+                min(1.0, magnitude / 2.0),
+                1.0,
+                remaining,
+            ),
+            dtype=np.float32,
         )
 
     def _qualify_anchors(

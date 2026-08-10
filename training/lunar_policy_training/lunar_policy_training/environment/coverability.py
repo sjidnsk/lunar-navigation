@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
 import math
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Mapping
 
 import numpy as np
 
@@ -113,9 +113,10 @@ def build_coverable_detail_mask(
     mission_target_detail_mask: np.ndarray,
     truth_obstacle_ratio: np.ndarray,
     reachable_pose_mask: np.ndarray,
+    observation_pose_cells: np.ndarray | None = None,
     reveal_from_pose: Callable[[np.ndarray, tuple[int, int]], np.ndarray],
 ) -> np.ndarray:
-    """Union exact detail visibility from every reachable coarse pose center."""
+    """Union detail visibility from exact graph poses or legacy coarse centers."""
     target = _require_bool_mask(
         mission_target_detail_mask, "mission target detail mask"
     )
@@ -144,12 +145,40 @@ def build_coverable_detail_mask(
         )
     row_scale = target.shape[0] // reachable.shape[0]
     column_scale = target.shape[1] // reachable.shape[1]
+    if observation_pose_cells is None:
+        pose_cells = np.asarray(
+            [
+                (
+                    int(row) * row_scale + row_scale // 2,
+                    int(column) * column_scale + column_scale // 2,
+                )
+                for row, column in np.argwhere(reachable)
+            ],
+            dtype=np.int32,
+        ).reshape((-1, 2))
+    else:
+        pose_cells = observation_pose_cells
+        if (
+            not isinstance(pose_cells, np.ndarray)
+            or pose_cells.dtype != np.dtype(np.int32)
+            or pose_cells.ndim != 2
+            or pose_cells.shape[1:] != (2,)
+            or not pose_cells.flags.c_contiguous
+            or (
+                pose_cells.size
+                and (
+                    (pose_cells < 0).any()
+                    or (pose_cells[:, 0] >= target.shape[0]).any()
+                    or (pose_cells[:, 1] >= target.shape[1]).any()
+                )
+            )
+        ):
+            raise CoverabilityError(
+                "observation pose cells must be C-contiguous int32 [N,2]"
+            )
     coverable = np.zeros(target.shape, dtype=np.bool_)
-    for row, column in np.argwhere(reachable):
-        pose_cell = (
-            int(row) * row_scale + row_scale // 2,
-            int(column) * column_scale + column_scale // 2,
-        )
+    for row, column in pose_cells:
+        pose_cell = int(row), int(column)
         visible = reveal_from_pose(truth, pose_cell)
         if (
             not isinstance(visible, np.ndarray)
@@ -425,6 +454,37 @@ def _spatially_prioritized_sources(
             yield coordinate
 
 
+def _prioritize_exact_detail_sources(
+    sources: tuple[tuple[int, int], ...], *, window_cells: int
+) -> Iterator[tuple[int, int]]:
+    """Prefer one exact graph pose per half-sensor block, then all remainder."""
+    stride = max(1, window_cells // 2)
+    representatives: dict[
+        tuple[int, int], tuple[tuple[int, int, int], tuple[int, int]]
+    ] = {}
+    for row, column in sources:
+        bucket = row // stride, column // stride
+        center_row = bucket[0] * stride + stride // 2
+        center_column = bucket[1] * stride + stride // 2
+        candidate = (
+            (
+                (row - center_row) ** 2 + (column - center_column) ** 2,
+                row,
+                column,
+            ),
+            (row, column),
+        )
+        current = representatives.get(bucket)
+        if current is None or candidate[0] < current[0]:
+            representatives[bucket] = candidate
+    selected = {coordinate for _, coordinate in representatives.values()}
+    for bucket in sorted(representatives):
+        yield representatives[bucket][1]
+    for coordinate in sources:
+        if coordinate not in selected:
+            yield coordinate
+
+
 @dataclass(frozen=True, slots=True)
 class StreamedDetailCoverability:
     """Bounded-memory exact target and coverable detail-mask build result."""
@@ -494,6 +554,7 @@ def build_streamed_detail_coverability(
     tile_provider: object,
     inside_mission_roi: np.ndarray,
     reachable_pose_mask: np.ndarray,
+    observation_positions_m: np.ndarray | None = None,
     intrinsic_terrain_feasible: Callable[[object], np.ndarray],
     reveal_from_pose: Callable[[np.ndarray, tuple[int, int]], np.ndarray],
 ) -> StreamedDetailCoverability:
@@ -502,6 +563,17 @@ def build_streamed_detail_coverability(
     reachable = _require_bool_mask(reachable_pose_mask, "reachable pose mask")
     if roi.shape != reachable.shape:
         raise CoverabilityError("mission ROI and reachable masks must align")
+    if observation_positions_m is not None and (
+        not isinstance(observation_positions_m, np.ndarray)
+        or observation_positions_m.dtype != np.dtype(np.float64)
+        or observation_positions_m.ndim != 2
+        or observation_positions_m.shape[1:] != (3,)
+        or not observation_positions_m.flags.c_contiguous
+        or not np.isfinite(observation_positions_m).all()
+    ):
+        raise CoverabilityError(
+            "observation positions must be finite C-contiguous float64 [N,3]"
+        )
     if not callable(intrinsic_terrain_feasible) or not callable(
         reveal_from_pose
     ):
@@ -578,17 +650,40 @@ def build_streamed_detail_coverability(
             mask=target,
         )
 
-    observation_sources = reachable & roi
-    for coarse_row, coarse_column in _spatially_prioritized_sources(
-        observation_sources,
-        row_scale=row_scale,
-        column_scale=column_scale,
-        window_cells=tile_cells,
-    ):
-        pose_row = coarse_row * row_scale + row_scale // 2
-        pose_column = (
-            coarse_column * column_scale + column_scale // 2
+    if observation_positions_m is None:
+        coarse_sources = _spatially_prioritized_sources(
+            reachable & roi,
+            row_scale=row_scale,
+            column_scale=column_scale,
+            window_cells=tile_cells,
         )
+        pose_sources: Iterator[tuple[int, int]] = (
+            (
+                coarse_row * row_scale + row_scale // 2,
+                coarse_column * column_scale + column_scale // 2,
+            )
+            for coarse_row, coarse_column in coarse_sources
+        )
+    else:
+        try:
+            exact_sources = tuple(
+                sorted(
+                    {
+                        tile_provider.world_to_detail(
+                            float(position[0]), float(position[1])
+                        )
+                        for position in observation_positions_m
+                    }
+                )
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            raise CoverabilityError(
+                "primitive observation position lies outside detail geometry"
+            ) from error
+        pose_sources = _prioritize_exact_detail_sources(
+            exact_sources, window_cells=tile_cells
+        )
+    for pose_row, pose_column in pose_sources:
         start_row = pose_row - tile_cells // 2
         start_column = pose_column - tile_cells // 2
         if (
@@ -703,11 +798,64 @@ def classify_ineligibility(
 
 
 @dataclass(frozen=True, slots=True)
+class QualifiedStartState:
+    """Canonical platform state anchoring one truth reachability graph."""
+
+    position_m: tuple[float, float, float]
+    yaw_rad: float
+    motion_mode: int
+    body_z_m: tuple[float, float]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.position_m, tuple)
+            or len(self.position_m) != 3
+            or not isinstance(self.body_z_m, tuple)
+            or len(self.body_z_m) != 2
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in (*self.position_m, *self.body_z_m, self.yaw_rad)
+            )
+            or type(self.motion_mode) is not int
+            or self.motion_mode < 0
+            or self.body_z_m[0] > self.body_z_m[1]
+        ):
+            raise CoverabilityError("qualified start state is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "position_m": [float(value) for value in self.position_m],
+            "yaw_rad": float(self.yaw_rad),
+            "motion_mode": self.motion_mode,
+            "body_z_m": [float(value) for value in self.body_z_m],
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> "QualifiedStartState":
+        fields = {"position_m", "yaw_rad", "motion_mode", "body_z_m"}
+        if not isinstance(value, Mapping) or set(value) != fields:
+            raise CoverabilityError("qualified start state fields are invalid")
+        position = value["position_m"]
+        body_z = value["body_z_m"]
+        if not isinstance(position, list) or not isinstance(body_z, list):
+            raise CoverabilityError("qualified start state vectors are invalid")
+        return cls(
+            position_m=tuple(position),
+            yaw_rad=value["yaw_rad"],
+            motion_mode=value["motion_mode"],
+            body_z_m=tuple(body_z),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PlatformCoverability:
     """Validated exact cache payload for one scene/platform/fixed start."""
 
     platform_type: str
     qualified_start_cell: tuple[int, int] | None
+    qualified_start_state: QualifiedStartState | None
     reachable_pose_mask: np.ndarray
     coverable_detail_shape: tuple[int, int]
     coverable_detail_bits: np.ndarray
@@ -717,7 +865,14 @@ class PlatformCoverability:
     mission_coverable_fraction: float
     initial_coverable_fraction: float
     initial_candidate_count: int
+    primitive_state_count: int
+    certified_edge_count: int
+    recoverable_state_count: int
     reachability_algorithm_id: str
+    primitive_state_schema: str
+    primitive_set_sha256: str
+    world_evidence_sha256: str
+    reachability_graph_sha256: str
     visibility_algorithm_id: str
     reachable_mask_sha256: str
     coverable_mask_sha256: str
@@ -764,10 +919,38 @@ class PlatformCoverability:
             raise CoverabilityError("coverability eligibility must be boolean")
         for name, value in (
             ("reachability algorithm ID", self.reachability_algorithm_id),
+            ("primitive state schema", self.primitive_state_schema),
             ("visibility algorithm ID", self.visibility_algorithm_id),
         ):
             if not isinstance(value, str) or not value:
                 raise CoverabilityError(f"{name} is missing")
+        for name, value in (
+            ("primitive set hash", self.primitive_set_sha256),
+            ("world evidence hash", self.world_evidence_sha256),
+            ("primitive graph hash", self.reachability_graph_sha256),
+        ):
+            _require_sha(value, name)
+        for name, value in (
+            ("primitive state count", self.primitive_state_count),
+            ("certified edge count", self.certified_edge_count),
+            ("recoverable state count", self.recoverable_state_count),
+        ):
+            if type(value) is not int or value < 0:
+                raise CoverabilityError(f"{name} must be non-negative")
+        if self.recoverable_state_count > self.primitive_state_count:
+            raise CoverabilityError(
+                "recoverable state count exceeds primitive state count"
+            )
+        if (self.qualified_start_cell is None) is not (
+            self.qualified_start_state is None
+        ):
+            raise CoverabilityError("qualified start state disagrees with cell")
+        if self.qualified_start_state is not None and (
+            not isinstance(self.qualified_start_state, QualifiedStartState)
+            or self.primitive_state_count == 0
+            or self.recoverable_state_count == 0
+        ):
+            raise CoverabilityError("qualified start state lacks a recoverable graph")
         if mask_sha256(reachable) != _require_sha(
             self.reachable_mask_sha256, "reachable mask hash"
         ):
@@ -832,6 +1015,7 @@ __all__ = [
     "CoverabilityError",
     "IneligibleReason",
     "PlatformCoverability",
+    "QualifiedStartState",
     "StreamedDetailCoverability",
     "classify_ineligibility",
     "mask_sha256",

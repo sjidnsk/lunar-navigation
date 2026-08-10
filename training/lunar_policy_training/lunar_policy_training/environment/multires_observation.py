@@ -293,6 +293,84 @@ class MultiresSensorObservationState(SensorObservationState):
         candidate_cells: np.ndarray,
     ) -> np.ndarray:
         """Estimate gains from the sparse observed-only 0.2 m detail state."""
+        self._validate_candidate_gain_grids(
+            observed_mask, obstacle_ratio, roi_ratio, priority_weight
+        )
+        candidates = np.asarray(candidate_cells)
+        if (
+            candidates.dtype != np.dtype(np.int32)
+            or candidates.ndim != 2
+            or candidates.shape[1:] != (2,)
+            or not candidates.flags.c_contiguous
+        ):
+            raise ValueError("candidate cells must be C-contiguous int32 [N,2]")
+        if candidates.size and (
+            (candidates < 0).any()
+            or (candidates >= GLOBAL_GEOMETRY.cells).any()
+        ):
+            raise ValueError("candidate cell is outside the global grid")
+        detail_candidates = np.ascontiguousarray(
+            candidates * _DETAIL_PER_GLOBAL + _DETAIL_PER_GLOBAL // 2,
+            dtype=np.int32,
+        )
+        return self._estimate_detail_candidate_gains(
+            observed_mask,
+            obstacle_ratio,
+            roi_ratio,
+            priority_weight,
+            detail_candidates,
+        )
+
+    def estimate_candidate_gains_at_positions(
+        self,
+        observed_mask: np.ndarray,
+        obstacle_ratio: np.ndarray,
+        roi_ratio: np.ndarray,
+        priority_weight: np.ndarray,
+        candidate_positions_m: np.ndarray,
+    ) -> np.ndarray:
+        """Estimate gain at exact graph positions, never coarse cell centres."""
+        self._validate_candidate_gain_grids(
+            observed_mask, obstacle_ratio, roi_ratio, priority_weight
+        )
+        positions = np.asarray(candidate_positions_m)
+        if (
+            positions.dtype != np.dtype(np.float64)
+            or positions.ndim != 2
+            or positions.shape[1:] != (3,)
+            or not positions.flags.c_contiguous
+            or not np.isfinite(positions).all()
+        ):
+            raise ValueError(
+                "candidate positions must be finite C-contiguous float64 [N,3]"
+            )
+        try:
+            detail_candidates = np.ascontiguousarray(
+                [
+                    self.tile_provider.world_to_detail(
+                        float(position[0]), float(position[1])
+                    )
+                    for position in positions
+                ],
+                dtype=np.int32,
+            ).reshape((-1, 2))
+        except ValueError as error:
+            raise ValueError("candidate position is outside the detail grid") from error
+        return self._estimate_detail_candidate_gains(
+            observed_mask,
+            obstacle_ratio,
+            roi_ratio,
+            priority_weight,
+            detail_candidates,
+        )
+
+    @staticmethod
+    def _validate_candidate_gain_grids(
+        observed_mask: np.ndarray,
+        obstacle_ratio: np.ndarray,
+        roi_ratio: np.ndarray,
+        priority_weight: np.ndarray,
+    ) -> None:
         coarse_shape = (GLOBAL_GEOMETRY.cells, GLOBAL_GEOMETRY.cells)
         grids = (
             ("observed mask", observed_mask, np.dtype(np.bool_)),
@@ -312,37 +390,41 @@ class MultiresSensorObservationState(SensorObservationState):
                 not np.isfinite(values).all() or (values < 0.0).any()
             ):
                 raise ValueError(f"candidate {name} values are invalid")
-        candidates = np.asarray(candidate_cells)
+
+    def _estimate_detail_candidate_gains(
+        self,
+        observed_mask: np.ndarray,
+        obstacle_ratio: np.ndarray,
+        roi_ratio: np.ndarray,
+        priority_weight: np.ndarray,
+        detail_candidates: np.ndarray,
+    ) -> np.ndarray:
+        candidates = np.asarray(detail_candidates)
         if (
             candidates.dtype != np.dtype(np.int32)
             or candidates.ndim != 2
             or candidates.shape[1:] != (2,)
             or not candidates.flags.c_contiguous
         ):
-            raise ValueError("candidate cells must be C-contiguous int32 [N,2]")
+            raise ValueError("detail candidate cells must be C-contiguous int32 [N,2]")
+        total = self.tile_provider.detail_cells_per_axis
         if candidates.size and (
             (candidates < 0).any()
-            or (candidates >= GLOBAL_GEOMETRY.cells).any()
+            or (candidates >= total).any()
         ):
-            raise ValueError("candidate cell is outside the global grid")
+            raise ValueError("candidate cell is outside the detail grid")
         if candidates.shape[0] == 0:
             return np.zeros((0, 2), dtype=np.float32)
-
-        detail_candidates = np.ascontiguousarray(
-            candidates * _DETAIL_PER_GLOBAL + _DETAIL_PER_GLOBAL // 2,
-            dtype=np.int32,
-        )
         radius_cells = math.floor(self.sensor.range_m / self.resolution_m)
-        total = self.tile_provider.detail_cells_per_axis
-        start_row = max(0, int(detail_candidates[:, 0].min()) - radius_cells)
+        start_row = max(0, int(candidates[:, 0].min()) - radius_cells)
         start_column = max(
-            0, int(detail_candidates[:, 1].min()) - radius_cells
+            0, int(candidates[:, 1].min()) - radius_cells
         )
         end_row = min(
-            total, int(detail_candidates[:, 0].max()) + radius_cells + 1
+            total, int(candidates[:, 0].max()) + radius_cells + 1
         )
         end_column = min(
-            total, int(detail_candidates[:, 1].max()) + radius_cells + 1
+            total, int(candidates[:, 1].max()) + radius_cells + 1
         )
         rows = end_row - start_row
         columns = end_column - start_column
@@ -372,7 +454,7 @@ class MultiresSensorObservationState(SensorObservationState):
             dtype=np.float32,
         )
         local_candidates = np.ascontiguousarray(
-            detail_candidates - np.asarray([start_row, start_column], np.int32),
+            candidates - np.asarray([start_row, start_column], np.int32),
             dtype=np.int32,
         )
         detail_gains = self.visibility_estimator.estimate_candidate_gains(

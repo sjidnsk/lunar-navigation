@@ -11,6 +11,7 @@ from lunar_policy_training.environment.coverability import (
     CoverabilityError,
     IneligibleReason,
     PlatformCoverability,
+    QualifiedStartState,
     classify_ineligibility,
     mask_sha256,
     pack_detail_mask,
@@ -80,6 +81,12 @@ def _eligible_coverability() -> PlatformCoverability:
     return PlatformCoverability(
         platform_type="WHEELED",
         qualified_start_cell=(0, 0),
+        qualified_start_state=QualifiedStartState(
+            position_m=(1.0, 1.0, 0.0),
+            yaw_rad=0.0,
+            motion_mode=0,
+            body_z_m=(0.0, 0.0),
+        ),
         reachable_pose_mask=reachable,
         coverable_detail_shape=detail.shape,
         coverable_detail_bits=pack_detail_mask(detail),
@@ -89,7 +96,16 @@ def _eligible_coverability() -> PlatformCoverability:
         mission_coverable_fraction=1.0,
         initial_coverable_fraction=3.0 / 9.0,
         initial_candidate_count=2,
-        reachability_algorithm_id="ground-start-component/v1",
+        primitive_state_count=4,
+        certified_edge_count=6,
+        recoverable_state_count=3,
+        reachability_algorithm_id=(
+            "cpp-wheel-motion-primitive-recoverable-graph/v1"
+        ),
+        primitive_state_schema="wheel-lattice-state/v1",
+        primitive_set_sha256="1" * 64,
+        world_evidence_sha256="2" * 64,
+        reachability_graph_sha256="3" * 64,
         visibility_algorithm_id="two-dimensional-detail-los/v1",
         reachable_mask_sha256=mask_sha256(reachable),
         coverable_mask_sha256=mask_sha256(detail),
@@ -118,6 +134,12 @@ def test_platform_coverability_validates_exact_masks_counts_hashes_and_ratio() -
         replace(value, coverable_ratio=np.zeros((2, 2), np.float32))
     with pytest.raises(CoverabilityError, match="exact"):
         replace(value, exact=False)
+    with pytest.raises(CoverabilityError, match="primitive graph hash"):
+        replace(value, reachability_graph_sha256="invalid")
+    with pytest.raises(CoverabilityError, match="recoverable state count"):
+        replace(value, recoverable_state_count=5)
+    with pytest.raises(CoverabilityError, match="qualified start state"):
+        replace(value, qualified_start_state=None)
 
 
 @pytest.mark.parametrize(
@@ -234,6 +256,36 @@ def test_coverable_union_keeps_visible_nonoccupiable_cell_and_excludes_island() 
     assert calls == [(1, 1)]
     assert result[2, 2]
     assert not result[5, 5]
+
+
+def test_coverable_union_uses_exact_primitive_pose_not_coarse_cell_center() -> None:
+    """Would fail if cache LOS reconstructed a 4 m center from a graph state."""
+    target = np.ones((6, 6), dtype=np.bool_)
+    reachable = np.zeros((3, 3), dtype=np.bool_)
+    reachable[0, 0] = True
+    calls: list[tuple[int, int]] = []
+
+    def reveal(
+        _truth_obstacle_ratio: np.ndarray,
+        pose_cell: tuple[int, int],
+    ) -> np.ndarray:
+        calls.append(pose_cell)
+        output = np.zeros((6, 6), dtype=np.bool_)
+        output[pose_cell] = True
+        output[2, 2] = True  # visible target need not be a standable pose
+        return output
+
+    result = build_coverable_detail_mask(
+        mission_target_detail_mask=target,
+        truth_obstacle_ratio=np.zeros(target.shape, dtype=np.float32),
+        reachable_pose_mask=reachable,
+        observation_pose_cells=np.asarray([[0, 0]], dtype=np.int32),
+        reveal_from_pose=reveal,
+    )
+
+    assert calls == [(0, 0)]
+    assert result[0, 0]
+    assert result[2, 2]
 
 
 def test_coverable_union_intersects_los_with_target_and_is_repeat_identical() -> None:

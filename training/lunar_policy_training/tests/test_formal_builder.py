@@ -17,6 +17,7 @@ from lunar_policy_training.environment.candidate_builder import CandidateBuilder
 from lunar_policy_training.environment.coverability import (
     IneligibleReason,
     PlatformCoverability,
+    QualifiedStartState,
     mask_sha256,
     pack_detail_mask,
 )
@@ -24,6 +25,7 @@ from lunar_policy_training.environment.formal_builder import (
     FormalEpisode,
     FormalEnvironmentBuilder,
     FormalWorkerBuilder,
+    _aggregate_primitive_detail,
     _formal_schedule_index,
 )
 from lunar_policy_training.environment.formal_episode_state import (
@@ -38,6 +40,7 @@ from lunar_policy_training.environment.observation_boundary import (
     SensorBoundaryEvidence,
 )
 from lunar_policy_training.environment.multires_observation import (
+    DetailObservedWindow,
     MultiresSensorObservationState,
 )
 from lunar_policy_training.environment.observation_builder import Pose2
@@ -59,6 +62,10 @@ from lunar_policy_training.polar_data.formal_cache import (
     StaticSceneData,
     write_formal_cache,
 )
+from lunar_policy_training.polar_data.raster import (
+    GridGeometry,
+    MapCanvas,
+)
 from lunar_policy_training.polar_data.hazards import (
     FORMAL_GENERATOR_VERSION,
     scene_seed,
@@ -67,6 +74,41 @@ from lunar_policy_training.project_capability import load_project_formal_capabil
 
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
+
+
+def test_primitive_detail_aggregation_requires_complete_point_two_metre_evidence() -> None:
+    detail_canvas = MapCanvas(
+        "e" * 64,
+        (0.0, 0.0, 64.0, 64.0),
+        GridGeometry(64.0, 0.2, 320),
+    )
+    shape = (320, 320)
+    valid = np.ones(shape, dtype=np.bool_)
+    valid[0, 0] = False
+    elevation = np.arange(shape[0] * shape[1], dtype=np.float32).reshape(shape)
+    obstacle = np.zeros(shape, dtype=np.float32)
+    obstacle[10:20, 10:20] = 0.4
+    detail = DetailObservedWindow(
+        canvas=detail_canvas,
+        elevation_m=elevation,
+        physical_obstacle_ratio=obstacle,
+        physical_obstacle_height_m=obstacle * 2.0,
+        forbidden_ratio=np.zeros(shape, dtype=np.float32),
+        valid_mask=valid,
+        observation_age_s=np.zeros(shape, dtype=np.float32),
+        observation_quality=np.ones(shape, dtype=np.float32),
+        observation_count=np.ones(shape, dtype=np.uint32),
+    )
+
+    aggregated = _aggregate_primitive_detail(detail)
+
+    assert aggregated.canvas.geometry == GridGeometry(64.0, 2.0, 32)
+    assert not bool(aggregated.valid_mask[0, 0])
+    assert bool(aggregated.valid_mask[1, 1])
+    assert aggregated.physical_obstacle_ratio[1, 1] == pytest.approx(0.4)
+    assert aggregated.elevation_m[1, 1] == pytest.approx(
+        float(elevation[10:20, 10:20].mean(dtype=np.float64))
+    )
 
 
 def _sha(label: str) -> str:
@@ -91,6 +133,24 @@ def _coverability(
         output[platform] = PlatformCoverability(
             platform_type=platform,
             qualified_start_cell=start,
+            qualified_start_state=(
+                None
+                if start is None
+                else QualifiedStartState(
+                    position_m=(
+                        (float(start[1]) + 0.5) * 4.0,
+                        1024.0 - (float(start[0]) + 0.5) * 4.0,
+                        7.33 if platform == "LEGGED" else 7.0,
+                    ),
+                    yaw_rad=0.0,
+                    motion_mode=1 if platform == "LEGGED" else 0,
+                    body_z_m=(
+                        (7.28, 7.38)
+                        if platform == "LEGGED"
+                        else (0.0, 0.0)
+                    ),
+                )
+            ),
             reachable_pose_mask=reachable,
             coverable_detail_shape=detail_shape,
             coverable_detail_bits=(eligible_bits if start is not None else empty_bits),
@@ -100,7 +160,14 @@ def _coverability(
             mission_coverable_fraction=1.0 if count else 0.0,
             initial_coverable_fraction=0.1 if count else 0.0,
             initial_candidate_count=1 if count else 0,
+            primitive_state_count=int(reachable.sum(dtype=np.int64)),
+            certified_edge_count=1 if count else 0,
+            recoverable_state_count=int(reachable.sum(dtype=np.int64)),
             reachability_algorithm_id=f"test-reachability/{platform.lower()}",
+            primitive_state_schema=f"test-state/{platform.lower()}",
+            primitive_set_sha256=_sha(f"primitive-set/{platform}"),
+            world_evidence_sha256=_sha(f"world-evidence/{platform}"),
+            reachability_graph_sha256=_sha(f"primitive-graph/{platform}"),
             visibility_algorithm_id="two-dimensional-detail-los/v1",
             reachable_mask_sha256=mask_sha256(reachable),
             coverable_mask_sha256=(eligible_hash if start is not None else empty_hash),
@@ -345,14 +412,16 @@ def test_formal_episode_passes_exact_platform_and_exposes_candidate_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assembly, _, _ = _assembly(tmp_path)
-    original_build = CandidateBuilderV2.build
+    original_build = CandidateBuilderV2.build_from_primitive_graph
     platform_calls: list[str] = []
 
     def record_platform(self, *args, **kwargs):
         platform_calls.append(kwargs["platform_type"])
         return original_build(self, *args, **kwargs)
 
-    monkeypatch.setattr(CandidateBuilderV2, "build", record_platform)
+    monkeypatch.setattr(
+        CandidateBuilderV2, "build_from_primitive_graph", record_platform
+    )
     worker = assembly.factory(0, "HOPPER")
 
     assert platform_calls

@@ -635,6 +635,72 @@ def test_primitive_reachability_engine_propagates_hard_failure_without_revision(
     assert after_failure.revision == 2
 
 
+def test_truth_primitive_graph_is_not_truncated_at_thirty_metres(
+    easy_request,
+) -> None:
+    request = easy_request("WHEELED")
+    request.world.global_map = _flat_map(
+        "map", width=80, height=8, resolution_m=1.0
+    )
+    request.world.local_map = _flat_map(
+        "odom", width=80, height=8, resolution_m=1.0
+    )
+    capability = _wheel_capability()
+    primitives = capability.motion_primitives
+    reverse = bridge_api.WheelMotionPrimitive()
+    reverse.primitive_id = "reverse"
+    reverse.kind = bridge_api.WheelPrimitiveKind.REVERSE
+    reverse.relative_end_pose = _pose(-1.0, 0.0, 0.0)
+    primitives.append(reverse)
+    stop = bridge_api.WheelMotionPrimitive()
+    stop.primitive_id = "stop-and-switch"
+    stop.kind = bridge_api.WheelPrimitiveKind.STOP_AND_SWITCH
+    stop.relative_end_pose = _pose(0.0, 0.0, 0.0)
+    primitives.append(stop)
+    capability.motion_primitives = primitives
+    request.capability = capability
+    request.config.wheel.xy_resolution_m = 1.0
+    request.config.global_map.base_resolution_m = 1.0
+
+    snapshot = bridge_api.PrimitiveReachabilityEngine().update(request, None)
+    recoverable_positions = snapshot.positions_m[snapshot.recoverable]
+
+    assert recoverable_positions[:, 0].max() - 2.5 > 30.0
+
+
+def test_ground_graph_uses_local_primitives_when_global_start_is_partial(
+    easy_request,
+) -> None:
+    request = easy_request("WHEELED")
+    _set_map_byte(request.world.global_map, "valid_mask", 3, 2, 0)
+    request.world.local_map = _flat_map(
+        "odom", width=40, height=40, resolution_m=0.2
+    )
+    capability = _wheel_capability()
+    primitives = capability.motion_primitives
+    primitives[0].relative_end_pose = _pose(0.2, 0.0, 0.0)
+    reverse = bridge_api.WheelMotionPrimitive()
+    reverse.primitive_id = "reverse"
+    reverse.kind = bridge_api.WheelPrimitiveKind.REVERSE
+    reverse.relative_end_pose = _pose(-0.2, 0.0, 0.0)
+    stop = bridge_api.WheelMotionPrimitive()
+    stop.primitive_id = "stop-and-switch"
+    stop.kind = bridge_api.WheelPrimitiveKind.STOP_AND_SWITCH
+    stop.relative_end_pose = _pose(0.0, 0.0, 0.0)
+    capability.motion_primitives = [*primitives, reverse, stop]
+    request.capability = capability
+    request.config.wheel.xy_resolution_m = 0.2
+
+    snapshot = bridge_api.PrimitiveReachabilityEngine().update(request, 30.0)
+
+    assert (snapshot.width, snapshot.height) == (40, 40)
+    assert snapshot.recoverable.any()
+    np.testing.assert_allclose(
+        snapshot.positions_m[snapshot.path_cost == 0.0][0],
+        (2.5, 3.5, 0.0),
+    )
+
+
 def test_grid_layer_rejects_non_contiguous_numpy() -> None:
     """Would fail if a strided view crossed the zero-copy-sensitive boundary."""
     values = np.zeros((4, 4), dtype=np.float32)[:, ::2]

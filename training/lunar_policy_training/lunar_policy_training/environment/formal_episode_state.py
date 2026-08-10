@@ -12,7 +12,7 @@ import torch
 from ..policy.observation import ObservationIdentity, PolicyBatch
 
 
-FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION = "lunar-formal-environment-state/v4"
+FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION = "lunar-formal-environment-state/v5"
 STABLE_EXECUTION_STATES = frozenset(
     {"DECISION_BOUNDARY", "GROUND_HOLD", "LANDED_HOLD"}
 )
@@ -60,6 +60,10 @@ _WORKER_FIELDS = frozenset(
         "legged_body_z_m",
         "execution_state",
         "observation_revision",
+        "primitive_graph_revision",
+        "primitive_graph_sha256",
+        "primitive_world_evidence_sha256",
+        "primitive_set_sha256",
         "state_time_ns",
         "reveal_history",
         "observation_identity",
@@ -273,6 +277,10 @@ class FormalWorkerState:
     legged_body_z_m: float
     execution_state: str
     observation_revision: int
+    primitive_graph_revision: int
+    primitive_graph_sha256: str
+    primitive_world_evidence_sha256: str
+    primitive_set_sha256: str
     state_time_ns: int
     reveal_history: tuple[FormalRevealState, ...]
     observation_identity: ObservationIdentity
@@ -332,6 +340,13 @@ class FormalWorkerState:
         )
         if revision != len(history) + 1:
             raise ValueError("formal observation revision does not match reveal history")
+        primitive_graph_revision = _nonnegative_int(
+            value["primitive_graph_revision"], "primitive graph revision"
+        )
+        if primitive_graph_revision != revision:
+            raise ValueError(
+                "formal primitive graph revision differs from observation revision"
+            )
         state_time_ns = _nonnegative_int(value["state_time_ns"], "state time")
         expected_time_ns = 1_000_000_000 + sum(
             int(round(item.elapsed_s * 1_000_000_000.0)) for item in history
@@ -380,6 +395,17 @@ class FormalWorkerState:
             ),
             execution_state=str(execution_state),
             observation_revision=revision,
+            primitive_graph_revision=primitive_graph_revision,
+            primitive_graph_sha256=_sha256(
+                value["primitive_graph_sha256"], "primitive graph digest"
+            ),
+            primitive_world_evidence_sha256=_sha256(
+                value["primitive_world_evidence_sha256"],
+                "primitive world evidence digest",
+            ),
+            primitive_set_sha256=_sha256(
+                value["primitive_set_sha256"], "primitive set digest"
+            ),
             state_time_ns=state_time_ns,
             reveal_history=history,
             observation_identity=identity,
@@ -409,6 +435,12 @@ class FormalWorkerState:
             "legged_body_z_m": self.legged_body_z_m,
             "execution_state": self.execution_state,
             "observation_revision": self.observation_revision,
+            "primitive_graph_revision": self.primitive_graph_revision,
+            "primitive_graph_sha256": self.primitive_graph_sha256,
+            "primitive_world_evidence_sha256": (
+                self.primitive_world_evidence_sha256
+            ),
+            "primitive_set_sha256": self.primitive_set_sha256,
             "state_time_ns": self.state_time_ns,
             "reveal_history": [item.to_dict() for item in self.reveal_history],
             "observation_identity": observation_identity_to_dict(

@@ -17,11 +17,15 @@ import lunar_planner_training_bridge as bridge_api
 from ..capability_freeze import (
     FrozenCapabilityBundle,
     FrozenCapabilityEnvironmentFactory,
-    FrozenLeggedCapability,
     FrozenPlatformCapability,
     ScenarioIdentity,
 )
-from ..polar_data.formal_cache import FormalCache, FormalCacheError, load_formal_cache
+from ..polar_data.formal_cache import (
+    FormalCache,
+    FormalCacheError,
+    _global_composed_capability,
+    load_formal_cache,
+)
 from ..polar_data.hazards import (
     CraterBowl,
     NoGoPolygon,
@@ -29,7 +33,12 @@ from ..polar_data.hazards import (
     VectorHazardScene,
 )
 from ..polar_data.multires_scene import MultiResolutionScene, SceneTileProvider
-from ..polar_data.raster import GLOBAL_GEOMETRY, LOCAL_GEOMETRY, MapCanvas
+from ..polar_data.raster import (
+    GLOBAL_GEOMETRY,
+    LOCAL_GEOMETRY,
+    GridGeometry,
+    MapCanvas,
+)
 from ..policy.action_semantics import apply_goal_theta
 from ..policy.observation import ObservationIdentity, PolicyBatch
 from ..training_semantics import FORMAL_SENSOR_FOV_RAD, FORMAL_SENSOR_RANGE_M
@@ -38,6 +47,7 @@ from .candidate_builder import (
     CandidateBuilderV2,
     CandidateDiagnostics,
 )
+from .coverability import QualifiedStartState
 from .formal_episode_state import (
     FormalPathSampleState,
     FormalPoseState,
@@ -69,6 +79,10 @@ from .observation_builder import (
 )
 from .parallel_pool import ParallelEnvironmentWorker
 from .platform_reachability import PlatformCandidateReachability
+from .primitive_reachability import (
+    ObservedPrimitiveReachability,
+    ObservedPrimitiveSnapshot,
+)
 from .v3_environment import (
     CommittedHopExecutionFeedback,
     EnvironmentInvariantError,
@@ -183,6 +197,7 @@ class _MapSnapshot:
     world: object
     projection: PlatformProjection
     platform_reachability: PlatformCandidateReachability
+    primitive_reachability: ObservedPrimitiveSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,6 +386,68 @@ def _grid_map(
     return grid
 
 
+def _aggregate_primitive_detail(
+    detail: DetailObservedWindow,
+) -> DetailObservedWindow:
+    """Conservatively aggregate 0.2 m observed evidence to a 2 m graph map."""
+    if (
+        not isinstance(detail, DetailObservedWindow)
+        or detail.canvas.geometry.cells != 320
+        or not math.isclose(
+            detail.canvas.geometry.resolution_m, 0.2, rel_tol=0.0, abs_tol=1.0e-12
+        )
+    ):
+        raise ValueError("primitive detail source geometry is invalid")
+    factor = 10
+    output_cells = detail.canvas.geometry.cells // factor
+    grouped_shape = (output_cells, factor, output_cells, factor)
+
+    def grouped(values: np.ndarray) -> np.ndarray:
+        source = np.asarray(values)
+        if source.shape != (320, 320):
+            raise ValueError("primitive detail source array is invalid")
+        return source.reshape(grouped_shape)
+
+    def floating(values: np.ndarray, reduction: str) -> np.ndarray:
+        source = grouped(values).astype(np.float64, copy=False)
+        if reduction == "mean":
+            result = source.mean(axis=(1, 3), dtype=np.float64)
+        elif reduction == "max":
+            result = source.max(axis=(1, 3))
+        elif reduction == "min":
+            result = source.min(axis=(1, 3))
+        else:
+            raise AssertionError("unsupported primitive aggregation")
+        return np.ascontiguousarray(result, dtype=np.float32)
+
+    valid = np.ascontiguousarray(
+        grouped(detail.valid_mask).all(axis=(1, 3)), dtype=np.bool_
+    )
+    count = np.ascontiguousarray(
+        grouped(detail.observation_count).min(axis=(1, 3)), dtype=np.uint32
+    )
+    canvas = MapCanvas(
+        detail.canvas.window_sha256,
+        detail.canvas.bounds_m,
+        GridGeometry(size_m=64.0, resolution_m=2.0, cells=32),
+    )
+    return DetailObservedWindow(
+        canvas=canvas,
+        elevation_m=floating(detail.elevation_m, "mean"),
+        physical_obstacle_ratio=floating(
+            detail.physical_obstacle_ratio, "max"
+        ),
+        physical_obstacle_height_m=floating(
+            detail.physical_obstacle_height_m, "max"
+        ),
+        forbidden_ratio=floating(detail.forbidden_ratio, "max"),
+        valid_mask=valid,
+        observation_age_s=floating(detail.observation_age_s, "max"),
+        observation_quality=floating(detail.observation_quality, "min"),
+        observation_count=count,
+    )
+
+
 def _yaw_from_pose(value: object) -> float:
     orientation = value.orientation
     return math.atan2(
@@ -418,15 +495,33 @@ class FormalEpisode:
             f"{platform_type.lower()}_clearance_margin_norm"
         ]
         self.start_cell = start_cell
-        x_m, y_m = loaded.scene.base_canvas.grid_center_world(*start_cell)
-        elevation_m = float(loaded.arrays["elevation_m"][start_cell])
-        self.current_pose = Pose2(x_m, y_m, 0.0, "map", elevation_m)
-        self._current_legged_body_z_m = elevation_m
-        if isinstance(capability.typed_capability, FrozenLeggedCapability):
-            interval = capability.typed_capability.body_height_m
-            self._current_legged_body_z_m += 0.5 * (
-                interval.lower + interval.upper
-            )
+        start_payload = loaded.entry["platform_coverability"][platform_type].get(
+            "qualified_start_state"
+        )
+        start_state = QualifiedStartState.from_dict(start_payload)
+        start_position = start_state.position_m
+        if loaded.scene.base_canvas.world_to_grid(
+            start_position[0], start_position[1]
+        ) != start_cell:
+            raise ValueError("formal qualified start state leaves its cached cell")
+        terrain_elevation_m = float(loaded.arrays["elevation_m"][start_cell])
+        pose_elevation_m = (
+            terrain_elevation_m
+            if platform_type == "LEGGED"
+            else float(start_position[2])
+        )
+        self.current_pose = Pose2(
+            float(start_position[0]),
+            float(start_position[1]),
+            float(start_state.yaw_rad),
+            "map",
+            pose_elevation_m,
+        )
+        self._current_legged_body_z_m = (
+            float(start_position[2])
+            if platform_type == "LEGGED"
+            else pose_elevation_m
+        )
         self.start_is_safe = bool(self._static_hard[start_cell])
         self._mission_roi = self._build_mission_roi()
         self.mission = MissionRaster(
@@ -472,6 +567,9 @@ class FormalEpisode:
         self._current_candidate_gain_resolution_m: float | None = None
         self._observation_builder = ObservationBuilderV2()
         self._bridge = bridge_api.PlannerBridge()
+        self._primitive_reachability = ObservedPrimitiveReachability(
+            platform_type
+        )
         self._snapshot: _MapSnapshot | None = None
         self._revision = 0
         self._pending_hop_landing: Pose2 | None = None
@@ -624,6 +722,15 @@ class FormalEpisode:
         )
         if (
             self._revision != state.observation_revision
+            or self._primitive_reachability.snapshot is None
+            or self._primitive_reachability.snapshot.revision
+            != state.primitive_graph_revision
+            or self._primitive_reachability.snapshot.graph_sha256
+            != state.primitive_graph_sha256
+            or self._primitive_reachability.snapshot.world_evidence_sha256
+            != state.primitive_world_evidence_sha256
+            or self._primitive_reachability.snapshot.primitive_set_sha256
+            != state.primitive_set_sha256
             or self.current_pose != self._pose_from_state(state.current_pose)
             or not math.isclose(
                 self._current_legged_body_z_m,
@@ -643,6 +750,12 @@ class FormalEpisode:
             raise ValueError("formal snapshot observation identity is missing")
         dynamic = environment.snapshot_stable_state()
         identity = identities[0]
+        primitive_graph = self._primitive_reachability.snapshot
+        if (
+            primitive_graph is None
+            or primitive_graph.revision != self._revision
+        ):
+            raise ValueError("formal primitive graph snapshot is stale")
         return FormalWorkerState.from_dict(
             {
                 "scenario_schedule_id": self.scenario_identity.scenario_schedule_id,
@@ -663,6 +776,12 @@ class FormalEpisode:
                 "legged_body_z_m": float(self._current_legged_body_z_m),
                 "execution_state": dynamic["execution_state"],
                 "observation_revision": self._revision,
+                "primitive_graph_revision": primitive_graph.revision,
+                "primitive_graph_sha256": primitive_graph.graph_sha256,
+                "primitive_world_evidence_sha256": (
+                    primitive_graph.world_evidence_sha256
+                ),
+                "primitive_set_sha256": primitive_graph.primitive_set_sha256,
                 "state_time_ns": identity.state_time_ns,
                 "reveal_history": [
                     reveal.to_dict() for reveal in self._reveal_history
@@ -802,17 +921,78 @@ class FormalEpisode:
         request.config.legged.yaw_bin_count = 64
         return request
 
+    def _observed_primitive_request(
+        self, global_map: object, local_map: object
+    ) -> object:
+        request = self._base_request(global_map, local_map)
+        request.request_id = (
+            f"formal-observed/{self.platform_type.lower()}/"
+            f"{self.scene_id}/{self._revision}"
+        )
+        request.capability = _global_composed_capability(
+            self.capability,
+            resolution_m=2.0,
+            bridge_api=bridge_api,
+        )
+        request.config.wheel.xy_resolution_m = 2.0
+        request.config.wheel.yaw_bin_count = 32
+        request.config.legged.xy_resolution_m = 2.0
+        request.config.legged.yaw_bin_count = 32
+        point = bridge_api.PointGoal()
+        point.position_m = _vec3(
+            self.current_pose.x_m,
+            self.current_pose.y_m,
+            self.current_pose.elevation_m,
+        )
+        point.tolerance_m = 0.0 if self.platform_type == "HOPPER" else 0.2
+        request.goal.goal_id = "observed-primitive-anchor"
+        request.goal.target = point
+        apply_goal_theta(
+            request.goal, self.platform_type, self.current_pose.yaw_rad
+        )
+        return request
+
     def build_policy_observation(
         self, observed, pose: Pose2
     ) -> PolicyBatch:
         if pose != self.current_pose:
             raise ValueError("policy observation pose differs from episode state")
         self._revision += 1
+        global_map, local_map, detail = self._observed_maps()
+        primitive_detail = _aggregate_primitive_detail(detail)
+        primitive_local_map = _grid_map(
+            canvas=primitive_detail.canvas,
+            frame_id="odom",
+            elevation_m=primitive_detail.elevation_m,
+            valid_mask=primitive_detail.valid_mask,
+            physical_obstacle_ratio=primitive_detail.physical_obstacle_ratio,
+            physical_obstacle_height_m=(
+                primitive_detail.physical_obstacle_height_m
+            ),
+            forbidden_ratio=primitive_detail.forbidden_ratio,
+            observation_age_s=primitive_detail.observation_age_s,
+            observation_quality=primitive_detail.observation_quality,
+            observation_count=primitive_detail.observation_count,
+            stamp_ns=1_000_000_000 + self._revision * 1_000_000,
+        )
+        primitive_snapshot = self._primitive_reachability.update(
+            self._observed_primitive_request(
+                global_map,
+                local_map
+                if self.platform_type == "HOPPER"
+                else primitive_local_map,
+            ),
+            observation_revision=self._revision,
+        )
         if self._defer_candidate_rebuild:
-            return self._build_ground_continuation_observation(pose)
+            return self._build_ground_continuation_observation(
+                pose,
+                global_map=global_map,
+                local_map=local_map,
+                primitive_snapshot=primitive_snapshot,
+            )
         local = self.sensor_state.local_observation(pose)
         world = observed.to_observed_world(local=local)
-        global_map, local_map, _ = self._observed_maps()
         projection_request = self._base_request(global_map, local_map)
         projection_request.request_id = (
             f"formal-projection/{self.scene_id}/{self._revision}"
@@ -859,30 +1039,12 @@ class FormalEpisode:
             request=projection_request,
             local_traversability_projection=local_cpp,
         )
-        candidates = candidate_builder.build(
+        candidates = candidate_builder.build_from_primitive_graph(
             world,
             self.mission,
             pose,
-            projection,
+            primitive_snapshot,
             platform_type=self.platform_type,
-            platform_reachability_filter_enabled=(
-                self._platform_candidate_reachability_enabled
-            ),
-            platform_reachability=(
-                platform_reachability
-                if self._platform_candidate_reachability_enabled
-                else None
-            ),
-            excluded_cells=(
-                self._visited_candidate_cells
-                if self._visited_candidate_filter_enabled
-                else ()
-            ),
-            backtrack_pose=(
-                self._navigation_stack[-2]
-                if len(self._navigation_stack) >= 2
-                else None
-            ),
         )
         arrays = self._observation_builder.build(
             world,
@@ -900,6 +1062,7 @@ class FormalEpisode:
             world,
             projection,
             platform_reachability,
+            primitive_snapshot,
         )
         return PolicyBatch(
             **{
@@ -909,13 +1072,17 @@ class FormalEpisode:
         )
 
     def _build_ground_continuation_observation(
-        self, pose: Pose2
+        self,
+        pose: Pose2,
+        *,
+        global_map: object,
+        local_map: object,
+        primitive_snapshot: ObservedPrimitiveSnapshot,
     ) -> PolicyBatch:
         """Refresh planning maps without rebuilding unused policy candidates."""
         snapshot = self._snapshot
         if snapshot is None:
             raise RuntimeError("ground continuation has no prior map snapshot")
-        global_map, local_map, _ = self._observed_maps()
         self._snapshot = _MapSnapshot(
             self._revision,
             snapshot.candidates,
@@ -924,6 +1091,7 @@ class FormalEpisode:
             snapshot.world,
             snapshot.projection,
             snapshot.platform_reachability,
+            primitive_snapshot,
         )
         previous = self.controller.current_observation
         pose_features = previous.pose_features.clone()
@@ -956,13 +1124,16 @@ class FormalEpisode:
             raise RuntimeError("formal request has no observation snapshot")
         if not 0 <= action.frontier_index < snapshot.candidates.count:
             raise ValueError("formal action candidate is invalid")
-        feature = snapshot.candidates.features[action.frontier_index]
         canvas = self.loaded.scene.base_canvas
-        target_x = canvas.bounds_m[0] + float(feature[0]) * canvas.geometry.size_m
-        target_y = canvas.bounds_m[3] - float(feature[1]) * canvas.geometry.size_m
+        target_position = snapshot.candidates.target_positions_m[
+            action.frontier_index
+        ]
+        target_x = float(target_position[0])
+        target_y = float(target_position[1])
         canvas.world_to_grid(target_x, target_y)
-        target_z = float(
-            snapshot.candidates.target_elevation_m[action.frontier_index]
+        target_z = float(target_position[2])
+        target_yaw = float(
+            snapshot.candidates.target_yaw_rad[action.frontier_index]
         )
         request = self._base_request(snapshot.global_map, snapshot.local_map)
         # The observation boundary owns the authoritative state clock.  Cache
@@ -983,7 +1154,7 @@ class FormalEpisode:
         goal.tolerance_m = 0.0 if self.platform_type == "HOPPER" else 0.2
         request.goal.goal_id = f"frontier/{action.frontier_index}"
         request.goal.target = goal
-        apply_goal_theta(request.goal, self.platform_type, action.theta_rad)
+        apply_goal_theta(request.goal, self.platform_type, target_yaw)
         return PreparedPlanRequest(request=request, identity=expected_identity)
 
     def begin_ground_option(
@@ -998,12 +1169,15 @@ class FormalEpisode:
         if not isinstance(target, bridge_api.PointGoal):
             raise ValueError("formal ground option requires a point goal")
         position = target.position_m
+        target_yaw = float(
+            self._snapshot.candidates.target_yaw_rad[action.frontier_index]
+        )
         values = (
             position.x,
             position.y,
             position.z,
             target.tolerance_m,
-            action.theta_rad,
+            target_yaw,
         )
         if not all(math.isfinite(float(value)) for value in values):
             raise ValueError("formal ground option contains non-finite values")
@@ -1016,7 +1190,7 @@ class FormalEpisode:
             target_y_m=float(position.y),
             target_z_m=float(position.z),
             tolerance_m=float(target.tolerance_m),
-            theta_rad=float(action.theta_rad),
+            theta_rad=target_yaw,
             goal_id=goal_id,
         )
         prepared.request.goal.goal_id = goal_id

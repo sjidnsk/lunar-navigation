@@ -12,6 +12,7 @@ import pytest
 from lunar_policy_training.environment.coverability import (
     IneligibleReason,
     PlatformCoverability,
+    QualifiedStartState,
     mask_sha256,
     pack_detail_mask,
 )
@@ -111,6 +112,16 @@ def _scene(
         coverability[platform] = PlatformCoverability(
             platform_type=platform,
             qualified_start_cell=start,
+            qualified_start_state=(
+                None
+                if start is None
+                else QualifiedStartState(
+                    position_m=(float(start[1]), float(start[0]), 0.0),
+                    yaw_rad=0.0,
+                    motion_mode=0,
+                    body_z_m=(0.0, 0.0),
+                )
+            ),
             reachable_pose_mask=reachable,
             coverable_detail_shape=detail.shape,
             coverable_detail_bits=pack_detail_mask(detail),
@@ -120,7 +131,14 @@ def _scene(
             mission_coverable_fraction=count / detail.size,
             initial_coverable_fraction=0.1,
             initial_candidate_count=1,
+            primitive_state_count=0 if start is None else int(reachable.sum()),
+            certified_edge_count=0 if start is None else 1,
+            recoverable_state_count=0 if start is None else int(reachable.sum()),
             reachability_algorithm_id=f"test-reachability/{platform.lower()}",
+            primitive_state_schema=f"test-state/{platform.lower()}",
+            primitive_set_sha256=_sha(f"primitive-set/{platform}"),
+            world_evidence_sha256=_sha(f"world/{platform}"),
+            reachability_graph_sha256=_sha(f"graph/{platform}"),
             visibility_algorithm_id="two-dimensional-detail-los/v1",
             reachable_mask_sha256=mask_sha256(reachable),
             coverable_mask_sha256=mask_sha256(detail),
@@ -259,7 +277,7 @@ def test_preflight_cache_round_trip_is_ineligible_for_formal_use(
     )
     arrays = cache.load_scene(_sha("scene"))
 
-    assert FORMAL_CACHE_SCHEMA == "lunar-formal-training-cache/v4"
+    assert FORMAL_CACHE_SCHEMA == "lunar-formal-training-cache/v5"
     assert manifest["schema"] == FORMAL_CACHE_SCHEMA
     assert manifest["materialization"] == "preflight"
     assert manifest["platform_eligibility"]["WHEELED"]["splits"]["train"] == {
@@ -271,6 +289,11 @@ def test_preflight_cache_round_trip_is_ineligible_for_formal_use(
     assert manifest["exact_common_evaluation"]["scene_count"] == 1
     platform = manifest["scenes"][0]["platform_coverability"]["WHEELED"]
     assert platform["qualified_start_cell"] == [127, 127]
+    assert platform["qualified_start_state"]["position_m"] == [127.0, 127.0, 0.0]
+    assert platform["primitive_state_count"] == 256 * 256
+    assert platform["certified_edge_count"] == 1
+    assert platform["recoverable_state_count"] == 256 * 256
+    assert len(platform["reachability_graph_sha256"]) == 64
     assert platform["eligible"] is True
     assert platform["ineligible_reason"] is None
     assert platform["exact"] is True
@@ -286,6 +309,21 @@ def test_preflight_cache_round_trip_is_ineligible_for_formal_use(
             expected_identity=identity,
             require_full=True,
         )
+
+
+def test_v4_cache_manifest_is_rejected_without_in_place_upgrade(
+    tmp_path: pathlib.Path,
+) -> None:
+    root, identity, _ = _write(tmp_path)
+    manifest_path = root / "cache-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema"] = "lunar-formal-training-cache/v4"
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True), encoding="utf-8"
+    )
+
+    with pytest.raises(FormalCacheError, match="schema"):
+        load_formal_cache(manifest_path, expected_identity=identity)
 
 
 def test_cache_records_platform_local_eligibility_and_exact_common_intersection(
