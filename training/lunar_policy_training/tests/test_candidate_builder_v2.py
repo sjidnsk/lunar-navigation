@@ -14,6 +14,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "model_cont
 from lunar_policy_training.environment import candidate_builder as candidate_builder_module  # noqa: E402
 from lunar_policy_training.environment.candidate_builder import CandidateBatch, CandidateBuilderV2  # noqa: E402
 from lunar_policy_training.environment.observation_builder import LocalObservation, MissionRaster, ObservedWorld, PlatformProjection, Pose2  # noqa: E402
+from lunar_policy_training.environment.platform_reachability import PlatformCandidateReachability  # noqa: E402
 from lunar_policy_training.environment.visibility import NativeVisibilityEstimator, SensorGeometry  # noqa: E402
 from lunar_policy_training.polar_data.hazards import CanvasRatioLayer  # noqa: E402
 from lunar_policy_training.polar_data.raster import MapCanvas  # noqa: E402
@@ -223,6 +224,7 @@ def test_candidate_builder_excludes_visited_landing_cells_only() -> None:
     assert np.any(
         np.all(positions == np.asarray([0.474609375, 0.525390625]), axis=1)
     )
+    assert batch.diagnostics.visited_excluded_count == 1
 
 
 def test_sensor_geometry_and_obstacle_or_zero_traversable_reject_candidates() -> None:
@@ -373,7 +375,11 @@ def test_ground_platform_keeps_candidate_when_observed_detour_exists() -> None:
     assert batch.count > legacy.count
     assert batch.diagnostics.emitted_count == batch.count
     assert batch.diagnostics.frontier_anchor_count >= batch.count
-    assert batch.diagnostics.platform_filter_rejected_count > 0
+    assert (
+        batch.diagnostics.static_infeasible_count
+        + batch.diagnostics.platform_unreachable_count
+        > 0
+    )
 
 
 def test_hopper_keeps_observed_landing_when_ground_ray_is_blocked() -> None:
@@ -446,7 +452,7 @@ def test_hopper_rejects_unobserved_or_projection_infeasible_landings() -> None:
     )
 
     assert unsafe.count == 0
-    assert unsafe.diagnostics.platform_filter_rejected_count == unsafe.diagnostics.frontier_anchor_count
+    assert unsafe.diagnostics.static_infeasible_count > 0
     assert unobserved.count == 0
 
 
@@ -462,3 +468,56 @@ def test_platform_filter_rejects_unknown_platform_and_is_byte_deterministic() ->
     np.testing.assert_array_equal(first.features, second.features)
     np.testing.assert_array_equal(first.mask, second.mask)
     assert first.diagnostics == second.diagnostics
+
+
+def test_stage_diagnostics_isolate_platform_unreachable_and_zero_gain() -> None:
+    world = _world_with_frontier()
+    mission = _mission()
+    projection = _projection()
+    pose = Pose2(500.0, 512.0)
+
+    class RejectingBridge:
+        def project_reachability(self, request, maximum_edge_distance_m):
+            del request, maximum_edge_distance_m
+            return type(
+                "Projection",
+                (),
+                {"reachable": np.zeros((256, 256), dtype=np.uint8)},
+            )()
+
+    reachability = PlatformCandidateReachability(
+        platform_type="WHEELED",
+        canvas=world.canvas,
+        pose_map=pose,
+        observed_elevation_m=world.elevation_m,
+        bridge=RejectingBridge(),
+        request=object(),
+    )
+    unreachable = CandidateBuilderV2(_RecordingEstimator()).build(
+        world,
+        mission,
+        pose,
+        projection,
+        platform_type="WHEELED",
+        platform_reachability=reachability,
+    )
+
+    class ZeroGainEstimator(_RecordingEstimator):
+        def estimate_candidate_gains(self, *args) -> np.ndarray:
+            candidates = args[-1]
+            return np.zeros((len(candidates), 2), dtype=np.float32)
+
+    zero_gain = CandidateBuilderV2(ZeroGainEstimator()).build(
+        world,
+        mission,
+        pose,
+        projection,
+        platform_type="HOPPER",
+    )
+
+    assert unreachable.count == 0
+    assert unreachable.diagnostics.platform_unreachable_count > 0
+    assert unreachable.diagnostics.zero_gain_count == 0
+    assert zero_gain.count == 0
+    assert zero_gain.diagnostics.platform_unreachable_count == 0
+    assert zero_gain.diagnostics.zero_gain_count > 0

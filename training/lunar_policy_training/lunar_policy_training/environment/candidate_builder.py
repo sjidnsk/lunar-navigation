@@ -12,6 +12,7 @@ import numpy as np
 from lunar_model_contract import ObservationContractV3
 
 from .observation_builder import MissionRaster, ObservedWorld, PlatformProjection, Pose2
+from .platform_reachability import PlatformCandidateReachability
 from .visibility import SensorGeometry, VisibilityEstimator, _ray_cells
 
 
@@ -22,21 +23,39 @@ _PLATFORM_TYPES = _GROUND_PLATFORM_TYPES | {"HOPPER"}
 @dataclass(frozen=True, slots=True)
 class CandidateDiagnostics:
     frontier_anchor_count: int = 0
-    platform_filter_rejected_count: int = 0
+    visited_excluded_count: int = 0
+    static_infeasible_count: int = 0
+    platform_unreachable_count: int = 0
+    zero_gain_count: int = 0
     emitted_count: int = 0
+    planner_rejected_count: int = 0
 
     def __post_init__(self) -> None:
         values = (
             self.frontier_anchor_count,
-            self.platform_filter_rejected_count,
+            self.visited_excluded_count,
+            self.static_infeasible_count,
+            self.platform_unreachable_count,
+            self.zero_gain_count,
             self.emitted_count,
+            self.planner_rejected_count,
         )
         if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in values):
             raise ValueError("candidate diagnostics must contain non-negative integers")
-        if self.platform_filter_rejected_count > self.frontier_anchor_count:
-            raise ValueError("candidate diagnostics rejected count exceeds anchors")
-        if self.emitted_count > self.frontier_anchor_count:
-            raise ValueError("candidate diagnostics emitted count exceeds anchors")
+        remaining = self.frontier_anchor_count
+        for value in (
+            self.visited_excluded_count,
+            self.static_infeasible_count,
+            self.platform_unreachable_count,
+            self.zero_gain_count,
+        ):
+            if value > remaining:
+                raise ValueError("candidate diagnostics stage count exceeds input")
+            remaining -= value
+        if self.emitted_count > remaining:
+            raise ValueError("candidate diagnostics emitted count exceeds survivors")
+        if self.planner_rejected_count > self.emitted_count:
+            raise ValueError("candidate planner rejection exceeds emitted count")
 
 
 @dataclass(frozen=True)
@@ -209,6 +228,7 @@ class CandidateBuilderV2:
         *,
         platform_type: str,
         platform_reachability_filter_enabled: bool = True,
+        platform_reachability: PlatformCandidateReachability | None = None,
         excluded_cells: Collection[tuple[int, int]] = (),
     ) -> CandidateBatch:
         if platform_type not in _PLATFORM_TYPES:
@@ -237,21 +257,48 @@ class CandidateBuilderV2:
                 standoff = (row + int(np.sign(robot[0] - row)) * step, column + int(np.sign(robot[1] - column)) * step)
                 if not (0 <= standoff[0] < cells and 0 <= standoff[1] < cells and observed[standoff]):
                     standoff = (row, column)
-                if standoff == robot or standoff in excluded_cells:
-                    continue
                 if self._candidate_within_sensor(canvas, pose_map, standoff):
                     raw_anchors.append((segment_id, standoff))
         raw_anchors = sorted(set(raw_anchors))
+        unvisited = [
+            anchor
+            for anchor in raw_anchors
+            if anchor[1] != robot and anchor[1] not in excluded_cells
+        ]
+        visited_excluded = len(raw_anchors) - len(unvisited)
+        static_feasible = [
+            anchor
+            for anchor in unvisited
+            if observed[anchor[1]]
+            and roi[anchor[1]]
+            and world.physical_obstacle_layer.values[anchor[1]] == 0.0
+            and projection.traversable_ratio[anchor[1]] > 0.0
+        ]
+        static_infeasible = len(unvisited) - len(static_feasible)
         reachable = None
-        if platform_reachability_filter_enabled and platform_type in _GROUND_PLATFORM_TYPES:
+        if (
+            platform_reachability_filter_enabled
+            and platform_reachability is None
+            and platform_type in _GROUND_PLATFORM_TYPES
+        ):
             reachable = _ground_reachable_mask(world, projection, robot)
+        accepted_mask: np.ndarray | None = None
+        if platform_reachability_filter_enabled and platform_reachability is not None:
+            if not isinstance(platform_reachability, PlatformCandidateReachability):
+                raise TypeError("platform reachability filter is invalid")
+            result = platform_reachability.filter(
+                np.ascontiguousarray(
+                    [point for _, point in static_feasible], dtype=np.int32
+                ).reshape((-1, 2))
+            )
+            accepted_mask = result.accepted_mask
         feasible: list[tuple[int, tuple[int, int]]] = []
-        for anchor in raw_anchors:
+        for index, anchor in enumerate(static_feasible):
             point = anchor[1]
-            if projection.traversable_ratio[point] == 0.0:
-                continue
             if not platform_reachability_filter_enabled:
                 accepted = _clear_observed(world, _ray_cells(robot, point))
+            elif accepted_mask is not None:
+                accepted = bool(accepted_mask[index])
             elif platform_type in _GROUND_PLATFORM_TYPES:
                 assert reachable is not None
                 accepted = bool(reachable[point])
@@ -263,9 +310,12 @@ class CandidateBuilderV2:
                 )
             if accepted:
                 feasible.append(anchor)
+        platform_unreachable = len(static_feasible) - len(feasible)
         diagnostics = CandidateDiagnostics(
             frontier_anchor_count=len(raw_anchors),
-            platform_filter_rejected_count=len(raw_anchors) - len(feasible),
+            visited_excluded_count=visited_excluded,
+            static_infeasible_count=static_infeasible,
+            platform_unreachable_count=platform_unreachable,
         )
         if not feasible:
             return CandidateBatch.empty(canvas.identity, diagnostics)
@@ -293,6 +343,7 @@ class CandidateBuilderV2:
         ):
             raise RuntimeError("candidate visibility estimator result is invalid")
         chosen: list[_FeasibleAnchor] = []
+        zero_gain_count = 0
         for (segment_id, point), (gain, priority_gain) in zip(
             feasible, gains, strict=True
         ):
@@ -309,6 +360,8 @@ class CandidateBuilderV2:
             )
             if feature is not None:
                 chosen.append(_FeasibleAnchor(segment_id, point, feature))
+            else:
+                zero_gain_count += 1
         chosen = _select_anchors(chosen, len(segments))
         output = np.zeros((64, 12), np.float32); mask = np.zeros(64, bool)
         for index, anchor in enumerate(chosen): output[index] = anchor.feature; mask[index] = True
@@ -318,7 +371,10 @@ class CandidateBuilderV2:
             canvas.identity,
             CandidateDiagnostics(
                 frontier_anchor_count=diagnostics.frontier_anchor_count,
-                platform_filter_rejected_count=diagnostics.platform_filter_rejected_count,
+                visited_excluded_count=diagnostics.visited_excluded_count,
+                static_infeasible_count=diagnostics.static_infeasible_count,
+                platform_unreachable_count=diagnostics.platform_unreachable_count,
+                zero_gain_count=zero_gain_count,
                 emitted_count=len(chosen),
             ),
         )

@@ -62,6 +62,7 @@ from .observation_builder import (
     Pose2,
 )
 from .parallel_pool import ParallelEnvironmentWorker
+from .platform_reachability import PlatformCandidateReachability
 from .v3_environment import (
     CommittedHopExecutionFeedback,
     EnvironmentInvariantError,
@@ -728,7 +729,8 @@ class FormalEpisode:
         projection = PlatformProjection(
             canvas=world.canvas,
             traversable_ratio=(
-                self._static_hard
+                world.observed_mask
+                & (world.physical_obstacle_layer.values == 0.0)
                 & self._mission_roi
             ).astype(np.float32),
             local_traversable_ratio=center,
@@ -753,6 +755,18 @@ class FormalEpisode:
             platform_type=self.platform_type,
             platform_reachability_filter_enabled=(
                 self._platform_candidate_reachability_enabled
+            ),
+            platform_reachability=(
+                PlatformCandidateReachability(
+                    platform_type=self.platform_type,
+                    canvas=world.canvas,
+                    pose_map=pose,
+                    observed_elevation_m=world.elevation_m,
+                    bridge=self._bridge,
+                    request=projection_request,
+                )
+                if self._platform_candidate_reachability_enabled
+                else None
             ),
             excluded_cells=(
                 self._visited_candidate_cells
