@@ -69,6 +69,16 @@ def test_state_timestamps_reject_stale_future_or_skewed_snapshots() -> None:
     assert _timestamps_are_usable((990, 995), **common)
 
 
+def test_policy_feedback_age_default_matches_planner_tracker() -> None:
+    rclpy.init()
+    node = InterfaceV1PolicyNode()
+    try:
+        assert node.get_parameter("input_max_age_s").value == 1.0
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
 def test_real_model_and_frozen_profile_configure_lifecycle_node() -> None:
     rclpy.init()
     node = _configured_node(PROFILE)

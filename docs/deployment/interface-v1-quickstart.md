@@ -70,7 +70,8 @@ ros2 topic echo /lunar/interface_v1/status
 发布 `/execution/motion_feedback`。状态消息包含当前平台、状态机、原因码和最近一次观测/推理耗时。
 地面平台只在匹配 `SEGMENT_COMPLETE`，且全局图、局部图、里程计、定位状态和 map→odom TF
 都晚于完成反馈后发下一次目标；飞跃式只在匹配 `LANDED_HOLD` 且同一组状态全部更新后再次选点。
-输入还必须满足 5 秒新鲜度和 0.2 秒组内时间偏差限制。若对接项目只需修改 Topic 名，使用 ROS remap；若修改消息字段，
+输入还必须满足 1 秒新鲜度和 0.2 秒组内时间偏差限制；该反馈新鲜度与规划器 tracker
+保持一致。若对接项目只需修改 Topic 名，使用 ROS remap；若修改消息字段，
 在 `lunar_external_adapter` 增加显式 converter，不修改旧模型观测、动作和权重定义。
 
 ## 5. 回归和停止

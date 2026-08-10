@@ -107,7 +107,7 @@ class InterfaceV1PolicyNode(LifecycleNode):
             "interface_profile_file", "/etc/lunar_navigation/interface_profile.yaml"
         )
         self.declare_parameter("decision_period_s", 0.1)
-        self.declare_parameter("input_max_age_s", 5.0)
+        self.declare_parameter("input_max_age_s", 1.0)
         self.declare_parameter("max_pairwise_skew_s", 0.2)
         self._lock = threading.RLock()
         self._enabled = False
@@ -128,7 +128,7 @@ class InterfaceV1PolicyNode(LifecycleNode):
         self._map_from_odom = None
         self._last_decision_boundary: tuple[object, ...] | None = None
         self._minimum_state_time_ns = 0
-        self._input_max_age_ns = 5_000_000_000
+        self._input_max_age_ns = 1_000_000_000
         self._max_pairwise_skew_ns = 200_000_000
         self._active_goal_handle = None
         self._last_elapsed_s = 0.0
@@ -465,6 +465,7 @@ class InterfaceV1PolicyNode(LifecycleNode):
                 self._send_goal(goal, stamp_ns)
             except CoordinatorError as error:
                 self._last_elapsed_s = time.perf_counter() - started
+                self._last_decision_boundary = boundary
                 self._reject("decision", error)
                 self._publish_status(self._coordinator.last_reason)
             except Exception as error:

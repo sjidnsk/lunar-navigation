@@ -118,7 +118,6 @@ class ClosedLoopCoordinator:
             self.active_plan_id = None
             self.active_segment_id = None
             self._platform_type = None
-            self._last_identity = None
             self.state = CoordinatorState.HOLD_ERROR
             self.last_reason = "POLICY_DECISION_FAILED"
             raise CoordinatorError("policy decision failed") from error
@@ -230,7 +229,7 @@ class ClosedLoopCoordinator:
             self._platform_type = None
             self.state = CoordinatorState.HOLD_ERROR
             self.last_reason = feedback.state
-            return False
+            return True
         terminal = (
             feedback.state == "LANDED_HOLD"
             if self._platform_type == "HOPPER"

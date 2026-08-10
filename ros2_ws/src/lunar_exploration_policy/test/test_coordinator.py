@@ -171,7 +171,7 @@ def test_matching_execution_failure_enters_hold_error() -> None:
         PlannerResult(goal.request_id, True, "plan", "REFERENCE_READY", "plan")
     )
 
-    assert not coordinator.accept_feedback(
+    assert coordinator.accept_feedback(
         ExecutionFeedback(1, "WHEELED", "plan", "FAILED", "plan", 10)
     )
 
@@ -234,4 +234,7 @@ def test_policy_failure_enters_diagnostic_hold_instead_of_stalling() -> None:
     assert coordinator.state is CoordinatorState.HOLD_ERROR
     assert coordinator.last_reason == "POLICY_DECISION_FAILED"
     assert coordinator._platform_type is None
-    assert coordinator._last_identity is None
+    assert coordinator._last_identity == _snapshot("WHEELED").identity
+
+    with pytest.raises(CoordinatorError, match="new decision boundary"):
+        coordinator.start_decision(_snapshot("WHEELED"), mission_id="mission")
