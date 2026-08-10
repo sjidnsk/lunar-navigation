@@ -16,7 +16,7 @@ from ..policy.observation import (
     PolicyBatch,
     validate_policy_batch,
 )
-from ..training_semantics import FORMAL_SUCCESS_COVERAGE_RATIO
+from ..training_semantics import formal_success_first_crossing
 from .observation_builder import Pose2
 from .sensor_observation import (
     ObservationDelta,
@@ -327,9 +327,7 @@ class ObservationBoundaryController:
             + float(delta.mission_observed_delta_m2),
         )
         mission_ratio = self._mission_observed_ratio()
-        crossing = (
-            previous_ratio < FORMAL_SUCCESS_COVERAGE_RATIO <= mission_ratio
-        )
+        crossing = formal_success_first_crossing(previous_ratio, mission_ratio)
         self._state_time_ns += elapsed_ns
         self._observation_revision += 1
         observation = self._policy_observation_builder(

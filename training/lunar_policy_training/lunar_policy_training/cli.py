@@ -870,6 +870,16 @@ def _freeze_policy_warm_start_manifest(
     if existing is not None and existing != frozen:
         raise ArtifactRootError("policy warm-start identity cannot drift")
     payload["policy_warm_start"] = frozen
+    parent = {
+        "checkpoint_sha256": evidence.parent_checkpoint_sha256,
+        "payload_sha256": evidence.parent_payload_sha256,
+        "global_step": evidence.parent_global_step,
+    }
+    existing_parent = payload.get("warm_start_parent")
+    if existing_parent not in (None, parent):
+        raise ArtifactRootError("policy warm-start parent cannot drift")
+    payload.setdefault("resume_parent", None)
+    payload["warm_start_parent"] = parent
     _write_manifest_payload(path, payload)
 
 
@@ -4576,6 +4586,8 @@ def _update_run_manifest(
     payload = _read_run_manifest(path)
     if "runtime_calibration" not in payload:
         raise ArtifactRootError("run manifest calibration is missing")
+    payload.setdefault("resume_parent", None)
+    payload.setdefault("warm_start_parent", None)
     if not isinstance(run_identity, RunIdentity):
         raise ArtifactRootError("run manifest identity must use RunIdentity")
     existing_identity = payload.get("run_identity")

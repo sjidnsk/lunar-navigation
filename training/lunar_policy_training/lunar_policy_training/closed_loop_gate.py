@@ -23,12 +23,13 @@ from .eval.baselines import select_baseline_action
 from .polar_data.multires_scene import GENERATOR_SHA256
 from .project_capability import load_project_formal_capability
 from .training_semantics import (
+    FORMAL_MINIMUM_MISSION_COVERABLE_RATIO,
     FORMAL_SUCCESS_COVERAGE_RATIO,
     training_semantics_sha256,
 )
 
 
-CLOSED_LOOP_GATE_SCHEMA = "lunar-platform-coverable-closed-loop-gate/v1"
+CLOSED_LOOP_GATE_SCHEMA = "lunar-platform-coverable-closed-loop-gate/v2"
 CLOSED_LOOP_MINIMUM_SCENES = 24
 CLOSED_LOOP_METHOD = "gain_over_cost_frontier"
 _SPLITS = ("train", "validation", "test", "holdout")
@@ -181,7 +182,7 @@ def _coverability_bindings(
             or not isinstance(fraction, (int, float))
             or isinstance(fraction, bool)
             or not math.isfinite(float(fraction))
-            or float(fraction) < FORMAL_SUCCESS_COVERAGE_RATIO
+            or float(fraction) < FORMAL_MINIMUM_MISSION_COVERABLE_RATIO
         ):
             raise ClosedLoopGateError(
                 "gate scene-platform is not exact and mission-coverable"
@@ -539,7 +540,7 @@ def _validate_row(
     binding = case.for_platform(platform)
     if (
         not math.isfinite(mission_fraction)
-        or mission_fraction < FORMAL_SUCCESS_COVERAGE_RATIO
+        or mission_fraction < FORMAL_MINIMUM_MISSION_COVERABLE_RATIO
         or mission_fraction != binding.mission_coverable_fraction
     ):
         raise ClosedLoopGateError("closed-loop mission coverable fraction failed")

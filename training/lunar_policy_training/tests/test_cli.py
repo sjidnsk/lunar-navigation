@@ -1524,6 +1524,8 @@ def test_formal_calibration_manifest_is_non_proxy_and_cache_bound(
     )
 
     assert manifest["task4_calibration"]["proxy"] is False
+    assert manifest["resume_parent"] is None
+    assert manifest["warm_start_parent"] is None
     assert state.run_identity.run_kind == "formal"
     assert state.scenario_schedule_id == schedule_id
     assert state.cache_manifest_path == cache_manifest

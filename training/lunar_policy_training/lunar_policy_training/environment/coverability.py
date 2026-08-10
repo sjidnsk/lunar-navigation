@@ -10,7 +10,10 @@ from typing import Callable, Iterator
 
 import numpy as np
 
-from ..training_semantics import FORMAL_SUCCESS_COVERAGE_RATIO
+from ..training_semantics import (
+    FORMAL_MINIMUM_MISSION_COVERABLE_RATIO,
+    FORMAL_SUCCESS_COVERAGE_RATIO,
+)
 
 
 _PLATFORM_TYPES = frozenset(("WHEELED", "LEGGED", "HOPPER"))
@@ -689,7 +692,7 @@ def classify_ineligibility(
         return IneligibleReason.ZERO_MISSION_TARGET
     if (
         coverable_detail_cell_count / mission_target_detail_cell_count
-        < FORMAL_SUCCESS_COVERAGE_RATIO
+        < FORMAL_MINIMUM_MISSION_COVERABLE_RATIO
     ):
         return IneligibleReason.MISSION_COVERABLE_BELOW_95
     if initial_coverable_fraction >= FORMAL_SUCCESS_COVERAGE_RATIO:

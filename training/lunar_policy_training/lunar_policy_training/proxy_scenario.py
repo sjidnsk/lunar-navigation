@@ -20,6 +20,7 @@ from .environment.v3_environment import (
 )
 from .policy.action_semantics import apply_goal_theta
 from .policy.observation import ObservationIdentity, PolicyBatch
+from .training_semantics import formal_success_first_crossing
 
 
 _PLATFORM_INDEX = {platform: index for index, platform in enumerate(PLATFORMS)}
@@ -634,7 +635,9 @@ class _ProxyEpisode:
         )
         self.coverage = min(1.0, self.coverage + gain)
         self.execution_state = execution_state
-        success_first_crossing = previous_coverage < 0.95 <= self.coverage
+        success_first_crossing = formal_success_first_crossing(
+            previous_coverage, self.coverage
+        )
         return ReferenceExecutionResult(
             next_observation=self.observation,
             mission_observed_delta=gain,

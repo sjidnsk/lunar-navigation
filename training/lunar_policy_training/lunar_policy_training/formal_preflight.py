@@ -28,10 +28,11 @@ from .evaluation.report import (
 from .policy.cross_attention import CrossAttentionPolicy
 from .policy.observation import PolicyBatch
 from .polar_data.formal_cache import FormalCache
-from .reward import compute_transition_reward
+from .reward import compute_transition_reward, reward_weights_sha256
+from .training_semantics import training_semantics_sha256
 
 
-FORMAL_PREFLIGHT_SCHEMA = "lunar-formal-training-preflight/v5"
+FORMAL_PREFLIGHT_SCHEMA = "lunar-formal-training-preflight/v6"
 REQUIRED_PREFLIGHT_CHECKS = (
     "cache_and_identity",
     "three_platform_worker_construction",
@@ -128,6 +129,13 @@ def build_formal_preflight_report(
         raise FormalPreflightError("preflight input digest is invalid")
     if not isinstance(run_identity, RunIdentity) or run_identity.run_kind != "formal":
         raise FormalPreflightError("preflight requires a formal run identity")
+    if run_identity.reward_sha256 != reward_weights_sha256():
+        raise FormalPreflightError("preflight reward identity is stale")
+    if (
+        run_identity.training_semantics_sha256
+        != training_semantics_sha256()
+    ):
+        raise FormalPreflightError("preflight training semantics are stale")
     if set(scenario_schedule_ids) != {
         "train",
         "validation",

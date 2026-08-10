@@ -33,6 +33,8 @@ from .ppo.checkpoint import (
     _validate_finite_tensors,
     _validated_rng_state,
 )
+from .reward import reward_weights_sha256
+from .training_semantics import training_semantics_sha256
 
 
 CHECKPOINT_SCHEMA_VERSION = "lunar-ppo-checkpoint/v6"
@@ -683,6 +685,15 @@ def _load_policy_warm_start_parent(
     identity = _run_identity_from_mapping(body.get("run_identity"))
     if identity.run_kind != "formal":
         raise CheckpointError("policy warm-start parent must be formal")
+    if identity.reward_sha256 != reward_weights_sha256():
+        raise CheckpointError("policy warm-start parent reward identity differs")
+    if (
+        identity.training_semantics_sha256
+        != training_semantics_sha256()
+    ):
+        raise CheckpointError(
+            "policy warm-start parent training semantics differ"
+        )
     if type(body.get("global_step")) is not int or body["global_step"] < 0:
         raise CheckpointError("policy warm-start parent step is invalid")
     model_state = body.get("model_state")

@@ -984,6 +984,16 @@ def load_formal_cache(
             "formal command requires a full, start-qualified cache"
         )
     identity = FormalCacheIdentity.from_dict(value.get("identity"))
+    if require_full and identity.reward_sha256 != reward_weights_sha256():
+        raise FormalCacheError("cache identity reward_sha256 differs")
+    if (
+        require_full
+        and identity.training_semantics_sha256
+        != training_semantics_sha256()
+    ):
+        raise FormalCacheError(
+            "cache identity training_semantics_sha256 differs"
+        )
     if expected_identity is not None:
         actual = identity.to_dict()
         expected = expected_identity.to_dict()

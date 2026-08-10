@@ -47,6 +47,7 @@ from lunar_policy_training.ppo.checkpoint import (  # noqa: E402
 from lunar_policy_training.training_semantics import (  # noqa: E402
     training_semantics_sha256,
 )
+from lunar_policy_training.reward import reward_weights_sha256  # noqa: E402
 from lunar_model_contract import ObservationContractV2, ObservationContractV3  # noqa: E402
 
 
@@ -59,7 +60,7 @@ def _identity(
         "split_sha256": "2" * 64,
         "generator_sha256": "3" * 64,
         "capability_sha256": "4" * 64,
-        "reward_sha256": "5" * 64,
+        "reward_sha256": reward_weights_sha256(),
         "v3_sha256": "6" * 64,
         "training_semantics_sha256": training_semantics_sha256(),
     }
@@ -326,7 +327,6 @@ def test_policy_warm_start_keeps_obsolete_episode_state_inert(
     environment["schema_version"] = "lunar-formal-environment-state/v2"
     for worker in environment["worker_episode_states"]:
         worker.pop("coverability_mask_sha256")
-    payload["body"]["run_identity"]["training_semantics_sha256"] = "8" * 64
     payload["body_sha256"] = _semantic_sha256(payload["body"])
     torch.save(payload, path)
 
@@ -337,6 +337,29 @@ def test_policy_warm_start_keeps_obsolete_episode_state_inert(
     assert evidence.parent_global_step == 906
     with pytest.raises(CheckpointError, match="environment state schema"):
         load_checkpoint(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    (
+        ("training_semantics_sha256", "training semantics"),
+        ("reward_sha256", "reward"),
+    ),
+)
+def test_policy_warm_start_rejects_pre_v7_or_pre_v4_parent(
+    tmp_path: pathlib.Path, field: str, message: str
+) -> None:
+    path = tmp_path / f"old-{field}.pt"
+    _policy_parent_checkpoint(path)
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    payload["body"]["run_identity"][field] = "8" * 64
+    payload["body_sha256"] = _semantic_sha256(payload["body"])
+    torch.save(payload, path)
+
+    with pytest.raises(CheckpointError, match=message):
+        load_policy_warm_start(
+            path, CrossAttentionPolicy(), value_head_seed=4080
+        )
 
 
 @pytest.mark.parametrize("corruption", ("missing", "unexpected", "shape", "dtype"))

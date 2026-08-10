@@ -1,4 +1,4 @@
-"""Frozen coverage-first V3 reward for v3 planner transitions."""
+"""Frozen coverage-first V4 reward for v3 planner transitions."""
 
 from __future__ import annotations
 
@@ -17,21 +17,21 @@ class InvalidTransition(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class RewardWeightsV3:
+class RewardWeightsV4:
     mission_observed_delta: float = 100.0
     executed_without_new_mission_coverage: float = 0.10
     goal_infeasible: float = 0.20
     no_known_safe_route: float = 0.30
     unsuccessful_remaining_coverage: float = 1.00
-    success_first_crossing: float = 5.00
+    success_first_crossing: float = 100.00
 
 
-REWARD_SCHEMA_VERSION = "lunar-reward/v3"
-DEFAULT_REWARD_WEIGHTS = RewardWeightsV3()
+REWARD_SCHEMA_VERSION = "lunar-reward/v4"
+DEFAULT_REWARD_WEIGHTS = RewardWeightsV4()
 
 
 @dataclass(frozen=True, slots=True)
-class RewardInputsV3:
+class RewardInputsV4:
     platform_type: str
     mission_observed_delta: float
     mission_observed_ratio_after: float
@@ -53,7 +53,7 @@ class RewardInputsV3:
     @classmethod
     def from_transition(
         cls, transition: PlannerTransition, *, platform_type: str
-    ) -> "RewardInputsV3":
+    ) -> "RewardInputsV4":
         if not isinstance(transition, PlannerTransition):
             raise InvalidTransition("reward input is not a PlannerTransition")
         return cls(
@@ -114,13 +114,13 @@ _BOOLEAN_FIELDS = (
 
 
 def reward_weights_sha256(
-    weights: RewardWeightsV3 = DEFAULT_REWARD_WEIGHTS,
+    weights: RewardWeightsV4 = DEFAULT_REWARD_WEIGHTS,
     *,
     platform_type: str | None = None,
 ) -> str:
-    """Return one platform-independent identity for the complete V3 reward."""
-    if not isinstance(weights, RewardWeightsV3):
-        raise ValueError("reward weights must use RewardWeightsV3")
+    """Return one platform-independent identity for the complete V4 reward."""
+    if not isinstance(weights, RewardWeightsV4):
+        raise ValueError("reward weights must use RewardWeightsV4")
     if platform_type is not None and platform_type not in _PLATFORMS:
         raise ValueError("platform type must be WHEELED, LEGGED, or HOPPER")
     values = tuple(asdict(weights).values())
@@ -145,16 +145,16 @@ def reward_weights_sha256(
 
 
 def compute_reward(
-    inputs: RewardInputsV3,
-    weights: RewardWeightsV3 = DEFAULT_REWARD_WEIGHTS,
+    inputs: RewardInputsV4,
+    weights: RewardWeightsV4 = DEFAULT_REWARD_WEIGHTS,
 ) -> float:
-    """Compute the frozen shared V3 reward or reject an invalid sample."""
-    if not isinstance(inputs, RewardInputsV3):
-        raise InvalidTransition("reward inputs must use RewardInputsV3")
+    """Compute the frozen shared V4 reward or reject an invalid sample."""
+    if not isinstance(inputs, RewardInputsV4):
+        raise InvalidTransition("reward inputs must use RewardInputsV4")
     if inputs.platform_type not in _PLATFORMS:
         raise InvalidTransition("reward platform type is invalid")
-    if not isinstance(weights, RewardWeightsV3) or weights != DEFAULT_REWARD_WEIGHTS:
-        raise InvalidTransition("reward weights differ from the frozen V3 baseline")
+    if not isinstance(weights, RewardWeightsV4) or weights != DEFAULT_REWARD_WEIGHTS:
+        raise InvalidTransition("reward weights differ from the frozen V4 baseline")
     if inputs.cpp_exception is not None:
         raise InvalidTransition("C++ exception transition cannot enter rollout")
     if any(type(getattr(inputs, field)) is not bool for field in _BOOLEAN_FIELDS):
@@ -259,8 +259,13 @@ def compute_transition_reward(transition: PlannerTransition) -> float:
     if values.count(1.0) != 1 or any(value not in (0.0, 1.0) for value in values):
         raise InvalidTransition("transition platform context is invalid")
     return compute_reward(
-        RewardInputsV3.from_transition(transition, platform_type=platform_type)
+        RewardInputsV4.from_transition(transition, platform_type=platform_type)
     )
+
+
+# Source compatibility only; hashes and runtime validation are V4.
+RewardInputsV3 = RewardInputsV4
+RewardWeightsV3 = RewardWeightsV4
 
 
 __all__ = [
@@ -268,7 +273,9 @@ __all__ = [
     "InvalidTransition",
     "REWARD_SCHEMA_VERSION",
     "RewardInputsV3",
+    "RewardInputsV4",
     "RewardWeightsV3",
+    "RewardWeightsV4",
     "compute_reward",
     "compute_transition_reward",
     "reward_weights_sha256",

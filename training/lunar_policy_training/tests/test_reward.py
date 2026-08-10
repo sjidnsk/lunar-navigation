@@ -15,14 +15,14 @@ from lunar_policy_training.policy.observation import PolicyBatch
 from lunar_policy_training.reward import (
     DEFAULT_REWARD_WEIGHTS,
     InvalidTransition,
-    RewardInputsV3,
-    RewardWeightsV3,
+    RewardInputsV4,
+    RewardWeightsV4,
     compute_reward,
     reward_weights_sha256,
 )
 
 
-def _inputs(**overrides: object) -> RewardInputsV3:
+def _inputs(**overrides: object) -> RewardInputsV4:
     values: dict[str, object] = {
         "platform_type": "WHEELED",
         "mission_observed_delta": 0.0,
@@ -43,7 +43,7 @@ def _inputs(**overrides: object) -> RewardInputsV3:
         "cpp_exception": None,
     }
     values.update(overrides)
-    return RewardInputsV3(**values)
+    return RewardInputsV4(**values)
 
 
 def _observation(*, mission_observed_ratio: float = 0.0) -> PolicyBatch:
@@ -81,7 +81,7 @@ def test_transition_adapter_reads_authoritative_v3_coverage() -> None:
         execution_events=ExecutionEvents(),
     )
 
-    inputs = RewardInputsV3.from_transition(transition, platform_type="WHEELED")
+    inputs = RewardInputsV4.from_transition(transition, platform_type="WHEELED")
 
     assert inputs.mission_observed_delta == 0.2
     assert inputs.mission_observed_ratio_after == pytest.approx(0.4)
@@ -96,7 +96,7 @@ def test_v3_ancillary_facts_have_no_implicit_dataclass_defaults() -> None:
         field.name: field.default for field in fields(PlannerTransition)
     }
     reward_defaults = {
-        field.name: field.default for field in fields(RewardInputsV3)
+        field.name: field.default for field in fields(RewardInputsV4)
     }
 
     assert transition_defaults["cancellation_expected"] is MISSING
@@ -127,7 +127,7 @@ def test_standard_transition_adapter_preserves_expected_cancellation() -> None:
         execution_events=ExecutionEvents(),
     )
 
-    inputs = RewardInputsV3.from_transition(transition, platform_type="WHEELED")
+    inputs = RewardInputsV4.from_transition(transition, platform_type="WHEELED")
 
     assert inputs.cancellation_expected is True
     assert inputs.cpp_exception is None
@@ -155,19 +155,19 @@ def test_standard_transition_adapter_rejects_cpp_exception_marker() -> None:
         execution_events=ExecutionEvents(),
     )
 
-    inputs = RewardInputsV3.from_transition(transition, platform_type="WHEELED")
+    inputs = RewardInputsV4.from_transition(transition, platform_type="WHEELED")
 
     with pytest.raises(InvalidTransition, match=r"C\+\+ exception"):
         compute_reward(inputs)
 
 
-def test_continuous_coverage_and_first_success_have_exact_v3_rewards() -> None:
+def test_continuous_coverage_and_first_success_have_exact_v4_rewards() -> None:
     """Would fail if coverage or the one-time completion bonus drifted."""
     dense = compute_reward(_inputs(mission_observed_delta=0.02))
     first = compute_reward(
         _inputs(
             mission_observed_delta=0.01,
-            mission_observed_ratio_after=0.95,
+            mission_observed_ratio_after=0.99,
             success_first_crossing=True,
             terminated=True,
         )
@@ -175,11 +175,22 @@ def test_continuous_coverage_and_first_success_have_exact_v3_rewards() -> None:
     later = compute_reward(_inputs(success_first_crossing=False))
 
     assert dense == 2.0
-    assert first == 6.0
+    assert first == 101.0
     assert later == -0.10
 
 
-def test_v3_reward_ignores_telemetry_and_has_one_platform_independent_hash() -> None:
+def test_zero_gain_first_success_restores_the_full_completion_signal() -> None:
+    assert compute_reward(
+        _inputs(
+            mission_observed_delta=0.0,
+            mission_observed_ratio_after=0.99,
+            success_first_crossing=True,
+            terminated=True,
+        )
+    ) == pytest.approx(99.9)
+
+
+def test_v4_reward_ignores_telemetry_and_has_one_platform_independent_hash() -> None:
     """Would fail if cost, time, or priority leaked back into policy reward."""
     baseline = compute_reward(
         _inputs(mission_observed_delta=0.2, mission_observed_ratio_after=0.4)
@@ -197,13 +208,13 @@ def test_v3_reward_ignores_telemetry_and_has_one_platform_independent_hash() -> 
 
     assert baseline == 20.0
     assert changed_telemetry == baseline
-    assert isinstance(DEFAULT_REWARD_WEIGHTS, RewardWeightsV3)
+    assert isinstance(DEFAULT_REWARD_WEIGHTS, RewardWeightsV4)
     assert {
         reward_weights_sha256(DEFAULT_REWARD_WEIGHTS, platform_type=platform)
         for platform in ("WHEELED", "LEGGED", "HOPPER")
     } == {reward_weights_sha256(DEFAULT_REWARD_WEIGHTS)}
     assert reward_weights_sha256() == (
-        "ec2ba24c8afd2a8c4416d4ece079155bcf33f326ed16453b0aded6e1bd77eeec"
+        "57f481799bb99f803c1f890d44b7ce27682bddb6e83370abbff08b1e4a515c15"
     )
     assert reward_weights_sha256() != (
         "46f0400e934113cfb863c4e4b64174027eac667f8654d14b2e5d333657335bd4"
