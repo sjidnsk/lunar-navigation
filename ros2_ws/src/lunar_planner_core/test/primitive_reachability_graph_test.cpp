@@ -516,6 +516,47 @@ TEST(PrimitiveReachabilityGraph,
 }
 
 TEST(PrimitiveReachabilityGraph,
+     HopperRecordsCertifiedEdgesBetweenAlreadyDiscoveredLandingStates) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 64U, 16U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 64U, 16U, 0.5);
+  input.config.global_map.base_resolution_m = 0.5;
+  std::get<HopperState>(input.current_state).pose.position_m =
+      {3.25, 4.25, 0.0};
+  KeepOnlyHopperLandingPatches(
+      input.world.local_map, {{8U, 6U}, {8U, 30U}, {8U, 54U}});
+  PrimitiveReachabilityEngine engine;
+
+  const PrimitiveReachabilityResult result = engine.Update(input, 30.0);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  const auto state_at = [&](const std::int32_t cell_x)
+      -> const PrimitiveReachabilityState* {
+    const auto iterator = std::find_if(
+        result.snapshot->states.begin(), result.snapshot->states.end(),
+        [cell_x](const PrimitiveReachabilityState& state) {
+          return state.cell_x == cell_x && state.cell_y == 8;
+        });
+    return iterator == result.snapshot->states.end() ? nullptr : &*iterator;
+  };
+  const PrimitiveReachabilityState* middle = state_at(30);
+  const PrimitiveReachabilityState* remote = state_at(54);
+  ASSERT_NE(middle, nullptr);
+  ASSERT_NE(remote, nullptr);
+  const auto has_edge = [&](const std::uint64_t source,
+                            const std::uint64_t target) {
+    return std::ranges::any_of(
+        result.snapshot->edges,
+        [source, target](const PrimitiveReachabilityEdge& edge) {
+          return edge.source_state_id == source &&
+              edge.target_state_id == target;
+        });
+  };
+  EXPECT_TRUE(has_edge(middle->state_id, remote->state_id));
+  EXPECT_TRUE(has_edge(remote->state_id, middle->state_id));
+}
+
+TEST(PrimitiveReachabilityGraph,
      HopperSkipsANumericallyIndeterminateNonAnchorLandingCell) {
   PlannerInput input = test::MakeValidHopperInput();
   input.world.global_map = test::MakeFlatMap("map", 8U, 5U, 1.0);

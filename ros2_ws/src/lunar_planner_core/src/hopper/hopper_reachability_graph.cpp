@@ -439,8 +439,7 @@ shared::PrimitiveGraphBuildResult BuildHopperPrimitiveGraph(
         continue;
       }
       const std::size_t target_grid_index = global_map->Index(target_cell);
-      if (state_by_grid[target_grid_index] != kNoState ||
-          !landings[target_grid_index].has_value()) {
+      if (!landings[target_grid_index].has_value()) {
         continue;
       }
       const DirectedEdgeResult forward = CertifyDirectedEdge(
@@ -454,9 +453,13 @@ shared::PrimitiveGraphBuildResult BuildHopperPrimitiveGraph(
         }
         continue;
       }
-      const std::size_t target_state_index = add_state(
-          target_grid_index,
-          graph.states[source_state_index].path_cost + forward.cost);
+      std::size_t target_state_index = state_by_grid[target_grid_index];
+      if (target_state_index == kNoState) {
+        target_state_index = add_state(
+            target_grid_index,
+            graph.states[source_state_index].path_cost + forward.cost);
+        queue.push_back(target_state_index);
+      }
       graph.potential_edges.push_back(shared::PrimitiveGraphPotentialEdge{
           .source_state_index = source_state_index,
           .target_state_index = target_state_index,
@@ -465,26 +468,6 @@ shared::PrimitiveGraphBuildResult BuildHopperPrimitiveGraph(
           .cost = forward.cost,
           .certified = true,
       });
-      const DirectedEdgeResult reverse = CertifyDirectedEdge(
-          *landings[target_grid_index], *landings[source_grid_index],
-          *global_map, *capability, input.config.map_safety,
-          input.stop_token);
-      if (reverse.ok()) {
-        graph.potential_edges.push_back(shared::PrimitiveGraphPotentialEdge{
-            .source_state_index = target_state_index,
-            .target_state_index = source_state_index,
-            .primitive_index = 0U,
-            .primitive_id = "certified-directed-hop",
-            .cost = reverse.cost,
-            .certified = true,
-        });
-      } else {
-        const std::string fatal = FatalEdgeReason(reverse);
-        if (!fatal.empty()) {
-          return Failure(fatal);
-        }
-      }
-      queue.push_back(target_state_index);
     }
   }
   return graph;
