@@ -515,5 +515,34 @@ TEST(PrimitiveReachabilityGraph,
   EXPECT_EQ(result.snapshot->reachable[8U * 80U + 74U], 1U);
 }
 
+TEST(PrimitiveReachabilityGraph,
+     HopperSkipsANumericallyIndeterminateNonAnchorLandingCell) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 8U, 5U, 1.0);
+  input.world.local_map = test::MakeFlatMap("odom", 20U, 20U, 0.6);
+  input.world.local_map.origin_m = {0.1, 0.1, 0.0};
+  input.config.global_map.base_resolution_m = 1.0;
+  std::get<HopperState>(input.current_state).pose.position_m =
+      {2.5, 2.5, 0.0};
+  auto capability = std::get<HopperCapability>(input.capability);
+  capability.landing_support_radius_m = 0.01;
+  capability.landing_lateral_margin_m = 0.0;
+  input.capability = capability;
+  PrimitiveReachabilityEngine engine;
+
+  const PrimitiveReachabilityResult result = engine.Update(input, 30.0);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  const auto has_cell = [&](const std::int32_t x, const std::int32_t y) {
+    return std::ranges::any_of(
+        result.snapshot->states,
+        [x, y](const PrimitiveReachabilityState& state) {
+          return state.cell_x == x && state.cell_y == y;
+        });
+  };
+  EXPECT_TRUE(has_cell(5, 2));
+  EXPECT_FALSE(has_cell(3, 2));
+}
+
 }  // namespace
 }  // namespace lunar::planning::shared

@@ -81,6 +81,10 @@ CertifiedLandingAtPosition(
         fatal_reason = "REACHABILITY_RESOURCE_EXHAUSTED";
         return std::nullopt;
       case LandingRegionStatus::kInvalidRequest:
+        if (landing.reason_code ==
+            "HOPPER_LANDING_REGION_NUMERICAL_INDETERMINATE") {
+          return std::nullopt;
+        }
         fatal_reason = landing.reason_code.empty()
             ? "HOPPER_LANDING_REGION_INVALID"
             : landing.reason_code;
