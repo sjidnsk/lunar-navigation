@@ -1,0 +1,8 @@
+schema_version: lunar-interface-v1-chain-fixture/v1
+model_qualification: integration_only
+platforms: [WHEELED, LEGGED, HOPPER]
+decisions_per_platform: 2
+terminal_feedback:
+  WHEELED: SEGMENT_COMPLETE
+  LEGGED: SEGMENT_COMPLETE
+  HOPPER: LANDED_HOLD
