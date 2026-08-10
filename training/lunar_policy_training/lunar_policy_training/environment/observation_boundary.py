@@ -132,15 +132,26 @@ class ObservationBoundaryController:
 
         resolution = sensor_state.truth.canvas.geometry.resolution_m
         cell_area_m2 = resolution * resolution
-        self._mission_area_m2 = float(
-            sensor_state.mission_roi_ratio.sum(dtype="float64") * cell_area_m2
+        exact_mission_area = getattr(sensor_state, "mission_area_m2", None)
+        exact_priority_area = getattr(sensor_state, "priority_area_m2", None)
+        self._mission_area_m2 = (
+            float(exact_mission_area)
+            if exact_mission_area is not None
+            else float(
+                sensor_state.mission_roi_ratio.sum(dtype="float64")
+                * cell_area_m2
+            )
         )
-        self._priority_area_m2 = float(
-            (
-                sensor_state.mission_priority
-                * sensor_state.mission_roi_ratio
-            ).sum(dtype="float64")
-            * cell_area_m2
+        self._priority_area_m2 = (
+            float(exact_priority_area)
+            if exact_priority_area is not None
+            else float(
+                (
+                    sensor_state.mission_priority
+                    * sensor_state.mission_roi_ratio
+                ).sum(dtype="float64")
+                * cell_area_m2
+            )
         )
 
     @property

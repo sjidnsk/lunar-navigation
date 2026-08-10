@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import subprocess
@@ -18,11 +19,19 @@ import numpy as np
 from ..capability_freeze import FrozenCapabilityBundle, FrozenPlatformCapability
 from ..environment.formal_start_qualification import (
     FORMAL_BOUNDARY_MARGIN_CELLS,
-    qualify_initial_start_cell,
+    build_formal_mission_roi,
+    qualify_initial_start,
 )
 from ..environment.coverability import (
+    IneligibleReason,
+    PlatformCoverability,
     StreamedDetailCoverability,
     build_streamed_detail_coverability,
+    classify_ineligibility,
+    mask_sha256,
+    pack_detail_mask,
+    read_packed_detail_window,
+    unpack_detail_mask,
 )
 from ..reward import reward_weights_sha256
 from ..training_semantics import training_semantics_sha256
@@ -46,19 +55,34 @@ from .scenario_manifest import (
 from .source_lock import load_aggregate_source_lock
 
 
-FORMAL_CACHE_SCHEMA = "lunar-formal-training-cache/v3"
+FORMAL_CACHE_SCHEMA = "lunar-formal-training-cache/v4"
 _SOURCE_IDS = (
     "NASA_LOLA_87S_DEM",
     "NASA_LOLA_87S_COUNT",
     "JAXA_LUPEX_DATA_S1",
 )
 _PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
-_MINIMUM_COMMON_START_ELIGIBLE_RATIO = 0.90
-_START_QUALIFICATION_POLICY = {
-    "evaluation_uses_common_eligible_subset": True,
-    "minimum_nasa_split_eligible_ratio": _MINIMUM_COMMON_START_ELIGIBLE_RATIO,
-    "holdout_requires_all_eligible": True,
-}
+_REQUIRED_SPLITS = ("train", "validation", "test", "holdout")
+_PLATFORM_COVERABILITY_FIELDS = frozenset(
+    (
+        "qualified_start_cell",
+        "reachable_pose_shape",
+        "coverable_detail_shape",
+        "mission_target_detail_cell_count",
+        "coverable_detail_cell_count",
+        "mission_coverable_fraction",
+        "initial_coverable_fraction",
+        "initial_candidate_count",
+        "reachability_algorithm_id",
+        "visibility_algorithm_id",
+        "reachable_mask_sha256",
+        "coverable_mask_sha256",
+        "exact",
+        "eligible",
+        "ineligible_reason",
+        "stage_diagnostics",
+    )
+)
 _IDENTITY_FIELDS = (
     "source_lock_file_sha256",
     "source_sha256s",
@@ -78,34 +102,56 @@ class FormalCacheError(ValueError):
     """The cache is incomplete, drifted, unsafe, or not formally eligible."""
 
 
-def _formal_start_qualification_ready(
+def _formal_platform_eligibility_ready(
     materialization: str,
-    split_totals: Mapping[str, int],
-    split_eligible: Mapping[str, int],
+    platform_counts: Mapping[str, Mapping[str, Mapping[str, int]]],
 ) -> bool:
-    """Gate a capability-bound common subset while retaining all holdout worlds."""
+    """Require a non-empty exact eligible lane for every platform and split."""
     if materialization != "full":
         return False
-    for split in ("train", "validation", "test"):
-        total = split_totals.get(split, 0)
-        eligible = split_eligible.get(split, 0)
-        if (
-            type(total) is not int
-            or type(eligible) is not int
-            or total <= 0
-            or eligible < 0
-            or eligible > total
-            or eligible / total < _MINIMUM_COMMON_START_ELIGIBLE_RATIO
-        ):
-            return False
-    holdout_total = split_totals.get("holdout", 0)
-    holdout_eligible = split_eligible.get("holdout", 0)
-    return (
-        type(holdout_total) is int
-        and type(holdout_eligible) is int
-        and holdout_total > 0
-        and holdout_eligible == holdout_total
-    )
+    if set(platform_counts) != set(_PLATFORMS):
+        return False
+    for platform in _PLATFORMS:
+        splits = platform_counts[platform]
+        for split in _REQUIRED_SPLITS:
+            counts = splits.get(split)
+            if not isinstance(counts, Mapping):
+                return False
+            total = counts.get("total_scene_count")
+            eligible = counts.get("eligible_scene_count")
+            if (
+                type(total) is not int
+                or type(eligible) is not int
+                or total <= 0
+                or eligible <= 0
+                or eligible > total
+            ):
+                return False
+    return True
+
+
+def platform_scenario_schedule_id(
+    platform_type: str,
+    split: str,
+    ordered_scene_ids: Iterable[str],
+) -> str:
+    """Bind one deterministic scenario schedule to a platform and split."""
+    if platform_type not in _PLATFORMS:
+        raise FormalCacheError("platform schedule type is invalid")
+    if split not in _REQUIRED_SPLITS:
+        raise FormalCacheError("platform schedule split is invalid")
+    scene_ids = tuple(ordered_scene_ids)
+    if len(set(scene_ids)) != len(scene_ids):
+        raise FormalCacheError("platform schedule contains duplicate scenes")
+    for scene_id in scene_ids:
+        _require_sha(scene_id, "platform schedule scene_id")
+    payload = {
+        "schema": "lunar-platform-scenario-schedule/v1",
+        "platform_type": platform_type,
+        "split": split,
+        "ordered_scene_ids": list(scene_ids),
+    }
+    return f"lunar-platform-scenario-schedule/v1:{_semantic_sha(payload)}"
 
 
 def _require_sha(value: object, name: str, *, length: int = 64) -> str:
@@ -217,7 +263,7 @@ class StaticSceneData:
     no_go_vertices: np.ndarray
     hard_feasible: Mapping[str, np.ndarray]
     clearance_margin_norm: Mapping[str, np.ndarray]
-    qualified_start_cells: Mapping[str, tuple[int, int] | None]
+    coverability: Mapping[str, PlatformCoverability]
 
     def __post_init__(self) -> None:
         _require_sha(self.scene_id, "scene_id")
@@ -270,23 +316,23 @@ class StaticSceneData:
             self.clearance_margin_norm
         ) != set(_PLATFORMS):
             raise FormalCacheError("scene projections must contain three platforms")
-        if set(self.qualified_start_cells) != set(_PLATFORMS):
+        if set(self.coverability) != set(_PLATFORMS):
             raise FormalCacheError(
-                "scene start qualification must contain three platforms"
+                "scene coverability must contain three platforms"
             )
-        checked_starts: dict[str, tuple[int, int] | None] = {}
+        checked_coverability: dict[str, PlatformCoverability] = {}
         for platform in _PLATFORMS:
-            cell = self.qualified_start_cells[platform]
-            if cell is None:
-                checked_starts[platform] = None
-                continue
+            payload = self.coverability[platform]
             if (
-                not isinstance(cell, tuple)
-                or len(cell) != 2
-                or any(type(value) is not int for value in cell)
-                or any(value < 0 or value >= 256 for value in cell)
+                not isinstance(payload, PlatformCoverability)
+                or payload.platform_type != platform
+                or payload.reachable_pose_mask.shape != (256, 256)
             ):
-                raise FormalCacheError("qualified start cell is invalid")
+                raise FormalCacheError("scene platform coverability is invalid")
+            cell = payload.qualified_start_cell
+            if cell is None:
+                checked_coverability[platform] = payload
+                continue
             row, column = cell
             margin = FORMAL_BOUNDARY_MARGIN_CELLS
             hard = np.asarray(self.hard_feasible[platform], dtype=np.bool_)
@@ -303,11 +349,11 @@ class StaticSceneData:
                 or not float(clearance[row, column]) > 0.0
             ):
                 raise FormalCacheError("qualified start cell is not physically safe")
-            checked_starts[platform] = cell
+            checked_coverability[platform] = payload
         object.__setattr__(
             self,
-            "qualified_start_cells",
-            MappingProxyType(checked_starts),
+            "coverability",
+            MappingProxyType(checked_coverability),
         )
 
     def arrays(self) -> dict[str, np.ndarray]:
@@ -341,6 +387,16 @@ class StaticSceneData:
                 raise FormalCacheError("normalized clearance must be in [0,1]")
             output[f"{prefix}_hard_feasible"] = hard
             output[f"{prefix}_clearance_margin_norm"] = clearance
+            coverability = self.coverability[platform]
+            output[f"{prefix}_reachable_pose_bits"] = pack_detail_mask(
+                coverability.reachable_pose_mask
+            )
+            output[f"{prefix}_coverable_detail_bits"] = np.ascontiguousarray(
+                coverability.coverable_detail_bits.copy(), dtype=np.uint8
+            )
+            output[f"{prefix}_coverable_ratio"] = np.ascontiguousarray(
+                coverability.coverable_ratio.copy(), dtype=np.float32
+            )
         return output
 
 
@@ -419,14 +475,46 @@ def _array_metadata(values: np.ndarray) -> dict[str, object]:
 def _scene_entry(scene: StaticSceneData, path: Path, root: Path) -> dict[str, object]:
     arrays = scene.arrays()
     _deterministic_npz(path, arrays)
-    start_cells = {
-        platform: (
-            None
-            if scene.qualified_start_cells[platform] is None
-            else list(scene.qualified_start_cells[platform])
-        )
-        for platform in _PLATFORMS
-    }
+    platform_coverability: dict[str, dict[str, object]] = {}
+    for platform in _PLATFORMS:
+        payload = scene.coverability[platform]
+        platform_coverability[platform] = {
+            "qualified_start_cell": (
+                None
+                if payload.qualified_start_cell is None
+                else list(payload.qualified_start_cell)
+            ),
+            "reachable_pose_shape": list(payload.reachable_pose_mask.shape),
+            "coverable_detail_shape": list(payload.coverable_detail_shape),
+            "mission_target_detail_cell_count": (
+                payload.mission_target_detail_cell_count
+            ),
+            "coverable_detail_cell_count": payload.coverable_detail_cell_count,
+            "mission_coverable_fraction": payload.mission_coverable_fraction,
+            "initial_coverable_fraction": payload.initial_coverable_fraction,
+            "initial_candidate_count": payload.initial_candidate_count,
+            "reachability_algorithm_id": payload.reachability_algorithm_id,
+            "visibility_algorithm_id": payload.visibility_algorithm_id,
+            "reachable_mask_sha256": payload.reachable_mask_sha256,
+            "coverable_mask_sha256": payload.coverable_mask_sha256,
+            "exact": payload.exact,
+            "eligible": payload.eligible,
+            "ineligible_reason": (
+                None
+                if payload.ineligible_reason is None
+                else payload.ineligible_reason.value
+            ),
+            "stage_diagnostics": {
+                "reachable_pose_count": int(
+                    payload.reachable_pose_mask.sum(dtype=np.int64)
+                ),
+                "mission_target_detail_cell_count": (
+                    payload.mission_target_detail_cell_count
+                ),
+                "coverable_detail_cell_count": payload.coverable_detail_cell_count,
+                "initial_candidate_count": payload.initial_candidate_count,
+            },
+        }
     return {
         "scene_id": scene.scene_id,
         "source": scene.source,
@@ -440,13 +528,86 @@ def _scene_entry(scene: StaticSceneData, path: Path, root: Path) -> dict[str, ob
         "arrays": {
             name: _array_metadata(values) for name, values in sorted(arrays.items())
         },
-        "start_qualification": {
-            "common_eligible": all(
-                start_cells[platform] is not None for platform in _PLATFORMS
-            ),
-            "platform_start_cells": start_cells,
-        },
+        "platform_coverability": platform_coverability,
     }
+
+
+def _eligibility_summary(
+    entries: Iterable[Mapping[str, object]],
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    ordered_entries = tuple(entries)
+    platform_summary: dict[str, object] = {}
+    readiness: dict[str, object] = {}
+    eligible_sets: dict[str, set[str]] = {}
+    for platform in _PLATFORMS:
+        split_summary: dict[str, object] = {}
+        split_counts: dict[str, object] = {}
+        eligible_by_split: dict[str, list[str]] = {}
+        schedule_ids: dict[str, str] = {}
+        all_eligible: set[str] = set()
+        for split in _REQUIRED_SPLITS:
+            split_entries = tuple(
+                entry for entry in ordered_entries if entry.get("split") == split
+            )
+            eligible_ids: list[str] = []
+            reasons: dict[str, int] = {}
+            for entry in split_entries:
+                payload = entry["platform_coverability"][platform]
+                if bool(payload["eligible"]):
+                    eligible_ids.append(str(entry["scene_id"]))
+                else:
+                    reason = str(payload["ineligible_reason"])
+                    reasons[reason] = reasons.get(reason, 0) + 1
+            eligible_ids.sort()
+            total = len(split_entries)
+            eligible = len(eligible_ids)
+            counts = {
+                "total_scene_count": total,
+                "eligible_scene_count": eligible,
+                "feasibility_rate": eligible / total if total else 0.0,
+                "ineligible_reason_counts": dict(sorted(reasons.items())),
+            }
+            split_summary[split] = counts
+            split_counts[split] = {
+                "total_scene_count": total,
+                "eligible_scene_count": eligible,
+            }
+            all_eligible.update(eligible_ids)
+            eligible_by_split[split] = eligible_ids
+            schedule_ids[split] = platform_scenario_schedule_id(
+                platform, split, eligible_ids
+            )
+        platform_summary[platform] = {
+            "splits": split_summary,
+            "eligible_scene_ids": eligible_by_split,
+            "scenario_schedule_ids": schedule_ids,
+        }
+        readiness[platform] = split_counts
+        eligible_sets[platform] = all_eligible
+
+    common_ids = sorted(set.intersection(*(eligible_sets[p] for p in _PLATFORMS)))
+    common_splits: dict[str, object] = {}
+    by_id = {str(entry["scene_id"]): entry for entry in ordered_entries}
+    for split in _REQUIRED_SPLITS:
+        ids = [scene_id for scene_id in common_ids if by_id[scene_id]["split"] == split]
+        common_splits[split] = {
+            "scene_count": len(ids),
+            "scene_ids": ids,
+            "scenario_schedule_id": _semantic_sha(
+                {
+                    "schema": "lunar-common-evaluation-schedule/v1",
+                    "split": split,
+                    "ordered_scene_ids": ids,
+                }
+            ),
+        }
+    exact_common = {
+        "scene_count": len(common_ids),
+        "scene_ids": common_ids,
+        "sha256": _semantic_sha(common_ids),
+        "splits": common_splits,
+    }
+    return platform_summary, exact_common, readiness
 
 
 def write_formal_cache(
@@ -493,18 +654,9 @@ def write_formal_cache(
             _scene_entry(scene, scene_root / f"{scene.scene_id}.npz", root)
         )
     entries.sort(key=lambda value: str(value["scene_id"]))
-    split_totals: dict[str, int] = {}
-    split_eligible: dict[str, int] = {}
-    for entry in entries:
-        split = str(entry["split"])
-        split_totals[split] = split_totals.get(split, 0) + 1
-        split_eligible.setdefault(split, 0)
-        if bool(entry["start_qualification"]["common_eligible"]):
-            split_eligible[split] += 1
-    qualification_complete = _formal_start_qualification_ready(
-        materialization,
-        split_totals,
-        split_eligible,
+    platform_eligibility, exact_common, readiness = _eligibility_summary(entries)
+    qualification_complete = _formal_platform_eligibility_ready(
+        materialization, readiness
     )
     inventory = [
         {
@@ -528,9 +680,8 @@ def write_formal_cache(
         "identity": identity.to_dict(),
         "scenario_manifest": inventory[0],
         "scene_count": len(entries),
-        "start_eligible_scene_count": sum(split_eligible.values()),
-        "start_eligible_split_counts": dict(sorted(split_eligible.items())),
-        "start_qualification_policy": dict(_START_QUALIFICATION_POLICY),
+        "platform_eligibility": platform_eligibility,
+        "exact_common_evaluation": exact_common,
         "scenes": entries,
         "inventory": inventory,
     }
@@ -573,6 +724,25 @@ class FormalCache:
             if _array_metadata(values) != expected[name]:
                 raise FormalCacheError(f"scene array {name} hash or metadata differs")
             values.setflags(write=False)
+        for platform in _PLATFORMS:
+            prefix = platform.lower()
+            payload = entry["platform_coverability"][platform]
+            reachable = unpack_detail_mask(
+                output[f"{prefix}_reachable_pose_bits"].copy(), (256, 256)
+            )
+            detail_shape = tuple(payload["coverable_detail_shape"])
+            coverable = unpack_detail_mask(
+                output[f"{prefix}_coverable_detail_bits"].copy(), detail_shape
+            )
+            if (
+                mask_sha256(reachable) != payload["reachable_mask_sha256"]
+                or mask_sha256(coverable) != payload["coverable_mask_sha256"]
+                or int(reachable.sum(dtype=np.int64))
+                != payload["stage_diagnostics"]["reachable_pose_count"]
+                or int(coverable.sum(dtype=np.int64))
+                != payload["coverable_detail_cell_count"]
+            ):
+                raise FormalCacheError("scene semantic coverability mask differs")
         return output
 
 
@@ -613,6 +783,122 @@ def _validate_inventory(root: Path, manifest: Mapping[str, object]) -> None:
             raise FormalCacheError("cache inventory file size differs")
         if _file_sha(path) != _require_sha(digest, "inventory sha256"):
             raise FormalCacheError("cache inventory file hash differs")
+
+
+def _shape(value: object, name: str) -> tuple[int, int]:
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or any(type(dimension) is not int or dimension <= 0 for dimension in value)
+    ):
+        raise FormalCacheError(f"{name} is invalid")
+    return value[0], value[1]
+
+
+def _validate_scene_coverability(entry: Mapping[str, object]) -> None:
+    platform_payloads = entry.get("platform_coverability")
+    arrays = entry.get("arrays")
+    if (
+        not isinstance(platform_payloads, Mapping)
+        or set(platform_payloads) != set(_PLATFORMS)
+        or not isinstance(arrays, Mapping)
+    ):
+        raise FormalCacheError("cache scene platform coverability is invalid")
+    for platform in _PLATFORMS:
+        payload = platform_payloads[platform]
+        if (
+            not isinstance(payload, Mapping)
+            or set(payload) != _PLATFORM_COVERABILITY_FIELDS
+        ):
+            raise FormalCacheError("cache platform coverability fields are invalid")
+        reachable_shape = _shape(
+            payload.get("reachable_pose_shape"), "reachable pose shape"
+        )
+        detail_shape = _shape(
+            payload.get("coverable_detail_shape"), "coverable detail shape"
+        )
+        if reachable_shape != (256, 256) or (
+            detail_shape[0] % 256 or detail_shape[1] % 256
+        ):
+            raise FormalCacheError("cache coverability geometry is invalid")
+        cell = payload.get("qualified_start_cell")
+        parsed_cell: tuple[int, int] | None
+        if cell is None:
+            parsed_cell = None
+        elif (
+            isinstance(cell, list)
+            and len(cell) == 2
+            and all(type(value) is int and 0 <= value < 256 for value in cell)
+        ):
+            parsed_cell = (cell[0], cell[1])
+        else:
+            raise FormalCacheError("cache qualified start cell is invalid")
+        target_count = payload.get("mission_target_detail_cell_count")
+        coverable_count = payload.get("coverable_detail_cell_count")
+        initial_candidate_count = payload.get("initial_candidate_count")
+        initial_fraction = payload.get("initial_coverable_fraction")
+        mission_fraction = payload.get("mission_coverable_fraction")
+        if (
+            type(target_count) is not int
+            or type(coverable_count) is not int
+            or type(initial_candidate_count) is not int
+            or not isinstance(initial_fraction, float)
+            or not isinstance(mission_fraction, float)
+        ):
+            raise FormalCacheError("cache coverability counts are invalid")
+        try:
+            expected_reason = classify_ineligibility(
+                qualified_start_cell=parsed_cell,
+                mission_target_detail_cell_count=target_count,
+                coverable_detail_cell_count=coverable_count,
+                initial_coverable_fraction=initial_fraction,
+                initial_candidate_count=initial_candidate_count,
+            )
+        except ValueError as error:
+            raise FormalCacheError("cache coverability gates are invalid") from error
+        expected_fraction = coverable_count / target_count if target_count else 0.0
+        if not np.isclose(mission_fraction, expected_fraction, rtol=0.0, atol=1.0e-12):
+            raise FormalCacheError("cache mission coverable fraction differs")
+        eligible = payload.get("eligible")
+        reason = payload.get("ineligible_reason")
+        if (
+            payload.get("exact") is not True
+            or type(eligible) is not bool
+            or eligible is not (expected_reason is None)
+            or reason
+            != (None if expected_reason is None else expected_reason.value)
+        ):
+            raise FormalCacheError("cache platform eligibility differs")
+        for name in ("reachability_algorithm_id", "visibility_algorithm_id"):
+            if not isinstance(payload.get(name), str) or not payload[name]:
+                raise FormalCacheError("cache coverability algorithm is missing")
+        for name in ("reachable_mask_sha256", "coverable_mask_sha256"):
+            _require_sha(payload.get(name), name)
+        diagnostics = payload.get("stage_diagnostics")
+        if not isinstance(diagnostics, Mapping) or diagnostics != {
+            "reachable_pose_count": diagnostics.get("reachable_pose_count"),
+            "mission_target_detail_cell_count": target_count,
+            "coverable_detail_cell_count": coverable_count,
+            "initial_candidate_count": initial_candidate_count,
+        }:
+            raise FormalCacheError("cache coverability diagnostics are invalid")
+        if (
+            type(diagnostics["reachable_pose_count"]) is not int
+            or diagnostics["reachable_pose_count"] < 0
+        ):
+            raise FormalCacheError("cache reachable pose count is invalid")
+        prefix = platform.lower()
+        expected_shapes = {
+            f"{prefix}_reachable_pose_bits": [(256 * 256 + 7) // 8],
+            f"{prefix}_coverable_detail_bits": [
+                (detail_shape[0] * detail_shape[1] + 7) // 8
+            ],
+            f"{prefix}_coverable_ratio": [256, 256],
+        }
+        for name, shape in expected_shapes.items():
+            metadata = arrays.get(name)
+            if not isinstance(metadata, Mapping) or metadata.get("shape") != shape:
+                raise FormalCacheError("cache coverability array metadata differs")
 
 
 def load_formal_cache(
@@ -660,56 +946,21 @@ def load_formal_cache(
     scene_ids = [entry.get("scene_id") for entry in scenes if isinstance(entry, Mapping)]
     if len(scene_ids) != len(scenes) or len(set(scene_ids)) != len(scene_ids):
         raise FormalCacheError("cache scene identity inventory is invalid")
-    split_totals: dict[str, int] = {}
-    split_eligible: dict[str, int] = {}
     for entry in scenes:
-        split = entry.get("split")
-        qualification = entry.get("start_qualification")
-        if not isinstance(split, str) or not isinstance(qualification, Mapping):
-            raise FormalCacheError("cache scene start qualification is invalid")
-        if set(qualification) != {"common_eligible", "platform_start_cells"}:
-            raise FormalCacheError("cache scene start qualification is invalid")
-        start_cells = qualification.get("platform_start_cells")
-        if not isinstance(start_cells, Mapping) or set(start_cells) != set(_PLATFORMS):
-            raise FormalCacheError("cache platform start qualification is invalid")
-        parsed_cells: dict[str, tuple[int, int] | None] = {}
-        for platform in _PLATFORMS:
-            cell = start_cells[platform]
-            if cell is None:
-                parsed_cells[platform] = None
-            elif (
-                isinstance(cell, list)
-                and len(cell) == 2
-                and all(type(value) is int and 0 <= value < 256 for value in cell)
-            ):
-                parsed_cells[platform] = (cell[0], cell[1])
-            else:
-                raise FormalCacheError("cache qualified start cell is invalid")
-        common = qualification.get("common_eligible")
-        expected_common = all(
-            parsed_cells[platform] is not None for platform in _PLATFORMS
-        )
-        if type(common) is not bool or common is not expected_common:
-            raise FormalCacheError("cache common start qualification is invalid")
-        split_totals[split] = split_totals.get(split, 0) + 1
-        split_eligible.setdefault(split, 0)
-        if common:
-            split_eligible[split] += 1
+        if not isinstance(entry, Mapping) or entry.get("split") not in _REQUIRED_SPLITS:
+            raise FormalCacheError("cache scene split is invalid")
+        _validate_scene_coverability(entry)
+    platform_eligibility, exact_common, readiness = _eligibility_summary(scenes)
     if (
-        value.get("start_eligible_scene_count") != sum(split_eligible.values())
-        or value.get("start_eligible_split_counts")
-        != dict(sorted(split_eligible.items()))
-        or value.get("start_qualification_policy")
-        != _START_QUALIFICATION_POLICY
+        value.get("platform_eligibility") != platform_eligibility
+        or value.get("exact_common_evaluation") != exact_common
     ):
-        raise FormalCacheError("cache start qualification counts differ")
-    expected_formal_eligible = _formal_start_qualification_ready(
-        materialization,
-        split_totals,
-        split_eligible,
+        raise FormalCacheError("cache platform eligibility summary differs")
+    expected_formal_eligible = _formal_platform_eligibility_ready(
+        materialization, readiness
     )
     if formal_eligible is not expected_formal_eligible:
-        raise FormalCacheError("cache formal start eligibility is invalid")
+        raise FormalCacheError("cache formal platform eligibility is invalid")
     _validate_inventory(path.parent, value)
     return FormalCache(path.parent, value, identity)
 
@@ -1056,24 +1307,38 @@ def _projection_request(
     platform: FrozenPlatformCapability,
     scene: MultiResolutionScene,
     projected: object,
+    *,
+    start_cell: tuple[int, int] | None = None,
+    local_projected: object | None = None,
 ) -> object:
     import lunar_planner_training_bridge as bridge_api
 
     from ..policy.action_semantics import apply_goal_theta
 
-    valid_indices = np.argwhere(projected.valid_mask)
-    if valid_indices.size == 0:
-        raise FormalCacheError("scene has no valid source elevation")
     projection_canvas = projected.canvas
-    center = np.asarray(
-        [
-            (projection_canvas.geometry.cells - 1) / 2.0,
-            (projection_canvas.geometry.cells - 1) / 2.0,
+    if start_cell is None:
+        valid_indices = np.argwhere(projected.valid_mask)
+        if valid_indices.size == 0:
+            raise FormalCacheError("scene has no valid source elevation")
+        center = np.asarray(
+            [
+                (projection_canvas.geometry.cells - 1) / 2.0,
+                (projection_canvas.geometry.cells - 1) / 2.0,
+            ]
+        )
+        row, column = valid_indices[
+            int(np.argmin(np.sum((valid_indices - center) ** 2, axis=1)))
         ]
-    )
-    row, column = valid_indices[
-        int(np.argmin(np.sum((valid_indices - center) ** 2, axis=1)))
-    ]
+    else:
+        row, column = start_cell
+        if (
+            type(row) is not int
+            or type(column) is not int
+            or not 0 <= row < projection_canvas.geometry.cells
+            or not 0 <= column < projection_canvas.geometry.cells
+            or not bool(projected.valid_mask[row, column])
+        ):
+            raise FormalCacheError("projection start cell is invalid")
     x_m, y_m = projection_canvas.grid_center_world(int(row), int(column))
     z_m = float(projected.elevation_m[row, column])
     request = bridge_api.TrainingPlanRequest()
@@ -1104,7 +1369,7 @@ def _projection_request(
     request.goal.goal_id = f"formal-cache/{platform.platform_type.lower()}"
     request.goal.target = goal
     apply_goal_theta(request.goal, platform.platform_type, 0.0)
-    map_arguments = {
+    global_map_arguments = {
         "canvas": projection_canvas,
         "elevation_m": projected.elevation_m,
         "valid_mask": projected.valid_mask,
@@ -1113,10 +1378,19 @@ def _projection_request(
         "forbidden_ratio": projected.forbidden_ratio,
     }
     request.world.global_map = _bridge_grid_map(
-        bridge_api, frame_id="map", **map_arguments
+        bridge_api, frame_id="map", **global_map_arguments
     )
+    local = projected if local_projected is None else local_projected
+    local_map_arguments = {
+        "canvas": local.canvas,
+        "elevation_m": local.elevation_m,
+        "valid_mask": local.valid_mask,
+        "obstacle_ratio": local.physical_obstacle_ratio,
+        "obstacle_height_m": local.physical_obstacle_height_m,
+        "forbidden_ratio": local.forbidden_ratio,
+    }
     request.world.local_map = _bridge_grid_map(
-        bridge_api, frame_id="odom", **map_arguments
+        bridge_api, frame_id="odom", **local_map_arguments
     )
     request.world.map_from_odom.parent_frame = "map"
     request.world.map_from_odom.child_frame = "odom"
@@ -1179,6 +1453,197 @@ def _build_platform_detail_coverability(
             )
         ),
         reveal_from_pose=estimator.reveal_from_pose,
+    )
+
+
+def _hopper_landing_evidence(
+    *,
+    platform: FrozenPlatformCapability,
+    scene: MultiResolutionScene,
+    projected: object,
+    start_cell: tuple[int, int],
+    bridge: object,
+) -> object:
+    """Stream exact 0.2 m landing regions into one coarse evidence grid."""
+    import lunar_planner_training_bridge as bridge_api
+
+    provider = SceneTileProvider(scene, capacity=1)
+    coarse_cells = projected.canvas.geometry.cells
+    certified = np.zeros((coarse_cells, coarse_cells), dtype=np.bool_)
+    aim = np.zeros((coarse_cells, coarse_cells, 3), dtype=np.float64)
+    boundary = np.zeros((coarse_cells, coarse_cells, 4, 3), dtype=np.float64)
+    area = np.zeros((coarse_cells, coarse_cells), dtype=np.float64)
+    coarse_per_tile = int(
+        round(
+            provider.tile_geometry.size_m
+            / projected.canvas.geometry.resolution_m
+        )
+    )
+    typed = platform.typed_capability
+    support_radius = float(getattr(typed, "landing_support_radius_m"))
+    lateral_margin = float(getattr(typed, "landing_lateral_margin_m"))
+    halo_cells = math.ceil(
+        (support_radius + lateral_margin)
+        / provider.tile_geometry.resolution_m
+    ) + 2
+    algorithm_id: str | None = None
+    for tile_row, tile_column in provider.iter_tile_indices():
+        window = provider.tile_with_halo(
+            tile_row, tile_column, halo_cells=halo_cells
+        )
+        row0 = tile_row * coarse_per_tile
+        column0 = tile_column * coarse_per_tile
+        row1 = min(row0 + coarse_per_tile, coarse_cells)
+        column1 = min(column0 + coarse_per_tile, coarse_cells)
+        cells = [
+            (row, column)
+            for row in range(row0, row1)
+            for column in range(column0, column1)
+        ]
+        targets = np.asarray(
+            [
+                (
+                    *projected.canvas.grid_center_world(row, column),
+                    float(projected.elevation_m[row, column]),
+                )
+                for row, column in cells
+            ],
+            dtype=np.float64,
+        )
+        result = bridge.project_hopper_landing_evidence(
+            _projection_request(
+                platform,
+                scene,
+                projected,
+                start_cell=start_cell,
+                local_projected=window.projected,
+            ),
+            np.ascontiguousarray(targets),
+        )
+        if algorithm_id is None:
+            algorithm_id = str(result.algorithm_id)
+        elif algorithm_id != result.algorithm_id:
+            raise FormalCacheError("hopper landing evidence algorithm drifted")
+        if result.certified.shape != (len(cells),):
+            raise FormalCacheError("hopper landing evidence geometry differs")
+        for index, (row, column) in enumerate(cells):
+            certified[row, column] = result.certified[index]
+            aim[row, column] = result.aim_positions_m[index]
+            boundary[row, column] = result.boundary_m[index]
+            area[row, column] = result.area_m2[index]
+    if algorithm_id is None:
+        raise FormalCacheError("hopper landing evidence is empty")
+    return bridge_api.HopperLandingEvidenceGrid(
+        np.ascontiguousarray(np.flipud(certified)),
+        np.ascontiguousarray(np.flipud(aim)),
+        np.ascontiguousarray(np.flipud(boundary)),
+        np.ascontiguousarray(np.flipud(area)),
+        algorithm_id,
+    )
+
+
+def _build_reachable_pose_mask(
+    *,
+    platform: FrozenPlatformCapability,
+    scene: MultiResolutionScene,
+    projected: object,
+    start_cell: tuple[int, int],
+    bridge: object,
+) -> tuple[np.ndarray, str, dict[str, int | float]]:
+    request = _projection_request(
+        platform, scene, projected, start_cell=start_cell
+    )
+    if platform.platform_type == "HOPPER":
+        evidence = _hopper_landing_evidence(
+            platform=platform,
+            scene=scene,
+            projected=projected,
+            start_cell=start_cell,
+            bridge=bridge,
+        )
+        output = bridge.project_reachability(request, 30.0, evidence)
+    else:
+        output = bridge.project_reachability(request, 30.0)
+    reachable = np.ascontiguousarray(
+        np.flipud(output.reachable).astype(np.bool_)
+    )
+    if reachable.shape != (256, 256):
+        raise FormalCacheError("reachable pose projection geometry differs")
+    diagnostics: dict[str, int | float] = {
+        "candidate_edges_evaluated": int(output.candidate_edges_evaluated),
+        "certified_edges": int(output.certified_edges),
+        "rejected_edges": int(output.rejected_edges),
+        "maximum_certified_edge_distance_m": float(
+            output.maximum_certified_edge_distance_m
+        ),
+    }
+    return reachable, str(output.algorithm_id), diagnostics
+
+
+def _initial_coverable_fraction(
+    *,
+    platform: FrozenPlatformCapability,
+    scene: MultiResolutionScene,
+    start_cell: tuple[int, int],
+    detail: StreamedDetailCoverability,
+) -> float:
+    from ..environment.visibility import NativeVisibilityEstimator, SensorGeometry
+
+    if detail.coverable_detail_cell_count == 0:
+        return 0.0
+    provider = SceneTileProvider(scene, capacity=1)
+    x_m, y_m = scene.base_canvas.grid_center_world(*start_cell)
+    pose_row, pose_column = provider.world_to_detail(x_m, y_m)
+    cells = provider.tile_geometry.cells
+    start_row = pose_row - cells // 2
+    start_column = pose_column - cells // 2
+    truth = provider.read_window(start_row, start_column, cells=cells)
+    visible = NativeVisibilityEstimator(
+        SensorGeometry(
+            platform.observation_capability.sensor_range_m,
+            platform.observation_capability.sensor_fov_rad,
+        ),
+        resolution_m=provider.tile_geometry.resolution_m,
+    ).reveal_from_pose(
+        truth.physical_obstacle_ratio,
+        (pose_row - start_row, pose_column - start_column),
+    )
+    coverable = read_packed_detail_window(
+        detail.coverable_detail_bits,
+        detail.detail_shape,
+        start_row=start_row,
+        start_column=start_column,
+        cells=cells,
+    )
+    observed = int((visible & coverable).sum(dtype=np.int64))
+    return float(observed / detail.coverable_detail_cell_count)
+
+
+def _unsafe_platform_coverability(
+    platform_type: str,
+    detail_shape: tuple[int, int],
+) -> PlatformCoverability:
+    reachable = np.zeros((256, 256), dtype=np.bool_)
+    detail = np.zeros(detail_shape, dtype=np.bool_)
+    return PlatformCoverability(
+        platform_type=platform_type,
+        qualified_start_cell=None,
+        reachable_pose_mask=reachable,
+        coverable_detail_shape=detail_shape,
+        coverable_detail_bits=pack_detail_mask(detail),
+        coverable_ratio=np.zeros((256, 256), dtype=np.float32),
+        mission_target_detail_cell_count=0,
+        coverable_detail_cell_count=0,
+        mission_coverable_fraction=0.0,
+        initial_coverable_fraction=0.0,
+        initial_candidate_count=0,
+        reachability_algorithm_id="not-run/unsafe-start",
+        visibility_algorithm_id="not-run/unsafe-start",
+        reachable_mask_sha256=mask_sha256(reachable),
+        coverable_mask_sha256=mask_sha256(detail),
+        exact=True,
+        eligible=False,
+        ineligible_reason=IneligibleReason.UNSAFE_START,
     )
 
 
@@ -1246,14 +1711,106 @@ def _static_scene_data(
             for platform in _PLATFORMS
         },
     }
-    qualified_start_cells = {
-        platform: qualify_initial_start_cell(
+    qualifications = {
+        platform: qualify_initial_start(
             scene=multires,
             arrays=qualification_arrays,
             capability=capability_bundle.for_platform(platform),
         )
         for platform in _PLATFORMS
     }
+    mission_roi = build_formal_mission_roi(qualification_arrays)
+    detail_shape = (
+        SceneTileProvider(multires, capacity=1).detail_cells_per_axis,
+    ) * 2
+    coverability: dict[str, PlatformCoverability] = {}
+    for platform_type in _PLATFORMS:
+        platform = capability_bundle.for_platform(platform_type)
+        qualification = qualifications[platform_type]
+        if qualification is None:
+            coverability[platform_type] = _unsafe_platform_coverability(
+                platform_type, detail_shape
+            )
+            continue
+        reachable, reachability_algorithm, _ = _build_reachable_pose_mask(
+            platform=platform,
+            scene=multires,
+            projected=projected,
+            start_cell=qualification.cell,
+            bridge=bridge,
+        )
+        if not bool(reachable[qualification.cell]):
+            zero = _unsafe_platform_coverability(platform_type, detail_shape)
+            coverability[platform_type] = PlatformCoverability(
+                platform_type=platform_type,
+                qualified_start_cell=None,
+                reachable_pose_mask=reachable,
+                coverable_detail_shape=zero.coverable_detail_shape,
+                coverable_detail_bits=zero.coverable_detail_bits,
+                coverable_ratio=zero.coverable_ratio,
+                mission_target_detail_cell_count=0,
+                coverable_detail_cell_count=0,
+                mission_coverable_fraction=0.0,
+                initial_coverable_fraction=0.0,
+                initial_candidate_count=0,
+                reachability_algorithm_id=reachability_algorithm,
+                visibility_algorithm_id="not-run/unsafe-start",
+                reachable_mask_sha256=mask_sha256(reachable),
+                coverable_mask_sha256=zero.coverable_mask_sha256,
+                exact=True,
+                eligible=False,
+                ineligible_reason=IneligibleReason.UNSAFE_START,
+            )
+            continue
+        detail = _build_platform_detail_coverability(
+            platform=platform,
+            scene=multires,
+            mission_roi=mission_roi,
+            reachable_pose_mask=reachable,
+            bridge=bridge,
+        )
+        initial_fraction = _initial_coverable_fraction(
+            platform=platform,
+            scene=multires,
+            start_cell=qualification.cell,
+            detail=detail,
+        )
+        reason = classify_ineligibility(
+            qualified_start_cell=qualification.cell,
+            mission_target_detail_cell_count=(
+                detail.mission_target_detail_cell_count
+            ),
+            coverable_detail_cell_count=detail.coverable_detail_cell_count,
+            initial_coverable_fraction=initial_fraction,
+            initial_candidate_count=qualification.initial_candidate_count,
+        )
+        coverability[platform_type] = PlatformCoverability(
+            platform_type=platform_type,
+            qualified_start_cell=qualification.cell,
+            reachable_pose_mask=reachable,
+            coverable_detail_shape=detail.detail_shape,
+            coverable_detail_bits=detail.coverable_detail_bits,
+            coverable_ratio=detail.coverable_ratio,
+            mission_target_detail_cell_count=(
+                detail.mission_target_detail_cell_count
+            ),
+            coverable_detail_cell_count=detail.coverable_detail_cell_count,
+            mission_coverable_fraction=(
+                detail.coverable_detail_cell_count
+                / detail.mission_target_detail_cell_count
+                if detail.mission_target_detail_cell_count
+                else 0.0
+            ),
+            initial_coverable_fraction=initial_fraction,
+            initial_candidate_count=qualification.initial_candidate_count,
+            reachability_algorithm_id=reachability_algorithm,
+            visibility_algorithm_id="two-dimensional-detail-los/v1",
+            reachable_mask_sha256=mask_sha256(reachable),
+            coverable_mask_sha256=detail.coverable_mask_sha256,
+            exact=True,
+            eligible=reason is None,
+            ineligible_reason=reason,
+        )
     rocks = np.asarray(
         [
             (item.x_m, item.y_m, item.radius_m, item.height_m)
@@ -1292,7 +1849,7 @@ def _static_scene_data(
         no_go_vertices=no_go,
         hard_feasible=hard,
         clearance_margin_norm=clearance,
-        qualified_start_cells=qualified_start_cells,
+        coverability=coverability,
     )
 
 

@@ -284,6 +284,24 @@ def _read_packed_window(
     )
 
 
+def read_packed_detail_window(
+    packed: np.ndarray,
+    shape: tuple[int, int],
+    *,
+    start_row: int,
+    start_column: int,
+    cells: int,
+) -> np.ndarray:
+    """Read one square semantic window without unpacking the full detail map."""
+    return _read_packed_window(
+        packed,
+        shape,
+        start_row=start_row,
+        start_column=start_column,
+        cells=cells,
+    )
+
+
 def _or_packed_window(
     packed: np.ndarray,
     shape: tuple[int, int],
@@ -767,5 +785,6 @@ __all__ = [
     "classify_ineligibility",
     "mask_sha256",
     "pack_detail_mask",
+    "read_packed_detail_window",
     "unpack_detail_mask",
 ]

@@ -7,6 +7,11 @@ import math
 
 import numpy as np
 
+from .coverability import (
+    mask_sha256,
+    read_packed_detail_window,
+    unpack_detail_mask,
+)
 from ..polar_data.multires_scene import MultiResolutionScene, SceneTileProvider
 from ..polar_data.raster import GLOBAL_GEOMETRY, LOCAL_GEOMETRY, MapCanvas
 from ..training_semantics import FORMAL_SENSOR_FOV_RAD, FORMAL_SENSOR_RANGE_M
@@ -76,6 +81,10 @@ class MultiresSensorObservationState(SensorObservationState):
         tile_provider: SceneTileProvider,
         mission_roi_ratio: np.ndarray,
         mission_priority: np.ndarray,
+        coverable_detail_shape: tuple[int, int] | None = None,
+        coverable_detail_bits: np.ndarray | None = None,
+        coverable_detail_cell_count: int | None = None,
+        coverable_mask_sha256: str | None = None,
     ) -> None:
         if not isinstance(scene, MultiResolutionScene):
             raise TypeError("multires sensor state requires a scene")
@@ -107,6 +116,56 @@ class MultiresSensorObservationState(SensorObservationState):
         self.mission_priority = self._coarse_ratio(
             "mission priority", mission_priority, shape
         )
+        coverability_values = (
+            coverable_detail_shape,
+            coverable_detail_bits,
+            coverable_detail_cell_count,
+            coverable_mask_sha256,
+        )
+        if any(value is not None for value in coverability_values) and any(
+            value is None for value in coverability_values
+        ):
+            raise ValueError("exact detail coverability must be supplied atomically")
+        self.coverable_detail_shape: tuple[int, int] | None = None
+        self.coverable_detail_bits: np.ndarray | None = None
+        self.coverable_detail_cell_count: int | None = None
+        self.coverable_mask_sha256: str | None = None
+        self.observed_coverable_detail_cell_count = 0
+        self._coverable_priority_area_m2: float | None = None
+        if coverable_detail_shape is not None:
+            total = tile_provider.detail_cells_per_axis
+            if coverable_detail_shape != (total, total):
+                raise ValueError("coverable detail mask geometry differs from scene")
+            unpacked = unpack_detail_mask(
+                np.ascontiguousarray(coverable_detail_bits, dtype=np.uint8),
+                coverable_detail_shape,
+            )
+            actual_count = int(unpacked.sum(dtype=np.int64))
+            if (
+                type(coverable_detail_cell_count) is not int
+                or coverable_detail_cell_count != actual_count
+                or mask_sha256(unpacked) != coverable_mask_sha256
+            ):
+                raise ValueError("coverable detail mask identity differs")
+            packed = np.ascontiguousarray(coverable_detail_bits.copy(), dtype=np.uint8)
+            packed.setflags(write=False)
+            self.coverable_detail_shape = coverable_detail_shape
+            self.coverable_detail_bits = packed
+            self.coverable_detail_cell_count = coverable_detail_cell_count
+            self.coverable_mask_sha256 = coverable_mask_sha256
+            weighted_counts = unpacked.reshape(
+                GLOBAL_GEOMETRY.cells,
+                _DETAIL_PER_GLOBAL,
+                GLOBAL_GEOMETRY.cells,
+                _DETAIL_PER_GLOBAL,
+            ).sum(axis=(1, 3), dtype=np.int64)
+            self._coverable_priority_area_m2 = float(
+                (
+                    weighted_counts.astype(np.float64)
+                    * self.mission_priority.astype(np.float64)
+                ).sum(dtype=np.float64)
+                * LOCAL_GEOMETRY.resolution_m**2
+            )
         self.forbidden_mask = np.ascontiguousarray(
             global_truth.forbidden_ratio > 0.0
         )
@@ -139,6 +198,28 @@ class MultiresSensorObservationState(SensorObservationState):
     @property
     def allocated_detail_tiles(self) -> int:
         return len(self._detail_tiles)
+
+    @property
+    def remaining_coverable_detail_cell_count(self) -> int | None:
+        if self.coverable_detail_cell_count is None:
+            return None
+        return (
+            self.coverable_detail_cell_count
+            - self.observed_coverable_detail_cell_count
+        )
+
+    @property
+    def mission_area_m2(self) -> float | None:
+        if self.coverable_detail_cell_count is None:
+            return None
+        return float(
+            self.coverable_detail_cell_count
+            * LOCAL_GEOMETRY.resolution_m**2
+        )
+
+    @property
+    def priority_area_m2(self) -> float | None:
+        return self._coverable_priority_area_m2
 
     @property
     def sensor(self) -> SensorGeometry:
@@ -420,20 +501,46 @@ class MultiresSensorObservationState(SensorObservationState):
             ).astype(np.uint32)
 
         new_rows, new_columns = np.nonzero(newly)
-        global_rows = start_row + new_rows
-        global_columns = start_column + new_columns
+        if self.coverable_detail_bits is None:
+            newly_coverable = newly
+        else:
+            coverable = read_packed_detail_window(
+                self.coverable_detail_bits,
+                self.coverable_detail_shape,
+                start_row=start_row,
+                start_column=start_column,
+                cells=window_cells,
+            )
+            newly_coverable = newly & coverable
+            self.observed_coverable_detail_cell_count += int(
+                newly_coverable.sum(dtype=np.int64)
+            )
+            if (
+                self.observed_coverable_detail_cell_count
+                > self.coverable_detail_cell_count
+            ):
+                raise RuntimeError("observed coverability exceeds frozen mask")
+        mission_rows, mission_columns = np.nonzero(newly_coverable)
+        global_rows = start_row + mission_rows
+        global_columns = start_column + mission_columns
         coarse_rows = global_rows // _DETAIL_PER_GLOBAL
         coarse_columns = global_columns // _DETAIL_PER_GLOBAL
         mission_delta = float(
-            self.mission_roi_ratio[coarse_rows, coarse_columns].sum(
-                dtype=np.float64
-            )
+            (
+                np.ones(mission_rows.shape, dtype=np.float64)
+                if self.coverable_detail_bits is not None
+                else self.mission_roi_ratio[coarse_rows, coarse_columns]
+            ).sum(dtype=np.float64)
             * LOCAL_GEOMETRY.resolution_m**2
         )
         priority_delta = float(
             (
                 self.mission_priority[coarse_rows, coarse_columns]
-                * self.mission_roi_ratio[coarse_rows, coarse_columns]
+                * (
+                    1.0
+                    if self.coverable_detail_bits is not None
+                    else self.mission_roi_ratio[coarse_rows, coarse_columns]
+                )
             ).sum(dtype=np.float64)
             * LOCAL_GEOMETRY.resolution_m**2
         )

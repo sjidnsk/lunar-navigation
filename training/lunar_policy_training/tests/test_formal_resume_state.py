@@ -45,6 +45,7 @@ def _worker_state() -> dict[str, object]:
         "scene_seed": "e" * 64,
         "start_seed": "f" * 64,
         "episode_seed": "1" * 64,
+        "coverability_mask_sha256": "3" * 64,
         "start_cell": [64, 96],
         "current_pose": pose,
         "legged_body_z_m": 7.0,

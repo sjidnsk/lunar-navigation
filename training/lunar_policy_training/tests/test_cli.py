@@ -813,24 +813,36 @@ def test_formal_evaluation_batches_ignore_preflight_train_assembly(
                 {
                     "scene_id": "c" * 64,
                     "split": "holdout",
-                    "start_qualification": {"common_eligible": True},
                 },
                 {
                     "scene_id": "d" * 64,
                     "split": "validation",
-                    "start_qualification": {"common_eligible": True},
                 },
                 {
                     "scene_id": "a" * 64,
                     "split": "validation",
-                    "start_qualification": {"common_eligible": True},
                 },
                 {
                     "scene_id": "b" * 64,
                     "split": "test",
-                    "start_qualification": {"common_eligible": True},
                 },
-            ]
+            ],
+            "exact_common_evaluation": {
+                "splits": {
+                    "validation": {
+                        "scene_ids": ["d" * 64, "a" * 64],
+                        "scenario_schedule_id": "cache/validation/v6",
+                    },
+                    "test": {
+                        "scene_ids": ["b" * 64],
+                        "scenario_schedule_id": "cache/test/v6",
+                    },
+                    "holdout": {
+                        "scene_ids": ["c" * 64],
+                        "scenario_schedule_id": "cache/holdout/v6",
+                    },
+                }
+            },
         },
     )
     template = proxy_observation(0, "WHEELED", step=0)

@@ -8,6 +8,10 @@ import pytest
 from lunar_policy_training.environment.multires_observation import (
     MultiresSensorObservationState,
 )
+from lunar_policy_training.environment.coverability import (
+    mask_sha256,
+    pack_detail_mask,
+)
 from lunar_policy_training.environment.observation_builder import Pose2
 from lunar_policy_training.polar_data.hazards import (
     RockCircle,
@@ -20,7 +24,9 @@ from lunar_policy_training.polar_data.multires_scene import (
 from lunar_policy_training.polar_data.raster import MapCanvas
 
 
-def _state() -> tuple[MultiresSensorObservationState, SceneTileProvider]:
+def _state(
+    coverable_detail_mask: np.ndarray | None = None,
+) -> tuple[MultiresSensorObservationState, SceneTileProvider]:
     canvas = MapCanvas("a" * 64, (0.0, 0.0, 1024.0, 1024.0))
     vector = VectorHazardScene(
         seed="b" * 64,
@@ -37,13 +43,84 @@ def _state() -> tuple[MultiresSensorObservationState, SceneTileProvider]:
         scenario_id="c" * 64,
     )
     provider = SceneTileProvider(scene, capacity=8)
+    coverability = {}
+    if coverable_detail_mask is not None:
+        coverability = {
+            "coverable_detail_shape": coverable_detail_mask.shape,
+            "coverable_detail_bits": pack_detail_mask(coverable_detail_mask),
+            "coverable_detail_cell_count": int(
+                coverable_detail_mask.sum(dtype=np.int64)
+            ),
+            "coverable_mask_sha256": mask_sha256(coverable_detail_mask),
+        }
     state = MultiresSensorObservationState(
         scene=scene,
         tile_provider=provider,
         mission_roi_ratio=np.ones((256, 256), np.float32),
         mission_priority=np.full((256, 256), 0.5, np.float32),
+        **coverability,
     )
     return state, provider
+
+
+def test_exact_coverable_bits_not_coarse_roi_define_coverage_delta() -> None:
+    coverable = np.zeros((5120, 5120), dtype=np.bool_)
+    coverable[2560, 2560:2562] = True
+    state, _ = _state(coverable)
+
+    delta = state.observe_world(
+        Pose2(512.0, 512.0, elevation_m=7.0), elapsed_s=0.0
+    )
+
+    assert delta.newly_observed_cells > 2
+    assert delta.mission_observed_delta_m2 == pytest.approx(0.08)
+    assert state.coverable_detail_cell_count == 2
+    assert state.observed_coverable_detail_cell_count == 2
+    assert state.remaining_coverable_detail_cell_count == 0
+
+
+def test_observed_obstacle_evidence_never_adds_coverage_outside_mask() -> None:
+    coverable = np.zeros((5120, 5120), dtype=np.bool_)
+    coverable[2560, 2560] = True
+    state, _ = _state(coverable)
+
+    delta = state.observe_world(
+        Pose2(512.0, 512.0, elevation_m=7.0), elapsed_s=0.0
+    )
+
+    assert state.detail_observed_at(521.2, 512.0)
+    assert delta.mission_observed_delta_m2 == pytest.approx(0.04)
+
+
+def test_coverability_truth_does_not_change_observed_candidate_gain_inputs() -> None:
+    coverable = np.zeros((5120, 5120), dtype=np.bool_)
+    coverable[2560, 2560] = True
+    first, _ = _state(coverable)
+    coverable[2560, 2560] = False
+    coverable[3000, 3000] = True
+    second, _ = _state(coverable)
+    pose = Pose2(512.0, 512.0, elevation_m=7.0)
+    first.observe_world(pose, elapsed_s=0.0)
+    second.observe_world(pose, elapsed_s=0.0)
+    candidates = np.ascontiguousarray([[127, 127], [128, 128]], np.int32)
+
+    first_gain = first.estimate_candidate_gains(
+        first.observed.valid_mask,
+        first.observed.physical_obstacle_ratio,
+        first.mission_roi_ratio,
+        first.mission_priority,
+        candidates,
+    )
+    second_gain = second.estimate_candidate_gains(
+        second.observed.valid_mask,
+        second.observed.physical_obstacle_ratio,
+        second.mission_roi_ratio,
+        second.mission_priority,
+        candidates,
+    )
+
+    np.testing.assert_array_equal(first.observed.valid_mask, second.observed.valid_mask)
+    np.testing.assert_array_equal(first_gain, second_gain)
 
 
 def test_reveal_uses_point_zero_four_square_metres_and_deduplicates_overlap() -> None:

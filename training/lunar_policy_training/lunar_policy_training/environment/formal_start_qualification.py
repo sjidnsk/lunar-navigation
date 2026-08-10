@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 from typing import Mapping
 
@@ -21,6 +22,21 @@ FORMAL_BOUNDARY_MARGIN_CELLS = math.ceil(
     (FORMAL_SENSOR_RANGE_M + LOCAL_GEOMETRY.size_m / 2.0)
     / GLOBAL_GEOMETRY.resolution_m
 )
+
+
+@dataclass(frozen=True, slots=True)
+class FormalStartQualification:
+    cell: tuple[int, int]
+    initial_candidate_count: int
+
+    def __post_init__(self) -> None:
+        if (
+            len(self.cell) != 2
+            or any(type(value) is not int or value < 0 for value in self.cell)
+            or type(self.initial_candidate_count) is not int
+            or self.initial_candidate_count <= 0
+        ):
+            raise ValueError("formal start qualification is invalid")
 
 
 def build_formal_mission_roi(arrays: Mapping[str, np.ndarray]) -> np.ndarray:
@@ -76,12 +92,12 @@ def formal_safe_start_cells(
     )
 
 
-def qualify_initial_start_cell(
+def qualify_initial_start(
     *,
     scene: MultiResolutionScene,
     arrays: Mapping[str, np.ndarray],
     capability: FrozenPlatformCapability,
-) -> tuple[int, int] | None:
+) -> FormalStartQualification | None:
     """Find one exact start whose initial 30 m reveal yields an action candidate.
 
     Qualification intentionally stops before policy tensor construction and C++ path
@@ -150,13 +166,28 @@ def qualify_initial_start_cell(
             platform_type=platform_type,
         )
         if candidates.count > 0:
-            return start_cell
+            return FormalStartQualification(start_cell, candidates.count)
     return None
+
+
+def qualify_initial_start_cell(
+    *,
+    scene: MultiResolutionScene,
+    arrays: Mapping[str, np.ndarray],
+    capability: FrozenPlatformCapability,
+) -> tuple[int, int] | None:
+    """Compatibility wrapper returning only the deterministic fixed cell."""
+    result = qualify_initial_start(
+        scene=scene, arrays=arrays, capability=capability
+    )
+    return None if result is None else result.cell
 
 
 __all__ = [
     "FORMAL_BOUNDARY_MARGIN_CELLS",
+    "FormalStartQualification",
     "build_formal_mission_roi",
     "formal_safe_start_cells",
+    "qualify_initial_start",
     "qualify_initial_start_cell",
 ]

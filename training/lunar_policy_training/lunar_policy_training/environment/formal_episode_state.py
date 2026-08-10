@@ -12,7 +12,7 @@ import torch
 from ..policy.observation import ObservationIdentity, PolicyBatch
 
 
-FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION = "lunar-formal-environment-state/v2"
+FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION = "lunar-formal-environment-state/v3"
 STABLE_EXECUTION_STATES = frozenset(
     {"DECISION_BOUNDARY", "GROUND_HOLD", "LANDED_HOLD"}
 )
@@ -46,6 +46,7 @@ _WORKER_FIELDS = frozenset(
         "scene_seed",
         "start_seed",
         "episode_seed",
+        "coverability_mask_sha256",
         "start_cell",
         "current_pose",
         "legged_body_z_m",
@@ -208,6 +209,7 @@ class FormalWorkerState:
     scene_seed: str
     start_seed: str
     episode_seed: str
+    coverability_mask_sha256: str
     start_cell: tuple[int, int]
     current_pose: FormalPoseState
     legged_body_z_m: float
@@ -310,6 +312,9 @@ class FormalWorkerState:
             scene_seed=_sha256(value["scene_seed"], "scene seed"),
             start_seed=_sha256(value["start_seed"], "start seed"),
             episode_seed=_sha256(value["episode_seed"], "episode seed"),
+            coverability_mask_sha256=_sha256(
+                value["coverability_mask_sha256"], "coverability mask"
+            ),
             start_cell=(start_cell[0], start_cell[1]),
             current_pose=current_pose,
             legged_body_z_m=_finite(
@@ -340,6 +345,7 @@ class FormalWorkerState:
             "scene_seed": self.scene_seed,
             "start_seed": self.start_seed,
             "episode_seed": self.episode_seed,
+            "coverability_mask_sha256": self.coverability_mask_sha256,
             "start_cell": list(self.start_cell),
             "current_pose": self.current_pose.to_dict(),
             "legged_body_z_m": self.legged_body_z_m,

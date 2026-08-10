@@ -1724,15 +1724,25 @@ def _formal_evaluation_batches(
         raise PreflightError("formal evaluation scenario IDs are not unique")
     batches: list[FormalEvaluationBatch] = []
     for split in expected_splits:
+        common = cache.manifest.get("exact_common_evaluation", {}).get(
+            "splits", {}
+        ).get(split)
+        if not isinstance(common, Mapping):
+            raise PreflightError("formal exact-common evaluation inventory is invalid")
+        common_ids = common.get("scene_ids")
+        common_schedule_id = common.get("scenario_schedule_id")
+        if not isinstance(common_ids, list) or not isinstance(
+            common_schedule_id, str
+        ):
+            raise PreflightError("formal exact-common evaluation inventory is invalid")
+        selected = set(common_ids)
         entries = _formal_scheduled_entries(
             [
                 entry
                 for entry in cache.manifest["scenes"]
-                if entry.get("split") == split
-                and entry.get("start_qualification", {}).get("common_eligible")
-                is True
+                if entry.get("scene_id") in selected
             ],
-            scenario_schedule_id=assemblies[split].scenario_schedule_id,
+            scenario_schedule_id=common_schedule_id,
         )
         seeds: list[int] = []
         for entry in entries:

@@ -12,6 +12,12 @@ from lunar_policy_training.capability_freeze import ScenarioIdentity
 from lunar_policy_training.environment import formal_builder as formal_builder_module
 from lunar_policy_training.environment import candidate_builder as candidate_builder_module
 from lunar_policy_training.environment.candidate_builder import CandidateBuilderV2
+from lunar_policy_training.environment.coverability import (
+    IneligibleReason,
+    PlatformCoverability,
+    mask_sha256,
+    pack_detail_mask,
+)
 from lunar_policy_training.environment.formal_builder import (
     FormalEpisode,
     FormalEnvironmentBuilder,
@@ -63,6 +69,46 @@ REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 def _sha(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def _coverability(
+    starts: dict[str, tuple[int, int] | None],
+) -> dict[str, PlatformCoverability]:
+    shape = (256, 256)
+    detail_shape = (5120, 5120)
+    eligible_detail = np.ones(detail_shape, dtype=np.bool_)
+    eligible_bits = pack_detail_mask(eligible_detail)
+    eligible_hash = mask_sha256(eligible_detail)
+    empty_detail = np.zeros(detail_shape, dtype=np.bool_)
+    empty_bits = pack_detail_mask(empty_detail)
+    empty_hash = mask_sha256(empty_detail)
+    output: dict[str, PlatformCoverability] = {}
+    for platform, start in starts.items():
+        reachable = np.full(shape, start is not None, dtype=np.bool_)
+        count = int(eligible_detail.size) if start is not None else 0
+        output[platform] = PlatformCoverability(
+            platform_type=platform,
+            qualified_start_cell=start,
+            reachable_pose_mask=reachable,
+            coverable_detail_shape=detail_shape,
+            coverable_detail_bits=(eligible_bits if start is not None else empty_bits),
+            coverable_ratio=np.full(shape, start is not None, dtype=np.float32),
+            mission_target_detail_cell_count=count,
+            coverable_detail_cell_count=count,
+            mission_coverable_fraction=1.0 if count else 0.0,
+            initial_coverable_fraction=0.1 if count else 0.0,
+            initial_candidate_count=1 if count else 0,
+            reachability_algorithm_id=f"test-reachability/{platform.lower()}",
+            visibility_algorithm_id="two-dimensional-detail-los/v1",
+            reachable_mask_sha256=mask_sha256(reachable),
+            coverable_mask_sha256=(eligible_hash if start is not None else empty_hash),
+            exact=True,
+            eligible=start is not None,
+            ineligible_reason=(
+                None if start is not None else IneligibleReason.UNSAFE_START
+            ),
+        )
+    return output
 
 
 def _cache(tmp_path: pathlib.Path):
@@ -134,11 +180,13 @@ def _cache(tmp_path: pathlib.Path):
         no_go_vertices=np.empty((0, 6, 2), np.float64),
         hard_feasible=hard,
         clearance_margin_norm=clearance,
-        qualified_start_cells={
-            "WHEELED": (127, 127),
-            "LEGGED": (127, 127),
-            "HOPPER": (127, 127),
-        },
+        coverability=_coverability(
+            {
+                "WHEELED": (127, 127),
+                "LEGGED": (127, 127),
+                "HOPPER": (127, 127),
+            }
+        ),
     )
     root = tmp_path / "cache"
     write_formal_cache(
@@ -222,7 +270,7 @@ def _cache_with_common_unstartable_scene(
             no_go_vertices=np.empty((0, 6, 2), np.float64),
             hard_feasible=hard,
             clearance_margin_norm=clearance,
-            qualified_start_cells=starts,
+            coverability=_coverability(starts),
         )
 
     root = tmp_path / "qualified-cache"
@@ -280,6 +328,7 @@ def test_formal_worker_uses_one_scene_current_capability_and_safe_start(
 
     assert first.episode.scene_id == second.episode.scene_id == scene_id
     assert first.episode.current_pose == second.episode.current_pose
+    assert first.episode.start_cell == second.episode.start_cell == (127, 127)
     assert first.episode.start_is_safe
     assert first.environment.sensor_closed_loop
     assert first.episode.capability is bundle.for_platform(platform)
@@ -365,7 +414,7 @@ def test_three_platforms_share_physical_scene_but_keep_distinct_projection(
     } == {(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)}
 
 
-def test_three_platforms_share_only_common_start_eligible_scenes(
+def test_training_uses_each_platforms_own_eligible_scene_lane(
     tmp_path: pathlib.Path,
 ) -> None:
     manifest, bundle, eligible_scene_id = _cache_with_common_unstartable_scene(
@@ -383,16 +432,20 @@ def test_three_platforms_share_only_common_start_eligible_scenes(
         for platform in ("WHEELED", "LEGGED", "HOPPER")
     }
 
-    assert {worker.episode.scene_id for worker in workers.values()} == {
-        eligible_scene_id
-    }
+    assert workers["HOPPER"].episode.scene_id == eligible_scene_id
+    assert workers["WHEELED"].episode.loaded.entry["platform_coverability"][
+        "WHEELED"
+    ]["eligible"]
+    assert workers["LEGGED"].episode.loaded.entry["platform_coverability"][
+        "LEGGED"
+    ]["eligible"]
     assert all(
         bool(worker.initial_observation.candidate_mask.any())
         for worker in workers.values()
     )
 
 
-def test_formal_builder_rejects_a_split_without_common_start_eligible_scenes(
+def test_only_the_empty_platform_lane_is_rejected(
     tmp_path: pathlib.Path,
 ) -> None:
     manifest, bundle, _ = _cache_with_common_unstartable_scene(
@@ -400,13 +453,16 @@ def test_formal_builder_rejects_a_split_without_common_start_eligible_scenes(
         include_eligible=False,
     )
 
-    with pytest.raises(ValueError, match="common start-eligible"):
-        FormalEnvironmentBuilder(
-            cache_manifest_path=manifest,
-            capability_bundle=bundle,
-            split="train",
-            allow_preflight=True,
-        ).build()
+    assembly = FormalEnvironmentBuilder(
+        cache_manifest_path=manifest,
+        capability_bundle=bundle,
+        split="train",
+        allow_preflight=True,
+    ).build()
+
+    assert assembly.factory(0, "WHEELED").episode.start_cell == (127, 127)
+    with pytest.raises(ValueError, match="platform-eligible"):
+        assembly.factory(0, "HOPPER")
 
 
 def test_formal_episode_cursor_is_deterministic_and_resume_exact(
@@ -733,6 +789,25 @@ def test_rejected_candidate_mask_survives_active_episode_replay(
     assert restored.snapshot_episode_state() == state
 
 
+def test_active_episode_rejects_a_different_coverability_mask(
+    tmp_path: pathlib.Path,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    worker = assembly.factory(0, "WHEELED")
+    state = worker.snapshot_episode_state()
+    state["coverability_mask_sha256"] = "0" * 64
+
+    with pytest.raises(ValueError, match="replay identity"):
+        assembly.factory.restore_for_episode(
+            worker_index=0,
+            platform_type="WHEELED",
+            episode_cursor=0,
+            platform_worker_index=0,
+            platform_worker_count=1,
+            state=state,
+        )
+
+
 def test_parallel_pool_snapshots_and_restores_the_active_formal_episode(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -811,7 +886,10 @@ def test_formal_scene_schedule_is_one_seeded_permutation_without_replacement() -
         {
             "scene_id": character * 64,
             "split": "validation",
-            "start_qualification": {"common_eligible": True},
+            "platform_coverability": {
+                platform: {"eligible": True}
+                for platform in ("WHEELED", "LEGGED", "HOPPER")
+            },
         }
         for character in "abcde"
     )
@@ -849,7 +927,10 @@ def test_formal_worker_traverses_the_seeded_scene_permutation_once(
         {
             "scene_id": character * 64,
             "split": "validation",
-            "start_qualification": {"common_eligible": True},
+            "platform_coverability": {
+                platform: {"eligible": True}
+                for platform in ("WHEELED", "LEGGED", "HOPPER")
+            },
         }
         for character in reversed("abcde")
     )

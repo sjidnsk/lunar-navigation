@@ -407,11 +407,28 @@ class FormalEpisode:
             priority=self._mission_roi.astype(np.float32),
             roi_ratio=self._mission_roi.astype(np.float32),
         )
+        coverability = loaded.entry["platform_coverability"][platform_type]
+        detail_shape_raw = coverability["coverable_detail_shape"]
+        if not isinstance(detail_shape_raw, list) or len(detail_shape_raw) != 2:
+            raise ValueError("formal coverability detail geometry is invalid")
+        prefix = platform_type.lower()
         self.sensor_state = MultiresSensorObservationState(
             scene=loaded.scene,
             tile_provider=SceneTileProvider(loaded.scene, capacity=8),
             mission_roi_ratio=self.mission.roi_ratio,
             mission_priority=self.mission.priority,
+            coverable_detail_shape=(
+                int(detail_shape_raw[0]), int(detail_shape_raw[1])
+            ),
+            coverable_detail_bits=loaded.arrays[
+                f"{prefix}_coverable_detail_bits"
+            ],
+            coverable_detail_cell_count=int(
+                coverability["coverable_detail_cell_count"]
+            ),
+            coverable_mask_sha256=str(
+                coverability["coverable_mask_sha256"]
+            ),
         )
         self._candidate_builder = CandidateBuilderV2(self.sensor_state)
         self._legacy_candidate_builder = CandidateBuilderV2(
@@ -506,6 +523,8 @@ class FormalEpisode:
             and state.start_seed == self.start_seed
             and state.episode_seed == self.episode_seed
             and state.start_cell == self.start_cell
+            and state.coverability_mask_sha256
+            == self.sensor_state.coverable_mask_sha256
         )
         if not expected:
             raise ValueError("formal replay identity differs from frozen episode")
@@ -558,6 +577,9 @@ class FormalEpisode:
                 "scene_seed": self.scene_seed,
                 "start_seed": self.start_seed,
                 "episode_seed": self.episode_seed,
+                "coverability_mask_sha256": (
+                    self.sensor_state.coverable_mask_sha256
+                ),
                 "start_cell": list(self.start_cell),
                 "current_pose": self._pose_state(self.current_pose).to_dict(),
                 "legged_body_z_m": float(self._current_legged_body_z_m),
@@ -1006,6 +1028,8 @@ class FormalWorkerBuilder:
     split: str
     allow_preflight: bool
     scenario_schedule_id: str
+    platform_scenario_schedule_ids: Mapping[str, str] | None = None
+    paired_evaluation: bool = False
     sensor_closed_loop: ClassVar[bool] = True
 
     def __call__(
@@ -1016,35 +1040,31 @@ class FormalWorkerBuilder:
         scenario_identity: ScenarioIdentity,
     ) -> FormalEnvironmentWorker:
         loaded = self._load_scheduled_scene(worker_index, scenario_identity)
-        safe = list(self._safe_start_cells(loaded, platform_type))
-        start_seed = _formal_episode_seed("start", scenario_identity)
-        if safe:
-            offset = int(start_seed[:16], 16) % len(safe)
-            safe = safe[offset:] + safe[:offset]
-        qualification = loaded.entry["start_qualification"]
-        fallback_raw = qualification["platform_start_cells"][platform_type]
-        if not isinstance(fallback_raw, list) or len(fallback_raw) != 2:
+        safe = self._safe_start_cells(loaded, platform_type)
+        payload = loaded.entry["platform_coverability"][platform_type]
+        start_raw = payload["qualified_start_cell"]
+        if (
+            payload.get("eligible") is not True
+            or not isinstance(start_raw, list)
+            or len(start_raw) != 2
+        ):
             raise ValueError("formal scheduled scene has no qualified platform start")
-        fallback = (int(fallback_raw[0]), int(fallback_raw[1]))
-        if fallback not in safe:
+        start_cell = (int(start_raw[0]), int(start_raw[1]))
+        if start_cell not in safe:
             raise ValueError("formal cached qualified start is not platform-safe")
-        trial_cells = [safe[0]]
-        if fallback != trial_cells[0]:
-            trial_cells.append(fallback)
-        for start_cell in trial_cells:
-            episode = FormalEpisode(
-                worker_index=worker_index,
-                platform_type=platform_type,
-                capability=capability,
-                scenario_identity=scenario_identity,
-                loaded=loaded,
-                start_cell=start_cell,
-            )
-            if bool(episode.initial_observation.candidate_mask.any()):
-                return self._make_worker(episode)
-        raise ValueError(
-            "formal cached start qualification differs from the observed-only candidate"
+        episode = FormalEpisode(
+            worker_index=worker_index,
+            platform_type=platform_type,
+            capability=capability,
+            scenario_identity=scenario_identity,
+            loaded=loaded,
+            start_cell=start_cell,
         )
+        if not bool(episode.initial_observation.candidate_mask.any()):
+            raise ValueError(
+                "formal cached start qualification differs from the observed-only candidate"
+            )
+        return self._make_worker(episode)
 
     def restore(
         self,
@@ -1059,7 +1079,13 @@ class FormalWorkerBuilder:
         if restored.scene_id != loaded.scene.scene_id:
             raise ValueError("formal restored scene differs from schedule")
         safe = self._safe_start_cells(loaded, platform_type)
-        if restored.start_cell not in safe:
+        cached_start = loaded.entry["platform_coverability"][platform_type][
+            "qualified_start_cell"
+        ]
+        if (
+            restored.start_cell not in safe
+            or cached_start != list(restored.start_cell)
+        ):
             raise ValueError("formal restored start is not platform-safe")
 
         def restore_with_filters(
@@ -1150,19 +1176,42 @@ class FormalWorkerBuilder:
         )
         if scenario_identity.scenario_schedule_id != self.scenario_schedule_id:
             raise ValueError("formal worker scenario schedule identity differs")
-        eligible_entries = [
-            entry
-            for entry in cache.manifest["scenes"]
-            if entry["split"] == self.split
-            and entry["start_qualification"]["common_eligible"]
-        ]
+        if self.paired_evaluation:
+            common_ids = set(
+                cache.manifest["exact_common_evaluation"]["splits"][self.split][
+                    "scene_ids"
+                ]
+            )
+            eligible_entries = [
+                entry
+                for entry in cache.manifest["scenes"]
+                if entry["scene_id"] in common_ids
+            ]
+            schedule_id = str(
+                cache.manifest["exact_common_evaluation"]["splits"][self.split][
+                    "scenario_schedule_id"
+                ]
+            )
+        else:
+            platform_type = scenario_identity.platform_type
+            eligible_entries = [
+                entry
+                for entry in cache.manifest["scenes"]
+                if entry["split"] == self.split
+                and entry["platform_coverability"][platform_type]["eligible"]
+            ]
+            schedule_id = (
+                self.platform_scenario_schedule_ids[platform_type]
+                if self.platform_scenario_schedule_ids is not None
+                else self.scenario_schedule_id
+            )
         if not eligible_entries:
             raise ValueError(
-                "formal cache has no common start-eligible scenes for the requested split"
+                "formal cache has no platform-eligible scenes for the requested split"
             )
         entries = _formal_scheduled_entries(
             eligible_entries,
-            scenario_schedule_id=self.scenario_schedule_id,
+            scenario_schedule_id=schedule_id,
         )
         base_index = _formal_schedule_index(
             worker_index,
@@ -1223,14 +1272,29 @@ class FormalEnvironmentBuilder:
             raise ValueError("cache capability identity differs from current bundle")
         if self.split not in {"train", "validation", "test", "holdout"}:
             raise ValueError("formal environment split is invalid")
-        schedule_id = (
-            f"{cache.manifest['cache_manifest_sha256']}/{self.split}/v6"
-        )
+        platform_schedule_ids = {
+            platform: str(
+                cache.manifest["platform_eligibility"][platform][
+                    "scenario_schedule_ids"
+                ][self.split]
+            )
+            for platform in _PLATFORMS
+        }
+        schedule_digest = hashlib.sha256(
+            json.dumps(
+                platform_schedule_ids,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        schedule_id = f"lunar-formal-combined-schedule/v1:{self.split}:{schedule_digest}"
         worker_builder = FormalWorkerBuilder(
             str(self.cache_manifest_path),
             self.split,
             self.allow_preflight,
             schedule_id,
+            platform_schedule_ids,
+            self.split != "train",
         )
         factory = FrozenCapabilityEnvironmentFactory(
             bundle=self.capability_bundle,
