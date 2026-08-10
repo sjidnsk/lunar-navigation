@@ -35,6 +35,7 @@
 - Create: `ros2_ws/src/lunar_planner_core/src/shared/sha256.cpp`
 - Create: `ros2_ws/src/lunar_planner_core/test/primitive_reachability_graph_test.cpp`
 - Modify: `ros2_ws/src/lunar_planner_core/CMakeLists.txt`
+- Modify: `ros2_ws/src/lunar_planner_core/test/public_header_boundary_test.py`
 
 **Interfaces:**
 
@@ -63,6 +64,7 @@ struct PrimitiveReachabilityEdge final {
   std::uint64_t source_state_id{};
   std::uint64_t target_state_id{};
   std::uint32_t primitive_index{};
+  std::string primitive_id;
   double cost{};
 };
 
@@ -108,11 +110,11 @@ class PrimitiveReachabilityEngine final {
 
 The private header defines `shared::PrimitiveGraphBuildResult` as canonical platform states, certified/rejected potential edges with swept tile dependencies, safe-anchor key, algorithm ID, state schema, and primitive-set canonical bytes. Tasks 2-4 return this exact type to the shared engine.
 
-- [ ] **Step 1: Write graph-label, projection, hash, and failure tests**
+- [x] **Step 1: Write graph-label, projection, hash, and failure tests**
 
 Add literal directed graphs proving: forward-only nodes are excluded; a node with a reverse path to anchor is included; same cell with different yaw/mode remains distinct; projected cells OR only recoverable observation states; SHA-256 matches the empty string and `abc` standard vectors; `-0.0` hashes like `+0.0`; non-finite graph fields fail.
 
-- [ ] **Step 2: Run the RED test**
+- [x] **Step 2: Run the RED test**
 
 ```bash
 set +u
@@ -130,11 +132,11 @@ ctest --test-dir "$NATIVE_ROOT/build/lunar_planner_core" \
 
 Expected: compile fails because the new public contract and graph kernel do not exist.
 
-- [ ] **Step 3: Implement canonical graph labels and identity**
+- [x] **Step 3: Implement canonical graph labels and identity**
 
 Implement deterministic forward BFS, reverse BFS from the safe anchor, projection, canonical binary serialization, and the small internal SHA-256 implementation. Reject invalid indices, duplicate canonical keys, negative/non-finite costs, non-finite poses, and canceled updates.
 
-- [ ] **Step 4: Run GREEN and commit**
+- [x] **Step 4: Run GREEN and commit**
 
 ```bash
 colcon --log-base "$NATIVE_ROOT/log-build" build --merge-install \

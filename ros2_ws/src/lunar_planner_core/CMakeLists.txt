@@ -49,7 +49,9 @@ add_library(${PROJECT_NAME} SHARED
   src/shared/convex_corridor.cpp
   src/shared/map_snapshot.cpp
   src/shared/projection_cache.cpp
+  src/shared/primitive_reachability_graph.cpp
   src/shared/safe_projection.cpp
+  src/shared/sha256.cpp
   src/shared/terrain_checks.cpp
   src/wheel/wheel_lattice.cpp
   src/wheel/wheel_planner.cpp
@@ -104,6 +106,15 @@ if(BUILD_TESTING)
     lunar_planner_core_reachability_projection_test ${PROJECT_NAME})
   lunar_enable_sanitizers(
     lunar_planner_core_reachability_projection_test)
+
+  ament_add_gtest(lunar_planner_core_primitive_reachability_graph_test
+    test/primitive_reachability_graph_test.cpp)
+  target_include_directories(
+    lunar_planner_core_primitive_reachability_graph_test PRIVATE src test)
+  target_link_libraries(
+    lunar_planner_core_primitive_reachability_graph_test ${PROJECT_NAME})
+  lunar_enable_sanitizers(
+    lunar_planner_core_primitive_reachability_graph_test)
 
   ament_add_gtest(lunar_planner_core_shared_core_test
     test/shared_core_test.cpp)
