@@ -1,8 +1,8 @@
 # 平台化精确可探索栅格与候选终止闭环设计
 
 **日期：** 2026-08-10
-**状态：** 已批准，待实施
-**范围：** 正式 PPO 训练的覆盖率分母、场景资格、平台可达性、候选耗尽审计和旧权重迁移
+**状态：** 已批准，增量闭环修复实施中
+**范围：** 正式 PPO 训练的覆盖率分母、场景资格、平台可达性、候选耗尽审计、宏动作闭环和全新训练身份
 
 ## 1. 权威关系
 
@@ -47,6 +47,26 @@ mission_roi = valid_mask - 64m 边界 - forbidden
 3. `coverable_detail_mask`：能从某个可达观测位置在 `30 m` 和 LOS 合同内看到的任务目标栅格。
 
 `coverable_detail_mask` 是成功分母。候选仍从 observed-only 状态生成，不得读取该真值掩码。
+
+### 2.1 新旧源码闭环审计结论
+
+冻结旧仓能达到 `0.99` 的关键不是单独某个阈值，而是同一套语义贯穿候选、规划、执行和观测：
+
+- 一个 action 选择一个候选目标，规划器执行到该目标，而不是每走 `3-4 m` 就丢弃目标；
+- 沿整条已认证路径按 `<= 1.0 m` 间距进行观测；
+- 预计信息增益允许射线穿过未知区域，只由已经观测到的障碍截断；
+- 候选增益按当前候选集归一化，策略实际看到的是可比较的 `O(1)` 信号；
+- 成功阈值与成功奖励分别为 `0.99` 和 `100.0`。
+
+当前实现的失败证据与之相反：场景 `b230277e...` 在第 241 个决策边界只有
+`6.419432%` 覆盖；机器人所在 `4 m` 单元已有 `378/400` 个精细格证据，局部 `0.2 m`
+投影确认起点安全连通，但粗图按合同仍是 unknown，导致所有正式请求被
+`GLOBAL_NO_KNOWN_SAFE_ROUTE` 拒绝。此前 20 步中候选目标平均距离为 `17.54 m`，实际每次只前进
+`3.94 m`，目标在滚动参考后被重新选择。首步预计增益只相当于实际目标观测增量的约 `1/80`，
+原因是预计增益把未知当成射线阻挡并仅计算未知边界薄壳。
+
+因此，`coverable_detail_mask` 的物理定义保留；不得通过缩小分母掩盖失败。剩余修复必须使运行时
+规划、动作、观测和预计增益与该分母闭合，并由自然终止闭环而不是训练曲线证明。
 
 ## 3. 精确可探索栅格合同
 
@@ -134,8 +154,8 @@ coverage =
     / popcount(coverable_detail_mask)
 ```
 
-分母必须大于零。初始 reveal 计入 numerator，但不得在初始状态达到 `0.95`；首次从 `<0.95`
-跨到 `>=0.95` 仍是唯一 `SUCCESS` 事件。
+分母必须大于零。初始 reveal 计入 numerator，但不得在初始状态达到 `0.99`；首次从 `<0.99`
+跨到 `>=0.99` 仍是唯一 `SUCCESS` 事件。
 
 ## 4. 真值与策略边界
 
@@ -208,7 +228,7 @@ ineligible_reason                      enum|null
 1. 起点安全且属于 reachable mask；
 2. `coverable_detail_cell_count > 0`；
 3. `mission_coverable_fraction = coverable / mission_target >= 0.95`；
-4. `initial_coverable_fraction < 0.95`；
+4. `initial_coverable_fraction < 0.99`；
 5. 初始 reveal 后至少有一个经平台检查的 observed-only 候选；
 6. reachability、detail target、LOS 和掩码哈希全部精确完成。
 
@@ -232,7 +252,8 @@ ineligible_reason                      enum|null
 
 ## 6. 运行时平台候选可达性
 
-候选发现、`0.2 m` observed-only 预计增益、64 项张量合同和稳定排序保持不变。平台检查改为统一
+候选发现的 observed-only 边界、64 项张量形状和稳定排序保持不变；预计增益的射线语义与数值
+归一化按 6.4 节修复。平台检查改为统一
 接口，避免 `CandidateBuilderV2` 内继续扩展互不一致的平台分支：
 
 ```text
@@ -274,8 +295,8 @@ frontier，且传统候选和退化扫描都没有发出正增益候选，可补
 回退。回退只能指向确定性导航栈中的直接父落点；栈必须保存父落点实际认证并执行的精确
 `x/y/z`，不得只保存其所属 `4 m` 粗格并在返程时改瞄粗格中心。返回父落点即弹栈，栈从已有
 reveal history 重建，禁止在两个已访问落点间振荡。增益字段必须如实为零，执行成本和零覆盖惩罚
-照常计算。不得延长 Hopper 单跳、读取 truth coverable mask、增加 checkpoint 状态或改变
-`[64,12]` 策略张量合同；精确返程位姿和高程只作为候选批内部规划元数据。独立 oracle 必须覆盖
+照常计算。不得延长 Hopper 单跳、读取 truth coverable mask 或改变
+`[64,12]` 策略张量合同；精确返程位姿和高程只作为候选批及 replay 审计元数据。独立 oracle 必须覆盖
 这类机会，但不得调用生产排序。oracle 的动作包络必须与生产生成器完全同源：相对当前执行位姿
 使用目标的精确世界坐标（直接父节点使用其实际 `x/y/z`）计算 `30 m` 距离和 FOV，禁止用粗格
 索引距离近似，否则位于格内边缘的机器人会产生假机会。
@@ -285,6 +306,56 @@ Hopper 落点存在精细/粗格冲突时，以已经通过算法 ID、几何和
 落脚证据的保守路径。该变化必须升级 Hopper reachability algorithm ID，使旧 cache 自动失配。
 
 运行时 C++ 数值失败或资源耗尽属于基础设施错误，不得写成候选不可达并让 episode 正常结束。
+
+### 6.1 地面平台的局部起点连接权威
+
+WHEELED/LEGGED 的正式 Planner 不得在局部 `0.2 m` 已证明当前位姿安全时，仅因当前所属 `4 m`
+单元未达到 `400/400` 观测就拒绝请求。全局图仍保持全观测才 known 的保守规则，不伪造或提升
+粗格证据；Planner 改为建立确定性的局部起点连接：
+
+1. 在 local `hard_feasible + connected_component` 中确认精确当前位姿；
+2. 找到同时属于该局部分量和全局 `hard_feasible` 的最近确定性 portal；
+3. 用局部投影搜索并认证从精确起点到 portal 的连接路径；
+4. 以 portal 作为全局搜索起点，再把局部连接和全局路径合成为一条 route preview；
+5. 若没有同时满足局部连接和全局到目标路径的 portal，才返回 `GLOBAL_NO_KNOWN_SAFE_ROUTE`。
+
+portal 按局部路径代价、行、列稳定排序；排除的 conditional corridor 仍只作用于全局段。任何
+局部起点连接都必须经过现有 local planner 的最终安全认证，不能把局部连通分量当作执行 reference。
+
+### 6.2 一个策略动作对应一个持续候选目标
+
+WHEELED/LEGGED 的一个 PPO action 固定候选的精确 `x/y/z`、目标容差和 theta。C++ 每次仍只发布
+`wheel_horizon_m=4.0` 或 `legged_horizon_m=3.0` 的安全滚动 reference；每段执行后环境更新真实
+观测地图，并在不再次调用策略的情况下对同一目标重新规划。满足以下任一条件才回到下一策略边界：
+
+- 目标容差满足；
+- `SUCCESS` 或硬终止发生；
+- 刷新地图后该目标被正式 Planner 明确判为不可行或无安全路径。
+
+所有内部 reference 的覆盖增量、优先级增量、规划/执行代价、时间和执行事件聚合成一个
+`PlannerTransition`。目标坐标不得从刷新后的候选索引重建。最多允许 64 个内部 reference，且每段
+必须产生有限、可验证的目标距离进展；违反者是环境不变量错误并丢弃 rollout，不是普通 episode
+失败。该上限是单个 `<=30 m` action 的防失控保护，不是 episode 决策上限。Hopper 保持一个 action
+对应一个已认证单跳，直到 `LANDED_HOLD`。
+
+### 6.3 沿已认证路径累积真实传感器观测
+
+WHEELED/LEGGED 对执行 reference 的折线按累计路程插值，观测样本间距不得超过 `1.0 m`，并始终
+包含最终位姿。每个样本使用与实际 reveal 相同的 `0.2 m` truth、30 m/360° 和 LOS；样本间 elapsed
+按 reference 时间戳插值。一个内部 reference 只发布一次最终策略 observation，但其覆盖增量是所有
+路径样本新观测精细格的去重并集。replay state 必须保存完整路径样本和逐段 elapsed，以便恢复后
+逐位重建相同 observed bits。Hopper 仍只在 `LANDED_HOLD` 观测，飞行中不得采样。
+
+### 6.4 预计信息增益与归一化
+
+候选预计增益只使用机器人当时掌握的 `0.2 m` 稀疏观测地图：候选必须是已观测安全位姿；对传感器
+圆盘内所有未观测 ROI 端点，射线可以穿过未知格，仅在遇到“已观测且为物理障碍”的格时截断。
+因此它是 observed-only 的乐观预计，不是真值 reveal，也不读取 coverable mask。
+
+通过平台可达性筛选后，`frontier_features[:,5]` 使用本批正增益候选的最大 mission gain 归一化，
+`frontier_features[:,6]` 同样按最大 priority gain 归一化；最大值为零时保持零。原始增益继续用于
+零增益诊断，稳定排序仍使用确定性 tie-break。该变化不改变 `[64,12]` 形状，但属于策略输入语义
+变化，必须升级训练语义并从新模型开始。
 
 ## 7. 候选耗尽与独立 Oracle
 
@@ -316,9 +387,9 @@ production_candidate_count == 0 AND oracle_opportunity_count > 0
 
 production_candidate_count == 0 AND oracle_opportunity_count == 0
     -> LEGAL_EXHAUSTION(<最后实际耗尽候选的阶段>)
-    -> 未达到 0.95 时按该阶段原因合法失败终止
+    -> 未达到 0.99 时按该阶段原因合法失败终止
 
-coverage 首次达到 0.95
+coverage 首次达到 0.99
     -> SUCCESS
 ```
 
@@ -334,35 +405,35 @@ coverage 首次达到 0.95
 环境可记录 `remaining_unobserved_coverable_count` 作为 truth-side 诊断，但不能用它生成候选或
 替代 observed-only oracle。
 
-## 8. Reward、checkpoint 与旧权重迁移
+## 8. Reward、checkpoint 与全新训练身份
 
-奖励权重本身保持 coverage-first v3 不变，但覆盖增量、剩余覆盖惩罚、成功奖励及 policy-visible
-覆盖率的语义全部变化。cache、训练语义、场景调度、起点和 episode 状态也发生变化，因此：
+奖励升级为 `lunar-reward/v4`。仍保持 coverage-first，固定共享权重为：
 
-- 旧正式运行不能严格 resume；
-- 不允许通过 source-commit migration 保留旧 optimizer、RNG、global step 或活动 episode；
-- 旧 checkpoint 保持不可变，作为 warm-start 来源和审计证据。
+```text
+mission_observed_delta                  100.0
+executed_without_new_mission_coverage    0.10
+goal_infeasible                          0.20
+no_known_safe_route                      0.30
+unsuccessful_remaining_coverage          1.00
+success_first_crossing                  100.0
+```
 
-新运行允许继承：
+`normalized_plan_or_execution_cost`、`normalized_macro_step_time` 和
+`priority_observed_delta` 继续作为有限性合同与诊断，不进入本轮覆盖优先奖励；这样不在修复覆盖闭环
+时混入新的效率目标。成功奖励恢复到旧仓量级，避免最后几个百分点只得到弱于普通覆盖增量的信号。
 
-- 全局/局部/候选 encoder；
-- cross-attention 与 policy action heads。
+cache、候选特征、动作聚合、成功阈值、reward 和 replay state 均发生语义变化，因此旧 checkpoint
+既不能严格 resume，也不用于 warm start。本次正式运行必须：
 
-新运行必须重置：
-
-- value head；
-- optimizer、学习率调度和任何运行统计；
-- PPO rollout/GAE 状态；
-- worker、场景游标、活动 episode 和 RNG；
-- global step，从 `0` 开始。
-
-run manifest 记录 `warm_start_parent_checkpoint_sha256`、父 checkpoint step 和只加载的参数前缀，
-不得把 warm start 表述为原运行连续恢复。若实现无法可靠分离 value head，则允许加载完整网络后
-立即以冻结 seed 重初始化 value head，并把重初始化摘要写入 manifest。
+- 随机初始化完整 policy 与 value 网络；
+- 新建 optimizer、学习率调度、归一化统计、rollout/GAE 和 RNG；
+- 从冻结 schedule 的第一个场景及 `global_step=0` 开始；
+- run manifest 中 `resume_parent` 与 `warm_start_parent` 均为 null，并记录旧运行仅作为历史审计。
 
 训练语义升级为
-`lunar-training-semantics/sensor-30m-360-platform-coverable-detail95-unbounded-per-platform-subset/v6`。
-cache schema、训练语义哈希和源码提交共同阻止 v3 cache 或旧活动 episode 误入新运行。
+`lunar-training-semantics/sensor-30m-360-platform-coverable-detail99-ground-option-path-observation/v7`。
+cache v4 的数组 schema 不变，但旧 manifest 的语义哈希、源码提交和 reward 哈希必须失配；必须在
+仓库外完整重建，禁止就地改写旧 cache。
 
 ## 9. 验证与训练解锁门
 
@@ -375,7 +446,10 @@ cache schema、训练语义哈希和源码提交共同阻止 v3 cache 或旧活�
 3. Hopper 的正向或反向落脚区域、delta-v、flight tube 任一失败都会拒绝对应边；
 4. 超过 `30.0 m` 的目标不进入当前策略可达图；
 5. 同一输入重复计算的 reachable mask、诊断计数和哈希逐位一致；
-6. 数值失败、取消和资源耗尽不会被降级为不可达。
+6. 数值失败、取消和资源耗尽不会被降级为不可达；
+7. 粗图起点 unknown、局部起点安全时使用经过认证的局部 portal 连接；
+8. portal 不属于局部起点分量或全局目标不可达时仍 fail closed；
+9. 已知粗图起点继续产生与修复前逐位相同的全局 route。
 
 ### 9.2 Python 单元与集成测试
 
@@ -391,7 +465,11 @@ cache schema、训练语义哈希和源码提交共同阻止 v3 cache 或旧活�
    空间通道；只有获准的覆盖率标量、reward 和环境诊断可以随精确分母变化；
 8. `production empty + oracle opportunity` 必须抛出环境不变量错误；
 9. scheduler 不会给某平台分配其 ineligible 场景；
-10. 旧 cache、旧 checkpoint 和随机非绑定起点全部 fail closed。
+10. 旧 cache、旧 checkpoint 和随机非绑定起点全部 fail closed；
+11. 一次地面 action 跨多个滚动 reference 仍只产生一个 transition，目标坐标不漂移；
+12. 路径样本间距 `<=1.0 m`、replay 位相同且 Hopper 飞行中不观测；
+13. 未知不阻挡预计增益、已知障碍阻挡，且候选最大正增益归一化为 `1.0`；
+14. `0.99` 首次越界只触发一次 `SUCCESS`，reward v4 的成功奖励为 `100.0`。
 
 ### 9.3 固定场景闭环门
 
@@ -400,7 +478,7 @@ cache schema、训练语义哈希和源码提交共同阻止 v3 cache 或旧活�
 
 - `exact=true`；
 - `mission_coverable_fraction >= 0.95`；
-- 基线最终覆盖率 `>=0.95`；
+- 基线最终覆盖率 `>=0.99`；
 - `ORACLE_CONTRADICTION=0`；
 - 平台候选发布后无系统性规划器语义拒绝；
 - 每个 terminal reason 完整；
@@ -409,8 +487,8 @@ cache schema、训练语义哈希和源码提交共同阻止 v3 cache 或旧活�
 这里的“24 个”是三平台 `exact-common` 的门禁分母，不是 preflight cache 的原始场景上限。
 若首批 24 个原始场景经平台资格计算后不足 24 个 `exact-common`，必须扩大确定性的 preflight
 物理场景前缀，再由冻结 common schedule 选取前 24 个；不得按闭环结果挑选成功场景，也不得降低
-`0.95` 资格或成功阈值。固定场景闭环使用独立的 `closed-loop-gate` 命令和仓库外报告；现有
-`formal-preflight` 的一步非代理探针与恢复等价性检查仍属于 full cache 生成后的启动前校准门，
+`0.95` 任务可行性资格门或 `0.99` 成功阈值。固定场景闭环使用独立的 `closed-loop-gate` 命令和仓库外报告；现有
+`formal-preflight` 的一步非代理探针与启动身份检查仍属于 full cache 生成后的启动前校准门，
 不能冒充本节的自然终止闭环门。
 
 随后才允许生成 full v4 cache。full manifest 必须公布三平台各 split 的资格率和排除原因；不得以
@@ -426,26 +504,27 @@ Humble 环境、仓库外 build/install/log 目录中构建并运行 `lunar_plan
 
 实施按以下独立审查单元推进：
 
-1. 冻结 v6 语义、cache v4 schema 与失败测试；
+1. 冻结 v6 基础语义、cache v4 schema 与失败测试；
 2. 暴露 WHEELED/LEGGED connected component，并实现 Hopper C++ reachability projection；
 3. 实现 tile-wise detail target、LOS union 与 bit-packed coverable mask；
 4. 重构 cache 资格、固定起点和 per-platform schedule；
 5. 接入精确 detail coverage numerator/denominator；
 6. 接入统一平台候选可达性、分阶段诊断和 observed-only oracle；
-7. 完成 checkpoint warm-start 边界和新 run manifest；
-8. 生成 preflight v4 cache，执行固定场景闭环门；
-9. 生成 full v4 cache并复核数据分布；
-10. 经明确授权后，以旧策略权重 warm start 新的 step-0 正式训练。
+7. 接入持续地面目标、路径观测和一个 action 的 transition 聚合；
+8. 升级预计增益、候选归一化、`0.99` 成功和 reward v4；
+9. 完成新 run manifest 的随机初始化边界；
+10. 生成 preflight v4 cache，执行单场景和固定场景闭环门；
+11. 生成 full v4 cache并复核数据分布；
+12. 使用本次已获授权的随机初始化配置启动新的 step-0 正式训练并检查首批指标。
 
-在第 8 项全部通过前不得启动新正式训练；失败时停在对应组件修复，不顺带调整 reward、网络、
-课程、传感器范围或场景尺寸。
+在第 10 项全部通过前不得启动新正式训练；失败时停在对应组件修复，不顺带调整网络、课程、
+传感器范围或场景尺寸。
 
 ## 11. 非目标
 
 本文不修改：
 
 - PPO 网络结构、七输入名称、`[64,12]` 候选合同或动作分布；
-- coverage-first v3 奖励权重；
 - `1024 m × 1024 m` 任务窗、`30 m/360°` 传感器或 `0.2 m` 实际 reveal；
 - 无固定决策上限和跨 update 保持 episode 的生命周期；
 - C++ v3 对最终 reference 的安全所有权；
@@ -466,5 +545,5 @@ Humble 环境、仓库外 build/install/log 目录中构建并运行 `lunar_plan
 - 候选耗尽能够区分生成、访问、平台、增益和规划器原因；
 - observed-only oracle 能阻止错误的静默早停；
 - 24 场景三平台闭环门、完整测试、ROS 构建和仓库边界检查全部通过；
-- 新训练使用新身份和 step 0，但可审计地复用旧策略权重；
-- 新正式训练的启动仍需要用户明确授权。
+- 新训练使用全新模型、全新 optimizer、新身份和 step 0；
+- 单场景、三平台闭环、完整测试和 cache 门通过后，按本次用户授权直接启动并核验首批指标。
