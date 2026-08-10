@@ -4,6 +4,10 @@
 
 当前接收合同版本为 `lunar-external-interfaces/v5`。
 
+旧 checkpoint 的接口联调实现、固定 YAML 替换方式和启动顺序见
+[`interface-v1-quickstart.md`](../deployment/interface-v1-quickstart.md)。该实现严格绑定 fed9/step 251
+旧定义，资格为 `integration_only`；它不会覆盖本文件后续版本的接口所有权，也不得被当作新语义模型。
+
 ## 来源与所有权
 
 - 外部/legacy 交接来源（不复制入本仓）：`课题四未知场景无人平台自主探索与规划外部输入.md`
@@ -24,6 +28,16 @@
 | `/mission/exploration_task` | `lunar_navigation_msgs/msg/ExplorationTask` | 外部任务系统 | `header`、`mission_id`、`revision`、`desired_state`、ROI、`science_regions`；状态为 `ACTIVE/PAUSED/CANCELED` |
 | `/execution/motion_feedback` | `lunar_navigation_msgs/msg/MotionExecutionFeedback` | 外部运动执行/控制系统 | `header`、`sequence`、`platform_type`、`plan_id`、`segment_id`、`state`、`reason_code`；状态为 `IDLE/ACCEPTED/EXECUTING/SEGMENT_COMPLETE/LANDED_HOLD/FAILED/CANCELED` |
 | `science_regions[]` | `lunar_navigation_msgs/msg/ScienceTargetRegion` | 外部任务系统 | `region_id`、`objective_id`、`boundary`、`priority` |
+
+旧 checkpoint 联调节点还提供一个明确的执行输出：
+
+| 输出 | 类型 | 消费者 | 语义 |
+|---|---|---|---|
+| `/lunar/motion_reference` | `lunar_planning_msgs/msg/MotionReference` | 外部运动执行/控制系统 | 原样转发当前 `PlanMotion` 成功结果；`reliable + volatile + depth 1`，禁止执行器重启后重放旧命令 |
+
+外部执行器只执行该 Topic 上最新收到的参考，并用同一 `plan_id/segment_id` 发布
+`MotionExecutionFeedback`。Topic 可用 ROS remap 调整；若外部项目更换消息类型，应在外部适配器边界新增显式
+converter，策略、规划器和旧模型合同内部仍保持上述类型，不能用 YAML 静默改变字段语义。
 
 ## 暂定消息 schema
 

@@ -36,7 +36,10 @@ python_bin="${LUNAR_INTERFACE_V1_PYTHON:-python3}"
 "$python_bin" -m pytest -q \
   "$repository_root/model_contract/tests/test_interface_manifest.py" \
   "$repository_root/model_contract/tests/test_package_boundary.py" \
+  "$repository_root/ros2_ws/src/lunar_external_adapter/test" \
   "$repository_root/ros2_ws/src/lunar_exploration_policy/test" \
+  "$repository_root/tests/foundation/test_external_interface_config.py" \
+  "$repository_root/tests/foundation/test_platform_profiles.py" \
   2>&1 | tee "$output_root/pytest.log"
 
 python3 "$repository_root/tools/check_repository_boundaries.py" "$repository_root" \

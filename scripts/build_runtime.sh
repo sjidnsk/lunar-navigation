@@ -21,8 +21,11 @@ fi
 
 cd "$task_repo_root"
 colcon --log-base "$task_output_root/runtime/log" build \
-  --base-paths ros2_ws/src \
+  --merge-install \
+  --executor parallel \
+  --parallel-workers 2 \
+  --base-paths ros2_ws/src model_contract \
   --packages-skip lunar_nav2_adapter \
   --build-base "$task_output_root/runtime/build" \
   --install-base "$task_output_root/runtime/install" \
-  --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+  --cmake-args -DCMAKE_BUILD_TYPE=Release
