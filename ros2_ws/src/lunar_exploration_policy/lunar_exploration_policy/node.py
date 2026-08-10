@@ -163,7 +163,7 @@ class InterfaceV1PolicyNode(LifecycleNode):
             self._publish_status("CONFIGURED")
             return TransitionCallbackReturn.SUCCESS
         except Exception as error:
-            self.get_logger().error("interface-v1 configure failed: %s", error)
+            self.get_logger().error(f"interface-v1 configure failed: {error}")
             self._destroy_runtime_entities()
             return TransitionCallbackReturn.FAILURE
 
@@ -204,7 +204,7 @@ class InterfaceV1PolicyNode(LifecycleNode):
 
     def _reject(self, channel: str, error: Exception) -> None:
         self.get_logger().warning(
-            "channel=%s reason_code=INPUT_REJECTED detail=%s", channel, error
+            f"channel={channel} reason_code=INPUT_REJECTED detail={error}"
         )
 
     def _on_global_map(self, message: GridMap) -> None:
@@ -420,7 +420,11 @@ class InterfaceV1PolicyNode(LifecycleNode):
                 )
                 if self._accept_planner_result(planner_result) and result.has_reference:
                     # 协调器先验证 request_id 和状态，再把同一参考交给执行器。
-                    self._reference_publisher.publish(result.reference)
+                    try:
+                        self._reference_publisher.publish(result.reference)
+                    except Exception as error:
+                        self._reject("motion_reference", error)
+                        self._halt_current("REFERENCE_PUBLISH_FAILED")
         except Exception as error:
             self._reject("plan_motion_result", error)
             self._accept_planner_result(

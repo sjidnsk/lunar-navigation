@@ -96,12 +96,11 @@ class ExternalAdapter(LifecycleNode):
                         header = getattr(message, "header", None)
                         stamp = getattr(header, "stamp", None)
                         self.get_logger().warning(
-                            "channel=%s reason_code=EXTERNAL_MESSAGE_REJECTED "
-                            "stamp=%s.%s detail=%s",
-                            name,
-                            getattr(stamp, "sec", "unknown"),
-                            getattr(stamp, "nanosec", "unknown"),
-                            error,
+                            f"channel={name} "
+                            "reason_code=EXTERNAL_MESSAGE_REJECTED "
+                            f"stamp={getattr(stamp, 'sec', 'unknown')}."
+                            f"{getattr(stamp, 'nanosec', 'unknown')} "
+                            f"detail={error}"
                         )
 
                 subscription = self.create_subscription(
@@ -111,7 +110,7 @@ class ExternalAdapter(LifecycleNode):
                 self._subscriptions.append(subscription)
             return TransitionCallbackReturn.SUCCESS
         except Exception as error:
-            self.get_logger().error("adapter configure failed: %s", error)
+            self.get_logger().error(f"adapter configure failed: {error}")
             self._destroy_runtime_entities()
             return TransitionCallbackReturn.FAILURE
 

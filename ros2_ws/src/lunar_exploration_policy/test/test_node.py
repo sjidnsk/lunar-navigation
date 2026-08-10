@@ -182,3 +182,42 @@ def test_result_rejected_by_current_coordinator_is_not_published() -> None:
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
+
+def test_reference_publish_failure_does_not_leave_executing_context() -> None:
+    class _Completed:
+        def __init__(self, result):
+            self.result = result
+
+    class _Future:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return _Completed(self._result)
+
+    class _FailingPublisher:
+        def publish(self, message):
+            del message
+            raise RuntimeError("transport closed")
+
+    result = PlanMotion.Result()
+    result.has_reference = True
+    result.reference.plan_id = "plan-undelivered"
+    result.reason_code = "OK"
+
+    rclpy.init()
+    node = InterfaceV1PolicyNode()
+    accepted = []
+    halted = []
+    node._enabled = True
+    node._reference_publisher = _FailingPublisher()
+    node._accept_planner_result = lambda value: accepted.append(value) or True
+    node._halt_current = halted.append
+    try:
+        node._on_action_result(_Future(result), "current-request")
+        assert len(accepted) == 1
+        assert halted == ["REFERENCE_PUBLISH_FAILED"]
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
