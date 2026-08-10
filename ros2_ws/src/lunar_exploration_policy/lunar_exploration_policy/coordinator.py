@@ -191,6 +191,13 @@ class ClosedLoopCoordinator:
             or feedback.sequence <= self._last_feedback_sequence
         ):
             return False
+        if feedback.state in ("FAILED", "CANCELED"):
+            self._last_feedback_sequence = feedback.sequence
+            self.active_plan_id = None
+            self._platform_type = None
+            self.state = CoordinatorState.HOLD_ERROR
+            self.last_reason = feedback.state
+            return False
         terminal = (
             feedback.state == "LANDED_HOLD"
             if self._platform_type == "HOPPER"
@@ -204,6 +211,17 @@ class ClosedLoopCoordinator:
         self.state = CoordinatorState.WAITING_INPUTS
         self.last_reason = feedback.state
         return True
+
+    def reset(self, reason: str) -> None:
+        """生命周期停用或任务暂停时丢弃本节点拥有的上下文。"""
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("reset reason must be non-empty")
+        self.active_plan_id = None
+        self._pending_request_id = None
+        self._platform_type = None
+        self._last_feedback_sequence = 0
+        self.state = CoordinatorState.WAITING_INPUTS
+        self.last_reason = reason
 
 
 __all__ = [

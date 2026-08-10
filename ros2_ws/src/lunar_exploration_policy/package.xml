@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>lunar_exploration_policy</name>
+  <version>0.1.0</version>
+  <description>Frozen fed9 exploration policy to PlanMotion ROS 2 closed loop.</description>
+  <maintainer email="maintainers@example.invalid">Lunar Navigation Maintainers</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>grid_map_msgs</exec_depend>
+  <exec_depend>lifecycle_msgs</exec_depend>
+  <exec_depend>lunar_navigation_msgs</exec_depend>
+  <exec_depend>lunar_external_adapter</exec_depend>
+  <exec_depend>lunar_model_contract</exec_depend>
+  <exec_depend>lunar_planner_training_bridge</exec_depend>
+  <exec_depend>lunar_planning_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

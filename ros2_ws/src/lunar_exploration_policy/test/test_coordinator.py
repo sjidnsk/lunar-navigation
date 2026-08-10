@@ -150,6 +150,22 @@ def test_foreign_or_late_feedback_does_not_clear_current_plan() -> None:
     assert coordinator.active_plan_id == "plan-current"
 
 
+def test_matching_execution_failure_enters_hold_error() -> None:
+    coordinator = ClosedLoopCoordinator(_FixedPolicy(0, 0.0))
+    goal = coordinator.start_decision(_snapshot("WHEELED"), mission_id="mission")
+    coordinator.accept_planner_result(
+        PlannerResult(goal.request_id, True, "plan", "REFERENCE_READY")
+    )
+
+    assert not coordinator.accept_feedback(
+        ExecutionFeedback(1, "WHEELED", "plan", "FAILED")
+    )
+
+    assert coordinator.state is CoordinatorState.HOLD_ERROR
+    assert coordinator.active_plan_id is None
+    assert coordinator.last_reason == "FAILED"
+
+
 def test_planner_infeasible_waits_for_new_boundary_without_fake_reference() -> None:
     coordinator = ClosedLoopCoordinator(_FixedPolicy(0, 0.0))
     goal = coordinator.start_decision(_snapshot("LEGGED"), mission_id="mission")
@@ -174,3 +190,17 @@ def test_new_decision_is_forbidden_before_matching_execution_feedback() -> None:
         coordinator.start_decision(
             _snapshot("WHEELED", revision=2), mission_id="mission"
         )
+
+
+def test_lifecycle_reset_discards_owned_plan_context() -> None:
+    coordinator = ClosedLoopCoordinator(_FixedPolicy(0, 0.0))
+    goal = coordinator.start_decision(_snapshot("WHEELED"), mission_id="mission")
+    coordinator.accept_planner_result(
+        PlannerResult(goal.request_id, True, "plan", "REFERENCE_READY")
+    )
+
+    coordinator.reset("DEACTIVATED")
+
+    assert coordinator.state is CoordinatorState.WAITING_INPUTS
+    assert coordinator.active_plan_id is None
+    assert coordinator.last_reason == "DEACTIVATED"
