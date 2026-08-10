@@ -325,8 +325,21 @@ struct OrderedPrimitive final {
   if (!terrain.hard_feasible) {
     return std::nullopt;
   }
+  Vec3 certified_target = point_goal.position_m;
+  const Vec3 cell_center = map.CellCenter(*target_cell);
+  const double center_goal_error = std::hypot(
+      cell_center.x - point_goal.position_m.x,
+      cell_center.y - point_goal.position_m.y);
+  const double center_translation = std::hypot(
+      cell_center.x - source.position_m.x,
+      cell_center.y - source.position_m.y);
+  if (center_goal_error <= point_goal.tolerance_m + kComparisonTolerance &&
+      center_translation <= maximum_translation + kComparisonTolerance) {
+    certified_target.x = cell_center.x;
+    certified_target.y = cell_center.y;
+  }
   LeggedPose target{
-      .position_m = point_goal.position_m,
+      .position_m = certified_target,
       .yaw_rad = target_yaw,
   };
   target.position_m.z = 0.5 *
@@ -349,7 +362,10 @@ struct OrderedPrimitive final {
       .primitive_index = std::numeric_limits<std::size_t>::max(),
       .primitive_kind = LeggedPrimitiveKind::kCoupled,
       .path_length_m = std::hypot(
-          distance, target.position_m.z - source.position_m.z),
+          std::hypot(
+              target.position_m.x - source.position_m.x,
+              target.position_m.y - source.position_m.y),
+          target.position_m.z - source.position_m.z),
   };
 }
 
@@ -482,7 +498,7 @@ LeggedLatticeBuildResult BuildLeggedLattice(
     const Interval source_body_z_m = source_index == 0U
         ? graph.true_start_body_z_m
         : source_state.reachable_body_z_m;
-    if (point_goal != nullptr) {
+    if (point_goal != nullptr && !GoalContainsBodyPose(goal, source_pose)) {
       bool canceled = false;
       auto connector = ApplyPointGoalConnector(
           source_pose, source_body_z_m, *point_goal, goal.yaw_rad,
@@ -605,17 +621,7 @@ LeggedLatticeBuildResult BuildLeggedLattice(
     }
     graph.search_problem.heuristic.push_back(
         std::isfinite(heuristic) ? heuristic : 0.0);
-    bool is_goal = GoalContainsBodyPose(goal, pose);
-    if (point_goal != nullptr) {
-      is_goal =
-          std::hypot(pose.position_m.x - point_goal->position_m.x,
-                     pose.position_m.y - point_goal->position_m.y) <=
-              kComparisonTolerance &&
-          (!goal.yaw_rad.has_value() ||
-           std::abs(ShortestYawDelta(pose.yaw_rad, *goal.yaw_rad)) <=
-               kComparisonTolerance);
-    }
-    if (is_goal) {
+    if (GoalContainsBodyPose(goal, pose)) {
       graph.search_problem.goal_mask[index] = 1U;
     }
   }

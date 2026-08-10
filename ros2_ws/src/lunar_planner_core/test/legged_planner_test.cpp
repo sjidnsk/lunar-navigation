@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include "legged/legged_terrain.hpp"
+#include "legged/legged_planner.hpp"
 #include "legged/legged_spline_optimizer.hpp"
 #include "legged/legged_timing.hpp"
 #include "lunar_planner_core/planner.hpp"
@@ -297,6 +298,48 @@ TEST(LeggedPlanner, ReachesExactOffCellGoalAndTaskYaw) {
   EXPECT_NEAR(endpoint.position_m.y, 3.63, 1.0e-9);
   EXPECT_NEAR(Yaw(endpoint.orientation), 0.23, 1.0e-9);
   EXPECT_NEAR(LeggedDiagnostics(output).endpoint_error_m, 0.0, 1.0e-9);
+}
+
+TEST(LeggedPlanner, KeepsTolerantBoundaryGoalInsideItsCertifiedTerrainCell) {
+  auto input = test::MakeValidLeggedInput();
+  input.request_id = "legged-boundary-goal";
+  std::get<LeggedState>(input.current_state).body_pose.position_m.x = 2.2;
+  input.config.optimization.maximum_iterations = 0U;
+  input.goal_map.target = PointGoal{
+      .position_m = {3.0, 3.0, 0.0},
+      .tolerance_m = 0.8,
+  };
+
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const PointGoal& goal = std::get<PointGoal>(input.goal_map.target);
+  const PlannerOutput output = legged::LeggedPlanner{}.Plan(
+      hierarchical::LocalPlanningProblem{
+          .request_id = input.request_id,
+          .platform_id = input.platform_id,
+          .capability_version = input.capability_version,
+          .local_map_generation = input.local_map_generation,
+          .state_time = input.state_time,
+          .current_state = input.current_state,
+          .goal_odom = input.goal_map,
+          .local_map_view = input.world.local_map,
+          .capability = input.capability,
+          .config = input.config,
+      });
+
+  ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << output.reason_code;
+  const Pose3& endpoint = LeggedTrajectory(output).points.back().pose;
+  const auto endpoint_cell = snapshot.snapshot->PositionToCell(
+      Vec2{.x = endpoint.position_m.x, .y = endpoint.position_m.y});
+  ASSERT_TRUE(endpoint_cell.has_value());
+  const Vec3 certified_center = snapshot.snapshot->CellCenter(*endpoint_cell);
+  EXPECT_NEAR(endpoint.position_m.x, certified_center.x, 1.0e-9);
+  EXPECT_NEAR(endpoint.position_m.y, certified_center.y, 1.0e-9);
+  EXPECT_LE(
+      std::hypot(endpoint.position_m.x - goal.position_m.x,
+                 endpoint.position_m.y - goal.position_m.y),
+      goal.tolerance_m + 1.0e-9);
 }
 
 TEST(LeggedPlanner, IsDeterministicForSameTypedSnapshot) {
