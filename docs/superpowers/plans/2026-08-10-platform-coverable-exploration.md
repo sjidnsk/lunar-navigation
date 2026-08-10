@@ -505,10 +505,14 @@ Only if a real regression required a production/test correction, repeat its RED/
 - Modify after the Hopper reachability algorithm bump: `ros2_ws/src/lunar_planner_training_bridge/test/test_bridge.py`
 - Modify if required by observed gate failures: `training/lunar_policy_training/lunar_policy_training/formal_preflight.py`
 - Modify if required by observed gate failures: `training/lunar_policy_training/lunar_policy_training/eval/baselines.py`
+- Create after discovering that `formal-preflight` is only a one-step probe: `training/lunar_policy_training/lunar_policy_training/closed_loop_gate.py`
+- Modify after discovering that `formal-preflight` cannot prove natural terminal: `training/lunar_policy_training/lunar_policy_training/cli.py`
 - Modify after the observed Hopper exhaustion failure: `training/lunar_policy_training/tests/test_candidate_builder_v2.py`
 - Modify after the observed Hopper exhaustion failure: `training/lunar_policy_training/tests/test_frontier_oracle.py`
 - Modify after observing unstable coarse-map return certification: `training/lunar_policy_training/tests/test_multires_observation.py`
 - Modify if required by observed gate failures: `training/lunar_policy_training/tests/test_formal_preflight.py`
+- Create: `training/lunar_policy_training/tests/test_closed_loop_gate.py`
+- Modify: `training/lunar_policy_training/tests/test_cli.py`
 - External artifacts only: v4 cache, native install, closed-loop report and prospective run manifest.
 
 **Interfaces:**
@@ -516,6 +520,7 @@ Only if a real regression required a production/test correction, repeat its RED/
 - A minimum of 24 frozen physical scenes is evaluated for all three platforms using deterministic observed-only gain-over-cost until natural terminal.
 - Every selected scene/platform has `exact=true`, mission coverable fraction `>=0.95`, final exact coverage `>=0.95`, zero oracle contradictions, complete terminal reason and repeat-identical masks/candidates/requests/final coverage.
 - Full v4 cache publishes split x platform feasibility and reason counts before a training command is prepared.
+- `closed-loop-gate` selects exactly the first 24 entries of the frozen exact-common schedules, emits per-scene/platform terminal evidence plus candidate/request/planner sequence hashes, and never starts training.
 
 The first real gate run found a Hopper legal-exhaustion false negative: at 20.18%
 exact coverage, no coarse frontier anchor was within the current 30 m hop, while
@@ -572,9 +577,48 @@ PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
   --preflight-scenario-limit 24
 ```
 
+The first commit-bound 24-raw-scene cache produced only six exact-common
+scenes (five train and one validation), so it is diagnostic evidence rather
+than a passable gate input. Build the next deterministic raw prefix with 128
+scenes; the gate still selects exactly 24 exact-common scenes and fails closed
+if that prefix remains insufficient. This expands qualification discovery only
+and does not select scenes using closed-loop outcomes.
+
 - [ ] **Step 3: Run the three-platform closed-loop gate twice**
 
-Use the existing `formal-preflight` command extended by Task 7 to emit coverability, oracle, planner and terminal evidence. Compare canonical run-one/run-two evidence and fail on any semantic difference.
+Run the dedicated natural-terminal command twice; `formal-preflight` remains a
+separate post-full-cache calibration/resume probe and is not a substitute for
+this gate:
+
+Before the external run, add and pass these exact regressions:
+
+- `test_select_closed_loop_gate_cases_requires_24_exact_common_scenes`;
+- `test_select_closed_loop_gate_cases_binds_schedule_cursor_and_coverability`;
+- `test_closed_loop_gate_report_is_canonical_and_repeat_comparable`;
+- parameterized rejection of non-exact masks, `<0.95` mission/final coverage,
+  missing success, non-success terminal, oracle contradiction, planner failure
+  and safety violation;
+- `test_closed_loop_gate_cli_runs_without_starting_training`.
+
+Run them together with all CLI regressions:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q \
+  training/lunar_policy_training/tests/test_closed_loop_gate.py \
+  training/lunar_policy_training/tests/test_cli.py
+```
+
+```bash
+PYTHONPATH="$PWD/model_contract:$PWD/training/lunar_policy_training" \
+  python3 -m lunar_policy_training.cli closed-loop-gate \
+  --cache-manifest "$PREFLIGHT_ROOT/cache-v4/cache-manifest.json" \
+  --artifact-root "$PREFLIGHT_ROOT/closed-loop-run-1" \
+  --minimum-scenes 24 --max-workers 8
+```
+
+Repeat with `closed-loop-run-2`. Compare
+`closed_loop_evidence_sha256`; timings and artifact paths are deliberately
+excluded from this canonical digest. Fail on any semantic difference.
 
 - [ ] **Step 4: Materialize full v4 cache only after the gate passes**
 
@@ -599,9 +643,15 @@ Report the exact v4 manifest SHA, feasibility table, exclusion reasons, prefligh
   Release verification reports `234 tests, 0 failures`, and repository boundary
   verification reports `14 passed`.
 - Task 10 step 1: completed by the scoped source commit containing this status.
-- Task 10 steps 2-5: pending the new commit-bound v4 cache, two deterministic
-  24-scene x 3-platform closed-loop runs, full-cache publication and explicit
-  launch authorization. Formal training remains stopped until those gates pass.
+- Task 10 step 2: the first commit-bound 24-raw-scene v4 cache was generated,
+  but it contains only six exact-common scenes and therefore cannot pass the
+  24-scene gate. The deterministic 128-scene qualification prefix is next.
+- Task 10 step 3 tooling: implemented as a separate natural-terminal command
+  after live inspection proved that existing `formal-preflight` executes only
+  a one-step probe. The two real runs remain pending the enlarged cache.
+- Task 10 steps 4-5: pending both repeat-identical closed-loop passes, full-cache
+  publication and explicit launch authorization. Formal training remains
+  stopped until those gates pass.
 
 ## Completion Evidence
 

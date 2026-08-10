@@ -398,6 +398,13 @@ cache schema、训练语义哈希和源码提交共同阻止 v3 cache 或旧活�
 - 每个 terminal reason 完整；
 - 重复运行的 mask、候选、请求和最终覆盖率一致。
 
+这里的“24 个”是三平台 `exact-common` 的门禁分母，不是 preflight cache 的原始场景上限。
+若首批 24 个原始场景经平台资格计算后不足 24 个 `exact-common`，必须扩大确定性的 preflight
+物理场景前缀，再由冻结 common schedule 选取前 24 个；不得按闭环结果挑选成功场景，也不得降低
+`0.95` 资格或成功阈值。固定场景闭环使用独立的 `closed-loop-gate` 命令和仓库外报告；现有
+`formal-preflight` 的一步非代理探针与恢复等价性检查仍属于 full cache 生成后的启动前校准门，
+不能冒充本节的自然终止闭环门。
+
 随后才允许生成 full v4 cache。full manifest 必须公布三平台各 split 的资格率和排除原因；不得以
 共同平均掩盖 Hopper 或任一 split。
 

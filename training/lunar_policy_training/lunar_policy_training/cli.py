@@ -97,6 +97,11 @@ from .formal_preflight import (
     _request_signature,
     run_formal_preflight,
 )
+from .closed_loop_gate import (
+    CLOSED_LOOP_MINIMUM_SCENES,
+    ClosedLoopGateError,
+    run_closed_loop_gate,
+)
 from .sensor_performance import (
     SensorPerformanceError,
     current_host_identity,
@@ -1235,6 +1240,20 @@ def build_parser() -> argparse.ArgumentParser:
     formal_preflight.add_argument("--calibration-root", required=True)
     formal_preflight.add_argument("--sensor-performance-report", required=True)
 
+    closed_loop_gate = subparsers.add_parser("closed-loop-gate")
+    closed_loop_gate.add_argument("--cache-manifest", required=True)
+    closed_loop_gate.add_argument("--artifact-root", required=True)
+    closed_loop_gate.add_argument(
+        "--minimum-scenes",
+        type=_positive_scenario_count,
+        default=CLOSED_LOOP_MINIMUM_SCENES,
+    )
+    closed_loop_gate.add_argument(
+        "--max-workers",
+        type=_positive_scenario_count,
+        default=8,
+    )
+
     extend_budget = subparsers.add_parser("extend-budget")
     extend_budget.add_argument("--artifact-root", required=True)
     extend_budget.add_argument("--blocks", required=True, type=_positive_block_count)
@@ -1436,6 +1455,34 @@ def main(argv: list[str] | None = None) -> int:
             repository_root=repository_root,
             capability_bundle=capability_bundle,
             formal_batches=formal_batches,
+        )
+    elif arguments.command == "closed-loop-gate":
+        try:
+            report, report_path = run_closed_loop_gate(
+                cache_manifest_path=Path(arguments.cache_manifest),
+                artifact_root=Path(arguments.artifact_root),
+                repository_root=repository_root,
+                source_commit=_source_commit(repository_root),
+                minimum_scene_count=arguments.minimum_scenes,
+                max_workers=arguments.max_workers,
+            )
+        except ClosedLoopGateError as error:
+            raise PreflightError(f"closed-loop gate failed: {error}") from error
+        print(
+            json.dumps(
+                {
+                    "closed_loop_gate_report": str(report_path),
+                    "closed_loop_evidence_sha256": report.payload[
+                        "closed_loop_evidence_sha256"
+                    ],
+                    "scene_count": report.payload["scene_count"],
+                    "scene_platform_count": report.payload[
+                        "scene_platform_count"
+                    ],
+                    "training_started": False,
+                },
+                sort_keys=True,
+            )
         )
     elif arguments.command == "formal-preflight":
         requested_config = load_training_config(Path(arguments.config))

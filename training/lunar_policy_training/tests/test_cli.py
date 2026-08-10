@@ -200,6 +200,19 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
             "/tmp/sensor-performance.json",
         ]
     )
+    closed_loop_gate = parser.parse_args(
+        [
+            "closed-loop-gate",
+            "--cache-manifest",
+            "/tmp/preflight-cache/cache-manifest.json",
+            "--artifact-root",
+            "/tmp/closed-loop-gate",
+            "--minimum-scenes",
+            "24",
+            "--max-workers",
+            "8",
+        ]
+    )
     extension = parser.parse_args(
         [
             "extend-budget",
@@ -225,9 +238,57 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
     assert formal_preflight.command == "formal-preflight"
     assert formal_preflight.cache_manifest.endswith("cache-manifest.json")
     assert formal_preflight.calibration_root == "/tmp/lunar-task4"
+    assert closed_loop_gate.command == "closed-loop-gate"
+    assert closed_loop_gate.minimum_scenes == 24
+    assert closed_loop_gate.max_workers == 8
     assert evaluate.sensor_performance_report is None
     assert extension.command == "extend-budget"
     assert extension.blocks == 2
+
+
+def test_closed_loop_gate_cli_runs_without_starting_training(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, object] = {}
+    report = SimpleNamespace(
+        payload={
+            "closed_loop_evidence_sha256": "e" * 64,
+            "scene_count": 24,
+            "scene_platform_count": 72,
+            "training_started": False,
+        }
+    )
+
+    def run_gate(**kwargs):
+        captured.update(kwargs)
+        return report, tmp_path / "gate" / "closed-loop-gate.json"
+
+    monkeypatch.setattr(cli_module, "run_closed_loop_gate", run_gate)
+    monkeypatch.setattr(cli_module, "_source_commit", lambda _root: "a" * 40)
+
+    assert (
+        cli_module.main(
+            [
+                "closed-loop-gate",
+                "--cache-manifest",
+                str(tmp_path / "cache" / "cache-manifest.json"),
+                "--artifact-root",
+                str(tmp_path / "gate"),
+                "--minimum-scenes",
+                "24",
+                "--max-workers",
+                "6",
+            ]
+        )
+        == 0
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert output["training_started"] is False
+    assert output["closed_loop_evidence_sha256"] == "e" * 64
+    assert captured["minimum_scene_count"] == 24
+    assert captured["max_workers"] == 6
 
 
 def test_formal_preflight_passes_the_validated_sensor_digest_to_calibration(
