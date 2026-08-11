@@ -844,16 +844,16 @@ class FormalEpisode:
                 physical_reachability.physical_reachability_algorithm_id
             ),
             goal_tolerance_mm=(0 if self.platform_type == "HOPPER" else 200),
+        )
+        candidate_result = candidate_builder.select_available(
+            candidate_universe,
+            canvas_id=world.canvas.identity,
             excluded_cells=(
                 self._visited_candidate_cells
                 if self._visited_candidate_filter_enabled
                 else ()
             ),
             backtrack_pose=backtrack_pose,
-        )
-        candidate_result = candidate_builder.select_available(
-            candidate_universe,
-            canvas_id=world.canvas.identity,
         )
         candidates = candidate_result.batch
         frontier_oracle = self._frontier_oracle.evaluate_physical(

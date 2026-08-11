@@ -84,9 +84,16 @@ class CandidateDiagnostics:
             > self.physical_candidate_universe_count
             or self.selected_policy_candidate_count
             > self.available_candidate_count
-            or self.planner_failed_current_snapshot_count
-            != self.physical_candidate_universe_count
-            - self.available_candidate_count
+            or (
+                self.planner_failed_current_snapshot_count
+                + (
+                    self.visited_excluded_count
+                    if _is_sha256(self.physical_snapshot_id)
+                    else 0
+                )
+                != self.physical_candidate_universe_count
+                - self.available_candidate_count
+            )
             or self.untried_reserve_count
             != self.available_candidate_count
             - self.selected_policy_candidate_count
@@ -792,6 +799,7 @@ class CandidateBuilderV2:
         backtrack_pose: Pose2 | None = None,
     ) -> PhysicalCandidateUniverse:
         """Build one primitive-independent, bounded physical opportunity set."""
+        del excluded_cells, backtrack_pose
         self._validate_physical_identity(
             platform_type=platform_type,
             platform_id=platform_id,
@@ -911,57 +919,13 @@ class CandidateBuilderV2:
             platform_type=platform_type,
             platform_reachability_filter_enabled=True,
             platform_reachability=None,
-            excluded_cells=excluded_cells,
+            excluded_cells=(),
             total_roi=total_roi,
             allow_zero_gain=False,
+            include_zero_gain=True,
             exact_target_poses=exact_target_poses,
             physical_observation_pose_mask=physical_mask,
         )
-        if not chosen and boundary.any() and qualified_anchors:
-            chosen, qualification = self._qualify_anchors(
-                qualified_anchors,
-                world,
-                mission,
-                pose_map,
-                projection,
-                platform_type=platform_type,
-                platform_reachability_filter_enabled=True,
-                platform_reachability=None,
-                excluded_cells=excluded_cells,
-                total_roi=total_roi,
-                allow_zero_gain=True,
-                exact_target_poses=exact_target_poses,
-                physical_observation_pose_mask=physical_mask,
-            )
-        if (
-            not chosen
-            and boundary.any()
-            and isinstance(backtrack_pose, Pose2)
-            and backtrack_pose.frame_id == "map"
-            and self._position_within_sensor(pose_map, backtrack_pose)
-        ):
-            try:
-                backtrack_cell = canvas.world_to_grid(
-                    backtrack_pose.x_m, backtrack_pose.y_m
-                )
-            except ValueError:
-                backtrack_cell = None
-            if backtrack_cell is not None:
-                chosen, qualification = self._qualify_anchors(
-                    [(0, backtrack_cell)],
-                    world,
-                    mission,
-                    pose_map,
-                    projection,
-                    platform_type=platform_type,
-                    platform_reachability_filter_enabled=True,
-                    platform_reachability=None,
-                    excluded_cells=(),
-                    total_roi=total_roi,
-                    allow_zero_gain=True,
-                    exact_target_poses=exact_target_poses,
-                    physical_observation_pose_mask=physical_mask,
-                )
 
         canonical: dict[str, PhysicalCandidate] = {}
         for anchor in chosen:
@@ -989,7 +953,16 @@ class CandidateBuilderV2:
             evidence_generation=evidence_generation,
             physical_evidence_sha256=physical_evidence_sha256,
         )
-        selected_count = min(_POLICY_CANDIDATE_COUNT, len(candidates))
+        positive_count = sum(
+            float(candidate.feature[5]) > 0.0 for candidate in candidates
+        )
+        selected_count = min(
+            _POLICY_CANDIDATE_COUNT,
+            positive_count if positive_count else len(candidates),
+        )
+        zero_gain_count = sum(
+            float(candidate.feature[5]) == 0.0 for candidate in candidates
+        )
         diagnostics = CandidateDiagnostics(
             physical_snapshot_id=physical_snapshot_id,
             physical_reachability_algorithm_id=(
@@ -1000,8 +973,8 @@ class CandidateBuilderV2:
             available_candidate_count=len(candidates),
             untried_reserve_count=len(candidates) - selected_count,
             planner_failed_current_snapshot_count=0,
-            zero_gain_count=qualification.zero_gain_count,
-            visited_excluded_count=qualification.visited_excluded_count,
+            zero_gain_count=zero_gain_count,
+            visited_excluded_count=0,
             physical_unreachable_count=(
                 qualification.static_infeasible_count
                 + qualification.platform_unreachable_count
@@ -1029,14 +1002,31 @@ class CandidateBuilderV2:
         canvas_id: str,
         failure_snapshot_id: str | None = None,
         planner_failed_candidate_ids: Collection[str] = (),
+        excluded_cells: Collection[tuple[int, int]] = (),
+        backtrack_pose: Pose2 | None = None,
     ) -> CandidateBuildResult:
-        """Filter only failures belonging to this snapshot, then take top 64."""
+        """Apply failures and history, then select observation/transit/backtrack."""
         if not isinstance(universe, PhysicalCandidateUniverse):
             raise TypeError("physical candidate universe is required")
         if not isinstance(canvas_id, str) or not canvas_id:
             raise ValueError("candidate batch canvas identity is missing")
         if isinstance(planner_failed_candidate_ids, (str, bytes)):
             raise TypeError("planner failed candidate IDs must be a collection")
+        if isinstance(excluded_cells, (str, bytes)):
+            raise TypeError("visited candidate cells must be a collection")
+        visited_cells = set(excluded_cells)
+        if any(
+            not isinstance(cell, tuple)
+            or len(cell) != 2
+            or any(type(value) is not int or value < 0 for value in cell)
+            for cell in visited_cells
+        ):
+            raise ValueError("visited candidate cell is invalid")
+        if backtrack_pose is not None and (
+            not isinstance(backtrack_pose, Pose2)
+            or backtrack_pose.frame_id != "map"
+        ):
+            raise ValueError("backtrack pose is invalid")
         failed_values = tuple(planner_failed_candidate_ids)
         current_failures: set[str] = set()
         if failed_values:
@@ -1053,12 +1043,47 @@ class CandidateBuilderV2:
                     raise ValueError(
                         "failed candidate identity is not in the current physical universe"
                     )
-        available = tuple(
+        planner_available = tuple(
             candidate
             for candidate in universe.candidates
             if candidate.candidate_id not in current_failures
         )
-        selected = available[:_POLICY_CANDIDATE_COUNT]
+        unvisited = tuple(
+            candidate
+            for candidate in planner_available
+            if candidate.position_grid_key not in visited_cells
+        )
+        positive = tuple(
+            candidate
+            for candidate in unvisited
+            if float(candidate.feature[5]) > 0.0
+        )
+        if positive:
+            selected = positive[:_POLICY_CANDIDATE_COUNT]
+        elif unvisited:
+            selected = unvisited[:_POLICY_CANDIDATE_COUNT]
+        else:
+            backtrack = ()
+            if backtrack_pose is not None:
+                exact_position = (
+                    float(backtrack_pose.x_m),
+                    float(backtrack_pose.y_m),
+                    float(backtrack_pose.elevation_m),
+                )
+                backtrack = tuple(
+                    candidate
+                    for candidate in planner_available
+                    if candidate.target_position_m == exact_position
+                )
+            selected = backtrack[:1]
+        selected_ids = {candidate.candidate_id for candidate in selected}
+        history_available = tuple(
+            candidate
+            for candidate in planner_available
+            if candidate.position_grid_key not in visited_cells
+            or candidate.candidate_id in selected_ids
+        )
+        visited_excluded_count = len(planner_available) - len(history_available)
         diagnostics = CandidateDiagnostics(
             physical_snapshot_id=universe.physical_snapshot_id,
             physical_reachability_algorithm_id=(
@@ -1066,11 +1091,11 @@ class CandidateBuilderV2:
             ),
             physical_candidate_universe_count=len(universe.candidates),
             selected_policy_candidate_count=len(selected),
-            available_candidate_count=len(available),
-            untried_reserve_count=len(available) - len(selected),
+            available_candidate_count=len(history_available),
+            untried_reserve_count=len(history_available) - len(selected),
             planner_failed_current_snapshot_count=len(current_failures),
             zero_gain_count=universe.diagnostics.zero_gain_count,
-            visited_excluded_count=universe.diagnostics.visited_excluded_count,
+            visited_excluded_count=visited_excluded_count,
             physical_unreachable_count=(
                 universe.diagnostics.physical_unreachable_count
             ),
@@ -1286,6 +1311,7 @@ class CandidateBuilderV2:
         excluded_cells: Collection[tuple[int, int]],
         total_roi: float,
         allow_zero_gain: bool,
+        include_zero_gain: bool = False,
         exact_target_poses: Mapping[tuple[int, int], Pose2] | None = None,
         physical_observation_pose_mask: np.ndarray | None = None,
     ) -> tuple[list[_FeasibleAnchor], _QualificationDiagnostics]:
@@ -1414,8 +1440,9 @@ class CandidateBuilderV2:
         zero_gain_count = 0
         gain_normalizer = float(gains[:, 0].max())
         priority_gain_normalizer = float(gains[:, 1].max())
-        admit_zero_gain = allow_zero_gain and not bool(
-            np.any(gains[:, 0] > np.float32(0.0))
+        admit_zero_gain = include_zero_gain or (
+            allow_zero_gain
+            and not bool(np.any(gains[:, 0] > np.float32(0.0)))
         )
         for (segment_id, point), (gain, priority_gain) in zip(
             feasible, gains, strict=True

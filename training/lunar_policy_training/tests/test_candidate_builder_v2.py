@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 import pathlib
 import sys
 import math
@@ -230,6 +231,8 @@ def _formal_universe(
     physical_reachability: PhysicalReachabilityResult | None = None,
     evidence_generation: int = 3,
     physical_evidence_sha256: str = "2" * 64,
+    excluded_cells: Collection[tuple[int, int]] = (),
+    backtrack_pose: Pose2 | None = None,
 ) -> candidate_builder_module.PhysicalCandidateUniverse:
     resolved_world = world or _world_with_frontier()
     resolved_physical = physical_reachability or _physical_reachability(
@@ -251,6 +254,8 @@ def _formal_universe(
             resolved_physical.physical_reachability_algorithm_id
         ),
         goal_tolerance_mm=0 if platform_type == "HOPPER" else 200,
+        excluded_cells=excluded_cells,
+        backtrack_pose=backtrack_pose,
     )
 
 
@@ -555,6 +560,123 @@ def test_no_reveal_and_primitive_source_changes_preserve_physical_identities() -
     )
     assert primitive_changed.physical_snapshot_id == first.physical_snapshot_id
     assert primitive_changed.universe_sha256 == first.universe_sha256
+
+
+def test_hopper_universe_ignores_history_while_selection_preserves_tiers_and_exact_parent() -> None:
+    world = _world_with_frontier()
+    positive_cell = (128, 123)
+    parent_cell = (128, 124)
+
+    class MixedGainEstimator(_RecordingEstimator):
+        def estimate_candidate_gains(self, *args) -> np.ndarray:
+            candidate_cells = args[-1]
+            self.calls.append(candidate_cells.copy())
+            gains = np.zeros((len(candidate_cells), 2), dtype=np.float32)
+            positive = np.all(
+                candidate_cells == np.asarray(positive_cell), axis=1
+            )
+            gains[positive] = 1.0
+            return gains
+
+    builder = CandidateBuilderV2(MixedGainEstimator())
+    physical = _physical_reachability(
+        world,
+        platform_type="HOPPER",
+        offset_xy_m=(0.02, -0.02),
+        landing_z_m=123.456,
+    )
+    physical_positions = {
+        tuple(cell): tuple(float(value) for value in position)
+        for cell, position in zip(
+            zip(*np.nonzero(physical.physical_observation_pose_mask), strict=True),
+            physical.observation_positions_m,
+            strict=True,
+        )
+    }
+    parent = Pose2(*physical_positions[parent_cell][:2], elevation_m=123.456)
+    visited = set(map(tuple, np.column_stack(np.nonzero(world.observed_mask))))
+
+    canonical = _formal_universe(
+        builder,
+        world=world,
+        platform_type="HOPPER",
+        physical_reachability=physical,
+    )
+    history_bound = _formal_universe(
+        builder,
+        world=world,
+        platform_type="HOPPER",
+        physical_reachability=physical,
+        excluded_cells=visited,
+        backtrack_pose=parent,
+    )
+
+    assert history_bound.physical_snapshot_id == canonical.physical_snapshot_id
+    assert history_bound.universe_sha256 == canonical.universe_sha256
+    assert tuple(candidate.candidate_id for candidate in history_bound.candidates) == tuple(
+        candidate.candidate_id for candidate in canonical.candidates
+    )
+
+    observation = builder.select_available(
+        canonical,
+        canvas_id=world.canvas.identity,
+    )
+    assert observation.batch.count > 0
+    assert np.all(observation.batch.features[observation.batch.mask, 5] > 0.0)
+
+    transit = builder.select_available(
+        canonical,
+        canvas_id=world.canvas.identity,
+        excluded_cells={positive_cell},
+    )
+    assert transit.batch.count > 0
+    assert np.all(transit.batch.features[transit.batch.mask, 5:7] == 0.0)
+
+    backtrack = builder.select_available(
+        canonical,
+        canvas_id=world.canvas.identity,
+        excluded_cells={
+            candidate.position_grid_key for candidate in canonical.candidates
+        },
+        backtrack_pose=parent,
+    )
+    assert backtrack.universe.universe_sha256 == canonical.universe_sha256
+    assert backtrack.batch.count == 1
+    np.testing.assert_array_equal(
+        backtrack.batch.target_positions_m[0],
+        np.asarray(physical_positions[parent_cell], dtype=np.float64),
+    )
+
+
+def test_ground_universe_ignores_visited_cells_but_availability_excludes_them() -> None:
+    builder = CandidateBuilderV2(_RecordingEstimator())
+    canonical = _formal_universe(builder)
+    visited_candidate = canonical.candidates[0]
+    history_bound = _formal_universe(
+        builder,
+        excluded_cells={visited_candidate.position_grid_key},
+    )
+
+    assert history_bound.physical_snapshot_id == canonical.physical_snapshot_id
+    assert history_bound.universe_sha256 == canonical.universe_sha256
+    assert tuple(candidate.candidate_id for candidate in history_bound.candidates) == tuple(
+        candidate.candidate_id for candidate in canonical.candidates
+    )
+
+    selected = builder.select_available(
+        canonical,
+        canvas_id=_canvas().identity,
+        excluded_cells={visited_candidate.position_grid_key},
+    )
+
+    assert selected.universe.universe_sha256 == canonical.universe_sha256
+    assert visited_candidate.candidate_id not in set(
+        selected.batch.candidate_ids[selected.batch.mask]
+    )
+    assert selected.batch.diagnostics.visited_excluded_count == 1
+    assert selected.batch.diagnostics.available_candidate_count == (
+        len(canonical.candidates) - 1
+    )
 
 
 def test_current_snapshot_failures_refill_from_reserve_and_padding_ids_are_empty(
