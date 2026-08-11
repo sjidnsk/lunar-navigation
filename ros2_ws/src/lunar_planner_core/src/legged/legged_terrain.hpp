@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "hierarchical/local_planning_problem.hpp"
 #include "lunar_planner_core/types/platform_capability.hpp"
 #include "shared/map_snapshot.hpp"
 #include "shared/safe_projection.hpp"
@@ -32,6 +33,29 @@ struct LeggedSweepResult final {
   std::string reason_code;
 };
 
+class LeggedTerrainGrid final {
+ public:
+  LeggedTerrainGrid(
+      const shared::SafeProjection& projection,
+      const LeggedCapability& capability,
+      std::stop_token stop_token);
+
+  [[nodiscard]] bool ok() const noexcept;
+  [[nodiscard]] bool canceled() const noexcept;
+  [[nodiscard]] bool Matches(
+      const shared::SafeProjection& projection,
+      const LeggedCapability& capability) const noexcept;
+  [[nodiscard]] const LeggedTerrainEvaluation* Find(
+      shared::GridCell cell) const noexcept;
+
+ private:
+  const shared::SafeProjection* projection_{};
+  const shared::MapSnapshot* source_map_{};
+  const LeggedCapability* capability_{};
+  std::vector<LeggedTerrainEvaluation> cells_;
+  bool canceled_{};
+};
+
 [[nodiscard]] LeggedTerrainEvaluation EvaluateLeggedTerrainCell(
     const shared::SafeProjection& projection,
     const LeggedCapability& capability,
@@ -44,6 +68,8 @@ struct LeggedSweepResult final {
     const Interval& source_body_z_m,
     const shared::SafeProjection& projection,
     const LeggedCapability& capability,
-    std::stop_token stop_token);
+    const hierarchical::LocalSearchDomain& search_domain,
+    std::stop_token stop_token,
+    const LeggedTerrainGrid* terrain_grid = nullptr);
 
 }  // namespace lunar::planning::legged

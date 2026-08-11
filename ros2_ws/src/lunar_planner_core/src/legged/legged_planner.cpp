@@ -70,6 +70,25 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_legged";
   if (projection.source_map() == nullptr) {
     return false;
   }
+  const hierarchical::LocalSearchDomain physical_domain{
+      projection.source_map()->width(), projection.source_map()->height(),
+      std::vector<std::uint8_t>(projection.source_map()->cell_count(), 1U)};
+  const auto body_pose_feasible = [&](const shared::GridCell cell,
+                                      const Vec3 position,
+                                      const double yaw_rad) {
+    const LeggedTerrainEvaluation terrain = EvaluateLeggedTerrainCell(
+        projection, capability, cell, stop_token);
+    if (!terrain.hard_feasible) {
+      return false;
+    }
+    LeggedPose pose{.position_m = position, .yaw_rad = yaw_rad};
+    pose.position_m.z =
+        0.5 * (terrain.body_height_m.lower + terrain.body_height_m.upper);
+    return ValidateLeggedBodySweep(
+               pose, pose, terrain.body_height_m, projection, capability,
+               physical_domain, stop_token)
+        .valid;
+  };
   GoalRegion position_goal = goal;
   position_goal.yaw_rad.reset();
   if (const auto* point = std::get_if<PointGoal>(&goal.target)) {
@@ -80,9 +99,8 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_legged";
     if (!cell.has_value()) {
       return false;
     }
-    const LeggedTerrainEvaluation terrain = EvaluateLeggedTerrainCell(
-        projection, capability, *cell, stop_token);
-    return terrain.hard_feasible;
+    return body_pose_feasible(
+        *cell, point->position_m, goal.yaw_rad.value_or(0.0));
   }
   for (std::size_t y = 0U; y < projection.source_map()->height(); ++y) {
     for (std::size_t x = 0U; x < projection.source_map()->width(); ++x) {
@@ -93,17 +111,12 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_legged";
           .x = static_cast<std::int32_t>(x),
           .y = static_cast<std::int32_t>(y),
       };
-      const LeggedTerrainEvaluation terrain = EvaluateLeggedTerrainCell(
-          projection, capability, cell, stop_token);
-      if (!terrain.hard_feasible) {
-        continue;
-      }
       Vec3 position = projection.source_map()->CellCenter(cell);
-      position.z = 0.5 *
-          (terrain.body_height_m.lower + terrain.body_height_m.upper);
       if (GoalContainsBodyPose(
               position_goal,
-              LeggedPose{.position_m = position, .yaw_rad = 0.0})) {
+              LeggedPose{.position_m = position, .yaw_rad = 0.0}) &&
+          body_pose_feasible(
+              cell, position, goal.yaw_rad.value_or(0.0))) {
         return true;
       }
     }
@@ -186,6 +199,7 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_legged";
     const std::vector<LeggedTransition>& transitions,
     const Interval& start_interval,
     const shared::SafeProjection& projection,
+    const hierarchical::LocalSearchDomain& search_domain,
     const LeggedCapability& capability,
     const std::stop_token stop_token) {
   Interval source_interval = start_interval;
@@ -198,7 +212,7 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_legged";
     }
     const LeggedSweepResult sweep = ValidateLeggedBodySweep(
         transition.source_pose, transition.target_pose, source_interval,
-        projection, capability, stop_token);
+        projection, capability, search_domain, stop_token);
     if (!sweep.valid) {
       return false;
     }
@@ -263,8 +277,8 @@ PlannerOutput LeggedPlanner::Plan(
   }
 
   LeggedLatticeBuildResult lattice = BuildLeggedLattice(
-      *current_state, problem.goal_odom, *projection.projection, *capability,
-      problem.config, problem.stop_token);
+      *current_state, problem.goal_odom, *projection.projection,
+      problem.search_domain, *capability, problem.config, problem.stop_token);
   if (!lattice.ok()) {
     switch (lattice.status) {
       case LeggedLatticeStatus::kCanceled:
@@ -284,6 +298,11 @@ PlannerOutput LeggedPlanner::Plan(
         }
         return Failure(
             PlanningOutcome::kInvalidRequest,
+            ExecutionDirective::kNoSafeReference,
+            lattice.reason_code, started);
+      case LeggedLatticeStatus::kNoPath:
+        return Failure(
+            PlanningOutcome::kNoKnownSafeRoute,
             ExecutionDirective::kNoSafeReference,
             lattice.reason_code, started);
       case LeggedLatticeStatus::kReady:
@@ -385,7 +404,7 @@ PlannerOutput LeggedPlanner::Plan(
     std::vector<LeggedTransition> selected = std::move(optimized.transitions);
     if (!ValidateTransitions(
             selected, true_start_height,
-            *projection.projection, *capability,
+            *projection.projection, problem.search_domain, *capability,
             problem.stop_token)) {
       if (problem.stop_token.stop_requested()) {
         return Canceled(started, search.expanded_states);
@@ -396,7 +415,7 @@ PlannerOutput LeggedPlanner::Plan(
     }
     if (!ValidateTransitions(
             selected, true_start_height,
-            *projection.projection, *capability,
+            *projection.projection, problem.search_domain, *capability,
             problem.stop_token)) {
       return Failure(
           PlanningOutcome::kNumericalFailure,

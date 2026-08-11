@@ -46,6 +46,7 @@ void SetFloat(
     "regression-distant-legged";
   input.world.global_map = test::MakeFlatMap("map", 48U, 12U, 1.0);
   input.world.local_map = test::MakeFlatMap("odom", 12U, 12U, 1.0);
+  input.world.local_map.origin_m.x = -1.0;
   input.config.global_map.base_resolution_m = 1.0;
   input.goal_map = GoalRegion{
     .goal_id = "distant-ground-goal",
@@ -70,6 +71,7 @@ void SetFloat(
     std::to_string(static_cast<std::uint8_t>(platform));
   input.world.global_map = test::MakeFlatMap("map", 250U, 250U, 0.2);
   input.world.local_map = test::MakeFlatMap("odom", 250U, 250U, 0.2);
+  input.world.local_map.origin_m.x = -1.0;
   input.config.global_map.base_resolution_m = 0.2;
   input.goal_map = GoalRegion{
     .goal_id = "regression-50m-goal",
@@ -207,23 +209,29 @@ TEST(HierarchicalRegression, FiftyMetreFailuresRemainExplicitAndBounded) {
   EXPECT_EQ(required.reason_code, "WHEEL_SMOOTHED_EXECUTION_REQUIRED");
 
   PlannerInput wheel_connector = test::MakeValidWheelInput();
+  wheel_connector.world.local_map =
+    test::MakeFlatMap("odom", 10U, 10U, 1.0);
+  wheel_connector.world.local_map.origin_m = {-1.0, -1.0, 0.0};
   std::get<WheeledState>(wheel_connector.current_state).pose.position_m = {
     2.15, 3.5, 0.0};
-  SetByte(wheel_connector.world.local_map, "obstacle", 1U, 3U, 1U);
+  SetByte(wheel_connector.world.local_map, "obstacle", 2U, 4U, 1U);
   const PlannerOutput wheel_blocked = planner.Plan(wheel_connector);
   EXPECT_EQ(
     wheel_blocked.reason_code, "WHEEL_START_CONNECTOR_INFEASIBLE");
 
   PlannerInput legged_connector = test::MakeValidLeggedInput();
+  legged_connector.world.local_map =
+    test::MakeFlatMap("odom", 10U, 10U, 1.0);
+  legged_connector.world.local_map.origin_m = {-1.0, -1.0, 0.0};
   std::get<LeggedState>(
     legged_connector.current_state).body_pose.position_m = {2.15, 3.5, 0.5};
-  SetByte(legged_connector.world.local_map, "obstacle", 1U, 3U, 1U);
+  SetByte(legged_connector.world.local_map, "obstacle", 2U, 4U, 1U);
   const PlannerOutput legged_blocked = planner.Plan(legged_connector);
   EXPECT_EQ(
     legged_blocked.reason_code, "LEGGED_START_CONNECTOR_INFEASIBLE");
 
   PlannerInput support = FiftyMetreInput(PlatformType::kHopper);
-  SetByte(support.world.local_map, "obstacle", 239U, 125U, 1U);
+  SetByte(support.world.local_map, "obstacle", 244U, 125U, 1U);
   const PlannerOutput insufficient = planner.Plan(support);
   EXPECT_EQ(
     insufficient.reason_code, "HOPPER_LANDING_TARGET_OCCUPIED");
@@ -327,6 +335,8 @@ TEST(HierarchicalRegression, AppliesFrozenMapFromOdomTransform) {
 TEST(HierarchicalRegression, AnchorsWheelPreviewAtTheMapTransformedTrueStart) {
   PlannerInput input = DistantGroundInput(PlatformType::kWheeled);
   input.world.global_map = test::MakeFlatMap("map", 30U, 30U, 1.0);
+  input.world.local_map.origin_m.x = -2.0;
+  input.world.local_map.origin_m.y = -1.0;
   auto& state = std::get<WheeledState>(input.current_state);
   state.pose.position_m = {1.2, 2.3, 0.0};
   state.pose.orientation = test::YawQuaternion(0.17);

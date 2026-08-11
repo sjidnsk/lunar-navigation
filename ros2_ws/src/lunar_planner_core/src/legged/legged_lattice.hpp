@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "hierarchical/local_planning_problem.hpp"
 #include "legged/legged_types.hpp"
 #include "lunar_planner_core/types/planner_io.hpp"
 #include "shared/ara_star.hpp"
@@ -27,6 +28,7 @@ enum class LeggedLatticeStatus {
   kCanceled,
   kResourceExhausted,
   kInvalidRequest,
+  kNoPath,
 };
 
 struct LeggedLatticeBuildResult final {
@@ -46,6 +48,7 @@ struct LeggedLatticeBuildResult final {
     const LeggedState& current_state,
     const GoalRegion& goal,
     const shared::SafeProjection& projection,
+    const hierarchical::LocalSearchDomain& search_domain,
     const LeggedCapability& capability,
     const PlannerConfig& config,
     std::stop_token stop_token);

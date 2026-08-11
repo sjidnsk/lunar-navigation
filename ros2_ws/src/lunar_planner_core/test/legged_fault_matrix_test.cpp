@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include "hierarchical/local_planning_problem.hpp"
 #include "legged/legged_terrain.hpp"
 #include "lunar_planner_core/planner.hpp"
 #include "shared/map_snapshot.hpp"
@@ -76,6 +77,29 @@ legged::LeggedTerrainEvaluation EvaluateAt(
       *projection.projection, capability, cell, {});
 }
 
+hierarchical::LocalSearchDomain SearchDomain(
+    const GridMap& map, std::vector<std::uint8_t> allowed) {
+  return hierarchical::LocalSearchDomain{
+      map.width, map.height, std::move(allowed)};
+}
+
+hierarchical::LocalSearchDomain FullDomain(const GridMap& map) {
+  return SearchDomain(
+      map, std::vector<std::uint8_t>(map.CellCount(), 1U));
+}
+
+void AllowCell(std::vector<std::uint8_t>& allowed, const GridMap& map,
+               const std::size_t x, const std::size_t y) {
+  allowed.at(y * map.width + x) = 1U;
+}
+
+PlannerInput MakeLeggedInputWithRequiredLocalCoverage() {
+  PlannerInput input = test::MakeValidLeggedInput();
+  input.world.local_map = test::MakeFlatMap("odom", 10U, 10U, 1.0);
+  input.world.local_map.origin_m = {-1.0, -1.0, 0.0};
+  return input;
+}
+
 TEST(LeggedFaultMatrix, RejectsSlopeButReportsRoughnessWithoutUsingIt) {
   auto slope_input = test::MakeValidLeggedInput();
   SetFloat(slope_input.world.local_map, "elevation", 3U, 3U, 2.0F);
@@ -91,6 +115,52 @@ TEST(LeggedFaultMatrix, RejectsSlopeButReportsRoughnessWithoutUsingIt) {
   EXPECT_TRUE(rough.hard_feasible);
   EXPECT_GT(rough.roughness_m, 0.0);
   EXPECT_FALSE(HasReason(rough, "LEGGED_ROUGHNESS_LIMIT"));
+}
+
+TEST(LeggedFaultMatrix, SearchDomainRestrictsOnlyTheBodyCenterPath) {
+  auto input = test::MakeValidLeggedInput();
+  auto& state = std::get<LeggedState>(input.current_state);
+  state.body_pose.position_m = {2.1, 3.1, 0.5};
+  const auto capability = std::get<LeggedCapability>(input.capability);
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  std::vector<std::uint8_t> allowed(input.world.local_map.CellCount(), 0U);
+  for (std::size_t x = 2U; x <= 4U; ++x) {
+    AllowCell(allowed, input.world.local_map, x, 3U);
+  }
+  const auto domain = SearchDomain(input.world.local_map, std::move(allowed));
+
+  const auto result = legged::ValidateLeggedBodySweep(
+      {{2.1, 3.1, 0.5}, 0.0}, {{4.1, 3.1, 0.5}, 0.0},
+      {.lower = 0.5, .upper = 0.5}, *projection.projection,
+      capability, domain, {});
+
+  EXPECT_TRUE(result.valid) << result.reason_code;
+}
+
+TEST(LeggedFaultMatrix, RejectsSweepWhoseCenterLeavesSearchDomain) {
+  auto input = test::MakeValidLeggedInput();
+  const auto capability = std::get<LeggedCapability>(input.capability);
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  std::vector<std::uint8_t> allowed(input.world.local_map.CellCount(), 0U);
+  AllowCell(allowed, input.world.local_map, 2U, 3U);
+  AllowCell(allowed, input.world.local_map, 4U, 3U);
+  const auto domain = SearchDomain(input.world.local_map, std::move(allowed));
+
+  const auto result = legged::ValidateLeggedBodySweep(
+      {{2.5, 3.5, 0.5}, 0.0}, {{4.5, 3.5, 0.5}, 0.0},
+      {.lower = 0.5, .upper = 0.5}, *projection.projection,
+      capability, domain, {});
+
+  EXPECT_FALSE(result.valid);
+  EXPECT_EQ(result.reason_code, "LEGGED_BODY_SWEEP_OUTSIDE_SEARCH_DOMAIN");
 }
 
 TEST(LeggedFaultMatrix, AcceptsThirtyDegreeSlopeBoundary) {
@@ -159,7 +229,7 @@ TEST(LeggedFaultMatrix, AcceptsHalfMeterStepAndRejectsHigherStep) {
   const auto accepted = legged::ValidateLeggedBodySweep(
       {{1.05, 1.05, 0.5}, 0.0}, {{1.15, 1.05, 1.0}, 0.0},
       {.lower = 0.5, .upper = 0.5}, *stepped_projection.projection,
-      capability, {});
+      capability, FullDomain(input.world.local_map), {});
   EXPECT_TRUE(accepted.valid) << accepted.reason_code;
 
   SetFloat(input.world.local_map, "elevation", 11U, 10U, 0.51F);
@@ -170,7 +240,7 @@ TEST(LeggedFaultMatrix, AcceptsHalfMeterStepAndRejectsHigherStep) {
   const auto rejected = legged::ValidateLeggedBodySweep(
       {{1.05, 1.05, 0.5}, 0.0}, {{1.15, 1.05, 1.01}, 0.0},
       {.lower = 0.5, .upper = 0.5}, *high_projection.projection,
-      capability, {});
+      capability, FullDomain(input.world.local_map), {});
   EXPECT_FALSE(rejected.valid);
   EXPECT_EQ(rejected.reason_code, "LEGGED_STEP_HEIGHT_LIMIT");
 }
@@ -193,7 +263,7 @@ TEST(LeggedFaultMatrix, AppliesDirectionalGapWidthInMeters) {
         {{0.85, 1.05, 0.5}, 0.0},
         {{1.55, 1.05, 0.5}, 0.0},
         {.lower = 0.5, .upper = 0.5}, *projection.projection,
-        capability, {});
+        capability, FullDomain(input.world.local_map), {});
   };
 
   const auto at_limit = evaluate(3U);
@@ -220,7 +290,7 @@ TEST(LeggedFaultMatrix, UsesMetricDiagonalGapLength) {
         {{0.85, 0.85, 0.5}, 0.7853981633974483},
         {{1.55, 1.55, 0.5}, 0.7853981633974483},
         {.lower = 0.5, .upper = 0.5}, *projection.projection,
-        capability, {});
+        capability, FullDomain(input.world.local_map), {});
   };
 
   EXPECT_TRUE(evaluate(2U).valid);
@@ -243,17 +313,17 @@ TEST(LeggedFaultMatrix, OrientedRectangleDoesNotUseRotatedAabb) {
       {{1.5, 1.5, 0.5}, 0.7853981633974483},
       {{1.6, 1.5, 0.5}, 0.7853981633974483},
       {.lower = 0.5, .upper = 0.5}, *projection.projection,
-      capability, {});
+      capability, FullDomain(input.world.local_map), {});
 
   EXPECT_TRUE(result.valid) << result.reason_code;
 }
 
 TEST(LeggedFaultMatrix, ReportsNoRouteAcrossUnknownBarrier) {
   Planner planner;
-  auto input = test::MakeValidLeggedInput();
+  auto input = MakeLeggedInputWithRequiredLocalCoverage();
   input.request_id = "legged-unknown-barrier";
   for (std::size_t y = 0U; y < input.world.local_map.height; ++y) {
-    SetByte(input.world.local_map, "valid_mask", 3U, y, 0U);
+    SetByte(input.world.local_map, "valid_mask", 4U, y, 0U);
   }
 
   const PlannerOutput output = planner.Plan(input);
@@ -266,11 +336,11 @@ TEST(LeggedFaultMatrix, ReportsNoRouteAcrossUnknownBarrier) {
 
 TEST(LeggedFaultMatrix, RejectsObstacleIntersectingOnlyTheTrueBodySweep) {
   Planner planner;
-  auto input = test::MakeValidLeggedInput();
+  auto input = MakeLeggedInputWithRequiredLocalCoverage();
   input.request_id = "legged-start-sweep-blocked";
   auto& state = std::get<LeggedState>(input.current_state);
   state.body_pose.position_m = {2.15, 3.5, 0.5};
-  SetByte(input.world.local_map, "obstacle", 1U, 3U, 1U);
+  SetByte(input.world.local_map, "obstacle", 2U, 4U, 1U);
 
   const PlannerOutput output = planner.Plan(input);
 

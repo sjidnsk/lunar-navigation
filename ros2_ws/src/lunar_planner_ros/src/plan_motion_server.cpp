@@ -1766,14 +1766,32 @@ struct PlanMotionServer::Impl final {
           "hierarchical_local_frontier_distance_m",
           DiagnosticDouble(hierarchical.local_frontier_distance_m));
       append(
+          "hierarchical_additional_corridor_margin_m",
+          DiagnosticDouble(hierarchical.additional_corridor_margin_m));
+      append(
+          "hierarchical_corridor_half_width_m",
+          DiagnosticDouble(hierarchical.corridor_half_width_m));
+      append(
+          "hierarchical_search_domain_cell_count",
+          std::to_string(hierarchical.search_domain_cell_count));
+      append(
+          "hierarchical_search_domain_sha256",
+          hierarchical.search_domain_sha256);
+      append(
+          "hierarchical_local_frontier_attempts",
+          std::to_string(hierarchical.local_frontier_attempts));
+      append(
           "hierarchical_local_attempts",
-          std::to_string(hierarchical.local_attempts));
+          std::to_string(hierarchical.local_frontier_attempts));
       append(
           "hierarchical_local_search_runs",
           std::to_string(hierarchical.local_search_runs));
       append(
           "hierarchical_global_replans",
           std::to_string(hierarchical.global_replans));
+      append(
+          "hierarchical_physical_goal_feasible",
+          hierarchical.physical_goal_feasible ? "true" : "false");
       append(
           "hierarchical_global_projection_cache_hits",
           std::to_string(hierarchical.global_projection_cache_hits));
@@ -1782,7 +1800,7 @@ struct PlanMotionServer::Impl final {
           std::to_string(hierarchical.local_projection_cache_hits));
       append(
           "hierarchical_corridor_width_m",
-          DiagnosticDouble(hierarchical.corridor_width_m));
+          DiagnosticDouble(2.0 * hierarchical.corridor_half_width_m));
       append(
           "hierarchical_hopper_graph_nodes",
           std::to_string(hierarchical.hopper_graph_nodes));

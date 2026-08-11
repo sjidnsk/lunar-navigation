@@ -653,12 +653,17 @@ TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
       .raw_route_points = 80U,
       .simplified_route_points = 12U,
       .local_frontier_distance_m = 4.0,
-      .local_attempts = 2U,
+      .additional_corridor_margin_m = 2.0,
+      .corridor_half_width_m = 0.3,
+      .search_domain_cell_count = 37U,
+      .search_domain_sha256 =
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      .local_frontier_attempts = 2U,
       .local_search_runs = 3U,
       .global_replans = 1U,
+      .physical_goal_feasible = true,
       .global_projection_cache_hits = 4U,
       .local_projection_cache_hits = 5U,
-      .corridor_width_m = 0.6,
       .hopper_graph_nodes = 11U,
       .hopper_graph_edges = 17U,
       .hopper_route_hops = 3U,
@@ -702,9 +707,15 @@ TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
       "hierarchical_raw_route_points",
       "hierarchical_simplified_route_points",
       "hierarchical_local_frontier_distance_m",
+      "hierarchical_additional_corridor_margin_m",
+      "hierarchical_corridor_half_width_m",
+      "hierarchical_search_domain_cell_count",
+      "hierarchical_search_domain_sha256",
+      "hierarchical_local_frontier_attempts",
       "hierarchical_local_attempts",
       "hierarchical_local_search_runs",
       "hierarchical_global_replans",
+      "hierarchical_physical_goal_feasible",
       "hierarchical_global_projection_cache_hits",
       "hierarchical_local_projection_cache_hits",
       "hierarchical_corridor_width_m",
@@ -746,6 +757,18 @@ TEST_F(PlanMotionServerTest, PublishesStableHierarchicalDiagnosticMetrics) {
       system.DiagnosticValue(
           "HIERARCHICAL_NO_ROUTE", "hierarchical_local_search_runs"),
       "3");
+  EXPECT_EQ(
+      system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE", "hierarchical_local_frontier_attempts"),
+      "2");
+  EXPECT_EQ(
+      system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE", "hierarchical_search_domain_cell_count"),
+      "37");
+  EXPECT_EQ(
+      system.DiagnosticValue(
+          "HIERARCHICAL_NO_ROUTE", "hierarchical_physical_goal_feasible"),
+      "true");
   EXPECT_EQ(
       system.DiagnosticValue(
           "HIERARCHICAL_NO_ROUTE", "hierarchical_global_replans"),

@@ -181,8 +181,22 @@ constexpr double kLunarGravityMps2 = -1.62;
              lunar::planning::ExecutionDirective::kContinueCommittedHop;
 }
 
+[[nodiscard]] bool ValidSha256(const std::string& value) noexcept {
+  return value.size() == 64U &&
+      std::ranges::all_of(value, [](const char character) {
+        return (character >= '0' && character <= '9') ||
+            (character >= 'a' && character <= 'f');
+      });
+}
+
 [[nodiscard]] bool ValidHierarchicalMetrics(
     const lunar::planning::HierarchicalPlannerMetrics& metrics) noexcept {
+  const bool domain_metrics_valid = metrics.local_search_runs == 0U
+      ? metrics.search_domain_cell_count == 0U &&
+          metrics.search_domain_sha256.empty() &&
+          !metrics.physical_goal_feasible
+      : metrics.search_domain_cell_count > 0U &&
+          ValidSha256(metrics.search_domain_sha256);
   return metrics.global_level <= 5U &&
       Finite(metrics.global_resolution_m) &&
       metrics.global_resolution_m > 0.0 && metrics.global_cells > 0U &&
@@ -190,7 +204,10 @@ constexpr double kLunarGravityMps2 = -1.62;
       metrics.local_elapsed >= std::chrono::nanoseconds::zero() &&
       Finite(metrics.local_frontier_distance_m) &&
       metrics.local_frontier_distance_m >= 0.0 &&
-      Finite(metrics.corridor_width_m) && metrics.corridor_width_m >= 0.0;
+      Finite(metrics.additional_corridor_margin_m) &&
+      metrics.additional_corridor_margin_m >= 0.0 &&
+      Finite(metrics.corridor_half_width_m) &&
+      metrics.corridor_half_width_m >= 0.0 && domain_metrics_valid;
 }
 
 [[nodiscard]] bool ValidLocalTrajectoryDiagnostics(

@@ -43,9 +43,51 @@ const LocalTrajectoryDiagnostics& LeggedDiagnostics(
   return *output.diagnostics.local_trajectory;
 }
 
+hierarchical::LocalPlanningProblem MakeLocalLeggedProblem(
+    const PlannerInput& input, std::vector<std::uint8_t> allowed) {
+  return hierarchical::LocalPlanningProblem{
+      .request_id = input.request_id,
+      .platform_id = input.platform_id,
+      .capability_version = input.capability_version,
+      .local_map_generation = input.local_map_generation,
+      .state_time = input.state_time,
+      .current_state = input.current_state,
+      .goal_odom = input.goal_map,
+      .local_map = input.world.local_map,
+      .search_domain = hierarchical::LocalSearchDomain{
+          input.world.local_map.width, input.world.local_map.height,
+          std::move(allowed)},
+      .capability = input.capability,
+      .config = input.config,
+      .stop_token = input.stop_token,
+  };
+}
+
+std::vector<std::uint8_t> EmptyDomain(const GridMap& map) {
+  return std::vector<std::uint8_t>(map.CellCount(), 0U);
+}
+
+hierarchical::LocalSearchDomain FullDomain(const GridMap& map) {
+  return hierarchical::LocalSearchDomain{
+      map.width, map.height,
+      std::vector<std::uint8_t>(map.CellCount(), 1U)};
+}
+
+void AllowCell(std::vector<std::uint8_t>& allowed, const GridMap& map,
+               const std::size_t x, const std::size_t y) {
+  allowed.at(y * map.width + x) = 1U;
+}
+
+PlannerInput MakeLeggedInputWithRequiredLocalCoverage() {
+  PlannerInput input = test::MakeValidLeggedInput();
+  input.world.local_map = test::MakeFlatMap("odom", 10U, 10U, 1.0);
+  input.world.local_map.origin_m = {-1.0, -1.0, 0.0};
+  return input;
+}
+
 TEST(LeggedPlanner, ProducesOnlyBodyReferenceWithBoundedKinematics) {
   Planner planner;
-  const auto input = test::MakeValidLeggedInput();
+  const auto input = MakeLeggedInputWithRequiredLocalCoverage();
   const auto capability = std::get<LeggedCapability>(input.capability);
 
   const PlannerOutput output = planner.Plan(input);
@@ -135,15 +177,53 @@ TEST(LeggedPlanner, DerivesLongSweepSamplingWithoutAFixedCeiling) {
       legged::LeggedPose{.position_m = {1.0, 2.5, 0.5}},
       legged::LeggedPose{.position_m = {4.0, 2.5, 0.5}},
       Interval{.lower = 0.5, .upper = 0.5},
-      *projection.projection, capability, {});
+      *projection.projection, capability, FullDomain(input.world.local_map),
+      {});
 
   EXPECT_TRUE(result.valid) << result.reason_code;
   EXPECT_GT(result.sample_count, 32U);
 }
 
+TEST(LeggedPlanner, PhysicallyBlockedBodySupportGoalWinsOverDomainMask) {
+  auto input = test::MakeValidLeggedInput();
+  input.request_id = "legged-physical-support-goal";
+  std::get<LeggedState>(input.current_state).body_pose.position_m.y = 3.1;
+  std::get<PointGoal>(input.goal_map.target).position_m.y = 3.1;
+  auto& obstacles = std::get<std::vector<std::uint8_t>>(
+      input.world.local_map.layers.at("obstacle").values);
+  obstacles.at(2U * input.world.local_map.width + 4U) = 1U;
+  auto allowed = std::vector<std::uint8_t>(
+      input.world.local_map.CellCount(), 1U);
+  allowed.at(3U * input.world.local_map.width + 4U) = 0U;
+  const auto problem = MakeLocalLeggedProblem(input, std::move(allowed));
+
+  const PlannerOutput output = legged::LeggedPlanner{}.Plan(problem);
+
+  EXPECT_EQ(output.outcome, PlanningOutcome::kGoalInfeasible);
+  EXPECT_EQ(output.directive, ExecutionDirective::kHoldPosition);
+  EXPECT_EQ(output.reason_code, "LEGGED_GOAL_INFEASIBLE");
+  EXPECT_EQ(output.diagnostics.expanded_states, 0U);
+  EXPECT_FALSE(output.reference.has_value());
+}
+
+TEST(LeggedPlanner, PhysicallySafeGoalReportsLocalSearchDomainExhaustion) {
+  auto input = test::MakeValidLeggedInput();
+  input.request_id = "legged-domain-exhausted";
+  auto allowed = EmptyDomain(input.world.local_map);
+  AllowCell(allowed, input.world.local_map, 2U, 3U);
+  const auto problem = MakeLocalLeggedProblem(input, std::move(allowed));
+
+  const PlannerOutput output = legged::LeggedPlanner{}.Plan(problem);
+
+  EXPECT_EQ(output.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(output.directive, ExecutionDirective::kNoSafeReference);
+  EXPECT_EQ(output.reason_code, "LOCAL_SEARCH_DOMAIN_EXHAUSTED");
+  EXPECT_FALSE(output.reference.has_value());
+}
+
 TEST(LeggedPlanner, HonorsRequiredSmoothingPolicy) {
   Planner planner;
-  auto fallback = test::MakeValidLeggedInput();
+  auto fallback = MakeLeggedInputWithRequiredLocalCoverage();
   fallback.request_id = "legged-forced-fallback";
   fallback.config.optimization.maximum_iterations = 0U;
 
@@ -169,7 +249,7 @@ TEST(LeggedPlanner, HonorsRequiredSmoothingPolicy) {
 
 TEST(LeggedPlanner, PreservesTheTrueOffCenterBodyPoseAndHeight) {
   Planner planner;
-  auto input = test::MakeValidLeggedInput();
+  auto input = MakeLeggedInputWithRequiredLocalCoverage();
   input.request_id = "legged-true-start";
   auto& state = std::get<LeggedState>(input.current_state);
   state.body_pose.position_m = {2.2, 3.2, 0.47};
@@ -197,7 +277,7 @@ TEST(LeggedPlanner, PreservesTheTrueOffCenterBodyPoseAndHeight) {
 
 TEST(LeggedPlanner, SupportsLateralBodyPrimitive) {
   Planner planner;
-  auto input = test::MakeValidLeggedInput();
+  auto input = MakeLeggedInputWithRequiredLocalCoverage();
   input.request_id = "legged-lateral";
   input.goal_map.target = PointGoal{
       .position_m = {2.5, 5.5, 0.0},
@@ -282,7 +362,7 @@ TEST(LeggedPlanner, UsesStepVerticalRateAsTimingLowerBound) {
 
 TEST(LeggedPlanner, ReachesExactOffCellGoalAndTaskYaw) {
   Planner planner;
-  auto input = test::MakeValidLeggedInput();
+  auto input = MakeLeggedInputWithRequiredLocalCoverage();
   input.request_id = "legged-exact-goal";
   input.goal_map.target = PointGoal{
       .position_m = {4.37, 3.63, 0.0},
@@ -349,7 +429,7 @@ TEST(LeggedPlanner, KeepsTolerantBoundaryGoalInsideItsCertifiedTerrainCell) {
 
 TEST(LeggedPlanner, IsDeterministicForSameTypedSnapshot) {
   Planner planner;
-  const auto input = test::MakeValidLeggedInput();
+  const auto input = MakeLeggedInputWithRequiredLocalCoverage();
 
   const PlannerOutput first = planner.Plan(input);
   const PlannerOutput second = planner.Plan(input);

@@ -237,10 +237,12 @@ struct OrderedPrimitive final {
     const LeggedBodyPrimitive& primitive,
     const std::size_t primitive_index,
     const shared::SafeProjection& projection,
+    const hierarchical::LocalSearchDomain& search_domain,
     const LeggedCapability& capability,
     const PlannerConfig& config,
     const std::stop_token stop_token,
-    bool& canceled) {
+    bool& canceled, bool& search_domain_rejected,
+    const LeggedTerrainGrid* const terrain_grid) {
   const shared::MapSnapshot& map = *projection.source_map();
   const double cosine = std::cos(source.yaw_rad);
   const double sine = std::sin(source.yaw_rad);
@@ -265,12 +267,15 @@ struct OrderedPrimitive final {
   };
   target.position_m.z = raw_target.z;
   const LeggedSweepResult sweep = ValidateLeggedBodySweep(
-      source, target, source_body_z_m, projection, capability, stop_token);
+      source, target, source_body_z_m, projection, capability, search_domain,
+      stop_token, terrain_grid);
   if (sweep.canceled) {
     canceled = true;
     return std::nullopt;
   }
   if (!sweep.valid) {
+    search_domain_rejected = search_domain_rejected ||
+        sweep.reason_code == "LEGGED_BODY_SWEEP_OUTSIDE_SEARCH_DOMAIN";
     return std::nullopt;
   }
   target.position_m.z = 0.5 * (
@@ -295,8 +300,10 @@ struct OrderedPrimitive final {
     const PointGoal& point_goal, const std::optional<double> goal_yaw,
     const double maximum_translation, const double maximum_yaw,
     const shared::SafeProjection& projection,
+    const hierarchical::LocalSearchDomain& search_domain,
     const LeggedCapability& capability, const std::stop_token stop_token,
-    bool& canceled) {
+    bool& canceled, bool& search_domain_rejected,
+    const LeggedTerrainGrid* const terrain_grid) {
   const double distance = std::hypot(
       point_goal.position_m.x - source.position_m.x,
       point_goal.position_m.y - source.position_m.y);
@@ -317,13 +324,20 @@ struct OrderedPrimitive final {
   if (!target_cell.has_value()) {
     return std::nullopt;
   }
-  const LeggedTerrainEvaluation terrain = EvaluateLeggedTerrainCell(
-      projection, capability, *target_cell, stop_token);
-  if (terrain.canceled) {
+  std::optional<LeggedTerrainEvaluation> direct_terrain;
+  const LeggedTerrainEvaluation* terrain{};
+  if (terrain_grid != nullptr && !stop_token.stop_requested()) {
+    terrain = terrain_grid->Find(*target_cell);
+  } else {
+    direct_terrain = EvaluateLeggedTerrainCell(
+        projection, capability, *target_cell, stop_token);
+    terrain = &*direct_terrain;
+  }
+  if (terrain == nullptr || terrain->canceled) {
     canceled = true;
     return std::nullopt;
   }
-  if (!terrain.hard_feasible) {
+  if (!terrain->hard_feasible) {
     return std::nullopt;
   }
   Vec3 certified_target = point_goal.position_m;
@@ -344,14 +358,17 @@ struct OrderedPrimitive final {
       .yaw_rad = target_yaw,
   };
   target.position_m.z = 0.5 *
-      (terrain.body_height_m.lower + terrain.body_height_m.upper);
+      (terrain->body_height_m.lower + terrain->body_height_m.upper);
   const LeggedSweepResult sweep = ValidateLeggedBodySweep(
-      source, target, source_body_z_m, projection, capability, stop_token);
+      source, target, source_body_z_m, projection, capability, search_domain,
+      stop_token, terrain_grid);
   if (sweep.canceled) {
     canceled = true;
     return std::nullopt;
   }
   if (!sweep.valid) {
+    search_domain_rejected = search_domain_rejected ||
+        sweep.reason_code == "LEGGED_BODY_SWEEP_OUTSIDE_SEARCH_DOMAIN";
     return std::nullopt;
   }
   target.position_m.z = 0.5 *
@@ -407,6 +424,7 @@ LeggedLatticeBuildResult BuildLeggedLattice(
     const LeggedState& current_state,
     const GoalRegion& goal,
     const shared::SafeProjection& projection,
+    const hierarchical::LocalSearchDomain& search_domain,
     const LeggedCapability& capability,
     const PlannerConfig& config,
     const std::stop_token stop_token) {
@@ -416,6 +434,12 @@ LeggedLatticeBuildResult BuildLeggedLattice(
   if (projection.source_map() == nullptr ||
       !ValidCapability(capability, config) ||
       !IsFinite(current_state.body_pose)) {
+    return Failure(
+        LeggedLatticeStatus::kInvalidRequest,
+        "LEGGED_LATTICE_REQUEST_INVALID");
+  }
+  if (search_domain.width() != projection.source_map()->width() ||
+      search_domain.height() != projection.source_map()->height()) {
     return Failure(
         LeggedLatticeStatus::kInvalidRequest,
         "LEGGED_LATTICE_REQUEST_INVALID");
@@ -443,6 +467,19 @@ LeggedLatticeBuildResult BuildLeggedLattice(
           start_terrain.body_height_m.upper + kComparisonTolerance) {
     return Failure(
         LeggedLatticeStatus::kInvalidRequest, "LEGGED_START_NOT_SAFE");
+  }
+  if (!search_domain.Contains(*start_cell)) {
+    return Failure(
+        LeggedLatticeStatus::kNoPath, "LOCAL_SEARCH_DOMAIN_EXHAUSTED");
+  }
+  const LeggedTerrainGrid terrain_grid{projection, capability, stop_token};
+  if (terrain_grid.canceled()) {
+    return Failure(LeggedLatticeStatus::kCanceled, "REQUEST_CANCELED");
+  }
+  if (!terrain_grid.ok()) {
+    return Failure(
+        LeggedLatticeStatus::kInvalidRequest,
+        "LEGGED_LATTICE_REQUEST_INVALID");
   }
 
   std::vector<OrderedPrimitive> ordered_primitives;
@@ -488,6 +525,7 @@ LeggedLatticeBuildResult BuildLeggedLattice(
       MaximumPrimitiveTranslation(capability) +
       projection.source_map()->resolution_m() * std::numbers::sqrt2 / 2.0;
   const double maximum_goal_yaw = MaximumPrimitiveYaw(capability, config);
+  bool search_domain_rejected = false;
   while (!pending.empty()) {
     if (stop_token.stop_requested()) {
       return Failure(LeggedLatticeStatus::kCanceled, "REQUEST_CANCELED");
@@ -503,8 +541,9 @@ LeggedLatticeBuildResult BuildLeggedLattice(
       bool canceled = false;
       auto connector = ApplyPointGoalConnector(
           source_pose, source_body_z_m, *point_goal, goal.yaw_rad,
-          maximum_goal_translation, maximum_goal_yaw, projection, capability,
-          stop_token, canceled);
+          maximum_goal_translation, maximum_goal_yaw, projection,
+          search_domain, capability, stop_token, canceled,
+          search_domain_rejected, &terrain_grid);
       if (canceled) {
         return Failure(LeggedLatticeStatus::kCanceled, "REQUEST_CANCELED");
       }
@@ -546,8 +585,9 @@ LeggedLatticeBuildResult BuildLeggedLattice(
       bool canceled = false;
       auto transition = ApplyPrimitive(
           source_pose, source_body_z_m, *ordered.primitive,
-          ordered.original_index, projection, capability, config, stop_token,
-          canceled);
+          ordered.original_index, projection, search_domain, capability,
+          config, stop_token, canceled, search_domain_rejected,
+          &terrain_grid);
       if (canceled) {
         return Failure(LeggedLatticeStatus::kCanceled, "REQUEST_CANCELED");
       }
@@ -628,8 +668,19 @@ LeggedLatticeBuildResult BuildLeggedLattice(
   }
   if (graph.search_problem.goal_mask.front() == 0U &&
       graph.search_problem.outgoing_edges.front().empty()) {
+    if (search_domain_rejected) {
+      return Failure(
+          LeggedLatticeStatus::kNoPath, "LOCAL_SEARCH_DOMAIN_EXHAUSTED");
+    }
     return Failure(LeggedLatticeStatus::kInvalidRequest,
                    "LEGGED_START_CONNECTOR_INFEASIBLE");
+  }
+  if (std::ranges::none_of(
+          graph.search_problem.goal_mask,
+          [](const std::uint8_t value) { return value != 0U; }) &&
+      search_domain_rejected) {
+    return Failure(
+        LeggedLatticeStatus::kNoPath, "LOCAL_SEARCH_DOMAIN_EXHAUSTED");
   }
   graph.search_problem.config = config.search;
   return LeggedLatticeBuildResult{
@@ -679,6 +730,9 @@ shared::PrimitiveGraphBuildResult BuildLeggedPrimitiveGraph(
           start_terrain.body_height_m.upper + kComparisonTolerance) {
     return fail("LEGGED_START_NOT_SAFE");
   }
+  hierarchical::LocalSearchDomain full_search_domain{
+      projection.source_map()->width(), projection.source_map()->height(),
+      std::vector<std::uint8_t>(projection.source_map()->cell_count(), 1U)};
 
   std::vector<OrderedPrimitive> ordered_primitives;
   ordered_primitives.reserve(capability.motion_primitives.size());
@@ -776,10 +830,11 @@ shared::PrimitiveGraphBuildResult BuildLeggedPrimitiveGraph(
     const double source_cost = source.path_cost;
     for (const OrderedPrimitive& ordered : ordered_primitives) {
       bool canceled = false;
+      bool search_domain_rejected = false;
       auto transition = ApplyPrimitive(
           source_pose, source_interval, *ordered.primitive,
-          ordered.original_index, projection, capability, config,
-          stop_token, canceled);
+          ordered.original_index, projection, full_search_domain, capability,
+          config, stop_token, canceled, search_domain_rejected, nullptr);
       if (canceled) {
         return fail("REQUEST_CANCELED");
       }

@@ -157,12 +157,20 @@ struct HierarchicalPlannerMetrics final {
   std::size_t raw_route_points{};
   std::size_t simplified_route_points{};
   double local_frontier_distance_m{};
-  std::size_t local_attempts{};
+  double additional_corridor_margin_m{};
+  double corridor_half_width_m{};
+  std::size_t search_domain_cell_count{};
+  std::string search_domain_sha256;
+  std::size_t local_frontier_attempts{};
   std::size_t local_search_runs{};
   std::size_t global_replans{};
+  bool physical_goal_feasible{};
+  // Deprecated for one ROS diagnostics migration cycle. Producers and new
+  // consumers use local_frontier_attempts and corridor_half_width_m.
+  std::size_t local_attempts{};
+  double corridor_width_m{};
   std::size_t global_projection_cache_hits{};
   std::size_t local_projection_cache_hits{};
-  double corridor_width_m{};
   std::size_t hopper_graph_nodes{};
   std::size_t hopper_graph_edges{};
   std::size_t hopper_route_hops{};

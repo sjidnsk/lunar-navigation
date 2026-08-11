@@ -271,12 +271,66 @@ LeggedTerrainEvaluation EvaluateLeggedTerrainCell(
   return result;
 }
 
+LeggedTerrainGrid::LeggedTerrainGrid(
+    const shared::SafeProjection& projection,
+    const LeggedCapability& capability,
+    const std::stop_token stop_token)
+    : projection_(&projection), source_map_(projection.source_map().get()),
+      capability_(&capability) {
+  if (source_map_ == nullptr || !ValidCapability(capability)) {
+    return;
+  }
+  cells_.reserve(source_map_->cell_count());
+  for (std::size_t y = 0U; y < source_map_->height(); ++y) {
+    for (std::size_t x = 0U; x < source_map_->width(); ++x) {
+      if (stop_token.stop_requested()) {
+        canceled_ = true;
+        return;
+      }
+      LeggedTerrainEvaluation evaluation = EvaluateLeggedTerrainCell(
+          projection, capability,
+          shared::GridCell{.x = static_cast<std::int32_t>(x),
+                           .y = static_cast<std::int32_t>(y)},
+          stop_token);
+      if (evaluation.canceled) {
+        canceled_ = true;
+        return;
+      }
+      cells_.push_back(std::move(evaluation));
+    }
+  }
+}
+
+bool LeggedTerrainGrid::ok() const noexcept {
+  return !canceled_ && source_map_ != nullptr &&
+      cells_.size() == source_map_->cell_count();
+}
+
+bool LeggedTerrainGrid::canceled() const noexcept { return canceled_; }
+
+bool LeggedTerrainGrid::Matches(
+    const shared::SafeProjection& projection,
+    const LeggedCapability& capability) const noexcept {
+  return ok() && projection_ == &projection &&
+      source_map_ == projection.source_map().get() && capability_ == &capability;
+}
+
+const LeggedTerrainEvaluation* LeggedTerrainGrid::Find(
+    const shared::GridCell cell) const noexcept {
+  if (!ok() || !source_map_->InBounds(cell)) {
+    return nullptr;
+  }
+  return &cells_[source_map_->Index(cell)];
+}
+
 LeggedSweepResult ValidateLeggedBodySweep(
     const LeggedPose& source, const LeggedPose& target,
     const Interval& source_body_z_m,
     const shared::SafeProjection& projection,
     const LeggedCapability& capability,
-    const std::stop_token stop_token) {
+    const hierarchical::LocalSearchDomain& search_domain,
+    const std::stop_token stop_token,
+    const LeggedTerrainGrid* const terrain_grid) {
   if (stop_token.stop_requested()) {
     return LeggedSweepResult{
         .valid = false,
@@ -293,6 +347,14 @@ LeggedSweepResult ValidateLeggedBodySweep(
   }
 
   const shared::MapSnapshot& map = *projection.source_map();
+  if (search_domain.width() != map.width() ||
+      search_domain.height() != map.height()) {
+    return SweepFailure("LEGGED_SWEEP_REQUEST_INVALID");
+  }
+  if (terrain_grid != nullptr &&
+      !terrain_grid->Matches(projection, capability)) {
+    return SweepFailure("LEGGED_SWEEP_REQUEST_INVALID");
+  }
   const Vec2 source_xy{.x = source.position_m.x, .y = source.position_m.y};
   const Vec2 target_xy{.x = target.position_m.x, .y = target.position_m.y};
   const auto source_cell = map.PositionToCell(source_xy);
@@ -329,6 +391,17 @@ LeggedSweepResult ValidateLeggedBodySweep(
   std::size_t sample_count = 0U;
   const auto obstacles = map.ByteLayer("obstacle");
   const auto forbidden = map.ByteLayer("forbidden");
+  std::optional<LeggedTerrainEvaluation> direct_evaluation;
+  const auto evaluate_terrain = [&](const shared::GridCell cell)
+      -> const LeggedTerrainEvaluation* {
+    if (terrain_grid != nullptr && !stop_token.stop_requested()) {
+      return terrain_grid->Find(cell);
+    }
+    direct_evaluation = EvaluateLeggedTerrainCell(
+        projection, capability, cell, stop_token);
+    return &*direct_evaluation;
+  };
+  bool center_left_search_domain = false;
   for (std::size_t sample = 0U; sample <= subdivisions; ++sample) {
     if (stop_token.stop_requested()) {
       return LeggedSweepResult{
@@ -381,9 +454,9 @@ LeggedSweepResult ValidateLeggedBodySweep(
           }
           continue;
         }
-        const LeggedTerrainEvaluation body_terrain =
-            EvaluateLeggedTerrainCell(projection, capability, cell, stop_token);
-        if (body_terrain.canceled) {
+        const LeggedTerrainEvaluation* const body_terrain =
+            evaluate_terrain(cell);
+        if (body_terrain == nullptr || body_terrain->canceled) {
           return LeggedSweepResult{
               .valid = false,
               .canceled = true,
@@ -392,13 +465,13 @@ LeggedSweepResult ValidateLeggedBodySweep(
               .reason_code = "REQUEST_CANCELED",
           };
         }
-        if (!body_terrain.hard_feasible &&
-            !SlopeOrOrdinaryStep(body_terrain, capability)) {
+        if (!body_terrain->hard_feasible &&
+            !SlopeOrOrdinaryStep(*body_terrain, capability)) {
           if (std::ranges::find(
-                  body_terrain.rejection_reasons,
+                  body_terrain->rejection_reasons,
                   "LEGGED_SLOPE_LIMIT") !=
-                  body_terrain.rejection_reasons.end() &&
-              body_terrain.maximum_neighbor_step_m >
+                  body_terrain->rejection_reasons.end() &&
+              body_terrain->maximum_neighbor_step_m >
                   capability.maximum_step_height_m + kComparisonTolerance) {
             return SweepFailure("LEGGED_STEP_HEIGHT_LIMIT", sample_count);
           }
@@ -411,13 +484,14 @@ LeggedSweepResult ValidateLeggedBodySweep(
     if (!center_cell.has_value()) {
       return SweepFailure("LEGGED_BODY_SWEEP_OUTSIDE_MAP", sample_count);
     }
+    center_left_search_domain = center_left_search_domain ||
+        !search_domain.Contains(*center_cell);
     if (!projection.Known(*center_cell)) {
       continue;
     }
-    const LeggedTerrainEvaluation terrain =
-        EvaluateLeggedTerrainCell(projection, capability, *center_cell,
-                                  stop_token);
-    if (terrain.canceled) {
+    const LeggedTerrainEvaluation* const terrain =
+        evaluate_terrain(*center_cell);
+    if (terrain == nullptr || terrain->canceled) {
       return LeggedSweepResult{
           .valid = false,
           .canceled = true,
@@ -426,31 +500,37 @@ LeggedSweepResult ValidateLeggedBodySweep(
           .reason_code = "REQUEST_CANCELED",
       };
     }
-    if (!terrain.hard_feasible && !SlopeOrOrdinaryStep(terrain, capability)) {
+    if (!terrain->hard_feasible &&
+        !SlopeOrOrdinaryStep(*terrain, capability)) {
       if (std::ranges::find(
-              terrain.rejection_reasons, "LEGGED_SLOPE_LIMIT") !=
-              terrain.rejection_reasons.end() &&
-          terrain.maximum_neighbor_step_m >
+              terrain->rejection_reasons, "LEGGED_SLOPE_LIMIT") !=
+              terrain->rejection_reasons.end() &&
+          terrain->maximum_neighbor_step_m >
               capability.maximum_step_height_m + kComparisonTolerance) {
         return SweepFailure("LEGGED_STEP_HEIGHT_LIMIT", sample_count);
       }
       return SweepFailure("LEGGED_TERRAIN_SWEEP_INVALID", sample_count);
     }
     if (previous_known_elevation.has_value() &&
-        std::abs(terrain.elevation_m - *previous_known_elevation) >
+        std::abs(terrain->elevation_m - *previous_known_elevation) >
             capability.maximum_step_height_m + kComparisonTolerance) {
       return SweepFailure("LEGGED_STEP_HEIGHT_LIMIT", sample_count);
     }
-    previous_known_elevation = terrain.elevation_m;
+    previous_known_elevation = terrain->elevation_m;
     if (sample == 0U) {
-      const auto start = IntersectIntervals(reachable, terrain.body_height_m);
+      const auto start = IntersectIntervals(reachable, terrain->body_height_m);
       if (!start.has_value()) {
         return SweepFailure("LEGGED_START_HEIGHT_INTERVAL_EMPTY", sample_count);
       }
       reachable = *start;
     } else {
-      reachable = terrain.body_height_m;
+      reachable = terrain->body_height_m;
     }
+  }
+
+  if (center_left_search_domain) {
+    return SweepFailure(
+        "LEGGED_BODY_SWEEP_OUTSIDE_SEARCH_DOMAIN", sample_count);
   }
 
   return LeggedSweepResult{

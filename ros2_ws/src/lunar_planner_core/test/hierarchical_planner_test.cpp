@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "hierarchical/global_route_planner.hpp"
+#include "hierarchical/local_frontier.hpp"
 #include "hierarchical/reference_composer.hpp"
 #include "lunar_planner_core/planner.hpp"
 #include "test_fixtures.hpp"
@@ -25,6 +26,21 @@ namespace {
   input.request_id = "hierarchical-wheel";
   input.world.global_map = test::MakeFlatMap("map", 24U, 8U, 1.0);
   input.world.local_map = test::MakeFlatMap("odom", 12U, 8U, 1.0);
+  input.world.local_map.origin_m.x = -1.0;
+  input.config.global_map.base_resolution_m = 1.0;
+  input.goal_map.target = PointGoal{
+      .position_m = {18.5, 3.5, 0.0},
+      .tolerance_m = 0.2,
+  };
+  return input;
+}
+
+[[nodiscard]] PlannerInput DistantLeggedInput() {
+  PlannerInput input = test::MakeValidLeggedInput();
+  input.request_id = "hierarchical-legged";
+  input.world.global_map = test::MakeFlatMap("map", 24U, 8U, 1.0);
+  input.world.local_map = test::MakeFlatMap("odom", 12U, 8U, 1.0);
+  input.world.local_map.origin_m.x = -1.0;
   input.config.global_map.base_resolution_m = 1.0;
   input.goal_map.target = PointGoal{
       .position_m = {18.5, 3.5, 0.0},
@@ -208,6 +224,94 @@ TEST(HierarchicalPlanner, ReturnsCompleteGlobalPreviewAndOneLocalSegment) {
             output.diagnostics.hierarchical->global_expanded_states);
 }
 
+TEST(HierarchicalPlanner, ReportsTheSuccessfulLeggedSearchProblemDomain) {
+  Planner planner;
+  const PlannerInput input = DistantLeggedInput();
+  const GlobalRoutePlanResult global = PlanGroundGlobalRoute(input);
+  ASSERT_TRUE(global.ok()) << global.reason_code;
+  const LocalFrontierResult frontiers =
+      BuildLocalFrontiers(input, *global.route);
+  ASSERT_TRUE(frontiers.ok()) << frontiers.reason_code;
+
+  const PlannerOutput first = planner.Plan(input);
+  const PlannerOutput repeated = planner.Plan(input);
+
+  ASSERT_TRUE(first.reference.has_value()) << first.reason_code;
+  ASSERT_TRUE(repeated.reference.has_value()) << repeated.reason_code;
+  ASSERT_TRUE(first.diagnostics.hierarchical.has_value());
+  ASSERT_TRUE(repeated.diagnostics.hierarchical.has_value());
+  const auto& metrics = *first.diagnostics.hierarchical;
+  ASSERT_GT(metrics.local_frontier_attempts, 0U);
+  ASSERT_LE(metrics.local_frontier_attempts, frontiers.problems.size());
+  const auto& successful_problem =
+      frontiers.problems[metrics.local_frontier_attempts - 1U];
+  EXPECT_DOUBLE_EQ(metrics.additional_corridor_margin_m, 2.0);
+  EXPECT_DOUBLE_EQ(
+      metrics.corridor_half_width_m,
+      std::hypot(0.68 / 2.0, 0.33 / 2.0) + 0.3 + 2.0);
+  EXPECT_EQ(metrics.search_domain_cell_count,
+            successful_problem.search_domain.allowed_cell_count());
+  EXPECT_EQ(metrics.search_domain_sha256,
+            successful_problem.search_domain.sha256());
+  EXPECT_EQ(metrics.local_search_runs, metrics.local_frontier_attempts);
+  EXPECT_EQ(metrics.global_replans, 0U);
+  EXPECT_TRUE(metrics.physical_goal_feasible);
+  EXPECT_EQ(repeated.diagnostics.hierarchical->search_domain_sha256,
+            metrics.search_domain_sha256);
+}
+
+TEST(HierarchicalPlanner, ReportsTheLastActuallySearchedLeggedProblem) {
+  Planner planner;
+  PlannerInput input = DistantLeggedInput();
+  auto& capability = std::get<LeggedCapability>(input.capability);
+  capability.motion_primitives = {
+      LeggedBodyPrimitive{
+          .primitive_id = "spin-only",
+          .kind = LeggedPrimitiveKind::kSpin,
+          .yaw_change_rad = 1.5707963267948966,
+      },
+  };
+  const GlobalRoutePlanResult global = PlanGroundGlobalRoute(input);
+  ASSERT_TRUE(global.ok()) << global.reason_code;
+  const LocalFrontierResult frontiers =
+      BuildLocalFrontiers(input, *global.route);
+  ASSERT_TRUE(frontiers.ok()) << frontiers.reason_code;
+  ASSERT_GT(frontiers.problems.size(), 1U);
+
+  const PlannerOutput output = planner.Plan(input);
+
+  ASSERT_EQ(output.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  ASSERT_TRUE(output.diagnostics.hierarchical.has_value());
+  const auto& metrics = *output.diagnostics.hierarchical;
+  const auto& last_problem = frontiers.problems.back();
+  EXPECT_EQ(metrics.local_frontier_attempts, frontiers.problems.size());
+  EXPECT_EQ(metrics.local_search_runs, frontiers.problems.size());
+  EXPECT_EQ(metrics.search_domain_cell_count,
+            last_problem.search_domain.allowed_cell_count());
+  EXPECT_EQ(metrics.search_domain_sha256,
+            last_problem.search_domain.sha256());
+  EXPECT_EQ(metrics.global_replans, 0U);
+  EXPECT_TRUE(metrics.physical_goal_feasible);
+}
+
+TEST(HierarchicalPlanner, LeavesDomainDiagnosticsEmptyWithoutALocalSearch) {
+  Planner planner;
+  PlannerInput input = DistantLeggedInput();
+  input.config.local_frontier.additional_corridor_margin_m = 0.8;
+
+  const PlannerOutput output = planner.Plan(input);
+
+  ASSERT_EQ(output.outcome, PlanningOutcome::kInvalidRequest);
+  EXPECT_EQ(output.reason_code, "LOCAL_FRONTIER_CONFIGURATION_INVALID");
+  ASSERT_TRUE(output.diagnostics.hierarchical.has_value());
+  const auto& metrics = *output.diagnostics.hierarchical;
+  EXPECT_EQ(metrics.search_domain_cell_count, 0U);
+  EXPECT_TRUE(metrics.search_domain_sha256.empty());
+  EXPECT_EQ(metrics.local_frontier_attempts, 0U);
+  EXPECT_EQ(metrics.local_search_runs, 0U);
+  EXPECT_FALSE(metrics.physical_goal_feasible);
+}
+
 TEST(HierarchicalPlanner, DistinguishesGlobalAndLocalRejections) {
   Planner planner;
   PlannerInput global_blocked = DistantWheelInput();
@@ -248,7 +352,7 @@ TEST(HierarchicalPlanner, UsesExactTerminalConnectorBeforeFrontierBackoff) {
   ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
       << output.reason_code;
   ASSERT_TRUE(output.diagnostics.hierarchical.has_value());
-  EXPECT_EQ(output.diagnostics.hierarchical->local_attempts, 1U);
+  EXPECT_EQ(output.diagnostics.hierarchical->local_frontier_attempts, 1U);
   EXPECT_EQ(std::ranges::find(output.diagnostics.warning_codes,
                               "LOCAL_FRONTIER_BACKOFF"),
             output.diagnostics.warning_codes.end());
@@ -277,7 +381,7 @@ TEST(HierarchicalPlanner, ReportsTheLocalBackendReasonAfterAllFrontiersFail) {
   ASSERT_EQ(output.outcome, PlanningOutcome::kNoKnownSafeRoute);
   EXPECT_EQ(output.reason_code, "LOCAL_SEGMENT_INFEASIBLE");
   EXPECT_NE(std::ranges::find(output.diagnostics.warning_codes,
-                              "WHEEL_NO_KNOWN_SAFE_ROUTE"),
+                              "LOCAL_SEARCH_DOMAIN_EXHAUSTED"),
             output.diagnostics.warning_codes.end());
 }
 
@@ -286,12 +390,13 @@ TEST(HierarchicalPlanner, ReroutesAfterAConditionalCorridorFailsLocalSweep) {
   PlannerInput input = test::MakeValidWheelInput();
   input.request_id = "conditional-corridor-reroute";
   input.world.global_map = test::MakeFlatMap("map", 14U, 13U, 1.0);
-  input.world.local_map = test::MakeFlatMap("odom", 14U, 13U, 1.0);
+  input.world.local_map = test::MakeFlatMap("odom", 18U, 13U, 1.0);
+  input.world.local_map.origin_m.x = -2.0;
   input.config.global_map.base_resolution_m = 1.0;
   input.config.local_frontier.wheel_horizon_m = 20.0;
   // The coarse 1 m test lattice needs room to realize the rerouted Manhattan
   // turns; production L0 uses the approved 0.20 m primitives.
-  input.config.local_frontier.additional_corridor_margin_m = 0.8;
+  input.config.local_frontier.additional_corridor_margin_m = 2.0;
   auto &state = std::get<WheeledState>(input.current_state);
   state.pose.position_m = {1.5, 4.5, 0.0};
   auto &capability = std::get<WheeledCapability>(input.capability);
@@ -302,9 +407,14 @@ TEST(HierarchicalPlanner, ReroutesAfterAConditionalCorridorFailsLocalSweep) {
       .position_m = {12.5, 4.5, 0.0},
       .tolerance_m = 0.2,
   };
+  auto &global_obstacles = std::get<std::vector<std::uint8_t>>(
+      input.world.global_map.layers.at("obstacle").values);
+  auto &local_obstacles = std::get<std::vector<std::uint8_t>>(
+      input.world.local_map.layers.at("obstacle").values);
   for (std::size_t y = 0U; y < 13U; ++y) {
     if (y != 4U && (y < 8U || y > 10U)) {
-      SetObstacleBoth(input, 6U, y);
+      global_obstacles.at(y * input.world.global_map.width + 6U) = 1U;
+      local_obstacles.at(y * input.world.local_map.width + 8U) = 1U;
     }
   }
   const GlobalRoutePlanResult shortest = PlanGroundGlobalRoute(input);

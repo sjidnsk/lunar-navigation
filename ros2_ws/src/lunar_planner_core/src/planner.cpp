@@ -101,7 +101,21 @@ struct GroundAccumulation final {
   std::size_t global_replans{};
   std::size_t global_projection_cache_hits{};
   std::size_t local_projection_cache_hits{};
+  std::size_t search_domain_cell_count{};
+  std::string search_domain_sha256;
+  bool physical_goal_feasible{};
 };
+
+void RecordLocalSearchProblem(
+    GroundAccumulation &accumulated,
+    const hierarchical::LocalPlanningProblem &problem,
+    const PlannerOutput &output) {
+  accumulated.search_domain_cell_count =
+      problem.search_domain.allowed_cell_count();
+  accumulated.search_domain_sha256 = problem.search_domain.sha256();
+  accumulated.physical_goal_feasible =
+      output.outcome != PlanningOutcome::kGoalInfeasible;
+}
 
 [[nodiscard]] HierarchicalPlannerMetrics GroundMetrics(
     const PlannerInput &input,
@@ -129,15 +143,23 @@ struct GroundAccumulation final {
       .simplified_route_points =
           route == nullptr ? 0U : route->simplified_cells.size(),
       .local_frontier_distance_m = frontier_distance_m,
-      .local_attempts = accumulated.local_frontier_attempts,
+      .additional_corridor_margin_m =
+          input.config.local_frontier.additional_corridor_margin_m,
+      .corridor_half_width_m =
+          frontiers == nullptr ? 0.0 : frontiers->corridor_half_width_m,
+      .search_domain_cell_count = accumulated.search_domain_cell_count,
+      .search_domain_sha256 = accumulated.search_domain_sha256,
+      .local_frontier_attempts = accumulated.local_frontier_attempts,
       .local_search_runs = accumulated.local_search_runs,
       .global_replans = accumulated.global_replans,
+      .physical_goal_feasible = accumulated.physical_goal_feasible,
+      .local_attempts = accumulated.local_frontier_attempts,
+      .corridor_width_m =
+          frontiers == nullptr ? 0.0 : 2.0 * frontiers->corridor_half_width_m,
       .global_projection_cache_hits =
           accumulated.global_projection_cache_hits,
       .local_projection_cache_hits =
           accumulated.local_projection_cache_hits,
-      .corridor_width_m =
-          frontiers == nullptr ? 0.0 : 2.0 * frontiers->corridor_half_width_m,
       .route_reused = route_reused,
       .route_cursor = route_cursor,
       .rolling_request_count = rolling_request_count,
@@ -370,6 +392,8 @@ PlannerOutput Planner::Plan(
         ++accumulated.local_search_runs;
         accumulated.local_projection_cache_hits +=
             ranked_wheel->projection_cache_hit ? 1U : 0U;
+        RecordLocalSearchProblem(
+            accumulated, frontiers.problems.front(), ranked_wheel->output);
       }
       const std::size_t local_iterations =
           platform == PlatformType::kWheeled
@@ -390,6 +414,8 @@ PlannerOutput Planner::Plan(
               std::chrono::duration_cast<std::chrono::nanoseconds>(
                   std::chrono::steady_clock::now() - search_started);
           ++accumulated.local_search_runs;
+          RecordLocalSearchProblem(
+              accumulated, frontiers.problems[attempt], local);
         }
         local_expanded += local.diagnostics.expanded_states;
         accumulated.local_expanded_states +=
