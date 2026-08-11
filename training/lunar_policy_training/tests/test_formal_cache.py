@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import pathlib
@@ -15,7 +15,6 @@ import lunar_policy_training.polar_data.formal_cache as formal_cache_module
 from lunar_policy_training.environment.coverability import (
     IneligibleReason,
     PlatformCoverability,
-    QualifiedStartState,
     mask_sha256,
     pack_detail_mask,
 )
@@ -39,6 +38,31 @@ REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 def _sha(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def _physical_projection_sha256(
+    platform_type: str,
+    mask: np.ndarray,
+    algorithm_id: str,
+    capability_content_sha256: str,
+    start_identity_sha256: str,
+) -> str:
+    body = {
+        "platform_type": platform_type,
+        "physical_reachability_algorithm_id": algorithm_id,
+        "physical_observation_pose_shape": list(mask.shape),
+        "physical_observation_pose_mask_sha256": mask_sha256(mask),
+        "capability_content_sha256": capability_content_sha256,
+        "start_identity_sha256": start_identity_sha256,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _scenario_document(scene_id: str) -> dict[str, object]:
@@ -112,20 +136,33 @@ def _scene(
             reason = IneligibleReason.MISSION_COVERABLE_BELOW_95
             eligible = False
         count = int(detail.sum(dtype=np.int64))
+        algorithm_id = f"test-physical-reachability/{platform.lower()}"
+        capability_sha256 = _sha(f"capability-content/{platform}")
+        start_sha256 = _sha(
+            f"physical-start/{platform}/{start if start is not None else 'unsafe'}"
+        )
         coverability[platform] = PlatformCoverability(
             platform_type=platform,
             qualified_start_cell=start,
-            qualified_start_state=(
-                None
-                if start is None
-                else QualifiedStartState(
-                    position_m=(float(start[1]), float(start[0]), 0.0),
-                    yaw_rad=0.0,
-                    motion_mode=0,
-                    body_z_m=(0.0, 0.0),
-                )
+            physical_observation_pose_mask=reachable,
+            physical_projection_schema=(
+                "lunar-physical-coverability-projection/v1"
             ),
-            reachable_pose_mask=reachable,
+            physical_reachability_algorithm_id=algorithm_id,
+            physical_safe_pose_count=(0 if start is None else reachable.size),
+            physically_reachable_pose_count=int(
+                reachable.sum(dtype=np.int64)
+            ),
+            physical_projection_sha256=_physical_projection_sha256(
+                platform,
+                reachable,
+                algorithm_id,
+                capability_sha256,
+                start_sha256,
+            ),
+            mission_target_detail_mask_sha256=mask_sha256(
+                np.ones(shape, dtype=np.bool_)
+            ),
             coverable_detail_shape=detail.shape,
             coverable_detail_bits=pack_detail_mask(detail),
             coverable_ratio=detail.astype(np.float32),
@@ -134,17 +171,10 @@ def _scene(
             mission_coverable_fraction=count / detail.size,
             initial_coverable_fraction=0.1,
             initial_candidate_count=1,
-            primitive_state_count=0 if start is None else int(reachable.sum()),
-            certified_edge_count=0 if start is None else 1,
-            recoverable_state_count=0 if start is None else int(reachable.sum()),
-            reachability_algorithm_id=f"test-reachability/{platform.lower()}",
-            primitive_state_schema=f"test-state/{platform.lower()}",
-            primitive_set_sha256=_sha(f"primitive-set/{platform}"),
-            world_evidence_sha256=_sha(f"world/{platform}"),
-            reachability_graph_sha256=_sha(f"graph/{platform}"),
-            visibility_algorithm_id="two-dimensional-detail-los/v1",
-            reachable_mask_sha256=mask_sha256(reachable),
-            coverable_mask_sha256=mask_sha256(detail),
+            coverable_detail_mask_sha256=mask_sha256(detail),
+            sensor_visibility_algorithm_id="two-dimensional-detail-los/v1",
+            capability_content_sha256=capability_sha256,
+            start_identity_sha256=start_sha256,
             exact=True,
             eligible=eligible,
             ineligible_reason=reason,
@@ -246,34 +276,78 @@ def test_hopper_landing_targets_exclude_nodata_cells_in_row_major_order() -> Non
     assert targets.flags.c_contiguous
 
 
-def test_truth_hopper_graph_receives_streamed_detail_landing_evidence(
+def test_physical_capability_identity_excludes_planner_motion_primitives() -> None:
+    @dataclass(frozen=True)
+    class PhysicalCapability:
+        maximum_slope_rad: float
+        minimum_clearance_m: float
+        motion_primitives: tuple[str, ...]
+
+    @dataclass(frozen=True)
+    class ObservationCapability:
+        sensor_range_m: float
+        sensor_fov_rad: float
+
+    common = {
+        "platform_type": "WHEELED",
+        "capability_type": "WHEELED",
+        "capability_version": "1.0.0",
+        "platform_id": "test-rover",
+        "base_frame_id": "base_link",
+        "observation_capability": ObservationCapability(30.0, 6.0),
+    }
+    first = SimpleNamespace(
+        **common,
+        typed_capability=PhysicalCapability(
+            maximum_slope_rad=0.4,
+            minimum_clearance_m=0.2,
+            motion_primitives=("forward", "reverse"),
+        ),
+    )
+    second = SimpleNamespace(
+        **common,
+        typed_capability=PhysicalCapability(
+            maximum_slope_rad=0.4,
+            minimum_clearance_m=0.2,
+            motion_primitives=("renamed-reverse", "renamed-forward", "spin"),
+        ),
+    )
+
+    assert formal_cache_module._physical_capability_content_sha256(
+        first
+    ) == formal_cache_module._physical_capability_content_sha256(second)
+
+
+def test_truth_hopper_physical_projection_uses_certified_landing_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import lunar_planner_training_bridge as bridge_api
-
     request = object()
-    evidence = object()
-    calls: list[tuple[object, object, object]] = []
+    evidence_grid = object()
+    calls: list[tuple[object, float, object]] = []
     reachable = np.zeros((256, 256), dtype=np.uint8)
     reachable[128, 128] = 1
     output = SimpleNamespace(
         platform_type="HOPPER",
         reachable=reachable,
-        recoverable=np.asarray([True], dtype=np.bool_),
-        observation_state=np.asarray([True], dtype=np.bool_),
-        positions_m=np.asarray([[514.0, 514.0, 1.0]], dtype=np.float64),
-        path_cost=np.asarray([0.0], dtype=np.float64),
-        yaw_rad=np.asarray([0.0], dtype=np.float64),
-        motion_mode=np.asarray([0], dtype=np.int32),
-        body_z_m=np.asarray([[0.0, 0.0]], dtype=np.float64),
+        algorithm_id="cpp-hopper-certified-bidirectional-bfs/v3",
+    )
+    certified = np.zeros((256, 256), dtype=np.bool_)
+    certified[127, 128] = True
+    aim = np.zeros((256, 256, 3), dtype=np.float64)
+    aim[127, 128] = (514.0, 510.0, 1.0)
+    evidence = SimpleNamespace(
+        bridge_grid=evidence_grid,
+        certified_pose_mask=certified,
+        aim_positions_m=aim,
     )
 
-    class Engine:
-        def update(self, *args: object) -> object:
-            calls.append(args)
+    class Bridge:
+        def project_reachability(
+            self, request_value: object, distance: float, evidence_value: object
+        ) -> object:
+            calls.append((request_value, distance, evidence_value))
             return output
 
-    monkeypatch.setattr(bridge_api, "PrimitiveReachabilityEngine", Engine)
     monkeypatch.setattr(
         formal_cache_module,
         "_projection_request",
@@ -285,37 +359,59 @@ def test_truth_hopper_graph_receives_streamed_detail_landing_evidence(
         lambda **_kwargs: evidence,
     )
 
-    result, _, positions, start = (
-        formal_cache_module._build_truth_primitive_reachability(
-            platform=SimpleNamespace(platform_type="HOPPER"),
-            scene=object(),
-            projected=object(),
-            start_cell=(128, 128),
-            bridge=object(),
-        )
+    result = formal_cache_module._build_truth_physical_reachability(
+        platform=SimpleNamespace(
+            platform_type="HOPPER", content_sha256=_sha("hopper-capability")
+        ),
+        scene=object(),
+        projected=object(),
+        start_cell=(127, 128),
+        bridge=Bridge(),
     )
 
-    assert calls == [(request, None, evidence)]
-    assert result is output
-    np.testing.assert_array_equal(positions, output.positions_m)
-    assert start.position_m == (514.0, 514.0, 1.0)
+    assert calls == [(request, 30.0, evidence_grid)]
+    assert result.physical_reachability_algorithm_id == output.algorithm_id
+    assert result.physical_safe_pose_count == 1
+    assert result.physically_reachable_pose_count == 1
+    assert result.physical_observation_pose_mask[127, 128]
+    np.testing.assert_array_equal(
+        result.observation_positions_m,
+        np.asarray([[514.0, 510.0, 1.0]], dtype=np.float64),
+    )
 
 
-def test_truth_graph_start_failure_marks_only_that_platform_ineligible(
+def test_truth_physical_start_failure_marks_only_that_platform_ineligible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    @dataclass(frozen=True)
+    class HopperCapability:
+        landing_support_radius_m: float
+
+    @dataclass(frozen=True)
+    class ObservationCapability:
+        sensor_range_m: float
+        sensor_fov_rad: float
+
     class CapabilityBundle:
         @staticmethod
         def for_platform(platform_type: str) -> object:
             assert platform_type == "HOPPER"
-            return object()
+            return SimpleNamespace(
+                platform_type=platform_type,
+                capability_type="HOPPER",
+                capability_version="1.0.0",
+                platform_id="test-hopper",
+                base_frame_id="base_link",
+                typed_capability=HopperCapability(0.4),
+                observation_capability=ObservationCapability(30.0, 6.0),
+            )
 
     def reject_start(**_kwargs):
         raise RuntimeError("HOPPER_START_LANDING_NOT_CERTIFIED")
 
     monkeypatch.setattr(
         formal_cache_module,
-        "_build_truth_primitive_reachability",
+        "_build_truth_physical_reachability",
         reject_start,
     )
 
@@ -334,7 +430,7 @@ def test_truth_graph_start_failure_marks_only_that_platform_ineligible(
     assert result.qualified_start_cell is None
 
 
-def test_truth_graph_does_not_hide_a_non_start_native_failure(
+def test_truth_physical_projection_does_not_hide_a_non_start_native_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class CapabilityBundle:
@@ -342,13 +438,13 @@ def test_truth_graph_does_not_hide_a_non_start_native_failure(
         def for_platform(_platform_type: str) -> object:
             return object()
 
-    def fail_graph(**_kwargs):
+    def fail_projection(**_kwargs):
         raise RuntimeError("HOPPER_REACHABILITY_CERTIFICATION_INVALID")
 
     monkeypatch.setattr(
         formal_cache_module,
-        "_build_truth_primitive_reachability",
-        fail_graph,
+        "_build_truth_physical_reachability",
+        fail_projection,
     )
 
     with pytest.raises(
@@ -402,7 +498,7 @@ def test_preflight_cache_round_trip_is_ineligible_for_formal_use(
     )
     arrays = cache.load_scene(_sha("scene"))
 
-    assert FORMAL_CACHE_SCHEMA == "lunar-formal-training-cache/v5"
+    assert FORMAL_CACHE_SCHEMA == "lunar-formal-training-cache/v6"
     assert manifest["schema"] == FORMAL_CACHE_SCHEMA
     assert manifest["materialization"] == "preflight"
     assert manifest["platform_eligibility"]["WHEELED"]["splits"]["train"] == {
@@ -414,18 +510,20 @@ def test_preflight_cache_round_trip_is_ineligible_for_formal_use(
     assert manifest["exact_common_evaluation"]["scene_count"] == 1
     platform = manifest["scenes"][0]["platform_coverability"]["WHEELED"]
     assert platform["qualified_start_cell"] == [127, 127]
-    assert platform["qualified_start_state"]["position_m"] == [127.0, 127.0, 0.0]
-    assert platform["primitive_state_count"] == 256 * 256
-    assert platform["certified_edge_count"] == 1
-    assert platform["recoverable_state_count"] == 256 * 256
-    assert len(platform["reachability_graph_sha256"]) == 64
+    assert platform["physical_observation_pose_shape"] == [256, 256]
+    assert platform["physical_safe_pose_count"] == 256 * 256
+    assert platform["physically_reachable_pose_count"] == 256 * 256
+    assert len(platform["physical_projection_sha256"]) == 64
+    assert len(platform["capability_content_sha256"]) == 64
+    assert len(platform["start_identity_sha256"]) == 64
+    assert not any("primitive" in field for field in platform)
     assert platform["eligible"] is True
     assert platform["ineligible_reason"] is None
     assert platform["exact"] is True
     assert cache.formal_eligible is False
     assert arrays["elevation_m"].shape == (256, 256)
     assert arrays["wheeled_hard_feasible"].dtype == np.uint8
-    assert arrays["wheeled_reachable_pose_bits"].dtype == np.uint8
+    assert arrays["wheeled_physical_observation_pose_bits"].dtype == np.uint8
     assert arrays["wheeled_coverable_detail_bits"].dtype == np.uint8
     assert arrays["wheeled_coverable_ratio"].dtype == np.float32
     with pytest.raises(FormalCacheError, match="full"):
@@ -436,18 +534,96 @@ def test_preflight_cache_round_trip_is_ineligible_for_formal_use(
         )
 
 
-def test_v4_cache_manifest_is_rejected_without_in_place_upgrade(
+def test_formal_cache_rejects_v5_manifest(
     tmp_path: pathlib.Path,
 ) -> None:
     root, identity, _ = _write(tmp_path)
     manifest_path = root / "cache-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["schema"] = "lunar-formal-training-cache/v4"
+    manifest["schema"] = "lunar-formal-training-cache/v5"
     manifest_path.write_text(
         json.dumps(manifest, sort_keys=True), encoding="utf-8"
     )
 
     with pytest.raises(FormalCacheError, match="schema"):
+        load_formal_cache(manifest_path, expected_identity=identity)
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "primitive_state_count",
+        "certified_edge_count",
+        "recoverable_state_count",
+        "primitive_state_schema",
+        "primitive_set_sha256",
+        "world_evidence_sha256",
+        "reachability_graph_sha256",
+    ),
+)
+def test_formal_cache_rejects_residual_primitive_identity_field(
+    tmp_path: pathlib.Path,
+    field: str,
+) -> None:
+    root, identity, _ = _write(tmp_path)
+    manifest_path = root / "cache-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    platform = manifest["scenes"][0]["platform_coverability"]["WHEELED"]
+    platform[field] = 1 if field.endswith("_count") else _sha(field)
+    body = dict(manifest)
+    body.pop("cache_manifest_sha256")
+    manifest["cache_manifest_sha256"] = hashlib.sha256(
+        json.dumps(
+            body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    manifest_path.write_text(
+        json.dumps(
+            manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FormalCacheError, match="primitive identity"):
+        load_formal_cache(manifest_path, expected_identity=identity)
+
+
+def test_formal_cache_rejects_residual_primitive_identity_outside_payload(
+    tmp_path: pathlib.Path,
+) -> None:
+    root, identity, _ = _write(tmp_path)
+    manifest_path = root / "cache-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["primitive_set_sha256"] = _sha("residual-primitive-set")
+    body = dict(manifest)
+    body.pop("cache_manifest_sha256")
+    manifest["cache_manifest_sha256"] = hashlib.sha256(
+        json.dumps(
+            body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    manifest_path.write_text(
+        json.dumps(
+            manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FormalCacheError, match="primitive identity"):
         load_formal_cache(manifest_path, expected_identity=identity)
 
 

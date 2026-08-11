@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
+import json
 import math
 from typing import Callable, Iterator, Mapping
 
@@ -17,6 +18,7 @@ from ..training_semantics import (
 
 
 _PLATFORM_TYPES = frozenset(("WHEELED", "LEGGED", "HOPPER"))
+PHYSICAL_PROJECTION_SCHEMA = "lunar-physical-coverability-projection/v1"
 _BYTE_POPCOUNT = np.asarray(
     [value.bit_count() for value in range(256)], dtype=np.uint8
 )
@@ -64,6 +66,49 @@ def mask_sha256(mask: np.ndarray) -> str:
     """Hash the semantic row-major boolean cells rather than packed padding."""
     checked = _require_bool_mask(mask, "mask")
     return sha256(checked.view(np.uint8).tobytes(order="C")).hexdigest()
+
+
+def physical_projection_sha256(
+    *,
+    platform_type: str,
+    physical_reachability_algorithm_id: str,
+    physical_observation_pose_mask: np.ndarray,
+    capability_content_sha256: str,
+    start_identity_sha256: str,
+) -> str:
+    """Hash only canonical physical authority, never planner primitives."""
+    if platform_type not in _PLATFORM_TYPES:
+        raise CoverabilityError("physical projection platform is invalid")
+    if (
+        not isinstance(physical_reachability_algorithm_id, str)
+        or not physical_reachability_algorithm_id
+    ):
+        raise CoverabilityError("physical reachability algorithm ID is missing")
+    mask = _require_bool_mask(
+        physical_observation_pose_mask, "physical observation pose mask"
+    )
+    capability_sha256 = _require_sha(
+        capability_content_sha256, "capability content hash"
+    )
+    start_sha256 = _require_sha(start_identity_sha256, "start identity hash")
+    body = {
+        "platform_type": platform_type,
+        "physical_reachability_algorithm_id": (
+            physical_reachability_algorithm_id
+        ),
+        "physical_observation_pose_shape": list(mask.shape),
+        "physical_observation_pose_mask_sha256": mask_sha256(mask),
+        "capability_content_sha256": capability_sha256,
+        "start_identity_sha256": start_sha256,
+    }
+    return sha256(
+        json.dumps(
+            body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def build_mission_target_detail_mask(
@@ -568,6 +613,8 @@ def build_streamed_detail_coverability(
         or observation_positions_m.dtype != np.dtype(np.float64)
         or observation_positions_m.ndim != 2
         or observation_positions_m.shape[1:] != (3,)
+        or len(observation_positions_m)
+        != int(reachable.sum(dtype=np.int64))
         or not observation_positions_m.flags.c_contiguous
         or not np.isfinite(observation_positions_m).all()
     ):
@@ -678,7 +725,7 @@ def build_streamed_detail_coverability(
             )
         except (AttributeError, TypeError, ValueError) as error:
             raise CoverabilityError(
-                "primitive observation position lies outside detail geometry"
+                "physical observation position lies outside detail geometry"
             ) from error
         pose_sources = _prioritize_exact_detail_sources(
             exact_sources, window_cells=tile_cells
@@ -855,8 +902,13 @@ class PlatformCoverability:
 
     platform_type: str
     qualified_start_cell: tuple[int, int] | None
-    qualified_start_state: QualifiedStartState | None
-    reachable_pose_mask: np.ndarray
+    physical_observation_pose_mask: np.ndarray
+    physical_projection_schema: str
+    physical_reachability_algorithm_id: str
+    physical_safe_pose_count: int
+    physically_reachable_pose_count: int
+    physical_projection_sha256: str
+    mission_target_detail_mask_sha256: str
     coverable_detail_shape: tuple[int, int]
     coverable_detail_bits: np.ndarray
     coverable_ratio: np.ndarray
@@ -865,17 +917,10 @@ class PlatformCoverability:
     mission_coverable_fraction: float
     initial_coverable_fraction: float
     initial_candidate_count: int
-    primitive_state_count: int
-    certified_edge_count: int
-    recoverable_state_count: int
-    reachability_algorithm_id: str
-    primitive_state_schema: str
-    primitive_set_sha256: str
-    world_evidence_sha256: str
-    reachability_graph_sha256: str
-    visibility_algorithm_id: str
-    reachable_mask_sha256: str
-    coverable_mask_sha256: str
+    coverable_detail_mask_sha256: str
+    sensor_visibility_algorithm_id: str
+    capability_content_sha256: str
+    start_identity_sha256: str
     exact: bool
     eligible: bool
     ineligible_reason: IneligibleReason | None
@@ -883,31 +928,32 @@ class PlatformCoverability:
     def __post_init__(self) -> None:
         if self.platform_type not in _PLATFORM_TYPES:
             raise CoverabilityError("platform type is invalid")
-        reachable = _require_bool_mask(
-            self.reachable_pose_mask, "reachable pose mask"
+        physical = _require_bool_mask(
+            self.physical_observation_pose_mask,
+            "physical observation pose mask",
         )
         shape = _detail_shape(self.coverable_detail_shape)
         detail = unpack_detail_mask(self.coverable_detail_bits, shape)
-        if shape[0] % reachable.shape[0] or shape[1] % reachable.shape[1]:
+        if shape[0] % physical.shape[0] or shape[1] % physical.shape[1]:
             raise CoverabilityError(
-                "detail mask shape must divide evenly into the reachable grid"
+                "detail mask shape must divide evenly into the physical grid"
             )
         ratio = self.coverable_ratio
         if (
             not isinstance(ratio, np.ndarray)
             or ratio.dtype != np.dtype(np.float32)
-            or ratio.shape != reachable.shape
+            or ratio.shape != physical.shape
             or not ratio.flags.c_contiguous
             or not np.isfinite(ratio).all()
             or ((ratio < 0.0) | (ratio > 1.0)).any()
         ):
             raise CoverabilityError("coverable ratio matrix is invalid")
-        rows_per_cell = shape[0] // reachable.shape[0]
-        columns_per_cell = shape[1] // reachable.shape[1]
+        rows_per_cell = shape[0] // physical.shape[0]
+        columns_per_cell = shape[1] // physical.shape[1]
         expected_ratio = detail.reshape(
-            reachable.shape[0],
+            physical.shape[0],
             rows_per_cell,
-            reachable.shape[1],
+            physical.shape[1],
             columns_per_cell,
         ).mean(axis=(1, 3), dtype=np.float64).astype(np.float32)
         if not np.array_equal(ratio, expected_ratio):
@@ -918,45 +964,60 @@ class PlatformCoverability:
         if type(self.eligible) is not bool:
             raise CoverabilityError("coverability eligibility must be boolean")
         for name, value in (
-            ("reachability algorithm ID", self.reachability_algorithm_id),
-            ("primitive state schema", self.primitive_state_schema),
-            ("visibility algorithm ID", self.visibility_algorithm_id),
+            ("physical projection schema", self.physical_projection_schema),
+            (
+                "physical reachability algorithm ID",
+                self.physical_reachability_algorithm_id,
+            ),
+            (
+                "sensor visibility algorithm ID",
+                self.sensor_visibility_algorithm_id,
+            ),
         ):
             if not isinstance(value, str) or not value:
                 raise CoverabilityError(f"{name} is missing")
+        if self.physical_projection_schema != PHYSICAL_PROJECTION_SCHEMA:
+            raise CoverabilityError("physical projection schema is unsupported")
         for name, value in (
-            ("primitive set hash", self.primitive_set_sha256),
-            ("world evidence hash", self.world_evidence_sha256),
-            ("primitive graph hash", self.reachability_graph_sha256),
+            (
+                "mission target detail mask hash",
+                self.mission_target_detail_mask_sha256,
+            ),
+            ("capability content hash", self.capability_content_sha256),
+            ("start identity hash", self.start_identity_sha256),
         ):
             _require_sha(value, name)
-        for name, value in (
-            ("primitive state count", self.primitive_state_count),
-            ("certified edge count", self.certified_edge_count),
-            ("recoverable state count", self.recoverable_state_count),
+        reachable_count = int(physical.sum(dtype=np.int64))
+        if (
+            type(self.physically_reachable_pose_count) is not int
+            or self.physically_reachable_pose_count != reachable_count
         ):
-            if type(value) is not int or value < 0:
-                raise CoverabilityError(f"{name} must be non-negative")
-        if self.recoverable_state_count > self.primitive_state_count:
             raise CoverabilityError(
-                "recoverable state count exceeds primitive state count"
+                "physically reachable pose count differs from physical mask"
             )
-        if (self.qualified_start_cell is None) is not (
-            self.qualified_start_state is None
+        if (
+            type(self.physical_safe_pose_count) is not int
+            or self.physical_safe_pose_count < reachable_count
         ):
-            raise CoverabilityError("qualified start state disagrees with cell")
-        if self.qualified_start_state is not None and (
-            not isinstance(self.qualified_start_state, QualifiedStartState)
-            or self.primitive_state_count == 0
-            or self.recoverable_state_count == 0
+            raise CoverabilityError(
+                "physical safe pose count is below reachable pose count"
+            )
+        expected_projection_sha256 = physical_projection_sha256(
+            platform_type=self.platform_type,
+            physical_reachability_algorithm_id=(
+                self.physical_reachability_algorithm_id
+            ),
+            physical_observation_pose_mask=physical,
+            capability_content_sha256=self.capability_content_sha256,
+            start_identity_sha256=self.start_identity_sha256,
+        )
+        if expected_projection_sha256 != _require_sha(
+            self.physical_projection_sha256, "physical projection hash"
         ):
-            raise CoverabilityError("qualified start state lacks a recoverable graph")
-        if mask_sha256(reachable) != _require_sha(
-            self.reachable_mask_sha256, "reachable mask hash"
-        ):
-            raise CoverabilityError("reachable mask hash differs")
+            raise CoverabilityError("physical projection hash differs")
         if mask_sha256(detail) != _require_sha(
-            self.coverable_mask_sha256, "coverable mask hash"
+            self.coverable_detail_mask_sha256,
+            "coverable mask hash",
         ):
             raise CoverabilityError("coverable mask hash differs")
 
@@ -991,14 +1052,25 @@ class PlatformCoverability:
             raise CoverabilityError("coverability eligibility disagrees with gates")
         if self.ineligible_reason is not expected_reason:
             raise CoverabilityError("coverability ineligible reason is invalid")
-        if self.qualified_start_cell is not None:
+        if self.qualified_start_cell is None:
+            if reachable_count:
+                raise CoverabilityError(
+                    "physical observation poses require a qualified start"
+                )
+        else:
             row, column = self.qualified_start_cell
             if (
-                row >= reachable.shape[0]
-                or column >= reachable.shape[1]
-                or not bool(reachable[row, column])
+                type(row) is not int
+                or type(column) is not int
+                or row < 0
+                or column < 0
+                or row >= physical.shape[0]
+                or column >= physical.shape[1]
+                or not bool(physical[row, column])
             ):
-                raise CoverabilityError("qualified start is not reachable")
+                raise CoverabilityError(
+                    "qualified start is not physically reachable"
+                )
 
     @property
     def coverable_detail_mask(self) -> np.ndarray:
@@ -1015,11 +1087,13 @@ __all__ = [
     "CoverabilityError",
     "IneligibleReason",
     "PlatformCoverability",
+    "PHYSICAL_PROJECTION_SCHEMA",
     "QualifiedStartState",
     "StreamedDetailCoverability",
     "classify_ineligibility",
     "mask_sha256",
     "pack_detail_mask",
+    "physical_projection_sha256",
     "read_packed_detail_window",
     "unpack_detail_mask",
 ]

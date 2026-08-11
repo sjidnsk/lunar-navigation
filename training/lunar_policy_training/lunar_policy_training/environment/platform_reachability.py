@@ -9,10 +9,66 @@ from typing import Mapping
 import numpy as np
 
 from ..polar_data.raster import MapCanvas
+from .coverability import PHYSICAL_PROJECTION_SCHEMA
 from .observation_builder import Pose2
 
 
 _PLATFORMS = frozenset(("WHEELED", "LEGGED", "HOPPER"))
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalReachabilityResult:
+    """Primitive-independent physical observation poses for one fixed start."""
+
+    platform_type: str
+    physical_observation_pose_mask: np.ndarray
+    observation_positions_m: np.ndarray
+    physical_projection_schema: str
+    physical_reachability_algorithm_id: str
+    physical_safe_pose_count: int
+    physically_reachable_pose_count: int
+
+    def __post_init__(self) -> None:
+        mask = self.physical_observation_pose_mask
+        positions = self.observation_positions_m
+        if self.platform_type not in _PLATFORMS:
+            raise ValueError("physical reachability platform is invalid")
+        if (
+            not isinstance(mask, np.ndarray)
+            or mask.dtype != np.dtype(np.bool_)
+            or mask.ndim != 2
+            or not mask.flags.c_contiguous
+            or any(dimension <= 0 for dimension in mask.shape)
+        ):
+            raise ValueError(
+                "physical observation pose mask must be C-contiguous bool [H,W]"
+            )
+        if (
+            not isinstance(positions, np.ndarray)
+            or positions.dtype != np.dtype(np.float64)
+            or positions.ndim != 2
+            or positions.shape[1:] != (3,)
+            or not positions.flags.c_contiguous
+            or not np.isfinite(positions).all()
+        ):
+            raise ValueError(
+                "physical observation positions must be C-contiguous float64 [N,3]"
+            )
+        reachable_count = int(mask.sum(dtype=np.int64))
+        if (
+            self.physical_projection_schema != PHYSICAL_PROJECTION_SCHEMA
+            or not isinstance(self.physical_reachability_algorithm_id, str)
+            or not self.physical_reachability_algorithm_id
+        ):
+            raise ValueError("physical reachability algorithm identity is invalid")
+        if (
+            type(self.physical_safe_pose_count) is not int
+            or type(self.physically_reachable_pose_count) is not int
+            or self.physical_safe_pose_count < reachable_count
+            or self.physically_reachable_pose_count != reachable_count
+            or len(positions) != reachable_count
+        ):
+            raise ValueError("physical reachability counts differ")
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,4 +440,9 @@ class PlatformCandidateReachability:
         )
 
 
-__all__ = ["CandidateReachabilityResult", "PlatformCandidateReachability"]
+__all__ = [
+    "CandidateReachabilityResult",
+    "PHYSICAL_PROJECTION_SCHEMA",
+    "PhysicalReachabilityResult",
+    "PlatformCandidateReachability",
+]

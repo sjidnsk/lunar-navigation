@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
+import hashlib
+import json
 
 import numpy as np
 import pytest
@@ -11,7 +13,6 @@ from lunar_policy_training.environment.coverability import (
     CoverabilityError,
     IneligibleReason,
     PlatformCoverability,
-    QualifiedStartState,
     classify_ineligibility,
     mask_sha256,
     pack_detail_mask,
@@ -61,7 +62,7 @@ def test_detail_mask_pack_is_row_major_and_rejects_nonzero_padding() -> None:
 
 
 def _eligible_coverability() -> PlatformCoverability:
-    reachable = np.asarray(
+    physical = np.asarray(
         [[True, False], [True, True]],
         dtype=np.bool_,
     )
@@ -78,16 +79,38 @@ def _eligible_coverability() -> PlatformCoverability:
         [[0.75, 0.0], [0.5, 1.0]],
         dtype=np.float32,
     )
+    capability_sha256 = "5" * 64
+    start_sha256 = "6" * 64
+    projection_body = {
+        "platform_type": "WHEELED",
+        "physical_reachability_algorithm_id": (
+            "cpp-ground-start-connected-component/v1"
+        ),
+        "physical_observation_pose_shape": list(physical.shape),
+        "physical_observation_pose_mask_sha256": mask_sha256(physical),
+        "capability_content_sha256": capability_sha256,
+        "start_identity_sha256": start_sha256,
+    }
+    projection_sha256 = hashlib.sha256(
+        json.dumps(
+            projection_body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     return PlatformCoverability(
         platform_type="WHEELED",
         qualified_start_cell=(0, 0),
-        qualified_start_state=QualifiedStartState(
-            position_m=(1.0, 1.0, 0.0),
-            yaw_rad=0.0,
-            motion_mode=0,
-            body_z_m=(0.0, 0.0),
+        physical_observation_pose_mask=physical,
+        physical_projection_schema="lunar-physical-coverability-projection/v1",
+        physical_reachability_algorithm_id=(
+            "cpp-ground-start-connected-component/v1"
         ),
-        reachable_pose_mask=reachable,
+        physical_safe_pose_count=4,
+        physically_reachable_pose_count=3,
+        physical_projection_sha256=projection_sha256,
+        mission_target_detail_mask_sha256="4" * 64,
         coverable_detail_shape=detail.shape,
         coverable_detail_bits=pack_detail_mask(detail),
         coverable_ratio=ratio,
@@ -96,19 +119,10 @@ def _eligible_coverability() -> PlatformCoverability:
         mission_coverable_fraction=1.0,
         initial_coverable_fraction=3.0 / 9.0,
         initial_candidate_count=2,
-        primitive_state_count=4,
-        certified_edge_count=6,
-        recoverable_state_count=3,
-        reachability_algorithm_id=(
-            "cpp-wheel-motion-primitive-recoverable-graph/v1"
-        ),
-        primitive_state_schema="wheel-lattice-state/v1",
-        primitive_set_sha256="1" * 64,
-        world_evidence_sha256="2" * 64,
-        reachability_graph_sha256="3" * 64,
-        visibility_algorithm_id="two-dimensional-detail-los/v1",
-        reachable_mask_sha256=mask_sha256(reachable),
-        coverable_mask_sha256=mask_sha256(detail),
+        coverable_detail_mask_sha256=mask_sha256(detail),
+        sensor_visibility_algorithm_id="two-dimensional-detail-los/v1",
+        capability_content_sha256=capability_sha256,
+        start_identity_sha256=start_sha256,
         exact=True,
         eligible=True,
         ineligible_reason=None,
@@ -120,7 +134,7 @@ def test_platform_coverability_validates_exact_masks_counts_hashes_and_ratio() -
     value = _eligible_coverability()
 
     assert value.coverable_detail_cell_count == 9
-    assert value.reachable_pose_mask.dtype == np.bool_
+    assert value.physical_observation_pose_mask.dtype == np.bool_
     assert value.coverable_detail_mask.tolist() == [
         [True, True, False, False],
         [True, False, False, False],
@@ -129,17 +143,49 @@ def test_platform_coverability_validates_exact_masks_counts_hashes_and_ratio() -
     ]
 
     with pytest.raises(CoverabilityError, match="coverable mask hash"):
-        replace(value, coverable_mask_sha256="f" * 64)
+        replace(value, coverable_detail_mask_sha256="f" * 64)
     with pytest.raises(CoverabilityError, match="coverable ratio"):
         replace(value, coverable_ratio=np.zeros((2, 2), np.float32))
     with pytest.raises(CoverabilityError, match="exact"):
         replace(value, exact=False)
-    with pytest.raises(CoverabilityError, match="primitive graph hash"):
-        replace(value, reachability_graph_sha256="invalid")
-    with pytest.raises(CoverabilityError, match="recoverable state count"):
-        replace(value, recoverable_state_count=5)
-    with pytest.raises(CoverabilityError, match="qualified start state"):
-        replace(value, qualified_start_state=None)
+    with pytest.raises(CoverabilityError, match="physical projection hash"):
+        replace(value, physical_projection_sha256="f" * 64)
+    with pytest.raises(CoverabilityError, match="physical projection schema"):
+        replace(value, physical_projection_schema="legacy-primitive-projection/v1")
+    with pytest.raises(CoverabilityError, match="physically reachable pose count"):
+        replace(value, physically_reachable_pose_count=2)
+    with pytest.raises(CoverabilityError, match="physical safe pose count"):
+        replace(value, physical_safe_pose_count=2)
+
+
+def test_platform_coverability_contract_has_only_physical_projection_identity() -> None:
+    """Would fail if cache eligibility retained any planner primitive identity."""
+    assert {field.name for field in fields(PlatformCoverability)} == {
+        "platform_type",
+        "qualified_start_cell",
+        "physical_observation_pose_mask",
+        "physical_projection_schema",
+        "physical_reachability_algorithm_id",
+        "physical_safe_pose_count",
+        "physically_reachable_pose_count",
+        "physical_projection_sha256",
+        "mission_target_detail_mask_sha256",
+        "coverable_detail_shape",
+        "coverable_detail_bits",
+        "coverable_ratio",
+        "mission_target_detail_cell_count",
+        "coverable_detail_cell_count",
+        "mission_coverable_fraction",
+        "initial_coverable_fraction",
+        "initial_candidate_count",
+        "coverable_detail_mask_sha256",
+        "sensor_visibility_algorithm_id",
+        "capability_content_sha256",
+        "start_identity_sha256",
+        "exact",
+        "eligible",
+        "ineligible_reason",
+    }
 
 
 @pytest.mark.parametrize(
@@ -258,8 +304,8 @@ def test_coverable_union_keeps_visible_nonoccupiable_cell_and_excludes_island() 
     assert not result[5, 5]
 
 
-def test_coverable_union_uses_exact_primitive_pose_not_coarse_cell_center() -> None:
-    """Would fail if cache LOS reconstructed a 4 m center from a graph state."""
+def test_coverable_union_uses_certified_physical_pose_not_coarse_cell_center() -> None:
+    """Would fail if cache LOS discarded a certified physical landing pose."""
     target = np.ones((6, 6), dtype=np.bool_)
     reachable = np.zeros((3, 3), dtype=np.bool_)
     reachable[0, 0] = True

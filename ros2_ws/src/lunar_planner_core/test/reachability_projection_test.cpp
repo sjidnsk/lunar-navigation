@@ -2,7 +2,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <numbers>
 #include <stop_token>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -26,6 +28,20 @@ void SetObstacle(GridMap& map, const std::size_t row,
       map.layers.at("obstacle").values).at(index) = 1U;
   std::get<std::vector<float>>(
       map.layers.at("obstacle_height").values).at(index) = height_m;
+}
+
+void SetElevation(GridMap& map, const std::size_t row,
+                  const std::size_t column, const float elevation_m) {
+  std::get<std::vector<float>>(
+      map.layers.at("elevation").values).at(row * map.width + column) =
+      elevation_m;
+}
+
+void SetKnown(GridMap& map, const std::size_t row,
+              const std::size_t column, const bool known) {
+  std::get<std::vector<std::uint8_t>>(
+      map.layers.at("valid_mask").values).at(row * map.width + column) =
+      static_cast<std::uint8_t>(known);
 }
 
 std::size_t Index(const GridMap& map, const std::size_t row,
@@ -83,6 +99,87 @@ TEST(ReachabilityProjection, GroundMaskIsTheCppStartConnectedComponent) {
   EXPECT_EQ(reachability.projection->algorithm_id,
             "cpp-ground-start-connected-component/v1");
   EXPECT_EQ(reachability.projection->candidate_edges_evaluated, 0U);
+}
+
+TEST(ReachabilityProjection,
+     GroundPhysicalMaskIgnoresPlannerPrimitiveIdentityAndOrder) {
+  PlannerInput first = test::MakeValidWheelInput();
+  PlannerInput second = first;
+  auto& primitives =
+      std::get<WheeledCapability>(second.capability).motion_primitives;
+  std::reverse(primitives.begin(), primitives.end());
+  for (std::size_t index = 0U; index < primitives.size(); ++index) {
+    primitives[index].primitive_id =
+        "physically-irrelevant-primitive-" + std::to_string(index);
+  }
+
+  const auto first_projection = ProjectReachability(first, 30.0);
+  const auto second_projection = ProjectReachability(second, 30.0);
+
+  ASSERT_TRUE(first_projection.ok()) << first_projection.reason_code;
+  ASSERT_TRUE(second_projection.ok()) << second_projection.reason_code;
+  EXPECT_EQ(first_projection.projection->reachable,
+            second_projection.projection->reachable);
+  EXPECT_EQ(first_projection.projection->algorithm_id,
+            second_projection.projection->algorithm_id);
+}
+
+TEST(ReachabilityProjection,
+     GroundPhysicalMaskRejectsSlopeWheelSupportAndClearance) {
+  PlannerInput slope = test::MakeValidWheelInput();
+  auto& slope_capability = std::get<WheeledCapability>(slope.capability);
+  slope_capability.maximum_slope_rad = 5.0 * std::numbers::pi / 180.0;
+  for (std::size_t row = 0U; row < slope.world.global_map.height; ++row) {
+    for (std::size_t column = 0U;
+         column < slope.world.global_map.width; ++column) {
+      SetElevation(slope.world.global_map, row, column,
+                   static_cast<float>(0.25 * column));
+    }
+  }
+  const auto slope_projection = ProjectReachability(slope, 30.0);
+  ASSERT_TRUE(slope_projection.ok()) << slope_projection.reason_code;
+  EXPECT_EQ(slope_projection.projection->reachable[Index(
+                slope.world.global_map, 3U, 2U)],
+            0U);
+
+  PlannerInput support = test::MakeValidWheelInput();
+  SetKnown(support.world.global_map, 3U, 4U, false);
+  const auto support_projection = ProjectReachability(support, 30.0);
+  ASSERT_TRUE(support_projection.ok()) << support_projection.reason_code;
+  EXPECT_EQ(support_projection.projection->reachable[Index(
+                support.world.global_map, 3U, 4U)],
+            0U);
+
+  PlannerInput clearance = test::MakeValidWheelInput();
+  std::get<WheeledCapability>(clearance.capability).minimum_clearance_m = 1.1;
+  SetObstacle(clearance.world.global_map, 3U, 4U);
+  const auto clearance_projection = ProjectReachability(clearance, 30.0);
+  ASSERT_TRUE(clearance_projection.ok()) << clearance_projection.reason_code;
+  EXPECT_EQ(clearance_projection.projection->reachable[Index(
+                clearance.world.global_map, 3U, 3U)],
+            0U);
+}
+
+TEST(ReachabilityProjection,
+     LeggedPhysicalMaskRejectsMissingFootholdAndBodyClearance) {
+  PlannerInput foothold = test::MakeValidLeggedInput();
+  SetKnown(foothold.world.global_map, 3U, 4U, false);
+  const auto foothold_projection = ProjectReachability(foothold, 30.0);
+  ASSERT_TRUE(foothold_projection.ok()) << foothold_projection.reason_code;
+  EXPECT_EQ(foothold_projection.projection->reachable[Index(
+                foothold.world.global_map, 3U, 4U)],
+            0U);
+
+  PlannerInput body_clearance = test::MakeValidLeggedInput();
+  std::get<LeggedCapability>(body_clearance.capability)
+      .minimum_body_clearance_m = 1.1;
+  SetObstacle(body_clearance.world.global_map, 3U, 4U);
+  const auto clearance_projection =
+      ProjectReachability(body_clearance, 30.0);
+  ASSERT_TRUE(clearance_projection.ok()) << clearance_projection.reason_code;
+  EXPECT_EQ(clearance_projection.projection->reachable[Index(
+                body_clearance.world.global_map, 3U, 3U)],
+            0U);
 }
 
 TEST(ReachabilityProjection, HopperCertifiedHopCrossesGroundDisconnectedGap) {
