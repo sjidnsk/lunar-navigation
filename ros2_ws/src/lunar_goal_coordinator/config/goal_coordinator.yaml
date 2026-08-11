@@ -1,0 +1,10 @@
+lunar_goal_coordinator:
+  ros__parameters:
+    use_sim_time: true
+    map_frame: "map"
+    odom_frame: "odom"
+    base_frame: "base_footprint"
+    plan_motion_action: "/plan_motion"
+    position_tolerance_m: 0.5
+    yaw_tolerance_rad: 0.2617993877991494
+    maximum_snapshot_skew_s: 0.2
