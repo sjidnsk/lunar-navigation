@@ -2736,6 +2736,18 @@ class _StaticSceneWork:
     capability_bundle: FrozenCapabilityBundle
 
 
+def _static_scene_process_payload(scene: StaticSceneData) -> dict[str, object]:
+    """Convert immutable scene mappings to process-safe materialization data."""
+    payload = dict(vars(scene))
+    payload["hard_feasible"] = dict(scene.hard_feasible)
+    payload["clearance_margin_norm"] = dict(scene.clearance_margin_norm)
+    payload["coverability"] = dict(scene.coverability)
+    payload["physical_evidence_algorithm_ids"] = dict(
+        scene.physical_evidence_algorithm_ids
+    )
+    return payload
+
+
 def _static_scene_process_worker(
     work: _StaticSceneWork,
 ) -> dict[str, object]:
@@ -2749,11 +2761,7 @@ def _static_scene_process_worker(
         bridge=bridge_api.PlannerBridge(),
         base_cache={},
     )
-    payload = dict(vars(scene))
-    payload["hard_feasible"] = dict(scene.hard_feasible)
-    payload["clearance_margin_norm"] = dict(scene.clearance_margin_norm)
-    payload["coverability"] = dict(scene.coverability)
-    return payload
+    return _static_scene_process_payload(scene)
 
 
 def prepare_formal_training_cache(

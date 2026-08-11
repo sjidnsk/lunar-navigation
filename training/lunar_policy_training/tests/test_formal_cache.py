@@ -316,6 +316,11 @@ def _scene(
     )
 
 
+def _v6_materialization_payload_worker(label: str) -> dict[str, object]:
+    scene = _scene(_sha(label))
+    return formal_cache_module._static_scene_process_payload(scene)
+
+
 def _write(tmp_path: pathlib.Path):
     scene_id = _sha("scene")
     scenario = _scenario_document(scene_id)
@@ -694,6 +699,20 @@ def test_bounded_process_map_yields_source_order() -> None:
     )
 
     assert result == [3, 1, 2]
+
+
+def test_bounded_process_map_returns_picklable_v6_materialization_payload() -> None:
+    payload = list(
+        _ordered_bounded_process_map(
+            ("process-payload",),
+            _v6_materialization_payload_worker,
+            max_workers=1,
+        )
+    )[0]
+
+    assert isinstance(payload["physical_evidence_algorithm_ids"], dict)
+    restored = StaticSceneData(**payload)
+    assert restored.scene_id == _sha("process-payload")
 
 
 def test_hopper_landing_targets_exclude_nodata_cells_in_row_major_order() -> None:
