@@ -4123,7 +4123,21 @@ def _calibration_environment_factory(
     def build_request(action, identity):
         request.state_time.nanoseconds_since_epoch = identity.state_time_ns
         apply_goal_theta(request.goal, platform_type, action.theta_rad)
-        return PreparedPlanRequest(request=request, identity=identity)
+        return PreparedPlanRequest(
+            request=request,
+            identity=identity,
+            candidate_id=hashlib.sha256(
+                f"task3-calibration-candidate:{action.frontier_index}".encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+            physical_snapshot_id=hashlib.sha256(
+                f"task3-calibration-snapshot:{platform_type}:"
+                f"{identity.map_snapshot_id}:{identity.robot_state_id}".encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+        )
 
     environment = create_v3_environment(
         platform_type=platform_type,

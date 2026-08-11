@@ -290,7 +290,12 @@ def _real_v3_worker(
 
     def build_request(action, identity):
         request.state_time.nanoseconds_since_epoch = identity.state_time_ns
-        return PreparedPlanRequest(request=request, identity=identity)
+        return PreparedPlanRequest(
+            request=request,
+            identity=identity,
+            candidate_id="a" * 64,
+            physical_snapshot_id="b" * 64,
+        )
 
     return ParallelEnvironmentWorker(
         environment=create_v3_environment(
@@ -621,9 +626,9 @@ def _quarter_reward(transition: PlannerTransition) -> float:
     return 0.25 * transition.next_observation.observation_identities[0].state_time_ns
 
 
-def test_last_real_action_receives_unsuccessful_terminal_reward_before_reset(
+def test_planning_failure_does_not_invent_terminal_or_rewrite_reward(
 ) -> None:
-    """Would fail if no-action resolution appended done after reward calculation."""
+    """Planner failure keeps the candidate and its single action reward."""
     template = _boundary_observation(all_false=False, generation=1)
     policy = _CountingPolicy().eval()
     with ParallelEnvPool(
@@ -644,11 +649,11 @@ def test_last_real_action_receives_unsuccessful_terminal_reward_before_reset(
     assert len(collected.rollout) == 2
     np.testing.assert_allclose(
         collected.rewards,
-        np.asarray([[-1.4, -1.3]], dtype=np.float32),
+        np.asarray([[-0.4, -0.3]], dtype=np.float32),
         rtol=0.0,
         atol=1.0e-6,
     )
-    assert collected.dones.tolist() == [[True, True]]
+    assert collected.dones.tolist() == [[False, False]]
 
 
 def test_hopper_pool_collector_returns_one_complete_landed_macro_sample() -> None:

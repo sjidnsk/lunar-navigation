@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
 
@@ -24,6 +25,10 @@ from .training_semantics import formal_success_first_crossing
 
 
 _PLATFORM_INDEX = {platform: index for index, platform in enumerate(PLATFORMS)}
+
+
+def _proxy_identity_sha256(label: str) -> str:
+    return hashlib.sha256(label.encode("utf-8")).hexdigest()
 
 
 def _vec2(x: float, y: float) -> bridge_api.Vec2:
@@ -64,8 +69,10 @@ def _flat_proxy_map(
 ) -> bridge_api.GridMap:
     if platform_type == "HOPPER":
         width, height, resolution = 16, 12, 0.5
+        origin_x_m, origin_y_m = 0.0, 0.0
     else:
-        width, height, resolution = 60, 40, 0.2
+        width, height, resolution = 50, 50, 0.2
+        origin_x_m, origin_y_m = -1.0, -1.0
     count = width * height
     terrain_amplitude = {
         "flat_sparse": 0.0,
@@ -79,6 +86,7 @@ def _flat_proxy_map(
     grid = bridge_api.GridMap()
     grid.frame_id = frame_id
     grid.stamp.nanoseconds_since_epoch = stamp_ns
+    grid.origin_m = _vec3(origin_x_m, origin_y_m, 0.0)
     grid.width = width
     grid.height = height
     grid.resolution_m = resolution
@@ -471,6 +479,18 @@ class _ProxyEpisode:
         return PreparedPlanRequest(
             request=request,
             identity=expected_identity,
+            candidate_id=_proxy_identity_sha256(
+                "proxy-candidate/v1:"
+                f"{self.platform_type}:{self.pending_target[0]:.6f}:"
+                f"{self.pending_target[1]:.6f}"
+            ),
+            physical_snapshot_id=_proxy_identity_sha256(
+                "proxy-physical-snapshot/v1:"
+                f"{self.platform_type}:{self.scenario.terrain_id}:"
+                f"{expected_identity.mission_revision}:"
+                f"{self.position[0]:.6f}:{self.position[1]:.6f}:"
+                f"{expected_identity.map_snapshot_id}"
+            ),
         )
 
     def begin_ground_option(
