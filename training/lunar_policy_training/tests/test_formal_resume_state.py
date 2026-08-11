@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-import copy
+import hashlib
 import pathlib
 import sys
+from dataclasses import replace
 
+import numpy as np
 import pytest
+from lunar_planner_training_bridge import CandidateDisposition
 
 
 PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -12,9 +15,16 @@ REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PACKAGE_ROOT))
 sys.path.insert(0, str(REPOSITORY_ROOT / "model_contract"))
 
+from lunar_policy_training.environment.candidate_builder import (  # noqa: E402
+    CandidateBuilderV2,
+    PhysicalCandidateUniverse,
+)
 from lunar_policy_training.environment.formal_episode_state import (  # noqa: E402
+    FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
     FormalWorkerState,
 )
+from lunar_policy_training.environment.macro_step import PolicyAction  # noqa: E402
+from test_formal_builder import _assembly  # noqa: E402
 
 
 def _worker_state() -> dict[str, object]:
@@ -34,6 +44,7 @@ def _worker_state() -> dict[str, object]:
         "elevation_m": 7.0,
         "frame_id": "map",
     }
+    candidate_ids = [f"{index + 10:064x}" for index in range(64)]
     return {
         "scenario_schedule_id": "cache/train/v3",
         "platform_type": "WHEELED",
@@ -51,10 +62,11 @@ def _worker_state() -> dict[str, object]:
         "legged_body_z_m": 7.0,
         "execution_state": "DECISION_BOUNDARY",
         "observation_revision": 2,
-        "primitive_graph_revision": 2,
-        "primitive_graph_sha256": "4" * 64,
-        "primitive_world_evidence_sha256": "5" * 64,
-        "primitive_set_sha256": "6" * 64,
+        "physical_snapshot_id": "4" * 64,
+        "physical_evidence_generation": 3,
+        "physical_evidence_sha256": "5" * 64,
+        "physical_candidate_universe_sha256": "6" * 64,
+        "planner_failed_candidate_ids": [],
         "state_time_ns": 2_250_000_000,
         "reveal_history": [
             {
@@ -80,10 +92,83 @@ def _worker_state() -> dict[str, object]:
         ],
         "observation_identity": identity,
         "policy_batch_sha256": "2" * 64,
-        "rejected_candidate_indices": [1, 3],
+        "candidate_ids": candidate_ids,
+        "candidate_mask": [True] * 64,
+        "oracle_opportunity_count": 70,
+        "oracle_opportunity_set_sha256": "7" * 64,
+        "terminal_reason": None,
+        "defer_candidate_rebuild": False,
         "last_hop_available_delta_v_mps": 0.0,
         "candidate_gain_resolution_m": 0.2,
     }
+
+
+def _force_seventy_candidate_universe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = CandidateBuilderV2.build_physical_universe
+
+    def build_seventy(self, *args, **kwargs):
+        universe = original(self, *args, **kwargs)
+        candidates = universe.candidates[:70]
+        assert len(candidates) == 70
+        diagnostics = replace(
+            universe.diagnostics,
+            physical_candidate_universe_count=70,
+            selected_policy_candidate_count=64,
+            available_candidate_count=70,
+            untried_reserve_count=6,
+        )
+        return PhysicalCandidateUniverse(
+            physical_snapshot_id=universe.physical_snapshot_id,
+            physical_reachability_algorithm_id=(
+                universe.physical_reachability_algorithm_id
+            ),
+            candidates=candidates,
+            universe_sha256=hashlib.sha256(
+                "".join(item.candidate_id for item in candidates).encode("ascii")
+            ).hexdigest(),
+            diagnostics=diagnostics,
+        )
+
+    monkeypatch.setattr(
+        CandidateBuilderV2,
+        "build_physical_universe",
+        build_seventy,
+    )
+
+
+def _worker_with_six_failures(tmp_path, monkeypatch):
+    _force_seventy_candidate_universe(monkeypatch)
+    assembly, _, _ = _assembly(tmp_path)
+    worker = assembly.factory.create_for_episode(
+        0,
+        "WHEELED",
+        4,
+        platform_worker_index=0,
+        platform_worker_count=8,
+    )
+    episode = worker.episode
+    snapshot = episode._snapshot
+    assert snapshot is not None
+    failed_ids = tuple(
+        str(snapshot.candidates.candidate_ids[index]) for index in range(6)
+    )
+    initial_ids = tuple(
+        str(snapshot.candidates.candidate_ids[index]) for index in range(64)
+    )
+    for candidate_id in failed_ids:
+        boundary = episode.refresh_after_planning_failure(
+            candidate_id,
+            CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+            snapshot.candidate_universe.physical_snapshot_id,
+        )
+        worker.environment._install_observation(boundary.next_observation)
+    refreshed = episode._snapshot
+    assert refreshed is not None
+    assert refreshed.candidates.count == 64
+    assert set(refreshed.candidates.candidate_ids) - set(initial_ids)
+    return assembly, worker
 
 
 def test_formal_worker_state_roundtrips_as_strict_json() -> None:
@@ -91,63 +176,166 @@ def test_formal_worker_state_roundtrips_as_strict_json() -> None:
 
     state = FormalWorkerState.from_dict(payload)
 
+    assert FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION == (
+        "lunar-formal-environment-state/v6"
+    )
     assert state.to_dict() == payload
     assert state.episode_cursor == 4
-    assert state.rejected_candidate_indices == (1, 3)
+    assert state.physical_evidence_generation == 3
+    assert state.planner_failed_candidate_ids == ()
     assert state.candidate_gain_resolution_m == 0.2
     assert len(state.reveal_history[0].path_samples) == 2
 
 
-def test_formal_worker_state_rejects_missing_detail_gain_marker() -> None:
+@pytest.mark.parametrize(
+    "missing",
+    (
+        "physical_snapshot_id",
+        "physical_evidence_generation",
+        "physical_evidence_sha256",
+        "physical_candidate_universe_sha256",
+        "planner_failed_candidate_ids",
+        "defer_candidate_rebuild",
+    ),
+)
+def test_formal_worker_state_rejects_missing_physical_identity(missing: str) -> None:
     payload = _worker_state()
-    payload.pop("candidate_gain_resolution_m")
+    payload.pop(missing)
 
     with pytest.raises(ValueError, match="structure"):
         FormalWorkerState.from_dict(payload)
 
 
+def test_formal_worker_state_rejects_retired_primitive_identity() -> None:
+    payload = _worker_state()
+    payload.update(
+        {
+            "primitive_graph_revision": 2,
+            "primitive_graph_sha256": "8" * 64,
+            "primitive_world_evidence_sha256": "9" * 64,
+            "primitive_set_sha256": "a" * 64,
+            "rejected_candidate_indices": [1, 3],
+        }
+    )
+
+    with pytest.raises(ValueError, match="structure"):
+        FormalWorkerState.from_dict(payload)
+
+
+def test_formal_worker_state_rejects_promoted_defaults() -> None:
+    payload = _worker_state()
+    payload["physical_snapshot_id"] = "0" * 64
+    payload["physical_evidence_generation"] = 0
+    payload["physical_evidence_sha256"] = "0" * 64
+    payload["physical_candidate_universe_sha256"] = "0" * 64
+
+    with pytest.raises(ValueError, match="physical"):
+        FormalWorkerState.from_dict(payload)
+
+
+def test_physical_worker_replay_roundtrips_reserve_failures_bit_exactly(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assembly, worker = _worker_with_six_failures(tmp_path, monkeypatch)
+    state = worker.snapshot_episode_state()
+    before_snapshot = worker.episode._snapshot
+    assert before_snapshot is not None
+    before_observation = worker.environment.current_observation
+    restored = assembly.factory.restore_for_episode(
+        worker_index=0,
+        platform_type="WHEELED",
+        episode_cursor=4,
+        platform_worker_index=0,
+        platform_worker_count=8,
+        state=state,
+    )
+    after_snapshot = restored.episode._snapshot
+    assert after_snapshot is not None
+    after_observation = restored.environment.current_observation
+
+    assert len(after_snapshot.candidate_universe.candidates) == 70
+    assert len(state["planner_failed_candidate_ids"]) == 6
+    assert tuple(after_snapshot.candidates.candidate_ids) == tuple(
+        before_snapshot.candidates.candidate_ids
+    )
+    assert np.array_equal(
+        after_snapshot.candidates.mask,
+        before_snapshot.candidates.mask,
+    )
+    assert after_snapshot.candidate_universe_sha256 == (
+        before_snapshot.candidate_universe_sha256
+    )
+    assert after_snapshot.frontier_oracle.oracle_opportunity_count == (
+        before_snapshot.frontier_oracle.oracle_opportunity_count
+    )
+    assert after_snapshot.frontier_oracle.oracle_opportunity_set_sha256 == (
+        before_snapshot.frontier_oracle.oracle_opportunity_set_sha256
+    )
+    assert after_observation.observation_identities == (
+        before_observation.observation_identities
+    )
+    assert all(
+        np.array_equal(
+            getattr(after_observation, name).numpy(),
+            getattr(before_observation, name).numpy(),
+        )
+        for name in before_observation.input_names
+    )
+    assert restored.environment._audit_current_candidate_boundary() == (
+        worker.environment._audit_current_candidate_boundary()
+    )
+
+
 @pytest.mark.parametrize(
-    ("mutation", "message"),
+    "mutation",
     (
-        (lambda value: value.pop("scene_id"), "structure"),
-        (lambda value: value.__setitem__("extra", 1), "structure"),
-        (
-            lambda value: value["current_pose"].__setitem__("x_m", float("nan")),
-            "finite",
+        lambda value: value.__setitem__("physical_snapshot_id", "0" * 64),
+        lambda value: value.__setitem__(
+            "physical_evidence_generation",
+            value["physical_evidence_generation"] + 1,
         ),
-        (lambda value: value.__setitem__("platform_type", "FLYING"), "platform"),
-        (lambda value: value.__setitem__("episode_cursor", -1), "cursor"),
-        (
-            lambda value: value.__setitem__("execution_state", "IN_FLIGHT"),
-            "stable",
+        lambda value: value.__setitem__("physical_evidence_sha256", "0" * 64),
+        lambda value: value.__setitem__(
+            "physical_candidate_universe_sha256", "0" * 64
         ),
-        (
-            lambda value: value.__setitem__("observation_revision", 8),
-            "revision",
-        ),
-        (
-            lambda value: value.__setitem__("primitive_graph_revision", 1),
-            "primitive graph revision",
-        ),
-        (
-            lambda value: value.__setitem__(
-                "rejected_candidate_indices", [3, 1]
-            ),
-            "candidate",
-        ),
-        (
-            lambda value: value.__setitem__(
-                "candidate_gain_resolution_m", 1.0
-            ),
-            "candidate gain resolution",
+        lambda value: value["planner_failed_candidate_ids"].__setitem__(
+            0, "0" * 64
         ),
     ),
 )
-def test_formal_worker_state_rejects_ambiguous_or_unstable_payloads(
-    mutation, message: str
+def test_physical_worker_replay_rejects_identity_drift(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation,
 ) -> None:
-    payload = copy.deepcopy(_worker_state())
-    mutation(payload)
+    assembly, worker = _worker_with_six_failures(tmp_path, monkeypatch)
+    state = worker.snapshot_episode_state()
+    mutation(state)
 
-    with pytest.raises(ValueError, match=message):
-        FormalWorkerState.from_dict(payload)
+    with pytest.raises(ValueError, match="physical|candidate|replay"):
+        assembly.factory.restore_for_episode(
+            worker_index=0,
+            platform_type="WHEELED",
+            episode_cursor=4,
+            platform_worker_index=0,
+            platform_worker_count=8,
+            state=state,
+        )
+
+
+def test_formal_snapshot_rejects_active_ground_option(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _force_seventy_candidate_universe(monkeypatch)
+    assembly, _, _ = _assembly(tmp_path)
+    worker = assembly.factory(0, "WHEELED")
+    observation = worker.environment.current_observation
+    worker.episode.begin_ground_option(
+        PolicyAction(0, 0.0),
+        observation.observation_identities[0],
+    )
+
+    with pytest.raises(ValueError, match="active ground option"):
+        worker.snapshot_episode_state()

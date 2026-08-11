@@ -6,6 +6,7 @@ import pathlib
 import random
 import json
 import sys
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -125,11 +126,54 @@ def test_resume_preserves_consumed_gpu_budget(tmp_path: pathlib.Path) -> None:
     budget = TrainingBudget.from_checkpoint(resumed)
 
     assert resumed.schema_version == CHECKPOINT_SCHEMA_VERSION
-    assert resumed.schema_version == "lunar-ppo-checkpoint/v6"
+    assert resumed.schema_version == "lunar-ppo-checkpoint/v7"
     assert resumed.run_identity == _identity()
     assert resumed.contract_version == OBSERVATION_CONTRACT_VERSION
     assert resumed.consumed_gpu_seconds == 7200.0
     assert budget.remaining_gpu_seconds == 86400.0 - 7200.0
+
+
+def test_checkpoint_resume_rejects_v6_checkpoint(
+    tmp_path: pathlib.Path,
+) -> None:
+    checkpoint = _checkpoint(consumed_gpu_seconds=7200.0)
+    body = _body_from_checkpoint(checkpoint)
+    body["schema_version"] = "lunar-ppo-checkpoint/v6"
+    path = tmp_path / "checkpoint-v6.pt"
+    torch.save(
+        {"body": body, "body_sha256": _semantic_sha256(body)},
+        path,
+    )
+
+    with pytest.raises(CheckpointError, match="schema"):
+        load_checkpoint_for_resume(
+            path,
+            expected_contract_version=OBSERVATION_CONTRACT_VERSION,
+            expected_config_hash=checkpoint.config_hash,
+            expected_source_commit=checkpoint.source_commit,
+            expected_run_identity=checkpoint.run_identity,
+        )
+
+
+def test_restore_training_state_rejects_v6_object_without_mutation() -> None:
+    checkpoint = _checkpoint(consumed_gpu_seconds=7200.0)
+    legacy = replace(checkpoint, schema_version="lunar-ppo-checkpoint/v6")
+    model = torch.nn.Linear(3, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=2)
+    model_before = copy.deepcopy(model.state_dict())
+    optimizer_before = copy.deepcopy(optimizer.state_dict())
+    rng_before = _semantic_sha256(_capture_rng_state())
+
+    with pytest.raises(CheckpointError, match="schema"):
+        restore_training_state(legacy, model, optimizer, scheduler)
+
+    assert all(
+        torch.equal(model.state_dict()[name], value)
+        for name, value in model_before.items()
+    )
+    assert optimizer.state_dict() == optimizer_before
+    assert _semantic_sha256(_capture_rng_state()) == rng_before
 
 
 def test_source_migration_changes_only_commit_and_payload_hash() -> None:
@@ -191,10 +235,11 @@ def _formal_worker_state(index: int) -> dict[str, object]:
         "legged_body_z_m": 7.0,
         "execution_state": execution_state,
         "observation_revision": 1,
-        "primitive_graph_revision": 1,
-        "primitive_graph_sha256": f"{index + 901:064x}",
-        "primitive_world_evidence_sha256": f"{index + 1001:064x}",
-        "primitive_set_sha256": f"{index + 1101:064x}",
+        "physical_snapshot_id": f"{index + 901:064x}",
+        "physical_evidence_generation": 1,
+        "physical_evidence_sha256": f"{index + 1001:064x}",
+        "physical_candidate_universe_sha256": f"{index + 1101:064x}",
+        "planner_failed_candidate_ids": [],
         "state_time_ns": 1_000_000_000,
         "reveal_history": [],
         "observation_identity": {
@@ -207,7 +252,12 @@ def _formal_worker_state(index: int) -> dict[str, object]:
             "candidate_set_id": f"{index + 601:064x}",
         },
         "policy_batch_sha256": f"{index + 701:064x}",
-        "rejected_candidate_indices": [],
+        "candidate_ids": [f"{index * 64 + lane + 1201:064x}" for lane in range(64)],
+        "candidate_mask": [True] * 64,
+        "oracle_opportunity_count": 64,
+        "oracle_opportunity_set_sha256": f"{index + 1301:064x}",
+        "terminal_reason": None,
+        "defer_candidate_rebuild": False,
         "last_hop_available_delta_v_mps": 0.0,
         "candidate_gain_resolution_m": 0.2,
     }
@@ -253,7 +303,7 @@ def _policy_parent_checkpoint(
         candidate_checkpoint_gpu_seconds=7200.0,
         environment_state=(
             {
-                "schema_version": "lunar-formal-environment-state/v5",
+                "schema_version": "lunar-formal-environment-state/v6",
                 "scenario_schedule_id": "cache-sha/train/v3",
                 "worker_episode_states": [
                     _formal_worker_state(index) for index in range(24)
@@ -320,6 +370,24 @@ def test_policy_warm_start_transfers_only_approved_weights(
         for name in target_state
         if name.startswith("value_mlp.")
     )
+
+
+def test_policy_warm_start_rejects_v6_checkpoint(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "checkpoint-v6.pt"
+    _policy_parent_checkpoint(path)
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    payload["body"]["schema_version"] = "lunar-ppo-checkpoint/v6"
+    payload["body_sha256"] = _semantic_sha256(payload["body"])
+    torch.save(payload, path)
+
+    with pytest.raises(CheckpointError, match="schema"):
+        load_policy_warm_start(
+            path,
+            CrossAttentionPolicy(),
+            value_head_seed=4080,
+        )
 
 
 def test_policy_warm_start_keeps_obsolete_episode_state_inert(
@@ -415,7 +483,7 @@ def test_formal_checkpoint_roundtrips_exact_active_worker_states(
     tmp_path: pathlib.Path,
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v5",
+        "schema_version": "lunar-formal-environment-state/v6",
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)
@@ -442,11 +510,41 @@ def test_formal_checkpoint_roundtrips_exact_active_worker_states(
     assert resumed.environment_state == environment_state
 
 
+def test_checkpoint_rejects_formal_v5_environment_state(
+    tmp_path: pathlib.Path,
+) -> None:
+    environment_state = {
+        "schema_version": "lunar-formal-environment-state/v6",
+        "scenario_schedule_id": "cache-sha/train/v3",
+        "worker_episode_states": [
+            _formal_worker_state(index) for index in range(24)
+        ],
+    }
+    checkpoint = _checkpoint(
+        consumed_gpu_seconds=25.0,
+        worker_allocation={"WHEELED": 8, "LEGGED": 8, "HOPPER": 8},
+        run_kind="formal",
+        environment_state=environment_state,
+    )
+    body = _body_from_checkpoint(checkpoint)
+    body["environment_state"]["schema_version"] = (
+        "lunar-formal-environment-state/v5"
+    )
+    path = tmp_path / "formal-v5.pt"
+    torch.save(
+        {"body": body, "body_sha256": _semantic_sha256(body)},
+        path,
+    )
+
+    with pytest.raises(CheckpointError, match="environment state schema"):
+        load_checkpoint(path)
+
+
 def test_formal_source_migration_preserves_original_and_records_evidence(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v5",
+        "schema_version": "lunar-formal-environment-state/v6",
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)

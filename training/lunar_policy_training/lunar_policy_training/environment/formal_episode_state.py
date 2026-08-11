@@ -12,7 +12,7 @@ import torch
 from ..policy.observation import ObservationIdentity, PolicyBatch
 
 
-FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION = "lunar-formal-environment-state/v5"
+FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION = "lunar-formal-environment-state/v6"
 STABLE_EXECUTION_STATES = frozenset(
     {"DECISION_BOUNDARY", "GROUND_HOLD", "LANDED_HOLD"}
 )
@@ -60,20 +60,38 @@ _WORKER_FIELDS = frozenset(
         "legged_body_z_m",
         "execution_state",
         "observation_revision",
-        "primitive_graph_revision",
-        "primitive_graph_sha256",
-        "primitive_world_evidence_sha256",
-        "primitive_set_sha256",
+        "physical_snapshot_id",
+        "physical_evidence_generation",
+        "physical_evidence_sha256",
+        "physical_candidate_universe_sha256",
+        "planner_failed_candidate_ids",
         "state_time_ns",
         "reveal_history",
         "observation_identity",
         "policy_batch_sha256",
-        "rejected_candidate_indices",
+        "candidate_ids",
+        "candidate_mask",
+        "oracle_opportunity_count",
+        "oracle_opportunity_set_sha256",
+        "terminal_reason",
+        "defer_candidate_rebuild",
         "last_hop_available_delta_v_mps",
         "candidate_gain_resolution_m",
     }
 )
 _CANDIDATE_GAIN_RESOLUTION_M = 0.2
+_TERMINAL_REASONS = frozenset(
+    {
+        "SUCCESS",
+        "NO_RECOVERABLE_OBSERVATION_STATE",
+        "VISITED_EXHAUSTED",
+        "ZERO_GAIN",
+        "NO_TRANSIT_OPPORTUNITY",
+        "PLANNER_BLOCKED_WITH_OPPORTUNITY",
+        "HARD_FAILURE",
+        "CANCELED",
+    }
+)
 
 
 def _finite(value: object, name: str) -> float:
@@ -100,6 +118,13 @@ def _sha256(value: object, name: str) -> str:
     ):
         raise ValueError(f"formal {name} must be a lowercase SHA-256")
     return value
+
+
+def _physical_sha256(value: object, name: str) -> str:
+    digest = _sha256(value, name)
+    if digest == "0" * 64:
+        raise ValueError(f"formal {name} must not use a promoted default")
+    return digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,15 +302,21 @@ class FormalWorkerState:
     legged_body_z_m: float
     execution_state: str
     observation_revision: int
-    primitive_graph_revision: int
-    primitive_graph_sha256: str
-    primitive_world_evidence_sha256: str
-    primitive_set_sha256: str
+    physical_snapshot_id: str
+    physical_evidence_generation: int
+    physical_evidence_sha256: str
+    physical_candidate_universe_sha256: str
+    planner_failed_candidate_ids: tuple[str, ...]
     state_time_ns: int
     reveal_history: tuple[FormalRevealState, ...]
     observation_identity: ObservationIdentity
     policy_batch_sha256: str
-    rejected_candidate_indices: tuple[int, ...]
+    candidate_ids: tuple[str, ...]
+    candidate_mask: tuple[bool, ...]
+    oracle_opportunity_count: int
+    oracle_opportunity_set_sha256: str
+    terminal_reason: str | None
+    defer_candidate_rebuild: bool
     last_hop_available_delta_v_mps: float
     candidate_gain_resolution_m: float
 
@@ -331,14 +362,30 @@ class FormalWorkerState:
         revision = _nonnegative_int(
             value["observation_revision"], "observation revision"
         )
-        if revision != len(history) + 1:
-            raise ValueError("formal observation revision does not match reveal history")
-        primitive_graph_revision = _nonnegative_int(
-            value["primitive_graph_revision"], "primitive graph revision"
-        )
-        if primitive_graph_revision != revision:
+        failed_value = value["planner_failed_candidate_ids"]
+        if (
+            not isinstance(failed_value, list)
+            or any(not isinstance(item, str) for item in failed_value)
+            or any(_sha256(item, "planner failed candidate ID") != item for item in failed_value)
+            or failed_value != sorted(set(failed_value))
+        ):
+            raise ValueError("formal planner failed candidate IDs are invalid")
+        expected_revision = len(history) + len(failed_value) + 1
+        if revision != expected_revision:
             raise ValueError(
-                "formal primitive graph revision differs from observation revision"
+                "formal observation revision does not match replay history"
+            )
+        evidence_generation = _nonnegative_int(
+            value["physical_evidence_generation"],
+            "physical evidence generation",
+        )
+        expected_generation = 1 + sum(
+            len(item.path_samples) if item.path_samples else 1
+            for item in history
+        )
+        if evidence_generation != expected_generation:
+            raise ValueError(
+                "formal physical evidence generation does not match reveal history"
             )
         state_time_ns = _nonnegative_int(value["state_time_ns"], "state time")
         expected_time_ns = 1_000_000_000 + sum(
@@ -355,13 +402,50 @@ class FormalWorkerState:
         current_pose = FormalPoseState.from_dict(value["current_pose"])
         if history and history[-1].pose != current_pose:
             raise ValueError("formal current pose differs from reveal history")
-        candidates = value["rejected_candidate_indices"]
+        candidate_ids = value["candidate_ids"]
+        candidate_mask = value["candidate_mask"]
         if (
-            not isinstance(candidates, list)
-            or any(type(item) is not int or not 0 <= item < 64 for item in candidates)
-            or candidates != sorted(set(candidates))
+            not isinstance(candidate_ids, list)
+            or len(candidate_ids) != 64
+            or not isinstance(candidate_mask, list)
+            or len(candidate_mask) != 64
+            or any(type(item) is not bool for item in candidate_mask)
+            or any(not isinstance(item, str) for item in candidate_ids)
+            or any(
+                (_sha256(candidate_id, "candidate ID") if enabled else candidate_id)
+                != candidate_id
+                for candidate_id, enabled in zip(
+                    candidate_ids, candidate_mask, strict=True
+                )
+            )
+            or any(
+                not enabled and candidate_id != ""
+                for candidate_id, enabled in zip(
+                    candidate_ids, candidate_mask, strict=True
+                )
+            )
+            or len(
+                {
+                    candidate_id
+                    for candidate_id, enabled in zip(
+                        candidate_ids, candidate_mask, strict=True
+                    )
+                    if enabled
+                }
+            )
+            != sum(candidate_mask)
         ):
-            raise ValueError("formal rejected candidate indices are invalid")
+            raise ValueError("formal candidate IDs or mask are invalid")
+        oracle_count = _nonnegative_int(
+            value["oracle_opportunity_count"], "oracle opportunity count"
+        )
+        terminal_reason = value["terminal_reason"]
+        if terminal_reason is not None and terminal_reason not in _TERMINAL_REASONS:
+            raise ValueError("formal terminal reason is invalid")
+        if bool(any(candidate_mask)) != (terminal_reason is None):
+            raise ValueError("formal terminal decision differs from availability")
+        if type(value["defer_candidate_rebuild"]) is not bool:
+            raise ValueError("formal defer candidate rebuild flag is invalid")
         last_delta_v = _finite(
             value["last_hop_available_delta_v_mps"], "hopper delta-v"
         )
@@ -388,24 +472,33 @@ class FormalWorkerState:
             ),
             execution_state=str(execution_state),
             observation_revision=revision,
-            primitive_graph_revision=primitive_graph_revision,
-            primitive_graph_sha256=_sha256(
-                value["primitive_graph_sha256"], "primitive graph digest"
+            physical_snapshot_id=_physical_sha256(
+                value["physical_snapshot_id"], "physical snapshot ID"
             ),
-            primitive_world_evidence_sha256=_sha256(
-                value["primitive_world_evidence_sha256"],
-                "primitive world evidence digest",
+            physical_evidence_generation=evidence_generation,
+            physical_evidence_sha256=_physical_sha256(
+                value["physical_evidence_sha256"], "physical evidence digest"
             ),
-            primitive_set_sha256=_sha256(
-                value["primitive_set_sha256"], "primitive set digest"
+            physical_candidate_universe_sha256=_physical_sha256(
+                value["physical_candidate_universe_sha256"],
+                "physical candidate universe digest",
             ),
+            planner_failed_candidate_ids=tuple(failed_value),
             state_time_ns=state_time_ns,
             reveal_history=history,
             observation_identity=identity,
             policy_batch_sha256=_sha256(
                 value["policy_batch_sha256"], "policy batch digest"
             ),
-            rejected_candidate_indices=tuple(candidates),
+            candidate_ids=tuple(candidate_ids),
+            candidate_mask=tuple(candidate_mask),
+            oracle_opportunity_count=oracle_count,
+            oracle_opportunity_set_sha256=_sha256(
+                value["oracle_opportunity_set_sha256"],
+                "oracle opportunity set digest",
+            ),
+            terminal_reason=terminal_reason,
+            defer_candidate_rebuild=value["defer_candidate_rebuild"],
             last_hop_available_delta_v_mps=last_delta_v,
             candidate_gain_resolution_m=candidate_gain_resolution_m,
         )
@@ -428,19 +521,29 @@ class FormalWorkerState:
             "legged_body_z_m": self.legged_body_z_m,
             "execution_state": self.execution_state,
             "observation_revision": self.observation_revision,
-            "primitive_graph_revision": self.primitive_graph_revision,
-            "primitive_graph_sha256": self.primitive_graph_sha256,
-            "primitive_world_evidence_sha256": (
-                self.primitive_world_evidence_sha256
+            "physical_snapshot_id": self.physical_snapshot_id,
+            "physical_evidence_generation": self.physical_evidence_generation,
+            "physical_evidence_sha256": self.physical_evidence_sha256,
+            "physical_candidate_universe_sha256": (
+                self.physical_candidate_universe_sha256
             ),
-            "primitive_set_sha256": self.primitive_set_sha256,
+            "planner_failed_candidate_ids": list(
+                self.planner_failed_candidate_ids
+            ),
             "state_time_ns": self.state_time_ns,
             "reveal_history": [item.to_dict() for item in self.reveal_history],
             "observation_identity": observation_identity_to_dict(
                 self.observation_identity
             ),
             "policy_batch_sha256": self.policy_batch_sha256,
-            "rejected_candidate_indices": list(self.rejected_candidate_indices),
+            "candidate_ids": list(self.candidate_ids),
+            "candidate_mask": list(self.candidate_mask),
+            "oracle_opportunity_count": self.oracle_opportunity_count,
+            "oracle_opportunity_set_sha256": (
+                self.oracle_opportunity_set_sha256
+            ),
+            "terminal_reason": self.terminal_reason,
+            "defer_candidate_rebuild": self.defer_candidate_rebuild,
             "last_hop_available_delta_v_mps": self.last_hop_available_delta_v_mps,
             "candidate_gain_resolution_m": self.candidate_gain_resolution_m,
         }

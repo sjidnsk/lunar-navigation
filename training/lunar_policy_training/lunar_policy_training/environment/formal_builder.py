@@ -53,6 +53,7 @@ from .formal_episode_state import (
     FormalPoseState,
     FormalRevealState,
     FormalWorkerState,
+    policy_batch_sha256,
 )
 from .frontier_oracle import (
     FrontierOpportunityOracle,
@@ -87,6 +88,7 @@ from .v3_environment import (
     EnvironmentInvariantError,
     PreparedPlanRequest,
     ReferenceExecutionResult,
+    _audit_candidate_boundary,
     create_v3_environment,
 )
 from .visibility import NativeVisibilityEstimator, SensorGeometry
@@ -641,20 +643,230 @@ class FormalEpisode:
         )
 
     def replay_state(self, state: FormalWorkerState) -> None:
-        """Fail closed until Task 10 defines a physical replay schema."""
-        del state
-        raise ValueError(
-            "formal replay v5 carries retired graph identity; "
-            "a physical replay schema is required"
+        """Replay physical evidence and verify every persisted boundary identity."""
+        if not isinstance(state, FormalWorkerState):
+            raise ValueError("formal replay state is invalid")
+        expected_static = (
+            self.scenario_identity.scenario_schedule_id,
+            self.platform_type,
+            self.worker_index,
+            self.scenario_identity.platform_worker_index,
+            self.scenario_identity.platform_worker_count,
+            self.episode_cursor,
+            self.scene_id,
+            self.scene_seed,
+            self.start_seed,
+            self.episode_seed,
+            self.sensor_state.coverable_mask_sha256,
+            self.start_cell,
         )
+        persisted_static = (
+            state.scenario_schedule_id,
+            state.platform_type,
+            state.worker_index,
+            state.platform_worker_index,
+            state.platform_worker_count,
+            state.episode_cursor,
+            state.scene_id,
+            state.scene_seed,
+            state.start_seed,
+            state.episode_seed,
+            state.coverability_mask_sha256,
+            state.start_cell,
+        )
+        if persisted_static != expected_static:
+            raise ValueError("formal replay worker identity differs")
+        if self._active_ground_option is not None:
+            raise ValueError("formal replay cannot contain an active ground option")
+
+        for reveal in state.reveal_history:
+            pose = self._pose_from_state(reveal.pose)
+            evidence = SensorBoundaryEvidence(
+                pose,
+                reveal.elapsed_s,
+                path_samples=tuple(
+                    SensorPathSample(
+                        self._pose_from_state(sample.pose),
+                        sample.elapsed_s,
+                    )
+                    for sample in reveal.path_samples
+                ),
+            )
+            self.current_pose = pose
+            self._current_legged_body_z_m = reveal.legged_body_z_m
+            self._record_reveal(
+                evidence,
+                reveal.execution_state,
+                defer_candidate_rebuild=reveal.defer_candidate_rebuild,
+            )
+            self.controller.after_execution(
+                platform_type=self.platform_type,
+                execution_state=reveal.execution_state,
+                evidence=evidence,
+            )
+
+        snapshot = self._snapshot
+        if snapshot is None:
+            raise ValueError("formal replay produced no physical snapshot")
+        if snapshot.candidate_universe.physical_snapshot_id != state.physical_snapshot_id:
+            raise ValueError("formal replay physical snapshot differs")
+        for candidate_id in state.planner_failed_candidate_ids:
+            self.refresh_after_planning_failure(
+                candidate_id,
+                bridge_api.CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+                state.physical_snapshot_id,
+            )
+
+        self.last_hop_available_delta_v_mps = (
+            state.last_hop_available_delta_v_mps
+        )
+        observation = self.controller.current_observation
+        snapshot = self._snapshot
+        if snapshot is None:
+            raise ValueError("formal replay produced no final physical snapshot")
+        identity = observation.observation_identities[0]
+        candidate_ids = tuple(str(item) for item in snapshot.candidates.candidate_ids)
+        candidate_mask = tuple(bool(item) for item in snapshot.candidates.mask)
+        terminal_reason = _audit_candidate_boundary(
+            snapshot.candidates.diagnostics,
+            snapshot.frontier_oracle,
+        )
+        replayed = (
+            self._revision,
+            self.sensor_state.evidence_generation,
+            self.sensor_state.physical_evidence_sha256(),
+            snapshot.candidate_universe.physical_snapshot_id,
+            snapshot.candidate_universe_sha256,
+            tuple(sorted(self._planner_failed_candidate_ids)),
+            self._pose_state(self.current_pose),
+            self._current_legged_body_z_m,
+            identity.state_time_ns,
+            identity,
+            policy_batch_sha256(observation),
+            candidate_ids,
+            candidate_mask,
+            snapshot.frontier_oracle.oracle_opportunity_count,
+            snapshot.frontier_oracle.oracle_opportunity_set_sha256,
+            None if terminal_reason is None else terminal_reason.value,
+            self._defer_candidate_rebuild,
+            self._current_candidate_gain_resolution_m,
+        )
+        persisted = (
+            state.observation_revision,
+            state.physical_evidence_generation,
+            state.physical_evidence_sha256,
+            state.physical_snapshot_id,
+            state.physical_candidate_universe_sha256,
+            state.planner_failed_candidate_ids,
+            state.current_pose,
+            state.legged_body_z_m,
+            state.state_time_ns,
+            state.observation_identity,
+            state.policy_batch_sha256,
+            state.candidate_ids,
+            state.candidate_mask,
+            state.oracle_opportunity_count,
+            state.oracle_opportunity_set_sha256,
+            state.terminal_reason,
+            state.defer_candidate_rebuild,
+            state.candidate_gain_resolution_m,
+        )
+        if replayed != persisted:
+            raise ValueError("formal replay physical identity differs")
+        self.initial_observation = observation
 
     def snapshot_state(self, environment: object) -> FormalWorkerState:
-        """Fail closed rather than forge legacy graph identity fields."""
-        del environment
+        """Capture one strict physical decision-boundary replay state."""
         if self._active_ground_option is not None:
             raise ValueError("formal snapshot cannot contain an active ground option")
-        raise ValueError(
-            "formal snapshot v5 cannot represent physical opportunity identity"
+        stable_state = getattr(environment, "snapshot_stable_state", None)
+        if not callable(stable_state):
+            raise ValueError("formal snapshot environment is invalid")
+        execution_state = stable_state().get("execution_state")
+        observation = getattr(environment, "current_observation", None)
+        if not isinstance(observation, PolicyBatch):
+            raise ValueError("formal snapshot observation is invalid")
+        controller_observation = self.controller.current_observation
+        if (
+            execution_state
+            != controller_observation.observation_identities[0].execution_state
+            or observation.observation_identities
+            != controller_observation.observation_identities
+            or policy_batch_sha256(observation)
+            != policy_batch_sha256(controller_observation)
+        ):
+            raise ValueError("formal snapshot environment boundary differs")
+        snapshot = self._snapshot
+        if snapshot is None:
+            raise ValueError("formal snapshot has no physical candidate state")
+        if self._current_candidate_gain_resolution_m is None:
+            raise ValueError("formal snapshot candidate gain identity is missing")
+        failed_ids = tuple(sorted(self._planner_failed_candidate_ids))
+        if failed_ids and self._planner_failure_snapshot_id != (
+            snapshot.candidate_universe.physical_snapshot_id
+        ):
+            raise ValueError("formal snapshot planner failure identity differs")
+        terminal_reason = _audit_candidate_boundary(
+            snapshot.candidates.diagnostics,
+            snapshot.frontier_oracle,
+        )
+        identity = observation.observation_identities[0]
+        return FormalWorkerState(
+            scenario_schedule_id=self.scenario_identity.scenario_schedule_id,
+            platform_type=self.platform_type,
+            worker_index=self.worker_index,
+            platform_worker_index=self.scenario_identity.platform_worker_index,
+            platform_worker_count=self.scenario_identity.platform_worker_count,
+            episode_cursor=self.episode_cursor,
+            scene_id=self.scene_id,
+            scene_seed=self.scene_seed,
+            start_seed=self.start_seed,
+            episode_seed=self.episode_seed,
+            coverability_mask_sha256=str(
+                self.sensor_state.coverable_mask_sha256
+            ),
+            start_cell=self.start_cell,
+            current_pose=self._pose_state(self.current_pose),
+            legged_body_z_m=float(self._current_legged_body_z_m),
+            execution_state=str(execution_state),
+            observation_revision=self._revision,
+            physical_snapshot_id=(
+                snapshot.candidate_universe.physical_snapshot_id
+            ),
+            physical_evidence_generation=self.sensor_state.evidence_generation,
+            physical_evidence_sha256=(
+                self.sensor_state.physical_evidence_sha256()
+            ),
+            physical_candidate_universe_sha256=(
+                snapshot.candidate_universe_sha256
+            ),
+            planner_failed_candidate_ids=failed_ids,
+            state_time_ns=identity.state_time_ns,
+            reveal_history=tuple(self._reveal_history),
+            observation_identity=identity,
+            policy_batch_sha256=policy_batch_sha256(observation),
+            candidate_ids=tuple(
+                str(item) for item in snapshot.candidates.candidate_ids
+            ),
+            candidate_mask=tuple(
+                bool(item) for item in snapshot.candidates.mask
+            ),
+            oracle_opportunity_count=(
+                snapshot.frontier_oracle.oracle_opportunity_count
+            ),
+            oracle_opportunity_set_sha256=(
+                snapshot.frontier_oracle.oracle_opportunity_set_sha256
+            ),
+            terminal_reason=(
+                None if terminal_reason is None else terminal_reason.value
+            ),
+            defer_candidate_rebuild=self._defer_candidate_rebuild,
+            last_hop_available_delta_v_mps=(
+                self.last_hop_available_delta_v_mps
+            ),
+            candidate_gain_resolution_m=(
+                self._current_candidate_gain_resolution_m
+            ),
         )
 
     def current_candidate_diagnostics(self) -> CandidateDiagnostics:
@@ -1534,11 +1746,34 @@ class FormalWorkerBuilder:
         scenario_identity: ScenarioIdentity,
         state: object,
     ) -> FormalEnvironmentWorker:
-        del worker_index, platform_type, capability, scenario_identity, state
-        raise ValueError(
-            "formal restore v5 carries retired graph identity; "
-            "a physical replay schema is required"
+        parsed = FormalWorkerState.from_dict(state)
+        if (
+            parsed.worker_index != worker_index
+            or parsed.platform_type != platform_type
+            or parsed.episode_cursor != scenario_identity.episode_cursor
+            or parsed.platform_worker_index
+            != scenario_identity.platform_worker_index
+            or parsed.platform_worker_count
+            != scenario_identity.platform_worker_count
+            or parsed.scenario_schedule_id
+            != scenario_identity.scenario_schedule_id
+        ):
+            raise ValueError("formal restore worker identity differs")
+        loaded = self._load_scheduled_scene(worker_index, scenario_identity)
+        episode = FormalEpisode(
+            worker_index=worker_index,
+            platform_type=platform_type,
+            capability=capability,
+            scenario_identity=scenario_identity,
+            loaded=loaded,
+            start_cell=parsed.start_cell,
         )
+        episode.replay_state(parsed)
+        worker = self._make_worker(episode)
+        worker.environment.restore_stable_state(
+            execution_state=parsed.execution_state
+        )
+        return worker
 
     def _load_scheduled_scene(
         self,

@@ -37,7 +37,7 @@ from .reward import reward_weights_sha256
 from .training_semantics import training_semantics_sha256
 
 
-CHECKPOINT_SCHEMA_VERSION = "lunar-ppo-checkpoint/v6"
+CHECKPOINT_SCHEMA_VERSION = "lunar-ppo-checkpoint/v7"
 OBSERVATION_CONTRACT_VERSION = ObservationContractV3.version
 _LEGACY_V5_SCHEMA_VERSION = "lunar-ppo-checkpoint/v5"
 _LEGACY_V4_SCHEMA_VERSION = "lunar-ppo-checkpoint/v4"
@@ -404,7 +404,7 @@ def migrate_checkpoint_source_commit(
     optimizer, RNG, environment, progress, budget, or identity field.
     """
     if not isinstance(checkpoint, TrainingCheckpointV6):
-        raise CheckpointError("source migration requires a v6 checkpoint")
+        raise CheckpointError("source migration requires a v7 checkpoint")
     if checkpoint.source_commit != expected_source_commit:
         raise CheckpointError("checkpoint source commit differs from migration")
     if not _is_source_commit(new_source_commit):
@@ -795,6 +795,10 @@ def restore_training_state(
     """Restore complete train/RNG state, rolling live objects back on failure."""
     if not isinstance(checkpoint, TrainingCheckpointV6):
         raise CheckpointError("checkpoint must use TrainingCheckpointV6")
+    body = _body_from_checkpoint(checkpoint)
+    _validate_body(body)
+    if _semantic_sha256(body) != checkpoint.payload_sha256:
+        raise CheckpointError("checkpoint payload hash mismatch")
     if not isinstance(model, nn.Module):
         raise CheckpointError("model must be a Torch module")
     if not isinstance(optimizer, torch.optim.Optimizer):
