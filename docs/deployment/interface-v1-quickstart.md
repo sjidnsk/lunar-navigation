@@ -84,3 +84,11 @@ export LUNAR_INTERFACE_V1_PYTHON="$HOME/CodexDownloads/lunar_navigation/interfac
 ```
 
 回归证据写入 `~/CodexDownloads/lunar_navigation/interface_v1/regression-*`。停止前先执行 lifecycle `deactivate`、`cleanup`，再在启动终端按 `Ctrl-C`；策略节点停用会取消其拥有的 Action，并且不会复用旧 episode 状态。
+
+## 6. Unreal TCP 单目标路径规划
+
+若仿真端是没有 ROS 的 Windows Unreal Engine 5.0.1，并且当前只需要一台 WHEELED 机器人
+接收 ROS 单目标位姿、执行 PlanMotion 轨迹，不要启动本页的探索 policy。使用独立的
+[Unreal TCP 轮式路径规划部署流程](unreal-tcp-wheeled-path-planning.md)；其启动图只包含 TCP
+bridge、已观测地图、planner 和单目标 coordinator。线协议见
+[lunar-unreal-tcp/v1](../interfaces/lunar-unreal-tcp-v1.md)。

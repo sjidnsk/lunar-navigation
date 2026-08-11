@@ -10,6 +10,19 @@
 
 外部 Topic 数据和静态能力资料由外部项目拥有；上游未定义期间，本仓按批准设计暂定提供 `lunar_navigation_msgs` schema，且不得与上游同名包共存。接收字段与暂定 schema 基线见 [`docs/interfaces/external-input-baseline.md`](docs/interfaces/external-input-baseline.md)。
 
+## Unreal TCP 单目标路径规划
+
+Windows Unreal Engine 5.0.1 无 ROS 场景可通过仓库自有
+[`lunar-unreal-tcp/v1`](docs/interfaces/lunar-unreal-tcp-v1.md) 接入一台 WHEELED 机器人。ROS 主机
+作为 TCP 客户端，负责仅观测地图融合、障碍计算、单目标 PlanMotion 和滚动轨迹；Unreal
+服务端负责传感器/状态和 AGX 执行反馈。部署入口见
+[`docs/deployment/unreal-tcp-wheeled-path-planning.md`](docs/deployment/unreal-tcp-wheeled-path-planning.md)，
+资格边界见
+[`docs/validation/unreal-tcp-wheeled-path-planning-qualification.md`](docs/validation/unreal-tcp-wheeled-path-planning-qualification.md)。
+
+仓库 fake server 回归通过只能称为 `ROS-side simulated-ready`；真实 Unreal 插件和两机稳定性
+必须另行验收。本启动图不包含探索、覆盖率、PPO 或训练节点。
+
 ## 基础检查
 
 ```bash

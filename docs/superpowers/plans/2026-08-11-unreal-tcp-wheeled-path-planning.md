@@ -41,11 +41,11 @@
 - Invariant: encoding writes every integer explicitly in little-endian order and never serializes a native struct.
 - Invariant: decoding rejects duplicate JSON keys, unknown fields, non-finite values, invalid flags/reserved bytes, CRC mismatch, size overflow, and a total body above 8 MiB.
 
-- [ ] **Step 1: Create package scaffolding, literal golden vectors, and failing codec tests**
+- [x] **Step 1: Create package scaffolding, literal golden vectors, and failing codec tests**
 
   Add GoogleTests named `EncodesGoldenHelloFrame`, `DecodesGoldenRobotStateFrame`, `RejectsHeaderAndBodyCrcMismatch`, `RejectsUnknownFlagsAndNonzeroReserved`, `RejectsMetadataAndBodyLimits`, and `RejectsDuplicateJsonKeys`. The fixture JSON stores literal hexadecimal frames and decoded literal fields; derive CRC literals independently with Python `zlib.crc32`, never through the C++ codec.
 
-- [ ] **Step 2: Run the protocol tests and verify RED**
+- [x] **Step 2: Run the protocol tests and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -55,7 +55,7 @@
 
   Expected: link or compile failure because `EncodeFrame`, `DecodeFrame`, and validation functions have no implementation.
 
-- [ ] **Step 3: Implement the minimal frame codec and strict JSON validator**
+- [x] **Step 3: Implement the minimal frame codec and strict JSON validator**
 
   Use these public constants and result shape:
 
@@ -75,7 +75,7 @@
 
   Implement CRC-32/ISO-HDLC with polynomial `0xEDB88320`, initial/final XOR `0xffffffff`, and validate header CRC with bytes 40-43 zeroed. Use a nlohmann SAX pass with an object-key stack to reject duplicate keys before normal parsing. Validate exact allowed and required top-level keys for all nine v1 message types.
 
-- [ ] **Step 4: Run the package tests and verify GREEN**
+- [x] **Step 4: Run the package tests and verify GREEN**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -86,7 +86,7 @@
 
   Expected: all Task 1 tests pass with zero failures.
 
-- [ ] **Step 5: Commit the independently usable protocol library**
+- [x] **Step 5: Commit the independently usable protocol library**
 
   ```bash
   git add ros2_ws/src/lunar_unreal_tcp_bridge tests/fixtures/unreal_tcp/protocol_v1_vectors.json
@@ -112,11 +112,11 @@
 - Produces: `StreamDecoder::Push(std::span<const std::byte>)`, `OutboundQueue::Push(Frame)`, `OutboundQueue::Pop()`, and `SessionProtocol::{BuildHello, AcceptHelloAck, AcceptIncoming, Reset}`.
 - Invariant: control/reference/feedback/error cannot be silently dropped; state and map each occupy a replaceable latest-only slot.
 
-- [ ] **Step 1: Write failing stream and queue tests**
+- [x] **Step 1: Write failing stream and queue tests**
 
   Add tests `DecodesEveryByteSplitOfGoldenFrame`, `DecodesCoalescedFramesAndRetainsHalfFrame`, `RejectsMaliciousLengthBeforeAllocation`, `ReplacesOnlyLatestStateAndMap`, `PreservesControlReferenceFeedbackOrdering`, and `ReportsHighPriorityQueueExhaustion`.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -126,15 +126,15 @@
 
   Expected: failure because stream and queue types do not exist.
 
-- [ ] **Step 3: Implement bounded incremental decode and priority scheduling**
+- [x] **Step 3: Implement bounded incremental decode and priority scheduling**
 
   Keep at most `kHeaderSize + kMaximumBodyBytes` receive bytes. Parse the advertised body size only after magic/version/header-size and header CRC validate. Use four priority levels from the design; store state/map in `std::optional<Frame>` slots and use bounded `std::deque<Frame>` for non-droppable classes.
 
-- [ ] **Step 4: Write failing session tests**
+- [x] **Step 4: Write failing session tests**
 
   Add tests `HandshakeFreezesNewSessionAndCalibration`, `RequiresSequenceOneThenStrictIncrease`, `AllowsForwardGapAfterLatestOnlyDrop`, `RejectsWrongSessionAndSimulationTimeRollback`, `ReconnectInvalidatesOldSession`, and `HeartbeatExpiryRequiresHold` using a fake steady clock.
 
-- [ ] **Step 5: Run focused session test and verify RED**
+- [x] **Step 5: Run focused session test and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -144,11 +144,11 @@
 
   Expected: failure because `SessionProtocol` is not implemented.
 
-- [ ] **Step 6: Implement the session state machine**
+- [x] **Step 6: Implement the session state machine**
 
   Expose states `DISCONNECTED`, `HANDSHAKING`, `SYNCING`, `READY`, `EXECUTING`, and `HOLD`. `BuildHello` emits sequence 1; `AcceptHelloAck` freezes UUID session, scene/robot identity, coordinate convention, calibration matrices/hash, rates, and body limit. `AcceptIncoming` rejects duplicate/backward sequence, wrong session, time rollback, and invalid plan identity, but permits a forward sequence gap.
 
-- [ ] **Step 7: Run all bridge-library tests and commit**
+- [x] **Step 7: Run all bridge-library tests and commit**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -176,11 +176,11 @@
 - Produces: `CoordinateTransform`, `ConvertRobotState`, `ConvertObservedElevation`, `ConvertMotionReference`, and `ConvertExecutionFeedback`.
 - Invariant: one frozen basis/matrix handles positions, rotations, linear/angular velocities, grid origin/basis, base-link/base-footprint calibration, and inverse trajectory conversion.
 
-- [ ] **Step 1: Write failing coordinate golden tests**
+- [x] **Step 1: Write failing coordinate golden tests**
 
   Add tests for Unreal origin, each unit axis, arbitrary yaw, negative Landscape coordinates `(-205160, -511559, 50)` cm, quaternion basis change, angular velocity pseudovector behavior, and ROS-Unreal-ROS round trip. The expected values are literal hand-derived vectors/matrices.
 
-- [ ] **Step 2: Run the coordinate tests and verify RED**
+- [x] **Step 2: Run the coordinate tests and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -190,15 +190,15 @@
 
   Expected: failure because coordinate conversion is absent.
 
-- [ ] **Step 3: Implement full basis and rigid calibration conversion**
+- [x] **Step 3: Implement full basis and rigid calibration conversion**
 
   Store a 3x3 invertible basis `B`, translation in meters, and the two rigid calibrations. Convert orientation with `R_ros = B * R_unreal * B.inverse()` and normalize the resulting quaternion. Convert angular velocity with determinant-aware pseudovector handling. Reject non-rigid/non-finite matrices and a handshake calibration hash mismatch.
 
-- [ ] **Step 4: Write failing ROS conversion tests**
+- [x] **Step 4: Write failing ROS conversion tests**
 
   Add tests `RobotStateProducesExternalAndWheeledOdometryFromOneSnapshot`, `ObservedMapUsesCellZeroAndUvAxesNotLandscapeOrigin`, `ObservedMapRejectsBadBitsetAndNonfiniteValidElevation`, `MotionReferenceEncodes112ByteStrictlyIncreasingRecords`, `MotionReferenceRejectsNonWheeledOrWrongCalibration`, and `ExecutionFeedbackMapsStableStatesAndReasons`.
 
-- [ ] **Step 5: Run conversion tests and verify RED**
+- [x] **Step 5: Run conversion tests and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -208,11 +208,11 @@
 
   Expected: failure because ROS conversions are absent.
 
-- [ ] **Step 6: Implement ROS conversions and verify all package tests**
+- [x] **Step 6: Implement ROS conversions and verify all package tests**
 
   Decode exactly 102,400 `float32_le` elevation samples plus 12,800 `bitset_lsb0` bytes. Publish raw observed GridMap with only `elevation` and `valid_mask`. Encode trajectory records explicitly as one `int64` and thirteen `float64` values, total 112 bytes per point; `time_from_start_ns` begins at zero and increases strictly.
 
-- [ ] **Step 7: Commit coordinate and message conversion**
+- [x] **Step 7: Commit coordinate and message conversion**
 
   ```bash
   git add ros2_ws/src/lunar_unreal_tcp_bridge
@@ -238,11 +238,11 @@
 - Produces: `/clock`, `/lunar/unreal/observed_elevation`, `/localization/odometry`, `/lunar/unreal/wheeled_odometry`, `/localization/status`, `/tf`, `/tf_static`, `/execution/motion_feedback`, services `/lunar/unreal/{start,hold,resume,reset_session}`, and `/lunar/unreal/status`.
 - Produces: dependency-injectable `SessionTransport` so node tests exercise the real node without mocking ROS publishers.
 
-- [ ] **Step 1: Write failing socket and reconnect tests**
+- [x] **Step 1: Write failing socket and reconnect tests**
 
   Use a loopback test server and add `ConnectsWithTcpNoDelayAndKeepalive`, `HandlesFragmentedAndCoalescedFrames`, `ReconnectBackoffIsBoundedFromHalfToFiveSeconds`, `DisconnectStopsWriterAndInvalidatesSession`, and `HighPriorityOverflowSendsHoldThenDisconnects`.
 
-- [ ] **Step 2: Run socket tests and verify RED**
+- [x] **Step 2: Run socket tests and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -252,15 +252,15 @@
 
   Expected: failure because `TcpClient` is absent.
 
-- [ ] **Step 3: Implement one-reader/one-writer persistent TCP client**
+- [x] **Step 3: Implement one-reader/one-writer persistent TCP client**
 
   Use `std::jthread` and stop tokens, `getaddrinfo`, `TCP_NODELAY`, `SO_KEEPALIVE`, bounded reconnect, exact send loops, and poll-based interruptible receive. Never invoke ROS publishers from the I/O thread; deliver immutable frames through callbacks/queues.
 
-- [ ] **Step 4: Write failing Lifecycle bridge tests**
+- [x] **Step 4: Write failing Lifecycle bridge tests**
 
   Add tests `ConfigureDeclaresFrozenParameters`, `ActivateStartsTransportAndDeactivateHolds`, `HandshakeRequiresStateAndMapBeforeReady`, `PublishesClockOdometryTfAndObservedMap`, `ForwardsOnlyValidWheeledReference`, `MatchingFeedbackPublishesExternalContract`, and `HeartbeatOrFreshnessExpiryFailsClosed`.
 
-- [ ] **Step 5: Run bridge-node tests and verify RED**
+- [x] **Step 5: Run bridge-node tests and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -270,11 +270,11 @@
 
   Expected: failure because the Lifecycle node is absent.
 
-- [ ] **Step 6: Implement bridge node, services, diagnostics, and watchdog**
+- [x] **Step 6: Implement bridge node, services, diagnostics, and watchdog**
 
   Network callbacks enqueue events; a mutually exclusive ROS callback group drains them. Use Unreal simulation time for message stamps and `/clock`, and `steady_clock` for 3-second heartbeat plus 1-second state/map freshness. Any forced-HOLD condition publishes a diagnostic reason, sends CONTROL/HOLD when the socket is usable, and invalidates the active plan/session as specified.
 
-- [ ] **Step 7: Build, run all bridge tests, and commit**
+- [x] **Step 7: Build, run all bridge tests, and commit**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -304,11 +304,11 @@
 - Produces: `ObservedPatch`, `CellEvidence`, `TileKey`, `SparseObservedMap::Fuse`, `SparseObservedMap::ResetSession`, and `ObstacleClassifier::Classify`.
 - Invariant: L0 is 0.2 m, tile is 256x256, session budget is 512 allocated tiles, and negative coordinates use mathematical floor division.
 
-- [ ] **Step 1: Write failing sparse fusion tests**
+- [x] **Step 1: Write failing sparse fusion tests**
 
   Add `AllocatesOnlyForValidObservation`, `MapsPositiveNegativeAndBoundaryCellsToTiles`, `InvalidPatchCannotEraseHistory`, `WelfordMeanVarianceCountAndAgeAreExact`, `SessionResetDropsAllOldSceneEvidence`, and `RefusesTheFiveHundredThirteenthTileWithoutEviction`.
 
-- [ ] **Step 2: Run sparse-map tests and verify RED**
+- [x] **Step 2: Run sparse-map tests and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -318,15 +318,15 @@
 
   Expected: compile/link failure because sparse map behavior is absent.
 
-- [ ] **Step 3: Implement sparse tiles and online evidence fusion**
+- [x] **Step 3: Implement sparse tiles and online evidence fusion**
 
   Each allocated tile owns exactly 65,536 `CellEvidence` entries. Apply Welford online mean/M2, monotonic observation count, and last simulation timestamp only to valid finite observations. Preflight all tile allocations for one patch so a budget failure is atomic.
 
-- [ ] **Step 4: Write failing obstacle classification tests**
+- [x] **Step 4: Write failing obstacle classification tests**
 
   Add `ClassifiesUnknownFreeAndOccupiedIndependently`, `ThresholdIsFreeAtPointTwoAndOccupiedAbovePointTwo`, `DetectsNegativeStepAsObstacleWithConservativeHeight`, `UsesObservedNeighborsOnlyForSupport`, and `ForbiddenRemainsIndependentOfUnknownAndObstacle`.
 
-- [ ] **Step 5: Run classifier tests and verify RED**
+- [x] **Step 5: Run classifier tests and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -336,11 +336,11 @@
 
   Expected: failure because classification is absent.
 
-- [ ] **Step 6: Implement 0.20 m WHEELED relief classification and commit**
+- [x] **Step 6: Implement 0.20 m WHEELED relief classification and commit**
 
   Estimate support as the median of finite valid 3x3 neighbors. Mark occupied when positive residual or any observed adjacent discontinuity exceeds `0.20 m`; a negative step uses at least one L0 resolution as conservative `obstacle_height`. Do not perform vehicle-footprint inflation.
 
-- [ ] **Step 7: Run map-core tests and commit**
+- [x] **Step 7: Run map-core tests and commit**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -370,11 +370,11 @@
 - Produces: `/environment/map_local` in `odom` and `/environment/map_global` in `map`, each with the ten frozen layers.
 - Invariant: local map is 64 m x 64 m at 0.2 m; active global map chooses the smallest admissible factor from `{1,2,4,8,16,20}` within cell/axis/1,024 m limits.
 
-- [ ] **Step 1: Write failing GridMap product tests**
+- [x] **Step 1: Write failing GridMap product tests**
 
   Add `BuildsThreeHundredTwentySquareLocalMapWithTenLayers`, `NeverEmitsUnobservedTruth`, `CropsAcrossSparseTileBoundaries`, `SelectsSmallestAdmissibleGlobalLevel`, `AppliesConservativeAndOrMaxMinAggregation`, `IncludesRobotGoalAndObservedCorridor`, and `RejectsGoalOutsideObservedConnectedEvidence`.
 
-- [ ] **Step 2: Run product tests and verify RED**
+- [x] **Step 2: Run product tests and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -384,15 +384,15 @@
 
   Expected: failure because product builder is absent.
 
-- [ ] **Step 3: Implement ten-layer products and conservative pyramid**
+- [x] **Step 3: Implement ten-layer products and conservative pyramid**
 
   Build `std_msgs/Float32MultiArray` in the exact GridMap circular-buffer layout accepted by `lunar_planner_ros::GridMapAdapter`. Aggregation uses valid AND, obstacle/forbidden OR, maximum obstacle height/age/variance, minimum quality/count, and mean elevation over valid children.
 
-- [ ] **Step 4: Write failing Lifecycle node tests**
+- [x] **Step 4: Write failing Lifecycle node tests**
 
   Add `ConfigureRequiresFrozenMapParameters`, `ActivatePublishesInitialRobotCenteredGlobalMap`, `ObservedPatchAndOdometryProduceSameGenerationProducts`, `GoalStampForcesContainingGlobalGenerationBeforePlanning`, `TileBudgetErrorKeepsPreviousProducts`, and `ResetSessionClearsProductsAndReturnsToSyncing`.
 
-- [ ] **Step 5: Run node tests and verify RED**
+- [x] **Step 5: Run node tests and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -402,11 +402,11 @@
 
   Expected: failure because node is absent.
 
-- [ ] **Step 6: Implement Lifecycle node and verify planner adapter compatibility**
+- [x] **Step 6: Implement Lifecycle node and verify planner adapter compatibility**
 
   Subscribe with reliable depth 1 for observed map and transient-local goal; publish local/global with reliable transient-local depth 1. Stamp products from the common simulation snapshot, reject state/map skew above 0.2 s, and run each generated message through the real planner `GridMapAdapter` in tests.
 
-- [ ] **Step 7: Run package tests and commit**
+- [x] **Step 7: Run package tests and commit**
 
   ```bash
   git add ros2_ws/src/lunar_observed_map
@@ -432,11 +432,11 @@
 - Produces: minimal `/mission/exploration_task`, the only `/lunar/motion_reference`, `/lunar/path_planning/status`, `/lunar/path_planning/cancel`, and HOLD through `/lunar/unreal/hold`.
 - Invariant: no implicit goal replacement; only a successful WHEELED result with `ACTIVATE_NEW_REFERENCE` and `has_reference=true` is published.
 
-- [ ] **Step 1: Write failing pure state-machine tests**
+- [x] **Step 1: Write failing pure state-machine tests**
 
   Add `AcceptsFiniteMapGoalAndNormalizesQuaternion`, `RejectsWrongFrameUnknownObstacleForbiddenOrDisconnectedGoal`, `RejectsImplicitReplacementUntilCanceled`, `PublishesOnlyActivateNewWheeledReference`, `SegmentCompleteWaitsForStrictlyNewerStateAndMap`, `RollsAgainOutsideTolerance`, `SucceedsInsideHalfMeterAndFifteenDegrees`, and `PlannerOrExecutorFailureEntersHoldWithStableReason`.
 
-- [ ] **Step 2: Run state-machine tests and verify RED**
+- [x] **Step 2: Run state-machine tests and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -446,15 +446,15 @@
 
   Expected: compile/link failure because coordinator core is absent.
 
-- [ ] **Step 3: Implement deterministic rolling state machine**
+- [x] **Step 3: Implement deterministic rolling state machine**
 
   Generate mission ID from TCP session ID plus target UUID, revision from 1 upward, point goal with 0.5 m tolerance and default 15-degree yaw tolerance, empty science regions, and ROI equal to active global map. Model explicit events rather than calling ROS inside the core.
 
-- [ ] **Step 4: Write failing coordinator-node tests**
+- [x] **Step 4: Write failing coordinator-node tests**
 
   Add `GoalWaitsForContainingGlobalMapGeneration`, `SendsPlanMotionWithReplaceFalse`, `PublishesMinimalMissionBeforeActionGoal`, `PublishesReturnedReferenceOnce`, `MatchingFeedbackAndNewSnapshotTriggerSecondPlan`, `CancelWaitsForCanceledThenAcceptsNewGoal`, and `LaunchGraphHasSingleMotionReferencePublisher`.
 
-- [ ] **Step 5: Run node tests and verify RED**
+- [x] **Step 5: Run node tests and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -464,11 +464,11 @@
 
   Expected: failure because ROS node is absent.
 
-- [ ] **Step 6: Implement Lifecycle coordinator and Action client**
+- [x] **Step 6: Implement Lifecycle coordinator and Action client**
 
   Use one mutually-exclusive callback group for state transitions and an Action callback group for `/plan_motion`. Validate fresh same-generation inputs before sending, set `replace_active_request=false`, require result request/mission/revision identity, and publish the reference with reliable volatile depth 1.
 
-- [ ] **Step 7: Run coordinator tests and commit**
+- [x] **Step 7: Run coordinator tests and commit**
 
   ```bash
   git add ros2_ws/src/lunar_goal_coordinator
@@ -493,11 +493,11 @@
 - Produces: one launch graph containing bridge, observed map, goal coordinator, and planner; planner remaps `/localization/odometry` to `/lunar/unreal/wheeled_odometry`.
 - Invariant: graph contains no `lunar_exploration_policy`, `lunar_interface_v1_policy`, PPO, or training process.
 
-- [ ] **Step 1: Write failing executable launch-contract test**
+- [x] **Step 1: Write failing executable launch-contract test**
 
   Import the real launch file, resolve actions, and assert exact package/executable/remap identities, `use_sim_time=true`, one motion-reference publisher owner, and absence of exploration/training nodes. The failure must be missing launch artifact, not a source-text grep.
 
-- [ ] **Step 2: Run launch-contract test and verify RED**
+- [x] **Step 2: Run launch-contract test and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -507,15 +507,15 @@
 
   Expected: failure because the launch file does not exist.
 
-- [ ] **Step 3: Implement configuration and launch graph**
+- [x] **Step 3: Implement configuration and launch graph**
 
   Install `launch/`, add new package exec dependencies, and make `scripts/build_runtime.sh` include all packages automatically while continuing to place artifacts under the caller-supplied external output root.
 
-- [ ] **Step 4: Write fake server and failing end-to-end launch test**
+- [x] **Step 4: Write fake server and failing end-to-end launch test**
 
   The fake server implements real golden codec behavior, HELLO/ACK, 20 Hz state, 5 Hz observed map, heartbeat, CONTROL acknowledgments, trajectory ACCEPTED/EXECUTING/SEGMENT_COMPLETE, intentional wrong-session/stale/skew injections, and disconnect. Test cases are `HandshakePublishesClockAndPlannerMaps`, `GoalProducesWheeledReferenceAndMatchingFeedback`, `SegmentCompleteAndNewSnapshotTriggerSecondPlan`, `WrongSessionStaleSkewAndDisconnectFailClosed`, and `ReconnectDoesNotReplayOldReference`.
 
-- [ ] **Step 5: Run end-to-end test and verify RED**
+- [x] **Step 5: Run end-to-end test and verify RED**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -525,11 +525,11 @@
 
   Expected: failure at the first unimplemented integration behavior.
 
-- [ ] **Step 6: Complete only the integration wiring required to make GREEN**
+- [x] **Step 6: Complete only the integration wiring required to make GREEN**
 
   Fix package manifests, launch transitions, topic QoS/remaps, and fake-server orchestration without changing frozen messages or adding exploration behavior.
 
-- [ ] **Step 7: Run integration suite and commit**
+- [x] **Step 7: Run integration suite and commit**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -553,11 +553,11 @@
 - Documents: exact header offsets, message schemas, binary layouts, CRC, coordinate/calibration rules, Windows firewall/listen configuration, ROS client commands, diagnostics, HOLD behavior, golden vectors, and external Unreal plugin obligations.
 - Qualification boundary: repository fake-server tests may qualify `ROS-side simulated-ready`; only external Unreal Engine 5.0.1 plugin build, three functional cases, network-disconnect case, and 30-minute two-machine run can qualify the full system.
 
-- [ ] **Step 1: Add a reproducible regression script**
+- [x] **Step 1: Add a reproducible regression script**
 
   The executable script accepts one absolute output directory, rejects repository-contained paths, sources ROS Humble, builds to external build/install/log directories, runs all three new package tests, integration tests, affected planner/interface-v1 regressions, and repository boundary checks.
 
-- [ ] **Step 2: Run the script against a fresh external output root**
+- [x] **Step 2: Run the script against a fresh external output root**
 
   ```bash
   ./scripts/run_unreal_tcp_regression.sh /home/kai/CodexDownloads/lunar_navigation/unreal_tcp_path_planning/final
@@ -565,11 +565,11 @@
 
   Expected: build and all automated repository tests pass with zero failures.
 
-- [ ] **Step 3: Write protocol, deployment, and qualification documents**
+- [x] **Step 3: Write protocol, deployment, and qualification documents**
 
   Include copyable Ubuntu commands and expected evidence. State `AGX plugin version=UNKNOWN` is transportable but never silently upgraded to a known version. Mark real Windows plugin build, AGX executor behavior, LAN firewall, three physical scenarios, disconnect HOLD within 3 seconds, and 30-minute stability as externally pending until recorded evidence exists.
 
-- [ ] **Step 4: Run UTF-8, placeholder, boundary, and diff checks**
+- [x] **Step 4: Run UTF-8, placeholder, boundary, and diff checks**
 
   ```bash
   python3 -c "from pathlib import Path; [p.read_text(encoding='utf-8') for p in Path('docs').rglob('*.md')]"
@@ -580,7 +580,7 @@
 
   Expected: all commands exit zero.
 
-- [ ] **Step 5: Run affected regression suites from the fresh install**
+- [x] **Step 5: Run affected regression suites from the fresh install**
 
   ```bash
   source /opt/ros/humble/setup.bash
@@ -591,11 +591,11 @@
 
   Expected: zero failed tests; exploration tests remain regression-only and the Unreal launch graph does not run that policy.
 
-- [ ] **Step 6: Review the final diff against every design completion criterion**
+- [x] **Step 6: Review the final diff against every design completion criterion**
 
   Record each criterion as repository-verified, external-Unreal-pending, or two-machine-pending in the qualification document. Do not describe the system as fully complete while either external category remains pending.
 
-- [ ] **Step 7: Commit documentation and qualification evidence**
+- [x] **Step 7: Commit documentation and qualification evidence**
 
   ```bash
   git add docs README.md scripts/run_unreal_tcp_regression.sh
