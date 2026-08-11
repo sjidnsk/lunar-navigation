@@ -318,7 +318,10 @@ class CandidateBuildResult:
         ):
             candidate = candidates_by_id[candidate_id]
             if (
-                tuple(self.batch.target_positions_m[index])
+                not np.array_equal(
+                    self.batch.features[index], candidate.feature
+                )
+                or tuple(self.batch.target_positions_m[index])
                 != candidate.target_position_m
                 or float(self.batch.target_elevation_m[index])
                 != candidate.target_position_m[2]

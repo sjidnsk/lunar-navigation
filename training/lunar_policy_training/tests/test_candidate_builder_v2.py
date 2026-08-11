@@ -600,6 +600,14 @@ def test_current_snapshot_failures_refill_from_reserve_and_padding_ids_are_empty
     assert selected.batch.diagnostics.selected_policy_candidate_count == 64
     assert selected.batch.diagnostics.planner_failed_current_snapshot_count == 1
     assert selected.batch.diagnostics.untried_reserve_count == len(universe.candidates) - 65
+    candidate_by_id = {
+        candidate.candidate_id: candidate for candidate in universe.candidates
+    }
+    for row, candidate_id in enumerate(first_ids[1:65]):
+        np.testing.assert_array_equal(
+            selected.batch.features[row],
+            candidate_by_id[candidate_id].feature,
+        )
 
 
 def test_current_snapshot_unknown_failed_id_fails_closed_but_old_snapshot_is_dropped() -> None:
@@ -640,7 +648,13 @@ def test_current_snapshot_unknown_failed_id_fails_closed_but_old_snapshot_is_dro
 
 @pytest.mark.parametrize(
     "malformation",
-    ("active_blank", "duplicate", "not_in_universe", "target_mismatch"),
+    (
+        "active_blank",
+        "duplicate",
+        "not_in_universe",
+        "target_mismatch",
+        "feature_mismatch",
+    ),
 )
 def test_formal_candidate_result_rejects_malformed_active_batch(
     malformation: str,
@@ -664,8 +678,11 @@ def test_formal_candidate_result_rejects_malformed_active_batch(
         candidate_ids[1] = candidate_ids[0]
     elif malformation == "not_in_universe":
         candidate_ids[0] = "f" * 64
-    else:
+    elif malformation == "target_mismatch":
         positions[0, 0] += 0.001
+    else:
+        assert not np.array_equal(features[0], features[1])
+        features[0] = features[1]
     malformed = CandidateBatch(
         features=features,
         mask=mask,
