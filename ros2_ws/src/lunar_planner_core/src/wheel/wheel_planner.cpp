@@ -246,7 +246,8 @@ namespace {
   }
 
   WheelLatticeSearchResult search = SearchWheelLatticeRanked(
-      *current_state, ranked_goals, safe_projection, *capability,
+      *current_state, ranked_goals, safe_projection, common.search_domain,
+      *capability,
       common.config, common.stop_token);
   if (!search.ok()) {
     const std::size_t expanded_states = search.plan.has_value()
@@ -343,7 +344,8 @@ namespace {
       used_discrete_fallback = true;
     }
     std::vector<WheelTransition> selected = std::move(optimized.transitions);
-    WheelSweepValidator validator{safe_projection, *capability};
+    WheelSweepValidator validator{
+        safe_projection, *capability, problem.search_domain};
     const bool optimized_valid = std::ranges::all_of(
         selected, [&](const WheelTransition& transition) {
           return validator.Validate(transition, problem.stop_token).valid;

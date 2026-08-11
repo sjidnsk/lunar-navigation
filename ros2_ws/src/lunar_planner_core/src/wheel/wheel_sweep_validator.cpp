@@ -149,6 +149,14 @@ WheelSweepValidator::WheelSweepValidator(
   }
 }
 
+WheelSweepValidator::WheelSweepValidator(
+    const shared::SafeProjection &physical_projection,
+    const WheeledCapability &capability,
+    const hierarchical::LocalSearchDomain &search_domain) noexcept
+    : WheelSweepValidator(physical_projection, capability) {
+  search_domain_ = &search_domain;
+}
+
 WheelSweepValidation
 WheelSweepValidator::Validate(const WheelTransition &transition,
                               const std::stop_token stop_token) const {
@@ -187,6 +195,11 @@ WheelSweepValidator::Validate(const WheelTransition &transition,
       1U,
       static_cast<std::size_t>(std::ceil(swept_distance_m / maximum_step_m)));
   const auto &map = *projection_->source_map();
+  if (search_domain_ != nullptr &&
+      (search_domain_->width() != map.width() ||
+       search_domain_->height() != map.height())) {
+    return Failure("WHEEL_SWEEP_REQUEST_INVALID");
+  }
   const double resolution = map.resolution_m();
   const double origin_x = map.origin_m().x;
   const double origin_y = map.origin_m().y;
@@ -216,6 +229,15 @@ WheelSweepValidator::Validate(const WheelTransition &transition,
     const double center_y = transition.source_pose.position_m.y +
                             ratio * (transition.target_pose.position_m.y -
                                      transition.source_pose.position_m.y);
+    const auto center_cell = map.PositionToCell(Vec2{
+        .x = center_x,
+        .y = center_y,
+    });
+    if (search_domain_ != nullptr &&
+        (!center_cell.has_value() ||
+         !search_domain_->Contains(*center_cell))) {
+      return Failure("WHEEL_SWEEP_OUTSIDE_SEARCH_DOMAIN", sample_count);
+    }
     const double yaw =
         transition.source_pose.yaw_rad + ratio * signed_yaw_delta;
     const shared::WheelTerrainPoseEvaluation terrain =

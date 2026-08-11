@@ -45,9 +45,45 @@ const LocalTrajectoryDiagnostics& LocalDiagnostics(
   return *output.diagnostics.local_trajectory;
 }
 
+hierarchical::LocalPlanningProblem MakeLocalWheelProblem(
+    const PlannerInput& input, std::vector<std::uint8_t> allowed) {
+  return hierarchical::LocalPlanningProblem{
+      .request_id = input.request_id,
+      .platform_id = input.platform_id,
+      .capability_version = input.capability_version,
+      .local_map_generation = input.local_map_generation,
+      .state_time = input.state_time,
+      .current_state = input.current_state,
+      .goal_odom = input.goal_map,
+      .local_map = input.world.local_map,
+      .search_domain = hierarchical::LocalSearchDomain{
+          input.world.local_map.width, input.world.local_map.height,
+          std::move(allowed)},
+      .capability = input.capability,
+      .config = input.config,
+      .stop_token = input.stop_token,
+  };
+}
+
+std::vector<std::uint8_t> EmptyDomain(const GridMap& map) {
+  return std::vector<std::uint8_t>(map.CellCount(), 0U);
+}
+
+void AllowCell(std::vector<std::uint8_t>& allowed, const GridMap& map,
+               const std::size_t x, const std::size_t y) {
+  allowed.at(y * map.width + x) = 1U;
+}
+
+PlannerInput MakeWheelInputWithRequiredLocalCoverage() {
+  PlannerInput input = test::MakeValidWheelInput();
+  input.world.local_map.origin_m.x = -1.0;
+  return input;
+}
+
 TEST(WheelPlanner, PlansForwardReferenceWithBoundedTiming) {
   Planner planner;
-  const auto input = test::MakeValidWheelInput();
+  auto input = MakeWheelInputWithRequiredLocalCoverage();
+  input.config.optimization.maximum_iterations = 0U;
 
   const PlannerOutput output = planner.Plan(input);
 
@@ -82,6 +118,85 @@ TEST(WheelPlanner, PlansForwardReferenceWithBoundedTiming) {
             trajectory.points[index].velocity.linear_mps.y),
         1.0 + 1.0e-9);
   }
+}
+
+TEST(WheelPlanner, SearchDomainBoundaryDoesNotBecomePhysicalObstacle) {
+  auto input = test::MakeValidWheelInput();
+  input.request_id = "wheel-domain-footprint-overhang";
+  input.config.optimization.maximum_iterations = 0U;
+  auto& state = std::get<WheeledState>(input.current_state);
+  state.pose.position_m.y = 3.1;
+  std::get<PointGoal>(input.goal_map.target).position_m.y = 3.1;
+  auto allowed = EmptyDomain(input.world.local_map);
+  for (std::size_t x = 2U; x <= 4U; ++x) {
+    AllowCell(allowed, input.world.local_map, x, 3U);
+  }
+  const auto problem = MakeLocalWheelProblem(input, std::move(allowed));
+
+  const PlannerOutput output = wheel::WheelPlanner{}.Plan(problem);
+
+  ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << output.reason_code;
+  EXPECT_EQ(output.reason_code, "WHEEL_PLAN_AVAILABLE");
+  EXPECT_GT(output.diagnostics.expanded_states, 0U);
+  EXPECT_TRUE(output.reference.has_value());
+}
+
+TEST(WheelPlanner, RejectsPrimitiveWhoseTargetCenterLeavesSearchDomain) {
+  auto input = test::MakeValidWheelInput();
+  input.request_id = "wheel-domain-primitive-target";
+  std::get<PointGoal>(input.goal_map.target).position_m.x = 6.5;
+  auto allowed = EmptyDomain(input.world.local_map);
+  AllowCell(allowed, input.world.local_map, 2U, 3U);
+  AllowCell(allowed, input.world.local_map, 6U, 3U);
+  const auto problem = MakeLocalWheelProblem(input, std::move(allowed));
+
+  const PlannerOutput output = wheel::WheelPlanner{}.Plan(problem);
+
+  EXPECT_EQ(output.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(output.directive, ExecutionDirective::kNoSafeReference);
+  EXPECT_EQ(output.reason_code, "LOCAL_SEARCH_DOMAIN_EXHAUSTED");
+  EXPECT_GT(output.diagnostics.expanded_states, 0U);
+  EXPECT_FALSE(output.reference.has_value());
+}
+
+TEST(WheelPlanner, PhysicallyUnsafeGoalFailsBeforeSearchExpansion) {
+  auto input = test::MakeValidWheelInput();
+  input.request_id = "wheel-physical-goal-infeasible";
+  auto& obstacle = std::get<std::vector<std::uint8_t>>(
+      input.world.local_map.layers.at("obstacle").values);
+  obstacle.at(3U * input.world.local_map.width + 4U) = 1U;
+  auto allowed = std::vector<std::uint8_t>(
+      input.world.local_map.CellCount(), 1U);
+  allowed[3U * input.world.local_map.width + 4U] = 0U;
+  const auto problem = MakeLocalWheelProblem(input, std::move(allowed));
+
+  const PlannerOutput output = wheel::WheelPlanner{}.Plan(problem);
+
+  EXPECT_EQ(output.outcome, PlanningOutcome::kGoalInfeasible);
+  EXPECT_EQ(output.directive, ExecutionDirective::kHoldPosition);
+  EXPECT_EQ(output.reason_code, "WHEEL_GOAL_INFEASIBLE");
+  EXPECT_EQ(output.diagnostics.expanded_states, 0U);
+  EXPECT_FALSE(output.reference.has_value());
+}
+
+TEST(WheelPlanner, PhysicallySafeGoalReportsLocalSearchDomainExhaustion) {
+  auto input = test::MakeValidWheelInput();
+  input.request_id = "wheel-domain-exhausted";
+  auto allowed = std::vector<std::uint8_t>(
+      input.world.local_map.CellCount(), 1U);
+  for (std::size_t y = 0U; y < input.world.local_map.height; ++y) {
+    allowed[y * input.world.local_map.width + 3U] = 0U;
+  }
+  const auto problem = MakeLocalWheelProblem(input, std::move(allowed));
+
+  const PlannerOutput output = wheel::WheelPlanner{}.Plan(problem);
+
+  EXPECT_EQ(output.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(output.directive, ExecutionDirective::kNoSafeReference);
+  EXPECT_EQ(output.reason_code, "LOCAL_SEARCH_DOMAIN_EXHAUSTED");
+  EXPECT_GT(output.diagnostics.expanded_states, 0U);
+  EXPECT_FALSE(output.reference.has_value());
 }
 
 TEST(WheelPlanner, LazySearchPreservesContinuousStartAndExactPointGoal) {
@@ -126,7 +241,11 @@ TEST(WheelPlanner, RankedSearchReusesExhaustedTreeForNearerFrontier) {
 
   const auto search = wheel::SearchWheelLatticeRanked(
       std::get<WheeledState>(input.current_state), ranked_goals,
-      *projection.projection, std::get<WheeledCapability>(input.capability),
+      *projection.projection,
+      hierarchical::LocalSearchDomain{
+          input.world.local_map.width, input.world.local_map.height,
+          std::vector<std::uint8_t>(input.world.local_map.CellCount(), 1U)},
+      std::get<WheeledCapability>(input.capability),
       input.config, {});
 
   ASSERT_TRUE(search.ok()) << search.reason_code;
@@ -203,7 +322,11 @@ TEST(WheelPlanner, RankedIndexedSearchIsDeterministicAcrossTwentyRuns) {
   for (std::size_t run = 0U; run < 20U; ++run) {
     const auto search = wheel::SearchWheelLatticeRanked(
         std::get<WheeledState>(input.current_state), ranked_goals,
-        *projection.projection, std::get<WheeledCapability>(input.capability),
+        *projection.projection,
+        hierarchical::LocalSearchDomain{
+            input.world.local_map.width, input.world.local_map.height,
+            std::vector<std::uint8_t>(input.world.local_map.CellCount(), 1U)},
+        std::get<WheeledCapability>(input.capability),
         input.config, {});
     ASSERT_TRUE(search.ok()) << "run=" << run << ' ' << search.reason_code;
     if (run == 0U) {
@@ -241,6 +364,15 @@ TEST(WheelPlanner, ReusesLocalProjectionOnlyForAnIdenticalContentKey) {
 
   const auto cold = planner.PlanRanked(std::span{&problem, 1U});
   const auto warm = planner.PlanRanked(std::span{&problem, 1U});
+  auto changed_domain = problem;
+  auto restricted = std::vector<std::uint8_t>(
+      input.world.local_map.CellCount(), 1U);
+  restricted.front() = 0U;
+  changed_domain.search_domain = hierarchical::LocalSearchDomain{
+      input.world.local_map.width, input.world.local_map.height,
+      std::move(restricted)};
+  const auto domain_reuse =
+      planner.PlanRanked(std::span{&changed_domain, 1U});
   auto changed_generation = problem;
   ++changed_generation.local_map_generation;
   const auto generation_miss =
@@ -256,8 +388,11 @@ TEST(WheelPlanner, ReusesLocalProjectionOnlyForAnIdenticalContentKey) {
 
   ASSERT_TRUE(cold.output.reference.has_value()) << cold.output.reason_code;
   ASSERT_TRUE(warm.output.reference.has_value()) << warm.output.reason_code;
+  ASSERT_TRUE(domain_reuse.output.reference.has_value())
+      << domain_reuse.output.reason_code;
   EXPECT_FALSE(cold.projection_cache_hit);
   EXPECT_TRUE(warm.projection_cache_hit);
+  EXPECT_TRUE(domain_reuse.projection_cache_hit);
   EXPECT_FALSE(generation_miss.projection_cache_hit);
   EXPECT_FALSE(capability_miss.projection_cache_hit);
   EXPECT_FALSE(safety_miss.projection_cache_hit);
@@ -275,7 +410,7 @@ TEST(WheelPlanner, ReusesLocalProjectionOnlyForAnIdenticalContentKey) {
 
 TEST(WheelPlanner, PlansToExactOffCellGoalWithSmallExecutionTolerance) {
   Planner planner;
-  auto input = test::MakeValidWheelInput();
+  auto input = MakeWheelInputWithRequiredLocalCoverage();
   input.request_id = "wheel-exact-off-cell-goal";
   input.goal_map.target = PointGoal{
       .position_m = {4.37, 3.42, 0.0},
@@ -459,7 +594,7 @@ TEST(WheelPlanner, ConnectsAnExactNearGoalAcrossThePointTwoMeterGridGap) {
 }
 
 TEST(WheelPlanner, LazySearchAcceptsAtLeastOneHierarchicalFrontier) {
-  const auto input = test::MakeValidWheelInput();
+  const auto input = MakeWheelInputWithRequiredLocalCoverage();
   const auto global = hierarchical::PlanGroundGlobalRoute(input);
   ASSERT_TRUE(global.ok()) << global.reason_code;
   const auto frontiers = hierarchical::BuildLocalFrontiers(
@@ -496,7 +631,7 @@ TEST(WheelPlanner, LazySearchAcceptsAtLeastOneHierarchicalFrontier) {
 
 TEST(WheelPlanner, ExposesStationaryModeAtAnAlreadySatisfiedGoal) {
   Planner planner;
-  auto input = test::MakeValidWheelInput();
+  auto input = MakeWheelInputWithRequiredLocalCoverage();
   input.request_id = "wheel-stationary";
   input.goal_map.target = PointGoal{
       .position_m = std::get<WheeledState>(input.current_state).pose.position_m,
@@ -515,7 +650,7 @@ TEST(WheelPlanner, ExposesStationaryModeAtAnAlreadySatisfiedGoal) {
 
 TEST(WheelPlanner, FallsBackOrFailsAccordingToRequiredSmoothingPolicy) {
   Planner planner;
-  auto fallback = test::MakeValidWheelInput();
+  auto fallback = MakeWheelInputWithRequiredLocalCoverage();
   fallback.request_id = "wheel-forced-fallback";
   fallback.config.optimization.maximum_iterations = 0U;
 
@@ -545,8 +680,9 @@ TEST(WheelPlanner, FallsBackOrFailsAccordingToRequiredSmoothingPolicy) {
 
 TEST(WheelPlanner, CapsEmittedSamplesEvenWhenOptimizationFallsBack) {
   Planner planner;
-  auto input = test::MakeValidWheelInput();
+  auto input = MakeWheelInputWithRequiredLocalCoverage();
   input.request_id = "wheel-nine-sample-budget";
+  input.config.optimization.maximum_iterations = 0U;
   input.config.optimization.maximum_smoothing_samples = 9U;
 
   const PlannerOutput output = planner.Plan(input);
@@ -560,7 +696,7 @@ TEST(WheelPlanner, CapsEmittedSamplesEvenWhenOptimizationFallsBack) {
 
 TEST(WheelPlanner, PreservesTheTrueOffCenterStartPoseInTrajectoryAndPreview) {
   Planner planner;
-  auto input = test::MakeValidWheelInput();
+  auto input = MakeWheelInputWithRequiredLocalCoverage();
   input.request_id = "wheel-true-start";
   auto& state = std::get<WheeledState>(input.current_state);
   state.pose.position_m = {2.2, 3.2, 0.0};
@@ -646,7 +782,8 @@ TEST(WheelPlanner, TimingUsesInitialVelocityTerrainAndDirectionStops) {
 
 TEST(WheelPlanner, SelectsReverseMotionForGoalBehind) {
   Planner planner;
-  auto input = test::MakeValidWheelInput();
+  auto input = MakeWheelInputWithRequiredLocalCoverage();
+  input.world.local_map.origin_m.x = -2.0;
   input.request_id = "wheel-reverse";
   input.goal_map.target = PointGoal{
       .position_m = {0.5, 3.5, 0.0},
@@ -670,7 +807,7 @@ TEST(WheelPlanner, SelectsReverseMotionForGoalBehind) {
 
 TEST(WheelPlanner, ProducesInPlaceSpinForYawOnlyGoal) {
   Planner planner;
-  auto input = test::MakeValidWheelInput();
+  auto input = MakeWheelInputWithRequiredLocalCoverage();
   input.request_id = "wheel-spin";
   input.goal_map.target = PointGoal{
       .position_m = {2.5, 3.5, 0.0},
@@ -741,7 +878,7 @@ TEST(WheelPlanner, BuildsABoundedClampedCurveForAForwardArc) {
 
 TEST(WheelPlanner, IsDeterministicForSameTypedSnapshot) {
   Planner planner;
-  const auto input = test::MakeValidWheelInput();
+  const auto input = MakeWheelInputWithRequiredLocalCoverage();
 
   const PlannerOutput first = planner.Plan(input);
   const PlannerOutput second = planner.Plan(input);

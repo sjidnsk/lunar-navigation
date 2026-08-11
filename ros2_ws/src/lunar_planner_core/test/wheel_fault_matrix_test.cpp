@@ -58,6 +58,12 @@ bool HasReason(const shared::WheelTerrainPoseEvaluation& evaluation,
       evaluation.rejection_codes.end();
 }
 
+PlannerInput MakeWheelInputWithRequiredLocalCoverage() {
+  PlannerInput input = test::MakeValidWheelInput();
+  input.world.local_map.origin_m.x = -1.0;
+  return input;
+}
+
 TEST(WheelFaultMatrix, FitsFourWheelSupportPlaneAtArbitrarySlopeBoundary) {
   auto input = test::MakeValidWheelInput();
   auto capability = std::get<WheeledCapability>(input.capability);
@@ -298,12 +304,44 @@ TEST(WheelFaultMatrix, DerivesLongSweepSamplingWithoutAFixedCeiling) {
   EXPECT_GT(result.sample_count, 32U);
 }
 
+TEST(WheelFaultMatrix, RejectsAForbiddenContinuousCenterBetweenAllowedEndpoints) {
+  auto input = test::MakeValidWheelInput();
+  const auto capability = std::get<WheeledCapability>(input.capability);
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  auto allowed = std::vector<std::uint8_t>(
+      input.world.local_map.CellCount(), 1U);
+  allowed[3U * input.world.local_map.width + 3U] = 0U;
+  const hierarchical::LocalSearchDomain search_domain{
+      input.world.local_map.width, input.world.local_map.height,
+      std::move(allowed)};
+  const wheel::WheelSweepValidator validator{
+      *projection.projection, capability, search_domain};
+  const wheel::WheelTransition transition{
+      .source_pose = wheel::WheelPose{.position_m = {2.5, 3.5, 0.0}},
+      .target_pose = wheel::WheelPose{.position_m = {4.5, 3.5, 0.0}},
+      .primitive_kind = WheelPrimitiveKind::kForward,
+      .source_mode = wheel::WheelMotionMode::kStart,
+      .target_mode = wheel::WheelMotionMode::kForward,
+      .path_length_m = 2.0,
+  };
+
+  const auto result = validator.Validate(transition, {});
+
+  EXPECT_FALSE(result.valid);
+  EXPECT_GT(result.sample_count, 1U);
+  EXPECT_EQ(result.reason_code, "WHEEL_SWEEP_OUTSIDE_SEARCH_DOMAIN");
+}
+
 TEST(WheelFaultMatrix, ReportsNoPathAcrossFullBarrier) {
   Planner planner;
-  auto input = test::MakeValidWheelInput();
+  auto input = MakeWheelInputWithRequiredLocalCoverage();
   input.request_id = "wheel-blocked";
   for (std::size_t y = 0U; y < input.world.local_map.height; ++y) {
-    SetObstacle(input.world.local_map, 3U, y);
+    SetObstacle(input.world.local_map, 4U, y);
   }
 
   const PlannerOutput output = planner.Plan(input);
@@ -316,11 +354,11 @@ TEST(WheelFaultMatrix, ReportsNoPathAcrossFullBarrier) {
 
 TEST(WheelFaultMatrix, RejectsObstacleIntersectingOnlyTheTrueStartConnector) {
   Planner planner;
-  auto input = test::MakeValidWheelInput();
+  auto input = MakeWheelInputWithRequiredLocalCoverage();
   input.request_id = "wheel-start-connector-blocked";
   auto& state = std::get<WheeledState>(input.current_state);
   state.pose.position_m = {2.15, 3.5, 0.0};
-  SetObstacle(input.world.local_map, 1U, 3U);
+  SetObstacle(input.world.local_map, 2U, 3U);
 
   const PlannerOutput output = planner.Plan(input);
 

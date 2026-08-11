@@ -5,6 +5,7 @@
 #include <stop_token>
 #include <string>
 
+#include "hierarchical/local_planning_problem.hpp"
 #include "lunar_planner_core/types/planner_io.hpp"
 #include "shared/safe_projection.hpp"
 #include "wheel/wheel_types.hpp"
@@ -50,7 +51,8 @@ struct WheelLatticeSearchResult final {
 [[nodiscard]] WheelLatticeSearchResult SearchWheelLatticeRanked(
     const WheeledState& current_state,
     std::span<const GoalRegion> ranked_goals,
-    const shared::SafeProjection& projection,
+    const shared::SafeProjection& physical_projection,
+    const hierarchical::LocalSearchDomain& search_domain,
     const WheeledCapability& capability,
     const PlannerConfig& config,
     std::stop_token stop_token);

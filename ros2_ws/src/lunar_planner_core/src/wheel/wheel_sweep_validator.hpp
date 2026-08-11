@@ -4,6 +4,7 @@
 #include <stop_token>
 #include <string>
 
+#include "hierarchical/local_planning_problem.hpp"
 #include "lunar_planner_core/types/platform_capability.hpp"
 #include "shared/safe_projection.hpp"
 #include "wheel/wheel_types.hpp"
@@ -26,6 +27,10 @@ class WheelSweepValidator final {
   WheelSweepValidator(
       const shared::SafeProjection& projection,
       const WheeledCapability& capability) noexcept;
+  WheelSweepValidator(
+      const shared::SafeProjection& physical_projection,
+      const WheeledCapability& capability,
+      const hierarchical::LocalSearchDomain& search_domain) noexcept;
 
   [[nodiscard]] WheelSweepValidation Validate(
       const WheelTransition& transition,
@@ -34,6 +39,7 @@ class WheelSweepValidator final {
  private:
   const shared::SafeProjection* projection_{};
   const WheeledCapability* capability_{};
+  const hierarchical::LocalSearchDomain* search_domain_{};
   double footprint_support_radius_m_{};
 };
 

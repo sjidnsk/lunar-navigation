@@ -505,6 +505,7 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
     const WheeledState& current_state,
     const std::span<const GoalRegion> ranked_goals,
     const shared::SafeProjection& projection,
+    const hierarchical::LocalSearchDomain& search_domain,
     const WheeledCapability& capability, const PlannerConfig& config,
     const std::stop_token stop_token) try {
   if (stop_token.stop_requested()) {
@@ -513,6 +514,12 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
   if (ranked_goals.empty() || projection.source_map() == nullptr ||
       !ValidateCapability(capability, config) ||
       !IsFinite(current_state.pose)) {
+    return Failure(
+        WheelLatticeStatus::kInvalidRequest,
+        "WHEEL_LATTICE_REQUEST_INVALID");
+  }
+  if (search_domain.width() != projection.source_map()->width() ||
+      search_domain.height() != projection.source_map()->height()) {
     return Failure(
         WheelLatticeStatus::kInvalidRequest,
         "WHEEL_LATTICE_REQUEST_INVALID");
@@ -527,6 +534,11 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
       !projection.HardFeasible(*current_cell)) {
     return Failure(
         WheelLatticeStatus::kInvalidRequest, "WHEEL_START_NOT_SAFE");
+  }
+  if (!search_domain.Contains(*current_cell)) {
+    return Failure(
+        WheelLatticeStatus::kNoPath,
+        "LOCAL_SEARCH_DOMAIN_EXHAUSTED");
   }
 
   const WheelPose true_start{
@@ -655,7 +667,7 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
   std::size_t best_goal_parent = kNoParent;
   std::vector<WheelTransition> best_terminal_transitions;
   bool start_has_valid_edge = false;
-  WheelSweepValidator validator{projection, capability};
+  WheelSweepValidator validator{projection, capability, search_domain};
 
   const auto update_goal = [&](
                                const std::size_t parent,
@@ -839,7 +851,7 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
     }
     return Failure(
         WheelLatticeStatus::kNoPath,
-        "WHEEL_NO_KNOWN_SAFE_ROUTE", expanded_states);
+        "LOCAL_SEARCH_DOMAIN_EXHAUSTED", expanded_states);
   }
   const auto plan = Reconstruct(
       nodes, best_goal_parent, best_terminal_transitions,
@@ -866,9 +878,16 @@ WheelLatticeSearchResult SearchWheelLattice(
     const shared::SafeProjection& projection,
     const WheeledCapability& capability, const PlannerConfig& config,
     const std::stop_token stop_token) {
+  const std::size_t cell_count = projection.source_map() == nullptr
+      ? 0U
+      : projection.source_map()->width() * projection.source_map()->height();
+  hierarchical::LocalSearchDomain full_domain{
+      projection.source_map() == nullptr ? 0U : projection.source_map()->width(),
+      projection.source_map() == nullptr ? 0U : projection.source_map()->height(),
+      std::vector<std::uint8_t>(cell_count, 1U)};
   return SearchWheelLatticeRanked(
       current_state, std::span<const GoalRegion>{&goal, 1U}, projection,
-      capability, config, stop_token);
+      full_domain, capability, config, stop_token);
 }
 
 }  // namespace lunar::planning::wheel
