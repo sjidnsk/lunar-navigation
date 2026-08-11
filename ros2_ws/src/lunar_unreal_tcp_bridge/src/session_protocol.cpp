@@ -190,6 +190,12 @@ std::optional<std::string> SessionProtocol::CheckHeartbeat(
   return std::nullopt;
 }
 
+void SessionProtocol::ForceHold() noexcept {
+  if (session_.has_value()) {
+    state_ = SessionState::kHold;
+  }
+}
+
 void SessionProtocol::Reset() noexcept {
   state_ = SessionState::kDisconnected;
   session_.reset();

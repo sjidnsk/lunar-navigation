@@ -1,0 +1,14 @@
+lunar_unreal_tcp_bridge:
+  ros__parameters:
+    use_sim_time: true
+    server_host: "192.168.1.20"
+    server_port: 47001
+    basis_map_from_unreal: [1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0]
+    unreal_world_origin_in_map_m: [0.0, 0.0, 0.0]
+    length_unit_to_m: 0.01
+    base_link_from_unreal_root: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    base_footprint_from_base_link: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    calibration_hash: "sha256:replace-with-unreal-calibration"
+    heartbeat_timeout_s: 3.0
+    freshness_timeout_s: 1.0
+    maximum_snapshot_skew_s: 0.2

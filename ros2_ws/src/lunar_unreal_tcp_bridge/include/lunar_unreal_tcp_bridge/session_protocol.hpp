@@ -54,6 +54,7 @@ class SessionProtocol final {
       const Frame& frame, SteadyTime received_at);
   [[nodiscard]] std::optional<std::string> CheckHeartbeat(
       SteadyTime now, std::chrono::seconds timeout = std::chrono::seconds{3});
+  void ForceHold() noexcept;
   void Reset() noexcept;
 
   [[nodiscard]] SessionState state() const noexcept;
