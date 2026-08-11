@@ -34,10 +34,18 @@ using Json = nlohmann::json;
 
 [[nodiscard]] PlannerInput MakeInput(const PlatformType platform) {
   switch (platform) {
-    case PlatformType::kWheeled:
-      return test::MakeValidWheelInput();
-    case PlatformType::kLegged:
-      return test::MakeValidLeggedInput();
+    case PlatformType::kWheeled: {
+      PlannerInput input = test::MakeValidWheelInput();
+      input.world.local_map = test::MakeFlatMap("odom", 24U, 16U, 1.0);
+      input.world.local_map.origin_m.x = -4.0;
+      return input;
+    }
+    case PlatformType::kLegged: {
+      PlannerInput input = test::MakeValidLeggedInput();
+      input.world.local_map = test::MakeFlatMap("odom", 24U, 16U, 1.0);
+      input.world.local_map.origin_m.x = -4.0;
+      return input;
+    }
     case PlatformType::kHopper:
       return test::MakeValidHopperInput();
   }
@@ -77,7 +85,7 @@ void MakeGoalKnownInfeasible(
       .position_m = {4.5, 3.5, 0.0},
       .tolerance_m = 0.2,
   };
-  forbidden[3U * input.world.local_map.width + 4U] = 1U;
+  forbidden[3U * input.world.local_map.width + 8U] = 1U;
 }
 
 [[nodiscard]] std::string OutcomeName(const PlanningOutcome outcome) {

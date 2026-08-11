@@ -54,6 +54,8 @@ lunar::planning::PlannerOutput NoRouteOutput(
   return lunar::planning::PlannerOutput{
       .outcome = lunar::planning::PlanningOutcome::kNoKnownSafeRoute,
       .directive = lunar::planning::ExecutionDirective::kHoldPosition,
+      .candidate_disposition = lunar::planning::CandidateDisposition::
+          kSuppressForCurrentPhysicalSnapshot,
       .reason_code = reason,
       .reference = std::nullopt,
       .diagnostics = {
@@ -106,6 +108,7 @@ lunar::planning::PlannerOutput WheelReferenceOutput(
   return lunar::planning::PlannerOutput{
       .outcome = lunar::planning::PlanningOutcome::kNewReferenceAvailable,
       .directive = lunar::planning::ExecutionDirective::kActivateNewReference,
+      .candidate_disposition = lunar::planning::CandidateDisposition::kKeep,
       .reason_code = "WHEEL_REFERENCE_AVAILABLE",
       .reference = lunar::planning::MotionReference{
           .plan_id = "wheel/rolling-1",
@@ -604,6 +607,8 @@ TEST_F(PlanMotionServerTest, ReturnsNoRouteAsSucceededActionWithEmptyReference) 
   EXPECT_EQ(wrapped.result->mission_revision, 7U);
   EXPECT_EQ(wrapped.result->diagnostics.expanded_states, 12U);
   EXPECT_TRUE(WaitFor([&] { return system.SawDiagnostic("NO_ROUTE"); }));
+  EXPECT_EQ(system.DiagnosticValue("NO_ROUTE", "candidate_disposition"),
+            "SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT");
   EXPECT_TRUE(WaitFor([&] {
     std::scoped_lock lock{feedback_mutex};
     return std::ranges::find(phases, Action::Feedback::SEARCHING) !=
@@ -963,6 +968,9 @@ TEST_F(
                "WHEEL_REFERENCE_AVAILABLE", "execution_state") ==
                "AWAITING_FEEDBACK";
   }));
+  EXPECT_EQ(system.DiagnosticValue("WHEEL_REFERENCE_AVAILABLE",
+                                   "candidate_disposition"),
+            "KEEP");
 
   using Feedback = lunar_navigation_msgs::msg::MotionExecutionFeedback;
   system.PublishExecutionFeedback(
@@ -1451,6 +1459,27 @@ TEST_F(PlanMotionServerTest, InternalResultInvariantUsesRecoverableErrorPath) {
   EXPECT_EQ(
       system.server->activate().id(),
       lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
+}
+
+TEST_F(PlanMotionServerTest, RejectsInvalidCandidateDispositionFailClosed) {
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner =
+          [](const lunar::planning::PlannerInput&) {
+            auto output = NoRouteOutput("INVALID_CANDIDATE_DISPOSITION");
+            output.candidate_disposition =
+                static_cast<lunar::planning::CandidateDisposition>(255U);
+            return output;
+          },
+      .preloaded_capabilities = WheelCapabilities(),
+  }};
+  system.PublishInputs();
+  const auto handle = system.SendGoal(system.Goal("invalid-disposition"));
+  ASSERT_NE(handle, nullptr);
+
+  const auto result = system.Result(handle);
+
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::ABORTED);
+  EXPECT_EQ(result.result->reason_code, "RESULT_ENUM_INVALID");
 }
 
 }  // namespace

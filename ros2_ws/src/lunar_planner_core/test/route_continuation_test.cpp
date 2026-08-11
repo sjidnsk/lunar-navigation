@@ -31,7 +31,8 @@ void SetRollingIdentity(PlannerInput &input, const std::string &platform_id,
   PlannerInput input = test::MakeValidWheelInput();
   input.request_id = "rolling-wheel-0";
   input.world.global_map = test::MakeFlatMap("map", 24U, 8U, 1.0);
-  input.world.local_map = test::MakeFlatMap("odom", 12U, 8U, 1.0);
+  input.world.local_map = test::MakeFlatMap("odom", 24U, 16U, 1.0);
+  input.world.local_map.origin_m.x = -4.0;
   input.config.global_map.base_resolution_m = 1.0;
   input.goal_map = GoalRegion{
       .goal_id = "rolling-wheel-goal",
@@ -84,7 +85,8 @@ TEST(RouteContinuation, ReusesTheSameGroundContractForLeggedPlatform) {
   PlannerInput initial = test::MakeValidLeggedInput();
   initial.request_id = "rolling-legged-0";
   initial.world.global_map = test::MakeFlatMap("map", 24U, 8U, 1.0);
-  initial.world.local_map = test::MakeFlatMap("odom", 12U, 8U, 1.0);
+  initial.world.local_map = test::MakeFlatMap("odom", 24U, 16U, 1.0);
+  initial.world.local_map.origin_m.x = -4.0;
   initial.goal_map = GoalRegion{
       .goal_id = "rolling-legged-goal",
       .target =

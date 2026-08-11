@@ -7,11 +7,13 @@
 namespace lunar::planning::training {
 namespace {
 
-[[nodiscard]] PlannerOutput BridgeFailure(const PlanningOutcome outcome,
-                                          const char *reason_code) noexcept {
+[[nodiscard]] PlannerOutput BridgeFailure(
+    const PlanningOutcome outcome, const CandidateDisposition disposition,
+    const char *reason_code) noexcept {
   PlannerOutput output;
   output.outcome = outcome;
   output.directive = ExecutionDirective::kNoSafeReference;
+  output.candidate_disposition = disposition;
   output.reason_code = reason_code;
   output.diagnostics.planner_name = "cpp_v3_hierarchical";
   return output;
@@ -49,9 +51,11 @@ PlannerOutput PlannerBridge::Plan(const TrainingPlanRequest &request) noexcept {
     return output;
   } catch (const std::bad_alloc &) {
     return BridgeFailure(PlanningOutcome::kResourceExhausted,
+                         CandidateDisposition::kKeep,
                          "BRIDGE_RESOURCE_EXHAUSTED");
   } catch (...) {
     return BridgeFailure(PlanningOutcome::kNumericalFailure,
+                         CandidateDisposition::kKeep,
                          "BRIDGE_REQUEST_CONVERSION_FAILED");
   }
 }

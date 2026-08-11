@@ -500,7 +500,10 @@ ActionResultConversion ConvertPlannerOutput(
               lunar::planning::PlanningOutcome::kCanceled) ||
       static_cast<std::uint8_t>(output.directive) >
           static_cast<std::uint8_t>(
-              lunar::planning::ExecutionDirective::kNoSafeReference)) {
+              lunar::planning::ExecutionDirective::kNoSafeReference) ||
+      static_cast<std::uint8_t>(output.candidate_disposition) >
+          static_cast<std::uint8_t>(lunar::planning::CandidateDisposition::
+                                        kSuppressForCurrentPhysicalSnapshot)) {
     return ResultFailure("RESULT_ENUM_INVALID");
   }
   if (output.reason_code.empty() || output.diagnostics.elapsed.count() < 0 ||

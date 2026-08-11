@@ -202,6 +202,18 @@ constexpr std::array<std::string_view, 15U> kRetiredSearchParameters{
   return joined;
 }
 
+[[nodiscard]] std::string_view CandidateDispositionName(
+    const lunar::planning::CandidateDisposition disposition) noexcept {
+  switch (disposition) {
+    case lunar::planning::CandidateDisposition::kKeep:
+      return "KEEP";
+    case lunar::planning::CandidateDisposition::
+        kSuppressForCurrentPhysicalSnapshot:
+      return "SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT";
+  }
+  return "UNKNOWN";
+}
+
 struct ExecutionDiagnosticInfo final {
   std::string plan_id;
   std::string segment_id;
@@ -1360,7 +1372,8 @@ struct PlanMotionServer::Impl final {
         diagnostic_msgs::msg::DiagnosticStatus::OK,
         result->reason_code,
         &output.diagnostics,
-        output.reference.has_value() ? &*output.reference : nullptr);
+        output.reference.has_value() ? &*output.reference : nullptr,
+        output.candidate_disposition);
     try {
       goal_handle->succeed(result);
     } catch (const std::exception& error) {
@@ -1696,7 +1709,9 @@ struct PlanMotionServer::Impl final {
       const std::uint8_t level,
       const std::string& reason_code,
       const lunar::planning::PlannerDiagnostics* diagnostics = nullptr,
-      const lunar::planning::MotionReference* active_reference = nullptr) {
+      const lunar::planning::MotionReference* active_reference = nullptr,
+      const lunar::planning::CandidateDisposition candidate_disposition =
+          lunar::planning::CandidateDisposition::kKeep) {
     std::scoped_lock lock{diagnostic_mutex};
     last_diagnostic_reason = reason_code;
     if (!diagnostics_publisher || !diagnostics_publisher->is_activated()) {
@@ -1719,6 +1734,8 @@ struct PlanMotionServer::Impl final {
       entry.value = std::move(value);
       status.values.push_back(std::move(entry));
     };
+    append("candidate_disposition",
+           std::string{CandidateDispositionName(candidate_disposition)});
     if (diagnostics != nullptr) {
       append(
           "planner_total_elapsed_s",

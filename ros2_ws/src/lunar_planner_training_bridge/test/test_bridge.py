@@ -316,6 +316,103 @@ def test_bridge_uses_matching_v3_planner(bridge, easy_request, platform_type):
     assert output.diagnostics.planner_name == "cpp_v3_hierarchical"
 
 
+def test_bridge_exposes_candidate_disposition_and_complete_hierarchical_metrics(
+    bridge, easy_request
+) -> None:
+    """Would fail if Task 3 metrics or structured disposition stopped at C++."""
+    request = easy_request("WHEELED")
+    request.world.local_map = _flat_map("odom", width=24, height=16)
+    request.world.local_map.origin_m.x = -4.0
+
+    output = bridge.plan(request)
+
+    assert output.outcome == bridge_api.PlanningOutcome.NEW_REFERENCE_AVAILABLE
+    assert output.candidate_disposition == bridge_api.CandidateDisposition.KEEP
+    metrics = output.diagnostics.hierarchical
+    assert metrics is not None
+    expected_fields = {
+        "global_level",
+        "global_resolution_m",
+        "global_cells",
+        "global_elapsed",
+        "local_elapsed",
+        "global_expanded_states",
+        "local_expanded_states",
+        "global_open_peak",
+        "estimated_work_memory_bytes",
+        "raw_route_points",
+        "simplified_route_points",
+        "local_frontier_distance_m",
+        "additional_corridor_margin_m",
+        "corridor_half_width_m",
+        "search_domain_cell_count",
+        "search_domain_sha256",
+        "local_frontier_attempts",
+        "local_search_runs",
+        "global_replans",
+        "physical_goal_feasible",
+        "local_attempts",
+        "corridor_width_m",
+        "global_projection_cache_hits",
+        "local_projection_cache_hits",
+        "hopper_graph_nodes",
+        "hopper_graph_edges",
+        "hopper_route_hops",
+        "hopper_certification_attempts",
+        "landing_field_elapsed",
+        "spatial_index_elapsed",
+        "ballistic_solve_elapsed",
+        "flight_tube_certification_elapsed",
+        "safe_landing_nodes",
+        "candidate_edges_evaluated",
+        "coarse_edges_rejected",
+        "full_edges_certified",
+        "full_edges_invalidated",
+        "edge_certificate_cache_hits",
+        "route_reused",
+        "route_cursor",
+        "rolling_request_count",
+    }
+    assert all(hasattr(metrics, field) for field in expected_fields)
+    assert metrics.local_search_runs > 0
+    assert metrics.search_domain_cell_count > 0
+    assert len(metrics.search_domain_sha256) == 64
+    assert metrics.physical_goal_feasible
+
+
+def test_bridge_suppresses_only_an_exhausted_physical_target(
+    bridge, easy_request
+) -> None:
+    request = easy_request("WHEELED")
+    for row in range(request.world.global_map.height):
+        _set_map_byte(request.world.global_map, "forbidden", row, 3, 1)
+
+    exhausted = bridge.plan(request)
+
+    assert exhausted.outcome == bridge_api.PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+    assert exhausted.candidate_disposition == (
+        bridge_api.CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT
+    )
+
+    invalid = easy_request("WHEELED")
+    layers = invalid.world.local_map.layers
+    del layers["forbidden"]
+    invalid.world.local_map.layers = layers
+
+    rejected = bridge.plan(invalid)
+
+    assert rejected.outcome == bridge_api.PlanningOutcome.INVALID_REQUEST
+    assert rejected.candidate_disposition == bridge_api.CandidateDisposition.KEEP
+
+    numerical = easy_request("WHEELED")
+    numerical.config.global_search.slope_weight = float("nan")
+
+    failed = bridge.plan(numerical)
+
+    assert failed.outcome == bridge_api.PlanningOutcome.NUMERICAL_FAILURE
+    assert failed.candidate_disposition == bridge_api.CandidateDisposition.KEEP
+
+
 def test_hopper_request_has_repeatable_delta_v_and_no_dynamic_propellant_contract(
     bridge, easy_request
 ) -> None:
@@ -749,6 +846,7 @@ def test_committed_hopper_request_uses_execution_context(
     assert output.directive == bridge_api.ExecutionDirective.CONTINUE_COMMITTED_HOP
     assert output.reason_code == "COMMITTED_HOP_CONTINUES"
     assert output.reference is None
+    assert output.candidate_disposition == bridge_api.CandidateDisposition.KEEP
 
 
 def test_public_outcome_and_directive_names_are_exact() -> None:
@@ -772,3 +870,23 @@ def test_public_outcome_and_directive_names_are_exact() -> None:
         "CONTINUE_COMMITTED_HOP",
         "NO_SAFE_REFERENCE",
     }
+    assert set(bridge_api.CandidateDisposition.__members__) == {
+        "KEEP",
+        "SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT",
+    }
+
+
+def test_candidate_disposition_defaults_non_target_outputs_to_keep() -> None:
+    output = bridge_api.PlannerOutput()
+    for outcome in (
+        bridge_api.PlanningOutcome.NEW_REFERENCE_AVAILABLE,
+        bridge_api.PlanningOutcome.SAFE_FRONTIER_REFERENCE_AVAILABLE,
+        bridge_api.PlanningOutcome.INVALID_REQUEST,
+        bridge_api.PlanningOutcome.STALE_INPUT,
+        bridge_api.PlanningOutcome.NUMERICAL_FAILURE,
+        bridge_api.PlanningOutcome.RESOURCE_EXHAUSTED,
+        bridge_api.PlanningOutcome.ACTIVE_REFERENCE_INVALIDATED,
+        bridge_api.PlanningOutcome.CANCELED,
+    ):
+        output.outcome = outcome
+        assert output.candidate_disposition == bridge_api.CandidateDisposition.KEEP

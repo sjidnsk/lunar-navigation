@@ -43,6 +43,11 @@ enum class ExecutionDirective : std::uint8_t {
   kNoSafeReference = 4,
 };
 
+enum class CandidateDisposition : std::uint8_t {
+  kKeep,
+  kSuppressForCurrentPhysicalSnapshot,
+};
+
 enum class TrajectoryMode : std::uint8_t {
   kStationary,
   kOptimized,
@@ -203,6 +208,7 @@ struct PlannerDiagnostics final {
 struct PlannerOutput final {
   PlanningOutcome outcome{PlanningOutcome::kInvalidRequest};
   ExecutionDirective directive{ExecutionDirective::kNoSafeReference};
+  CandidateDisposition candidate_disposition{CandidateDisposition::kKeep};
   std::string reason_code;
   std::optional<MotionReference> reference;
   PlannerDiagnostics diagnostics;

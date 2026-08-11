@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -17,8 +18,10 @@
 #include "hierarchical/global_route_planner.hpp"
 #include "hierarchical/local_frontier.hpp"
 #include "hierarchical/reference_composer.hpp"
+#include "legged/legged_planner.hpp"
 #include "lunar_planner_core/planner.hpp"
 #include "test_fixtures.hpp"
+#include "wheel/wheel_planner.hpp"
 
 namespace lunar::planning::hierarchical {
 namespace {
@@ -135,6 +138,44 @@ void SetObstacleBoth(PlannerInput &input, const std::size_t x,
   return route;
 }
 
+TEST(CandidateDispositionContract, DefaultsNonTargetOutcomesToKeep) {
+  constexpr std::array<PlanningOutcome, 8U> outcomes{
+      PlanningOutcome::kNewReferenceAvailable,
+      PlanningOutcome::kSafeFrontierReferenceAvailable,
+      PlanningOutcome::kInvalidRequest,
+      PlanningOutcome::kStaleInput,
+      PlanningOutcome::kNumericalFailure,
+      PlanningOutcome::kResourceExhausted,
+      PlanningOutcome::kActiveReferenceInvalidated,
+      PlanningOutcome::kCanceled,
+  };
+
+  for (const PlanningOutcome outcome : outcomes) {
+    PlannerOutput output{.outcome = outcome};
+    EXPECT_EQ(output.candidate_disposition, CandidateDisposition::kKeep)
+        << static_cast<int>(outcome);
+  }
+}
+
+TEST(CandidateDispositionContract, KeepsConcreteInfrastructureFailures) {
+  PlannerInput numerical = DistantWheelInput();
+  numerical.config.global_search.slope_weight =
+      std::numeric_limits<double>::quiet_NaN();
+  const PlannerOutput numerical_output = Planner{}.Plan(numerical);
+  ASSERT_EQ(numerical_output.outcome, PlanningOutcome::kNumericalFailure);
+  EXPECT_EQ(numerical_output.candidate_disposition,
+            CandidateDisposition::kKeep);
+
+  PlannerInput resource = DistantWheelInput();
+  resource.world.global_map = test::MakeFlatMap("map", 5'000U, 1U, 3.2);
+  resource.world.local_map = test::MakeFlatMap("odom", 12U, 12U, 0.2);
+  resource.config.global_map.base_resolution_m = 0.2;
+  const PlannerOutput resource_output = Planner{}.Plan(resource);
+  ASSERT_EQ(resource_output.outcome, PlanningOutcome::kResourceExhausted);
+  EXPECT_EQ(resource_output.candidate_disposition,
+            CandidateDisposition::kKeep);
+}
+
 TEST(ReferenceComposer, FreezesCompletePreviewAndRequestIdentity) {
   const PlannerInput input = DistantWheelInput();
   const GlobalRoute route = TwoPointRoute();
@@ -223,6 +264,7 @@ TEST(HierarchicalPlanner, ReturnsCompleteGlobalPreviewAndOneLocalSegment) {
 
   ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
       << output.reason_code;
+  EXPECT_EQ(output.candidate_disposition, CandidateDisposition::kKeep);
   ASSERT_TRUE(output.reference.has_value());
   ASSERT_NE(output.continuation, nullptr);
   EXPECT_EQ(output.diagnostics.planner_name, "cpp_v3_hierarchical");
@@ -300,6 +342,8 @@ TEST(HierarchicalPlanner, ReportsTheLastActuallySearchedLeggedProblem) {
   const PlannerOutput output = planner.Plan(input);
 
   ASSERT_EQ(output.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(output.candidate_disposition,
+            CandidateDisposition::kSuppressForCurrentPhysicalSnapshot);
   ASSERT_TRUE(output.diagnostics.hierarchical.has_value());
   const auto& metrics = *output.diagnostics.hierarchical;
   const auto& last_problem = frontiers.problems.back();
@@ -321,6 +365,7 @@ TEST(HierarchicalPlanner, LeavesDomainDiagnosticsEmptyWithoutALocalSearch) {
   const PlannerOutput output = planner.Plan(input);
 
   ASSERT_EQ(output.outcome, PlanningOutcome::kInvalidRequest);
+  EXPECT_EQ(output.candidate_disposition, CandidateDisposition::kKeep);
   EXPECT_EQ(output.reason_code, "LOCAL_FRONTIER_CONFIGURATION_INVALID");
   ASSERT_TRUE(output.diagnostics.hierarchical.has_value());
   const auto& metrics = *output.diagnostics.hierarchical;
@@ -339,6 +384,8 @@ TEST(HierarchicalPlanner, DistinguishesGlobalAndLocalRejections) {
   const PlannerOutput global = planner.Plan(global_blocked);
 
   EXPECT_EQ(global.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(global.candidate_disposition,
+            CandidateDisposition::kSuppressForCurrentPhysicalSnapshot);
   EXPECT_EQ(global.reason_code, "GLOBAL_NO_KNOWN_SAFE_ROUTE");
   EXPECT_FALSE(global.reference.has_value());
 
@@ -350,6 +397,8 @@ TEST(HierarchicalPlanner, DistinguishesGlobalAndLocalRejections) {
   const PlannerOutput local = planner.Plan(local_unavailable);
 
   EXPECT_EQ(local.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(local.candidate_disposition,
+            CandidateDisposition::kSuppressForCurrentPhysicalSnapshot);
   EXPECT_EQ(local.reason_code, "LOCAL_MAP_COVERAGE_INSUFFICIENT");
   EXPECT_FALSE(local.reference.has_value());
 }
@@ -398,6 +447,8 @@ TEST(HierarchicalPlanner, ReportsTheLocalBackendReasonAfterAllFrontiersFail) {
   const PlannerOutput output = planner.Plan(input);
 
   ASSERT_EQ(output.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(output.candidate_disposition,
+            CandidateDisposition::kSuppressForCurrentPhysicalSnapshot);
   EXPECT_EQ(output.reason_code, "LOCAL_SEGMENT_INFEASIBLE");
   EXPECT_NE(std::ranges::find(output.diagnostics.warning_codes,
                               "LOCAL_SEARCH_DOMAIN_EXHAUSTED"),
@@ -470,7 +521,9 @@ TEST(HierarchicalPlanner, IsStatelessAcrossCancellationAndRepeatedRequests) {
   std::stop_source stop;
   stop.request_stop();
   canceled.stop_token = stop.get_token();
-  EXPECT_EQ(planner.Plan(canceled).outcome, PlanningOutcome::kCanceled);
+  const PlannerOutput canceled_output = planner.Plan(canceled);
+  EXPECT_EQ(canceled_output.outcome, PlanningOutcome::kCanceled);
+  EXPECT_EQ(canceled_output.candidate_disposition, CandidateDisposition::kKeep);
 
   const PlannerInput input = DistantWheelInput();
   const PlannerOutput first = planner.Plan(input);
@@ -542,6 +595,7 @@ TEST(HierarchicalPlanner,
   const PlannerOutput output = planner.Plan(input);
 
   EXPECT_EQ(output.outcome, PlanningOutcome::kInvalidRequest);
+  EXPECT_EQ(output.candidate_disposition, CandidateDisposition::kKeep);
   EXPECT_EQ(output.reason_code, "LEGGED_LATTICE_REQUEST_INVALID");
   ASSERT_TRUE(output.diagnostics.hierarchical.has_value());
   EXPECT_EQ(output.diagnostics.hierarchical->local_search_runs, 1U);
@@ -584,6 +638,63 @@ TEST(HierarchicalPlanner, PublishesProvisionalRouteAndIsolatesObserverErrors) {
   EXPECT_EQ(observed->route_id, "wheel-route/" + input.request_id);
   EXPECT_EQ(observed->platform_type, PlatformType::kWheeled);
   EXPECT_EQ(observed->poses_map, output.reference->preview.poses_map);
+}
+
+TEST(HierarchicalPlanner,
+     KeepsLocalBackendFailuresUntilTheHierarchyExhaustsTheTarget) {
+  PlannerInput wheel_input = DistantWheelInput();
+  auto &wheel_capability = std::get<WheeledCapability>(wheel_input.capability);
+  wheel_capability.motion_primitives = {
+      WheelMotionPrimitive{
+          .primitive_id = "spin-only",
+          .kind = WheelPrimitiveKind::kSpinCounterclockwise,
+          .relative_end_pose =
+              Pose3{.orientation = Quaternion{.w = 0.9238795325112867,
+                                              .z = 0.3826834323650898}},
+      },
+  };
+  const GlobalRoutePlanResult wheel_global = PlanGroundGlobalRoute(wheel_input);
+  ASSERT_TRUE(wheel_global.ok()) << wheel_global.reason_code;
+  const LocalFrontierResult wheel_frontiers =
+      BuildLocalFrontiers(wheel_input, *wheel_global.route);
+  ASSERT_TRUE(wheel_frontiers.ok()) << wheel_frontiers.reason_code;
+
+  const PlannerOutput wheel_backend =
+      wheel::WheelPlanner{}.PlanRanked(wheel_frontiers.problems).output;
+  const PlannerOutput wheel_public = Planner{}.Plan(wheel_input);
+
+  ASSERT_EQ(wheel_backend.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(wheel_backend.candidate_disposition, CandidateDisposition::kKeep);
+  ASSERT_EQ(wheel_public.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(wheel_public.candidate_disposition,
+            CandidateDisposition::kSuppressForCurrentPhysicalSnapshot);
+
+  PlannerInput legged_input = DistantLeggedInput();
+  auto &legged_capability = std::get<LeggedCapability>(legged_input.capability);
+  legged_capability.motion_primitives = {
+      LeggedBodyPrimitive{
+          .primitive_id = "spin-only",
+          .kind = LeggedPrimitiveKind::kSpin,
+          .yaw_change_rad = 1.5707963267948966,
+      },
+  };
+  const GlobalRoutePlanResult legged_global =
+      PlanGroundGlobalRoute(legged_input);
+  ASSERT_TRUE(legged_global.ok()) << legged_global.reason_code;
+  const LocalFrontierResult legged_frontiers =
+      BuildLocalFrontiers(legged_input, *legged_global.route);
+  ASSERT_TRUE(legged_frontiers.ok()) << legged_frontiers.reason_code;
+  ASSERT_FALSE(legged_frontiers.problems.empty());
+
+  const PlannerOutput legged_backend =
+      legged::LeggedPlanner{}.Plan(legged_frontiers.problems.back());
+  const PlannerOutput legged_public = Planner{}.Plan(legged_input);
+
+  ASSERT_EQ(legged_backend.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(legged_backend.candidate_disposition, CandidateDisposition::kKeep);
+  ASSERT_EQ(legged_public.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(legged_public.candidate_disposition,
+            CandidateDisposition::kSuppressForCurrentPhysicalSnapshot);
 }
 
 } // namespace

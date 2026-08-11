@@ -102,6 +102,8 @@ void RequireValidResult(const PlannerOutput& output) {
 [[nodiscard]] Json Run(const Arguments& arguments) {
   Planner planner;
   PlannerInput input = test::MakeValidWheelInput();
+  input.world.local_map = test::MakeFlatMap("odom", 24U, 16U, 1.0);
+  input.world.local_map.origin_m.x = -4.0;
   std::mt19937_64 random{kRandomSeed};
 
   for (std::size_t index = 0U; index < kWarmupCount; ++index) {

@@ -81,7 +81,7 @@ constexpr Vec3 kLunarGravityMps2{0.0, 0.0, -1.62};
 
 [[nodiscard]] PlannerOutput Failure(
     const PlanningOutcome outcome, const ExecutionDirective directive,
-    std::string reason_code,
+    const CandidateDisposition candidate_disposition, std::string reason_code,
     const std::chrono::steady_clock::time_point started,
     const std::uint64_t expanded_states = 0U,
     std::optional<LocalTrajectoryDiagnostics> local = std::nullopt,
@@ -89,6 +89,7 @@ constexpr Vec3 kLunarGravityMps2{0.0, 0.0, -1.62};
   return {
       .outcome = outcome,
       .directive = directive,
+      .candidate_disposition = candidate_disposition,
       .reason_code = std::move(reason_code),
       .diagnostics = PlannerDiagnostics{
           .planner_name = std::string{kPlannerName},
@@ -106,7 +107,8 @@ constexpr Vec3 kLunarGravityMps2{0.0, 0.0, -1.62};
     const std::uint64_t expanded_states = 0U) {
   return Failure(
       PlanningOutcome::kCanceled, ExecutionDirective::kHoldPosition,
-      "REQUEST_CANCELED", started, expanded_states);
+      CandidateDisposition::kKeep, "REQUEST_CANCELED", started,
+      expanded_states);
 }
 
 [[nodiscard]] std::optional<Vec3> RotateMapVectorToOdom(
@@ -162,7 +164,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
   if (state == nullptr || capability == nullptr) {
     return Failure(
         PlanningOutcome::kInvalidRequest,
-        ExecutionDirective::kNoSafeReference,
+        ExecutionDirective::kNoSafeReference, CandidateDisposition::kKeep,
         "HOPPER_PLATFORM_TYPE_MISMATCH", started);
   }
 
@@ -172,14 +174,14 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
       PlanningProtectionDecision::kContinueCommittedHop) {
     return Failure(
         PlanningOutcome::kSafeFrontierReferenceAvailable,
-        ExecutionDirective::kContinueCommittedHop,
+        ExecutionDirective::kContinueCommittedHop, CandidateDisposition::kKeep,
         protection.reason_code, started);
   }
   if (protection.decision ==
       PlanningProtectionDecision::kActiveReferenceInvalidated) {
     return Failure(
         PlanningOutcome::kActiveReferenceInvalidated,
-        ExecutionDirective::kNoSafeReference,
+        ExecutionDirective::kNoSafeReference, CandidateDisposition::kKeep,
         protection.reason_code, started);
   }
   if (input.stop_token.stop_requested()) {
@@ -188,13 +190,13 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
   if (input.request_id.empty() || !ValidState(*state)) {
     return Failure(
         PlanningOutcome::kInvalidRequest,
-        ExecutionDirective::kNoSafeReference,
+        ExecutionDirective::kNoSafeReference, CandidateDisposition::kKeep,
         "HOPPER_REQUEST_INVALID", started);
   }
   if (!ValidCapability(*capability)) {
     return Failure(
         PlanningOutcome::kInvalidRequest,
-        ExecutionDirective::kNoSafeReference,
+        ExecutionDirective::kNoSafeReference, CandidateDisposition::kKeep,
         "HOPPER_CAPABILITY_INVALID", started);
   }
   const auto* point = std::get_if<PointGoal>(&input.goal_map.target);
@@ -204,7 +206,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
       !Finite(point->position_m)) {
     return Failure(
         PlanningOutcome::kInvalidRequest,
-        ExecutionDirective::kNoSafeReference,
+        ExecutionDirective::kNoSafeReference, CandidateDisposition::kKeep,
         "HOPPER_EXACT_POINT_REQUIRED", started);
   }
   const AvailableSingleHopDeltaVResult available =
@@ -212,7 +214,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
   if (!available.ok()) {
     return Failure(
         PlanningOutcome::kInvalidRequest,
-        ExecutionDirective::kNoSafeReference,
+        ExecutionDirective::kNoSafeReference, CandidateDisposition::kKeep,
         available.reason_code, started);
   }
 
@@ -224,7 +226,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
     if (!global_map.ok() || !local_map.ok()) {
       return Failure(
           PlanningOutcome::kInvalidRequest,
-          ExecutionDirective::kNoSafeReference,
+          ExecutionDirective::kNoSafeReference, CandidateDisposition::kKeep,
           global_map.ok() ? local_map.reason_code : global_map.reason_code,
           started);
     }
@@ -237,7 +239,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
     if (!local_goal.has_value() || !launch_pose_map.has_value()) {
       return Failure(
           PlanningOutcome::kInvalidRequest,
-          ExecutionDirective::kNoSafeReference,
+          ExecutionDirective::kNoSafeReference, CandidateDisposition::kKeep,
           "FRAME_TRANSFORM_INVALID", started);
     }
 
@@ -260,7 +262,8 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
           outcome == PlanningOutcome::kGoalInfeasible
               ? ExecutionDirective::kHoldPosition
               : ExecutionDirective::kNoSafeReference,
-          landing.reason_code, started, landing.inspected_cells);
+          CandidateDisposition::kKeep, landing.reason_code, started,
+          landing.inspected_cells);
     }
 
     const auto landing_map = hierarchical::TransformPoint(
@@ -274,7 +277,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
     if (!landing_map.has_value() || !map_boundary_ok) {
       return Failure(
           PlanningOutcome::kInvalidRequest,
-          ExecutionDirective::kNoSafeReference,
+          ExecutionDirective::kNoSafeReference, CandidateDisposition::kKeep,
           "FRAME_TRANSFORM_INVALID", started, landing.inspected_cells);
     }
 
@@ -298,29 +301,33 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
           return Failure(
               PlanningOutcome::kInvalidRequest,
               ExecutionDirective::kNoSafeReference,
-              hop.reason_code, started, total_work);
+              CandidateDisposition::kKeep, hop.reason_code, started,
+              total_work);
         case HopCertificationStatus::kNumericalIndeterminate:
           return Failure(
               PlanningOutcome::kNumericalFailure,
               ExecutionDirective::kNoSafeReference,
-              hop.reason_code, started, total_work);
+              CandidateDisposition::kKeep, hop.reason_code, started,
+              total_work);
         case HopCertificationStatus::kResourceExhausted:
           return Failure(
               PlanningOutcome::kResourceExhausted,
               ExecutionDirective::kNoSafeReference,
-              hop.reason_code, started, total_work);
+              CandidateDisposition::kKeep, hop.reason_code, started,
+              total_work);
         case HopCertificationStatus::kInfeasible: {
           return Failure(
               PlanningOutcome::kNoKnownSafeRoute,
               ExecutionDirective::kNoSafeReference,
-              hop.reason_code, started, total_work);
+              CandidateDisposition::kKeep, hop.reason_code, started,
+              total_work);
         }
         case HopCertificationStatus::kCertified:
           break;
       }
       return Failure(
           PlanningOutcome::kNumericalFailure,
-          ExecutionDirective::kNoSafeReference,
+          ExecutionDirective::kNoSafeReference, CandidateDisposition::kKeep,
           "HOPPER_CERTIFICATION_RESULT_INVALID", started, total_work);
     }
 
@@ -342,6 +349,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
           return Failure(
               PlanningOutcome::kNumericalFailure,
               ExecutionDirective::kNoSafeReference,
+              CandidateDisposition::kKeep,
               "HOPPER_LANDING_REGION_NUMERICAL_INDETERMINATE", started,
               total_work);
         }
@@ -353,6 +361,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
             return Failure(
                 PlanningOutcome::kNumericalFailure,
                 ExecutionDirective::kNoSafeReference,
+                CandidateDisposition::kKeep,
                 "HOPPER_LANDING_REGION_NUMERICAL_INDETERMINATE", started,
                 total_work);
           }
@@ -373,6 +382,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
           return Failure(
               PlanningOutcome::kNumericalFailure,
               ExecutionDirective::kNoSafeReference,
+              CandidateDisposition::kKeep,
               "HOPPER_LANDING_REGION_NUMERICAL_INDETERMINATE", started,
               total_work);
         }
@@ -383,7 +393,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
       if (!(region_radius > minimum_region_radius)) {
         return Failure(
             PlanningOutcome::kGoalInfeasible,
-            ExecutionDirective::kHoldPosition,
+            ExecutionDirective::kHoldPosition, CandidateDisposition::kKeep,
             "LANDING_REGION_NOT_CERTIFIABLE", started, total_work);
       }
       const Vec3 center = landing.region->aim_position_on_surface_m;
@@ -399,7 +409,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
       if (!map_boundary_ok) {
         return Failure(
             PlanningOutcome::kInvalidRequest,
-            ExecutionDirective::kNoSafeReference,
+            ExecutionDirective::kNoSafeReference, CandidateDisposition::kKeep,
             "FRAME_TRANSFORM_INVALID", started, total_work);
       }
     }
@@ -408,7 +418,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
     if (!launch_velocity_odom.has_value()) {
       return Failure(
           PlanningOutcome::kInvalidRequest,
-          ExecutionDirective::kNoSafeReference,
+          ExecutionDirective::kNoSafeReference, CandidateDisposition::kKeep,
           "FRAME_TRANSFORM_INVALID", started, total_work);
     }
     const auto flight_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -416,7 +426,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
     if (flight_time.count() <= 0) {
       return Failure(
           PlanningOutcome::kNumericalFailure,
-          ExecutionDirective::kNoSafeReference,
+          ExecutionDirective::kNoSafeReference, CandidateDisposition::kKeep,
           "HOPPER_BALLISTIC_NUMERICAL_INDETERMINATE", started, total_work);
     }
 
@@ -462,6 +472,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
     return {
         .outcome = PlanningOutcome::kNewReferenceAvailable,
         .directive = ExecutionDirective::kActivateNewReference,
+        .candidate_disposition = CandidateDisposition::kKeep,
         .reason_code = "HOPPER_SINGLE_HOP_AVAILABLE",
         .reference = MotionReference{
             .plan_id = "hopper/" + input.request_id,
@@ -491,7 +502,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
   } catch (const std::bad_alloc&) {
     return Failure(
         PlanningOutcome::kResourceExhausted,
-        ExecutionDirective::kNoSafeReference,
+        ExecutionDirective::kNoSafeReference, CandidateDisposition::kKeep,
         "HOPPER_SEARCH_ALLOCATION_FAILED", started);
   }
 }

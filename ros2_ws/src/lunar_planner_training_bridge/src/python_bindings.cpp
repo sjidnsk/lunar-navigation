@@ -644,6 +644,11 @@ void BindOutput(py::module_ &module) {
              planning::ExecutionDirective::kContinueCommittedHop)
       .value("NO_SAFE_REFERENCE",
              planning::ExecutionDirective::kNoSafeReference);
+  py::enum_<planning::CandidateDisposition>(module, "CandidateDisposition")
+      .value("KEEP", planning::CandidateDisposition::kKeep)
+      .value(
+          "SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT",
+          planning::CandidateDisposition::kSuppressForCurrentPhysicalSnapshot);
   py::enum_<planning::TrajectorySemantics>(module, "TrajectorySemantics")
       .value("WHEELED_BASE", planning::TrajectorySemantics::kWheeledBase)
       .value("LEGGED_BODY_REFERENCE",
@@ -697,6 +702,115 @@ void BindOutput(py::module_ &module) {
           })
       .def_readwrite("input_time", &planning::MotionReference::input_time)
       .def_readwrite("data", &planning::MotionReference::data);
+  py::class_<planning::HierarchicalPlannerMetrics>(module,
+                                                   "HierarchicalPlannerMetrics")
+      .def(py::init<>())
+      .def_readwrite("global_level",
+                     &planning::HierarchicalPlannerMetrics::global_level)
+      .def_readwrite("global_resolution_m",
+                     &planning::HierarchicalPlannerMetrics::global_resolution_m)
+      .def_readwrite("global_cells",
+                     &planning::HierarchicalPlannerMetrics::global_cells)
+      .def_readwrite("global_elapsed",
+                     &planning::HierarchicalPlannerMetrics::global_elapsed)
+      .def_readwrite("local_elapsed",
+                     &planning::HierarchicalPlannerMetrics::local_elapsed)
+      .def_readwrite(
+          "global_expanded_states",
+          &planning::HierarchicalPlannerMetrics::global_expanded_states)
+      .def_readwrite(
+          "local_expanded_states",
+          &planning::HierarchicalPlannerMetrics::local_expanded_states)
+      .def_readwrite("global_open_peak",
+                     &planning::HierarchicalPlannerMetrics::global_open_peak)
+      .def_readwrite(
+          "estimated_work_memory_bytes",
+          &planning::HierarchicalPlannerMetrics::estimated_work_memory_bytes)
+      .def_readwrite("raw_route_points",
+                     &planning::HierarchicalPlannerMetrics::raw_route_points)
+      .def_readwrite(
+          "simplified_route_points",
+          &planning::HierarchicalPlannerMetrics::simplified_route_points)
+      .def_readwrite(
+          "local_frontier_distance_m",
+          &planning::HierarchicalPlannerMetrics::local_frontier_distance_m)
+      .def_readwrite(
+          "additional_corridor_margin_m",
+          &planning::HierarchicalPlannerMetrics::additional_corridor_margin_m)
+      .def_readwrite(
+          "corridor_half_width_m",
+          &planning::HierarchicalPlannerMetrics::corridor_half_width_m)
+      .def_readwrite(
+          "search_domain_cell_count",
+          &planning::HierarchicalPlannerMetrics::search_domain_cell_count)
+      .def_readwrite(
+          "search_domain_sha256",
+          &planning::HierarchicalPlannerMetrics::search_domain_sha256)
+      .def_readwrite(
+          "local_frontier_attempts",
+          &planning::HierarchicalPlannerMetrics::local_frontier_attempts)
+      .def_readwrite("local_search_runs",
+                     &planning::HierarchicalPlannerMetrics::local_search_runs)
+      .def_readwrite("global_replans",
+                     &planning::HierarchicalPlannerMetrics::global_replans)
+      .def_readwrite(
+          "physical_goal_feasible",
+          &planning::HierarchicalPlannerMetrics::physical_goal_feasible)
+      .def_readwrite("local_attempts",
+                     &planning::HierarchicalPlannerMetrics::local_attempts)
+      .def_readwrite("corridor_width_m",
+                     &planning::HierarchicalPlannerMetrics::corridor_width_m)
+      .def_readwrite(
+          "global_projection_cache_hits",
+          &planning::HierarchicalPlannerMetrics::global_projection_cache_hits)
+      .def_readwrite(
+          "local_projection_cache_hits",
+          &planning::HierarchicalPlannerMetrics::local_projection_cache_hits)
+      .def_readwrite("hopper_graph_nodes",
+                     &planning::HierarchicalPlannerMetrics::hopper_graph_nodes)
+      .def_readwrite("hopper_graph_edges",
+                     &planning::HierarchicalPlannerMetrics::hopper_graph_edges)
+      .def_readwrite("hopper_route_hops",
+                     &planning::HierarchicalPlannerMetrics::hopper_route_hops)
+      .def_readwrite(
+          "hopper_certification_attempts",
+          &planning::HierarchicalPlannerMetrics::hopper_certification_attempts)
+      .def_readwrite(
+          "landing_field_elapsed",
+          &planning::HierarchicalPlannerMetrics::landing_field_elapsed)
+      .def_readwrite(
+          "spatial_index_elapsed",
+          &planning::HierarchicalPlannerMetrics::spatial_index_elapsed)
+      .def_readwrite(
+          "ballistic_solve_elapsed",
+          &planning::HierarchicalPlannerMetrics::ballistic_solve_elapsed)
+      .def_readwrite("flight_tube_certification_elapsed",
+                     &planning::HierarchicalPlannerMetrics::
+                         flight_tube_certification_elapsed)
+      .def_readwrite("safe_landing_nodes",
+                     &planning::HierarchicalPlannerMetrics::safe_landing_nodes)
+      .def_readwrite(
+          "candidate_edges_evaluated",
+          &planning::HierarchicalPlannerMetrics::candidate_edges_evaluated)
+      .def_readwrite(
+          "coarse_edges_rejected",
+          &planning::HierarchicalPlannerMetrics::coarse_edges_rejected)
+      .def_readwrite(
+          "full_edges_certified",
+          &planning::HierarchicalPlannerMetrics::full_edges_certified)
+      .def_readwrite(
+          "full_edges_invalidated",
+          &planning::HierarchicalPlannerMetrics::full_edges_invalidated)
+      .def_readwrite(
+          "edge_certificate_cache_hits",
+          &planning::HierarchicalPlannerMetrics::edge_certificate_cache_hits)
+      .def_readwrite("route_reused",
+                     &planning::HierarchicalPlannerMetrics::route_reused)
+      .def_readwrite("route_cursor",
+                     &planning::HierarchicalPlannerMetrics::route_cursor)
+      .def_readwrite(
+          "rolling_request_count",
+          &planning::HierarchicalPlannerMetrics::rolling_request_count);
   py::class_<planning::PlannerDiagnostics>(module, "PlannerDiagnostics")
       .def(py::init<>())
       .def_readwrite("planner_name",
@@ -706,11 +820,15 @@ void BindOutput(py::module_ &module) {
                      &planning::PlannerDiagnostics::expanded_states)
       .def_readwrite("best_cost", &planning::PlannerDiagnostics::best_cost)
       .def_readwrite("warning_codes",
-                     &planning::PlannerDiagnostics::warning_codes);
+                     &planning::PlannerDiagnostics::warning_codes)
+      .def_readwrite("hierarchical",
+                     &planning::PlannerDiagnostics::hierarchical);
   py::class_<planning::PlannerOutput>(module, "PlannerOutput")
       .def(py::init<>())
       .def_readwrite("outcome", &planning::PlannerOutput::outcome)
       .def_readwrite("directive", &planning::PlannerOutput::directive)
+      .def_readwrite("candidate_disposition",
+                     &planning::PlannerOutput::candidate_disposition)
       .def_readwrite("reason_code", &planning::PlannerOutput::reason_code)
       .def_readwrite("reference", &planning::PlannerOutput::reference)
       .def_readwrite("diagnostics", &planning::PlannerOutput::diagnostics);

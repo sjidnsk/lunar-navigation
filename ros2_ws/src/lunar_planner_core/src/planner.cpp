@@ -38,6 +38,7 @@ constexpr std::string_view kPlannerName = "cpp_v3_hierarchical";
 
 [[nodiscard]] PlannerOutput
 Failure(const PlanningOutcome outcome, const ExecutionDirective directive,
+        const CandidateDisposition candidate_disposition,
         std::string reason_code,
         const std::chrono::steady_clock::time_point started,
         const std::uint64_t expanded_states = 0U,
@@ -47,6 +48,7 @@ Failure(const PlanningOutcome outcome, const ExecutionDirective directive,
   return PlannerOutput{
       .outcome = outcome,
       .directive = directive,
+      .candidate_disposition = candidate_disposition,
       .reason_code = std::move(reason_code),
       .reference = std::nullopt,
       .diagnostics =
@@ -245,7 +247,8 @@ PlannerOutput Planner::Plan(
   try {
     if (impl_ == nullptr) {
       return Failure(PlanningOutcome::kInvalidRequest,
-                     ExecutionDirective::kNoSafeReference, "PLANNER_MOVED_FROM",
+                     ExecutionDirective::kNoSafeReference,
+                     CandidateDisposition::kKeep, "PLANNER_MOVED_FROM",
                      started);
     }
     const PlatformType platform = CapabilityPlatform(input.capability);
@@ -263,14 +266,14 @@ PlannerOutput Planner::Plan(
     }
     if (input.stop_token.stop_requested()) {
       return Failure(PlanningOutcome::kCanceled,
-                     ExecutionDirective::kHoldPosition, "REQUEST_CANCELED",
-                     started);
+                     ExecutionDirective::kHoldPosition,
+                     CandidateDisposition::kKeep, "REQUEST_CANCELED", started);
     }
     if (std::string reason = MissingRequiredLayer(input.world);
         !reason.empty()) {
       return Failure(PlanningOutcome::kInvalidRequest,
-                     ExecutionDirective::kNoSafeReference, std::move(reason),
-                     started);
+                     ExecutionDirective::kNoSafeReference,
+                     CandidateDisposition::kKeep, std::move(reason), started);
     }
     const hierarchical::MapLevelValidationResult levels =
         hierarchical::ValidateMapLevels(input.world, input.config.global_map);
@@ -279,8 +282,8 @@ PlannerOutput Planner::Plan(
           levels.reason_code == "GLOBAL_MAP_SCALE_UNSUPPORTED"
               ? PlanningOutcome::kResourceExhausted
               : PlanningOutcome::kInvalidRequest;
-      return Failure(outcome, FailureDirective(outcome), levels.reason_code,
-                     started);
+      return Failure(outcome, FailureDirective(outcome),
+                     CandidateDisposition::kKeep, levels.reason_code, started);
     }
     if (platform == PlatformType::kHopper) {
       PlannerOutput output = impl_->hopper_planner.Plan(input);
@@ -293,12 +296,18 @@ PlannerOutput Planner::Plan(
         output.outcome = PlanningOutcome::kResourceExhausted;
         output.directive = ExecutionDirective::kNoSafeReference;
       }
+      if (output.outcome == PlanningOutcome::kNoKnownSafeRoute ||
+          output.outcome == PlanningOutcome::kGoalInfeasible) {
+        output.candidate_disposition =
+            CandidateDisposition::kSuppressForCurrentPhysicalSnapshot;
+      }
       return output;
     }
     if (platform != PlatformType::kWheeled &&
         platform != PlatformType::kLegged) {
       return Failure(PlanningOutcome::kInvalidRequest,
                      ExecutionDirective::kNoSafeReference,
+                     CandidateDisposition::kKeep,
                      "PLANNER_BACKEND_NOT_CONFIGURED", started);
     }
 
@@ -335,10 +344,16 @@ PlannerOutput Planner::Plan(
     std::vector<std::string> conditional_retry_warnings;
     for (;;) {
       if (!global.ok()) {
-        return Failure(global.outcome, FailureDirective(global.outcome),
-                       global.reason_code, started, 0U, std::nullopt, {},
-                       GroundMetrics(
-                           input, global, accumulated, nullptr, 0U, 0U, 0.0));
+        const CandidateDisposition candidate_disposition =
+            global.outcome == PlanningOutcome::kNoKnownSafeRoute ||
+                    global.outcome == PlanningOutcome::kGoalInfeasible
+                ? CandidateDisposition::kSuppressForCurrentPhysicalSnapshot
+                : CandidateDisposition::kKeep;
+        return Failure(
+            global.outcome, FailureDirective(global.outcome),
+            candidate_disposition, global.reason_code, started, 0U,
+            std::nullopt, {},
+            GroundMetrics(input, global, accumulated, nullptr, 0U, 0U, 0.0));
       }
       if (provisional_route_observer) {
         try {
@@ -371,30 +386,41 @@ PlannerOutput Planner::Plan(
         }
       }
       if (!global.ok()) {
+        const CandidateDisposition candidate_disposition =
+            global.outcome == PlanningOutcome::kNoKnownSafeRoute ||
+                    global.outcome == PlanningOutcome::kGoalInfeasible
+                ? CandidateDisposition::kSuppressForCurrentPhysicalSnapshot
+                : CandidateDisposition::kKeep;
         return Failure(global.outcome, FailureDirective(global.outcome),
-                       global.reason_code, started, 0U, std::nullopt, {},
-                       GroundMetrics(
-                           input, global, accumulated, nullptr, 0U, 0U, 0.0,
-                           route_reused, route_cursor,
-                           rolling_request_count));
+                       candidate_disposition, global.reason_code, started, 0U,
+                       std::nullopt, {},
+                       GroundMetrics(input, global, accumulated, nullptr, 0U,
+                                     0U, 0.0, route_reused, route_cursor,
+                                     rolling_request_count));
       }
       if (!frontiers.ok()) {
         PlanningOutcome outcome = PlanningOutcome::kInvalidRequest;
+        CandidateDisposition candidate_disposition =
+            CandidateDisposition::kKeep;
         if (frontiers.status ==
             hierarchical::LocalFrontierStatus::kCoverageInsufficient) {
           outcome = PlanningOutcome::kNoKnownSafeRoute;
+          candidate_disposition =
+              CandidateDisposition::kSuppressForCurrentPhysicalSnapshot;
         } else if (frontiers.status ==
                    hierarchical::LocalFrontierStatus::kGoalInfeasible) {
           outcome = PlanningOutcome::kGoalInfeasible;
+          candidate_disposition =
+              CandidateDisposition::kSuppressForCurrentPhysicalSnapshot;
         } else if (frontiers.status ==
                    hierarchical::LocalFrontierStatus::kCanceled) {
           outcome = PlanningOutcome::kCanceled;
         }
         return Failure(
-            outcome, FailureDirective(outcome), frontiers.reason_code, started,
-            global.route->expanded_states, global.route->cost, {},
-            GroundMetrics(
-                input, global, accumulated, &frontiers, 0U, 0U, 0.0));
+            outcome, FailureDirective(outcome), candidate_disposition,
+            frontiers.reason_code, started, global.route->expanded_states,
+            global.route->cost, {},
+            GroundMetrics(input, global, accumulated, &frontiers, 0U, 0U, 0.0));
       }
 
       std::uint64_t local_expanded = 0U;
@@ -480,8 +506,9 @@ PlannerOutput Planner::Plan(
           if (!composed.ok()) {
             return Failure(
                 PlanningOutcome::kNumericalFailure,
-                ExecutionDirective::kNoSafeReference, composed.reason_code,
-                started, global.route->expanded_states + local_expanded,
+                ExecutionDirective::kNoSafeReference,
+                CandidateDisposition::kKeep, composed.reason_code, started,
+                global.route->expanded_states + local_expanded,
                 global.route->cost, std::move(warnings),
                 GroundMetrics(
                     input, global, accumulated, &frontiers, local_expanded,
@@ -500,6 +527,7 @@ PlannerOutput Planner::Plan(
           return PlannerOutput{
               .outcome = outcome,
               .directive = directive,
+              .candidate_disposition = CandidateDisposition::kKeep,
               .reason_code = std::move(reason_code),
               .reference = std::move(composed.reference),
               .diagnostics =
@@ -529,7 +557,8 @@ PlannerOutput Planner::Plan(
             local.outcome == PlanningOutcome::kNumericalFailure ||
             local.outcome == PlanningOutcome::kActiveReferenceInvalidated) {
           return Failure(
-              local.outcome, local.directive, local.reason_code, started,
+              local.outcome, local.directive, CandidateDisposition::kKeep,
+              local.reason_code, started,
               global.route->expanded_states + local_expanded,
               global.route->cost, local.diagnostics.warning_codes,
               GroundMetrics(
@@ -576,6 +605,7 @@ PlannerOutput Planner::Plan(
       return Failure(
           PlanningOutcome::kNoKnownSafeRoute,
           ExecutionDirective::kNoSafeReference,
+          CandidateDisposition::kSuppressForCurrentPhysicalSnapshot,
           specific_local_failure.value_or("LOCAL_SEGMENT_INFEASIBLE"), started,
           global.route->expanded_states + local_expanded, global.route->cost,
           std::move(local_failure_reasons),
@@ -586,16 +616,18 @@ PlannerOutput Planner::Plan(
     }
   } catch (const std::bad_alloc &) {
     return Failure(PlanningOutcome::kResourceExhausted,
-                   ExecutionDirective::kNoSafeReference, "RESOURCE_EXHAUSTED",
-                   started);
+                   ExecutionDirective::kNoSafeReference,
+                   CandidateDisposition::kKeep, "RESOURCE_EXHAUSTED", started);
   } catch (const std::exception &) {
     return Failure(PlanningOutcome::kNumericalFailure,
                    ExecutionDirective::kNoSafeReference,
-                   "INTERNAL_PLANNER_EXCEPTION", started);
+                   CandidateDisposition::kKeep, "INTERNAL_PLANNER_EXCEPTION",
+                   started);
   } catch (...) {
     return Failure(PlanningOutcome::kNumericalFailure,
                    ExecutionDirective::kNoSafeReference,
-                   "INTERNAL_PLANNER_EXCEPTION", started);
+                   CandidateDisposition::kKeep, "INTERNAL_PLANNER_EXCEPTION",
+                   started);
   }
 }
 
