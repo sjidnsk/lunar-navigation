@@ -331,6 +331,7 @@ Sweep 的中心采样必须在 domain 内，footprint/support/clearance 采样�
 - Modify: `ros2_ws/src/lunar_planner_core/test/legged_planner_test.cpp`
 - Modify: `ros2_ws/src/lunar_planner_core/test/legged_fault_matrix_test.cpp`
 - Modify: `ros2_ws/src/lunar_planner_core/test/hierarchical_planner_test.cpp`
+- Modify: `ros2_ws/src/lunar_planner_core/test/hierarchical_regression_test.cpp`
 - Modify: `ros2_ws/src/lunar_planner_ros/src/message_conversion.cpp`
 - Modify: `ros2_ws/src/lunar_planner_ros/src/plan_motion_server.cpp`
 - Modify: `ros2_ws/src/lunar_planner_ros/test/plan_motion_server_test.cpp`
@@ -413,6 +414,7 @@ struct HierarchicalPlannerMetrics final {
     ros2_ws/src/lunar_planner_core/test/legged_planner_test.cpp \
     ros2_ws/src/lunar_planner_core/test/legged_fault_matrix_test.cpp \
     ros2_ws/src/lunar_planner_core/test/hierarchical_planner_test.cpp \
+    ros2_ws/src/lunar_planner_core/test/hierarchical_regression_test.cpp \
     ros2_ws/src/lunar_planner_ros/src/message_conversion.cpp \
     ros2_ws/src/lunar_planner_ros/src/plan_motion_server.cpp \
     ros2_ws/src/lunar_planner_ros/test/plan_motion_server_test.cpp
