@@ -17,7 +17,6 @@ from typing import IO, Mapping, Sequence
 
 import numpy as np
 import torch
-from lunar_planner_training_bridge import PlannerBridge
 
 from .capability_freeze import FrozenCapabilityEnvironmentFactory
 from .config import PLATFORMS
@@ -70,6 +69,7 @@ _ROW_FIELDS = frozenset(
         "platform_reference_mismatch_count",
         "execution_failure_count",
         "executed_step_count",
+        "planner_call_count",
         "request_sequence_sha256",
         "planner_sequence_sha256",
         "additional_corridor_margin_m",
@@ -126,6 +126,22 @@ class _ClosedLoopWork:
     platform: str
     watchdog_max_steps: int
     watchdog_seconds: float
+
+
+class _RecordingPlannerBridge:
+    """Record the exact request/output pair consumed by the environment."""
+
+    def __init__(self, delegate: object) -> None:
+        if not callable(getattr(delegate, "plan", None)):
+            raise ClosedLoopGateError("gate planner bridge is unavailable")
+        self._delegate = delegate
+        self.calls: list[tuple[str, object]] = []
+
+    def plan(self, request: object) -> object:
+        request_sha256 = _request_signature(request)
+        output = self._delegate.plan(request)
+        self.calls.append((request_sha256, output))
+        return output
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -422,6 +438,10 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
     )
     if worker.episode.scene_id != work.case.scene_id:
         raise ClosedLoopGateError("gate worker selected a different physical scene")
+    recording_bridge = _RecordingPlannerBridge(
+        getattr(worker.environment, "_bridge", None)
+    )
+    worker.environment._bridge = recording_bridge
 
     request_chain = hashlib.sha256()
     planner_chain = hashlib.sha256()
@@ -438,6 +458,7 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
     terminal_reason: TerminalReason | None = None
     oracle_opportunity_count = 0
     planner_reason_counts: Counter[str] = Counter()
+    planner_call_count = 0
     additional_corridor_margin_m = 2.0
     search_domain_cell_count = 0
     search_domain_sha256 = ""
@@ -485,27 +506,7 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         request_signature = _request_signature(first_request)
         if request_signature != _request_signature(second_request):
             raise ClosedLoopGateError("gate request differs on repeat")
-        probe = PlannerBridge().plan(first_request)
-        hierarchical = probe.diagnostics.hierarchical
-        if hierarchical is None:
-            raise ClosedLoopGateError("gate planner domain diagnostics are missing")
-        additional_corridor_margin_m = float(
-            hierarchical.additional_corridor_margin_m
-        )
-        if additional_corridor_margin_m != 2.0:
-            raise ClosedLoopGateError(
-                "gate planner corridor margin is not fixed at 2.0 m"
-            )
-        search_domain_cell_count = int(hierarchical.search_domain_cell_count)
-        search_domain_sha256 = str(hierarchical.search_domain_sha256)
-        if search_domain_cell_count <= 0 or not _is_sha(search_domain_sha256):
-            raise ClosedLoopGateError("gate planner search domain is invalid")
-        planner_reason_counts[str(probe.reason_code)] += 1
-        _chain_update(
-            request_chain,
-            {"step": step_count, "request_sha256": request_signature},
-        )
-
+        call_start = len(recording_bridge.calls)
         result = worker.environment.advance_prepared_action(
             action,
             expected_identity=identities[0],
@@ -513,6 +514,67 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         transition = result.transition
         if transition is None or result.policy_decisions_consumed != 1:
             raise ClosedLoopGateError("gate action produced no planner transition")
+        actual_calls = recording_bridge.calls[call_start:]
+        if not actual_calls or actual_calls[0][0] != request_signature:
+            raise ClosedLoopGateError(
+                "gate actual planner request differs from prepared request"
+            )
+        for actual_request_sha256, output in actual_calls:
+            hierarchical = output.diagnostics.hierarchical
+            if hierarchical is None:
+                raise ClosedLoopGateError(
+                    "gate planner domain diagnostics are missing"
+                )
+            additional_corridor_margin_m = float(
+                hierarchical.additional_corridor_margin_m
+            )
+            if additional_corridor_margin_m != 2.0:
+                raise ClosedLoopGateError(
+                    "gate planner corridor margin is not fixed at 2.0 m"
+                )
+            search_domain_cell_count = int(
+                hierarchical.search_domain_cell_count
+            )
+            search_domain_sha256 = str(hierarchical.search_domain_sha256)
+            if search_domain_cell_count <= 0 or not _is_sha(
+                search_domain_sha256
+            ):
+                raise ClosedLoopGateError(
+                    "gate planner search domain is invalid"
+                )
+            reason_code = str(output.reason_code)
+            planner_reason_counts[reason_code] += 1
+            _chain_update(
+                request_chain,
+                {
+                    "planner_call": planner_call_count,
+                    "request_sha256": actual_request_sha256,
+                },
+            )
+            _chain_update(
+                planner_chain,
+                {
+                    "planner_call": planner_call_count,
+                    "outcome": output.outcome.name,
+                    "directive": output.directive.name,
+                    "reason_code": reason_code,
+                    "additional_corridor_margin_m_hex": (
+                        additional_corridor_margin_m.hex()
+                    ),
+                    "search_domain_cell_count": search_domain_cell_count,
+                    "search_domain_sha256": search_domain_sha256,
+                },
+            )
+            planner_call_count += 1
+        actual_output = actual_calls[-1][1]
+        if (
+            transition.planning_outcome != actual_output.outcome
+            or transition.execution_directive != actual_output.directive
+            or transition.reason_code != actual_output.reason_code
+        ):
+            raise ClosedLoopGateError(
+                "gate planner transition differs from actual planner output"
+            )
         step_count += 1
         events = transition.execution_events
         accepted = (
@@ -535,16 +597,8 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         _chain_update(
             planner_chain,
             {
-                "step": step_count - 1,
-                "outcome": transition.planning_outcome.name,
-                "directive": transition.execution_directive.name,
-                "reason_code": transition.reason_code,
+                "policy_step": step_count - 1,
                 "events": asdict(events),
-                "additional_corridor_margin_m_hex": (
-                    additional_corridor_margin_m.hex()
-                ),
-                "search_domain_cell_count": search_domain_cell_count,
-                "search_domain_sha256": search_domain_sha256,
             },
         )
         if transition.terminated:
@@ -592,6 +646,7 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         "platform_reference_mismatch_count": platform_reference_mismatches,
         "execution_failure_count": execution_failures,
         "executed_step_count": step_count,
+        "planner_call_count": planner_call_count,
         "request_sequence_sha256": request_chain.hexdigest(),
         "planner_sequence_sha256": planner_chain.hexdigest(),
         "additional_corridor_margin_m": additional_corridor_margin_m,
@@ -646,6 +701,7 @@ def _validate_row(
         "platform_reference_mismatch_count",
         "execution_failure_count",
         "executed_step_count",
+        "planner_call_count",
     )
     if any(
         type(row.get(field)) is not int or int(row[field]) < 0
@@ -672,6 +728,8 @@ def _validate_row(
         )
     if row["executed_step_count"] <= 0:
         raise ClosedLoopGateError("closed-loop executed step count is invalid")
+    if row["planner_call_count"] < row["executed_step_count"]:
+        raise ClosedLoopGateError("closed-loop planner call count is incomplete")
     for field, message in (
         ("oracle_contradiction_count", "oracle contradiction"),
         ("safety_violation_count", "safety violation"),
@@ -754,7 +812,7 @@ def _validate_row(
             or count <= 0
             for reason, count in reason_counts.items()
         )
-        or sum(reason_counts.values()) != row["executed_step_count"]
+        or sum(reason_counts.values()) != row["planner_call_count"]
     ):
         raise ClosedLoopGateError("closed-loop planner reason counts are invalid")
     for field in _ROW_SHA_FIELDS:
