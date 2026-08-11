@@ -459,7 +459,8 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
     oracle_opportunity_count = 0
     planner_reason_counts: Counter[str] = Counter()
     planner_call_count = 0
-    additional_corridor_margin_m = 2.0
+    expected_corridor_margin_m = 0.0 if work.platform == "HOPPER" else 2.0
+    additional_corridor_margin_m = expected_corridor_margin_m
     search_domain_cell_count = 0
     search_domain_sha256 = ""
     deadline = time.monotonic() + work.watchdog_seconds
@@ -528,9 +529,13 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
             additional_corridor_margin_m = float(
                 hierarchical.additional_corridor_margin_m
             )
-            if additional_corridor_margin_m != 2.0:
+            if additional_corridor_margin_m != expected_corridor_margin_m:
+                if work.platform == "HOPPER":
+                    raise ClosedLoopGateError(
+                        "gate hopper corridor margin is not fixed at 0.0 m"
+                    )
                 raise ClosedLoopGateError(
-                    "gate planner corridor margin is not fixed at 2.0 m"
+                    "gate ground planner corridor margin is not fixed at 2.0 m"
                 )
             search_domain_cell_count = int(
                 hierarchical.search_domain_cell_count
@@ -789,12 +794,19 @@ def _validate_row(
             "closed-loop has no successful execution before terminal"
         )
     margin = row.get("additional_corridor_margin_m")
+    expected_margin = 0.0 if platform == "HOPPER" else 2.0
     if (
         not isinstance(margin, (int, float))
         or isinstance(margin, bool)
-        or float(margin) != 2.0
+        or float(margin) != expected_margin
     ):
-        raise ClosedLoopGateError("closed-loop corridor margin is not fixed at 2.0 m")
+        if platform == "HOPPER":
+            raise ClosedLoopGateError(
+                "closed-loop hopper corridor margin is not fixed at 0.0 m"
+            )
+        raise ClosedLoopGateError(
+            "closed-loop ground corridor margin is not fixed at 2.0 m"
+        )
     if (
         type(row.get("search_domain_cell_count")) is not int
         or int(row["search_domain_cell_count"]) <= 0
