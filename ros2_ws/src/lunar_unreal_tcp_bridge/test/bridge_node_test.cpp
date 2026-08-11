@@ -476,6 +476,47 @@ TEST(BridgeNode, MatchingFeedbackPublishesExternalContract) {
   executor.remove_node(observer);
 }
 
+TEST(BridgeNode, StatusCarriesSessionAndSceneIdentity) {
+  TestBridge bridge;
+  auto observer = std::make_shared<rclcpp::Node>("bridge_status_observer");
+  std::optional<diagnostic_msgs::msg::DiagnosticArray> diagnostic;
+  const auto subscription = observer->create_subscription<
+      diagnostic_msgs::msg::DiagnosticArray>(
+      "/lunar/unreal/status", 10,
+      [&](const diagnostic_msgs::msg::DiagnosticArray& value) {
+        diagnostic = value;
+      });
+  (void)subscription;
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(observer);
+  executor.add_node(bridge.node->get_node_base_interface());
+  ConfigureAndActivate(bridge);
+  bridge.transport->Connect();
+  bridge.node->DrainEventsForTesting();
+  bridge.transport->Inject(HelloAck());
+  bridge.node->DrainEventsForTesting();
+
+  ASSERT_TRUE(SpinUntil(executor, [&] {
+    if (!diagnostic || diagnostic->status.empty()) {
+      return false;
+    }
+    return std::any_of(
+        diagnostic->status.front().values.begin(),
+        diagnostic->status.front().values.end(),
+        [](const diagnostic_msgs::msg::KeyValue& value) {
+          return value.key == "session_id" && value.value == kSessionId;
+        });
+  }));
+  const auto& values = diagnostic->status.front().values;
+  EXPECT_NE(
+      std::find_if(values.begin(), values.end(), [](const auto& value) {
+        return value.key == "scene_id" && value.value == "unreal-scene";
+      }),
+      values.end());
+  executor.remove_node(bridge.node->get_node_base_interface());
+  executor.remove_node(observer);
+}
+
 TEST(BridgeNode, HeartbeatOrFreshnessExpiryFailsClosed) {
   TestBridge bridge;
   Ready(bridge);

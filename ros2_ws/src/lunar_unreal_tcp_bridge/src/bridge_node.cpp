@@ -21,6 +21,7 @@
 #include <Eigen/Core>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
+#include <diagnostic_msgs/msg/key_value.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <grid_map_msgs/msg/grid_map.hpp>
 #include <lunar_navigation_msgs/msg/localization_status.hpp>
@@ -854,6 +855,24 @@ class BridgeNode::Impl final {
         ? diagnostic_msgs::msg::DiagnosticStatus::ERROR
         : diagnostic_msgs::msg::DiagnosticStatus::OK;
     status.message = StateName(session_.state()) + ":" + last_reason_;
+    const auto key_value = [](std::string key, std::string value) {
+      diagnostic_msgs::msg::KeyValue output;
+      output.key = std::move(key);
+      output.value = std::move(value);
+      return output;
+    };
+    status.values = {
+        key_value("session_state", StateName(session_.state())),
+        key_value("reason_code", last_reason_),
+        key_value(
+            "session_id", session_.session().has_value()
+                ? session_.session()->session_id
+                : ""),
+        key_value(
+            "scene_id", session_.session().has_value()
+                ? session_.session()->scene_id
+                : ""),
+    };
     array.status.push_back(std::move(status));
     status_publisher_->publish(array);
   }
