@@ -2,11 +2,13 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <optional>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
+#include <thread>
 #include <variant>
 #include <vector>
 
@@ -46,6 +48,23 @@ namespace {
       .position_m = {18.5, 3.5, 0.0},
       .tolerance_m = 0.2,
   };
+  return input;
+}
+
+[[nodiscard]] PlannerInput LongRunningLeggedInput() {
+  PlannerInput input = DistantLeggedInput();
+  input.request_id = "hierarchical-legged-cancel-during-local";
+  input.world.global_map = test::MakeFlatMap("map", 250U, 250U, 0.2);
+  input.world.local_map = test::MakeFlatMap("odom", 250U, 250U, 0.2);
+  input.world.local_map.origin_m.x = -1.0;
+  input.config.global_map.base_resolution_m = 0.2;
+  input.config.legged.xy_resolution_m = 0.2;
+  input.goal_map.target = PointGoal{
+      .position_m = {47.9, 25.1, 0.0},
+      .tolerance_m = 0.2,
+  };
+  std::get<LeggedState>(input.current_state).body_pose.position_m = {
+      2.1, 25.1, 0.5};
   return input;
 }
 
@@ -463,6 +482,70 @@ TEST(HierarchicalPlanner, IsStatelessAcrossCancellationAndRepeatedRequests) {
             second.reference->preview.poses_map);
   EXPECT_EQ(first.reference->plan_id, second.reference->plan_id);
   EXPECT_EQ(first.diagnostics.best_cost, second.diagnostics.best_cost);
+}
+
+TEST(HierarchicalPlanner,
+     CancellationBeforeLocalSearchLeavesGoalFeasibilityUnproven) {
+  Planner planner;
+  PlannerInput input = DistantLeggedInput();
+  std::stop_source stop;
+  input.stop_token = stop.get_token();
+  bool observer_called = false;
+
+  const PlannerOutput output = planner.Plan(
+      input, [&](const ProvisionalGlobalRoute&) {
+        observer_called = true;
+        stop.request_stop();
+      });
+
+  EXPECT_TRUE(observer_called);
+  EXPECT_EQ(output.outcome, PlanningOutcome::kCanceled);
+  ASSERT_TRUE(output.diagnostics.hierarchical.has_value());
+  EXPECT_EQ(output.diagnostics.hierarchical->local_search_runs, 0U);
+  EXPECT_FALSE(output.diagnostics.hierarchical->physical_goal_feasible);
+}
+
+TEST(HierarchicalPlanner,
+     CancellationDuringLocalSearchLeavesGoalFeasibilityUnproven) {
+  Planner planner;
+  PlannerInput input = LongRunningLeggedInput();
+  std::stop_source stop;
+  input.stop_token = stop.get_token();
+  std::promise<void> global_route_observed;
+  std::future<void> global_route_ready = global_route_observed.get_future();
+
+  std::future<PlannerOutput> planning = std::async(
+      std::launch::async, [&] {
+        return planner.Plan(
+            input, [&](const ProvisionalGlobalRoute&) {
+              global_route_observed.set_value();
+            });
+      });
+  ASSERT_EQ(global_route_ready.wait_for(std::chrono::seconds{5}),
+            std::future_status::ready);
+  std::this_thread::sleep_for(std::chrono::milliseconds{100});
+  stop.request_stop();
+  const PlannerOutput output = planning.get();
+
+  EXPECT_EQ(output.outcome, PlanningOutcome::kCanceled);
+  ASSERT_TRUE(output.diagnostics.hierarchical.has_value());
+  EXPECT_GT(output.diagnostics.hierarchical->local_search_runs, 0U);
+  EXPECT_FALSE(output.diagnostics.hierarchical->physical_goal_feasible);
+}
+
+TEST(HierarchicalPlanner,
+     InvalidLocalSearchLeavesGoalFeasibilityUnproven) {
+  Planner planner;
+  PlannerInput input = DistantLeggedInput();
+  input.config.legged.yaw_bin_count = 0U;
+
+  const PlannerOutput output = planner.Plan(input);
+
+  EXPECT_EQ(output.outcome, PlanningOutcome::kInvalidRequest);
+  EXPECT_EQ(output.reason_code, "LEGGED_LATTICE_REQUEST_INVALID");
+  ASSERT_TRUE(output.diagnostics.hierarchical.has_value());
+  EXPECT_EQ(output.diagnostics.hierarchical->local_search_runs, 1U);
+  EXPECT_FALSE(output.diagnostics.hierarchical->physical_goal_feasible);
 }
 
 TEST(HierarchicalPlanner, ReportsGlobalAndWheelLocalProjectionCacheHits) {

@@ -106,6 +106,25 @@ struct GroundAccumulation final {
   bool physical_goal_feasible{};
 };
 
+[[nodiscard]] bool PhysicalGoalFeasibilityProven(
+    const PlanningOutcome outcome) noexcept {
+  switch (outcome) {
+    case PlanningOutcome::kNewReferenceAvailable:
+    case PlanningOutcome::kSafeFrontierReferenceAvailable:
+    case PlanningOutcome::kNoKnownSafeRoute:
+      return true;
+    case PlanningOutcome::kGoalInfeasible:
+    case PlanningOutcome::kInvalidRequest:
+    case PlanningOutcome::kStaleInput:
+    case PlanningOutcome::kNumericalFailure:
+    case PlanningOutcome::kResourceExhausted:
+    case PlanningOutcome::kActiveReferenceInvalidated:
+    case PlanningOutcome::kCanceled:
+      return false;
+  }
+  return false;
+}
+
 void RecordLocalSearchProblem(
     GroundAccumulation &accumulated,
     const hierarchical::LocalPlanningProblem &problem,
@@ -114,7 +133,7 @@ void RecordLocalSearchProblem(
       problem.search_domain.allowed_cell_count();
   accumulated.search_domain_sha256 = problem.search_domain.sha256();
   accumulated.physical_goal_feasible =
-      output.outcome != PlanningOutcome::kGoalInfeasible;
+      PhysicalGoalFeasibilityProven(output.outcome);
 }
 
 [[nodiscard]] HierarchicalPlannerMetrics GroundMetrics(
