@@ -12,10 +12,8 @@
 #include <gtest/gtest.h>
 
 #include "hierarchical/global_route_planner.hpp"
-#include "hierarchical/local_planning_problem.hpp"
 #include "lunar_planner_core/planner.hpp"
 #include "test_fixtures.hpp"
-#include "wheel/wheel_planner.hpp"
 
 namespace lunar::planning::hierarchical
 {
@@ -169,53 +167,39 @@ TEST(HierarchicalRegression, DistantGroundRoutesSucceedAndWallFailsClosed) {
 }
 
 TEST(HierarchicalRegression,
-     HistoricalBoundaryWindowKeepsPhysicalMapSeparateFromSearchDomain) {
-  PlannerInput input = test::MakeValidWheelInput();
+     HistoricalBoundaryWindowUsesHierarchicalDomainConstruction) {
+  PlannerInput input = DistantGroundInput(PlatformType::kWheeled);
   input.request_id = "historical-boundary-window";
   input.config.optimization.maximum_iterations = 0U;
+  input.config.local_frontier.additional_corridor_margin_m = 2.0;
   auto& state = std::get<WheeledState>(input.current_state);
   state.pose.position_m.y = 3.1;
   std::get<PointGoal>(input.goal_map.target).position_m.y = 3.1;
-
-  std::vector<std::uint8_t> allowed(input.world.local_map.CellCount(), 0U);
-  for (std::size_t x = 2U; x <= 4U; ++x) {
-    allowed.at(3U * input.world.local_map.width + x) = 1U;
-  }
-  hierarchical::LocalSearchDomain domain{
-      input.world.local_map.width, input.world.local_map.height, allowed};
-  const std::string domain_sha256 = domain.sha256();
-  const hierarchical::LocalPlanningProblem problem{
-      .request_id = input.request_id,
-      .platform_id = input.platform_id,
-      .capability_version = input.capability_version,
-      .local_map_generation = input.local_map_generation,
-      .state_time = input.state_time,
-      .current_state = input.current_state,
-      .goal_odom = input.goal_map,
-      .local_map = input.world.local_map,
-      .search_domain = std::move(domain),
-      .capability = input.capability,
-      .config = input.config,
-      .stop_token = input.stop_token,
-  };
   const auto& obstacle = std::get<std::vector<std::uint8_t>>(
-      problem.local_map.layers.at("obstacle").values);
-  const shared::GridCell footprint_overhang{.x = 4, .y = 2};
+      input.world.local_map.layers.at("obstacle").values);
+  ASSERT_TRUE(std::ranges::all_of(
+      obstacle, [](const std::uint8_t value) { return value == 0U; }));
 
-  ASSERT_EQ(problem.search_domain.allowed_cell_count(), 3U);
-  ASSERT_FALSE(problem.search_domain.Contains(footprint_overhang));
-  ASSERT_EQ(obstacle.at(2U * problem.local_map.width + 4U), 0U);
-  ASSERT_EQ(problem.local_map.width, input.world.local_map.width);
-  ASSERT_EQ(problem.local_map.height, input.world.local_map.height);
+  const PlannerOutput output = Planner{}.Plan(input);
 
-  const PlannerOutput output = wheel::WheelPlanner{}.Plan(problem);
-
+  if (output.outcome != PlanningOutcome::kNewReferenceAvailable) {
+    EXPECT_EQ(output.reason_code, "LOCAL_SEARCH_DOMAIN_EXHAUSTED");
+    EXPECT_NE(output.reason_code, "WHEEL_GOAL_INFEASIBLE");
+    EXPECT_GT(output.diagnostics.expanded_states, 0U);
+  }
   ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
       << output.reason_code;
+  ASSERT_TRUE(output.reference.has_value());
   EXPECT_GT(output.diagnostics.expanded_states, 0U);
-  EXPECT_DOUBLE_EQ(input.config.local_frontier.additional_corridor_margin_m,
-                   2.0);
-  EXPECT_FALSE(domain_sha256.empty());
+  ASSERT_TRUE(output.diagnostics.hierarchical.has_value());
+  const auto& metrics = *output.diagnostics.hierarchical;
+  EXPECT_GT(metrics.local_expanded_states, 0U);
+  EXPECT_DOUBLE_EQ(metrics.additional_corridor_margin_m, 2.0);
+  EXPECT_GT(metrics.search_domain_cell_count, 0U);
+  EXPECT_LT(
+    metrics.search_domain_cell_count, input.world.local_map.CellCount());
+  EXPECT_EQ(metrics.search_domain_sha256.size(), 64U);
+  EXPECT_TRUE(metrics.physical_goal_feasible);
 }
 
 TEST(HierarchicalRegression, FiftyMetreFarGoalsSucceedForAllPlatforms) {
