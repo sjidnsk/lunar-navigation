@@ -345,7 +345,7 @@ namespace {
     }
     std::vector<WheelTransition> selected = std::move(optimized.transitions);
     WheelSweepValidator validator{
-        safe_projection, *capability, problem.search_domain};
+        safe_projection, *capability, common.search_domain};
     const bool optimized_valid = std::ranges::all_of(
         selected, [&](const WheelTransition& transition) {
           return validator.Validate(transition, problem.stop_token).valid;

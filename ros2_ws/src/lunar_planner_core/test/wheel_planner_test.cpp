@@ -160,6 +160,61 @@ TEST(WheelPlanner, RejectsPrimitiveWhoseTargetCenterLeavesSearchDomain) {
   EXPECT_FALSE(output.reference.has_value());
 }
 
+TEST(WheelPlanner, TranslationOnlyDomainBlockedStartReportsDomainExhaustion) {
+  auto input = test::MakeValidWheelInput();
+  input.request_id = "wheel-domain-translation-only-start";
+  std::get<PointGoal>(input.goal_map.target).position_m.x = 6.5;
+  auto& capability = std::get<WheeledCapability>(input.capability);
+  capability.motion_primitives = {
+      WheelMotionPrimitive{
+          .primitive_id = "forward",
+          .kind = WheelPrimitiveKind::kForward,
+          .relative_end_pose = Pose3{.position_m = {1.0, 0.0, 0.0}},
+      },
+  };
+  auto allowed = EmptyDomain(input.world.local_map);
+  AllowCell(allowed, input.world.local_map, 2U, 3U);
+  const auto problem = MakeLocalWheelProblem(input, std::move(allowed));
+
+  const PlannerOutput output = wheel::WheelPlanner{}.Plan(problem);
+
+  EXPECT_EQ(output.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(output.directive, ExecutionDirective::kNoSafeReference);
+  EXPECT_EQ(output.reason_code, "LOCAL_SEARCH_DOMAIN_EXHAUSTED");
+  EXPECT_GT(output.diagnostics.expanded_states, 0U);
+  EXPECT_FALSE(output.reference.has_value());
+}
+
+TEST(WheelPlanner, TranslationOnlyPhysicalBlockKeepsStartInfeasibleReason) {
+  auto input = test::MakeValidWheelInput();
+  input.request_id = "wheel-domain-before-physical-start";
+  auto& state = std::get<WheeledState>(input.current_state);
+  state.pose.position_m.y = 3.1;
+  auto& goal = std::get<PointGoal>(input.goal_map.target);
+  goal.position_m = {6.5, 3.1, 0.0};
+  auto& capability = std::get<WheeledCapability>(input.capability);
+  capability.motion_primitives = {
+      WheelMotionPrimitive{
+          .primitive_id = "forward",
+          .kind = WheelPrimitiveKind::kForward,
+          .relative_end_pose = Pose3{.position_m = {1.0, 0.0, 0.0}},
+      },
+  };
+  auto& obstacle = std::get<std::vector<std::uint8_t>>(
+      input.world.local_map.layers.at("obstacle").values);
+  obstacle[2U * input.world.local_map.width + 4U] = 1U;
+  auto allowed = EmptyDomain(input.world.local_map);
+  AllowCell(allowed, input.world.local_map, 2U, 3U);
+  const auto problem = MakeLocalWheelProblem(input, std::move(allowed));
+
+  const PlannerOutput output = wheel::WheelPlanner{}.Plan(problem);
+
+  EXPECT_EQ(output.outcome, PlanningOutcome::kNoKnownSafeRoute);
+  EXPECT_EQ(output.directive, ExecutionDirective::kNoSafeReference);
+  EXPECT_EQ(output.reason_code, "WHEEL_START_CONNECTOR_INFEASIBLE");
+  EXPECT_FALSE(output.reference.has_value());
+}
+
 TEST(WheelPlanner, PhysicallyUnsafeGoalFailsBeforeSearchExpansion) {
   auto input = test::MakeValidWheelInput();
   input.request_id = "wheel-physical-goal-infeasible";
@@ -299,6 +354,38 @@ TEST(WheelPlanner, RankedPlannerBuildsProjectionOnceAndReportsChosenProblem) {
   EXPECT_EQ(*result.selected_problem_index, 1U);
   ASSERT_TRUE(result.output.reference.has_value());
   EXPECT_EQ(result.output.reference->plan_id, "wheel/near");
+}
+
+TEST(WheelPlanner, RankedFallbackFinalValidationUsesTheSearchDomain) {
+  const auto input = test::MakeValidWheelInput();
+  auto far = MakeLocalWheelProblem(
+      input, std::vector<std::uint8_t>(
+                 input.world.local_map.CellCount(), 1U));
+  far.request_id = "far-wide-domain";
+  far.goal_odom = GoalRegion{
+      .goal_id = "outside-local-window",
+      .target = PointGoal{
+          .position_m = {1000.0, 1000.0, 0.0},
+          .tolerance_m = 0.0,
+      },
+  };
+  auto narrow_allowed = EmptyDomain(input.world.local_map);
+  AllowCell(narrow_allowed, input.world.local_map, 2U, 3U);
+  auto near = MakeLocalWheelProblem(input, std::move(narrow_allowed));
+  near.request_id = "near-narrow-domain";
+  std::vector<hierarchical::LocalPlanningProblem> problems;
+  problems.push_back(std::move(far));
+  problems.push_back(std::move(near));
+
+  const wheel::WheelRankedPlanResult result =
+      wheel::WheelPlanner{}.PlanRanked(problems);
+
+  ASSERT_EQ(result.output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << result.output.reason_code;
+  ASSERT_TRUE(result.selected_problem_index.has_value());
+  EXPECT_EQ(*result.selected_problem_index, 1U);
+  ASSERT_TRUE(result.output.reference.has_value());
+  EXPECT_EQ(result.output.reference->plan_id, "wheel/near-narrow-domain");
 }
 
 TEST(WheelPlanner, RankedIndexedSearchIsDeterministicAcrossTwentyRuns) {

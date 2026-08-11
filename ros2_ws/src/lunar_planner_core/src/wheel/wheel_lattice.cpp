@@ -273,7 +273,9 @@ struct OpenGreater final {
     const shared::SafeProjection& projection,
     const WheeledCapability& capability,
     const WheelSweepValidator& validator,
-    const std::stop_token stop_token) {
+    const WheelSweepValidator* const physical_validator,
+    const std::stop_token stop_token,
+    bool* const search_domain_rejected) {
   const auto* point = std::get_if<PointGoal>(&goal.target);
   if (point == nullptr || !IsFinite(point->position_m)) {
     return std::nullopt;
@@ -309,6 +311,12 @@ struct OpenGreater final {
       const WheelSweepValidation sweep =
           validator.Validate(transition, stop_token);
       if (!sweep.valid) {
+        if (search_domain_rejected != nullptr &&
+            physical_validator != nullptr &&
+            sweep.reason_code == "WHEEL_SWEEP_OUTSIDE_SEARCH_DOMAIN" &&
+            physical_validator->Validate(transition, stop_token).valid) {
+          *search_domain_rejected = true;
+        }
         return false;
       }
       transition.surface_slope_rad = sweep.maximum_surface_slope_rad;
@@ -667,6 +675,8 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
   std::size_t best_goal_parent = kNoParent;
   std::vector<WheelTransition> best_terminal_transitions;
   bool start_has_valid_edge = false;
+  bool start_has_domain_rejected_edge = false;
+  WheelSweepValidator physical_validator{projection, capability};
   WheelSweepValidator validator{projection, capability, search_domain};
 
   const auto update_goal = [&](
@@ -714,16 +724,24 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
           current_entry.node_index, {},
           current_snapshot.path_cost);
     }
+    bool connector_domain_rejected = false;
+    const bool checking_start_connector = current_entry.node_index == 0U;
     if (auto terminal = ExactGoalConnector(
             current_snapshot, goal, maximum_connector_length_m, projection,
-            capability, validator, stop_token);
+            capability, validator,
+            checking_start_connector ? &physical_validator : nullptr,
+            stop_token,
+            checking_start_connector ? &connector_domain_rejected : nullptr);
         terminal.has_value()) {
-      if (current_entry.node_index == 0U) {
+      if (checking_start_connector) {
         start_has_valid_edge = true;
       }
       update_goal(
           current_entry.node_index, std::move(terminal->transitions),
           current_snapshot.path_cost + terminal->cost);
+    }
+    if (checking_start_connector && connector_domain_rejected) {
+      start_has_domain_rejected_edge = true;
     }
 
     for (const OrderedPrimitive& ordered : ordered_primitives) {
@@ -752,6 +770,18 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
             expanded_states);
       }
       if (!sweep.valid) {
+        if (current_entry.node_index == 0U &&
+            sweep.reason_code == "WHEEL_SWEEP_OUTSIDE_SEARCH_DOMAIN") {
+          const WheelSweepValidation physical_sweep =
+              physical_validator.Validate(*transition, stop_token);
+          if (physical_sweep.canceled) {
+            return Failure(
+                WheelLatticeStatus::kCanceled, "REQUEST_CANCELED",
+                expanded_states);
+          }
+          start_has_domain_rejected_edge =
+              start_has_domain_rejected_edge || physical_sweep.valid;
+        }
         continue;
       }
       if (current_entry.node_index == 0U) {
@@ -830,7 +860,7 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
         }
         if (auto terminal = ExactGoalConnector(
                 node, fallback_goal, maximum_connector_length_m, projection,
-                capability, validator, stop_token);
+                capability, validator, nullptr, stop_token, nullptr);
             terminal.has_value()) {
           update_goal(
               node_index, std::move(terminal->transitions),
@@ -845,6 +875,11 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
 
   if (!best_goal_cost.has_value() || best_goal_parent == kNoParent) {
     if (!start_has_valid_edge) {
+      if (start_has_domain_rejected_edge) {
+        return Failure(
+            WheelLatticeStatus::kNoPath,
+            "LOCAL_SEARCH_DOMAIN_EXHAUSTED", expanded_states);
+      }
       return Failure(
           WheelLatticeStatus::kInvalidRequest,
           "WHEEL_START_CONNECTOR_INFEASIBLE", expanded_states);
