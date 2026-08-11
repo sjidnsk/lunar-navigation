@@ -300,7 +300,14 @@ def test_config_package_declares_exact_external_runtime_dependencies():
 
     assert {node.text for node in package.findall("exec_depend")} == {
         "grid_map_msgs",
+        "launch",
+        "launch_ros",
+        "lifecycle_msgs",
+        "lunar_goal_coordinator",
         "nav_msgs",
+        "lunar_observed_map",
+        "lunar_planner_ros",
+        "lunar_unreal_tcp_bridge",
         "tf2_msgs",
         "lunar_navigation_msgs",
     }

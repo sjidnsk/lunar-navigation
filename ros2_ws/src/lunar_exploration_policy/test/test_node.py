@@ -80,6 +80,7 @@ def test_policy_feedback_age_default_matches_planner_tracker() -> None:
 
 
 def test_real_model_and_frozen_profile_configure_lifecycle_node() -> None:
+    _real_model_dir()
     rclpy.init()
     node = _configured_node(PROFILE)
     try:
@@ -97,6 +98,7 @@ def test_real_model_and_frozen_profile_configure_lifecycle_node() -> None:
 def test_modified_profile_fails_closed(tmp_path: Path) -> None:
     modified = tmp_path / "platform_profile.yaml"
     modified.write_bytes(PROFILE.read_bytes() + b"\n# changed\n")
+    _real_model_dir()
     rclpy.init()
     node = _configured_node(modified)
     try:
