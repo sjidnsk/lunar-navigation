@@ -1218,6 +1218,31 @@ def test_formal_cache_rejects_noncanonical_coverability_array_dtype(
         )
 
 
+@pytest.mark.parametrize("authority_drift", ("big_endian", "shape"))
+def test_formal_cache_rejects_noncanonical_ground_projection_elevation(
+    tmp_path: pathlib.Path,
+    authority_drift: str,
+) -> None:
+    root, identity, manifest = _write(tmp_path)
+    scene_path = root / manifest["scenes"][0]["relative_path"]
+    with np.load(scene_path, allow_pickle=False) as archive:
+        elevation = archive["elevation_m"].copy()
+    replacement = (
+        elevation.astype(">f4")
+        if authority_drift == "big_endian"
+        else elevation[..., np.newaxis]
+    )
+    _rewrite_scene_array_and_resign_manifest(
+        root, manifest, "elevation_m", replacement
+    )
+
+    with pytest.raises(FormalCacheError, match="shape|dtype|byte order"):
+        load_formal_cache(
+            root / "cache-manifest.json",
+            expected_identity=identity,
+        )
+
+
 def test_formal_cache_recomputes_physical_projection_digest(
     tmp_path: pathlib.Path,
 ) -> None:

@@ -1226,6 +1226,19 @@ def _validate_scene_coverability(entry: Mapping[str, object]) -> None:
         raise FormalCacheError("cache scene platform coverability is invalid")
     _safe_relative(entry.get("relative_path"))
     _physical_grid_geometry(entry.get("world_bounds_m"))
+    elevation_metadata = arrays.get("elevation_m")
+    expected_elevation_metadata = {
+        "shape": [256, 256],
+        "dtype": "<f4",
+        "byte_order": "little",
+    }
+    if not isinstance(elevation_metadata, Mapping) or any(
+        elevation_metadata.get(field) != value
+        for field, value in expected_elevation_metadata.items()
+    ):
+        raise FormalCacheError(
+            "cache ground projection elevation shape, dtype, or byte order differs"
+        )
     for platform in _PLATFORMS:
         payload = platform_payloads[platform]
         if (
