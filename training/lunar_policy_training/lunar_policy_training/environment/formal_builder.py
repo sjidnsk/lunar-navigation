@@ -65,6 +65,7 @@ from .formal_start_qualification import (
 from .macro_step import ExecutionEvents, PolicyAction
 from .multires_observation import DetailObservedWindow, MultiresSensorObservationState
 from .observation_boundary import (
+    BoundaryObservationResult,
     ObservationBoundaryController,
     SensorBoundaryEvidence,
     SensorPathSample,
@@ -211,6 +212,7 @@ class _GroundOption:
     tolerance_m: float
     theta_rad: float
     goal_id: str
+    candidate_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,6 +538,11 @@ class FormalEpisode:
         self._hopper_feedback_phase = 0
         self._active_ground_option: _GroundOption | None = None
         self._defer_candidate_rebuild = False
+        self._planner_failure_snapshot_id: str | None = None
+        self._planner_failed_candidate_ids: set[str] = set()
+        self._pending_planning_failure: (
+            tuple[str, bridge_api.CandidateDisposition] | None
+        ) = None
         self.last_hop_available_delta_v_mps = 0.0
         self._reveal_history: list[FormalRevealState] = []
         self._visited_candidate_cells = {start_cell}
@@ -845,9 +852,23 @@ class FormalEpisode:
             ),
             goal_tolerance_mm=(0 if self.platform_type == "HOPPER" else 200),
         )
+        failure_snapshot_id = self._planner_failure_snapshot_id
+        failed_candidate_ids = set(self._planner_failed_candidate_ids)
+        if failure_snapshot_id != candidate_universe.physical_snapshot_id:
+            failure_snapshot_id = candidate_universe.physical_snapshot_id
+            failed_candidate_ids.clear()
+        pending_failure = self._pending_planning_failure
+        if pending_failure is not None:
+            candidate_id, disposition = pending_failure
+            if disposition == (
+                bridge_api.CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT
+            ):
+                failed_candidate_ids.add(candidate_id)
         candidate_result = candidate_builder.select_available(
             candidate_universe,
             canvas_id=world.canvas.identity,
+            failure_snapshot_id=failure_snapshot_id,
+            planner_failed_candidate_ids=failed_candidate_ids,
             excluded_cells=(
                 self._visited_candidate_cells
                 if self._visited_candidate_filter_enabled
@@ -855,6 +876,9 @@ class FormalEpisode:
             ),
             backtrack_pose=backtrack_pose,
         )
+        self._planner_failure_snapshot_id = failure_snapshot_id
+        self._planner_failed_candidate_ids = failed_candidate_ids
+        self._pending_planning_failure = None
         candidates = candidate_result.batch
         frontier_oracle = self._frontier_oracle.evaluate_physical(
             world,
@@ -972,7 +996,16 @@ class FormalEpisode:
         request.goal.goal_id = f"frontier/{action.frontier_index}"
         request.goal.target = goal
         apply_goal_theta(request.goal, self.platform_type, target_yaw)
-        return PreparedPlanRequest(request=request, identity=expected_identity)
+        return PreparedPlanRequest(
+            request=request,
+            identity=expected_identity,
+            candidate_id=str(
+                snapshot.candidates.candidate_ids[action.frontier_index]
+            ),
+            physical_snapshot_id=(
+                snapshot.candidate_universe.physical_snapshot_id
+            ),
+        )
 
     def begin_ground_option(
         self, action: PolicyAction, expected_identity: ObservationIdentity
@@ -1009,6 +1042,7 @@ class FormalEpisode:
             tolerance_m=float(target.tolerance_m),
             theta_rad=target_yaw,
             goal_id=goal_id,
+            candidate_id=prepared.candidate_id,
         )
         prepared.request.goal.goal_id = goal_id
         return prepared
@@ -1044,7 +1078,14 @@ class FormalEpisode:
         request.goal.goal_id = option.goal_id
         request.goal.target = goal
         apply_goal_theta(request.goal, self.platform_type, option.theta_rad)
-        return PreparedPlanRequest(request=request, identity=expected_identity)
+        return PreparedPlanRequest(
+            request=request,
+            identity=expected_identity,
+            candidate_id=option.candidate_id,
+            physical_snapshot_id=(
+                snapshot.candidate_universe.physical_snapshot_id
+            ),
+        )
 
     def ground_option_distance_m(self) -> float:
         option = self._active_ground_option
@@ -1060,6 +1101,40 @@ class FormalEpisode:
 
     def clear_ground_option(self) -> None:
         self._active_ground_option = None
+
+    def refresh_after_planning_failure(
+        self,
+        candidate_id: str,
+        disposition: bridge_api.CandidateDisposition,
+    ) -> BoundaryObservationResult:
+        """Rebuild availability after a planner response without new evidence."""
+        if disposition not in {
+            bridge_api.CandidateDisposition.KEEP,
+            bridge_api.CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+        }:
+            raise ValueError("planner candidate disposition is invalid")
+        snapshot = self._snapshot
+        if snapshot is None:
+            raise RuntimeError("planning failure refresh has no map snapshot")
+        universe_ids = {
+            candidate.candidate_id
+            for candidate in snapshot.candidate_universe.candidates
+        }
+        if candidate_id not in universe_ids:
+            raise ValueError(
+                "planning failure candidate is outside the physical universe"
+            )
+        self._active_ground_option = None
+        self._defer_candidate_rebuild = False
+        self._pending_planning_failure = (candidate_id, disposition)
+        execution_state = (
+            self.controller.current_observation.observation_identities[0]
+            .execution_state
+        )
+        return self.controller.rebuild_without_sensor_update(
+            pose_map=self.current_pose,
+            execution_state=execution_state,
+        )
 
     def execute_reference(self, reference: object) -> ReferenceExecutionResult:
         if not isinstance(reference, bridge_api.MotionReference):
@@ -1509,6 +1584,9 @@ class FormalWorkerBuilder:
             initial_observation=episode.initial_observation,
             observation_boundary_controller=episode.controller,
             require_sensor_closed_loop=True,
+            planning_failure_refresher=(
+                episode.refresh_after_planning_failure
+            ),
             reference_executor=episode.execute_reference,
             committed_hop_executor=(
                 episode.committed_hop_feedback

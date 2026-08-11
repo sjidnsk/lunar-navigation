@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import Callable, Protocol
 
 from lunar_planner_training_bridge import (
+    CandidateDisposition,
     ExecutionDirective,
     MotionReference,
     PlannerBridge,
@@ -68,15 +69,6 @@ _NO_REFERENCE_OUTPUTS = frozenset(
         ),
     }
 )
-_REJECTED_ACTION_OUTPUTS = frozenset(
-    {
-        (PlanningOutcome.GOAL_INFEASIBLE, ExecutionDirective.HOLD_POSITION),
-        (
-            PlanningOutcome.NO_KNOWN_SAFE_ROUTE,
-            ExecutionDirective.NO_SAFE_REFERENCE,
-        ),
-    }
-)
 _MAX_COMMITTED_HOP_FEEDBACK_STEPS = 64
 _MAX_GROUND_OPTION_REFERENCES = 64
 _GROUND_OPTION_TARGET_TOLERANCE_M = 0.2
@@ -106,12 +98,26 @@ class PreparedPlanRequest:
 
     request: TrainingPlanRequest
     identity: ObservationIdentity
+    candidate_id: str
+    physical_snapshot_id: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.request, TrainingPlanRequest):
             raise ValueError("prepared planner request must use TrainingPlanRequest")
         if not isinstance(self.identity, ObservationIdentity):
             raise ValueError("prepared planner request requires observation identity")
+        for name, value in (
+            ("candidate", self.candidate_id),
+            ("physical snapshot", self.physical_snapshot_id),
+        ):
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(
+                    f"prepared planner request {name} identity is invalid"
+                )
 
 
 @dataclass(frozen=True)
@@ -173,6 +179,10 @@ class V3ExplorationEnvironment:
         observation_boundary_controller: (
             ObservationBoundaryController | None
         ) = None,
+        planning_failure_refresher: (
+            Callable[[str, CandidateDisposition], BoundaryObservationResult]
+            | None
+        ) = None,
         require_sensor_closed_loop: bool = False,
         require_identity_bound_request: bool = False,
         reference_executor: Callable[
@@ -230,6 +240,10 @@ class V3ExplorationEnvironment:
                 raise ValueError(
                     "sensor-closed environment cannot use an observation provider"
                 )
+            if not callable(planning_failure_refresher):
+                raise ValueError(
+                    "sensor-closed environment requires a planning failure refresher"
+                )
             boundary_observation = (
                 observation_boundary_controller.current_observation
             )
@@ -243,6 +257,11 @@ class V3ExplorationEnvironment:
             raise ValueError(
                 "observation boundary controller requires sensor-closed-loop mode"
             )
+        if (
+            planning_failure_refresher is not None
+            and not callable(planning_failure_refresher)
+        ):
+            raise ValueError("planning failure refresher must be callable")
         if type(require_identity_bound_request) is not bool:
             raise ValueError("identity-bound request flag must be boolean")
         if type(include_planner_wall_time_in_reward) is not bool:
@@ -281,6 +300,7 @@ class V3ExplorationEnvironment:
         self._rejected_candidates: set[int] = set()
         self._observation_provider = observation_provider
         self._observation_boundary_controller = observation_boundary_controller
+        self._planning_failure_refresher = planning_failure_refresher
         self._require_sensor_closed_loop = require_sensor_closed_loop
         self._require_identity_bound_request = require_identity_bound_request
         self._reference_executor = reference_executor
@@ -325,14 +345,13 @@ class V3ExplorationEnvironment:
         return _clone_observation(self._observation)
 
     def current_candidate_diagnostics(self) -> CandidateDiagnostics:
-        """Return producer stages plus planner rejections at this boundary."""
+        """Return authoritative producer diagnostics for this boundary."""
         if self._candidate_diagnostics_provider is None:
-            emitted = int(
-                self._observation.candidate_mask.sum().item()
-            ) + len(self._rejected_candidates)
+            selected = int(self._observation.candidate_mask.sum().item())
             diagnostics = CandidateDiagnostics(
-                frontier_anchor_count=emitted,
-                emitted_count=emitted,
+                physical_candidate_universe_count=selected,
+                selected_policy_candidate_count=selected,
+                available_candidate_count=selected,
             )
         else:
             diagnostics = self._candidate_diagnostics_provider()
@@ -340,13 +359,7 @@ class V3ExplorationEnvironment:
                 self._fail_closed(
                     "candidate diagnostics provider returned invalid data"
                 )
-        try:
-            return replace(
-                diagnostics,
-                planner_rejected_count=len(self._rejected_candidates),
-            )
-        except ValueError as error:
-            self._fail_closed(str(error))
+        return diagnostics
 
     def snapshot_stable_state(self) -> dict[str, object]:
         """Return the dynamic fields not owned by the observation controller."""
@@ -416,29 +429,19 @@ class V3ExplorationEnvironment:
     ) -> PlannerTransition:
         if self._execution_state in {"JUMP_COMMITTED", "IN_FLIGHT"}:
             self._fail_closed("committed hopper cannot accept a new policy action")
-        request = self._build_plan_request(action, expected_identity)
+        request, prepared = self._build_plan_request(action, expected_identity)
         output = self._bridge.plan(request)
         self._validate_output(output)
-        return self._transition_for_output(
-            output, action, mask_rejected_action=True
-        )
+        return self._transition_for_output(output, prepared)
 
     def _transition_for_output(
         self,
         output: PlannerOutput,
-        action: PolicyAction,
-        *,
-        mask_rejected_action: bool,
+        prepared: PreparedPlanRequest | None,
     ) -> PlannerTransition:
         if output.directive == ExecutionDirective.CONTINUE_COMMITTED_HOP:
             return self._advance_committed_hop_without_policy(output)
         if output.reference is None:
-            if (
-                mask_rejected_action
-                and (output.outcome, output.directive)
-                in _REJECTED_ACTION_OUTPUTS
-            ):
-                self._mask_rejected_candidate(action.frontier_index)
             if output.outcome == PlanningOutcome.CANCELED:
                 return self._hold_transition(
                     outcome=output.outcome,
@@ -460,6 +463,7 @@ class V3ExplorationEnvironment:
                     planner_elapsed=output.diagnostics.elapsed,
                     terminal_reason=TerminalReason.HARD_FAILURE,
                 )
+            self._refresh_after_planning_failure(output, prepared)
             return self._hold_transition(
                 outcome=output.outcome,
                 directive=output.directive,
@@ -617,9 +621,9 @@ class V3ExplorationEnvironment:
     def _audit_exhaustion(self) -> tuple[TerminalReason, int, int | None]:
         diagnostics = self.current_candidate_diagnostics()
         planner_rejected_all = (
-            diagnostics.emitted_count > 0
-            and diagnostics.planner_rejected_count
-            == diagnostics.emitted_count
+            diagnostics.physical_candidate_universe_count > 0
+            and diagnostics.planner_failed_current_snapshot_count
+            == diagnostics.physical_candidate_universe_count
         )
         if self._frontier_oracle is None:
             oracle = FrontierOracleResult(0, 0, 0, 0)
@@ -627,37 +631,29 @@ class V3ExplorationEnvironment:
             oracle = self._frontier_oracle()
             if not isinstance(oracle, FrontierOracleResult):
                 self._fail_closed("frontier oracle returned invalid data")
-        if diagnostics.emitted_count == 0 and oracle.opportunity_count > 0:
+        if (
+            diagnostics.physical_candidate_universe_count == 0
+            and oracle.opportunity_count > 0
+        ):
             self._fail_closed(
                 "production candidates are empty while frontier oracle found opportunities"
             )
-        if diagnostics.emitted_count > 0 and not planner_rejected_all:
+        if (
+            diagnostics.physical_candidate_universe_count > 0
+            and diagnostics.selected_policy_candidate_count == 0
+            and diagnostics.available_candidate_count > 0
+            and not planner_rejected_all
+        ):
             self._fail_closed("terminal candidate accounting is incomplete")
         if planner_rejected_all:
             reason = TerminalReason.PLANNER_REJECTED_ALL
-        elif diagnostics.primitive_state_count > 0:
-            if diagnostics.recoverable_observation_state_count == 0:
-                reason = TerminalReason.NO_RECOVERABLE_OBSERVATION_STATE
-            elif (
-                diagnostics.visited_excluded_count
-                >= diagnostics.recoverable_observation_state_count
-            ):
-                reason = TerminalReason.VISITED_EXHAUSTED
-            elif (
-                diagnostics.zero_gain_count > 0
-                and diagnostics.frontier_hint_count == 0
-            ):
-                reason = TerminalReason.ZERO_GAIN
-            else:
-                reason = TerminalReason.NO_TRANSIT_OPPORTUNITY
         elif diagnostics.zero_gain_count > 0:
             reason = TerminalReason.ZERO_GAIN
         elif diagnostics.visited_excluded_count > 0:
             reason = TerminalReason.VISITED_EXHAUSTED
         elif (
-            diagnostics.platform_unreachable_count > 0
-            or diagnostics.static_infeasible_count > 0
-            or diagnostics.frontier_anchor_count == 0
+            diagnostics.physical_unreachable_count > 0
+            or diagnostics.physical_candidate_universe_count == 0
         ):
             reason = TerminalReason.NO_RECOVERABLE_OBSERVATION_STATE
         else:
@@ -690,30 +686,13 @@ class V3ExplorationEnvironment:
             ),
         )
 
-    def _mask_rejected_candidate(self, candidate_index: int) -> None:
-        mask = self._observation.candidate_mask
-        if (
-            mask.ndim != 2
-            or mask.shape[0] != 1
-            or candidate_index < 0
-            or candidate_index >= mask.shape[1]
-            or not bool(mask[0, candidate_index].item())
-        ):
-            self._fail_closed(
-                "rejected planner action does not identify an active candidate"
-            )
-        self._rejected_candidates.add(candidate_index)
-        masked = _clone_observation(self._observation)
-        masked.candidate_mask[0, candidate_index] = False
-        self._observation = masked
-
     def _build_plan_request(
         self,
         action: PolicyAction,
         expected_identity: ObservationIdentity | None,
-    ) -> TrainingPlanRequest | object:
+    ) -> tuple[TrainingPlanRequest | object, PreparedPlanRequest | None]:
         if not self._require_identity_bound_request:
-            return self._request_builder(action)
+            return self._request_builder(action), None
         if expected_identity is None:
             self._fail_closed(
                 "identity-bound request requires a prepared observation"
@@ -730,11 +709,11 @@ class V3ExplorationEnvironment:
             != expected_identity.state_time_ns
         ):
             self._fail_closed("request state time does not match observation identity")
-        return prepared.request
+        return prepared.request, prepared
 
     def _build_ground_continuation_request(
         self, expected_identity: ObservationIdentity
-    ) -> TrainingPlanRequest | object:
+    ) -> PreparedPlanRequest:
         builder = self._ground_option_continuation_builder
         if builder is None:
             self._fail_closed("ground option continuation builder is unavailable")
@@ -752,7 +731,7 @@ class V3ExplorationEnvironment:
             self._fail_closed(
                 "ground continuation state time does not match observation identity"
             )
-        return prepared.request
+        return prepared
 
     def _ground_option_distance_m(self) -> float:
         provider = self._ground_option_distance_provider
@@ -778,16 +757,14 @@ class V3ExplorationEnvironment:
             self._fail_closed("ground option clearer is unavailable")
         transitions: list[PlannerTransition] = []
         try:
-            request = self._build_plan_request(action, expected_identity)
+            request, prepared = self._build_plan_request(
+                action, expected_identity
+            )
             previous_distance_m = self._ground_option_distance_m()
             for reference_index in range(_MAX_GROUND_OPTION_REFERENCES):
                 output = self._bridge.plan(request)
                 self._validate_output(output)
-                transition = self._transition_for_output(
-                    output,
-                    action,
-                    mask_rejected_action=not transitions,
-                )
+                transition = self._transition_for_output(output, prepared)
                 transitions.append(transition)
                 if output.reference is None:
                     return self._aggregate_ground_transitions(transitions)
@@ -816,9 +793,10 @@ class V3ExplorationEnvironment:
                         "ground option did not finish within 64 references"
                     )
                 continuation_identity = self._observation.observation_identities[0]
-                request = self._build_ground_continuation_request(
+                prepared = self._build_ground_continuation_request(
                     continuation_identity
                 )
+                request = prepared.request
             self._fail_closed("ground option reference loop is inconsistent")
         finally:
             clearer()
@@ -927,11 +905,7 @@ class V3ExplorationEnvironment:
         next_identity = observation.observation_identities[0]
         if next_identity != current_identity:
             self._rejected_candidates.clear()
-        installed = _clone_observation(observation)
-        for candidate_index in self._rejected_candidates:
-            if candidate_index < installed.candidate_mask.shape[1]:
-                installed.candidate_mask[0, candidate_index] = False
-        self._observation = installed
+        self._observation = _clone_observation(observation)
         return self._observation
 
     def _refresh_ground_observation(self) -> None:
@@ -1337,6 +1311,45 @@ class V3ExplorationEnvironment:
         except (TypeError, ValueError, RuntimeError) as error:
             self._fail_closed(str(error))
 
+    def _refresh_after_planning_failure(
+        self,
+        output: PlannerOutput,
+        prepared: PreparedPlanRequest | None,
+    ) -> None:
+        disposition = output.candidate_disposition
+        if disposition not in {
+            CandidateDisposition.KEEP,
+            CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+        }:
+            self._fail_closed("planner candidate disposition is invalid")
+        refresher = self._planning_failure_refresher
+        if refresher is None:
+            return
+        if not isinstance(prepared, PreparedPlanRequest):
+            self._fail_closed(
+                "planning failure refresh requires prepared candidate identity"
+            )
+        before_identity = self._observation.observation_identities[0]
+        try:
+            boundary = refresher(prepared.candidate_id, disposition)
+        except (TypeError, ValueError, RuntimeError) as error:
+            self._fail_closed(str(error))
+        if not isinstance(boundary, BoundaryObservationResult):
+            self._fail_closed("planning failure refresher returned invalid data")
+        after_identity = boundary.next_observation.observation_identities[0]
+        if (
+            not boundary.updated
+            or boundary.mission_observed_delta != 0.0
+            or boundary.priority_observed_delta != 0.0
+            or boundary.success_first_crossing
+            or after_identity.state_time_ns != before_identity.state_time_ns
+            or after_identity == before_identity
+        ):
+            self._fail_closed(
+                "planning failure refresh must be a zero-evidence revision"
+            )
+        self._install_observation(boundary.next_observation)
+
     def _fail_closed(self, message: str) -> None:
         self._rollout_discarded = True
         self._training_stopped = True
@@ -1428,6 +1441,9 @@ def create_v3_environment(
     observation_boundary_controller: (
         ObservationBoundaryController | None
     ) = None,
+    planning_failure_refresher: (
+        Callable[[str, CandidateDisposition], BoundaryObservationResult] | None
+    ) = None,
     require_sensor_closed_loop: bool = False,
     reference_executor: Callable[
         [MotionReference], ReferenceExecutionResult
@@ -1460,6 +1476,10 @@ def create_v3_environment(
         raise ValueError(
             "sensor-closed environment requires an observation boundary controller"
         )
+    if require_sensor_closed_loop and not callable(planning_failure_refresher):
+        raise ValueError(
+            "sensor-closed environment requires a planning failure refresher"
+        )
     return V3ExplorationEnvironment(
         platform_type=platform_type,
         bridge=PlannerBridge(),
@@ -1467,6 +1487,7 @@ def create_v3_environment(
         initial_observation=initial_observation,
         observation_provider=observation_provider,
         observation_boundary_controller=observation_boundary_controller,
+        planning_failure_refresher=planning_failure_refresher,
         require_sensor_closed_loop=require_sensor_closed_loop,
         require_identity_bound_request=True,
         reference_executor=reference_executor,

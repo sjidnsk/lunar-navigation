@@ -238,6 +238,64 @@ def test_reset_reveals_before_candidates_and_ground_boundary_uses_actual_area() 
     assert identity.state_time_ns == 2_000_000_000
 
 
+def test_zero_evidence_rebuild_changes_only_policy_revision_and_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Would fail if planner failure replayed sensors or advanced physical state."""
+
+    class _RefreshingPolicyBuilder(_PolicyBuilder):
+        def __call__(
+            self, observed: TrainingObservedGrid, pose_map: Pose2
+        ) -> PolicyBatch:
+            observation = super().__call__(observed, pose_map)
+            if len(self.visible_counts) > 1:
+                observation.candidate_mask[0, 0] = False
+                observation.candidate_mask[0, 1] = True
+            return observation
+
+    controller, _, canvas = _controller("WHEELED")
+    builder = _RefreshingPolicyBuilder("WHEELED")
+    controller._policy_observation_builder = builder
+    observe_calls = 0
+    original_observe_world = SensorObservationState.observe_world
+
+    def counting_observe_world(self, *args, **kwargs):
+        nonlocal observe_calls
+        observe_calls += 1
+        return original_observe_world(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        SensorObservationState, "observe_world", counting_observe_world
+    )
+    pose = _pose(canvas, 5, 2)
+    initial = controller.reset(pose)
+    before_identity = initial.next_observation.observation_identities[0]
+    before_valid = controller.sensor_state.observed.valid_mask.copy()
+    before_counts = controller.sensor_state.observed.observation_count.copy()
+    reveal_calls = observe_calls
+
+    refreshed = controller.rebuild_without_sensor_update(
+        pose_map=pose,
+        execution_state="DECISION_BOUNDARY",
+    )
+
+    after_identity = refreshed.next_observation.observation_identities[0]
+    assert observe_calls == reveal_calls
+    assert np.array_equal(
+        controller.sensor_state.observed.valid_mask, before_valid
+    )
+    assert np.array_equal(
+        controller.sensor_state.observed.observation_count, before_counts
+    )
+    assert refreshed.mission_observed_delta == 0.0
+    assert refreshed.priority_observed_delta == 0.0
+    assert refreshed.mission_observed_ratio == initial.mission_observed_ratio
+    assert refreshed.success_first_crossing is False
+    assert after_identity.state_time_ns == before_identity.state_time_ns
+    assert after_identity.map_snapshot_id != before_identity.map_snapshot_id
+    assert after_identity.candidate_set_id != before_identity.candidate_set_id
+
+
 def test_ground_path_samples_reveal_the_whole_route_with_one_policy_revision() -> None:
     controller, builder, canvas = _controller("WHEELED")
     controller.reset(_pose(canvas, 5, 2))
@@ -400,6 +458,7 @@ def test_sensor_closed_ground_environment_ignores_executor_coverage_claims() -> 
         initial_observation=initial,
         reference_executor=lambda reference: execution,
         observation_boundary_controller=controller,
+        planning_failure_refresher=lambda *_args: None,
         require_sensor_closed_loop=True,
     )
 
@@ -429,6 +488,7 @@ def test_sensor_boundary_crossing_overrides_executor_false_and_terminates() -> N
         initial_observation=initial,
         reference_executor=lambda reference: execution,
         observation_boundary_controller=controller,
+        planning_failure_refresher=lambda *_args: None,
         require_sensor_closed_loop=True,
     )
 
@@ -456,6 +516,7 @@ def test_sensor_closed_environment_fails_before_accepting_missing_evidence() -> 
         initial_observation=initial,
         reference_executor=lambda reference: execution,
         observation_boundary_controller=controller,
+        planning_failure_refresher=lambda *_args: None,
         require_sensor_closed_loop=True,
     )
 
@@ -526,6 +587,7 @@ def test_sensor_closed_hopper_ignores_in_flight_claims_and_reveals_on_landing() 
         initial_observation=initial,
         committed_hop_executor=lambda: next(feedback),
         observation_boundary_controller=controller,
+        planning_failure_refresher=lambda *_args: None,
         require_sensor_closed_loop=True,
     )
 
@@ -582,6 +644,7 @@ def test_sensor_closed_hopper_success_comes_from_landing_boundary() -> None:
         initial_observation=initial,
         committed_hop_executor=lambda: next(feedback),
         observation_boundary_controller=controller,
+        planning_failure_refresher=lambda *_args: None,
         require_sensor_closed_loop=True,
     )
 
@@ -606,5 +669,14 @@ def test_formal_factory_requires_initialized_sensor_closed_controller() -> None:
             platform_type="WHEELED",
             request_builder=lambda action, identity: None,
             initial_observation=initial,
+            require_sensor_closed_loop=True,
+        )
+
+    with pytest.raises(ValueError, match="planning failure refresher"):
+        create_v3_environment(
+            platform_type="WHEELED",
+            request_builder=lambda action, identity: None,
+            initial_observation=initial,
+            observation_boundary_controller=controller,
             require_sensor_closed_loop=True,
         )

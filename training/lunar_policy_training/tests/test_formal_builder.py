@@ -11,6 +11,7 @@ import pathlib
 import numpy as np
 import pytest
 import torch
+from lunar_planner_training_bridge import CandidateDisposition
 
 from lunar_policy_training.capability_freeze import ScenarioIdentity
 from lunar_policy_training.environment import formal_builder as formal_builder_module
@@ -679,8 +680,7 @@ def test_formal_episode_passes_exact_platform_and_exposes_candidate_diagnostics(
     assert platform_calls
     assert set(platform_calls) == {"HOPPER"}
     diagnostics = worker.episode.current_candidate_diagnostics()
-    with pytest.raises(TypeError, match="planner_rejected_count"):
-        worker.current_candidate_diagnostics()
+    assert worker.current_candidate_diagnostics() == diagnostics
     assert diagnostics.selected_policy_candidate_count == int(
         worker.environment.current_observation.candidate_mask.sum()
     )
@@ -1247,6 +1247,12 @@ def test_policy_input_and_request_are_observed_only_identity_bound_and_multires(
     request = prepared.request
 
     assert prepared.identity == identity
+    assert prepared.candidate_id == str(
+        worker.episode._snapshot.candidates.candidate_ids[candidate]
+    )
+    assert prepared.physical_snapshot_id == (
+        worker.episode._snapshot.candidate_universe.physical_snapshot_id
+    )
     assert identity.map_snapshot_id in request.request_id
     assert request.capability_version == bundle.for_platform("WHEELED").capability_version
     assert observation.prior_channels.shape[-2:] == (256, 256)
@@ -1272,7 +1278,8 @@ def test_ground_option_freezes_target_when_candidate_arrays_refresh(
     candidate = int(observation.candidate_mask[0].nonzero()[0])
     action = PolicyAction(candidate, 0.4)
 
-    first = episode.begin_ground_option(action, identity).request
+    first_prepared = episode.begin_ground_option(action, identity)
+    first = first_prepared.request
     first_goal = first.goal.target.position_m
     frozen = (first_goal.x, first_goal.y, first_goal.z, first.goal.goal_id)
     snapshot = episode._snapshot
@@ -1295,7 +1302,8 @@ def test_ground_option_freezes_target_when_candidate_arrays_refresh(
         ),
     )
 
-    continued = episode.continue_ground_option(identity).request
+    continued_prepared = episode.continue_ground_option(identity)
+    continued = continued_prepared.request
     continued_goal = continued.goal.target.position_m
 
     assert (
@@ -1304,6 +1312,7 @@ def test_ground_option_freezes_target_when_candidate_arrays_refresh(
         continued_goal.z,
         continued.goal.goal_id,
     ) == frozen
+    assert continued_prepared.candidate_id == first_prepared.candidate_id
     with pytest.raises(ValueError, match="active ground option"):
         worker.snapshot_episode_state()
     episode.clear_ground_option()
@@ -1425,6 +1434,70 @@ def test_formal_worker_exposes_physical_candidate_diagnostics(
     assert diagnostics.selected_policy_candidate_count > 0
     assert diagnostics.planner_failed_current_snapshot_count == 0
     assert not hasattr(diagnostics, "planner_rejected_count")
+
+
+def test_planning_failure_refresh_suppresses_stable_id_without_new_evidence(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if suppression mutated the universe or failed to promote reserve."""
+    assembly, _, _ = _assembly(tmp_path)
+    worker = assembly.factory(0, "WHEELED")
+    episode = worker.episode
+    before = episode.controller.current_observation
+    before_identity = before.observation_identities[0]
+    snapshot = episode._snapshot
+    assert snapshot is not None
+    before_ids = tuple(
+        str(snapshot.candidates.candidate_ids[index])
+        for index in np.flatnonzero(snapshot.candidates.mask)
+    )
+    failed_id = before_ids[0]
+    before_universe_sha256 = snapshot.candidate_universe_sha256
+    before_physical_snapshot_id = (
+        snapshot.candidate_universe.physical_snapshot_id
+    )
+    before_evidence_generation = episode.sensor_state.evidence_generation
+    before_evidence_sha256 = episode.sensor_state.physical_evidence_sha256()
+    before_pose = episode.current_pose
+    before_ratio = float(before.pose_features[0, 4].item())
+    candidate_index = int(np.flatnonzero(snapshot.candidates.mask)[0])
+    episode.begin_ground_option(
+        PolicyAction(candidate_index, 0.0), before_identity
+    )
+    episode._defer_candidate_rebuild = True
+
+    refreshed = episode.refresh_after_planning_failure(
+        failed_id,
+        CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+    )
+
+    after_snapshot = episode._snapshot
+    assert after_snapshot is not None
+    after_ids = tuple(
+        str(after_snapshot.candidates.candidate_ids[index])
+        for index in np.flatnonzero(after_snapshot.candidates.mask)
+    )
+    after_identity = refreshed.next_observation.observation_identities[0]
+    assert episode._active_ground_option is None
+    assert episode._defer_candidate_rebuild is False
+    assert episode.current_pose == before_pose
+    assert episode.sensor_state.evidence_generation == before_evidence_generation
+    assert episode.sensor_state.physical_evidence_sha256() == before_evidence_sha256
+    assert after_identity.state_time_ns == before_identity.state_time_ns
+    assert float(refreshed.next_observation.pose_features[0, 4]) == before_ratio
+    assert refreshed.mission_observed_delta == 0.0
+    assert refreshed.priority_observed_delta == 0.0
+    assert after_snapshot.candidate_universe_sha256 == before_universe_sha256
+    assert (
+        after_snapshot.candidate_universe.physical_snapshot_id
+        == before_physical_snapshot_id
+    )
+    assert failed_id not in after_ids
+    assert len(after_ids) == len(before_ids)
+    assert set(after_ids) - set(before_ids)
+    assert after_snapshot.candidates.diagnostics.planner_failed_current_snapshot_count == 1
+    assert after_identity.map_snapshot_id != before_identity.map_snapshot_id
+    assert after_identity.candidate_set_id != before_identity.candidate_set_id
 
 
 def test_parallel_and_evaluation_consumers_remain_deferred_to_failure_refresh() -> None:

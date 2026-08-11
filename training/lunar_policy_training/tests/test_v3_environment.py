@@ -10,6 +10,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "model_contract"))
 
 from lunar_planner_training_bridge import (  # noqa: E402
+    CandidateDisposition,
     ExecutionDirective,
     MotionReference,
     PlannerDiagnostics,
@@ -37,6 +38,9 @@ from lunar_policy_training.environment.v3_environment import (  # noqa: E402
     PreparedPlanRequest,
     ReferenceExecutionResult,
     V3ExplorationEnvironment,
+)
+from lunar_policy_training.environment.observation_boundary import (  # noqa: E402
+    BoundaryObservationResult,
 )
 from lunar_policy_training.policy.observation import (  # noqa: E402
     ObservationIdentity,
@@ -142,7 +146,12 @@ class _GroundOptionHarness:
     def _prepared(identity: ObservationIdentity) -> PreparedPlanRequest:
         request = TrainingPlanRequest()
         request.state_time.nanoseconds_since_epoch = identity.state_time_ns
-        return PreparedPlanRequest(request=request, identity=identity)
+        return PreparedPlanRequest(
+            request=request,
+            identity=identity,
+            candidate_id="a" * 64,
+            physical_snapshot_id="b" * 64,
+        )
 
     def begin(
         self, action: PolicyAction, identity: ObservationIdentity
@@ -219,6 +228,89 @@ def test_no_reference_holds_state_and_preserves_planner_failure() -> None:
     assert transition.terminated is False
 
 
+def test_initial_planning_failure_uses_prepared_identity_for_zero_evidence_refresh(
+) -> None:
+    """Would fail if suppression recovered candidate identity from action index."""
+    candidate_id = "c" * 64
+    physical_snapshot_id = "d" * 64
+    initial_identity = _identity()
+    refreshed_identity = _identity(
+        map_snapshot_id="map-refresh",
+        candidate_set_id="candidates-refresh",
+    )
+    refreshed_observation = _observation(
+        candidate_mask=(False, True), identity=refreshed_identity
+    )
+    output = PlannerOutput()
+    output.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+    output.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    output.candidate_disposition = (
+        CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT
+    )
+    output.reason_code = "NO_ROUTE"
+    refresh_calls: list[tuple[str, CandidateDisposition]] = []
+
+    def build_request(
+        action: PolicyAction, identity: ObservationIdentity
+    ) -> PreparedPlanRequest:
+        assert action.frontier_index == 1
+        request = TrainingPlanRequest()
+        request.state_time.nanoseconds_since_epoch = identity.state_time_ns
+        return PreparedPlanRequest(
+            request=request,
+            identity=identity,
+            candidate_id=candidate_id,
+            physical_snapshot_id=physical_snapshot_id,
+        )
+
+    def refresh(
+        failed_candidate_id: str, disposition: CandidateDisposition
+    ) -> BoundaryObservationResult:
+        refresh_calls.append((failed_candidate_id, disposition))
+        return BoundaryObservationResult(
+            next_observation=refreshed_observation,
+            mission_observed_delta=0.0,
+            priority_observed_delta=0.0,
+            mission_observed_ratio=0.4,
+            success_first_crossing=False,
+            updated=True,
+        )
+
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(output),
+        request_builder=build_request,
+        initial_observation=_observation(
+            candidate_mask=(True, True), identity=initial_identity
+        ),
+        require_identity_bound_request=True,
+        planning_failure_refresher=refresh,
+        include_planner_wall_time_in_reward=False,
+    )
+
+    transition = env.step(
+        PolicyAction(frontier_index=1, theta_rad=0.0),
+        expected_identity=initial_identity,
+    )
+
+    assert refresh_calls == [
+        (
+            candidate_id,
+            CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+        )
+    ]
+    assert transition.next_observation.candidate_mask.tolist() == [
+        [False, True]
+    ]
+    assert transition.next_observation.observation_identities == (
+        refreshed_identity,
+    )
+    assert transition.mission_observed_delta == 0.0
+    assert transition.priority_observed_delta == 0.0
+    assert transition.normalized_macro_step_time == 0.0
+    assert transition.terminated is False
+
+
 @pytest.mark.parametrize(
     ("outcome", "directive"),
     [
@@ -229,14 +321,15 @@ def test_no_reference_holds_state_and_preserves_planner_failure() -> None:
         ),
     ],
 )
-def test_normal_v3_rejection_consumes_decision_and_masks_only_selected_candidate(
+def test_keep_disposition_consumes_decision_without_suppressing_candidate(
     outcome: PlanningOutcome,
     directive: ExecutionDirective,
 ) -> None:
-    """Would fail if one rejected frontier poisoned unrelated candidates."""
+    """Would fail if outcome/directive parsing overrode disposition authority."""
     output = PlannerOutput()
     output.outcome = outcome
     output.directive = directive
+    output.candidate_disposition = CandidateDisposition.KEEP
     output.reason_code = "CANDIDATE_REJECTED"
     env = V3ExplorationEnvironment(
         platform_type="WHEELED",
@@ -256,7 +349,7 @@ def test_normal_v3_rejection_consumes_decision_and_masks_only_selected_candidate
     assert result.transition is not None
     assert policy_masks[0].tolist() == [[True, True]]
     assert result.transition.next_observation.candidate_mask.tolist() == [
-        [False, True]
+        [True, True]
     ]
 
 
@@ -298,10 +391,10 @@ def test_ninth_policy_decision_is_not_a_task_terminal() -> None:
         ("candidate_set_id", "candidates-2"),
     ),
 )
-def test_new_observation_identity_component_clears_temporary_rejections(
+def test_keep_disposition_never_creates_identity_scoped_suppression(
     identity_change: str, changed_value: object
 ) -> None:
-    """Would fail if rejection leaked across any producer identity component."""
+    """Would fail if environment retained an index mask outside the producer."""
     rejected = PlannerOutput()
     rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
     rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
@@ -347,13 +440,13 @@ def test_new_observation_identity_component_clears_temporary_rejections(
 
     assert seen_masks == [
         [[True, True]],
-        [[False, True]],
+        [[True, True]],
         [[True, True]],
     ]
 
 
-def test_same_observation_identity_preserves_temporary_rejections() -> None:
-    """Would fail if a tensor refresh silently forgot same-boundary rejection state."""
+def test_same_observation_identity_does_not_create_index_suppression() -> None:
+    """Would fail if the environment inferred failure identity from an index."""
     rejected = PlannerOutput()
     rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
     rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
@@ -392,7 +485,7 @@ def test_same_observation_identity_preserves_temporary_rejections() -> None:
     env.advance_until_decision_boundary(policy)
     env.advance_until_decision_boundary(policy)
 
-    assert seen == [[[True, True]], [[False, True]]]
+    assert seen == [[[True, True]], [[True, True]]]
 
 
 def test_rejection_refreshes_changed_producer_identity_before_retry_policy() -> None:
@@ -432,8 +525,8 @@ def test_rejection_refreshes_changed_producer_identity_before_retry_policy() -> 
     assert seen == [[[True, True]], [[True, True]]]
 
 
-def test_rejection_refresh_with_same_identity_keeps_temporary_mask() -> None:
-    """Would fail if every producer refresh erased same-boundary rejection state."""
+def test_provider_refresh_with_same_identity_has_no_environment_index_mask() -> None:
+    """Would fail if the consumer reapplied a retired action-index mask."""
     rejected = PlannerOutput()
     rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
     rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
@@ -462,7 +555,7 @@ def test_rejection_refresh_with_same_identity_keeps_temporary_mask() -> None:
     env.advance_until_decision_boundary(policy)
     env.advance_until_decision_boundary(policy)
 
-    assert seen == [[[True, True]], [[False, True]]]
+    assert seen == [[[True, True]], [[True, True]]]
 
 
 def test_prepared_action_does_not_refresh_producer_after_policy_boundary() -> None:
@@ -518,7 +611,12 @@ def test_identity_bound_request_rejects_snapshot_drift_before_bridge_plan() -> N
         action: PolicyAction, expected_identity: ObservationIdentity
     ) -> PreparedPlanRequest:
         assert expected_identity == prepared_identity
-        return PreparedPlanRequest(request=request, identity=drifted_identity)
+        return PreparedPlanRequest(
+            request=request,
+            identity=drifted_identity,
+            candidate_id="a" * 64,
+            physical_snapshot_id="b" * 64,
+        )
 
     env = V3ExplorationEnvironment(
         platform_type="WHEELED",
@@ -622,10 +720,7 @@ def test_empty_production_candidates_with_oracle_opportunity_fail_closed() -> No
         bridge=_Bridge(PlannerOutput()),
         request_builder=lambda action: action,
         initial_observation=_observation(candidate_mask=(False, False)),
-        candidate_diagnostics_provider=lambda: CandidateDiagnostics(
-            frontier_anchor_count=2,
-            emitted_count=0,
-        ),
+        candidate_diagnostics_provider=CandidateDiagnostics,
         frontier_oracle=lambda: FrontierOracleResult(
             frontier_anchor_count=2,
             observed_safe_pose_count=2,
@@ -641,22 +736,20 @@ def test_empty_production_candidates_with_oracle_opportunity_fail_closed() -> No
     assert env.training_stopped is True
 
 
-def test_partial_planner_rejection_cannot_masquerade_as_oracle_contradiction() -> None:
+def test_partial_planner_failure_cannot_masquerade_as_oracle_contradiction() -> None:
     env = V3ExplorationEnvironment(
         platform_type="WHEELED",
         bridge=_Bridge(PlannerOutput()),
         request_builder=lambda action: action,
         initial_observation=_observation(candidate_mask=(False, False)),
         candidate_diagnostics_provider=lambda: CandidateDiagnostics(
-            frontier_anchor_count=2,
-            primitive_state_count=2,
-            forward_reachable_state_count=2,
-            returnable_state_count=2,
-            recoverable_observation_state_count=2,
-            frontier_hint_count=2,
-            positive_gain_state_count=2,
-            emitted_count=2,
-            planner_rejected_count=1,
+            physical_snapshot_id="e" * 64,
+            physical_reachability_algorithm_id="test/reachability",
+            physical_candidate_universe_count=2,
+            selected_policy_candidate_count=0,
+            available_candidate_count=1,
+            untried_reserve_count=1,
+            planner_failed_current_snapshot_count=1,
         ),
         frontier_oracle=lambda: FrontierOracleResult(1, 1, 1, 1),
     )
@@ -677,10 +770,8 @@ def test_legal_empty_boundary_reports_latest_stage_and_truth_diagnostic() -> Non
             platform_index=2, candidate_mask=(False, False)
         ),
         candidate_diagnostics_provider=lambda: CandidateDiagnostics(
-            frontier_anchor_count=7,
-            visited_excluded_count=1,
-            platform_unreachable_count=4,
             zero_gain_count=2,
+            physical_unreachable_count=4,
         ),
         frontier_oracle=lambda: FrontierOracleResult(
             frontier_anchor_count=7,
@@ -703,22 +794,63 @@ def test_last_planner_rejection_with_oracle_opportunity_reports_planner_failure(
     rejected = PlannerOutput()
     rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
     rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    rejected.candidate_disposition = (
+        CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT
+    )
     rejected.reason_code = "NO_ROUTE"
     oracle_calls = 0
+    initial = _observation(candidate_mask=(True, False))
+    refreshed = _observation(
+        candidate_mask=(False, False),
+        identity=_identity(
+            map_snapshot_id="map-planner-failed",
+            candidate_set_id="candidates-empty",
+        ),
+    )
 
     def oracle() -> FrontierOracleResult:
         nonlocal oracle_calls
         oracle_calls += 1
         return FrontierOracleResult(1, 1, 1, 1)
 
+    def request_builder(
+        _action: PolicyAction, identity: ObservationIdentity
+    ) -> PreparedPlanRequest:
+        request = TrainingPlanRequest()
+        request.state_time.nanoseconds_since_epoch = identity.state_time_ns
+        return PreparedPlanRequest(
+            request=request,
+            identity=identity,
+            candidate_id="a" * 64,
+            physical_snapshot_id="f" * 64,
+        )
+
+    def refresh(
+        _candidate_id: str, _disposition: CandidateDisposition
+    ) -> BoundaryObservationResult:
+        return BoundaryObservationResult(
+            next_observation=refreshed,
+            mission_observed_delta=0.0,
+            priority_observed_delta=0.0,
+            mission_observed_ratio=0.5,
+            success_first_crossing=False,
+            updated=True,
+        )
+
     env = V3ExplorationEnvironment(
         platform_type="WHEELED",
         bridge=_Bridge(rejected),
-        request_builder=lambda action: action,
-        initial_observation=_observation(candidate_mask=(True, False)),
+        request_builder=request_builder,
+        initial_observation=initial,
+        require_identity_bound_request=True,
+        planning_failure_refresher=refresh,
         candidate_diagnostics_provider=lambda: CandidateDiagnostics(
-            frontier_anchor_count=1,
-            emitted_count=1,
+            physical_snapshot_id="f" * 64,
+            physical_reachability_algorithm_id="test/reachability",
+            physical_candidate_universe_count=1,
+            selected_policy_candidate_count=0,
+            available_candidate_count=0,
+            planner_failed_current_snapshot_count=1,
         ),
         frontier_oracle=oracle,
         remaining_coverable_detail_cell_count_provider=lambda: 88,
@@ -852,6 +984,7 @@ def _ground_result(
     execution_cost: float,
     execution_time: float,
     sample_count: int,
+    success_first_crossing: bool = False,
 ) -> ReferenceExecutionResult:
     return ReferenceExecutionResult(
         next_observation=_observation(identity=identity),
@@ -860,10 +993,10 @@ def _ground_result(
         normalized_execution_cost_contribution=execution_cost,
         normalized_execution_time_contribution=execution_time,
         executed_without_new_coverage=mission_delta == 0.0,
-        success_first_crossing=False,
+        success_first_crossing=success_first_crossing,
         episode_ended_without_success=False,
         hard_safety_violation=False,
-        terminated=False,
+        terminated=success_first_crossing,
         execution_state="DECISION_BOUNDARY",
         execution_events=ExecutionEvents(
             reference_samples_consumed=sample_count,
@@ -997,6 +1130,176 @@ def test_ground_option_returns_aggregated_progress_when_refresh_rejects_goal() -
     assert result.transition.reason_code == "REFRESHED_GOAL_REJECTED"
     assert result.transition.terminated is False
     assert harness.clear_calls == 1
+
+
+def test_rolling_planning_failure_refreshes_after_aggregating_each_reference_once(
+) -> None:
+    identities = [
+        _identity(
+            map_snapshot_id=f"rolling-map-{index}",
+            robot_state_id=f"rolling-robot-{index}",
+            state_time_ns=1_000 * index,
+            candidate_set_id=f"rolling-candidates-{index}",
+        )
+        for index in range(1, 5)
+    ]
+    refreshed_identity = _identity(
+        map_snapshot_id="rolling-map-refresh",
+        robot_state_id=identities[-1].robot_state_id,
+        state_time_ns=identities[-1].state_time_ns,
+        candidate_set_id="rolling-candidates-refresh",
+    )
+    harness = _GroundOptionHarness([10.0, 7.0, 4.0, 1.0])
+    executor = _SequenceReferenceExecutor(
+        [
+            _ground_result(
+                identities[index + 1],
+                mission_delta=0.1 * (index + 1),
+                priority_delta=0.01 * (index + 1),
+                execution_cost=0.2 * (index + 1),
+                execution_time=0.3 * (index + 1),
+                sample_count=index + 2,
+            )
+            for index in range(3)
+        ]
+    )
+    rejected = PlannerOutput()
+    rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
+    rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    rejected.candidate_disposition = (
+        CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT
+    )
+    rejected.reason_code = "ROLLING_GOAL_REJECTED"
+    refresh_calls: list[tuple[str, CandidateDisposition, int]] = []
+
+    def refresh(
+        candidate_id: str, disposition: CandidateDisposition
+    ) -> BoundaryObservationResult:
+        refresh_calls.append(
+            (candidate_id, disposition, len(executor.references))
+        )
+        return BoundaryObservationResult(
+            next_observation=_observation(
+                candidate_mask=(False, True), identity=refreshed_identity
+            ),
+            mission_observed_delta=0.0,
+            priority_observed_delta=0.0,
+            mission_observed_ratio=0.7,
+            success_first_crossing=False,
+            updated=True,
+        )
+
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_SequenceBridge(
+            [
+                _reference_output(
+                    "WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE
+                )
+                for _ in range(3)
+            ]
+            + [rejected]
+        ),
+        request_builder=harness.begin,
+        initial_observation=_observation(identity=identities[0]),
+        require_identity_bound_request=True,
+        reference_executor=executor,
+        ground_option_continuation_builder=harness.continue_,
+        ground_option_distance_provider=harness.distance,
+        ground_option_clearer=harness.clear,
+        planning_failure_refresher=refresh,
+        include_planner_wall_time_in_reward=False,
+        plan_cost_scale=4.0,
+    )
+
+    result = env.advance_prepared_action(
+        PolicyAction(1, 0.0), expected_identity=identities[0]
+    )
+
+    assert refresh_calls == [
+        (
+            "a" * 64,
+            CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+            3,
+        )
+    ]
+    assert harness.clear_calls == 1
+    assert harness.begin_identities == [identities[0]]
+    assert harness.continue_identities == identities[1:]
+    transition = result.transition
+    assert transition is not None
+    assert transition.next_observation.observation_identities == (
+        refreshed_identity,
+    )
+    assert transition.mission_observed_delta == pytest.approx(0.6)
+    assert transition.priority_observed_delta == pytest.approx(0.06)
+    assert transition.normalized_plan_or_execution_cost == pytest.approx(2.7)
+    assert transition.normalized_macro_step_time == pytest.approx(1.8)
+    assert transition.execution_events.reference_samples_consumed == 9
+    assert transition.terminated is False
+
+
+def test_rolling_success_crossing_skips_fourth_plan_and_failure_refresh() -> None:
+    identities = [
+        _identity(
+            map_snapshot_id=f"success-map-{index}",
+            robot_state_id=f"success-robot-{index}",
+            state_time_ns=1_000 * index,
+        )
+        for index in range(1, 5)
+    ]
+    harness = _GroundOptionHarness([10.0, 7.0, 4.0])
+    executor = _SequenceReferenceExecutor(
+        [
+            _ground_result(
+                identities[index + 1],
+                mission_delta=0.1,
+                priority_delta=0.01,
+                execution_cost=0.0,
+                execution_time=0.1,
+                sample_count=2,
+                success_first_crossing=index == 2,
+            )
+            for index in range(3)
+        ]
+    )
+    bridge = _SequenceBridge(
+        [
+            _reference_output(
+                "WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE
+            )
+            for _ in range(3)
+        ]
+    )
+    refresh_calls = 0
+
+    def unexpected_refresh(*_args) -> BoundaryObservationResult:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        raise AssertionError("success must not refresh planning failure")
+
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=bridge,
+        request_builder=harness.begin,
+        initial_observation=_observation(identity=identities[0]),
+        require_identity_bound_request=True,
+        reference_executor=executor,
+        ground_option_continuation_builder=harness.continue_,
+        ground_option_distance_provider=harness.distance,
+        ground_option_clearer=harness.clear,
+        planning_failure_refresher=unexpected_refresh,
+    )
+
+    result = env.advance_prepared_action(
+        PolicyAction(0, 0.0), expected_identity=identities[0]
+    )
+
+    assert len(executor.references) == 3
+    assert refresh_calls == 0
+    assert result.transition is not None
+    assert result.transition.success_first_crossing is True
+    assert result.transition.terminated is True
 
 
 def test_ground_option_fails_closed_on_no_progress_and_clears_target() -> None:
@@ -1317,7 +1620,12 @@ def test_production_factory_step_uses_real_cpp_v3_bridge() -> None:
 
     def build_request(action, identity):
         request.state_time.nanoseconds_since_epoch = identity.state_time_ns
-        return PreparedPlanRequest(request=request, identity=identity)
+        return PreparedPlanRequest(
+            request=request,
+            identity=identity,
+            candidate_id="a" * 64,
+            physical_snapshot_id="b" * 64,
+        )
 
     env = create_v3_environment(
         platform_type="WHEELED",

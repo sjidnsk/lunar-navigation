@@ -280,6 +280,35 @@ class ObservationBoundaryController:
             updated=True,
         )
 
+    def rebuild_without_sensor_update(
+        self,
+        *,
+        pose_map: Pose2,
+        execution_state: str,
+    ) -> BoundaryObservationResult:
+        """Rebuild policy candidates while preserving all physical evidence."""
+        if self._current_observation is None:
+            raise RuntimeError("sensor boundary must be reset before rebuild")
+        if not isinstance(pose_map, Pose2) or pose_map.frame_id != "map":
+            raise ValueError("sensor boundary rebuild pose must be map-frame Pose2")
+        stable_states = (
+            {"GROUND_HOLD", "LANDED_HOLD"}
+            if self._platform_type == "HOPPER"
+            else {"DECISION_BOUNDARY"}
+        )
+        if execution_state not in stable_states:
+            raise ValueError("sensor boundary rebuild requires a stable state")
+        mission_ratio = self._mission_observed_ratio()
+        self._build_observation(pose_map, execution_state, mission_ratio)
+        return BoundaryObservationResult(
+            next_observation=self.current_observation,
+            mission_observed_delta=0.0,
+            priority_observed_delta=0.0,
+            mission_observed_ratio=mission_ratio,
+            success_first_crossing=False,
+            updated=True,
+        )
+
     def _observe(
         self, evidence: SensorBoundaryEvidence, execution_state: str
     ):
@@ -329,9 +358,18 @@ class ObservationBoundaryController:
         mission_ratio = self._mission_observed_ratio()
         crossing = formal_success_first_crossing(previous_ratio, mission_ratio)
         self._state_time_ns += elapsed_ns
+        self._build_observation(evidence.pose_map, execution_state, mission_ratio)
+        return delta, mission_ratio, crossing
+
+    def _build_observation(
+        self,
+        pose_map: Pose2,
+        execution_state: str,
+        mission_ratio: float,
+    ) -> None:
         self._observation_revision += 1
         observation = self._policy_observation_builder(
-            self._sensor_state.observed.copy(), evidence.pose_map
+            self._sensor_state.observed.copy(), pose_map
         )
         if not isinstance(observation, PolicyBatch):
             raise ValueError("policy observation builder returned invalid data")
@@ -351,11 +389,10 @@ class ObservationBoundaryController:
         )
         if not torch.equal(observation.platform_context, expected_context):
             raise ValueError("policy observation platform does not match controller")
-        identity = self._make_identity(observation, evidence.pose_map, execution_state)
+        identity = self._make_identity(observation, pose_map, execution_state)
         self._current_observation = _clone_policy_batch(
             observation, identity=identity
         )
-        return delta, mission_ratio, crossing
 
     def _mission_observed_ratio(self) -> float:
         if self._mission_area_m2 <= 0.0:
