@@ -230,7 +230,7 @@ PlannerOutput LeggedPlanner::Plan(
         "LEGGED_PLATFORM_TYPE_MISMATCH", started);
   }
   const shared::MapSnapshotBuildResult map =
-      shared::MapSnapshot::Create(problem.local_map_view);
+      shared::MapSnapshot::Create(problem.local_map);
   if (!map.ok()) {
     return Failure(
         PlanningOutcome::kInvalidRequest,

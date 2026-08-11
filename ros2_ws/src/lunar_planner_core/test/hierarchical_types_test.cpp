@@ -2,11 +2,14 @@
 #include <cstddef>
 #include <numbers>
 #include <optional>
+#include <stdexcept>
 #include <variant>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "hierarchical/frame_transform.hpp"
+#include "hierarchical/local_planning_problem.hpp"
 #include "hierarchical/map_level.hpp"
 #include "lunar_planner_core/types/motion_reference.hpp"
 #include "lunar_planner_core/types/planner_config.hpp"
@@ -63,7 +66,36 @@ TEST(HierarchicalTypes, FreezesApprovedMapAndLocalRules) {
   EXPECT_DOUBLE_EQ(config.local_frontier.wheel_horizon_m, 4.0);
   EXPECT_DOUBLE_EQ(config.local_frontier.legged_horizon_m, 3.0);
   static_assert(!HasMaximumAttempts<LocalFrontierConfig>);
-  EXPECT_DOUBLE_EQ(config.local_frontier.additional_corridor_margin_m, 0.4);
+  EXPECT_DOUBLE_EQ(kFixedAdditionalCorridorMarginM, 2.0);
+  EXPECT_DOUBLE_EQ(config.local_frontier.additional_corridor_margin_m,
+                   kFixedAdditionalCorridorMarginM);
+}
+
+TEST(HierarchicalTypes, LocalSearchDomainCachesCanonicalShapeCountAndHash) {
+  const LocalSearchDomain domain{2U, 2U, {1U, 0U, 1U, 1U}};
+
+  EXPECT_EQ(domain.width(), 2U);
+  EXPECT_EQ(domain.height(), 2U);
+  ASSERT_EQ(domain.allowed().size(), 4U);
+  EXPECT_EQ(domain.allowed()[0], 1U);
+  EXPECT_EQ(domain.allowed()[1], 0U);
+  EXPECT_EQ(domain.allowed()[2], 1U);
+  EXPECT_EQ(domain.allowed()[3], 1U);
+  EXPECT_EQ(domain.allowed_cell_count(), 3U);
+  EXPECT_TRUE(domain.Contains(shared::GridCell{.x = 0, .y = 0}));
+  EXPECT_FALSE(domain.Contains(shared::GridCell{.x = 1, .y = 0}));
+  EXPECT_TRUE(domain.Contains(shared::GridCell{.x = 1, .y = 1}));
+  EXPECT_FALSE(domain.Contains(shared::GridCell{.x = -1, .y = 0}));
+  EXPECT_FALSE(domain.Contains(shared::GridCell{.x = 2, .y = 0}));
+  EXPECT_EQ(domain.sha256(),
+            "f248f5703378ff86250fb15dbd2540d4f54b5feba11b0c3dfe87c0951f099d10");
+}
+
+TEST(HierarchicalTypes, LocalSearchDomainRejectsWrongShapeAndNonBinaryBytes) {
+  EXPECT_THROW((LocalSearchDomain{2U, 2U, {1U, 0U, 1U}}),
+               std::invalid_argument);
+  EXPECT_THROW((LocalSearchDomain{2U, 2U, {1U, 0U, 2U, 1U}}),
+               std::invalid_argument);
 }
 
 TEST(HierarchicalTypes, SelectsSmallestAdmissibleConfiguredLevel) {

@@ -2,7 +2,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <variant>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -322,7 +324,10 @@ TEST(LeggedPlanner, KeepsTolerantBoundaryGoalInsideItsCertifiedTerrainCell) {
           .state_time = input.state_time,
           .current_state = input.current_state,
           .goal_odom = input.goal_map,
-          .local_map_view = input.world.local_map,
+          .local_map = input.world.local_map,
+          .search_domain = hierarchical::LocalSearchDomain{
+              input.world.local_map.width, input.world.local_map.height,
+              std::vector<std::uint8_t>(input.world.local_map.CellCount(), 1U)},
           .capability = input.capability,
           .config = input.config,
       });

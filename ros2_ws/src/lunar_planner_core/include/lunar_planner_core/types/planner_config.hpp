@@ -9,6 +9,8 @@
 
 namespace lunar::planning {
 
+inline constexpr double kFixedAdditionalCorridorMarginM = 2.0;
+
 struct AraStarConfig final {
   double initial_epsilon{2.0};
   double epsilon_decrement{0.25};
@@ -74,7 +76,7 @@ struct GlobalSearchConfig final {
 struct LocalFrontierConfig final {
   double wheel_horizon_m{4.0};
   double legged_horizon_m{3.0};
-  double additional_corridor_margin_m{0.4};
+  double additional_corridor_margin_m{kFixedAdditionalCorridorMarginM};
 };
 
 struct PlannerConfig final {

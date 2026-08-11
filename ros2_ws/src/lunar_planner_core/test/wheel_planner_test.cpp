@@ -150,7 +150,10 @@ TEST(WheelPlanner, RankedPlannerBuildsProjectionOnceAndReportsChosenProblem) {
               .target = PointGoal{
                   .position_m = {1000.0, 1000.0, 0.0}, .tolerance_m = 0.0},
           },
-          .local_map_view = input.world.local_map,
+          .local_map = input.world.local_map,
+          .search_domain = hierarchical::LocalSearchDomain{
+              input.world.local_map.width, input.world.local_map.height,
+              std::vector<std::uint8_t>(input.world.local_map.CellCount(), 1U)},
           .capability = input.capability,
           .config = input.config,
       },
@@ -159,7 +162,10 @@ TEST(WheelPlanner, RankedPlannerBuildsProjectionOnceAndReportsChosenProblem) {
           .state_time = input.state_time,
           .current_state = input.current_state,
           .goal_odom = input.goal_map,
-          .local_map_view = input.world.local_map,
+          .local_map = input.world.local_map,
+          .search_domain = hierarchical::LocalSearchDomain{
+              input.world.local_map.width, input.world.local_map.height,
+              std::vector<std::uint8_t>(input.world.local_map.CellCount(), 1U)},
           .capability = input.capability,
           .config = input.config,
       },
@@ -224,7 +230,10 @@ TEST(WheelPlanner, ReusesLocalProjectionOnlyForAnIdenticalContentKey) {
       .state_time = input.state_time,
       .current_state = input.current_state,
       .goal_odom = input.goal_map,
-      .local_map_view = input.world.local_map,
+      .local_map = input.world.local_map,
+      .search_domain = hierarchical::LocalSearchDomain{
+          input.world.local_map.width, input.world.local_map.height,
+          std::vector<std::uint8_t>(input.world.local_map.CellCount(), 1U)},
       .capability = input.capability,
       .config = input.config,
   };
@@ -412,7 +421,7 @@ TEST(WheelPlanner, ConnectsAnExactNearGoalAcrossThePointTwoMeterGridGap) {
   std::string frontier_reasons;
   for (const auto& problem : frontiers.problems) {
     const auto local_snapshot =
-        shared::MapSnapshot::Create(problem.local_map_view);
+        shared::MapSnapshot::Create(problem.local_map);
     ASSERT_TRUE(local_snapshot.ok()) << local_snapshot.reason_code;
     const auto local_projection = shared::BuildSafeProjection(
         local_snapshot.snapshot, problem.capability,
@@ -460,7 +469,7 @@ TEST(WheelPlanner, LazySearchAcceptsAtLeastOneHierarchicalFrontier) {
   bool solved = false;
   std::string reasons;
   for (const auto& problem : frontiers.problems) {
-    const auto snapshot = shared::MapSnapshot::Create(problem.local_map_view);
+    const auto snapshot = shared::MapSnapshot::Create(problem.local_map);
     ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
     const auto projection = shared::BuildSafeProjection(
         snapshot.snapshot, problem.capability, problem.config.map_safety, {});

@@ -214,9 +214,9 @@ namespace {
       projection_cache.GetOrBuild(
           shared::MakeProjectionCacheKey(
               common.local_map_generation, common.platform_id,
-              common.capability_version, common.local_map_view,
+              common.capability_version, common.local_map,
               common.capability, common.config.map_safety),
-          common.local_map_view, common.capability, common.config.map_safety,
+          common.local_map, common.capability, common.config.map_safety,
           common.stop_token);
   if (!projection.ok()) {
     if (projection.reason_code == "REQUEST_CANCELED") {

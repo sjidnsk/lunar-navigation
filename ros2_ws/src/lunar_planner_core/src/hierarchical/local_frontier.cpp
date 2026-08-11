@@ -9,6 +9,7 @@
 #include <optional>
 #include <set>
 #include <stop_token>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
@@ -17,9 +18,66 @@
 #include "hierarchical/frame_transform.hpp"
 #include "shared/map_snapshot.hpp"
 #include "shared/safe_projection.hpp"
+#include "shared/sha256.hpp"
 #include "wheel/wheel_types.hpp"
 
 namespace lunar::planning::hierarchical {
+
+LocalSearchDomain::LocalSearchDomain(
+    const std::size_t width, const std::size_t height,
+    std::vector<std::uint8_t> allowed)
+    : width_(width), height_(height), allowed_(std::move(allowed)) {
+  if ((width_ != 0U &&
+       height_ > std::numeric_limits<std::size_t>::max() / width_) ||
+      allowed_.size() != width_ * height_) {
+    throw std::invalid_argument{"LOCAL_SEARCH_DOMAIN_SIZE_INVALID"};
+  }
+  if (std::ranges::any_of(allowed_, [](const std::uint8_t value) {
+        return value > 1U;
+      })) {
+    throw std::invalid_argument{"LOCAL_SEARCH_DOMAIN_VALUE_INVALID"};
+  }
+  allowed_cell_count_ = static_cast<std::size_t>(
+      std::ranges::count(allowed_, std::uint8_t{1U}));
+
+  std::vector<std::uint8_t> canonical;
+  canonical.reserve(16U + allowed_.size());
+  const auto append_be64 = [&canonical](const std::uint64_t value) {
+    for (std::size_t byte = 0U; byte < 8U; ++byte) {
+      canonical.push_back(static_cast<std::uint8_t>(
+          value >> ((7U - byte) * 8U)));
+    }
+  };
+  append_be64(static_cast<std::uint64_t>(width_));
+  append_be64(static_cast<std::uint64_t>(height_));
+  canonical.insert(canonical.end(), allowed_.begin(), allowed_.end());
+  sha256_ = shared::Sha256Hex(canonical);
+}
+
+bool LocalSearchDomain::Contains(const shared::GridCell cell) const noexcept {
+  return cell.x >= 0 && cell.y >= 0 &&
+         static_cast<std::size_t>(cell.x) < width_ &&
+         static_cast<std::size_t>(cell.y) < height_ &&
+         allowed_[static_cast<std::size_t>(cell.y) * width_ +
+                  static_cast<std::size_t>(cell.x)] == 1U;
+}
+
+std::size_t LocalSearchDomain::width() const noexcept { return width_; }
+
+std::size_t LocalSearchDomain::height() const noexcept { return height_; }
+
+std::span<const std::uint8_t> LocalSearchDomain::allowed() const noexcept {
+  return allowed_;
+}
+
+std::size_t LocalSearchDomain::allowed_cell_count() const noexcept {
+  return allowed_cell_count_;
+}
+
+const std::string &LocalSearchDomain::sha256() const noexcept {
+  return sha256_;
+}
+
 namespace {
 
 constexpr double kTolerance = 1.0e-9;
@@ -188,8 +246,8 @@ ValidPlatformGeometry(const PlatformGeometry &geometry,
          geometry.support_radius_m >= 0.0 &&
          std::isfinite(geometry.minimum_clearance_m) &&
          geometry.minimum_clearance_m >= 0.0 &&
-         std::isfinite(config.additional_corridor_margin_m) &&
-         config.additional_corridor_margin_m >= 0.0;
+         Close(config.additional_corridor_margin_m,
+               kFixedAdditionalCorridorMarginM);
 }
 
 [[nodiscard]] bool HasEdgeMargin(const shared::MapSnapshot &map,
@@ -277,24 +335,22 @@ PrefixPolyline(const std::vector<Vec3> &route_odom, const double distance_m,
   return prefix;
 }
 
-[[nodiscard]] GridMap BuildLocalView(const GridMap &source, const Vec3 current,
-                                     const std::vector<Vec3> &route_prefix,
-                                     const double horizon_m,
-                                     const double corridor_half_width_m) {
-  GridMap view = source;
-  const double raster_margin_m = std::numbers::sqrt2 * 0.5 * view.resolution_m;
-  auto &valid =
-      std::get<std::vector<std::uint8_t>>(view.layers.at("valid_mask").values);
-  auto &forbidden =
-      std::get<std::vector<std::uint8_t>>(view.layers.at("forbidden").values);
-  for (std::size_t y = 0U; y < view.height; ++y) {
-    for (std::size_t x = 0U; x < view.width; ++x) {
-      const std::size_t index = y * view.width + x;
+[[nodiscard]] LocalSearchDomain
+BuildSearchDomain(const GridMap &source, const Vec3 current,
+                  const std::vector<Vec3> &route_prefix,
+                  const double horizon_m,
+                  const double corridor_half_width_m) {
+  const double raster_margin_m =
+      std::numbers::sqrt2 * 0.5 * source.resolution_m;
+  std::vector<std::uint8_t> allowed(source.CellCount(), 0U);
+  for (std::size_t y = 0U; y < source.height; ++y) {
+    for (std::size_t x = 0U; x < source.width; ++x) {
+      const std::size_t index = y * source.width + x;
       const Vec3 center{
-          .x = view.origin_m.x +
-               (static_cast<double>(x) + 0.5) * view.resolution_m,
-          .y = view.origin_m.y +
-               (static_cast<double>(y) + 0.5) * view.resolution_m,
+          .x = source.origin_m.x +
+               (static_cast<double>(x) + 0.5) * source.resolution_m,
+          .y = source.origin_m.y +
+               (static_cast<double>(y) + 0.5) * source.resolution_m,
       };
       const bool inside_horizon =
           std::hypot(center.x - current.x, center.y - current.y) <=
@@ -302,13 +358,10 @@ PrefixPolyline(const std::vector<Vec3> &route_odom, const double distance_m,
       const bool inside_corridor =
           DistanceToPolyline(center, route_prefix) <=
           corridor_half_width_m + raster_margin_m + kTolerance;
-      if (!inside_horizon || !inside_corridor) {
-        valid[index] = 0U;
-        forbidden[index] = 1U;
-      }
+      allowed[index] = inside_horizon && inside_corridor ? 1U : 0U;
     }
   }
-  return view;
+  return LocalSearchDomain{source.width, source.height, std::move(allowed)};
 }
 
 [[nodiscard]] GoalRegion FrontierGoal(const PlannerInput &input,
@@ -464,10 +517,14 @@ LocalFrontierResult BuildLocalFrontiers(const PlannerInput &input,
         .state_time = input.state_time,
         .current_state = input.current_state,
         .goal_odom = *goal_odom,
-        .local_map_view =
-            BuildLocalView(local_map, geometry->current_position_odom,
-                           {geometry->current_position_odom},
-                           geometry->horizon_m, corridor_half_width),
+        .local_map = local_map,
+        .search_domain = BuildSearchDomain(
+            local_map, geometry->current_position_odom,
+            {geometry->current_position_odom}, geometry->horizon_m,
+            corridor_half_width),
+        .route_prefix_odom = {geometry->current_position_odom},
+        .frontier_attempt_index = 0U,
+        .frontier_distance_m = 0.0,
         .capability = input.capability,
         .config = input.config,
         .previous_execution = input.previous_execution,
@@ -625,9 +682,13 @@ LocalFrontierResult BuildLocalFrontiers(const PlannerInput &input,
         .current_state = input.current_state,
         .goal_odom = FrontierGoal(input, candidate,
                                   snapshot.snapshot->resolution_m(), attempt),
-        .local_map_view =
-            BuildLocalView(local_map, geometry->current_position_odom, prefix,
-                           geometry->horizon_m, corridor_half_width),
+        .local_map = local_map,
+        .search_domain = BuildSearchDomain(
+            local_map, geometry->current_position_odom, prefix,
+            geometry->horizon_m, corridor_half_width),
+        .route_prefix_odom = prefix,
+        .frontier_attempt_index = attempt,
+        .frontier_distance_m = candidate.route_distance_m,
         .capability = input.capability,
         .config = input.config,
         .previous_execution = input.previous_execution,
