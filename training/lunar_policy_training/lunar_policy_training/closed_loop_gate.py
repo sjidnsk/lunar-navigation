@@ -43,7 +43,6 @@ _ROW_SHA_FIELDS = (
     "oracle_opportunity_set_sha256",
     "request_sequence_sha256",
     "planner_sequence_sha256",
-    "search_domain_sha256",
 )
 _ROW_FIELDS = frozenset(
     {
@@ -541,11 +540,16 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
                 hierarchical.search_domain_cell_count
             )
             search_domain_sha256 = str(hierarchical.search_domain_sha256)
-            if search_domain_cell_count <= 0 or not _is_sha(
+            if work.platform == "HOPPER":
+                if search_domain_cell_count != 0 or search_domain_sha256 != "":
+                    raise ClosedLoopGateError(
+                        "gate hopper search domain is not empty"
+                    )
+            elif search_domain_cell_count <= 0 or not _is_sha(
                 search_domain_sha256
             ):
                 raise ClosedLoopGateError(
-                    "gate planner search domain is invalid"
+                    "gate ground planner search domain is invalid"
                 )
             reason_code = str(output.reason_code)
             planner_reason_counts[reason_code] += 1
@@ -807,12 +811,26 @@ def _validate_row(
         raise ClosedLoopGateError(
             "closed-loop ground corridor margin is not fixed at 2.0 m"
         )
-    if (
-        type(row.get("search_domain_cell_count")) is not int
-        or int(row["search_domain_cell_count"]) <= 0
-        or not _is_sha(row.get("search_domain_sha256"))
+    search_domain_cell_count = row.get("search_domain_cell_count")
+    search_domain_sha256 = row.get("search_domain_sha256")
+    if platform == "HOPPER":
+        if (
+            type(search_domain_cell_count) is not int
+            or search_domain_cell_count != 0
+            or type(search_domain_sha256) is not str
+            or search_domain_sha256 != ""
+        ):
+            raise ClosedLoopGateError(
+                "closed-loop hopper search domain is not empty"
+            )
+    elif (
+        type(search_domain_cell_count) is not int
+        or int(search_domain_cell_count) <= 0
+        or not _is_sha(search_domain_sha256)
     ):
-        raise ClosedLoopGateError("closed-loop search domain diagnostics are invalid")
+        raise ClosedLoopGateError(
+            "closed-loop ground search domain diagnostics are invalid"
+        )
     reason_counts = row.get("planner_reason_counts")
     if (
         not isinstance(reason_counts, Mapping)

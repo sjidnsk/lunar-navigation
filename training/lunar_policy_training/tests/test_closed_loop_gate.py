@@ -142,8 +142,8 @@ def _passing_rows(cases) -> list[dict[str, object]]:
             "additional_corridor_margin_m": (
                 0.0 if platform == "HOPPER" else 2.0
             ),
-            "search_domain_cell_count": 37,
-            "search_domain_sha256": _sha("5"),
+            "search_domain_cell_count": 0 if platform == "HOPPER" else 37,
+            "search_domain_sha256": "" if platform == "HOPPER" else _sha("5"),
             "planner_reason_counts": {"OK": 11},
             "candidate_diagnostics": dict(CANDIDATE_DIAGNOSTICS),
         }
@@ -450,6 +450,24 @@ def test_closed_loop_gate_report_rejects_nonzero_hopper_corridor_margin() -> Non
     hopper["additional_corridor_margin_m"] = 2.0
 
     with pytest.raises(ClosedLoopGateError, match="hopper corridor margin"):
+        build_closed_loop_gate_report(
+            source_commit="9" * 40,
+            cache_manifest_sha256=_sha("d"),
+            cases=cases,
+            rows=rows,
+            timings_seconds={},
+        )
+
+
+def test_closed_loop_gate_report_rejects_fake_hopper_search_domain() -> None:
+    manifest, scenario_document = _cache_documents()
+    cases = select_closed_loop_gate_cases(manifest, scenario_document)
+    rows = _passing_rows(cases)
+    hopper = next(row for row in rows if row["platform"] == "HOPPER")
+    hopper["search_domain_cell_count"] = 37
+    hopper["search_domain_sha256"] = _sha("5")
+
+    with pytest.raises(ClosedLoopGateError, match="hopper search domain"):
         build_closed_loop_gate_report(
             source_commit="9" * 40,
             cache_manifest_sha256=_sha("d"),
