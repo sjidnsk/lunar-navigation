@@ -51,6 +51,7 @@ from lunar_policy_training.polar_data.formal_cache import (
     write_formal_cache,
 )
 from lunar_policy_training.proxy_scenario import _ProxyEpisode
+from lunar_policy_training.polar_data.raster import MapCanvas
 
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -215,9 +216,6 @@ def _scene(
         algorithm_id = f"test-physical-reachability/{platform.lower()}"
         evidence_algorithm_id = f"test-physical-evidence/{platform.lower()}"
         capability_sha256 = _sha(f"capability-content/{platform}")
-        start_sha256 = _sha(
-            f"physical-start/{platform}/{start if start is not None else 'unsafe'}"
-        )
         rows, columns = np.nonzero(reachable)
         positions = np.ascontiguousarray(
             np.column_stack(
@@ -230,6 +228,20 @@ def _scene(
             ),
             dtype=np.float64,
         ).reshape((-1, 3))
+        start_position = (
+            None
+            if start is None
+            else (
+                (float(start[1]) + 0.5) * resolution_m,
+                bounds[3] - (float(start[0]) + 0.5) * resolution_m,
+                0.0,
+            )
+        )
+        start_sha256 = formal_cache_module._physical_start_identity_from_position(
+            platform_type=platform,
+            start_cell=start,
+            position_m=start_position,
+        )
         observation_positions[platform] = positions
         evidence_algorithms[platform] = evidence_algorithm_id
         coverability[platform] = PlatformCoverability(
@@ -859,16 +871,20 @@ def test_truth_hopper_physical_projection_uses_certified_landing_evidence(
             calls.append((request_value, distance, evidence_value))
             return output
 
-    monkeypatch.setattr(
-        formal_cache_module,
-        "_projection_request",
-        lambda *_args, **_kwargs: request,
-    )
-    monkeypatch.setattr(
-        formal_cache_module,
-        "_hopper_landing_evidence",
-        lambda **_kwargs: evidence,
-    )
+    request_kwargs: list[dict[str, object]] = []
+    evidence_kwargs: list[dict[str, object]] = []
+
+    def projection_request(*_args, **kwargs):
+        request_kwargs.append(kwargs)
+        return request
+
+    def hopper_evidence(**kwargs):
+        evidence_kwargs.append(kwargs)
+        return evidence
+
+    monkeypatch.setattr(formal_cache_module, "_projection_request", projection_request)
+    monkeypatch.setattr(formal_cache_module, "_hopper_landing_evidence", hopper_evidence)
+    exact_start = (514.0, 510.0, 1.0)
 
     result = formal_cache_module._build_truth_physical_reachability(
         platform=SimpleNamespace(
@@ -877,10 +893,15 @@ def test_truth_hopper_physical_projection_uses_certified_landing_evidence(
         scene=object(),
         projected=object(),
         start_cell=(127, 128),
+        exact_start_position_m=exact_start,
         bridge=Bridge(),
     )
 
     assert calls == [(request, 30.0, evidence_grid)]
+    assert request_kwargs == [
+        {"start_cell": (127, 128), "exact_start_position_m": exact_start}
+    ]
+    assert evidence_kwargs[0]["exact_start_position_m"] == exact_start
     assert result.physical_reachability_algorithm_id == output.algorithm_id
     assert result.physical_safe_pose_count == 1
     assert result.physically_reachable_pose_count == 1
@@ -889,6 +910,102 @@ def test_truth_hopper_physical_projection_uses_certified_landing_evidence(
         result.observation_positions_m,
         np.asarray([[514.0, 510.0, 1.0]], dtype=np.float64),
     )
+
+
+def test_truth_hopper_physical_projection_rejects_exact_start_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exact_start = (514.0, 510.0, 1.0)
+    reachable = np.zeros((256, 256), dtype=np.uint8)
+    reachable[128, 128] = 1
+    certified = np.zeros((256, 256), dtype=np.bool_)
+    certified[127, 128] = True
+    aim = np.zeros((256, 256, 3), dtype=np.float64)
+    aim[127, 128] = (514.001, 510.0, 1.0)
+    evidence = SimpleNamespace(
+        bridge_grid=object(),
+        certified_pose_mask=certified,
+        aim_positions_m=aim,
+        evidence_algorithm_id="test/hopper-evidence/v1",
+    )
+    monkeypatch.setattr(
+        formal_cache_module,
+        "_projection_request",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        formal_cache_module,
+        "_hopper_landing_evidence",
+        lambda **_kwargs: evidence,
+    )
+    bridge = SimpleNamespace(
+        project_reachability=lambda *_args: SimpleNamespace(
+            platform_type="HOPPER",
+            reachable=reachable,
+            algorithm_id="test/hopper-reachability/v1",
+        )
+    )
+
+    with pytest.raises(FormalCacheError, match="exact start.*drift"):
+        formal_cache_module._build_truth_physical_reachability(
+            platform=SimpleNamespace(platform_type="HOPPER"),
+            scene=object(),
+            projected=object(),
+            start_cell=(127, 128),
+            exact_start_position_m=exact_start,
+            bridge=bridge,
+        )
+
+
+def test_projection_request_binds_canonical_exact_hopper_start() -> None:
+    canvas = MapCanvas.from_roi_bounds(
+        "e" * 64, (0.0, 0.0, 1024.0, 1024.0)
+    )
+    shape = (256, 256)
+    projected = SimpleNamespace(
+        canvas=canvas,
+        elevation_m=np.full(shape, 7.0, dtype=np.float32),
+        valid_mask=np.ones(shape, dtype=np.bool_),
+        physical_obstacle_ratio=np.zeros(shape, dtype=np.float32),
+        physical_obstacle_height_m=np.zeros(shape, dtype=np.float32),
+        forbidden_ratio=np.zeros(shape, dtype=np.float32),
+    )
+    start_cell = (127, 128)
+    center_x, center_y = canvas.grid_center_world(*start_cell)
+    exact_start = (center_x + 0.02, center_y - 0.02, 8.25)
+
+    request = formal_cache_module._projection_request(
+        _frozen_proxy_capability("HOPPER", alternate_motion=False),
+        SimpleNamespace(scene_id="f" * 64),
+        projected,
+        start_cell=start_cell,
+        exact_start_position_m=exact_start,
+    )
+
+    state_position = request.current_state.pose.position_m
+    goal_position = request.goal.target.position_m
+    assert (
+        float(state_position.x),
+        float(state_position.y),
+        float(state_position.z),
+    ) == exact_start
+    assert (
+        float(goal_position.x),
+        float(goal_position.y),
+        float(goal_position.z),
+    ) == exact_start
+    with pytest.raises(FormalCacheError, match="canonical"):
+        formal_cache_module._projection_request(
+            _frozen_proxy_capability("HOPPER", alternate_motion=False),
+            SimpleNamespace(scene_id="f" * 64),
+            projected,
+            start_cell=start_cell,
+            exact_start_position_m=(
+                exact_start[0] + 0.0000001,
+                exact_start[1],
+                exact_start[2],
+            ),
+        )
 
 
 def test_ground_coverability_keeps_physical_positions_outside_mission_roi(
@@ -1046,7 +1163,11 @@ def test_truth_physical_start_failure_marks_only_that_platform_ineligible(
     result = formal_cache_module._build_scene_platform_coverability(
         platform_type="HOPPER",
         capability_bundle=CapabilityBundle(),
-        qualification=SimpleNamespace(cell=(3, 4), initial_candidate_count=1),
+        qualification=SimpleNamespace(
+            cell=(3, 4),
+            initial_candidate_count=1,
+            exact_start_position_m=(4.5, 252.5, 0.0),
+        ),
         scene=object(),
         projected=projected,
         mission_roi=np.ones((2, 2), dtype=np.bool_),
@@ -1086,7 +1207,9 @@ def test_truth_physical_projection_does_not_hide_a_non_start_native_failure(
             platform_type="HOPPER",
             capability_bundle=CapabilityBundle(),
             qualification=SimpleNamespace(
-                cell=(3, 4), initial_candidate_count=1
+                cell=(3, 4),
+                initial_candidate_count=1,
+                exact_start_position_m=(4.5, 252.5, 0.0),
             ),
             scene=object(),
             projected=object(),
@@ -1259,6 +1382,58 @@ def test_formal_cache_recomputes_physical_projection_digest(
         )
 
 
+def test_formal_cache_recomputes_hopper_exact_start_identity(
+    tmp_path: pathlib.Path,
+) -> None:
+    root, identity, manifest = _write(tmp_path)
+    scene = manifest["scenes"][0]
+    hopper = scene["platform_coverability"]["HOPPER"]
+    scene_path = root / scene["relative_path"]
+    with np.load(scene_path, allow_pickle=False) as archive:
+        physical = formal_cache_module.unpack_detail_mask(
+            archive["hopper_physical_observation_pose_bits"].copy(),
+            (256, 256),
+        )
+        positions_m = formal_cache_module._positions_m_from_canonical_um(
+            np.ascontiguousarray(
+                archive["hopper_physical_observation_positions_um"]
+            )
+        )
+    resolution_m, origin_m, bounds_m = (
+        formal_cache_module._physical_grid_geometry(scene["world_bounds_m"])
+    )
+    forged_start_sha256 = _sha("forged-hopper-exact-start")
+    hopper["start_identity_sha256"] = forged_start_sha256
+    hopper["physical_projection_sha256"] = (
+        canonical_physical_projection_sha256(
+            platform_type="HOPPER",
+            physical_reachability_algorithm_id=(
+                hopper["physical_reachability_algorithm_id"]
+            ),
+            physical_evidence_algorithm_id=(
+                hopper["physical_evidence_algorithm_id"]
+            ),
+            physical_observation_pose_mask=physical,
+            physical_observation_positions_m=positions_m,
+            physical_grid_resolution_m=resolution_m,
+            physical_grid_origin_m=origin_m,
+            physical_grid_world_bounds_m=bounds_m,
+            physical_grid_axis_convention=(
+                hopper["physical_grid_axis_convention"]
+            ),
+            capability_content_sha256=hopper["capability_content_sha256"],
+            start_identity_sha256=forged_start_sha256,
+        )
+    )
+    _resign_manifest(root, manifest)
+
+    with pytest.raises(FormalCacheError, match="start identity"):
+        load_formal_cache(
+            root / "cache-manifest.json",
+            expected_identity=identity,
+        )
+
+
 @pytest.mark.parametrize(
     "authority_tamper",
     (
@@ -1315,7 +1490,8 @@ def test_formal_cache_rejects_physical_projection_authority_tamper(
         _refresh_scene_integrity_and_resign(root, manifest)
 
     with pytest.raises(
-        FormalCacheError, match="physical (projection|observation)"
+        FormalCacheError,
+        match="physical (projection|observation|start identity)",
     ):
         load_formal_cache(
             root / "cache-manifest.json",

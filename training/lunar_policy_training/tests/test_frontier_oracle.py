@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from hashlib import sha256
 import math
 
 import numpy as np
+import pytest
 
 from lunar_policy_training.environment.candidate_builder import CandidateBuilderV2
 from lunar_policy_training.environment.frontier_oracle import (
@@ -12,25 +14,28 @@ from lunar_policy_training.environment.observation_builder import (
     LocalObservation,
     MissionRaster,
     ObservedWorld,
-    PlatformProjection,
     Pose2,
 )
 from lunar_policy_training.environment.platform_reachability import (
-    CandidateReachabilityResult,
+    PHYSICAL_PROJECTION_SCHEMA,
+    PhysicalReachabilityResult,
 )
 from lunar_policy_training.environment.primitive_reachability import (
-    ObservedPrimitiveSnapshot,
+    ObservedPrimitiveReachability,
 )
 from lunar_policy_training.environment.visibility import SensorGeometry
 from lunar_policy_training.polar_data.hazards import CanvasRatioLayer
-from lunar_policy_training.polar_data.raster import MapCanvas
+from lunar_policy_training.polar_data.raster import GridGeometry, MapCanvas
+
+
+EMPTY_OPPORTUNITY_SET_SHA256 = sha256(b"").hexdigest()
 
 
 class _GainEstimator:
     sensor = SensorGeometry(30.0, 2.0 * math.pi)
     resolution_m = 4.0
 
-    def __init__(self, gains: float = 1.0) -> None:
+    def __init__(self, gains: dict[tuple[int, int], float]) -> None:
         self.gains = gains
         self.calls: list[np.ndarray] = []
 
@@ -42,372 +47,257 @@ class _GainEstimator:
         priority_weight,
         candidate_cells,
     ) -> np.ndarray:
+        del observed_mask, obstacle_ratio, roi_ratio, priority_weight
         self.calls.append(candidate_cells.copy())
-        return np.full(
-            (candidate_cells.shape[0], 2), self.gains, dtype=np.float32
-        )
+        return np.asarray(
+            [
+                (self.gains.get(tuple(cell), 0.0), 0.0)
+                for cell in candidate_cells
+            ],
+            dtype=np.float32,
+        ).reshape((-1, 2))
 
 
-class _Reachability:
-    def __init__(self, accepted: bool) -> None:
-        self.accepted = accepted
-        self.calls: list[np.ndarray] = []
-
-    def filter(self, candidate_cells: np.ndarray) -> CandidateReachabilityResult:
-        self.calls.append(candidate_cells.copy())
-        mask = np.full(candidate_cells.shape[0], self.accepted, dtype=np.bool_)
-        return CandidateReachabilityResult(
-            mask,
-            {
-                "platform_unreachable_count": int(
-                    (~mask).sum(dtype=np.int64)
-                )
-            },
-        )
-
-
-def _fixture():
-    canvas = MapCanvas.from_roi_bounds(
-        "f" * 64, (500.0, 500.0, 1524.0, 1524.0)
+def _world_and_mission(
+    *,
+    canvas: MapCanvas | None = None,
+) -> tuple[ObservedWorld, MissionRaster, Pose2]:
+    resolved = canvas or MapCanvas.from_roi_bounds(
+        "f" * 64, (0.0, 0.0, 1024.0, 1024.0)
     )
-    observed = np.zeros((256, 256), dtype=np.bool_)
-    observed[126:130, 126:130] = True
-    obstacle = CanvasRatioLayer(
-        canvas, np.zeros((256, 256), dtype=np.float32)
-    )
+    shape = (resolved.geometry.cells, resolved.geometry.cells)
+    observed = np.zeros(shape, dtype=np.bool_)
+    observed[126:131, 126:135] = True
+    roi = np.zeros(shape, dtype=np.float32)
+    roi[124:133, 124:138] = 1.0
+    elevation = np.full(shape, 7.0, dtype=np.float32)
+    robot_x_m, robot_y_m = resolved.grid_center_world(128, 128)
     local = LocalObservation(
-        canvas.identity,
-        (1008.8, 1008.8, 1015.2, 1015.2),
+        resolved.identity,
+        (
+            robot_x_m - 3.2,
+            robot_y_m - 3.2,
+            robot_x_m + 3.2,
+            robot_y_m + 3.2,
+        ),
         np.zeros((32, 32), dtype=np.float32),
         np.ones((32, 32), dtype=np.bool_),
         np.zeros((32, 32), dtype=np.float32),
     )
     world = ObservedWorld(
-        canvas,
-        np.zeros((256, 256), dtype=np.float32),
+        resolved,
+        elevation,
         observed,
-        obstacle,
+        CanvasRatioLayer(resolved, np.zeros(shape, dtype=np.float32)),
         local,
     )
-    roi = np.zeros((256, 256), dtype=np.float32)
-    roi[120:136, 120:136] = 1.0
-    mission = MissionRaster(canvas, roi.copy(), roi)
-    projection = PlatformProjection(
-        canvas,
-        observed.astype(np.float32),
-        np.ones((32, 32), dtype=np.float32),
-        np.ones((256, 256), dtype=np.float32),
-        "test_only/proxy",
-    )
-    return world, mission, projection
-
-
-def _frozen(values: np.ndarray) -> np.ndarray:
-    result = np.ascontiguousarray(values)
-    result.setflags(write=False)
-    return result
-
-
-def _oracle_graph(canvas: MapCanvas) -> ObservedPrimitiveSnapshot:
-    cells = ((128, 128), (128, 129), (128, 130))
-    positions = np.asarray(
-        [(*canvas.grid_center_world(*cell), 0.0) for cell in cells],
-        dtype=np.float64,
-    )
-    labels = _frozen(np.ones(3, dtype=np.bool_))
-    return ObservedPrimitiveSnapshot(
-        platform_type="WHEELED",
-        width=32,
-        height=32,
-        algorithm_id="test-wheel/v1",
-        state_schema="test-wheel-state/v1",
-        primitive_set_sha256="1" * 64,
-        world_evidence_sha256="2" * 64,
-        graph_sha256="3" * 64,
-        revision=1,
-        invalidated_edge_count=0,
-        revalidated_edge_count=0,
-        state_ids=_frozen(np.asarray([1, 2, 3], dtype=np.uint64)),
-        positions_m=_frozen(positions),
-        yaw_rad=_frozen(np.zeros(3, dtype=np.float64)),
-        cells=_frozen(np.asarray(cells, dtype=np.int32)),
-        yaw_bin=_frozen(np.zeros(3, dtype=np.int32)),
-        motion_mode=_frozen(np.zeros(3, dtype=np.int32)),
-        body_z_m=_frozen(np.zeros((3, 2), dtype=np.float64)),
-        path_cost=_frozen(np.asarray([0.0, 1.0, 1.0], dtype=np.float64)),
-        forward_reachable=labels,
-        returnable=labels,
-        observation_state=labels,
-        recoverable=labels,
-        direct_successor=_frozen(
-            np.asarray([False, True, True], dtype=np.bool_)
-        ),
-        edge_source_ids=_frozen(np.asarray([1, 2, 1], dtype=np.uint64)),
-        edge_target_ids=_frozen(np.asarray([2, 1, 3], dtype=np.uint64)),
-        edge_primitive_indices=_frozen(np.zeros(3, dtype=np.uint32)),
-        edge_primitive_ids=("forward", "reverse", "outbound"),
-        edge_cost=_frozen(np.ones(3, dtype=np.float64)),
+    return (
+        world,
+        MissionRaster(resolved, roi.copy(), roi),
+        Pose2(robot_x_m, robot_y_m, elevation_m=7.0),
     )
 
 
-def test_primitive_oracle_recomputes_returnability_from_edges(
-    monkeypatch,
+def _physical(
+    world: ObservedWorld,
+    cells: tuple[tuple[int, int], ...],
+    *,
+    positions_m: np.ndarray | None = None,
+    platform_type: str = "WHEELED",
+) -> PhysicalReachabilityResult:
+    mask = np.zeros(world.observed_mask.shape, dtype=np.bool_)
+    for cell in cells:
+        mask[cell] = True
+    if positions_m is None:
+        positions_m = np.asarray(
+            [
+                (
+                    *world.canvas.grid_center_world(*cell),
+                    float(world.elevation_m[cell]),
+                )
+                for cell in sorted(cells)
+            ],
+            dtype=np.float64,
+        ).reshape((-1, 3))
+    return PhysicalReachabilityResult(
+        platform_type=platform_type,
+        physical_observation_pose_mask=np.ascontiguousarray(mask),
+        observation_positions_m=np.ascontiguousarray(
+            positions_m, dtype=np.float64
+        ).reshape((-1, 3)),
+        physical_projection_schema=PHYSICAL_PROJECTION_SCHEMA,
+        physical_reachability_algorithm_id="test/physical-reachability/v1",
+        physical_evidence_algorithm_id="test/physical-evidence/v1",
+        physical_safe_pose_count=len(cells),
+        physically_reachable_pose_count=len(cells),
+    )
+
+
+def _forbid_primitive_and_production_paths(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    estimator = _GainEstimator()
-    world, mission, _ = _fixture()
-    graph = _oracle_graph(world.canvas)
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("oracle called a production or primitive path")
+
     monkeypatch.setattr(
-        CandidateBuilderV2,
-        "build_from_primitive_graph",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("oracle called production graph ranking")
-        ),
+        ObservedPrimitiveReachability, "update", forbidden
+    )
+    monkeypatch.setattr(
+        CandidateBuilderV2, "build_from_primitive_graph", forbidden
+    )
+    monkeypatch.setattr(
+        CandidateBuilderV2, "build_physical_universe", forbidden
     )
 
-    result = FrontierOpportunityOracle(estimator).evaluate(
+
+def test_physical_oracle_is_independent_and_hashes_sorted_positive_opportunities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _forbid_primitive_and_production_paths(monkeypatch)
+    world, mission, pose = _world_and_mission()
+    cells = ((128, 130), (128, 129))
+    estimator = _GainEstimator({cell: 1.0 for cell in cells})
+    physical = _physical(world, cells)
+
+    result = FrontierOpportunityOracle(estimator).evaluate_physical(
         world,
         mission,
-        pose_map=Pose2(*world.canvas.grid_center_world(128, 128)),
-        primitive_graph=graph,
+        pose_map=pose,
+        physical_reachability=physical,
     )
 
-    assert result.frontier_anchor_count == 2
-    assert result.platform_reachable_pose_count == 1
-    assert result.opportunity_count == 1
-    np.testing.assert_array_equal(estimator.calls[0], np.asarray([[128, 129]]))
-
-
-def test_oracle_finds_observed_safe_positive_gain_without_candidate_ranking(
-    monkeypatch,
-) -> None:
-    estimator = _GainEstimator()
-    reachability = _Reachability(True)
-    world, mission, projection = _fixture()
-    monkeypatch.setattr(
-        CandidateBuilderV2,
-        "build",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("oracle called production candidate ranking")
-        ),
-    )
-
-    result = FrontierOpportunityOracle(estimator).evaluate(
-        world,
-        mission,
-        projection,
-        pose_map=Pose2(1012.0, 1012.0),
-        platform_reachability=reachability,
-    )
-
-    assert result.frontier_anchor_count > 0
-    assert result.observed_safe_pose_count == result.frontier_anchor_count
-    assert result.platform_reachable_pose_count == result.frontier_anchor_count
-    assert result.opportunity_count == result.frontier_anchor_count
+    expected_keys = b"128:129:518000:510000:7000\n128:130:522000:510000:7000"
+    assert result.oracle_opportunity_count == 2
+    assert result.opportunity_count == 2
+    assert result.oracle_opportunity_set_sha256 == sha256(
+        expected_keys
+    ).hexdigest()
+    assert result.opportunity_set_sha256 == result.oracle_opportunity_set_sha256
+    assert result.platform_reachable_pose_count == 2
     assert len(estimator.calls) == 1
-    np.testing.assert_array_equal(estimator.calls[0], reachability.calls[0])
-
-
-def test_oracle_requires_platform_certification_before_counting_gain() -> None:
-    estimator = _GainEstimator()
-    world, mission, projection = _fixture()
-
-    result = FrontierOpportunityOracle(estimator).evaluate(
-        world,
-        mission,
-        projection,
-        pose_map=Pose2(1012.0, 1012.0),
-        platform_reachability=_Reachability(False),
+    np.testing.assert_array_equal(
+        estimator.calls[0], np.asarray(cells[::-1], dtype=np.int32)
     )
 
-    assert result.frontier_anchor_count > 0
+
+def test_physical_oracle_does_not_turn_frontier_existence_into_positive_gain() -> None:
+    world, mission, pose = _world_and_mission()
+    physical = _physical(world, ((128, 129), (128, 130)))
+    estimator = _GainEstimator({})
+
+    result = FrontierOpportunityOracle(estimator).evaluate_physical(
+        world,
+        mission,
+        pose_map=pose,
+        physical_reachability=physical,
+    )
+
+    assert bool((mission.roi_ratio > 0.0).any())
+    assert result.platform_reachable_pose_count == 2
+    assert result.oracle_opportunity_count == 0
+    assert result.oracle_opportunity_set_sha256 == EMPTY_OPPORTUNITY_SET_SHA256
+
+
+def test_physical_oracle_requires_reachability_before_estimating_gain() -> None:
+    world, mission, pose = _world_and_mission()
+    estimator = _GainEstimator({(128, 129): 1.0})
+
+    result = FrontierOpportunityOracle(estimator).evaluate_physical(
+        world,
+        mission,
+        pose_map=pose,
+        physical_reachability=_physical(world, ()),
+    )
+
+    assert result.frontier_anchor_count == int(
+        world.observed_mask.sum(dtype=np.int64)
+    )
+    assert result.observed_safe_pose_count == (
+        int(world.observed_mask.sum(dtype=np.int64)) - 1
+    )
     assert result.platform_reachable_pose_count == 0
-    assert result.opportunity_count == 0
+    assert result.oracle_opportunity_count == 0
+    assert result.oracle_opportunity_set_sha256 == EMPTY_OPPORTUNITY_SET_SHA256
     assert estimator.calls == []
 
 
-def test_oracle_finds_positive_gain_pose_when_frontier_is_beyond_one_hop() -> None:
-    canvas = MapCanvas.from_roi_bounds(
-        "a" * 64, (500.0, 500.0, 1524.0, 1524.0)
+def test_physical_oracle_uses_exact_positions_at_thirty_metre_boundary() -> None:
+    canvas = MapCanvas(
+        "9" * 64,
+        (0.0, 0.0, 256.0, 256.0),
+        GridGeometry(256.0, 1.0, 256),
     )
-    robot = (128, 128)
-    robot_x_m, robot_y_m = canvas.grid_center_world(*robot)
-    observed = np.zeros((256, 256), dtype=np.bool_)
-    observed[127:130, 128:142] = True
-    roi = np.zeros((256, 256), dtype=np.float32)
-    roi[127:130, 128:143] = 1.0
-    world = ObservedWorld(
-        canvas,
-        np.zeros((256, 256), dtype=np.float32),
-        observed,
-        CanvasRatioLayer(canvas, np.zeros((256, 256), dtype=np.float32)),
-        LocalObservation(
-            canvas.identity,
-            (
-                robot_x_m - 3.2,
-                robot_y_m - 3.2,
-                robot_x_m + 3.2,
-                robot_y_m + 3.2,
-            ),
-            np.zeros((32, 32), dtype=np.float32),
-            np.ones((32, 32), dtype=np.bool_),
-            np.zeros((32, 32), dtype=np.float32),
+    world, mission, _ = _world_and_mission(canvas=canvas)
+    robot_x_m, robot_y_m = canvas.grid_center_world(128, 128)
+    pose = Pose2(robot_x_m, robot_y_m, elevation_m=7.0)
+    cells = ((128, 158), (129, 158))
+    world.observed_mask[128, 158] = True
+    world.observed_mask[129, 158] = True
+    positions = np.asarray(
+        (
+            (robot_x_m + 29.9, robot_y_m, 10.0),
+            (robot_x_m + 30.1, robot_y_m - 1.0, 11.0),
         ),
+        dtype=np.float64,
     )
-    mission = MissionRaster(canvas, roi.copy(), roi)
-    projection = PlatformProjection(
-        canvas,
-        observed.astype(np.float32),
-        np.ones((32, 32), dtype=np.float32),
-        np.ones((256, 256), dtype=np.float32),
-        "test_only/proxy",
+    physical = _physical(
+        world,
+        cells,
+        positions_m=positions,
+        platform_type="HOPPER",
     )
-    estimator = _GainEstimator()
+    estimator = _GainEstimator({cell: 1.0 for cell in cells})
 
-    result = FrontierOpportunityOracle(estimator).evaluate(
+    result = FrontierOpportunityOracle(estimator).evaluate_physical(
         world,
         mission,
-        projection,
-        pose_map=Pose2(robot_x_m, robot_y_m),
-        platform_reachability=_Reachability(True),
-    )
-
-    assert result.opportunity_count > 0
-    assert len(estimator.calls) == 1
-    assert (128, 141) not in map(tuple, estimator.calls[0])
-    distances_m = np.linalg.norm(
-        estimator.calls[0] - np.asarray(robot), axis=1
-    ) * canvas.geometry.resolution_m
-    assert np.all(distances_m <= 30.0)
-
-
-def test_oracle_uses_exact_pose_distance_at_sensor_boundary() -> None:
-    canvas = MapCanvas.from_roi_bounds(
-        "9" * 64, (500.0, 500.0, 1524.0, 1524.0)
-    )
-    robot = (128, 128)
-    target = (133, 133)
-    robot_center_x, robot_center_y = canvas.grid_center_world(*robot)
-    pose = Pose2(robot_center_x - 1.9, robot_center_y + 1.9)
-    target_x, target_y = canvas.grid_center_world(*target)
-    assert math.hypot(target_x - pose.x_m, target_y - pose.y_m) > 30.0
-    assert (
-        np.linalg.norm(np.asarray(target) - np.asarray(robot))
-        * canvas.geometry.resolution_m
-        < 30.0
-    )
-    observed = np.zeros((256, 256), dtype=np.bool_)
-    observed[robot] = True
-    observed[target] = True
-    roi = observed.astype(np.float32)
-    world = ObservedWorld(
-        canvas,
-        np.zeros((256, 256), dtype=np.float32),
-        observed,
-        CanvasRatioLayer(canvas, np.zeros((256, 256), dtype=np.float32)),
-        LocalObservation(
-            canvas.identity,
-            (
-                pose.x_m - 3.2,
-                pose.y_m - 3.2,
-                pose.x_m + 3.2,
-                pose.y_m + 3.2,
-            ),
-            np.zeros((32, 32), dtype=np.float32),
-            np.ones((32, 32), dtype=np.bool_),
-            np.zeros((32, 32), dtype=np.float32),
-        ),
-    )
-    mission = MissionRaster(canvas, roi.copy(), roi)
-    projection = PlatformProjection(
-        canvas,
-        observed.astype(np.float32),
-        np.ones((32, 32), dtype=np.float32),
-        np.ones((256, 256), dtype=np.float32),
-        "test_only/proxy",
-    )
-
-    result = FrontierOpportunityOracle(_GainEstimator()).evaluate(
-        world,
-        mission,
-        projection,
         pose_map=pose,
-        platform_reachability=_Reachability(True),
+        physical_reachability=physical,
     )
 
-    assert result.opportunity_count == 0
-
-
-def test_oracle_counts_certified_zero_gain_transit_to_remote_frontier() -> None:
-    canvas = MapCanvas.from_roi_bounds(
-        "b" * 64, (500.0, 500.0, 524.0, 524.0)
+    assert result.oracle_opportunity_count == 1
+    np.testing.assert_array_equal(
+        estimator.calls[0], np.asarray(((128, 158),), dtype=np.int32)
     )
-    robot = (128, 128)
-    robot_x_m, robot_y_m = canvas.grid_center_world(*robot)
-    observed = np.zeros((256, 256), dtype=np.bool_)
-    observed[127:130, 128:142] = True
-    roi = np.zeros((256, 256), dtype=np.float32)
-    roi[127:130, 128:143] = 1.0
-    world = ObservedWorld(
-        canvas,
-        np.zeros((256, 256), dtype=np.float32),
-        observed,
-        CanvasRatioLayer(canvas, np.zeros((256, 256), dtype=np.float32)),
-        LocalObservation(
-            canvas.identity,
-            (
-                robot_x_m - 3.2,
-                robot_y_m - 3.2,
-                robot_x_m + 3.2,
-                robot_y_m + 3.2,
-            ),
-            np.zeros((32, 32), dtype=np.float32),
-            np.ones((32, 32), dtype=np.bool_),
-            np.zeros((32, 32), dtype=np.float32),
-        ),
-    )
-    mission = MissionRaster(canvas, roi.copy(), roi)
-    projection = PlatformProjection(
-        canvas,
-        observed.astype(np.float32),
-        np.ones((32, 32), dtype=np.float32),
-        np.ones((256, 256), dtype=np.float32),
-        "test_only/proxy",
-    )
-    estimator = _GainEstimator(gains=0.0)
 
-    class OneStepReachability(_Reachability):
-        def filter(
-            self,
-            candidate_cells: np.ndarray,
-            *,
-            target_positions_map: np.ndarray | None = None,
-        ) -> CandidateReachabilityResult:
-            del target_positions_map
-            self.calls.append(candidate_cells.copy())
-            mask = (candidate_cells[:, 0] == 128) & (
-                candidate_cells[:, 1] == 129
-            )
-            mask = np.ascontiguousarray(mask, dtype=np.bool_)
-            return CandidateReachabilityResult(
-                mask,
-                {
-                    "platform_unreachable_count": int(
-                        (~mask).sum(dtype=np.int64)
-                    )
-                },
-            )
 
-    result = FrontierOpportunityOracle(estimator).evaluate(
+def test_physical_oracle_hash_is_repeatable_and_binds_exact_hopper_xyz() -> None:
+    world, mission, pose = _world_and_mission()
+    cells = ((128, 129),)
+    x_m, y_m = world.canvas.grid_center_world(*cells[0])
+    first_physical = _physical(
         world,
-        mission,
-        projection,
-        pose_map=Pose2(robot_x_m, robot_y_m),
-        platform_reachability=OneStepReachability(True),
-        excluded_cells=set(map(tuple, np.column_stack(np.nonzero(observed)))),
-        backtrack_pose=Pose2(
-            *canvas.grid_center_world(128, 129), elevation_m=0.0
-        ),
+        cells,
+        positions_m=np.asarray(((x_m + 0.02, y_m - 0.02, 31.0),)),
+        platform_type="HOPPER",
+    )
+    changed_height = _physical(
+        world,
+        cells,
+        positions_m=np.asarray(((x_m + 0.02, y_m - 0.02, 32.0),)),
+        platform_type="HOPPER",
     )
 
-    assert result.platform_reachable_pose_count > 0
-    assert result.opportunity_count > 0
+    def evaluate(physical: PhysicalReachabilityResult):
+        return FrontierOpportunityOracle(
+            _GainEstimator({cells[0]: 1.0})
+        ).evaluate_physical(
+            world,
+            mission,
+            pose_map=pose,
+            physical_reachability=physical,
+        )
+
+    first = evaluate(first_physical)
+    repeated = evaluate(first_physical)
+    changed = evaluate(changed_height)
+
+    assert first.oracle_opportunity_count == repeated.oracle_opportunity_count == 1
+    assert (
+        first.oracle_opportunity_set_sha256
+        == repeated.oracle_opportunity_set_sha256
+    )
+    assert (
+        changed.oracle_opportunity_set_sha256
+        != first.oracle_opportunity_set_sha256
+    )

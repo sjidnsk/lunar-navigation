@@ -1385,7 +1385,11 @@ def test_stage_diagnostics_isolate_platform_unreachable_and_zero_gain() -> None:
             return type(
                 "Projection",
                 (),
-                {"reachable": np.zeros((256, 256), dtype=np.uint8)},
+                {
+                    "platform_type": "WHEELED",
+                    "reachable": np.zeros((256, 256), dtype=np.uint8),
+                    "algorithm_id": "test/rejecting-ground/v1",
+                },
             )()
 
     reachability = PlatformCandidateReachability(
@@ -1461,7 +1465,9 @@ def test_ground_reachability_uses_local_detail_authority_inside_window_and_globa
             reachable = np.zeros((256, 256), dtype=np.uint8)
             reachable[0, 3] = 1
             return SimpleNamespace(
-                reachable=reachable
+                platform_type="LEGGED",
+                reachable=reachable,
+                algorithm_id="test/ground-local-override/v1",
             )
 
         def project_traversability(self, request):
@@ -1513,6 +1519,393 @@ def test_ground_reachability_uses_local_detail_authority_inside_window_and_globa
     assert dict(result.reason_counts) == {"platform_unreachable_count": 1}
 
 
+def test_ground_project_physical_returns_row_major_exact_positions_and_local_override() -> None:
+    canvas = _canvas()
+    start = (128, 128)
+    start_x_m, start_y_m = canvas.grid_center_world(*start)
+    resolution_m = canvas.geometry.resolution_m
+    local_hard = np.zeros((256, 256), dtype=np.uint8)
+    local_components = np.full((256, 256), -1, dtype=np.int32)
+    local_row_by_grid_row = {128: 127, 129: 126}
+    for grid_row, column, component in (
+        (128, 128, 7),
+        (128, 129, 7),
+        (128, 130, 8),
+        (129, 128, 7),
+    ):
+        local_row = local_row_by_grid_row[grid_row]
+        local_hard[local_row, column] = 1
+        local_components[local_row, column] = component
+
+    class RecordingBridge:
+        def __init__(self) -> None:
+            self.reachability_calls = 0
+
+        def project_reachability(self, request, maximum_edge_distance_m):
+            del request
+            self.reachability_calls += 1
+            assert maximum_edge_distance_m == 30.0
+            return SimpleNamespace(
+                platform_type="WHEELED",
+                reachable=np.ones((256, 256), dtype=np.uint8),
+                algorithm_id="test/ground-connected-component/v1",
+            )
+
+    bridge = RecordingBridge()
+    request = SimpleNamespace(
+        world=SimpleNamespace(
+            local_map=SimpleNamespace(
+                frame_id="odom",
+                width=256,
+                height=256,
+                resolution_m=resolution_m,
+                origin_m=SimpleNamespace(
+                    x=canvas.bounds_m[0],
+                    y=canvas.bounds_m[1],
+                    z=0.0,
+                ),
+            ),
+            map_from_odom=SimpleNamespace(
+                parent_frame="map",
+                child_frame="odom",
+                translation_m=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+            ),
+        )
+    )
+    reachability = PlatformCandidateReachability(
+        platform_type="WHEELED",
+        canvas=canvas,
+        pose_map=Pose2(start_x_m, start_y_m, elevation_m=4.0),
+        observed_elevation_m=np.zeros((256, 256), dtype=np.float32),
+        bridge=bridge,
+        request=request,
+        local_traversability_projection=SimpleNamespace(
+            hard_feasible=local_hard,
+            connected_component=local_components,
+        ),
+    )
+    cells = np.asarray(
+        ((129, 128), (128, 130), (128, 129)), dtype=np.int32
+    )
+    positions = np.asarray(
+        [
+            (*canvas.grid_center_world(129, 128), 13.0),
+            (*canvas.grid_center_world(128, 130), 12.0),
+            (*canvas.grid_center_world(128, 129), 11.0),
+        ],
+        dtype=np.float64,
+    )
+
+    result = reachability.project_physical(
+        cells, target_positions_map=np.ascontiguousarray(positions)
+    )
+
+    expected_mask = np.zeros((256, 256), dtype=np.bool_)
+    expected_mask[128, 129] = True
+    expected_mask[129, 128] = True
+    np.testing.assert_array_equal(
+        result.physical_observation_pose_mask, expected_mask
+    )
+    np.testing.assert_array_equal(
+        result.observation_positions_m,
+        np.asarray(
+            [
+                (*canvas.grid_center_world(128, 129), 11.0),
+                (*canvas.grid_center_world(129, 128), 13.0),
+            ],
+            dtype=np.float64,
+        ),
+    )
+    assert result.platform_type == "WHEELED"
+    assert result.physical_projection_schema == PHYSICAL_PROJECTION_SCHEMA
+    assert (
+        result.physical_reachability_algorithm_id
+        == "test/ground-connected-component/v1"
+    )
+    assert (
+        result.physical_evidence_algorithm_id
+        == "cpp-safe-traversability-projection/v1"
+    )
+    assert result.physical_safe_pose_count == 3
+    assert result.physically_reachable_pose_count == 2
+    assert bridge.reachability_calls == 1
+
+
+def test_hopper_project_physical_binds_certified_aim_and_direct_connectivity() -> None:
+    canvas = _canvas()
+    start = (128, 128)
+    start_x_m, start_y_m = canvas.grid_center_world(*start)
+    target_rejected = (128, 130)
+    target_accepted = (128, 129)
+    accepted_x_m, accepted_y_m = canvas.grid_center_world(*target_accepted)
+    certified_aim = np.asarray(
+        (accepted_x_m + 0.02, accepted_y_m - 0.02, 321.0),
+        dtype=np.float64,
+    )
+
+    class RecordingBridge:
+        def __init__(self) -> None:
+            self.targets: np.ndarray | None = None
+            self.evidence = None
+
+        def project_hopper_landing_evidence(self, request, targets):
+            del request
+            self.targets = targets.copy()
+            aims = targets.copy()
+            certified = np.zeros(len(targets), dtype=np.bool_)
+            for index, target in enumerate(targets):
+                cell = canvas.world_to_grid(
+                    float(target[0]), float(target[1])
+                )
+                if cell == start:
+                    certified[index] = True
+                elif cell == target_accepted:
+                    certified[index] = True
+                    aims[index] = certified_aim
+            return SimpleNamespace(
+                certified=np.ascontiguousarray(certified),
+                aim_positions_m=np.ascontiguousarray(aims),
+                boundary_m=np.zeros((3, 4, 3), dtype=np.float64),
+                area_m2=np.ones(3, dtype=np.float64),
+                algorithm_id="test/hopper-landing-evidence/v1",
+            )
+
+        def project_direct_hopper_reachability(
+            self, request, maximum_edge_distance_m, evidence
+        ):
+            del request
+            assert maximum_edge_distance_m == 30.0
+            self.evidence = evidence
+            reachable = np.zeros((256, 256), dtype=np.uint8)
+            reachable[127, 129:131] = 1
+            return SimpleNamespace(
+                platform_type="HOPPER",
+                reachable=reachable,
+                algorithm_id="test/hopper-direct-connectivity/v1",
+            )
+
+    bridge = RecordingBridge()
+    reachability = PlatformCandidateReachability(
+        platform_type="HOPPER",
+        canvas=canvas,
+        pose_map=Pose2(start_x_m, start_y_m, elevation_m=123.0),
+        observed_elevation_m=np.zeros((256, 256), dtype=np.float32),
+        bridge=bridge,
+        request=object(),
+    )
+    cells = np.asarray(
+        (target_rejected, target_accepted), dtype=np.int32
+    )
+    targets = np.asarray(
+        [
+            (*canvas.grid_center_world(*target_rejected), 200.0),
+            (*canvas.grid_center_world(*target_accepted), 201.0),
+        ],
+        dtype=np.float64,
+    )
+
+    result = reachability.project_physical(
+        cells, target_positions_map=np.ascontiguousarray(targets)
+    )
+
+    expected_mask = np.zeros((256, 256), dtype=np.bool_)
+    expected_mask[target_accepted] = True
+    np.testing.assert_array_equal(
+        result.physical_observation_pose_mask, expected_mask
+    )
+    np.testing.assert_array_equal(
+        result.observation_positions_m, certified_aim.reshape(1, 3)
+    )
+    assert result.physical_safe_pose_count == 1
+    assert result.physically_reachable_pose_count == 1
+    assert (
+        result.physical_evidence_algorithm_id
+        == "test/hopper-landing-evidence/v1"
+    )
+    assert (
+        result.physical_reachability_algorithm_id
+        == "test/hopper-direct-connectivity/v1"
+    )
+    assert bridge.targets is not None
+    np.testing.assert_array_equal(
+        bridge.targets[0], np.asarray((start_x_m, start_y_m, 123.0))
+    )
+    assert bridge.evidence.algorithm_id == "test/hopper-landing-evidence/v1"
+
+
+def test_ground_project_physical_accepts_empty_observed_safe_set() -> None:
+    canvas = _canvas()
+    start_x_m, start_y_m = canvas.grid_center_world(128, 128)
+
+    class EmptyBridge:
+        def project_reachability(self, request, maximum_edge_distance_m):
+            del request, maximum_edge_distance_m
+            return SimpleNamespace(
+                platform_type="LEGGED",
+                reachable=np.zeros((256, 256), dtype=np.uint8),
+                algorithm_id="test/empty-ground/v1",
+            )
+
+    reachability = PlatformCandidateReachability(
+        platform_type="LEGGED",
+        canvas=canvas,
+        pose_map=Pose2(start_x_m, start_y_m),
+        observed_elevation_m=np.zeros((256, 256), dtype=np.float32),
+        bridge=EmptyBridge(),
+        request=SimpleNamespace(
+            world=SimpleNamespace(
+                local_map=SimpleNamespace(
+                    frame_id="odom",
+                    width=256,
+                    height=256,
+                    resolution_m=canvas.geometry.resolution_m,
+                    origin_m=SimpleNamespace(
+                        x=canvas.bounds_m[0],
+                        y=canvas.bounds_m[1],
+                        z=0.0,
+                    ),
+                ),
+                map_from_odom=SimpleNamespace(
+                    parent_frame="map",
+                    child_frame="odom",
+                    translation_m=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                    rotation=SimpleNamespace(
+                        x=0.0, y=0.0, z=0.0, w=1.0
+                    ),
+                ),
+            )
+        ),
+        local_traversability_projection=SimpleNamespace(
+            hard_feasible=np.zeros((256, 256), dtype=np.uint8),
+            connected_component=np.full(
+                (256, 256), -1, dtype=np.int32
+            ),
+        ),
+    )
+
+    result = reachability.project_physical(
+        np.empty((0, 2), dtype=np.int32)
+    )
+
+    assert result.physical_observation_pose_mask.shape == (256, 256)
+    assert not result.physical_observation_pose_mask.any()
+    assert result.observation_positions_m.shape == (0, 3)
+    assert result.physical_safe_pose_count == 0
+    assert result.physically_reachable_pose_count == 0
+    assert result.physical_reachability_algorithm_id == "test/empty-ground/v1"
+
+
+def test_project_physical_rejects_position_outside_declared_cell() -> None:
+    canvas = _canvas()
+    start_x_m, start_y_m = canvas.grid_center_world(128, 128)
+    reachability = PlatformCandidateReachability(
+        platform_type="WHEELED",
+        canvas=canvas,
+        pose_map=Pose2(start_x_m, start_y_m),
+        observed_elevation_m=np.zeros((256, 256), dtype=np.float32),
+        bridge=SimpleNamespace(
+            project_reachability=lambda *_: pytest.fail(
+                "misaligned input reached the bridge"
+            )
+        ),
+        request=object(),
+        local_traversability_projection=object(),
+    )
+    wrong_x_m, wrong_y_m = canvas.grid_center_world(128, 130)
+
+    with pytest.raises(ValueError, match="leaves its cell"):
+        reachability.project_physical(
+            np.asarray(((128, 129),), dtype=np.int32),
+            target_positions_map=np.asarray(
+                ((wrong_x_m, wrong_y_m, 0.0),), dtype=np.float64
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("reachable", "algorithm_id", "message"),
+    (
+        (np.zeros((2, 2), dtype=np.uint8), "test/ground/v1", "geometry"),
+        (np.zeros((256, 256), dtype=np.uint8), "", "algorithm"),
+    ),
+)
+def test_project_physical_rejects_malformed_reachability_projection(
+    reachable: np.ndarray,
+    algorithm_id: str,
+    message: str,
+) -> None:
+    canvas = _canvas()
+    start_x_m, start_y_m = canvas.grid_center_world(128, 128)
+    bridge = SimpleNamespace(
+        project_reachability=lambda *_: SimpleNamespace(
+            platform_type="WHEELED",
+            reachable=reachable,
+            algorithm_id=algorithm_id,
+        )
+    )
+    reachability = PlatformCandidateReachability(
+        platform_type="WHEELED",
+        canvas=canvas,
+        pose_map=Pose2(start_x_m, start_y_m),
+        observed_elevation_m=np.zeros((256, 256), dtype=np.float32),
+        bridge=bridge,
+        request=object(),
+        local_traversability_projection=SimpleNamespace(
+            hard_feasible=np.ones((256, 256), dtype=np.uint8),
+            connected_component=np.zeros((256, 256), dtype=np.int32),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        reachability.project_physical(
+            np.asarray(((128, 129),), dtype=np.int32)
+        )
+
+
+def test_hopper_project_physical_rejects_certified_aim_outside_cell() -> None:
+    canvas = _canvas()
+    start = (128, 128)
+    target = (128, 129)
+    start_x_m, start_y_m = canvas.grid_center_world(*start)
+    wrong_x_m, wrong_y_m = canvas.grid_center_world(128, 130)
+
+    class MisalignedLandingBridge:
+        def project_hopper_landing_evidence(self, request, targets):
+            del request
+            aims = targets.copy()
+            aims[1] = (wrong_x_m, wrong_y_m, 10.0)
+            return SimpleNamespace(
+                certified=np.ones(2, dtype=np.bool_),
+                aim_positions_m=np.ascontiguousarray(aims),
+                boundary_m=np.zeros((2, 4, 3), dtype=np.float64),
+                area_m2=np.ones(2, dtype=np.float64),
+                algorithm_id="test/misaligned-landing/v1",
+            )
+
+        def project_direct_hopper_reachability(self, *args):
+            del args
+            return SimpleNamespace(
+                platform_type="HOPPER",
+                reachable=np.ones((256, 256), dtype=np.uint8),
+                algorithm_id="test/direct/v1",
+            )
+
+    reachability = PlatformCandidateReachability(
+        platform_type="HOPPER",
+        canvas=canvas,
+        pose_map=Pose2(start_x_m, start_y_m),
+        observed_elevation_m=np.zeros((256, 256), dtype=np.float32),
+        bridge=MisalignedLandingBridge(),
+        request=object(),
+    )
+
+    with pytest.raises(RuntimeError, match="leaves its cell"):
+        reachability.project_physical(
+            np.asarray((target,), dtype=np.int32)
+        )
+
+
 def test_hopper_reachability_uses_certified_pose_height_for_start() -> None:
     canvas = _canvas()
     start = (128, 128)
@@ -1541,7 +1934,9 @@ def test_hopper_reachability_uses_certified_pose_height_for_start() -> None:
         ):
             del request, maximum_edge_distance_m, evidence
             return SimpleNamespace(
-                reachable=np.ones((256, 256), dtype=np.uint8)
+                platform_type="HOPPER",
+                reachable=np.ones((256, 256), dtype=np.uint8),
+                algorithm_id="test/direct-hopper/v1",
             )
 
     bridge = RecordingBridge()

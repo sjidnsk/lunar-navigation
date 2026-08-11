@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 import hashlib
+import inspect
 import json
 import math
 import pathlib
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -15,24 +16,27 @@ from lunar_policy_training.capability_freeze import ScenarioIdentity
 from lunar_policy_training.environment import formal_builder as formal_builder_module
 from lunar_policy_training.environment import candidate_builder as candidate_builder_module
 from lunar_policy_training.environment import formal_start_qualification as qualification_module
-from lunar_policy_training.environment.candidate_builder import CandidateBuilderV2
+from lunar_policy_training.environment import parallel_pool as parallel_pool_module
+from lunar_policy_training.environment.candidate_builder import (
+    CandidateBatch,
+    CandidateBuilderV2,
+    CandidateDiagnostics,
+)
 from lunar_policy_training.environment.coverability import (
     IneligibleReason,
+    PHYSICAL_GRID_AXIS_CONVENTION,
+    PHYSICAL_PROJECTION_SCHEMA,
     PlatformCoverability,
-    QualifiedStartState,
+    canonical_physical_positions_um,
     mask_sha256,
     pack_detail_mask,
+    physical_projection_sha256,
 )
 from lunar_policy_training.environment.formal_builder import (
     FormalEpisode,
     FormalEnvironmentBuilder,
     FormalWorkerBuilder,
-    _aggregate_primitive_detail,
     _formal_schedule_index,
-)
-from lunar_policy_training.environment.formal_episode_state import (
-    FormalWorkerState,
-    policy_batch_sha256,
 )
 from lunar_policy_training.environment.formal_start_qualification import (
     qualify_initial_start_cell,
@@ -42,32 +46,26 @@ from lunar_policy_training.environment.observation_boundary import (
     SensorBoundaryEvidence,
 )
 from lunar_policy_training.environment.multires_observation import (
-    DetailObservedWindow,
     MultiresSensorObservationState,
 )
 from lunar_policy_training.environment.observation_builder import Pose2
-from lunar_policy_training.environment.parallel_pool import (
-    ParallelActions,
-    ParallelEnvPool,
+from lunar_policy_training.environment.platform_reachability import (
+    PhysicalReachabilityResult,
+)
+from lunar_policy_training.environment.primitive_reachability import (
+    ObservedPrimitiveReachability,
 )
 from lunar_policy_training.environment.visibility import (
     NativeVisibilityEstimator,
     SensorGeometry,
 )
-from lunar_policy_training.evaluation import report as report_module
-from lunar_policy_training.evaluation.report import FormalEvaluationBatch
-from lunar_policy_training.formal_preflight import _request_signature
-from lunar_policy_training.policy.cross_attention import CrossAttentionPolicy
-from lunar_policy_training.reward import compute_transition_reward
 from lunar_policy_training.polar_data.formal_cache import (
     FormalCacheIdentity,
     StaticSceneData,
+    load_formal_cache,
     write_formal_cache,
 )
-from lunar_policy_training.polar_data.raster import (
-    GridGeometry,
-    MapCanvas,
-)
+from lunar_policy_training.polar_data import formal_cache as formal_cache_module
 from lunar_policy_training.polar_data.hazards import (
     FORMAL_GENERATOR_VERSION,
     scene_seed,
@@ -78,66 +76,14 @@ from lunar_policy_training.project_capability import load_project_formal_capabil
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
-def test_formal_episode_maps_visited_detail_poses_to_current_graph_state_ids() -> None:
-    episode = object.__new__(FormalEpisode)
-    episode._visited_candidate_filter_enabled = True
-    episode._visited_primitive_pose_keys = {(5, 10), (15, 20)}
-    snapshot = SimpleNamespace(
-        state_ids=np.asarray([11, 22, 33], dtype=np.uint64),
-        positions_m=np.asarray(
-            [[1.01, 2.01, 0.0], [3.01, 4.01, 0.0], [9.0, 9.0, 0.0]],
-            dtype=np.float64,
-        ),
-    )
-
-    assert episode._visited_primitive_state_ids(snapshot) == {11, 22}
-
-    episode._visited_candidate_filter_enabled = False
-    assert episode._visited_primitive_state_ids(snapshot) == set()
-
-
-def test_primitive_detail_aggregation_requires_complete_point_two_metre_evidence() -> None:
-    detail_canvas = MapCanvas(
-        "e" * 64,
-        (0.0, 0.0, 64.0, 64.0),
-        GridGeometry(64.0, 0.2, 320),
-    )
-    shape = (320, 320)
-    valid = np.ones(shape, dtype=np.bool_)
-    valid[0, 0] = False
-    elevation = np.arange(shape[0] * shape[1], dtype=np.float32).reshape(shape)
-    obstacle = np.zeros(shape, dtype=np.float32)
-    obstacle[10:20, 10:20] = 0.4
-    detail = DetailObservedWindow(
-        canvas=detail_canvas,
-        elevation_m=elevation,
-        physical_obstacle_ratio=obstacle,
-        physical_obstacle_height_m=obstacle * 2.0,
-        forbidden_ratio=np.zeros(shape, dtype=np.float32),
-        valid_mask=valid,
-        observation_age_s=np.zeros(shape, dtype=np.float32),
-        observation_quality=np.ones(shape, dtype=np.float32),
-        observation_count=np.ones(shape, dtype=np.uint32),
-    )
-
-    aggregated = _aggregate_primitive_detail(detail)
-
-    assert aggregated.canvas.geometry == GridGeometry(64.0, 2.0, 32)
-    assert not bool(aggregated.valid_mask[0, 0])
-    assert bool(aggregated.valid_mask[1, 1])
-    assert aggregated.physical_obstacle_ratio[1, 1] == pytest.approx(0.4)
-    assert aggregated.elevation_m[1, 1] == pytest.approx(
-        float(elevation[10:20, 10:20].mean(dtype=np.float64))
-    )
-
-
 def _sha(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
 
 
 def _coverability(
     starts: dict[str, tuple[int, int] | None],
-) -> dict[str, PlatformCoverability]:
+    bundle,
+) -> tuple[dict[str, PlatformCoverability], dict[str, str], np.ndarray]:
     shape = (256, 256)
     detail_shape = (5120, 5120)
     eligible_detail = np.ones(detail_shape, dtype=np.bool_)
@@ -147,31 +93,70 @@ def _coverability(
     empty_bits = pack_detail_mask(empty_detail)
     empty_hash = mask_sha256(empty_detail)
     output: dict[str, PlatformCoverability] = {}
+    evidence_algorithms: dict[str, str] = {}
+    hopper_positions_m = np.empty((0, 3), dtype=np.float64)
     for platform, start in starts.items():
-        reachable = np.full(shape, start is not None, dtype=np.bool_)
+        reachable = np.zeros(shape, dtype=np.bool_)
+        if start is not None:
+            reachable[start] = True
         count = int(eligible_detail.size) if start is not None else 0
+        positions_m = np.empty((0, 3), dtype=np.float64)
+        if start is not None:
+            row, column = start
+            positions_m = np.asarray(
+                (
+                    (
+                        (float(column) + 0.5) * 4.0,
+                        1024.0 - (float(row) + 0.5) * 4.0,
+                        7.0,
+                    ),
+                ),
+                dtype=np.float64,
+            )
+        positions_m = np.ascontiguousarray(positions_m, dtype=np.float64)
+        if platform == "HOPPER":
+            hopper_positions_m = positions_m
+        capability_sha256 = formal_cache_module._physical_capability_content_sha256(
+            bundle.for_platform(platform)
+        )
+        start_sha256 = formal_cache_module._physical_start_identity_from_position(
+            platform_type=platform,
+            start_cell=start,
+            position_m=(
+                None
+                if start is None
+                else tuple(float(value) for value in positions_m[0])
+            ),
+        )
+        reachability_algorithm_id = f"test-physical-reachability/{platform.lower()}"
+        evidence_algorithm_id = f"test-physical-evidence/{platform.lower()}"
+        evidence_algorithms[platform] = evidence_algorithm_id
         output[platform] = PlatformCoverability(
             platform_type=platform,
             qualified_start_cell=start,
-            qualified_start_state=(
-                None
-                if start is None
-                else QualifiedStartState(
-                    position_m=(
-                        (float(start[1]) + 0.5) * 4.0,
-                        1024.0 - (float(start[0]) + 0.5) * 4.0,
-                        7.33 if platform == "LEGGED" else 7.0,
-                    ),
-                    yaw_rad=0.0,
-                    motion_mode=1 if platform == "LEGGED" else 0,
-                    body_z_m=(
-                        (7.28, 7.38)
-                        if platform == "LEGGED"
-                        else (0.0, 0.0)
-                    ),
-                )
+            physical_observation_pose_mask=reachable,
+            physical_projection_schema=PHYSICAL_PROJECTION_SCHEMA,
+            physical_reachability_algorithm_id=reachability_algorithm_id,
+            physical_safe_pose_count=int(reachable.sum(dtype=np.int64)),
+            physically_reachable_pose_count=int(
+                reachable.sum(dtype=np.int64)
             ),
-            reachable_pose_mask=reachable,
+            physical_projection_sha256=physical_projection_sha256(
+                platform_type=platform,
+                physical_reachability_algorithm_id=reachability_algorithm_id,
+                physical_evidence_algorithm_id=evidence_algorithm_id,
+                physical_observation_pose_mask=reachable,
+                physical_observation_positions_m=positions_m,
+                physical_grid_resolution_m=4.0,
+                physical_grid_origin_m=(0.0, 1024.0),
+                physical_grid_world_bounds_m=(0.0, 0.0, 1024.0, 1024.0),
+                physical_grid_axis_convention=PHYSICAL_GRID_AXIS_CONVENTION,
+                capability_content_sha256=capability_sha256,
+                start_identity_sha256=start_sha256,
+            ),
+            mission_target_detail_mask_sha256=(
+                eligible_hash if start is not None else empty_hash
+            ),
             coverable_detail_shape=detail_shape,
             coverable_detail_bits=(eligible_bits if start is not None else empty_bits),
             coverable_ratio=np.full(shape, start is not None, dtype=np.float32),
@@ -180,24 +165,23 @@ def _coverability(
             mission_coverable_fraction=1.0 if count else 0.0,
             initial_coverable_fraction=0.1 if count else 0.0,
             initial_candidate_count=1 if count else 0,
-            primitive_state_count=int(reachable.sum(dtype=np.int64)),
-            certified_edge_count=1 if count else 0,
-            recoverable_state_count=int(reachable.sum(dtype=np.int64)),
-            reachability_algorithm_id=f"test-reachability/{platform.lower()}",
-            primitive_state_schema=f"test-state/{platform.lower()}",
-            primitive_set_sha256=_sha(f"primitive-set/{platform}"),
-            world_evidence_sha256=_sha(f"world-evidence/{platform}"),
-            reachability_graph_sha256=_sha(f"primitive-graph/{platform}"),
-            visibility_algorithm_id="two-dimensional-detail-los/v1",
-            reachable_mask_sha256=mask_sha256(reachable),
-            coverable_mask_sha256=(eligible_hash if start is not None else empty_hash),
+            coverable_detail_mask_sha256=(
+                eligible_hash if start is not None else empty_hash
+            ),
+            sensor_visibility_algorithm_id="two-dimensional-detail-los/v1",
+            capability_content_sha256=capability_sha256,
+            start_identity_sha256=start_sha256,
             exact=True,
             eligible=start is not None,
             ineligible_reason=(
                 None if start is not None else IneligibleReason.UNSAFE_START
             ),
         )
-    return output
+    return (
+        output,
+        evidence_algorithms,
+        canonical_physical_positions_um(hopper_positions_m),
+    )
 
 
 def _cache(tmp_path: pathlib.Path):
@@ -252,6 +236,14 @@ def _cache(tmp_path: pathlib.Path):
         platform: np.ones(shape, np.float32)
         for platform in ("WHEELED", "LEGGED", "HOPPER")
     }
+    coverability, evidence_algorithms, hopper_positions_um = _coverability(
+        {
+            "WHEELED": (127, 127),
+            "LEGGED": (127, 127),
+            "HOPPER": (127, 127),
+        },
+        bundle,
+    )
     scene = StaticSceneData(
         scene_id=scene_id,
         source="NASA_LOLA",
@@ -269,13 +261,9 @@ def _cache(tmp_path: pathlib.Path):
         no_go_vertices=np.empty((0, 6, 2), np.float64),
         hard_feasible=hard,
         clearance_margin_norm=clearance,
-        coverability=_coverability(
-            {
-                "WHEELED": (127, 127),
-                "LEGGED": (127, 127),
-                "HOPPER": (127, 127),
-            }
-        ),
+        coverability=coverability,
+        physical_evidence_algorithm_ids=evidence_algorithms,
+        hopper_physical_observation_positions_um=hopper_positions_um,
     )
     root = tmp_path / "cache"
     write_formal_cache(
@@ -342,6 +330,10 @@ def _cache_with_common_unstartable_scene(
         scene_id: str,
         starts: dict[str, tuple[int, int] | None],
     ) -> StaticSceneData:
+        coverability, evidence_algorithms, hopper_positions_um = _coverability(
+            starts,
+            bundle,
+        )
         return StaticSceneData(
             scene_id=scene_id,
             source="NASA_LOLA",
@@ -359,7 +351,9 @@ def _cache_with_common_unstartable_scene(
             no_go_vertices=np.empty((0, 6, 2), np.float64),
             hard_feasible=hard,
             clearance_margin_norm=clearance,
-            coverability=_coverability(starts),
+            coverability=coverability,
+            physical_evidence_algorithm_ids=evidence_algorithms,
+            hopper_physical_observation_positions_um=hopper_positions_um,
         )
 
     root = tmp_path / "qualified-cache"
@@ -406,6 +400,244 @@ def _assembly(tmp_path: pathlib.Path):
     return assembly, bundle, scene_id
 
 
+def _primitive_changed_capability(capability):
+    typed = capability.typed_capability
+    primitives = getattr(typed, "motion_primitives", None)
+    if primitives is not None:
+        assert len(primitives) > 1
+        changed_first = replace(
+            primitives[0],
+            primitive_id=f"{primitives[0].primitive_id}/task7-isolation",
+        )
+        typed = replace(
+            typed,
+            motion_primitives=(changed_first, *tuple(reversed(primitives[1:]))),
+        )
+    else:
+        assert capability.platform_type == "HOPPER"
+        assert not hasattr(typed, "motion_primitives")
+    return replace(
+        capability,
+        typed_capability=typed,
+        content_sha256=_sha(
+            f"primitive-only-change/{capability.platform_type}"
+        ),
+    )
+
+
+def _forbid_primitive_formal_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("formal boundary called primitive reachability")
+
+    monkeypatch.setattr(
+        ObservedPrimitiveReachability,
+        "update",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        CandidateBuilderV2,
+        "build_from_primitive_graph",
+        forbidden,
+    )
+
+
+@pytest.mark.parametrize("platform", ("WHEELED", "LEGGED", "HOPPER"))
+def test_start_qualification_never_calls_primitive_reachability_or_builder(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+) -> None:
+    manifest, bundle, scene_id = _cache(tmp_path)
+    loaded = formal_builder_module._load_multires_scene(
+        load_formal_cache(manifest), scene_id
+    )
+    _forbid_primitive_formal_paths(monkeypatch)
+    monkeypatch.setattr(
+        formal_cache_module,
+        "_global_composed_capability",
+        lambda capability, **_kwargs: capability.to_bridge_capability(),
+        raising=False,
+    )
+
+    qualified = qualification_module.qualify_initial_start(
+        scene=loaded.scene,
+        arrays=loaded.arrays,
+        capability=bundle.for_platform(platform),
+    )
+
+    assert qualified is not None
+    assert qualified.initial_candidate_count > 0
+
+
+@pytest.mark.parametrize("platform", ("WHEELED", "LEGGED", "HOPPER"))
+def test_formal_runtime_never_calls_primitive_reachability_or_builder(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    _forbid_primitive_formal_paths(monkeypatch)
+    monkeypatch.setattr(
+        formal_builder_module,
+        "_global_composed_capability",
+        lambda capability, **_kwargs: capability.to_bridge_capability(),
+        raising=False,
+    )
+
+    worker = assembly.factory(0, platform)
+
+    assert bool(worker.initial_observation.candidate_mask.any())
+
+
+@pytest.mark.parametrize("platform", ("WHEELED", "LEGGED", "HOPPER"))
+def test_physical_universe_and_oracle_are_repeatable_and_primitive_independent(
+    tmp_path: pathlib.Path,
+    platform: str,
+) -> None:
+    assembly, bundle, _ = _assembly(tmp_path)
+    first = assembly.factory(0, platform).episode
+    repeated = assembly.factory(0, platform).episode
+    changed_capability = _primitive_changed_capability(
+        bundle.for_platform(platform)
+    )
+    changed = FormalEpisode(
+        worker_index=first.worker_index,
+        platform_type=platform,
+        capability=changed_capability,
+        scenario_identity=first.scenario_identity,
+        loaded=first.loaded,
+        start_cell=first.start_cell,
+    )
+
+    snapshots = (first._snapshot, repeated._snapshot, changed._snapshot)
+    assert all(snapshot is not None for snapshot in snapshots)
+    assert len(
+        {
+            snapshot.candidates.diagnostics.physical_candidate_universe_count
+            for snapshot in snapshots
+        }
+    ) == 1
+    assert len(
+        {snapshot.candidate_universe_sha256 for snapshot in snapshots}
+    ) == 1
+    assert len(
+        {snapshot.frontier_oracle.oracle_opportunity_count for snapshot in snapshots}
+    ) == 1
+    assert len(
+        {
+            snapshot.frontier_oracle.oracle_opportunity_set_sha256
+            for snapshot in snapshots
+        }
+    ) == 1
+
+
+def test_hopper_runtime_preserves_row_major_certified_exact_landing_xyz(
+    tmp_path: pathlib.Path,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    episode = assembly.factory(0, "HOPPER").episode
+    snapshot = episode._snapshot
+
+    assert snapshot is not None
+    physical = snapshot.physical_reachability
+    cells = tuple(zip(*np.nonzero(physical.physical_observation_pose_mask), strict=True))
+    exact_by_cell = dict(
+        zip(cells, physical.observation_positions_m, strict=True)
+    )
+    selected_positions = snapshot.candidates.target_positions_m[
+        snapshot.candidates.mask
+    ]
+    assert len(selected_positions) > 0
+    for position in selected_positions:
+        cell = episode.loaded.scene.base_canvas.world_to_grid(
+            float(position[0]), float(position[1])
+        )
+        np.testing.assert_array_equal(position, exact_by_cell[cell])
+
+
+def test_hopper_start_qualification_reprojects_from_certified_exact_start(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, bundle, scene_id = _cache(tmp_path)
+    loaded = formal_builder_module._load_multires_scene(
+        load_formal_cache(manifest), scene_id
+    )
+    original_project = (
+        qualification_module.PlatformCandidateReachability.project_physical
+    )
+    calls: list[tuple[Pose2, tuple[float, float, float]]] = []
+    certified_start: tuple[float, float, float] | None = None
+
+    def certify_offset_start(self, *args, **kwargs):
+        nonlocal certified_start
+        state_position = self._request.current_state.pose.position_m
+        calls.append(
+            (
+                self._pose,
+                (
+                    float(state_position.x),
+                    float(state_position.y),
+                    float(state_position.z),
+                ),
+            )
+        )
+        result = original_project(self, *args, **kwargs)
+        if len(calls) != 1:
+            if certified_start is None:
+                return result
+            start_cell = self._canvas.world_to_grid(
+                self._pose.x_m, self._pose.y_m
+            )
+            cells = tuple(
+                zip(
+                    *np.nonzero(result.physical_observation_pose_mask),
+                    strict=True,
+                )
+            )
+            assert start_cell in cells
+            positions = result.observation_positions_m.copy()
+            positions[cells.index(start_cell)] = certified_start
+            return replace(result, observation_positions_m=positions)
+        start_cell = self._canvas.world_to_grid(
+            self._pose.x_m, self._pose.y_m
+        )
+        cells = tuple(
+            zip(
+                *np.nonzero(result.physical_observation_pose_mask),
+                strict=True,
+            )
+        )
+        assert start_cell in cells
+        index = cells.index(start_cell)
+        positions = result.observation_positions_m.copy()
+        positions[index] += np.asarray((0.02, -0.02, 1.25))
+        certified_start = tuple(float(value) for value in positions[index])
+        return replace(result, observation_positions_m=positions)
+
+    monkeypatch.setattr(
+        qualification_module.PlatformCandidateReachability,
+        "project_physical",
+        certify_offset_start,
+    )
+
+    qualified = qualification_module.qualify_initial_start(
+        scene=loaded.scene,
+        arrays=loaded.arrays,
+        capability=bundle.for_platform("HOPPER"),
+    )
+
+    assert qualified is not None
+    assert certified_start is not None
+    assert len(calls) >= 2
+    assert (
+        calls[1][0].x_m,
+        calls[1][0].y_m,
+        calls[1][0].elevation_m,
+    ) == certified_start
+    assert calls[1][1] == certified_start
+
+
 @pytest.mark.parametrize("platform", ("WHEELED", "LEGGED", "HOPPER"))
 def test_formal_worker_uses_one_scene_current_capability_and_safe_start(
     tmp_path: pathlib.Path, platform: str
@@ -432,7 +664,7 @@ def test_formal_episode_passes_exact_platform_and_exposes_candidate_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assembly, _, _ = _assembly(tmp_path)
-    original_build = CandidateBuilderV2.build_from_primitive_graph
+    original_build = CandidateBuilderV2.build_physical_universe
     platform_calls: list[str] = []
 
     def record_platform(self, *args, **kwargs):
@@ -440,16 +672,21 @@ def test_formal_episode_passes_exact_platform_and_exposes_candidate_diagnostics(
         return original_build(self, *args, **kwargs)
 
     monkeypatch.setattr(
-        CandidateBuilderV2, "build_from_primitive_graph", record_platform
+        CandidateBuilderV2, "build_physical_universe", record_platform
     )
     worker = assembly.factory(0, "HOPPER")
 
     assert platform_calls
     assert set(platform_calls) == {"HOPPER"}
     diagnostics = worker.episode.current_candidate_diagnostics()
-    assert worker.current_candidate_diagnostics() == diagnostics
-    assert diagnostics.emitted_count == int(
+    with pytest.raises(TypeError, match="planner_rejected_count"):
+        worker.current_candidate_diagnostics()
+    assert diagnostics.selected_policy_candidate_count == int(
         worker.environment.current_observation.candidate_mask.sum()
+    )
+    assert len(diagnostics.physical_snapshot_id) == 64
+    assert diagnostics.physical_candidate_universe_count >= (
+        diagnostics.selected_policy_candidate_count
     )
 
 
@@ -493,7 +730,7 @@ def test_start_qualification_skips_a_native_unsafe_start_candidate(
 ) -> None:
     assembly, bundle, _ = _assembly(tmp_path)
     worker = assembly.factory(0, "WHEELED")
-    original_update = qualification_module.ObservedPrimitiveReachability.update
+    original_project = qualification_module.PlatformCandidateReachability.project_physical
     calls = 0
 
     def reject_first_start(self, *args, **kwargs):
@@ -501,11 +738,11 @@ def test_start_qualification_skips_a_native_unsafe_start_candidate(
         calls += 1
         if calls == 1:
             raise RuntimeError("WHEEL_START_NOT_SAFE")
-        return original_update(self, *args, **kwargs)
+        return original_project(self, *args, **kwargs)
 
     monkeypatch.setattr(
-        qualification_module.ObservedPrimitiveReachability,
-        "update",
+        qualification_module.PlatformCandidateReachability,
+        "project_physical",
         reject_first_start,
     )
 
@@ -526,16 +763,16 @@ def test_start_qualification_does_not_hide_other_native_failures(
     assembly, bundle, _ = _assembly(tmp_path)
     worker = assembly.factory(0, "LEGGED")
 
-    def fail_graph(*_args, **_kwargs):
-        raise RuntimeError("PRIMITIVE_GRAPH_FAILED")
+    def fail_projection(*_args, **_kwargs):
+        raise RuntimeError("PHYSICAL_PROJECTION_FAILED")
 
     monkeypatch.setattr(
-        qualification_module.ObservedPrimitiveReachability,
-        "update",
-        fail_graph,
+        qualification_module.PlatformCandidateReachability,
+        "project_physical",
+        fail_projection,
     )
 
-    with pytest.raises(RuntimeError, match="PRIMITIVE_GRAPH_FAILED"):
+    with pytest.raises(RuntimeError, match="PHYSICAL_PROJECTION_FAILED"):
         qualify_initial_start_cell(
             scene=worker.episode.loaded.scene,
             arrays=worker.episode.loaded.arrays,
@@ -796,10 +1033,10 @@ def test_formal_episode_estimates_candidate_gain_from_detail_observation(
 
     assert estimator is worker.episode.sensor_state
     assert estimator.resolution_m == 0.2
-    assert worker.snapshot_episode_state()["candidate_gain_resolution_m"] == 0.2
+    assert worker.episode._current_candidate_gain_resolution_m == 0.2
 
 
-def test_restore_rejects_a_legacy_state_without_detail_gain_identity(
+def test_formal_v5_snapshot_fails_closed_without_physical_identity(
     tmp_path: pathlib.Path,
 ) -> None:
     assembly, _, _ = _assembly(tmp_path)
@@ -810,18 +1047,8 @@ def test_restore_rejects_a_legacy_state_without_detail_gain_identity(
         platform_worker_index=0,
         platform_worker_count=1,
     )
-    legacy_state = worker.snapshot_episode_state()
-    legacy_state.pop("candidate_gain_resolution_m")
-
-    with pytest.raises(ValueError, match="structure"):
-        assembly.factory.restore_for_episode(
-            worker_index=0,
-            platform_type="WHEELED",
-            episode_cursor=4,
-            platform_worker_index=0,
-            platform_worker_count=1,
-            state=legacy_state,
-        )
+    with pytest.raises(ValueError, match="cannot represent physical opportunity"):
+        worker.snapshot_episode_state()
 
 
 def test_formal_candidate_path_never_calls_the_legacy_frontier_builder(
@@ -849,7 +1076,7 @@ def test_formal_candidate_path_never_calls_the_legacy_frontier_builder(
 
 
 @pytest.mark.parametrize("platform", ("WHEELED", "LEGGED", "HOPPER"))
-def test_active_formal_episode_replays_to_exact_observation_and_request(
+def test_formal_v5_replay_fails_closed_for_all_platforms(
     tmp_path: pathlib.Path, platform: str,
 ) -> None:
     assembly, _, _ = _assembly(tmp_path)
@@ -860,145 +1087,24 @@ def test_active_formal_episode_replays_to_exact_observation_and_request(
         platform_worker_index=0,
         platform_worker_count=1,
     )
-    initial = worker.environment.current_observation
-    candidate = int(initial.candidate_mask[0].nonzero()[0])
-    result = worker.environment.advance_prepared_action(
-        PolicyAction(candidate, 0.0),
-        expected_identity=initial.observation_identities[0],
-    )
-    assert not result.transition.terminated
-    state = FormalWorkerState.from_dict(worker.snapshot_episode_state())
-
-    restored = assembly.factory.restore_for_episode(
-        worker_index=0,
-        platform_type=platform,
-        episode_cursor=4,
-        platform_worker_index=0,
-        platform_worker_count=1,
-        state=state.to_dict(),
-    )
-
-    uninterrupted_observation = worker.environment.current_observation
-    restored_observation = restored.environment.current_observation
-    assert restored_observation.observation_identities == (
-        uninterrupted_observation.observation_identities
-    )
-    assert policy_batch_sha256(restored_observation) == policy_batch_sha256(
-        uninterrupted_observation
-    )
-    next_candidate = int(uninterrupted_observation.candidate_mask[0].nonzero()[0])
-    action = PolicyAction(next_candidate, 0.25)
-    uninterrupted_request = worker.episode.build_request(
-        action, uninterrupted_observation.observation_identities[0]
-    ).request
-    restored_request = restored.episode.build_request(
-        action, restored_observation.observation_identities[0]
-    ).request
-    assert _request_signature(restored_request) == _request_signature(
-        uninterrupted_request
-    )
-
-    uninterrupted_result = worker.environment.advance_prepared_action(
-        action,
-        expected_identity=uninterrupted_observation.observation_identities[0],
-    )
-    restored_result = restored.environment.advance_prepared_action(
-        action,
-        expected_identity=restored_observation.observation_identities[0],
-    )
-    assert policy_batch_sha256(
-        restored_result.transition.next_observation
-    ) == policy_batch_sha256(uninterrupted_result.transition.next_observation)
-    assert compute_transition_reward(restored_result.transition) == (
-        compute_transition_reward(uninterrupted_result.transition)
-    )
+    with pytest.raises(ValueError, match="retired graph identity"):
+        worker.episode.replay_state(object())
 
 
-def test_rejected_candidate_mask_survives_active_episode_replay(
+def test_formal_v5_restore_fails_closed_before_parsing_legacy_state(
     tmp_path: pathlib.Path,
 ) -> None:
     assembly, _, _ = _assembly(tmp_path)
-    worker = assembly.factory(0, "WHEELED")
-    candidate = int(worker.initial_observation.candidate_mask[0].nonzero()[0])
-    worker.environment._mask_rejected_candidate(candidate)
-    state = worker.snapshot_episode_state()
 
-    restored = assembly.factory.restore_for_episode(
-        worker_index=0,
-        platform_type="WHEELED",
-        episode_cursor=0,
-        platform_worker_index=0,
-        platform_worker_count=1,
-        state=state,
-    )
-
-    assert not bool(
-        restored.environment.current_observation.candidate_mask[0, candidate]
-    )
-    assert restored.snapshot_episode_state() == state
-
-
-def test_active_episode_rejects_a_different_coverability_mask(
-    tmp_path: pathlib.Path,
-) -> None:
-    assembly, _, _ = _assembly(tmp_path)
-    worker = assembly.factory(0, "WHEELED")
-    state = worker.snapshot_episode_state()
-    state["coverability_mask_sha256"] = "0" * 64
-
-    with pytest.raises(ValueError, match="replay identity"):
+    with pytest.raises(ValueError, match="physical replay schema"):
         assembly.factory.restore_for_episode(
             worker_index=0,
             platform_type="WHEELED",
-            episode_cursor=0,
+            episode_cursor=4,
             platform_worker_index=0,
             platform_worker_count=1,
-            state=state,
+            state={},
         )
-
-
-def test_parallel_pool_snapshots_and_restores_the_active_formal_episode(
-    tmp_path: pathlib.Path,
-) -> None:
-    assembly, _, _ = _assembly(tmp_path)
-    with ParallelEnvPool(
-        allocation={"WHEELED": 1},
-        observation_template=assembly.observation_template,
-        environment_factory=assembly.factory,
-        reward_fn=compute_transition_reward,
-        worker_timeout_seconds=120.0,
-        worker_startup_timeout_seconds=60.0,
-        initial_episode_cursors=(4,),
-    ) as uninterrupted:
-        initial = uninterrupted.reset()
-        candidate = int(initial.observations.candidate_mask[0].nonzero()[0])
-        stepped = uninterrupted.step(
-            ParallelActions(
-                candidate_indices=torch.tensor([candidate], dtype=torch.int64),
-                thetas=torch.tensor([0.0], dtype=torch.float32),
-            ),
-            policy_version=9,
-        )
-        states = uninterrupted.snapshot_episode_states(policy_version=9)
-
-    with ParallelEnvPool(
-        allocation={"WHEELED": 1},
-        observation_template=assembly.observation_template,
-        environment_factory=assembly.factory,
-        reward_fn=compute_transition_reward,
-        worker_timeout_seconds=120.0,
-        worker_startup_timeout_seconds=600.0,
-        initial_episode_states=states,
-    ) as resumed:
-        restored = resumed.reset()
-
-    assert resumed.episode_cursors == (4,)
-    assert restored.observations.observation_identities == (
-        stepped.observations.observation_identities
-    )
-    assert policy_batch_sha256(restored.observations) == policy_batch_sha256(
-        stepped.observations
-    )
 
 
 def test_formal_schedule_uses_platform_local_scene_lanes_at_any_allocation() -> None:
@@ -1148,6 +1254,7 @@ def test_policy_input_and_request_are_observed_only_identity_bound_and_multires(
     assert request.world.global_map.width == 256
     assert request.world.local_map.resolution_m == 0.2
     assert request.world.local_map.width == 320
+    assert request.config.local_frontier.additional_corridor_margin_m == 2.0
     global_valid = request.world.global_map.layers["valid_mask"].values
     global_elevation = request.world.global_map.layers["elevation"].values
     assert np.all(global_elevation[global_valid == 0] == 0.0)
@@ -1168,7 +1275,25 @@ def test_ground_option_freezes_target_when_candidate_arrays_refresh(
     first = episode.begin_ground_option(action, identity).request
     first_goal = first.goal.target.position_m
     frozen = (first_goal.x, first_goal.y, first_goal.z, first.goal.goal_id)
-    episode._snapshot.candidates.features[candidate, :2] = (0.01, 0.99)
+    snapshot = episode._snapshot
+    assert snapshot is not None
+    refreshed_features = snapshot.candidates.features.copy()
+    refreshed_features[candidate, :2] = (0.01, 0.99)
+    episode._snapshot = replace(
+        snapshot,
+        candidates=CandidateBatch(
+            features=refreshed_features,
+            mask=snapshot.candidates.mask.copy(),
+            canvas_id=snapshot.candidates.canvas_id,
+            diagnostics=snapshot.candidates.diagnostics,
+            target_elevation_m=(
+                snapshot.candidates.target_elevation_m.copy()
+            ),
+            target_positions_m=snapshot.candidates.target_positions_m.copy(),
+            target_yaw_rad=snapshot.candidates.target_yaw_rad.copy(),
+            candidate_ids=snapshot.candidates.candidate_ids.copy(),
+        ),
+    )
 
     continued = episode.continue_ground_option(identity).request
     continued_goal = continued.goal.target.position_m
@@ -1182,7 +1307,8 @@ def test_ground_option_freezes_target_when_candidate_arrays_refresh(
     with pytest.raises(ValueError, match="active ground option"):
         worker.snapshot_episode_state()
     episode.clear_ground_option()
-    worker.snapshot_episode_state()
+    with pytest.raises(ValueError, match="cannot represent physical opportunity"):
+        worker.snapshot_episode_state()
     with pytest.raises(RuntimeError, match="no active ground option"):
         episode.ground_option_distance_m()
 
@@ -1221,10 +1347,13 @@ def test_ground_option_rebuilds_candidates_only_at_final_policy_boundary(
     reference_count = 0
 
     class CountingCandidateBuilder:
-        def build_from_primitive_graph(self, *args, **kwargs):
+        def build_physical_universe(self, *args, **kwargs):
             nonlocal candidate_builds
             candidate_builds += 1
-            return original_builder.build_from_primitive_graph(*args, **kwargs)
+            return original_builder.build_physical_universe(*args, **kwargs)
+
+        def select_available(self, *args, **kwargs):
+            return original_builder.select_available(*args, **kwargs)
 
     original_executor = worker.environment._reference_executor
 
@@ -1284,28 +1413,24 @@ def test_formal_builder_rejects_preflight_cache_by_default(
         ).build()
 
 
-def test_formal_evaluation_watchdog_classifies_real_unfinished_workers(
+def test_formal_worker_exposes_physical_candidate_diagnostics(
     tmp_path: pathlib.Path,
 ) -> None:
     assembly, _, _ = _assembly(tmp_path)
-    batch = FormalEvaluationBatch(
-        split="validation",
-        factory=assembly.factory,
-        observation_template=assembly.observation_template,
-        scenario_seeds=(409000,),
-    )
+    diagnostics = assembly.factory(
+        0, "WHEELED"
+    ).episode.current_candidate_diagnostics()
 
-    with pytest.raises(
-        report_module.FormalEvaluationIncomplete,
-        match="EVALUATION_INCOMPLETE",
-    ):
-        report_module._evaluate_formal_chunk(
-            CrossAttentionPolicy(),
-            method="nearest_frontier",
-            device=torch.device("cpu"),
-            batch=batch,
-            scenario_offset=0,
-            scenario_seeds=(409000,),
-            watchdog_max_steps=1,
-            watchdog_seconds=60.0,
-        )
+    assert diagnostics.physical_candidate_universe_count > 0
+    assert diagnostics.selected_policy_candidate_count > 0
+    assert diagnostics.planner_failed_current_snapshot_count == 0
+    assert not hasattr(diagnostics, "planner_rejected_count")
+
+
+def test_parallel_and_evaluation_consumers_remain_deferred_to_failure_refresh() -> None:
+    """Task 8 owns replacing this legacy planner-rejection consumer."""
+    consumer_source = inspect.getsource(parallel_pool_module._worker_main)
+
+    assert "planner_rejected_count" in consumer_source
+    with pytest.raises(TypeError, match="planner_rejected_count"):
+        replace(CandidateDiagnostics(), planner_rejected_count=0)

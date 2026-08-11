@@ -1097,6 +1097,46 @@ def _validate_scene_semantics(
             positions_m = _ground_physical_observation_positions_m(
                 physical, output["elevation_m"], bounds_m
             )
+        start_raw = payload["qualified_start_cell"]
+        start_cell = (
+            None
+            if start_raw is None
+            else (int(start_raw[0]), int(start_raw[1]))
+        )
+        start_position_m: tuple[float, float, float] | None = None
+        if start_cell is not None:
+            if not bool(physical[start_cell]):
+                raise FormalCacheError(
+                    "scene physical start is absent from reachability"
+                )
+            if platform == "HOPPER":
+                rows, columns = np.nonzero(physical)
+                matching = np.flatnonzero(
+                    (rows == start_cell[0]) & (columns == start_cell[1])
+                )
+                if len(matching) != 1:
+                    raise FormalCacheError(
+                        "scene Hopper physical start is ambiguous"
+                    )
+                start_position_m = tuple(
+                    float(value)
+                    for value in positions_m[int(matching[0])]
+                )
+            else:
+                start_position_m = (
+                    origin_m[0]
+                    + (float(start_cell[1]) + 0.5) * resolution_m,
+                    origin_m[1]
+                    - (float(start_cell[0]) + 0.5) * resolution_m,
+                    float(output["elevation_m"][start_cell]),
+                )
+        expected_start_sha256 = _physical_start_identity_from_position(
+            platform_type=platform,
+            start_cell=start_cell,
+            position_m=start_position_m,
+        )
+        if expected_start_sha256 != payload["start_identity_sha256"]:
+            raise FormalCacheError("scene physical start identity differs")
         try:
             expected_projection_sha256 = physical_projection_sha256(
                 platform_type=platform,
@@ -1115,7 +1155,7 @@ def _validate_scene_semantics(
                     payload["physical_grid_axis_convention"]
                 ),
                 capability_content_sha256=payload["capability_content_sha256"],
-                start_identity_sha256=payload["start_identity_sha256"],
+                start_identity_sha256=expected_start_sha256,
             )
         except ValueError as error:
             raise FormalCacheError(
@@ -1808,6 +1848,7 @@ def _projection_request(
     *,
     start_cell: tuple[int, int] | None = None,
     local_projected: object | None = None,
+    exact_start_position_m: tuple[float, float, float] | None = None,
 ) -> object:
     import lunar_planner_training_bridge as bridge_api
 
@@ -1839,6 +1880,42 @@ def _projection_request(
             raise FormalCacheError("projection start cell is invalid")
     x_m, y_m = projection_canvas.grid_center_world(int(row), int(column))
     z_m = float(projected.elevation_m[row, column])
+    if exact_start_position_m is not None:
+        if (
+            platform.platform_type != "HOPPER"
+            or start_cell is None
+            or not isinstance(exact_start_position_m, tuple)
+            or len(exact_start_position_m) != 3
+            or any(type(value) is not float for value in exact_start_position_m)
+        ):
+            raise FormalCacheError("exact Hopper start position is invalid")
+        exact = np.ascontiguousarray(
+            np.asarray(exact_start_position_m, dtype=np.float64).reshape((1, 3))
+        )
+        canonical = _positions_m_from_canonical_um(
+            canonical_physical_positions_um(exact)
+        )
+        if not np.array_equal(exact, canonical):
+            raise FormalCacheError(
+                "exact Hopper start position must be canonical micrometres"
+            )
+        try:
+            exact_cell = projection_canvas.world_to_grid(
+                float(exact[0, 0]), float(exact[0, 1])
+            )
+        except ValueError as error:
+            raise FormalCacheError(
+                "exact Hopper start position leaves the canvas"
+            ) from error
+        if exact_cell != (int(row), int(column)):
+            raise FormalCacheError(
+                "exact Hopper start position leaves its start cell"
+            )
+        x_m, y_m, z_m = (
+            float(exact[0, 0]),
+            float(exact[0, 1]),
+            float(exact[0, 2]),
+        )
     request = bridge_api.TrainingPlanRequest()
     request.request_id = f"formal-cache/{scene.scene_id}/{platform.platform_type}"
     request.mission_id = f"formal-cache/{scene.scene_id}"
@@ -2011,6 +2088,7 @@ def _hopper_landing_evidence(
     projected: object,
     start_cell: tuple[int, int],
     bridge: object,
+    exact_start_position_m: tuple[float, float, float],
 ) -> _HopperPhysicalEvidence:
     """Stream exact 0.2 m landing regions into one coarse evidence grid."""
     import lunar_planner_training_bridge as bridge_api
@@ -2059,6 +2137,7 @@ def _hopper_landing_evidence(
                 projected,
                 start_cell=start_cell,
                 local_projected=window.projected,
+                exact_start_position_m=exact_start_position_m,
             ),
             targets,
         )
@@ -2097,20 +2176,25 @@ def _build_truth_physical_reachability(
     projected: object,
     start_cell: tuple[int, int],
     bridge: object,
+    exact_start_position_m: tuple[float, float, float] | None = None,
 ) -> PhysicalReachabilityResult:
     request = _projection_request(
         platform,
         scene,
         projected,
         start_cell=start_cell,
+        exact_start_position_m=exact_start_position_m,
     )
     if platform.platform_type == "HOPPER":
+        if exact_start_position_m is None:
+            raise FormalCacheError("truth Hopper exact start position is missing")
         landing_evidence = _hopper_landing_evidence(
             platform=platform,
             scene=scene,
             projected=projected,
             start_cell=start_cell,
             bridge=bridge,
+            exact_start_position_m=exact_start_position_m,
         )
         output = bridge.project_reachability(
             request, 30.0, landing_evidence.bridge_grid
@@ -2137,6 +2221,24 @@ def _build_truth_physical_reachability(
         positions = np.ascontiguousarray(
             landing_evidence.aim_positions_m[physical], dtype=np.float64
         )
+        if not bool(physical[start_cell]):
+            raise FormalCacheError("truth Hopper exact start is unreachable")
+        rows, columns = np.nonzero(physical)
+        matching = np.flatnonzero(
+            (rows == start_cell[0]) & (columns == start_cell[1])
+        )
+        if len(matching) != 1:
+            raise FormalCacheError("truth Hopper exact start is ambiguous")
+        truth_start = np.ascontiguousarray(
+            positions[int(matching[0])].reshape((1, 3)), dtype=np.float64
+        )
+        truth_start_canonical = _positions_m_from_canonical_um(
+            canonical_physical_positions_um(truth_start)
+        )[0]
+        if tuple(float(value) for value in truth_start_canonical) != (
+            exact_start_position_m
+        ):
+            raise FormalCacheError("truth Hopper exact start position drifted")
     else:
         positions = np.asarray(
             [
@@ -2169,13 +2271,18 @@ def _initial_coverable_fraction(
     scene: MultiResolutionScene,
     start_cell: tuple[int, int],
     detail: StreamedDetailCoverability,
+    exact_start_position_m: tuple[float, float, float] | None = None,
 ) -> float:
     from ..environment.visibility import NativeVisibilityEstimator, SensorGeometry
 
     if detail.coverable_detail_cell_count == 0:
         return 0.0
     provider = SceneTileProvider(scene, capacity=1)
-    x_m, y_m = scene.base_canvas.grid_center_world(*start_cell)
+    x_m, y_m = (
+        scene.base_canvas.grid_center_world(*start_cell)
+        if exact_start_position_m is None
+        else exact_start_position_m[:2]
+    )
     pose_row, pose_column = provider.world_to_detail(x_m, y_m)
     cells = provider.tile_geometry.cells
     start_row = pose_row - cells // 2
@@ -2204,25 +2311,51 @@ def _initial_coverable_fraction(
     return float(observed / detail.coverable_detail_cell_count)
 
 
+def _physical_start_identity_from_position(
+    *,
+    platform_type: str,
+    start_cell: tuple[int, int] | None,
+    position_m: tuple[float, float, float] | None,
+) -> str:
+    if (start_cell is None) is not (position_m is None):
+        raise FormalCacheError("physical start identity inputs differ")
+    payload: dict[str, object] = {
+        "schema": "lunar-physical-start-identity/v1",
+        "platform_type": platform_type,
+        "qualified_start_cell": (
+            None if start_cell is None else list(start_cell)
+        ),
+    }
+    if position_m is not None:
+        values = np.asarray(position_m, dtype=np.float64)
+        if values.shape != (3,) or not np.isfinite(values).all():
+            raise FormalCacheError("physical start position is invalid")
+        payload["position_m"] = [float(value) for value in values]
+    return _semantic_sha(payload)
+
+
 def _physical_start_identity_sha256(
     *,
     platform_type: str,
     projected: object,
     start_cell: tuple[int, int],
+    exact_start_position_m: tuple[float, float, float] | None = None,
 ) -> str:
     row, column = start_cell
     x_m, y_m = projected.canvas.grid_center_world(row, column)
-    return _semantic_sha(
-        {
-            "schema": "lunar-physical-start-identity/v1",
-            "platform_type": platform_type,
-            "qualified_start_cell": [row, column],
-            "position_m": [
-                float(x_m),
-                float(y_m),
-                float(projected.elevation_m[row, column]),
-            ],
-        }
+    position_m = (
+        [
+            float(x_m),
+            float(y_m),
+            float(projected.elevation_m[row, column]),
+        ]
+        if exact_start_position_m is None
+        else [float(value) for value in exact_start_position_m]
+    )
+    return _physical_start_identity_from_position(
+        platform_type=platform_type,
+        start_cell=start_cell,
+        position_m=tuple(position_m),
     )
 
 
@@ -2258,12 +2391,10 @@ def _unsafe_platform_coverability(
     physical = np.zeros((256, 256), dtype=np.bool_)
     detail = np.zeros(detail_shape, dtype=np.bool_)
     capability_sha256 = _physical_capability_content_sha256(platform)
-    start_sha256 = _semantic_sha(
-        {
-            "schema": "lunar-physical-start-identity/v1",
-            "platform_type": platform.platform_type,
-            "qualified_start_cell": None,
-        }
+    start_sha256 = _physical_start_identity_from_position(
+        platform_type=platform.platform_type,
+        start_cell=None,
+        position_m=None,
     )
     algorithm_id = "not-run/unsafe-start"
     canvas = projected.canvas
@@ -2326,6 +2457,13 @@ def _build_scene_platform_coverability(
     platform = capability_bundle.for_platform(platform_type)
     if qualification is None:
         return _unsafe_platform_coverability(platform, projected, detail_shape)
+    exact_start_position_m = getattr(
+        qualification, "exact_start_position_m", None
+    )
+    if platform_type == "HOPPER" and exact_start_position_m is None:
+        raise FormalCacheError("qualified Hopper exact start position is missing")
+    if platform_type != "HOPPER" and exact_start_position_m is not None:
+        raise FormalCacheError("ground qualification carries a Hopper exact start")
 
     import lunar_planner_training_bridge as bridge_api
 
@@ -2337,6 +2475,7 @@ def _build_scene_platform_coverability(
             projected=projected,
             start_cell=qualification.cell,
             bridge=bridge,
+            exact_start_position_m=exact_start_position_m,
         )
     except RuntimeError as error:
         if native_start_failure_is_ineligible(platform_type, error):
@@ -2360,6 +2499,7 @@ def _build_scene_platform_coverability(
         scene=scene,
         start_cell=qualification.cell,
         detail=detail,
+        exact_start_position_m=exact_start_position_m,
     )
     reason = classify_ineligibility(
         qualified_start_cell=qualification.cell,
@@ -2374,6 +2514,7 @@ def _build_scene_platform_coverability(
         platform_type=platform_type,
         projected=projected,
         start_cell=qualification.cell,
+        exact_start_position_m=exact_start_position_m,
     )
     capability_sha256 = _physical_capability_content_sha256(platform)
     canvas = projected.canvas

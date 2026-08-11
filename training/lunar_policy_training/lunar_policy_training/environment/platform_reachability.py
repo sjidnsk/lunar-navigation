@@ -14,6 +14,9 @@ from .observation_builder import Pose2
 
 
 _PLATFORMS = frozenset(("WHEELED", "LEGGED", "HOPPER"))
+_GROUND_PHYSICAL_EVIDENCE_ALGORITHM_ID = (
+    "cpp-safe-traversability-projection/v1"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +173,87 @@ class PlatformCandidateReachability:
         *,
         target_positions_map: np.ndarray | None = None,
     ) -> CandidateReachabilityResult:
+        candidates = self._validate_candidate_cells(candidate_cells)
+        physical = self.project_physical(
+            candidates, target_positions_map=target_positions_map
+        )
+        accepted = np.ascontiguousarray(
+            physical.physical_observation_pose_mask[
+                candidates[:, 0], candidates[:, 1]
+            ],
+            dtype=np.bool_,
+        )
+        return CandidateReachabilityResult(
+            accepted,
+            {"platform_unreachable_count": int((~accepted).sum(dtype=np.int64))},
+        )
+
+    def project_physical(
+        self,
+        observed_safe_cells: np.ndarray,
+        *,
+        target_positions_map: np.ndarray | None = None,
+    ) -> PhysicalReachabilityResult:
+        """Project one observed-safe cell set into physical observation poses."""
+        candidates = self._validate_candidate_cells(observed_safe_cells)
+        positions = self._validate_target_positions(
+            candidates, target_positions_map
+        )
+        candidates, positions = self._row_major_unique(candidates, positions)
+        if self._platform_type == "HOPPER":
+            (
+                accepted,
+                safe,
+                exact_positions,
+                reachability_algorithm_id,
+                evidence_algorithm_id,
+            ) = self._project_hopper_candidates(candidates, positions)
+        else:
+            projection = self._bridge.project_reachability(
+                self._request, self._maximum_edge_distance_m
+            )
+            reachable, reachability_algorithm_id = (
+                self._validate_reachability_projection(projection)
+            )
+            accepted = np.ascontiguousarray(
+                reachable[candidates[:, 0], candidates[:, 1]],
+                dtype=np.bool_,
+            )
+            local_inside, local_accepted = self._ground_local_reachability(
+                candidates, positions
+            )
+            accepted[local_inside] = local_accepted[local_inside]
+            safe = np.ones(len(candidates), dtype=np.bool_)
+            exact_positions = positions
+            evidence_algorithm_id = (
+                _GROUND_PHYSICAL_EVIDENCE_ALGORITHM_ID
+            )
+
+        mask = np.zeros(
+            (self._canvas.geometry.cells, self._canvas.geometry.cells),
+            dtype=np.bool_,
+        )
+        accepted_cells = candidates[accepted]
+        if len(accepted_cells):
+            mask[accepted_cells[:, 0], accepted_cells[:, 1]] = True
+        return PhysicalReachabilityResult(
+            platform_type=self._platform_type,
+            physical_observation_pose_mask=np.ascontiguousarray(mask),
+            observation_positions_m=np.ascontiguousarray(
+                exact_positions[accepted], dtype=np.float64
+            ).reshape((-1, 3)),
+            physical_projection_schema=PHYSICAL_PROJECTION_SCHEMA,
+            physical_reachability_algorithm_id=reachability_algorithm_id,
+            physical_evidence_algorithm_id=evidence_algorithm_id,
+            physical_safe_pose_count=int(safe.sum(dtype=np.int64)),
+            physically_reachable_pose_count=int(
+                accepted.sum(dtype=np.int64)
+            ),
+        )
+
+    def _validate_candidate_cells(
+        self, candidate_cells: np.ndarray
+    ) -> np.ndarray:
         candidates = np.asarray(candidate_cells)
         cells = self._canvas.geometry.cells
         if (
@@ -177,52 +261,110 @@ class PlatformCandidateReachability:
             or candidates.ndim != 2
             or candidates.shape[1:] != (2,)
             or not candidates.flags.c_contiguous
-            or (candidates.size and ((candidates < 0).any() or (candidates >= cells).any()))
-        ):
-            raise ValueError("candidate reachability cells must be int32 [N,2]")
-        if not len(candidates):
-            return CandidateReachabilityResult(
-                np.zeros(0, dtype=np.bool_), {"platform_unreachable_count": 0}
+            or (
+                candidates.size
+                and ((candidates < 0).any() or (candidates >= cells).any())
             )
-        positions = None
-        if target_positions_map is not None:
-            positions = np.asarray(target_positions_map)
-            if (
-                positions.dtype != np.dtype(np.float64)
-                or positions.shape != (len(candidates), 3)
-                or not positions.flags.c_contiguous
-                or not np.isfinite(positions).all()
+        ):
+            raise ValueError(
+                "candidate reachability cells must be int32 [N,2]"
+            )
+        return candidates
+
+    def _validate_target_positions(
+        self,
+        candidates: np.ndarray,
+        target_positions_map: np.ndarray | None,
+    ) -> np.ndarray:
+        if target_positions_map is None:
+            return np.asarray(
+                [
+                    (
+                        *self._canvas.grid_center_world(
+                            int(row), int(column)
+                        ),
+                        float(self._elevation[row, column]),
+                    )
+                    for row, column in candidates
+                ],
+                dtype=np.float64,
+            ).reshape((-1, 3))
+        positions = np.asarray(target_positions_map)
+        if (
+            positions.dtype != np.dtype(np.float64)
+            or positions.shape != (len(candidates), 3)
+            or not positions.flags.c_contiguous
+            or not np.isfinite(positions).all()
+        ):
+            raise ValueError(
+                "candidate target positions must be float64 [N,3]"
+            )
+        for cell, position in zip(candidates, positions, strict=True):
+            try:
+                target_cell = self._canvas.world_to_grid(
+                    float(position[0]), float(position[1])
+                )
+            except ValueError as error:
+                raise ValueError(
+                    "candidate target position leaves its cell"
+                ) from error
+            if target_cell != tuple(cell):
+                raise ValueError("candidate target position leaves its cell")
+        return positions
+
+    @staticmethod
+    def _row_major_unique(
+        candidates: np.ndarray, positions: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if not len(candidates):
+            return candidates.copy(), positions.copy()
+        order = np.lexsort((candidates[:, 1], candidates[:, 0]))
+        sorted_cells = np.ascontiguousarray(candidates[order], dtype=np.int32)
+        sorted_positions = np.ascontiguousarray(
+            positions[order], dtype=np.float64
+        )
+        keep = np.ones(len(sorted_cells), dtype=np.bool_)
+        keep[1:] = np.any(sorted_cells[1:] != sorted_cells[:-1], axis=1)
+        duplicate_indices = np.flatnonzero(~keep)
+        for index in duplicate_indices:
+            if not np.array_equal(
+                sorted_positions[index], sorted_positions[index - 1]
             ):
                 raise ValueError(
-                    "candidate target positions must be float64 [N,3]"
+                    "duplicate candidate cell has conflicting positions"
                 )
-            for cell, position in zip(candidates, positions, strict=True):
-                if self._canvas.world_to_grid(
-                    float(position[0]), float(position[1])
-                ) != tuple(cell):
-                    raise ValueError("candidate target position leaves its cell")
-        if self._platform_type == "HOPPER":
-            projection = self._hopper_projection(candidates, positions)
-        else:
-            projection = self._bridge.project_reachability(
-                self._request, self._maximum_edge_distance_m
-            )
-        reachable = np.ascontiguousarray(
-            np.flipud(projection.reachable).astype(np.bool_)
+        return (
+            np.ascontiguousarray(sorted_cells[keep], dtype=np.int32),
+            np.ascontiguousarray(sorted_positions[keep], dtype=np.float64),
         )
-        if reachable.shape != (cells, cells):
-            raise RuntimeError("candidate reachability projection geometry differs")
-        accepted = np.ascontiguousarray(
-            reachable[candidates[:, 0], candidates[:, 1]], dtype=np.bool_
-        )
-        if self._platform_type != "HOPPER":
-            local_inside, local_accepted = self._ground_local_reachability(
-                candidates, positions
+
+    def _validate_reachability_projection(
+        self, projection: object
+    ) -> tuple[np.ndarray, str]:
+        reachable = getattr(projection, "reachable", None)
+        if getattr(projection, "platform_type", None) != self._platform_type:
+            raise RuntimeError(
+                "candidate reachability projection platform differs"
             )
-            accepted[local_inside] = local_accepted[local_inside]
-        return CandidateReachabilityResult(
-            accepted,
-            {"platform_unreachable_count": int((~accepted).sum(dtype=np.int64))},
+        cells = self._canvas.geometry.cells
+        if (
+            not isinstance(reachable, np.ndarray)
+            or reachable.dtype != np.dtype(np.uint8)
+            or reachable.shape != (cells, cells)
+            or not reachable.flags.c_contiguous
+            or (reachable.size and (reachable > 1).any())
+        ):
+            raise RuntimeError(
+                "candidate reachability projection geometry differs"
+            )
+        algorithm_id = getattr(projection, "algorithm_id", None)
+        if not isinstance(algorithm_id, str) or not algorithm_id:
+            raise RuntimeError(
+                "candidate reachability projection algorithm is invalid"
+            )
+        return (
+            np.ascontiguousarray(np.flipud(reachable).astype(np.bool_)),
+            algorithm_id,
         )
 
     def _ground_local_reachability(
@@ -378,26 +520,22 @@ class PlatformCandidateReachability:
             (points_map - np.asarray([tx, ty, tz])) @ rotation_child_to_parent
         )
 
-    def _hopper_projection(
+    def _project_hopper_candidates(
         self,
         candidates: np.ndarray,
-        target_positions_map: np.ndarray | None,
-    ) -> object:
+        target_positions_map: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, str]:
         import lunar_planner_training_bridge as bridge_api
 
         start = self._canvas.world_to_grid(self._pose.x_m, self._pose.y_m)
         cells_to_certify = [start, *map(tuple, candidates.tolist())]
         cells_to_certify = list(dict.fromkeys(cells_to_certify))
-        exact_targets = (
-            {}
-            if target_positions_map is None
-            else {
-                tuple(cell): tuple(float(value) for value in position)
-                for cell, position in zip(
-                    candidates.tolist(), target_positions_map.tolist(), strict=True
-                )
-            }
-        )
+        exact_targets = {
+            tuple(cell): tuple(float(value) for value in position)
+            for cell, position in zip(
+                candidates.tolist(), target_positions_map.tolist(), strict=True
+            )
+        }
         targets = np.asarray(
             [
                 (
@@ -421,6 +559,55 @@ class PlatformCandidateReachability:
         landing = self._bridge.project_hopper_landing_evidence(
             self._request, np.ascontiguousarray(targets)
         )
+        count = len(cells_to_certify)
+        certified = getattr(landing, "certified", None)
+        aim = getattr(landing, "aim_positions_m", None)
+        boundary = getattr(landing, "boundary_m", None)
+        area = getattr(landing, "area_m2", None)
+        evidence_algorithm_id = getattr(landing, "algorithm_id", None)
+        if (
+            not isinstance(certified, np.ndarray)
+            or certified.dtype != np.dtype(np.bool_)
+            or certified.shape != (count,)
+            or not certified.flags.c_contiguous
+            or not isinstance(aim, np.ndarray)
+            or aim.dtype != np.dtype(np.float64)
+            or aim.shape != (count, 3)
+            or not aim.flags.c_contiguous
+            or not np.isfinite(aim).all()
+            or not isinstance(boundary, np.ndarray)
+            or boundary.dtype != np.dtype(np.float64)
+            or boundary.shape != (count, 4, 3)
+            or not boundary.flags.c_contiguous
+            or not np.isfinite(boundary).all()
+            or not isinstance(area, np.ndarray)
+            or area.dtype != np.dtype(np.float64)
+            or area.shape != (count,)
+            or not area.flags.c_contiguous
+            or not np.isfinite(area).all()
+            or (area < 0.0).any()
+        ):
+            raise RuntimeError("hopper landing evidence geometry differs")
+        if (
+            not isinstance(evidence_algorithm_id, str)
+            or not evidence_algorithm_id
+        ):
+            raise RuntimeError("hopper landing evidence algorithm is invalid")
+        for cell, position, is_certified in zip(
+            cells_to_certify, aim, certified, strict=True
+        ):
+            if not bool(is_certified):
+                continue
+            try:
+                aim_cell = self._canvas.world_to_grid(
+                    float(position[0]), float(position[1])
+                )
+            except ValueError as error:
+                raise RuntimeError(
+                    "certified hopper aim leaves its cell"
+                ) from error
+            if aim_cell != cell:
+                raise RuntimeError("certified hopper aim leaves its cell")
         shape = (self._canvas.geometry.cells, self._canvas.geometry.cells)
         certified = np.zeros(shape, dtype=np.bool_)
         aim = np.zeros((*shape, 3), dtype=np.float64)
@@ -436,10 +623,38 @@ class PlatformCandidateReachability:
             np.ascontiguousarray(np.flipud(aim)),
             np.ascontiguousarray(np.flipud(boundary)),
             np.ascontiguousarray(np.flipud(area)),
-            str(landing.algorithm_id),
+            evidence_algorithm_id,
         )
-        return self._bridge.project_direct_hopper_reachability(
+        projection = self._bridge.project_direct_hopper_reachability(
             self._request, self._maximum_edge_distance_m, evidence
+        )
+        reachable, reachability_algorithm_id = (
+            self._validate_reachability_projection(projection)
+        )
+        index_by_cell = {
+            cell: index for index, cell in enumerate(cells_to_certify)
+        }
+        candidate_indices = np.asarray(
+            [index_by_cell[tuple(cell)] for cell in candidates],
+            dtype=np.int64,
+        )
+        candidate_certified = np.ascontiguousarray(
+            landing.certified[candidate_indices], dtype=np.bool_
+        )
+        accepted = np.ascontiguousarray(
+            reachable[candidates[:, 0], candidates[:, 1]]
+            & candidate_certified,
+            dtype=np.bool_,
+        )
+        exact_positions = np.ascontiguousarray(
+            landing.aim_positions_m[candidate_indices], dtype=np.float64
+        ).reshape((-1, 3))
+        return (
+            accepted,
+            candidate_certified,
+            exact_positions,
+            reachability_algorithm_id,
+            evidence_algorithm_id,
         )
 
 
