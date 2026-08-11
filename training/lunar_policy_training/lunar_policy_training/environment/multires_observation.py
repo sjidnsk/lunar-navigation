@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 import math
+import struct
 
 import numpy as np
 
@@ -178,6 +180,7 @@ class MultiresSensorObservationState(SensorObservationState):
         self.scene = scene
         self.tile_provider = tile_provider
         self._detail_tiles: dict[tuple[int, int], _ObservedDetailTile] = {}
+        self._evidence_generation = 0
         self.coarse_obstacle_height_m = np.zeros(shape, dtype=np.float32)
         self.coarse_forbidden_ratio = np.zeros(shape, dtype=np.float32)
 
@@ -197,6 +200,35 @@ class MultiresSensorObservationState(SensorObservationState):
     @property
     def allocated_detail_tiles(self) -> int:
         return len(self._detail_tiles)
+
+    @property
+    def evidence_generation(self) -> int:
+        return self._evidence_generation
+
+    def physical_evidence_sha256(self) -> str:
+        """Hash sorted sparse tile identities and their observed layer bytes."""
+        digest = sha256()
+        layer_names = (
+            "elevation_m",
+            "physical_obstacle_ratio",
+            "physical_obstacle_height_m",
+            "forbidden_ratio",
+            "valid_mask",
+            "observation_age_s",
+            "observation_quality",
+            "observation_count",
+        )
+        for tile_identity in sorted(self._detail_tiles):
+            digest.update(struct.pack("<ii", *tile_identity))
+            tile = self._detail_tiles[tile_identity]
+            for name in layer_names:
+                values = np.ascontiguousarray(getattr(tile, name))
+                if values.dtype.itemsize > 1:
+                    values = np.ascontiguousarray(
+                        values, dtype=values.dtype.newbyteorder("<")
+                    )
+                digest.update(values.tobytes(order="C"))
+        return digest.hexdigest()
 
     @property
     def remaining_coverable_detail_cell_count(self) -> int | None:
@@ -635,12 +667,14 @@ class MultiresSensorObservationState(SensorObservationState):
         )
         for coarse_row, coarse_column in affected:
             self._aggregate_coarse_cell(coarse_row, coarse_column)
-        return ObservationDelta(
+        delta = ObservationDelta(
             visible_cells=int(np.count_nonzero(visible)),
             newly_observed_cells=int(new_rows.size),
             mission_observed_delta_m2=mission_delta,
             priority_observed_delta_m2=priority_delta,
         )
+        self._evidence_generation += 1
+        return delta
 
     def _detail_block(self, coarse_row: int, coarse_column: int, name: str) -> np.ndarray:
         if not (

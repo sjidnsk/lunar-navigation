@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
+from hashlib import sha256
+import json
 import math
 
 import numpy as np
@@ -12,104 +14,182 @@ import numpy as np
 from lunar_model_contract import ObservationContractV3
 
 from .observation_builder import MissionRaster, ObservedWorld, PlatformProjection, Pose2
-from .platform_reachability import PlatformCandidateReachability
-from .primitive_reachability import ObservedPrimitiveSnapshot
+from .platform_reachability import (
+    PhysicalReachabilityResult,
+    PlatformCandidateReachability,
+)
 from .visibility import SensorGeometry, VisibilityEstimator, _ray_cells
 
 
 _GROUND_PLATFORM_TYPES = frozenset(("WHEELED", "LEGGED"))
 _PLATFORM_TYPES = _GROUND_PLATFORM_TYPES | {"HOPPER"}
 _MIN_PLATFORM_CANDIDATE_RESERVE = 8
+_MAX_PHYSICAL_CANDIDATES = 4096
+_POLICY_CANDIDATE_COUNT = 64
+
+CANDIDATE_ID_SCHEMA = "lunar-physical-candidate-id/v1"
+PHYSICAL_SNAPSHOT_SCHEMA = "lunar-physical-snapshot/v1"
 
 
 CANDIDATE_DIAGNOSTIC_FIELDS = (
-    "frontier_anchor_count",
-    "visited_excluded_count",
-    "static_infeasible_count",
-    "platform_unreachable_count",
+    "physical_snapshot_id",
+    "physical_reachability_algorithm_id",
+    "physical_candidate_universe_count",
+    "selected_policy_candidate_count",
+    "available_candidate_count",
+    "untried_reserve_count",
+    "planner_failed_current_snapshot_count",
     "zero_gain_count",
-    "emitted_count",
-    "planner_rejected_count",
-    "primitive_state_count",
-    "forward_reachable_state_count",
-    "returnable_state_count",
-    "recoverable_observation_state_count",
-    "frontier_hint_count",
-    "positive_gain_state_count",
-    "transit_state_count",
-    "invalidated_edge_count",
-    "revalidated_edge_count",
+    "visited_excluded_count",
+    "physical_unreachable_count",
 )
 
 
 @dataclass(frozen=True, slots=True)
 class CandidateDiagnostics:
+    physical_snapshot_id: str = ""
+    physical_reachability_algorithm_id: str = ""
+    physical_candidate_universe_count: int = 0
+    selected_policy_candidate_count: int = 0
+    available_candidate_count: int = 0
+    untried_reserve_count: int = 0
+    planner_failed_current_snapshot_count: int = 0
+    zero_gain_count: int = 0
+    visited_excluded_count: int = 0
+    physical_unreachable_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.physical_snapshot_id, str) or not isinstance(
+            self.physical_reachability_algorithm_id, str
+        ):
+            raise TypeError("candidate diagnostic identities must be strings")
+        values = (
+            self.physical_candidate_universe_count,
+            self.selected_policy_candidate_count,
+            self.available_candidate_count,
+            self.untried_reserve_count,
+            self.planner_failed_current_snapshot_count,
+            self.zero_gain_count,
+            self.visited_excluded_count,
+            self.physical_unreachable_count,
+        )
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in values):
+            raise ValueError("candidate diagnostics must contain non-negative integers")
+        if (
+            self.physical_candidate_universe_count > _MAX_PHYSICAL_CANDIDATES
+            or self.selected_policy_candidate_count > _POLICY_CANDIDATE_COUNT
+            or self.available_candidate_count
+            > self.physical_candidate_universe_count
+            or self.selected_policy_candidate_count
+            > self.available_candidate_count
+            or self.planner_failed_current_snapshot_count
+            != self.physical_candidate_universe_count
+            - self.available_candidate_count
+            or self.untried_reserve_count
+            != self.available_candidate_count
+            - self.selected_policy_candidate_count
+        ):
+            raise ValueError("candidate selection diagnostics are inconsistent")
+
+
+@dataclass(frozen=True, slots=True)
+class _QualificationDiagnostics:
     frontier_anchor_count: int = 0
     visited_excluded_count: int = 0
     static_infeasible_count: int = 0
     platform_unreachable_count: int = 0
     zero_gain_count: int = 0
-    emitted_count: int = 0
-    planner_rejected_count: int = 0
-    primitive_state_count: int = 0
-    forward_reachable_state_count: int = 0
-    returnable_state_count: int = 0
-    recoverable_observation_state_count: int = 0
-    frontier_hint_count: int = 0
-    positive_gain_state_count: int = 0
-    transit_state_count: int = 0
-    invalidated_edge_count: int = 0
-    revalidated_edge_count: int = 0
+
+
+def _is_sha256(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _canonical_sha256(body: object) -> str:
+    return sha256(
+        json.dumps(
+            body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalCandidate:
+    candidate_id: str
+    position_grid_key: tuple[int, int]
+    target_position_m: tuple[float, float, float]
+    target_yaw_bin: int
+    target_yaw_rad: float
+    goal_tolerance_mm: int
+    feature: np.ndarray
+    rank_key: tuple[object, ...]
 
     def __post_init__(self) -> None:
-        values = (
-            self.frontier_anchor_count,
-            self.visited_excluded_count,
-            self.static_infeasible_count,
-            self.platform_unreachable_count,
-            self.zero_gain_count,
-            self.emitted_count,
-            self.planner_rejected_count,
-            self.primitive_state_count,
-            self.forward_reachable_state_count,
-            self.returnable_state_count,
-            self.recoverable_observation_state_count,
-            self.frontier_hint_count,
-            self.positive_gain_state_count,
-            self.transit_state_count,
-            self.invalidated_edge_count,
-            self.revalidated_edge_count,
-        )
-        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in values):
-            raise ValueError("candidate diagnostics must contain non-negative integers")
-        remaining = self.frontier_anchor_count
-        for value in (
-            self.visited_excluded_count,
-            self.static_infeasible_count,
-            self.platform_unreachable_count,
-            self.zero_gain_count,
+        if not _is_sha256(self.candidate_id):
+            raise ValueError("physical candidate ID must be a lowercase SHA-256")
+        if (
+            not isinstance(self.position_grid_key, tuple)
+            or len(self.position_grid_key) != 2
+            or any(type(value) is not int or value < 0 for value in self.position_grid_key)
+            or not isinstance(self.target_position_m, tuple)
+            or len(self.target_position_m) != 3
+            or not all(math.isfinite(float(value)) for value in self.target_position_m)
+            or type(self.target_yaw_bin) is not int
+            or not 0 <= self.target_yaw_bin < 64
+            or not math.isfinite(self.target_yaw_rad)
+            or type(self.goal_tolerance_mm) is not int
+            or self.goal_tolerance_mm < 0
+            or not isinstance(self.rank_key, tuple)
         ):
-            if value > remaining:
-                raise ValueError("candidate diagnostics stage count exceeds input")
-            remaining -= value
-        if self.emitted_count > remaining:
-            raise ValueError("candidate diagnostics emitted count exceeds survivors")
-        if self.planner_rejected_count > self.emitted_count:
-            raise ValueError("candidate planner rejection exceeds emitted count")
-        if self.primitive_state_count > 0 and (
-            self.forward_reachable_state_count > self.primitive_state_count
-            or self.returnable_state_count > self.primitive_state_count
-            or self.recoverable_observation_state_count
-            > min(
-                self.forward_reachable_state_count,
-                self.returnable_state_count,
-            )
-            or self.positive_gain_state_count + self.transit_state_count
-            > self.recoverable_observation_state_count
-            or self.emitted_count
-            > self.positive_gain_state_count + self.transit_state_count
+            raise ValueError("physical candidate fields are invalid")
+        feature = np.ascontiguousarray(self.feature, dtype=np.float32)
+        if feature.shape != (len(ObservationContractV3.frontier_fields),) or not np.isfinite(feature).all():
+            raise ValueError("physical candidate feature must be finite float32 [12]")
+        feature = feature.copy()
+        feature.setflags(write=False)
+        object.__setattr__(self, "feature", feature)
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalCandidateUniverse:
+    physical_snapshot_id: str
+    physical_reachability_algorithm_id: str
+    candidates: tuple[PhysicalCandidate, ...]
+    universe_sha256: str
+    diagnostics: CandidateDiagnostics
+
+    def __post_init__(self) -> None:
+        if (
+            not _is_sha256(self.physical_snapshot_id)
+            or not isinstance(self.physical_reachability_algorithm_id, str)
+            or not self.physical_reachability_algorithm_id
+            or not isinstance(self.candidates, tuple)
+            or len(self.candidates) > _MAX_PHYSICAL_CANDIDATES
+            or any(not isinstance(candidate, PhysicalCandidate) for candidate in self.candidates)
+            or len({candidate.candidate_id for candidate in self.candidates})
+            != len(self.candidates)
+            or tuple(candidate.rank_key for candidate in self.candidates)
+            != tuple(sorted(candidate.rank_key for candidate in self.candidates))
+            or not _is_sha256(self.universe_sha256)
+            or self.universe_sha256
+            != sha256(
+                "".join(candidate.candidate_id for candidate in self.candidates).encode("ascii")
+            ).hexdigest()
+            or not isinstance(self.diagnostics, CandidateDiagnostics)
+            or self.diagnostics.physical_snapshot_id != self.physical_snapshot_id
+            or self.diagnostics.physical_reachability_algorithm_id
+            != self.physical_reachability_algorithm_id
+            or self.diagnostics.physical_candidate_universe_count
+            != len(self.candidates)
         ):
-            raise ValueError("candidate primitive graph counts are inconsistent")
+            raise ValueError("physical candidate universe is invalid")
 
 
 @dataclass(frozen=True)
@@ -121,8 +201,7 @@ class CandidateBatch:
     target_elevation_m: np.ndarray | None = None
     target_positions_m: np.ndarray | None = None
     target_yaw_rad: np.ndarray | None = None
-    primitive_state_ids: np.ndarray | None = None
-    primitive_graph_revision: int = 0
+    candidate_ids: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         features, mask = np.asarray(self.features, dtype=np.float32), np.asarray(self.mask, dtype=bool)
@@ -130,8 +209,8 @@ class CandidateBatch:
             raise ValueError("candidate batch must use finite [64,12] and [64]")
         if not isinstance(self.diagnostics, CandidateDiagnostics):
             raise TypeError("candidate diagnostics are required")
-        if self.diagnostics.emitted_count != int(mask.sum()):
-            raise ValueError("candidate diagnostics emitted count must match mask")
+        if self.diagnostics.selected_policy_candidate_count != int(mask.sum()):
+            raise ValueError("selected policy candidate count must match mask")
         target_elevation = self.target_elevation_m
         if target_elevation is None:
             target_elevation = np.zeros(64, dtype=np.float64)
@@ -154,10 +233,10 @@ class CandidateBatch:
         if target_yaw is None:
             target_yaw = np.zeros(64, dtype=np.float64)
         target_yaw = np.ascontiguousarray(target_yaw)
-        state_ids = self.primitive_state_ids
-        if state_ids is None:
-            state_ids = np.zeros(64, dtype=np.uint64)
-        state_ids = np.ascontiguousarray(state_ids)
+        candidate_ids = self.candidate_ids
+        if candidate_ids is None:
+            candidate_ids = np.full(64, "", dtype="<U64")
+        candidate_ids = np.ascontiguousarray(candidate_ids, dtype="<U64")
         if (
             target_positions.dtype != np.dtype(np.float64)
             or target_positions.shape != (64, 3)
@@ -165,16 +244,17 @@ class CandidateBatch:
             or target_yaw.dtype != np.dtype(np.float64)
             or target_yaw.shape != (64,)
             or not np.isfinite(target_yaw).all()
-            or state_ids.dtype != np.dtype(np.uint64)
-            or state_ids.shape != (64,)
-            or type(self.primitive_graph_revision) is not int
-            or self.primitive_graph_revision < 0
-            or (state_ids[~mask] != 0).any()
+            or candidate_ids.shape != (64,)
+            or (candidate_ids[~mask] != "").any()
+            or any(
+                value and not _is_sha256(str(value))
+                for value in candidate_ids[mask]
+            )
         ):
-            raise ValueError("candidate primitive targets are invalid")
+            raise ValueError("candidate targets or identities are invalid")
         object.__setattr__(self, "target_positions_m", target_positions)
         object.__setattr__(self, "target_yaw_rad", target_yaw)
-        object.__setattr__(self, "primitive_state_ids", state_ids)
+        object.__setattr__(self, "candidate_ids", candidate_ids)
 
     @property
     def count(self) -> int:
@@ -185,16 +265,27 @@ class CandidateBatch:
         cls,
         canvas_id: str | None = None,
         diagnostics: CandidateDiagnostics | None = None,
-        *,
-        primitive_graph_revision: int = 0,
     ) -> "CandidateBatch":
         return cls(
             np.zeros((64, 12), np.float32),
             np.zeros(64, bool),
             canvas_id,
             diagnostics or CandidateDiagnostics(),
-            primitive_graph_revision=primitive_graph_revision,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateBuildResult:
+    universe: PhysicalCandidateUniverse
+    batch: CandidateBatch
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.universe, PhysicalCandidateUniverse) or not isinstance(
+            self.batch, CandidateBatch
+        ):
+            raise TypeError("candidate build result is invalid")
+        if self.batch.diagnostics != self.universe.diagnostics:
+            raise ValueError("candidate result diagnostics differ")
 
 
 def _neighbors(row: int, column: int, cells: int) -> tuple[tuple[int, int], ...]:
@@ -263,6 +354,7 @@ class _FeasibleAnchor:
     point: tuple[int, int]
     feature: np.ndarray
     elevation_m: float
+    target_position_m: tuple[float, float, float]
 
 
 def _anchor_key(anchor: _FeasibleAnchor) -> tuple[object, ...]:
@@ -310,114 +402,97 @@ def _select_anchors(anchors: list[_FeasibleAnchor], segment_count: int, limit: i
     return sorted(selected, key=_anchor_key)
 
 
-_PrimitiveCandidate = tuple[int, tuple[int, int], float, float]
-
-
-def _primitive_candidate_key(
-    candidate: _PrimitiveCandidate,
-    graph: ObservedPrimitiveSnapshot,
-) -> tuple[float, float, int]:
-    state_index, _, gain, _ = candidate
-    path_cost = float(graph.path_cost[state_index])
-    return (
-        -gain / (1.0 + path_cost),
-        path_cost,
-        int(graph.state_ids[state_index]),
-    )
-
-
-def _primitive_candidate_distance(
-    lhs: _PrimitiveCandidate,
-    rhs: _PrimitiveCandidate,
-    graph: ObservedPrimitiveSnapshot,
+def _candidate_distance_squared(
+    lhs: PhysicalCandidate, rhs: PhysicalCandidate
 ) -> float:
-    lhs_position = graph.positions_m[lhs[0], :2]
-    rhs_position = graph.positions_m[rhs[0], :2]
-    return float(np.linalg.norm(lhs_position - rhs_position))
+    delta_row = lhs.position_grid_key[0] - rhs.position_grid_key[0]
+    delta_column = lhs.position_grid_key[1] - rhs.position_grid_key[1]
+    return float(delta_row * delta_row + delta_column * delta_column)
 
 
-def _farthest_primitive_subset(
-    candidates: list[_PrimitiveCandidate],
+def _stable_farthest_candidates(
+    candidates: list[PhysicalCandidate],
     count: int,
-    graph: ObservedPrimitiveSnapshot,
-) -> list[_PrimitiveCandidate]:
-    remaining = sorted(
-        candidates, key=lambda candidate: _primitive_candidate_key(candidate, graph)
+    *,
+    initial: list[PhysicalCandidate] | None = None,
+) -> list[PhysicalCandidate]:
+    ordered = sorted(candidates, key=lambda candidate: candidate.rank_key)
+    selected = list(initial or ())
+    selected_ids = {candidate.candidate_id for candidate in selected}
+    remaining = [
+        candidate
+        for candidate in ordered
+        if candidate.candidate_id not in selected_ids
+    ]
+    if not selected and remaining and count > 0:
+        selected.append(remaining.pop(0))
+    if not remaining or len(selected) >= count:
+        return selected[:count]
+    minimum_distances = np.asarray(
+        [
+            min(
+                _candidate_distance_squared(candidate, chosen)
+                for chosen in selected
+            )
+            for candidate in remaining
+        ],
+        dtype=np.float64,
     )
-    if not remaining or count <= 0:
-        return []
-    selected = [remaining.pop(0)]
     while remaining and len(selected) < count:
-        next_index = min(
-            range(len(remaining)),
-            key=lambda index: (
-                -min(
-                    _primitive_candidate_distance(
-                        remaining[index], chosen, graph
-                    )
-                    for chosen in selected
-                ),
-                _primitive_candidate_key(remaining[index], graph),
-            ),
+        farthest = float(minimum_distances.max(initial=-1.0))
+        next_index = next(
+            index
+            for index, distance in enumerate(minimum_distances)
+            if distance == farthest
         )
-        selected.append(remaining.pop(next_index))
+        chosen = remaining.pop(next_index)
+        selected.append(chosen)
+        minimum_distances = np.delete(minimum_distances, next_index)
+        if remaining:
+            new_distances = np.asarray(
+                [
+                    _candidate_distance_squared(candidate, chosen)
+                    for candidate in remaining
+                ],
+                dtype=np.float64,
+            )
+            minimum_distances = np.minimum(minimum_distances, new_distances)
     return selected
 
 
-def _select_primitive_candidates(
-    candidates: list[_PrimitiveCandidate],
-    graph: ObservedPrimitiveSnapshot,
+def _compress_physical_candidates(
+    candidates: list[PhysicalCandidate],
     *,
     canvas_cells: int,
-    limit: int = 64,
-) -> list[_PrimitiveCandidate]:
-    """Keep every spatial component represented before stable farthest fill."""
-    ordered = sorted(
-        candidates, key=lambda candidate: _primitive_candidate_key(candidate, graph)
-    )
+    limit: int = _MAX_PHYSICAL_CANDIDATES,
+) -> tuple[PhysicalCandidate, ...]:
+    ordered = sorted(candidates, key=lambda candidate: candidate.rank_key)
     if len(ordered) <= limit:
-        return ordered
+        return tuple(ordered)
     segments = _segments(
-        sorted({candidate[1] for candidate in ordered}), canvas_cells
+        sorted({candidate.position_grid_key for candidate in ordered}),
+        canvas_cells,
     )
     segment_by_cell = {
         cell: segment_id
         for segment_id, segment in enumerate(segments)
         for cell in segment
     }
-    by_segment: list[list[_PrimitiveCandidate]] = [
+    by_segment: list[list[PhysicalCandidate]] = [
         [] for _ in range(len(segments))
     ]
     for candidate in ordered:
-        by_segment[segment_by_cell[candidate[1]]].append(candidate)
+        by_segment[segment_by_cell[candidate.position_grid_key]].append(candidate)
     representatives = [segment[0] for segment in by_segment if segment]
     if len(representatives) > limit:
-        selected = _farthest_primitive_subset(representatives, limit, graph)
+        selected = _stable_farthest_candidates(representatives, limit)
     else:
-        representative_ids = {candidate[0] for candidate in representatives}
-        remaining = [
-            candidate
-            for candidate in ordered
-            if candidate[0] not in representative_ids
-        ]
-        selected = list(representatives)
-        while remaining and len(selected) < limit:
-            next_index = min(
-                range(len(remaining)),
-                key=lambda index: (
-                    -min(
-                        _primitive_candidate_distance(
-                            remaining[index], chosen, graph
-                        )
-                        for chosen in selected
-                    ),
-                    _primitive_candidate_key(remaining[index], graph),
-                ),
-            )
-            selected.append(remaining.pop(next_index))
-    return sorted(
-        selected, key=lambda candidate: _primitive_candidate_key(candidate, graph)
-    )
+        selected = _stable_farthest_candidates(
+            ordered,
+            limit,
+            initial=representatives,
+        )
+    return tuple(sorted(selected, key=lambda candidate: candidate.rank_key))
 
 
 class CandidateBuilderV2:
@@ -591,343 +666,508 @@ class CandidateBuilderV2:
             mask,
             canvas.identity,
             CandidateDiagnostics(
-                frontier_anchor_count=diagnostics.frontier_anchor_count,
-                visited_excluded_count=diagnostics.visited_excluded_count,
-                static_infeasible_count=diagnostics.static_infeasible_count,
-                platform_unreachable_count=diagnostics.platform_unreachable_count,
+                physical_snapshot_id="legacy/non-formal",
+                physical_reachability_algorithm_id=projection.source,
+                physical_candidate_universe_count=len(chosen),
+                selected_policy_candidate_count=len(chosen),
+                available_candidate_count=len(chosen),
+                untried_reserve_count=0,
+                planner_failed_current_snapshot_count=0,
                 zero_gain_count=diagnostics.zero_gain_count,
-                emitted_count=len(chosen),
+                visited_excluded_count=diagnostics.visited_excluded_count,
+                physical_unreachable_count=(
+                    diagnostics.static_infeasible_count
+                    + diagnostics.platform_unreachable_count
+                ),
             ),
             target_elevation,
         )
 
-    def build_from_primitive_graph(
+    def build_physical_universe(
         self,
         world: ObservedWorld,
         mission: MissionRaster,
         pose_map: Pose2,
-        primitive_graph: ObservedPrimitiveSnapshot,
+        projection: PlatformProjection,
         *,
+        physical_reachability: PhysicalReachabilityResult,
         platform_type: str,
-        excluded_state_ids: Collection[int] = (),
-    ) -> CandidateBatch:
-        """Build policy targets only from exact current graph states."""
-        if platform_type not in _PLATFORM_TYPES:
-            raise ValueError("platform_type must be WHEELED, LEGGED, or HOPPER")
+        platform_id: str,
+        capability_content_sha256: str,
+        mission_revision: int,
+        evidence_generation: int,
+        physical_evidence_sha256: str,
+        physical_reachability_algorithm_id: str,
+        goal_tolerance_mm: int,
+        excluded_cells: Collection[tuple[int, int]] = (),
+        backtrack_pose: Pose2 | None = None,
+    ) -> PhysicalCandidateUniverse:
+        """Build one primitive-independent, bounded physical opportunity set."""
+        self._validate_physical_identity(
+            platform_type=platform_type,
+            platform_id=platform_id,
+            capability_content_sha256=capability_content_sha256,
+            mission_revision=mission_revision,
+            evidence_generation=evidence_generation,
+            physical_evidence_sha256=physical_evidence_sha256,
+            physical_reachability_algorithm_id=(
+                physical_reachability_algorithm_id
+            ),
+            goal_tolerance_mm=goal_tolerance_mm,
+        )
         if (
-            not isinstance(primitive_graph, ObservedPrimitiveSnapshot)
-            or primitive_graph.platform_type != platform_type
-        ):
-            raise TypeError("candidate primitive graph is invalid")
-        if (
-            pose_map.frame_id != "map"
+            not isinstance(world, ObservedWorld)
+            or not isinstance(mission, MissionRaster)
+            or not isinstance(projection, PlatformProjection)
+            or not isinstance(
+                physical_reachability, PhysicalReachabilityResult
+            )
+            or not isinstance(pose_map, Pose2)
+            or pose_map.frame_id != "map"
             or world.canvas != mission.canvas
-            or primitive_graph.revision <= 0
+            or world.canvas != projection.canvas
         ):
-            return CandidateBatch.empty(
-                world.canvas.identity,
-                primitive_graph_revision=primitive_graph.revision,
-            )
-        excluded = {int(value) for value in excluded_state_ids}
-        if any(value < 0 for value in excluded):
-            raise ValueError("excluded primitive state identity is invalid")
-        positions = primitive_graph.positions_m
-        distances = np.hypot(
-            positions[:, 0] - pose_map.x_m,
-            positions[:, 1] - pose_map.y_m,
+            raise ValueError("physical candidate inputs must share a map canvas")
+        canvas = world.canvas
+        cells = canvas.geometry.cells
+        physical_mask = physical_reachability.physical_observation_pose_mask
+        if (
+            physical_reachability.platform_type != platform_type
+            or physical_reachability.physical_reachability_algorithm_id
+            != physical_reachability_algorithm_id
+            or physical_mask.shape != (cells, cells)
+        ):
+            raise ValueError("physical reachability identity or geometry differs")
+        physical_cells = tuple(
+            (int(row), int(column))
+            for row, column in zip(*np.nonzero(physical_mask), strict=True)
         )
-        raw_indices = np.flatnonzero(primitive_graph.observation_state)
-        unvisited_indices = np.asarray(
-            [
-                index
-                for index in raw_indices
-                if int(primitive_graph.state_ids[index]) not in excluded
-                and primitive_graph.path_cost[index] > 0.0
-            ],
-            dtype=np.intp,
-        )
-        visited_excluded = len(raw_indices) - len(unvisited_indices)
-        spatial: list[tuple[int, tuple[int, int]]] = []
-        for index in unvisited_indices:
-            try:
-                cell = world.canvas.world_to_grid(
-                    float(positions[index, 0]), float(positions[index, 1])
+        physical_positions = physical_reachability.observation_positions_m
+        if len(physical_cells) != len(physical_positions):
+            raise ValueError("physical reachability positions differ from mask")
+        exact_target_poses: dict[tuple[int, int], Pose2] = {}
+        for cell, position in zip(
+            physical_cells, physical_positions, strict=True
+        ):
+            if canvas.world_to_grid(
+                float(position[0]), float(position[1])
+            ) != cell:
+                raise ValueError(
+                    "physical reachability position leaves its row-major cell"
                 )
-            except ValueError:
-                continue
-            spatial.append((int(index), cell))
-        static_infeasible = len(unvisited_indices) - len(spatial)
-        feasible = [
-            (index, cell)
-            for index, cell in spatial
-            if bool(primitive_graph.recoverable[index])
-            and distances[index] <= self._sensor.range_m + 1.0e-9
-            and (
-                platform_type != "HOPPER"
-                or bool(primitive_graph.direct_successor[index])
+            exact_target_poses[cell] = Pose2(
+                float(position[0]),
+                float(position[1]),
+                elevation_m=float(position[2]),
             )
-        ]
-        platform_unreachable = len(spatial) - len(feasible)
-        unknown_roi = (mission.roi_ratio > 0.0) & ~world.observed_mask
-        adjacent_unknown = np.zeros_like(unknown_roi)
+        try:
+            robot = canvas.world_to_grid(pose_map.x_m, pose_map.y_m)
+        except ValueError as error:
+            raise ValueError("physical candidate pose is outside the map") from error
+
+        observed = world.observed_mask
+        roi = mission.roi_ratio > 0.0
+        unknown_roi = roi & ~observed
+        adjacent_unknown = np.zeros_like(observed)
         adjacent_unknown[1:] |= unknown_roi[:-1]
         adjacent_unknown[:-1] |= unknown_roi[1:]
         adjacent_unknown[:, 1:] |= unknown_roi[:, :-1]
         adjacent_unknown[:, :-1] |= unknown_roi[:, 1:]
-        frontier_hint_count = sum(
-            bool(world.observed_mask[cell] and adjacent_unknown[cell])
-            for _, cell in spatial
-        )
-        diagnostics = CandidateDiagnostics(
-            frontier_anchor_count=len(raw_indices),
-            visited_excluded_count=visited_excluded,
-            static_infeasible_count=static_infeasible,
-            platform_unreachable_count=platform_unreachable,
-            primitive_state_count=len(primitive_graph.state_ids),
-            forward_reachable_state_count=int(
-                primitive_graph.forward_reachable.sum(dtype=np.int64)
-            ),
-            returnable_state_count=int(
-                primitive_graph.returnable.sum(dtype=np.int64)
-            ),
-            recoverable_observation_state_count=int(
-                (
-                    primitive_graph.recoverable
-                    & primitive_graph.observation_state
-                ).sum(dtype=np.int64)
-            ),
-            frontier_hint_count=frontier_hint_count,
-            invalidated_edge_count=primitive_graph.invalidated_edge_count,
-            revalidated_edge_count=primitive_graph.revalidated_edge_count,
-        )
-        if not feasible:
-            return CandidateBatch.empty(
-                world.canvas.identity,
-                diagnostics,
-                primitive_graph_revision=primitive_graph.revision,
-            )
-
-        # A 360-degree sensor makes poses in the same observed 0.2 m cell
-        # observationally equivalent. Keep the cheapest stable graph state.
-        deduplicated: dict[tuple[int, int], tuple[int, tuple[int, int]]] = {}
-        detail_resolution = float(
-            getattr(self._visibility_estimator, "resolution_m", 0.2)
-        )
-        if not math.isfinite(detail_resolution) or detail_resolution <= 0.0:
-            detail_resolution = 0.2
-        for index, cell in feasible:
-            key = (
-                int(math.floor(positions[index, 0] / detail_resolution)),
-                int(math.floor(positions[index, 1] / detail_resolution)),
-            )
-            previous = deduplicated.get(key)
-            if previous is None or (
-                float(primitive_graph.path_cost[index]),
-                int(primitive_graph.state_ids[index]),
-            ) < (
-                float(primitive_graph.path_cost[previous[0]]),
-                int(primitive_graph.state_ids[previous[0]]),
-            ):
-                deduplicated[key] = (index, cell)
-        feasible = list(deduplicated.values())
-        candidate_cells = np.ascontiguousarray(
-            [cell for _, cell in feasible], dtype=np.int32
-        ).reshape((-1, 2))
-        exact_positions = np.ascontiguousarray(
-            [positions[index] for index, _ in feasible], dtype=np.float64
-        )
-        exact_gain = getattr(
-            self._visibility_estimator,
-            "estimate_candidate_gains_at_positions",
-            None,
-        )
-        gain_arguments = (
-            np.ascontiguousarray(world.observed_mask, dtype=np.bool_),
-            np.ascontiguousarray(
-                world.physical_obstacle_layer.values, dtype=np.float32
-            ),
-            np.ascontiguousarray(mission.roi_ratio, dtype=np.float32),
-            np.ascontiguousarray(
-                mission.priority * mission.roi_ratio, dtype=np.float32
+        boundary = observed & roi & adjacent_unknown
+        segments = _segments(_points(boundary), cells)
+        spacing = max(
+            1,
+            math.ceil(
+                self._sensor.anchor_spacing_m
+                / canvas.geometry.resolution_m
             ),
         )
-        gains = (
-            exact_gain(*gain_arguments, exact_positions)
-            if callable(exact_gain)
-            else self._visibility_estimator.estimate_candidate_gains(
-                *gain_arguments, candidate_cells
-            )
+        step = max(
+            1,
+            round(
+                self._sensor.standoff_m / canvas.geometry.resolution_m
+            ),
         )
-        if (
-            not isinstance(gains, np.ndarray)
-            or gains.dtype != np.dtype(np.float32)
-            or gains.shape != (len(feasible), 2)
-            or not gains.flags.c_contiguous
-            or not np.isfinite(gains).all()
-            or (gains < 0.0).any()
-        ):
-            raise RuntimeError("primitive candidate gain result is invalid")
-        positive: list[_PrimitiveCandidate] = [
-            (index, cell, float(gain), float(priority_gain))
-            for (index, cell), (gain, priority_gain) in zip(
-                feasible, gains, strict=True
-            )
-            if gain > 0.0
-        ]
-        selected = list(positive)
-        transit_selected = 0
-        unknown_roi_exists = bool(
-            np.any((mission.roi_ratio > 0.0) & ~world.observed_mask)
-        )
-        if len(selected) < _MIN_PLATFORM_CANDIDATE_RESERVE and unknown_roi_exists:
-            zero_gain = [
-                (index, cell, float(gain), float(priority_gain))
-                for (index, cell), (gain, priority_gain) in zip(
-                    feasible, gains, strict=True
+        raw_anchors: list[tuple[int, tuple[int, int]]] = []
+        for segment_id, segment in enumerate(segments):
+            for row, column in _spaced_anchors(segment, spacing):
+                standoff = (
+                    row + int(np.sign(robot[0] - row)) * step,
+                    column + int(np.sign(robot[1] - column)) * step,
                 )
-                if gain <= 0.0
-            ]
-            zero_gain.sort(
-                key=lambda item: (
-                    float(primitive_graph.path_cost[item[0]]),
-                    int(primitive_graph.state_ids[item[0]]),
+                if not (
+                    0 <= standoff[0] < cells
+                    and 0 <= standoff[1] < cells
+                    and observed[standoff]
+                ):
+                    standoff = (row, column)
+                if self._candidate_within_sensor(canvas, pose_map, standoff):
+                    raw_anchors.append((segment_id, standoff))
+        if boundary.any():
+            reserve_segment = len(segments)
+            raw_anchors.extend(
+                (reserve_segment, point)
+                for point in self._fallback_observation_poses(
+                    world, mission, pose_map, projection
                 )
             )
-            reserve = zero_gain[
-                : _MIN_PLATFORM_CANDIDATE_RESERVE - len(selected)
-            ]
-            selected.extend(reserve)
-            transit_selected = len(reserve)
-        selected = _select_primitive_candidates(
-            selected,
-            primitive_graph,
-            canvas_cells=world.canvas.geometry.cells,
-        )
-        output = np.zeros((64, 12), dtype=np.float32)
-        mask = np.zeros(64, dtype=np.bool_)
-        target_positions = np.zeros((64, 3), dtype=np.float64)
-        target_yaw = np.zeros(64, dtype=np.float64)
-        state_ids = np.zeros(64, dtype=np.uint64)
-        target_elevation = np.zeros(64, dtype=np.float64)
-        gain_normalizer = max((item[2] for item in selected), default=0.0)
-        priority_normalizer = max((item[3] for item in selected), default=0.0)
+        qualified_anchors = sorted(set(raw_anchors))
         total_roi = float(mission.roi_ratio.sum(dtype=np.float64))
-        for output_index, (state_index, cell, gain, priority_gain) in enumerate(
-            selected
-        ):
-            output[output_index] = self._primitive_feature(
+        chosen, qualification = self._qualify_anchors(
+            qualified_anchors,
+            world,
+            mission,
+            pose_map,
+            projection,
+            platform_type=platform_type,
+            platform_reachability_filter_enabled=True,
+            platform_reachability=None,
+            excluded_cells=excluded_cells,
+            total_roi=total_roi,
+            allow_zero_gain=False,
+            exact_target_poses=exact_target_poses,
+            physical_observation_pose_mask=physical_mask,
+        )
+        if not chosen and boundary.any() and qualified_anchors:
+            chosen, qualification = self._qualify_anchors(
+                qualified_anchors,
                 world,
                 mission,
                 pose_map,
-                cell,
-                positions[state_index],
-                gain=gain,
-                priority_gain=priority_gain,
-                gain_normalizer=gain_normalizer,
-                priority_gain_normalizer=priority_normalizer,
+                projection,
+                platform_type=platform_type,
+                platform_reachability_filter_enabled=True,
+                platform_reachability=None,
+                excluded_cells=excluded_cells,
                 total_roi=total_roi,
+                allow_zero_gain=True,
+                exact_target_poses=exact_target_poses,
+                physical_observation_pose_mask=physical_mask,
             )
-            mask[output_index] = True
-            target_positions[output_index] = positions[state_index]
-            target_yaw[output_index] = primitive_graph.yaw_rad[state_index]
-            state_ids[output_index] = primitive_graph.state_ids[state_index]
-            target_elevation[output_index] = positions[state_index, 2]
-        zero_discarded = max(0, len(feasible) - len(positive) - transit_selected)
-        return CandidateBatch(
-            output,
-            mask,
-            world.canvas.identity,
-            CandidateDiagnostics(
-                frontier_anchor_count=diagnostics.frontier_anchor_count,
-                visited_excluded_count=diagnostics.visited_excluded_count,
-                static_infeasible_count=diagnostics.static_infeasible_count,
-                platform_unreachable_count=diagnostics.platform_unreachable_count,
-                zero_gain_count=zero_discarded,
-                emitted_count=len(selected),
-                primitive_state_count=diagnostics.primitive_state_count,
-                forward_reachable_state_count=(
-                    diagnostics.forward_reachable_state_count
-                ),
-                returnable_state_count=diagnostics.returnable_state_count,
-                recoverable_observation_state_count=(
-                    diagnostics.recoverable_observation_state_count
-                ),
-                frontier_hint_count=diagnostics.frontier_hint_count,
-                positive_gain_state_count=len(positive),
-                transit_state_count=transit_selected,
-                invalidated_edge_count=diagnostics.invalidated_edge_count,
-                revalidated_edge_count=diagnostics.revalidated_edge_count,
+        if (
+            not chosen
+            and boundary.any()
+            and isinstance(backtrack_pose, Pose2)
+            and backtrack_pose.frame_id == "map"
+            and self._position_within_sensor(pose_map, backtrack_pose)
+        ):
+            try:
+                backtrack_cell = canvas.world_to_grid(
+                    backtrack_pose.x_m, backtrack_pose.y_m
+                )
+            except ValueError:
+                backtrack_cell = None
+            if backtrack_cell is not None:
+                chosen, qualification = self._qualify_anchors(
+                    [(0, backtrack_cell)],
+                    world,
+                    mission,
+                    pose_map,
+                    projection,
+                    platform_type=platform_type,
+                    platform_reachability_filter_enabled=True,
+                    platform_reachability=None,
+                    excluded_cells=(),
+                    total_roi=total_roi,
+                    allow_zero_gain=True,
+                    exact_target_poses=exact_target_poses,
+                    physical_observation_pose_mask=physical_mask,
+                )
+
+        canonical: dict[str, PhysicalCandidate] = {}
+        for anchor in chosen:
+            candidate = self._physical_candidate(
+                anchor,
+                pose_map=pose_map,
+                platform_type=platform_type,
+                platform_id=platform_id,
+                mission_revision=mission_revision,
+                goal_tolerance_mm=goal_tolerance_mm,
+            )
+            previous = canonical.get(candidate.candidate_id)
+            if previous is None or candidate.rank_key < previous.rank_key:
+                canonical[candidate.candidate_id] = candidate
+        candidates = _compress_physical_candidates(
+            list(canonical.values()),
+            canvas_cells=cells,
+        )
+        physical_snapshot_id = self._physical_snapshot_id(
+            platform_type=platform_type,
+            platform_id=platform_id,
+            capability_content_sha256=capability_content_sha256,
+            mission_revision=mission_revision,
+            pose_map=pose_map,
+            evidence_generation=evidence_generation,
+            physical_evidence_sha256=physical_evidence_sha256,
+        )
+        selected_count = min(_POLICY_CANDIDATE_COUNT, len(candidates))
+        diagnostics = CandidateDiagnostics(
+            physical_snapshot_id=physical_snapshot_id,
+            physical_reachability_algorithm_id=(
+                physical_reachability_algorithm_id
             ),
-            target_elevation,
-            target_positions,
-            target_yaw,
-            state_ids,
-            primitive_graph.revision,
+            physical_candidate_universe_count=len(candidates),
+            selected_policy_candidate_count=selected_count,
+            available_candidate_count=len(candidates),
+            untried_reserve_count=len(candidates) - selected_count,
+            planner_failed_current_snapshot_count=0,
+            zero_gain_count=qualification.zero_gain_count,
+            visited_excluded_count=qualification.visited_excluded_count,
+            physical_unreachable_count=(
+                qualification.static_infeasible_count
+                + qualification.platform_unreachable_count
+            ),
+        )
+        universe_sha256 = sha256(
+            "".join(candidate.candidate_id for candidate in candidates).encode(
+                "ascii"
+            )
+        ).hexdigest()
+        return PhysicalCandidateUniverse(
+            physical_snapshot_id=physical_snapshot_id,
+            physical_reachability_algorithm_id=(
+                physical_reachability_algorithm_id
+            ),
+            candidates=candidates,
+            universe_sha256=universe_sha256,
+            diagnostics=diagnostics,
+        )
+
+    def select_available(
+        self,
+        universe: PhysicalCandidateUniverse,
+        *,
+        canvas_id: str,
+        failure_snapshot_id: str | None = None,
+        planner_failed_candidate_ids: Collection[str] = (),
+    ) -> CandidateBuildResult:
+        """Filter only failures belonging to this snapshot, then take top 64."""
+        if not isinstance(universe, PhysicalCandidateUniverse):
+            raise TypeError("physical candidate universe is required")
+        if not isinstance(canvas_id, str) or not canvas_id:
+            raise ValueError("candidate batch canvas identity is missing")
+        if isinstance(planner_failed_candidate_ids, (str, bytes)):
+            raise TypeError("planner failed candidate IDs must be a collection")
+        failed_values = tuple(planner_failed_candidate_ids)
+        current_failures: set[str] = set()
+        if failed_values:
+            if not _is_sha256(failure_snapshot_id):
+                raise ValueError("failure snapshot identity is invalid")
+            if failure_snapshot_id == universe.physical_snapshot_id:
+                if any(not _is_sha256(value) for value in failed_values):
+                    raise ValueError("planner failed candidate identity is invalid")
+                current_failures = set(failed_values)
+                universe_ids = {
+                    candidate.candidate_id for candidate in universe.candidates
+                }
+                if not current_failures <= universe_ids:
+                    raise ValueError(
+                        "failed candidate identity is not in the current physical universe"
+                    )
+        available = tuple(
+            candidate
+            for candidate in universe.candidates
+            if candidate.candidate_id not in current_failures
+        )
+        selected = available[:_POLICY_CANDIDATE_COUNT]
+        diagnostics = CandidateDiagnostics(
+            physical_snapshot_id=universe.physical_snapshot_id,
+            physical_reachability_algorithm_id=(
+                universe.physical_reachability_algorithm_id
+            ),
+            physical_candidate_universe_count=len(universe.candidates),
+            selected_policy_candidate_count=len(selected),
+            available_candidate_count=len(available),
+            untried_reserve_count=len(available) - len(selected),
+            planner_failed_current_snapshot_count=len(current_failures),
+            zero_gain_count=universe.diagnostics.zero_gain_count,
+            visited_excluded_count=universe.diagnostics.visited_excluded_count,
+            physical_unreachable_count=(
+                universe.diagnostics.physical_unreachable_count
+            ),
+        )
+        selected_universe = PhysicalCandidateUniverse(
+            physical_snapshot_id=universe.physical_snapshot_id,
+            physical_reachability_algorithm_id=(
+                universe.physical_reachability_algorithm_id
+            ),
+            candidates=universe.candidates,
+            universe_sha256=universe.universe_sha256,
+            diagnostics=diagnostics,
+        )
+        return CandidateBuildResult(
+            universe=selected_universe,
+            batch=self._candidate_batch(
+                selected,
+                canvas_id=canvas_id,
+                diagnostics=diagnostics,
+            ),
         )
 
     @staticmethod
-    def _primitive_feature(
-        world: ObservedWorld,
-        mission: MissionRaster,
-        pose: Pose2,
-        point: tuple[int, int],
-        target_position_m: np.ndarray,
+    def _validate_physical_identity(
         *,
-        gain: float,
-        priority_gain: float,
-        gain_normalizer: float,
-        priority_gain_normalizer: float,
-        total_roi: float,
-    ) -> np.ndarray:
-        canvas = world.canvas
-        x = float(target_position_m[0])
-        y = float(target_position_m[1])
-        dx = x - pose.x_m
-        dy = y - pose.y_m
-        distance = math.hypot(dx, dy)
-        bearing = math.atan2(dy, dx)
-        normal = np.zeros(2, dtype=np.float64)
-        for neighbor in _neighbors(*point, canvas.geometry.cells):
-            if mission.roi_ratio[neighbor] > 0.0 and not world.observed_mask[neighbor]:
-                normal += (
-                    neighbor[0] - point[0],
-                    neighbor[1] - point[1],
-                )
-        magnitude = float(np.linalg.norm(normal))
-        remaining = (
-            float(
-                (mission.roi_ratio * ~world.observed_mask).sum(
-                    dtype=np.float64
-                )
-                / total_roi
-            )
-            if total_roi
-            else 0.0
+        platform_type: str,
+        platform_id: str,
+        capability_content_sha256: str,
+        mission_revision: int,
+        evidence_generation: int,
+        physical_evidence_sha256: str,
+        physical_reachability_algorithm_id: str,
+        goal_tolerance_mm: int,
+    ) -> None:
+        if platform_type not in _PLATFORM_TYPES:
+            raise ValueError("platform_type must be WHEELED, LEGGED, or HOPPER")
+        if not isinstance(platform_id, str) or not platform_id:
+            raise ValueError("platform ID is missing")
+        if not _is_sha256(capability_content_sha256):
+            raise ValueError("capability content hash is invalid")
+        if type(mission_revision) is not int or mission_revision <= 0:
+            raise ValueError("mission revision must be positive")
+        if type(evidence_generation) is not int or evidence_generation <= 0:
+            raise ValueError("evidence generation must be positive")
+        if not _is_sha256(physical_evidence_sha256):
+            raise ValueError("physical evidence hash is invalid")
+        if (
+            not isinstance(physical_reachability_algorithm_id, str)
+            or not physical_reachability_algorithm_id
+        ):
+            raise ValueError("physical reachability algorithm ID is missing")
+        if type(goal_tolerance_mm) is not int or goal_tolerance_mm < 0:
+            raise ValueError("goal tolerance millimetres are invalid")
+
+    @staticmethod
+    def _physical_snapshot_id(
+        *,
+        platform_type: str,
+        platform_id: str,
+        capability_content_sha256: str,
+        mission_revision: int,
+        pose_map: Pose2,
+        evidence_generation: int,
+        physical_evidence_sha256: str,
+    ) -> str:
+        normalized_yaw = math.atan2(
+            math.sin(pose_map.yaw_rad), math.cos(pose_map.yaw_rad)
         )
-        return np.asarray(
-            (
-                (x - canvas.bounds_m[0]) / canvas.geometry.size_m,
-                (canvas.bounds_m[3] - y) / canvas.geometry.size_m,
-                min(
-                    1.0,
-                    distance
-                    / (math.sqrt(2.0) * canvas.geometry.size_m),
-                ),
-                math.sin(bearing),
-                math.cos(bearing),
-                min(1.0, gain / gain_normalizer)
-                if gain_normalizer
-                else 0.0,
-                min(1.0, priority_gain / priority_gain_normalizer)
-                if priority_gain_normalizer
-                else 0.0,
-                -normal[0] / magnitude if magnitude else 0.0,
-                normal[1] / magnitude if magnitude else 1.0,
-                min(1.0, magnitude / 2.0),
-                1.0,
-                remaining,
-            ),
-            dtype=np.float32,
+        return _canonical_sha256(
+            {
+                "schema": PHYSICAL_SNAPSHOT_SCHEMA,
+                "platform_type": platform_type,
+                "platform_id": platform_id,
+                "capability_content_sha256": capability_content_sha256,
+                "mission_revision": mission_revision,
+                "pose_key_mm": [
+                    int(round(pose_map.x_m * 1_000.0)),
+                    int(round(pose_map.y_m * 1_000.0)),
+                    int(round(pose_map.elevation_m * 1_000.0)),
+                ],
+                "yaw_key_urad": int(round(normalized_yaw * 1_000_000.0)),
+                "observed_evidence_generation": evidence_generation,
+                "physical_evidence_sha256": physical_evidence_sha256,
+            }
+        )
+
+    @staticmethod
+    def _physical_candidate(
+        anchor: _FeasibleAnchor,
+        *,
+        pose_map: Pose2,
+        platform_type: str,
+        platform_id: str,
+        mission_revision: int,
+        goal_tolerance_mm: int,
+    ) -> PhysicalCandidate:
+        x_m, y_m, z_m = anchor.target_position_m
+        position_grid_key = (int(anchor.point[0]), int(anchor.point[1]))
+        delta_x = x_m - pose_map.x_m
+        delta_y = y_m - pose_map.y_m
+        target_yaw = (
+            math.atan2(delta_y, delta_x)
+            if delta_x != 0.0 or delta_y != 0.0
+            else math.atan2(math.sin(pose_map.yaw_rad), math.cos(pose_map.yaw_rad))
+        )
+        normalized = (target_yaw + math.pi) % (2.0 * math.pi)
+        target_yaw_bin = min(
+            63, int(math.floor(normalized * 64.0 / (2.0 * math.pi)))
+        )
+        z_mm = int(round(z_m * 1_000.0))
+        candidate_id = _canonical_sha256(
+            {
+                "schema": CANDIDATE_ID_SCHEMA,
+                "platform_type": platform_type,
+                "platform_id": platform_id,
+                "mission_revision": mission_revision,
+                "row": position_grid_key[0],
+                "column": position_grid_key[1],
+                "z_mm": z_mm,
+                "heading_bin_64": target_yaw_bin,
+                "goal_tolerance_mm": goal_tolerance_mm,
+            }
+        )
+        distance = math.hypot(delta_x, delta_y)
+        rank_key: tuple[object, ...] = (
+            -float(anchor.feature[5]),
+            -float(anchor.feature[6]),
+            distance,
+            position_grid_key[0],
+            position_grid_key[1],
+            z_mm,
+            target_yaw_bin,
+            goal_tolerance_mm,
+            x_m,
+            y_m,
+            z_m,
+            candidate_id,
+        )
+        return PhysicalCandidate(
+            candidate_id=candidate_id,
+            position_grid_key=position_grid_key,
+            target_position_m=(x_m, y_m, z_m),
+            target_yaw_bin=target_yaw_bin,
+            target_yaw_rad=target_yaw,
+            goal_tolerance_mm=goal_tolerance_mm,
+            feature=anchor.feature,
+            rank_key=rank_key,
+        )
+
+    @staticmethod
+    def _candidate_batch(
+        candidates: tuple[PhysicalCandidate, ...],
+        *,
+        canvas_id: str,
+        diagnostics: CandidateDiagnostics,
+    ) -> CandidateBatch:
+        features = np.zeros((64, 12), dtype=np.float32)
+        mask = np.zeros(64, dtype=np.bool_)
+        elevations = np.zeros(64, dtype=np.float64)
+        positions = np.zeros((64, 3), dtype=np.float64)
+        yaw = np.zeros(64, dtype=np.float64)
+        candidate_ids = np.full(64, "", dtype="<U64")
+        for index, candidate in enumerate(candidates):
+            features[index] = candidate.feature
+            mask[index] = True
+            positions[index] = candidate.target_position_m
+            elevations[index] = candidate.target_position_m[2]
+            yaw[index] = candidate.target_yaw_rad
+            candidate_ids[index] = candidate.candidate_id
+        return CandidateBatch(
+            features=features,
+            mask=mask,
+            canvas_id=canvas_id,
+            diagnostics=diagnostics,
+            target_elevation_m=elevations,
+            target_positions_m=positions,
+            target_yaw_rad=yaw,
+            candidate_ids=candidate_ids,
+        )
+
+    def build_from_primitive_graph(self, *args, **kwargs) -> CandidateBatch:
+        """Deprecated seam retained only to prove formal paths never call it."""
+        del args, kwargs
+        raise RuntimeError(
+            "primitive graph candidate materialization is disabled; "
+            "use build_physical_universe"
         )
 
     def _qualify_anchors(
@@ -945,11 +1185,20 @@ class CandidateBuilderV2:
         total_roi: float,
         allow_zero_gain: bool,
         exact_target_poses: Mapping[tuple[int, int], Pose2] | None = None,
-    ) -> tuple[list[_FeasibleAnchor], CandidateDiagnostics]:
+        physical_observation_pose_mask: np.ndarray | None = None,
+    ) -> tuple[list[_FeasibleAnchor], _QualificationDiagnostics]:
         exact_target_poses = exact_target_poses or {}
         canvas = world.canvas
         observed = world.observed_mask
         roi = mission.roi_ratio > 0.0
+        if physical_observation_pose_mask is not None and (
+            not isinstance(physical_observation_pose_mask, np.ndarray)
+            or physical_observation_pose_mask.dtype != np.dtype(np.bool_)
+            or physical_observation_pose_mask.shape != observed.shape
+            or not physical_observation_pose_mask.flags.c_contiguous
+            or platform_reachability is not None
+        ):
+            raise ValueError("physical observation pose mask is invalid")
         robot = canvas.world_to_grid(pose_map.x_m, pose_map.y_m)
         unvisited = [
             anchor
@@ -970,6 +1219,7 @@ class CandidateBuilderV2:
         if (
             platform_reachability_filter_enabled
             and platform_reachability is None
+            and physical_observation_pose_mask is None
             and platform_type in _GROUND_PLATFORM_TYPES
         ):
             reachable = _ground_reachable_mask(world, projection, robot)
@@ -1011,6 +1261,8 @@ class CandidateBuilderV2:
             point = anchor[1]
             if not platform_reachability_filter_enabled:
                 accepted = _clear_observed(world, _ray_cells(robot, point))
+            elif physical_observation_pose_mask is not None:
+                accepted = bool(physical_observation_pose_mask[point])
             elif accepted_mask is not None:
                 accepted = bool(accepted_mask[index])
             elif platform_type in _GROUND_PLATFORM_TYPES:
@@ -1025,7 +1277,7 @@ class CandidateBuilderV2:
             if accepted:
                 feasible.append(anchor)
         platform_unreachable = len(static_feasible) - len(feasible)
-        diagnostics = CandidateDiagnostics(
+        diagnostics = _QualificationDiagnostics(
             frontier_anchor_count=len(raw_anchors),
             visited_excluded_count=visited_excluded,
             static_infeasible_count=static_infeasible,
@@ -1092,11 +1344,23 @@ class CandidateBuilderV2:
                             if target_pose is None
                             else float(target_pose.elevation_m)
                         ),
+                        (
+                            (
+                                *canvas.grid_center_world(*point),
+                                float(world.elevation_m[point]),
+                            )
+                            if target_pose is None
+                            else (
+                                float(target_pose.x_m),
+                                float(target_pose.y_m),
+                                float(target_pose.elevation_m),
+                            )
+                        ),
                     )
                 )
             else:
                 zero_gain_count += 1
-        return chosen, CandidateDiagnostics(
+        return chosen, _QualificationDiagnostics(
             frontier_anchor_count=diagnostics.frontier_anchor_count,
             visited_excluded_count=diagnostics.visited_excluded_count,
             static_infeasible_count=diagnostics.static_infeasible_count,
@@ -1164,9 +1428,14 @@ class CandidateBuilderV2:
 
 
 __all__ = [
+    "CANDIDATE_ID_SCHEMA",
     "CANDIDATE_DIAGNOSTIC_FIELDS",
+    "PHYSICAL_SNAPSHOT_SCHEMA",
     "CandidateBatch",
+    "CandidateBuildResult",
     "CandidateBuilderV2",
     "CandidateDiagnostics",
+    "PhysicalCandidate",
+    "PhysicalCandidateUniverse",
     "SensorGeometry",
 ]

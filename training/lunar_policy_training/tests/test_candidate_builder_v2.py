@@ -3,6 +3,8 @@ from __future__ import annotations
 import pathlib
 import sys
 import math
+from dataclasses import fields
+from hashlib import sha256
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,14 +15,45 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "model_contract"))
 
 from lunar_policy_training.environment import candidate_builder as candidate_builder_module  # noqa: E402
-from lunar_policy_training.environment.candidate_builder import CandidateBatch, CandidateBuilderV2  # noqa: E402
+from lunar_policy_training.environment.candidate_builder import (  # noqa: E402
+    CANDIDATE_ID_SCHEMA,
+    CANDIDATE_DIAGNOSTIC_FIELDS,
+    PHYSICAL_SNAPSHOT_SCHEMA,
+    CandidateBatch,
+    CandidateBuildResult,
+    CandidateBuilderV2,
+    CandidateDiagnostics,
+    PhysicalCandidate,
+    PhysicalCandidateUniverse,
+)
 from lunar_policy_training.environment.observation_builder import LocalObservation, MissionRaster, ObservedWorld, PlatformProjection, Pose2  # noqa: E402
-from lunar_policy_training.environment.platform_reachability import CandidateReachabilityResult, PlatformCandidateReachability  # noqa: E402
-from lunar_policy_training.environment.primitive_reachability import ObservedPrimitiveSnapshot  # noqa: E402
+from lunar_policy_training.environment.platform_reachability import (  # noqa: E402
+    PHYSICAL_PROJECTION_SCHEMA,
+    CandidateReachabilityResult,
+    PhysicalReachabilityResult,
+    PlatformCandidateReachability,
+)
 from lunar_policy_training.environment.visibility import NativeVisibilityEstimator, SensorGeometry  # noqa: E402
 from lunar_policy_training.polar_data.hazards import CanvasRatioLayer  # noqa: E402
 from lunar_policy_training.polar_data.raster import MapCanvas  # noqa: E402
 from lunar_policy_training.training_semantics import FORMAL_SENSOR_FOV_RAD, FORMAL_SENSOR_RANGE_M  # noqa: E402
+
+
+def test_physical_candidate_contract_symbols_are_public() -> None:
+    expected = {
+        "CANDIDATE_ID_SCHEMA",
+        "PHYSICAL_SNAPSHOT_SCHEMA",
+        "CandidateBuildResult",
+        "PhysicalCandidate",
+        "PhysicalCandidateUniverse",
+    }
+
+    assert expected <= set(candidate_builder_module.__all__)
+    assert CANDIDATE_ID_SCHEMA == "lunar-physical-candidate-id/v1"
+    assert PHYSICAL_SNAPSHOT_SCHEMA == "lunar-physical-snapshot/v1"
+    assert CandidateBuildResult is candidate_builder_module.CandidateBuildResult
+    assert PhysicalCandidate is candidate_builder_module.PhysicalCandidate
+    assert PhysicalCandidateUniverse is candidate_builder_module.PhysicalCandidateUniverse
 
 
 def _canvas() -> MapCanvas:
@@ -139,107 +172,85 @@ def _builder(
     )
 
 
-def _frozen(values: np.ndarray) -> np.ndarray:
-    output = np.ascontiguousarray(values)
-    output.setflags(write=False)
-    return output
-
-
-def _primitive_snapshot(
+def _physical_reachability(
+    world: ObservedWorld,
     *,
     platform_type: str = "WHEELED",
-    recoverable: tuple[bool, ...] = (True, True, False),
-    direct_successor: tuple[bool, ...] = (False, True, True),
-) -> ObservedPrimitiveSnapshot:
-    canvas = _canvas()
-    cells = ((128, 128), (128, 130), (128, 132))[: len(recoverable)]
-    positions = np.asarray(
-        [(*canvas.grid_center_world(*cell), 0.0) for cell in cells],
-        dtype=np.float64,
+    mask: np.ndarray | None = None,
+    offset_xy_m: tuple[float, float] = (0.0, 0.0),
+    landing_z_m: float | None = None,
+) -> PhysicalReachabilityResult:
+    physical_mask = np.ascontiguousarray(
+        world.observed_mask.copy() if mask is None else mask,
+        dtype=np.bool_,
     )
-    state_ids = np.arange(1, len(cells) + 1, dtype=np.uint64)
-    edge_source = np.asarray([1, 2], dtype=np.uint64)[: max(0, len(cells) - 1)]
-    edge_target = np.asarray([2, 1], dtype=np.uint64)[: len(edge_source)]
-    forward = np.asarray(recoverable, dtype=np.bool_)
-    returnable = np.asarray(recoverable, dtype=np.bool_)
-    return ObservedPrimitiveSnapshot(
+    positions = np.asarray(
+        [
+            (
+                world.canvas.grid_center_world(int(row), int(column))[0]
+                + offset_xy_m[0],
+                world.canvas.grid_center_world(int(row), int(column))[1]
+                + offset_xy_m[1],
+                (
+                    float(world.elevation_m[row, column])
+                    if landing_z_m is None
+                    else landing_z_m
+                ),
+            )
+            for row, column in zip(*np.nonzero(physical_mask), strict=True)
+        ],
+        dtype=np.float64,
+    ).reshape((-1, 3))
+    return PhysicalReachabilityResult(
         platform_type=platform_type,
-        width=32,
-        height=32,
-        algorithm_id=f"test-{platform_type.lower()}/v1",
-        state_schema=f"test-{platform_type.lower()}-state/v1",
-        primitive_set_sha256="1" * 64,
-        world_evidence_sha256="2" * 64,
-        graph_sha256="3" * 64,
-        revision=4,
-        invalidated_edge_count=0,
-        revalidated_edge_count=0,
-        state_ids=_frozen(state_ids),
-        positions_m=_frozen(positions),
-        yaw_rad=_frozen(np.zeros(len(cells), dtype=np.float64)),
-        cells=_frozen(np.asarray(cells, dtype=np.int32)),
-        yaw_bin=_frozen(np.zeros(len(cells), dtype=np.int32)),
-        motion_mode=_frozen(np.zeros(len(cells), dtype=np.int32)),
-        body_z_m=_frozen(np.zeros((len(cells), 2), dtype=np.float64)),
-        path_cost=_frozen(np.arange(len(cells), dtype=np.float64)),
-        forward_reachable=_frozen(forward),
-        returnable=_frozen(returnable),
-        observation_state=_frozen(np.ones(len(cells), dtype=np.bool_)),
-        recoverable=_frozen(forward & returnable),
-        direct_successor=_frozen(np.asarray(direct_successor, dtype=np.bool_)),
-        edge_source_ids=_frozen(edge_source),
-        edge_target_ids=_frozen(edge_target),
-        edge_primitive_indices=_frozen(
-            np.zeros(len(edge_source), dtype=np.uint32)
+        physical_observation_pose_mask=physical_mask,
+        observation_positions_m=np.ascontiguousarray(positions),
+        physical_projection_schema=PHYSICAL_PROJECTION_SCHEMA,
+        physical_reachability_algorithm_id=(
+            f"cpp-v3/{platform_type.lower()}-physical-reachability/v1"
         ),
-        edge_primitive_ids=tuple("primitive" for _ in edge_source),
-        edge_cost=_frozen(np.ones(len(edge_source), dtype=np.float64)),
+        physical_evidence_algorithm_id=(
+            f"cpp-v3/{platform_type.lower()}-physical-evidence/v1"
+        ),
+        physical_safe_pose_count=int(physical_mask.sum(dtype=np.int64)),
+        physically_reachable_pose_count=int(
+            physical_mask.sum(dtype=np.int64)
+        ),
     )
 
 
-def _primitive_snapshot_for_cells(
-    cells: tuple[tuple[int, int], ...],
+def _formal_universe(
+    builder: CandidateBuilderV2 | None = None,
     *,
+    world: ObservedWorld | None = None,
+    mission: MissionRaster | None = None,
+    pose: Pose2 = Pose2(500.0, 512.0),
+    projection: PlatformProjection | None = None,
     platform_type: str = "WHEELED",
-) -> ObservedPrimitiveSnapshot:
-    canvas = _canvas()
-    count = len(cells)
-    positions = np.asarray(
-        [(*canvas.grid_center_world(*cell), 0.0) for cell in cells],
-        dtype=np.float64,
+    physical_reachability: PhysicalReachabilityResult | None = None,
+    evidence_generation: int = 3,
+    physical_evidence_sha256: str = "2" * 64,
+) -> candidate_builder_module.PhysicalCandidateUniverse:
+    resolved_world = world or _world_with_frontier()
+    resolved_physical = physical_reachability or _physical_reachability(
+        resolved_world, platform_type=platform_type
     )
-    state_ids = np.arange(1, count + 1, dtype=np.uint64)
-    reachable = np.ones(count, dtype=np.bool_)
-    return ObservedPrimitiveSnapshot(
+    return (builder or _builder()).build_physical_universe(
+        resolved_world,
+        mission or _mission(),
+        pose,
+        projection or _projection(),
+        physical_reachability=resolved_physical,
         platform_type=platform_type,
-        width=32,
-        height=32,
-        algorithm_id=f"test-{platform_type.lower()}/v1",
-        state_schema=f"test-{platform_type.lower()}-state/v1",
-        primitive_set_sha256="1" * 64,
-        world_evidence_sha256="2" * 64,
-        graph_sha256="3" * 64,
-        revision=4,
-        invalidated_edge_count=2,
-        revalidated_edge_count=7,
-        state_ids=_frozen(state_ids),
-        positions_m=_frozen(positions),
-        yaw_rad=_frozen(np.zeros(count, dtype=np.float64)),
-        cells=_frozen(np.asarray(cells, dtype=np.int32)),
-        yaw_bin=_frozen(np.zeros(count, dtype=np.int32)),
-        motion_mode=_frozen(np.zeros(count, dtype=np.int32)),
-        body_z_m=_frozen(np.zeros((count, 2), dtype=np.float64)),
-        path_cost=_frozen(np.arange(count, dtype=np.float64)),
-        forward_reachable=_frozen(reachable),
-        returnable=_frozen(reachable),
-        observation_state=_frozen(reachable),
-        recoverable=_frozen(reachable),
-        direct_successor=_frozen(reachable),
-        edge_source_ids=_frozen(np.zeros(0, dtype=np.uint64)),
-        edge_target_ids=_frozen(np.zeros(0, dtype=np.uint64)),
-        edge_primitive_indices=_frozen(np.zeros(0, dtype=np.uint32)),
-        edge_primitive_ids=(),
-        edge_cost=_frozen(np.zeros(0, dtype=np.float64)),
+        platform_id=f"unit-{platform_type.lower()}-1",
+        capability_content_sha256="1" * 64,
+        mission_revision=7,
+        evidence_generation=evidence_generation,
+        physical_evidence_sha256=physical_evidence_sha256,
+        physical_reachability_algorithm_id=(
+            resolved_physical.physical_reachability_algorithm_id
+        ),
+        goal_tolerance_mm=0 if platform_type == "HOPPER" else 200,
     )
 
 
@@ -254,133 +265,307 @@ def test_candidate_builder_requires_explicit_sensor_estimator() -> None:
     )
 
 
-def test_primitive_candidates_only_emit_current_recoverable_graph_states() -> None:
-    estimator = _RecordingEstimator()
-    builder = CandidateBuilderV2(estimator)
-    snapshot = _primitive_snapshot()
-
-    batch = builder.build_from_primitive_graph(
-        _world_with_frontier(),
-        _mission(),
-        Pose2(*_canvas().grid_center_world(128, 128)),
-        snapshot,
-        platform_type="WHEELED",
+def test_candidate_diagnostics_own_only_physical_selection_fields() -> None:
+    assert tuple(field.name for field in fields(CandidateDiagnostics)) == (
+        "physical_snapshot_id",
+        "physical_reachability_algorithm_id",
+        "physical_candidate_universe_count",
+        "selected_policy_candidate_count",
+        "available_candidate_count",
+        "untried_reserve_count",
+        "planner_failed_current_snapshot_count",
+        "zero_gain_count",
+        "visited_excluded_count",
+        "physical_unreachable_count",
     )
-
-    assert batch.primitive_graph_revision == snapshot.revision
-    assert set(batch.primitive_state_ids[batch.mask]) == {np.uint64(2)}
-    assert np.all(batch.primitive_state_ids[~batch.mask] == 0)
-    np.testing.assert_allclose(
-        batch.target_positions_m[batch.mask], snapshot.positions_m[[1]]
+    assert CANDIDATE_DIAGNOSTIC_FIELDS == tuple(
+        field.name for field in fields(CandidateDiagnostics)
     )
 
 
-def test_hopper_primitive_candidates_reject_recoverable_multihop_states() -> None:
-    estimator = _RecordingEstimator()
-    snapshot = _primitive_snapshot(
+def test_physical_universe_requires_explicit_canonical_identity() -> None:
+    with pytest.raises(TypeError):
+        _builder().build_physical_universe(
+            _world_with_frontier(),
+            _mission(),
+            Pose2(500.0, 512.0),
+            _projection(),
+            physical_reachability=_physical_reachability(
+                _world_with_frontier()
+            ),
+            platform_type="WHEELED",
+        )
+
+    with pytest.raises(ValueError, match="capability content hash"):
+        _builder().build_physical_universe(
+            _world_with_frontier(),
+            _mission(),
+            Pose2(500.0, 512.0),
+            _projection(),
+            physical_reachability=_physical_reachability(
+                _world_with_frontier()
+            ),
+            platform_type="WHEELED",
+            platform_id="unit-wheel-1",
+            capability_content_sha256="",
+            mission_revision=7,
+            evidence_generation=3,
+            physical_evidence_sha256="2" * 64,
+            physical_reachability_algorithm_id="cpp-v3/wheel/v1",
+            goal_tolerance_mm=200,
+        )
+
+
+def test_hopper_candidates_bind_exact_certified_landing_positions_and_z() -> None:
+    world = _world_with_frontier()
+    physical = _physical_reachability(
+        world,
         platform_type="HOPPER",
-        recoverable=(True, True, True),
-        direct_successor=(False, True, False),
+        offset_xy_m=(0.02, -0.02),
+        landing_z_m=123.456,
     )
-
-    batch = CandidateBuilderV2(estimator).build_from_primitive_graph(
-        _world_with_frontier(),
-        _mission(),
-        Pose2(*_canvas().grid_center_world(128, 128)),
-        snapshot,
+    universe = _formal_universe(
+        world=world,
         platform_type="HOPPER",
+        physical_reachability=physical,
+    )
+    position_by_cell = {
+        tuple(cell): tuple(position)
+        for cell, position in zip(
+            zip(*np.nonzero(physical.physical_observation_pose_mask), strict=True),
+            physical.observation_positions_m,
+            strict=True,
+        )
+    }
+
+    assert universe.candidates
+    for candidate in universe.candidates:
+        expected = position_by_cell[candidate.position_grid_key]
+        assert candidate.target_position_m == expected
+        coarse_x, coarse_y = world.canvas.grid_center_world(
+            *candidate.position_grid_key
+        )
+        assert candidate.target_position_m[:2] != (coarse_x, coarse_y)
+        assert candidate.target_position_m[2] == 123.456
+
+    changed = _formal_universe(
+        world=world,
+        platform_type="HOPPER",
+        physical_reachability=_physical_reachability(
+            world,
+            platform_type="HOPPER",
+            offset_xy_m=(0.02, -0.02),
+            landing_z_m=123.457,
+        ),
+    )
+    assert {
+        candidate.candidate_id for candidate in changed.candidates
+    }.isdisjoint(
+        candidate.candidate_id for candidate in universe.candidates
     )
 
-    assert set(batch.primitive_state_ids[batch.mask]) == {np.uint64(2)}
 
+def test_physical_mask_false_rejects_candidate_and_counts_unreachable() -> None:
+    world = _world_with_frontier()
+    baseline = _formal_universe(world=world)
+    rejected_cell = baseline.candidates[0].position_grid_key
+    mask = world.observed_mask.copy()
+    mask[rejected_cell] = False
 
-def test_primitive_candidates_exclude_visited_state_id() -> None:
-    snapshot = _primitive_snapshot()
-
-    batch = CandidateBuilderV2(_RecordingEstimator()).build_from_primitive_graph(
-        _world_with_frontier(),
-        _mission(),
-        Pose2(*_canvas().grid_center_world(128, 128)),
-        snapshot,
-        platform_type="WHEELED",
-        excluded_state_ids={2},
+    rejected = _formal_universe(
+        world=world,
+        physical_reachability=_physical_reachability(world, mask=mask),
     )
 
-    assert batch.count == 0
-    assert batch.diagnostics.visited_excluded_count == 2
-
-
-def test_sparse_positive_primitive_candidates_add_recoverable_transit_reserve() -> None:
-    cells = (
-        (128, 128),
-        *tuple((128, column) for column in range(129, 136)),
-        (129, 128),
-        (129, 129),
-    )
-    snapshot = _primitive_snapshot_for_cells(cells)
-
-    class SparseGainEstimator(_RecordingEstimator):
-        def estimate_candidate_gains(self, *args) -> np.ndarray:
-            candidates = args[-1]
-            gains = np.zeros((len(candidates), 2), dtype=np.float32)
-            gains[0] = (1.0, 1.0)
-            return gains
-
-    batch = CandidateBuilderV2(SparseGainEstimator()).build_from_primitive_graph(
-        _world_with_frontier(),
-        _mission(),
-        Pose2(*_canvas().grid_center_world(128, 128)),
-        snapshot,
-        platform_type="WHEELED",
+    assert rejected_cell not in {
+        candidate.position_grid_key for candidate in rejected.candidates
+    }
+    assert (
+        rejected.diagnostics.physical_unreachable_count
+        > baseline.diagnostics.physical_unreachable_count
     )
 
-    assert batch.count == 8
-    assert batch.diagnostics.positive_gain_state_count == 1
-    assert batch.diagnostics.transit_state_count == 7
-    assert batch.diagnostics.zero_gain_count == 1
 
-
-def test_primitive_candidates_spatially_truncate_more_than_64_states() -> None:
-    current = (128, 128)
-    remote = tuple(
-        (row, column)
-        for row in range(133, 135)
-        for column in range(133, 135)
-    )
-    clustered = tuple(
-        (row, column)
-        for row in range(123, 131)
-        for column in range(123, 131)
-        if (row, column) != current
-    )
-    cells = (current, *clustered, *remote)
-    snapshot = _primitive_snapshot_for_cells(cells)
-    pose = Pose2(*_canvas().grid_center_world(*current))
+def test_physical_ids_are_stable_across_frontier_fallback_and_generation_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     builder = CandidateBuilderV2(_RecordingEstimator())
+    without_fallback = monkeypatch.context()
+    with without_fallback as scoped:
+        scoped.setattr(builder, "_fallback_observation_poses", lambda *args: [])
+        frontier_only = _formal_universe(builder)
+    targets = [candidate.position_grid_key for candidate in frontier_only.candidates]
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            builder,
+            "_fallback_observation_poses",
+            lambda *args: targets,
+        )
+        duplicated = _formal_universe(builder)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            builder,
+            "_fallback_observation_poses",
+            lambda *args: targets[::-1],
+        )
+        reordered = _formal_universe(builder)
 
-    first = builder.build_from_primitive_graph(
-        _world_with_frontier(),
-        _mission(),
-        pose,
-        snapshot,
-        platform_type="WHEELED",
+    expected_ids = tuple(candidate.candidate_id for candidate in frontier_only.candidates)
+    assert tuple(candidate.candidate_id for candidate in duplicated.candidates) == expected_ids
+    assert tuple(candidate.candidate_id for candidate in reordered.candidates) == expected_ids
+    assert duplicated.universe_sha256 == frontier_only.universe_sha256
+    assert reordered.universe_sha256 == frontier_only.universe_sha256
+
+
+def test_no_reveal_and_primitive_source_changes_preserve_physical_identities() -> None:
+    first = _formal_universe()
+    second = _formal_universe()
+    projection = _projection()
+    renamed = PlatformProjection(
+        projection.canvas,
+        projection.traversable_ratio,
+        projection.local_traversable_ratio,
+        projection.clearance_margin_norm,
+        source="cpp_v3/renamed-and-reordered-primitives",
     )
-    second = builder.build_from_primitive_graph(
-        _world_with_frontier(),
-        _mission(),
-        pose,
-        snapshot,
-        platform_type="WHEELED",
+    primitive_changed = _formal_universe(projection=renamed)
+
+    assert second.physical_snapshot_id == first.physical_snapshot_id
+    assert second.universe_sha256 == first.universe_sha256
+    assert first.universe_sha256 == sha256(
+        "".join(
+            candidate.candidate_id for candidate in first.candidates
+        ).encode("ascii")
+    ).hexdigest()
+    assert tuple(candidate.candidate_id for candidate in second.candidates) == tuple(
+        candidate.candidate_id for candidate in first.candidates
+    )
+    assert primitive_changed.physical_snapshot_id == first.physical_snapshot_id
+    assert primitive_changed.universe_sha256 == first.universe_sha256
+
+
+def test_current_snapshot_failures_refill_from_reserve_and_padding_ids_are_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = np.zeros((256, 256), dtype=np.bool_)
+    observed[110:146, 110:146] = True
+    roi = observed.copy()
+    roi[109:147, 109:147] = True
+    world = _world(observed)
+    mission = _mission_for_roi(roi)
+    builder = CandidateBuilderV2(_RecordingEstimator())
+    reserve_cells = [
+        cell
+        for cell in zip(*np.nonzero(observed), strict=True)
+        if cell != (128, 128)
+    ][:80]
+    monkeypatch.setattr(
+        builder,
+        "_fallback_observation_poses",
+        lambda *args: reserve_cells,
+    )
+    universe = _formal_universe(
+        builder,
+        world=world,
+        mission=mission,
+        pose=Pose2(*_canvas().grid_center_world(128, 128)),
+    )
+    assert len(universe.candidates) > 64
+    first_ids = tuple(candidate.candidate_id for candidate in universe.candidates[:65])
+
+    selected = builder.select_available(
+        universe,
+        canvas_id=_canvas().identity,
+        failure_snapshot_id=universe.physical_snapshot_id,
+        planner_failed_candidate_ids={first_ids[0]},
     )
 
-    assert first.count == 64
-    selected_cells = snapshot.cells[
-        first.primitive_state_ids[first.mask].astype(np.int64) - 1
-    ]
-    assert selected_cells[:, 0].max() >= 133
-    assert selected_cells[:, 1].max() >= 133
-    np.testing.assert_array_equal(first.features, second.features)
-    np.testing.assert_array_equal(first.primitive_state_ids, second.primitive_state_ids)
+    assert tuple(selected.batch.candidate_ids[selected.batch.mask]) == first_ids[1:65]
+    assert selected.universe.physical_snapshot_id == universe.physical_snapshot_id
+    assert selected.universe.universe_sha256 == universe.universe_sha256
+    assert np.all(selected.batch.candidate_ids[~selected.batch.mask] == "")
+    assert selected.batch.diagnostics.selected_policy_candidate_count == 64
+    assert selected.batch.diagnostics.planner_failed_current_snapshot_count == 1
+    assert selected.batch.diagnostics.untried_reserve_count == len(universe.candidates) - 65
+
+
+def test_current_snapshot_unknown_failed_id_fails_closed_but_old_snapshot_is_dropped() -> None:
+    builder = CandidateBuilderV2(_RecordingEstimator())
+    first = _formal_universe(builder)
+    with pytest.raises(ValueError, match="current physical universe"):
+        builder.select_available(
+            first,
+            canvas_id=_canvas().identity,
+            failure_snapshot_id=first.physical_snapshot_id,
+            planner_failed_candidate_ids={"f" * 64},
+        )
+
+    moved = _formal_universe(
+        builder,
+        pose=Pose2(500.002, 512.0),
+    )
+    evidence_updated = _formal_universe(
+        builder,
+        evidence_generation=4,
+        physical_evidence_sha256="3" * 64,
+    )
+    failed_id = first.candidates[0].candidate_id
+    assert moved.physical_snapshot_id != first.physical_snapshot_id
+    assert evidence_updated.physical_snapshot_id != first.physical_snapshot_id
+    assert failed_id in {
+        candidate.candidate_id for candidate in evidence_updated.candidates
+    }
+    selected = builder.select_available(
+        evidence_updated,
+        canvas_id=_canvas().identity,
+        failure_snapshot_id=first.physical_snapshot_id,
+        planner_failed_candidate_ids={failed_id},
+    )
+    assert failed_id in set(selected.batch.candidate_ids[selected.batch.mask])
+    assert selected.batch.diagnostics.planner_failed_current_snapshot_count == 0
+
+
+def test_4097_qualified_positions_compress_to_stable_4096_universe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = np.zeros((256, 256), dtype=np.bool_)
+    observed[80:176, 80:176] = True
+    roi = observed.copy()
+    roi[79:177, 79:177] = True
+    cells = [
+        cell
+        for cell in zip(*np.nonzero(observed), strict=True)
+        if cell != (128, 128)
+    ][:4097]
+
+    class WideEstimator(_RecordingEstimator):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sensor = SensorGeometry(2000.0, 2.0 * math.pi)
+
+    builder = CandidateBuilderV2(WideEstimator())
+    monkeypatch.setattr(candidate_builder_module, "_spaced_anchors", lambda *args: [])
+    monkeypatch.setattr(
+        builder,
+        "_fallback_observation_poses",
+        lambda *args: cells,
+    )
+    arguments = {
+        "builder": builder,
+        "world": _world(observed),
+        "mission": _mission_for_roi(roi),
+        "pose": Pose2(*_canvas().grid_center_world(128, 128)),
+    }
+
+    first = _formal_universe(**arguments)
+    second = _formal_universe(**arguments)
+
+    assert len(first.candidates) == 4096
+    assert len({candidate.candidate_id for candidate in first.candidates}) == 4096
+    assert tuple(candidate.candidate_id for candidate in second.candidates) == tuple(
+        candidate.candidate_id for candidate in first.candidates
+    )
+    assert second.universe_sha256 == first.universe_sha256
 
 
 def test_candidate_builder_is_observed_only_uses_exact_12_fields_and_stable_64_padding() -> None:
@@ -668,7 +853,7 @@ def test_sparse_primary_candidates_add_platform_checked_observation_reserves(
         map(tuple, estimator.calls[1])
     )
     assert batch.count > 1
-    assert batch.diagnostics.emitted_count == batch.count
+    assert batch.diagnostics.selected_policy_candidate_count == batch.count
 
 
 def test_ground_platform_keeps_candidate_when_observed_detour_exists() -> None:
@@ -699,13 +884,9 @@ def test_ground_platform_keeps_candidate_when_observed_detour_exists() -> None:
     )
     assert legacy.count == 0
     assert batch.count > legacy.count
-    assert batch.diagnostics.emitted_count == batch.count
-    assert batch.diagnostics.frontier_anchor_count >= batch.count
-    assert (
-        batch.diagnostics.static_infeasible_count
-        + batch.diagnostics.platform_unreachable_count
-        > 0
-    )
+    assert batch.diagnostics.selected_policy_candidate_count == batch.count
+    assert batch.diagnostics.physical_candidate_universe_count >= batch.count
+    assert batch.diagnostics.physical_unreachable_count > 0
 
 
 def test_hopper_keeps_observed_landing_when_ground_ray_is_blocked() -> None:
@@ -781,7 +962,7 @@ def test_hopper_rejects_unobserved_or_projection_infeasible_landings() -> None:
     )
 
     assert unsafe.count == 0
-    assert unsafe.diagnostics.static_infeasible_count > 0
+    assert unsafe.diagnostics.physical_unreachable_count > 0
     assert unobserved.count == 0
 
 
@@ -1034,10 +1215,10 @@ def test_stage_diagnostics_isolate_platform_unreachable_and_zero_gain() -> None:
     )
 
     assert unreachable.count == 0
-    assert unreachable.diagnostics.platform_unreachable_count > 0
+    assert unreachable.diagnostics.physical_unreachable_count > 0
     assert unreachable.diagnostics.zero_gain_count == 0
     assert zero_gain.count == 0
-    assert zero_gain.diagnostics.platform_unreachable_count == 0
+    assert zero_gain.diagnostics.physical_unreachable_count == 0
     assert zero_gain.diagnostics.zero_gain_count > 0
 
 

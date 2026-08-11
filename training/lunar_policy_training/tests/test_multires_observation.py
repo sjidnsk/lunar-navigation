@@ -266,3 +266,55 @@ def test_candidate_gains_use_one_observed_only_detail_window_and_physical_area()
     assert local_candidates.dtype == np.int32
     assert np.all(obstacles[~observed] == 0.0)
     np.testing.assert_allclose(gains, [[1.0, 0.5], [1.0, 0.5]])
+
+
+def test_evidence_generation_and_digest_change_only_on_authoritative_sensor_updates() -> None:
+    state, _ = _state()
+    pose = Pose2(512.0, 512.0, elevation_m=7.0)
+    initial_digest = state.physical_evidence_sha256()
+
+    assert state.evidence_generation == 0
+    assert len(initial_digest) == 64
+    state.local_observation(pose)
+    state.planning_observation(pose)
+    assert state.evidence_generation == 0
+    assert state.physical_evidence_sha256() == initial_digest
+
+    state.observe_world(pose, elapsed_s=0.0)
+    first_digest = state.physical_evidence_sha256()
+    assert state.evidence_generation == 1
+    assert first_digest != initial_digest
+
+    state.planning_observation(pose)
+    assert state.evidence_generation == 1
+    assert state.physical_evidence_sha256() == first_digest
+
+    state.observe_world(pose, elapsed_s=1.0)
+    assert state.evidence_generation == 2
+    assert state.physical_evidence_sha256() != first_digest
+
+
+def test_failed_observation_does_not_advance_evidence_generation() -> None:
+    state, _ = _state()
+    before = state.physical_evidence_sha256()
+
+    with pytest.raises(ValueError, match="detail window"):
+        state.observe_world(Pose2(1.0, 1.0), elapsed_s=0.0)
+
+    assert state.evidence_generation == 0
+    assert state.physical_evidence_sha256() == before
+
+
+def test_physical_evidence_digest_uses_sorted_tile_identity_and_observed_bytes() -> None:
+    first, _ = _state()
+    second, _ = _state()
+    low = Pose2(400.0, 400.0, elevation_m=7.0)
+    high = Pose2(624.0, 624.0, elevation_m=7.0)
+
+    first.observe_world(low, elapsed_s=0.0)
+    first.observe_world(high, elapsed_s=0.0)
+    second.observe_world(high, elapsed_s=0.0)
+    second.observe_world(low, elapsed_s=0.0)
+
+    assert first.evidence_generation == second.evidence_generation == 2
+    assert first.physical_evidence_sha256() == second.physical_evidence_sha256()
