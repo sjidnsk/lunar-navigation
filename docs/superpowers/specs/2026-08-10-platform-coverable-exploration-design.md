@@ -1,8 +1,14 @@
 # 平台运动原语可达探索与候选终止闭环设计
 
+> **部分取代说明（2026-08-11）：** 本文中以 truth/observed 运动原语图作为覆盖率分母、候选和
+> oracle 权威的条款，`PLANNER_REJECTED_ALL` 终止语义，以及 cache v5 / training semantics v10
+> 身份，已由
+> [`2026-08-11-physical-opportunity-planner-failure-semantics-design.md`](2026-08-11-physical-opportunity-planner-failure-semantics-design.md)
+> 原子取代。本文未被新设计明确修改的 source/split、传感器、宏动作、路径观测、成功阈值和奖励边界继续有效。
+
 **日期：** 2026-08-10
 **修订：** 2026-08-11
-**状态：** 已批准，运动原语双图修订待实施
+**状态：** 已部分取代；未被 2026-08-11 修订明确修改的条款继续有效
 **范围：** 正式 PPO 训练的覆盖率分母、场景资格、平台运动原语可达性、候选生成、候选耗尽审计、宏动作闭环和全新训练身份
 
 ## 1. 权威关系
