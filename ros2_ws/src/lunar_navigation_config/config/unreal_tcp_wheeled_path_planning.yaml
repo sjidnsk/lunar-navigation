@@ -1,0 +1,59 @@
+lunar_unreal_tcp_bridge:
+  ros__parameters:
+    use_sim_time: true
+    server_host: "192.168.1.20"
+    server_port: 47001
+    basis_map_from_unreal: [1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0]
+    unreal_world_origin_in_map_m: [0.0, 0.0, 0.0]
+    length_unit_to_m: 0.01
+    base_link_from_unreal_root: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    base_footprint_from_base_link: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    calibration_hash: "sha256:unreal-tcp-wheeled-v1"
+    heartbeat_timeout_s: 3.0
+    freshness_timeout_s: 1.0
+    maximum_snapshot_skew_s: 0.2
+
+lunar_observed_map:
+  ros__parameters:
+    use_sim_time: true
+    initial_session_id: ""
+    base_resolution_m: 0.2
+    local_axis_cells: 320
+    tile_side_cells: 256
+    maximum_tiles: 512
+    target_axis_cells: 256
+    maximum_axis_cells: 4096
+    maximum_total_cells: 1048576
+    maximum_global_axis_m: 1024.0
+    # ceil((0.719 m footprint support radius + 0.2 m clearance) / 0.2 m)
+    # plus one boundary cell keeps the cropped start/goal corridor plannable.
+    planning_boundary_cells: 6
+    maximum_snapshot_skew_s: 0.2
+    maximum_local_obstacle_relief_m: 0.2
+
+lunar_planner:
+  ros__parameters:
+    use_sim_time: true
+    global_map_max_age: 1.0
+    local_map_max_age: 1.0
+    odometry_max_age: 1.0
+    localization_status_max_age: 1.0
+    tf_max_age: 1.0
+    max_pairwise_skew: 0.2
+    execution_feedback_max_age: 1.0
+    base_resolution_m: 0.2
+    maximum_global_level: 5
+    maximum_global_cells: 1048576
+    maximum_global_axis_cells: 4096
+    target_global_axis_cells: 256
+
+lunar_goal_coordinator:
+  ros__parameters:
+    use_sim_time: true
+    map_frame: "map"
+    odom_frame: "odom"
+    base_frame: "base_footprint"
+    plan_motion_action: "/plan_motion"
+    position_tolerance_m: 0.5
+    yaw_tolerance_rad: 0.2617993877991494
+    maximum_snapshot_skew_s: 0.2

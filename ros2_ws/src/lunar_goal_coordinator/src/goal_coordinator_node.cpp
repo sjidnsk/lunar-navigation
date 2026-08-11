@@ -268,6 +268,8 @@ class GoalCoordinatorNode::Impl final {
     local_map_stamp_ns_.reset();
     odometry_.reset();
     transform_stamp_ns_.reset();
+    pending_command_.reset();
+    pending_plan_goal_.reset();
     machine_ = GoalStateMachine{};
     configured_ = false;
     return CallbackReturn::SUCCESS;
@@ -423,12 +425,18 @@ class GoalCoordinatorNode::Impl final {
       }
       if (session_id.empty() || session_state == "DISCONNECTED" ||
           session_state == "HANDSHAKING") {
+        pending_command_.reset();
+        pending_plan_goal_.reset();
         machine_.SetSession({});
         global_map_.reset();
         local_map_stamp_ns_.reset();
         odometry_.reset();
         transform_stamp_ns_.reset();
       } else {
+        if (session_id != machine_.session_id()) {
+          pending_command_.reset();
+          pending_plan_goal_.reset();
+        }
         machine_.SetSession(std::move(session_id));
       }
       RequestHoldIfNeeded();
@@ -442,6 +450,8 @@ class GoalCoordinatorNode::Impl final {
     if (!active_ || !machine_.BeginCancel()) {
       return false;
     }
+    pending_command_.reset();
+    pending_plan_goal_.reset();
     const bool has_reference = !machine_.active_plan_id().empty();
     RequestHoldIfNeeded();
     dependencies_.planner->Cancel(
@@ -536,7 +546,7 @@ class GoalCoordinatorNode::Impl final {
     rclcpp::SubscriptionOptions options;
     options.callback_group = transition_group_;
     goal_subscription_ = node_.create_subscription<geometry_msgs::msg::PoseStamped>(
-        "/goal_pose", transient_qos,
+        "/goal_pose", rclcpp::QoS{1}.reliable().durability_volatile(),
         [this](const geometry_msgs::msg::PoseStamped::SharedPtr message) {
           ReceiveGoal(*message);
         },
@@ -647,6 +657,17 @@ class GoalCoordinatorNode::Impl final {
       return;
     }
     RequestHoldIfNeeded();
+    if (pending_command_ && pending_plan_goal_) {
+      if (!dependencies_.planner->Available()) {
+        return;
+      }
+      const PlanningCommand command = std::move(*pending_command_);
+      Action::Goal goal = std::move(*pending_plan_goal_);
+      pending_command_.reset();
+      pending_plan_goal_.reset();
+      SendPlanningGoal(command, goal);
+      return;
+    }
     if (machine_.state() != CoordinatorState::kReady ||
         !dependencies_.planner->Available()) {
       return;
@@ -688,9 +709,20 @@ class GoalCoordinatorNode::Impl final {
     goal.goal.yaw_rad = command->goal_yaw_rad;
     goal.goal.yaw_tolerance_rad = command->yaw_tolerance_rad;
     last_plan_goal_ = goal;
+    if (command->publish_mission) {
+      pending_command_ = *command;
+      pending_plan_goal_ = goal;
+      PublishStatus();
+      return;
+    }
+    SendPlanningGoal(*command, goal);
+  }
+
+  void SendPlanningGoal(
+      const PlanningCommand& command, const Action::Goal& goal) {
     dependencies_.planner->Send(
         goal,
-        [this, command = *command](PlanCompletion completion) {
+        [this, command](PlanCompletion completion) {
           std::scoped_lock callback_lock{mutex_};
           PlannerReply reply{
               .request_id = command.request_id,
@@ -805,6 +837,8 @@ class GoalCoordinatorNode::Impl final {
   std::optional<lunar_navigation_msgs::msg::ExplorationTask> last_mission_;
   std::optional<lunar_planning_msgs::msg::MotionReference> last_reference_;
   std::optional<Action::Goal> last_plan_goal_;
+  std::optional<PlanningCommand> pending_command_;
+  std::optional<Action::Goal> pending_plan_goal_;
 };
 
 GoalCoordinatorNode::GoalCoordinatorNode(

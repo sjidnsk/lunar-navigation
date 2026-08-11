@@ -370,6 +370,7 @@ struct PlanMotionServer::Impl final {
       lunar_navigation_msgs::msg::LocalizationStatus>::SharedPtr
       localization_status_sub;
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr tf_sub;
+  rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr tf_static_sub;
   rclcpp::Subscription<
       lunar_navigation_msgs::msg::ExplorationTask>::SharedPtr mission_sub;
   rclcpp::Subscription<
@@ -845,6 +846,15 @@ struct PlanMotionServer::Impl final {
           }
         },
         tf_options);
+    tf_static_sub = node.create_subscription<tf2_msgs::msg::TFMessage>(
+        "/tf_static", rclcpp::QoS{1}.reliable().transient_local(),
+        [this](const tf2_msgs::msg::TFMessage::SharedPtr message) {
+          const auto store = Store();
+          if (store) {
+            store->UpdateTransforms(*message);
+          }
+        },
+        tf_options);
 
     rclcpp::SubscriptionOptions mission_options;
     mission_options.callback_group = mission_group;
@@ -881,6 +891,7 @@ struct PlanMotionServer::Impl final {
     odometry_sub.reset();
     localization_status_sub.reset();
     tf_sub.reset();
+    tf_static_sub.reset();
     mission_sub.reset();
     execution_feedback_sub.reset();
   }

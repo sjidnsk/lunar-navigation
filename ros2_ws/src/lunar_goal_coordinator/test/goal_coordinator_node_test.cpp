@@ -336,6 +336,8 @@ TEST(GoalCoordinatorNode, CancelWaitsForCanceledThenAcceptsNewGoal) {
   EXPECT_EQ(test.node->state_for_testing(), CoordinatorState::kIdle);
   test.node->ReceiveGoalForTesting(Goal(1'000'000'000LL));
   EXPECT_EQ(test.node->state_for_testing(), CoordinatorState::kPlanning);
+  EXPECT_EQ(test.planner->goals.size(), 1U);
+  test.node->DispatchForTesting();
   EXPECT_EQ(test.planner->goals.size(), 2U);
 }
 

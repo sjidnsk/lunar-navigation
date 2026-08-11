@@ -372,6 +372,62 @@ SelectTransform(
   return Interpolate(*lower, *upper, state_stamp);
 }
 
+[[nodiscard]] geometry_msgs::msg::TransformStamped ComposeTransforms(
+    const geometry_msgs::msg::TransformStamped& parent_from_intermediate,
+    const geometry_msgs::msg::TransformStamped& intermediate_from_child,
+    const std::int64_t state_stamp) noexcept {
+  const lunar::planning::Vec3 child_offset{
+      .x = intermediate_from_child.transform.translation.x,
+      .y = intermediate_from_child.transform.translation.y,
+      .z = intermediate_from_child.transform.translation.z,
+  };
+  const lunar::planning::Vec3 rotated_offset = Rotate(
+      parent_from_intermediate.transform.rotation, child_offset);
+
+  geometry_msgs::msg::TransformStamped result;
+  result.header.frame_id = parent_from_intermediate.header.frame_id;
+  result.child_frame_id = intermediate_from_child.child_frame_id;
+  result.header.stamp = ToStamp(state_stamp);
+  result.transform.translation.x =
+      parent_from_intermediate.transform.translation.x + rotated_offset.x;
+  result.transform.translation.y =
+      parent_from_intermediate.transform.translation.y + rotated_offset.y;
+  result.transform.translation.z =
+      parent_from_intermediate.transform.translation.z + rotated_offset.z;
+  result.transform.rotation = Normalize(Multiply(
+      parent_from_intermediate.transform.rotation,
+      intermediate_from_child.transform.rotation));
+  return result;
+}
+
+[[nodiscard]] std::optional<geometry_msgs::msg::TransformStamped>
+SelectOdomFromBase(
+    const std::vector<geometry_msgs::msg::TransformStamped>& transforms,
+    const std::string_view base_frame_id,
+    const std::int64_t state_stamp,
+    const std::int64_t now,
+    const SnapshotPolicy& policy) {
+  if (auto direct = SelectTransform(
+          transforms, "odom", base_frame_id, state_stamp, now, policy);
+      direct.has_value()) {
+    return direct;
+  }
+  if (base_frame_id != "base_footprint") {
+    return std::nullopt;
+  }
+
+  const auto odom_from_base_link = SelectTransform(
+      transforms, "odom", "base_link", state_stamp, now, policy);
+  const auto base_link_from_footprint = SelectTransform(
+      transforms, "base_link", "base_footprint", state_stamp, now, policy);
+  if (!odom_from_base_link.has_value() ||
+      !base_link_from_footprint.has_value()) {
+    return std::nullopt;
+  }
+  return ComposeTransforms(
+      *odom_from_base_link, *base_link_from_footprint, state_stamp);
+}
+
 [[nodiscard]] bool FiniteCoreVector(
     const lunar::planning::Vec3& value) noexcept {
   return IsFinite(value.x) && IsFinite(value.y) && IsFinite(value.z);
@@ -650,9 +706,8 @@ SnapshotBuildResult SnapshotBuilder::Freeze(
   const auto map_from_odom = SelectTransform(
       view.transforms, "map", "odom", *odometry_stamp,
       now_stamp, policy_);
-  const auto odom_from_base = SelectTransform(
-      view.transforms, "odom", base_frame_id_, *odometry_stamp,
-      now_stamp, policy_);
+  const auto odom_from_base = SelectOdomFromBase(
+      view.transforms, base_frame_id_, *odometry_stamp, now_stamp, policy_);
   if (!map_from_odom.has_value() || !odom_from_base.has_value()) {
     return Failure(SnapshotErrorCode::kStaleTf, "STALE_TF");
   }

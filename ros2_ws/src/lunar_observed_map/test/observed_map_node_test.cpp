@@ -220,6 +220,20 @@ TEST(ObservedMapNode, ObservedPatchAndOdometryProduceSameGenerationProducts) {
                   .ok());
 }
 
+TEST(ObservedMapNode, OdometryWithoutNewObservationDoesNotAdvanceGeneration) {
+  TestNode test;
+  test.Ready();
+  const std::uint64_t generation = test.node->generation_for_testing();
+  const auto global_stamp =
+      test.node->last_global_map_for_testing()->header.stamp;
+
+  test.node->ReceiveOdometryForTesting(Odometry(2'100'000'000LL, 0.2, 0.1));
+
+  EXPECT_EQ(test.node->generation_for_testing(), generation);
+  EXPECT_EQ(
+      test.node->last_global_map_for_testing()->header.stamp, global_stamp);
+}
+
 TEST(ObservedMapNode, FreezesArbitrarySessionLatticeOriginFromFirstPatch) {
   TestNode test;
   test.Activate();

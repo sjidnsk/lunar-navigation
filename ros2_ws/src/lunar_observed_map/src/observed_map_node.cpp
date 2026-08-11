@@ -285,7 +285,10 @@ class ObservedMapNode::Impl final {
     }
     last_odometry_ = message;
     last_odometry_time_ns_ = *Nanoseconds(message.header.stamp);
-    TryGenerate();
+    if (!last_generated_observation_time_ns_.has_value() ||
+        last_generated_observation_time_ns_ != last_map_time_ns_) {
+      TryGenerate();
+    }
   }
 
   void ReceiveGoal(const geometry_msgs::msg::PoseStamped& message) {
@@ -482,7 +485,7 @@ class ObservedMapNode::Impl final {
         });
     goal_subscription_ = node_.create_subscription<
         geometry_msgs::msg::PoseStamped>(
-        "/goal_pose", rclcpp::QoS{1}.reliable().transient_local(),
+        "/goal_pose", rclcpp::QoS{1}.reliable().durability_volatile(),
         [this](const geometry_msgs::msg::PoseStamped::SharedPtr message) {
           ReceiveGoal(*message);
         });
@@ -693,6 +696,7 @@ class ObservedMapNode::Impl final {
     }
     last_local_map_ = *local.message;
     last_global_map_ = *global.message;
+    last_generated_observation_time_ns_ = last_map_time_ns_;
     ++generation_;
     state_ = ObservedMapNodeState::kReady;
     last_reason_ = "READY";
@@ -705,6 +709,7 @@ class ObservedMapNode::Impl final {
 
   void ClearSnapshot() {
     last_map_time_ns_.reset();
+    last_generated_observation_time_ns_.reset();
     last_odometry_time_ns_.reset();
     last_odometry_.reset();
     goal_.reset();
@@ -763,6 +768,7 @@ class ObservedMapNode::Impl final {
   ObservedMapNodeState state_{ObservedMapNodeState::kUnconfigured};
   std::string last_reason_{"UNCONFIGURED"};
   std::optional<std::int64_t> last_map_time_ns_;
+  std::optional<std::int64_t> last_generated_observation_time_ns_;
   std::optional<std::int64_t> last_odometry_time_ns_;
   std::optional<nav_msgs::msg::Odometry> last_odometry_;
   std::optional<geometry_msgs::msg::PoseStamped> goal_;

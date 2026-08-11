@@ -11,6 +11,13 @@
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>tf2_msgs</exec_depend>
   <exec_depend>lunar_navigation_msgs</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>lifecycle_msgs</exec_depend>
+  <exec_depend>lunar_goal_coordinator</exec_depend>
+  <exec_depend>lunar_observed_map</exec_depend>
+  <exec_depend>lunar_planner_ros</exec_depend>
+  <exec_depend>lunar_unreal_tcp_bridge</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

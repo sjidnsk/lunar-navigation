@@ -150,6 +150,30 @@ TEST(SnapshotBuilder, FreezesExactlyOneValidMapFrameInput) {
   EXPECT_GT(result.input->map_from_odom_generation, 0U);
 }
 
+TEST(SnapshotBuilder, ResolvesBaseFootprintThroughStaticBaseLinkTransform) {
+  auto store = ValidStore();
+  auto odometry = test::MakeOdometry();
+  odometry.child_frame_id = "base_footprint";
+  store->UpdateOdometry(odometry);
+  tf2_msgs::msg::TFMessage static_transforms;
+  static_transforms.transforms = {
+      test::MakeTransform(
+          "base_link", "base_footprint", 10'000'000'000LL, 0.1),
+  };
+  store->UpdateTransforms(static_transforms);
+  lunar::planning::PlannerConfig config;
+  config.global_map.base_resolution_m = 1.0;
+  SnapshotBuilder builder{
+      store, ValidPolicy(), test::MakeWheeledCapability(), std::move(config),
+      "base_footprint"};
+
+  const SnapshotBuildResult result = builder.Freeze(
+      ValidGoal(), rclcpp::Time{10'100'000'000LL});
+
+  ASSERT_TRUE(result.ok())
+      << (result.error ? result.error->reason_code : "");
+}
+
 TEST(SnapshotBuilder, BuildsHopperWithoutPropellantTopic) {
   const auto result = MakeHopperBuilder(ValidStore()).Freeze(
       ValidHopperGoal(), rclcpp::Time{10'100'000'000LL});
