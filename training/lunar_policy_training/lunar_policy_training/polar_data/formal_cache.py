@@ -28,6 +28,7 @@ from ..environment.primitive_reachability import (
 )
 from ..environment.coverability import (
     IneligibleReason,
+    PHYSICAL_GRID_AXIS_CONVENTION,
     PlatformCoverability,
     StreamedDetailCoverability,
     build_streamed_detail_coverability,
@@ -507,10 +508,10 @@ class StaticSceneData:
                 coverability.physical_observation_pose_mask
             )
             output[f"{prefix}_coverable_detail_bits"] = np.ascontiguousarray(
-                coverability.coverable_detail_bits.copy(), dtype=np.uint8
+                coverability.coverable_detail_bits.copy(), dtype=np.dtype("u1")
             )
             output[f"{prefix}_coverable_ratio"] = np.ascontiguousarray(
-                coverability.coverable_ratio.copy(), dtype=np.float32
+                coverability.coverable_ratio.copy(), dtype=np.dtype("<f4")
             )
         return output
 
@@ -870,19 +871,7 @@ class FormalCache:
                 output[f"{prefix}_coverable_detail_bits"].copy(), detail_shape
             )
             if (
-                physical_projection_sha256(
-                    platform_type=platform,
-                    physical_reachability_algorithm_id=(
-                        payload["physical_reachability_algorithm_id"]
-                    ),
-                    physical_observation_pose_mask=physical,
-                    capability_content_sha256=(
-                        payload["capability_content_sha256"]
-                    ),
-                    start_identity_sha256=payload["start_identity_sha256"],
-                )
-                != payload["physical_projection_sha256"]
-                or mask_sha256(coverable)
+                mask_sha256(coverable)
                 != payload["coverable_detail_mask_sha256"]
                 or int(physical.sum(dtype=np.int64))
                 != payload["physically_reachable_pose_count"]
@@ -1057,19 +1046,32 @@ def _validate_scene_coverability(entry: Mapping[str, object]) -> None:
         }:
             raise FormalCacheError("cache coverability diagnostics are invalid")
         prefix = platform.lower()
-        expected_shapes = {
-            f"{prefix}_physical_observation_pose_bits": [
-                (256 * 256 + 7) // 8
-            ],
-            f"{prefix}_coverable_detail_bits": [
-                (detail_shape[0] * detail_shape[1] + 7) // 8
-            ],
-            f"{prefix}_coverable_ratio": [256, 256],
+        expected_arrays = {
+            f"{prefix}_physical_observation_pose_bits": {
+                "shape": [(256 * 256 + 7) // 8],
+                "dtype": "|u1",
+                "byte_order": "not-applicable",
+            },
+            f"{prefix}_coverable_detail_bits": {
+                "shape": [(detail_shape[0] * detail_shape[1] + 7) // 8],
+                "dtype": "|u1",
+                "byte_order": "not-applicable",
+            },
+            f"{prefix}_coverable_ratio": {
+                "shape": [256, 256],
+                "dtype": "<f4",
+                "byte_order": "little",
+            },
         }
-        for name, shape in expected_shapes.items():
+        for name, expected in expected_arrays.items():
             metadata = arrays.get(name)
-            if not isinstance(metadata, Mapping) or metadata.get("shape") != shape:
+            if not isinstance(metadata, Mapping):
                 raise FormalCacheError("cache coverability array metadata differs")
+            for field, value in expected.items():
+                if metadata.get(field) != value:
+                    raise FormalCacheError(
+                        f"cache coverability array {field} differs"
+                    )
 
 
 def load_formal_cache(
@@ -1685,6 +1687,7 @@ class _HopperPhysicalEvidence:
     bridge_grid: object
     certified_pose_mask: np.ndarray
     aim_positions_m: np.ndarray
+    evidence_algorithm_id: str
 
 
 def _hopper_landing_evidence(
@@ -1769,6 +1772,7 @@ def _hopper_landing_evidence(
         bridge_grid=bridge_grid,
         certified_pose_mask=np.ascontiguousarray(certified, dtype=np.bool_),
         aim_positions_m=np.ascontiguousarray(aim, dtype=np.float64),
+        evidence_algorithm_id=algorithm_id,
     )
 
 
@@ -1798,12 +1802,14 @@ def _build_truth_physical_reachability(
             request, 30.0, landing_evidence.bridge_grid
         )
         safe = landing_evidence.certified_pose_mask
+        evidence_algorithm_id = landing_evidence.evidence_algorithm_id
     else:
         output = bridge.project_reachability(request, 30.0)
         traversability = bridge.project_traversability(request)
         safe = np.ascontiguousarray(
             np.flipud(traversability.hard_feasible).astype(np.bool_)
         )
+        evidence_algorithm_id = "cpp-safe-traversability-projection/v1"
     if output.platform_type != platform.platform_type:
         raise FormalCacheError("physical projection platform identity differs")
     physical = np.ascontiguousarray(
@@ -1837,6 +1843,7 @@ def _build_truth_physical_reachability(
         observation_positions_m=positions,
         physical_projection_schema=PHYSICAL_PROJECTION_SCHEMA,
         physical_reachability_algorithm_id=str(output.algorithm_id),
+        physical_evidence_algorithm_id=evidence_algorithm_id,
         physical_safe_pose_count=int(safe.sum(dtype=np.int64)),
         physically_reachable_pose_count=int(physical.sum(dtype=np.int64)),
     )
@@ -1907,6 +1914,7 @@ def _physical_start_identity_sha256(
 
 def _unsafe_platform_coverability(
     platform: FrozenPlatformCapability,
+    projected: object,
     detail_shape: tuple[int, int],
 ) -> PlatformCoverability:
     physical = np.zeros((256, 256), dtype=np.bool_)
@@ -1920,6 +1928,8 @@ def _unsafe_platform_coverability(
         }
     )
     algorithm_id = "not-run/unsafe-start"
+    canvas = projected.canvas
+    bounds = tuple(float(value) for value in canvas.bounds_m)
     return PlatformCoverability(
         platform_type=platform.platform_type,
         qualified_start_cell=None,
@@ -1931,7 +1941,13 @@ def _unsafe_platform_coverability(
         physical_projection_sha256=physical_projection_sha256(
             platform_type=platform.platform_type,
             physical_reachability_algorithm_id=algorithm_id,
+            physical_evidence_algorithm_id=algorithm_id,
             physical_observation_pose_mask=physical,
+            physical_observation_positions_m=np.empty((0, 3), dtype=np.float64),
+            physical_grid_resolution_m=float(canvas.geometry.resolution_m),
+            physical_grid_origin_m=(bounds[0], bounds[3]),
+            physical_grid_world_bounds_m=bounds,
+            physical_grid_axis_convention=PHYSICAL_GRID_AXIS_CONVENTION,
             capability_content_sha256=capability_sha256,
             start_identity_sha256=start_sha256,
         ),
@@ -1966,7 +1982,7 @@ def _build_scene_platform_coverability(
 ) -> PlatformCoverability:
     platform = capability_bundle.for_platform(platform_type)
     if qualification is None:
-        return _unsafe_platform_coverability(platform, detail_shape)
+        return _unsafe_platform_coverability(platform, projected, detail_shape)
 
     import lunar_planner_training_bridge as bridge_api
 
@@ -1981,11 +1997,11 @@ def _build_scene_platform_coverability(
         )
     except RuntimeError as error:
         if native_start_failure_is_ineligible(platform_type, error):
-            return _unsafe_platform_coverability(platform, detail_shape)
+            return _unsafe_platform_coverability(platform, projected, detail_shape)
         raise
     physical = physical_projection.physical_observation_pose_mask
     if not bool(physical[qualification.cell]):
-        return _unsafe_platform_coverability(platform, detail_shape)
+        return _unsafe_platform_coverability(platform, projected, detail_shape)
     detail = _build_platform_detail_coverability(
         platform=platform,
         scene=scene,
@@ -1993,8 +2009,6 @@ def _build_scene_platform_coverability(
         physical_observation_pose_mask=physical,
         physical_observation_positions_m=(
             physical_projection.observation_positions_m
-            if platform_type == "HOPPER"
-            else None
         ),
         bridge=bridge,
     )
@@ -2019,6 +2033,8 @@ def _build_scene_platform_coverability(
         start_cell=qualification.cell,
     )
     capability_sha256 = _physical_capability_content_sha256(platform)
+    canvas = projected.canvas
+    bounds = tuple(float(value) for value in canvas.bounds_m)
     return PlatformCoverability(
         platform_type=platform_type,
         qualified_start_cell=qualification.cell,
@@ -2040,7 +2056,17 @@ def _build_scene_platform_coverability(
             physical_reachability_algorithm_id=(
                 physical_projection.physical_reachability_algorithm_id
             ),
+            physical_evidence_algorithm_id=(
+                physical_projection.physical_evidence_algorithm_id
+            ),
             physical_observation_pose_mask=physical,
+            physical_observation_positions_m=(
+                physical_projection.observation_positions_m
+            ),
+            physical_grid_resolution_m=float(canvas.geometry.resolution_m),
+            physical_grid_origin_m=(bounds[0], bounds[3]),
+            physical_grid_world_bounds_m=bounds,
+            physical_grid_axis_convention=PHYSICAL_GRID_AXIS_CONVENTION,
             capability_content_sha256=capability_sha256,
             start_identity_sha256=start_sha256,
         ),

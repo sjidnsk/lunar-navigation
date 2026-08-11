@@ -19,6 +19,10 @@ from ..training_semantics import (
 
 _PLATFORM_TYPES = frozenset(("WHEELED", "LEGGED", "HOPPER"))
 PHYSICAL_PROJECTION_SCHEMA = "lunar-physical-coverability-projection/v1"
+PHYSICAL_GRID_AXIS_CONVENTION = (
+    "north-up-row-major-row-decreases-y-column-increases-x"
+)
+_LINEAR_QUANTIZATION_PER_M = 1_000_000
 _BYTE_POPCOUNT = np.asarray(
     [value.bit_count() for value in range(256)], dtype=np.uint8
 )
@@ -72,20 +76,101 @@ def physical_projection_sha256(
     *,
     platform_type: str,
     physical_reachability_algorithm_id: str,
+    physical_evidence_algorithm_id: str,
     physical_observation_pose_mask: np.ndarray,
+    physical_observation_positions_m: np.ndarray,
+    physical_grid_resolution_m: float,
+    physical_grid_origin_m: tuple[float, float],
+    physical_grid_world_bounds_m: tuple[float, float, float, float],
+    physical_grid_axis_convention: str,
     capability_content_sha256: str,
     start_identity_sha256: str,
 ) -> str:
     """Hash only canonical physical authority, never planner primitives."""
     if platform_type not in _PLATFORM_TYPES:
         raise CoverabilityError("physical projection platform is invalid")
-    if (
-        not isinstance(physical_reachability_algorithm_id, str)
-        or not physical_reachability_algorithm_id
+    for name, value in (
+        (
+            "physical reachability algorithm ID",
+            physical_reachability_algorithm_id,
+        ),
+        ("physical evidence algorithm ID", physical_evidence_algorithm_id),
     ):
-        raise CoverabilityError("physical reachability algorithm ID is missing")
+        if not isinstance(value, str) or not value:
+            raise CoverabilityError(f"{name} is missing")
     mask = _require_bool_mask(
         physical_observation_pose_mask, "physical observation pose mask"
+    )
+    positions = physical_observation_positions_m
+    if (
+        not isinstance(positions, np.ndarray)
+        or positions.dtype != np.dtype(np.float64)
+        or positions.ndim != 2
+        or positions.shape[1:] != (3,)
+        or len(positions) != int(mask.sum(dtype=np.int64))
+        or not positions.flags.c_contiguous
+        or not np.isfinite(positions).all()
+    ):
+        raise CoverabilityError(
+            "physical observation positions must be row-major float64 [N,3]"
+        )
+    if (
+        not isinstance(physical_grid_resolution_m, float)
+        or not math.isfinite(physical_grid_resolution_m)
+        or physical_grid_resolution_m <= 0.0
+        or physical_grid_axis_convention != PHYSICAL_GRID_AXIS_CONVENTION
+    ):
+        raise CoverabilityError("physical grid resolution or axis is invalid")
+    geometry_values = (
+        physical_grid_origin_m,
+        physical_grid_world_bounds_m,
+    )
+    if (
+        not isinstance(physical_grid_origin_m, tuple)
+        or len(physical_grid_origin_m) != 2
+        or not isinstance(physical_grid_world_bounds_m, tuple)
+        or len(physical_grid_world_bounds_m) != 4
+        or any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            for values in geometry_values
+            for value in values
+        )
+    ):
+        raise CoverabilityError("physical grid origin or bounds are invalid")
+    left, bottom, right, top = tuple(
+        float(value) for value in physical_grid_world_bounds_m
+    )
+    origin_x, origin_y = tuple(float(value) for value in physical_grid_origin_m)
+    if (
+        left >= right
+        or bottom >= top
+        or not math.isclose(origin_x, left, rel_tol=0.0, abs_tol=5.0e-7)
+        or not math.isclose(origin_y, top, rel_tol=0.0, abs_tol=5.0e-7)
+        or not math.isclose(
+            right - left,
+            mask.shape[1] * physical_grid_resolution_m,
+            rel_tol=0.0,
+            abs_tol=5.0e-7,
+        )
+        or not math.isclose(
+            top - bottom,
+            mask.shape[0] * physical_grid_resolution_m,
+            rel_tol=0.0,
+            abs_tol=5.0e-7,
+        )
+    ):
+        raise CoverabilityError("physical grid geometry is inconsistent")
+
+    def quantized(value: float) -> int:
+        scaled = float(value) * _LINEAR_QUANTIZATION_PER_M
+        if not math.isfinite(scaled) or abs(scaled) > np.iinfo(np.int64).max:
+            raise CoverabilityError("physical projection coordinate is out of range")
+        return int(round(scaled))
+
+    quantized_positions = np.ascontiguousarray(
+        np.rint(positions * _LINEAR_QUANTIZATION_PER_M), dtype="<i8"
     )
     capability_sha256 = _require_sha(
         capability_content_sha256, "capability content hash"
@@ -96,8 +181,29 @@ def physical_projection_sha256(
         "physical_reachability_algorithm_id": (
             physical_reachability_algorithm_id
         ),
-        "physical_observation_pose_shape": list(mask.shape),
+        "physical_evidence_algorithm_id": physical_evidence_algorithm_id,
+        "physical_grid_geometry": {
+            "shape": list(mask.shape),
+            "linear_quantization_um": 1,
+            "resolution_um": quantized(physical_grid_resolution_m),
+            "origin_um": [quantized(origin_x), quantized(origin_y)],
+            "world_bounds_um": [
+                quantized(left),
+                quantized(bottom),
+                quantized(right),
+                quantized(top),
+            ],
+            "axis_convention": physical_grid_axis_convention,
+        },
         "physical_observation_pose_mask_sha256": mask_sha256(mask),
+        "physical_observation_positions": {
+            "count": len(positions),
+            "component_order": "x-y-z",
+            "quantization_um": 1,
+            "sha256": sha256(
+                quantized_positions.tobytes(order="C")
+            ).hexdigest(),
+        },
         "capability_content_sha256": capability_sha256,
         "start_identity_sha256": start_sha256,
     }
@@ -1002,19 +1108,7 @@ class PlatformCoverability:
             raise CoverabilityError(
                 "physical safe pose count is below reachable pose count"
             )
-        expected_projection_sha256 = physical_projection_sha256(
-            platform_type=self.platform_type,
-            physical_reachability_algorithm_id=(
-                self.physical_reachability_algorithm_id
-            ),
-            physical_observation_pose_mask=physical,
-            capability_content_sha256=self.capability_content_sha256,
-            start_identity_sha256=self.start_identity_sha256,
-        )
-        if expected_projection_sha256 != _require_sha(
-            self.physical_projection_sha256, "physical projection hash"
-        ):
-            raise CoverabilityError("physical projection hash differs")
+        _require_sha(self.physical_projection_sha256, "physical projection hash")
         if mask_sha256(detail) != _require_sha(
             self.coverable_detail_mask_sha256,
             "coverable mask hash",
@@ -1087,6 +1181,7 @@ __all__ = [
     "CoverabilityError",
     "IneligibleReason",
     "PlatformCoverability",
+    "PHYSICAL_GRID_AXIS_CONVENTION",
     "PHYSICAL_PROJECTION_SCHEMA",
     "QualifiedStartState",
     "StreamedDetailCoverability",

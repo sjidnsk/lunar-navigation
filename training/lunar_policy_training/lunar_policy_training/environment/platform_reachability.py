@@ -25,6 +25,7 @@ class PhysicalReachabilityResult:
     observation_positions_m: np.ndarray
     physical_projection_schema: str
     physical_reachability_algorithm_id: str
+    physical_evidence_algorithm_id: str
     physical_safe_pose_count: int
     physically_reachable_pose_count: int
 
@@ -59,6 +60,8 @@ class PhysicalReachabilityResult:
             self.physical_projection_schema != PHYSICAL_PROJECTION_SCHEMA
             or not isinstance(self.physical_reachability_algorithm_id, str)
             or not self.physical_reachability_algorithm_id
+            or not isinstance(self.physical_evidence_algorithm_id, str)
+            or not self.physical_evidence_algorithm_id
         ):
             raise ValueError("physical reachability algorithm identity is invalid")
         if (

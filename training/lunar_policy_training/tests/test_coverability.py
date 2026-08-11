@@ -16,6 +16,7 @@ from lunar_policy_training.environment.coverability import (
     classify_ineligibility,
     mask_sha256,
     pack_detail_mask,
+    physical_projection_sha256,
     unpack_detail_mask,
 )
 from lunar_policy_training.training_semantics import (
@@ -149,7 +150,7 @@ def test_platform_coverability_validates_exact_masks_counts_hashes_and_ratio() -
     with pytest.raises(CoverabilityError, match="exact"):
         replace(value, exact=False)
     with pytest.raises(CoverabilityError, match="physical projection hash"):
-        replace(value, physical_projection_sha256="f" * 64)
+        replace(value, physical_projection_sha256="not-a-sha")
     with pytest.raises(CoverabilityError, match="physical projection schema"):
         replace(value, physical_projection_schema="legacy-primitive-projection/v1")
     with pytest.raises(CoverabilityError, match="physically reachable pose count"):
@@ -186,6 +187,63 @@ def test_platform_coverability_contract_has_only_physical_projection_identity() 
         "eligible",
         "ineligible_reason",
     }
+
+
+def test_physical_projection_hash_binds_canonical_geometry_positions_and_algorithms(
+) -> None:
+    physical = np.asarray([[True, False], [False, True]], dtype=np.bool_)
+    positions = np.asarray(
+        [[100.5, 215.5, 3.25], [115.5, 200.5, 4.5]], dtype=np.float64
+    )
+    arguments = {
+        "platform_type": "HOPPER",
+        "physical_reachability_algorithm_id": (
+            "cpp-hopper-certified-bidirectional-bfs/v3"
+        ),
+        "physical_evidence_algorithm_id": (
+            "cpp-hopper-exact-landing-evidence/v2"
+        ),
+        "physical_observation_pose_mask": physical,
+        "physical_observation_positions_m": positions,
+        "physical_grid_resolution_m": 8.0,
+        "physical_grid_origin_m": (100.0, 216.0),
+        "physical_grid_world_bounds_m": (100.0, 200.0, 116.0, 216.0),
+        "physical_grid_axis_convention": (
+            "north-up-row-major-row-decreases-y-column-increases-x"
+        ),
+        "capability_content_sha256": "5" * 64,
+        "start_identity_sha256": "6" * 64,
+    }
+
+    actual = physical_projection_sha256(**arguments)
+
+    # Hand-derived from the canonical UTF-8 body and little-endian int64
+    # micrometre positions; it intentionally does not call a production builder.
+    assert actual == "020c7293180aeeb9fe5dda7df67aac36974a0a6c3ce11c7b53d17817c7502753"
+    invalid_geometry_mutations = (
+        {"physical_grid_resolution_m": 4.0},
+        {"physical_grid_origin_m": (101.0, 216.0)},
+        {"physical_grid_world_bounds_m": (100.0, 199.0, 116.0, 216.0)},
+        {"physical_grid_axis_convention": "south-up-row-major"},
+    )
+    for mutation in invalid_geometry_mutations:
+        with pytest.raises(CoverabilityError, match="physical grid"):
+            physical_projection_sha256(**(arguments | mutation))
+
+    identity_mutations = (
+        {
+            "physical_observation_positions_m": np.asarray(
+                [[100.5, 215.5, 3.25], [115.5, 200.5, 4.500002]],
+                dtype=np.float64,
+            )
+        },
+        {"physical_evidence_algorithm_id": "changed-landing-evidence/v9"},
+        {"physical_reachability_algorithm_id": "changed-connectivity/v9"},
+    )
+    for mutation in identity_mutations:
+        assert physical_projection_sha256(
+            **(arguments | mutation)
+        ) != actual
 
 
 @pytest.mark.parametrize(

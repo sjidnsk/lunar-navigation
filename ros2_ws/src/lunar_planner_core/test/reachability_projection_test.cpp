@@ -14,6 +14,7 @@
 #include "lunar_planner_core/traversability_projection.hpp"
 #include "hopper/hop_certifier.hpp"
 #include "hopper/landing_region.hpp"
+#include "legged/legged_terrain.hpp"
 #include "shared/map_snapshot.hpp"
 #include "shared/safe_projection.hpp"
 #include "test_fixtures.hpp"
@@ -47,6 +48,13 @@ void SetKnown(GridMap& map, const std::size_t row,
 std::size_t Index(const GridMap& map, const std::size_t row,
                   const std::size_t column) {
   return row * map.width + column;
+}
+
+bool IsKnown(const GridMap& map, const std::size_t row,
+             const std::size_t column) {
+  return std::get<std::vector<std::uint8_t>>(
+             map.layers.at("valid_mask").values)
+             .at(Index(map, row, column)) != 0U;
 }
 
 void KeepOnlyLandingEvidencePatches(
@@ -143,11 +151,34 @@ TEST(ReachabilityProjection,
             0U);
 
   PlannerInput support = test::MakeValidWheelInput();
-  SetKnown(support.world.global_map, 3U, 4U, false);
+  support.world.global_map = test::MakeFlatMap("map", 80U, 60U, 0.1);
+  support.world.local_map = test::MakeFlatMap("odom", 80U, 60U, 0.1);
+  support.config.global_map.base_resolution_m = 0.1;
+  support.config.wheel.xy_resolution_m = 0.1;
+  support.config.legged.xy_resolution_m = 0.1;
+  constexpr std::size_t kWheelTargetRow = 35U;
+  constexpr std::size_t kWheelTargetColumn = 45U;
+  const auto support_baseline = ProjectReachability(support, 30.0);
+  ASSERT_TRUE(support_baseline.ok()) << support_baseline.reason_code;
+  ASSERT_NE(support_baseline.projection->reachable[Index(
+                support.world.global_map, kWheelTargetRow,
+                kWheelTargetColumn)],
+            0U);
+  // The missing patch lies under the rear-left wheel footprint.  The rover's
+  // body-center cell stays known, so this is support evidence rather than a
+  // renamed center-cell unknownness check.
+  for (std::size_t row = 31U; row <= 32U; ++row) {
+    for (std::size_t column = 41U; column <= 42U; ++column) {
+      SetKnown(support.world.global_map, row, column, false);
+    }
+  }
+  ASSERT_TRUE(IsKnown(support.world.global_map, kWheelTargetRow,
+                      kWheelTargetColumn));
   const auto support_projection = ProjectReachability(support, 30.0);
   ASSERT_TRUE(support_projection.ok()) << support_projection.reason_code;
   EXPECT_EQ(support_projection.projection->reachable[Index(
-                support.world.global_map, 3U, 4U)],
+                support.world.global_map, kWheelTargetRow,
+                kWheelTargetColumn)],
             0U);
 
   PlannerInput clearance = test::MakeValidWheelInput();
@@ -160,26 +191,69 @@ TEST(ReachabilityProjection,
             0U);
 }
 
-TEST(ReachabilityProjection,
-     LeggedPhysicalMaskRejectsMissingFootholdAndBodyClearance) {
+TEST(ReachabilityProjection, LeggedPhysicalMaskRejectsMissingFoothold) {
   PlannerInput foothold = test::MakeValidLeggedInput();
-  SetKnown(foothold.world.global_map, 3U, 4U, false);
+  foothold.world.global_map = test::MakeFlatMap("map", 80U, 60U, 0.1);
+  foothold.world.local_map = test::MakeFlatMap("odom", 80U, 60U, 0.1);
+  foothold.config.global_map.base_resolution_m = 0.1;
+  foothold.config.wheel.xy_resolution_m = 0.1;
+  foothold.config.legged.xy_resolution_m = 0.1;
+  constexpr std::size_t kLeggedTargetRow = 35U;
+  constexpr std::size_t kLeggedTargetColumn = 45U;
+  const auto foothold_baseline = ProjectReachability(foothold, 30.0);
+  ASSERT_TRUE(foothold_baseline.ok()) << foothold_baseline.reason_code;
+  ASSERT_NE(foothold_baseline.projection->reachable[Index(
+                foothold.world.global_map, kLeggedTargetRow,
+                kLeggedTargetColumn)],
+            0U);
+  // Remove only the front-right foothold patch at the target pose.  The body
+  // center remains observed and physically distinct from the missing support.
+  for (std::size_t row = 36U; row <= 37U; ++row) {
+    for (std::size_t column = 48U; column <= 49U; ++column) {
+      SetKnown(foothold.world.global_map, row, column, false);
+    }
+  }
+  ASSERT_TRUE(IsKnown(foothold.world.global_map, kLeggedTargetRow,
+                      kLeggedTargetColumn));
   const auto foothold_projection = ProjectReachability(foothold, 30.0);
   ASSERT_TRUE(foothold_projection.ok()) << foothold_projection.reason_code;
   EXPECT_EQ(foothold_projection.projection->reachable[Index(
-                foothold.world.global_map, 3U, 4U)],
+                foothold.world.global_map, kLeggedTargetRow,
+                kLeggedTargetColumn)],
             0U);
+}
 
-  PlannerInput body_clearance = test::MakeValidLeggedInput();
-  std::get<LeggedCapability>(body_clearance.capability)
-      .minimum_body_clearance_m = 1.1;
-  SetObstacle(body_clearance.world.global_map, 3U, 4U);
-  const auto clearance_projection =
-      ProjectReachability(body_clearance, 30.0);
-  ASSERT_TRUE(clearance_projection.ok()) << clearance_projection.reason_code;
-  EXPECT_EQ(clearance_projection.projection->reachable[Index(
-                body_clearance.world.global_map, 3U, 3U)],
-            0U);
+TEST(ReachabilityProjection,
+     LeggedBodyHeightIntervalRejectsRaisedTerrainEnvelope) {
+  PlannerInput input = test::MakeValidLeggedInput();
+  auto& capability = std::get<LeggedCapability>(input.capability);
+  ASSERT_DOUBLE_EQ(capability.minimum_body_clearance_m, 0.3);
+  ASSERT_DOUBLE_EQ(capability.body_height_m.lower, 0.4);
+  ASSERT_DOUBLE_EQ(capability.body_height_m.upper, 0.6);
+  SetElevation(input.world.global_map, 3U, 4U, 0.4F);
+  ASSERT_TRUE(IsKnown(input.world.global_map, 3U, 4U));
+
+  const auto map = shared::MapSnapshot::Create(input.world.global_map);
+  ASSERT_TRUE(map.ok()) << map.reason_code;
+  const auto safe = shared::BuildSafeProjection(
+      map.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(safe.ok()) << safe.reason_code;
+  const hierarchical::LocalSearchDomain full_domain{
+      input.world.global_map.width, input.world.global_map.height,
+      std::vector<std::uint8_t>(
+          input.world.global_map.width * input.world.global_map.height, 1U)};
+  const legged::LeggedPose pose{
+      .position_m = {4.5, 3.5, 0.5},
+      .yaw_rad = 0.0,
+  };
+  const legged::LeggedSweepResult body_height_projection =
+      legged::ValidateLeggedBodySweep(
+          pose, pose, Interval{.lower = 0.5, .upper = 0.5},
+          *safe.projection, capability, full_domain, {});
+
+  EXPECT_FALSE(body_height_projection.valid);
+  EXPECT_EQ(body_height_projection.reason_code,
+            "LEGGED_START_HEIGHT_INTERVAL_EMPTY");
 }
 
 TEST(ReachabilityProjection, HopperCertifiedHopCrossesGroundDisconnectedGap) {

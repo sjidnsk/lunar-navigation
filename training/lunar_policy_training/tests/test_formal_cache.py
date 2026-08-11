@@ -3,21 +3,40 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import hashlib
 import json
+import math
 import pathlib
 import threading
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import lunar_planner_training_bridge as bridge_api
 
 import lunar_policy_training.polar_data.formal_cache as formal_cache_module
 
+from lunar_policy_training.capability_freeze import (
+    FrozenHopperCapability,
+    FrozenInterval,
+    FrozenLeggedBodyPrimitive,
+    FrozenLeggedCapability,
+    FrozenObservationCapability,
+    FrozenPlatformCapability,
+    FrozenPose3,
+    FrozenQuaternion,
+    FrozenVec2,
+    FrozenVec3,
+    FrozenWheelMotionPrimitive,
+    FrozenWheeledCapability,
+)
 from lunar_policy_training.environment.coverability import (
+    build_coverable_detail_mask,
     IneligibleReason,
     PlatformCoverability,
     mask_sha256,
     pack_detail_mask,
+    physical_projection_sha256 as canonical_physical_projection_sha256,
 )
+from lunar_policy_training.environment.macro_step import PolicyAction
 from lunar_policy_training.polar_data.formal_cache import (
     FORMAL_CACHE_SCHEMA,
     FormalCacheError,
@@ -31,6 +50,7 @@ from lunar_policy_training.polar_data.formal_cache import (
     platform_scenario_schedule_id,
     write_formal_cache,
 )
+from lunar_policy_training.proxy_scenario import _ProxyEpisode
 
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -38,6 +58,68 @@ REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 def _sha(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def _independent_array_metadata(values: np.ndarray) -> dict[str, object]:
+    array = np.ascontiguousarray(values)
+    byte_order = array.dtype.byteorder
+    if byte_order == "=":
+        byte_order = "little" if np.little_endian else "big"
+    elif byte_order == "|":
+        byte_order = "not-applicable"
+    else:
+        byte_order = "little" if byte_order == "<" else "big"
+    return {
+        "shape": list(array.shape),
+        "dtype": array.dtype.str,
+        "byte_order": byte_order,
+        "sha256": hashlib.sha256(array.tobytes(order="C")).hexdigest(),
+    }
+
+
+def _rewrite_scene_array_and_resign_manifest(
+    root: pathlib.Path,
+    manifest: dict[str, object],
+    array_name: str,
+    replacement: np.ndarray,
+) -> None:
+    scene = manifest["scenes"][0]
+    scene_path = root / scene["relative_path"]
+    with np.load(scene_path, allow_pickle=False) as archive:
+        arrays = {name: archive[name].copy() for name in archive.files}
+    arrays[array_name] = np.ascontiguousarray(replacement)
+    np.savez_compressed(scene_path, **arrays)
+
+    scene["arrays"][array_name] = _independent_array_metadata(arrays[array_name])
+    scene["size_bytes"] = scene_path.stat().st_size
+    scene["sha256"] = hashlib.sha256(scene_path.read_bytes()).hexdigest()
+    inventory = next(
+        item
+        for item in manifest["inventory"]
+        if item["relative_path"] == scene["relative_path"]
+    )
+    inventory["size_bytes"] = scene["size_bytes"]
+    inventory["sha256"] = scene["sha256"]
+    body = dict(manifest)
+    body.pop("cache_manifest_sha256")
+    manifest["cache_manifest_sha256"] = hashlib.sha256(
+        json.dumps(
+            body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    (root / "cache-manifest.json").write_text(
+        json.dumps(
+            manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _physical_projection_sha256(
@@ -216,6 +298,345 @@ def _write(tmp_path: pathlib.Path):
     return root, identity, manifest
 
 
+def _frozen_pose(x_m: float, y_m: float, yaw_rad: float = 0.0) -> FrozenPose3:
+    return FrozenPose3(
+        position_m=FrozenVec3(x_m, y_m, 0.0),
+        orientation=FrozenQuaternion(
+            math.cos(yaw_rad / 2.0),
+            0.0,
+            0.0,
+            math.sin(yaw_rad / 2.0),
+        ),
+    )
+
+
+def _frozen_proxy_capability(
+    platform_type: str, *, alternate_motion: bool
+) -> FrozenPlatformCapability:
+    if platform_type == "WHEELED":
+        primitives = (
+            (
+                FrozenWheelMotionPrimitive(
+                    "long-forward",
+                    "FORWARD",
+                    _frozen_pose(0.4, 0.0),
+                ),
+                FrozenWheelMotionPrimitive(
+                    "stop-after-long-forward",
+                    "STOP_AND_SWITCH",
+                    _frozen_pose(0.0, 0.0),
+                ),
+            )
+            if alternate_motion
+            else (
+                FrozenWheelMotionPrimitive(
+                    "forward", "FORWARD", _frozen_pose(0.2, 0.0)
+                ),
+                FrozenWheelMotionPrimitive(
+                    "reverse", "REVERSE", _frozen_pose(-0.2, 0.0)
+                ),
+                FrozenWheelMotionPrimitive(
+                    "spin-left",
+                    "SPIN_COUNTERCLOCKWISE",
+                    _frozen_pose(0.0, 0.0, math.pi / 32.0),
+                ),
+            )
+        )
+        typed = FrozenWheeledCapability(
+            reference_point="base_link",
+            footprint_xy_m=(
+                FrozenVec2(-0.591, -0.409),
+                FrozenVec2(0.591, -0.409),
+                FrozenVec2(0.591, 0.409),
+                FrozenVec2(-0.591, 0.409),
+            ),
+            body_extent_m=FrozenVec3(1.182, 0.818, 1.29996),
+            wheel_diameter_m=0.319,
+            wheel_width_m=0.148,
+            wheelbase_m=0.8175,
+            track_width_m=0.67,
+            minimum_underbody_clearance_m=0.21,
+            maximum_local_obstacle_relief_m=0.2,
+            allow_unsupported_gap=False,
+            minimum_body_z_m=0.0,
+            maximum_body_z_m=1.29996,
+            maximum_forward_speed_mps=1.5,
+            maximum_reverse_speed_mps=1.5,
+            maximum_spin_rate_radps=1.0,
+            maximum_acceleration_mps2=0.5,
+            maximum_braking_deceleration_mps2=0.5,
+            maximum_yaw_acceleration_radps2=0.5,
+            maximum_lateral_acceleration_mps2=0.5,
+            maximum_curvature_per_m=1.0,
+            maximum_slope_rad=0.3490658503988659,
+            minimum_clearance_m=0.2,
+            motion_primitives=primitives,
+        )
+    elif platform_type == "LEGGED":
+        primitives = (
+            (
+                FrozenLeggedBodyPrimitive(
+                    "long-forward", "FORWARD", FrozenVec3(0.4, 0.0, 0.0), 0.0
+                ),
+                FrozenLeggedBodyPrimitive(
+                    "big-spin", "SPIN", FrozenVec3(0.0, 0.0, 0.0), math.pi / 32.0
+                ),
+            )
+            if alternate_motion
+            else (
+                FrozenLeggedBodyPrimitive(
+                    "forward", "FORWARD", FrozenVec3(0.2, 0.0, 0.0), 0.0
+                ),
+                FrozenLeggedBodyPrimitive(
+                    "backward", "BACKWARD", FrozenVec3(-0.2, 0.0, 0.0), 0.0
+                ),
+                FrozenLeggedBodyPrimitive(
+                    "left", "LATERAL_LEFT", FrozenVec3(0.0, 0.2, 0.0), 0.0
+                ),
+            )
+        )
+        typed = FrozenLeggedCapability(
+            reference_point="base_link",
+            body_extent_m=FrozenVec3(0.68, 0.33, 0.35),
+            platform_mass_kg=15.89,
+            maximum_payload_kg=10.0,
+            maximum_slope_rad=0.5235987755982988,
+            maximum_step_height_m=0.5,
+            maximum_gap_width_m=0.3,
+            minimum_body_clearance_m=0.3,
+            step_vertical_rate_mps=0.1,
+            body_height_m=FrozenInterval(0.28, 0.38),
+            forward_speed_mps=FrozenInterval(-1.5, 1.5),
+            lateral_speed_mps=FrozenInterval(-0.8, 0.8),
+            yaw_rate_radps=FrozenInterval(-1.0, 1.0),
+            maximum_linear_acceleration_mps2=1.0,
+            maximum_yaw_acceleration_radps2=1.0,
+            motion_primitives=primitives,
+        )
+    else:
+        typed = FrozenHopperCapability(
+            specific_impulse_s=301.0,
+            reference_total_mass_kg=20.0,
+            reference_propellant_mass_kg=0.2,
+            landing_support_radius_m=0.45,
+            flight_collision_radius_m=0.55,
+            maximum_landing_plane_residual_m=0.05,
+            landing_lateral_margin_m=0.2,
+            flight_map_margin_m=0.2,
+            reachability_delta_v_margin_ratio=0.1,
+            standard_gravity_mps2=9.80665,
+            maximum_landing_slope_rad=0.17453292519943295,
+        )
+    return FrozenPlatformCapability(
+        platform_type=platform_type,
+        capability_type=f"test-{platform_type.lower()}-physical/v1",
+        capability_version=f"{platform_type.lower()}-capability-v2",
+        platform_id=f"proxy-{platform_type.lower()}",
+        base_frame_id="base_link",
+        platform_document_path=f"{platform_type.lower()}/platform.yaml",
+        observation_document_path=f"{platform_type.lower()}/observation.json",
+        urdf_path=f"{platform_type.lower()}/platform.urdf",
+        mesh_paths=(),
+        observation_capability=FrozenObservationCapability(
+            sensor_range_m=30.0, sensor_fov_rad=2.0 * math.pi
+        ),
+        typed_capability=typed,
+        content_sha256=_sha(
+            f"{platform_type}/{'alternate' if alternate_motion else 'baseline'}"
+        ),
+        resources=(),
+    )
+
+
+def _proxy_request(platform_type: str, frontier_index: int = 0) -> object:
+    episode = _ProxyEpisode(0, platform_type, scenario_index=0)
+    identity = episode.observation.observation_identities[0]
+    return episode.build_request(
+        PolicyAction(frontier_index=frontier_index, theta_rad=0.0), identity
+    ).request
+
+
+def _replace_with_substantive_motion_primitives(
+    request: object, platform_type: str
+) -> None:
+    if platform_type == "WHEELED":
+        forward = bridge_api.WheelMotionPrimitive()
+        forward.primitive_id = "long-forward"
+        forward.kind = bridge_api.WheelPrimitiveKind.FORWARD
+        pose = bridge_api.Pose3()
+        pose.orientation.w = 1.0
+        pose.position_m.x = 0.4
+        forward.relative_end_pose = pose
+        stop = bridge_api.WheelMotionPrimitive()
+        stop.primitive_id = "stop-after-long-forward"
+        stop.kind = bridge_api.WheelPrimitiveKind.STOP_AND_SWITCH
+        request.capability.motion_primitives = [forward, stop]
+    else:
+        forward = bridge_api.LeggedBodyPrimitive()
+        forward.primitive_id = "long-forward"
+        forward.kind = bridge_api.LeggedPrimitiveKind.FORWARD
+        displacement = bridge_api.Vec3()
+        displacement.x = 0.4
+        forward.body_frame_displacement_m = displacement
+        spin = bridge_api.LeggedBodyPrimitive()
+        spin.primitive_id = "big-spin"
+        spin.kind = bridge_api.LeggedPrimitiveKind.SPIN
+        spin.yaw_change_rad = math.pi / 32.0
+        request.capability.motion_primitives = [forward, spin]
+
+
+def _bridge_motion_signature(request: object, platform_type: str) -> tuple:
+    if platform_type == "WHEELED":
+        return tuple(
+            (
+                item.primitive_id,
+                float(item.relative_end_pose.position_m.x),
+                float(item.relative_end_pose.position_m.y),
+                float(item.relative_end_pose.orientation.z),
+            )
+            for item in request.capability.motion_primitives
+        )
+    return tuple(
+        (
+            item.primitive_id,
+            float(item.body_frame_displacement_m.x),
+            float(item.body_frame_displacement_m.y),
+            float(item.yaw_change_rad),
+        )
+        for item in request.capability.motion_primitives
+    )
+
+
+def _hopper_evidence(request: object, bridge: object) -> tuple[object, np.ndarray, str]:
+    grid = request.world.local_map
+    targets = np.asarray(
+        [
+            (
+                float(grid.origin_m.x) + (column + 0.5) * grid.resolution_m,
+                float(grid.origin_m.y) + (row + 0.5) * grid.resolution_m,
+                0.0,
+            )
+            for row in range(grid.height)
+            for column in range(grid.width)
+        ],
+        dtype=np.float64,
+    )
+    result = bridge.project_hopper_landing_evidence(request, targets)
+    shape = (grid.height, grid.width)
+    certified = np.ascontiguousarray(result.certified.reshape(shape))
+    aim = np.ascontiguousarray(result.aim_positions_m.reshape((*shape, 3)))
+    boundary = np.ascontiguousarray(
+        result.boundary_m.reshape((*shape, 4, 3))
+    )
+    area = np.ascontiguousarray(result.area_m2.reshape(shape))
+    evidence = bridge_api.HopperLandingEvidenceGrid(
+        certified, aim, boundary, area, str(result.algorithm_id)
+    )
+    return evidence, np.ascontiguousarray(np.flipud(aim)), str(result.algorithm_id)
+
+
+def _real_physical_coverability_product(
+    request: object,
+    *,
+    platform_type: str,
+    capability_sha256: str,
+    bridge: object,
+    hopper_evidence: tuple[object, np.ndarray, str] | None = None,
+) -> tuple[np.ndarray, str, np.ndarray]:
+    grid = request.world.global_map
+    if platform_type == "HOPPER":
+        assert hopper_evidence is not None
+        evidence, north_up_aim, evidence_algorithm_id = hopper_evidence
+        projection = bridge.project_reachability(request, 30.0, evidence)
+    else:
+        projection = bridge.project_reachability(request, 30.0)
+        north_up_aim = None
+        evidence_algorithm_id = "cpp-safe-traversability-projection/v1"
+    physical = np.ascontiguousarray(
+        np.flipud(projection.reachable).astype(np.bool_)
+    )
+    left = float(grid.origin_m.x)
+    bottom = float(grid.origin_m.y)
+    right = left + grid.width * grid.resolution_m
+    top = bottom + grid.height * grid.resolution_m
+    if north_up_aim is None:
+        positions = np.asarray(
+            [
+                (
+                    left + (int(column) + 0.5) * grid.resolution_m,
+                    top - (int(row) + 0.5) * grid.resolution_m,
+                    0.0,
+                )
+                for row, column in np.argwhere(physical)
+            ],
+            dtype=np.float64,
+        ).reshape((-1, 3))
+    else:
+        positions = np.ascontiguousarray(north_up_aim[physical], dtype=np.float64)
+    positions = np.ascontiguousarray(positions, dtype=np.float64)
+    state = request.current_state
+    pose = state.body_pose if platform_type == "LEGGED" else state.pose
+    start_sha256 = hashlib.sha256(
+        json.dumps(
+            {
+                "platform_type": platform_type,
+                "position_m": [
+                    float(pose.position_m.x),
+                    float(pose.position_m.y),
+                    float(pose.position_m.z),
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    projection_sha256 = canonical_physical_projection_sha256(
+        platform_type=platform_type,
+        physical_reachability_algorithm_id=str(projection.algorithm_id),
+        physical_evidence_algorithm_id=evidence_algorithm_id,
+        physical_observation_pose_mask=physical,
+        physical_observation_positions_m=positions,
+        physical_grid_resolution_m=float(grid.resolution_m),
+        physical_grid_origin_m=(left, top),
+        physical_grid_world_bounds_m=(left, bottom, right, top),
+        physical_grid_axis_convention=(
+            "north-up-row-major-row-decreases-y-column-increases-x"
+        ),
+        capability_content_sha256=capability_sha256,
+        start_identity_sha256=start_sha256,
+    )
+    pose_cells = np.asarray(
+        [
+            (
+                int(math.floor((top - float(position[1])) / grid.resolution_m)),
+                int(math.floor((float(position[0]) - left) / grid.resolution_m)),
+            )
+            for position in positions
+        ],
+        dtype=np.int32,
+    )
+    pose_cells[:, 0] = np.clip(pose_cells[:, 0], 0, grid.height - 1)
+    pose_cells[:, 1] = np.clip(pose_cells[:, 1], 0, grid.width - 1)
+
+    def reveal(_truth: np.ndarray, pose_cell: tuple[int, int]) -> np.ndarray:
+        visible = np.zeros(physical.shape, dtype=np.bool_)
+        row, column = pose_cell
+        visible[
+            max(row - 1, 0) : min(row + 2, physical.shape[0]),
+            max(column - 1, 0) : min(column + 2, physical.shape[1]),
+        ] = True
+        return visible
+
+    coverable = build_coverable_detail_mask(
+        mission_target_detail_mask=np.ones(physical.shape, dtype=np.bool_),
+        truth_obstacle_ratio=np.zeros(physical.shape, dtype=np.float32),
+        reachable_pose_mask=physical,
+        observation_pose_cells=np.ascontiguousarray(pose_cells),
+        reveal_from_pose=reveal,
+    )
+    return physical, projection_sha256, pack_detail_mask(coverable)
+
+
 def test_platform_map_executes_independent_work_concurrently_in_fixed_order() -> None:
     barrier = threading.Barrier(3, timeout=2.0)
 
@@ -318,6 +739,73 @@ def test_physical_capability_identity_excludes_planner_motion_primitives() -> No
     ) == formal_cache_module._physical_capability_content_sha256(second)
 
 
+@pytest.mark.parametrize("platform_type", ("WHEELED", "LEGGED", "HOPPER"))
+def test_real_physical_product_is_invariant_to_substantive_planner_motion(
+    platform_type: str,
+) -> None:
+    first_request = _proxy_request(platform_type, frontier_index=0)
+    second_request = _proxy_request(
+        platform_type,
+        frontier_index=1 if platform_type == "HOPPER" else 0,
+    )
+    first_capability = _frozen_proxy_capability(
+        platform_type, alternate_motion=False
+    )
+    second_capability = _frozen_proxy_capability(
+        platform_type, alternate_motion=True
+    )
+    if platform_type == "HOPPER":
+        bridge = bridge_api.PlannerBridge()
+        first_plan = bridge.plan(first_request)
+        second_plan = bridge.plan(second_request)
+        assert first_plan.reference is not None
+        assert second_plan.reference is not None
+        first_landing = first_plan.reference.data.segments[-1].nominal_landing_point_m
+        second_landing = second_plan.reference.data.segments[-1].nominal_landing_point_m
+        assert (float(first_landing.x), float(first_landing.y)) != (
+            float(second_landing.x),
+            float(second_landing.y),
+        )
+        evidence = _hopper_evidence(first_request, bridge)
+    else:
+        first_signature = _bridge_motion_signature(first_request, platform_type)
+        _replace_with_substantive_motion_primitives(
+            second_request, platform_type
+        )
+        second_signature = _bridge_motion_signature(second_request, platform_type)
+        assert first_signature != second_signature
+        assert len(first_signature) != len(second_signature)
+        bridge = bridge_api.PlannerBridge()
+        evidence = None
+
+    first_capability_sha256 = (
+        formal_cache_module._physical_capability_content_sha256(first_capability)
+    )
+    second_capability_sha256 = (
+        formal_cache_module._physical_capability_content_sha256(second_capability)
+    )
+    assert first_capability_sha256 == second_capability_sha256
+
+    first = _real_physical_coverability_product(
+        first_request,
+        platform_type=platform_type,
+        capability_sha256=first_capability_sha256,
+        bridge=bridge,
+        hopper_evidence=evidence,
+    )
+    second = _real_physical_coverability_product(
+        second_request,
+        platform_type=platform_type,
+        capability_sha256=second_capability_sha256,
+        bridge=bridge,
+        hopper_evidence=evidence,
+    )
+
+    np.testing.assert_array_equal(first[0], second[0])
+    assert first[1] == second[1]
+    np.testing.assert_array_equal(first[2], second[2])
+
+
 def test_truth_hopper_physical_projection_uses_certified_landing_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -339,6 +827,7 @@ def test_truth_hopper_physical_projection_uses_certified_landing_evidence(
         bridge_grid=evidence_grid,
         certified_pose_mask=certified,
         aim_positions_m=aim,
+        evidence_algorithm_id="cpp-hopper-exact-landing-evidence/v2",
     )
 
     class Bridge:
@@ -380,6 +869,113 @@ def test_truth_hopper_physical_projection_uses_certified_landing_evidence(
     )
 
 
+def test_ground_coverability_keeps_physical_positions_outside_mission_roi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass(frozen=True)
+    class GroundCapability:
+        maximum_slope_rad: float
+        motion_primitives: tuple[str, ...]
+
+    @dataclass(frozen=True)
+    class ObservationCapability:
+        sensor_range_m: float
+        sensor_fov_rad: float
+
+    platform = SimpleNamespace(
+        platform_type="WHEELED",
+        capability_type="WHEELED",
+        capability_version="1.0.0",
+        platform_id="test-rover",
+        base_frame_id="base_link",
+        typed_capability=GroundCapability(0.4, ("forward",)),
+        observation_capability=ObservationCapability(30.0, 6.0),
+    )
+
+    class CapabilityBundle:
+        @staticmethod
+        def for_platform(platform_type: str) -> object:
+            assert platform_type == "WHEELED"
+            return platform
+
+    class Canvas:
+        bounds_m = (0.0, 0.0, 256.0, 256.0)
+        geometry = SimpleNamespace(resolution_m=1.0)
+
+        @staticmethod
+        def grid_center_world(row: int, column: int) -> tuple[float, float]:
+            return float(column) + 0.5, float(row) + 0.5
+
+    projected = SimpleNamespace(
+        canvas=Canvas(),
+        elevation_m=np.zeros((256, 256), dtype=np.float32),
+    )
+    physical = np.zeros((256, 256), dtype=np.bool_)
+    physical[127, 127] = True  # qualified start inside the mission ROI
+    physical[127, 190] = True  # outside ROI but able to observe back into it
+    positions = np.asarray(
+        [[127.5, 127.5, 0.0], [190.5, 127.5, 0.0]], dtype=np.float64
+    )
+    projection = SimpleNamespace(
+        physical_observation_pose_mask=physical,
+        observation_positions_m=positions,
+        physical_projection_schema="lunar-physical-coverability-projection/v1",
+        physical_reachability_algorithm_id=(
+            "cpp-ground-start-connected-component/v1"
+        ),
+        physical_evidence_algorithm_id=(
+            "cpp-safe-traversability-projection/v1"
+        ),
+        physical_safe_pose_count=2,
+        physically_reachable_pose_count=2,
+    )
+    detail_mask = np.ones((256, 256), dtype=np.bool_)
+    detail = SimpleNamespace(
+        mission_target_detail_cell_count=detail_mask.size,
+        coverable_detail_cell_count=detail_mask.size,
+        mission_target_mask_sha256=mask_sha256(detail_mask),
+        detail_shape=detail_mask.shape,
+        coverable_detail_bits=pack_detail_mask(detail_mask),
+        coverable_ratio=np.ones((256, 256), dtype=np.float32),
+        coverable_mask_sha256=mask_sha256(detail_mask),
+    )
+    received_positions: list[np.ndarray | None] = []
+
+    monkeypatch.setattr(
+        formal_cache_module,
+        "_build_truth_physical_reachability",
+        lambda **_kwargs: projection,
+    )
+
+    def build_detail(**kwargs):
+        received_positions.append(kwargs["physical_observation_positions_m"])
+        return detail
+
+    monkeypatch.setattr(
+        formal_cache_module, "_build_platform_detail_coverability", build_detail
+    )
+    monkeypatch.setattr(
+        formal_cache_module,
+        "_initial_coverable_fraction",
+        lambda **_kwargs: 0.1,
+    )
+
+    formal_cache_module._build_scene_platform_coverability(
+        platform_type="WHEELED",
+        capability_bundle=CapabilityBundle(),
+        qualification=SimpleNamespace(
+            cell=(127, 127), initial_candidate_count=1
+        ),
+        scene=object(),
+        projected=projected,
+        mission_roi=np.zeros((256, 256), dtype=np.bool_),
+        detail_shape=(256, 256),
+    )
+
+    assert len(received_positions) == 1
+    np.testing.assert_array_equal(received_positions[0], positions)
+
+
 def test_truth_physical_start_failure_marks_only_that_platform_ineligible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -414,13 +1010,19 @@ def test_truth_physical_start_failure_marks_only_that_platform_ineligible(
         "_build_truth_physical_reachability",
         reject_start,
     )
+    projected = SimpleNamespace(
+        canvas=SimpleNamespace(
+            bounds_m=(0.0, 0.0, 256.0, 256.0),
+            geometry=SimpleNamespace(resolution_m=1.0),
+        )
+    )
 
     result = formal_cache_module._build_scene_platform_coverability(
         platform_type="HOPPER",
         capability_bundle=CapabilityBundle(),
         qualification=SimpleNamespace(cell=(3, 4), initial_candidate_count=1),
         scene=object(),
-        projected=object(),
+        projected=projected,
         mission_roi=np.ones((2, 2), dtype=np.bool_),
         detail_shape=(256, 256),
     )
@@ -525,12 +1127,51 @@ def test_preflight_cache_round_trip_is_ineligible_for_formal_use(
     assert arrays["wheeled_hard_feasible"].dtype == np.uint8
     assert arrays["wheeled_physical_observation_pose_bits"].dtype == np.uint8
     assert arrays["wheeled_coverable_detail_bits"].dtype == np.uint8
-    assert arrays["wheeled_coverable_ratio"].dtype == np.float32
+    assert arrays["wheeled_coverable_ratio"].dtype == np.dtype("<f4")
+    array_contract = manifest["scenes"][0]["arrays"]
+    physical_bits = array_contract["wheeled_physical_observation_pose_bits"]
+    assert physical_bits["dtype"] == "|u1"
+    assert physical_bits["byte_order"] == "not-applicable"
+    detail_bits = array_contract["wheeled_coverable_detail_bits"]
+    assert detail_bits["dtype"] == "|u1"
+    assert detail_bits["byte_order"] == "not-applicable"
+    ratio = array_contract["wheeled_coverable_ratio"]
+    assert ratio["dtype"] == "<f4"
+    assert ratio["byte_order"] == "little"
     with pytest.raises(FormalCacheError, match="full"):
         load_formal_cache(
             root / "cache-manifest.json",
             expected_identity=identity,
             require_full=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("array_name", "wrong_dtype"),
+    (
+        ("wheeled_physical_observation_pose_bits", np.dtype("<u2")),
+        ("wheeled_coverable_detail_bits", np.dtype("<u2")),
+        ("wheeled_coverable_ratio", np.dtype(">f4")),
+    ),
+)
+def test_formal_cache_rejects_noncanonical_coverability_array_dtype(
+    tmp_path: pathlib.Path,
+    array_name: str,
+    wrong_dtype: np.dtype[object],
+) -> None:
+    root, identity, manifest = _write(tmp_path)
+    scene_path = root / manifest["scenes"][0]["relative_path"]
+    with np.load(scene_path, allow_pickle=False) as archive:
+        original = archive[array_name].copy()
+    replacement = original.astype(wrong_dtype)
+    _rewrite_scene_array_and_resign_manifest(
+        root, manifest, array_name, replacement
+    )
+
+    with pytest.raises(FormalCacheError, match="dtype|byte order"):
+        load_formal_cache(
+            root / "cache-manifest.json",
+            expected_identity=identity,
         )
 
 
