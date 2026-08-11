@@ -72,6 +72,27 @@ def mask_sha256(mask: np.ndarray) -> str:
     return sha256(checked.view(np.uint8).tobytes(order="C")).hexdigest()
 
 
+def canonical_physical_positions_um(positions_m: np.ndarray) -> np.ndarray:
+    """Return canonical row-major little-endian int64 micrometre positions."""
+    positions = positions_m
+    if (
+        not isinstance(positions, np.ndarray)
+        or positions.dtype != np.dtype(np.float64)
+        or positions.ndim != 2
+        or positions.shape[1:] != (3,)
+        or not positions.flags.c_contiguous
+        or not np.isfinite(positions).all()
+    ):
+        raise CoverabilityError(
+            "physical observation positions must be row-major float64 [N,3]"
+        )
+    scaled = positions * _LINEAR_QUANTIZATION_PER_M
+    int64_limit = float(np.iinfo(np.int64).max)
+    if not np.isfinite(scaled).all() or (np.abs(scaled) > int64_limit).any():
+        raise CoverabilityError("physical projection coordinate is out of range")
+    return np.ascontiguousarray(np.rint(scaled), dtype="<i8")
+
+
 def physical_projection_sha256(
     *,
     platform_type: str,
@@ -169,9 +190,7 @@ def physical_projection_sha256(
             raise CoverabilityError("physical projection coordinate is out of range")
         return int(round(scaled))
 
-    quantized_positions = np.ascontiguousarray(
-        np.rint(positions * _LINEAR_QUANTIZATION_PER_M), dtype="<i8"
-    )
+    quantized_positions = canonical_physical_positions_um(positions)
     capability_sha256 = _require_sha(
         capability_content_sha256, "capability content hash"
     )
@@ -1178,6 +1197,7 @@ __all__ = [
     "build_coverable_detail_mask",
     "build_mission_target_detail_mask",
     "build_streamed_detail_coverability",
+    "canonical_physical_positions_um",
     "CoverabilityError",
     "IneligibleReason",
     "PlatformCoverability",

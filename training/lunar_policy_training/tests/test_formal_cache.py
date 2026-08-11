@@ -89,17 +89,10 @@ def _rewrite_scene_array_and_resign_manifest(
         arrays = {name: archive[name].copy() for name in archive.files}
     arrays[array_name] = np.ascontiguousarray(replacement)
     np.savez_compressed(scene_path, **arrays)
+    _refresh_scene_integrity_and_resign(root, manifest)
 
-    scene["arrays"][array_name] = _independent_array_metadata(arrays[array_name])
-    scene["size_bytes"] = scene_path.stat().st_size
-    scene["sha256"] = hashlib.sha256(scene_path.read_bytes()).hexdigest()
-    inventory = next(
-        item
-        for item in manifest["inventory"]
-        if item["relative_path"] == scene["relative_path"]
-    )
-    inventory["size_bytes"] = scene["size_bytes"]
-    inventory["sha256"] = scene["sha256"]
+
+def _resign_manifest(root: pathlib.Path, manifest: dict[str, object]) -> None:
     body = dict(manifest)
     body.pop("cache_manifest_sha256")
     manifest["cache_manifest_sha256"] = hashlib.sha256(
@@ -122,29 +115,26 @@ def _rewrite_scene_array_and_resign_manifest(
     )
 
 
-def _physical_projection_sha256(
-    platform_type: str,
-    mask: np.ndarray,
-    algorithm_id: str,
-    capability_content_sha256: str,
-    start_identity_sha256: str,
-) -> str:
-    body = {
-        "platform_type": platform_type,
-        "physical_reachability_algorithm_id": algorithm_id,
-        "physical_observation_pose_shape": list(mask.shape),
-        "physical_observation_pose_mask_sha256": mask_sha256(mask),
-        "capability_content_sha256": capability_content_sha256,
-        "start_identity_sha256": start_identity_sha256,
-    }
-    return hashlib.sha256(
-        json.dumps(
-            body,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+def _refresh_scene_integrity_and_resign(
+    root: pathlib.Path, manifest: dict[str, object]
+) -> None:
+    scene = manifest["scenes"][0]
+    scene_path = root / scene["relative_path"]
+    with np.load(scene_path, allow_pickle=False) as archive:
+        scene["arrays"] = {
+            name: _independent_array_metadata(archive[name])
+            for name in archive.files
+        }
+    scene["size_bytes"] = scene_path.stat().st_size
+    scene["sha256"] = hashlib.sha256(scene_path.read_bytes()).hexdigest()
+    inventory = next(
+        item
+        for item in manifest["inventory"]
+        if item["relative_path"] == scene["relative_path"]
+    )
+    inventory["size_bytes"] = scene["size_bytes"]
+    inventory["sha256"] = scene["sha256"]
+    _resign_manifest(root, manifest)
 
 
 def _scenario_document(scene_id: str) -> dict[str, object]:
@@ -200,7 +190,11 @@ def _scene(
         if qualified_start_cells is None
         else qualified_start_cells
     )
+    bounds = (0.0, 0.0, 1024.0, 1024.0)
+    resolution_m = 4.0
     coverability: dict[str, PlatformCoverability] = {}
+    observation_positions: dict[str, np.ndarray] = {}
+    evidence_algorithms: dict[str, str] = {}
     for platform in ("WHEELED", "LEGGED", "HOPPER"):
         reachable = np.ones(shape, dtype=np.bool_)
         start = starts[platform]
@@ -219,10 +213,25 @@ def _scene(
             eligible = False
         count = int(detail.sum(dtype=np.int64))
         algorithm_id = f"test-physical-reachability/{platform.lower()}"
+        evidence_algorithm_id = f"test-physical-evidence/{platform.lower()}"
         capability_sha256 = _sha(f"capability-content/{platform}")
         start_sha256 = _sha(
             f"physical-start/{platform}/{start if start is not None else 'unsafe'}"
         )
+        rows, columns = np.nonzero(reachable)
+        positions = np.ascontiguousarray(
+            np.column_stack(
+                (
+                    (columns.astype(np.float64) + 0.5) * resolution_m,
+                    bounds[3]
+                    - (rows.astype(np.float64) + 0.5) * resolution_m,
+                    np.zeros(len(rows), dtype=np.float64),
+                )
+            ),
+            dtype=np.float64,
+        ).reshape((-1, 3))
+        observation_positions[platform] = positions
+        evidence_algorithms[platform] = evidence_algorithm_id
         coverability[platform] = PlatformCoverability(
             platform_type=platform,
             qualified_start_cell=start,
@@ -235,12 +244,20 @@ def _scene(
             physically_reachable_pose_count=int(
                 reachable.sum(dtype=np.int64)
             ),
-            physical_projection_sha256=_physical_projection_sha256(
-                platform,
-                reachable,
-                algorithm_id,
-                capability_sha256,
-                start_sha256,
+            physical_projection_sha256=canonical_physical_projection_sha256(
+                platform_type=platform,
+                physical_reachability_algorithm_id=algorithm_id,
+                physical_evidence_algorithm_id=evidence_algorithm_id,
+                physical_observation_pose_mask=reachable,
+                physical_observation_positions_m=positions,
+                physical_grid_resolution_m=resolution_m,
+                physical_grid_origin_m=(bounds[0], bounds[3]),
+                physical_grid_world_bounds_m=bounds,
+                physical_grid_axis_convention=(
+                    "north-up-row-major-row-decreases-y-column-increases-x"
+                ),
+                capability_content_sha256=capability_sha256,
+                start_identity_sha256=start_sha256,
             ),
             mission_target_detail_mask_sha256=mask_sha256(
                 np.ones(shape, dtype=np.bool_)
@@ -267,7 +284,7 @@ def _scene(
         split="train",
         window_id="nasa-window-000",
         window_sha256="b" * 64,
-        world_bounds_m=(0.0, 0.0, 1024.0, 1024.0),
+        world_bounds_m=bounds,
         elevation_m=np.zeros(shape, np.float32),
         valid_mask=np.ones(shape, bool),
         physical_obstacle_ratio=np.zeros(shape, np.float32),
@@ -279,6 +296,11 @@ def _scene(
         hard_feasible=hard,
         clearance_margin_norm=clearance,
         coverability=coverability,
+        physical_evidence_algorithm_ids=evidence_algorithms,
+        hopper_physical_observation_positions_um=np.ascontiguousarray(
+            np.rint(observation_positions["HOPPER"] * 1_000_000.0),
+            dtype="<i8",
+        ),
     )
 
 
@@ -960,7 +982,7 @@ def test_ground_coverability_keeps_physical_positions_outside_mission_roi(
         lambda **_kwargs: 0.1,
     )
 
-    formal_cache_module._build_scene_platform_coverability(
+    product = formal_cache_module._build_scene_platform_coverability(
         platform_type="WHEELED",
         capability_bundle=CapabilityBundle(),
         qualification=SimpleNamespace(
@@ -974,6 +996,10 @@ def test_ground_coverability_keeps_physical_positions_outside_mission_roi(
 
     assert len(received_positions) == 1
     np.testing.assert_array_equal(received_positions[0], positions)
+    np.testing.assert_array_equal(product.observation_positions_m, positions)
+    assert product.physical_evidence_algorithm_id == (
+        "cpp-safe-traversability-projection/v1"
+    )
 
 
 def test_truth_physical_start_failure_marks_only_that_platform_ineligible(
@@ -1027,9 +1053,12 @@ def test_truth_physical_start_failure_marks_only_that_platform_ineligible(
         detail_shape=(256, 256),
     )
 
-    assert result.eligible is False
-    assert result.ineligible_reason is IneligibleReason.UNSAFE_START
-    assert result.qualified_start_cell is None
+    assert result.coverability.eligible is False
+    assert (
+        result.coverability.ineligible_reason is IneligibleReason.UNSAFE_START
+    )
+    assert result.coverability.qualified_start_cell is None
+    assert result.observation_positions_m.shape == (0, 3)
 
 
 def test_truth_physical_projection_does_not_hide_a_non_start_native_failure(
@@ -1118,6 +1147,12 @@ def test_preflight_cache_round_trip_is_ineligible_for_formal_use(
     assert len(platform["physical_projection_sha256"]) == 64
     assert len(platform["capability_content_sha256"]) == 64
     assert len(platform["start_identity_sha256"]) == 64
+    assert platform["physical_evidence_algorithm_id"] == (
+        "test-physical-evidence/wheeled"
+    )
+    assert platform["physical_grid_axis_convention"] == (
+        "north-up-row-major-row-decreases-y-column-increases-x"
+    )
     assert not any("primitive" in field for field in platform)
     assert platform["eligible"] is True
     assert platform["ineligible_reason"] is None
@@ -1128,6 +1163,13 @@ def test_preflight_cache_round_trip_is_ineligible_for_formal_use(
     assert arrays["wheeled_physical_observation_pose_bits"].dtype == np.uint8
     assert arrays["wheeled_coverable_detail_bits"].dtype == np.uint8
     assert arrays["wheeled_coverable_ratio"].dtype == np.dtype("<f4")
+    assert arrays["hopper_physical_observation_positions_um"].dtype.str == (
+        "<i8"
+    )
+    assert arrays["hopper_physical_observation_positions_um"].shape == (
+        256 * 256,
+        3,
+    )
     array_contract = manifest["scenes"][0]["arrays"]
     physical_bits = array_contract["wheeled_physical_observation_pose_bits"]
     assert physical_bits["dtype"] == "|u1"
@@ -1152,6 +1194,7 @@ def test_preflight_cache_round_trip_is_ineligible_for_formal_use(
         ("wheeled_physical_observation_pose_bits", np.dtype("<u2")),
         ("wheeled_coverable_detail_bits", np.dtype("<u2")),
         ("wheeled_coverable_ratio", np.dtype(">f4")),
+        ("hopper_physical_observation_positions_um", np.dtype(">i8")),
     ),
 )
 def test_formal_cache_rejects_noncanonical_coverability_array_dtype(
@@ -1169,6 +1212,138 @@ def test_formal_cache_rejects_noncanonical_coverability_array_dtype(
     )
 
     with pytest.raises(FormalCacheError, match="dtype|byte order"):
+        load_formal_cache(
+            root / "cache-manifest.json",
+            expected_identity=identity,
+        )
+
+
+def test_formal_cache_recomputes_physical_projection_digest(
+    tmp_path: pathlib.Path,
+) -> None:
+    root, identity, manifest = _write(tmp_path)
+    manifest["scenes"][0]["platform_coverability"]["WHEELED"][
+        "physical_projection_sha256"
+    ] = "f" * 64
+    _refresh_scene_integrity_and_resign(root, manifest)
+
+    with pytest.raises(FormalCacheError, match="physical projection"):
+        load_formal_cache(
+            root / "cache-manifest.json",
+            expected_identity=identity,
+        )
+
+
+@pytest.mark.parametrize(
+    "authority_tamper",
+    (
+        "geometry",
+        "ground_elevation",
+        "positions",
+        "position_order",
+        "evidence_algorithm",
+        "reachability_algorithm",
+    ),
+)
+def test_formal_cache_rejects_physical_projection_authority_tamper(
+    tmp_path: pathlib.Path,
+    authority_tamper: str,
+) -> None:
+    root, identity, manifest = _write(tmp_path)
+    scene = manifest["scenes"][0]
+    if authority_tamper == "geometry":
+        scene["world_bounds_m"] = [0.0, 0.0, 512.0, 512.0]
+        _refresh_scene_integrity_and_resign(root, manifest)
+    elif authority_tamper == "ground_elevation":
+        scene_path = root / scene["relative_path"]
+        with np.load(scene_path, allow_pickle=False) as archive:
+            elevation = archive["elevation_m"].copy()
+        elevation[0, 0] += np.float32(0.001)
+        _rewrite_scene_array_and_resign_manifest(
+            root, manifest, "elevation_m", elevation
+        )
+    elif authority_tamper in {"positions", "position_order"}:
+        scene_path = root / scene["relative_path"]
+        with np.load(scene_path, allow_pickle=False) as archive:
+            positions = archive[
+                "hopper_physical_observation_positions_um"
+            ].copy()
+        if authority_tamper == "positions":
+            positions[0, 2] += 1
+        else:
+            positions[[0, 1]] = positions[[1, 0]]
+        _rewrite_scene_array_and_resign_manifest(
+            root,
+            manifest,
+            "hopper_physical_observation_positions_um",
+            positions,
+        )
+    elif authority_tamper == "evidence_algorithm":
+        scene["platform_coverability"]["HOPPER"][
+            "physical_evidence_algorithm_id"
+        ] = "tampered-hopper-evidence/v9"
+        _refresh_scene_integrity_and_resign(root, manifest)
+    else:
+        scene["platform_coverability"]["HOPPER"][
+            "physical_reachability_algorithm_id"
+        ] = "tampered-hopper-connectivity/v9"
+        _refresh_scene_integrity_and_resign(root, manifest)
+
+    with pytest.raises(
+        FormalCacheError, match="physical (projection|observation)"
+    ):
+        load_formal_cache(
+            root / "cache-manifest.json",
+            expected_identity=identity,
+        )
+
+
+def test_formal_cache_rejects_hopper_position_shape_drift(
+    tmp_path: pathlib.Path,
+) -> None:
+    root, identity, manifest = _write(tmp_path)
+    scene_path = root / manifest["scenes"][0]["relative_path"]
+    with np.load(scene_path, allow_pickle=False) as archive:
+        positions = archive["hopper_physical_observation_positions_um"].copy()
+    _rewrite_scene_array_and_resign_manifest(
+        root,
+        manifest,
+        "hopper_physical_observation_positions_um",
+        positions[:-1],
+    )
+
+    with pytest.raises(FormalCacheError, match="shape"):
+        load_formal_cache(
+            root / "cache-manifest.json",
+            expected_identity=identity,
+        )
+
+
+@pytest.mark.parametrize(
+    "schema_drift",
+    ("missing_field", "unknown_field", "missing_array", "unknown_array"),
+)
+def test_formal_cache_rejects_projection_authority_schema_drift(
+    tmp_path: pathlib.Path,
+    schema_drift: str,
+) -> None:
+    root, identity, manifest = _write(tmp_path)
+    scene = manifest["scenes"][0]
+    hopper = scene["platform_coverability"]["HOPPER"]
+    arrays = scene["arrays"]
+    if schema_drift == "missing_field":
+        hopper.pop("physical_evidence_algorithm_id")
+    elif schema_drift == "unknown_field":
+        hopper["physical_projection_optional"] = "not-allowed"
+    elif schema_drift == "missing_array":
+        arrays.pop("hopper_physical_observation_positions_um")
+    else:
+        arrays["hopper_physical_observation_positions_optional"] = dict(
+            arrays["hopper_physical_observation_positions_um"]
+        )
+    _resign_manifest(root, manifest)
+
+    with pytest.raises(FormalCacheError, match="coverability"):
         load_formal_cache(
             root / "cache-manifest.json",
             expected_identity=identity,

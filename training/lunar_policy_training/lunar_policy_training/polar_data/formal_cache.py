@@ -32,6 +32,7 @@ from ..environment.coverability import (
     PlatformCoverability,
     StreamedDetailCoverability,
     build_streamed_detail_coverability,
+    canonical_physical_positions_um,
     classify_ineligibility,
     mask_sha256,
     pack_detail_mask,
@@ -90,6 +91,8 @@ _PLATFORM_COVERABILITY_FIELDS = frozenset(
         "physical_observation_pose_shape",
         "physical_projection_schema",
         "physical_reachability_algorithm_id",
+        "physical_evidence_algorithm_id",
+        "physical_grid_axis_convention",
         "physical_safe_pose_count",
         "physically_reachable_pose_count",
         "physical_projection_sha256",
@@ -110,6 +113,44 @@ _PLATFORM_COVERABILITY_FIELDS = frozenset(
         "stage_diagnostics",
     )
 )
+_SCENE_ENTRY_FIELDS = frozenset(
+    (
+        "scene_id",
+        "source",
+        "split",
+        "window_id",
+        "window_sha256",
+        "world_bounds_m",
+        "relative_path",
+        "size_bytes",
+        "sha256",
+        "arrays",
+        "platform_coverability",
+    )
+)
+_STATIC_SCENE_BASE_ARRAYS = frozenset(
+    (
+        "elevation_m",
+        "valid_mask",
+        "physical_obstacle_ratio",
+        "physical_obstacle_height_m",
+        "forbidden_ratio",
+        "rocks",
+        "craters",
+        "no_go_vertices",
+    )
+)
+_STATIC_SCENE_ARRAYS = _STATIC_SCENE_BASE_ARRAYS | frozenset(
+    f"{platform.lower()}_{suffix}"
+    for platform in _PLATFORMS
+    for suffix in (
+        "hard_feasible",
+        "clearance_margin_norm",
+        "physical_observation_pose_bits",
+        "coverable_detail_bits",
+        "coverable_ratio",
+    )
+) | frozenset(("hopper_physical_observation_positions_um",))
 _IDENTITY_FIELDS = (
     "source_lock_file_sha256",
     "source_sha256s",
@@ -361,6 +402,104 @@ def _grid(name: str, value: np.ndarray, dtype: object) -> np.ndarray:
     return array
 
 
+def _physical_grid_geometry(
+    world_bounds_m: object,
+    shape: tuple[int, int] = (256, 256),
+) -> tuple[
+    float,
+    tuple[float, float],
+    tuple[float, float, float, float],
+]:
+    if (
+        not isinstance(world_bounds_m, (list, tuple))
+        or len(world_bounds_m) != 4
+        or any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            for value in world_bounds_m
+        )
+    ):
+        raise FormalCacheError("scene world bounds are invalid")
+    bounds = tuple(float(value) for value in world_bounds_m)
+    left, bottom, right, top = bounds
+    resolution_x = (right - left) / shape[1]
+    resolution_y = (top - bottom) / shape[0]
+    if (
+        left >= right
+        or bottom >= top
+        or not math.isfinite(resolution_x)
+        or resolution_x <= 0.0
+        or not math.isclose(
+            resolution_x, resolution_y, rel_tol=0.0, abs_tol=5.0e-7
+        )
+    ):
+        raise FormalCacheError("scene physical grid geometry is invalid")
+    return resolution_x, (left, top), bounds
+
+
+def _ground_physical_observation_positions_m(
+    physical_mask: np.ndarray,
+    elevation_m: np.ndarray,
+    world_bounds_m: object,
+) -> np.ndarray:
+    resolution, (left, top), _ = _physical_grid_geometry(
+        world_bounds_m, physical_mask.shape
+    )
+    rows, columns = np.nonzero(physical_mask)
+    return np.ascontiguousarray(
+        np.column_stack(
+            (
+                left + (columns.astype(np.float64) + 0.5) * resolution,
+                top - (rows.astype(np.float64) + 0.5) * resolution,
+                np.asarray(elevation_m[physical_mask], dtype=np.float64),
+            )
+        ),
+        dtype=np.float64,
+    ).reshape((-1, 3))
+
+
+def _positions_m_from_canonical_um(values: np.ndarray) -> np.ndarray:
+    if (
+        not isinstance(values, np.ndarray)
+        or values.dtype.str != "<i8"
+        or values.ndim != 2
+        or values.shape[1:] != (3,)
+        or not values.flags.c_contiguous
+    ):
+        raise FormalCacheError(
+            "Hopper physical observation positions must be canonical <i8 [N,3]"
+        )
+    return np.ascontiguousarray(values.astype(np.float64) / 1_000_000.0)
+
+
+def _validate_hopper_position_cells(
+    positions_m: np.ndarray,
+    physical_mask: np.ndarray,
+    world_bounds_m: object,
+) -> None:
+    if len(positions_m) != int(physical_mask.sum(dtype=np.int64)):
+        raise FormalCacheError("Hopper physical observation position count differs")
+    if not len(positions_m):
+        return
+    resolution, (left, top), _ = _physical_grid_geometry(
+        world_bounds_m, physical_mask.shape
+    )
+    rows, columns = np.nonzero(physical_mask)
+    tolerance = 0.5e-6
+    x = positions_m[:, 0]
+    y = positions_m[:, 1]
+    if (
+        (x < left + columns * resolution - tolerance).any()
+        or (x >= left + (columns + 1) * resolution + tolerance).any()
+        or (y > top - rows * resolution + tolerance).any()
+        or (y <= top - (rows + 1) * resolution - tolerance).any()
+    ):
+        raise FormalCacheError(
+            "Hopper physical observation positions are not row-major mask landings"
+        )
+
+
 @dataclass(frozen=True)
 class StaticSceneData:
     scene_id: str
@@ -380,6 +519,8 @@ class StaticSceneData:
     hard_feasible: Mapping[str, np.ndarray]
     clearance_margin_norm: Mapping[str, np.ndarray]
     coverability: Mapping[str, PlatformCoverability]
+    physical_evidence_algorithm_ids: Mapping[str, str]
+    hopper_physical_observation_positions_um: np.ndarray
 
     def __post_init__(self) -> None:
         _require_sha(self.scene_id, "scene_id")
@@ -391,8 +532,10 @@ class StaticSceneData:
             raise FormalCacheError("scene window_id is missing")
         if self.window_sha256 is not None:
             _require_sha(self.window_sha256, "window_sha256")
-        if len(self.world_bounds_m) != 4:
-            raise FormalCacheError("scene world bounds are invalid")
+        resolution_m, origin_m, bounds_m = _physical_grid_geometry(
+            self.world_bounds_m
+        )
+        object.__setattr__(self, "world_bounds_m", bounds_m)
         elevation = _grid("elevation_m", self.elevation_m, np.float32)
         valid = _grid("valid_mask", self.valid_mask, np.bool_)
         if not np.isfinite(elevation[valid]).all():
@@ -436,6 +579,33 @@ class StaticSceneData:
             raise FormalCacheError(
                 "scene coverability must contain three platforms"
             )
+        if set(self.physical_evidence_algorithm_ids) != set(_PLATFORMS):
+            raise FormalCacheError(
+                "scene physical evidence must contain three platforms"
+            )
+        evidence_algorithms = {
+            platform: self.physical_evidence_algorithm_ids[platform]
+            for platform in _PLATFORMS
+        }
+        if any(
+            not isinstance(value, str) or not value
+            for value in evidence_algorithms.values()
+        ):
+            raise FormalCacheError("scene physical evidence algorithm is invalid")
+        object.__setattr__(
+            self,
+            "physical_evidence_algorithm_ids",
+            MappingProxyType(evidence_algorithms),
+        )
+        hopper_positions_um = np.ascontiguousarray(
+            self.hopper_physical_observation_positions_um
+        )
+        hopper_positions_m = _positions_m_from_canonical_um(hopper_positions_um)
+        object.__setattr__(
+            self,
+            "hopper_physical_observation_positions_um",
+            hopper_positions_um,
+        )
         checked_coverability: dict[str, PlatformCoverability] = {}
         for platform in _PLATFORMS:
             payload = self.coverability[platform]
@@ -445,6 +615,51 @@ class StaticSceneData:
                 or payload.physical_observation_pose_mask.shape != (256, 256)
             ):
                 raise FormalCacheError("scene platform coverability is invalid")
+            positions_m = (
+                hopper_positions_m
+                if platform == "HOPPER"
+                else _ground_physical_observation_positions_m(
+                    payload.physical_observation_pose_mask,
+                    elevation,
+                    bounds_m,
+                )
+            )
+            if platform == "HOPPER":
+                _validate_hopper_position_cells(
+                    positions_m,
+                    payload.physical_observation_pose_mask,
+                    bounds_m,
+                )
+            try:
+                expected_projection_sha256 = physical_projection_sha256(
+                    platform_type=platform,
+                    physical_reachability_algorithm_id=(
+                        payload.physical_reachability_algorithm_id
+                    ),
+                    physical_evidence_algorithm_id=(
+                        evidence_algorithms[platform]
+                    ),
+                    physical_observation_pose_mask=(
+                        payload.physical_observation_pose_mask
+                    ),
+                    physical_observation_positions_m=positions_m,
+                    physical_grid_resolution_m=resolution_m,
+                    physical_grid_origin_m=origin_m,
+                    physical_grid_world_bounds_m=bounds_m,
+                    physical_grid_axis_convention=(
+                        PHYSICAL_GRID_AXIS_CONVENTION
+                    ),
+                    capability_content_sha256=(
+                        payload.capability_content_sha256
+                    ),
+                    start_identity_sha256=payload.start_identity_sha256,
+                )
+            except ValueError as error:
+                raise FormalCacheError(
+                    "scene physical projection authority is invalid"
+                ) from error
+            if expected_projection_sha256 != payload.physical_projection_sha256:
+                raise FormalCacheError("scene physical projection hash differs")
             cell = payload.qualified_start_cell
             if cell is None:
                 checked_coverability[platform] = payload
@@ -482,6 +697,9 @@ class StaticSceneData:
             "rocks": self.rocks,
             "craters": self.craters,
             "no_go_vertices": self.no_go_vertices,
+            "hopper_physical_observation_positions_um": (
+                self.hopper_physical_observation_positions_um
+            ),
         }
         for platform in _PLATFORMS:
             prefix = platform.lower()
@@ -607,6 +825,10 @@ def _scene_entry(scene: StaticSceneData, path: Path, root: Path) -> dict[str, ob
             "physical_reachability_algorithm_id": (
                 payload.physical_reachability_algorithm_id
             ),
+            "physical_evidence_algorithm_id": (
+                scene.physical_evidence_algorithm_ids[platform]
+            ),
+            "physical_grid_axis_convention": PHYSICAL_GRID_AXIS_CONVENTION,
             "physical_safe_pose_count": payload.physical_safe_pose_count,
             "physically_reachable_pose_count": (
                 payload.physically_reachable_pose_count
@@ -825,6 +1047,96 @@ def write_formal_cache(
     return body
 
 
+def _load_verified_scene_arrays(
+    root: Path, entry: Mapping[str, object]
+) -> dict[str, np.ndarray]:
+    path = root / str(entry["relative_path"])
+    try:
+        with np.load(path, allow_pickle=False) as archive:
+            expected = entry["arrays"]
+            if set(archive.files) != set(expected):
+                raise FormalCacheError("scene array inventory differs")
+            output = {
+                name: np.ascontiguousarray(archive[name])
+                for name in archive.files
+            }
+    except FormalCacheError:
+        raise
+    except (OSError, ValueError) as error:
+        raise FormalCacheError("scene NPZ is invalid") from error
+    for name, values in output.items():
+        if _array_metadata(values) != expected[name]:
+            raise FormalCacheError(f"scene array {name} hash or metadata differs")
+        values.setflags(write=False)
+    return output
+
+
+def _validate_scene_semantics(
+    entry: Mapping[str, object], output: Mapping[str, np.ndarray]
+) -> None:
+    resolution_m, origin_m, bounds_m = _physical_grid_geometry(
+        entry["world_bounds_m"]
+    )
+    for platform in _PLATFORMS:
+        prefix = platform.lower()
+        payload = entry["platform_coverability"][platform]
+        physical = unpack_detail_mask(
+            output[f"{prefix}_physical_observation_pose_bits"].copy(),
+            (256, 256),
+        )
+        detail_shape = tuple(payload["coverable_detail_shape"])
+        coverable = unpack_detail_mask(
+            output[f"{prefix}_coverable_detail_bits"].copy(), detail_shape
+        )
+        if platform == "HOPPER":
+            positions_m = _positions_m_from_canonical_um(
+                output["hopper_physical_observation_positions_um"]
+            )
+            _validate_hopper_position_cells(positions_m, physical, bounds_m)
+        else:
+            positions_m = _ground_physical_observation_positions_m(
+                physical, output["elevation_m"], bounds_m
+            )
+        try:
+            expected_projection_sha256 = physical_projection_sha256(
+                platform_type=platform,
+                physical_reachability_algorithm_id=(
+                    payload["physical_reachability_algorithm_id"]
+                ),
+                physical_evidence_algorithm_id=(
+                    payload["physical_evidence_algorithm_id"]
+                ),
+                physical_observation_pose_mask=physical,
+                physical_observation_positions_m=positions_m,
+                physical_grid_resolution_m=resolution_m,
+                physical_grid_origin_m=origin_m,
+                physical_grid_world_bounds_m=bounds_m,
+                physical_grid_axis_convention=(
+                    payload["physical_grid_axis_convention"]
+                ),
+                capability_content_sha256=payload["capability_content_sha256"],
+                start_identity_sha256=payload["start_identity_sha256"],
+            )
+        except ValueError as error:
+            raise FormalCacheError(
+                "scene physical projection authority is invalid"
+            ) from error
+        if (
+            expected_projection_sha256
+            != payload["physical_projection_sha256"]
+        ):
+            raise FormalCacheError("scene physical projection hash differs")
+        if (
+            mask_sha256(coverable)
+            != payload["coverable_detail_mask_sha256"]
+            or int(physical.sum(dtype=np.int64))
+            != payload["physically_reachable_pose_count"]
+            or int(coverable.sum(dtype=np.int64))
+            != payload["coverable_detail_cell_count"]
+        ):
+            raise FormalCacheError("scene semantic coverability mask differs")
+
+
 @dataclass(frozen=True)
 class FormalCache:
     root: Path
@@ -847,38 +1159,8 @@ class FormalCache:
         )
         if entry is None:
             raise FormalCacheError("scene is not present in cache")
-        path = self.root / entry["relative_path"]
-        with np.load(path, allow_pickle=False) as archive:
-            expected = entry["arrays"]
-            if set(archive.files) != set(expected):
-                raise FormalCacheError("scene array inventory differs")
-            output = {
-                name: np.ascontiguousarray(archive[name]) for name in archive.files
-            }
-        for name, values in output.items():
-            if _array_metadata(values) != expected[name]:
-                raise FormalCacheError(f"scene array {name} hash or metadata differs")
-            values.setflags(write=False)
-        for platform in _PLATFORMS:
-            prefix = platform.lower()
-            payload = entry["platform_coverability"][platform]
-            physical = unpack_detail_mask(
-                output[f"{prefix}_physical_observation_pose_bits"].copy(),
-                (256, 256),
-            )
-            detail_shape = tuple(payload["coverable_detail_shape"])
-            coverable = unpack_detail_mask(
-                output[f"{prefix}_coverable_detail_bits"].copy(), detail_shape
-            )
-            if (
-                mask_sha256(coverable)
-                != payload["coverable_detail_mask_sha256"]
-                or int(physical.sum(dtype=np.int64))
-                != payload["physically_reachable_pose_count"]
-                or int(coverable.sum(dtype=np.int64))
-                != payload["coverable_detail_cell_count"]
-            ):
-                raise FormalCacheError("scene semantic coverability mask differs")
+        output = _load_verified_scene_arrays(self.root, entry)
+        _validate_scene_semantics(entry, output)
         return output
 
 
@@ -935,11 +1217,15 @@ def _validate_scene_coverability(entry: Mapping[str, object]) -> None:
     platform_payloads = entry.get("platform_coverability")
     arrays = entry.get("arrays")
     if (
-        not isinstance(platform_payloads, Mapping)
+        set(entry) != _SCENE_ENTRY_FIELDS
+        or not isinstance(platform_payloads, Mapping)
         or set(platform_payloads) != set(_PLATFORMS)
         or not isinstance(arrays, Mapping)
+        or set(arrays) != _STATIC_SCENE_ARRAYS
     ):
         raise FormalCacheError("cache scene platform coverability is invalid")
+    _safe_relative(entry.get("relative_path"))
+    _physical_grid_geometry(entry.get("world_bounds_m"))
     for platform in _PLATFORMS:
         payload = platform_payloads[platform]
         if (
@@ -1022,12 +1308,18 @@ def _validate_scene_coverability(entry: Mapping[str, object]) -> None:
         for name in (
             "physical_projection_schema",
             "physical_reachability_algorithm_id",
+            "physical_evidence_algorithm_id",
             "sensor_visibility_algorithm_id",
         ):
             if not isinstance(payload.get(name), str) or not payload[name]:
                 raise FormalCacheError("cache coverability algorithm is missing")
         if payload["physical_projection_schema"] != PHYSICAL_PROJECTION_SCHEMA:
             raise FormalCacheError("cache physical projection schema is unsupported")
+        if (
+            payload.get("physical_grid_axis_convention")
+            != PHYSICAL_GRID_AXIS_CONVENTION
+        ):
+            raise FormalCacheError("cache physical grid axis differs")
         for name in (
             "physical_projection_sha256",
             "mission_target_detail_mask_sha256",
@@ -1063,6 +1355,12 @@ def _validate_scene_coverability(entry: Mapping[str, object]) -> None:
                 "byte_order": "little",
             },
         }
+        if platform == "HOPPER":
+            expected_arrays["hopper_physical_observation_positions_um"] = {
+                "shape": [physically_reachable_pose_count, 3],
+                "dtype": "<i8",
+                "byte_order": "little",
+            }
         for name, expected in expected_arrays.items():
             metadata = arrays.get(name)
             if not isinstance(metadata, Mapping):
@@ -1146,6 +1444,9 @@ def load_formal_cache(
     if formal_eligible is not expected_formal_eligible:
         raise FormalCacheError("cache formal platform eligibility is invalid")
     _validate_inventory(path.parent, value)
+    for entry in scenes:
+        arrays = _load_verified_scene_arrays(path.parent, entry)
+        _validate_scene_semantics(entry, arrays)
     return FormalCache(path.parent, value, identity)
 
 
@@ -1912,11 +2213,35 @@ def _physical_start_identity_sha256(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _PlatformCoverabilityProduct:
+    coverability: PlatformCoverability
+    observation_positions_m: np.ndarray
+    physical_evidence_algorithm_id: str
+
+    def __post_init__(self) -> None:
+        positions = self.observation_positions_m
+        if (
+            not isinstance(self.coverability, PlatformCoverability)
+            or not isinstance(positions, np.ndarray)
+            or positions.dtype != np.dtype(np.float64)
+            or positions.ndim != 2
+            or positions.shape[1:] != (3,)
+            or len(positions)
+            != self.coverability.physically_reachable_pose_count
+            or not positions.flags.c_contiguous
+            or not np.isfinite(positions).all()
+            or not isinstance(self.physical_evidence_algorithm_id, str)
+            or not self.physical_evidence_algorithm_id
+        ):
+            raise FormalCacheError("physical coverability authority is invalid")
+
+
 def _unsafe_platform_coverability(
     platform: FrozenPlatformCapability,
     projected: object,
     detail_shape: tuple[int, int],
-) -> PlatformCoverability:
+) -> _PlatformCoverabilityProduct:
     physical = np.zeros((256, 256), dtype=np.bool_)
     detail = np.zeros(detail_shape, dtype=np.bool_)
     capability_sha256 = _physical_capability_content_sha256(platform)
@@ -1930,7 +2255,7 @@ def _unsafe_platform_coverability(
     algorithm_id = "not-run/unsafe-start"
     canvas = projected.canvas
     bounds = tuple(float(value) for value in canvas.bounds_m)
-    return PlatformCoverability(
+    coverability = PlatformCoverability(
         platform_type=platform.platform_type,
         qualified_start_cell=None,
         physical_observation_pose_mask=physical,
@@ -1968,6 +2293,11 @@ def _unsafe_platform_coverability(
         eligible=False,
         ineligible_reason=IneligibleReason.UNSAFE_START,
     )
+    return _PlatformCoverabilityProduct(
+        coverability=coverability,
+        observation_positions_m=np.empty((0, 3), dtype=np.float64),
+        physical_evidence_algorithm_id=algorithm_id,
+    )
 
 
 def _build_scene_platform_coverability(
@@ -1979,7 +2309,7 @@ def _build_scene_platform_coverability(
     projected: object,
     mission_roi: np.ndarray,
     detail_shape: tuple[int, int],
-) -> PlatformCoverability:
+) -> _PlatformCoverabilityProduct:
     platform = capability_bundle.for_platform(platform_type)
     if qualification is None:
         return _unsafe_platform_coverability(platform, projected, detail_shape)
@@ -2035,7 +2365,7 @@ def _build_scene_platform_coverability(
     capability_sha256 = _physical_capability_content_sha256(platform)
     canvas = projected.canvas
     bounds = tuple(float(value) for value in canvas.bounds_m)
-    return PlatformCoverability(
+    coverability = PlatformCoverability(
         platform_type=platform_type,
         qualified_start_cell=qualification.cell,
         physical_observation_pose_mask=physical,
@@ -2093,6 +2423,13 @@ def _build_scene_platform_coverability(
         exact=True,
         eligible=reason is None,
         ineligible_reason=reason,
+    )
+    return _PlatformCoverabilityProduct(
+        coverability=coverability,
+        observation_positions_m=physical_projection.observation_positions_m,
+        physical_evidence_algorithm_id=(
+            physical_projection.physical_evidence_algorithm_id
+        ),
     )
 
 
@@ -2172,7 +2509,7 @@ def _static_scene_data(
     detail_shape = (
         SceneTileProvider(multires, capacity=1).detail_cells_per_axis,
     ) * 2
-    coverability = _parallel_platform_map(
+    coverability_products = _parallel_platform_map(
         lambda platform_type: _build_scene_platform_coverability(
             platform_type=platform_type,
             capability_bundle=capability_bundle,
@@ -2182,6 +2519,17 @@ def _static_scene_data(
             mission_roi=mission_roi,
             detail_shape=detail_shape,
         )
+    )
+    coverability = {
+        platform: coverability_products[platform].coverability
+        for platform in _PLATFORMS
+    }
+    physical_evidence_algorithms = {
+        platform: coverability_products[platform].physical_evidence_algorithm_id
+        for platform in _PLATFORMS
+    }
+    hopper_positions_um = canonical_physical_positions_um(
+        coverability_products["HOPPER"].observation_positions_m
     )
     rocks = np.asarray(
         [
@@ -2222,6 +2570,8 @@ def _static_scene_data(
         hard_feasible=hard,
         clearance_margin_norm=clearance,
         coverability=coverability,
+        physical_evidence_algorithm_ids=physical_evidence_algorithms,
+        hopper_physical_observation_positions_um=hopper_positions_um,
     )
 
 
