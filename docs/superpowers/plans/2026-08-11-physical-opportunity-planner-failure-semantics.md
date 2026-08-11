@@ -170,6 +170,9 @@ struct LocalPlanningProblem final {
     --build-base "$PHYSICAL_NATIVE_ROOT/build" \
     --install-base "$PHYSICAL_NATIVE_ROOT/install" \
     --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+  set +u
+  source "$PHYSICAL_NATIVE_ROOT/install/setup.bash"
+  set -u
   colcon --log-base "$PHYSICAL_NATIVE_ROOT/log-test" test \
     --packages-select lunar_planner_core \
     --build-base "$PHYSICAL_NATIVE_ROOT/build" \
@@ -192,6 +195,9 @@ struct LocalPlanningProblem final {
     --build-base "$PHYSICAL_NATIVE_ROOT/build" \
     --install-base "$PHYSICAL_NATIVE_ROOT/install" \
     --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+  set +u
+  source "$PHYSICAL_NATIVE_ROOT/install/setup.bash"
+  set -u
   colcon --log-base "$PHYSICAL_NATIVE_ROOT/log-green" test \
     --packages-select lunar_planner_core \
     --build-base "$PHYSICAL_NATIVE_ROOT/build" \
@@ -266,6 +272,9 @@ Sweep 的中心采样必须在 domain 内，footprint/support/clearance 采样�
     --build-base "$PHYSICAL_NATIVE_ROOT/build" \
     --install-base "$PHYSICAL_NATIVE_ROOT/install" \
     --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+  set +u
+  source "$PHYSICAL_NATIVE_ROOT/install/setup.bash"
+  set -u
   colcon --log-base "$PHYSICAL_NATIVE_ROOT/log-wheel-red" test \
     --packages-select lunar_planner_core \
     --build-base "$PHYSICAL_NATIVE_ROOT/build" \
@@ -288,6 +297,9 @@ Sweep 的中心采样必须在 domain 内，footprint/support/clearance 采样�
     --build-base "$PHYSICAL_NATIVE_ROOT/build" \
     --install-base "$PHYSICAL_NATIVE_ROOT/install" \
     --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+  set +u
+  source "$PHYSICAL_NATIVE_ROOT/install/setup.bash"
+  set -u
   colcon --log-base "$PHYSICAL_NATIVE_ROOT/log-wheel-green" test \
     --packages-select lunar_planner_core \
     --build-base "$PHYSICAL_NATIVE_ROOT/build" \
@@ -355,6 +367,9 @@ struct HierarchicalPlannerMetrics final {
     --build-base "$PHYSICAL_NATIVE_ROOT/build" \
     --install-base "$PHYSICAL_NATIVE_ROOT/install" \
     --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+  set +u
+  source "$PHYSICAL_NATIVE_ROOT/install/setup.bash"
+  set -u
   colcon --log-base "$PHYSICAL_NATIVE_ROOT/log-legged-red" test \
     --packages-select lunar_planner_core lunar_planner_ros \
     --build-base "$PHYSICAL_NATIVE_ROOT/build" \
@@ -378,6 +393,9 @@ struct HierarchicalPlannerMetrics final {
     --build-base "$PHYSICAL_NATIVE_ROOT/build" \
     --install-base "$PHYSICAL_NATIVE_ROOT/install" \
     --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+  set +u
+  source "$PHYSICAL_NATIVE_ROOT/install/setup.bash"
+  set -u
   colcon --log-base "$PHYSICAL_NATIVE_ROOT/log-legged-green" test \
     --packages-select lunar_planner_core lunar_planner_ros \
     --build-base "$PHYSICAL_NATIVE_ROOT/build" \
@@ -566,6 +584,9 @@ class PlatformCoverability:
     --build-base "$PHYSICAL_BRIDGE_ROOT/build" \
     --install-base "$PHYSICAL_BRIDGE_ROOT/install" \
     --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+  set +u
+  source "$PHYSICAL_BRIDGE_ROOT/install/setup.bash"
+  set -u
   colcon --log-base "$PHYSICAL_BRIDGE_ROOT/log-reachability-red" test \
     --packages-select lunar_planner_core \
     --build-base "$PHYSICAL_BRIDGE_ROOT/build" \
@@ -592,6 +613,9 @@ class PlatformCoverability:
     --build-base "$PHYSICAL_BRIDGE_ROOT/build" \
     --install-base "$PHYSICAL_BRIDGE_ROOT/install" \
     --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+  set +u
+  source "$PHYSICAL_BRIDGE_ROOT/install/setup.bash"
+  set -u
   colcon --log-base "$PHYSICAL_BRIDGE_ROOT/log-reachability-green" test \
     --packages-select lunar_planner_core \
     --build-base "$PHYSICAL_BRIDGE_ROOT/build" \
@@ -1103,6 +1127,9 @@ TRAINING_UPDATE_METRICS_SCHEMA = "lunar-training-update-metrics/v4"
     --build-base "$PHYSICAL_BRIDGE_ROOT/build" \
     --install-base "$PHYSICAL_BRIDGE_ROOT/install" \
     --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+  set +u
+  source "$PHYSICAL_BRIDGE_ROOT/install/setup.bash"
+  set -u
   colcon --log-base "$PHYSICAL_BRIDGE_ROOT/log-history" test \
     --packages-select lunar_planner_core \
     --build-base "$PHYSICAL_BRIDGE_ROOT/build" \
@@ -1110,9 +1137,6 @@ TRAINING_UPDATE_METRICS_SCHEMA = "lunar-training-update-metrics/v4"
     --event-handlers console_direct+ \
     --ctest-args -R hierarchical_regression
   colcon test-result --test-result-base "$PHYSICAL_BRIDGE_ROOT/build" --verbose
-  set +u
-  source "$PHYSICAL_BRIDGE_ROOT/install/setup.bash"
-  set -u
   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q \
     training/lunar_policy_training/tests/test_physical_opportunity_regression.py \
     training/lunar_policy_training/tests/test_v3_environment.py \
@@ -1158,6 +1182,9 @@ TRAINING_UPDATE_METRICS_SCHEMA = "lunar-training-update-metrics/v4"
     --build-base "$PHYSICAL_FINAL_ROOT/build" \
     --install-base "$PHYSICAL_FINAL_ROOT/install" \
     --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+  set +u
+  source "$PHYSICAL_FINAL_ROOT/install/setup.bash"
+  set -u
   colcon --log-base "$PHYSICAL_FINAL_ROOT/log-test" test \
     --packages-select lunar_planner_core lunar_planner_training_bridge lunar_planner_ros \
     --build-base "$PHYSICAL_FINAL_ROOT/build" \
