@@ -115,14 +115,22 @@ def test_historical_boundary_failure_replays_against_v6_cache(
     )
     legacy_state = json.loads(state_path.read_text(encoding="utf-8"))
     assert legacy_state["platform_type"] == "LEGGED"
+    legacy_body_z_m = float(legacy_state["legged_body_z_m"])
+    assert legacy_body_z_m == float(
+        legacy_state["reveal_history"][-1]["legged_body_z_m"]
+    )
 
     cache_manifest = pathlib.Path(cache_manifest_raw).resolve(strict=True)
-    cache = load_formal_cache(cache_manifest, require_full=True)
+    cache = load_formal_cache(cache_manifest, require_full=False)
     assert cache.manifest["schema"] == "lunar-formal-training-cache/v6"
+    assert cache.manifest["materialization"] == "preflight"
+    assert cache.manifest["formal_eligible"] is False
+    capability_bundle = load_project_formal_capability(REPOSITORY_ROOT)
     assembly = FormalEnvironmentBuilder(
         cache_manifest_path=cache_manifest,
-        capability_bundle=load_project_formal_capability(REPOSITORY_ROOT),
+        capability_bundle=capability_bundle,
         split="train",
+        allow_preflight=True,
     ).build()
     worker = assembly.factory(0, "LEGGED")
     episode = worker.episode
@@ -143,13 +151,30 @@ def test_historical_boundary_failure_replays_against_v6_cache(
             path_samples=samples,
         )
         episode.current_pose = pose
-        episode._current_legged_body_z_m = float(reveal["legged_body_z_m"])
         boundary = episode.controller.after_execution(
             platform_type="LEGGED",
             execution_state=str(reveal["execution_state"]),
             evidence=evidence,
         )
         assert boundary.updated is True
+
+    body_height = capability_bundle.for_platform(
+        "LEGGED"
+    ).typed_capability.body_height_m
+    nominal_body_height_m = 0.5 * (
+        float(body_height.lower) + float(body_height.upper)
+    )
+    episode._current_legged_body_z_m = (
+        float(episode.current_pose.elevation_m) + nominal_body_height_m
+    )
+    rebuilt_body_height_m = (
+        episode._current_legged_body_z_m
+        - float(episode.current_pose.elevation_m)
+    )
+    assert float(body_height.lower) <= rebuilt_body_height_m
+    assert rebuilt_body_height_m <= float(body_height.upper)
+    assert rebuilt_body_height_m == pytest.approx(nominal_body_height_m)
+    assert episode._current_legged_body_z_m != legacy_body_z_m
 
     snapshot = episode._snapshot
     assert snapshot is not None
