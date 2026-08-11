@@ -27,9 +27,12 @@ import torch
 from lunar_planner_training_bridge import PlanningOutcome, TrainingPlanRequest
 
 from .capability_freeze import (
+    CAPABILITY_FREEZE_SCHEMA,
+    PLATFORMS,
     CapabilityFreezeError,
     FrozenCapabilityBundle,
     FrozenCapabilityEnvironmentFactory,
+    FrozenPlatformCapability,
 )
 from .project_capability import load_project_formal_capability
 from .polar_data.formal_cache import (
@@ -191,7 +194,7 @@ def _build_formal_resume_equivalence_evidence(
     ):
         raise PreflightError("formal resume checkpoint roundtrip is invalid")
     if any(
-        getattr(value, "schema_version", None) != "lunar-ppo-checkpoint/v6"
+        getattr(value, "schema_version", None) != "lunar-ppo-checkpoint/v7"
         for value in (uninterrupted, resumed)
     ):
         raise PreflightError("formal resume checkpoint schema differs")
@@ -237,7 +240,7 @@ def _build_formal_resume_equivalence_evidence(
             raise PreflightError(f"formal resume {name} differs at update two")
 
     body: dict[str, object] = {
-        "checkpoint_schema": "lunar-ppo-checkpoint/v6",
+        "checkpoint_schema": "lunar-ppo-checkpoint/v7",
         "checkpoint_relative_path": checkpoint_relative_path,
         "checkpoint_sha256": checkpoint_sha256,
         "checkpoint_roundtrip": True,
@@ -1341,10 +1344,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     elif arguments.command == "calibrate":
+        capability_bundle = _formal_capability_preflight(repository_root)
         requested_config = load_training_config(Path(arguments.config))
         if requested_config.run_kind != "formal":
             raise PreflightError("public calibrate requires the formal config")
-        capability_bundle = _formal_capability_preflight(repository_root)
         sensor_report_sha256 = _formal_sensor_performance_preflight(
             arguments.sensor_performance_report,
             capability_bundle=capability_bundle,
@@ -1367,12 +1370,12 @@ def main(argv: list[str] | None = None) -> int:
             sensor_performance_sha256=sensor_report_sha256,
         )
     elif arguments.command == "train":
+        capability_bundle = _formal_capability_preflight(repository_root)
         requested_config = load_training_config(Path(arguments.config))
         if requested_config.run_kind != "formal":
             raise PreflightError(
                 "public train is formal; use the development-smoke helper"
             )
-        capability_bundle = _formal_capability_preflight(repository_root)
         sensor_performance_sha256 = _formal_sensor_performance_preflight(
             arguments.sensor_performance_report,
             capability_bundle=capability_bundle,
@@ -1495,10 +1498,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     elif arguments.command == "formal-preflight":
+        capability_bundle = _formal_capability_preflight(repository_root)
         requested_config = load_training_config(Path(arguments.config))
         if requested_config.run_kind != "formal":
             raise PreflightError("formal-preflight requires the formal config")
-        capability_bundle = _formal_capability_preflight(repository_root)
         sensor_performance_sha256 = _formal_sensor_performance_preflight(
             arguments.sensor_performance_report,
             capability_bundle=capability_bundle,
@@ -1590,7 +1593,32 @@ def _formal_capability_preflight(
     repository_root: Path,
 ) -> FrozenCapabilityBundle:
     try:
-        return load_project_formal_capability(repository_root)
+        bundle = load_project_formal_capability(repository_root)
+        if (
+            not isinstance(bundle, FrozenCapabilityBundle)
+            or bundle.schema != CAPABILITY_FREEZE_SCHEMA
+            or bundle.formal_eligible is not True
+            or len(bundle.platforms) != len(PLATFORMS)
+            or any(
+                not isinstance(platform, FrozenPlatformCapability)
+                for platform in bundle.platforms
+            )
+            or tuple(
+                platform.platform_type for platform in bundle.platforms
+            )
+            != PLATFORMS
+            or not isinstance(bundle.bundle_sha256, str)
+            or len(bundle.bundle_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in bundle.bundle_sha256
+            )
+        ):
+            raise CapabilityFreezeError(
+                "formal capability must be the complete non-proxy WHEELED, "
+                "LEGGED and HOPPER freeze"
+            )
+        return bundle
     except CapabilityFreezeError as error:
         raise PreflightError(f"project formal capability is invalid: {error}") from error
 

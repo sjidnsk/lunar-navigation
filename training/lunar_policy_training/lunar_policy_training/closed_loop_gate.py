@@ -10,12 +10,14 @@ import os
 import subprocess
 import sys
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import IO, Mapping, Sequence
 
 import numpy as np
 import torch
+from lunar_planner_training_bridge import PlannerBridge
 
 from .capability_freeze import FrozenCapabilityEnvironmentFactory
 from .config import PLATFORMS
@@ -30,19 +32,52 @@ from .training_semantics import (
 )
 
 
-CLOSED_LOOP_GATE_SCHEMA = "lunar-platform-coverable-closed-loop-gate/v3"
+CLOSED_LOOP_GATE_SCHEMA = "lunar-physical-opportunity-closed-loop-gate/v4"
 CLOSED_LOOP_MINIMUM_SCENES = 1
 CLOSED_LOOP_METHOD = "gain_over_cost_frontier"
 _SPLITS = ("train", "validation", "test", "holdout")
 _ROW_SHA_FIELDS = (
-    "reachable_mask_sha256",
+    "physical_projection_sha256",
     "coverable_mask_sha256",
-    "primitive_set_sha256",
-    "world_evidence_sha256",
-    "reachability_graph_sha256",
-    "candidate_sequence_sha256",
+    "physical_candidate_universe_sha256",
+    "physical_snapshot_id",
+    "oracle_opportunity_set_sha256",
     "request_sequence_sha256",
     "planner_sequence_sha256",
+    "search_domain_sha256",
+)
+_ROW_FIELDS = frozenset(
+    {
+        "scene_id",
+        "split",
+        "platform",
+        "exact",
+        "mission_coverable_fraction_hex",
+        "physical_projection_sha256",
+        "coverable_mask_sha256",
+        "physical_reachability_algorithm_id",
+        "physical_candidate_universe_sha256",
+        "physical_snapshot_id",
+        "oracle_opportunity_set_sha256",
+        "final_coverage_hex",
+        "success_first_crossing",
+        "terminal_reason",
+        "oracle_contradiction_count",
+        "oracle_opportunity_count",
+        "planner_failure_count",
+        "safety_violation_count",
+        "invalid_action_count",
+        "platform_reference_mismatch_count",
+        "execution_failure_count",
+        "executed_step_count",
+        "request_sequence_sha256",
+        "planner_sequence_sha256",
+        "additional_corridor_margin_m",
+        "search_domain_cell_count",
+        "search_domain_sha256",
+        "planner_reason_counts",
+        "candidate_diagnostics",
+    }
 )
 
 
@@ -54,13 +89,9 @@ class ClosedLoopGateError(RuntimeError):
 class PlatformCoverabilityBinding:
     platform: str
     mission_coverable_fraction: float
-    reachable_mask_sha256: str
+    physical_projection_sha256: str
     coverable_mask_sha256: str
-    reachability_algorithm_id: str
-    primitive_state_schema: str
-    primitive_set_sha256: str
-    world_evidence_sha256: str
-    reachability_graph_sha256: str
+    physical_reachability_algorithm_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,38 +227,27 @@ def _coverability_bindings(
             raise ClosedLoopGateError(
                 "gate scene-platform is not exact and mission-coverable"
             )
-        reachable = value.get("reachable_mask_sha256")
-        coverable = value.get("coverable_mask_sha256")
-        if not _is_sha(reachable) or not _is_sha(coverable):
-            raise ClosedLoopGateError("gate coverability mask identity is invalid")
-        reachability_algorithm_id = value.get("reachability_algorithm_id")
-        primitive_state_schema = value.get("primitive_state_schema")
-        primitive_set_sha256 = value.get("primitive_set_sha256")
-        world_evidence_sha256 = value.get("world_evidence_sha256")
-        reachability_graph_sha256 = value.get("reachability_graph_sha256")
+        physical_projection = value.get("physical_projection_sha256")
+        coverable = value.get("coverable_detail_mask_sha256")
+        physical_reachability_algorithm_id = value.get(
+            "physical_reachability_algorithm_id"
+        )
         if (
-            not isinstance(reachability_algorithm_id, str)
-            or not reachability_algorithm_id
-            or not isinstance(primitive_state_schema, str)
-            or not primitive_state_schema
-            or not _is_sha(primitive_set_sha256)
-            or not _is_sha(world_evidence_sha256)
-            or not _is_sha(reachability_graph_sha256)
+            not _is_sha(physical_projection)
+            or not _is_sha(coverable)
+            or not isinstance(physical_reachability_algorithm_id, str)
+            or not physical_reachability_algorithm_id
         ):
-            raise ClosedLoopGateError(
-                "gate primitive graph identity is invalid"
-            )
+            raise ClosedLoopGateError("gate physical identity is invalid")
         bindings.append(
             PlatformCoverabilityBinding(
                 platform=platform,
                 mission_coverable_fraction=float(fraction),
-                reachable_mask_sha256=str(reachable),
+                physical_projection_sha256=str(physical_projection),
                 coverable_mask_sha256=str(coverable),
-                reachability_algorithm_id=reachability_algorithm_id,
-                primitive_state_schema=primitive_state_schema,
-                primitive_set_sha256=str(primitive_set_sha256),
-                world_evidence_sha256=str(world_evidence_sha256),
-                reachability_graph_sha256=str(reachability_graph_sha256),
+                physical_reachability_algorithm_id=(
+                    physical_reachability_algorithm_id
+                ),
             )
         )
     return tuple(bindings)
@@ -242,8 +262,8 @@ def select_closed_loop_gate_cases(
     """Select the first stable exact-common schedule entries across all splits."""
     if type(minimum_scene_count) is not int or minimum_scene_count < 1:
         raise ClosedLoopGateError("gate minimum scene count must be positive")
-    if cache_manifest.get("schema") != "lunar-formal-training-cache/v5":
-        raise ClosedLoopGateError("gate requires formal cache v5")
+    if cache_manifest.get("schema") != "lunar-formal-training-cache/v6":
+        raise ClosedLoopGateError("gate requires formal cache v6")
     entries = cache_manifest.get("scenes")
     scenarios = scenario_document.get("scenarios")
     common = cache_manifest.get("exact_common_evaluation")
@@ -320,16 +340,6 @@ def _array_signature(name: str, values: object) -> bytes:
     digest.update(repr(array.shape).encode("ascii"))
     digest.update(array.tobytes(order="C"))
     return digest.digest()
-
-
-def _candidate_signature(observation: object) -> str:
-    digest = hashlib.sha256()
-    for name in ("frontier_features", "candidate_mask"):
-        tensor = getattr(observation, name)
-        values = tensor.detach().cpu().contiguous().numpy()
-        digest.update(_array_signature(name, values))
-    digest.update(repr(observation.observation_identities).encode("utf-8"))
-    return digest.hexdigest()
 
 
 def _request_signature(request: object) -> str:
@@ -413,13 +423,13 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
     if worker.episode.scene_id != work.case.scene_id:
         raise ClosedLoopGateError("gate worker selected a different physical scene")
 
-    candidate_chain = hashlib.sha256()
     request_chain = hashlib.sha256()
     planner_chain = hashlib.sha256()
     planner_failures = 0
     safety_violations = 0
     invalid_actions = 0
     execution_failures = 0
+    platform_reference_mismatches = 0
     success_first_crossing = False
     step_count = 0
     final_coverage = float(
@@ -427,6 +437,10 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
     )
     terminal_reason: TerminalReason | None = None
     oracle_opportunity_count = 0
+    planner_reason_counts: Counter[str] = Counter()
+    additional_corridor_margin_m = 2.0
+    search_domain_cell_count = 0
+    search_domain_sha256 = ""
     deadline = time.monotonic() + work.watchdog_seconds
 
     while terminal_reason is None:
@@ -466,21 +480,27 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
             raise ClosedLoopGateError("gate baseline action differs on repeat")
         theta = 0.0 if work.platform == "HOPPER" else first.theta
         action = PolicyAction(first.candidate_index, theta)
-        candidate_signature = _candidate_signature(observation)
         first_request = worker.episode.build_request(action, identities[0]).request
         second_request = worker.episode.build_request(action, identities[0]).request
         request_signature = _request_signature(first_request)
         if request_signature != _request_signature(second_request):
             raise ClosedLoopGateError("gate request differs on repeat")
-        _chain_update(
-            candidate_chain,
-            {
-                "step": step_count,
-                "candidate_sha256": candidate_signature,
-                "selected_index": first.candidate_index,
-                "selected_theta_hex": float(theta).hex(),
-            },
+        probe = PlannerBridge().plan(first_request)
+        hierarchical = probe.diagnostics.hierarchical
+        if hierarchical is None:
+            raise ClosedLoopGateError("gate planner domain diagnostics are missing")
+        additional_corridor_margin_m = float(
+            hierarchical.additional_corridor_margin_m
         )
+        if additional_corridor_margin_m != 2.0:
+            raise ClosedLoopGateError(
+                "gate planner corridor margin is not fixed at 2.0 m"
+            )
+        search_domain_cell_count = int(hierarchical.search_domain_cell_count)
+        search_domain_sha256 = str(hierarchical.search_domain_sha256)
+        if search_domain_cell_count <= 0 or not _is_sha(search_domain_sha256):
+            raise ClosedLoopGateError("gate planner search domain is invalid")
+        planner_reason_counts[str(probe.reason_code)] += 1
         _chain_update(
             request_chain,
             {"step": step_count, "request_sha256": request_signature},
@@ -502,6 +522,9 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         planner_failures += int(not accepted)
         safety_violations += events.safety_violation_count
         invalid_actions += events.invalid_action_count
+        platform_reference_mismatches += (
+            events.platform_reference_mismatch_count
+        )
         execution_failures += events.execution_failure_count
         success_first_crossing = bool(
             success_first_crossing or transition.success_first_crossing
@@ -517,6 +540,11 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
                 "directive": transition.execution_directive.name,
                 "reason_code": transition.reason_code,
                 "events": asdict(events),
+                "additional_corridor_margin_m_hex": (
+                    additional_corridor_margin_m.hex()
+                ),
+                "search_domain_cell_count": search_domain_cell_count,
+                "search_domain_sha256": search_domain_sha256,
             },
         )
         if transition.terminated:
@@ -527,6 +555,14 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         raise ClosedLoopGateError("gate natural terminal has no reason")
     binding = work.case.for_platform(work.platform)
     diagnostics = worker.current_candidate_diagnostics()
+    snapshot = worker.episode._snapshot
+    if snapshot is None:
+        raise ClosedLoopGateError("gate terminal physical snapshot is missing")
+    physical_candidate_universe_sha256 = snapshot.candidate_universe_sha256
+    physical_snapshot_id = snapshot.candidate_universe.physical_snapshot_id
+    oracle_opportunity_set_sha256 = (
+        snapshot.frontier_oracle.oracle_opportunity_set_sha256
+    )
     row = {
         "scene_id": work.case.scene_id,
         "split": work.case.split,
@@ -535,13 +571,16 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         "mission_coverable_fraction_hex": (
             binding.mission_coverable_fraction.hex()
         ),
-        "reachable_mask_sha256": binding.reachable_mask_sha256,
+        "physical_projection_sha256": binding.physical_projection_sha256,
         "coverable_mask_sha256": binding.coverable_mask_sha256,
-        "reachability_algorithm_id": binding.reachability_algorithm_id,
-        "primitive_state_schema": binding.primitive_state_schema,
-        "primitive_set_sha256": binding.primitive_set_sha256,
-        "world_evidence_sha256": binding.world_evidence_sha256,
-        "reachability_graph_sha256": binding.reachability_graph_sha256,
+        "physical_reachability_algorithm_id": (
+            binding.physical_reachability_algorithm_id
+        ),
+        "physical_candidate_universe_sha256": (
+            physical_candidate_universe_sha256
+        ),
+        "physical_snapshot_id": physical_snapshot_id,
+        "oracle_opportunity_set_sha256": oracle_opportunity_set_sha256,
         "final_coverage_hex": final_coverage.hex(),
         "success_first_crossing": success_first_crossing,
         "terminal_reason": terminal_reason.value,
@@ -550,11 +589,15 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         "planner_failure_count": planner_failures,
         "safety_violation_count": safety_violations,
         "invalid_action_count": invalid_actions,
+        "platform_reference_mismatch_count": platform_reference_mismatches,
         "execution_failure_count": execution_failures,
         "executed_step_count": step_count,
-        "candidate_sequence_sha256": candidate_chain.hexdigest(),
         "request_sequence_sha256": request_chain.hexdigest(),
         "planner_sequence_sha256": planner_chain.hexdigest(),
+        "additional_corridor_margin_m": additional_corridor_margin_m,
+        "search_domain_cell_count": search_domain_cell_count,
+        "search_domain_sha256": search_domain_sha256,
+        "planner_reason_counts": dict(sorted(planner_reason_counts.items())),
         "candidate_diagnostics": {
             name: getattr(diagnostics, name)
             for name in CANDIDATE_DIAGNOSTIC_FIELDS
@@ -569,6 +612,10 @@ def _validate_row(
     case: ClosedLoopGateCase,
     platform: str,
 ) -> None:
+    if set(row) != _ROW_FIELDS:
+        raise ClosedLoopGateError(
+            "closed-loop primitive-bound row fields are forbidden"
+        )
     if row.get("exact") is not True:
         raise ClosedLoopGateError("closed-loop row is not exact")
     try:
@@ -596,6 +643,7 @@ def _validate_row(
         "planner_failure_count",
         "safety_violation_count",
         "invalid_action_count",
+        "platform_reference_mismatch_count",
         "execution_failure_count",
         "executed_step_count",
     )
@@ -608,9 +656,15 @@ def _validate_row(
     if (
         not isinstance(diagnostics, Mapping)
         or set(diagnostics) != set(CANDIDATE_DIAGNOSTIC_FIELDS)
+        or not _is_sha(diagnostics.get("physical_snapshot_id"))
+        or not isinstance(
+            diagnostics.get("physical_reachability_algorithm_id"), str
+        )
+        or not diagnostics.get("physical_reachability_algorithm_id")
         or any(
-            type(value) is not int or value < 0
-            for value in diagnostics.values()
+            type(diagnostics.get(field)) is not int
+            or int(diagnostics[field]) < 0
+            for field in CANDIDATE_DIAGNOSTIC_FIELDS[2:]
         )
     ):
         raise ClosedLoopGateError(
@@ -618,27 +672,35 @@ def _validate_row(
         )
     if row["executed_step_count"] <= 0:
         raise ClosedLoopGateError("closed-loop executed step count is invalid")
-    if row["planner_failure_count"] >= row["executed_step_count"]:
-        raise ClosedLoopGateError(
-            "closed-loop has no successful execution before terminal"
-        )
     for field, message in (
         ("oracle_contradiction_count", "oracle contradiction"),
         ("safety_violation_count", "safety violation"),
         ("invalid_action_count", "invalid action"),
+        ("platform_reference_mismatch_count", "reference mismatch"),
         ("execution_failure_count", "execution failure"),
     ):
         if row[field] != 0:
             raise ClosedLoopGateError(f"closed-loop {message} count is nonzero")
 
     terminal_reason = row.get("terminal_reason")
+    if terminal_reason == "PLANNER_BLOCKED_WITH_OPPORTUNITY":
+        raise ClosedLoopGateError(
+            "closed-loop planner blocked qualification limit is zero"
+        )
+    if terminal_reason == "HARD_FAILURE":
+        raise ClosedLoopGateError(
+            "closed-loop hard failure qualification limit is zero"
+        )
+    if terminal_reason == "CANCELED":
+        raise ClosedLoopGateError(
+            "closed-loop canceled qualification limit is zero"
+        )
     success = terminal_reason == "SUCCESS"
     legal_failure_reasons = {
         "NO_RECOVERABLE_OBSERVATION_STATE",
         "VISITED_EXHAUSTED",
         "NO_TRANSIT_OPPORTUNITY",
         "ZERO_GAIN",
-        "PLANNER_REJECTED_ALL",
     }
     if not success and terminal_reason not in legal_failure_reasons:
         raise ClosedLoopGateError("closed-loop terminal reason is not auditable")
@@ -660,38 +722,57 @@ def _validate_row(
             raise ClosedLoopGateError(
                 "closed-loop failure has a success crossing"
             )
-        if (
-            terminal_reason != "PLANNER_REJECTED_ALL"
-            and row["oracle_opportunity_count"] != 0
-        ):
+        if row["oracle_opportunity_count"] != 0:
             raise ClosedLoopGateError(
                 "closed-loop terminal oracle opportunity is nonzero"
             )
-        if (
-            terminal_reason == "PLANNER_REJECTED_ALL"
-            and row["planner_failure_count"] <= 0
-        ):
-            raise ClosedLoopGateError(
-                "closed-loop planner-rejected terminal has no planner failure"
-            )
+    if row["planner_failure_count"] >= row["executed_step_count"]:
+        raise ClosedLoopGateError(
+            "closed-loop has no successful execution before terminal"
+        )
+    margin = row.get("additional_corridor_margin_m")
+    if (
+        not isinstance(margin, (int, float))
+        or isinstance(margin, bool)
+        or float(margin) != 2.0
+    ):
+        raise ClosedLoopGateError("closed-loop corridor margin is not fixed at 2.0 m")
+    if (
+        type(row.get("search_domain_cell_count")) is not int
+        or int(row["search_domain_cell_count"]) <= 0
+        or not _is_sha(row.get("search_domain_sha256"))
+    ):
+        raise ClosedLoopGateError("closed-loop search domain diagnostics are invalid")
+    reason_counts = row.get("planner_reason_counts")
+    if (
+        not isinstance(reason_counts, Mapping)
+        or not reason_counts
+        or any(
+            not isinstance(reason, str)
+            or not reason
+            or type(count) is not int
+            or count <= 0
+            for reason, count in reason_counts.items()
+        )
+        or sum(reason_counts.values()) != row["executed_step_count"]
+    ):
+        raise ClosedLoopGateError("closed-loop planner reason counts are invalid")
     for field in _ROW_SHA_FIELDS:
         if not _is_sha(row.get(field)):
             raise ClosedLoopGateError(f"closed-loop {field} is invalid")
     if (
-        row["reachable_mask_sha256"] != binding.reachable_mask_sha256
+        row["physical_projection_sha256"]
+        != binding.physical_projection_sha256
         or row["coverable_mask_sha256"] != binding.coverable_mask_sha256
     ):
-        raise ClosedLoopGateError("closed-loop coverability identity differs")
+        raise ClosedLoopGateError("closed-loop physical identity differs")
     if (
-        row.get("reachability_algorithm_id")
-        != binding.reachability_algorithm_id
-        or row.get("primitive_state_schema") != binding.primitive_state_schema
-        or row.get("primitive_set_sha256") != binding.primitive_set_sha256
-        or row.get("world_evidence_sha256") != binding.world_evidence_sha256
-        or row.get("reachability_graph_sha256")
-        != binding.reachability_graph_sha256
+        row.get("physical_reachability_algorithm_id")
+        != binding.physical_reachability_algorithm_id
+        or row.get("physical_snapshot_id")
+        != diagnostics.get("physical_snapshot_id")
     ):
-        raise ClosedLoopGateError("closed-loop primitive graph identity differs")
+        raise ClosedLoopGateError("closed-loop physical identity differs")
 
 
 def _run_closed_loop_work_checked(work: _ClosedLoopWork) -> dict[str, object]:
@@ -765,6 +846,18 @@ def build_closed_loop_gate_report(
     success_count = sum(
         row["terminal_reason"] == "SUCCESS" for row in ordered_rows
     )
+    terminal_reason_counts = dict(
+        sorted(Counter(str(row["terminal_reason"]) for row in ordered_rows).items())
+    )
+    planner_blocked_count = terminal_reason_counts.get(
+        "PLANNER_BLOCKED_WITH_OPPORTUNITY", 0
+    )
+    hard_failure_count = terminal_reason_counts.get("HARD_FAILURE", 0)
+    canceled_count = terminal_reason_counts.get("CANCELED", 0)
+    reference_mismatch_count = sum(
+        int(row["platform_reference_mismatch_count"])
+        for row in ordered_rows
+    )
     evidence: dict[str, object] = {
         "schema_version": CLOSED_LOOP_GATE_SCHEMA,
         "source_commit": source_commit,
@@ -777,6 +870,11 @@ def build_closed_loop_gate_report(
         "natural_failure_scene_platform_count": (
             len(ordered_rows) - success_count
         ),
+        "terminal_reason_counts": terminal_reason_counts,
+        "planner_blocked_scene_platform_count": planner_blocked_count,
+        "hard_failure_scene_platform_count": hard_failure_count,
+        "canceled_scene_platform_count": canceled_count,
+        "platform_reference_mismatch_count": reference_mismatch_count,
         "selected_scenes": [
             {
                 "scene_id": case.scene_id,
@@ -807,6 +905,8 @@ def write_closed_loop_gate_report(
 ) -> Path:
     if not isinstance(report, ClosedLoopGateReport):
         raise ClosedLoopGateError("closed-loop gate report is invalid")
+    if report.payload.get("schema_version") != CLOSED_LOOP_GATE_SCHEMA:
+        raise ClosedLoopGateError("closed-loop gate report schema differs")
     artifact_root.mkdir(parents=True, exist_ok=True)
     path = artifact_root / "closed-loop-gate.json"
     body = report.to_dict()

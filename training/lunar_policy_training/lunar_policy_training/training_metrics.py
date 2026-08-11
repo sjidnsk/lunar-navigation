@@ -21,7 +21,7 @@ from .environment.macro_step import TerminalAudit, TerminalReason
 from .ppo.trainer import PPOUpdateMetrics
 
 
-TRAINING_UPDATE_METRICS_SCHEMA = "lunar-training-update-metrics/v3"
+TRAINING_UPDATE_METRICS_SCHEMA = "lunar-training-update-metrics/v4"
 _CANDIDATE_IDENTITY_FIELDS = CANDIDATE_DIAGNOSTIC_FIELDS[:2]
 _CANDIDATE_COUNT_FIELDS = CANDIDATE_DIAGNOSTIC_FIELDS[2:]
 _PHYSICAL_EXHAUSTION_REASONS = frozenset(

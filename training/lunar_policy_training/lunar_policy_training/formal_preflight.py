@@ -120,6 +120,7 @@ def build_formal_preflight_report(
     selected_rollout_horizon: int,
     evaluation_probe_sha256: str,
     resume_equivalence: Mapping[str, object],
+    additional_corridor_margin_m: float,
 ) -> FormalPreflightReport:
     if not _is_sha(source_commit, length=40):
         raise FormalPreflightError("source commit is invalid")
@@ -174,10 +175,16 @@ def build_formal_preflight_report(
     if not _is_sha(evaluation_probe_sha256):
         raise FormalPreflightError("preflight evaluation digest is invalid")
     if (
+        not isinstance(additional_corridor_margin_m, (int, float))
+        or isinstance(additional_corridor_margin_m, bool)
+        or float(additional_corridor_margin_m) != 2.0
+    ):
+        raise FormalPreflightError("preflight corridor margin must be fixed at 2.0 m")
+    if (
         not isinstance(resume_equivalence, Mapping)
         or set(resume_equivalence) != _RESUME_EQUIVALENCE_FIELDS
         or resume_equivalence.get("checkpoint_schema")
-        != "lunar-ppo-checkpoint/v6"
+        != "lunar-ppo-checkpoint/v7"
         or not isinstance(
             resume_equivalence.get("checkpoint_relative_path"), str
         )
@@ -212,6 +219,7 @@ def build_formal_preflight_report(
         "selected_rollout_horizon": selected_rollout_horizon,
         "episode_decision_limit": None,
         "evaluation_probe_sha256": evaluation_probe_sha256,
+        "additional_corridor_margin_m": 2.0,
         "resume_equivalence": dict(sorted(resume_equivalence.items())),
         "proxy": False,
         "training_started": False,
@@ -369,6 +377,7 @@ def _direct_environment_checks(
         raise FormalPreflightError("three platforms did not receive the same world")
     request_hashes: dict[str, str] = {}
     planner_hashes: dict[str, str] = {}
+    corridor_margins: set[float] = set()
     for platform, worker in workers.items():
         action, identity = _first_action(worker, platform)
         first = worker.episode.build_request(action, identity).request
@@ -388,6 +397,12 @@ def _direct_environment_checks(
             or first.world.local_map.width != 320
         ):
             raise FormalPreflightError("formal multiresolution map contract differs")
+        margin = first.config.local_frontier.additional_corridor_margin_m
+        if float(margin) != 2.0:
+            raise FormalPreflightError(
+                "formal planner corridor margin is not fixed at 2.0 m"
+            )
+        corridor_margins.add(float(margin))
         request_hashes[platform] = first_hash
         planner_hashes[platform] = first_planner_hash
 
@@ -417,6 +432,7 @@ def _direct_environment_checks(
         "request_sha256s": request_hashes,
         "planner_sha256s": planner_hashes,
         "hopper_available_delta_v_mps": hopper_available[0],
+        "additional_corridor_margin_m": corridor_margins.pop(),
     }
 
 
@@ -494,13 +510,13 @@ def run_formal_preflight(
     selected_rollout_horizon: int = 32,
     resume_equivalence: Mapping[str, object] | None = None,
 ) -> tuple[FormalPreflightReport, Path]:
-    """Execute formal wiring and record the supplied V6 resume proof."""
+    """Execute formal wiring and record the supplied V7 resume proof."""
     expected_splits = {"train", "validation", "test", "holdout"}
     if set(assemblies) != expected_splits:
         raise FormalPreflightError("formal preflight assemblies are incomplete")
     timings: dict[str, float] = {}
     started = time.monotonic()
-    _direct_environment_checks(cache, assemblies["train"])
+    direct_evidence = _direct_environment_checks(cache, assemblies["train"])
     timings["direct_environment"] = time.monotonic() - started
 
     started = time.monotonic()
@@ -568,6 +584,9 @@ def run_formal_preflight(
         selected_rollout_horizon=selected_rollout_horizon,
         evaluation_probe_sha256=str(evaluation_probe["probe_sha256"]),
         resume_equivalence=resume_equivalence,
+        additional_corridor_margin_m=float(
+            direct_evidence["additional_corridor_margin_m"]
+        ),
     )
     return report, write_formal_preflight_report(artifact_root, report)
 

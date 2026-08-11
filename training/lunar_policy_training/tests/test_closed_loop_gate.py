@@ -10,6 +10,7 @@ import lunar_policy_training.closed_loop_gate as gate_module
 from lunar_policy_training.closed_loop_gate import (
     CLOSED_LOOP_GATE_SCHEMA,
     CLOSED_LOOP_MINIMUM_SCENES,
+    ClosedLoopGateReport,
     ClosedLoopGateError,
     _validate_bound_identities,
     build_closed_loop_gate_report,
@@ -21,22 +22,16 @@ from lunar_policy_training.closed_loop_gate import (
 PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
 
 CANDIDATE_DIAGNOSTICS = {
-    "frontier_anchor_count": 1,
-    "visited_excluded_count": 0,
-    "static_infeasible_count": 0,
-    "platform_unreachable_count": 0,
+    "physical_snapshot_id": "3" * 64,
+    "physical_reachability_algorithm_id": "lunar-physical-reachability/test-v1",
+    "physical_candidate_universe_count": 1,
+    "selected_policy_candidate_count": 1,
+    "available_candidate_count": 1,
+    "untried_reserve_count": 0,
+    "planner_failed_current_snapshot_count": 0,
     "zero_gain_count": 0,
-    "emitted_count": 1,
-    "planner_rejected_count": 0,
-    "primitive_state_count": 2,
-    "forward_reachable_state_count": 2,
-    "returnable_state_count": 2,
-    "recoverable_observation_state_count": 2,
-    "frontier_hint_count": 1,
-    "positive_gain_state_count": 1,
-    "transit_state_count": 0,
-    "invalidated_edge_count": 0,
-    "revalidated_edge_count": 1,
+    "visited_excluded_count": 0,
+    "physical_unreachable_count": 0,
 }
 
 
@@ -53,13 +48,11 @@ def _coverability() -> dict[str, object]:
         "exact": True,
         "eligible": True,
         "mission_coverable_fraction": 0.97,
-        "reachable_mask_sha256": _sha("a"),
-        "coverable_mask_sha256": _sha("b"),
-        "reachability_algorithm_id": "lunar-primitive-reachability/test-v1",
-        "primitive_state_schema": "lunar-primitive-state/test-v1",
-        "primitive_set_sha256": _sha("2"),
-        "world_evidence_sha256": _sha("3"),
-        "reachability_graph_sha256": _sha("4"),
+        "physical_projection_sha256": _sha("a"),
+        "coverable_detail_mask_sha256": _sha("b"),
+        "physical_reachability_algorithm_id": (
+            "lunar-physical-reachability/test-v1"
+        ),
     }
 
 
@@ -88,7 +81,7 @@ def _cache_documents(scene_count: int = CLOSED_LOOP_MINIMUM_SCENES):
             }
         )
     manifest = {
-        "schema": "lunar-formal-training-cache/v5",
+        "schema": "lunar-formal-training-cache/v6",
         "cache_manifest_sha256": _sha("d"),
         "scenes": scenes,
         "exact_common_evaluation": {
@@ -115,13 +108,14 @@ def _passing_rows(cases) -> list[dict[str, object]]:
             "platform": platform,
             "exact": True,
             "mission_coverable_fraction_hex": float(0.97).hex(),
-            "reachable_mask_sha256": _sha("a"),
+            "physical_projection_sha256": _sha("a"),
             "coverable_mask_sha256": _sha("b"),
-            "reachability_algorithm_id": "lunar-primitive-reachability/test-v1",
-            "primitive_state_schema": "lunar-primitive-state/test-v1",
-            "primitive_set_sha256": _sha("2"),
-            "world_evidence_sha256": _sha("3"),
-            "reachability_graph_sha256": _sha("4"),
+            "physical_reachability_algorithm_id": (
+                "lunar-physical-reachability/test-v1"
+            ),
+            "physical_candidate_universe_sha256": _sha("2"),
+            "physical_snapshot_id": _sha("3"),
+            "oracle_opportunity_set_sha256": _sha("4"),
             "final_coverage_hex": float(0.95).hex(),
             "success_first_crossing": True,
             "terminal_reason": "SUCCESS",
@@ -130,11 +124,15 @@ def _passing_rows(cases) -> list[dict[str, object]]:
             "planner_failure_count": 0,
             "safety_violation_count": 0,
             "invalid_action_count": 0,
+            "platform_reference_mismatch_count": 0,
             "execution_failure_count": 0,
             "executed_step_count": 11,
-            "candidate_sequence_sha256": _sha("e"),
             "request_sequence_sha256": _sha("f"),
             "planner_sequence_sha256": _sha("1"),
+            "additional_corridor_margin_m": 2.0,
+            "search_domain_cell_count": 37,
+            "search_domain_sha256": _sha("5"),
+            "planner_reason_counts": {"OK": 11},
             "candidate_diagnostics": dict(CANDIDATE_DIAGNOSTICS),
         }
         for case in cases
@@ -211,7 +209,7 @@ def test_select_closed_loop_gate_cases_binds_schedule_cursor_and_coverability() 
     )
     assert all(case.scenario_schedule_id == "common/train/v1" for case in first)
     assert all(
-        binding.reachability_graph_sha256 == _sha("4")
+        binding.physical_projection_sha256 == _sha("a")
         for case in first
         for binding in case.coverability
     )
@@ -220,14 +218,12 @@ def test_select_closed_loop_gate_cases_binds_schedule_cursor_and_coverability() 
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     (
-        ("reachability_algorithm_id", "", "graph identity"),
-        ("primitive_state_schema", "", "graph identity"),
-        ("primitive_set_sha256", "invalid", "graph identity"),
-        ("world_evidence_sha256", "invalid", "graph identity"),
-        ("reachability_graph_sha256", "invalid", "graph identity"),
+        ("physical_reachability_algorithm_id", "", "physical identity"),
+        ("physical_projection_sha256", "invalid", "physical identity"),
+        ("coverable_detail_mask_sha256", "invalid", "physical identity"),
     ),
 )
-def test_select_closed_loop_gate_cases_rejects_incomplete_graph_identity(
+def test_select_closed_loop_gate_cases_rejects_incomplete_physical_identity(
     field: str,
     value: object,
     message: str,
@@ -236,6 +232,14 @@ def test_select_closed_loop_gate_cases_rejects_incomplete_graph_identity(
     manifest["scenes"][0]["platform_coverability"]["WHEELED"][field] = value
 
     with pytest.raises(ClosedLoopGateError, match=message):
+        select_closed_loop_gate_cases(manifest, scenario_document)
+
+
+def test_select_closed_loop_gate_cases_rejects_cache_v5() -> None:
+    manifest, scenario_document = _cache_documents()
+    manifest["schema"] = "lunar-formal-training-cache/v5"
+
+    with pytest.raises(ClosedLoopGateError, match="cache v6"):
         select_closed_loop_gate_cases(manifest, scenario_document)
 
 
@@ -266,6 +270,11 @@ def test_closed_loop_gate_report_is_canonical_and_repeat_comparable(
     assert first.payload["scene_platform_count"] == 3
     assert first.payload["successful_scene_platform_count"] == 3
     assert first.payload["natural_failure_scene_platform_count"] == 0
+    assert first.payload["terminal_reason_counts"] == {"SUCCESS": 3}
+    assert first.payload["planner_blocked_scene_platform_count"] == 0
+    assert first.payload["hard_failure_scene_platform_count"] == 0
+    assert first.payload["canceled_scene_platform_count"] == 0
+    assert first.payload["platform_reference_mismatch_count"] == 0
     assert first.payload["passed"] is True
     assert first.payload["closed_loop_evidence_sha256"] == second.payload[
         "closed_loop_evidence_sha256"
@@ -276,6 +285,43 @@ def test_closed_loop_gate_report_is_canonical_and_repeat_comparable(
     assert len(payload["closed_loop_report_sha256"]) == 64
 
 
+def test_closed_loop_gate_rejects_v3_report(tmp_path: pathlib.Path) -> None:
+    manifest, scenario_document = _cache_documents()
+    cases = select_closed_loop_gate_cases(manifest, scenario_document)
+    current = build_closed_loop_gate_report(
+        source_commit="9" * 40,
+        cache_manifest_sha256=_sha("d"),
+        cases=cases,
+        rows=_passing_rows(cases),
+        timings_seconds={},
+    )
+    legacy = ClosedLoopGateReport(
+        {
+            **current.payload,
+            "schema_version": "lunar-platform-coverable-closed-loop-gate/v3",
+        }
+    )
+
+    with pytest.raises(ClosedLoopGateError, match="schema"):
+        write_closed_loop_gate_report(tmp_path, legacy)
+
+
+def test_closed_loop_gate_rejects_primitive_bound_report() -> None:
+    manifest, scenario_document = _cache_documents()
+    cases = select_closed_loop_gate_cases(manifest, scenario_document)
+    rows = _passing_rows(cases)
+    rows[0]["primitive_set_sha256"] = _sha("9")
+
+    with pytest.raises(ClosedLoopGateError, match="primitive"):
+        build_closed_loop_gate_report(
+            source_commit="9" * 40,
+            cache_manifest_sha256=_sha("d"),
+            cases=cases,
+            rows=rows,
+            timings_seconds={},
+        )
+
+
 @pytest.mark.parametrize(
     ("terminal_reason", "oracle_opportunity_count"),
     (
@@ -283,7 +329,6 @@ def test_closed_loop_gate_report_is_canonical_and_repeat_comparable(
         ("VISITED_EXHAUSTED", 0),
         ("NO_TRANSIT_OPPORTUNITY", 0),
         ("ZERO_GAIN", 0),
-        ("PLANNER_REJECTED_ALL", 3),
     ),
 )
 def test_closed_loop_gate_accepts_auditable_failure_below_success_threshold(
@@ -325,19 +370,11 @@ def test_closed_loop_gate_accepts_auditable_failure_below_success_threshold(
         ("safety_violation_count", 1, "safety"),
         ("invalid_action_count", 1, "invalid action"),
         ("execution_failure_count", 1, "execution failure"),
-        (
-            "reachability_algorithm_id",
-            "lunar-primitive-reachability/other-v1",
-            "graph identity differs",
-        ),
-        (
-            "primitive_state_schema",
-            "lunar-primitive-state/other-v1",
-            "graph identity differs",
-        ),
-        ("primitive_set_sha256", _sha("5"), "graph identity differs"),
-        ("world_evidence_sha256", _sha("6"), "graph identity differs"),
-        ("reachability_graph_sha256", _sha("7"), "graph identity differs"),
+        ("physical_projection_sha256", _sha("6"), "physical identity differs"),
+        ("coverable_mask_sha256", _sha("7"), "physical identity differs"),
+        ("additional_corridor_margin_m", 1.5, "corridor margin"),
+        ("search_domain_cell_count", 0, "search domain"),
+        ("search_domain_sha256", "", "search domain"),
     ),
 )
 def test_closed_loop_gate_report_rejects_a_failed_scene_platform(
@@ -385,7 +422,7 @@ def test_closed_loop_gate_report_rejects_a_failed_scene_platform(
                 "success_first_crossing": False,
                 "terminal_reason": "HARD_FAILURE",
             },
-            "terminal reason",
+            "hard failure",
         ),
         (
             {
@@ -400,10 +437,23 @@ def test_closed_loop_gate_report_rejects_a_failed_scene_platform(
             {
                 "final_coverage_hex": float(0.31).hex(),
                 "success_first_crossing": False,
-                "terminal_reason": "PLANNER_REJECTED_ALL",
+                "terminal_reason": "PLANNER_BLOCKED_WITH_OPPORTUNITY",
+                "oracle_opportunity_count": 3,
                 "planner_failure_count": 11,
             },
-            "successful execution",
+            "planner blocked",
+        ),
+        (
+            {
+                "final_coverage_hex": float(0.31).hex(),
+                "success_first_crossing": False,
+                "terminal_reason": "CANCELED",
+            },
+            "canceled",
+        ),
+        (
+            {"platform_reference_mismatch_count": 1},
+            "reference mismatch",
         ),
     ),
 )

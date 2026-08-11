@@ -83,7 +83,6 @@ def test_parallel_adapter_preserves_terminal_audit_outside_policy_inputs() -> No
         reason=TerminalReason.ZERO_GAIN,
         oracle_opportunity_count=0,
         candidate_diagnostics=CandidateDiagnostics(
-            frontier_anchor_count=3,
             zero_gain_count=3,
         ),
         remaining_coverable_detail_cell_count=42,
@@ -426,6 +425,118 @@ def test_formal_calibrate_rejects_cache_before_cuda_or_artifact_creation(
 
     assert touched == []
     assert not artifact_root.exists()
+
+
+def test_formal_calibrate_validates_capability_before_config(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    touched: list[str] = []
+    monkeypatch.setattr(
+        cli_module,
+        "_formal_capability_preflight",
+        lambda _root: (_ for _ in ()).throw(
+            PreflightError("project formal capability is invalid")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "load_training_config",
+        lambda _path: touched.append("config"),
+    )
+
+    with pytest.raises(PreflightError, match="capability"):
+        cli_module.main(
+            [
+                "calibrate",
+                "--config",
+                str(tmp_path / "formal.yaml"),
+                "--artifact-root",
+                str(tmp_path / "run"),
+                "--cache-manifest",
+                str(tmp_path / "cache-manifest.json"),
+                "--sensor-performance-report",
+                str(tmp_path / "sensor.json"),
+            ]
+        )
+
+    assert touched == []
+
+
+@pytest.mark.parametrize(
+    "bundle",
+    (
+        FrozenCapabilityBundle(
+            schema="lunar-training-capability-freeze/v1",
+            platforms=(),
+            bundle_sha256="b" * 64,
+            formal_eligible=True,
+        ),
+        FrozenCapabilityBundle(
+            schema="lunar-training-capability-freeze/v1",
+            platforms=(),
+            bundle_sha256="b" * 64,
+            formal_eligible=False,
+        ),
+    ),
+)
+def test_formal_capability_preflight_rejects_incomplete_or_proxy_bundle(
+    bundle: FrozenCapabilityBundle,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "load_project_formal_capability",
+        lambda _root: bundle,
+    )
+
+    with pytest.raises(PreflightError, match="capability"):
+        cli_module._formal_capability_preflight(REPOSITORY_ROOT)
+
+
+def test_formal_resume_equivalence_rejects_checkpoint_v6() -> None:
+    def checkpoint(schema_version: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            schema_version=schema_version,
+            model_state={"value": 1},
+            optimizer_state={"value": 2},
+            rng_state={"value": 3},
+            environment_state={"value": 4},
+        )
+
+    legacy = checkpoint("lunar-ppo-checkpoint/v6")
+    with pytest.raises(PreflightError, match="checkpoint schema"):
+        cli_module._build_formal_resume_equivalence_evidence(
+            checkpoint_relative_path="resume-equivalence/update-1.pt",
+            checkpoint_sha256="a" * 64,
+            checkpoint_roundtrip=True,
+            rollout_exact=True,
+            uninterrupted=legacy,
+            resumed=legacy,
+            uninterrupted_observation_sha256="b" * 64,
+            resumed_observation_sha256="b" * 64,
+            uninterrupted_candidate_sha256="c" * 64,
+            resumed_candidate_sha256="c" * 64,
+            uninterrupted_request_sha256="d" * 64,
+            resumed_request_sha256="d" * 64,
+        )
+
+    current = checkpoint("lunar-ppo-checkpoint/v7")
+    evidence = cli_module._build_formal_resume_equivalence_evidence(
+        checkpoint_relative_path="resume-equivalence/update-1.pt",
+        checkpoint_sha256="a" * 64,
+        checkpoint_roundtrip=True,
+        rollout_exact=True,
+        uninterrupted=current,
+        resumed=current,
+        uninterrupted_observation_sha256="b" * 64,
+        resumed_observation_sha256="b" * 64,
+        uninterrupted_candidate_sha256="c" * 64,
+        resumed_candidate_sha256="c" * 64,
+        uninterrupted_request_sha256="d" * 64,
+        resumed_request_sha256="d" * 64,
+    )
+    assert evidence["checkpoint_schema"] == "lunar-ppo-checkpoint/v7"
 
 
 def test_cache_accepts_runtime_only_visibility_repair(

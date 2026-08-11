@@ -120,7 +120,7 @@ def _record(global_step: int) -> dict[str, object]:
 def test_build_training_update_record_preserves_learning_and_rollout_facts() -> None:
     record = _record(119)
 
-    assert record["schema_version"] == "lunar-training-update-metrics/v3"
+    assert record["schema_version"] == "lunar-training-update-metrics/v4"
     assert record["global_step"] == 119
     assert record["transition_count"] == 4
     assert record["reward"]["mean"] == pytest.approx(2.5)
@@ -300,7 +300,7 @@ def test_training_metrics_journal_appends_exact_resume_sequence(tmp_path) -> Non
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert [row["global_step"] for row in rows] == [119, 120]
     assert all(
-        row["schema_version"] == "lunar-training-update-metrics/v3"
+        row["schema_version"] == "lunar-training-update-metrics/v4"
         for row in rows
     )
 
