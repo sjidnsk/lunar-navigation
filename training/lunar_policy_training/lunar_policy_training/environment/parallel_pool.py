@@ -8,7 +8,7 @@ import os
 import queue
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import torch
 from lunar_planner_training_bridge import PlanningOutcome
@@ -781,25 +781,27 @@ class ParallelEnvPool:
             if (
                 kind != "resolved"
                 or worker_index in completed
-                or len(values) != 7
+                or len(values) != 8
                 or values[:2] != [buffer_index, policy_version]
                 or not isinstance(values[2], CandidateDiagnostics)
                 or type(values[3]) is not bool
+                or type(values[4]) is not bool
                 or (
-                    values[4] is not None
-                    and not isinstance(values[4], TerminalAudit)
+                    values[5] is not None
+                    and not isinstance(values[5], TerminalAudit)
                 )
-                or values[3] != (values[4] is not None)
-                or not isinstance(values[5], ObservationIdentity)
-                or type(values[6]) is not int
-                or values[6] < 0
+                or values[3] != (values[5] is not None)
+                or (values[4] and not values[3])
+                or not isinstance(values[6], ObservationIdentity)
+                or type(values[7]) is not int
+                or values[7] < 0
             ):
                 raise ParallelPoolError("worker resolution protocol failed")
             diagnostics[worker_index] = values[2]
-            no_candidate_terminations[worker_index] = values[3]
-            terminal_audits[worker_index] = values[4]
-            identities[worker_index] = values[5]
-            cursors[worker_index] = values[6]
+            no_candidate_terminations[worker_index] = values[4]
+            terminal_audits[worker_index] = values[5]
+            identities[worker_index] = values[6]
+            cursors[worker_index] = values[7]
             completed.add(worker_index)
         self._episode_cursors = tuple(
             cursors[index] for index in range(self.worker_count)
@@ -1210,10 +1212,14 @@ def _worker_main(
                     raise ParallelPoolError(
                         "boundary preparation must not create an action transition"
                     )
-                terminal_boundary = boundary.execution_state == "NO_CANDIDATES"
+                terminal_boundary = boundary.terminal_reason is not None
+                no_candidate_termination = (
+                    boundary.execution_state == "NO_CANDIDATES"
+                )
                 if boundary.execution_state not in {
                     "DECISION_READY",
                     "NO_CANDIDATES",
+                    "TERMINATED",
                 }:
                     raise ParallelPoolError(
                         "worker returned invalid decision-boundary state"
@@ -1258,6 +1264,7 @@ def _worker_main(
                         policy_version,
                         candidate_diagnostics,
                         terminal_boundary,
+                        no_candidate_termination,
                         terminal_audit,
                         current_observation.observation_identities[0],
                         episode_cursor,
@@ -1295,12 +1302,6 @@ def _worker_main(
                 reward = reward_fn(transition)
                 policy_decisions_consumed = boundary.policy_decisions_consumed
                 current_diagnostics = _current_candidate_diagnostics(worker)
-                candidate_diagnostics = replace(
-                    candidate_diagnostics,
-                    planner_rejected_count=(
-                        current_diagnostics.planner_rejected_count
-                    ),
-                )
                 terminal_audit = _terminal_audit(
                     terminated=transition.terminated,
                     terminal_reason=transition.terminal_reason,
@@ -1310,7 +1311,11 @@ def _worker_main(
                     remaining_coverable_detail_cell_count=(
                         transition.remaining_coverable_detail_cell_count
                     ),
-                    candidate_diagnostics=candidate_diagnostics,
+                    candidate_diagnostics=(
+                        current_diagnostics
+                        if transition.terminated
+                        else candidate_diagnostics
+                    ),
                 )
             else:
                 raise ParallelPoolError(

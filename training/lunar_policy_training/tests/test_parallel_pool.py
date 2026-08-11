@@ -130,6 +130,27 @@ def _observation(worker_index: int, platform_type: str) -> PolicyBatch:
     )
 
 
+def _diagnostics(
+    *,
+    universe: int,
+    selected: int,
+    available: int,
+    failed: int,
+    reserve: int = 0,
+    visited: int = 0,
+) -> CandidateDiagnostics:
+    return CandidateDiagnostics(
+        physical_snapshot_id="a" * 64,
+        physical_reachability_algorithm_id="test/reachability-v1",
+        physical_candidate_universe_count=universe,
+        selected_policy_candidate_count=selected,
+        available_candidate_count=available,
+        untried_reserve_count=reserve,
+        planner_failed_current_snapshot_count=failed,
+        visited_excluded_count=visited,
+    )
+
+
 def _real_v3_worker_factory(
     worker_index: int, platform_type: str
 ) -> ParallelEnvironmentWorker:
@@ -139,7 +160,12 @@ def _real_v3_worker_factory(
 
     def build_request(action, identity):
         request.state_time.nanoseconds_since_epoch = identity.state_time_ns
-        return PreparedPlanRequest(request=request, identity=identity)
+        return PreparedPlanRequest(
+            request=request,
+            identity=identity,
+            candidate_id="b" * 64,
+            physical_snapshot_id="a" * 64,
+        )
 
     environment = create_v3_environment(
         platform_type=platform_type,
@@ -254,7 +280,9 @@ def _diagnostic_terminal_success_worker_factory(
     return _DiagnosticParallelWorker(
         environment=_TerminalSuccessEnvironment(observation),
         initial_observation=observation,
-        diagnostics=CandidateDiagnostics(9, 4, 3),
+        diagnostics=_diagnostics(
+            universe=9, selected=4, available=7, failed=2, reserve=3
+        ),
     )
 
 
@@ -272,9 +300,13 @@ class _NoActionThenReadyFactory:
         if selected and self.calls == 1:
             observation.candidate_mask.zero_()
         diagnostics = (
-            CandidateDiagnostics(5, 5, 0)
+            _diagnostics(
+                universe=5, selected=0, available=0, failed=0, visited=5
+            )
             if not bool(observation.candidate_mask.any())
-            else CandidateDiagnostics(5, 2, 3)
+            else _diagnostics(
+                universe=5, selected=2, available=5, failed=0, reserve=3
+            )
         )
         return _DiagnosticParallelWorker(
             environment=_PreparationOnlyEnvironment(observation),
@@ -454,16 +486,19 @@ def test_preserved_no_action_terminal_can_be_explicitly_reset(
     assert prepared_consumed == [0]
     assert prepared_outcomes == ()
     assert prepared_events == ()
-    assert prepared_diagnostics == (CandidateDiagnostics(5, 5, 0),)
+    assert prepared_diagnostics == (
+        _diagnostics(
+            universe=5, selected=0, available=0, failed=0, visited=5
+        ),
+    )
     assert prepared_no_candidates == (True,)
     assert len(prepared.terminal_audits) == 1
     assert prepared.terminal_audits[0] is not None
     assert prepared.terminal_audits[0].reason is TerminalReason.VISITED_EXHAUSTED
     assert prepared.terminal_audits[0].oracle_opportunity_count == 0
     assert prepared.terminal_audits[0].remaining_coverable_detail_cell_count == 77
-    assert prepared.terminal_audits[0].candidate_diagnostics == CandidateDiagnostics(
-        frontier_anchor_count=5,
-        visited_excluded_count=5,
+    assert prepared.terminal_audits[0].candidate_diagnostics == _diagnostics(
+        universe=5, selected=0, available=0, failed=0, visited=5
     )
     assert reset_dones == [False]
     assert actionable.dones.tolist() == [False]
@@ -482,7 +517,11 @@ def test_step_reports_candidate_diagnostics_from_selected_observation() -> None:
         pool.reset()
         stepped = pool.step(_actions(1), policy_version=43)
 
-    assert stepped.candidate_diagnostics == (CandidateDiagnostics(9, 4, 3),)
+    assert stepped.candidate_diagnostics == (
+        _diagnostics(
+            universe=9, selected=4, available=7, failed=2, reserve=3
+        ),
+    )
     assert stepped.no_candidate_terminations == ()
     assert len(stepped.terminal_audits) == 1
     assert stepped.terminal_audits[0] is not None

@@ -19,17 +19,30 @@ from lunar_policy_training.training_metrics import (
 )
 
 
-_ZERO_PRIMITIVE_DIAGNOSTICS = {
-    "primitive_state_count": 0,
-    "forward_reachable_state_count": 0,
-    "returnable_state_count": 0,
-    "recoverable_observation_state_count": 0,
-    "frontier_hint_count": 0,
-    "positive_gain_state_count": 0,
-    "transit_state_count": 0,
-    "invalidated_edge_count": 0,
-    "revalidated_edge_count": 0,
-}
+def _diagnostics(
+    *,
+    snapshot: str,
+    universe: int,
+    selected: int,
+    available: int,
+    failed: int,
+    reserve: int = 0,
+    zero_gain: int = 0,
+    visited: int = 0,
+    unreachable: int = 0,
+) -> CandidateDiagnostics:
+    return CandidateDiagnostics(
+        physical_snapshot_id=snapshot * 64,
+        physical_reachability_algorithm_id="test/reachability-v1",
+        physical_candidate_universe_count=universe,
+        selected_policy_candidate_count=selected,
+        available_candidate_count=available,
+        untried_reserve_count=reserve,
+        planner_failed_current_snapshot_count=failed,
+        zero_gain_count=zero_gain,
+        visited_excluded_count=visited,
+        physical_unreachable_count=unreachable,
+    )
 
 
 def _ppo_metrics() -> PPOUpdateMetrics:
@@ -69,26 +82,10 @@ def _record(global_step: int) -> dict[str, object]:
             PlanningOutcome.INVALID_REQUEST,
         ),
         candidate_diagnostics=(
-            CandidateDiagnostics(
-                frontier_anchor_count=5,
-                platform_unreachable_count=1,
-                emitted_count=4,
-            ),
-            CandidateDiagnostics(
-                frontier_anchor_count=6,
-                platform_unreachable_count=2,
-                emitted_count=4,
-            ),
-            CandidateDiagnostics(
-                frontier_anchor_count=7,
-                platform_unreachable_count=3,
-                emitted_count=4,
-            ),
-            CandidateDiagnostics(
-                frontier_anchor_count=8,
-                platform_unreachable_count=4,
-                emitted_count=4,
-            ),
+            _diagnostics(snapshot="1", universe=5, selected=4, available=4, failed=1, unreachable=1),
+            _diagnostics(snapshot="2", universe=6, selected=4, available=4, failed=2, unreachable=2),
+            _diagnostics(snapshot="3", universe=7, selected=4, available=4, failed=3, unreachable=3),
+            _diagnostics(snapshot="4", universe=8, selected=4, available=4, failed=4, unreachable=4),
         ),
         no_candidate_terminations=(False, True, False, False),
         terminal_audits=(
@@ -96,20 +93,18 @@ def _record(global_step: int) -> dict[str, object]:
             TerminalAudit(
                 reason=TerminalReason.HARD_FAILURE,
                 oracle_opportunity_count=0,
-                candidate_diagnostics=CandidateDiagnostics(
-                    frontier_anchor_count=6,
-                    platform_unreachable_count=2,
-                    emitted_count=4,
+                candidate_diagnostics=_diagnostics(
+                    snapshot="2", universe=6, selected=4, available=4,
+                    failed=2, unreachable=2,
                 ),
                 remaining_coverable_detail_cell_count=90,
             ),
             TerminalAudit(
                 reason=TerminalReason.SUCCESS,
                 oracle_opportunity_count=0,
-                candidate_diagnostics=CandidateDiagnostics(
-                    frontier_anchor_count=7,
-                    platform_unreachable_count=3,
-                    emitted_count=4,
+                candidate_diagnostics=_diagnostics(
+                    snapshot="3", universe=7, selected=4, available=4,
+                    failed=3, unreachable=3,
                 ),
                 remaining_coverable_detail_cell_count=0,
             ),
@@ -155,16 +150,23 @@ def test_build_training_update_record_preserves_learning_and_rollout_facts() -> 
     }
     assert record["candidate"]["by_platform"] == {
         "LEGGED": {
-            "frontier_anchor_count": 26,
-            "visited_excluded_count": 0,
-            "static_infeasible_count": 0,
-            "platform_unreachable_count": 10,
+            "physical_candidate_universe_count": 26,
+            "selected_policy_candidate_count": 16,
+            "available_candidate_count": 16,
+            "untried_reserve_count": 0,
+            "planner_failed_current_snapshot_count": 10,
             "zero_gain_count": 0,
-            "emitted_count": 16,
-            "planner_rejected_count": 0,
-            **_ZERO_PRIMITIVE_DIAGNOSTICS,
+            "visited_excluded_count": 0,
+            "physical_unreachable_count": 10,
             "no_candidate_termination_count": 1,
-            "planner_rejected_exhaustion_count": 0,
+            "physical_exhaustion_count": 0,
+            "planner_blocked_count": 0,
+        }
+    }
+    assert record["candidate"]["identity_by_platform"] == {
+        "LEGGED": {
+            "physical_snapshot_ids": [character * 64 for character in "1234"],
+            "physical_reachability_algorithm_ids": ["test/reachability-v1"],
         }
     }
     assert record["terminal"] == {
@@ -174,14 +176,20 @@ def test_build_training_update_record_preserves_learning_and_rollout_facts() -> 
         },
         "candidate_diagnostics_by_platform": {
             "LEGGED": {
-                "frontier_anchor_count": 13,
-                "visited_excluded_count": 0,
-                "static_infeasible_count": 0,
-                "platform_unreachable_count": 5,
+                "physical_candidate_universe_count": 13,
+                "selected_policy_candidate_count": 8,
+                "available_candidate_count": 8,
+                "untried_reserve_count": 0,
+                "planner_failed_current_snapshot_count": 5,
                 "zero_gain_count": 0,
-                "emitted_count": 8,
-                "planner_rejected_count": 0,
-                **_ZERO_PRIMITIVE_DIAGNOSTICS,
+                "visited_excluded_count": 0,
+                "physical_unreachable_count": 5,
+            }
+        },
+        "candidate_identity_by_platform": {
+            "LEGGED": {
+                "physical_snapshot_ids": ["2" * 64, "3" * 64],
+                "physical_reachability_algorithm_ids": ["test/reachability-v1"],
             }
         },
         "oracle_opportunity_count": 0,
@@ -202,6 +210,14 @@ def test_build_training_update_record_preserves_learning_and_rollout_facts() -> 
 
 
 def test_candidate_and_planner_diagnostics_preserve_worker_platform_alignment() -> None:
+    wheeled = _diagnostics(
+        snapshot="a", universe=3, selected=2, available=2, failed=1,
+        unreachable=1,
+    )
+    blocked = _diagnostics(
+        snapshot="b", universe=7, selected=0, available=0, failed=7,
+        unreachable=4,
+    )
     record = build_training_update_record(
         global_step=1,
         timestamp_utc="2026-08-09T02:00:00Z",
@@ -218,55 +234,14 @@ def test_candidate_and_planner_diagnostics_preserve_worker_platform_alignment() 
             PlanningOutcome.NEW_REFERENCE_AVAILABLE,
             PlanningOutcome.NO_KNOWN_SAFE_ROUTE,
         ),
-        candidate_diagnostics=(
-            CandidateDiagnostics(
-                frontier_anchor_count=3,
-                platform_unreachable_count=1,
-                emitted_count=2,
-                primitive_state_count=5,
-                forward_reachable_state_count=4,
-                returnable_state_count=4,
-                recoverable_observation_state_count=3,
-                frontier_hint_count=2,
-                positive_gain_state_count=2,
-                invalidated_edge_count=1,
-                revalidated_edge_count=8,
-            ),
-            CandidateDiagnostics(
-                frontier_anchor_count=11,
-                platform_unreachable_count=4,
-                emitted_count=7,
-                planner_rejected_count=7,
-                primitive_state_count=20,
-                forward_reachable_state_count=15,
-                returnable_state_count=12,
-                recoverable_observation_state_count=11,
-                frontier_hint_count=5,
-                positive_gain_state_count=7,
-                invalidated_edge_count=3,
-                revalidated_edge_count=30,
-            ),
-        ),
+        candidate_diagnostics=(wheeled, blocked),
         no_candidate_terminations=(False, True),
         terminal_audits=(
             None,
             TerminalAudit(
-                reason=TerminalReason.PLANNER_REJECTED_ALL,
-                oracle_opportunity_count=0,
-                candidate_diagnostics=CandidateDiagnostics(
-                    frontier_anchor_count=11,
-                    platform_unreachable_count=4,
-                    emitted_count=7,
-                    planner_rejected_count=7,
-                    primitive_state_count=20,
-                    forward_reachable_state_count=15,
-                    returnable_state_count=12,
-                    recoverable_observation_state_count=11,
-                    frontier_hint_count=5,
-                    positive_gain_state_count=7,
-                    invalidated_edge_count=3,
-                    revalidated_edge_count=30,
-                ),
+                reason=TerminalReason.PLANNER_BLOCKED_WITH_OPPORTUNITY,
+                oracle_opportunity_count=146,
+                candidate_diagnostics=blocked,
                 remaining_coverable_detail_cell_count=123,
             ),
         ),
@@ -277,49 +252,37 @@ def test_candidate_and_planner_diagnostics_preserve_worker_platform_alignment() 
     )
 
     assert record["candidate"]["by_platform"]["WHEELED"] == {
-        "frontier_anchor_count": 3,
-        "visited_excluded_count": 0,
-        "static_infeasible_count": 0,
-        "platform_unreachable_count": 1,
+        "physical_candidate_universe_count": 3,
+        "selected_policy_candidate_count": 2,
+        "available_candidate_count": 2,
+        "untried_reserve_count": 0,
+        "planner_failed_current_snapshot_count": 1,
         "zero_gain_count": 0,
-        "emitted_count": 2,
-        "planner_rejected_count": 0,
-        "primitive_state_count": 5,
-        "forward_reachable_state_count": 4,
-        "returnable_state_count": 4,
-        "recoverable_observation_state_count": 3,
-        "frontier_hint_count": 2,
-        "positive_gain_state_count": 2,
-        "transit_state_count": 0,
-        "invalidated_edge_count": 1,
-        "revalidated_edge_count": 8,
+        "visited_excluded_count": 0,
+        "physical_unreachable_count": 1,
         "no_candidate_termination_count": 0,
-        "planner_rejected_exhaustion_count": 0,
+        "physical_exhaustion_count": 0,
+        "planner_blocked_count": 0,
     }
     assert record["candidate"]["by_platform"]["HOPPER"] == {
-        "frontier_anchor_count": 11,
-        "visited_excluded_count": 0,
-        "static_infeasible_count": 0,
-        "platform_unreachable_count": 4,
+        "physical_candidate_universe_count": 7,
+        "selected_policy_candidate_count": 0,
+        "available_candidate_count": 0,
+        "untried_reserve_count": 0,
+        "planner_failed_current_snapshot_count": 7,
         "zero_gain_count": 0,
-        "emitted_count": 7,
-        "planner_rejected_count": 7,
-        "primitive_state_count": 20,
-        "forward_reachable_state_count": 15,
-        "returnable_state_count": 12,
-        "recoverable_observation_state_count": 11,
-        "frontier_hint_count": 5,
-        "positive_gain_state_count": 7,
-        "transit_state_count": 0,
-        "invalidated_edge_count": 3,
-        "revalidated_edge_count": 30,
+        "visited_excluded_count": 0,
+        "physical_unreachable_count": 4,
         "no_candidate_termination_count": 1,
-        "planner_rejected_exhaustion_count": 1,
+        "physical_exhaustion_count": 0,
+        "planner_blocked_count": 1,
     }
     assert record["terminal"]["reason_counts_by_platform"] == {
-        "HOPPER": {"PLANNER_REJECTED_ALL": 1},
+        "HOPPER": {"PLANNER_BLOCKED_WITH_OPPORTUNITY": 1},
         "WHEELED": {},
     }
+    assert record["terminal"]["oracle_opportunity_count"] == 146
+    assert record["terminal"]["oracle_contradiction_count"] == 0
     assert record["planner"]["outcome_counts_by_platform"] == {
         "HOPPER": {"NO_KNOWN_SAFE_ROUTE": 1},
         "WHEELED": {"NEW_REFERENCE_AVAILABLE": 1},
@@ -367,7 +330,7 @@ def test_training_metrics_journal_rejects_nonfinite_metric(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("bad_value", (None, -1))
-def test_training_metrics_journal_rejects_missing_or_negative_graph_diagnostic(
+def test_training_metrics_journal_rejects_missing_or_negative_physical_diagnostic(
     tmp_path, bad_value
 ) -> None:
     journal = TrainingMetricsJournal(
@@ -376,9 +339,9 @@ def test_training_metrics_journal_rejects_missing_or_negative_graph_diagnostic(
     record = _record(119)
     diagnostics = record["candidate"]["by_platform"]["LEGGED"]
     if bad_value is None:
-        diagnostics.pop("primitive_state_count")
+        diagnostics.pop("physical_candidate_universe_count")
     else:
-        diagnostics["primitive_state_count"] = bad_value
+        diagnostics["physical_candidate_universe_count"] = bad_value
 
     with pytest.raises(TrainingMetricsError, match="diagnostics"):
         journal.append(record)

@@ -18,6 +18,7 @@ from lunar_planner_training_bridge import (
 )
 
 from ..policy.observation import ObservationIdentity, PolicyBatch
+from ..training_semantics import formal_success_first_crossing
 from .candidate_builder import CandidateDiagnostics
 from .frontier_oracle import FrontierOracleResult
 from .macro_step import (
@@ -85,6 +86,44 @@ _EXECUTION_EVENT_COUNT_FIELDS = (
 
 class EnvironmentInvariantError(RuntimeError):
     """A planner/environment mismatch that invalidates the current rollout."""
+
+
+def _audit_candidate_boundary(
+    diagnostics: CandidateDiagnostics,
+    oracle: FrontierOracleResult,
+) -> TerminalReason | None:
+    """Classify one observed production/oracle boundary without truth input."""
+    if not isinstance(diagnostics, CandidateDiagnostics):
+        raise EnvironmentInvariantError("candidate diagnostics are invalid")
+    if not isinstance(oracle, FrontierOracleResult):
+        raise EnvironmentInvariantError("candidate oracle data are invalid")
+    universe = diagnostics.physical_candidate_universe_count
+    available = diagnostics.available_candidate_count
+    reserve = diagnostics.untried_reserve_count
+    failed = diagnostics.planner_failed_current_snapshot_count
+    oracle_count = oracle.opportunity_count
+    if universe == 0:
+        if oracle_count != 0:
+            raise EnvironmentInvariantError("CANDIDATE_ORACLE_MISMATCH")
+        if diagnostics.visited_excluded_count > 0:
+            return TerminalReason.VISITED_EXHAUSTED
+        if diagnostics.zero_gain_count > 0:
+            return TerminalReason.ZERO_GAIN
+        if diagnostics.physical_unreachable_count > 0:
+            return TerminalReason.NO_RECOVERABLE_OBSERVATION_STATE
+        return TerminalReason.NO_TRANSIT_OPPORTUNITY
+    if oracle_count == 0:
+        raise EnvironmentInvariantError("CANDIDATE_ORACLE_MISMATCH")
+    blocked = (
+        failed == universe
+        and reserve == 0
+        and available == 0
+    )
+    if blocked:
+        return TerminalReason.PLANNER_BLOCKED_WITH_OPPORTUNITY
+    if available > 0:
+        return None
+    raise EnvironmentInvariantError("candidate availability is inconsistent")
 
 
 class PlannerBridgeProtocol(Protocol):
@@ -300,7 +339,6 @@ class V3ExplorationEnvironment:
             if not require_identity_bound_request:
                 raise ValueError("ground options require identity-bound requests")
         self._observation = _clone_observation(initial_observation)
-        self._rejected_candidates: set[int] = set()
         self._observation_provider = observation_provider
         self._observation_boundary_controller = observation_boundary_controller
         self._planning_failure_refresher = planning_failure_refresher
@@ -325,6 +363,15 @@ class V3ExplorationEnvironment:
         )
         self._rollout_discarded = False
         self._training_stopped = False
+        initial_ratio = (
+            observation_boundary_controller._mission_observed_ratio()
+            if require_sensor_closed_loop
+            else 0.0
+        )
+        self._initial_success_pending = formal_success_first_crossing(
+            0.0, initial_ratio
+        )
+        self._episode_terminated = False
         self._committed_output: PlannerOutput | None = None
         self._execution_state = (
             "GROUND_HOLD" if platform_type == "HOPPER" else "DECISION_BOUNDARY"
@@ -376,14 +423,12 @@ class V3ExplorationEnvironment:
             )
         return {
             "execution_state": self._execution_state,
-            "rejected_candidate_indices": sorted(self._rejected_candidates),
         }
 
     def restore_stable_state(
         self,
         *,
         execution_state: str,
-        rejected_candidate_indices: tuple[int, ...],
     ) -> None:
         """Reapply non-reveal state after deterministic observation replay."""
         if execution_state not in {
@@ -399,30 +444,7 @@ class V3ExplorationEnvironment:
             raise EnvironmentInvariantError(
                 "restored execution state differs from observation identity"
             )
-        if (
-            not isinstance(rejected_candidate_indices, tuple)
-            or tuple(sorted(set(rejected_candidate_indices)))
-            != rejected_candidate_indices
-            or any(
-                type(index) is not int
-                or index < 0
-                or index >= self._observation.candidate_mask.shape[1]
-                for index in rejected_candidate_indices
-            )
-        ):
-            raise EnvironmentInvariantError(
-                "restored rejected candidate indices are invalid"
-            )
-        restored = _clone_observation(self._observation)
-        for index in rejected_candidate_indices:
-            if not bool(restored.candidate_mask[0, index].item()):
-                raise EnvironmentInvariantError(
-                    "restored rejected candidate was not active before masking"
-                )
-            restored.candidate_mask[0, index] = False
-        self._rejected_candidates = set(rejected_candidate_indices)
         self._execution_state = execution_state
-        self._observation = restored
 
     def step(
         self,
@@ -430,6 +452,8 @@ class V3ExplorationEnvironment:
         *,
         expected_identity: ObservationIdentity | None = None,
     ) -> PlannerTransition:
+        if self._episode_terminated:
+            raise RuntimeError("terminated episode requires reset")
         if self._execution_state in {"JUMP_COMMITTED", "IN_FLIGHT"}:
             self._fail_closed("committed hopper cannot accept a new policy action")
         request, prepared = self._build_plan_request(action, expected_identity)
@@ -506,6 +530,8 @@ class V3ExplorationEnvironment:
     def advance_until_decision_boundary(
         self, policy: Callable[[PolicyBatch], PolicyAction]
     ) -> DecisionBoundaryResult:
+        if self._episode_terminated:
+            raise RuntimeError("terminated episode requires reset")
         if self._execution_state in {"JUMP_COMMITTED", "IN_FLIGHT"}:
             feedback = self._advance_committed_hop_execution()
             output = self._committed_output
@@ -571,25 +597,21 @@ class V3ExplorationEnvironment:
             "IN_FLIGHT",
         }:
             transition = self._complete_committed_hop_transition(transition)
-        if (
-            not transition.terminated
-            and not transition.success_first_crossing
-            and not transition.hard_safety_violation
-            and not bool(
-                transition.next_observation.candidate_mask.any().item()
-            )
-        ):
-            reason, oracle_count, remaining = self._audit_exhaustion()
-            transition = replace(
-                transition,
-                episode_ended_without_success=True,
-                terminated=True,
-                terminal_reason=reason,
-                oracle_opportunity_count=oracle_count,
-                remaining_coverable_detail_cell_count=remaining,
-            )
-        elif transition.terminated and transition.terminal_reason is None:
+        if transition.terminated and transition.terminal_reason is None:
             transition = self._with_flag_terminal_reason(transition)
+        elif not transition.terminated:
+            reason, oracle_count, remaining = self._audit_current_candidate_boundary()
+            if reason is not None:
+                transition = replace(
+                    transition,
+                    episode_ended_without_success=True,
+                    terminated=True,
+                    terminal_reason=reason,
+                    oracle_opportunity_count=oracle_count,
+                    remaining_coverable_detail_cell_count=remaining,
+                )
+        if transition.terminated:
+            self._episode_terminated = True
         return DecisionBoundaryResult(
             execution_state=self._execution_state,
             transition=transition,
@@ -603,17 +625,27 @@ class V3ExplorationEnvironment:
 
     def refresh_decision_boundary(self) -> DecisionBoundaryResult:
         """Refresh producer input and classify a ground boundary without policy."""
+        if self._episode_terminated:
+            raise RuntimeError("terminated episode requires reset")
+        if self._initial_success_pending:
+            self._initial_success_pending = False
+            self._episode_terminated = True
+            return DecisionBoundaryResult(
+                execution_state="TERMINATED",
+                terminal_reason=TerminalReason.SUCCESS,
+                remaining_coverable_detail_cell_count=(
+                    self._remaining_coverable_count()
+                ),
+            )
         if self._execution_state in {"JUMP_COMMITTED", "IN_FLIGHT"}:
             self._fail_closed(
                 "committed hopper requires execution feedback before refresh"
             )
         self._refresh_ground_observation()
-        if not bool(self._observation.candidate_mask.any().item()):
-            return self._no_candidate_boundary()
-        return DecisionBoundaryResult(execution_state="DECISION_READY")
-
-    def _no_candidate_boundary(self) -> DecisionBoundaryResult:
-        reason, oracle_count, remaining = self._audit_exhaustion()
+        reason, oracle_count, remaining = self._audit_current_candidate_boundary()
+        if reason is None:
+            return DecisionBoundaryResult(execution_state="DECISION_READY")
+        self._episode_terminated = True
         return DecisionBoundaryResult(
             execution_state="NO_CANDIDATES",
             terminal_reason=reason,
@@ -621,47 +653,40 @@ class V3ExplorationEnvironment:
             remaining_coverable_detail_cell_count=remaining,
         )
 
-    def _audit_exhaustion(self) -> tuple[TerminalReason, int, int | None]:
-        diagnostics = self.current_candidate_diagnostics()
-        planner_rejected_all = (
-            diagnostics.physical_candidate_universe_count > 0
-            and diagnostics.planner_failed_current_snapshot_count
-            == diagnostics.physical_candidate_universe_count
+    def _no_candidate_boundary(self) -> DecisionBoundaryResult:
+        reason, oracle_count, remaining = self._audit_current_candidate_boundary()
+        if reason is None:
+            self._fail_closed("candidate availability is inconsistent")
+        self._episode_terminated = True
+        return DecisionBoundaryResult(
+            execution_state="NO_CANDIDATES",
+            terminal_reason=reason,
+            oracle_opportunity_count=oracle_count,
+            remaining_coverable_detail_cell_count=remaining,
         )
+
+    def _audit_current_candidate_boundary(
+        self,
+    ) -> tuple[TerminalReason | None, int, int | None]:
+        diagnostics = self.current_candidate_diagnostics()
         if self._frontier_oracle is None:
+            if bool(self._observation.candidate_mask.any().item()):
+                return None, 0, None
             oracle = FrontierOracleResult(0, 0, 0, 0)
         else:
             oracle = self._frontier_oracle()
-            if not isinstance(oracle, FrontierOracleResult):
-                self._fail_closed("frontier oracle returned invalid data")
-        if (
-            diagnostics.physical_candidate_universe_count == 0
-            and oracle.opportunity_count > 0
-        ):
-            self._fail_closed(
-                "production candidates are empty while frontier oracle found opportunities"
-            )
-        if (
-            diagnostics.physical_candidate_universe_count > 0
-            and diagnostics.selected_policy_candidate_count == 0
-            and diagnostics.available_candidate_count > 0
-            and not planner_rejected_all
-        ):
-            self._fail_closed("terminal candidate accounting is incomplete")
-        if planner_rejected_all:
-            reason = TerminalReason.PLANNER_REJECTED_ALL
-        elif diagnostics.zero_gain_count > 0:
-            reason = TerminalReason.ZERO_GAIN
-        elif diagnostics.visited_excluded_count > 0:
-            reason = TerminalReason.VISITED_EXHAUSTED
-        elif (
-            diagnostics.physical_unreachable_count > 0
-            or diagnostics.physical_candidate_universe_count == 0
-        ):
-            reason = TerminalReason.NO_RECOVERABLE_OBSERVATION_STATE
-        else:
-            reason = TerminalReason.NO_TRANSIT_OPPORTUNITY
-        return reason, oracle.opportunity_count, self._remaining_coverable_count()
+        try:
+            reason = _audit_candidate_boundary(diagnostics, oracle)
+        except EnvironmentInvariantError as error:
+            self._fail_closed(str(error))
+        selected = int(self._observation.candidate_mask.sum().item())
+        if selected != diagnostics.selected_policy_candidate_count:
+            self._fail_closed("candidate availability differs from observation")
+        return (
+            reason,
+            oracle.opportunity_count,
+            self._remaining_coverable_count() if reason is not None else None,
+        )
 
     def _remaining_coverable_count(self) -> int | None:
         provider = self._remaining_coverable_detail_cell_count_provider
@@ -904,10 +929,6 @@ class V3ExplorationEnvironment:
             self._fail_closed(
                 "V3 observation requires one producer-owned observation identity"
             )
-        current_identity = self._observation.observation_identities[0]
-        next_identity = observation.observation_identities[0]
-        if next_identity != current_identity:
-            self._rejected_candidates.clear()
         self._observation = _clone_observation(observation)
         return self._observation
 

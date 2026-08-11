@@ -41,11 +41,25 @@ from lunar_policy_training.environment.v3_environment import (  # noqa: E402
 )
 from lunar_policy_training.environment.observation_boundary import (  # noqa: E402
     BoundaryObservationResult,
+    ObservationBoundaryController,
 )
 from lunar_policy_training.policy.observation import (  # noqa: E402
     ObservationIdentity,
     PolicyBatch,
 )
+
+
+def test_terminal_reason_contract_uses_physical_opportunity_matrix() -> None:
+    assert {reason.value for reason in TerminalReason} == {
+        "SUCCESS",
+        "NO_RECOVERABLE_OBSERVATION_STATE",
+        "VISITED_EXHAUSTED",
+        "ZERO_GAIN",
+        "NO_TRANSIT_OPPORTUNITY",
+        "PLANNER_BLOCKED_WITH_OPPORTUNITY",
+        "HARD_FAILURE",
+        "CANCELED",
+    }
 
 
 def _identity(**changes: object) -> ObservationIdentity:
@@ -97,6 +111,23 @@ def _observation(
         platform_context=platform_context,
         observation_identities=(identity or _identity(),),
     )
+
+
+def _candidate_diagnostics(**changes: object) -> CandidateDiagnostics:
+    values = {
+        "physical_snapshot_id": "f" * 64,
+        "physical_reachability_algorithm_id": "test/reachability",
+        "physical_candidate_universe_count": 0,
+        "selected_policy_candidate_count": 0,
+        "available_candidate_count": 0,
+        "untried_reserve_count": 0,
+        "planner_failed_current_snapshot_count": 0,
+        "zero_gain_count": 0,
+        "visited_excluded_count": 0,
+        "physical_unreachable_count": 0,
+    }
+    values.update(changes)
+    return CandidateDiagnostics(**values)
 
 
 class _Bridge:
@@ -723,83 +754,153 @@ def test_all_false_candidates_bypass_policy_without_fallback() -> None:
     assert result.policy_decisions_consumed == 0
 
 
-def test_empty_production_candidates_with_oracle_opportunity_fail_closed() -> None:
+@pytest.mark.parametrize(
+    ("diagnostics", "oracle_count", "candidate_mask", "expected_reason"),
+    (
+        (
+            _candidate_diagnostics(
+                physical_candidate_universe_count=2,
+                selected_policy_candidate_count=1,
+                available_candidate_count=1,
+                planner_failed_current_snapshot_count=1,
+            ),
+            2,
+            (True, False),
+            None,
+        ),
+        (
+            _candidate_diagnostics(
+                physical_candidate_universe_count=3,
+                selected_policy_candidate_count=1,
+                available_candidate_count=3,
+                untried_reserve_count=2,
+            ),
+            3,
+            (True, False),
+            None,
+        ),
+        (
+            _candidate_diagnostics(physical_unreachable_count=4),
+            0,
+            (False, False),
+            "NO_RECOVERABLE_OBSERVATION_STATE",
+        ),
+        (
+            _candidate_diagnostics(zero_gain_count=2),
+            0,
+            (False, False),
+            "ZERO_GAIN",
+        ),
+        (
+            _candidate_diagnostics(
+                physical_snapshot_id="", visited_excluded_count=5
+            ),
+            0,
+            (False, False),
+            "VISITED_EXHAUSTED",
+        ),
+        (
+            _candidate_diagnostics(),
+            0,
+            (False, False),
+            "NO_TRANSIT_OPPORTUNITY",
+        ),
+        (
+            _candidate_diagnostics(
+                physical_candidate_universe_count=146,
+                planner_failed_current_snapshot_count=146,
+            ),
+            146,
+            (False, False),
+            "PLANNER_BLOCKED_WITH_OPPORTUNITY",
+        ),
+    ),
+)
+def test_candidate_boundary_matrix_continues_or_terminates_from_observed_facts(
+    diagnostics: CandidateDiagnostics,
+    oracle_count: int,
+    candidate_mask: tuple[bool, ...],
+    expected_reason: str | None,
+) -> None:
     env = V3ExplorationEnvironment(
         platform_type="WHEELED",
         bridge=_Bridge(PlannerOutput()),
         request_builder=lambda action: action,
-        initial_observation=_observation(candidate_mask=(False, False)),
-        candidate_diagnostics_provider=CandidateDiagnostics,
+        initial_observation=_observation(candidate_mask=candidate_mask),
+        candidate_diagnostics_provider=lambda: diagnostics,
         frontier_oracle=lambda: FrontierOracleResult(
-            frontier_anchor_count=2,
-            observed_safe_pose_count=2,
-            platform_reachable_pose_count=2,
-            opportunity_count=1,
-        ),
-    )
-
-    with pytest.raises(EnvironmentInvariantError, match="oracle"):
-        env.refresh_decision_boundary()
-
-    assert env.rollout_discarded is True
-    assert env.training_stopped is True
-
-
-def test_partial_planner_failure_cannot_masquerade_as_oracle_contradiction() -> None:
-    env = V3ExplorationEnvironment(
-        platform_type="WHEELED",
-        bridge=_Bridge(PlannerOutput()),
-        request_builder=lambda action: action,
-        initial_observation=_observation(candidate_mask=(False, False)),
-        candidate_diagnostics_provider=lambda: CandidateDiagnostics(
-            physical_snapshot_id="e" * 64,
-            physical_reachability_algorithm_id="test/reachability",
-            physical_candidate_universe_count=2,
-            selected_policy_candidate_count=0,
-            available_candidate_count=1,
-            untried_reserve_count=1,
-            planner_failed_current_snapshot_count=1,
-        ),
-        frontier_oracle=lambda: FrontierOracleResult(1, 1, 1, 1),
-    )
-
-    with pytest.raises(EnvironmentInvariantError, match="accounting"):
-        env.refresh_decision_boundary()
-
-    assert env.rollout_discarded is True
-    assert env.training_stopped is True
-
-
-def test_legal_empty_boundary_reports_latest_stage_and_truth_diagnostic() -> None:
-    env = V3ExplorationEnvironment(
-        platform_type="HOPPER",
-        bridge=_Bridge(PlannerOutput()),
-        request_builder=lambda action: action,
-        initial_observation=_observation(
-            platform_index=2, candidate_mask=(False, False)
-        ),
-        candidate_diagnostics_provider=lambda: CandidateDiagnostics(
-            zero_gain_count=2,
-            physical_unreachable_count=4,
-        ),
-        frontier_oracle=lambda: FrontierOracleResult(
-            frontier_anchor_count=7,
-            observed_safe_pose_count=6,
-            platform_reachable_pose_count=2,
-            opportunity_count=0,
+            oracle_count, oracle_count, oracle_count, oracle_count
         ),
         remaining_coverable_detail_cell_count_provider=lambda: 1234,
     )
 
     result = env.refresh_decision_boundary()
 
-    assert result.execution_state == "NO_CANDIDATES"
-    assert result.terminal_reason is TerminalReason.ZERO_GAIN
-    assert result.oracle_opportunity_count == 0
-    assert result.remaining_coverable_detail_cell_count == 1234
+    assert result.execution_state == (
+        "DECISION_READY" if expected_reason is None else "NO_CANDIDATES"
+    )
+    assert (
+        None if result.terminal_reason is None else result.terminal_reason.value
+    ) == expected_reason
+    assert result.oracle_opportunity_count == (
+        0 if expected_reason is None else oracle_count
+    )
+    assert result.remaining_coverable_detail_cell_count == (
+        None if expected_reason is None else 1234
+    )
 
 
-def test_last_planner_rejection_with_oracle_opportunity_reports_planner_failure() -> None:
+@pytest.mark.parametrize(
+    ("diagnostics", "oracle_count", "candidate_mask"),
+    (
+        (_candidate_diagnostics(), 1, (False, False)),
+        (
+            _candidate_diagnostics(
+                physical_candidate_universe_count=1,
+                selected_policy_candidate_count=1,
+                available_candidate_count=1,
+            ),
+            0,
+            (True, False),
+        ),
+        (
+            _candidate_diagnostics(
+                physical_candidate_universe_count=2,
+                planner_failed_current_snapshot_count=1,
+                visited_excluded_count=1,
+            ),
+            2,
+            (False, False),
+        ),
+    ),
+)
+def test_candidate_oracle_or_availability_mismatch_fails_closed(
+    diagnostics: CandidateDiagnostics,
+    oracle_count: int,
+    candidate_mask: tuple[bool, ...],
+) -> None:
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(PlannerOutput()),
+        request_builder=lambda action: action,
+        initial_observation=_observation(candidate_mask=candidate_mask),
+        candidate_diagnostics_provider=lambda: diagnostics,
+        frontier_oracle=lambda: FrontierOracleResult(
+            oracle_count, oracle_count, oracle_count, oracle_count
+        ),
+    )
+
+    with pytest.raises(
+        EnvironmentInvariantError,
+        match="CANDIDATE_ORACLE_MISMATCH|availability",
+    ):
+        env.refresh_decision_boundary()
+
+    assert env.rollout_discarded is True
+    assert env.training_stopped is True
+
+
+def test_all_planner_failures_with_146_oracle_opportunities_report_blocked() -> None:
     rejected = PlannerOutput()
     rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
     rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
@@ -820,7 +921,7 @@ def test_last_planner_rejection_with_oracle_opportunity_reports_planner_failure(
     def oracle() -> FrontierOracleResult:
         nonlocal oracle_calls
         oracle_calls += 1
-        return FrontierOracleResult(1, 1, 1, 1)
+        return FrontierOracleResult(146, 146, 146, 146)
 
     def request_builder(
         _action: PolicyAction, identity: ObservationIdentity
@@ -855,13 +956,11 @@ def test_last_planner_rejection_with_oracle_opportunity_reports_planner_failure(
         initial_observation=initial,
         require_identity_bound_request=True,
         planning_failure_refresher=refresh,
-        candidate_diagnostics_provider=lambda: CandidateDiagnostics(
-            physical_snapshot_id="f" * 64,
-            physical_reachability_algorithm_id="test/reachability",
-            physical_candidate_universe_count=1,
+        candidate_diagnostics_provider=lambda: _candidate_diagnostics(
+            physical_candidate_universe_count=146,
             selected_policy_candidate_count=0,
             available_candidate_count=0,
-            planner_failed_current_snapshot_count=1,
+            planner_failed_current_snapshot_count=146,
         ),
         frontier_oracle=oracle,
         remaining_coverable_detail_cell_count_provider=lambda: 88,
@@ -875,8 +974,12 @@ def test_last_planner_rejection_with_oracle_opportunity_reports_planner_failure(
     assert oracle_calls == 1
     assert result.transition is not None
     assert result.transition.terminated is True
-    assert result.transition.terminal_reason is TerminalReason.PLANNER_REJECTED_ALL
-    assert result.transition.oracle_opportunity_count == 1
+    assert result.transition.terminal_reason is not None
+    assert (
+        result.transition.terminal_reason.value
+        == "PLANNER_BLOCKED_WITH_OPPORTUNITY"
+    )
+    assert result.transition.oracle_opportunity_count == 146
     assert result.transition.remaining_coverable_detail_cell_count == 88
 
 
@@ -931,6 +1034,132 @@ def test_planner_hard_outcomes_never_become_legal_exploration_exhaustion(
     assert result.transition.terminated is True
     assert result.transition.terminal_reason is expected_reason
     assert result.transition.remaining_coverable_detail_cell_count == 456
+
+
+def test_hard_keep_failure_does_not_refresh_or_write_candidate_failures() -> None:
+    output = PlannerOutput()
+    output.outcome = PlanningOutcome.INVALID_REQUEST
+    output.directive = ExecutionDirective.NO_SAFE_REFERENCE
+    output.candidate_disposition = CandidateDisposition.KEEP
+    output.reason_code = "INFRASTRUCTURE_FAILURE"
+    refresh_calls = 0
+
+    def unexpected_refresh(*_args: object) -> BoundaryObservationResult:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        raise AssertionError("hard KEEP must not update the failure set")
+
+    diagnostics = _candidate_diagnostics(
+        physical_candidate_universe_count=1,
+        selected_policy_candidate_count=1,
+        available_candidate_count=1,
+    )
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(output),
+        request_builder=lambda action: action,
+        initial_observation=_observation(candidate_mask=(True, False)),
+        planning_failure_refresher=unexpected_refresh,
+        candidate_diagnostics_provider=lambda: diagnostics,
+    )
+
+    result = env.advance_prepared_action(
+        PolicyAction(0, 0.0),
+        expected_identity=env.current_observation.observation_identities[0],
+    )
+
+    assert refresh_calls == 0
+    assert env.current_candidate_diagnostics() == diagnostics
+    assert result.transition is not None
+    assert result.transition.terminal_reason is TerminalReason.HARD_FAILURE
+
+
+def test_execution_success_crossing_precedes_candidate_oracle_audit() -> None:
+    output = _reference_output(
+        "WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE
+    )
+    oracle_calls = 0
+
+    def contradictory_oracle() -> FrontierOracleResult:
+        nonlocal oracle_calls
+        oracle_calls += 1
+        return FrontierOracleResult(1, 1, 1, 9)
+
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_Bridge(output),
+        request_builder=lambda action: action,
+        initial_observation=_observation(candidate_mask=(True, False)),
+        reference_executor=_ReferenceExecutor(
+            ReferenceExecutionResult(
+                next_observation=_observation(candidate_mask=(False, False)),
+                mission_observed_delta=0.01,
+                priority_observed_delta=0.0,
+                normalized_execution_cost_contribution=0.0,
+                normalized_execution_time_contribution=0.0,
+                executed_without_new_coverage=False,
+                success_first_crossing=True,
+                episode_ended_without_success=False,
+                hard_safety_violation=False,
+                terminated=True,
+                execution_state="DECISION_BOUNDARY",
+            )
+        ),
+        candidate_diagnostics_provider=_candidate_diagnostics,
+        frontier_oracle=contradictory_oracle,
+    )
+
+    result = env.advance_prepared_action(
+        PolicyAction(0, 0.0),
+        expected_identity=env.current_observation.observation_identities[0],
+    )
+
+    assert oracle_calls == 0
+    assert result.transition is not None
+    assert result.transition.success_first_crossing is True
+    assert result.transition.terminal_reason is TerminalReason.SUCCESS
+
+
+def test_initial_sensor_crossing_succeeds_before_planner_and_only_once() -> None:
+    initial = _observation(candidate_mask=(True, False))
+    controller = object.__new__(ObservationBoundaryController)
+    controller._platform_type = "WHEELED"
+    controller._current_observation = initial
+    controller._mission_observed_area_m2 = 0.96
+    controller._mission_area_m2 = 1.0
+    planner_calls = 0
+
+    class CountingBridge:
+        def plan(self, request: object) -> PlannerOutput:
+            del request
+            nonlocal planner_calls
+            planner_calls += 1
+            return PlannerOutput()
+
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=CountingBridge(),
+        request_builder=lambda action: action,
+        initial_observation=initial,
+        observation_boundary_controller=controller,
+        planning_failure_refresher=lambda *_args: None,
+        require_sensor_closed_loop=True,
+    )
+    policy_calls = 0
+
+    def policy(_observation: PolicyBatch) -> PolicyAction:
+        nonlocal policy_calls
+        policy_calls += 1
+        return PolicyAction(0, 0.0)
+
+    result = env.advance_until_decision_boundary(policy)
+
+    assert result.terminal_reason is TerminalReason.SUCCESS
+    assert result.policy_decisions_consumed == 0
+    assert planner_calls == 0
+    assert policy_calls == 0
+    with pytest.raises(RuntimeError, match="reset"):
+        env.advance_until_decision_boundary(policy)
 
 
 @pytest.mark.parametrize(

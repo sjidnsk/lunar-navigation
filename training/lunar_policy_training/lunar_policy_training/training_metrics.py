@@ -22,10 +22,32 @@ from .ppo.trainer import PPOUpdateMetrics
 
 
 TRAINING_UPDATE_METRICS_SCHEMA = "lunar-training-update-metrics/v3"
+_CANDIDATE_IDENTITY_FIELDS = CANDIDATE_DIAGNOSTIC_FIELDS[:2]
+_CANDIDATE_COUNT_FIELDS = CANDIDATE_DIAGNOSTIC_FIELDS[2:]
+_PHYSICAL_EXHAUSTION_REASONS = frozenset(
+    {
+        TerminalReason.NO_RECOVERABLE_OBSERVATION_STATE,
+        TerminalReason.VISITED_EXHAUSTED,
+        TerminalReason.ZERO_GAIN,
+        TerminalReason.NO_TRANSIT_OPPORTUNITY,
+    }
+)
 
 
 class TrainingMetricsError(ValueError):
     """Training metrics are incomplete, ambiguous, or unsafe to append."""
+
+
+def _materialize_identity_sets(
+    values: Mapping[str, Mapping[str, set[str]]],
+) -> dict[str, dict[str, list[str]]]:
+    return {
+        platform: {
+            name: sorted(identities)
+            for name, identities in fields.items()
+        }
+        for platform, fields in values.items()
+    }
 
 
 def build_training_update_record(
@@ -186,16 +208,33 @@ def build_training_update_record(
     }
     candidate_by_platform: dict[str, dict[str, int]] = {
         platform: {
-            **{name: 0 for name in CANDIDATE_DIAGNOSTIC_FIELDS},
+            **{name: 0 for name in _CANDIDATE_COUNT_FIELDS},
             "no_candidate_termination_count": 0,
-            "planner_rejected_exhaustion_count": 0,
+            "physical_exhaustion_count": 0,
+            "planner_blocked_count": 0,
+        }
+        for platform in sorted(allocation)
+    }
+    candidate_identity_sets = {
+        platform: {
+            "physical_snapshot_ids": set(),
+            "physical_reachability_algorithm_ids": set(),
         }
         for platform in sorted(allocation)
     }
     for index, diagnostics in enumerate(candidates):
-        values = candidate_by_platform[platforms[index % worker_count]]
-        for name in CANDIDATE_DIAGNOSTIC_FIELDS:
+        platform = platforms[index % worker_count]
+        values = candidate_by_platform[platform]
+        for name in _CANDIDATE_COUNT_FIELDS:
             values[name] += getattr(diagnostics, name)
+        if diagnostics.physical_snapshot_id:
+            candidate_identity_sets[platform]["physical_snapshot_ids"].add(
+                diagnostics.physical_snapshot_id
+            )
+        if diagnostics.physical_reachability_algorithm_id:
+            candidate_identity_sets[platform][
+                "physical_reachability_algorithm_ids"
+            ].add(diagnostics.physical_reachability_algorithm_id)
     for index, terminated_without_candidates in enumerate(no_candidates):
         if terminated_without_candidates:
             candidate_by_platform[platforms[index % worker_count]][
@@ -208,7 +247,14 @@ def build_training_update_record(
     terminal_candidate_by_platform = {
         platform: {
             name: 0
-            for name in CANDIDATE_DIAGNOSTIC_FIELDS
+            for name in _CANDIDATE_COUNT_FIELDS
+        }
+        for platform in sorted(allocation)
+    }
+    terminal_identity_sets = {
+        platform: {
+            "physical_snapshot_ids": set(),
+            "physical_reachability_algorithm_ids": set(),
         }
         for platform in sorted(allocation)
     }
@@ -226,17 +272,31 @@ def build_training_update_record(
             terminal_candidate_by_platform[platform][name] += getattr(
                 audit.candidate_diagnostics, name
             )
+        if audit.candidate_diagnostics.physical_snapshot_id:
+            terminal_identity_sets[platform]["physical_snapshot_ids"].add(
+                audit.candidate_diagnostics.physical_snapshot_id
+            )
+        if audit.candidate_diagnostics.physical_reachability_algorithm_id:
+            terminal_identity_sets[platform][
+                "physical_reachability_algorithm_ids"
+            ].add(
+                audit.candidate_diagnostics.physical_reachability_algorithm_id
+            )
         oracle_opportunity_count += audit.oracle_opportunity_count
-        if audit.oracle_opportunity_count > 0:
+        if (
+            audit.oracle_opportunity_count > 0
+            and audit.reason
+            is not TerminalReason.PLANNER_BLOCKED_WITH_OPPORTUNITY
+        ):
             oracle_contradiction_count += 1
         if audit.remaining_coverable_detail_cell_count is not None:
             remaining_counts.append(
                 audit.remaining_coverable_detail_cell_count
             )
-        if audit.reason is TerminalReason.PLANNER_REJECTED_ALL:
-            candidate_by_platform[platform][
-                "planner_rejected_exhaustion_count"
-            ] += 1
+        if audit.reason in _PHYSICAL_EXHAUSTION_REASONS:
+            candidate_by_platform[platform]["physical_exhaustion_count"] += 1
+        if audit.reason is TerminalReason.PLANNER_BLOCKED_WITH_OPPORTUNITY:
+            candidate_by_platform[platform]["planner_blocked_count"] += 1
     start_mean = float(start_coverage.astype(np.float64).mean())
     end_mean = float(end_coverage.astype(np.float64).mean())
     record: dict[str, object] = {
@@ -261,7 +321,12 @@ def build_training_update_record(
         },
         "terminal_count": int(dones.sum(dtype=np.int64)),
         "success_first_crossing_count": sum(success),
-        "candidate": {"by_platform": candidate_by_platform},
+        "candidate": {
+            "by_platform": candidate_by_platform,
+            "identity_by_platform": _materialize_identity_sets(
+                candidate_identity_sets
+            ),
+        },
         "terminal": {
             "reason_counts": dict(sorted(terminal_reason_counts.items())),
             "reason_counts_by_platform": {
@@ -272,6 +337,9 @@ def build_training_update_record(
             },
             "candidate_diagnostics_by_platform": (
                 terminal_candidate_by_platform
+            ),
+            "candidate_identity_by_platform": _materialize_identity_sets(
+                terminal_identity_sets
             ),
             "oracle_opportunity_count": oracle_opportunity_count,
             "oracle_contradiction_count": oracle_contradiction_count,
@@ -422,12 +490,16 @@ def _validate_record(record: object) -> None:
     )
     if not isinstance(candidate_by_platform, Mapping) or not candidate_by_platform:
         raise TrainingMetricsError("metrics candidate diagnostics are missing")
-    aggregate_fields = set(CANDIDATE_DIAGNOSTIC_FIELDS) | {
+    aggregate_fields = set(_CANDIDATE_COUNT_FIELDS) | {
         "no_candidate_termination_count",
-        "planner_rejected_exhaustion_count",
+        "physical_exhaustion_count",
+        "planner_blocked_count",
     }
     for values in candidate_by_platform.values():
         _validate_diagnostic_counts(values, aggregate_fields)
+    _validate_identity_groups(
+        candidate.get("identity_by_platform"), set(candidate_by_platform)
+    )
     terminal = record.get("terminal")
     terminal_by_platform = (
         terminal.get("candidate_diagnostics_by_platform")
@@ -437,7 +509,11 @@ def _validate_record(record: object) -> None:
     if not isinstance(terminal_by_platform, Mapping) or not terminal_by_platform:
         raise TrainingMetricsError("metrics terminal diagnostics are missing")
     for values in terminal_by_platform.values():
-        _validate_diagnostic_counts(values, set(CANDIDATE_DIAGNOSTIC_FIELDS))
+        _validate_diagnostic_counts(values, set(_CANDIDATE_COUNT_FIELDS))
+    _validate_identity_groups(
+        terminal.get("candidate_identity_by_platform"),
+        set(terminal_by_platform),
+    )
     _validate_finite_json(record)
 
 
@@ -453,6 +529,30 @@ def _validate_diagnostic_counts(
         )
     ):
         raise TrainingMetricsError("metrics candidate diagnostics are invalid")
+
+
+def _validate_identity_groups(
+    value: object, expected_platforms: set[object]
+) -> None:
+    expected_fields = {
+        "physical_snapshot_ids",
+        "physical_reachability_algorithm_ids",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_platforms:
+        raise TrainingMetricsError("metrics candidate identities are invalid")
+    for fields in value.values():
+        if not isinstance(fields, Mapping) or set(fields) != expected_fields:
+            raise TrainingMetricsError("metrics candidate identities are invalid")
+        for identities in fields.values():
+            if (
+                not isinstance(identities, list)
+                or any(
+                    not isinstance(identity, str) or not identity
+                    for identity in identities
+                )
+                or identities != sorted(set(identities))
+            ):
+                raise TrainingMetricsError("metrics candidate identities are invalid")
 
 
 def _validate_finite_json(value: object) -> None:
