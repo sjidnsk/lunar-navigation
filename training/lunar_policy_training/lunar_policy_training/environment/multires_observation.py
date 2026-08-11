@@ -14,7 +14,11 @@ from .coverability import (
     read_packed_detail_window,
     unpack_detail_mask,
 )
-from ..polar_data.multires_scene import MultiResolutionScene, SceneTileProvider
+from ..polar_data.multires_scene import (
+    MultiResolutionScene,
+    ProjectedScene,
+    SceneTileProvider,
+)
 from ..polar_data.raster import GLOBAL_GEOMETRY, LOCAL_GEOMETRY, MapCanvas
 from ..training_semantics import FORMAL_SENSOR_FOV_RAD, FORMAL_SENSOR_RANGE_M
 from .observation_builder import LocalObservation, Pose2
@@ -57,6 +61,37 @@ class _ObservedDetailTile:
             observation_quality=zeros(),
             observation_count=np.zeros(shape, dtype=np.uint32),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _AgedDetailUpdate:
+    tile: _ObservedDetailTile
+    known_mask: np.ndarray
+    observation_age_s: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class _VisibleDetailUpdate:
+    key: tuple[int, int]
+    tile: _ObservedDetailTile
+    insert_tile: bool
+    window_slice: tuple[slice, slice]
+    tile_slice: tuple[slice, slice]
+    visible_mask: np.ndarray
+    observation_count: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class _CoarseObservationUpdate:
+    row: int
+    column: int
+    elevation_m: np.float32
+    physical_obstacle_ratio: np.float32
+    physical_obstacle_height_m: np.float32
+    forbidden_ratio: np.float32
+    observation_age_s: np.float32
+    observation_quality: np.float32
+    observation_count: np.uint32
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,14 +294,6 @@ class MultiresSensorObservationState(SensorObservationState):
     @property
     def resolution_m(self) -> float:
         return float(self.visibility_estimator.resolution_m)
-
-    def _tile(self, tile_row: int, tile_column: int) -> _ObservedDetailTile:
-        key = tile_row, tile_column
-        tile = self._detail_tiles.get(key)
-        if tile is None:
-            tile = _ObservedDetailTile.empty(self.tile_provider.tile_geometry.cells)
-            self._detail_tiles[key] = tile
-        return tile
 
     def _existing_tile(
         self, tile_row: int, tile_column: int
@@ -553,18 +580,7 @@ class MultiresSensorObservationState(SensorObservationState):
             or elapsed_s < 0.0
         ):
             raise ValueError("observation elapsed time is invalid")
-        for tile in self._detail_tiles.values():
-            known = tile.valid_mask
-            aged = tile.observation_age_s[known].astype(np.float64) + float(
-                elapsed_s
-            )
-            if (
-                not np.isfinite(aged).all()
-                or (aged > np.finfo(np.float32).max).any()
-            ):
-                raise ValueError("observation age would overflow")
-            tile.observation_age_s[known] = aged.astype(np.float32)
-
+        elapsed = float(elapsed_s)
         window_cells = self.tile_provider.tile_geometry.cells
         start_row, start_column, pose_row, pose_column = self._detail_window(
             pose, window_cells
@@ -572,48 +588,73 @@ class MultiresSensorObservationState(SensorObservationState):
         truth = self.tile_provider.read_window(
             start_row, start_column, cells=window_cells
         )
-        visible = self.visibility_estimator.reveal_from_pose(
+        revealed = self.visibility_estimator.reveal_from_pose(
             truth.physical_obstacle_ratio,
             (pose_row, pose_column),
         )
-        visible &= truth.valid_mask
+        if (
+            not isinstance(revealed, np.ndarray)
+            or revealed.dtype != np.dtype(np.bool_)
+            or revealed.shape != truth.valid_mask.shape
+        ):
+            raise RuntimeError("sensor reveal result is invalid")
+        visible = np.ascontiguousarray(revealed & truth.valid_mask)
+
+        aged_updates: list[_AgedDetailUpdate] = []
+        for tile in self._detail_tiles.values():
+            known = tile.valid_mask
+            aged = tile.observation_age_s[known].astype(np.float64) + elapsed
+            if (
+                not np.isfinite(aged).all()
+                or (aged > np.finfo(np.float32).max).any()
+            ):
+                raise ValueError("observation age would overflow")
+            aged_updates.append(
+                _AgedDetailUpdate(
+                    tile=tile,
+                    known_mask=known,
+                    observation_age_s=np.ascontiguousarray(
+                        aged, dtype=np.float32
+                    ),
+                )
+            )
+
         newly = np.zeros(visible.shape, dtype=np.bool_)
+        visible_updates: list[_VisibleDetailUpdate] = []
         for tile_row, tile_column, window_slice, tile_slice in self._window_slices(
             start_row, start_column, window_cells
         ):
             visible_part = visible[window_slice]
             if not visible_part.any():
                 continue
-            tile = self._tile(tile_row, tile_column)
+            tile = self._existing_tile(tile_row, tile_column)
+            insert_tile = tile is None
+            if tile is None:
+                tile = _ObservedDetailTile.empty(
+                    self.tile_provider.tile_geometry.cells
+                )
             known_part = tile.valid_mask[tile_slice]
             newly_part = visible_part & ~known_part
             newly[window_slice] = newly_part
-            for target, source in (
-                (tile.elevation_m, truth.elevation_m),
-                (
-                    tile.physical_obstacle_ratio,
-                    truth.physical_obstacle_ratio,
-                ),
-                (
-                    tile.physical_obstacle_height_m,
-                    truth.physical_obstacle_height_m,
-                ),
-                (tile.forbidden_ratio, truth.forbidden_ratio),
-            ):
-                target_view = target[tile_slice]
-                target_view[visible_part] = source[window_slice][visible_part]
-            known_part[visible_part] = True
-            quality = tile.observation_quality[tile_slice]
-            quality[visible_part] = 1.0
-            age = tile.observation_age_s[tile_slice]
-            age[visible_part] = 0.0
             count = tile.observation_count[tile_slice]
-            count[visible_part] = np.minimum(
+            updated_count = np.minimum(
                 count[visible_part].astype(np.uint64) + 1,
                 np.iinfo(np.uint32).max,
             ).astype(np.uint32)
+            visible_updates.append(
+                _VisibleDetailUpdate(
+                    key=(tile_row, tile_column),
+                    tile=tile,
+                    insert_tile=insert_tile,
+                    window_slice=window_slice,
+                    tile_slice=tile_slice,
+                    visible_mask=visible_part,
+                    observation_count=updated_count,
+                )
+            )
 
         new_rows, new_columns = np.nonzero(newly)
+        next_coverable_count = self.observed_coverable_detail_cell_count
         if self.coverable_detail_bits is None:
             newly_coverable = newly
         else:
@@ -625,12 +666,11 @@ class MultiresSensorObservationState(SensorObservationState):
                 cells=window_cells,
             )
             newly_coverable = newly & coverable
-            self.observed_coverable_detail_cell_count += int(
+            next_coverable_count += int(
                 newly_coverable.sum(dtype=np.int64)
             )
             if (
-                self.observed_coverable_detail_cell_count
-                > self.coverable_detail_cell_count
+                next_coverable_count > self.coverable_detail_cell_count
             ):
                 raise RuntimeError("observed coverability exceeds frozen mask")
         mission_rows, mission_columns = np.nonzero(newly_coverable)
@@ -665,16 +705,196 @@ class MultiresSensorObservationState(SensorObservationState):
                 strict=True,
             )
         )
-        for coarse_row, coarse_column in affected:
-            self._aggregate_coarse_cell(coarse_row, coarse_column)
+        coarse_updates = tuple(
+            update
+            for coarse_row, coarse_column in sorted(affected)
+            for update in (
+                self._prospective_coarse_update(
+                    coarse_row,
+                    coarse_column,
+                    start_row=start_row,
+                    start_column=start_column,
+                    truth=truth,
+                    visible=visible,
+                    elapsed_s=elapsed,
+                ),
+            )
+            if update is not None
+        )
         delta = ObservationDelta(
             visible_cells=int(np.count_nonzero(visible)),
             newly_observed_cells=int(new_rows.size),
             mission_observed_delta_m2=mission_delta,
             priority_observed_delta_m2=priority_delta,
         )
+
+        for update in aged_updates:
+            update.tile.observation_age_s[update.known_mask] = (
+                update.observation_age_s
+            )
+        for update in visible_updates:
+            tile = update.tile
+            for target, source in (
+                (tile.elevation_m, truth.elevation_m),
+                (
+                    tile.physical_obstacle_ratio,
+                    truth.physical_obstacle_ratio,
+                ),
+                (
+                    tile.physical_obstacle_height_m,
+                    truth.physical_obstacle_height_m,
+                ),
+                (tile.forbidden_ratio, truth.forbidden_ratio),
+            ):
+                target_view = target[update.tile_slice]
+                source_view = source[update.window_slice]
+                target_view[update.visible_mask] = source_view[
+                    update.visible_mask
+                ]
+            tile.valid_mask[update.tile_slice][update.visible_mask] = True
+            tile.observation_quality[update.tile_slice][
+                update.visible_mask
+            ] = 1.0
+            tile.observation_age_s[update.tile_slice][
+                update.visible_mask
+            ] = 0.0
+            tile.observation_count[update.tile_slice][
+                update.visible_mask
+            ] = update.observation_count
+            if update.insert_tile:
+                self._detail_tiles[update.key] = tile
+        if self.coverable_detail_bits is not None:
+            self.observed_coverable_detail_cell_count = next_coverable_count
+        for update in coarse_updates:
+            cell = update.row, update.column
+            self.observed.elevation_m[cell] = update.elevation_m
+            self.observed.physical_obstacle_ratio[cell] = (
+                update.physical_obstacle_ratio
+            )
+            self.coarse_obstacle_height_m[cell] = (
+                update.physical_obstacle_height_m
+            )
+            self.coarse_forbidden_ratio[cell] = update.forbidden_ratio
+            self.observed.valid_mask[cell] = True
+            self.observed.observation_age_s[cell] = update.observation_age_s
+            self.observed.observation_quality[cell] = (
+                update.observation_quality
+            )
+            self.observed.observation_count[cell] = update.observation_count
         self._evidence_generation += 1
         return delta
+
+    def _prospective_coarse_update(
+        self,
+        row: int,
+        column: int,
+        *,
+        start_row: int,
+        start_column: int,
+        truth: ProjectedScene,
+        visible: np.ndarray,
+        elapsed_s: float,
+    ) -> _CoarseObservationUpdate | None:
+        elevation = self._detail_block(row, column, "elevation_m").copy()
+        obstacle = self._detail_block(
+            row, column, "physical_obstacle_ratio"
+        ).copy()
+        obstacle_height = self._detail_block(
+            row, column, "physical_obstacle_height_m"
+        ).copy()
+        forbidden = self._detail_block(
+            row, column, "forbidden_ratio"
+        ).copy()
+        valid = self._detail_block(row, column, "valid_mask").copy()
+        age = self._detail_block(
+            row, column, "observation_age_s"
+        ).copy()
+        quality = self._detail_block(
+            row, column, "observation_quality"
+        ).copy()
+        count = self._detail_count_block(row, column).copy()
+        age[valid] = (
+            age[valid].astype(np.float64) + elapsed_s
+        ).astype(np.float32)
+
+        block_start_row = row * _DETAIL_PER_GLOBAL
+        block_start_column = column * _DETAIL_PER_GLOBAL
+        overlap_row0 = max(block_start_row, start_row)
+        overlap_column0 = max(block_start_column, start_column)
+        overlap_row1 = min(
+            block_start_row + _DETAIL_PER_GLOBAL,
+            start_row + visible.shape[0],
+        )
+        overlap_column1 = min(
+            block_start_column + _DETAIL_PER_GLOBAL,
+            start_column + visible.shape[1],
+        )
+        if overlap_row0 < overlap_row1 and overlap_column0 < overlap_column1:
+            block_slice = (
+                slice(
+                    overlap_row0 - block_start_row,
+                    overlap_row1 - block_start_row,
+                ),
+                slice(
+                    overlap_column0 - block_start_column,
+                    overlap_column1 - block_start_column,
+                ),
+            )
+            window_slice = (
+                slice(overlap_row0 - start_row, overlap_row1 - start_row),
+                slice(
+                    overlap_column0 - start_column,
+                    overlap_column1 - start_column,
+                ),
+            )
+            visible_part = visible[window_slice]
+            for target, source in (
+                (elevation, truth.elevation_m),
+                (obstacle, truth.physical_obstacle_ratio),
+                (obstacle_height, truth.physical_obstacle_height_m),
+                (forbidden, truth.forbidden_ratio),
+            ):
+                target_view = target[block_slice]
+                source_view = source[window_slice]
+                target_view[visible_part] = source_view[visible_part]
+            valid_view = valid[block_slice]
+            valid_view[visible_part] = True
+            quality_view = quality[block_slice]
+            quality_view[visible_part] = 1.0
+            age_view = age[block_slice]
+            age_view[visible_part] = 0.0
+            count_view = count[block_slice]
+            count_view[visible_part] = np.minimum(
+                count_view[visible_part].astype(np.uint64) + 1,
+                np.iinfo(np.uint32).max,
+            ).astype(np.uint32)
+
+        if not valid.all():
+            return None
+        return _CoarseObservationUpdate(
+            row=row,
+            column=column,
+            elevation_m=np.float32(elevation[valid].mean(dtype=np.float64)),
+            physical_obstacle_ratio=np.float32(
+                obstacle[valid].max(initial=0.0)
+            ),
+            physical_obstacle_height_m=np.float32(
+                obstacle_height[valid].max(initial=0.0)
+            ),
+            forbidden_ratio=np.float32(
+                forbidden[valid].max(initial=0.0)
+            ),
+            observation_age_s=np.float32(age[valid].min(initial=0.0)),
+            observation_quality=np.float32(
+                quality[valid].max(initial=0.0)
+            ),
+            observation_count=np.uint32(
+                min(
+                    int(count[valid].sum(dtype=np.uint64)),
+                    int(np.iinfo(np.uint32).max),
+                )
+            ),
+        )
 
     def _detail_block(self, coarse_row: int, coarse_column: int, name: str) -> np.ndarray:
         if not (
@@ -707,47 +927,6 @@ class MultiresSensorObservationState(SensorObservationState):
         return self._detail_block(
             coarse_row, coarse_column, "valid_mask"
         ).copy()
-
-    def _aggregate_coarse_cell(self, row: int, column: int) -> None:
-        valid = self._detail_block(row, column, "valid_mask")
-        if not valid.all():
-            return
-        elevation = self._detail_block(row, column, "elevation_m")
-        obstacle = self._detail_block(
-            row, column, "physical_obstacle_ratio"
-        )
-        obstacle_height = self._detail_block(
-            row, column, "physical_obstacle_height_m"
-        )
-        forbidden = self._detail_block(row, column, "forbidden_ratio")
-        age = self._detail_block(row, column, "observation_age_s")
-        quality = self._detail_block(row, column, "observation_quality")
-        count = self._detail_count_block(row, column)
-        self.observed.elevation_m[row, column] = np.float32(
-            elevation[valid].mean(dtype=np.float64)
-        )
-        self.observed.physical_obstacle_ratio[row, column] = np.float32(
-            obstacle[valid].max(initial=0.0)
-        )
-        self.coarse_obstacle_height_m[row, column] = np.float32(
-            obstacle_height[valid].max(initial=0.0)
-        )
-        self.coarse_forbidden_ratio[row, column] = np.float32(
-            forbidden[valid].max(initial=0.0)
-        )
-        self.observed.valid_mask[row, column] = True
-        self.observed.observation_age_s[row, column] = np.float32(
-            age[valid].min(initial=0.0)
-        )
-        self.observed.observation_quality[row, column] = np.float32(
-            quality[valid].max(initial=0.0)
-        )
-        self.observed.observation_count[row, column] = np.uint32(
-            min(
-                int(count[valid].sum(dtype=np.uint64)),
-                int(np.iinfo(np.uint32).max),
-            )
-        )
 
     def _detail_count_block(self, row: int, column: int) -> np.ndarray:
         coarse_per_tile = (

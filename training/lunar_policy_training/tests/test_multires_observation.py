@@ -63,6 +63,43 @@ def _state(
     return state, provider
 
 
+def _authoritative_observation_bytes(
+    state: MultiresSensorObservationState,
+) -> tuple[object, ...]:
+    detail_fields = (
+        "elevation_m",
+        "physical_obstacle_ratio",
+        "physical_obstacle_height_m",
+        "forbidden_ratio",
+        "valid_mask",
+        "observation_age_s",
+        "observation_quality",
+        "observation_count",
+    )
+    coarse_fields = (
+        "elevation_m",
+        "physical_obstacle_ratio",
+        "valid_mask",
+        "observation_age_s",
+        "observation_quality",
+        "elevation_variance",
+        "obstacle_variance",
+        "observation_count",
+    )
+    return (
+        state.evidence_generation,
+        state.physical_evidence_sha256(),
+        state.observed_coverable_detail_cell_count,
+        tuple(
+            (key, *(getattr(tile, name).tobytes() for name in detail_fields))
+            for key, tile in sorted(state._detail_tiles.items())
+        ),
+        *(getattr(state.observed, name).tobytes() for name in coarse_fields),
+        state.coarse_obstacle_height_m.tobytes(),
+        state.coarse_forbidden_ratio.tobytes(),
+    )
+
+
 def test_exact_coverable_bits_not_coarse_roi_define_coverage_delta() -> None:
     coverable = np.zeros((5120, 5120), dtype=np.bool_)
     coverable[2560, 2560:2562] = True
@@ -303,6 +340,39 @@ def test_failed_observation_does_not_advance_evidence_generation() -> None:
 
     assert state.evidence_generation == 0
     assert state.physical_evidence_sha256() == before
+
+
+@pytest.mark.parametrize("failure_stage", ("detail_window", "reveal"))
+def test_failed_observation_is_atomic_after_detail_state_exists(
+    failure_stage: str,
+) -> None:
+    state, _ = _state()
+    center = Pose2(512.0, 512.0, elevation_m=7.0)
+    state.observe_world(center, elapsed_s=0.0)
+    before = _authoritative_observation_bytes(state)
+
+    if failure_stage == "detail_window":
+        failed_pose = Pose2(1.0, 1.0, elevation_m=7.0)
+        expected_error = ValueError
+    else:
+        failed_pose = center
+        expected_error = RuntimeError
+
+        class FailingReveal:
+            sensor = state.visibility_estimator.sensor
+            resolution_m = state.visibility_estimator.resolution_m
+
+            @staticmethod
+            def reveal_from_pose(*args, **kwargs):
+                del args, kwargs
+                raise RuntimeError("injected reveal failure")
+
+        state.visibility_estimator = FailingReveal()
+
+    with pytest.raises(expected_error):
+        state.observe_world(failed_pose, elapsed_s=2.0)
+
+    assert _authoritative_observation_bytes(state) == before
 
 
 def test_physical_evidence_digest_uses_sorted_tile_identity_and_observed_bytes() -> None:

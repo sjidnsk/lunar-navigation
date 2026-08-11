@@ -26,6 +26,8 @@ _PLATFORM_TYPES = _GROUND_PLATFORM_TYPES | {"HOPPER"}
 _MIN_PLATFORM_CANDIDATE_RESERVE = 8
 _MAX_PHYSICAL_CANDIDATES = 4096
 _POLICY_CANDIDATE_COUNT = 64
+_CANONICAL_INT64_MIN = -(1 << 63)
+_CANONICAL_INT64_MAX = (1 << 63) - 1
 
 CANDIDATE_ID_SCHEMA = "lunar-physical-candidate-id/v1"
 PHYSICAL_SNAPSHOT_SCHEMA = "lunar-physical-snapshot/v1"
@@ -118,6 +120,16 @@ def _canonical_sha256(body: object) -> str:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _millimetres(value_m: float) -> int:
+    scaled = float(value_m) * 1_000.0
+    if not math.isfinite(scaled):
+        raise ValueError("candidate millimetre key is out of range")
+    value_mm = int(round(scaled))
+    if not _CANONICAL_INT64_MIN <= value_mm <= _CANONICAL_INT64_MAX:
+        raise ValueError("candidate millimetre key is out of range")
+    return value_mm
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,6 +298,66 @@ class CandidateBuildResult:
             raise TypeError("candidate build result is invalid")
         if self.batch.diagnostics != self.universe.diagnostics:
             raise ValueError("candidate result diagnostics differ")
+        active_indices = np.flatnonzero(self.batch.mask)
+        active_ids = tuple(
+            str(self.batch.candidate_ids[index]) for index in active_indices
+        )
+        if (
+            any(not _is_sha256(candidate_id) for candidate_id in active_ids)
+            or len(set(active_ids)) != len(active_ids)
+        ):
+            raise ValueError("formal candidate batch identities are invalid")
+        candidates_by_id = {
+            candidate.candidate_id: candidate
+            for candidate in self.universe.candidates
+        }
+        if any(candidate_id not in candidates_by_id for candidate_id in active_ids):
+            raise ValueError("formal candidate batch identity is outside universe")
+        for index, candidate_id in zip(
+            active_indices, active_ids, strict=True
+        ):
+            candidate = candidates_by_id[candidate_id]
+            if (
+                tuple(self.batch.target_positions_m[index])
+                != candidate.target_position_m
+                or float(self.batch.target_elevation_m[index])
+                != candidate.target_position_m[2]
+                or float(self.batch.target_yaw_rad[index])
+                != candidate.target_yaw_rad
+            ):
+                raise ValueError("formal candidate batch target is invalid")
+
+        owned_arrays = tuple(
+            value.copy(order="C")
+            for value in (
+                self.batch.features,
+                self.batch.mask,
+                self.batch.target_elevation_m,
+                self.batch.target_positions_m,
+                self.batch.target_yaw_rad,
+                self.batch.candidate_ids,
+            )
+        )
+        owned_batch = CandidateBatch(
+            features=owned_arrays[0],
+            mask=owned_arrays[1],
+            canvas_id=self.batch.canvas_id,
+            diagnostics=self.batch.diagnostics,
+            target_elevation_m=owned_arrays[2],
+            target_positions_m=owned_arrays[3],
+            target_yaw_rad=owned_arrays[4],
+            candidate_ids=owned_arrays[5],
+        )
+        for value in (
+            owned_batch.features,
+            owned_batch.mask,
+            owned_batch.target_elevation_m,
+            owned_batch.target_positions_m,
+            owned_batch.target_yaw_rad,
+            owned_batch.candidate_ids,
+        ):
+            value.setflags(write=False)
+        object.__setattr__(self, "batch", owned_batch)
 
 
 def _neighbors(row: int, column: int, cells: int) -> tuple[tuple[int, int], ...]:
@@ -346,6 +418,20 @@ def _spaced_anchors(segment: list[tuple[int, int]], spacing_cells: int) -> list[
         if all(math.dist(point, anchor) >= spacing_cells for anchor in anchors):
             anchors.append(point)
     return anchors
+
+
+def _source_free_physical_anchors(
+    anchors: Collection[tuple[int, tuple[int, int]]],
+) -> list[tuple[int, tuple[int, int]]]:
+    segment_by_target: dict[tuple[int, int], int] = {}
+    for segment_id, target in anchors:
+        previous = segment_by_target.get(target)
+        if previous is None or segment_id < previous:
+            segment_by_target[target] = segment_id
+    return sorted(
+        (segment_id, target)
+        for target, segment_id in segment_by_target.items()
+    )
 
 
 @dataclass(frozen=True)
@@ -811,7 +897,7 @@ class CandidateBuilderV2:
                     world, mission, pose_map, projection
                 )
             )
-        qualified_anchors = sorted(set(raw_anchors))
+        qualified_anchors = _source_free_physical_anchors(raw_anchors)
         total_roi = float(mission.roi_ratio.sum(dtype=np.float64))
         chosen, qualification = self._qualify_anchors(
             qualified_anchors,
@@ -1091,16 +1177,29 @@ class CandidateBuilderV2:
         target_yaw_bin = min(
             63, int(math.floor(normalized * 64.0 / (2.0 * math.pi)))
         )
-        z_mm = int(round(z_m * 1_000.0))
+        z_mm = _millimetres(z_m)
+        position_key = (
+            {
+                "landing_key_mm": [
+                    _millimetres(x_m),
+                    _millimetres(y_m),
+                    z_mm,
+                ]
+            }
+            if platform_type == "HOPPER"
+            else {
+                "row": position_grid_key[0],
+                "column": position_grid_key[1],
+                "z_mm": z_mm,
+            }
+        )
         candidate_id = _canonical_sha256(
             {
                 "schema": CANDIDATE_ID_SCHEMA,
                 "platform_type": platform_type,
                 "platform_id": platform_id,
                 "mission_revision": mission_revision,
-                "row": position_grid_key[0],
-                "column": position_grid_key[1],
-                "z_mm": z_mm,
+                **position_key,
                 "heading_bin_64": target_yaw_bin,
                 "goal_tolerance_mm": goal_tolerance_mm,
             }

@@ -365,6 +365,95 @@ def test_hopper_candidates_bind_exact_certified_landing_positions_and_z() -> Non
     )
 
 
+def test_candidate_ids_use_exact_hopper_landing_xy_but_ground_grid_key() -> None:
+    world = _world_with_frontier()
+    physical_mask = np.zeros_like(world.observed_mask)
+    physical_mask[122, 127] = True
+    first_offset = (0.020, -0.020)
+    second_offset = (0.022, -0.020)
+
+    hopper_first = _formal_universe(
+        world=world,
+        platform_type="HOPPER",
+        physical_reachability=_physical_reachability(
+            world,
+            platform_type="HOPPER",
+            mask=physical_mask,
+            offset_xy_m=first_offset,
+            landing_z_m=123.456,
+        ),
+    )
+    hopper_second = _formal_universe(
+        world=world,
+        platform_type="HOPPER",
+        physical_reachability=_physical_reachability(
+            world,
+            platform_type="HOPPER",
+            mask=physical_mask,
+            offset_xy_m=second_offset,
+            landing_z_m=123.456,
+        ),
+    )
+    first_by_cell = {
+        candidate.position_grid_key: candidate
+        for candidate in hopper_first.candidates
+    }
+    second_by_cell = {
+        candidate.position_grid_key: candidate
+        for candidate in hopper_second.candidates
+    }
+
+    assert len(first_by_cell) == len(hopper_first.candidates) == 1
+    assert len(second_by_cell) == len(hopper_second.candidates) == 1
+    assert first_by_cell.keys() == second_by_cell.keys()
+    for cell, first in first_by_cell.items():
+        second = second_by_cell[cell]
+        assert second.target_position_m[0] - first.target_position_m[0] == pytest.approx(0.002)
+        assert second.target_position_m[1:] == first.target_position_m[1:]
+        assert second.target_yaw_bin == first.target_yaw_bin
+        assert second.candidate_id != first.candidate_id
+    assert hopper_second.universe_sha256 != hopper_first.universe_sha256
+
+    ground_first = _formal_universe(
+        world=world,
+        physical_reachability=_physical_reachability(
+            world,
+            mask=physical_mask,
+            offset_xy_m=first_offset,
+            landing_z_m=123.456,
+        ),
+    )
+    ground_second = _formal_universe(
+        world=world,
+        physical_reachability=_physical_reachability(
+            world,
+            mask=physical_mask,
+            offset_xy_m=second_offset,
+            landing_z_m=123.456,
+        ),
+    )
+    assert tuple(
+        candidate.candidate_id for candidate in ground_second.candidates
+    ) == tuple(candidate.candidate_id for candidate in ground_first.candidates)
+    assert ground_second.universe_sha256 == ground_first.universe_sha256
+
+
+def test_candidate_identity_rejects_out_of_range_millimetre_key() -> None:
+    world = _world_with_frontier()
+    physical = _physical_reachability(
+        world,
+        platform_type="HOPPER",
+        landing_z_m=np.finfo(np.float64).max,
+    )
+
+    with pytest.raises(ValueError, match="millimetre"):
+        _formal_universe(
+            world=world,
+            platform_type="HOPPER",
+            physical_reachability=physical,
+        )
+
+
 def test_physical_mask_false_rejects_candidate_and_counts_unreachable() -> None:
     world = _world_with_frontier()
     baseline = _formal_universe(world=world)
@@ -389,32 +478,56 @@ def test_physical_mask_false_rejects_candidate_and_counts_unreachable() -> None:
 def test_physical_ids_are_stable_across_frontier_fallback_and_generation_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    world = _world_with_frontier()
     builder = CandidateBuilderV2(_RecordingEstimator())
-    without_fallback = monkeypatch.context()
-    with without_fallback as scoped:
+    with monkeypatch.context() as scoped:
         scoped.setattr(builder, "_fallback_observation_poses", lambda *args: [])
-        frontier_only = _formal_universe(builder)
-    targets = [candidate.position_grid_key for candidate in frontier_only.candidates]
+        discovery = _formal_universe(builder, world=world)
+    rejected_cell = discovery.candidates[0].position_grid_key
+    physical_mask = world.observed_mask.copy()
+    physical_mask[rejected_cell] = False
+    physical = _physical_reachability(world, mask=physical_mask)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(builder, "_fallback_observation_poses", lambda *args: [])
+        frontier_only = _formal_universe(
+            builder,
+            world=world,
+            physical_reachability=physical,
+        )
+    targets = [
+        rejected_cell,
+        *(candidate.position_grid_key for candidate in frontier_only.candidates),
+    ]
     with monkeypatch.context() as scoped:
         scoped.setattr(
             builder,
             "_fallback_observation_poses",
             lambda *args: targets,
         )
-        duplicated = _formal_universe(builder)
+        duplicated = _formal_universe(
+            builder,
+            world=world,
+            physical_reachability=physical,
+        )
     with monkeypatch.context() as scoped:
         scoped.setattr(
             builder,
             "_fallback_observation_poses",
             lambda *args: targets[::-1],
         )
-        reordered = _formal_universe(builder)
+        reordered = _formal_universe(
+            builder,
+            world=world,
+            physical_reachability=physical,
+        )
 
     expected_ids = tuple(candidate.candidate_id for candidate in frontier_only.candidates)
     assert tuple(candidate.candidate_id for candidate in duplicated.candidates) == expected_ids
     assert tuple(candidate.candidate_id for candidate in reordered.candidates) == expected_ids
     assert duplicated.universe_sha256 == frontier_only.universe_sha256
     assert reordered.universe_sha256 == frontier_only.universe_sha256
+    assert duplicated.diagnostics == frontier_only.diagnostics
+    assert reordered.diagnostics == frontier_only.diagnostics
 
 
 def test_no_reveal_and_primitive_source_changes_preserve_physical_identities() -> None:
@@ -523,6 +636,101 @@ def test_current_snapshot_unknown_failed_id_fails_closed_but_old_snapshot_is_dro
     )
     assert failed_id in set(selected.batch.candidate_ids[selected.batch.mask])
     assert selected.batch.diagnostics.planner_failed_current_snapshot_count == 0
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    ("active_blank", "duplicate", "not_in_universe", "target_mismatch"),
+)
+def test_formal_candidate_result_rejects_malformed_active_batch(
+    malformation: str,
+) -> None:
+    builder = CandidateBuilderV2(_RecordingEstimator())
+    universe = _formal_universe(builder)
+    selected = builder.select_available(
+        universe,
+        canvas_id=_canvas().identity,
+    )
+    assert selected.batch.count >= 2
+    features = selected.batch.features.copy()
+    mask = selected.batch.mask.copy()
+    elevations = selected.batch.target_elevation_m.copy()
+    positions = selected.batch.target_positions_m.copy()
+    yaw = selected.batch.target_yaw_rad.copy()
+    candidate_ids = selected.batch.candidate_ids.copy()
+    if malformation == "active_blank":
+        candidate_ids[0] = ""
+    elif malformation == "duplicate":
+        candidate_ids[1] = candidate_ids[0]
+    elif malformation == "not_in_universe":
+        candidate_ids[0] = "f" * 64
+    else:
+        positions[0, 0] += 0.001
+    malformed = CandidateBatch(
+        features=features,
+        mask=mask,
+        canvas_id=selected.batch.canvas_id,
+        diagnostics=selected.batch.diagnostics,
+        target_elevation_m=elevations,
+        target_positions_m=positions,
+        target_yaw_rad=yaw,
+        candidate_ids=candidate_ids,
+    )
+
+    with pytest.raises(ValueError, match="formal candidate batch"):
+        CandidateBuildResult(selected.universe, malformed)
+
+
+def test_formal_candidate_result_owns_readonly_arrays_without_freezing_callers() -> None:
+    builder = CandidateBuilderV2(_RecordingEstimator())
+    selected = builder.select_available(
+        _formal_universe(builder),
+        canvas_id=_canvas().identity,
+    )
+    caller_arrays = (
+        selected.batch.features.copy(),
+        selected.batch.mask.copy(),
+        selected.batch.target_elevation_m.copy(),
+        selected.batch.target_positions_m.copy(),
+        selected.batch.target_yaw_rad.copy(),
+        selected.batch.candidate_ids.copy(),
+    )
+    caller_batch = CandidateBatch(
+        features=caller_arrays[0],
+        mask=caller_arrays[1],
+        canvas_id=selected.batch.canvas_id,
+        diagnostics=selected.batch.diagnostics,
+        target_elevation_m=caller_arrays[2],
+        target_positions_m=caller_arrays[3],
+        target_yaw_rad=caller_arrays[4],
+        candidate_ids=caller_arrays[5],
+    )
+
+    result = CandidateBuildResult(selected.universe, caller_batch)
+    result_arrays = (
+        result.batch.features,
+        result.batch.mask,
+        result.batch.target_elevation_m,
+        result.batch.target_positions_m,
+        result.batch.target_yaw_rad,
+        result.batch.candidate_ids,
+    )
+
+    assert all(array.flags.writeable for array in caller_arrays)
+    assert all(not array.flags.writeable for array in result_arrays)
+    assert all(
+        not np.shares_memory(caller, owned)
+        for caller, owned in zip(caller_arrays, result_arrays, strict=True)
+    )
+    legacy = _builder().build(
+        _world_with_frontier(),
+        _mission(),
+        Pose2(500.0, 512.0),
+        _projection(),
+        platform_type="WHEELED",
+    )
+    assert legacy.count > 0
+    assert np.all(legacy.candidate_ids[legacy.mask] == "")
 
 
 def test_4097_qualified_positions_compress_to_stable_4096_universe(
