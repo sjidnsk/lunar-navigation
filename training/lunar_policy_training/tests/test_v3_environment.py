@@ -786,7 +786,11 @@ def test_all_false_candidates_bypass_policy_without_fallback() -> None:
             "NO_RECOVERABLE_OBSERVATION_STATE",
         ),
         (
-            _candidate_diagnostics(zero_gain_count=2),
+            _candidate_diagnostics(
+                physical_candidate_universe_count=2,
+                planner_failed_current_snapshot_count=2,
+                zero_gain_count=2,
+            ),
             0,
             (False, False),
             "ZERO_GAIN",
