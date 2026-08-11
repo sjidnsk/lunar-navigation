@@ -1037,7 +1037,7 @@ def test_formal_episode_estimates_candidate_gain_from_detail_observation(
     assert worker.episode._current_candidate_gain_resolution_m == 0.2
 
 
-def test_formal_v5_snapshot_fails_closed_without_physical_identity(
+def test_formal_v6_snapshot_records_physical_identity(
     tmp_path: pathlib.Path,
 ) -> None:
     assembly, _, _ = _assembly(tmp_path)
@@ -1048,8 +1048,17 @@ def test_formal_v5_snapshot_fails_closed_without_physical_identity(
         platform_worker_index=0,
         platform_worker_count=1,
     )
-    with pytest.raises(ValueError, match="cannot represent physical opportunity"):
-        worker.snapshot_episode_state()
+    state = worker.snapshot_episode_state()
+    snapshot = worker.episode._snapshot
+
+    assert snapshot is not None
+    assert state["physical_snapshot_id"] == (
+        snapshot.candidate_universe.physical_snapshot_id
+    )
+    assert state["physical_candidate_universe_sha256"] == (
+        snapshot.candidate_universe_sha256
+    )
+    assert state["candidate_gain_resolution_m"] == 0.2
 
 
 def test_formal_candidate_path_never_calls_the_legacy_frontier_builder(
@@ -1077,7 +1086,7 @@ def test_formal_candidate_path_never_calls_the_legacy_frontier_builder(
 
 
 @pytest.mark.parametrize("platform", ("WHEELED", "LEGGED", "HOPPER"))
-def test_formal_v5_replay_fails_closed_for_all_platforms(
+def test_formal_v5_restore_fails_closed_for_all_platforms(
     tmp_path: pathlib.Path, platform: str,
 ) -> None:
     assembly, _, _ = _assembly(tmp_path)
@@ -1088,16 +1097,26 @@ def test_formal_v5_replay_fails_closed_for_all_platforms(
         platform_worker_index=0,
         platform_worker_count=1,
     )
-    with pytest.raises(ValueError, match="retired graph identity"):
-        worker.episode.replay_state(object())
+    legacy_state = worker.snapshot_episode_state()
+    legacy_state.pop("physical_snapshot_id")
+
+    with pytest.raises(ValueError, match="worker state structure"):
+        assembly.factory.restore_for_episode(
+            worker_index=0,
+            platform_type=platform,
+            episode_cursor=4,
+            platform_worker_index=0,
+            platform_worker_count=1,
+            state=legacy_state,
+        )
 
 
-def test_formal_v5_restore_fails_closed_before_parsing_legacy_state(
+def test_formal_restore_rejects_malformed_state_before_episode_replay(
     tmp_path: pathlib.Path,
 ) -> None:
     assembly, _, _ = _assembly(tmp_path)
 
-    with pytest.raises(ValueError, match="physical replay schema"):
+    with pytest.raises(ValueError, match="worker state structure"):
         assembly.factory.restore_for_episode(
             worker_index=0,
             platform_type="WHEELED",
@@ -1317,8 +1336,10 @@ def test_ground_option_freezes_target_when_candidate_arrays_refresh(
     with pytest.raises(ValueError, match="active ground option"):
         worker.snapshot_episode_state()
     episode.clear_ground_option()
-    with pytest.raises(ValueError, match="cannot represent physical opportunity"):
-        worker.snapshot_episode_state()
+    state = worker.snapshot_episode_state()
+    assert state["physical_snapshot_id"] == (
+        episode._snapshot.candidate_universe.physical_snapshot_id
+    )
     with pytest.raises(RuntimeError, match="no active ground option"):
         episode.ground_option_distance_m()
 
@@ -1662,10 +1683,10 @@ def test_rolling_continuation_snapshot_tracks_latest_pose_and_evidence(
     )
 
 
-def test_parallel_and_evaluation_consumers_remain_deferred_to_failure_refresh() -> None:
-    """Task 8 owns replacing this legacy planner-rejection consumer."""
+def test_parallel_consumer_has_no_legacy_planner_rejection_counter() -> None:
     consumer_source = inspect.getsource(parallel_pool_module._worker_main)
 
-    assert "planner_rejected_count" in consumer_source
+    assert "planner_rejected_count" not in consumer_source
+    assert "rejected_candidate_indices" not in consumer_source
     with pytest.raises(TypeError, match="planner_rejected_count"):
         replace(CandidateDiagnostics(), planner_rejected_count=0)
