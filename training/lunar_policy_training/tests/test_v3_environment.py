@@ -793,7 +793,8 @@ def test_all_false_candidates_bypass_policy_without_fallback() -> None:
         ),
         (
             _candidate_diagnostics(
-                physical_snapshot_id="", visited_excluded_count=5
+                physical_candidate_universe_count=5,
+                visited_excluded_count=5,
             ),
             0,
             (False, False),
@@ -809,6 +810,16 @@ def test_all_false_candidates_bypass_policy_without_fallback() -> None:
             _candidate_diagnostics(
                 physical_candidate_universe_count=146,
                 planner_failed_current_snapshot_count=146,
+            ),
+            146,
+            (False, False),
+            "PLANNER_BLOCKED_WITH_OPPORTUNITY",
+        ),
+        (
+            _candidate_diagnostics(
+                physical_candidate_universe_count=146,
+                planner_failed_current_snapshot_count=100,
+                visited_excluded_count=46,
             ),
             146,
             (False, False),
@@ -866,8 +877,8 @@ def test_candidate_boundary_matrix_continues_or_terminates_from_observed_facts(
         (
             _candidate_diagnostics(
                 physical_candidate_universe_count=2,
-                planner_failed_current_snapshot_count=1,
-                visited_excluded_count=1,
+                planner_failed_current_snapshot_count=0,
+                visited_excluded_count=2,
             ),
             2,
             (False, False),

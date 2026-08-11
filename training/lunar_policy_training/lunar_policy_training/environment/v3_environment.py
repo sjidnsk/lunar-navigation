@@ -102,9 +102,13 @@ def _audit_candidate_boundary(
     reserve = diagnostics.untried_reserve_count
     failed = diagnostics.planner_failed_current_snapshot_count
     oracle_count = oracle.opportunity_count
-    if universe == 0:
-        if oracle_count != 0:
-            raise EnvironmentInvariantError("CANDIDATE_ORACLE_MISMATCH")
+    if available > 0:
+        if oracle_count > 0:
+            return None
+        raise EnvironmentInvariantError("CANDIDATE_ORACLE_MISMATCH")
+    if reserve > 0:
+        raise EnvironmentInvariantError("candidate availability is inconsistent")
+    if oracle_count == 0:
         if diagnostics.visited_excluded_count > 0:
             return TerminalReason.VISITED_EXHAUSTED
         if diagnostics.zero_gain_count > 0:
@@ -112,17 +116,11 @@ def _audit_candidate_boundary(
         if diagnostics.physical_unreachable_count > 0:
             return TerminalReason.NO_RECOVERABLE_OBSERVATION_STATE
         return TerminalReason.NO_TRANSIT_OPPORTUNITY
-    if oracle_count == 0:
+    active_unvisited = universe - diagnostics.visited_excluded_count
+    if universe == 0 or active_unvisited <= 0:
         raise EnvironmentInvariantError("CANDIDATE_ORACLE_MISMATCH")
-    blocked = (
-        failed == universe
-        and reserve == 0
-        and available == 0
-    )
-    if blocked:
+    if failed == active_unvisited:
         return TerminalReason.PLANNER_BLOCKED_WITH_OPPORTUNITY
-    if available > 0:
-        return None
     raise EnvironmentInvariantError("candidate availability is inconsistent")
 
 
