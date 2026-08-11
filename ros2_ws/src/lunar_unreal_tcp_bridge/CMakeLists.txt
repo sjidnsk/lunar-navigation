@@ -6,7 +6,10 @@ find_package(nlohmann_json REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
   src/metadata_validation.cpp
-  src/protocol.cpp)
+  src/outbound_queue.cpp
+  src/protocol.cpp
+  src/session_protocol.cpp
+  src/stream_decoder.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 target_include_directories(${PROJECT_NAME}
   PUBLIC
@@ -38,6 +41,15 @@ if(BUILD_TESTING)
   ament_add_gtest(unreal_tcp_metadata_validation_test
     test/metadata_validation_test.cpp)
   target_link_libraries(unreal_tcp_metadata_validation_test ${PROJECT_NAME})
+
+  ament_add_gtest(unreal_tcp_stream_decoder_test test/stream_decoder_test.cpp)
+  target_link_libraries(unreal_tcp_stream_decoder_test ${PROJECT_NAME})
+
+  ament_add_gtest(unreal_tcp_outbound_queue_test test/outbound_queue_test.cpp)
+  target_link_libraries(unreal_tcp_outbound_queue_test ${PROJECT_NAME})
+
+  ament_add_gtest(unreal_tcp_session_protocol_test test/session_protocol_test.cpp)
+  target_link_libraries(unreal_tcp_session_protocol_test ${PROJECT_NAME})
 endif()
 
 ament_package()
