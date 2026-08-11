@@ -12,8 +12,10 @@
 #include <gtest/gtest.h>
 
 #include "hierarchical/global_route_planner.hpp"
+#include "hierarchical/local_planning_problem.hpp"
 #include "lunar_planner_core/planner.hpp"
 #include "test_fixtures.hpp"
+#include "wheel/wheel_planner.hpp"
 
 namespace lunar::planning::hierarchical
 {
@@ -164,6 +166,56 @@ TEST(HierarchicalRegression, DistantGroundRoutesSucceedAndWallFailsClosed) {
   EXPECT_EQ(wall.outcome, PlanningOutcome::kNoKnownSafeRoute);
   EXPECT_EQ(wall.reason_code, "GLOBAL_NO_KNOWN_SAFE_ROUTE");
   EXPECT_FALSE(wall.reference.has_value());
+}
+
+TEST(HierarchicalRegression,
+     HistoricalBoundaryWindowKeepsPhysicalMapSeparateFromSearchDomain) {
+  PlannerInput input = test::MakeValidWheelInput();
+  input.request_id = "historical-boundary-window";
+  input.config.optimization.maximum_iterations = 0U;
+  auto& state = std::get<WheeledState>(input.current_state);
+  state.pose.position_m.y = 3.1;
+  std::get<PointGoal>(input.goal_map.target).position_m.y = 3.1;
+
+  std::vector<std::uint8_t> allowed(input.world.local_map.CellCount(), 0U);
+  for (std::size_t x = 2U; x <= 4U; ++x) {
+    allowed.at(3U * input.world.local_map.width + x) = 1U;
+  }
+  hierarchical::LocalSearchDomain domain{
+      input.world.local_map.width, input.world.local_map.height, allowed};
+  const std::string domain_sha256 = domain.sha256();
+  const hierarchical::LocalPlanningProblem problem{
+      .request_id = input.request_id,
+      .platform_id = input.platform_id,
+      .capability_version = input.capability_version,
+      .local_map_generation = input.local_map_generation,
+      .state_time = input.state_time,
+      .current_state = input.current_state,
+      .goal_odom = input.goal_map,
+      .local_map = input.world.local_map,
+      .search_domain = std::move(domain),
+      .capability = input.capability,
+      .config = input.config,
+      .stop_token = input.stop_token,
+  };
+  const auto& obstacle = std::get<std::vector<std::uint8_t>>(
+      problem.local_map.layers.at("obstacle").values);
+  const shared::GridCell footprint_overhang{.x = 4, .y = 2};
+
+  ASSERT_EQ(problem.search_domain.allowed_cell_count(), 3U);
+  ASSERT_FALSE(problem.search_domain.Contains(footprint_overhang));
+  ASSERT_EQ(obstacle.at(2U * problem.local_map.width + 4U), 0U);
+  ASSERT_EQ(problem.local_map.width, input.world.local_map.width);
+  ASSERT_EQ(problem.local_map.height, input.world.local_map.height);
+
+  const PlannerOutput output = wheel::WheelPlanner{}.Plan(problem);
+
+  ASSERT_EQ(output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << output.reason_code;
+  EXPECT_GT(output.diagnostics.expanded_states, 0U);
+  EXPECT_DOUBLE_EQ(input.config.local_frontier.additional_corridor_margin_m,
+                   2.0);
+  EXPECT_FALSE(domain_sha256.empty());
 }
 
 TEST(HierarchicalRegression, FiftyMetreFarGoalsSucceedForAllPlatforms) {

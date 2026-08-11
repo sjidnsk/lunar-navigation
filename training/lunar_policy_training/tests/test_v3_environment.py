@@ -915,7 +915,7 @@ def test_candidate_oracle_or_availability_mismatch_fails_closed(
     assert env.training_stopped is True
 
 
-def test_all_planner_failures_with_146_oracle_opportunities_report_blocked() -> None:
+def test_oracle_146_refills_last_reserve_then_reports_planner_blocked() -> None:
     rejected = PlannerOutput()
     rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
     rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
@@ -924,6 +924,12 @@ def test_all_planner_failures_with_146_oracle_opportunities_report_blocked() -> 
     )
     rejected.reason_code = "NO_ROUTE"
     oracle_calls = 0
+    diagnostics = _candidate_diagnostics(
+        physical_candidate_universe_count=26,
+        selected_policy_candidate_count=1,
+        available_candidate_count=1,
+        planner_failed_current_snapshot_count=25,
+    )
     initial = _observation(candidate_mask=(True, False))
     refreshed = _observation(
         candidate_mask=(False, False),
@@ -955,6 +961,13 @@ def test_all_planner_failures_with_146_oracle_opportunities_report_blocked() -> 
         _disposition: CandidateDisposition,
         _physical_snapshot_id: str,
     ) -> BoundaryObservationResult:
+        nonlocal diagnostics
+        diagnostics = _candidate_diagnostics(
+            physical_candidate_universe_count=26,
+            selected_policy_candidate_count=0,
+            available_candidate_count=0,
+            planner_failed_current_snapshot_count=26,
+        )
         return BoundaryObservationResult(
             next_observation=refreshed,
             mission_observed_delta=0.0,
@@ -971,22 +984,21 @@ def test_all_planner_failures_with_146_oracle_opportunities_report_blocked() -> 
         initial_observation=initial,
         require_identity_bound_request=True,
         planning_failure_refresher=refresh,
-        candidate_diagnostics_provider=lambda: _candidate_diagnostics(
-            physical_candidate_universe_count=146,
-            selected_policy_candidate_count=0,
-            available_candidate_count=0,
-            planner_failed_current_snapshot_count=146,
-        ),
+        candidate_diagnostics_provider=lambda: diagnostics,
         frontier_oracle=oracle,
         remaining_coverable_detail_cell_count_provider=lambda: 88,
     )
+
+    ready = env.refresh_decision_boundary()
+    assert ready.execution_state == "DECISION_READY"
+    assert ready.terminal_reason is None
 
     result = env.advance_prepared_action(
         PolicyAction(frontier_index=0, theta_rad=0.0),
         expected_identity=env.current_observation.observation_identities[0],
     )
 
-    assert oracle_calls == 1
+    assert oracle_calls == 2
     assert result.transition is not None
     assert result.transition.terminated is True
     assert result.transition.terminal_reason is not None
@@ -996,6 +1008,11 @@ def test_all_planner_failures_with_146_oracle_opportunities_report_blocked() -> 
     )
     assert result.transition.oracle_opportunity_count == 146
     assert result.transition.remaining_coverable_detail_cell_count == 88
+    assert result.transition.success_first_crossing is False
+    assert result.transition.terminal_reason not in {
+        TerminalReason.VISITED_EXHAUSTED,
+        TerminalReason.NO_TRANSIT_OPPORTUNITY,
+    }
 
 
 @pytest.mark.parametrize(
@@ -1051,7 +1068,7 @@ def test_planner_hard_outcomes_never_become_legal_exploration_exhaustion(
     assert result.transition.remaining_coverable_detail_cell_count == 456
 
 
-def test_hard_keep_failure_does_not_refresh_or_write_candidate_failures() -> None:
+def test_oracle_146_hard_keep_failure_does_not_refresh_or_report_blocked() -> None:
     output = PlannerOutput()
     output.outcome = PlanningOutcome.INVALID_REQUEST
     output.directive = ExecutionDirective.NO_SAFE_REFERENCE
@@ -1087,6 +1104,10 @@ def test_hard_keep_failure_does_not_refresh_or_write_candidate_failures() -> Non
     assert env.current_candidate_diagnostics() == diagnostics
     assert result.transition is not None
     assert result.transition.terminal_reason is TerminalReason.HARD_FAILURE
+    assert (
+        result.transition.terminal_reason
+        is not TerminalReason.PLANNER_BLOCKED_WITH_OPPORTUNITY
+    )
 
 
 def test_execution_success_crossing_precedes_candidate_oracle_audit() -> None:

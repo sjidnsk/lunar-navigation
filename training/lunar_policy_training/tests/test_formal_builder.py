@@ -22,6 +22,7 @@ from lunar_policy_training.environment.candidate_builder import (
     CandidateBatch,
     CandidateBuilderV2,
     CandidateDiagnostics,
+    PhysicalCandidateUniverse,
 )
 from lunar_policy_training.environment.coverability import (
     IneligibleReason,
@@ -1499,6 +1500,74 @@ def test_planning_failure_refresh_suppresses_stable_id_without_new_evidence(
     assert after_snapshot.candidates.diagnostics.planner_failed_current_snapshot_count == 1
     assert after_identity.map_snapshot_id != before_identity.map_snapshot_id
     assert after_identity.candidate_set_id != before_identity.candidate_set_id
+
+
+def test_boundary_window_refills_one_reserve_before_exhaustion(
+    tmp_path: pathlib.Path,
+) -> None:
+    assembly, _, _ = _assembly(tmp_path)
+    episode = assembly.factory(0, "WHEELED").episode
+    snapshot = episode._snapshot
+    assert snapshot is not None
+    assert snapshot.frontier_oracle.oracle_opportunity_count == 146
+    candidates = snapshot.candidate_universe.candidates[:26]
+    assert len(candidates) == 26
+    diagnostics = replace(
+        snapshot.candidate_universe.diagnostics,
+        physical_candidate_universe_count=26,
+        selected_policy_candidate_count=26,
+        available_candidate_count=26,
+        untried_reserve_count=0,
+    )
+    universe = PhysicalCandidateUniverse(
+        physical_snapshot_id=(
+            snapshot.candidate_universe.physical_snapshot_id
+        ),
+        physical_reachability_algorithm_id=(
+            snapshot.candidate_universe.physical_reachability_algorithm_id
+        ),
+        candidates=candidates,
+        universe_sha256=hashlib.sha256(
+            "".join(candidate.candidate_id for candidate in candidates).encode(
+                "ascii"
+            )
+        ).hexdigest(),
+        diagnostics=diagnostics,
+    )
+    failed_ids = {candidate.candidate_id for candidate in candidates[:25]}
+    assert len(candidates) - len(failed_ids) == 1
+    assert snapshot.candidates.canvas_id is not None
+
+    refilled = episode._candidate_builder.select_available(
+        universe,
+        canvas_id=snapshot.candidates.canvas_id,
+        failure_snapshot_id=universe.physical_snapshot_id,
+        planner_failed_candidate_ids=failed_ids,
+    )
+
+    assert refilled.batch.count == 1
+    assert tuple(refilled.batch.candidate_ids[refilled.batch.mask]) == (
+        candidates[-1].candidate_id,
+    )
+    assert refilled.batch.diagnostics.physical_candidate_universe_count == 26
+    assert refilled.batch.diagnostics.planner_failed_current_snapshot_count == 25
+    assert refilled.batch.diagnostics.available_candidate_count == 1
+    assert refilled.batch.diagnostics.untried_reserve_count == 0
+
+    exhausted = episode._candidate_builder.select_available(
+        universe,
+        canvas_id=snapshot.candidates.canvas_id,
+        failure_snapshot_id=universe.physical_snapshot_id,
+        planner_failed_candidate_ids={
+            candidate.candidate_id for candidate in candidates
+        },
+    )
+
+    assert exhausted.batch.count == 0
+    assert exhausted.batch.diagnostics.physical_candidate_universe_count == 26
+    assert exhausted.batch.diagnostics.planner_failed_current_snapshot_count == 26
+    assert exhausted.batch.diagnostics.available_candidate_count == 0
+    assert exhausted.batch.diagnostics.untried_reserve_count == 0
 
 
 def test_planning_failure_snapshot_mismatch_fails_before_refresh_state_changes(
