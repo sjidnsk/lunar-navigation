@@ -56,6 +56,12 @@ if(BUILD_TESTING)
   target_include_directories(${PROJECT_NAME}_visibility_test PRIVATE include)
   target_link_libraries(${PROJECT_NAME}_visibility_test
     lunar_training_visibility)
+  ament_add_gtest(${PROJECT_NAME}_plan_exception_boundary_test
+    test/plan_exception_boundary_test.cpp)
+  target_include_directories(${PROJECT_NAME}_plan_exception_boundary_test PRIVATE
+    src)
+  target_link_libraries(${PROJECT_NAME}_plan_exception_boundary_test
+    lunar_planner_core::lunar_planner_core)
   ament_add_pytest_test(${PROJECT_NAME}_test_bridge
     test/test_bridge.py
     TIMEOUT 180)

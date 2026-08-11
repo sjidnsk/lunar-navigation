@@ -1,23 +1,11 @@
-#include <new>
 #include <stop_token>
 #include <utility>
 
 #include "lunar_planner_training_bridge/request.hpp"
+#include "plan_exception_boundary.hpp"
 
 namespace lunar::planning::training {
 namespace {
-
-[[nodiscard]] PlannerOutput BridgeFailure(
-    const PlanningOutcome outcome, const CandidateDisposition disposition,
-    const char *reason_code) noexcept {
-  PlannerOutput output;
-  output.outcome = outcome;
-  output.directive = ExecutionDirective::kNoSafeReference;
-  output.candidate_disposition = disposition;
-  output.reason_code = reason_code;
-  output.diagnostics.planner_name = "cpp_v3_hierarchical";
-  return output;
-}
 
 [[nodiscard]] PlannerInput ToPlannerInput(
     const TrainingPlanRequest &request) {
@@ -46,18 +34,9 @@ namespace {
 }  // namespace
 
 PlannerOutput PlannerBridge::Plan(const TrainingPlanRequest &request) noexcept {
-  try {
-    PlannerOutput output = planner_.Plan(ToPlannerInput(request));
-    return output;
-  } catch (const std::bad_alloc &) {
-    return BridgeFailure(PlanningOutcome::kResourceExhausted,
-                         CandidateDisposition::kKeep,
-                         "BRIDGE_RESOURCE_EXHAUSTED");
-  } catch (...) {
-    return BridgeFailure(PlanningOutcome::kNumericalFailure,
-                         CandidateDisposition::kKeep,
-                         "BRIDGE_REQUEST_CONVERSION_FAILED");
-  }
+  return detail::TranslatePlanExceptions([this, &request] {
+    return planner_.Plan(ToPlannerInput(request));
+  });
 }
 
 ReachabilityProjectionResult PlannerBridge::ProjectReachability(
