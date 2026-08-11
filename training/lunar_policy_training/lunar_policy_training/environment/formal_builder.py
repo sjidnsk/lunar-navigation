@@ -197,6 +197,7 @@ class _MapSnapshot:
     projection: PlatformProjection
     physical_reachability: PhysicalReachabilityResult
     candidate_universe: PhysicalCandidateUniverse
+    planning_physical_snapshot_id: str
     frontier_oracle: FrontierOracleResult
 
     @property
@@ -541,7 +542,7 @@ class FormalEpisode:
         self._planner_failure_snapshot_id: str | None = None
         self._planner_failed_candidate_ids: set[str] = set()
         self._pending_planning_failure: (
-            tuple[str, bridge_api.CandidateDisposition] | None
+            tuple[str, bridge_api.CandidateDisposition, str] | None
         ) = None
         self.last_hop_available_delta_v_mps = 0.0
         self._reveal_history: list[FormalRevealState] = []
@@ -859,7 +860,11 @@ class FormalEpisode:
             failed_candidate_ids.clear()
         pending_failure = self._pending_planning_failure
         if pending_failure is not None:
-            candidate_id, disposition = pending_failure
+            candidate_id, disposition, pending_snapshot_id = pending_failure
+            if pending_snapshot_id != candidate_universe.physical_snapshot_id:
+                raise ValueError(
+                    "planning failure physical snapshot changed during rebuild"
+                )
             if disposition == (
                 bridge_api.CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT
             ):
@@ -903,6 +908,7 @@ class FormalEpisode:
             projection,
             physical_reachability,
             candidate_result.universe,
+            candidate_universe.physical_snapshot_id,
             frontier_oracle,
         )
         return PolicyBatch(
@@ -932,6 +938,19 @@ class FormalEpisode:
             snapshot.projection,
             snapshot.physical_reachability,
             snapshot.candidate_universe,
+            CandidateBuilderV2._physical_snapshot_id(
+                platform_type=self.platform_type,
+                platform_id=self.capability.platform_id,
+                capability_content_sha256=(
+                    _physical_capability_content_sha256(self.capability)
+                ),
+                mission_revision=1,
+                pose_map=pose,
+                evidence_generation=self.sensor_state.evidence_generation,
+                physical_evidence_sha256=(
+                    self.sensor_state.physical_evidence_sha256()
+                ),
+            ),
             snapshot.frontier_oracle,
         )
         previous = self.controller.current_observation
@@ -1003,7 +1022,7 @@ class FormalEpisode:
                 snapshot.candidates.candidate_ids[action.frontier_index]
             ),
             physical_snapshot_id=(
-                snapshot.candidate_universe.physical_snapshot_id
+                snapshot.planning_physical_snapshot_id
             ),
         )
 
@@ -1083,7 +1102,7 @@ class FormalEpisode:
             identity=expected_identity,
             candidate_id=option.candidate_id,
             physical_snapshot_id=(
-                snapshot.candidate_universe.physical_snapshot_id
+                snapshot.planning_physical_snapshot_id
             ),
         )
 
@@ -1106,6 +1125,7 @@ class FormalEpisode:
         self,
         candidate_id: str,
         disposition: bridge_api.CandidateDisposition,
+        physical_snapshot_id: str,
     ) -> BoundaryObservationResult:
         """Rebuild availability after a planner response without new evidence."""
         if disposition not in {
@@ -1116,6 +1136,8 @@ class FormalEpisode:
         snapshot = self._snapshot
         if snapshot is None:
             raise RuntimeError("planning failure refresh has no map snapshot")
+        if physical_snapshot_id != snapshot.planning_physical_snapshot_id:
+            raise ValueError("planning failure physical snapshot is stale")
         universe_ids = {
             candidate.candidate_id
             for candidate in snapshot.candidate_universe.candidates
@@ -1126,7 +1148,11 @@ class FormalEpisode:
             )
         self._active_ground_option = None
         self._defer_candidate_rebuild = False
-        self._pending_planning_failure = (candidate_id, disposition)
+        self._pending_planning_failure = (
+            candidate_id,
+            disposition,
+            physical_snapshot_id,
+        )
         execution_state = (
             self.controller.current_observation.observation_identities[0]
             .execution_state

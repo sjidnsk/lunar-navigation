@@ -180,7 +180,10 @@ class V3ExplorationEnvironment:
             ObservationBoundaryController | None
         ) = None,
         planning_failure_refresher: (
-            Callable[[str, CandidateDisposition], BoundaryObservationResult]
+            Callable[
+                [str, CandidateDisposition, str],
+                BoundaryObservationResult,
+            ]
             | None
         ) = None,
         require_sensor_closed_loop: bool = False,
@@ -1331,7 +1334,11 @@ class V3ExplorationEnvironment:
             )
         before_identity = self._observation.observation_identities[0]
         try:
-            boundary = refresher(prepared.candidate_id, disposition)
+            boundary = refresher(
+                prepared.candidate_id,
+                disposition,
+                prepared.physical_snapshot_id,
+            )
         except (TypeError, ValueError, RuntimeError) as error:
             self._fail_closed(str(error))
         if not isinstance(boundary, BoundaryObservationResult):
@@ -1442,7 +1449,10 @@ def create_v3_environment(
         ObservationBoundaryController | None
     ) = None,
     planning_failure_refresher: (
-        Callable[[str, CandidateDisposition], BoundaryObservationResult] | None
+        Callable[
+            [str, CandidateDisposition, str], BoundaryObservationResult
+        ]
+        | None
     ) = None,
     require_sensor_closed_loop: bool = False,
     reference_executor: Callable[

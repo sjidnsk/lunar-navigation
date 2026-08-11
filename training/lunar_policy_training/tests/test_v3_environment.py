@@ -248,7 +248,7 @@ def test_initial_planning_failure_uses_prepared_identity_for_zero_evidence_refre
         CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT
     )
     output.reason_code = "NO_ROUTE"
-    refresh_calls: list[tuple[str, CandidateDisposition]] = []
+    refresh_calls: list[tuple[str, CandidateDisposition, str]] = []
 
     def build_request(
         action: PolicyAction, identity: ObservationIdentity
@@ -264,9 +264,17 @@ def test_initial_planning_failure_uses_prepared_identity_for_zero_evidence_refre
         )
 
     def refresh(
-        failed_candidate_id: str, disposition: CandidateDisposition
+        failed_candidate_id: str,
+        disposition: CandidateDisposition,
+        failed_physical_snapshot_id: str,
     ) -> BoundaryObservationResult:
-        refresh_calls.append((failed_candidate_id, disposition))
+        refresh_calls.append(
+            (
+                failed_candidate_id,
+                disposition,
+                failed_physical_snapshot_id,
+            )
+        )
         return BoundaryObservationResult(
             next_observation=refreshed_observation,
             mission_observed_delta=0.0,
@@ -297,6 +305,7 @@ def test_initial_planning_failure_uses_prepared_identity_for_zero_evidence_refre
         (
             candidate_id,
             CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+            physical_snapshot_id,
         )
     ]
     assert transition.next_observation.candidate_mask.tolist() == [
@@ -826,7 +835,9 @@ def test_last_planner_rejection_with_oracle_opportunity_reports_planner_failure(
         )
 
     def refresh(
-        _candidate_id: str, _disposition: CandidateDisposition
+        _candidate_id: str,
+        _disposition: CandidateDisposition,
+        _physical_snapshot_id: str,
     ) -> BoundaryObservationResult:
         return BoundaryObservationResult(
             next_observation=refreshed,
@@ -1170,13 +1181,20 @@ def test_rolling_planning_failure_refreshes_after_aggregating_each_reference_onc
         CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT
     )
     rejected.reason_code = "ROLLING_GOAL_REJECTED"
-    refresh_calls: list[tuple[str, CandidateDisposition, int]] = []
+    refresh_calls: list[tuple[str, CandidateDisposition, str, int]] = []
 
     def refresh(
-        candidate_id: str, disposition: CandidateDisposition
+        candidate_id: str,
+        disposition: CandidateDisposition,
+        physical_snapshot_id: str,
     ) -> BoundaryObservationResult:
         refresh_calls.append(
-            (candidate_id, disposition, len(executor.references))
+            (
+                candidate_id,
+                disposition,
+                physical_snapshot_id,
+                len(executor.references),
+            )
         )
         return BoundaryObservationResult(
             next_observation=_observation(
@@ -1220,6 +1238,7 @@ def test_rolling_planning_failure_refreshes_after_aggregating_each_reference_onc
         (
             "a" * 64,
             CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+            "b" * 64,
             3,
         )
     ]

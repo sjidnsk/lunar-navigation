@@ -1469,6 +1469,7 @@ def test_planning_failure_refresh_suppresses_stable_id_without_new_evidence(
     refreshed = episode.refresh_after_planning_failure(
         failed_id,
         CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+        physical_snapshot_id=before_physical_snapshot_id,
     )
 
     after_snapshot = episode._snapshot
@@ -1498,6 +1499,98 @@ def test_planning_failure_refresh_suppresses_stable_id_without_new_evidence(
     assert after_snapshot.candidates.diagnostics.planner_failed_current_snapshot_count == 1
     assert after_identity.map_snapshot_id != before_identity.map_snapshot_id
     assert after_identity.candidate_set_id != before_identity.candidate_set_id
+
+
+def test_planning_failure_snapshot_mismatch_fails_before_refresh_state_changes(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if a stale request could suppress the current snapshot."""
+    assembly, _, _ = _assembly(tmp_path)
+    episode = assembly.factory(0, "WHEELED").episode
+    snapshot = episode._snapshot
+    assert snapshot is not None
+    candidate_index = int(np.flatnonzero(snapshot.candidates.mask)[0])
+    candidate_id = str(snapshot.candidates.candidate_ids[candidate_index])
+    before = episode.controller.current_observation
+    before_failures = set(episode._planner_failed_candidate_ids)
+    before_pending = episode._pending_planning_failure
+    before_generation = episode.sensor_state.evidence_generation
+    before_evidence = episode.sensor_state.physical_evidence_sha256()
+
+    with pytest.raises(ValueError, match="physical snapshot"):
+        episode.refresh_after_planning_failure(
+            candidate_id,
+            CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+            physical_snapshot_id="0" * 64,
+        )
+
+    after = episode.controller.current_observation
+    assert after.observation_identities == before.observation_identities
+    assert all(
+        torch.equal(getattr(after, name), getattr(before, name))
+        for name in before.input_names
+    )
+    assert episode._planner_failed_candidate_ids == before_failures
+    assert episode._pending_planning_failure == before_pending
+    assert episode.sensor_state.evidence_generation == before_generation
+    assert episode.sensor_state.physical_evidence_sha256() == before_evidence
+
+
+def test_rolling_continuation_snapshot_tracks_latest_pose_and_evidence(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if continuation attested the initial physical snapshot."""
+    assembly, _, _ = _assembly(tmp_path)
+    episode = assembly.factory(0, "WHEELED").episode
+    initial_observation = episode.controller.current_observation
+    initial_identity = initial_observation.observation_identities[0]
+    snapshot = episode._snapshot
+    assert snapshot is not None
+    candidate_index = int(np.flatnonzero(snapshot.candidates.mask)[2])
+    initial_prepared = episode.begin_ground_option(
+        PolicyAction(candidate_index, 0.0), initial_identity
+    )
+    target = initial_prepared.request.goal.target.position_m
+    start = episode.current_pose
+    moved = Pose2(
+        start.x_m + 0.1 * (float(target.x) - start.x_m),
+        start.y_m + 0.1 * (float(target.y) - start.y_m),
+        start.yaw_rad,
+        "map",
+        start.elevation_m
+        + 0.1 * (float(target.z) - start.elevation_m),
+    )
+    evidence = SensorBoundaryEvidence(moved, 1.0)
+    episode.current_pose = moved
+    episode._record_reveal(evidence, "DECISION_BOUNDARY")
+    boundary = episode.controller.after_execution(
+        platform_type="WHEELED",
+        execution_state="DECISION_BOUNDARY",
+        evidence=evidence,
+    )
+    continued = episode.continue_ground_option(
+        boundary.next_observation.observation_identities[0]
+    )
+
+    assert continued.candidate_id == initial_prepared.candidate_id
+    assert (
+        continued.physical_snapshot_id
+        != initial_prepared.physical_snapshot_id
+    )
+    refreshed = episode.refresh_after_planning_failure(
+        continued.candidate_id,
+        CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+        physical_snapshot_id=continued.physical_snapshot_id,
+    )
+    final_snapshot = episode._snapshot
+    assert final_snapshot is not None
+    assert (
+        final_snapshot.candidate_universe.physical_snapshot_id
+        == continued.physical_snapshot_id
+    )
+    assert refreshed.next_observation.observation_identities[0].state_time_ns == (
+        boundary.next_observation.observation_identities[0].state_time_ns
+    )
 
 
 def test_parallel_and_evaluation_consumers_remain_deferred_to_failure_refresh() -> None:
