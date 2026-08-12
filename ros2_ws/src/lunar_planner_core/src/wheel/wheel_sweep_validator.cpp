@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -139,6 +140,22 @@ Failure(std::string reason_code, const std::size_t sample_count = 0U) {
 
 } // namespace
 
+std::size_t WheelTerrainPoseKeyHash::operator()(
+    const WheelTerrainPoseKey& key) const noexcept {
+  std::uint64_t hash = 1469598103934665603ULL;
+  const auto append = [&](std::uint64_t value) {
+    for (std::size_t byte = 0U; byte < sizeof(value); ++byte) {
+      hash ^= value & 0xffU;
+      hash *= 1099511628211ULL;
+      value >>= 8U;
+    }
+  };
+  append(key.x_bits);
+  append(key.y_bits);
+  append(key.yaw_bits);
+  return static_cast<std::size_t>(hash);
+}
+
 WheelSweepValidator::WheelSweepValidator(
     const shared::SafeProjection &projection,
     const WheeledCapability &capability) noexcept
@@ -146,6 +163,9 @@ WheelSweepValidator::WheelSweepValidator(
   for (const Vec2 &vertex : capability.footprint_xy_m) {
     footprint_support_radius_m_ =
         std::max(footprint_support_radius_m_, std::hypot(vertex.x, vertex.y));
+  }
+  if (projection.source_map() != nullptr) {
+    terrain_cache_.reserve(projection.source_map()->cell_count() * 4U);
   }
 }
 
@@ -181,6 +201,12 @@ WheelSweepValidator::Validate(const WheelTransition &transition,
     return Failure("WHEEL_CURVATURE_LIMIT");
   }
 
+  const auto normalized_bits = [](double value) {
+    if (value == 0.0) {
+      value = 0.0;
+    }
+    return std::bit_cast<std::uint64_t>(value);
+  };
   const double translation_m = std::hypot(
       transition.target_pose.position_m.x - transition.source_pose.position_m.x,
       transition.target_pose.position_m.y -
@@ -240,9 +266,20 @@ WheelSweepValidator::Validate(const WheelTransition &transition,
     }
     const double yaw =
         transition.source_pose.yaw_rad + ratio * signed_yaw_delta;
-    const shared::WheelTerrainPoseEvaluation terrain =
-        shared::EvaluateWheelTerrainPose(
-            map, Vec2{.x = center_x, .y = center_y}, yaw, *capability_);
+    const WheelTerrainPoseKey key{
+        .x_bits = normalized_bits(center_x),
+        .y_bits = normalized_bits(center_y),
+        .yaw_bits = normalized_bits(yaw),
+    };
+    auto found = terrain_cache_.find(key);
+    if (found == terrain_cache_.end()) {
+      found = terrain_cache_.emplace(
+          key, shared::EvaluateWheelTerrainPose(
+                   map, Vec2{.x = center_x, .y = center_y}, yaw,
+                   *capability_)).first;
+      ++terrain_evaluation_count_;
+    }
+    const shared::WheelTerrainPoseEvaluation& terrain = found->second;
     if (!terrain.feasible) {
       return Failure(
           terrain.rejection_codes.empty()
@@ -319,6 +356,10 @@ WheelSweepValidator::Validate(const WheelTransition &transition,
       .minimum_underbody_clearance_m = minimum_underbody_clearance_m,
       .reason_code = "WHEEL_SWEEP_VALID",
   };
+}
+
+std::size_t WheelSweepValidator::terrain_evaluation_count() const noexcept {
+  return terrain_evaluation_count_;
 }
 
 } // namespace lunar::planning::wheel

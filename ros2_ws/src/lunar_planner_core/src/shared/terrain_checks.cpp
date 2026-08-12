@@ -4,8 +4,8 @@
 #include <array>
 #include <cmath>
 #include <limits>
-#include <map>
 #include <numbers>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -533,12 +533,22 @@ WheelTerrainPoseEvaluation EvaluateWheelTerrainPose(
 
   evaluation.maximum_positive_relief_m = 0.0;
   double mean_residual = 0.0;
-  std::map<GridCell, double> elevation_by_cell;
+  const std::size_t sample_grid_width = static_cast<std::size_t>(
+      maximum_cell->x - minimum_cell->x + 1);
+  const std::size_t sample_grid_height = static_cast<std::size_t>(
+      maximum_cell->y - minimum_cell->y + 1);
+  std::vector<std::optional<double>> elevation_by_cell(
+      sample_grid_width * sample_grid_height);
+  const auto sample_grid_index = [&](const GridCell cell) {
+    return static_cast<std::size_t>(cell.y - minimum_cell->y) *
+               sample_grid_width +
+           static_cast<std::size_t>(cell.x - minimum_cell->x);
+  };
   for (const TerrainSample& sample : samples) {
     evaluation.maximum_positive_relief_m = std::max(
         evaluation.maximum_positive_relief_m, sample.residual_m);
     mean_residual += sample.residual_m;
-    elevation_by_cell.emplace(sample.cell, sample.elevation_m);
+    elevation_by_cell[sample_grid_index(sample.cell)] = sample.elevation_m;
   }
   mean_residual /= static_cast<double>(samples.size());
   double residual_variance = 0.0;
@@ -556,12 +566,17 @@ WheelTerrainPoseEvaluation EvaluateWheelTerrainPose(
       GridCell{1, 0}, GridCell{0, 1}};
   const double maximum_continuous_step_m =
       std::tan(capability.maximum_slope_rad) * map.resolution_m();
-  for (const auto& [cell, elevation_m] : elevation_by_cell) {
+  for (const TerrainSample& sample : samples) {
     for (const GridCell offset : kForwardNeighbors) {
-      const auto found = elevation_by_cell.find(
-          GridCell{cell.x + offset.x, cell.y + offset.y});
-      if (found != elevation_by_cell.end() &&
-          std::abs(found->second - elevation_m) >
+      const GridCell neighbor{
+          sample.cell.x + offset.x, sample.cell.y + offset.y};
+      if (neighbor.x > maximum_cell->x || neighbor.y > maximum_cell->y) {
+        continue;
+      }
+      const std::optional<double>& neighbor_elevation =
+          elevation_by_cell[sample_grid_index(neighbor)];
+      if (neighbor_elevation.has_value() &&
+          std::abs(*neighbor_elevation - sample.elevation_m) >
               maximum_continuous_step_m + kElevationComparisonToleranceM) {
         AddReason(evaluation.rejection_codes,
                   "WHEEL_SURFACE_DISCONTINUITY");

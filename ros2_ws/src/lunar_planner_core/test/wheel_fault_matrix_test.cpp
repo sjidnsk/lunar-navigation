@@ -251,6 +251,40 @@ TEST(WheelFaultMatrix, RejectsObstacleIntersectingContinuousFootprintSweep) {
   EXPECT_EQ(result.reason_code, "WHEEL_SWEEP_COLLISION");
 }
 
+TEST(WheelFaultMatrix, SweepMemoizesExactTerrainPosesPerValidator) {
+  auto input = test::MakeValidWheelInput();
+  const auto capability = std::get<WheeledCapability>(input.capability);
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  const wheel::WheelSweepValidator validator{
+      *projection.projection, capability};
+  const wheel::WheelTransition transition{
+      .source_pose = wheel::WheelPose{.position_m = {2.5, 3.5, 0.0}},
+      .target_pose = wheel::WheelPose{.position_m = {4.5, 3.5, 0.0}},
+  };
+
+  const auto first = validator.Validate(transition, {});
+  const std::size_t first_count = validator.terrain_evaluation_count();
+  const auto second = validator.Validate(transition, {});
+
+  EXPECT_GT(first_count, 0U);
+  EXPECT_EQ(validator.terrain_evaluation_count(), first_count);
+  EXPECT_EQ(second.valid, first.valid);
+  EXPECT_EQ(second.canceled, first.canceled);
+  EXPECT_EQ(second.sample_count, first.sample_count);
+  EXPECT_EQ(second.maximum_surface_slope_rad,
+            first.maximum_surface_slope_rad);
+  EXPECT_EQ(second.maximum_roughness_m, first.maximum_roughness_m);
+  EXPECT_EQ(second.maximum_positive_relief_m,
+            first.maximum_positive_relief_m);
+  EXPECT_EQ(second.minimum_underbody_clearance_m,
+            first.minimum_underbody_clearance_m);
+  EXPECT_EQ(second.reason_code, first.reason_code);
+}
+
 TEST(WheelFaultMatrix, IgnoresUnsafeCellsOutsideTheRotatedFootprintPolygon) {
   auto input = test::MakeValidWheelInput();
   SetObstacle(input.world.local_map, 4U, 4U);
