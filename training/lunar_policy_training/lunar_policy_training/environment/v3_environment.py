@@ -786,7 +786,6 @@ class V3ExplorationEnvironment:
             request, prepared = self._build_plan_request(
                 action, expected_identity
             )
-            previous_distance_m = self._ground_option_distance_m()
             for reference_index in range(_MAX_GROUND_OPTION_REFERENCES):
                 output = self._bridge.plan(request)
                 self._validate_output(output)
@@ -806,14 +805,6 @@ class V3ExplorationEnvironment:
                     + _GROUND_OPTION_PROGRESS_EPSILON_M
                 ):
                     return self._aggregate_ground_transitions(transitions)
-                if (
-                    current_distance_m
-                    >= previous_distance_m - _GROUND_OPTION_PROGRESS_EPSILON_M
-                ):
-                    self._fail_closed(
-                        "ground option reference made no target-distance progress"
-                    )
-                previous_distance_m = current_distance_m
                 if reference_index + 1 >= _MAX_GROUND_OPTION_REFERENCES:
                     self._fail_closed(
                         "ground option did not finish within 64 references"

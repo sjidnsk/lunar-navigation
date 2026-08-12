@@ -1290,7 +1290,7 @@ def test_one_ground_policy_action_aggregates_three_rolling_references() -> None:
         )
         for index in range(1, 5)
     ]
-    harness = _GroundOptionHarness([10.0, 6.0, 2.0, 0.1])
+    harness = _GroundOptionHarness([6.0, 2.0, 0.1])
     executor = _SequenceReferenceExecutor(
         [
             _ground_result(
@@ -1358,7 +1358,7 @@ def test_ground_option_returns_aggregated_progress_when_refresh_rejects_goal() -
         robot_state_id="robot-progress",
         state_time_ns=2_000,
     )
-    harness = _GroundOptionHarness([10.0, 5.0])
+    harness = _GroundOptionHarness([5.0])
     rejected = PlannerOutput()
     rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
     rejected.directive = ExecutionDirective.NO_SAFE_REFERENCE
@@ -1425,7 +1425,7 @@ def test_rolling_planning_failure_refreshes_after_aggregating_each_reference_onc
         state_time_ns=identities[-1].state_time_ns,
         candidate_set_id="rolling-candidates-refresh",
     )
-    harness = _GroundOptionHarness([10.0, 7.0, 4.0, 1.0])
+    harness = _GroundOptionHarness([7.0, 4.0, 1.0])
     executor = _SequenceReferenceExecutor(
         [
             _ground_result(
@@ -1532,7 +1532,7 @@ def test_rolling_success_crossing_skips_fourth_plan_and_failure_refresh() -> Non
         )
         for index in range(1, 5)
     ]
-    harness = _GroundOptionHarness([10.0, 7.0, 4.0])
+    harness = _GroundOptionHarness([7.0, 4.0])
     executor = _SequenceReferenceExecutor(
         [
             _ground_result(
@@ -1586,45 +1586,73 @@ def test_rolling_success_crossing_skips_fourth_plan_and_failure_refresh() -> Non
     assert result.transition.terminated is True
 
 
-def test_ground_option_fails_closed_on_no_progress_and_clears_target() -> None:
-    identity = _identity()
-    harness = _GroundOptionHarness([10.0, 10.0])
-    env = V3ExplorationEnvironment(
-        platform_type="WHEELED",
-        bridge=_Bridge(
-            _reference_output(
-                "WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE
-            )
-        ),
-        request_builder=harness.begin,
-        initial_observation=_observation(identity=identity),
-        require_identity_bound_request=True,
-        reference_executor=_ReferenceExecutor(
+def test_ground_option_allows_a_detour_before_reaching_the_target() -> None:
+    identities = [
+        _identity(
+            map_snapshot_id=f"detour-map-{index}",
+            robot_state_id=f"detour-robot-{index}",
+            state_time_ns=1_000 * index,
+        )
+        for index in range(1, 3)
+    ]
+    harness = _GroundOptionHarness([])
+    executor = _SequenceReferenceExecutor(
+        [
             _ground_result(
-                _identity(map_snapshot_id="map-2", state_time_ns=2_000),
-                mission_delta=0.0,
-                priority_delta=0.0,
-                execution_cost=0.0,
-                execution_time=0.1,
-                sample_count=2,
+                identities[index],
+                mission_delta=0.1,
+                priority_delta=0.01,
+                execution_cost=0.2,
+                execution_time=0.3,
+                sample_count=73,
             )
-        ),
+            for index in range(2)
+        ]
+    )
+    bridge = _SequenceBridge(
+        [
+            _reference_output(
+                "LEGGED", ExecutionDirective.ACTIVATE_NEW_REFERENCE
+            )
+            for _ in range(2)
+        ]
+    )
+    target_distances_m = (
+        21.15892246783659,
+        22.466419385387436,
+        0.1,
+    )
+
+    def target_distance_m() -> float:
+        return target_distances_m[len(executor.references)]
+
+    env = V3ExplorationEnvironment(
+        platform_type="LEGGED",
+        bridge=bridge,
+        request_builder=harness.begin,
+        initial_observation=_observation(identity=identities[0]),
+        require_identity_bound_request=True,
+        reference_executor=executor,
         ground_option_continuation_builder=harness.continue_,
-        ground_option_distance_provider=harness.distance,
+        ground_option_distance_provider=target_distance_m,
         ground_option_clearer=harness.clear,
     )
 
-    with pytest.raises(EnvironmentInvariantError, match="progress"):
-        env.advance_prepared_action(
-            PolicyAction(0, 0.0), expected_identity=identity
-        )
+    result = env.advance_prepared_action(
+        PolicyAction(0, 0.0), expected_identity=identities[0]
+    )
 
-    assert env.rollout_discarded
-    assert env.training_stopped
+    assert result.policy_decisions_consumed == 1
+    assert len(executor.references) == 2
+    assert harness.continue_identities == [identities[0]]
     assert harness.clear_calls == 1
+    assert result.transition is not None
+    assert result.transition.mission_observed_delta == pytest.approx(0.2)
+    assert result.transition.execution_events.reference_samples_consumed == 146
 
 
-def test_ground_option_fails_closed_before_a_sixty_fifth_reference() -> None:
+def test_stationary_ground_option_fails_closed_before_a_sixty_fifth_reference(
+) -> None:
     identities = [
         _identity(
             map_snapshot_id=f"map-{index}",
@@ -1633,9 +1661,7 @@ def test_ground_option_fails_closed_before_a_sixty_fifth_reference() -> None:
         )
         for index in range(65)
     ]
-    harness = _GroundOptionHarness(
-        [100.0 - 0.1 * index for index in range(65)]
-    )
+    harness = _GroundOptionHarness([10.0] * 65)
     executor = _SequenceReferenceExecutor(
         [
             _ground_result(
