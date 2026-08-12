@@ -17,6 +17,57 @@ _ORACLE_RANGE_M = 30.0
 _EMPTY_OPPORTUNITY_SET_SHA256 = sha256(b"").hexdigest()
 
 
+def _oracle_ground_potential_gain_mask(
+    unknown_roi: np.ndarray,
+    *,
+    sensor_range_m: float,
+    resolution_m: float,
+) -> np.ndarray:
+    """Independently coarse-filter impossible ground observation poses."""
+    unknown = np.asarray(unknown_roi)
+    if (
+        unknown.dtype != np.dtype(np.bool_)
+        or unknown.ndim != 2
+        or min(unknown.shape) <= 0
+        or not unknown.flags.c_contiguous
+    ):
+        raise ValueError("frontier oracle unknown ROI mask is invalid")
+    if (
+        not math.isfinite(sensor_range_m)
+        or sensor_range_m <= 0.0
+        or not math.isfinite(resolution_m)
+        or resolution_m <= 0.0
+    ):
+        raise ValueError("frontier oracle gain prefilter geometry is invalid")
+    possible = np.zeros_like(unknown)
+    if not unknown.any():
+        return possible
+    rows, columns = unknown.shape
+    radius = math.ceil(sensor_range_m / resolution_m)
+    if radius >= max(rows - 1, columns - 1):
+        return np.ones_like(unknown)
+    for row_offset in range(-min(radius, rows - 1), min(radius, rows - 1) + 1):
+        source_row_start = max(0, -row_offset)
+        source_row_stop = min(rows, rows - row_offset)
+        target_row_start = source_row_start + row_offset
+        target_row_stop = source_row_stop + row_offset
+        for column_offset in range(
+            -min(radius, columns - 1), min(radius, columns - 1) + 1
+        ):
+            source_column_start = max(0, -column_offset)
+            source_column_stop = min(columns, columns - column_offset)
+            target_column_start = source_column_start + column_offset
+            target_column_stop = source_column_stop + column_offset
+            possible[
+                target_row_start:target_row_stop,
+                target_column_start:target_column_stop,
+            ] |= unknown[
+                source_row_start:source_row_stop,
+                source_column_start:source_column_stop,
+            ]
+    return np.ascontiguousarray(possible, dtype=np.bool_)
+
+
 def _millimetres(value_m: float) -> int:
     scaled = float(value_m) * 1_000.0
     if not math.isfinite(scaled):
@@ -158,26 +209,42 @@ class FrontierOpportunityOracle:
         safe_positions = np.ascontiguousarray(
             positions[physical_safe], dtype=np.float64
         )
-        if opportunity_authority is None:
+        platform_type = physical_reachability.platform_type
+        if platform_type in ("WHEELED", "LEGGED"):
+            reachable_count = len(safe_cells)
+            potential_gain = _oracle_ground_potential_gain_mask(
+                np.ascontiguousarray(
+                    (mission.roi_ratio > 0.0) & ~observed,
+                    dtype=np.bool_,
+                ),
+                sensor_range_m=_ORACLE_RANGE_M,
+                resolution_m=world.canvas.geometry.resolution_m,
+            )
+            within_range = np.ascontiguousarray(
+                [potential_gain[tuple(cell)] for cell in safe_cells],
+                dtype=np.bool_,
+            )
+        elif opportunity_authority is None:
             distance_m = np.hypot(
                 safe_positions[:, 0] - pose_map.x_m,
                 safe_positions[:, 1] - pose_map.y_m,
             )
             within_range = distance_m <= _ORACLE_RANGE_M + 1.0e-12
+            reachable_count = int(within_range.sum(dtype=np.int64))
         else:
             within_range = np.ones(len(safe_positions), dtype=np.bool_)
+            reachable_count = len(safe_cells)
         reachable_cells = np.ascontiguousarray(
             safe_cells[within_range], dtype=np.int32
         )
         reachable_positions = np.ascontiguousarray(
             safe_positions[within_range], dtype=np.float64
         )
-        reachable_count = len(reachable_cells)
-        if reachable_count == 0:
+        if reachable_count == 0 or len(reachable_cells) == 0:
             return FrontierOracleResult(
                 anchor_count,
                 safe_count,
-                0,
+                reachable_count,
                 0,
             )
 
@@ -206,7 +273,7 @@ class FrontierOpportunityOracle:
         if (
             not isinstance(gains, np.ndarray)
             or gains.dtype != np.dtype(np.float32)
-            or gains.shape != (reachable_count, 2)
+            or gains.shape != (len(reachable_cells), 2)
             or not gains.flags.c_contiguous
             or not np.isfinite(gains).all()
             or (gains < 0.0).any()

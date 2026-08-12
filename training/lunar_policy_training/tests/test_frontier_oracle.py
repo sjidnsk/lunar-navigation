@@ -198,6 +198,31 @@ def test_physical_oracle_does_not_turn_frontier_existence_into_positive_gain() -
     assert result.oracle_opportunity_set_sha256 == EMPTY_OPPORTUNITY_SET_SHA256
 
 
+def test_ground_global_oracle_keeps_positive_opportunity_beyond_sensor_range() -> None:
+    world, mission, pose = _world_and_mission()
+    remote = (128, 150)
+    world.observed_mask[remote] = True
+    mission.roi_ratio[remote] = np.float32(1.0)
+    mission.priority[remote] = np.float32(1.0)
+    mission.roi_ratio[128, 151] = np.float32(1.0)
+    mission.priority[128, 151] = np.float32(1.0)
+    assert math.dist((128, 128), remote) * world.canvas.geometry.resolution_m == 88.0
+    estimator = _GainEstimator({remote: 1.0})
+
+    result = FrontierOpportunityOracle(estimator).evaluate_physical(
+        world,
+        mission,
+        pose_map=pose,
+        physical_reachability=_physical(world, (remote,)),
+    )
+
+    assert result.platform_reachable_pose_count == 1
+    assert result.oracle_opportunity_count == 1
+    np.testing.assert_array_equal(
+        estimator.calls[0], np.asarray((remote,), dtype=np.int32)
+    )
+
+
 def test_physical_oracle_requires_reachability_before_estimating_gain() -> None:
     world, mission, pose = _world_and_mission()
     estimator = _GainEstimator({(128, 129): 1.0})

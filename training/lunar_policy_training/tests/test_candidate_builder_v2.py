@@ -360,6 +360,87 @@ def _formal_universe(
     )
 
 
+def _remote_ground_opportunity_fixture() -> tuple[
+    ObservedWorld,
+    MissionRaster,
+    Pose2,
+    tuple[int, int],
+]:
+    canvas = _canvas()
+    robot = (128, 125)
+    remote = (128, 144)
+    observed = np.zeros((256, 256), dtype=np.bool_)
+    observed[127:130, 124:146] = True
+    roi = observed.copy()
+    roi[127:130, 146] = True
+    robot_x_m, robot_y_m = canvas.grid_center_world(*robot)
+    assert math.dist(robot, remote) * canvas.geometry.resolution_m == 76.0
+    return (
+        _world(observed),
+        _mission_for_roi(roi),
+        Pose2(robot_x_m, robot_y_m),
+        remote,
+    )
+
+
+class _LiteralGainEstimator(_RecordingEstimator):
+    def __init__(self, gains: dict[tuple[int, int], float]) -> None:
+        super().__init__()
+        self._gains = dict(gains)
+
+    def estimate_candidate_gains(self, *args) -> np.ndarray:
+        candidates = np.asarray(args[-1], dtype=np.int32)
+        self.calls.append(candidates.copy())
+        return np.asarray(
+            [
+                (self._gains.get(tuple(cell), 0.0), 0.0)
+                for cell in candidates
+            ],
+            dtype=np.float32,
+        ).reshape((-1, 2))
+
+
+def test_ground_global_candidate_keeps_positive_opportunity_beyond_sensor_range() -> None:
+    world, mission, pose, remote = _remote_ground_opportunity_fixture()
+    estimator = _LiteralGainEstimator({remote: 1.0})
+    physical = _physical_reachability(world, mask=world.observed_mask)
+
+    universe = _formal_universe(
+        CandidateBuilderV2(estimator),
+        world=world,
+        mission=mission,
+        pose=pose,
+        physical_reachability=physical,
+    )
+
+    assert remote in {
+        candidate.position_grid_key for candidate in universe.candidates
+    }
+    assert all(float(candidate.feature[5]) > 0.0 for candidate in universe.candidates)
+    assert any(remote in map(tuple, call) for call in estimator.calls)
+
+
+def test_ground_global_all_zero_positions_are_diagnostic_only() -> None:
+    world, mission, pose, _ = _remote_ground_opportunity_fixture()
+    estimator = _LiteralGainEstimator({})
+    physical = _physical_reachability(world, mask=world.observed_mask)
+
+    universe = _formal_universe(
+        CandidateBuilderV2(estimator),
+        world=world,
+        mission=mission,
+        pose=pose,
+        physical_reachability=physical,
+    )
+
+    assert universe.candidates == ()
+    assert universe.diagnostics.physical_candidate_universe_count == 0
+    assert universe.diagnostics.available_candidate_count == 0
+    assert universe.diagnostics.selected_policy_candidate_count == 0
+    assert universe.diagnostics.untried_reserve_count == 0
+    assert universe.diagnostics.zero_gain_count > 0
+
+
 def test_candidate_builder_requires_explicit_sensor_estimator() -> None:
     with pytest.raises(TypeError):
         CandidateBuilderV2()

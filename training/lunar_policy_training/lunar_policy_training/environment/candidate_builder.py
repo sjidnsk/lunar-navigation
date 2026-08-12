@@ -48,6 +48,57 @@ CANDIDATE_DIAGNOSTIC_FIELDS = (
 )
 
 
+def _ground_potential_gain_mask(
+    unknown_roi: np.ndarray,
+    *,
+    sensor_range_m: float,
+    resolution_m: float,
+) -> np.ndarray:
+    """Losslessly coarse-filter ground poses before exact visibility."""
+    unknown = np.asarray(unknown_roi)
+    if (
+        unknown.dtype != np.dtype(np.bool_)
+        or unknown.ndim != 2
+        or min(unknown.shape) <= 0
+        or not unknown.flags.c_contiguous
+    ):
+        raise ValueError("unknown ROI mask is invalid")
+    if (
+        not math.isfinite(sensor_range_m)
+        or sensor_range_m <= 0.0
+        or not math.isfinite(resolution_m)
+        or resolution_m <= 0.0
+    ):
+        raise ValueError("ground gain prefilter geometry is invalid")
+    possible = np.zeros_like(unknown)
+    if not unknown.any():
+        return possible
+    rows, columns = unknown.shape
+    radius = math.ceil(sensor_range_m / resolution_m)
+    if radius >= max(rows - 1, columns - 1):
+        return np.ones_like(unknown)
+    for row_offset in range(-min(radius, rows - 1), min(radius, rows - 1) + 1):
+        source_row_start = max(0, -row_offset)
+        source_row_stop = min(rows, rows - row_offset)
+        target_row_start = source_row_start + row_offset
+        target_row_stop = source_row_stop + row_offset
+        for column_offset in range(
+            -min(radius, columns - 1), min(radius, columns - 1) + 1
+        ):
+            source_column_start = max(0, -column_offset)
+            source_column_stop = min(columns, columns - column_offset)
+            target_column_start = source_column_start + column_offset
+            target_column_stop = source_column_stop + column_offset
+            possible[
+                target_row_start:target_row_stop,
+                target_column_start:target_column_stop,
+            ] |= unknown[
+                source_row_start:source_row_stop,
+                source_column_start:source_column_stop,
+            ]
+    return np.ascontiguousarray(possible, dtype=np.bool_)
+
+
 @dataclass(frozen=True, slots=True)
 class CandidateDiagnostics:
     physical_snapshot_id: str = ""
@@ -899,9 +950,40 @@ class CandidateBuilderV2:
                     and observed[standoff]
                 ):
                     standoff = (row, column)
-                if self._candidate_within_sensor(canvas, pose_map, standoff):
+                if (
+                    platform_type in _GROUND_PLATFORM_TYPES
+                    or self._candidate_within_sensor(canvas, pose_map, standoff)
+                ):
                     raw_anchors.append((segment_id, standoff))
-        if boundary.any():
+        ground_proven_zero_count = 0
+        if platform_type in _GROUND_PLATFORM_TYPES:
+            static_safe = np.ascontiguousarray(
+                observed
+                & roi
+                & (world.physical_obstacle_layer.values == 0.0)
+                & (projection.traversable_ratio > 0.0),
+                dtype=np.bool_,
+            )
+            physical_safe = np.ascontiguousarray(
+                static_safe & physical_mask, dtype=np.bool_
+            )
+            static_safe[robot] = False
+            physical_safe[robot] = False
+            potential_gain = _ground_potential_gain_mask(
+                np.ascontiguousarray(unknown_roi, dtype=np.bool_),
+                sensor_range_m=self._sensor.range_m,
+                resolution_m=canvas.geometry.resolution_m,
+            )
+            ground_proven_zero_count = int(
+                (physical_safe & ~potential_gain).sum(dtype=np.int64)
+            )
+            raw_anchors.extend(
+                (len(segments), (int(row), int(column)))
+                for row, column in zip(
+                    *np.nonzero(static_safe & potential_gain), strict=True
+                )
+            )
+        elif boundary.any():
             reserve_segment = len(segments)
             raw_anchors.extend(
                 (reserve_segment, point)
@@ -963,7 +1045,7 @@ class CandidateBuilderV2:
             excluded_cells=(),
             total_roi=total_roi,
             allow_zero_gain=False,
-            include_zero_gain=True,
+            include_zero_gain=platform_type == "HOPPER",
             exact_target_poses=exact_target_poses,
             physical_observation_pose_mask=(
                 hopper_allowed
@@ -1010,8 +1092,13 @@ class CandidateBuilderV2:
             _POLICY_CANDIDATE_COUNT,
             positive_count if positive_count else len(candidates),
         )
-        zero_gain_count = sum(
-            float(candidate.feature[5]) == 0.0 for candidate in candidates
+        zero_gain_count = (
+            ground_proven_zero_count
+            + qualification.zero_gain_count
+            + sum(
+                float(candidate.feature[5]) == 0.0
+                for candidate in candidates
+            )
         )
         diagnostics = CandidateDiagnostics(
             physical_snapshot_id=physical_snapshot_id,
