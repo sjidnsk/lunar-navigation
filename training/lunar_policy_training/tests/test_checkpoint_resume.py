@@ -126,20 +126,20 @@ def test_resume_preserves_consumed_gpu_budget(tmp_path: pathlib.Path) -> None:
     budget = TrainingBudget.from_checkpoint(resumed)
 
     assert resumed.schema_version == CHECKPOINT_SCHEMA_VERSION
-    assert resumed.schema_version == "lunar-ppo-checkpoint/v7"
+    assert resumed.schema_version == "lunar-ppo-checkpoint/v8"
     assert resumed.run_identity == _identity()
     assert resumed.contract_version == OBSERVATION_CONTRACT_VERSION
     assert resumed.consumed_gpu_seconds == 7200.0
     assert budget.remaining_gpu_seconds == 86400.0 - 7200.0
 
 
-def test_checkpoint_resume_rejects_v6_checkpoint(
+def test_checkpoint_resume_rejects_v7_checkpoint(
     tmp_path: pathlib.Path,
 ) -> None:
     checkpoint = _checkpoint(consumed_gpu_seconds=7200.0)
     body = _body_from_checkpoint(checkpoint)
-    body["schema_version"] = "lunar-ppo-checkpoint/v6"
-    path = tmp_path / "checkpoint-v6.pt"
+    body["schema_version"] = "lunar-ppo-checkpoint/v7"
+    path = tmp_path / "checkpoint-v7.pt"
     torch.save(
         {"body": body, "body_sha256": _semantic_sha256(body)},
         path,
@@ -155,9 +155,9 @@ def test_checkpoint_resume_rejects_v6_checkpoint(
         )
 
 
-def test_restore_training_state_rejects_v6_object_without_mutation() -> None:
+def test_restore_training_state_rejects_v7_object_without_mutation() -> None:
     checkpoint = _checkpoint(consumed_gpu_seconds=7200.0)
-    legacy = replace(checkpoint, schema_version="lunar-ppo-checkpoint/v6")
+    legacy = replace(checkpoint, schema_version="lunar-ppo-checkpoint/v7")
     model = torch.nn.Linear(3, 2)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=2)

@@ -24,6 +24,7 @@ from .environment.candidate_builder import CANDIDATE_DIAGNOSTIC_FIELDS
 from .eval.baselines import select_baseline_action
 from .polar_data.multires_scene import GENERATOR_SHA256
 from .project_capability import load_project_formal_capability
+from .polar_data.formal_cache import FORMAL_CACHE_SCHEMA
 from .training_semantics import (
     FORMAL_MINIMUM_MISSION_COVERABLE_RATIO,
     FORMAL_SUCCESS_COVERAGE_RATIO,
@@ -277,8 +278,8 @@ def select_closed_loop_gate_cases(
     """Select the first stable exact-common schedule entries across all splits."""
     if type(minimum_scene_count) is not int or minimum_scene_count < 1:
         raise ClosedLoopGateError("gate minimum scene count must be positive")
-    if cache_manifest.get("schema") != "lunar-formal-training-cache/v6":
-        raise ClosedLoopGateError("gate requires formal cache v6")
+    if cache_manifest.get("schema") != FORMAL_CACHE_SCHEMA:
+        raise ClosedLoopGateError("gate requires the current formal cache schema")
     entries = cache_manifest.get("scenes")
     scenarios = scenario_document.get("scenarios")
     common = cache_manifest.get("exact_common_evaluation")

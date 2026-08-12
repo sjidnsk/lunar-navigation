@@ -56,6 +56,7 @@ from .budget import (
     select_qualified_rollout_horizon,
 )
 from .checkpoint import (
+    CHECKPOINT_SCHEMA_VERSION,
     FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
     OBSERVATION_CONTRACT_VERSION,
     PolicyWarmStartEvidence,
@@ -194,7 +195,7 @@ def _build_formal_resume_equivalence_evidence(
     ):
         raise PreflightError("formal resume checkpoint roundtrip is invalid")
     if any(
-        getattr(value, "schema_version", None) != "lunar-ppo-checkpoint/v7"
+        getattr(value, "schema_version", None) != CHECKPOINT_SCHEMA_VERSION
         for value in (uninterrupted, resumed)
     ):
         raise PreflightError("formal resume checkpoint schema differs")
@@ -240,7 +241,7 @@ def _build_formal_resume_equivalence_evidence(
             raise PreflightError(f"formal resume {name} differs at update two")
 
     body: dict[str, object] = {
-        "checkpoint_schema": "lunar-ppo-checkpoint/v7",
+        "checkpoint_schema": CHECKPOINT_SCHEMA_VERSION,
         "checkpoint_relative_path": checkpoint_relative_path,
         "checkpoint_sha256": checkpoint_sha256,
         "checkpoint_roundtrip": True,

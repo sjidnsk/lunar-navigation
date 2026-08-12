@@ -14,7 +14,7 @@ FORMAL_TRAINING_SEMANTICS_VERSION = (
     "lunar-training-semantics/"
     "sensor-30m-360-platform-physical-coverable-detail95-observed-physical-"
     "candidates-fixed2m-search-domain-snapshot-planner-failure-option-path-"
-    "observation-auditable-failure/v11"
+    "observation-auditable-failure-global-ground-target/v12"
 )
 # Keep the established public name as an alias so every identity consumer moves
 # atomically without duplicating the semantic string.

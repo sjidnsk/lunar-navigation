@@ -37,7 +37,7 @@ from .reward import reward_weights_sha256
 from .training_semantics import training_semantics_sha256
 
 
-CHECKPOINT_SCHEMA_VERSION = "lunar-ppo-checkpoint/v7"
+CHECKPOINT_SCHEMA_VERSION = "lunar-ppo-checkpoint/v8"
 OBSERVATION_CONTRACT_VERSION = ObservationContractV3.version
 _LEGACY_V5_SCHEMA_VERSION = "lunar-ppo-checkpoint/v5"
 _LEGACY_V4_SCHEMA_VERSION = "lunar-ppo-checkpoint/v4"

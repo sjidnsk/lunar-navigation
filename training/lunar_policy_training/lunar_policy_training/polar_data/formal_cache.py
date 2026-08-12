@@ -66,7 +66,7 @@ from .scenario_manifest import (
 from .source_lock import load_aggregate_source_lock
 
 
-FORMAL_CACHE_SCHEMA = "lunar-formal-training-cache/v6"
+FORMAL_CACHE_SCHEMA = "lunar-formal-training-cache/v7"
 _SOURCE_IDS = (
     "NASA_LOLA_87S_DEM",
     "NASA_LOLA_87S_COUNT",

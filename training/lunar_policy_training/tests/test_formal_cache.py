@@ -1271,7 +1271,7 @@ def test_preflight_cache_round_trip_is_ineligible_for_formal_use(
     )
     arrays = cache.load_scene(_sha("scene"))
 
-    assert FORMAL_CACHE_SCHEMA == "lunar-formal-training-cache/v6"
+    assert FORMAL_CACHE_SCHEMA == "lunar-formal-training-cache/v7"
     assert manifest["schema"] == FORMAL_CACHE_SCHEMA
     assert manifest["materialization"] == "preflight"
     assert manifest["platform_eligibility"]["WHEELED"]["splits"]["train"] == {

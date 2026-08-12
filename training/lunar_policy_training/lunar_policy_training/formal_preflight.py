@@ -16,7 +16,7 @@ import torch
 from lunar_model_contract import ObservationContractV3
 from lunar_planner_training_bridge import PlannerBridge
 
-from .checkpoint import RunIdentity
+from .checkpoint import CHECKPOINT_SCHEMA_VERSION, RunIdentity
 from .config import PLATFORMS, ROLLOUT_HORIZON_CANDIDATES
 from .environment.formal_builder import FormalEnvironmentAssembly
 from .environment.macro_step import PolicyAction
@@ -184,7 +184,7 @@ def build_formal_preflight_report(
         not isinstance(resume_equivalence, Mapping)
         or set(resume_equivalence) != _RESUME_EQUIVALENCE_FIELDS
         or resume_equivalence.get("checkpoint_schema")
-        != "lunar-ppo-checkpoint/v7"
+        != CHECKPOINT_SCHEMA_VERSION
         or not isinstance(
             resume_equivalence.get("checkpoint_relative_path"), str
         )
