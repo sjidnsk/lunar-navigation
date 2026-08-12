@@ -67,15 +67,22 @@ def _physical_position_at_cell(
     physical: PhysicalReachabilityResult,
     cell: tuple[int, int],
 ) -> tuple[float, float, float] | None:
-    rows, columns = np.nonzero(physical.physical_observation_pose_mask)
+    authority = physical.hopper_opportunity_authority
+    if physical.platform_type == "HOPPER" and authority is not None:
+        mask = authority.certified_mask
+        positions = authority.certified_positions_m
+    else:
+        mask = physical.physical_observation_pose_mask
+        positions = physical.observation_positions_m
+    rows, columns = np.nonzero(mask)
     matching = np.flatnonzero((rows == cell[0]) & (columns == cell[1]))
     if len(matching) == 0:
         return None
-    if len(matching) != 1 or len(physical.observation_positions_m) != len(rows):
+    if len(matching) != 1 or len(positions) != len(rows):
         raise RuntimeError("physical start position authority is ambiguous")
     return tuple(
         float(value)
-        for value in physical.observation_positions_m[int(matching[0])]
+        for value in positions[int(matching[0])]
     )
 
 

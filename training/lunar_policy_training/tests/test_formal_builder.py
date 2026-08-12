@@ -585,37 +585,27 @@ def test_hopper_start_qualification_reprojects_from_certified_exact_start(
             )
         )
         result = original_project(self, *args, **kwargs)
-        if len(calls) != 1:
-            if certified_start is None:
-                return result
-            start_cell = self._canvas.world_to_grid(
-                self._pose.x_m, self._pose.y_m
-            )
-            cells = tuple(
-                zip(
-                    *np.nonzero(result.physical_observation_pose_mask),
-                    strict=True,
-                )
-            )
-            assert start_cell in cells
-            positions = result.observation_positions_m.copy()
-            positions[cells.index(start_cell)] = certified_start
-            return replace(result, observation_positions_m=positions)
+        authority = result.hopper_opportunity_authority
+        assert authority is not None
         start_cell = self._canvas.world_to_grid(
             self._pose.x_m, self._pose.y_m
         )
         cells = tuple(
-            zip(
-                *np.nonzero(result.physical_observation_pose_mask),
-                strict=True,
-            )
+            zip(*np.nonzero(authority.certified_mask), strict=True)
         )
         assert start_cell in cells
+        positions = authority.certified_positions_m.copy()
         index = cells.index(start_cell)
-        positions = result.observation_positions_m.copy()
+        if len(calls) != 1:
+            if certified_start is None:
+                return result
+            positions[index] = certified_start
+            authority.certified_positions_m = np.ascontiguousarray(positions)
+            return result
         positions[index] += np.asarray((0.02, -0.02, 1.25))
         certified_start = tuple(float(value) for value in positions[index])
-        return replace(result, observation_positions_m=positions)
+        authority.certified_positions_m = np.ascontiguousarray(positions)
+        return result
 
     monkeypatch.setattr(
         qualification_module.PlatformCandidateReachability,
