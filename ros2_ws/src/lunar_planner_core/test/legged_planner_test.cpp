@@ -9,12 +9,14 @@
 #include <gtest/gtest.h>
 
 #include "legged/legged_terrain.hpp"
+#include "legged/legged_lattice.hpp"
 #include "legged/legged_planner.hpp"
 #include "legged/legged_spline_optimizer.hpp"
 #include "legged/legged_timing.hpp"
 #include "lunar_planner_core/planner.hpp"
 #include "shared/map_snapshot.hpp"
 #include "shared/safe_projection.hpp"
+#include "shared/ara_star.hpp"
 #include "test_fixtures.hpp"
 
 namespace lunar::planning {
@@ -454,6 +456,103 @@ TEST(LeggedPlanner, IsDeterministicForSameTypedSnapshot) {
     EXPECT_DOUBLE_EQ(
         second_points[index].pose.position_m.z,
         first_points[index].pose.position_m.z);
+  }
+}
+
+TEST(LeggedPlanner, LazySearchMatchesCertifiedFullLatticeExactly) {
+  const auto input = MakeLeggedInputWithRequiredLocalCoverage();
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  const auto domain = FullDomain(input.world.local_map);
+  const auto& state = std::get<LeggedState>(input.current_state);
+  const auto& capability = std::get<LeggedCapability>(input.capability);
+  const auto full = legged::BuildLeggedLattice(
+      state, input.goal_map, *projection.projection, domain, capability,
+      input.config, {});
+  ASSERT_TRUE(full.ok()) << full.reason_code;
+  const auto full_search = shared::SearchAraStar(
+      full.graph->search_problem, {});
+  const auto full_plan = legged::ResolveLeggedPlan(*full.graph, full_search);
+  ASSERT_TRUE(full_plan.has_value());
+
+  const auto lazy = legged::SearchLeggedLattice(
+      state, input.goal_map, *projection.projection, domain, capability,
+      input.config, {});
+
+  ASSERT_TRUE(lazy.ok()) << lazy.reason_code;
+  ASSERT_TRUE(lazy.plan.has_value());
+  auto lazy_transitions = lazy.plan->transitions;
+  auto full_transitions = full_plan->transitions;
+  for (auto& transition : lazy_transitions) {
+    transition.stable_index = 0U;
+  }
+  for (auto& transition : full_transitions) {
+    transition.stable_index = 0U;
+  }
+  EXPECT_EQ(lazy_transitions, full_transitions);
+  EXPECT_DOUBLE_EQ(lazy.plan->cost, full_plan->cost);
+  EXPECT_EQ(lazy.plan->expanded_states, full_plan->expanded_states);
+  EXPECT_LT(lazy.plan->expanded_states, full.graph->states.size());
+}
+
+TEST(LeggedPlanner, LazySearchPreservesNoPathAndCancellationContracts) {
+  auto input = MakeLeggedInputWithRequiredLocalCoverage();
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  auto allowed = EmptyDomain(input.world.local_map);
+  AllowCell(allowed, input.world.local_map, 2U, 3U);
+  const auto domain = hierarchical::LocalSearchDomain{
+      input.world.local_map.width, input.world.local_map.height, allowed};
+  const auto& state = std::get<LeggedState>(input.current_state);
+  const auto& capability = std::get<LeggedCapability>(input.capability);
+
+  const auto no_path = legged::SearchLeggedLattice(
+      state, input.goal_map, *projection.projection, domain, capability,
+      input.config, {});
+  EXPECT_EQ(no_path.status, legged::LeggedLatticeStatus::kNoPath);
+  EXPECT_EQ(no_path.reason_code, "LOCAL_SEARCH_DOMAIN_EXHAUSTED");
+
+  std::stop_source stop_source;
+  stop_source.request_stop();
+  const auto canceled = legged::SearchLeggedLattice(
+      state, input.goal_map, *projection.projection, domain, capability,
+      input.config, stop_source.get_token());
+  EXPECT_EQ(canceled.status, legged::LeggedLatticeStatus::kCanceled);
+  EXPECT_EQ(canceled.reason_code, "REQUEST_CANCELED");
+}
+
+TEST(LeggedPlanner, LazySearchTieBreakIsDeterministicAcrossTwentyRuns) {
+  auto input = MakeLeggedInputWithRequiredLocalCoverage();
+  std::get<PointGoal>(input.goal_map.target).position_m = {4.5, 4.5, 0.0};
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  const auto domain = FullDomain(input.world.local_map);
+  const auto& state = std::get<LeggedState>(input.current_state);
+  const auto& capability = std::get<LeggedCapability>(input.capability);
+  std::optional<legged::LeggedDiscretePlan> expected;
+
+  for (std::size_t run = 0U; run < 20U; ++run) {
+    const auto result = legged::SearchLeggedLattice(
+        state, input.goal_map, *projection.projection, domain, capability,
+        input.config, {});
+    ASSERT_TRUE(result.ok()) << "run=" << run << ' ' << result.reason_code;
+    ASSERT_TRUE(result.plan.has_value());
+    if (!expected.has_value()) {
+      expected = result.plan;
+    } else {
+      EXPECT_EQ(result.plan->transitions, expected->transitions);
+      EXPECT_DOUBLE_EQ(result.plan->cost, expected->cost);
+      EXPECT_EQ(result.plan->expanded_states, expected->expanded_states);
+    }
   }
 }
 

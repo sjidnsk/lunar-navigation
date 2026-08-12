@@ -9,6 +9,8 @@
 #include <map>
 #include <numbers>
 #include <optional>
+#include <new>
+#include <functional>
 #include <queue>
 #include <ranges>
 #include <string>
@@ -36,6 +38,52 @@ struct OrderedPrimitive final {
   std::size_t original_index{};
   const LeggedBodyPrimitive* primitive{};
 };
+
+constexpr std::size_t kNoParent = std::numeric_limits<std::size_t>::max();
+
+struct LazySearchNode final {
+  LeggedLatticeState state;
+  LeggedPose pose;
+  double path_cost{std::numeric_limits<double>::infinity()};
+  std::size_t parent{kNoParent};
+  std::optional<LeggedTransition> incoming;
+  std::size_t open_sequence{};
+  bool closed{};
+};
+
+struct LazyOpenEntry final {
+  double estimated_total_cost{};
+  double path_cost{};
+  LeggedStateKey key;
+  std::size_t node_index{};
+  std::size_t sequence{};
+};
+
+struct LazyOpenGreater final {
+  [[nodiscard]] bool operator()(
+      const LazyOpenEntry& lhs, const LazyOpenEntry& rhs) const noexcept {
+    return std::tie(lhs.estimated_total_cost, lhs.path_cost, lhs.key,
+                    lhs.sequence, lhs.node_index) >
+        std::tie(rhs.estimated_total_cost, rhs.path_cost, rhs.key,
+                 rhs.sequence, rhs.node_index);
+  }
+};
+
+[[nodiscard]] LeggedLatticeSearchResult SearchFailure(
+    const LeggedLatticeStatus status, std::string reason_code,
+    const std::size_t expanded_states = 0U) {
+  return LeggedLatticeSearchResult{
+      .status = status,
+      .plan = status == LeggedLatticeStatus::kNoPath
+          ? std::optional<LeggedDiscretePlan>{LeggedDiscretePlan{
+                .transitions = {},
+                .cost = std::numeric_limits<double>::infinity(),
+                .expanded_states = expanded_states,
+            }}
+          : std::nullopt,
+      .reason_code = std::move(reason_code),
+  };
+}
 
 [[nodiscard]] LeggedLatticeBuildResult Failure(
     const LeggedLatticeStatus status, std::string reason_code) {
@@ -688,6 +736,353 @@ LeggedLatticeBuildResult BuildLeggedLattice(
       .graph = std::move(graph),
       .reason_code = {},
   };
+}
+
+LeggedLatticeSearchResult SearchLeggedLattice(
+    const LeggedState& current_state, const GoalRegion& goal,
+    const shared::SafeProjection& projection,
+    const hierarchical::LocalSearchDomain& search_domain,
+    const LeggedCapability& capability, const PlannerConfig& config,
+    const std::stop_token stop_token) try {
+  if (stop_token.stop_requested()) {
+    return SearchFailure(LeggedLatticeStatus::kCanceled, "REQUEST_CANCELED");
+  }
+  if (projection.source_map() == nullptr ||
+      !ValidCapability(capability, config) ||
+      !IsFinite(current_state.body_pose) ||
+      search_domain.width() != projection.source_map()->width() ||
+      search_domain.height() != projection.source_map()->height()) {
+    return SearchFailure(
+        LeggedLatticeStatus::kInvalidRequest,
+        "LEGGED_LATTICE_REQUEST_INVALID");
+  }
+  const auto current_yaw = YawFromQuaternion(current_state.body_pose.orientation);
+  const auto start_cell = projection.source_map()->PositionToCell(Vec2{
+      .x = current_state.body_pose.position_m.x,
+      .y = current_state.body_pose.position_m.y,
+  });
+  if (!current_yaw.has_value() || !start_cell.has_value()) {
+    return SearchFailure(
+        LeggedLatticeStatus::kInvalidRequest, "LEGGED_START_NOT_SAFE");
+  }
+  const LeggedTerrainEvaluation start_terrain = EvaluateLeggedTerrainCell(
+      projection, capability, *start_cell, stop_token);
+  if (start_terrain.canceled) {
+    return SearchFailure(LeggedLatticeStatus::kCanceled, "REQUEST_CANCELED");
+  }
+  if (!start_terrain.hard_feasible ||
+      current_state.body_pose.position_m.z <
+          start_terrain.body_height_m.lower - kComparisonTolerance ||
+      current_state.body_pose.position_m.z >
+          start_terrain.body_height_m.upper + kComparisonTolerance) {
+    return SearchFailure(
+        LeggedLatticeStatus::kInvalidRequest, "LEGGED_START_NOT_SAFE");
+  }
+  if (!search_domain.Contains(*start_cell)) {
+    return SearchFailure(
+        LeggedLatticeStatus::kNoPath, "LOCAL_SEARCH_DOMAIN_EXHAUSTED");
+  }
+  if (GoalContainsBodyPose(
+          goal, LeggedPose{.position_m = current_state.body_pose.position_m,
+                           .yaw_rad = *current_yaw})) {
+    return LeggedLatticeSearchResult{
+        .status = LeggedLatticeStatus::kReady,
+        .plan = LeggedDiscretePlan{
+            .transitions = {}, .cost = 0.0, .expanded_states = 0U},
+        .reason_code = {},
+    };
+  }
+
+  const LeggedTerrainGrid terrain_grid{projection, capability, stop_token};
+  if (terrain_grid.canceled()) {
+    return SearchFailure(LeggedLatticeStatus::kCanceled, "REQUEST_CANCELED");
+  }
+  if (!terrain_grid.ok()) {
+    return SearchFailure(
+        LeggedLatticeStatus::kInvalidRequest,
+        "LEGGED_LATTICE_REQUEST_INVALID");
+  }
+  std::vector<OrderedPrimitive> ordered_primitives;
+  ordered_primitives.reserve(capability.motion_primitives.size());
+  for (std::size_t index = 0U; index < capability.motion_primitives.size();
+       ++index) {
+    ordered_primitives.push_back(OrderedPrimitive{
+        .original_index = index,
+        .primitive = &capability.motion_primitives[index],
+    });
+  }
+  std::stable_sort(
+      ordered_primitives.begin(), ordered_primitives.end(),
+      [](const OrderedPrimitive& lhs, const OrderedPrimitive& rhs) {
+        return std::tie(lhs.primitive->primitive_id, lhs.original_index) <
+            std::tie(rhs.primitive->primitive_id, rhs.original_index);
+      });
+
+  const double maximum_speed = MaximumPlanarSpeed(capability);
+  const auto heuristic = [&](const LeggedPose& pose) {
+    double estimate = GoalDistance(goal, pose) / maximum_speed;
+    if (goal.yaw_rad.has_value()) {
+      const double yaw_speed = std::max(
+          std::abs(capability.yaw_rate_radps.lower),
+          std::abs(capability.yaw_rate_radps.upper));
+      estimate = std::max(
+          estimate,
+          std::abs(ShortestYawDelta(pose.yaw_rad, *goal.yaw_rad)) /
+              yaw_speed);
+    }
+    return estimate;
+  };
+  const LeggedPose true_start{
+      .position_m = current_state.body_pose.position_m,
+      .yaw_rad = *current_yaw,
+  };
+  const LeggedLatticeState start{
+      .cell_x = start_cell->x,
+      .cell_y = start_cell->y,
+      .yaw_bin = YawToBin(*current_yaw, config.legged.yaw_bin_count),
+      .reachable_body_z_m = start_terrain.body_height_m,
+  };
+  std::vector<LazySearchNode> nodes;
+  nodes.push_back(LazySearchNode{
+      .state = start,
+      .pose = true_start,
+      .path_cost = 0.0,
+      .parent = kNoParent,
+      .incoming = std::nullopt,
+      .open_sequence = 0U,
+      .closed = false,
+  });
+  std::map<LeggedStateKey, std::size_t> node_by_state;
+  node_by_state.emplace(KeyOf(start), 0U);
+  std::priority_queue<
+      LazyOpenEntry, std::vector<LazyOpenEntry>, LazyOpenGreater> open;
+  open.push(LazyOpenEntry{
+      .estimated_total_cost = heuristic(true_start),
+      .path_cost = 0.0,
+      .key = KeyOf(start),
+      .node_index = 0U,
+      .sequence = 0U,
+  });
+  std::size_t next_sequence = 1U;
+  std::size_t expanded_states = 0U;
+  std::optional<double> best_goal_cost;
+  std::size_t best_goal_parent = kNoParent;
+  std::optional<LeggedTransition> best_terminal;
+  bool start_has_valid_edge = false;
+  bool start_has_domain_rejected_edge = false;
+  bool search_domain_rejected = false;
+  const auto* point_goal = std::get_if<PointGoal>(&goal.target);
+  const double maximum_goal_translation = MaximumPrimitiveTranslation(capability) +
+      projection.source_map()->resolution_m() * std::numbers::sqrt2 / 2.0;
+  const double maximum_goal_yaw = MaximumPrimitiveYaw(capability, config);
+  const auto update_goal = [&](const std::size_t parent,
+                               std::optional<LeggedTransition> terminal,
+                               const double cost) {
+    if (std::isfinite(cost) &&
+        (!best_goal_cost.has_value() ||
+         cost + kComparisonTolerance < *best_goal_cost)) {
+      best_goal_cost = cost;
+      best_goal_parent = parent;
+      best_terminal = std::move(terminal);
+    }
+  };
+
+  while (!open.empty()) {
+    if (stop_token.stop_requested()) {
+      return SearchFailure(
+          LeggedLatticeStatus::kCanceled, "REQUEST_CANCELED",
+          expanded_states);
+    }
+    if (best_goal_cost.has_value() &&
+        open.top().estimated_total_cost + kComparisonTolerance >=
+            *best_goal_cost) {
+      break;
+    }
+    const LazyOpenEntry current_entry = open.top();
+    open.pop();
+    LazySearchNode& current = nodes[current_entry.node_index];
+    if (current.closed || current.open_sequence != current_entry.sequence ||
+        std::abs(current.path_cost - current_entry.path_cost) >
+            kComparisonTolerance) {
+      continue;
+    }
+    current.closed = true;
+    ++expanded_states;
+    const LazySearchNode current_snapshot = current;
+    if (std::holds_alternative<PlanarRegionGoal>(goal.target) &&
+        GoalContainsBodyPose(goal, current_snapshot.pose)) {
+      update_goal(current_entry.node_index, std::nullopt,
+                  current_snapshot.path_cost);
+    }
+    if (point_goal != nullptr &&
+        !GoalContainsBodyPose(goal, current_snapshot.pose)) {
+      bool canceled = false;
+      bool domain_rejected = false;
+      auto terminal = ApplyPointGoalConnector(
+          current_snapshot.pose,
+          current_entry.node_index == 0U
+              ? Interval{.lower = current_state.body_pose.position_m.z,
+                         .upper = current_state.body_pose.position_m.z}
+              : current_snapshot.state.reachable_body_z_m,
+          *point_goal, goal.yaw_rad, maximum_goal_translation,
+          maximum_goal_yaw, projection, search_domain, capability,
+          stop_token, canceled, domain_rejected, &terrain_grid);
+      if (canceled) {
+        return SearchFailure(
+            LeggedLatticeStatus::kCanceled, "REQUEST_CANCELED",
+            expanded_states);
+      }
+      if (terminal.has_value()) {
+        if (current_entry.node_index == 0U) {
+          start_has_valid_edge = true;
+        }
+        const double edge_cost =
+            TransitionDurationLowerBound(*terminal, capability) +
+            0.5 * terminal->path_length_m +
+            0.25 * std::abs(ShortestYawDelta(
+                       terminal->source_pose.yaw_rad,
+                       terminal->target_pose.yaw_rad));
+        update_goal(current_entry.node_index, std::move(terminal),
+                    current_snapshot.path_cost + edge_cost);
+      }
+      if (current_entry.node_index == 0U && domain_rejected) {
+        start_has_domain_rejected_edge = true;
+      }
+      search_domain_rejected = search_domain_rejected || domain_rejected;
+    }
+
+    for (const OrderedPrimitive& ordered : ordered_primitives) {
+      bool canceled = false;
+      bool domain_rejected = false;
+      auto transition = ApplyPrimitive(
+          current_snapshot.pose,
+          current_entry.node_index == 0U
+              ? Interval{.lower = current_state.body_pose.position_m.z,
+                         .upper = current_state.body_pose.position_m.z}
+              : current_snapshot.state.reachable_body_z_m,
+          *ordered.primitive, ordered.original_index, projection,
+          search_domain, capability, config, stop_token, canceled,
+          domain_rejected, &terrain_grid);
+      if (canceled) {
+        return SearchFailure(
+            LeggedLatticeStatus::kCanceled, "REQUEST_CANCELED",
+            expanded_states);
+      }
+      if (!transition.has_value()) {
+        if (current_entry.node_index == 0U && domain_rejected) {
+          start_has_domain_rejected_edge = true;
+        }
+        search_domain_rejected = search_domain_rejected || domain_rejected;
+        continue;
+      }
+      if (current_entry.node_index == 0U) {
+        start_has_valid_edge = true;
+      }
+      const auto target_cell = projection.source_map()->PositionToCell(Vec2{
+          .x = transition->target_pose.position_m.x,
+          .y = transition->target_pose.position_m.y,
+      });
+      if (!target_cell.has_value()) {
+        continue;
+      }
+      const LeggedLatticeState target_state{
+          .cell_x = target_cell->x,
+          .cell_y = target_cell->y,
+          .yaw_bin = YawToBin(
+              transition->target_pose.yaw_rad,
+              config.legged.yaw_bin_count),
+          .reachable_body_z_m = transition->target_body_z_m,
+      };
+      const double edge_cost =
+          TransitionDurationLowerBound(*transition, capability) +
+          0.5 * transition->path_length_m +
+          0.25 * std::abs(ShortestYawDelta(
+                     transition->source_pose.yaw_rad,
+                     transition->target_pose.yaw_rad));
+      if (!std::isfinite(edge_cost) || edge_cost <= 0.0) {
+        return SearchFailure(
+            LeggedLatticeStatus::kInvalidRequest,
+            "LEGGED_LATTICE_EDGE_COST_INVALID", expanded_states);
+      }
+      const double candidate_cost = current_snapshot.path_cost + edge_cost;
+      std::size_t target_index{};
+      const auto found = node_by_state.find(KeyOf(target_state));
+      if (found == node_by_state.end()) {
+        target_index = nodes.size();
+        nodes.push_back(LazySearchNode{
+            .state = target_state,
+            .pose = transition->target_pose,
+        });
+        node_by_state.emplace(KeyOf(target_state), target_index);
+      } else {
+        target_index = found->second;
+      }
+      LazySearchNode& target = nodes[target_index];
+      if (candidate_cost + kComparisonTolerance >= target.path_cost) {
+        continue;
+      }
+      target.pose = transition->target_pose;
+      target.state = target_state;
+      target.path_cost = candidate_cost;
+      target.parent = current_entry.node_index;
+      target.incoming = std::move(transition);
+      target.open_sequence = next_sequence++;
+      target.closed = false;
+      open.push(LazyOpenEntry{
+          .estimated_total_cost = candidate_cost + heuristic(target.pose),
+          .path_cost = candidate_cost,
+          .key = KeyOf(target.state),
+          .node_index = target_index,
+          .sequence = target.open_sequence,
+      });
+    }
+  }
+
+  if (!best_goal_cost.has_value() || best_goal_parent == kNoParent) {
+    if (!start_has_valid_edge) {
+      return SearchFailure(
+          start_has_domain_rejected_edge ? LeggedLatticeStatus::kNoPath
+                                         : LeggedLatticeStatus::kInvalidRequest,
+          start_has_domain_rejected_edge
+              ? "LOCAL_SEARCH_DOMAIN_EXHAUSTED"
+              : "LEGGED_START_CONNECTOR_INFEASIBLE",
+          expanded_states);
+    }
+    return SearchFailure(
+        LeggedLatticeStatus::kNoPath,
+        search_domain_rejected ? "LOCAL_SEARCH_DOMAIN_EXHAUSTED"
+                               : "LEGGED_NO_KNOWN_SAFE_ROUTE",
+        expanded_states);
+  }
+  std::vector<LeggedTransition> transitions;
+  for (std::size_t current = best_goal_parent; current != 0U;) {
+    if (current >= nodes.size() || nodes[current].parent == kNoParent ||
+        !nodes[current].incoming.has_value() ||
+        transitions.size() >= nodes.size()) {
+      return SearchFailure(
+          LeggedLatticeStatus::kInvalidRequest,
+          "LEGGED_SEARCH_RESULT_INVALID", expanded_states);
+    }
+    transitions.push_back(*nodes[current].incoming);
+    current = nodes[current].parent;
+  }
+  std::reverse(transitions.begin(), transitions.end());
+  if (best_terminal.has_value()) {
+    transitions.push_back(*best_terminal);
+  }
+  return LeggedLatticeSearchResult{
+      .status = LeggedLatticeStatus::kReady,
+      .plan = LeggedDiscretePlan{
+          .transitions = std::move(transitions),
+          .cost = *best_goal_cost,
+          .expanded_states = expanded_states,
+      },
+      .reason_code = {},
+  };
+} catch (const std::bad_alloc&) {
+  return SearchFailure(
+      LeggedLatticeStatus::kResourceExhausted,
+      "LEGGED_SEARCH_ALLOCATION_FAILURE");
 }
 
 shared::PrimitiveGraphBuildResult BuildLeggedPrimitiveGraph(

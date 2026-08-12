@@ -41,10 +41,31 @@ struct LeggedLatticeBuildResult final {
   }
 };
 
+struct LeggedLatticeSearchResult final {
+  LeggedLatticeStatus status{LeggedLatticeStatus::kInvalidRequest};
+  std::optional<LeggedDiscretePlan> plan;
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept {
+    return status == LeggedLatticeStatus::kReady && plan.has_value();
+  }
+};
+
 [[nodiscard]] bool GoalContainsBodyPose(
     const GoalRegion& goal, const LeggedPose& pose) noexcept;
 
 [[nodiscard]] LeggedLatticeBuildResult BuildLeggedLattice(
+    const LeggedState& current_state,
+    const GoalRegion& goal,
+    const shared::SafeProjection& projection,
+    const hierarchical::LocalSearchDomain& search_domain,
+    const LeggedCapability& capability,
+    const PlannerConfig& config,
+    std::stop_token stop_token);
+
+// Performs deterministic A* directly over lazily generated body primitives.
+// Search state and terrain evidence are confined to this request.
+[[nodiscard]] LeggedLatticeSearchResult SearchLeggedLattice(
     const LeggedState& current_state,
     const GoalRegion& goal,
     const shared::SafeProjection& projection,

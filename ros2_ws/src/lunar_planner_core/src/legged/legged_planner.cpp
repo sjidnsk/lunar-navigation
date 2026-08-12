@@ -276,83 +276,49 @@ PlannerOutput LeggedPlanner::Plan(
         "LEGGED_GOAL_INFEASIBLE", started);
   }
 
-  LeggedLatticeBuildResult lattice = BuildLeggedLattice(
+  LeggedLatticeSearchResult search = SearchLeggedLattice(
       *current_state, problem.goal_odom, *projection.projection,
       problem.search_domain, *capability, problem.config, problem.stop_token);
-  if (!lattice.ok()) {
-    switch (lattice.status) {
+  if (!search.ok()) {
+    const std::size_t expanded_states = search.plan.has_value()
+        ? search.plan->expanded_states
+        : 0U;
+    switch (search.status) {
       case LeggedLatticeStatus::kCanceled:
-        return Canceled(started);
+        return Canceled(started, expanded_states);
       case LeggedLatticeStatus::kResourceExhausted:
         return Failure(
             PlanningOutcome::kResourceExhausted,
             ExecutionDirective::kNoSafeReference,
-            lattice.reason_code, started);
+            search.reason_code, started, expanded_states);
       case LeggedLatticeStatus::kInvalidRequest:
-        if (lattice.reason_code == "LEGGED_START_NOT_SAFE" ||
-            lattice.reason_code == "LEGGED_START_CONNECTOR_INFEASIBLE") {
+        if (search.reason_code == "LEGGED_START_NOT_SAFE" ||
+            search.reason_code == "LEGGED_START_CONNECTOR_INFEASIBLE") {
           return Failure(
               PlanningOutcome::kNoKnownSafeRoute,
               ExecutionDirective::kNoSafeReference,
-              lattice.reason_code, started);
+              search.reason_code, started, expanded_states);
         }
         return Failure(
             PlanningOutcome::kInvalidRequest,
             ExecutionDirective::kNoSafeReference,
-            lattice.reason_code, started);
+            search.reason_code, started, expanded_states);
       case LeggedLatticeStatus::kNoPath:
         return Failure(
             PlanningOutcome::kNoKnownSafeRoute,
             ExecutionDirective::kNoSafeReference,
-            lattice.reason_code, started);
+            search.reason_code, started, expanded_states);
       case LeggedLatticeStatus::kReady:
         break;
     }
   }
-  if (!lattice.graph.has_value()) {
+  if (!search.plan.has_value()) {
     return Failure(
         PlanningOutcome::kNumericalFailure,
         ExecutionDirective::kHoldPosition,
-        "LEGGED_LATTICE_RESULT_INVALID", started);
+        "LEGGED_SEARCH_RESULT_INVALID", started);
   }
-  if (std::ranges::none_of(
-          lattice.graph->search_problem.goal_mask,
-          [](const std::uint8_t value) { return value != 0U; })) {
-    return Failure(
-        PlanningOutcome::kNoKnownSafeRoute,
-        ExecutionDirective::kNoSafeReference,
-        "LEGGED_NO_KNOWN_SAFE_ROUTE", started);
-  }
-  const shared::AraStarResult search = shared::SearchAraStar(
-      lattice.graph->search_problem, problem.stop_token);
-  switch (search.status) {
-    case shared::AraStarStatus::kCanceled:
-      return Canceled(started, search.expanded_states);
-    case shared::AraStarStatus::kResourceExhausted:
-      return Failure(
-          PlanningOutcome::kResourceExhausted,
-          ExecutionDirective::kNoSafeReference,
-          search.reason_code, started, search.expanded_states);
-    case shared::AraStarStatus::kNoPath:
-      return Failure(
-          PlanningOutcome::kNoKnownSafeRoute,
-          ExecutionDirective::kNoSafeReference,
-          "LEGGED_NO_KNOWN_SAFE_ROUTE", started, search.expanded_states);
-    case shared::AraStarStatus::kInvalidProblem:
-      return Failure(
-          PlanningOutcome::kNumericalFailure,
-          ExecutionDirective::kHoldPosition,
-          search.reason_code, started, search.expanded_states);
-    case shared::AraStarStatus::kSolved:
-      break;
-  }
-  const auto discrete = ResolveLeggedPlan(*lattice.graph, search);
-  if (!discrete.has_value()) {
-    return Failure(
-        PlanningOutcome::kNumericalFailure,
-        ExecutionDirective::kHoldPosition,
-        "LEGGED_SEARCH_RESULT_INVALID", started, search.expanded_states);
-  }
+  const LeggedDiscretePlan& discrete = *search.plan;
 
   std::vector<std::string> warnings{"LEGGED_BODY_REFERENCE_ONLY"};
   TrajectoryReference trajectory;
@@ -360,14 +326,14 @@ PlannerOutput LeggedPlanner::Plan(
   CollisionValidation collision_validation =
       CollisionValidation::kNotApplicable;
   std::chrono::nanoseconds smoothing_elapsed{};
-  if (discrete->transitions.empty()) {
+  if (discrete.transitions.empty()) {
     trajectory = StationaryTrajectory(*current_state);
   } else {
     const double support_radius = std::hypot(
         capability->body_extent_m.x / 2.0,
         capability->body_extent_m.y / 2.0);
     const shared::CorridorResult corridor = shared::BuildConvexCorridor(
-        *projection.projection, Centerline(discrete->transitions),
+        *projection.projection, Centerline(discrete.transitions),
         shared::CorridorTightening{
             .footprint_support_radius_m = support_radius,
             .tracking_error_bound_m = 0.0,
@@ -375,20 +341,20 @@ PlannerOutput LeggedPlanner::Plan(
         },
         problem.config.corridor, problem.stop_token);
     if (corridor.status == shared::CorridorStatus::kCanceled) {
-      return Canceled(started, search.expanded_states);
+      return Canceled(started, discrete.expanded_states);
     }
     if (corridor.status != shared::CorridorStatus::kCertified) {
       warnings.push_back(corridor.reason_code);
     }
     const auto smoothing_started = std::chrono::steady_clock::now();
     LeggedOptimizationResult optimized = OptimizeLeggedBodySpline(
-        discrete->transitions, corridor, problem.config.optimization,
+        discrete.transitions, corridor, problem.config.optimization,
         problem.stop_token);
     smoothing_elapsed =
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - smoothing_started);
     if (optimized.canceled) {
-      return Canceled(started, search.expanded_states);
+      return Canceled(started, discrete.expanded_states);
     }
     bool used_discrete_fallback =
         corridor.status != shared::CorridorStatus::kCertified;
@@ -407,9 +373,9 @@ PlannerOutput LeggedPlanner::Plan(
             *projection.projection, problem.search_domain, *capability,
             problem.stop_token)) {
       if (problem.stop_token.stop_requested()) {
-        return Canceled(started, search.expanded_states);
+        return Canceled(started, discrete.expanded_states);
       }
-      selected = discrete->transitions;
+      selected = discrete.transitions;
       warnings.emplace_back("LEGGED_OPTIMIZATION_SWEEP_FALLBACK");
       used_discrete_fallback = true;
     }
@@ -420,8 +386,8 @@ PlannerOutput LeggedPlanner::Plan(
       return Failure(
           PlanningOutcome::kNumericalFailure,
           ExecutionDirective::kHoldPosition,
-          "LEGGED_VALIDATED_PATH_LOST", started, search.expanded_states,
-          discrete->cost, std::move(warnings));
+          "LEGGED_VALIDATED_PATH_LOST", started, discrete.expanded_states,
+          discrete.cost, std::move(warnings));
     }
     if (used_discrete_fallback &&
         std::ranges::find(
@@ -435,7 +401,7 @@ PlannerOutput LeggedPlanner::Plan(
           PlanningOutcome::kNoKnownSafeRoute,
           ExecutionDirective::kNoSafeReference,
           "LEGGED_SMOOTHED_EXECUTION_REQUIRED", started,
-          search.expanded_states, discrete->cost, std::move(warnings));
+          discrete.expanded_states, discrete.cost, std::move(warnings));
     }
     trajectory_mode = used_discrete_fallback
         ? TrajectoryMode::kDiscreteFallback
@@ -447,14 +413,14 @@ PlannerOutput LeggedPlanner::Plan(
                  std::size_t{512U}),
         problem.stop_token);
     if (timed.canceled) {
-      return Canceled(started, search.expanded_states);
+      return Canceled(started, discrete.expanded_states);
     }
     if (!timed.ok()) {
       return Failure(
           PlanningOutcome::kNumericalFailure,
           ExecutionDirective::kHoldPosition,
-          timed.reason_code, started, search.expanded_states,
-          discrete->cost, std::move(warnings));
+          timed.reason_code, started, discrete.expanded_states,
+          discrete.cost, std::move(warnings));
     }
     trajectory = std::move(*timed.trajectory);
   }
@@ -477,7 +443,7 @@ PlannerOutput LeggedPlanner::Plan(
     return Failure(PlanningOutcome::kNumericalFailure,
                    ExecutionDirective::kNoSafeReference,
                    "LEGGED_TRAJECTORY_DIAGNOSTICS_NONFINITE", started,
-                   search.expanded_states, discrete->cost,
+                   discrete.expanded_states, discrete.cost,
                    std::move(warnings));
   }
 
@@ -495,8 +461,8 @@ PlannerOutput LeggedPlanner::Plan(
           .planner_name = std::string{kPlannerName},
           .elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
               std::chrono::steady_clock::now() - started),
-          .expanded_states = search.expanded_states,
-          .best_cost = discrete->cost,
+          .expanded_states = discrete.expanded_states,
+          .best_cost = discrete.cost,
           .warning_codes = std::move(warnings),
           .local_trajectory = local_diagnostics,
       },
