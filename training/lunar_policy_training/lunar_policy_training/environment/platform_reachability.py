@@ -19,6 +19,47 @@ _GROUND_PHYSICAL_EVIDENCE_ALGORITHM_ID = (
 )
 
 
+class HopperOpportunityAuthority:
+    """One-boundary certified landing context shared by independent queries."""
+
+    def __init__(
+        self,
+        *,
+        bridge: object,
+        context: object,
+        certified_mask: np.ndarray,
+        certified_positions_m: np.ndarray,
+    ) -> None:
+        self._bridge = bridge
+        self._context = context
+        self.certified_mask = np.ascontiguousarray(certified_mask, dtype=np.bool_)
+        self.certified_positions_m = np.ascontiguousarray(
+            certified_positions_m, dtype=np.float64
+        ).reshape((-1, 3))
+        if len(self.certified_positions_m) != int(self.certified_mask.sum()):
+            raise ValueError("hopper opportunity landing counts differ")
+        direct = np.ascontiguousarray(
+            np.flipud(np.asarray(context.direct, dtype=np.bool_))
+        )
+        direct.setflags(write=False)
+        self.direct_mask = direct
+
+    @property
+    def algorithm_id(self) -> str:
+        return str(self._context.algorithm_id)
+
+    def query(self, positive_mask: np.ndarray) -> object:
+        positive = np.asarray(positive_mask)
+        if (
+            positive.dtype != np.dtype(np.bool_)
+            or positive.shape != self.certified_mask.shape
+        ):
+            raise ValueError("hopper opportunity mask differs")
+        return self._bridge.query_hopper_opportunity_distance(
+            self._context, np.ascontiguousarray(np.flipud(positive))
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class PhysicalReachabilityResult:
     """Primitive-independent physical observation poses for one fixed start."""
@@ -31,6 +72,7 @@ class PhysicalReachabilityResult:
     physical_evidence_algorithm_id: str
     physical_safe_pose_count: int
     physically_reachable_pose_count: int
+    hopper_opportunity_authority: HopperOpportunityAuthority | None = None
 
     def __post_init__(self) -> None:
         mask = self.physical_observation_pose_mask
@@ -75,6 +117,8 @@ class PhysicalReachabilityResult:
             or len(positions) != reachable_count
         ):
             raise ValueError("physical reachability counts differ")
+        if self.platform_type != "HOPPER" and self.hopper_opportunity_authority is not None:
+            raise ValueError("ground physical reachability has hopper authority")
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +173,8 @@ class PlatformCandidateReachability:
         bridge_methods = (
             (
                 "project_hopper_landing_evidence",
-                "project_direct_hopper_reachability",
+                "project_hopper_opportunity_context",
+                "query_hopper_opportunity_distance",
             )
             if platform_type == "HOPPER"
             else (
@@ -207,6 +252,7 @@ class PlatformCandidateReachability:
                 exact_positions,
                 reachability_algorithm_id,
                 evidence_algorithm_id,
+                opportunity_authority,
             ) = self._project_hopper_candidates(candidates, positions)
         else:
             projection = self._bridge.project_reachability(
@@ -228,6 +274,7 @@ class PlatformCandidateReachability:
             evidence_algorithm_id = (
                 _GROUND_PHYSICAL_EVIDENCE_ALGORITHM_ID
             )
+            opportunity_authority = None
 
         mask = np.zeros(
             (self._canvas.geometry.cells, self._canvas.geometry.cells),
@@ -249,6 +296,7 @@ class PlatformCandidateReachability:
             physically_reachable_pose_count=int(
                 accepted.sum(dtype=np.int64)
             ),
+            hopper_opportunity_authority=opportunity_authority,
         )
 
     def _validate_candidate_cells(
@@ -524,7 +572,14 @@ class PlatformCandidateReachability:
         self,
         candidates: np.ndarray,
         target_positions_map: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, str]:
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        str,
+        str,
+        HopperOpportunityAuthority,
+    ]:
         import lunar_planner_training_bridge as bridge_api
 
         start = self._canvas.world_to_grid(self._pose.x_m, self._pose.y_m)
@@ -625,12 +680,22 @@ class PlatformCandidateReachability:
             np.ascontiguousarray(np.flipud(area)),
             evidence_algorithm_id,
         )
-        projection = self._bridge.project_direct_hopper_reachability(
+        opportunity_context = self._bridge.project_hopper_opportunity_context(
             self._request, self._maximum_edge_distance_m, evidence
         )
-        reachable, reachability_algorithm_id = (
-            self._validate_reachability_projection(projection)
+        direct = np.asarray(getattr(opportunity_context, "direct", None))
+        if (
+            direct.dtype != np.dtype(np.bool_)
+            or direct.shape != shape
+            or not direct.flags.c_contiguous
+        ):
+            raise RuntimeError("hopper opportunity direct geometry differs")
+        reachable = np.ascontiguousarray(np.flipud(direct), dtype=np.bool_)
+        reachability_algorithm_id = getattr(
+            opportunity_context, "algorithm_id", None
         )
+        if not isinstance(reachability_algorithm_id, str) or not reachability_algorithm_id:
+            raise RuntimeError("hopper opportunity algorithm identity is invalid")
         index_by_cell = {
             cell: index for index, cell in enumerate(cells_to_certify)
         }
@@ -649,12 +714,23 @@ class PlatformCandidateReachability:
         exact_positions = np.ascontiguousarray(
             landing.aim_positions_m[candidate_indices], dtype=np.float64
         ).reshape((-1, 3))
+        certified_mask = np.ascontiguousarray(certified, dtype=np.bool_)
+        certified_positions = np.ascontiguousarray(
+            aim[certified_mask], dtype=np.float64
+        ).reshape((-1, 3))
+        authority = HopperOpportunityAuthority(
+            bridge=self._bridge,
+            context=opportunity_context,
+            certified_mask=certified_mask,
+            certified_positions_m=certified_positions,
+        )
         return (
             accepted,
             candidate_certified,
             exact_positions,
             reachability_algorithm_id,
             evidence_algorithm_id,
+            authority,
         )
 
 
@@ -662,5 +738,6 @@ __all__ = [
     "CandidateReachabilityResult",
     "PHYSICAL_PROJECTION_SCHEMA",
     "PhysicalReachabilityResult",
+    "HopperOpportunityAuthority",
     "PlatformCandidateReachability",
 ]

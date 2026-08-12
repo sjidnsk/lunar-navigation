@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -26,6 +27,19 @@
 #include "shared/safe_projection.hpp"
 
 namespace lunar::planning {
+
+struct HopperOpportunityContextStorage final {
+  std::shared_ptr<const shared::MapSnapshot> map;
+  HopperCapability capability;
+  MapSafetyConfig map_safety;
+  std::stop_token stop_token;
+  std::vector<std::optional<hopper::CertifiedLandingRegion>> landings;
+  std::vector<std::pair<std::int32_t, std::int32_t>> offsets;
+  std::deque<std::size_t> pending;
+  std::unordered_map<std::size_t, std::uint8_t> edge_cache;
+  std::size_t start_index{};
+};
+
 namespace {
 
 constexpr Vec3 kLunarGravityMps2{0.0, 0.0, -1.62};
@@ -651,6 +665,337 @@ ReachabilityProjectionResult ProjectDirectHopperReachability(
     const HopperLandingEvidenceGrid& hopper_landing_evidence) {
   return ProjectReachabilityImpl(
       input, maximum_edge_distance_m, &hopper_landing_evidence, true);
+}
+
+HopperOpportunityContextResult
+ProjectHopperOpportunityContext(
+    const PlannerInput& input, const double maximum_edge_distance_m,
+    const HopperLandingEvidenceGrid& hopper_landing_evidence) {
+  const auto failure = [](std::string reason_code) {
+    return HopperOpportunityContextResult{
+        .context = std::nullopt,
+        .reason_code = std::move(reason_code),
+    };
+  };
+  if (!std::isfinite(maximum_edge_distance_m) ||
+      maximum_edge_distance_m <= 0.0) {
+    return failure("REACHABILITY_MAXIMUM_EDGE_DISTANCE_INVALID");
+  }
+  if (input.stop_token.stop_requested()) {
+    return failure("REQUEST_CANCELED");
+  }
+  const auto* capability = std::get_if<HopperCapability>(&input.capability);
+  if (capability == nullptr) {
+    return failure("HOPPER_OPPORTUNITY_DISTANCE_PLATFORM_MISMATCH");
+  }
+  try {
+    const auto global = shared::MapSnapshot::Create(input.world.global_map);
+    if (!global.ok()) {
+      return failure(global.reason_code);
+    }
+    const auto start = StartCell(
+        input, *global.snapshot, PlatformType::kHopper);
+    if (!start.has_value()) {
+      return failure("REACHABILITY_START_OUTSIDE_GLOBAL_MAP");
+    }
+    auto built = hopper::BuildExternalLandings(
+        *global.snapshot, hopper_landing_evidence);
+    if (!built.landings.has_value()) {
+      return failure(std::move(built.reason_code));
+    }
+    HopperOpportunityContext context{
+        .width = global.snapshot->width(),
+        .height = global.snapshot->height(),
+        .direct =
+            std::vector<std::uint8_t>(global.snapshot->cell_count(), 0U),
+        .reachable =
+            std::vector<std::uint8_t>(global.snapshot->cell_count(), 0U),
+        .hop_distance_from_current =
+            std::vector<std::int32_t>(global.snapshot->cell_count(), -1),
+        .algorithm_id = "cpp-hopper-opportunity-connectivity/v1",
+        .storage = std::make_shared<HopperOpportunityContextStorage>(),
+    };
+    const std::size_t start_index = global.snapshot->Index(*start);
+    if (start_index >= built.landings->size() ||
+        !(*built.landings)[start_index].has_value()) {
+      return HopperOpportunityContextResult{
+          .context = std::move(context), .reason_code = {}};
+    }
+    context.storage->map = global.snapshot;
+    context.storage->capability = *capability;
+    context.storage->map_safety = input.config.map_safety;
+    context.storage->stop_token = input.stop_token;
+    context.storage->landings = std::move(*built.landings);
+    context.storage->start_index = start_index;
+    context.reachable[start_index] = 1U;
+    context.hop_distance_from_current[start_index] = 0;
+    const auto cell_radius = static_cast<std::int32_t>(
+        std::ceil(maximum_edge_distance_m / global.snapshot->resolution_m()));
+    for (std::int32_t dy = -cell_radius; dy <= cell_radius; ++dy) {
+      for (std::int32_t dx = -cell_radius; dx <= cell_radius; ++dx) {
+        if (dx == 0 && dy == 0) {
+          continue;
+        }
+        const double distance = std::hypot(
+            static_cast<double>(dx) * global.snapshot->resolution_m(),
+            static_cast<double>(dy) * global.snapshot->resolution_m());
+        if (distance <= maximum_edge_distance_m + kDistanceToleranceM) {
+          context.storage->offsets.emplace_back(dx, dy);
+        }
+      }
+    }
+    const auto certify = [&](const std::size_t target_index) {
+      ++context.candidate_edges_evaluated;
+      const auto forward = CertifyDirectedLandingRegionEdge(
+          *context.storage->landings[start_index],
+          *context.storage->landings[target_index], *global.snapshot,
+          *capability, input.config.map_safety, input.stop_token);
+      if (!forward.ok()) {
+        if (forward.status == hopper::HopCertificationStatus::kInfeasible) {
+          ++context.rejected_edges;
+          return std::pair{false, std::string{}};
+        }
+        return std::pair{false, EdgeFailureReason(forward)};
+      }
+      ++context.certified_edges;
+      ++context.candidate_edges_evaluated;
+      const auto reverse = CertifyDirectedLandingRegionEdge(
+          *context.storage->landings[target_index],
+          *context.storage->landings[start_index], *global.snapshot,
+          *capability, input.config.map_safety, input.stop_token);
+      if (!reverse.ok()) {
+        if (reverse.status == hopper::HopCertificationStatus::kInfeasible) {
+          ++context.rejected_edges;
+          return std::pair{false, std::string{}};
+        }
+        return std::pair{false, EdgeFailureReason(reverse)};
+      }
+      ++context.certified_edges;
+      return std::pair{true, std::string{}};
+    };
+    const shared::GridCell start_cell = *start;
+    const std::size_t cell_count = global.snapshot->cell_count();
+    for (const auto [dx, dy] : context.storage->offsets) {
+      const shared::GridCell target{
+          .x = start_cell.x + dx, .y = start_cell.y + dy};
+      if (!global.snapshot->InBounds(target)) {
+        continue;
+      }
+      const std::size_t target_index = global.snapshot->Index(target);
+      if (!context.storage->landings[target_index].has_value()) {
+        continue;
+      }
+      const auto [certified, fatal_reason] = certify(target_index);
+      if (!fatal_reason.empty()) {
+        return failure(fatal_reason);
+      }
+      const std::size_t edge_key = std::min(start_index, target_index) *
+              cell_count + std::max(start_index, target_index);
+      context.storage->edge_cache.emplace(
+          edge_key, certified ? 1U : 0U);
+      if (certified) {
+        context.direct[target_index] = 1U;
+        context.reachable[target_index] = 1U;
+        context.hop_distance_from_current[target_index] = 1;
+        context.storage->pending.push_back(target_index);
+      }
+    }
+    return HopperOpportunityContextResult{
+        .context = std::move(context), .reason_code = {}};
+  } catch (const std::bad_alloc&) {
+    return failure("REACHABILITY_RESOURCE_EXHAUSTED");
+  } catch (...) {
+    return failure("REACHABILITY_INTERNAL_FAILURE");
+  }
+}
+
+HopperOpportunityDistanceProjectionResult QueryHopperOpportunityDistance(
+    HopperOpportunityContext& context,
+    const std::span<const std::uint8_t> positive_opportunities) {
+  const auto failure = [](std::string reason_code) {
+    return HopperOpportunityDistanceProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = std::move(reason_code),
+    };
+  };
+  if (context.storage == nullptr || context.storage->map == nullptr ||
+      positive_opportunities.size() != context.reachable.size() ||
+      std::any_of(positive_opportunities.begin(),
+                  positive_opportunities.end(),
+                  [](const std::uint8_t value) { return value > 1U; })) {
+    return failure("HOPPER_OPPORTUNITY_MASK_INVALID");
+  }
+  try {
+    auto& storage = *context.storage;
+    const std::size_t cell_count = context.reachable.size();
+    std::size_t undiscovered_positive = 0U;
+    for (std::size_t index = 0U; index < cell_count; ++index) {
+      if (positive_opportunities[index] != 0U &&
+          context.reachable[index] == 0U) {
+        ++undiscovered_positive;
+      }
+    }
+    const auto certify = [&](const std::size_t source_index,
+                             const std::size_t target_index) {
+      const std::size_t edge_key = std::min(source_index, target_index) *
+              cell_count + std::max(source_index, target_index);
+      if (const auto cached = storage.edge_cache.find(edge_key);
+          cached != storage.edge_cache.end()) {
+        return std::pair{cached->second != 0U, std::string{}};
+      }
+      ++context.candidate_edges_evaluated;
+      const auto forward = CertifyDirectedLandingRegionEdge(
+          *storage.landings[source_index], *storage.landings[target_index],
+          *storage.map, storage.capability, storage.map_safety,
+          storage.stop_token);
+      if (!forward.ok()) {
+        if (forward.status == hopper::HopCertificationStatus::kInfeasible) {
+          ++context.rejected_edges;
+          storage.edge_cache.emplace(edge_key, 0U);
+          return std::pair{false, std::string{}};
+        }
+        return std::pair{false, EdgeFailureReason(forward)};
+      }
+      ++context.certified_edges;
+      ++context.candidate_edges_evaluated;
+      const auto reverse = CertifyDirectedLandingRegionEdge(
+          *storage.landings[target_index], *storage.landings[source_index],
+          *storage.map, storage.capability, storage.map_safety,
+          storage.stop_token);
+      if (!reverse.ok()) {
+        if (reverse.status == hopper::HopCertificationStatus::kInfeasible) {
+          ++context.rejected_edges;
+          storage.edge_cache.emplace(edge_key, 0U);
+          return std::pair{false, std::string{}};
+        }
+        return std::pair{false, EdgeFailureReason(reverse)};
+      }
+      ++context.certified_edges;
+      storage.edge_cache.emplace(edge_key, 1U);
+      return std::pair{true, std::string{}};
+    };
+    std::int32_t completed_positive_parent_level = -1;
+    while (!storage.pending.empty() &&
+           (undiscovered_positive > 0U ||
+            context.hop_distance_from_current[storage.pending.front()] <=
+                completed_positive_parent_level)) {
+      if (storage.stop_token.stop_requested()) {
+        return failure("REQUEST_CANCELED");
+      }
+      const std::size_t source_index = storage.pending.front();
+      storage.pending.pop_front();
+      const shared::GridCell source{
+          .x = static_cast<std::int32_t>(source_index % context.width),
+          .y = static_cast<std::int32_t>(source_index / context.width),
+      };
+      for (const auto [dx, dy] : storage.offsets) {
+        const shared::GridCell target{
+            .x = source.x + dx, .y = source.y + dy};
+        if (!storage.map->InBounds(target)) {
+          continue;
+        }
+        const std::size_t target_index = storage.map->Index(target);
+        if (context.hop_distance_from_current[target_index] >= 0 ||
+            !storage.landings[target_index].has_value()) {
+          continue;
+        }
+        const auto [certified, fatal_reason] =
+            certify(source_index, target_index);
+        if (!fatal_reason.empty()) {
+          return failure(fatal_reason);
+        }
+        if (certified) {
+          context.reachable[target_index] = 1U;
+          context.hop_distance_from_current[target_index] =
+              context.hop_distance_from_current[source_index] + 1;
+          storage.pending.push_back(target_index);
+          if (positive_opportunities[target_index] != 0U) {
+            --undiscovered_positive;
+            completed_positive_parent_level = std::max(
+                completed_positive_parent_level,
+                context.hop_distance_from_current[target_index] - 1);
+          }
+        }
+      }
+    }
+    HopperOpportunityDistanceProjection projection{
+        .width = context.width,
+        .height = context.height,
+        .direct_progress = std::vector<std::uint8_t>(cell_count, 0U),
+        .reachable_opportunities =
+            std::vector<std::uint8_t>(cell_count, 0U),
+        .algorithm_id = "cpp-hopper-opportunity-distance/v1",
+    };
+    std::int32_t nearest = std::numeric_limits<std::int32_t>::max();
+    for (std::size_t index = 0U; index < cell_count; ++index) {
+      if (context.reachable[index] == 0U ||
+          positive_opportunities[index] == 0U) {
+        continue;
+      }
+      projection.reachable_opportunities[index] = 1U;
+      nearest = std::min(
+          nearest, context.hop_distance_from_current[index]);
+    }
+    if (nearest == std::numeric_limits<std::int32_t>::max()) {
+      return HopperOpportunityDistanceProjectionResult{
+          .projection = std::move(projection), .reason_code = {}};
+    }
+    projection.current_hop_distance = nearest;
+    projection.has_reachable_opportunity = 1U;
+    if (nearest == 0) {
+      return HopperOpportunityDistanceProjectionResult{
+          .projection = std::move(projection), .reason_code = {}};
+    }
+    std::vector<std::uint8_t> shortest_path(cell_count, 0U);
+    for (std::size_t index = 0U; index < cell_count; ++index) {
+      shortest_path[index] = static_cast<std::uint8_t>(
+          positive_opportunities[index] != 0U &&
+          context.hop_distance_from_current[index] == nearest);
+    }
+    for (std::int32_t level = nearest; level > 1; --level) {
+      for (std::size_t target_index = 0U; target_index < cell_count;
+           ++target_index) {
+        if (shortest_path[target_index] == 0U ||
+            context.hop_distance_from_current[target_index] != level) {
+          continue;
+        }
+        const shared::GridCell target{
+            .x = static_cast<std::int32_t>(target_index % context.width),
+            .y = static_cast<std::int32_t>(target_index / context.width),
+        };
+        for (const auto [dx, dy] : storage.offsets) {
+          const shared::GridCell source{
+              .x = target.x + dx, .y = target.y + dy};
+          if (!storage.map->InBounds(source)) {
+            continue;
+          }
+          const std::size_t source_index = storage.map->Index(source);
+          if (context.hop_distance_from_current[source_index] != level - 1 ||
+              !storage.landings[source_index].has_value()) {
+            continue;
+          }
+          const auto [certified, fatal_reason] =
+              certify(source_index, target_index);
+          if (!fatal_reason.empty()) {
+            return failure(fatal_reason);
+          }
+          if (certified) {
+            shortest_path[source_index] = 1U;
+          }
+        }
+      }
+    }
+    for (std::size_t index = 0U; index < cell_count; ++index) {
+      projection.direct_progress[index] = static_cast<std::uint8_t>(
+          context.direct[index] != 0U && shortest_path[index] != 0U);
+    }
+    return HopperOpportunityDistanceProjectionResult{
+        .projection = std::move(projection), .reason_code = {}};
+  } catch (const std::bad_alloc&) {
+    return failure("REACHABILITY_RESOURCE_EXHAUSTED");
+  } catch (...) {
+    return failure("REACHABILITY_INTERNAL_FAILURE");
+  }
 }
 
 HopperLandingEvidenceProjectionResult ProjectHopperLandingEvidence(

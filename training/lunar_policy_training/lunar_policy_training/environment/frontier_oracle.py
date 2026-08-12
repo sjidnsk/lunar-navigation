@@ -109,6 +109,17 @@ class FrontierOpportunityOracle:
             np.column_stack(np.nonzero(mask)), dtype=np.int32
         ).reshape((-1, 2))
         positions = physical_reachability.observation_positions_m
+        opportunity_authority = (
+            physical_reachability.hopper_opportunity_authority
+        )
+        if opportunity_authority is not None:
+            physical_cells = np.ascontiguousarray(
+                np.column_stack(
+                    np.nonzero(opportunity_authority.certified_mask)
+                ),
+                dtype=np.int32,
+            ).reshape((-1, 2))
+            positions = opportunity_authority.certified_positions_m
         if len(physical_cells) != len(positions):
             raise ValueError("frontier oracle physical positions differ")
         for cell, position in zip(physical_cells, positions, strict=True):
@@ -147,11 +158,14 @@ class FrontierOpportunityOracle:
         safe_positions = np.ascontiguousarray(
             positions[physical_safe], dtype=np.float64
         )
-        distance_m = np.hypot(
-            safe_positions[:, 0] - pose_map.x_m,
-            safe_positions[:, 1] - pose_map.y_m,
-        )
-        within_range = distance_m <= _ORACLE_RANGE_M + 1.0e-12
+        if opportunity_authority is None:
+            distance_m = np.hypot(
+                safe_positions[:, 0] - pose_map.x_m,
+                safe_positions[:, 1] - pose_map.y_m,
+            )
+            within_range = distance_m <= _ORACLE_RANGE_M + 1.0e-12
+        else:
+            within_range = np.ones(len(safe_positions), dtype=np.bool_)
         reachable_cells = np.ascontiguousarray(
             safe_cells[within_range], dtype=np.int32
         )
@@ -199,6 +213,26 @@ class FrontierOpportunityOracle:
         ):
             raise RuntimeError("frontier oracle visibility result is invalid")
         positive = gains[:, 0] > np.float32(0.0)
+        if opportunity_authority is not None:
+            positive_mask = np.zeros_like(
+                opportunity_authority.certified_mask, dtype=np.bool_
+            )
+            positive_cells = reachable_cells[positive]
+            if len(positive_cells):
+                positive_mask[
+                    positive_cells[:, 0], positive_cells[:, 1]
+                ] = True
+            opportunity = opportunity_authority.query(
+                np.ascontiguousarray(positive_mask)
+            )
+            connected_positive = np.ascontiguousarray(
+                np.flipud(opportunity.reachable_opportunities),
+                dtype=np.bool_,
+            )
+            positive = np.ascontiguousarray(
+                [connected_positive[tuple(cell)] for cell in reachable_cells],
+                dtype=np.bool_,
+            )
         opportunity_keys = sorted(
             (
                 f"{int(cell[0])}:{int(cell[1])}:"

@@ -982,6 +982,84 @@ void BindProjection(py::module_ &module) {
       .def_readonly(
           "maximum_certified_edge_distance_m",
           &planning::ReachabilityProjection::maximum_certified_edge_distance_m);
+  py::class_<planning::HopperOpportunityContext>(
+      module, "HopperOpportunityContext")
+      .def_property_readonly(
+          "direct", [](const planning::HopperOpportunityContext &self) {
+            py::array_t<bool> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.height),
+                static_cast<py::ssize_t>(self.width)});
+            std::transform(self.direct.begin(), self.direct.end(),
+                           result.mutable_data(),
+                           [](const std::uint8_t value) {
+                             return value != 0U;
+                           });
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "reachable", [](const planning::HopperOpportunityContext &self) {
+            py::array_t<bool> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.height),
+                static_cast<py::ssize_t>(self.width)});
+            std::transform(self.reachable.begin(), self.reachable.end(),
+                           result.mutable_data(),
+                           [](const std::uint8_t value) {
+                             return value != 0U;
+                           });
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "hop_distance_from_current",
+          [](const planning::HopperOpportunityContext &self) {
+            return ReadonlyArray(CopyArray2d(
+                self.hop_distance_from_current, self.height, self.width));
+          })
+      .def_readonly("algorithm_id",
+                    &planning::HopperOpportunityContext::algorithm_id)
+      .def_readonly(
+          "candidate_edges_evaluated",
+          &planning::HopperOpportunityContext::candidate_edges_evaluated)
+      .def_readonly("certified_edges",
+                    &planning::HopperOpportunityContext::certified_edges)
+      .def_readonly("rejected_edges",
+                    &planning::HopperOpportunityContext::rejected_edges);
+  py::class_<planning::HopperOpportunityDistanceProjection>(
+      module, "HopperOpportunityDistanceProjection")
+      .def_property_readonly(
+          "direct_progress",
+          [](const planning::HopperOpportunityDistanceProjection &self) {
+            py::array_t<bool> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.height),
+                static_cast<py::ssize_t>(self.width)});
+            std::transform(
+                self.direct_progress.begin(), self.direct_progress.end(),
+                result.mutable_data(),
+                [](const std::uint8_t value) { return value != 0U; });
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "reachable_opportunities",
+          [](const planning::HopperOpportunityDistanceProjection &self) {
+            py::array_t<bool> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.height),
+                static_cast<py::ssize_t>(self.width)});
+            std::transform(
+                self.reachable_opportunities.begin(),
+                self.reachable_opportunities.end(), result.mutable_data(),
+                [](const std::uint8_t value) { return value != 0U; });
+            return ReadonlyArray(std::move(result));
+          })
+      .def_readonly(
+          "current_hop_distance",
+          &planning::HopperOpportunityDistanceProjection::current_hop_distance)
+      .def_property_readonly(
+          "has_reachable_opportunity",
+          [](const planning::HopperOpportunityDistanceProjection &self) {
+            return self.has_reachable_opportunity != 0U;
+          })
+      .def_readonly(
+          "algorithm_id",
+          &planning::HopperOpportunityDistanceProjection::algorithm_id);
   py::class_<planning::HopperLandingEvidenceGrid>(
       module, "HopperLandingEvidenceGrid")
       .def(py::init(&HopperLandingGridFromArrays),
@@ -1572,6 +1650,54 @@ void BindRequest(py::module_ &module) {
           py::arg("request"), py::arg("maximum_edge_distance_m"),
           py::arg("hopper_landing_evidence"),
           py::call_guard<py::gil_scoped_release>())
+      .def(
+          "project_hopper_opportunity_context",
+          [](const training::PlannerBridge &self,
+             const training::TrainingPlanRequest &request,
+             const double maximum_edge_distance_m,
+             const planning::HopperLandingEvidenceGrid &evidence) {
+            auto result = self.ProjectHopperOpportunityContext(
+                request, maximum_edge_distance_m, evidence);
+            if (!result.ok()) {
+              throw std::runtime_error(result.reason_code);
+            }
+            return std::move(*result.context);
+          },
+          py::arg("request"), py::arg("maximum_edge_distance_m"),
+          py::arg("hopper_landing_evidence"),
+          py::call_guard<py::gil_scoped_release>())
+      .def(
+          "query_hopper_opportunity_distance",
+          [](const training::PlannerBridge &self,
+             planning::HopperOpportunityContext &context,
+             const py::array &positive_opportunities) {
+            RequireExactArray(
+                positive_opportunities, py::dtype::of<bool>(), 2,
+                "positive opportunities", "bool");
+            if (positive_opportunities.shape(0) !=
+                    static_cast<py::ssize_t>(context.height) ||
+                positive_opportunities.shape(1) !=
+                    static_cast<py::ssize_t>(context.width)) {
+              throw py::value_error("positive opportunities shape mismatch");
+            }
+            const auto *data =
+                static_cast<const bool *>(positive_opportunities.data());
+            std::vector<std::uint8_t> values(
+                static_cast<std::size_t>(positive_opportunities.size()));
+            std::transform(
+                data, data + positive_opportunities.size(), values.begin(),
+                [](const bool value) { return value ? 1U : 0U; });
+            planning::HopperOpportunityDistanceProjectionResult result;
+            {
+              py::gil_scoped_release release;
+              result = self.QueryHopperOpportunityDistance(context, values);
+            }
+            if (!result.ok()) {
+              throw std::runtime_error(result.reason_code);
+            }
+            return std::move(*result.projection);
+          },
+          py::arg("context"), py::arg("positive_opportunities"))
       .def(
           "project_hopper_landing_evidence",
           [](const training::PlannerBridge &self,

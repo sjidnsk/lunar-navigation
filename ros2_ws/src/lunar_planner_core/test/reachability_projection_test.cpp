@@ -596,6 +596,172 @@ TEST(ReachabilityProjection,
 }
 
 TEST(ReachabilityProjection,
+     HopperOpportunityDistanceSelectsOnlyStrictlyCloserDirectLandings) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 80U, 16U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 80U, 16U, 0.5);
+  input.config.global_map.base_resolution_m = 0.5;
+  std::get<HopperState>(input.current_state).pose.position_m =
+      {3.25, 4.25, 0.0};
+  KeepOnlyLandingEvidencePatches(
+      input.world.local_map, {{8U, 6U}, {8U, 40U}, {8U, 74U}});
+  const auto global = shared::MapSnapshot::Create(input.world.global_map);
+  ASSERT_TRUE(global.ok()) << global.reason_code;
+  std::vector<Vec3> targets;
+  targets.reserve(global.snapshot->cell_count());
+  for (std::size_t index = 0U; index < global.snapshot->cell_count(); ++index) {
+    targets.push_back(global.snapshot->CellCenter(shared::GridCell{
+        .x = static_cast<std::int32_t>(index % global.snapshot->width()),
+        .y = static_cast<std::int32_t>(index / global.snapshot->width()),
+    }));
+  }
+  const auto landing = ProjectHopperLandingEvidence(input, targets);
+  ASSERT_TRUE(landing.ok()) << landing.reason_code;
+  const HopperLandingEvidenceGrid evidence{
+      .width = global.snapshot->width(),
+      .height = global.snapshot->height(),
+      .landings = landing.projection->landings,
+      .algorithm_id = landing.projection->algorithm_id,
+  };
+  std::vector<std::uint8_t> positive(global.snapshot->cell_count(), 0U);
+  positive[Index(input.world.global_map, 8U, 74U)] = 1U;
+
+  auto context = ProjectHopperOpportunityContext(
+      input, 18.0, evidence);
+  ASSERT_TRUE(context.ok()) << context.reason_code;
+  const auto projection = QueryHopperOpportunityDistance(
+      *context.context, positive);
+
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  EXPECT_EQ(projection.projection->algorithm_id,
+            "cpp-hopper-opportunity-distance/v1");
+  EXPECT_EQ(projection.projection->current_hop_distance, 2);
+  EXPECT_EQ(projection.projection->has_reachable_opportunity, 1U);
+  EXPECT_NE(projection.projection->direct_progress[
+                Index(input.world.global_map, 8U, 40U)],
+            0U);
+  EXPECT_EQ(projection.projection->direct_progress[
+                Index(input.world.global_map, 8U, 6U)],
+            0U);
+  EXPECT_NE(projection.projection->reachable_opportunities[
+                Index(input.world.global_map, 8U, 74U)],
+            0U);
+  EXPECT_GT(context.context->candidate_edges_evaluated, 0U);
+
+  std::vector<std::uint8_t> independent_positive(
+      global.snapshot->cell_count(), 0U);
+  independent_positive[Index(input.world.global_map, 8U, 40U)] = 1U;
+  const auto independent = QueryHopperOpportunityDistance(
+      *context.context, independent_positive);
+  ASSERT_TRUE(independent.ok()) << independent.reason_code;
+  EXPECT_EQ(independent.projection->current_hop_distance, 1);
+  EXPECT_NE(independent.projection->direct_progress[
+                Index(input.world.global_map, 8U, 40U)],
+            0U);
+  const std::size_t edges_before_empty =
+      context.context->candidate_edges_evaluated;
+  const auto empty = QueryHopperOpportunityDistance(
+      *context.context,
+      std::vector<std::uint8_t>(global.snapshot->cell_count(), 0U));
+  ASSERT_TRUE(empty.ok()) << empty.reason_code;
+  EXPECT_EQ(empty.projection->has_reachable_opportunity, 0U);
+  EXPECT_EQ(context.context->candidate_edges_evaluated, edges_before_empty);
+}
+
+TEST(ReachabilityProjection,
+     HopperOpportunityDistanceReportsNoDisconnectedPositiveLanding) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 80U, 16U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 80U, 16U, 0.5);
+  input.config.global_map.base_resolution_m = 0.5;
+  std::get<HopperState>(input.current_state).pose.position_m =
+      {3.25, 4.25, 0.0};
+  KeepOnlyLandingEvidencePatches(
+      input.world.local_map, {{8U, 6U}, {8U, 74U}});
+  const auto global = shared::MapSnapshot::Create(input.world.global_map);
+  ASSERT_TRUE(global.ok()) << global.reason_code;
+  std::vector<Vec3> targets;
+  for (std::size_t index = 0U; index < global.snapshot->cell_count(); ++index) {
+    targets.push_back(global.snapshot->CellCenter(shared::GridCell{
+        .x = static_cast<std::int32_t>(index % global.snapshot->width()),
+        .y = static_cast<std::int32_t>(index / global.snapshot->width()),
+    }));
+  }
+  const auto landing = ProjectHopperLandingEvidence(input, targets);
+  ASSERT_TRUE(landing.ok()) << landing.reason_code;
+  const HopperLandingEvidenceGrid evidence{
+      .width = global.snapshot->width(),
+      .height = global.snapshot->height(),
+      .landings = landing.projection->landings,
+      .algorithm_id = landing.projection->algorithm_id,
+  };
+  std::vector<std::uint8_t> positive(global.snapshot->cell_count(), 0U);
+  positive[Index(input.world.global_map, 8U, 74U)] = 1U;
+
+  auto context = ProjectHopperOpportunityContext(
+      input, 18.0, evidence);
+  ASSERT_TRUE(context.ok()) << context.reason_code;
+  const auto projection = QueryHopperOpportunityDistance(
+      *context.context, positive);
+
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  EXPECT_EQ(projection.projection->current_hop_distance, -1);
+  EXPECT_EQ(projection.projection->has_reachable_opportunity, 0U);
+  EXPECT_EQ(std::count(projection.projection->direct_progress.begin(),
+                       projection.projection->direct_progress.end(), 1U),
+            0);
+  EXPECT_EQ(std::count(projection.projection->reachable_opportunities.begin(),
+                       projection.projection->reachable_opportunities.end(), 1U),
+            0);
+}
+
+TEST(ReachabilityProjection,
+     HopperOpportunityDistanceReturnsEveryShortestFirstHop) {
+  PlannerInput input = test::MakeValidHopperInput();
+  input.world.global_map = test::MakeFlatMap("map", 50U, 50U, 0.5);
+  input.world.local_map = test::MakeFlatMap("odom", 50U, 50U, 0.5);
+  input.config.global_map.base_resolution_m = 0.5;
+  std::get<HopperState>(input.current_state).pose.position_m =
+      {5.25, 12.25, 0.0};
+  KeepOnlyLandingEvidencePatches(
+      input.world.local_map,
+      {{24U, 10U}, {12U, 24U}, {36U, 24U}, {24U, 38U}});
+  const auto global = shared::MapSnapshot::Create(input.world.global_map);
+  ASSERT_TRUE(global.ok()) << global.reason_code;
+  std::vector<Vec3> targets;
+  for (std::size_t index = 0U; index < global.snapshot->cell_count(); ++index) {
+    targets.push_back(global.snapshot->CellCenter(shared::GridCell{
+        .x = static_cast<std::int32_t>(index % global.snapshot->width()),
+        .y = static_cast<std::int32_t>(index / global.snapshot->width()),
+    }));
+  }
+  const auto landing = ProjectHopperLandingEvidence(input, targets);
+  ASSERT_TRUE(landing.ok()) << landing.reason_code;
+  HopperLandingEvidenceGrid evidence{
+      .width = global.snapshot->width(),
+      .height = global.snapshot->height(),
+      .landings = landing.projection->landings,
+      .algorithm_id = landing.projection->algorithm_id,
+  };
+  auto context = ProjectHopperOpportunityContext(input, 10.0, evidence);
+  ASSERT_TRUE(context.ok()) << context.reason_code;
+  std::vector<std::uint8_t> positive(global.snapshot->cell_count(), 0U);
+  positive[Index(input.world.global_map, 24U, 38U)] = 1U;
+
+  const auto projection = QueryHopperOpportunityDistance(
+      *context.context, positive);
+
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  EXPECT_EQ(projection.projection->current_hop_distance, 2);
+  EXPECT_NE(projection.projection->direct_progress[
+                Index(input.world.global_map, 12U, 24U)],
+            0U);
+  EXPECT_NE(projection.projection->direct_progress[
+                Index(input.world.global_map, 36U, 24U)],
+            0U);
+}
+
+TEST(ReachabilityProjection,
      ExactDetailLandingEvidenceOverridesItsCoarseAggregateCell) {
   PlannerInput input = test::MakeValidHopperInput();
   input.world.global_map = test::MakeFlatMap("map", 80U, 16U, 0.5);

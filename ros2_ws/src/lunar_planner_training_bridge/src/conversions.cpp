@@ -98,6 +98,47 @@ ReachabilityProjectionResult PlannerBridge::ProjectDirectHopperReachability(
   }
 }
 
+HopperOpportunityContextResult
+PlannerBridge::ProjectHopperOpportunityContext(
+    const TrainingPlanRequest &request,
+    const double maximum_edge_distance_m,
+    const HopperLandingEvidenceGrid &evidence) const noexcept {
+  try {
+    return lunar::planning::ProjectHopperOpportunityContext(
+        ToPlannerInput(request), maximum_edge_distance_m, evidence);
+  } catch (const std::bad_alloc &) {
+    return HopperOpportunityContextResult{
+        .context = std::nullopt,
+        .reason_code = "REACHABILITY_RESOURCE_EXHAUSTED",
+    };
+  } catch (...) {
+    return HopperOpportunityContextResult{
+        .context = std::nullopt,
+        .reason_code = "BRIDGE_REQUEST_CONVERSION_FAILED",
+    };
+  }
+}
+
+HopperOpportunityDistanceProjectionResult
+PlannerBridge::QueryHopperOpportunityDistance(
+    HopperOpportunityContext &context,
+    const std::vector<std::uint8_t> &positive_opportunities) const noexcept {
+  try {
+    return lunar::planning::QueryHopperOpportunityDistance(
+        context, positive_opportunities);
+  } catch (const std::bad_alloc &) {
+    return HopperOpportunityDistanceProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = "REACHABILITY_RESOURCE_EXHAUSTED",
+    };
+  } catch (...) {
+    return HopperOpportunityDistanceProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = "BRIDGE_REQUEST_CONVERSION_FAILED",
+    };
+  }
+}
+
 HopperLandingEvidenceProjectionResult
 PlannerBridge::ProjectHopperLandingEvidence(
     const TrainingPlanRequest &request,

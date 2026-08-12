@@ -523,6 +523,14 @@ def test_bridge_streams_hopper_landing_evidence_into_reachability(
     direct = bridge.project_direct_hopper_reachability(
         request, 2.0, evidence
     )
+    positive = np.zeros(shape, dtype=np.bool_)
+    positive.reshape(-1)[-1] = True
+    opportunity_context = bridge.project_hopper_opportunity_context(
+        request, 2.0, evidence
+    )
+    opportunity = bridge.query_hopper_opportunity_distance(
+        opportunity_context, positive
+    )
     primitive = bridge_api.PrimitiveReachabilityEngine().update(
         request, 2.0, evidence
     )
@@ -542,6 +550,21 @@ def test_bridge_streams_hopper_landing_evidence_into_reachability(
     assert direct.reachable.shape == external.reachable.shape
     assert direct.reachable.dtype == np.uint8
     assert direct.reachable.flags.c_contiguous
+    assert opportunity.algorithm_id == "cpp-hopper-opportunity-distance/v1"
+    assert opportunity.direct_progress.shape == shape
+    assert opportunity.direct_progress.dtype == np.bool_
+    assert opportunity.direct_progress.flags.c_contiguous
+    assert opportunity.reachable_opportunities.shape == shape
+    assert opportunity.reachable_opportunities.dtype == np.bool_
+    assert opportunity.reachable_opportunities.flags.c_contiguous
+    assert isinstance(opportunity.current_hop_distance, int)
+    assert isinstance(opportunity.has_reachable_opportunity, bool)
+    assert opportunity_context.algorithm_id == (
+        "cpp-hopper-opportunity-connectivity/v1"
+    )
+    assert opportunity_context.reachable.dtype == np.bool_
+    assert opportunity_context.hop_distance_from_current.dtype == np.int32
+    assert opportunity_context.candidate_edges_evaluated >= 0
     assert primitive.platform_type == "HOPPER"
     assert primitive.reachable.any()
 
@@ -552,6 +575,10 @@ def test_bridge_streams_hopper_landing_evidence_into_reachability(
             projected.boundary_m.reshape((*shape, 4, 3)),
             projected.area_m2.reshape(shape),
             projected.algorithm_id,
+        )
+    with pytest.raises(TypeError, match="bool"):
+        bridge.query_hopper_opportunity_distance(
+            opportunity_context, positive.astype(np.uint8)
         )
 
 

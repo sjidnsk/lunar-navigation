@@ -4,7 +4,7 @@ from collections.abc import Collection
 import pathlib
 import sys
 import math
-from dataclasses import fields
+from dataclasses import fields, replace
 from hashlib import sha256
 from types import SimpleNamespace
 
@@ -29,11 +29,110 @@ from lunar_policy_training.environment.candidate_builder import (  # noqa: E402
 )
 from lunar_policy_training.environment.observation_builder import LocalObservation, MissionRaster, ObservedWorld, PlatformProjection, Pose2  # noqa: E402
 from lunar_policy_training.environment.platform_reachability import (  # noqa: E402
+    HopperOpportunityAuthority,
     PHYSICAL_PROJECTION_SCHEMA,
     CandidateReachabilityResult,
     PhysicalReachabilityResult,
     PlatformCandidateReachability,
 )
+
+
+class _FakeOpportunityBridge:
+    def __init__(
+        self,
+        *,
+        direct_positive: tuple[int, int],
+        transit: tuple[int, int],
+    ) -> None:
+        self.direct_positive = direct_positive
+        self.transit = transit
+        self.queries: list[np.ndarray] = []
+
+    def query_hopper_opportunity_distance(self, context, positive) -> object:
+        del context
+        north_up = np.ascontiguousarray(np.flipud(positive), dtype=np.bool_)
+        self.queries.append(north_up.copy())
+        progress = np.zeros_like(north_up)
+        if bool(north_up.any()):
+            target = (
+                self.direct_positive
+                if north_up[self.direct_positive]
+                else self.transit
+            )
+            progress[target] = True
+        return SimpleNamespace(
+            direct_progress=np.ascontiguousarray(np.flipud(progress)),
+            reachable_opportunities=np.ascontiguousarray(
+                np.flipud(north_up)
+            ),
+            current_hop_distance=1 if north_up.any() else -1,
+            has_reachable_opportunity=bool(north_up.any()),
+            algorithm_id="cpp-hopper-opportunity-distance/v1",
+        )
+
+
+def _fake_opportunity_authority(
+    shape: tuple[int, int],
+    *,
+    direct_positive: tuple[int, int],
+    transit: tuple[int, int],
+) -> tuple[HopperOpportunityAuthority, _FakeOpportunityBridge]:
+    certified = np.ones(shape, dtype=np.bool_)
+    direct = np.zeros(shape, dtype=np.bool_)
+    direct[direct_positive] = True
+    direct[transit] = True
+    bridge = _FakeOpportunityBridge(
+        direct_positive=direct_positive, transit=transit
+    )
+    context = SimpleNamespace(
+        direct=np.ascontiguousarray(np.flipud(direct)),
+        algorithm_id="cpp-hopper-opportunity-connectivity/v1",
+    )
+    canvas = _canvas()
+    positions = np.asarray(
+        [
+            (*canvas.grid_center_world(int(row), int(column)), 0.0)
+            for row, column in zip(*np.nonzero(certified), strict=True)
+        ],
+        dtype=np.float64,
+    )
+    return (
+        HopperOpportunityAuthority(
+            bridge=bridge,
+            context=context,
+            certified_mask=certified,
+            certified_positions_m=positions,
+        ),
+        bridge,
+    )
+
+
+def _universe_with_gains(
+    universe: PhysicalCandidateUniverse,
+    gains: dict[tuple[int, int], float],
+) -> PhysicalCandidateUniverse:
+    candidates: list[PhysicalCandidate] = []
+    for candidate in universe.candidates:
+        feature = candidate.feature.copy()
+        feature[5] = np.float32(gains.get(candidate.position_grid_key, 0.0))
+        rank_key = (
+            -float(feature[5]),
+            *candidate.rank_key[1:],
+        )
+        candidates.append(replace(candidate, feature=feature, rank_key=rank_key))
+    ordered = tuple(sorted(candidates, key=lambda candidate: candidate.rank_key))
+    diagnostics = replace(
+        universe.diagnostics,
+        zero_gain_count=sum(float(candidate.feature[5]) == 0.0 for candidate in ordered),
+    )
+    return replace(
+        universe,
+        candidates=ordered,
+        universe_sha256=sha256(
+            "".join(candidate.candidate_id for candidate in ordered).encode("ascii")
+        ).hexdigest(),
+        diagnostics=diagnostics,
+    )
 from lunar_policy_training.environment.visibility import NativeVisibilityEstimator, SensorGeometry  # noqa: E402
 from lunar_policy_training.polar_data.hazards import CanvasRatioLayer  # noqa: E402
 from lunar_policy_training.polar_data.raster import MapCanvas  # noqa: E402
@@ -646,6 +745,194 @@ def test_hopper_universe_ignores_history_while_selection_preserves_tiers_and_exa
         backtrack.batch.target_positions_m[0],
         np.asarray(physical_positions[parent_cell], dtype=np.float64),
     )
+
+
+def test_hopper_failed_direct_positive_selects_remote_progress_transit() -> None:
+    world = _world_with_frontier()
+    builder = CandidateBuilderV2(_RecordingEstimator())
+    physical = _physical_reachability(world, platform_type="HOPPER")
+    universe = _formal_universe(
+        builder,
+        world=world,
+        platform_type="HOPPER",
+        physical_reachability=physical,
+    )
+    direct_positive = universe.candidates[0]
+    transit = next(
+        candidate
+        for candidate in universe.candidates
+        if candidate.position_grid_key != direct_positive.position_grid_key
+    )
+    authority, bridge = _fake_opportunity_authority(
+        world.observed_mask.shape,
+        direct_positive=direct_positive.position_grid_key,
+        transit=transit.position_grid_key,
+    )
+    remote = next(
+        candidate.position_grid_key
+        for candidate in universe.candidates
+        if candidate.position_grid_key
+        not in (direct_positive.position_grid_key, transit.position_grid_key)
+    )
+    positive_mask = np.zeros_like(world.observed_mask)
+    positive_mask[direct_positive.position_grid_key] = True
+    positive_mask[remote] = True
+
+    universe = _universe_with_gains(
+        universe, {direct_positive.position_grid_key: 1.0}
+    )
+    by_cell = {
+        candidate.position_grid_key: candidate for candidate in universe.candidates
+    }
+    direct_positive = by_cell[direct_positive.position_grid_key]
+    transit = by_cell[transit.position_grid_key]
+    progress_universe = replace(
+        universe,
+        candidates=(direct_positive, transit),
+        universe_sha256=sha256(
+            f"{direct_positive.candidate_id}{transit.candidate_id}".encode("ascii")
+        ).hexdigest(),
+        diagnostics=replace(
+            universe.diagnostics,
+            physical_candidate_universe_count=2,
+            selected_policy_candidate_count=1,
+            available_candidate_count=2,
+            untried_reserve_count=1,
+            zero_gain_count=1,
+        ),
+    )
+    selected = builder.select_available(
+        progress_universe,
+        canvas_id=world.canvas.identity,
+        failure_snapshot_id=progress_universe.physical_snapshot_id,
+        planner_failed_candidate_ids={direct_positive.candidate_id},
+    )
+
+    assert selected.batch.count == 1
+    assert tuple(selected.batch.candidate_ids[selected.batch.mask]) == (
+        transit.candidate_id,
+    )
+    del authority, bridge, positive_mask, remote
+
+
+def test_hopper_all_zero_gain_has_no_transit_candidate() -> None:
+    world = _world_with_frontier()
+    builder = CandidateBuilderV2(_RecordingEstimator())
+    universe = _universe_with_gains(_formal_universe(builder), {})
+    direct = universe.candidates[0].position_grid_key
+    transit = universe.candidates[1].position_grid_key
+    authority, bridge = _fake_opportunity_authority(
+        world.observed_mask.shape,
+        direct_positive=direct,
+        transit=transit,
+    )
+
+    assert universe.diagnostics.zero_gain_count == len(universe.candidates)
+    assert not np.zeros_like(world.observed_mask).any()
+    del authority, bridge
+
+
+def test_hopper_build_time_authority_admits_only_direct_positive_and_progress_transit() -> None:
+    world = _world_with_frontier()
+    direct = (128, 123)
+    transit = (128, 124)
+    remote = (128, 125)
+    authority, bridge = _fake_opportunity_authority(
+        world.observed_mask.shape,
+        direct_positive=direct,
+        transit=transit,
+    )
+    positive_mask = np.zeros_like(world.observed_mask)
+    positive_mask[direct] = True
+    positive_mask[remote] = True
+    physical = replace(
+        _physical_reachability(world, platform_type="HOPPER"),
+        hopper_opportunity_authority=authority,
+    )
+    builder = CandidateBuilderV2(_RecordingEstimator())
+    builder.hopper_positive_mask = lambda *args: np.ascontiguousarray(positive_mask)
+
+    universe = _formal_universe(
+        builder,
+        world=world,
+        platform_type="HOPPER",
+        physical_reachability=physical,
+    )
+
+    cells = {candidate.position_grid_key for candidate in universe.candidates}
+    assert direct in cells
+    assert transit in cells
+    assert remote not in cells
+    assert not bridge.queries[0][direct]
+    assert bridge.queries[0][remote]
+
+
+def test_hopper_build_time_all_zero_has_empty_canonical_universe() -> None:
+    world = _world_with_frontier()
+    direct = (128, 123)
+    transit = (128, 124)
+    authority, bridge = _fake_opportunity_authority(
+        world.observed_mask.shape,
+        direct_positive=direct,
+        transit=transit,
+    )
+    physical = replace(
+        _physical_reachability(world, platform_type="HOPPER"),
+        hopper_opportunity_authority=authority,
+    )
+    builder = CandidateBuilderV2(_RecordingEstimator())
+    builder.hopper_positive_mask = lambda *args: np.zeros_like(world.observed_mask)
+
+    universe = _formal_universe(
+        builder,
+        world=world,
+        platform_type="HOPPER",
+        physical_reachability=physical,
+    )
+
+    assert universe.candidates == ()
+    assert universe.diagnostics.available_candidate_count == 0
+    assert len(bridge.queries) == 1
+    assert not bridge.queries[0].any()
+
+
+def test_hopper_exact_parent_requires_opportunity_distance_decrease() -> None:
+    world = _world_with_frontier()
+    builder = CandidateBuilderV2(_RecordingEstimator())
+    universe = _formal_universe(builder)
+    parent = universe.candidates[0]
+    other = universe.candidates[1]
+    authority, _ = _fake_opportunity_authority(
+        world.observed_mask.shape,
+        direct_positive=other.position_grid_key,
+        transit=other.position_grid_key,
+    )
+    positive_mask = np.zeros_like(world.observed_mask)
+    positive_mask[other.position_grid_key] = True
+    parent_pose = Pose2(*parent.target_position_m[:2], elevation_m=parent.target_position_m[2])
+
+    progress_universe = replace(
+        universe,
+        candidates=(other,),
+        universe_sha256=sha256(other.candidate_id.encode("ascii")).hexdigest(),
+        diagnostics=replace(
+            universe.diagnostics,
+            physical_candidate_universe_count=1,
+            selected_policy_candidate_count=1,
+            available_candidate_count=1,
+            untried_reserve_count=0,
+            zero_gain_count=int(float(other.feature[5]) == 0.0),
+        ),
+    )
+    rejected = builder.select_available(
+        progress_universe,
+        canvas_id=world.canvas.identity,
+        excluded_cells={other.position_grid_key},
+        backtrack_pose=parent_pose,
+    )
+
+    assert rejected.batch.count == 0
+    del authority, positive_mask
 
 
 def test_ground_universe_ignores_visited_cells_but_availability_excludes_them() -> None:
@@ -1793,19 +2080,22 @@ def test_hopper_project_physical_binds_certified_aim_and_direct_connectivity() -
                 algorithm_id="test/hopper-landing-evidence/v1",
             )
 
-        def project_direct_hopper_reachability(
+        def project_hopper_opportunity_context(
             self, request, maximum_edge_distance_m, evidence
         ):
             del request
             assert maximum_edge_distance_m == 30.0
             self.evidence = evidence
-            reachable = np.zeros((256, 256), dtype=np.uint8)
-            reachable[127, 129:131] = 1
+            direct = np.zeros((256, 256), dtype=np.bool_)
+            direct[127, 129:131] = True
             return SimpleNamespace(
-                platform_type="HOPPER",
-                reachable=reachable,
-                algorithm_id="test/hopper-direct-connectivity/v1",
+                direct=np.ascontiguousarray(direct),
+                algorithm_id="test/hopper-opportunity-connectivity/v1",
             )
+
+        def query_hopper_opportunity_distance(self, context, positive):
+            del context, positive
+            raise AssertionError("opportunity query not expected")
 
     bridge = RecordingBridge()
     reachability = PlatformCandidateReachability(
@@ -1847,7 +2137,7 @@ def test_hopper_project_physical_binds_certified_aim_and_direct_connectivity() -
     )
     assert (
         result.physical_reachability_algorithm_id
-        == "test/hopper-direct-connectivity/v1"
+        == "test/hopper-opportunity-connectivity/v1"
     )
     assert bridge.targets is not None
     np.testing.assert_array_equal(
@@ -2005,13 +2295,16 @@ def test_hopper_project_physical_rejects_certified_aim_outside_cell() -> None:
                 algorithm_id="test/misaligned-landing/v1",
             )
 
-        def project_direct_hopper_reachability(self, *args):
+        def project_hopper_opportunity_context(self, *args):
             del args
             return SimpleNamespace(
-                platform_type="HOPPER",
-                reachable=np.ones((256, 256), dtype=np.uint8),
-                algorithm_id="test/direct/v1",
+                direct=np.ones((256, 256), dtype=np.bool_),
+                algorithm_id="test/opportunity-connectivity/v1",
             )
+
+        def query_hopper_opportunity_distance(self, context, positive):
+            del context, positive
+            raise AssertionError("opportunity query not expected")
 
     reachability = PlatformCandidateReachability(
         platform_type="HOPPER",
@@ -2051,15 +2344,18 @@ def test_hopper_reachability_uses_certified_pose_height_for_start() -> None:
                 algorithm_id="test/landing-evidence/v1",
             )
 
-        def project_direct_hopper_reachability(
+        def project_hopper_opportunity_context(
             self, request, maximum_edge_distance_m, evidence
         ):
             del request, maximum_edge_distance_m, evidence
             return SimpleNamespace(
-                platform_type="HOPPER",
-                reachable=np.ones((256, 256), dtype=np.uint8),
-                algorithm_id="test/direct-hopper/v1",
+                direct=np.ones((256, 256), dtype=np.bool_),
+                algorithm_id="test/opportunity-connectivity/v1",
             )
+
+        def query_hopper_opportunity_distance(self, context, positive):
+            del context, positive
+            raise AssertionError("opportunity query not expected")
 
     bridge = RecordingBridge()
     reachability = PlatformCandidateReachability(

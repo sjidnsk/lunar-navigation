@@ -15,6 +15,7 @@ from lunar_model_contract import ObservationContractV3
 
 from .observation_builder import MissionRaster, ObservedWorld, PlatformProjection, Pose2
 from .platform_reachability import (
+    HopperOpportunityAuthority,
     PhysicalReachabilityResult,
     PlatformCandidateReachability,
 )
@@ -908,6 +909,43 @@ class CandidateBuilderV2:
                     world, mission, pose_map, projection
                 )
             )
+        hopper_allowed: np.ndarray | None = None
+        if platform_type == "HOPPER":
+            authority = physical_reachability.hopper_opportunity_authority
+            if authority is not None:
+                if not isinstance(authority, HopperOpportunityAuthority):
+                    raise ValueError("hopper opportunity authority is invalid")
+                positive_mask = self.hopper_positive_mask(
+                    world, mission, physical_reachability
+                )
+                remote_positive = np.ascontiguousarray(
+                    positive_mask & ~authority.direct_mask, dtype=np.bool_
+                )
+                opportunity = authority.query(remote_positive)
+                progress = np.ascontiguousarray(
+                    np.flipud(opportunity.direct_progress), dtype=np.bool_
+                )
+                hopper_allowed = np.ascontiguousarray(
+                    (positive_mask & authority.direct_mask) | progress,
+                    dtype=np.bool_,
+                )
+                for cell, position in zip(
+                    zip(*np.nonzero(authority.certified_mask), strict=True),
+                    authority.certified_positions_m,
+                    strict=True,
+                ):
+                    if hopper_allowed[cell]:
+                        exact_target_poses[cell] = Pose2(
+                            float(position[0]),
+                            float(position[1]),
+                            elevation_m=float(position[2]),
+                        )
+                raw_anchors.extend(
+                    (len(segments), (int(row), int(column)))
+                    for row, column in zip(
+                        *np.nonzero(hopper_allowed), strict=True
+                    )
+                )
         qualified_anchors = _source_free_physical_anchors(raw_anchors)
         total_roi = float(mission.roi_ratio.sum(dtype=np.float64))
         chosen, qualification = self._qualify_anchors(
@@ -924,8 +962,17 @@ class CandidateBuilderV2:
             allow_zero_gain=False,
             include_zero_gain=True,
             exact_target_poses=exact_target_poses,
-            physical_observation_pose_mask=physical_mask,
+            physical_observation_pose_mask=(
+                hopper_allowed
+                if hopper_allowed is not None
+                else physical_mask
+            ),
         )
+
+        if hopper_allowed is not None:
+            chosen = [
+                anchor for anchor in chosen if hopper_allowed[anchor.point]
+            ]
 
         canonical: dict[str, PhysicalCandidate] = {}
         for anchor in chosen:
@@ -994,6 +1041,57 @@ class CandidateBuilderV2:
             universe_sha256=universe_sha256,
             diagnostics=diagnostics,
         )
+
+    def hopper_positive_mask(
+        self,
+        world: ObservedWorld,
+        mission: MissionRaster,
+        physical_reachability: PhysicalReachabilityResult,
+    ) -> np.ndarray:
+        """Estimate production gains across all certified Hopper landings."""
+        authority = physical_reachability.hopper_opportunity_authority
+        if not isinstance(authority, HopperOpportunityAuthority):
+            raise ValueError("hopper opportunity authority is missing")
+        certified_cells = np.ascontiguousarray(
+            np.column_stack(np.nonzero(authority.certified_mask)),
+            dtype=np.int32,
+        ).reshape((-1, 2))
+        arguments = (
+            np.ascontiguousarray(world.observed_mask, dtype=np.bool_),
+            np.ascontiguousarray(
+                world.physical_obstacle_layer.values, dtype=np.float32
+            ),
+            np.ascontiguousarray(mission.roi_ratio, dtype=np.float32),
+            np.ascontiguousarray(
+                mission.priority * mission.roi_ratio, dtype=np.float32
+            ),
+        )
+        exact_gain = getattr(
+            self._visibility_estimator,
+            "estimate_candidate_gains_at_positions",
+            None,
+        )
+        gains = (
+            exact_gain(*arguments, authority.certified_positions_m)
+            if callable(exact_gain)
+            else self._visibility_estimator.estimate_candidate_gains(
+                *arguments, certified_cells
+            )
+        )
+        gains = np.asarray(gains)
+        if (
+            gains.dtype != np.dtype(np.float32)
+            or gains.shape != (len(certified_cells), 2)
+            or not gains.flags.c_contiguous
+            or not np.isfinite(gains).all()
+            or (gains < 0.0).any()
+        ):
+            raise RuntimeError("hopper opportunity visibility result is invalid")
+        positive_mask = np.zeros_like(authority.certified_mask, dtype=np.bool_)
+        if len(certified_cells):
+            positive_cells = certified_cells[gains[:, 0] > np.float32(0.0)]
+            positive_mask[positive_cells[:, 0], positive_cells[:, 1]] = True
+        return np.ascontiguousarray(positive_mask)
 
     def select_available(
         self,

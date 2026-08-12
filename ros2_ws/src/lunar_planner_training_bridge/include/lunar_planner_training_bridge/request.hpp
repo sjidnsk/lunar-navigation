@@ -51,6 +51,16 @@ class PlannerBridge final {
       double maximum_edge_distance_m,
       const lunar::planning::HopperLandingEvidenceGrid &evidence)
       const noexcept;
+  [[nodiscard]] lunar::planning::HopperOpportunityContextResult
+  ProjectHopperOpportunityContext(
+      const TrainingPlanRequest &request,
+      double maximum_edge_distance_m,
+      const lunar::planning::HopperLandingEvidenceGrid &evidence)
+      const noexcept;
+  [[nodiscard]] lunar::planning::HopperOpportunityDistanceProjectionResult
+  QueryHopperOpportunityDistance(
+      lunar::planning::HopperOpportunityContext &context,
+      const std::vector<std::uint8_t> &positive_opportunities) const noexcept;
   [[nodiscard]] lunar::planning::HopperLandingEvidenceProjectionResult
   ProjectHopperLandingEvidence(
       const TrainingPlanRequest &request,
