@@ -226,6 +226,7 @@ def test_gate_binds_domain_evidence_to_the_actual_stateful_planner_call(
             )
             hierarchical = SimpleNamespace(
                 additional_corridor_margin_m=2.0,
+                local_search_runs=1,
                 search_domain_cell_count=37,
                 search_domain_sha256=_sha(str(self.call_count)),
             )
@@ -329,6 +330,41 @@ def test_gate_binds_domain_evidence_to_the_actual_stateful_planner_call(
     assert planner.call_count == 1
     assert row["planner_reason_counts"] == {"FIRST_ACTUAL": 1}
     assert row["search_domain_sha256"] == _sha("1")
+
+
+def test_gate_accepts_empty_domain_before_any_ground_local_search() -> None:
+    output = SimpleNamespace(
+        reference=None,
+        diagnostics=SimpleNamespace(
+            hierarchical=SimpleNamespace(
+                local_search_runs=0,
+                search_domain_cell_count=0,
+                search_domain_sha256="",
+            )
+        ),
+    )
+
+    assert gate_module._validate_planner_search_domain_evidence(
+        "LEGGED", output
+    ) == (0, "", False)
+
+
+def test_gate_rejects_ground_reference_without_a_search_domain() -> None:
+    output = SimpleNamespace(
+        reference=object(),
+        diagnostics=SimpleNamespace(
+            hierarchical=SimpleNamespace(
+                local_search_runs=0,
+                search_domain_cell_count=0,
+                search_domain_sha256="",
+            )
+        ),
+    )
+
+    with pytest.raises(ClosedLoopGateError, match="without local search"):
+        gate_module._validate_planner_search_domain_evidence(
+            "WHEELED", output
+        )
 
 
 def test_select_closed_loop_gate_cases_binds_schedule_cursor_and_coverability() -> None:

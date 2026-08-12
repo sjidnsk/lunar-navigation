@@ -169,6 +169,42 @@ def _is_sha(value: object, *, length: int = 64) -> bool:
     )
 
 
+def _validate_planner_search_domain_evidence(
+    platform: str,
+    output: object,
+) -> tuple[int, str, bool]:
+    hierarchical = getattr(
+        getattr(output, "diagnostics", None), "hierarchical", None
+    )
+    if hierarchical is None:
+        raise ClosedLoopGateError("gate planner domain diagnostics are missing")
+    search_domain_cell_count = int(hierarchical.search_domain_cell_count)
+    search_domain_sha256 = str(hierarchical.search_domain_sha256)
+    if platform == "HOPPER":
+        if search_domain_cell_count != 0 or search_domain_sha256 != "":
+            raise ClosedLoopGateError("gate hopper search domain is not empty")
+        return 0, "", False
+
+    local_search_runs = int(hierarchical.local_search_runs)
+    if local_search_runs < 0:
+        raise ClosedLoopGateError(
+            "gate ground planner local search count is invalid"
+        )
+    if local_search_runs == 0:
+        if getattr(output, "reference", None) is not None:
+            raise ClosedLoopGateError(
+                "gate ground planner returned a reference without local search"
+            )
+        if search_domain_cell_count != 0 or search_domain_sha256 != "":
+            raise ClosedLoopGateError(
+                "gate ground planner search domain exists without local search"
+            )
+        return 0, "", False
+    if search_domain_cell_count <= 0 or not _is_sha(search_domain_sha256):
+        raise ClosedLoopGateError("gate ground planner search domain is invalid")
+    return search_domain_cell_count, search_domain_sha256, True
+
+
 def _validate_bound_identities(
     *,
     source_commit: str,
@@ -537,21 +573,14 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
                 raise ClosedLoopGateError(
                     "gate ground planner corridor margin is not fixed at 2.0 m"
                 )
-            search_domain_cell_count = int(
-                hierarchical.search_domain_cell_count
-            )
-            search_domain_sha256 = str(hierarchical.search_domain_sha256)
-            if work.platform == "HOPPER":
-                if search_domain_cell_count != 0 or search_domain_sha256 != "":
-                    raise ClosedLoopGateError(
-                        "gate hopper search domain is not empty"
-                    )
-            elif search_domain_cell_count <= 0 or not _is_sha(
-                search_domain_sha256
-            ):
-                raise ClosedLoopGateError(
-                    "gate ground planner search domain is invalid"
-                )
+            (
+                call_search_domain_cell_count,
+                call_search_domain_sha256,
+                has_search_domain,
+            ) = _validate_planner_search_domain_evidence(work.platform, output)
+            if has_search_domain:
+                search_domain_cell_count = call_search_domain_cell_count
+                search_domain_sha256 = call_search_domain_sha256
             reason_code = str(output.reason_code)
             planner_reason_counts[reason_code] += 1
             _chain_update(
@@ -571,8 +600,8 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
                     "additional_corridor_margin_m_hex": (
                         additional_corridor_margin_m.hex()
                     ),
-                    "search_domain_cell_count": search_domain_cell_count,
-                    "search_domain_sha256": search_domain_sha256,
+                    "search_domain_cell_count": call_search_domain_cell_count,
+                    "search_domain_sha256": call_search_domain_sha256,
                 },
             )
             planner_call_count += 1
