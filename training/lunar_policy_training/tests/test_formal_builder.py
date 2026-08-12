@@ -1673,6 +1673,90 @@ def test_rolling_continuation_snapshot_tracks_latest_pose_and_evidence(
     )
 
 
+def test_ground_failure_refresh_allows_locked_target_to_exit_after_reveal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A deferred rebuild may legitimately remove the locked physical target."""
+    assembly, _, _ = _assembly(tmp_path)
+    episode = assembly.factory(0, "WHEELED").episode
+    initial_observation = episode.controller.current_observation
+    initial_identity = initial_observation.observation_identities[0]
+    snapshot = episode._snapshot
+    assert snapshot is not None
+    active_indices = tuple(
+        int(index) for index in np.flatnonzero(snapshot.candidates.mask)
+    )
+    assert len(active_indices) >= 2
+    candidate_index = active_indices[0]
+    initial_prepared = episode.begin_ground_option(
+        PolicyAction(candidate_index, 0.0), initial_identity
+    )
+    locked_target = initial_prepared.request.goal.target.position_m
+    locked_yaw = float(snapshot.candidates.target_yaw_rad[candidate_index])
+
+    def target_heading_from(index: int) -> float:
+        position = snapshot.candidates.target_positions_m[index]
+        return math.atan2(
+            float(locked_target.y) - float(position[1]),
+            float(locked_target.x) - float(position[0]),
+        )
+
+    detour_index = next(
+        index
+        for index in active_indices[1:]
+        if abs(
+            math.atan2(
+                math.sin(target_heading_from(index) - locked_yaw),
+                math.cos(target_heading_from(index) - locked_yaw),
+            )
+        )
+        > math.pi / 16.0
+    )
+    detour_target = snapshot.candidates.target_positions_m[detour_index]
+    moved = Pose2(
+        float(detour_target[0]),
+        float(detour_target[1]),
+        float(snapshot.candidates.target_yaw_rad[detour_index]),
+        "map",
+        float(detour_target[2]),
+    )
+    evidence = SensorBoundaryEvidence(moved, 1.0)
+    episode.current_pose = moved
+    episode._record_reveal(
+        evidence,
+        "DECISION_BOUNDARY",
+        defer_candidate_rebuild=True,
+    )
+    boundary = episode.controller.after_execution(
+        platform_type="WHEELED",
+        execution_state="DECISION_BOUNDARY",
+        evidence=evidence,
+    )
+    continued = episode.continue_ground_option(
+        boundary.next_observation.observation_identities[0]
+    )
+    assert continued.candidate_id == initial_prepared.candidate_id
+
+    refreshed = episode.refresh_after_planning_failure(
+        continued.candidate_id,
+        CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+        physical_snapshot_id=continued.physical_snapshot_id,
+    )
+
+    final_snapshot = episode._snapshot
+    assert final_snapshot is not None
+    final_universe_ids = {
+        candidate.candidate_id
+        for candidate in final_snapshot.candidate_universe.candidates
+    }
+    assert continued.candidate_id not in final_universe_ids
+    assert episode._active_ground_option is None
+    assert episode._pending_planning_failure is None
+    assert refreshed.next_observation.observation_identities[0].state_time_ns == (
+        boundary.next_observation.observation_identities[0].state_time_ns
+    )
+
+
 def test_parallel_consumer_has_no_legacy_planner_rejection_counter() -> None:
     consumer_source = inspect.getsource(parallel_pool_module._worker_main)
 

@@ -544,7 +544,7 @@ class FormalEpisode:
         self._planner_failure_snapshot_id: str | None = None
         self._planner_failed_candidate_ids: set[str] = set()
         self._pending_planning_failure: (
-            tuple[str, bridge_api.CandidateDisposition, str] | None
+            tuple[str, bridge_api.CandidateDisposition, str, bool] | None
         ) = None
         self.last_hop_available_delta_v_mps = 0.0
         self._reveal_history: list[FormalRevealState] = []
@@ -1072,7 +1072,12 @@ class FormalEpisode:
             failed_candidate_ids.clear()
         pending_failure = self._pending_planning_failure
         if pending_failure is not None:
-            candidate_id, disposition, pending_snapshot_id = pending_failure
+            (
+                candidate_id,
+                disposition,
+                pending_snapshot_id,
+                allow_locked_target_exit,
+            ) = pending_failure
             if pending_snapshot_id != candidate_universe.physical_snapshot_id:
                 raise ValueError(
                     "planning failure physical snapshot changed during rebuild"
@@ -1080,7 +1085,16 @@ class FormalEpisode:
             if disposition == (
                 bridge_api.CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT
             ):
-                failed_candidate_ids.add(candidate_id)
+                current_ids = {
+                    candidate.candidate_id
+                    for candidate in candidate_universe.candidates
+                }
+                if candidate_id in current_ids:
+                    failed_candidate_ids.add(candidate_id)
+                elif not allow_locked_target_exit:
+                    raise ValueError(
+                        "planning failure candidate changed during rebuild"
+                    )
         candidate_result = candidate_builder.select_available(
             candidate_universe,
             canvas_id=world.canvas.identity,
@@ -1358,12 +1372,27 @@ class FormalEpisode:
             raise ValueError(
                 "planning failure candidate is outside the physical universe"
             )
+        option = self._active_ground_option
+        allow_locked_target_exit = False
+        if option is not None:
+            if self.platform_type not in {"WHEELED", "LEGGED"}:
+                raise ValueError("active ground option has a non-ground platform")
+            if candidate_id != option.candidate_id:
+                raise ValueError(
+                    "planning failure candidate differs from the locked ground target"
+                )
+            # Candidate rebuilding is deliberately deferred while a locked
+            # ground option rolls across multiple sensor boundaries.  The
+            # final rebuild may legitimately remove that stable target after
+            # the accumulated evidence makes it zero-gain or unreachable.
+            allow_locked_target_exit = self._defer_candidate_rebuild
         self._active_ground_option = None
         self._defer_candidate_rebuild = False
         self._pending_planning_failure = (
             candidate_id,
             disposition,
             physical_snapshot_id,
+            allow_locked_target_exit,
         )
         execution_state = (
             self.controller.current_observation.observation_identities[0]
