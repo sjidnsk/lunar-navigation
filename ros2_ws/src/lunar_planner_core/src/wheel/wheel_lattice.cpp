@@ -762,6 +762,20 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
       if (!projection.HardFeasible(target_cell)) {
         continue;
       }
+      const auto dense_target_index = DenseStateIndex(
+          target_key, width, height, config.wheel.yaw_bin_count);
+      if (!dense_target_index.has_value()) {
+        return Failure(
+            WheelLatticeStatus::kInvalidRequest,
+            "WHEEL_LATTICE_EDGE_STATE_INVALID", expanded_states);
+      }
+      const std::size_t found = node_by_state[*dense_target_index];
+      if (found != kNoParent && ExistingTargetDominates(
+              current_snapshot.path_cost,
+              WheelPrimitiveCostLowerBound(*transition, capability),
+              nodes[found].path_cost)) {
+        continue;
+      }
       const WheelSweepValidation sweep =
           validator.Validate(*transition, stop_token);
       if (sweep.canceled) {
@@ -797,14 +811,6 @@ WheelLatticeSearchResult SearchWheelLatticeRanked(
       }
       const double candidate_cost = current_snapshot.path_cost + edge_cost;
       std::size_t target_index{};
-      const auto dense_target_index = DenseStateIndex(
-          target_key, width, height, config.wheel.yaw_bin_count);
-      if (!dense_target_index.has_value()) {
-        return Failure(
-            WheelLatticeStatus::kInvalidRequest,
-            "WHEEL_LATTICE_EDGE_STATE_INVALID", expanded_states);
-      }
-      const std::size_t found = node_by_state[*dense_target_index];
       if (found == kNoParent) {
         target_index = nodes.size();
         nodes.push_back(SearchNode{

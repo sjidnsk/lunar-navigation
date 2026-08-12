@@ -390,6 +390,41 @@ double WheelPrimitiveEdgeCost(
   return cost;
 }
 
+double WheelPrimitiveCostLowerBound(
+    const WheelTransition& transition,
+    const WheeledCapability& capability) noexcept {
+  const double yaw_distance = std::abs(ShortestYawDelta(
+      transition.source_pose.yaw_rad, transition.target_pose.yaw_rad));
+  if (transition.path_length_m > kComparisonTolerance) {
+    double speed_limit = transition.reverse
+        ? capability.maximum_reverse_speed_mps
+        : capability.maximum_forward_speed_mps;
+    const double curvature = std::abs(transition.curvature_per_m);
+    if (curvature > kComparisonTolerance) {
+      speed_limit = std::min(
+          {speed_limit,
+           capability.maximum_spin_rate_radps / curvature,
+           std::sqrt(
+               capability.maximum_lateral_acceleration_mps2 / curvature)});
+    }
+    return transition.path_length_m / speed_limit;
+  }
+  if (yaw_distance > kComparisonTolerance) {
+    return yaw_distance / capability.maximum_spin_rate_radps;
+  }
+  return 1.0e-3;
+}
+
+bool ExistingTargetDominates(
+    const double source_cost, const double edge_cost_lower_bound,
+    const double existing_target_cost) noexcept {
+  return std::isfinite(source_cost) &&
+      std::isfinite(edge_cost_lower_bound) && edge_cost_lower_bound > 0.0 &&
+      std::isfinite(existing_target_cost) &&
+      source_cost + edge_cost_lower_bound + kComparisonTolerance >=
+          existing_target_cost;
+}
+
 shared::PrimitiveGraphBuildResult BuildWheelPrimitiveGraph(
     const WheeledState& current_state,
     const shared::SafeProjection& projection,

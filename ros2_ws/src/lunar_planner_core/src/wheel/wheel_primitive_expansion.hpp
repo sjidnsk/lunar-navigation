@@ -30,6 +30,14 @@ namespace lunar::planning::wheel {
     const shared::SafeProjection& projection,
     const WheeledCapability& capability) noexcept;
 
+[[nodiscard]] double WheelPrimitiveCostLowerBound(
+    const WheelTransition& transition,
+    const WheeledCapability& capability) noexcept;
+
+[[nodiscard]] bool ExistingTargetDominates(
+    double source_cost, double edge_cost_lower_bound,
+    double existing_target_cost) noexcept;
+
 [[nodiscard]] shared::PrimitiveGraphBuildResult BuildWheelPrimitiveGraph(
     const WheeledState& current_state,
     const shared::SafeProjection& projection,

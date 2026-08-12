@@ -166,6 +166,19 @@ WheelSweepValidator::WheelSweepValidator(
   }
   if (projection.source_map() != nullptr) {
     terrain_cache_.reserve(projection.source_map()->cell_count() * 4U);
+    const std::size_t width = projection.source_map()->width();
+    const std::size_t height = projection.source_map()->height();
+    unsafe_prefix_sum_.assign((width + 1U) * (height + 1U), 0U);
+    for (std::size_t y = 0U; y < height; ++y) {
+      std::size_t row_unsafe = 0U;
+      for (std::size_t x = 0U; x < width; ++x) {
+        row_unsafe += static_cast<std::size_t>(!projection.IntrinsicFeasible(
+            shared::GridCell{.x = static_cast<std::int32_t>(x),
+                             .y = static_cast<std::int32_t>(y)}));
+        unsafe_prefix_sum_[(y + 1U) * (width + 1U) + (x + 1U)] =
+            unsafe_prefix_sum_[y * (width + 1U) + (x + 1U)] + row_unsafe;
+      }
+    }
   }
 }
 
@@ -329,8 +342,20 @@ WheelSweepValidator::Validate(const WheelTransition &transition,
         maximum_cell_y >= static_cast<std::int64_t>(map.height())) {
       return Failure("WHEEL_SWEEP_OUTSIDE_MAP", sample_count);
     }
-    for (std::int64_t y = minimum_cell_y; y <= maximum_cell_y; ++y) {
+    const std::size_t prefix_width = map.width() + 1U;
+    const std::size_t x0 = static_cast<std::size_t>(minimum_cell_x);
+    const std::size_t y0 = static_cast<std::size_t>(minimum_cell_y);
+    const std::size_t x1 = static_cast<std::size_t>(maximum_cell_x) + 1U;
+    const std::size_t y1 = static_cast<std::size_t>(maximum_cell_y) + 1U;
+    const std::size_t unsafe_count =
+        unsafe_prefix_sum_[y1 * prefix_width + x1] -
+        unsafe_prefix_sum_[y0 * prefix_width + x1] -
+        unsafe_prefix_sum_[y1 * prefix_width + x0] +
+        unsafe_prefix_sum_[y0 * prefix_width + x0];
+    for (std::int64_t y = minimum_cell_y;
+         unsafe_count != 0U && y <= maximum_cell_y; ++y) {
       for (std::int64_t x = minimum_cell_x; x <= maximum_cell_x; ++x) {
+        ++exact_footprint_cell_test_count_;
         const shared::GridCell cell{
             .x = static_cast<std::int32_t>(x),
             .y = static_cast<std::int32_t>(y),
@@ -360,6 +385,10 @@ WheelSweepValidator::Validate(const WheelTransition &transition,
 
 std::size_t WheelSweepValidator::terrain_evaluation_count() const noexcept {
   return terrain_evaluation_count_;
+}
+
+std::size_t WheelSweepValidator::exact_footprint_cell_test_count() const noexcept {
+  return exact_footprint_cell_test_count_;
 }
 
 } // namespace lunar::planning::wheel

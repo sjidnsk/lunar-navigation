@@ -4,6 +4,7 @@
 #include <stop_token>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "hierarchical/local_planning_problem.hpp"
 #include "lunar_planner_core/types/platform_capability.hpp"
@@ -51,6 +52,7 @@ class WheelSweepValidator final {
       const WheelTransition& transition,
       std::stop_token stop_token) const;
   [[nodiscard]] std::size_t terrain_evaluation_count() const noexcept;
+  [[nodiscard]] std::size_t exact_footprint_cell_test_count() const noexcept;
 
  private:
   const shared::SafeProjection* projection_{};
@@ -61,6 +63,8 @@ class WheelSweepValidator final {
       WheelTerrainPoseKey, shared::WheelTerrainPoseEvaluation,
       WheelTerrainPoseKeyHash> terrain_cache_;
   mutable std::size_t terrain_evaluation_count_{};
+  mutable std::size_t exact_footprint_cell_test_count_{};
+  std::vector<std::size_t> unsafe_prefix_sum_;
 };
 
 }  // namespace lunar::planning::wheel

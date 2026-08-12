@@ -16,6 +16,7 @@
 #include "shared/safe_projection.hpp"
 #include "shared/terrain_checks.hpp"
 #include "test_fixtures.hpp"
+#include "wheel/wheel_primitive_expansion.hpp"
 #include "wheel/wheel_sweep_validator.hpp"
 #include "wheel/wheel_types.hpp"
 
@@ -285,6 +286,65 @@ TEST(WheelFaultMatrix, SweepMemoizesExactTerrainPosesPerValidator) {
   EXPECT_EQ(second.reason_code, first.reason_code);
 }
 
+TEST(WheelFaultMatrix, SkipsDominatedPrimitiveBeforeSweepBitExactly) {
+  auto input = test::MakeValidWheelInput();
+  const auto capability = std::get<WheeledCapability>(input.capability);
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  const wheel::WheelTransition translation{
+      .source_pose = {.position_m = {2.5, 3.5, 0.0}},
+      .target_pose = {.position_m = {3.5, 3.5, 0.0}},
+      .path_length_m = 1.0,
+  };
+  const wheel::WheelSweepValidator baseline{
+      *projection.projection, capability};
+  const auto expected = baseline.Validate(translation, {});
+  const wheel::WheelSweepValidator validator{
+      *projection.projection, capability};
+  const double lower_bound = wheel::WheelPrimitiveCostLowerBound(
+      translation, capability);
+
+  EXPECT_TRUE(expected.valid) << expected.reason_code;
+  EXPECT_TRUE(std::isfinite(lower_bound));
+  EXPECT_GT(lower_bound, 0.0);
+  EXPECT_TRUE(wheel::ExistingTargetDominates(
+      3.0, lower_bound, 3.0 + lower_bound));
+  EXPECT_FALSE(wheel::ExistingTargetDominates(
+      3.0, lower_bound, 3.0 + lower_bound + 1.0e-6));
+  EXPECT_FALSE(wheel::ExistingTargetDominates(
+      std::numeric_limits<double>::quiet_NaN(), lower_bound,
+      3.0 + lower_bound));
+  EXPECT_FALSE(wheel::ExistingTargetDominates(
+      3.0, std::numeric_limits<double>::infinity(),
+      3.0 + lower_bound));
+  EXPECT_EQ(validator.terrain_evaluation_count(), 0U);
+}
+
+TEST(WheelFaultMatrix, SkipsExactFootprintCellsOnlyForAnAllSafeAabb) {
+  auto input = test::MakeValidWheelInput();
+  const auto capability = std::get<WheeledCapability>(input.capability);
+  const auto snapshot = shared::MapSnapshot::Create(input.world.local_map);
+  ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
+  const auto projection = shared::BuildSafeProjection(
+      snapshot.snapshot, input.capability, input.config.map_safety, {});
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  const wheel::WheelSweepValidator validator{*projection.projection, capability};
+
+  const auto result = validator.Validate(
+      wheel::WheelTransition{
+          .source_pose = {.position_m = {2.5, 3.5, 0.0}},
+          .target_pose = {.position_m = {4.5, 3.5, 0.0}},
+      },
+      {});
+
+  EXPECT_TRUE(result.valid) << result.reason_code;
+  EXPECT_GT(result.sample_count, 1U);
+  EXPECT_EQ(validator.exact_footprint_cell_test_count(), 0U);
+}
+
 TEST(WheelFaultMatrix, IgnoresUnsafeCellsOutsideTheRotatedFootprintPolygon) {
   auto input = test::MakeValidWheelInput();
   SetObstacle(input.world.local_map, 4U, 4U);
@@ -314,6 +374,7 @@ TEST(WheelFaultMatrix, IgnoresUnsafeCellsOutsideTheRotatedFootprintPolygon) {
 
   EXPECT_TRUE(result.valid) << result.reason_code;
   EXPECT_EQ(result.reason_code, "WHEEL_SWEEP_VALID");
+  EXPECT_GT(validator.exact_footprint_cell_test_count(), 0U);
 }
 
 TEST(WheelFaultMatrix, DerivesLongSweepSamplingWithoutAFixedCeiling) {
