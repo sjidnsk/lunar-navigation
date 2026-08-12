@@ -48,8 +48,10 @@ class _FakeOpportunityBridge:
         self.transit = transit
         self.queries: list[np.ndarray] = []
 
-    def query_hopper_opportunity_distance(self, context, positive) -> object:
-        del context
+    def query_hopper_opportunity_distance(
+        self, context, positive, enumerate_all_reachable_opportunities
+    ) -> object:
+        del context, enumerate_all_reachable_opportunities
         north_up = np.ascontiguousarray(np.flipud(positive), dtype=np.bool_)
         self.queries.append(north_up.copy())
         progress = np.zeros_like(north_up)

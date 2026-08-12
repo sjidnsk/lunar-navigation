@@ -529,7 +529,7 @@ def test_bridge_streams_hopper_landing_evidence_into_reachability(
         request, 2.0, evidence
     )
     opportunity = bridge.query_hopper_opportunity_distance(
-        opportunity_context, positive
+        opportunity_context, positive, False
     )
     primitive = bridge_api.PrimitiveReachabilityEngine().update(
         request, 2.0, evidence

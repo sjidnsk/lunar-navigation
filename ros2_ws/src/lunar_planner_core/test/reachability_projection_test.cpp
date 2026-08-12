@@ -651,13 +651,32 @@ TEST(ReachabilityProjection,
   std::vector<std::uint8_t> independent_positive(
       global.snapshot->cell_count(), 0U);
   independent_positive[Index(input.world.global_map, 8U, 40U)] = 1U;
+  independent_positive[Index(input.world.global_map, 8U, 74U)] = 1U;
+  auto incremental_context = ProjectHopperOpportunityContext(
+      input, 18.0, evidence);
+  ASSERT_TRUE(incremental_context.ok()) << incremental_context.reason_code;
   const auto independent = QueryHopperOpportunityDistance(
-      *context.context, independent_positive);
+      *incremental_context.context, independent_positive, false);
   ASSERT_TRUE(independent.ok()) << independent.reason_code;
   EXPECT_EQ(independent.projection->current_hop_distance, 1);
   EXPECT_NE(independent.projection->direct_progress[
                 Index(input.world.global_map, 8U, 40U)],
             0U);
+  EXPECT_EQ(std::count(
+                independent.projection->reachable_opportunities.begin(),
+                independent.projection->reachable_opportunities.end(), 1U),
+            1);
+  const std::size_t edges_after_nearest =
+      incremental_context.context->candidate_edges_evaluated;
+  const auto full = QueryHopperOpportunityDistance(
+      *incremental_context.context, independent_positive, true);
+  ASSERT_TRUE(full.ok()) << full.reason_code;
+  EXPECT_EQ(std::count(full.projection->reachable_opportunities.begin(),
+                       full.projection->reachable_opportunities.end(), 1U),
+            2);
+  EXPECT_GT(
+      incremental_context.context->candidate_edges_evaluated,
+      edges_after_nearest);
   const std::size_t edges_before_empty =
       context.context->candidate_edges_evaluated;
   const auto empty = QueryHopperOpportunityDistance(

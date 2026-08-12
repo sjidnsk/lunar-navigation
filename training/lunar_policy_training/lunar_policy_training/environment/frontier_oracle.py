@@ -223,7 +223,8 @@ class FrontierOpportunityOracle:
                     positive_cells[:, 0], positive_cells[:, 1]
                 ] = True
             opportunity = opportunity_authority.query(
-                np.ascontiguousarray(positive_mask)
+                np.ascontiguousarray(positive_mask),
+                enumerate_all_reachable_opportunities=True,
             )
             connected_positive = np.ascontiguousarray(
                 np.flipud(opportunity.reachable_opportunities),

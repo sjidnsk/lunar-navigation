@@ -811,7 +811,8 @@ ProjectHopperOpportunityContext(
 
 HopperOpportunityDistanceProjectionResult QueryHopperOpportunityDistance(
     HopperOpportunityContext& context,
-    const std::span<const std::uint8_t> positive_opportunities) {
+    const std::span<const std::uint8_t> positive_opportunities,
+    const bool enumerate_all_reachable_opportunities) {
   const auto failure = [](std::string reason_code) {
     return HopperOpportunityDistanceProjectionResult{
         .projection = std::nullopt,
@@ -829,10 +830,17 @@ HopperOpportunityDistanceProjectionResult QueryHopperOpportunityDistance(
     auto& storage = *context.storage;
     const std::size_t cell_count = context.reachable.size();
     std::size_t undiscovered_positive = 0U;
+    std::int32_t nearest_discovered_positive =
+        std::numeric_limits<std::int32_t>::max();
     for (std::size_t index = 0U; index < cell_count; ++index) {
-      if (positive_opportunities[index] != 0U &&
-          context.reachable[index] == 0U) {
-        ++undiscovered_positive;
+      if (positive_opportunities[index] != 0U) {
+        if (context.reachable[index] == 0U) {
+          ++undiscovered_positive;
+        } else {
+          nearest_discovered_positive = std::min(
+              nearest_discovered_positive,
+              context.hop_distance_from_current[index]);
+        }
       }
     }
     const auto certify = [&](const std::size_t source_index,
@@ -874,11 +882,18 @@ HopperOpportunityDistanceProjectionResult QueryHopperOpportunityDistance(
       storage.edge_cache.emplace(edge_key, 1U);
       return std::pair{true, std::string{}};
     };
-    std::int32_t completed_positive_parent_level = -1;
+    std::int32_t completed_positive_parent_level =
+        !enumerate_all_reachable_opportunities &&
+                nearest_discovered_positive !=
+                    std::numeric_limits<std::int32_t>::max()
+            ? nearest_discovered_positive - 1
+            : -1;
     while (!storage.pending.empty() &&
-           (undiscovered_positive > 0U ||
+           (completed_positive_parent_level < 0 ||
             context.hop_distance_from_current[storage.pending.front()] <=
-                completed_positive_parent_level)) {
+                completed_positive_parent_level ||
+            (enumerate_all_reachable_opportunities &&
+             undiscovered_positive > 0U))) {
       if (storage.stop_token.stop_requested()) {
         return failure("REQUEST_CANCELED");
       }
@@ -911,9 +926,14 @@ HopperOpportunityDistanceProjectionResult QueryHopperOpportunityDistance(
           storage.pending.push_back(target_index);
           if (positive_opportunities[target_index] != 0U) {
             --undiscovered_positive;
-            completed_positive_parent_level = std::max(
-                completed_positive_parent_level,
-                context.hop_distance_from_current[target_index] - 1);
+            const std::int32_t parent_level =
+                context.hop_distance_from_current[target_index] - 1;
+            completed_positive_parent_level =
+                completed_positive_parent_level < 0
+                ? parent_level
+                : enumerate_all_reachable_opportunities
+                ? std::max(completed_positive_parent_level, parent_level)
+                : completed_positive_parent_level;
           }
         }
       }

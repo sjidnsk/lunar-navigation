@@ -131,7 +131,8 @@ ProjectHopperOpportunityContext(
 [[nodiscard]] HopperOpportunityDistanceProjectionResult
 QueryHopperOpportunityDistance(
     HopperOpportunityContext& context,
-    std::span<const std::uint8_t> positive_opportunities);
+    std::span<const std::uint8_t> positive_opportunities,
+    bool enumerate_all_reachable_opportunities = true);
 
 [[nodiscard]] HopperLandingEvidenceProjectionResult
 ProjectHopperLandingEvidence(

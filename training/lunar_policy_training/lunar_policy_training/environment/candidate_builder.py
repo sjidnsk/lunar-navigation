@@ -921,7 +921,10 @@ class CandidateBuilderV2:
                 remote_positive = np.ascontiguousarray(
                     positive_mask & ~authority.direct_mask, dtype=np.bool_
                 )
-                opportunity = authority.query(remote_positive)
+                opportunity = authority.query(
+                    remote_positive,
+                    enumerate_all_reachable_opportunities=False,
+                )
                 progress = np.ascontiguousarray(
                     np.flipud(opportunity.direct_progress), dtype=np.bool_
                 )

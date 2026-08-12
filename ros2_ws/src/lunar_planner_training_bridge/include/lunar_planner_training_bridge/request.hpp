@@ -60,7 +60,8 @@ class PlannerBridge final {
   [[nodiscard]] lunar::planning::HopperOpportunityDistanceProjectionResult
   QueryHopperOpportunityDistance(
       lunar::planning::HopperOpportunityContext &context,
-      const std::vector<std::uint8_t> &positive_opportunities) const noexcept;
+      const std::vector<std::uint8_t> &positive_opportunities,
+      bool enumerate_all_reachable_opportunities) const noexcept;
   [[nodiscard]] lunar::planning::HopperLandingEvidenceProjectionResult
   ProjectHopperLandingEvidence(
       const TrainingPlanRequest &request,

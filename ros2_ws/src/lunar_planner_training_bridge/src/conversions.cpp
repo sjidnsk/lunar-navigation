@@ -122,10 +122,12 @@ PlannerBridge::ProjectHopperOpportunityContext(
 HopperOpportunityDistanceProjectionResult
 PlannerBridge::QueryHopperOpportunityDistance(
     HopperOpportunityContext &context,
-    const std::vector<std::uint8_t> &positive_opportunities) const noexcept {
+    const std::vector<std::uint8_t> &positive_opportunities,
+    const bool enumerate_all_reachable_opportunities) const noexcept {
   try {
     return lunar::planning::QueryHopperOpportunityDistance(
-        context, positive_opportunities);
+        context, positive_opportunities,
+        enumerate_all_reachable_opportunities);
   } catch (const std::bad_alloc &) {
     return HopperOpportunityDistanceProjectionResult{
         .projection = std::nullopt,

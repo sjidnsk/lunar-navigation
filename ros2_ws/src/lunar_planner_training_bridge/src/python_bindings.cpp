@@ -1670,7 +1670,8 @@ void BindRequest(py::module_ &module) {
           "query_hopper_opportunity_distance",
           [](const training::PlannerBridge &self,
              planning::HopperOpportunityContext &context,
-             const py::array &positive_opportunities) {
+             const py::array &positive_opportunities,
+             const bool enumerate_all_reachable_opportunities) {
             RequireExactArray(
                 positive_opportunities, py::dtype::of<bool>(), 2,
                 "positive opportunities", "bool");
@@ -1690,14 +1691,16 @@ void BindRequest(py::module_ &module) {
             planning::HopperOpportunityDistanceProjectionResult result;
             {
               py::gil_scoped_release release;
-              result = self.QueryHopperOpportunityDistance(context, values);
+              result = self.QueryHopperOpportunityDistance(
+                  context, values, enumerate_all_reachable_opportunities);
             }
             if (!result.ok()) {
               throw std::runtime_error(result.reason_code);
             }
             return std::move(*result.projection);
           },
-          py::arg("context"), py::arg("positive_opportunities"))
+          py::arg("context"), py::arg("positive_opportunities"),
+          py::arg("enumerate_all_reachable_opportunities") = true)
       .def(
           "project_hopper_landing_evidence",
           [](const training::PlannerBridge &self,

@@ -48,7 +48,12 @@ class HopperOpportunityAuthority:
     def algorithm_id(self) -> str:
         return str(self._context.algorithm_id)
 
-    def query(self, positive_mask: np.ndarray) -> object:
+    def query(
+        self,
+        positive_mask: np.ndarray,
+        *,
+        enumerate_all_reachable_opportunities: bool,
+    ) -> object:
         positive = np.asarray(positive_mask)
         if (
             positive.dtype != np.dtype(np.bool_)
@@ -56,7 +61,9 @@ class HopperOpportunityAuthority:
         ):
             raise ValueError("hopper opportunity mask differs")
         return self._bridge.query_hopper_opportunity_distance(
-            self._context, np.ascontiguousarray(np.flipud(positive))
+            self._context,
+            np.ascontiguousarray(np.flipud(positive)),
+            enumerate_all_reachable_opportunities,
         )
 
 
