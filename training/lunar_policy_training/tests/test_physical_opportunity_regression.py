@@ -137,7 +137,7 @@ def test_historical_boundary_failure_replays_against_v6_cache(
     assert episode.scene_id == legacy_state["scene_id"]
     assert list(episode.start_cell) == legacy_state["start_cell"]
 
-    # The v4 worker payload is read-only evidence.  Rebuild a fresh v6 episode
+    # The v4 worker payload is read-only evidence.  Rebuild a fresh v7 episode
     # exclusively through the public sensor-boundary API; never resume it.
     for reveal in legacy_state["reveal_history"]:
         pose = _pose(reveal["pose"])
@@ -178,6 +178,39 @@ def test_historical_boundary_failure_replays_against_v6_cache(
 
     snapshot = episode._snapshot
     assert snapshot is not None
+    universe_matches = tuple(
+        (index, candidate)
+        for index, candidate in enumerate(snapshot.candidate_universe.candidates)
+        if np.array_equal(
+            np.asarray(candidate.target_position_m, dtype=np.float64),
+            HISTORICAL_TARGET,
+        )
+    )
+    assert len(universe_matches) == 1
+    target_universe_index, target_candidate = universe_matches[0]
+    assert float(target_candidate.feature[5]) > 0.0
+    universe_sha256 = snapshot.candidate_universe_sha256
+    if target_candidate.candidate_id not in set(
+        snapshot.candidates.candidate_ids[snapshot.candidates.mask]
+    ):
+        episode._visited_candidate_cells.update(
+            candidate.position_grid_key
+            for candidate in snapshot.candidate_universe.candidates[
+                :target_universe_index
+            ]
+        )
+        execution_state = (
+            episode.controller.current_observation.observation_identities[0]
+            .execution_state
+        )
+        rebuilt = episode.controller.rebuild_without_sensor_update(
+            pose_map=episode.current_pose,
+            execution_state=execution_state,
+        )
+        assert rebuilt.updated is True
+        snapshot = episode._snapshot
+        assert snapshot is not None
+        assert snapshot.candidate_universe_sha256 == universe_sha256
     active = np.flatnonzero(snapshot.candidates.mask)
     matches = tuple(
         int(index)
