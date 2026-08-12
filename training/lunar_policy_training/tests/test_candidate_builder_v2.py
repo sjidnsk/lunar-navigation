@@ -979,6 +979,58 @@ def test_hopper_build_time_all_zero_has_empty_canonical_universe() -> None:
     assert not bridge.queries[0].any()
 
 
+def test_hopper_without_a_direct_first_hop_does_not_query_remote_gain() -> None:
+    world = _world_with_frontier()
+    certified = np.zeros_like(world.observed_mask, dtype=np.bool_)
+    certified[128, 128] = True
+    context = SimpleNamespace(
+        direct=np.zeros_like(world.observed_mask, dtype=np.bool_),
+        algorithm_id="cpp-hopper-opportunity-connectivity/v1",
+    )
+
+    class RejectingBridge:
+        def query_hopper_opportunity_distance(self, *args, **kwargs):
+            raise AssertionError("remote opportunities require a direct first hop")
+
+    canvas = world.canvas
+    positions = np.asarray(
+        [
+            (*canvas.grid_center_world(int(row), int(column)), 0.0)
+            for row, column in zip(*np.nonzero(certified), strict=True)
+        ],
+        dtype=np.float64,
+    )
+    authority = HopperOpportunityAuthority(
+        bridge=RejectingBridge(),
+        context=context,
+        certified_mask=certified,
+        certified_positions_m=positions,
+    )
+    physical = replace(
+        _physical_reachability(world, platform_type="HOPPER"),
+        physical_observation_pose_mask=np.zeros_like(world.observed_mask),
+        observation_positions_m=np.empty((0, 3), dtype=np.float64),
+        physically_reachable_pose_count=0,
+        hopper_opportunity_authority=authority,
+    )
+    positive_mask = np.zeros_like(world.observed_mask)
+    positive_mask[128, 128] = True
+    builder = CandidateBuilderV2(_RecordingEstimator())
+    builder.hopper_positive_mask = lambda *args: np.ascontiguousarray(
+        positive_mask
+    )
+
+    universe = _formal_universe(
+        builder,
+        world=world,
+        platform_type="HOPPER",
+        physical_reachability=physical,
+    )
+
+    assert universe.candidates == ()
+    assert universe.diagnostics.available_candidate_count == 0
+
+
 def test_hopper_exact_parent_requires_opportunity_distance_decrease() -> None:
     world = _world_with_frontier()
     builder = CandidateBuilderV2(_RecordingEstimator())

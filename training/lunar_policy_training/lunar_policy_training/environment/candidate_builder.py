@@ -1000,20 +1000,27 @@ class CandidateBuilderV2:
                 positive_mask = self.hopper_positive_mask(
                     world, mission, physical_reachability
                 )
-                remote_positive = np.ascontiguousarray(
-                    positive_mask & ~authority.direct_mask, dtype=np.bool_
+                direct_positive = np.ascontiguousarray(
+                    positive_mask & authority.direct_mask, dtype=np.bool_
                 )
-                opportunity = authority.query(
-                    remote_positive,
-                    enumerate_all_reachable_opportunities=False,
-                )
-                progress = np.ascontiguousarray(
-                    np.flipud(opportunity.direct_progress), dtype=np.bool_
-                )
-                hopper_allowed = np.ascontiguousarray(
-                    (positive_mask & authority.direct_mask) | progress,
-                    dtype=np.bool_,
-                )
+                if authority.direct_mask.any():
+                    remote_positive = np.ascontiguousarray(
+                        positive_mask & ~authority.direct_mask,
+                        dtype=np.bool_,
+                    )
+                    opportunity = authority.query(
+                        remote_positive,
+                        enumerate_all_reachable_opportunities=False,
+                    )
+                    progress = np.ascontiguousarray(
+                        np.flipud(opportunity.direct_progress),
+                        dtype=np.bool_,
+                    )
+                    hopper_allowed = np.ascontiguousarray(
+                        direct_positive | progress, dtype=np.bool_
+                    )
+                else:
+                    hopper_allowed = direct_positive
                 for cell, position in zip(
                     zip(*np.nonzero(authority.certified_mask), strict=True),
                     authority.certified_positions_m,
