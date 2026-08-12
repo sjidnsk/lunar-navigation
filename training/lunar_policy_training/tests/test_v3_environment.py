@@ -13,11 +13,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "model_cont
 from lunar_planner_training_bridge import (  # noqa: E402
     CandidateDisposition,
     ExecutionDirective,
+    HierarchicalPlannerMetrics,
     MotionReference,
     PlannerDiagnostics,
     PlannerOutput,
     PlanningOutcome,
     TrainingPlanRequest,
+    TrajectoryPoint,
 )
 import torch  # noqa: E402
 import pytest  # noqa: E402
@@ -1736,28 +1738,27 @@ def test_ground_option_allows_a_detour_before_reaching_the_target() -> None:
     assert result.transition.execution_events.reference_samples_consumed == 146
 
 
-def test_stationary_ground_option_fails_closed_before_a_sixty_fifth_reference(
-) -> None:
+def test_ground_option_can_reach_target_after_more_than_64_references() -> None:
     identities = [
         _identity(
             map_snapshot_id=f"map-{index}",
             robot_state_id=f"robot-{index}",
             state_time_ns=1_000 * index,
         )
-        for index in range(65)
+        for index in range(67)
     ]
-    harness = _GroundOptionHarness([10.0] * 65)
+    harness = _GroundOptionHarness([10.0] * 65 + [0.1])
     executor = _SequenceReferenceExecutor(
         [
             _ground_result(
                 identities[index + 1],
-                mission_delta=0.0,
-                priority_delta=0.0,
-                execution_cost=0.0,
+                mission_delta=0.01,
+                priority_delta=0.001,
+                execution_cost=0.02,
                 execution_time=0.1,
                 sample_count=2,
             )
-            for index in range(64)
+            for index in range(66)
         ]
     )
     env = V3ExplorationEnvironment(
@@ -1767,7 +1768,7 @@ def test_stationary_ground_option_fails_closed_before_a_sixty_fifth_reference(
                 _reference_output(
                     "WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE
                 )
-                for _ in range(65)
+                for _ in range(66)
             ]
         ),
         request_builder=harness.begin,
@@ -1779,12 +1780,66 @@ def test_stationary_ground_option_fails_closed_before_a_sixty_fifth_reference(
         ground_option_clearer=harness.clear,
     )
 
-    with pytest.raises(EnvironmentInvariantError, match="64"):
+    result = env.advance_prepared_action(
+        PolicyAction(0, 0.0), expected_identity=identities[0]
+    )
+
+    assert result.policy_decisions_consumed == 1
+    assert len(executor.references) == 66
+    assert result.transition is not None
+    assert result.transition.mission_observed_delta == pytest.approx(0.66)
+    assert result.transition.priority_observed_delta == pytest.approx(0.066)
+    assert result.transition.execution_events.reference_samples_consumed == 132
+    assert harness.clear_calls == 1
+
+
+def test_ground_option_repeated_progress_signature_fails_closed() -> None:
+    identity = _identity()
+    harness = _GroundOptionHarness([10.0, 10.0])
+    outputs = [
+        _reference_output("WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE)
+        for _ in range(2)
+    ]
+    for output in outputs:
+        hierarchical = HierarchicalPlannerMetrics()
+        hierarchical.route_cursor = 7
+        output.diagnostics.hierarchical = hierarchical
+        point = TrajectoryPoint()
+        point.pose.position_m.x = 12.0
+        point.pose.position_m.y = 34.0
+        point.pose.position_m.z = 5.0
+        output.reference.data.points = [point]
+    executor = _SequenceReferenceExecutor(
+        [
+            _ground_result(
+                identity,
+                mission_delta=0.0,
+                priority_delta=0.0,
+                execution_cost=0.0,
+                execution_time=0.1,
+                sample_count=2,
+            )
+            for _ in range(2)
+        ]
+    )
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=_SequenceBridge(outputs),
+        request_builder=harness.begin,
+        initial_observation=_observation(identity=identity),
+        require_identity_bound_request=True,
+        reference_executor=executor,
+        ground_option_continuation_builder=harness.continue_,
+        ground_option_distance_provider=harness.distance,
+        ground_option_clearer=harness.clear,
+    )
+
+    with pytest.raises(EnvironmentInvariantError, match="GROUND_OPTION_STALLED"):
         env.advance_prepared_action(
-            PolicyAction(0, 0.0), expected_identity=identities[0]
+            PolicyAction(0, 0.0), expected_identity=identity
         )
 
-    assert len(executor.references) == 64
+    assert len(executor.references) == 2
     assert harness.clear_calls == 1
 
 

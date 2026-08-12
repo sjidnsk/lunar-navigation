@@ -71,7 +71,6 @@ _NO_REFERENCE_OUTPUTS = frozenset(
     }
 )
 _MAX_COMMITTED_HOP_FEEDBACK_STEPS = 64
-_MAX_GROUND_OPTION_REFERENCES = 64
 _GROUND_OPTION_TARGET_TOLERANCE_M = 0.2
 _GROUND_OPTION_PROGRESS_EPSILON_M = 1.0e-6
 _EXECUTION_EVENT_COUNT_FIELDS = (
@@ -773,6 +772,37 @@ class V3ExplorationEnvironment:
             self._fail_closed("ground option distance is invalid")
         return float(distance_m)
 
+    def _ground_progress_signature(
+        self,
+        output: PlannerOutput,
+        *,
+        candidate_id: str,
+    ) -> tuple[object, ...]:
+        identity = self._observation.observation_identities[0]
+        hierarchical = output.diagnostics.hierarchical
+        route_cursor = (
+            None if hierarchical is None else int(hierarchical.route_cursor)
+        )
+        reference = output.reference
+        if reference is None:
+            self._fail_closed("ground progress signature requires a reference")
+        points = getattr(reference.data, "points", None)
+        if points:
+            position = points[-1].pose.position_m
+            endpoint: tuple[object, ...] = (
+                "trajectory",
+                float(position.x),
+                float(position.y),
+                float(position.z),
+            )
+            if not all(
+                math.isfinite(value) for value in endpoint[1:]
+            ):
+                self._fail_closed("ground reference endpoint is non-finite")
+        else:
+            endpoint = ("reference", str(reference.plan_id))
+        return identity, route_cursor, endpoint, candidate_id
+
     def _advance_ground_option(
         self,
         action: PolicyAction,
@@ -786,7 +816,13 @@ class V3ExplorationEnvironment:
             request, prepared = self._build_plan_request(
                 action, expected_identity
             )
-            for reference_index in range(_MAX_GROUND_OPTION_REFERENCES):
+            if not isinstance(prepared, PreparedPlanRequest):
+                self._fail_closed(
+                    "ground option requires prepared candidate identity"
+                )
+            locked_candidate_id = prepared.candidate_id
+            seen_progress_signatures: set[tuple[object, ...]] = set()
+            while True:
                 output = self._bridge.plan(request)
                 self._validate_output(output)
                 transition = self._transition_for_output(output, prepared)
@@ -805,17 +841,25 @@ class V3ExplorationEnvironment:
                     + _GROUND_OPTION_PROGRESS_EPSILON_M
                 ):
                     return self._aggregate_ground_transitions(transitions)
-                if reference_index + 1 >= _MAX_GROUND_OPTION_REFERENCES:
+                progress_signature = self._ground_progress_signature(
+                    output,
+                    candidate_id=locked_candidate_id,
+                )
+                if progress_signature in seen_progress_signatures:
                     self._fail_closed(
-                        "ground option did not finish within 64 references"
+                        "GROUND_OPTION_STALLED"
                     )
+                seen_progress_signatures.add(progress_signature)
                 continuation_identity = self._observation.observation_identities[0]
                 prepared = self._build_ground_continuation_request(
                     continuation_identity
                 )
+                if prepared.candidate_id != locked_candidate_id:
+                    self._fail_closed(
+                        "ground option candidate identity changed"
+                    )
                 request = prepared.request
                 request.continuation = output.continuation
-            self._fail_closed("ground option reference loop is inconsistent")
         finally:
             clearer()
 
