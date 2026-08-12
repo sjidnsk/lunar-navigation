@@ -380,6 +380,29 @@ def test_bridge_exposes_candidate_disposition_and_complete_hierarchical_metrics(
     assert metrics.physical_goal_feasible
 
 
+def test_bridge_carries_an_opaque_ground_route_continuation(bridge, easy_request) -> None:
+    request = easy_request("WHEELED")
+    request.world.global_map = _flat_map("map", width=24, height=8)
+    request.world.local_map = _flat_map("odom", width=24, height=16)
+    request.world.local_map.origin_m.x = -4.0
+    request.goal.target.position_m = _vec3(18.5, 3.5, 0.0)
+
+    first = bridge.plan(request)
+
+    assert first.reference is not None
+    assert first.continuation is not None
+    assert not hasattr(first.continuation, "global_route")
+    request.request_id = "training-wheeled-continuation"
+    request.local_map_generation += 1
+    request.current_state.pose = _pose(2.6, 3.5, 0.0)
+    request.continuation = first.continuation
+
+    second = bridge.plan(request)
+
+    assert second.diagnostics.hierarchical.route_reused is True
+    assert second.diagnostics.hierarchical.global_expanded_states == 0
+
+
 def test_bridge_suppresses_only_an_exhausted_physical_target(
     bridge, easy_request
 ) -> None:

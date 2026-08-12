@@ -814,6 +814,7 @@ class V3ExplorationEnvironment:
                     continuation_identity
                 )
                 request = prepared.request
+                request.continuation = output.continuation
             self._fail_closed("ground option reference loop is inconsistent")
         finally:
             clearer()

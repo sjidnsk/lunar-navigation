@@ -823,6 +823,9 @@ void BindOutput(py::module_ &module) {
                      &planning::PlannerDiagnostics::warning_codes)
       .def_readwrite("hierarchical",
                      &planning::PlannerDiagnostics::hierarchical);
+  py::class_<training::OpaqueRouteContinuation,
+             std::shared_ptr<training::OpaqueRouteContinuation>>(
+      module, "OpaqueRouteContinuation");
   py::class_<planning::PlannerOutput>(module, "PlannerOutput")
       .def(py::init<>())
       .def_readwrite("outcome", &planning::PlannerOutput::outcome)
@@ -831,7 +834,16 @@ void BindOutput(py::module_ &module) {
                      &planning::PlannerOutput::candidate_disposition)
       .def_readwrite("reason_code", &planning::PlannerOutput::reason_code)
       .def_readwrite("reference", &planning::PlannerOutput::reference)
-      .def_readwrite("diagnostics", &planning::PlannerOutput::diagnostics);
+      .def_readwrite("diagnostics", &planning::PlannerOutput::diagnostics)
+      .def_property_readonly(
+          "continuation",
+          [](const planning::PlannerOutput &output) {
+            if (output.continuation == nullptr) {
+              return std::shared_ptr<training::OpaqueRouteContinuation>{};
+            }
+            return std::make_shared<training::OpaqueRouteContinuation>(
+                training::OpaqueRouteContinuation{output.continuation});
+          });
 }
 
 [[nodiscard]] planning::HopperLandingEvidenceGrid HopperLandingGridFromArrays(
@@ -1585,6 +1597,8 @@ void BindRequest(py::module_ &module) {
       .def_readwrite("config", &training::TrainingPlanRequest::config)
       .def_readwrite("previous_execution",
                      &training::TrainingPlanRequest::previous_execution)
+      .def_readwrite("continuation",
+                     &training::TrainingPlanRequest::continuation)
       .def_readwrite("position_uncertainty_m",
                      &training::TrainingPlanRequest::position_uncertainty_m)
       .def_readwrite("velocity_uncertainty_mps",

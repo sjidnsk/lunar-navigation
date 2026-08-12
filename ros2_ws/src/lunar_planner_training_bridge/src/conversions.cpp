@@ -28,6 +28,9 @@ namespace {
       .stop_token = std::stop_token{},
       .position_uncertainty_m = request.position_uncertainty_m,
       .velocity_uncertainty_mps = request.velocity_uncertainty_mps,
+      .continuation = request.continuation == nullptr
+                          ? nullptr
+                          : request.continuation->value,
   };
 }
 

@@ -12,6 +12,10 @@
 
 namespace lunar::planning::training {
 
+struct OpaqueRouteContinuation final {
+  std::shared_ptr<const lunar::planning::RouteContinuation> value;
+};
+
 struct TrainingPlanRequest final {
   std::string request_id;
   std::string mission_id;
@@ -28,6 +32,7 @@ struct TrainingPlanRequest final {
   lunar::planning::PlatformCapability capability;
   lunar::planning::PlannerConfig config;
   std::optional<lunar::planning::ExecutionContext> previous_execution;
+  std::shared_ptr<const OpaqueRouteContinuation> continuation;
   double position_uncertainty_m{};
   double velocity_uncertainty_mps{};
 };

@@ -4,6 +4,7 @@ from datetime import timedelta
 from dataclasses import FrozenInstanceError
 import pathlib
 import sys
+from types import SimpleNamespace
 
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -20,6 +21,7 @@ from lunar_planner_training_bridge import (  # noqa: E402
 )
 import torch  # noqa: E402
 import pytest  # noqa: E402
+import lunar_policy_training.environment.v3_environment as v3_module  # noqa: E402
 
 from lunar_policy_training.environment.candidate_builder import (  # noqa: E402
     CandidateDiagnostics,
@@ -141,8 +143,10 @@ class _Bridge:
 class _SequenceBridge:
     def __init__(self, outputs: list[PlannerOutput]) -> None:
         self.outputs = iter(outputs)
+        self.requests: list[object] = []
 
     def plan(self, request: object) -> PlannerOutput:
+        self.requests.append(request)
         return next(self.outputs)
 
 
@@ -1349,6 +1353,87 @@ def test_one_ground_policy_action_aggregates_three_rolling_references() -> None:
     assert transition.normalized_macro_step_time == pytest.approx(2.55)
     assert transition.execution_events.reference_samples_consumed == 9
     assert transition.execution_events.selected_action_observed_safe is True
+
+
+def test_ground_rolling_requests_carry_the_previous_opaque_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identities = [
+        _identity(
+            map_snapshot_id=f"continuation-map-{index}",
+            robot_state_id=f"continuation-robot-{index}",
+            state_time_ns=1_000 * index,
+        )
+        for index in range(1, 4)
+    ]
+    harness = _GroundOptionHarness([4.0, 0.1])
+    monkeypatch.setattr(v3_module, "TrainingPlanRequest", SimpleNamespace)
+    harness._prepared = lambda identity: PreparedPlanRequest(
+        request=SimpleNamespace(
+            state_time=SimpleNamespace(
+                nanoseconds_since_epoch=identity.state_time_ns
+            ),
+            continuation=None,
+        ),
+        identity=identity,
+        candidate_id="a" * 64,
+        physical_snapshot_id="b" * 64,
+    )
+    outputs = [
+        _reference_output("WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE)
+        for _ in range(2)
+    ]
+    handles = [object(), object()]
+    outputs = [
+        SimpleNamespace(
+            outcome=output.outcome,
+            directive=output.directive,
+            candidate_disposition=output.candidate_disposition,
+            reason_code=output.reason_code,
+            reference=output.reference,
+            diagnostics=output.diagnostics,
+            continuation=handle,
+        )
+        for output, handle in zip(outputs, handles, strict=True)
+    ]
+    bridge = _SequenceBridge(outputs)
+    env = V3ExplorationEnvironment(
+        platform_type="WHEELED",
+        bridge=bridge,
+        request_builder=harness.begin,
+        initial_observation=_observation(identity=identities[0]),
+        require_identity_bound_request=True,
+        reference_executor=_SequenceReferenceExecutor(
+            [
+                _ground_result(
+                    identities[1],
+                    mission_delta=0.1,
+                    priority_delta=0.0,
+                    execution_cost=0.1,
+                    execution_time=0.1,
+                    sample_count=2,
+                ),
+                _ground_result(
+                    identities[2],
+                    mission_delta=0.1,
+                    priority_delta=0.0,
+                    execution_cost=0.1,
+                    execution_time=0.1,
+                    sample_count=2,
+                ),
+            ]
+        ),
+        ground_option_continuation_builder=harness.continue_,
+        ground_option_distance_provider=harness.distance,
+        ground_option_clearer=harness.clear,
+    )
+
+    env.advance_prepared_action(
+        PolicyAction(0, 0.0), expected_identity=identities[0]
+    )
+
+    assert bridge.requests[0].continuation is None
+    assert bridge.requests[1].continuation is handles[0]
 
 
 def test_ground_option_returns_aggregated_progress_when_refresh_rejects_goal() -> None:
