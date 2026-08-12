@@ -299,6 +299,19 @@ LeggedTerrainGrid::LeggedTerrainGrid(
       cells_.push_back(std::move(evaluation));
     }
   }
+  const std::size_t stride = source_map_->width() + 1U;
+  hard_infeasible_prefix_sum_.assign(
+      stride * (source_map_->height() + 1U), 0U);
+  for (std::size_t y = 0U; y < source_map_->height(); ++y) {
+    for (std::size_t x = 0U; x < source_map_->width(); ++x) {
+      const std::size_t prefix_index = (y + 1U) * stride + x + 1U;
+      hard_infeasible_prefix_sum_[prefix_index] =
+          (cells_[y * source_map_->width() + x].hard_feasible ? 0U : 1U) +
+          hard_infeasible_prefix_sum_[prefix_index - 1U] +
+          hard_infeasible_prefix_sum_[prefix_index - stride] -
+          hard_infeasible_prefix_sum_[prefix_index - stride - 1U];
+    }
+  }
 }
 
 bool LeggedTerrainGrid::ok() const noexcept {
@@ -321,6 +334,35 @@ const LeggedTerrainEvaluation* LeggedTerrainGrid::Find(
     return nullptr;
   }
   return &cells_[source_map_->Index(cell)];
+}
+
+bool LeggedTerrainGrid::AllCellsHardFeasible(
+    const shared::GridCell minimum,
+    const shared::GridCell maximum) const noexcept {
+  if (!ok() || !source_map_->InBounds(minimum) ||
+      !source_map_->InBounds(maximum) || minimum.x > maximum.x ||
+      minimum.y > maximum.y) {
+    return false;
+  }
+  const std::size_t stride = source_map_->width() + 1U;
+  const std::size_t left = static_cast<std::size_t>(minimum.x);
+  const std::size_t top = static_cast<std::size_t>(minimum.y);
+  const std::size_t right = static_cast<std::size_t>(maximum.x) + 1U;
+  const std::size_t bottom = static_cast<std::size_t>(maximum.y) + 1U;
+  const std::size_t unsafe_count =
+      hard_infeasible_prefix_sum_[bottom * stride + right] -
+      hard_infeasible_prefix_sum_[top * stride + right] -
+      hard_infeasible_prefix_sum_[bottom * stride + left] +
+      hard_infeasible_prefix_sum_[top * stride + left];
+  return unsafe_count == 0U;
+}
+
+std::size_t LeggedTerrainGrid::exact_rectangle_test_count() const noexcept {
+  return exact_rectangle_test_count_;
+}
+
+void LeggedTerrainGrid::RecordExactRectangleTest() const noexcept {
+  ++exact_rectangle_test_count_;
 }
 
 LeggedSweepResult ValidateLeggedBodySweep(
@@ -435,9 +477,15 @@ LeggedSweepResult ValidateLeggedBodySweep(
     if (!minimum_cell.has_value() || !maximum_cell.has_value()) {
       return SweepFailure("LEGGED_BODY_SWEEP_OUTSIDE_MAP", sample_count);
     }
-    for (std::int32_t y = minimum_cell->y; y <= maximum_cell->y; ++y) {
+    const bool all_aabb_cells_safe = terrain_grid != nullptr &&
+        terrain_grid->AllCellsHardFeasible(*minimum_cell, *maximum_cell);
+    for (std::int32_t y = minimum_cell->y;
+         !all_aabb_cells_safe && y <= maximum_cell->y; ++y) {
       for (std::int32_t x = minimum_cell->x; x <= maximum_cell->x; ++x) {
         const shared::GridCell cell{.x = x, .y = y};
+        if (terrain_grid != nullptr) {
+          terrain_grid->RecordExactRectangleTest();
+        }
         if (!RectangleIntersectsCell(
                 center, yaw, half_length, half_width, map, cell)) {
           continue;

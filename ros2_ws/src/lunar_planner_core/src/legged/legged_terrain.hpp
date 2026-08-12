@@ -47,13 +47,19 @@ class LeggedTerrainGrid final {
       const LeggedCapability& capability) const noexcept;
   [[nodiscard]] const LeggedTerrainEvaluation* Find(
       shared::GridCell cell) const noexcept;
+  [[nodiscard]] bool AllCellsHardFeasible(
+      shared::GridCell minimum, shared::GridCell maximum) const noexcept;
+  [[nodiscard]] std::size_t exact_rectangle_test_count() const noexcept;
+  void RecordExactRectangleTest() const noexcept;
 
  private:
   const shared::SafeProjection* projection_{};
   const shared::MapSnapshot* source_map_{};
   const LeggedCapability* capability_{};
   std::vector<LeggedTerrainEvaluation> cells_;
+  std::vector<std::size_t> hard_infeasible_prefix_sum_;
   bool canceled_{};
+  mutable std::size_t exact_rectangle_test_count_{};
 };
 
 [[nodiscard]] LeggedTerrainEvaluation EvaluateLeggedTerrainCell(

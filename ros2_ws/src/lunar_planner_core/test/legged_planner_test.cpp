@@ -175,15 +175,19 @@ TEST(LeggedPlanner, DerivesLongSweepSamplingWithoutAFixedCeiling) {
       snapshot.snapshot, input.capability, input.config.map_safety, {});
   ASSERT_TRUE(projection.ok()) << projection.reason_code;
 
+  const legged::LeggedTerrainGrid terrain_grid{
+      *projection.projection, capability, {}};
+  ASSERT_TRUE(terrain_grid.ok());
   const legged::LeggedSweepResult result = legged::ValidateLeggedBodySweep(
       legged::LeggedPose{.position_m = {1.0, 2.5, 0.5}},
       legged::LeggedPose{.position_m = {4.0, 2.5, 0.5}},
       Interval{.lower = 0.5, .upper = 0.5},
       *projection.projection, capability, FullDomain(input.world.local_map),
-      {});
+      {}, &terrain_grid);
 
   EXPECT_TRUE(result.valid) << result.reason_code;
   EXPECT_GT(result.sample_count, 32U);
+  EXPECT_EQ(terrain_grid.exact_rectangle_test_count(), 0U);
 }
 
 TEST(LeggedPlanner, PhysicallyBlockedBodySupportGoalWinsOverDomainMask) {
