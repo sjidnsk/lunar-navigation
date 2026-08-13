@@ -14,10 +14,13 @@ REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PACKAGE_ROOT))
 sys.path.insert(0, str(REPOSITORY_ROOT / "model_contract"))
 
+import lunar_policy_training.budget as budget_module  # noqa: E402
+
 from lunar_policy_training.budget import (  # noqa: E402
     BUDGET_EXTENSION_BLOCK_SECONDS,
     CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS,
     INITIAL_GPU_BUDGET_SECONDS,
+    TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS,
     BudgetError,
     BudgetExceededError,
     CalibrationError,
@@ -43,7 +46,45 @@ def test_training_budget_uses_fixed_total_and_rejects_overspend() -> None:
 
 
 def test_calibration_probe_reserve_covers_the_formal_worker_timeout() -> None:
-    assert CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS == 1080.0
+    assert CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS == 9720.0
+    assert TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS == 39000.0
+
+
+def test_operator_fixed_runtime_freezes_twenty_four_without_measurement(
+    tmp_path: pathlib.Path,
+) -> None:
+    config = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+    budget = TrainingBudget()
+    manifest = tmp_path / "run-manifest.json"
+
+    result = budget_module.freeze_fixed_runtime_selection(
+        config=config,
+        budget=budget,
+        manifest_path=manifest,
+        selected_micro_batch=4,
+    )
+
+    assert result.selected_workers == 24
+    assert result.selected_micro_batch == 4
+    assert result.selected_rollout_horizon == 32
+    assert result.compared_workers == (24,)
+    assert result.measurements == ()
+    assert result.horizon_measurements == ()
+    assert budget.consumed_gpu_seconds == 0.0
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["runtime_calibration"] == {
+        "selection_mode": "operator-fixed/v1",
+        "selected_workers": 24,
+        "selected_micro_batch": 4,
+        "selected_rollout_horizon": 32,
+        "compared_workers": [24],
+        "measurements": [],
+        "rollout_horizon_candidates": [],
+        "horizon_transitions_per_worker": 0,
+        "horizon_measurements": [],
+    }
 
 
 def test_active_gpu_intervals_exclude_paused_wall_clock() -> None:
@@ -159,7 +200,7 @@ def test_calibration_selects_fastest_safe_worker_tier_from_three_candidates(
 ) -> None:
     """Would fail if the new 30-worker tier were ignored or forced when slower."""
     baseline = load_training_config(
-        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
     )
     config = replace(
         baseline,
@@ -213,7 +254,7 @@ def test_horizon_calibration_uses_fastest_safe_tier_when_thirty_is_slower(
 ) -> None:
     """Would fail if adding workers forced a slower tier into formal training."""
     baseline = load_training_config(
-        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
     )
     config = replace(
         baseline,
@@ -263,7 +304,7 @@ def test_calibration_really_compares_all_worker_tiers_and_freezes_manifest(
 ) -> None:
     """Would fail if the preferred tier skipped either lower control."""
     config = load_training_config(
-        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
     )
     budget = TrainingBudget()
     probe = _CalibrationProbe()
@@ -312,7 +353,7 @@ def test_rollout_horizon_calibration_uses_equal_work_and_freezes_selection(
 ) -> None:
     """Would fail if horizon changed episode semantics or compared unequal work."""
     config = load_training_config(
-        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
     )
     horizon_probe = _HorizonProbe()
 
@@ -352,7 +393,7 @@ def test_rollout_horizon_near_ties_prefer_the_shorter_update_boundary(
 ) -> None:
     """Would fail if measurement noise selected a much longer update."""
     config = load_training_config(
-        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
     )
 
     def horizon_probe(
@@ -402,7 +443,7 @@ def test_rollout_horizon_selection_rejects_fast_but_semantically_invalid_candida
     tmp_path: pathlib.Path,
 ) -> None:
     config = load_training_config(
-        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
     )
 
     def probe(
@@ -451,7 +492,7 @@ def test_incomplete_horizon_probe_is_recorded_but_cannot_be_selected(
     tmp_path: pathlib.Path,
 ) -> None:
     config = load_training_config(
-        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
     )
 
     def probe(
@@ -504,7 +545,7 @@ def test_calibration_falls_back_to_18_when_higher_tiers_are_not_safe_or_faster(
 ) -> None:
     """Would fail if worker count overrode OOM, timeout, or throughput gates."""
     config = load_training_config(
-        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
     )
 
     result = calibrate_runtime(
@@ -524,7 +565,7 @@ def test_calibration_falls_back_to_24_when_only_thirty_is_not_qualified(
 ) -> None:
     """Would fail if one bad top tier discarded a safe faster middle tier."""
     config = load_training_config(
-        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
     )
 
     result = calibrate_runtime(
@@ -543,7 +584,7 @@ def test_calibration_rejects_ipc_failure_instead_of_labeling_planner_timeout(
 ) -> None:
     """Would fail if a dead/late worker were treated as a normal planner transition."""
     config = load_training_config(
-        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
     )
 
     def ipc_failure(workers: int, micro_batch: int) -> CalibrationMeasurement:
@@ -589,7 +630,7 @@ def test_calibration_unexpected_exit_still_settles_shared_budget(
 ) -> None:
     """Would fail if a failed calibration probe left active GPU time uncharged."""
     config = load_training_config(
-        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
     )
     timestamps = iter((20.0, 23.0))
     budget = TrainingBudget()
@@ -615,7 +656,7 @@ def test_calibration_does_not_start_probe_below_bounded_unit_reserve(
 ) -> None:
     """Would fail if the final partial budget still launched an 18/24 probe."""
     config = load_training_config(
-        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_smoke.yaml"
     )
     calls: list[tuple[int, int]] = []
     budget = TrainingBudget(

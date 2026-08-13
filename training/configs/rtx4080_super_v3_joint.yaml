@@ -1,10 +1,11 @@
 parallel:
-  worker_candidates: [18, 24, 30]
-  preferred_workers: 30
+  # Operator-fixed on this RTX 4080 SUPER host; no worker-tier benchmark.
+  worker_candidates: [24]
+  preferred_workers: 24
   joint_workers:
-    WHEELED: 10
-    LEGGED: 10
-    HOPPER: 10
+    WHEELED: 8
+    LEGGED: 8
+    HOPPER: 8
   nested_compute_threads: 1
   gpu_memory_fraction_max: 0.90
 task_area:
@@ -26,8 +27,7 @@ ppo:
   frontier_entropy_coef: 0.01
   theta_entropy_coef: 0.001
   max_grad_norm: 0.5
-  # Bootstrap value only. Formal calibration compares 16/32/64 with equal
-  # transitions and freezes the qualified throughput winner in run-manifest.
+  # Operator-fixed with the 24-worker runtime selection.
   rollout_horizon: 32
   dtype: float32
 checkpoint_interval_seconds: 1800

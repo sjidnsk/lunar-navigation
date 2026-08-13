@@ -1432,7 +1432,7 @@ def test_formal_active_episode_resume_only_extends_worker_startup_timeout() -> N
 
 
 def test_formal_calibration_and_training_share_the_runtime_worker_timeout() -> None:
-    assert training_cli._parallel_pool_runtime_timeout_seconds(formal=True) == 120.0
+    assert training_cli._parallel_pool_runtime_timeout_seconds(formal=True) == 1200.0
     assert training_cli._parallel_pool_runtime_timeout_seconds(formal=False) == 60.0
 
 

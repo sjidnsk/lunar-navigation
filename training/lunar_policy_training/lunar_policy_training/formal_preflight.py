@@ -17,7 +17,12 @@ from lunar_model_contract import ObservationContractV3
 from lunar_planner_training_bridge import PlannerBridge
 
 from .checkpoint import CHECKPOINT_SCHEMA_VERSION, RunIdentity
-from .config import PLATFORMS, ROLLOUT_HORIZON_CANDIDATES, WORKER_CANDIDATES
+from .config import (
+    FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
+    FORMAL_WORKER_CANDIDATES,
+    PLATFORMS,
+    ROLLOUT_HORIZON_CANDIDATES,
+)
 from .environment.formal_builder import FormalEnvironmentAssembly
 from .environment.macro_step import PolicyAction
 from .environment.parallel_pool import ParallelActions, ParallelEnvPool
@@ -443,7 +448,7 @@ def _resume_check(assembly: FormalEnvironmentAssembly) -> None:
         observation_template=assembly.observation_template,
         environment_factory=assembly.factory,
         reward_fn=compute_transition_reward,
-        worker_timeout_seconds=60.0,
+        worker_timeout_seconds=FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
     ) as first:
         initial = first.reset()
         candidate_indices = torch.tensor(
@@ -467,7 +472,7 @@ def _resume_check(assembly: FormalEnvironmentAssembly) -> None:
         observation_template=assembly.observation_template,
         environment_factory=assembly.factory,
         reward_fn=compute_transition_reward,
-        worker_timeout_seconds=60.0,
+        worker_timeout_seconds=FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
         initial_episode_states=states,
     ) as resumed:
         resumed_digest = _batch_digest(resumed.reset().observations)
@@ -489,7 +494,7 @@ def _qualify_worker_candidate(
         observation_template=assembly.observation_template,
         environment_factory=assembly.factory,
         reward_fn=compute_transition_reward,
-        worker_timeout_seconds=120.0,
+        worker_timeout_seconds=FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
     ) as pool:
         pool.reset()
     return time.monotonic() - started
@@ -504,7 +509,7 @@ def run_formal_preflight(
     source_commit: str,
     sensor_performance_sha256: str,
     artifact_root: Path,
-    worker_candidates: tuple[int, ...] = WORKER_CANDIDATES,
+    worker_candidates: tuple[int, ...] = FORMAL_WORKER_CANDIDATES,
     selected_workers: int | None = None,
     selected_micro_batch: int = 2,
     selected_rollout_horizon: int = 32,

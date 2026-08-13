@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 from ..curriculum import CurriculumSchedule, PLATFORMS
+from ..config import FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS
 from ..checkpoint import RunIdentity
 from ..environment.parallel_pool import ParallelActions, ParallelEnvPool
 from ..eval.baselines import select_baseline_action
@@ -620,7 +621,7 @@ def formal_evaluation_probe(
                 observation_template=batch.observation_template,
                 environment_factory=batch.factory,
                 reward_fn=_evaluation_reward,
-                worker_timeout_seconds=120.0,
+                worker_timeout_seconds=FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
                 auto_reset=False,
                 initial_episode_cursors=(0, 0, 0),
             ) as pool:
@@ -784,7 +785,7 @@ def _evaluate_formal_chunk(
         observation_template=batch.observation_template,
         environment_factory=batch.factory,
         reward_fn=_evaluation_reward,
-        worker_timeout_seconds=120.0,
+        worker_timeout_seconds=FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
         auto_reset=False,
         initial_episode_cursors=cursors,
     ) as pool:

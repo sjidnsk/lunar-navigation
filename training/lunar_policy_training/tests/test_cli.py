@@ -1489,6 +1489,7 @@ def _write_calibrated_manifest(root: pathlib.Path, *, consumed: float = 12.5) ->
     _freeze_task4_manifest(
         root / "run-manifest.json",
         schedule=CurriculumSchedule(),
+        selected_workers=24,
         reward_hash=reward_weights_sha256(),
         reward_seed_results=(
             {
@@ -1622,14 +1623,15 @@ def test_formal_calibration_manifest_is_non_proxy_and_cache_bound(
                 "schema_version": "lunar-training-run/v1",
                 "frozen_config": config,
                 "runtime_calibration": {
+                    "selection_mode": "operator-fixed/v1",
                     "selected_workers": 24,
-                    "selected_micro_batch": 2,
+                    "selected_micro_batch": 4,
                     "selected_rollout_horizon": 32,
-                    "compared_workers": [18, 24, 30],
+                    "compared_workers": [24],
                     "measurements": [],
-                    "rollout_horizon_candidates": [16, 32, 64],
-                    "horizon_transitions_per_worker": 64,
-                    "horizon_measurements": _formal_horizon_measurements(),
+                    "rollout_horizon_candidates": [],
+                    "horizon_transitions_per_worker": 0,
+                    "horizon_measurements": [],
                 },
                 "consumed_gpu_seconds": 12.5,
                 "budget_extension_blocks": 0,
@@ -1658,6 +1660,7 @@ def test_formal_calibration_manifest_is_non_proxy_and_cache_bound(
     _freeze_task4_manifest(
         root / "run-manifest.json",
         schedule=CurriculumSchedule(),
+        selected_workers=24,
         reward_hash=reward_weights_sha256(),
         reward_seed_results=tuple(
             {
@@ -1681,6 +1684,9 @@ def test_formal_calibration_manifest_is_non_proxy_and_cache_bound(
     )
 
     assert manifest["task4_calibration"]["proxy"] is False
+    assert manifest["task4_calibration"]["curriculum"][
+        "joint_worker_allocation"
+    ] == {"WHEELED": 8, "LEGGED": 8, "HOPPER": 8}
     assert manifest["resume_parent"] is None
     assert manifest["warm_start_parent"] is None
     assert state.run_identity.run_kind == "formal"
@@ -1996,10 +2002,11 @@ def test_resume_continues_latest_and_candidate_rhythms_from_active_gpu_markers()
     assert state.candidate_checkpoint_gpu_seconds == 3600.0
 
 
-def test_training_does_not_start_callbacks_below_bounded_unit_reserve() -> None:
-    """Would fail if the final partial budget launched another rollout/update."""
+def test_training_allows_one_complete_update_with_partial_remaining_budget() -> None:
+    """The final update may finish at a safe boundary without early reservation."""
     budget = TrainingBudget(consumed_gpu_seconds=86400.0 - 600.0 + 1.0)
     events: list[str] = []
+    timestamps = iter((10.0, 609.0))
     loop = TrainingBoundaryLoop(
         budget=budget,
         stop_flag=SignalStopFlag(),
@@ -2008,8 +2015,8 @@ def test_training_does_not_start_callbacks_below_bounded_unit_reserve() -> None:
         curriculum_phase="joint",
         initial_global_step=41,
         initial_latest_checkpoint_gpu_seconds=84000.0,
-        initial_candidate_checkpoint_gpu_seconds=82800.0,
-        clock=lambda: 10.0,
+        initial_candidate_checkpoint_gpu_seconds=84000.0,
+        clock=lambda: next(timestamps),
     )
 
     state = loop.run(
@@ -2021,18 +2028,19 @@ def test_training_does_not_start_callbacks_below_bounded_unit_reserve() -> None:
         max_updates=1,
     )
 
-    assert events == ["save-latest-step-41"]
-    assert state.global_step == 41
+    assert events == ["collect", "update", "save-latest-step-42"]
+    assert state.global_step == 42
     assert state.rollout_discarded is False
     assert state.latest_checkpoint_gpu_seconds == 86400.0
     assert budget.consumed_gpu_seconds == 86400.0
     assert budget.interval_active is False
 
 
-def test_curriculum_phase_returns_before_next_update_could_cross_boundary() -> None:
-    """Would fail if a warmup could consume time reserved for its next phase."""
+def test_curriculum_phase_allows_one_complete_update_to_cross_boundary() -> None:
+    """A long macro action completes before the curriculum switches phases."""
     budget = TrainingBudget(consumed_gpu_seconds=6599.0)
     events: list[str] = []
+    timestamps = iter((10.0, 611.0))
     loop = TrainingBoundaryLoop(
         budget=budget,
         stop_flag=SignalStopFlag(),
@@ -2040,7 +2048,7 @@ def test_curriculum_phase_returns_before_next_update_could_cross_boundary() -> N
         candidate_checkpoint_interval_seconds=3600,
         curriculum_phase="warmup_wheeled",
         phase_end_gpu_seconds=7199.0,
-        clock=lambda: 10.0,
+        clock=lambda: next(timestamps),
     )
 
     state = loop.run(
@@ -2052,9 +2060,9 @@ def test_curriculum_phase_returns_before_next_update_could_cross_boundary() -> N
         max_updates=10,
     )
 
-    assert events == ["save-latest-step-0"]
-    assert state.global_step == 0
-    assert budget.consumed_gpu_seconds == 6599.0
+    assert events == ["collect", "update", "save-latest-step-1"]
+    assert state.global_step == 1
+    assert budget.consumed_gpu_seconds == 7200.0
 
 
 def test_formal_curriculum_invocation_advances_all_phases_without_restart(
@@ -2312,7 +2320,7 @@ def test_run_manifest_records_the_checkpointed_metrics_journal(
 
 
 def test_training_overrun_saves_terminal_latest_after_complete_update() -> None:
-    timestamps = iter((0.0, 600.001))
+    timestamps = iter((0.0, 39000.001))
     events: list[str] = []
     budget = TrainingBudget()
     loop = TrainingBoundaryLoop(

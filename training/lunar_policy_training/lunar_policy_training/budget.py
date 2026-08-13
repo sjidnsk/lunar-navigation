@@ -12,6 +12,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .config import FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS
+
 
 if TYPE_CHECKING:
     from .config import ResolvedTrainingConfig
@@ -22,12 +24,18 @@ BUDGET_EXTENSION_BLOCK_SECONDS = 21600.0
 # Backward-compatible name for the immutable initial limit. Runtime code must
 # use TrainingBudget.total_gpu_seconds for an explicitly extended run.
 TOTAL_GPU_BUDGET_SECONDS = INITIAL_GPU_BUDGET_SECONDS
-# The largest calibration probe performs micro_batch=4 across two bounded
-# pool-step phases at the formal 120-second worker timeout:
-# 4 * 2 * 120 = 960 seconds. The remaining 120 seconds covers policy
+# A legacy measured calibration probe may perform four macro steps across two
+# bounded pool-step phases at the formal 1200-second worker timeout:
+# 4 * 2 * 1200 = 9600 seconds. The remaining 120 seconds covers policy
 # inference, backward/update, and CUDA synchronization.
-CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS = 1080.0
-TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS = 600.0
+CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS = (
+    8.0 * FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS + 120.0
+)
+# A horizon-32 update can legally wait for 32 sequential 1200-second macro
+# actions. The remaining 600 seconds covers the optimizer and synchronization.
+TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS = (
+    32.0 * FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS + 600.0
+)
 ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER = 64
 ROLLOUT_HORIZON_THROUGHPUT_NEAR_TIE_RATIO = 0.99
 
@@ -186,6 +194,68 @@ class CalibrationResult:
     compared_workers: tuple[int, ...]
     measurements: tuple[CalibrationMeasurement, ...]
     horizon_measurements: tuple[HorizonCalibrationMeasurement, ...]
+
+
+def freeze_fixed_runtime_selection(
+    *,
+    config: "ResolvedTrainingConfig",
+    budget: TrainingBudget,
+    manifest_path: str | Path,
+    selected_micro_batch: int = 4,
+) -> CalibrationResult:
+    """Freeze the explicit 24-worker runtime without benchmarking worker tiers."""
+    from .config import ResolvedTrainingConfig
+
+    if not isinstance(config, ResolvedTrainingConfig):
+        raise CalibrationError("fixed runtime requires resolved training config")
+    if config.run_kind != "formal":
+        raise CalibrationError("fixed runtime selection is formal-only")
+    if (
+        config.parallel.worker_candidates != (24,)
+        or config.parallel.preferred_workers != 24
+        or dict(config.parallel.joint_workers)
+        != {"WHEELED": 8, "LEGGED": 8, "HOPPER": 8}
+    ):
+        raise CalibrationError("fixed runtime selection requires 24 workers")
+    if not isinstance(budget, TrainingBudget):
+        raise CalibrationError("fixed runtime requires the run TrainingBudget")
+    if type(selected_micro_batch) is not int or selected_micro_batch <= 0:
+        raise CalibrationError("fixed runtime micro-batch must be positive")
+    target = Path(manifest_path)
+    if not target.is_absolute():
+        raise CalibrationError("run manifest path must be absolute")
+    if target.exists():
+        raise CalibrationError("runtime calibration manifest is already frozen")
+    if not target.parent.is_dir():
+        raise CalibrationError("run manifest parent directory is missing")
+    result = CalibrationResult(
+        selected_workers=24,
+        selected_micro_batch=selected_micro_batch,
+        selected_rollout_horizon=config.ppo.rollout_horizon,
+        compared_workers=(24,),
+        measurements=(),
+        horizon_measurements=(),
+    )
+    payload = {
+        "schema_version": "lunar-training-run/v1",
+        "frozen_config": config.as_frozen_dict(),
+        "runtime_calibration": {
+            "selection_mode": "operator-fixed/v1",
+            "selected_workers": result.selected_workers,
+            "selected_micro_batch": result.selected_micro_batch,
+            "selected_rollout_horizon": result.selected_rollout_horizon,
+            "compared_workers": [24],
+            "measurements": [],
+            "rollout_horizon_candidates": [],
+            "horizon_transitions_per_worker": 0,
+            "horizon_measurements": [],
+        },
+        "consumed_gpu_seconds": budget.consumed_gpu_seconds,
+        "budget_extension_blocks": budget.budget_extension_blocks,
+        "total_gpu_budget_seconds": budget.total_gpu_seconds,
+    }
+    _write_json_atomic_new(target, payload)
+    return result
 
 
 def select_qualified_rollout_horizon(
@@ -730,6 +800,7 @@ __all__ = [
     "ROLLOUT_HORIZON_THROUGHPUT_NEAR_TIE_RATIO",
     "TrainingBudget",
     "calibrate_runtime",
+    "freeze_fixed_runtime_selection",
     "select_qualified_rollout_horizon",
     "extend_budget_manifest",
 ]

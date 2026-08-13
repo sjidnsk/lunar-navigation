@@ -53,16 +53,16 @@ def resolved_config():
     )
 
 
-def test_training_config_calibrates_the_added_thirty_worker_tier(
+def test_formal_training_config_fixes_twenty_four_workers(
     resolved_config,
 ) -> None:
-    """Would fail if the runtime never measured the requested extra workers."""
-    assert resolved_config.parallel.worker_candidates == (18, 24, 30)
-    assert resolved_config.parallel.preferred_workers == 30
+    """Would fail if formal training still launched a worker-tier comparison."""
+    assert resolved_config.parallel.worker_candidates == (24,)
+    assert resolved_config.parallel.preferred_workers == 24
     assert dict(resolved_config.parallel.joint_workers) == {
-        "WHEELED": 10,
-        "LEGGED": 10,
-        "HOPPER": 10,
+        "WHEELED": 8,
+        "LEGGED": 8,
+        "HOPPER": 8,
     }
 
 

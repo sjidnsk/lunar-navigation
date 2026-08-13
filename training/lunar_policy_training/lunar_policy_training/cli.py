@@ -53,6 +53,7 @@ from .budget import (
     TrainingBudget,
     calibrate_runtime,
     extend_budget_manifest,
+    freeze_fixed_runtime_selection,
     select_qualified_rollout_horizon,
 )
 from .checkpoint import (
@@ -72,6 +73,7 @@ from .checkpoint import (
     save_checkpoint_atomic,
 )
 from .config import (
+    FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
     PPOConfig,
     ROLLOUT_HORIZON_CANDIDATES,
     ResolvedTrainingConfig,
@@ -680,22 +682,36 @@ class TrainingBoundaryLoop:
                 return state
             if (
                 self._phase_end_gpu_seconds is not None
-                and self._phase_end_gpu_seconds
-                - self._budget.consumed_gpu_seconds
-                <= TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS
+                and self._budget.consumed_gpu_seconds
+                >= self._phase_end_gpu_seconds
             ):
+                state = self._state(rollout_discarded=False)
+                if (
+                    self._latest_checkpoint_gpu_seconds
+                    != self._budget.consumed_gpu_seconds
+                ):
+                    self._latest_checkpoint_gpu_seconds = (
+                        self._budget.consumed_gpu_seconds
+                    )
+                    state = self._state(rollout_discarded=False)
+                    save_checkpoint("latest", state)
+                return state
+            interval_start = self._clock()
+            if self._budget.remaining_gpu_seconds <= 0.0:
                 self._latest_checkpoint_gpu_seconds = (
                     self._budget.consumed_gpu_seconds
                 )
                 state = self._state(rollout_discarded=False)
                 save_checkpoint("latest", state)
                 return state
-            interval_start = self._clock()
             try:
                 self._budget.begin_gpu_interval(
                     monotonic_seconds=interval_start,
                     upper_bound_gpu_seconds=(
-                        TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS
+                        min(
+                            TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS,
+                            self._budget.remaining_gpu_seconds,
+                        )
                     ),
                 )
             except BudgetExceededError:
@@ -778,9 +794,17 @@ class TrainingBoundaryLoop:
                     state = self._state(rollout_discarded=False)
                     save_checkpoint("latest", state)
                 return state
-        self._latest_checkpoint_gpu_seconds = self._budget.consumed_gpu_seconds
-        state = self._state(rollout_discarded=False)
-        save_checkpoint("latest", state)
+        if (
+            self._latest_checkpoint_gpu_seconds
+            != self._budget.consumed_gpu_seconds
+        ):
+            self._latest_checkpoint_gpu_seconds = (
+                self._budget.consumed_gpu_seconds
+            )
+            state = self._state(rollout_discarded=False)
+            save_checkpoint("latest", state)
+        else:
+            state = self._state(rollout_discarded=False)
         return state
 
     def _state(self, *, rollout_discarded: bool) -> TrainingLoopState:
@@ -893,6 +917,7 @@ def _freeze_task4_manifest(
     path: Path,
     *,
     schedule: CurriculumSchedule,
+    selected_workers: int,
     reward_hash: str,
     reward_seed_results: tuple[dict[str, object], ...],
     proxy: bool = True,
@@ -901,6 +926,12 @@ def _freeze_task4_manifest(
     """Freeze reward, scenario schedule, curriculum and the formal seed."""
     if not isinstance(schedule, CurriculumSchedule):
         raise ArtifactRootError("Task 4 curriculum schedule is invalid")
+    try:
+        joint_allocation = schedule.worker_allocation(
+            "joint", selected_workers=selected_workers
+        )
+    except ValueError as error:
+        raise ArtifactRootError("Task 4 worker selection is invalid") from error
     if len(reward_hash) != 64 or any(
         character not in "0123456789abcdef" for character in reward_hash
     ):
@@ -973,7 +1004,7 @@ def _freeze_task4_manifest(
             "platform_warmup_order": list(schedule.platform_warmup_order),
             "platform_warmup_limit_s": schedule.platform_warmup_limit_s,
             "joint_minimum_s": schedule.joint_minimum_s,
-            "joint_worker_allocation": schedule.joint_worker_allocation,
+            "joint_worker_allocation": joint_allocation,
             "evaluation_interval_s": schedule.evaluation_interval_s,
             "total_gpu_limit_s": schedule.total_gpu_limit_s,
         },
@@ -1002,6 +1033,16 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
     config = resolve_training_config(frozen_config)
     if config.run_kind != run_identity.run_kind:
         raise ArtifactRootError("run manifest kind differs from frozen config")
+    selected_workers = runtime.get("selected_workers")
+    micro_batch_size = runtime.get("selected_micro_batch")
+    selected_rollout_horizon = runtime.get("selected_rollout_horizon")
+    if (
+        type(selected_workers) is not int
+        or type(micro_batch_size) is not int
+        or type(selected_rollout_horizon) is not int
+        or selected_rollout_horizon != config.ppo.rollout_horizon
+    ):
+        raise ArtifactRootError("runtime calibration selection is invalid")
     formal_environment = manifest.get("formal_environment")
     cache_manifest_path: Path | None = None
     cache_manifest_sha256: str | None = None
@@ -1071,7 +1112,9 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
             "platform_warmup_order": list(schedule.platform_warmup_order),
             "platform_warmup_limit_s": schedule.platform_warmup_limit_s,
             "joint_minimum_s": schedule.joint_minimum_s,
-            "joint_worker_allocation": schedule.joint_worker_allocation,
+            "joint_worker_allocation": schedule.worker_allocation(
+                "joint", selected_workers=selected_workers
+            ),
             "evaluation_interval_s": schedule.evaluation_interval_s,
             "total_gpu_limit_s": schedule.total_gpu_limit_s,
         },
@@ -1094,20 +1137,22 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
         or not 0.0 <= float(calibration_end) <= schedule.calibration_limit_s
     ):
         raise ArtifactRootError("Task 4 calibration end is invalid")
-    selected_workers = runtime.get("selected_workers")
-    micro_batch_size = runtime.get("selected_micro_batch")
-    selected_rollout_horizon = runtime.get("selected_rollout_horizon")
-    if (
-        type(selected_workers) is not int
-        or type(micro_batch_size) is not int
-        or type(selected_rollout_horizon) is not int
-        or selected_rollout_horizon != config.ppo.rollout_horizon
-    ):
-        raise ArtifactRootError("runtime calibration selection is invalid")
     horizon_candidates = runtime.get("rollout_horizon_candidates")
     horizon_work = runtime.get("horizon_transitions_per_worker")
     horizon_measurements = runtime.get("horizon_measurements")
-    if config.run_kind == "formal":
+    selection_mode = runtime.get("selection_mode")
+    if config.run_kind == "formal" and selection_mode == "operator-fixed/v1":
+        if (
+            selected_workers != 24
+            or micro_batch_size != 4
+            or runtime.get("compared_workers") != [24]
+            or runtime.get("measurements") != []
+            or horizon_candidates != []
+            or horizon_work != 0
+            or horizon_measurements != []
+        ):
+            raise ArtifactRootError("operator-fixed runtime selection is invalid")
+    elif config.run_kind == "formal":
         if (
             horizon_candidates != list(ROLLOUT_HORIZON_CANDIDATES)
             or horizon_work != ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER
@@ -2078,32 +2123,31 @@ def _calibrate_training_run(
     budget = TrainingBudget(
         total_gpu_seconds=float(config.total_gpu_budget_seconds)
     )
-    workload = _CudaPlannerCalibrationWorkload(
-        config.ppo,
-        environment_factory=(
-            formal_environment_assembly.factory if formal else None
-        ),
-        observation_template=(
-            formal_environment_assembly.observation_template if formal else None
-        ),
-    )
-    try:
-        calibration = calibrate_runtime(
+    if formal:
+        if calibration_micro_batch_candidates is not None:
+            raise PreflightError("fixed formal runtime rejects calibration candidates")
+        calibration = freeze_fixed_runtime_selection(
             config=config,
-            workload=workload,
-            horizon_workload=(
-                workload.measure_rollout_horizon if formal else None
-            ),
             budget=budget,
             manifest_path=root / "run-manifest.json",
-            micro_batch_candidates=(
-                (1, 2, 4)
-                if calibration_micro_batch_candidates is None
-                else calibration_micro_batch_candidates
-            ),
+            selected_micro_batch=4,
         )
-    finally:
-        workload.close()
+    else:
+        workload = _CudaPlannerCalibrationWorkload(config.ppo)
+        try:
+            calibration = calibrate_runtime(
+                config=config,
+                workload=workload,
+                budget=budget,
+                manifest_path=root / "run-manifest.json",
+                micro_batch_candidates=(
+                    (1, 2, 4)
+                    if calibration_micro_batch_candidates is None
+                    else calibration_micro_batch_candidates
+                ),
+            )
+        finally:
+            workload.close()
     config = with_rollout_horizon(
         config,
         calibration.selected_rollout_horizon,
@@ -2179,6 +2223,7 @@ def _calibrate_training_run(
     _freeze_task4_manifest(
         root / "run-manifest.json",
         schedule=schedule,
+        selected_workers=calibration.selected_workers,
         reward_hash=reward_weights_sha256(),
         reward_seed_results=tuple(reward_results),
         proxy=not formal,
@@ -2995,7 +3040,7 @@ def _parallel_pool_startup_timeout_seconds(
 
 def _parallel_pool_runtime_timeout_seconds(*, formal: bool) -> float:
     """Keep formal calibration and training on one runtime timeout contract."""
-    return 120.0 if formal else 60.0
+    return FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS if formal else 60.0
 
 
 def _run_updates(
@@ -3498,7 +3543,7 @@ def _formal_resume_equivalence_check(
             observation_template=assembly.observation_template,
             environment_factory=assembly.factory,
             reward_fn=compute_transition_reward,
-            worker_timeout_seconds=120.0,
+            worker_timeout_seconds=FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
             initial_episode_states=initial_states,
         )
         environment = _ParallelPoolVectorEnv(pool, policy_version=policy_version)

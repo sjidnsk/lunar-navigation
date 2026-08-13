@@ -12,7 +12,9 @@ import yaml
 
 PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
 WORKER_CANDIDATES = (18, 24, 30)
+FORMAL_WORKER_CANDIDATES = (24,)
 ROLLOUT_HORIZON_CANDIDATES = (16, 32, 64)
+FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS = 1200.0
 TASK_AREA_SAMPLING_ALGORITHM = "deterministic-uniform-square/v1"
 _CONFIG_FIELDS = {
     "parallel",
@@ -301,10 +303,20 @@ def resolve_training_config(raw: Mapping[str, object]) -> ResolvedTrainingConfig
 
 def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
     validate_ppo_config(config.ppo)
+    if config.run_kind == "formal":
+        worker_candidates = FORMAL_WORKER_CANDIDATES
+        preferred_workers = 24
+        joint_workers = {"WHEELED": 8, "LEGGED": 8, "HOPPER": 8}
+    elif config.run_kind == "development-smoke":
+        worker_candidates = WORKER_CANDIDATES
+        preferred_workers = 30
+        joint_workers = {"WHEELED": 10, "LEGGED": 10, "HOPPER": 10}
+    else:
+        raise TrainingConfigError("run kind must be formal or development-smoke")
     expected = {
-        "worker_candidates": WORKER_CANDIDATES,
-        "preferred_workers": 30,
-        "joint_workers": {"WHEELED": 10, "LEGGED": 10, "HOPPER": 10},
+        "worker_candidates": worker_candidates,
+        "preferred_workers": preferred_workers,
+        "joint_workers": joint_workers,
         "nested_compute_threads": 1,
         "gpu_memory_fraction_max": 0.90,
         "checkpoint_interval_seconds": 1800,
@@ -337,8 +349,6 @@ def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
     }
     if actual != expected:
         raise TrainingConfigError("training config changes a frozen Task 3 value")
-    if config.run_kind not in ("formal", "development-smoke"):
-        raise TrainingConfigError("run kind must be formal or development-smoke")
 
 
 def validate_ppo_config(config: PPOConfig) -> PPOConfig:
@@ -423,6 +433,8 @@ def _string(value: object, name: str) -> str:
 
 
 __all__ = [
+    "FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS",
+    "FORMAL_WORKER_CANDIDATES",
     "PLATFORMS",
     "TASK_AREA_SAMPLING_ALGORITHM",
     "ParallelConfig",
