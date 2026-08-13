@@ -14,6 +14,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "model_contract"))
 
 from lunar_policy_training.budget import (  # noqa: E402
     BUDGET_EXTENSION_BLOCK_SECONDS,
+    CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS,
     INITIAL_GPU_BUDGET_SECONDS,
     BudgetError,
     BudgetExceededError,
@@ -37,6 +38,10 @@ def test_training_budget_uses_fixed_total_and_rejects_overspend() -> None:
     with pytest.raises(BudgetExceededError, match="remaining"):
         budget.consume(1.001)
     assert budget.remaining_gpu_seconds == 0.0
+
+
+def test_calibration_probe_reserve_covers_the_formal_worker_timeout() -> None:
+    assert CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS == 1080.0
 
 
 def test_active_gpu_intervals_exclude_paused_wall_clock() -> None:

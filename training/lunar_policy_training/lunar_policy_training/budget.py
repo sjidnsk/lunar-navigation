@@ -23,10 +23,10 @@ BUDGET_EXTENSION_BLOCK_SECONDS = 21600.0
 # use TrainingBudget.total_gpu_seconds for an explicitly extended run.
 TOTAL_GPU_BUDGET_SECONDS = INITIAL_GPU_BUDGET_SECONDS
 # The largest calibration probe performs micro_batch=4 across two bounded
-# pool-step phases at a 60-second worker timeout: 4 * 2 * 60 = 480 seconds.
-# The remaining 120 seconds covers policy inference, backward/update, and CUDA
-# synchronization. Training uses the same conservative complete-update bound.
-CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS = 600.0
+# pool-step phases at the formal 120-second worker timeout:
+# 4 * 2 * 120 = 960 seconds. The remaining 120 seconds covers policy
+# inference, backward/update, and CUDA synchronization.
+CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS = 1080.0
 TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS = 600.0
 ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER = 64
 ROLLOUT_HORIZON_THROUGHPUT_NEAR_TIE_RATIO = 0.99

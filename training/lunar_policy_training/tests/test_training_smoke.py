@@ -1431,6 +1431,11 @@ def test_formal_active_episode_resume_only_extends_worker_startup_timeout() -> N
     assert training_cli._parallel_pool_startup_timeout_seconds(({},)) == 600.0
 
 
+def test_formal_calibration_and_training_share_the_runtime_worker_timeout() -> None:
+    assert training_cli._parallel_pool_runtime_timeout_seconds(formal=True) == 120.0
+    assert training_cli._parallel_pool_runtime_timeout_seconds(formal=False) == 60.0
+
+
 def test_formal_seed_enables_exact_cuda_replay_algorithms() -> None:
     training_cli._seed_everything(4080)
 

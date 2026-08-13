@@ -2214,7 +2214,9 @@ def _formal_reward_seed_results(
                 observation_template=observation_template,
                 environment_factory=factory,
                 reward_fn=compute_transition_reward,
-                worker_timeout_seconds=60.0,
+                worker_timeout_seconds=_parallel_pool_runtime_timeout_seconds(
+                    formal=True
+                ),
             )
             environment = _ParallelPoolVectorEnv(pool, policy_version=seed)
             collected = collect_ppo_rollout(
@@ -2990,6 +2992,11 @@ def _parallel_pool_startup_timeout_seconds(
     return 600.0 if initial_episode_states is not None else 60.0
 
 
+def _parallel_pool_runtime_timeout_seconds(*, formal: bool) -> float:
+    """Keep formal calibration and training on one runtime timeout contract."""
+    return 120.0 if formal else 60.0
+
+
 def _run_updates(
     *,
     config: ResolvedTrainingConfig,
@@ -3100,7 +3107,9 @@ def _run_updates(
         observation_template=observation_template,
         environment_factory=environment_factory,
         reward_fn=reward_fn,
-        worker_timeout_seconds=120.0,
+        worker_timeout_seconds=_parallel_pool_runtime_timeout_seconds(
+            formal=config.run_kind == "formal"
+        ),
         worker_startup_timeout_seconds=(
             _parallel_pool_startup_timeout_seconds(initial_episode_states)
         ),
@@ -3914,7 +3923,9 @@ class _CudaPlannerCalibrationWorkload:
                 observation_template=self._observation_template,
                 environment_factory=self._environment_factory,
                 reward_fn=compute_transition_reward,
-                worker_timeout_seconds=60.0,
+                worker_timeout_seconds=_parallel_pool_runtime_timeout_seconds(
+                    formal=True
+                ),
             )
             environment = _ParallelPoolVectorEnv(pool, policy_version=0)
             environment.reset()
@@ -3990,7 +4001,9 @@ class _CudaPlannerCalibrationWorkload:
                 observation_template=self._observation_template,
                 environment_factory=self._environment_factory,
                 reward_fn=compute_transition_reward,
-                worker_timeout_seconds=60.0,
+                worker_timeout_seconds=_parallel_pool_runtime_timeout_seconds(
+                    formal=True
+                ),
                 initial_episode_states=states,
             )
             restored = resumed_pool.reset().observations
@@ -4085,7 +4098,9 @@ class _CudaPlannerCalibrationWorkload:
                 else proxy_environment_factory
             ),
             reward_fn=compute_transition_reward,
-            worker_timeout_seconds=60.0,
+            worker_timeout_seconds=_parallel_pool_runtime_timeout_seconds(
+                formal=self._formal
+            ),
         )
         self._environment = _ParallelPoolVectorEnv(
             self._pool, policy_version=self._policy_version
