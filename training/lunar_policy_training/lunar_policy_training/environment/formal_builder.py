@@ -550,6 +550,7 @@ class FormalEpisode:
         ) = None
         self.last_hop_available_delta_v_mps = 0.0
         self._reveal_history: list[FormalRevealState] = []
+        self._replay_event_kinds: list[str] = []
         self._visited_candidate_cells = {start_cell}
         self._navigation_stack = [self.current_pose]
         self._visited_candidate_filter_enabled = visited_candidate_filter_enabled
@@ -643,6 +644,7 @@ class FormalEpisode:
                 defer_candidate_rebuild=defer_candidate_rebuild,
             )
         )
+        self._replay_event_kinds.append("REVEAL")
 
     def replay_state(self, state: FormalWorkerState) -> None:
         """Replay physical evidence and verify every persisted boundary identity."""
@@ -681,23 +683,41 @@ class FormalEpisode:
         if self._active_ground_option is not None:
             raise ValueError("formal replay cannot contain an active ground option")
 
-        expired_failure_rebuilds = (
-            state.observation_revision
-            - len(state.reveal_history)
-            - 1
-            - len(state.planner_failed_candidate_ids)
+        reveal_index = 0
+        last_reveal_index = max(
+            (
+                index
+                for index, kind in enumerate(state.replay_event_kinds)
+                if kind == "REVEAL"
+            ),
+            default=-1,
         )
-        for _ in range(expired_failure_rebuilds):
-            execution_state = (
-                self.controller.current_observation.observation_identities[0]
-                .execution_state
-            )
-            self.controller.rebuild_without_sensor_update(
-                pose_map=self.current_pose,
-                execution_state=execution_state,
-            )
-
-        for reveal in state.reveal_history:
+        active_failure_ids = iter(state.planner_failed_candidate_ids)
+        for event_index, event_kind in enumerate(state.replay_event_kinds):
+            if event_kind != "REVEAL":
+                if (
+                    event_kind == "PLANNING_FAILURE_SUPPRESS"
+                    and event_index > last_reveal_index
+                ):
+                    candidate_id = next(active_failure_ids)
+                    self.refresh_after_planning_failure(
+                        candidate_id,
+                        bridge_api.CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+                        self._snapshot.planning_physical_snapshot_id,
+                    )
+                    continue
+                execution_state = (
+                    self.controller.current_observation.observation_identities[0]
+                    .execution_state
+                )
+                self.controller.rebuild_without_sensor_update(
+                    pose_map=self.current_pose,
+                    execution_state=execution_state,
+                )
+                self._replay_event_kinds.append(event_kind)
+                continue
+            reveal = state.reveal_history[reveal_index]
+            reveal_index += 1
             pose = self._pose_from_state(reveal.pose)
             evidence = SensorBoundaryEvidence(
                 pose,
@@ -728,12 +748,6 @@ class FormalEpisode:
             raise ValueError("formal replay produced no physical snapshot")
         if snapshot.candidate_universe.physical_snapshot_id != state.physical_snapshot_id:
             raise ValueError("formal replay physical snapshot differs")
-        for candidate_id in state.planner_failed_candidate_ids:
-            self.refresh_after_planning_failure(
-                candidate_id,
-                bridge_api.CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
-                state.physical_snapshot_id,
-            )
 
         self.last_hop_available_delta_v_mps = (
             state.last_hop_available_delta_v_mps
@@ -861,6 +875,7 @@ class FormalEpisode:
             planner_failed_candidate_ids=failed_ids,
             state_time_ns=identity.state_time_ns,
             reveal_history=tuple(self._reveal_history),
+            replay_event_kinds=tuple(self._replay_event_kinds),
             observation_identity=identity,
             policy_batch_sha256=policy_batch_sha256(observation),
             candidate_ids=tuple(
@@ -1427,10 +1442,18 @@ class FormalEpisode:
             self.controller.current_observation.observation_identities[0]
             .execution_state
         )
-        return self.controller.rebuild_without_sensor_update(
+        before_failed_ids = set(self._planner_failed_candidate_ids)
+        rebuilt = self.controller.rebuild_without_sensor_update(
             pose_map=self.current_pose,
             execution_state=execution_state,
         )
+        event_kind = (
+            "PLANNING_FAILURE_SUPPRESS"
+            if self._planner_failed_candidate_ids != before_failed_ids
+            else "PLANNING_FAILURE_REBUILD"
+        )
+        self._replay_event_kinds.append(event_kind)
+        return rebuilt
 
     def execute_reference(self, reference: object) -> ReferenceExecutionResult:
         if not isinstance(reference, bridge_api.MotionReference):

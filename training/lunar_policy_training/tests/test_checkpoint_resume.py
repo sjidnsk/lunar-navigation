@@ -242,6 +242,7 @@ def _formal_worker_state(index: int) -> dict[str, object]:
         "planner_failed_candidate_ids": [],
         "state_time_ns": 1_000_000_000,
         "reveal_history": [],
+        "replay_event_kinds": [],
         "observation_identity": {
             "episode_id": episode_id,
             "mission_revision": 1,
@@ -303,7 +304,7 @@ def _policy_parent_checkpoint(
         candidate_checkpoint_gpu_seconds=7200.0,
         environment_state=(
             {
-                "schema_version": "lunar-formal-environment-state/v7",
+                "schema_version": "lunar-formal-environment-state/v8",
                 "scenario_schedule_id": "cache-sha/train/v3",
                 "worker_episode_states": [
                     _formal_worker_state(index) for index in range(24)
@@ -483,7 +484,7 @@ def test_formal_checkpoint_roundtrips_exact_active_worker_states(
     tmp_path: pathlib.Path,
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v7",
+        "schema_version": "lunar-formal-environment-state/v8",
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)
@@ -510,11 +511,11 @@ def test_formal_checkpoint_roundtrips_exact_active_worker_states(
     assert resumed.environment_state == environment_state
 
 
-def test_checkpoint_rejects_formal_v6_environment_state(
+def test_checkpoint_rejects_formal_v7_environment_state(
     tmp_path: pathlib.Path,
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v7",
+        "schema_version": "lunar-formal-environment-state/v8",
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)
@@ -528,9 +529,9 @@ def test_checkpoint_rejects_formal_v6_environment_state(
     )
     body = _body_from_checkpoint(checkpoint)
     body["environment_state"]["schema_version"] = (
-        "lunar-formal-environment-state/v6"
+        "lunar-formal-environment-state/v7"
     )
-    path = tmp_path / "formal-v6.pt"
+    path = tmp_path / "formal-v7.pt"
     torch.save(
         {"body": body, "body_sha256": _semantic_sha256(body)},
         path,
@@ -544,7 +545,7 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v7",
+        "schema_version": "lunar-formal-environment-state/v8",
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)

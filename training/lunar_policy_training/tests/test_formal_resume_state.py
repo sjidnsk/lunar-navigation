@@ -93,6 +93,7 @@ def _worker_state() -> dict[str, object]:
                 "defer_candidate_rebuild": False,
             }
         ],
+        "replay_event_kinds": ["REVEAL"],
         "observation_identity": identity,
         "policy_batch_sha256": "2" * 64,
         "candidate_ids": candidate_ids,
@@ -180,7 +181,7 @@ def test_formal_worker_state_roundtrips_as_strict_json() -> None:
     state = FormalWorkerState.from_dict(payload)
 
     assert FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION == (
-        "lunar-formal-environment-state/v7"
+        "lunar-formal-environment-state/v8"
     )
     assert state.to_dict() == payload
     assert state.episode_cursor == 4
@@ -198,6 +199,7 @@ def test_formal_worker_state_roundtrips_as_strict_json() -> None:
         "physical_evidence_sha256",
         "physical_candidate_universe_sha256",
         "planner_failed_candidate_ids",
+        "replay_event_kinds",
         "defer_candidate_rebuild",
     ),
 )
@@ -304,6 +306,12 @@ def test_physical_worker_replay_preserves_failure_before_later_reveal(
         for index in np.flatnonzero(initial_snapshot.candidates.mask)[:3]
     )
     assert len(candidate_ids) == 3
+    kept = episode.refresh_after_planning_failure(
+        candidate_ids[0],
+        CandidateDisposition.KEEP,
+        initial_snapshot.planning_physical_snapshot_id,
+    )
+    worker.environment._install_observation(kept.next_observation)
     for candidate_id in candidate_ids:
         refreshed = episode.refresh_after_planning_failure(
             candidate_id,
@@ -324,6 +332,13 @@ def test_physical_worker_replay_preserves_failure_before_later_reveal(
     assert snapshot is not None
     assert episode._planner_failed_candidate_ids == set()
     state = FormalWorkerState.from_dict(worker.snapshot_episode_state())
+    assert state.replay_event_kinds == (
+        "PLANNING_FAILURE_REBUILD",
+        "PLANNING_FAILURE_SUPPRESS",
+        "PLANNING_FAILURE_SUPPRESS",
+        "PLANNING_FAILURE_SUPPRESS",
+        "REVEAL",
+    )
     restored = assembly.factory.restore_for_episode(
         worker_index=0,
         platform_type="WHEELED",

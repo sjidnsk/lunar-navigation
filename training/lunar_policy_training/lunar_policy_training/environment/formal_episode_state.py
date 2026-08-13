@@ -12,7 +12,7 @@ import torch
 from ..policy.observation import ObservationIdentity, PolicyBatch
 
 
-FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION = "lunar-formal-environment-state/v7"
+FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION = "lunar-formal-environment-state/v8"
 STABLE_EXECUTION_STATES = frozenset(
     {"DECISION_BOUNDARY", "GROUND_HOLD", "LANDED_HOLD"}
 )
@@ -67,6 +67,7 @@ _WORKER_FIELDS = frozenset(
         "planner_failed_candidate_ids",
         "state_time_ns",
         "reveal_history",
+        "replay_event_kinds",
         "observation_identity",
         "policy_batch_sha256",
         "candidate_ids",
@@ -309,6 +310,7 @@ class FormalWorkerState:
     planner_failed_candidate_ids: tuple[str, ...]
     state_time_ns: int
     reveal_history: tuple[FormalRevealState, ...]
+    replay_event_kinds: tuple[str, ...]
     observation_identity: ObservationIdentity
     policy_batch_sha256: str
     candidate_ids: tuple[str, ...]
@@ -359,6 +361,21 @@ class FormalWorkerState:
         if not isinstance(history_value, list):
             raise ValueError("formal reveal history structure is invalid")
         history = tuple(FormalRevealState.from_dict(item) for item in history_value)
+        event_kinds_value = value["replay_event_kinds"]
+        if (
+            not isinstance(event_kinds_value, list)
+            or any(
+                item
+                not in {
+                    "REVEAL",
+                    "PLANNING_FAILURE_REBUILD",
+                    "PLANNING_FAILURE_SUPPRESS",
+                }
+                for item in event_kinds_value
+            )
+        ):
+            raise ValueError("formal replay event order is invalid")
+        replay_event_kinds = tuple(event_kinds_value)
         revision = _nonnegative_int(
             value["observation_revision"], "observation revision"
         )
@@ -370,8 +387,23 @@ class FormalWorkerState:
             or failed_value != sorted(set(failed_value))
         ):
             raise ValueError("formal planner failed candidate IDs are invalid")
-        minimum_revision = len(history) + len(failed_value) + 1
-        if revision < minimum_revision:
+        last_reveal_index = max(
+            (
+                index
+                for index, kind in enumerate(replay_event_kinds)
+                if kind == "REVEAL"
+            ),
+            default=-1,
+        )
+        active_failure_count = sum(
+            kind == "PLANNING_FAILURE_SUPPRESS"
+            for kind in replay_event_kinds[last_reveal_index + 1 :]
+        )
+        if (
+            replay_event_kinds.count("REVEAL") != len(history)
+            or active_failure_count != len(failed_value)
+            or revision != len(replay_event_kinds) + 1
+        ):
             raise ValueError(
                 "formal observation revision does not match replay history"
             )
@@ -486,6 +518,7 @@ class FormalWorkerState:
             planner_failed_candidate_ids=tuple(failed_value),
             state_time_ns=state_time_ns,
             reveal_history=history,
+            replay_event_kinds=replay_event_kinds,
             observation_identity=identity,
             policy_batch_sha256=_sha256(
                 value["policy_batch_sha256"], "policy batch digest"
@@ -532,6 +565,7 @@ class FormalWorkerState:
             ),
             "state_time_ns": self.state_time_ns,
             "reveal_history": [item.to_dict() for item in self.reveal_history],
+            "replay_event_kinds": list(self.replay_event_kinds),
             "observation_identity": observation_identity_to_dict(
                 self.observation_identity
             ),
