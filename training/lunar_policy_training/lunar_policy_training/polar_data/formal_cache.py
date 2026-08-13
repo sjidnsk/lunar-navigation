@@ -223,6 +223,15 @@ def _ordered_bounded_process_map(
             pending.append(executor.submit(worker, item))
 
 
+def _scene_process_worker_count(*, cpu_count: int, scene_count: int) -> int:
+    """Use one process per three platform threads without unbounded fan-out."""
+    if type(cpu_count) is not int or cpu_count < 1:
+        raise ValueError("CPU count must be a positive integer")
+    if type(scene_count) is not int or scene_count < 1:
+        raise ValueError("scene count must be a positive integer")
+    return min(scene_count, max(1, min(12, cpu_count // len(_PLATFORMS))))
+
+
 def _formal_platform_eligibility_ready(
     materialization: str,
     platform_counts: Mapping[str, Mapping[str, Mapping[str, int]]],
@@ -2030,6 +2039,9 @@ def _detail_intrinsic_projection(
     projected: object,
     bridge: object,
 ) -> np.ndarray:
+    valid = np.asarray(projected.valid_mask, dtype=np.bool_)
+    if not valid.any():
+        return np.zeros(valid.shape, dtype=np.bool_)
     output = bridge.project_traversability(
         _projection_request(platform, scene, projected)
     )
@@ -2845,10 +2857,9 @@ def prepare_formal_training_cache(
             for scenario in selected
         )
 
-        cpu_count = os.cpu_count() or 1
-        worker_count = min(
-            len(selected),
-            max(1, min(8, cpu_count // len(_PLATFORMS))),
+        worker_count = _scene_process_worker_count(
+            cpu_count=os.cpu_count() or 1,
+            scene_count=len(selected),
         )
         payloads = _ordered_bounded_process_map(
             work_items,

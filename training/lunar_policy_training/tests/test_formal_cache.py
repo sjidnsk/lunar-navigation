@@ -46,6 +46,7 @@ from lunar_policy_training.polar_data.formal_cache import (
     _formal_platform_eligibility_ready,
     _ordered_bounded_process_map,
     _parallel_platform_map,
+    _scene_process_worker_count,
     _selected_scenarios,
     load_formal_cache,
     platform_scenario_schedule_id,
@@ -702,6 +703,13 @@ def test_bounded_process_map_yields_source_order() -> None:
     assert result == [3, 1, 2]
 
 
+def test_scene_process_workers_fill_the_host_without_oversubscription() -> None:
+    assert _scene_process_worker_count(cpu_count=28, scene_count=128) == 9
+    assert _scene_process_worker_count(cpu_count=36, scene_count=128) == 12
+    assert _scene_process_worker_count(cpu_count=192, scene_count=128) == 12
+    assert _scene_process_worker_count(cpu_count=28, scene_count=4) == 4
+
+
 def test_bounded_process_map_returns_picklable_v6_materialization_payload() -> None:
     payload = list(
         _ordered_bounded_process_map(
@@ -1026,6 +1034,29 @@ def test_projection_request_binds_canonical_exact_hopper_start() -> None:
                 exact_start[2],
             ),
         )
+
+
+def test_detail_intrinsic_projection_skips_a_fully_unobserved_tile() -> None:
+    shape = (258, 258)
+    projected = SimpleNamespace(
+        valid_mask=np.zeros(shape, dtype=np.bool_),
+    )
+
+    class Bridge:
+        def project_traversability(self, _request: object) -> object:
+            raise AssertionError("an empty truth tile must not reach the planner bridge")
+
+    intrinsic = formal_cache_module._detail_intrinsic_projection(
+        platform=object(),
+        scene=object(),
+        projected=projected,
+        bridge=Bridge(),
+    )
+
+    assert intrinsic.dtype == np.dtype(np.bool_)
+    assert intrinsic.shape == shape
+    assert intrinsic.flags.c_contiguous
+    assert not intrinsic.any()
 
 
 def test_ground_coverability_keeps_physical_positions_outside_mission_roi(
