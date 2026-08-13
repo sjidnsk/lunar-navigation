@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import pathlib
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -11,6 +11,7 @@ from lunar_policy_training.checkpoint import RunIdentity
 from lunar_policy_training.formal_preflight import (
     REQUIRED_PREFLIGHT_CHECKS,
     FormalPreflightError,
+    _direct_environment_checks,
     build_formal_preflight_report,
     write_formal_preflight_report,
 )
@@ -49,6 +50,97 @@ def _resume_equivalence() -> dict[str, object]:
         "resumed_update": 2,
         "evidence_sha256": "e" * 64,
     }
+
+
+def test_direct_checks_use_exact_common_training_world(monkeypatch) -> None:
+    scene_id = "f" * 64
+    common_schedule_id = "common/train/v1"
+    calls: list[tuple[str, bool, object]] = []
+
+    class Worker:
+        episode = type("Episode", (), {"scene_id": scene_id})()
+
+    @dataclass(frozen=True)
+    class Builder:
+        scenario_schedule_id: str
+        paired_evaluation: bool
+        platform_scenario_schedule_ids: object
+
+    @dataclass(frozen=True)
+    class Factory:
+        scenario_schedule_id: str
+        builder: Builder
+
+        def create_for_episode(
+            self,
+            worker_index,
+            platform,
+            episode_cursor,
+            *,
+            platform_worker_index,
+            platform_worker_count,
+        ):
+            calls.append(
+                (
+                    platform,
+                    self.builder.paired_evaluation,
+                    self.builder.platform_scenario_schedule_ids,
+                )
+            )
+            return Worker()
+
+    factory = Factory(
+        scenario_schedule_id="combined/train/v1",
+        builder=Builder(
+            scenario_schedule_id="combined/train/v1",
+            paired_evaluation=False,
+            platform_scenario_schedule_ids={
+                platform: f"platform/{platform.lower()}"
+                for platform in ("WHEELED", "LEGGED", "HOPPER")
+            },
+        ),
+    )
+    assembly = type("Assembly", (), {"factory": factory})()
+    cache = type(
+        "Cache",
+        (),
+        {
+            "manifest": {
+                "exact_common_evaluation": {
+                    "splits": {
+                        "train": {
+                            "scenario_schedule_id": common_schedule_id,
+                            "scene_ids": [scene_id],
+                        }
+                    }
+                },
+                "scenes": [
+                    {
+                        "split": "train",
+                        "platform_coverability": {
+                            "HOPPER": {"eligible": True}
+                        },
+                    }
+                ],
+            }
+        },
+    )()
+
+    monkeypatch.setattr(
+        "lunar_policy_training.formal_preflight._first_action",
+        lambda worker, platform: (_ for _ in ()).throw(
+            RuntimeError("past scene check")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="past scene check"):
+        _direct_environment_checks(cache, assembly)
+
+    assert calls == [
+        ("WHEELED", True, None),
+        ("LEGGED", True, None),
+        ("HOPPER", True, None),
+    ]
+    assert factory.builder.scenario_schedule_id == "combined/train/v1"
 
 
 def test_preflight_report_is_canonical_non_proxy_and_records_real_v9_resume(

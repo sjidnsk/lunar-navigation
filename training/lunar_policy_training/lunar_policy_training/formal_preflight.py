@@ -7,7 +7,7 @@ import json
 import math
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -367,8 +367,33 @@ def _first_action(worker: object, platform: str) -> tuple[PolicyAction, object]:
 def _direct_environment_checks(
     cache: FormalCache, assembly: FormalEnvironmentAssembly
 ) -> dict[str, object]:
+    common_train = cache.manifest.get("exact_common_evaluation", {}).get(
+        "splits", {}
+    ).get("train")
+    if not isinstance(common_train, Mapping) or not isinstance(
+        common_train.get("scenario_schedule_id"), str
+    ):
+        raise FormalPreflightError(
+            "formal exact-common training inventory is invalid"
+        )
+    try:
+        builder = replace(
+            assembly.factory.builder,
+            paired_evaluation=True,
+            platform_scenario_schedule_ids=None,
+            scenario_schedule_id=str(common_train["scenario_schedule_id"]),
+        )
+        common_factory = replace(
+            assembly.factory,
+            scenario_schedule_id=str(common_train["scenario_schedule_id"]),
+            builder=builder,
+        )
+    except TypeError as error:
+        raise FormalPreflightError(
+            "formal train factory cannot select a common world"
+        ) from error
     workers = {
-        platform: assembly.factory.create_for_episode(
+        platform: common_factory.create_for_episode(
             0,
             platform,
             0,
@@ -411,11 +436,18 @@ def _direct_environment_checks(
         request_hashes[platform] = first_hash
         planner_hashes[platform] = first_planner_hash
 
-    train_count = sum(
-        entry.get("split") == "train" for entry in cache.manifest["scenes"]
+    hopper_train_count = sum(
+        entry.get("split") == "train"
+        and entry.get("platform_coverability", {})
+        .get("HOPPER", {})
+        .get("eligible")
+        is True
+        for entry in cache.manifest["scenes"]
     )
+    if hopper_train_count <= 0:
+        raise FormalPreflightError("formal Hopper training inventory is empty")
     hopper_available: list[float] = []
-    for cursor in (0, train_count):
+    for cursor in (0, hopper_train_count):
         worker = assembly.factory.create_for_episode(
             0,
             "HOPPER",
