@@ -14,6 +14,10 @@ PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
 WORKER_CANDIDATES = (18, 24, 30)
 FORMAL_WORKER_CANDIDATES = (24,)
 ROLLOUT_HORIZON_CANDIDATES = (16, 32, 64)
+FORMAL_ROLLOUT_HORIZON = 12
+SUPPORTED_ROLLOUT_HORIZONS = (
+    FORMAL_ROLLOUT_HORIZON,
+) + ROLLOUT_HORIZON_CANDIDATES
 FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS = 1200.0
 TASK_AREA_SAMPLING_ALGORITHM = "deterministic-uniform-square/v1"
 _CONFIG_FIELDS = {
@@ -307,10 +311,16 @@ def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
         worker_candidates = FORMAL_WORKER_CANDIDATES
         preferred_workers = 24
         joint_workers = {"WHEELED": 8, "LEGGED": 8, "HOPPER": 8}
+        rollout_horizon = FORMAL_ROLLOUT_HORIZON
     elif config.run_kind == "development-smoke":
         worker_candidates = WORKER_CANDIDATES
         preferred_workers = 30
         joint_workers = {"WHEELED": 10, "LEGGED": 10, "HOPPER": 10}
+        rollout_horizon = config.ppo.rollout_horizon
+        if rollout_horizon not in ROLLOUT_HORIZON_CANDIDATES:
+            raise TrainingConfigError(
+                "development rollout horizon must be a calibrated candidate"
+            )
     else:
         raise TrainingConfigError("run kind must be formal or development-smoke")
     expected = {
@@ -323,6 +333,7 @@ def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
         "candidate_checkpoint_interval_seconds": 3600,
         "total_gpu_budget_seconds": 86400,
         "formal_training_seeds": (4080,),
+        "rollout_horizon": rollout_horizon,
         "task_area": (
             100.0,
             500.0,
@@ -341,6 +352,7 @@ def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
         ),
         "total_gpu_budget_seconds": config.total_gpu_budget_seconds,
         "formal_training_seeds": config.formal_training_seeds,
+        "rollout_horizon": config.ppo.rollout_horizon,
         "task_area": (
             config.task_area.minimum_size_m,
             config.task_area.maximum_size_m,
@@ -365,9 +377,9 @@ def validate_ppo_config(config: PPOConfig) -> PPOConfig:
             raise TrainingConfigError(f"PPO field {field} changes a frozen value")
     if type(config.rollout_horizon) is not int:
         raise TrainingConfigError("PPO field rollout_horizon must have exact type int")
-    if config.rollout_horizon not in ROLLOUT_HORIZON_CANDIDATES:
+    if config.rollout_horizon not in SUPPORTED_ROLLOUT_HORIZONS:
         raise TrainingConfigError(
-            "PPO rollout horizon must be one of the calibrated candidates"
+            "PPO rollout horizon must be a supported formal or calibrated value"
         )
     return config
 
@@ -433,6 +445,7 @@ def _string(value: object, name: str) -> str:
 
 
 __all__ = [
+    "FORMAL_ROLLOUT_HORIZON",
     "FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS",
     "FORMAL_WORKER_CANDIDATES",
     "PLATFORMS",

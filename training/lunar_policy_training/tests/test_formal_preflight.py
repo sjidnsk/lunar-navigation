@@ -68,7 +68,7 @@ def test_preflight_report_is_canonical_non_proxy_and_records_real_v9_resume(
         qualified_worker_candidates=(18, 24),
         selected_workers=24,
         selected_micro_batch=2,
-        selected_rollout_horizon=32,
+        selected_rollout_horizon=12,
         evaluation_probe_sha256="d" * 64,
         resume_equivalence=_resume_equivalence(),
         additional_corridor_margin_m=2.0,
@@ -82,8 +82,8 @@ def test_preflight_report_is_canonical_non_proxy_and_records_real_v9_resume(
     assert payload["proxy"] is False
     assert payload["training_started"] is False
     assert payload["selected_workers"] == 24
-    assert payload["rollout_horizon_candidates"] == [16, 32, 64]
-    assert payload["selected_rollout_horizon"] == 32
+    assert payload["rollout_horizon_candidates"] == [12]
+    assert payload["selected_rollout_horizon"] == 12
     assert payload["episode_decision_limit"] is None
     assert payload["schema_version"] == "lunar-formal-training-preflight/v6"
     assert payload["evaluation_probe_sha256"] == "d" * 64
@@ -113,7 +113,7 @@ def test_preflight_report_rejects_an_unclosed_required_check() -> None:
             qualified_worker_candidates=(18,),
             selected_workers=18,
             selected_micro_batch=1,
-            selected_rollout_horizon=32,
+            selected_rollout_horizon=12,
             evaluation_probe_sha256="d" * 64,
             resume_equivalence=_resume_equivalence(),
             additional_corridor_margin_m=2.0,
@@ -139,7 +139,7 @@ def test_preflight_report_rejects_claimed_resume_without_exact_update_two() -> N
             qualified_worker_candidates=(18,),
             selected_workers=18,
             selected_micro_batch=1,
-            selected_rollout_horizon=32,
+            selected_rollout_horizon=12,
             evaluation_probe_sha256="d" * 64,
             resume_equivalence=resume,
             additional_corridor_margin_m=2.0,
@@ -175,7 +175,7 @@ def test_formal_preflight_rejects_semantics_v10() -> None:
             qualified_worker_candidates=(18,),
             selected_workers=18,
             selected_micro_batch=1,
-            selected_rollout_horizon=32,
+            selected_rollout_horizon=12,
             evaluation_probe_sha256="d" * 64,
             resume_equivalence=_resume_equivalence(),
             additional_corridor_margin_m=2.0,
@@ -201,7 +201,7 @@ def test_formal_preflight_rejects_checkpoint_v8() -> None:
             qualified_worker_candidates=(18,),
             selected_workers=18,
             selected_micro_batch=1,
-            selected_rollout_horizon=32,
+            selected_rollout_horizon=12,
             evaluation_probe_sha256="d" * 64,
             resume_equivalence=resume,
             additional_corridor_margin_m=2.0,
@@ -224,7 +224,7 @@ def test_formal_preflight_rejects_non_fixed_corridor_margin() -> None:
             qualified_worker_candidates=(18,),
             selected_workers=18,
             selected_micro_batch=1,
-            selected_rollout_horizon=32,
+            selected_rollout_horizon=12,
             evaluation_probe_sha256="d" * 64,
             resume_equivalence=_resume_equivalence(),
             additional_corridor_margin_m=1.5,

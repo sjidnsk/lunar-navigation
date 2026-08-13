@@ -18,10 +18,10 @@ from lunar_planner_training_bridge import PlannerBridge
 
 from .checkpoint import CHECKPOINT_SCHEMA_VERSION, RunIdentity
 from .config import (
+    FORMAL_ROLLOUT_HORIZON,
     FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
     FORMAL_WORKER_CANDIDATES,
     PLATFORMS,
-    ROLLOUT_HORIZON_CANDIDATES,
 )
 from .environment.formal_builder import FormalEnvironmentAssembly
 from .environment.macro_step import PolicyAction
@@ -175,8 +175,8 @@ def build_formal_preflight_report(
         or selected_micro_batch <= 0
     ):
         raise FormalPreflightError("preflight worker recommendation is invalid")
-    if selected_rollout_horizon not in ROLLOUT_HORIZON_CANDIDATES:
-        raise FormalPreflightError("preflight rollout horizon is not calibrated")
+    if selected_rollout_horizon != FORMAL_ROLLOUT_HORIZON:
+        raise FormalPreflightError("preflight rollout horizon is not formal-fixed")
     if not _is_sha(evaluation_probe_sha256):
         raise FormalPreflightError("preflight evaluation digest is invalid")
     if (
@@ -220,7 +220,7 @@ def build_formal_preflight_report(
         "qualified_worker_candidates": list(qualified_worker_candidates),
         "selected_workers": selected_workers,
         "selected_micro_batch": selected_micro_batch,
-        "rollout_horizon_candidates": list(ROLLOUT_HORIZON_CANDIDATES),
+        "rollout_horizon_candidates": [FORMAL_ROLLOUT_HORIZON],
         "selected_rollout_horizon": selected_rollout_horizon,
         "episode_decision_limit": None,
         "evaluation_probe_sha256": evaluation_probe_sha256,
@@ -512,7 +512,7 @@ def run_formal_preflight(
     worker_candidates: tuple[int, ...] = FORMAL_WORKER_CANDIDATES,
     selected_workers: int | None = None,
     selected_micro_batch: int = 2,
-    selected_rollout_horizon: int = 32,
+    selected_rollout_horizon: int = FORMAL_ROLLOUT_HORIZON,
     resume_equivalence: Mapping[str, object] | None = None,
 ) -> tuple[FormalPreflightReport, Path]:
     """Execute formal wiring and record the supplied V7 resume proof."""

@@ -47,7 +47,7 @@ def test_training_budget_uses_fixed_total_and_rejects_overspend() -> None:
 
 def test_calibration_probe_reserve_covers_the_formal_worker_timeout() -> None:
     assert CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS == 9720.0
-    assert TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS == 39000.0
+    assert TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS == 15000.0
 
 
 def test_operator_fixed_runtime_freezes_twenty_four_without_measurement(
@@ -68,7 +68,7 @@ def test_operator_fixed_runtime_freezes_twenty_four_without_measurement(
 
     assert result.selected_workers == 24
     assert result.selected_micro_batch == 4
-    assert result.selected_rollout_horizon == 32
+    assert result.selected_rollout_horizon == 12
     assert result.compared_workers == (24,)
     assert result.measurements == ()
     assert result.horizon_measurements == ()
@@ -78,7 +78,7 @@ def test_operator_fixed_runtime_freezes_twenty_four_without_measurement(
         "selection_mode": "operator-fixed/v1",
         "selected_workers": 24,
         "selected_micro_batch": 4,
-        "selected_rollout_horizon": 32,
+        "selected_rollout_horizon": 12,
         "compared_workers": [24],
         "measurements": [],
         "rollout_horizon_candidates": [],

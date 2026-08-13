@@ -12,7 +12,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .config import FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS
+from .config import (
+    FORMAL_ROLLOUT_HORIZON,
+    FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
+)
 
 
 if TYPE_CHECKING:
@@ -31,10 +34,10 @@ TOTAL_GPU_BUDGET_SECONDS = INITIAL_GPU_BUDGET_SECONDS
 CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS = (
     8.0 * FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS + 120.0
 )
-# A horizon-32 update can legally wait for 32 sequential 1200-second macro
+# A horizon-12 update can legally wait for 12 sequential 1200-second macro
 # actions. The remaining 600 seconds covers the optimizer and synchronization.
 TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS = (
-    32.0 * FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS + 600.0
+    float(FORMAL_ROLLOUT_HORIZON) * FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS + 600.0
 )
 ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER = 64
 ROLLOUT_HORIZON_THROUGHPUT_NEAR_TIE_RATIO = 0.99
@@ -213,10 +216,13 @@ def freeze_fixed_runtime_selection(
     if (
         config.parallel.worker_candidates != (24,)
         or config.parallel.preferred_workers != 24
+        or config.ppo.rollout_horizon != FORMAL_ROLLOUT_HORIZON
         or dict(config.parallel.joint_workers)
         != {"WHEELED": 8, "LEGGED": 8, "HOPPER": 8}
     ):
-        raise CalibrationError("fixed runtime selection requires 24 workers")
+        raise CalibrationError(
+            "fixed runtime selection requires 24 workers and formal horizon"
+        )
     if not isinstance(budget, TrainingBudget):
         raise CalibrationError("fixed runtime requires the run TrainingBudget")
     if type(selected_micro_batch) is not int or selected_micro_batch <= 0:

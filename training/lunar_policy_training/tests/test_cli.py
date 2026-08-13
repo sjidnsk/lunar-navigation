@@ -1626,7 +1626,7 @@ def test_formal_calibration_manifest_is_non_proxy_and_cache_bound(
                     "selection_mode": "operator-fixed/v1",
                     "selected_workers": 24,
                     "selected_micro_batch": 4,
-                    "selected_rollout_horizon": 32,
+                    "selected_rollout_horizon": 12,
                     "compared_workers": [24],
                     "measurements": [],
                     "rollout_horizon_candidates": [],
@@ -1723,14 +1723,14 @@ def test_train_consumes_existing_calibrated_root_without_recalibration(
 def test_formal_train_uses_the_calibrated_horizon_not_the_bootstrap_value(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Would fail when train compares bootstrap 32 directly with selected 16."""
+    """Would fail when train drifts from the fixed formal horizon."""
     root = tmp_path / "formal-calibrated"
     root.mkdir()
     requested = load_training_config(
         REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
     )
-    assert requested.ppo.rollout_horizon == 32
-    frozen = with_rollout_horizon(requested, 16)
+    assert requested.ppo.rollout_horizon == 12
+    frozen = with_rollout_horizon(requested, 12)
     identity = RunIdentity(
         run_kind="formal",
         data_sha256="1" * 64,
@@ -1743,7 +1743,7 @@ def test_formal_train_uses_the_calibrated_horizon_not_the_bootstrap_value(
     )
     calibrated = SimpleNamespace(
         config=frozen,
-        rollout_horizon=16,
+        rollout_horizon=12,
         run_identity=identity,
         formal_seed=4080,
     )
@@ -1772,7 +1772,7 @@ def test_formal_train_uses_the_calibrated_horizon_not_the_bootstrap_value(
     )
 
     assert result is sentinel
-    assert calibrated.config.ppo.rollout_horizon == 16
+    assert calibrated.config.ppo.rollout_horizon == 12
 
 
 def test_sigterm_during_update_saves_only_after_complete_update_boundary() -> None:
@@ -2320,7 +2320,7 @@ def test_run_manifest_records_the_checkpointed_metrics_journal(
 
 
 def test_training_overrun_saves_terminal_latest_after_complete_update() -> None:
-    timestamps = iter((0.0, 39000.001))
+    timestamps = iter((0.0, 15000.001))
     events: list[str] = []
     budget = TrainingBudget()
     loop = TrainingBoundaryLoop(

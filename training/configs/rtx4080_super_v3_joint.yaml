@@ -27,8 +27,8 @@ ppo:
   frontier_entropy_coef: 0.01
   theta_entropy_coef: 0.001
   max_grad_norm: 0.5
-  # Operator-fixed with the 24-worker runtime selection.
-  rollout_horizon: 32
+  # Short update boundary for slow formal macro actions; workers remain fixed at 24.
+  rollout_horizon: 12
   dtype: float32
 checkpoint_interval_seconds: 1800
 candidate_checkpoint_interval_seconds: 3600

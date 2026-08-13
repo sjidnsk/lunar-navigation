@@ -64,6 +64,7 @@ def test_formal_training_config_fixes_twenty_four_workers(
         "LEGGED": 8,
         "HOPPER": 8,
     }
+    assert resolved_config.ppo.rollout_horizon == 12
 
 
 @pytest.mark.parametrize(
