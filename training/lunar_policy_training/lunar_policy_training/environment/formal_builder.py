@@ -706,6 +706,7 @@ class FormalEpisode:
                         self._snapshot.planning_physical_snapshot_id,
                     )
                     continue
+                self._defer_candidate_rebuild = False
                 execution_state = (
                     self.controller.current_observation.observation_identities[0]
                     .execution_state

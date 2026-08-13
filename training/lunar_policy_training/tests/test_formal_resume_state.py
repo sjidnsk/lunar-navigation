@@ -360,6 +360,60 @@ def test_physical_worker_replay_preserves_failure_before_later_reveal(
     )
 
 
+def test_physical_worker_replay_clears_deferred_ground_rebuild_on_failure(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A planning failure must end a deferred rolling ground rebuild."""
+    assembly, _, _ = _assembly(tmp_path)
+    worker = assembly.factory(0, "WHEELED")
+    episode = worker.episode
+    initial_snapshot = episode._snapshot
+    assert initial_snapshot is not None
+    candidate_id = str(
+        initial_snapshot.candidates.candidate_ids[
+            int(np.flatnonzero(initial_snapshot.candidates.mask)[0])
+        ]
+    )
+    evidence = SensorBoundaryEvidence(episode.current_pose, 1.0)
+    episode._record_reveal(
+        evidence,
+        "DECISION_BOUNDARY",
+        defer_candidate_rebuild=True,
+    )
+    revealed = episode.controller.after_execution(
+        platform_type="WHEELED",
+        execution_state="DECISION_BOUNDARY",
+        evidence=evidence,
+    )
+    worker.environment._install_observation(revealed.next_observation)
+    deferred_snapshot = episode._snapshot
+    assert deferred_snapshot is not None
+    rebuilt = episode.refresh_after_planning_failure(
+        candidate_id,
+        CandidateDisposition.KEEP,
+        deferred_snapshot.planning_physical_snapshot_id,
+    )
+    worker.environment._install_observation(rebuilt.next_observation)
+    state = FormalWorkerState.from_dict(worker.snapshot_episode_state())
+    assert state.replay_event_kinds == (
+        "REVEAL",
+        "PLANNING_FAILURE_REBUILD",
+    )
+
+    restored = assembly.factory.restore_for_episode(
+        worker_index=0,
+        platform_type="WHEELED",
+        episode_cursor=0,
+        platform_worker_index=0,
+        platform_worker_count=1,
+        state=state.to_dict(),
+    )
+
+    assert restored.environment.current_observation.observation_identities == (
+        worker.environment.current_observation.observation_identities
+    )
+
+
 @pytest.mark.parametrize(
     "mutation",
     (
