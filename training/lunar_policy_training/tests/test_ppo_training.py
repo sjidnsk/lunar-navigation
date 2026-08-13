@@ -338,6 +338,64 @@ _EXPECTED_PPO = {
     "dtype": "float32",
 }
 
+
+_EXPECTED_TASK_AREA = {
+    "minimum_size_m": 100.0,
+    "maximum_size_m": 500.0,
+    "sampling_algorithm": "deterministic-uniform-square/v1",
+}
+
+
+def _config_with_task_area() -> dict[str, object]:
+    raw = yaml.safe_load(
+        (
+            pathlib.Path(__file__).resolve().parents[3]
+            / "training/configs/rtx4080_super_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    raw["task_area"] = dict(_EXPECTED_TASK_AREA)
+    return raw
+
+
+def test_training_config_freezes_random_100_to_500_m_task_area() -> None:
+    config = resolve_training_config(_config_with_task_area())
+
+    assert config.task_area.minimum_size_m == 100.0
+    assert config.task_area.maximum_size_m == 500.0
+    assert (
+        config.task_area.sampling_algorithm
+        == "deterministic-uniform-square/v1"
+    )
+    assert config.as_frozen_dict()["task_area"] == _EXPECTED_TASK_AREA
+
+
+def test_training_config_requires_explicit_task_area() -> None:
+    raw = _config_with_task_area()
+    del raw["task_area"]
+
+    with pytest.raises(TrainingConfigError, match="task area"):
+        resolve_training_config(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("minimum_size_m", 100, "task area minimum"),
+        ("minimum_size_m", 96.0, "task area"),
+        ("maximum_size_m", 504.0, "task area"),
+        ("maximum_size_m", 100, "task area maximum"),
+        ("sampling_algorithm", "random/v0", "task area sampling"),
+    ),
+)
+def test_training_config_rejects_task_area_contract_drift(
+    field: str, value: object, message: str
+) -> None:
+    raw = _config_with_task_area()
+    raw["task_area"][field] = value
+
+    with pytest.raises(TrainingConfigError, match=message):
+        resolve_training_config(raw)
+
 _PPO_VALUE_DRIFTS = (
     ("gamma", 0.994),
     ("gae_lambda", 0.94),

@@ -7,6 +7,10 @@ parallel:
     HOPPER: 8
   nested_compute_threads: 1
   gpu_memory_fraction_max: 0.90
+task_area:
+  minimum_size_m: 100.0
+  maximum_size_m: 500.0
+  sampling_algorithm: deterministic-uniform-square/v1
 ppo:
   gamma: 0.995
   gae_lambda: 0.95

@@ -12,8 +12,10 @@ import yaml
 
 PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
 ROLLOUT_HORIZON_CANDIDATES = (16, 32, 64)
+TASK_AREA_SAMPLING_ALGORITHM = "deterministic-uniform-square/v1"
 _CONFIG_FIELDS = {
     "parallel",
+    "task_area",
     "ppo",
     "checkpoint_interval_seconds",
     "candidate_checkpoint_interval_seconds",
@@ -56,6 +58,16 @@ class ParallelConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskAreaConfig:
+    minimum_size_m: float
+    maximum_size_m: float
+    sampling_algorithm: str
+
+    def __post_init__(self) -> None:
+        validate_task_area_config(self)
+
+
+@dataclass(frozen=True, slots=True)
 class PPOConfig:
     gamma: float
     gae_lambda: float
@@ -81,6 +93,7 @@ class PPOConfig:
 @dataclass(frozen=True, slots=True)
 class ResolvedTrainingConfig:
     parallel: ParallelConfig
+    task_area: TaskAreaConfig
     ppo: PPOConfig
     checkpoint_interval_seconds: int
     candidate_checkpoint_interval_seconds: int
@@ -98,6 +111,11 @@ class ResolvedTrainingConfig:
                 "gpu_memory_fraction_max": (
                     self.parallel.gpu_memory_fraction_max
                 ),
+            },
+            "task_area": {
+                "minimum_size_m": self.task_area.minimum_size_m,
+                "maximum_size_m": self.task_area.maximum_size_m,
+                "sampling_algorithm": self.task_area.sampling_algorithm,
             },
             "ppo": {
                 "gamma": self.ppo.gamma,
@@ -145,6 +163,8 @@ def resolve_training_config(raw: Mapping[str, object]) -> ResolvedTrainingConfig
     """Resolve an already-loaded run-manifest config through the same gates."""
     if not isinstance(raw, Mapping):
         raise TrainingConfigError("training config must be a mapping")
+    if "task_area" not in raw:
+        raise TrainingConfigError("task area config is required")
     if set(raw) != _CONFIG_FIELDS:
         raise TrainingConfigError(
             "training config must contain exactly the frozen top-level fields"
@@ -155,6 +175,16 @@ def resolve_training_config(raw: Mapping[str, object]) -> ResolvedTrainingConfig
     joint_raw = parallel_raw.get("joint_workers")
     if not isinstance(joint_raw, Mapping):
         raise TrainingConfigError("joint worker allocation must be a mapping")
+    task_area_raw = raw.get("task_area")
+    task_area_fields = {
+        "minimum_size_m",
+        "maximum_size_m",
+        "sampling_algorithm",
+    }
+    if not isinstance(task_area_raw, Mapping) or set(task_area_raw) != task_area_fields:
+        raise TrainingConfigError(
+            "task area config must contain exactly the frozen fields"
+        )
     ppo_raw = raw.get("ppo")
     ppo_fields = {
         "gamma",
@@ -197,6 +227,17 @@ def resolve_training_config(raw: Mapping[str, object]) -> ResolvedTrainingConfig
             gpu_memory_fraction_max=_number(
                 parallel_raw.get("gpu_memory_fraction_max"),
                 "GPU memory fraction",
+            ),
+        ),
+        task_area=TaskAreaConfig(
+            minimum_size_m=_exact_float(
+                task_area_raw["minimum_size_m"], "task area minimum"
+            ),
+            maximum_size_m=_exact_float(
+                task_area_raw["maximum_size_m"], "task area maximum"
+            ),
+            sampling_algorithm=_string(
+                task_area_raw["sampling_algorithm"], "task area sampling"
             ),
         ),
         ppo=PPOConfig(
@@ -269,6 +310,11 @@ def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
         "candidate_checkpoint_interval_seconds": 3600,
         "total_gpu_budget_seconds": 86400,
         "formal_training_seeds": (4080,),
+        "task_area": (
+            100.0,
+            500.0,
+            TASK_AREA_SAMPLING_ALGORITHM,
+        ),
     }
     actual = {
         "worker_candidates": config.parallel.worker_candidates,
@@ -282,6 +328,11 @@ def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
         ),
         "total_gpu_budget_seconds": config.total_gpu_budget_seconds,
         "formal_training_seeds": config.formal_training_seeds,
+        "task_area": (
+            config.task_area.minimum_size_m,
+            config.task_area.maximum_size_m,
+            config.task_area.sampling_algorithm,
+        ),
     }
     if actual != expected:
         raise TrainingConfigError("training config changes a frozen Task 3 value")
@@ -307,6 +358,24 @@ def validate_ppo_config(config: PPOConfig) -> PPOConfig:
         raise TrainingConfigError(
             "PPO rollout horizon must be one of the calibrated candidates"
         )
+    return config
+
+
+def validate_task_area_config(config: TaskAreaConfig) -> TaskAreaConfig:
+    """Reject task-area drift before it can change the training distribution."""
+    if not isinstance(config, TaskAreaConfig):
+        raise TrainingConfigError("task area config must use typed TaskAreaConfig")
+    if type(config.minimum_size_m) is not float:
+        raise TrainingConfigError("task area minimum must have exact type float")
+    if type(config.maximum_size_m) is not float:
+        raise TrainingConfigError("task area maximum must have exact type float")
+    if config.minimum_size_m != 100.0 or config.maximum_size_m != 500.0:
+        raise TrainingConfigError("task area changes the frozen 100-500 m range")
+    if (
+        type(config.sampling_algorithm) is not str
+        or config.sampling_algorithm != TASK_AREA_SAMPLING_ALGORITHM
+    ):
+        raise TrainingConfigError("task area sampling algorithm changes a frozen value")
     return config
 
 
@@ -340,6 +409,12 @@ def _number(value: object, name: str) -> float:
     return float(value)
 
 
+def _exact_float(value: object, name: str) -> float:
+    if type(value) is not float:
+        raise TrainingConfigError(f"{name} must have exact type float")
+    return value
+
+
 def _string(value: object, name: str) -> str:
     if not isinstance(value, str) or not value:
         raise TrainingConfigError(f"{name} must be a non-empty string")
@@ -348,11 +423,14 @@ def _string(value: object, name: str) -> str:
 
 __all__ = [
     "PLATFORMS",
+    "TASK_AREA_SAMPLING_ALGORITHM",
     "ParallelConfig",
     "PPOConfig",
     "ResolvedTrainingConfig",
+    "TaskAreaConfig",
     "TrainingConfigError",
     "load_training_config",
     "resolve_training_config",
+    "validate_task_area_config",
     "validate_ppo_config",
 ]

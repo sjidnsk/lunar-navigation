@@ -75,6 +75,7 @@ from .config import (
     PPOConfig,
     ROLLOUT_HORIZON_CANDIDATES,
     ResolvedTrainingConfig,
+    TaskAreaConfig,
     load_training_config,
     resolve_training_config,
     with_rollout_horizon,
@@ -1217,7 +1218,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_data.add_argument(
         "--materialization",
         required=True,
-        choices=("preflight", "full"),
+        choices=("preflight", "bounded", "full"),
     )
     prepare_data.add_argument(
         "--preflight-scenario-limit",
@@ -1312,11 +1313,19 @@ def main(argv: list[str] | None = None) -> int:
         ):
             raise PreflightError("full materialization rejects a scenario limit")
         if (
-            arguments.materialization == "preflight"
+            arguments.materialization in {"preflight", "bounded"}
             and arguments.preflight_scenario_limit is None
         ):
             raise PreflightError(
-                "preflight materialization requires --preflight-scenario-limit"
+                "preflight or bounded materialization requires "
+                "--preflight-scenario-limit"
+            )
+        if (
+            arguments.materialization == "bounded"
+            and arguments.preflight_scenario_limit != 128
+        ):
+            raise PreflightError(
+                "bounded materialization requires exactly 128 scenarios"
             )
         capability_bundle = _formal_capability_preflight(repository_root)
         try:
@@ -1359,6 +1368,7 @@ def main(argv: list[str] | None = None) -> int:
             capability_bundle=capability_bundle,
             repository_root=repository_root,
             split="train",
+            task_area=requested_config.task_area,
         )
         _calibrate_training_run(
             config_path=Path(arguments.config),
@@ -1513,6 +1523,7 @@ def main(argv: list[str] | None = None) -> int:
             capability_bundle=capability_bundle,
             repository_root=repository_root,
             split="train",
+            task_area=requested_config.task_area,
         )
         assemblies = {"train": train_assembly}
         for split in ("validation", "test", "holdout"):
@@ -1521,6 +1532,7 @@ def main(argv: list[str] | None = None) -> int:
                 capability_bundle=capability_bundle,
                 repository_root=repository_root,
                 split=split,
+                task_area=requested_config.task_area,
             )
         evaluation_batches = _formal_evaluation_batches(cache, assemblies)
         calibrated = _validated_formal_preflight_calibration(
@@ -1676,6 +1688,7 @@ def _build_formal_environment(
     capability_bundle: FrozenCapabilityBundle,
     repository_root: Path,
     split: str,
+    task_area: TaskAreaConfig,
 ) -> tuple[FormalCache, FormalEnvironmentAssembly]:
     """Validate every current identity before constructing one formal factory."""
     try:
@@ -1713,6 +1726,7 @@ def _build_formal_environment(
         assembly = FormalEnvironmentBuilder(
             cache_manifest_path=cache_manifest_path,
             capability_bundle=capability_bundle,
+            task_area=task_area,
             split=split,
         ).build()
     except (FormalCacheError, ValueError) as error:
@@ -1745,6 +1759,7 @@ def _formal_environment_from_calibrated_root(
         capability_bundle=capability_bundle,
         repository_root=repository_root,
         split=split,
+        task_area=calibrated.config.task_area,
     )
     if cache.manifest["cache_manifest_sha256"] != calibrated.cache_manifest_sha256:
         raise PreflightError("formal cache manifest differs from calibration")

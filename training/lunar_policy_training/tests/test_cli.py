@@ -312,6 +312,7 @@ def test_formal_preflight_passes_the_validated_sensor_digest_to_calibration(
         rollout_horizon=16,
     )
     captured: dict[str, object] = {}
+    task_areas: list[object] = []
     monkeypatch.setattr(
         cli_module, "_formal_capability_preflight", lambda _root: bundle
     )
@@ -320,10 +321,12 @@ def test_formal_preflight_passes_the_validated_sensor_digest_to_calibration(
         "_formal_sensor_performance_preflight",
         lambda *args, **kwargs: sensor_digest,
     )
+    def build_formal_environment(*args, task_area, **kwargs):
+        task_areas.append(task_area)
+        return cache, assembly
+
     monkeypatch.setattr(
-        cli_module,
-        "_build_formal_environment",
-        lambda *args, **kwargs: (cache, assembly),
+        cli_module, "_build_formal_environment", build_formal_environment
     )
     monkeypatch.setattr(
         cli_module, "_formal_evaluation_batches", lambda *args: ()
@@ -372,6 +375,7 @@ def test_formal_preflight_passes_the_validated_sensor_digest_to_calibration(
         ]
     ) == 0
     assert captured["sensor_performance_sha256"] == sensor_digest
+    assert task_areas == [config.task_area] * 4
 
 
 def test_formal_calibrate_rejects_cache_before_cuda_or_artifact_creation(
@@ -639,6 +643,50 @@ def test_prepare_data_delegates_to_formal_cache_without_touching_cuda(
     assert calls[0]["preflight_scenario_limit"] == 4
     assert calls[0]["capability_bundle"] is bundle
     assert json.loads(capsys.readouterr().out)["scene_count"] == 4
+
+
+def test_prepare_data_accepts_the_frozen_bounded_inventory(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    bundle = FrozenCapabilityBundle(
+        schema="lunar-training-capability-freeze/v1",
+        platforms=(),
+        bundle_sha256="b" * 64,
+        formal_eligible=True,
+    )
+    monkeypatch.setattr(
+        cli_module, "_formal_capability_preflight", lambda _root: bundle
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "prepare_formal_training_cache",
+        lambda **kwargs: calls.append(kwargs)
+        or {
+            "cache_manifest_sha256": "c" * 64,
+            "materialization": "bounded",
+            "scene_count": 128,
+        },
+    )
+
+    assert cli_module.main(
+        [
+            "prepare-data",
+            "--source-lock",
+            str(tmp_path / "source.json"),
+            "--split-manifest",
+            str(tmp_path / "split.json"),
+            "--cache-root",
+            str(tmp_path / "cache"),
+            "--materialization",
+            "bounded",
+            "--preflight-scenario-limit",
+            "128",
+        ]
+    ) == 0
+    assert calls[0]["materialization"] == "bounded"
+    assert calls[0]["preflight_scenario_limit"] == 128
 
 
 @pytest.mark.parametrize(

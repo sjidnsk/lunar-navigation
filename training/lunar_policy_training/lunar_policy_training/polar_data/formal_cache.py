@@ -67,6 +67,10 @@ from .source_lock import load_aggregate_source_lock
 
 
 FORMAL_CACHE_SCHEMA = "lunar-formal-training-cache/v8"
+BOUNDED_FORMAL_SCENE_COUNT = 128
+BOUNDED_FORMAL_SPLIT_COUNTS = MappingProxyType(
+    {"train": 98, "validation": 12, "test": 12, "holdout": 6}
+)
 _SOURCE_IDS = (
     "NASA_LOLA_87S_DEM",
     "NASA_LOLA_87S_COUNT",
@@ -224,7 +228,7 @@ def _formal_platform_eligibility_ready(
     platform_counts: Mapping[str, Mapping[str, Mapping[str, int]]],
 ) -> bool:
     """Require a non-empty exact eligible lane for every platform and split."""
-    if materialization != "full":
+    if materialization not in {"bounded", "full"}:
         return False
     if set(platform_counts) != set(_PLATFORMS):
         return False
@@ -977,15 +981,17 @@ def write_formal_cache(
     repository_root: str | Path,
 ) -> dict[str, object]:
     """Atomically publish a cache manifest last; an existing cache is read-only."""
-    if materialization not in {"preflight", "full"}:
-        raise FormalCacheError("materialization must be preflight or full")
+    if materialization not in {"preflight", "bounded", "full"}:
+        raise FormalCacheError(
+            "materialization must be preflight, bounded, or full"
+        )
     root = _validate_cache_root(Path(cache_root), Path(repository_root))
     manifest_path = root / "cache-manifest.json"
     if manifest_path.is_file():
         existing = load_formal_cache(
             manifest_path,
             expected_identity=identity,
-            require_full=materialization == "full",
+            require_full=materialization in {"bounded", "full"},
         )
         if existing.manifest["materialization"] != materialization:
             raise FormalCacheError("existing cache materialization differs")
@@ -1012,8 +1018,13 @@ def write_formal_cache(
         )
     entries.sort(key=lambda value: str(value["scene_id"]))
     platform_eligibility, exact_common, readiness = _eligibility_summary(entries)
-    qualification_complete = _formal_platform_eligibility_ready(
-        materialization, readiness
+    common_ready = all(
+        int(exact_common["splits"][split]["scene_count"]) > 0
+        for split in _REQUIRED_SPLITS
+    )
+    qualification_complete = (
+        _formal_platform_eligibility_ready(materialization, readiness)
+        and common_ready
     )
     inventory = [
         {
@@ -1033,7 +1044,10 @@ def write_formal_cache(
     body: dict[str, object] = {
         "schema": FORMAL_CACHE_SCHEMA,
         "materialization": materialization,
-        "formal_eligible": materialization == "full" and qualification_complete,
+        "formal_eligible": (
+            materialization in {"bounded", "full"}
+            and qualification_complete
+        ),
         "identity": identity.to_dict(),
         "scenario_manifest": inventory[0],
         "scene_count": len(entries),
@@ -1449,14 +1463,18 @@ def load_formal_cache(
     if _semantic_sha(body) != claimed:
         raise FormalCacheError("cache manifest identity mismatch")
     materialization = value.get("materialization")
-    if materialization not in {"preflight", "full"}:
+    if materialization not in {"preflight", "bounded", "full"}:
         raise FormalCacheError("cache materialization is invalid")
     formal_eligible = value.get("formal_eligible")
-    if type(formal_eligible) is not bool or (materialization != "full" and formal_eligible):
+    if type(formal_eligible) is not bool or (
+        materialization == "preflight" and formal_eligible
+    ):
         raise FormalCacheError("cache formal eligibility is invalid")
-    if require_full and (materialization != "full" or not formal_eligible):
+    if require_full and (
+        materialization not in {"bounded", "full"} or not formal_eligible
+    ):
         raise FormalCacheError(
-            "formal command requires a full, start-qualified cache"
+            "formal command requires a bounded or full, start-qualified cache"
         )
     identity = FormalCacheIdentity.from_dict(value.get("identity"))
     if require_full and identity.reward_sha256 != reward_weights_sha256():
@@ -1491,8 +1509,13 @@ def load_formal_cache(
         or value.get("exact_common_evaluation") != exact_common
     ):
         raise FormalCacheError("cache platform eligibility summary differs")
-    expected_formal_eligible = _formal_platform_eligibility_ready(
-        materialization, readiness
+    common_ready = all(
+        int(exact_common["splits"][split]["scene_count"]) > 0
+        for split in _REQUIRED_SPLITS
+    )
+    expected_formal_eligible = (
+        _formal_platform_eligibility_ready(materialization, readiness)
+        and common_ready
     )
     if formal_eligible is not expected_formal_eligible:
         raise FormalCacheError("cache formal platform eligibility is invalid")
@@ -1670,6 +1693,23 @@ def _selected_scenarios(
         if preflight_scenario_limit is not None:
             raise FormalCacheError("full materialization rejects a scenario limit")
         return tuple(scenarios)
+    if materialization == "bounded":
+        if preflight_scenario_limit != BOUNDED_FORMAL_SCENE_COUNT:
+            raise FormalCacheError(
+                "bounded materialization requires exactly 128 scenarios"
+            )
+        selected: list[Mapping[str, object]] = []
+        for split in _REQUIRED_SPLITS:
+            split_scenarios = tuple(
+                item for item in scenarios if item.get("split") == split
+            )
+            required = BOUNDED_FORMAL_SPLIT_COUNTS[split]
+            if len(split_scenarios) < required:
+                raise FormalCacheError(
+                    f"bounded materialization split {split} is too small"
+                )
+            selected.extend(split_scenarios[:required])
+        return tuple(selected)
     if (
         type(preflight_scenario_limit) is not int
         or preflight_scenario_limit < 1
@@ -2775,8 +2815,10 @@ def prepare_formal_training_cache(
     repository_root: str | Path,
 ) -> dict[str, object]:
     """Verify locked inputs and materialize the current formal static world cache."""
-    if materialization not in {"preflight", "full"}:
-        raise FormalCacheError("materialization must be preflight or full")
+    if materialization not in {"preflight", "bounded", "full"}:
+        raise FormalCacheError(
+            "materialization must be preflight, bounded, or full"
+        )
     root = Path(repository_root).resolve(strict=True)
     verified = _verified_preparation_inputs(
         source_lock_path=Path(source_lock_path),
@@ -2826,14 +2868,23 @@ def prepare_formal_training_cache(
     )
     if materialization == "full" and manifest.get("scene_count") != 1734:
         raise FormalCacheError("full cache must contain exactly 1734 scenes")
-    if materialization == "full" and not manifest.get("formal_eligible"):
+    if (
+        materialization == "bounded"
+        and manifest.get("scene_count") != BOUNDED_FORMAL_SCENE_COUNT
+    ):
+        raise FormalCacheError("bounded cache must contain exactly 128 scenes")
+    if materialization in {"bounded", "full"} and not manifest.get(
+        "formal_eligible"
+    ):
         raise FormalCacheError(
-            "full cache common-start subset is below the frozen split qualification"
+            "formal cache common-start subset is below split qualification"
         )
     return manifest
 
 
 __all__ = [
+    "BOUNDED_FORMAL_SCENE_COUNT",
+    "BOUNDED_FORMAL_SPLIT_COUNTS",
     "FORMAL_CACHE_SCHEMA",
     "FormalCache",
     "FormalCacheError",

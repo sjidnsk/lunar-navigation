@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from lunar_planner_training_bridge import PlannerBridge
 
+from lunar_policy_training.config import TaskAreaConfig
 from lunar_policy_training.environment.formal_builder import (
     FormalEnvironmentBuilder,
 )
@@ -129,6 +130,11 @@ def test_historical_boundary_failure_replays_against_v6_cache(
     assembly = FormalEnvironmentBuilder(
         cache_manifest_path=cache_manifest,
         capability_bundle=capability_bundle,
+        task_area=TaskAreaConfig(
+            minimum_size_m=100.0,
+            maximum_size_m=500.0,
+            sampling_algorithm="deterministic-uniform-square/v1",
+        ),
         split="train",
         allow_preflight=True,
     ).build()

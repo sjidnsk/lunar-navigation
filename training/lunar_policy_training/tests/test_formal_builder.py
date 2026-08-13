@@ -43,6 +43,10 @@ from lunar_policy_training.environment.formal_builder import (
 from lunar_policy_training.environment.formal_start_qualification import (
     qualify_initial_start_cell,
 )
+from lunar_policy_training.environment.task_area import (
+    sample_task_area_span_cells,
+    scope_formal_task_area,
+)
 from lunar_policy_training.environment.macro_step import PolicyAction
 from lunar_policy_training.environment.observation_boundary import (
     SensorBoundaryEvidence,
@@ -73,9 +77,15 @@ from lunar_policy_training.polar_data.hazards import (
     scene_seed,
 )
 from lunar_policy_training.project_capability import load_project_formal_capability
+from lunar_policy_training.config import TaskAreaConfig
 
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
+TASK_AREA = TaskAreaConfig(
+    minimum_size_m=100.0,
+    maximum_size_m=500.0,
+    sampling_algorithm="deterministic-uniform-square/v1",
+)
 
 
 def _sha(label: str) -> str:
@@ -396,10 +406,85 @@ def _assembly(tmp_path: pathlib.Path):
     assembly = FormalEnvironmentBuilder(
         cache_manifest_path=manifest,
         capability_bundle=bundle,
+        task_area=TASK_AREA,
         split="train",
         allow_preflight=True,
     ).build()
     return assembly, bundle, scene_id
+
+
+@pytest.mark.parametrize(
+    ("episode_seed", "expected_span_cells"),
+    (
+        ("a" * 64, 36),
+        ("b" * 64, 28),
+        ("c" * 64, 100),
+        ("0" * 64, 67),
+        ("f" * 64, 89),
+    ),
+)
+def test_task_area_sampling_is_deterministic_and_inclusive(
+    episode_seed: str, expected_span_cells: int
+) -> None:
+    assert (
+        sample_task_area_span_cells(TASK_AREA, episode_seed)
+        == expected_span_cells
+    )
+    assert 25 <= expected_span_cells <= 125
+
+
+@pytest.mark.parametrize("platform", ("WHEELED", "LEGGED", "HOPPER"))
+def test_scoped_task_area_preserves_source_and_exact_platform_mask(
+    tmp_path: pathlib.Path, platform: str
+) -> None:
+    manifest, _, _ = _cache(tmp_path)
+    cache = load_formal_cache(manifest)
+    original = formal_builder_module._load_multires_scene(
+        cache, cache.manifest["scenes"][0]["scene_id"]
+    )
+    original_entry = json.dumps(original.entry, sort_keys=True)
+    original_valid = original.arrays["valid_mask"].copy()
+    original_bits = original.arrays[
+        f"{platform.lower()}_coverable_detail_bits"
+    ].copy()
+
+    scoped, task = scope_formal_task_area(
+        original,
+        platform_type=platform,
+        start_cell=(127, 127),
+        config=TASK_AREA,
+        episode_seed="a" * 64,
+    )
+
+    assert task.span_cells == 36
+    assert task.size_m == 144.0
+    assert task.coarse_bounds_half_open == (109, 145, 109, 145)
+    assert task.detail_bounds_half_open == (2180, 2900, 2180, 2900)
+    roi = scoped.arrays["scoped_mission_roi"]
+    assert int(roi.sum(dtype=np.int64)) == 36 * 36
+    assert not bool(roi[:109].any())
+    assert not bool(roi[145:].any())
+    payload = scoped.entry["platform_coverability"][platform]
+    coverable = formal_builder_module.unpack_detail_mask(
+        scoped.arrays[f"{platform.lower()}_coverable_detail_bits"],
+        tuple(payload["coverable_detail_shape"]),
+    )
+    assert int(coverable.sum(dtype=np.int64)) == 720 * 720
+    assert mask_sha256(coverable) == payload["coverable_detail_mask_sha256"]
+    assert payload["mission_coverable_fraction"] == 1.0
+    assert json.dumps(original.entry, sort_keys=True) == original_entry
+    assert np.array_equal(original.arrays["valid_mask"], original_valid)
+    assert np.array_equal(
+        original.arrays[f"{platform.lower()}_coverable_detail_bits"],
+        original_bits,
+    )
+
+
+def test_task_area_translates_intact_at_map_edge() -> None:
+    from lunar_policy_training.environment.task_area import task_area_bounds
+
+    assert task_area_bounds((16, 16), 125) == (0, 125, 0, 125)
+    assert task_area_bounds((240, 240), 125) == (131, 256, 131, 256)
 
 
 def _primitive_changed_capability(capability):
@@ -783,6 +868,16 @@ def test_three_platforms_share_physical_scene_but_keep_distinct_projection(
     assert {worker.episode.scene_id for worker in workers.values()} == {scene_id}
     assert len({worker.episode.episode_seed for worker in workers.values()}) == 1
     assert len({worker.episode.start_seed for worker in workers.values()}) == 3
+    assert len(
+        {
+            worker.episode.loaded.entry["task_area"]["size_m"]
+            for worker in workers.values()
+        }
+    ) == 1
+    assert all(
+        100.0 <= worker.episode.loaded.entry["task_area"]["size_m"] <= 500.0
+        for worker in workers.values()
+    )
     assert {
         tuple(worker.initial_observation.platform_context[0].tolist())
         for worker in workers.values()
@@ -798,6 +893,7 @@ def test_training_uses_each_platforms_own_eligible_scene_lane(
     assembly = FormalEnvironmentBuilder(
         cache_manifest_path=manifest,
         capability_bundle=bundle,
+        task_area=TASK_AREA,
         split="train",
         allow_preflight=True,
     ).build()
@@ -831,6 +927,7 @@ def test_only_the_empty_platform_lane_is_rejected(
     assembly = FormalEnvironmentBuilder(
         cache_manifest_path=manifest,
         capability_bundle=bundle,
+        task_area=TASK_AREA,
         split="train",
         allow_preflight=True,
     ).build()
@@ -853,6 +950,10 @@ def test_formal_episode_cursor_is_deterministic_and_resume_exact(
     assert first.episode.current_pose == resumed.episode.current_pose
     assert first.episode.start_seed == resumed.episode.start_seed
     assert first.episode.episode_seed == resumed.episode.episode_seed
+    assert (
+        first.episode.loaded.entry["task_area"]
+        == resumed.episode.loaded.entry["task_area"]
+    )
     assert (
         first.initial_observation.observation_identities
         == resumed.initial_observation.observation_identities
@@ -1217,6 +1318,7 @@ def test_formal_worker_traverses_the_seeded_scene_permutation_once(
         split="validation",
         allow_preflight=True,
         scenario_schedule_id=schedule_id,
+        task_area=TASK_AREA,
     )
 
     loaded = []
@@ -1430,6 +1532,7 @@ def test_formal_builder_rejects_preflight_cache_by_default(
         FormalEnvironmentBuilder(
             cache_manifest_path=manifest,
             capability_bundle=bundle,
+            task_area=TASK_AREA,
             split="train",
         ).build()
 

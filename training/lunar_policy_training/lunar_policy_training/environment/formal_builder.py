@@ -14,6 +14,7 @@ import torch
 
 import lunar_planner_training_bridge as bridge_api
 
+from ..config import TaskAreaConfig
 from ..capability_freeze import (
     FrozenCapabilityBundle,
     FrozenCapabilityEnvironmentFactory,
@@ -63,6 +64,7 @@ from .formal_start_qualification import (
     build_formal_mission_roi,
     formal_safe_start_cells,
 )
+from .task_area import scope_formal_task_area
 from .macro_step import ExecutionEvents, PolicyAction
 from .multires_observation import DetailObservedWindow, MultiresSensorObservationState
 from .observation_boundary import (
@@ -888,6 +890,17 @@ class FormalEpisode:
         return remaining
 
     def _build_mission_roi(self) -> np.ndarray:
+        scoped = self.loaded.arrays.get("scoped_mission_roi")
+        if scoped is not None:
+            roi = np.ascontiguousarray(scoped, dtype=np.bool_)
+            if roi.shape != (
+                GLOBAL_GEOMETRY.cells,
+                GLOBAL_GEOMETRY.cells,
+            ):
+                raise ValueError("formal scoped mission ROI geometry is invalid")
+            if not bool(roi[self.start_cell]):
+                raise ValueError("formal scoped mission ROI excludes the start")
+            return roi
         return build_formal_mission_roi(self.loaded.arrays)
 
     def _observed_maps(self) -> tuple[object, object, DetailObservedWindow]:
@@ -1729,6 +1742,7 @@ class FormalWorkerBuilder:
     split: str
     allow_preflight: bool
     scenario_schedule_id: str
+    task_area: TaskAreaConfig
     platform_scenario_schedule_ids: Mapping[str, str] | None = None
     paired_evaluation: bool = False
     sensor_closed_loop: ClassVar[bool] = True
@@ -1753,6 +1767,13 @@ class FormalWorkerBuilder:
         start_cell = (int(start_raw[0]), int(start_raw[1]))
         if start_cell not in safe:
             raise ValueError("formal cached qualified start is not platform-safe")
+        loaded, _ = scope_formal_task_area(
+            loaded,
+            platform_type=platform_type,
+            start_cell=start_cell,
+            config=self.task_area,
+            episode_seed=_formal_episode_seed("episode", scenario_identity),
+        )
         episode = FormalEpisode(
             worker_index=worker_index,
             platform_type=platform_type,
@@ -1789,6 +1810,13 @@ class FormalWorkerBuilder:
         ):
             raise ValueError("formal restore worker identity differs")
         loaded = self._load_scheduled_scene(worker_index, scenario_identity)
+        loaded, _ = scope_formal_task_area(
+            loaded,
+            platform_type=platform_type,
+            start_cell=parsed.start_cell,
+            config=self.task_area,
+            episode_seed=_formal_episode_seed("episode", scenario_identity),
+        )
         episode = FormalEpisode(
             worker_index=worker_index,
             platform_type=platform_type,
@@ -1926,6 +1954,7 @@ class FormalWorkerBuilder:
 class FormalEnvironmentBuilder:
     cache_manifest_path: Path
     capability_bundle: FrozenCapabilityBundle
+    task_area: TaskAreaConfig
     split: str = "train"
     allow_preflight: bool = False
 
@@ -1949,19 +1978,27 @@ class FormalEnvironmentBuilder:
         }
         schedule_digest = hashlib.sha256(
             json.dumps(
-                platform_schedule_ids,
+                {
+                    "platform_scenario_schedule_ids": platform_schedule_ids,
+                    "task_area": {
+                        "minimum_size_m": self.task_area.minimum_size_m,
+                        "maximum_size_m": self.task_area.maximum_size_m,
+                        "sampling_algorithm": self.task_area.sampling_algorithm,
+                    },
+                },
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
         schedule_id = f"lunar-formal-combined-schedule/v1:{self.split}:{schedule_digest}"
         worker_builder = FormalWorkerBuilder(
-            str(self.cache_manifest_path),
-            self.split,
-            self.allow_preflight,
-            schedule_id,
-            platform_schedule_ids,
-            self.split != "train",
+            cache_manifest_path=str(self.cache_manifest_path),
+            split=self.split,
+            allow_preflight=self.allow_preflight,
+            scenario_schedule_id=schedule_id,
+            task_area=self.task_area,
+            platform_scenario_schedule_ids=platform_schedule_ids,
+            paired_evaluation=self.split != "train",
         )
         factory = FrozenCapabilityEnvironmentFactory(
             bundle=self.capability_bundle,

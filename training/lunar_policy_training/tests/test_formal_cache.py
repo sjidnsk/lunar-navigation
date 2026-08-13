@@ -46,6 +46,7 @@ from lunar_policy_training.polar_data.formal_cache import (
     _formal_platform_eligibility_ready,
     _ordered_bounded_process_map,
     _parallel_platform_map,
+    _selected_scenarios,
     load_formal_cache,
     platform_scenario_schedule_id,
     write_formal_cache,
@@ -1328,6 +1329,87 @@ def test_preflight_cache_round_trip_is_ineligible_for_formal_use(
             expected_identity=identity,
             require_full=True,
         )
+
+
+def test_bounded_inventory_is_stratified_across_all_frozen_splits() -> None:
+    scenarios = []
+    for split, count in (
+        ("train", 1536),
+        ("validation", 96),
+        ("test", 96),
+        ("holdout", 6),
+    ):
+        scenarios.extend(
+            {
+                "scene_id": _sha(f"{split}/{index}"),
+                "split": split,
+            }
+            for index in range(count)
+        )
+    document = {"scenarios": scenarios}
+
+    selected = _selected_scenarios(document, "bounded", 128)
+    repeated = _selected_scenarios(document, "bounded", 128)
+
+    assert selected == repeated
+    assert len(selected) == len({item["scene_id"] for item in selected}) == 128
+    assert {
+        split: sum(item["split"] == split for item in selected)
+        for split in ("train", "validation", "test", "holdout")
+    } == {"train": 98, "validation": 12, "test": 12, "holdout": 6}
+
+
+def test_bounded_cache_is_formal_eligible_only_with_common_platform_splits(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scene_ids = {
+        split: _sha(f"bounded/{split}")
+        for split in ("train", "validation", "test", "holdout")
+    }
+    scenario: dict[str, object] = {
+        "schema": "test-formal-scenario-manifest/v1",
+        "scenarios": [
+            {"scene_id": scene_id, "split": split}
+            for split, scene_id in scene_ids.items()
+        ],
+        "scenario_manifest_sha256": _sha("bounded-scenario-document"),
+    }
+    identity = _identity(str(scenario["scenario_manifest_sha256"]))
+    monkeypatch.setattr(
+        formal_cache_module,
+        "reward_weights_sha256",
+        lambda: identity.reward_sha256,
+    )
+    monkeypatch.setattr(
+        formal_cache_module,
+        "training_semantics_sha256",
+        lambda: identity.training_semantics_sha256,
+    )
+    root = tmp_path / "bounded-cache"
+    manifest = write_formal_cache(
+        root,
+        identity=identity,
+        scenario_manifest=scenario,
+        materialization="bounded",
+        scenes=tuple(
+            replace(_scene(scene_id), split=split)
+            for split, scene_id in scene_ids.items()
+        ),
+        repository_root=REPOSITORY_ROOT,
+    )
+
+    assert manifest["materialization"] == "bounded"
+    assert manifest["formal_eligible"] is True
+    assert {
+        split: payload["scene_count"]
+        for split, payload in manifest["exact_common_evaluation"][
+            "splits"
+        ].items()
+    } == {"holdout": 1, "test": 1, "train": 1, "validation": 1}
+    assert load_formal_cache(
+        root / "cache-manifest.json", require_full=True
+    ).formal_eligible is True
 
 
 @pytest.mark.parametrize(
