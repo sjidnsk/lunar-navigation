@@ -24,6 +24,9 @@ from lunar_policy_training.environment.formal_episode_state import (  # noqa: E4
     FormalWorkerState,
 )
 from lunar_policy_training.environment.macro_step import PolicyAction  # noqa: E402
+from lunar_policy_training.environment.observation_boundary import (  # noqa: E402
+    SensorBoundaryEvidence,
+)
 from test_formal_builder import _assembly  # noqa: E402
 
 
@@ -284,6 +287,61 @@ def test_physical_worker_replay_roundtrips_reserve_failures_bit_exactly(
     )
     assert restored.environment._audit_current_candidate_boundary() == (
         worker.environment._audit_current_candidate_boundary()
+    )
+
+
+def test_physical_worker_replay_preserves_failure_before_later_reveal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A cleared current failure set must not erase an earlier revision event."""
+    assembly, _, _ = _assembly(tmp_path)
+    worker = assembly.factory(0, "WHEELED")
+    episode = worker.episode
+    initial_snapshot = episode._snapshot
+    assert initial_snapshot is not None
+    candidate_ids = tuple(
+        str(initial_snapshot.candidates.candidate_ids[index])
+        for index in np.flatnonzero(initial_snapshot.candidates.mask)[:3]
+    )
+    assert len(candidate_ids) == 3
+    for candidate_id in candidate_ids:
+        refreshed = episode.refresh_after_planning_failure(
+            candidate_id,
+            CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+            initial_snapshot.planning_physical_snapshot_id,
+        )
+        worker.environment._install_observation(refreshed.next_observation)
+    evidence = SensorBoundaryEvidence(episode.current_pose, 1.0)
+    episode._record_reveal(evidence, "DECISION_BOUNDARY")
+    revealed = episode.controller.after_execution(
+        platform_type="WHEELED",
+        execution_state="DECISION_BOUNDARY",
+        evidence=evidence,
+    )
+    worker.environment._install_observation(revealed.next_observation)
+
+    snapshot = episode._snapshot
+    assert snapshot is not None
+    assert episode._planner_failed_candidate_ids == set()
+    state = FormalWorkerState.from_dict(worker.snapshot_episode_state())
+    restored = assembly.factory.restore_for_episode(
+        worker_index=0,
+        platform_type="WHEELED",
+        episode_cursor=0,
+        platform_worker_index=0,
+        platform_worker_count=1,
+        state=state.to_dict(),
+    )
+
+    assert restored.environment.current_observation.observation_identities == (
+        worker.environment.current_observation.observation_identities
+    )
+    assert all(
+        np.array_equal(
+            getattr(restored.environment.current_observation, name).numpy(),
+            getattr(worker.environment.current_observation, name).numpy(),
+        )
+        for name in worker.environment.current_observation.input_names
     )
 
 

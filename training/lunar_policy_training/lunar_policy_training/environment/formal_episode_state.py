@@ -370,8 +370,8 @@ class FormalWorkerState:
             or failed_value != sorted(set(failed_value))
         ):
             raise ValueError("formal planner failed candidate IDs are invalid")
-        expected_revision = len(history) + len(failed_value) + 1
-        if revision != expected_revision:
+        minimum_revision = len(history) + len(failed_value) + 1
+        if revision < minimum_revision:
             raise ValueError(
                 "formal observation revision does not match replay history"
             )

@@ -681,6 +681,22 @@ class FormalEpisode:
         if self._active_ground_option is not None:
             raise ValueError("formal replay cannot contain an active ground option")
 
+        expired_failure_rebuilds = (
+            state.observation_revision
+            - len(state.reveal_history)
+            - 1
+            - len(state.planner_failed_candidate_ids)
+        )
+        for _ in range(expired_failure_rebuilds):
+            execution_state = (
+                self.controller.current_observation.observation_identities[0]
+                .execution_state
+            )
+            self.controller.rebuild_without_sensor_update(
+                pose_map=self.current_pose,
+                execution_state=execution_state,
+            )
+
         for reveal in state.reveal_history:
             pose = self._pose_from_state(reveal.pose)
             evidence = SensorBoundaryEvidence(
