@@ -494,7 +494,7 @@ def test_formal_capability_preflight_rejects_incomplete_or_proxy_bundle(
         cli_module._formal_capability_preflight(REPOSITORY_ROOT)
 
 
-def test_formal_resume_equivalence_rejects_checkpoint_v7() -> None:
+def test_formal_resume_equivalence_rejects_checkpoint_v8() -> None:
     def checkpoint(schema_version: str) -> SimpleNamespace:
         return SimpleNamespace(
             schema_version=schema_version,
@@ -504,7 +504,7 @@ def test_formal_resume_equivalence_rejects_checkpoint_v7() -> None:
             environment_state={"value": 4},
         )
 
-    legacy = checkpoint("lunar-ppo-checkpoint/v7")
+    legacy = checkpoint("lunar-ppo-checkpoint/v8")
     with pytest.raises(PreflightError, match="checkpoint schema"):
         cli_module._build_formal_resume_equivalence_evidence(
             checkpoint_relative_path="resume-equivalence/update-1.pt",
@@ -521,7 +521,7 @@ def test_formal_resume_equivalence_rejects_checkpoint_v7() -> None:
             resumed_request_sha256="d" * 64,
         )
 
-    current = checkpoint("lunar-ppo-checkpoint/v8")
+    current = checkpoint("lunar-ppo-checkpoint/v9")
     evidence = cli_module._build_formal_resume_equivalence_evidence(
         checkpoint_relative_path="resume-equivalence/update-1.pt",
         checkpoint_sha256="a" * 64,
@@ -536,7 +536,7 @@ def test_formal_resume_equivalence_rejects_checkpoint_v7() -> None:
         uninterrupted_request_sha256="d" * 64,
         resumed_request_sha256="d" * 64,
     )
-    assert evidence["checkpoint_schema"] == "lunar-ppo-checkpoint/v8"
+    assert evidence["checkpoint_schema"] == "lunar-ppo-checkpoint/v9"
 
 
 def test_cache_accepts_runtime_only_visibility_repair(

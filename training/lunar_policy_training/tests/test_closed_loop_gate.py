@@ -90,7 +90,7 @@ def _cache_documents(scene_count: int = CLOSED_LOOP_MINIMUM_SCENES):
             }
         )
     manifest = {
-        "schema": "lunar-formal-training-cache/v7",
+        "schema": "lunar-formal-training-cache/v8",
         "cache_manifest_sha256": _sha("d"),
         "scenes": scenes,
         "exact_common_evaluation": {
@@ -410,9 +410,9 @@ def test_select_closed_loop_gate_cases_rejects_incomplete_physical_identity(
         select_closed_loop_gate_cases(manifest, scenario_document)
 
 
-def test_select_closed_loop_gate_cases_rejects_cache_v6() -> None:
+def test_select_closed_loop_gate_cases_rejects_cache_v7() -> None:
     manifest, scenario_document = _cache_documents()
-    manifest["schema"] = "lunar-formal-training-cache/v6"
+    manifest["schema"] = "lunar-formal-training-cache/v7"
 
     with pytest.raises(ClosedLoopGateError, match="current formal cache"):
         select_closed_loop_gate_cases(manifest, scenario_document)

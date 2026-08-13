@@ -30,7 +30,7 @@ _POLICY_CANDIDATE_COUNT = 64
 _CANONICAL_INT64_MIN = -(1 << 63)
 _CANONICAL_INT64_MAX = (1 << 63) - 1
 
-CANDIDATE_ID_SCHEMA = "lunar-physical-candidate-id/v1"
+CANDIDATE_ID_SCHEMA = "lunar-physical-candidate-id/v2"
 PHYSICAL_SNAPSHOT_SCHEMA = "lunar-physical-snapshot/v1"
 
 
@@ -1416,6 +1416,11 @@ class CandidateBuilderV2:
                 "z_mm": z_mm,
             }
         )
+        identity_heading = (
+            {"heading_bin_64": target_yaw_bin}
+            if platform_type == "HOPPER"
+            else {"heading_authority": "policy-action"}
+        )
         candidate_id = _canonical_sha256(
             {
                 "schema": CANDIDATE_ID_SCHEMA,
@@ -1423,7 +1428,7 @@ class CandidateBuilderV2:
                 "platform_id": platform_id,
                 "mission_revision": mission_revision,
                 **position_key,
-                "heading_bin_64": target_yaw_bin,
+                **identity_heading,
                 "goal_tolerance_mm": goal_tolerance_mm,
             }
         )

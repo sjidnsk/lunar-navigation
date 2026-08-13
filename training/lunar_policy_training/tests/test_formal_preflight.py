@@ -33,7 +33,7 @@ def _identity() -> RunIdentity:
 
 def _resume_equivalence() -> dict[str, object]:
     return {
-        "checkpoint_schema": "lunar-ppo-checkpoint/v8",
+        "checkpoint_schema": "lunar-ppo-checkpoint/v9",
         "checkpoint_relative_path": "resume-equivalence/update-1.pt",
         "checkpoint_sha256": "f" * 64,
         "checkpoint_roundtrip": True,
@@ -51,7 +51,7 @@ def _resume_equivalence() -> dict[str, object]:
     }
 
 
-def test_preflight_report_is_canonical_non_proxy_and_records_real_v8_resume(
+def test_preflight_report_is_canonical_non_proxy_and_records_real_v9_resume(
     tmp_path: pathlib.Path,
 ) -> None:
     report = build_formal_preflight_report(
@@ -182,9 +182,9 @@ def test_formal_preflight_rejects_semantics_v10() -> None:
         )
 
 
-def test_formal_preflight_rejects_checkpoint_v7() -> None:
+def test_formal_preflight_rejects_checkpoint_v8() -> None:
     resume = _resume_equivalence()
-    resume["checkpoint_schema"] = "lunar-ppo-checkpoint/v7"
+    resume["checkpoint_schema"] = "lunar-ppo-checkpoint/v8"
 
     with pytest.raises(FormalPreflightError, match="resume equivalence"):
         build_formal_preflight_report(

@@ -1673,10 +1673,35 @@ def test_rolling_continuation_snapshot_tracks_latest_pose_and_evidence(
     )
 
 
-def test_ground_failure_refresh_allows_locked_target_to_exit_after_reveal(
+def test_ground_request_uses_and_locks_policy_theta(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A deferred rebuild may legitimately remove the locked physical target."""
+    assembly, _, _ = _assembly(tmp_path)
+    episode = assembly.factory(0, "WHEELED").episode
+    observation = episode.controller.current_observation
+    identity = observation.observation_identities[0]
+    snapshot = episode._snapshot
+    assert snapshot is not None
+    candidate_index = int(np.flatnonzero(snapshot.candidates.mask)[0])
+    candidate_yaw = float(snapshot.candidates.target_yaw_rad[candidate_index])
+    action_yaw = math.atan2(
+        math.sin(candidate_yaw + 0.7),
+        math.cos(candidate_yaw + 0.7),
+    )
+    action = PolicyAction(candidate_index, action_yaw)
+
+    prepared = episode.begin_ground_option(action, identity)
+    continued = episode.continue_ground_option(identity)
+
+    assert prepared.request.goal.yaw_rad == action_yaw
+    assert continued.request.goal.yaw_rad == action_yaw
+    episode.clear_ground_option()
+
+
+def test_ground_failure_refresh_suppresses_stable_target_after_reveal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A moved robot must not turn the same ground target into a new identity."""
     assembly, _, _ = _assembly(tmp_path)
     episode = assembly.factory(0, "WHEELED").episode
     initial_observation = episode.controller.current_observation
@@ -1749,7 +1774,17 @@ def test_ground_failure_refresh_allows_locked_target_to_exit_after_reveal(
         candidate.candidate_id
         for candidate in final_snapshot.candidate_universe.candidates
     }
-    assert continued.candidate_id not in final_universe_ids
+    final_batch_ids = {
+        str(final_snapshot.candidates.candidate_ids[index])
+        for index in np.flatnonzero(final_snapshot.candidates.mask)
+    }
+    assert continued.candidate_id in final_universe_ids
+    assert continued.candidate_id not in final_batch_ids
+    assert (
+        final_snapshot.candidates.diagnostics
+        .planner_failed_current_snapshot_count
+        == 1
+    )
     assert episode._active_ground_option is None
     assert episode._pending_planning_failure is None
     assert refreshed.next_observation.observation_identities[0].state_time_ns == (

@@ -25,18 +25,18 @@ from lunar_policy_training.training_semantics import (
 )
 
 
-_V12 = (
+_V13 = (
     "lunar-training-semantics/"
     "sensor-30m-360-platform-physical-coverable-detail95-observed-physical-"
     "candidates-fixed2m-search-domain-snapshot-planner-failure-option-path-"
-    "observation-auditable-failure-global-ground-target/v12"
+    "observation-auditable-failure-global-ground-target-stable-action-yaw/v13"
 )
 
 
-def test_formal_training_semantics_names_global_ground_opportunity_v12() -> None:
+def test_formal_training_semantics_names_stable_ground_opportunity_v13() -> None:
     """Would fail if a new run retained the primitive-graph identity."""
-    assert FORMAL_TRAINING_SEMANTICS_VERSION == _V12
-    assert TRAINING_SEMANTICS_VERSION == _V12
+    assert FORMAL_TRAINING_SEMANTICS_VERSION == _V13
+    assert TRAINING_SEMANTICS_VERSION == _V13
 
 
 def test_detail_mask_pack_is_row_major_and_rejects_nonzero_padding() -> None:

@@ -122,7 +122,7 @@ def test_historical_boundary_failure_replays_against_v6_cache(
 
     cache_manifest = pathlib.Path(cache_manifest_raw).resolve(strict=True)
     cache = load_formal_cache(cache_manifest, require_full=False)
-    assert cache.manifest["schema"] == "lunar-formal-training-cache/v7"
+    assert cache.manifest["schema"] == "lunar-formal-training-cache/v8"
     assert cache.manifest["materialization"] == "preflight"
     assert cache.manifest["formal_eligible"] is False
     capability_bundle = load_project_formal_capability(REPOSITORY_ROOT)

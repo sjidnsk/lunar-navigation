@@ -1218,8 +1218,10 @@ class FormalEpisode:
         target_y = float(target_position[1])
         canvas.world_to_grid(target_x, target_y)
         target_z = float(target_position[2])
-        target_yaw = float(
-            snapshot.candidates.target_yaw_rad[action.frontier_index]
+        target_yaw = (
+            float(snapshot.candidates.target_yaw_rad[action.frontier_index])
+            if self.platform_type == "HOPPER"
+            else float(action.theta_rad)
         )
         request = self._base_request(snapshot.global_map, snapshot.local_map)
         # The observation boundary owns the authoritative state clock.  Cache
@@ -1264,9 +1266,7 @@ class FormalEpisode:
         if not isinstance(target, bridge_api.PointGoal):
             raise ValueError("formal ground option requires a point goal")
         position = target.position_m
-        target_yaw = float(
-            self._snapshot.candidates.target_yaw_rad[action.frontier_index]
-        )
+        target_yaw = float(action.theta_rad)
         values = (
             position.x,
             position.y,

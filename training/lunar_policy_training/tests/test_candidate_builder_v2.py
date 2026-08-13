@@ -151,7 +151,7 @@ def test_physical_candidate_contract_symbols_are_public() -> None:
     }
 
     assert expected <= set(candidate_builder_module.__all__)
-    assert CANDIDATE_ID_SCHEMA == "lunar-physical-candidate-id/v1"
+    assert CANDIDATE_ID_SCHEMA == "lunar-physical-candidate-id/v2"
     assert PHYSICAL_SNAPSHOT_SCHEMA == "lunar-physical-snapshot/v1"
     assert CandidateBuildResult is candidate_builder_module.CandidateBuildResult
     assert PhysicalCandidate is candidate_builder_module.PhysicalCandidate
@@ -623,6 +623,35 @@ def test_candidate_ids_use_exact_hopper_landing_xy_but_ground_grid_key() -> None
         candidate.candidate_id for candidate in ground_second.candidates
     ) == tuple(candidate.candidate_id for candidate in ground_first.candidates)
     assert ground_second.universe_sha256 == ground_first.universe_sha256
+
+
+def test_ground_candidate_id_is_stable_when_robot_bearing_changes() -> None:
+    """The policy action owns terminal yaw; robot-relative bearing is not identity."""
+    world = _world_with_frontier()
+    target = (122, 127)
+    physical_mask = np.zeros_like(world.observed_mask)
+    physical_mask[target] = True
+    physical = _physical_reachability(world, mask=physical_mask)
+    west_x, west_y = world.canvas.grid_center_world(122, 120)
+    south_x, south_y = world.canvas.grid_center_world(130, 127)
+
+    from_west = _formal_universe(
+        world=world,
+        pose=Pose2(west_x, west_y),
+        physical_reachability=physical,
+    )
+    from_south = _formal_universe(
+        world=world,
+        pose=Pose2(south_x, south_y),
+        physical_reachability=physical,
+    )
+
+    assert len(from_west.candidates) == len(from_south.candidates) == 1
+    west_candidate = from_west.candidates[0]
+    south_candidate = from_south.candidates[0]
+    assert west_candidate.position_grid_key == south_candidate.position_grid_key
+    assert west_candidate.target_yaw_bin != south_candidate.target_yaw_bin
+    assert west_candidate.candidate_id == south_candidate.candidate_id
 
 
 def test_candidate_identity_rejects_out_of_range_millimetre_key() -> None:

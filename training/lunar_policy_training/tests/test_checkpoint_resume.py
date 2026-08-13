@@ -126,20 +126,20 @@ def test_resume_preserves_consumed_gpu_budget(tmp_path: pathlib.Path) -> None:
     budget = TrainingBudget.from_checkpoint(resumed)
 
     assert resumed.schema_version == CHECKPOINT_SCHEMA_VERSION
-    assert resumed.schema_version == "lunar-ppo-checkpoint/v8"
+    assert resumed.schema_version == "lunar-ppo-checkpoint/v9"
     assert resumed.run_identity == _identity()
     assert resumed.contract_version == OBSERVATION_CONTRACT_VERSION
     assert resumed.consumed_gpu_seconds == 7200.0
     assert budget.remaining_gpu_seconds == 86400.0 - 7200.0
 
 
-def test_checkpoint_resume_rejects_v7_checkpoint(
+def test_checkpoint_resume_rejects_v8_checkpoint(
     tmp_path: pathlib.Path,
 ) -> None:
     checkpoint = _checkpoint(consumed_gpu_seconds=7200.0)
     body = _body_from_checkpoint(checkpoint)
-    body["schema_version"] = "lunar-ppo-checkpoint/v7"
-    path = tmp_path / "checkpoint-v7.pt"
+    body["schema_version"] = "lunar-ppo-checkpoint/v8"
+    path = tmp_path / "checkpoint-v8.pt"
     torch.save(
         {"body": body, "body_sha256": _semantic_sha256(body)},
         path,
@@ -155,9 +155,9 @@ def test_checkpoint_resume_rejects_v7_checkpoint(
         )
 
 
-def test_restore_training_state_rejects_v7_object_without_mutation() -> None:
+def test_restore_training_state_rejects_v8_object_without_mutation() -> None:
     checkpoint = _checkpoint(consumed_gpu_seconds=7200.0)
-    legacy = replace(checkpoint, schema_version="lunar-ppo-checkpoint/v7")
+    legacy = replace(checkpoint, schema_version="lunar-ppo-checkpoint/v8")
     model = torch.nn.Linear(3, 2)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=2)
@@ -303,7 +303,7 @@ def _policy_parent_checkpoint(
         candidate_checkpoint_gpu_seconds=7200.0,
         environment_state=(
             {
-                "schema_version": "lunar-formal-environment-state/v6",
+                "schema_version": "lunar-formal-environment-state/v7",
                 "scenario_schedule_id": "cache-sha/train/v3",
                 "worker_episode_states": [
                     _formal_worker_state(index) for index in range(24)
@@ -483,7 +483,7 @@ def test_formal_checkpoint_roundtrips_exact_active_worker_states(
     tmp_path: pathlib.Path,
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v6",
+        "schema_version": "lunar-formal-environment-state/v7",
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)
@@ -510,11 +510,11 @@ def test_formal_checkpoint_roundtrips_exact_active_worker_states(
     assert resumed.environment_state == environment_state
 
 
-def test_checkpoint_rejects_formal_v5_environment_state(
+def test_checkpoint_rejects_formal_v6_environment_state(
     tmp_path: pathlib.Path,
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v6",
+        "schema_version": "lunar-formal-environment-state/v7",
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)
@@ -528,9 +528,9 @@ def test_checkpoint_rejects_formal_v5_environment_state(
     )
     body = _body_from_checkpoint(checkpoint)
     body["environment_state"]["schema_version"] = (
-        "lunar-formal-environment-state/v5"
+        "lunar-formal-environment-state/v6"
     )
-    path = tmp_path / "formal-v5.pt"
+    path = tmp_path / "formal-v6.pt"
     torch.save(
         {"body": body, "body_sha256": _semantic_sha256(body)},
         path,
@@ -544,7 +544,7 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v6",
+        "schema_version": "lunar-formal-environment-state/v7",
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)

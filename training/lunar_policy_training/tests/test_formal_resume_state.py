@@ -177,7 +177,7 @@ def test_formal_worker_state_roundtrips_as_strict_json() -> None:
     state = FormalWorkerState.from_dict(payload)
 
     assert FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION == (
-        "lunar-formal-environment-state/v6"
+        "lunar-formal-environment-state/v7"
     )
     assert state.to_dict() == payload
     assert state.episode_cursor == 4
