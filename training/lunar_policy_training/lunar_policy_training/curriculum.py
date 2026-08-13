@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from .capability_freeze import FrozenPlatformCapability
+from .config import WORKER_CANDIDATES
 
 
 PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
@@ -85,7 +86,8 @@ class CurriculumSchedule:
 
     @property
     def joint_worker_allocation(self) -> dict[str, int]:
-        return {platform: 8 for platform in PLATFORMS}
+        per_platform = max(WORKER_CANDIDATES) // len(PLATFORMS)
+        return {platform: per_platform for platform in PLATFORMS}
 
     @property
     def evaluation_scenario_indices(self) -> tuple[int, int, int]:
@@ -221,8 +223,11 @@ class CurriculumSchedule:
     def worker_allocation(
         self, phase: str, *, selected_workers: int
     ) -> dict[str, int]:
-        if type(selected_workers) is not int or selected_workers not in (18, 24):
-            raise ValueError("curriculum workers must be the frozen 18 or 24")
+        if (
+            type(selected_workers) is not int
+            or selected_workers not in WORKER_CANDIDATES
+        ):
+            raise ValueError("curriculum workers must use a calibrated tier")
         warmup_platform = {
             "warmup_wheeled": "WHEELED",
             "warmup_legged": "LEGGED",

@@ -100,7 +100,7 @@ def _valid_report() -> dict[str, object]:
         "training_semantics_sha256": SEMANTICS_SHA256,
         "fixture": {
             "scenario_seed": 4080,
-            "workers": 24,
+            "workers": 30,
             "planner_workload": "cpp-v3-current-capability-v2",
             "native_warmup_count": 50,
             "native_sample_count": 200,
@@ -247,9 +247,9 @@ def test_formal_benchmark_uses_project_capability_without_external_lock(
 
 def test_formal_throughput_rejects_missing_current_capability_or_worker_fallback() -> None:
     with pytest.raises(SensorPerformanceError, match="formal capability"):
-        benchmark_observation_throughput(workers=24)
-    with pytest.raises(SensorPerformanceError, match="24 workers"):
-        benchmark_observation_throughput(workers=18, diagnostic_only=True)
+        benchmark_observation_throughput(workers=30)
+    with pytest.raises(SensorPerformanceError, match="30 workers"):
+        benchmark_observation_throughput(workers=24, diagnostic_only=True)
 
 
 @pytest.mark.parametrize(
@@ -273,7 +273,7 @@ def test_formal_throughput_rejects_missing_current_capability_or_worker_fallback
             "fixture",
         ),
         (
-            lambda report: report["fixture"].__setitem__("workers", 18),
+            lambda report: report["fixture"].__setitem__("workers", 24),
             "fixture",
         ),
         (

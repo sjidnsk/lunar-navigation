@@ -15,7 +15,7 @@ from lunar_planner_training_bridge import PlanningOutcome
 from lunar_model_contract import ObservationContractV3
 
 from ..capability_freeze import FrozenPlatformCapability, ScenarioIdentity
-from ..config import PLATFORMS
+from ..config import PLATFORMS, WORKER_CANDIDATES
 from ..policy.observation import (
     ObservationIdentity,
     PolicyBatch,
@@ -969,10 +969,11 @@ class ParallelEnvPool:
 
 
 def joint_worker_allocation(total_workers: int) -> dict[str, int]:
-    """Return the frozen eight-per-platform joint allocation."""
-    if type(total_workers) is not int or total_workers != 24:
-        raise ValueError("joint training requires exactly 24 workers")
-    return {platform: 8 for platform in PLATFORMS}
+    """Balance one calibrated worker tier equally across all platforms."""
+    if type(total_workers) is not int or total_workers not in WORKER_CANDIDATES:
+        raise ValueError("joint training requires a calibrated worker tier")
+    per_platform = total_workers // len(PLATFORMS)
+    return {platform: per_platform for platform in PLATFORMS}
 
 
 def _create_environment_for_episode(

@@ -52,9 +52,9 @@ def test_frozen_curriculum_reserves_sixteen_hours_for_joint_training() -> None:
     assert schedule.platform_warmup_limit_s == 2 * 60 * 60
     assert schedule.joint_minimum_s == 16 * 60 * 60
     assert schedule.joint_worker_allocation == {
-        "WHEELED": 8,
-        "LEGGED": 8,
-        "HOPPER": 8,
+        "WHEELED": 10,
+        "LEGGED": 10,
+        "HOPPER": 10,
     }
 
 
@@ -103,6 +103,14 @@ def test_active_gpu_phase_order_and_allocations_prepare_formal_train() -> None:
         "WHEELED": 6,
         "LEGGED": 6,
         "HOPPER": 6,
+    }
+    assert schedule.worker_allocation("warmup_wheeled", selected_workers=30) == {
+        "WHEELED": 30
+    }
+    assert schedule.worker_allocation("joint", selected_workers=30) == {
+        "WHEELED": 10,
+        "LEGGED": 10,
+        "HOPPER": 10,
     }
 
 

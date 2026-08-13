@@ -76,6 +76,7 @@ from .config import (
     ROLLOUT_HORIZON_CANDIDATES,
     ResolvedTrainingConfig,
     TaskAreaConfig,
+    WORKER_CANDIDATES,
     load_training_config,
     resolve_training_config,
     with_rollout_horizon,
@@ -3467,8 +3468,8 @@ def _formal_resume_equivalence_check(
 ) -> dict[str, object]:
     """Run update one, persist V6, then compare update two across resume."""
     _validated_cuda_device()
-    if selected_workers not in (18, 24):
-        raise PreflightError("formal resume proof requires 18 or 24 workers")
+    if selected_workers not in WORKER_CANDIDATES:
+        raise PreflightError("formal resume proof requires a calibrated worker tier")
     allocation = {
         platform: selected_workers // len(PLATFORMS) for platform in PLATFORMS
     }
@@ -3757,7 +3758,7 @@ def _formal_resume_equivalence_check(
 
 
 class _CudaPlannerCalibrationWorkload:
-    """Same real PlannerBridge + policy workload at 18 and 24 workers."""
+    """Same real PlannerBridge + policy workload across calibrated worker tiers."""
 
     _RUNTIME_PROBE_HORIZON = 4
 
@@ -4259,11 +4260,7 @@ def _proxy_rollout(
 
 
 def _allocation_for_workers(workers: int) -> dict[str, int]:
-    if workers == 24:
-        return joint_worker_allocation(24)
-    if workers == 18:
-        return {"WHEELED": 6, "LEGGED": 6, "HOPPER": 6}
-    raise ValueError("runtime calibration only supports 18 or 24 workers")
+    return joint_worker_allocation(workers)
 
 
 def _checkpoint_target(

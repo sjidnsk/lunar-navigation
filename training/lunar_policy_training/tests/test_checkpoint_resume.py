@@ -720,6 +720,22 @@ def test_checkpoint_roundtrips_single_platform_warmup_allocation(
     assert load_checkpoint(path).worker_allocation == {"WHEELED": 24}
 
 
+def test_checkpoint_roundtrips_thirty_worker_joint_allocation(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if a faster 30-worker run became impossible to resume."""
+    allocation = {"WHEELED": 10, "LEGGED": 10, "HOPPER": 10}
+    checkpoint = _checkpoint(
+        consumed_gpu_seconds=120.0,
+        worker_allocation=allocation,
+    )
+    path = tmp_path / "latest.pt"
+
+    save_checkpoint_atomic(path, checkpoint)
+
+    assert load_checkpoint(path).worker_allocation == allocation
+
+
 def test_exhausted_checkpoint_resume_never_restarts_terminal_unit(
     tmp_path: pathlib.Path,
 ) -> None:

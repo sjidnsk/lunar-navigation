@@ -22,7 +22,7 @@ from .training_semantics import training_semantics_sha256
 SCHEMA_VERSION = "sensor-observation-performance/v1"
 NATIVE_SCHEMA_VERSION = "native-visibility-benchmark/v1"
 SCENARIO_SEED = 4080
-REQUIRED_WORKERS = 24
+REQUIRED_WORKERS = 30
 NATIVE_WARMUP_COUNT = 50
 NATIVE_SAMPLE_COUNT = 200
 THROUGHPUT_WARMUP_STEPS = 2
@@ -68,7 +68,7 @@ def benchmark_observation_throughput(
 ) -> dict[str, float]:
     """Measure paired end-to-end sampling on the current planner/capability."""
     if type(workers) is not int or workers != REQUIRED_WORKERS:
-        raise SensorPerformanceError("sensor throughput benchmark requires 24 workers")
+        raise SensorPerformanceError("sensor throughput benchmark requires 30 workers")
     if diagnostic_only:
         if capability_bundle is not None:
             raise SensorPerformanceError(
@@ -99,7 +99,7 @@ def benchmark_observation_throughput(
             results = tuple(executor.map(_throughput_worker, range(workers)))
     except Exception as error:
         raise SensorPerformanceError(
-            "24-worker sensor throughput benchmark failed"
+            "30-worker sensor throughput benchmark failed"
         ) from error
     disabled_elapsed = max(result[0] for result in results)
     enabled_elapsed = max(result[1] for result in results)
@@ -529,7 +529,7 @@ def build_sensor_performance_report(
     source_commit: str,
     host: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Combine native latency and 24-worker throughput into one sealed report."""
+    """Combine native latency and 30-worker throughput into one sealed report."""
     native = _validated_native_benchmark(native_benchmark)
     disabled = _positive_finite(
         observation_disabled_steps_per_second,

@@ -1,10 +1,10 @@
 parallel:
-  worker_candidates: [18, 24]
-  preferred_workers: 24
+  worker_candidates: [18, 24, 30]
+  preferred_workers: 30
   joint_workers:
-    WHEELED: 8
-    LEGGED: 8
-    HOPPER: 8
+    WHEELED: 10
+    LEGGED: 10
+    HOPPER: 10
   nested_compute_threads: 1
   gpu_memory_fraction_max: 0.90
 task_area:

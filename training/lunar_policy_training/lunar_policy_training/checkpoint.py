@@ -20,6 +20,7 @@ from .budget import (
     BUDGET_EXTENSION_BLOCK_SECONDS,
     INITIAL_GPU_BUDGET_SECONDS,
 )
+from .config import WORKER_CANDIDATES
 from .environment.formal_episode_state import (
     FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
     FormalWorkerState,
@@ -907,7 +908,7 @@ def _validate_body(body: object) -> None:
         or not allocation
         or not set(allocation) <= {"WHEELED", "LEGGED", "HOPPER"}
         or any(type(value) is not int or value <= 0 for value in allocation.values())
-        or sum(allocation.values()) not in (18, 24)
+        or sum(allocation.values()) not in WORKER_CANDIDATES
     ):
         raise CheckpointError("checkpoint worker allocation is invalid")
     _validate_environment_state(

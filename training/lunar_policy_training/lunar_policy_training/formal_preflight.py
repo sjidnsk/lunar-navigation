@@ -17,7 +17,7 @@ from lunar_model_contract import ObservationContractV3
 from lunar_planner_training_bridge import PlannerBridge
 
 from .checkpoint import CHECKPOINT_SCHEMA_VERSION, RunIdentity
-from .config import PLATFORMS, ROLLOUT_HORIZON_CANDIDATES
+from .config import PLATFORMS, ROLLOUT_HORIZON_CANDIDATES, WORKER_CANDIDATES
 from .environment.formal_builder import FormalEnvironmentAssembly
 from .environment.macro_step import PolicyAction
 from .environment.parallel_pool import ParallelActions, ParallelEnvPool
@@ -504,7 +504,7 @@ def run_formal_preflight(
     source_commit: str,
     sensor_performance_sha256: str,
     artifact_root: Path,
-    worker_candidates: tuple[int, ...] = (18, 24),
+    worker_candidates: tuple[int, ...] = WORKER_CANDIDATES,
     selected_workers: int | None = None,
     selected_micro_batch: int = 2,
     selected_rollout_horizon: int = 32,

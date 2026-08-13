@@ -53,11 +53,34 @@ def resolved_config():
     )
 
 
-def test_joint_pool_has_eight_workers_per_platform() -> None:
-    """Would fail if any platform lost its fixed share of the 24-worker pool."""
-    allocation = joint_worker_allocation(total_workers=24)
+def test_training_config_calibrates_the_added_thirty_worker_tier(
+    resolved_config,
+) -> None:
+    """Would fail if the runtime never measured the requested extra workers."""
+    assert resolved_config.parallel.worker_candidates == (18, 24, 30)
+    assert resolved_config.parallel.preferred_workers == 30
+    assert dict(resolved_config.parallel.joint_workers) == {
+        "WHEELED": 10,
+        "LEGGED": 10,
+        "HOPPER": 10,
+    }
 
-    assert allocation == {"WHEELED": 8, "LEGGED": 8, "HOPPER": 8}
+
+@pytest.mark.parametrize(
+    ("total_workers", "expected_per_platform"),
+    ((18, 6), (24, 8), (30, 10)),
+)
+def test_joint_pool_balances_every_calibrated_worker_candidate(
+    total_workers: int, expected_per_platform: int
+) -> None:
+    """Would fail if a calibrated worker tier lost equal platform coverage."""
+    allocation = joint_worker_allocation(total_workers=total_workers)
+
+    assert allocation == {
+        "WHEELED": expected_per_platform,
+        "LEGGED": expected_per_platform,
+        "HOPPER": expected_per_platform,
+    }
 
 
 def test_checkpoint_interval_is_thirty_minutes(resolved_config) -> None:

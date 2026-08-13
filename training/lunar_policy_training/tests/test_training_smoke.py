@@ -1345,9 +1345,9 @@ def test_cuda_interrupt_resume_preserves_step_budget_and_allocation(
         evidence.resumed_consumed_gpu_seconds
     )
     assert manifest["frozen_config"]["parallel"]["joint_workers"] == {
-        "WHEELED": 8,
-        "LEGGED": 8,
-        "HOPPER": 8,
+        "WHEELED": 10,
+        "LEGGED": 10,
+        "HOPPER": 10,
     }
     selected_workers = manifest["runtime_calibration"]["selected_workers"]
     selected_micro_batch = manifest["runtime_calibration"][

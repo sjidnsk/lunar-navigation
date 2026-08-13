@@ -11,6 +11,7 @@ import yaml
 
 
 PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
+WORKER_CANDIDATES = (18, 24, 30)
 ROLLOUT_HORIZON_CANDIDATES = (16, 32, 64)
 TASK_AREA_SAMPLING_ALGORITHM = "deterministic-uniform-square/v1"
 _CONFIG_FIELDS = {
@@ -301,9 +302,9 @@ def resolve_training_config(raw: Mapping[str, object]) -> ResolvedTrainingConfig
 def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
     validate_ppo_config(config.ppo)
     expected = {
-        "worker_candidates": (18, 24),
-        "preferred_workers": 24,
-        "joint_workers": {"WHEELED": 8, "LEGGED": 8, "HOPPER": 8},
+        "worker_candidates": WORKER_CANDIDATES,
+        "preferred_workers": 30,
+        "joint_workers": {"WHEELED": 10, "LEGGED": 10, "HOPPER": 10},
         "nested_compute_threads": 1,
         "gpu_memory_fraction_max": 0.90,
         "checkpoint_interval_seconds": 1800,

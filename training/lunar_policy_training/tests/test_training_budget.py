@@ -3,6 +3,8 @@ from __future__ import annotations
 import pathlib
 import sys
 import json
+from dataclasses import replace
+from types import MappingProxyType
 
 import pytest
 
@@ -75,21 +77,30 @@ def test_bounded_interval_saturates_when_actual_exceeds_reserve() -> None:
 
 
 class _CalibrationProbe:
-    def __init__(self, bad_24: str | None = None) -> None:
+    def __init__(
+        self,
+        bad_high_tiers: str | None = None,
+        *,
+        bad_30_only: str | None = None,
+    ) -> None:
         self.calls: list[tuple[int, int]] = []
-        self.bad_24 = bad_24
+        self.bad_high_tiers = bad_high_tiers
+        self.bad_30_only = bad_30_only
 
     def __call__(self, workers: int, micro_batch: int) -> CalibrationMeasurement:
         self.calls.append((workers, micro_batch))
         peak = {1: 0.40, 2: 0.80, 4: 0.95}[micro_batch]
-        throughput = (100.0 if workers == 18 else 120.0) + micro_batch
-        oom = workers == 24 and self.bad_24 == "oom" and micro_batch == 2
+        throughput = {18: 100.0, 24: 120.0, 30: 140.0}[workers] + micro_batch
+        bad_mode = self.bad_high_tiers if workers in (24, 30) else None
+        if workers == 30 and self.bad_30_only is not None:
+            bad_mode = self.bad_30_only
+        oom = bad_mode == "oom" and micro_batch == 2
         planner_timeouts = (
             1
-            if workers == 24 and self.bad_24 == "timeout" and micro_batch == 2
+            if bad_mode == "timeout" and micro_batch == 2
             else 0
         )
-        if workers == 24 and self.bad_24 == "throughput":
+        if bad_mode == "throughput":
             throughput = 50.0 + micro_batch
         return CalibrationMeasurement(
             workers=workers,
@@ -143,10 +154,114 @@ class _HorizonProbe:
         )
 
 
-def test_calibration_really_compares_18_and_24_and_freezes_manifest(
+def test_calibration_selects_fastest_safe_worker_tier_from_three_candidates(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Would fail if preferred=24 skipped the required 18-worker control."""
+    """Would fail if the new 30-worker tier were ignored or forced when slower."""
+    baseline = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+    config = replace(
+        baseline,
+        parallel=replace(
+            baseline.parallel,
+            worker_candidates=(18, 24, 30),
+            preferred_workers=30,
+            joint_workers=MappingProxyType(
+                {"WHEELED": 10, "LEGGED": 10, "HOPPER": 10}
+            ),
+        ),
+    )
+    calls: list[tuple[int, int]] = []
+
+    def probe(workers: int, micro_batch: int) -> CalibrationMeasurement:
+        calls.append((workers, micro_batch))
+        throughput = {18: 90.0, 24: 125.0, 30: 140.0}[workers]
+        return CalibrationMeasurement(
+            workers=workers,
+            micro_batch=micro_batch,
+            throughput_samples_per_second=throughput + micro_batch,
+            peak_gpu_memory_fraction=0.5,
+            planner_timeouts=0,
+            oom=False,
+            gpu_seconds=1.0,
+        )
+
+    result = calibrate_runtime(
+        config=config,
+        workload=probe,
+        budget=TrainingBudget(),
+        manifest_path=tmp_path / "run-manifest.json",
+        micro_batch_candidates=(1, 2),
+    )
+
+    assert calls == [
+        (18, 1),
+        (18, 2),
+        (24, 1),
+        (24, 2),
+        (30, 1),
+        (30, 2),
+    ]
+    assert result.selected_workers == 30
+    assert result.selected_micro_batch == 2
+    assert result.compared_workers == (18, 24, 30)
+
+
+def test_horizon_calibration_uses_fastest_safe_tier_when_thirty_is_slower(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if adding workers forced a slower tier into formal training."""
+    baseline = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+    config = replace(
+        baseline,
+        parallel=replace(
+            baseline.parallel,
+            worker_candidates=(18, 24, 30),
+            preferred_workers=30,
+            joint_workers=MappingProxyType(
+                {"WHEELED": 10, "LEGGED": 10, "HOPPER": 10}
+            ),
+        ),
+    )
+
+    def workload(workers: int, micro_batch: int) -> CalibrationMeasurement:
+        return CalibrationMeasurement(
+            workers=workers,
+            micro_batch=micro_batch,
+            throughput_samples_per_second={18: 90.0, 24: 140.0, 30: 110.0}[
+                workers
+            ],
+            peak_gpu_memory_fraction=0.5,
+            planner_timeouts=0,
+            oom=False,
+            gpu_seconds=1.0,
+        )
+
+    horizon_probe = _HorizonProbe()
+    result = calibrate_runtime(
+        config=config,
+        workload=workload,
+        horizon_workload=horizon_probe,
+        budget=TrainingBudget(),
+        manifest_path=tmp_path / "run-manifest.json",
+        micro_batch_candidates=(1,),
+    )
+
+    assert result.selected_workers == 24
+    assert horizon_probe.calls == [
+        (24, 1, 16, 64),
+        (24, 1, 32, 64),
+        (24, 1, 64, 64),
+    ]
+
+
+def test_calibration_really_compares_all_worker_tiers_and_freezes_manifest(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Would fail if the preferred tier skipped either lower control."""
     config = load_training_config(
         REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
     )
@@ -169,13 +284,16 @@ def test_calibration_really_compares_18_and_24_and_freezes_manifest(
         (24, 1),
         (24, 2),
         (24, 4),
+        (30, 1),
+        (30, 2),
+        (30, 4),
     ]
-    assert result.selected_workers == 24
+    assert result.selected_workers == 30
     assert result.selected_micro_batch == 2
-    assert result.compared_workers == (18, 24)
-    assert budget.consumed_gpu_seconds == 6.0
+    assert result.compared_workers == (18, 24, 30)
+    assert budget.consumed_gpu_seconds == 9.0
     payload = json.loads(manifest.read_text(encoding="utf-8"))
-    assert payload["runtime_calibration"]["selected_workers"] == 24
+    assert payload["runtime_calibration"]["selected_workers"] == 30
     assert payload["runtime_calibration"]["selected_micro_batch"] == 2
     assert payload["budget_extension_blocks"] == 0
     assert payload["total_gpu_budget_seconds"] == 86400
@@ -208,13 +326,13 @@ def test_rollout_horizon_calibration_uses_equal_work_and_freezes_selection(
     )
 
     assert horizon_probe.calls == [
-        (24, 2, 16, 64),
-        (24, 2, 32, 64),
-        (24, 2, 64, 64),
+        (30, 2, 16, 64),
+        (30, 2, 32, 64),
+        (30, 2, 64, 64),
     ]
     assert result.selected_rollout_horizon == 32
     assert {item.total_transitions for item in result.horizon_measurements} == {
-        24 * 64
+        30 * 64
     }
     payload = json.loads(
         (tmp_path / "run-manifest.json").read_text(encoding="utf-8")
@@ -380,24 +498,44 @@ def test_incomplete_horizon_probe_is_recorded_but_cannot_be_selected(
     assert result.horizon_measurements[-1].failure_reason == "worker exited"
 
 
-@pytest.mark.parametrize("bad_24", ["oom", "timeout", "throughput"])
-def test_calibration_falls_back_to_18_when_24_is_not_safe_or_faster(
-    tmp_path: pathlib.Path, bad_24: str
+@pytest.mark.parametrize("bad_high_tiers", ["oom", "timeout", "throughput"])
+def test_calibration_falls_back_to_18_when_higher_tiers_are_not_safe_or_faster(
+    tmp_path: pathlib.Path, bad_high_tiers: str
 ) -> None:
-    """Would fail if preferred workers overrode OOM, timeout, or throughput gates."""
+    """Would fail if worker count overrode OOM, timeout, or throughput gates."""
     config = load_training_config(
         REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
     )
 
     result = calibrate_runtime(
         config=config,
-        workload=_CalibrationProbe(bad_24),
+        workload=_CalibrationProbe(bad_high_tiers),
         budget=TrainingBudget(),
-        manifest_path=tmp_path / f"{bad_24}.json",
+        manifest_path=tmp_path / f"{bad_high_tiers}.json",
         micro_batch_candidates=(1, 2, 4),
     )
 
     assert result.selected_workers == 18
+
+
+@pytest.mark.parametrize("bad_30", ["oom", "timeout", "throughput"])
+def test_calibration_falls_back_to_24_when_only_thirty_is_not_qualified(
+    tmp_path: pathlib.Path, bad_30: str
+) -> None:
+    """Would fail if one bad top tier discarded a safe faster middle tier."""
+    config = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v3_joint.yaml"
+    )
+
+    result = calibrate_runtime(
+        config=config,
+        workload=_CalibrationProbe(bad_30_only=bad_30),
+        budget=TrainingBudget(),
+        manifest_path=tmp_path / f"30-{bad_30}.json",
+        micro_batch_candidates=(1, 2, 4),
+    )
+
+    assert result.selected_workers == 24
 
 
 def test_calibration_rejects_ipc_failure_instead_of_labeling_planner_timeout(

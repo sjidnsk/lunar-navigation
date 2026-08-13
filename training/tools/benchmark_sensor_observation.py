@@ -57,7 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if arguments.workers != REQUIRED_WORKERS:
             raise SensorPerformanceError(
-                "sensor performance qualification requires exactly 24 workers"
+                "sensor performance qualification requires exactly 30 workers"
             )
         if arguments.diagnostic_only:
             if arguments.output is not None:

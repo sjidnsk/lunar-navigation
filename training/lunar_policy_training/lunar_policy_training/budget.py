@@ -501,25 +501,23 @@ def calibrate_runtime(
         worker_safe[workers] = safe and workers in best
 
     compared = tuple(config.parallel.worker_candidates)
-    if compared != (18, 24):
-        raise CalibrationError("runtime calibration must compare 18 and 24 workers")
+    if compared != (18, 24, 30):
+        raise CalibrationError(
+            "runtime calibration must compare 18, 24, and 30 workers"
+        )
     if not worker_safe.get(18, False):
         raise CalibrationError("18-worker control did not produce a safe result")
-    selected_workers = 18
-    if (
-        worker_safe.get(24, False)
-        and best[24].throughput_samples_per_second
-        >= best[18].throughput_samples_per_second
-    ):
-        selected_workers = 24
+    selected_workers = max(
+        (workers for workers in compared if worker_safe.get(workers, False)),
+        key=lambda workers: (
+            best[workers].throughput_samples_per_second,
+            workers,
+        ),
+    )
     selected_micro_batch = best[selected_workers].micro_batch
     horizon_measurements: list[HorizonCalibrationMeasurement] = []
     selected_rollout_horizon = config.ppo.rollout_horizon
     if horizon_workload is not None:
-        if selected_workers != config.parallel.preferred_workers:
-            raise CalibrationError(
-                "24-worker control must qualify before formal horizon calibration"
-            )
         qualified_horizons: list[HorizonCalibrationMeasurement] = []
         expected_total = selected_workers * horizon_transitions_per_worker
         for rollout_horizon in horizons:
