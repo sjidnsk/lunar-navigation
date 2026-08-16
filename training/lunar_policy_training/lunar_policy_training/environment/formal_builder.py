@@ -142,6 +142,43 @@ _HOPPER_TASK_SENSOR_ALGORITHM_ID = (
 )
 
 
+def _ground_start_resample_reason(
+    output: object,
+    platform_type: str,
+) -> str | None:
+    expected_reason = {
+        "WHEELED": "WHEEL_START_NOT_SAFE",
+        "LEGGED": "LEGGED_START_NOT_SAFE",
+    }.get(platform_type)
+    if expected_reason is None:
+        raise ValueError("ground start qualification platform is invalid")
+    start_reasons = {
+        "WHEEL_START_NOT_SAFE",
+        "LEGGED_START_NOT_SAFE",
+    }
+    reported_reasons = {
+        str(output.reason_code),
+        *(str(reason) for reason in output.diagnostics.warning_codes),
+    }
+    observed_start_reasons = reported_reasons & start_reasons
+    if observed_start_reasons:
+        if observed_start_reasons != {expected_reason}:
+            raise EnvironmentInvariantError(
+                "GROUND_START_QUALIFICATION_PLATFORM_MISMATCH"
+            )
+        return expected_reason
+    if output.outcome in {
+        bridge_api.PlanningOutcome.INVALID_REQUEST,
+        bridge_api.PlanningOutcome.STALE_INPUT,
+        bridge_api.PlanningOutcome.NUMERICAL_FAILURE,
+        bridge_api.PlanningOutcome.RESOURCE_EXHAUSTED,
+        bridge_api.PlanningOutcome.ACTIVE_REFERENCE_INVALIDATED,
+        bridge_api.PlanningOutcome.CANCELED,
+    }:
+        raise EnvironmentInvariantError("GROUND_START_QUALIFICATION_FAILED")
+    return None
+
+
 def _formal_scheduled_entries(
     entries: Sequence[Mapping[str, object]],
     *,
