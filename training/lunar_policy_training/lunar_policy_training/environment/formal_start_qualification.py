@@ -67,10 +67,10 @@ def _physical_position_at_cell(
     physical: PhysicalReachabilityResult,
     cell: tuple[int, int],
 ) -> tuple[float, float, float] | None:
-    authority = physical.hopper_opportunity_authority
-    if physical.platform_type == "HOPPER" and authority is not None:
-        mask = authority.certified_mask
-        positions = authority.certified_positions_m
+    envelope = physical.hopper_single_hop_envelope
+    if physical.platform_type == "HOPPER" and envelope is not None:
+        mask = envelope.certified_mask
+        positions = envelope.certified_positions_m
     else:
         mask = physical.physical_observation_pose_mask
         positions = physical.observation_positions_m
@@ -256,7 +256,7 @@ def _qualify_at_pose(
         observed_elevation_m=world.elevation_m,
         bridge=bridge,
         request=request,
-        maximum_edge_distance_m=30.0,
+        maximum_edge_distance_m=(None if platform_type == "HOPPER" else 30.0),
         local_traversability_projection=(
             None if platform_type == "HOPPER" else local_cpp
         ),

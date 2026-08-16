@@ -33,9 +33,11 @@ from .capability_freeze import (
     FrozenCapabilityBundle,
     FrozenCapabilityEnvironmentFactory,
     FrozenPlatformCapability,
+    ScenarioIdentity,
 )
 from .project_capability import load_project_formal_capability
 from .polar_data.formal_cache import (
+    FORMAL_CACHE_SCHEMA,
     FormalCache,
     FormalCacheError,
     FormalCacheIdentity,
@@ -44,11 +46,31 @@ from .polar_data.formal_cache import (
     prepare_formal_training_cache,
 )
 from .polar_data.multires_scene import GENERATOR_SHA256
+from .polar_data.hopper_task_closure import HopperTaskClosureBuilder
+from .polar_data.task_cache import (
+    PlatformTaskKey,
+    TaskCacheStore,
+    TaskCommonKey,
+)
+from .polar_data.task_cache_scheduler import (
+    TaskBuildEstimate,
+    TaskBuildPriority,
+    TaskBuildProduct,
+    TaskBuildRequest,
+    TaskCacheCoordinator,
+    TaskCacheCoordinatorError,
+    priority_for_scheduled_task,
+)
+from .polar_data.task_coverability import (
+    build_ground_task_coverability,
+    build_task_common,
+)
 from .budget import (
     BudgetExceededError,
     CalibrationMeasurement,
     HorizonCalibrationMeasurement,
     ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER,
+    RUN_MANIFEST_SCHEMA_VERSION,
     TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS,
     TrainingBudget,
     calibrate_runtime,
@@ -63,6 +85,7 @@ from .checkpoint import (
     PolicyWarmStartEvidence,
     RunIdentity,
     TrainingCheckpointV6,
+    UpdateRecoveryState,
     build_training_checkpoint,
     config_sha256,
     load_checkpoint,
@@ -81,6 +104,7 @@ from .config import (
     WORKER_CANDIDATES,
     load_training_config,
     resolve_training_config,
+    require_reward_v4_config,
     with_rollout_horizon,
 )
 from .environment.parallel_pool import (
@@ -94,15 +118,29 @@ from .environment.candidate_builder import CandidateDiagnostics
 from .environment.formal_builder import (
     FormalEnvironmentAssembly,
     FormalEnvironmentBuilder,
+    _formal_episode_seed,
+    _formal_schedule_index,
     _formal_scheduled_entries,
 )
 from .environment.formal_episode_state import FormalWorkerState
+from .environment.task_area import (
+    FrozenTaskGeometry,
+    derive_task_evidence_halo,
+    formal_worker_strata,
+    freeze_formal_task_geometry,
+)
 from .environment.macro_step import PlannerTransition, PolicyAction, TerminalAudit
 from .environment.v3_environment import PreparedPlanRequest, create_v3_environment
-from .training_semantics import training_semantics_sha256
+from .training_semantics import (
+    FORMAL_TRAINING_SEMANTICS_VERSION,
+    training_semantics_sha256,
+)
 from .formal_preflight import (
+    FORMAL_PREFLIGHT_SCHEMA,
+    REQUIRED_PREFLIGHT_CHECKS,
     FormalPreflightError,
     _request_signature,
+    _validate_task_cache_evidence,
     run_formal_preflight,
 )
 from .closed_loop_gate import (
@@ -135,10 +173,21 @@ from .evaluation.report import (
     EvaluationReport,
     FORMAL_EVALUATION_WATCHDOG_SECONDS,
     FormalEvaluationBatch,
+    RewardV4EvaluationReport,
     evaluate_formal_policy,
     evaluate_proxy_policy,
     report_sha256,
     write_report,
+)
+from .evaluation.reward_v4_runtime import evaluate_reward_v4_fixed_grid
+from .reward_evaluation import (
+    REWARD_EVALUATION_MANIFEST_SCHEMA,
+    build_reward_v4_evaluation_manifest,
+    reward_evaluation_manifest_sha256,
+)
+from .reward_update_boundary import (
+    advance_reward_update_boundary,
+    materialize_reward_evaluation_artifacts,
 )
 from .policy.cross_attention import CrossAttentionPolicy, sample_action
 from .policy.action_semantics import apply_goal_theta
@@ -146,17 +195,48 @@ from .policy.observation import ObservationIdentity, PolicyBatch
 from .proxy_scenario import proxy_environment_factory, proxy_observation
 from .ppo.collector import (
     CollectedRollout,
+    CommittedMacroRollout,
     CollectorConfig,
     EnvStep,
+    collect_committed_macro_rollout,
     collect_rollout as collect_ppo_rollout,
 )
 from .ppo.checkpoint import _semantic_sha256
 from .ppo.rollout import RolloutBatch
 from .ppo.trainer import PPOTrainer, PPOUpdateMetrics
+from .recovery.transition_journal import (
+    APPLIED_SCHEMA_VERSION,
+    INDEX_SCHEMA_VERSION,
+    PAYLOAD_SCHEMA_VERSION,
+    SEAL_SCHEMA_VERSION,
+    LoadedUpdate,
+    TransitionJournal,
+)
 from .reward import compute_transition_reward, reward_weights_sha256
+from .reward_contract import (
+    DEFAULT_REWARD_CONFIG,
+    REWARD_SCHEMA_VERSION,
+    TaskScaleBucket,
+    reward_config_as_mapping,
+)
+from .reward_curriculum import (
+    REWARD_CURRICULUM_SCHEMA_VERSION,
+    AcceptedRewardCheckpoint,
+    PlatformType,
+    RewardCurriculumState,
+    TrainingStage,
+    apply_rollback,
+    initial_reward_curriculum_state,
+    worker_allocation_for_stage,
+)
 from .training_metrics import (
+    TRAINING_UPDATE_METRICS_SCHEMA,
+    RewardV4MacroAudit,
+    RewardV4RuntimeDiagnostics,
     TrainingMetricsJournal,
+    build_reward_v4_update_record,
     build_training_update_record,
+    training_metrics_record_sha256,
 )
 
 
@@ -169,6 +249,322 @@ class ArtifactRootError(ValueError):
 
 class PreflightError(ValueError):
     """A formal command failed before artifact or accelerator access."""
+
+
+class UpdateCommitError(RuntimeError):
+    """One sealed Reward V4 update cannot be committed or recovered safely."""
+
+
+class InjectedUpdateCommitFault(UpdateCommitError):
+    """Test-only crash injected at a durable update-commit boundary."""
+
+
+_UPDATE_COMMIT_FAULTS = frozenset(
+    ("optimizer_before_checkpoint", "checkpoint_before_metrics")
+)
+
+
+def _reward_v4_macro_audits(
+    *,
+    rollout: CommittedMacroRollout,
+    curriculum_state: RewardCurriculumState,
+) -> tuple[RewardV4MacroAudit, ...]:
+    """Project one sealed journal grid into exact metrics-v6 macro rows."""
+    if not isinstance(rollout, CommittedMacroRollout):
+        raise UpdateCommitError("Reward V4 macro rollout is invalid")
+    if not isinstance(curriculum_state, RewardCurriculumState):
+        raise UpdateCommitError("Reward V4 curriculum state is invalid")
+    advantages = np.asarray(rollout.rollout.advantages)
+    if advantages.ndim != 1 or advantages.shape[0] != len(rollout.committed):
+        raise UpdateCommitError("Reward V4 rollout advantage grid differs")
+    if not np.isfinite(advantages).all():
+        raise UpdateCommitError("Reward V4 rollout advantages are non-finite")
+
+    audits: list[RewardV4MacroAudit] = []
+    for row, committed in enumerate(rollout.committed):
+        payload = committed.payload
+        inputs = payload.reward_inputs
+        pre = payload.pre_worker_state
+        post = payload.post_worker_state
+        try:
+            total_before = pre["coverable_detail_cell_count"]
+            total_after = post["coverable_detail_cell_count"]
+            observed_before = pre["observed_coverable_detail_cell_count"]
+            observed_after = post["observed_coverable_detail_cell_count"]
+            coverage_hash_before = pre["observed_coverable_mask_sha256"]
+            coverage_hash_after = post["observed_coverable_mask_sha256"]
+        except KeyError as error:
+            raise UpdateCommitError(
+                "Reward V4 worker state lacks exact coverage facts"
+            ) from error
+        if (
+            type(total_before) is not int
+            or type(total_after) is not int
+            or total_before <= 0
+            or total_after != total_before
+            or type(observed_before) is not int
+            or type(observed_after) is not int
+            or not 0 <= observed_before <= observed_after <= total_before
+            or not math.isclose(
+                inputs.coverage_before,
+                observed_before / total_before,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            )
+            or not math.isclose(
+                inputs.coverage_after,
+                observed_after / total_after,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            )
+        ):
+            raise UpdateCommitError(
+                "Reward V4 coverage ratio and exact counts differ"
+            )
+        try:
+            platform = PlatformType(payload.platform_type)
+        except ValueError as error:
+            raise UpdateCommitError("Reward V4 macro platform is invalid") from error
+        platform_state = curriculum_state.platforms[platform]
+        if payload.reward_stage is not platform_state.stage:
+            raise UpdateCommitError(
+                "Reward V4 macro stage differs from curriculum"
+            )
+        if payload.reward_weights != platform_state.weights:
+            raise UpdateCommitError(
+                "Reward V4 macro weights differ from curriculum"
+            )
+        audits.append(
+            RewardV4MacroAudit(
+                worker_index=payload.worker_index,
+                slot_index=payload.slot_index,
+                transition_id=payload.transition_id,
+                transition_sha256=committed.file_sha256,
+                payload_sha256=committed.payload_sha256,
+                platform_type=payload.platform_type,
+                scale_bucket=payload.scale_bucket,
+                reward_stage=payload.reward_stage,
+                reward_weights=payload.reward_weights,
+                terminal_class=payload.terminal_class,
+                coverage_before=inputs.coverage_before,
+                coverage_after=inputs.coverage_after,
+                priority_before=inputs.priority_before,
+                priority_after=inputs.priority_after,
+                executed_path_m=inputs.path_after_m - inputs.path_before_m,
+                cumulative_path_before_m=inputs.path_before_m,
+                cumulative_path_after_m=inputs.path_after_m,
+                task_scale_m=inputs.task_scale_m,
+                coverage_cell_count_before=observed_before,
+                coverage_cell_count_after=observed_after,
+                coverage_mask_sha256=str(coverage_hash_before),
+                next_coverage_mask_sha256=str(coverage_hash_after),
+                reward_components=payload.reward_components,
+                advantage=float(advantages[row]),
+                done=payload.done,
+                success_first_crossing=inputs.success_first_crossing,
+            )
+        )
+    return tuple(
+        sorted(audits, key=lambda item: (item.worker_index, item.slot_index))
+    )
+
+
+def _reward_v4_evaluation_manifest_sha256() -> str:
+    manifest = build_reward_v4_evaluation_manifest(
+        platforms=tuple(PlatformType),
+        scale_buckets=tuple(TaskScaleBucket),
+        evaluation_seeds=DEFAULT_REWARD_CONFIG.evaluation_seeds,
+    )
+    return reward_evaluation_manifest_sha256(manifest)
+
+
+def _reward_v4_schema_identity() -> dict[str, str]:
+    return {
+        "run_manifest": RUN_MANIFEST_SCHEMA_VERSION,
+        "checkpoint": CHECKPOINT_SCHEMA_VERSION,
+        "observation_contract": OBSERVATION_CONTRACT_VERSION,
+        "formal_environment_state": FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
+        "training_metrics": TRAINING_UPDATE_METRICS_SCHEMA,
+        "transition_payload": PAYLOAD_SCHEMA_VERSION,
+        "transition_index": INDEX_SCHEMA_VERSION,
+        "transition_seal": SEAL_SCHEMA_VERSION,
+        "transition_applied": APPLIED_SCHEMA_VERSION,
+        "reward": REWARD_SCHEMA_VERSION,
+        "reward_curriculum": REWARD_CURRICULUM_SCHEMA_VERSION,
+        "reward_evaluation_manifest": REWARD_EVALUATION_MANIFEST_SCHEMA,
+        "formal_cache": FORMAL_CACHE_SCHEMA,
+        "formal_preflight": FORMAL_PREFLIGHT_SCHEMA,
+        "training_semantics": FORMAL_TRAINING_SEMANTICS_VERSION,
+    }
+
+
+def commit_or_recover_reward_v4_update(
+    *,
+    update_id: int,
+    checkpoint_path: Path,
+    metrics_path: Path,
+    journal: TransitionJournal,
+    apply_and_build_checkpoint: Callable[
+        [LoadedUpdate], TrainingCheckpointV6
+    ],
+    fault_injection: str | None = None,
+) -> TrainingCheckpointV6:
+    """Apply one sealed update once and close its durable artifact triangle.
+
+    The immutable checkpoint is the optimizer-application authority.  Metrics
+    may lag that checkpoint by exactly one row and are repaired from the row
+    embedded in the checkpoint before the journal is marked APPLIED.
+    """
+    if type(update_id) is not int or update_id < 0:
+        raise UpdateCommitError("update commit ID is invalid")
+    if not isinstance(checkpoint_path, Path) or not checkpoint_path.is_absolute():
+        raise UpdateCommitError("update checkpoint path must be absolute")
+    if not isinstance(metrics_path, Path) or not metrics_path.is_absolute():
+        raise UpdateCommitError("update metrics path must be absolute")
+    if not isinstance(journal, TransitionJournal):
+        raise UpdateCommitError("update transition journal is invalid")
+    if not callable(apply_and_build_checkpoint):
+        raise UpdateCommitError("update checkpoint builder is invalid")
+    if fault_injection is not None and fault_injection not in _UPDATE_COMMIT_FAULTS:
+        raise UpdateCommitError("update commit fault injection is invalid")
+
+    loaded = journal.load_update(update_id)
+    if loaded.state not in ("SEALED", "APPLIED") or loaded.journal_sha256 is None:
+        raise UpdateCommitError("update journal must be sealed before commit")
+
+    if checkpoint_path.exists():
+        checkpoint = load_checkpoint(checkpoint_path)
+        if not isinstance(checkpoint, TrainingCheckpointV6):
+            raise UpdateCommitError("update checkpoint is not resumable")
+    else:
+        if loaded.state == "APPLIED":
+            raise UpdateCommitError("applied update checkpoint is missing")
+        checkpoint = apply_and_build_checkpoint(loaded)
+        _validate_reward_v4_update_checkpoint(
+            checkpoint=checkpoint,
+            update_id=update_id,
+            loaded=loaded,
+        )
+        if fault_injection == "optimizer_before_checkpoint":
+            raise InjectedUpdateCommitFault(fault_injection)
+        save_checkpoint_atomic(checkpoint_path, checkpoint, overwrite=False)
+
+    _validate_reward_v4_update_checkpoint(
+        checkpoint=checkpoint,
+        update_id=update_id,
+        loaded=loaded,
+    )
+    recovery = checkpoint.update_recovery_state
+    if loaded.state == "APPLIED" and (
+        loaded.checkpoint_payload_sha256 != checkpoint.payload_sha256
+        or loaded.metrics_record_sha256 != recovery.metrics_record_sha256
+    ):
+        raise UpdateCommitError("applied update artifact identity differs")
+    if fault_injection == "checkpoint_before_metrics":
+        raise InjectedUpdateCommitFault(fault_injection)
+
+    metrics = TrainingMetricsJournal(
+        metrics_path,
+        resume_global_step=update_id,
+        checkpoint_record=recovery.metrics_record,
+        checkpoint_record_sha256=recovery.metrics_record_sha256,
+    )
+    if metrics.last_global_step != update_id:
+        raise UpdateCommitError("update metrics did not reach checkpoint")
+    journal.mark_update_applied(
+        update_id=update_id,
+        checkpoint_payload_sha256=checkpoint.payload_sha256,
+        metrics_record_sha256=recovery.metrics_record_sha256,
+    )
+    return checkpoint
+
+
+def _validate_reward_v4_update_checkpoint(
+    *,
+    checkpoint: object,
+    update_id: int,
+    loaded: LoadedUpdate,
+) -> None:
+    if not isinstance(checkpoint, TrainingCheckpointV6):
+        raise UpdateCommitError("update checkpoint builder returned invalid state")
+    recovery = checkpoint.update_recovery_state
+    if checkpoint.global_step != update_id or recovery.update_id != update_id:
+        raise UpdateCommitError("update checkpoint step differs")
+    if recovery.journal_state != "SEALED":
+        raise UpdateCommitError("update checkpoint journal state differs")
+    if recovery.journal_sha256 != loaded.journal_sha256:
+        raise UpdateCommitError("update checkpoint journal identity differs")
+    if recovery.policy_version != loaded.policy_version:
+        raise UpdateCommitError("update checkpoint policy version differs")
+    if (
+        training_metrics_record_sha256(recovery.metrics_record)
+        != recovery.metrics_record_sha256
+    ):
+        raise UpdateCommitError("update checkpoint metrics identity differs")
+
+
+def restore_reward_v4_rollback(
+    *,
+    accepted_checkpoint: TrainingCheckpointV6,
+    current_curriculum_state: RewardCurriculumState,
+    current_recovery_state: UpdateRecoveryState,
+    triggers: tuple[PlatformType, ...],
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    normalization_state: dict[object, object],
+) -> tuple[RewardCurriculumState, UpdateRecoveryState]:
+    """Restore shared train state while retaining monotonic Reward V4 lineage."""
+    if not isinstance(accepted_checkpoint, TrainingCheckpointV6):
+        raise UpdateCommitError("Reward V4 rollback checkpoint is invalid")
+    if not isinstance(current_curriculum_state, RewardCurriculumState) or not isinstance(
+        current_recovery_state, UpdateRecoveryState
+    ):
+        raise UpdateCommitError("Reward V4 rollback live state is invalid")
+    if (
+        current_curriculum_state.current_update_id
+        != current_recovery_state.update_id
+        or current_curriculum_state.recovery_generation
+        != current_recovery_state.recovery_generation
+        or current_curriculum_state.restored_from_checkpoint_sha256
+        != current_recovery_state.restored_from_checkpoint_sha256
+    ):
+        raise UpdateCommitError("Reward V4 rollback lineage differs")
+    try:
+        accepted_curriculum = RewardCurriculumState.from_mapping(
+            accepted_checkpoint.reward_curriculum_state
+        )
+        rolled_back = apply_rollback(
+            current_curriculum_state,
+            triggers=triggers,
+            checkpoint=AcceptedRewardCheckpoint(
+                update_id=accepted_checkpoint.global_step,
+                payload_sha256=accepted_checkpoint.payload_sha256,
+                curriculum_state=accepted_curriculum,
+            ),
+            current_update_id=current_recovery_state.update_id,
+        )
+        recovery = current_recovery_state.with_rollback_lineage(
+            restored_from_checkpoint_sha256=(
+                accepted_checkpoint.payload_sha256
+            )
+        )
+    except (TypeError, ValueError) as error:
+        raise UpdateCommitError("Reward V4 rollback state is invalid") from error
+    if (
+        rolled_back.recovery_generation != recovery.recovery_generation
+        or rolled_back.restored_from_checkpoint_sha256
+        != recovery.restored_from_checkpoint_sha256
+    ):
+        raise UpdateCommitError("Reward V4 rollback lineage is inconsistent")
+    restore_training_state(
+        accepted_checkpoint,
+        model,
+        optimizer,
+        scheduler,
+        normalization_state=normalization_state,
+    )
+    return rolled_back, recovery
 
 
 def _build_formal_resume_equivalence_evidence(
@@ -336,6 +732,7 @@ class _RunEvidence:
     consumed_gpu_seconds: float
     platform_allocation: dict[str, int]
     signal_observed_at_update_boundary: bool
+    worker_restart_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,7 +767,7 @@ class CalibratedRunState:
     reward_hash: str
     scenario_schedule_id: str
     formal_seed: int
-    reward_calibration_seeds: tuple[int, int, int]
+    reward_calibration_seeds: tuple[int, ...]
     calibration_end_gpu_seconds: float
     run_identity: RunIdentity
     cache_manifest_path: Path | None
@@ -848,6 +1245,401 @@ def _is_within(path: Path, parent: Path) -> bool:
         return False
 
 
+def _manifest_sha256(value: object, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ArtifactRootError(f"{label} digest is invalid")
+    return value
+
+
+def _freeze_reward_v4_run_manifest(
+    path: Path,
+    *,
+    artifact_root: Path,
+    config: ResolvedTrainingConfig,
+    source_commit: str,
+    run_identity: RunIdentity,
+) -> None:
+    """Bind every Reward V4 schema and static run fact before initialization."""
+    root = artifact_root.resolve(strict=True)
+    if path.resolve(strict=True).parent != root:
+        raise ArtifactRootError("Reward V4 manifest is outside its artifact root")
+    if not isinstance(config, ResolvedTrainingConfig):
+        raise ArtifactRootError("Reward V4 run config is invalid")
+    reward_config = require_reward_v4_config(config)
+    if (
+        not isinstance(run_identity, RunIdentity)
+        or run_identity.run_kind != config.run_kind
+        or run_identity.reward_sha256 != reward_weights_sha256()
+        or run_identity.training_semantics_sha256
+        != training_semantics_sha256()
+    ):
+        raise ArtifactRootError("Reward V4 run identity is stale")
+    if (
+        not isinstance(source_commit, str)
+        or len(source_commit) != 40
+        or any(character not in "0123456789abcdef" for character in source_commit)
+    ):
+        raise ArtifactRootError("Reward V4 source commit is invalid")
+    payload = _read_run_manifest(path)
+    if payload.get("schema_version") != RUN_MANIFEST_SCHEMA_VERSION:
+        raise ArtifactRootError("Reward V4 requires run manifest v2")
+    if payload.get("global_step") not in (None, 0):
+        raise ArtifactRootError("Reward V4 run must start at global step zero")
+    for name, expected in (
+        ("frozen_config", config.as_frozen_dict()),
+        ("source_commit", source_commit),
+        ("run_identity", run_identity.to_dict()),
+    ):
+        existing = payload.get(name)
+        if existing is not None and existing != expected:
+            raise ArtifactRootError(f"Reward V4 {name} cannot drift")
+
+    curriculum = initial_reward_curriculum_state(reward_config)
+    strata = formal_worker_strata(curriculum.stage)
+    frozen = {
+        "source_commit": source_commit,
+        "run_identity": run_identity.to_dict(),
+        "frozen_config": config.as_frozen_dict(),
+        "global_step": 0,
+        "schema_identity": _reward_v4_schema_identity(),
+        "reward_config": reward_config_as_mapping(reward_config),
+        "reward_sha256": reward_weights_sha256(),
+        "macro_actions_per_worker": reward_config.macro_actions_per_worker,
+        "worker_strata": [
+            {
+                "worker_index": item.worker_index,
+                "platform_type": item.platform_type,
+                "platform_worker_index": item.platform_worker_index,
+                "platform_worker_count": item.platform_worker_count,
+                "scale_bucket": item.scale_bucket.value,
+            }
+            for item in strata
+        ],
+        "evaluation_manifest_sha256": (
+            _reward_v4_evaluation_manifest_sha256()
+        ),
+        "artifact_roots": {
+            "checkpoint": str((root / "checkpoints").resolve()),
+            "journal": str((root / "journal").resolve()),
+            "metrics": str((root / "metrics").resolve()),
+        },
+        "current_curriculum_state": curriculum.to_dict(),
+    }
+    for name, expected in frozen.items():
+        existing = payload.get(name)
+        if existing is not None and existing != expected:
+            raise ArtifactRootError(f"Reward V4 {name} cannot drift")
+        payload[name] = expected
+    payload["platform_allocation"] = worker_allocation_for_stage(
+        curriculum.stage,
+        reward_config,
+    )
+    payload.setdefault("initialization", None)
+    payload.setdefault("initialization_evidence", None)
+    payload.setdefault("qualification_evidence", None)
+    payload.setdefault("resume_parent", None)
+    payload.setdefault("warm_start_parent", None)
+    payload.setdefault("journal_cursor", None)
+    _write_manifest_payload(path, payload)
+
+
+def _freeze_training_qualification_manifest(
+    path: Path,
+    *,
+    formal_preflight_path: Path,
+    formal_preflight_sha256: str,
+    qualification_report_path: Path,
+    qualification_report_sha256: str,
+) -> None:
+    payload = _read_run_manifest(path)
+    if (
+        payload.get("schema_version") != RUN_MANIFEST_SCHEMA_VERSION
+        or payload.get("global_step") != 0
+        or payload.get("initialization") is not None
+    ):
+        raise ArtifactRootError(
+            "qualification requires an uninitialized Reward V4 run"
+        )
+    paths = (formal_preflight_path, qualification_report_path)
+    if any(not isinstance(value, Path) or not value.is_absolute() for value in paths):
+        raise ArtifactRootError("qualification evidence path is invalid")
+    frozen = {
+        "formal_preflight_path": str(formal_preflight_path.resolve()),
+        "formal_preflight_sha256": _manifest_sha256(
+            formal_preflight_sha256, label="formal preflight"
+        ),
+        "focused_qualification_path": str(qualification_report_path.resolve()),
+        "focused_qualification_sha256": _manifest_sha256(
+            qualification_report_sha256, label="focused qualification"
+        ),
+    }
+    existing = payload.get("qualification_evidence")
+    if existing not in (None, frozen):
+        raise ArtifactRootError("qualification evidence cannot drift")
+    payload["qualification_evidence"] = frozen
+    _write_manifest_payload(path, payload)
+
+
+def _canonical_report_sha256(
+    payload: Mapping[str, object], *, hash_field: str
+) -> str:
+    body = {key: value for key, value in payload.items() if key != hash_field}
+    try:
+        encoded = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise PreflightError("Reward V4 evidence is not canonical") from error
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _load_reward_v4_evidence_file(
+    path: Path,
+    *,
+    label: str,
+    repository_root: Path | None,
+) -> tuple[dict[str, object], str]:
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise PreflightError(f"{label} path must be absolute")
+    if path.is_symlink() or not path.is_file():
+        raise PreflightError(f"{label} file is missing or unsafe")
+    resolved = path.resolve(strict=True)
+    if repository_root is not None and _is_within(
+        resolved, repository_root.resolve(strict=True)
+    ):
+        raise PreflightError(f"{label} must remain outside the repository")
+
+    def reject_constant(value: str) -> object:
+        raise ValueError(value)
+
+    try:
+        payload = json.loads(
+            resolved.read_text(encoding="utf-8"),
+            parse_constant=reject_constant,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise PreflightError(f"{label} JSON is invalid") from error
+    if not isinstance(payload, dict):
+        raise PreflightError(f"{label} must be a JSON object")
+    return payload, _file_sha256(resolved)
+
+
+def _validate_reward_v4_entry_evidence(
+    *,
+    formal_preflight_path: Path,
+    qualification_report_path: Path,
+    source_commit: str,
+    run_identity: RunIdentity,
+    repository_root: Path | None = None,
+) -> tuple[str, str]:
+    """Validate the two explicit non-training authorities for a new run."""
+    if (
+        not isinstance(run_identity, RunIdentity)
+        or run_identity.run_kind != "formal"
+        or not isinstance(source_commit, str)
+        or len(source_commit) != 40
+        or any(character not in "0123456789abcdef" for character in source_commit)
+    ):
+        raise PreflightError("Reward V4 entry identity is invalid")
+    preflight, preflight_file_sha256 = _load_reward_v4_evidence_file(
+        formal_preflight_path,
+        label="formal preflight",
+        repository_root=repository_root,
+    )
+    expected_schema_identity = {
+        "checkpoint": CHECKPOINT_SCHEMA_VERSION,
+        "formal_cache": FORMAL_CACHE_SCHEMA,
+        "formal_environment_state": FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
+        "reward": REWARD_SCHEMA_VERSION,
+        "reward_evaluation_manifest": REWARD_EVALUATION_MANIFEST_SCHEMA,
+        "run_manifest": RUN_MANIFEST_SCHEMA_VERSION,
+        "training_metrics": TRAINING_UPDATE_METRICS_SCHEMA,
+    }
+    reported_preflight_sha256 = preflight.get("preflight_report_sha256")
+    try:
+        task_cache_evidence = _validate_task_cache_evidence(
+            preflight.get("task_cache_evidence")
+        )
+    except FormalPreflightError as error:
+        raise PreflightError(
+            "formal preflight task cache evidence is invalid"
+        ) from error
+    if (
+        preflight.get("schema_version") != FORMAL_PREFLIGHT_SCHEMA
+        or preflight.get("source_commit") != source_commit
+        or preflight.get("run_identity") != run_identity.to_dict()
+        or preflight.get("checks")
+        != {name: True for name in REQUIRED_PREFLIGHT_CHECKS}
+        or preflight.get("selected_workers") != 24
+        or preflight.get("selected_rollout_horizon")
+        != DEFAULT_REWARD_CONFIG.macro_actions_per_worker
+        or preflight.get("training_started") is not False
+        or preflight.get("schema_identity") != expected_schema_identity
+        or preflight.get("reward_config_sha256")
+        != reward_weights_sha256()
+        or preflight.get("evaluation_manifest_sha256")
+        != _reward_v4_evaluation_manifest_sha256()
+        or preflight.get("formal_environment_state_schema")
+        != FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION
+        or preflight.get("task_cache_evidence") != task_cache_evidence
+        or reported_preflight_sha256
+        != _canonical_report_sha256(
+            preflight, hash_field="preflight_report_sha256"
+        )
+    ):
+        raise PreflightError("formal preflight evidence is stale or incomplete")
+
+    qualification, qualification_file_sha256 = (
+        _load_reward_v4_evidence_file(
+            qualification_report_path,
+            label="focused qualification",
+            repository_root=repository_root,
+        )
+    )
+    summary = qualification.get("test_summary")
+    reported_qualification_sha256 = qualification.get("report_sha256")
+    if (
+        qualification.get("schema_version")
+        != "lunar-reward-v4-focused-qualification/v1"
+        or qualification.get("source_commit") != source_commit
+        or qualification.get("task_range") != {"first": 1, "last": 11}
+        or qualification.get("passed") is not True
+        or not isinstance(summary, Mapping)
+        or set(summary) != {
+            "passed",
+            "failed",
+            "errors",
+            "unexpected_skips",
+        }
+        or type(summary.get("passed")) is not int
+        or summary["passed"] <= 0
+        or summary.get("failed") != 0
+        or summary.get("errors") != 0
+        or summary.get("unexpected_skips") != 0
+        or reported_qualification_sha256
+        != _canonical_report_sha256(
+            qualification, hash_field="report_sha256"
+        )
+    ):
+        raise PreflightError(
+            "focused qualification evidence is stale or incomplete"
+        )
+    return preflight_file_sha256, qualification_file_sha256
+
+
+def _freeze_random_initialization_manifest(
+    path: Path,
+    *,
+    model: torch.nn.Module,
+    seed: int,
+) -> None:
+    if not isinstance(model, torch.nn.Module):
+        raise ArtifactRootError("random initialization model is invalid")
+    if type(seed) is not int or seed < 0:
+        raise ArtifactRootError("random initialization seed is invalid")
+    payload = _read_run_manifest(path)
+    if (
+        payload.get("schema_version") != RUN_MANIFEST_SCHEMA_VERSION
+        or payload.get("global_step") != 0
+        or payload.get("qualification_evidence") is None
+        or "training_metrics" in payload
+    ):
+        raise ArtifactRootError(
+            "random initialization requires a qualified step-zero run"
+        )
+    artifact_roots = payload.get("artifact_roots")
+    if not isinstance(artifact_roots, Mapping) or set(artifact_roots) != {
+        "checkpoint",
+        "journal",
+        "metrics",
+    }:
+        raise ArtifactRootError("Reward V4 artifact roots are invalid")
+    for value in artifact_roots.values():
+        target = Path(str(value))
+        if target.is_symlink() or not target.is_dir():
+            raise ArtifactRootError(
+                "Reward V4 artifact parents must be precreated"
+            )
+    state = model.state_dict()
+    if not state or any(
+        not isinstance(name, str) or not isinstance(value, torch.Tensor)
+        for name, value in state.items()
+    ):
+        raise ArtifactRootError("random initialization state is invalid")
+    evidence = {
+        "schema_version": "lunar-random-initialization/v1",
+        "mode": "random-init",
+        "seed": seed,
+        "parameter_evidence": [
+            {
+                "name": name,
+                "status": "random",
+                "parent_sha256": None,
+                "target_sha256": _semantic_sha256(
+                    {"value": state[name].detach().cpu().clone()}
+                ),
+            }
+            for name in sorted(state)
+        ],
+        "fresh_training_state": {
+            "global_step": 0,
+            "optimizer": True,
+            "scheduler": True,
+            "normalization": True,
+            "rng": True,
+            "worker_episode_state": True,
+            "metrics_journal": True,
+        },
+    }
+    existing = payload.get("initialization_evidence")
+    if payload.get("initialization") not in (None, "random-init") or existing not in (
+        None,
+        evidence,
+    ):
+        raise ArtifactRootError("random initialization evidence cannot drift")
+    payload["initialization"] = "random-init"
+    payload["initialization_evidence"] = evidence
+    payload["policy_warm_start"] = None
+    payload["warm_start_parent"] = None
+    payload.setdefault("resume_parent", None)
+    _write_manifest_payload(path, payload)
+
+
+def _require_reward_v4_artifact_parents(
+    root: Path,
+    *,
+    repository_root: Path,
+) -> None:
+    resolved_root = validate_artifact_root(root, repository_root=repository_root)
+    manifest = _read_run_manifest(resolved_root / "run-manifest.json")
+    expected = {
+        "checkpoint": str((resolved_root / "checkpoints").resolve()),
+        "journal": str((resolved_root / "journal").resolve()),
+        "metrics": str((resolved_root / "metrics").resolve()),
+    }
+    if manifest.get("artifact_roots") != expected:
+        raise ArtifactRootError("Reward V4 artifact root identity differs")
+    for value in expected.values():
+        target = Path(value)
+        if target.is_symlink() or not target.is_dir():
+            raise ArtifactRootError(
+                "Reward V4 checkpoint, journal and metrics parents "
+                "must be precreated"
+            )
+        if any(target.iterdir()):
+            raise ArtifactRootError(
+                "Reward V4 new-run artifact parents must be empty"
+            )
+
+
 def _freeze_formal_environment_manifest(
     path: Path,
     *,
@@ -891,7 +1683,12 @@ def _freeze_policy_warm_start_manifest(
     if not isinstance(evidence, PolicyWarmStartEvidence):
         raise ArtifactRootError("policy warm-start evidence is invalid")
     payload = _read_run_manifest(path)
-    if payload.get("global_step") != 0 or "training_metrics" in payload:
+    if (
+        payload.get("schema_version") != RUN_MANIFEST_SCHEMA_VERSION
+        or payload.get("global_step") != 0
+        or payload.get("qualification_evidence") is None
+        or "training_metrics" in payload
+    ):
         raise ArtifactRootError(
             "policy warm-start requires a fresh step-zero run manifest"
         )
@@ -901,16 +1698,57 @@ def _freeze_policy_warm_start_manifest(
         raise ArtifactRootError("policy warm-start identity cannot drift")
     payload["policy_warm_start"] = frozen
     parent = {
+        "path": evidence.parent_checkpoint_path,
         "checkpoint_sha256": evidence.parent_checkpoint_sha256,
         "payload_sha256": evidence.parent_payload_sha256,
         "global_step": evidence.parent_global_step,
+        "schema_version": evidence.parent_schema_version,
+        "contract_version": evidence.parent_contract_version,
+        "run_identity": dict(evidence.parent_run_identity),
     }
     existing_parent = payload.get("warm_start_parent")
     if existing_parent not in (None, parent):
         raise ArtifactRootError("policy warm-start parent cannot drift")
     payload.setdefault("resume_parent", None)
     payload["warm_start_parent"] = parent
+    payload["initialization"] = (
+        "random-init"
+        if evidence.fallback_reason is not None
+        else "policy-warm-start"
+    )
+    payload["initialization_evidence"] = frozen
     _write_manifest_payload(path, payload)
+
+
+def _reward_calibration_seeds_for_config(
+    config: ResolvedTrainingConfig,
+) -> tuple[int, ...]:
+    """Use one fixed startup seed for Reward V4; retain the V3 contract."""
+    if not isinstance(config, ResolvedTrainingConfig):
+        raise ValueError("reward calibration config is invalid")
+    if config.reward_v4 is not None:
+        return (REWARD_CALIBRATION_SEEDS[0],)
+    return REWARD_CALIBRATION_SEEDS
+
+
+def _reward_calibration_allocation_for_config(
+    config: ResolvedTrainingConfig,
+    *,
+    selected_workers: int,
+) -> dict[str, int]:
+    """Calibrate the active Reward V4 ground stage, not the later joint stage."""
+    if not isinstance(config, ResolvedTrainingConfig):
+        raise ValueError("reward calibration config is invalid")
+    if type(selected_workers) is not int or selected_workers <= 0:
+        raise ValueError("reward calibration worker count is invalid")
+    allocation = (
+        worker_allocation_for_stage(TrainingStage.GROUND_R1, config.reward_v4)
+        if config.reward_v4 is not None
+        else _allocation_for_workers(selected_workers)
+    )
+    if sum(allocation.values()) != selected_workers:
+        raise ValueError("reward calibration allocation differs from worker count")
+    return allocation
 
 
 def _freeze_task4_manifest(
@@ -920,6 +1758,8 @@ def _freeze_task4_manifest(
     selected_workers: int,
     reward_hash: str,
     reward_seed_results: tuple[dict[str, object], ...],
+    reward_calibration_seeds: tuple[int, ...] = REWARD_CALIBRATION_SEEDS,
+    reward_calibration_allocation: Mapping[str, int] | None = None,
     proxy: bool = True,
     scenario_schedule_id: str | None = None,
 ) -> None:
@@ -936,12 +1776,31 @@ def _freeze_task4_manifest(
         character not in "0123456789abcdef" for character in reward_hash
     ):
         raise ArtifactRootError("Task 4 reward hash is invalid")
+    calibration_seeds = tuple(reward_calibration_seeds)
     if (
-        len(reward_seed_results) != 3
+        not calibration_seeds
+        or any(type(seed) is not int for seed in calibration_seeds)
+        or len(set(calibration_seeds)) != len(calibration_seeds)
+        or len(reward_seed_results) != len(calibration_seeds)
         or tuple(result.get("seed") for result in reward_seed_results)
-        != REWARD_CALIBRATION_SEEDS
+        != calibration_seeds
     ):
-        raise ArtifactRootError("three reward calibration seed results are required")
+        raise ArtifactRootError("reward calibration seed results are invalid")
+    calibration_allocation = (
+        dict(joint_allocation)
+        if reward_calibration_allocation is None
+        else dict(reward_calibration_allocation)
+    )
+    if (
+        not calibration_allocation
+        or not set(calibration_allocation).issubset(PLATFORMS)
+        or any(
+            type(count) is not int or count <= 0
+            for count in calibration_allocation.values()
+        )
+        or sum(calibration_allocation.values()) != selected_workers
+    ):
+        raise ArtifactRootError("reward calibration allocation is invalid")
     if type(proxy) is not bool:
         raise ArtifactRootError("calibration proxy flag must be boolean")
     if proxy:
@@ -969,7 +1828,7 @@ def _freeze_task4_manifest(
             digest = result.get("rollout_sha256")
             if (
                 not isinstance(rewards, dict)
-                or set(rewards) != {"WHEELED", "LEGGED", "HOPPER"}
+                or set(rewards) != set(calibration_allocation)
                 or any(
                     not isinstance(value, (int, float))
                     or isinstance(value, bool)
@@ -990,11 +1849,12 @@ def _freeze_task4_manifest(
     ):
         raise ArtifactRootError("calibration GPU budget state is invalid")
     frozen = {
-        "schema_version": "lunar-policy-calibration/v2",
+        "schema_version": "lunar-policy-calibration/v3",
         "proxy": proxy,
         "reward_hash": reward_hash,
         "reward_selection": "single-approved-shared-weight-set/v1",
-        "reward_calibration_seeds": list(REWARD_CALIBRATION_SEEDS),
+        "reward_calibration_seeds": list(calibration_seeds),
+        "reward_calibration_allocation": calibration_allocation,
         "reward_seed_results": [dict(result) for result in reward_seed_results],
         "scenario_schedule_id": resolved_schedule_id,
         "formal_seed": FORMAL_SEED,
@@ -1099,12 +1959,25 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
             raise ArtifactRootError("development calibration cannot bind formal cache")
         expected_proxy = True
         expected_schedule_id = schedule.scenario_schedule_id
+    expected_calibration_seeds = _reward_calibration_seeds_for_config(config)
+    try:
+        expected_calibration_allocation = (
+            _reward_calibration_allocation_for_config(
+                config,
+                selected_workers=selected_workers,
+            )
+        )
+    except ValueError as error:
+        raise ArtifactRootError(
+            "Task 4 reward calibration allocation is invalid"
+        ) from error
     expected_static = {
-        "schema_version": "lunar-policy-calibration/v2",
+        "schema_version": "lunar-policy-calibration/v3",
         "proxy": expected_proxy,
         "reward_hash": reward_weights_sha256(),
         "reward_selection": "single-approved-shared-weight-set/v1",
-        "reward_calibration_seeds": list(REWARD_CALIBRATION_SEEDS),
+        "reward_calibration_seeds": list(expected_calibration_seeds),
+        "reward_calibration_allocation": expected_calibration_allocation,
         "scenario_schedule_id": expected_schedule_id,
         "formal_seed": FORMAL_SEED,
         "curriculum": {
@@ -1126,7 +1999,7 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
     if (
         not isinstance(reward_results, list)
         or tuple(result.get("seed") for result in reward_results if isinstance(result, dict))
-        != REWARD_CALIBRATION_SEEDS
+        != expected_calibration_seeds
     ):
         raise ArtifactRootError("Task 4 calibrated run identity is invalid")
     calibration_end = task4.get("calibration_end_gpu_seconds")
@@ -1237,7 +2110,7 @@ def _load_calibrated_run_state(root: Path) -> CalibratedRunState:
     return CalibratedRunState(
         config=config,
         budget=budget,
-        allocation=_allocation_for_workers(selected_workers),
+        allocation=expected_calibration_allocation,
         selected_workers=selected_workers,
         micro_batch_size=micro_batch_size,
         rollout_horizon=selected_rollout_horizon,
@@ -1271,6 +2144,30 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_scenario_count,
     )
 
+    prepare_tasks = subparsers.add_parser("prepare-tasks")
+    prepare_tasks.add_argument("--config", required=True)
+    prepare_tasks.add_argument("--cache-manifest", required=True)
+    prepare_tasks.add_argument(
+        "--stage",
+        required=True,
+        choices=tuple(stage.value for stage in TrainingStage),
+    )
+    prepare_tasks.add_argument(
+        "--prefetch-depth",
+        required=True,
+        type=_positive_scenario_count,
+    )
+    prepare_tasks.add_argument(
+        "--builder-workers",
+        required=True,
+        type=_bounded_builder_count,
+    )
+    prepare_tasks.add_argument(
+        "--report",
+        required=True,
+        type=_external_report_path,
+    )
+
     calibrate = subparsers.add_parser("calibrate")
     calibrate.add_argument("--config", required=True)
     calibrate.add_argument("--artifact-root", required=True)
@@ -1280,8 +2177,12 @@ def build_parser() -> argparse.ArgumentParser:
     train = subparsers.add_parser("train")
     train.add_argument("--config", required=True)
     train.add_argument("--artifact-root", required=True)
-    train.add_argument("--sensor-performance-report")
-    train.add_argument("--warm-start-checkpoint")
+    train.add_argument("--sensor-performance-report", required=True)
+    train.add_argument("--formal-preflight-report", required=True)
+    train.add_argument("--qualification-report", required=True)
+    initialization = train.add_mutually_exclusive_group(required=True)
+    initialization.add_argument("--policy-warm-start")
+    initialization.add_argument("--random-init", action="store_true")
 
     resume = subparsers.add_parser("resume")
     resume.add_argument("--artifact-root", required=True)
@@ -1349,6 +2250,998 @@ def _positive_scenario_count(value: str) -> int:
     return count
 
 
+def _bounded_builder_count(value: str) -> int:
+    try:
+        count = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "task builder count must be an integer from 1 through 24"
+        ) from error
+    if str(count) != value or not 1 <= count <= 24:
+        raise argparse.ArgumentTypeError(
+            "task builder count must be an integer from 1 through 24"
+        )
+    return count
+
+
+def _external_report_path(value: str) -> str:
+    path = Path(value)
+    repository_root = Path(__file__).resolve().parents[3]
+    if (
+        not path.is_absolute()
+        or path.suffix != ".json"
+        or path.is_symlink()
+        or path.resolve(strict=False).is_relative_to(repository_root)
+        or (
+            path.parent.exists()
+            and (path.parent.is_symlink() or not path.parent.is_dir())
+        )
+    ):
+        raise argparse.ArgumentTypeError(
+            "task prefetch report must be an absolute external JSON path"
+        )
+    return str(path)
+
+
+_TASK_PREFETCH_REPORT_SCHEMA = "lunar-task-cache-prefetch/v1"
+_GROUND_TASK_REACHABILITY_ALGORITHM_ID = "cpp-ground-global-cost-tree/v1"
+_GROUND_TASK_EVIDENCE_ALGORITHM_ID = (
+    "cpp-safe-traversability-projection/v1"
+)
+_GROUND_TASK_SENSOR_ALGORITHM_ID = "sensor-30m-360/v1"
+_GROUND_TASK_VISIBILITY_ALGORITHM_ID = "two-dimensional-detail-los/v1"
+_HOPPER_TASK_REACHABILITY_ALGORITHM_ID = (
+    "truth-hopper-task-safe-hop-observation-closure/v1"
+)
+_HOPPER_TASK_EVIDENCE_ALGORITHM_ID = (
+    "cpp-hopper-incremental-edge-evidence/v1"
+)
+_HOPPER_TASK_SENSOR_ALGORITHM_ID = (
+    "hopper-unobstructed-trajectory-capsule-closure/v1"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _ScheduledTaskBuild:
+    worker_index: int
+    episode_offset: int
+    scene_id: str
+    platform_type: str
+    geometry: FrozenTaskGeometry
+    common_key: TaskCommonKey
+    platform_key: PlatformTaskKey
+    platform: FrozenPlatformCapability
+    qualified_start: Mapping[str, object]
+    priority: TaskBuildPriority
+
+
+@dataclass(frozen=True, slots=True)
+class _FormalTaskCacheClient:
+    """Picklable worker endpoint for contextual task-cache requests."""
+
+    endpoint: object
+
+    def get_task_artifacts(
+        self,
+        *,
+        cache: FormalCache,
+        common_key: TaskCommonKey,
+        platform_key: PlatformTaskKey,
+        geometry: FrozenTaskGeometry,
+        record: object,
+        capability: FrozenPlatformCapability,
+    ):
+        getter = getattr(self.endpoint, "get_contextual", None)
+        cache_root = Path(getattr(self.endpoint, "cache_root", ""))
+        scene_id = getattr(record, "scene_id", None)
+        if (
+            not callable(getter)
+            or cache_root != cache.root
+            or not isinstance(common_key, TaskCommonKey)
+            or not isinstance(platform_key, PlatformTaskKey)
+            or not isinstance(geometry, FrozenTaskGeometry)
+            or not isinstance(scene_id, str)
+            or not isinstance(capability, FrozenPlatformCapability)
+        ):
+            raise TaskCacheCoordinatorError(
+                "formal task cache client authority differs"
+            )
+        context = {
+            "cache_root": str(cache.root),
+            "scene_id": scene_id,
+            "platform_type": capability.platform_type,
+            "common_key": common_key.to_dict(),
+            "platform_key": platform_key.to_dict(),
+            "geometry": {
+                "episode_seed": geometry.episode_seed,
+                "scale_bucket": geometry.scale_bucket.value,
+                "span_cells": geometry.span_cells,
+                "coarse_bounds_half_open": list(
+                    geometry.coarse_bounds_half_open
+                ),
+                "detail_bounds_half_open": list(
+                    geometry.detail_bounds_half_open
+                ),
+                "halo_coarse_bounds_half_open": list(
+                    geometry.halo_coarse_bounds_half_open
+                ),
+                "local_start_cell": list(geometry.local_start_cell),
+                "geometry_sha256": geometry.geometry_sha256,
+            },
+        }
+        reference = getter(
+            platform_key,
+            TaskBuildPriority.CURRENT_CURRICULUM,
+            context=context,
+            timeout=FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
+        )
+        platform = reference.load()
+        common = TaskCacheStore(cache.root).load_common(common_key)
+        if common is None:
+            raise TaskCacheCoordinatorError(
+                "formal task common artifact is missing after contextual build"
+            )
+        return common, platform
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _task_halo_contract_sha256(halo: object) -> str:
+    payload = {
+        "coarse_cells": halo.coarse_cells,
+        "detail_cells": halo.detail_cells,
+        "sensor_radius_m": halo.sensor_radius_m,
+        "platform_support_radius_m": halo.platform_support_radius_m,
+        "native_stencil_radius_m": halo.native_stencil_radius_m,
+        "algorithm_id": halo.algorithm_id,
+        "capability_bundle_sha256": halo.capability_bundle_sha256,
+    }
+    return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+
+
+def _combined_task_schedule_id(
+    cache: FormalCache,
+    task_area: TaskAreaConfig,
+    *,
+    split: str,
+) -> tuple[str, Mapping[str, str]]:
+    platform_schedule_ids = {
+        platform: str(
+            cache.manifest["platform_eligibility"][platform][
+                "scenario_schedule_ids"
+            ][split]
+        )
+        for platform in PLATFORMS
+    }
+    digest = hashlib.sha256(
+        _canonical_json_bytes(
+            {
+                "platform_scenario_schedule_ids": platform_schedule_ids,
+                "task_area": {
+                    "minimum_size_m": task_area.minimum_size_m,
+                    "maximum_size_m": task_area.maximum_size_m,
+                    "sampling_algorithm": task_area.sampling_algorithm,
+                },
+            }
+        )
+    ).hexdigest()
+    return (
+        f"lunar-formal-combined-schedule/v1:{split}:{digest}",
+        platform_schedule_ids,
+    )
+
+
+def _task_platform_key(
+    *,
+    common_key: TaskCommonKey,
+    platform: FrozenPlatformCapability,
+    qualified_start: Mapping[str, object],
+) -> PlatformTaskKey:
+    if platform.platform_type in {"WHEELED", "LEGGED"}:
+        identities = (
+            _GROUND_TASK_REACHABILITY_ALGORITHM_ID,
+            _GROUND_TASK_EVIDENCE_ALGORITHM_ID,
+            _GROUND_TASK_SENSOR_ALGORITHM_ID,
+            _GROUND_TASK_VISIBILITY_ALGORITHM_ID,
+        )
+    elif platform.platform_type == "HOPPER":
+        identities = (
+            _HOPPER_TASK_REACHABILITY_ALGORITHM_ID,
+            _HOPPER_TASK_EVIDENCE_ALGORITHM_ID,
+            _HOPPER_TASK_SENSOR_ALGORITHM_ID,
+            _HOPPER_TASK_SENSOR_ALGORITHM_ID,
+        )
+    else:  # pragma: no cover - the frozen capability union is closed
+        raise PreflightError("task prefetch platform is invalid")
+    return PlatformTaskKey(
+        common_key_sha256=common_key.sha256(),
+        platform_type=platform.platform_type,
+        qualified_start_identity_sha256=str(
+            qualified_start["start_identity_sha256"]
+        ),
+        platform_capability_sha256=platform.content_sha256,
+        reachability_algorithm_id=identities[0],
+        physical_evidence_algorithm_id=identities[1],
+        sensor_algorithm_id=identities[2],
+        visibility_algorithm_id=identities[3],
+        training_semantics_sha256=training_semantics_sha256(),
+    )
+
+
+def _task_build_estimate_for(
+    geometry: FrozenTaskGeometry,
+    platform_type: str,
+) -> TaskBuildEstimate:
+    halo = geometry.halo_coarse_bounds_half_open
+    halo_rows = (halo[1] - halo[0]) * 20
+    halo_columns = (halo[3] - halo[2]) * 20
+    detail_cells = (geometry.span_cells * 20) ** 2
+    coarse_cells = geometry.span_cells**2
+    # This is deliberately conservative.  It covers the shared float layers,
+    # task/platform masks, temporary visibility windows and native projections.
+    in_flight_bytes = max(
+        1,
+        halo_rows * halo_columns * 64
+        + detail_cells * 32
+        + coarse_cells * 2048,
+    )
+    detail_tiles = math.ceil(geometry.span_cells / 16) ** 2
+    if platform_type == "HOPPER":
+        native_calls = 8 * coarse_cells + detail_tiles + 16
+    else:
+        native_calls = coarse_cells + detail_tiles + 4
+    return TaskBuildEstimate(
+        in_flight_bytes=in_flight_bytes,
+        native_calls=native_calls,
+    )
+
+
+def _task_build_estimate(specification: _ScheduledTaskBuild) -> TaskBuildEstimate:
+    return _task_build_estimate_for(
+        specification.geometry,
+        specification.platform_type,
+    )
+
+
+def _scheduled_task_builds(
+    *,
+    cache: FormalCache,
+    config: ResolvedTrainingConfig,
+    capability_bundle: FrozenCapabilityBundle,
+    stage: str,
+    prefetch_depth: int,
+    source_commit: str,
+) -> tuple[_ScheduledTaskBuild, ...]:
+    split = "train"
+    schedule_id, platform_schedule_ids = _combined_task_schedule_id(
+        cache,
+        config.task_area,
+        split=split,
+    )
+    halo = derive_task_evidence_halo(capability_bundle)
+    halo_sha256 = _task_halo_contract_sha256(halo)
+    specifications: list[_ScheduledTaskBuild] = []
+    for stratum in formal_worker_strata(stage):
+        platform_type = stratum.platform_type
+        platform = capability_bundle.for_platform(platform_type)
+        entries = tuple(
+            entry
+            for entry in cache.manifest["scenes"]
+            if entry["split"] == split
+            and entry["platform_starts"][platform_type]["qualified"] is True
+        )
+        scheduled = _formal_scheduled_entries(
+            entries,
+            scenario_schedule_id=platform_schedule_ids[platform_type],
+        )
+        if not scheduled:
+            raise PreflightError(
+                f"task prefetch has no eligible {platform_type} train scene"
+            )
+        for episode_offset in range(prefetch_depth):
+            scenario = ScenarioIdentity(
+                platform_type=platform_type,
+                scenario_schedule_id=schedule_id,
+                worker_index=stratum.worker_index,
+                episode_cursor=episode_offset,
+                platform_worker_index=stratum.platform_worker_index,
+                platform_worker_count=stratum.platform_worker_count,
+                capability_version=platform.capability_version,
+                capability_sha256=platform.content_sha256,
+            )
+            index = _formal_schedule_index(
+                stratum.worker_index,
+                episode_offset,
+                len(scheduled),
+                platform_worker_index=stratum.platform_worker_index,
+                platform_worker_count=stratum.platform_worker_count,
+            )
+            entry = scheduled[index]
+            scene_id = str(entry["scene_id"])
+            qualified_start = entry["platform_starts"][platform_type]
+            raw_start = qualified_start["qualified_start_cell"]
+            if (
+                not isinstance(raw_start, (list, tuple))
+                or len(raw_start) != 2
+                or any(type(value) is not int for value in raw_start)
+            ):
+                raise PreflightError("task prefetch qualified start is invalid")
+            episode_seed = _formal_episode_seed("episode", scenario)
+            geometry = freeze_formal_task_geometry(
+                start_cell=(int(raw_start[0]), int(raw_start[1])),
+                config=config.task_area,
+                episode_seed=episode_seed,
+                scale_bucket=stratum.scale_bucket,
+                halo=halo,
+            )
+            common_key = TaskCommonKey(
+                scene_id=scene_id,
+                # The episode seed is intentionally platform-independent for
+                # matching lanes, allowing a physically identical crop to be
+                # shared while scene, bounds and geometry remain in the key.
+                scenario_identity_sha256=episode_seed,
+                source_identity_sha256=(
+                    cache.identity.source_lock_file_sha256
+                ),
+                coarse_bounds_half_open=geometry.coarse_bounds_half_open,
+                detail_bounds_half_open=geometry.detail_bounds_half_open,
+                task_span_cells=geometry.span_cells,
+                scale_bucket=geometry.scale_bucket.value,
+                geometry_sha256=geometry.geometry_sha256,
+                halo_contract_sha256=halo_sha256,
+                capability_bundle_sha256=capability_bundle.bundle_sha256,
+                generator_sha256=GENERATOR_SHA256,
+                source_commit=source_commit,
+            )
+            specifications.append(
+                _ScheduledTaskBuild(
+                    worker_index=stratum.worker_index,
+                    episode_offset=episode_offset,
+                    scene_id=scene_id,
+                    platform_type=platform_type,
+                    geometry=geometry,
+                    common_key=common_key,
+                    platform_key=_task_platform_key(
+                        common_key=common_key,
+                        platform=platform,
+                        qualified_start=qualified_start,
+                    ),
+                    platform=platform,
+                    qualified_start=qualified_start,
+                    priority=priority_for_scheduled_task(
+                        stage=stage,
+                        platform_type=platform_type,
+                        episode_offset=episode_offset,
+                    ),
+                )
+            )
+    return tuple(specifications)
+
+
+def _validate_task_payload_identity(
+    key: PlatformTaskKey,
+    payload: object,
+) -> None:
+    diagnostics = getattr(payload, "diagnostics", None)
+    if not isinstance(diagnostics, Mapping):
+        raise TaskCacheCoordinatorError(
+            "task builder diagnostics are missing"
+        )
+    expected = {
+        "physical_reachability_algorithm_id": key.reachability_algorithm_id,
+        "physical_evidence_algorithm_id": key.physical_evidence_algorithm_id,
+        "sensor_algorithm_id": key.sensor_algorithm_id,
+        "start_identity_sha256": key.qualified_start_identity_sha256,
+        "platform_capability_sha256": key.platform_capability_sha256,
+    }
+    if any(diagnostics.get(name) != value for name, value in expected.items()):
+        raise TaskCacheCoordinatorError(
+            "task builder diagnostics differ from the frozen key"
+        )
+    if key.platform_type in {"WHEELED", "LEGGED"} and (
+        diagnostics.get("visibility_algorithm_id")
+        != key.visibility_algorithm_id
+    ):
+        raise TaskCacheCoordinatorError(
+            "task builder visibility identity differs from the frozen key"
+        )
+
+
+def _task_native_call_count(platform_type: str, payload: object) -> int:
+    diagnostics = payload.diagnostics
+    if platform_type == "HOPPER":
+        names = (
+            "static_projection_call_count",
+            "landing_evidence_call_count",
+            "edge_projection_call_count",
+        )
+    else:
+        names = (
+            "static_projection_call_count",
+            "reachability_tree_call_count",
+            "visibility_window_count",
+        )
+    count = sum(int(diagnostics[name]) for name in names)
+    if platform_type != "HOPPER":
+        count += 1  # Initial exact candidate-gain query.
+    return count
+
+
+class _FormalTaskCacheRuntime:
+    """Own one bounded coordinator shared by all formal worker processes."""
+
+    def __init__(
+        self,
+        *,
+        cache_manifest_path: Path,
+        capability_bundle: FrozenCapabilityBundle,
+        task_area: TaskAreaConfig,
+        source_commit: str,
+        builder_workers: int,
+    ) -> None:
+        if type(builder_workers) is not int or builder_workers not in {1, 2, 4, 6}:
+            raise PreflightError("task cache runtime builder count is invalid")
+        self.cache = load_formal_cache(
+            cache_manifest_path.resolve(strict=True), require_full=True
+        )
+        self.capability_bundle = capability_bundle
+        self.task_area = task_area
+        self.source_commit = source_commit
+        self.halo = derive_task_evidence_halo(capability_bundle)
+        self.store = TaskCacheStore(self.cache.root)
+        self._contexts: dict[str, _ScheduledTaskBuild] = {}
+        self._context_lock = threading.Lock()
+        self._bridge_state = threading.local()
+        maximum_span = int(task_area.maximum_size_m // 4)
+        if maximum_span <= 0 or maximum_span * 4 != task_area.maximum_size_m:
+            raise PreflightError("task cache runtime maximum span is invalid")
+        halo_span = min(
+            256,
+            maximum_span + 2 * int(self.halo.coarse_cells),
+        )
+        maximum_geometry = FrozenTaskGeometry(
+            episode_seed="0" * 64,
+            scale_bucket=TaskScaleBucket.M400_500,
+            span_cells=maximum_span,
+            coarse_bounds_half_open=(0, maximum_span, 0, maximum_span),
+            detail_bounds_half_open=(
+                0,
+                maximum_span * 20,
+                0,
+                maximum_span * 20,
+            ),
+            halo_coarse_bounds_half_open=(0, halo_span, 0, halo_span),
+            local_start_cell=(0, 0),
+            geometry_sha256="0" * 64,
+        )
+        maximum_estimates = tuple(
+            _task_build_estimate_for(maximum_geometry, platform_type)
+            for platform_type in PLATFORMS
+        )
+        max_in_flight_bytes = (
+            max(value.in_flight_bytes for value in maximum_estimates)
+            * builder_workers
+        )
+        max_native_calls = (
+            max(value.native_calls for value in maximum_estimates)
+            * builder_workers
+        )
+        self.coordinator = TaskCacheCoordinator(
+            store=self.store,
+            builder=self._build,
+            estimator=self._estimate,
+            max_builder_workers=builder_workers,
+            max_in_flight_bytes=max_in_flight_bytes,
+            max_native_calls=max_native_calls,
+            contextual_request_registrar=self._register_context,
+        )
+        self.client = _FormalTaskCacheClient(
+            self.coordinator.create_client()
+        )
+
+    def _register_context(self, value: Mapping[str, object]) -> None:
+        if set(value) != {
+            "cache_root",
+            "scene_id",
+            "platform_type",
+            "common_key",
+            "platform_key",
+            "geometry",
+        }:
+            raise TaskCacheCoordinatorError(
+                "formal task build context schema differs"
+            )
+        if Path(str(value["cache_root"])) != self.cache.root:
+            raise TaskCacheCoordinatorError(
+                "formal task build cache root differs"
+            )
+        try:
+            common_key = TaskCommonKey(**value["common_key"])
+            platform_key = PlatformTaskKey(**value["platform_key"])
+            raw_geometry = value["geometry"]
+            if not isinstance(raw_geometry, Mapping):
+                raise TypeError("task geometry payload is not a mapping")
+            geometry = FrozenTaskGeometry(
+                episode_seed=str(raw_geometry["episode_seed"]),
+                scale_bucket=TaskScaleBucket(raw_geometry["scale_bucket"]),
+                span_cells=int(raw_geometry["span_cells"]),
+                coarse_bounds_half_open=tuple(
+                    int(item)
+                    for item in raw_geometry["coarse_bounds_half_open"]
+                ),
+                detail_bounds_half_open=tuple(
+                    int(item)
+                    for item in raw_geometry["detail_bounds_half_open"]
+                ),
+                halo_coarse_bounds_half_open=tuple(
+                    int(item)
+                    for item in raw_geometry[
+                        "halo_coarse_bounds_half_open"
+                    ]
+                ),
+                local_start_cell=tuple(
+                    int(item) for item in raw_geometry["local_start_cell"]
+                ),
+                geometry_sha256=str(raw_geometry["geometry_sha256"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise TaskCacheCoordinatorError(
+                "formal task build context is invalid"
+            ) from error
+        scene_id = value["scene_id"]
+        platform_type = value["platform_type"]
+        if (
+            not isinstance(scene_id, str)
+            or scene_id != common_key.scene_id
+            or platform_type not in PLATFORMS
+            or platform_type != platform_key.platform_type
+        ):
+            raise TaskCacheCoordinatorError(
+                "formal task build context identity differs"
+            )
+        record = self.cache.record(scene_id)
+        capability = self.capability_bundle.for_platform(platform_type)
+        qualified_start = record.platform_starts[platform_type]
+        raw_start = qualified_start["qualified_start_cell"]
+        if (
+            not isinstance(raw_start, (list, tuple))
+            or len(raw_start) != 2
+            or any(type(item) is not int for item in raw_start)
+        ):
+            raise TaskCacheCoordinatorError(
+                "formal task build qualified start is invalid"
+            )
+        expected_geometry = freeze_formal_task_geometry(
+            start_cell=(int(raw_start[0]), int(raw_start[1])),
+            config=self.task_area,
+            episode_seed=geometry.episode_seed,
+            scale_bucket=geometry.scale_bucket,
+            halo=self.halo,
+        )
+        expected_common = TaskCommonKey(
+            scene_id=scene_id,
+            scenario_identity_sha256=geometry.episode_seed,
+            source_identity_sha256=(
+                self.cache.identity.source_lock_file_sha256
+            ),
+            coarse_bounds_half_open=geometry.coarse_bounds_half_open,
+            detail_bounds_half_open=geometry.detail_bounds_half_open,
+            task_span_cells=geometry.span_cells,
+            scale_bucket=geometry.scale_bucket.value,
+            geometry_sha256=geometry.geometry_sha256,
+            halo_contract_sha256=_task_halo_contract_sha256(self.halo),
+            capability_bundle_sha256=self.capability_bundle.bundle_sha256,
+            generator_sha256=GENERATOR_SHA256,
+            source_commit=self.source_commit,
+        )
+        expected_platform = _task_platform_key(
+            common_key=expected_common,
+            platform=capability,
+            qualified_start=qualified_start,
+        )
+        if (
+            geometry != expected_geometry
+            or common_key != expected_common
+            or platform_key != expected_platform
+        ):
+            raise TaskCacheCoordinatorError(
+                "formal task build context authority differs"
+            )
+        specification = _ScheduledTaskBuild(
+            worker_index=0,
+            episode_offset=0,
+            scene_id=scene_id,
+            platform_type=platform_type,
+            geometry=geometry,
+            common_key=common_key,
+            platform_key=platform_key,
+            platform=capability,
+            qualified_start=qualified_start,
+            priority=TaskBuildPriority.CURRENT_CURRICULUM,
+        )
+        identity = platform_key.sha256()
+        with self._context_lock:
+            previous = self._contexts.setdefault(identity, specification)
+            if previous != specification:
+                raise TaskCacheCoordinatorError(
+                    "formal task build context changed for one key"
+                )
+
+    def _context(self, key: PlatformTaskKey) -> _ScheduledTaskBuild:
+        with self._context_lock:
+            context = self._contexts.get(key.sha256())
+        if context is None or context.platform_key != key:
+            raise TaskCacheCoordinatorError(
+                "formal task build context is unavailable"
+            )
+        return context
+
+    def _estimate(self, key: PlatformTaskKey) -> TaskBuildEstimate:
+        return _task_build_estimate(self._context(key))
+
+    def _build(self, key: PlatformTaskKey) -> TaskBuildProduct:
+        specification = self._context(key)
+        common = self.coordinator.request_common(
+            specification.common_key,
+            lambda: build_task_common(
+                scene_index=self.cache,
+                scene_id=specification.scene_id,
+                geometry=specification.geometry,
+                capability_bundle=self.capability_bundle,
+            ),
+        )
+        bridge = getattr(self._bridge_state, "bridge", None)
+        if bridge is None:
+            import lunar_planner_training_bridge as bridge_api
+
+            bridge = bridge_api.PlannerBridge()
+            self._bridge_state.bridge = bridge
+        if specification.platform_type == "HOPPER":
+            closure = HopperTaskClosureBuilder(
+                common=common,
+                platform=specification.platform,
+                qualified_start=specification.qualified_start,
+                bridge=bridge,
+                task_key_sha256=key.sha256(),
+                journal_sink=self.store.commit_hopper_closure_journal,
+            )
+            payload = closure.build(
+                resume=self.store.load_hopper_closure_journal(key.sha256())
+            )
+            native_calls = sum(closure.metrics.values())
+        else:
+            payload = build_ground_task_coverability(
+                common=common,
+                platform=specification.platform,
+                qualified_start=specification.qualified_start,
+                bridge=bridge,
+            )
+            native_calls = _task_native_call_count(
+                specification.platform_type,
+                payload,
+            )
+        _validate_task_payload_identity(key, payload)
+        return TaskBuildProduct(payload=payload, native_calls=native_calls)
+
+    def metrics(self) -> Mapping[str, object]:
+        return self.coordinator.metrics()
+
+    def close(self) -> None:
+        self.coordinator.close()
+
+    def __enter__(self) -> "_FormalTaskCacheRuntime":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+def _prepare_task_cache(
+    *,
+    config_path: Path,
+    cache_manifest_path: Path,
+    stage: str,
+    prefetch_depth: int,
+    builder_workers: int,
+    repository_root: Path,
+) -> dict[str, object]:
+    started = time.perf_counter()
+    requested_config = load_training_config(config_path)
+    if requested_config.run_kind != "formal":
+        raise PreflightError("task prefetch requires the formal config")
+    capability_bundle = _formal_capability_preflight(repository_root)
+    manifest_path = cache_manifest_path.resolve(strict=True)
+    try:
+        cache = load_formal_cache(manifest_path, require_full=True)
+    except FormalCacheError as error:
+        raise PreflightError(
+            f"task prefetch scene index is invalid: {error}"
+        ) from error
+    current_v3_commit, current_v3_sha256 = current_v3_identity(repository_root)
+    expected_identity = {
+        "generator_sha256": GENERATOR_SHA256,
+        "capability_sha256": capability_bundle.bundle_sha256,
+        "reward_sha256": reward_weights_sha256(),
+        "training_semantics_sha256": training_semantics_sha256(),
+        "v3_source_commit": current_v3_commit,
+        "v3_sha256": current_v3_sha256,
+    }
+    for name, expected in expected_identity.items():
+        if getattr(cache.identity, name) != expected:
+            raise PreflightError(
+                f"task prefetch scene index {name} differs from current source"
+            )
+    source_commit = _source_commit(repository_root)
+    specifications = _scheduled_task_builds(
+        cache=cache,
+        config=requested_config,
+        capability_bundle=capability_bundle,
+        stage=stage,
+        prefetch_depth=prefetch_depth,
+        source_commit=source_commit,
+    )
+    if len(specifications) != 24 * prefetch_depth:
+        raise PreflightError("task prefetch schedule is not 24-worker complete")
+    by_key: dict[str, _ScheduledTaskBuild] = {}
+    for specification in specifications:
+        identity = specification.platform_key.sha256()
+        previous = by_key.setdefault(identity, specification)
+        if previous.platform_key != specification.platform_key:
+            raise PreflightError("task prefetch key collision differs")
+    estimates = {
+        identity: _task_build_estimate(specification)
+        for identity, specification in by_key.items()
+    }
+    ordered_estimates = sorted(
+        estimates.values(),
+        key=lambda value: (value.in_flight_bytes, value.native_calls),
+        reverse=True,
+    )
+    capacity_count = min(builder_workers, len(ordered_estimates))
+    max_in_flight_bytes = sum(
+        value.in_flight_bytes for value in ordered_estimates[:capacity_count]
+    )
+    max_native_calls = sum(
+        value.native_calls for value in ordered_estimates[:capacity_count]
+    )
+    store = TaskCacheStore(manifest_path.parent)
+    bridge_state = threading.local()
+    coordinator: TaskCacheCoordinator | None = None
+
+    def build(key: PlatformTaskKey) -> TaskBuildProduct:
+        assert coordinator is not None
+        specification = by_key[key.sha256()]
+        common = coordinator.request_common(
+            specification.common_key,
+            lambda: build_task_common(
+                scene_index=cache,
+                scene_id=specification.scene_id,
+                geometry=specification.geometry,
+                capability_bundle=capability_bundle,
+            ),
+        )
+        bridge = getattr(bridge_state, "bridge", None)
+        if bridge is None:
+            import lunar_planner_training_bridge as bridge_api
+
+            bridge = bridge_api.PlannerBridge()
+            bridge_state.bridge = bridge
+        if specification.platform_type == "HOPPER":
+            closure = HopperTaskClosureBuilder(
+                common=common,
+                platform=specification.platform,
+                qualified_start=specification.qualified_start,
+                bridge=bridge,
+                task_key_sha256=key.sha256(),
+                journal_sink=store.commit_hopper_closure_journal,
+            )
+            payload = closure.build(
+                resume=store.load_hopper_closure_journal(key.sha256())
+            )
+            native_calls = sum(closure.metrics.values())
+        else:
+            payload = build_ground_task_coverability(
+                common=common,
+                platform=specification.platform,
+                qualified_start=specification.qualified_start,
+                bridge=bridge,
+            )
+            native_calls = _task_native_call_count(
+                specification.platform_type,
+                payload,
+            )
+        _validate_task_payload_identity(key, payload)
+        return TaskBuildProduct(payload=payload, native_calls=native_calls)
+
+    requests = tuple(
+        TaskBuildRequest(
+            key=specification.platform_key,
+            priority=specification.priority,
+            estimate=estimates[specification.platform_key.sha256()],
+        )
+        for specification in specifications
+    )
+    try:
+        coordinator = TaskCacheCoordinator(
+            store=store,
+            builder=build,
+            estimator=lambda key: estimates[key.sha256()],
+            max_builder_workers=builder_workers,
+            max_in_flight_bytes=max_in_flight_bytes,
+            max_native_calls=max_native_calls,
+        )
+        coordinator.prefetch(requests)
+        coordinator.wait_for_idle()
+        metrics = dict(coordinator.metrics())
+    except (TaskCacheCoordinatorError, KeyError, RuntimeError) as error:
+        raise PreflightError(f"task prefetch failed: {error}") from error
+    finally:
+        if coordinator is not None:
+            coordinator.close()
+
+    resolved: list[dict[str, object]] = []
+    for specification in specifications:
+        artifact = store.load_platform(specification.platform_key)
+        if artifact is None:
+            raise PreflightError(
+                "task prefetch finished without a requested artifact"
+            )
+        resolved.append(
+            {
+                "worker_index": specification.worker_index,
+                "episode_offset": specification.episode_offset,
+                "platform_type": specification.platform_type,
+                "scale_bucket": specification.geometry.scale_bucket.value,
+                "scene_id": specification.scene_id,
+                "task_span_cells": specification.geometry.span_cells,
+                "task_geometry_sha256": specification.geometry.geometry_sha256,
+                "task_common_key_sha256": specification.common_key.sha256(),
+                "platform_task_key_sha256": (
+                    specification.platform_key.sha256()
+                ),
+                "platform_task_artifact_sha256": artifact.artifact_sha256,
+            }
+        )
+    return {
+        "schema": _TASK_PREFETCH_REPORT_SCHEMA,
+        "source_commit": source_commit,
+        "cache_manifest": str(manifest_path),
+        "cache_manifest_sha256": cache.manifest["cache_manifest_sha256"],
+        "stage": stage,
+        "prefetch_depth": prefetch_depth,
+        "builder_workers": builder_workers,
+        "max_in_flight_bytes": max_in_flight_bytes,
+        "max_native_calls": max_native_calls,
+        "requested_task_count": len(specifications),
+        "unique_platform_task_count": len(by_key),
+        "resolved_task_count": len(resolved),
+        "tasks": resolved,
+        "coordinator_metrics": metrics,
+        "elapsed_seconds": time.perf_counter() - started,
+    }
+
+
+def _write_task_prefetch_report(
+    path: Path,
+    payload: Mapping[str, object],
+) -> str:
+    target = Path(_external_report_path(str(path)))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    body = dict(payload)
+    if body.get("schema") != _TASK_PREFETCH_REPORT_SCHEMA:
+        raise ArtifactRootError("task prefetch report schema differs")
+    body.pop("report_sha256", None)
+    report_sha256 = hashlib.sha256(_canonical_json_bytes(body)).hexdigest()
+    document = {**body, "report_sha256": report_sha256}
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=target.parent,
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(_canonical_json_bytes(document) + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+        directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as error:
+        if temporary.exists():
+            temporary.unlink()
+        raise ArtifactRootError("task prefetch report write failed") from error
+    return report_sha256
+
+
+def _open_formal_task_cache_runtime(
+    *,
+    artifact_root: Path,
+    cache_manifest_path: Path,
+    capability_bundle: FrozenCapabilityBundle,
+    task_area: TaskAreaConfig,
+    repository_root: Path,
+) -> _FormalTaskCacheRuntime:
+    root = validate_artifact_root(
+        artifact_root, repository_root=repository_root
+    )
+    report_path = root / "ground-task-prefetch.json"
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise PreflightError(
+            "formal task cache prefetch evidence is unavailable"
+        ) from error
+    if not isinstance(report, Mapping):
+        raise PreflightError("formal task cache prefetch evidence is invalid")
+    body = dict(report)
+    report_sha256 = body.pop("report_sha256", None)
+    source_commit = _source_commit(repository_root)
+    manifest_path = cache_manifest_path.resolve(strict=True)
+    cache = load_formal_cache(manifest_path, require_full=True)
+    tasks = report.get("tasks")
+    if (
+        report.get("schema") != _TASK_PREFETCH_REPORT_SCHEMA
+        or report_sha256
+        != hashlib.sha256(_canonical_json_bytes(body)).hexdigest()
+        or report.get("source_commit") != source_commit
+        or Path(str(report.get("cache_manifest"))).resolve(strict=True)
+        != manifest_path
+        or report.get("cache_manifest_sha256")
+        != cache.manifest["cache_manifest_sha256"]
+        or report.get("stage") != "GROUND_R1"
+        or report.get("prefetch_depth") != 2
+        or report.get("requested_task_count") != 48
+        or report.get("resolved_task_count") != 48
+        or not isinstance(tasks, list)
+        or len(tasks) != 48
+    ):
+        raise PreflightError(
+            "formal task cache prefetch evidence differs from this run"
+        )
+    platform_counts = {
+        platform: sum(
+            row.get("platform_type") == platform
+            for row in tasks
+            if isinstance(row, Mapping)
+        )
+        for platform in ("WHEELED", "LEGGED")
+    }
+    offset_counts = {
+        offset: sum(
+            row.get("episode_offset") == offset
+            for row in tasks
+            if isinstance(row, Mapping)
+        )
+        for offset in (0, 1)
+    }
+    if platform_counts != {"WHEELED": 24, "LEGGED": 24} or offset_counts != {
+        0: 24,
+        1: 24,
+    }:
+        raise PreflightError(
+            "formal task cache prefetch allocation differs"
+        )
+    return _FormalTaskCacheRuntime(
+        cache_manifest_path=manifest_path,
+        capability_bundle=capability_bundle,
+        task_area=task_area,
+        source_commit=source_commit,
+        builder_workers=int(report.get("builder_workers", 0)),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     repository_root = Path(__file__).resolve().parents[3]
@@ -1399,6 +3292,31 @@ def main(argv: list[str] | None = None) -> int:
                 sort_keys=True,
             )
         )
+    elif arguments.command == "prepare-tasks":
+        try:
+            payload = _prepare_task_cache(
+                config_path=Path(arguments.config),
+                cache_manifest_path=Path(arguments.cache_manifest),
+                stage=arguments.stage,
+                prefetch_depth=arguments.prefetch_depth,
+                builder_workers=arguments.builder_workers,
+                repository_root=repository_root,
+            )
+        except (FormalCacheError, TaskCacheCoordinatorError) as error:
+            raise PreflightError(f"task prefetch failed: {error}") from error
+        report_path = Path(arguments.report)
+        report_sha256 = _write_task_prefetch_report(report_path, payload)
+        print(
+            json.dumps(
+                {
+                    "report": str(report_path),
+                    "report_sha256": report_sha256,
+                    "requested_task_count": payload["requested_task_count"],
+                    "resolved_task_count": payload["resolved_task_count"],
+                },
+                sort_keys=True,
+            )
+        )
     elif arguments.command == "calibrate":
         capability_bundle = _formal_capability_preflight(repository_root)
         requested_config = load_training_config(Path(arguments.config))
@@ -1409,23 +3327,31 @@ def main(argv: list[str] | None = None) -> int:
             capability_bundle=capability_bundle,
             repository_root=repository_root,
         )
-        formal_cache, formal_assembly = _build_formal_environment(
-            Path(arguments.cache_manifest),
-            capability_bundle=capability_bundle,
-            repository_root=repository_root,
-            split="train",
-            task_area=requested_config.task_area,
-        )
-        _calibrate_training_run(
-            config_path=Path(arguments.config),
+        with _open_formal_task_cache_runtime(
             artifact_root=Path(arguments.artifact_root),
-            repository_root=repository_root,
-            capability_bundle=capability_bundle,
-            formal_cache=formal_cache,
-            formal_environment_assembly=formal_assembly,
             cache_manifest_path=Path(arguments.cache_manifest),
-            sensor_performance_sha256=sensor_report_sha256,
-        )
+            capability_bundle=capability_bundle,
+            task_area=requested_config.task_area,
+            repository_root=repository_root,
+        ) as task_runtime:
+            formal_cache, formal_assembly = _build_formal_environment(
+                Path(arguments.cache_manifest),
+                capability_bundle=capability_bundle,
+                repository_root=repository_root,
+                split="train",
+                task_area=requested_config.task_area,
+                task_cache_client=task_runtime.client,
+            )
+            _calibrate_training_run(
+                config_path=Path(arguments.config),
+                artifact_root=Path(arguments.artifact_root),
+                repository_root=repository_root,
+                capability_bundle=capability_bundle,
+                formal_cache=formal_cache,
+                formal_environment_assembly=formal_assembly,
+                cache_manifest_path=Path(arguments.cache_manifest),
+                sensor_performance_sha256=sensor_report_sha256,
+            )
     elif arguments.command == "train":
         capability_bundle = _formal_capability_preflight(repository_root)
         requested_config = load_training_config(Path(arguments.config))
@@ -1440,38 +3366,97 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not Path(arguments.artifact_root).is_dir():
             raise ArtifactRootError("run calibrate before public train")
-        formal_assembly = _formal_environment_from_calibrated_root(
-            Path(arguments.artifact_root),
-            capability_bundle=capability_bundle,
-            repository_root=repository_root,
-            sensor_performance_sha256=sensor_performance_sha256,
-            split="train",
+        reward_v4_root = validate_artifact_root(
+            Path(arguments.artifact_root), repository_root=repository_root
         )
-        formal_batches = _formal_evaluation_batches_from_calibrated_root(
-            Path(arguments.artifact_root),
-            capability_bundle=capability_bundle,
-            repository_root=repository_root,
-            sensor_performance_sha256=sensor_performance_sha256,
+        calibrated = _load_calibrated_run_state(reward_v4_root)
+        manifest = _read_run_manifest(reward_v4_root / "run-manifest.json")
+        if (
+            manifest.get("schema_version") != RUN_MANIFEST_SCHEMA_VERSION
+            or manifest.get("global_step") != 0
+            or manifest.get("initialization") is not None
+            or manifest.get("qualification_evidence") is not None
+        ):
+            raise ArtifactRootError(
+                "formal train requires a new uninitialized run manifest v2"
+            )
+        source_commit = _source_commit(repository_root)
+        _freeze_reward_v4_run_manifest(
+            reward_v4_root / "run-manifest.json",
+            artifact_root=reward_v4_root,
+            config=calibrated.config,
+            source_commit=source_commit,
+            run_identity=calibrated.run_identity,
         )
-        _start_training_run(
-            config_path=Path(arguments.config),
-            artifact_root=Path(arguments.artifact_root),
-            repository_root=repository_root,
-            max_updates=None,
-            interrupt_first_update=False,
-            warm_start_checkpoint_path=(
-                Path(arguments.warm_start_checkpoint)
-                if arguments.warm_start_checkpoint is not None
-                else None
-            ),
-            capability_bundle=capability_bundle,
-            formal_environment_factory=formal_assembly.factory,
-            formal_observation_template=formal_assembly.observation_template,
-            formal_evaluation_batches=formal_batches,
-            formal_gate_path=(
-                repository_root / "training/configs/candidate_gate_v1.yaml"
-            ),
+        _require_reward_v4_artifact_parents(
+            reward_v4_root, repository_root=repository_root
         )
+        preflight_sha256, qualification_sha256 = (
+            _validate_reward_v4_entry_evidence(
+                formal_preflight_path=Path(
+                    arguments.formal_preflight_report
+                ),
+                qualification_report_path=Path(
+                    arguments.qualification_report
+                ),
+                source_commit=source_commit,
+                run_identity=calibrated.run_identity,
+                repository_root=repository_root,
+            )
+        )
+        _freeze_training_qualification_manifest(
+            reward_v4_root / "run-manifest.json",
+            formal_preflight_path=Path(arguments.formal_preflight_report),
+            formal_preflight_sha256=preflight_sha256,
+            qualification_report_path=Path(arguments.qualification_report),
+            qualification_report_sha256=qualification_sha256,
+        )
+        assert calibrated.cache_manifest_path is not None
+        with _open_formal_task_cache_runtime(
+            artifact_root=reward_v4_root,
+            cache_manifest_path=calibrated.cache_manifest_path,
+            capability_bundle=capability_bundle,
+            task_area=calibrated.config.task_area,
+            repository_root=repository_root,
+        ) as task_runtime:
+            formal_assembly = _formal_environment_from_calibrated_root(
+                reward_v4_root,
+                capability_bundle=capability_bundle,
+                repository_root=repository_root,
+                sensor_performance_sha256=sensor_performance_sha256,
+                split="train",
+                task_cache_client=task_runtime.client,
+            )
+            formal_batches = _formal_evaluation_batches_from_calibrated_root(
+                reward_v4_root,
+                capability_bundle=capability_bundle,
+                repository_root=repository_root,
+                sensor_performance_sha256=sensor_performance_sha256,
+                task_cache_client=task_runtime.client,
+            )
+            _start_training_run(
+                config_path=Path(arguments.config),
+                artifact_root=reward_v4_root,
+                repository_root=repository_root,
+                max_updates=None,
+                interrupt_first_update=False,
+                warm_start_checkpoint_path=(
+                    Path(arguments.policy_warm_start)
+                    if arguments.policy_warm_start is not None
+                    else None
+                ),
+                random_init=arguments.random_init,
+                capability_bundle=capability_bundle,
+                formal_environment_factory=formal_assembly.factory,
+                formal_observation_template=(
+                    formal_assembly.observation_template
+                ),
+                formal_evaluation_batches=formal_batches,
+                formal_gate_path=(
+                    repository_root
+                    / "training/configs/candidate_gate_v1.yaml"
+                ),
+            )
     elif arguments.command == "resume":
         capability_bundle = _formal_capability_preflight(repository_root)
         sensor_performance_sha256 = _formal_sensor_performance_preflight(
@@ -1479,32 +3464,47 @@ def main(argv: list[str] | None = None) -> int:
             capability_bundle=capability_bundle,
             repository_root=repository_root,
         )
-        formal_assembly = _formal_environment_from_calibrated_root(
-            Path(arguments.artifact_root),
+        resume_root = Path(arguments.artifact_root)
+        resume_state = _load_calibrated_run_state(resume_root)
+        assert resume_state.cache_manifest_path is not None
+        with _open_formal_task_cache_runtime(
+            artifact_root=resume_root,
+            cache_manifest_path=resume_state.cache_manifest_path,
             capability_bundle=capability_bundle,
+            task_area=resume_state.config.task_area,
             repository_root=repository_root,
-            sensor_performance_sha256=sensor_performance_sha256,
-            split="train",
-        )
-        formal_batches = _formal_evaluation_batches_from_calibrated_root(
-            Path(arguments.artifact_root),
-            capability_bundle=capability_bundle,
-            repository_root=repository_root,
-            sensor_performance_sha256=sensor_performance_sha256,
-        )
-        _resume_training_run(
-            artifact_root=Path(arguments.artifact_root),
-            checkpoint_path=Path(arguments.checkpoint),
-            repository_root=repository_root,
-            max_updates=None,
-            capability_bundle=capability_bundle,
-            formal_environment_factory=formal_assembly.factory,
-            formal_observation_template=formal_assembly.observation_template,
-            formal_evaluation_batches=formal_batches,
-            formal_gate_path=(
-                repository_root / "training/configs/candidate_gate_v1.yaml"
-            ),
-        )
+        ) as task_runtime:
+            formal_assembly = _formal_environment_from_calibrated_root(
+                resume_root,
+                capability_bundle=capability_bundle,
+                repository_root=repository_root,
+                sensor_performance_sha256=sensor_performance_sha256,
+                split="train",
+                task_cache_client=task_runtime.client,
+            )
+            formal_batches = _formal_evaluation_batches_from_calibrated_root(
+                resume_root,
+                capability_bundle=capability_bundle,
+                repository_root=repository_root,
+                sensor_performance_sha256=sensor_performance_sha256,
+                task_cache_client=task_runtime.client,
+            )
+            _resume_training_run(
+                artifact_root=resume_root,
+                checkpoint_path=Path(arguments.checkpoint),
+                repository_root=repository_root,
+                max_updates=None,
+                capability_bundle=capability_bundle,
+                formal_environment_factory=formal_assembly.factory,
+                formal_observation_template=(
+                    formal_assembly.observation_template
+                ),
+                formal_evaluation_batches=formal_batches,
+                formal_gate_path=(
+                    repository_root
+                    / "training/configs/candidate_gate_v1.yaml"
+                ),
+            )
     elif arguments.command == "evaluate":
         capability_bundle = _formal_capability_preflight(repository_root)
         sensor_performance_sha256 = _formal_sensor_performance_preflight(
@@ -1512,20 +3512,31 @@ def main(argv: list[str] | None = None) -> int:
             capability_bundle=capability_bundle,
             repository_root=repository_root,
         )
-        formal_batches = _formal_evaluation_batches_from_calibrated_root(
-            Path(arguments.artifact_root),
+        evaluation_root = Path(arguments.artifact_root)
+        evaluation_state = _load_calibrated_run_state(evaluation_root)
+        assert evaluation_state.cache_manifest_path is not None
+        with _open_formal_task_cache_runtime(
+            artifact_root=evaluation_root,
+            cache_manifest_path=evaluation_state.cache_manifest_path,
             capability_bundle=capability_bundle,
+            task_area=evaluation_state.config.task_area,
             repository_root=repository_root,
-            sensor_performance_sha256=sensor_performance_sha256,
-        )
-        _evaluate_checkpoint(
-            checkpoint_path=Path(arguments.checkpoint),
-            gate_path=Path(arguments.gate),
-            artifact_root=Path(arguments.artifact_root),
-            repository_root=repository_root,
-            capability_bundle=capability_bundle,
-            formal_batches=formal_batches,
-        )
+        ) as task_runtime:
+            formal_batches = _formal_evaluation_batches_from_calibrated_root(
+                evaluation_root,
+                capability_bundle=capability_bundle,
+                repository_root=repository_root,
+                sensor_performance_sha256=sensor_performance_sha256,
+                task_cache_client=task_runtime.client,
+            )
+            _evaluate_checkpoint(
+                checkpoint_path=Path(arguments.checkpoint),
+                gate_path=Path(arguments.gate),
+                artifact_root=evaluation_root,
+                repository_root=repository_root,
+                capability_bundle=capability_bundle,
+                formal_batches=formal_batches,
+            )
     elif arguments.command == "closed-loop-gate":
         try:
             report, report_path = run_closed_loop_gate(
@@ -1564,78 +3575,97 @@ def main(argv: list[str] | None = None) -> int:
             capability_bundle=capability_bundle,
             repository_root=repository_root,
         )
-        cache, train_assembly = _build_formal_environment(
-            Path(arguments.cache_manifest),
+        with _open_formal_task_cache_runtime(
+            artifact_root=Path(arguments.calibration_root),
+            cache_manifest_path=Path(arguments.cache_manifest),
             capability_bundle=capability_bundle,
-            repository_root=repository_root,
-            split="train",
             task_area=requested_config.task_area,
-        )
-        assemblies = {"train": train_assembly}
-        for split in ("validation", "test", "holdout"):
-            _, assemblies[split] = _build_formal_environment(
+            repository_root=repository_root,
+        ) as task_runtime:
+            cache, train_assembly = _build_formal_environment(
                 Path(arguments.cache_manifest),
                 capability_bundle=capability_bundle,
                 repository_root=repository_root,
-                split=split,
+                split="train",
                 task_area=requested_config.task_area,
+                task_cache_client=task_runtime.client,
             )
-        evaluation_batches = _formal_evaluation_batches(cache, assemblies)
-        calibrated = _validated_formal_preflight_calibration(
-            calibration_root=Path(arguments.calibration_root),
-            requested_config=requested_config,
-            cache=cache,
-            train_assembly=train_assembly,
-            cache_manifest_path=Path(arguments.cache_manifest),
-            sensor_performance_sha256=sensor_performance_sha256,
-            repository_root=repository_root,
-        )
-        preflight_root = validate_artifact_root(
-            Path(arguments.artifact_root), repository_root=repository_root
-        )
-        if (preflight_root / "checkpoints").exists():
-            raise PreflightError(
-                "formal-preflight artifact root cannot contain checkpoints"
+            assemblies = {"train": train_assembly}
+            for split in ("validation", "test", "holdout"):
+                _, assemblies[split] = _build_formal_environment(
+                    Path(arguments.cache_manifest),
+                    capability_bundle=capability_bundle,
+                    repository_root=repository_root,
+                    split=split,
+                    task_area=requested_config.task_area,
+                    task_cache_client=task_runtime.client,
+                )
+            evaluation_batches = _formal_evaluation_batches(
+                cache, assemblies
             )
-        try:
-            resume_equivalence = _formal_resume_equivalence_check(
-                config=calibrated.config,
-                assembly=train_assembly,
-                run_identity=_formal_run_identity(cache.identity),
-                source_commit=_source_commit(repository_root),
-                artifact_root=preflight_root,
-                selected_workers=calibrated.selected_workers,
-                micro_batch_size=calibrated.micro_batch_size,
-            )
-            report, report_path = run_formal_preflight(
+            calibrated = _validated_formal_preflight_calibration(
+                calibration_root=Path(arguments.calibration_root),
+                requested_config=requested_config,
                 cache=cache,
-                assemblies=assemblies,
-                evaluation_batches=evaluation_batches,
-                run_identity=_formal_run_identity(cache.identity),
-                source_commit=_source_commit(repository_root),
+                train_assembly=train_assembly,
+                cache_manifest_path=Path(arguments.cache_manifest),
                 sensor_performance_sha256=sensor_performance_sha256,
-                artifact_root=preflight_root,
-                worker_candidates=requested_config.parallel.worker_candidates,
-                selected_workers=calibrated.selected_workers,
-                selected_micro_batch=calibrated.micro_batch_size,
-                selected_rollout_horizon=calibrated.rollout_horizon,
-                resume_equivalence=resume_equivalence,
+                repository_root=repository_root,
             )
-        except FormalPreflightError as error:
-            raise PreflightError(f"formal preflight failed: {error}") from error
-        print(
-            json.dumps(
-                {
-                    "formal_preflight_report": str(report_path),
-                    "selected_workers": report.payload["selected_workers"],
-                    "selected_micro_batch": report.payload[
-                        "selected_micro_batch"
-                    ],
-                    "training_started": False,
-                },
-                sort_keys=True,
+            preflight_root = validate_artifact_root(
+                Path(arguments.artifact_root), repository_root=repository_root
             )
-        )
+            if (preflight_root / "checkpoints").exists():
+                raise PreflightError(
+                    "formal-preflight artifact root cannot contain checkpoints"
+                )
+            try:
+                resume_equivalence = _formal_resume_equivalence_check(
+                    config=calibrated.config,
+                    assembly=train_assembly,
+                    run_identity=_formal_run_identity(cache.identity),
+                    source_commit=_source_commit(repository_root),
+                    artifact_root=preflight_root,
+                    selected_workers=calibrated.selected_workers,
+                    worker_allocation=calibrated.allocation,
+                    micro_batch_size=calibrated.micro_batch_size,
+                )
+                report, report_path = run_formal_preflight(
+                    cache=cache,
+                    assemblies=assemblies,
+                    evaluation_batches=evaluation_batches,
+                    run_identity=_formal_run_identity(cache.identity),
+                    source_commit=_source_commit(repository_root),
+                    sensor_performance_sha256=sensor_performance_sha256,
+                    artifact_root=preflight_root,
+                    worker_candidates=(
+                        requested_config.parallel.worker_candidates
+                    ),
+                    worker_allocation=calibrated.allocation,
+                    selected_workers=calibrated.selected_workers,
+                    selected_micro_batch=calibrated.micro_batch_size,
+                    selected_rollout_horizon=calibrated.rollout_horizon,
+                    resume_equivalence=resume_equivalence,
+                )
+            except FormalPreflightError as error:
+                raise PreflightError(
+                    f"formal preflight failed: {error}"
+                ) from error
+            print(
+                json.dumps(
+                    {
+                        "formal_preflight_report": str(report_path),
+                        "selected_workers": report.payload[
+                            "selected_workers"
+                        ],
+                        "selected_micro_batch": report.payload[
+                            "selected_micro_batch"
+                        ],
+                        "training_started": False,
+                    },
+                    sort_keys=True,
+                )
+            )
     elif arguments.command == "extend-budget":
         root = validate_artifact_root(
             Path(arguments.artifact_root), repository_root=repository_root
@@ -1735,6 +3765,7 @@ def _build_formal_environment(
     repository_root: Path,
     split: str,
     task_area: TaskAreaConfig,
+    task_cache_client: object | None = None,
 ) -> tuple[FormalCache, FormalEnvironmentAssembly]:
     """Validate every current identity before constructing one formal factory."""
     try:
@@ -1774,6 +3805,8 @@ def _build_formal_environment(
             capability_bundle=capability_bundle,
             task_area=task_area,
             split=split,
+            task_cache_client=task_cache_client,
+            source_commit=_source_commit(repository_root),
         ).build()
     except (FormalCacheError, ValueError) as error:
         raise PreflightError(f"formal environment is invalid: {error}") from error
@@ -1787,6 +3820,7 @@ def _formal_environment_from_calibrated_root(
     repository_root: Path,
     sensor_performance_sha256: str,
     split: str,
+    task_cache_client: object | None = None,
 ) -> FormalEnvironmentAssembly:
     root = validate_artifact_root(
         artifact_root, repository_root=repository_root
@@ -1806,6 +3840,7 @@ def _formal_environment_from_calibrated_root(
         repository_root=repository_root,
         split=split,
         task_area=calibrated.config.task_area,
+        task_cache_client=task_cache_client,
     )
     if cache.manifest["cache_manifest_sha256"] != calibrated.cache_manifest_sha256:
         raise PreflightError("formal cache manifest differs from calibration")
@@ -1969,6 +4004,7 @@ def _formal_evaluation_batches_from_calibrated_root(
     capability_bundle: FrozenCapabilityBundle,
     repository_root: Path,
     sensor_performance_sha256: str,
+    task_cache_client: object | None = None,
 ) -> tuple[FormalEvaluationBatch, ...]:
     """Construct all frozen non-training batches for manual or periodic gates."""
     calibrated = _load_calibrated_run_state(artifact_root)
@@ -1981,6 +4017,7 @@ def _formal_evaluation_batches_from_calibrated_root(
             repository_root=repository_root,
             sensor_performance_sha256=sensor_performance_sha256,
             split=split,
+            task_cache_client=task_cache_client,
         )
         for split in ("validation", "test", "holdout")
     }
@@ -2062,6 +4099,35 @@ def run_cuda_interrupt_resume_smoke(
     )
 
 
+def _prepare_calibration_artifact_root(root: Path, *, formal: bool) -> None:
+    """Create a run root or reuse only its validated formal entry evidence."""
+    if root.exists():
+        if not formal:
+            raise ArtifactRootError("calibration artifact root already exists")
+        required = {
+            "ground-task-prefetch.json",
+            "sensor-performance.json",
+        }
+        try:
+            entries = tuple(root.iterdir()) if root.is_dir() else ()
+        except OSError as error:
+            raise ArtifactRootError(
+                "formal calibration artifact root is unreadable"
+            ) from error
+        if (
+            root.is_symlink()
+            or {entry.name for entry in entries} != required
+            or any(entry.is_symlink() or not entry.is_file() for entry in entries)
+        ):
+            raise ArtifactRootError(
+                "formal calibration artifact root has unexpected content"
+            )
+        return
+    if not root.parent.is_dir():
+        raise ArtifactRootError("artifact root parent directory is missing")
+    root.mkdir()
+
+
 def _calibrate_training_run(
     *,
     config_path: Path,
@@ -2115,11 +4181,7 @@ def _calibrate_training_run(
     root = validate_artifact_root(
         artifact_root, repository_root=repository_root
     )
-    if root.exists():
-        raise ArtifactRootError("calibration artifact root already exists")
-    if not root.parent.is_dir():
-        raise ArtifactRootError("artifact root parent directory is missing")
-    root.mkdir()
+    _prepare_calibration_artifact_root(root, formal=formal)
     budget = TrainingBudget(
         total_gpu_seconds=float(config.total_gpu_budget_seconds)
     )
@@ -2153,6 +4215,11 @@ def _calibrate_training_run(
         calibration.selected_rollout_horizon,
     )
     schedule = CurriculumSchedule()
+    calibration_seeds = _reward_calibration_seeds_for_config(config)
+    calibration_allocation = _reward_calibration_allocation_for_config(
+        config,
+        selected_workers=calibration.selected_workers,
+    )
     if formal:
         assert formal_environment_assembly is not None
         assert formal_cache is not None
@@ -2162,7 +4229,8 @@ def _calibrate_training_run(
             _formal_reward_seed_results(
                 factory=formal_environment_assembly.factory,
                 observation_template=formal_environment_assembly.observation_template,
-                selected_workers=calibration.selected_workers,
+                allocation=calibration_allocation,
+                seeds=calibration_seeds,
                 budget=budget,
             )
         )
@@ -2177,7 +4245,7 @@ def _calibrate_training_run(
         )
     else:
         reward_results = []
-        for seed in REWARD_CALIBRATION_SEEDS:
+        for seed in calibration_seeds:
             _seed_everything(seed)
             start = time.monotonic()
             budget.begin_gpu_interval(
@@ -2210,7 +4278,6 @@ def _calibrate_training_run(
                     "report_sha256": report_sha256(report),
                 }
             )
-    allocation = _allocation_for_workers(calibration.selected_workers)
     _update_run_manifest(
         root / "run-manifest.json",
         source_commit=source_commit,
@@ -2218,7 +4285,7 @@ def _calibrate_training_run(
         run_identity=run_identity,
         global_step=0,
         consumed_gpu_seconds=budget.consumed_gpu_seconds,
-        platform_allocation=allocation,
+        platform_allocation=calibration_allocation,
     )
     _freeze_task4_manifest(
         root / "run-manifest.json",
@@ -2226,6 +4293,8 @@ def _calibrate_training_run(
         selected_workers=calibration.selected_workers,
         reward_hash=reward_weights_sha256(),
         reward_seed_results=tuple(reward_results),
+        reward_calibration_seeds=calibration_seeds,
+        reward_calibration_allocation=calibration_allocation,
         proxy=not formal,
         scenario_schedule_id=(
             formal_environment_assembly.scenario_schedule_id
@@ -2233,6 +4302,14 @@ def _calibrate_training_run(
             else None
         ),
     )
+    if config.reward_v4 is not None:
+        _freeze_reward_v4_run_manifest(
+            root / "run-manifest.json",
+            artifact_root=root,
+            config=config,
+            source_commit=source_commit,
+            run_identity=run_identity,
+        )
     return _load_calibrated_run_state(root)
 
 
@@ -2240,13 +4317,16 @@ def _formal_reward_seed_results(
     *,
     factory: FrozenCapabilityEnvironmentFactory,
     observation_template: PolicyBatch,
-    selected_workers: int,
+    allocation: Mapping[str, int],
+    seeds: tuple[int, ...],
     budget: TrainingBudget,
 ) -> tuple[dict[str, object], ...]:
-    """Measure the approved reward on real formal transitions for three seeds."""
-    allocation = _allocation_for_workers(selected_workers)
+    """Measure the approved reward on the current formal curriculum stage."""
+    resolved_allocation = dict(allocation)
+    if not resolved_allocation or not seeds:
+        raise ValueError("formal reward calibration inputs are empty")
     results: list[dict[str, object]] = []
-    for seed in REWARD_CALIBRATION_SEEDS:
+    for seed in seeds:
         _seed_everything(seed)
         start = time.monotonic()
         budget.begin_gpu_interval(
@@ -2256,7 +4336,7 @@ def _formal_reward_seed_results(
         pool: ParallelEnvPool | None = None
         try:
             pool = ParallelEnvPool(
-                allocation=allocation,
+                allocation=resolved_allocation,
                 observation_template=observation_template,
                 environment_factory=factory,
                 reward_fn=compute_transition_reward,
@@ -2274,7 +4354,7 @@ def _formal_reward_seed_results(
             torch.cuda.synchronize()
             platform_rewards: dict[str, float] = {}
             offset = 0
-            for platform, count in allocation.items():
+            for platform, count in resolved_allocation.items():
                 values = collected.rewards[:, offset : offset + count]
                 platform_rewards[platform] = float(values.mean())
                 offset += count
@@ -2638,6 +4718,7 @@ def _run_curriculum_training(
     interrupt_first_update: bool,
     restore_checkpoint,
     warm_start_checkpoint_path: Path | None = None,
+    random_init: bool = False,
     capability_bundle: FrozenCapabilityBundle | None = None,
     formal_environment_factory: FrozenCapabilityEnvironmentFactory | None = None,
     formal_observation_template: PolicyBatch | None = None,
@@ -2648,6 +4729,10 @@ def _run_curriculum_training(
     """Run one smoke override or advance across four active-GPU phases."""
     if restore_checkpoint is not None and warm_start_checkpoint_path is not None:
         raise PreflightError("resume and policy warm-start are mutually exclusive")
+    if type(random_init) is not bool:
+        raise PreflightError("random initialization selection is invalid")
+    if restore_checkpoint is not None and random_init:
+        raise PreflightError("resume and random initialization are mutually exclusive")
     if calibrated.config.run_kind == "formal":
         _validate_formal_bundle_identity(capability_bundle, calibrated.run_identity)
         if not isinstance(
@@ -2670,9 +4755,95 @@ def _run_curriculum_training(
         if capability_bundle is not None or formal_environment_factory is not None:
             raise PreflightError("development-smoke cannot consume formal capability")
         rollout_factory = proxy_environment_factory
+    if calibrated.config.reward_v4 is not None:
+        reward_config = require_reward_v4_config(calibrated.config)
+        checkpoint = restore_checkpoint
+        global_step = initial_global_step
+        remaining_updates = max_updates
+        pending_warm_start = warm_start_checkpoint_path
+        pending_random_init = random_init
+        while True:
+            curriculum = (
+                RewardCurriculumState.from_mapping(
+                    checkpoint.reward_curriculum_state
+                )
+                if checkpoint is not None
+                else initial_reward_curriculum_state(reward_config)
+            )
+            allocation = worker_allocation_for_stage(
+                curriculum.stage, reward_config
+            )
+            evaluation_batch = FormalEvaluationBatch(
+                split="validation",
+                factory=rollout_factory,
+                observation_template=formal_observation_template,
+                scenario_seeds=reward_config.evaluation_seeds,
+            )
+            evidence = _run_updates(
+                config=calibrated.config,
+                artifact_root=artifact_root,
+                repository_root=repository_root,
+                source_commit=source_commit,
+                budget=calibrated.budget,
+                allocation=allocation,
+                micro_batch_size=calibrated.micro_batch_size,
+                initial_global_step=global_step,
+                max_updates=(
+                    remaining_updates
+                    if remaining_updates is not None
+                    else 2**63 - 1
+                ),
+                interrupt_first_update=interrupt_first_update,
+                restore_checkpoint=checkpoint,
+                curriculum_phase=curriculum.stage.value,
+                rollout_environment_factory=rollout_factory,
+                rollout_observation_template=formal_observation_template,
+                rollout_reward_fn=compute_transition_reward,
+                run_identity=calibrated.run_identity,
+                reward_v4_evaluation_batch=evaluation_batch,
+                warm_start_checkpoint_path=(
+                    pending_warm_start
+                    if checkpoint is None and global_step == 0
+                    else None
+                ),
+                random_init=(
+                    pending_random_init
+                    if checkpoint is None and global_step == 0
+                    else False
+                ),
+                warm_start_seed=(
+                    calibrated.formal_seed
+                    if pending_warm_start is not None
+                    and checkpoint is None
+                    and global_step == 0
+                    else None
+                ),
+            )
+            completed = evidence.global_step - global_step
+            if remaining_updates is not None:
+                remaining_updates -= completed
+            if (
+                not evidence.worker_restart_required
+                or calibrated.budget.exhausted
+                or evidence.signal_observed_at_update_boundary
+                or remaining_updates == 0
+            ):
+                return evidence
+            checkpoint = load_checkpoint(
+                _checkpoint_target(
+                    artifact_root,
+                    kind="latest",
+                    global_step=evidence.global_step,
+                )
+            )
+            global_step = evidence.global_step
+            interrupt_first_update = False
+            pending_warm_start = None
+            pending_random_init = False
     schedule = CurriculumSchedule()
     checkpoint = restore_checkpoint
     pending_warm_start = warm_start_checkpoint_path
+    pending_random_init = random_init
     global_step = initial_global_step
     while True:
         phase = schedule.phase_for(
@@ -2728,6 +4899,11 @@ def _run_curriculum_training(
                 if checkpoint is None and global_step == 0
                 else None
             ),
+            random_init=(
+                pending_random_init
+                if checkpoint is None and global_step == 0
+                else False
+            ),
             warm_start_seed=(
                 calibrated.formal_seed
                 if pending_warm_start is not None
@@ -2737,6 +4913,7 @@ def _run_curriculum_training(
             ),
         )
         pending_warm_start = None
+        pending_random_init = False
         if (
             max_updates is not None
             or calibrated.budget.exhausted
@@ -2790,6 +4967,7 @@ def _start_training_run(
     max_updates: int | None,
     interrupt_first_update: bool,
     warm_start_checkpoint_path: Path | None = None,
+    random_init: bool = False,
     capability_bundle: FrozenCapabilityBundle | None = None,
     formal_environment_factory: FrozenCapabilityEnvironmentFactory | None = None,
     formal_observation_template: PolicyBatch | None = None,
@@ -2804,9 +4982,15 @@ def _start_training_run(
             raise PreflightError("formal train cannot bound updates")
         if capability_bundle is None:
             raise PreflightError("formal capability bundle is required")
+        if (warm_start_checkpoint_path is None) == (not random_init):
+            raise PreflightError(
+                "formal train requires exactly one explicit initialization"
+            )
     else:
         if warm_start_checkpoint_path is not None:
             raise PreflightError("policy warm-start is formal-only")
+        if random_init:
+            raise PreflightError("explicit random initialization is formal-only")
         if capability_bundle is not None or formal_evaluation_batches is not None:
             raise PreflightError("development-smoke rejects formal capability bundle")
         if type(max_updates) is not int or not 1 <= max_updates <= 2:
@@ -2882,6 +5066,7 @@ def _start_training_run(
         interrupt_first_update=interrupt_first_update,
         restore_checkpoint=None,
         warm_start_checkpoint_path=warm_start_checkpoint_path,
+        random_init=random_init,
         capability_bundle=capability_bundle,
         formal_environment_factory=formal_environment_factory,
         formal_observation_template=formal_observation_template,
@@ -2892,6 +5077,200 @@ def _start_training_run(
             else None
         ),
     )
+
+
+def _validate_reward_v4_resume_manifest(
+    manifest: Mapping[str, object],
+    *,
+    checkpoint: object,
+) -> None:
+    """Fail closed unless the manifest mirrors the accepted update boundary."""
+    if manifest.get("schema_version") != RUN_MANIFEST_SCHEMA_VERSION:
+        raise ArtifactRootError("Reward V4 strict resume requires manifest v2")
+    if manifest.get("schema_identity") != _reward_v4_schema_identity():
+        raise ArtifactRootError("Reward V4 resume schema identity differs")
+    if manifest.get("initialization") not in (
+        "policy-warm-start",
+        "random-init",
+    ) or not isinstance(manifest.get("initialization_evidence"), Mapping):
+        raise ArtifactRootError("Reward V4 resume initialization is incomplete")
+    if not isinstance(manifest.get("qualification_evidence"), Mapping):
+        raise ArtifactRootError("Reward V4 resume qualification is incomplete")
+
+    global_step = getattr(checkpoint, "global_step", None)
+    run_identity = getattr(checkpoint, "run_identity", None)
+    recovery = getattr(checkpoint, "update_recovery_state", None)
+    curriculum = getattr(checkpoint, "reward_curriculum_state", None)
+    if (
+        type(global_step) is not int
+        or global_step <= 0
+        or not isinstance(run_identity, RunIdentity)
+        or not isinstance(recovery, UpdateRecoveryState)
+        or not isinstance(curriculum, Mapping)
+    ):
+        raise ArtifactRootError("Reward V4 resume checkpoint state is invalid")
+    if (
+        manifest.get("global_step") != global_step
+        or manifest.get("run_identity") != run_identity.to_dict()
+    ):
+        raise ArtifactRootError("Reward V4 resume checkpoint identity differs")
+    if recovery.journal_state != "SEALED" or (
+        manifest.get("journal_cursor") != recovery.to_dict()
+    ):
+        raise ArtifactRootError("Reward V4 resume journal cursor differs")
+    if manifest.get("current_curriculum_state") != dict(curriculum):
+        raise ArtifactRootError("Reward V4 resume curriculum state differs")
+
+
+def _default_resume_checkpoint_target(
+    root: Path,
+    *,
+    manifest: Mapping[str, object],
+    reward_v4: bool,
+) -> Path:
+    """Resolve the last manifest-accepted checkpoint, not a possibly-ahead mirror."""
+    if not isinstance(root, Path) or not root.is_absolute():
+        raise ArtifactRootError("resume artifact root is invalid")
+    if not isinstance(manifest, Mapping) or type(reward_v4) is not bool:
+        raise ArtifactRootError("resume manifest selection is invalid")
+    if reward_v4:
+        global_step = manifest.get("global_step")
+        if type(global_step) is not int or global_step <= 0:
+            raise ArtifactRootError(
+                "Reward V4 resume requires an accepted update checkpoint"
+            )
+        target = root / "checkpoints" / f"update-{global_step:08d}.pt"
+    else:
+        target = _checkpoint_target(root, kind="latest", global_step=0)
+    try:
+        return target.resolve(strict=True)
+    except OSError as error:
+        raise ArtifactRootError("resume checkpoint is missing") from error
+
+
+def _reward_v4_step_zero_initialization(
+    manifest: Mapping[str, object],
+) -> tuple[Path | None, bool]:
+    """Recover the frozen fresh-run initialization for a partial first update."""
+    if (
+        not isinstance(manifest, Mapping)
+        or manifest.get("global_step") != 0
+        or not isinstance(manifest.get("qualification_evidence"), Mapping)
+        or not isinstance(manifest.get("initialization_evidence"), Mapping)
+    ):
+        raise ArtifactRootError(
+            "Reward V4 step-zero initialization evidence is incomplete"
+        )
+    initialization = manifest.get("initialization")
+    evidence = manifest["initialization_evidence"]
+    if initialization == "random-init" and evidence.get("mode") in (
+        "random-init",
+        "random-initialization",
+    ):
+        return None, True
+    if initialization != "policy-warm-start" or evidence.get(
+        "mode"
+    ) != "policy-partial":
+        raise ArtifactRootError(
+            "Reward V4 step-zero initialization identity is invalid"
+        )
+    parent = manifest.get("warm_start_parent")
+    if not isinstance(parent, Mapping):
+        raise ArtifactRootError(
+            "Reward V4 step-zero warm-start parent is missing"
+        )
+    path = parent.get("path")
+    if not isinstance(path, str) or not Path(path).is_absolute():
+        raise ArtifactRootError(
+            "Reward V4 step-zero warm-start path is invalid"
+        )
+    source = Path(path)
+    if source.is_symlink():
+        raise ArtifactRootError(
+            "Reward V4 step-zero warm-start parent is unsafe"
+        )
+    try:
+        target = source.resolve(strict=True)
+    except OSError as error:
+        raise ArtifactRootError(
+            "Reward V4 step-zero warm-start parent is missing"
+        ) from error
+    if target.is_symlink() or not target.is_file():
+        raise ArtifactRootError(
+            "Reward V4 step-zero warm-start parent is unsafe"
+        )
+    return target, False
+
+
+def _validate_reward_v4_resume_curriculum(
+    config: ResolvedTrainingConfig,
+    *,
+    checkpoint: object,
+) -> RewardCurriculumState:
+    """Validate Reward V4's checkpoint-owned stage instead of legacy GPU phases."""
+    try:
+        reward_config = require_reward_v4_config(config)
+        curriculum = RewardCurriculumState.from_mapping(
+            getattr(checkpoint, "reward_curriculum_state", None)
+        )
+    except (TypeError, ValueError) as error:
+        raise ArtifactRootError(
+            "Reward V4 resume curriculum state is invalid"
+        ) from error
+    if (
+        getattr(checkpoint, "curriculum_phase", None)
+        != curriculum.stage.value
+    ):
+        raise ArtifactRootError("Reward V4 resume curriculum phase differs")
+    if getattr(checkpoint, "global_step", None) != curriculum.current_update_id:
+        raise ArtifactRootError("Reward V4 resume curriculum step differs")
+    checkpoint_allocation = getattr(checkpoint, "worker_allocation", None)
+    expected_allocation = worker_allocation_for_stage(
+        curriculum.stage, reward_config
+    )
+    transition_allocation = False
+    recovery = getattr(checkpoint, "update_recovery_state", None)
+    if curriculum.worker_restart_required and isinstance(
+        recovery, UpdateRecoveryState
+    ):
+        metrics_phase_raw = recovery.metrics_record.get("curriculum_phase")
+        try:
+            metrics_phase = TrainingStage(metrics_phase_raw)
+            transition_allocation = (
+                tuple(TrainingStage).index(curriculum.stage)
+                == tuple(TrainingStage).index(metrics_phase) + 1
+                and checkpoint_allocation
+                == worker_allocation_for_stage(metrics_phase, reward_config)
+            )
+        except (TypeError, ValueError):
+            transition_allocation = False
+    if checkpoint_allocation != expected_allocation and not transition_allocation:
+        raise ArtifactRootError("Reward V4 resume worker allocation differs")
+    return curriculum
+
+
+def _restore_reward_v4_budget_boundary(
+    budget: TrainingBudget,
+    *,
+    checkpoint: object,
+) -> None:
+    """Restore the checkpoint-owned budget after an idempotent update replay."""
+    if not isinstance(budget, TrainingBudget) or budget.interval_active:
+        raise ArtifactRootError("Reward V4 recovery budget is invalid")
+    try:
+        restored = TrainingBudget.from_checkpoint(checkpoint)
+    except ValueError as error:
+        raise ArtifactRootError(
+            "Reward V4 recovery budget identity is invalid"
+        ) from error
+    if (
+        restored.total_gpu_seconds != budget.total_gpu_seconds
+        or restored.budget_extension_blocks != budget.budget_extension_blocks
+    ):
+        raise ArtifactRootError(
+            "Reward V4 recovery budget identity differs"
+        )
+    budget.consumed_gpu_seconds = restored.consumed_gpu_seconds
 
 
 def _resume_training_run(
@@ -2937,11 +5316,38 @@ def _resume_training_run(
     micro_batch_size = runtime_calibration.get("selected_micro_batch")
     if type(micro_batch_size) is not int or micro_batch_size <= 0:
         raise ArtifactRootError("run manifest micro-batch is invalid")
+    if (
+        config.reward_v4 is not None
+        and manifest.get("global_step") == 0
+        and checkpoint_path is None
+    ):
+        warm_start, random_init = _reward_v4_step_zero_initialization(
+            manifest
+        )
+        _seed_everything(calibrated.formal_seed)
+        return _run_curriculum_training(
+            calibrated=calibrated,
+            artifact_root=root,
+            repository_root=repository_root,
+            source_commit=source_commit,
+            initial_global_step=0,
+            max_updates=max_updates,
+            interrupt_first_update=False,
+            restore_checkpoint=None,
+            warm_start_checkpoint_path=warm_start,
+            random_init=random_init,
+            capability_bundle=capability_bundle,
+            formal_environment_factory=formal_environment_factory,
+            formal_observation_template=formal_observation_template,
+            evaluate_candidate=None,
+        )
     target = (
         checkpoint_path.resolve(strict=True)
         if checkpoint_path is not None
-        else _checkpoint_target(root, kind="latest", global_step=0).resolve(
-            strict=True
+        else _default_resume_checkpoint_target(
+            root,
+            manifest=manifest,
+            reward_v4=config.reward_v4 is not None,
         )
     )
     authoritative_parent = (root / "checkpoints").resolve(strict=True)
@@ -2962,6 +5368,9 @@ def _resume_training_run(
             calibrated.budget.total_gpu_seconds
         ),
     )
+    if config.reward_v4 is not None:
+        _validate_reward_v4_resume_manifest(manifest, checkpoint=checkpoint)
+        _validate_reward_v4_resume_curriculum(config, checkpoint=checkpoint)
     if manifest.get("global_step") != checkpoint.global_step:
         raise ArtifactRootError("run manifest global step differs from latest checkpoint")
     manifest_budget = manifest.get("consumed_gpu_seconds")
@@ -2973,22 +5382,25 @@ def _resume_training_run(
     expected_budget_state = "exhausted" if calibrated.budget.exhausted else "active"
     if manifest.get("budget_state") != expected_budget_state:
         raise ArtifactRootError("run manifest budget state differs from checkpoint")
-    phases = (
-        "warmup_wheeled",
-        "warmup_legged",
-        "warmup_hopper",
-        "joint",
-    )
-    derived_phase = CurriculumSchedule().phase_for(
-        consumed_gpu_s=float(manifest_budget),
-        calibration_end_gpu_s=calibrated.calibration_end_gpu_seconds,
-    )
-    if checkpoint.curriculum_phase not in phases or (
-        checkpoint.curriculum_phase != derived_phase
-        and phases.index(derived_phase) - phases.index(checkpoint.curriculum_phase)
-        != 1
-    ):
-        raise ArtifactRootError("checkpoint curriculum phase differs from GPU budget")
+    if config.reward_v4 is None:
+        phases = (
+            "warmup_wheeled",
+            "warmup_legged",
+            "warmup_hopper",
+            "joint",
+        )
+        derived_phase = CurriculumSchedule().phase_for(
+            consumed_gpu_s=float(manifest_budget),
+            calibration_end_gpu_s=calibrated.calibration_end_gpu_seconds,
+        )
+        if checkpoint.curriculum_phase not in phases or (
+            checkpoint.curriculum_phase != derived_phase
+            and phases.index(derived_phase) - phases.index(checkpoint.curriculum_phase)
+            != 1
+        ):
+            raise ArtifactRootError(
+                "checkpoint curriculum phase differs from GPU budget"
+            )
 
     def evaluate_candidate(
         candidate: Path,
@@ -3032,7 +5444,9 @@ def _resume_training_run(
 
 
 def _parallel_pool_startup_timeout_seconds(
-    initial_episode_states: tuple[Mapping[str, object], ...] | None,
+    initial_episode_states: (
+        tuple[Mapping[str, object] | None, ...] | None
+    ),
 ) -> float:
     """Give active-episode reconstruction headroom without loosening steps."""
     return 600.0 if initial_episode_states is not None else 60.0
@@ -3041,6 +5455,693 @@ def _parallel_pool_startup_timeout_seconds(
 def _parallel_pool_runtime_timeout_seconds(*, formal: bool) -> float:
     """Keep formal calibration and training on one runtime timeout contract."""
     return FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS if formal else 60.0
+
+
+def _reward_v4_run_id(
+    *, artifact_root: Path, source_commit: str, run_identity: RunIdentity
+) -> str:
+    descriptor = {
+        "artifact_root": str(artifact_root.resolve()),
+        "source_commit": source_commit,
+        "run_identity": run_identity.to_dict(),
+    }
+    encoded = json.dumps(
+        descriptor,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return f"reward-v4-{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _reward_v4_initial_episode_states(
+    *,
+    restore_checkpoint: TrainingCheckpointV6 | None,
+    journal: TransitionJournal,
+    update_id: int,
+    curriculum_phase: str,
+    allocation: Mapping[str, int],
+) -> tuple[Mapping[str, object] | None, ...] | None:
+    base: tuple[Mapping[str, object], ...] | None = None
+    if restore_checkpoint is not None:
+        base = resume_worker_episode_states(
+            restore_checkpoint,
+            target_phase=curriculum_phase,
+            target_allocation=allocation,
+        )
+    recovered = journal.recover_worker_boundaries(update_id=update_id)
+    if not recovered:
+        return base
+    states: list[Mapping[str, object] | None] = (
+        [None] * journal.worker_count if base is None else list(base)
+    )
+    for worker, boundary in recovered.items():
+        states[worker] = boundary.post_worker_state
+    return tuple(states)
+
+
+def _run_reward_v4_updates(
+    *,
+    config: ResolvedTrainingConfig,
+    artifact_root: Path,
+    source_commit: str,
+    budget: TrainingBudget,
+    allocation: dict[str, int],
+    micro_batch_size: int,
+    initial_global_step: int,
+    max_updates: int,
+    interrupt_first_update: bool,
+    restore_checkpoint: TrainingCheckpointV6 | None,
+    curriculum_phase: str,
+    environment_factory: FrozenCapabilityEnvironmentFactory,
+    observation_template: PolicyBatch,
+    reward_fn: Callable[[PlannerTransition], float],
+    run_identity: RunIdentity,
+    evaluation_batch: FormalEvaluationBatch,
+    warm_start_checkpoint_path: Path | None,
+    warm_start_seed: int | None,
+    random_init: bool,
+) -> _RunEvidence:
+    """Run Reward V4 as sealed macro grids and atomic update transactions."""
+    _validated_cuda_device()
+    reward_config = require_reward_v4_config(config)
+    if not isinstance(evaluation_batch, FormalEvaluationBatch) or (
+        tuple(evaluation_batch.scenario_seeds)
+        != reward_config.evaluation_seeds
+    ):
+        raise PreflightError("Reward V4 fixed evaluation batch differs")
+    evaluation_manifest = build_reward_v4_evaluation_manifest(
+        platforms=tuple(PlatformType),
+        scale_buckets=tuple(TaskScaleBucket),
+        evaluation_seeds=reward_config.evaluation_seeds,
+    )
+    curriculum = (
+        RewardCurriculumState.from_mapping(
+            restore_checkpoint.reward_curriculum_state
+        )
+        if restore_checkpoint is not None
+        else initial_reward_curriculum_state(reward_config)
+    )
+    if (
+        curriculum.stage.value != curriculum_phase
+        or curriculum.current_update_id != initial_global_step
+        or worker_allocation_for_stage(curriculum.stage, reward_config)
+        != allocation
+    ):
+        raise PreflightError("Reward V4 curriculum runtime identity differs")
+    worker_strata = formal_worker_strata(curriculum.stage)
+    if len(worker_strata) != sum(allocation.values()):
+        raise PreflightError("Reward V4 worker strata differ from allocation")
+    if restore_checkpoint is not None and (
+        restore_checkpoint.environment_state.get("scenario_schedule_id")
+        != environment_factory.scenario_schedule_id
+    ):
+        raise PreflightError("checkpoint formal scenario schedule mismatch")
+
+    policy = CrossAttentionPolicy()
+    if random_init:
+        _freeze_random_initialization_manifest(
+            artifact_root / "run-manifest.json",
+            model=policy,
+            seed=FORMAL_SEED,
+        )
+    warm_start_evidence = (
+        load_policy_warm_start(
+            warm_start_checkpoint_path,
+            policy,
+            value_head_seed=warm_start_seed,
+        )
+        if warm_start_checkpoint_path is not None
+        else None
+    )
+    trainer = ResumablePPOTrainer(
+        policy,
+        reward_fn=reward_fn,
+        ppo_config=config.ppo,
+        device="cuda",
+    )
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        trainer.optimizer, lr_lambda=lambda _step: 1.0
+    )
+    if warm_start_evidence is not None:
+        _freeze_policy_warm_start_manifest(
+            artifact_root / "run-manifest.json",
+            evidence=warm_start_evidence,
+        )
+
+    run_id = _reward_v4_run_id(
+        artifact_root=artifact_root,
+        source_commit=source_commit,
+        run_identity=run_identity,
+    )
+    journal = TransitionJournal(
+        artifact_root / "journal",
+        run_id=run_id,
+        worker_count=len(worker_strata),
+        slots_per_worker=reward_config.macro_actions_per_worker,
+        worker_strata=worker_strata,
+    )
+    next_update_id = initial_global_step + 1
+    initial_episode_states = _reward_v4_initial_episode_states(
+        restore_checkpoint=restore_checkpoint,
+        journal=journal,
+        update_id=next_update_id,
+        curriculum_phase=curriculum_phase,
+        allocation=allocation,
+    )
+    pool = ParallelEnvPool(
+        allocation=allocation,
+        observation_template=observation_template,
+        environment_factory=environment_factory,
+        reward_fn=reward_fn,
+        worker_timeout_seconds=_parallel_pool_runtime_timeout_seconds(
+            formal=True
+        ),
+        worker_startup_timeout_seconds=(
+            _parallel_pool_startup_timeout_seconds(initial_episode_states)
+        ),
+        auto_reset=False,
+        initial_episode_states=initial_episode_states,
+    )
+    stop_flag = SignalStopFlag()
+    sent_interrupt = False
+    global_step = initial_global_step
+    signal_observed = False
+    best_checkpoint_state: Mapping[str, object] = (
+        restore_checkpoint.best_checkpoint_state
+        if restore_checkpoint is not None
+        else {
+            "schema_version": "lunar-best-checkpoint-state/v1",
+            "accepted": [],
+        }
+    )
+    candidate_checkpoint_gpu_seconds = (
+        restore_checkpoint.candidate_checkpoint_gpu_seconds
+        if restore_checkpoint is not None
+        else 0.0
+    )
+    restart_acknowledged = bool(
+        curriculum.worker_restart_required
+        and restore_checkpoint is not None
+    )
+    try:
+        pool.reset()
+        if restore_checkpoint is not None:
+            restore_training_state(
+                restore_checkpoint,
+                trainer.policy,
+                trainer.optimizer,
+                scheduler,
+                normalization_state=trainer.normalization,
+            )
+        with stop_flag.installed():
+            for _ in range(max_updates):
+                if budget.exhausted:
+                    break
+                update_id = global_step + 1
+                interval_start = time.monotonic()
+                budget.begin_gpu_interval(
+                    monotonic_seconds=interval_start,
+                    upper_bound_gpu_seconds=min(
+                        TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS,
+                        budget.remaining_gpu_seconds,
+                    ),
+                )
+                interval_closed = False
+                collect_started = time.perf_counter()
+                try:
+                    committed_rollout = collect_committed_macro_rollout(
+                        pool=pool,
+                        policy=trainer.policy,
+                        journal=journal,
+                        worker_strata=worker_strata,
+                        actions_per_worker=(
+                            reward_config.macro_actions_per_worker
+                        ),
+                        update_id=update_id,
+                        policy_version=global_step,
+                        reward_stage={
+                            platform.value: curriculum.platforms[
+                                platform
+                            ].stage
+                            for platform in PlatformType
+                            if platform.value in allocation
+                        },
+                        deterministic=False,
+                        device="cuda",
+                        reward_weights={
+                            platform.value: curriculum.platforms[
+                                platform
+                            ].weights
+                            for platform in PlatformType
+                            if platform.value in allocation
+                        },
+                    )
+                    torch.cuda.synchronize()
+                    collect_wall_seconds = (
+                        time.perf_counter() - collect_started
+                    )
+                except BaseException:
+                    budget.end_gpu_interval(
+                        monotonic_seconds=time.monotonic()
+                    )
+                    interval_closed = True
+                    raise
+
+                checkpoint_path = (
+                    artifact_root
+                    / "checkpoints"
+                    / f"update-{update_id:08d}.pt"
+                ).resolve()
+                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                metrics_path = (
+                    artifact_root / "metrics" / "train.jsonl"
+                ).resolve()
+                applied_here = False
+
+                def apply_and_build_checkpoint(
+                    loaded: LoadedUpdate,
+                ) -> TrainingCheckpointV6:
+                    nonlocal applied_here, interval_closed, sent_interrupt
+                    candidate_path = (
+                        artifact_root
+                        / "checkpoints"
+                        / f"candidate-update-{update_id:08d}.pt"
+                    ).resolve()
+                    report_path = (
+                        artifact_root
+                        / "evaluation"
+                        / f"candidate-update-{update_id:08d}"
+                        / "report.json"
+                    ).resolve()
+                    base_curriculum = (
+                        replace(curriculum, worker_restart_required=False)
+                        if restart_acknowledged
+                        else curriculum
+                    )
+
+                    candidate: TrainingCheckpointV6 | None = None
+                    candidate_was_existing = candidate_path.exists()
+                    if candidate_was_existing:
+                        candidate = load_checkpoint(candidate_path)
+                        if not isinstance(candidate, TrainingCheckpointV6):
+                            raise UpdateCommitError(
+                                "Reward V4 candidate checkpoint is invalid"
+                            )
+                        budget.end_gpu_interval(
+                            monotonic_seconds=time.monotonic()
+                        )
+                        interval_closed = True
+                        _restore_reward_v4_budget_boundary(
+                            budget, checkpoint=candidate
+                        )
+                    else:
+                        timer: threading.Timer | None = None
+                        if interrupt_first_update and not sent_interrupt:
+                            sent_interrupt = True
+                            timer = threading.Timer(
+                                0.01,
+                                lambda: os.kill(os.getpid(), signal.SIGTERM),
+                            )
+                            timer.start()
+                        update_started = time.perf_counter()
+                        try:
+                            ppo_metrics = trainer.update(
+                                committed_rollout.rollout,
+                                micro_batch_size=micro_batch_size,
+                            )
+                            scheduler.step()
+                            torch.cuda.synchronize()
+                        finally:
+                            if timer is not None:
+                                timer.join()
+                        update_wall_seconds = (
+                            time.perf_counter() - update_started
+                        )
+                        budget.end_gpu_interval(
+                            monotonic_seconds=time.monotonic()
+                        )
+                        interval_closed = True
+                        preliminary = advance_reward_update_boundary(
+                            base_curriculum,
+                            update_id=update_id,
+                            evaluation_report=None,
+                            candidate_checkpoint_path=None,
+                            candidate_checkpoint_gpu_seconds=(
+                                candidate_checkpoint_gpu_seconds
+                            ),
+                            best_checkpoint_state=best_checkpoint_state,
+                            config=reward_config,
+                        )
+                        audits = _reward_v4_macro_audits(
+                            rollout=committed_rollout,
+                            curriculum_state=curriculum,
+                        )
+                        metrics_record = build_reward_v4_update_record(
+                            global_step=update_id,
+                            timestamp_utc=datetime.now(timezone.utc)
+                            .isoformat()
+                            .replace("+00:00", "Z"),
+                            curriculum_phase=curriculum.stage.value,
+                            platform_allocation=allocation,
+                            worker_strata=worker_strata,
+                            actions_per_worker=(
+                                reward_config.macro_actions_per_worker
+                            ),
+                            macro_audits=audits,
+                            ppo_metrics=ppo_metrics,
+                            collect_wall_seconds=collect_wall_seconds,
+                            update_wall_seconds=update_wall_seconds,
+                            worker_wait_seconds=0.0,
+                            invalid_tasks=committed_rollout.invalid_tasks,
+                            runtime_diagnostics=(
+                                RewardV4RuntimeDiagnostics.from_rollout(
+                                    committed_rollout
+                                )
+                            ),
+                        )
+                        recovery = UpdateRecoveryState(
+                            update_id=update_id,
+                            policy_version=committed_rollout.policy_version,
+                            next_slot_by_worker=(
+                                reward_config.macro_actions_per_worker,
+                            )
+                            * len(worker_strata),
+                            worker_strata=worker_strata,
+                            journal_state="SEALED",
+                            journal_sha256=committed_rollout.journal_sha256,
+                            metrics_record=metrics_record,
+                            metrics_record_sha256=(
+                                training_metrics_record_sha256(metrics_record)
+                            ),
+                            recovery_generation=(
+                                preliminary.curriculum_state.recovery_generation
+                            ),
+                            restored_from_checkpoint_sha256=(
+                                preliminary.curriculum_state
+                                .restored_from_checkpoint_sha256
+                            ),
+                        )
+                        environment_state = {
+                            "schema_version": (
+                                FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION
+                            ),
+                            "scenario_schedule_id": (
+                                environment_factory.scenario_schedule_id
+                            ),
+                            "worker_episode_states": list(
+                                pool.snapshot_episode_states(
+                                    policy_version=update_id
+                                )
+                            ),
+                        }
+                        evaluation_due_by_time = (
+                            budget.consumed_gpu_seconds
+                            - candidate_checkpoint_gpu_seconds
+                            >= reward_config.evaluation_interval_gpu_s
+                        )
+                        candidate = build_training_checkpoint(
+                            model=trainer.policy,
+                            optimizer=trainer.optimizer,
+                            scheduler=scheduler,
+                            global_step=update_id,
+                            curriculum_phase=(
+                                preliminary.curriculum_state.stage.value
+                            ),
+                            normalization=trainer.normalization,
+                            frozen_config=config.as_frozen_dict(),
+                            run_identity=run_identity,
+                            source_commit=source_commit,
+                            consumed_gpu_seconds=budget.consumed_gpu_seconds,
+                            budget_extension_blocks=(
+                                budget.budget_extension_blocks
+                            ),
+                            total_gpu_budget_seconds=budget.total_gpu_seconds,
+                            worker_allocation=allocation,
+                            micro_batch_size=micro_batch_size,
+                            latest_checkpoint_gpu_seconds=(
+                                budget.consumed_gpu_seconds
+                            ),
+                            candidate_checkpoint_gpu_seconds=(
+                                budget.consumed_gpu_seconds
+                                if evaluation_due_by_time
+                                else candidate_checkpoint_gpu_seconds
+                            ),
+                            environment_state=environment_state,
+                            update_recovery_state=recovery,
+                            reward_curriculum_state=(
+                                preliminary.curriculum_state
+                            ),
+                            best_checkpoint_state=best_checkpoint_state,
+                        )
+
+                    evaluation_due = bool(
+                        report_path.exists()
+                        or candidate_was_existing
+                        or budget.consumed_gpu_seconds
+                        - candidate_checkpoint_gpu_seconds
+                        >= reward_config.evaluation_interval_gpu_s
+                    )
+                    if not evaluation_due:
+                        applied_here = True
+                        return candidate
+
+                    active_platforms = tuple(
+                        platform
+                        for platform in PlatformType
+                        if platform.value in allocation
+                    )
+                    enabled_r2_platforms = tuple(
+                        platform
+                        for platform in active_platforms
+                        if base_curriculum.platforms[platform].stage
+                        is RewardStage.R2
+                    )
+
+                    def build_candidate() -> TrainingCheckpointV6:
+                        if candidate is None:
+                            raise UpdateCommitError(
+                                "Reward V4 candidate state is missing"
+                            )
+                        return candidate
+
+                    def evaluate_candidate_checkpoint(
+                        value: TrainingCheckpointV6,
+                    ) -> RewardV4EvaluationReport:
+                        restore_training_state(
+                            value,
+                            trainer.policy,
+                            trainer.optimizer,
+                            scheduler,
+                            normalization_state=trainer.normalization,
+                        )
+                        return evaluate_reward_v4_fixed_grid(
+                            trainer.policy,
+                            device="cuda",
+                            checkpoint_payload_sha256=value.payload_sha256,
+                            manifest=evaluation_manifest,
+                            active_platforms=active_platforms,
+                            batch=evaluation_batch,
+                            bootstrap_seed=FORMAL_SEED,
+                            bootstrap_resample_count=2_000,
+                            enabled_r2_platforms=enabled_r2_platforms,
+                        )
+
+                    candidate, report = materialize_reward_evaluation_artifacts(
+                        candidate_checkpoint_path=candidate_path,
+                        evaluation_report_path=report_path,
+                        build_candidate_checkpoint=build_candidate,
+                        evaluate_candidate=evaluate_candidate_checkpoint,
+                    )
+                    expected_report_manifest = type(evaluation_manifest)(
+                        tasks=tuple(
+                            task
+                            for task in evaluation_manifest.tasks
+                            if task.platform in active_platforms
+                        )
+                    )
+                    if reward_evaluation_manifest_sha256(
+                        report.manifest
+                    ) != reward_evaluation_manifest_sha256(
+                        expected_report_manifest
+                    ):
+                        raise UpdateCommitError(
+                            "Reward V4 evaluation manifest differs"
+                        )
+                    _validate_reward_v4_update_checkpoint(
+                        checkpoint=candidate,
+                        update_id=update_id,
+                        loaded=loaded,
+                    )
+                    restore_training_state(
+                        candidate,
+                        trainer.policy,
+                        trainer.optimizer,
+                        scheduler,
+                        normalization_state=trainer.normalization,
+                    )
+                    decision = advance_reward_update_boundary(
+                        base_curriculum,
+                        update_id=update_id,
+                        evaluation_report=report,
+                        candidate_checkpoint_path=candidate_path,
+                        candidate_checkpoint_gpu_seconds=(
+                            budget.consumed_gpu_seconds
+                        ),
+                        best_checkpoint_state=best_checkpoint_state,
+                        config=reward_config,
+                    )
+                    if decision.rollback_checkpoint_path is not None:
+                        rollback_checkpoint = load_checkpoint(
+                            decision.rollback_checkpoint_path
+                        )
+                        if not isinstance(
+                            rollback_checkpoint, TrainingCheckpointV6
+                        ):
+                            raise UpdateCommitError(
+                                "Reward V4 rollback checkpoint is invalid"
+                            )
+                        restore_training_state(
+                            rollback_checkpoint,
+                            trainer.policy,
+                            trainer.optimizer,
+                            scheduler,
+                            normalization_state=trainer.normalization,
+                        )
+                    metrics_record = dict(
+                        candidate.update_recovery_state.metrics_record
+                    )
+                    metrics_record["curriculum_events"] = [
+                        dict(event) for event in decision.curriculum_events
+                    ]
+                    metrics_record["checkpoint_decision"] = dict(
+                        decision.checkpoint_decision or {}
+                    )
+                    recovery = replace(
+                        candidate.update_recovery_state,
+                        metrics_record=metrics_record,
+                        metrics_record_sha256=(
+                            training_metrics_record_sha256(metrics_record)
+                        ),
+                        recovery_generation=(
+                            decision.curriculum_state.recovery_generation
+                        ),
+                        restored_from_checkpoint_sha256=(
+                            decision.curriculum_state
+                            .restored_from_checkpoint_sha256
+                        ),
+                    )
+                    applied_here = True
+                    return build_training_checkpoint(
+                        model=trainer.policy,
+                        optimizer=trainer.optimizer,
+                        scheduler=scheduler,
+                        global_step=update_id,
+                        curriculum_phase=decision.curriculum_state.stage.value,
+                        normalization=trainer.normalization,
+                        frozen_config=config.as_frozen_dict(),
+                        run_identity=run_identity,
+                        source_commit=source_commit,
+                        consumed_gpu_seconds=budget.consumed_gpu_seconds,
+                        budget_extension_blocks=budget.budget_extension_blocks,
+                        total_gpu_budget_seconds=budget.total_gpu_seconds,
+                        worker_allocation=allocation,
+                        micro_batch_size=micro_batch_size,
+                        latest_checkpoint_gpu_seconds=(
+                            budget.consumed_gpu_seconds
+                        ),
+                        candidate_checkpoint_gpu_seconds=(
+                            decision.candidate_checkpoint_gpu_seconds
+                        ),
+                        environment_state=candidate.environment_state,
+                        update_recovery_state=recovery,
+                        reward_curriculum_state=decision.curriculum_state,
+                        best_checkpoint_state=dict(
+                            decision.best_checkpoint_state
+                        ),
+                    )
+
+                try:
+                    checkpoint = commit_or_recover_reward_v4_update(
+                        update_id=update_id,
+                        checkpoint_path=checkpoint_path,
+                        metrics_path=metrics_path,
+                        journal=journal,
+                        apply_and_build_checkpoint=apply_and_build_checkpoint,
+                    )
+                finally:
+                    if budget.interval_active:
+                        budget.end_gpu_interval(
+                            monotonic_seconds=time.monotonic()
+                        )
+                        interval_closed = True
+                if not interval_closed:
+                    raise RuntimeError("Reward V4 GPU interval remained open")
+                if not applied_here:
+                    restore_training_state(
+                        checkpoint,
+                        trainer.policy,
+                        trainer.optimizer,
+                        scheduler,
+                        normalization_state=trainer.normalization,
+                    )
+                    _restore_reward_v4_budget_boundary(
+                        budget,
+                        checkpoint=checkpoint,
+                    )
+                latest = _checkpoint_target(
+                    artifact_root,
+                    kind="latest",
+                    global_step=update_id,
+                )
+                latest.parent.mkdir(parents=True, exist_ok=True)
+                save_checkpoint_atomic(latest, checkpoint, overwrite=True)
+                curriculum = RewardCurriculumState.from_mapping(
+                    checkpoint.reward_curriculum_state
+                )
+                best_checkpoint_state = checkpoint.best_checkpoint_state
+                candidate_checkpoint_gpu_seconds = (
+                    checkpoint.candidate_checkpoint_gpu_seconds
+                )
+                global_step = update_id
+                metrics_journal = TrainingMetricsJournal(
+                    metrics_path,
+                    resume_global_step=global_step,
+                )
+                _update_run_manifest(
+                    artifact_root / "run-manifest.json",
+                    source_commit=source_commit,
+                    config_hash=checkpoint.config_hash,
+                    run_identity=run_identity,
+                    global_step=global_step,
+                    consumed_gpu_seconds=budget.consumed_gpu_seconds,
+                    platform_allocation=allocation,
+                    training_metrics=metrics_journal.checkpoint_summary(
+                        artifact_root=artifact_root
+                    ),
+                    update_recovery_state=(
+                        checkpoint.update_recovery_state
+                    ),
+                    reward_curriculum_state=(
+                        checkpoint.reward_curriculum_state
+                    ),
+                )
+                if stop_flag.requested:
+                    signal_observed = True
+                    break
+                if curriculum.worker_restart_required:
+                    break
+    finally:
+        pool.close()
+    if global_step == initial_global_step:
+        raise RuntimeError("Reward V4 run completed no update")
+    return _RunEvidence(
+        global_step=global_step,
+        consumed_gpu_seconds=budget.consumed_gpu_seconds,
+        platform_allocation=allocation,
+        signal_observed_at_update_boundary=signal_observed,
+        worker_restart_required=curriculum.worker_restart_required,
+    )
 
 
 def _run_updates(
@@ -3065,8 +6166,10 @@ def _run_updates(
     rollout_observation_template: PolicyBatch | None = None,
     rollout_reward_fn: Callable[[PlannerTransition], float] | None = None,
     run_identity: RunIdentity,
+    reward_v4_evaluation_batch: FormalEvaluationBatch | None = None,
     warm_start_checkpoint_path: Path | None = None,
     warm_start_seed: int | None = None,
+    random_init: bool = False,
 ) -> _RunEvidence:
     if type(max_updates) is not int or max_updates <= 0:
         raise ValueError("max updates must be a positive integer")
@@ -3076,6 +6179,10 @@ def _run_updates(
         raise PreflightError("training run identity differs from configuration")
     if restore_checkpoint is not None and warm_start_checkpoint_path is not None:
         raise PreflightError("resume and policy warm-start are mutually exclusive")
+    if type(random_init) is not bool:
+        raise PreflightError("random initialization selection is invalid")
+    if restore_checkpoint is not None and random_init:
+        raise PreflightError("resume and random initialization are mutually exclusive")
     if warm_start_checkpoint_path is not None:
         if config.run_kind != "formal":
             raise PreflightError("policy warm-start is formal-only")
@@ -3085,6 +6192,13 @@ def _run_updates(
             raise PreflightError("policy warm-start seed is invalid")
     elif warm_start_seed is not None:
         raise PreflightError("policy warm-start seed has no parent checkpoint")
+    if config.run_kind == "formal" and initial_global_step == 0 and (
+        restore_checkpoint is None
+        and (warm_start_checkpoint_path is None) == (not random_init)
+    ):
+        raise PreflightError(
+            "formal run requires exactly one explicit initialization"
+        )
     if config.run_kind == "formal":
         if not isinstance(
             rollout_environment_factory, FrozenCapabilityEnvironmentFactory
@@ -3106,9 +6220,39 @@ def _run_updates(
             raise PreflightError("development-smoke must remain proxy-only")
         environment_factory = proxy_environment_factory
         observation_template = proxy_observation(0, "WHEELED", step=0)
+    if config.reward_v4 is not None:
+        if config.run_kind != "formal":
+            raise PreflightError("Reward V4 runtime is formal-only")
+        return _run_reward_v4_updates(
+            config=config,
+            artifact_root=artifact_root,
+            source_commit=source_commit,
+            budget=budget,
+            allocation=allocation,
+            micro_batch_size=micro_batch_size,
+            initial_global_step=initial_global_step,
+            max_updates=max_updates,
+            interrupt_first_update=interrupt_first_update,
+            restore_checkpoint=restore_checkpoint,
+            curriculum_phase=curriculum_phase,
+            environment_factory=environment_factory,
+            observation_template=observation_template,
+            reward_fn=rollout_reward_fn or compute_transition_reward,
+            run_identity=run_identity,
+            evaluation_batch=reward_v4_evaluation_batch,
+            warm_start_checkpoint_path=warm_start_checkpoint_path,
+            warm_start_seed=warm_start_seed,
+            random_init=random_init,
+        )
     _validated_cuda_device()
     reward_fn = rollout_reward_fn or compute_transition_reward
     policy = CrossAttentionPolicy()
+    if random_init:
+        _freeze_random_initialization_manifest(
+            artifact_root / "run-manifest.json",
+            model=policy,
+            seed=FORMAL_SEED,
+        )
     warm_start_evidence = (
         load_policy_warm_start(
             warm_start_checkpoint_path,
@@ -3401,6 +6545,7 @@ def _run_updates(
             and not state.rollout_discarded
             and state.global_step > initial_global_step
         ),
+        worker_restart_required=False,
     )
 
 
@@ -3465,8 +6610,13 @@ def _rollout_batch_field_digests(batch: RolloutBatch) -> dict[str, str]:
 def _first_formal_request_digest(
     factory: FrozenCapabilityEnvironmentFactory,
     states: tuple[Mapping[str, object], ...],
+    *,
+    expected_platforms: tuple[str, ...],
 ) -> str:
-    """Rebuild one active worker per platform and hash its next real request."""
+    """Hash one next request for every platform active in this stage."""
+    expected = set(expected_platforms)
+    if not expected or not expected.issubset(PLATFORMS):
+        raise PreflightError("formal resume request platforms are invalid")
     signatures: dict[str, str] = {}
     for raw in states:
         state = FormalWorkerState.from_dict(raw)
@@ -3492,13 +6642,102 @@ def _first_formal_request_digest(
             observation.observation_identities[0],
         )
         signatures[state.platform_type] = _request_signature(prepared.request)
-    if set(signatures) != set(PLATFORMS):
+    if set(signatures) != expected:
         raise PreflightError("formal resume request proof missed a platform")
     return hashlib.sha256(
         json.dumps(signatures, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
         )
     ).hexdigest()
+
+
+def _formal_resume_checkpoint_boundary(
+    *,
+    config: ResolvedTrainingConfig,
+    global_step: int,
+    allocation: Mapping[str, int],
+) -> tuple[UpdateRecoveryState, RewardCurriculumState, dict[str, object]]:
+    """Build a sealed v11 boundary for the preflight's one-step updates."""
+    if not isinstance(config, ResolvedTrainingConfig):
+        raise PreflightError("formal resume checkpoint config is invalid")
+    if type(global_step) is not int or global_step <= 0:
+        raise PreflightError("formal resume checkpoint step is invalid")
+    reward_config = require_reward_v4_config(config)
+    curriculum = replace(
+        initial_reward_curriculum_state(reward_config),
+        current_update_id=global_step,
+    )
+    expected_allocation = worker_allocation_for_stage(
+        curriculum.stage,
+        reward_config,
+    )
+    if dict(allocation) != expected_allocation:
+        raise PreflightError("formal resume checkpoint allocation differs")
+    strata = formal_worker_strata(curriculum.stage)
+    policy_version = global_step - 1
+    next_slots = (1,) * len(strata)
+    metrics_record = {
+        "schema_version": "lunar-formal-preflight-resume-metrics/v1",
+        "global_step": global_step,
+        "policy_version": policy_version,
+        "worker_count": len(strata),
+    }
+    metrics_sha256 = hashlib.sha256(
+        json.dumps(
+            metrics_record,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    journal_identity = {
+        "schema_version": "lunar-formal-preflight-resume-journal/v1",
+        "update_id": global_step,
+        "policy_version": policy_version,
+        "next_slot_by_worker": list(next_slots),
+        "worker_strata": [
+            {
+                "worker_index": item.worker_index,
+                "platform_type": item.platform_type,
+                "platform_worker_index": item.platform_worker_index,
+                "platform_worker_count": item.platform_worker_count,
+                "scale_bucket": item.scale_bucket.value,
+            }
+            for item in strata
+        ],
+    }
+    journal_sha256 = hashlib.sha256(
+        json.dumps(
+            journal_identity,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    recovery = UpdateRecoveryState(
+        update_id=global_step,
+        policy_version=policy_version,
+        next_slot_by_worker=next_slots,
+        worker_strata=strata,
+        journal_state="SEALED",
+        journal_sha256=journal_sha256,
+        metrics_record=metrics_record,
+        metrics_record_sha256=metrics_sha256,
+        recovery_generation=curriculum.recovery_generation,
+        restored_from_checkpoint_sha256=(
+            curriculum.restored_from_checkpoint_sha256
+        ),
+    )
+    return (
+        recovery,
+        curriculum,
+        {
+            "schema_version": "lunar-best-checkpoint-state/v1",
+            "accepted": [],
+        },
+    )
 
 
 def _formal_resume_equivalence_check(
@@ -3509,15 +6748,22 @@ def _formal_resume_equivalence_check(
     source_commit: str,
     artifact_root: Path,
     selected_workers: int,
+    worker_allocation: Mapping[str, int],
     micro_batch_size: int,
 ) -> dict[str, object]:
-    """Run update one, persist V6, then compare update two across resume."""
+    """Run update one, persist v11, then compare update two across resume."""
     _validated_cuda_device()
     if selected_workers not in WORKER_CANDIDATES:
         raise PreflightError("formal resume proof requires a calibrated worker tier")
-    allocation = {
-        platform: selected_workers // len(PLATFORMS) for platform in PLATFORMS
-    }
+    expected_allocation = _reward_calibration_allocation_for_config(
+        config,
+        selected_workers=selected_workers,
+    )
+    allocation = dict(worker_allocation)
+    if allocation != expected_allocation:
+        raise PreflightError(
+            "formal resume proof allocation differs from frozen calibration"
+        )
     resume_root = artifact_root / "resume-equivalence"
     resume_root.mkdir(parents=True, exist_ok=False)
     checkpoint_path = resume_root / "update-1.pt"
@@ -3597,12 +6843,17 @@ def _formal_resume_equivalence_check(
         global_step: int,
         state: Mapping[str, object],
     ):
+        recovery, curriculum, best = _formal_resume_checkpoint_boundary(
+            config=config,
+            global_step=global_step,
+            allocation=allocation,
+        )
         return build_training_checkpoint(
             model=trainer.policy,
             optimizer=trainer.optimizer,
             scheduler=scheduler,
             global_step=global_step,
-            curriculum_phase="preflight_resume_equivalence",
+            curriculum_phase=curriculum.stage.value,
             normalization=trainer.normalization,
             frozen_config=config.as_frozen_dict(),
             run_identity=run_identity,
@@ -3615,6 +6866,9 @@ def _formal_resume_equivalence_check(
             latest_checkpoint_gpu_seconds=0.0,
             candidate_checkpoint_gpu_seconds=0.0,
             environment_state=state,
+            update_recovery_state=recovery,
+            reward_curriculum_state=curriculum,
+            best_checkpoint_state=best,
         )
 
     _seed_everything(FORMAL_SEED)
@@ -3680,7 +6934,9 @@ def _formal_resume_equivalence_check(
         )
         uninterrupted_observation = environment.current_observations
         uninterrupted_request = _first_formal_request_digest(
-            assembly.factory, uninterrupted_states
+            assembly.factory,
+            uninterrupted_states,
+            expected_platforms=tuple(allocation),
         )
         uninterrupted = checkpoint_for(
             trainer,
@@ -3764,7 +7020,9 @@ def _formal_resume_equivalence_check(
         )
         resumed_observation = resumed_environment.current_observations
         resumed_request = _first_formal_request_digest(
-            assembly.factory, resumed_states
+            assembly.factory,
+            resumed_states,
+            expected_platforms=tuple(allocation),
         )
         resumed = checkpoint_for(
             resumed_trainer,
@@ -4299,8 +7557,15 @@ def _proxy_rollout(
         selected_thetas=numpy(action.selected_theta, np.float32),
         old_log_prob_total=numpy(action.log_prob_total, np.float32),
         old_values=old_values,
+        raw_advantages=numpy(advantages, np.float32),
         advantages=numpy(advantages, np.float32),
         returns=old_values + np.float32(0.1),
+        platform_ids=np.argmax(
+            numpy(batch.platform_context, np.float32), axis=1
+        ).astype(np.int64, copy=False),
+        scale_bucket_ids=(
+            np.arange(sample_count, dtype=np.int64) % 4
+        ),
     )
 
 
@@ -4682,7 +7947,10 @@ def _read_run_manifest(path: Path) -> dict[str, object]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ArtifactRootError("run manifest is invalid") from error
-    if not isinstance(payload, dict) or payload.get("schema_version") != "lunar-training-run/v1":
+    if not isinstance(payload, dict) or payload.get("schema_version") not in {
+        "lunar-training-run/v1",
+        RUN_MANIFEST_SCHEMA_VERSION,
+    }:
         raise ArtifactRootError("run manifest schema is invalid")
     return payload
 
@@ -4697,6 +7965,8 @@ def _update_run_manifest(
     consumed_gpu_seconds: float,
     platform_allocation: dict[str, int],
     training_metrics: Mapping[str, object] | None = None,
+    update_recovery_state: UpdateRecoveryState | None = None,
+    reward_curriculum_state: Mapping[str, object] | None = None,
 ) -> None:
     payload = _read_run_manifest(path)
     if "runtime_calibration" not in payload:
@@ -4736,6 +8006,70 @@ def _update_run_manifest(
             )
         ):
             raise ArtifactRootError("run manifest training metrics are invalid")
+    reward_v4_manifest = (
+        payload.get("schema_version") == RUN_MANIFEST_SCHEMA_VERSION
+        and isinstance(payload.get("reward_config"), Mapping)
+        and payload.get("reward_sha256") == reward_weights_sha256()
+    )
+    if (update_recovery_state is None) != (reward_curriculum_state is None):
+        raise ArtifactRootError(
+            "run manifest recovery and curriculum state must update together"
+        )
+    if not reward_v4_manifest and update_recovery_state is not None:
+        raise ArtifactRootError("legacy run manifest rejects Reward V4 cursor")
+    if reward_v4_manifest and global_step > 0:
+        if update_recovery_state is None:
+            cursor = payload.get("journal_cursor")
+            curriculum_value = payload.get("current_curriculum_state")
+            if (
+                not isinstance(cursor, Mapping)
+                or cursor.get("update_id") != global_step
+                or cursor.get("journal_state") != "SEALED"
+                or not isinstance(curriculum_value, Mapping)
+                or curriculum_value.get("current_update_id") != global_step
+            ):
+                raise ArtifactRootError(
+                    "Reward V4 manifest journal cursor is missing"
+                )
+        else:
+            if (
+                not isinstance(update_recovery_state, UpdateRecoveryState)
+                or update_recovery_state.update_id != global_step
+                or update_recovery_state.journal_state != "SEALED"
+                or any(
+                    value != DEFAULT_REWARD_CONFIG.macro_actions_per_worker
+                    for value in update_recovery_state.next_slot_by_worker
+                )
+            ):
+                raise ArtifactRootError(
+                    "Reward V4 manifest journal cursor is invalid"
+                )
+            try:
+                curriculum = RewardCurriculumState.from_mapping(
+                    reward_curriculum_state
+                )
+            except Exception as error:
+                raise ArtifactRootError(
+                    "Reward V4 manifest curriculum state is invalid"
+                ) from error
+            if curriculum.current_update_id != global_step:
+                raise ArtifactRootError(
+                    "Reward V4 manifest curriculum cursor differs"
+                )
+            cursor = update_recovery_state.to_dict()
+            existing_step = payload.get("global_step")
+            if existing_step == global_step and payload.get(
+                "journal_cursor"
+            ) not in (None, cursor):
+                raise ArtifactRootError(
+                    "Reward V4 manifest journal cursor cannot drift"
+                )
+            payload["journal_cursor"] = cursor
+            payload["current_curriculum_state"] = curriculum.to_dict()
+    elif reward_v4_manifest and update_recovery_state is not None:
+        raise ArtifactRootError(
+            "Reward V4 step-zero manifest rejects an update cursor"
+        )
     payload.update(
         {
             "source_commit": source_commit,
@@ -4790,13 +8124,17 @@ if __name__ == "__main__":
 __all__ = [
     "ArtifactRootError",
     "CudaSmokeEvidence",
+    "InjectedUpdateCommitFault",
     "PreflightError",
     "ResumablePPOTrainer",
     "SignalStopFlag",
     "TrainingBoundaryLoop",
     "TrainingLoopState",
+    "UpdateCommitError",
     "build_parser",
+    "commit_or_recover_reward_v4_update",
     "main",
     "run_cuda_interrupt_resume_smoke",
+    "restore_reward_v4_rollback",
     "validate_artifact_root",
 ]

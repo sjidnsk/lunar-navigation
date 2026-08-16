@@ -7,7 +7,7 @@ from enum import Enum
 from hashlib import sha256
 import json
 import math
-from typing import Callable, Iterator, Mapping
+from typing import Callable, Iterable, Iterator, Mapping
 
 import numpy as np
 
@@ -364,6 +364,173 @@ def build_coverable_detail_mask(
     return np.ascontiguousarray(coverable, dtype=np.bool_)
 
 
+@dataclass(frozen=True, slots=True)
+class HopperTruthClosureHop:
+    """One truth-only hop certified from the current simulated evidence."""
+
+    source_landing_index: int
+    target_landing_index: int
+    trajectory_observation_mask: np.ndarray
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.source_landing_index) is not int
+            or self.source_landing_index < 0
+            or type(self.target_landing_index) is not int
+            or self.target_landing_index < 0
+            or self.source_landing_index == self.target_landing_index
+        ):
+            raise CoverabilityError("hopper truth closure hop identity is invalid")
+        mask = _require_bool_mask(
+            self.trajectory_observation_mask,
+            "hopper trajectory observation mask",
+        ).copy()
+        mask.setflags(write=False)
+        object.__setattr__(self, "trajectory_observation_mask", mask)
+
+
+@dataclass(frozen=True, slots=True)
+class HopperTruthObservationClosure:
+    """Fixed point of landings and trajectory observations available from truth."""
+
+    reachable_landing_indices: tuple[int, ...]
+    observed_detail_mask: np.ndarray
+    coverable_detail_mask: np.ndarray
+    certified_hop_count: int
+    expansion_round_count: int
+    closure_sha256: str
+
+    def __post_init__(self) -> None:
+        observed = _require_bool_mask(
+            self.observed_detail_mask, "hopper closure observed mask"
+        )
+        coverable = _require_bool_mask(
+            self.coverable_detail_mask, "hopper closure coverable mask"
+        )
+        if (
+            observed.shape != coverable.shape
+            or (coverable & ~observed).any()
+            or tuple(sorted(set(self.reachable_landing_indices)))
+            != self.reachable_landing_indices
+            or any(
+                type(value) is not int or value < 0
+                for value in self.reachable_landing_indices
+            )
+            or type(self.certified_hop_count) is not int
+            or self.certified_hop_count < 0
+            or type(self.expansion_round_count) is not int
+            or self.expansion_round_count < 0
+        ):
+            raise CoverabilityError("hopper truth closure result is invalid")
+        _require_sha(self.closure_sha256, "hopper truth closure hash")
+        for value in (observed, coverable):
+            value.setflags(write=False)
+
+
+def build_hopper_truth_observation_closure(
+    *,
+    landing_count: int,
+    initial_landing_index: int,
+    initial_observed_detail_mask: np.ndarray,
+    mission_target_detail_mask: np.ndarray,
+    enumerate_safe_hops: Callable[
+        [tuple[int, ...], np.ndarray], Iterable[HopperTruthClosureHop]
+    ],
+) -> HopperTruthObservationClosure:
+    """Compute the order-independent safe-hop/observation fixed point.
+
+    ``enumerate_safe_hops`` receives only the landings and evidence available at
+    the beginning of a round.  All hops returned in that round are merged
+    together before another certification round starts, preventing traversal
+    order from leaking future observations into a same-round decision.
+    """
+    if (
+        type(landing_count) is not int
+        or landing_count <= 0
+        or type(initial_landing_index) is not int
+        or not 0 <= initial_landing_index < landing_count
+        or not callable(enumerate_safe_hops)
+    ):
+        raise CoverabilityError("hopper truth closure inputs are invalid")
+    observed = _require_bool_mask(
+        initial_observed_detail_mask, "initial hopper observed mask"
+    ).copy()
+    target = _require_bool_mask(
+        mission_target_detail_mask, "hopper mission target mask"
+    )
+    if observed.shape != target.shape:
+        raise CoverabilityError("hopper closure detail geometries differ")
+
+    reached = {initial_landing_index}
+    certified: dict[tuple[int, int], str] = {}
+    expansion_round_count = 0
+    while True:
+        reached_snapshot = tuple(sorted(reached))
+        observed_snapshot = observed.copy()
+        observed_snapshot.setflags(write=False)
+        proposed = tuple(enumerate_safe_hops(reached_snapshot, observed_snapshot))
+        ordered: dict[tuple[int, int], HopperTruthClosureHop] = {}
+        for hop in proposed:
+            if not isinstance(hop, HopperTruthClosureHop):
+                raise CoverabilityError("hopper truth closure callback returned invalid hop")
+            edge = hop.source_landing_index, hop.target_landing_index
+            if (
+                hop.source_landing_index not in reached
+                or hop.target_landing_index >= landing_count
+                or hop.trajectory_observation_mask.shape != observed.shape
+            ):
+                raise CoverabilityError("hopper truth closure hop exceeds current authority")
+            existing = ordered.get(edge)
+            if existing is not None and not np.array_equal(
+                existing.trajectory_observation_mask,
+                hop.trajectory_observation_mask,
+            ):
+                raise CoverabilityError("hopper truth closure hop is ambiguous")
+            ordered[edge] = hop
+
+        new_hops: list[HopperTruthClosureHop] = []
+        for edge in sorted(ordered):
+            hop = ordered[edge]
+            trajectory_sha = mask_sha256(hop.trajectory_observation_mask)
+            old_sha = certified.get(edge)
+            if old_sha is not None:
+                if old_sha != trajectory_sha:
+                    raise CoverabilityError("hopper truth closure hop drifted")
+                continue
+            certified[edge] = trajectory_sha
+            new_hops.append(hop)
+        if not new_hops:
+            break
+        before_reached = len(reached)
+        before_observed = int(observed.sum(dtype=np.int64))
+        for hop in new_hops:
+            reached.add(hop.target_landing_index)
+            observed |= hop.trajectory_observation_mask
+        if (
+            len(reached) == before_reached
+            and int(observed.sum(dtype=np.int64)) == before_observed
+        ):
+            break
+        expansion_round_count += 1
+
+    coverable = np.ascontiguousarray(observed & target, dtype=np.bool_)
+    observed = np.ascontiguousarray(observed, dtype=np.bool_)
+    reachable = tuple(sorted(reached))
+    digest = sha256()
+    digest.update(b"lunar-hopper-truth-observation-closure/v1\0")
+    digest.update(np.asarray(reachable, dtype="<i8").tobytes(order="C"))
+    digest.update(observed.view(np.uint8).tobytes(order="C"))
+    digest.update(coverable.view(np.uint8).tobytes(order="C"))
+    return HopperTruthObservationClosure(
+        reachable_landing_indices=reachable,
+        observed_detail_mask=observed,
+        coverable_detail_mask=coverable,
+        certified_hop_count=len(certified),
+        expansion_round_count=expansion_round_count,
+        closure_sha256=digest.hexdigest(),
+    )
+
+
 def pack_detail_mask(mask: np.ndarray) -> np.ndarray:
     """Pack a two-dimensional boolean mask in row-major, MSB-first order."""
     checked = _require_bool_mask(mask, "detail mask")
@@ -461,16 +628,47 @@ def _read_packed_window(
     start_column: int,
     cells: int,
 ) -> np.ndarray:
-    rows = _packed_rows(packed, shape)
+    checked_shape = _detail_shape(shape)
     if (
         type(cells) is not int
         or cells < 1
         or start_row < 0
         or start_column < 0
-        or start_row + cells > shape[0]
-        or start_column + cells > shape[1]
+        or start_row + cells > checked_shape[0]
+        or start_column + cells > checked_shape[1]
     ):
         raise CoverabilityError("packed detail window lies outside the mask")
+    if checked_shape[1] % 8:
+        cell_count = math.prod(checked_shape)
+        byte_count = (cell_count + 7) // 8
+        if (
+            not isinstance(packed, np.ndarray)
+            or packed.dtype != np.dtype(np.uint8)
+            or packed.ndim != 1
+            or not packed.flags.c_contiguous
+            or packed.size != byte_count
+        ):
+            raise CoverabilityError("packed detail mask size or dtype is invalid")
+        padding = byte_count * 8 - cell_count
+        if padding and int(packed[-1]) & ((1 << padding) - 1):
+            raise CoverabilityError("packed detail mask has non-zero padding bits")
+        row_offsets = (
+            np.arange(start_row, start_row + cells, dtype=np.int64)
+            * checked_shape[1]
+            + start_column
+        )
+        flat_indices = row_offsets[:, None] + np.arange(cells, dtype=np.int64)
+        byte_indices = flat_indices // 8
+        bit_offsets = 7 - (flat_indices % 8)
+        return np.ascontiguousarray(
+            (
+                packed[byte_indices]
+                & np.left_shift(np.uint8(1), bit_offsets.astype(np.uint8))
+            )
+            != 0,
+            dtype=np.bool_,
+        )
+    rows = _packed_rows(packed, checked_shape)
     byte_start = start_column // 8
     bit_offset = start_column % 8
     byte_end = (start_column + cells + 7) // 8
@@ -717,6 +915,45 @@ class StreamedDetailCoverability:
             self.coverable_detail_bits, shape
         ):
             raise CoverabilityError("streamed coverable hash differs")
+
+
+def freeze_streamed_detail_coverability(
+    *,
+    detail_shape: tuple[int, int],
+    coarse_shape: tuple[int, int],
+    mission_target_detail_bits: np.ndarray,
+    coverable_detail_bits: np.ndarray,
+) -> StreamedDetailCoverability:
+    """Validate and freeze already-streamed exact target/coverable masks."""
+    shape = _detail_shape(detail_shape)
+    if (
+        not isinstance(coarse_shape, tuple)
+        or len(coarse_shape) != 2
+        or any(type(value) is not int or value <= 0 for value in coarse_shape)
+        or shape[0] % coarse_shape[0]
+        or shape[1] % coarse_shape[1]
+    ):
+        raise CoverabilityError("streamed coarse geometry is invalid")
+    target = np.ascontiguousarray(mission_target_detail_bits, dtype=np.uint8)
+    coverable = np.ascontiguousarray(coverable_detail_bits, dtype=np.uint8)
+    _packed_rows(target, shape)
+    _packed_rows(coverable, shape)
+    if np.bitwise_and(coverable, np.bitwise_not(target)).any():
+        raise CoverabilityError("coverable mask exceeds mission target mask")
+    ratio, coverable_count = _streamed_coarse_ratio(
+        coverable, shape, coarse_shape
+    )
+    target_count = int(_BYTE_POPCOUNT[target].sum(dtype=np.int64))
+    return StreamedDetailCoverability(
+        detail_shape=shape,
+        mission_target_detail_bits=target,
+        coverable_detail_bits=coverable,
+        coverable_ratio=ratio,
+        mission_target_detail_cell_count=target_count,
+        coverable_detail_cell_count=coverable_count,
+        mission_target_mask_sha256=_streamed_mask_sha256(target, shape),
+        coverable_mask_sha256=_streamed_mask_sha256(coverable, shape),
+    )
 
 
 def build_streamed_detail_coverability(
@@ -1194,11 +1431,14 @@ class PlatformCoverability:
 
 
 __all__ = [
+    "build_hopper_truth_observation_closure",
     "build_coverable_detail_mask",
     "build_mission_target_detail_mask",
     "build_streamed_detail_coverability",
     "canonical_physical_positions_um",
     "CoverabilityError",
+    "HopperTruthClosureHop",
+    "HopperTruthObservationClosure",
     "IneligibleReason",
     "PlatformCoverability",
     "PHYSICAL_GRID_AXIS_CONVENTION",
@@ -1206,6 +1446,7 @@ __all__ = [
     "QualifiedStartState",
     "StreamedDetailCoverability",
     "classify_ineligibility",
+    "freeze_streamed_detail_coverability",
     "mask_sha256",
     "pack_detail_mask",
     "physical_projection_sha256",

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import torch
 from lunar_planner_training_bridge import PlanningOutcome
-from lunar_model_contract import ObservationContractV3
+from lunar_model_contract import ObservationContractV4
 
 from ..capability_freeze import FrozenPlatformCapability, ScenarioIdentity
 from ..config import PLATFORMS, WORKER_CANDIDATES
@@ -20,6 +20,17 @@ from ..policy.observation import (
     ObservationIdentity,
     PolicyBatch,
     validate_policy_batch,
+)
+from ..reward import (
+    DEFAULT_REWARD_WEIGHTS,
+    RewardComponentsV4,
+    RewardInputsV4,
+    compute_reward_components,
+)
+from ..reward_contract import (
+    RewardStage,
+    RewardTerminalClass,
+    RewardWeightsV4,
 )
 from .macro_step import (
     ExecutionEvents,
@@ -32,7 +43,7 @@ from .formal_episode_state import FormalWorkerState
 from .candidate_builder import CandidateDiagnostics
 
 
-_OBSERVATION_FIELDS = ObservationContractV3.input_names
+_OBSERVATION_FIELDS = ObservationContractV4.input_names
 
 
 class ParallelPoolError(RuntimeError):
@@ -77,6 +88,98 @@ class ParallelRolloutStep:
     terminal_audits: tuple[TerminalAudit | None, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class InvalidTaskAudit:
+    """One pre-policy task rejection that must never enter PPO tensors."""
+
+    worker_index: int
+    episode_id: str
+    platform_type: str
+    reason_code: str
+    physical_snapshot_id: str
+    post_worker_state: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if type(self.worker_index) is not int or self.worker_index < 0:
+            raise ValueError("invalid-task worker index is invalid")
+        if not isinstance(self.episode_id, str) or not self.episode_id:
+            raise ValueError("invalid-task episode identity is invalid")
+        expected_reason = {
+            "WHEELED": "WHEEL_START_NOT_SAFE",
+            "LEGGED": "LEGGED_START_NOT_SAFE",
+        }.get(self.platform_type)
+        if self.reason_code not in {
+            expected_reason,
+            "INITIAL_OBSERVATION_ALREADY_SUCCESSFUL",
+        }:
+            raise ValueError("invalid-task reason is invalid")
+        if (
+            not isinstance(self.physical_snapshot_id, str)
+            or len(self.physical_snapshot_id) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.physical_snapshot_id
+            )
+        ):
+            raise ValueError("invalid-task physical snapshot is invalid")
+        if not isinstance(self.post_worker_state, Mapping):
+            raise TypeError("invalid-task worker state is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedWorkerBoundary:
+    """One worker's stable pre-action boundary or no-action task terminal."""
+
+    worker_index: int
+    observation: PolicyBatch
+    policy_version: int
+    worker_state: Mapping[str, object]
+    candidate_diagnostics: CandidateDiagnostics
+    no_candidate_termination: bool
+    terminal_audit: TerminalAudit | None
+    buffer_index: int
+    invalid_task_audit: InvalidTaskAudit | None = None
+
+    @property
+    def actionable(self) -> bool:
+        return self.terminal_audit is None and self.invalid_task_audit is None
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedWorkerTransition:
+    """One complete macro action at a recoverable post-action boundary."""
+
+    worker_index: int
+    observation: PolicyBatch
+    policy_version: int
+    worker_state: Mapping[str, object]
+    reward_components: RewardComponentsV4
+    reward_inputs: RewardInputsV4
+    terminal_class: RewardTerminalClass
+    done: bool
+    planning_outcome: PlanningOutcome
+    reason_code: str
+    execution_events: ExecutionEvents
+    candidate_diagnostics: CandidateDiagnostics
+    terminal_audit: TerminalAudit | None
+    policy_decisions_consumed: int
+    success_first_crossing: bool
+    buffer_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class RejectedWorkerAction:
+    """One pre-motion planner rejection that must not enter PPO tensors."""
+
+    worker_index: int
+    observation: PolicyBatch
+    policy_version: int
+    worker_state: Mapping[str, object]
+    reason_code: str
+    candidate_diagnostics: CandidateDiagnostics
+    buffer_index: int
+
+
 class ParallelEnvPool:
     """Own one spawned process/environment/bridge per synchronous worker."""
 
@@ -91,7 +194,9 @@ class ParallelEnvPool:
         worker_startup_timeout_seconds: float | None = None,
         auto_reset: bool = True,
         initial_episode_cursors: tuple[int, ...] | None = None,
-        initial_episode_states: tuple[Mapping[str, object], ...] | None = None,
+        initial_episode_states: (
+            tuple[Mapping[str, object] | None, ...] | None
+        ) = None,
     ) -> None:
         self._platforms = _expanded_platforms(allocation)
         self.worker_count = len(self._platforms)
@@ -129,7 +234,9 @@ class ParallelEnvPool:
             raise ParallelPoolError(
                 "worker startup timeout must be finite and positive"
             )
-        parsed_initial_states: tuple[FormalWorkerState, ...] | None = None
+        parsed_initial_states: (
+            tuple[FormalWorkerState | None, ...] | None
+        ) = None
         if initial_episode_states is not None:
             if (
                 not isinstance(initial_episode_states, tuple)
@@ -140,12 +247,16 @@ class ParallelEnvPool:
                 )
             try:
                 parsed_initial_states = tuple(
-                    FormalWorkerState.from_dict(value)
+                    None
+                    if value is None
+                    else FormalWorkerState.from_dict(value)
                     for value in initial_episode_states
                 )
             except ValueError as error:
                 raise ParallelPoolError("initial episode state is invalid") from error
             for index, state in enumerate(parsed_initial_states):
+                if state is None:
+                    continue
                 if (
                     state.worker_index != index
                     or state.platform_type != self._platforms[index]
@@ -158,7 +269,8 @@ class ParallelEnvPool:
                         "initial episode state worker identity differs"
                     )
             restored_cursors = tuple(
-                state.episode_cursor for state in parsed_initial_states
+                0 if state is None else state.episode_cursor
+                for state in parsed_initial_states
             )
             if initial_episode_cursors is None:
                 initial_episode_cursors = restored_cursors
@@ -180,6 +292,23 @@ class ParallelEnvPool:
                 "initial episode cursors must contain one non-negative integer per worker"
             )
         self._environment_factory = environment_factory
+        inventory_provider = getattr(
+            environment_factory, "task_inventory_count", None
+        )
+        if inventory_provider is None:
+            self._invalid_task_inventory_counts = (None,) * self.worker_count
+        elif callable(inventory_provider):
+            inventory_counts = tuple(
+                inventory_provider(platform) for platform in self._platforms
+            )
+            if any(
+                type(count) is not int or count <= 0
+                for count in inventory_counts
+            ):
+                raise ParallelPoolError("formal task inventory is invalid")
+            self._invalid_task_inventory_counts = inventory_counts
+        else:
+            raise ParallelPoolError("formal task inventory provider is invalid")
         self._reward_fn = reward_fn
         self._auto_reset = auto_reset
         self._worker_timeout_seconds = float(worker_timeout_seconds)
@@ -195,7 +324,10 @@ class ParallelEnvPool:
         self._initial_episode_states = (
             None
             if parsed_initial_states is None
-            else tuple(state.to_dict() for state in parsed_initial_states)
+            else tuple(
+                None if state is None else state.to_dict()
+                for state in parsed_initial_states
+            )
         )
         self.worker_pids: list[int] = []
         self.worker_thread_limits: list[tuple[str, str]] = []
@@ -203,6 +335,17 @@ class ParallelEnvPool:
             None,
             None,
         ]
+        self._async_started = False
+        self._async_policy_version: int | None = None
+        self._async_in_flight: dict[int, str] = {}
+        self._async_buffer_indices = [0] * self.worker_count
+        self._async_identities: list[ObservationIdentity] = []
+        self._async_terminal_workers = {
+            index
+            for index, state in enumerate(parsed_initial_states or ())
+            if state is not None and state.terminal_reason is not None
+        }
+        self._async_consecutive_invalid_tasks = [0] * self.worker_count
 
         self.shared_observation_buffers = _shared_observation_double_buffer(
             observation_template, self.worker_count
@@ -321,6 +464,11 @@ class ParallelEnvPool:
         """Return the exact episode ordinal currently owned by every worker."""
         return self._episode_cursors
 
+    @property
+    def terminal_worker_indices(self) -> tuple[int, ...]:
+        """Return workers that require a reset before another macro action."""
+        return tuple(sorted(self._async_terminal_workers))
+
     def reset(self) -> ParallelRolloutStep:
         if self._closed or self.training_stopped:
             raise ParallelPoolError("parallel pool is stopped")
@@ -331,6 +479,14 @@ class ParallelEnvPool:
         self._shared_rewards[0].zero_()
         self._shared_dones[0].zero_()
         self._shared_policy_versions[0].fill_(-1)
+        identities = self._buffer_identities[0]
+        if identities is None:
+            raise ParallelPoolError("initial observation identities are missing")
+        self._async_started = False
+        self._async_policy_version = None
+        self._async_in_flight.clear()
+        self._async_buffer_indices = [0] * self.worker_count
+        self._async_identities = list(identities)
         return self._stage_buffer(0)
 
     def snapshot_episode_states(
@@ -347,9 +503,18 @@ class ParallelEnvPool:
             raise ParallelPoolError(
                 "policy version must be a non-negative integer"
             )
-        identities = self._buffer_identities[self._buffer_index]
-        if identities is None:
-            raise ParallelPoolError("current observation identities are missing")
+        if self._async_started:
+            if self._async_in_flight:
+                raise ParallelPoolError(
+                    "episode snapshot cannot contain in-flight workers"
+                )
+            identities = tuple(self._async_identities)
+        else:
+            identities = self._buffer_identities[self._buffer_index]
+            if identities is None:
+                raise ParallelPoolError(
+                    "current observation identities are missing"
+                )
         if any(
             identity.execution_state
             not in {"DECISION_BOUNDARY", "GROUND_HOLD", "LANDED_HOLD"}
@@ -376,6 +541,464 @@ class ParallelEnvPool:
             return self._fail_closed(
                 "episode snapshot failed", cause=error
             )
+
+    def prepare_workers(
+        self,
+        worker_indices: tuple[int, ...],
+        *,
+        policy_version: int,
+        reset: bool = False,
+    ) -> None:
+        """Dispatch independent decision-boundary preparation commands."""
+        if self._closed or self.training_stopped:
+            raise ParallelPoolError("parallel pool is stopped")
+        try:
+            self._require_async_mode(policy_version)
+            indices = _validate_worker_indices(
+                worker_indices, worker_count=self.worker_count
+            )
+            if type(reset) is not bool:
+                raise ParallelPoolError("worker reset flag must be boolean")
+            for worker_index in indices:
+                if worker_index in self._async_in_flight:
+                    raise ParallelPoolError("worker already has an in-flight command")
+                if reset != (worker_index in self._async_terminal_workers):
+                    raise ParallelPoolError(
+                        "worker reset flag differs from preserved terminal state"
+                    )
+            for worker_index in indices:
+                target_buffer = 1 - self._async_buffer_indices[worker_index]
+                self._command_queues[worker_index].put(
+                    (
+                        "async_prepare",
+                        target_buffer,
+                        policy_version,
+                        reset,
+                    )
+                )
+                self._async_in_flight[worker_index] = "async_prepared"
+        except ParallelPoolError as error:
+            if not self.training_stopped:
+                self._fail_closed(str(error))
+            raise
+        except Exception as error:
+            self._fail_closed("worker preparation dispatch failed", cause=error)
+
+    def submit_actions(
+        self,
+        actions: Mapping[int, PolicyAction],
+        *,
+        policy_version: int,
+        reward_stage: RewardStage,
+        reward_weights: RewardWeightsV4 = DEFAULT_REWARD_WEIGHTS,
+    ) -> None:
+        """Dispatch actions only to the ready workers named by the caller."""
+        if self._closed or self.training_stopped:
+            raise ParallelPoolError("parallel pool is stopped")
+        try:
+            self._require_async_mode(policy_version)
+            if not isinstance(actions, Mapping) or not actions:
+                raise ParallelPoolError("asynchronous worker actions are invalid")
+            if not isinstance(reward_stage, RewardStage):
+                raise ParallelPoolError("asynchronous reward stage is invalid")
+            if not isinstance(reward_weights, RewardWeightsV4):
+                raise ParallelPoolError("asynchronous reward weights are invalid")
+            indices = _validate_worker_indices(
+                tuple(actions), worker_count=self.worker_count
+            )
+            for worker_index in indices:
+                if worker_index in self._async_in_flight:
+                    raise ParallelPoolError("worker already has an in-flight command")
+                action = actions[worker_index]
+                if not isinstance(action, PolicyAction):
+                    raise ParallelPoolError("asynchronous worker action is invalid")
+            for worker_index in indices:
+                action = actions[worker_index]
+                target_buffer = 1 - self._async_buffer_indices[worker_index]
+                self.shared_action_buffers[target_buffer]["candidate_indices"][
+                    worker_index
+                ] = action.frontier_index
+                self.shared_action_buffers[target_buffer]["thetas"][
+                    worker_index
+                ] = action.theta_rad
+                self._command_queues[worker_index].put(
+                    (
+                        "async_step",
+                        target_buffer,
+                        policy_version,
+                        self._async_identities[worker_index],
+                        reward_stage.value,
+                        reward_weights,
+                    )
+                )
+                self._async_in_flight[worker_index] = "async_step"
+        except ParallelPoolError as error:
+            if not self.training_stopped:
+                self._fail_closed(str(error))
+            raise
+        except Exception as error:
+            self._fail_closed("worker action dispatch failed", cause=error)
+
+    def await_completed_workers(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> tuple[
+        PreparedWorkerBoundary
+        | CompletedWorkerTransition
+        | RejectedWorkerAction,
+        ...,
+    ]:
+        """Return as soon as at least one independently dispatched worker completes."""
+        if self._closed or self.training_stopped:
+            raise ParallelPoolError("parallel pool is stopped")
+        try:
+            if not self._async_in_flight:
+                raise ParallelPoolError("no asynchronous worker command is in flight")
+            timeout = (
+                self._worker_timeout_seconds
+                if timeout_seconds is None
+                else timeout_seconds
+            )
+            if (
+                not isinstance(timeout, (int, float))
+                or isinstance(timeout, bool)
+                or not math.isfinite(float(timeout))
+                or timeout <= 0.0
+            ):
+                raise ParallelPoolError("asynchronous wait timeout is invalid")
+            deadline = time.monotonic() + float(timeout)
+            messages = [self._next_result(deadline)]
+            while True:
+                try:
+                    message = self._result_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if not isinstance(message, tuple) or len(message) < 2:
+                    raise ParallelPoolError(
+                        "worker returned malformed asynchronous data"
+                    )
+                messages.append(message)
+            return tuple(self._consume_async_result(message) for message in messages)
+        except ParallelPoolError as error:
+            if not self.training_stopped:
+                self._fail_closed(str(error))
+            raise
+        except Exception as error:
+            self._fail_closed("asynchronous worker wait failed", cause=error)
+
+    def complete_policy_update(self, *, policy_version: int) -> None:
+        """Release the fixed policy version only after every worker slot is committed."""
+        if type(policy_version) is not int or policy_version < 0:
+            raise ParallelPoolError("policy version must be a non-negative integer")
+        if self._async_policy_version != policy_version:
+            raise ParallelPoolError("asynchronous policy version differs")
+        if self._async_in_flight:
+            raise ParallelPoolError("cannot complete update with in-flight workers")
+        self._async_policy_version = None
+
+    def current_worker_observations(
+        self, worker_indices: tuple[int, ...]
+    ) -> tuple[PolicyBatch, ...]:
+        """Clone stable post-action observations without refreshing workers."""
+        if self._closed or self.training_stopped:
+            raise ParallelPoolError("parallel pool is stopped")
+        indices = _validate_worker_indices(
+            worker_indices, worker_count=self.worker_count
+        )
+        if any(worker in self._async_in_flight for worker in indices):
+            raise ParallelPoolError("worker observation is still in flight")
+        if not self._reset:
+            raise ParallelPoolError("parallel pool must be reset before bootstrap")
+        return tuple(
+            self._stage_worker_observation(
+                self._async_buffer_indices[worker],
+                worker,
+                self._async_identities[worker],
+            )
+            for worker in indices
+        )
+
+    def _require_async_mode(self, policy_version: int) -> None:
+        if not self._reset:
+            raise ParallelPoolError("parallel pool must be reset before collection")
+        if self._auto_reset:
+            raise ParallelPoolError(
+                "independent collection requires explicit worker reset"
+            )
+        if type(policy_version) is not int or policy_version < 0:
+            raise ParallelPoolError("policy version must be a non-negative integer")
+        if not self._async_started:
+            identities = self._buffer_identities[self._buffer_index]
+            if identities is None:
+                raise ParallelPoolError("current observation identities are missing")
+            self._async_identities = list(identities)
+            self._async_buffer_indices = [self._buffer_index] * self.worker_count
+            self._async_started = True
+        if self._async_policy_version is None:
+            self._async_policy_version = policy_version
+        elif self._async_policy_version != policy_version:
+            raise ParallelPoolError("asynchronous rollout mixed policy versions")
+
+    def _consume_async_result(
+        self, message: tuple[object, ...]
+    ) -> (
+        PreparedWorkerBoundary
+        | CompletedWorkerTransition
+        | RejectedWorkerAction
+    ):
+        kind, worker_index, *values = message
+        if kind == "error":
+            raise ParallelPoolError(f"worker {worker_index} failed: {values[0]}")
+        if type(worker_index) is not int or worker_index not in self._async_in_flight:
+            raise ParallelPoolError("asynchronous worker identity is invalid")
+        expected_kind = self._async_in_flight[worker_index]
+        if kind != expected_kind and not (
+            expected_kind == "async_step" and kind == "async_rejected"
+        ):
+            raise ParallelPoolError("asynchronous worker result kind differs")
+        if kind == "async_prepared":
+            result = self._parse_async_prepared(worker_index, values)
+        elif kind == "async_step":
+            result = self._parse_async_step(worker_index, values)
+        elif kind == "async_rejected":
+            result = self._parse_async_rejected(worker_index, values)
+        else:
+            raise ParallelPoolError("asynchronous worker result kind is invalid")
+        del self._async_in_flight[worker_index]
+        if isinstance(result, PreparedWorkerBoundary):
+            if result.invalid_task_audit is None:
+                self._async_consecutive_invalid_tasks[worker_index] = 0
+            else:
+                count = self._async_consecutive_invalid_tasks[worker_index] + 1
+                self._async_consecutive_invalid_tasks[worker_index] = count
+                inventory_count = self._invalid_task_inventory_counts[
+                    worker_index
+                ]
+                if inventory_count is not None and count >= inventory_count:
+                    raise ParallelPoolError(
+                        "FORMAL_INVALID_TASK_INVENTORY_EXHAUSTED"
+                    )
+        self._async_buffer_indices[worker_index] = result.buffer_index
+        identity = result.observation.observation_identities
+        if identity is None or len(identity) != 1:
+            raise ParallelPoolError("asynchronous observation identity is missing")
+        self._async_identities[worker_index] = identity[0]
+        if (
+            isinstance(result, CompletedWorkerTransition) and result.done
+        ) or (
+            isinstance(result, PreparedWorkerBoundary) and not result.actionable
+        ):
+            self._async_terminal_workers.add(worker_index)
+        else:
+            self._async_terminal_workers.discard(worker_index)
+        return result
+
+    def _parse_async_rejected(
+        self, worker_index: int, values: list[object]
+    ) -> RejectedWorkerAction:
+        if (
+            len(values) != 7
+            or type(values[0]) is not int
+            or values[1] != self._async_policy_version
+            or not isinstance(values[2], str)
+            or not values[2]
+            or not isinstance(values[3], CandidateDiagnostics)
+            or not isinstance(values[4], ObservationIdentity)
+            or type(values[5]) is not int
+            or values[5] < 0
+            or not isinstance(values[6], Mapping)
+        ):
+            raise ParallelPoolError(
+                "asynchronous rejected action result is invalid"
+            )
+        buffer_index = int(values[0])
+        state = self._validated_async_state(
+            values[6],
+            worker_index=worker_index,
+            episode_cursor=int(values[5]),
+            identity=values[4],
+        )
+        self._set_async_cursor(worker_index, int(values[5]))
+        return RejectedWorkerAction(
+            worker_index=worker_index,
+            observation=self._stage_worker_observation(
+                buffer_index, worker_index, values[4]
+            ),
+            policy_version=int(values[1]),
+            worker_state=state,
+            reason_code=values[2],
+            candidate_diagnostics=values[3],
+            buffer_index=buffer_index,
+        )
+
+    def _parse_async_prepared(
+        self, worker_index: int, values: list[object]
+    ) -> PreparedWorkerBoundary:
+        if (
+            len(values) != 10
+            or type(values[0]) is not int
+            or values[1] != self._async_policy_version
+            or not isinstance(values[2], CandidateDiagnostics)
+            or type(values[3]) is not bool
+            or type(values[4]) is not bool
+            or (values[5] is not None and not isinstance(values[5], TerminalAudit))
+            or (
+                values[6] is not None
+                and not isinstance(values[6], InvalidTaskAudit)
+            )
+            or values[3] != (values[5] is not None)
+            or (values[4] and not values[3])
+            or (values[5] is not None and values[6] is not None)
+            or not isinstance(values[7], ObservationIdentity)
+            or type(values[8]) is not int
+            or values[8] < 0
+            or not isinstance(values[9], Mapping)
+        ):
+            raise ParallelPoolError("asynchronous preparation result is invalid")
+        buffer_index = int(values[0])
+        state = self._validated_async_state(
+            values[9],
+            worker_index=worker_index,
+            episode_cursor=int(values[8]),
+            identity=values[7],
+        )
+        invalid_task_audit = values[6]
+        if invalid_task_audit is not None and (
+            invalid_task_audit.worker_index != worker_index
+            or invalid_task_audit.episode_id != values[7].episode_id
+            or invalid_task_audit.platform_type != self._platforms[worker_index]
+            or invalid_task_audit.physical_snapshot_id
+            != values[2].physical_snapshot_id
+            or dict(invalid_task_audit.post_worker_state) != dict(state)
+        ):
+            raise ParallelPoolError("invalid-task audit identity differs")
+        self._set_async_cursor(worker_index, int(values[8]))
+        return PreparedWorkerBoundary(
+            worker_index=worker_index,
+            observation=self._stage_worker_observation(
+                buffer_index, worker_index, values[7]
+            ),
+            policy_version=int(values[1]),
+            worker_state=state,
+            candidate_diagnostics=values[2],
+            no_candidate_termination=bool(values[4]),
+            terminal_audit=values[5],
+            buffer_index=buffer_index,
+            invalid_task_audit=invalid_task_audit,
+        )
+
+    def _parse_async_step(
+        self, worker_index: int, values: list[object]
+    ) -> CompletedWorkerTransition:
+        if (
+            len(values) != 15
+            or type(values[0]) is not int
+            or values[1] != self._async_policy_version
+            or type(values[2]) is not int
+            or not isinstance(values[3], str)
+            or not isinstance(values[4], ExecutionEvents)
+            or not isinstance(values[5], CandidateDiagnostics)
+            or (values[6] is not None and not isinstance(values[6], TerminalAudit))
+            or not isinstance(values[7], ObservationIdentity)
+            or values[8] != 1
+            or type(values[9]) is not bool
+            or type(values[10]) is not int
+            or values[10] < 0
+            or not isinstance(values[11], RewardComponentsV4)
+            or not isinstance(values[12], RewardInputsV4)
+            or not isinstance(values[13], RewardTerminalClass)
+            or not isinstance(values[14], Mapping)
+        ):
+            raise ParallelPoolError("asynchronous step result is invalid")
+        try:
+            outcome = PlanningOutcome(values[2])
+        except (TypeError, ValueError) as error:
+            raise ParallelPoolError("asynchronous planning outcome is invalid") from error
+        buffer_index = int(values[0])
+        done = bool(self._shared_dones[buffer_index][worker_index])
+        if done != (values[6] is not None):
+            raise ParallelPoolError("asynchronous terminal metadata disagrees")
+        reward = float(self._shared_rewards[buffer_index][worker_index])
+        if not math.isfinite(reward) or not math.isclose(
+            reward,
+            values[11].total,
+            rel_tol=1.0e-6,
+            abs_tol=1.0e-6,
+        ):
+            raise ParallelPoolError("asynchronous reward components disagree")
+        state = self._validated_async_state(
+            values[14],
+            worker_index=worker_index,
+            episode_cursor=int(values[10]),
+            identity=values[7],
+        )
+        self._set_async_cursor(worker_index, int(values[10]))
+        return CompletedWorkerTransition(
+            worker_index=worker_index,
+            observation=self._stage_worker_observation(
+                buffer_index, worker_index, values[7]
+            ),
+            policy_version=int(values[1]),
+            worker_state=state,
+            reward_components=values[11],
+            reward_inputs=values[12],
+            terminal_class=values[13],
+            done=done,
+            planning_outcome=outcome,
+            reason_code=values[3],
+            execution_events=values[4],
+            candidate_diagnostics=values[5],
+            terminal_audit=values[6],
+            policy_decisions_consumed=int(values[8]),
+            success_first_crossing=bool(values[9]),
+            buffer_index=buffer_index,
+        )
+
+    def _validated_async_state(
+        self,
+        value: object,
+        *,
+        worker_index: int,
+        episode_cursor: int,
+        identity: ObservationIdentity,
+    ) -> dict[str, object]:
+        try:
+            state = FormalWorkerState.from_dict(value)
+        except ValueError as error:
+            raise ParallelPoolError("asynchronous worker state is invalid") from error
+        if (
+            state.worker_index != worker_index
+            or state.episode_cursor != episode_cursor
+            or state.observation_identity != identity
+        ):
+            raise ParallelPoolError("asynchronous worker state identity differs")
+        return state.to_dict()
+
+    def _set_async_cursor(self, worker_index: int, cursor: int) -> None:
+        cursors = list(self._episode_cursors)
+        cursors[worker_index] = cursor
+        self._episode_cursors = tuple(cursors)
+
+    def _stage_worker_observation(
+        self,
+        buffer_index: int,
+        worker_index: int,
+        identity: ObservationIdentity,
+    ) -> PolicyBatch:
+        if buffer_index not in (0, 1):
+            raise ParallelPoolError("asynchronous buffer index is invalid")
+        observation = PolicyBatch(
+            **{
+                name: tensor[worker_index].detach().clone().unsqueeze(0)
+                for name, tensor in self.shared_observation_buffers[
+                    buffer_index
+                ].items()
+            },
+            observation_identities=(identity,),
+        )
+        validate_policy_batch(observation)
+        return observation
 
     def step(
         self, actions: ParallelActions, *, policy_version: int
@@ -1031,11 +1654,37 @@ def _current_candidate_diagnostics(
     return diagnostics
 
 
+def _snapshot_formal_worker_state(
+    worker: ParallelEnvironmentWorker,
+    *,
+    worker_index: int,
+    platform_type: str,
+    episode_cursor: int,
+    identity: ObservationIdentity,
+) -> dict[str, object]:
+    snapshot = getattr(worker, "snapshot_episode_state", None)
+    if not callable(snapshot):
+        raise ParallelPoolError(
+            "worker does not support stable episode snapshots"
+        )
+    try:
+        state = FormalWorkerState.from_dict(snapshot())
+    except ValueError as error:
+        raise ParallelPoolError("worker episode snapshot state is invalid") from error
+    if (
+        state.worker_index != worker_index
+        or state.platform_type != platform_type
+        or state.episode_cursor != episode_cursor
+        or state.observation_identity != identity
+    ):
+        raise ParallelPoolError("worker episode snapshot identity differs")
+    return state.to_dict()
+
+
 def _terminal_audit(
     *,
     terminated: bool,
     terminal_reason: TerminalReason | None,
-    oracle_opportunity_count: int,
     remaining_coverable_detail_cell_count: int | None,
     candidate_diagnostics: CandidateDiagnostics,
 ) -> TerminalAudit | None:
@@ -1050,7 +1699,6 @@ def _terminal_audit(
     try:
         return TerminalAudit(
             reason=terminal_reason,
-            oracle_opportunity_count=oracle_opportunity_count,
             candidate_diagnostics=candidate_diagnostics,
             remaining_coverable_detail_cell_count=(
                 remaining_coverable_detail_cell_count
@@ -1108,13 +1756,307 @@ def _worker_main(
             )
         )
         terminal_transition: PlannerTransition | None = None
-        no_action_terminal: str | None = None
+        restored_terminal = (
+            initial_episode_state is not None
+            and FormalWorkerState.from_dict(initial_episode_state).terminal_reason
+            is not None
+        )
+        no_action_terminal: str | None = (
+            "RESTORED_TERMINAL" if restored_terminal else None
+        )
         while True:
             command = command_queue.get()
             if command == ("stop",):
                 return
             if not isinstance(command, tuple) or not command:
                 raise ParallelPoolError("worker command protocol failed")
+            if command[0] == "async_prepare":
+                if (
+                    len(command) != 4
+                    or type(command[1]) is not int
+                    or type(command[2]) is not int
+                    or command[2] < 0
+                    or type(command[3]) is not bool
+                ):
+                    raise ParallelPoolError(
+                        "asynchronous worker preparation command failed"
+                    )
+                _, buffer_index, policy_version, reset_worker = command
+                if reset_worker:
+                    if terminal_transition is None and no_action_terminal is None:
+                        raise ParallelPoolError(
+                            "only a terminated worker can be reset"
+                        )
+                    episode_cursor += 1
+                    worker = _create_environment_for_episode(
+                        environment_factory,
+                        worker_index,
+                        platform_type,
+                        episode_cursor,
+                        platform_worker_index,
+                        platform_worker_count,
+                    )
+                    terminal_transition = None
+                    no_action_terminal = None
+                elif terminal_transition is not None or no_action_terminal is not None:
+                    raise ParallelPoolError(
+                        "terminated worker requires reset before preparation"
+                    )
+                boundary = worker.environment.refresh_decision_boundary()
+                if (
+                    boundary.transition is not None
+                    or boundary.policy_decisions_consumed != 0
+                ):
+                    raise ParallelPoolError(
+                        "boundary preparation must not create an action transition"
+                    )
+                terminal_boundary = boundary.terminal_reason is not None
+                invalid_task = boundary.task_resample_required
+                no_candidate_termination = (
+                    boundary.execution_state == "NO_CANDIDATES"
+                )
+                if boundary.execution_state not in {
+                    "DECISION_READY",
+                    "NO_CANDIDATES",
+                    "TERMINATED",
+                    "TASK_RESAMPLE_REQUIRED",
+                }:
+                    raise ParallelPoolError(
+                        "worker returned invalid decision-boundary state"
+                    )
+                candidate_diagnostics = _current_candidate_diagnostics(worker)
+                terminal_audit = _terminal_audit(
+                    terminated=terminal_boundary,
+                    terminal_reason=boundary.terminal_reason,
+                    remaining_coverable_detail_cell_count=(
+                        boundary.remaining_coverable_detail_cell_count
+                    ),
+                    candidate_diagnostics=candidate_diagnostics,
+                )
+                if invalid_task != (
+                    boundary.execution_state == "TASK_RESAMPLE_REQUIRED"
+                ) or invalid_task != isinstance(
+                    boundary.task_resample_reason, str
+                ):
+                    raise ParallelPoolError(
+                        "worker task-resample boundary is invalid"
+                    )
+                if terminal_boundary or invalid_task:
+                    no_action_terminal = boundary.execution_state
+                current_observation = _environment_current_observation(worker)
+                identity = current_observation.observation_identities[0]
+                state = _snapshot_formal_worker_state(
+                    worker,
+                    worker_index=worker_index,
+                    platform_type=platform_type,
+                    episode_cursor=episode_cursor,
+                    identity=identity,
+                )
+                invalid_task_audit = (
+                    InvalidTaskAudit(
+                        worker_index=worker_index,
+                        episode_id=identity.episode_id,
+                        platform_type=platform_type,
+                        reason_code=str(boundary.task_resample_reason),
+                        physical_snapshot_id=(
+                            candidate_diagnostics.physical_snapshot_id
+                        ),
+                        post_worker_state=state,
+                    )
+                    if invalid_task
+                    else None
+                )
+                _write_observation(
+                    observation_buffers[buffer_index],
+                    worker_index,
+                    current_observation,
+                )
+                reward_buffers[buffer_index][worker_index] = 0.0
+                done_buffers[buffer_index][worker_index] = terminal_boundary
+                policy_version_buffers[buffer_index][worker_index] = policy_version
+                result_queue.put(
+                    (
+                        "async_prepared",
+                        worker_index,
+                        buffer_index,
+                        policy_version,
+                        candidate_diagnostics,
+                        terminal_boundary,
+                        no_candidate_termination,
+                        terminal_audit,
+                        invalid_task_audit,
+                        identity,
+                        episode_cursor,
+                        state,
+                    )
+                )
+                continue
+            if command[0] == "async_step":
+                if (
+                    len(command) != 6
+                    or type(command[1]) is not int
+                    or type(command[2]) is not int
+                    or command[2] < 0
+                    or not isinstance(command[3], ObservationIdentity)
+                    or not isinstance(command[5], RewardWeightsV4)
+                ):
+                    raise ParallelPoolError(
+                        "asynchronous worker step command failed"
+                    )
+                (
+                    _,
+                    buffer_index,
+                    policy_version,
+                    expected_identity,
+                    reward_stage_value,
+                    reward_weights,
+                ) = command
+                try:
+                    reward_stage = RewardStage(reward_stage_value)
+                except (TypeError, ValueError) as error:
+                    raise ParallelPoolError(
+                        "asynchronous worker reward stage is invalid"
+                    ) from error
+                if terminal_transition is not None or no_action_terminal is not None:
+                    raise ParallelPoolError(
+                        "terminated worker requires reset before another action"
+                    )
+                action = PolicyAction(
+                    frontier_index=int(
+                        action_buffers[buffer_index]["candidate_indices"][
+                            worker_index
+                        ]
+                    ),
+                    theta_rad=float(
+                        action_buffers[buffer_index]["thetas"][worker_index]
+                    ),
+                )
+                candidate_diagnostics = _current_candidate_diagnostics(worker)
+                boundary = worker.environment.advance_prepared_action(
+                    action,
+                    expected_identity=expected_identity,
+                )
+                transition = boundary.transition
+                if boundary.reselection_required:
+                    if (
+                        transition is not None
+                        or boundary.policy_decisions_consumed != 1
+                        or not isinstance(boundary.reselection_reason, str)
+                        or not boundary.reselection_reason
+                        or boundary.terminal_reason is not None
+                        or boundary.task_resample_required
+                    ):
+                        raise ParallelPoolError(
+                            "worker reselection boundary is invalid"
+                        )
+                    current_observation = _environment_current_observation(
+                        worker
+                    )
+                    current_diagnostics = _current_candidate_diagnostics(
+                        worker
+                    )
+                    identity = current_observation.observation_identities[0]
+                    state = _snapshot_formal_worker_state(
+                        worker,
+                        worker_index=worker_index,
+                        platform_type=platform_type,
+                        episode_cursor=episode_cursor,
+                        identity=identity,
+                    )
+                    _write_observation(
+                        observation_buffers[buffer_index],
+                        worker_index,
+                        current_observation,
+                    )
+                    reward_buffers[buffer_index][worker_index] = 0.0
+                    done_buffers[buffer_index][worker_index] = False
+                    policy_version_buffers[buffer_index][worker_index] = (
+                        policy_version
+                    )
+                    result_queue.put(
+                        (
+                            "async_rejected",
+                            worker_index,
+                            buffer_index,
+                            policy_version,
+                            boundary.reselection_reason,
+                            current_diagnostics,
+                            identity,
+                            episode_cursor,
+                            state,
+                        )
+                    )
+                    continue
+                if not isinstance(transition, PlannerTransition):
+                    raise ParallelPoolError(
+                        "worker environment must return PlannerTransition"
+                    )
+                if boundary.policy_decisions_consumed != 1:
+                    raise ParallelPoolError(
+                        "worker action must consume exactly one policy decision"
+                    )
+                reward_inputs = RewardInputsV4.from_transition(
+                    transition, platform_type=platform_type
+                )
+                components = compute_reward_components(
+                    reward_inputs,
+                    reward_stage,
+                    reward_weights,
+                )
+                current_diagnostics = _current_candidate_diagnostics(worker)
+                terminal_audit = _terminal_audit(
+                    terminated=transition.terminated,
+                    terminal_reason=transition.terminal_reason,
+                    remaining_coverable_detail_cell_count=(
+                        transition.remaining_coverable_detail_cell_count
+                    ),
+                    candidate_diagnostics=(
+                        current_diagnostics
+                        if transition.terminated
+                        else candidate_diagnostics
+                    ),
+                )
+                current_observation = transition.next_observation
+                if transition.terminated:
+                    terminal_transition = transition
+                identity = current_observation.observation_identities[0]
+                state = _snapshot_formal_worker_state(
+                    worker,
+                    worker_index=worker_index,
+                    platform_type=platform_type,
+                    episode_cursor=episode_cursor,
+                    identity=identity,
+                )
+                _write_observation(
+                    observation_buffers[buffer_index],
+                    worker_index,
+                    current_observation,
+                )
+                reward_buffers[buffer_index][worker_index] = components.total
+                done_buffers[buffer_index][worker_index] = transition.terminated
+                policy_version_buffers[buffer_index][worker_index] = policy_version
+                result_queue.put(
+                    (
+                        "async_step",
+                        worker_index,
+                        buffer_index,
+                        policy_version,
+                        int(transition.planning_outcome),
+                        transition.reason_code,
+                        transition.execution_events,
+                        candidate_diagnostics,
+                        terminal_audit,
+                        identity,
+                        boundary.policy_decisions_consumed,
+                        transition.success_first_crossing,
+                        episode_cursor,
+                        components,
+                        reward_inputs,
+                        transition.reward_terminal_class,
+                        state,
+                    )
+                )
+                continue
             if command[0] == "snapshot_episode_state":
                 if (
                     len(command) != 3
@@ -1229,7 +2171,6 @@ def _worker_main(
                 terminal_audit = _terminal_audit(
                     terminated=terminal_boundary,
                     terminal_reason=boundary.terminal_reason,
-                    oracle_opportunity_count=boundary.oracle_opportunity_count,
                     remaining_coverable_detail_cell_count=(
                         boundary.remaining_coverable_detail_cell_count
                     ),
@@ -1306,9 +2247,6 @@ def _worker_main(
                 terminal_audit = _terminal_audit(
                     terminated=transition.terminated,
                     terminal_reason=transition.terminal_reason,
-                    oracle_opportunity_count=(
-                        transition.oracle_opportunity_count
-                    ),
                     remaining_coverable_detail_cell_count=(
                         transition.remaining_coverable_detail_cell_count
                     ),
@@ -1479,13 +2417,31 @@ def _validate_actions(actions: ParallelActions, worker_count: int) -> None:
         raise ParallelPoolError("action thetas must be finite")
 
 
+def _validate_worker_indices(
+    worker_indices: tuple[int, ...], *, worker_count: int
+) -> tuple[int, ...]:
+    if (
+        not isinstance(worker_indices, tuple)
+        or not worker_indices
+        or any(type(index) is not int for index in worker_indices)
+        or len(set(worker_indices)) != len(worker_indices)
+        or any(index < 0 or index >= worker_count for index in worker_indices)
+    ):
+        raise ParallelPoolError("asynchronous worker indices are invalid")
+    return worker_indices
+
+
 __all__ = [
     "CapabilityEnvironmentBuilder",
+    "CompletedWorkerTransition",
     "EnvironmentFactory",
+    "InvalidTaskAudit",
     "ParallelActions",
     "ParallelEnvironmentWorker",
     "ParallelEnvPool",
     "ParallelPoolError",
     "ParallelRolloutStep",
+    "PreparedWorkerBoundary",
+    "RejectedWorkerAction",
     "joint_worker_allocation",
 ]

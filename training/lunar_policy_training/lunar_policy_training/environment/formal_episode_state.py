@@ -5,14 +5,15 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
 
 import torch
 
 from ..policy.observation import ObservationIdentity, PolicyBatch
+from .candidate_builder import CandidateDecisionSnapshot
 
 
-FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION = "lunar-formal-environment-state/v8"
+FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION = "lunar-formal-environment-state/v13"
 STABLE_EXECUTION_STATES = frozenset(
     {"DECISION_BOUNDARY", "GROUND_HOLD", "LANDED_HOLD"}
 )
@@ -54,11 +55,29 @@ _WORKER_FIELDS = frozenset(
         "scene_seed",
         "start_seed",
         "episode_seed",
+        "task_geometry_sha256",
+        "task_common_key_sha256",
+        "task_common_artifact_sha256",
+        "platform_task_key_sha256",
+        "platform_task_artifact_sha256",
+        "task_coarse_bounds_half_open",
+        "task_detail_bounds_half_open",
+        "task_halo_bounds_half_open",
         "coverability_mask_sha256",
+        "observed_coverable_mask_sha256",
+        "coverable_detail_cell_count",
+        "observed_coverable_detail_cell_count",
+        "scale_bucket",
+        "task_span_cells",
+        "priority_seed",
+        "priority_coarse_mask_sha256",
+        "priority_detail_mask_sha256",
+        "priority_coverable_detail_cell_count",
         "start_cell",
         "current_pose",
         "legged_body_z_m",
         "execution_state",
+        "cumulative_executed_path_m",
         "observation_revision",
         "physical_snapshot_id",
         "physical_evidence_generation",
@@ -72,8 +91,7 @@ _WORKER_FIELDS = frozenset(
         "policy_batch_sha256",
         "candidate_ids",
         "candidate_mask",
-        "oracle_opportunity_count",
-        "oracle_opportunity_set_sha256",
+        "candidate_decision_snapshot",
         "terminal_reason",
         "defer_candidate_rebuild",
         "last_hop_available_delta_v_mps",
@@ -81,14 +99,18 @@ _WORKER_FIELDS = frozenset(
     }
 )
 _CANDIDATE_GAIN_RESOLUTION_M = 0.2
+_CANDIDATE_DECISION_FIELDS = frozenset(
+    field.name for field in fields(CandidateDecisionSnapshot)
+)
 _TERMINAL_REASONS = frozenset(
     {
         "SUCCESS",
-        "NO_RECOVERABLE_OBSERVATION_STATE",
-        "VISITED_EXHAUSTED",
-        "ZERO_GAIN",
-        "NO_TRANSIT_OPPORTUNITY",
-        "PLANNER_BLOCKED_WITH_OPPORTUNITY",
+        "NO_FRONTIER",
+        "NO_GLOBAL_ROUTE",
+        "ZERO_EXPECTED_GAIN",
+        "PLANNER_EXHAUSTED",
+        "NO_AVAILABLE_LANDING_CANDIDATE",
+        "TRUNCATED",
         "HARD_FAILURE",
         "CANCELED",
     }
@@ -126,6 +148,102 @@ def _physical_sha256(value: object, name: str) -> str:
     if digest == "0" * 64:
         raise ValueError(f"formal {name} must not use a promoted default")
     return digest
+
+
+def _half_open_bounds(
+    value: object,
+    name: str,
+) -> tuple[int, int, int, int]:
+    if (
+        not isinstance(value, list)
+        or len(value) != 4
+        or any(type(item) is not int or item < 0 for item in value)
+    ):
+        raise ValueError(f"formal {name} bounds are invalid")
+    row0, row1, column0, column1 = value
+    if row0 >= row1 or column0 >= column1:
+        raise ValueError(f"formal {name} bounds are empty")
+    return row0, row1, column0, column1
+
+
+def _candidate_decision_snapshot_from_dict(
+    value: object,
+) -> CandidateDecisionSnapshot:
+    if not isinstance(value, Mapping) or set(value) != _CANDIDATE_DECISION_FIELDS:
+        raise ValueError("formal candidate decision snapshot structure is invalid")
+    return CandidateDecisionSnapshot(
+        snapshot_id=_physical_sha256(value["snapshot_id"], "candidate snapshot ID"),
+        frontier_segment_count=_nonnegative_int(
+            value["frontier_segment_count"], "frontier segment count"
+        ),
+        raw_candidate_count=_nonnegative_int(
+            value["raw_candidate_count"], "raw candidate count"
+        ),
+        fine_pose_candidate_count=_nonnegative_int(
+            value["fine_pose_candidate_count"], "fine pose candidate count"
+        ),
+        globally_reachable_candidate_count=_nonnegative_int(
+            value["globally_reachable_candidate_count"],
+            "globally reachable candidate count",
+        ),
+        positive_gain_candidate_count=_nonnegative_int(
+            value["positive_gain_candidate_count"],
+            "positive gain candidate count",
+        ),
+        selected_policy_candidate_count=_nonnegative_int(
+            value["selected_policy_candidate_count"],
+            "selected policy candidate count",
+        ),
+        untried_reserve_count=_nonnegative_int(
+            value["untried_reserve_count"], "untried reserve count"
+        ),
+        planner_rejected_current_snapshot_count=_nonnegative_int(
+            value["planner_rejected_current_snapshot_count"],
+            "planner rejected candidate count",
+        ),
+        candidate_set_sha256=_sha256(
+            value["candidate_set_sha256"], "candidate set digest"
+        ),
+        global_search_call_count=_nonnegative_int(
+            value["global_search_call_count"], "global search call count"
+        ),
+        global_search_elapsed_s=_finite(
+            value["global_search_elapsed_s"], "global search elapsed time"
+        ),
+        candidate_refresh_elapsed_s=_finite(
+            value["candidate_refresh_elapsed_s"],
+            "candidate refresh elapsed time",
+        ),
+        pipeline_kind=value["pipeline_kind"],
+        representable_landing_sha256=_sha256(
+            value["representable_landing_sha256"],
+            "representable landing digest",
+        ),
+        raw_known_landing_count=_nonnegative_int(
+            value["raw_known_landing_count"], "raw known landing count"
+        ),
+        eligible_landing_count=_nonnegative_int(
+            value["eligible_landing_count"], "eligible landing count"
+        ),
+        predicted_positive_landing_count=_nonnegative_int(
+            value["predicted_positive_landing_count"],
+            "predicted positive landing count",
+        ),
+        visited_landing_count=_nonnegative_int(
+            value["visited_landing_count"], "visited landing count"
+        ),
+        scan_elapsed_s=_finite(value["scan_elapsed_s"], "scan elapsed time"),
+        sort_elapsed_s=_finite(value["sort_elapsed_s"], "sort elapsed time"),
+        top64_elapsed_s=_finite(
+            value["top64_elapsed_s"], "top64 elapsed time"
+        ),
+        reserve_elapsed_s=_finite(
+            value["reserve_elapsed_s"], "reserve elapsed time"
+        ),
+        scan_complete=value["scan_complete"],
+        pagination_closed=value["pagination_closed"],
+        capacity_truncated=value["capacity_truncated"],
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,11 +415,29 @@ class FormalWorkerState:
     scene_seed: str
     start_seed: str
     episode_seed: str
+    task_geometry_sha256: str
+    task_common_key_sha256: str
+    task_common_artifact_sha256: str
+    platform_task_key_sha256: str
+    platform_task_artifact_sha256: str
+    task_coarse_bounds_half_open: tuple[int, int, int, int]
+    task_detail_bounds_half_open: tuple[int, int, int, int]
+    task_halo_bounds_half_open: tuple[int, int, int, int]
     coverability_mask_sha256: str
+    observed_coverable_mask_sha256: str
+    coverable_detail_cell_count: int
+    observed_coverable_detail_cell_count: int
+    scale_bucket: str
+    task_span_cells: int
+    priority_seed: str
+    priority_coarse_mask_sha256: str
+    priority_detail_mask_sha256: str
+    priority_coverable_detail_cell_count: int
     start_cell: tuple[int, int]
     current_pose: FormalPoseState
     legged_body_z_m: float
     execution_state: str
+    cumulative_executed_path_m: float
     observation_revision: int
     physical_snapshot_id: str
     physical_evidence_generation: int
@@ -315,8 +451,7 @@ class FormalWorkerState:
     policy_batch_sha256: str
     candidate_ids: tuple[str, ...]
     candidate_mask: tuple[bool, ...]
-    oracle_opportunity_count: int
-    oracle_opportunity_set_sha256: str
+    candidate_decision_snapshot: CandidateDecisionSnapshot
     terminal_reason: str | None
     defer_candidate_rebuild: bool
     last_hop_available_delta_v_mps: float
@@ -338,6 +473,37 @@ class FormalWorkerState:
         platform_type = value["platform_type"]
         if platform_type not in _PLATFORMS:
             raise ValueError("formal worker platform is invalid")
+        scale_bucket = value["scale_bucket"]
+        if scale_bucket not in {"100_200", "200_300", "300_400", "400_500"}:
+            raise ValueError("formal task scale bucket is invalid")
+        task_span_cells = _nonnegative_int(
+            value["task_span_cells"], "task span cells"
+        )
+        if task_span_cells <= 0:
+            raise ValueError("formal task span must be positive")
+        coarse_bounds = _half_open_bounds(
+            value["task_coarse_bounds_half_open"], "task coarse"
+        )
+        detail_bounds = _half_open_bounds(
+            value["task_detail_bounds_half_open"], "task detail"
+        )
+        halo_bounds = _half_open_bounds(
+            value["task_halo_bounds_half_open"], "task halo"
+        )
+        if (
+            coarse_bounds[1] - coarse_bounds[0] != task_span_cells
+            or coarse_bounds[3] - coarse_bounds[2] != task_span_cells
+        ):
+            raise ValueError("formal task span differs from coarse bounds")
+        if detail_bounds != tuple(item * 20 for item in coarse_bounds):
+            raise ValueError("formal task detail bounds differ from coarse bounds")
+        if not (
+            halo_bounds[0] <= coarse_bounds[0]
+            and halo_bounds[1] >= coarse_bounds[1]
+            and halo_bounds[2] <= coarse_bounds[2]
+            and halo_bounds[3] >= coarse_bounds[3]
+        ):
+            raise ValueError("formal task halo bounds do not contain the task")
         worker_index = _nonnegative_int(value["worker_index"], "worker index")
         lane = _nonnegative_int(
             value["platform_worker_index"], "platform worker index"
@@ -350,11 +516,18 @@ class FormalWorkerState:
         execution_state = value["execution_state"]
         if execution_state not in STABLE_EXECUTION_STATES:
             raise ValueError("formal worker execution state is not stable")
+        cumulative_executed_path_m = _finite(
+            value["cumulative_executed_path_m"],
+            "cumulative executed path",
+        )
+        if cumulative_executed_path_m < 0.0:
+            raise ValueError("formal cumulative executed path must be non-negative")
         start_cell = value["start_cell"]
         if (
             not isinstance(start_cell, list)
             or len(start_cell) != 2
             or any(type(item) is not int or item < 0 for item in start_cell)
+            or any(item >= task_span_cells for item in start_cell)
         ):
             raise ValueError("formal start cell is invalid")
         history_value = value["reveal_history"]
@@ -412,7 +585,11 @@ class FormalWorkerState:
             "physical evidence generation",
         )
         expected_generation = 1 + sum(
-            len(item.path_samples) if item.path_samples else 1
+            (
+                1
+                if platform_type == "HOPPER"
+                else (len(item.path_samples) if item.path_samples else 1)
+            )
             for item in history
         )
         if evidence_generation != expected_generation:
@@ -468,9 +645,20 @@ class FormalWorkerState:
             != sum(candidate_mask)
         ):
             raise ValueError("formal candidate IDs or mask are invalid")
-        oracle_count = _nonnegative_int(
-            value["oracle_opportunity_count"], "oracle opportunity count"
+        candidate_decision_snapshot = _candidate_decision_snapshot_from_dict(
+            value["candidate_decision_snapshot"]
         )
+        if (
+            candidate_decision_snapshot.snapshot_id
+            != value["physical_snapshot_id"]
+            or candidate_decision_snapshot.candidate_set_sha256
+            != value["physical_candidate_universe_sha256"]
+            or candidate_decision_snapshot.selected_policy_candidate_count
+            != sum(candidate_mask)
+            or candidate_decision_snapshot.planner_rejected_current_snapshot_count
+            != len(failed_value)
+        ):
+            raise ValueError("formal candidate decision snapshot identity differs")
         terminal_reason = value["terminal_reason"]
         if terminal_reason is not None and terminal_reason not in _TERMINAL_REASONS:
             raise ValueError("formal terminal reason is invalid")
@@ -483,6 +671,16 @@ class FormalWorkerState:
         )
         if last_delta_v < 0.0:
             raise ValueError("formal hopper delta-v must be non-negative")
+        coverable_count = _nonnegative_int(
+            value["coverable_detail_cell_count"],
+            "coverable detail cell count",
+        )
+        observed_coverable_count = _nonnegative_int(
+            value["observed_coverable_detail_cell_count"],
+            "observed coverable detail cell count",
+        )
+        if coverable_count == 0 or observed_coverable_count > coverable_count:
+            raise ValueError("formal coverable detail cell counts are invalid")
         return cls(
             scenario_schedule_id=schedule_id,
             platform_type=str(platform_type),
@@ -494,8 +692,49 @@ class FormalWorkerState:
             scene_seed=_sha256(value["scene_seed"], "scene seed"),
             start_seed=_sha256(value["start_seed"], "start seed"),
             episode_seed=_sha256(value["episode_seed"], "episode seed"),
+            task_geometry_sha256=_physical_sha256(
+                value["task_geometry_sha256"], "task geometry digest"
+            ),
+            task_common_key_sha256=_physical_sha256(
+                value["task_common_key_sha256"], "task common key digest"
+            ),
+            task_common_artifact_sha256=_physical_sha256(
+                value["task_common_artifact_sha256"],
+                "task common artifact digest",
+            ),
+            platform_task_key_sha256=_physical_sha256(
+                value["platform_task_key_sha256"], "platform task key digest"
+            ),
+            platform_task_artifact_sha256=_physical_sha256(
+                value["platform_task_artifact_sha256"],
+                "platform task artifact digest",
+            ),
+            task_coarse_bounds_half_open=coarse_bounds,
+            task_detail_bounds_half_open=detail_bounds,
+            task_halo_bounds_half_open=halo_bounds,
             coverability_mask_sha256=_sha256(
                 value["coverability_mask_sha256"], "coverability mask"
+            ),
+            observed_coverable_mask_sha256=_sha256(
+                value["observed_coverable_mask_sha256"],
+                "observed coverable mask",
+            ),
+            coverable_detail_cell_count=coverable_count,
+            observed_coverable_detail_cell_count=observed_coverable_count,
+            scale_bucket=str(scale_bucket),
+            task_span_cells=task_span_cells,
+            priority_seed=_sha256(value["priority_seed"], "priority seed"),
+            priority_coarse_mask_sha256=_sha256(
+                value["priority_coarse_mask_sha256"],
+                "priority coarse mask",
+            ),
+            priority_detail_mask_sha256=_sha256(
+                value["priority_detail_mask_sha256"],
+                "priority detail mask",
+            ),
+            priority_coverable_detail_cell_count=_nonnegative_int(
+                value["priority_coverable_detail_cell_count"],
+                "priority coverable detail cell count",
             ),
             start_cell=(start_cell[0], start_cell[1]),
             current_pose=current_pose,
@@ -503,6 +742,7 @@ class FormalWorkerState:
                 value["legged_body_z_m"], "legged body height"
             ),
             execution_state=str(execution_state),
+            cumulative_executed_path_m=cumulative_executed_path_m,
             observation_revision=revision,
             physical_snapshot_id=_physical_sha256(
                 value["physical_snapshot_id"], "physical snapshot ID"
@@ -525,11 +765,7 @@ class FormalWorkerState:
             ),
             candidate_ids=tuple(candidate_ids),
             candidate_mask=tuple(candidate_mask),
-            oracle_opportunity_count=oracle_count,
-            oracle_opportunity_set_sha256=_sha256(
-                value["oracle_opportunity_set_sha256"],
-                "oracle opportunity set digest",
-            ),
+            candidate_decision_snapshot=candidate_decision_snapshot,
             terminal_reason=terminal_reason,
             defer_candidate_rebuild=value["defer_candidate_rebuild"],
             last_hop_available_delta_v_mps=last_delta_v,
@@ -548,11 +784,45 @@ class FormalWorkerState:
             "scene_seed": self.scene_seed,
             "start_seed": self.start_seed,
             "episode_seed": self.episode_seed,
+            "task_geometry_sha256": self.task_geometry_sha256,
+            "task_common_key_sha256": self.task_common_key_sha256,
+            "task_common_artifact_sha256": self.task_common_artifact_sha256,
+            "platform_task_key_sha256": self.platform_task_key_sha256,
+            "platform_task_artifact_sha256": (
+                self.platform_task_artifact_sha256
+            ),
+            "task_coarse_bounds_half_open": list(
+                self.task_coarse_bounds_half_open
+            ),
+            "task_detail_bounds_half_open": list(
+                self.task_detail_bounds_half_open
+            ),
+            "task_halo_bounds_half_open": list(
+                self.task_halo_bounds_half_open
+            ),
             "coverability_mask_sha256": self.coverability_mask_sha256,
+            "observed_coverable_mask_sha256": (
+                self.observed_coverable_mask_sha256
+            ),
+            "coverable_detail_cell_count": self.coverable_detail_cell_count,
+            "observed_coverable_detail_cell_count": (
+                self.observed_coverable_detail_cell_count
+            ),
+            "scale_bucket": self.scale_bucket,
+            "task_span_cells": self.task_span_cells,
+            "priority_seed": self.priority_seed,
+            "priority_coarse_mask_sha256": (
+                self.priority_coarse_mask_sha256
+            ),
+            "priority_detail_mask_sha256": self.priority_detail_mask_sha256,
+            "priority_coverable_detail_cell_count": (
+                self.priority_coverable_detail_cell_count
+            ),
             "start_cell": list(self.start_cell),
             "current_pose": self.current_pose.to_dict(),
             "legged_body_z_m": self.legged_body_z_m,
             "execution_state": self.execution_state,
+            "cumulative_executed_path_m": self.cumulative_executed_path_m,
             "observation_revision": self.observation_revision,
             "physical_snapshot_id": self.physical_snapshot_id,
             "physical_evidence_generation": self.physical_evidence_generation,
@@ -572,9 +842,8 @@ class FormalWorkerState:
             "policy_batch_sha256": self.policy_batch_sha256,
             "candidate_ids": list(self.candidate_ids),
             "candidate_mask": list(self.candidate_mask),
-            "oracle_opportunity_count": self.oracle_opportunity_count,
-            "oracle_opportunity_set_sha256": (
-                self.oracle_opportunity_set_sha256
+            "candidate_decision_snapshot": asdict(
+                self.candidate_decision_snapshot
             ),
             "terminal_reason": self.terminal_reason,
             "defer_candidate_rebuild": self.defer_candidate_rebuild,

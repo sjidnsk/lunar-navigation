@@ -13,8 +13,10 @@ FORMAL_SUCCESS_COVERAGE_RATIO = 0.95
 FORMAL_TRAINING_SEMANTICS_VERSION = (
     "lunar-training-semantics/"
     "sensor-30m-360-platform-physical-coverable-detail95-observed-physical-"
-    "candidates-fixed2m-search-domain-snapshot-planner-failure-option-path-"
-    "observation-auditable-failure-global-ground-target-stable-action-yaw/v13"
+    "frontier-three-samples-global-cost-tree-detail-gain-candidate-snapshot-"
+    "planner-exhaustion-hopper-single-hop-envelope-homogeneous-landings-"
+    "trajectory-capsule-atomic-commit-task-induced-coverability-hopper-task-"
+    "truth-closure-task-cache-v1-no-oracle-reward-v4/v17"
 )
 # Keep the established public name as an alias so every identity consumer moves
 # atomically without duplicating the semantic string.

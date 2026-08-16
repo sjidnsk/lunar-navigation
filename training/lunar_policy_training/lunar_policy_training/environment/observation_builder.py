@@ -12,7 +12,12 @@ from lunar_model_contract import ObservationContractV3, validate_observation_inp
 from lunar_model_contract.observation import PLATFORM_CONTEXTS
 
 from ..polar_data.hazards import CanvasRatioLayer
-from ..polar_data.raster import GLOBAL_GEOMETRY, LOCAL_GEOMETRY, MapCanvas
+from ..polar_data.raster import (
+    GLOBAL_GEOMETRY,
+    LOCAL_GEOMETRY,
+    MapCanvas,
+    resample_average,
+)
 
 if TYPE_CHECKING:
     from .candidate_builder import CandidateBatch
@@ -100,7 +105,8 @@ class ObservedWorld:
     local: LocalObservation
 
     def __post_init__(self) -> None:
-        elevation = _grid("elevation_m", self.elevation_m, GLOBAL_GEOMETRY.cells, finite=False)
+        cells = self.canvas.geometry.cells
+        elevation = _grid("elevation_m", self.elevation_m, cells, finite=False)
         observed = np.asarray(self.observed_mask, dtype=bool)
         if observed.shape != elevation.shape or not np.isfinite(elevation[observed]).all():
             raise ValueError("NoData cannot be marked observed")
@@ -123,8 +129,9 @@ class MissionRaster:
     roi_ratio: np.ndarray
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "priority", _ratio("mission priority", self.priority, GLOBAL_GEOMETRY.cells))
-        object.__setattr__(self, "roi_ratio", _ratio("mission ROI", self.roi_ratio, GLOBAL_GEOMETRY.cells))
+        cells = self.canvas.geometry.cells
+        object.__setattr__(self, "priority", _ratio("mission priority", self.priority, cells))
+        object.__setattr__(self, "roi_ratio", _ratio("mission ROI", self.roi_ratio, cells))
 
 
 @dataclass(frozen=True)
@@ -138,9 +145,10 @@ class PlatformProjection:
     def __post_init__(self) -> None:
         if self.source != "test_only/proxy" and not self.source.startswith("cpp_v3/"):
             raise ValueError("projection source must be test_only/proxy or cpp_v3/")
-        object.__setattr__(self, "traversable_ratio", _ratio("traversable_ratio", self.traversable_ratio, GLOBAL_GEOMETRY.cells))
+        cells = self.canvas.geometry.cells
+        object.__setattr__(self, "traversable_ratio", _ratio("traversable_ratio", self.traversable_ratio, cells))
         object.__setattr__(self, "local_traversable_ratio", _ratio("local_traversable_ratio", self.local_traversable_ratio, LOCAL_GEOMETRY.cells))
-        object.__setattr__(self, "clearance_margin_norm", _ratio("clearance_margin_norm", self.clearance_margin_norm, GLOBAL_GEOMETRY.cells))
+        object.__setattr__(self, "clearance_margin_norm", _ratio("clearance_margin_norm", self.clearance_margin_norm, cells))
 
 
 class ObservationBuilderV2:
@@ -164,8 +172,43 @@ class ObservationBuilderV2:
         observed = world.observed_mask
         elevation = np.where(observed, world.elevation_m - self._reference.global_reference_m, 0.0).astype(np.float32)
         local = world.local
-        prior = np.stack((elevation, mission.priority, np.where(observed, world.physical_obstacle_layer.values, 0.0), np.where(observed, projection.traversable_ratio, 0.0)), axis=0)[None].astype(np.float32)
-        coverage = np.stack((observed.astype(np.float32), mission.roi_ratio, mission.priority * mission.roi_ratio * (~observed)), axis=0)[None].astype(np.float32)
+        policy_shape = (GLOBAL_GEOMETRY.cells, GLOBAL_GEOMETRY.cells)
+
+        def policy_grid(values: np.ndarray) -> np.ndarray:
+            source = np.ascontiguousarray(values, dtype=np.float32)
+            if source.shape == policy_shape:
+                return source
+            return np.ascontiguousarray(
+                resample_average(source, policy_shape), dtype=np.float32
+            )
+
+        prior = np.stack(
+            tuple(
+                policy_grid(values)
+                for values in (
+                    elevation,
+                    mission.priority,
+                    np.where(
+                        observed,
+                        world.physical_obstacle_layer.values,
+                        0.0,
+                    ),
+                    np.where(observed, projection.traversable_ratio, 0.0),
+                )
+            ),
+            axis=0,
+        )[None].astype(np.float32)
+        coverage = np.stack(
+            tuple(
+                policy_grid(values)
+                for values in (
+                    observed.astype(np.float32),
+                    mission.roi_ratio,
+                    mission.priority * mission.roi_ratio * (~observed),
+                )
+            ),
+            axis=0,
+        )[None].astype(np.float32)
         local_crop = np.stack((np.where(local.observed_mask, local.elevation_m - pose_map.elevation_m, 0.0), local.observed_mask.astype(np.float32), np.where(local.observed_mask, local.physical_obstacle_ratio, 0.0), np.where(local.observed_mask, projection.local_traversable_ratio, 0.0)), axis=0)[None].astype(np.float32)
         total = float(mission.roi_ratio.sum())
         observed_ratio = float((observed * mission.roi_ratio).sum() / total) if total else 0.0

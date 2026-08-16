@@ -72,6 +72,17 @@ class PlannerBridge final {
       const TrainingPlanRequest &request,
       const std::vector<lunar::planning::Vec3> &target_positions_map)
       const noexcept;
+  [[nodiscard]]
+  lunar::planning::HopperSingleHopEnvelopeProjectionResult
+  ProjectHopperSingleHopEnvelope(
+      const TrainingPlanRequest &request,
+      const lunar::planning::HopperLandingEvidenceGrid &evidence)
+      const noexcept;
+  [[nodiscard]] lunar::planning::HopperIncrementalEdgeProjectionResult
+  ProjectHopperIncrementalEdges(
+      const TrainingPlanRequest &request,
+      const lunar::planning::HopperLandingEvidenceGrid &evidence,
+      const std::vector<std::uint8_t> &task_target_mask) const noexcept;
   [[nodiscard]] lunar::planning::TraversabilityProjectionResult
   ProjectTraversability(const TrainingPlanRequest &request) const {
     return lunar::planning::ProjectTraversability(

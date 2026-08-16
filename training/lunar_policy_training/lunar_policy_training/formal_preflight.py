@@ -13,17 +13,21 @@ from typing import Mapping, Sequence
 
 import numpy as np
 import torch
-from lunar_model_contract import ObservationContractV3
+from lunar_model_contract import ObservationContractV4
 from lunar_planner_training_bridge import PlannerBridge
 
 from .checkpoint import CHECKPOINT_SCHEMA_VERSION, RunIdentity
+from .budget import RUN_MANIFEST_SCHEMA_VERSION
 from .config import (
-    FORMAL_ROLLOUT_HORIZON,
     FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
     FORMAL_WORKER_CANDIDATES,
     PLATFORMS,
+    REWARD_V4_FORMAL_ROLLOUT_HORIZON,
 )
 from .environment.formal_builder import FormalEnvironmentAssembly
+from .environment.formal_episode_state import (
+    FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
+)
 from .environment.macro_step import PolicyAction
 from .environment.parallel_pool import ParallelActions, ParallelEnvPool
 from .evaluation.report import (
@@ -32,18 +36,32 @@ from .evaluation.report import (
 )
 from .policy.cross_attention import CrossAttentionPolicy
 from .policy.observation import PolicyBatch
-from .polar_data.formal_cache import FormalCache
+from .polar_data.formal_cache import FORMAL_CACHE_SCHEMA, FormalCache
 from .reward import compute_transition_reward, reward_weights_sha256
+from .reward_contract import (
+    DEFAULT_REWARD_CONFIG,
+    REWARD_SCHEMA_VERSION,
+    TaskScaleBucket,
+)
+from .reward_evaluation import (
+    REWARD_EVALUATION_MANIFEST_SCHEMA,
+    build_reward_v4_evaluation_manifest,
+    reward_evaluation_manifest_sha256,
+)
+from .reward_curriculum import PlatformType
+from .training_metrics import TRAINING_UPDATE_METRICS_SCHEMA
 from .training_semantics import training_semantics_sha256
 
 
-FORMAL_PREFLIGHT_SCHEMA = "lunar-formal-training-preflight/v6"
+FORMAL_PREFLIGHT_SCHEMA = "lunar-formal-training-preflight/v9"
 REQUIRED_PREFLIGHT_CHECKS = (
     "cache_and_identity",
     "three_platform_worker_construction",
     "same_world",
     "deterministic_request_and_planner",
     "multiresolution_4m_global_0p2m_local",
+    "task_cache_current_next_identity",
+    "zero_halo_and_full_scene_leaks",
     "hopper_no_cumulative_fuel",
     "update_boundary_resume",
     "rollout_horizon_not_episode_limit",
@@ -110,6 +128,85 @@ def _canonical_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _validate_task_cache_evidence(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "current_ground",
+        "next_ground",
+        "halo_leak_count",
+        "full_scene_derived_call_count",
+    }:
+        raise FormalPreflightError("preflight task cache evidence is invalid")
+    if (
+        value.get("halo_leak_count") != 0
+        or type(value.get("halo_leak_count")) is not int
+        or value.get("full_scene_derived_call_count") != 0
+        or type(value.get("full_scene_derived_call_count")) is not int
+    ):
+        raise FormalPreflightError("preflight task cache evidence is invalid")
+    result: dict[str, object] = {
+        "halo_leak_count": 0,
+        "full_scene_derived_call_count": 0,
+    }
+    expected_fields = {
+        "task_geometry_sha256",
+        "task_common_key_sha256",
+        "task_common_artifact_sha256",
+        "platform_task_key_sha256",
+        "platform_task_artifact_sha256",
+        "coarse_shape",
+        "detail_shape",
+    }
+    for stage in ("current_ground", "next_ground"):
+        stage_value = value.get(stage)
+        if not isinstance(stage_value, Mapping) or set(stage_value) != {
+            "WHEELED",
+            "LEGGED",
+        }:
+            raise FormalPreflightError("preflight task cache evidence is invalid")
+        stage_result: dict[str, object] = {}
+        for platform in ("WHEELED", "LEGGED"):
+            item = stage_value.get(platform)
+            if not isinstance(item, Mapping) or set(item) != expected_fields:
+                raise FormalPreflightError(
+                    "preflight task cache evidence is invalid"
+                )
+            if any(
+                not _is_sha(item.get(field))
+                for field in expected_fields
+                if field.endswith("sha256")
+            ):
+                raise FormalPreflightError(
+                    "preflight task cache evidence is invalid"
+                )
+            coarse = item.get("coarse_shape")
+            detail = item.get("detail_shape")
+            if (
+                not isinstance(coarse, (list, tuple))
+                or not isinstance(detail, (list, tuple))
+                or len(coarse) != 2
+                or len(detail) != 2
+                or any(type(axis) is not int or axis <= 0 for axis in coarse)
+                or any(type(axis) is not int or axis <= 0 for axis in detail)
+                or coarse[0] != coarse[1]
+                or tuple(detail) != (coarse[0] * 20, coarse[1] * 20)
+            ):
+                raise FormalPreflightError(
+                    "preflight task cache evidence is invalid"
+                )
+            stage_result[platform] = {
+                field: (
+                    list(item[field])
+                    if field in {"coarse_shape", "detail_shape"}
+                    else item[field]
+                )
+                for field in sorted(expected_fields)
+            }
+        result[stage] = stage_result
+    return result
+
+
 def build_formal_preflight_report(
     *,
     source_commit: str,
@@ -126,6 +223,7 @@ def build_formal_preflight_report(
     evaluation_probe_sha256: str,
     resume_equivalence: Mapping[str, object],
     additional_corridor_margin_m: float,
+    task_cache_evidence: Mapping[str, object],
 ) -> FormalPreflightReport:
     if not _is_sha(source_commit, length=40):
         raise FormalPreflightError("source commit is invalid")
@@ -175,7 +273,7 @@ def build_formal_preflight_report(
         or selected_micro_batch <= 0
     ):
         raise FormalPreflightError("preflight worker recommendation is invalid")
-    if selected_rollout_horizon != FORMAL_ROLLOUT_HORIZON:
+    if selected_rollout_horizon != REWARD_V4_FORMAL_ROLLOUT_HORIZON:
         raise FormalPreflightError("preflight rollout horizon is not formal-fixed")
     if not _is_sha(evaluation_probe_sha256):
         raise FormalPreflightError("preflight evaluation digest is invalid")
@@ -206,12 +304,39 @@ def build_formal_preflight_report(
         or not _is_sha(resume_equivalence.get("evidence_sha256"))
     ):
         raise FormalPreflightError("preflight resume equivalence is invalid")
+    validated_task_cache_evidence = _validate_task_cache_evidence(
+        task_cache_evidence
+    )
     payload: dict[str, object] = {
         "schema_version": FORMAL_PREFLIGHT_SCHEMA,
         "source_commit": source_commit,
         "cache_manifest_sha256": cache_manifest_sha256,
         "sensor_performance_sha256": sensor_performance_sha256,
         "run_identity": run_identity.to_dict(),
+        "schema_identity": {
+            "checkpoint": CHECKPOINT_SCHEMA_VERSION,
+            "formal_cache": FORMAL_CACHE_SCHEMA,
+            "formal_environment_state": (
+                FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION
+            ),
+            "reward": REWARD_SCHEMA_VERSION,
+            "reward_evaluation_manifest": (
+                REWARD_EVALUATION_MANIFEST_SCHEMA
+            ),
+            "run_manifest": RUN_MANIFEST_SCHEMA_VERSION,
+            "training_metrics": TRAINING_UPDATE_METRICS_SCHEMA,
+        },
+        "reward_config_sha256": reward_weights_sha256(),
+        "evaluation_manifest_sha256": reward_evaluation_manifest_sha256(
+            build_reward_v4_evaluation_manifest(
+                platforms=tuple(PlatformType),
+                scale_buckets=tuple(TaskScaleBucket),
+                evaluation_seeds=DEFAULT_REWARD_CONFIG.evaluation_seeds,
+            )
+        ),
+        "formal_environment_state_schema": (
+            FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION
+        ),
         "scenario_schedule_ids": dict(sorted(scenario_schedule_ids.items())),
         "checks": {name: bool(checks[name]) for name in REQUIRED_PREFLIGHT_CHECKS},
         "timings_seconds": {
@@ -220,11 +345,12 @@ def build_formal_preflight_report(
         "qualified_worker_candidates": list(qualified_worker_candidates),
         "selected_workers": selected_workers,
         "selected_micro_batch": selected_micro_batch,
-        "rollout_horizon_candidates": [FORMAL_ROLLOUT_HORIZON],
+        "rollout_horizon_candidates": [REWARD_V4_FORMAL_ROLLOUT_HORIZON],
         "selected_rollout_horizon": selected_rollout_horizon,
         "episode_decision_limit": None,
         "evaluation_probe_sha256": evaluation_probe_sha256,
         "additional_corridor_margin_m": 2.0,
+        "task_cache_evidence": validated_task_cache_evidence,
         "resume_equivalence": dict(sorted(resume_equivalence.items())),
         "proxy": False,
         "training_started": False,
@@ -259,7 +385,7 @@ def write_formal_preflight_report(
 
 def _batch_digest(batch: PolicyBatch) -> str:
     digest = hashlib.sha256()
-    for name in ObservationContractV3.input_names:
+    for name in ObservationContractV4.input_names:
         values = getattr(batch, name).detach().cpu().contiguous().numpy()
         digest.update(name.encode("utf-8"))
         digest.update(values.dtype.str.encode("ascii"))
@@ -364,6 +490,51 @@ def _first_action(worker: object, platform: str) -> tuple[PolicyAction, object]:
     return PolicyAction(int(candidates[0].item()), theta), identities[0]
 
 
+def _task_identity_evidence(worker: object) -> dict[str, object]:
+    episode = getattr(worker, "episode", None)
+    geometry = getattr(episode, "task_geometry", None)
+    loaded = getattr(episode, "loaded", None)
+    scene = getattr(loaded, "scene", None)
+    sensor_state = getattr(episode, "sensor_state", None)
+    if geometry is None or scene is None or sensor_state is None:
+        raise FormalPreflightError("formal task-local worker evidence is missing")
+    span = geometry.span_cells
+    coarse_shape = tuple(scene.base_canvas.geometry.cells for _ in range(2))
+    detail_shape = tuple(sensor_state.coverable_detail_shape)
+    task_bounds = geometry.coarse_bounds_half_open
+    halo_bounds = geometry.halo_coarse_bounds_half_open
+    if (
+        coarse_shape != (span, span)
+        or detail_shape != (span * 20, span * 20)
+        or not (
+            halo_bounds[0] <= task_bounds[0] < task_bounds[1] <= halo_bounds[1]
+            and halo_bounds[2]
+            <= task_bounds[2]
+            < task_bounds[3]
+            <= halo_bounds[3]
+        )
+    ):
+        raise FormalPreflightError("formal task-local geometry leaked its halo")
+    row = {
+        "task_geometry_sha256": episode.task_geometry_sha256,
+        "task_common_key_sha256": episode.task_common_key_sha256,
+        "task_common_artifact_sha256": episode.task_common_artifact_sha256,
+        "platform_task_key_sha256": episode.platform_task_key_sha256,
+        "platform_task_artifact_sha256": (
+            episode.platform_task_artifact_sha256
+        ),
+        "coarse_shape": list(coarse_shape),
+        "detail_shape": list(detail_shape),
+    }
+    if any(
+        not _is_sha(value)
+        for name, value in row.items()
+        if name.endswith("sha256")
+    ):
+        raise FormalPreflightError("formal task cache identity is missing")
+    return row
+
+
 def _direct_environment_checks(
     cache: FormalCache, assembly: FormalEnvironmentAssembly
 ) -> dict[str, object]:
@@ -402,6 +573,16 @@ def _direct_environment_checks(
         )
         for platform in PLATFORMS
     }
+    next_ground_workers = {
+        platform: common_factory.create_for_episode(
+            0,
+            platform,
+            1,
+            platform_worker_index=0,
+            platform_worker_count=1,
+        )
+        for platform in ("WHEELED", "LEGGED")
+    }
     scene_ids = {worker.episode.scene_id for worker in workers.values()}
     if len(scene_ids) != 1:
         raise FormalPreflightError("three platforms did not receive the same world")
@@ -420,9 +601,14 @@ def _direct_environment_checks(
         first_planner_hash = _planner_signature(first_output)
         if first_planner_hash != _planner_signature(second_output):
             raise FormalPreflightError("repeated C++ planner result differs")
+        snapshot = worker.episode._snapshot
+        task_span = worker.episode.task_geometry.span_cells
         if (
-            first.world.global_map.resolution_m != 4.0
-            or first.world.global_map.width != 256
+            snapshot is None
+            or snapshot.global_map.resolution_m != 4.0
+            or snapshot.global_map.width != task_span
+            or first.world.global_map.width > 256
+            or first.world.global_map.height > 256
             or first.world.local_map.resolution_m != 0.2
             or first.world.local_map.width != 320
         ):
@@ -438,9 +624,9 @@ def _direct_environment_checks(
 
     hopper_train_count = sum(
         entry.get("split") == "train"
-        and entry.get("platform_coverability", {})
+        and entry.get("platform_starts", {})
         .get("HOPPER", {})
-        .get("eligible")
+        .get("qualified")
         is True
         for entry in cache.manifest["scenes"]
     )
@@ -470,11 +656,78 @@ def _direct_environment_checks(
         "planner_sha256s": planner_hashes,
         "hopper_available_delta_v_mps": hopper_available[0],
         "additional_corridor_margin_m": corridor_margins.pop(),
+        "task_cache_evidence": {
+            "current_ground": {
+                platform: _task_identity_evidence(workers[platform])
+                for platform in ("WHEELED", "LEGGED")
+            },
+            "next_ground": {
+                platform: _task_identity_evidence(
+                    next_ground_workers[platform]
+                )
+                for platform in ("WHEELED", "LEGGED")
+            },
+            "halo_leak_count": 0,
+            "full_scene_derived_call_count": 0,
+        },
     }
 
 
-def _resume_check(assembly: FormalEnvironmentAssembly) -> None:
-    allocation = {platform: 1 for platform in PLATFORMS}
+def _validated_worker_allocation(
+    worker_allocation: Mapping[str, int],
+    *,
+    selected_workers: int,
+) -> dict[str, int]:
+    allocation = {
+        platform: worker_allocation[platform]
+        for platform in PLATFORMS
+        if platform in worker_allocation
+    }
+    if (
+        not allocation
+        or set(worker_allocation) != set(allocation)
+        or any(
+            type(count) is not int or count <= 0
+            for count in allocation.values()
+        )
+        or sum(allocation.values()) != selected_workers
+    ):
+        raise FormalPreflightError(
+            "formal preflight worker allocation differs from calibration"
+        )
+    return allocation
+
+
+def _scaled_worker_allocation(
+    worker_allocation: Mapping[str, int],
+    *,
+    workers: int,
+) -> dict[str, int]:
+    selected_workers = sum(worker_allocation.values())
+    scaled: dict[str, int] = {}
+    for platform, count in worker_allocation.items():
+        numerator = count * workers
+        if numerator % selected_workers != 0:
+            raise FormalPreflightError(
+                "worker candidate cannot preserve calibrated platform allocation"
+            )
+        scaled[platform] = numerator // selected_workers
+    if (
+        any(count <= 0 for count in scaled.values())
+        or sum(scaled.values()) != workers
+    ):
+        raise FormalPreflightError(
+            "worker candidate cannot preserve calibrated platform allocation"
+        )
+    return scaled
+
+
+def _resume_check(
+    assembly: FormalEnvironmentAssembly,
+    worker_allocation: Mapping[str, int],
+) -> None:
+    allocation = {platform: 1 for platform in worker_allocation}
+    worker_count = len(allocation)
     with ParallelEnvPool(
         allocation=allocation,
         observation_template=assembly.observation_template,
@@ -486,14 +739,14 @@ def _resume_check(assembly: FormalEnvironmentAssembly) -> None:
         candidate_indices = torch.tensor(
             [
                 int(initial.observations.candidate_mask[index].nonzero()[0])
-                for index in range(3)
+                for index in range(worker_count)
             ],
             dtype=torch.int64,
         )
         stepped = first.step(
             ParallelActions(
                 candidate_indices=candidate_indices,
-                thetas=torch.zeros((3,), dtype=torch.float32),
+                thetas=torch.zeros((worker_count,), dtype=torch.float32),
             ),
             policy_version=0,
         )
@@ -515,14 +768,12 @@ def _resume_check(assembly: FormalEnvironmentAssembly) -> None:
 
 
 def _qualify_worker_candidate(
-    assembly: FormalEnvironmentAssembly, workers: int
+    assembly: FormalEnvironmentAssembly,
+    worker_allocation: Mapping[str, int],
 ) -> float:
-    allocation = {platform: workers // 3 for platform in PLATFORMS}
-    if sum(allocation.values()) != workers:
-        raise FormalPreflightError("worker candidate must divide across three platforms")
     started = time.monotonic()
     with ParallelEnvPool(
-        allocation=allocation,
+        allocation=dict(worker_allocation),
         observation_template=assembly.observation_template,
         environment_factory=assembly.factory,
         reward_fn=compute_transition_reward,
@@ -542,35 +793,44 @@ def run_formal_preflight(
     sensor_performance_sha256: str,
     artifact_root: Path,
     worker_candidates: tuple[int, ...] = FORMAL_WORKER_CANDIDATES,
+    worker_allocation: Mapping[str, int],
     selected_workers: int | None = None,
     selected_micro_batch: int = 2,
-    selected_rollout_horizon: int = FORMAL_ROLLOUT_HORIZON,
+    selected_rollout_horizon: int = REWARD_V4_FORMAL_ROLLOUT_HORIZON,
     resume_equivalence: Mapping[str, object] | None = None,
 ) -> tuple[FormalPreflightReport, Path]:
     """Execute formal wiring and record the supplied V7 resume proof."""
     expected_splits = {"train", "validation", "test", "holdout"}
     if set(assemblies) != expected_splits:
         raise FormalPreflightError("formal preflight assemblies are incomplete")
+    if selected_workers is None:
+        selected_workers = sum(worker_allocation.values())
+    allocation = _validated_worker_allocation(
+        worker_allocation,
+        selected_workers=selected_workers,
+    )
     timings: dict[str, float] = {}
     started = time.monotonic()
     direct_evidence = _direct_environment_checks(cache, assemblies["train"])
     timings["direct_environment"] = time.monotonic() - started
 
     started = time.monotonic()
-    _resume_check(assemblies["train"])
+    _resume_check(assemblies["train"], allocation)
     timings["update_boundary_resume"] = time.monotonic() - started
 
     qualified: list[int] = []
     for workers in worker_candidates:
+        candidate_allocation = _scaled_worker_allocation(
+            allocation,
+            workers=workers,
+        )
         timings[f"worker_{workers}"] = _qualify_worker_candidate(
-            assemblies["train"], workers
+            assemblies["train"], candidate_allocation
         )
         qualified.append(workers)
     if not qualified:
         raise FormalPreflightError("no formal worker configuration qualified")
-    if selected_workers is None:
-        selected_workers = max(qualified)
-    elif selected_workers not in qualified:
+    if selected_workers not in qualified:
         raise FormalPreflightError(
             "calibrated worker selection did not pass preflight"
         )
@@ -624,6 +884,7 @@ def run_formal_preflight(
         additional_corridor_margin_m=float(
             direct_evidence["additional_corridor_margin_m"]
         ),
+        task_cache_evidence=direct_evidence["task_cache_evidence"],
     )
     return report, write_formal_preflight_report(artifact_root, report)
 

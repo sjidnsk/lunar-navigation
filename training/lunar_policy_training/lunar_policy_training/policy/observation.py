@@ -6,7 +6,7 @@ from dataclasses import InitVar, dataclass
 
 import torch
 
-from lunar_model_contract import ObservationContractV3, validate_observation_inputs
+from lunar_model_contract import ObservationContractV4, validate_observation_inputs
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +39,7 @@ class ObservationIdentity:
 
 @dataclass
 class PolicyBatch:
-    """Seven tensors in exactly ``ObservationContractV3.input_names`` order."""
+    """Seven tensors in exactly ``ObservationContractV4.input_names`` order."""
 
     prior_channels: torch.Tensor
     coverage_summary: torch.Tensor
@@ -59,14 +59,14 @@ class PolicyBatch:
 
     @property
     def input_names(self) -> tuple[str, ...]:
-        return ObservationContractV3.input_names
+        return ObservationContractV4.input_names
 
 
 def validate_policy_batch(batch: PolicyBatch) -> None:
     """Reject tensors that cannot be passed to the shared PPO architecture."""
     if not isinstance(batch, PolicyBatch):
         raise ValueError("policy batch must use PolicyBatch")
-    values = {name: getattr(batch, name) for name in ObservationContractV3.input_names}
+    values = {name: getattr(batch, name) for name in ObservationContractV4.input_names}
     if any(not isinstance(value, torch.Tensor) for value in values.values()):
         raise ValueError("policy inputs must be tensors")
     devices = {value.device for value in values.values()}

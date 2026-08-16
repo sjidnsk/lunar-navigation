@@ -9,13 +9,24 @@ from typing import Mapping
 
 import yaml
 
+from .reward_contract import (
+    DEFAULT_REWARD_CONFIG,
+    RewardConfigV4,
+    reward_config_as_mapping,
+    reward_config_from_mapping,
+)
+
 
 PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
 WORKER_CANDIDATES = (18, 24, 30)
 FORMAL_WORKER_CANDIDATES = (24,)
 ROLLOUT_HORIZON_CANDIDATES = (16, 32, 64)
 FORMAL_ROLLOUT_HORIZON = 12
+REWARD_V4_FORMAL_ROLLOUT_HORIZON = (
+    DEFAULT_REWARD_CONFIG.macro_actions_per_worker
+)
 SUPPORTED_ROLLOUT_HORIZONS = (
+    REWARD_V4_FORMAL_ROLLOUT_HORIZON,
     FORMAL_ROLLOUT_HORIZON,
 ) + ROLLOUT_HORIZON_CANDIDATES
 FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS = 1200.0
@@ -30,6 +41,7 @@ _CONFIG_FIELDS = {
     "formal_training_seeds",
     "run_kind",
 }
+_REWARD_V4_CONFIG_FIELDS = _CONFIG_FIELDS | {"reward_v4"}
 
 
 class TrainingConfigError(ValueError):
@@ -107,9 +119,10 @@ class ResolvedTrainingConfig:
     total_gpu_budget_seconds: int
     formal_training_seeds: tuple[int, ...]
     run_kind: str
+    reward_v4: RewardConfigV4 | None = None
 
     def as_frozen_dict(self) -> dict[str, object]:
-        return {
+        resolved: dict[str, object] = {
             "parallel": {
                 "worker_candidates": list(self.parallel.worker_candidates),
                 "preferred_workers": self.parallel.preferred_workers,
@@ -150,6 +163,9 @@ class ResolvedTrainingConfig:
             "formal_training_seeds": list(self.formal_training_seeds),
             "run_kind": self.run_kind,
         }
+        if self.reward_v4 is not None:
+            resolved["reward_v4"] = reward_config_as_mapping(self.reward_v4)
+        return resolved
 
 
 def load_training_config(path: str | Path) -> ResolvedTrainingConfig:
@@ -172,10 +188,19 @@ def resolve_training_config(raw: Mapping[str, object]) -> ResolvedTrainingConfig
         raise TrainingConfigError("training config must be a mapping")
     if "task_area" not in raw:
         raise TrainingConfigError("task area config is required")
-    if set(raw) != _CONFIG_FIELDS:
+    raw_fields = set(raw)
+    if raw_fields != _CONFIG_FIELDS and raw_fields != _REWARD_V4_CONFIG_FIELDS:
         raise TrainingConfigError(
             "training config must contain exactly the frozen top-level fields"
         )
+    reward_v4: RewardConfigV4 | None = None
+    if "reward_v4" in raw:
+        try:
+            reward_v4 = reward_config_from_mapping(raw["reward_v4"])
+        except ValueError as error:
+            raise TrainingConfigError("Reward V4 config is invalid") from error
+        if reward_v4 != DEFAULT_REWARD_CONFIG:
+            raise TrainingConfigError("Reward V4 config changes a frozen value")
     parallel_raw = raw.get("parallel")
     if not isinstance(parallel_raw, Mapping):
         raise TrainingConfigError("parallel config must be a mapping")
@@ -300,6 +325,7 @@ def resolve_training_config(raw: Mapping[str, object]) -> ResolvedTrainingConfig
             raw.get("formal_training_seeds"), "formal training seeds"
         ),
         run_kind=_string(raw.get("run_kind"), "run kind"),
+        reward_v4=reward_v4,
     )
     _validate_frozen_values(config)
     return config
@@ -311,7 +337,11 @@ def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
         worker_candidates = FORMAL_WORKER_CANDIDATES
         preferred_workers = 24
         joint_workers = {"WHEELED": 8, "LEGGED": 8, "HOPPER": 8}
-        rollout_horizon = FORMAL_ROLLOUT_HORIZON
+        rollout_horizon = (
+            REWARD_V4_FORMAL_ROLLOUT_HORIZON
+            if config.reward_v4 is not None
+            else FORMAL_ROLLOUT_HORIZON
+        )
     elif config.run_kind == "development-smoke":
         worker_candidates = WORKER_CANDIDATES
         preferred_workers = 30
@@ -361,6 +391,22 @@ def _validate_frozen_values(config: ResolvedTrainingConfig) -> None:
     }
     if actual != expected:
         raise TrainingConfigError("training config changes a frozen Task 3 value")
+    if config.reward_v4 is not None:
+        if config.run_kind != "formal":
+            raise TrainingConfigError("Reward V4 is only valid for a formal run")
+        if config.reward_v4 != DEFAULT_REWARD_CONFIG:
+            raise TrainingConfigError("Reward V4 config changes a frozen value")
+
+
+def require_reward_v4_config(config: ResolvedTrainingConfig) -> RewardConfigV4:
+    """Return the exact V4 contract or reject a legacy formal configuration."""
+    if not isinstance(config, ResolvedTrainingConfig):
+        raise TrainingConfigError("Reward V4 requires a resolved training config")
+    if config.reward_v4 is None:
+        raise TrainingConfigError("Reward V4 config is required")
+    if config.reward_v4 != DEFAULT_REWARD_CONFIG:
+        raise TrainingConfigError("Reward V4 config changes a frozen value")
+    return config.reward_v4
 
 
 def validate_ppo_config(config: PPOConfig) -> PPOConfig:
@@ -446,6 +492,7 @@ def _string(value: object, name: str) -> str:
 
 __all__ = [
     "FORMAL_ROLLOUT_HORIZON",
+    "REWARD_V4_FORMAL_ROLLOUT_HORIZON",
     "FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS",
     "FORMAL_WORKER_CANDIDATES",
     "PLATFORMS",
@@ -457,6 +504,7 @@ __all__ = [
     "TrainingConfigError",
     "load_training_config",
     "resolve_training_config",
+    "require_reward_v4_config",
     "validate_task_area_config",
     "validate_ppo_config",
 ]

@@ -4,21 +4,23 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 import json
 import math
+from time import perf_counter
 
 import numpy as np
 
-from lunar_model_contract import ObservationContractV3
+from lunar_model_contract import ObservationContractV4
 
 from .observation_builder import MissionRaster, ObservedWorld, PlatformProjection, Pose2
 from .platform_reachability import (
-    HopperOpportunityAuthority,
+    HopperSingleHopEnvelope,
     PhysicalReachabilityResult,
     PlatformCandidateReachability,
 )
+from .task_area import task_roi_diagonal_m
 from .visibility import SensorGeometry, VisibilityEstimator, _ray_cells
 
 
@@ -29,9 +31,46 @@ _MAX_PHYSICAL_CANDIDATES = 4096
 _POLICY_CANDIDATE_COUNT = 64
 _CANONICAL_INT64_MIN = -(1 << 63)
 _CANONICAL_INT64_MAX = (1 << 63) - 1
+_NOMINAL_GLOBAL_COST_PER_M = 1.0
+_DETAIL_CELL_COARSE_EQUIVALENT = float(np.float32((0.2 / 4.0) ** 2))
+_DETAIL_CELL_AREA_M2 = 0.2**2
+_EMPTY_SHA256 = sha256(b"").hexdigest()
 
 CANDIDATE_ID_SCHEMA = "lunar-physical-candidate-id/v2"
 PHYSICAL_SNAPSHOT_SCHEMA = "lunar-physical-snapshot/v1"
+
+
+class CandidateInvariantError(RuntimeError):
+    """A candidate snapshot contains non-finite or contradictory authority."""
+
+
+@dataclass(frozen=True, slots=True)
+class _RawFrontierCandidate:
+    sample_rank: int
+    frontier_cell: tuple[int, int]
+    pose_cell: tuple[int, int]
+
+
+def normalize_global_path_cost(
+    cost: float,
+    roi_diagonal_m: float,
+    nominal_cost_per_m: float,
+) -> float:
+    """Normalize an absolute global cost without candidate-set statistics."""
+    values = tuple(float(value) for value in (cost, roi_diagonal_m, nominal_cost_per_m))
+    if (
+        not all(math.isfinite(value) for value in values)
+        or values[0] < 0.0
+        or values[1] <= 0.0
+        or values[2] <= 0.0
+    ):
+        raise CandidateInvariantError("GLOBAL_PATH_COST_NONFINITE")
+    reference = values[1] * values[2]
+    denominator = values[0] + reference
+    result = values[0] / denominator
+    if not math.isfinite(result) or not 0.0 <= result < 1.0:
+        raise CandidateInvariantError("GLOBAL_PATH_COST_NONFINITE")
+    return result
 
 
 CANDIDATE_DIAGNOSTIC_FIELDS = (
@@ -130,8 +169,7 @@ class CandidateDiagnostics:
         if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in values):
             raise ValueError("candidate diagnostics must contain non-negative integers")
         if (
-            self.physical_candidate_universe_count > _MAX_PHYSICAL_CANDIDATES
-            or self.selected_policy_candidate_count > _POLICY_CANDIDATE_COUNT
+            self.selected_policy_candidate_count > _POLICY_CANDIDATE_COUNT
             or self.available_candidate_count
             > self.physical_candidate_universe_count
             or self.selected_policy_candidate_count
@@ -151,6 +189,149 @@ class CandidateDiagnostics:
             - self.selected_policy_candidate_count
         ):
             raise ValueError("candidate selection diagnostics are inconsistent")
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateDecisionSnapshot:
+    snapshot_id: str
+    frontier_segment_count: int
+    raw_candidate_count: int
+    fine_pose_candidate_count: int
+    globally_reachable_candidate_count: int
+    positive_gain_candidate_count: int
+    selected_policy_candidate_count: int
+    untried_reserve_count: int
+    planner_rejected_current_snapshot_count: int
+    candidate_set_sha256: str
+    global_search_call_count: int
+    global_search_elapsed_s: float
+    candidate_refresh_elapsed_s: float
+    pipeline_kind: str = "GROUND_FRONTIER"
+    representable_landing_sha256: str = _EMPTY_SHA256
+    raw_known_landing_count: int = 0
+    eligible_landing_count: int = 0
+    predicted_positive_landing_count: int = 0
+    visited_landing_count: int = 0
+    scan_elapsed_s: float = 0.0
+    sort_elapsed_s: float = 0.0
+    top64_elapsed_s: float = 0.0
+    reserve_elapsed_s: float = 0.0
+    scan_complete: bool = True
+    pagination_closed: bool = True
+    capacity_truncated: bool = False
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.frontier_segment_count,
+            self.raw_candidate_count,
+            self.fine_pose_candidate_count,
+            self.globally_reachable_candidate_count,
+            self.positive_gain_candidate_count,
+            self.selected_policy_candidate_count,
+            self.untried_reserve_count,
+            self.planner_rejected_current_snapshot_count,
+            self.global_search_call_count,
+        )
+        if self.pipeline_kind not in {"GROUND_FRONTIER", "HOPPER_LANDING"}:
+            raise ValueError("candidate decision pipeline kind is invalid")
+        common_invalid = (
+            not _is_sha256(self.snapshot_id)
+            or not _is_sha256(self.candidate_set_sha256)
+            or any(type(value) is not int or value < 0 for value in counts)
+            or not math.isfinite(self.candidate_refresh_elapsed_s)
+            or self.candidate_refresh_elapsed_s < 0.0
+        )
+        if self.pipeline_kind == "HOPPER_LANDING":
+            hopper_counts = (
+                self.raw_known_landing_count,
+                self.eligible_landing_count,
+                self.predicted_positive_landing_count,
+                self.visited_landing_count,
+            )
+            hopper_times = (
+                self.scan_elapsed_s,
+                self.sort_elapsed_s,
+                self.top64_elapsed_s,
+                self.reserve_elapsed_s,
+            )
+            if (
+                common_invalid
+                or not _is_sha256(self.representable_landing_sha256)
+                or any(type(value) is not int or value < 0 for value in hopper_counts)
+                or not (
+                    self.raw_known_landing_count
+                    >= self.eligible_landing_count
+                    >= self.predicted_positive_landing_count
+                )
+                or self.visited_landing_count > self.eligible_landing_count
+                or self.globally_reachable_candidate_count
+                != self.eligible_landing_count
+                or self.positive_gain_candidate_count
+                != self.predicted_positive_landing_count
+                or self.selected_policy_candidate_count
+                > self.eligible_landing_count
+                or self.untried_reserve_count
+                != self.eligible_landing_count
+                - self.selected_policy_candidate_count
+                - self.planner_rejected_current_snapshot_count
+                or self.global_search_call_count != 0
+                or self.global_search_elapsed_s != 0.0
+                or any(not math.isfinite(value) or value < 0.0 for value in hopper_times)
+                or type(self.scan_complete) is not bool
+                or type(self.pagination_closed) is not bool
+                or type(self.capacity_truncated) is not bool
+                or not self.scan_complete
+                or not self.pagination_closed
+                or self.capacity_truncated
+            ):
+                raise ValueError("hopper candidate decision snapshot is invalid")
+            return
+        if (
+            common_invalid
+            or (
+                self.frontier_segment_count > 0
+                and self.raw_candidate_count
+                > 3 * self.frontier_segment_count
+            )
+            or not (
+                self.raw_candidate_count
+                >= self.fine_pose_candidate_count
+                >= self.globally_reachable_candidate_count
+                >= self.positive_gain_candidate_count
+                >= self.selected_policy_candidate_count
+            )
+            or self.untried_reserve_count
+            > self.positive_gain_candidate_count
+            - self.selected_policy_candidate_count
+            or self.planner_rejected_current_snapshot_count
+            > self.positive_gain_candidate_count
+            or self.global_search_call_count != 1
+            or not math.isfinite(self.global_search_elapsed_s)
+            or self.global_search_elapsed_s < 0.0
+            or self.representable_landing_sha256 != _EMPTY_SHA256
+            or any(
+                value != 0
+                for value in (
+                    self.raw_known_landing_count,
+                    self.eligible_landing_count,
+                    self.predicted_positive_landing_count,
+                    self.visited_landing_count,
+                )
+            )
+            or any(
+                value != 0.0
+                for value in (
+                    self.scan_elapsed_s,
+                    self.sort_elapsed_s,
+                    self.top64_elapsed_s,
+                    self.reserve_elapsed_s,
+                )
+            )
+            or self.scan_complete is not True
+            or self.pagination_closed is not True
+            or self.capacity_truncated is not False
+        ):
+            raise ValueError("candidate decision snapshot is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +382,12 @@ class PhysicalCandidate:
     goal_tolerance_mm: int
     feature: np.ndarray
     rank_key: tuple[object, ...]
+    segment_id: int = 0
+    segment_candidate_rank: int = 0
+    global_path_cost_m: float = 0.0
+    expected_gain_m2: float = 0.0
+    expected_priority_gain_m2: float = 0.0
+    risk: float = 0.0
 
     def __post_init__(self) -> None:
         if not _is_sha256(self.candidate_id):
@@ -218,14 +405,95 @@ class PhysicalCandidate:
             or type(self.goal_tolerance_mm) is not int
             or self.goal_tolerance_mm < 0
             or not isinstance(self.rank_key, tuple)
+            or type(self.segment_id) is not int
+            or self.segment_id < 0
+            or type(self.segment_candidate_rank) is not int
+            or not 0 <= self.segment_candidate_rank < 3
+            or not math.isfinite(self.global_path_cost_m)
+            or self.global_path_cost_m < 0.0
+            or not math.isfinite(self.expected_gain_m2)
+            or self.expected_gain_m2 < 0.0
+            or not math.isfinite(self.expected_priority_gain_m2)
+            or self.expected_priority_gain_m2 < 0.0
+            or not math.isfinite(self.risk)
+            or self.risk < 0.0
         ):
             raise ValueError("physical candidate fields are invalid")
         feature = np.ascontiguousarray(self.feature, dtype=np.float32)
-        if feature.shape != (len(ObservationContractV3.frontier_fields),) or not np.isfinite(feature).all():
+        if feature.shape != (len(ObservationContractV4.frontier_fields),) or not np.isfinite(feature).all():
             raise ValueError("physical candidate feature must be finite float32 [12]")
         feature = feature.copy()
         feature.setflags(write=False)
         object.__setattr__(self, "feature", feature)
+
+
+def _balanced_candidate_order(
+    candidates: Collection[object], *, limit: int = _POLICY_CANDIDATE_COUNT
+) -> list[object]:
+    """Order Top-N by segment rounds and keep a deterministic reserve."""
+    if type(limit) is not int or limit <= 0:
+        raise ValueError("candidate policy limit must be positive")
+    by_segment: dict[int, list[object]] = {}
+    for candidate in candidates:
+        segment_id = getattr(candidate, "segment_id", None)
+        if type(segment_id) is not int or segment_id < 0:
+            raise ValueError("candidate segment identity is invalid")
+        by_segment.setdefault(segment_id, []).append(candidate)
+    for segment in by_segment.values():
+        segment.sort(
+            key=lambda candidate: (
+                -float(getattr(candidate, "expected_gain_m2")),
+                float(getattr(candidate, "global_path_cost_m")),
+                float(getattr(candidate, "risk")),
+                str(getattr(candidate, "candidate_id")),
+            )
+        )
+    if not by_segment:
+        return []
+    segment_ids = sorted(by_segment)
+    representatives = [by_segment[segment_id][0] for segment_id in segment_ids]
+    selected: list[object] = []
+    reserve: list[object] = []
+    if len(representatives) > limit:
+        remaining = sorted(
+            representatives,
+            key=lambda candidate: str(getattr(candidate, "candidate_id")),
+        )
+        selected.append(remaining.pop(0))
+        while remaining and len(selected) < limit:
+            index = min(
+                range(len(remaining)),
+                key=lambda item: (
+                    -min(
+                        _candidate_distance_squared(remaining[item], chosen)
+                        for chosen in selected
+                    ),
+                    str(getattr(remaining[item], "candidate_id")),
+                ),
+            )
+            selected.append(remaining.pop(index))
+        reserve.extend(
+            sorted(
+                remaining,
+                key=lambda candidate: str(getattr(candidate, "candidate_id")),
+            )
+        )
+        for rank in range(1, 3):
+            reserve.extend(
+                by_segment[segment_id][rank]
+                for segment_id in segment_ids
+                if len(by_segment[segment_id]) > rank
+            )
+        return [*selected, *reserve]
+
+    maximum_rank = max(len(segment) for segment in by_segment.values())
+    rounds = [
+        by_segment[segment_id][rank]
+        for rank in range(maximum_rank)
+        for segment_id in segment_ids
+        if len(by_segment[segment_id]) > rank
+    ]
+    return rounds[:limit] + rounds[limit:]
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +503,7 @@ class PhysicalCandidateUniverse:
     candidates: tuple[PhysicalCandidate, ...]
     universe_sha256: str
     diagnostics: CandidateDiagnostics
+    decision_snapshot: CandidateDecisionSnapshot | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -242,7 +511,6 @@ class PhysicalCandidateUniverse:
             or not isinstance(self.physical_reachability_algorithm_id, str)
             or not self.physical_reachability_algorithm_id
             or not isinstance(self.candidates, tuple)
-            or len(self.candidates) > _MAX_PHYSICAL_CANDIDATES
             or any(not isinstance(candidate, PhysicalCandidate) for candidate in self.candidates)
             or len({candidate.candidate_id for candidate in self.candidates})
             != len(self.candidates)
@@ -254,6 +522,12 @@ class PhysicalCandidateUniverse:
                 "".join(candidate.candidate_id for candidate in self.candidates).encode("ascii")
             ).hexdigest()
             or not isinstance(self.diagnostics, CandidateDiagnostics)
+            or (
+                self.decision_snapshot is not None
+                and not isinstance(
+                    self.decision_snapshot, CandidateDecisionSnapshot
+                )
+            )
             or self.diagnostics.physical_snapshot_id != self.physical_snapshot_id
             or self.diagnostics.physical_reachability_algorithm_id
             != self.physical_reachability_algorithm_id
@@ -276,7 +550,7 @@ class CandidateBatch:
 
     def __post_init__(self) -> None:
         features, mask = np.asarray(self.features, dtype=np.float32), np.asarray(self.mask, dtype=bool)
-        if features.shape != (64, len(ObservationContractV3.frontier_fields)) or mask.shape != (64,) or not np.isfinite(features).all():
+        if features.shape != (64, len(ObservationContractV4.frontier_fields)) or mask.shape != (64,) or not np.isfinite(features).all():
             raise ValueError("candidate batch must use finite [64,12] and [64]")
         if not isinstance(self.diagnostics, CandidateDiagnostics):
             raise TypeError("candidate diagnostics are required")
@@ -424,6 +698,165 @@ class CandidateBuildResult:
 
 def _neighbors(row: int, column: int, cells: int) -> tuple[tuple[int, int], ...]:
     return tuple((row + dr, column + dc) for dr, dc in ((-1, 0), (0, -1), (0, 1), (1, 0)) if 0 <= row + dr < cells and 0 <= column + dc < cells)
+
+
+def _frontier_chains(
+    points: Collection[tuple[int, int]], cells: int
+) -> list[list[tuple[int, int]]]:
+    """Split a four-neighbour frontier graph into canonical maximal chains."""
+    point_set = set(points)
+    if (
+        type(cells) is not int
+        or cells <= 0
+        or any(
+            not isinstance(point, tuple)
+            or len(point) != 2
+            or any(type(value) is not int for value in point)
+            or not 0 <= point[0] < cells
+            or not 0 <= point[1] < cells
+            for point in point_set
+        )
+    ):
+        raise ValueError("frontier graph is invalid")
+    adjacency = {
+        point: tuple(
+            neighbor
+            for neighbor in _neighbors(*point, cells)
+            if neighbor in point_set
+        )
+        for point in point_set
+    }
+    boundary = {point for point, neighbors in adjacency.items() if len(neighbors) != 2}
+    visited_edges: set[frozenset[tuple[int, int]]] = set()
+    chains: list[list[tuple[int, int]]] = []
+
+    def edge(lhs: tuple[int, int], rhs: tuple[int, int]) -> frozenset[tuple[int, int]]:
+        return frozenset((lhs, rhs))
+
+    for start in sorted(boundary):
+        if not adjacency[start]:
+            chains.append([start])
+            continue
+        for neighbor in adjacency[start]:
+            if edge(start, neighbor) in visited_edges:
+                continue
+            chain = [start]
+            previous, current = start, neighbor
+            visited_edges.add(edge(previous, current))
+            while True:
+                chain.append(current)
+                if current in boundary:
+                    break
+                following = next(
+                    item for item in adjacency[current] if item != previous
+                )
+                previous, current = current, following
+                visited_edges.add(edge(previous, current))
+            if chain[-1] < chain[0]:
+                chain.reverse()
+            elif chain[-1] == chain[0] and tuple(reversed(chain)) < tuple(chain):
+                chain.reverse()
+            chains.append(chain)
+
+    remaining = point_set - {
+        point for chain in chains for point in chain
+    }
+    while remaining:
+        start = min(remaining)
+        first = min(adjacency[start])
+        chain = [start]
+        previous, current = start, first
+        visited_edges.add(edge(previous, current))
+        while current != start:
+            chain.append(current)
+            following = next(
+                item for item in adjacency[current] if item != previous
+            )
+            previous, current = current, following
+            visited_edges.add(edge(previous, current))
+        reverse = [start, *reversed(chain[1:])]
+        if tuple(reverse) < tuple(chain):
+            chain = reverse
+        chains.append(chain)
+        remaining.difference_update(chain)
+    return [list(chain) for chain in sorted(tuple(chain) for chain in chains)]
+
+
+def _sample_frontier_chain(
+    chain: Collection[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """Return stable quarter/half/three-quarter cells without duplication."""
+    ordered = list(chain)
+    if not ordered:
+        return []
+    cumulative = [0.0]
+    for previous, current in zip(ordered, ordered[1:], strict=False):
+        cumulative.append(cumulative[-1] + math.dist(previous, current))
+    total = cumulative[-1]
+    selected: list[tuple[int, int]] = []
+    for fraction in (0.25, 0.5, 0.75):
+        target = total * fraction
+        index = min(
+            range(len(ordered)),
+            key=lambda value: (abs(cumulative[value] - target), value),
+        )
+        if ordered[index] not in selected:
+            selected.append(ordered[index])
+    return selected
+
+
+def _map_frontier_chain_candidates(
+    chain: Collection[tuple[int, int]],
+    *,
+    robot: tuple[int, int],
+    observed_mask: np.ndarray,
+    physical_pose_mask: np.ndarray,
+    standoff_cells: int,
+) -> list[_RawFrontierCandidate]:
+    """Map the three samples once; rejected samples are never backfilled."""
+    if (
+        not isinstance(observed_mask, np.ndarray)
+        or observed_mask.dtype != np.dtype(np.bool_)
+        or observed_mask.ndim != 2
+        or not isinstance(physical_pose_mask, np.ndarray)
+        or physical_pose_mask.dtype != np.dtype(np.bool_)
+        or physical_pose_mask.shape != observed_mask.shape
+        or type(standoff_cells) is not int
+        or standoff_cells < 0
+    ):
+        raise ValueError("frontier candidate masks are invalid")
+    rows, columns = observed_mask.shape
+    output: list[_RawFrontierCandidate] = []
+    seen: set[tuple[int, int]] = set()
+    for sample_rank, frontier_cell in enumerate(_sample_frontier_chain(chain)):
+        row, column = frontier_cell
+        pose_cell = (
+            row + int(np.sign(robot[0] - row)) * standoff_cells,
+            column + int(np.sign(robot[1] - column)) * standoff_cells,
+        )
+        if not (
+            0 <= pose_cell[0] < rows
+            and 0 <= pose_cell[1] < columns
+            and observed_mask[pose_cell]
+        ):
+            pose_cell = frontier_cell
+        if (
+            pose_cell in seen
+            or not 0 <= pose_cell[0] < rows
+            or not 0 <= pose_cell[1] < columns
+            or not observed_mask[pose_cell]
+            or not physical_pose_mask[pose_cell]
+        ):
+            continue
+        seen.add(pose_cell)
+        output.append(
+            _RawFrontierCandidate(
+                sample_rank=sample_rank,
+                frontier_cell=frontier_cell,
+                pose_cell=pose_cell,
+            )
+        )
+    return output
 
 
 def _clear_observed(world: ObservedWorld, cells: list[tuple[int, int]], *, unknown_endpoint_allowed: bool = False) -> bool:
@@ -851,7 +1284,8 @@ class CandidateBuilderV2:
         backtrack_pose: Pose2 | None = None,
     ) -> PhysicalCandidateUniverse:
         """Build one primitive-independent, bounded physical opportunity set."""
-        del excluded_cells, backtrack_pose
+        refresh_started = perf_counter()
+        del backtrack_pose
         self._validate_physical_identity(
             platform_type=platform_type,
             platform_id=platform_id,
@@ -914,6 +1348,28 @@ class CandidateBuilderV2:
         except ValueError as error:
             raise ValueError("physical candidate pose is outside the map") from error
 
+        if platform_type == "HOPPER":
+            return self._build_hopper_physical_universe(
+                world=world,
+                mission=mission,
+                pose_map=pose_map,
+                projection=projection,
+                physical_reachability=physical_reachability,
+                platform_id=platform_id,
+                capability_content_sha256=capability_content_sha256,
+                mission_revision=mission_revision,
+                evidence_generation=evidence_generation,
+                physical_evidence_sha256=physical_evidence_sha256,
+                physical_reachability_algorithm_id=(
+                    physical_reachability_algorithm_id
+                ),
+                goal_tolerance_mm=goal_tolerance_mm,
+                robot=robot,
+                exact_target_poses=exact_target_poses,
+                excluded_cells=excluded_cells,
+                refresh_started=refresh_started,
+            )
+
         observed = world.observed_mask
         roi = mission.roi_ratio > 0.0
         unknown_roi = roi & ~observed
@@ -923,168 +1379,204 @@ class CandidateBuilderV2:
         adjacent_unknown[:, 1:] |= unknown_roi[:, :-1]
         adjacent_unknown[:, :-1] |= unknown_roi[:, 1:]
         boundary = observed & roi & adjacent_unknown
-        segments = _segments(_points(boundary), cells)
-        spacing = max(
-            1,
-            math.ceil(
-                self._sensor.anchor_spacing_m
-                / canvas.geometry.resolution_m
-            ),
-        )
-        step = max(
-            1,
-            round(
-                self._sensor.standoff_m / canvas.geometry.resolution_m
-            ),
-        )
-        raw_anchors: list[tuple[int, tuple[int, int]]] = []
-        for segment_id, segment in enumerate(segments):
-            for row, column in _spaced_anchors(segment, spacing):
-                standoff = (
-                    row + int(np.sign(robot[0] - row)) * step,
-                    column + int(np.sign(robot[1] - column)) * step,
-                )
-                if not (
-                    0 <= standoff[0] < cells
-                    and 0 <= standoff[1] < cells
-                    and observed[standoff]
-                ):
-                    standoff = (row, column)
-                if (
-                    platform_type in _GROUND_PLATFORM_TYPES
-                    or self._candidate_within_sensor(canvas, pose_map, standoff)
-                ):
-                    raw_anchors.append((segment_id, standoff))
-        ground_proven_zero_count = 0
+        segments = _frontier_chains(_points(boundary), cells)
         if platform_type in _GROUND_PLATFORM_TYPES:
-            static_safe = np.ascontiguousarray(
-                observed
-                & roi
-                & (world.physical_obstacle_layer.values == 0.0)
-                & (projection.traversable_ratio > 0.0),
-                dtype=np.bool_,
+            return self._build_ground_physical_universe(
+                world=world,
+                mission=mission,
+                pose_map=pose_map,
+                projection=projection,
+                physical_reachability=physical_reachability,
+                platform_type=platform_type,
+                platform_id=platform_id,
+                capability_content_sha256=capability_content_sha256,
+                mission_revision=mission_revision,
+                evidence_generation=evidence_generation,
+                physical_evidence_sha256=physical_evidence_sha256,
+                physical_reachability_algorithm_id=(
+                    physical_reachability_algorithm_id
+                ),
+                goal_tolerance_mm=goal_tolerance_mm,
+                robot=robot,
+                segments=segments,
+                exact_target_poses=exact_target_poses,
+                refresh_started=refresh_started,
             )
-            physical_safe = np.ascontiguousarray(
-                static_safe & physical_mask, dtype=np.bool_
+    def _build_hopper_physical_universe(
+        self,
+        *,
+        world: ObservedWorld,
+        mission: MissionRaster,
+        pose_map: Pose2,
+        projection: PlatformProjection,
+        physical_reachability: PhysicalReachabilityResult,
+        platform_id: str,
+        capability_content_sha256: str,
+        mission_revision: int,
+        evidence_generation: int,
+        physical_evidence_sha256: str,
+        physical_reachability_algorithm_id: str,
+        goal_tolerance_mm: int,
+        robot: tuple[int, int],
+        exact_target_poses: Mapping[tuple[int, int], Pose2],
+        excluded_cells: Collection[tuple[int, int]],
+        refresh_started: float,
+    ) -> PhysicalCandidateUniverse:
+        """Build the complete homogeneous HOPPER landing universe."""
+        envelope = physical_reachability.hopper_single_hop_envelope
+        if (
+            not isinstance(envelope, HopperSingleHopEnvelope)
+            or not envelope.complete
+        ):
+            raise CandidateInvariantError("HOPPER_ENVELOPE_INCOMPLETE")
+        canvas = world.canvas
+        if (
+            envelope.eligible_mask.shape != world.observed_mask.shape
+            or not np.array_equal(
+                envelope.eligible_mask,
+                physical_reachability.physical_observation_pose_mask,
             )
-            static_safe[robot] = False
-            physical_safe[robot] = False
-            potential_gain = _ground_potential_gain_mask(
-                np.ascontiguousarray(unknown_roi, dtype=np.bool_),
-                sensor_range_m=self._sensor.range_m,
-                resolution_m=canvas.geometry.resolution_m,
-            )
-            ground_proven_zero_count = int(
-                (physical_safe & ~potential_gain).sum(dtype=np.int64)
-            )
-            raw_anchors.extend(
-                (len(segments), (int(row), int(column)))
-                for row, column in zip(
-                    *np.nonzero(static_safe & potential_gain), strict=True
-                )
-            )
-        elif boundary.any():
-            reserve_segment = len(segments)
-            raw_anchors.extend(
-                (reserve_segment, point)
-                for point in self._fallback_observation_poses(
-                    world, mission, pose_map, projection
-                )
-            )
-        hopper_allowed: np.ndarray | None = None
-        if platform_type == "HOPPER":
-            authority = physical_reachability.hopper_opportunity_authority
-            if authority is not None:
-                if not isinstance(authority, HopperOpportunityAuthority):
-                    raise ValueError("hopper opportunity authority is invalid")
-                positive_mask = self.hopper_positive_mask(
-                    world, mission, physical_reachability
-                )
-                direct_positive = np.ascontiguousarray(
-                    positive_mask & authority.direct_mask, dtype=np.bool_
-                )
-                if authority.direct_mask.any():
-                    remote_positive = np.ascontiguousarray(
-                        positive_mask & ~authority.direct_mask,
-                        dtype=np.bool_,
-                    )
-                    opportunity = authority.query(
-                        remote_positive,
-                        enumerate_all_reachable_opportunities=False,
-                    )
-                    progress = np.ascontiguousarray(
-                        np.flipud(opportunity.direct_progress),
-                        dtype=np.bool_,
-                    )
-                    hopper_allowed = np.ascontiguousarray(
-                        direct_positive | progress, dtype=np.bool_
-                    )
-                else:
-                    hopper_allowed = direct_positive
-                for cell, position in zip(
-                    zip(*np.nonzero(authority.certified_mask), strict=True),
-                    authority.certified_positions_m,
-                    strict=True,
-                ):
-                    if hopper_allowed[cell]:
-                        exact_target_poses[cell] = Pose2(
-                            float(position[0]),
-                            float(position[1]),
-                            elevation_m=float(position[2]),
-                        )
-                raw_anchors.extend(
-                    (len(segments), (int(row), int(column)))
-                    for row, column in zip(
-                        *np.nonzero(hopper_allowed), strict=True
-                    )
-                )
-        qualified_anchors = _source_free_physical_anchors(raw_anchors)
-        total_roi = float(mission.roi_ratio.sum(dtype=np.float64))
-        chosen, qualification = self._qualify_anchors(
-            qualified_anchors,
-            world,
-            mission,
-            pose_map,
-            projection,
-            platform_type=platform_type,
-            platform_reachability_filter_enabled=True,
-            platform_reachability=None,
-            excluded_cells=(),
-            total_roi=total_roi,
-            allow_zero_gain=False,
-            include_zero_gain=platform_type == "HOPPER",
-            exact_target_poses=exact_target_poses,
-            physical_observation_pose_mask=(
-                hopper_allowed
-                if hopper_allowed is not None
-                else physical_mask
-            ),
+        ):
+            raise CandidateInvariantError("HOPPER_ENVELOPE_GEOMETRY_DIFFERS")
+
+        scan_started = perf_counter()
+        representable = np.zeros_like(envelope.eligible_mask, dtype=np.bool_)
+        current_position = (
+            float(pose_map.x_m),
+            float(pose_map.y_m),
+            float(pose_map.elevation_m),
         )
+        eligible_cells: list[tuple[int, int]] = []
+        eligible_positions: list[tuple[float, float, float]] = []
+        for cell in sorted(exact_target_poses):
+            target = exact_target_poses[cell]
+            position = (
+                float(target.x_m),
+                float(target.y_m),
+                float(target.elevation_m),
+            )
+            if (
+                not envelope.eligible_mask[cell]
+                or mission.roi_ratio[cell] <= 0.0
+                or position == current_position
+                or not all(world.observed_mask[item] for item in _ray_cells(robot, cell))
+            ):
+                continue
+            representable[cell] = True
+            eligible_cells.append(cell)
+            eligible_positions.append(position)
 
-        if hopper_allowed is not None:
-            chosen = [
-                anchor for anchor in chosen if hopper_allowed[anchor.point]
-            ]
-
-        canonical: dict[str, PhysicalCandidate] = {}
-        for anchor in chosen:
+        positions_array = np.asarray(
+            eligible_positions, dtype=np.float64
+        ).reshape((-1, 3))
+        gains = self._hopper_predicted_capsule_gains(
+            world=world,
+            mission=mission,
+            pose_map=pose_map,
+            target_positions_m=positions_array,
+        )
+        scan_elapsed = perf_counter() - scan_started
+        gain_normalizer = float(gains[:, 0].max(initial=0.0))
+        priority_gain_normalizer = float(gains[:, 1].max(initial=0.0))
+        total_roi = float(mission.roi_ratio.sum(dtype=np.float64))
+        roi_diagonal = task_roi_diagonal_m(
+            mission.roi_ratio,
+            resolution_m=canvas.geometry.resolution_m,
+        )
+        preliminary: list[PhysicalCandidate] = []
+        for cell, position, gain_pair in zip(
+            eligible_cells, eligible_positions, gains, strict=True
+        ):
+            target_pose = Pose2(
+                position[0], position[1], elevation_m=position[2]
+            )
+            required_delta_v = float(envelope.required_delta_v_mps[cell])
+            distance = math.dist(current_position, position)
+            feature = self._feature(
+                world,
+                mission,
+                projection,
+                pose_map,
+                cell,
+                total_roi,
+                float(gain_pair[0]),
+                float(gain_pair[1]),
+                gain_normalizer,
+                priority_gain_normalizer,
+                allow_zero_gain=True,
+                target_pose=target_pose,
+                global_path_cost_norm=normalize_global_path_cost(
+                    required_delta_v,
+                    roi_diagonal,
+                    _NOMINAL_GLOBAL_COST_PER_M,
+                ),
+            )
+            if feature is None:
+                raise CandidateInvariantError("HOPPER_FEATURE_MISSING")
+            anchor = _FeasibleAnchor(
+                segment_id=0,
+                point=cell,
+                feature=feature,
+                elevation_m=position[2],
+                target_position_m=position,
+            )
             candidate = self._physical_candidate(
                 anchor,
                 pose_map=pose_map,
-                platform_type=platform_type,
+                platform_type="HOPPER",
                 platform_id=platform_id,
                 mission_revision=mission_revision,
                 goal_tolerance_mm=goal_tolerance_mm,
+                global_path_cost_m=distance,
+                expected_gain_m2=(
+                    float(gain_pair[0])
+                    * canvas.geometry.resolution_m**2
+                ),
+                expected_priority_gain_m2=(
+                    float(gain_pair[1])
+                    * canvas.geometry.resolution_m**2
+                ),
+                risk=max(
+                    0.0,
+                    1.0 - float(projection.clearance_margin_norm[cell]),
+                ),
             )
-            previous = canonical.get(candidate.candidate_id)
-            if previous is None or candidate.rank_key < previous.rank_key:
-                canonical[candidate.candidate_id] = candidate
-        candidates = _compress_physical_candidates(
-            list(canonical.values()),
-            canvas_cells=cells,
+            preliminary.append(
+                replace(
+                    candidate,
+                    rank_key=(
+                        -float(gain_pair[0]),
+                        -float(gain_pair[1]),
+                        required_delta_v,
+                        candidate.risk,
+                        candidate.candidate_id,
+                    ),
+                )
+            )
+
+        sort_started = perf_counter()
+        base_order = sorted(preliminary, key=lambda item: item.rank_key)
+        sort_elapsed = perf_counter() - sort_started
+        top64_started = perf_counter()
+        selected_order = _stable_farthest_candidates(
+            base_order, min(_POLICY_CANDIDATE_COUNT, len(base_order))
         )
+        top64_elapsed = perf_counter() - top64_started
+        reserve_started = perf_counter()
+        selected_ids = {candidate.candidate_id for candidate in selected_order}
+        reserve = [
+            candidate
+            for candidate in base_order
+            if candidate.candidate_id not in selected_ids
+        ]
+        ordered = [*selected_order, *reserve]
+        candidates = tuple(
+            replace(candidate, rank_key=(index, candidate.candidate_id))
+            for index, candidate in enumerate(ordered)
+        )
+        reserve_elapsed = perf_counter() - reserve_started
         physical_snapshot_id = self._physical_snapshot_id(
-            platform_type=platform_type,
+            platform_type="HOPPER",
             platform_id=platform_id,
             capability_content_sha256=capability_content_sha256,
             mission_revision=mission_revision,
@@ -1092,21 +1584,19 @@ class CandidateBuilderV2:
             evidence_generation=evidence_generation,
             physical_evidence_sha256=physical_evidence_sha256,
         )
+        selected_count = min(_POLICY_CANDIDATE_COUNT, len(candidates))
         positive_count = sum(
-            float(candidate.feature[5]) > 0.0 for candidate in candidates
+            candidate.expected_gain_m2 > 0.0 for candidate in candidates
         )
-        selected_count = min(
-            _POLICY_CANDIDATE_COUNT,
-            positive_count if positive_count else len(candidates),
+        visited = set(excluded_cells)
+        visited_count = sum(
+            candidate.position_grid_key in visited for candidate in candidates
         )
-        zero_gain_count = (
-            ground_proven_zero_count
-            + qualification.zero_gain_count
-            + sum(
-                float(candidate.feature[5]) == 0.0
-                for candidate in candidates
+        universe_sha256 = sha256(
+            "".join(candidate.candidate_id for candidate in candidates).encode(
+                "ascii"
             )
-        )
+        ).hexdigest()
         diagnostics = CandidateDiagnostics(
             physical_snapshot_id=physical_snapshot_id,
             physical_reachability_algorithm_id=(
@@ -1117,18 +1607,44 @@ class CandidateBuilderV2:
             available_candidate_count=len(candidates),
             untried_reserve_count=len(candidates) - selected_count,
             planner_failed_current_snapshot_count=0,
-            zero_gain_count=zero_gain_count,
+            zero_gain_count=len(candidates) - positive_count,
             visited_excluded_count=0,
             physical_unreachable_count=(
-                qualification.static_infeasible_count
-                + qualification.platform_unreachable_count
+                envelope.raw_known_landing_count - len(candidates)
             ),
         )
-        universe_sha256 = sha256(
-            "".join(candidate.candidate_id for candidate in candidates).encode(
-                "ascii"
-            )
-        ).hexdigest()
+        decision_snapshot = CandidateDecisionSnapshot(
+            snapshot_id=physical_snapshot_id,
+            frontier_segment_count=0,
+            raw_candidate_count=envelope.raw_known_landing_count,
+            fine_pose_candidate_count=int(
+                envelope.certified_mask.sum(dtype=np.int64)
+            ),
+            globally_reachable_candidate_count=len(candidates),
+            positive_gain_candidate_count=positive_count,
+            selected_policy_candidate_count=selected_count,
+            untried_reserve_count=len(candidates) - selected_count,
+            planner_rejected_current_snapshot_count=0,
+            candidate_set_sha256=universe_sha256,
+            global_search_call_count=0,
+            global_search_elapsed_s=0.0,
+            candidate_refresh_elapsed_s=perf_counter() - refresh_started,
+            pipeline_kind="HOPPER_LANDING",
+            representable_landing_sha256=sha256(
+                np.packbits(representable, bitorder="little").tobytes()
+            ).hexdigest(),
+            raw_known_landing_count=envelope.raw_known_landing_count,
+            eligible_landing_count=len(candidates),
+            predicted_positive_landing_count=positive_count,
+            visited_landing_count=visited_count,
+            scan_elapsed_s=scan_elapsed,
+            sort_elapsed_s=sort_elapsed,
+            top64_elapsed_s=top64_elapsed,
+            reserve_elapsed_s=reserve_elapsed,
+            scan_complete=True,
+            pagination_closed=True,
+            capacity_truncated=False,
+        )
         return PhysicalCandidateUniverse(
             physical_snapshot_id=physical_snapshot_id,
             physical_reachability_algorithm_id=(
@@ -1137,23 +1653,138 @@ class CandidateBuilderV2:
             candidates=candidates,
             universe_sha256=universe_sha256,
             diagnostics=diagnostics,
+            decision_snapshot=decision_snapshot,
         )
 
-    def hopper_positive_mask(
+    def _hopper_predicted_capsule_gains(
         self,
+        *,
         world: ObservedWorld,
         mission: MissionRaster,
-        physical_reachability: PhysicalReachabilityResult,
+        pose_map: Pose2,
+        target_positions_m: np.ndarray,
     ) -> np.ndarray:
-        """Estimate production gains across all certified Hopper landings."""
-        authority = physical_reachability.hopper_opportunity_authority
-        if not isinstance(authority, HopperOpportunityAuthority):
-            raise ValueError("hopper opportunity authority is missing")
-        certified_cells = np.ascontiguousarray(
-            np.column_stack(np.nonzero(authority.certified_mask)),
-            dtype=np.int32,
-        ).reshape((-1, 2))
-        arguments = (
+        """Predict no-occlusion 4 m task gain along each horizontal segment."""
+        positions = np.ascontiguousarray(target_positions_m, dtype=np.float64)
+        gains = np.zeros((len(positions), 2), dtype=np.float32)
+        unknown = (mission.roi_ratio > 0.0) & ~world.observed_mask
+        if not len(positions) or not unknown.any():
+            return gains
+        rows, columns = np.nonzero(unknown)
+        resolution = world.canvas.geometry.resolution_m
+        left, _, _, top = world.canvas.bounds_m
+        unknown_x = left + (columns.astype(np.float64) + 0.5) * resolution
+        unknown_y = top - (rows.astype(np.float64) + 0.5) * resolution
+        roi_weight = mission.roi_ratio[rows, columns].astype(np.float64)
+        priority_weight = (
+            mission.priority[rows, columns].astype(np.float64) * roi_weight
+        )
+        radius = float(self._sensor.range_m)
+        radius_squared = radius * radius
+        start_x = float(pose_map.x_m)
+        start_y = float(pose_map.y_m)
+        for index, position in enumerate(positions):
+            delta_x = float(position[0]) - start_x
+            delta_y = float(position[1]) - start_y
+            candidate_box = (
+                (unknown_x >= min(start_x, float(position[0])) - radius)
+                & (unknown_x <= max(start_x, float(position[0])) + radius)
+                & (unknown_y >= min(start_y, float(position[1])) - radius)
+                & (unknown_y <= max(start_y, float(position[1])) + radius)
+            )
+            candidate_indices = np.flatnonzero(candidate_box)
+            if not len(candidate_indices):
+                continue
+            length_squared = delta_x * delta_x + delta_y * delta_y
+            if length_squared == 0.0:
+                projection = np.zeros(len(candidate_indices), dtype=np.float64)
+            else:
+                projection = np.clip(
+                    (
+                        (unknown_x[candidate_indices] - start_x) * delta_x
+                        + (unknown_y[candidate_indices] - start_y) * delta_y
+                    )
+                    / length_squared,
+                    0.0,
+                    1.0,
+                )
+            nearest_x = start_x + projection * delta_x
+            nearest_y = start_y + projection * delta_y
+            inside = (
+                (unknown_x[candidate_indices] - nearest_x) ** 2
+                + (unknown_y[candidate_indices] - nearest_y) ** 2
+                <= radius_squared
+            )
+            included = candidate_indices[inside]
+            gains[index, 0] = np.float32(roi_weight[included].sum())
+            gains[index, 1] = np.float32(priority_weight[included].sum())
+        return np.ascontiguousarray(gains)
+
+    def _build_ground_physical_universe(
+        self,
+        *,
+        world: ObservedWorld,
+        mission: MissionRaster,
+        pose_map: Pose2,
+        projection: PlatformProjection,
+        physical_reachability: PhysicalReachabilityResult,
+        platform_type: str,
+        platform_id: str,
+        capability_content_sha256: str,
+        mission_revision: int,
+        evidence_generation: int,
+        physical_evidence_sha256: str,
+        physical_reachability_algorithm_id: str,
+        goal_tolerance_mm: int,
+        robot: tuple[int, int],
+        segments: list[list[tuple[int, int]]],
+        exact_target_poses: Mapping[tuple[int, int], Pose2],
+        refresh_started: float,
+    ) -> PhysicalCandidateUniverse:
+        """Build ground candidates from three fixed samples per frontier chain."""
+        physical_mask = physical_reachability.physical_observation_pose_mask
+        step = max(
+            1,
+            round(
+                self._sensor.standoff_m
+                / world.canvas.geometry.resolution_m
+            ),
+        )
+        raw_count = 0
+        mapped: dict[tuple[int, int], tuple[int, _RawFrontierCandidate]] = {}
+        for segment_id, segment in enumerate(segments):
+            raw_count += len(_sample_frontier_chain(segment))
+            for candidate in _map_frontier_chain_candidates(
+                segment,
+                robot=robot,
+                observed_mask=world.observed_mask,
+                physical_pose_mask=physical_mask,
+                standoff_cells=step,
+            ):
+                previous = mapped.get(candidate.pose_cell)
+                key = (segment_id, candidate.sample_rank, candidate.pose_cell)
+                if previous is None or key < (
+                    previous[0],
+                    previous[1].sample_rank,
+                    previous[1].pose_cell,
+                ):
+                    mapped[candidate.pose_cell] = (segment_id, candidate)
+        fine = sorted(
+            mapped.values(),
+            key=lambda item: (
+                item[0], item[1].sample_rank, item[1].pose_cell
+            ),
+        )
+        ground_global_search = physical_reachability.ground_global_search
+        if ground_global_search is None:
+            raise CandidateInvariantError("GLOBAL_PATH_COST_NONFINITE")
+        minimum_cost = ground_global_search.sampled_minimum_cost_m
+        globally_reachable = [
+            (segment_id, raw, float(minimum_cost[raw.pose_cell]))
+            for segment_id, raw in fine
+            if math.isfinite(float(minimum_cost[raw.pose_cell]))
+        ]
+        gain_arguments = (
             np.ascontiguousarray(world.observed_mask, dtype=np.bool_),
             np.ascontiguousarray(
                 world.physical_obstacle_layer.values, dtype=np.float32
@@ -1163,32 +1794,202 @@ class CandidateBuilderV2:
                 mission.priority * mission.roi_ratio, dtype=np.float32
             ),
         )
+        target_positions = np.ascontiguousarray(
+            [
+                (
+                    exact_target_poses[raw.pose_cell].x_m,
+                    exact_target_poses[raw.pose_cell].y_m,
+                    exact_target_poses[raw.pose_cell].elevation_m,
+                )
+                for _, raw, _ in globally_reachable
+            ],
+            dtype=np.float64,
+        ).reshape((-1, 3))
         exact_gain = getattr(
             self._visibility_estimator,
             "estimate_candidate_gains_at_positions",
             None,
         )
-        gains = (
-            exact_gain(*arguments, authority.certified_positions_m)
-            if callable(exact_gain)
-            else self._visibility_estimator.estimate_candidate_gains(
-                *arguments, certified_cells
+        if not globally_reachable:
+            gains = np.zeros((0, 2), dtype=np.float32)
+        elif callable(exact_gain):
+            gains = exact_gain(*gain_arguments, target_positions)
+        else:
+            candidate_cells = np.ascontiguousarray(
+                [raw.pose_cell for _, raw, _ in globally_reachable],
+                dtype=np.int32,
+            ).reshape((-1, 2))
+            gains = self._visibility_estimator.estimate_candidate_gains(
+                *gain_arguments, candidate_cells
             )
-        )
-        gains = np.asarray(gains)
         if (
-            gains.dtype != np.dtype(np.float32)
-            or gains.shape != (len(certified_cells), 2)
+            not isinstance(gains, np.ndarray)
+            or gains.shape != (len(globally_reachable), 2)
+            or gains.dtype != np.dtype(np.float32)
             or not gains.flags.c_contiguous
             or not np.isfinite(gains).all()
             or (gains < 0.0).any()
         ):
-            raise RuntimeError("hopper opportunity visibility result is invalid")
-        positive_mask = np.zeros_like(authority.certified_mask, dtype=np.bool_)
-        if len(certified_cells):
-            positive_cells = certified_cells[gains[:, 0] > np.float32(0.0)]
-            positive_mask[positive_cells[:, 0], positive_cells[:, 1]] = True
-        return np.ascontiguousarray(positive_mask)
+            raise CandidateInvariantError("CANDIDATE_GAIN_NONFINITE")
+        positive_indices = [
+            index
+            for index, gain in enumerate(gains[:, 0])
+            if float(gain) >= _DETAIL_CELL_COARSE_EQUIVALENT
+        ]
+        positive_gain_normalizer = max(
+            (float(gains[index, 0]) for index in positive_indices),
+            default=0.0,
+        )
+        priority_gain_normalizer = max(
+            (float(gains[index, 1]) for index in positive_indices),
+            default=0.0,
+        )
+        total_roi = float(mission.roi_ratio.sum(dtype=np.float64))
+        roi_diagonal = task_roi_diagonal_m(
+            mission.roi_ratio,
+            resolution_m=world.canvas.geometry.resolution_m,
+        )
+        preliminary: list[PhysicalCandidate] = []
+        for index in positive_indices:
+            segment_id, raw, global_cost = globally_reachable[index]
+            target_pose = exact_target_poses[raw.pose_cell]
+            gain = float(gains[index, 0])
+            priority_gain = float(gains[index, 1])
+            feature = self._feature(
+                world,
+                mission,
+                projection,
+                pose_map,
+                raw.pose_cell,
+                total_roi,
+                gain,
+                priority_gain,
+                positive_gain_normalizer,
+                priority_gain_normalizer,
+                target_pose=target_pose,
+                global_path_cost_norm=normalize_global_path_cost(
+                    global_cost,
+                    roi_diagonal,
+                    _NOMINAL_GLOBAL_COST_PER_M,
+                ),
+            )
+            if feature is None:
+                continue
+            anchor = _FeasibleAnchor(
+                segment_id=segment_id,
+                point=raw.pose_cell,
+                feature=feature,
+                elevation_m=float(target_pose.elevation_m),
+                target_position_m=(
+                    float(target_pose.x_m),
+                    float(target_pose.y_m),
+                    float(target_pose.elevation_m),
+                ),
+            )
+            preliminary.append(
+                self._physical_candidate(
+                    anchor,
+                    pose_map=pose_map,
+                    platform_type=platform_type,
+                    platform_id=platform_id,
+                    mission_revision=mission_revision,
+                    goal_tolerance_mm=goal_tolerance_mm,
+                    segment_candidate_rank=0,
+                    global_path_cost_m=global_cost,
+                    expected_gain_m2=(
+                        gain / _DETAIL_CELL_COARSE_EQUIVALENT
+                    )
+                    * _DETAIL_CELL_AREA_M2,
+                    expected_priority_gain_m2=(
+                        priority_gain / _DETAIL_CELL_COARSE_EQUIVALENT
+                    )
+                    * _DETAIL_CELL_AREA_M2,
+                    risk=max(
+                        0.0,
+                        1.0
+                        - float(
+                            projection.clearance_margin_norm[raw.pose_cell]
+                        ),
+                    ),
+                )
+            )
+        by_segment: dict[int, list[PhysicalCandidate]] = {}
+        for candidate in preliminary:
+            by_segment.setdefault(candidate.segment_id, []).append(candidate)
+        ranked: list[PhysicalCandidate] = []
+        for segment_id in sorted(by_segment):
+            segment = sorted(
+                by_segment[segment_id],
+                key=lambda candidate: (
+                    -candidate.expected_gain_m2,
+                    candidate.global_path_cost_m,
+                    candidate.risk,
+                    candidate.candidate_id,
+                ),
+            )
+            ranked.extend(
+                replace(candidate, segment_candidate_rank=rank)
+                for rank, candidate in enumerate(segment)
+            )
+        balanced = _balanced_candidate_order(ranked)
+        candidates = tuple(
+            replace(candidate, rank_key=(index, candidate.candidate_id))
+            for index, candidate in enumerate(balanced)
+        )
+        physical_snapshot_id = self._physical_snapshot_id(
+            platform_type=platform_type,
+            platform_id=platform_id,
+            capability_content_sha256=capability_content_sha256,
+            mission_revision=mission_revision,
+            pose_map=pose_map,
+            evidence_generation=evidence_generation,
+            physical_evidence_sha256=physical_evidence_sha256,
+        )
+        selected_count = min(_POLICY_CANDIDATE_COUNT, len(candidates))
+        universe_sha256 = sha256(
+            "".join(candidate.candidate_id for candidate in candidates).encode(
+                "ascii"
+            )
+        ).hexdigest()
+        diagnostics = CandidateDiagnostics(
+            physical_snapshot_id=physical_snapshot_id,
+            physical_reachability_algorithm_id=(
+                physical_reachability_algorithm_id
+            ),
+            physical_candidate_universe_count=len(candidates),
+            selected_policy_candidate_count=selected_count,
+            available_candidate_count=len(candidates),
+            untried_reserve_count=len(candidates) - selected_count,
+            planner_failed_current_snapshot_count=0,
+            zero_gain_count=len(globally_reachable) - len(positive_indices),
+            visited_excluded_count=0,
+            physical_unreachable_count=raw_count - len(globally_reachable),
+        )
+        snapshot = CandidateDecisionSnapshot(
+            snapshot_id=physical_snapshot_id,
+            frontier_segment_count=len(segments),
+            raw_candidate_count=raw_count,
+            fine_pose_candidate_count=len(fine),
+            globally_reachable_candidate_count=len(globally_reachable),
+            positive_gain_candidate_count=len(candidates),
+            selected_policy_candidate_count=selected_count,
+            untried_reserve_count=len(candidates) - selected_count,
+            planner_rejected_current_snapshot_count=0,
+            candidate_set_sha256=universe_sha256,
+            global_search_call_count=1,
+            global_search_elapsed_s=ground_global_search.search_elapsed_s,
+            candidate_refresh_elapsed_s=perf_counter() - refresh_started,
+        )
+        return PhysicalCandidateUniverse(
+            physical_snapshot_id=physical_snapshot_id,
+            physical_reachability_algorithm_id=(
+                physical_reachability_algorithm_id
+            ),
+            candidates=candidates,
+            universe_sha256=universe_sha256,
+            diagnostics=diagnostics,
+            decision_snapshot=snapshot,
+        )
 
     def select_available(
         self,
@@ -1200,7 +2001,7 @@ class CandidateBuilderV2:
         excluded_cells: Collection[tuple[int, int]] = (),
         backtrack_pose: Pose2 | None = None,
     ) -> CandidateBuildResult:
-        """Apply failures and history, then select observation/transit/backtrack."""
+        """Apply current-snapshot failures and select a deterministic Top-64."""
         if not isinstance(universe, PhysicalCandidateUniverse):
             raise TypeError("physical candidate universe is required")
         if not isinstance(canvas_id, str) or not canvas_id:
@@ -1243,42 +2044,50 @@ class CandidateBuilderV2:
             for candidate in universe.candidates
             if candidate.candidate_id not in current_failures
         )
-        unvisited = tuple(
-            candidate
-            for candidate in planner_available
-            if candidate.position_grid_key not in visited_cells
-        )
-        positive = tuple(
-            candidate
-            for candidate in unvisited
-            if float(candidate.feature[5]) > 0.0
-        )
-        if positive:
-            selected = positive[:_POLICY_CANDIDATE_COUNT]
-        elif unvisited:
-            selected = unvisited[:_POLICY_CANDIDATE_COUNT]
+        is_hopper = "hopper" in universe.physical_reachability_algorithm_id.lower()
+        if is_hopper:
+            selected = planner_available[:_POLICY_CANDIDATE_COUNT]
+            history_available = planner_available
+            visited_excluded_count = 0
         else:
-            backtrack = ()
-            if backtrack_pose is not None:
-                exact_position = (
-                    float(backtrack_pose.x_m),
-                    float(backtrack_pose.y_m),
-                    float(backtrack_pose.elevation_m),
-                )
-                backtrack = tuple(
-                    candidate
-                    for candidate in planner_available
-                    if candidate.target_position_m == exact_position
-                )
-            selected = backtrack[:1]
-        selected_ids = {candidate.candidate_id for candidate in selected}
-        history_available = tuple(
-            candidate
-            for candidate in planner_available
-            if candidate.position_grid_key not in visited_cells
-            or candidate.candidate_id in selected_ids
-        )
-        visited_excluded_count = len(planner_available) - len(history_available)
+            unvisited = tuple(
+                candidate
+                for candidate in planner_available
+                if candidate.position_grid_key not in visited_cells
+            )
+            positive = tuple(
+                candidate
+                for candidate in unvisited
+                if float(candidate.feature[5]) > 0.0
+            )
+            if positive:
+                selected = positive[:_POLICY_CANDIDATE_COUNT]
+            elif unvisited:
+                selected = unvisited[:_POLICY_CANDIDATE_COUNT]
+            else:
+                backtrack = ()
+                if backtrack_pose is not None:
+                    exact_position = (
+                        float(backtrack_pose.x_m),
+                        float(backtrack_pose.y_m),
+                        float(backtrack_pose.elevation_m),
+                    )
+                    backtrack = tuple(
+                        candidate
+                        for candidate in planner_available
+                        if candidate.target_position_m == exact_position
+                    )
+                selected = backtrack[:1]
+            selected_ids = {candidate.candidate_id for candidate in selected}
+            history_available = tuple(
+                candidate
+                for candidate in planner_available
+                if candidate.position_grid_key not in visited_cells
+                or candidate.candidate_id in selected_ids
+            )
+            visited_excluded_count = len(planner_available) - len(
+                history_available
+            )
         diagnostics = CandidateDiagnostics(
             physical_snapshot_id=universe.physical_snapshot_id,
             physical_reachability_algorithm_id=(
@@ -1303,6 +2112,20 @@ class CandidateBuilderV2:
             candidates=universe.candidates,
             universe_sha256=universe.universe_sha256,
             diagnostics=diagnostics,
+            decision_snapshot=(
+                None
+                if universe.decision_snapshot is None
+                else replace(
+                    universe.decision_snapshot,
+                    selected_policy_candidate_count=len(selected),
+                    untried_reserve_count=(
+                        len(history_available) - len(selected)
+                    ),
+                    planner_rejected_current_snapshot_count=len(
+                        current_failures
+                    ),
+                )
+            ),
         )
         return CandidateBuildResult(
             universe=selected_universe,
@@ -1386,6 +2209,11 @@ class CandidateBuilderV2:
         platform_id: str,
         mission_revision: int,
         goal_tolerance_mm: int,
+        segment_candidate_rank: int = 0,
+        global_path_cost_m: float = 0.0,
+        expected_gain_m2: float = 0.0,
+        expected_priority_gain_m2: float = 0.0,
+        risk: float = 0.0,
     ) -> PhysicalCandidate:
         x_m, y_m, z_m = anchor.target_position_m
         position_grid_key = (int(anchor.point[0]), int(anchor.point[1]))
@@ -1456,6 +2284,12 @@ class CandidateBuilderV2:
             goal_tolerance_mm=goal_tolerance_mm,
             feature=anchor.feature,
             rank_key=rank_key,
+            segment_id=anchor.segment_id,
+            segment_candidate_rank=segment_candidate_rank,
+            global_path_cost_m=global_path_cost_m,
+            expected_gain_m2=expected_gain_m2,
+            expected_priority_gain_m2=expected_priority_gain_m2,
+            risk=risk,
         )
 
     @staticmethod
@@ -1538,7 +2372,10 @@ class CandidateBuilderV2:
             anchor
             for anchor in unvisited
             if observed[anchor[1]]
-            and roi[anchor[1]]
+            and (
+                platform_type == "HOPPER"
+                or roi[anchor[1]]
+            )
             and world.physical_obstacle_layer.values[anchor[1]] == 0.0
             and projection.traversable_ratio[anchor[1]] > 0.0
         ]
@@ -1738,7 +2575,7 @@ class CandidateBuilderV2:
         )
         return abs(relative) <= self._sensor.fov_rad / 2.0
 
-    def _feature(self, world: ObservedWorld, mission: MissionRaster, projection: PlatformProjection, pose: Pose2, point: tuple[int, int], total_roi: float, gain: float, priority_gain: float, gain_normalizer: float, priority_gain_normalizer: float, *, allow_zero_gain: bool = False, target_pose: Pose2 | None = None) -> np.ndarray | None:
+    def _feature(self, world: ObservedWorld, mission: MissionRaster, projection: PlatformProjection, pose: Pose2, point: tuple[int, int], total_roi: float, gain: float, priority_gain: float, gain_normalizer: float, priority_gain_normalizer: float, *, allow_zero_gain: bool = False, target_pose: Pose2 | None = None, global_path_cost_norm: float | None = None) -> np.ndarray | None:
         canvas = world.canvas
         x, y = (
             canvas.grid_center_world(*point)
@@ -1753,7 +2590,7 @@ class CandidateBuilderV2:
         for neighbor in _neighbors(*point, canvas.geometry.cells):
             if mission.roi_ratio[neighbor] > 0 and not world.observed_mask[neighbor]: normal += (neighbor[0] - point[0], neighbor[1] - point[1])
         magnitude = float(np.linalg.norm(normal)); remaining = float((mission.roi_ratio * ~world.observed_mask).sum() / total_roi) if total_roi else 0.0
-        return np.asarray(((x - canvas.bounds_m[0]) / canvas.geometry.size_m, (canvas.bounds_m[3] - y) / canvas.geometry.size_m, min(1.0, distance / (math.sqrt(2.0) * canvas.geometry.size_m)), math.sin(bearing), math.cos(bearing), min(1.0, gain / gain_normalizer) if gain_normalizer else 0.0, min(1.0, priority_gain / priority_gain_normalizer) if priority_gain_normalizer else 0.0, -normal[0] / magnitude if magnitude else 0.0, normal[1] / magnitude if magnitude else 1.0, min(1.0, magnitude / 2.0), projection.clearance_margin_norm[point], remaining), dtype=np.float32)
+        return np.asarray(((x - canvas.bounds_m[0]) / canvas.geometry.size_m, (canvas.bounds_m[3] - y) / canvas.geometry.size_m, min(1.0, distance / (math.sqrt(2.0) * canvas.geometry.size_m)) if global_path_cost_norm is None else global_path_cost_norm, math.sin(bearing), math.cos(bearing), min(1.0, gain / gain_normalizer) if gain_normalizer else 0.0, min(1.0, priority_gain / priority_gain_normalizer) if priority_gain_normalizer else 0.0, -normal[0] / magnitude if magnitude else 0.0, normal[1] / magnitude if magnitude else 1.0, min(1.0, magnitude / 2.0), projection.clearance_margin_norm[point], remaining), dtype=np.float32)
 
 
 __all__ = [
@@ -1763,8 +2600,11 @@ __all__ = [
     "CandidateBatch",
     "CandidateBuildResult",
     "CandidateBuilderV2",
+    "CandidateDecisionSnapshot",
     "CandidateDiagnostics",
+    "CandidateInvariantError",
     "PhysicalCandidate",
     "PhysicalCandidateUniverse",
     "SensorGeometry",
+    "normalize_global_path_cost",
 ]

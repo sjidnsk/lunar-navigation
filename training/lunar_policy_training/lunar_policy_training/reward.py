@@ -1,54 +1,42 @@
-"""Frozen coverage-first V4 reward for v3 planner transitions."""
+"""Pure, auditable Reward V4 computation for formal macro transitions."""
 
 from __future__ import annotations
 
-import hashlib
-import json
+from dataclasses import dataclass, replace
 import math
-from dataclasses import asdict, dataclass
-
-from lunar_planner_training_bridge import PlanningOutcome
 
 from .environment.macro_step import PlannerTransition
+from .reward_contract import (
+    DEFAULT_REWARD_CONFIG,
+    REWARD_SCHEMA_VERSION,
+    RewardStage,
+    RewardTerminalClass,
+    RewardWeightsV4,
+    reward_config_sha256,
+)
 
 
 class InvalidTransition(RuntimeError):
-    """A planner/infrastructure transition must not enter a rollout."""
+    """An invalid environment transition must not enter a rollout."""
 
 
-@dataclass(frozen=True, slots=True)
-class RewardWeightsV4:
-    mission_observed_delta: float = 100.0
-    executed_without_new_mission_coverage: float = 0.10
-    goal_infeasible: float = 0.20
-    no_known_safe_route: float = 0.30
-    unsuccessful_remaining_coverage: float = 1.00
-    success_first_crossing: float = 100.00
-
-
-REWARD_SCHEMA_VERSION = "lunar-reward/v4"
-DEFAULT_REWARD_WEIGHTS = RewardWeightsV4()
+DEFAULT_REWARD_WEIGHTS = DEFAULT_REWARD_CONFIG.initial_weights
 
 
 @dataclass(frozen=True, slots=True)
 class RewardInputsV4:
+    """Environment-owned cumulative facts consumed by Reward V4."""
+
     platform_type: str
-    mission_observed_delta: float
-    mission_observed_ratio_after: float
-    priority_observed_delta: float
-    normalized_plan_or_execution_cost: float
-    normalized_macro_step_time: float
-    executed_without_new_coverage: bool
+    coverage_before: float
+    coverage_after: float
+    priority_before: float
+    priority_after: float
+    path_before_m: float
+    path_after_m: float
+    task_scale_m: float
+    terminal_class: RewardTerminalClass
     success_first_crossing: bool
-    episode_ended_without_success: bool
-    hard_safety_violation: bool
-    safety_violation_count: int
-    platform_reference_mismatch_count: int
-    hopper_commitment_violation_count: int
-    terminated: bool
-    planning_outcome: PlanningOutcome
-    cancellation_expected: bool
-    cpp_exception: str | None
 
     @classmethod
     def from_transition(
@@ -58,59 +46,38 @@ class RewardInputsV4:
             raise InvalidTransition("reward input is not a PlannerTransition")
         return cls(
             platform_type=platform_type,
-            mission_observed_delta=transition.mission_observed_delta,
-            mission_observed_ratio_after=float(
-                transition.next_observation.pose_features[0, 4]
-                .detach()
-                .cpu()
-                .item()
-            ),
-            priority_observed_delta=transition.priority_observed_delta,
-            normalized_plan_or_execution_cost=(
-                transition.normalized_plan_or_execution_cost
-            ),
-            normalized_macro_step_time=transition.normalized_macro_step_time,
-            executed_without_new_coverage=(
-                transition.executed_without_new_coverage
-            ),
+            coverage_before=transition.coverage_before,
+            coverage_after=transition.coverage_after,
+            priority_before=transition.priority_before,
+            priority_after=transition.priority_after,
+            path_before_m=transition.cumulative_executed_path_m_before,
+            path_after_m=transition.cumulative_executed_path_m_after,
+            task_scale_m=transition.task_scale_m,
+            terminal_class=transition.reward_terminal_class,
             success_first_crossing=transition.success_first_crossing,
-            episode_ended_without_success=(
-                transition.episode_ended_without_success
-            ),
-            hard_safety_violation=transition.hard_safety_violation,
-            safety_violation_count=(
-                transition.execution_events.safety_violation_count
-            ),
-            platform_reference_mismatch_count=(
-                transition.execution_events.platform_reference_mismatch_count
-            ),
-            hopper_commitment_violation_count=(
-                transition.execution_events.hopper_commitment_violation_count
-            ),
-            terminated=transition.terminated,
-            planning_outcome=transition.planning_outcome,
-            cancellation_expected=transition.cancellation_expected,
-            cpp_exception=transition.cpp_exception,
         )
 
 
+@dataclass(frozen=True, slots=True)
+class RewardComponentsV4:
+    """Named Reward V4 terms retained for diagnostics and exact tests."""
+
+    coverage: float
+    success: float
+    terminal_gap: float
+    priority: float
+    path: float
+    total: float
+
+
 _PLATFORMS = frozenset({"WHEELED", "LEGGED", "HOPPER"})
-_INVALID_OUTCOMES = frozenset(
-    {
-        PlanningOutcome.INVALID_REQUEST,
-        PlanningOutcome.STALE_INPUT,
-        PlanningOutcome.NUMERICAL_FAILURE,
-        PlanningOutcome.RESOURCE_EXHAUSTED,
-    }
+_RATIO_FIELDS = (
+    "coverage_before",
+    "coverage_after",
+    "priority_before",
+    "priority_after",
 )
-_BOOLEAN_FIELDS = (
-    "executed_without_new_coverage",
-    "success_first_crossing",
-    "episode_ended_without_success",
-    "hard_safety_violation",
-    "terminated",
-    "cancellation_expected",
-)
+_PATH_FIELDS = ("path_before_m", "path_after_m")
 
 
 def reward_weights_sha256(
@@ -118,149 +85,165 @@ def reward_weights_sha256(
     *,
     platform_type: str | None = None,
 ) -> str:
-    """Return one platform-independent identity for the complete V4 reward."""
+    """Hash the complete Reward V4 config, independent of platform."""
     if not isinstance(weights, RewardWeightsV4):
         raise ValueError("reward weights must use RewardWeightsV4")
     if platform_type is not None and platform_type not in _PLATFORMS:
         raise ValueError("platform type must be WHEELED, LEGGED, or HOPPER")
-    values = tuple(asdict(weights).values())
-    if any(
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or not math.isfinite(float(value))
-        or float(value) < 0.0
-        for value in values
+    config = replace(
+        DEFAULT_REWARD_CONFIG,
+        coverage_weight=weights.coverage,
+        success_bonus=weights.success,
+        terminal_gap_weight=weights.terminal_gap,
+        priority_weight=weights.priority,
+        path_weight=weights.path,
+    )
+    return reward_config_sha256(config)
+
+
+def _finite_scalar(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
+def _validate_inputs(inputs: RewardInputsV4) -> None:
+    if not isinstance(inputs, RewardInputsV4):
+        raise InvalidTransition("reward inputs must use RewardInputsV4")
+    if inputs.platform_type not in _PLATFORMS:
+        raise InvalidTransition("reward platform type is invalid")
+    if not isinstance(inputs.terminal_class, RewardTerminalClass):
+        raise InvalidTransition("reward terminal class is invalid")
+    if type(inputs.success_first_crossing) is not bool:
+        raise InvalidTransition("reward success fact must use an exact boolean")
+
+    for name in _RATIO_FIELDS:
+        value = getattr(inputs, name)
+        if not _finite_scalar(value) or not 0.0 <= float(value) <= 1.0:
+            raise InvalidTransition(f"reward {name} is outside [0,1]")
+    for name in _PATH_FIELDS:
+        value = getattr(inputs, name)
+        if not _finite_scalar(value) or float(value) < 0.0:
+            raise InvalidTransition(f"reward {name} must be finite and non-negative")
+    if not _finite_scalar(inputs.task_scale_m) or inputs.task_scale_m <= 0.0:
+        raise InvalidTransition("reward task scale must be finite and positive")
+
+    if inputs.coverage_after < inputs.coverage_before:
+        raise InvalidTransition("reward coverage facts regress")
+    if inputs.priority_after < inputs.priority_before:
+        raise InvalidTransition("reward priority facts regress")
+    if inputs.path_after_m < inputs.path_before_m:
+        raise InvalidTransition("reward path facts regress")
+
+    if inputs.terminal_class is RewardTerminalClass.INVALID_TRANSITION:
+        raise InvalidTransition("invalid transition cannot enter reward computation")
+
+    threshold = DEFAULT_REWARD_CONFIG.success_threshold
+    actual_first_crossing = (
+        inputs.coverage_before < threshold <= inputs.coverage_after
+    )
+    declared_success = inputs.terminal_class is RewardTerminalClass.SUCCESS
+    if (
+        inputs.success_first_crossing != actual_first_crossing
+        or declared_success != actual_first_crossing
     ):
-        raise ValueError("reward weights must be finite and non-negative")
-    payload = json.dumps(
-        {
-            "schema_version": REWARD_SCHEMA_VERSION,
-            "weights": asdict(weights),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+        raise InvalidTransition("success must be one real first threshold crossing")
+    if not declared_success and inputs.coverage_after >= threshold:
+        raise InvalidTransition("non-success transition reached success threshold")
+
+
+def compute_reward_components(
+    inputs: RewardInputsV4,
+    stage: RewardStage,
+    weights: RewardWeightsV4 = DEFAULT_REWARD_WEIGHTS,
+) -> RewardComponentsV4:
+    """Compute the five Reward V4 terms from one authoritative boundary."""
+    _validate_inputs(inputs)
+    if not isinstance(stage, RewardStage):
+        raise InvalidTransition("reward stage is invalid")
+    if not isinstance(weights, RewardWeightsV4):
+        raise InvalidTransition("reward weights must use RewardWeightsV4")
+
+    coverage = math.fsum(
+        (
+            weights.coverage * float(inputs.coverage_after),
+            -weights.coverage * float(inputs.coverage_before),
+        )
+    )
+    success = (
+        weights.success
+        if inputs.terminal_class is RewardTerminalClass.SUCCESS
+        else 0.0
+    )
+    terminal_gap = (
+        -weights.terminal_gap * (1.0 - float(inputs.coverage_after))
+        if inputs.terminal_class
+        is RewardTerminalClass.VALID_INCOMPLETE_TERMINAL
+        else 0.0
+    )
+
+    priority = 0.0
+    path = 0.0
+    if stage is RewardStage.R2:
+        priority = math.fsum(
+            (
+                weights.priority * float(inputs.priority_after),
+                -weights.priority * float(inputs.priority_before),
+            )
+        )
+        scale = float(inputs.task_scale_m)
+        normalized_before = 1.0 - math.exp(-float(inputs.path_before_m) / scale)
+        normalized_after = 1.0 - math.exp(-float(inputs.path_after_m) / scale)
+        path = -weights.path * (normalized_after - normalized_before)
+
+    total = math.fsum((coverage, success, terminal_gap, priority, path))
+    if not all(
+        math.isfinite(value)
+        for value in (coverage, success, terminal_gap, priority, path, total)
+    ):
+        raise InvalidTransition("computed Reward V4 component is non-finite")
+    return RewardComponentsV4(
+        coverage=coverage,
+        success=success,
+        terminal_gap=terminal_gap,
+        priority=priority,
+        path=path,
+        total=total,
+    )
 
 
 def compute_reward(
     inputs: RewardInputsV4,
     weights: RewardWeightsV4 = DEFAULT_REWARD_WEIGHTS,
+    *,
+    stage: RewardStage = RewardStage.R1,
 ) -> float:
-    """Compute the frozen shared V4 reward or reject an invalid sample."""
-    if not isinstance(inputs, RewardInputsV4):
-        raise InvalidTransition("reward inputs must use RewardInputsV4")
-    if inputs.platform_type not in _PLATFORMS:
-        raise InvalidTransition("reward platform type is invalid")
-    if not isinstance(weights, RewardWeightsV4) or weights != DEFAULT_REWARD_WEIGHTS:
-        raise InvalidTransition("reward weights differ from the frozen V4 baseline")
-    if inputs.cpp_exception is not None:
-        raise InvalidTransition("C++ exception transition cannot enter rollout")
-    if any(type(getattr(inputs, field)) is not bool for field in _BOOLEAN_FIELDS):
-        raise InvalidTransition("reward flags must use exact boolean values")
-
-    values = (
-        inputs.mission_observed_delta,
-        inputs.mission_observed_ratio_after,
-        inputs.priority_observed_delta,
-        inputs.normalized_plan_or_execution_cost,
-        inputs.normalized_macro_step_time,
-    )
-    if not all(
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(float(value))
-        for value in values
-    ):
-        raise InvalidTransition("reward input contains a non-finite scalar")
-    if not 0.0 <= float(inputs.mission_observed_delta) <= 1.0:
-        raise InvalidTransition("mission observed delta is outside [0,1] range")
-    if not 0.0 <= float(inputs.mission_observed_ratio_after) <= 1.0:
-        raise InvalidTransition("mission observed ratio is outside [0,1] range")
-    if not 0.0 <= float(inputs.priority_observed_delta) <= 1.0:
-        raise InvalidTransition("priority observed delta is outside [0,1] range")
-    if (
-        inputs.normalized_plan_or_execution_cost < 0.0
-        or inputs.normalized_macro_step_time < 0.0
-    ):
-        raise InvalidTransition("normalized reward costs must be non-negative")
-    hard_safety_event_counts = (
-        inputs.safety_violation_count,
-        inputs.platform_reference_mismatch_count,
-        inputs.hopper_commitment_violation_count,
-    )
-    if any(type(value) is not int or value < 0 for value in hard_safety_event_counts):
-        raise InvalidTransition("hard safety gate event count is invalid")
-    if inputs.hard_safety_violation != any(
-        value > 0 for value in hard_safety_event_counts
-    ):
-        raise InvalidTransition("hard safety flag and safety gate event disagree")
-    if inputs.success_first_crossing and inputs.hard_safety_violation:
-        raise InvalidTransition("success and hard safety cannot coexist")
-    if inputs.success_first_crossing and inputs.episode_ended_without_success:
-        raise InvalidTransition("success and unsuccessful terminal cannot coexist")
-    terminal_fact = (
-        inputs.success_first_crossing or inputs.episode_ended_without_success
-    )
-    if inputs.terminated != terminal_fact:
-        raise InvalidTransition("terminal state and reward terminal facts disagree")
-    if inputs.hard_safety_violation and not inputs.episode_ended_without_success:
-        raise InvalidTransition("hard safety requires an unsuccessful terminal")
-    if inputs.hard_safety_violation:
-        raise InvalidTransition("hard safety transition cannot enter rollout")
-    if not isinstance(inputs.planning_outcome, PlanningOutcome):
-        raise InvalidTransition("planning outcome is invalid")
-    if inputs.planning_outcome in _INVALID_OUTCOMES:
-        raise InvalidTransition(
-            f"{inputs.planning_outcome.name.lower()} transition cannot enter rollout"
-        )
-    if (
-        inputs.planning_outcome == PlanningOutcome.CANCELED
-        and not inputs.cancellation_expected
-    ):
-        raise InvalidTransition("unexpected canceled transition cannot enter rollout")
-    if inputs.planning_outcome == PlanningOutcome.CANCELED:
-        return 0.0
-
-    reward = float(inputs.mission_observed_delta) * weights.mission_observed_delta
-    if inputs.mission_observed_delta == 0.0:
-        reward -= weights.executed_without_new_mission_coverage
-    if inputs.planning_outcome == PlanningOutcome.GOAL_INFEASIBLE:
-        reward -= weights.goal_infeasible
-    elif inputs.planning_outcome in {
-        PlanningOutcome.NO_KNOWN_SAFE_ROUTE,
-        PlanningOutcome.ACTIVE_REFERENCE_INVALIDATED,
-    }:
-        reward -= weights.no_known_safe_route
-    if inputs.success_first_crossing:
-        reward += weights.success_first_crossing
-    if inputs.episode_ended_without_success:
-        reward -= weights.unsuccessful_remaining_coverage * (
-            1.0 - float(inputs.mission_observed_ratio_after)
-        )
-    if not math.isfinite(reward):
-        raise InvalidTransition("computed reward is non-finite")
-    return reward
+    """Return the scalar Reward V4 total for compatibility callers."""
+    return compute_reward_components(inputs, stage, weights).total
 
 
-def compute_transition_reward(transition: PlannerTransition) -> float:
-    """Pool-safe shared reward adapter deriving the episode platform one-hot."""
+def compute_transition_reward(
+    transition: PlannerTransition,
+    *,
+    stage: RewardStage = RewardStage.R1,
+    weights: RewardWeightsV4 = DEFAULT_REWARD_WEIGHTS,
+) -> float:
+    """Pool-safe adapter deriving the platform from the frozen one-hot."""
     if not isinstance(transition, PlannerTransition):
         raise InvalidTransition("reward input is not a PlannerTransition")
     context = transition.next_observation.platform_context
     if context.shape != (1, 3):
         raise InvalidTransition("transition platform context shape is invalid")
     values = context.detach().cpu().tolist()[0]
-    try:
-        platform_type = ("WHEELED", "LEGGED", "HOPPER")[values.index(1.0)]
-    except (ValueError, IndexError) as error:
-        raise InvalidTransition("transition platform context is invalid") from error
     if values.count(1.0) != 1 or any(value not in (0.0, 1.0) for value in values):
         raise InvalidTransition("transition platform context is invalid")
-    return compute_reward(
-        RewardInputsV4.from_transition(transition, platform_type=platform_type)
+    platform_type = ("WHEELED", "LEGGED", "HOPPER")[values.index(1.0)]
+    inputs = RewardInputsV4.from_transition(
+        transition, platform_type=platform_type
     )
+    return compute_reward(inputs, weights, stage=stage)
 
 
 # Source compatibility only; hashes and runtime validation are V4.
@@ -272,11 +255,13 @@ __all__ = [
     "DEFAULT_REWARD_WEIGHTS",
     "InvalidTransition",
     "REWARD_SCHEMA_VERSION",
+    "RewardComponentsV4",
     "RewardInputsV3",
     "RewardInputsV4",
     "RewardWeightsV3",
     "RewardWeightsV4",
     "compute_reward",
+    "compute_reward_components",
     "compute_transition_reward",
     "reward_weights_sha256",
 ]

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
 from pathlib import Path
+from collections import OrderedDict
 from typing import ClassVar, Mapping, Sequence
 
 import numpy as np
@@ -23,32 +24,54 @@ from ..capability_freeze import (
 )
 from ..polar_data.formal_cache import (
     FormalCache,
-    FormalCacheError,
+    FormalSceneIndexRecord,
     _physical_capability_content_sha256,
     load_formal_cache,
 )
 from ..polar_data.hazards import (
-    CraterBowl,
-    NoGoPolygon,
-    RockCircle,
     VectorHazardScene,
 )
-from ..polar_data.multires_scene import MultiResolutionScene, SceneTileProvider
+from ..polar_data.multires_scene import (
+    GENERATOR_SHA256,
+    LOCAL_DETAIL_PROVENANCE,
+    MultiResolutionScene,
+    ProjectedScene,
+    SceneTileProvider,
+)
 from ..polar_data.raster import (
     GLOBAL_GEOMETRY,
     LOCAL_GEOMETRY,
+    LOCAL_TILE_GEOMETRY,
+    GridGeometry,
     MapCanvas,
+)
+from ..polar_data.task_cache import (
+    PlatformTaskArtifact,
+    PlatformTaskKey,
+    TaskCacheStore,
+    TaskCommonArtifact,
+    TaskCommonKey,
+)
+from ..polar_data.task_cache_scheduler import (
+    TaskBuildPriority,
+    TaskCacheCoordinatorError,
 )
 from ..policy.action_semantics import apply_goal_theta
 from ..policy.observation import ObservationIdentity, PolicyBatch
-from ..training_semantics import FORMAL_SENSOR_FOV_RAD, FORMAL_SENSOR_RANGE_M
+from ..reward_contract import TaskScaleBucket
+from ..training_semantics import (
+    FORMAL_SENSOR_FOV_RAD,
+    FORMAL_SENSOR_RANGE_M,
+    training_semantics_sha256,
+)
 from .candidate_builder import (
     CandidateBatch,
     CandidateBuilderV2,
+    CandidateDecisionSnapshot,
     CandidateDiagnostics,
     PhysicalCandidateUniverse,
 )
-from .coverability import unpack_detail_mask
+from .coverability import mask_sha256, pack_detail_mask, unpack_detail_mask
 from .formal_episode_state import (
     FormalPathSampleState,
     FormalPoseState,
@@ -56,17 +79,22 @@ from .formal_episode_state import (
     FormalWorkerState,
     policy_batch_sha256,
 )
-from .frontier_oracle import (
-    FrontierOpportunityOracle,
-    FrontierOracleResult,
-)
 from .formal_start_qualification import (
     build_formal_mission_roi,
-    formal_safe_start_cells,
 )
-from .task_area import scope_formal_task_area
+from .task_area import (
+    FrozenTaskGeometry,
+    build_task_priority_mask,
+    derive_task_evidence_halo,
+    freeze_formal_task_geometry,
+    scale_bucket_for_worker,
+)
 from .macro_step import ExecutionEvents, PolicyAction
-from .multires_observation import DetailObservedWindow, MultiresSensorObservationState
+from .multires_observation import (
+    DetailObservedWindow,
+    HopperTrajectoryPoint,
+    MultiresSensorObservationState,
+)
 from .observation_boundary import (
     BoundaryObservationResult,
     ObservationBoundaryController,
@@ -99,6 +127,19 @@ from .visibility import NativeVisibilityEstimator, SensorGeometry
 _PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
 _FORMAL_MACRO_STEP_TIME_SCALE_S = 2.0
 _MAX_GROUND_SENSOR_SAMPLE_SPACING_M = 1.0
+_GROUND_TASK_REACHABILITY_ALGORITHM_ID = "cpp-ground-global-cost-tree/v1"
+_GROUND_TASK_EVIDENCE_ALGORITHM_ID = "cpp-safe-traversability-projection/v1"
+_GROUND_TASK_SENSOR_ALGORITHM_ID = "sensor-30m-360/v1"
+_GROUND_TASK_VISIBILITY_ALGORITHM_ID = "two-dimensional-detail-los/v1"
+_HOPPER_TASK_REACHABILITY_ALGORITHM_ID = (
+    "truth-hopper-task-safe-hop-observation-closure/v1"
+)
+_HOPPER_TASK_EVIDENCE_ALGORITHM_ID = (
+    "cpp-hopper-incremental-edge-evidence/v1"
+)
+_HOPPER_TASK_SENSOR_ALGORITHM_ID = (
+    "hopper-unobstructed-trajectory-capsule-closure/v1"
+)
 
 
 def _formal_scheduled_entries(
@@ -183,12 +224,309 @@ def _formal_episode_seed(kind: str, identity: ScenarioIdentity) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _canonical_json_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _task_halo_contract_sha256(halo: object) -> str:
+    return _canonical_json_sha256(
+        {
+            "coarse_cells": halo.coarse_cells,
+            "detail_cells": halo.detail_cells,
+            "sensor_radius_m": halo.sensor_radius_m,
+            "platform_support_radius_m": halo.platform_support_radius_m,
+            "native_stencil_radius_m": halo.native_stencil_radius_m,
+            "algorithm_id": halo.algorithm_id,
+            "capability_bundle_sha256": halo.capability_bundle_sha256,
+        }
+    )
+
+
+def _task_platform_key(
+    *,
+    common_key: TaskCommonKey,
+    platform: FrozenPlatformCapability,
+    qualified_start: Mapping[str, object],
+) -> PlatformTaskKey:
+    if platform.platform_type in {"WHEELED", "LEGGED"}:
+        identities = (
+            _GROUND_TASK_REACHABILITY_ALGORITHM_ID,
+            _GROUND_TASK_EVIDENCE_ALGORITHM_ID,
+            _GROUND_TASK_SENSOR_ALGORITHM_ID,
+            _GROUND_TASK_VISIBILITY_ALGORITHM_ID,
+        )
+    elif platform.platform_type == "HOPPER":
+        identities = (
+            _HOPPER_TASK_REACHABILITY_ALGORITHM_ID,
+            _HOPPER_TASK_EVIDENCE_ALGORITHM_ID,
+            _HOPPER_TASK_SENSOR_ALGORITHM_ID,
+            _HOPPER_TASK_SENSOR_ALGORITHM_ID,
+        )
+    else:  # pragma: no cover - the frozen capability union is closed
+        raise ValueError("formal task platform is invalid")
+    return PlatformTaskKey(
+        common_key_sha256=common_key.sha256(),
+        platform_type=platform.platform_type,
+        qualified_start_identity_sha256=str(
+            qualified_start["start_identity_sha256"]
+        ),
+        platform_capability_sha256=platform.content_sha256,
+        reachability_algorithm_id=identities[0],
+        physical_evidence_algorithm_id=identities[1],
+        sensor_algorithm_id=identities[2],
+        visibility_algorithm_id=identities[3],
+        training_semantics_sha256=training_semantics_sha256(),
+    )
+
+
+class _TaskLocalMultiResolutionScene(MultiResolutionScene):
+    """Exact task-sized view backed only by verified common artifact arrays."""
+
+    def __init__(
+        self,
+        common: TaskCommonArtifact,
+        *,
+        window_sha256: str,
+        scene_seed: str,
+    ) -> None:
+        geometry = common.geometry
+        span = geometry.span_cells
+        canvas = MapCanvas(
+            window_sha256,
+            common.local_world_bounds_m,
+            GridGeometry(span * 4.0, 4.0, span),
+        )
+        halo_row0, _, halo_column0, _ = (
+            geometry.halo_coarse_bounds_half_open
+        )
+        row0, row1, column0, column1 = geometry.coarse_bounds_half_open
+        coarse_rows = slice(row0 - halo_row0, row1 - halo_row0)
+        coarse_columns = slice(
+            column0 - halo_column0,
+            column1 - halo_column0,
+        )
+        detail_rows = slice(coarse_rows.start * 20, coarse_rows.stop * 20)
+        detail_columns = slice(
+            coarse_columns.start * 20,
+            coarse_columns.stop * 20,
+        )
+        empty_hazards = VectorHazardScene(
+            seed=scene_seed,
+            canvas=canvas,
+            rocks=(),
+            craters=(),
+            no_go_polygons=(),
+        )
+        coarse = {
+            name: np.ascontiguousarray(
+                common.arrays[name][coarse_rows, coarse_columns]
+            )
+            for name in (
+                "elevation_m",
+                "valid_mask",
+                "physical_obstacle_ratio",
+                "physical_obstacle_height_m",
+                "forbidden_ratio",
+            )
+        }
+        detail = {
+            name.removeprefix("detail_"): np.ascontiguousarray(
+                common.arrays[name][detail_rows, detail_columns]
+            )
+            for name in (
+                "detail_elevation_m",
+                "detail_valid_mask",
+                "detail_physical_obstacle_ratio",
+                "detail_physical_obstacle_height_m",
+                "detail_forbidden_ratio",
+            )
+        }
+        super().__init__(
+            canvas,
+            np.where(coarse["valid_mask"], coarse["elevation_m"], 0.0).astype(
+                np.float32
+            ),
+            coarse["valid_mask"],
+            empty_hazards,
+            scenario_id=common.key.scene_id,
+        )
+        object.__setattr__(self, "_task_coarse", coarse)
+        object.__setattr__(self, "_task_detail", detail)
+
+    def _project_indices(
+        self,
+        *,
+        start_row: int,
+        start_column: int,
+        cells: int,
+        detail: bool,
+        canvas: MapCanvas,
+        padded: bool,
+    ) -> ProjectedScene:
+        source = self._task_detail if detail else self._task_coarse
+        total = source["valid_mask"].shape[0]
+        if min(start_row, start_column) < 0 or cells <= 0:
+            raise ValueError("task projection indices are invalid")
+        available_rows = max(0, min(cells, total - start_row))
+        available_columns = max(0, min(cells, total - start_column))
+        if not padded and (
+            available_rows != cells or available_columns != cells
+        ):
+            raise ValueError("projection target lies outside task scene")
+        shape = (cells, cells)
+        elevation = np.full(shape, np.nan, dtype=np.float32)
+        valid = np.zeros(shape, dtype=np.bool_)
+        obstacle = np.zeros(shape, dtype=np.float32)
+        obstacle_height = np.zeros(shape, dtype=np.float32)
+        forbidden = np.zeros(shape, dtype=np.float32)
+        if available_rows and available_columns:
+            source_slice = (
+                slice(start_row, start_row + available_rows),
+                slice(start_column, start_column + available_columns),
+            )
+            target_slice = (
+                slice(0, available_rows),
+                slice(0, available_columns),
+            )
+            for target, name in (
+                (elevation, "elevation_m"),
+                (valid, "valid_mask"),
+                (obstacle, "physical_obstacle_ratio"),
+                (obstacle_height, "physical_obstacle_height_m"),
+                (forbidden, "forbidden_ratio"),
+            ):
+                target[target_slice] = source[name][source_slice]
+        return ProjectedScene(
+            vector_sha256=self.hazards.vector_sha256,
+            canvas=canvas,
+            crater_elevation_delta_m=np.zeros(shape, dtype=np.float32),
+            physical_obstacle_ratio=obstacle,
+            physical_obstacle_height_m=obstacle_height,
+            forbidden_ratio=forbidden,
+            local_detail_provenance=LOCAL_DETAIL_PROVENANCE,
+            elevation_m=elevation,
+            valid_mask=valid,
+        )
+
+    def project(self, target_canvas: MapCanvas) -> ProjectedScene:
+        if target_canvas.window_sha256 != self.base_canvas.window_sha256:
+            raise ValueError("projection target window identity differs")
+        resolution = target_canvas.geometry.resolution_m
+        if math.isclose(resolution, 4.0, rel_tol=0.0, abs_tol=1.0e-9):
+            detail = False
+        elif math.isclose(resolution, 0.2, rel_tol=0.0, abs_tol=1.0e-9):
+            detail = True
+        else:
+            raise ValueError("task scene projection resolution is unsupported")
+        left, _, _, top = self.base_canvas.bounds_m
+        start_column = round((target_canvas.bounds_m[0] - left) / resolution)
+        start_row = round((top - target_canvas.bounds_m[3]) / resolution)
+        return self._project_indices(
+            start_row=start_row,
+            start_column=start_column,
+            cells=target_canvas.geometry.cells,
+            detail=detail,
+            canvas=target_canvas,
+            padded=False,
+        )
+
+
+class _TaskLocalSceneTileProvider(SceneTileProvider):
+    """Fixed 64 m tiles over an exact, potentially partial final task tile."""
+
+    def __init__(
+        self,
+        scene: _TaskLocalMultiResolutionScene,
+        *,
+        capacity: int = 8,
+    ) -> None:
+        if capacity < 1:
+            raise ValueError("tile cache capacity must be positive")
+        self.scene = scene
+        self.tile_geometry = LOCAL_TILE_GEOMETRY
+        self.capacity = capacity
+        self.tiles_per_axis = math.ceil(
+            self.detail_cells_per_axis / self.tile_geometry.cells
+        )
+        self._cache = OrderedDict()
+
+    @property
+    def detail_cells_per_axis(self) -> int:
+        return self.scene.base_canvas.geometry.cells * 20
+
+    def tile(self, tile_row: int, tile_column: int) -> ProjectedScene:
+        if not (
+            0 <= tile_row < self.tiles_per_axis
+            and 0 <= tile_column < self.tiles_per_axis
+        ):
+            raise ValueError("tile index lies outside the task scene")
+        key = (self.scene.scene_id, tile_row, tile_column, GENERATOR_SHA256)
+        cached = self._cache.pop(key, None)
+        if cached is not None:
+            self._cache[key] = cached
+            return cached
+        cells = self.tile_geometry.cells
+        start_row = tile_row * cells
+        start_column = tile_column * cells
+        left, _, _, top = self.scene.base_canvas.bounds_m
+        tile_left = left + start_column * self.tile_geometry.resolution_m
+        tile_top = top - start_row * self.tile_geometry.resolution_m
+        canvas = MapCanvas(
+            self.scene.base_canvas.window_sha256,
+            (
+                tile_left,
+                tile_top - self.tile_geometry.size_m,
+                tile_left + self.tile_geometry.size_m,
+                tile_top,
+            ),
+            self.tile_geometry,
+        )
+        projected = self.scene._project_indices(
+            start_row=start_row,
+            start_column=start_column,
+            cells=cells,
+            detail=True,
+            canvas=canvas,
+            padded=True,
+        )
+        self._cache[key] = projected
+        while len(self._cache) > self.capacity:
+            self._cache.popitem(last=False)
+        return projected
+
+    def read_visibility_obstacle_window(
+        self,
+        start_row: int,
+        start_column: int,
+        *,
+        cells: int,
+    ) -> np.ndarray:
+        return self.read_window(
+            start_row,
+            start_column,
+            cells=cells,
+        ).physical_obstacle_ratio
+
+
 @dataclass(frozen=True, slots=True)
 class _LoadedScene:
     scene: MultiResolutionScene
     arrays: Mapping[str, np.ndarray]
     entry: Mapping[str, object]
     scenario: Mapping[str, object]
+    task_geometry: FrozenTaskGeometry | None = None
+    task_common_key_sha256: str | None = None
+    task_common_artifact_sha256: str | None = None
+    platform_task_key_sha256: str | None = None
+    platform_task_artifact_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,13 +534,14 @@ class _MapSnapshot:
     revision: int
     candidates: CandidateBatch
     global_map: object
+    planner_global_map: object
     local_map: object
     world: object
     projection: PlatformProjection
     physical_reachability: PhysicalReachabilityResult
     candidate_universe: PhysicalCandidateUniverse
     planning_physical_snapshot_id: str
-    frontier_oracle: FrontierOracleResult
+    ground_start_resample_reason: str | None
 
     @property
     def candidate_universe_sha256(self) -> str:
@@ -245,84 +584,192 @@ class FormalEnvironmentAssembly:
     scenario_schedule_id: str
 
 
-def _scenario_inventory(cache: FormalCache) -> dict[str, Mapping[str, object]]:
-    path = cache.root / "scenario-manifest.json"
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise FormalCacheError("cache scenario manifest cannot be decoded") from error
-    scenarios = document.get("scenarios") if isinstance(document, Mapping) else None
-    if not isinstance(scenarios, list) or any(
-        not isinstance(item, Mapping) for item in scenarios
-    ):
-        raise FormalCacheError("cache scenario manifest inventory is invalid")
-    inventory = {str(item.get("scene_id")): item for item in scenarios}
-    if len(inventory) != len(scenarios):
-        raise FormalCacheError("cache scenario manifest has duplicate scene IDs")
-    return inventory
-
-
-def _load_multires_scene(cache: FormalCache, scene_id: str) -> _LoadedScene:
-    entry = next(
-        (item for item in cache.manifest["scenes"] if item["scene_id"] == scene_id),
-        None,
-    )
-    if entry is None:
-        raise FormalCacheError("scheduled scene is absent from cache")
-    scenario = _scenario_inventory(cache).get(scene_id)
-    if scenario is None:
-        raise FormalCacheError("scheduled scene is absent from scenario manifest")
-    arrays = cache.load_scene(scene_id)
-    window_sha = entry.get("window_sha256")
-    bounds = entry.get("world_bounds_m")
-    if not isinstance(window_sha, str) or not isinstance(bounds, list) or len(bounds) != 4:
-        raise FormalCacheError("cached scene canvas identity is invalid")
-    canvas = MapCanvas(window_sha, tuple(float(value) for value in bounds))
-    vector = VectorHazardScene(
-        seed=str(scenario.get("scene_seed")),
-        canvas=canvas,
-        rocks=tuple(RockCircle(*row) for row in arrays["rocks"].tolist()),
-        craters=tuple(CraterBowl(*row) for row in arrays["craters"].tolist()),
-        no_go_polygons=tuple(
-            NoGoPolygon(tuple(tuple(point) for point in polygon))
-            for polygon in arrays["no_go_vertices"].tolist()
+def _task_local_loaded_scene(
+    *,
+    record: FormalSceneIndexRecord,
+    common: TaskCommonArtifact,
+    platform: PlatformTaskArtifact,
+) -> _LoadedScene:
+    """Translate verified task artifacts into the existing episode boundary."""
+    if platform.common_artifact_sha256 != common.artifact_sha256:
+        raise ValueError("formal platform task common artifact identity differs")
+    if platform.key.common_key_sha256 != common.key.sha256():
+        raise ValueError("formal platform task common key identity differs")
+    if platform.platform_type != platform.key.platform_type:
+        raise ValueError("formal platform task type differs")
+    expected_diagnostics = {
+        "start_identity_sha256": platform.key.qualified_start_identity_sha256,
+        "platform_capability_sha256": platform.key.platform_capability_sha256,
+        "physical_reachability_algorithm_id": (
+            platform.key.reachability_algorithm_id
         ),
-    )
-    overlay = MultiResolutionScene(
-        canvas,
-        np.where(arrays["valid_mask"], arrays["elevation_m"], 0.0).astype(
-            np.float32
+        "physical_evidence_algorithm_id": (
+            platform.key.physical_evidence_algorithm_id
         ),
-        arrays["valid_mask"],
-        vector,
-        scenario_id=scene_id,
-    ).project(canvas)
-    base_elevation = (
-        arrays["elevation_m"] - overlay.crater_elevation_delta_m
-    ).astype(np.float32)
-    scene = MultiResolutionScene(
-        canvas,
-        np.where(arrays["valid_mask"], base_elevation, 0.0).astype(np.float32),
-        arrays["valid_mask"],
-        vector,
-        scenario_id=scene_id,
+        "sensor_algorithm_id": platform.key.sensor_algorithm_id,
+    }
+    if any(
+        platform.diagnostics.get(name) != expected
+        for name, expected in expected_diagnostics.items()
+    ):
+        raise ValueError("formal platform task diagnostics differ from key")
+    if (
+        platform.platform_type in {"WHEELED", "LEGGED"}
+        and platform.diagnostics.get("visibility_algorithm_id")
+        != platform.key.visibility_algorithm_id
+    ):
+        raise ValueError("formal ground task visibility identity differs")
+    geometry = common.geometry
+    span = geometry.span_cells
+    detail_cells = span * 20
+    coarse_shape = (span, span)
+    detail_shape = (detail_cells, detail_cells)
+    mission_roi = np.ascontiguousarray(
+        common.arrays["mission_roi_mask"], dtype=np.bool_
     )
-    regenerated = scene.project(canvas)
-    for name in (
-        "physical_obstacle_ratio",
-        "physical_obstacle_height_m",
-        "forbidden_ratio",
+    coverable = np.ascontiguousarray(
+        platform.arrays["task_coverable_detail_mask"], dtype=np.bool_
+    )
+    physical_mask = np.ascontiguousarray(
+        platform.arrays["physical_observation_pose_mask"], dtype=np.bool_
+    )
+    safe_mask = np.ascontiguousarray(
+        platform.arrays["physical_safe_pose_mask"], dtype=np.bool_
+    )
+    if (
+        mission_roi.shape != coarse_shape
+        or physical_mask.shape != coarse_shape
+        or safe_mask.shape != coarse_shape
+        or coverable.shape != detail_shape
     ):
-        if not np.array_equal(getattr(regenerated, name), arrays[name]):
-            raise FormalCacheError(f"cached {name} differs from vector scene")
-    if not np.allclose(
-        regenerated.elevation_m[arrays["valid_mask"]],
-        arrays["elevation_m"][arrays["valid_mask"]],
-        rtol=0.0,
-        atol=2.0e-5,
-    ):
-        raise FormalCacheError("cached elevation differs from reconstructed scene")
-    return _LoadedScene(scene, arrays, entry, scenario)
+        raise ValueError("formal task artifact local geometry differs")
+    if platform.diagnostics.get("resample_required") is True:
+        raise ValueError("formal task artifact requires deterministic resampling")
+    if not bool(coverable.any()):
+        raise ValueError("formal task artifact has a zero denominator")
+    priority_seed = hashlib.sha256(
+        f"task-priority/v1\0{geometry.episode_seed}".encode("utf-8")
+    ).hexdigest()
+    priority = build_task_priority_mask(
+        mission_roi,
+        span_cells=span,
+        priority_seed=priority_seed,
+    )
+    priority_detail = np.repeat(
+        np.repeat(priority.coarse_mask, 20, axis=0),
+        20,
+        axis=1,
+    )
+    priority_coverable = np.ascontiguousarray(
+        priority_detail & coverable,
+        dtype=np.bool_,
+    )
+    prefix = platform.platform_type.lower()
+    halo_row0, _, halo_column0, _ = geometry.halo_coarse_bounds_half_open
+    row0, row1, column0, column1 = geometry.coarse_bounds_half_open
+    local_rows = slice(row0 - halo_row0, row1 - halo_row0)
+    local_columns = slice(
+        column0 - halo_column0,
+        column1 - halo_column0,
+    )
+    arrays: dict[str, np.ndarray] = {
+        name: np.ascontiguousarray(
+            common.arrays[name][local_rows, local_columns]
+        )
+        for name in (
+            "elevation_m",
+            "valid_mask",
+            "physical_obstacle_ratio",
+            "physical_obstacle_height_m",
+            "forbidden_ratio",
+        )
+    }
+    arrays.update(
+        {
+            "scoped_mission_roi": mission_roi,
+            "task_priority_coarse_mask": np.ascontiguousarray(
+                priority.coarse_mask, dtype=np.bool_
+            ),
+            "task_priority_detail_bits": pack_detail_mask(
+                priority_coverable
+            ),
+            f"{prefix}_hard_feasible": safe_mask.astype(np.uint8),
+            # The task artifact already carries the exact binary safe authority.
+            # Runtime clearance remains a ranking feature and must not expand it.
+            f"{prefix}_clearance_margin_norm": safe_mask.astype(np.float32),
+            f"{prefix}_physical_observation_pose_bits": pack_detail_mask(
+                physical_mask
+            ),
+            f"{prefix}_physical_observation_positions_um": (
+                np.ascontiguousarray(
+                    platform.arrays["physical_observation_positions_um"],
+                    dtype=np.int64,
+                )
+            ),
+            f"{prefix}_coverable_detail_bits": pack_detail_mask(coverable),
+            f"{prefix}_coverable_ratio": np.ascontiguousarray(
+                platform.arrays["coverable_ratio"], dtype=np.float32
+            ),
+        }
+    )
+    scene = _TaskLocalMultiResolutionScene(
+        common,
+        window_sha256=record.window_sha256,
+        scene_seed=record.scene_seed,
+    )
+    coverable_count = int(coverable.sum(dtype=np.int64))
+    coverable_sha = mask_sha256(coverable)
+    priority_count = int(priority_coverable.sum(dtype=np.int64))
+    entry = {
+        **record.to_dict(),
+        "task_area": {
+            "sampling_algorithm": "deterministic-uniform-square/v1",
+            "episode_seed": geometry.episode_seed,
+            "span_cells": span,
+            "size_m": span * 4.0,
+            "coarse_bounds_half_open": list(
+                geometry.coarse_bounds_half_open
+            ),
+            "detail_bounds_half_open": list(
+                geometry.detail_bounds_half_open
+            ),
+            "halo_coarse_bounds_half_open": list(
+                geometry.halo_coarse_bounds_half_open
+            ),
+            "coverable_detail_cell_count": coverable_count,
+            "coverable_detail_mask_sha256": coverable_sha,
+            "scale_bucket": geometry.scale_bucket.value,
+            "priority_seed": priority_seed,
+            "priority_side_cells": priority.side_cells,
+            "priority_coarse_mask_sha256": priority.coarse_mask_sha256,
+            "priority_detail_mask_sha256": mask_sha256(priority_coverable),
+            "priority_coverable_detail_cell_count": priority_count,
+        },
+        "platform_coverability": {
+            platform.platform_type: {
+                "eligible": True,
+                "qualified_start_cell": list(geometry.local_start_cell),
+                "coverable_detail_shape": [detail_cells, detail_cells],
+                "coverable_detail_cell_count": coverable_count,
+                "coverable_detail_mask_sha256": coverable_sha,
+            }
+        },
+    }
+    return _LoadedScene(
+        scene=scene,
+        arrays=arrays,
+        entry=entry,
+        scenario={
+            "scene_id": record.scene_id,
+            "scene_seed": record.scene_seed,
+            "world_bounds_m": list(record.world_bounds_m),
+        },
+        task_geometry=geometry,
+        task_common_key_sha256=common.key.sha256(),
+        task_common_artifact_sha256=common.artifact_sha256,
+        platform_task_key_sha256=platform.key.sha256(),
+        platform_task_artifact_sha256=platform.artifact_sha256,
+    )
 
 
 def _vec3(x: float, y: float, z: float) -> object:
@@ -396,6 +843,91 @@ def _grid_map(
     return grid
 
 
+_PLANNER_GLOBAL_SCALE_FACTORS = (1, 2, 4, 8, 16, 20)
+_PLANNER_GLOBAL_TARGET_AXIS_CELLS = 256
+
+
+def _planner_global_canvas(source: MapCanvas) -> MapCanvas:
+    """Choose the C++ hierarchical level for one exact task-local extent."""
+    size_m = source.geometry.size_m
+    for factor in _PLANNER_GLOBAL_SCALE_FACTORS:
+        resolution_m = LOCAL_GEOMETRY.resolution_m * factor
+        cells = int(
+            math.ceil(
+                size_m / resolution_m
+                - 1.0e-9 * max(1.0, abs(size_m / resolution_m))
+            )
+        )
+        if cells <= _PLANNER_GLOBAL_TARGET_AXIS_CELLS:
+            padded_size_m = cells * resolution_m
+            left, _, _, top = source.bounds_m
+            bounds = (
+                left,
+                top - padded_size_m,
+                left + padded_size_m,
+                top,
+            )
+            identity = hashlib.sha256(
+                (
+                    f"formal-planner-global-level/v1\0{source.identity}\0"
+                    f"{resolution_m:.17g}\0{cells}"
+                ).encode("utf-8")
+            ).hexdigest()
+            return MapCanvas(
+                identity,
+                bounds,
+                GridGeometry(
+                    size_m=padded_size_m,
+                    resolution_m=resolution_m,
+                    cells=cells,
+                ),
+            )
+    raise ValueError("formal task extent exceeds the planner global hierarchy")
+
+
+def _project_task_grid_to_planner_level(
+    values: np.ndarray,
+    *,
+    source: MapCanvas,
+    target: MapCanvas,
+    fill_value: object,
+) -> np.ndarray:
+    """Nearest containing-cell projection with any edge padding kept invalid."""
+    array = np.asarray(values)
+    source_cells = source.geometry.cells
+    if array.shape != (source_cells, source_cells):
+        raise ValueError("formal planner source grid geometry differs")
+    target_cells = target.geometry.cells
+    left, bottom, right, top = source.bounds_m
+    target_left, _, _, target_top = target.bounds_m
+    resolution_m = target.geometry.resolution_m
+    target_columns_m = (
+        target_left
+        + (np.arange(target_cells, dtype=np.float64) + 0.5) * resolution_m
+    )
+    target_rows_m = (
+        target_top
+        - (np.arange(target_cells, dtype=np.float64) + 0.5) * resolution_m
+    )
+    valid_columns = (target_columns_m >= left) & (target_columns_m < right)
+    valid_rows = (target_rows_m > bottom) & (target_rows_m <= top)
+    source_columns = np.floor(
+        (target_columns_m[valid_columns] - left) / source.geometry.resolution_m
+    ).astype(np.intp)
+    source_rows = np.floor(
+        (top - target_rows_m[valid_rows]) / source.geometry.resolution_m
+    ).astype(np.intp)
+    output = np.full(
+        (target_cells, target_cells),
+        fill_value,
+        dtype=array.dtype,
+    )
+    output[np.ix_(valid_rows, valid_columns)] = array[
+        np.ix_(source_rows, source_columns)
+    ]
+    return np.ascontiguousarray(output)
+
+
 def _yaw_from_pose(value: object) -> float:
     orientation = value.orientation
     return math.atan2(
@@ -436,6 +968,44 @@ class FormalEpisode:
         self.scene_seed = str(loaded.scenario.get("scene_seed"))
         self.start_seed = _formal_episode_seed("start", scenario_identity)
         self.episode_seed = _formal_episode_seed("episode", scenario_identity)
+        if (
+            loaded.task_geometry is None
+            or loaded.task_common_key_sha256 is None
+            or loaded.task_common_artifact_sha256 is None
+            or loaded.platform_task_key_sha256 is None
+            or loaded.platform_task_artifact_sha256 is None
+        ):
+            raise ValueError("formal task cache identity is missing")
+        self.task_geometry = loaded.task_geometry
+        self.task_geometry_sha256 = loaded.task_geometry.geometry_sha256
+        self.task_common_key_sha256 = loaded.task_common_key_sha256
+        self.task_common_artifact_sha256 = (
+            loaded.task_common_artifact_sha256
+        )
+        self.platform_task_key_sha256 = loaded.platform_task_key_sha256
+        self.platform_task_artifact_sha256 = (
+            loaded.platform_task_artifact_sha256
+        )
+        task_area_payload = loaded.entry.get("task_area")
+        if not isinstance(task_area_payload, Mapping):
+            raise ValueError("formal Reward V4 task identity is missing")
+        try:
+            self.scale_bucket = TaskScaleBucket(
+                str(task_area_payload["scale_bucket"])
+            )
+            self.task_span_cells = int(task_area_payload["span_cells"])
+            self.priority_seed = str(task_area_payload["priority_seed"])
+            self.priority_coarse_mask_sha256 = str(
+                task_area_payload["priority_coarse_mask_sha256"]
+            )
+            self.priority_detail_mask_sha256 = str(
+                task_area_payload["priority_detail_mask_sha256"]
+            )
+            self.priority_coverable_detail_cell_count = int(
+                task_area_payload["priority_coverable_detail_cell_count"]
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("formal Reward V4 task identity is invalid") from error
         self._static_hard = loaded.arrays[
             f"{platform_type.lower()}_hard_feasible"
         ].astype(bool)
@@ -444,9 +1014,10 @@ class FormalEpisode:
         ]
         self.start_cell = start_cell
         prefix = platform_type.lower()
+        coarse_cells = loaded.scene.base_canvas.geometry.cells
         cached_physical_mask = unpack_detail_mask(
             loaded.arrays[f"{prefix}_physical_observation_pose_bits"].copy(),
-            (GLOBAL_GEOMETRY.cells, GLOBAL_GEOMETRY.cells),
+            (coarse_cells, coarse_cells),
         )
         if not bool(cached_physical_mask[start_cell]):
             raise ValueError("formal start is absent from cached physical authority")
@@ -494,9 +1065,17 @@ class FormalEpisode:
         )
         self.start_is_safe = bool(self._static_hard[start_cell])
         self._mission_roi = self._build_mission_roi()
+        priority_coarse = np.ascontiguousarray(
+            loaded.arrays.get("task_priority_coarse_mask"),
+            dtype=np.bool_,
+        )
+        if priority_coarse.shape != self._mission_roi.shape:
+            raise ValueError("formal task priority geometry is invalid")
+        if mask_sha256(priority_coarse) != self.priority_coarse_mask_sha256:
+            raise ValueError("formal task priority coarse identity differs")
         self.mission = MissionRaster(
             loaded.scene.base_canvas,
-            priority=self._mission_roi.astype(np.float32),
+            priority=priority_coarse.astype(np.float32),
             roi_ratio=self._mission_roi.astype(np.float32),
         )
         coverability = loaded.entry["platform_coverability"][platform_type]
@@ -505,7 +1084,7 @@ class FormalEpisode:
             raise ValueError("formal coverability detail geometry is invalid")
         self.sensor_state = MultiresSensorObservationState(
             scene=loaded.scene,
-            tile_provider=SceneTileProvider(loaded.scene, capacity=8),
+            tile_provider=_TaskLocalSceneTileProvider(loaded.scene, capacity=8),
             mission_roi_ratio=self.mission.roi_ratio,
             mission_priority=self.mission.priority,
             coverable_detail_shape=(
@@ -520,13 +1099,20 @@ class FormalEpisode:
             coverable_mask_sha256=str(
                 coverability["coverable_detail_mask_sha256"]
             ),
+            priority_detail_shape=(
+                int(detail_shape_raw[0]), int(detail_shape_raw[1])
+            ),
+            priority_detail_bits=loaded.arrays["task_priority_detail_bits"],
+            priority_detail_cell_count=(
+                self.priority_coverable_detail_cell_count
+            ),
+            priority_detail_mask_sha256=self.priority_detail_mask_sha256,
         )
         self._candidate_builder = CandidateBuilderV2(self.sensor_state)
-        self._frontier_oracle = FrontierOpportunityOracle(self.sensor_state)
         self._legacy_candidate_builder = CandidateBuilderV2(
             NativeVisibilityEstimator(
                 SensorGeometry(FORMAL_SENSOR_RANGE_M, FORMAL_SENSOR_FOV_RAD),
-                resolution_m=GLOBAL_GEOMETRY.resolution_m,
+                resolution_m=loaded.scene.base_canvas.geometry.resolution_m,
             )
         )
         self._detail_candidate_gain_enabled = detail_candidate_gain_enabled
@@ -539,6 +1125,7 @@ class FormalEpisode:
         self._snapshot: _MapSnapshot | None = None
         self._revision = 0
         self._pending_hop_landing: Pose2 | None = None
+        self._pending_hop_midpoint: Pose2 | None = None
         self._pending_hop_elapsed_s = 0.0
         self._hopper_feedback_phase = 0
         self._active_ground_option: _GroundOption | None = None
@@ -661,7 +1248,22 @@ class FormalEpisode:
             self.scene_seed,
             self.start_seed,
             self.episode_seed,
+            self.task_geometry_sha256,
+            self.task_common_key_sha256,
+            self.task_common_artifact_sha256,
+            self.platform_task_key_sha256,
+            self.platform_task_artifact_sha256,
+            self.task_geometry.coarse_bounds_half_open,
+            self.task_geometry.detail_bounds_half_open,
+            self.task_geometry.halo_coarse_bounds_half_open,
             self.sensor_state.coverable_mask_sha256,
+            self.sensor_state.coverable_detail_cell_count,
+            self.scale_bucket.value,
+            self.task_span_cells,
+            self.priority_seed,
+            self.priority_coarse_mask_sha256,
+            self.priority_detail_mask_sha256,
+            self.priority_coverable_detail_cell_count,
             self.start_cell,
         )
         persisted_static = (
@@ -675,7 +1277,22 @@ class FormalEpisode:
             state.scene_seed,
             state.start_seed,
             state.episode_seed,
+            state.task_geometry_sha256,
+            state.task_common_key_sha256,
+            state.task_common_artifact_sha256,
+            state.platform_task_key_sha256,
+            state.platform_task_artifact_sha256,
+            state.task_coarse_bounds_half_open,
+            state.task_detail_bounds_half_open,
+            state.task_halo_bounds_half_open,
             state.coverability_mask_sha256,
+            state.coverable_detail_cell_count,
+            state.scale_bucket,
+            state.task_span_cells,
+            state.priority_seed,
+            state.priority_coarse_mask_sha256,
+            state.priority_detail_mask_sha256,
+            state.priority_coverable_detail_cell_count,
             state.start_cell,
         )
         if persisted_static != expected_static:
@@ -738,17 +1355,30 @@ class FormalEpisode:
                 reveal.execution_state,
                 defer_candidate_rebuild=reveal.defer_candidate_rebuild,
             )
-            self.controller.after_execution(
-                platform_type=self.platform_type,
-                execution_state=reveal.execution_state,
-                evidence=evidence,
-            )
+            if self.platform_type == "HOPPER" and evidence.path_samples:
+                self.controller.replay_hopper_trajectory(evidence)
+            else:
+                self.controller.after_execution(
+                    platform_type=self.platform_type,
+                    execution_state=reveal.execution_state,
+                    evidence=evidence,
+                )
 
         snapshot = self._snapshot
         if snapshot is None:
             raise ValueError("formal replay produced no physical snapshot")
         if snapshot.candidate_universe.physical_snapshot_id != state.physical_snapshot_id:
             raise ValueError("formal replay physical snapshot differs")
+        if (
+            self.sensor_state.observed_coverable_detail_cell_count
+            != state.observed_coverable_detail_cell_count
+        ):
+            raise ValueError("formal replay observed coverage count differs")
+        if (
+            self.sensor_state.observed_coverable_mask_sha256()
+            != state.observed_coverable_mask_sha256
+        ):
+            raise ValueError("formal replay observed coverage mask differs")
 
         self.last_hop_available_delta_v_mps = (
             state.last_hop_available_delta_v_mps
@@ -760,9 +1390,26 @@ class FormalEpisode:
         identity = observation.observation_identities[0]
         candidate_ids = tuple(str(item) for item in snapshot.candidates.candidate_ids)
         candidate_mask = tuple(bool(item) for item in snapshot.candidates.mask)
+        decision_snapshot = snapshot.candidate_universe.decision_snapshot
+        if decision_snapshot is None:
+            raise ValueError("formal replay candidate decision snapshot is missing")
         terminal_reason = _audit_candidate_boundary(
-            snapshot.candidates.diagnostics,
-            snapshot.frontier_oracle,
+            decision_snapshot, self.platform_type
+        )
+        replayed_decision_snapshot = replace(
+            decision_snapshot,
+            global_search_elapsed_s=(
+                state.candidate_decision_snapshot.global_search_elapsed_s
+            ),
+            candidate_refresh_elapsed_s=(
+                state.candidate_decision_snapshot.candidate_refresh_elapsed_s
+            ),
+            scan_elapsed_s=state.candidate_decision_snapshot.scan_elapsed_s,
+            sort_elapsed_s=state.candidate_decision_snapshot.sort_elapsed_s,
+            top64_elapsed_s=state.candidate_decision_snapshot.top64_elapsed_s,
+            reserve_elapsed_s=(
+                state.candidate_decision_snapshot.reserve_elapsed_s
+            ),
         )
         replayed = (
             self._revision,
@@ -778,8 +1425,7 @@ class FormalEpisode:
             policy_batch_sha256(observation),
             candidate_ids,
             candidate_mask,
-            snapshot.frontier_oracle.oracle_opportunity_count,
-            snapshot.frontier_oracle.oracle_opportunity_set_sha256,
+            replayed_decision_snapshot,
             None if terminal_reason is None else terminal_reason.value,
             self._defer_candidate_rebuild,
             self._current_candidate_gain_resolution_m,
@@ -798,14 +1444,48 @@ class FormalEpisode:
             state.policy_batch_sha256,
             state.candidate_ids,
             state.candidate_mask,
-            state.oracle_opportunity_count,
-            state.oracle_opportunity_set_sha256,
+            state.candidate_decision_snapshot,
             state.terminal_reason,
             state.defer_candidate_rebuild,
             state.candidate_gain_resolution_m,
         )
         if replayed != persisted:
-            raise ValueError("formal replay physical identity differs")
+            names = (
+                "observation_revision",
+                "physical_evidence_generation",
+                "physical_evidence_sha256",
+                "physical_snapshot_id",
+                "physical_candidate_universe_sha256",
+                "planner_failed_candidate_ids",
+                "current_pose",
+                "legged_body_z_m",
+                "state_time_ns",
+                "observation_identity",
+                "policy_batch_sha256",
+                "candidate_ids",
+                "candidate_mask",
+                "candidate_decision_snapshot",
+                "terminal_reason",
+                "defer_candidate_rebuild",
+                "candidate_gain_resolution_m",
+            )
+            mismatches = tuple(
+                name
+                for name, replayed_value, persisted_value in zip(
+                    names, replayed, persisted, strict=True
+                )
+                if replayed_value != persisted_value
+            )
+            raise ValueError(
+                f"formal replay physical identity differs: {mismatches}"
+            )
+        self._snapshot = replace(
+            snapshot,
+            candidate_universe=replace(
+                snapshot.candidate_universe,
+                decision_snapshot=replayed_decision_snapshot,
+            ),
+        )
         self.initial_observation = observation
 
     def snapshot_state(self, environment: object) -> FormalWorkerState:
@@ -815,7 +1495,11 @@ class FormalEpisode:
         stable_state = getattr(environment, "snapshot_stable_state", None)
         if not callable(stable_state):
             raise ValueError("formal snapshot environment is invalid")
-        execution_state = stable_state().get("execution_state")
+        stable_payload = stable_state()
+        execution_state = stable_payload.get("execution_state")
+        cumulative_executed_path_m = stable_payload.get(
+            "cumulative_executed_path_m"
+        )
         observation = getattr(environment, "current_observation", None)
         if not isinstance(observation, PolicyBatch):
             raise ValueError("formal snapshot observation is invalid")
@@ -839,9 +1523,20 @@ class FormalEpisode:
             snapshot.candidate_universe.physical_snapshot_id
         ):
             raise ValueError("formal snapshot planner failure identity differs")
+        decision_snapshot = snapshot.candidate_universe.decision_snapshot
+        if decision_snapshot is None:
+            raise ValueError("formal candidate decision snapshot is missing")
         terminal_reason = _audit_candidate_boundary(
-            snapshot.candidates.diagnostics,
-            snapshot.frontier_oracle,
+            decision_snapshot, self.platform_type
+        )
+        persisted_decision_snapshot = replace(
+            decision_snapshot,
+            global_search_elapsed_s=0.0,
+            candidate_refresh_elapsed_s=0.0,
+            scan_elapsed_s=0.0,
+            sort_elapsed_s=0.0,
+            top64_elapsed_s=0.0,
+            reserve_elapsed_s=0.0,
         )
         identity = observation.observation_identities[0]
         return FormalWorkerState(
@@ -855,13 +1550,49 @@ class FormalEpisode:
             scene_seed=self.scene_seed,
             start_seed=self.start_seed,
             episode_seed=self.episode_seed,
+            task_geometry_sha256=self.task_geometry_sha256,
+            task_common_key_sha256=self.task_common_key_sha256,
+            task_common_artifact_sha256=self.task_common_artifact_sha256,
+            platform_task_key_sha256=self.platform_task_key_sha256,
+            platform_task_artifact_sha256=(
+                self.platform_task_artifact_sha256
+            ),
+            task_coarse_bounds_half_open=(
+                self.task_geometry.coarse_bounds_half_open
+            ),
+            task_detail_bounds_half_open=(
+                self.task_geometry.detail_bounds_half_open
+            ),
+            task_halo_bounds_half_open=(
+                self.task_geometry.halo_coarse_bounds_half_open
+            ),
             coverability_mask_sha256=str(
                 self.sensor_state.coverable_mask_sha256
+            ),
+            observed_coverable_mask_sha256=(
+                self.sensor_state.observed_coverable_mask_sha256()
+            ),
+            coverable_detail_cell_count=int(
+                self.sensor_state.coverable_detail_cell_count
+            ),
+            observed_coverable_detail_cell_count=int(
+                self.sensor_state.observed_coverable_detail_cell_count
+            ),
+            scale_bucket=self.scale_bucket.value,
+            task_span_cells=self.task_span_cells,
+            priority_seed=self.priority_seed,
+            priority_coarse_mask_sha256=(
+                self.priority_coarse_mask_sha256
+            ),
+            priority_detail_mask_sha256=self.priority_detail_mask_sha256,
+            priority_coverable_detail_cell_count=(
+                self.priority_coverable_detail_cell_count
             ),
             start_cell=self.start_cell,
             current_pose=self._pose_state(self.current_pose),
             legged_body_z_m=float(self._current_legged_body_z_m),
             execution_state=str(execution_state),
+            cumulative_executed_path_m=float(cumulative_executed_path_m),
             observation_revision=self._revision,
             physical_snapshot_id=(
                 snapshot.candidate_universe.physical_snapshot_id
@@ -885,12 +1616,7 @@ class FormalEpisode:
             candidate_mask=tuple(
                 bool(item) for item in snapshot.candidates.mask
             ),
-            oracle_opportunity_count=(
-                snapshot.frontier_oracle.oracle_opportunity_count
-            ),
-            oracle_opportunity_set_sha256=(
-                snapshot.frontier_oracle.oracle_opportunity_set_sha256
-            ),
+            candidate_decision_snapshot=persisted_decision_snapshot,
             terminal_reason=(
                 None if terminal_reason is None else terminal_reason.value
             ),
@@ -909,11 +1635,11 @@ class FormalEpisode:
             return CandidateDiagnostics()
         return snapshot.candidates.diagnostics
 
-    def frontier_oracle_result(self) -> FrontierOracleResult:
+    def current_candidate_decision_snapshot(self) -> CandidateDecisionSnapshot:
         snapshot = self._snapshot
-        if snapshot is None:
-            raise RuntimeError("formal frontier oracle has no observed snapshot")
-        return snapshot.frontier_oracle
+        if snapshot is None or snapshot.candidate_universe.decision_snapshot is None:
+            raise RuntimeError("formal candidate decision snapshot is unavailable")
+        return snapshot.candidate_universe.decision_snapshot
 
     def remaining_coverable_detail_cell_count(self) -> int:
         remaining = self.sensor_state.remaining_coverable_detail_cell_count
@@ -925,17 +1651,17 @@ class FormalEpisode:
         scoped = self.loaded.arrays.get("scoped_mission_roi")
         if scoped is not None:
             roi = np.ascontiguousarray(scoped, dtype=np.bool_)
-            if roi.shape != (
-                GLOBAL_GEOMETRY.cells,
-                GLOBAL_GEOMETRY.cells,
-            ):
+            cells = self.loaded.scene.base_canvas.geometry.cells
+            if roi.shape != (cells, cells):
                 raise ValueError("formal scoped mission ROI geometry is invalid")
             if not bool(roi[self.start_cell]):
                 raise ValueError("formal scoped mission ROI excludes the start")
             return roi
         return build_formal_mission_roi(self.loaded.arrays)
 
-    def _observed_maps(self) -> tuple[object, object, DetailObservedWindow]:
+    def _observed_maps(
+        self,
+    ) -> tuple[object, object, object, DetailObservedWindow]:
         observed = self.sensor_state.observed
         stamp_ns = 1_000_000_000 + self._revision * 1_000_000
         global_map = _grid_map(
@@ -944,11 +1670,46 @@ class FormalEpisode:
             elevation_m=observed.elevation_m,
             valid_mask=observed.valid_mask,
             physical_obstacle_ratio=observed.physical_obstacle_ratio,
-            physical_obstacle_height_m=self.sensor_state.coarse_obstacle_height_m,
+            physical_obstacle_height_m=(
+                self.sensor_state.coarse_obstacle_height_m
+            ),
             forbidden_ratio=self.sensor_state.coarse_forbidden_ratio,
             observation_age_s=observed.observation_age_s,
             observation_quality=observed.observation_quality,
             observation_count=observed.observation_count,
+            stamp_ns=stamp_ns,
+        )
+        planner_canvas = _planner_global_canvas(observed.canvas)
+
+        def planner_level(values: np.ndarray, fill_value: object) -> np.ndarray:
+            return _project_task_grid_to_planner_level(
+                values,
+                source=observed.canvas,
+                target=planner_canvas,
+                fill_value=fill_value,
+            )
+
+        planner_global_map = _grid_map(
+            canvas=planner_canvas,
+            frame_id="map",
+            elevation_m=planner_level(observed.elevation_m, np.float32(0.0)),
+            valid_mask=planner_level(observed.valid_mask, False),
+            physical_obstacle_ratio=planner_level(
+                observed.physical_obstacle_ratio, np.float32(0.0)
+            ),
+            physical_obstacle_height_m=planner_level(
+                self.sensor_state.coarse_obstacle_height_m, np.float32(0.0)
+            ),
+            forbidden_ratio=planner_level(
+                self.sensor_state.coarse_forbidden_ratio, np.float32(0.0)
+            ),
+            observation_age_s=planner_level(
+                observed.observation_age_s, np.float32(0.0)
+            ),
+            observation_quality=planner_level(
+                observed.observation_quality, np.float32(0.0)
+            ),
+            observation_count=planner_level(observed.observation_count, 0),
             stamp_ns=stamp_ns,
         )
         detail = self.sensor_state.planning_observation(self.current_pose)
@@ -965,7 +1726,7 @@ class FormalEpisode:
             observation_count=detail.observation_count,
             stamp_ns=stamp_ns,
         )
-        return global_map, local_map, detail
+        return global_map, planner_global_map, local_map, detail
 
     def _base_request(self, global_map: object, local_map: object) -> object:
         request = bridge_api.TrainingPlanRequest()
@@ -1022,16 +1783,35 @@ class FormalEpisode:
         if pose != self.current_pose:
             raise ValueError("policy observation pose differs from episode state")
         self._revision += 1
-        global_map, local_map, _ = self._observed_maps()
+        snapshot = self._snapshot
+        pending_failure = self._pending_planning_failure
+        if (
+            snapshot is not None
+            and pending_failure is not None
+            and pending_failure[2]
+            == snapshot.candidate_universe.physical_snapshot_id
+            and snapshot.planning_physical_snapshot_id
+            == snapshot.candidate_universe.physical_snapshot_id
+        ):
+            return self._reselect_current_candidate_snapshot(pose)
+        global_map, planner_global_map, local_map, _ = self._observed_maps()
         if self._defer_candidate_rebuild:
             return self._build_ground_continuation_observation(
                 pose,
                 global_map=global_map,
+                planner_global_map=planner_global_map,
                 local_map=local_map,
             )
         local = self.sensor_state.local_observation(pose)
         world = observed.to_observed_world(local=local)
-        projection_request = self._base_request(global_map, local_map)
+        projection_request = self._base_request(
+            (
+                global_map
+                if self.platform_type == "HOPPER"
+                else planner_global_map
+            ),
+            local_map,
+        )
         projection_request.request_id = (
             f"formal-projection/{self.scene_id}/{self._revision}"
         )
@@ -1042,6 +1822,11 @@ class FormalEpisode:
         projection_request.goal.target = point
         apply_goal_theta(projection_request.goal, self.platform_type, pose.yaw_rad)
         local_cpp = self._bridge.project_traversability(projection_request)
+        ground_start_resample_reason = self._qualify_ground_start(
+            planner_global_map=planner_global_map,
+            local_map=local_map,
+            pose=pose,
+        )
         local_known = np.ascontiguousarray(np.flipud(local_cpp.known).astype(bool))
         local_hard = np.ascontiguousarray(
             np.flipud(local_cpp.hard_feasible).astype(bool)
@@ -1081,9 +1866,16 @@ class FormalEpisode:
             observed_elevation_m=world.elevation_m,
             bridge=self._bridge,
             request=projection_request,
-            maximum_edge_distance_m=30.0,
+            maximum_edge_distance_m=(
+                None if self.platform_type == "HOPPER" else 30.0
+            ),
             local_traversability_projection=(
                 None if self.platform_type == "HOPPER" else local_cpp
+            ),
+            planner_global_canvas=(
+                None
+                if self.platform_type == "HOPPER"
+                else _planner_global_canvas(world.canvas)
             ),
         ).project_physical(safe_cells)
         backtrack_pose = (
@@ -1109,6 +1901,12 @@ class FormalEpisode:
                 physical_reachability.physical_reachability_algorithm_id
             ),
             goal_tolerance_mm=(0 if self.platform_type == "HOPPER" else 200),
+            excluded_cells=(
+                self._visited_candidate_cells
+                if self.platform_type == "HOPPER"
+                and self._visited_candidate_filter_enabled
+                else ()
+            ),
         )
         failure_snapshot_id = self._planner_failure_snapshot_id
         failed_candidate_ids = set(self._planner_failed_candidate_ids)
@@ -1156,12 +1954,6 @@ class FormalEpisode:
         self._planner_failed_candidate_ids = failed_candidate_ids
         self._pending_planning_failure = None
         candidates = candidate_result.batch
-        frontier_oracle = self._frontier_oracle.evaluate_physical(
-            world,
-            self.mission,
-            pose_map=pose,
-            physical_reachability=physical_reachability,
-        )
         arrays = self._observation_builder.build(
             world,
             self.mission,
@@ -1174,13 +1966,84 @@ class FormalEpisode:
             self._revision,
             candidates,
             global_map,
+            planner_global_map,
             local_map,
             world,
             projection,
             physical_reachability,
             candidate_result.universe,
             candidate_universe.physical_snapshot_id,
-            frontier_oracle,
+            ground_start_resample_reason,
+        )
+        return PolicyBatch(
+            **{
+                name: torch.from_numpy(value.copy())
+                for name, value in arrays.items()
+            }
+        )
+
+    def _reselect_current_candidate_snapshot(self, pose: Pose2) -> PolicyBatch:
+        """Promote reserve entries without rerunning global search or gain."""
+        snapshot = self._snapshot
+        pending = self._pending_planning_failure
+        if snapshot is None or pending is None:
+            raise RuntimeError("candidate reselection requires a pending failure")
+        candidate_id, disposition, pending_snapshot_id, _ = pending
+        universe = snapshot.candidate_universe
+        if (
+            pending_snapshot_id != universe.physical_snapshot_id
+            or snapshot.planning_physical_snapshot_id
+            != universe.physical_snapshot_id
+        ):
+            raise ValueError("candidate reselection snapshot differs")
+        failed_candidate_ids = set(self._planner_failed_candidate_ids)
+        if self._planner_failure_snapshot_id != universe.physical_snapshot_id:
+            failed_candidate_ids.clear()
+        if disposition == (
+            bridge_api.CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT
+        ):
+            failed_candidate_ids.add(candidate_id)
+        backtrack_pose = (
+            self._navigation_stack[-2]
+            if len(self._navigation_stack) >= 2
+            else None
+        )
+        candidate_result = self._candidate_builder.select_available(
+            universe,
+            canvas_id=snapshot.candidates.canvas_id,
+            failure_snapshot_id=universe.physical_snapshot_id,
+            planner_failed_candidate_ids=failed_candidate_ids,
+            excluded_cells=(
+                self._visited_candidate_cells
+                if self._visited_candidate_filter_enabled
+                else ()
+            ),
+            backtrack_pose=backtrack_pose,
+        )
+        candidates = candidate_result.batch
+        arrays = self._observation_builder.build(
+            snapshot.world,
+            self.mission,
+            pose,
+            snapshot.projection,
+            candidates,
+            self.platform_type,
+        )
+        self._planner_failure_snapshot_id = universe.physical_snapshot_id
+        self._planner_failed_candidate_ids = failed_candidate_ids
+        self._pending_planning_failure = None
+        self._snapshot = _MapSnapshot(
+            self._revision,
+            candidates,
+            snapshot.global_map,
+            snapshot.planner_global_map,
+            snapshot.local_map,
+            snapshot.world,
+            snapshot.projection,
+            snapshot.physical_reachability,
+            candidate_result.universe,
+            snapshot.planning_physical_snapshot_id,
+            snapshot.ground_start_resample_reason,
         )
         return PolicyBatch(
             **{
@@ -1194,16 +2057,23 @@ class FormalEpisode:
         pose: Pose2,
         *,
         global_map: object,
+        planner_global_map: object,
         local_map: object,
     ) -> PolicyBatch:
         """Refresh planning maps without rebuilding unused policy candidates."""
         snapshot = self._snapshot
         if snapshot is None:
             raise RuntimeError("ground continuation has no prior map snapshot")
+        ground_start_resample_reason = self._qualify_ground_start(
+            planner_global_map=planner_global_map,
+            local_map=local_map,
+            pose=pose,
+        )
         self._snapshot = _MapSnapshot(
             self._revision,
             snapshot.candidates,
             global_map,
+            planner_global_map,
             local_map,
             snapshot.world,
             snapshot.projection,
@@ -1222,7 +2092,7 @@ class FormalEpisode:
                     self.sensor_state.physical_evidence_sha256()
                 ),
             ),
-            snapshot.frontier_oracle,
+            ground_start_resample_reason,
         )
         previous = self.controller.current_observation
         pose_features = previous.pose_features.clone()
@@ -1244,6 +2114,38 @@ class FormalEpisode:
             candidate_mask=previous.candidate_mask.clone(),
             platform_context=previous.platform_context.clone(),
         )
+
+    def _qualify_ground_start(
+        self,
+        *,
+        planner_global_map: object,
+        local_map: object,
+        pose: Pose2,
+    ) -> str | None:
+        if self.platform_type == "HOPPER":
+            return None
+        request = self._base_request(planner_global_map, local_map)
+        request.request_id = (
+            f"formal-start-qualification/{self.scene_id}/{self._revision}"
+        )
+        goal = bridge_api.PointGoal()
+        goal.position_m = _vec3(
+            pose.x_m,
+            pose.y_m,
+            pose.elevation_m,
+        )
+        goal.tolerance_m = 0.0
+        request.goal.goal_id = "current-pose-start-qualification"
+        request.goal.target = goal
+        apply_goal_theta(request.goal, self.platform_type, pose.yaw_rad)
+        output = self._bridge.plan(request)
+        return _ground_start_resample_reason(output, self.platform_type)
+
+    def ground_start_qualification_reason(self) -> str | None:
+        snapshot = self._snapshot
+        if snapshot is None:
+            raise RuntimeError("ground start qualification has no map snapshot")
+        return snapshot.ground_start_resample_reason
 
     def build_request(
         self, action: PolicyAction, expected_identity: ObservationIdentity
@@ -1268,7 +2170,10 @@ class FormalEpisode:
             if self.platform_type == "HOPPER"
             else float(action.theta_rad)
         )
-        request = self._base_request(snapshot.global_map, snapshot.local_map)
+        request = self._base_request(
+            snapshot.planner_global_map,
+            snapshot.local_map,
+        )
         # The observation boundary owns the authoritative state clock.  Cache
         # map objects are materialized while the observation is being built,
         # before that controller attaches its identity, so bind every request
@@ -1348,7 +2253,10 @@ class FormalEpisode:
         snapshot = self._snapshot
         if snapshot is None:
             raise RuntimeError("formal ground continuation has no map snapshot")
-        request = self._base_request(snapshot.global_map, snapshot.local_map)
+        request = self._base_request(
+            snapshot.planner_global_map,
+            snapshot.local_map,
+        )
         state_time_ns = expected_identity.state_time_ns
         request.state_time.nanoseconds_since_epoch = state_time_ns
         request.world.global_map.stamp.nanoseconds_since_epoch = state_time_ns
@@ -1443,14 +2351,17 @@ class FormalEpisode:
             self.controller.current_observation.observation_identities[0]
             .execution_state
         )
-        before_failed_ids = set(self._planner_failed_candidate_ids)
         rebuilt = self.controller.rebuild_without_sensor_update(
             pose_map=self.current_pose,
             execution_state=execution_state,
         )
         event_kind = (
             "PLANNING_FAILURE_SUPPRESS"
-            if self._planner_failed_candidate_ids != before_failed_ids
+            if (
+                disposition
+                == bridge_api.CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT
+                and candidate_id in self._planner_failed_candidate_ids
+            )
             else "PLANNING_FAILURE_REBUILD"
         )
         self._replay_event_kinds.append(event_kind)
@@ -1663,6 +2574,31 @@ class FormalEpisode:
         self._pending_hop_elapsed_s = float(
             segment.flight_time.total_seconds()
         )
+        start = self.current_pose
+        duration = self._pending_hop_elapsed_s
+        velocity = segment.launch_velocity_mps
+        gravity = tuple(
+            2.0 * (end - begin - speed * duration) / (duration * duration)
+            for begin, end, speed in (
+                (start.x_m, landing.x, velocity.x),
+                (start.y_m, landing.y, velocity.y),
+                (start.elevation_m, landing.z, velocity.z),
+            )
+        )
+        midpoint_time = 0.5 * duration
+        self._pending_hop_midpoint = Pose2(
+            start.x_m
+            + velocity.x * midpoint_time
+            + 0.5 * gravity[0] * midpoint_time * midpoint_time,
+            start.y_m
+            + velocity.y * midpoint_time
+            + 0.5 * gravity[1] * midpoint_time * midpoint_time,
+            0.0,
+            "map",
+            start.elevation_m
+            + velocity.z * midpoint_time
+            + 0.5 * gravity[2] * midpoint_time * midpoint_time,
+        )
         self.last_hop_available_delta_v_mps = float(
             segment.available_delta_v_mps
         )
@@ -1695,6 +2631,9 @@ class FormalEpisode:
             return self._hopper_feedback_failure()
         if self._hopper_feedback_phase == 0:
             self._hopper_feedback_phase = 1
+            midpoint = self._pending_hop_midpoint
+            if midpoint is None:
+                return self._hopper_feedback_failure()
             return CommittedHopExecutionFeedback(
                 execution_state="IN_FLIGHT",
                 next_observation=self.controller.current_observation,
@@ -1710,14 +2649,33 @@ class FormalEpisode:
                 execution_events=ExecutionEvents(
                     hopper_commitment_states=("IN_FLIGHT",)
                 ),
+                trajectory_points=(
+                    HopperTrajectoryPoint(
+                        midpoint, 0.5 * self._pending_hop_elapsed_s
+                    ),
+                ),
             )
         self._pending_hop_landing = None
+        midpoint = self._pending_hop_midpoint
+        self._pending_hop_midpoint = None
         elapsed_s = self._pending_hop_elapsed_s
         self._pending_hop_elapsed_s = 0.0
         self._hopper_feedback_phase = 0
         self.current_pose = landing
         evidence = SensorBoundaryEvidence(landing, elapsed_s)
-        self._record_reveal(evidence, "LANDED_HOLD")
+        if midpoint is None:
+            return self._hopper_feedback_failure()
+        self._record_reveal(
+            SensorBoundaryEvidence(
+                landing,
+                elapsed_s,
+                path_samples=(
+                    SensorPathSample(midpoint, 0.5 * elapsed_s),
+                    SensorPathSample(landing, 0.5 * elapsed_s),
+                ),
+            ),
+            "LANDED_HOLD",
+        )
         return CommittedHopExecutionFeedback(
             execution_state="LANDED_HOLD",
             next_observation=self.controller.current_observation,
@@ -1734,6 +2692,7 @@ class FormalEpisode:
                 hopper_commitment_states=("LANDED_HOLD",)
             ),
             sensor_boundary_evidence=evidence,
+            trajectory_points=(HopperTrajectoryPoint(landing, elapsed_s),),
         )
 
     def _execution_failure(self, *, hopper: bool = False) -> ReferenceExecutionResult:
@@ -1785,7 +2744,37 @@ class FormalWorkerBuilder:
     task_area: TaskAreaConfig
     platform_scenario_schedule_ids: Mapping[str, str] | None = None
     paired_evaluation: bool = False
+    task_cache_client: object | None = None
+    source_commit: str | None = None
+    task_halo: object | None = None
     sensor_closed_loop: ClassVar[bool] = True
+
+    def task_inventory_count(self, platform_type: str) -> int:
+        if platform_type not in _PLATFORMS:
+            raise ValueError("formal task inventory platform is invalid")
+        cache = load_formal_cache(
+            Path(self.cache_manifest_path),
+            require_full=not self.allow_preflight,
+        )
+        if self.paired_evaluation:
+            common_ids = set(
+                cache.manifest["exact_common_evaluation"]["splits"][
+                    self.split
+                ]["scene_ids"]
+            )
+            count = sum(
+                entry["scene_id"] in common_ids
+                for entry in cache.manifest["scenes"]
+            )
+        else:
+            count = sum(
+                entry["split"] == self.split
+                and entry["platform_starts"][platform_type]["qualified"]
+                for entry in cache.manifest["scenes"]
+            )
+        if type(count) is not int or count <= 0:
+            raise ValueError("formal task inventory is empty")
+        return count
 
     def __call__(
         self,
@@ -1794,26 +2783,14 @@ class FormalWorkerBuilder:
         capability: FrozenPlatformCapability,
         scenario_identity: ScenarioIdentity,
     ) -> FormalEnvironmentWorker:
-        loaded = self._load_scheduled_scene(worker_index, scenario_identity)
-        safe = self._safe_start_cells(loaded, platform_type)
-        payload = loaded.entry["platform_coverability"][platform_type]
-        start_raw = payload["qualified_start_cell"]
-        if (
-            payload.get("eligible") is not True
-            or not isinstance(start_raw, list)
-            or len(start_raw) != 2
-        ):
-            raise ValueError("formal scheduled scene has no qualified platform start")
-        start_cell = (int(start_raw[0]), int(start_raw[1]))
-        if start_cell not in safe:
-            raise ValueError("formal cached qualified start is not platform-safe")
-        loaded, _ = scope_formal_task_area(
-            loaded,
-            platform_type=platform_type,
-            start_cell=start_cell,
-            config=self.task_area,
-            episode_seed=_formal_episode_seed("episode", scenario_identity),
+        loaded = self._load_scheduled_scene(
+            worker_index,
+            scenario_identity,
+            capability,
         )
+        if loaded.task_geometry is None:
+            raise ValueError("formal task geometry is unavailable")
+        start_cell = loaded.task_geometry.local_start_cell
         episode = FormalEpisode(
             worker_index=worker_index,
             platform_type=platform_type,
@@ -1849,13 +2826,10 @@ class FormalWorkerBuilder:
             != scenario_identity.scenario_schedule_id
         ):
             raise ValueError("formal restore worker identity differs")
-        loaded = self._load_scheduled_scene(worker_index, scenario_identity)
-        loaded, _ = scope_formal_task_area(
-            loaded,
-            platform_type=platform_type,
-            start_cell=parsed.start_cell,
-            config=self.task_area,
-            episode_seed=_formal_episode_seed("episode", scenario_identity),
+        loaded = self._restore_task_scene(
+            scenario_identity=scenario_identity,
+            capability=capability,
+            state=parsed,
         )
         episode = FormalEpisode(
             worker_index=worker_index,
@@ -1868,7 +2842,10 @@ class FormalWorkerBuilder:
         episode.replay_state(parsed)
         worker = self._make_worker(episode)
         worker.environment.restore_stable_state(
-            execution_state=parsed.execution_state
+            execution_state=parsed.execution_state,
+            cumulative_executed_path_m=(
+                parsed.cumulative_executed_path_m
+            ),
         )
         return worker
 
@@ -1876,6 +2853,7 @@ class FormalWorkerBuilder:
         self,
         worker_index: int,
         scenario_identity: ScenarioIdentity,
+        capability: FrozenPlatformCapability,
     ) -> _LoadedScene:
         cache = load_formal_cache(
             Path(self.cache_manifest_path), require_full=not self.allow_preflight
@@ -1904,7 +2882,7 @@ class FormalWorkerBuilder:
                 entry
                 for entry in cache.manifest["scenes"]
                 if entry["split"] == self.split
-                and entry["platform_coverability"][platform_type]["eligible"]
+                and entry["platform_starts"][platform_type]["qualified"]
             ]
             schedule_id = (
                 self.platform_scenario_schedule_ids[platform_type]
@@ -1926,8 +2904,285 @@ class FormalWorkerBuilder:
             platform_worker_index=scenario_identity.platform_worker_index,
             platform_worker_count=scenario_identity.platform_worker_count,
         )
-        entry = entries[base_index]
-        return _load_multires_scene(cache, str(entry["scene_id"]))
+        base_episode_seed = _formal_episode_seed(
+            "episode", scenario_identity
+        )
+        scale_bucket = scale_bucket_for_worker(
+            scenario_identity.platform_worker_index,
+            scenario_identity.platform_worker_count,
+        )
+        rejected: list[dict[str, object]] = []
+        for attempt in range(len(entries)):
+            entry = entries[(base_index + attempt) % len(entries)]
+            record = cache.record(str(entry["scene_id"]))
+            qualified_start = record.platform_starts[capability.platform_type]
+            raw_start = qualified_start["qualified_start_cell"]
+            if (
+                qualified_start.get("qualified") is not True
+                or not isinstance(raw_start, (list, tuple))
+                or len(raw_start) != 2
+            ):
+                continue
+            geometry_seed = (
+                base_episode_seed
+                if attempt == 0
+                else hashlib.sha256(
+                    (
+                        f"{base_episode_seed}\0task-resample/v1\0{attempt}"
+                    ).encode("utf-8")
+                ).hexdigest()
+            )
+            geometry = freeze_formal_task_geometry(
+                start_cell=(int(raw_start[0]), int(raw_start[1])),
+                config=self.task_area,
+                episode_seed=geometry_seed,
+                scale_bucket=scale_bucket,
+                halo=self._resolved_task_halo(),
+            )
+            common_key, platform_key = self._keys(
+                cache=cache,
+                record=record,
+                geometry=geometry,
+                capability=capability,
+                qualified_start=qualified_start,
+                scenario_identity_sha256=base_episode_seed,
+            )
+            common, platform = self._resolve_task_artifacts(
+                cache=cache,
+                common_key=common_key,
+                platform_key=platform_key,
+                geometry=geometry,
+                record=record,
+                capability=capability,
+            )
+            if (
+                platform.diagnostics.get("resample_required") is True
+                or int(
+                    platform.diagnostics.get(
+                        "coverable_detail_cell_count", 0
+                    )
+                )
+                <= 0
+            ):
+                rejected.append(
+                    {
+                        "attempt": attempt,
+                        "platform_task_key_sha256": platform_key.sha256(),
+                        "reason": str(
+                            platform.diagnostics.get(
+                                "resample_reason", "ZERO_DENOMINATOR"
+                            )
+                        ),
+                    }
+                )
+                continue
+            loaded = _task_local_loaded_scene(
+                record=record,
+                common=common,
+                platform=platform,
+            )
+            if rejected:
+                loaded = replace(
+                    loaded,
+                    entry={
+                        **dict(loaded.entry),
+                        "task_resample_audit": rejected,
+                    },
+                )
+            return loaded
+        raise ValueError("formal task schedule has no nonzero denominator")
+
+    def _restore_task_scene(
+        self,
+        *,
+        scenario_identity: ScenarioIdentity,
+        capability: FrozenPlatformCapability,
+        state: FormalWorkerState,
+    ) -> _LoadedScene:
+        cache = load_formal_cache(
+            Path(self.cache_manifest_path), require_full=not self.allow_preflight
+        )
+        record = cache.record(state.scene_id)
+        qualified_start = record.platform_starts[capability.platform_type]
+        coarse = state.task_coarse_bounds_half_open
+        detail = state.task_detail_bounds_half_open
+        global_start = qualified_start.get("qualified_start_cell")
+        if (
+            not isinstance(global_start, (list, tuple))
+            or len(global_start) != 2
+        ):
+            raise ValueError("formal restore qualified start is invalid")
+        local_start = (
+            int(global_start[0]) - coarse[0],
+            int(global_start[1]) - coarse[2],
+        )
+        if local_start != state.start_cell:
+            raise ValueError("formal restore local start identity differs")
+        geometry = FrozenTaskGeometry(
+            episode_seed=state.episode_seed,
+            scale_bucket=TaskScaleBucket(state.scale_bucket),
+            span_cells=state.task_span_cells,
+            coarse_bounds_half_open=coarse,
+            detail_bounds_half_open=detail,
+            halo_coarse_bounds_half_open=state.task_halo_bounds_half_open,
+            local_start_cell=local_start,
+            geometry_sha256=state.task_geometry_sha256,
+        )
+        common_key, platform_key = self._keys(
+            cache=cache,
+            record=record,
+            geometry=geometry,
+            capability=capability,
+            qualified_start=qualified_start,
+            scenario_identity_sha256=state.episode_seed,
+        )
+        if (
+            common_key.sha256() != state.task_common_key_sha256
+            or platform_key.sha256() != state.platform_task_key_sha256
+        ):
+            raise ValueError("formal restore task cache key differs")
+        common, platform = self._resolve_task_artifacts(
+            cache=cache,
+            common_key=common_key,
+            platform_key=platform_key,
+            geometry=geometry,
+            record=record,
+            capability=capability,
+        )
+        if (
+            common.artifact_sha256 != state.task_common_artifact_sha256
+            or platform.artifact_sha256
+            != state.platform_task_artifact_sha256
+            or common.geometry.geometry_sha256
+            != state.task_geometry_sha256
+            or common.geometry.coarse_bounds_half_open != coarse
+            or common.geometry.detail_bounds_half_open != detail
+            or common.geometry.halo_coarse_bounds_half_open
+            != state.task_halo_bounds_half_open
+        ):
+            raise ValueError("formal restore task artifact identity differs")
+        return _task_local_loaded_scene(
+            record=record,
+            common=common,
+            platform=platform,
+        )
+
+    def _keys(
+        self,
+        *,
+        cache: FormalCache,
+        record: FormalSceneIndexRecord,
+        geometry: FrozenTaskGeometry,
+        capability: FrozenPlatformCapability,
+        qualified_start: Mapping[str, object],
+        scenario_identity_sha256: str,
+    ) -> tuple[TaskCommonKey, PlatformTaskKey]:
+        halo = self._resolved_task_halo()
+        source_commit = self.source_commit or cache.identity.v3_source_commit
+        common_key = TaskCommonKey(
+            scene_id=record.scene_id,
+            scenario_identity_sha256=scenario_identity_sha256,
+            source_identity_sha256=cache.identity.source_lock_file_sha256,
+            coarse_bounds_half_open=geometry.coarse_bounds_half_open,
+            detail_bounds_half_open=geometry.detail_bounds_half_open,
+            task_span_cells=geometry.span_cells,
+            scale_bucket=geometry.scale_bucket.value,
+            geometry_sha256=geometry.geometry_sha256,
+            halo_contract_sha256=_task_halo_contract_sha256(halo),
+            capability_bundle_sha256=halo.capability_bundle_sha256,
+            generator_sha256=GENERATOR_SHA256,
+            source_commit=source_commit,
+        )
+        return common_key, _task_platform_key(
+            common_key=common_key,
+            platform=capability,
+            qualified_start=qualified_start,
+        )
+
+    def _resolved_task_halo(self) -> object:
+        halo = self.task_halo
+        required = (
+            "coarse_cells",
+            "detail_cells",
+            "sensor_radius_m",
+            "platform_support_radius_m",
+            "native_stencil_radius_m",
+            "algorithm_id",
+            "capability_bundle_sha256",
+        )
+        if halo is None or any(not hasattr(halo, name) for name in required):
+            raise ValueError("formal task evidence halo is missing")
+        return halo
+
+    def _resolve_task_artifacts(
+        self,
+        *,
+        cache: FormalCache,
+        common_key: TaskCommonKey,
+        platform_key: PlatformTaskKey,
+        geometry: FrozenTaskGeometry,
+        record: FormalSceneIndexRecord,
+        capability: FrozenPlatformCapability,
+    ) -> tuple[TaskCommonArtifact, PlatformTaskArtifact]:
+        store = TaskCacheStore(cache.root)
+        if self.task_cache_client is None:
+            platform = store.load_platform(platform_key)
+            if platform is None:
+                raise TaskCacheCoordinatorError(
+                    "formal task artifact is missing and no coordinator is attached"
+                )
+        else:
+            contextual_getter = getattr(
+                self.task_cache_client, "get_task_artifacts", None
+            )
+            if callable(contextual_getter):
+                common, platform = contextual_getter(
+                    cache=cache,
+                    common_key=common_key,
+                    platform_key=platform_key,
+                    geometry=geometry,
+                    record=record,
+                    capability=capability,
+                )
+                if not isinstance(common, TaskCommonArtifact) or not isinstance(
+                    platform, PlatformTaskArtifact
+                ):
+                    raise TypeError("formal contextual task cache result is invalid")
+                if (
+                    common.root.parent.parent.parent.parent != cache.root
+                    or platform.root.parent.parent.parent.parent != cache.root
+                ):
+                    raise ValueError("formal task cache root differs")
+                if (
+                    platform.key != platform_key
+                    or common.key != common_key
+                    or platform.common_artifact_sha256
+                    != common.artifact_sha256
+                ):
+                    raise ValueError("formal task artifact reference differs")
+                return common, platform
+            getter = getattr(self.task_cache_client, "get", None)
+            if not callable(getter):
+                raise TypeError("formal task cache client is invalid")
+            reference = getter(
+                platform_key,
+                TaskBuildPriority.CURRENT_CURRICULUM,
+            )
+            platform = reference.load()
+            if reference.cache_root != cache.root:
+                raise ValueError("formal task cache root differs")
+        common = store.load_common(common_key)
+        if common is None:
+            raise TaskCacheCoordinatorError(
+                "formal task common artifact is missing after platform build"
+            )
+        if (
+            platform.key != platform_key
+            or common.key != common_key
+            or platform.common_artifact_sha256 != common.artifact_sha256
+        ):
+            raise ValueError("formal task artifact reference differs")
+        return common, platform
 
     @staticmethod
     def _make_worker(episode: FormalEpisode) -> FormalEnvironmentWorker:
@@ -1969,13 +3224,24 @@ class FormalWorkerBuilder:
             candidate_diagnostics_provider=(
                 episode.current_candidate_diagnostics
             ),
-            frontier_oracle=episode.frontier_oracle_result,
+            candidate_decision_snapshot_provider=(
+                episode.current_candidate_decision_snapshot
+            ),
             remaining_coverable_detail_cell_count_provider=(
                 episode.remaining_coverable_detail_cell_count
+            ),
+            ground_start_qualification_provider=(
+                episode.ground_start_qualification_reason
+                if platform_type != "HOPPER"
+                else None
             ),
             plan_cost_scale=100.0,
             planner_elapsed_scale_s=_FORMAL_MACRO_STEP_TIME_SCALE_S,
             include_planner_wall_time_in_reward=False,
+            task_scale_m=(
+                episode.task_span_cells
+                * episode.loaded.scene.base_canvas.geometry.resolution_m
+            ),
         )
         return FormalEnvironmentWorker(
             environment=environment,
@@ -1983,11 +3249,6 @@ class FormalWorkerBuilder:
             episode=episode,
         )
 
-    @staticmethod
-    def _safe_start_cells(
-        loaded: _LoadedScene, platform_type: str
-    ) -> tuple[tuple[int, int], ...]:
-        return formal_safe_start_cells(loaded.arrays, platform_type)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1997,6 +3258,8 @@ class FormalEnvironmentBuilder:
     task_area: TaskAreaConfig
     split: str = "train"
     allow_preflight: bool = False
+    task_cache_client: object | None = None
+    source_commit: str | None = None
 
     def build(self) -> FormalEnvironmentAssembly:
         cache = load_formal_cache(
@@ -2039,6 +3302,11 @@ class FormalEnvironmentBuilder:
             task_area=self.task_area,
             platform_scenario_schedule_ids=platform_schedule_ids,
             paired_evaluation=self.split != "train",
+            task_cache_client=self.task_cache_client,
+            source_commit=(
+                self.source_commit or cache.identity.v3_source_commit
+            ),
+            task_halo=derive_task_evidence_halo(self.capability_bundle),
         )
         factory = FrozenCapabilityEnvironmentFactory(
             bundle=self.capability_bundle,

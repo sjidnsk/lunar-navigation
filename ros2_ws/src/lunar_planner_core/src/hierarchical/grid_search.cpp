@@ -53,6 +53,15 @@ struct WorseOpenEntry final {
   };
 }
 
+[[nodiscard]] GlobalGridCostTreeResult
+TreeFailure(const GlobalSearchStatus status, std::string reason) {
+  return GlobalGridCostTreeResult{
+      .status = status,
+      .tree = std::nullopt,
+      .reason_code = std::move(reason),
+  };
+}
+
 [[nodiscard]] shared::GridCell CellFromIndex(const shared::MapSnapshot &map,
                                              const std::size_t index) noexcept {
   return shared::GridCell{
@@ -292,6 +301,108 @@ SearchGlobalGrid(const GlobalGridSearchProblem &problem) try {
 } catch (const std::bad_alloc &) {
   return Failure(GlobalSearchStatus::kAllocationFailed,
                  "GLOBAL_SEARCH_ALLOCATION_FAILED");
+}
+
+GlobalGridCostTreeResult
+SearchGlobalGridCostTree(const GlobalGridSearchProblem &problem) try {
+  if (problem.stop_token.stop_requested()) {
+    return TreeFailure(GlobalSearchStatus::kCanceled, "REQUEST_CANCELED");
+  }
+  const auto &map = problem.projection.source_map();
+  if (map == nullptr || !ValidConfig(problem) ||
+      !map->InBounds(problem.start) || !Available(problem, problem.start)) {
+    return TreeFailure(GlobalSearchStatus::kInvalidProblem,
+                       "GLOBAL_SEARCH_PROBLEM_INVALID");
+  }
+
+  const double infinity = std::numeric_limits<double>::infinity();
+  const std::size_t no_parent = std::numeric_limits<std::size_t>::max();
+  std::vector<double> best_g(map->cell_count(), infinity);
+  std::vector<std::size_t> parent(map->cell_count(), no_parent);
+  std::vector<std::uint8_t> closed(map->cell_count(), 0U);
+  std::priority_queue<OpenEntry, std::vector<OpenEntry>, WorseOpenEntry> open;
+
+  const std::size_t start_index = map->Index(problem.start);
+  best_g[start_index] = 0.0;
+  parent[start_index] = start_index;
+  open.push(OpenEntry{
+      .f = 0.0,
+      .h = 0.0,
+      .g = 0.0,
+      .state = start_index,
+  });
+  std::size_t expanded = 0U;
+
+  while (!open.empty()) {
+    if (problem.stop_token.stop_requested()) {
+      return TreeFailure(GlobalSearchStatus::kCanceled, "REQUEST_CANCELED");
+    }
+    const OpenEntry current_entry = open.top();
+    open.pop();
+    if (current_entry.g > best_g[current_entry.state] ||
+        closed[current_entry.state] != 0U) {
+      continue;
+    }
+    closed[current_entry.state] = 1U;
+    ++expanded;
+    const shared::GridCell current = CellFromIndex(*map, current_entry.state);
+
+    for (std::size_t neighbor_index = 0U; neighbor_index < kNeighborX.size();
+         ++neighbor_index) {
+      if (problem.stop_token.stop_requested()) {
+        return TreeFailure(GlobalSearchStatus::kCanceled, "REQUEST_CANCELED");
+      }
+      const std::int32_t delta_x = kNeighborX[neighbor_index];
+      const std::int32_t delta_y = kNeighborY[neighbor_index];
+      const shared::GridCell next{
+          .x = current.x + delta_x,
+          .y = current.y + delta_y,
+      };
+      if (!Available(problem, next) ||
+          !DiagonalAllowed(problem, current, delta_x, delta_y)) {
+        continue;
+      }
+      const std::size_t next_state = map->Index(next);
+      const double candidate_g =
+          current_entry.g +
+          EdgeCost(problem, next, delta_x != 0 && delta_y != 0);
+      if (!std::isfinite(candidate_g)) {
+        return TreeFailure(GlobalSearchStatus::kInvalidProblem,
+                           "GLOBAL_SEARCH_RESULT_INVALID");
+      }
+      if (candidate_g == best_g[next_state]) {
+        if (current_entry.state < parent[next_state]) {
+          parent[next_state] = current_entry.state;
+        }
+        continue;
+      }
+      if (candidate_g > best_g[next_state]) {
+        continue;
+      }
+      best_g[next_state] = candidate_g;
+      parent[next_state] = current_entry.state;
+      open.push(OpenEntry{
+          .f = candidate_g,
+          .h = 0.0,
+          .g = candidate_g,
+          .state = next_state,
+      });
+    }
+  }
+
+  return GlobalGridCostTreeResult{
+      .status = GlobalSearchStatus::kSolved,
+      .tree = GlobalGridCostTree{
+          .minimum_cost = std::move(best_g),
+          .parent_index = std::move(parent),
+          .start_index = start_index,
+          .expanded_states = expanded,
+      },
+      .reason_code = {},
+  };
+} catch (const std::bad_alloc &) {
+  return TreeFailure(GlobalSearchStatus::kAllocationFailed,
+                     "GLOBAL_SEARCH_ALLOCATION_FAILED");
 }
 
 } // namespace lunar::planning::hierarchical

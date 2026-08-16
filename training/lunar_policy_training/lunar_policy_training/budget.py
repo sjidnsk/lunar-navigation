@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from .config import (
     FORMAL_ROLLOUT_HORIZON,
     FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
+    REWARD_V4_FORMAL_ROLLOUT_HORIZON,
 )
 
 
@@ -34,13 +35,17 @@ TOTAL_GPU_BUDGET_SECONDS = INITIAL_GPU_BUDGET_SECONDS
 CALIBRATION_PROBE_UPPER_BOUND_GPU_SECONDS = (
     8.0 * FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS + 120.0
 )
-# A horizon-12 update can legally wait for 12 sequential 1200-second macro
-# actions. The remaining 600 seconds covers the optimizer and synchronization.
+# A Reward V4 update can legally wait for one 1200-second macro action per
+# worker. The remaining 600 seconds covers the optimizer and synchronization.
 TRAINING_ROLLOUT_UPDATE_UPPER_BOUND_GPU_SECONDS = (
-    float(FORMAL_ROLLOUT_HORIZON) * FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS + 600.0
+    float(REWARD_V4_FORMAL_ROLLOUT_HORIZON)
+    * FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS
+    + 600.0
 )
 ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER = 64
 ROLLOUT_HORIZON_THROUGHPUT_NEAR_TIE_RATIO = 0.99
+RUN_MANIFEST_SCHEMA_VERSION = "lunar-training-run/v2"
+_LEGACY_RUN_MANIFEST_SCHEMA_VERSION = "lunar-training-run/v1"
 
 
 class BudgetError(ValueError):
@@ -216,7 +221,12 @@ def freeze_fixed_runtime_selection(
     if (
         config.parallel.worker_candidates != (24,)
         or config.parallel.preferred_workers != 24
-        or config.ppo.rollout_horizon != FORMAL_ROLLOUT_HORIZON
+        or config.ppo.rollout_horizon
+        != (
+            REWARD_V4_FORMAL_ROLLOUT_HORIZON
+            if config.reward_v4 is not None
+            else FORMAL_ROLLOUT_HORIZON
+        )
         or dict(config.parallel.joint_workers)
         != {"WHEELED": 8, "LEGGED": 8, "HOPPER": 8}
     ):
@@ -243,7 +253,7 @@ def freeze_fixed_runtime_selection(
         horizon_measurements=(),
     )
     payload = {
-        "schema_version": "lunar-training-run/v1",
+        "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
         "frozen_config": config.as_frozen_dict(),
         "runtime_calibration": {
             "selection_mode": "operator-fixed/v1",
@@ -433,7 +443,11 @@ def extend_budget_manifest(
         raise BudgetError("run budget manifest is invalid") from error
     if (
         not isinstance(payload, dict)
-        or payload.get("schema_version") != "lunar-training-run/v1"
+        or payload.get("schema_version")
+        not in (
+            RUN_MANIFEST_SCHEMA_VERSION,
+            _LEGACY_RUN_MANIFEST_SCHEMA_VERSION,
+        )
     ):
         raise BudgetError("run budget manifest schema is invalid")
     try:
@@ -662,7 +676,7 @@ def calibrate_runtime(
         horizon_measurements=tuple(horizon_measurements),
     )
     payload = {
-        "schema_version": "lunar-training-run/v1",
+        "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
         "frozen_config": frozen_config.as_frozen_dict(),
         "runtime_calibration": {
             "selected_workers": result.selected_workers,
@@ -804,6 +818,7 @@ __all__ = [
     "CalibrationResult",
     "ROLLOUT_HORIZON_TRANSITIONS_PER_WORKER",
     "ROLLOUT_HORIZON_THROUGHPUT_NEAR_TIE_RATIO",
+    "RUN_MANIFEST_SCHEMA_VERSION",
     "TrainingBudget",
     "calibrate_runtime",
     "freeze_fixed_runtime_selection",

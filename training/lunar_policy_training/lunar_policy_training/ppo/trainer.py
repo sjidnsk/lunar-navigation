@@ -18,6 +18,20 @@ from .rollout import RolloutBatch
 
 
 @dataclass(frozen=True, slots=True)
+class StratumPPOUpdateMetrics:
+    platform_id: int
+    scale_bucket_id: int
+    sample_count: int
+    logical_weight: float
+    total_loss: float
+    policy_loss: float
+    value_loss: float
+    frontier_entropy: float
+    theta_entropy: float
+    approx_kl: float
+
+
+@dataclass(frozen=True, slots=True)
 class PPOUpdateMetrics:
     total_loss: float
     policy_loss: float
@@ -31,6 +45,21 @@ class PPOUpdateMetrics:
     optimizer_steps: int
     epochs_completed: int
     target_kl_early_stopped: bool
+    strata: tuple[StratumPPOUpdateMetrics, ...] = ()
+
+
+def stratum_loss_weights(
+    rollout: RolloutBatch,
+) -> dict[tuple[int, int], float]:
+    """Return sample-count-independent platform and scale loss weights."""
+    if not isinstance(rollout, RolloutBatch):
+        raise trainer_core.PPOTrainingError(
+            "stratum loss weights require RolloutBatch"
+        )
+    return trainer_core.logical_stratum_weights(
+        rollout.platform_ids,
+        rollout.scale_bucket_ids,
+    )
 
 
 class PPOTrainer:
@@ -99,49 +128,73 @@ class PPOTrainer:
         max_clipped_gradient_norm = 0.0
         optimizer_steps = 0
         early_stopped = False
+        logical_weights = stratum_loss_weights(rollout)
+        stratum_indices = {
+            stratum: np.flatnonzero(
+                (rollout.platform_ids == stratum[0])
+                & (rollout.scale_bucket_ids == stratum[1])
+            ).astype(np.int64, copy=False)
+            for stratum in logical_weights
+        }
+        stratum_totals = {
+            stratum: {name: 0.0 for name in totals}
+            for stratum in logical_weights
+        }
 
         for _epoch in range(self.config.epochs_per_update):
             self.optimizer.zero_grad(set_to_none=True)
             epoch_totals = {name: 0.0 for name in totals}
-            for start in range(0, len(rollout), micro_batch_size):
-                stop = min(start + micro_batch_size, len(rollout))
-                (
-                    policy_batch,
-                    selected_indices,
-                    selected_thetas,
-                    old_log_prob_total,
-                    old_values,
-                    advantages,
-                    returns,
-                ) = rollout.select(
-                    np.arange(start, stop, dtype=np.int64), device=self.device
-                )
-                output = self.policy(policy_batch)
-                evaluation = recompute_action_log_probs(
-                    output,
-                    policy_batch.candidate_mask,
-                    selected_indices,
-                    selected_thetas,
-                    policy_batch.platform_context,
-                )
-                terms = self.loss_function(
-                    new_log_prob_total=evaluation.log_prob_total,
-                    old_log_prob_total=old_log_prob_total,
-                    normalized_advantage=advantages,
-                    new_value=output.value,
-                    old_value=old_values,
-                    returns=returns,
-                    frontier_entropy=evaluation.frontier_entropy,
-                    theta_entropy=evaluation.theta_entropy,
-                    theta_active=evaluation.theta_active,
-                    config=self.config,
-                )
-                weight = (stop - start) / len(rollout)
-                (terms.total_loss * weight).backward()
-                for name in epoch_totals:
-                    epoch_totals[name] += (
-                        float(getattr(terms, name).detach().cpu()) * weight
+            epoch_stratum_totals = {
+                stratum: {name: 0.0 for name in totals}
+                for stratum in logical_weights
+            }
+            for stratum in sorted(logical_weights):
+                indices = stratum_indices[stratum]
+                logical_weight = logical_weights[stratum]
+                for start in range(0, len(indices), micro_batch_size):
+                    stop = min(start + micro_batch_size, len(indices))
+                    micro_indices = indices[start:stop]
+                    (
+                        policy_batch,
+                        selected_indices,
+                        selected_thetas,
+                        old_log_prob_total,
+                        old_values,
+                        advantages,
+                        returns,
+                    ) = rollout.select(micro_indices, device=self.device)
+                    output = self.policy(policy_batch)
+                    evaluation = recompute_action_log_probs(
+                        output,
+                        policy_batch.candidate_mask,
+                        selected_indices,
+                        selected_thetas,
+                        policy_batch.platform_context,
                     )
+                    terms = self.loss_function(
+                        new_log_prob_total=evaluation.log_prob_total,
+                        old_log_prob_total=old_log_prob_total,
+                        normalized_advantage=advantages,
+                        new_value=output.value,
+                        old_value=old_values,
+                        returns=returns,
+                        frontier_entropy=evaluation.frontier_entropy,
+                        theta_entropy=evaluation.theta_entropy,
+                        theta_active=evaluation.theta_active,
+                        config=self.config,
+                    )
+                    physical_weight = len(micro_indices) / len(indices)
+                    weighted_loss = (
+                        terms.total_loss * logical_weight * physical_weight
+                    )
+                    weighted_loss.backward()
+                    for name in epoch_stratum_totals[stratum]:
+                        epoch_stratum_totals[stratum][name] += (
+                            float(getattr(terms, name).detach().cpu())
+                            * physical_weight
+                        )
+                for name, value in epoch_stratum_totals[stratum].items():
+                    epoch_totals[name] += value * logical_weight
 
             gradient_norm = trainer_core._gradient_norm(self.policy.parameters())
             if not math.isfinite(gradient_norm):
@@ -171,6 +224,9 @@ class PPOTrainer:
                 )
             for name, value in epoch_totals.items():
                 totals[name] += value
+            for stratum, values in epoch_stratum_totals.items():
+                for name, value in values.items():
+                    stratum_totals[stratum][name] += value
             if epoch_totals["approx_kl"] > self.config.target_kl:
                 early_stopped = True
                 break
@@ -183,6 +239,19 @@ class PPOTrainer:
         if optimizer_steps <= 0:
             raise trainer_core.PPOTrainingError("PPO update completed no optimizer epoch")
         averaged = {name: value / optimizer_steps for name, value in totals.items()}
+        stratum_metrics = tuple(
+            StratumPPOUpdateMetrics(
+                platform_id=stratum[0],
+                scale_bucket_id=stratum[1],
+                sample_count=len(stratum_indices[stratum]),
+                logical_weight=logical_weights[stratum],
+                **{
+                    name: value / optimizer_steps
+                    for name, value in stratum_totals[stratum].items()
+                },
+            )
+            for stratum in sorted(logical_weights)
+        )
         return PPOUpdateMetrics(
             total_loss=averaged["total_loss"],
             policy_loss=averaged["policy_loss"],
@@ -196,6 +265,7 @@ class PPOTrainer:
             optimizer_steps=optimizer_steps,
             epochs_completed=optimizer_steps,
             target_kl_early_stopped=early_stopped,
+            strata=stratum_metrics,
         )
 
 
@@ -210,6 +280,8 @@ __all__ = [
     "PPOTrainer",
     "PPOTrainingError",
     "PPOUpdateMetrics",
+    "StratumPPOUpdateMetrics",
     "physical_microbatch_slices",
     "policy_state_sha256",
+    "stratum_loss_weights",
 ]

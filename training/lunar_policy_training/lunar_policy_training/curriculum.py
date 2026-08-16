@@ -11,6 +11,11 @@ from typing import Mapping
 
 from .capability_freeze import FrozenPlatformCapability
 from .config import WORKER_CANDIDATES
+from .reward_curriculum import (
+    RewardCurriculumState,
+    TrainingStage,
+    worker_allocation_for_stage,
+)
 
 
 PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
@@ -20,6 +25,7 @@ ACTIVE_PHASES = (
     "warmup_hopper",
     "joint",
 )
+REWARD_V4_ACTIVE_STAGES = tuple(stage.value for stage in TrainingStage)
 FORMAL_SEED = 4080
 REWARD_CALIBRATION_SEEDS = (4081, 4082, 4083)
 _COMPLETE_UPDATE_RESERVE_S = 600
@@ -251,9 +257,15 @@ def resume_worker_episode_states(
     source_phase = getattr(checkpoint, "curriculum_phase", None)
     source_allocation = getattr(checkpoint, "worker_allocation", None)
     environment_state = getattr(checkpoint, "environment_state", None)
+    old_curriculum = (
+        source_phase in ACTIVE_PHASES and target_phase in ACTIVE_PHASES
+    )
+    reward_v4_curriculum = (
+        source_phase in REWARD_V4_ACTIVE_STAGES
+        and target_phase in REWARD_V4_ACTIVE_STAGES
+    )
     if (
-        source_phase not in ACTIVE_PHASES
-        or target_phase not in ACTIVE_PHASES
+        not (old_curriculum or reward_v4_curriculum)
         or not isinstance(source_allocation, Mapping)
         or not isinstance(target_allocation, Mapping)
         or not isinstance(environment_state, Mapping)
@@ -261,17 +273,42 @@ def resume_worker_episode_states(
         raise ValueError("curriculum checkpoint state is invalid")
     source = dict(source_allocation)
     target = dict(target_allocation)
+    if reward_v4_curriculum and source_phase == target_phase:
+        try:
+            reward_state = RewardCurriculumState.from_mapping(
+                checkpoint.reward_curriculum_state
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError(
+                "Reward V4 restart checkpoint state is invalid"
+            ) from error
+        if reward_state.worker_restart_required and target == (
+            worker_allocation_for_stage(reward_state.stage)
+        ):
+            return None
     if source_phase == target_phase and source == target:
         states = environment_state.get("worker_episode_states")
         if not isinstance(states, list) or len(states) != sum(target.values()):
             raise ValueError("curriculum worker episode states are invalid")
         return tuple(states)
-    if (
-        ACTIVE_PHASES.index(target_phase) == ACTIVE_PHASES.index(source_phase) + 1
-        and source != target
-    ):
-        return None
+    if old_curriculum:
+        if (
+            ACTIVE_PHASES.index(target_phase)
+            == ACTIVE_PHASES.index(source_phase) + 1
+            and source != target
+        ):
+            return None
+    else:
+        source_index = REWARD_V4_ACTIVE_STAGES.index(source_phase)
+        target_index = REWARD_V4_ACTIVE_STAGES.index(target_phase)
+        if target_index == source_index + 1:
+            return None
     raise ValueError("curriculum phase or allocation drift is invalid")
+
+
+def reward_v4_worker_allocation(stage: TrainingStage) -> dict[str, int]:
+    """Expose the frozen capability-driven allocation through curriculum API."""
+    return worker_allocation_for_stage(stage)
 
 
 def next_joint_evaluation_gpu_seconds(
@@ -331,5 +368,7 @@ __all__ = [
     "FORMAL_SEED",
     "FrozenCurriculum",
     "PLATFORMS",
+    "REWARD_V4_ACTIVE_STAGES",
     "REWARD_CALIBRATION_SEEDS",
+    "reward_v4_worker_allocation",
 ]

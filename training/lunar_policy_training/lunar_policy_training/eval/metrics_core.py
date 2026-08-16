@@ -14,6 +14,39 @@ _TERMINATION_REASONS: Final = frozenset({'success_done', 'failure_done', 'stagna
 class MetricError(ValueError):
     """Episode or aggregate metrics violate the deterministic evaluation contract."""
 
+
+def priority_coverage_auc_over_macro_actions(
+    coverage_curve: Sequence[float] | None,
+    *,
+    priority_denominator_present: bool,
+) -> float | None:
+    """Return Reward V4 priority AUC, omitting tasks without a valid sample."""
+    if type(priority_denominator_present) is not bool:
+        raise MetricError('priority denominator fact must be boolean')
+    if not priority_denominator_present:
+        if coverage_curve is not None:
+            raise MetricError('priority curve has no denominator')
+        return None
+    if coverage_curve is None:
+        raise MetricError('priority curve is missing')
+    values = tuple(float(value) for value in coverage_curve)
+    if (
+        not values
+        or any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in values)
+        or any(right < left for left, right in zip(values, values[1:]))
+    ):
+        raise MetricError('priority coverage curve is invalid')
+    macro_action_count = len(values) - 1
+    if macro_action_count == 0:
+        return None
+    return float(
+        math.fsum(
+            (values[index] + values[index + 1]) * 0.5
+            for index in range(macro_action_count)
+        )
+        / macro_action_count
+    )
+
 @dataclass(frozen=True, slots=True)
 class EpisodeResult:
     method: str

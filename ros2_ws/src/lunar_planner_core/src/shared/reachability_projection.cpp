@@ -1,6 +1,7 @@
 #include "lunar_planner_core/reachability_projection.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +18,7 @@
 #include <vector>
 
 #include "hierarchical/frame_transform.hpp"
+#include "hierarchical/grid_search.hpp"
 #include "hopper/ballistic_envelope.hpp"
 #include "hopper/ballistic_kinematics.hpp"
 #include "hopper/flight_tube_certifier.hpp"
@@ -177,6 +179,7 @@ CertifiedLandingAt(const shared::MapSnapshot& global_map,
 struct LandingRegionHopResult final {
   hopper::HopCertificationStatus status{
       hopper::HopCertificationStatus::kInvalid};
+  double nominal_flight_time_s{};
   std::string reason_code;
 
   [[nodiscard]] bool ok() const noexcept {
@@ -259,7 +262,10 @@ struct LandingRegionHopResult final {
       }
     }
     if (corners_envelope_certified && region_tube.certified) {
-      return {.status = hopper::HopCertificationStatus::kCertified};
+      return {
+          .status = hopper::HopCertificationStatus::kCertified,
+          .nominal_flight_time_s = center_hop.arc.flight_time_s,
+      };
     }
     if (!(region_radius > minimum_region_radius)) {
       return {
@@ -275,6 +281,191 @@ struct LandingRegionHopResult final {
     }
     landing_region.area_m2 *= 0.25;
   }
+}
+
+[[nodiscard]] LandingRegionHopResult CertifyCurrentToLandingRegionEdge(
+    const Vec3 source_position_m,
+    const hopper::CertifiedLandingRegion& target,
+    const shared::MapSnapshot& flight_map,
+    const HopperCapability& capability,
+    const MapSafetyConfig& map_safety,
+    const std::stop_token stop_token) {
+  const hopper::SingleHopCertificationResult hop = hopper::CertifySingleHop(
+      hopper::SingleHopCertificationProblem{
+          .launch_position_m = source_position_m,
+          .landing_position_m = target.aim_position_on_surface_m,
+          .gravity_mps2 = kLunarGravityMps2,
+          .flight_map = &flight_map,
+          .capability = &capability,
+          .map_safety = &map_safety,
+          .stop_token = stop_token,
+      });
+  if (!hop.ok()) {
+    return {.status = hop.status, .reason_code = hop.reason_code};
+  }
+  return CertifyLandingRegionHop(
+      *hop.certification, target, flight_map, capability, map_safety,
+      stop_token);
+}
+
+[[nodiscard]] double PointRectangleDistance(
+    const Vec3 point, const double x0, const double x1,
+    const double y0, const double y1) noexcept {
+  const double nearest_x = std::clamp(point.x, x0, x1);
+  const double nearest_y = std::clamp(point.y, y0, y1);
+  return std::hypot(point.x - nearest_x, point.y - nearest_y);
+}
+
+[[nodiscard]] bool SegmentIntersectsRectangle(
+    const Vec3 begin, const Vec3 end, const double x0, const double x1,
+    const double y0, const double y1) noexcept {
+  double lower = 0.0;
+  double upper = 1.0;
+  const double dx = end.x - begin.x;
+  const double dy = end.y - begin.y;
+  const auto clip = [&](const double p, const double q) {
+    if (std::abs(p) <= std::numeric_limits<double>::epsilon()) {
+      return q >= 0.0;
+    }
+    const double ratio = q / p;
+    if (p < 0.0) {
+      lower = std::max(lower, ratio);
+    } else {
+      upper = std::min(upper, ratio);
+    }
+    return lower <= upper;
+  };
+  return clip(-dx, begin.x - x0) && clip(dx, x1 - begin.x) &&
+      clip(-dy, begin.y - y0) && clip(dy, y1 - begin.y);
+}
+
+[[nodiscard]] double PlanarPointSegmentDistance(
+    const Vec3 point, const Vec3 begin, const Vec3 end) noexcept {
+  const double dx = end.x - begin.x;
+  const double dy = end.y - begin.y;
+  const double squared_length = dx * dx + dy * dy;
+  if (squared_length <= std::numeric_limits<double>::epsilon()) {
+    return std::hypot(point.x - begin.x, point.y - begin.y);
+  }
+  const double projection = std::clamp(
+      ((point.x - begin.x) * dx + (point.y - begin.y) * dy) /
+          squared_length,
+      0.0, 1.0);
+  return std::hypot(
+      point.x - (begin.x + projection * dx),
+      point.y - (begin.y + projection * dy));
+}
+
+[[nodiscard]] double SegmentRectangleDistance(
+    const Vec3 begin, const Vec3 end, const double x0, const double x1,
+    const double y0, const double y1) noexcept {
+  if (SegmentIntersectsRectangle(begin, end, x0, x1, y0, y1)) {
+    return 0.0;
+  }
+  double distance = std::min(
+      PointRectangleDistance(begin, x0, x1, y0, y1),
+      PointRectangleDistance(end, x0, x1, y0, y1));
+  for (const Vec3 corner : {
+           Vec3{x0, y0, 0.0}, Vec3{x1, y0, 0.0},
+           Vec3{x1, y1, 0.0}, Vec3{x0, y1, 0.0}}) {
+    distance = std::min(
+        distance, PlanarPointSegmentDistance(corner, begin, end));
+  }
+  return distance;
+}
+
+[[nodiscard]] bool KnownForFlightEvidence(
+    const shared::MapSnapshot& map, const std::size_t index,
+    const MapSafetyConfig& config) noexcept {
+  return map.ByteLayer("valid_mask")[index] != 0U &&
+      static_cast<double>(map.FloatLayer("obstacle_variance")[index]) <=
+          config.maximum_obstacle_variance_m2 + kDistanceToleranceM &&
+      static_cast<double>(map.FloatLayer("observation_age_s")[index]) <=
+          config.maximum_observation_age_s + kDistanceToleranceM &&
+      static_cast<double>(map.FloatLayer("observation_quality")[index]) +
+              kDistanceToleranceM >=
+          config.minimum_observation_quality &&
+      map.CountLayer("observation_count")[index] >=
+          config.minimum_observation_count;
+}
+
+struct HopperEdgeDependencyResult final {
+  std::vector<std::size_t> indices;
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept { return reason_code.empty(); }
+};
+
+[[nodiscard]] HopperEdgeDependencyResult MissingFlightEvidenceTiles(
+    const shared::MapSnapshot& map,
+    const Vec3 source,
+    const hopper::CertifiedLandingRegion& target,
+    const HopperCapability& capability,
+    const MapSafetyConfig& map_safety) {
+  double landing_radius = 0.0;
+  for (const Vec3 vertex : target.boundary_m) {
+    landing_radius = std::max(
+        landing_radius,
+        std::hypot(
+            vertex.x - target.aim_position_on_surface_m.x,
+            vertex.y - target.aim_position_on_surface_m.y));
+  }
+  const double radius = capability.flight_collision_radius_m +
+      capability.flight_map_margin_m + landing_radius;
+  if (!Finite(source) || !Finite(target.aim_position_on_surface_m) ||
+      !std::isfinite(radius) || radius <= 0.0) {
+    return {.reason_code = "HOPPER_EDGE_DEPENDENCY_GEOMETRY_INVALID"};
+  }
+  const double minimum_x =
+      std::min(source.x, target.aim_position_on_surface_m.x) - radius;
+  const double maximum_x =
+      std::max(source.x, target.aim_position_on_surface_m.x) + radius;
+  const double minimum_y =
+      std::min(source.y, target.aim_position_on_surface_m.y) - radius;
+  const double maximum_y =
+      std::max(source.y, target.aim_position_on_surface_m.y) + radius;
+  const auto cell_coordinate = [&](const double value, const double origin) {
+    return static_cast<long long>(
+        std::floor((value - origin) / map.resolution_m()));
+  };
+  const long long x0 = std::max<long long>(
+      0, cell_coordinate(minimum_x, map.origin_m().x));
+  const long long x1 = std::min<long long>(
+      static_cast<long long>(map.width()) - 1,
+      cell_coordinate(maximum_x, map.origin_m().x));
+  const long long y0 = std::max<long long>(
+      0, cell_coordinate(minimum_y, map.origin_m().y));
+  const long long y1 = std::min<long long>(
+      static_cast<long long>(map.height()) - 1,
+      cell_coordinate(maximum_y, map.origin_m().y));
+  HopperEdgeDependencyResult result;
+  if (x0 > x1 || y0 > y1) {
+    return result;
+  }
+  for (long long y = y0; y <= y1; ++y) {
+    for (long long x = x0; x <= x1; ++x) {
+      const double cell_x0 = map.origin_m().x +
+          static_cast<double>(x) * map.resolution_m();
+      const double cell_y0 = map.origin_m().y +
+          static_cast<double>(y) * map.resolution_m();
+      if (SegmentRectangleDistance(
+              source, target.aim_position_on_surface_m,
+              cell_x0, cell_x0 + map.resolution_m(),
+              cell_y0, cell_y0 + map.resolution_m()) >
+          radius + kDistanceToleranceM) {
+        continue;
+      }
+      const shared::GridCell cell{
+          .x = static_cast<std::int32_t>(x),
+          .y = static_cast<std::int32_t>(y),
+      };
+      const std::size_t index = map.Index(cell);
+      if (!KnownForFlightEvidence(map, index, map_safety)) {
+        result.indices.push_back(index);
+      }
+    }
+  }
+  return result;
 }
 
 [[nodiscard]] LandingRegionHopResult CertifyDirectedLandingRegionEdge(
@@ -328,13 +519,21 @@ struct LandingRegionHopResult final {
     const shared::SafeProjection& safe,
     const shared::GridCell start,
     const double maximum_edge_distance_m) {
+  const double infinity = std::numeric_limits<double>::infinity();
+  const std::size_t no_parent = std::numeric_limits<std::size_t>::max();
   ReachabilityProjection projection{
       .platform_type = safe.platform_type(),
       .width = global_map->width(),
       .height = global_map->height(),
       .reachable = std::vector<std::uint8_t>(global_map->cell_count(), 0U),
-      .algorithm_id = "cpp-ground-start-connected-component/v1",
+      .algorithm_id = "cpp-ground-global-cost-tree/v1",
       .maximum_edge_distance_m = maximum_edge_distance_m,
+      .minimum_cost =
+          std::vector<double>(global_map->cell_count(), infinity),
+      .parent_index =
+          std::vector<std::size_t>(global_map->cell_count(), no_parent),
+      .start_index = global_map->Index(start),
+      .search_elapsed_s = 0.0,
   };
   if (!safe.HardFeasible(start)) {
     return ReachabilityProjectionResult{
@@ -342,25 +541,56 @@ struct LandingRegionHopResult final {
         .reason_code = {},
     };
   }
-  const std::int32_t component = safe.ConnectedComponent(start);
-  if (component < 0) {
-    return ReachabilityProjectionResult{
-        .projection = std::move(projection),
-        .reason_code = {},
-    };
+  const auto started = std::chrono::steady_clock::now();
+  hierarchical::GlobalGridCostTreeResult tree =
+      hierarchical::SearchGlobalGridCostTree(
+          hierarchical::GlobalGridSearchProblem{
+              .projection = safe,
+              .start = start,
+              .goal_mask = {},
+              .excluded_mask = {},
+              .maximum_speed_mps = 1.0,
+              .config = input.config.global_search,
+              .stop_token = input.stop_token,
+          });
+  projection.search_elapsed_s = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - started).count();
+  if (!tree.ok()) {
+    return Failure(tree.reason_code.empty()
+                       ? "GLOBAL_SEARCH_RESULT_INVALID"
+                       : std::move(tree.reason_code));
+  }
+  if (tree.tree->minimum_cost.size() != global_map->cell_count() ||
+      tree.tree->parent_index.size() != global_map->cell_count() ||
+      tree.tree->start_index != projection.start_index ||
+      !std::isfinite(projection.search_elapsed_s) ||
+      projection.search_elapsed_s < 0.0) {
+    return Failure("GLOBAL_SEARCH_RESULT_INVALID");
   }
   for (std::size_t index = 0U; index < global_map->cell_count(); ++index) {
-    if (input.stop_token.stop_requested()) {
-      return Failure("REQUEST_CANCELED");
+    const double cost = tree.tree->minimum_cost[index];
+    const std::size_t parent = tree.tree->parent_index[index];
+    if (!std::isfinite(cost)) {
+      if (!std::isinf(cost) || cost < 0.0 || parent != no_parent) {
+        return Failure("GLOBAL_SEARCH_RESULT_INVALID");
+      }
+      continue;
     }
-    const shared::GridCell cell{
-        .x = static_cast<std::int32_t>(index % global_map->width()),
-        .y = static_cast<std::int32_t>(index / global_map->width()),
-    };
-    projection.reachable[index] = static_cast<std::uint8_t>(
-        safe.HardFeasible(cell) &&
-        safe.ConnectedComponent(cell) == component);
+    if (cost < 0.0 || parent >= global_map->cell_count()) {
+      return Failure("GLOBAL_SEARCH_RESULT_INVALID");
+    }
+    if (index == projection.start_index) {
+      if (cost != 0.0 || parent != index) {
+        return Failure("GLOBAL_SEARCH_RESULT_INVALID");
+      }
+    } else if (!std::isfinite(tree.tree->minimum_cost[parent]) ||
+               !(tree.tree->minimum_cost[parent] < cost)) {
+      return Failure("GLOBAL_SEARCH_RESULT_INVALID");
+    }
+    projection.reachable[index] = 1U;
   }
+  projection.minimum_cost = std::move(tree.tree->minimum_cost);
+  projection.parent_index = std::move(tree.tree->parent_index);
   return ReachabilityProjectionResult{
       .projection = std::move(projection),
       .reason_code = {},
@@ -944,7 +1174,11 @@ HopperOpportunityDistanceProjectionResult QueryHopperOpportunityDistance(
         .direct_progress = std::vector<std::uint8_t>(cell_count, 0U),
         .reachable_opportunities =
             std::vector<std::uint8_t>(cell_count, 0U),
-        .algorithm_id = "cpp-hopper-opportunity-distance/v1",
+        .direct_progress_total_cost = std::vector<double>(
+            cell_count, std::numeric_limits<double>::infinity()),
+        .represented_opportunity_index = std::vector<std::size_t>(
+            cell_count, std::numeric_limits<std::size_t>::max()),
+        .algorithm_id = "cpp-hopper-opportunity-distance/v2",
     };
     std::int32_t nearest = std::numeric_limits<std::int32_t>::max();
     for (std::size_t index = 0U; index < cell_count; ++index) {
@@ -966,11 +1200,38 @@ HopperOpportunityDistanceProjectionResult QueryHopperOpportunityDistance(
       return HopperOpportunityDistanceProjectionResult{
           .projection = std::move(projection), .reason_code = {}};
     }
+    const double infinity = std::numeric_limits<double>::infinity();
+    const std::size_t no_target = std::numeric_limits<std::size_t>::max();
+    const auto edge_cost = [&](const std::size_t source_index,
+                               const std::size_t target_index)
+        -> std::optional<double> {
+      if (source_index >= storage.landings.size() ||
+          target_index >= storage.landings.size() ||
+          !storage.landings[source_index].has_value() ||
+          !storage.landings[target_index].has_value()) {
+        return std::nullopt;
+      }
+      const Vec3 source =
+          storage.landings[source_index]->aim_position_on_surface_m;
+      const Vec3 target =
+          storage.landings[target_index]->aim_position_on_surface_m;
+      const double value = std::hypot(
+          source.x - target.x, source.y - target.y, source.z - target.z);
+      if (!std::isfinite(value) || value <= 0.0) {
+        return std::nullopt;
+      }
+      return value;
+    };
     std::vector<std::uint8_t> shortest_path(cell_count, 0U);
+    std::vector<double> remaining_cost(cell_count, infinity);
+    std::vector<std::size_t> represented_target(cell_count, no_target);
     for (std::size_t index = 0U; index < cell_count; ++index) {
-      shortest_path[index] = static_cast<std::uint8_t>(
-          positive_opportunities[index] != 0U &&
-          context.hop_distance_from_current[index] == nearest);
+      if (positive_opportunities[index] != 0U &&
+          context.hop_distance_from_current[index] == nearest) {
+        shortest_path[index] = 1U;
+        remaining_cost[index] = 0.0;
+        represented_target[index] = index;
+      }
     }
     for (std::int32_t level = nearest; level > 1; --level) {
       for (std::size_t target_index = 0U; target_index < cell_count;
@@ -1001,13 +1262,46 @@ HopperOpportunityDistanceProjectionResult QueryHopperOpportunityDistance(
           }
           if (certified) {
             shortest_path[source_index] = 1U;
+            const auto cost = edge_cost(source_index, target_index);
+            if (!cost.has_value() ||
+                !std::isfinite(remaining_cost[target_index]) ||
+                represented_target[target_index] == no_target) {
+              return failure("HOPPER_OPPORTUNITY_COST_INVALID");
+            }
+            const double candidate_cost =
+                *cost + remaining_cost[target_index];
+            if (!std::isfinite(candidate_cost)) {
+              return failure("HOPPER_OPPORTUNITY_COST_INVALID");
+            }
+            if (candidate_cost < remaining_cost[source_index] ||
+                (candidate_cost == remaining_cost[source_index] &&
+                 represented_target[target_index] <
+                     represented_target[source_index])) {
+              remaining_cost[source_index] = candidate_cost;
+              represented_target[source_index] =
+                  represented_target[target_index];
+            }
           }
         }
       }
     }
     for (std::size_t index = 0U; index < cell_count; ++index) {
-      projection.direct_progress[index] = static_cast<std::uint8_t>(
-          context.direct[index] != 0U && shortest_path[index] != 0U);
+      if (context.direct[index] == 0U || shortest_path[index] == 0U) {
+        continue;
+      }
+      const auto direct_cost = edge_cost(storage.start_index, index);
+      if (!direct_cost.has_value() || !std::isfinite(remaining_cost[index]) ||
+          represented_target[index] == no_target) {
+        return failure("HOPPER_OPPORTUNITY_COST_INVALID");
+      }
+      const double total_cost = *direct_cost + remaining_cost[index];
+      if (!std::isfinite(total_cost) || total_cost <= 0.0) {
+        return failure("HOPPER_OPPORTUNITY_COST_INVALID");
+      }
+      projection.direct_progress[index] = 1U;
+      projection.direct_progress_total_cost[index] = total_cost;
+      projection.represented_opportunity_index[index] =
+          represented_target[index];
     }
     return HopperOpportunityDistanceProjectionResult{
         .projection = std::move(projection), .reason_code = {}};
@@ -1076,6 +1370,270 @@ HopperLandingEvidenceProjectionResult ProjectHopperLandingEvidence(
     return LandingFailure("REACHABILITY_RESOURCE_EXHAUSTED");
   } catch (...) {
     return LandingFailure("HOPPER_LANDING_EVIDENCE_INTERNAL_FAILURE");
+  }
+}
+
+HopperIncrementalEdgeProjectionResult ProjectHopperIncrementalEdges(
+    const PlannerInput& input,
+    const HopperLandingEvidenceGrid& hopper_landing_evidence,
+    const std::span<const std::uint8_t> task_target_mask) {
+  const auto failure = [](std::string reason_code) {
+    return HopperIncrementalEdgeProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = std::move(reason_code),
+    };
+  };
+  if (input.stop_token.stop_requested()) {
+    return failure("REQUEST_CANCELED");
+  }
+  const auto* capability = std::get_if<HopperCapability>(&input.capability);
+  const auto* state = std::get_if<HopperState>(&input.current_state);
+  if (capability == nullptr || state == nullptr) {
+    return failure("HOPPER_INCREMENTAL_EDGE_PLATFORM_MISMATCH");
+  }
+  try {
+    const auto global = shared::MapSnapshot::Create(input.world.global_map);
+    if (!global.ok()) {
+      return failure(global.reason_code);
+    }
+    if (task_target_mask.size() != global.snapshot->cell_count() ||
+        std::any_of(
+            task_target_mask.begin(), task_target_mask.end(),
+            [](const std::uint8_t value) { return value > 1U; })) {
+      return failure("HOPPER_INCREMENTAL_EDGE_TASK_MASK_INVALID");
+    }
+    hopper::ExternalLandingBuildResult built =
+        hopper::BuildExternalLandings(
+            *global.snapshot, hopper_landing_evidence);
+    if (!built.ok()) {
+      return failure(std::move(built.reason_code));
+    }
+    const auto pose_map = hierarchical::TransformPose(
+        state->pose, input.world.map_from_odom,
+        hierarchical::TransformDirection::kChildToParent);
+    if (!pose_map.has_value() || !Finite(pose_map->position_m)) {
+      return failure("FRAME_TRANSFORM_INVALID");
+    }
+    HopperIncrementalEdgeProjection projection{
+        .width = global.snapshot->width(),
+        .height = global.snapshot->height(),
+        .algorithm_id = "cpp-hopper-incremental-edge-evidence/v1",
+    };
+    const double same_pose_tolerance = std::max(
+        kDistanceToleranceM,
+        global.snapshot->resolution_m() *
+            std::sqrt(std::numeric_limits<double>::epsilon()));
+    for (std::size_t index = 0U; index < task_target_mask.size(); ++index) {
+      if (input.stop_token.stop_requested()) {
+        return failure("REQUEST_CANCELED");
+      }
+      if (task_target_mask[index] == 0U ||
+          !(*built.landings)[index].has_value()) {
+        continue;
+      }
+      const auto& target = *(*built.landings)[index];
+      const double displacement = std::hypot(
+          std::hypot(
+              target.aim_position_on_surface_m.x - pose_map->position_m.x,
+              target.aim_position_on_surface_m.y - pose_map->position_m.y),
+          target.aim_position_on_surface_m.z - pose_map->position_m.z);
+      if (!std::isfinite(displacement)) {
+        return failure("HOPPER_LANDING_EVIDENCE_VALUE_INVALID");
+      }
+      if (displacement <= same_pose_tolerance) {
+        continue;
+      }
+      HopperIncrementalEdgeDiagnostic diagnostic{
+          .target_index = index,
+          .exact_target_position_m = target.aim_position_on_surface_m,
+      };
+      const auto envelope = hopper::EvaluateMinimumSingleHopEnvelope(
+          pose_map->position_m, target.aim_position_on_surface_m,
+          kLunarGravityMps2, global.snapshot->resolution_m(), *capability);
+      if (!envelope.ok()) {
+        if (envelope.reason_code ==
+            "HOPPER_SINGLE_HOP_ENVELOPE_EXCEEDED") {
+          diagnostic.disposition =
+              HopperEdgeEvidenceDisposition::kStablePhysicalRejection;
+          diagnostic.reason_code = envelope.reason_code;
+          projection.edges.push_back(std::move(diagnostic));
+          continue;
+        }
+        return failure(
+            envelope.reason_code.empty()
+                ? "HOPPER_BALLISTIC_NUMERICAL_INDETERMINATE"
+                : envelope.reason_code);
+      }
+      diagnostic.nominal_flight_time_s =
+          envelope.evidence->arc.flight_time_s;
+      const HopperEdgeDependencyResult dependencies =
+          MissingFlightEvidenceTiles(
+              *global.snapshot, pose_map->position_m, target, *capability,
+              input.config.map_safety);
+      if (!dependencies.ok()) {
+        return failure(dependencies.reason_code);
+      }
+      if (!dependencies.indices.empty()) {
+        diagnostic.disposition =
+            HopperEdgeEvidenceDisposition::kWaitingEvidence;
+        diagnostic.dependency_tile_indices = dependencies.indices;
+        diagnostic.reason_code = "HOPPER_FLIGHT_TUBE_UNKNOWN";
+        projection.edges.push_back(std::move(diagnostic));
+        continue;
+      }
+      const LandingRegionHopResult edge =
+          CertifyCurrentToLandingRegionEdge(
+              pose_map->position_m, target, *global.snapshot, *capability,
+              input.config.map_safety, input.stop_token);
+      if (edge.ok()) {
+        if (!std::isfinite(edge.nominal_flight_time_s) ||
+            edge.nominal_flight_time_s <= 0.0) {
+          return failure("HOPPER_INCREMENTAL_EDGE_RESULT_INVALID");
+        }
+        diagnostic.disposition =
+            HopperEdgeEvidenceDisposition::kCertified;
+        diagnostic.nominal_flight_time_s = edge.nominal_flight_time_s;
+        projection.edges.push_back(std::move(diagnostic));
+        continue;
+      }
+      if (edge.status == hopper::HopCertificationStatus::kInfeasible) {
+        diagnostic.disposition =
+            HopperEdgeEvidenceDisposition::kStablePhysicalRejection;
+        diagnostic.nominal_flight_time_s = 0.0;
+        diagnostic.reason_code = edge.reason_code.empty()
+            ? "HOPPER_EDGE_PHYSICALLY_INFEASIBLE"
+            : edge.reason_code;
+        projection.edges.push_back(std::move(diagnostic));
+        continue;
+      }
+      return failure(EdgeFailureReason(edge));
+    }
+    return HopperIncrementalEdgeProjectionResult{
+        .projection = std::move(projection),
+        .reason_code = {},
+    };
+  } catch (const std::bad_alloc&) {
+    return failure("REACHABILITY_RESOURCE_EXHAUSTED");
+  } catch (...) {
+    return failure("REACHABILITY_INTERNAL_FAILURE");
+  }
+}
+
+HopperSingleHopEnvelopeProjectionResult ProjectHopperSingleHopEnvelope(
+    const PlannerInput& input,
+    const HopperLandingEvidenceGrid& hopper_landing_evidence) {
+  const auto failure = [](std::string reason_code) {
+    return HopperSingleHopEnvelopeProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = std::move(reason_code),
+    };
+  };
+  if (input.stop_token.stop_requested()) {
+    return failure("REQUEST_CANCELED");
+  }
+  const auto* capability = std::get_if<HopperCapability>(&input.capability);
+  const auto* state = std::get_if<HopperState>(&input.current_state);
+  if (capability == nullptr || state == nullptr) {
+    return failure("HOPPER_SINGLE_HOP_ENVELOPE_PLATFORM_MISMATCH");
+  }
+  try {
+    const auto global =
+        shared::MapSnapshot::Create(input.world.global_map);
+    if (!global.ok()) {
+      return failure(global.reason_code);
+    }
+    hopper::ExternalLandingBuildResult built =
+        hopper::BuildExternalLandings(
+            *global.snapshot, hopper_landing_evidence);
+    if (!built.ok()) {
+      return failure(std::move(built.reason_code));
+    }
+    const auto pose_map = hierarchical::TransformPose(
+        state->pose, input.world.map_from_odom,
+        hierarchical::TransformDirection::kChildToParent);
+    if (!pose_map.has_value() || !Finite(pose_map->position_m)) {
+      return failure("FRAME_TRANSFORM_INVALID");
+    }
+    const std::size_t cell_count = global.snapshot->cell_count();
+    const double infinity = std::numeric_limits<double>::infinity();
+    HopperSingleHopEnvelopeProjection projection{
+        .width = global.snapshot->width(),
+        .height = global.snapshot->height(),
+        .eligible = std::vector<std::uint8_t>(cell_count, 0U),
+        .required_delta_v_mps =
+            std::vector<double>(cell_count, infinity),
+        .nominal_flight_time_s =
+            std::vector<double>(cell_count, 0.0),
+        .algorithm_id = "cpp-hopper-single-hop-envelope/v1",
+        .complete = 1U,
+    };
+    const double same_pose_tolerance = std::max(
+        kDistanceToleranceM,
+        global.snapshot->resolution_m() *
+            std::sqrt(std::numeric_limits<double>::epsilon()));
+    for (std::size_t index = 0U; index < cell_count; ++index) {
+      if (input.stop_token.stop_requested()) {
+        return failure("REQUEST_CANCELED");
+      }
+      const auto& landing = (*built.landings)[index];
+      if (!landing.has_value()) {
+        continue;
+      }
+      ++projection.raw_known_landing_count;
+      const Vec3 target = landing->aim_position_on_surface_m;
+      const double displacement = std::hypot(
+          std::hypot(
+              target.x - pose_map->position_m.x,
+              target.y - pose_map->position_m.y),
+          target.z - pose_map->position_m.z);
+      if (!std::isfinite(displacement)) {
+        return failure("HOPPER_LANDING_EVIDENCE_VALUE_INVALID");
+      }
+      if (displacement <= same_pose_tolerance) {
+        continue;
+      }
+      ++projection.candidates_evaluated;
+      const auto envelope = hopper::EvaluateMinimumSingleHopEnvelope(
+          pose_map->position_m, target, kLunarGravityMps2,
+          global.snapshot->resolution_m(), *capability);
+      if (!envelope.ok()) {
+        if (envelope.reason_code ==
+            "HOPPER_SINGLE_HOP_ENVELOPE_EXCEEDED") {
+          continue;
+        }
+        return failure(envelope.reason_code.empty()
+                           ? "HOPPER_BALLISTIC_NUMERICAL_INDETERMINATE"
+                           : envelope.reason_code);
+      }
+      if (!std::isfinite(
+              envelope.evidence->envelope.required_delta_v_mps) ||
+          envelope.evidence->envelope.required_delta_v_mps <= 0.0 ||
+          !std::isfinite(envelope.evidence->arc.flight_time_s) ||
+          envelope.evidence->arc.flight_time_s <= 0.0) {
+        return failure("HOPPER_SINGLE_HOP_ENVELOPE_RESULT_INVALID");
+      }
+      projection.eligible[index] = 1U;
+      projection.required_delta_v_mps[index] =
+          envelope.evidence->envelope.required_delta_v_mps;
+      projection.nominal_flight_time_s[index] =
+          envelope.evidence->arc.flight_time_s;
+      ++projection.eligible_count;
+    }
+    if (projection.eligible_count != static_cast<std::size_t>(
+            std::count(projection.eligible.begin(),
+                       projection.eligible.end(), 1U)) ||
+        projection.candidates_evaluated >
+            projection.raw_known_landing_count) {
+      return failure("HOPPER_SINGLE_HOP_ENVELOPE_RESULT_INVALID");
+    }
+    return HopperSingleHopEnvelopeProjectionResult{
+        .projection = std::move(projection),
+        .reason_code = {},
+    };
+  } catch (const std::bad_alloc&) {
+    return failure("REACHABILITY_RESOURCE_EXHAUSTED");
+  } catch (...) {
+    return failure("REACHABILITY_INTERNAL_FAILURE");
   }
 }
 

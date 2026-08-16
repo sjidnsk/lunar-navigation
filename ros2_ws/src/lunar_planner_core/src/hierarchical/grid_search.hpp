@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <stop_token>
 #include <string>
@@ -46,7 +47,28 @@ struct GlobalGridSearchResult final {
   }
 };
 
+struct GlobalGridCostTree final {
+  std::vector<double> minimum_cost;
+  std::vector<std::size_t> parent_index;
+  std::size_t start_index{};
+  std::size_t expanded_states{};
+};
+
+struct GlobalGridCostTreeResult final {
+  GlobalSearchStatus status{GlobalSearchStatus::kInvalidProblem};
+  std::optional<GlobalGridCostTree> tree;
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept {
+    return status == GlobalSearchStatus::kSolved && tree.has_value() &&
+           reason_code.empty();
+  }
+};
+
 [[nodiscard]] GlobalGridSearchResult
 SearchGlobalGrid(const GlobalGridSearchProblem &problem);
+
+[[nodiscard]] GlobalGridCostTreeResult
+SearchGlobalGridCostTree(const GlobalGridSearchProblem &problem);
 
 } // namespace lunar::planning::hierarchical

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -174,6 +175,32 @@ template <typename Value>
 [[nodiscard]] py::array_t<Value> ReadonlyArray(py::array_t<Value> result) {
   result.attr("setflags")(false);
   return result;
+}
+
+[[nodiscard]] py::array_t<std::int64_t> CopyIndexArray2d(
+    const std::vector<std::size_t> &values,
+    const std::size_t height,
+    const std::size_t width) {
+  if (values.size() != height * width) {
+    throw std::runtime_error("index grid geometry differs");
+  }
+  py::array_t<std::int64_t> result(py::array::ShapeContainer{
+      static_cast<py::ssize_t>(height),
+      static_cast<py::ssize_t>(width),
+  });
+  std::transform(
+      values.begin(), values.end(), result.mutable_data(),
+      [](const std::size_t value) -> std::int64_t {
+        if (value == std::numeric_limits<std::size_t>::max()) {
+          return -1;
+        }
+        if (value > static_cast<std::size_t>(
+                        std::numeric_limits<std::int64_t>::max())) {
+          throw std::runtime_error("index grid value exceeds int64");
+        }
+        return static_cast<std::int64_t>(value);
+      });
+  return ReadonlyArray(std::move(result));
 }
 
 [[nodiscard]] py::object GridLayerValues(const planning::GridLayer &layer) {
@@ -913,6 +940,75 @@ void BindOutput(py::module_ &module) {
 }
 
 void BindProjection(py::module_ &module) {
+  py::enum_<planning::HopperEdgeEvidenceDisposition>(
+      module, "HopperEdgeEvidenceDisposition")
+      .value("CERTIFIED",
+             planning::HopperEdgeEvidenceDisposition::kCertified)
+      .value(
+          "STABLE_PHYSICAL_REJECTION",
+          planning::HopperEdgeEvidenceDisposition::kStablePhysicalRejection)
+      .value("WAITING_EVIDENCE",
+             planning::HopperEdgeEvidenceDisposition::kWaitingEvidence);
+  py::class_<planning::HopperIncrementalEdgeDiagnostic>(
+      module, "HopperIncrementalEdgeDiagnostic")
+      .def_readonly(
+          "target_index",
+          &planning::HopperIncrementalEdgeDiagnostic::target_index)
+      .def_readonly(
+          "disposition",
+          &planning::HopperIncrementalEdgeDiagnostic::disposition)
+      .def_property_readonly(
+          "dependency_tile_indices",
+          [](const planning::HopperIncrementalEdgeDiagnostic &self) {
+            py::array_t<std::int64_t> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(
+                    self.dependency_tile_indices.size())});
+            std::transform(
+                self.dependency_tile_indices.begin(),
+                self.dependency_tile_indices.end(), result.mutable_data(),
+                [](const std::size_t value) -> std::int64_t {
+                  if (value > static_cast<std::size_t>(
+                                  std::numeric_limits<std::int64_t>::max())) {
+                    throw std::runtime_error(
+                        "hopper dependency index exceeds int64");
+                  }
+                  return static_cast<std::int64_t>(value);
+                });
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "exact_target_position_m",
+          [](const planning::HopperIncrementalEdgeDiagnostic &self) {
+            py::array_t<double> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(3)});
+            result.mutable_data()[0] = self.exact_target_position_m.x;
+            result.mutable_data()[1] = self.exact_target_position_m.y;
+            result.mutable_data()[2] = self.exact_target_position_m.z;
+            return ReadonlyArray(std::move(result));
+          })
+      .def_readonly(
+          "nominal_flight_time_s",
+          &planning::HopperIncrementalEdgeDiagnostic::nominal_flight_time_s)
+      .def_readonly(
+          "reason_code",
+          &planning::HopperIncrementalEdgeDiagnostic::reason_code);
+  py::class_<planning::HopperIncrementalEdgeProjection>(
+      module, "HopperIncrementalEdgeProjection")
+      .def_readonly(
+          "width", &planning::HopperIncrementalEdgeProjection::width)
+      .def_readonly(
+          "height", &planning::HopperIncrementalEdgeProjection::height)
+      .def_property_readonly(
+          "edges", [](const planning::HopperIncrementalEdgeProjection &self) {
+            py::tuple result(self.edges.size());
+            for (std::size_t index = 0U; index < self.edges.size(); ++index) {
+              result[index] = py::cast(self.edges[index]);
+            }
+            return result;
+          })
+      .def_readonly(
+          "algorithm_id",
+          &planning::HopperIncrementalEdgeProjection::algorithm_id);
   py::class_<planning::TraversabilityProjection>(
       module, "TraversabilityProjection")
       .def_property_readonly(
@@ -993,7 +1089,87 @@ void BindProjection(py::module_ &module) {
                     &planning::ReachabilityProjection::rejected_edges)
       .def_readonly(
           "maximum_certified_edge_distance_m",
-          &planning::ReachabilityProjection::maximum_certified_edge_distance_m);
+          &planning::ReachabilityProjection::maximum_certified_edge_distance_m)
+      .def_property_readonly(
+          "minimum_cost",
+          [](const planning::ReachabilityProjection &self) {
+            if (self.minimum_cost.size() != self.height * self.width) {
+              throw std::runtime_error("cost grid geometry differs");
+            }
+            return ReadonlyArray(CopyArray2d(
+                self.minimum_cost, self.height, self.width));
+          })
+      .def_property_readonly(
+          "parent_index",
+          [](const planning::ReachabilityProjection &self) {
+            return CopyIndexArray2d(
+                self.parent_index, self.height, self.width);
+          })
+      .def_readonly("start_index", &planning::ReachabilityProjection::start_index)
+      .def_readonly(
+          "search_elapsed_s",
+          &planning::ReachabilityProjection::search_elapsed_s);
+  py::class_<planning::HopperSingleHopEnvelopeProjection>(
+      module, "HopperSingleHopEnvelopeProjection")
+      .def_readonly(
+          "width", &planning::HopperSingleHopEnvelopeProjection::width)
+      .def_readonly(
+          "height", &planning::HopperSingleHopEnvelopeProjection::height)
+      .def_property_readonly(
+          "eligible",
+          [](const planning::HopperSingleHopEnvelopeProjection &self) {
+            if (self.eligible.size() != self.height * self.width) {
+              throw std::runtime_error(
+                  "hopper envelope eligibility geometry differs");
+            }
+            py::array_t<bool> result(py::array::ShapeContainer{
+                static_cast<py::ssize_t>(self.height),
+                static_cast<py::ssize_t>(self.width)});
+            std::transform(
+                self.eligible.begin(), self.eligible.end(),
+                result.mutable_data(),
+                [](const std::uint8_t value) { return value != 0U; });
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "required_delta_v_mps",
+          [](const planning::HopperSingleHopEnvelopeProjection &self) {
+            if (self.required_delta_v_mps.size() !=
+                self.height * self.width) {
+              throw std::runtime_error(
+                  "hopper envelope delta-v geometry differs");
+            }
+            return ReadonlyArray(CopyArray2d(
+                self.required_delta_v_mps, self.height, self.width));
+          })
+      .def_property_readonly(
+          "nominal_flight_time_s",
+          [](const planning::HopperSingleHopEnvelopeProjection &self) {
+            if (self.nominal_flight_time_s.size() !=
+                self.height * self.width) {
+              throw std::runtime_error(
+                  "hopper envelope flight-time geometry differs");
+            }
+            return ReadonlyArray(CopyArray2d(
+                self.nominal_flight_time_s, self.height, self.width));
+          })
+      .def_readonly(
+          "algorithm_id",
+          &planning::HopperSingleHopEnvelopeProjection::algorithm_id)
+      .def_readonly(
+          "raw_known_landing_count",
+          &planning::HopperSingleHopEnvelopeProjection::raw_known_landing_count)
+      .def_readonly(
+          "candidates_evaluated",
+          &planning::HopperSingleHopEnvelopeProjection::candidates_evaluated)
+      .def_readonly(
+          "eligible_count",
+          &planning::HopperSingleHopEnvelopeProjection::eligible_count)
+      .def_property_readonly(
+          "complete",
+          [](const planning::HopperSingleHopEnvelopeProjection &self) {
+            return self.complete != 0U;
+          });
   py::class_<planning::HopperOpportunityContext>(
       module, "HopperOpportunityContext")
       .def_property_readonly(
@@ -1060,6 +1236,24 @@ void BindProjection(py::module_ &module) {
                 self.reachable_opportunities.end(), result.mutable_data(),
                 [](const std::uint8_t value) { return value != 0U; });
             return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "direct_progress_total_cost",
+          [](const planning::HopperOpportunityDistanceProjection &self) {
+            if (self.direct_progress_total_cost.size() !=
+                self.height * self.width) {
+              throw std::runtime_error(
+                  "hopper opportunity cost geometry differs");
+            }
+            return ReadonlyArray(CopyArray2d(
+                self.direct_progress_total_cost, self.height, self.width));
+          })
+      .def_property_readonly(
+          "represented_opportunity_index",
+          [](const planning::HopperOpportunityDistanceProjection &self) {
+            return CopyIndexArray2d(
+                self.represented_opportunity_index,
+                self.height, self.width);
           })
       .def_readonly(
           "current_hop_distance",
@@ -1752,7 +1946,57 @@ void BindRequest(py::module_ &module) {
             }
             return std::move(*result.projection);
           },
-          py::arg("request"), py::arg("target_positions_m"));
+          py::arg("request"), py::arg("target_positions_m"))
+      .def(
+          "project_hopper_single_hop_envelope",
+          [](const training::PlannerBridge &self,
+             const training::TrainingPlanRequest &request,
+             const planning::HopperLandingEvidenceGrid &evidence) {
+            auto result = self.ProjectHopperSingleHopEnvelope(
+                request, evidence);
+            if (!result.ok()) {
+              throw std::runtime_error(result.reason_code);
+            }
+            return std::move(*result.projection);
+          },
+          py::arg("request"), py::arg("hopper_landing_evidence"),
+          py::call_guard<py::gil_scoped_release>())
+      .def(
+          "project_hopper_incremental_edges",
+          [](const training::PlannerBridge &self,
+             const training::TrainingPlanRequest &request,
+             const planning::HopperLandingEvidenceGrid &evidence,
+             const py::array &task_target_mask) {
+            RequireExactArray(
+                task_target_mask, py::dtype::of<bool>(), 2,
+                "hopper task target mask", "bool");
+            if (task_target_mask.shape(0) !=
+                    static_cast<py::ssize_t>(evidence.height) ||
+                task_target_mask.shape(1) !=
+                    static_cast<py::ssize_t>(evidence.width)) {
+              throw py::value_error(
+                  "hopper task target mask shape mismatch");
+            }
+            const auto *data =
+                static_cast<const bool *>(task_target_mask.data());
+            std::vector<std::uint8_t> values(
+                static_cast<std::size_t>(task_target_mask.size()), 0U);
+            std::transform(
+                data, data + task_target_mask.size(), values.begin(),
+                [](const bool value) { return value ? 1U : 0U; });
+            planning::HopperIncrementalEdgeProjectionResult result;
+            {
+              py::gil_scoped_release release;
+              result = self.ProjectHopperIncrementalEdges(
+                  request, evidence, values);
+            }
+            if (!result.ok()) {
+              throw std::runtime_error(result.reason_code);
+            }
+            return std::move(*result.projection);
+          },
+          py::arg("request"), py::arg("hopper_landing_evidence"),
+          py::arg("task_target_mask"));
 }
 
 }  // namespace

@@ -5,13 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import tempfile
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Mapping, Sequence
 
 import numpy as np
 import torch
+from lunar_planner_training_bridge import PlanningOutcome
 
 from ..curriculum import CurriculumSchedule, PLATFORMS
 from ..config import FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS
@@ -21,7 +25,26 @@ from ..eval.baselines import select_baseline_action
 from ..policy.cross_attention import CrossAttentionPolicy, sample_action
 from ..policy.observation import PolicyBatch
 from ..proxy_scenario import ProxyEnvironmentFactory, proxy_observation
-from ..reward import compute_transition_reward, reward_weights_sha256
+from ..reward import (
+    InvalidTransition,
+    compute_transition_reward,
+    reward_weights_sha256,
+)
+from ..reward_contract import TaskScaleBucket
+from ..reward_curriculum import PlatformGateMetrics, PlatformType
+from ..reward_evaluation import (
+    CheckpointScore,
+    PlatformScaleMetrics,
+    RewardEpisodeMetrics,
+    RewardEvaluationManifest,
+    RewardEvaluationTask,
+    bootstrap_platform_scale_metrics,
+    build_checkpoint_score,
+    checkpoint_score_sha256,
+    reward_evaluation_manifest_sha256,
+    summarize_platform_gate_metrics,
+    summarize_platform_scale_metrics,
+)
 from ..training_semantics import FORMAL_SUCCESS_COVERAGE_RATIO
 
 
@@ -37,6 +60,136 @@ REQUIRED_METHODS = (
 FORMAL_EVALUATION_SPLITS = ("validation", "test", "holdout")
 FORMAL_EVALUATION_WATCHDOG_MAX_STEPS = 4096
 FORMAL_EVALUATION_WATCHDOG_SECONDS = 3600.0
+REWARD_V4_EVALUATION_REPORT_SCHEMA = "lunar-reward-v4-evaluation-report/v1"
+
+
+@dataclass(frozen=True, slots=True)
+class RewardV4EvaluationReport:
+    """Canonical fixed-task Reward V4 checkpoint evaluation artifact."""
+
+    checkpoint_payload_sha256: str
+    manifest: RewardEvaluationManifest
+    episodes: tuple[RewardEpisodeMetrics, ...]
+    stratum_metrics: tuple[PlatformScaleMetrics, ...]
+    platform_gate_metrics: Mapping[PlatformType, PlatformGateMetrics]
+    bootstrap_by_stratum: Mapping[str, Mapping[str, object]]
+    checkpoint_score: CheckpointScore
+    bootstrap_seed: int
+    bootstrap_resample_count: int
+    schema_version: str = REWARD_V4_EVALUATION_REPORT_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema_version != REWARD_V4_EVALUATION_REPORT_SCHEMA:
+            raise ValueError("Reward V4 evaluation report schema is invalid")
+        _require_lower_sha256(
+            self.checkpoint_payload_sha256,
+            "Reward V4 evaluation checkpoint",
+        )
+        if not isinstance(self.manifest, RewardEvaluationManifest):
+            raise ValueError("Reward V4 evaluation manifest is invalid")
+        if type(self.bootstrap_seed) is not int or (
+            type(self.bootstrap_resample_count) is not int
+            or self.bootstrap_resample_count <= 0
+        ):
+            raise ValueError("Reward V4 evaluation bootstrap is invalid")
+        expected_episode_keys = tuple(
+            (task.platform, task.scale_bucket, task.evaluation_seed)
+            for task in self.manifest.tasks
+        )
+        actual_episode_keys = tuple(
+            (row.platform, row.scale_bucket, row.evaluation_seed)
+            for row in self.episodes
+        )
+        if (
+            any(not isinstance(row, RewardEpisodeMetrics) for row in self.episodes)
+            or actual_episode_keys != expected_episode_keys
+        ):
+            raise ValueError("Reward V4 evaluation episode grid differs")
+        expected_strata = tuple(
+            dict.fromkeys(
+                (task.platform, task.scale_bucket)
+                for task in self.manifest.tasks
+            )
+        )
+        actual_strata = tuple(
+            (row.platform, row.scale_bucket) for row in self.stratum_metrics
+        )
+        if (
+            any(
+                not isinstance(row, PlatformScaleMetrics)
+                for row in self.stratum_metrics
+            )
+            or actual_strata != expected_strata
+        ):
+            raise ValueError("Reward V4 evaluation stratum grid differs")
+        platforms = tuple(dict.fromkeys(task.platform for task in self.manifest.tasks))
+        gates = dict(self.platform_gate_metrics)
+        if set(gates) != set(platforms) or any(
+            not isinstance(gates[platform], PlatformGateMetrics)
+            for platform in platforms
+        ):
+            raise ValueError("Reward V4 evaluation platform gates differ")
+        bootstraps = {
+            str(key): dict(value)
+            for key, value in self.bootstrap_by_stratum.items()
+        }
+        stratum_by_key = {
+            _reward_v4_stratum_key(row.platform, row.scale_bucket): row
+            for row in self.stratum_metrics
+        }
+        if set(bootstraps) != set(stratum_by_key) or any(
+            value.get("point_estimate") != stratum_by_key[key].to_dict()
+            or value.get("resample_count") != self.bootstrap_resample_count
+            for key, value in bootstraps.items()
+        ):
+            raise ValueError("Reward V4 evaluation bootstrap evidence differs")
+        if (
+            not isinstance(self.checkpoint_score, CheckpointScore)
+            or self.checkpoint_score.payload_sha256
+            != self.checkpoint_payload_sha256
+            or self.checkpoint_score.compared_strata
+            != tuple(sorted(stratum_by_key))
+        ):
+            raise ValueError("Reward V4 checkpoint score differs")
+        object.__setattr__(
+            self,
+            "platform_gate_metrics",
+            MappingProxyType({platform: gates[platform] for platform in platforms}),
+        )
+        object.__setattr__(
+            self,
+            "bootstrap_by_stratum",
+            MappingProxyType(
+                {key: MappingProxyType(bootstraps[key]) for key in sorted(bootstraps)}
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "checkpoint_payload_sha256": self.checkpoint_payload_sha256,
+            "manifest_sha256": reward_evaluation_manifest_sha256(self.manifest),
+            "manifest": self.manifest.to_dict(),
+            "episodes": [row.to_dict() for row in self.episodes],
+            "strata": {
+                _reward_v4_stratum_key(row.platform, row.scale_bucket): row.to_dict()
+                for row in self.stratum_metrics
+            },
+            "platform_gates": {
+                platform.value: self.platform_gate_metrics[platform].to_dict()
+                for platform in self.platform_gate_metrics
+            },
+            "bootstrap_seed": self.bootstrap_seed,
+            "bootstrap_resample_count": self.bootstrap_resample_count,
+            "bootstrap_by_stratum": {
+                key: dict(value)
+                for key, value in self.bootstrap_by_stratum.items()
+            },
+            "checkpoint_score": self.checkpoint_score.to_dict(),
+            "checkpoint_score_sha256": checkpoint_score_sha256(
+                self.checkpoint_score
+            ),
+        }
 
 
 class FormalEvaluationIncomplete(RuntimeError):
@@ -415,6 +568,278 @@ def _aggregate_platform_metrics(
         theta_mean_resultant_length=theta_mean_resultant_length,
         fixed_yaw_mean_abs_delta_rad=fixed_yaw_mean_abs_delta_rad,
     )
+
+
+def build_reward_v4_evaluation_report(
+    *,
+    manifest: RewardEvaluationManifest,
+    episodes: Sequence[RewardEpisodeMetrics],
+    checkpoint_payload_sha256: str,
+    enabled_r2_platforms: Sequence[PlatformType],
+    bootstrap_seed: int,
+    bootstrap_resample_count: int,
+) -> RewardV4EvaluationReport:
+    """Aggregate one frozen evaluation grid without changing gate point estimates."""
+    if not isinstance(manifest, RewardEvaluationManifest):
+        raise TypeError("Reward V4 evaluation manifest is invalid")
+    values = tuple(episodes)
+    expected_keys = tuple(
+        (task.platform, task.scale_bucket, task.evaluation_seed)
+        for task in manifest.tasks
+    )
+    by_key = {
+        (row.platform, row.scale_bucket, row.evaluation_seed): row
+        for row in values
+        if isinstance(row, RewardEpisodeMetrics)
+    }
+    if len(by_key) != len(values) or set(by_key) != set(expected_keys):
+        raise ValueError("Reward V4 evaluation episodes differ from manifest")
+    ordered_episodes = tuple(by_key[key] for key in expected_keys)
+    stratum_keys = tuple(
+        dict.fromkeys((platform, bucket) for platform, bucket, _seed in expected_keys)
+    )
+    stratum_metrics = tuple(
+        summarize_platform_scale_metrics(
+            tuple(
+                row
+                for row in ordered_episodes
+                if row.platform is platform and row.scale_bucket is bucket
+            )
+        )
+        for platform, bucket in stratum_keys
+    )
+    platforms = tuple(dict.fromkeys(platform for platform, _bucket in stratum_keys))
+    platform_gates = {
+        platform: summarize_platform_gate_metrics(
+            tuple(row for row in stratum_metrics if row.platform is platform),
+            platform=platform,
+        )
+        for platform in platforms
+    }
+    if type(bootstrap_seed) is not int or bootstrap_seed < 0:
+        raise ValueError("Reward V4 evaluation bootstrap seed is invalid")
+    if type(bootstrap_resample_count) is not int or bootstrap_resample_count <= 0:
+        raise ValueError("Reward V4 evaluation bootstrap count is invalid")
+    bootstrap_by_stratum = {
+        _reward_v4_stratum_key(platform, bucket): (
+            bootstrap_platform_scale_metrics(
+                tuple(
+                    row
+                    for row in ordered_episodes
+                    if row.platform is platform and row.scale_bucket is bucket
+                ),
+                bootstrap_seed=bootstrap_seed + index,
+                resample_count=bootstrap_resample_count,
+            )
+        )
+        for index, (platform, bucket) in enumerate(stratum_keys)
+    }
+    score = build_checkpoint_score(
+        stratum_metrics,
+        enabled_r2_platforms=enabled_r2_platforms,
+        payload_sha256=checkpoint_payload_sha256,
+    )
+    return RewardV4EvaluationReport(
+        checkpoint_payload_sha256=checkpoint_payload_sha256,
+        manifest=manifest,
+        episodes=ordered_episodes,
+        stratum_metrics=stratum_metrics,
+        platform_gate_metrics=platform_gates,
+        bootstrap_by_stratum=bootstrap_by_stratum,
+        checkpoint_score=score,
+        bootstrap_seed=bootstrap_seed,
+        bootstrap_resample_count=bootstrap_resample_count,
+    )
+
+
+def reward_v4_report_sha256(report: RewardV4EvaluationReport) -> str:
+    if not isinstance(report, RewardV4EvaluationReport):
+        raise TypeError("Reward V4 evaluation report is invalid")
+    payload = json.dumps(
+        report.to_dict(),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def write_reward_v4_report(
+    path: Path, report: RewardV4EvaluationReport
+) -> str:
+    digest = reward_v4_report_sha256(report)
+    payload = {**report.to_dict(), "report_sha256": digest}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps(payload, sort_keys=True, indent=2, allow_nan=False)
+                + "\n"
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return digest
+
+
+def read_reward_v4_report(path: Path) -> RewardV4EvaluationReport:
+    """Read and fully rederive one content-addressed Reward V4 report."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("Reward V4 evaluation report is unreadable") from error
+    if not isinstance(payload, dict) or not isinstance(
+        payload.get("report_sha256"), str
+    ):
+        raise ValueError("Reward V4 evaluation report hash is missing")
+    report_digest = payload.pop("report_sha256")
+    actual_digest = hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    if report_digest != actual_digest:
+        raise ValueError("Reward V4 evaluation report hash differs")
+    try:
+        manifest_raw = payload["manifest"]
+        if not isinstance(manifest_raw, Mapping) or set(manifest_raw) != {
+            "schema_version",
+            "tasks",
+        }:
+            raise ValueError("manifest structure differs")
+        tasks_raw = manifest_raw["tasks"]
+        if not isinstance(tasks_raw, list):
+            raise ValueError("manifest tasks differ")
+        task_fields = {
+            "platform",
+            "scale_bucket",
+            "evaluation_seed",
+            "scene_sha256",
+            "roi_sha256",
+            "priority_sha256",
+            "start_pose_sha256",
+            "capability_sha256",
+        }
+        tasks = tuple(
+            RewardEvaluationTask(
+                platform=PlatformType(row["platform"]),
+                scale_bucket=TaskScaleBucket(row["scale_bucket"]),
+                evaluation_seed=row["evaluation_seed"],
+                scene_sha256=row["scene_sha256"],
+                roi_sha256=row["roi_sha256"],
+                priority_sha256=row["priority_sha256"],
+                start_pose_sha256=row["start_pose_sha256"],
+                capability_sha256=row["capability_sha256"],
+            )
+            for row in tasks_raw
+            if isinstance(row, Mapping) and set(row) == task_fields
+        )
+        if len(tasks) != len(tasks_raw):
+            raise ValueError("manifest task fields differ")
+        manifest = RewardEvaluationManifest(
+            tasks=tasks,
+            schema_version=manifest_raw["schema_version"],
+        )
+        episodes_raw = payload["episodes"]
+        if not isinstance(episodes_raw, list):
+            raise ValueError("episode list differs")
+        episode_fields = {
+            "platform",
+            "scale_bucket",
+            "evaluation_seed",
+            "success_at_0_95",
+            "final_coverage",
+            "priority_coverage_auc_over_macro_actions",
+            "steps_to_success",
+            "normalized_executed_path_to_success",
+            "hard_error_count",
+            "macro_action_count",
+            "priority_denominator_present",
+        }
+        episodes = tuple(
+            RewardEpisodeMetrics(
+                platform=PlatformType(row["platform"]),
+                scale_bucket=TaskScaleBucket(row["scale_bucket"]),
+                evaluation_seed=row["evaluation_seed"],
+                success_at_0_95=row["success_at_0_95"],
+                final_coverage=row["final_coverage"],
+                priority_coverage_auc_over_macro_actions=row[
+                    "priority_coverage_auc_over_macro_actions"
+                ],
+                steps_to_success=row["steps_to_success"],
+                normalized_executed_path_to_success=row[
+                    "normalized_executed_path_to_success"
+                ],
+                hard_error_count=row["hard_error_count"],
+                macro_action_count=row["macro_action_count"],
+                priority_denominator_present=row[
+                    "priority_denominator_present"
+                ],
+            )
+            for row in episodes_raw
+            if isinstance(row, Mapping) and set(row) == episode_fields
+        )
+        if len(episodes) != len(episodes_raw):
+            raise ValueError("episode fields differ")
+        score_raw = payload["checkpoint_score"]
+        if not isinstance(score_raw, Mapping) or not isinstance(
+            score_raw.get("enabled_r2_platforms"), list
+        ):
+            raise ValueError("checkpoint score differs")
+        enabled_r2 = tuple(
+            PlatformType(value)
+            for value in score_raw["enabled_r2_platforms"]
+        )
+        rebuilt = build_reward_v4_evaluation_report(
+            manifest=manifest,
+            episodes=episodes,
+            checkpoint_payload_sha256=payload[
+                "checkpoint_payload_sha256"
+            ],
+            enabled_r2_platforms=enabled_r2,
+            bootstrap_seed=payload["bootstrap_seed"],
+            bootstrap_resample_count=payload[
+                "bootstrap_resample_count"
+            ],
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "Reward V4 evaluation report structure differs"
+        ) from error
+    if rebuilt.to_dict() != payload:
+        raise ValueError("Reward V4 evaluation report evidence differs")
+    return rebuilt
+
+
+def _reward_v4_stratum_key(
+    platform: PlatformType, bucket: TaskScaleBucket
+) -> str:
+    return f"{platform.value}/{bucket.value}"
+
+
+def _require_lower_sha256(value: object, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{name} must be a lowercase SHA-256")
+    return value
 
 
 def report_sha256(report: EvaluationReport) -> str:
@@ -1270,6 +1695,14 @@ def _select_actions(
 
 
 def _evaluation_reward(transition) -> float:
+    if transition.planning_outcome in {
+        PlanningOutcome.INVALID_REQUEST,
+        PlanningOutcome.STALE_INPUT,
+        PlanningOutcome.NUMERICAL_FAILURE,
+    }:
+        raise InvalidTransition(
+            "invalid planning outcome cannot enter evaluation reward"
+        )
     return compute_transition_reward(transition)
 
 
@@ -1314,11 +1747,17 @@ __all__ = [
     "MethodEvaluation",
     "PlatformMetrics",
     "REQUIRED_METHODS",
+    "REWARD_V4_EVALUATION_REPORT_SCHEMA",
+    "RewardV4EvaluationReport",
+    "build_reward_v4_evaluation_report",
+    "read_reward_v4_report",
     "report_sha256",
+    "reward_v4_report_sha256",
     "evaluate_formal_policy",
     "formal_evaluation_probe",
     "evaluate_proxy_policy",
     "mission_coverage_ratio",
     "select_best_candidate",
     "write_report",
+    "write_reward_v4_report",
 ]

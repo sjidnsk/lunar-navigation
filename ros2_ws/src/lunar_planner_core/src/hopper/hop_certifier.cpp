@@ -19,11 +19,6 @@ struct TimedArc final {
   double certified_delta_v_mps{};
 };
 
-struct MinimumArcResult final {
-  std::optional<TimedArc> timed_arc;
-  std::string reason_code;
-};
-
 [[nodiscard]] bool Finite(const Vec3 value) noexcept {
   return std::isfinite(value.x) && std::isfinite(value.y) &&
       std::isfinite(value.z);
@@ -52,111 +47,6 @@ struct MinimumArcResult final {
       .certified_delta_v_mps =
           (1.0 + capability.reachability_delta_v_margin_ratio) * ideal,
   };
-}
-
-[[nodiscard]] MinimumArcResult MinimumDeltaVArc(
-    const SingleHopCertificationProblem& problem) noexcept {
-  const Vec3 displacement{
-      problem.landing_position_m.x - problem.launch_position_m.x,
-      problem.landing_position_m.y - problem.launch_position_m.y,
-      problem.landing_position_m.z - problem.launch_position_m.z,
-  };
-  const double gravity = Norm(problem.gravity_mps2);
-  const double distance = Norm(displacement);
-  if (!std::isfinite(gravity) || gravity <= 0.0 ||
-      !std::isfinite(distance)) {
-    return {.reason_code = "HOPPER_BALLISTIC_NUMERICAL_INDETERMINATE"};
-  }
-  const double evidence_scale = problem.flight_map == nullptr
-      ? 1.0
-      : problem.flight_map->resolution_m();
-  double center = std::sqrt(
-      2.0 * std::max(distance, evidence_scale) / gravity);
-  if (!std::isfinite(center) || center <= 0.0) {
-    return {.reason_code = "HOPPER_BALLISTIC_NUMERICAL_INDETERMINATE"};
-  }
-  double left = 0.5 * center;
-  double right = 2.0 * center;
-  TimedArc left_arc = AtTime(
-      problem.launch_position_m, problem.landing_position_m,
-      problem.gravity_mps2, left, *problem.capability);
-  TimedArc center_arc = AtTime(
-      problem.launch_position_m, problem.landing_position_m,
-      problem.gravity_mps2, center, *problem.capability);
-  TimedArc right_arc = AtTime(
-      problem.launch_position_m, problem.landing_position_m,
-      problem.gravity_mps2, right, *problem.capability);
-  while (left_arc.certified_delta_v_mps <
-         center_arc.certified_delta_v_mps) {
-    right = center;
-    right_arc = center_arc;
-    center = left;
-    center_arc = left_arc;
-    const double next = 0.5 * left;
-    if (!(next > 0.0 && next < left)) {
-      return {.reason_code = "HOPPER_BALLISTIC_NUMERICAL_INDETERMINATE"};
-    }
-    left = next;
-    left_arc = AtTime(
-        problem.launch_position_m, problem.landing_position_m,
-        problem.gravity_mps2, left, *problem.capability);
-  }
-  while (right_arc.certified_delta_v_mps <
-         center_arc.certified_delta_v_mps) {
-    left = center;
-    left_arc = center_arc;
-    center = right;
-    center_arc = right_arc;
-    const double next = 2.0 * right;
-    if (!std::isfinite(next) || !(next > right)) {
-      return {.reason_code = "HOPPER_BALLISTIC_NUMERICAL_INDETERMINATE"};
-    }
-    right = next;
-    right_arc = AtTime(
-        problem.launch_position_m, problem.landing_position_m,
-        problem.gravity_mps2, right, *problem.capability);
-  }
-
-  constexpr double inverse_phi = 0.6180339887498948482;
-  double x1 = right - inverse_phi * (right - left);
-  double x2 = left + inverse_phi * (right - left);
-  TimedArc arc1 = AtTime(
-      problem.launch_position_m, problem.landing_position_m,
-      problem.gravity_mps2, x1, *problem.capability);
-  TimedArc arc2 = AtTime(
-      problem.launch_position_m, problem.landing_position_m,
-      problem.gravity_mps2, x2, *problem.capability);
-  const double numerical_scale = std::sqrt(
-      std::numeric_limits<double>::epsilon());
-  while (right - left > numerical_scale *
-         std::max({1.0, std::abs(left), std::abs(right)})) {
-    if (arc1.certified_delta_v_mps <= arc2.certified_delta_v_mps) {
-      right = x2;
-      x2 = x1;
-      arc2 = arc1;
-      x1 = right - inverse_phi * (right - left);
-      arc1 = AtTime(
-          problem.launch_position_m, problem.landing_position_m,
-          problem.gravity_mps2, x1, *problem.capability);
-    } else {
-      left = x1;
-      x1 = x2;
-      arc1 = arc2;
-      x2 = left + inverse_phi * (right - left);
-      arc2 = AtTime(
-          problem.launch_position_m, problem.landing_position_m,
-          problem.gravity_mps2, x2, *problem.capability);
-    }
-  }
-  TimedArc best = arc1.certified_delta_v_mps <=
-          arc2.certified_delta_v_mps
-      ? arc1
-      : arc2;
-  if (!std::isfinite(best.certified_delta_v_mps) ||
-      !std::isfinite(best.arc.flight_time_s)) {
-    return {.reason_code = "HOPPER_BALLISTIC_NUMERICAL_INDETERMINATE"};
-  }
-  return {.timed_arc = best};
 }
 
 [[nodiscard]] bool NumericalTubeFailure(
@@ -207,22 +97,22 @@ SingleHopCertificationResult CertifySingleHop(
         .reason_code = available.reason_code,
     };
   }
-  const MinimumArcResult minimum = MinimumDeltaVArc(problem);
-  if (!minimum.timed_arc.has_value()) {
+  const MinimumSingleHopEnvelopeResult minimum =
+      EvaluateMinimumSingleHopEnvelope(
+          problem.launch_position_m, problem.landing_position_m,
+          problem.gravity_mps2, problem.flight_map->resolution_m(),
+          *problem.capability);
+  if (!minimum.ok()) {
     return {
-        .status = HopCertificationStatus::kNumericalIndeterminate,
+        .status = minimum.reason_code ==
+                "HOPPER_SINGLE_HOP_ENVELOPE_EXCEEDED"
+            ? HopCertificationStatus::kInfeasible
+            : HopCertificationStatus::kNumericalIndeterminate,
         .reason_code = minimum.reason_code,
     };
   }
-  if (minimum.timed_arc->certified_delta_v_mps >
-      *available.delta_v_mps) {
-    return {
-        .status = HopCertificationStatus::kInfeasible,
-        .reason_code = "HOPPER_SINGLE_HOP_ENVELOPE_EXCEEDED",
-    };
-  }
 
-  const double minimum_time = minimum.timed_arc->arc.flight_time_s;
+  const double minimum_time = minimum.evidence->arc.flight_time_s;
   double feasible_upper = minimum_time;
   double infeasible_upper = 2.0 * feasible_upper;
   while (true) {
@@ -261,20 +151,8 @@ SingleHopCertificationResult CertifySingleHop(
   }
 
   std::size_t examined = 1U;
-  SingleHopEnvelopeResult minimum_envelope = EvaluateSingleHopEnvelope(
-      minimum.timed_arc->arc, *problem.capability);
-  if (!minimum_envelope.ok()) {
-    return {
-        .status = minimum_envelope.reason_code ==
-                "HOPPER_SINGLE_HOP_ENVELOPE_EXCEEDED"
-            ? HopCertificationStatus::kInfeasible
-            : HopCertificationStatus::kNumericalIndeterminate,
-        .examined_intervals = examined,
-        .reason_code = minimum_envelope.reason_code,
-    };
-  }
   FlightTubeCertificationResult minimum_tube = CertifyFlightTube(
-      minimum.timed_arc->arc, *problem.flight_map, *problem.capability,
+      minimum.evidence->arc, *problem.flight_map, *problem.capability,
       *problem.map_safety, problem.stop_token);
   if (minimum_tube.canceled) {
     return {
@@ -285,7 +163,7 @@ SingleHopCertificationResult CertifySingleHop(
   }
   if (minimum_tube.certified) {
     return Certified(
-        minimum.timed_arc->arc, *minimum_envelope.evidence,
+        minimum.evidence->arc, minimum.evidence->envelope,
         std::move(minimum_tube), examined);
   }
   if (NumericalTubeFailure(minimum_tube)) {

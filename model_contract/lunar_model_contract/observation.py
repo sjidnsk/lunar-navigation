@@ -100,7 +100,27 @@ class ObservationContractV3(ObservationContractV2):
     )
 
 
-ACTIVE_OBSERVATION_CONTRACT: Final = ObservationContractV3
+class ObservationContractV4(ObservationContractV3):
+    """Active schema using authoritative global path cost per candidate."""
+
+    version: Final = "lunar-observation-contract/v4"
+    frontier_fields: Final = (
+        "x_norm",
+        "y_norm",
+        "global_path_cost_norm",
+        "bearing_sin",
+        "bearing_cos",
+        "potential_coverage_gain_ratio",
+        "priority_weighted_gain_ratio",
+        "normal_sin",
+        "normal_cos",
+        "normal_confidence",
+        "clearance_margin_norm",
+        "region_remaining_ratio",
+    )
+
+
+ACTIVE_OBSERVATION_CONTRACT: Final = ObservationContractV4
 
 
 def _require_float32_finite(name: str, array: np.ndarray) -> None:
@@ -133,7 +153,7 @@ def validate_platform_context(array: np.ndarray) -> None:
 
 
 def validate_observation_inputs(mapping: Mapping[str, np.ndarray]) -> None:
-    """Validate one batch of the active V3 observation mapping.
+    """Validate one batch of the active V4 observation mapping.
 
     A batch with an all-false candidate mask is valid: the builder owns the
     explicit bypass when no frontier candidate can be selected.

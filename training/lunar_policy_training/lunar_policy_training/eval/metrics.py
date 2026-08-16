@@ -10,6 +10,7 @@ from .metrics_core import (
     bootstrap_indices_sha256,
     build_episode_result,
     episode_record,
+    priority_coverage_auc_over_macro_actions,
     summarize_episodes,
     validate_episode_result,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "bootstrap_indices_sha256",
     "build_episode_result",
     "episode_record",
+    "priority_coverage_auc_over_macro_actions",
     "summarize_episodes",
     "validate_episode_result",
 ]

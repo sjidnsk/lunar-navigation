@@ -20,7 +20,10 @@ import torch
 
 from .capability_freeze import FrozenCapabilityEnvironmentFactory
 from .config import PLATFORMS
-from .environment.candidate_builder import CANDIDATE_DIAGNOSTIC_FIELDS
+from .environment.candidate_builder import (
+    CANDIDATE_DIAGNOSTIC_FIELDS,
+    CandidateDecisionSnapshot,
+)
 from .eval.baselines import select_baseline_action
 from .polar_data.multires_scene import GENERATOR_SHA256
 from .project_capability import load_project_formal_capability
@@ -32,7 +35,7 @@ from .training_semantics import (
 )
 
 
-CLOSED_LOOP_GATE_SCHEMA = "lunar-physical-opportunity-closed-loop-gate/v4"
+CLOSED_LOOP_GATE_SCHEMA = "lunar-physical-opportunity-closed-loop-gate/v5"
 CLOSED_LOOP_MINIMUM_SCENES = 1
 CLOSED_LOOP_METHOD = "gain_over_cost_frontier"
 _SPLITS = ("train", "validation", "test", "holdout")
@@ -41,7 +44,6 @@ _ROW_SHA_FIELDS = (
     "coverable_mask_sha256",
     "physical_candidate_universe_sha256",
     "physical_snapshot_id",
-    "oracle_opportunity_set_sha256",
     "request_sequence_sha256",
     "planner_sequence_sha256",
 )
@@ -57,12 +59,10 @@ _ROW_FIELDS = frozenset(
         "physical_reachability_algorithm_id",
         "physical_candidate_universe_sha256",
         "physical_snapshot_id",
-        "oracle_opportunity_set_sha256",
+        "candidate_decision_snapshot",
         "final_coverage_hex",
         "success_first_crossing",
         "terminal_reason",
-        "oracle_contradiction_count",
-        "oracle_opportunity_count",
         "planner_failure_count",
         "safety_violation_count",
         "invalid_action_count",
@@ -492,7 +492,6 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         mission_coverage_ratio(worker.environment.current_observation)[0]
     )
     terminal_reason: TerminalReason | None = None
-    oracle_opportunity_count = 0
     planner_reason_counts: Counter[str] = Counter()
     planner_call_count = 0
     expected_corridor_margin_m = 0.0 if work.platform == "HOPPER" else 2.0
@@ -509,7 +508,6 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         boundary = worker.environment.refresh_decision_boundary()
         if boundary.execution_state == "NO_CANDIDATES":
             terminal_reason = boundary.terminal_reason
-            oracle_opportunity_count = boundary.oracle_opportunity_count
             final_coverage = float(
                 mission_coverage_ratio(worker.environment.current_observation)[0]
             )
@@ -642,7 +640,6 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         )
         if transition.terminated:
             terminal_reason = transition.terminal_reason
-            oracle_opportunity_count = transition.oracle_opportunity_count
 
     if terminal_reason is None:
         raise ClosedLoopGateError("gate natural terminal has no reason")
@@ -653,9 +650,9 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
         raise ClosedLoopGateError("gate terminal physical snapshot is missing")
     physical_candidate_universe_sha256 = snapshot.candidate_universe_sha256
     physical_snapshot_id = snapshot.candidate_universe.physical_snapshot_id
-    oracle_opportunity_set_sha256 = (
-        snapshot.frontier_oracle.oracle_opportunity_set_sha256
-    )
+    decision_snapshot = snapshot.candidate_universe.decision_snapshot
+    if decision_snapshot is None:
+        raise ClosedLoopGateError("gate candidate decision snapshot is missing")
     row = {
         "scene_id": work.case.scene_id,
         "split": work.case.split,
@@ -673,12 +670,10 @@ def _run_closed_loop_work(work: _ClosedLoopWork) -> dict[str, object]:
             physical_candidate_universe_sha256
         ),
         "physical_snapshot_id": physical_snapshot_id,
-        "oracle_opportunity_set_sha256": oracle_opportunity_set_sha256,
+        "candidate_decision_snapshot": asdict(decision_snapshot),
         "final_coverage_hex": final_coverage.hex(),
         "success_first_crossing": success_first_crossing,
         "terminal_reason": terminal_reason.value,
-        "oracle_contradiction_count": 0,
-        "oracle_opportunity_count": oracle_opportunity_count,
         "planner_failure_count": planner_failures,
         "safety_violation_count": safety_violations,
         "invalid_action_count": invalid_actions,
@@ -732,8 +727,6 @@ def _validate_row(
     ):
         raise ClosedLoopGateError("closed-loop final coverage is invalid")
     count_fields = (
-        "oracle_contradiction_count",
-        "oracle_opportunity_count",
         "planner_failure_count",
         "safety_violation_count",
         "invalid_action_count",
@@ -765,12 +758,30 @@ def _validate_row(
         raise ClosedLoopGateError(
             "closed-loop candidate diagnostics are invalid"
         )
+    decision_value = row.get("candidate_decision_snapshot")
+    try:
+        decision_snapshot = CandidateDecisionSnapshot(**decision_value)
+    except (TypeError, ValueError) as error:
+        raise ClosedLoopGateError(
+            "closed-loop candidate decision snapshot is invalid"
+        ) from error
+    if (
+        decision_snapshot.snapshot_id != row.get("physical_snapshot_id")
+        or decision_snapshot.candidate_set_sha256
+        != row.get("physical_candidate_universe_sha256")
+        or decision_snapshot.selected_policy_candidate_count
+        != diagnostics["selected_policy_candidate_count"]
+        or decision_snapshot.planner_rejected_current_snapshot_count
+        != diagnostics["planner_failed_current_snapshot_count"]
+    ):
+        raise ClosedLoopGateError(
+            "closed-loop candidate decision snapshot identity differs"
+        )
     if row["executed_step_count"] <= 0:
         raise ClosedLoopGateError("closed-loop executed step count is invalid")
     if row["planner_call_count"] < row["executed_step_count"]:
         raise ClosedLoopGateError("closed-loop planner call count is incomplete")
     for field, message in (
-        ("oracle_contradiction_count", "oracle contradiction"),
         ("safety_violation_count", "safety violation"),
         ("invalid_action_count", "invalid action"),
         ("platform_reference_mismatch_count", "reference mismatch"),
@@ -780,10 +791,6 @@ def _validate_row(
             raise ClosedLoopGateError(f"closed-loop {message} count is nonzero")
 
     terminal_reason = row.get("terminal_reason")
-    if terminal_reason == "PLANNER_BLOCKED_WITH_OPPORTUNITY":
-        raise ClosedLoopGateError(
-            "closed-loop planner blocked qualification limit is zero"
-        )
     if terminal_reason == "HARD_FAILURE":
         raise ClosedLoopGateError(
             "closed-loop hard failure qualification limit is zero"
@@ -794,10 +801,11 @@ def _validate_row(
         )
     success = terminal_reason == "SUCCESS"
     legal_failure_reasons = {
-        "NO_RECOVERABLE_OBSERVATION_STATE",
-        "VISITED_EXHAUSTED",
-        "NO_TRANSIT_OPPORTUNITY",
-        "ZERO_GAIN",
+        "NO_FRONTIER",
+        "NO_GLOBAL_ROUTE",
+        "ZERO_EXPECTED_GAIN",
+        "PLANNER_EXHAUSTED",
+        "NO_AVAILABLE_LANDING_CANDIDATE",
     }
     if not success and terminal_reason not in legal_failure_reasons:
         raise ClosedLoopGateError("closed-loop terminal reason is not auditable")
@@ -806,10 +814,6 @@ def _validate_row(
             raise ClosedLoopGateError("closed-loop successful coverage is too low")
         if row.get("success_first_crossing") is not True:
             raise ClosedLoopGateError("closed-loop success crossing is missing")
-        if row["oracle_opportunity_count"] != 0:
-            raise ClosedLoopGateError(
-                "closed-loop terminal oracle opportunity is nonzero"
-            )
     else:
         if final_coverage >= FORMAL_SUCCESS_COVERAGE_RATIO:
             raise ClosedLoopGateError(
@@ -818,10 +822,6 @@ def _validate_row(
         if row.get("success_first_crossing") is not False:
             raise ClosedLoopGateError(
                 "closed-loop failure has a success crossing"
-            )
-        if row["oracle_opportunity_count"] != 0:
-            raise ClosedLoopGateError(
-                "closed-loop terminal oracle opportunity is nonzero"
             )
     if row["planner_failure_count"] >= row["executed_step_count"]:
         raise ClosedLoopGateError(
@@ -967,9 +967,7 @@ def build_closed_loop_gate_report(
     terminal_reason_counts = dict(
         sorted(Counter(str(row["terminal_reason"]) for row in ordered_rows).items())
     )
-    planner_blocked_count = terminal_reason_counts.get(
-        "PLANNER_BLOCKED_WITH_OPPORTUNITY", 0
-    )
+    planner_exhausted_count = terminal_reason_counts.get("PLANNER_EXHAUSTED", 0)
     hard_failure_count = terminal_reason_counts.get("HARD_FAILURE", 0)
     canceled_count = terminal_reason_counts.get("CANCELED", 0)
     reference_mismatch_count = sum(
@@ -989,7 +987,7 @@ def build_closed_loop_gate_report(
             len(ordered_rows) - success_count
         ),
         "terminal_reason_counts": terminal_reason_counts,
-        "planner_blocked_scene_platform_count": planner_blocked_count,
+        "planner_exhausted_scene_platform_count": planner_exhausted_count,
         "hard_failure_scene_platform_count": hard_failure_count,
         "canceled_scene_platform_count": canceled_count,
         "platform_reference_mismatch_count": reference_mismatch_count,

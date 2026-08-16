@@ -302,6 +302,11 @@ class FrozenPlatformCapability:
     resources: tuple[FrozenCapabilityResource, ...]
 
     @property
+    def nominal_global_cost_per_m(self) -> float:
+        """Derived base route cost used by candidate cost normalization."""
+        return 1.0
+
+    @property
     def source_motion_primitive_ids(self) -> tuple[str, ...]:
         typed = self.typed_capability
         if isinstance(typed, FrozenHopperCapability):
@@ -456,6 +461,17 @@ class FrozenCapabilityEnvironmentFactory:
 
     def __call__(self, worker_index: int, platform_type: str) -> object:
         return self.create_for_episode(worker_index, platform_type, 0)
+
+    def task_inventory_count(self, platform_type: str) -> int:
+        provider = getattr(self.builder, "task_inventory_count", None)
+        if not callable(provider):
+            raise CapabilityFreezeError(
+                "formal environment builder does not publish task inventory"
+            )
+        count = provider(platform_type)
+        if type(count) is not int or count <= 0:
+            raise CapabilityFreezeError("formal task inventory is invalid")
+        return count
 
     def create_for_episode(
         self,

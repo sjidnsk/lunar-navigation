@@ -45,6 +45,59 @@ struct HopperLandingEvidenceGrid final {
   std::string algorithm_id;
 };
 
+struct HopperSingleHopEnvelopeProjection final {
+  std::size_t width{};
+  std::size_t height{};
+  std::vector<std::uint8_t> eligible;
+  std::vector<double> required_delta_v_mps;
+  std::vector<double> nominal_flight_time_s;
+  std::string algorithm_id;
+  std::size_t raw_known_landing_count{};
+  std::size_t candidates_evaluated{};
+  std::size_t eligible_count{};
+  std::uint8_t complete{};
+};
+
+struct HopperSingleHopEnvelopeProjectionResult final {
+  std::optional<HopperSingleHopEnvelopeProjection> projection;
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept {
+    return projection.has_value() && reason_code.empty();
+  }
+};
+
+enum class HopperEdgeEvidenceDisposition : std::uint8_t {
+  kCertified,
+  kStablePhysicalRejection,
+  kWaitingEvidence,
+};
+
+struct HopperIncrementalEdgeDiagnostic final {
+  std::size_t target_index{};
+  HopperEdgeEvidenceDisposition disposition{};
+  std::vector<std::size_t> dependency_tile_indices;
+  Vec3 exact_target_position_m;
+  double nominal_flight_time_s{};
+  std::string reason_code;
+};
+
+struct HopperIncrementalEdgeProjection final {
+  std::size_t width{};
+  std::size_t height{};
+  std::vector<HopperIncrementalEdgeDiagnostic> edges;
+  std::string algorithm_id;
+};
+
+struct HopperIncrementalEdgeProjectionResult final {
+  std::optional<HopperIncrementalEdgeProjection> projection;
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept {
+    return projection.has_value() && reason_code.empty();
+  }
+};
+
 struct ReachabilityProjection final {
   PlatformType platform_type{};
   std::size_t width{};
@@ -56,6 +109,10 @@ struct ReachabilityProjection final {
   std::size_t certified_edges{};
   std::size_t rejected_edges{};
   double maximum_certified_edge_distance_m{};
+  std::vector<double> minimum_cost;
+  std::vector<std::size_t> parent_index;
+  std::size_t start_index{};
+  double search_elapsed_s{};
 };
 
 struct ReachabilityProjectionResult final {
@@ -94,6 +151,8 @@ struct HopperOpportunityDistanceProjection final {
   std::size_t height{};
   std::vector<std::uint8_t> direct_progress;
   std::vector<std::uint8_t> reachable_opportunities;
+  std::vector<double> direct_progress_total_cost;
+  std::vector<std::size_t> represented_opportunity_index;
   std::int32_t current_hop_distance{-1};
   std::uint8_t has_reachable_opportunity{};
   std::string algorithm_id;
@@ -138,5 +197,16 @@ QueryHopperOpportunityDistance(
 ProjectHopperLandingEvidence(
     const PlannerInput& input,
     std::span<const Vec3> target_positions_map);
+
+[[nodiscard]] HopperSingleHopEnvelopeProjectionResult
+ProjectHopperSingleHopEnvelope(
+    const PlannerInput& input,
+    const HopperLandingEvidenceGrid& hopper_landing_evidence);
+
+[[nodiscard]] HopperIncrementalEdgeProjectionResult
+ProjectHopperIncrementalEdges(
+    const PlannerInput& input,
+    const HopperLandingEvidenceGrid& hopper_landing_evidence,
+    std::span<const std::uint8_t> task_target_mask);
 
 }  // namespace lunar::planning

@@ -7,18 +7,18 @@ import math
 
 import numpy as np
 import torch
-from lunar_model_contract import ActionContractV2, ObservationContractV3
+from lunar_model_contract import ActionContractV2, ObservationContractV4
 
 from ..policy.cross_attention import PolicyOutput
 from . import baseline_core
 
 
-_DISTANCE_FIELD = ObservationContractV3.frontier_fields.index(
-    "distance_from_robot_norm"
+_PATH_COST_FIELD = ObservationContractV4.frontier_fields.index(
+    "global_path_cost_norm"
 )
-_BEARING_SIN_FIELD = ObservationContractV3.frontier_fields.index("bearing_sin")
-_BEARING_COS_FIELD = ObservationContractV3.frontier_fields.index("bearing_cos")
-_POTENTIAL_GAIN_FIELD = ObservationContractV3.frontier_fields.index(
+_BEARING_SIN_FIELD = ObservationContractV4.frontier_fields.index("bearing_sin")
+_BEARING_COS_FIELD = ObservationContractV4.frontier_fields.index("bearing_cos")
+_POTENTIAL_GAIN_FIELD = ObservationContractV4.frontier_fields.index(
     "potential_coverage_gain_ratio"
 )
 
@@ -48,7 +48,7 @@ def select_baseline_action(
     mask = np.asarray(candidate_mask)
     if features.shape != (
         ActionContractV2.candidate_count,
-        len(ObservationContractV3.frontier_fields),
+        len(ObservationContractV4.frontier_fields),
     ) or mask.shape != (ActionContractV2.candidate_count,) or mask.dtype != np.bool_:
         raise baseline_core.BaselineSelectionError(
             "baseline candidate feature or mask shape is invalid"
@@ -67,7 +67,7 @@ def select_baseline_action(
         selected = min(
             (int(index) for index in valid_indices),
             key=lambda index: (
-                float(features[index, _DISTANCE_FIELD]),
+                float(features[index, _PATH_COST_FIELD]),
                 index,
             ),
         )
@@ -83,7 +83,7 @@ def select_baseline_action(
         scores: dict[int, float] = {}
         for raw_index in valid_indices:
             index = int(raw_index)
-            denominator = 1.0 + float(features[index, _DISTANCE_FIELD])
+            denominator = 1.0 + float(features[index, _PATH_COST_FIELD])
             if not math.isfinite(denominator) or denominator <= 0.0:
                 raise baseline_core.BaselineSelectionError(
                     "gain-over-cost denominator must be positive"

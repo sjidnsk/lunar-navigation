@@ -181,6 +181,45 @@ def physical_microbatch_slices(sample_count: int) -> tuple[tuple[int, int], ...]
     )
 
 
+def logical_stratum_weights(
+    platform_ids: np.ndarray,
+    scale_bucket_ids: np.ndarray,
+) -> dict[tuple[int, int], float]:
+    """Give platforms equal mass, then split each platform across its scales."""
+    if (
+        not isinstance(platform_ids, np.ndarray)
+        or not isinstance(scale_bucket_ids, np.ndarray)
+        or platform_ids.dtype != np.int64
+        or scale_bucket_ids.dtype != np.int64
+        or platform_ids.ndim != 1
+        or scale_bucket_ids.shape != platform_ids.shape
+        or platform_ids.size == 0
+        or (platform_ids < 0).any()
+        or (platform_ids > 2).any()
+        or (scale_bucket_ids < 0).any()
+        or (scale_bucket_ids > 3).any()
+    ):
+        raise PPOTrainingError("PPO stratum identities are invalid")
+    platforms = tuple(sorted(int(value) for value in np.unique(platform_ids)))
+    platform_weight = 1.0 / len(platforms)
+    result: dict[tuple[int, int], float] = {}
+    for platform_id in platforms:
+        scales = tuple(
+            sorted(
+                int(value)
+                for value in np.unique(
+                    scale_bucket_ids[platform_ids == platform_id]
+                )
+            )
+        )
+        scale_weight = platform_weight / len(scales)
+        for scale_bucket_id in scales:
+            result[(platform_id, scale_bucket_id)] = scale_weight
+    if not math.isclose(math.fsum(result.values()), 1.0, abs_tol=1.0e-12):
+        raise PPOTrainingError("PPO stratum weights do not sum to one")
+    return result
+
+
 def _gradient_norm(parameters) -> float:
     total = 0.0
     found = False

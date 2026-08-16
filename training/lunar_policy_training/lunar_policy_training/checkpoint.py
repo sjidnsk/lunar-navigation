@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import json
@@ -9,12 +10,16 @@ import math
 import os
 import tempfile
 from collections.abc import Mapping, MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
 from torch import nn
-from lunar_model_contract import ObservationContractV2, ObservationContractV3
+from lunar_model_contract import (
+    ObservationContractV2,
+    ObservationContractV3,
+    ObservationContractV4,
+)
 
 from .budget import (
     BUDGET_EXTENSION_BLOCK_SECONDS,
@@ -25,6 +30,7 @@ from .environment.formal_episode_state import (
     FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
     FormalWorkerState,
 )
+from .environment.task_area import WorkerStratum
 from .ppo.checkpoint import (
     CheckpointError,
     _capture_rng_state,
@@ -35,32 +41,45 @@ from .ppo.checkpoint import (
     _validated_rng_state,
 )
 from .reward import reward_weights_sha256
+from .reward_contract import TaskScaleBucket
+from .reward_curriculum import (
+    RewardCurriculumState,
+    TrainingStage,
+    worker_allocation_for_stage,
+)
 from .training_semantics import training_semantics_sha256
 
 
-CHECKPOINT_SCHEMA_VERSION = "lunar-ppo-checkpoint/v9"
-OBSERVATION_CONTRACT_VERSION = ObservationContractV3.version
+CHECKPOINT_SCHEMA_VERSION = "lunar-ppo-checkpoint/v13"
+OBSERVATION_CONTRACT_VERSION = ObservationContractV4.version
+_LEGACY_V12_SCHEMA_VERSION = "lunar-ppo-checkpoint/v12"
+_LEGACY_V11_SCHEMA_VERSION = "lunar-ppo-checkpoint/v11"
+_LEGACY_V10_SCHEMA_VERSION = "lunar-ppo-checkpoint/v10"
+_LEGACY_V9_SCHEMA_VERSION = "lunar-ppo-checkpoint/v9"
 _LEGACY_V5_SCHEMA_VERSION = "lunar-ppo-checkpoint/v5"
 _LEGACY_V4_SCHEMA_VERSION = "lunar-ppo-checkpoint/v4"
 _LEGACY_V3_SCHEMA_VERSION = "lunar-ppo-checkpoint/v3"
 _LEGACY_V2_SCHEMA_VERSION = "lunar-ppo-checkpoint/v2"
 _LEGACY_OBSERVATION_CONTRACT_VERSION = "ObservationContractV1"
 _LEGACY_V2_OBSERVATION_CONTRACT_VERSION = ObservationContractV2.version
+_LEGACY_V9_OBSERVATION_CONTRACT_VERSION = ObservationContractV3.version
 POLICY_WARM_START_PREFIXES = (
     "global_encoder",
     "local_encoder",
     "pose_encoder",
     "platform_encoder",
-    "frontier_encoder",
-    "frontier_position_encoder",
     "cross_attention_blocks",
-    "action_output_mlp",
     "frontier_logit_head",
     "theta_sin_head",
     "theta_cos_head",
     "theta_kappa_head",
 )
-_POLICY_WARM_START_EXCLUDED_PREFIX = "value_mlp"
+POLICY_WARM_START_RESET_PREFIXES = (
+    "frontier_encoder",
+    "frontier_position_encoder",
+    "action_output_mlp",
+    "value_mlp",
+)
 _RUN_IDENTITY_FIELDS = (
     "run_kind",
     "data_sha256",
@@ -72,7 +91,7 @@ _RUN_IDENTITY_FIELDS = (
     "training_semantics_sha256",
 )
 _LEGACY_V3_RUN_IDENTITY_FIELDS = _RUN_IDENTITY_FIELDS[:-1]
-_BODY_FIELDS = {
+_V10_BODY_FIELDS = {
     "schema_version",
     "contract_version",
     "model_state",
@@ -95,7 +114,12 @@ _BODY_FIELDS = {
     "latest_checkpoint_gpu_seconds",
     "candidate_checkpoint_gpu_seconds",
 }
-_V4_BODY_FIELDS = _BODY_FIELDS - {"environment_state"}
+_BODY_FIELDS = _V10_BODY_FIELDS | {
+    "update_recovery_state",
+    "reward_curriculum_state",
+    "best_checkpoint_state",
+}
+_V4_BODY_FIELDS = _V10_BODY_FIELDS - {"environment_state"}
 _V2_BODY_FIELDS = _V4_BODY_FIELDS - {"run_identity"}
 
 
@@ -128,6 +152,193 @@ class RunIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class UpdateRecoveryState:
+    """Checkpoint-owned identity for one optimizer-applied sealed update."""
+
+    update_id: int
+    policy_version: int
+    next_slot_by_worker: tuple[int, ...]
+    worker_strata: tuple[WorkerStratum, ...]
+    journal_state: str
+    journal_sha256: str
+    metrics_record: dict[str, object]
+    metrics_record_sha256: str
+    recovery_generation: int
+    restored_from_checkpoint_sha256: str | None
+
+    def __post_init__(self) -> None:
+        if type(self.update_id) is not int or self.update_id < 0:
+            raise CheckpointError("checkpoint update recovery ID is invalid")
+        if type(self.policy_version) is not int or self.policy_version < 0:
+            raise CheckpointError(
+                "checkpoint update recovery policy version is invalid"
+            )
+        if (
+            not isinstance(self.worker_strata, tuple)
+            or not self.worker_strata
+            or any(
+                not isinstance(item, WorkerStratum)
+                for item in self.worker_strata
+            )
+            or tuple(item.worker_index for item in self.worker_strata)
+            != tuple(range(len(self.worker_strata)))
+        ):
+            raise CheckpointError(
+                "checkpoint update recovery worker strata are invalid"
+            )
+        if (
+            not isinstance(self.next_slot_by_worker, tuple)
+            or len(self.next_slot_by_worker) != len(self.worker_strata)
+            or any(
+                type(value) is not int or value < 0
+                for value in self.next_slot_by_worker
+            )
+        ):
+            raise CheckpointError(
+                "checkpoint update recovery worker cursors are invalid"
+            )
+        if self.journal_state not in ("SEALED", "LEGACY_COMPATIBILITY"):
+            raise CheckpointError(
+                "checkpoint update recovery journal state is invalid"
+            )
+        if not _is_sha256(self.journal_sha256):
+            raise CheckpointError(
+                "checkpoint update recovery journal hash is invalid"
+            )
+        frozen_metrics = _json_copy(self.metrics_record)
+        if (
+            type(frozen_metrics.get("global_step")) is not int
+            or frozen_metrics["global_step"] != self.update_id
+        ):
+            raise CheckpointError(
+                "checkpoint update recovery metrics step is invalid"
+            )
+        if (
+            not _is_sha256(self.metrics_record_sha256)
+            or _json_sha256(frozen_metrics) != self.metrics_record_sha256
+        ):
+            raise CheckpointError(
+                "checkpoint update recovery metrics hash is invalid"
+            )
+        object.__setattr__(self, "metrics_record", frozen_metrics)
+        if type(self.recovery_generation) is not int or self.recovery_generation < 0:
+            raise CheckpointError(
+                "checkpoint update recovery generation is invalid"
+            )
+        if self.restored_from_checkpoint_sha256 is not None and not _is_sha256(
+            self.restored_from_checkpoint_sha256
+        ):
+            raise CheckpointError(
+                "checkpoint restored-from identity is invalid"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "update_id": self.update_id,
+            "policy_version": self.policy_version,
+            "next_slot_by_worker": list(self.next_slot_by_worker),
+            "worker_strata": [
+                _worker_stratum_to_mapping(item) for item in self.worker_strata
+            ],
+            "journal_state": self.journal_state,
+            "journal_sha256": self.journal_sha256,
+            "metrics_record": _json_copy(self.metrics_record),
+            "metrics_record_sha256": self.metrics_record_sha256,
+            "recovery_generation": self.recovery_generation,
+            "restored_from_checkpoint_sha256": (
+                self.restored_from_checkpoint_sha256
+            ),
+        }
+
+    def with_rollback_lineage(
+        self, *, restored_from_checkpoint_sha256: str
+    ) -> "UpdateRecoveryState":
+        if not _is_sha256(restored_from_checkpoint_sha256):
+            raise CheckpointError(
+                "checkpoint rollback parent identity is invalid"
+            )
+        return replace(
+            self,
+            recovery_generation=self.recovery_generation + 1,
+            restored_from_checkpoint_sha256=(
+                restored_from_checkpoint_sha256
+            ),
+        )
+
+    @classmethod
+    def from_mapping(cls, value: object) -> "UpdateRecoveryState":
+        if not isinstance(value, Mapping) or set(value) != {
+            "update_id",
+            "policy_version",
+            "next_slot_by_worker",
+            "worker_strata",
+            "journal_state",
+            "journal_sha256",
+            "metrics_record",
+            "metrics_record_sha256",
+            "recovery_generation",
+            "restored_from_checkpoint_sha256",
+        }:
+            raise CheckpointError(
+                "checkpoint update recovery structure is invalid"
+            )
+        slots = value["next_slot_by_worker"]
+        strata = value["worker_strata"]
+        if not isinstance(slots, list) or not isinstance(strata, list):
+            raise CheckpointError(
+                "checkpoint update recovery arrays are invalid"
+            )
+        return cls(
+            update_id=value["update_id"],
+            policy_version=value["policy_version"],
+            next_slot_by_worker=tuple(slots),
+            worker_strata=tuple(
+                _worker_stratum_from_mapping(item) for item in strata
+            ),
+            journal_state=value["journal_state"],
+            journal_sha256=value["journal_sha256"],
+            metrics_record=value["metrics_record"],
+            metrics_record_sha256=value["metrics_record_sha256"],
+            recovery_generation=value["recovery_generation"],
+            restored_from_checkpoint_sha256=value[
+                "restored_from_checkpoint_sha256"
+            ],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyWarmStartParameterEvidence:
+    """One target parameter's audited warm-start disposition."""
+
+    name: str
+    status: str
+    parent_sha256: str | None
+    target_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise CheckpointError("policy warm-start parameter name is invalid")
+        if self.status not in ("loaded", "reset", "random_fallback"):
+            raise CheckpointError("policy warm-start parameter status is invalid")
+        if self.parent_sha256 is not None and not _is_sha256(
+            self.parent_sha256
+        ):
+            raise CheckpointError(
+                "policy warm-start parent parameter digest is invalid"
+            )
+        if not _is_sha256(self.target_sha256):
+            raise CheckpointError("policy warm-start target parameter digest is invalid")
+
+    def to_manifest_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "status": self.status,
+            "parent_sha256": self.parent_sha256,
+            "target_sha256": self.target_sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PolicyWarmStartEvidence:
     """Auditable evidence for a policy-only import into a fresh run."""
 
@@ -137,6 +348,12 @@ class PolicyWarmStartEvidence:
     loaded_prefixes: tuple[str, ...]
     value_head_reinitialization_sha256: str
     value_head_seed: int
+    parameter_evidence: tuple[PolicyWarmStartParameterEvidence, ...]
+    parent_checkpoint_path: str
+    parent_schema_version: str
+    parent_contract_version: str
+    parent_run_identity: Mapping[str, str]
+    fallback_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not _is_sha256(self.parent_checkpoint_sha256) or not _is_sha256(
@@ -145,9 +362,33 @@ class PolicyWarmStartEvidence:
             raise CheckpointError("policy warm-start parent digest is invalid")
         if type(self.parent_global_step) is not int or self.parent_global_step < 0:
             raise CheckpointError("policy warm-start parent step is invalid")
+        parent_path = Path(self.parent_checkpoint_path)
+        if not self.parent_checkpoint_path or not parent_path.is_absolute():
+            raise CheckpointError("policy warm-start parent path is invalid")
+        if self.parent_schema_version not in (
+            CHECKPOINT_SCHEMA_VERSION,
+            _LEGACY_V12_SCHEMA_VERSION,
+            _LEGACY_V11_SCHEMA_VERSION,
+            _LEGACY_V10_SCHEMA_VERSION,
+            _LEGACY_V9_SCHEMA_VERSION,
+        ):
+            raise CheckpointError("policy warm-start parent schema is invalid")
+        if self.parent_contract_version not in (
+            OBSERVATION_CONTRACT_VERSION,
+            _LEGACY_V9_OBSERVATION_CONTRACT_VERSION,
+        ):
+            raise CheckpointError("policy warm-start parent contract is invalid")
+        try:
+            parent_identity = _run_identity_from_mapping(
+                self.parent_run_identity
+            ).to_dict()
+        except CheckpointError as error:
+            raise CheckpointError(
+                "policy warm-start parent identity is invalid"
+            ) from error
+        object.__setattr__(self, "parent_run_identity", parent_identity)
         if (
             not isinstance(self.loaded_prefixes, tuple)
-            or not self.loaded_prefixes
             or len(set(self.loaded_prefixes)) != len(self.loaded_prefixes)
             or any(
                 not isinstance(prefix, str) or not prefix
@@ -159,17 +400,60 @@ class PolicyWarmStartEvidence:
             raise CheckpointError("policy warm-start value-head digest is invalid")
         if type(self.value_head_seed) is not int or self.value_head_seed < 0:
             raise CheckpointError("policy warm-start value-head seed is invalid")
+        if (
+            not isinstance(self.parameter_evidence, tuple)
+            or not self.parameter_evidence
+        ):
+            raise CheckpointError("policy warm-start parameter evidence is invalid")
+        if any(
+            not isinstance(entry, PolicyWarmStartParameterEvidence)
+            for entry in self.parameter_evidence
+        ) or len({entry.name for entry in self.parameter_evidence}) != len(
+            self.parameter_evidence
+        ):
+            raise CheckpointError("policy warm-start parameter evidence is invalid")
+        if self.fallback_reason is None:
+            if self.loaded_prefixes != POLICY_WARM_START_PREFIXES or {
+                entry.status for entry in self.parameter_evidence
+            } != {"loaded", "reset"}:
+                raise CheckpointError("policy warm-start loaded evidence differs")
+        elif (
+            not isinstance(self.fallback_reason, str)
+            or not self.fallback_reason
+            or self.loaded_prefixes
+            or {entry.status for entry in self.parameter_evidence}
+            != {"random_fallback"}
+        ):
+            raise CheckpointError("policy warm-start fallback evidence differs")
 
     def to_manifest_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "lunar-policy-warm-start/v1",
-            "mode": "policy-only",
+            "schema_version": "lunar-policy-warm-start/v2",
+            "mode": (
+                "random-initialization"
+                if self.fallback_reason is not None
+                else "policy-partial"
+            ),
             "warm_start_parent_checkpoint_sha256": (
                 self.parent_checkpoint_sha256
             ),
             "warm_start_parent_payload_sha256": self.parent_payload_sha256,
             "warm_start_parent_global_step": self.parent_global_step,
+            "warm_start_parent_path": self.parent_checkpoint_path,
+            "warm_start_parent_schema_version": self.parent_schema_version,
+            "warm_start_parent_contract_version": self.parent_contract_version,
+            "warm_start_parent_run_identity": dict(
+                self.parent_run_identity
+            ),
             "loaded_parameter_prefixes": list(self.loaded_prefixes),
+            "reset_parameter_prefixes": list(
+                POLICY_WARM_START_RESET_PREFIXES
+            ),
+            "parameter_evidence": [
+                entry.to_manifest_dict()
+                for entry in self.parameter_evidence
+            ],
+            "fallback_reason": self.fallback_reason,
             "value_head_reinitialized": True,
             "value_head_reinitialization_sha256": (
                 self.value_head_reinitialization_sha256
@@ -177,18 +461,73 @@ class PolicyWarmStartEvidence:
             "value_head_seed": self.value_head_seed,
             "fresh_training_state": {
                 "global_step": 0,
+                "candidate_encoder_input": True,
+                "value_head": True,
                 "optimizer": True,
                 "scheduler": True,
                 "normalization": True,
+                "gae_rollout": True,
                 "rng": True,
                 "worker_episode_state": True,
+                "hopper_private_observation_buffer": True,
+                "candidate_suppression": True,
+                "reward_stage_gate": True,
                 "metrics_journal": True,
             },
+            "compatibility_checks": {
+                "formal_parent": True,
+                "supported_parent_schema": True,
+                "observation_contract_supported": True,
+                "policy_architecture_compatible": self.fallback_reason is None,
+                "policy_allowlist_only": True,
+                "training_state_reset": True,
+                "parent_reward_identity_reused": False,
+                "parent_training_semantics_reused": False,
+            },
         }
+
+    @property
+    def value_head_reset(self) -> bool:
+        return True
+
+    @property
+    def optimizer_loaded(self) -> bool:
+        return False
 
 
 @dataclass(frozen=True, slots=True)
 class TrainingCheckpointV6:
+    schema_version: str
+    contract_version: str
+    model_state: Mapping[object, object]
+    optimizer_state: Mapping[object, object]
+    scheduler_state: Mapping[object, object]
+    global_step: int
+    curriculum_phase: str
+    normalization: Mapping[object, object]
+    rng_state: Mapping[object, object]
+    frozen_config: dict[str, object]
+    environment_state: dict[str, object]
+    run_identity: RunIdentity
+    config_hash: str
+    source_commit: str
+    consumed_gpu_seconds: float
+    budget_extension_blocks: int
+    total_gpu_budget_seconds: float
+    worker_allocation: dict[str, int]
+    micro_batch_size: int
+    latest_checkpoint_gpu_seconds: float
+    candidate_checkpoint_gpu_seconds: float
+    update_recovery_state: UpdateRecoveryState
+    reward_curriculum_state: dict[str, object]
+    best_checkpoint_state: dict[str, object]
+    payload_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingCheckpointV10:
+    """Read-only pre-Reward-V4 checkpoint; never accepted for strict resume."""
+
     schema_version: str
     contract_version: str
     model_state: Mapping[object, object]
@@ -353,6 +692,11 @@ def build_training_checkpoint(
     latest_checkpoint_gpu_seconds: float,
     candidate_checkpoint_gpu_seconds: float,
     environment_state: Mapping[str, object] | None = None,
+    update_recovery_state: UpdateRecoveryState | None = None,
+    reward_curriculum_state: (
+        RewardCurriculumState | Mapping[str, object] | None
+    ) = None,
+    best_checkpoint_state: Mapping[str, object] | None = None,
 ) -> TrainingCheckpointV6:
     """Capture a complete run state with the PPO core's strict validators."""
     if not isinstance(model, nn.Module):
@@ -363,6 +707,36 @@ def build_training_checkpoint(
         raise CheckpointError("scheduler must be a Torch LR scheduler")
     if not isinstance(run_identity, RunIdentity):
         raise CheckpointError("checkpoint run identity must use RunIdentity")
+    if update_recovery_state is None:
+        if "reward_v4" in frozen_config:
+            raise CheckpointError(
+                "Reward V4 checkpoint requires update recovery state"
+            )
+        update_recovery_state = _legacy_compatibility_recovery_state(
+            global_step=global_step,
+            worker_allocation=worker_allocation,
+        )
+    if not isinstance(update_recovery_state, UpdateRecoveryState):
+        raise CheckpointError(
+            "checkpoint update recovery state must use UpdateRecoveryState"
+        )
+    if isinstance(reward_curriculum_state, RewardCurriculumState):
+        curriculum_state = reward_curriculum_state.to_dict()
+    else:
+        curriculum_state = _json_copy(
+            reward_curriculum_state
+            or {
+                "schema_version": "lunar-reward-curriculum-state/v1",
+                "state": "LEGACY_COMPATIBILITY",
+            }
+        )
+    best_state = _json_copy(
+        best_checkpoint_state
+        or {
+            "schema_version": "lunar-best-checkpoint-state/v1",
+            "state": "LEGACY_COMPATIBILITY",
+        }
+    )
     body = {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "contract_version": OBSERVATION_CONTRACT_VERSION,
@@ -387,6 +761,9 @@ def build_training_checkpoint(
         "micro_batch_size": micro_batch_size,
         "latest_checkpoint_gpu_seconds": latest_checkpoint_gpu_seconds,
         "candidate_checkpoint_gpu_seconds": candidate_checkpoint_gpu_seconds,
+        "update_recovery_state": update_recovery_state.to_dict(),
+        "reward_curriculum_state": curriculum_state,
+        "best_checkpoint_state": best_state,
     }
     _validate_body(body)
     return _checkpoint_from_body(body, _semantic_sha256(body))
@@ -469,6 +846,7 @@ def load_checkpoint(
     path: str | Path, *, run_kind: str | None = None
 ) -> (
     TrainingCheckpointV6
+    | TrainingCheckpointV10
     | TrainingCheckpointV5
     | TrainingCheckpointV4
     | TrainingCheckpointV3
@@ -492,6 +870,8 @@ def load_checkpoint(
     schema = body.get("schema_version") if isinstance(body, Mapping) else None
     if schema == CHECKPOINT_SCHEMA_VERSION:
         _validate_body(body)
+    elif schema == _LEGACY_V10_SCHEMA_VERSION:
+        _validate_v10_body(body)
     elif schema == _LEGACY_V5_SCHEMA_VERSION:
         _require_explicit_legacy_development_reader(run_kind, "v5")
         _validate_v5_body(body)
@@ -518,6 +898,8 @@ def load_checkpoint(
         return _checkpoint_v4_from_body(body, payload_sha256)
     if schema == _LEGACY_V5_SCHEMA_VERSION:
         return _checkpoint_v5_from_body(body, payload_sha256)
+    if schema == _LEGACY_V10_SCHEMA_VERSION:
+        return _checkpoint_v10_from_body(body, payload_sha256)
     return _checkpoint_from_body(body, payload_sha256)
 
 
@@ -549,18 +931,25 @@ def load_policy_warm_start(
             for prefix in POLICY_WARM_START_PREFIXES
         )
     }
-    value_names = {
+    reset_names = {
         name
         for name in target_state
-        if name.startswith(f"{_POLICY_WARM_START_EXCLUDED_PREFIX}.")
+        if any(
+            name.startswith(f"{prefix}.")
+            for prefix in POLICY_WARM_START_RESET_PREFIXES
+        )
     }
     if (
-        allowed_names | value_names != set(target_state)
-        or allowed_names & value_names
-        or not value_names
+        allowed_names | reset_names != set(target_state)
+        or allowed_names & reset_names
+        or not reset_names
         or any(
             not any(name.startswith(f"{prefix}.") for name in allowed_names)
             for prefix in POLICY_WARM_START_PREFIXES
+        )
+        or any(
+            not any(name.startswith(f"{prefix}.") for name in reset_names)
+            for prefix in POLICY_WARM_START_RESET_PREFIXES
         )
     ):
         raise CheckpointError(
@@ -570,49 +959,64 @@ def load_policy_warm_start(
     body, parent_file_sha256, parent_payload_sha256 = (
         _load_policy_warm_start_parent(path)
     )
+    parent_checkpoint_path = str(Path(path).resolve(strict=True))
     parent_state = body["model_state"]
-    if set(parent_state) != set(target_state) or any(
-        not isinstance(name, str) for name in parent_state
-    ):
-        raise CheckpointError("policy warm-start model keys differ")
-    for name, target_value in target_state.items():
-        parent_value = parent_state[name]
-        if not isinstance(parent_value, torch.Tensor):
-            raise CheckpointError("policy warm-start model tensor is invalid")
-        if parent_value.layout != target_value.layout:
-            raise CheckpointError("policy warm-start tensor layout differs")
-        if parent_value.shape != target_value.shape:
-            raise CheckpointError("policy warm-start tensor shape differs")
-        if parent_value.dtype != target_value.dtype:
-            raise CheckpointError("policy warm-start tensor dtype differs")
+    fallback_reason = _policy_warm_start_compatibility_reason(
+        parent_state, target_state
+    )
+    if fallback_reason is not None:
+        return _policy_warm_start_evidence(
+            body=body,
+            parent_state=parent_state,
+            target_state=target_state,
+            parent_file_sha256=parent_file_sha256,
+            parent_payload_sha256=parent_payload_sha256,
+            parent_checkpoint_path=parent_checkpoint_path,
+            loaded_prefixes=(),
+            reset_names=reset_names,
+            value_head_seed=value_head_seed,
+            fallback_reason=fallback_reason,
+        )
 
     live_state = _cpu_copy(target_state)
     try:
+        prepared_state = _cpu_copy(target_state)
         with torch.no_grad(), torch.random.fork_rng(devices=[]):
             for name in sorted(allowed_names):
-                target_state[name].copy_(parent_state[name])
+                prepared_state[name] = parent_state[name].detach().cpu().clone()
             torch.random.default_generator.manual_seed(value_head_seed)
-            value_module = getattr(
-                model, _POLICY_WARM_START_EXCLUDED_PREFIX, None
-            )
-            if not isinstance(value_module, nn.Module):
-                raise CheckpointError(
-                    "policy warm-start value head is unavailable"
-                )
-            for module in value_module.modules():
-                reset_parameters = getattr(module, "reset_parameters", None)
-                if callable(reset_parameters):
-                    reset_parameters()
-        loaded_state = model.state_dict()
+            for prefix in POLICY_WARM_START_RESET_PREFIXES:
+                source_module = getattr(model, prefix, None)
+                if not isinstance(source_module, nn.Module):
+                    raise CheckpointError(
+                        "policy warm-start reset module is unavailable"
+                    )
+                reset_module = copy.deepcopy(source_module).cpu()
+                for module in reset_module.modules():
+                    reset_parameters = getattr(
+                        module, "reset_parameters", None
+                    )
+                    if callable(reset_parameters):
+                        reset_parameters()
+                reset_state = reset_module.state_dict()
+                expected_names = {
+                    name.removeprefix(f"{prefix}.")
+                    for name in reset_names
+                    if name.startswith(f"{prefix}.")
+                }
+                if set(reset_state) != expected_names:
+                    raise CheckpointError(
+                        "policy warm-start reset state differs"
+                    )
+                for name, value in reset_state.items():
+                    prepared_state[f"{prefix}.{name}"] = (
+                        value.detach().cpu().clone()
+                    )
         _validate_finite_tensors(
-            loaded_state, state_name="policy warm-start model"
+            prepared_state, state_name="policy warm-start model"
         )
-        value_digest = _semantic_sha256(
-            {
-                name: loaded_state[name].detach().cpu().clone()
-                for name in sorted(value_names)
-            }
-        )
+        model.load_state_dict(dict(prepared_state), strict=True)
+        loaded_state = model.state_dict()
     except Exception as error:
         try:
             model.load_state_dict(dict(live_state), strict=True)
@@ -624,13 +1028,100 @@ def load_policy_warm_start(
             raise
         raise CheckpointError("policy warm-start could not be applied") from error
 
+    return _policy_warm_start_evidence(
+        body=body,
+        parent_state=parent_state,
+        target_state=loaded_state,
+        parent_file_sha256=parent_file_sha256,
+        parent_payload_sha256=parent_payload_sha256,
+        parent_checkpoint_path=parent_checkpoint_path,
+        loaded_prefixes=POLICY_WARM_START_PREFIXES,
+        reset_names=reset_names,
+        value_head_seed=value_head_seed,
+        fallback_reason=None,
+    )
+
+
+def _policy_warm_start_compatibility_reason(
+    parent_state: Mapping[object, object],
+    target_state: Mapping[str, torch.Tensor],
+) -> str | None:
+    if set(parent_state) != set(target_state) or any(
+        not isinstance(name, str) for name in parent_state
+    ):
+        return "model keys differ"
+    for name, target_value in target_state.items():
+        parent_value = parent_state[name]
+        if not isinstance(parent_value, torch.Tensor):
+            return f"model tensor is invalid: {name}"
+        if parent_value.layout != target_value.layout:
+            return f"tensor layout differs: {name}"
+        if parent_value.shape != target_value.shape:
+            return f"tensor shape differs: {name}"
+        if parent_value.dtype != target_value.dtype:
+            return f"tensor dtype differs: {name}"
+    return None
+
+
+def _tensor_sha256(value: torch.Tensor) -> str:
+    return _semantic_sha256({"value": value.detach().cpu().clone()})
+
+
+def _policy_warm_start_evidence(
+    *,
+    body: Mapping[object, object],
+    parent_state: Mapping[object, object],
+    target_state: Mapping[str, torch.Tensor],
+    parent_file_sha256: str,
+    parent_payload_sha256: str,
+    parent_checkpoint_path: str,
+    loaded_prefixes: tuple[str, ...],
+    reset_names: set[str],
+    value_head_seed: int,
+    fallback_reason: str | None,
+) -> PolicyWarmStartEvidence:
+    status_by_name = {
+        name: (
+            "random_fallback"
+            if fallback_reason is not None
+            else ("reset" if name in reset_names else "loaded")
+        )
+        for name in target_state
+    }
+    parameter_evidence = tuple(
+        PolicyWarmStartParameterEvidence(
+            name=name,
+            status=status_by_name[name],
+            parent_sha256=(
+                _tensor_sha256(parent_state[name])
+                if isinstance(parent_state.get(name), torch.Tensor)
+                else None
+            ),
+            target_sha256=_tensor_sha256(target_state[name]),
+        )
+        for name in sorted(target_state)
+    )
+    value_names = sorted(
+        name for name in target_state if name.startswith("value_mlp.")
+    )
     return PolicyWarmStartEvidence(
         parent_checkpoint_sha256=parent_file_sha256,
         parent_payload_sha256=parent_payload_sha256,
         parent_global_step=body["global_step"],
-        loaded_prefixes=POLICY_WARM_START_PREFIXES,
-        value_head_reinitialization_sha256=value_digest,
+        loaded_prefixes=loaded_prefixes,
+        value_head_reinitialization_sha256=_semantic_sha256(
+            {
+                name: target_state[name].detach().cpu().clone()
+                for name in value_names
+            }
+        ),
         value_head_seed=value_head_seed,
+        parameter_evidence=parameter_evidence,
+        parent_checkpoint_path=parent_checkpoint_path,
+        parent_schema_version=body["schema_version"],
+        parent_contract_version=body["contract_version"],
+        parent_run_identity=dict(body["run_identity"]),
+        fallback_reason=fallback_reason,
     )
 
 
@@ -661,18 +1152,41 @@ def _load_policy_warm_start_parent(
         raise CheckpointError("policy warm-start payload structure is invalid")
     body = payload["body"]
     payload_sha256 = payload["body_sha256"]
-    if not isinstance(body, Mapping) or set(body) != _BODY_FIELDS:
+    if not isinstance(body, Mapping):
         raise CheckpointError("policy warm-start body structure is invalid")
     schema = body.get("schema_version")
-    contract = body.get("contract_version")
-    if schema not in (CHECKPOINT_SCHEMA_VERSION, _LEGACY_V5_SCHEMA_VERSION):
+    if schema not in (
+        CHECKPOINT_SCHEMA_VERSION,
+        _LEGACY_V12_SCHEMA_VERSION,
+        _LEGACY_V11_SCHEMA_VERSION,
+        _LEGACY_V10_SCHEMA_VERSION,
+        _LEGACY_V9_SCHEMA_VERSION,
+    ):
         raise CheckpointError("policy warm-start checkpoint schema is unsupported")
+    expected_fields = (
+        _BODY_FIELDS
+        if schema in (
+            CHECKPOINT_SCHEMA_VERSION,
+            _LEGACY_V12_SCHEMA_VERSION,
+            _LEGACY_V11_SCHEMA_VERSION,
+        )
+        else _V10_BODY_FIELDS
+    )
+    if set(body) != expected_fields:
+        raise CheckpointError("policy warm-start body structure is invalid")
+    contract = body.get("contract_version")
     if (
-        schema == CHECKPOINT_SCHEMA_VERSION
+        schema
+        in (
+            CHECKPOINT_SCHEMA_VERSION,
+            _LEGACY_V12_SCHEMA_VERSION,
+            _LEGACY_V11_SCHEMA_VERSION,
+            _LEGACY_V10_SCHEMA_VERSION,
+        )
         and contract != OBSERVATION_CONTRACT_VERSION
     ) or (
-        schema == _LEGACY_V5_SCHEMA_VERSION
-        and contract != _LEGACY_V2_OBSERVATION_CONTRACT_VERSION
+        schema == _LEGACY_V9_SCHEMA_VERSION
+        and contract != _LEGACY_V9_OBSERVATION_CONTRACT_VERSION
     ):
         raise CheckpointError("policy warm-start observation contract differs")
     if not _is_sha256(payload_sha256):
@@ -686,15 +1200,9 @@ def _load_policy_warm_start_parent(
     identity = _run_identity_from_mapping(body.get("run_identity"))
     if identity.run_kind != "formal":
         raise CheckpointError("policy warm-start parent must be formal")
-    if identity.reward_sha256 != reward_weights_sha256():
-        raise CheckpointError("policy warm-start parent reward identity differs")
-    if (
-        identity.training_semantics_sha256
-        != training_semantics_sha256()
-    ):
-        raise CheckpointError(
-            "policy warm-start parent training semantics differ"
-        )
+    # Reward/training identity deliberately does not authorize reuse here.
+    # It is recorded in PolicyWarmStartEvidence while only the allow-listed
+    # policy tensors cross the new-run boundary.
     if type(body.get("global_step")) is not int or body["global_step"] < 0:
         raise CheckpointError("policy warm-start parent step is invalid")
     model_state = body.get("model_state")
@@ -740,7 +1248,9 @@ def load_checkpoint_for_resume(
         raise CheckpointError("expected run identity must use RunIdentity")
     checkpoint = load_checkpoint(path, run_kind=expected_run_identity.run_kind)
     if not isinstance(checkpoint, TrainingCheckpointV6):
-        raise CheckpointError("legacy checkpoint is read-only and cannot resume")
+        raise CheckpointError(
+            "legacy checkpoint is read-only and cannot strict resume"
+        )
     if checkpoint.contract_version != expected_contract_version:
         raise CheckpointError("checkpoint contract version mismatch")
     if checkpoint.config_hash != expected_config_hash:
@@ -853,6 +1363,122 @@ def config_sha256(config: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _json_sha256(value: Mapping[str, object]) -> str:
+    copied = _json_copy(value)
+    encoded = json.dumps(
+        copied,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _worker_stratum_to_mapping(value: WorkerStratum) -> dict[str, object]:
+    if not isinstance(value, WorkerStratum):
+        raise CheckpointError("checkpoint worker stratum is invalid")
+    return {
+        "worker_index": value.worker_index,
+        "platform_type": value.platform_type,
+        "platform_worker_index": value.platform_worker_index,
+        "platform_worker_count": value.platform_worker_count,
+        "scale_bucket": value.scale_bucket.value,
+    }
+
+
+def _worker_stratum_from_mapping(value: object) -> WorkerStratum:
+    if not isinstance(value, Mapping) or set(value) != {
+        "worker_index",
+        "platform_type",
+        "platform_worker_index",
+        "platform_worker_count",
+        "scale_bucket",
+    }:
+        raise CheckpointError("checkpoint worker stratum structure is invalid")
+    try:
+        result = WorkerStratum(
+            worker_index=value["worker_index"],
+            platform_type=value["platform_type"],
+            platform_worker_index=value["platform_worker_index"],
+            platform_worker_count=value["platform_worker_count"],
+            scale_bucket=TaskScaleBucket(value["scale_bucket"]),
+        )
+    except (TypeError, ValueError) as error:
+        raise CheckpointError("checkpoint worker stratum is invalid") from error
+    if (
+        type(result.worker_index) is not int
+        or result.worker_index < 0
+        or result.platform_type not in {"WHEELED", "LEGGED", "HOPPER"}
+        or type(result.platform_worker_index) is not int
+        or type(result.platform_worker_count) is not int
+        or result.platform_worker_count <= 0
+        or not 0
+        <= result.platform_worker_index
+        < result.platform_worker_count
+    ):
+        raise CheckpointError("checkpoint worker stratum is invalid")
+    return result
+
+
+def _legacy_compatibility_recovery_state(
+    *,
+    global_step: int,
+    worker_allocation: Mapping[str, int],
+) -> UpdateRecoveryState:
+    strata: list[WorkerStratum] = []
+    worker_index = 0
+    buckets = tuple(TaskScaleBucket)
+    for platform_type, count in worker_allocation.items():
+        if type(count) is not int or count <= 0:
+            raise CheckpointError("checkpoint worker allocation is invalid")
+        for lane in range(count):
+            strata.append(
+                WorkerStratum(
+                    worker_index=worker_index,
+                    platform_type=platform_type,
+                    platform_worker_index=lane,
+                    platform_worker_count=count,
+                    scale_bucket=buckets[
+                        min(len(buckets) - 1, lane * len(buckets) // count)
+                    ],
+                )
+            )
+            worker_index += 1
+    metrics = {
+        "schema_version": "lunar-training-update-metrics/legacy-compatibility",
+        "global_step": global_step,
+    }
+    return UpdateRecoveryState(
+        update_id=global_step,
+        policy_version=max(0, global_step - 1),
+        next_slot_by_worker=(0,) * len(strata),
+        worker_strata=tuple(strata),
+        journal_state="LEGACY_COMPATIBILITY",
+        journal_sha256="0" * 64,
+        metrics_record=metrics,
+        metrics_record_sha256=_json_sha256(metrics),
+        recovery_generation=0,
+        restored_from_checkpoint_sha256=None,
+    )
+
+
+def _add_legacy_v11_fields(body: dict[object, object]) -> None:
+    recovery = _legacy_compatibility_recovery_state(
+        global_step=body["global_step"],
+        worker_allocation=body["worker_allocation"],
+    )
+    body["update_recovery_state"] = recovery.to_dict()
+    body["reward_curriculum_state"] = {
+        "schema_version": "lunar-reward-curriculum-state/v1",
+        "state": "LEGACY_COMPATIBILITY",
+    }
+    body["best_checkpoint_state"] = {
+        "schema_version": "lunar-best-checkpoint-state/v1",
+        "state": "LEGACY_COMPATIBILITY",
+    }
+
+
 def _validate_body(body: object) -> None:
     if not isinstance(body, Mapping) or set(body) != _BODY_FIELDS:
         raise CheckpointError("checkpoint body structure is invalid")
@@ -916,6 +1542,72 @@ def _validate_body(body: object) -> None:
         run_kind=run_identity.run_kind,
         worker_count=sum(allocation.values()),
     )
+    recovery = UpdateRecoveryState.from_mapping(body["update_recovery_state"])
+    if recovery.update_id != body["global_step"]:
+        raise CheckpointError(
+            "checkpoint update recovery differs from global step"
+        )
+    if len(recovery.worker_strata) != sum(allocation.values()) or {
+        platform: sum(
+            item.platform_type == platform
+            for item in recovery.worker_strata
+        )
+        for platform in allocation
+    } != dict(allocation):
+        raise CheckpointError(
+            "checkpoint update recovery worker allocation differs"
+        )
+    reward_v4 = "reward_v4" in body["frozen_config"]
+    if reward_v4 and recovery.journal_state != "SEALED":
+        raise CheckpointError(
+            "Reward V4 checkpoint requires sealed journal identity"
+        )
+    curriculum_value = body["reward_curriculum_state"]
+    if reward_v4:
+        try:
+            curriculum = RewardCurriculumState.from_mapping(curriculum_value)
+        except ValueError as error:
+            raise CheckpointError(
+                "Reward V4 checkpoint curriculum state is invalid"
+            ) from error
+        expected_allocation = worker_allocation_for_stage(curriculum.stage)
+        metrics_phase_raw = recovery.metrics_record.get("curriculum_phase")
+        transition_allocation = False
+        if curriculum.worker_restart_required and isinstance(
+            metrics_phase_raw, str
+        ):
+            try:
+                metrics_phase = TrainingStage(metrics_phase_raw)
+                transition_allocation = (
+                    tuple(TrainingStage).index(curriculum.stage)
+                    == tuple(TrainingStage).index(metrics_phase) + 1
+                    and worker_allocation_for_stage(metrics_phase)
+                    == dict(allocation)
+                )
+            except ValueError:
+                transition_allocation = False
+        if (
+            curriculum.current_update_id != body["global_step"]
+            or curriculum.stage.value != body["curriculum_phase"]
+            or curriculum.recovery_generation
+            != recovery.recovery_generation
+            or curriculum.restored_from_checkpoint_sha256
+            != recovery.restored_from_checkpoint_sha256
+            or (
+                expected_allocation != dict(allocation)
+                and not transition_allocation
+            )
+        ):
+            raise CheckpointError(
+                "Reward V4 checkpoint curriculum identity differs"
+            )
+    elif not isinstance(curriculum_value, Mapping) or not curriculum_value:
+        raise CheckpointError("checkpoint reward_curriculum_state is invalid")
+    best_value = body["best_checkpoint_state"]
+    if not isinstance(best_value, Mapping) or not best_value:
+        raise CheckpointError("checkpoint best_checkpoint_state is invalid")
+    _json_copy(curriculum_value)
+    _json_copy(best_value)
     if type(body["micro_batch_size"]) is not int or body["micro_batch_size"] <= 0:
         raise CheckpointError("checkpoint micro-batch is invalid")
     for name in (
@@ -991,11 +1683,25 @@ def _validate_v2_body(body: object) -> None:
         training_semantics_sha256="0" * 64,
     ).to_dict()
     promoted["environment_state"] = {}
+    _add_legacy_v11_fields(promoted)
+    _validate_body(promoted)
+
+
+def _validate_v10_body(body: object) -> None:
+    if not isinstance(body, Mapping) or set(body) != _V10_BODY_FIELDS:
+        raise CheckpointError("v10 checkpoint body structure is invalid")
+    if body["schema_version"] != _LEGACY_V10_SCHEMA_VERSION:
+        raise CheckpointError("v10 checkpoint schema version mismatch")
+    if body["contract_version"] != OBSERVATION_CONTRACT_VERSION:
+        raise CheckpointError("v10 checkpoint contract version mismatch")
+    promoted = dict(body)
+    promoted["schema_version"] = CHECKPOINT_SCHEMA_VERSION
+    _add_legacy_v11_fields(promoted)
     _validate_body(promoted)
 
 
 def _validate_v5_body(body: object) -> None:
-    if not isinstance(body, Mapping) or set(body) != _BODY_FIELDS:
+    if not isinstance(body, Mapping) or set(body) != _V10_BODY_FIELDS:
         raise CheckpointError("v5 checkpoint body structure is invalid")
     if body["schema_version"] != _LEGACY_V5_SCHEMA_VERSION:
         raise CheckpointError("v5 checkpoint schema version mismatch")
@@ -1004,6 +1710,7 @@ def _validate_v5_body(body: object) -> None:
     promoted = dict(body)
     promoted["schema_version"] = CHECKPOINT_SCHEMA_VERSION
     promoted["contract_version"] = OBSERVATION_CONTRACT_VERSION
+    _add_legacy_v11_fields(promoted)
     _validate_body(promoted)
 
 
@@ -1021,6 +1728,7 @@ def _validate_v4_body(body: object) -> None:
     promoted["schema_version"] = CHECKPOINT_SCHEMA_VERSION
     promoted["contract_version"] = OBSERVATION_CONTRACT_VERSION
     promoted["environment_state"] = {}
+    _add_legacy_v11_fields(promoted)
     _validate_body(promoted)
 
 
@@ -1045,6 +1753,7 @@ def _validate_v3_body(body: object) -> None:
         "training_semantics_sha256": "0" * 64,
     }
     promoted["environment_state"] = {}
+    _add_legacy_v11_fields(promoted)
     _validate_body(promoted)
 
 
@@ -1052,6 +1761,44 @@ def _checkpoint_from_body(
     body: Mapping[object, object], payload_sha256: str
 ) -> TrainingCheckpointV6:
     return TrainingCheckpointV6(
+        schema_version=body["schema_version"],
+        contract_version=body["contract_version"],
+        model_state=body["model_state"],
+        optimizer_state=body["optimizer_state"],
+        scheduler_state=body["scheduler_state"],
+        global_step=body["global_step"],
+        curriculum_phase=body["curriculum_phase"],
+        normalization=body["normalization"],
+        rng_state=body["rng_state"],
+        frozen_config=dict(body["frozen_config"]),
+        environment_state=dict(body["environment_state"]),
+        run_identity=_run_identity_from_mapping(body["run_identity"]),
+        config_hash=body["config_hash"],
+        source_commit=body["source_commit"],
+        consumed_gpu_seconds=float(body["consumed_gpu_seconds"]),
+        budget_extension_blocks=body["budget_extension_blocks"],
+        total_gpu_budget_seconds=float(body["total_gpu_budget_seconds"]),
+        worker_allocation=dict(body["worker_allocation"]),
+        micro_batch_size=body["micro_batch_size"],
+        latest_checkpoint_gpu_seconds=float(
+            body["latest_checkpoint_gpu_seconds"]
+        ),
+        candidate_checkpoint_gpu_seconds=float(
+            body["candidate_checkpoint_gpu_seconds"]
+        ),
+        update_recovery_state=UpdateRecoveryState.from_mapping(
+            body["update_recovery_state"]
+        ),
+        reward_curriculum_state=dict(body["reward_curriculum_state"]),
+        best_checkpoint_state=dict(body["best_checkpoint_state"]),
+        payload_sha256=payload_sha256,
+    )
+
+
+def _checkpoint_v10_from_body(
+    body: Mapping[object, object], payload_sha256: str
+) -> TrainingCheckpointV10:
+    return TrainingCheckpointV10(
         schema_version=body["schema_version"],
         contract_version=body["contract_version"],
         model_state=body["model_state"],
@@ -1216,6 +1963,8 @@ def _body_from_checkpoint(checkpoint: TrainingCheckpointV6) -> dict[str, object]
         name: (
             checkpoint.run_identity.to_dict()
             if name == "run_identity"
+            else checkpoint.update_recovery_state.to_dict()
+            if name == "update_recovery_state"
             else getattr(checkpoint, name)
         )
         for name in _BODY_FIELDS
@@ -1291,8 +2040,10 @@ __all__ = [
     "CHECKPOINT_SCHEMA_VERSION",
     "OBSERVATION_CONTRACT_VERSION",
     "FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION",
+    "POLICY_WARM_START_RESET_PREFIXES",
     "POLICY_WARM_START_PREFIXES",
     "LegacyRunIdentityV3",
+    "PolicyWarmStartParameterEvidence",
     "PolicyWarmStartEvidence",
     "RunIdentity",
     "TrainingCheckpointV2",
@@ -1300,6 +2051,8 @@ __all__ = [
     "TrainingCheckpointV4",
     "TrainingCheckpointV5",
     "TrainingCheckpointV6",
+    "TrainingCheckpointV10",
+    "UpdateRecoveryState",
     "build_training_checkpoint",
     "config_sha256",
     "load_checkpoint",

@@ -32,11 +32,33 @@ struct SingleHopEnvelopeResult final {
   }
 };
 
+struct MinimumSingleHopEnvelopeEvidence final {
+  BallisticArc arc;
+  SingleHopEnvelopeEvidence envelope;
+};
+
+struct MinimumSingleHopEnvelopeResult final {
+  std::optional<MinimumSingleHopEnvelopeEvidence> evidence;
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept {
+    return evidence.has_value() && reason_code.empty();
+  }
+};
+
 [[nodiscard]] AvailableSingleHopDeltaVResult AvailableSingleHopDeltaV(
     const HopperCapability& capability) noexcept;
 
 [[nodiscard]] SingleHopEnvelopeResult EvaluateSingleHopEnvelope(
     const BallisticArc& arc,
+    const HopperCapability& capability) noexcept;
+
+[[nodiscard]] MinimumSingleHopEnvelopeResult
+EvaluateMinimumSingleHopEnvelope(
+    Vec3 launch_position_m,
+    Vec3 landing_position_m,
+    Vec3 gravity_mps2,
+    double evidence_scale_m,
     const HopperCapability& capability) noexcept;
 
 }  // namespace lunar::planning::hopper

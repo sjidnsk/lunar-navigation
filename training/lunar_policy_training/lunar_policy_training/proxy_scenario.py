@@ -675,6 +675,8 @@ class _ProxyEpisode:
                 selected_action_observed_safe=True,
                 hopper_commitment_states=hopper_commitment_states,
             ),
+            coverage_before=previous_coverage,
+            coverage_after=self.coverage,
         )
 
     def _execution_failure(
@@ -716,6 +718,8 @@ class _ProxyEpisode:
                 ),
                 execution_failure_count=1,
             ),
+            coverage_before=self.coverage,
+            coverage_after=self.coverage,
         )
 
     def committed_hop_feedback(self) -> CommittedHopExecutionFeedback:
@@ -735,6 +739,8 @@ class _ProxyEpisode:
                 hopper_commitment_violation_count=1,
                 execution_failure_count=1,
             ),
+            coverage_before=self.coverage,
+            coverage_after=self.coverage,
         )
 
 

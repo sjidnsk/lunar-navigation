@@ -6,16 +6,24 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from lunar_model_contract import ObservationContractV3, validate_observation_inputs
+from lunar_model_contract import ObservationContractV4, validate_observation_inputs
 
 from ..policy.observation import PolicyBatch, validate_policy_batch
+from ..reward_contract import TaskScaleBucket
 from .rollout_core import (
     GAEResult,
     GAE_LAMBDA,
     GAMMA,
     RolloutContractError,
     compute_gae,
+    compute_stratified_gae,
 )
+
+
+PLATFORM_ID_BY_TYPE = {"WHEELED": 0, "LEGGED": 1, "HOPPER": 2}
+SCALE_BUCKET_ID_BY_BUCKET = {
+    bucket: index for index, bucket in enumerate(TaskScaleBucket)
+}
 
 
 @dataclass(slots=True)
@@ -33,8 +41,11 @@ class RolloutBatch:
     selected_thetas: np.ndarray
     old_log_prob_total: np.ndarray
     old_values: np.ndarray
+    raw_advantages: np.ndarray
     advantages: np.ndarray
     returns: np.ndarray
+    platform_ids: np.ndarray
+    scale_bucket_ids: np.ndarray
 
     def __post_init__(self) -> None:
         float_arrays = (
@@ -47,6 +58,7 @@ class RolloutBatch:
             self.selected_thetas,
             self.old_log_prob_total,
             self.old_values,
+            self.raw_advantages,
             self.advantages,
             self.returns,
         )
@@ -65,12 +77,18 @@ class RolloutBatch:
             or self.selected_frontier_indices.dtype != np.int64
         ):
             raise RolloutContractError("selected frontier indices must use int64")
+        identity_arrays = (self.platform_ids, self.scale_bucket_ids)
+        if any(
+            not isinstance(value, np.ndarray) or value.dtype != np.int64
+            for value in identity_arrays
+        ):
+            raise RolloutContractError("rollout stratum IDs must use int64")
         sample_count = self.prior_channels.shape[0]
         try:
             validate_observation_inputs(
                 {
                     name: getattr(self, name)
-                    for name in ObservationContractV3.input_names
+                    for name in ObservationContractV4.input_names
                 }
             )
         except ValueError as error:
@@ -80,8 +98,11 @@ class RolloutBatch:
             self.selected_thetas,
             self.old_log_prob_total,
             self.old_values,
+            self.raw_advantages,
             self.advantages,
             self.returns,
+            self.platform_ids,
+            self.scale_bucket_ids,
         )
         if any(value.shape != (sample_count,) for value in vectors):
             raise RolloutContractError("rollout action and training vectors must use [N]")
@@ -99,6 +120,21 @@ class RolloutBatch:
         ]
         if not selected_valid.all():
             raise RolloutContractError("selected frontier index is masked")
+        if (
+            (self.platform_ids < 0).any()
+            or (self.platform_ids >= len(PLATFORM_ID_BY_TYPE)).any()
+            or (self.scale_bucket_ids < 0).any()
+            or (self.scale_bucket_ids >= len(SCALE_BUCKET_ID_BY_BUCKET)).any()
+        ):
+            raise RolloutContractError("rollout stratum ID is out of range")
+        expected_platform_ids = np.argmax(self.platform_context, axis=1).astype(
+            np.int64,
+            copy=False,
+        )
+        if not np.array_equal(self.platform_ids, expected_platform_ids):
+            raise RolloutContractError(
+                "rollout platform IDs differ from observation context"
+            )
 
     def __len__(self) -> int:
         return int(self.prior_channels.shape[0])
@@ -154,7 +190,10 @@ __all__ = [
     "GAEResult",
     "GAE_LAMBDA",
     "GAMMA",
+    "PLATFORM_ID_BY_TYPE",
     "RolloutBatch",
     "RolloutContractError",
+    "SCALE_BUCKET_ID_BY_BUCKET",
     "compute_gae",
+    "compute_stratified_gae",
 ]
