@@ -56,6 +56,19 @@ class TrainingMetricsError(ValueError):
     """Training metrics are incomplete, ambiguous, or unsafe to append."""
 
 
+def _thaw_journal_worker_state(value: object) -> object:
+    """Restore the JSON sequence form hidden by journal immutability."""
+
+    if isinstance(value, Mapping):
+        return {
+            key: _thaw_journal_worker_state(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_thaw_journal_worker_state(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeWorkerIdentity:
     """All task and physical-snapshot identities observed for one worker."""
@@ -276,7 +289,9 @@ class RewardV4RuntimeDiagnostics:
 
         def add_state(value: Mapping[str, object]) -> FormalWorkerState:
             try:
-                state = FormalWorkerState.from_dict(value)
+                state = FormalWorkerState.from_dict(
+                    _thaw_journal_worker_state(value)
+                )
             except ValueError as error:
                 raise TrainingMetricsError(
                     "runtime worker state is invalid"
