@@ -2836,10 +2836,6 @@ class FormalWorkerBuilder:
             loaded=loaded,
             start_cell=start_cell,
         )
-        if not bool(episode.initial_observation.candidate_mask.any()):
-            raise ValueError(
-                "formal cached start qualification differs from the observed-only candidate"
-            )
         return self._make_worker(episode)
 
     def restore(
