@@ -104,6 +104,28 @@ def test_reward_v4_evaluation_resolves_only_active_r2_platforms() -> None:
     assert enabled_r2 == (PlatformType.LEGGED,)
 
 
+def test_resume_task_keys_keep_first_source_namespace_after_same_step_repairs() -> None:
+    checkpoint = SimpleNamespace(global_step=63, source_commit="e" * 40)
+    manifest = {
+        "source_migrations": [
+            {
+                "global_step": 63,
+                "from_source_commit": "e" * 40,
+                "to_source_commit": "c" * 40,
+            },
+            {
+                "global_step": 63,
+                "from_source_commit": "c" * 40,
+                "to_source_commit": "d" * 40,
+            },
+        ]
+    }
+
+    assert cli_module._resume_task_key_source_commit(manifest, checkpoint) == (
+        "e" * 40
+    )
+
+
 @pytest.mark.parametrize(
     ("tier", "expected_seeds", "expected_cap", "expected_report"),
     (

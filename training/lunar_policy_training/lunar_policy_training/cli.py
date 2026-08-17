@@ -3553,6 +3553,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         resume_root = Path(arguments.artifact_root)
         resume_state = _load_calibrated_run_state(resume_root)
+        resume_checkpoint = load_checkpoint(Path(arguments.checkpoint))
+        manifest = _read_run_manifest(resume_root / "run-manifest.json")
+        task_key_source_commit = _resume_task_key_source_commit(
+            manifest, resume_checkpoint
+        )
         assert resume_state.cache_manifest_path is not None
         with _open_formal_task_cache_runtime(
             artifact_root=resume_root,
@@ -3568,6 +3573,7 @@ def main(argv: list[str] | None = None) -> int:
                 sensor_performance_sha256=sensor_performance_sha256,
                 split="train",
                 task_cache_client=task_runtime.client,
+                task_key_source_commit=task_key_source_commit,
             )
             formal_batches = _formal_evaluation_batches_from_calibrated_root(
                 resume_root,
@@ -3853,6 +3859,7 @@ def _build_formal_environment(
     split: str,
     task_area: TaskAreaConfig,
     task_cache_client: object | None = None,
+    task_key_source_commit: str | None = None,
 ) -> tuple[FormalCache, FormalEnvironmentAssembly]:
     """Validate every current identity before constructing one formal factory."""
     try:
@@ -3893,7 +3900,11 @@ def _build_formal_environment(
             task_area=task_area,
             split=split,
             task_cache_client=task_cache_client,
-            source_commit=_source_commit(repository_root),
+            source_commit=(
+                task_key_source_commit
+                if task_key_source_commit is not None
+                else _source_commit(repository_root)
+            ),
         ).build()
     except (FormalCacheError, ValueError) as error:
         raise PreflightError(f"formal environment is invalid: {error}") from error
@@ -3908,6 +3919,7 @@ def _formal_environment_from_calibrated_root(
     sensor_performance_sha256: str,
     split: str,
     task_cache_client: object | None = None,
+    task_key_source_commit: str | None = None,
 ) -> FormalEnvironmentAssembly:
     root = validate_artifact_root(
         artifact_root, repository_root=repository_root
@@ -3928,6 +3940,7 @@ def _formal_environment_from_calibrated_root(
         split=split,
         task_area=calibrated.config.task_area,
         task_cache_client=task_cache_client,
+        task_key_source_commit=task_key_source_commit,
     )
     if cache.manifest["cache_manifest_sha256"] != calibrated.cache_manifest_sha256:
         raise PreflightError("formal cache manifest differs from calibration")
@@ -3938,6 +3951,23 @@ def _formal_environment_from_calibrated_root(
     ):
         raise PreflightError("formal training scenario schedule differs from calibration")
     return assembly
+
+
+def _resume_task_key_source_commit(
+    manifest: Mapping[str, object], checkpoint: TrainingCheckpointV6
+) -> str:
+    """Keep persisted task keys stable across source-only checkpoint repairs."""
+    migrations = manifest.get("source_migrations", ())
+    if isinstance(migrations, list):
+        for migration in migrations:
+            if not isinstance(migration, Mapping):
+                continue
+            if migration.get("global_step") != checkpoint.global_step:
+                continue
+            source = migration.get("from_source_commit")
+            if isinstance(source, str) and len(source) == 40:
+                return source
+    return checkpoint.source_commit
 
 
 def _validated_formal_preflight_calibration(
