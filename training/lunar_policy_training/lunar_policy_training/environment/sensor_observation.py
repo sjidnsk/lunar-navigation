@@ -394,10 +394,31 @@ class SensorObservationState:
         if not isinstance(pose, Pose2) or pose.frame_id != "map":
             raise ValueError("observation pose must be a map-frame Pose2")
         try:
-            pose_cell = self.truth.canvas.world_to_grid(pose.x_m, pose.y_m)
+            pose_cell = self.observation_cell_world(pose)
         except ValueError as error:
             raise ValueError("observation pose is outside the grid") from error
         return self.observe(pose_cell, elapsed_s=elapsed_s)
+
+    def observation_cell_world(self, pose: Pose2) -> tuple[int, int]:
+        """Return the exact grid cell that determines sensor visibility."""
+        if not isinstance(pose, Pose2) or pose.frame_id != "map":
+            raise ValueError("observation pose must be a map-frame Pose2")
+        return self.truth.canvas.world_to_grid(pose.x_m, pose.y_m)
+
+    def observe_world_repeated(
+        self,
+        pose: Pose2,
+        *,
+        elapsed_steps_s: tuple[float, ...],
+    ) -> ObservationDelta:
+        """Apply ordered observations sharing one exact visibility cell."""
+        try:
+            pose_cell = self.observation_cell_world(pose)
+        except ValueError as error:
+            raise ValueError("observation pose is outside the grid") from error
+        return self.observe_repeated(
+            pose_cell, elapsed_steps_s=elapsed_steps_s
+        )
 
 
 __all__ = [

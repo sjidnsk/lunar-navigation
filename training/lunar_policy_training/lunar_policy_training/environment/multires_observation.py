@@ -1274,6 +1274,48 @@ class MultiresSensorObservationState(SensorObservationState):
         x_m, y_m = self.scene.base_canvas.grid_center_world(*pose_cell)
         return self.observe_world(Pose2(x_m, y_m), elapsed_s=elapsed_s)
 
+    def observation_cell_world(self, pose: Pose2) -> tuple[int, int]:
+        """Return the authoritative 0.2 m cell used by detail visibility."""
+        if not isinstance(pose, Pose2) or pose.frame_id != "map":
+            raise ValueError("observation pose must be a map-frame Pose2")
+        return self.tile_provider.world_to_detail(pose.x_m, pose.y_m)
+
+    def observe_world_repeated(
+        self,
+        pose: Pose2,
+        *,
+        elapsed_steps_s: tuple[float, ...],
+    ) -> ObservationDelta:
+        """Preserve authoritative detail updates for one exact 0.2 m cell."""
+        if (
+            not isinstance(elapsed_steps_s, tuple)
+            or not elapsed_steps_s
+            or any(
+                not isinstance(elapsed_s, (int, float))
+                or isinstance(elapsed_s, bool)
+                or not math.isfinite(float(elapsed_s))
+                or elapsed_s < 0.0
+                for elapsed_s in elapsed_steps_s
+            )
+        ):
+            raise ValueError("observation elapsed time is invalid")
+        deltas = tuple(
+            self.observe_world(pose, elapsed_s=float(elapsed_s))
+            for elapsed_s in elapsed_steps_s
+        )
+        return ObservationDelta(
+            visible_cells=sum(delta.visible_cells for delta in deltas),
+            newly_observed_cells=sum(
+                delta.newly_observed_cells for delta in deltas
+            ),
+            mission_observed_delta_m2=sum(
+                delta.mission_observed_delta_m2 for delta in deltas
+            ),
+            priority_observed_delta_m2=sum(
+                delta.priority_observed_delta_m2 for delta in deltas
+            ),
+        )
+
     def observe_world(self, pose: Pose2, *, elapsed_s: float) -> ObservationDelta:
         if not isinstance(pose, Pose2) or pose.frame_id != "map":
             raise ValueError("observation pose must be a map-frame Pose2")

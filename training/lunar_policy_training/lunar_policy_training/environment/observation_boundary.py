@@ -678,7 +678,6 @@ class ObservationBoundaryController:
     def _observe(
         self, evidence: SensorBoundaryEvidence, execution_state: str
     ):
-        canvas = self._sensor_state.truth.canvas
         elapsed_ns = int(round(float(evidence.elapsed_s) * 1_000_000_000.0))
         if elapsed_ns < 0 or elapsed_ns > (1 << 63) - 1 - self._state_time_ns:
             raise ValueError("sensor boundary elapsed time is out of range")
@@ -690,9 +689,7 @@ class ObservationBoundaryController:
         for sample in samples:
             try:
                 sample_cells.append(
-                    canvas.world_to_grid(
-                        sample.pose_map.x_m, sample.pose_map.y_m
-                    )
+                    self._sensor_state.observation_cell_world(sample.pose_map)
                 )
             except ValueError as error:
                 raise ValueError(
@@ -713,8 +710,8 @@ class ObservationBoundaryController:
                 ):
                     group_end += 1
                 sample_deltas.append(
-                    self._sensor_state.observe_repeated(
-                        sample_cells[group_start],
+                    self._sensor_state.observe_world_repeated(
+                        samples[group_start].pose_map,
                         elapsed_steps_s=tuple(
                             float(sample.elapsed_s)
                             for sample in samples[group_start:group_end]

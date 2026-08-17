@@ -331,6 +331,38 @@ def test_evidence_generation_and_digest_change_only_on_authoritative_sensor_upda
     assert state.physical_evidence_sha256() != first_digest
 
 
+def test_same_cell_batch_preserves_multires_authoritative_updates() -> None:
+    sequential, _ = _state()
+    batched, _ = _state()
+    pose = Pose2(512.0, 512.0, elevation_m=7.0)
+    elapsed_steps_s = (0.0, 0.25, 1.0)
+
+    sequential_deltas = tuple(
+        sequential.observe_world(pose, elapsed_s=elapsed_s)
+        for elapsed_s in elapsed_steps_s
+    )
+    batch_delta = batched.observe_world_repeated(
+        pose, elapsed_steps_s=elapsed_steps_s
+    )
+
+    assert batched.evidence_generation == len(elapsed_steps_s)
+    assert _authoritative_observation_bytes(batched) == (
+        _authoritative_observation_bytes(sequential)
+    )
+    assert batch_delta == type(batch_delta)(
+        visible_cells=sum(delta.visible_cells for delta in sequential_deltas),
+        newly_observed_cells=sum(
+            delta.newly_observed_cells for delta in sequential_deltas
+        ),
+        mission_observed_delta_m2=sum(
+            delta.mission_observed_delta_m2 for delta in sequential_deltas
+        ),
+        priority_observed_delta_m2=sum(
+            delta.priority_observed_delta_m2 for delta in sequential_deltas
+        ),
+    )
+
+
 def test_failed_observation_does_not_advance_evidence_generation() -> None:
     state, _ = _state()
     before = state.physical_evidence_sha256()
