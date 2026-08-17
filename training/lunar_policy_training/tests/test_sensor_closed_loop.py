@@ -96,6 +96,24 @@ class _SequencedVisibilityEstimator:
         return self._masks.pop(0).copy()
 
 
+class _CountingVisibilityEstimator:
+    def __init__(self, delegate: NativeVisibilityEstimator) -> None:
+        self.sensor = delegate.sensor
+        self.resolution_m = delegate.resolution_m
+        self._delegate = delegate
+        self.calls: list[tuple[int, int]] = []
+
+    def reveal_from_pose(
+        self,
+        physical_obstacle_ratio: np.ndarray,
+        pose_cell: tuple[int, int],
+    ) -> np.ndarray:
+        self.calls.append(pose_cell)
+        return self._delegate.reveal_from_pose(
+            physical_obstacle_ratio, pose_cell
+        )
+
+
 def _coverage_controller(
     platform_type: str,
 ) -> tuple[ObservationBoundaryController, MapCanvas]:
@@ -322,6 +340,43 @@ def test_ground_path_samples_reveal_the_whole_route_with_one_policy_revision() -
     )
     after = updated.next_observation.observation_identities[0]
     assert after.state_time_ns - before.state_time_ns == 6_000_000_000
+
+
+def test_ground_path_reveals_consecutive_same_cell_samples_once() -> None:
+    controller, _, canvas = _controller("WHEELED")
+    delegate = controller.sensor_state.visibility_estimator
+    assert isinstance(delegate, NativeVisibilityEstimator)
+    counting = _CountingVisibilityEstimator(delegate)
+    controller.sensor_state.visibility_estimator = counting
+    controller.reset(_pose(canvas, 5, 2))
+    calls_after_reset = len(counting.calls)
+    center = _pose(canvas, 5, 5)
+    poses = tuple(
+        Pose2(
+            x_m=center.x_m + offset,
+            y_m=center.y_m - offset,
+            yaw_rad=float(index),
+            elevation_m=center.elevation_m,
+        )
+        for index, offset in enumerate((-0.1, -0.05, 0.05, 0.1))
+    )
+    assert len({canvas.world_to_grid(pose.x_m, pose.y_m) for pose in poses}) == 1
+    samples = tuple(SensorPathSample(pose, 0.25) for pose in poses)
+
+    updated = controller.after_execution(
+        platform_type="WHEELED",
+        execution_state="DECISION_BOUNDARY",
+        evidence=SensorBoundaryEvidence(
+            poses[-1],
+            1.0,
+            path_samples=samples,
+        ),
+    )
+
+    assert len(counting.calls) - calls_after_reset == 1
+    assert updated.next_observation.observation_identities[0].state_time_ns == (
+        1_000_000_000
+    )
 
 
 def test_sensor_path_evidence_requires_exact_endpoint_and_elapsed_sum() -> None:

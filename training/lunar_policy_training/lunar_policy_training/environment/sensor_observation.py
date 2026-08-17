@@ -277,11 +277,27 @@ class SensorObservationState:
     def observe(
         self, pose_cell: tuple[int, int], *, elapsed_s: float
     ) -> ObservationDelta:
+        return self.observe_repeated(
+            pose_cell, elapsed_steps_s=(elapsed_s,)
+        )
+
+    def observe_repeated(
+        self,
+        pose_cell: tuple[int, int],
+        *,
+        elapsed_steps_s: tuple[float, ...],
+    ) -> ObservationDelta:
+        """Apply ordered observations that share one exact visibility cell."""
         if (
-            not isinstance(elapsed_s, (int, float))
-            or isinstance(elapsed_s, bool)
-            or not math.isfinite(float(elapsed_s))
-            or elapsed_s < 0.0
+            not isinstance(elapsed_steps_s, tuple)
+            or not elapsed_steps_s
+            or any(
+                not isinstance(elapsed_s, (int, float))
+                or isinstance(elapsed_s, bool)
+                or not math.isfinite(float(elapsed_s))
+                or elapsed_s < 0.0
+                for elapsed_s in elapsed_steps_s
+            )
         ):
             raise ValueError("observation elapsed time is invalid")
         shape = _shape(self.truth.canvas)
@@ -307,17 +323,6 @@ class SensorObservationState:
 
         known_before = self.observed.valid_mask.copy()
         age = self.observed.observation_age_s.copy()
-        aged_values = (
-            age[known_before].astype(np.float64) + float(elapsed_s)
-        )
-        if (
-            not np.isfinite(aged_values).all()
-            or (aged_values > np.finfo(np.float32).max).any()
-        ):
-            raise ValueError("observation age would overflow")
-        age[known_before] = aged_values.astype(np.float32)
-        age[visible] = 0.0
-
         elevation = self.observed.elevation_m.copy()
         obstacle = self.observed.physical_obstacle_ratio.copy()
         valid = known_before.copy()
@@ -325,17 +330,32 @@ class SensorObservationState:
         elevation_variance = self.observed.elevation_variance.copy()
         obstacle_variance = self.observed.obstacle_variance.copy()
         count = self.observed.observation_count.copy()
+
+        # Preserve the exact sequential float32 age and saturating-count
+        # semantics while reusing the visibility mask and array copies.
+        for elapsed_s in elapsed_steps_s:
+            aged_values = (
+                age[valid].astype(np.float64) + float(elapsed_s)
+            )
+            if (
+                not np.isfinite(aged_values).all()
+                or (aged_values > np.finfo(np.float32).max).any()
+            ):
+                raise ValueError("observation age would overflow")
+            age[valid] = aged_values.astype(np.float32)
+            age[visible] = 0.0
+            valid[visible] = True
+            incremented = np.minimum(
+                count[visible].astype(np.uint64) + 1,
+                np.iinfo(np.uint32).max,
+            ).astype(np.uint32)
+            count[visible] = incremented
+
         elevation[visible] = self.truth.elevation_m[visible]
         obstacle[visible] = self.truth.physical_obstacle_ratio[visible]
-        valid[visible] = True
         quality[visible] = 1.0
         elevation_variance[visible] = self.truth.elevation_variance[visible]
         obstacle_variance[visible] = self.truth.obstacle_variance[visible]
-        incremented = np.minimum(
-            count[visible].astype(np.uint64) + 1,
-            np.iinfo(np.uint32).max,
-        ).astype(np.uint32)
-        count[visible] = incremented
 
         newly_observed = visible & ~known_before
         cell_area_m2 = self.truth.canvas.geometry.resolution_m**2
@@ -360,7 +380,9 @@ class SensorObservationState:
         self.observed.obstacle_variance = obstacle_variance
         self.observed.observation_count = count
         return ObservationDelta(
-            visible_cells=int(np.count_nonzero(visible)),
+            visible_cells=(
+                int(np.count_nonzero(visible)) * len(elapsed_steps_s)
+            ),
             newly_observed_cells=int(np.count_nonzero(newly_observed)),
             mission_observed_delta_m2=mission_delta,
             priority_observed_delta_m2=priority_delta,

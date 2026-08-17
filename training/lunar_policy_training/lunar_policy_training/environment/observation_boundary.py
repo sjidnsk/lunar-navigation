@@ -686,22 +686,50 @@ class ObservationBoundaryController:
         samples = evidence.path_samples or (
             SensorPathSample(evidence.pose_map, evidence.elapsed_s),
         )
-        visible_cells = 0
-        newly_observed_cells = 0
-        mission_observed_delta_m2 = 0.0
-        priority_observed_delta_m2 = 0.0
+        sample_cells: list[tuple[int, int]] = []
         for sample in samples:
             try:
-                canvas.world_to_grid(
-                    sample.pose_map.x_m, sample.pose_map.y_m
+                sample_cells.append(
+                    canvas.world_to_grid(
+                        sample.pose_map.x_m, sample.pose_map.y_m
+                    )
                 )
             except ValueError as error:
                 raise ValueError(
                     "sensor boundary pose is outside the grid"
                 ) from error
-            sample_delta = self._sensor_state.observe_world(
-                sample.pose_map, elapsed_s=float(sample.elapsed_s)
+        visible_cells = 0
+        newly_observed_cells = 0
+        mission_observed_delta_m2 = 0.0
+        priority_observed_delta_m2 = 0.0
+        sample_deltas: list[ObservationDelta] = []
+        if self._platform_type in _GROUND_PLATFORMS:
+            group_start = 0
+            while group_start < len(samples):
+                group_end = group_start + 1
+                while (
+                    group_end < len(samples)
+                    and sample_cells[group_end] == sample_cells[group_start]
+                ):
+                    group_end += 1
+                sample_deltas.append(
+                    self._sensor_state.observe_repeated(
+                        sample_cells[group_start],
+                        elapsed_steps_s=tuple(
+                            float(sample.elapsed_s)
+                            for sample in samples[group_start:group_end]
+                        ),
+                    )
+                )
+                group_start = group_end
+        else:
+            sample_deltas.extend(
+                self._sensor_state.observe_world(
+                    sample.pose_map, elapsed_s=float(sample.elapsed_s)
+                )
+                for sample in samples
             )
+        for sample_delta in sample_deltas:
             visible_cells += int(sample_delta.visible_cells)
             newly_observed_cells += int(sample_delta.newly_observed_cells)
             mission_observed_delta_m2 += float(

@@ -107,6 +107,47 @@ def test_repeated_observation_has_zero_coverage_delta_and_saturates_count() -> N
     assert state.observed.observation_count[5, 5] == np.iinfo(np.uint32).max
 
 
+def test_same_cell_batch_is_exactly_equivalent_to_sequential_observations() -> None:
+    sequential, _ = _state()
+    batched, _ = _state()
+    elapsed_steps_s = (0.125, 0.2, 0.3333333333333333, 0.75)
+
+    sequential_deltas = tuple(
+        sequential.observe((5, 5), elapsed_s=elapsed_s)
+        for elapsed_s in elapsed_steps_s
+    )
+    batch_delta = batched.observe_repeated(
+        (5, 5), elapsed_steps_s=elapsed_steps_s
+    )
+
+    assert batch_delta.visible_cells == sum(
+        delta.visible_cells for delta in sequential_deltas
+    )
+    assert batch_delta.newly_observed_cells == sum(
+        delta.newly_observed_cells for delta in sequential_deltas
+    )
+    assert batch_delta.mission_observed_delta_m2 == sum(
+        delta.mission_observed_delta_m2 for delta in sequential_deltas
+    )
+    assert batch_delta.priority_observed_delta_m2 == sum(
+        delta.priority_observed_delta_m2 for delta in sequential_deltas
+    )
+    for name in (
+        "elevation_m",
+        "physical_obstacle_ratio",
+        "valid_mask",
+        "observation_age_s",
+        "observation_quality",
+        "elevation_variance",
+        "obstacle_variance",
+        "observation_count",
+    ):
+        np.testing.assert_array_equal(
+            getattr(batched.observed, name),
+            getattr(sequential.observed, name),
+        )
+
+
 def test_observation_errors_are_fail_closed_before_partial_mutation() -> None:
     state, _ = _state()
     before = state.observed.copy()

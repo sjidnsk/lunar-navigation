@@ -2113,11 +2113,13 @@ class FormalEpisode:
         snapshot = self._snapshot
         if snapshot is None:
             raise RuntimeError("ground continuation has no prior map snapshot")
-        ground_start_resample_reason = self._qualify_ground_start(
-            planner_global_map=planner_global_map,
-            local_map=local_map,
-            pose=pose,
-        )
+        # The continuation pose is the certified endpoint of the reference that
+        # just executed.  Replanning from that pose back to itself duplicates
+        # the next rolling request and turns a valid one-pose connector into
+        # LOCAL_DETAIL_ROUTE_RESULT_INVALID.  Initial decision boundaries still
+        # use _qualify_ground_start; the next real rolling plan remains the
+        # fail-closed authority for this endpoint.
+        ground_start_resample_reason = None
         self._snapshot = _MapSnapshot(
             self._revision,
             snapshot.candidates,
