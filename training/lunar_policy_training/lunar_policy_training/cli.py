@@ -3589,6 +3589,7 @@ def main(argv: list[str] | None = None) -> int:
                 repository_root=repository_root,
                 sensor_performance_sha256=sensor_performance_sha256,
                 task_cache_client=task_runtime.client,
+                task_key_source_commit=task_key_source_commit,
             )
             _resume_training_run(
                 artifact_root=resume_root,
