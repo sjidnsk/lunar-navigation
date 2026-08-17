@@ -1797,6 +1797,7 @@ class MultiresSensorObservationState(SensorObservationState):
     def local_observation(self, pose: Pose2) -> LocalObservation:
         if not isinstance(pose, Pose2) or pose.frame_id != "map":
             raise ValueError("local observation pose must be map-frame")
+        self.tile_provider.world_to_detail(pose.x_m, pose.y_m)
         half = LOCAL_GEOMETRY.size_m / 2.0
         left, _, _, top = self.scene.base_canvas.bounds_m
         resolution = LOCAL_GEOMETRY.resolution_m
@@ -1808,26 +1809,38 @@ class MultiresSensorObservationState(SensorObservationState):
         )
         cells = LOCAL_GEOMETRY.cells
         total = self.tile_provider.detail_cells_per_axis
-        if (
-            start_row < 0
-            or start_column < 0
-            or start_row + cells > total
-            or start_column + cells > total
-        ):
-            raise ValueError("local observation lies outside the scene")
         elevation = np.zeros((cells, cells), dtype=np.float32)
         obstacle = np.zeros((cells, cells), dtype=np.float32)
         valid = np.zeros((cells, cells), dtype=np.bool_)
+        source_row0 = max(start_row, 0)
+        source_row1 = min(start_row + cells, total)
+        source_column0 = max(start_column, 0)
+        source_column1 = min(start_column + cells, total)
+        row_offset = source_row0 - start_row
+        column_offset = source_column0 - start_column
         for tile_row, tile_column, window_slice, tile_slice in self._window_slices(
-            start_row, start_column, cells
+            source_row0,
+            source_column0,
+            source_row1 - source_row0,
+            source_column1 - source_column0,
         ):
             tile = self._existing_tile(tile_row, tile_column)
             if tile is None:
                 continue
+            target_slice = (
+                slice(
+                    row_offset + window_slice[0].start,
+                    row_offset + window_slice[0].stop,
+                ),
+                slice(
+                    column_offset + window_slice[1].start,
+                    column_offset + window_slice[1].stop,
+                ),
+            )
             local_valid = tile.valid_mask[tile_slice]
-            valid[window_slice] = local_valid
-            elevation_part = elevation[window_slice]
-            obstacle_part = obstacle[window_slice]
+            valid[target_slice] = local_valid
+            elevation_part = elevation[target_slice]
+            obstacle_part = obstacle[target_slice]
             elevation_part[local_valid] = tile.elevation_m[tile_slice][local_valid]
             obstacle_part[local_valid] = tile.physical_obstacle_ratio[tile_slice][
                 local_valid

@@ -228,6 +228,26 @@ def test_local_crop_is_exact_six_point_four_metres_and_never_exposes_unknown_tru
     assert np.all(local.elevation_m[local.observed_mask] == 7.0)
 
 
+def test_local_crop_pads_task_edge_without_exposing_outside_truth() -> None:
+    state, _ = _state()
+    state.observe_world(
+        Pose2(20.0, 1004.0, elevation_m=7.0), elapsed_s=0.0
+    )
+
+    local = state.local_observation(
+        Pose2(1.0, 1023.0, elevation_m=7.0)
+    )
+
+    assert local.bounds_m == pytest.approx((-2.2, 1019.8, 4.2, 1026.2))
+    assert local.elevation_m.shape == (32, 32)
+    assert local.observed_mask.any()
+    assert not local.observed_mask[:11].any()
+    assert not local.observed_mask[:, :11].any()
+    assert np.all(local.elevation_m[~local.observed_mask] == 0.0)
+    assert np.all(local.physical_obstacle_ratio[~local.observed_mask] == 0.0)
+    assert np.all(local.elevation_m[local.observed_mask] == 7.0)
+
+
 def test_detail_state_is_sparse_and_truth_tiles_remain_lru_bounded() -> None:
     state, provider = _state()
 
