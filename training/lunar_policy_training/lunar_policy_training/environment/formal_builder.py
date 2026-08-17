@@ -142,6 +142,10 @@ _HOPPER_TASK_SENSOR_ALGORITHM_ID = (
 )
 
 
+class _GroundStartQualificationProbeError(EnvironmentInvariantError):
+    """One planner probe failed before it could classify the start cell."""
+
+
 def _ground_start_resample_reason(
     output: object,
     platform_type: str,
@@ -175,7 +179,15 @@ def _ground_start_resample_reason(
         bridge_api.PlanningOutcome.ACTIVE_REFERENCE_INVALIDATED,
         bridge_api.PlanningOutcome.CANCELED,
     }:
-        raise EnvironmentInvariantError("GROUND_START_QUALIFICATION_FAILED")
+        warnings = ",".join(
+            str(reason) for reason in output.diagnostics.warning_codes
+        )
+        raise _GroundStartQualificationProbeError(
+            "GROUND_START_QUALIFICATION_FAILED "
+            f"outcome={output.outcome} "
+            f"reason_code={output.reason_code} "
+            f"warning_codes={warnings or '-'}"
+        )
     return None
 
 
@@ -2161,22 +2173,31 @@ class FormalEpisode:
     ) -> str | None:
         if self.platform_type == "HOPPER":
             return None
-        request = self._base_request(planner_global_map, local_map)
-        request.request_id = (
+        request_id = (
             f"formal-start-qualification/{self.scene_id}/{self._revision}"
         )
-        goal = bridge_api.PointGoal()
-        goal.position_m = _vec3(
-            pose.x_m,
-            pose.y_m,
-            pose.elevation_m,
-        )
-        goal.tolerance_m = 0.0
-        request.goal.goal_id = "current-pose-start-qualification"
-        request.goal.target = goal
-        apply_goal_theta(request.goal, self.platform_type, pose.yaw_rad)
-        output = self._bridge.plan(request)
-        return _ground_start_resample_reason(output, self.platform_type)
+        for attempt in range(2):
+            request = self._base_request(planner_global_map, local_map)
+            request.request_id = (
+                request_id if attempt == 0 else f"{request_id}/retry-{attempt}"
+            )
+            goal = bridge_api.PointGoal()
+            goal.position_m = _vec3(
+                pose.x_m,
+                pose.y_m,
+                pose.elevation_m,
+            )
+            goal.tolerance_m = 0.0
+            request.goal.goal_id = "current-pose-start-qualification"
+            request.goal.target = goal
+            apply_goal_theta(request.goal, self.platform_type, pose.yaw_rad)
+            output = self._bridge.plan(request)
+            try:
+                return _ground_start_resample_reason(output, self.platform_type)
+            except _GroundStartQualificationProbeError:
+                if attempt == 1:
+                    raise
+        raise AssertionError("ground start qualification retry loop is incomplete")
 
     def ground_start_qualification_reason(self) -> str | None:
         snapshot = self._snapshot
