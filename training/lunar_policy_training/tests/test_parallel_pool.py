@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pathlib
 import os
+import queue
 import sys
 from dataclasses import dataclass
 
@@ -124,6 +125,26 @@ def test_parallel_pool_uses_distinct_startup_and_runtime_timeouts(
 
     assert deadlines == [400.0, 160.0]
     assert reset_rows == {0: (identity, 0)}
+
+
+def test_next_result_drains_worker_error_before_reporting_dead_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker's queued startup exception must not be hidden by exit detection."""
+
+    class _DeadProcess:
+        exitcode = 1
+
+        def is_alive(self) -> bool:
+            return False
+
+    pool = object.__new__(ParallelEnvPool)
+    pool._processes = [_DeadProcess()]
+    pool._result_queue = queue.Queue()
+    pool._result_queue.put(("error", 0, "startup boom"))
+    monkeypatch.setattr(parallel_pool_module.time, "monotonic", lambda: 100.0)
+
+    assert pool._next_result(101.0) == ("error", 0, "startup boom")
 
 
 def _observation(worker_index: int, platform_type: str) -> PolicyBatch:

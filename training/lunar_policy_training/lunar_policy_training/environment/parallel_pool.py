@@ -1357,21 +1357,21 @@ class ParallelEnvPool:
 
     def _next_result(self, deadline: float) -> tuple[object, ...]:
         while True:
-            dead = [
-                index
-                for index, process in enumerate(self._processes)
-                if not process.is_alive() and process.exitcode is not None
-            ]
-            if dead:
-                raise ParallelPoolError(
-                    f"worker process exited unexpectedly: {dead}"
-                )
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 raise ParallelPoolError("worker response timed out")
             try:
                 message = self._result_queue.get(timeout=min(remaining, 0.1))
             except queue.Empty:
+                dead = [
+                    index
+                    for index, process in enumerate(self._processes)
+                    if not process.is_alive() and process.exitcode is not None
+                ]
+                if dead:
+                    raise ParallelPoolError(
+                        f"worker process exited unexpectedly: {dead}"
+                    )
                 continue
             except Exception as error:
                 raise ParallelPoolError("worker result queue failed") from error
