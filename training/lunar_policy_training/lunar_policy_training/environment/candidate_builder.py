@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
 import json
@@ -859,6 +859,89 @@ def _map_frontier_chain_candidates(
     return output
 
 
+def _map_frontier_chain_pose_options(
+    chain: Collection[tuple[int, int]],
+    *,
+    robot: tuple[int, int],
+    observed_mask: np.ndarray,
+    physical_pose_mask: np.ndarray,
+    standoff_cells: int,
+) -> list[_RawFrontierCandidate]:
+    """Enumerate internal pose options along one chain before slot selection."""
+    if (
+        not isinstance(observed_mask, np.ndarray)
+        or observed_mask.dtype != np.dtype(np.bool_)
+        or observed_mask.ndim != 2
+        or not isinstance(physical_pose_mask, np.ndarray)
+        or physical_pose_mask.dtype != np.dtype(np.bool_)
+        or physical_pose_mask.shape != observed_mask.shape
+        or type(standoff_cells) is not int
+        or standoff_cells < 0
+    ):
+        raise ValueError("frontier pose-option masks are invalid")
+    rows, columns = observed_mask.shape
+    output: list[_RawFrontierCandidate] = []
+    seen: set[tuple[int, int]] = set()
+    for chain_rank, frontier_cell in enumerate(chain):
+        row, column = frontier_cell
+        pose_cell = (
+            row + int(np.sign(robot[0] - row)) * standoff_cells,
+            column + int(np.sign(robot[1] - column)) * standoff_cells,
+        )
+        if not (
+            0 <= pose_cell[0] < rows
+            and 0 <= pose_cell[1] < columns
+            and observed_mask[pose_cell]
+        ):
+            pose_cell = frontier_cell
+        if (
+            pose_cell in seen
+            or not 0 <= pose_cell[0] < rows
+            or not 0 <= pose_cell[1] < columns
+            or not observed_mask[pose_cell]
+            or not physical_pose_mask[pose_cell]
+        ):
+            continue
+        seen.add(pose_cell)
+        output.append(
+            _RawFrontierCandidate(
+                sample_rank=chain_rank,
+                frontier_cell=frontier_cell,
+                pose_cell=pose_cell,
+            )
+        )
+    return output
+
+
+def _select_three_chain_options(
+    options: Collection[tuple[_RawFrontierCandidate, int]],
+    *,
+    chain_length: int,
+) -> tuple[int, ...]:
+    """Choose up to three certified option indices near stable arc quartiles."""
+    remaining = list(options)
+    if type(chain_length) is not int or chain_length <= 0:
+        raise ValueError("frontier chain length is invalid")
+    selected: list[int] = []
+    total = float(max(0, chain_length - 1))
+    for fraction in (0.25, 0.5, 0.75):
+        if not remaining:
+            break
+        target = total * fraction
+        raw, option_index = min(
+            remaining,
+            key=lambda item: (
+                abs(float(item[0].sample_rank) - target),
+                item[0].sample_rank,
+                item[0].pose_cell,
+                item[1],
+            ),
+        )
+        selected.append(option_index)
+        remaining.remove((raw, option_index))
+    return tuple(selected)
+
+
 def _clear_observed(world: ObservedWorld, cells: list[tuple[int, int]], *, unknown_endpoint_allowed: bool = False) -> bool:
     check = cells[:-1] if unknown_endpoint_allowed else cells
     obstacle_ratio = world.physical_obstacle_layer.values
@@ -1282,6 +1365,9 @@ class CandidateBuilderV2:
         goal_tolerance_mm: int,
         excluded_cells: Collection[tuple[int, int]] = (),
         backtrack_pose: Pose2 | None = None,
+        ground_endpoint_feasibility: (
+            Callable[[np.ndarray], np.ndarray] | None
+        ) = None,
     ) -> PhysicalCandidateUniverse:
         """Build one primitive-independent, bounded physical opportunity set."""
         refresh_started = perf_counter()
@@ -1400,6 +1486,7 @@ class CandidateBuilderV2:
                 robot=robot,
                 segments=segments,
                 exact_target_poses=exact_target_poses,
+                ground_endpoint_feasibility=ground_endpoint_feasibility,
                 refresh_started=refresh_started,
             )
     def _build_hopper_physical_universe(
@@ -1739,9 +1826,12 @@ class CandidateBuilderV2:
         robot: tuple[int, int],
         segments: list[list[tuple[int, int]]],
         exact_target_poses: Mapping[tuple[int, int], Pose2],
+        ground_endpoint_feasibility: (
+            Callable[[np.ndarray], np.ndarray] | None
+        ),
         refresh_started: float,
     ) -> PhysicalCandidateUniverse:
-        """Build ground candidates from three fixed samples per frontier chain."""
+        """Build at most three certified candidates per complete frontier chain."""
         physical_mask = physical_reachability.physical_observation_pose_mask
         step = max(
             1,
@@ -1750,11 +1840,10 @@ class CandidateBuilderV2:
                 / world.canvas.geometry.resolution_m
             ),
         )
-        raw_count = 0
+        raw_count = sum(min(3, len(segment)) for segment in segments)
         mapped: dict[tuple[int, int], tuple[int, _RawFrontierCandidate]] = {}
         for segment_id, segment in enumerate(segments):
-            raw_count += len(_sample_frontier_chain(segment))
-            for candidate in _map_frontier_chain_candidates(
+            for candidate in _map_frontier_chain_pose_options(
                 segment,
                 robot=robot,
                 observed_mask=world.observed_mask,
@@ -1805,18 +1894,51 @@ class CandidateBuilderV2:
             ],
             dtype=np.float64,
         ).reshape((-1, 3))
+        if ground_endpoint_feasibility is None:
+            endpoint_mask = np.ones(
+                len(globally_reachable), dtype=np.bool_
+            )
+        else:
+            endpoint_mask = ground_endpoint_feasibility(target_positions)
+            if (
+                not isinstance(endpoint_mask, np.ndarray)
+                or endpoint_mask.dtype != np.dtype(np.bool_)
+                or endpoint_mask.shape != (len(globally_reachable),)
+                or not endpoint_mask.flags.c_contiguous
+            ):
+                raise CandidateInvariantError(
+                    "GROUND_ENDPOINT_FEASIBILITY_INVALID"
+                )
+        endpoint_feasible = [
+            item
+            for item, accepted in zip(
+                globally_reachable, endpoint_mask, strict=True
+            )
+            if bool(accepted)
+        ]
+        target_positions = np.ascontiguousarray(
+            [
+                (
+                    exact_target_poses[raw.pose_cell].x_m,
+                    exact_target_poses[raw.pose_cell].y_m,
+                    exact_target_poses[raw.pose_cell].elevation_m,
+                )
+                for _, raw, _ in endpoint_feasible
+            ],
+            dtype=np.float64,
+        ).reshape((-1, 3))
         exact_gain = getattr(
             self._visibility_estimator,
             "estimate_candidate_gains_at_positions",
             None,
         )
-        if not globally_reachable:
+        if not endpoint_feasible:
             gains = np.zeros((0, 2), dtype=np.float32)
         elif callable(exact_gain):
             gains = exact_gain(*gain_arguments, target_positions)
         else:
             candidate_cells = np.ascontiguousarray(
-                [raw.pose_cell for _, raw, _ in globally_reachable],
+                [raw.pose_cell for _, raw, _ in endpoint_feasible],
                 dtype=np.int32,
             ).reshape((-1, 2))
             gains = self._visibility_estimator.estimate_candidate_gains(
@@ -1824,7 +1946,7 @@ class CandidateBuilderV2:
             )
         if (
             not isinstance(gains, np.ndarray)
-            or gains.shape != (len(globally_reachable), 2)
+            or gains.shape != (len(endpoint_feasible), 2)
             or gains.dtype != np.dtype(np.float32)
             or not gains.flags.c_contiguous
             or not np.isfinite(gains).all()
@@ -1836,22 +1958,44 @@ class CandidateBuilderV2:
             for index, gain in enumerate(gains[:, 0])
             if float(gain) >= _DETAIL_CELL_COARSE_EQUIVALENT
         ]
-        positive_gain_normalizer = max(
-            (float(gains[index, 0]) for index in positive_indices),
-            default=0.0,
-        )
-        priority_gain_normalizer = max(
-            (float(gains[index, 1]) for index in positive_indices),
-            default=0.0,
-        )
         total_roi = float(mission.roi_ratio.sum(dtype=np.float64))
         roi_diagonal = task_roi_diagonal_m(
             mission.roi_ratio,
             resolution_m=world.canvas.geometry.resolution_m,
         )
-        preliminary: list[PhysicalCandidate] = []
+        selectable_by_segment: dict[
+            int, list[tuple[_RawFrontierCandidate, int]]
+        ] = {}
         for index in positive_indices:
-            segment_id, raw, global_cost = globally_reachable[index]
+            segment_id, raw, _ = endpoint_feasible[index]
+            selectable_by_segment.setdefault(segment_id, []).append(
+                (raw, index)
+            )
+        selected_positive_indices: list[int] = []
+        for segment_id in sorted(selectable_by_segment):
+            selected_positive_indices.extend(
+                _select_three_chain_options(
+                    selectable_by_segment[segment_id],
+                    chain_length=len(segments[segment_id]),
+                )
+            )
+        positive_gain_normalizer = max(
+            (
+                float(gains[index, 0])
+                for index in selected_positive_indices
+            ),
+            default=0.0,
+        )
+        priority_gain_normalizer = max(
+            (
+                float(gains[index, 1])
+                for index in selected_positive_indices
+            ),
+            default=0.0,
+        )
+        preliminary: list[PhysicalCandidate] = []
+        for index in selected_positive_indices:
+            segment_id, raw, global_cost = endpoint_feasible[index]
             target_pose = exact_target_poses[raw.pose_cell]
             gain = float(gains[index, 0])
             priority_gain = float(gains[index, 1])
@@ -1961,16 +2105,33 @@ class CandidateBuilderV2:
             available_candidate_count=len(candidates),
             untried_reserve_count=len(candidates) - selected_count,
             planner_failed_current_snapshot_count=0,
-            zero_gain_count=len(globally_reachable) - len(positive_indices),
+            zero_gain_count=len(endpoint_feasible) - len(positive_indices),
             visited_excluded_count=0,
-            physical_unreachable_count=raw_count - len(globally_reachable),
+            physical_unreachable_count=(
+                len(fine) - len(endpoint_feasible)
+            ),
         )
         snapshot = CandidateDecisionSnapshot(
             snapshot_id=physical_snapshot_id,
             frontier_segment_count=len(segments),
             raw_candidate_count=raw_count,
-            fine_pose_candidate_count=len(fine),
-            globally_reachable_candidate_count=len(globally_reachable),
+            fine_pose_candidate_count=sum(
+                min(
+                    3,
+                    sum(item[0] == segment_id for item in fine),
+                )
+                for segment_id in range(len(segments))
+            ),
+            globally_reachable_candidate_count=sum(
+                min(
+                    3,
+                    sum(
+                        item[0] == segment_id
+                        for item in globally_reachable
+                    ),
+                )
+                for segment_id in range(len(segments))
+            ),
             positive_gain_candidate_count=len(candidates),
             selected_policy_candidate_count=selected_count,
             untried_reserve_count=len(candidates) - selected_count,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
+import math
 from types import MappingProxyType
 from typing import Mapping
 
@@ -18,6 +19,70 @@ _PLATFORMS = frozenset(("WHEELED", "LEGGED", "HOPPER"))
 _GROUND_PHYSICAL_EVIDENCE_ALGORITHM_ID = (
     "cpp-safe-traversability-projection/v1"
 )
+
+
+def ground_point_goal_feasibility(
+    hard_feasible: np.ndarray,
+    *,
+    canvas: MapCanvas,
+    target_positions_m: np.ndarray,
+    tolerance_m: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Evaluate the C++ point-goal/cell-box rule on one north-up mask."""
+    hard = np.asarray(hard_feasible)
+    targets = np.asarray(target_positions_m)
+    cells = canvas.geometry.cells if isinstance(canvas, MapCanvas) else 0
+    if (
+        hard.dtype != np.dtype(np.bool_)
+        or hard.shape != (cells, cells)
+        or not hard.flags.c_contiguous
+        or targets.dtype != np.dtype(np.float64)
+        or targets.ndim != 2
+        or targets.shape[1:] != (3,)
+        or not targets.flags.c_contiguous
+        or not np.isfinite(targets).all()
+        or not isinstance(tolerance_m, (int, float))
+        or isinstance(tolerance_m, bool)
+        or not np.isfinite(float(tolerance_m))
+        or float(tolerance_m) < 0.0
+    ):
+        raise ValueError("ground point-goal feasibility inputs are invalid")
+    covered = np.zeros(len(targets), dtype=np.bool_)
+    feasible = np.zeros(len(targets), dtype=np.bool_)
+    if not len(targets):
+        return covered, feasible
+    left, _bottom, _right, top = canvas.bounds_m
+    resolution = float(canvas.geometry.resolution_m)
+    tolerance = float(tolerance_m)
+    index_radius = int(math.ceil(tolerance / resolution)) + 1
+    for index, target in enumerate(targets):
+        x_m = float(target[0])
+        y_m = float(target[1])
+        base_column = math.floor((x_m - left) / resolution)
+        base_row = math.floor((top - y_m) / resolution)
+        row0 = max(0, base_row - index_radius)
+        row1 = min(cells, base_row + index_radius + 1)
+        column0 = max(0, base_column - index_radius)
+        column1 = min(cells, base_column + index_radius + 1)
+        for row in range(row0, row1):
+            cell_top = top - row * resolution
+            cell_bottom = cell_top - resolution
+            delta_y = max(cell_bottom - y_m, 0.0, y_m - cell_top)
+            for column in range(column0, column1):
+                cell_left = left + column * resolution
+                cell_right = cell_left + resolution
+                delta_x = max(cell_left - x_m, 0.0, x_m - cell_right)
+                if math.hypot(delta_x, delta_y) <= tolerance + 1.0e-9:
+                    covered[index] = True
+                    if hard[row, column]:
+                        feasible[index] = True
+                        break
+            if feasible[index]:
+                break
+    return (
+        np.ascontiguousarray(covered),
+        np.ascontiguousarray(feasible),
+    )
 
 
 @dataclass(frozen=True, slots=True)

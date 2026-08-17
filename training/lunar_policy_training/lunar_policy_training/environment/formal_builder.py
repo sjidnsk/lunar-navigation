@@ -112,6 +112,7 @@ from .parallel_pool import ParallelEnvironmentWorker
 from .platform_reachability import (
     PhysicalReachabilityResult,
     PlatformCandidateReachability,
+    ground_point_goal_feasibility,
 )
 from .v3_environment import (
     CommittedHopExecutionFeedback,
@@ -1826,6 +1827,123 @@ class FormalEpisode:
         request.config.local_frontier.additional_corridor_margin_m = 2.0
         return request
 
+    def _ground_endpoint_feasibility(
+        self,
+        target_positions_m: np.ndarray,
+        *,
+        planner_global_map: object,
+    ) -> np.ndarray:
+        """Batch exact ground endpoints through observed-only 0.2 m windows."""
+        targets = np.asarray(target_positions_m)
+        if (
+            self.platform_type not in {"WHEELED", "LEGGED"}
+            or targets.dtype != np.dtype(np.float64)
+            or targets.ndim != 2
+            or targets.shape[1:] != (3,)
+            or not targets.flags.c_contiguous
+            or not np.isfinite(targets).all()
+        ):
+            raise ValueError("ground endpoint authority inputs are invalid")
+        output = np.zeros(len(targets), dtype=np.bool_)
+        if not len(targets):
+            return output
+        bucket_size_m = 48.0
+        grouped: dict[tuple[int, int], list[int]] = {}
+        for index, position in enumerate(targets):
+            key = (
+                math.floor(float(position[0]) / bucket_size_m),
+                math.floor(float(position[1]) / bucket_size_m),
+            )
+            grouped.setdefault(key, []).append(index)
+        for group_index, key in enumerate(sorted(grouped)):
+            indices = grouped[key]
+            group_targets = np.ascontiguousarray(
+                targets[indices], dtype=np.float64
+            )
+            center_x_m = float(
+                (
+                    group_targets[:, 0].min()
+                    + group_targets[:, 0].max()
+                )
+                / 2.0
+            )
+            center_y_m = float(
+                (
+                    group_targets[:, 1].min()
+                    + group_targets[:, 1].max()
+                )
+                / 2.0
+            )
+            center_z_m = float(group_targets[:, 2].mean(dtype=np.float64))
+            center_pose = Pose2(
+                center_x_m,
+                center_y_m,
+                self.current_pose.yaw_rad,
+                "map",
+                center_z_m,
+            )
+            detail = self.sensor_state.planning_observation(center_pose)
+            stamp_ns = (
+                1_000_000_000
+                + self._revision * 1_000_000
+                + group_index
+            )
+            local_map = _grid_map(
+                canvas=detail.canvas,
+                frame_id="odom",
+                elevation_m=detail.elevation_m,
+                valid_mask=detail.valid_mask,
+                physical_obstacle_ratio=detail.physical_obstacle_ratio,
+                physical_obstacle_height_m=(
+                    detail.physical_obstacle_height_m
+                ),
+                forbidden_ratio=detail.forbidden_ratio,
+                observation_age_s=detail.observation_age_s,
+                observation_quality=detail.observation_quality,
+                observation_count=detail.observation_count,
+                stamp_ns=stamp_ns,
+            )
+            request = self._base_request(planner_global_map, local_map)
+            request.request_id = (
+                f"formal-endpoint/{self.scene_id}/{self._revision}/"
+                f"{group_index}"
+            )
+            point = bridge_api.PointGoal()
+            point.position_m = _vec3(center_x_m, center_y_m, center_z_m)
+            point.tolerance_m = 0.2
+            request.goal.goal_id = f"endpoint/{group_index}"
+            request.goal.target = point
+            apply_goal_theta(
+                request.goal,
+                self.platform_type,
+                self.current_pose.yaw_rad,
+            )
+            projection = self._bridge.project_traversability(request)
+            raw_hard = np.asarray(
+                getattr(projection, "hard_feasible", None)
+            )
+            cells = detail.canvas.geometry.cells
+            if (
+                raw_hard.dtype != np.dtype(np.uint8)
+                or raw_hard.shape != (cells, cells)
+                or not raw_hard.flags.c_contiguous
+                or (raw_hard.size and (raw_hard > 1).any())
+            ):
+                raise RuntimeError(
+                    "ground endpoint traversability geometry differs"
+                )
+            hard = np.ascontiguousarray(
+                np.flipud(raw_hard).astype(np.bool_)
+            )
+            covered, feasible = ground_point_goal_feasibility(
+                hard,
+                canvas=detail.canvas,
+                target_positions_m=group_targets,
+                tolerance_m=0.2,
+            )
+            output[np.asarray(indices, dtype=np.intp)] = covered & feasible
+        return np.ascontiguousarray(output)
+
     def build_policy_observation(
         self, observed, pose: Pose2
     ) -> PolicyBatch:
@@ -1955,6 +2073,14 @@ class FormalEpisode:
                 if self.platform_type == "HOPPER"
                 and self._visited_candidate_filter_enabled
                 else ()
+            ),
+            ground_endpoint_feasibility=(
+                None
+                if self.platform_type == "HOPPER"
+                else lambda positions: self._ground_endpoint_feasibility(
+                    positions,
+                    planner_global_map=planner_global_map,
+                )
             ),
         )
         failure_snapshot_id = self._planner_failure_snapshot_id
