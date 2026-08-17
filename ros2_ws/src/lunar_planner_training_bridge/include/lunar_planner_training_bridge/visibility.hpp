@@ -44,6 +44,10 @@ public:
   RevealFromPose(GridShape shape, GridCell pose,
                  std::span<const float> truth_obstacle_ratio) const;
 
+  [[nodiscard]] std::vector<std::uint8_t>
+  RevealFromPoses(GridShape shape, std::span<const GridCell> poses,
+                  std::span<const float> truth_obstacle_ratios) const;
+
 private:
   struct Ray final {
     std::uint32_t cell_offset{};
@@ -60,6 +64,10 @@ private:
   std::vector<std::uint32_t> reverse_offsets_;
   std::vector<std::uint32_t> occurrence_rays_;
   std::vector<std::uint16_t> occurrence_positions_;
+
+  void RevealFromPoseInto(GridShape shape, GridCell pose,
+                          std::span<const float> truth_obstacle_ratio,
+                          std::span<std::uint8_t> visible) const;
 };
 
 } // namespace lunar::planning::training

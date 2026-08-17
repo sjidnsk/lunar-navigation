@@ -247,6 +247,10 @@ class _HopperObservationRollbackState:
     observed_coverable_detail_cell_count: int
     observed_priority_detail_cell_count: int
     evidence_generation: int
+    observation_age_ledger: list[float]
+    detail_tile_age_cursors: dict[tuple[int, int], int]
+    physical_evidence_identity: bytes
+    dirty_coarse_cell_ids: set[int]
 
 
 class MultiresSensorObservationState(SensorObservationState):
@@ -412,6 +416,10 @@ class MultiresSensorObservationState(SensorObservationState):
         self.tile_provider = tile_provider
         self._detail_tiles: dict[tuple[int, int], _ObservedDetailTile] = {}
         self._evidence_generation = 0
+        self._observation_age_ledger: list[float] = []
+        self._detail_tile_age_cursors: dict[tuple[int, int], int] = {}
+        self._physical_evidence_identity = sha256().digest()
+        self._dirty_coarse_cell_ids: set[int] = set()
         self.coarse_obstacle_height_m = np.zeros(shape, dtype=np.float32)
         self.coarse_forbidden_ratio = np.zeros(shape, dtype=np.float32)
 
@@ -440,6 +448,7 @@ class MultiresSensorObservationState(SensorObservationState):
 
     def physical_evidence_sha256(self) -> str:
         """Hash sorted sparse tile identities and their observed layer bytes."""
+        self.materialize_all_observation_ages()
         digest = sha256()
         layer_names = (
             "elevation_m",
@@ -462,6 +471,102 @@ class MultiresSensorObservationState(SensorObservationState):
                     )
                 digest.update(values.tobytes(order="C"))
         return digest.hexdigest()
+
+    def physical_evidence_identity_sha256(self) -> str:
+        """Return the ordered sensor-event chain used by rolling continuations."""
+        return self._physical_evidence_identity.hex()
+
+    def materialize_all_observation_ages(self) -> None:
+        """Apply deferred elapsed intervals before a full-state boundary."""
+        self._materialize_observation_ages_for_tiles(
+            tuple(sorted(self._detail_tiles))
+        )
+
+    def _materialize_observation_ages_for_tiles(
+        self,
+        identities: tuple[tuple[int, int], ...],
+    ) -> None:
+        ledger_end = len(self._observation_age_ledger)
+        if ledger_end == 0:
+            return
+        for identity in identities:
+            tile = self._detail_tiles.get(identity)
+            if tile is None:
+                continue
+            cursor = self._detail_tile_age_cursors.get(identity, 0)
+            if not 0 <= cursor <= ledger_end:
+                raise RuntimeError("detail tile age cursor is invalid")
+            if cursor < ledger_end:
+                self._materialize_detail_tile_ages(
+                    tile,
+                    self._observation_age_ledger[cursor:ledger_end],
+                )
+                self._detail_tile_age_cursors[identity] = ledger_end
+        if all(
+            self._detail_tile_age_cursors.get(identity, 0) >= ledger_end
+            for identity in self._detail_tiles
+        ):
+            self._observation_age_ledger = []
+            self._detail_tile_age_cursors = {
+                identity: 0 for identity in self._detail_tiles
+            }
+
+    def _materialize_observation_ages_for_window(
+        self,
+        start_row: int,
+        start_column: int,
+        cells: int,
+    ) -> None:
+        self._materialize_observation_ages_for_tiles(
+            tuple(
+                sorted(
+                    {
+                        (tile_row, tile_column)
+                        for tile_row, tile_column, _, _ in self._window_slices(
+                            start_row, start_column, cells
+                        )
+                    }
+                )
+            )
+        )
+
+    def _advance_ground_evidence_identity(
+        self,
+        prepared: _PreparedDetailObservation,
+        *,
+        elapsed_s: float,
+    ) -> None:
+        digest = sha256()
+        digest.update(self._physical_evidence_identity)
+        digest.update(
+            struct.pack(
+                "<Qdii",
+                self._evidence_generation,
+                elapsed_s,
+                prepared.start_row,
+                prepared.start_column,
+            )
+        )
+        digest.update(sha256(prepared.visible.tobytes(order="C")).digest())
+        self._physical_evidence_identity = digest.digest()
+
+    def _advance_hopper_evidence_identity(
+        self,
+        patch: HopperTrajectoryObservationPatch,
+        *,
+        elapsed_s: float,
+    ) -> None:
+        digest = sha256()
+        digest.update(self._physical_evidence_identity)
+        digest.update(struct.pack("<Qd", self._evidence_generation, elapsed_s))
+        digest.update(bytes.fromhex(patch.trajectory_sha256))
+        self._physical_evidence_identity = digest.digest()
+
+    def consume_dirty_coarse_cell_ids(self) -> tuple[int, ...]:
+        """Return and clear source-grid cells changed since the last map patch."""
+        dirty = tuple(sorted(self._dirty_coarse_cell_ids))
+        self._dirty_coarse_cell_ids.clear()
+        return dirty
 
     def observed_coverable_mask_sha256(self) -> str:
         """Hash the exact row-major 0.2 m cells counted by coverage."""
@@ -679,6 +784,7 @@ class MultiresSensorObservationState(SensorObservationState):
         ):
             raise ValueError("hopper trajectory elapsed time is invalid")
         elapsed = float(elapsed_s)
+        self.materialize_all_observation_ages()
         next_tiles = {
             identity: tile.copy() for identity, tile in self._detail_tiles.items()
         }
@@ -896,6 +1002,11 @@ class MultiresSensorObservationState(SensorObservationState):
         if self.priority_detail_bits is not None:
             self.observed_priority_detail_cell_count = next_priority_count
         self._evidence_generation += 1
+        self._advance_hopper_evidence_identity(patch, elapsed_s=elapsed)
+        self._dirty_coarse_cell_ids.update(
+            row * self.scene.base_canvas.geometry.cells + column
+            for row, column in affected_coarse
+        )
         return ObservationDelta(
             visible_cells=visible_cells,
             newly_observed_cells=int(global_rows.size),
@@ -920,6 +1031,10 @@ class MultiresSensorObservationState(SensorObservationState):
                 self.observed_priority_detail_cell_count
             ),
             evidence_generation=self._evidence_generation,
+            observation_age_ledger=self._observation_age_ledger,
+            detail_tile_age_cursors=self._detail_tile_age_cursors,
+            physical_evidence_identity=self._physical_evidence_identity,
+            dirty_coarse_cell_ids=self._dirty_coarse_cell_ids,
         )
 
     def _restore_hopper_observation_rollback_state(
@@ -942,6 +1057,10 @@ class MultiresSensorObservationState(SensorObservationState):
             state.observed_priority_detail_cell_count
         )
         self._evidence_generation = state.evidence_generation
+        self._observation_age_ledger = state.observation_age_ledger
+        self._detail_tile_age_cursors = state.detail_tile_age_cursors
+        self._physical_evidence_identity = state.physical_evidence_identity
+        self._dirty_coarse_cell_ids = state.dirty_coarse_cell_ids
 
     def _coarse_update_from_tiles(
         self,
@@ -1295,45 +1414,22 @@ class MultiresSensorObservationState(SensorObservationState):
         elapsed_steps_s: tuple[float, ...],
     ) -> ObservationDelta:
         """Preserve authoritative detail updates for one exact 0.2 m cell."""
-        if (
-            not isinstance(elapsed_steps_s, tuple)
-            or not elapsed_steps_s
-            or any(
-                not isinstance(elapsed_s, (int, float))
-                or isinstance(elapsed_s, bool)
-                or not math.isfinite(float(elapsed_s))
-                or elapsed_s < 0.0
-                for elapsed_s in elapsed_steps_s
-            )
-        ):
-            raise ValueError("observation elapsed time is invalid")
-        prepared = self._prepare_detail_observation(pose)
-        deltas = tuple(
-            self._apply_prepared_detail_observation(
-                prepared,
-                elapsed_s=float(elapsed_s),
-                update_coarse=index == len(elapsed_steps_s) - 1,
-            )
-            for index, elapsed_s in enumerate(elapsed_steps_s)
-        )
-        return ObservationDelta(
-            visible_cells=sum(delta.visible_cells for delta in deltas),
-            newly_observed_cells=sum(
-                delta.newly_observed_cells for delta in deltas
-            ),
-            mission_observed_delta_m2=sum(
-                delta.mission_observed_delta_m2 for delta in deltas
-            ),
-            priority_observed_delta_m2=sum(
-                delta.priority_observed_delta_m2 for delta in deltas
-            ),
+        return self.observe_ground_trajectory(
+            tuple((pose, elapsed_s) for elapsed_s in elapsed_steps_s)
         )
 
     def observe_world_path(
         self,
         samples: tuple[tuple[Pose2, float], ...],
     ) -> ObservationDelta:
-        """Atomically apply one path while sharing same-cell visibility."""
+        """Compatibility forwarding for the atomic ground trajectory API."""
+        return self.observe_ground_trajectory(samples)
+
+    def observe_ground_trajectory(
+        self,
+        samples: tuple[tuple[Pose2, float], ...],
+    ) -> ObservationDelta:
+        """Atomically apply ordered ground samples with one visibility batch."""
         if (
             not isinstance(samples, tuple)
             or not samples
@@ -1351,30 +1447,19 @@ class MultiresSensorObservationState(SensorObservationState):
         ):
             raise ValueError("ground observation path is invalid")
         cells = tuple(self.observation_cell_world(pose) for pose, _ in samples)
-        prepared_groups: list[
-            tuple[_PreparedDetailObservation, tuple[float, ...]]
-        ] = []
-        group_start = 0
-        while group_start < len(samples):
-            group_end = group_start + 1
-            while group_end < len(samples) and cells[group_end] == cells[group_start]:
-                group_end += 1
-            prepared_groups.append(
-                (
-                    self._prepare_detail_observation(samples[group_start][0]),
-                    tuple(
-                        float(elapsed_s)
-                        for _, elapsed_s in samples[group_start:group_end]
-                    ),
-                )
-            )
-            group_start = group_end
+        first_pose_by_cell: dict[tuple[int, int], Pose2] = {}
+        for cell, (pose, _) in zip(cells, samples, strict=True):
+            first_pose_by_cell.setdefault(cell, pose)
+        prepared_by_cell = self._prepare_ground_trajectory_observations(
+            tuple(first_pose_by_cell.items())
+        )
+        prepared_events = tuple(
+            (prepared_by_cell[cell], float(elapsed_s))
+            for cell, (_, elapsed_s) in zip(cells, samples, strict=True)
+        )
 
         rollback = self._capture_hopper_observation_rollback_state()
-        self._detail_tiles = {
-            identity: tile.copy()
-            for identity, tile in self._detail_tiles.items()
-        }
+        self._detail_tiles = self._detail_tiles.copy()
         self.observed = self.observed.copy()
         self.coarse_obstacle_height_m = self.coarse_obstacle_height_m.copy()
         self.coarse_forbidden_ratio = self.coarse_forbidden_ratio.copy()
@@ -1384,15 +1469,12 @@ class MultiresSensorObservationState(SensorObservationState):
             else self._observed_coverable_detail_bits.copy()
         )
         deltas: list[ObservationDelta] = []
-        elapsed_ledger: list[float] = []
-        tile_age_cursors = {
-            identity: 0 for identity in self._detail_tiles
-        }
-        prepared_events = tuple(
-            (prepared, elapsed_s)
-            for prepared, elapsed_steps_s in prepared_groups
-            for elapsed_s in elapsed_steps_s
-        )
+        elapsed_ledger = self._observation_age_ledger.copy()
+        tile_age_cursors = self._detail_tile_age_cursors.copy()
+        for identity in self._detail_tiles:
+            tile_age_cursors.setdefault(identity, 0)
+        copied_tile_identities: set[tuple[int, int]] = set()
+        dirty_coarse_cell_ids = self._dirty_coarse_cell_ids.copy()
         event_coarse_cell_ids = tuple(
             self._visible_coarse_cell_ids(prepared)
             for prepared, _ in prepared_events
@@ -1422,17 +1504,19 @@ class MultiresSensorObservationState(SensorObservationState):
                         coarse_cell_ids_to_update=coarse_cell_ids_to_update,
                         elapsed_ledger=elapsed_ledger,
                         tile_age_cursors=tile_age_cursors,
+                        copied_tile_identities=copied_tile_identities,
                     )
                 )
-            for identity, tile in self._detail_tiles.items():
-                self._materialize_detail_tile_ages(
-                    tile,
-                    elapsed_ledger[tile_age_cursors[identity] :],
+                self._advance_ground_evidence_identity(
+                    prepared, elapsed_s=elapsed_s
                 )
-                tile_age_cursors[identity] = len(elapsed_ledger)
+                dirty_coarse_cell_ids.update(coarse_cell_ids_to_update)
         except Exception:
             self._restore_hopper_observation_rollback_state(rollback)
             raise
+        self._observation_age_ledger = elapsed_ledger
+        self._detail_tile_age_cursors = tile_age_cursors
+        self._dirty_coarse_cell_ids = dirty_coarse_cell_ids
         return ObservationDelta(
             visible_cells=sum(delta.visible_cells for delta in deltas),
             newly_observed_cells=sum(delta.newly_observed_cells for delta in deltas),
@@ -1443,6 +1527,93 @@ class MultiresSensorObservationState(SensorObservationState):
                 delta.priority_observed_delta_m2 for delta in deltas
             ),
         )
+
+    def _prepare_ground_trajectory_observations(
+        self,
+        first_pose_by_cell: tuple[tuple[tuple[int, int], Pose2], ...],
+    ) -> dict[tuple[int, int], _PreparedDetailObservation]:
+        """Prepare exact unique-cell observations through bounded native batches."""
+        if not first_pose_by_cell:
+            raise ValueError("ground trajectory needs at least one pose")
+        window_cells = self.tile_provider.tile_geometry.cells
+        prepared_inputs: list[
+            tuple[tuple[int, int], ProjectedScene, int, int, int, int]
+        ] = []
+        for cell, pose in first_pose_by_cell:
+            if self.observation_cell_world(pose) != cell:
+                raise ValueError("ground trajectory cell differs from pose")
+            start_row, start_column, pose_row, pose_column = self._detail_window(
+                pose, window_cells
+            )
+            prepared_inputs.append(
+                (
+                    cell,
+                    self.tile_provider.compose_window_from_tiles(
+                        start_row, start_column, cells=window_cells
+                    ),
+                    start_row,
+                    start_column,
+                    pose_row,
+                    pose_column,
+                )
+            )
+        revealed_masks: list[np.ndarray | None] = [None] * len(prepared_inputs)
+        reveal_batch = getattr(self.visibility_estimator, "reveal_from_poses", None)
+        if callable(reveal_batch):
+            maximum_batch = 32
+            for batch_start in range(0, len(prepared_inputs), maximum_batch):
+                batch = prepared_inputs[batch_start : batch_start + maximum_batch]
+                truth = np.ascontiguousarray(
+                    np.stack(
+                        [
+                            item[1].physical_obstacle_ratio
+                            for item in batch
+                        ],
+                        axis=0,
+                    ),
+                    dtype=np.float32,
+                )
+                pose_cells = np.ascontiguousarray(
+                    [(item[4], item[5]) for item in batch], dtype=np.int32
+                )
+                revealed = reveal_batch(truth, pose_cells)
+                if (
+                    not isinstance(revealed, np.ndarray)
+                    or revealed.dtype != np.dtype(np.bool_)
+                    or revealed.shape != truth.shape
+                    or not revealed.flags.c_contiguous
+                ):
+                    raise RuntimeError("sensor batch reveal result is invalid")
+                for offset in range(len(batch)):
+                    revealed_masks[batch_start + offset] = revealed[offset]
+        else:
+            for index, (_, truth, _, _, pose_row, pose_column) in enumerate(
+                prepared_inputs
+            ):
+                revealed = self.visibility_estimator.reveal_from_pose(
+                    truth.physical_obstacle_ratio,
+                    (pose_row, pose_column),
+                )
+                if (
+                    not isinstance(revealed, np.ndarray)
+                    or revealed.dtype != np.dtype(np.bool_)
+                    or revealed.shape != truth.valid_mask.shape
+                ):
+                    raise RuntimeError("sensor reveal result is invalid")
+                revealed_masks[index] = revealed
+        result: dict[tuple[int, int], _PreparedDetailObservation] = {}
+        for (cell, truth, start_row, start_column, _, _), revealed in zip(
+            prepared_inputs, revealed_masks, strict=True
+        ):
+            if revealed is None:
+                raise RuntimeError("sensor batch reveal result is missing")
+            result[cell] = _PreparedDetailObservation(
+                truth=truth,
+                visible=np.ascontiguousarray(revealed & truth.valid_mask),
+                start_row=start_row,
+                start_column=start_column,
+            )
+        return result
 
     def _visible_coarse_cell_ids(
         self,
@@ -1494,6 +1665,7 @@ class MultiresSensorObservationState(SensorObservationState):
         coarse_cell_ids_to_update: frozenset[int],
         elapsed_ledger: list[float],
         tile_age_cursors: dict[tuple[int, int], int],
+        copied_tile_identities: set[tuple[int, int]],
     ) -> ObservationDelta:
         """Apply one event while deferring age work for remote sparse tiles."""
         window_cells = self.tile_provider.tile_geometry.cells
@@ -1513,6 +1685,10 @@ class MultiresSensorObservationState(SensorObservationState):
             if tile is None:
                 tile_age_cursors[identity] = prior_elapsed_end
                 continue
+            if identity not in copied_tile_identities:
+                tile = tile.copy()
+                all_tiles[identity] = tile
+                copied_tile_identities.add(identity)
             self._materialize_detail_tile_ages(
                 tile,
                 elapsed_ledger[
@@ -1547,22 +1723,11 @@ class MultiresSensorObservationState(SensorObservationState):
         for identity in active_identities:
             if identity in all_tiles:
                 tile_age_cursors[identity] = len(elapsed_ledger)
+                copied_tile_identities.add(identity)
         return delta
 
     def observe_world(self, pose: Pose2, *, elapsed_s: float) -> ObservationDelta:
-        if not isinstance(pose, Pose2) or pose.frame_id != "map":
-            raise ValueError("observation pose must be a map-frame Pose2")
-        if (
-            not isinstance(elapsed_s, (int, float))
-            or isinstance(elapsed_s, bool)
-            or not math.isfinite(float(elapsed_s))
-            or elapsed_s < 0.0
-        ):
-            raise ValueError("observation elapsed time is invalid")
-        return self._apply_prepared_detail_observation(
-            self._prepare_detail_observation(pose),
-            elapsed_s=float(elapsed_s),
-        )
+        return self.observe_ground_trajectory(((pose, elapsed_s),))
 
     def _prepare_detail_observation(
         self, pose: Pose2
@@ -2111,6 +2276,9 @@ class MultiresSensorObservationState(SensorObservationState):
         """Return the observed-only 64 m map consumed by C++ local planning."""
         cells = self.tile_provider.tile_geometry.cells
         start_row, start_column, _, _ = self._detail_window(pose, cells)
+        self._materialize_observation_ages_for_window(
+            start_row, start_column, cells
+        )
         shape = (cells, cells)
         float_names = (
             "elevation_m",
@@ -2138,7 +2306,7 @@ class MultiresSensorObservationState(SensorObservationState):
             destination_count = count[window_slice]
             source_count = tile.observation_count[tile_slice]
             destination_count[local_valid] = source_count[local_valid]
-        truth_window = self.tile_provider.read_window(
+        truth_window = self.tile_provider.compose_window_from_tiles(
             start_row, start_column, cells=cells
         )
         return DetailObservedWindow(

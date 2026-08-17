@@ -419,6 +419,51 @@ def test_ground_boundary_uses_one_atomic_path_observation(
     ]
 
 
+def test_ground_boundary_prefers_ground_trajectory_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, canvas = _controller("WHEELED")
+    controller.reset(_pose(canvas, 5, 2))
+    samples = tuple(
+        SensorPathSample(_pose(canvas, 5, column), 0.25)
+        for column in (3, 4, 5, 6)
+    )
+    received: list[tuple[tuple[Pose2, float], ...]] = []
+
+    def observe_ground_trajectory(
+        path: tuple[tuple[Pose2, float], ...],
+    ) -> ObservationDelta:
+        received.append(path)
+        return ObservationDelta(0, 0, 0.0, 0.0)
+
+    monkeypatch.setattr(
+        controller.sensor_state,
+        "observe_world_path",
+        None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        controller.sensor_state,
+        "observe_ground_trajectory",
+        observe_ground_trajectory,
+        raising=False,
+    )
+
+    controller.after_execution(
+        platform_type="WHEELED",
+        execution_state="DECISION_BOUNDARY",
+        evidence=SensorBoundaryEvidence(
+            samples[-1].pose_map,
+            1.0,
+            path_samples=samples,
+        ),
+    )
+
+    assert received == [
+        tuple((sample.pose_map, sample.elapsed_s) for sample in samples)
+    ]
+
+
 def test_sensor_path_evidence_requires_exact_endpoint_and_elapsed_sum() -> None:
     _, _, canvas = _controller("WHEELED")
 

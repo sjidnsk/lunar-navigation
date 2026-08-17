@@ -77,6 +77,28 @@ TEST(VisibilityKernel, RevealsFirstPositiveObstacleButNotCellsBehindIt) {
   EXPECT_EQ(visible[Index(shape, 3, 6)], 0U);
 }
 
+TEST(VisibilityKernel, RevealsBatchExactlyAsOrderedSinglePoses) {
+  const VisibilityKernel kernel{1.0, 3.0};
+  constexpr GridShape shape{.height = 7U, .width = 7U};
+  const std::size_t cell_count = shape.height * shape.width;
+  std::vector<float> truths(cell_count * 3U, 0.0F);
+  truths[cell_count + Index(shape, 3, 5)] = 0.001F;
+  truths[cell_count * 2U + Index(shape, 0, 1)] = 0.001F;
+  const std::vector<GridCell> poses{{3, 3}, {3, 3}, {0, 0}};
+
+  const auto batched = kernel.RevealFromPoses(shape, poses, truths);
+
+  ASSERT_EQ(batched.size(), truths.size());
+  for (std::size_t index = 0U; index < poses.size(); ++index) {
+    const auto single = kernel.RevealFromPose(
+        shape, poses[index],
+        std::span<const float>{truths}.subspan(index * cell_count,
+                                               cell_count));
+    EXPECT_TRUE(std::equal(single.begin(), single.end(),
+                           batched.begin() + index * cell_count));
+  }
+}
+
 TEST(VisibilityKernel, ForbiddenValuesCannotAffectReveal) {
   const VisibilityKernel kernel{1.0, 3.0};
   constexpr GridShape shape{.height = 7U, .width = 7U};

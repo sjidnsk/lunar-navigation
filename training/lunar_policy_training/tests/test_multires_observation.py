@@ -462,6 +462,67 @@ def test_ground_path_batch_preserves_sequential_authoritative_updates() -> None:
     )
 
 
+def test_ground_trajectory_deduplicates_nonconsecutive_poses_in_one_native_batch() -> None:
+    sequential, _ = _state()
+    batched, _ = _state()
+    poses = (
+        Pose2(512.0, 512.0, elevation_m=7.0),
+        Pose2(513.0, 512.0, elevation_m=7.0),
+        Pose2(512.0, 512.0, elevation_m=7.0),
+        Pose2(514.0, 512.0, elevation_m=7.0),
+    )
+    elapsed_steps_s = (0.0, 0.25, 0.5, 1.0)
+    delegate = batched.visibility_estimator
+    batch_sizes: list[int] = []
+
+    class BatchCountingDetailEstimator:
+        sensor = delegate.sensor
+        resolution_m = delegate.resolution_m
+
+        @staticmethod
+        def reveal_from_pose(*args, **kwargs) -> np.ndarray:
+            del args, kwargs
+            raise AssertionError("trajectory must use the native batch reveal")
+
+        @staticmethod
+        def reveal_from_poses(
+            truth_obstacle_ratios: np.ndarray,
+            pose_cells: np.ndarray,
+        ) -> np.ndarray:
+            batch_sizes.append(int(truth_obstacle_ratios.shape[0]))
+            return delegate.reveal_from_poses(
+                truth_obstacle_ratios,
+                pose_cells,
+            )
+
+    batched.visibility_estimator = BatchCountingDetailEstimator()
+    path = tuple(zip(poses, elapsed_steps_s, strict=True))
+    sequential_deltas = tuple(
+        sequential.observe_world(pose, elapsed_s=elapsed_s)
+        for pose, elapsed_s in path
+    )
+
+    batch_delta = batched.observe_ground_trajectory(path)
+
+    assert batch_sizes == [3]
+    assert batched.evidence_generation == len(path)
+    assert _authoritative_observation_bytes(batched) == (
+        _authoritative_observation_bytes(sequential)
+    )
+    assert batch_delta == type(batch_delta)(
+        visible_cells=sum(delta.visible_cells for delta in sequential_deltas),
+        newly_observed_cells=sum(
+            delta.newly_observed_cells for delta in sequential_deltas
+        ),
+        mission_observed_delta_m2=sum(
+            delta.mission_observed_delta_m2 for delta in sequential_deltas
+        ),
+        priority_observed_delta_m2=sum(
+            delta.priority_observed_delta_m2 for delta in sequential_deltas
+        ),
+    )
+
+
 def test_ground_path_batch_is_atomic_when_later_visibility_fails() -> None:
     state, _ = _state()
     center = Pose2(512.0, 512.0, elevation_m=7.0)
@@ -538,6 +599,69 @@ def test_ground_path_lazy_aging_matches_remote_tile_history() -> None:
         priority_observed_delta_m2=sum(
             delta.priority_observed_delta_m2 for delta in sequential_deltas
         ),
+    )
+
+
+def test_cross_path_age_stays_lazy_until_the_remote_planning_window_reads_it() -> None:
+    eager, _ = _state()
+    lazy, lazy_provider = _state()
+    remote = Pose2(128.0, 128.0, elevation_m=7.0)
+    current = Pose2(512.0, 512.0, elevation_m=7.0)
+
+    def observe_eager(
+        state: MultiresSensorObservationState,
+        pose: Pose2,
+        elapsed_s: float,
+    ) -> None:
+        state._apply_prepared_detail_observation(
+            state._prepare_detail_observation(pose), elapsed_s=elapsed_s
+        )
+
+    observe_eager(eager, remote, 0.0)
+    lazy.observe_ground_trajectory(((remote, 0.0),))
+    remote_row, remote_column = lazy_provider.world_to_detail(
+        remote.x_m, remote.y_m
+    )
+    tile_cells = lazy_provider.tile_geometry.cells
+    remote_identity = remote_row // tile_cells, remote_column // tile_cells
+    before_remote_age = lazy._detail_tiles[remote_identity].observation_age_s.tobytes()
+
+    observe_eager(eager, current, 1.0)
+    lazy.observe_ground_trajectory(((current, 1.0),))
+
+    assert lazy._detail_tiles[remote_identity].observation_age_s.tobytes() == (
+        before_remote_age
+    )
+
+    lazy.planning_observation(remote)
+
+    assert lazy._detail_tiles[remote_identity].observation_age_s.tobytes() != (
+        before_remote_age
+    )
+    assert _authoritative_observation_bytes(lazy) == (
+        _authoritative_observation_bytes(eager)
+    )
+
+
+def test_rolling_evidence_identity_changes_without_materializing_remote_age() -> None:
+    state, provider = _state()
+    remote = Pose2(128.0, 128.0, elevation_m=7.0)
+    current = Pose2(512.0, 512.0, elevation_m=7.0)
+    state.observe_ground_trajectory(((remote, 0.0),))
+    remote_row, remote_column = provider.world_to_detail(
+        remote.x_m, remote.y_m
+    )
+    tile_cells = provider.tile_geometry.cells
+    remote_identity = remote_row // tile_cells, remote_column // tile_cells
+    before_identity = state.physical_evidence_identity_sha256()
+    before_remote_age = state._detail_tiles[remote_identity].observation_age_s.tobytes()
+
+    state.observe_ground_trajectory(((current, 1.0),))
+
+    assert state.physical_evidence_identity_sha256() != before_identity
+    assert state._observation_age_ledger
+    assert state._detail_tiles[remote_identity].observation_age_s.tobytes() == (
+        before_remote_age
     )
 
 

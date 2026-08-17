@@ -701,18 +701,20 @@ class ObservationBoundaryController:
         priority_observed_delta_m2 = 0.0
         sample_deltas: list[ObservationDelta] = []
         if self._platform_type in _GROUND_PLATFORMS:
-            observe_world_path = getattr(
-                self._sensor_state, "observe_world_path", None
+            observe_ground_trajectory = getattr(
+                self._sensor_state, "observe_ground_trajectory", None
             )
-            if callable(observe_world_path):
+            observe_world_path = getattr(self._sensor_state, "observe_world_path", None)
+            path = tuple(
+                (sample.pose_map, float(sample.elapsed_s))
+                for sample in samples
+            )
+            if callable(observe_ground_trajectory):
                 sample_deltas.append(
-                    observe_world_path(
-                        tuple(
-                            (sample.pose_map, float(sample.elapsed_s))
-                            for sample in samples
-                        )
-                    )
+                    observe_ground_trajectory(path)
                 )
+            elif callable(observe_world_path):
+                sample_deltas.append(observe_world_path(path))
             else:
                 group_start = 0
                 while group_start < len(samples):

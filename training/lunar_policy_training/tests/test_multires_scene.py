@@ -328,6 +328,64 @@ def test_detail_window_is_projected_once_without_rebuilding_crossed_tiles(
     np.testing.assert_array_equal(actual.forbidden_ratio, expected.forbidden_ratio)
 
 
+def test_composed_detail_window_reuses_fixed_tiles_and_is_bit_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    geometry = GridGeometry(size_m=16.0, resolution_m=1.0, cells=16)
+    canvas = MapCanvas("1" * 64, (0.0, 0.0, 16.0, 16.0), geometry)
+    vector = generate_vector_hazard_scene(
+        canvas.window_sha256,
+        408010,
+        canvas=canvas,
+        rock_count=4,
+        crater_count=2,
+        no_go_count=1,
+    )
+    scene = MultiResolutionScene(
+        canvas,
+        np.arange(256, dtype=np.float32).reshape(16, 16),
+        np.ones((16, 16), dtype=np.bool_),
+        vector,
+    )
+    provider = SceneTileProvider(
+        scene,
+        tile_geometry=GridGeometry(size_m=8.0, resolution_m=1.0, cells=8),
+        capacity=4,
+    )
+    expected = provider.read_window(4, 4, cells=8)
+    original = MultiResolutionScene.project
+    projected_canvases: list[MapCanvas] = []
+
+    def counted_projection(self, target: MapCanvas):
+        projected_canvases.append(target)
+        return original(self, target)
+
+    monkeypatch.setattr(MultiResolutionScene, "project", counted_projection)
+
+    first = provider.compose_window_from_tiles(4, 4, cells=8)
+    second = provider.compose_window_from_tiles(4, 4, cells=8)
+
+    assert [value.geometry.size_m for value in projected_canvases] == [
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+    ]
+    assert provider.cache_size == 4
+    assert first.canvas.identity == expected.canvas.identity
+    assert second.canvas.identity == expected.canvas.identity
+    for name in (
+        "crater_elevation_delta_m",
+        "physical_obstacle_ratio",
+        "physical_obstacle_height_m",
+        "forbidden_ratio",
+        "elevation_m",
+        "valid_mask",
+    ):
+        np.testing.assert_array_equal(getattr(first, name), getattr(expected, name))
+        np.testing.assert_array_equal(getattr(second, name), getattr(expected, name))
+
+
 def test_visibility_obstacle_window_matches_exact_truth_without_sampling_dem(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -944,6 +944,8 @@ class _PlannerGridProjection:
     valid_columns: np.ndarray
     source_rows: np.ndarray
     source_columns: np.ndarray
+    source_flat_sorted: np.ndarray
+    target_flat_sorted: np.ndarray
 
 
 def _planner_grid_projection(
@@ -981,11 +983,30 @@ def _planner_grid_projection(
             / source.geometry.resolution_m
         ).astype(np.intp)
     )
+    source_flat = np.ascontiguousarray(
+        (
+            source_rows[:, None] * source.geometry.cells
+            + source_columns[None, :]
+        ).reshape(-1),
+        dtype=np.intp,
+    )
+    target_flat = np.ascontiguousarray(
+        (
+            np.flatnonzero(valid_rows)[:, None] * target_cells
+            + np.flatnonzero(valid_columns)[None, :]
+        ).reshape(-1),
+        dtype=np.intp,
+    )
+    order = np.argsort(source_flat, kind="stable")
+    source_flat_sorted = np.ascontiguousarray(source_flat[order], dtype=np.intp)
+    target_flat_sorted = np.ascontiguousarray(target_flat[order], dtype=np.intp)
     for values in (
         valid_rows,
         valid_columns,
         source_rows,
         source_columns,
+        source_flat_sorted,
+        target_flat_sorted,
     ):
         values.flags.writeable = False
     return _PlannerGridProjection(
@@ -996,7 +1017,60 @@ def _planner_grid_projection(
         valid_columns=valid_columns,
         source_rows=source_rows,
         source_columns=source_columns,
+        source_flat_sorted=source_flat_sorted,
+        target_flat_sorted=target_flat_sorted,
     )
+
+
+def _planner_patch_indices_for_source_cells(
+    projection: _PlannerGridProjection,
+    source_flat_indices: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map source cells to all exact north-up planner cells that sample them."""
+    if not isinstance(projection, _PlannerGridProjection):
+        raise TypeError("planner projection is invalid")
+    source = np.asarray(source_flat_indices)
+    if (
+        source.dtype != np.dtype(np.intp)
+        or source.ndim != 1
+        or not source.flags.c_contiguous
+        or source.size == 0
+    ):
+        raise ValueError("planner source patch indices are invalid")
+    if (source < 0).any() or not np.array_equal(source, np.unique(source)):
+        raise ValueError("planner source patch indices must be unique and sorted")
+    starts = np.searchsorted(projection.source_flat_sorted, source, side="left")
+    stops = np.searchsorted(projection.source_flat_sorted, source, side="right")
+    target_chunks = [
+        projection.target_flat_sorted[start:stop]
+        for start, stop in zip(starts.tolist(), stops.tolist(), strict=True)
+        if start != stop
+    ]
+    source_chunks = [
+        np.full(stop - start, value, dtype=np.intp)
+        for value, start, stop in zip(
+            source.tolist(), starts.tolist(), stops.tolist(), strict=True
+        )
+        if start != stop
+    ]
+    if not target_chunks:
+        return (
+            np.empty((0,), dtype=np.intp),
+            np.empty((0,), dtype=np.intp),
+        )
+    target = np.concatenate(target_chunks)
+    source_for_target = np.concatenate(source_chunks)
+    order = np.argsort(target, kind="stable")
+    return (
+        np.ascontiguousarray(target[order], dtype=np.intp),
+        np.ascontiguousarray(source_for_target[order], dtype=np.intp),
+    )
+
+
+def _candidate_boundary_evidence_sha256(sensor_state: object) -> str:
+    """Materialize deferred evidence before forming a candidate identity."""
+    sensor_state.materialize_all_observation_ages()
+    return sensor_state.physical_evidence_sha256()
 
 
 def _project_task_grid_to_planner_level(
@@ -1222,6 +1296,7 @@ class FormalEpisode:
             self.sensor_state.observed.canvas,
             self._planner_global_canvas,
         )
+        self._persistent_planner_global_map: object | None = None
         self._candidate_builder = CandidateBuilderV2(self.sensor_state)
         self._legacy_candidate_builder = CandidateBuilderV2(
             NativeVisibilityEstimator(
@@ -1841,7 +1916,114 @@ class FormalEpisode:
             observation_count=detail.observation_count,
             stamp_ns=stamp_ns,
         )
+        self._persistent_planner_global_map = planner_global_map
+        self.sensor_state.consume_dirty_coarse_cell_ids()
         return global_map, planner_global_map, local_map, detail
+
+    def _rolling_planner_and_local_map(self) -> tuple[object, object]:
+        """Patch only committed coarse evidence before the next local request."""
+        if self._persistent_planner_global_map is None:
+            _, planner_global_map, local_map, _ = self._observed_maps()
+            return planner_global_map, local_map
+        stamp_ns = 1_000_000_000 + self._revision * 1_000_000
+        planner_global_map = self._persistent_planner_global_map
+        self._patch_persistent_planner_global_map(
+            planner_global_map, stamp_ns=stamp_ns
+        )
+        detail = self.sensor_state.planning_observation(self.current_pose)
+        local_map = _grid_map(
+            canvas=detail.canvas,
+            frame_id="odom",
+            elevation_m=detail.elevation_m,
+            valid_mask=detail.valid_mask,
+            physical_obstacle_ratio=detail.physical_obstacle_ratio,
+            physical_obstacle_height_m=detail.physical_obstacle_height_m,
+            forbidden_ratio=detail.forbidden_ratio,
+            observation_age_s=detail.observation_age_s,
+            observation_quality=detail.observation_quality,
+            observation_count=detail.observation_count,
+            stamp_ns=stamp_ns,
+        )
+        return planner_global_map, local_map
+
+    def _patch_persistent_planner_global_map(
+        self,
+        planner_global_map: object,
+        *,
+        stamp_ns: int,
+    ) -> None:
+        dirty = self.sensor_state.consume_dirty_coarse_cell_ids()
+        planner_global_map.stamp.nanoseconds_since_epoch = stamp_ns
+        if not dirty:
+            return
+        source_flat = np.ascontiguousarray(dirty, dtype=np.intp)
+        target_north_flat, source_for_target = (
+            _planner_patch_indices_for_source_cells(
+                self._planner_grid_projection, source_flat
+            )
+        )
+        if target_north_flat.size == 0:
+            return
+        target_cells = self._planner_global_canvas.geometry.cells
+        target_rows = target_north_flat // target_cells
+        target_columns = target_north_flat % target_cells
+        target_south_flat = (
+            (target_cells - 1 - target_rows) * target_cells + target_columns
+        )
+        order = np.argsort(target_south_flat, kind="stable")
+        patch_indices = np.ascontiguousarray(
+            target_south_flat[order], dtype=np.uint32
+        )
+        source_for_target = source_for_target[order]
+        observed = self.sensor_state.observed
+        source_cells = observed.canvas.geometry.cells
+        source_rows = source_for_target // source_cells
+        source_columns = source_for_target % source_cells
+        valid = observed.valid_mask[source_rows, source_columns]
+
+        def sampled(values: np.ndarray, fill_value: object) -> np.ndarray:
+            return np.ascontiguousarray(
+                np.where(
+                    valid,
+                    values[source_rows, source_columns],
+                    fill_value,
+                )
+            )
+
+        layer_values = {
+            "elevation": sampled(observed.elevation_m, np.float32(0.0)).astype(
+                np.float32, copy=False
+            ),
+            "valid_mask": np.ascontiguousarray(valid, dtype=np.uint8),
+            "obstacle": np.ascontiguousarray(
+                (observed.physical_obstacle_ratio[source_rows, source_columns] > 0.0)
+                & valid,
+                dtype=np.uint8,
+            ),
+            "obstacle_height": sampled(
+                self.sensor_state.coarse_obstacle_height_m, np.float32(0.0)
+            ).astype(np.float32, copy=False),
+            "forbidden": np.ascontiguousarray(
+                (self.sensor_state.coarse_forbidden_ratio[
+                    source_rows, source_columns
+                ] > 0.0)
+                & valid,
+                dtype=np.uint8,
+            ),
+            "observation_age_s": sampled(
+                observed.observation_age_s, np.float32(0.0)
+            ).astype(np.float32, copy=False),
+            "observation_quality": sampled(
+                observed.observation_quality, np.float32(0.0)
+            ).astype(np.float32, copy=False),
+            "observation_count": sampled(
+                observed.observation_count, np.uint32(0)
+            ).astype(np.uint32, copy=False),
+        }
+        for name, values in layer_values.items():
+            planner_global_map.patch_layer_flat_indices(
+                name, patch_indices, np.ascontiguousarray(values)
+            )
 
     def _base_request(self, global_map: object, local_map: object) -> object:
         request = bridge_api.TrainingPlanRequest()
@@ -2026,14 +2208,21 @@ class FormalEpisode:
             == snapshot.candidate_universe.physical_snapshot_id
         ):
             return self._reselect_current_candidate_snapshot(pose)
-        global_map, planner_global_map, local_map, _ = self._observed_maps()
         if self._defer_candidate_rebuild:
+            snapshot = self._snapshot
+            if snapshot is None:
+                raise RuntimeError("ground continuation has no prior map snapshot")
+            planner_global_map, local_map = self._rolling_planner_and_local_map()
             return self._build_ground_continuation_observation(
                 pose,
-                global_map=global_map,
+                global_map=snapshot.global_map,
                 planner_global_map=planner_global_map,
                 local_map=local_map,
             )
+        candidate_evidence_sha256 = _candidate_boundary_evidence_sha256(
+            self.sensor_state
+        )
+        global_map, planner_global_map, local_map, _ = self._observed_maps()
         local = self.sensor_state.local_observation(pose)
         world = observed.to_observed_world(local=local)
         projection_request = self._base_request(
@@ -2126,9 +2315,7 @@ class FormalEpisode:
             capability_content_sha256=physical_capability_sha256,
             mission_revision=1,
             evidence_generation=self.sensor_state.evidence_generation,
-            physical_evidence_sha256=(
-                self.sensor_state.physical_evidence_sha256()
-            ),
+            physical_evidence_sha256=candidate_evidence_sha256,
             physical_reachability_algorithm_id=(
                 physical_reachability.physical_reachability_algorithm_id
             ),
@@ -2331,7 +2518,7 @@ class FormalEpisode:
                 pose_map=pose,
                 evidence_generation=self.sensor_state.evidence_generation,
                 physical_evidence_sha256=(
-                    self.sensor_state.physical_evidence_sha256()
+                    self.sensor_state.physical_evidence_identity_sha256()
                 ),
             ),
             ground_start_resample_reason,

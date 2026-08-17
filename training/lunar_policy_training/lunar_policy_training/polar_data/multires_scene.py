@@ -542,6 +542,56 @@ class SceneTileProvider:
             self._window_canvas(start_row, start_column, cells=cells)
         )
 
+    def compose_window_from_tiles(
+        self, start_row: int, start_column: int, *, cells: int
+    ) -> ProjectedScene:
+        """Compose one exact aligned window from cached fixed detail tiles."""
+        canvas = self._window_canvas(start_row, start_column, cells=cells)
+        tile_cells = self.tile_geometry.cells
+        end_row = start_row + cells
+        end_column = start_column + cells
+        field_dtypes = {
+            "crater_elevation_delta_m": np.float32,
+            "physical_obstacle_ratio": np.float32,
+            "physical_obstacle_height_m": np.float32,
+            "forbidden_ratio": np.float32,
+            "elevation_m": np.float32,
+            "valid_mask": np.bool_,
+        }
+        fields = {
+            name: np.empty((cells, cells), dtype=dtype)
+            for name, dtype in field_dtypes.items()
+        }
+        for tile_row in range(
+            start_row // tile_cells, (end_row - 1) // tile_cells + 1
+        ):
+            for tile_column in range(
+                start_column // tile_cells, (end_column - 1) // tile_cells + 1
+            ):
+                tile = self.tile(tile_row, tile_column)
+                tile_start_row = tile_row * tile_cells
+                tile_start_column = tile_column * tile_cells
+                row0 = max(start_row, tile_start_row)
+                row1 = min(end_row, tile_start_row + tile_cells)
+                column0 = max(start_column, tile_start_column)
+                column1 = min(end_column, tile_start_column + tile_cells)
+                target_rows = slice(row0 - start_row, row1 - start_row)
+                target_columns = slice(column0 - start_column, column1 - start_column)
+                tile_rows = slice(row0 - tile_start_row, row1 - tile_start_row)
+                tile_columns = slice(
+                    column0 - tile_start_column,
+                    column1 - tile_start_column,
+                )
+                for name, destination in fields.items():
+                    destination[target_rows, target_columns] = getattr(tile, name)[
+                        tile_rows, tile_columns
+                    ]
+        return ProjectedScene(
+            vector_sha256=self.scene.hazards.vector_sha256,
+            canvas=canvas,
+            **fields,
+        )
+
     def read_visibility_obstacle_window(
         self, start_row: int, start_column: int, *, cells: int
     ) -> np.ndarray:

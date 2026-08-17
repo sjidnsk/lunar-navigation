@@ -360,15 +360,54 @@ std::vector<std::uint8_t> VisibilityKernel::RevealFromPose(
     const GridShape shape, const GridCell pose,
     const std::span<const float> truth_obstacle_ratio) const {
   const std::size_t cell_count = CheckedCellCount(shape);
+  std::vector<std::uint8_t> visible(cell_count, 0U);
+  RevealFromPoseInto(shape, pose, truth_obstacle_ratio, visible);
+  return visible;
+}
+
+std::vector<std::uint8_t> VisibilityKernel::RevealFromPoses(
+    const GridShape shape, const std::span<const GridCell> poses,
+    const std::span<const float> truth_obstacle_ratios) const {
+  const std::size_t cell_count = CheckedCellCount(shape);
+  if (poses.empty()) {
+    if (!truth_obstacle_ratios.empty()) {
+      throw std::invalid_argument(
+          "batched truth obstacle ratio size mismatch");
+    }
+    return {};
+  }
+  if (poses.size() > std::numeric_limits<std::size_t>::max() / cell_count ||
+      truth_obstacle_ratios.size() != poses.size() * cell_count) {
+    throw std::invalid_argument("batched truth obstacle ratio size mismatch");
+  }
+  std::vector<std::uint8_t> visible(truth_obstacle_ratios.size(), 0U);
+  for (std::size_t index = 0U; index < poses.size(); ++index) {
+    RevealFromPoseInto(
+        shape, poses[index],
+        truth_obstacle_ratios.subspan(index * cell_count, cell_count),
+        std::span<std::uint8_t>{visible}.subspan(index * cell_count,
+                                                 cell_count));
+  }
+  return visible;
+}
+
+void VisibilityKernel::RevealFromPoseInto(
+    const GridShape shape, const GridCell pose,
+    const std::span<const float> truth_obstacle_ratio,
+    const std::span<std::uint8_t> visible) const {
+  const std::size_t cell_count = CheckedCellCount(shape);
   ValidateFloatGrid(truth_obstacle_ratio, cell_count, "truth obstacle ratio");
   if (!InBounds(shape, pose)) {
     throw std::out_of_range("visibility pose is outside the grid");
   }
-  std::vector<std::uint8_t> visible(cell_count, 0U);
+  if (visible.size() != cell_count) {
+    throw std::invalid_argument("visibility output size mismatch");
+  }
+  std::ranges::fill(visible, 0U);
   const std::size_t pose_index = Index(shape, pose);
   visible[pose_index] = 1U;
   if (truth_obstacle_ratio[pose_index] > 0.0F) {
-    return visible;
+    return;
   }
   const bool full_disk_in_bounds =
       pose.row >= radius_cells_ && pose.column >= radius_cells_ &&
@@ -401,7 +440,7 @@ std::vector<std::uint8_t> VisibilityKernel::RevealFromPose(
       for (const GridCell cell : endpoint_offsets_) {
         visible[Index(shape, Add(pose, cell))] = 1U;
       }
-      return visible;
+      return;
     }
     for (std::size_t cell_index = 0U; cell_index < endpoint_offsets_.size();
          ++cell_index) {
@@ -417,7 +456,7 @@ std::vector<std::uint8_t> VisibilityKernel::RevealFromPose(
         }
       }
     }
-    return visible;
+    return;
   }
   for (std::size_t ray_index = 0U; ray_index < rays_.size(); ++ray_index) {
     if (!InBounds(shape, Add(pose, endpoint_offsets_[ray_index]))) {
@@ -435,7 +474,6 @@ std::vector<std::uint8_t> VisibilityKernel::RevealFromPose(
       }
     }
   }
-  return visible;
 }
 
 } // namespace lunar::planning::training

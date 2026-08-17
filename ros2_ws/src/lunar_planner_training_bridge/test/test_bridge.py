@@ -213,6 +213,57 @@ def test_visibility_binding_preserves_exact_batch_and_reveal_contract() -> None:
     assert not visible[3, 6]
 
 
+def test_visibility_binding_reveals_batch_exactly_as_ordered_single_poses() -> None:
+    kernel = bridge_api.VisibilityKernel(1.0, 3.0)
+    truth = np.zeros((3, 7, 7), dtype=np.float32)
+    truth[1, 3, 5] = 0.001
+    truth[2, 0, 1] = 0.001
+    poses = np.asarray(((3, 3), (3, 3), (0, 0)), dtype=np.int32)
+
+    batched = kernel.reveal_from_poses(truth, poses)
+
+    assert batched.shape == truth.shape
+    assert batched.dtype == np.bool_
+    assert batched.flags.c_contiguous
+    for index, (row, column) in enumerate(poses):
+        np.testing.assert_array_equal(
+            batched[index],
+            kernel.reveal_from_pose(truth[index], int(row), int(column)),
+        )
+
+
+def test_grid_map_patches_sorted_flat_indices_without_rebuilding_layers() -> None:
+    grid = bridge_api.GridMap()
+    grid.width = 3
+    grid.height = 2
+    grid.layers = {
+        "observation_age_s": bridge_api.GridLayer(
+            np.zeros((6,), dtype=np.float32)
+        ),
+    }
+    indices = np.asarray((1, 5), dtype=np.uint32)
+    values = np.asarray((0.25, 1.5), dtype=np.float32)
+
+    grid.patch_layer_flat_indices("observation_age_s", indices, values)
+
+    np.testing.assert_array_equal(
+        grid.layers["observation_age_s"].values,
+        np.asarray((0.0, 0.25, 0.0, 0.0, 0.0, 1.5), dtype=np.float32),
+    )
+    with pytest.raises(ValueError, match="strictly increasing"):
+        grid.patch_layer_flat_indices(
+            "observation_age_s",
+            np.asarray((1, 1), dtype=np.uint32),
+            values,
+        )
+    with pytest.raises(TypeError, match="float32"):
+        grid.patch_layer_flat_indices(
+            "observation_age_s",
+            indices,
+            values.astype(np.float64),
+        )
+
+
 @pytest.mark.parametrize(
     ("argument", "values", "message"),
     (

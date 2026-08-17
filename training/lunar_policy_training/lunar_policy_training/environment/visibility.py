@@ -57,6 +57,12 @@ class VisibilityEstimator(Protocol):
         pose_cell: tuple[int, int],
     ) -> np.ndarray: ...
 
+    def reveal_from_poses(
+        self,
+        truth_obstacle_ratios: np.ndarray,
+        pose_cells: np.ndarray,
+    ) -> np.ndarray: ...
+
 
 def _require_full_circle(sensor: SensorGeometry) -> None:
     if not sensor.is_full_circle:
@@ -197,6 +203,46 @@ class NativeVisibilityEstimator:
             or not visible.flags.c_contiguous
         ):
             raise RuntimeError("native reveal result is invalid")
+        return visible
+
+    def reveal_from_poses(
+        self,
+        truth_obstacle_ratios: np.ndarray,
+        pose_cells: np.ndarray,
+    ) -> np.ndarray:
+        """Reveal an ordered batch through the same native single-pose kernel."""
+        truth = np.asarray(truth_obstacle_ratios)
+        if truth.dtype != np.dtype(np.float32):
+            raise TypeError("truth obstacle ratios dtype must be float32")
+        if truth.ndim != 3 or min(truth.shape) <= 0:
+            raise ValueError("truth obstacle ratios must be non-empty [N,H,W]")
+        if not truth.flags.c_contiguous:
+            raise ValueError("truth obstacle ratios must be C-contiguous")
+        if not np.isfinite(truth).all() or (truth < 0.0).any():
+            raise ValueError("truth obstacle ratios must be finite and non-negative")
+        poses = np.asarray(pose_cells)
+        if poses.dtype != np.dtype(np.int32):
+            raise TypeError("pose cells dtype must be int32")
+        if (
+            poses.ndim != 2
+            or poses.shape != (truth.shape[0], 2)
+            or not poses.flags.c_contiguous
+        ):
+            raise ValueError("pose cells must be C-contiguous [N,2]")
+        if (
+            (poses[:, 0] < 0).any()
+            or (poses[:, 1] < 0).any()
+            or (poses[:, 0] >= truth.shape[1]).any()
+            or (poses[:, 1] >= truth.shape[2]).any()
+        ):
+            raise ValueError("pose cell is outside the grid")
+        visible = self._kernel.reveal_from_poses(truth, poses)
+        if (
+            visible.shape != truth.shape
+            or visible.dtype != np.dtype(np.bool_)
+            or not visible.flags.c_contiguous
+        ):
+            raise RuntimeError("native batch reveal result is invalid")
         return visible
 
 

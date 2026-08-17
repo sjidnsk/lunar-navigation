@@ -58,3 +58,26 @@ def test_slow_visibility_reference_requires_explicit_test_only_opt_in() -> None:
             SensorGeometry(30.0, 2.0 * np.pi),
             resolution_m=0.2,
         )
+
+
+def test_native_visibility_batch_matches_ordered_single_pose_results() -> None:
+    native = NativeVisibilityEstimator(
+        SensorGeometry(4.0, 2.0 * np.pi), resolution_m=1.0
+    )
+    truth = np.zeros((3, 9, 9), dtype=np.float32)
+    truth[1, 4, 6] = np.float32(0.001)
+    truth[2, 1, 2] = np.float32(0.001)
+    poses = np.asarray(((4, 4), (4, 4), (1, 1)), dtype=np.int32)
+
+    revealed = native.reveal_from_poses(truth, poses)
+
+    assert revealed.shape == truth.shape
+    assert revealed.dtype == np.bool_
+    assert revealed.flags.c_contiguous
+    for index, (row, column) in enumerate(poses):
+        np.testing.assert_array_equal(
+            revealed[index],
+            native.reveal_from_pose(
+                truth[index], (int(row), int(column))
+            ),
+        )

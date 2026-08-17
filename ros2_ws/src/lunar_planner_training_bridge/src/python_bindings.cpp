@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -209,6 +210,62 @@ template <typename Value>
       layer.values);
 }
 
+void PatchGridMapLayerFlatIndices(planning::GridMap &map,
+                                  const std::string &name,
+                                  const py::array &indices,
+                                  const py::array &values) {
+  RequireExactArray(indices, py::dtype::of<std::uint32_t>(), 1,
+                    "grid layer flat indices", "uint32");
+  if ((values.flags() & py::array::c_style) == 0) {
+    throw py::value_error("grid layer patch values must be C-contiguous");
+  }
+  if (values.ndim() != 1) {
+    throw py::value_error("grid layer patch values must be one-dimensional");
+  }
+  if (indices.size() != values.size()) {
+    throw py::value_error("grid layer patch index/value size mismatch");
+  }
+  if (map.CellCount() == 0U || !map.HasConsistentLayerSizes()) {
+    throw py::value_error("grid map layer geometry is invalid");
+  }
+  const auto layer = map.layers.find(name);
+  if (layer == map.layers.end()) {
+    throw py::value_error("grid map patch layer is missing");
+  }
+  const auto *flat_indices =
+      static_cast<const std::uint32_t *>(indices.data());
+  if (!std::is_sorted(flat_indices, flat_indices + indices.size()) ||
+      std::adjacent_find(flat_indices, flat_indices + indices.size()) !=
+          flat_indices + indices.size()) {
+    throw py::value_error(
+        "grid layer patch indices must be strictly increasing");
+  }
+  if (std::any_of(flat_indices, flat_indices + indices.size(),
+                  [&map](const std::uint32_t index) {
+                    return static_cast<std::size_t>(index) >= map.CellCount();
+                  })) {
+    throw py::value_error("grid layer patch index lies outside the grid");
+  }
+  std::visit(
+      [&values, flat_indices](auto &target) {
+        using Value = typename std::decay_t<decltype(target)>::value_type;
+        if (!values.dtype().is(py::dtype::of<Value>())) {
+          if constexpr (std::is_same_v<Value, float>) {
+            throw py::type_error("grid layer patch values dtype must be float32");
+          } else if constexpr (std::is_same_v<Value, std::uint8_t>) {
+            throw py::type_error("grid layer patch values dtype must be uint8");
+          } else {
+            throw py::type_error("grid layer patch values dtype must be uint32");
+          }
+        }
+        const auto *patch = static_cast<const Value *>(values.data());
+        for (py::ssize_t index = 0; index < values.size(); ++index) {
+          target[flat_indices[index]] = patch[index];
+        }
+      },
+      layer->second.values);
+}
+
 [[nodiscard]] std::string PlatformTypeName(
     const planning::PlatformType platform_type) {
   switch (platform_type) {
@@ -295,6 +352,8 @@ void BindWorld(py::module_ &module) {
       .def_readwrite("resolution_m", &planning::GridMap::resolution_m)
       .def_readwrite("origin_m", &planning::GridMap::origin_m)
       .def_readwrite("layers", &planning::GridMap::layers)
+      .def("patch_layer_flat_indices", &PatchGridMapLayerFlatIndices,
+           py::arg("name"), py::arg("flat_indices"), py::arg("values"))
       .def_property_readonly("cell_count", &planning::GridMap::CellCount);
   py::class_<planning::RigidTransform>(module, "RigidTransform")
       .def(py::init<>())
@@ -1762,7 +1821,72 @@ void BindVisibility(py::module_ &module) {
             return result;
           },
           py::arg("truth_obstacle_ratio"), py::arg("pose_row"),
-          py::arg("pose_column"));
+          py::arg("pose_column"))
+      .def(
+          "reveal_from_poses",
+          [](const training::VisibilityKernel &self,
+             const py::array &truth_obstacle_ratios,
+             const py::array &pose_cells) {
+            RequireExactArray(truth_obstacle_ratios,
+                              py::dtype::of<float>(), 3,
+                              "truth obstacle ratios", "float32");
+            RequireExactArray(pose_cells,
+                              py::dtype::of<std::int32_t>(), 2,
+                              "pose cells", "int32");
+            if (truth_obstacle_ratios.shape(0) <= 0 ||
+                truth_obstacle_ratios.shape(1) <= 0 ||
+                truth_obstacle_ratios.shape(2) <= 0) {
+              throw py::value_error(
+                  "truth obstacle ratios must be a non-empty [N,H,W] grid");
+            }
+            if (pose_cells.shape(1) != 2 ||
+                pose_cells.shape(0) != truth_obstacle_ratios.shape(0)) {
+              throw py::value_error("pose cells must have shape [N,2]");
+            }
+            RequireFiniteFloatArray(truth_obstacle_ratios,
+                                    "truth obstacle ratios");
+            const training::GridShape shape{
+                .height = static_cast<std::size_t>(
+                    truth_obstacle_ratios.shape(1)),
+                .width = static_cast<std::size_t>(
+                    truth_obstacle_ratios.shape(2)),
+            };
+            const auto *pose_data =
+                static_cast<const std::int32_t *>(pose_cells.data());
+            std::vector<training::GridCell> poses;
+            poses.reserve(static_cast<std::size_t>(pose_cells.shape(0)));
+            for (py::ssize_t index = 0; index < pose_cells.shape(0);
+                 ++index) {
+              const training::GridCell pose{
+                  .row = pose_data[index * 2],
+                  .column = pose_data[index * 2 + 1],
+              };
+              if (pose.row < 0 || pose.column < 0 ||
+                  static_cast<std::size_t>(pose.row) >= shape.height ||
+                  static_cast<std::size_t>(pose.column) >= shape.width) {
+                throw py::value_error("visibility pose is outside the grid");
+              }
+              poses.push_back(pose);
+            }
+            std::vector<std::uint8_t> visible;
+            {
+              py::gil_scoped_release release;
+              visible = self.RevealFromPoses(
+                  shape, poses,
+                  std::span<const float>{
+                      static_cast<const float *>(truth_obstacle_ratios.data()),
+                      static_cast<std::size_t>(
+                          truth_obstacle_ratios.size())});
+            }
+            py::array_t<bool> result(py::array::ShapeContainer{
+                truth_obstacle_ratios.shape(0), truth_obstacle_ratios.shape(1),
+                truth_obstacle_ratios.shape(2)});
+            std::transform(visible.begin(), visible.end(),
+                           result.mutable_data(),
+                           [](const auto value) { return value != 0U; });
+            return result;
+          },
+          py::arg("truth_obstacle_ratios"), py::arg("pose_cells"));
 }
 
 void BindRequest(py::module_ &module) {
