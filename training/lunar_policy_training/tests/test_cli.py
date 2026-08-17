@@ -61,6 +61,7 @@ from lunar_policy_training.config import (
 from lunar_policy_training.checkpoint import PolicyWarmStartEvidence, RunIdentity
 from lunar_policy_training.curriculum import CurriculumSchedule
 from lunar_policy_training.polar_data.formal_cache import FormalCacheIdentity
+from lunar_policy_training.polar_data.task_cache import TaskCommonKey
 from lunar_policy_training.evaluation.release_gate import (
     GateResult,
     evaluate_release_gate,
@@ -124,6 +125,60 @@ def test_resume_task_keys_keep_first_source_namespace_after_same_step_repairs() 
     assert cli_module._resume_task_key_source_commit(manifest, checkpoint) == (
         "e" * 40
     )
+
+
+def test_resume_task_keys_read_persisted_task_namespace_after_later_repairs(
+    tmp_path: pathlib.Path,
+) -> None:
+    persisted_source = "a" * 40
+    common_key = TaskCommonKey(
+        scene_id="1" * 64,
+        scenario_identity_sha256="2" * 64,
+        source_identity_sha256="3" * 64,
+        coarse_bounds_half_open=(0, 25, 0, 25),
+        detail_bounds_half_open=(0, 500, 0, 500),
+        task_span_cells=25,
+        scale_bucket="100_200",
+        geometry_sha256="4" * 64,
+        halo_contract_sha256="5" * 64,
+        capability_bundle_sha256="6" * 64,
+        generator_sha256="7" * 64,
+        source_commit=persisted_source,
+    )
+    artifact = tmp_path / "tasks" / "v1" / "common" / common_key.sha256()
+    artifact.mkdir(parents=True)
+    (artifact / "manifest.json").write_text(
+        json.dumps(
+            {
+                "key_sha256": common_key.sha256(),
+                "key": common_key.to_dict(),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    checkpoint = SimpleNamespace(global_step=71, source_commit="d" * 40)
+    manifest = {
+        "source_migrations": [
+            {
+                "global_step": 71,
+                "from_source_commit": "b" * 40,
+                "to_source_commit": "c" * 40,
+            },
+            {
+                "global_step": 71,
+                "from_source_commit": "c" * 40,
+                "to_source_commit": "d" * 40,
+            },
+        ]
+    }
+
+    assert cli_module._resume_task_key_source_commit(
+        manifest,
+        checkpoint,
+        task_cache_root=tmp_path,
+        task_common_key_sha256s=(common_key.sha256(),),
+    ) == persisted_source
 
 
 @pytest.mark.parametrize(

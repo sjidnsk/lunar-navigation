@@ -3577,10 +3577,15 @@ def main(argv: list[str] | None = None) -> int:
         resume_state = _load_calibrated_run_state(resume_root)
         resume_checkpoint = load_checkpoint(Path(arguments.checkpoint))
         manifest = _read_run_manifest(resume_root / "run-manifest.json")
-        task_key_source_commit = _resume_task_key_source_commit(
-            manifest, resume_checkpoint
-        )
         assert resume_state.cache_manifest_path is not None
+        task_key_source_commit = _resume_task_key_source_commit(
+            manifest,
+            resume_checkpoint,
+            task_cache_root=resume_state.cache_manifest_path.parent,
+            task_common_key_sha256s=_resume_task_common_key_sha256s(
+                resume_checkpoint
+            ),
+        )
         with _open_formal_task_cache_runtime(
             artifact_root=resume_root,
             cache_manifest_path=resume_state.cache_manifest_path,
@@ -3980,10 +3985,84 @@ def _formal_environment_from_calibrated_root(
     return assembly
 
 
+def _resume_task_common_key_sha256s(
+    checkpoint: TrainingCheckpointV6,
+) -> tuple[str, ...]:
+    """Return the strict persisted common-key identities for a formal resume."""
+    environment_state = checkpoint.environment_state
+    if not isinstance(environment_state, Mapping):
+        raise PreflightError("formal resume worker state is invalid")
+    raw_states = environment_state.get("worker_episode_states")
+    if not isinstance(raw_states, list) or not raw_states:
+        raise PreflightError("formal resume worker state is invalid")
+    try:
+        states = tuple(FormalWorkerState.from_dict(value) for value in raw_states)
+    except ValueError as error:
+        raise PreflightError("formal resume worker state is invalid") from error
+    return tuple(state.task_common_key_sha256 for state in states)
+
+
+def _persisted_task_key_source_commit(
+    *,
+    task_cache_root: Path,
+    task_common_key_sha256s: tuple[str, ...],
+) -> str:
+    """Read the immutable source namespace behind restored task common keys."""
+    if not isinstance(task_cache_root, Path):
+        raise PreflightError("formal resume task cache root is invalid")
+    unique_keys = tuple(dict.fromkeys(task_common_key_sha256s))
+    if not unique_keys:
+        raise PreflightError("formal resume task cache keys are missing")
+    source_commits: set[str] = set()
+    for key_sha256 in unique_keys:
+        if (
+            not isinstance(key_sha256, str)
+            or len(key_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in key_sha256)
+        ):
+            raise PreflightError("formal resume task common key is invalid")
+        artifact = task_cache_root / "tasks" / "v1" / "common" / key_sha256
+        manifest_path = artifact / "manifest.json"
+        if artifact.is_symlink() or manifest_path.is_symlink():
+            raise PreflightError("formal resume task common artifact is unsafe")
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise PreflightError(
+                "formal resume task common artifact is missing"
+            ) from error
+        if not isinstance(payload, Mapping):
+            raise PreflightError("formal resume task common artifact is invalid")
+        try:
+            common_key = TaskCommonKey(**payload["key"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise PreflightError("formal resume task common key is invalid") from error
+        if (
+            payload.get("key_sha256") != key_sha256
+            or common_key.sha256() != key_sha256
+        ):
+            raise PreflightError("formal resume task common key differs")
+        source_commits.add(common_key.source_commit)
+    if len(source_commits) != 1:
+        raise PreflightError("formal resume task source namespace differs")
+    return next(iter(source_commits))
+
+
 def _resume_task_key_source_commit(
-    manifest: Mapping[str, object], checkpoint: TrainingCheckpointV6
+    manifest: Mapping[str, object],
+    checkpoint: TrainingCheckpointV6,
+    *,
+    task_cache_root: Path | None = None,
+    task_common_key_sha256s: tuple[str, ...] | None = None,
 ) -> str:
     """Keep persisted task keys stable across source-only checkpoint repairs."""
+    if task_cache_root is not None or task_common_key_sha256s is not None:
+        if task_cache_root is None or task_common_key_sha256s is None:
+            raise PreflightError("formal resume task key evidence is incomplete")
+        return _persisted_task_key_source_commit(
+            task_cache_root=task_cache_root,
+            task_common_key_sha256s=task_common_key_sha256s,
+        )
     migrations = manifest.get("source_migrations", ())
     if isinstance(migrations, list):
         for migration in migrations:
