@@ -404,6 +404,143 @@ def test_same_cell_batch_preserves_multires_authoritative_updates() -> None:
     )
 
 
+def test_ground_path_batch_preserves_sequential_authoritative_updates() -> None:
+    sequential, _ = _state()
+    batched, _ = _state()
+    poses = (
+        Pose2(512.0, 512.0, elevation_m=7.0),
+        Pose2(512.0, 512.0, elevation_m=7.0),
+        Pose2(513.0, 512.0, elevation_m=7.0),
+        Pose2(514.0, 512.0, elevation_m=7.0),
+    )
+    elapsed_steps_s = (0.0, 0.25, 0.5, 1.0)
+    delegate = batched.visibility_estimator
+    reveal_calls = 0
+
+    class CountingDetailEstimator:
+        sensor = delegate.sensor
+        resolution_m = delegate.resolution_m
+
+        @staticmethod
+        def reveal_from_pose(
+            physical_obstacle_ratio: np.ndarray,
+            pose_cell: tuple[int, int],
+        ) -> np.ndarray:
+            nonlocal reveal_calls
+            reveal_calls += 1
+            return delegate.reveal_from_pose(
+                physical_obstacle_ratio,
+                pose_cell,
+            )
+
+    batched.visibility_estimator = CountingDetailEstimator()
+    sequential_deltas = tuple(
+        sequential.observe_world(pose, elapsed_s=elapsed_s)
+        for pose, elapsed_s in zip(poses, elapsed_steps_s, strict=True)
+    )
+
+    batch_delta = batched.observe_world_path(
+        tuple(zip(poses, elapsed_steps_s, strict=True))
+    )
+
+    assert reveal_calls == 3
+    assert batched.evidence_generation == len(poses)
+    assert _authoritative_observation_bytes(batched) == (
+        _authoritative_observation_bytes(sequential)
+    )
+    assert batch_delta == type(batch_delta)(
+        visible_cells=sum(delta.visible_cells for delta in sequential_deltas),
+        newly_observed_cells=sum(
+            delta.newly_observed_cells for delta in sequential_deltas
+        ),
+        mission_observed_delta_m2=sum(
+            delta.mission_observed_delta_m2 for delta in sequential_deltas
+        ),
+        priority_observed_delta_m2=sum(
+            delta.priority_observed_delta_m2 for delta in sequential_deltas
+        ),
+    )
+
+
+def test_ground_path_batch_is_atomic_when_later_visibility_fails() -> None:
+    state, _ = _state()
+    center = Pose2(512.0, 512.0, elevation_m=7.0)
+    state.observe_world(center, elapsed_s=0.0)
+    before = _authoritative_observation_bytes(state)
+    delegate = state.visibility_estimator
+    reveal_calls = 0
+
+    class FailingSecondReveal:
+        sensor = delegate.sensor
+        resolution_m = delegate.resolution_m
+
+        @staticmethod
+        def reveal_from_pose(
+            physical_obstacle_ratio: np.ndarray,
+            pose_cell: tuple[int, int],
+        ) -> np.ndarray:
+            nonlocal reveal_calls
+            reveal_calls += 1
+            if reveal_calls == 2:
+                raise RuntimeError("injected second path reveal failure")
+            return delegate.reveal_from_pose(
+                physical_obstacle_ratio,
+                pose_cell,
+            )
+
+    state.visibility_estimator = FailingSecondReveal()
+
+    with pytest.raises(RuntimeError, match="second path reveal"):
+        state.observe_world_path(
+            (
+                (Pose2(513.0, 512.0, elevation_m=7.0), 0.5),
+                (Pose2(514.0, 512.0, elevation_m=7.0), 1.0),
+            )
+        )
+
+    assert _authoritative_observation_bytes(state) == before
+
+
+def test_ground_path_lazy_aging_matches_remote_tile_history() -> None:
+    sequential, _ = _state()
+    batched, _ = _state()
+    history = (
+        Pose2(128.0, 128.0, elevation_m=7.0),
+        Pose2(512.0, 512.0, elevation_m=7.0),
+        Pose2(896.0, 896.0, elevation_m=7.0),
+    )
+    for state in (sequential, batched):
+        for pose in history:
+            state.observe_world(pose, elapsed_s=0.125)
+    path = (
+        (Pose2(512.0, 512.0, elevation_m=7.0), 0.25),
+        (Pose2(513.0, 512.0, elevation_m=7.0), 0.5),
+        (Pose2(514.0, 513.0, elevation_m=7.0), 0.75),
+    )
+
+    sequential_deltas = tuple(
+        sequential.observe_world(pose, elapsed_s=elapsed_s)
+        for pose, elapsed_s in path
+    )
+    batch_delta = batched.observe_world_path(path)
+
+    assert _authoritative_observation_bytes(batched) == (
+        _authoritative_observation_bytes(sequential)
+    )
+    assert batch_delta == type(batch_delta)(
+        visible_cells=sum(delta.visible_cells for delta in sequential_deltas),
+        newly_observed_cells=sum(
+            delta.newly_observed_cells for delta in sequential_deltas
+        ),
+        mission_observed_delta_m2=sum(
+            delta.mission_observed_delta_m2 for delta in sequential_deltas
+        ),
+        priority_observed_delta_m2=sum(
+            delta.priority_observed_delta_m2 for delta in sequential_deltas
+        ),
+    )
+
+
 def test_failed_observation_does_not_advance_evidence_generation() -> None:
     state, _ = _state()
     before = state.physical_evidence_sha256()

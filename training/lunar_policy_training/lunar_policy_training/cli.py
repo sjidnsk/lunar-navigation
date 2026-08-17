@@ -93,6 +93,7 @@ from .checkpoint import (
     load_policy_warm_start,
     migrate_checkpoint_source_commit,
     restore_training_state,
+    replace_checkpoint_alias_atomic,
     save_checkpoint_atomic,
 )
 from .config import (
@@ -6226,7 +6227,7 @@ def _run_reward_v4_updates(
                     global_step=update_id,
                 )
                 latest.parent.mkdir(parents=True, exist_ok=True)
-                save_checkpoint_atomic(latest, checkpoint, overwrite=True)
+                replace_checkpoint_alias_atomic(latest, checkpoint_path)
                 curriculum = RewardCurriculumState.from_mapping(
                     checkpoint.reward_curriculum_state
                 )

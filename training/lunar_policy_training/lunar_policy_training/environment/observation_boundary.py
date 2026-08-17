@@ -701,24 +701,37 @@ class ObservationBoundaryController:
         priority_observed_delta_m2 = 0.0
         sample_deltas: list[ObservationDelta] = []
         if self._platform_type in _GROUND_PLATFORMS:
-            group_start = 0
-            while group_start < len(samples):
-                group_end = group_start + 1
-                while (
-                    group_end < len(samples)
-                    and sample_cells[group_end] == sample_cells[group_start]
-                ):
-                    group_end += 1
+            observe_world_path = getattr(
+                self._sensor_state, "observe_world_path", None
+            )
+            if callable(observe_world_path):
                 sample_deltas.append(
-                    self._sensor_state.observe_world_repeated(
-                        samples[group_start].pose_map,
-                        elapsed_steps_s=tuple(
-                            float(sample.elapsed_s)
-                            for sample in samples[group_start:group_end]
-                        ),
+                    observe_world_path(
+                        tuple(
+                            (sample.pose_map, float(sample.elapsed_s))
+                            for sample in samples
+                        )
                     )
                 )
-                group_start = group_end
+            else:
+                group_start = 0
+                while group_start < len(samples):
+                    group_end = group_start + 1
+                    while (
+                        group_end < len(samples)
+                        and sample_cells[group_end] == sample_cells[group_start]
+                    ):
+                        group_end += 1
+                    sample_deltas.append(
+                        self._sensor_state.observe_world_repeated(
+                            samples[group_start].pose_map,
+                            elapsed_steps_s=tuple(
+                                float(sample.elapsed_s)
+                                for sample in samples[group_start:group_end]
+                            ),
+                        )
+                    )
+                    group_start = group_end
         else:
             sample_deltas.extend(
                 self._sensor_state.observe_world(

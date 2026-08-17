@@ -935,18 +935,22 @@ def _planner_global_canvas(source: MapCanvas) -> MapCanvas:
     raise ValueError("formal task extent exceeds the planner global hierarchy")
 
 
-def _project_task_grid_to_planner_level(
-    values: np.ndarray,
-    *,
+@dataclass(frozen=True, slots=True)
+class _PlannerGridProjection:
+    source_identity: str
+    target_identity: str
+    target_cells: int
+    valid_rows: np.ndarray
+    valid_columns: np.ndarray
+    source_rows: np.ndarray
+    source_columns: np.ndarray
+
+
+def _planner_grid_projection(
     source: MapCanvas,
     target: MapCanvas,
-    fill_value: object,
-) -> np.ndarray:
-    """Nearest containing-cell projection with any edge padding kept invalid."""
-    array = np.asarray(values)
-    source_cells = source.geometry.cells
-    if array.shape != (source_cells, source_cells):
-        raise ValueError("formal planner source grid geometry differs")
+) -> _PlannerGridProjection:
+    """Build immutable geometry indices shared by all projected layers."""
     target_cells = target.geometry.cells
     left, bottom, right, top = source.bounds_m
     target_left, _, _, target_top = target.bounds_m
@@ -959,21 +963,74 @@ def _project_task_grid_to_planner_level(
         target_top
         - (np.arange(target_cells, dtype=np.float64) + 0.5) * resolution_m
     )
-    valid_columns = (target_columns_m >= left) & (target_columns_m < right)
-    valid_rows = (target_rows_m > bottom) & (target_rows_m <= top)
-    source_columns = np.floor(
-        (target_columns_m[valid_columns] - left) / source.geometry.resolution_m
-    ).astype(np.intp)
-    source_rows = np.floor(
-        (top - target_rows_m[valid_rows]) / source.geometry.resolution_m
-    ).astype(np.intp)
+    valid_columns = np.ascontiguousarray(
+        (target_columns_m >= left) & (target_columns_m < right)
+    )
+    valid_rows = np.ascontiguousarray(
+        (target_rows_m > bottom) & (target_rows_m <= top)
+    )
+    source_columns = np.ascontiguousarray(
+        np.floor(
+            (target_columns_m[valid_columns] - left)
+            / source.geometry.resolution_m
+        ).astype(np.intp)
+    )
+    source_rows = np.ascontiguousarray(
+        np.floor(
+            (top - target_rows_m[valid_rows])
+            / source.geometry.resolution_m
+        ).astype(np.intp)
+    )
+    for values in (
+        valid_rows,
+        valid_columns,
+        source_rows,
+        source_columns,
+    ):
+        values.flags.writeable = False
+    return _PlannerGridProjection(
+        source_identity=source.identity,
+        target_identity=target.identity,
+        target_cells=target_cells,
+        valid_rows=valid_rows,
+        valid_columns=valid_columns,
+        source_rows=source_rows,
+        source_columns=source_columns,
+    )
+
+
+def _project_task_grid_to_planner_level(
+    values: np.ndarray,
+    *,
+    source: MapCanvas,
+    target: MapCanvas,
+    fill_value: object,
+    projection: _PlannerGridProjection | None = None,
+) -> np.ndarray:
+    """Nearest containing-cell projection with any edge padding kept invalid."""
+    array = np.asarray(values)
+    source_cells = source.geometry.cells
+    if array.shape != (source_cells, source_cells):
+        raise ValueError("formal planner source grid geometry differs")
+    fixed = (
+        _planner_grid_projection(source, target)
+        if projection is None
+        else projection
+    )
+    if (
+        not isinstance(fixed, _PlannerGridProjection)
+        or fixed.source_identity != source.identity
+        or fixed.target_identity != target.identity
+        or fixed.target_cells != target.geometry.cells
+    ):
+        raise ValueError("formal planner projection geometry differs")
     output = np.full(
-        (target_cells, target_cells),
+        (fixed.target_cells, fixed.target_cells),
         fill_value,
         dtype=array.dtype,
     )
-    output[np.ix_(valid_rows, valid_columns)] = array[
-        np.ix_(source_rows, source_columns)
+    output[np.ix_(fixed.valid_rows, fixed.valid_columns)] = array[
+        np.ix_(fixed.source_rows, fixed.source_columns)
     ]
     return np.ascontiguousarray(output)
 
@@ -1157,6 +1214,13 @@ class FormalEpisode:
                 self.priority_coverable_detail_cell_count
             ),
             priority_detail_mask_sha256=self.priority_detail_mask_sha256,
+        )
+        self._planner_global_canvas = _planner_global_canvas(
+            self.sensor_state.observed.canvas
+        )
+        self._planner_grid_projection = _planner_grid_projection(
+            self.sensor_state.observed.canvas,
+            self._planner_global_canvas,
         )
         self._candidate_builder = CandidateBuilderV2(self.sensor_state)
         self._legacy_candidate_builder = CandidateBuilderV2(
@@ -1729,7 +1793,7 @@ class FormalEpisode:
             observation_count=observed.observation_count,
             stamp_ns=stamp_ns,
         )
-        planner_canvas = _planner_global_canvas(observed.canvas)
+        planner_canvas = self._planner_global_canvas
 
         def planner_level(values: np.ndarray, fill_value: object) -> np.ndarray:
             return _project_task_grid_to_planner_level(
@@ -1737,6 +1801,7 @@ class FormalEpisode:
                 source=observed.canvas,
                 target=planner_canvas,
                 fill_value=fill_value,
+                projection=self._planner_grid_projection,
             )
 
         planner_global_map = _grid_map(

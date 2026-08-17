@@ -842,6 +842,46 @@ def save_checkpoint_atomic(
         raise CheckpointError("checkpoint file could not be written atomically") from error
 
 
+def replace_checkpoint_alias_atomic(
+    path: str | Path,
+    immutable_checkpoint: str | Path,
+) -> None:
+    """Atomically point a same-directory alias at one persisted checkpoint."""
+    target = _validated_target(path)
+    source = Path(immutable_checkpoint)
+    if (
+        source.is_symlink()
+        or not source.is_file()
+        or source.parent.resolve() != target.parent.resolve()
+        or source.resolve() == target.resolve()
+    ):
+        raise CheckpointError("checkpoint alias source is invalid")
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=target.parent,
+        prefix=f".{target.name}.",
+        suffix=".link",
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        temporary.unlink()
+        os.link(source, temporary)
+        os.replace(temporary, target)
+        directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception as error:
+        if temporary.exists():
+            temporary.unlink()
+        if isinstance(error, CheckpointError):
+            raise
+        raise CheckpointError(
+            "checkpoint alias could not be replaced atomically"
+        ) from error
+
+
 def load_checkpoint(
     path: str | Path, *, run_kind: str | None = None
 ) -> (

@@ -16,7 +16,10 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 sys.path.insert(0, str(REPOSITORY_ROOT / "model_contract"))
 
 import lunar_policy_training.ppo.checkpoint as checkpoint_module  # noqa: E402
-from lunar_policy_training.checkpoint import load_policy_warm_start  # noqa: E402
+from lunar_policy_training.checkpoint import (  # noqa: E402
+    load_policy_warm_start,
+    replace_checkpoint_alias_atomic,
+)
 from lunar_policy_training.policy.cross_attention import (  # noqa: E402
     CrossAttentionPolicy,
 )
@@ -32,6 +35,20 @@ from lunar_policy_training.ppo.checkpoint import (  # noqa: E402
 class UnsafeCheckpointValue:
     def __init__(self) -> None:
         self.value = "must not be constructed by the restricted loader"
+
+
+def test_latest_checkpoint_alias_reuses_immutable_checkpoint_inode(
+    tmp_path: pathlib.Path,
+) -> None:
+    immutable = tmp_path / "update-000059.pt"
+    immutable.write_bytes(b"complete immutable checkpoint")
+    latest = tmp_path / "latest.pt"
+    latest.write_bytes(b"old latest checkpoint")
+
+    replace_checkpoint_alias_atomic(latest, immutable)
+
+    assert latest.read_bytes() == immutable.read_bytes()
+    assert latest.stat().st_ino == immutable.stat().st_ino
 
 
 def test_policy_warm_start_uses_restricted_checkpoint_loader(

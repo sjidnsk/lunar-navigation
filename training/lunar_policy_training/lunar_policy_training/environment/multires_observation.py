@@ -1329,6 +1329,226 @@ class MultiresSensorObservationState(SensorObservationState):
             ),
         )
 
+    def observe_world_path(
+        self,
+        samples: tuple[tuple[Pose2, float], ...],
+    ) -> ObservationDelta:
+        """Atomically apply one path while sharing same-cell visibility."""
+        if (
+            not isinstance(samples, tuple)
+            or not samples
+            or any(
+                not isinstance(sample, tuple)
+                or len(sample) != 2
+                or not isinstance(sample[0], Pose2)
+                or sample[0].frame_id != "map"
+                or not isinstance(sample[1], (int, float))
+                or isinstance(sample[1], bool)
+                or not math.isfinite(float(sample[1]))
+                or float(sample[1]) < 0.0
+                for sample in samples
+            )
+        ):
+            raise ValueError("ground observation path is invalid")
+        cells = tuple(self.observation_cell_world(pose) for pose, _ in samples)
+        prepared_groups: list[
+            tuple[_PreparedDetailObservation, tuple[float, ...]]
+        ] = []
+        group_start = 0
+        while group_start < len(samples):
+            group_end = group_start + 1
+            while group_end < len(samples) and cells[group_end] == cells[group_start]:
+                group_end += 1
+            prepared_groups.append(
+                (
+                    self._prepare_detail_observation(samples[group_start][0]),
+                    tuple(
+                        float(elapsed_s)
+                        for _, elapsed_s in samples[group_start:group_end]
+                    ),
+                )
+            )
+            group_start = group_end
+
+        rollback = self._capture_hopper_observation_rollback_state()
+        self._detail_tiles = {
+            identity: tile.copy()
+            for identity, tile in self._detail_tiles.items()
+        }
+        self.observed = self.observed.copy()
+        self.coarse_obstacle_height_m = self.coarse_obstacle_height_m.copy()
+        self.coarse_forbidden_ratio = self.coarse_forbidden_ratio.copy()
+        self._observed_coverable_detail_bits = (
+            None
+            if self._observed_coverable_detail_bits is None
+            else self._observed_coverable_detail_bits.copy()
+        )
+        deltas: list[ObservationDelta] = []
+        elapsed_ledger: list[float] = []
+        tile_age_cursors = {
+            identity: 0 for identity in self._detail_tiles
+        }
+        prepared_events = tuple(
+            (prepared, elapsed_s)
+            for prepared, elapsed_steps_s in prepared_groups
+            for elapsed_s in elapsed_steps_s
+        )
+        event_coarse_cell_ids = tuple(
+            self._visible_coarse_cell_ids(prepared)
+            for prepared, _ in prepared_events
+        )
+        last_coarse_event = {
+            cell_id: event_index
+            for event_index, cells_at_event in enumerate(
+                event_coarse_cell_ids
+            )
+            for cell_id in cells_at_event
+        }
+        try:
+            for event_index, (prepared, elapsed_s) in enumerate(prepared_events):
+                elapsed_ledger.append(elapsed_s)
+                coarse_cell_ids_to_update = frozenset(
+                    cell_id
+                    for cell_id in event_coarse_cell_ids[event_index]
+                    if last_coarse_event[cell_id] == event_index
+                )
+                deltas.append(
+                    self._apply_prepared_path_observation(
+                        prepared,
+                        elapsed_s=elapsed_s,
+                        affected_coarse_cell_ids=(
+                            event_coarse_cell_ids[event_index]
+                        ),
+                        coarse_cell_ids_to_update=coarse_cell_ids_to_update,
+                        elapsed_ledger=elapsed_ledger,
+                        tile_age_cursors=tile_age_cursors,
+                    )
+                )
+            for identity, tile in self._detail_tiles.items():
+                self._materialize_detail_tile_ages(
+                    tile,
+                    elapsed_ledger[tile_age_cursors[identity] :],
+                )
+                tile_age_cursors[identity] = len(elapsed_ledger)
+        except Exception:
+            self._restore_hopper_observation_rollback_state(rollback)
+            raise
+        return ObservationDelta(
+            visible_cells=sum(delta.visible_cells for delta in deltas),
+            newly_observed_cells=sum(delta.newly_observed_cells for delta in deltas),
+            mission_observed_delta_m2=sum(
+                delta.mission_observed_delta_m2 for delta in deltas
+            ),
+            priority_observed_delta_m2=sum(
+                delta.priority_observed_delta_m2 for delta in deltas
+            ),
+        )
+
+    def _visible_coarse_cell_ids(
+        self,
+        prepared: _PreparedDetailObservation,
+    ) -> tuple[int, ...]:
+        visible_rows, visible_columns = np.nonzero(prepared.visible)
+        axis = self.scene.base_canvas.geometry.cells
+        identities = np.unique(
+            (
+                (prepared.start_row + visible_rows)
+                // _DETAIL_PER_GLOBAL
+            )
+            * axis
+            + (
+                (prepared.start_column + visible_columns)
+                // _DETAIL_PER_GLOBAL
+            )
+        )
+        return tuple(int(value) for value in identities)
+
+    @staticmethod
+    def _materialize_detail_tile_ages(
+        tile: _ObservedDetailTile,
+        elapsed_steps_s: list[float],
+    ) -> None:
+        known = tile.valid_mask
+        if not known.any():
+            return
+        for elapsed_s in elapsed_steps_s:
+            aged = (
+                tile.observation_age_s[known].astype(np.float64)
+                + float(elapsed_s)
+            )
+            if (
+                not np.isfinite(aged).all()
+                or (aged > np.finfo(np.float32).max).any()
+            ):
+                raise ValueError("observation age would overflow")
+            tile.observation_age_s[known] = np.ascontiguousarray(
+                aged, dtype=np.float32
+            )
+
+    def _apply_prepared_path_observation(
+        self,
+        prepared: _PreparedDetailObservation,
+        *,
+        elapsed_s: float,
+        affected_coarse_cell_ids: tuple[int, ...],
+        coarse_cell_ids_to_update: frozenset[int],
+        elapsed_ledger: list[float],
+        tile_age_cursors: dict[tuple[int, int], int],
+    ) -> ObservationDelta:
+        """Apply one event while deferring age work for remote sparse tiles."""
+        window_cells = self.tile_provider.tile_geometry.cells
+        active_identities = {
+            (tile_row, tile_column)
+            for tile_row, tile_column, _, _ in self._window_slices(
+                prepared.start_row,
+                prepared.start_column,
+                window_cells,
+            )
+        }
+        all_tiles = self._detail_tiles
+        active_tiles: dict[tuple[int, int], _ObservedDetailTile] = {}
+        prior_elapsed_end = len(elapsed_ledger) - 1
+        for identity in active_identities:
+            tile = all_tiles.get(identity)
+            if tile is None:
+                tile_age_cursors[identity] = prior_elapsed_end
+                continue
+            self._materialize_detail_tile_ages(
+                tile,
+                elapsed_ledger[
+                    tile_age_cursors[identity] : prior_elapsed_end
+                ],
+            )
+            tile_age_cursors[identity] = prior_elapsed_end
+            active_tiles[identity] = tile
+
+        self._detail_tiles = active_tiles
+        coarse_axis = self.scene.base_canvas.geometry.cells
+        affected_coarse_cells = frozenset(
+            divmod(cell_id, coarse_axis)
+            for cell_id in affected_coarse_cell_ids
+        )
+        coarse_cells_to_update = frozenset(
+            divmod(cell_id, coarse_axis)
+            for cell_id in coarse_cell_ids_to_update
+        )
+        try:
+            delta = self._apply_prepared_detail_observation(
+                prepared,
+                elapsed_s=elapsed_s,
+                update_coarse=bool(coarse_cells_to_update),
+                in_place_transaction=True,
+                coarse_cells_to_update=coarse_cells_to_update,
+                known_affected_coarse_cells=affected_coarse_cells,
+            )
+        finally:
+            all_tiles.update(self._detail_tiles)
+            self._detail_tiles = all_tiles
+        for identity in active_identities:
+            if identity in all_tiles:
+                tile_age_cursors[identity] = len(elapsed_ledger)
+        return delta
+
     def observe_world(self, pose: Pose2, *, elapsed_s: float) -> ObservationDelta:
         if not isinstance(pose, Pose2) or pose.frame_id != "map":
             raise ValueError("observation pose must be a map-frame Pose2")
@@ -1380,6 +1600,9 @@ class MultiresSensorObservationState(SensorObservationState):
         *,
         elapsed_s: float,
         update_coarse: bool = True,
+        in_place_transaction: bool = False,
+        coarse_cells_to_update: frozenset[tuple[int, int]] | None = None,
+        known_affected_coarse_cells: frozenset[tuple[int, int]] | None = None,
     ) -> ObservationDelta:
         elapsed = float(elapsed_s)
         truth = prepared.truth
@@ -1503,18 +1726,34 @@ class MultiresSensorObservationState(SensorObservationState):
         priority_delta = float(
             priority_weighted_count * LOCAL_GEOMETRY.resolution_m**2
         )
-        visible_rows, visible_columns = np.nonzero(visible)
-        affected = set(
-            zip(
-                ((start_row + visible_rows) // _DETAIL_PER_GLOBAL).tolist(),
-                ((start_column + visible_columns) // _DETAIL_PER_GLOBAL).tolist(),
-                strict=True,
+        if known_affected_coarse_cells is None:
+            visible_rows, visible_columns = np.nonzero(visible)
+            affected = set(
+                zip(
+                    (
+                        (start_row + visible_rows) // _DETAIL_PER_GLOBAL
+                    ).tolist(),
+                    (
+                        (start_column + visible_columns)
+                        // _DETAIL_PER_GLOBAL
+                    ).tolist(),
+                    strict=True,
+                )
             )
+        else:
+            affected = set(known_affected_coarse_cells)
+        selected_coarse_cells = (
+            affected
+            if coarse_cells_to_update is None
+            else set(coarse_cells_to_update)
         )
-        coarse_updates = (
-            tuple(
+        if not selected_coarse_cells.issubset(affected):
+            raise ValueError("coarse observation update leaves visible evidence")
+        coarse_updates = ()
+        if update_coarse and not in_place_transaction:
+            coarse_updates = tuple(
                 update
-                for coarse_row, coarse_column in sorted(affected)
+                for coarse_row, coarse_column in sorted(selected_coarse_cells)
                 for update in (
                     self._prospective_coarse_update(
                         coarse_row,
@@ -1528,9 +1767,6 @@ class MultiresSensorObservationState(SensorObservationState):
                 )
                 if update is not None
             )
-            if update_coarse
-            else ()
-        )
         delta = ObservationDelta(
             visible_cells=int(np.count_nonzero(visible)),
             newly_observed_cells=int(new_rows.size),
@@ -1597,6 +1833,19 @@ class MultiresSensorObservationState(SensorObservationState):
                 )
         if self.priority_detail_bits is not None:
             self.observed_priority_detail_cell_count = next_priority_count
+        if update_coarse and in_place_transaction:
+            coarse_updates = tuple(
+                update
+                for coarse_row, coarse_column in sorted(selected_coarse_cells)
+                for update in (
+                    self._coarse_update_from_tiles(
+                        self._detail_tiles,
+                        coarse_row,
+                        coarse_column,
+                    ),
+                )
+                if update is not None
+            )
         for update in coarse_updates:
             cell = update.row, update.column
             self.observed.elevation_m[cell] = update.elevation_m

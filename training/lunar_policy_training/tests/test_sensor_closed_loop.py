@@ -20,6 +20,7 @@ from lunar_policy_training.environment.observation_boundary import (
 )
 from lunar_policy_training.environment.observation_builder import Pose2
 from lunar_policy_training.environment.sensor_observation import (
+    ObservationDelta,
     SensorObservationState,
     TrainingObservedGrid,
     TrainingWorldTruth,
@@ -377,6 +378,45 @@ def test_ground_path_reveals_consecutive_same_cell_samples_once() -> None:
     assert updated.next_observation.observation_identities[0].state_time_ns == (
         1_000_000_000
     )
+
+
+def test_ground_boundary_uses_one_atomic_path_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, canvas = _controller("WHEELED")
+    controller.reset(_pose(canvas, 5, 2))
+    samples = tuple(
+        SensorPathSample(_pose(canvas, 5, column), 0.25)
+        for column in (3, 4, 5, 6)
+    )
+    received: list[tuple[tuple[Pose2, float], ...]] = []
+
+    def observe_world_path(
+        path: tuple[tuple[Pose2, float], ...],
+    ) -> ObservationDelta:
+        received.append(path)
+        return ObservationDelta(0, 0, 0.0, 0.0)
+
+    monkeypatch.setattr(
+        controller.sensor_state,
+        "observe_world_path",
+        observe_world_path,
+        raising=False,
+    )
+
+    controller.after_execution(
+        platform_type="WHEELED",
+        execution_state="DECISION_BOUNDARY",
+        evidence=SensorBoundaryEvidence(
+            samples[-1].pose_map,
+            1.0,
+            path_samples=samples,
+        ),
+    )
+
+    assert received == [
+        tuple((sample.pose_map, sample.elapsed_s) for sample in samples)
+    ]
 
 
 def test_sensor_path_evidence_requires_exact_endpoint_and_elapsed_sum() -> None:
