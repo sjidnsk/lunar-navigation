@@ -3259,6 +3259,7 @@ def _open_formal_task_cache_runtime(
     capability_bundle: FrozenCapabilityBundle,
     task_area: TaskAreaConfig,
     repository_root: Path,
+    task_key_source_commit: str | None = None,
 ) -> _FormalTaskCacheRuntime:
     root = validate_artifact_root(
         artifact_root, repository_root=repository_root
@@ -3275,6 +3276,11 @@ def _open_formal_task_cache_runtime(
     body = dict(report)
     report_sha256 = body.pop("report_sha256", None)
     source_commit = _source_commit(repository_root)
+    task_runtime_source_commit = (
+        task_key_source_commit
+        if task_key_source_commit is not None
+        else source_commit
+    )
     manifest_path = cache_manifest_path.resolve(strict=True)
     cache = load_formal_cache(manifest_path, require_full=True)
     tasks = report.get("tasks")
@@ -3324,7 +3330,7 @@ def _open_formal_task_cache_runtime(
         cache_manifest_path=manifest_path,
         capability_bundle=capability_bundle,
         task_area=task_area,
-        source_commit=source_commit,
+        source_commit=task_runtime_source_commit,
         builder_workers=int(report.get("builder_workers", 0)),
     )
 
@@ -3565,6 +3571,7 @@ def main(argv: list[str] | None = None) -> int:
             capability_bundle=capability_bundle,
             task_area=resume_state.config.task_area,
             repository_root=repository_root,
+            task_key_source_commit=task_key_source_commit,
         ) as task_runtime:
             formal_assembly = _formal_environment_from_calibrated_root(
                 resume_root,
