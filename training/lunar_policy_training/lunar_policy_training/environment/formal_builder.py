@@ -1073,6 +1073,59 @@ def _candidate_boundary_evidence_sha256(sensor_state: object) -> str:
     return sensor_state.physical_evidence_sha256()
 
 
+def _resolve_rebuilt_planning_failure(
+    *,
+    candidate_universe: PhysicalCandidateUniverse,
+    failure_snapshot_id: str | None,
+    planner_failed_candidate_ids: set[str],
+    pending_failure: tuple[
+        str,
+        bridge_api.CandidateDisposition,
+        str,
+        bool,
+    ]
+    | None,
+) -> tuple[str, set[str]]:
+    """Apply a planner failure only when its physical candidate boundary survives.
+
+    A rolling ground option can collect new evidence while retaining its locked
+    target.  If the subsequent local request fails, that request belongs to the
+    pre-rebuild candidate boundary.  Its suppression must not be carried into
+    the new physical snapshot: the fresh universe is the authority from there.
+    All other snapshot changes remain fail-closed.
+    """
+    rebuilt_snapshot_id = candidate_universe.physical_snapshot_id
+    rebuilt_failed_ids = set(planner_failed_candidate_ids)
+    if failure_snapshot_id != rebuilt_snapshot_id:
+        failure_snapshot_id = rebuilt_snapshot_id
+        rebuilt_failed_ids.clear()
+    if pending_failure is None:
+        return failure_snapshot_id, rebuilt_failed_ids
+
+    (
+        candidate_id,
+        disposition,
+        pending_snapshot_id,
+        allow_locked_target_exit,
+    ) = pending_failure
+    if pending_snapshot_id != rebuilt_snapshot_id:
+        if allow_locked_target_exit:
+            return failure_snapshot_id, rebuilt_failed_ids
+        raise ValueError("planning failure physical snapshot changed during rebuild")
+    if (
+        disposition
+        == bridge_api.CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT
+    ):
+        current_ids = {
+            candidate.candidate_id for candidate in candidate_universe.candidates
+        }
+        if candidate_id in current_ids:
+            rebuilt_failed_ids.add(candidate_id)
+        elif not allow_locked_target_exit:
+            raise ValueError("planning failure candidate changed during rebuild")
+    return failure_snapshot_id, rebuilt_failed_ids
+
+
 def _project_task_grid_to_planner_level(
     values: np.ndarray,
     *,
@@ -2335,36 +2388,14 @@ class FormalEpisode:
                 )
             ),
         )
-        failure_snapshot_id = self._planner_failure_snapshot_id
-        failed_candidate_ids = set(self._planner_failed_candidate_ids)
-        if failure_snapshot_id != candidate_universe.physical_snapshot_id:
-            failure_snapshot_id = candidate_universe.physical_snapshot_id
-            failed_candidate_ids.clear()
-        pending_failure = self._pending_planning_failure
-        if pending_failure is not None:
-            (
-                candidate_id,
-                disposition,
-                pending_snapshot_id,
-                allow_locked_target_exit,
-            ) = pending_failure
-            if pending_snapshot_id != candidate_universe.physical_snapshot_id:
-                raise ValueError(
-                    "planning failure physical snapshot changed during rebuild"
-                )
-            if disposition == (
-                bridge_api.CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT
-            ):
-                current_ids = {
-                    candidate.candidate_id
-                    for candidate in candidate_universe.candidates
-                }
-                if candidate_id in current_ids:
-                    failed_candidate_ids.add(candidate_id)
-                elif not allow_locked_target_exit:
-                    raise ValueError(
-                        "planning failure candidate changed during rebuild"
-                    )
+        failure_snapshot_id, failed_candidate_ids = (
+            _resolve_rebuilt_planning_failure(
+                candidate_universe=candidate_universe,
+                failure_snapshot_id=self._planner_failure_snapshot_id,
+                planner_failed_candidate_ids=self._planner_failed_candidate_ids,
+                pending_failure=self._pending_planning_failure,
+            )
+        )
         candidate_result = candidate_builder.select_available(
             candidate_universe,
             canvas_id=world.canvas.identity,

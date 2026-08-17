@@ -7,6 +7,7 @@ import inspect
 import json
 import math
 import pathlib
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -1616,6 +1617,53 @@ def test_planning_failure_refresh_suppresses_stable_id_without_new_evidence(
     assert after_identity.candidate_set_id != before_identity.candidate_set_id
 
 
+def test_deferred_ground_failure_drops_stale_suppression_after_new_evidence(
+) -> None:
+    """A rolling target failure cannot suppress a rebuilt physical snapshot."""
+    universe = SimpleNamespace(
+        physical_snapshot_id="b" * 64,
+        candidates=(SimpleNamespace(candidate_id="candidate-current"),),
+    )
+
+    snapshot_id, failed_ids = (
+        formal_builder_module._resolve_rebuilt_planning_failure(
+            candidate_universe=universe,
+            failure_snapshot_id="a" * 64,
+            planner_failed_candidate_ids={"old-failure"},
+            pending_failure=(
+                "candidate-stale",
+                CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+                "a" * 64,
+                True,
+            ),
+        )
+    )
+
+    assert snapshot_id == universe.physical_snapshot_id
+    assert failed_ids == set()
+
+
+def test_non_deferred_failure_rejects_rebuilt_physical_snapshot() -> None:
+    """A request without an intervening rolling reveal must stay fail-closed."""
+    universe = SimpleNamespace(
+        physical_snapshot_id="b" * 64,
+        candidates=(SimpleNamespace(candidate_id="candidate-current"),),
+    )
+
+    with pytest.raises(ValueError, match="physical snapshot changed"):
+        formal_builder_module._resolve_rebuilt_planning_failure(
+            candidate_universe=universe,
+            failure_snapshot_id="a" * 64,
+            planner_failed_candidate_ids=set(),
+            pending_failure=(
+                "candidate-stale",
+                CandidateDisposition.SUPPRESS_FOR_CURRENT_PHYSICAL_SNAPSHOT,
+                "a" * 64,
+                False,
+            ),
+        )
+
+
 def test_boundary_window_refills_one_reserve_before_exhaustion(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1801,10 +1849,10 @@ def test_ground_request_uses_and_locks_policy_theta(
     episode.clear_ground_option()
 
 
-def test_ground_failure_refresh_suppresses_stable_target_after_reveal(
+def test_ground_failure_refresh_discards_stale_suppression_after_reveal(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A moved robot must not turn the same ground target into a new identity."""
+    """A moved robot must not suppress a rebuilt target with an old failure."""
     assembly, _, _ = _assembly(tmp_path)
     episode = assembly.factory(0, "WHEELED").episode
     initial_observation = episode.controller.current_observation
@@ -1873,20 +1921,14 @@ def test_ground_failure_refresh_suppresses_stable_target_after_reveal(
 
     final_snapshot = episode._snapshot
     assert final_snapshot is not None
-    final_universe_ids = {
-        candidate.candidate_id
-        for candidate in final_snapshot.candidate_universe.candidates
-    }
-    final_batch_ids = {
-        str(final_snapshot.candidates.candidate_ids[index])
-        for index in np.flatnonzero(final_snapshot.candidates.mask)
-    }
-    assert continued.candidate_id in final_universe_ids
-    assert continued.candidate_id not in final_batch_ids
+    assert (
+        final_snapshot.candidate_universe.physical_snapshot_id
+        != continued.physical_snapshot_id
+    )
     assert (
         final_snapshot.candidates.diagnostics
         .planner_failed_current_snapshot_count
-        == 1
+        == 0
     )
     assert episode._active_ground_option is None
     assert episode._pending_planning_failure is None
