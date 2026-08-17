@@ -301,6 +301,75 @@ def advance_reward_update_boundary(
     )
 
 
+def advance_reward_sentinel_update_boundary(
+    state: RewardCurriculumState,
+    *,
+    update_id: int,
+    evaluation_report: RewardV4EvaluationReport,
+    candidate_checkpoint_path: Path,
+    candidate_checkpoint_gpu_seconds: float,
+    best_checkpoint_state: Mapping[str, object],
+    config: RewardConfigV4 = DEFAULT_REWARD_CONFIG,
+) -> RewardUpdateBoundaryDecision:
+    """Apply a hard-error sentinel without changing curriculum or ranking."""
+    if not isinstance(evaluation_report, RewardV4EvaluationReport):
+        raise TypeError("Reward V4 sentinel report is invalid")
+    if (
+        not isinstance(candidate_checkpoint_path, Path)
+        or not candidate_checkpoint_path.is_absolute()
+    ):
+        raise ValueError("Reward V4 sentinel candidate path is invalid")
+    score = evaluation_report.checkpoint_score
+    if score.payload_sha256 != evaluation_report.checkpoint_payload_sha256:
+        raise ValueError("Reward V4 sentinel candidate identity differs")
+    report_platforms = tuple(evaluation_report.platform_gate_metrics)
+    expected_r2 = tuple(
+        platform
+        for platform in report_platforms
+        if state.platforms[platform].stage is RewardStage.R2
+    )
+    if score.enabled_r2_platforms != expected_r2:
+        raise ValueError("Reward V4 sentinel R2 platform set differs")
+    if score.hard_error_count != 0:
+        raise RewardUpdateBoundaryError(
+            "Reward V4 sentinel evaluation contains a hard error"
+        )
+    boundary = advance_reward_update_boundary(
+        state,
+        update_id=update_id,
+        evaluation_report=None,
+        candidate_checkpoint_path=None,
+        candidate_checkpoint_gpu_seconds=candidate_checkpoint_gpu_seconds,
+        best_checkpoint_state=best_checkpoint_state,
+        config=config,
+    )
+    return RewardUpdateBoundaryDecision(
+        curriculum_state=boundary.curriculum_state,
+        curriculum_events=(
+            {
+                "event": "SENTINEL_EVALUATION_PASSED",
+                "update_id": update_id,
+                "candidate_checkpoint_path": str(
+                    candidate_checkpoint_path
+                ),
+                "candidate_payload_sha256": score.payload_sha256,
+                "report_sha256": reward_v4_report_sha256(
+                    evaluation_report
+                ),
+                "manifest_sha256": reward_evaluation_manifest_sha256(
+                    evaluation_report.manifest
+                ),
+            },
+        ),
+        checkpoint_decision=None,
+        best_checkpoint_state=boundary.best_checkpoint_state,
+        candidate_checkpoint_gpu_seconds=(
+            boundary.candidate_checkpoint_gpu_seconds
+        ),
+        rollback_checkpoint_path=None,
+    )
+
+
 def materialize_reward_evaluation_artifacts(
     *,
     candidate_checkpoint_path: Path,

@@ -151,6 +151,11 @@ class RewardV4RuntimeDiagnostics:
     terminal_reason_counts: Mapping[str, int]
     invalid_task_reason_counts: Mapping[str, int]
     hard_error_reason_counts: Mapping[str, int]
+    planner_call_count_by_worker: tuple[int, ...] = ()
+    planner_elapsed_s_by_worker: tuple[float, ...] = ()
+    policy_inference_elapsed_s: float = 0.0
+    candidate_refresh_elapsed_s: float = 0.0
+    global_search_elapsed_s: float = 0.0
 
     def __post_init__(self) -> None:
         if type(self.update_id) is not int or self.update_id <= 0:
@@ -180,6 +185,37 @@ class RewardV4RuntimeDiagnostics:
             or any(not _finite_nonnegative(value) for value in elapsed)
         ):
             raise TrainingMetricsError("runtime macro elapsed times are invalid")
+        planner_counts = self.planner_call_count_by_worker
+        if not planner_counts:
+            planner_counts = (0,) * len(identities)
+            object.__setattr__(
+                self, "planner_call_count_by_worker", planner_counts
+            )
+        if (
+            type(planner_counts) is not tuple
+            or len(planner_counts) != len(identities)
+            or any(type(value) is not int or value < 0 for value in planner_counts)
+        ):
+            raise TrainingMetricsError("runtime planner call counts are invalid")
+        planner_elapsed = self.planner_elapsed_s_by_worker
+        if not planner_elapsed:
+            planner_elapsed = (0.0,) * len(identities)
+            object.__setattr__(
+                self, "planner_elapsed_s_by_worker", planner_elapsed
+            )
+        if (
+            type(planner_elapsed) is not tuple
+            or len(planner_elapsed) != len(identities)
+            or any(not _finite_nonnegative(value) for value in planner_elapsed)
+        ):
+            raise TrainingMetricsError("runtime planner elapsed times are invalid")
+        for name in (
+            "policy_inference_elapsed_s",
+            "candidate_refresh_elapsed_s",
+            "global_search_elapsed_s",
+        ):
+            if not _finite_nonnegative(getattr(self, name)):
+                raise TrainingMetricsError(f"runtime {name} is invalid")
         slowest = dict(self.slowest_worker)
         slowest_index = max(range(len(elapsed)), key=lambda index: (elapsed[index], -index))
         if set(slowest) != {"worker_index", "elapsed_s"} or (
@@ -225,11 +261,20 @@ class RewardV4RuntimeDiagnostics:
             "terminal_reason_counts": dict(self.terminal_reason_counts),
             "invalid_task_reason_counts": dict(self.invalid_task_reason_counts),
             "hard_error_reason_counts": dict(self.hard_error_reason_counts),
+            "planner_call_count_by_worker": list(
+                self.planner_call_count_by_worker
+            ),
+            "planner_elapsed_s_by_worker": list(
+                self.planner_elapsed_s_by_worker
+            ),
+            "policy_inference_elapsed_s": self.policy_inference_elapsed_s,
+            "candidate_refresh_elapsed_s": self.candidate_refresh_elapsed_s,
+            "global_search_elapsed_s": self.global_search_elapsed_s,
         }
 
     @classmethod
     def from_dict(cls, value: object) -> "RewardV4RuntimeDiagnostics":
-        expected = {
+        legacy_expected = {
             "update_id",
             "worker_identities",
             "invalid_start_task_count",
@@ -242,7 +287,20 @@ class RewardV4RuntimeDiagnostics:
             "invalid_task_reason_counts",
             "hard_error_reason_counts",
         }
-        if not isinstance(value, Mapping) or set(value) != expected:
+        timing_expected = {
+            "planner_call_count_by_worker",
+            "planner_elapsed_s_by_worker",
+            "policy_inference_elapsed_s",
+            "candidate_refresh_elapsed_s",
+            "global_search_elapsed_s",
+        }
+        if not isinstance(value, Mapping):
+            raise TrainingMetricsError("runtime diagnostics structure is invalid")
+        keys = frozenset(value)
+        if keys not in {
+            frozenset(legacy_expected),
+            frozenset(legacy_expected | timing_expected),
+        }:
             raise TrainingMetricsError("runtime diagnostics structure is invalid")
         try:
             return cls(
@@ -268,6 +326,21 @@ class RewardV4RuntimeDiagnostics:
                 terminal_reason_counts=value["terminal_reason_counts"],
                 invalid_task_reason_counts=value["invalid_task_reason_counts"],
                 hard_error_reason_counts=value["hard_error_reason_counts"],
+                planner_call_count_by_worker=tuple(
+                    value.get("planner_call_count_by_worker", ())
+                ),
+                planner_elapsed_s_by_worker=tuple(
+                    value.get("planner_elapsed_s_by_worker", ())
+                ),
+                policy_inference_elapsed_s=value.get(
+                    "policy_inference_elapsed_s", 0.0
+                ),
+                candidate_refresh_elapsed_s=value.get(
+                    "candidate_refresh_elapsed_s", 0.0
+                ),
+                global_search_elapsed_s=value.get(
+                    "global_search_elapsed_s", 0.0
+                ),
             )
         except (TypeError, ValueError) as error:
             raise TrainingMetricsError(
@@ -327,9 +400,17 @@ class RewardV4RuntimeDiagnostics:
                 terminal_identities.add(identity)
                 terminal_counts[reason] += 1
 
+        candidate_refresh_elapsed_s = 0.0
+        global_search_elapsed_s = 0.0
         for committed in rollout.committed:
             pre = add_state(committed.payload.pre_worker_state)
             post = add_state(committed.payload.post_worker_state)
+            candidate_refresh_elapsed_s += float(
+                pre.candidate_decision_snapshot.candidate_refresh_elapsed_s
+            )
+            global_search_elapsed_s += float(
+                pre.candidate_decision_snapshot.global_search_elapsed_s
+            )
             if pre.platform_type != committed.platform_type or (
                 post.platform_type != committed.platform_type
             ):
@@ -423,6 +504,21 @@ class RewardV4RuntimeDiagnostics:
             terminal_reason_counts=dict(terminal_counts),
             invalid_task_reason_counts=dict(invalid_counts),
             hard_error_reason_counts=hard_error_counts,
+            planner_call_count_by_worker=(
+                tuple(rollout.planner_call_count_by_worker)
+                if rollout.planner_call_count_by_worker
+                else (0,) * worker_count
+            ),
+            planner_elapsed_s_by_worker=(
+                tuple(float(value) for value in rollout.planner_elapsed_s_by_worker)
+                if rollout.planner_elapsed_s_by_worker
+                else (0.0,) * worker_count
+            ),
+            policy_inference_elapsed_s=float(
+                rollout.policy_inference_elapsed_s
+            ),
+            candidate_refresh_elapsed_s=candidate_refresh_elapsed_s,
+            global_search_elapsed_s=global_search_elapsed_s,
         )
 
 

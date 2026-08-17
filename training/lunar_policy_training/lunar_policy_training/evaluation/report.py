@@ -42,6 +42,7 @@ from ..reward_evaluation import (
     build_checkpoint_score,
     checkpoint_score_sha256,
     reward_evaluation_manifest_sha256,
+    reward_episode_metrics_from_mapping,
     summarize_platform_gate_metrics,
     summarize_platform_scale_metrics,
 )
@@ -758,41 +759,10 @@ def read_reward_v4_report(path: Path) -> RewardV4EvaluationReport:
         episodes_raw = payload["episodes"]
         if not isinstance(episodes_raw, list):
             raise ValueError("episode list differs")
-        episode_fields = {
-            "platform",
-            "scale_bucket",
-            "evaluation_seed",
-            "success_at_0_95",
-            "final_coverage",
-            "priority_coverage_auc_over_macro_actions",
-            "steps_to_success",
-            "normalized_executed_path_to_success",
-            "hard_error_count",
-            "macro_action_count",
-            "priority_denominator_present",
-        }
         episodes = tuple(
-            RewardEpisodeMetrics(
-                platform=PlatformType(row["platform"]),
-                scale_bucket=TaskScaleBucket(row["scale_bucket"]),
-                evaluation_seed=row["evaluation_seed"],
-                success_at_0_95=row["success_at_0_95"],
-                final_coverage=row["final_coverage"],
-                priority_coverage_auc_over_macro_actions=row[
-                    "priority_coverage_auc_over_macro_actions"
-                ],
-                steps_to_success=row["steps_to_success"],
-                normalized_executed_path_to_success=row[
-                    "normalized_executed_path_to_success"
-                ],
-                hard_error_count=row["hard_error_count"],
-                macro_action_count=row["macro_action_count"],
-                priority_denominator_present=row[
-                    "priority_denominator_present"
-                ],
-            )
+            reward_episode_metrics_from_mapping(row)
             for row in episodes_raw
-            if isinstance(row, Mapping) and set(row) == episode_fields
+            if isinstance(row, Mapping)
         )
         if len(episodes) != len(episodes_raw):
             raise ValueError("episode fields differ")

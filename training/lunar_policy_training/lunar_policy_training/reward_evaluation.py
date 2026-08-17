@@ -177,6 +177,49 @@ class RewardEpisodeMetrics:
         }
 
 
+def reward_episode_metrics_from_mapping(
+    value: Mapping[str, object],
+) -> RewardEpisodeMetrics:
+    """Strictly decode one durable Reward V4 episode row."""
+    fields = {
+        "platform",
+        "scale_bucket",
+        "evaluation_seed",
+        "success_at_0_95",
+        "final_coverage",
+        "priority_coverage_auc_over_macro_actions",
+        "steps_to_success",
+        "normalized_executed_path_to_success",
+        "hard_error_count",
+        "macro_action_count",
+        "priority_denominator_present",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ValueError("Reward V4 episode structure differs")
+    try:
+        return RewardEpisodeMetrics(
+            platform=PlatformType(value["platform"]),
+            scale_bucket=TaskScaleBucket(value["scale_bucket"]),
+            evaluation_seed=value["evaluation_seed"],
+            success_at_0_95=value["success_at_0_95"],
+            final_coverage=value["final_coverage"],
+            priority_coverage_auc_over_macro_actions=value[
+                "priority_coverage_auc_over_macro_actions"
+            ],
+            steps_to_success=value["steps_to_success"],
+            normalized_executed_path_to_success=value[
+                "normalized_executed_path_to_success"
+            ],
+            hard_error_count=value["hard_error_count"],
+            macro_action_count=value["macro_action_count"],
+            priority_denominator_present=value[
+                "priority_denominator_present"
+            ],
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("Reward V4 episode structure differs") from error
+
+
 @dataclass(frozen=True, slots=True)
 class PlatformScaleMetrics:
     platform: PlatformType

@@ -6,6 +6,7 @@ from hashlib import sha256
 import math
 from dataclasses import dataclass, replace
 from datetime import timedelta
+from time import perf_counter
 from typing import Callable, Protocol
 
 from lunar_planner_training_bridge import (
@@ -463,6 +464,8 @@ class V3ExplorationEnvironment:
             0.0, initial_ratio
         )
         self._episode_terminated = False
+        self._macro_planner_call_count = 0
+        self._macro_planner_elapsed_s = 0.0
         self._committed_output: PlannerOutput | None = None
         self._hopper_commitment_id: str | None = None
         self._execution_state = (
@@ -638,10 +641,40 @@ class V3ExplorationEnvironment:
             raise RuntimeError("terminated episode requires reset")
         if self._execution_state in {"JUMP_COMMITTED", "IN_FLIGHT"}:
             self._fail_closed("committed hopper cannot accept a new policy action")
+        self._reset_macro_planner_timing()
         request, prepared = self._build_plan_request(action, expected_identity)
-        output = self._bridge.plan(request)
+        output = self._plan_with_timing(request)
         self._validate_output(output)
-        return self._transition_for_output(output, prepared)
+        return self._attach_macro_planner_timing(
+            self._transition_for_output(output, prepared)
+        )
+
+    def _reset_macro_planner_timing(self) -> None:
+        self._macro_planner_call_count = 0
+        self._macro_planner_elapsed_s = 0.0
+
+    def _plan_with_timing(self, request: object) -> PlannerOutput:
+        started = perf_counter()
+        try:
+            return self._bridge.plan(request)
+        finally:
+            elapsed_s = perf_counter() - started
+            if not math.isfinite(elapsed_s) or elapsed_s < 0.0:
+                self._fail_closed("planner wall time is invalid")
+            self._macro_planner_call_count += 1
+            self._macro_planner_elapsed_s += elapsed_s
+
+    def _attach_macro_planner_timing(
+        self, transition: PlannerTransition
+    ) -> PlannerTransition:
+        return replace(
+            transition,
+            execution_events=replace(
+                transition.execution_events,
+                planner_call_count=self._macro_planner_call_count,
+                planner_elapsed_s=self._macro_planner_elapsed_s,
+            ),
+        )
 
     def _transition_for_output(
         self,
@@ -769,6 +802,7 @@ class V3ExplorationEnvironment:
             self._fail_closed("prepared action observation identity is stale")
         if not bool(self._observation.candidate_mask.any().item()):
             return self._no_candidate_boundary()
+        self._reset_macro_planner_timing()
         ground_result = (
             self._advance_ground_option(action, expected_identity)
             if self._ground_option_continuation_builder is not None
@@ -800,6 +834,7 @@ class V3ExplorationEnvironment:
                     remaining_coverable_detail_cell_count=remaining,
                     reward_terminal_class=terminal_class_for_reason(reason),
                 )
+        transition = self._attach_macro_planner_timing(transition)
         if transition.terminated:
             self._episode_terminated = True
         return DecisionBoundaryResult(
@@ -1034,7 +1069,7 @@ class V3ExplorationEnvironment:
             locked_candidate_id = prepared.candidate_id
             seen_progress_signatures: set[tuple[object, ...]] = set()
             while True:
-                output = self._bridge.plan(request)
+                output = self._plan_with_timing(request)
                 self._validate_output(output)
                 if output.reference is None and not transitions:
                     suppressible = (

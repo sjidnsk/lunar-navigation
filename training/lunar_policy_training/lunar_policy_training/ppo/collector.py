@@ -110,6 +110,9 @@ class CommittedMacroRollout:
     invalid_tasks: tuple[InvalidTaskAudit, ...] = ()
     rejected_actions: tuple[RejectedWorkerAction, ...] = ()
     macro_action_elapsed_s_by_worker: tuple[float, ...] = ()
+    planner_call_count_by_worker: tuple[int, ...] = ()
+    planner_elapsed_s_by_worker: tuple[float, ...] = ()
+    policy_inference_elapsed_s: float = 0.0
 
     @property
     def slot_counts(self) -> dict[int, int]:
@@ -320,6 +323,9 @@ def collect_committed_macro_rollout(
             invalid_tasks=(),
             rejected_actions=(),
             macro_action_elapsed_s_by_worker=(0.0,) * worker_count,
+            planner_call_count_by_worker=(0,) * worker_count,
+            planner_elapsed_s_by_worker=(0.0,) * worker_count,
+            policy_inference_elapsed_s=0.0,
         )
 
     recovered = journal.recover_worker_boundaries(update_id=update_id)
@@ -382,6 +388,9 @@ def collect_committed_macro_rollout(
     invalid_tasks: list[InvalidTaskAudit] = []
     rejected_actions: list[RejectedWorkerAction] = []
     macro_action_elapsed_s_by_worker = [0.0] * worker_count
+    planner_call_count_by_worker = [0] * worker_count
+    planner_elapsed_s_by_worker = [0.0] * worker_count
+    policy_inference_elapsed_s = 0.0
     while any(slot < actions_per_worker for slot in next_slot.values()):
         events = await_completed()
         if (
@@ -485,6 +494,13 @@ def collect_committed_macro_rollout(
             if not np.isfinite(elapsed_s) or elapsed_s < 0.0:
                 raise CollectorError("macro action elapsed time is invalid")
             macro_action_elapsed_s_by_worker[worker] += float(elapsed_s)
+            planner_events = event.execution_events
+            planner_call_count_by_worker[worker] += (
+                planner_events.planner_call_count
+            )
+            planner_elapsed_s_by_worker[worker] += float(
+                planner_events.planner_elapsed_s
+            )
             post_identity = _single_identity(event.observation)
             pre_identity = _single_identity(current.prepared.observation)
             if post_identity.episode_id != pre_identity.episode_id:
@@ -549,6 +565,7 @@ def collect_committed_macro_rollout(
                 )
 
         if actionable:
+            policy_started_s = perf_counter()
             observations = _concatenate_policy_batches(
                 tuple(item.observation for item in actionable),
                 device=target_device,
@@ -640,6 +657,10 @@ def collect_committed_macro_rollout(
                 actions_by_reward.setdefault(
                     (stage, platform_weights), {}
                 )[worker] = action
+            policy_elapsed_s = perf_counter() - policy_started_s
+            if not np.isfinite(policy_elapsed_s) or policy_elapsed_s < 0.0:
+                raise CollectorError("policy inference elapsed time is invalid")
+            policy_inference_elapsed_s += float(policy_elapsed_s)
             for (stage, platform_weights), actions in actions_by_reward.items():
                 submit_actions(
                     actions,
@@ -669,6 +690,9 @@ def collect_committed_macro_rollout(
         macro_action_elapsed_s_by_worker=tuple(
             macro_action_elapsed_s_by_worker
         ),
+        planner_call_count_by_worker=tuple(planner_call_count_by_worker),
+        planner_elapsed_s_by_worker=tuple(planner_elapsed_s_by_worker),
+        policy_inference_elapsed_s=policy_inference_elapsed_s,
     )
     complete_update = getattr(pool, "complete_policy_update", None)
     if callable(complete_update):
@@ -905,6 +929,9 @@ def _sealed_macro_rollout(
     invalid_tasks: tuple[InvalidTaskAudit, ...],
     rejected_actions: tuple[RejectedWorkerAction, ...],
     macro_action_elapsed_s_by_worker: tuple[float, ...],
+    planner_call_count_by_worker: tuple[int, ...],
+    planner_elapsed_s_by_worker: tuple[float, ...],
+    policy_inference_elapsed_s: float,
 ) -> CommittedMacroRollout:
     if (
         getattr(loaded, "state", None) not in ("SEALED", "APPLIED")
@@ -945,6 +972,9 @@ def _sealed_macro_rollout(
         invalid_tasks=invalid_tasks,
         rejected_actions=rejected_actions,
         macro_action_elapsed_s_by_worker=macro_action_elapsed_s_by_worker,
+        planner_call_count_by_worker=planner_call_count_by_worker,
+        planner_elapsed_s_by_worker=planner_elapsed_s_by_worker,
+        policy_inference_elapsed_s=policy_inference_elapsed_s,
     )
 
 

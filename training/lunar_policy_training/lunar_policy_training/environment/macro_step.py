@@ -231,6 +231,19 @@ class ExecutionEvents:
     reference_samples_consumed: int = 0
     selected_action_observed_safe: bool = False
     hopper_commitment_states: tuple[str, ...] = ()
+    planner_call_count: int = 0
+    planner_elapsed_s: float = 0.0
+
+    def __post_init__(self) -> None:
+        if type(self.planner_call_count) is not int or self.planner_call_count < 0:
+            raise ValueError("planner call count must be non-negative")
+        if (
+            not isinstance(self.planner_elapsed_s, (int, float))
+            or isinstance(self.planner_elapsed_s, bool)
+            or not math.isfinite(float(self.planner_elapsed_s))
+            or float(self.planner_elapsed_s) < 0.0
+        ):
+            raise ValueError("planner elapsed time must be finite and non-negative")
 
 
 @dataclass(frozen=True)

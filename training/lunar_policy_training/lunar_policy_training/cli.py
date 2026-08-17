@@ -180,12 +180,20 @@ from .evaluation.report import (
     write_report,
 )
 from .evaluation.reward_v4_runtime import evaluate_reward_v4_fixed_grid
+from .evaluation.reward_v4_schedule import (
+    REWARD_V4_SENTINEL_MACRO_ACTIONS_PER_TASK,
+    RewardV4EvaluationMode,
+    RewardV4EvaluationTier,
+    materialize_reward_v4_evaluation_mode,
+)
 from .reward_evaluation import (
     REWARD_EVALUATION_MANIFEST_SCHEMA,
+    RewardEvaluationManifest,
     build_reward_v4_evaluation_manifest,
     reward_evaluation_manifest_sha256,
 )
 from .reward_update_boundary import (
+    advance_reward_sentinel_update_boundary,
     advance_reward_update_boundary,
     materialize_reward_evaluation_artifacts,
 )
@@ -494,6 +502,66 @@ def _reward_v4_evaluation_platforms(
         platform
         for platform in active
         if curriculum.platforms[platform].stage is RewardStage.R2
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RewardV4EvaluationRequest:
+    tier: RewardV4EvaluationTier
+    manifest: RewardEvaluationManifest
+    batch: FormalEvaluationBatch
+    report_path: Path
+    progress_directory: Path
+    max_macro_actions_per_task: int | None
+
+
+def _reward_v4_evaluation_request(
+    *,
+    evaluation_directory: Path,
+    mode: RewardV4EvaluationMode,
+    manifest: RewardEvaluationManifest,
+    batch: FormalEvaluationBatch,
+) -> _RewardV4EvaluationRequest:
+    """Resolve one durable sentinel or full evaluation task grid."""
+    if (
+        not isinstance(evaluation_directory, Path)
+        or not evaluation_directory.is_absolute()
+    ):
+        raise ValueError("Reward V4 evaluation directory is invalid")
+    if not isinstance(mode, RewardV4EvaluationMode):
+        raise TypeError("Reward V4 evaluation mode is invalid")
+    if not isinstance(manifest, RewardEvaluationManifest) or not isinstance(
+        batch, FormalEvaluationBatch
+    ):
+        raise TypeError("Reward V4 evaluation request input is invalid")
+    full_seeds = tuple(batch.scenario_seeds)
+    if not full_seeds:
+        raise ValueError("Reward V4 evaluation batch has no seed")
+    if mode.tier is RewardV4EvaluationTier.SENTINEL:
+        selected_seeds = (full_seeds[0],)
+        report_name = "sentinel-report.json"
+        max_macro_actions = REWARD_V4_SENTINEL_MACRO_ACTIONS_PER_TASK
+    else:
+        selected_seeds = full_seeds
+        report_name = "report.json"
+        max_macro_actions = None
+    selected_manifest = RewardEvaluationManifest(
+        tasks=tuple(
+            task
+            for task in manifest.tasks
+            if task.evaluation_seed in selected_seeds
+        )
+    )
+    selected_batch = replace(batch, scenario_seeds=selected_seeds)
+    return _RewardV4EvaluationRequest(
+        tier=mode.tier,
+        manifest=selected_manifest,
+        batch=selected_batch,
+        report_path=evaluation_directory / report_name,
+        progress_directory=(
+            evaluation_directory / f"{mode.tier.value}-progress"
+        ),
+        max_macro_actions_per_task=max_macro_actions,
     )
 
 
@@ -5746,12 +5814,16 @@ def _run_reward_v4_updates(
                         / "checkpoints"
                         / f"candidate-update-{update_id:08d}.pt"
                     ).resolve()
-                    report_path = (
+                    evaluation_directory = (
                         artifact_root
                         / "evaluation"
                         / f"candidate-update-{update_id:08d}"
-                        / "report.json"
                     ).resolve()
+                    mode_path = evaluation_directory / "evaluation-mode.json"
+                    sentinel_report_path = (
+                        evaluation_directory / "sentinel-report.json"
+                    )
+                    full_report_path = evaluation_directory / "report.json"
                     base_curriculum = (
                         replace(curriculum, worker_restart_required=False)
                         if restart_acknowledged
@@ -5914,7 +5986,9 @@ def _run_reward_v4_updates(
                         )
 
                     evaluation_due = bool(
-                        report_path.exists()
+                        mode_path.exists()
+                        or sentinel_report_path.exists()
+                        or full_report_path.exists()
                         or candidate_was_existing
                         or budget.consumed_gpu_seconds
                         - candidate_checkpoint_gpu_seconds
@@ -5923,6 +5997,27 @@ def _run_reward_v4_updates(
                     if not evaluation_due:
                         applied_here = True
                         return candidate
+                    if candidate is None:
+                        raise UpdateCommitError(
+                            "Reward V4 candidate state is missing"
+                        )
+
+                    mode = materialize_reward_v4_evaluation_mode(
+                        mode_path,
+                        checkpoint_payload_sha256=candidate.payload_sha256,
+                        previous_candidate_gpu_seconds=(
+                            candidate_checkpoint_gpu_seconds
+                        ),
+                        candidate_gpu_seconds=(
+                            candidate.consumed_gpu_seconds
+                        ),
+                    )
+                    evaluation_request = _reward_v4_evaluation_request(
+                        evaluation_directory=evaluation_directory,
+                        mode=mode,
+                        manifest=evaluation_manifest,
+                        batch=evaluation_batch,
+                    )
 
                     (
                         active_platforms,
@@ -5933,10 +6028,6 @@ def _run_reward_v4_updates(
                     )
 
                     def build_candidate() -> TrainingCheckpointV6:
-                        if candidate is None:
-                            raise UpdateCommitError(
-                                "Reward V4 candidate state is missing"
-                            )
                         return candidate
 
                     def evaluate_candidate_checkpoint(
@@ -5953,24 +6044,34 @@ def _run_reward_v4_updates(
                             trainer.policy,
                             device="cuda",
                             checkpoint_payload_sha256=value.payload_sha256,
-                            manifest=evaluation_manifest,
+                            manifest=evaluation_request.manifest,
                             active_platforms=active_platforms,
-                            batch=evaluation_batch,
+                            batch=evaluation_request.batch,
                             bootstrap_seed=FORMAL_SEED,
                             bootstrap_resample_count=2_000,
                             enabled_r2_platforms=enabled_r2_platforms,
+                            max_macro_actions_per_task=(
+                                evaluation_request
+                                .max_macro_actions_per_task
+                            ),
+                            progress_directory=(
+                                evaluation_request.progress_directory
+                            ),
+                            evaluation_tier=evaluation_request.tier,
                         )
 
                     candidate, report = materialize_reward_evaluation_artifacts(
                         candidate_checkpoint_path=candidate_path,
-                        evaluation_report_path=report_path,
+                        evaluation_report_path=(
+                            evaluation_request.report_path
+                        ),
                         build_candidate_checkpoint=build_candidate,
                         evaluate_candidate=evaluate_candidate_checkpoint,
                     )
                     expected_report_manifest = type(evaluation_manifest)(
                         tasks=tuple(
                             task
-                            for task in evaluation_manifest.tasks
+                            for task in evaluation_request.manifest.tasks
                             if task.platform in active_platforms
                         )
                     )
@@ -5994,17 +6095,33 @@ def _run_reward_v4_updates(
                         scheduler,
                         normalization_state=trainer.normalization,
                     )
-                    decision = advance_reward_update_boundary(
-                        base_curriculum,
-                        update_id=update_id,
-                        evaluation_report=report,
-                        candidate_checkpoint_path=candidate_path,
-                        candidate_checkpoint_gpu_seconds=(
-                            budget.consumed_gpu_seconds
-                        ),
-                        best_checkpoint_state=best_checkpoint_state,
-                        config=reward_config,
-                    )
+                    if (
+                        evaluation_request.tier
+                        is RewardV4EvaluationTier.SENTINEL
+                    ):
+                        decision = advance_reward_sentinel_update_boundary(
+                            base_curriculum,
+                            update_id=update_id,
+                            evaluation_report=report,
+                            candidate_checkpoint_path=candidate_path,
+                            candidate_checkpoint_gpu_seconds=(
+                                budget.consumed_gpu_seconds
+                            ),
+                            best_checkpoint_state=best_checkpoint_state,
+                            config=reward_config,
+                        )
+                    else:
+                        decision = advance_reward_update_boundary(
+                            base_curriculum,
+                            update_id=update_id,
+                            evaluation_report=report,
+                            candidate_checkpoint_path=candidate_path,
+                            candidate_checkpoint_gpu_seconds=(
+                                budget.consumed_gpu_seconds
+                            ),
+                            best_checkpoint_state=best_checkpoint_state,
+                            config=reward_config,
+                        )
                     if decision.rollback_checkpoint_path is not None:
                         rollback_checkpoint = load_checkpoint(
                             decision.rollback_checkpoint_path

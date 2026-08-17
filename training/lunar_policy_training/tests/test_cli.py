@@ -73,10 +73,17 @@ from lunar_policy_training.evaluation.report import (
     PlatformMetrics,
     REQUIRED_METHODS,
 )
+from lunar_policy_training.evaluation.reward_v4_schedule import (
+    RewardV4EvaluationMode,
+    RewardV4EvaluationTier,
+)
 from lunar_policy_training.proxy_scenario import proxy_observation
 from lunar_policy_training.reward import reward_weights_sha256
-from lunar_policy_training.reward_contract import RewardStage
+from lunar_policy_training.reward_contract import RewardStage, TaskScaleBucket
 from lunar_policy_training.reward_curriculum import PlatformType
+from lunar_policy_training.reward_evaluation import (
+    build_reward_v4_evaluation_manifest,
+)
 
 
 def test_reward_v4_evaluation_resolves_only_active_r2_platforms() -> None:
@@ -95,6 +102,70 @@ def test_reward_v4_evaluation_resolves_only_active_r2_platforms() -> None:
 
     assert active == (PlatformType.WHEELED, PlatformType.LEGGED)
     assert enabled_r2 == (PlatformType.LEGGED,)
+
+
+@pytest.mark.parametrize(
+    ("tier", "expected_seeds", "expected_cap", "expected_report"),
+    (
+        (
+            RewardV4EvaluationTier.SENTINEL,
+            (4081,),
+            1,
+            "sentinel-report.json",
+        ),
+        (
+            RewardV4EvaluationTier.FULL,
+            (4081, 4082, 4083),
+            None,
+            "report.json",
+        ),
+    ),
+)
+def test_reward_v4_evaluation_request_separates_sentinel_from_full(
+    tmp_path: pathlib.Path,
+    tier: RewardV4EvaluationTier,
+    expected_seeds: tuple[int, ...],
+    expected_cap: int | None,
+    expected_report: str,
+) -> None:
+    seeds = (4081, 4082, 4083)
+    manifest = build_reward_v4_evaluation_manifest(
+        platforms=tuple(PlatformType),
+        scale_buckets=tuple(TaskScaleBucket),
+        evaluation_seeds=seeds,
+    )
+    batch = FormalEvaluationBatch(
+        split="validation",
+        factory=SimpleNamespace(scenario_schedule_id="fixed-eval"),
+        observation_template=proxy_observation(0, "WHEELED", step=0),
+        scenario_seeds=seeds,
+    )
+    mode = RewardV4EvaluationMode(
+        tier=tier,
+        checkpoint_payload_sha256="a" * 64,
+        previous_candidate_gpu_seconds=(
+            0.0 if tier is RewardV4EvaluationTier.SENTINEL else 43_199.0
+        ),
+        candidate_gpu_seconds=(
+            10_800.0 if tier is RewardV4EvaluationTier.SENTINEL else 43_200.0
+        ),
+    )
+
+    request = cli_module._reward_v4_evaluation_request(
+        evaluation_directory=(tmp_path / "candidate-33").resolve(),
+        mode=mode,
+        manifest=manifest,
+        batch=batch,
+    )
+
+    assert request.tier is tier
+    assert request.batch.scenario_seeds == expected_seeds
+    assert tuple(
+        sorted({task.evaluation_seed for task in request.manifest.tasks})
+    ) == expected_seeds
+    assert request.max_macro_actions_per_task == expected_cap
+    assert request.report_path.name == expected_report
+    assert request.progress_directory.name == f"{tier.value}-progress"
 
 
 def test_parallel_adapter_preserves_terminal_audit_outside_policy_inputs() -> None:
