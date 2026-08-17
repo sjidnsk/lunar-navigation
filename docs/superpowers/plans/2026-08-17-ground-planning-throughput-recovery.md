@@ -38,3 +38,31 @@
 - [ ] Fast-forward the clean emergency runtime to the verified commit.
 - [ ] Archive the unsealed update 27 journal, migrate source identity on a copied update 26 checkpoint, and verify it before switching `latest.pt`.
 - [ ] Resume the existing run and confirm live workers create fresh update 27 macro-boundary records without the prior qualification error.
+
+## Task 4: Repair the sealed-update evaluation branch
+
+**Files:**
+- Modify: `training/lunar_policy_training/lunar_policy_training/cli.py`
+- Test: `training/lunar_policy_training/tests/test_cli.py`
+
+- [x] Add a RED that resolves active and R2-enabled platforms through the same helper used by the evaluation-due branch.
+- [x] Import `RewardStage`, add the minimal helper, and route the evaluation-due branch through it.
+- [x] Run the focused CLI regression GREEN.
+
+## Task 5: Make multires same-cell batching computationally real
+
+**Files:**
+- Modify: `training/lunar_policy_training/lunar_policy_training/environment/multires_observation.py`
+- Test: `training/lunar_policy_training/tests/test_multires_observation.py`
+
+- [x] Extend the existing exact-equivalence test with a RED proving one same-cell batch invokes detail visibility once.
+- [x] Reuse one validated detail window and visibility mask across the ordered elapsed steps while preserving sequential arrays, counters, coverage deltas, evidence generation, and hashes.
+- [x] Run focused multires, sensor, and boundary suites GREEN and compare a representative batch against sequential execution.
+
+## Task 6: Verify and recover the already sealed update 31
+
+- [x] Run focused CLI and sensor suites plus `git diff --check`.
+- [ ] Commit only the plan, CLI, multires, and focused test files.
+- [ ] Fast-forward the clean emergency runtime to the verified commit and migrate source identity without changing model, optimizer, RNG, budget, or sealed journal data.
+- [ ] Resume from the last applied checkpoint and verify update 31 is applied from its 24 sealed slots without recollection.
+- [ ] Confirm the next update starts with live workers and no evaluation-branch exception.

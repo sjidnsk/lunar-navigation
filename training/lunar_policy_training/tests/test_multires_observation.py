@@ -336,6 +336,26 @@ def test_same_cell_batch_preserves_multires_authoritative_updates() -> None:
     batched, _ = _state()
     pose = Pose2(512.0, 512.0, elevation_m=7.0)
     elapsed_steps_s = (0.0, 0.25, 1.0)
+    delegate = batched.visibility_estimator
+    reveal_calls = 0
+
+    class CountingDetailEstimator:
+        sensor = delegate.sensor
+        resolution_m = delegate.resolution_m
+
+        @staticmethod
+        def reveal_from_pose(
+            physical_obstacle_ratio: np.ndarray,
+            pose_cell: tuple[int, int],
+        ) -> np.ndarray:
+            nonlocal reveal_calls
+            reveal_calls += 1
+            return delegate.reveal_from_pose(
+                physical_obstacle_ratio,
+                pose_cell,
+            )
+
+    batched.visibility_estimator = CountingDetailEstimator()
 
     sequential_deltas = tuple(
         sequential.observe_world(pose, elapsed_s=elapsed_s)
@@ -346,6 +366,7 @@ def test_same_cell_batch_preserves_multires_authoritative_updates() -> None:
     )
 
     assert batched.evidence_generation == len(elapsed_steps_s)
+    assert reveal_calls == 1
     assert _authoritative_observation_bytes(batched) == (
         _authoritative_observation_bytes(sequential)
     )

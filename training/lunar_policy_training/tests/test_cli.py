@@ -75,6 +75,26 @@ from lunar_policy_training.evaluation.report import (
 )
 from lunar_policy_training.proxy_scenario import proxy_observation
 from lunar_policy_training.reward import reward_weights_sha256
+from lunar_policy_training.reward_contract import RewardStage
+from lunar_policy_training.reward_curriculum import PlatformType
+
+
+def test_reward_v4_evaluation_resolves_only_active_r2_platforms() -> None:
+    curriculum = SimpleNamespace(
+        platforms={
+            PlatformType.WHEELED: SimpleNamespace(stage=RewardStage.R1),
+            PlatformType.LEGGED: SimpleNamespace(stage=RewardStage.R2),
+            PlatformType.HOPPER: SimpleNamespace(stage=RewardStage.R2),
+        }
+    )
+
+    active, enabled_r2 = cli_module._reward_v4_evaluation_platforms(
+        curriculum,
+        {"WHEELED": 12, "LEGGED": 12},
+    )
+
+    assert active == (PlatformType.WHEELED, PlatformType.LEGGED)
+    assert enabled_r2 == (PlatformType.LEGGED,)
 
 
 def test_parallel_adapter_preserves_terminal_audit_outside_policy_inputs() -> None:

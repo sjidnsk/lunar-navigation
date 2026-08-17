@@ -216,6 +216,7 @@ from .reward import compute_transition_reward, reward_weights_sha256
 from .reward_contract import (
     DEFAULT_REWARD_CONFIG,
     REWARD_SCHEMA_VERSION,
+    RewardStage,
     TaskScaleBucket,
     reward_config_as_mapping,
 )
@@ -477,6 +478,23 @@ def commit_or_recover_reward_v4_update(
         metrics_record_sha256=recovery.metrics_record_sha256,
     )
     return checkpoint
+
+
+def _reward_v4_evaluation_platforms(
+    curriculum: RewardCurriculumState,
+    allocation: Mapping[str, int],
+) -> tuple[tuple[PlatformType, ...], tuple[PlatformType, ...]]:
+    """Return active platforms and the active subset currently in R2."""
+    active = tuple(
+        platform
+        for platform in PlatformType
+        if platform.value in allocation
+    )
+    return active, tuple(
+        platform
+        for platform in active
+        if curriculum.platforms[platform].stage is RewardStage.R2
+    )
 
 
 def _validate_reward_v4_update_checkpoint(
@@ -5906,16 +5924,12 @@ def _run_reward_v4_updates(
                         applied_here = True
                         return candidate
 
-                    active_platforms = tuple(
-                        platform
-                        for platform in PlatformType
-                        if platform.value in allocation
-                    )
-                    enabled_r2_platforms = tuple(
-                        platform
-                        for platform in active_platforms
-                        if base_curriculum.platforms[platform].stage
-                        is RewardStage.R2
+                    (
+                        active_platforms,
+                        enabled_r2_platforms,
+                    ) = _reward_v4_evaluation_platforms(
+                        base_curriculum,
+                        allocation,
                     )
 
                     def build_candidate() -> TrainingCheckpointV6:

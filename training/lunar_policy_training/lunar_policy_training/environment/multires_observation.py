@@ -107,6 +107,14 @@ class _CoarseObservationUpdate:
 
 
 @dataclass(frozen=True, slots=True)
+class _PreparedDetailObservation:
+    truth: ProjectedScene
+    visible: np.ndarray
+    start_row: int
+    start_column: int
+
+
+@dataclass(frozen=True, slots=True)
 class DetailObservedWindow:
     canvas: MapCanvas
     elevation_m: np.ndarray
@@ -1299,9 +1307,14 @@ class MultiresSensorObservationState(SensorObservationState):
             )
         ):
             raise ValueError("observation elapsed time is invalid")
+        prepared = self._prepare_detail_observation(pose)
         deltas = tuple(
-            self.observe_world(pose, elapsed_s=float(elapsed_s))
-            for elapsed_s in elapsed_steps_s
+            self._apply_prepared_detail_observation(
+                prepared,
+                elapsed_s=float(elapsed_s),
+                update_coarse=index == len(elapsed_steps_s) - 1,
+            )
+            for index, elapsed_s in enumerate(elapsed_steps_s)
         )
         return ObservationDelta(
             visible_cells=sum(delta.visible_cells for delta in deltas),
@@ -1326,7 +1339,16 @@ class MultiresSensorObservationState(SensorObservationState):
             or elapsed_s < 0.0
         ):
             raise ValueError("observation elapsed time is invalid")
-        elapsed = float(elapsed_s)
+        return self._apply_prepared_detail_observation(
+            self._prepare_detail_observation(pose),
+            elapsed_s=float(elapsed_s),
+        )
+
+    def _prepare_detail_observation(
+        self, pose: Pose2
+    ) -> _PreparedDetailObservation:
+        if not isinstance(pose, Pose2) or pose.frame_id != "map":
+            raise ValueError("observation pose must be a map-frame Pose2")
         window_cells = self.tile_provider.tile_geometry.cells
         start_row, start_column, pose_row, pose_column = self._detail_window(
             pose, window_cells
@@ -1345,7 +1367,26 @@ class MultiresSensorObservationState(SensorObservationState):
         ):
             raise RuntimeError("sensor reveal result is invalid")
         visible = np.ascontiguousarray(revealed & truth.valid_mask)
+        return _PreparedDetailObservation(
+            truth=truth,
+            visible=visible,
+            start_row=start_row,
+            start_column=start_column,
+        )
 
+    def _apply_prepared_detail_observation(
+        self,
+        prepared: _PreparedDetailObservation,
+        *,
+        elapsed_s: float,
+        update_coarse: bool = True,
+    ) -> ObservationDelta:
+        elapsed = float(elapsed_s)
+        truth = prepared.truth
+        visible = prepared.visible
+        start_row = prepared.start_row
+        start_column = prepared.start_column
+        window_cells = self.tile_provider.tile_geometry.cells
         aged_updates: list[_AgedDetailUpdate] = []
         for tile in self._detail_tiles.values():
             known = tile.valid_mask
@@ -1470,21 +1511,25 @@ class MultiresSensorObservationState(SensorObservationState):
                 strict=True,
             )
         )
-        coarse_updates = tuple(
-            update
-            for coarse_row, coarse_column in sorted(affected)
-            for update in (
-                self._prospective_coarse_update(
-                    coarse_row,
-                    coarse_column,
-                    start_row=start_row,
-                    start_column=start_column,
-                    truth=truth,
-                    visible=visible,
-                    elapsed_s=elapsed,
-                ),
+        coarse_updates = (
+            tuple(
+                update
+                for coarse_row, coarse_column in sorted(affected)
+                for update in (
+                    self._prospective_coarse_update(
+                        coarse_row,
+                        coarse_column,
+                        start_row=start_row,
+                        start_column=start_column,
+                        truth=truth,
+                        visible=visible,
+                        elapsed_s=elapsed,
+                    ),
+                )
+                if update is not None
             )
-            if update is not None
+            if update_coarse
+            else ()
         )
         delta = ObservationDelta(
             visible_cells=int(np.count_nonzero(visible)),
