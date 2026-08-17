@@ -3058,14 +3058,29 @@ def _prepare_task_cache(
         "capability_sha256": capability_bundle.bundle_sha256,
         "reward_sha256": reward_weights_sha256(),
         "training_semantics_sha256": training_semantics_sha256(),
-        "v3_source_commit": current_v3_commit,
-        "v3_sha256": current_v3_sha256,
     }
     for name, expected in expected_identity.items():
         if getattr(cache.identity, name) != expected:
             raise PreflightError(
                 f"task prefetch scene index {name} differs from current source"
             )
+    v3_identity_matches = (
+        cache.identity.v3_source_commit == current_v3_commit
+        and cache.identity.v3_sha256 == current_v3_sha256
+    )
+    runtime_only_repair = (
+        cache.identity.v3_source_commit != current_v3_commit
+        and cache.identity.v3_sha256 != current_v3_sha256
+        and _cache_accepts_runtime_only_v3_repair(
+            repository_root,
+            cached_commit=cache.identity.v3_source_commit,
+            current_commit=current_v3_commit,
+        )
+    )
+    if not v3_identity_matches and not runtime_only_repair:
+        raise PreflightError(
+            "task prefetch scene index v3 differs from current source"
+        )
     source_commit = _source_commit(repository_root)
     specifications = _scheduled_task_builds(
         cache=cache,
@@ -3818,9 +3833,12 @@ _CACHE_SAFE_V3_RUNTIME_REPAIR_PATHS = frozenset(
     {
         "ros2_ws/src/lunar_planner_training_bridge/include/"
         "lunar_planner_training_bridge/visibility.hpp",
+        "ros2_ws/src/lunar_planner_training_bridge/src/python_bindings.cpp",
         "ros2_ws/src/lunar_planner_training_bridge/src/visibility.cpp",
+        "ros2_ws/src/lunar_planner_training_bridge/test/test_bridge.py",
         "ros2_ws/src/lunar_planner_training_bridge/test/"
         "visibility_benchmark.cpp",
+        "ros2_ws/src/lunar_planner_training_bridge/test/visibility_test.cpp",
     }
 )
 _V3_SOURCE_PREFIXES = (

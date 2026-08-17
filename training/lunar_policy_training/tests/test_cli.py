@@ -684,6 +684,33 @@ def test_cache_accepts_runtime_only_visibility_repair(
     )
 
 
+def test_cache_accepts_batched_visibility_runtime_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The V2 batch bridge may reuse static task-cache material."""
+    monkeypatch.setattr(
+        cli_module, "_commit_is_ancestor", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_commit_changed_paths",
+        lambda *_args: (
+            "ros2_ws/src/lunar_planner_training_bridge/include/"
+            "lunar_planner_training_bridge/visibility.hpp",
+            "ros2_ws/src/lunar_planner_training_bridge/src/python_bindings.cpp",
+            "ros2_ws/src/lunar_planner_training_bridge/src/visibility.cpp",
+            "ros2_ws/src/lunar_planner_training_bridge/test/test_bridge.py",
+            "ros2_ws/src/lunar_planner_training_bridge/test/visibility_test.cpp",
+        ),
+    )
+
+    assert cli_module._cache_accepts_runtime_only_v3_repair(
+        REPOSITORY_ROOT,
+        cached_commit="a" * 40,
+        current_commit="b" * 40,
+    )
+
+
 def test_cache_rejects_runtime_repair_that_changes_planner_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
