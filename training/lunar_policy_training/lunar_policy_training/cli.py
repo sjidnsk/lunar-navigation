@@ -3526,6 +3526,7 @@ def main(argv: list[str] | None = None) -> int:
                 repository_root=repository_root,
                 sensor_performance_sha256=sensor_performance_sha256,
                 task_cache_client=task_runtime.client,
+                task_key_source_commit=task_key_source_commit,
             )
             _start_training_run(
                 config_path=Path(arguments.config),
@@ -4129,6 +4130,7 @@ def _formal_evaluation_batches_from_calibrated_root(
     repository_root: Path,
     sensor_performance_sha256: str,
     task_cache_client: object | None = None,
+    task_key_source_commit: str | None = None,
 ) -> tuple[FormalEvaluationBatch, ...]:
     """Construct all frozen non-training batches for manual or periodic gates."""
     calibrated = _load_calibrated_run_state(artifact_root)
@@ -4142,6 +4144,7 @@ def _formal_evaluation_batches_from_calibrated_root(
             sensor_performance_sha256=sensor_performance_sha256,
             split=split,
             task_cache_client=task_cache_client,
+            task_key_source_commit=task_key_source_commit,
         )
         for split in ("validation", "test", "holdout")
     }
