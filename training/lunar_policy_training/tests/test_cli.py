@@ -484,6 +484,66 @@ def test_task_four_cli_registers_calibrate_train_resume_and_evaluate() -> None:
     assert extension.blocks == 2
 
 
+def test_resume_parser_accepts_fresh_episodes_at_update_boundary() -> None:
+    """The non-exact mode is explicit rather than an implicit recovery fallback."""
+    parsed = build_parser().parse_args(
+        [
+            "resume",
+            "--artifact-root",
+            "/tmp/lunar-task4",
+            "--checkpoint",
+            "/tmp/lunar-task4/checkpoints/update-00000012.pt",
+            "--fresh-episodes-at-update-boundary",
+        ]
+    )
+
+    assert parsed.fresh_episodes_at_update_boundary is True
+
+
+def test_fresh_episode_resume_records_an_idempotent_audit_marker(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The manifest must disclose that active worker state was intentionally reset."""
+    manifest_path = tmp_path / "run-manifest.json"
+    manifest_path.write_text(
+        json.dumps({"schema_version": cli_module.RUN_MANIFEST_SCHEMA_VERSION}),
+        encoding="utf-8",
+    )
+    checkpoint = SimpleNamespace(
+        global_step=12,
+        payload_sha256="a" * 64,
+        update_recovery_state=SimpleNamespace(
+            update_id=12,
+            journal_state="SEALED",
+        ),
+    )
+    checkpoint_path = tmp_path / "checkpoints" / "update-00000012.pt"
+
+    first = cli_module._record_fresh_episode_resume(
+        manifest_path=manifest_path,
+        checkpoint_path=checkpoint_path,
+        checkpoint=checkpoint,
+    )
+    second = cli_module._record_fresh_episode_resume(
+        manifest_path=manifest_path,
+        checkpoint_path=checkpoint_path,
+        checkpoint=checkpoint,
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert first == second
+    assert payload["fresh_episode_resume_history"] == [first]
+    assert first == {
+        "schema_version": "lunar-fresh-episode-resume/v1",
+        "mode": "fresh-episodes-at-update-boundary",
+        "checkpoint_path": str(checkpoint_path),
+        "checkpoint_payload_sha256": "a" * 64,
+        "global_step": 12,
+        "environment_state_restored": False,
+        "worker_boundary_replayed": False,
+    }
+
+
 def test_closed_loop_gate_cli_runs_without_starting_training(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,

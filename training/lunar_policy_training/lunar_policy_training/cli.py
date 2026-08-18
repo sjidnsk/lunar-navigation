@@ -2325,6 +2325,14 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--artifact-root", required=True)
     resume.add_argument("--checkpoint", required=True)
     resume.add_argument("--sensor-performance-report")
+    resume.add_argument(
+        "--fresh-episodes-at-update-boundary",
+        action="store_true",
+        help=(
+            "resume model and optimizer state from a sealed update while "
+            "starting every worker in a new episode"
+        ),
+    )
 
     evaluate = subparsers.add_parser("evaluate")
     evaluate.add_argument("--checkpoint", required=True)
@@ -3666,6 +3674,9 @@ def main(argv: list[str] | None = None) -> int:
                 checkpoint_path=Path(arguments.checkpoint),
                 repository_root=repository_root,
                 max_updates=None,
+                fresh_episodes_at_update_boundary=(
+                    arguments.fresh_episodes_at_update_boundary
+                ),
                 capability_bundle=capability_bundle,
                 formal_environment_factory=formal_assembly.factory,
                 formal_observation_template=(
@@ -4992,6 +5003,7 @@ def _run_curriculum_training(
     max_updates: int | None,
     interrupt_first_update: bool,
     restore_checkpoint,
+    fresh_episodes_at_update_boundary: bool = False,
     warm_start_checkpoint_path: Path | None = None,
     random_init: bool = False,
     capability_bundle: FrozenCapabilityBundle | None = None,
@@ -5004,6 +5016,14 @@ def _run_curriculum_training(
     """Run one smoke override or advance across four active-GPU phases."""
     if restore_checkpoint is not None and warm_start_checkpoint_path is not None:
         raise PreflightError("resume and policy warm-start are mutually exclusive")
+    if type(fresh_episodes_at_update_boundary) is not bool:
+        raise PreflightError("fresh-episode resume mode is invalid")
+    if fresh_episodes_at_update_boundary and (
+        restore_checkpoint is None or calibrated.config.reward_v4 is None
+    ):
+        raise PreflightError(
+            "fresh-episode resume requires a Reward V4 restore checkpoint"
+        )
     if type(random_init) is not bool:
         raise PreflightError("random initialization selection is invalid")
     if restore_checkpoint is not None and random_init:
@@ -5037,6 +5057,7 @@ def _run_curriculum_training(
         remaining_updates = max_updates
         pending_warm_start = warm_start_checkpoint_path
         pending_random_init = random_init
+        pending_fresh_episodes = fresh_episodes_at_update_boundary
         while True:
             curriculum = (
                 RewardCurriculumState.from_mapping(
@@ -5070,6 +5091,7 @@ def _run_curriculum_training(
                 ),
                 interrupt_first_update=interrupt_first_update,
                 restore_checkpoint=checkpoint,
+                fresh_episodes_at_update_boundary=pending_fresh_episodes,
                 curriculum_phase=curriculum.stage.value,
                 rollout_environment_factory=rollout_factory,
                 rollout_observation_template=formal_observation_template,
@@ -5115,6 +5137,7 @@ def _run_curriculum_training(
             interrupt_first_update = False
             pending_warm_start = None
             pending_random_init = False
+            pending_fresh_episodes = False
     schedule = CurriculumSchedule()
     checkpoint = restore_checkpoint
     pending_warm_start = warm_start_checkpoint_path
@@ -5548,12 +5571,56 @@ def _restore_reward_v4_budget_boundary(
     budget.consumed_gpu_seconds = restored.consumed_gpu_seconds
 
 
+def _record_fresh_episode_resume(
+    *,
+    manifest_path: Path,
+    checkpoint_path: Path,
+    checkpoint: object,
+) -> dict[str, object]:
+    """Durably disclose a deliberately non-exact worker recovery mode."""
+    global_step = getattr(checkpoint, "global_step", None)
+    payload_sha256 = getattr(checkpoint, "payload_sha256", None)
+    recovery = getattr(checkpoint, "update_recovery_state", None)
+    if (
+        type(global_step) is not int
+        or global_step <= 0
+        or not isinstance(payload_sha256, str)
+        or len(payload_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in payload_sha256)
+        or getattr(recovery, "update_id", None) != global_step
+        or getattr(recovery, "journal_state", None) != "SEALED"
+    ):
+        raise ArtifactRootError(
+            "fresh-episode resume requires a sealed update checkpoint"
+        )
+    evidence: dict[str, object] = {
+        "schema_version": "lunar-fresh-episode-resume/v1",
+        "mode": "fresh-episodes-at-update-boundary",
+        "checkpoint_path": str(checkpoint_path),
+        "checkpoint_payload_sha256": payload_sha256,
+        "global_step": global_step,
+        "environment_state_restored": False,
+        "worker_boundary_replayed": False,
+    }
+    manifest = _read_run_manifest(manifest_path)
+    history = manifest.get("fresh_episode_resume_history", [])
+    if not isinstance(history, list) or any(
+        not isinstance(item, Mapping) for item in history
+    ):
+        raise ArtifactRootError("fresh-episode resume history is invalid")
+    if evidence not in history:
+        manifest["fresh_episode_resume_history"] = [*history, evidence]
+        _write_manifest_payload(manifest_path, manifest)
+    return evidence
+
+
 def _resume_training_run(
     *,
     artifact_root: Path,
     checkpoint_path: Path | None = None,
     repository_root: Path,
     max_updates: int | None,
+    fresh_episodes_at_update_boundary: bool = False,
     capability_bundle: FrozenCapabilityBundle | None = None,
     formal_environment_factory: FrozenCapabilityEnvironmentFactory | None = None,
     formal_observation_template: PolicyBatch | None = None,
@@ -5563,6 +5630,8 @@ def _resume_training_run(
     root = validate_artifact_root(
         artifact_root, repository_root=repository_root
     )
+    if type(fresh_episodes_at_update_boundary) is not bool:
+        raise ArtifactRootError("fresh-episode resume mode is invalid")
     calibrated = _load_calibrated_run_state(root)
     manifest = _read_run_manifest(root / "run-manifest.json")
     frozen_config = manifest.get("frozen_config")
@@ -5596,6 +5665,10 @@ def _resume_training_run(
         and manifest.get("global_step") == 0
         and checkpoint_path is None
     ):
+        if fresh_episodes_at_update_boundary:
+            raise ArtifactRootError(
+                "fresh-episode resume requires an accepted update checkpoint"
+            )
         warm_start, random_init = _reward_v4_step_zero_initialization(
             manifest
         )
@@ -5646,6 +5719,10 @@ def _resume_training_run(
     if config.reward_v4 is not None:
         _validate_reward_v4_resume_manifest(manifest, checkpoint=checkpoint)
         _validate_reward_v4_resume_curriculum(config, checkpoint=checkpoint)
+    elif fresh_episodes_at_update_boundary:
+        raise ArtifactRootError(
+            "fresh-episode resume requires a Reward V4 checkpoint"
+        )
     if manifest.get("global_step") != checkpoint.global_step:
         raise ArtifactRootError("run manifest global step differs from latest checkpoint")
     manifest_budget = manifest.get("consumed_gpu_seconds")
@@ -5676,6 +5753,12 @@ def _resume_training_run(
             raise ArtifactRootError(
                 "checkpoint curriculum phase differs from GPU budget"
             )
+    if fresh_episodes_at_update_boundary:
+        _record_fresh_episode_resume(
+            manifest_path=root / "run-manifest.json",
+            checkpoint_path=target,
+            checkpoint=checkpoint,
+        )
 
     def evaluate_candidate(
         candidate: Path,
@@ -5706,6 +5789,7 @@ def _resume_training_run(
         max_updates=max_updates,
         interrupt_first_update=False,
         restore_checkpoint=checkpoint,
+        fresh_episodes_at_update_boundary=fresh_episodes_at_update_boundary,
         capability_bundle=capability_bundle,
         formal_environment_factory=formal_environment_factory,
         formal_observation_template=formal_observation_template,
@@ -5756,7 +5840,17 @@ def _reward_v4_initial_episode_states(
     update_id: int,
     curriculum_phase: str,
     allocation: Mapping[str, int],
+    fresh_episodes_at_update_boundary: bool = False,
 ) -> tuple[Mapping[str, object] | None, ...] | None:
+    if type(fresh_episodes_at_update_boundary) is not bool:
+        raise PreflightError("fresh-episode resume mode is invalid")
+    if fresh_episodes_at_update_boundary:
+        recovered = journal.recover_worker_boundaries(update_id=update_id)
+        if recovered:
+            raise PreflightError(
+                "fresh-episode resume refuses uncommitted worker boundaries"
+            )
+        return None
     base: tuple[Mapping[str, object], ...] | None = None
     if restore_checkpoint is not None:
         base = resume_worker_episode_states(
@@ -5787,6 +5881,7 @@ def _run_reward_v4_updates(
     max_updates: int,
     interrupt_first_update: bool,
     restore_checkpoint: TrainingCheckpointV6 | None,
+    fresh_episodes_at_update_boundary: bool,
     curriculum_phase: str,
     environment_factory: FrozenCapabilityEnvironmentFactory,
     observation_template: PolicyBatch,
@@ -5883,6 +5978,7 @@ def _run_reward_v4_updates(
         update_id=next_update_id,
         curriculum_phase=curriculum_phase,
         allocation=allocation,
+        fresh_episodes_at_update_boundary=fresh_episodes_at_update_boundary,
     )
     pool = ParallelEnvPool(
         allocation=allocation,
@@ -6477,6 +6573,7 @@ def _run_updates(
     max_updates: int,
     interrupt_first_update: bool,
     restore_checkpoint,
+    fresh_episodes_at_update_boundary: bool = False,
     curriculum_phase: str = "joint",
     phase_end_gpu_seconds: float | None = None,
     pause_after_gpu_seconds: float | None = None,
@@ -6499,6 +6596,14 @@ def _run_updates(
         raise PreflightError("training run identity differs from configuration")
     if restore_checkpoint is not None and warm_start_checkpoint_path is not None:
         raise PreflightError("resume and policy warm-start are mutually exclusive")
+    if type(fresh_episodes_at_update_boundary) is not bool:
+        raise PreflightError("fresh-episode resume mode is invalid")
+    if fresh_episodes_at_update_boundary and (
+        config.reward_v4 is None or restore_checkpoint is None
+    ):
+        raise PreflightError(
+            "fresh-episode resume requires a Reward V4 restore checkpoint"
+        )
     if type(random_init) is not bool:
         raise PreflightError("random initialization selection is invalid")
     if restore_checkpoint is not None and random_init:
@@ -6554,6 +6659,7 @@ def _run_updates(
             max_updates=max_updates,
             interrupt_first_update=interrupt_first_update,
             restore_checkpoint=restore_checkpoint,
+            fresh_episodes_at_update_boundary=fresh_episodes_at_update_boundary,
             curriculum_phase=curriculum_phase,
             environment_factory=environment_factory,
             observation_template=observation_template,

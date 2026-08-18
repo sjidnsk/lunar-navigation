@@ -1431,6 +1431,59 @@ def test_formal_active_episode_resume_only_extends_worker_startup_timeout() -> N
     assert training_cli._parallel_pool_startup_timeout_seconds(({},)) == 1800.0
 
 
+def test_reward_v4_fresh_episode_resume_skips_worker_state_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sealed-update fast resume starts new workers instead of replaying state."""
+    recovered_updates: list[int] = []
+    journal = SimpleNamespace(
+        worker_count=2,
+        recover_worker_boundaries=lambda *, update_id: recovered_updates.append(
+            update_id
+        )
+        or {},
+    )
+
+    def replay_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("fresh-episode resume must not replay worker state")
+
+    monkeypatch.setattr(
+        training_cli,
+        "resume_worker_episode_states",
+        replay_must_not_run,
+    )
+
+    states = training_cli._reward_v4_initial_episode_states(
+        restore_checkpoint=object(),
+        journal=journal,
+        update_id=13,
+        curriculum_phase="joint",
+        allocation={"WHEELED": 2},
+        fresh_episodes_at_update_boundary=True,
+    )
+
+    assert states is None
+    assert recovered_updates == [13]
+
+
+def test_reward_v4_fresh_episode_resume_rejects_uncommitted_boundaries() -> None:
+    """Fast resume may not silently discard a partially committed next update."""
+    journal = SimpleNamespace(
+        worker_count=2,
+        recover_worker_boundaries=lambda *, update_id: {0: object()},
+    )
+
+    with pytest.raises(PreflightError, match="uncommitted worker boundaries"):
+        training_cli._reward_v4_initial_episode_states(
+            restore_checkpoint=object(),
+            journal=journal,
+            update_id=13,
+            curriculum_phase="joint",
+            allocation={"WHEELED": 2},
+            fresh_episodes_at_update_boundary=True,
+        )
+
+
 def test_formal_calibration_and_training_share_the_runtime_worker_timeout() -> None:
     assert training_cli._parallel_pool_runtime_timeout_seconds(formal=True) == 1200.0
     assert training_cli._parallel_pool_runtime_timeout_seconds(formal=False) == 60.0
