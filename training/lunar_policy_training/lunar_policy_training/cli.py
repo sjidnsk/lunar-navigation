@@ -8073,6 +8073,32 @@ def _validated_source_migration_sensor_reports(
     return previous_sha256, current_sha256
 
 
+def _validated_task_prefetch_for_source_migration(
+    *, report_path: Path, expected_old_source_commit: str
+) -> tuple[dict[str, object], str]:
+    """Load the immutable task report before re-signing its source identity."""
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ArtifactRootError(
+            "source migration task prefetch evidence is unavailable"
+        ) from error
+    if not isinstance(report, Mapping):
+        raise ArtifactRootError("source migration task prefetch evidence is invalid")
+    body = dict(report)
+    report_sha256 = body.pop("report_sha256", None)
+    if (
+        body.get("schema") != _TASK_PREFETCH_REPORT_SCHEMA
+        or report_sha256
+        != hashlib.sha256(_canonical_json_bytes(body)).hexdigest()
+        or body.get("source_commit") != expected_old_source_commit
+    ):
+        raise ArtifactRootError(
+            "source migration task prefetch evidence differs from checkpoint"
+        )
+    return body, str(report_sha256)
+
+
 def _prepare_source_migrated_resume_checkpoint(
     *,
     artifact_root: Path,
@@ -8154,6 +8180,13 @@ def _prepare_source_migrated_resume_checkpoint(
     formal_environment = manifest.get("formal_environment")
     if not isinstance(formal_environment, dict):
         raise ArtifactRootError("source migration formal environment is missing")
+    prefetch_path = root / "ground-task-prefetch.json"
+    prefetch_body, previous_prefetch_sha256 = (
+        _validated_task_prefetch_for_source_migration(
+            report_path=prefetch_path,
+            expected_old_source_commit=expected_old_source_commit,
+        )
+    )
     previous_sensor_sha256, current_sensor_sha256 = (
         _validated_source_migration_sensor_reports(
             previous_report_path=previous_sensor_performance_report,
@@ -8203,6 +8236,10 @@ def _prepare_source_migrated_resume_checkpoint(
         expected_budget_extension_blocks=checkpoint.budget_extension_blocks,
         expected_total_gpu_budget_seconds=checkpoint.total_gpu_budget_seconds,
     )
+    prefetch_body["source_commit"] = new_source_commit
+    current_prefetch_sha256 = _write_task_prefetch_report(
+        prefetch_path, prefetch_body
+    )
     migrations = manifest.get("source_migrations", [])
     if not isinstance(migrations, list):
         raise ArtifactRootError("source migration manifest history is invalid")
@@ -8230,6 +8267,9 @@ def _prepare_source_migrated_resume_checkpoint(
                 current_sensor_performance_report.resolve(strict=True)
             ),
             "current_sensor_performance_sha256": current_sensor_sha256,
+            "prefetch_report": str(prefetch_path),
+            "previous_prefetch_report_sha256": previous_prefetch_sha256,
+            "current_prefetch_report_sha256": current_prefetch_sha256,
             "changed_paths": list(changed_paths),
         }
     )

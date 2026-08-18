@@ -626,6 +626,21 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
         ),
         encoding="utf-8",
     )
+    prefetch_path = root / "ground-task-prefetch.json"
+    cli_module._write_task_prefetch_report(
+        prefetch_path,
+        {
+            "schema": cli_module._TASK_PREFETCH_REPORT_SCHEMA,
+            "source_commit": checkpoint.source_commit,
+            "cache_manifest": str(tmp_path / "cache-manifest.json"),
+            "cache_manifest_sha256": "6" * 64,
+            "stage": "GROUND_R1",
+            "prefetch_depth": 2,
+            "requested_task_count": 48,
+            "resolved_task_count": 48,
+            "tasks": [],
+        },
+    )
     new_commit = "b" * 40
     monkeypatch.setattr(cli_module, "_source_commit", lambda _root: new_commit)
     monkeypatch.setattr(
@@ -676,6 +691,22 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
     assert manifest["formal_environment"]["sensor_performance_sha256"] == (
         "8" * 64
     )
+    prefetch = json.loads(prefetch_path.read_text(encoding="utf-8"))
+    prefetch_body = dict(prefetch)
+    prefetch_sha256 = prefetch_body.pop("report_sha256")
+    assert prefetch_body["source_commit"] == new_commit
+    assert prefetch_sha256 == hashlib.sha256(
+        json.dumps(
+            prefetch_body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert manifest["source_migrations"][-1]["current_prefetch_report_sha256"] == (
+        prefetch_sha256
+    )
 
     chained_commit = "c" * 40
     monkeypatch.setattr(
@@ -707,6 +738,8 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
     assert manifest["formal_environment"]["sensor_performance_sha256"] == (
         "9" * 64
     )
+    chained_prefetch = json.loads(prefetch_path.read_text(encoding="utf-8"))
+    assert chained_prefetch["source_commit"] == chained_commit
 
 
 def test_formal_checkpoint_rejects_missing_episode_cursor_state() -> None:
