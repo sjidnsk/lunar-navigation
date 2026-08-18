@@ -1428,7 +1428,7 @@ def test_formal_resume_preflight_uses_the_fixed_three_platform_order() -> None:
 def test_formal_active_episode_resume_only_extends_worker_startup_timeout() -> None:
     """Restored active episodes get startup headroom, not a looser step timeout."""
     assert training_cli._parallel_pool_startup_timeout_seconds(None) == 60.0
-    assert training_cli._parallel_pool_startup_timeout_seconds(({},)) == 600.0
+    assert training_cli._parallel_pool_startup_timeout_seconds(({},)) == 1800.0
 
 
 def test_formal_calibration_and_training_share_the_runtime_worker_timeout() -> None:
