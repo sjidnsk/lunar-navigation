@@ -403,15 +403,32 @@ class RewardV4RuntimeDiagnostics:
         candidate_refresh_elapsed_s = 0.0
         global_search_elapsed_s = 0.0
         for committed in rollout.committed:
-            pre = add_state(committed.payload.pre_worker_state)
+            pre = committed.payload.pre_worker_audit
             post = add_state(committed.payload.post_worker_state)
-            candidate_refresh_elapsed_s += float(
-                pre.candidate_decision_snapshot.candidate_refresh_elapsed_s
-            )
-            global_search_elapsed_s += float(
-                pre.candidate_decision_snapshot.global_search_elapsed_s
-            )
-            if pre.platform_type != committed.platform_type or (
+            try:
+                pre_worker = pre["worker_index"]
+                pre_platform = pre["platform_type"]
+                refresh_elapsed = pre["candidate_refresh_elapsed_s"]
+                search_elapsed = pre["global_search_elapsed_s"]
+            except KeyError as error:
+                raise TrainingMetricsError(
+                    "journal pre worker audit is incomplete"
+                ) from error
+            if (
+                type(pre_worker) is not int
+                or pre_worker != committed.worker_index
+                or pre_platform != committed.platform_type
+                or not isinstance(refresh_elapsed, (int, float))
+                or isinstance(refresh_elapsed, bool)
+                or not math.isfinite(float(refresh_elapsed))
+                or not isinstance(search_elapsed, (int, float))
+                or isinstance(search_elapsed, bool)
+                or not math.isfinite(float(search_elapsed))
+            ):
+                raise TrainingMetricsError("journal pre worker audit is invalid")
+            candidate_refresh_elapsed_s += float(refresh_elapsed)
+            global_search_elapsed_s += float(search_elapsed)
+            if (
                 post.platform_type != committed.platform_type
             ):
                 raise TrainingMetricsError("runtime committed platform differs")

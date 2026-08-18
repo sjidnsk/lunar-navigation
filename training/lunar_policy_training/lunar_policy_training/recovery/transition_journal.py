@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import pickle
 import re
+import shutil
 import threading
 from types import MappingProxyType
 from typing import Mapping, Sequence
@@ -31,11 +32,12 @@ from ..reward_contract import (
 )
 
 
-PAYLOAD_SCHEMA_VERSION = "lunar-transition-payload/v3"
+PAYLOAD_SCHEMA_VERSION = "lunar-transition-payload/v4"
 INDEX_SCHEMA_VERSION = "lunar-transition-index/v1"
 SEAL_SCHEMA_VERSION = "lunar-transition-seal/v1"
 APPLIED_SCHEMA_VERSION = "lunar-transition-applied/v1"
 _RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_UPDATE_ROOT_PATTERN = re.compile(r"update-(\d{8})")
 _PLATFORMS = frozenset(("WHEELED", "LEGGED", "HOPPER"))
 _FAULTS = frozenset(("before_rename", "after_rename_before_index"))
 _PAYLOAD_FIELDS = frozenset(
@@ -60,7 +62,7 @@ _PAYLOAD_FIELDS = frozenset(
         "reward_inputs",
         "done",
         "terminal_class",
-        "pre_worker_state",
+        "pre_worker_audit",
         "post_worker_state",
     )
 )
@@ -134,7 +136,7 @@ class InjectedJournalFault(JournalError):
 
 @dataclass(frozen=True, slots=True, eq=False)
 class MacroTransitionPayload:
-    """One complete PPO sample and both recoverable environment boundaries."""
+    """One complete PPO sample, compact pre-audit, and recoverable post-state."""
 
     update_id: int
     worker_index: int
@@ -155,7 +157,7 @@ class MacroTransitionPayload:
     reward_inputs: RewardInputsV4
     done: bool
     terminal_class: RewardTerminalClass
-    pre_worker_state: Mapping[str, object]
+    pre_worker_audit: Mapping[str, object]
     post_worker_state: Mapping[str, object]
 
     def __post_init__(self) -> None:
@@ -164,7 +166,7 @@ class MacroTransitionPayload:
         object.__setattr__(self, "old_log_prob", _clone_tensor(self.old_log_prob))
         object.__setattr__(self, "old_value", _clone_tensor(self.old_value))
         object.__setattr__(
-            self, "pre_worker_state", _freeze_mapping(self.pre_worker_state)
+            self, "pre_worker_audit", _freeze_mapping(self.pre_worker_audit)
         )
         object.__setattr__(
             self, "post_worker_state", _freeze_mapping(self.post_worker_state)
@@ -466,6 +468,55 @@ class TransitionJournal:
             body["record_sha256"] = _json_sha256(body)
             self._write_json_atomic(self._applied_path(update_id), body)
             return self.load_update(update_id)
+
+    def prune_applied_updates(self, *, keep_latest: int) -> tuple[int, ...]:
+        """Remove only superseded, fully applied update directories.
+
+        Callers invoke this only after the corresponding run manifest has
+        advanced, so the remaining newest applied update and any open update
+        preserve the crash-recovery boundary.
+        """
+        if type(keep_latest) is not int or keep_latest < 1:
+            raise JournalValidationError("journal retention count is invalid")
+        with self._lock:
+            if not self.recovery_root.exists():
+                return ()
+            recovery_root = self.recovery_root.resolve()
+            applied: list[tuple[int, Path]] = []
+            for path in sorted(self.recovery_root.iterdir(), key=lambda item: item.name):
+                matched = _UPDATE_ROOT_PATTERN.fullmatch(path.name)
+                if matched is None:
+                    continue
+                if path.is_symlink() or not path.is_dir():
+                    raise JournalCorruptionError("journal update root is invalid")
+                update_id = int(matched.group(1))
+                applied_path = path / "applied.json"
+                if not applied_path.exists():
+                    continue
+                marker = self._read_applied(applied_path)
+                seal = self._read_seal(path / "seal.json")
+                if (
+                    marker["run_id"] != self.run_id
+                    or marker["update_id"] != update_id
+                    or marker["state"] != "APPLIED"
+                    or seal["run_id"] != self.run_id
+                    or seal["update_id"] != update_id
+                    or seal["state"] != "SEALED"
+                    or marker["journal_sha256"] != seal["journal_sha256"]
+                ):
+                    raise JournalCorruptionError("journal applied root is invalid")
+                applied.append((update_id, path))
+
+            prunable = applied[:-keep_latest]
+            removed: list[int] = []
+            for update_id, path in prunable:
+                target = path.resolve()
+                if target.parent != recovery_root or target == recovery_root:
+                    raise JournalCorruptionError("journal prune target is invalid")
+                shutil.rmtree(target)
+                _fsync_directory(recovery_root)
+                removed.append(update_id)
+            return tuple(removed)
 
     def recover_worker_boundaries(
         self, *, update_id: int
@@ -870,6 +921,109 @@ def _validate_worker_strata(
     return parsed
 
 
+_PRE_WORKER_AUDIT_FIELDS = frozenset(
+    (
+        "worker_index",
+        "platform_type",
+        "episode_id",
+        "platform_task_key_sha256",
+        "physical_snapshot_id",
+        "coverable_detail_cell_count",
+        "observed_coverable_detail_cell_count",
+        "observed_coverable_mask_sha256",
+        "candidate_refresh_elapsed_s",
+        "global_search_elapsed_s",
+        "fine_pose_candidate_count",
+        "globally_reachable_candidate_count",
+    )
+)
+
+
+def build_pre_worker_audit(state: Mapping[str, object]) -> Mapping[str, object]:
+    """Project just the pre-action facts used by durable update audits."""
+    if not isinstance(state, Mapping):
+        raise JournalValidationError("pre worker state is invalid")
+    try:
+        identity = state["observation_identity"]
+        decision = state["candidate_decision_snapshot"]
+        if not isinstance(identity, Mapping) or not isinstance(decision, Mapping):
+            raise TypeError
+        audit: dict[str, object] = {
+            "worker_index": state["worker_index"],
+            "platform_type": state["platform_type"],
+            "episode_id": identity["episode_id"],
+            "platform_task_key_sha256": state["platform_task_key_sha256"],
+            "physical_snapshot_id": state["physical_snapshot_id"],
+            "coverable_detail_cell_count": state["coverable_detail_cell_count"],
+            "observed_coverable_detail_cell_count": state[
+                "observed_coverable_detail_cell_count"
+            ],
+            "observed_coverable_mask_sha256": state[
+                "observed_coverable_mask_sha256"
+            ],
+            "candidate_refresh_elapsed_s": decision[
+                "candidate_refresh_elapsed_s"
+            ],
+            "global_search_elapsed_s": decision["global_search_elapsed_s"],
+            "fine_pose_candidate_count": decision["fine_pose_candidate_count"],
+            "globally_reachable_candidate_count": decision[
+                "globally_reachable_candidate_count"
+            ],
+        }
+    except (KeyError, TypeError) as error:
+        raise JournalValidationError("pre worker state lacks audit facts") from error
+    _validate_pre_worker_audit(audit)
+    return audit
+
+
+def _validate_pre_worker_audit(value: object) -> None:
+    if not isinstance(value, Mapping) or set(value) != _PRE_WORKER_AUDIT_FIELDS:
+        raise JournalValidationError("pre worker audit is invalid")
+    worker = value["worker_index"]
+    if type(worker) is not int or worker < 0:
+        raise JournalValidationError("pre worker audit worker is invalid")
+    if value["platform_type"] not in _PLATFORMS:
+        raise JournalValidationError("pre worker audit platform is invalid")
+    episode_id = value["episode_id"]
+    if not isinstance(episode_id, str) or not episode_id:
+        raise JournalValidationError("pre worker audit episode is invalid")
+    for name in (
+        "platform_task_key_sha256",
+        "physical_snapshot_id",
+        "observed_coverable_mask_sha256",
+    ):
+        if not _is_sha256(value[name]):
+            raise JournalValidationError("pre worker audit hash is invalid")
+    total = value["coverable_detail_cell_count"]
+    observed = value["observed_coverable_detail_cell_count"]
+    if (
+        type(total) is not int
+        or total <= 0
+        or type(observed) is not int
+        or not 0 <= observed <= total
+    ):
+        raise JournalValidationError("pre worker audit coverage is invalid")
+    for name in (
+        "candidate_refresh_elapsed_s",
+        "global_search_elapsed_s",
+    ):
+        elapsed = value[name]
+        if (
+            not isinstance(elapsed, (int, float))
+            or isinstance(elapsed, bool)
+            or not math.isfinite(float(elapsed))
+            or elapsed < 0.0
+        ):
+            raise JournalValidationError("pre worker audit elapsed is invalid")
+    for name in (
+        "fine_pose_candidate_count",
+        "globally_reachable_candidate_count",
+    ):
+        count = value[name]
+        if type(count) is not int or count < 0:
+            raise JournalValidationError("pre worker audit count is invalid")
+
+
 def _validate_payload(payload: MacroTransitionPayload) -> None:
     if not isinstance(payload, MacroTransitionPayload):
         raise JournalValidationError("journal payload type is invalid")
@@ -926,7 +1080,13 @@ def _validate_payload(payload: MacroTransitionPayload) -> None:
     }
     if payload.done != terminal:
         raise JournalValidationError("journal done and terminal class disagree")
-    _validate_safe_mapping(payload.pre_worker_state, "pre worker state")
+    _validate_pre_worker_audit(payload.pre_worker_audit)
+    if (
+        payload.pre_worker_audit["worker_index"] != payload.worker_index
+        or payload.pre_worker_audit["platform_type"] != payload.platform_type
+        or payload.pre_worker_audit["episode_id"] != payload.episode_id
+    ):
+        raise JournalValidationError("pre worker audit identity differs")
     _validate_safe_mapping(payload.post_worker_state, "post worker state")
 
 
@@ -1052,7 +1212,7 @@ def _payload_to_mapping(payload: MacroTransitionPayload) -> dict[str, object]:
         },
         "done": payload.done,
         "terminal_class": payload.terminal_class.value,
-        "pre_worker_state": _storage_value(payload.pre_worker_state),
+        "pre_worker_audit": _storage_value(payload.pre_worker_audit),
         "post_worker_state": _storage_value(payload.post_worker_state),
     }
 
@@ -1153,7 +1313,7 @@ def _payload_from_mapping(value: object) -> MacroTransitionPayload:
             ),
             done=value["done"],
             terminal_class=RewardTerminalClass(value["terminal_class"]),
-            pre_worker_state=value["pre_worker_state"],
+            pre_worker_audit=value["pre_worker_audit"],
             post_worker_state=value["post_worker_state"],
         )
     except (TypeError, ValueError) as error:

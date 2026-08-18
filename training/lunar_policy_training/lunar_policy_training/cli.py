@@ -294,7 +294,7 @@ def _reward_v4_macro_audits(
     for row, committed in enumerate(rollout.committed):
         payload = committed.payload
         inputs = payload.reward_inputs
-        pre = payload.pre_worker_state
+        pre = payload.pre_worker_audit
         post = payload.post_worker_state
         try:
             total_before = pre["coverable_detail_cell_count"]
@@ -6396,6 +6396,7 @@ def _run_reward_v4_updates(
                         checkpoint.reward_curriculum_state
                     ),
                 )
+                journal.prune_applied_updates(keep_latest=1)
                 if stop_flag.requested:
                     signal_observed = True
                     break

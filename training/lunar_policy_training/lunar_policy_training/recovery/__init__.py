@@ -11,6 +11,7 @@ from .transition_journal import (
     MacroTransitionPayload,
     RecoveredWorkerBoundary,
     TransitionJournal,
+    build_pre_worker_audit,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "MacroTransitionPayload",
     "RecoveredWorkerBoundary",
     "TransitionJournal",
+    "build_pre_worker_audit",
 ]

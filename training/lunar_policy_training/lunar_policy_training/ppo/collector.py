@@ -32,6 +32,7 @@ from ..recovery.transition_journal import (
     CommittedTransition,
     MacroTransitionPayload,
     TransitionJournal,
+    build_pre_worker_audit,
 )
 from ..reward import DEFAULT_REWARD_WEIGHTS, compute_reward_components
 from ..reward_contract import RewardStage, RewardWeightsV4
@@ -548,7 +549,9 @@ def collect_committed_macro_rollout(
                 reward_inputs=event.reward_inputs,
                 done=event.done,
                 terminal_class=event.terminal_class,
-                pre_worker_state=current.prepared.worker_state,
+                pre_worker_audit=build_pre_worker_audit(
+                    current.prepared.worker_state
+                ),
                 post_worker_state=event.worker_state,
             )
             committed = journal.commit(payload)
