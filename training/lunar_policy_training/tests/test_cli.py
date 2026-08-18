@@ -6,7 +6,7 @@ import signal
 import json
 import subprocess
 import sys
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 import torch
@@ -103,6 +103,79 @@ def test_reward_v4_evaluation_resolves_only_active_r2_platforms() -> None:
 
     assert active == (PlatformType.WHEELED, PlatformType.LEGGED)
     assert enabled_r2 == (PlatformType.LEGGED,)
+
+
+def test_checkpoint_environment_state_reuses_terminal_journal_states() -> None:
+    """A sealed journal already owns the exact worker recovery boundary."""
+    def committed(worker: int, slot: int, label: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            worker_index=worker,
+            slot_index=slot,
+            payload=SimpleNamespace(
+                post_worker_state=MappingProxyType(
+                    {
+                        "worker": worker,
+                        "label": label,
+                        "reveal_history": (label, "boundary"),
+                    }
+                )
+            ),
+        )
+
+    loaded = SimpleNamespace(
+        state="SEALED",
+        committed={
+            (0, 0): committed(0, 0, "old-0"),
+            (1, 0): committed(1, 0, "old-1"),
+            (0, 1): committed(0, 1, "final-0"),
+            (1, 1): committed(1, 1, "final-1"),
+        },
+    )
+
+    environment_state = cli_module._checkpoint_environment_state_from_sealed_journal(
+        loaded=loaded,
+        scenario_schedule_id="fixed-schedule",
+        worker_count=2,
+        actions_per_worker=2,
+    )
+
+    assert environment_state == {
+        "schema_version": cli_module.FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
+        "scenario_schedule_id": "fixed-schedule",
+        "worker_episode_states": [
+            {
+                "worker": 0,
+                "label": "final-0",
+                "reveal_history": ["final-0", "boundary"],
+            },
+            {
+                "worker": 1,
+                "label": "final-1",
+                "reveal_history": ["final-1", "boundary"],
+            },
+        ],
+    }
+
+
+def test_checkpoint_environment_state_rejects_missing_terminal_journal_slot() -> None:
+    loaded = SimpleNamespace(
+        state="SEALED",
+        committed={
+            (0, 0): SimpleNamespace(
+                worker_index=0,
+                slot_index=0,
+                payload=SimpleNamespace(post_worker_state={"worker": 0}),
+            )
+        },
+    )
+
+    with pytest.raises(cli_module.UpdateCommitError, match="terminal worker state"):
+        cli_module._checkpoint_environment_state_from_sealed_journal(
+            loaded=loaded,
+            scenario_schedule_id="fixed-schedule",
+            worker_count=1,
+            actions_per_worker=2,
+        )
 
 
 def test_resume_task_keys_keep_first_source_namespace_after_same_step_repairs() -> None:

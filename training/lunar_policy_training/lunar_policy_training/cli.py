@@ -216,10 +216,12 @@ from .ppo.trainer import PPOTrainer, PPOUpdateMetrics
 from .recovery.transition_journal import (
     APPLIED_SCHEMA_VERSION,
     INDEX_SCHEMA_VERSION,
+    JournalValidationError,
     PAYLOAD_SCHEMA_VERSION,
     SEAL_SCHEMA_VERSION,
     LoadedUpdate,
     TransitionJournal,
+    materialize_committed_post_worker_state,
 )
 from .reward import compute_transition_reward, reward_weights_sha256
 from .reward_contract import (
@@ -487,6 +489,54 @@ def commit_or_recover_reward_v4_update(
         metrics_record_sha256=recovery.metrics_record_sha256,
     )
     return checkpoint
+
+
+def _checkpoint_environment_state_from_sealed_journal(
+    *,
+    loaded: LoadedUpdate,
+    scenario_schedule_id: str,
+    worker_count: int,
+    actions_per_worker: int,
+) -> dict[str, object]:
+    """Reuse the sealed final macro boundaries instead of re-snapshotting workers."""
+    if getattr(loaded, "state", None) not in ("SEALED", "APPLIED"):
+        raise UpdateCommitError("checkpoint journal is not sealed")
+    if not isinstance(scenario_schedule_id, str) or not scenario_schedule_id:
+        raise UpdateCommitError("checkpoint scenario schedule is invalid")
+    if type(worker_count) is not int or worker_count <= 0:
+        raise UpdateCommitError("checkpoint worker count is invalid")
+    if type(actions_per_worker) is not int or actions_per_worker <= 0:
+        raise UpdateCommitError("checkpoint macro action count is invalid")
+    committed = getattr(loaded, "committed", None)
+    if not isinstance(committed, Mapping):
+        raise UpdateCommitError("checkpoint journal committed grid is invalid")
+
+    states: list[dict[str, object]] = []
+    terminal_slot = actions_per_worker - 1
+    for worker_index in range(worker_count):
+        item = committed.get((worker_index, terminal_slot))
+        if (
+            item is None
+            or getattr(item, "worker_index", None) != worker_index
+            or getattr(item, "slot_index", None) != terminal_slot
+        ):
+            raise UpdateCommitError("checkpoint terminal worker state is missing")
+        payload = getattr(item, "payload", None)
+        try:
+            states.append(
+                materialize_committed_post_worker_state(
+                    getattr(payload, "post_worker_state", None)
+                )
+            )
+        except JournalValidationError as error:
+            raise UpdateCommitError(
+                "checkpoint terminal worker state is invalid"
+            ) from error
+    return {
+        "schema_version": FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
+        "scenario_schedule_id": scenario_schedule_id,
+        "worker_episode_states": states,
+    }
 
 
 def _reward_v4_evaluation_platforms(
@@ -6071,19 +6121,18 @@ def _run_reward_v4_updates(
                                 .restored_from_checkpoint_sha256
                             ),
                         )
-                        environment_state = {
-                            "schema_version": (
-                                FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION
-                            ),
-                            "scenario_schedule_id": (
-                                environment_factory.scenario_schedule_id
-                            ),
-                            "worker_episode_states": list(
-                                pool.snapshot_episode_states(
-                                    policy_version=update_id
-                                )
-                            ),
-                        }
+                        environment_state = (
+                            _checkpoint_environment_state_from_sealed_journal(
+                                loaded=loaded,
+                                scenario_schedule_id=(
+                                    environment_factory.scenario_schedule_id
+                                ),
+                                worker_count=len(worker_strata),
+                                actions_per_worker=(
+                                    reward_config.macro_actions_per_worker
+                                ),
+                            )
+                        )
                         evaluation_due_by_time = (
                             budget.consumed_gpu_seconds
                             - candidate_checkpoint_gpu_seconds

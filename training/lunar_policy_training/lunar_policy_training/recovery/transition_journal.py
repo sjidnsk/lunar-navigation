@@ -259,12 +259,13 @@ class TransitionJournal:
         self._worker_strata = _validate_worker_strata(
             worker_strata, worker_count=worker_count
         )
+        self._open_updates: dict[int, LoadedUpdate] = {}
 
     def commit(self, payload: MacroTransitionPayload) -> CommittedTransition:
         """Durably commit one payload; identical retries return the first record."""
         with self._lock:
             self._validate_payload(payload)
-            loaded = self.load_update(payload.update_id)
+            loaded = self._load_open_update_for_commit(payload.update_id)
             if loaded.state != "OPEN":
                 raise JournalConflictError("sealed update cannot accept another slot")
 
@@ -308,9 +309,22 @@ class TransitionJournal:
                 file_sha256=file_sha256,
             )
             self._append_index(self._index_path(payload.update_id), record)
-            committed = self.load_update(payload.update_id).committed.get(key)
-            if committed is None:
-                raise JournalCorruptionError("committed slot is not index reachable")
+            committed = CommittedTransition(
+                update_id=payload.update_id,
+                worker_index=payload.worker_index,
+                slot_index=payload.slot_index,
+                policy_version=payload.policy_version,
+                platform_type=payload.platform_type,
+                scale_bucket=payload.scale_bucket,
+                episode_id=payload.episode_id,
+                episode_transition_index=payload.episode_transition_index,
+                transition_id=payload.transition_id,
+                payload_sha256=payload_sha256,
+                file_sha256=file_sha256,
+                payload_path=payload_path,
+                payload=payload,
+            )
+            self._cache_committed_open_transition(loaded, committed)
             return committed
 
     def load_update(self, update_id: int) -> LoadedUpdate:
@@ -372,7 +386,7 @@ class TransitionJournal:
                         journal_sha256=journal_sha256,
                     )
                     state = "APPLIED"
-            return LoadedUpdate(
+            loaded = LoadedUpdate(
                 update_id=update_id,
                 state=state,
                 committed=committed,
@@ -382,6 +396,8 @@ class TransitionJournal:
                 checkpoint_payload_sha256=checkpoint_payload_sha256,
                 metrics_record_sha256=metrics_record_sha256,
             )
+            self._replace_open_update_cache(loaded)
+            return loaded
 
     def seal_update(
         self,
@@ -515,6 +531,7 @@ class TransitionJournal:
                     raise JournalCorruptionError("journal prune target is invalid")
                 shutil.rmtree(target)
                 _fsync_directory(recovery_root)
+                self._open_updates.pop(update_id, None)
                 removed.append(update_id)
             return tuple(removed)
 
@@ -557,6 +574,45 @@ class TransitionJournal:
             or payload.scale_bucket is not expected[1]
         ):
             raise JournalValidationError("journal worker stratum does not match")
+
+    def _load_open_update_for_commit(self, update_id: int) -> LoadedUpdate:
+        cached = self._open_updates.get(update_id)
+        if cached is not None:
+            return cached
+        return self.load_update(update_id)
+
+    def _cache_committed_open_transition(
+        self, loaded: LoadedUpdate, committed: CommittedTransition
+    ) -> None:
+        if loaded.state != "OPEN":
+            raise JournalCorruptionError("journal open cache has a sealed update")
+        key = (committed.worker_index, committed.slot_index)
+        if key in loaded.committed:
+            raise JournalCorruptionError("journal open cache repeats a slot")
+        updated_committed = dict(loaded.committed)
+        updated_committed[key] = committed
+        versions = {item.policy_version for item in updated_committed.values()}
+        policy_version = next(iter(versions)) if len(versions) == 1 else None
+        payload_path = committed.payload_path.resolve()
+        orphaned = tuple(
+            path
+            for path in loaded.orphaned_payloads
+            if path.resolve() != payload_path
+        )
+        self._open_updates[loaded.update_id] = LoadedUpdate(
+            update_id=loaded.update_id,
+            state="OPEN",
+            committed=updated_committed,
+            orphaned_payloads=orphaned,
+            policy_version=policy_version,
+            journal_sha256=None,
+        )
+
+    def _replace_open_update_cache(self, loaded: LoadedUpdate) -> None:
+        if loaded.state == "OPEN":
+            self._open_updates[loaded.update_id] = loaded
+        else:
+            self._open_updates.pop(loaded.update_id, None)
 
     def _validate_sealable(
         self, committed: Mapping[tuple[int, int], CommittedTransition]
@@ -1361,6 +1417,18 @@ def _storage_value(value: object) -> object:
     return value
 
 
+def materialize_committed_post_worker_state(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    """Return a checkpoint-serializable copy of an immutable journal boundary."""
+    if not isinstance(value, Mapping):
+        raise JournalValidationError("journal post worker state is invalid")
+    materialized = _storage_value(value)
+    if not isinstance(materialized, dict):
+        raise JournalValidationError("journal post worker state is invalid")
+    return materialized
+
+
 def _semantic_sha256(value: object) -> str:
     descriptor = _semantic_descriptor(value)
     return hashlib.sha256(_canonical_json(descriptor)).hexdigest()
@@ -1492,6 +1560,7 @@ __all__ = [
     "JournalValidationError",
     "LoadedUpdate",
     "MacroTransitionPayload",
+    "materialize_committed_post_worker_state",
     "PAYLOAD_SCHEMA_VERSION",
     "RecoveredWorkerBoundary",
     "SEAL_SCHEMA_VERSION",

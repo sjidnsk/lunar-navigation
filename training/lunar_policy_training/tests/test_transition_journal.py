@@ -7,6 +7,7 @@ import torch
 
 import lunar_policy_training.recovery.transition_journal as journal_module
 from lunar_policy_training.recovery.transition_journal import (
+    InjectedJournalFault,
     JournalValidationError,
     MacroTransitionPayload,
     TransitionJournal,
@@ -173,3 +174,82 @@ def test_compact_pre_audit_must_match_transition_identity(tmp_path: Path) -> Non
 
     with pytest.raises(JournalValidationError, match="pre worker audit identity"):
         journal.commit(_payload(update_id=1, slot_index=0, pre_worker_audit=audit))
+
+
+def test_open_update_does_not_reload_prior_payloads_but_restart_revalidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Normal appends reuse validated state; a fresh journal still reads disk."""
+    audit = _compact_pre_worker_audit(_full_pre_worker_state())
+    journal = TransitionJournal(
+        tmp_path / "journal",
+        run_id="reward-v4-test",
+        worker_count=1,
+        slots_per_worker=4,
+    )
+    normal_reads: list[Path] = []
+    original_read = journal._read_payload_file
+
+    def record_normal_read(path: Path) -> tuple[str, MacroTransitionPayload]:
+        normal_reads.append(path)
+        return original_read(path)
+
+    monkeypatch.setattr(journal, "_read_payload_file", record_normal_read)
+    for slot_index in range(3):
+        journal.commit(
+            _payload(
+                update_id=1,
+                slot_index=slot_index,
+                pre_worker_audit=audit,
+            )
+        )
+
+    assert normal_reads == []
+
+    restarted = TransitionJournal(
+        tmp_path / "journal",
+        run_id="reward-v4-test",
+        worker_count=1,
+        slots_per_worker=4,
+    )
+    restart_reads: list[Path] = []
+    restarted_original_read = restarted._read_payload_file
+
+    def record_restart_read(path: Path) -> tuple[str, MacroTransitionPayload]:
+        restart_reads.append(path)
+        return restarted_original_read(path)
+
+    monkeypatch.setattr(restarted, "_read_payload_file", record_restart_read)
+    restarted.commit(
+        _payload(update_id=1, slot_index=3, pre_worker_audit=audit)
+    )
+
+    assert {path.name for path in restart_reads} == {
+        "slot-000.pt",
+        "slot-001.pt",
+        "slot-002.pt",
+    }
+    assert len(restarted.load_update(1).committed) == 4
+
+
+def test_failed_pre_index_write_does_not_poison_open_update_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A payload only joins the cache after its durable index record exists."""
+    audit = _compact_pre_worker_audit(_full_pre_worker_state())
+    journal = TransitionJournal(
+        tmp_path / "journal",
+        run_id="reward-v4-test",
+        worker_count=1,
+        slots_per_worker=1,
+        fault_injection="after_rename_before_index",
+    )
+    payload = _payload(update_id=1, slot_index=0, pre_worker_audit=audit)
+
+    with pytest.raises(InjectedJournalFault, match="after_rename_before_index"):
+        journal.commit(payload)
+
+    monkeypatch.setattr(journal, "_fault_injection", None)
+    committed = journal.commit(payload)
+    assert committed.transition_id == payload.transition_id
+    assert len(journal.load_update(1).committed) == 1
