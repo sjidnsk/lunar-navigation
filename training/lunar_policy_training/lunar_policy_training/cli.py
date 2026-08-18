@@ -8091,12 +8091,16 @@ def _prepare_source_migrated_resume_checkpoint(
         raise PreflightError("source migration expected step is invalid")
     checkpoint_target = checkpoint_path.resolve(strict=True)
     checkpoints = (root / "checkpoints").resolve(strict=True)
+    chained_resume_name = (
+        f"resume-step-{expected_global_step}-"
+        f"{expected_old_source_commit[:12]}.pt"
+    )
     if (
         checkpoint_target.parent != checkpoints
-        or checkpoint_target.name != "latest.pt"
+        or checkpoint_target.name not in {"latest.pt", chained_resume_name}
     ):
         raise ArtifactRootError(
-            "source migration requires the authoritative latest checkpoint"
+            "source migration checkpoint is not authoritative"
         )
     checkpoint = load_checkpoint(checkpoint_target)
     if (
@@ -8135,6 +8139,18 @@ def _prepare_source_migrated_resume_checkpoint(
         != checkpoint.worker_allocation
     ):
         raise ArtifactRootError("source migration manifest differs from checkpoint")
+    if checkpoint_target.name != "latest.pt":
+        migrations = manifest.get("source_migrations")
+        if not isinstance(migrations, list) or not any(
+            isinstance(item, Mapping)
+            and item.get("global_step") == expected_global_step
+            and item.get("to_source_commit") == expected_old_source_commit
+            and item.get("migrated_checkpoint") == str(checkpoint_target)
+            for item in migrations
+        ):
+            raise ArtifactRootError(
+                "source migration checkpoint is not a recorded prior migration"
+            )
     formal_environment = manifest.get("formal_environment")
     if not isinstance(formal_environment, dict):
         raise ArtifactRootError("source migration formal environment is missing")

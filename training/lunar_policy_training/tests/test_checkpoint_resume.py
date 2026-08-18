@@ -229,11 +229,29 @@ def _formal_worker_state(index: int) -> dict[str, object]:
         "scene_seed": f"{index + 101:064x}",
         "start_seed": f"{index + 201:064x}",
         "episode_seed": f"{index + 301:064x}",
+        "task_geometry_sha256": f"{index + 311:064x}",
+        "task_common_key_sha256": f"{index + 321:064x}",
+        "task_common_artifact_sha256": f"{index + 331:064x}",
+        "platform_task_key_sha256": f"{index + 341:064x}",
+        "platform_task_artifact_sha256": f"{index + 351:064x}",
+        "task_coarse_bounds_half_open": [0, 128, 0, 128],
+        "task_detail_bounds_half_open": [0, 2560, 0, 2560],
+        "task_halo_bounds_half_open": [0, 128, 0, 128],
         "coverability_mask_sha256": f"{index + 801:064x}",
+        "observed_coverable_mask_sha256": f"{index + 811:064x}",
+        "coverable_detail_cell_count": 100,
+        "observed_coverable_detail_cell_count": 10,
+        "scale_bucket": "100_200",
+        "task_span_cells": 128,
+        "priority_seed": f"{index + 821:064x}",
+        "priority_coarse_mask_sha256": f"{index + 831:064x}",
+        "priority_detail_mask_sha256": f"{index + 841:064x}",
+        "priority_coverable_detail_cell_count": 0,
         "start_cell": [64, 96],
         "current_pose": pose,
         "legged_body_z_m": 7.0,
         "execution_state": execution_state,
+        "cumulative_executed_path_m": 0.0,
         "observation_revision": 1,
         "physical_snapshot_id": f"{index + 901:064x}",
         "physical_evidence_generation": 1,
@@ -255,8 +273,36 @@ def _formal_worker_state(index: int) -> dict[str, object]:
         "policy_batch_sha256": f"{index + 701:064x}",
         "candidate_ids": [f"{index * 64 + lane + 1201:064x}" for lane in range(64)],
         "candidate_mask": [True] * 64,
-        "oracle_opportunity_count": 64,
-        "oracle_opportunity_set_sha256": f"{index + 1301:064x}",
+        "candidate_decision_snapshot": {
+            "snapshot_id": f"{index + 901:064x}",
+            "frontier_segment_count": 22,
+            "raw_candidate_count": 64,
+            "fine_pose_candidate_count": 64,
+            "globally_reachable_candidate_count": 64,
+            "positive_gain_candidate_count": 64,
+            "selected_policy_candidate_count": 64,
+            "untried_reserve_count": 0,
+            "planner_rejected_current_snapshot_count": 0,
+            "candidate_set_sha256": f"{index + 1101:064x}",
+            "global_search_call_count": 1,
+            "global_search_elapsed_s": 0.0,
+            "candidate_refresh_elapsed_s": 0.0,
+            "pipeline_kind": "GROUND_FRONTIER",
+            "representable_landing_sha256": (
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            ),
+            "raw_known_landing_count": 0,
+            "eligible_landing_count": 0,
+            "predicted_positive_landing_count": 0,
+            "visited_landing_count": 0,
+            "scan_elapsed_s": 0.0,
+            "sort_elapsed_s": 0.0,
+            "top64_elapsed_s": 0.0,
+            "reserve_elapsed_s": 0.0,
+            "scan_complete": True,
+            "pagination_closed": True,
+            "capacity_truncated": False,
+        },
         "terminal_reason": None,
         "defer_candidate_rebuild": False,
         "last_hop_available_delta_v_mps": 0.0,
@@ -484,7 +530,7 @@ def test_formal_checkpoint_roundtrips_exact_active_worker_states(
     tmp_path: pathlib.Path,
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v8",
+        "schema_version": cli_module.FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)
@@ -545,7 +591,7 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     environment_state = {
-        "schema_version": "lunar-formal-environment-state/v8",
+        "schema_version": cli_module.FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
         "scenario_schedule_id": "cache-sha/train/v3",
         "worker_episode_states": [
             _formal_worker_state(index) for index in range(24)
@@ -629,6 +675,37 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
     assert manifest["source_migrations"][-1]["to_source_commit"] == new_commit
     assert manifest["formal_environment"]["sensor_performance_sha256"] == (
         "8" * 64
+    )
+
+    chained_commit = "c" * 40
+    monkeypatch.setattr(
+        cli_module, "_source_commit", lambda _root: chained_commit
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_validated_source_migration_sensor_reports",
+        lambda **kwargs: ("8" * 64, "9" * 64),
+    )
+    chained_path = cli_module._prepare_source_migrated_resume_checkpoint(
+        artifact_root=root,
+        checkpoint_path=migrated_path,
+        repository_root=REPOSITORY_ROOT,
+        expected_old_source_commit=new_commit,
+        expected_global_step=12,
+        previous_sensor_performance_report=current_sensor,
+        current_sensor_performance_report=current_sensor,
+    )
+
+    chained = load_checkpoint(chained_path)
+    manifest = json.loads(
+        (root / "run-manifest.json").read_text(encoding="utf-8")
+    )
+    assert chained.source_commit == chained_commit
+    assert manifest["source_commit"] == chained_commit
+    assert manifest["source_migrations"][-1]["from_source_commit"] == new_commit
+    assert manifest["source_migrations"][-1]["to_source_commit"] == chained_commit
+    assert manifest["formal_environment"]["sensor_performance_sha256"] == (
+        "9" * 64
     )
 
 
