@@ -2566,11 +2566,15 @@ class CandidateBuilderV2:
                 and 0 <= segment_id < len(segments)
                 and isinstance(candidate, _RawFrontierCandidate)
                 and candidate.frontier_cell in segments[segment_id]
-                and physical_mask[candidate.pose_cell]
             ):
                 raise CandidateInvariantError(
                     "GROUND_DETAIL_CANDIDATE_INVALID"
                 )
+            if not physical_mask[candidate.pose_cell]:
+                # Fine traversability only certifies the landing pose.  The
+                # existing 4 m physical/global reachability authority remains
+                # a separate conservative gate and may reject its parent cell.
+                continue
             target_pose = candidate.target_pose or exact_target_poses.get(
                 candidate.pose_cell
             )
