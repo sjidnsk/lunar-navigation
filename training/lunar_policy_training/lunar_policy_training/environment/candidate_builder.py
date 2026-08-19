@@ -2913,14 +2913,10 @@ class CandidateBuilderV2:
         for index in positive_indices:
             segment_id, raw, _ = endpoint_feasible[index]
             target_pose = raw.target_pose or exact_target_poses[raw.pose_cell]
-            if (
-                raw.pose_cell in visited_cells
-                or _ground_target_visit_key(
-                    target_pose.x_m,
-                    target_pose.y_m,
-                )
-                in visited_cells
-            ):
+            if _ground_target_visit_key(
+                target_pose.x_m,
+                target_pose.y_m,
+            ) in visited_cells:
                 continue
             selectable_by_segment.setdefault(segment_id, []).append(
                 (raw, index, float(gains[index, 0]))
@@ -3153,14 +3149,11 @@ class CandidateBuilderV2:
             unvisited = tuple(
                 candidate
                 for candidate in planner_available
-                if (
-                    candidate.position_grid_key not in visited_cells
-                    and _ground_target_visit_key(
-                        candidate.target_position_m[0],
-                        candidate.target_position_m[1],
-                    )
-                    not in visited_cells
+                if _ground_target_visit_key(
+                    candidate.target_position_m[0],
+                    candidate.target_position_m[1],
                 )
+                not in visited_cells
             )
             positive = tuple(
                 candidate
@@ -3189,14 +3182,11 @@ class CandidateBuilderV2:
             history_available = tuple(
                 candidate
                 for candidate in planner_available
-                if (
-                    candidate.position_grid_key not in visited_cells
-                    and _ground_target_visit_key(
-                        candidate.target_position_m[0],
-                        candidate.target_position_m[1],
-                    )
-                    not in visited_cells
+                if _ground_target_visit_key(
+                    candidate.target_position_m[0],
+                    candidate.target_position_m[1],
                 )
+                not in visited_cells
                 or candidate.candidate_id in selected_ids
             )
             visited_excluded_count = len(planner_available) - len(

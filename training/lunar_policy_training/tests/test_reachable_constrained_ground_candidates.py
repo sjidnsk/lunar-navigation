@@ -209,6 +209,61 @@ def test_ground_frontier_never_fabricates_three_when_only_two_are_feasible() -> 
     assert len(universe.candidates) == 2
 
 
+def test_ground_fine_visit_keys_never_filter_matching_coarse_coordinates() -> None:
+    """A 0.2 m visit key is not a legacy 4 m candidate-cell key."""
+    world, mission, projection, pose, physical = _fixture()
+    builder = CandidateBuilderV2(_PositiveGainEstimator())
+    build_kwargs = {
+        "physical_reachability": physical,
+        "platform_type": "WHEELED",
+        "platform_id": "unit-wheeled-fine-visit-key",
+        "capability_content_sha256": "1" * 64,
+        "mission_revision": 7,
+        "evidence_generation": 3,
+        "physical_evidence_sha256": "2" * 64,
+        "physical_reachability_algorithm_id": (
+            physical.physical_reachability_algorithm_id
+        ),
+        "goal_tolerance_mm": 200,
+    }
+    universe = builder.build_physical_universe(
+        world, mission, pose, projection, **build_kwargs
+    )
+    first = universe.candidates[0]
+    fine_key = _ground_target_visit_key(
+        first.target_position_m[0], first.target_position_m[1]
+    )
+    assert first.position_grid_key != fine_key
+
+    # This pair happens to have the coarse cell's integer values, but it is
+    # not an exact 0.2 m ground visit.  It must leave both build-time
+    # qualification and selection unchanged.
+    rebuilt = builder.build_physical_universe(
+        world,
+        mission,
+        pose,
+        projection,
+        excluded_cells={first.position_grid_key},
+        **build_kwargs,
+    )
+    selected = builder.select_available(
+        universe,
+        canvas_id=world.canvas.identity,
+        excluded_cells={first.position_grid_key},
+    )
+
+    assert tuple(candidate.candidate_id for candidate in rebuilt.candidates) == tuple(
+        candidate.candidate_id for candidate in universe.candidates
+    )
+    assert first.candidate_id in set(
+        selected.batch.candidate_ids[selected.batch.mask]
+    )
+    assert selected.batch.diagnostics.visited_excluded_count == 0
+    assert selected.batch.diagnostics.available_candidate_count == len(
+        universe.candidates
+    )
+
+
 def test_ground_frontier_qualifies_all_strip_witnesses_but_emits_three_actions() -> None:
     """Fine-strip fan-out changes qualification, not policy cardinality."""
     world, mission, projection, pose, physical = _fixture()
