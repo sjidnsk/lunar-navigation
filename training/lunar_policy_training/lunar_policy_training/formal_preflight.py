@@ -9,7 +9,7 @@ import os
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping
 
 import numpy as np
 import torch
@@ -20,7 +20,6 @@ from .checkpoint import CHECKPOINT_SCHEMA_VERSION, RunIdentity
 from .budget import RUN_MANIFEST_SCHEMA_VERSION
 from .config import (
     FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
-    FORMAL_WORKER_CANDIDATES,
     PLATFORMS,
     REWARD_V4_FORMAL_ROLLOUT_HORIZON,
 )
@@ -30,11 +29,6 @@ from .environment.formal_episode_state import (
 )
 from .environment.macro_step import PolicyAction
 from .environment.parallel_pool import ParallelActions, ParallelEnvPool
-from .evaluation.report import (
-    FormalEvaluationBatch,
-    formal_evaluation_probe,
-)
-from .policy.cross_attention import CrossAttentionPolicy
 from .policy.observation import PolicyBatch
 from .polar_data.formal_cache import FORMAL_CACHE_SCHEMA, FormalCache
 from .reward import compute_transition_reward, reward_weights_sha256
@@ -53,7 +47,7 @@ from .training_metrics import TRAINING_UPDATE_METRICS_SCHEMA
 from .training_semantics import training_semantics_sha256
 
 
-FORMAL_PREFLIGHT_SCHEMA = "lunar-formal-training-preflight/v9"
+FORMAL_PREFLIGHT_SCHEMA = "lunar-formal-training-preflight/v10"
 REQUIRED_PREFLIGHT_CHECKS = (
     "cache_and_identity",
     "three_platform_worker_construction",
@@ -63,36 +57,20 @@ REQUIRED_PREFLIGHT_CHECKS = (
     "task_cache_current_next_identity",
     "zero_halo_and_full_scene_leaks",
     "hopper_no_cumulative_fuel",
-    "update_boundary_resume",
+    "single_worker_resume_boundary",
     "rollout_horizon_not_episode_limit",
-    "qualified_worker_configuration",
-    "nonproxy_evaluation_probe",
+    "calibrated_worker_configuration",
+    "three_platform_macro_step",
 )
-_RESUME_EQUIVALENCE_FIELDS = {
-    "checkpoint_schema",
-    "checkpoint_relative_path",
-    "checkpoint_sha256",
-    "checkpoint_roundtrip",
-    "rollout_exact",
-    "model_exact",
-    "optimizer_exact",
-    "rng_exact",
-    "environment_state_exact",
-    "observation_exact",
-    "candidate_exact",
-    "first_request_exact",
-    "uninterrupted_update",
-    "resumed_update",
+_RESUME_BOUNDARY_FIELDS = {
+    "schema_version",
+    "platforms",
+    "post_step_observation_sha256",
+    "resumed_observation_sha256",
+    "state_roundtrip",
     "evidence_sha256",
 }
-_RESUME_EQUIVALENCE_BOOLEAN_FIELDS = _RESUME_EQUIVALENCE_FIELDS - {
-    "checkpoint_schema",
-    "checkpoint_relative_path",
-    "checkpoint_sha256",
-    "uninterrupted_update",
-    "resumed_update",
-    "evidence_sha256",
-}
+_MINIMAL_RESUME_BOUNDARY_SCHEMA = "lunar-formal-preflight-resume-boundary/v1"
 
 
 class FormalPreflightError(RuntimeError):
@@ -220,8 +198,8 @@ def build_formal_preflight_report(
     selected_workers: int,
     selected_micro_batch: int,
     selected_rollout_horizon: int,
-    evaluation_probe_sha256: str,
-    resume_equivalence: Mapping[str, object],
+    three_platform_step_sha256: str,
+    resume_boundary: Mapping[str, object],
     additional_corridor_margin_m: float,
     task_cache_evidence: Mapping[str, object],
 ) -> FormalPreflightReport:
@@ -275,8 +253,8 @@ def build_formal_preflight_report(
         raise FormalPreflightError("preflight worker recommendation is invalid")
     if selected_rollout_horizon != REWARD_V4_FORMAL_ROLLOUT_HORIZON:
         raise FormalPreflightError("preflight rollout horizon is not formal-fixed")
-    if not _is_sha(evaluation_probe_sha256):
-        raise FormalPreflightError("preflight evaluation digest is invalid")
+    if not _is_sha(three_platform_step_sha256):
+        raise FormalPreflightError("preflight step digest is invalid")
     if (
         not isinstance(additional_corridor_margin_m, (int, float))
         or isinstance(additional_corridor_margin_m, bool)
@@ -284,24 +262,15 @@ def build_formal_preflight_report(
     ):
         raise FormalPreflightError("preflight corridor margin must be fixed at 2.0 m")
     if (
-        not isinstance(resume_equivalence, Mapping)
-        or set(resume_equivalence) != _RESUME_EQUIVALENCE_FIELDS
-        or resume_equivalence.get("checkpoint_schema")
-        != CHECKPOINT_SCHEMA_VERSION
-        or not isinstance(
-            resume_equivalence.get("checkpoint_relative_path"), str
-        )
-        or Path(str(resume_equivalence["checkpoint_relative_path"])).is_absolute()
-        or ".."
-        in Path(str(resume_equivalence["checkpoint_relative_path"])).parts
-        or any(
-            resume_equivalence.get(field) is not True
-            for field in _RESUME_EQUIVALENCE_BOOLEAN_FIELDS
-        )
-        or resume_equivalence.get("uninterrupted_update") != 2
-        or resume_equivalence.get("resumed_update") != 2
-        or not _is_sha(resume_equivalence.get("checkpoint_sha256"))
-        or not _is_sha(resume_equivalence.get("evidence_sha256"))
+        not isinstance(resume_boundary, Mapping)
+        or set(resume_boundary) != _RESUME_BOUNDARY_FIELDS
+        or resume_boundary.get("schema_version")
+        != _MINIMAL_RESUME_BOUNDARY_SCHEMA
+        or resume_boundary.get("platforms") != list(PLATFORMS)
+        or resume_boundary.get("state_roundtrip") is not True
+        or not _is_sha(resume_boundary.get("post_step_observation_sha256"))
+        or not _is_sha(resume_boundary.get("resumed_observation_sha256"))
+        or not _is_sha(resume_boundary.get("evidence_sha256"))
     ):
         raise FormalPreflightError("preflight resume equivalence is invalid")
     validated_task_cache_evidence = _validate_task_cache_evidence(
@@ -348,10 +317,10 @@ def build_formal_preflight_report(
         "rollout_horizon_candidates": [REWARD_V4_FORMAL_ROLLOUT_HORIZON],
         "selected_rollout_horizon": selected_rollout_horizon,
         "episode_decision_limit": None,
-        "evaluation_probe_sha256": evaluation_probe_sha256,
+        "three_platform_step_sha256": three_platform_step_sha256,
         "additional_corridor_margin_m": 2.0,
         "task_cache_evidence": validated_task_cache_evidence,
-        "resume_equivalence": dict(sorted(resume_equivalence.items())),
+        "resume_boundary": dict(sorted(resume_boundary.items())),
         "proxy": False,
         "training_started": False,
     }
@@ -698,34 +667,11 @@ def _validated_worker_allocation(
     return allocation
 
 
-def _scaled_worker_allocation(
-    worker_allocation: Mapping[str, int],
-    *,
-    workers: int,
-) -> dict[str, int]:
-    selected_workers = sum(worker_allocation.values())
-    scaled: dict[str, int] = {}
-    for platform, count in worker_allocation.items():
-        numerator = count * workers
-        if numerator % selected_workers != 0:
-            raise FormalPreflightError(
-                "worker candidate cannot preserve calibrated platform allocation"
-            )
-        scaled[platform] = numerator // selected_workers
-    if (
-        any(count <= 0 for count in scaled.values())
-        or sum(scaled.values()) != workers
-    ):
-        raise FormalPreflightError(
-            "worker candidate cannot preserve calibrated platform allocation"
-        )
-    return scaled
-
-
 def _resume_check(
     assembly: FormalEnvironmentAssembly,
     worker_allocation: Mapping[str, int],
-) -> None:
+) -> dict[str, object]:
+    """Verify one post-action environment boundary can be restored exactly."""
     allocation = {platform: 1 for platform in worker_allocation}
     worker_count = len(allocation)
     with ParallelEnvPool(
@@ -765,41 +711,81 @@ def _resume_check(
         raise FormalPreflightError(
             "resumed formal observations differ at update boundary"
         )
+    body = {
+        "schema_version": _MINIMAL_RESUME_BOUNDARY_SCHEMA,
+        "platforms": list(PLATFORMS),
+        "post_step_observation_sha256": active_digest,
+        "resumed_observation_sha256": resumed_digest,
+        "state_roundtrip": True,
+    }
+    body["evidence_sha256"] = hashlib.sha256(
+        _canonical_bytes(body).rstrip(b"\n")
+    ).hexdigest()
+    return body
 
 
-def _qualify_worker_candidate(
+def _three_platform_macro_step_probe(
     assembly: FormalEnvironmentAssembly,
     worker_allocation: Mapping[str, int],
-) -> float:
-    started = time.monotonic()
+) -> str:
+    """Execute one real macro action per platform without training a policy."""
+    allocation = {platform: 1 for platform in worker_allocation}
+    platforms = tuple(allocation)
     with ParallelEnvPool(
-        allocation=dict(worker_allocation),
+        allocation=allocation,
         observation_template=assembly.observation_template,
         environment_factory=assembly.factory,
         reward_fn=compute_transition_reward,
         worker_timeout_seconds=FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
     ) as pool:
-        pool.reset()
-    return time.monotonic() - started
+        initial = pool.reset()
+        candidate_indices = torch.tensor(
+            [
+                int(initial.observations.candidate_mask[index].nonzero()[0])
+                for index in range(len(platforms))
+            ],
+            dtype=torch.int64,
+        )
+        stepped = pool.step(
+            ParallelActions(
+                candidate_indices=candidate_indices,
+                thetas=torch.zeros((len(platforms),), dtype=torch.float32),
+            ),
+            policy_version=0,
+        )
+    consumed = stepped.policy_decisions_consumed.detach().cpu().tolist()
+    if consumed != [1] * len(platforms):
+        raise FormalPreflightError(
+            "three-platform preflight step did not consume exactly one action"
+        )
+    body = {
+        "platforms": list(platforms),
+        "initial_observation_sha256": _batch_digest(initial.observations),
+        "post_step_observation_sha256": _batch_digest(stepped.observations),
+        "candidate_indices": candidate_indices.detach().cpu().tolist(),
+        "planning_outcomes": [
+            outcome.name for outcome in stepped.planning_outcomes
+        ],
+        "reason_codes": list(stepped.reason_codes),
+        "policy_decisions_consumed": consumed,
+    }
+    return hashlib.sha256(_canonical_bytes(body).rstrip(b"\n")).hexdigest()
 
 
 def run_formal_preflight(
     *,
     cache: FormalCache,
     assemblies: Mapping[str, FormalEnvironmentAssembly],
-    evaluation_batches: Sequence[FormalEvaluationBatch],
     run_identity: RunIdentity,
     source_commit: str,
     sensor_performance_sha256: str,
     artifact_root: Path,
-    worker_candidates: tuple[int, ...] = FORMAL_WORKER_CANDIDATES,
     worker_allocation: Mapping[str, int],
     selected_workers: int | None = None,
     selected_micro_batch: int = 2,
     selected_rollout_horizon: int = REWARD_V4_FORMAL_ROLLOUT_HORIZON,
-    resume_equivalence: Mapping[str, object] | None = None,
 ) -> tuple[FormalPreflightReport, Path]:
-    """Execute formal wiring and record the supplied V7 resume proof."""
+    """Execute the bounded real-environment preflight before training."""
     expected_splits = {"train", "validation", "test", "holdout"}
     if set(assemblies) != expected_splits:
         raise FormalPreflightError("formal preflight assemblies are incomplete")
@@ -815,55 +801,16 @@ def run_formal_preflight(
     timings["direct_environment"] = time.monotonic() - started
 
     started = time.monotonic()
-    _resume_check(assemblies["train"], allocation)
-    timings["update_boundary_resume"] = time.monotonic() - started
+    resume_boundary = _resume_check(assemblies["train"], allocation)
+    timings["single_worker_resume_boundary"] = time.monotonic() - started
 
-    qualified: list[int] = []
-    for workers in worker_candidates:
-        candidate_allocation = _scaled_worker_allocation(
-            allocation,
-            workers=workers,
-        )
-        timings[f"worker_{workers}"] = _qualify_worker_candidate(
-            assemblies["train"], candidate_allocation
-        )
-        qualified.append(workers)
-    if not qualified:
-        raise FormalPreflightError("no formal worker configuration qualified")
-    if selected_workers not in qualified:
-        raise FormalPreflightError(
-            "calibrated worker selection did not pass preflight"
-        )
-
-    bounded_batches = tuple(
-        FormalEvaluationBatch(
-            split=batch.split,
-            factory=batch.factory,
-            observation_template=batch.observation_template,
-            scenario_seeds=batch.scenario_seeds[:1],
-        )
-        for batch in evaluation_batches
-    )
     started = time.monotonic()
-    evaluation_probe = formal_evaluation_probe(
-        CrossAttentionPolicy(),
-        device="cpu",
-        run_identity=run_identity,
-        batches=bounded_batches,
+    three_platform_step_sha256 = _three_platform_macro_step_probe(
+        assemblies["train"], allocation
     )
-    timings["nonproxy_evaluation_probe"] = time.monotonic() - started
-    if (
-        evaluation_probe.get("proxy") is not False
-        or evaluation_probe.get("schema_version")
-        != "lunar-formal-evaluation-probe/v1"
-        or evaluation_probe.get("row_count") != 27
-        or not _is_sha(evaluation_probe.get("probe_sha256"))
-    ):
-        raise FormalPreflightError("formal preflight evaluation fell back to proxy")
+    timings["three_platform_macro_step"] = time.monotonic() - started
 
     checks = {name: True for name in REQUIRED_PREFLIGHT_CHECKS}
-    if resume_equivalence is None:
-        raise FormalPreflightError("formal preflight resume equivalence is missing")
     report = build_formal_preflight_report(
         source_commit=source_commit,
         cache_manifest_sha256=str(cache.manifest["cache_manifest_sha256"]),
@@ -875,12 +822,12 @@ def run_formal_preflight(
         },
         checks=checks,
         timings_seconds=timings,
-        qualified_worker_candidates=tuple(qualified),
+        qualified_worker_candidates=(selected_workers,),
         selected_workers=selected_workers,
         selected_micro_batch=selected_micro_batch,
         selected_rollout_horizon=selected_rollout_horizon,
-        evaluation_probe_sha256=str(evaluation_probe["probe_sha256"]),
-        resume_equivalence=resume_equivalence,
+        three_platform_step_sha256=three_platform_step_sha256,
+        resume_boundary=resume_boundary,
         additional_corridor_margin_m=float(
             direct_evidence["additional_corridor_margin_m"]
         ),

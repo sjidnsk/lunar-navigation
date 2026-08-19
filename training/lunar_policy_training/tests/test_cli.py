@@ -6,6 +6,7 @@ import signal
 import json
 import subprocess
 import sys
+import contextlib
 from types import MappingProxyType, SimpleNamespace
 
 import pytest
@@ -645,7 +646,8 @@ def test_formal_preflight_passes_the_validated_sensor_digest_to_calibration(
         config=config,
         selected_workers=24,
         micro_batch_size=4,
-        rollout_horizon=16,
+        rollout_horizon=1,
+        allocation={"WHEELED": 8, "LEGGED": 8, "HOPPER": 8},
     )
     captured: dict[str, object] = {}
     task_areas: list[object] = []
@@ -665,7 +667,9 @@ def test_formal_preflight_passes_the_validated_sensor_digest_to_calibration(
         cli_module, "_build_formal_environment", build_formal_environment
     )
     monkeypatch.setattr(
-        cli_module, "_formal_evaluation_batches", lambda *args: ()
+        cli_module,
+        "_open_formal_task_cache_runtime",
+        lambda **kwargs: contextlib.nullcontext(SimpleNamespace(client=object())),
     )
 
     def validated_calibration(**kwargs):
@@ -679,9 +683,6 @@ def test_formal_preflight_passes_the_validated_sensor_digest_to_calibration(
     )
     monkeypatch.setattr(
         cli_module, "_formal_run_identity", lambda _identity: object()
-    )
-    monkeypatch.setattr(
-        cli_module, "_formal_resume_equivalence_check", lambda **kwargs: {}
     )
     report = SimpleNamespace(
         payload={

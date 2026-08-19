@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import inspect
 import pathlib
 from dataclasses import dataclass, replace
 
@@ -13,6 +14,7 @@ from lunar_policy_training.formal_preflight import (
     FormalPreflightError,
     _direct_environment_checks,
     build_formal_preflight_report,
+    run_formal_preflight,
     write_formal_preflight_report,
 )
 from lunar_policy_training.reward import reward_weights_sha256
@@ -32,24 +34,47 @@ def _identity() -> RunIdentity:
     )
 
 
-def _resume_equivalence() -> dict[str, object]:
+def _resume_boundary() -> dict[str, object]:
     return {
-        "checkpoint_schema": "lunar-ppo-checkpoint/v9",
-        "checkpoint_relative_path": "resume-equivalence/update-1.pt",
-        "checkpoint_sha256": "f" * 64,
-        "checkpoint_roundtrip": True,
-        "rollout_exact": True,
-        "model_exact": True,
-        "optimizer_exact": True,
-        "rng_exact": True,
-        "environment_state_exact": True,
-        "observation_exact": True,
-        "candidate_exact": True,
-        "first_request_exact": True,
-        "uninterrupted_update": 2,
-        "resumed_update": 2,
+        "schema_version": "lunar-formal-preflight-resume-boundary/v1",
+        "platforms": ["WHEELED", "LEGGED", "HOPPER"],
+        "post_step_observation_sha256": "f" * 64,
+        "resumed_observation_sha256": "e" * 64,
+        "state_roundtrip": True,
         "evidence_sha256": "e" * 64,
     }
+
+
+def _task_cache_evidence() -> dict[str, object]:
+    item = {
+        "task_geometry_sha256": "1" * 64,
+        "task_common_key_sha256": "2" * 64,
+        "task_common_artifact_sha256": "3" * 64,
+        "platform_task_key_sha256": "4" * 64,
+        "platform_task_artifact_sha256": "5" * 64,
+        "coarse_shape": [64, 64],
+        "detail_shape": [1280, 1280],
+    }
+    return {
+        "current_ground": {
+            "WHEELED": dict(item),
+            "LEGGED": dict(item),
+        },
+        "next_ground": {
+            "WHEELED": dict(item),
+            "LEGGED": dict(item),
+        },
+        "halo_leak_count": 0,
+        "full_scene_derived_call_count": 0,
+    }
+
+
+def test_minimal_preflight_contract_does_not_accept_full_pool_or_evaluation_inputs() -> None:
+    """Preflight validates wiring, rather than replaying a training update."""
+    parameters = inspect.signature(run_formal_preflight).parameters
+
+    assert "evaluation_batches" not in parameters
+    assert "worker_candidates" not in parameters
 
 
 def test_direct_checks_use_exact_common_training_world(monkeypatch) -> None:
@@ -139,11 +164,13 @@ def test_direct_checks_use_exact_common_training_world(monkeypatch) -> None:
         ("WHEELED", True, None),
         ("LEGGED", True, None),
         ("HOPPER", True, None),
+        ("WHEELED", True, None),
+        ("LEGGED", True, None),
     ]
     assert factory.builder.scenario_schedule_id == "combined/train/v1"
 
 
-def test_preflight_report_is_canonical_non_proxy_and_records_real_v9_resume(
+def test_preflight_report_is_canonical_and_records_minimal_resume_boundary(
     tmp_path: pathlib.Path,
 ) -> None:
     report = build_formal_preflight_report(
@@ -160,10 +187,11 @@ def test_preflight_report_is_canonical_non_proxy_and_records_real_v9_resume(
         qualified_worker_candidates=(18, 24),
         selected_workers=24,
         selected_micro_batch=2,
-        selected_rollout_horizon=12,
-        evaluation_probe_sha256="d" * 64,
-        resume_equivalence=_resume_equivalence(),
+        selected_rollout_horizon=1,
+        three_platform_step_sha256="d" * 64,
+        resume_boundary=_resume_boundary(),
         additional_corridor_margin_m=2.0,
+        task_cache_evidence=_task_cache_evidence(),
     )
 
     first = write_formal_preflight_report(tmp_path, report)
@@ -174,14 +202,14 @@ def test_preflight_report_is_canonical_non_proxy_and_records_real_v9_resume(
     assert payload["proxy"] is False
     assert payload["training_started"] is False
     assert payload["selected_workers"] == 24
-    assert payload["rollout_horizon_candidates"] == [12]
-    assert payload["selected_rollout_horizon"] == 12
+    assert payload["rollout_horizon_candidates"] == [1]
+    assert payload["selected_rollout_horizon"] == 1
     assert payload["episode_decision_limit"] is None
-    assert payload["schema_version"] == "lunar-formal-training-preflight/v6"
-    assert payload["evaluation_probe_sha256"] == "d" * 64
+    assert payload["schema_version"] == "lunar-formal-training-preflight/v10"
+    assert payload["three_platform_step_sha256"] == "d" * 64
     assert payload["additional_corridor_margin_m"] == 2.0
     assert "evaluation_report_sha256" not in payload
-    assert payload["resume_equivalence"] == _resume_equivalence()
+    assert payload["resume_boundary"] == _resume_boundary()
     assert len(payload["preflight_report_sha256"]) == 64
     assert not (tmp_path / "checkpoints").exists()
 
@@ -205,16 +233,17 @@ def test_preflight_report_rejects_an_unclosed_required_check() -> None:
             qualified_worker_candidates=(18,),
             selected_workers=18,
             selected_micro_batch=1,
-            selected_rollout_horizon=12,
-            evaluation_probe_sha256="d" * 64,
-            resume_equivalence=_resume_equivalence(),
+            selected_rollout_horizon=1,
+            three_platform_step_sha256="d" * 64,
+            resume_boundary=_resume_boundary(),
             additional_corridor_margin_m=2.0,
+            task_cache_evidence=_task_cache_evidence(),
         )
 
 
-def test_preflight_report_rejects_claimed_resume_without_exact_update_two() -> None:
-    resume = _resume_equivalence()
-    resume["optimizer_exact"] = False
+def test_preflight_report_rejects_resume_boundary_without_state_roundtrip() -> None:
+    resume = _resume_boundary()
+    resume["state_roundtrip"] = False
 
     with pytest.raises(FormalPreflightError, match="resume equivalence"):
         build_formal_preflight_report(
@@ -231,10 +260,11 @@ def test_preflight_report_rejects_claimed_resume_without_exact_update_two() -> N
             qualified_worker_candidates=(18,),
             selected_workers=18,
             selected_micro_batch=1,
-            selected_rollout_horizon=12,
-            evaluation_probe_sha256="d" * 64,
-            resume_equivalence=resume,
+            selected_rollout_horizon=1,
+            three_platform_step_sha256="d" * 64,
+            resume_boundary=resume,
             additional_corridor_margin_m=2.0,
+            task_cache_evidence=_task_cache_evidence(),
         )
 
 
@@ -267,16 +297,17 @@ def test_formal_preflight_rejects_semantics_v10() -> None:
             qualified_worker_candidates=(18,),
             selected_workers=18,
             selected_micro_batch=1,
-            selected_rollout_horizon=12,
-            evaluation_probe_sha256="d" * 64,
-            resume_equivalence=_resume_equivalence(),
+            selected_rollout_horizon=1,
+            three_platform_step_sha256="d" * 64,
+            resume_boundary=_resume_boundary(),
             additional_corridor_margin_m=2.0,
+            task_cache_evidence=_task_cache_evidence(),
         )
 
 
-def test_formal_preflight_rejects_checkpoint_v8() -> None:
-    resume = _resume_equivalence()
-    resume["checkpoint_schema"] = "lunar-ppo-checkpoint/v8"
+def test_formal_preflight_rejects_unknown_resume_boundary_schema() -> None:
+    resume = _resume_boundary()
+    resume["schema_version"] = "lunar-formal-preflight-resume-boundary/v0"
 
     with pytest.raises(FormalPreflightError, match="resume equivalence"):
         build_formal_preflight_report(
@@ -293,10 +324,11 @@ def test_formal_preflight_rejects_checkpoint_v8() -> None:
             qualified_worker_candidates=(18,),
             selected_workers=18,
             selected_micro_batch=1,
-            selected_rollout_horizon=12,
-            evaluation_probe_sha256="d" * 64,
-            resume_equivalence=resume,
+            selected_rollout_horizon=1,
+            three_platform_step_sha256="d" * 64,
+            resume_boundary=resume,
             additional_corridor_margin_m=2.0,
+            task_cache_evidence=_task_cache_evidence(),
         )
 
 
@@ -316,8 +348,9 @@ def test_formal_preflight_rejects_non_fixed_corridor_margin() -> None:
             qualified_worker_candidates=(18,),
             selected_workers=18,
             selected_micro_batch=1,
-            selected_rollout_horizon=12,
-            evaluation_probe_sha256="d" * 64,
-            resume_equivalence=_resume_equivalence(),
+            selected_rollout_horizon=1,
+            three_platform_step_sha256="d" * 64,
+            resume_boundary=_resume_boundary(),
             additional_corridor_margin_m=1.5,
+            task_cache_evidence=_task_cache_evidence(),
         )

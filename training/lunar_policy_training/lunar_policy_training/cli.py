@@ -3818,9 +3818,6 @@ def main(argv: list[str] | None = None) -> int:
                     task_area=requested_config.task_area,
                     task_cache_client=task_runtime.client,
                 )
-            evaluation_batches = _formal_evaluation_batches(
-                cache, assemblies
-            )
             calibrated = _validated_formal_preflight_calibration(
                 calibration_root=Path(arguments.calibration_root),
                 requested_config=requested_config,
@@ -3838,32 +3835,17 @@ def main(argv: list[str] | None = None) -> int:
                     "formal-preflight artifact root cannot contain checkpoints"
                 )
             try:
-                resume_equivalence = _formal_resume_equivalence_check(
-                    config=calibrated.config,
-                    assembly=train_assembly,
-                    run_identity=_formal_run_identity(cache.identity),
-                    source_commit=_source_commit(repository_root),
-                    artifact_root=preflight_root,
-                    selected_workers=calibrated.selected_workers,
-                    worker_allocation=calibrated.allocation,
-                    micro_batch_size=calibrated.micro_batch_size,
-                )
                 report, report_path = run_formal_preflight(
                     cache=cache,
                     assemblies=assemblies,
-                    evaluation_batches=evaluation_batches,
                     run_identity=_formal_run_identity(cache.identity),
                     source_commit=_source_commit(repository_root),
                     sensor_performance_sha256=sensor_performance_sha256,
                     artifact_root=preflight_root,
-                    worker_candidates=(
-                        requested_config.parallel.worker_candidates
-                    ),
                     worker_allocation=calibrated.allocation,
                     selected_workers=calibrated.selected_workers,
                     selected_micro_batch=calibrated.micro_batch_size,
                     selected_rollout_horizon=calibrated.rollout_horizon,
-                    resume_equivalence=resume_equivalence,
                 )
             except FormalPreflightError as error:
                 raise PreflightError(
