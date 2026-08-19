@@ -91,6 +91,8 @@ def test_step_zero_manifest_allows_preflight_only_source_refresh(
         v3_sha256="5" * 64,
         training_semantics_sha256=cli_module.training_semantics_sha256(),
     )
+    old_schema_identity = dict(cli_module._reward_v4_schema_identity())
+    old_schema_identity["formal_preflight"] = "lunar-formal-training-preflight/v9"
     (root / "run-manifest.json").write_text(
         json.dumps(
             {
@@ -99,6 +101,7 @@ def test_step_zero_manifest_allows_preflight_only_source_refresh(
                 "source_commit": "a" * 40,
                 "frozen_config": config.as_frozen_dict(),
                 "run_identity": identity.to_dict(),
+                "schema_identity": old_schema_identity,
             }
         ),
         encoding="utf-8",

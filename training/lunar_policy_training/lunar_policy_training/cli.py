@@ -1449,12 +1449,32 @@ def _freeze_reward_v4_run_manifest(
 
     curriculum = initial_reward_curriculum_state(reward_config)
     strata = formal_worker_strata(curriculum.stage)
+    current_schema_identity = _reward_v4_schema_identity()
+    previous_schema_identity = payload.get("schema_identity")
+    schema_refresh_allowed = (
+        source_refresh_allowed
+        and isinstance(previous_schema_identity, Mapping)
+        and previous_schema_identity.get("formal_preflight")
+        == "lunar-formal-training-preflight/v9"
+        and current_schema_identity.get("formal_preflight")
+        == "lunar-formal-training-preflight/v10"
+        and {
+            key: value
+            for key, value in previous_schema_identity.items()
+            if key != "formal_preflight"
+        }
+        == {
+            key: value
+            for key, value in current_schema_identity.items()
+            if key != "formal_preflight"
+        }
+    )
     frozen = {
         "source_commit": source_commit,
         "run_identity": run_identity.to_dict(),
         "frozen_config": config.as_frozen_dict(),
         "global_step": 0,
-        "schema_identity": _reward_v4_schema_identity(),
+        "schema_identity": current_schema_identity,
         "reward_config": reward_config_as_mapping(reward_config),
         "reward_sha256": reward_weights_sha256(),
         "macro_actions_per_worker": reward_config.macro_actions_per_worker,
@@ -1484,6 +1504,7 @@ def _freeze_reward_v4_run_manifest(
             existing is not None
             and existing != expected
             and not (name == "source_commit" and source_refresh_allowed)
+            and not (name == "schema_identity" and schema_refresh_allowed)
         ):
             raise ArtifactRootError(f"Reward V4 {name} cannot drift")
         payload[name] = expected
