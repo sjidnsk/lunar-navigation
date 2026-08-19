@@ -934,6 +934,64 @@ def test_cache_accepts_batched_visibility_runtime_repair(
     )
 
 
+def test_cache_accepts_exact_ground_endpoint_runtime_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Endpoint certification augments runtime queries, not cached scene data."""
+    monkeypatch.setattr(
+        cli_module, "_commit_is_ancestor", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_commit_changed_paths",
+        lambda *_args: (
+            "docs/superpowers/specs/fine-ground-endpoints.md",
+            "training/lunar_policy_training/lunar_policy_training/environment/"
+            "candidate_builder.py",
+            "ros2_ws/src/lunar_planner_core/include/lunar_planner_core/"
+            "reachability_projection.hpp",
+            "ros2_ws/src/lunar_planner_core/src/shared/"
+            "reachability_projection.cpp",
+            "ros2_ws/src/lunar_planner_core/test/"
+            "reachability_projection_test.cpp",
+            "ros2_ws/src/lunar_planner_training_bridge/include/"
+            "lunar_planner_training_bridge/request.hpp",
+            "ros2_ws/src/lunar_planner_training_bridge/src/conversions.cpp",
+            "ros2_ws/src/lunar_planner_training_bridge/src/python_bindings.cpp",
+            "ros2_ws/src/lunar_planner_training_bridge/test/test_bridge.py",
+        ),
+    )
+
+    assert cli_module._cache_accepts_runtime_only_v3_repair(
+        REPOSITORY_ROOT,
+        cached_commit="a" * 40,
+        current_commit="b" * 40,
+    )
+
+
+def test_cache_rejects_exact_endpoint_allowlist_if_global_planner_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli_module, "_commit_is_ancestor", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_commit_changed_paths",
+        lambda *_args: (
+            "ros2_ws/src/lunar_planner_core/src/shared/"
+            "reachability_projection.cpp",
+            "ros2_ws/src/lunar_planner_core/src/planner.cpp",
+        ),
+    )
+
+    assert not cli_module._cache_accepts_runtime_only_v3_repair(
+        REPOSITORY_ROOT,
+        cached_commit="a" * 40,
+        current_commit="b" * 40,
+    )
+
+
 def test_cache_rejects_runtime_repair_that_changes_planner_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

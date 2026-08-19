@@ -3932,6 +3932,20 @@ def _formal_capability_preflight(
 
 _CACHE_SAFE_V3_RUNTIME_REPAIR_PATHS = frozenset(
     {
+        # Exact ground endpoints attach dynamic fine positions to the existing
+        # global cost tree; they do not alter the static scene projection that
+        # is materialized in the formal cache.
+        "ros2_ws/src/lunar_planner_core/include/"
+        "lunar_planner_core/reachability_projection.hpp",
+        "ros2_ws/src/lunar_planner_core/src/shared/"
+        "reachability_projection.cpp",
+        "ros2_ws/src/lunar_planner_core/test/"
+        "reachability_projection_test.cpp",
+        "ros2_ws/src/lunar_planner_training_bridge/include/"
+        "lunar_planner_training_bridge/request.hpp",
+        "ros2_ws/src/lunar_planner_training_bridge/src/conversions.cpp",
+        "ros2_ws/src/lunar_planner_training_bridge/src/python_bindings.cpp",
+        "ros2_ws/src/lunar_planner_training_bridge/test/test_bridge.py",
         "ros2_ws/src/lunar_planner_training_bridge/include/"
         "lunar_planner_training_bridge/visibility.hpp",
         "ros2_ws/src/lunar_planner_training_bridge/src/python_bindings.cpp",
@@ -3956,7 +3970,7 @@ def _cache_accepts_runtime_only_v3_repair(
     cached_commit: str,
     current_commit: str,
 ) -> bool:
-    """Allow an old static cache only for the audited visibility runtime repair."""
+    """Allow an old static cache only for audited runtime-only repairs."""
     if cached_commit == current_commit:
         return False
     try:
