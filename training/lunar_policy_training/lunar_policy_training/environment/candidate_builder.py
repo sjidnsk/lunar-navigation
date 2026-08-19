@@ -320,7 +320,11 @@ class CandidateDecisionSnapshot:
             self.planner_rejected_current_snapshot_count,
             self.global_search_call_count,
         )
-        if self.pipeline_kind not in {"GROUND_FRONTIER", "HOPPER_LANDING"}:
+        if self.pipeline_kind not in {
+            "GROUND_FRONTIER",
+            "GROUND_EXHAUSTION",
+            "HOPPER_LANDING",
+        }:
             raise ValueError("candidate decision pipeline kind is invalid")
         common_invalid = (
             not _is_sha256(self.snapshot_id)
@@ -377,7 +381,8 @@ class CandidateDecisionSnapshot:
         if (
             common_invalid
             or (
-                self.frontier_segment_count > 0
+                self.pipeline_kind == "GROUND_FRONTIER"
+                and self.frontier_segment_count > 0
                 and self.raw_candidate_count
                 > 3 * self.frontier_segment_count
             )

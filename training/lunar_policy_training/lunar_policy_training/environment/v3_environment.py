@@ -102,10 +102,12 @@ def _audit_candidate_boundary(
         raise EnvironmentInvariantError("candidate snapshot is invalid")
     if platform_type not in {"WHEELED", "LEGGED", "HOPPER"}:
         raise EnvironmentInvariantError("candidate snapshot platform is invalid")
-    expected_pipeline = (
-        "HOPPER_LANDING" if platform_type == "HOPPER" else "GROUND_FRONTIER"
+    expected_pipelines = (
+        {"HOPPER_LANDING"}
+        if platform_type == "HOPPER"
+        else {"GROUND_FRONTIER", "GROUND_EXHAUSTION"}
     )
-    if snapshot.pipeline_kind != expected_pipeline:
+    if snapshot.pipeline_kind not in expected_pipelines:
         raise EnvironmentInvariantError("candidate snapshot pipeline is invalid")
     selected = snapshot.selected_policy_candidate_count
     reserve = snapshot.untried_reserve_count

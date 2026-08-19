@@ -10,6 +10,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "model_contract"))
 
 from lunar_policy_training.environment import candidate_builder  # noqa: E402
+from lunar_policy_training.environment.v3_environment import (  # noqa: E402
+    TerminalReason,
+    _audit_candidate_boundary,
+)
 from lunar_policy_training.environment.observation_builder import (  # noqa: E402
     LocalObservation,
     MissionRaster,
@@ -18,6 +22,27 @@ from lunar_policy_training.environment.observation_builder import (  # noqa: E40
 from lunar_policy_training.environment.visibility import SensorGeometry  # noqa: E402
 from lunar_policy_training.polar_data.hazards import CanvasRatioLayer  # noqa: E402
 from lunar_policy_training.polar_data.raster import MapCanvas  # noqa: E402
+
+
+def test_ground_exhaustion_snapshot_allows_zero_gain_only_after_complete_scan() -> None:
+    snapshot = candidate_builder.CandidateDecisionSnapshot(
+        snapshot_id="a" * 64,
+        frontier_segment_count=1,
+        raw_candidate_count=7,
+        fine_pose_candidate_count=7,
+        globally_reachable_candidate_count=7,
+        positive_gain_candidate_count=0,
+        selected_policy_candidate_count=0,
+        untried_reserve_count=0,
+        planner_rejected_current_snapshot_count=0,
+        candidate_set_sha256="b" * 64,
+        global_search_call_count=1,
+        global_search_elapsed_s=0.01,
+        candidate_refresh_elapsed_s=0.02,
+        pipeline_kind="GROUND_EXHAUSTION",
+    )
+
+    assert _audit_candidate_boundary(snapshot, "WHEELED") is TerminalReason.ZERO_EXPECTED_GAIN
 
 
 def test_residual_component_scan_is_four_connected_and_canonical() -> None:
