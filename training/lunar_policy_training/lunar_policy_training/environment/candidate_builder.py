@@ -116,25 +116,21 @@ def _ground_potential_gain_mask(
     radius = math.ceil(sensor_range_m / resolution_m)
     if radius >= max(rows - 1, columns - 1):
         return np.ones_like(unknown)
-    for row_offset in range(-min(radius, rows - 1), min(radius, rows - 1) + 1):
-        source_row_start = max(0, -row_offset)
-        source_row_stop = min(rows, rows - row_offset)
-        target_row_start = source_row_start + row_offset
-        target_row_stop = source_row_stop + row_offset
-        for column_offset in range(
-            -min(radius, columns - 1), min(radius, columns - 1) + 1
-        ):
-            source_column_start = max(0, -column_offset)
-            source_column_stop = min(columns, columns - column_offset)
-            target_column_start = source_column_start + column_offset
-            target_column_stop = source_column_stop + column_offset
-            possible[
-                target_row_start:target_row_stop,
-                target_column_start:target_column_stop,
-            ] |= unknown[
-                source_row_start:source_row_stop,
-                source_column_start:source_column_stop,
-            ]
+    padded = np.pad(unknown.astype(np.int32), ((1, 0), (1, 0)))
+    integral = padded.cumsum(axis=0, dtype=np.int64).cumsum(
+        axis=1, dtype=np.int64
+    )
+    row_low = np.maximum(np.arange(rows) - radius, 0)
+    row_high = np.minimum(np.arange(rows) + radius + 1, rows)
+    column_low = np.maximum(np.arange(columns) - radius, 0)
+    column_high = np.minimum(np.arange(columns) + radius + 1, columns)
+    sums = (
+        integral[row_high[:, None], column_high[None, :]]
+        - integral[row_low[:, None], column_high[None, :]]
+        - integral[row_high[:, None], column_low[None, :]]
+        + integral[row_low[:, None], column_low[None, :]]
+    )
+    possible = np.ascontiguousarray(sums > 0, dtype=np.bool_)
     return np.ascontiguousarray(possible, dtype=np.bool_)
 
 
@@ -1270,6 +1266,10 @@ class CandidateBuilderV2:
         mission: MissionRaster,
         *,
         reachable_pose_mask: np.ndarray,
+        observation_positions_m: np.ndarray | None = None,
+        ground_endpoint_feasibility: (
+            Callable[[np.ndarray], np.ndarray] | None
+        ) = None,
     ) -> ExhaustionUpgradeScanResult:
         """Measure all currently reachable observed-only residual observers.
 
@@ -1292,6 +1292,20 @@ class CandidateBuilderV2:
             or not reachable.flags.c_contiguous
         ):
             raise ValueError("exhaustion scan reachable pose mask is invalid")
+        reachable_count = int(reachable.sum(dtype=np.int64))
+        positions = observation_positions_m
+        if positions is not None and (
+            not isinstance(positions, np.ndarray)
+            or positions.dtype != np.dtype(np.float64)
+            or positions.shape != (reachable_count, 3)
+            or not positions.flags.c_contiguous
+            or not np.isfinite(positions).all()
+        ):
+            raise ValueError("exhaustion scan observation positions are invalid")
+        if ground_endpoint_feasibility is not None and positions is None:
+            raise ValueError(
+                "exhaustion scan endpoint feasibility requires observation positions"
+            )
         residual = np.ascontiguousarray(
             (mission.roi_ratio > 0.0) & ~world.observed_mask,
             dtype=np.bool_,
@@ -1306,6 +1320,49 @@ class CandidateBuilderV2:
         pose_cells = np.ascontiguousarray(
             np.argwhere(eligible), dtype=np.int32
         ).reshape((-1, 2))
+        if positions is None:
+            endpoint_positions = np.empty((len(pose_cells), 3), dtype=np.float64)
+        else:
+            reachable_cells = np.argwhere(reachable)
+            reachable_codes = np.ascontiguousarray(
+                reachable_cells[:, 0].astype(np.int64) * cells
+                + reachable_cells[:, 1],
+                dtype=np.int64,
+            )
+            pose_codes = np.ascontiguousarray(
+                pose_cells[:, 0].astype(np.int64) * cells + pose_cells[:, 1],
+                dtype=np.int64,
+            )
+            position_indices = np.searchsorted(reachable_codes, pose_codes)
+            if (
+                (position_indices >= len(reachable_codes)).any()
+                or not np.array_equal(reachable_codes[position_indices], pose_codes)
+            ):
+                raise CandidateInvariantError(
+                    "GROUND_EXHAUSTION_POSITION_ALIGNMENT_INVALID"
+                )
+            endpoint_positions = np.ascontiguousarray(
+                positions[position_indices], dtype=np.float64
+            )
+        if ground_endpoint_feasibility is None:
+            endpoint_mask = np.ones(len(pose_cells), dtype=np.bool_)
+        else:
+            endpoint_mask = ground_endpoint_feasibility(endpoint_positions)
+            if (
+                not isinstance(endpoint_mask, np.ndarray)
+                or endpoint_mask.dtype != np.dtype(np.bool_)
+                or endpoint_mask.shape != (len(pose_cells),)
+                or not endpoint_mask.flags.c_contiguous
+            ):
+                raise CandidateInvariantError(
+                    "GROUND_ENDPOINT_FEASIBILITY_INVALID"
+                )
+        endpoint_cells = np.ascontiguousarray(
+            pose_cells[endpoint_mask], dtype=np.int32
+        ).reshape((-1, 2))
+        endpoint_positions = np.ascontiguousarray(
+            endpoint_positions[endpoint_mask], dtype=np.float64
+        ).reshape((-1, 3))
         gain_arguments = (
             np.ascontiguousarray(world.observed_mask, dtype=np.bool_),
             np.ascontiguousarray(
@@ -1316,13 +1373,23 @@ class CandidateBuilderV2:
                 mission.priority * mission.roi_ratio, dtype=np.float32
             ),
         )
-        gains = self._visibility_estimator.estimate_candidate_gains(
-            *gain_arguments, pose_cells
+        exact_gain = getattr(
+            self._visibility_estimator,
+            "estimate_candidate_gains_at_positions",
+            None,
         )
+        if not len(endpoint_cells):
+            gains = np.zeros((0, 2), dtype=np.float32)
+        elif positions is not None and callable(exact_gain):
+            gains = exact_gain(*gain_arguments, endpoint_positions)
+        else:
+            gains = self._visibility_estimator.estimate_candidate_gains(
+                *gain_arguments, endpoint_cells
+            )
         if (
             not isinstance(gains, np.ndarray)
             or gains.dtype != np.dtype(np.float32)
-            or gains.shape != (len(pose_cells), 2)
+            or gains.shape != (len(endpoint_cells), 2)
             or not gains.flags.c_contiguous
             or not np.isfinite(gains).all()
             or (gains < 0.0).any()
@@ -1331,20 +1398,21 @@ class CandidateBuilderV2:
         positive = tuple(
             (int(row), int(column))
             for (row, column), gain in zip(
-                pose_cells, gains[:, 0], strict=True
+                endpoint_cells, gains[:, 0], strict=True
             )
             if float(gain) >= _DETAIL_CELL_COARSE_EQUIVALENT
         )
         temporary_bytes = int(
             residual.nbytes + potential.nbytes + eligible.nbytes
-            + pose_cells.nbytes + gains.nbytes
+            + pose_cells.nbytes + endpoint_cells.nbytes + endpoint_positions.nbytes
+            + gains.nbytes
         )
         return ExhaustionUpgradeScanResult(
             diagnostics=ExhaustionUpgradeDiagnostics(
                 residual_component_count=len(components),
-                reachable_pose_count=int(eligible.sum(dtype=np.int64)),
-                endpoint_feasible_pose_count=len(pose_cells),
-                exact_gain_evaluated_pose_count=len(pose_cells),
+                reachable_pose_count=len(pose_cells),
+                endpoint_feasible_pose_count=len(endpoint_cells),
+                exact_gain_evaluated_pose_count=len(endpoint_cells),
                 positive_pose_count=len(positive),
                 temporary_array_bytes=temporary_bytes,
                 elapsed_s=perf_counter() - started,

@@ -43,6 +43,19 @@ def test_residual_component_scan_rejects_invalid_mask() -> None:
         )
 
 
+def test_ground_potential_gain_mask_marks_exact_chebyshev_sensor_stencil() -> None:
+    unknown = np.zeros((5, 6), dtype=np.bool_)
+    unknown[2, 3] = True
+
+    result = candidate_builder._ground_potential_gain_mask(
+        unknown, sensor_range_m=1.0, resolution_m=1.0
+    )
+
+    expected = np.zeros_like(unknown)
+    expected[1:4, 2:5] = True
+    assert np.array_equal(result, expected)
+
+
 class _AllGainEstimator:
     def __init__(self) -> None:
         self.sensor = SensorGeometry(30.0, 2.0 * np.pi)
@@ -90,3 +103,34 @@ def test_isolated_ground_exhaustion_scan_batches_reachable_residual_observers() 
     assert result.diagnostics.positive_pose_count == result.diagnostics.reachable_pose_count
     assert len(estimator.calls) == 1
     assert len(estimator.calls[0]) == result.diagnostics.exact_gain_evaluated_pose_count
+
+
+def test_isolated_ground_exhaustion_scan_filters_endpoint_infeasible_poses() -> None:
+    world, mission = _world_and_mission()
+    estimator = _AllGainEstimator()
+    builder = candidate_builder.CandidateBuilderV2(estimator)
+    reachable = np.ascontiguousarray(world.observed_mask.copy(), dtype=np.bool_)
+    reachable_cells = np.argwhere(reachable)
+    positions = np.ascontiguousarray(
+        [
+            (float(row) * 0.1, float(column) * 0.1, 0.0)
+            for row, column in reachable_cells
+        ],
+        dtype=np.float64,
+    )
+
+    result = builder.scan_ground_exhaustion_candidates(
+        world,
+        mission,
+        reachable_pose_mask=reachable,
+        observation_positions_m=positions,
+        ground_endpoint_feasibility=lambda candidates: np.zeros(
+            len(candidates), dtype=np.bool_
+        ),
+    )
+
+    assert result.diagnostics.reachable_pose_count > 0
+    assert result.diagnostics.endpoint_feasible_pose_count == 0
+    assert result.diagnostics.exact_gain_evaluated_pose_count == 0
+    assert result.positive_pose_cells == ()
+    assert estimator.calls == []

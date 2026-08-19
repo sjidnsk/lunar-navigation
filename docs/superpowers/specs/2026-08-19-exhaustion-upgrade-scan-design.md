@@ -39,9 +39,13 @@ positive pose.
 
 `ExhaustionUpgradeDiagnostics` records the residual component count, raw
 reachable pose count, endpoint-feasible pose count, exact-gain evaluated pose
-count, positive pose count, selected candidate count and elapsed time.  The
-isolated API returns these diagnostics and immutable `PhysicalCandidate`
-values, but does not expose them to the policy yet.
+count, positive pose count and elapsed time.  The isolated API returns these
+diagnostics plus canonical positive pose-cell witnesses; it does not create
+`PhysicalCandidate` values or expose any result to the policy yet.
+
+The radius prefilter is an exact Chebyshev-stencil existence test implemented
+with a summed-area table.  It is O(map cells), rather than repeatedly
+translating the full map for every offset in the sensor-radius stencil.
 
 ## Performance gates before integration
 
