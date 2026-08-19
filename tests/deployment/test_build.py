@@ -1,0 +1,21 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from deployment.luna_runtime.build import REQUIRED_PACKAGES, make_build_plan
+from deployment.luna_runtime.config import load_runtime_config
+from deployment.luna_runtime.state import resolve_runtime_paths
+
+
+def test_default_build_selects_current_runtime_packages_and_never_training_bridge(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    config = load_runtime_config(root / "deployment/config/runtime.default.yaml")
+    paths = resolve_runtime_paths("dev", home=tmp_path)
+
+    plan = make_build_plan(config, paths, root)
+
+    assert "lunar_planner_training_bridge" not in plan.packages
+    assert plan.packages == REQUIRED_PACKAGES
+    assert plan.packages[-1] == "lunar_policy_runtime"
+    assert plan.build_base == paths.data / "build"
+    assert all(str(base).startswith(str(paths.data)) for base in (plan.build_base, plan.install_base, plan.log_base))

@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Sequence
 
 from .bundle import BundleRequest, build_bundle
+from .build import build_runtime, make_build_plan
 from .commands import CommandRunner, RuntimeRefusal, doctor_runtime, init_runtime, prepare_environment
 from .config import ConfigError, load_runtime_config, load_profile
 from .host import HostFacts
+from .process import read_runtime_status, start_runtime, stop_runtime, tail_log
 from .state import resolve_runtime_paths
 
 
@@ -37,6 +39,29 @@ class SystemRunner:
             if result.returncode == 0:
                 versions[package] = result.stdout.strip()
         return versions
+
+    def popen(self, command: tuple[str, ...]):
+        process = subprocess.Popen(command, start_new_session=True)
+        fingerprint = Path(f"/proc/{process.pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8").strip()
+        return type("SystemChild", (), {
+            "pid": process.pid,
+            "fingerprint": fingerprint,
+            "terminate": process.terminate,
+        })()
+
+    def lifecycle_state(self, node_name: str) -> str:
+        result = subprocess.run(("ros2", "lifecycle", "get", node_name), text=True, capture_output=True, check=True)
+        return result.stdout.strip().split()[-1]
+
+    def process_matches(self, pid: int, fingerprint: str) -> bool:
+        try:
+            return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8").strip() == fingerprint
+        except OSError:
+            return False
+
+    def terminate(self, pid: int, fingerprint: str) -> None:
+        if self.process_matches(pid, fingerprint):
+            os.kill(pid, 15)
 
 
 def _repo_root() -> Path:
@@ -78,7 +103,7 @@ def run_cli(
     host = facts or _host_facts()
     commands = runner or SystemRunner()
     parser = argparse.ArgumentParser(prog="luna", add_help=False)
-    parser.add_argument("command", choices=("init", "prepare", "doctor", "config", "bundle"))
+    parser.add_argument("command", choices=("init", "prepare", "doctor", "config", "bundle", "build", "start", "stop", "status", "logs"))
     parser.add_argument("--profile")
     parser.add_argument("--config")
     parser.add_argument("--dry-run", action="store_true")
@@ -107,6 +132,18 @@ def run_cli(
 
         config_path = Path(args.config) if args.config else resolve_runtime_paths("dev", home=home).config
         config = load_runtime_config(config_path)
+        paths = resolve_runtime_paths("dev", home=home)
+        if args.command == "build":
+            build_runtime(make_build_plan(config, paths, root), commands)
+            return CliResult(0, {"build_base": str(paths.data / "build")})
+        if args.command == "start":
+            return CliResult(0, start_runtime(config, paths, commands))
+        if args.command == "stop":
+            return CliResult(0, stop_runtime(paths, commands))
+        if args.command == "status":
+            return CliResult(0, read_runtime_status(paths, commands))
+        if args.command == "logs":
+            return CliResult(0, {"log_directory": str(tail_log(paths))})
         if args.command == "config":
             if args.check != "check":
                 return CliResult(2, {"reason": "CONFIG_SUBCOMMAND_REQUIRED"})
@@ -119,7 +156,7 @@ def run_cli(
                 return CliResult(2, {"reason": "SELECT_PREPARE_MODE"})
             result = prepare_environment(
                 config,
-                resolve_runtime_paths("dev", home=home),
+                paths,
                 host,
                 apply=args.apply,
                 confirmed=args.yes,
