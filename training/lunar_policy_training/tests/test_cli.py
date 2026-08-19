@@ -28,6 +28,8 @@ def test_preflight_only_source_delta_rejects_runtime_changes() -> None:
             "training/lunar_policy_training/lunar_policy_training/cli.py",
             "training/lunar_policy_training/lunar_policy_training/formal_preflight.py",
             "training/lunar_policy_training/tests/test_cli.py",
+            "training/lunar_policy_training/tests/test_qualification_entry_targets.py",
+            "training/tools/qualify_task_cache_training_entry.py",
         }
     )
     assert not cli_module._preflight_only_source_delta_paths(

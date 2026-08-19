@@ -8191,7 +8191,9 @@ _PREFLIGHT_ONLY_SOURCE_PATHS = frozenset(
         "training/lunar_policy_training/tests/test_cli.py",
         "training/lunar_policy_training/tests/test_formal_preflight.py",
         "training/lunar_policy_training/tests/test_ppo_training.py",
+        "training/lunar_policy_training/tests/test_qualification_entry_targets.py",
         "training/configs/rtx4080_super_v4_joint.yaml",
+        "training/tools/qualify_task_cache_training_entry.py",
     }
 )
 
