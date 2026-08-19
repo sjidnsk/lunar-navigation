@@ -155,7 +155,7 @@ def _half_open_bounds(
     name: str,
 ) -> tuple[int, int, int, int]:
     if (
-        not isinstance(value, list)
+        not isinstance(value, (list, tuple))
         or len(value) != 4
         or any(type(item) is not int or item < 0 for item in value)
     ):
@@ -325,7 +325,7 @@ class FormalRevealState:
         if elapsed_s < 0.0:
             raise ValueError("formal reveal elapsed time must be non-negative")
         samples_value = value["path_samples"]
-        if not isinstance(samples_value, list):
+        if not isinstance(samples_value, (list, tuple)):
             raise ValueError("formal path sample list is invalid")
         path_samples = tuple(
             FormalPathSampleState.from_dict(item) for item in samples_value
@@ -524,19 +524,19 @@ class FormalWorkerState:
             raise ValueError("formal cumulative executed path must be non-negative")
         start_cell = value["start_cell"]
         if (
-            not isinstance(start_cell, list)
+            not isinstance(start_cell, (list, tuple))
             or len(start_cell) != 2
             or any(type(item) is not int or item < 0 for item in start_cell)
             or any(item >= task_span_cells for item in start_cell)
         ):
             raise ValueError("formal start cell is invalid")
         history_value = value["reveal_history"]
-        if not isinstance(history_value, list):
+        if not isinstance(history_value, (list, tuple)):
             raise ValueError("formal reveal history structure is invalid")
         history = tuple(FormalRevealState.from_dict(item) for item in history_value)
         event_kinds_value = value["replay_event_kinds"]
         if (
-            not isinstance(event_kinds_value, list)
+            not isinstance(event_kinds_value, (list, tuple))
             or any(
                 item
                 not in {
@@ -554,10 +554,10 @@ class FormalWorkerState:
         )
         failed_value = value["planner_failed_candidate_ids"]
         if (
-            not isinstance(failed_value, list)
+            not isinstance(failed_value, (list, tuple))
             or any(not isinstance(item, str) for item in failed_value)
             or any(_sha256(item, "planner failed candidate ID") != item for item in failed_value)
-            or failed_value != sorted(set(failed_value))
+            or tuple(failed_value) != tuple(sorted(set(failed_value)))
         ):
             raise ValueError("formal planner failed candidate IDs are invalid")
         last_reveal_index = max(
@@ -614,9 +614,9 @@ class FormalWorkerState:
         candidate_ids = value["candidate_ids"]
         candidate_mask = value["candidate_mask"]
         if (
-            not isinstance(candidate_ids, list)
+            not isinstance(candidate_ids, (list, tuple))
             or len(candidate_ids) != 64
-            or not isinstance(candidate_mask, list)
+            or not isinstance(candidate_mask, (list, tuple))
             or len(candidate_mask) != 64
             or any(type(item) is not bool for item in candidate_mask)
             or any(not isinstance(item, str) for item in candidate_ids)
