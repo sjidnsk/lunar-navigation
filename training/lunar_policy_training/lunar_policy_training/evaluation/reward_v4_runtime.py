@@ -114,6 +114,7 @@ def evaluate_reward_v4_fixed_grid(
     remaining_tasks = tuple(
         task for task in tasks if _task_key(task) not in completed
     )
+    worker_topology = _remaining_worker_topology(tasks, remaining_tasks)
     target_device = torch.device(device)
     if target_device.type == "cuda" and not torch.cuda.is_available():
         raise RewardV4RuntimeEvaluationError(
@@ -151,6 +152,7 @@ def evaluate_reward_v4_fixed_grid(
                 worker_timeout_seconds=FORMAL_WORKER_RESPONSE_TIMEOUT_SECONDS,
                 auto_reset=False,
                 initial_episode_cursors=cursors,
+                worker_topology=worker_topology,
             ) as pool:
                 if pool.worker_count != len(remaining_tasks):
                     raise RewardV4RuntimeEvaluationError(
@@ -378,6 +380,30 @@ def _task_key(
     task: RewardEvaluationTask,
 ) -> tuple[PlatformType, TaskScaleBucket, int]:
     return (task.platform, task.scale_bucket, task.evaluation_seed)
+
+
+def _remaining_worker_topology(
+    tasks: tuple[RewardEvaluationTask, ...],
+    remaining_tasks: tuple[RewardEvaluationTask, ...],
+) -> tuple[tuple[int, int], ...]:
+    """Keep resumed task lanes tied to the original fixed evaluation grid."""
+    topology: list[tuple[int, int]] = []
+    for task in remaining_tasks:
+        platform_tasks = tuple(
+            candidate for candidate in tasks if candidate.platform is task.platform
+        )
+        if not platform_tasks:
+            raise RewardV4RuntimeEvaluationError(
+                "runtime evaluation task platform is unavailable"
+            )
+        try:
+            lane = platform_tasks.index(task)
+        except ValueError as error:
+            raise RewardV4RuntimeEvaluationError(
+                "runtime evaluation task is outside fixed grid"
+            ) from error
+        topology.append((lane, len(platform_tasks)))
+    return tuple(topology)
 
 
 def _evaluation_progress_path(

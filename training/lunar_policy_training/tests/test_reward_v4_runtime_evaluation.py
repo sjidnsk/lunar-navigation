@@ -288,3 +288,10 @@ def test_full_evaluation_keeps_running_until_natural_terminal(
     assert tuple(row.final_coverage for row in report.episodes) == pytest.approx(
         (0.2,) * 4
     )
+
+
+def test_remaining_evaluation_task_keeps_its_original_scale_lane() -> None:
+    tasks = _manifest().tasks
+    remaining = (tasks[2],)
+
+    assert runtime_module._remaining_worker_topology(tasks, remaining) == ((2, 4),)

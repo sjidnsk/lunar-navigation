@@ -194,6 +194,7 @@ class ParallelEnvPool:
         worker_startup_timeout_seconds: float | None = None,
         auto_reset: bool = True,
         initial_episode_cursors: tuple[int, ...] | None = None,
+        worker_topology: tuple[tuple[int, int], ...] | None = None,
         initial_episode_states: (
             tuple[Mapping[str, object] | None, ...] | None
         ) = None,
@@ -205,10 +206,34 @@ class ParallelEnvPool:
         for platform in self._platforms:
             platform_worker_indices.append(local_counts[platform])
             local_counts[platform] += 1
-        self._platform_worker_indices = tuple(platform_worker_indices)
-        self._platform_worker_counts = tuple(
+        default_worker_indices = tuple(platform_worker_indices)
+        default_worker_counts = tuple(
             local_counts[platform] for platform in self._platforms
         )
+        if worker_topology is None:
+            self._platform_worker_indices = default_worker_indices
+            self._platform_worker_counts = default_worker_counts
+        else:
+            if (
+                not isinstance(worker_topology, tuple)
+                or len(worker_topology) != self.worker_count
+                or any(
+                    not isinstance(value, tuple)
+                    or len(value) != 2
+                    or type(value[0]) is not int
+                    or type(value[1]) is not int
+                    or value[1] <= 0
+                    or not 0 <= value[0] < value[1]
+                    for value in worker_topology
+                )
+            ):
+                raise ParallelPoolError("worker topology is invalid")
+            self._platform_worker_indices = tuple(
+                value[0] for value in worker_topology
+            )
+            self._platform_worker_counts = tuple(
+                value[1] for value in worker_topology
+            )
         _validate_template(observation_template)
         if not callable(environment_factory):
             raise ParallelPoolError("environment factory must be callable")
