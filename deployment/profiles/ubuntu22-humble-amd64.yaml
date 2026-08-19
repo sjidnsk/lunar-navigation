@@ -1,0 +1,10 @@
+schema_version: luna-target-profile/v1
+id: ubuntu22-humble-amd64
+host:
+  os_id: ubuntu
+  os_version: "22.04"
+  architecture: x86_64
+  ros_distro: humble
+  l4t_prefix: null
+  jetpack_major: null
+policy_probe: onnxruntime

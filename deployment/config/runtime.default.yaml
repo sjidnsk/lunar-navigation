@@ -1,0 +1,33 @@
+profile: ubuntu22-humble-amd64
+interfaces:
+  map_global: /environment/map_global
+  map_local: /environment/map_local
+  odometry: /localization/odometry
+  localization_status: /localization/status
+  tf: /tf
+  exploration_task: /mission/exploration_task
+  motion_feedback: /execution/motion_feedback
+  plan_motion: /plan_motion
+  diagnostics: /diagnostics
+  certified_route_markers: /planning/certified_route_markers
+  provisional_route_markers: /planning/provisional_route_markers
+capabilities:
+  platform_file: /opt/luna/capabilities/platform.yaml
+  observation_file: /opt/luna/capabilities/observation.yaml
+planner:
+  enable_nav2_adapter: false
+  snapshot_policy:
+    global_map_max_age: 1.0
+    local_map_max_age: 1.0
+    odometry_max_age: 1.0
+    localization_status_max_age: 1.0
+    tf_max_age: 1.0
+    max_pairwise_skew: 1.0
+policy:
+  mode: fallback
+  model_id: null
+extensions:
+  map_pipeline: false
+  path_tracking: false
+runtime:
+  log_level: INFO

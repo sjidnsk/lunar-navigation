@@ -1,0 +1,29 @@
+schema_version: lunar-runtime-allowlist/v1
+runtime_files:
+  - scripts/luna
+  - deployment/luna_runtime
+  - deployment/config
+  - deployment/runtime_source_allowlist.yaml
+bundle_templates:
+  - deployment/docs/README.runtime.md
+  - deployment/docs/COMMANDS.runtime.md
+profile_directory: deployment/profiles
+runtime_roots:
+  - model_contract
+  - ros2_ws/src/lunar_navigation_msgs
+  - ros2_ws/src/lunar_planning_msgs
+  - ros2_ws/src/lunar_navigation_config
+  - ros2_ws/src/lunar_planner_core
+  - ros2_ws/src/lunar_planner_ros
+  - ros2_ws/src/lunar_policy_runtime
+optional_roots:
+  nav2_adapter: ros2_ws/src/lunar_nav2_adapter
+excluded_path_components:
+  - test
+  - tests
+  - docs
+  - build
+  - install
+  - log
+  - cache
+  - __pycache__

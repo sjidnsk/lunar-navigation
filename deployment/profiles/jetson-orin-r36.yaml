@@ -1,0 +1,10 @@
+schema_version: luna-target-profile/v1
+id: jetson-orin-r36
+host:
+  os_id: ubuntu
+  os_version: "22.04"
+  architecture: aarch64
+  ros_distro: humble
+  l4t_prefix: R36
+  jetpack_major: 6
+policy_probe: trtexec
