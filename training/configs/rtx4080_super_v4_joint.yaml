@@ -34,7 +34,7 @@ total_gpu_budget_seconds: 86400
 formal_training_seeds: [4080]
 run_kind: formal
 reward_v4:
-  success_threshold: 0.95
+  success_threshold: 0.80
   coverage_weight: 100.0
   success_bonus: 100.0
   terminal_gap_weight: 1.0

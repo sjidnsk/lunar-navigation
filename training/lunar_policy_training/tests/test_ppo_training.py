@@ -472,6 +472,17 @@ def test_both_yaml_files_freeze_the_exact_typed_ppo_baseline(filename: str) -> N
     assert asdict(config.ppo) == _EXPECTED_PPO
 
 
+def test_v4_joint_config_loads_with_the_formal_80_percent_success_boundary() -> None:
+    """Would fail if the launch configuration drifted from the frozen 80% contract."""
+    config = load_training_config(
+        pathlib.Path(__file__).resolve().parents[3]
+        / "training/configs/rtx4080_super_v4_joint.yaml"
+    )
+
+    assert config.reward_v4 is not None
+    assert config.reward_v4.success_threshold == 0.80
+
+
 @pytest.mark.parametrize(
     ("field", "drift"),
     _PPO_VALUE_DRIFTS,
