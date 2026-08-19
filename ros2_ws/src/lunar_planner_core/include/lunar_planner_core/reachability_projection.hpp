@@ -14,6 +14,7 @@
 namespace lunar::planning {
 
 struct HopperOpportunityContextStorage;
+struct GroundEndpointReachabilityContextStorage;
 
 struct HopperLandingEvidence final {
   std::uint8_t certified{};
@@ -124,6 +125,35 @@ struct ReachabilityProjectionResult final {
   }
 };
 
+struct GroundEndpointReachabilityContext final {
+  ReachabilityProjection projection;
+  std::shared_ptr<GroundEndpointReachabilityContextStorage> storage;
+};
+
+struct GroundEndpointReachabilityContextResult final {
+  std::optional<GroundEndpointReachabilityContext> context;
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept {
+    return context.has_value() && reason_code.empty();
+  }
+};
+
+struct GroundExactEndpointProjection final {
+  std::vector<std::uint8_t> reachable;
+  std::vector<double> minimum_cost_m;
+  std::vector<std::string> reason_codes;
+};
+
+struct GroundExactEndpointProjectionResult final {
+  std::optional<GroundExactEndpointProjection> projection;
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept {
+    return projection.has_value() && reason_code.empty();
+  }
+};
+
 struct HopperOpportunityContext final {
   std::size_t width{};
   std::size_t height{};
@@ -170,6 +200,17 @@ struct HopperOpportunityDistanceProjectionResult final {
 [[nodiscard]] ReachabilityProjectionResult ProjectReachability(
     const PlannerInput& input,
     double maximum_edge_distance_m);
+
+[[nodiscard]] GroundEndpointReachabilityContextResult
+ProjectGroundEndpointReachabilityContext(
+    const PlannerInput& input,
+    double maximum_edge_distance_m);
+
+[[nodiscard]] GroundExactEndpointProjectionResult
+QueryGroundExactEndpoints(
+    const GroundEndpointReachabilityContext& context,
+    std::span<const Vec3> target_positions_map,
+    double tolerance_m);
 
 [[nodiscard]] ReachabilityProjectionResult ProjectReachability(
     const PlannerInput& input,

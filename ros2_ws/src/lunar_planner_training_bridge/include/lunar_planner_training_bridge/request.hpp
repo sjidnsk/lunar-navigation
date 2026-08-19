@@ -44,6 +44,15 @@ class PlannerBridge final {
   [[nodiscard]] lunar::planning::ReachabilityProjectionResult
   ProjectReachability(const TrainingPlanRequest &request,
                       double maximum_edge_distance_m) const noexcept;
+  [[nodiscard]] lunar::planning::GroundEndpointReachabilityContextResult
+  ProjectGroundEndpointReachabilityContext(
+      const TrainingPlanRequest& request,
+      double maximum_edge_distance_m) const noexcept;
+  [[nodiscard]] lunar::planning::GroundExactEndpointProjectionResult
+  QueryGroundExactEndpoints(
+      const lunar::planning::GroundEndpointReachabilityContext& context,
+      const std::vector<lunar::planning::Vec3>& target_positions_map,
+      double tolerance_m) const noexcept;
   [[nodiscard]] lunar::planning::ReachabilityProjectionResult
   ProjectReachability(
       const TrainingPlanRequest &request,

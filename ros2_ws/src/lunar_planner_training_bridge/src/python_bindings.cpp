@@ -1168,6 +1168,47 @@ void BindProjection(py::module_ &module) {
       .def_readonly(
           "search_elapsed_s",
           &planning::ReachabilityProjection::search_elapsed_s);
+  py::class_<planning::GroundEndpointReachabilityContext>(
+      module, "GroundEndpointReachabilityContext")
+      .def_property_readonly(
+          "projection",
+          [](const planning::GroundEndpointReachabilityContext& self)
+              -> const planning::ReachabilityProjection& {
+                return self.projection;
+              },
+          py::return_value_policy::reference_internal);
+  py::class_<planning::GroundExactEndpointProjection>(
+      module, "GroundExactEndpointProjection")
+      .def_property_readonly(
+          "reachable",
+          [](const planning::GroundExactEndpointProjection& self) {
+            py::array_t<std::uint8_t> result(
+                py::array::ShapeContainer{
+                    static_cast<py::ssize_t>(self.reachable.size())});
+            std::copy(self.reachable.begin(), self.reachable.end(),
+                      result.mutable_data());
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "minimum_cost_m",
+          [](const planning::GroundExactEndpointProjection& self) {
+            py::array_t<double> result(
+                py::array::ShapeContainer{
+                    static_cast<py::ssize_t>(self.minimum_cost_m.size())});
+            std::copy(self.minimum_cost_m.begin(), self.minimum_cost_m.end(),
+                      result.mutable_data());
+            return ReadonlyArray(std::move(result));
+          })
+      .def_property_readonly(
+          "reason_codes",
+          [](const planning::GroundExactEndpointProjection& self) {
+            py::tuple result(self.reason_codes.size());
+            for (std::size_t index = 0U; index < self.reason_codes.size();
+                 ++index) {
+              result[index] = py::str(self.reason_codes[index]);
+            }
+            return result;
+          });
   py::class_<planning::HopperSingleHopEnvelopeProjection>(
       module, "HopperSingleHopEnvelopeProjection")
       .def_readonly(
@@ -1950,6 +1991,65 @@ void BindRequest(py::module_ &module) {
           },
           py::arg("request"), py::arg("maximum_edge_distance_m"),
           py::call_guard<py::gil_scoped_release>())
+      .def(
+          "project_ground_endpoint_context",
+          [](const training::PlannerBridge& self,
+             const training::TrainingPlanRequest& request,
+             const double maximum_edge_distance_m) {
+            auto result = self.ProjectGroundEndpointReachabilityContext(
+                request, maximum_edge_distance_m);
+            if (!result.ok()) {
+              throw std::runtime_error(result.reason_code);
+            }
+            return std::move(*result.context);
+          },
+          py::arg("request"), py::arg("maximum_edge_distance_m"),
+          py::call_guard<py::gil_scoped_release>())
+      .def(
+          "query_ground_exact_endpoints",
+          [](const training::PlannerBridge& self,
+             const planning::GroundEndpointReachabilityContext& context,
+             const py::array& target_positions_m,
+             const double tolerance_m) {
+            RequireExactArray(
+                target_positions_m, py::dtype::of<double>(), 2,
+                "ground endpoint targets", "float64");
+            if (target_positions_m.shape(1) != 3) {
+              throw py::value_error(
+                  "ground endpoint targets must have shape [N,3]");
+            }
+            RequireFiniteDoubleArray(
+                target_positions_m, "ground endpoint targets");
+            if (!std::isfinite(tolerance_m) || tolerance_m < 0.0) {
+              throw py::value_error(
+                  "ground endpoint tolerance must be finite and non-negative");
+            }
+            const auto* data = static_cast<const double*>(
+                target_positions_m.data());
+            std::vector<planning::Vec3> targets;
+            targets.reserve(static_cast<std::size_t>(
+                target_positions_m.shape(0)));
+            for (py::ssize_t index = 0;
+                 index < target_positions_m.shape(0); ++index) {
+              targets.push_back(planning::Vec3{
+                  .x = data[index * 3],
+                  .y = data[index * 3 + 1],
+                  .z = data[index * 3 + 2],
+              });
+            }
+            planning::GroundExactEndpointProjectionResult result;
+            {
+              py::gil_scoped_release release;
+              result = self.QueryGroundExactEndpoints(
+                  context, targets, tolerance_m);
+            }
+            if (!result.ok()) {
+              throw std::runtime_error(result.reason_code);
+            }
+            return std::move(*result.projection);
+          },
+          py::arg("context"), py::arg("target_positions_m"),
+          py::arg("tolerance_m"))
       .def(
           "project_reachability",
           [](const training::PlannerBridge &self,

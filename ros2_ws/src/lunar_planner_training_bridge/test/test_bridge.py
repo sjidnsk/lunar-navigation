@@ -565,6 +565,33 @@ def test_bridge_projects_start_bound_reachability_with_exact_array_contract(
         assert projection.candidate_edges_evaluated == 0
 
 
+def test_bridge_queries_exact_ground_endpoints_from_one_context(
+    bridge, easy_request
+) -> None:
+    """A detailed target must not be represented by the candidate canvas parent."""
+    request = easy_request("WHEELED")
+    context = bridge.project_ground_endpoint_context(request, 30.0)
+    targets = np.ascontiguousarray(
+        ((4.9, 3.5, 0.0), (-0.1, 3.5, 0.0)), dtype=np.float64
+    )
+
+    result = bridge.query_ground_exact_endpoints(context, targets, 0.2)
+
+    assert context.projection.platform_type == "WHEELED"
+    assert context.projection.minimum_cost.flags.writeable is False
+    assert result.reachable.dtype == np.uint8
+    assert result.reachable.flags.c_contiguous
+    assert result.minimum_cost_m.dtype == np.float64
+    assert result.minimum_cost_m.flags.c_contiguous
+    assert result.reachable.tolist() == [1, 0]
+    assert np.isfinite(result.minimum_cost_m[0])
+    assert np.isposinf(result.minimum_cost_m[1])
+    assert result.reason_codes == (
+        "GROUND_ENDPOINT_REACHABLE",
+        "GROUND_ENDPOINT_OUTSIDE_GLOBAL_MAP",
+    )
+
+
 def test_bridge_streams_hopper_landing_evidence_into_reachability(
     bridge, easy_request
 ) -> None:

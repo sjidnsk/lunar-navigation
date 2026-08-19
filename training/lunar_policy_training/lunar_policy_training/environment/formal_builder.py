@@ -2264,12 +2264,18 @@ class FormalEpisode:
         world: ObservedWorld,
         *,
         planner_global_map: object,
+        complete_segment_ids: tuple[int, ...] = (),
     ) -> tuple[tuple[int, _RawFrontierCandidate], ...]:
-        """Resolve three fixed coarse anchors into observed-only 0.2 m poses.
+        """Resolve fixed anchors into observed-only 0.2 m candidate witnesses.
 
         The detail window and the C++ traversability projection are both bound
         to the current observation revision.  They deliberately receive no
         task coverability or scene-truth layer.
+
+        The normal path resolves the fixed quarter/half/three-quarter anchors.
+        A non-empty ``complete_segment_ids`` is the second-level fallback: it
+        resolves every coarse frontier cell in only those already-unsuccessful
+        segments.  It is not a task-wide residual-area scan.
         """
         detail_factor = int(round(
             GLOBAL_GEOMETRY.resolution_m / self.sensor_state.resolution_m
@@ -2279,11 +2285,25 @@ class FormalEpisode:
             != GLOBAL_GEOMETRY.resolution_m
         ):
             raise RuntimeError("ground detail candidate resolution differs")
+        if (
+            any(
+                type(segment_id) is not int
+                or not 0 <= segment_id < len(segments)
+                for segment_id in complete_segment_ids
+            )
+            or len(set(complete_segment_ids)) != len(complete_segment_ids)
+        ):
+            raise ValueError("ground detail recovery segment IDs are invalid")
+        complete_segment_set = set(complete_segment_ids)
         anchors: list[tuple[int, int, tuple[int, int], float, float]] = []
         for segment_id, segment in enumerate(segments):
-            for sample_rank, frontier_cell in enumerate(
-                _sample_frontier_chain(segment)
-            ):
+            if complete_segment_set:
+                if segment_id not in complete_segment_set:
+                    continue
+                frontier_cells = segment
+            else:
+                frontier_cells = _sample_frontier_chain(segment)
+            for sample_rank, frontier_cell in enumerate(frontier_cells):
                 x_m, y_m = world.canvas.grid_center_world(*frontier_cell)
                 anchors.append((
                     segment_id,
@@ -2547,7 +2567,7 @@ class FormalEpisode:
         safe_cells = np.ascontiguousarray(
             np.column_stack(np.nonzero(observed_safe)), dtype=np.int32
         ).reshape((-1, 2))
-        physical_reachability = PlatformCandidateReachability(
+        reachability_authority = PlatformCandidateReachability(
             platform_type=self.platform_type,
             canvas=world.canvas,
             pose_map=pose,
@@ -2565,7 +2585,10 @@ class FormalEpisode:
                 if self.platform_type == "HOPPER"
                 else _planner_global_canvas(world.canvas)
             ),
-        ).project_physical(safe_cells)
+        )
+        physical_reachability = reachability_authority.project_physical(
+            safe_cells
+        )
         backtrack_pose = (
             self._navigation_stack[-2]
             if len(self._navigation_stack) >= 2
@@ -2604,6 +2627,11 @@ class FormalEpisode:
                     planner_global_map=planner_global_map,
                 )
             ),
+            ground_exact_endpoint_reachability=(
+                None
+                if self.platform_type == "HOPPER"
+                else reachability_authority.query_exact_ground_endpoints
+            ),
             ground_detail_candidate_provider=(
                 None
                 if self.platform_type == "HOPPER"
@@ -2612,6 +2640,18 @@ class FormalEpisode:
                         segments,
                         candidate_world,
                         planner_global_map=planner_global_map,
+                    )
+                )
+            ),
+            ground_detail_segment_recovery_provider=(
+                None
+                if self.platform_type == "HOPPER"
+                else lambda segments, candidate_world, segment_ids: (
+                    self._ground_detail_frontier_candidates(
+                        segments,
+                        candidate_world,
+                        planner_global_map=planner_global_map,
+                        complete_segment_ids=segment_ids,
                     )
                 )
             ),

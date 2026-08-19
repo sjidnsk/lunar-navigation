@@ -110,6 +110,40 @@ TEST(ReachabilityProjection, GroundMaskIsTheCppStartConnectedComponent) {
 }
 
 TEST(ReachabilityProjection,
+     GroundExactEndpointContextCertifiesPointGoalWithoutParentSampling) {
+  PlannerInput input = test::MakeValidWheelInput();
+  input.world.global_map = test::MakeFlatMap("map", 12U, 8U, 1.0);
+  input.world.local_map = test::MakeFlatMap("odom", 12U, 8U, 1.0);
+  auto& state = std::get<WheeledState>(input.current_state);
+  state.pose.position_m = {2.5, 3.5, 0.0};
+
+  const auto context = ProjectGroundEndpointReachabilityContext(input, 30.0);
+
+  ASSERT_TRUE(context.ok()) << context.reason_code;
+  ASSERT_EQ(context.context->projection.platform_type, PlatformType::kWheeled);
+  ASSERT_TRUE(std::isfinite(context.context->projection.search_elapsed_s));
+  const std::vector<Vec3> targets{
+      {.x = 4.9, .y = 3.5, .z = 0.0},
+      {.x = -0.1, .y = 3.5, .z = 0.0},
+  };
+  const auto queried = QueryGroundExactEndpoints(
+      *context.context, targets, 0.2);
+
+  ASSERT_TRUE(queried.ok()) << queried.reason_code;
+  ASSERT_EQ(queried.projection->reachable.size(), targets.size());
+  ASSERT_EQ(queried.projection->minimum_cost_m.size(), targets.size());
+  ASSERT_EQ(queried.projection->reason_codes.size(), targets.size());
+  EXPECT_EQ(queried.projection->reachable.at(0), 1U);
+  EXPECT_TRUE(std::isfinite(queried.projection->minimum_cost_m.at(0)));
+  EXPECT_EQ(queried.projection->reason_codes.at(0),
+            "GROUND_ENDPOINT_REACHABLE");
+  EXPECT_EQ(queried.projection->reachable.at(1), 0U);
+  EXPECT_TRUE(std::isinf(queried.projection->minimum_cost_m.at(1)));
+  EXPECT_EQ(queried.projection->reason_codes.at(1),
+            "GROUND_ENDPOINT_OUTSIDE_GLOBAL_MAP");
+}
+
+TEST(ReachabilityProjection,
      GroundPhysicalMaskIgnoresPlannerPrimitiveIdentityAndOrder) {
   PlannerInput first = test::MakeValidWheelInput();
   PlannerInput second = first;

@@ -16,6 +16,7 @@ from .observation_builder import Pose2
 
 
 _PLATFORMS = frozenset(("WHEELED", "LEGGED", "HOPPER"))
+_GROUND_PLATFORMS = frozenset(("WHEELED", "LEGGED"))
 _GROUND_PHYSICAL_EVIDENCE_ALGORITHM_ID = (
     "cpp-safe-traversability-projection/v1"
 )
@@ -520,6 +521,7 @@ class PlatformCandidateReachability:
         if platform_type != "HOPPER" and planner_global_canvas is not None:
             self._validate_planner_global_map_binding()
         self._maximum_edge_distance_m = resolved_edge_distance_m
+        self._ground_endpoint_context: object | None = None
         self._local_traversability = (
             None
             if platform_type == "HOPPER"
@@ -573,9 +575,27 @@ class PlatformCandidateReachability:
             ground_global_search = None
         else:
             assert self._maximum_edge_distance_m is not None
-            projection = self._bridge.project_reachability(
-                self._request, self._maximum_edge_distance_m
+            self._ground_endpoint_context = None
+            project_context = getattr(
+                self._bridge,
+                "project_ground_endpoint_context",
+                None,
             )
+            if callable(project_context):
+                context = project_context(
+                    self._request,
+                    self._maximum_edge_distance_m,
+                )
+                projection = getattr(context, "projection", None)
+                if projection is None:
+                    raise PlatformReachabilityError(
+                        "ground endpoint context projection is unavailable"
+                    )
+                self._ground_endpoint_context = context
+            else:
+                projection = self._bridge.project_reachability(
+                    self._request, self._maximum_edge_distance_m
+                )
             (
                 reachable,
                 reachability_algorithm_id,
@@ -662,6 +682,70 @@ class PlatformCandidateReachability:
             ground_global_search=ground_global_search,
             hopper_single_hop_envelope=single_hop_envelope,
         )
+
+    def query_exact_ground_endpoints(
+        self, target_positions_map: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Query detailed goals against this snapshot's one global cost tree."""
+        if self._platform_type not in _GROUND_PLATFORMS:
+            raise RuntimeError("exact ground endpoints are ground-only")
+        context = self._ground_endpoint_context
+        if context is None:
+            raise RuntimeError("ground endpoint context is unavailable")
+        positions = np.asarray(target_positions_map)
+        if (
+            positions.dtype != np.dtype(np.float64)
+            or positions.ndim != 2
+            or positions.shape[1:] != (3,)
+            or not positions.flags.c_contiguous
+            or not np.isfinite(positions).all()
+        ):
+            raise ValueError(
+                "exact ground endpoint positions must be float64 [N,3]"
+            )
+        query = getattr(
+            self._bridge,
+            "query_ground_exact_endpoints",
+            None,
+        )
+        if not callable(query):
+            raise RuntimeError("ground endpoint query is unavailable")
+        result = query(context, positions, 0.2)
+        raw_reachable = getattr(result, "reachable", None)
+        raw_cost = getattr(result, "minimum_cost_m", None)
+        reasons = getattr(result, "reason_codes", None)
+        if (
+            not isinstance(raw_reachable, np.ndarray)
+            or raw_reachable.dtype != np.dtype(np.uint8)
+            or raw_reachable.shape != (len(positions),)
+            or not raw_reachable.flags.c_contiguous
+            or (raw_reachable.size and (raw_reachable > 1).any())
+            or not isinstance(raw_cost, np.ndarray)
+            or raw_cost.dtype != np.dtype(np.float64)
+            or raw_cost.shape != (len(positions),)
+            or not raw_cost.flags.c_contiguous
+            or np.isnan(raw_cost).any()
+            or np.isneginf(raw_cost).any()
+            or (raw_cost < 0.0).any()
+            or not isinstance(reasons, tuple)
+            or len(reasons) != len(positions)
+            or any(not isinstance(reason, str) or not reason for reason in reasons)
+        ):
+            raise PlatformReachabilityError(
+                "ground endpoint query geometry differs"
+            )
+        reachable = np.ascontiguousarray(
+            raw_reachable.astype(np.bool_), dtype=np.bool_
+        )
+        cost = np.ascontiguousarray(raw_cost, dtype=np.float64)
+        if (
+            not np.isfinite(cost[reachable]).all()
+            or not np.isposinf(cost[~reachable]).all()
+        ):
+            raise PlatformReachabilityError(
+                "ground endpoint query costs differ"
+            )
+        return reachable, cost
 
     def _validate_planner_global_map_binding(self) -> None:
         planner_map = getattr(

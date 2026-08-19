@@ -61,6 +61,46 @@ ReachabilityProjectionResult PlannerBridge::ProjectReachability(
   }
 }
 
+GroundEndpointReachabilityContextResult
+PlannerBridge::ProjectGroundEndpointReachabilityContext(
+    const TrainingPlanRequest& request,
+    const double maximum_edge_distance_m) const noexcept {
+  try {
+    return lunar::planning::ProjectGroundEndpointReachabilityContext(
+        ToPlannerInput(request), maximum_edge_distance_m);
+  } catch (const std::bad_alloc&) {
+    return GroundEndpointReachabilityContextResult{
+        .context = std::nullopt,
+        .reason_code = "REACHABILITY_RESOURCE_EXHAUSTED",
+    };
+  } catch (...) {
+    return GroundEndpointReachabilityContextResult{
+        .context = std::nullopt,
+        .reason_code = "BRIDGE_REQUEST_CONVERSION_FAILED",
+    };
+  }
+}
+
+GroundExactEndpointProjectionResult PlannerBridge::QueryGroundExactEndpoints(
+    const GroundEndpointReachabilityContext& context,
+    const std::vector<Vec3>& target_positions_map,
+    const double tolerance_m) const noexcept {
+  try {
+    return lunar::planning::QueryGroundExactEndpoints(
+        context, target_positions_map, tolerance_m);
+  } catch (const std::bad_alloc&) {
+    return GroundExactEndpointProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = "REACHABILITY_RESOURCE_EXHAUSTED",
+    };
+  } catch (...) {
+    return GroundExactEndpointProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = "BRIDGE_REQUEST_CONVERSION_FAILED",
+    };
+  }
+}
+
 ReachabilityProjectionResult PlannerBridge::ProjectReachability(
     const TrainingPlanRequest &request,
     const double maximum_edge_distance_m,

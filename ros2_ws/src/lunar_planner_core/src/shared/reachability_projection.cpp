@@ -42,6 +42,12 @@ struct HopperOpportunityContextStorage final {
   std::size_t start_index{};
 };
 
+struct GroundEndpointReachabilityContextStorage final {
+  std::shared_ptr<const shared::MapSnapshot> global_map;
+  shared::SafeProjection safe;
+  hierarchical::GlobalGridCostTree tree;
+};
+
 namespace {
 
 constexpr Vec3 kLunarGravityMps2{0.0, 0.0, -1.62};
@@ -881,6 +887,268 @@ ReachabilityProjectionResult ProjectReachability(
     const PlannerInput& input, const double maximum_edge_distance_m) {
   return ProjectReachabilityImpl(
       input, maximum_edge_distance_m, nullptr, false);
+}
+
+GroundEndpointReachabilityContextResult
+ProjectGroundEndpointReachabilityContext(
+    const PlannerInput& input, const double maximum_edge_distance_m) {
+  const auto failure = [](std::string reason_code) {
+    return GroundEndpointReachabilityContextResult{
+        .context = std::nullopt,
+        .reason_code = std::move(reason_code),
+    };
+  };
+  if (!std::isfinite(maximum_edge_distance_m) ||
+      maximum_edge_distance_m <= 0.0) {
+    return failure("REACHABILITY_MAXIMUM_EDGE_DISTANCE_INVALID");
+  }
+  if (input.stop_token.stop_requested()) {
+    return failure("REQUEST_CANCELED");
+  }
+  try {
+    const PlatformType platform = CapabilityPlatform(input.capability);
+    if (platform == PlatformType::kHopper) {
+      return failure("GROUND_ENDPOINT_CONTEXT_PLATFORM_MISMATCH");
+    }
+    if (StatePose(input.current_state, platform) == nullptr) {
+      return failure("REACHABILITY_PLATFORM_STATE_MISMATCH");
+    }
+    const shared::MapSnapshotBuildResult global =
+        shared::MapSnapshot::Create(input.world.global_map);
+    if (!global.ok()) {
+      return failure(global.reason_code);
+    }
+    const auto start = StartCell(input, *global.snapshot, platform);
+    if (!start.has_value()) {
+      return failure("REACHABILITY_START_OUTSIDE_GLOBAL_MAP");
+    }
+    const shared::SafeProjectionBuildResult built =
+        shared::BuildSafeProjection(
+            global.snapshot, input.capability, input.config.map_safety,
+            input.stop_token);
+    if (!built.ok()) {
+      return failure(built.reason_code);
+    }
+    const double infinity = std::numeric_limits<double>::infinity();
+    const std::size_t no_parent = std::numeric_limits<std::size_t>::max();
+    const std::size_t start_index = global.snapshot->Index(*start);
+    GroundEndpointReachabilityContextStorage storage{
+        .global_map = global.snapshot,
+        .safe = std::move(*built.projection),
+        .tree = hierarchical::GlobalGridCostTree{
+            .minimum_cost = std::vector<double>(
+                global.snapshot->cell_count(), infinity),
+            .parent_index = std::vector<std::size_t>(
+                global.snapshot->cell_count(), no_parent),
+            .start_index = start_index,
+            .expanded_states = 0U,
+        },
+    };
+    double search_elapsed_s = 0.0;
+    if (storage.safe.HardFeasible(*start)) {
+      const auto started = std::chrono::steady_clock::now();
+      hierarchical::GlobalGridCostTreeResult tree =
+          hierarchical::SearchGlobalGridCostTree(
+              hierarchical::GlobalGridSearchProblem{
+                  .projection = storage.safe,
+                  .start = *start,
+                  .goal_mask = {},
+                  .excluded_mask = {},
+                  .maximum_speed_mps = 1.0,
+                  .config = input.config.global_search,
+                  .stop_token = input.stop_token,
+              });
+      search_elapsed_s = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - started).count();
+      if (!tree.ok()) {
+        return failure(tree.reason_code.empty()
+                           ? "GLOBAL_SEARCH_RESULT_INVALID"
+                           : std::move(tree.reason_code));
+      }
+      storage.tree = std::move(*tree.tree);
+    }
+    if (storage.tree.minimum_cost.size() != global.snapshot->cell_count() ||
+        storage.tree.parent_index.size() != global.snapshot->cell_count() ||
+        storage.tree.start_index != start_index ||
+        !std::isfinite(search_elapsed_s) || search_elapsed_s < 0.0) {
+      return failure("GLOBAL_SEARCH_RESULT_INVALID");
+    }
+    ReachabilityProjection projection{
+        .platform_type = platform,
+        .width = global.snapshot->width(),
+        .height = global.snapshot->height(),
+        .reachable = std::vector<std::uint8_t>(
+            global.snapshot->cell_count(), 0U),
+        .algorithm_id = "cpp-ground-global-cost-tree/v1",
+        .maximum_edge_distance_m = maximum_edge_distance_m,
+        .minimum_cost = storage.tree.minimum_cost,
+        .parent_index = storage.tree.parent_index,
+        .start_index = start_index,
+        .search_elapsed_s = search_elapsed_s,
+    };
+    for (std::size_t index = 0U; index < projection.minimum_cost.size();
+         ++index) {
+      const double cost = projection.minimum_cost[index];
+      const std::size_t parent = projection.parent_index[index];
+      if (!std::isfinite(cost)) {
+        if (!std::isinf(cost) || cost < 0.0 || parent != no_parent) {
+          return failure("GLOBAL_SEARCH_RESULT_INVALID");
+        }
+        continue;
+      }
+      if (cost < 0.0 || parent >= projection.minimum_cost.size()) {
+        return failure("GLOBAL_SEARCH_RESULT_INVALID");
+      }
+      if (index == start_index) {
+        if (cost != 0.0 || parent != index) {
+          return failure("GLOBAL_SEARCH_RESULT_INVALID");
+        }
+      } else if (!std::isfinite(projection.minimum_cost[parent]) ||
+                 !(projection.minimum_cost[parent] < cost)) {
+        return failure("GLOBAL_SEARCH_RESULT_INVALID");
+      }
+      projection.reachable[index] = 1U;
+    }
+    return GroundEndpointReachabilityContextResult{
+        .context = GroundEndpointReachabilityContext{
+            .projection = std::move(projection),
+            .storage = std::make_shared<GroundEndpointReachabilityContextStorage>(
+                std::move(storage)),
+        },
+        .reason_code = {},
+    };
+  } catch (const std::bad_alloc&) {
+    return failure("REACHABILITY_RESOURCE_EXHAUSTED");
+  } catch (...) {
+    return failure("REACHABILITY_INTERNAL_FAILURE");
+  }
+}
+
+GroundExactEndpointProjectionResult QueryGroundExactEndpoints(
+    const GroundEndpointReachabilityContext& context,
+    const std::span<const Vec3> target_positions_map,
+    const double tolerance_m) {
+  const auto failure = [](std::string reason_code) {
+    return GroundExactEndpointProjectionResult{
+        .projection = std::nullopt,
+        .reason_code = std::move(reason_code),
+    };
+  };
+  if (!std::isfinite(tolerance_m) || tolerance_m < 0.0) {
+    return failure("GROUND_ENDPOINT_TOLERANCE_INVALID");
+  }
+  if (context.storage == nullptr ||
+      context.storage->global_map == nullptr ||
+      context.projection.platform_type == PlatformType::kHopper) {
+    return failure("GROUND_ENDPOINT_CONTEXT_INVALID");
+  }
+  try {
+    const auto& storage = *context.storage;
+    const auto& map = *storage.global_map;
+    const std::size_t cell_count = map.cell_count();
+    if (context.projection.width != map.width() ||
+        context.projection.height != map.height() ||
+        context.projection.minimum_cost.size() != cell_count ||
+        context.projection.parent_index.size() != cell_count ||
+        context.projection.reachable.size() != cell_count ||
+        storage.tree.minimum_cost.size() != cell_count ||
+        storage.tree.parent_index.size() != cell_count) {
+      return failure("GROUND_ENDPOINT_CONTEXT_INVALID");
+    }
+    const double infinity = std::numeric_limits<double>::infinity();
+    GroundExactEndpointProjection projection{
+        .reachable = std::vector<std::uint8_t>(
+            target_positions_map.size(), 0U),
+        .minimum_cost_m = std::vector<double>(
+            target_positions_map.size(), infinity),
+        .reason_codes = std::vector<std::string>(
+            target_positions_map.size(), "GROUND_ENDPOINT_UNREACHABLE"),
+    };
+    const double resolution_m = map.resolution_m();
+    const Vec3 origin_m = map.origin_m();
+    const std::int32_t radius_cells = static_cast<std::int32_t>(
+        std::ceil(tolerance_m / resolution_m)) + 1;
+    for (std::size_t target_index = 0U;
+         target_index < target_positions_map.size(); ++target_index) {
+      const Vec3 target = target_positions_map[target_index];
+      if (!std::isfinite(target.x) || !std::isfinite(target.y) ||
+          !std::isfinite(target.z)) {
+        projection.reason_codes[target_index] =
+            "GROUND_ENDPOINT_POSITION_INVALID";
+        continue;
+      }
+      const auto center = map.PositionToCell({.x = target.x, .y = target.y});
+      if (!center.has_value()) {
+        projection.reason_codes[target_index] =
+            "GROUND_ENDPOINT_OUTSIDE_GLOBAL_MAP";
+        continue;
+      }
+      bool any_hard_feasible = false;
+      bool found_reachable = false;
+      double best_cost = infinity;
+      std::size_t best_cell_index = cell_count;
+      const double tolerance_squared = tolerance_m * tolerance_m;
+      for (std::int32_t y = center->y - radius_cells;
+           y <= center->y + radius_cells; ++y) {
+        for (std::int32_t x = center->x - radius_cells;
+             x <= center->x + radius_cells; ++x) {
+          const shared::GridCell cell{.x = x, .y = y};
+          if (!map.InBounds(cell)) {
+            continue;
+          }
+          const double lower_x = origin_m.x +
+              static_cast<double>(cell.x) * resolution_m;
+          const double upper_x = lower_x + resolution_m;
+          const double lower_y = origin_m.y +
+              static_cast<double>(cell.y) * resolution_m;
+          const double upper_y = lower_y + resolution_m;
+          const double dx = std::max(
+              {lower_x - target.x, 0.0, target.x - upper_x});
+          const double dy = std::max(
+              {lower_y - target.y, 0.0, target.y - upper_y});
+          if (dx * dx + dy * dy > tolerance_squared) {
+            continue;
+          }
+          if (!storage.safe.HardFeasible(cell)) {
+            continue;
+          }
+          any_hard_feasible = true;
+          const std::size_t cell_index = map.Index(cell);
+          const double cost = storage.tree.minimum_cost[cell_index];
+          if (!std::isfinite(cost)) {
+            continue;
+          }
+          if (!found_reachable || cost < best_cost ||
+              (cost == best_cost && cell_index < best_cell_index)) {
+            found_reachable = true;
+            best_cost = cost;
+            best_cell_index = cell_index;
+          }
+        }
+      }
+      if (!any_hard_feasible) {
+        projection.reason_codes[target_index] =
+            "GROUND_ENDPOINT_NOT_HARD_FEASIBLE";
+        continue;
+      }
+      if (!found_reachable) {
+        projection.reason_codes[target_index] =
+            "GROUND_ENDPOINT_UNREACHABLE";
+        continue;
+      }
+      projection.reachable[target_index] = 1U;
+      projection.minimum_cost_m[target_index] = best_cost;
+      projection.reason_codes[target_index] = "GROUND_ENDPOINT_REACHABLE";
+    }
+    return GroundExactEndpointProjectionResult{
+        .projection = std::move(projection),
+        .reason_code = {},
+    };
+  } catch (const std::bad_alloc&) {
+    return failure("REACHABILITY_RESOURCE_EXHAUSTED");
+  } catch (...) {
+    return failure("REACHABILITY_INTERNAL_FAILURE");
+  }
 }
 
 ReachabilityProjectionResult ProjectReachability(

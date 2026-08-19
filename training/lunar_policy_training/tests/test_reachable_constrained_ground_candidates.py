@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 
 import numpy as np
@@ -23,6 +24,7 @@ from lunar_policy_training.environment.platform_reachability import (
     GroundGlobalSearchEvidence,
     PHYSICAL_PROJECTION_SCHEMA,
     PhysicalReachabilityResult,
+    PlatformCandidateReachability,
 )
 from lunar_policy_training.environment.visibility import SensorGeometry
 from lunar_policy_training.polar_data.hazards import CanvasRatioLayer
@@ -334,6 +336,227 @@ def test_ground_frontier_qualifies_all_strip_witnesses_but_emits_three_actions()
     assert first.candidate_id not in {
         candidate.candidate_id for candidate in refreshed.candidates
     }
+
+
+def test_ground_detail_witness_uses_exact_endpoint_reachability_not_parent_mask() -> None:
+    """A fine witness is not discarded because its 4 m parent is sampled false."""
+    world, mission, projection, pose, physical = _fixture()
+    pose_cell = (129, 104)
+    parent_mask = np.array(
+        physical.physical_observation_pose_mask, copy=True, dtype=np.bool_
+    )
+    parent_mask[pose_cell] = False
+    parent_positions = np.asarray(
+        [
+            (*world.canvas.grid_center_world(int(row), int(column)), 0.0)
+            for row, column in zip(*np.nonzero(parent_mask), strict=True)
+        ],
+        dtype=np.float64,
+    ).reshape((-1, 3))
+    parent_cost = np.array(
+        physical.ground_global_search.sampled_minimum_cost_m,
+        copy=True,
+        dtype=np.float64,
+    )
+    parent_cost[pose_cell] = np.inf
+    parent_cost.setflags(write=False)
+    physical = replace(
+        physical,
+        physical_observation_pose_mask=np.ascontiguousarray(parent_mask),
+        observation_positions_m=np.ascontiguousarray(parent_positions),
+        physically_reachable_pose_count=int(parent_mask.sum(dtype=np.int64)),
+        ground_global_search=GroundGlobalSearchEvidence(
+            sampled_minimum_cost_m=parent_cost,
+            planner_tree_sha256="b" * 64,
+            planner_tree_cells=world.canvas.geometry.cells,
+            planner_start_index=(
+                physical.ground_global_search.planner_start_index
+            ),
+            search_elapsed_s=0.01,
+            coarse_fine_unreachable_count=1,
+        ),
+    )
+    center_x, center_y = world.canvas.grid_center_world(*pose_cell)
+    queried: list[np.ndarray] = []
+
+    def provider(segments, _world):
+        return (
+            (
+                0,
+                _RawFrontierCandidate(
+                    sample_rank=0,
+                    frontier_cell=segments[0][0],
+                    pose_cell=pose_cell,
+                    target_pose=Pose2(center_x, center_y),
+                ),
+            ),
+        )
+
+    def exact_endpoint_reachability(
+        positions_m: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        queried.append(positions_m.copy())
+        return (
+            np.ones(len(positions_m), dtype=np.bool_),
+            np.full(len(positions_m), 2.0, dtype=np.float64),
+        )
+
+    universe = CandidateBuilderV2(
+        _PositiveGainEstimator()
+    ).build_physical_universe(
+        world,
+        mission,
+        pose,
+        projection,
+        physical_reachability=physical,
+        platform_type="WHEELED",
+        platform_id="unit-wheeled-exact-endpoint",
+        capability_content_sha256="1" * 64,
+        mission_revision=7,
+        evidence_generation=3,
+        physical_evidence_sha256="2" * 64,
+        physical_reachability_algorithm_id=(
+            physical.physical_reachability_algorithm_id
+        ),
+        goal_tolerance_mm=200,
+        ground_detail_candidate_provider=provider,
+        ground_exact_endpoint_reachability=exact_endpoint_reachability,
+    )
+
+    assert len(queried) == 1
+    np.testing.assert_allclose(queried[0], [[center_x, center_y, 0.0]])
+    assert len(universe.candidates) == 1
+    assert universe.candidates[0].position_grid_key == pose_cell
+    assert universe.candidates[0].global_path_cost_m == 2.0
+
+
+def test_ground_exact_endpoint_query_reuses_the_projected_context() -> None:
+    """Detailed candidates query the existing global tree; they do not replan."""
+    context = object()
+    calls: list[tuple[object, np.ndarray, float]] = []
+
+    class Bridge:
+        def query_ground_exact_endpoints(
+            self,
+            supplied_context: object,
+            positions_m: np.ndarray,
+            tolerance_m: float,
+        ):
+            calls.append((supplied_context, positions_m.copy(), tolerance_m))
+            return type(
+                "ExactEndpoints",
+                (),
+                {
+                    "reachable": np.asarray((1, 0), dtype=np.uint8),
+                    "minimum_cost_m": np.asarray(
+                        (3.5, np.inf), dtype=np.float64
+                    ),
+                    "reason_codes": (
+                        "GROUND_ENDPOINT_REACHABLE",
+                        "GROUND_ENDPOINT_UNREACHABLE",
+                    ),
+                },
+            )()
+
+    authority = object.__new__(PlatformCandidateReachability)
+    authority._platform_type = "WHEELED"
+    authority._bridge = Bridge()
+    authority._ground_endpoint_context = context
+    positions = np.ascontiguousarray(
+        ((1.2, 3.4, 5.6), (7.8, 9.0, 1.2)), dtype=np.float64
+    )
+
+    reachable, cost = authority.query_exact_ground_endpoints(positions)
+
+    assert len(calls) == 1
+    assert calls[0][0] is context
+    np.testing.assert_array_equal(calls[0][1], positions)
+    assert calls[0][2] == 0.2
+    np.testing.assert_array_equal(reachable, np.asarray((True, False)))
+    np.testing.assert_array_equal(cost, np.asarray((3.5, np.inf)))
+
+
+def test_ground_segment_recovery_scans_only_when_all_three_anchors_have_no_gain() -> None:
+    """A complete segment supplement is a fallback, never a normal scan."""
+    world, mission, projection, pose, physical = _fixture()
+    primary_columns = (101, 104, 109)
+    recovered_column = 106
+    recovered_x, _ = world.canvas.grid_center_world(129, recovered_column)
+    recovery_calls: list[tuple[int, ...]] = []
+
+    class SegmentSelectiveEstimator(_PositiveGainEstimator):
+        def estimate_candidate_gains_at_positions(
+            self,
+            observed_mask: np.ndarray,
+            obstacle_ratio: np.ndarray,
+            roi_ratio: np.ndarray,
+            priority_weight: np.ndarray,
+            positions_m: np.ndarray,
+        ) -> np.ndarray:
+            del observed_mask, obstacle_ratio, roi_ratio, priority_weight
+            gains = np.zeros((len(positions_m), 2), dtype=np.float32)
+            gains[:, :] = np.isclose(positions_m[:, 0], recovered_x)[:, None]
+            return gains
+
+    def primary_provider(segments, _world):
+        return tuple(
+            (
+                0,
+                _RawFrontierCandidate(
+                    sample_rank=rank,
+                    frontier_cell=segments[0][0],
+                    pose_cell=(129, column),
+                    target_pose=Pose2(
+                        *world.canvas.grid_center_world(129, column)
+                    ),
+                ),
+            )
+            for rank, column in enumerate(primary_columns)
+        )
+
+    def recovery_provider(segments, _world, segment_ids):
+        recovery_calls.append(tuple(segment_ids))
+        return (
+            (
+                0,
+                _RawFrontierCandidate(
+                    sample_rank=3,
+                    frontier_cell=segments[0][0],
+                    pose_cell=(129, recovered_column),
+                    target_pose=Pose2(
+                        *world.canvas.grid_center_world(129, recovered_column)
+                    ),
+                ),
+            ),
+        )
+
+    universe = CandidateBuilderV2(
+        SegmentSelectiveEstimator()
+    ).build_physical_universe(
+        world,
+        mission,
+        pose,
+        projection,
+        physical_reachability=physical,
+        platform_type="WHEELED",
+        platform_id="unit-wheeled-segment-recovery",
+        capability_content_sha256="1" * 64,
+        mission_revision=7,
+        evidence_generation=3,
+        physical_evidence_sha256="2" * 64,
+        physical_reachability_algorithm_id=(
+            physical.physical_reachability_algorithm_id
+        ),
+        goal_tolerance_mm=200,
+        ground_detail_candidate_provider=primary_provider,
+        ground_detail_segment_recovery_provider=recovery_provider,
+    )
+
+    assert recovery_calls == [(0,)]
+    assert len(universe.candidates) == 1
+    assert universe.candidates[0].position_grid_key == (129, recovered_column)
+    assert universe.decision_snapshot.raw_candidate_count == 4
+    assert universe.decision_snapshot.fine_pose_candidate_count == 4
 
 
 def test_narrow_frontier_strip_keeps_only_observed_safe_positions() -> None:

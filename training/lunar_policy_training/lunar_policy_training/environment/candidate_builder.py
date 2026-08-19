@@ -2065,11 +2065,25 @@ class CandidateBuilderV2:
         ground_endpoint_feasibility: (
             Callable[[np.ndarray], np.ndarray] | None
         ) = None,
+        ground_exact_endpoint_reachability: (
+            Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] | None
+        ) = None,
         ground_detail_candidate_provider: (
             Callable[
                 [
                     list[list[tuple[int, int]]],
                     ObservedWorld,
+                ],
+                Collection[tuple[int, _RawFrontierCandidate]],
+            ]
+            | None
+        ) = None,
+        ground_detail_segment_recovery_provider: (
+            Callable[
+                [
+                    list[list[tuple[int, int]]],
+                    ObservedWorld,
+                    tuple[int, ...],
                 ],
                 Collection[tuple[int, _RawFrontierCandidate]],
             ]
@@ -2195,8 +2209,14 @@ class CandidateBuilderV2:
                 exact_target_poses=exact_target_poses,
                 excluded_cells=excluded_cells,
                 ground_endpoint_feasibility=ground_endpoint_feasibility,
+                ground_exact_endpoint_reachability=(
+                    ground_exact_endpoint_reachability
+                ),
                 ground_detail_candidate_provider=(
                     ground_detail_candidate_provider
+                ),
+                ground_detail_segment_recovery_provider=(
+                    ground_detail_segment_recovery_provider
                 ),
                 refresh_started=refresh_started,
             )
@@ -2553,6 +2573,9 @@ class CandidateBuilderV2:
         ground_endpoint_feasibility: (
             Callable[[np.ndarray], np.ndarray] | None
         ),
+        ground_exact_endpoint_reachability: (
+            Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] | None
+        ),
         ground_detail_candidate_provider: (
             Callable[
                 [
@@ -2563,10 +2586,24 @@ class CandidateBuilderV2:
             ]
             | None
         ),
+        ground_detail_segment_recovery_provider: (
+            Callable[
+                [
+                    list[list[tuple[int, int]]],
+                    ObservedWorld,
+                    tuple[int, ...],
+                ],
+                Collection[tuple[int, _RawFrontierCandidate]],
+            ]
+            | None
+        ),
         refresh_started: float,
     ) -> PhysicalCandidateUniverse:
         """Build at most three policy candidates per complete frontier chain."""
         physical_mask = physical_reachability.physical_observation_pose_mask
+        ground_global_search = physical_reachability.ground_global_search
+        if ground_global_search is None:
+            raise CandidateInvariantError("GLOBAL_PATH_COST_NONFINITE")
         step = max(
             1,
             round(
@@ -2574,82 +2611,6 @@ class CandidateBuilderV2:
                 / world.canvas.geometry.resolution_m
             ),
         )
-        raw_count = 0
-        if ground_detail_candidate_provider is None:
-            source = (
-                (segment_id, candidate)
-                for segment_id, segment in enumerate(segments)
-                for candidate in _map_frontier_chain_pose_options(
-                    segment,
-                    robot=robot,
-                    observed_mask=world.observed_mask,
-                    physical_pose_mask=physical_mask,
-                    standoff_cells=step,
-                )
-            )
-        else:
-            source = iter(ground_detail_candidate_provider(segments, world))
-        mapped: dict[
-            tuple[int, int, int, int], tuple[int, _RawFrontierCandidate]
-        ] = {}
-        for segment_id, candidate in source:
-            raw_count += 1
-            if not (
-                isinstance(segment_id, int)
-                and 0 <= segment_id < len(segments)
-                and isinstance(candidate, _RawFrontierCandidate)
-                and candidate.frontier_cell in segments[segment_id]
-            ):
-                raise CandidateInvariantError(
-                    "GROUND_DETAIL_CANDIDATE_INVALID"
-                )
-            if not physical_mask[candidate.pose_cell]:
-                # Fine traversability only certifies the landing pose.  The
-                # existing 4 m physical/global reachability authority remains
-                # a separate conservative gate and may reject its parent cell.
-                continue
-            target_pose = candidate.target_pose or exact_target_poses.get(
-                candidate.pose_cell
-            )
-            if target_pose is None:
-                raise CandidateInvariantError(
-                    "GROUND_DETAIL_CANDIDATE_POSITION_MISSING"
-                )
-            if world.canvas.world_to_grid(target_pose.x_m, target_pose.y_m) != (
-                candidate.pose_cell
-            ):
-                raise CandidateInvariantError(
-                    "GROUND_DETAIL_CANDIDATE_POSITION_OUTSIDE_CELL"
-                )
-            mapped_key = (
-                candidate.pose_cell[0],
-                candidate.pose_cell[1],
-                int(round(target_pose.x_m * 1000.0)),
-                int(round(target_pose.y_m * 1000.0)),
-            )
-            previous = mapped.get(mapped_key)
-            key = (segment_id, candidate.sample_rank, candidate.pose_cell)
-            if previous is None or key < (
-                previous[0],
-                previous[1].sample_rank,
-                previous[1].pose_cell,
-            ):
-                mapped[mapped_key] = (segment_id, candidate)
-        fine = sorted(
-            mapped.values(),
-            key=lambda item: (
-                item[0], item[1].sample_rank, item[1].pose_cell
-            ),
-        )
-        ground_global_search = physical_reachability.ground_global_search
-        if ground_global_search is None:
-            raise CandidateInvariantError("GLOBAL_PATH_COST_NONFINITE")
-        minimum_cost = ground_global_search.sampled_minimum_cost_m
-        globally_reachable = [
-            (segment_id, raw, float(minimum_cost[raw.pose_cell]))
-            for segment_id, raw in fine
-            if math.isfinite(float(minimum_cost[raw.pose_cell]))
-        ]
         gain_arguments = (
             np.ascontiguousarray(world.observed_mask, dtype=np.bool_),
             np.ascontiguousarray(
@@ -2660,76 +2621,274 @@ class CandidateBuilderV2:
                 mission.priority * mission.roi_ratio, dtype=np.float32
             ),
         )
-        target_positions = np.ascontiguousarray(
-            [
-                (
-                    (raw.target_pose or exact_target_poses[raw.pose_cell]).x_m,
-                    (raw.target_pose or exact_target_poses[raw.pose_cell]).y_m,
-                    (raw.target_pose or exact_target_poses[raw.pose_cell]).elevation_m,
-                )
-                for _, raw, _ in globally_reachable
-            ],
-            dtype=np.float64,
-        ).reshape((-1, 3))
-        if ground_endpoint_feasibility is None:
-            endpoint_mask = np.ones(
-                len(globally_reachable), dtype=np.bool_
-            )
-        else:
-            endpoint_mask = ground_endpoint_feasibility(target_positions)
-            if (
-                not isinstance(endpoint_mask, np.ndarray)
-                or endpoint_mask.dtype != np.dtype(np.bool_)
-                or endpoint_mask.shape != (len(globally_reachable),)
-                or not endpoint_mask.flags.c_contiguous
-            ):
-                raise CandidateInvariantError(
-                    "GROUND_ENDPOINT_FEASIBILITY_INVALID"
-                )
-        endpoint_feasible = [
-            item
-            for item, accepted in zip(
-                globally_reachable, endpoint_mask, strict=True
-            )
-            if bool(accepted)
-        ]
-        target_positions = np.ascontiguousarray(
-            [
-                (
-                    (raw.target_pose or exact_target_poses[raw.pose_cell]).x_m,
-                    (raw.target_pose or exact_target_poses[raw.pose_cell]).y_m,
-                    (raw.target_pose or exact_target_poses[raw.pose_cell]).elevation_m,
-                )
-                for _, raw, _ in endpoint_feasible
-            ],
-            dtype=np.float64,
-        ).reshape((-1, 3))
         exact_gain = getattr(
             self._visibility_estimator,
             "estimate_candidate_gains_at_positions",
             None,
         )
-        if not endpoint_feasible:
-            gains = np.zeros((0, 2), dtype=np.float32)
-        elif callable(exact_gain):
-            gains = exact_gain(*gain_arguments, target_positions)
-        else:
-            candidate_cells = np.ascontiguousarray(
-                [raw.pose_cell for _, raw, _ in endpoint_feasible],
-                dtype=np.int32,
-            ).reshape((-1, 2))
-            gains = self._visibility_estimator.estimate_candidate_gains(
-                *gain_arguments, candidate_cells
+
+        def target_pose_for(raw: _RawFrontierCandidate) -> Pose2:
+            target_pose = raw.target_pose or exact_target_poses.get(
+                raw.pose_cell
             )
-        if (
-            not isinstance(gains, np.ndarray)
-            or gains.shape != (len(endpoint_feasible), 2)
-            or gains.dtype != np.dtype(np.float32)
-            or not gains.flags.c_contiguous
-            or not np.isfinite(gains).all()
-            or (gains < 0.0).any()
-        ):
-            raise CandidateInvariantError("CANDIDATE_GAIN_NONFINITE")
+            if target_pose is None:
+                raise CandidateInvariantError(
+                    "GROUND_DETAIL_CANDIDATE_POSITION_MISSING"
+                )
+            return target_pose
+
+        def positions_for(
+            values: Collection[tuple[int, _RawFrontierCandidate]]
+            | Collection[tuple[int, _RawFrontierCandidate, float]],
+        ) -> np.ndarray:
+            return np.ascontiguousarray(
+                [
+                    (
+                        target_pose_for(item[1]).x_m,
+                        target_pose_for(item[1]).y_m,
+                        target_pose_for(item[1]).elevation_m,
+                    )
+                    for item in values
+                ],
+                dtype=np.float64,
+            ).reshape((-1, 3))
+
+        def qualify_source(
+            source: Collection[tuple[int, _RawFrontierCandidate]],
+            *,
+            use_exact_endpoint_query: bool,
+            excluded_keys: Collection[tuple[int, int, int, int]] = (),
+        ) -> tuple[
+            int,
+            list[tuple[int, _RawFrontierCandidate]],
+            list[tuple[int, _RawFrontierCandidate, float]],
+            list[tuple[int, _RawFrontierCandidate, float]],
+            np.ndarray,
+            set[tuple[int, int, int, int]],
+        ]:
+            raw_count = 0
+            mapped: dict[
+                tuple[int, int, int, int], tuple[int, _RawFrontierCandidate]
+            ] = {}
+            excluded = set(excluded_keys)
+            for segment_id, candidate in source:
+                raw_count += 1
+                if not (
+                    isinstance(segment_id, int)
+                    and 0 <= segment_id < len(segments)
+                    and isinstance(candidate, _RawFrontierCandidate)
+                    and candidate.frontier_cell in segments[segment_id]
+                ):
+                    raise CandidateInvariantError(
+                        "GROUND_DETAIL_CANDIDATE_INVALID"
+                    )
+                if (
+                    not use_exact_endpoint_query
+                    and not physical_mask[candidate.pose_cell]
+                ):
+                    continue
+                target_pose = target_pose_for(candidate)
+                if world.canvas.world_to_grid(
+                    target_pose.x_m, target_pose.y_m
+                ) != candidate.pose_cell:
+                    raise CandidateInvariantError(
+                        "GROUND_DETAIL_CANDIDATE_POSITION_OUTSIDE_CELL"
+                    )
+                mapped_key = (
+                    candidate.pose_cell[0],
+                    candidate.pose_cell[1],
+                    int(round(target_pose.x_m * 1000.0)),
+                    int(round(target_pose.y_m * 1000.0)),
+                )
+                if mapped_key in excluded:
+                    continue
+                previous = mapped.get(mapped_key)
+                key = (segment_id, candidate.sample_rank, candidate.pose_cell)
+                if previous is None or key < (
+                    previous[0],
+                    previous[1].sample_rank,
+                    previous[1].pose_cell,
+                ):
+                    mapped[mapped_key] = (segment_id, candidate)
+            fine = sorted(
+                mapped.values(),
+                key=lambda item: (
+                    item[0], item[1].sample_rank, item[1].pose_cell
+                ),
+            )
+            if (
+                use_exact_endpoint_query
+                and ground_exact_endpoint_reachability is not None
+            ):
+                exact_result = ground_exact_endpoint_reachability(
+                    positions_for(fine)
+                )
+                if (
+                    not isinstance(exact_result, tuple)
+                    or len(exact_result) != 2
+                ):
+                    raise CandidateInvariantError(
+                        "GROUND_EXACT_ENDPOINT_REACHABILITY_INVALID"
+                    )
+                exact_reachable, exact_cost = exact_result
+                if (
+                    not isinstance(exact_reachable, np.ndarray)
+                    or exact_reachable.dtype != np.dtype(np.bool_)
+                    or exact_reachable.shape != (len(fine),)
+                    or not exact_reachable.flags.c_contiguous
+                    or not isinstance(exact_cost, np.ndarray)
+                    or exact_cost.dtype != np.dtype(np.float64)
+                    or exact_cost.shape != (len(fine),)
+                    or not exact_cost.flags.c_contiguous
+                    or np.isnan(exact_cost).any()
+                    or np.isneginf(exact_cost).any()
+                    or (exact_cost < 0.0).any()
+                    or not np.isfinite(exact_cost[exact_reachable]).all()
+                    or not np.isposinf(exact_cost[~exact_reachable]).all()
+                ):
+                    raise CandidateInvariantError(
+                        "GROUND_EXACT_ENDPOINT_REACHABILITY_INVALID"
+                    )
+                globally_reachable = [
+                    (segment_id, raw, float(cost))
+                    for (segment_id, raw), accepted, cost in zip(
+                        fine,
+                        exact_reachable,
+                        exact_cost,
+                        strict=True,
+                    )
+                    if bool(accepted)
+                ]
+            else:
+                minimum_cost = ground_global_search.sampled_minimum_cost_m
+                globally_reachable = [
+                    (segment_id, raw, float(minimum_cost[raw.pose_cell]))
+                    for segment_id, raw in fine
+                    if math.isfinite(float(minimum_cost[raw.pose_cell]))
+                ]
+            if ground_endpoint_feasibility is None:
+                endpoint_mask = np.ones(
+                    len(globally_reachable), dtype=np.bool_
+                )
+            else:
+                endpoint_mask = ground_endpoint_feasibility(
+                    positions_for(globally_reachable)
+                )
+                if (
+                    not isinstance(endpoint_mask, np.ndarray)
+                    or endpoint_mask.dtype != np.dtype(np.bool_)
+                    or endpoint_mask.shape != (len(globally_reachable),)
+                    or not endpoint_mask.flags.c_contiguous
+                ):
+                    raise CandidateInvariantError(
+                        "GROUND_ENDPOINT_FEASIBILITY_INVALID"
+                    )
+            endpoint_feasible = [
+                item
+                for item, accepted in zip(
+                    globally_reachable, endpoint_mask, strict=True
+                )
+                if bool(accepted)
+            ]
+            if not endpoint_feasible:
+                gains = np.zeros((0, 2), dtype=np.float32)
+            elif callable(exact_gain):
+                gains = exact_gain(
+                    *gain_arguments,
+                    positions_for(endpoint_feasible),
+                )
+            else:
+                candidate_cells = np.ascontiguousarray(
+                    [raw.pose_cell for _, raw, _ in endpoint_feasible],
+                    dtype=np.int32,
+                ).reshape((-1, 2))
+                gains = self._visibility_estimator.estimate_candidate_gains(
+                    *gain_arguments, candidate_cells
+                )
+            if (
+                not isinstance(gains, np.ndarray)
+                or gains.shape != (len(endpoint_feasible), 2)
+                or gains.dtype != np.dtype(np.float32)
+                or not gains.flags.c_contiguous
+                or not np.isfinite(gains).all()
+                or (gains < 0.0).any()
+            ):
+                raise CandidateInvariantError("CANDIDATE_GAIN_NONFINITE")
+            return (
+                raw_count,
+                fine,
+                globally_reachable,
+                endpoint_feasible,
+                gains,
+                set(mapped),
+            )
+
+        if ground_detail_candidate_provider is None:
+            primary_source = (
+                (segment_id, candidate)
+                for segment_id, segment in enumerate(segments)
+                for candidate in _map_frontier_chain_pose_options(
+                    segment,
+                    robot=robot,
+                    observed_mask=world.observed_mask,
+                    physical_pose_mask=physical_mask,
+                    standoff_cells=step,
+                )
+            )
+            primary_uses_exact_endpoint_query = False
+        else:
+            primary_source = ground_detail_candidate_provider(segments, world)
+            primary_uses_exact_endpoint_query = True
+        (
+            raw_count,
+            fine,
+            globally_reachable,
+            endpoint_feasible,
+            gains,
+            primary_keys,
+        ) = qualify_source(
+            primary_source,
+            use_exact_endpoint_query=primary_uses_exact_endpoint_query,
+        )
+        primary_positive_segments = {
+            endpoint_feasible[index][0]
+            for index, gain in enumerate(gains[:, 0])
+            if float(gain) >= _DETAIL_CELL_COARSE_EQUIVALENT
+        }
+        if ground_detail_segment_recovery_provider is not None:
+            if ground_detail_candidate_provider is None:
+                raise CandidateInvariantError(
+                    "GROUND_DETAIL_SEGMENT_RECOVERY_WITHOUT_DETAIL"
+                )
+            recovery_segment_ids = tuple(
+                segment_id
+                for segment_id in range(len(segments))
+                if segment_id not in primary_positive_segments
+            )
+            if recovery_segment_ids:
+                (
+                    recovery_raw_count,
+                    recovery_fine,
+                    recovery_globally_reachable,
+                    recovery_endpoint_feasible,
+                    recovery_gains,
+                    _recovery_keys,
+                ) = qualify_source(
+                    ground_detail_segment_recovery_provider(
+                        segments,
+                        world,
+                        recovery_segment_ids,
+                    ),
+                    use_exact_endpoint_query=True,
+                    excluded_keys=primary_keys,
+                )
+                raw_count += recovery_raw_count
+                fine.extend(recovery_fine)
+                globally_reachable.extend(recovery_globally_reachable)
+                endpoint_feasible.extend(recovery_endpoint_feasible)
+                gains = np.ascontiguousarray(
+                    np.vstack((gains, recovery_gains)), dtype=np.float32
+                )
         positive_indices = [
             index
             for index, gain in enumerate(gains[:, 0])
