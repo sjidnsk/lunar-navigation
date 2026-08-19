@@ -742,6 +742,86 @@ def test_formal_source_migration_preserves_original_and_records_evidence(
     assert chained_prefetch["source_commit"] == chained_commit
 
 
+def test_host_sensor_refresh_preserves_checkpoint_and_records_evidence(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment_state = {
+        "schema_version": cli_module.FORMAL_ENVIRONMENT_STATE_SCHEMA_VERSION,
+        "scenario_schedule_id": "cache-sha/train/v3",
+        "worker_episode_states": [
+            _formal_worker_state(index) for index in range(24)
+        ],
+    }
+    checkpoint = _checkpoint(
+        consumed_gpu_seconds=7200.0,
+        worker_allocation={"WHEELED": 8, "LEGGED": 8, "HOPPER": 8},
+        run_kind="formal",
+        environment_state=environment_state,
+    )
+    root = tmp_path / "run"
+    checkpoints = root / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    latest = checkpoints / "latest.pt"
+    save_checkpoint_atomic(latest, checkpoint)
+    original_bytes = latest.read_bytes()
+    (root / "run-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "lunar-training-run/v1",
+                "source_commit": checkpoint.source_commit,
+                "config_hash": checkpoint.config_hash,
+                "run_identity": checkpoint.run_identity.to_dict(),
+                "global_step": checkpoint.global_step,
+                "consumed_gpu_seconds": checkpoint.consumed_gpu_seconds,
+                "platform_allocation": checkpoint.worker_allocation,
+                "formal_environment": {
+                    "sensor_performance_sha256": "7" * 64,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = tmp_path / "refreshed-sensor.json"
+    report.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        cli_module,
+        "_source_commit",
+        lambda _root: checkpoint.source_commit,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_validated_host_refreshed_sensor_report",
+        lambda **kwargs: "8" * 64,
+    )
+
+    refreshed_sha256 = cli_module._refresh_formal_host_sensor_evidence(
+        artifact_root=root,
+        checkpoint_path=latest,
+        repository_root=REPOSITORY_ROOT,
+        expected_source_commit=checkpoint.source_commit,
+        expected_global_step=12,
+        refreshed_sensor_performance_report=report,
+    )
+
+    manifest = json.loads(
+        (root / "run-manifest.json").read_text(encoding="utf-8")
+    )
+    assert refreshed_sha256 == "8" * 64
+    assert latest.read_bytes() == original_bytes
+    assert manifest["source_commit"] == checkpoint.source_commit
+    assert manifest["formal_environment"]["sensor_performance_sha256"] == (
+        "8" * 64
+    )
+    assert manifest["sensor_performance_host_refreshes"][-1] == {
+        "schema_version": "lunar-training-host-sensor-refresh/v1",
+        "source_commit": checkpoint.source_commit,
+        "global_step": 12,
+        "previous_sensor_performance_sha256": "7" * 64,
+        "current_sensor_performance_report": str(report.resolve()),
+        "current_sensor_performance_sha256": "8" * 64,
+    }
+
+
 def test_formal_checkpoint_rejects_missing_episode_cursor_state() -> None:
     with pytest.raises(CheckpointError, match="environment state"):
         _checkpoint(

@@ -8179,6 +8179,106 @@ def _validated_source_migration_sensor_reports(
     return previous_sha256, current_sha256
 
 
+def _validated_host_refreshed_sensor_report(
+    *,
+    report_path: Path,
+    repository_root: Path,
+    expected_source_commit: str,
+    run_identity: RunIdentity,
+) -> str:
+    """Validate current-host performance evidence for one unchanged source."""
+    try:
+        report = load_sensor_performance_report(report_path)
+        return validate_sensor_performance_report(
+            report,
+            expected_host=current_host_identity(),
+            expected_source_commit=sensor_source_commit(
+                repository_root,
+                revision=expected_source_commit,
+            ),
+            expected_capability_sha256=run_identity.capability_sha256,
+            expected_training_semantics_sha256=(
+                run_identity.training_semantics_sha256
+            ),
+        )
+    except SensorPerformanceError as error:
+        raise PreflightError(
+            f"host-refreshed sensor evidence is invalid: {error}"
+        ) from error
+
+
+def _refresh_formal_host_sensor_evidence(
+    *,
+    artifact_root: Path,
+    checkpoint_path: Path,
+    repository_root: Path,
+    expected_source_commit: str,
+    expected_global_step: int,
+    refreshed_sensor_performance_report: Path,
+) -> str:
+    """Atomically rebind formal evidence after a host restart, not source drift."""
+    root = validate_artifact_root(
+        artifact_root, repository_root=repository_root
+    )
+    if type(expected_global_step) is not int or expected_global_step < 0:
+        raise PreflightError("host sensor refresh expected step is invalid")
+    checkpoint_target = checkpoint_path.resolve(strict=True)
+    checkpoints = (root / "checkpoints").resolve(strict=True)
+    if checkpoint_target.parent != checkpoints or checkpoint_target.name != "latest.pt":
+        raise ArtifactRootError("host sensor refresh checkpoint is not authoritative")
+    checkpoint = load_checkpoint(checkpoint_target)
+    if (
+        not isinstance(checkpoint, TrainingCheckpointV6)
+        or checkpoint.run_identity.run_kind != "formal"
+        or checkpoint.source_commit != expected_source_commit
+        or checkpoint.global_step != expected_global_step
+        or _source_commit(repository_root) != expected_source_commit
+    ):
+        raise PreflightError("host sensor refresh checkpoint identity differs")
+    manifest_path = root / "run-manifest.json"
+    manifest = _read_run_manifest(manifest_path)
+    if (
+        manifest.get("source_commit") != expected_source_commit
+        or manifest.get("global_step") != checkpoint.global_step
+        or manifest.get("config_hash") != checkpoint.config_hash
+        or manifest.get("consumed_gpu_seconds")
+        != checkpoint.consumed_gpu_seconds
+        or manifest.get("platform_allocation") != checkpoint.worker_allocation
+    ):
+        raise ArtifactRootError("host sensor refresh manifest differs from checkpoint")
+    formal_environment = manifest.get("formal_environment")
+    if not isinstance(formal_environment, dict):
+        raise ArtifactRootError("host sensor refresh formal environment is missing")
+    previous_sha256 = formal_environment.get("sensor_performance_sha256")
+    if not isinstance(previous_sha256, str) or len(previous_sha256) != 64:
+        raise ArtifactRootError("host sensor refresh previous evidence is invalid")
+    current_sha256 = _validated_host_refreshed_sensor_report(
+        report_path=refreshed_sensor_performance_report,
+        repository_root=repository_root,
+        expected_source_commit=expected_source_commit,
+        run_identity=checkpoint.run_identity,
+    )
+    record = {
+        "schema_version": "lunar-training-host-sensor-refresh/v1",
+        "source_commit": expected_source_commit,
+        "global_step": expected_global_step,
+        "previous_sensor_performance_sha256": previous_sha256,
+        "current_sensor_performance_report": str(
+            refreshed_sensor_performance_report.resolve(strict=True)
+        ),
+        "current_sensor_performance_sha256": current_sha256,
+    }
+    refreshes = manifest.get("sensor_performance_host_refreshes", [])
+    if not isinstance(refreshes, list):
+        raise ArtifactRootError("host sensor refresh history is invalid")
+    refreshes.append(record)
+    formal_environment["sensor_performance_sha256"] = current_sha256
+    manifest["formal_environment"] = formal_environment
+    manifest["sensor_performance_host_refreshes"] = refreshes
+    _write_manifest_payload(manifest_path, manifest)
+    return current_sha256
+
+
 def _validated_task_prefetch_for_source_migration(
     *, report_path: Path, expected_old_source_commit: str
 ) -> tuple[dict[str, object], str]:
