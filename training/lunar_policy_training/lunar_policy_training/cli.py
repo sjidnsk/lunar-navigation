@@ -2367,6 +2367,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _operator_skips_pending_reward_v4_evaluation(update_id: int) -> bool:
+    """Return whether the operator explicitly waived this one pending evaluation."""
+    if type(update_id) is not int or update_id <= 0:
+        raise ValueError("Reward V4 evaluation override update ID is invalid")
+    raw = os.environ.get("LUNAR_SKIP_PENDING_REWARD_V4_EVALUATION_UPDATE")
+    if raw is None:
+        return False
+    if not raw.isascii() or not raw.isdecimal():
+        raise ValueError("Reward V4 evaluation override is invalid")
+    return int(raw) == update_id
+
+
 def _positive_block_count(value: str) -> int:
     try:
         blocks = int(value)
@@ -6094,10 +6106,18 @@ def _run_reward_v4_updates(
                     loaded: LoadedUpdate,
                 ) -> TrainingCheckpointV6:
                     nonlocal applied_here, interval_closed, sent_interrupt
+                    operator_skip_evaluation = (
+                        _operator_skips_pending_reward_v4_evaluation(update_id)
+                    )
+                    candidate_name = f"candidate-update-{update_id:08d}.pt"
+                    if operator_skip_evaluation:
+                        candidate_name = (
+                            f"candidate-update-{update_id:08d}-operator-skip.pt"
+                        )
                     candidate_path = (
                         artifact_root
                         / "checkpoints"
-                        / f"candidate-update-{update_id:08d}.pt"
+                        / candidate_name
                     ).resolve()
                     evaluation_directory = (
                         artifact_root
@@ -6195,6 +6215,12 @@ def _run_reward_v4_updates(
                                 )
                             ),
                         )
+                        if operator_skip_evaluation:
+                            metrics_record["curriculum_events"] = [{
+                                "event": "EVALUATION_SKIPPED_BY_OPERATOR",
+                                "update_id": update_id,
+                                "reason": "operator requested training continuation",
+                            }]
                         recovery = UpdateRecoveryState(
                             update_id=update_id,
                             policy_version=committed_rollout.policy_version,
@@ -6285,6 +6311,9 @@ def _run_reward_v4_updates(
                         raise UpdateCommitError(
                             "Reward V4 candidate state is missing"
                         )
+                    if operator_skip_evaluation:
+                        applied_here = True
+                        return candidate
 
                     mode = materialize_reward_v4_evaluation_mode(
                         mode_path,

@@ -35,6 +35,7 @@ from lunar_policy_training.cli import (  # noqa: E402
     _freeze_policy_warm_start_manifest,
     _load_calibrated_run_state,
     _latest_candidate_checkpoint,
+    _operator_skips_pending_reward_v4_evaluation,
     _run_curriculum_training,
     _update_run_manifest,
     build_parser,
@@ -85,6 +86,15 @@ from lunar_policy_training.reward_curriculum import PlatformType
 from lunar_policy_training.reward_evaluation import (
     build_reward_v4_evaluation_manifest,
 )
+
+
+def test_operator_skip_pending_reward_v4_evaluation_is_update_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LUNAR_SKIP_PENDING_REWARD_V4_EVALUATION_UPDATE", "320")
+
+    assert _operator_skips_pending_reward_v4_evaluation(320) is True
+    assert _operator_skips_pending_reward_v4_evaluation(321) is False
 
 
 def test_reward_v4_evaluation_resolves_only_active_r2_platforms() -> None:
