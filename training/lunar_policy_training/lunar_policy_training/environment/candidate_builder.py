@@ -36,7 +36,8 @@ _DETAIL_CELL_COARSE_EQUIVALENT = float(np.float32((0.2 / 4.0) ** 2))
 _DETAIL_CELL_AREA_M2 = 0.2**2
 _EMPTY_SHA256 = sha256(b"").hexdigest()
 
-CANDIDATE_ID_SCHEMA = "lunar-physical-candidate-id/v2"
+CANDIDATE_ID_SCHEMA = "lunar-physical-candidate-id/v3"
+_HOPPER_CANDIDATE_ID_SCHEMA = "lunar-physical-candidate-id/v2"
 PHYSICAL_SNAPSHOT_SCHEMA = "lunar-physical-snapshot/v1"
 
 
@@ -49,6 +50,171 @@ class _RawFrontierCandidate:
     sample_rank: int
     frontier_cell: tuple[int, int]
     pose_cell: tuple[int, int]
+    target_pose: Pose2 | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _NarrowFrontierStripSelection:
+    """One deterministic detailed pose per sampled frontier anchor."""
+
+    pose_cells: tuple[tuple[int, int], ...]
+    evaluated_detail_cell_count: int
+
+
+def _select_narrow_frontier_strip_positions(
+    chain: Collection[tuple[int, int]],
+    *,
+    coarse_observed_mask: np.ndarray,
+    observed_detail_mask: np.ndarray,
+    physical_safe_detail_mask: np.ndarray,
+    clearance_detail: np.ndarray,
+    detail_cells_per_coarse: int,
+    minimum_standoff_detail_cells: int,
+    maximum_standoff_detail_cells: int,
+    lateral_half_width_detail_cells: int,
+) -> _NarrowFrontierStripSelection:
+    """Pick at most three observed-safe poses from bounded 0.2 m strips.
+
+    Every sampled frontier anchor contributes at most one pose.  The strip
+    points from the frontier into its observed side, determined exclusively
+    from the four-neighbour coarse observed mask.  It never scans map area
+    outside the configured standoff and lateral bounds.
+    """
+    masks = (
+        ("coarse observed", coarse_observed_mask),
+        ("detail observed", observed_detail_mask),
+        ("detail physical safe", physical_safe_detail_mask),
+    )
+    if any(
+        not isinstance(mask, np.ndarray)
+        or mask.dtype != np.dtype(np.bool_)
+        or mask.ndim != 2
+        or not mask.flags.c_contiguous
+        for _, mask in masks
+    ):
+        raise ValueError("narrow frontier strip masks are invalid")
+    if (
+        not isinstance(clearance_detail, np.ndarray)
+        or clearance_detail.dtype != np.dtype(np.float32)
+        or clearance_detail.ndim != 2
+        or not clearance_detail.flags.c_contiguous
+        or not np.isfinite(clearance_detail).all()
+        or (clearance_detail < 0.0).any()
+        or observed_detail_mask.shape != physical_safe_detail_mask.shape
+        or observed_detail_mask.shape != clearance_detail.shape
+        or type(detail_cells_per_coarse) is not int
+        or detail_cells_per_coarse <= 0
+        or type(minimum_standoff_detail_cells) is not int
+        or minimum_standoff_detail_cells < 0
+        or type(maximum_standoff_detail_cells) is not int
+        or maximum_standoff_detail_cells < minimum_standoff_detail_cells
+        or type(lateral_half_width_detail_cells) is not int
+        or lateral_half_width_detail_cells < 0
+    ):
+        raise ValueError("narrow frontier strip geometry is invalid")
+    if observed_detail_mask.shape != tuple(
+        dimension * detail_cells_per_coarse
+        for dimension in coarse_observed_mask.shape
+    ):
+        raise ValueError("narrow frontier strip resolutions differ")
+
+    coarse_rows, coarse_columns = coarse_observed_mask.shape
+    detail_rows, detail_columns = observed_detail_mask.shape
+    seen: set[tuple[int, int]] = set()
+    selected: list[tuple[int, int]] = []
+    evaluated = 0
+    directions = ((-1, 0), (0, -1), (0, 1), (1, 0))
+    center_offset = detail_cells_per_coarse // 2
+
+    for frontier_row, frontier_column in _sample_frontier_chain(chain):
+        if not (
+            0 <= frontier_row < coarse_rows
+            and 0 <= frontier_column < coarse_columns
+            and coarse_observed_mask[frontier_row, frontier_column]
+        ):
+            continue
+        unknown_directions = [
+            (row_delta, column_delta)
+            for row_delta, column_delta in directions
+            if 0 <= frontier_row + row_delta < coarse_rows
+            and 0 <= frontier_column + column_delta < coarse_columns
+            and not coarse_observed_mask[
+                frontier_row + row_delta,
+                frontier_column + column_delta,
+            ]
+        ]
+        row_normal = int(np.sign(sum(item[0] for item in unknown_directions)))
+        column_normal = int(
+            np.sign(sum(item[1] for item in unknown_directions))
+        )
+        anchor_row = frontier_row * detail_cells_per_coarse + center_offset
+        anchor_column = (
+            frontier_column * detail_cells_per_coarse + center_offset
+        )
+        if row_normal == 0 and column_normal == 0:
+            probe_distance = max(1, minimum_standoff_detail_cells)
+            fallback: tuple[tuple[float, int, int], tuple[int, int]] | None = None
+            for row_delta, column_delta in directions:
+                row = anchor_row + row_delta * probe_distance
+                column = anchor_column + column_delta * probe_distance
+                if not (0 <= row < detail_rows and 0 <= column < detail_columns):
+                    continue
+                evaluated += 1
+                if (
+                    not observed_detail_mask[row, column]
+                    or not physical_safe_detail_mask[row, column]
+                ):
+                    continue
+                key = (-float(clearance_detail[row, column]), row, column)
+                if fallback is None or key < fallback[0]:
+                    fallback = (key, (row_delta, column_delta))
+            if fallback is None:
+                continue
+            observed_row_direction, observed_column_direction = fallback[1]
+        else:
+            observed_row_direction = -row_normal
+            observed_column_direction = -column_normal
+        lateral_row_direction = -observed_column_direction
+        lateral_column_direction = observed_row_direction
+        best: tuple[tuple[float, int, int, int, int], tuple[int, int]] | None = None
+        for distance in range(
+            minimum_standoff_detail_cells,
+            maximum_standoff_detail_cells + 1,
+        ):
+            center_row = anchor_row + observed_row_direction * distance
+            center_column = anchor_column + observed_column_direction * distance
+            for lateral_offset in range(
+                -lateral_half_width_detail_cells,
+                lateral_half_width_detail_cells + 1,
+            ):
+                row = center_row + lateral_row_direction * lateral_offset
+                column = center_column + lateral_column_direction * lateral_offset
+                if not (0 <= row < detail_rows and 0 <= column < detail_columns):
+                    continue
+                evaluated += 1
+                if (
+                    not observed_detail_mask[row, column]
+                    or not physical_safe_detail_mask[row, column]
+                    or (row, column) in seen
+                ):
+                    continue
+                key = (
+                    -float(clearance_detail[row, column]),
+                    distance,
+                    abs(lateral_offset),
+                    row,
+                    column,
+                )
+                if best is None or key < best[0]:
+                    best = (key, (row, column))
+        if best is not None:
+            selected.append(best[1])
+            seen.add(best[1])
+
+    return _NarrowFrontierStripSelection(
+        pose_cells=tuple(selected),
+        evaluated_detail_cell_count=evaluated,
+    )
 
 
 def normalize_global_path_cost(
@@ -1857,6 +2023,16 @@ class CandidateBuilderV2:
         ground_endpoint_feasibility: (
             Callable[[np.ndarray], np.ndarray] | None
         ) = None,
+        ground_detail_candidate_provider: (
+            Callable[
+                [
+                    list[list[tuple[int, int]]],
+                    ObservedWorld,
+                ],
+                Collection[tuple[int, _RawFrontierCandidate]],
+            ]
+            | None
+        ) = None,
     ) -> PhysicalCandidateUniverse:
         """Build one primitive-independent, bounded physical opportunity set."""
         refresh_started = perf_counter()
@@ -1976,6 +2152,9 @@ class CandidateBuilderV2:
                 segments=segments,
                 exact_target_poses=exact_target_poses,
                 ground_endpoint_feasibility=ground_endpoint_feasibility,
+                ground_detail_candidate_provider=(
+                    ground_detail_candidate_provider
+                ),
                 refresh_started=refresh_started,
             )
             normal_snapshot = normal_universe.decision_snapshot
@@ -2342,6 +2521,16 @@ class CandidateBuilderV2:
         ground_endpoint_feasibility: (
             Callable[[np.ndarray], np.ndarray] | None
         ),
+        ground_detail_candidate_provider: (
+            Callable[
+                [
+                    list[list[tuple[int, int]]],
+                    ObservedWorld,
+                ],
+                Collection[tuple[int, _RawFrontierCandidate]],
+            ]
+            | None
+        ),
         refresh_started: float,
     ) -> PhysicalCandidateUniverse:
         """Build at most three certified candidates per complete frontier chain."""
@@ -2354,23 +2543,61 @@ class CandidateBuilderV2:
             ),
         )
         raw_count = sum(min(3, len(segment)) for segment in segments)
-        mapped: dict[tuple[int, int], tuple[int, _RawFrontierCandidate]] = {}
-        for segment_id, segment in enumerate(segments):
-            for candidate in _map_frontier_chain_pose_options(
-                segment,
-                robot=robot,
-                observed_mask=world.observed_mask,
-                physical_pose_mask=physical_mask,
-                standoff_cells=step,
+        if ground_detail_candidate_provider is None:
+            source = (
+                (segment_id, candidate)
+                for segment_id, segment in enumerate(segments)
+                for candidate in _map_frontier_chain_pose_options(
+                    segment,
+                    robot=robot,
+                    observed_mask=world.observed_mask,
+                    physical_pose_mask=physical_mask,
+                    standoff_cells=step,
+                )
+            )
+        else:
+            source = iter(ground_detail_candidate_provider(segments, world))
+        mapped: dict[
+            tuple[int, int, int, int], tuple[int, _RawFrontierCandidate]
+        ] = {}
+        for segment_id, candidate in source:
+            if not (
+                isinstance(segment_id, int)
+                and 0 <= segment_id < len(segments)
+                and isinstance(candidate, _RawFrontierCandidate)
+                and candidate.frontier_cell in segments[segment_id]
+                and physical_mask[candidate.pose_cell]
             ):
-                previous = mapped.get(candidate.pose_cell)
-                key = (segment_id, candidate.sample_rank, candidate.pose_cell)
-                if previous is None or key < (
-                    previous[0],
-                    previous[1].sample_rank,
-                    previous[1].pose_cell,
-                ):
-                    mapped[candidate.pose_cell] = (segment_id, candidate)
+                raise CandidateInvariantError(
+                    "GROUND_DETAIL_CANDIDATE_INVALID"
+                )
+            target_pose = candidate.target_pose or exact_target_poses.get(
+                candidate.pose_cell
+            )
+            if target_pose is None:
+                raise CandidateInvariantError(
+                    "GROUND_DETAIL_CANDIDATE_POSITION_MISSING"
+                )
+            if world.canvas.world_to_grid(target_pose.x_m, target_pose.y_m) != (
+                candidate.pose_cell
+            ):
+                raise CandidateInvariantError(
+                    "GROUND_DETAIL_CANDIDATE_POSITION_OUTSIDE_CELL"
+                )
+            mapped_key = (
+                candidate.pose_cell[0],
+                candidate.pose_cell[1],
+                int(round(target_pose.x_m * 1000.0)),
+                int(round(target_pose.y_m * 1000.0)),
+            )
+            previous = mapped.get(mapped_key)
+            key = (segment_id, candidate.sample_rank, candidate.pose_cell)
+            if previous is None or key < (
+                previous[0],
+                previous[1].sample_rank,
+                previous[1].pose_cell,
+            ):
+                mapped[mapped_key] = (segment_id, candidate)
         fine = sorted(
             mapped.values(),
             key=lambda item: (
@@ -2399,9 +2626,9 @@ class CandidateBuilderV2:
         target_positions = np.ascontiguousarray(
             [
                 (
-                    exact_target_poses[raw.pose_cell].x_m,
-                    exact_target_poses[raw.pose_cell].y_m,
-                    exact_target_poses[raw.pose_cell].elevation_m,
+                    (raw.target_pose or exact_target_poses[raw.pose_cell]).x_m,
+                    (raw.target_pose or exact_target_poses[raw.pose_cell]).y_m,
+                    (raw.target_pose or exact_target_poses[raw.pose_cell]).elevation_m,
                 )
                 for _, raw, _ in globally_reachable
             ],
@@ -2432,9 +2659,9 @@ class CandidateBuilderV2:
         target_positions = np.ascontiguousarray(
             [
                 (
-                    exact_target_poses[raw.pose_cell].x_m,
-                    exact_target_poses[raw.pose_cell].y_m,
-                    exact_target_poses[raw.pose_cell].elevation_m,
+                    (raw.target_pose or exact_target_poses[raw.pose_cell]).x_m,
+                    (raw.target_pose or exact_target_poses[raw.pose_cell]).y_m,
+                    (raw.target_pose or exact_target_poses[raw.pose_cell]).elevation_m,
                 )
                 for _, raw, _ in endpoint_feasible
             ],
@@ -2509,7 +2736,7 @@ class CandidateBuilderV2:
         preliminary: list[PhysicalCandidate] = []
         for index in selected_positive_indices:
             segment_id, raw, global_cost = endpoint_feasible[index]
-            target_pose = exact_target_poses[raw.pose_cell]
+            target_pose = raw.target_pose or exact_target_poses[raw.pose_cell]
             gain = float(gains[index, 0])
             priority_gain = float(gains[index, 1])
             feature = self._feature(
@@ -2915,6 +3142,8 @@ class CandidateBuilderV2:
             else {
                 "row": position_grid_key[0],
                 "column": position_grid_key[1],
+                "x_mm": _millimetres(x_m),
+                "y_mm": _millimetres(y_m),
                 "z_mm": z_mm,
             }
         )
@@ -2925,7 +3154,11 @@ class CandidateBuilderV2:
         )
         candidate_id = _canonical_sha256(
             {
-                "schema": CANDIDATE_ID_SCHEMA,
+                "schema": (
+                    _HOPPER_CANDIDATE_ID_SCHEMA
+                    if platform_type == "HOPPER"
+                    else CANDIDATE_ID_SCHEMA
+                ),
                 "platform_type": platform_type,
                 "platform_id": platform_id,
                 "mission_revision": mission_revision,

@@ -70,6 +70,9 @@ from .candidate_builder import (
     CandidateDecisionSnapshot,
     CandidateDiagnostics,
     PhysicalCandidateUniverse,
+    _RawFrontierCandidate,
+    _sample_frontier_chain,
+    _select_narrow_frontier_strip_positions,
 )
 from .coverability import mask_sha256, pack_detail_mask, unpack_detail_mask
 from .formal_episode_state import (
@@ -2244,6 +2247,178 @@ class FormalEpisode:
             output[np.asarray(indices, dtype=np.intp)] = covered & feasible
         return np.ascontiguousarray(output)
 
+    def _ground_detail_frontier_candidates(
+        self,
+        segments: list[list[tuple[int, int]]],
+        world: ObservedWorld,
+        *,
+        planner_global_map: object,
+    ) -> tuple[tuple[int, _RawFrontierCandidate], ...]:
+        """Resolve three fixed coarse anchors into observed-only 0.2 m poses.
+
+        The detail window and the C++ traversability projection are both bound
+        to the current observation revision.  They deliberately receive no
+        task coverability or scene-truth layer.
+        """
+        detail_factor = int(round(
+            GLOBAL_GEOMETRY.resolution_m / self.sensor_state.resolution_m
+        ))
+        if detail_factor <= 0 or (
+            detail_factor * self.sensor_state.resolution_m
+            != GLOBAL_GEOMETRY.resolution_m
+        ):
+            raise RuntimeError("ground detail candidate resolution differs")
+        anchors: list[tuple[int, int, tuple[int, int], float, float]] = []
+        for segment_id, segment in enumerate(segments):
+            for sample_rank, frontier_cell in enumerate(
+                _sample_frontier_chain(segment)
+            ):
+                x_m, y_m = world.canvas.grid_center_world(*frontier_cell)
+                anchors.append((
+                    segment_id,
+                    sample_rank,
+                    frontier_cell,
+                    x_m,
+                    y_m,
+                ))
+        groups: dict[tuple[int, int], list[tuple[int, int, tuple[int, int], float, float]]] = {}
+        # A 32 m bucket plus 4 m strip fits inside one 64 m observed window.
+        for anchor in anchors:
+            groups.setdefault(
+                (int(math.floor(anchor[3] / 32.0)), int(math.floor(anchor[4] / 32.0))),
+                [],
+            ).append(anchor)
+        output: list[tuple[int, _RawFrontierCandidate]] = []
+        for group_index, anchors_in_group in enumerate(groups.values()):
+            mean_x = float(np.mean([item[3] for item in anchors_in_group]))
+            mean_y = float(np.mean([item[4] for item in anchors_in_group]))
+            # Align the 64 m detail window to the 4 m global lattice.  The
+            # selector can then derive its local coarse frontier neighbours
+            # without any resampling or half-cell shift.
+            left, _bottom, _right, top = world.canvas.bounds_m
+            center_x = left + 32.0 + 4.0 * round((mean_x - left - 32.0) / 4.0)
+            center_y = top - 32.0 - 4.0 * round((top - 32.0 - mean_y) / 4.0)
+            center_row, center_column = world.canvas.world_to_grid(center_x, center_y)
+            center_pose = Pose2(
+                center_x,
+                center_y,
+                self.current_pose.yaw_rad,
+                "map",
+                float(world.elevation_m[center_row, center_column]),
+            )
+            detail = self.sensor_state.planning_observation(center_pose)
+            local_map = _grid_map(
+                canvas=detail.canvas,
+                frame_id="odom",
+                elevation_m=detail.elevation_m,
+                valid_mask=detail.valid_mask,
+                physical_obstacle_ratio=detail.physical_obstacle_ratio,
+                physical_obstacle_height_m=detail.physical_obstacle_height_m,
+                forbidden_ratio=detail.forbidden_ratio,
+                observation_age_s=detail.observation_age_s,
+                observation_quality=detail.observation_quality,
+                observation_count=detail.observation_count,
+                stamp_ns=(2_000_000_000 + self._revision * 1_000_000 + group_index),
+            )
+            request = self._base_request(planner_global_map, local_map)
+            request.request_id = (
+                f"formal-frontier-strip/{self.scene_id}/{self._revision}/"
+                f"{group_index}"
+            )
+            point = bridge_api.PointGoal()
+            point.position_m = _vec3(
+                center_pose.x_m, center_pose.y_m, center_pose.elevation_m
+            )
+            point.tolerance_m = 0.2
+            request.goal.goal_id = f"frontier-strip/{group_index}"
+            request.goal.target = point
+            apply_goal_theta(request.goal, self.platform_type, center_pose.yaw_rad)
+            projection = self._bridge.project_traversability(request)
+            cells = detail.canvas.geometry.cells
+            hard = np.asarray(getattr(projection, "hard_feasible", None))
+            clearance = np.asarray(getattr(projection, "clearance_m", None))
+            if (
+                hard.dtype != np.dtype(np.uint8)
+                or clearance.dtype != np.dtype(np.float32)
+                or hard.shape != (cells, cells)
+                or clearance.shape != (cells, cells)
+                or not hard.flags.c_contiguous
+                or not clearance.flags.c_contiguous
+                or (hard.size and (hard > 1).any())
+                or not np.isfinite(clearance).all()
+                or (clearance < 0.0).any()
+            ):
+                raise RuntimeError(
+                    "ground detail candidate traversability geometry differs"
+                )
+            physical_safe = np.ascontiguousarray(np.flipud(hard).astype(np.bool_))
+            clearance_m = np.ascontiguousarray(
+                np.flipud(clearance).astype(np.float32)
+            )
+            local_coarse_cells = cells // detail_factor
+            coarse_observed = np.zeros(
+                (local_coarse_cells, local_coarse_cells), dtype=np.bool_
+            )
+            for local_row in range(local_coarse_cells):
+                for local_column in range(local_coarse_cells):
+                    x_m, y_m = detail.canvas.grid_center_world(
+                        local_row * detail_factor + detail_factor // 2,
+                        local_column * detail_factor + detail_factor // 2,
+                    )
+                    try:
+                        world_row, world_column = world.canvas.world_to_grid(x_m, y_m)
+                    except ValueError:
+                        continue
+                    coarse_observed[local_row, local_column] = world.observed_mask[
+                        world_row, world_column
+                    ]
+            for segment_id, sample_rank, frontier_cell, x_m, y_m in anchors_in_group:
+                try:
+                    detail_row, detail_column = detail.canvas.world_to_grid(x_m, y_m)
+                except ValueError:
+                    continue
+                selection = _select_narrow_frontier_strip_positions(
+                    [(
+                        detail_row // detail_factor,
+                        detail_column // detail_factor,
+                    )],
+                    coarse_observed_mask=np.ascontiguousarray(coarse_observed),
+                    observed_detail_mask=np.ascontiguousarray(detail.valid_mask),
+                    physical_safe_detail_mask=physical_safe,
+                    clearance_detail=clearance_m,
+                    detail_cells_per_coarse=detail_factor,
+                    # C++ hard feasibility already applies the platform body
+                    # footprint and safety margins; this one-cell offset only
+                    # prevents selecting the unknown frontier boundary itself.
+                    minimum_standoff_detail_cells=1,
+                    maximum_standoff_detail_cells=20,
+                    lateral_half_width_detail_cells=1,
+                )
+                if not selection.pose_cells:
+                    continue
+                pose_row, pose_column = selection.pose_cells[0]
+                target_x, target_y = detail.canvas.grid_center_world(
+                    pose_row, pose_column
+                )
+                try:
+                    pose_cell = world.canvas.world_to_grid(target_x, target_y)
+                except ValueError:
+                    continue
+                output.append((
+                    segment_id,
+                    _RawFrontierCandidate(
+                        sample_rank=sample_rank,
+                        frontier_cell=frontier_cell,
+                        pose_cell=pose_cell,
+                        target_pose=Pose2(
+                            target_x,
+                            target_y,
+                            elevation_m=float(detail.elevation_m[pose_row, pose_column]),
+                        ),
+                    ),
+                ))
+        return tuple(output)
+
     def build_policy_observation(
         self, observed, pose: Pose2
     ) -> PolicyBatch:
@@ -2385,6 +2560,17 @@ class FormalEpisode:
                 else lambda positions: self._ground_endpoint_feasibility(
                     positions,
                     planner_global_map=planner_global_map,
+                )
+            ),
+            ground_detail_candidate_provider=(
+                None
+                if self.platform_type == "HOPPER"
+                else lambda segments, candidate_world: (
+                    self._ground_detail_frontier_candidates(
+                        segments,
+                        candidate_world,
+                        planner_global_map=planner_global_map,
+                    )
                 )
             ),
         )

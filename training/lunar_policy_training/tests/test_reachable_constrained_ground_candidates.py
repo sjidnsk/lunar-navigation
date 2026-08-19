@@ -4,7 +4,11 @@ import math
 
 import numpy as np
 
-from lunar_policy_training.environment.candidate_builder import CandidateBuilderV2
+from lunar_policy_training.environment.candidate_builder import (
+    CandidateBuilderV2,
+    _FeasibleAnchor,
+    _select_narrow_frontier_strip_positions,
+)
 from lunar_policy_training.environment.observation_builder import (
     LocalObservation,
     MissionRaster,
@@ -196,3 +200,119 @@ def test_ground_frontier_never_fabricates_three_when_only_two_are_feasible() -> 
 
     assert {candidate.position_grid_key for candidate in universe.candidates} == allowed
     assert len(universe.candidates) == 2
+
+
+def test_narrow_frontier_strip_uses_observed_safe_high_clearance_positions() -> None:
+    """A coarse frontier selects one detailed, observed-safe pose per anchor."""
+    coarse_observed = np.zeros((5, 5), dtype=np.bool_)
+    coarse_observed[2:, :] = True
+    detail_observed = np.zeros((25, 25), dtype=np.bool_)
+    detail_observed[10:, :] = True
+    detail_safe = detail_observed.copy()
+    clearance = np.zeros((25, 25), dtype=np.float32)
+    for column in (7, 12, 17):
+        clearance[15, column] = 0.8
+        clearance[15, column + 1] = 1.0
+        detail_safe[15, column + 1] = False
+
+    selection = _select_narrow_frontier_strip_positions(
+        [(2, column) for column in range(5)],
+        coarse_observed_mask=coarse_observed,
+        observed_detail_mask=detail_observed,
+        physical_safe_detail_mask=detail_safe,
+        clearance_detail=clearance,
+        detail_cells_per_coarse=5,
+        minimum_standoff_detail_cells=2,
+        maximum_standoff_detail_cells=4,
+        lateral_half_width_detail_cells=1,
+    )
+
+    assert selection.pose_cells == ((15, 7), (15, 12), (15, 17))
+    assert selection.evaluated_detail_cell_count == 27
+
+
+def test_narrow_frontier_strip_has_a_fixed_bounded_scan_cost() -> None:
+    """Long segments cannot expand one anchor's detailed strip into map search."""
+    coarse_observed = np.zeros((9, 41), dtype=np.bool_)
+    coarse_observed[4:, :] = True
+    detail_observed = np.zeros((45, 205), dtype=np.bool_)
+    detail_observed[20:, :] = True
+    detail_safe = detail_observed.copy()
+    clearance = np.ones((45, 205), dtype=np.float32)
+
+    selection = _select_narrow_frontier_strip_positions(
+        [(4, column) for column in range(1, 40)],
+        coarse_observed_mask=coarse_observed,
+        observed_detail_mask=detail_observed,
+        physical_safe_detail_mask=detail_safe,
+        clearance_detail=clearance,
+        detail_cells_per_coarse=5,
+        minimum_standoff_detail_cells=2,
+        maximum_standoff_detail_cells=4,
+        lateral_half_width_detail_cells=1,
+    )
+
+    assert len(selection.pose_cells) == 3
+    assert selection.evaluated_detail_cell_count == 27
+
+
+def test_narrow_frontier_strip_uses_clearance_gradient_when_frontier_normal_cancels() -> None:
+    """Opposing unknown neighbours choose the safest observed-side direction."""
+    coarse_observed = np.ones((5, 5), dtype=np.bool_)
+    coarse_observed[1, 2] = False
+    coarse_observed[3, 2] = False
+    detail_observed = np.ones((25, 25), dtype=np.bool_)
+    detail_safe = detail_observed.copy()
+    clearance = np.zeros((25, 25), dtype=np.float32)
+    clearance[12, 14] = 0.9
+
+    selection = _select_narrow_frontier_strip_positions(
+        [(2, 2)],
+        coarse_observed_mask=coarse_observed,
+        observed_detail_mask=detail_observed,
+        physical_safe_detail_mask=detail_safe,
+        clearance_detail=clearance,
+        detail_cells_per_coarse=5,
+        minimum_standoff_detail_cells=2,
+        maximum_standoff_detail_cells=2,
+        lateral_half_width_detail_cells=0,
+    )
+
+    assert selection.pose_cells == ((12, 14),)
+    assert selection.evaluated_detail_cell_count == 5
+
+
+def test_ground_candidate_identity_distinguishes_exact_positions_in_one_coarse_cell() -> None:
+    """A 0.2 m strip must not alias two poses through its 4 m parent cell."""
+    feature = np.zeros(12, dtype=np.float32)
+    feature[5] = np.float32(1.0)
+    common = {
+        "pose_map": Pose2(500.0, 500.0),
+        "platform_type": "WHEELED",
+        "platform_id": "unit-wheeled",
+        "mission_revision": 7,
+        "goal_tolerance_mm": 200,
+    }
+    left = CandidateBuilderV2._physical_candidate(
+        _FeasibleAnchor(
+            segment_id=0,
+            point=(100, 101),
+            feature=feature,
+            elevation_m=1.0,
+            target_position_m=(504.1, 503.9, 1.0),
+        ),
+        **common,
+    )
+    right = CandidateBuilderV2._physical_candidate(
+        _FeasibleAnchor(
+            segment_id=0,
+            point=(100, 101),
+            feature=feature,
+            elevation_m=1.0,
+            target_position_m=(504.3, 503.9, 1.0),
+        ),
+        **common,
+    )
+
+    assert left.position_grid_key == right.position_grid_key
+    assert left.candidate_id != right.candidate_id

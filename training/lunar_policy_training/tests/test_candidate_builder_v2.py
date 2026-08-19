@@ -151,7 +151,7 @@ def test_physical_candidate_contract_symbols_are_public() -> None:
     }
 
     assert expected <= set(candidate_builder_module.__all__)
-    assert CANDIDATE_ID_SCHEMA == "lunar-physical-candidate-id/v2"
+    assert CANDIDATE_ID_SCHEMA == "lunar-physical-candidate-id/v3"
     assert PHYSICAL_SNAPSHOT_SCHEMA == "lunar-physical-snapshot/v1"
     assert CandidateBuildResult is candidate_builder_module.CandidateBuildResult
     assert PhysicalCandidate is candidate_builder_module.PhysicalCandidate
