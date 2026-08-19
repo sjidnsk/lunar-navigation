@@ -3383,11 +3383,17 @@ def _open_formal_task_cache_runtime(
         raise PreflightError("formal task cache prefetch evidence is invalid")
     body = dict(report)
     report_sha256 = body.pop("report_sha256", None)
-    source_commit = _source_commit(repository_root)
+    report_source_commit = report.get("source_commit")
+    source_compatible = (
+        isinstance(report_source_commit, str)
+        and _preflight_only_source_delta(
+            repository_root, report_source_commit
+        )
+    )
     task_runtime_source_commit = (
         task_key_source_commit
         if task_key_source_commit is not None
-        else source_commit
+        else report_source_commit
     )
     manifest_path = cache_manifest_path.resolve(strict=True)
     cache = load_formal_cache(manifest_path, require_full=True)
@@ -3396,7 +3402,7 @@ def _open_formal_task_cache_runtime(
         report.get("schema") != _TASK_PREFETCH_REPORT_SCHEMA
         or report_sha256
         != hashlib.sha256(_canonical_json_bytes(body)).hexdigest()
-        or report.get("source_commit") != source_commit
+        or not source_compatible
         or Path(str(report.get("cache_manifest"))).resolve(strict=True)
         != manifest_path
         or report.get("cache_manifest_sha256")
@@ -3407,6 +3413,7 @@ def _open_formal_task_cache_runtime(
         or report.get("resolved_task_count") != 48
         or not isinstance(tasks, list)
         or len(tasks) != 48
+        or not isinstance(task_runtime_source_commit, str)
     ):
         raise PreflightError(
             "formal task cache prefetch evidence differs from this run"
@@ -4197,7 +4204,9 @@ def _validated_formal_preflight_calibration(
     if calibrated.config != expected_config:
         raise PreflightError("formal preflight config differs from calibration")
     if (
-        manifest.get("source_commit") != _source_commit(repository_root)
+        not _preflight_only_source_delta(
+            repository_root, str(manifest.get("source_commit", ""))
+        )
         or manifest.get("global_step") != 0
         or (root / "checkpoints").exists()
     ):
@@ -4355,10 +4364,15 @@ def _formal_sensor_performance_preflight(
         raise PreflightError("formal sensor performance report is required")
     try:
         report = load_sensor_performance_report(Path(report_path))
+        report_source_commit = report.get("source_commit")
+        if not isinstance(report_source_commit, str) or not _preflight_only_source_delta(
+            Path(repository_root), report_source_commit
+        ):
+            raise SensorPerformanceError("sensor source is not preflight-compatible")
         return validate_sensor_performance_report(
             report,
             expected_host=current_host_identity(),
-            expected_source_commit=sensor_source_commit(repository_root),
+            expected_source_commit=report_source_commit,
             expected_capability_sha256=capability_bundle.bundle_sha256,
             expected_training_semantics_sha256=training_semantics_sha256(),
         )
@@ -8166,6 +8180,44 @@ def _commit_changed_paths(
         text=True,
     )
     return tuple(line for line in completed.stdout.splitlines() if line)
+
+
+_PREFLIGHT_ONLY_SOURCE_PATHS = frozenset(
+    {
+        "training/lunar_policy_training/lunar_policy_training/cli.py",
+        "training/lunar_policy_training/lunar_policy_training/formal_preflight.py",
+        "training/lunar_policy_training/tests/test_cli.py",
+        "training/lunar_policy_training/tests/test_formal_preflight.py",
+    }
+)
+
+
+def _preflight_only_source_delta_paths(paths: set[str]) -> bool:
+    """Permit evidence reuse only when no calibration/runtime input changed."""
+    return bool(paths) and paths.issubset(_PREFLIGHT_ONLY_SOURCE_PATHS)
+
+
+def _preflight_only_source_delta(
+    repository_root: Path, evidence_source_commit: str
+) -> bool:
+    current = _source_commit(repository_root)
+    if evidence_source_commit == current:
+        return True
+    if (
+        not isinstance(evidence_source_commit, str)
+        or len(evidence_source_commit) != 40
+        or any(
+            character not in "0123456789abcdef"
+            for character in evidence_source_commit
+        )
+        or not _commit_is_ancestor(
+            repository_root, evidence_source_commit, current
+        )
+    ):
+        return False
+    return _preflight_only_source_delta_paths(
+        set(_commit_changed_paths(repository_root, evidence_source_commit, current))
+    )
 
 
 def _file_sha256(path: Path) -> str:

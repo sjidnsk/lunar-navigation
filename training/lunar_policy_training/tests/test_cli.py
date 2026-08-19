@@ -21,6 +21,21 @@ REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PACKAGE_ROOT))
 sys.path.insert(0, str(REPOSITORY_ROOT / "model_contract"))
 
+
+def test_preflight_only_source_delta_rejects_runtime_changes() -> None:
+    assert cli_module._preflight_only_source_delta_paths(
+        {
+            "training/lunar_policy_training/lunar_policy_training/cli.py",
+            "training/lunar_policy_training/lunar_policy_training/formal_preflight.py",
+            "training/lunar_policy_training/tests/test_cli.py",
+        }
+    )
+    assert not cli_module._preflight_only_source_delta_paths(
+        {
+            "training/lunar_policy_training/lunar_policy_training/reward.py"
+        }
+    )
+
 from lunar_policy_training.budget import TrainingBudget  # noqa: E402
 from lunar_policy_training.cli import (  # noqa: E402
     ArtifactRootError,
