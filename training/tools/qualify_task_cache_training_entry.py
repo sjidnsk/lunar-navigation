@@ -50,34 +50,28 @@ _RESULT_FIELDS = frozenset(
     )
 )
 _FOCUSED_TARGETS = (
-    "training/lunar_policy_training/tests/test_task_cache.py",
-    "training/lunar_policy_training/tests/test_task_coverability.py",
-    "training/lunar_policy_training/tests/test_hopper_task_closure.py",
-    "training/lunar_policy_training/tests/test_task_cache_scheduler.py",
-    "training/lunar_policy_training/tests/test_formal_cache.py",
-    "training/lunar_policy_training/tests/test_formal_builder.py",
-    "training/lunar_policy_training/tests/test_formal_resume_state.py",
-    "training/lunar_policy_training/tests/test_checkpoint.py",
-    "training/lunar_policy_training/tests/test_checkpoint_resume.py",
+    "training/lunar_policy_training/tests/test_reward_v4_sentinel_boundary.py",
+    "training/lunar_policy_training/tests/test_formal_ground_endpoint_authority.py",
+    "training/lunar_policy_training/tests/"
+    "test_reachable_constrained_ground_candidates.py",
     "training/lunar_policy_training/tests/test_formal_preflight.py",
-    "training/lunar_policy_training/tests/test_hopper_macro_step.py",
-    "training/lunar_policy_training/tests/test_cli.py",
 )
 _SHORT_SMOKES = (
     (
         "WHEELED",
-        "training/lunar_policy_training/tests/test_formal_builder.py::"
-        "test_worker_loads_exact_task_local_scene_and_world_origin[WHEELED]",
+        "training/lunar_policy_training/tests/"
+        "test_reachable_constrained_ground_candidates.py::"
+        "test_ground_frontier_qualifies_all_strip_witnesses_but_emits_three_actions",
     ),
     (
         "LEGGED",
-        "training/lunar_policy_training/tests/test_formal_builder.py::"
-        "test_worker_loads_exact_task_local_scene_and_world_origin[LEGGED]",
+        "training/lunar_policy_training/tests/test_formal_preflight.py::"
+        "test_direct_checks_use_exact_common_training_world",
     ),
     (
         "HOPPER",
         "training/lunar_policy_training/tests/test_hopper_macro_step.py::"
-        "test_prepared_hopper_action_aggregates_until_landed_hold",
+        "test_hopper_resumes_policy_only_after_landed_hold",
     ),
 )
 _LIVE_REPAIR_FOCUSED_NODES = (
