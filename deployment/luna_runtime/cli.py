@@ -25,7 +25,7 @@ from .config import ConfigError, load_runtime_config, load_profile
 from .host import HostFacts
 from .process import read_runtime_status, start_runtime, stop_runtime, tail_log
 from .state import resolve_runtime_paths
-from .model_store import ModelInstallError, ModelStore, model_store_root
+from .model_store import ModelInstallError, ModelStore, model_store_root, probe_model_for_profile
 
 
 @dataclass(frozen=True)
@@ -145,7 +145,11 @@ def run_cli(
         config = load_runtime_config(config_path)
         paths = resolve_runtime_paths("dev", home=home)
         if args.command == "model":
-            store = ModelStore(model_store_root(config_path, paths.data))
+            profile = load_profile(config.profile, root)
+            store = ModelStore(
+                model_store_root(config_path, paths.data),
+                probe=lambda onnx: probe_model_for_profile(onnx, profile.policy_probe),
+            )
             if args.check == "install" and args.argument:
                 installed = store.install(Path(args.argument))
                 return CliResult(0, {"model_id": installed.model_id, "model_sha256": installed.model_sha256, "model_binding": "staged_not_connected"})

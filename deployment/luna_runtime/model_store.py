@@ -30,6 +30,13 @@ def _load_validator():
     return ModelManifestError, validate_model_package
 
 
+def probe_model_for_profile(onnx_path: Path, backend: str) -> None:
+    _load_validator()
+    from lunar_policy_runtime.probe import probe_model_artifact
+
+    probe_model_artifact(onnx_path, backend)
+
+
 class ModelInstallError(ValueError):
     pass
 
@@ -106,7 +113,10 @@ class ModelStore:
             destination = self.root / package.manifest.model_id / model_hash
             if destination.exists():
                 return InstalledModel(package.manifest.model_id, model_hash, destination)
-            self.probe(package_root / "policy.onnx")
+            try:
+                self.probe(package_root / "policy.onnx")
+            except Exception as error:
+                raise ModelInstallError(str(error)) from error
             destination.parent.mkdir(parents=True, exist_ok=True)
             staging = destination.parent / f".{model_hash}.staging"
             if staging.exists():
