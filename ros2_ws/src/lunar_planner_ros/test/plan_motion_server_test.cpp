@@ -559,6 +559,36 @@ TEST_F(PlanMotionServerTest, ConfiguresAndActivatesWithExplicitSnapshotPolicy) {
   node.reset();
 }
 
+TEST_F(PlanMotionServerTest, UsesConfiguredPlanMotionActionName) {
+  auto options = ValidOptions();
+  options.append_parameter_override("interfaces.plan_motion", "/demo/plan_motion");
+  auto server = std::make_shared<PlanMotionServer>(
+      std::move(options), DefaultDependencies());
+  ASSERT_EQ(
+      server->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(
+      server->activate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
+  auto client_node = std::make_shared<rclcpp::Node>("configured_endpoint_client");
+  auto client = rclcpp_action::create_client<Action>(
+      client_node, "/demo/plan_motion");
+  rclcpp::executors::MultiThreadedExecutor executor{
+      rclcpp::ExecutorOptions{}, 2U};
+  executor.add_node(server->get_node_base_interface());
+  executor.add_node(client_node);
+  std::jthread spin_thread([&] { executor.spin(); });
+
+  EXPECT_TRUE(client->wait_for_action_server(3s));
+
+  executor.cancel();
+  spin_thread.join();
+  executor.remove_node(client_node);
+  executor.remove_node(server->get_node_base_interface());
+  EXPECT_EQ(
+      server->deactivate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(
+      server->cleanup().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+}
+
 TEST_F(PlanMotionServerTest, RejectsUnsupportedGlobalMapConfiguration) {
   auto options = ValidOptions();
   options.append_parameter_override("maximum_global_level", 3);

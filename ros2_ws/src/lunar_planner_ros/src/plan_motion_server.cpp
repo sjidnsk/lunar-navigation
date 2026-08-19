@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stop_token>
 #include <string>
@@ -345,6 +346,19 @@ struct ExecutionDiagnosticInfo final {
 }  // namespace
 
 struct PlanMotionServer::Impl final {
+  struct InterfaceNames final {
+    std::string map_global;
+    std::string map_local;
+    std::string odometry;
+    std::string localization_status;
+    std::string tf;
+    std::string exploration_task;
+    std::string motion_feedback;
+    std::string plan_motion;
+    std::string diagnostics;
+    std::string certified_route_markers;
+    std::string provisional_route_markers;
+  };
   struct PendingGoal final {
     std::string request_id;
     std::string mission_id;
@@ -420,6 +434,7 @@ struct PlanMotionServer::Impl final {
   std::string worker_stop_reason{"REQUEST_CANCELED"};
   std::string last_diagnostic_reason;
   std::string diagnostic_hardware_id{"unconfigured"};
+  InterfaceNames interface_names;
 
   explicit Impl(
       PlanMotionServer& owner,
@@ -446,23 +461,26 @@ struct PlanMotionServer::Impl final {
     action_group = node.create_callback_group(
         rclcpp::CallbackGroupType::MutuallyExclusive);
 
+    DeclareParameters();
+    interface_names = ReadInterfaceNames();
+
     diagnostics_publisher =
         node.create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
-            "/diagnostics", rclcpp::QoS{10}.reliable());
+            interface_names.diagnostics, rclcpp::QoS{10}.reliable());
     route_marker_publisher =
         node.create_publisher<visualization_msgs::msg::MarkerArray>(
-            "/planning/certified_route_markers",
+            interface_names.certified_route_markers,
             rclcpp::QoS{1}.reliable().transient_local());
     provisional_route_marker_publisher =
         node.create_publisher<visualization_msgs::msg::MarkerArray>(
-            "/planning/provisional_route_markers",
+            interface_names.provisional_route_markers,
             rclcpp::QoS{1}.reliable().transient_local());
     action_server = rclcpp_action::create_server<Action>(
         node.get_node_base_interface(),
         node.get_node_clock_interface(),
         node.get_node_logging_interface(),
         node.get_node_waitables_interface(),
-        "/plan_motion",
+        interface_names.plan_motion,
         [this](
             const rclcpp_action::GoalUUID& uuid,
             const std::shared_ptr<const Action::Goal> goal) {
@@ -475,8 +493,6 @@ struct PlanMotionServer::Impl final {
           HandleAccepted(goal_handle);
         },
         rcl_action_server_get_default_options(), action_group);
-
-    DeclareParameters();
   }
 
   ~Impl() {
@@ -505,6 +521,68 @@ struct PlanMotionServer::Impl final {
         "platform_capability_file", rclcpp::ParameterType::PARAMETER_STRING);
     node.declare_parameter(
         "observation_capability_file", rclcpp::ParameterType::PARAMETER_STRING);
+    node.declare_parameter<std::string>(
+        "interfaces.map_global", "/environment/map_global");
+    node.declare_parameter<std::string>(
+        "interfaces.map_local", "/environment/map_local");
+    node.declare_parameter<std::string>(
+        "interfaces.odometry", "/localization/odometry");
+    node.declare_parameter<std::string>(
+        "interfaces.localization_status", "/localization/status");
+    node.declare_parameter<std::string>("interfaces.tf", "/tf");
+    node.declare_parameter<std::string>(
+        "interfaces.exploration_task", "/mission/exploration_task");
+    node.declare_parameter<std::string>(
+        "interfaces.motion_feedback", "/execution/motion_feedback");
+    node.declare_parameter<std::string>(
+        "interfaces.plan_motion", "/plan_motion");
+    node.declare_parameter<std::string>(
+        "interfaces.diagnostics", "/diagnostics");
+    node.declare_parameter<std::string>(
+        "interfaces.certified_route_markers",
+        "/planning/certified_route_markers");
+    node.declare_parameter<std::string>(
+        "interfaces.provisional_route_markers",
+        "/planning/provisional_route_markers");
+  }
+
+  [[nodiscard]] InterfaceNames ReadInterfaceNames() const {
+    InterfaceNames names{
+        .map_global = node.get_parameter("interfaces.map_global").as_string(),
+        .map_local = node.get_parameter("interfaces.map_local").as_string(),
+        .odometry = node.get_parameter("interfaces.odometry").as_string(),
+        .localization_status =
+            node.get_parameter("interfaces.localization_status").as_string(),
+        .tf = node.get_parameter("interfaces.tf").as_string(),
+        .exploration_task =
+            node.get_parameter("interfaces.exploration_task").as_string(),
+        .motion_feedback =
+            node.get_parameter("interfaces.motion_feedback").as_string(),
+        .plan_motion =
+            node.get_parameter("interfaces.plan_motion").as_string(),
+        .diagnostics =
+            node.get_parameter("interfaces.diagnostics").as_string(),
+        .certified_route_markers = node.get_parameter(
+            "interfaces.certified_route_markers").as_string(),
+        .provisional_route_markers = node.get_parameter(
+            "interfaces.provisional_route_markers").as_string(),
+    };
+    const std::array<std::string_view, 11U> values{
+        names.map_global, names.map_local, names.odometry,
+        names.localization_status, names.tf, names.exploration_task,
+        names.motion_feedback, names.plan_motion, names.diagnostics,
+        names.certified_route_markers, names.provisional_route_markers};
+    std::set<std::string_view> unique;
+    for (const std::string_view value : values) {
+      if (value.size() < 2U || value.front() != '/') {
+        throw std::invalid_argument{
+            "interface names must be nonempty absolute ROS names"};
+      }
+      if (!unique.insert(value).second) {
+        throw std::invalid_argument{"interface names must be globally unique"};
+      }
+    }
+    return names;
   }
 
   [[nodiscard]] std::chrono::nanoseconds RequiredDuration(
@@ -802,7 +880,7 @@ struct PlanMotionServer::Impl final {
     map_options.callback_group = map_group;
     const auto map_qos = rclcpp::QoS{1}.reliable().transient_local();
     global_map_sub = node.create_subscription<grid_map_msgs::msg::GridMap>(
-        "/environment/map_global", map_qos,
+        interface_names.map_global, map_qos,
         [this](const grid_map_msgs::msg::GridMap::SharedPtr message) {
           const auto store = Store();
           if (store) {
@@ -811,7 +889,7 @@ struct PlanMotionServer::Impl final {
         },
         map_options);
     local_map_sub = node.create_subscription<grid_map_msgs::msg::GridMap>(
-        "/environment/map_local", map_qos,
+        interface_names.map_local, map_qos,
         [this](const grid_map_msgs::msg::GridMap::SharedPtr message) {
           const auto store = Store();
           if (store) {
@@ -823,7 +901,7 @@ struct PlanMotionServer::Impl final {
     rclcpp::SubscriptionOptions localization_options;
     localization_options.callback_group = localization_group;
     odometry_sub = node.create_subscription<nav_msgs::msg::Odometry>(
-        "/localization/odometry", rclcpp::SensorDataQoS{},
+        interface_names.odometry, rclcpp::SensorDataQoS{},
         [this](const nav_msgs::msg::Odometry::SharedPtr message) {
           OnOdometry(*message);
         },
@@ -831,7 +909,7 @@ struct PlanMotionServer::Impl final {
     localization_status_sub =
         node.create_subscription<
             lunar_navigation_msgs::msg::LocalizationStatus>(
-            "/localization/status", rclcpp::QoS{10}.reliable(),
+            interface_names.localization_status, rclcpp::QoS{10}.reliable(),
             [this](
                 const lunar_navigation_msgs::msg::LocalizationStatus::SharedPtr
                     message) {
@@ -842,7 +920,7 @@ struct PlanMotionServer::Impl final {
     rclcpp::SubscriptionOptions tf_options;
     tf_options.callback_group = tf_group;
     tf_sub = node.create_subscription<tf2_msgs::msg::TFMessage>(
-        "/tf", rclcpp::QoS{100}.best_effort(),
+        interface_names.tf, rclcpp::QoS{100}.best_effort(),
         [this](const tf2_msgs::msg::TFMessage::SharedPtr message) {
           const auto store = Store();
           if (store) {
@@ -855,7 +933,7 @@ struct PlanMotionServer::Impl final {
     mission_options.callback_group = mission_group;
     mission_sub =
         node.create_subscription<lunar_navigation_msgs::msg::ExplorationTask>(
-            "/mission/exploration_task",
+            interface_names.exploration_task,
             rclcpp::QoS{1}.reliable().transient_local(),
             [this](
                 const lunar_navigation_msgs::msg::ExplorationTask::SharedPtr
@@ -866,7 +944,7 @@ struct PlanMotionServer::Impl final {
 
     execution_feedback_sub = node.create_subscription<
         lunar_navigation_msgs::msg::MotionExecutionFeedback>(
-        "/execution/motion_feedback", rclcpp::QoS{10}.reliable(),
+        interface_names.motion_feedback, rclcpp::QoS{10}.reliable(),
         [this](const lunar_navigation_msgs::msg::MotionExecutionFeedback::
                    SharedPtr message) {
           const FeedbackAcceptResult accepted =

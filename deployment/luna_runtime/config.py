@@ -70,7 +70,7 @@ class RuntimeConfig:
 
     def planner_ros_parameters(self) -> dict[str, Any]:
         return {
-            **dict(self.interfaces),
+            **{f"interfaces.{key}": value for key, value in self.interfaces.items()},
             **dict(self.planner["snapshot_policy"]),
             "platform_capability_file": self.capabilities["platform_file"],
             "observation_capability_file": self.capabilities["observation_file"],

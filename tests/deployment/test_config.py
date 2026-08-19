@@ -102,5 +102,6 @@ def test_valid_fallback_config_renders_planner_ros_parameters(tmp_path: Path) ->
 
     text = output.read_text(encoding="utf-8")
     assert "/lunar_planner:" in text
+    assert "interfaces.map_global: /environment/map_global" in text
     assert "global_map_max_age: 1.0" in text
     assert "enable_nav2_adapter: false" in text
