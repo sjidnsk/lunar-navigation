@@ -88,6 +88,20 @@ ros2_ws/src/
 
 `luna` 本身以用户级可执行文件安装；若系统已有同名命令，初始化必须报告冲突，不能覆盖现有可执行文件。包内 `./luna` 始终可用。
 
+### 3.3 单一有效算法基线与排除规则
+
+每份部署包只对应 manifest 中的一个精确 `source_commit`，并由**白名单**收集当前运行路径需要的包和配置；打包器不得扫描仓库后按文件存在性把内容一并带走。
+
+具体要求如下：
+
+- 只包含 `luna build` 在目标 profile 下实际构建、以及 `luna start` 实际加载的当前规划算法与配置；
+- 不包含 Git 历史、旧分支、实验/迁移目录、废弃的候选生成版本、旧 Python A* 路径、旧训练环境、测试和历史模型；
+- 部署配置不提供“选择旧算法版本”的开关。旧行为若仍以独立模块存在，必须被 bundle allowlist 排除；
+- 若一段源码仅为了当前公共接口兼容而仍被活动代码调用，它在完成替代前可以保留，但不得成为可选的旧规划行为；
+- 初始模型状态仅为 `fallback`；安装模型后只存在一个活动模型指针和一个可回退的前一模型，训练 checkpoint 与更早模型均不随包交付。
+
+因此“最新”不表示工作目录中时间戳最新的文件，而是 release manifest 固定的、经当前运行时配置选择的唯一算法基线。
+
 ## 4. 模型仍在训练时的交接
 
 ### 4.1 默认行为
@@ -255,6 +269,7 @@ runtime:                    # LUNA_HOME、进程与日志设置
 - 无模型时 `fallback` 可以运行规划；模型包安装失败不改变正在使用的模型。
 - 外部输入/输出与 `lunar-external-interfaces/v5`、`PlanMotion`、ObservationContract 和 ActionContract 精确匹配。
 - 包中不含 tests、docs（`README.md` 与 `COMMANDS.md` 除外）、训练、cache、checkpoint、build/install/log 或历史 artifact。
+- bundle allowlist 只收集 manifest 固定的当前有效算法；不得包含旧算法模块、历史模型、Git 历史或可选旧版本选择开关。
 - `luna` 覆盖初始化、构建、配置、运行、诊断、日志、模型和扩展的常用操作，无需操作者拼接底层 ROS/colcon 命令。
 - 未来地图处理和路径跟踪可以通过可选包接入，而不修改规划核心或已冻结的外部消息。
 
