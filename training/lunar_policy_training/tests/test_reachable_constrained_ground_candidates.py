@@ -8,6 +8,7 @@ from lunar_policy_training.environment.candidate_builder import (
     CandidateBuilderV2,
     _FeasibleAnchor,
     _RawFrontierCandidate,
+    _ground_target_visit_key,
     _select_narrow_frontier_strip_positions,
     _select_three_chain_options,
 )
@@ -244,7 +245,7 @@ def test_ground_frontier_qualifies_all_strip_witnesses_but_emits_three_actions()
                         frontier_cell=frontier_cell,
                         pose_cell=pose_cell,
                         target_pose=Pose2(
-                            center_x + 0.1 * witness,
+                            center_x + 0.2 * witness,
                             center_y,
                         ),
                     ),
@@ -281,6 +282,28 @@ def test_ground_frontier_qualifies_all_strip_witnesses_but_emits_three_actions()
     assert universe.decision_snapshot.globally_reachable_candidate_count == 6
     assert endpoint_batches == [6]
     assert gain_batches == [6]
+    # All detailed witnesses within this 4 m source cell share the legacy
+    # coarse position key.  Visiting one 0.2 m witness must leave its sibling
+    # selectable rather than suppressing the whole coarse cell.
+    first = universe.candidates[0]
+    result = CandidateBuilderV2(RecordingGainEstimator()).select_available(
+        universe,
+        canvas_id=world.canvas.identity,
+        excluded_cells={
+            _ground_target_visit_key(
+                first.target_position_m[0], first.target_position_m[1]
+            )
+        },
+    )
+    selected_ids = {
+        candidate_id
+        for candidate_id, enabled in zip(
+            result.batch.candidate_ids, result.batch.mask, strict=True
+        )
+        if enabled
+    }
+    assert first.candidate_id not in selected_ids
+    assert selected_ids
 
 
 def test_narrow_frontier_strip_keeps_only_observed_safe_positions() -> None:

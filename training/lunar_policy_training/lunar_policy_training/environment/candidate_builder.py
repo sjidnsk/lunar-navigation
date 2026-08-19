@@ -45,6 +45,23 @@ class CandidateInvariantError(RuntimeError):
     """A candidate snapshot contains non-finite or contradictory authority."""
 
 
+def _ground_target_visit_key(x_m: float, y_m: float) -> tuple[int, int]:
+    """Return the stable 0.2 m visited-cell key for one ground endpoint.
+
+    Ground frontier witnesses are resolved on the 0.2 m map, so the visited
+    filter must use that same geometry.  Zig-zag encoding keeps the generic
+    non-negative tuple contract valid for maps with negative world origins.
+    """
+    if not math.isfinite(float(x_m)) or not math.isfinite(float(y_m)):
+        raise ValueError("ground target visit position is invalid")
+
+    def encode(value: float) -> int:
+        signed = int(math.floor(value / 0.2))
+        return 2 * signed if signed >= 0 else -2 * signed - 1
+
+    return encode(float(x_m)), encode(float(y_m))
+
+
 @dataclass(frozen=True, slots=True)
 class _RawFrontierCandidate:
     sample_rank: int
@@ -2969,7 +2986,14 @@ class CandidateBuilderV2:
             unvisited = tuple(
                 candidate
                 for candidate in planner_available
-                if candidate.position_grid_key not in visited_cells
+                if (
+                    candidate.position_grid_key not in visited_cells
+                    and _ground_target_visit_key(
+                        candidate.target_position_m[0],
+                        candidate.target_position_m[1],
+                    )
+                    not in visited_cells
+                )
             )
             positive = tuple(
                 candidate
@@ -2998,7 +3022,14 @@ class CandidateBuilderV2:
             history_available = tuple(
                 candidate
                 for candidate in planner_available
-                if candidate.position_grid_key not in visited_cells
+                if (
+                    candidate.position_grid_key not in visited_cells
+                    and _ground_target_visit_key(
+                        candidate.target_position_m[0],
+                        candidate.target_position_m[1],
+                    )
+                    not in visited_cells
+                )
                 or candidate.candidate_id in selected_ids
             )
             visited_excluded_count = len(planner_available) - len(

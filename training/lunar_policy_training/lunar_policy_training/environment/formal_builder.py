@@ -71,6 +71,7 @@ from .candidate_builder import (
     CandidateDiagnostics,
     PhysicalCandidateUniverse,
     _RawFrontierCandidate,
+    _ground_target_visit_key,
     _sample_frontier_chain,
     _select_narrow_frontier_strip_positions,
 )
@@ -1384,6 +1385,12 @@ class FormalEpisode:
         self._reveal_history: list[FormalRevealState] = []
         self._replay_event_kinds: list[str] = []
         self._visited_candidate_cells = {start_cell}
+        self._visited_ground_target_cells = {
+            _ground_target_visit_key(
+                self.current_pose.x_m,
+                self.current_pose.y_m,
+            )
+        }
         self._navigation_stack = [self.current_pose]
         self._visited_candidate_filter_enabled = visited_candidate_filter_enabled
         self.controller = ObservationBoundaryController(
@@ -1459,6 +1466,10 @@ class FormalEpisode:
         visited_poses.extend(sample.pose_map for sample in evidence.path_samples)
         self._visited_candidate_cells.update(
             canvas.world_to_grid(pose.x_m, pose.y_m) for pose in visited_poses
+        )
+        self._visited_ground_target_cells.update(
+            _ground_target_visit_key(pose.x_m, pose.y_m)
+            for pose in visited_poses
         )
         self._reveal_history.append(
             FormalRevealState(
@@ -2614,8 +2625,9 @@ class FormalEpisode:
             failure_snapshot_id=failure_snapshot_id,
             planner_failed_candidate_ids=failed_candidate_ids,
             excluded_cells=(
-                self._visited_candidate_cells
+                self._visited_ground_target_cells
                 if self._visited_candidate_filter_enabled
+                and self.platform_type != "HOPPER"
                 else ()
             ),
             backtrack_pose=backtrack_pose,
@@ -2684,8 +2696,9 @@ class FormalEpisode:
             failure_snapshot_id=universe.physical_snapshot_id,
             planner_failed_candidate_ids=failed_candidate_ids,
             excluded_cells=(
-                self._visited_candidate_cells
+                self._visited_ground_target_cells
                 if self._visited_candidate_filter_enabled
+                and self.platform_type != "HOPPER"
                 else ()
             ),
             backtrack_pose=backtrack_pose,
