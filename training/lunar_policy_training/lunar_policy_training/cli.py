@@ -2389,6 +2389,19 @@ def _reward_v4_evaluation_disabled() -> bool:
     return True
 
 
+def _reward_v4_candidate_matches_current_journal(
+    candidate: TrainingCheckpointV6,
+    *,
+    source_commit: str,
+    journal_sha256: str,
+) -> bool:
+    """Allow candidate reuse only within the exact source and sealed journal."""
+    return (
+        candidate.source_commit == source_commit
+        and candidate.update_recovery_state.journal_sha256 == journal_sha256
+    )
+
+
 def _positive_block_count(value: str) -> int:
     try:
         blocks = int(value)
@@ -6154,6 +6167,16 @@ def _run_reward_v4_updates(
                             raise UpdateCommitError(
                                 "Reward V4 candidate checkpoint is invalid"
                             )
+                        candidate_was_existing = (
+                            _reward_v4_candidate_matches_current_journal(
+                                candidate,
+                                source_commit=source_commit,
+                                journal_sha256=committed_rollout.journal_sha256,
+                            )
+                        )
+                        if not candidate_was_existing:
+                            candidate = None
+                    if candidate_was_existing:
                         budget.end_gpu_interval(
                             monotonic_seconds=time.monotonic()
                         )

@@ -105,6 +105,23 @@ def test_reward_v4_evaluation_can_be_disabled_for_the_training_run(
     assert cli_module._reward_v4_evaluation_disabled() is True
 
 
+def test_reward_v4_candidate_reuse_requires_current_source_and_journal() -> None:
+    candidate = SimpleNamespace(
+        source_commit="a" * 40,
+        update_recovery_state=SimpleNamespace(journal_sha256="b" * 64),
+    )
+
+    assert cli_module._reward_v4_candidate_matches_current_journal(
+        candidate, source_commit="a" * 40, journal_sha256="b" * 64
+    ) is True
+    assert cli_module._reward_v4_candidate_matches_current_journal(
+        candidate, source_commit="c" * 40, journal_sha256="b" * 64
+    ) is False
+    assert cli_module._reward_v4_candidate_matches_current_journal(
+        candidate, source_commit="a" * 40, journal_sha256="c" * 64
+    ) is False
+
+
 def test_reward_v4_evaluation_resolves_only_active_r2_platforms() -> None:
     curriculum = SimpleNamespace(
         platforms={
