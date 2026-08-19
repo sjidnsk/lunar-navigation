@@ -247,10 +247,19 @@ def test_ground_exhaustion_builds_formal_candidate_universe_from_positive_scan()
     assert universe.diagnostics.selected_policy_candidate_count > 0
 
 
-def test_ground_normal_builder_upgrades_zero_gain_frontier_before_terminal() -> None:
+def test_ground_normal_builder_does_not_scan_after_zero_gain_frontier(
+    monkeypatch,
+) -> None:
     world, mission = _world_and_mission()
     estimator = _ZeroGainEstimator()
     builder = candidate_builder.CandidateBuilderV2(estimator)
+    monkeypatch.setattr(
+        builder,
+        "scan_ground_exhaustion_candidates",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("normal frontier path must not start an exhaustion scan")
+        ),
+    )
     mask = np.ascontiguousarray(world.observed_mask.copy(), dtype=np.bool_)
     positions = np.ascontiguousarray(
         [
@@ -309,4 +318,8 @@ def test_ground_normal_builder_upgrades_zero_gain_frontier_before_terminal() -> 
     )
 
     assert universe.decision_snapshot is not None
-    assert universe.decision_snapshot.pipeline_kind == "GROUND_EXHAUSTION"
+    assert universe.decision_snapshot.pipeline_kind == "GROUND_FRONTIER"
+    assert universe.decision_snapshot.positive_gain_candidate_count == 0
+    assert _audit_candidate_boundary(
+        universe.decision_snapshot, "WHEELED"
+    ) is TerminalReason.ZERO_EXPECTED_GAIN

@@ -2206,24 +2206,12 @@ class CandidateBuilderV2:
                 or normal_snapshot.positive_gain_candidate_count > 0
             ):
                 return normal_universe
-            return self.build_ground_exhaustion_universe(
-                world,
-                mission,
-                pose_map,
-                projection,
-                physical_reachability=physical_reachability,
-                platform_type=platform_type,
-                platform_id=platform_id,
-                capability_content_sha256=capability_content_sha256,
-                mission_revision=mission_revision,
-                evidence_generation=evidence_generation,
-                physical_evidence_sha256=physical_evidence_sha256,
-                physical_reachability_algorithm_id=(
-                    physical_reachability_algorithm_id
-                ),
-                goal_tolerance_mm=goal_tolerance_mm,
-                ground_endpoint_feasibility=ground_endpoint_feasibility,
-            )
+            # The normal frontier pipeline is the complete online candidate
+            # authority for ground platforms.  A zero-gain normal result is a
+            # terminal boundary, not permission to enumerate the remaining
+            # task region with an exhaustion scan.
+            return normal_universe
+
     def _build_hopper_physical_universe(
         self,
         *,
