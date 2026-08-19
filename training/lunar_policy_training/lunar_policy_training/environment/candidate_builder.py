@@ -15,7 +15,6 @@ import numpy as np
 from lunar_model_contract import ObservationContractV4
 
 from .observation_builder import MissionRaster, ObservedWorld, PlatformProjection, Pose2
-from .ground_opportunity_index import ground_potential_gain_mask
 from .platform_reachability import (
     HopperSingleHopEnvelope,
     PhysicalReachabilityResult,
@@ -282,11 +281,44 @@ def _ground_potential_gain_mask(
     resolution_m: float,
 ) -> np.ndarray:
     """Losslessly coarse-filter ground poses before exact visibility."""
-    return ground_potential_gain_mask(
-        unknown_roi,
-        sensor_range_m=sensor_range_m,
-        resolution_m=resolution_m,
+    unknown = np.asarray(unknown_roi)
+    if (
+        unknown.dtype != np.dtype(np.bool_)
+        or unknown.ndim != 2
+        or min(unknown.shape) <= 0
+        or not unknown.flags.c_contiguous
+    ):
+        raise ValueError("unknown ROI mask is invalid")
+    if (
+        not math.isfinite(sensor_range_m)
+        or sensor_range_m <= 0.0
+        or not math.isfinite(resolution_m)
+        or resolution_m <= 0.0
+    ):
+        raise ValueError("ground gain prefilter geometry is invalid")
+    possible = np.zeros_like(unknown)
+    if not unknown.any():
+        return possible
+    rows, columns = unknown.shape
+    radius = math.ceil(sensor_range_m / resolution_m)
+    if radius >= max(rows - 1, columns - 1):
+        return np.ones_like(unknown)
+    padded = np.pad(unknown.astype(np.int32), ((1, 0), (1, 0)))
+    integral = padded.cumsum(axis=0, dtype=np.int64).cumsum(
+        axis=1, dtype=np.int64
     )
+    row_low = np.maximum(np.arange(rows) - radius, 0)
+    row_high = np.minimum(np.arange(rows) + radius + 1, rows)
+    column_low = np.maximum(np.arange(columns) - radius, 0)
+    column_high = np.minimum(np.arange(columns) + radius + 1, columns)
+    sums = (
+        integral[row_high[:, None], column_high[None, :]]
+        - integral[row_low[:, None], column_high[None, :]]
+        - integral[row_high[:, None], column_low[None, :]]
+        + integral[row_low[:, None], column_low[None, :]]
+    )
+    possible = np.ascontiguousarray(sums > 0, dtype=np.bool_)
+    return np.ascontiguousarray(possible, dtype=np.bool_)
 
 
 def _ground_residual_components(
