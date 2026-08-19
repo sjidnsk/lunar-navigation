@@ -3634,6 +3634,7 @@ def main(argv: list[str] | None = None) -> int:
                 sensor_performance_sha256=sensor_performance_sha256,
                 split="train",
                 task_cache_client=task_runtime.client,
+                task_key_source_commit=task_runtime.source_commit,
             )
             formal_batches = _formal_evaluation_batches_from_calibrated_root(
                 reward_v4_root,
@@ -3641,7 +3642,7 @@ def main(argv: list[str] | None = None) -> int:
                 repository_root=repository_root,
                 sensor_performance_sha256=sensor_performance_sha256,
                 task_cache_client=task_runtime.client,
-                task_key_source_commit=task_key_source_commit,
+                task_key_source_commit=task_runtime.source_commit,
             )
             _start_training_run(
                 config_path=Path(arguments.config),

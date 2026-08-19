@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import inspect
 import pathlib
 import os
 import signal
@@ -37,6 +39,38 @@ def test_preflight_only_source_delta_rejects_runtime_changes() -> None:
             "training/lunar_policy_training/lunar_policy_training/reward.py"
         }
     )
+
+
+def test_train_path_propagates_the_reused_task_cache_source() -> None:
+    """Fresh policy warm starts must retain the prefetch key namespace."""
+    tree = ast.parse(inspect.getsource(cli_module.main))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id
+        in {
+            "_formal_environment_from_calibrated_root",
+            "_formal_evaluation_batches_from_calibrated_root",
+        }
+    ]
+    names = {node.func.id for node in calls}
+    assert names == {
+        "_formal_environment_from_calibrated_root",
+        "_formal_evaluation_batches_from_calibrated_root",
+    }
+    for name in names:
+        assert any(
+            any(
+                keyword.arg == "task_key_source_commit"
+                and ast.unparse(keyword.value) == "task_runtime.source_commit"
+                for keyword in call.keywords
+            )
+            for call in calls
+            if call.func.id == name
+        )
+
 
 from lunar_policy_training.budget import TrainingBudget  # noqa: E402
 from lunar_policy_training.cli import (  # noqa: E402
