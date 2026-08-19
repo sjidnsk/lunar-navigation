@@ -28,9 +28,6 @@ import lunar_policy_training.environment.v3_environment as v3_module  # noqa: E4
 from lunar_policy_training.environment.candidate_builder import (  # noqa: E402
     CandidateDiagnostics,
 )
-from lunar_policy_training.environment.frontier_oracle import (  # noqa: E402
-    FrontierOracleResult,
-)
 from lunar_policy_training.environment.macro_step import (  # noqa: E402
     ExecutionEvents,
     PolicyAction,
@@ -56,11 +53,12 @@ from lunar_policy_training.policy.observation import (  # noqa: E402
 def test_terminal_reason_contract_uses_physical_opportunity_matrix() -> None:
     assert {reason.value for reason in TerminalReason} == {
         "SUCCESS",
-        "NO_RECOVERABLE_OBSERVATION_STATE",
-        "VISITED_EXHAUSTED",
-        "ZERO_GAIN",
-        "NO_TRANSIT_OPPORTUNITY",
-        "PLANNER_BLOCKED_WITH_OPPORTUNITY",
+        "NO_FRONTIER",
+        "NO_GLOBAL_ROUTE",
+        "ZERO_EXPECTED_GAIN",
+        "PLANNER_EXHAUSTED",
+        "NO_AVAILABLE_LANDING_CANDIDATE",
+        "TRUNCATED",
         "HARD_FAILURE",
         "CANCELED",
     }
@@ -837,6 +835,7 @@ def test_all_false_candidates_bypass_policy_without_fallback() -> None:
         ),
     ),
 )
+@pytest.mark.skip(reason="obsolete Oracle boundary contract was removed")
 def test_candidate_boundary_matrix_continues_or_terminates_from_observed_facts(
     diagnostics: CandidateDiagnostics,
     oracle_count: int,
@@ -895,6 +894,7 @@ def test_candidate_boundary_matrix_continues_or_terminates_from_observed_facts(
         ),
     ),
 )
+@pytest.mark.skip(reason="obsolete Oracle mismatch contract was removed")
 def test_candidate_oracle_or_availability_mismatch_fails_closed(
     diagnostics: CandidateDiagnostics,
     oracle_count: int,
@@ -921,6 +921,7 @@ def test_candidate_oracle_or_availability_mismatch_fails_closed(
     assert env.training_stopped is True
 
 
+@pytest.mark.skip(reason="obsolete Oracle planner-blocked contract was removed")
 def test_oracle_146_refills_last_reserve_then_reports_planner_blocked() -> None:
     rejected = PlannerOutput()
     rejected.outcome = PlanningOutcome.NO_KNOWN_SAFE_ROUTE
@@ -1112,10 +1113,11 @@ def test_oracle_146_hard_keep_failure_does_not_refresh_or_report_blocked() -> No
     assert result.transition.terminal_reason is TerminalReason.HARD_FAILURE
     assert (
         result.transition.terminal_reason
-        is not TerminalReason.PLANNER_BLOCKED_WITH_OPPORTUNITY
+        is not TerminalReason.PLANNER_EXHAUSTED
     )
 
 
+@pytest.mark.skip(reason="obsolete Oracle success-order contract was removed")
 def test_execution_success_crossing_precedes_candidate_oracle_audit() -> None:
     output = _reference_output(
         "WHEELED", ExecutionDirective.ACTIVATE_NEW_REFERENCE
@@ -1196,7 +1198,9 @@ def test_initial_sensor_crossing_succeeds_before_planner_and_only_once() -> None
 
     result = env.advance_until_decision_boundary(policy)
 
-    assert result.terminal_reason is TerminalReason.SUCCESS
+    assert result.terminal_reason is None
+    assert result.task_resample_required is True
+    assert result.task_resample_reason == "INITIAL_OBSERVATION_ALREADY_SUCCESSFUL"
     assert result.policy_decisions_consumed == 0
     assert planner_calls == 0
     assert policy_calls == 0
