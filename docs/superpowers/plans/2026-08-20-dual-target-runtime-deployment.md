@@ -4,7 +4,7 @@
 
 **Goal:** 从当前唯一有效算法基线构建两份可原生编译的源码运行时包，并提供安全、短命令的 `luna` 操作入口。
 
-**Architecture:** 开发仓新增一个纯 Python 的 `deployment/luna_runtime` 管理层，负责 profile、配置、可复现 bundle、构建目录和受管 planner 进程；它不把产物写回源码树。`lunar_planner_ros` 保持唯一规划服务，但将固定 Topic/Action 名称参数化并由 `luna` 生成的 ROS 参数文件驱动。模型包在首版仅做不可变 artifact 的校验、存储和原子指针切换；因为当前 ROS 服务没有 V4 候选/观测到模型的调用链，非 `fallback` 策略模式必须 fail-closed，而不能假装模型已参与规划。
+**Architecture:** 开发仓新增一个纯 Python 的 `deployment/luna_runtime` 管理层，负责 profile、环境依赖锁、配置、可复现 bundle、源码树外构建目录和受管 planner 进程；它不把产物写回源码树。`lunar_planner_ros` 保持唯一规划服务，但将固定 Topic/Action 名称参数化并由 `luna` 生成的 ROS 参数文件驱动。模型包在首版仅做不可变 artifact 的校验、存储和原子指针切换；因为当前 ROS 服务没有 V4 候选/观测到模型的调用链，非 `fallback` 策略模式必须 fail-closed，而不能假装模型已参与规划。
 
 **Tech Stack:** Python 3.10 标准库与 PyYAML、pytest、ROS 2 Humble、C++20、ament/colcon、ONNX Runtime（amd64 模型包加载冒烟）、TensorRT `trtexec`（Orin 本机 engine 冒烟）。
 
@@ -21,6 +21,9 @@
 - 全局地图处理和路径跟踪只建立扩展注册边界；首版不得猜测执行器低级控制 Topic，也不得修改 `PlanMotion`、`MotionReference` 或外部 v5 消息。
 - `lunar_nav2_adapter` 是 WHEELED 可选包，默认不构建；`lunar_planner_training_bridge` 与 `training/` 永远不属于运行时包。
 - 测试、设计文档和运行 artifact 可以存在开发仓，但 bundle 根目录仅交付 `README.md` 与 `COMMANDS.md` 两份操作者文档。
+- 每个 target profile 必须携带一个 SHA-256 可核验的环境依赖锁。`luna prepare --dry-run` 不写文件、不调用 sudo；只有显式 `luna prepare --apply --yes` 才能安装锁定的 Ubuntu/ROS 包。
+- `prepare --apply` 只能处理环境锁中的 apt 包和当前 bundle package XML 已冻结的 rosdep 解析结果；绝不自动初始化 rosdep、添加 apt 源、安装/升级 NVIDIA 驱动、CUDA、TensorRT 或刷写 Jetson。
+- `policy.mode: fallback` 不依赖 ONNX Runtime 或 `trtexec`。模型后端只在显式模型安装时探测；`doctor --live` 只读查询已运行 ROS graph，外部输入缺席应报告 `WAITING_FOR_EXTERNAL_INPUT`，不能被混同为构建失败。
 
 ## File Structure
 
@@ -37,11 +40,14 @@ deployment/
   profiles/
     ubuntu22-humble-amd64.yaml
     jetson-orin-r36.yaml
+    ubuntu22-humble-amd64.environment.yaml  # amd64 依赖声明锁
+    jetson-orin-r36.environment.yaml        # Orin 依赖声明锁
   luna_runtime/
     __init__.py
     cli.py                               # luna 子命令解析与稳定退出码
     config.py                            # profile/config/schema/参数渲染
     host.py                              # 可注入的目标机身份检测
+    environment.py                       # 环境锁解析、dry-run/apply 计划与 manifest
     state.py                             # XDG/LUNA_HOME 目录、JSON 状态和原子写入
     commands.py                          # init/doctor/config/extension 编排
     build.py                             # package-select colcon 计划与执行
@@ -67,6 +73,7 @@ ros2_ws/src/lunar_planner_ros/
   package.xml
 tests/deployment/
   test_config.py
+  test_environment.py
   test_cli.py
   test_build.py
   test_process.py
@@ -79,22 +86,27 @@ tests/deployment/
 
 ---
 
-### Task 1: 冻结 profile、运行时配置与 bundle 白名单
+### Task 1: 冻结 profile、目标机环境锁、运行时配置与 bundle 白名单
 
 **Files:**
 - Create: `deployment/__init__.py`
 - Create: `deployment/luna_runtime/__init__.py`
 - Create: `deployment/luna_runtime/config.py`
 - Create: `deployment/luna_runtime/host.py`
+- Create: `deployment/luna_runtime/environment.py`
 - Create: `deployment/config/runtime.schema.json`
 - Create: `deployment/config/runtime.default.yaml`
 - Create: `deployment/profiles/ubuntu22-humble-amd64.yaml`
 - Create: `deployment/profiles/jetson-orin-r36.yaml`
+- Create: `deployment/profiles/ubuntu22-humble-amd64.environment.yaml`
+- Create: `deployment/profiles/jetson-orin-r36.environment.yaml`
 - Create: `deployment/runtime_source_allowlist.yaml`
 - Create: `tests/deployment/test_config.py`
+- Create: `tests/deployment/test_environment.py`
 
 **Interfaces:**
-- Produces `TargetProfile`, `HostFacts`, `RuntimeConfig`, `load_profile(profile_id)`, `load_runtime_config(path)`, `validate_host(profile, facts)`, `render_planner_params(config, output_path)` and `load_allowlist(path)`.
+- Produces `TargetProfile`, `HostFacts`, `EnvironmentLock`, `EnvironmentLockError`, `RuntimeConfig`, `load_profile(profile_id)`, `load_environment_lock(profile_id)`, `verify_environment_lock(repo_root, profile, resolver)`, `load_runtime_config(path)`, `validate_host(profile, facts)`, `render_planner_params(config, output_path)` and `load_allowlist(path)`.
+- `EnvironmentLock` binds exactly one profile to a sorted complete apt-package set, an optional `nav2_adapter` set, the runtime source roots used for rosdep checking, the expected L4T/JetPack identity where applicable, and model-backend requirements that are intentionally empty for fallback.
 - Consumes the existing `lunar-external-interfaces/v5` names in `ros2_ws/src/lunar_navigation_config/config/external_interfaces.yaml`; it does not redefine message fields.
 - `RuntimeConfig.interfaces` contains exactly `map_global`, `map_local`, `odometry`, `localization_status`, `tf`, `exploration_task`, `motion_feedback`, `plan_motion`, `diagnostics`, `certified_route_markers`, and `provisional_route_markers`.
 
@@ -107,7 +119,7 @@ from deployment.luna_runtime.host import HostFacts
 
 def test_orin_profile_rejects_amd64_host(tmp_path):
     profile = load_profile("jetson-orin-r36")
-    facts = HostFacts(os_id="ubuntu", os_version="22.04", architecture="x86_64", ros_distro="humble", l4t="R36.0.0")
+    facts = HostFacts(os_id="ubuntu", os_version="22.04", architecture="x86_64", ros_distro="humble", l4t="R36.0.0", jetpack="6.0")
     assert validate_host(profile, facts) == ("ARCHITECTURE_MISMATCH",)
 
 
@@ -134,13 +146,40 @@ runtime: {log_level: INFO}
 """, encoding="utf-8")
     with pytest.raises(ConfigError, match="interfaces.map_global"):
         load_runtime_config(config)
+
+
+# tests/deployment/test_environment.py
+from deployment.luna_runtime.environment import load_environment_lock
+
+
+def test_orin_environment_lock_keeps_tensorrt_out_of_fallback_requirements():
+    lock = load_environment_lock("jetson-orin-r36")
+    assert lock.profile_id == "jetson-orin-r36"
+    assert lock.l4t_prefix == "R36"
+    assert lock.jetpack_major == 6
+    assert "trtexec" not in lock.fallback_required_executables
+    assert lock.model_required_executables == ("trtexec",)
+
+
+def test_environment_lock_exposes_nav2_as_an_optional_group():
+    lock = load_environment_lock("ubuntu22-humble-amd64")
+    assert "ros-humble-nav2-core" not in lock.required_apt_packages
+    assert lock.optional_apt_groups["nav2_adapter"] == (
+        "ros-humble-nav2-core", "ros-humble-nav2-costmap-2d", "ros-humble-pluginlib"
+    )
+
+
+def test_environment_lock_rejects_a_resolved_dependency_missing_from_the_lock():
+    resolver = FakeRosdepResolver({"rclcpp": "ros-humble-rclcpp", "new_key": "ros-humble-new-key"})
+    with pytest.raises(EnvironmentLockError, match="DEPENDENCY_LOCK_DRIFT"):
+        verify_environment_lock(repo_root, load_profile("ubuntu22-humble-amd64"), resolver)
 ```
 
 - [ ] **Step 2: Verify RED**
 
-Run: `python3 -m pytest -q tests/deployment/test_config.py`
+Run: `python3 -m pytest -q tests/deployment/test_config.py tests/deployment/test_environment.py`
 
-Expected: FAIL because `deployment.luna_runtime` and its config/profile interfaces do not exist.
+Expected: FAIL because `deployment.luna_runtime` and its config/profile/environment-lock interfaces do not exist.
 
 - [ ] **Step 3: Implement immutable profile and config parsing**
 
@@ -152,6 +191,7 @@ class HostFacts:
     architecture: str
     ros_distro: str
     l4t: str | None = None
+    jetpack: str | None = None
 
 
 @dataclass(frozen=True)
@@ -162,7 +202,29 @@ class TargetProfile:
     architecture: str
     ros_distro: str
     l4t_prefix: str | None
+    jetpack_major: int | None
     policy_probe: Literal["onnxruntime", "trtexec"]
+
+
+@dataclass(frozen=True)
+class EnvironmentLock:
+    sha256: str
+    profile_id: str
+    os_id: str
+    os_version: str
+    architecture: str
+    ros_distro: str
+    required_apt_packages: tuple[str, ...]
+    optional_apt_groups: Mapping[str, tuple[str, ...]]
+    rosdep_source_roots: tuple[str, ...]
+    l4t_prefix: str | None
+    jetpack_major: int | None
+    fallback_required_executables: tuple[str, ...]
+    model_required_executables: tuple[str, ...]
+
+
+class EnvironmentLockError(ValueError):
+    pass
 
 
 def render_planner_params(config: RuntimeConfig, output_path: Path) -> None:
@@ -170,13 +232,54 @@ def render_planner_params(config: RuntimeConfig, output_path: Path) -> None:
     atomic_write_yaml(output_path, payload)
 ```
 
+Both environment-lock YAML files use this concrete shape; the only target-specific fields are architecture, the Orin identity and model backend executable:
+
+```yaml
+schema_version: luna-environment-lock/v1
+profile_id: ubuntu22-humble-amd64
+host: {os_id: ubuntu, os_version: "22.04", architecture: x86_64, ros_distro: humble}
+required_apt_packages:
+  - build-essential
+  - cmake
+  - git
+  - python3
+  - python3-pip
+  - python3-venv
+  - python3-yaml
+  - python3-numpy
+  - python3-colcon-common-extensions
+  - python3-rosdep
+  - libyaml-cpp-dev
+  - nlohmann-json3-dev
+  - ros-humble-ros-base
+  - ros-humble-grid-map-msgs
+  - ros-humble-urdf
+optional_apt_groups:
+  nav2_adapter: [ros-humble-nav2-core, ros-humble-nav2-costmap-2d, ros-humble-pluginlib]
+rosdep_source_roots: [ros2_ws/src, model_contract]
+fallback_required_executables: []
+model_required_executables: []
+```
+
+The displayed `required_apt_packages` are the immutable bootstrap prefix. The committed lock appends the complete sorted non-source Humble resolver closure for the exact active package roots; it must not rely on a target-time generic `rosdep install`. `verify_environment_lock(repo_root, profile, resolver)` resolves the selected bundle roots with `--ignore-src`, normalizes the resulting apt package names, and compares that exact set with the checked-in lock during bundle creation. It never rewrites the lock; a missing or extra resolved package rejects the bundle as `DEPENDENCY_LOCK_DRIFT`. The Orin file changes `profile_id`, `architecture: aarch64`, adds `l4t_prefix: R36` and `jetpack_major: 6`, and sets `model_required_executables: [trtexec]`.
+
+`host.py` obtains OS identity from `/etc/os-release`, architecture from `uname -m`, ROS identity from `/opt/ros/humble` and the active setup environment, and on Orin only reads `/etc/nv_tegra_release` plus `dpkg-query -W nvidia-jetpack` to populate `l4t`/`jetpack`. These probes never install, update, reset or otherwise change NVIDIA software. `validate_host` compares the parsed major values against the profile and returns stable ordered codes such as `OS_VERSION_MISMATCH`, `ARCHITECTURE_MISMATCH`, `ROS_DISTRO_MISMATCH`, `L4T_MISMATCH` and `JETPACK_MISMATCH`.
+
 Use `yaml.safe_load`; require all six top-level blocks from the spec; require absolute topic/action names; reject duplicate interface names, retired global/hopper truncation keys, false safety switches, profile mismatch, unknown keys and `policy.mode` values other than `fallback`, `onnx`, `tensorrt`. The default template contains current v5 topics, required positive snapshot durations, capability file paths as explicit empty strings, `planner.enable_nav2_adapter: false`, both extensions disabled, and `policy.mode: fallback`. `onnx` and `tensorrt` are syntactically valid stored-model modes; Task 5 is the only place that refuses them at process start until a ROS policy adapter exists.
 
 The allowlist uses explicit roots, not broad repository matching:
 
 ```yaml
 schema_version: lunar-runtime-allowlist/v1
-runtime_files: [scripts/luna, deployment]
+runtime_files:
+  - scripts/luna
+  - deployment/luna_runtime
+  - deployment/config
+  - deployment/runtime_source_allowlist.yaml
+bundle_templates:
+  - deployment/docs/README.runtime.md
+  - deployment/docs/COMMANDS.runtime.md
+profile_directory: deployment/profiles
 runtime_roots:
   - model_contract
   - ros2_ws/src/lunar_navigation_msgs
@@ -192,18 +295,18 @@ excluded_path_components: [test, tests, docs, build, install, log, cache, __pyca
 
 - [ ] **Step 4: Verify GREEN**
 
-Run: `python3 -m pytest -q tests/deployment/test_config.py`
+Run: `python3 -m pytest -q tests/deployment/test_config.py tests/deployment/test_environment.py`
 
-Expected: PASS; cover amd64/Orin identity checks, missing/duplicate topic rejection, nonpositive timing rejection, false safety-toggle rejection, valid fallback config, planner ROS YAML rendering and exact allowlist roots.
+Expected: PASS; cover amd64/Orin identity checks, environment-lock/profile binding, fallback-without-inference-backend, optional Nav2 isolation, missing/duplicate topic rejection, nonpositive timing rejection, false safety-toggle rejection, valid fallback config, planner ROS YAML rendering and exact allowlist roots.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add deployment tests/deployment/test_config.py
-git commit -m "feat(deploy): define luna runtime profiles and config"
+git add deployment tests/deployment/test_config.py tests/deployment/test_environment.py
+git commit -m "feat(deploy): define luna profiles environment locks and config"
 ```
 
-### Task 2: 实现 `luna init`、`doctor` 与配置检查的安全状态层
+### Task 2: 实现 `luna init`、`prepare`、`doctor` 与配置检查的安全状态层
 
 **Files:**
 - Create: `deployment/luna_runtime/state.py`
@@ -213,9 +316,9 @@ git commit -m "feat(deploy): define luna runtime profiles and config"
 - Create: `tests/deployment/test_cli.py`
 
 **Interfaces:**
-- Consumes `RuntimeConfig`, `TargetProfile`, `HostFacts` and the default config from Task 1.
-- Produces `RuntimePaths`, `RuntimeState`, `atomic_write_json(path, value)`, `init_runtime(...)`, `doctor_runtime(...)`, `check_runtime_config(...)`, and CLI exit codes `0` (success), `2` (operator/config error), `3` (host/dependency mismatch), `4` (safe runtime refusal).
-- The first positional CLI token is one of `init`, `doctor`, `config`, `build`, `start`, `stop`, `status`, `logs`, `model`, `extension`, or `bundle`.
+- Consumes `RuntimeConfig`, `TargetProfile`, `EnvironmentLock`, `HostFacts` and the default config from Task 1.
+- Produces `RuntimePaths`, `RuntimeState`, `PreparePlan`, `PrepareResult`, `atomic_write_json(path, value)`, `init_runtime(...)`, `resolve_rosdep_lock(...)`, `verify_rosdep_installation(...)`, `write_environment_manifest(...)`, `prepare_environment(...)`, `doctor_runtime(...)`, `check_runtime_config(...)`, and CLI exit codes `0` (success), `2` (operator/config error), `3` (host/dependency mismatch), `4` (safe runtime refusal).
+- The first positional CLI token is one of `init`, `prepare`, `doctor`, `config`, `build`, `start`, `stop`, `status`, `logs`, `model`, `extension`, or `bundle`.
 
 - [ ] **Step 1: Write the failing command/state tests**
 
@@ -233,6 +336,36 @@ def test_doctor_reports_host_mismatch_without_running_build(tmp_path):
     result = run_cli(["doctor", "--config", str(orin_config)], facts=AMD64_FACTS)
     assert result.exit_code == 3
     assert result.json["reasons"] == ["ARCHITECTURE_MISMATCH"]
+
+
+def test_prepare_dry_run_is_read_only_and_never_invokes_sudo(tmp_path):
+    runner = FakeRunner(installed_packages={"build-essential"})
+    before = snapshot_tree(tmp_path)
+    result = run_cli(["prepare", "--dry-run", "--config", str(amd64_config)], runner=runner)
+    assert result.exit_code == 3
+    assert result.json["missing_apt_packages"]
+    assert runner.privileged_commands == []
+    assert runner.writes == []
+    assert snapshot_tree(tmp_path) == before
+
+
+def test_prepare_apply_installs_only_locked_packages_then_records_manifest(tmp_path):
+    runner = FakeRunner.ready_for_apply(AMD64_LOCK)
+    result = run_cli(["prepare", "--apply", "--yes", "--config", str(amd64_config)], runner=runner)
+    assert result.exit_code == 0
+    assert ("sudo", "apt-get", "update") in runner.commands
+    assert all(package in AMD64_LOCK.required_apt_packages for package in runner.apt_install_packages)
+    manifest = read_json(runtime_paths(tmp_path).data / "environment-manifest.json")
+    assert manifest["environment_lock_sha256"] == AMD64_LOCK.sha256
+    assert {item["name"] for item in manifest["apt_packages"]} >= set(AMD64_LOCK.required_apt_packages)
+
+
+def test_orin_prepare_never_attempts_to_install_nvidia_cuda_or_tensorrt(tmp_path):
+    runner = FakeRunner.ready_for_apply(ORIN_LOCK)
+    result = run_cli(["prepare", "--apply", "--yes", "--config", str(orin_config)], runner=runner)
+    assert result.exit_code == 0
+    invoked = " ".join(" ".join(command) for command in runner.privileged_commands).lower()
+    assert all(token not in invoked for token in ("nvidia", "cuda", "tensorrt", "flash"))
 ```
 
 - [ ] **Step 2: Verify RED**
@@ -262,7 +395,55 @@ def atomic_write_json(path: Path, value: Mapping[str, object]) -> None:
     os.replace(temporary, path)
 ```
 
-`init` creates a fallback-only config and `state.json`, then optionally creates `~/.local/bin/luna` only when `--install-command` is given and `shutil.which("luna")` is empty or resolves to the same package-local executable. It never overwrites a different command. `doctor` emits a stable JSON object with `profile`, `host`, `config`, `dependencies`, `reasons` and no build side effect. `config check` parses and validates only; it does not source ROS, run a gate or launch a process. The executable `scripts/luna` contains only:
+```python
+@dataclass(frozen=True)
+class PreparePlan:
+    profile_id: str
+    required_apt_packages: tuple[str, ...]
+    missing_apt_packages: tuple[str, ...]
+    missing_executables: tuple[str, ...]
+    optional_groups: Mapping[str, tuple[str, ...]]
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PrepareResult:
+    plan: PreparePlan
+    applied: bool
+
+
+class RuntimeRefusal(RuntimeError):
+    pass
+
+
+def prepare_environment(
+    config: RuntimeConfig,
+    paths: RuntimePaths,
+    facts: HostFacts,
+    *,
+    apply: bool,
+    confirmed: bool,
+    runner: CommandRunner,
+) -> PrepareResult:
+    lock = load_environment_lock(config.profile)
+    plan = make_prepare_plan(lock, config, facts, runner)
+    if not apply:
+        return PrepareResult(plan=plan, applied=False)
+    if plan.reasons or not confirmed:
+        raise RuntimeRefusal("PREPARE_REFUSED")
+    if plan.missing_apt_packages:
+        runner.run(("sudo", "apt-get", "update"), check=True)
+        runner.run(("sudo", "apt-get", "install", "--no-install-recommends", *plan.missing_apt_packages), check=True)
+    verify_rosdep_installation(lock, config.source_root, runner)
+    write_environment_manifest(paths.data / "environment-manifest.json", lock, facts, runner)
+    return PrepareResult(plan=plan, applied=True)
+```
+
+`make_prepare_plan` reads `dpkg-query`, `/opt/ros/humble`, the environment-lock SHA-256 and executable paths through the injected runner. It calls `resolve_rosdep_lock`, which uses read-only `rosdep resolve` for every external dependency key and compares the normalized apt results with `EnvironmentLock.required_apt_packages`; both dry-run and apply can therefore report `ROSDEP_NOT_INITIALIZED` or `DEPENDENCY_LOCK_DRIFT` before any sudo action. It checks profile/host identity before emitting install actions and includes the Nav2 optional group only when `planner.enable_nav2_adapter` is true. After apt succeeds, `verify_rosdep_installation` invokes read-only `rosdep check --from-paths ros2_ws/src model_contract --ignore-src --rosdistro humble`; neither function may call `rosdep init`, `rosdep update`, or generic `rosdep install`. The command parser maps `luna prepare --dry-run` to `apply=False`; `luna prepare --apply` requires `--yes` and is the sole code path permitted to invoke sudo. `doctor` uses the same immutable plan but never invokes apt. `doctor --live` runs only `ros2 node list`, `ros2 action list`, and topic/action type inspection after a managed planner is active; an absent upstream publisher is reported as `WAITING_FOR_EXTERNAL_INPUT`, not as a build or configuration failure.
+
+`write_environment_manifest` writes only after a successful apply, using `atomic_write_json`, with this minimum payload: `{schema_version, source_commit, profile_id, environment_lock_sha256, host, ros_prefix, apt_packages: [{name, version}], generated_at_utc}`. It reads package versions from `dpkg-query -W`; it never embeds sudo output, environment variables, credentials, model paths, training paths or device-private data.
+
+`init` creates a fallback-only config and `state.json`, then optionally creates `~/.local/bin/luna` only when `--install-command` is given and `shutil.which("luna")` is empty or resolves to the same package-local executable. It never overwrites a different command. `prepare` emits a stable JSON object with `profile`, `environment_lock_sha256`, `missing_apt_packages`, `optional_groups`, `reasons` and `applied`; only a successful apply writes the separate local environment manifest. Static `doctor` emits `profile`, `host`, `config`, `dependencies`, `reasons` and no build side effect; live doctor adds ROS interface status without subscribing or publishing. `config check` parses and validates only; it does not source ROS, run a gate or launch a process. The executable `scripts/luna` contains only:
 
 ```python
 #!/usr/bin/env python3
@@ -283,13 +464,13 @@ and has executable mode set with `chmod 755 scripts/luna`.
 
 Run: `python3 -m pytest -q tests/deployment/test_cli.py tests/deployment/test_config.py`
 
-Expected: PASS; test `LUNA_HOME` override, malformed state recovery, collision refusal, JSON diagnostics and no source-tree writes.
+Expected: PASS; test `LUNA_HOME` override, malformed state recovery, collision refusal, dry-run no-write/no-sudo behavior, apply-only lock packages, Orin NVIDIA/CUDA/TensorRT prohibition, stable `ROSDEP_NOT_INITIALIZED`/`DEPENDENCY_LOCK_DRIFT` diagnostics, live-doctor `WAITING_FOR_EXTERNAL_INPUT`, JSON diagnostics and no source-tree writes.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add deployment scripts/luna tests/deployment/test_cli.py
-git commit -m "feat(deploy): add luna initialization and diagnostics"
+git commit -m "feat(deploy): prepare target environment and diagnostics"
 ```
 
 ### Task 3: 用白名单构建两个确定性源码运行时包
@@ -304,7 +485,7 @@ git commit -m "feat(deploy): add luna initialization and diagnostics"
 
 **Interfaces:**
 - Consumes Task 1 allowlist/profile and a clean Git `HEAD` file tree.
-- Produces `BundleRequest`, `BundleResult`, `collect_bundle_files(repo_root, revision, target)`, `build_bundle(request)`, `<bundle>/release-manifest.json`, bundle-root `luna` file and `luna_runtime/` directory.
+- Produces `BundleRequest`, `BundleResult`, `collect_bundle_files(repo_root, revision, target)`, `build_bundle(request)`, `<bundle>/release-manifest.json`, bundle-root `luna` file, `luna_runtime/`, `config/`, `profiles/` and selected source-package directories, plus root `runtime_source_allowlist.yaml`.
 - `luna bundle --target {ubuntu22-humble-amd64,jetson-orin-r36} --output <absolute-dir>` creates exactly one `.tar.gz` without changing the Git worktree.
 
 - [ ] **Step 1: Write the failing bundle and documentation tests**
@@ -315,6 +496,10 @@ def test_bundle_has_only_allowlisted_current_runtime_source(tmp_path):
     names = archive_names(result.archive)
     assert "lunar-runtime-ubuntu22-humble-amd64-src/luna" in names
     assert "lunar-runtime-ubuntu22-humble-amd64-src/luna_runtime/cli.py" in names
+    assert "lunar-runtime-ubuntu22-humble-amd64-src/config/runtime.schema.json" in names
+    assert "lunar-runtime-ubuntu22-humble-amd64-src/profiles/ubuntu22-humble-amd64.environment.yaml" in names
+    assert "lunar-runtime-ubuntu22-humble-amd64-src/runtime_source_allowlist.yaml" in names
+    assert not any("profiles/jetson-orin-r36" in name for name in names)
     assert all("/training/" not in name and "/test/" not in name and "/tests/" not in name for name in names)
     assert "lunar-runtime-ubuntu22-humble-amd64-src/ros2_ws/src/lunar_planner_training_bridge/" not in "\n".join(names)
 
@@ -348,15 +533,15 @@ def build_bundle(request: BundleRequest) -> BundleResult:
     return write_deterministic_tar_gz(files + bundle_generated_files(manifest), request.output_dir)
 ```
 
-Read source only with `git ls-tree`/`git show <revision>:<path>` so untracked files, local build trees and stale checkout paths cannot enter. Reject dirty changes touching an allowlisted path, but allow unrelated user edits to remain untouched. Filter every path component listed in the allowlist, exclude all test directories, and add only the two rendered operator docs at bundle root. Copy `scripts/luna` as root `luna`, and copy `deployment/luna_runtime` as root `luna_runtime`; this preserves the invariant that `./luna` is executable without colliding with a directory of the same name.
+Read source only with `git ls-tree`/`git show <revision>:<path>` so untracked files, local build trees and stale checkout paths cannot enter. Reject dirty changes touching an allowlisted path, but allow unrelated user edits to remain untouched. Filter every path component listed in the allowlist, exclude all test directories, and add only the two rendered operator docs at bundle root. Copy `scripts/luna` as root `luna`, `deployment/luna_runtime` as root `luna_runtime`, `deployment/config` as root `config`, and `deployment/runtime_source_allowlist.yaml` as root `runtime_source_allowlist.yaml`; this preserves the invariant that `./luna` is executable without colliding with a directory of the same name. Preserve `model_contract` and selected `ros2_ws/src` package roots at their declared root-relative paths.
 
-Use fixed tar metadata (`uid=0`, `gid=0`, empty owner names, `mtime=0`, sorted paths) and a SHA-256 over sorted `path + NUL + sha256(content)` entries. The manifest contains the exact Git commit, source-list hash, runtime schema version, profile identity, interface contract version, observation/action contract versions, optional extension list and model mode `fallback`.
+Copy `deployment/profiles/<target>.yaml` and `deployment/profiles/<target>.environment.yaml` as bundle-root `profiles/<target>.yaml` and `profiles/<target>.environment.yaml`; never copy the other target's profile. Use fixed tar metadata (`uid=0`, `gid=0`, empty owner names, `mtime=0`, sorted paths) and a SHA-256 over sorted `path + NUL + sha256(content)` entries. The manifest contains the exact Git commit, source-list hash, runtime schema version, profile identity, selected environment-lock SHA-256, interface contract version, observation/action contract versions, optional extension list and model mode `fallback`.
 
 - [ ] **Step 4: Verify GREEN**
 
 Run: `python3 -m pytest -q tests/deployment/test_bundle.py tests/deployment/test_runtime_docs.py`
 
-Expected: PASS; assert deterministic archive hash on two builds, correct two-profile manifest identity, no historical branch/test/training/bridge/artifact paths, executable root command, and documentation contains every public `luna` command plus v5 input/output summary.
+Expected: PASS; assert deterministic archive hash on two builds, correct two-profile manifest identity, exactly one selected profile/environment-lock pair, no historical branch/test/training/bridge/artifact paths, executable root command, and documentation contains every public `luna` command plus v5 input/output summary.
 
 - [ ] **Step 5: Commit**
 
@@ -624,9 +809,11 @@ git commit -m "feat(deploy): stage validated runtime model artifacts"
 ```python
 def test_rendered_commands_document_every_public_subcommand_and_safe_policy_boundary():
     commands = rendered_commands()
-    for token in ("init", "doctor", "config check", "build", "start", "stop", "status", "logs", "model install", "model activate", "model rollback", "extension", "bundle"):
+    for token in ("init", "prepare --dry-run", "prepare --apply", "doctor", "doctor --live", "config check", "build", "start", "stop", "status", "logs", "model install", "model activate", "model rollback", "extension", "bundle"):
         assert f"luna {token}" in commands
     assert "POLICY_RUNTIME_UNBOUND" in commands
+    assert "ROSDEP_NOT_INITIALIZED" in commands
+    assert "WAITING_FOR_EXTERNAL_INPUT" in commands
     assert "formal preflight" not in commands.lower()
 
 
@@ -644,9 +831,9 @@ Expected: FAIL until templates document the implemented public behavior and bund
 
 - [ ] **Step 3: Write operator instructions and run the target matrix**
 
-`README.runtime.md` must contain: project purpose; the fallback/model-staging distinction; a compact component diagram; both profile support matrices; all external v5 input/output names, owners and frame expectations; the five-minute `./luna init`, `./luna doctor`, `./luna build`, `./luna start` workflow; and non-disableable safety boundaries.
+`README.runtime.md` must contain: project purpose; the fallback/model-staging distinction; a compact component diagram; both profile support matrices; all external v5 input/output names, owners and frame expectations; the five-minute `./luna init`, `./luna prepare --dry-run`, `./luna prepare --apply --yes`, `./luna build`, `./luna start` workflow; and non-disableable safety boundaries. It must explicitly state that environment preparation never changes NVIDIA, CUDA, TensorRT or Jetson firmware, and that fallback needs no model backend.
 
-`COMMANDS.runtime.md` must contain one copyable command per operation, expected success/error JSON fields, a complete `runtime.yaml` example, model package layout, `POLICY_RUNTIME_UNBOUND` explanation, model rollback, extension state semantics and recovery commands. It must also state that target amd64 and Orin native builds are separate evidence, not cross-compilation claims.
+`COMMANDS.runtime.md` must contain one copyable command per operation, expected success/error JSON fields, a complete `runtime.yaml` example, model package layout, `POLICY_RUNTIME_UNBOUND` explanation, model rollback, extension state semantics and recovery commands. It must document `prepare --dry-run` as read-only, `prepare --apply --yes` as the only sudo-capable path, `ROSDEP_NOT_INITIALIZED`, `DEPENDENCY_LOCK_DRIFT`, and `doctor --live` / `WAITING_FOR_EXTERNAL_INPUT`. It must also state that target amd64 and Orin native builds are separate evidence, not cross-compilation claims.
 
 Run the following verification matrix after implementation:
 
@@ -660,7 +847,7 @@ LUNA_HOME="$(mktemp -d)" ./scripts/luna bundle --target ubuntu22-humble-amd64 --
 tar -tzf "$HOME/CodexDownloads/lunar_navigation/runtime-bundles/lunar-runtime-ubuntu22-humble-amd64-src.tar.gz"
 ```
 
-On the independent amd64 target, run `./luna init`, `doctor`, `config check`, `build`, then `start` with real external capability-file paths and confirm the planner becomes lifecycle `active`. On Jetson Orin R36, run the same sequence from its own source bundle and capture the native build/engine probe result. Label the latter as device validation only after it actually runs; do not infer it from amd64 tests.
+On the independent amd64 target, run `./luna init`, `prepare --dry-run`, `prepare --apply --yes`, `doctor`, `config check`, `build`, then `start` with real external capability-file paths and confirm the planner becomes lifecycle `active`. After upstream publishers are connected, run `doctor --live` and distinguish `WAITING_FOR_EXTERNAL_INPUT` from a build failure. On Jetson Orin R36, run the same sequence from its own source bundle, assert R36/JetPack 6 identity before applying the lock, and capture the native build/engine probe result only when a model is explicitly installed. Label the latter as device validation only after it actually runs; do not infer it from amd64 tests.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -679,20 +866,20 @@ git commit -m "docs(deploy): document luna runtime operation"
 
 ### Spec coverage
 
-- Two profile-specific native source bundles, their manifests and strict active-source allowlist are covered by Tasks 1 and 3.
-- `luna` initialization, configuration, host diagnosis, native build, lifecycle start/stop, status/logs, model operations, extension registration and bundle generation are covered by Tasks 2, 5 and 6.
+- Two profile-specific native source bundles, their manifests, environment locks and strict active-source allowlist are covered by Tasks 1 and 3.
+- `luna` initialization, target environment preparation, configuration, host diagnosis, native build, lifecycle start/stop, status/logs, model operations, extension registration and bundle generation are covered by Tasks 2, 5 and 6.
 - Existing v5 inputs/outputs become configurable without message drift in Task 4; the rendered parameter file is produced by Tasks 1 and 5.
 - Source-tree/output separation, no training bridge, no old algorithms and no bundle artifacts are enforced in Tasks 1, 3 and 5.
-- README/COMMANDS and independent amd64/Orin evidence are covered in Task 7.
+- README/COMMANDS, `prepare` safety documentation and independent amd64/Orin evidence are covered in Task 7.
 - The specification's intended future learned-policy behavior is deliberately not claimed as present: Tasks 5 and 6 enforce `POLICY_RUNTIME_UNBOUND` until an independently designed ROS candidate/Observation V4 adapter is approved. This preserves the stated fallback deployment behavior while avoiding an inactive model that appears to control planning.
 
 ### Placeholder scan
 
-The plan contains no unbounded file collection, implicit build output location, automatic checkpoint pickup, unverified architecture claim, or undefined safety fallback. Every created module, public interface, test command and runtime error code is named above.
+The plan contains no unbounded file collection, implicit build output location, generic unpinned dependency installation, automatic checkpoint pickup, unverified architecture claim, or undefined safety fallback. Every created module, public interface, test command and runtime error code is named above.
 
 ### Type consistency
 
-- Tasks 2, 3 and 5 all consume the same `RuntimeConfig`, `TargetProfile`, `RuntimePaths` and `RuntimeState` types from Tasks 1–2.
+- Tasks 2, 3 and 5 all consume the same `RuntimeConfig`, `TargetProfile`, `EnvironmentLock`, `RuntimePaths` and `RuntimeState` types from Tasks 1–2.
 - Task 5 generates the exact `interfaces.*` ROS parameters read by Task 4.
 - Task 6's `ModelManifest` validates `ObservationContractV4` and `ActionContractV2`, then stores only `ValidatedModelPackage`; it does not pass a raw checkpoint to Task 5.
 - Task 7 verifies the same public subcommands, model-state labels and bundle-root layout produced in Tasks 2–6.

@@ -61,8 +61,9 @@ README.md
 COMMANDS.md
 luna                          # 包内可直接执行的薄命令入口
 luna_runtime/                 # 命令实现与 profile
+runtime_source_allowlist.yaml # 包内重新打包时使用的当前源码白名单
+profiles/                     # 本 bundle 目标的 profile 与环境依赖锁
 config/                       # 默认运行时配置及 schema
-platform/                     # 已批准平台能力资料
 model_contract/               # 观测/动作契约与模型 manifest 校验
 ros2_ws/src/
   lunar_navigation_msgs/
@@ -75,6 +76,29 @@ ros2_ws/src/
 ```
 
 `lunar_planner_training_bridge`、`training/` 和训练专用 Python 依赖不进入部署包。训练桥继续属于训练机的高吞吐内部接口，不是设备 ROS 接口。
+
+### 3.4 目标机环境准备
+
+部署包不假定目标机已经装有开发机的依赖，也不复制开发机的 `/opt/ros`、Python site-packages、CUDA、TensorRT 或任何构建结果。amd64 bundle 携带 `profiles/ubuntu22-humble-amd64.environment.yaml`，Orin bundle 携带 `profiles/jetson-orin-r36.environment.yaml`；每个文件与其唯一 target profile 同名，是**依赖声明锁**，冻结以下内容：
+
+- Ubuntu 22.04、目标架构和 ROS 2 Humble；Orin 另冻结 `L4T R36` 与 JetPack 6 大版本；
+- 基础构建工具：`build-essential`、`cmake`、`git`、Python 3.10、`python3-venv`、PyYAML、NumPy、colcon、rosdep、`libyaml-cpp-dev` 与 `nlohmann-json3-dev`；
+- ROS Humble 基线：`ros-humble-ros-base`、`ros-humble-grid-map-msgs`、`ros-humble-urdf`，以及从本 bundle 当前 `package.xml` 解析出的其余 Humble rosdep 依赖；
+- 只有 `planner.enable_nav2_adapter: true` 才解析/安装的 Nav2 可选组；
+- 模型推理后端不是基础依赖：`policy.mode: fallback` 不需要 ONNX Runtime 或 `trtexec`。Orin 的 `trtexec` 只在显式安装 TensorRT 模型包时检查。
+
+环境准备只通过两个明确命令进行：
+
+```text
+luna prepare --dry-run
+luna prepare --apply --yes
+```
+
+`--dry-run` 只读取 host、`dpkg-query`、`rosdep`、ROS 安装和 bundle 中的锁文件，输出 JSON 的缺失项、将执行的固定 apt 包、可选组状态和拒绝原因；它不写状态、不调用 sudo、不启动 ROS，也不解析训练目录。`--apply` 先要求目标身份匹配，再由操作者显式确认后仅安装环境锁列出的 Ubuntu/ROS 包并解析本 bundle 的当前 package XML；构建与 `rosdep` 仍以普通用户执行。它绝不自动初始化 rosdep、修改第三方 apt 源、安装/升级 NVIDIA 驱动、CUDA、TensorRT 或刷写 Jetson。若 rosdep 尚未由管理员初始化，返回稳定原因 `ROSDEP_NOT_INITIALIZED`；若当前 package XML 的解析结果不再被环境锁完整覆盖，返回 `DEPENDENCY_LOCK_DRIFT`。二者都只给出该环境所缺的前置条件，而不是尝试绕过系统管理边界。
+
+成功的 `--apply` 在 `LUNA_HOME` 下写一份 `environment-manifest.json`，记录 profile、环境锁 SHA-256、已解析的包名/版本、ROS prefix、host 事实和时间；不记录凭据或训练路径。该 manifest 是本机部署证据，不进入 Git 或 bundle。失败不会修改已有 build、install、活动模型或运行进程。
+
+`luna doctor` 是静态检查：验证 profile、环境锁、配置、能力文件可读性和已安装依赖，不要求外部 ROS publisher 在线。`luna doctor --live` 只在运行时已启动后查询 ROS graph/action；缺少外部 publisher 时报告 `WAITING_FOR_EXTERNAL_INPUT`，但不将它伪装成构建失败。实际 `PlanMotion` 请求仍由规划器以输入新鲜度和安全检查 fail-closed。
 
 ### 3.2 本机构建与运行目录
 
@@ -197,7 +221,9 @@ ActionContractV2
 | --- | --- |
 | `luna init --profile ubuntu22-humble-amd64` | 创建 amd64 运行时配置并检查目标基本身份 |
 | `luna init --profile jetson-orin-r36` | 创建 Orin 配置并检查 R36/架构身份 |
-| `luna doctor` | 检查 ROS、依赖、能力文件、配置与外部接口可解析性 |
+| `luna prepare --dry-run` | 无副作用地列出目标机缺失依赖、可选组和环境拒绝原因 |
+| `luna prepare --apply --yes` | 经显式确认安装环境锁的基础/ROS依赖；不安装 NVIDIA、CUDA 或 TensorRT |
+| `luna doctor` / `luna doctor --live` | 前者检查静态环境、能力文件与配置；后者只读查询已运行 ROS 接口状态 |
 | `luna config check` | 只校验 `runtime.yaml`，不启动服务 |
 | `luna build` | 在 `LUNA_HOME` 中原生构建必要 ROS 包 |
 | `luna start` / `luna stop` | 启动或停止部署规划服务 |
@@ -209,7 +235,7 @@ ActionContractV2
 | `luna extension enable <name>` / `disable <name>` | 修改配置中的可选扩展开关；下次启动生效 |
 | `luna bundle --target <profile>` | 在开发机从干净源码树创建对应源码运行时包 |
 
-`luna doctor` 与 `luna config check` 是快速本地配置检查，不是训练资格或发布门。`luna start` 不自动运行训练 replay、formal preflight、覆盖率评估、AGX release gate 或 service 激活。
+`luna prepare`、`luna doctor` 与 `luna config check` 是部署准备和快速本地检查，不是训练资格或发布门。`luna start` 不自动运行训练 replay、formal preflight、覆盖率评估、AGX release gate 或 service 激活。
 
 ## 7. 唯一运行时配置
 
@@ -260,6 +286,7 @@ runtime:                    # LUNA_HOME、进程与日志设置
 ## 10. 失败处理与恢复
 
 - `luna build` 在独立目录构建；失败不会覆盖上一次可用安装。
+- `luna prepare --dry-run` 没有写入或 sudo 副作用；`--apply` 失败不会触碰已有 build、install、活动模型或运行进程。它只报告/安装锁内的基础和 ROS 依赖，绝不修改 NVIDIA、CUDA、TensorRT 或 Jetson 固件。
 - `luna model install`、`activate` 和 `rollback` 使用 manifest/hash 验证和原子指针切换；失败保持旧模型或 `fallback`。
 - 运行时输入失效、模型契约不匹配、路径不可行或安全认证失败时，输出明确的 `PlanMotion` 结果/诊断，不自动降级为未认证运动。
 - `luna stop` 仅停止该运行时的受管进程；`luna start` 可从已有构建和活动模型恢复，无需训练 cache。
@@ -268,6 +295,7 @@ runtime:                    # LUNA_HOME、进程与日志设置
 ## 11. 验收标准
 
 - 两份源码包在各自目标机身份上可通过 `luna init`、`luna build`、`luna config check` 和 `luna start` 启动规划 ROS 服务。
+- 两份包均包含 target 环境依赖锁；`luna prepare --dry-run` 在空白目标机不产生副作用，`luna prepare --apply` 只安装声明的基础/ROS依赖并写入可审计的本机环境 manifest。Orin 的 R36/JetPack 身份必须被验证，但任何 NVIDIA/CUDA/TensorRT/固件操作都必须留给设备管理员和显式模型安装流程。
 - amd64 包不依赖训练主机的 GPU 或构建物；Orin 包不接受非本机 TensorRT engine。
 - 无模型时 `fallback` 可以运行规划；模型包安装失败不改变正在使用的模型；策略适配器交付前，非 `fallback` 模式必须 fail-closed。
 - 外部输入/输出与 `lunar-external-interfaces/v5`、`PlanMotion`、ObservationContract 和 ActionContract 精确匹配。
