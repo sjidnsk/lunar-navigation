@@ -1,7 +1,98 @@
-# Luna commands
+# Luna operator commands
 
-Use `./luna init --profile ubuntu22-humble-amd64` (or `jetson-orin-r36`) first.
+Run all operations through `./luna`; no manual ROS sourcing, colcon command,
+or lifecycle request is required. Each command prints JSON. A nonzero exit
+code with a `reason` or `reasons` field is an actionable refusal.
 
-`luna prepare --dry-run` is read-only. `luna prepare --apply --yes` is the only command that can invoke sudo; it never changes NVIDIA, CUDA, TensorRT or Jetson firmware.
+## Runtime configuration and environment
 
-Before a ROS policy adapter is delivered, a non-fallback start is refused with `POLICY_RUNTIME_UNBOUND`.
+```bash
+./luna init --profile ubuntu22-humble-amd64
+./luna prepare --dry-run
+./luna prepare --apply --yes
+./luna doctor
+./luna doctor --live
+./luna config check
+./luna build
+```
+
+`luna prepare --dry-run` only reports locked dependencies; it never writes or
+invokes sudo. `luna prepare --apply --yes` is the only sudo-capable path.
+Typical errors are `ROSDEP_NOT_INITIALIZED` or `DEPENDENCY_LOCK_DRIFT`; correct
+the host/environment lock rather than bypassing it. `luna doctor --live` may
+return `WAITING_FOR_EXTERNAL_INPUT`: the build is usable, but required map,
+localization, TF, task, or feedback publishers are not connected yet.
+
+`runtime.yaml` is the one supported configuration surface:
+
+```yaml
+profile: ubuntu22-humble-amd64
+interfaces: {map_global: /environment/map_global, map_local: /environment/map_local, odometry: /localization/odometry, localization_status: /localization/status, tf: /tf, exploration_task: /mission/exploration_task, motion_feedback: /execution/motion_feedback, plan_motion: /plan_motion, diagnostics: /diagnostics, certified_route_markers: /planning/certified_route_markers, provisional_route_markers: /planning/provisional_route_markers}
+capabilities: {platform_file: /opt/luna/capabilities/platform.yaml, observation_file: /opt/luna/capabilities/observation.yaml}
+planner: {enable_nav2_adapter: false, snapshot_policy: {global_map_max_age: 1.0, local_map_max_age: 1.0, odometry_max_age: 1.0, localization_status_max_age: 1.0, tf_max_age: 1.0, max_pairwise_skew: 1.0}}
+policy: {mode: fallback, model_id: null}
+extensions: {map_pipeline: false, path_tracking: false}
+runtime: {log_level: INFO}
+```
+
+## Lifecycle and logs
+
+```bash
+./luna start
+./luna status
+./luna logs
+./luna stop
+```
+
+`status` reports the managed PID/lifecycle state. Fallback needs no model
+backend. `policy.mode: onnx` or `tensorrt` is refused with
+`POLICY_RUNTIME_UNBOUND` until an approved ROS policy adapter exists; a staged
+model has `model_binding: staged_not_connected`.
+
+## Model artifacts
+
+```bash
+./luna model install /absolute/path/model.tar.gz
+./luna model activate demo-v4
+./luna model status
+./luna model rollback
+```
+
+A model package is exactly:
+
+```text
+model-manifest.json
+policy.onnx
+normalization.npz
+```
+
+Install validates the manifest, v4 observation contract, v2 action contract,
+and SHA-256 hashes, then stages an immutable content-addressed copy under
+`$LUNA_HOME/models/<model-id>/<model-sha256>/`. Activation atomically writes
+`active-model.json`; rollback restores `previous-model.json`, or returns to
+fallback if no previous model exists. Failed validation leaves the active
+pointer unchanged.
+
+## Optional extensions
+
+```bash
+./luna extension
+./luna extension enable map_pipeline
+./luna extension disable map_pipeline
+```
+
+Each entry reports `{enabled, package, status}` where status is
+`not_installed`, `disabled`, or `enabled`. Enabling a package that is absent
+returns `EXTENSION_PACKAGE_NOT_INSTALLED`; it does not manufacture a publisher
+or controller.
+
+## Make a source bundle
+
+```bash
+./luna bundle --target ubuntu22-humble-amd64 --output /absolute/output-directory
+./luna bundle --target jetson-orin-r36 --output /absolute/output-directory
+```
+
+The bundle contains the current allowlisted source, one target profile, and
+only `README.md` plus `COMMANDS.md`. Do native builds separately on amd64 and
+Orin; a successful build or model probe on one is not evidence for the other.

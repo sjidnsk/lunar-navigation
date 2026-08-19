@@ -57,3 +57,12 @@ def test_luna_bundle_writes_one_archive_without_runtime_initialization(tmp_path:
     assert result.exit_code == 0
     assert Path(result.payload["archive"]).is_file()
     assert not (tmp_path / "home").exists()
+
+
+def test_bundle_root_contains_exactly_two_markdown_documents(tmp_path: Path) -> None:
+    result = build_bundle(BundleRequest(REPO_ROOT, "HEAD", "ubuntu22-humble-amd64", tmp_path))
+    markdown = [name for name in _names(result.archive) if name.endswith(".md")]
+    assert markdown == [
+        "lunar-runtime-ubuntu22-humble-amd64-src/COMMANDS.md",
+        "lunar-runtime-ubuntu22-humble-amd64-src/README.md",
+    ]
