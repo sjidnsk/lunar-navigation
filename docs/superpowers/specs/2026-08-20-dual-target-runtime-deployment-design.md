@@ -59,7 +59,8 @@
 ```text
 README.md
 COMMANDS.md
-luna/                         # 命令实现与 profile
+luna                          # 包内可直接执行的薄命令入口
+luna_runtime/                 # 命令实现与 profile
 config/                       # 默认运行时配置及 schema
 platform/                     # 已批准平台能力资料
 model_contract/               # 观测/动作契约与模型 manifest 校验
@@ -70,7 +71,7 @@ ros2_ws/src/
   lunar_planner_core/
   lunar_planner_ros/
   lunar_nav2_adapter/         # 可选，轮式 Nav2 集成
-  lunar_policy_runtime/       # 本设计新增的可选运行时策略包
+  lunar_policy_runtime/       # 模型包校验与未来推理适配接口
 ```
 
 `lunar_planner_training_bridge`、`training/` 和训练专用 Python 依赖不进入部署包。训练桥继续属于训练机的高吞吐内部接口，不是设备 ROS 接口。
@@ -115,6 +116,8 @@ policy:
 
 在 `fallback` 下，系统使用确定性候选排序/选择策略，仍经由同一候选生成、规划和安全认证链工作；不会试图加载 checkpoint，也不会等待训练结束才能启动规划服务。
 
+当前活动 ROS 运行时是外部 `PlanMotion` 目标的规划服务；它尚未拥有把 V4 观测、候选集合和模型动作接入 ROS 请求链的适配器。这份首版部署包因此实现模型包的校验、存储、状态查询和回退，但不伪造“模型已在驱动规划”的行为：在独立的策略到 ROS 适配器经设计和验证前，`luna start` 必须拒绝任何非 `fallback` 的 `policy.mode`，并报告稳定原因 `POLICY_RUNTIME_UNBOUND`。这不阻塞无模型的安全规划部署，也不让训练中的 checkpoint 进入设备。
+
 ### 4.2 模型包接口
 
 训练完成一个可交付候选后，训练侧导出独立目录或压缩包：
@@ -132,7 +135,7 @@ normalization.npz
 1. `luna model install <模型包>` 验证 manifest、hash、输入/输出形状和运行时契约；失败时不改变当前模型。
 2. amd64 直接保存 ONNX 并用 ONNX Runtime 进行加载冒烟。
 3. Orin 在本机从同一 ONNX 生成 engine，并绑定 ONNX hash、TensorRT 版本、设备指纹和精度配置；任何一项变化都使旧 engine 失效并重建。
-4. `luna model activate <模型-id>` 原子切换活动模型，并使新的规划会话使用 `policy` 模式。
+4. `luna model activate <模型-id>` 原子切换活动模型指针；首版运行时只将其标记为已验证待接入，不能改变仍处于 `fallback` 的 `PlanMotion` 服务。
 5. `luna model rollback` 回到上一个有效模型；没有模型时回到 `fallback`。
 
 运行时绝不轮询训练目录，也不根据“latest.pt”自动替换模型。模型包与源码运行时可独立更新，只要 manifest 宣称且验证通过兼容的接口版本。
@@ -184,7 +187,7 @@ ActionContractV2
   frontier_logits, theta_mu, theta_kappa, value
 ```
 
-运行时只能把通过候选生成、精确可达性和规划安全认证的候选交给模型。模型输出只用于高层候选/方向选择，不能绕过规划器、替代路径认证或直接生成执行器命令。
+后续策略到 ROS 适配器只能把通过候选生成、精确可达性和规划安全认证的候选交给模型。模型输出只用于高层候选/方向选择，不能绕过规划器、替代路径认证或直接生成执行器命令。
 
 ## 6. 单一 `luna` 操作入口
 
@@ -201,7 +204,7 @@ ActionContractV2
 | `luna status` | 显示进程、活动 profile、模型模式和 ROS 接口状态 |
 | `luna logs [--follow]` | 读取或跟随本运行时日志 |
 | `luna model install <path>` | 安装并校验独立模型包 |
-| `luna model activate <id>` / `rollback` / `status` | 原子切换、回退或查看模型状态 |
+| `luna model activate <id>` / `rollback` / `status` | 原子切换已验证模型指针、回退或查看模型状态；策略适配器交付前不改变 `fallback` 规划行为 |
 | `luna extension list` | 列出可用及已启用扩展 |
 | `luna extension enable <name>` / `disable <name>` | 修改配置中的可选扩展开关；下次启动生效 |
 | `luna bundle --target <profile>` | 在开发机从干净源码树创建对应源码运行时包 |
@@ -266,7 +269,7 @@ runtime:                    # LUNA_HOME、进程与日志设置
 
 - 两份源码包在各自目标机身份上可通过 `luna init`、`luna build`、`luna config check` 和 `luna start` 启动规划 ROS 服务。
 - amd64 包不依赖训练主机的 GPU 或构建物；Orin 包不接受非本机 TensorRT engine。
-- 无模型时 `fallback` 可以运行规划；模型包安装失败不改变正在使用的模型。
+- 无模型时 `fallback` 可以运行规划；模型包安装失败不改变正在使用的模型；策略适配器交付前，非 `fallback` 模式必须 fail-closed。
 - 外部输入/输出与 `lunar-external-interfaces/v5`、`PlanMotion`、ObservationContract 和 ActionContract 精确匹配。
 - 包中不含 tests、docs（`README.md` 与 `COMMANDS.md` 除外）、训练、cache、checkpoint、build/install/log 或历史 artifact。
 - bundle allowlist 只收集 manifest 固定的当前有效算法；不得包含旧算法模块、历史模型、Git 历史或可选旧版本选择开关。
