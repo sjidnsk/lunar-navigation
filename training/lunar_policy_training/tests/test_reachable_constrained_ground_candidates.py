@@ -7,7 +7,9 @@ import numpy as np
 from lunar_policy_training.environment.candidate_builder import (
     CandidateBuilderV2,
     _FeasibleAnchor,
+    _RawFrontierCandidate,
     _select_narrow_frontier_strip_positions,
+    _select_three_chain_options,
 )
 from lunar_policy_training.environment.observation_builder import (
     LocalObservation,
@@ -158,7 +160,9 @@ def test_ground_frontier_backfills_three_exactly_feasible_positions() -> None:
     assert emitted == allowed
     assert len(universe.candidates) == 3
     assert universe.decision_snapshot.frontier_segment_count == 1
-    assert universe.decision_snapshot.raw_candidate_count == 3
+    # Raw is now the true bounded feasibility fan-out; three remains the
+    # policy/action limit after qualification.
+    assert universe.decision_snapshot.raw_candidate_count == 9
 
 
 def test_ground_frontier_never_fabricates_three_when_only_two_are_feasible() -> None:
@@ -202,8 +206,85 @@ def test_ground_frontier_never_fabricates_three_when_only_two_are_feasible() -> 
     assert len(universe.candidates) == 2
 
 
-def test_narrow_frontier_strip_uses_observed_safe_high_clearance_positions() -> None:
-    """A coarse frontier selects one detailed, observed-safe pose per anchor."""
+def test_ground_frontier_qualifies_all_strip_witnesses_but_emits_three_actions() -> None:
+    """Fine-strip fan-out changes qualification, not policy cardinality."""
+    world, mission, projection, pose, physical = _fixture()
+    gain_batches: list[int] = []
+    endpoint_batches: list[int] = []
+
+    class RecordingGainEstimator(_PositiveGainEstimator):
+        def estimate_candidate_gains(
+            self,
+            observed_mask: np.ndarray,
+            obstacle_ratio: np.ndarray,
+            roi_ratio: np.ndarray,
+            priority_weight: np.ndarray,
+            candidate_cells: np.ndarray,
+        ) -> np.ndarray:
+            gain_batches.append(len(candidate_cells))
+            return super().estimate_candidate_gains(
+                observed_mask,
+                obstacle_ratio,
+                roi_ratio,
+                priority_weight,
+                candidate_cells,
+            )
+
+    def provider(segments, _world):
+        frontier_cell = segments[0][0]
+        output = []
+        for sample_rank, column in enumerate((101, 104, 109)):
+            pose_cell = (129, column)
+            center_x, center_y = world.canvas.grid_center_world(*pose_cell)
+            for witness in range(2):
+                output.append((
+                    0,
+                    _RawFrontierCandidate(
+                        sample_rank=sample_rank,
+                        frontier_cell=frontier_cell,
+                        pose_cell=pose_cell,
+                        target_pose=Pose2(
+                            center_x + 0.1 * witness,
+                            center_y,
+                        ),
+                    ),
+                ))
+        return tuple(output)
+
+    def endpoint_feasibility(positions: np.ndarray) -> np.ndarray:
+        endpoint_batches.append(len(positions))
+        return np.ones(len(positions), dtype=np.bool_)
+
+    universe = CandidateBuilderV2(RecordingGainEstimator()).build_physical_universe(
+        world,
+        mission,
+        pose,
+        projection,
+        physical_reachability=physical,
+        platform_type="WHEELED",
+        platform_id="unit-wheeled-1",
+        capability_content_sha256="1" * 64,
+        mission_revision=7,
+        evidence_generation=3,
+        physical_evidence_sha256="2" * 64,
+        physical_reachability_algorithm_id=(
+            physical.physical_reachability_algorithm_id
+        ),
+        goal_tolerance_mm=200,
+        ground_endpoint_feasibility=endpoint_feasibility,
+        ground_detail_candidate_provider=provider,
+    )
+
+    assert len(universe.candidates) == 3
+    assert universe.decision_snapshot.raw_candidate_count == 6
+    assert universe.decision_snapshot.fine_pose_candidate_count == 6
+    assert universe.decision_snapshot.globally_reachable_candidate_count == 6
+    assert endpoint_batches == [6]
+    assert gain_batches == [6]
+
+
+def test_narrow_frontier_strip_keeps_only_observed_safe_positions() -> None:
+    """A coarse frontier retains every bounded detailed safe witness."""
     coarse_observed = np.zeros((5, 5), dtype=np.bool_)
     coarse_observed[2:, :] = True
     detail_observed = np.zeros((25, 25), dtype=np.bool_)
@@ -227,8 +308,68 @@ def test_narrow_frontier_strip_uses_observed_safe_high_clearance_positions() -> 
         lateral_half_width_detail_cells=1,
     )
 
-    assert selection.pose_cells == ((15, 7), (15, 12), (15, 17))
+    assert len(selection.pose_cells) == 24
+    assert {(15, 7), (15, 12), (15, 17)} <= set(selection.pose_cells)
+    assert not {(15, 8), (15, 13), (15, 18)} & set(selection.pose_cells)
     assert selection.evaluated_detail_cell_count == 27
+
+
+def test_narrow_frontier_strip_retains_all_bounded_safe_witnesses() -> None:
+    """A later gain gate must see every safe cell, not only max clearance."""
+    coarse_observed = np.zeros((5, 5), dtype=np.bool_)
+    coarse_observed[2:, :] = True
+    detail_observed = np.zeros((25, 25), dtype=np.bool_)
+    detail_observed[10:, :] = True
+    detail_safe = detail_observed.copy()
+    clearance = np.zeros((25, 25), dtype=np.float32)
+    clearance[15, 12] = 10.0
+
+    selection = _select_narrow_frontier_strip_positions(
+        [(2, 2)],
+        coarse_observed_mask=coarse_observed,
+        observed_detail_mask=detail_observed,
+        physical_safe_detail_mask=detail_safe,
+        clearance_detail=clearance,
+        detail_cells_per_coarse=5,
+        minimum_standoff_detail_cells=2,
+        maximum_standoff_detail_cells=3,
+        lateral_half_width_detail_cells=1,
+    )
+
+    assert selection.pose_cells == (
+        (14, 11),
+        (14, 12),
+        (14, 13),
+        (15, 11),
+        (15, 12),
+        (15, 13),
+    )
+    assert selection.evaluated_detail_cell_count == 6
+
+
+def test_three_chain_selection_spreads_actions_across_sampled_anchors() -> None:
+    """Many valid strip witnesses from one anchor stay internal alternatives."""
+    def raw(sample_rank: int, column: int) -> _RawFrontierCandidate:
+        return _RawFrontierCandidate(
+            sample_rank=sample_rank,
+            frontier_cell=(9, sample_rank),
+            pose_cell=(10, column),
+        )
+
+    selected = _select_three_chain_options(
+        [
+            (raw(0, 1), 0, 1.0),
+            (raw(0, 2), 1, 9.0),
+            (raw(1, 3), 2, 2.0),
+            (raw(1, 4), 3, 8.0),
+            (raw(2, 5), 4, 3.0),
+            (raw(2, 6), 5, 7.0),
+        ],
+        chain_length=50,
+    )
+
+    # Exactly three final actions: one best-gain witness for each of q1/q2/q3.
+    assert selected == (1, 3, 5)
 
 
 def test_narrow_frontier_strip_has_a_fixed_bounded_scan_cost() -> None:
@@ -252,7 +393,11 @@ def test_narrow_frontier_strip_has_a_fixed_bounded_scan_cost() -> None:
         lateral_half_width_detail_cells=1,
     )
 
-    assert len(selection.pose_cells) == 3
+    # Three sampled anchors, each with a fixed 3-by-3 detail strip.  The
+    # policy cardinality is bounded later, after feasibility and gain gates;
+    # the local witness scan itself must not silently throw safe positions
+    # away.
+    assert len(selection.pose_cells) == 27
     assert selection.evaluated_detail_cell_count == 27
 
 
@@ -280,6 +425,34 @@ def test_narrow_frontier_strip_uses_clearance_gradient_when_frontier_normal_canc
 
     assert selection.pose_cells == ((12, 14),)
     assert selection.evaluated_detail_cell_count == 5
+
+
+def test_narrow_frontier_strip_uses_task_roi_unknown_side_not_map_exterior() -> None:
+    """The observed-side direction is derived from unexplored task ROI only."""
+    coarse_observed = np.ones((5, 5), dtype=np.bool_)
+    coarse_observed[1, 2] = False
+    unknown_roi = np.zeros((5, 5), dtype=np.bool_)
+    unknown_roi[1, 2] = True
+    detail_observed = np.ones((25, 25), dtype=np.bool_)
+    detail_safe = detail_observed.copy()
+    clearance = np.ones((25, 25), dtype=np.float32)
+
+    selection = _select_narrow_frontier_strip_positions(
+        [(2, 2)],
+        coarse_observed_mask=coarse_observed,
+        coarse_unknown_roi_mask=unknown_roi,
+        observed_detail_mask=detail_observed,
+        physical_safe_detail_mask=detail_safe,
+        clearance_detail=clearance,
+        detail_cells_per_coarse=5,
+        minimum_standoff_detail_cells=2,
+        maximum_standoff_detail_cells=2,
+        lateral_half_width_detail_cells=0,
+    )
+
+    # Unknown task area is above the anchor, so its safe observation strip is
+    # below it.  Outside-ROI unknown cells must not reverse this direction.
+    assert selection.pose_cells == ((14, 12),)
 
 
 def test_ground_candidate_identity_distinguishes_exact_positions_in_one_coarse_cell() -> None:

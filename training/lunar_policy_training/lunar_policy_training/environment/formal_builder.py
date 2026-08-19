@@ -2363,6 +2363,14 @@ class FormalEpisode:
             coarse_observed = np.zeros(
                 (local_coarse_cells, local_coarse_cells), dtype=np.bool_
             )
+            coarse_unknown_roi = np.zeros_like(coarse_observed)
+            mission = getattr(self, "mission", None)
+            mission_unknown_roi = (
+                None
+                if not isinstance(mission, MissionRaster)
+                or mission.canvas != world.canvas
+                else (mission.roi_ratio > 0.0) & ~world.observed_mask
+            )
             for local_row in range(local_coarse_cells):
                 for local_column in range(local_coarse_cells):
                     x_m, y_m = detail.canvas.grid_center_world(
@@ -2376,6 +2384,11 @@ class FormalEpisode:
                     coarse_observed[local_row, local_column] = world.observed_mask[
                         world_row, world_column
                     ]
+                    coarse_unknown_roi[local_row, local_column] = (
+                        not world.observed_mask[world_row, world_column]
+                        if mission_unknown_roi is None
+                        else mission_unknown_roi[world_row, world_column]
+                    )
             for segment_id, sample_rank, frontier_cell, x_m, y_m in anchors_in_group:
                 try:
                     detail_row, detail_column = detail.canvas.world_to_grid(x_m, y_m)
@@ -2387,6 +2400,9 @@ class FormalEpisode:
                         detail_column // detail_factor,
                     )],
                     coarse_observed_mask=np.ascontiguousarray(coarse_observed),
+                    coarse_unknown_roi_mask=np.ascontiguousarray(
+                        coarse_unknown_roi
+                    ),
                     observed_detail_mask=np.ascontiguousarray(detail.valid_mask),
                     physical_safe_detail_mask=physical_safe,
                     clearance_detail=clearance_m,
@@ -2398,29 +2414,35 @@ class FormalEpisode:
                     maximum_standoff_detail_cells=20,
                     lateral_half_width_detail_cells=1,
                 )
-                if not selection.pose_cells:
-                    continue
-                pose_row, pose_column = selection.pose_cells[0]
-                target_x, target_y = detail.canvas.grid_center_world(
-                    pose_row, pose_column
-                )
-                try:
-                    pose_cell = world.canvas.world_to_grid(target_x, target_y)
-                except ValueError:
-                    continue
-                output.append((
-                    segment_id,
-                    _RawFrontierCandidate(
-                        sample_rank=sample_rank,
-                        frontier_cell=frontier_cell,
-                        pose_cell=pose_cell,
-                        target_pose=Pose2(
-                            target_x,
-                            target_y,
-                            elevation_m=float(detail.elevation_m[pose_row, pose_column]),
+                # Keep the complete bounded safe strip.  Reachability and
+                # exact gain are batch gates below this provider; choosing a
+                # single clearance-maximising cell here used to manufacture
+                # a false ZERO_EXPECTED_GAIN when that one cell had no view.
+                for pose_row, pose_column in selection.pose_cells:
+                    target_x, target_y = detail.canvas.grid_center_world(
+                        pose_row, pose_column
+                    )
+                    try:
+                        pose_cell = world.canvas.world_to_grid(
+                            target_x, target_y
+                        )
+                    except ValueError:
+                        continue
+                    output.append((
+                        segment_id,
+                        _RawFrontierCandidate(
+                            sample_rank=sample_rank,
+                            frontier_cell=frontier_cell,
+                            pose_cell=pose_cell,
+                            target_pose=Pose2(
+                                target_x,
+                                target_y,
+                                elevation_m=float(
+                                    detail.elevation_m[pose_row, pose_column]
+                                ),
+                            ),
                         ),
-                    ),
-                ))
+                    ))
         return tuple(output)
 
     def build_policy_observation(

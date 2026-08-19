@@ -55,7 +55,7 @@ class _RawFrontierCandidate:
 
 @dataclass(frozen=True, slots=True)
 class _NarrowFrontierStripSelection:
-    """One deterministic detailed pose per sampled frontier anchor."""
+    """Deterministic detailed witnesses from sampled frontier anchors."""
 
     pose_cells: tuple[tuple[int, int], ...]
     evaluated_detail_cell_count: int
@@ -65,6 +65,7 @@ def _select_narrow_frontier_strip_positions(
     chain: Collection[tuple[int, int]],
     *,
     coarse_observed_mask: np.ndarray,
+    coarse_unknown_roi_mask: np.ndarray | None = None,
     observed_detail_mask: np.ndarray,
     physical_safe_detail_mask: np.ndarray,
     clearance_detail: np.ndarray,
@@ -73,12 +74,13 @@ def _select_narrow_frontier_strip_positions(
     maximum_standoff_detail_cells: int,
     lateral_half_width_detail_cells: int,
 ) -> _NarrowFrontierStripSelection:
-    """Pick at most three observed-safe poses from bounded 0.2 m strips.
+    """Enumerate observed-safe poses from bounded 0.2 m frontier strips.
 
-    Every sampled frontier anchor contributes at most one pose.  The strip
-    points from the frontier into its observed side, determined exclusively
-    from the four-neighbour coarse observed mask.  It never scans map area
-    outside the configured standoff and lateral bounds.
+    The strip points from each sampled frontier anchor into its observed side,
+    determined from four-neighbour unexplored task-ROI cells.  It emits every
+    deduplicated safe witness in stable geometric order; later reachability
+    and gain gates choose the bounded policy candidates.  It never scans map
+    area outside the configured standoff and lateral bounds.
     """
     masks = (
         ("coarse observed", coarse_observed_mask),
@@ -117,6 +119,19 @@ def _select_narrow_frontier_strip_positions(
         for dimension in coarse_observed_mask.shape
     ):
         raise ValueError("narrow frontier strip resolutions differ")
+    if coarse_unknown_roi_mask is None:
+        # Compatibility for direct unit callers.  Formal training always
+        # supplies the task-ROI mask below, so exterior map cells never steer
+        # a production frontier strip.
+        coarse_unknown_roi_mask = np.ascontiguousarray(~coarse_observed_mask)
+    if (
+        not isinstance(coarse_unknown_roi_mask, np.ndarray)
+        or coarse_unknown_roi_mask.dtype != np.dtype(np.bool_)
+        or coarse_unknown_roi_mask.shape != coarse_observed_mask.shape
+        or not coarse_unknown_roi_mask.flags.c_contiguous
+        or bool((coarse_unknown_roi_mask & coarse_observed_mask).any())
+    ):
+        raise ValueError("narrow frontier strip task ROI mask is invalid")
 
     coarse_rows, coarse_columns = coarse_observed_mask.shape
     detail_rows, detail_columns = observed_detail_mask.shape
@@ -138,7 +153,7 @@ def _select_narrow_frontier_strip_positions(
             for row_delta, column_delta in directions
             if 0 <= frontier_row + row_delta < coarse_rows
             and 0 <= frontier_column + column_delta < coarse_columns
-            and not coarse_observed_mask[
+            and coarse_unknown_roi_mask[
                 frontier_row + row_delta,
                 frontier_column + column_delta,
             ]
@@ -176,7 +191,6 @@ def _select_narrow_frontier_strip_positions(
             observed_column_direction = -column_normal
         lateral_row_direction = -observed_column_direction
         lateral_column_direction = observed_row_direction
-        best: tuple[tuple[float, int, int, int, int], tuple[int, int]] | None = None
         for distance in range(
             minimum_standoff_detail_cells,
             maximum_standoff_detail_cells + 1,
@@ -198,18 +212,8 @@ def _select_narrow_frontier_strip_positions(
                     or (row, column) in seen
                 ):
                     continue
-                key = (
-                    -float(clearance_detail[row, column]),
-                    distance,
-                    abs(lateral_offset),
-                    row,
-                    column,
-                )
-                if best is None or key < best[0]:
-                    best = (key, (row, column))
-        if best is not None:
-            selected.append(best[1])
-            seen.add(best[1])
+                selected.append((row, column))
+                seen.add((row, column))
 
     return _NarrowFrontierStripSelection(
         pose_cells=tuple(selected),
@@ -553,12 +557,6 @@ class CandidateDecisionSnapshot:
             return
         if (
             common_invalid
-            or (
-                self.pipeline_kind == "GROUND_FRONTIER"
-                and self.frontier_segment_count > 0
-                and self.raw_candidate_count
-                > 3 * self.frontier_segment_count
-            )
             or not (
                 self.raw_candidate_count
                 >= self.fine_pose_candidate_count
@@ -1180,31 +1178,58 @@ def _map_frontier_chain_pose_options(
 
 
 def _select_three_chain_options(
-    options: Collection[tuple[_RawFrontierCandidate, int]],
+    options: Collection[tuple[_RawFrontierCandidate, int, float]],
     *,
     chain_length: int,
 ) -> tuple[int, ...]:
-    """Choose up to three certified option indices near stable arc quartiles."""
-    remaining = list(options)
+    """Choose at most three qualified positions, anchor-first and stable.
+
+    A detailed safe strip can yield many positions for one of the three
+    sampled frontier anchors.  It is an internal feasibility fan-out, not a
+    request to give that anchor three policy actions.  Select the highest-gain
+    qualified position from each distinct anchor before backfilling a missing
+    anchor with another qualified witness.
+    """
     if type(chain_length) is not int or chain_length <= 0:
         raise ValueError("frontier chain length is invalid")
+    remaining = sorted(
+        options,
+        key=lambda item: (
+            item[0].sample_rank,
+            -float(item[2]),
+            item[0].pose_cell,
+            item[1],
+        ),
+    )
+    if any(
+        not math.isfinite(float(item[2])) or float(item[2]) < 0.0
+        for item in remaining
+    ):
+        raise ValueError("frontier option gain is invalid")
+    by_anchor: dict[int, list[tuple[_RawFrontierCandidate, int, float]]] = {}
+    for item in remaining:
+        by_anchor.setdefault(item[0].sample_rank, []).append(item)
+    anchor_ranks = tuple(sorted(by_anchor))
     selected: list[int] = []
-    total = float(max(0, chain_length - 1))
+    selected_anchor_ranks: set[int] = set()
     for fraction in (0.25, 0.5, 0.75):
-        if not remaining:
+        if not anchor_ranks:
             break
-        target = total * fraction
-        raw, option_index = min(
-            remaining,
-            key=lambda item: (
-                abs(float(item[0].sample_rank) - target),
-                item[0].sample_rank,
-                item[0].pose_cell,
-                item[1],
-            ),
+        target_index = min(
+            len(anchor_ranks) - 1,
+            int(fraction * len(anchor_ranks)),
         )
+        rank = anchor_ranks[target_index]
+        if rank in selected_anchor_ranks:
+            continue
+        raw, option_index, _ = by_anchor[rank][0]
         selected.append(option_index)
-        remaining.remove((raw, option_index))
+        selected_anchor_ranks.add(raw.sample_rank)
+    for raw, option_index, _ in remaining:
+        if len(selected) == 3:
+            break
+        if option_index not in selected:
+            selected.append(option_index)
     return tuple(selected)
 
 
@@ -2533,7 +2558,7 @@ class CandidateBuilderV2:
         ),
         refresh_started: float,
     ) -> PhysicalCandidateUniverse:
-        """Build at most three certified candidates per complete frontier chain."""
+        """Build at most three policy candidates per complete frontier chain."""
         physical_mask = physical_reachability.physical_observation_pose_mask
         step = max(
             1,
@@ -2542,7 +2567,7 @@ class CandidateBuilderV2:
                 / world.canvas.geometry.resolution_m
             ),
         )
-        raw_count = sum(min(3, len(segment)) for segment in segments)
+        raw_count = 0
         if ground_detail_candidate_provider is None:
             source = (
                 (segment_id, candidate)
@@ -2561,6 +2586,7 @@ class CandidateBuilderV2:
             tuple[int, int, int, int], tuple[int, _RawFrontierCandidate]
         ] = {}
         for segment_id, candidate in source:
+            raw_count += 1
             if not (
                 isinstance(segment_id, int)
                 and 0 <= segment_id < len(segments)
@@ -2708,12 +2734,12 @@ class CandidateBuilderV2:
             resolution_m=world.canvas.geometry.resolution_m,
         )
         selectable_by_segment: dict[
-            int, list[tuple[_RawFrontierCandidate, int]]
+            int, list[tuple[_RawFrontierCandidate, int, float]]
         ] = {}
         for index in positive_indices:
             segment_id, raw, _ = endpoint_feasible[index]
             selectable_by_segment.setdefault(segment_id, []).append(
-                (raw, index)
+                (raw, index, float(gains[index, 0]))
             )
         selected_positive_indices: list[int] = []
         for segment_id in sorted(selectable_by_segment):
@@ -2859,23 +2885,8 @@ class CandidateBuilderV2:
             snapshot_id=physical_snapshot_id,
             frontier_segment_count=len(segments),
             raw_candidate_count=raw_count,
-            fine_pose_candidate_count=sum(
-                min(
-                    3,
-                    sum(item[0] == segment_id for item in fine),
-                )
-                for segment_id in range(len(segments))
-            ),
-            globally_reachable_candidate_count=sum(
-                min(
-                    3,
-                    sum(
-                        item[0] == segment_id
-                        for item in globally_reachable
-                    ),
-                )
-                for segment_id in range(len(segments))
-            ),
+            fine_pose_candidate_count=len(fine),
+            globally_reachable_candidate_count=len(globally_reachable),
             positive_gain_candidate_count=len(candidates),
             selected_policy_candidate_count=selected_count,
             untried_reserve_count=len(candidates) - selected_count,
