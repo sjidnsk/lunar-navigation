@@ -666,6 +666,7 @@ def test_formal_preflight_passes_the_validated_sensor_digest_to_calibration(
     )
     captured: dict[str, object] = {}
     task_areas: list[object] = []
+    task_key_sources: list[object] = []
     monkeypatch.setattr(
         cli_module, "_formal_capability_preflight", lambda _root: bundle
     )
@@ -674,8 +675,9 @@ def test_formal_preflight_passes_the_validated_sensor_digest_to_calibration(
         "_formal_sensor_performance_preflight",
         lambda *args, **kwargs: sensor_digest,
     )
-    def build_formal_environment(*args, task_area, **kwargs):
+    def build_formal_environment(*args, task_area, task_key_source_commit, **kwargs):
         task_areas.append(task_area)
+        task_key_sources.append(task_key_source_commit)
         return cache, assembly
 
     monkeypatch.setattr(
@@ -684,7 +686,9 @@ def test_formal_preflight_passes_the_validated_sensor_digest_to_calibration(
     monkeypatch.setattr(
         cli_module,
         "_open_formal_task_cache_runtime",
-        lambda **kwargs: contextlib.nullcontext(SimpleNamespace(client=object())),
+        lambda **kwargs: contextlib.nullcontext(
+            SimpleNamespace(client=object(), source_commit="e" * 40)
+        ),
     )
 
     def validated_calibration(**kwargs):
@@ -728,6 +732,7 @@ def test_formal_preflight_passes_the_validated_sensor_digest_to_calibration(
     ) == 0
     assert captured["sensor_performance_sha256"] == sensor_digest
     assert task_areas == [config.task_area] * 4
+    assert task_key_sources == ["e" * 40] * 4
 
 
 def test_formal_calibrate_rejects_cache_before_cuda_or_artifact_creation(

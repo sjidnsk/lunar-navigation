@@ -3814,6 +3814,7 @@ def main(argv: list[str] | None = None) -> int:
                 split="train",
                 task_area=requested_config.task_area,
                 task_cache_client=task_runtime.client,
+                task_key_source_commit=task_runtime.source_commit,
             )
             assemblies = {"train": train_assembly}
             for split in ("validation", "test", "holdout"):
@@ -3824,6 +3825,7 @@ def main(argv: list[str] | None = None) -> int:
                     split=split,
                     task_area=requested_config.task_area,
                     task_cache_client=task_runtime.client,
+                    task_key_source_commit=task_runtime.source_commit,
                 )
             calibrated = _validated_formal_preflight_calibration(
                 calibration_root=Path(arguments.calibration_root),
