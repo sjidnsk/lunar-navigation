@@ -138,3 +138,41 @@ def test_formal_ground_detail_frontier_candidates_use_only_observed_detail() -> 
     assert candidate.target_pose.frame_id == "map"
     assert candidates[1][0] == 1
     assert episode._bridge.calls == 1
+
+
+def test_formal_ground_detail_frontier_candidates_clamp_edge_window_center() -> None:
+    episode = object.__new__(FormalEpisode)
+    episode.platform_type = "WHEELED"
+    episode.scene_id = "unit-scene"
+    episode._revision = 5
+    episode.current_pose = Pose2(0.0, 0.0)
+    episode.sensor_state = _ObservedDetailWindows()
+    episode._bridge = _AllSafeProjectionBridge()
+    episode._base_request = (
+        lambda _global_map, _local_map: bridge_api.TrainingPlanRequest()
+    )
+    canvas = MapCanvas.from_roi_bounds("b" * 64, (0.0, 0.0, 1024.0, 1024.0))
+    shape = (canvas.geometry.cells, canvas.geometry.cells)
+    observed = np.zeros(shape, dtype=np.bool_)
+    observed[255, 255] = True
+    zeros = np.zeros(shape, dtype=np.float32)
+    local = LocalObservation(
+        canvas.identity,
+        (0.0, 0.0, 6.4, 6.4),
+        np.zeros((32, 32), dtype=np.float32),
+        np.ones((32, 32), dtype=np.bool_),
+        np.zeros((32, 32), dtype=np.float32),
+    )
+    world = ObservedWorld(
+        canvas,
+        zeros.copy(),
+        observed,
+        CanvasRatioLayer(canvas, zeros.copy()),
+        local,
+    )
+
+    episode._ground_detail_frontier_candidates(
+        [[(255, 255)]], world, planner_global_map=object()
+    )
+
+    assert episode.sensor_state.centres == [(992.0, 32.0)]

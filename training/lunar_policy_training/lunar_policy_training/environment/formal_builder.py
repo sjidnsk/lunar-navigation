@@ -2295,9 +2295,13 @@ class FormalEpisode:
             # Align the 64 m detail window to the 4 m global lattice.  The
             # selector can then derive its local coarse frontier neighbours
             # without any resampling or half-cell shift.
-            left, _bottom, _right, top = world.canvas.bounds_m
+            left, bottom, right, top = world.canvas.bounds_m
             center_x = left + 32.0 + 4.0 * round((mean_x - left - 32.0) / 4.0)
             center_y = top - 32.0 - 4.0 * round((top - 32.0 - mean_y) / 4.0)
+            # Alignment rounding can otherwise select the exterior canvas
+            # boundary for a frontier in the outermost 4 m cell.
+            center_x = min(max(center_x, left + 32.0), right - 32.0)
+            center_y = min(max(center_y, bottom + 32.0), top - 32.0)
             center_row, center_column = world.canvas.world_to_grid(center_x, center_y)
             center_pose = Pose2(
                 center_x,
