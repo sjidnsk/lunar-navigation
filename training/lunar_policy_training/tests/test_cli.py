@@ -72,6 +72,54 @@ def test_train_path_propagates_the_reused_task_cache_source() -> None:
         )
 
 
+def test_step_zero_manifest_allows_preflight_only_source_refresh(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A completed calibration can become a current qualified run without rerunning."""
+    root = tmp_path / "calibration"
+    root.mkdir()
+    config = load_training_config(
+        REPOSITORY_ROOT / "training/configs/rtx4080_super_v4_joint.yaml"
+    )
+    identity = RunIdentity(
+        run_kind="formal",
+        data_sha256="1" * 64,
+        split_sha256="2" * 64,
+        generator_sha256="3" * 64,
+        capability_sha256="4" * 64,
+        reward_sha256=cli_module.reward_weights_sha256(),
+        v3_sha256="5" * 64,
+        training_semantics_sha256=cli_module.training_semantics_sha256(),
+    )
+    (root / "run-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": cli_module.RUN_MANIFEST_SCHEMA_VERSION,
+                "global_step": 0,
+                "source_commit": "a" * 40,
+                "frozen_config": config.as_frozen_dict(),
+                "run_identity": identity.to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        cli_module, "_preflight_only_source_delta", lambda *_args: True
+    )
+
+    cli_module._freeze_reward_v4_run_manifest(
+        root / "run-manifest.json",
+        artifact_root=root,
+        config=config,
+        source_commit="b" * 40,
+        run_identity=identity,
+        repository_root=REPOSITORY_ROOT,
+    )
+
+    payload = json.loads((root / "run-manifest.json").read_text(encoding="utf-8"))
+    assert payload["source_commit"] == "b" * 40
+
+
 from lunar_policy_training.budget import TrainingBudget  # noqa: E402
 from lunar_policy_training.cli import (  # noqa: E402
     ArtifactRootError,

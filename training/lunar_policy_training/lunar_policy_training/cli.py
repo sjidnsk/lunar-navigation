@@ -1399,6 +1399,7 @@ def _freeze_reward_v4_run_manifest(
     config: ResolvedTrainingConfig,
     source_commit: str,
     run_identity: RunIdentity,
+    repository_root: Path | None = None,
 ) -> None:
     """Bind every Reward V4 schema and static run fact before initialization."""
     root = artifact_root.resolve(strict=True)
@@ -1426,13 +1427,24 @@ def _freeze_reward_v4_run_manifest(
         raise ArtifactRootError("Reward V4 requires run manifest v2")
     if payload.get("global_step") not in (None, 0):
         raise ArtifactRootError("Reward V4 run must start at global step zero")
+    source_refresh_allowed = (
+        repository_root is not None
+        and isinstance(payload.get("source_commit"), str)
+        and _preflight_only_source_delta(
+            repository_root, str(payload["source_commit"])
+        )
+    )
     for name, expected in (
         ("frozen_config", config.as_frozen_dict()),
         ("source_commit", source_commit),
         ("run_identity", run_identity.to_dict()),
     ):
         existing = payload.get(name)
-        if existing is not None and existing != expected:
+        if (
+            existing is not None
+            and existing != expected
+            and not (name == "source_commit" and source_refresh_allowed)
+        ):
             raise ArtifactRootError(f"Reward V4 {name} cannot drift")
 
     curriculum = initial_reward_curriculum_state(reward_config)
@@ -1468,7 +1480,11 @@ def _freeze_reward_v4_run_manifest(
     }
     for name, expected in frozen.items():
         existing = payload.get(name)
-        if existing is not None and existing != expected:
+        if (
+            existing is not None
+            and existing != expected
+            and not (name == "source_commit" and source_refresh_allowed)
+        ):
             raise ArtifactRootError(f"Reward V4 {name} cannot drift")
         payload[name] = expected
     payload["platform_allocation"] = worker_allocation_for_stage(
@@ -3595,6 +3611,7 @@ def main(argv: list[str] | None = None) -> int:
             config=calibrated.config,
             source_commit=source_commit,
             run_identity=calibrated.run_identity,
+            repository_root=repository_root,
         )
         _require_reward_v4_artifact_parents(
             reward_v4_root, repository_root=repository_root
