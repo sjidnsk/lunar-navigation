@@ -25,6 +25,19 @@ class RuntimeRefusal(RuntimeError):
     pass
 
 
+_EXTENSION_PACKAGES = {
+    "map_pipeline": "lunar_map_pipeline",
+    "path_tracking": "lunar_path_tracking",
+}
+
+
+@dataclass(frozen=True)
+class ExtensionState:
+    enabled: bool
+    package: str
+    status: str
+
+
 @dataclass(frozen=True)
 class PreparePlan:
     profile_id: str
@@ -134,3 +147,44 @@ def doctor_runtime(config: RuntimeConfig, facts: HostFacts, runner: CommandRunne
     profile = load_profile(config.profile, repo_root)
     lock = load_environment_lock(config.profile, repo_root)
     return make_prepare_plan(lock, profile, config, facts, runner)
+
+
+def extension_states(config: RuntimeConfig, runner: CommandRunner) -> dict[str, ExtensionState]:
+    states: dict[str, ExtensionState] = {}
+    for name, package in _EXTENSION_PACKAGES.items():
+        installed = runner.is_installed(package)
+        states[name] = ExtensionState(
+            enabled=bool(config.extensions[name] and installed),
+            package=package,
+            status="enabled" if config.extensions[name] and installed else ("disabled" if installed else "not_installed"),
+        )
+    return states
+
+
+def set_extension_enabled(config_path: Path, config: RuntimeConfig, runner: CommandRunner, name: str, enabled: bool) -> dict[str, ExtensionState]:
+    if name not in _EXTENSION_PACKAGES:
+        raise RuntimeRefusal("EXTENSION_UNKNOWN")
+    package = _EXTENSION_PACKAGES[name]
+    if enabled and not runner.is_installed(package):
+        raise RuntimeRefusal("EXTENSION_PACKAGE_NOT_INSTALLED")
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as error:
+        raise RuntimeRefusal("CONFIG_WRITE_FAILED") from error
+    if not isinstance(raw, dict):
+        raise RuntimeRefusal("CONFIG_WRITE_FAILED")
+    raw["extensions"][name] = enabled
+    temporary = config_path.with_name(f".{config_path.name}.tmp")
+    temporary.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    temporary.replace(config_path)
+    # Return the exact next-launch state without silently claiming a running node changed.
+    updated = RuntimeConfig(
+        profile=config.profile,
+        interfaces=config.interfaces,
+        capabilities=config.capabilities,
+        planner=config.planner,
+        policy=config.policy,
+        extensions={**config.extensions, name: enabled},
+        runtime=config.runtime,
+    )
+    return extension_states(updated, runner)

@@ -12,11 +12,20 @@ from typing import Sequence
 
 from .bundle import BundleRequest, build_bundle
 from .build import build_runtime, make_build_plan
-from .commands import CommandRunner, RuntimeRefusal, doctor_runtime, init_runtime, prepare_environment
+from .commands import (
+    CommandRunner,
+    RuntimeRefusal,
+    doctor_runtime,
+    extension_states,
+    init_runtime,
+    prepare_environment,
+    set_extension_enabled,
+)
 from .config import ConfigError, load_runtime_config, load_profile
 from .host import HostFacts
 from .process import read_runtime_status, start_runtime, stop_runtime, tail_log
 from .state import resolve_runtime_paths
+from .model_store import ModelInstallError, ModelStore, model_store_root
 
 
 @dataclass(frozen=True)
@@ -103,7 +112,7 @@ def run_cli(
     host = facts or _host_facts()
     commands = runner or SystemRunner()
     parser = argparse.ArgumentParser(prog="luna", add_help=False)
-    parser.add_argument("command", choices=("init", "prepare", "doctor", "config", "bundle", "build", "start", "stop", "status", "logs"))
+    parser.add_argument("command", choices=("init", "prepare", "doctor", "config", "bundle", "build", "start", "stop", "status", "logs", "model", "extension"))
     parser.add_argument("--profile")
     parser.add_argument("--config")
     parser.add_argument("--dry-run", action="store_true")
@@ -111,7 +120,9 @@ def run_cli(
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--target")
     parser.add_argument("--output")
+    parser.add_argument("--live", action="store_true")
     parser.add_argument("check", nargs="?")
+    parser.add_argument("argument", nargs="?")
     try:
         args = parser.parse_args(list(argv))
         if args.command == "bundle":
@@ -133,6 +144,25 @@ def run_cli(
         config_path = Path(args.config) if args.config else resolve_runtime_paths("dev", home=home).config
         config = load_runtime_config(config_path)
         paths = resolve_runtime_paths("dev", home=home)
+        if args.command == "model":
+            store = ModelStore(model_store_root(config_path, paths.data))
+            if args.check == "install" and args.argument:
+                installed = store.install(Path(args.argument))
+                return CliResult(0, {"model_id": installed.model_id, "model_sha256": installed.model_sha256, "model_binding": "staged_not_connected"})
+            if args.check == "activate" and args.argument:
+                return CliResult(0, asdict(store.activate(args.argument)))
+            if args.check == "rollback" and args.argument is None:
+                return CliResult(0, asdict(store.rollback()))
+            if args.check == "status" and args.argument is None:
+                return CliResult(0, asdict(store.status()))
+            return CliResult(2, {"reason": "MODEL_SUBCOMMAND_REQUIRED"})
+        if args.command == "extension":
+            if args.check in (None, "list") and args.argument is None:
+                return CliResult(0, {key: asdict(value) for key, value in extension_states(config, commands).items()})
+            if args.check in ("enable", "disable") and args.argument:
+                states = set_extension_enabled(config_path, config, commands, args.argument, args.check == "enable")
+                return CliResult(0, {key: asdict(value) for key, value in states.items()})
+            return CliResult(2, {"reason": "EXTENSION_SUBCOMMAND_REQUIRED"})
         if args.command == "build":
             build_runtime(make_build_plan(config, paths, root), commands)
             return CliResult(0, {"build_base": str(paths.data / "build")})
@@ -150,7 +180,10 @@ def run_cli(
             return CliResult(0, {"config": str(config_path), "profile": config.profile})
         if args.command == "doctor":
             plan = doctor_runtime(config, host, commands, root)
-            return CliResult(3 if plan.reasons else 0, _payload(plan))
+            payload = _payload(plan)
+            if args.live:
+                payload["live_status"] = "WAITING_FOR_EXTERNAL_INPUT" if not plan.reasons else "HOST_OR_DEPENDENCY_UNREADY"
+            return CliResult(3 if plan.reasons else 0, payload)
         if args.command == "prepare":
             if args.dry_run == args.apply:
                 return CliResult(2, {"reason": "SELECT_PREPARE_MODE"})
@@ -164,7 +197,7 @@ def run_cli(
                 repo_root=root,
             )
             return CliResult(0 if result.applied or not result.plan.reasons else 3, _payload(result.plan, applied=result.applied))
-    except (ConfigError, RuntimeRefusal) as error:
+    except (ConfigError, RuntimeRefusal, ModelInstallError) as error:
         return CliResult(2, {"reason": str(error)})
     return CliResult(2, {"reason": "COMMAND_NOT_IMPLEMENTED"})
 
