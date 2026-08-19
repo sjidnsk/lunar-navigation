@@ -61,7 +61,7 @@ REQUIRED_METHODS = (
 FORMAL_EVALUATION_SPLITS = ("validation", "test", "holdout")
 FORMAL_EVALUATION_WATCHDOG_MAX_STEPS = 4096
 FORMAL_EVALUATION_WATCHDOG_SECONDS = 3600.0
-REWARD_V4_EVALUATION_REPORT_SCHEMA = "lunar-reward-v4-evaluation-report/v1"
+REWARD_V4_EVALUATION_REPORT_SCHEMA = "lunar-reward-v4-evaluation-report/v2"
 
 
 @dataclass(frozen=True, slots=True)

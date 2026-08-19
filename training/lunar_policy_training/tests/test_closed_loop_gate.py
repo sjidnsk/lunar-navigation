@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from dataclasses import asdict
 from types import SimpleNamespace
 
 import numpy as np
@@ -21,11 +22,15 @@ from lunar_policy_training.closed_loop_gate import (
     select_closed_loop_gate_cases,
     write_closed_loop_gate_report,
 )
-from lunar_policy_training.environment.candidate_builder import CandidateDiagnostics
+from lunar_policy_training.environment.candidate_builder import (
+    CandidateDecisionSnapshot,
+    CandidateDiagnostics,
+)
 from lunar_policy_training.environment.macro_step import (
     ExecutionEvents,
     TerminalReason,
 )
+from lunar_policy_training.polar_data.formal_cache import FORMAL_CACHE_SCHEMA
 
 
 PLATFORMS = ("WHEELED", "LEGGED", "HOPPER")
@@ -90,7 +95,7 @@ def _cache_documents(scene_count: int = CLOSED_LOOP_MINIMUM_SCENES):
             }
         )
     manifest = {
-        "schema": "lunar-formal-training-cache/v8",
+        "schema": FORMAL_CACHE_SCHEMA,
         "cache_manifest_sha256": _sha("d"),
         "scenes": scenes,
         "exact_common_evaluation": {
@@ -109,6 +114,43 @@ def _cache_documents(scene_count: int = CLOSED_LOOP_MINIMUM_SCENES):
     return manifest, {"scenarios": scenarios}
 
 
+def _decision_snapshot(platform: str) -> dict[str, object]:
+    common = {
+        "snapshot_id": _sha("3"),
+        "frontier_segment_count": 1,
+        "raw_candidate_count": 1,
+        "fine_pose_candidate_count": 1,
+        "globally_reachable_candidate_count": 1,
+        "positive_gain_candidate_count": 1,
+        "selected_policy_candidate_count": 1,
+        "untried_reserve_count": 0,
+        "planner_rejected_current_snapshot_count": 0,
+        "candidate_set_sha256": _sha("2"),
+        "candidate_refresh_elapsed_s": 0.0,
+    }
+    if platform == "HOPPER":
+        return asdict(
+            CandidateDecisionSnapshot(
+                **common,
+                global_search_call_count=0,
+                global_search_elapsed_s=0.0,
+                pipeline_kind="HOPPER_LANDING",
+                representable_landing_sha256=_sha("6"),
+                raw_known_landing_count=1,
+                eligible_landing_count=1,
+                predicted_positive_landing_count=1,
+                visited_landing_count=0,
+            )
+        )
+    return asdict(
+        CandidateDecisionSnapshot(
+            **common,
+            global_search_call_count=1,
+            global_search_elapsed_s=0.0,
+        )
+    )
+
+
 def _passing_rows(cases) -> list[dict[str, object]]:
     return [
         {
@@ -124,12 +166,10 @@ def _passing_rows(cases) -> list[dict[str, object]]:
             ),
             "physical_candidate_universe_sha256": _sha("2"),
             "physical_snapshot_id": _sha("3"),
-            "oracle_opportunity_set_sha256": _sha("4"),
-            "final_coverage_hex": float(0.95).hex(),
+            "candidate_decision_snapshot": _decision_snapshot(platform),
+            "final_coverage_hex": float(0.80).hex(),
             "success_first_crossing": True,
             "terminal_reason": "SUCCESS",
-            "oracle_contradiction_count": 0,
-            "oracle_opportunity_count": 0,
             "planner_failure_count": 0,
             "safety_violation_count": 0,
             "invalid_action_count": 0,
@@ -259,7 +299,6 @@ def test_gate_binds_domain_evidence_to_the_actual_stateful_planner_call(
                 success_first_crossing=True,
                 terminated=True,
                 terminal_reason=TerminalReason.SUCCESS,
-                oracle_opportunity_count=0,
             )
             return SimpleNamespace(
                 transition=transition,
@@ -268,9 +307,14 @@ def test_gate_binds_domain_evidence_to_the_actual_stateful_planner_call(
 
     snapshot = SimpleNamespace(
         candidate_universe_sha256=_sha("2"),
-        candidate_universe=SimpleNamespace(physical_snapshot_id=_sha("3")),
-        frontier_oracle=SimpleNamespace(
-            oracle_opportunity_set_sha256=_sha("4")
+        candidate_universe=SimpleNamespace(
+            physical_snapshot_id=_sha("3"),
+            decision_snapshot=CandidateDecisionSnapshot(
+                **{
+                    key: value
+                    for key, value in _decision_snapshot("WHEELED").items()
+                }
+            ),
         ),
     )
     worker = SimpleNamespace(
@@ -313,7 +357,7 @@ def test_gate_binds_domain_evidence_to_the_actual_stateful_planner_call(
     monkeypatch.setattr(
         report_module,
         "mission_coverage_ratio",
-        lambda _observation: np.asarray([0.95], dtype=np.float64),
+        lambda _observation: np.asarray([0.80], dtype=np.float64),
     )
     monkeypatch.setattr(gate_module, "PlannerBridge", lambda: planner, raising=False)
     work = SimpleNamespace(
@@ -446,7 +490,7 @@ def test_closed_loop_gate_report_is_canonical_and_repeat_comparable(
     assert first.payload["successful_scene_platform_count"] == 3
     assert first.payload["natural_failure_scene_platform_count"] == 0
     assert first.payload["terminal_reason_counts"] == {"SUCCESS": 3}
-    assert first.payload["planner_blocked_scene_platform_count"] == 0
+    assert first.payload["planner_exhausted_scene_platform_count"] == 0
     assert first.payload["hard_failure_scene_platform_count"] == 0
     assert first.payload["canceled_scene_platform_count"] == 0
     assert first.payload["platform_reference_mismatch_count"] == 0
@@ -551,17 +595,17 @@ def test_closed_loop_gate_rejects_primitive_bound_report() -> None:
 
 
 @pytest.mark.parametrize(
-    ("terminal_reason", "oracle_opportunity_count"),
+    "terminal_reason",
     (
-        ("NO_RECOVERABLE_OBSERVATION_STATE", 0),
-        ("VISITED_EXHAUSTED", 0),
-        ("NO_TRANSIT_OPPORTUNITY", 0),
-        ("ZERO_GAIN", 0),
+        "NO_FRONTIER",
+        "NO_GLOBAL_ROUTE",
+        "ZERO_EXPECTED_GAIN",
+        "PLANNER_EXHAUSTED",
+        "NO_AVAILABLE_LANDING_CANDIDATE",
     ),
 )
 def test_closed_loop_gate_accepts_auditable_failure_below_success_threshold(
     terminal_reason: str,
-    oracle_opportunity_count: int,
 ) -> None:
     manifest, scenario_document = _cache_documents()
     cases = select_closed_loop_gate_cases(manifest, scenario_document)
@@ -570,7 +614,6 @@ def test_closed_loop_gate_accepts_auditable_failure_below_success_threshold(
         final_coverage_hex=float(0.31).hex(),
         success_first_crossing=False,
         terminal_reason=terminal_reason,
-        oracle_opportunity_count=oracle_opportunity_count,
         planner_failure_count=2,
     )
 
@@ -594,7 +637,7 @@ def test_closed_loop_gate_accepts_auditable_failure_below_success_threshold(
             float(0.94).hex(),
             "mission coverable",
         ),
-        ("oracle_contradiction_count", 1, "oracle contradiction"),
+        ("candidate_decision_snapshot", {}, "candidate decision snapshot"),
         ("safety_violation_count", 1, "safety"),
         ("invalid_action_count", 1, "invalid action"),
         ("execution_failure_count", 1, "execution failure"),
@@ -630,7 +673,7 @@ def test_closed_loop_gate_report_rejects_a_failed_scene_platform(
     (
         (
             {
-                "final_coverage_hex": float(0.949999).hex(),
+                "final_coverage_hex": float(0.799999).hex(),
                 "success_first_crossing": True,
                 "terminal_reason": "SUCCESS",
             },
@@ -638,9 +681,9 @@ def test_closed_loop_gate_report_rejects_a_failed_scene_platform(
         ),
         (
             {
-                "final_coverage_hex": float(0.95).hex(),
+                "final_coverage_hex": float(0.80).hex(),
                 "success_first_crossing": False,
-                "terminal_reason": "ZERO_GAIN",
+                "terminal_reason": "NO_FRONTIER",
             },
             "failure coverage",
         ),
@@ -657,19 +700,17 @@ def test_closed_loop_gate_report_rejects_a_failed_scene_platform(
                 "final_coverage_hex": float(0.31).hex(),
                 "success_first_crossing": False,
                 "terminal_reason": "ZERO_GAIN",
-                "oracle_opportunity_count": 1,
             },
-            "terminal oracle opportunity",
+            "terminal reason is not auditable",
         ),
         (
             {
                 "final_coverage_hex": float(0.31).hex(),
                 "success_first_crossing": False,
-                "terminal_reason": "PLANNER_BLOCKED_WITH_OPPORTUNITY",
-                "oracle_opportunity_count": 3,
+                "terminal_reason": "NO_FRONTIER",
                 "planner_failure_count": 11,
             },
-            "planner blocked",
+            "no successful execution",
         ),
         (
             {

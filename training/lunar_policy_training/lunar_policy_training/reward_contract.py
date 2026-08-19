@@ -9,6 +9,8 @@ import json
 import math
 from typing import Mapping, Sequence
 
+from .training_semantics import FORMAL_SUCCESS_COVERAGE_RATIO
+
 
 REWARD_SCHEMA_VERSION = "lunar-reward/v4"
 _DEFAULT_CONFIG_SENTINEL = object()
@@ -63,7 +65,7 @@ class RewardWeightsV4:
 class RewardConfigV4:
     """Every approved Reward V4 rule that participates in run identity."""
 
-    success_threshold: float = 0.95
+    success_threshold: float = FORMAL_SUCCESS_COVERAGE_RATIO
     coverage_weight: float = 100.0
     success_bonus: float = 100.0
     terminal_gap_weight: float = 1.0

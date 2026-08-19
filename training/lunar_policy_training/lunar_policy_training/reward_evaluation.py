@@ -13,10 +13,11 @@ import numpy as np
 from .eval.metrics_core import priority_coverage_auc_over_macro_actions
 from .reward_contract import DEFAULT_REWARD_CONFIG, TaskScaleBucket
 from .reward_curriculum import PlatformGateMetrics, PlatformType
+from .training_semantics import FORMAL_SUCCESS_COVERAGE_RATIO
 
 
 REWARD_EVALUATION_MANIFEST_SCHEMA = "lunar-reward-evaluation-manifest/v1"
-REWARD_EVALUATION_BOOTSTRAP_SCHEMA = "lunar-reward-evaluation-bootstrap/v1"
+REWARD_EVALUATION_BOOTSTRAP_SCHEMA = "lunar-reward-evaluation-bootstrap/v2"
 _POSITIVE_INFINITY = "POSITIVE_INFINITY"
 _NEGATIVE_INFINITY = "NEGATIVE_INFINITY"
 _PLATFORM_ORDER = tuple(PlatformType)
@@ -98,7 +99,7 @@ class RewardEpisodeMetrics:
     platform: PlatformType
     scale_bucket: TaskScaleBucket
     evaluation_seed: int
-    success_at_0_95: bool
+    success_at_threshold: bool
     final_coverage: float
     priority_coverage_auc_over_macro_actions: float | None
     steps_to_success: int | None
@@ -114,7 +115,7 @@ class RewardEpisodeMetrics:
             raise ValueError("Reward V4 episode stratum is invalid")
         if type(self.evaluation_seed) is not int or self.evaluation_seed < 0:
             raise ValueError("Reward V4 episode seed is invalid")
-        if type(self.success_at_0_95) is not bool:
+        if type(self.success_at_threshold) is not bool:
             raise ValueError("Reward V4 episode success is invalid")
         _require_ratio(self.final_coverage, "episode final coverage")
         if type(self.hard_error_count) is not int or self.hard_error_count < 0:
@@ -147,12 +148,15 @@ class RewardEpisodeMetrics:
         ):
             raise ValueError("Reward V4 episode efficiency samples differ")
         if self.steps_to_success is not None and (
-            not self.success_at_0_95
+            not self.success_at_threshold
             or self.steps_to_success <= 0
             or self.steps_to_success > self.macro_action_count
         ):
             raise ValueError("Reward V4 success step is inconsistent")
-        if not self.success_at_0_95 and self.final_coverage >= 0.95:
+        if (
+            not self.success_at_threshold
+            and self.final_coverage >= FORMAL_SUCCESS_COVERAGE_RATIO
+        ):
             raise ValueError("Reward V4 episode success fact differs")
 
     def to_dict(self) -> dict[str, object]:
@@ -160,7 +164,7 @@ class RewardEpisodeMetrics:
             "platform": self.platform.value,
             "scale_bucket": self.scale_bucket.value,
             "evaluation_seed": self.evaluation_seed,
-            "success_at_0_95": self.success_at_0_95,
+            "success_at_threshold": self.success_at_threshold,
             "final_coverage": self.final_coverage,
             "priority_coverage_auc_over_macro_actions": (
                 self.priority_coverage_auc_over_macro_actions
@@ -185,7 +189,7 @@ def reward_episode_metrics_from_mapping(
         "platform",
         "scale_bucket",
         "evaluation_seed",
-        "success_at_0_95",
+        "success_at_threshold",
         "final_coverage",
         "priority_coverage_auc_over_macro_actions",
         "steps_to_success",
@@ -201,7 +205,7 @@ def reward_episode_metrics_from_mapping(
             platform=PlatformType(value["platform"]),
             scale_bucket=TaskScaleBucket(value["scale_bucket"]),
             evaluation_seed=value["evaluation_seed"],
-            success_at_0_95=value["success_at_0_95"],
+            success_at_threshold=value["success_at_threshold"],
             final_coverage=value["final_coverage"],
             priority_coverage_auc_over_macro_actions=value[
                 "priority_coverage_auc_over_macro_actions"
@@ -525,7 +529,7 @@ def build_reward_episode_metrics(
         platform=platform,
         scale_bucket=scale_bucket,
         evaluation_seed=evaluation_seed,
-        success_at_0_95=first_success is not None,
+        success_at_threshold=first_success is not None,
         final_coverage=coverage[-1],
         priority_coverage_auc_over_macro_actions=priority_auc,
         steps_to_success=(first_success if has_efficiency_sample else None),
@@ -765,7 +769,7 @@ def _summarize_rows(
         for row in rows
         if row.normalized_executed_path_to_success is not None
     )
-    successful = sum(row.success_at_0_95 for row in rows)
+    successful = sum(row.success_at_threshold for row in rows)
     return PlatformScaleMetrics(
         platform=platform,
         scale_bucket=bucket,

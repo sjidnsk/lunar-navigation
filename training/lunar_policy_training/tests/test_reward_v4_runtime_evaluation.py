@@ -264,6 +264,40 @@ def test_sentinel_finishes_after_one_complete_macro_action_and_resumes(
         evaluate_reward_v4_fixed_grid(_Policy(), **kwargs)
 
 
+def test_runtime_progress_rejects_an_old_success_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_fakes(monkeypatch)
+    progress = (tmp_path / "schema-progress").resolve()
+    kwargs = {
+        "device": "cpu",
+        "checkpoint_payload_sha256": _PAYLOAD_SHA,
+        "manifest": _manifest(),
+        "active_platforms": (PlatformType.WHEELED,),
+        "batch": _batch(),
+        "bootstrap_seed": 7,
+        "bootstrap_resample_count": 1,
+        "max_macro_actions_per_task": 1,
+        "progress_directory": progress,
+        "evaluation_tier": RewardV4EvaluationTier.SENTINEL,
+    }
+    evaluate_reward_v4_fixed_grid(_Policy(), **kwargs)
+
+    progress_file = sorted(progress.glob("*.json"))[0]
+    payload = json.loads(progress_file.read_text(encoding="utf-8"))
+    payload["schema_version"] = "lunar-reward-v4-evaluation-progress/v1"
+    body = {key: value for key, value in payload.items() if key != "progress_sha256"}
+    payload["progress_sha256"] = runtime_module._progress_sha256(body)
+    progress_file.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        RewardV4RuntimeEvaluationError,
+        match="progress schema differs",
+    ):
+        evaluate_reward_v4_fixed_grid(_Policy(), **kwargs)
+
+
 def test_full_evaluation_keeps_running_until_natural_terminal(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

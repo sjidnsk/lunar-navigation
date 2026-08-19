@@ -25,18 +25,20 @@ from lunar_policy_training.training_semantics import (
 )
 
 
-_V13 = (
+_V18 = (
     "lunar-training-semantics/"
-    "sensor-30m-360-platform-physical-coverable-detail95-observed-physical-"
-    "candidates-fixed2m-search-domain-snapshot-planner-failure-option-path-"
-    "observation-auditable-failure-global-ground-target-stable-action-yaw/v13"
+    "sensor-30m-360-platform-physical-coverable-min95-success80-observed-physical-"
+    "frontier-three-samples-global-cost-tree-detail-gain-candidate-snapshot-"
+    "planner-exhaustion-hopper-single-hop-envelope-homogeneous-landings-"
+    "trajectory-capsule-atomic-commit-task-induced-coverability-hopper-task-"
+    "truth-closure-task-cache-v1-no-oracle-reward-v4/v18"
 )
 
 
-def test_formal_training_semantics_names_stable_ground_opportunity_v13() -> None:
-    """Would fail if a new run retained the primitive-graph identity."""
-    assert FORMAL_TRAINING_SEMANTICS_VERSION == _V13
-    assert TRAINING_SEMANTICS_VERSION == _V13
+def test_formal_training_semantics_names_the_80_percent_success_contract() -> None:
+    """Would fail if an 80-percent run retained an older semantic identity."""
+    assert FORMAL_TRAINING_SEMANTICS_VERSION == _V18
+    assert TRAINING_SEMANTICS_VERSION == _V18
 
 
 def test_detail_mask_pack_is_row_major_and_rejects_nonzero_padding() -> None:
@@ -260,8 +262,8 @@ def test_physical_projection_hash_binds_canonical_geometry_positions_and_algorit
             1,
             IneligibleReason.MISSION_COVERABLE_BELOW_95,
         ),
-        ((1, 1), 100, 95, 0.94, 0, IneligibleReason.NO_INITIAL_CANDIDATE),
-        ((1, 1), 100, 95, 0.95, 1, IneligibleReason.INITIAL_ALREADY_SUCCESS),
+        ((1, 1), 100, 95, 0.79, 0, IneligibleReason.NO_INITIAL_CANDIDATE),
+        ((1, 1), 100, 95, 0.80, 1, IneligibleReason.INITIAL_ALREADY_SUCCESS),
         ((1, 1), 100, 95, 0.10, 0, IneligibleReason.NO_INITIAL_CANDIDATE),
         ((1, 1), 100, 95, 0.10, 1, None),
     ],

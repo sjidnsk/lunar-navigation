@@ -48,7 +48,7 @@ _PLATFORM_INDEX = {
     PlatformType.LEGGED: 1,
     PlatformType.HOPPER: 2,
 }
-_EVALUATION_PROGRESS_SCHEMA = "lunar-reward-v4-evaluation-progress/v1"
+_EVALUATION_PROGRESS_SCHEMA = "lunar-reward-v4-evaluation-progress/v2"
 
 
 class RewardV4RuntimeEvaluationError(RuntimeError):
@@ -537,6 +537,10 @@ def _read_evaluation_progress(
     if not isinstance(payload, Mapping) or set(payload) != fields:
         raise RewardV4RuntimeEvaluationError(
             "runtime evaluation progress structure differs"
+        )
+    if payload["schema_version"] != _EVALUATION_PROGRESS_SCHEMA:
+        raise RewardV4RuntimeEvaluationError(
+            "runtime evaluation progress schema differs"
         )
     if payload["checkpoint_payload_sha256"] != checkpoint_payload_sha256:
         raise RewardV4RuntimeEvaluationError(
