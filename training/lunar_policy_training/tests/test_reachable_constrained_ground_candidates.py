@@ -256,7 +256,8 @@ def test_ground_frontier_qualifies_all_strip_witnesses_but_emits_three_actions()
         endpoint_batches.append(len(positions))
         return np.ones(len(positions), dtype=np.bool_)
 
-    universe = CandidateBuilderV2(RecordingGainEstimator()).build_physical_universe(
+    builder = CandidateBuilderV2(RecordingGainEstimator())
+    universe = builder.build_physical_universe(
         world,
         mission,
         pose,
@@ -304,6 +305,35 @@ def test_ground_frontier_qualifies_all_strip_witnesses_but_emits_three_actions()
     }
     assert first.candidate_id not in selected_ids
     assert selected_ids
+
+    refreshed = builder.build_physical_universe(
+        world,
+        mission,
+        pose,
+        projection,
+        physical_reachability=physical,
+        platform_type="WHEELED",
+        platform_id="unit-wheeled-1",
+        capability_content_sha256="1" * 64,
+        mission_revision=7,
+        evidence_generation=3,
+        physical_evidence_sha256="2" * 64,
+        physical_reachability_algorithm_id=(
+            physical.physical_reachability_algorithm_id
+        ),
+        goal_tolerance_mm=200,
+        excluded_cells={
+            _ground_target_visit_key(
+                first.target_position_m[0], first.target_position_m[1]
+            )
+        },
+        ground_endpoint_feasibility=endpoint_feasibility,
+        ground_detail_candidate_provider=provider,
+    )
+    assert len(refreshed.candidates) == 3
+    assert first.candidate_id not in {
+        candidate.candidate_id for candidate in refreshed.candidates
+    }
 
 
 def test_narrow_frontier_strip_keeps_only_observed_safe_positions() -> None:

@@ -2472,7 +2472,9 @@ class FormalEpisode:
             and snapshot.planning_physical_snapshot_id
             == snapshot.candidate_universe.physical_snapshot_id
         ):
-            return self._reselect_current_candidate_snapshot(pose)
+            reselected = self._reselect_current_candidate_snapshot(pose)
+            if reselected is not None:
+                return reselected
         if self._defer_candidate_rebuild:
             snapshot = self._snapshot
             if snapshot is None:
@@ -2586,9 +2588,12 @@ class FormalEpisode:
             ),
             goal_tolerance_mm=(0 if self.platform_type == "HOPPER" else 200),
             excluded_cells=(
-                self._visited_candidate_cells
-                if self.platform_type == "HOPPER"
-                and self._visited_candidate_filter_enabled
+                (
+                    self._visited_candidate_cells
+                    if self.platform_type == "HOPPER"
+                    else self._visited_ground_target_cells
+                )
+                if self._visited_candidate_filter_enabled
                 else ()
             ),
             ground_endpoint_feasibility=(
@@ -2664,7 +2669,9 @@ class FormalEpisode:
             }
         )
 
-    def _reselect_current_candidate_snapshot(self, pose: Pose2) -> PolicyBatch:
+    def _reselect_current_candidate_snapshot(
+        self, pose: Pose2
+    ) -> PolicyBatch | None:
         """Promote reserve entries without rerunning global search or gain."""
         snapshot = self._snapshot
         pending = self._pending_planning_failure
@@ -2704,6 +2711,14 @@ class FormalEpisode:
             backtrack_pose=backtrack_pose,
         )
         candidates = candidate_result.batch
+        if not bool(candidates.mask.any()):
+            # The short-lived snapshot has no remaining unvisited candidate.
+            # Rebuild once from the latest observed state so the bounded safe
+            # strip can promote a different 0.2 m witness before terminal
+            # classification.  Keep the failure set: a surviving identity is
+            # still a current-snapshot planner rejection.
+            self._pending_planning_failure = None
+            return None
         arrays = self._observation_builder.build(
             snapshot.world,
             self.mission,

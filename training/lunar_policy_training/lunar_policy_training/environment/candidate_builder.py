@@ -2193,6 +2193,7 @@ class CandidateBuilderV2:
                 robot=robot,
                 segments=segments,
                 exact_target_poses=exact_target_poses,
+                excluded_cells=excluded_cells,
                 ground_endpoint_feasibility=ground_endpoint_feasibility,
                 ground_detail_candidate_provider=(
                     ground_detail_candidate_provider
@@ -2560,6 +2561,7 @@ class CandidateBuilderV2:
         robot: tuple[int, int],
         segments: list[list[tuple[int, int]]],
         exact_target_poses: Mapping[tuple[int, int], Pose2],
+        excluded_cells: Collection[tuple[int, int]],
         ground_endpoint_feasibility: (
             Callable[[np.ndarray], np.ndarray] | None
         ),
@@ -2745,6 +2747,14 @@ class CandidateBuilderV2:
             for index, gain in enumerate(gains[:, 0])
             if float(gain) >= _DETAIL_CELL_COARSE_EQUIVALENT
         ]
+        visited_cells = set(excluded_cells)
+        if any(
+            not isinstance(cell, tuple)
+            or len(cell) != 2
+            or any(type(value) is not int or value < 0 for value in cell)
+            for cell in visited_cells
+        ):
+            raise CandidateInvariantError("GROUND_VISITED_POSITION_INVALID")
         total_roi = float(mission.roi_ratio.sum(dtype=np.float64))
         roi_diagonal = task_roi_diagonal_m(
             mission.roi_ratio,
@@ -2755,6 +2765,16 @@ class CandidateBuilderV2:
         ] = {}
         for index in positive_indices:
             segment_id, raw, _ = endpoint_feasible[index]
+            target_pose = raw.target_pose or exact_target_poses[raw.pose_cell]
+            if (
+                raw.pose_cell in visited_cells
+                or _ground_target_visit_key(
+                    target_pose.x_m,
+                    target_pose.y_m,
+                )
+                in visited_cells
+            ):
+                continue
             selectable_by_segment.setdefault(segment_id, []).append(
                 (raw, index, float(gains[index, 0]))
             )
