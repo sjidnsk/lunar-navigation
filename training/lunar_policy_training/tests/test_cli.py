@@ -97,6 +97,14 @@ def test_operator_skip_pending_reward_v4_evaluation_is_update_scoped(
     assert _operator_skips_pending_reward_v4_evaluation(321) is False
 
 
+def test_reward_v4_evaluation_can_be_disabled_for_the_training_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LUNAR_DISABLE_REWARD_V4_EVALUATION", "1")
+
+    assert cli_module._reward_v4_evaluation_disabled() is True
+
+
 def test_reward_v4_evaluation_resolves_only_active_r2_platforms() -> None:
     curriculum = SimpleNamespace(
         platforms={

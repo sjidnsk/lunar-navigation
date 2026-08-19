@@ -2379,6 +2379,16 @@ def _operator_skips_pending_reward_v4_evaluation(update_id: int) -> bool:
     return int(raw) == update_id
 
 
+def _reward_v4_evaluation_disabled() -> bool:
+    """Return whether this operator-run disables Reward V4 evaluation."""
+    raw = os.environ.get("LUNAR_DISABLE_REWARD_V4_EVALUATION")
+    if raw is None:
+        return False
+    if raw != "1":
+        raise ValueError("Reward V4 evaluation disable override is invalid")
+    return True
+
+
 def _positive_block_count(value: str) -> int:
     try:
         blocks = int(value)
@@ -6109,8 +6119,9 @@ def _run_reward_v4_updates(
                     operator_skip_evaluation = (
                         _operator_skips_pending_reward_v4_evaluation(update_id)
                     )
+                    evaluation_disabled = _reward_v4_evaluation_disabled()
                     candidate_name = f"candidate-update-{update_id:08d}.pt"
-                    if operator_skip_evaluation:
+                    if operator_skip_evaluation and not evaluation_disabled:
                         candidate_name = (
                             f"candidate-update-{update_id:08d}-operator-skip.pt"
                         )
@@ -6215,7 +6226,12 @@ def _run_reward_v4_updates(
                                 )
                             ),
                         )
-                        if operator_skip_evaluation:
+                        if evaluation_disabled:
+                            metrics_record["curriculum_events"] = [{
+                                "event": "EVALUATION_DISABLED",
+                                "reason": "operator disabled formal evaluation",
+                            }]
+                        elif operator_skip_evaluation:
                             metrics_record["curriculum_events"] = [{
                                 "event": "EVALUATION_SKIPPED_BY_OPERATOR",
                                 "update_id": update_id,
@@ -6311,7 +6327,7 @@ def _run_reward_v4_updates(
                         raise UpdateCommitError(
                             "Reward V4 candidate state is missing"
                         )
-                    if operator_skip_evaluation:
+                    if evaluation_disabled or operator_skip_evaluation:
                         applied_here = True
                         return candidate
 
