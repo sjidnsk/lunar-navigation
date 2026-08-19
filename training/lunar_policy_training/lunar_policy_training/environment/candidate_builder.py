@@ -268,13 +268,20 @@ class ExhaustionUpgradeScanResult:
 
     diagnostics: ExhaustionUpgradeDiagnostics
     positive_pose_cells: tuple[tuple[int, int], ...]
+    positive_gain_pairs: tuple[tuple[float, float], ...]
 
     def __post_init__(self) -> None:
         if (
             len(self.positive_pose_cells)
             != self.diagnostics.positive_pose_count
+            or len(self.positive_gain_pairs) != len(self.positive_pose_cells)
             or tuple(sorted(self.positive_pose_cells)) != self.positive_pose_cells
             or len(set(self.positive_pose_cells)) != len(self.positive_pose_cells)
+            or any(
+                len(pair) != 2
+                or not all(math.isfinite(float(value)) and float(value) >= 0.0 for value in pair)
+                for pair in self.positive_gain_pairs
+            )
         ):
             raise ValueError("exhaustion upgrade result is invalid")
 
@@ -1400,12 +1407,15 @@ class CandidateBuilderV2:
             or (gains < 0.0).any()
         ):
             raise CandidateInvariantError("CANDIDATE_GAIN_NONFINITE")
-        positive = tuple(
-            (int(row), int(column))
-            for (row, column), gain in zip(
-                endpoint_cells, gains[:, 0], strict=True
-            )
-            if float(gain) >= _DETAIL_CELL_COARSE_EQUIVALENT
+        positive_rows = [
+            (int(row), int(column), float(gain[0]), float(gain[1]))
+            for (row, column), gain in zip(endpoint_cells, gains, strict=True)
+            if float(gain[0]) >= _DETAIL_CELL_COARSE_EQUIVALENT
+        ]
+        positive = tuple((row, column) for row, column, _, _ in positive_rows)
+        positive_gains = tuple(
+            (gain, priority_gain)
+            for _, _, gain, priority_gain in positive_rows
         )
         temporary_bytes = int(
             residual.nbytes + potential.nbytes + eligible.nbytes
@@ -1423,6 +1433,232 @@ class CandidateBuilderV2:
                 elapsed_s=perf_counter() - started,
             ),
             positive_pose_cells=positive,
+            positive_gain_pairs=positive_gains,
+        )
+
+    def build_ground_exhaustion_universe(
+        self,
+        world: ObservedWorld,
+        mission: MissionRaster,
+        pose_map: Pose2,
+        projection: PlatformProjection,
+        *,
+        physical_reachability: PhysicalReachabilityResult,
+        platform_type: str,
+        platform_id: str,
+        capability_content_sha256: str,
+        mission_revision: int,
+        evidence_generation: int,
+        physical_evidence_sha256: str,
+        physical_reachability_algorithm_id: str,
+        goal_tolerance_mm: int,
+        ground_endpoint_feasibility: (
+            Callable[[np.ndarray], np.ndarray] | None
+        ),
+    ) -> PhysicalCandidateUniverse:
+        """Build a formal ground universe from one completed upgrade scan."""
+        started = perf_counter()
+        if platform_type not in _GROUND_PLATFORM_TYPES:
+            raise ValueError("ground exhaustion universe requires a ground platform")
+        self._validate_physical_identity(
+            platform_type=platform_type,
+            platform_id=platform_id,
+            capability_content_sha256=capability_content_sha256,
+            mission_revision=mission_revision,
+            evidence_generation=evidence_generation,
+            physical_evidence_sha256=physical_evidence_sha256,
+            physical_reachability_algorithm_id=(
+                physical_reachability_algorithm_id
+            ),
+            goal_tolerance_mm=goal_tolerance_mm,
+        )
+        if (
+            not isinstance(world, ObservedWorld)
+            or not isinstance(mission, MissionRaster)
+            or not isinstance(projection, PlatformProjection)
+            or not isinstance(physical_reachability, PhysicalReachabilityResult)
+            or not isinstance(pose_map, Pose2)
+            or pose_map.frame_id != "map"
+            or world.canvas != mission.canvas
+            or world.canvas != projection.canvas
+            or physical_reachability.platform_type != platform_type
+            or physical_reachability.physical_reachability_algorithm_id
+            != physical_reachability_algorithm_id
+        ):
+            raise ValueError("ground exhaustion universe inputs are inconsistent")
+        physical_mask = physical_reachability.physical_observation_pose_mask
+        cells = world.canvas.geometry.cells
+        if physical_mask.shape != (cells, cells):
+            raise ValueError("ground exhaustion mask geometry differs")
+        physical_cells = tuple(
+            (int(row), int(column))
+            for row, column in zip(*np.nonzero(physical_mask), strict=True)
+        )
+        positions = physical_reachability.observation_positions_m
+        if len(physical_cells) != len(positions):
+            raise ValueError("ground exhaustion positions differ from mask")
+        exact_target_poses: dict[tuple[int, int], Pose2] = {}
+        for cell, position in zip(physical_cells, positions, strict=True):
+            if world.canvas.world_to_grid(float(position[0]), float(position[1])) != cell:
+                raise ValueError("ground exhaustion position leaves its cell")
+            exact_target_poses[cell] = Pose2(
+                float(position[0]),
+                float(position[1]),
+                elevation_m=float(position[2]),
+            )
+        ground_global_search = physical_reachability.ground_global_search
+        if ground_global_search is None:
+            raise CandidateInvariantError("GLOBAL_PATH_COST_NONFINITE")
+        scan = self.scan_ground_exhaustion_candidates(
+            world,
+            mission,
+            reachable_pose_mask=physical_mask,
+            observation_positions_m=positions,
+            ground_endpoint_feasibility=ground_endpoint_feasibility,
+        )
+        minimum_cost = ground_global_search.sampled_minimum_cost_m
+        total_roi = float(mission.roi_ratio.sum(dtype=np.float64))
+        roi_diagonal = task_roi_diagonal_m(
+            mission.roi_ratio,
+            resolution_m=world.canvas.geometry.resolution_m,
+        )
+        ranked_scan = sorted(
+            (
+                (
+                    cell,
+                    float(gain_pair[0]),
+                    float(gain_pair[1]),
+                    float(minimum_cost[cell]),
+                    max(0.0, 1.0 - float(projection.clearance_margin_norm[cell])),
+                )
+                for cell, gain_pair in zip(
+                    scan.positive_pose_cells,
+                    scan.positive_gain_pairs,
+                    strict=True,
+                )
+                if math.isfinite(float(minimum_cost[cell]))
+            ),
+            key=lambda item: (-item[1], item[3], item[4], item[0]),
+        )
+        positive_gain_normalizer = max((item[1] for item in ranked_scan), default=0.0)
+        priority_gain_normalizer = max((item[2] for item in ranked_scan), default=0.0)
+        preliminary: list[PhysicalCandidate] = []
+        for segment_id, (cell, gain, priority_gain, global_cost, risk) in enumerate(
+            ranked_scan
+        ):
+            target_pose = exact_target_poses[cell]
+            feature = self._feature(
+                world,
+                mission,
+                projection,
+                pose_map,
+                cell,
+                total_roi,
+                gain,
+                priority_gain,
+                positive_gain_normalizer,
+                priority_gain_normalizer,
+                target_pose=target_pose,
+                global_path_cost_norm=normalize_global_path_cost(
+                    global_cost,
+                    roi_diagonal,
+                    _NOMINAL_GLOBAL_COST_PER_M,
+                ),
+            )
+            if feature is None:
+                continue
+            preliminary.append(
+                self._physical_candidate(
+                    _FeasibleAnchor(
+                        segment_id=segment_id,
+                        point=cell,
+                        feature=feature,
+                        elevation_m=float(target_pose.elevation_m),
+                        target_position_m=(
+                            float(target_pose.x_m),
+                            float(target_pose.y_m),
+                            float(target_pose.elevation_m),
+                        ),
+                    ),
+                    pose_map=pose_map,
+                    platform_type=platform_type,
+                    platform_id=platform_id,
+                    mission_revision=mission_revision,
+                    goal_tolerance_mm=goal_tolerance_mm,
+                    segment_candidate_rank=0,
+                    global_path_cost_m=global_cost,
+                    expected_gain_m2=(
+                        gain / _DETAIL_CELL_COARSE_EQUIVALENT
+                    ) * _DETAIL_CELL_AREA_M2,
+                    expected_priority_gain_m2=(
+                        priority_gain / _DETAIL_CELL_COARSE_EQUIVALENT
+                    ) * _DETAIL_CELL_AREA_M2,
+                    risk=risk,
+                )
+            )
+        compressed = _compress_physical_candidates(
+            preliminary, canvas_cells=cells
+        )
+        candidates = tuple(
+            replace(candidate, rank_key=(index, candidate.candidate_id))
+            for index, candidate in enumerate(compressed)
+        )
+        physical_snapshot_id = self._physical_snapshot_id(
+            platform_type=platform_type,
+            platform_id=platform_id,
+            capability_content_sha256=capability_content_sha256,
+            mission_revision=mission_revision,
+            pose_map=pose_map,
+            evidence_generation=evidence_generation,
+            physical_evidence_sha256=physical_evidence_sha256,
+        )
+        selected_count = min(_POLICY_CANDIDATE_COUNT, len(candidates))
+        universe_sha256 = sha256(
+            "".join(candidate.candidate_id for candidate in candidates).encode("ascii")
+        ).hexdigest()
+        diagnostics = CandidateDiagnostics(
+            physical_snapshot_id=physical_snapshot_id,
+            physical_reachability_algorithm_id=physical_reachability_algorithm_id,
+            physical_candidate_universe_count=len(candidates),
+            selected_policy_candidate_count=selected_count,
+            available_candidate_count=len(candidates),
+            untried_reserve_count=len(candidates) - selected_count,
+            planner_failed_current_snapshot_count=0,
+            zero_gain_count=(
+                scan.diagnostics.endpoint_feasible_pose_count
+                - scan.diagnostics.positive_pose_count
+            ),
+            visited_excluded_count=0,
+            physical_unreachable_count=(
+                physical_reachability.physical_safe_pose_count
+                - physical_reachability.physically_reachable_pose_count
+            ),
+        )
+        snapshot = CandidateDecisionSnapshot(
+            snapshot_id=physical_snapshot_id,
+            frontier_segment_count=scan.diagnostics.residual_component_count,
+            raw_candidate_count=scan.diagnostics.reachable_pose_count,
+            fine_pose_candidate_count=scan.diagnostics.reachable_pose_count,
+            globally_reachable_candidate_count=(
+                scan.diagnostics.endpoint_feasible_pose_count
+            ),
+            positive_gain_candidate_count=len(candidates),
+            selected_policy_candidate_count=selected_count,
+            untried_reserve_count=len(candidates) - selected_count,
+            planner_rejected_current_snapshot_count=0,
+            candidate_set_sha256=universe_sha256,
+            global_search_call_count=1,
+            global_search_elapsed_s=ground_global_search.search_elapsed_s,
+            candidate_refresh_elapsed_s=perf_counter() - started,
+            pipeline_kind="GROUND_EXHAUSTION",
+        )
+        return PhysicalCandidateUniverse(
+            physical_snapshot_id=physical_snapshot_id,
+            physical_reachability_algorithm_id=physical_reachability_algorithm_id,
+            candidates=candidates,
+            universe_sha256=universe_sha256,
+            diagnostics=diagnostics,
+            decision_snapshot=snapshot,
         )
 
     def build(
@@ -1720,7 +1956,7 @@ class CandidateBuilderV2:
         boundary = observed & roi & adjacent_unknown
         segments = _frontier_chains(_points(boundary), cells)
         if platform_type in _GROUND_PLATFORM_TYPES:
-            return self._build_ground_physical_universe(
+            normal_universe = self._build_ground_physical_universe(
                 world=world,
                 mission=mission,
                 pose_map=pose_map,
@@ -1741,6 +1977,30 @@ class CandidateBuilderV2:
                 exact_target_poses=exact_target_poses,
                 ground_endpoint_feasibility=ground_endpoint_feasibility,
                 refresh_started=refresh_started,
+            )
+            normal_snapshot = normal_universe.decision_snapshot
+            if (
+                normal_snapshot is None
+                or normal_snapshot.positive_gain_candidate_count > 0
+            ):
+                return normal_universe
+            return self.build_ground_exhaustion_universe(
+                world,
+                mission,
+                pose_map,
+                projection,
+                physical_reachability=physical_reachability,
+                platform_type=platform_type,
+                platform_id=platform_id,
+                capability_content_sha256=capability_content_sha256,
+                mission_revision=mission_revision,
+                evidence_generation=evidence_generation,
+                physical_evidence_sha256=physical_evidence_sha256,
+                physical_reachability_algorithm_id=(
+                    physical_reachability_algorithm_id
+                ),
+                goal_tolerance_mm=goal_tolerance_mm,
+                ground_endpoint_feasibility=ground_endpoint_feasibility,
             )
     def _build_hopper_physical_universe(
         self,

@@ -18,6 +18,13 @@ from lunar_policy_training.environment.observation_builder import (  # noqa: E40
     LocalObservation,
     MissionRaster,
     ObservedWorld,
+    PlatformProjection,
+    Pose2,
+)
+from lunar_policy_training.environment.platform_reachability import (  # noqa: E402
+    GroundGlobalSearchEvidence,
+    PHYSICAL_PROJECTION_SCHEMA,
+    PhysicalReachabilityResult,
 )
 from lunar_policy_training.environment.visibility import SensorGeometry  # noqa: E402
 from lunar_policy_training.polar_data.hazards import CanvasRatioLayer  # noqa: E402
@@ -94,6 +101,15 @@ class _AllGainEstimator:
         return np.ones((len(candidate_cells), 2), dtype=np.float32)
 
 
+class _ZeroGainEstimator(_AllGainEstimator):
+    def estimate_candidate_gains(
+        self, observed_mask, obstacle_ratio, roi_ratio, priority_weight, candidate_cells
+    ) -> np.ndarray:
+        del observed_mask, obstacle_ratio, roi_ratio, priority_weight
+        self.calls.append(candidate_cells.copy())
+        return np.zeros((len(candidate_cells), 2), dtype=np.float32)
+
+
 def _world_and_mission() -> tuple[ObservedWorld, MissionRaster]:
     canvas = MapCanvas.from_roi_bounds("e" * 64, (0.0, 0.0, 25.6, 25.6))
     observed = np.zeros((256, 256), dtype=np.bool_)
@@ -126,6 +142,9 @@ def test_isolated_ground_exhaustion_scan_batches_reachable_residual_observers() 
     assert 0 < result.diagnostics.reachable_pose_count <= int(reachable.sum())
     assert result.diagnostics.exact_gain_evaluated_pose_count == result.diagnostics.reachable_pose_count
     assert result.diagnostics.positive_pose_count == result.diagnostics.reachable_pose_count
+    assert result.positive_gain_pairs == tuple(
+        (1.0, 1.0) for _ in result.positive_pose_cells
+    )
     assert len(estimator.calls) == 1
     assert len(estimator.calls[0]) == result.diagnostics.exact_gain_evaluated_pose_count
 
@@ -159,3 +178,135 @@ def test_isolated_ground_exhaustion_scan_filters_endpoint_infeasible_poses() -> 
     assert result.diagnostics.exact_gain_evaluated_pose_count == 0
     assert result.positive_pose_cells == ()
     assert estimator.calls == []
+
+
+def test_ground_exhaustion_builds_formal_candidate_universe_from_positive_scan() -> None:
+    world, mission = _world_and_mission()
+    estimator = _AllGainEstimator()
+    builder = candidate_builder.CandidateBuilderV2(estimator)
+    mask = np.ascontiguousarray(world.observed_mask.copy(), dtype=np.bool_)
+    positions = np.ascontiguousarray(
+        [
+            (*world.canvas.grid_center_world(int(row), int(column)), 0.0)
+            for row, column in zip(*np.nonzero(mask), strict=True)
+        ],
+        dtype=np.float64,
+    )
+    costs = np.full(mask.shape, np.inf, dtype=np.float64)
+    costs[mask] = 1.0
+    costs = np.ascontiguousarray(costs)
+    costs.setflags(write=False)
+    physical = PhysicalReachabilityResult(
+        platform_type="WHEELED",
+        physical_observation_pose_mask=mask,
+        observation_positions_m=positions,
+        physical_projection_schema=PHYSICAL_PROJECTION_SCHEMA,
+        physical_reachability_algorithm_id="test/ground/v1",
+        physical_evidence_algorithm_id="test/evidence/v1",
+        physical_safe_pose_count=int(mask.sum()),
+        physically_reachable_pose_count=int(mask.sum()),
+        ground_global_search=GroundGlobalSearchEvidence(
+            sampled_minimum_cost_m=costs,
+            planner_tree_sha256="c" * 64,
+            planner_tree_cells=256,
+            planner_start_index=0,
+            search_elapsed_s=0.01,
+            coarse_fine_unreachable_count=0,
+        ),
+    )
+    projection = PlatformProjection(
+        world.canvas,
+        np.ones(mask.shape, dtype=np.float32),
+        np.ones((32, 32), dtype=np.float32),
+        np.ones(mask.shape, dtype=np.float32),
+        "test_only/proxy",
+    )
+
+    universe = builder.build_ground_exhaustion_universe(
+        world,
+        mission,
+        Pose2(12.8, 12.8),
+        projection,
+        physical_reachability=physical,
+        platform_type="WHEELED",
+        platform_id="unit-wheeled-1",
+        capability_content_sha256="1" * 64,
+        mission_revision=1,
+        evidence_generation=1,
+        physical_evidence_sha256="2" * 64,
+        physical_reachability_algorithm_id="test/ground/v1",
+        goal_tolerance_mm=200,
+        ground_endpoint_feasibility=lambda targets: np.ones(
+            len(targets), dtype=np.bool_
+        ),
+    )
+
+    assert universe.candidates
+    assert universe.decision_snapshot is not None
+    assert universe.decision_snapshot.pipeline_kind == "GROUND_EXHAUSTION"
+    assert universe.diagnostics.selected_policy_candidate_count > 0
+
+
+def test_ground_normal_builder_upgrades_zero_gain_frontier_before_terminal() -> None:
+    world, mission = _world_and_mission()
+    estimator = _ZeroGainEstimator()
+    builder = candidate_builder.CandidateBuilderV2(estimator)
+    mask = np.ascontiguousarray(world.observed_mask.copy(), dtype=np.bool_)
+    positions = np.ascontiguousarray(
+        [
+            (*world.canvas.grid_center_world(int(row), int(column)), 0.0)
+            for row, column in zip(*np.nonzero(mask), strict=True)
+        ],
+        dtype=np.float64,
+    )
+    costs = np.full(mask.shape, np.inf, dtype=np.float64)
+    costs[mask] = 1.0
+    costs = np.ascontiguousarray(costs)
+    costs.setflags(write=False)
+    physical = PhysicalReachabilityResult(
+        platform_type="WHEELED",
+        physical_observation_pose_mask=mask,
+        observation_positions_m=positions,
+        physical_projection_schema=PHYSICAL_PROJECTION_SCHEMA,
+        physical_reachability_algorithm_id="test/ground/v1",
+        physical_evidence_algorithm_id="test/evidence/v1",
+        physical_safe_pose_count=int(mask.sum()),
+        physically_reachable_pose_count=int(mask.sum()),
+        ground_global_search=GroundGlobalSearchEvidence(
+            sampled_minimum_cost_m=costs,
+            planner_tree_sha256="c" * 64,
+            planner_tree_cells=256,
+            planner_start_index=0,
+            search_elapsed_s=0.01,
+            coarse_fine_unreachable_count=0,
+        ),
+    )
+    projection = PlatformProjection(
+        world.canvas,
+        np.ones(mask.shape, dtype=np.float32),
+        np.ones((32, 32), dtype=np.float32),
+        np.ones(mask.shape, dtype=np.float32),
+        "test_only/proxy",
+    )
+
+    universe = builder.build_physical_universe(
+        world,
+        mission,
+        Pose2(12.8, 12.8),
+        projection,
+        physical_reachability=physical,
+        platform_type="WHEELED",
+        platform_id="unit-wheeled-1",
+        capability_content_sha256="1" * 64,
+        mission_revision=1,
+        evidence_generation=1,
+        physical_evidence_sha256="2" * 64,
+        physical_reachability_algorithm_id="test/ground/v1",
+        goal_tolerance_mm=200,
+        ground_endpoint_feasibility=lambda targets: np.ones(
+            len(targets), dtype=np.bool_
+        ),
+    )
+
+    assert universe.decision_snapshot is not None
+    assert universe.decision_snapshot.pipeline_kind == "GROUND_EXHAUSTION"

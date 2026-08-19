@@ -8,10 +8,11 @@ observed-only policy contract and a bounded runtime cost.
 
 ## Scope
 
-This change initially implements and measures an isolated ground-only scan.
-It does not alter `v3_environment` termination, PPO trajectories, checkpoint
-schemas, HOPPER behavior, or the live training runtime.  Integration is a
-separate decision after benchmark evidence.
+This change integrates the scan only as the ground candidate builder's
+zero-positive fallback. Normal three-per-frontier refreshes are unchanged;
+HOPPER behavior, PPO interfaces and checkpoint schemas are unchanged. The
+scan result uses the explicit `GROUND_EXHAUSTION` pipeline kind, so a terminal
+zero-gain result is distinguishable from normal frontier sampling.
 
 ## Observed-only inputs
 
@@ -40,8 +41,10 @@ positive pose.
 `ExhaustionUpgradeDiagnostics` records the residual component count, raw
 reachable pose count, endpoint-feasible pose count, exact-gain evaluated pose
 count, positive pose count and elapsed time.  The isolated API returns these
-diagnostics plus canonical positive pose-cell witnesses; it does not create
-`PhysicalCandidate` values or expose any result to the policy yet.
+diagnostics plus canonical positive pose-cell witnesses and exact gain pairs.
+The ground fallback converts them to the existing `PhysicalCandidateUniverse`
+only when ordinary candidates contain no positive gain; no PPO tensor, action
+or checkpoint field is added.
 
 The radius prefilter is an exact Chebyshev-stencil existence test implemented
 with a summed-area table.  It is O(map cells), rather than repeatedly

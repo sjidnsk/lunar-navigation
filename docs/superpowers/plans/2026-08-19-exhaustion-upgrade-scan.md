@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build and measure a ground-only observed-data exhaustion scan without changing live episode termination.
+**Goal:** Build, measure and conditionally integrate a ground-only observed-data exhaustion scan.
 
-**Architecture:** Add a pure candidate-builder API that derives residual authorized-unobserved components, exhaustively evaluates the finite reachable observer-pose library near those components, and returns the deterministic positive subset plus diagnostics. Keep the existing normal three-per-frontier builder untouched; integration with `v3_environment` is explicitly deferred pending measurement.
+**Architecture:** Add a candidate-builder fallback that derives residual authorized-unobserved components, exhaustively evaluates the finite reachable observer-pose library near those components, and returns the deterministic positive subset plus diagnostics. Keep the existing normal three-per-frontier builder untouched; invoke the scan only when that path has no positive ground candidate, and publish the result through the existing candidate-universe contract.
 
 **Tech Stack:** Python 3.10, NumPy, existing `CandidateBuilderV2`, existing ground global-reachability and batched visibility-estimator interfaces, pytest.
 
@@ -15,7 +15,7 @@
 - Ground platforms only; do not alter HOPPER candidate or termination semantics.
 - Never use hidden coverability/reward truth to generate or rank a candidate.
 - Reuse the existing exact-gain and endpoint-feasibility contracts.
-- Do not call the scan from normal candidate refresh in this change.
+- Do not call the scan from a normal candidate refresh that already has a positive candidate.
 - Runtime artifacts and benchmark outputs remain outside Git.
 
 ---
