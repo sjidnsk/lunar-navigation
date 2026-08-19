@@ -138,6 +138,48 @@ def _ground_potential_gain_mask(
     return np.ascontiguousarray(possible, dtype=np.bool_)
 
 
+def _ground_residual_components(
+    residual: np.ndarray,
+) -> tuple[tuple[tuple[int, int], ...], ...]:
+    """Return canonical four-connected observed-only residual components."""
+    if (
+        not isinstance(residual, np.ndarray)
+        or residual.dtype != np.dtype(np.bool_)
+        or residual.ndim != 2
+        or min(residual.shape) <= 0
+        or not residual.flags.c_contiguous
+    ):
+        raise ValueError("ground residual mask is invalid")
+    remaining = np.ascontiguousarray(residual.copy(), dtype=np.bool_)
+    rows, columns = remaining.shape
+    components: list[tuple[tuple[int, int], ...]] = []
+    for start_row, start_column in zip(*np.nonzero(remaining), strict=True):
+        start = (int(start_row), int(start_column))
+        if not remaining[start]:
+            continue
+        remaining[start] = False
+        queue: deque[tuple[int, int]] = deque((start,))
+        cells: list[tuple[int, int]] = []
+        while queue:
+            row, column = queue.popleft()
+            cells.append((row, column))
+            for next_row, next_column in (
+                (row - 1, column),
+                (row, column - 1),
+                (row, column + 1),
+                (row + 1, column),
+            ):
+                if (
+                    0 <= next_row < rows
+                    and 0 <= next_column < columns
+                    and remaining[next_row, next_column]
+                ):
+                    remaining[next_row, next_column] = False
+                    queue.append((next_row, next_column))
+        components.append(tuple(sorted(cells)))
+    return tuple(components)
+
+
 @dataclass(frozen=True, slots=True)
 class CandidateDiagnostics:
     physical_snapshot_id: str = ""
@@ -189,6 +231,56 @@ class CandidateDiagnostics:
             - self.selected_policy_candidate_count
         ):
             raise ValueError("candidate selection diagnostics are inconsistent")
+
+
+@dataclass(frozen=True, slots=True)
+class ExhaustionUpgradeDiagnostics:
+    """Observed-only work accounting for one isolated ground exhaustion scan."""
+
+    residual_component_count: int
+    reachable_pose_count: int
+    endpoint_feasible_pose_count: int
+    exact_gain_evaluated_pose_count: int
+    positive_pose_count: int
+    temporary_array_bytes: int
+    elapsed_s: float
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.residual_component_count,
+            self.reachable_pose_count,
+            self.endpoint_feasible_pose_count,
+            self.exact_gain_evaluated_pose_count,
+            self.positive_pose_count,
+            self.temporary_array_bytes,
+        )
+        if (
+            any(type(value) is not int or value < 0 for value in counts)
+            or self.endpoint_feasible_pose_count > self.reachable_pose_count
+            or self.exact_gain_evaluated_pose_count
+            != self.endpoint_feasible_pose_count
+            or self.positive_pose_count > self.exact_gain_evaluated_pose_count
+            or not math.isfinite(self.elapsed_s)
+            or self.elapsed_s < 0.0
+        ):
+            raise ValueError("exhaustion upgrade diagnostics are invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ExhaustionUpgradeScanResult:
+    """A non-policy observed-only scan result; it does not change termination."""
+
+    diagnostics: ExhaustionUpgradeDiagnostics
+    positive_pose_cells: tuple[tuple[int, int], ...]
+
+    def __post_init__(self) -> None:
+        if (
+            len(self.positive_pose_cells)
+            != self.diagnostics.positive_pose_count
+            or tuple(sorted(self.positive_pose_cells)) != self.positive_pose_cells
+            or len(set(self.positive_pose_cells)) != len(self.positive_pose_cells)
+        ):
+            raise ValueError("exhaustion upgrade result is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1171,6 +1263,94 @@ class CandidateBuilderV2:
     @property
     def sensor(self) -> SensorGeometry:
         return self._sensor
+
+    def scan_ground_exhaustion_candidates(
+        self,
+        world: ObservedWorld,
+        mission: MissionRaster,
+        *,
+        reachable_pose_mask: np.ndarray,
+    ) -> ExhaustionUpgradeScanResult:
+        """Measure all currently reachable observed-only residual observers.
+
+        This deliberately has no platform action, candidate-batch, checkpoint,
+        or terminal side effect.  It is the pre-integration scan used to bound
+        the work required when normal frontier candidates are exhausted.
+        """
+        started = perf_counter()
+        if (
+            not isinstance(world, ObservedWorld)
+            or not isinstance(mission, MissionRaster)
+            or world.canvas != mission.canvas
+        ):
+            raise ValueError("exhaustion scan inputs must share a map canvas")
+        reachable = np.asarray(reachable_pose_mask)
+        cells = world.canvas.geometry.cells
+        if (
+            reachable.dtype != np.dtype(np.bool_)
+            or reachable.shape != (cells, cells)
+            or not reachable.flags.c_contiguous
+        ):
+            raise ValueError("exhaustion scan reachable pose mask is invalid")
+        residual = np.ascontiguousarray(
+            (mission.roi_ratio > 0.0) & ~world.observed_mask,
+            dtype=np.bool_,
+        )
+        components = _ground_residual_components(residual)
+        potential = _ground_potential_gain_mask(
+            residual,
+            sensor_range_m=self._sensor.range_m,
+            resolution_m=world.canvas.geometry.resolution_m,
+        )
+        eligible = np.ascontiguousarray(reachable & potential, dtype=np.bool_)
+        pose_cells = np.ascontiguousarray(
+            np.argwhere(eligible), dtype=np.int32
+        ).reshape((-1, 2))
+        gain_arguments = (
+            np.ascontiguousarray(world.observed_mask, dtype=np.bool_),
+            np.ascontiguousarray(
+                world.physical_obstacle_layer.values, dtype=np.float32
+            ),
+            np.ascontiguousarray(mission.roi_ratio, dtype=np.float32),
+            np.ascontiguousarray(
+                mission.priority * mission.roi_ratio, dtype=np.float32
+            ),
+        )
+        gains = self._visibility_estimator.estimate_candidate_gains(
+            *gain_arguments, pose_cells
+        )
+        if (
+            not isinstance(gains, np.ndarray)
+            or gains.dtype != np.dtype(np.float32)
+            or gains.shape != (len(pose_cells), 2)
+            or not gains.flags.c_contiguous
+            or not np.isfinite(gains).all()
+            or (gains < 0.0).any()
+        ):
+            raise CandidateInvariantError("CANDIDATE_GAIN_NONFINITE")
+        positive = tuple(
+            (int(row), int(column))
+            for (row, column), gain in zip(
+                pose_cells, gains[:, 0], strict=True
+            )
+            if float(gain) >= _DETAIL_CELL_COARSE_EQUIVALENT
+        )
+        temporary_bytes = int(
+            residual.nbytes + potential.nbytes + eligible.nbytes
+            + pose_cells.nbytes + gains.nbytes
+        )
+        return ExhaustionUpgradeScanResult(
+            diagnostics=ExhaustionUpgradeDiagnostics(
+                residual_component_count=len(components),
+                reachable_pose_count=int(eligible.sum(dtype=np.int64)),
+                endpoint_feasible_pose_count=len(pose_cells),
+                exact_gain_evaluated_pose_count=len(pose_cells),
+                positive_pose_count=len(positive),
+                temporary_array_bytes=temporary_bytes,
+                elapsed_s=perf_counter() - started,
+            ),
+            positive_pose_cells=positive,
+        )
 
     def build(
         self,
