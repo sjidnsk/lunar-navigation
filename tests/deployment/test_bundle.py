@@ -6,6 +6,8 @@ import tarfile
 from pathlib import Path
 
 from deployment.luna_runtime.bundle import BundleRequest, build_bundle
+from deployment.luna_runtime.cli import run_cli
+from deployment.luna_runtime.host import HostFacts
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -43,3 +45,15 @@ def test_bundles_are_deterministic_and_profiles_are_distinct(tmp_path: Path) -> 
     assert hashlib.sha256(amd_first.read_bytes()).hexdigest() == hashlib.sha256(amd_second.read_bytes()).hexdigest()
     assert _manifest(amd_first)["source_commit"] == _manifest(orin)["source_commit"]
     assert _manifest(amd_first)["target_profile"] != _manifest(orin)["target_profile"]
+
+
+def test_luna_bundle_writes_one_archive_without_runtime_initialization(tmp_path: Path) -> None:
+    result = run_cli(
+        ["bundle", "--target", "ubuntu22-humble-amd64", "--output", str(tmp_path)],
+        facts=HostFacts("ubuntu", "22.04", "x86_64", "humble"),
+        repo_root=REPO_ROOT,
+        home=tmp_path / "home",
+    )
+    assert result.exit_code == 0
+    assert Path(result.payload["archive"]).is_file()
+    assert not (tmp_path / "home").exists()

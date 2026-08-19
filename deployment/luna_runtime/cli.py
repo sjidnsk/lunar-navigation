@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
 
+from .bundle import BundleRequest, build_bundle
 from .commands import CommandRunner, RuntimeRefusal, doctor_runtime, init_runtime, prepare_environment
 from .config import ConfigError, load_runtime_config, load_profile
 from .host import HostFacts
@@ -77,15 +78,22 @@ def run_cli(
     host = facts or _host_facts()
     commands = runner or SystemRunner()
     parser = argparse.ArgumentParser(prog="luna", add_help=False)
-    parser.add_argument("command", choices=("init", "prepare", "doctor", "config"))
+    parser.add_argument("command", choices=("init", "prepare", "doctor", "config", "bundle"))
     parser.add_argument("--profile")
     parser.add_argument("--config")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--target")
+    parser.add_argument("--output")
     parser.add_argument("check", nargs="?")
     try:
         args = parser.parse_args(list(argv))
+        if args.command == "bundle":
+            if not args.target or not args.output:
+                return CliResult(2, {"reason": "BUNDLE_TARGET_AND_OUTPUT_REQUIRED"})
+            result = build_bundle(BundleRequest(root, "HEAD", args.target, Path(args.output)))
+            return CliResult(0, {"archive": str(result.archive), "source_commit": result.source_commit})
         if args.command == "init":
             if not args.profile:
                 return CliResult(2, {"reason": "PROFILE_REQUIRED"})
