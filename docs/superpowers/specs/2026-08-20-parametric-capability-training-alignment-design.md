@@ -7,13 +7,13 @@
 
 ## 1. 目标
 
-把已经进入部署主线的 WHEELED、LEGGED、HOPPER 参数化能力接入最新地面正式训练链，同时保持已经确认的 PPO 动作语义、候选容量、Reward V4、训练观测抽象和轻量评估机制。
+把已经进入部署主线的 WHEELED、LEGGED、HOPPER 参数化能力接入最新地面正式训练链，同时把正式训练观测统一到部署使用的 10 m、90° 传感器语义，并保持已经确认的 PPO 动作语义、候选容量、Reward V4 和轻量评估机制。
 
 本设计解决以下错配：
 
 - 部署规划器读取 `deployment/config/{wheel,legged,hopper}.yaml`；
 - 正式训练仍读取旧 `three_platform_capability_freeze_v1.yaml`；
-- 部署 `observation.yaml` 是 10 m、90°，正式训练抽象仍是 30 m、360°；
+- 部署 `observation.yaml` 是 10 m、90°，正式训练仍硬编码为 30 m、360°；
 - 候选位置由生成器产生，地面最终朝向由 PPO 的连续 `theta` 输出，但候选预期收益尚未明确绑定前沿法向。
 
 ## 2. 已确认决策
@@ -34,7 +34,7 @@ PolicyAction = (candidate_index, theta_rad)
 
 ### 2.2 候选预期收益
 
-候选预期收益使用前沿法向的标准观测朝向计算，但该标准朝向不约束 PPO 的最终 `theta_rad`。
+候选预期收益使用前沿法向的标准观测朝向和 10 m、90° 方向性视场计算，但该标准朝向不约束 PPO 的最终 `theta_rad`。
 
 对每个前沿锚点：
 
@@ -50,16 +50,28 @@ PolicyAction = (candidate_index, theta_rad)
 
 ### 2.3 训练观测与部署接口
 
-正式训练继续使用：
+正式训练与部署统一使用：
 
 ```text
-sensor_range_m = 30.0
-sensor_fov_deg = 360.0
+sensor_range_m = 10.0
+sensor_fov_deg = 90.0
 ```
 
-`deployment/config/observation.yaml` 中的 10 m、90° 仅属于部署运行配置，不改变本次正式训练语义。Topic 名称、QoS、T3 地图适配、相机到车体 TF 和底盘控制接口均属于部署边界，不进入离线正式训练身份。
+`deployment/config/observation.yaml` 是训练和部署共同的观测能力权威。训练启动时冻结该文件；传感器距离、视场角和内容摘要进入训练语义、缓存、任务分母和 run manifest 身份。
 
-若未来把正式训练抽象改成 10 m、90°，必须作为新的训练语义版本、缓存身份和新运行单独设计；不得在本次对齐中静默切换。
+`FORMAL_TRAINING_SEMANTICS_VERSION` 必须从当前 30 m、360° 身份升级为新的 10 m、90° 身份。新版本不得接受旧版本缓存或精确 checkpoint 恢复。
+
+方向性观测必须贯穿完整数据流：
+
+- 候选资格和预期收益以候选位置及 `canonical_yaw` 为中心计算 90° 视场；
+- PPO 执行后的实际观测以执行位姿的真实 yaw 为中心计算 90° 视场；
+- 初始观测只使用初始平台 yaw，不得退化为 360° 初始化；
+- Reward V4 和覆盖增量只使用实际 90° 观测提交结果；
+- 任何 30 m、360° 可见性或覆盖缓存均不得迁移到新运行。
+
+Topic 名称、QoS、T3 地图适配、相机到车体 TF 和底盘控制接口仍属于部署接口边界，不进入离线正式训练身份。
+
+10 m 是传感器有效观测距离，不是地面候选动作距离、全局路径范围或滚动局部规划范围。本次不得把与路径搜索域有关的 30 m 常量机械改成 10 m；路径规划范围保持现有配置和算法不变。
 
 ### 2.4 当前训练范围
 
@@ -82,7 +94,8 @@ sensor_fov_deg = 360.0
 
 - `deployment/config/wheel.yaml`；
 - `deployment/config/legged.yaml`；
-- `deployment/config/hopper.yaml`。
+- `deployment/config/hopper.yaml`；
+- `deployment/config/observation.yaml`。
 
 训练不得继续从旧三平台冻结 YAML 重建不同数值的能力。旧文件仅保留为历史兼容输入，不再是新运行的能力权威。
 
@@ -90,10 +103,10 @@ sensor_fov_deg = 360.0
 
 训练启动时必须：
 
-1. 读取三个参数化能力文件；
+1. 读取本次活动平台 WHEELED、LEGGED 的参数化能力文件和共同观测能力文件；
 2. 使用现有严格 schema 和解析器验证；
-3. 对每个平台生成 canonical JSON 语义摘要；
-4. 将原始能力文件复制到 run 外部产物目录；
+3. 对每个活动平台和观测能力生成 canonical JSON 语义摘要；
+4. 将活动平台与观测能力原始文件复制到 run 外部产物目录；
 5. 在 run manifest 中记录源路径、文件 SHA256、平台内容 SHA256 和组合摘要；
 6. worker 仅接收已冻结的不可变能力对象，不在宏动作中重新读取文件。
 
@@ -101,7 +114,7 @@ sensor_fov_deg = 360.0
 
 ### 3.3 平台作用域身份
 
-地面训练的资格、缓存和 worker 身份分别绑定 WHEELED 与 LEGGED 的平台内容摘要。HOPPER 能力仍需通过加载器和训练桥测试，但 HOPPER 内容变化不得单独使一个只含地面 worker 的 checkpoint 失效。
+地面训练的资格、缓存和 worker 身份分别绑定 WHEELED 与 LEGGED 的平台内容摘要，并共同绑定观测能力摘要。HOPPER 能力仍需通过加载器和训练桥测试，但 HOPPER 内容变化不得单独使一个只含地面 worker 的 checkpoint 失效。
 
 ## 4. 规划与训练桥
 
@@ -118,7 +131,7 @@ sensor_fov_deg = 360.0
 
 ### 5.1 可复用内容
 
-以下内容与新平台参数无关，可以保留：
+以下内容与新平台及观测参数无关，可以保留：
 
 - 原始场景源文件；
 - 任务区域和场景划分；
@@ -137,12 +150,24 @@ WHEELED 数值能力已经改变，必须重新生成：
 
 LEGGED 和 HOPPER 只有在 canonical 物理字段与旧缓存逐字段相等、派生投影算法身份相同且 bit-exact 复核通过时才可迁移旧派生缓存；任一条件不满足则只重建对应平台，不重建原始场景。
 
-正式训练传感器仍是 30 m、360°，因此传感器可见性缓存不因部署 10 m、90° 文件失效。
+由于正式训练从 30 m、360° 改为 10 m、90°，本次活动的 WHEELED、LEGGED 必须让以下内容失效并重新生成：
+
+- 可见性和射线缓存；
+- 候选预期收益及其特征派生缓存；
+- 初始观测和轨迹观测派生缓存；
+- 任务级冻结可覆盖分母；
+- 依赖观测内容的场景资格结果。
+
+现有 HOPPER 观测派生缓存也必须标记为与新语义不兼容，但当前不创建 HOPPER worker，因此不在本次恢复训练前重建 HOPPER 缓存。
+
+任务可覆盖分母必须保持策略无关。对每个物理可达观测位置，分母使用平台物理上可达到的朝向集合之可见区域并集；当前地面能力允许原地或局部改变 yaw 时，可以用经测试证明等价的 10 m 全方位并集优化分母构建，但这只用于计算潜在可覆盖集合。候选收益、当前已覆盖状态和奖励仍必须严格使用单次 90° 实际视场，不得借分母优化泄漏全向观测。
 
 ### 5.3 checkpoint 使用方式
 
-update 457 不作为精确恢复点。新 run 采用 fresh episode，并且只热启动形状和语义兼容的共享策略参数：
+update 457 不作为精确恢复点。新 run 采用 fresh episode，并且只把形状兼容的共享策略参数作为跨传感器语义初始化；该来源必须在 manifest 中标记为 30 m、360° 旧语义，不能称为等价恢复：
 
+- 可按精确参数名和张量形状加载共享候选编码器、Cross-Attention 主干和候选索引 actor；
+- 连续 `theta` actor 必须重新初始化，因为旧 360° 观测奖励不能提供与新 90° 方向性观测等价的朝向学习信号；
 - 不恢复旧 worker 环境；
 - 不恢复未完成宏动作；
 - 不恢复 optimizer；
@@ -150,6 +175,8 @@ update 457 不作为精确恢复点。新 run 采用 fresh episode，并且只�
 - 不恢复 value head；
 - 不恢复旧运行归一化统计；
 - 保留旧 checkpoint 和 run manifest 作为来源证据。
+
+任一名称、形状或模型契约不匹配的策略张量都不得宽松加载。新 `theta` actor、value head、归一化状态和 optimizer 必须从新语义初始化。
 
 ## 6. 分支集成策略
 
@@ -169,14 +196,16 @@ update 457 不作为精确恢复点。新 run 采用 fresh episode，并且只�
 1. 参数化能力 schema、WHEELED/LEGGED/HOPPER 加载器和训练桥聚焦测试通过；
 2. WHEELED 新能力逐字段进入 C++ 规划请求；
 3. LEGGED 新能力逐字段进入 C++ 规划请求；
-4. 前沿法向只使用 ROI 内未知侧，标准收益确定且可重复；
-5. PPO 输出的地面 `theta_rad` 不被标准法向覆盖；
-6. 30 m、360° 正式训练语义未被部署 10 m、90° 配置改变；
-7. 旧缓存对新 WHEELED 能力 fail closed；
-8. 经等价认证的平台缓存可按平台复用；
-9. update 457 仅提取兼容策略权重并创建 fresh-episode 新 run；
-10. 单个 WHEELED 和 LEGGED 场景各完成一个完整宏动作，无硬错误、非有限值或身份漂移；
-11. `git diff --check` 与目标 Python 编译检查通过。
+4. 前沿法向只使用 ROI 内未知侧，10 m、90° 标准收益确定且可重复；
+5. PPO 输出的地面 `theta_rad` 不被标准法向覆盖，并实际改变 90° 可见区域；
+6. 10 m 边界内外和 90° 视场内外的可见性测试通过，初始观测不再全向；
+7. 任务分母使用可达位置和可达朝向的可见并集，但 rollout 覆盖与奖励保持单次 90°；
+8. 旧 30 m、360° 可见性、收益、分母和资格缓存全部 fail closed；
+9. 旧缓存对新 WHEELED 能力 fail closed；
+10. 仅与平台物理相关且经等价认证的缓存可按平台复用；
+11. update 457 仅提取兼容策略权重并创建 fresh-episode 新 run；
+12. 单个 WHEELED 和 LEGGED 场景各完成一个完整宏动作，无硬错误、非有限值或身份漂移；
+13. `git diff --check` 与目标 Python 编译检查通过。
 
 验证通过后才恢复 24 个地面 worker。训练启动、首次 checkpoint 和首个指标 update 分别报告，不能把进程存活表述为训练健康或收敛。
 
@@ -188,9 +217,8 @@ update 457 不作为精确恢复点。新 run 采用 fresh episode，并且只�
 - 不修改 Reward V4；
 - 不降低安全、碰撞、净空或规划失败约束；
 - 不修改路径规划算法；
-- 不把部署 Topic/QoS/TF 写进训练身份；
+- 不把部署 Topic/QoS 或控制接口写进训练身份；
 - 不恢复第三级全任务残余区域扫描；
 - 不启动或评估 HOPPER；
 - 不运行全场景长门禁；
 - 不删除旧 checkpoint、原始场景或历史缓存。
-
