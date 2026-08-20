@@ -33,6 +33,9 @@
 - Create: `tests/deployment/test_hopper_capability.py`
 - Modify: `ros2_ws/src/lunar_planner_core/include/lunar_planner_core/types/platform_capability.hpp`
 - Modify: `ros2_ws/src/lunar_planner_core/src/shared/projection_cache.cpp`
+- Modify: `ros2_ws/src/lunar_planner_core/src/shared/reachability_projection.cpp`
+- Modify: `ros2_ws/src/lunar_planner_core/src/hopper/hopper_planner.cpp`
+- Modify: `ros2_ws/src/lunar_planner_core/src/hopper/hopper_reachability_graph.cpp`
 - Modify: `ros2_ws/src/lunar_planner_ros/src/capability_loader.cpp`
 - Modify: `ros2_ws/src/lunar_planner_ros/test/capability_loader_test.cpp`
 - Modify: `ros2_ws/src/lunar_planner_training_bridge/src/python_bindings.cpp`
@@ -96,7 +99,7 @@ reference_horizontal_range_m: project_engineering_baseline
 reference_elevation_delta_m: project_engineering_baseline
 ```
 
-Flatten the approved sections into the existing runtime `hopper:` block, keep the approved source spelling `reference_remaining_usable_fuel_mass_kg`, and map it internally to the existing non-decrementing reference propellant quantity. Validate exact keys and exact source keys for the approved parametric identity. Preserve legacy HOPPER parsing only in legacy URDF/package-relative mode. Hash and bind every new typed field so ROS and formal-freeze projections cannot silently disagree.
+Flatten the approved sections into the existing runtime `hopper:` block, keep the approved source spelling `reference_remaining_usable_fuel_mass_kg`, and map it internally to the existing non-decrementing reference propellant quantity. Validate exact keys and exact source keys for the approved parametric identity. Preserve legacy HOPPER parsing only in legacy URDF/package-relative mode. Hash and bind every new typed field so ROS and formal-freeze projections cannot silently disagree. Replace the hard-coded lunar-gravity vectors used by `HopperPlanner`, `HopperReachabilityGraph`, and HOPPER reachability projection with `HopperCapability::gravity_mps2`; add behavior tests whose changed configured gravity alters or invalidates the resulting ballistic/reachability calculation, so the new field is proven to be consumed rather than merely stored.
 
 - [ ] **Step 4: Run focused GREEN verification**
 
