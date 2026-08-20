@@ -1,0 +1,7 @@
+luna_t3_localization_status_adapter:
+  ros__parameters:
+    odometry_topic: /Car/T3/semantic/current_pose
+    status_topic: /localization/status
+    max_age_s: 1.0
+    valid_position_variance_max: 0.1
+    degraded_position_variance_max: 0.5

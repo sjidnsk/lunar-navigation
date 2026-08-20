@@ -29,7 +29,7 @@
 | --- | --- |
 | `ros2_ws/src/luna_t3_map_adapter/python/luna_t3_map_adapter/grid_map_codec.py` | GridMap 与 canonical NumPy 层之间的确定性编解码，复用现有 ring-buffer 约定。 |
 | `ros2_ws/src/luna_t3_map_adapter/python/luna_t3_map_adapter/local_grid_conversion.py` | 纯局部证据模型、十层派生和 observation ledger，不依赖 ROS Node。 |
-| `ros2_ws/src/luna_t3_map_adapter/python/luna_t3_map_adapter/local_map_adapter_node.py` | Task3 `odom` 局部图订阅、tile evidence 读取、几何合同校验和 canonical 局部图发布。 |
+| `ros2_ws/src/luna_t3_map_adapter/python/luna_t3_map_adapter/local_map_adapter_node.py` | Task3 `odom` 局部图订阅、只读 `map -> odom` evidence 索引、tile evidence 读取、几何合同校验和 canonical 局部图发布。 |
 | `ros2_ws/src/luna_t3_map_adapter/config/task3_local_map_adapter.yaml` | 局部地图 topic、frame、安全映射、缓存和新鲜度配置。 |
 | `ros2_ws/src/luna_t3_map_adapter/launch/task3_live_integration.launch.py` | 以 Task3 适配模式共同启动全局、局部、定位状态校验与 planner。 |
 | `ros2_ws/src/luna_t3_map_adapter/python/luna_t3_map_adapter/localization_status_adapter.py` | 直接消费课题三车体 Odometry、校验 frame/新鲜度/协方差并发布定位状态；不转换 pose。 |
@@ -184,7 +184,7 @@ git commit -m "feat(task3): derive canonical local planning evidence"
 - Test: `ros2_ws/src/luna_t3_map_adapter/test/test_local_map_adapter_node.py`
 
 **Interfaces:**
-- Consumes: `/Car/T3/mapping/grid_map`（`frame_id="odom"`、单位朝向、0.2 m）and a read-only `TileEvidenceProvider`.
+- Consumes: `/Car/T3/mapping/grid_map`（`frame_id="odom"`、单位朝向、0.2 m）, a time-matched read-only `map -> odom` transform used only to index global evidence, and a read-only `TileEvidenceProvider`.
 - Produces: `/environment/map_local` with the ten required layers and unchanged source geometry, `frame_id="odom"`, source timestamp, reliable/transient-local depth-1 QoS; diagnostics reasons `LOCAL_MAP_RESOLUTION_INVALID`, `LOCAL_MAP_FRAME_INVALID`, `LOCAL_MAP_GEOMETRY_INVALID`, `LOCAL_MAP_EVIDENCE_INCOMPLETE`.
 
 - [ ] **Step 1: Write failing node tests with fakes**
@@ -217,12 +217,13 @@ Expected: FAIL because `LocalMapAdapterNode` does not exist.
 class LocalMapAdapterNode(Node):
     def _on_source_grid(self, message: GridMap) -> None:
         source = local_source_from_grid(message)
-        evidence = self._evidence_provider.read_window(source.map_bounds())
+        odom_from_map = self._transformer.odom_from_map(message.header.stamp)
+        evidence = self._evidence_provider.read_window(source.map_bounds(), odom_from_map)
         canonical = convert_local_grid(source, evidence, self._policy, self._ledger)
         self._publisher.publish(encode_grid_map("odom", message.header.stamp, ...))
 ```
 
-Reject instead of transforming a source map whose frame is not `odom`, whose orientation is non-identity, or whose geometry is malformed: `lunar_planner_ros` applies the same restriction. Add `diagnostic_msgs` and required ROS message dependencies to `package.xml`; install the second script in CMake. The YAML must declare source/output topic names, `odom`, `0.2`, occupancy threshold, semantic IDs, cache size and `max_age_s`.
+Reject instead of transforming a source map whose frame is not `odom`, whose orientation is non-identity, or whose geometry is malformed: `lunar_planner_ros` applies the same restriction. `map -> odom` may only index global L0 evidence at local-cell centers; it must not alter GridMap origin, orientation, resolution or dimensions. Add `tf2_ros`, `diagnostic_msgs` and required ROS message dependencies to `package.xml`; install the second script in CMake. The YAML must declare source/output topic names, `odom`, `0.2`, occupancy threshold, semantic IDs, cache size and `max_age_s`.
 
 - [ ] **Step 4: Run package tests and build**
 

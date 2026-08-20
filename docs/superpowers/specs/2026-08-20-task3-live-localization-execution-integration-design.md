@@ -75,6 +75,7 @@ external controller -------- /execution/motion_feedback
 | 输入 | 类型 | 约束 |
 | --- | --- | --- |
 | `/Car/T3/mapping/grid_map` | `grid_map_msgs/msg/GridMap` | `frame_id=odom`；单位朝向；分辨率严格为 `0.2 m`；非零时间戳；课题三现有 QoS `RELIABLE + TRANSIENT_LOCAL + depth=1` |
+| `/tf` | `tf2_msgs/msg/TFMessage` | 在局部图时间戳存在 `map -> odom`；仅用于把局部格中心查询到全局 L0 evidence，绝不改变局部图几何或重新发布 TF |
 | 全局 L0 tile cache | 课题三 SQLite 只读快照 | 用于补充确有来源的高度范围、方差和累计观测资料 |
 | 安全映射配置 | YAML | occupancy 阈值、语义障碍/禁入类别和外部禁区 |
 
@@ -87,7 +88,7 @@ external controller -------- /execution/motion_feedback
 - QoS 固定为 `RELIABLE + TRANSIENT_LOCAL + depth=1`；
 - 必须含外部接口 v5 规定的十个层。
 
-若源图不是 `odom`、姿态不是单位朝向、分辨率不是 0.2 m、时间戳为零或层缺失，适配器不发布新图并输出稳定诊断原因。适配器不得把 `map` 图简单改名为 `odom` 图。
+若源图不是 `odom`、姿态不是单位朝向、分辨率不是 0.2 m、时间戳为零、层缺失，或没有同时间的 `map -> odom` 以认证所需 L0 evidence，适配器不发布新图并输出稳定诊断原因。适配器不得把 `map` 图简单改名为 `odom` 图；TF 查询只服务于 evidence 索引，绝不变更本地 GridMap 的几何。
 
 ### 4.2 图层派生
 
