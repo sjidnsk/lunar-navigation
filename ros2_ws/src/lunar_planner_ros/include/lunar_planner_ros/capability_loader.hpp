@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -16,6 +17,16 @@ struct ObservationCapability final {
   double sensor_fov_rad{};
 };
 
+enum class GeometrySourceKind : std::uint8_t {
+  kUrdfMesh,
+  kParametricEnvelope,
+};
+
+struct ParametricWheeledGeometry final {
+  std::size_t wheel_count{};
+  std::vector<lunar::planning::Vec2> wheel_center_xy_m;
+};
+
 struct LoadedCapabilities final {
   std::string platform_id;
   std::string capability_version;
@@ -25,6 +36,8 @@ struct LoadedCapabilities final {
   std::optional<double> maximum_obstacle_height_m;
   std::vector<std::string> source_motion_primitive_ids;
   std::map<std::string, std::string, std::less<>> field_source_types;
+  GeometrySourceKind geometry_source_kind{GeometrySourceKind::kUrdfMesh};
+  std::optional<ParametricWheeledGeometry> parametric_wheeled_geometry;
   std::filesystem::path urdf_path;
   std::vector<std::filesystem::path> mesh_paths;
   ObservationCapability observation;

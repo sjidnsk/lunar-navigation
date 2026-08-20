@@ -2,6 +2,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <numbers>
 #include <string>
 #include <variant>
@@ -53,6 +54,34 @@ void WriteObservation(const std::filesystem::path& share) {
   Write(
       share / "config" / "observation.json",
       R"({"sensor_range_m": 25.0, "sensor_fov_deg": 90.0})");
+}
+
+std::filesystem::path RepositoryRoot() {
+  return std::filesystem::path{__FILE__}.parent_path()
+      .parent_path().parent_path().parent_path().parent_path();
+}
+
+std::string TrackedWheelYaml() {
+  std::ifstream stream{RepositoryRoot() / "deployment/config/wheel.yaml"};
+  return std::string{
+      std::istreambuf_iterator<char>{stream},
+      std::istreambuf_iterator<char>{}};
+}
+
+CapabilityLoadResult LoadParametricText(const std::string& document) {
+  const auto share = UniqueShare("parametric-text");
+  WriteObservation(share);
+  Write(share / "config" / "platform.yaml", document);
+  return CapabilityLoader{}.LoadFromShareDirectory(
+      share, "config/platform.yaml", "config/observation.json");
+}
+
+std::string WithoutSource(std::string document, const std::string& field) {
+  const std::string line = "  " + field + ": ";
+  const auto begin = document.find(line, document.find("sources:\n"));
+  const auto end = document.find('\n', begin);
+  document.erase(begin, end - begin + 1U);
+  return document;
 }
 
 std::string CommonHeader(const std::string& type) {
@@ -181,6 +210,70 @@ CapabilityLoadResult Load(
   Write(share / "config" / "platform.yaml", platform_document);
   return CapabilityLoader{}.LoadFromShareDirectory(
       share, "config/platform.yaml", "config/observation.json");
+}
+
+TEST(CapabilityLoader, LoadsParametricWheelWithoutUrdfOrMesh) {
+  const auto share = UniqueShare("parametric-wheel");
+  WriteObservation(share);
+  Write(share / "config" / "platform.yaml", TrackedWheelYaml());
+  const auto result = CapabilityLoader{}.LoadFromShareDirectory(
+      share, "config/platform.yaml", "config/observation.json");
+  ASSERT_TRUE(result.ok())
+      << (result.error ? result.error->detail : std::string{});
+  EXPECT_EQ(result.capabilities->geometry_source_kind,
+            GeometrySourceKind::kParametricEnvelope);
+  EXPECT_TRUE(result.capabilities->urdf_path.empty());
+  EXPECT_TRUE(result.capabilities->mesh_paths.empty());
+  ASSERT_TRUE(result.capabilities->parametric_wheeled_geometry.has_value());
+  EXPECT_EQ(result.capabilities->parametric_wheeled_geometry->wheel_count, 4U);
+  EXPECT_EQ(
+      result.capabilities->parametric_wheeled_geometry->wheel_center_xy_m.size(),
+      4U);
+  const auto& wheel = std::get<lunar::planning::WheeledCapability>(
+      result.capabilities->platform);
+  EXPECT_DOUBLE_EQ(wheel.maximum_curvature_per_m, 5.0);
+}
+
+TEST(CapabilityLoader, RejectsMixedOrInvalidParametricGeometry) {
+  std::string mixed = TrackedWheelYaml();
+  const std::string parametric_geometry =
+      "geometry_source: {type: parametric_envelope}";
+  mixed.replace(
+      mixed.find(parametric_geometry), parametric_geometry.size(),
+      "geometry_source:\n"
+      "  type: parametric_envelope\n"
+      "  urdf_file: urdf/rover.urdf");
+  EXPECT_EQ(LoadParametricText(mixed).error->reason_code,
+            "CAPABILITY_SCHEMA_INVALID");
+  std::string wrong_count = TrackedWheelYaml();
+  wrong_count.replace(
+      wrong_count.find("wheel_count: 4"), 14U, "wheel_count: 3");
+  EXPECT_EQ(LoadParametricText(wrong_count).error->reason_code,
+            "CAPABILITY_VALUE_INVALID");
+  std::string outside = TrackedWheelYaml();
+  const auto centers = outside.find("wheel_center_xy_m:");
+  outside.replace(
+      centers, outside.find('\n', centers) - centers,
+      "wheel_center_xy_m: [[2.0, 0.0], [0.4075, -0.3115], "
+      "[-0.4075, -0.3115], [-0.4075, 0.3115]]");
+  EXPECT_EQ(LoadParametricText(outside).error->reason_code,
+            "CAPABILITY_VALUE_INVALID");
+}
+
+TEST(CapabilityLoader, RejectsMissingOrUnsupportedFieldSources) {
+  EXPECT_EQ(LoadParametricText(
+                WithoutSource(TrackedWheelYaml(), "maximum_curvature_per_m"))
+                .error->reason_code,
+            "CAPABILITY_SCHEMA_INVALID");
+  std::string unsupported = TrackedWheelYaml();
+  const std::string approved =
+      "maximum_curvature_per_m: user_confirmed_capability";
+  const auto source = unsupported.find(
+      approved,
+      unsupported.find("sources:\n"));
+  unsupported.replace(source, approved.size(), "maximum_curvature_per_m: guess");
+  EXPECT_EQ(LoadParametricText(unsupported).error->reason_code,
+            "CAPABILITY_VALUE_INVALID");
 }
 
 TEST(CapabilityLoader, LoadsV2WheelGeometryAndSourcesWithoutProxyValues) {

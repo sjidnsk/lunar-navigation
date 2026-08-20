@@ -26,6 +26,47 @@ namespace {
 constexpr std::string_view kPlatformSchema =
     "platform-control-capability-source/v2";
 constexpr double kProjectMaximumSlopeRad = std::numbers::pi / 6.0;
+const std::set<std::string, std::less<>> kAllowedSourceTypes{
+    "upstream_model",
+    "upstream_config",
+    "user_spec_material",
+    "user_confirmed_upgrade",
+    "user_provided_dimension",
+    "user_approximate_measurement",
+    "user_confirmed_capability",
+    "user_approved_planning_policy",
+    "derived",
+    "planning_policy",
+    "project_engineering_baseline",
+    "planning_safety_baseline",
+    "unknown",
+};
+const std::set<std::string, std::less<>> kRequiredWheeledSources{
+    "allow_unsupported_gap",
+    "body_extent_m",
+    "footprint_xy_m",
+    "maximum_acceleration_mps2",
+    "maximum_braking_deceleration_mps2",
+    "maximum_curvature_per_m",
+    "maximum_forward_speed_mps",
+    "maximum_lateral_acceleration_mps2",
+    "maximum_local_obstacle_relief_m",
+    "maximum_reverse_speed_mps",
+    "maximum_spin_rate_radps",
+    "maximum_surface_slope_rad",
+    "maximum_yaw_acceleration_radps2",
+    "minimum_clearance_m",
+    "minimum_underbody_clearance_m",
+    "motion_primitives",
+    "reference_point",
+    "roughness_handling",
+    "track_width_m",
+    "wheel_center_xy_m",
+    "wheel_count",
+    "wheel_diameter_m",
+    "wheel_width_m",
+    "wheelbase_m",
+};
 
 class LoadFailure final : public std::runtime_error {
  public:
@@ -179,6 +220,24 @@ class LoadFailure final : public std::runtime_error {
   }
 }
 
+[[nodiscard]] std::size_t RequirePositiveSize(
+    const YAML::Node& parent,
+    const std::string& key) {
+  const YAML::Node node = parent[key];
+  if (!node || !node.IsScalar()) {
+    SchemaFailure("missing positive size: " + key);
+  }
+  try {
+    const auto value = node.as<std::size_t>();
+    if (value == 0U) {
+      ValueFailure("expected positive size: " + key);
+    }
+    return value;
+  } catch (const YAML::Exception&) {
+    SchemaFailure("invalid positive size: " + key);
+  }
+}
+
 [[nodiscard]] bool RequireBool(
     const YAML::Node& parent,
     const std::string& key) {
@@ -274,6 +333,30 @@ void RejectUnexpectedKeys(
   } catch (const YAML::Exception&) {
     SchemaFailure("invalid vec2: " + field);
   }
+}
+
+[[nodiscard]] bool IsStrictlyConvex(
+    const std::vector<lunar::planning::Vec2>& polygon) noexcept {
+  if (polygon.size() < 3U) {
+    return false;
+  }
+  double orientation = 0.0;
+  for (std::size_t index = 0U; index < polygon.size(); ++index) {
+    const auto& first = polygon[index];
+    const auto& second = polygon[(index + 1U) % polygon.size()];
+    const auto& third = polygon[(index + 2U) % polygon.size()];
+    const double cross = (second.x - first.x) * (third.y - second.y) -
+        (second.y - first.y) * (third.x - second.x);
+    if (!std::isfinite(cross) || std::abs(cross) <= 1.0e-12) {
+      return false;
+    }
+    if (orientation == 0.0) {
+      orientation = cross;
+    } else if ((orientation > 0.0) != (cross > 0.0)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 [[nodiscard]] lunar::planning::Vec3 Vec3(
@@ -428,6 +511,76 @@ void RecordPrimitiveId(
   ordered.push_back(id);
 }
 
+[[nodiscard]] ParametricWheeledGeometry ParseParametricWheelGeometry(
+    const YAML::Node& wheeled,
+    const lunar::planning::Vec3& body_extent,
+    const double wheel_diameter,
+    const double wheel_width) {
+  const std::size_t wheel_count = RequirePositiveSize(wheeled, "wheel_count");
+  if (wheel_count != 4U) {
+    ValueFailure("parametric wheeled geometry requires four wheels");
+  }
+
+  const YAML::Node center_nodes = RequireSequence(
+      wheeled, "wheel_center_xy_m", wheel_count);
+  if (center_nodes.size() != wheel_count) {
+    ValueFailure("wheel_center_xy_m count must match wheel_count");
+  }
+  std::vector<lunar::planning::Vec2> centers;
+  std::set<std::pair<double, double>> unique_centers;
+  centers.reserve(wheel_count);
+  for (std::size_t index = 0U; index < center_nodes.size(); ++index) {
+    const auto center = Vec2(
+        center_nodes[index],
+        "wheeled.wheel_center_xy_m[" + std::to_string(index) + "]");
+    if (!unique_centers.emplace(center.x, center.y).second) {
+      ValueFailure("duplicate wheeled wheel center");
+    }
+    if (std::abs(center.x) + wheel_diameter / 2.0 >
+            body_extent.x / 2.0 + 1.0e-9 ||
+        std::abs(center.y) + wheel_width / 2.0 >
+            body_extent.y / 2.0 + 1.0e-9) {
+      ValueFailure("wheel center exceeds body envelope");
+    }
+    centers.push_back(center);
+  }
+
+  const YAML::Node footprint_nodes = RequireSequence(
+      wheeled, "footprint_xy_m", 3U);
+  std::vector<lunar::planning::Vec2> footprint;
+  std::set<std::pair<double, double>> unique_vertices;
+  footprint.reserve(footprint_nodes.size());
+  for (std::size_t index = 0U; index < footprint_nodes.size(); ++index) {
+    const auto vertex = Vec2(
+        footprint_nodes[index],
+        "wheeled.footprint_xy_m[" + std::to_string(index) + "]");
+    if (!unique_vertices.emplace(vertex.x, vertex.y).second) {
+      ValueFailure("duplicate wheeled footprint vertex");
+    }
+    footprint.push_back(vertex);
+  }
+  if (!IsStrictlyConvex(footprint)) {
+    ValueFailure("parametric wheeled footprint must be strictly convex");
+  }
+  return ParametricWheeledGeometry{
+      .wheel_count = wheel_count,
+      .wheel_center_xy_m = std::move(centers),
+  };
+}
+
+void ValidateRequiredSources(
+    const LoadedCapabilities& loaded,
+    const std::set<std::string, std::less<>>& required) {
+  if (loaded.field_source_types.size() != required.size()) {
+    SchemaFailure("sources do not match required fields");
+  }
+  for (const auto& field : required) {
+    if (!loaded.field_source_types.contains(field)) {
+      SchemaFailure("missing required source: " + field);
+    }
+  }
+}
+
 [[nodiscard]] lunar::planning::WheeledCapability ParseWheeled(
     const YAML::Node& root,
     LoadedCapabilities& loaded) {
@@ -437,10 +590,12 @@ void RecordPrimitiveId(
       {"footprint_xy_m",
        "body_extent_m",
        "reference_point",
+       "wheel_count",
        "wheel_diameter_m",
        "wheel_width_m",
        "wheelbase_m",
        "track_width_m",
+       "wheel_center_xy_m",
        "minimum_underbody_clearance_m",
        "maximum_local_obstacle_relief_m",
        "allow_unsupported_gap",
@@ -489,8 +644,13 @@ void RecordPrimitiveId(
   const double track_width = Positive(
       RequireDouble(node, "track_width_m"), "track_width_m");
   if (wheel_width >= body_extent.y || wheelbase >= body_extent.x ||
-      std::abs(track_width - (body_extent.y - wheel_width)) > 1.0e-6) {
+      (loaded.geometry_source_kind == GeometrySourceKind::kUrdfMesh &&
+       std::abs(track_width - (body_extent.y - wheel_width)) > 1.0e-6)) {
     ValueFailure("wheeled wheel geometry is inconsistent with body extent");
+  }
+  if (loaded.geometry_source_kind == GeometrySourceKind::kParametricEnvelope) {
+    loaded.parametric_wheeled_geometry = ParseParametricWheelGeometry(
+        node, body_extent, wheel_diameter, wheel_width);
   }
   const double underbody_clearance = Positive(
       RequireDouble(node, "minimum_underbody_clearance_m"),
@@ -915,6 +1075,12 @@ void AddMesh(
   if (loaded.field_source_types.empty()) {
     SchemaFailure("sources must not be empty");
   }
+  for (const auto& [field, source_type] : loaded.field_source_types) {
+    static_cast<void>(field);
+    if (!kAllowedSourceTypes.contains(source_type)) {
+      ValueFailure("unsupported field source type: " + source_type);
+    }
+  }
 
   loaded.observation.sensor_range_m = Positive(
       RequireDouble(observation_document, "sensor_range_m"),
@@ -929,17 +1095,35 @@ void AddMesh(
       fov_degrees * std::numbers::pi / 180.0;
 
   const YAML::Node geometry = RequireMap(platform_document, "geometry_source");
-  const std::filesystem::path urdf_relative =
-      RequireString(geometry, "urdf_file");
-  loaded.urdf_path = ResolveFile(
-      share, urdf_relative,
-      CapabilityLoadErrorCode::kFileMissing,
-      "CAPABILITY_URDF_MISSING");
-  loaded.mesh_paths =
-      ValidateGeometry(share, loaded.urdf_path, loaded.base_frame_id);
+  const bool parametric = geometry["type"] &&
+      RequireString(geometry, "type") == "parametric_envelope";
+  if (parametric) {
+    if (geometry["urdf_file"]) {
+      SchemaFailure("parametric geometry must not declare urdf_file");
+    }
+    RejectUnexpectedKeys(geometry, {"type"}, "geometry_source");
+    if (platform_type != "WHEELED") {
+      ValueFailure("parametric_envelope is only approved for WHEELED");
+    }
+    loaded.geometry_source_kind = GeometrySourceKind::kParametricEnvelope;
+  } else {
+    RejectUnexpectedKeys(geometry, {"urdf_file"}, "geometry_source");
+    loaded.geometry_source_kind = GeometrySourceKind::kUrdfMesh;
+    const std::filesystem::path urdf_relative =
+        RequireString(geometry, "urdf_file");
+    loaded.urdf_path = ResolveFile(
+        share, urdf_relative,
+        CapabilityLoadErrorCode::kFileMissing,
+        "CAPABILITY_URDF_MISSING");
+    loaded.mesh_paths =
+        ValidateGeometry(share, loaded.urdf_path, loaded.base_frame_id);
+  }
 
   if (platform_type == "WHEELED") {
     loaded.platform = ParseWheeled(platform_document, loaded);
+    if (loaded.geometry_source_kind == GeometrySourceKind::kParametricEnvelope) {
+      ValidateRequiredSources(loaded, kRequiredWheeledSources);
+    }
   } else if (platform_type == "LEGGED") {
     loaded.platform = ParseLegged(platform_document, loaded);
   } else if (platform_type == "HOPPER") {
