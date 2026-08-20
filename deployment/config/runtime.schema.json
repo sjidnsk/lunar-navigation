@@ -2,6 +2,28 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Luna runtime configuration",
   "type": "object",
-  "required": ["profile", "interfaces", "capabilities", "planner", "policy", "extensions", "input_adapters", "runtime"],
-  "additionalProperties": false
+  "required": ["profile", "interfaces", "capabilities", "planner", "policy", "extensions", "input_adapters", "controller", "runtime"],
+  "additionalProperties": false,
+  "properties": {
+    "profile": {"type": "string"},
+    "interfaces": {"type": "object"},
+    "capabilities": {"type": "object"},
+    "planner": {"type": "object"},
+    "policy": {"type": "object"},
+    "extensions": {"type": "object"},
+    "input_adapters": {"type": "object"},
+    "controller": {
+      "type": "object",
+      "required": ["wheeled"],
+      "additionalProperties": false,
+      "properties": {
+        "wheeled": {
+          "type": "object",
+          "required": ["enabled", "command_topic", "odometry_topic", "feedback_topic", "execution_goal_topic", "reference_topic", "control_rate_hz", "lookahead_m", "max_linear_mps", "max_angular_radps", "max_cross_track_error_m", "goal_position_tolerance_m", "goal_yaw_tolerance_rad", "reference_max_age_s", "odometry_max_age_s"],
+          "additionalProperties": false
+        }
+      }
+    },
+    "runtime": {"type": "object"}
+  }
 }

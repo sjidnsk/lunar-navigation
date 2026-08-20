@@ -86,6 +86,23 @@ sequence, and current state. Wrong, stale, duplicate, or mismatched feedback is
 rejected by the planner. There is no generic controller command topic in this
 repository.
 
+## Optional WHEELED execution
+
+The deployment default is `controller.wheeled.enabled: false`: planning is
+active but this project sends no chassis command. Set it to `true` only after
+the Task3 input chain is healthy and a single command owner has been selected.
+When enabled, the coordinator forwards explicit `/mission/execution_goal`
+requests through `/plan_motion`; only a certified WHEELED result is handed to
+the controller on `/execution/wheeled_reference`. The controller tracks it
+using odometry and publishes `geometry_msgs/msg/Twist` only to
+`/Car/T5/Car_Cmd_Vel`.
+
+Do not run `keyboard_teleop.py` while the optional controller is enabled.
+Every stale reference or odometry input, path deviation, invalid reference, or
+controller stop first emits zero Twist and then sends matching execution
+feedback. `STALE_INPUT` means the controller has stopped rather than guessing
+at vehicle state.
+
 The repository ships three reviewed numeric platform capability documents:
 `deployment/config/wheel.yaml`, `deployment/config/legged.yaml`, and
 `deployment/config/hopper.yaml`. The latter two are the Quad48

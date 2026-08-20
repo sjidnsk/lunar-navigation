@@ -102,6 +102,36 @@ must use its `plan_id` and `segment_id` in matching `MotionExecutionFeedback`
 messages on `/execution/motion_feedback`; invalid identity or sequence is
 rejected by the planner.
 
+## Optional WHEELED controller
+
+Automatic chassis control is disabled by default. Keep this setting for map,
+planning, and smoke-client checks:
+
+```yaml
+controller:
+  wheeled:
+    enabled: false
+```
+
+To enable it only after confirming that no `keyboard_teleop.py` process owns
+the chassis command Topic, set `controller.wheeled.enabled: true` in a copied
+runtime configuration, then restart with that file:
+
+```bash
+./luna config check --config /etc/luna/task3-adapted.runtime.yaml
+./luna build --config /etc/luna/task3-adapted.runtime.yaml
+./luna start --config /etc/luna/task3-adapted.runtime.yaml
+```
+
+The coordinator consumes `/mission/execution_goal`; the controller consumes
+`/execution/wheeled_reference` and publishes only `geometry_msgs/msg/Twist` to
+`/Car/T5/Car_Cmd_Vel`. It sends `MotionExecutionFeedback` on
+`/execution/motion_feedback`. `STALE_INPUT`, `PATH_DEVIATION`,
+`INVALID_REFERENCE`, and controller stop all command zero velocity before the
+feedback. Source-level tests do not authorize vehicle movement; retain
+`enabled: false` until the real chassis command direction and emergency stop
+path have been validated.
+
 ## Model artifacts
 
 ```bash

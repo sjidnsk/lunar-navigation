@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 
@@ -52,3 +53,22 @@ def test_task3_documentation_declares_direct_inputs_and_plan_feedback_contract()
     ):
         assert token in commands
     assert smoke_client.is_file()
+
+
+def test_runtime_schema_and_operator_docs_cover_optional_wheeled_execution() -> None:
+    root = Path(__file__).resolve().parents[2]
+    schema = json.loads((root / "deployment" / "config" / "runtime.schema.json").read_text(encoding="utf-8"))
+    readme = (root / "deployment" / "docs" / "README.runtime.md").read_text(encoding="utf-8")
+    commands = (root / "deployment" / "docs" / "COMMANDS.runtime.md").read_text(encoding="utf-8")
+
+    assert "controller" in schema["required"]
+    assert schema["properties"]["controller"]["required"] == ["wheeled"]
+    for token in (
+        "controller.wheeled.enabled",
+        "/Car/T5/Car_Cmd_Vel",
+        "/mission/execution_goal",
+        "/execution/wheeled_reference",
+        "keyboard_teleop.py",
+        "STALE_INPUT",
+    ):
+        assert token in readme or token in commands
