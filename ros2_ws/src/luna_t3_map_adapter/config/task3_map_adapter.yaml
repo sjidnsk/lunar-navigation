@@ -1,7 +1,7 @@
 luna_t3_map_adapter:
   ros__parameters:
-    # Deployment must supply an absolute production path; no fixture default exists.
-    sqlite_path: ""
+    # Task3 production global map on the deployment host (opened read-only).
+    sqlite_path: /home/yanfa/P3/map_retest_output/move_soft_raw_full_current_20260820/global_grid_map.sqlite3
     max_cached_tiles: 128
     exploration_task_topic: /mission/exploration_task
     global_map_revision_topic: /Car/T3/mapping/global_map_revision
