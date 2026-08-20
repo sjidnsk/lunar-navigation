@@ -42,22 +42,22 @@ wheeled:
       relative_end_pose: {position_m: [-0.2, 0.0, 0.0], orientation_wxyz: [1.0, 0.0, 0.0, 0.0]}
     - primitive_id: forward-arc-left
       kind: FORWARD_ARC
-      relative_end_pose: {position_m: [0.039018064403226, 0.003842943919354, 0.0], orientation_wxyz: [0.995184726672197, 0.0, 0.0, 0.098017140329561]}
+      relative_end_pose: {position_m: [0.019603428065912, 0.000963054665561, 0.0], orientation_wxyz: [0.998795456205172, 0.0, 0.0, 0.049067674327418]}
     - primitive_id: forward-arc-right
       kind: FORWARD_ARC
-      relative_end_pose: {position_m: [0.039018064403226, -0.003842943919354, 0.0], orientation_wxyz: [0.995184726672197, 0.0, 0.0, -0.098017140329561]}
+      relative_end_pose: {position_m: [0.019603428065912, -0.000963054665561, 0.0], orientation_wxyz: [0.998795456205172, 0.0, 0.0, -0.049067674327418]}
     - primitive_id: reverse-arc-left
       kind: REVERSE_ARC
-      relative_end_pose: {position_m: [-0.039018064403226, 0.003842943919354, 0.0], orientation_wxyz: [0.995184726672197, 0.0, 0.0, -0.098017140329561]}
+      relative_end_pose: {position_m: [-0.019603428065912, 0.000963054665561, 0.0], orientation_wxyz: [0.998795456205172, 0.0, 0.0, -0.049067674327418]}
     - primitive_id: reverse-arc-right
       kind: REVERSE_ARC
-      relative_end_pose: {position_m: [-0.039018064403226, -0.003842943919354, 0.0], orientation_wxyz: [0.995184726672197, 0.0, 0.0, 0.098017140329561]}
+      relative_end_pose: {position_m: [-0.019603428065912, -0.000963054665561, 0.0], orientation_wxyz: [0.998795456205172, 0.0, 0.0, 0.049067674327418]}
     - primitive_id: spin-left
       kind: SPIN_COUNTERCLOCKWISE
-      relative_end_pose: {position_m: [0.0, 0.0, 0.0], orientation_wxyz: [0.995184726672197, 0.0, 0.0, 0.098017140329561]}
+      relative_end_pose: {position_m: [0.0, 0.0, 0.0], orientation_wxyz: [0.998795456205172, 0.0, 0.0, 0.049067674327418]}
     - primitive_id: spin-right
       kind: SPIN_CLOCKWISE
-      relative_end_pose: {position_m: [0.0, 0.0, 0.0], orientation_wxyz: [0.995184726672197, 0.0, 0.0, -0.098017140329561]}
+      relative_end_pose: {position_m: [0.0, 0.0, 0.0], orientation_wxyz: [0.998795456205172, 0.0, 0.0, -0.049067674327418]}
     - primitive_id: stop-switch
       kind: STOP_AND_SWITCH
       relative_end_pose: {position_m: [0.0, 0.0, 0.0], orientation_wxyz: [1.0, 0.0, 0.0, 0.0]}

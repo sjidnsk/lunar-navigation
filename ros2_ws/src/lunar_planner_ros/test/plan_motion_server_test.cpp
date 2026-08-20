@@ -606,7 +606,7 @@ TEST_F(
   std::scoped_lock lock{capture_mutex};
   ASSERT_TRUE(observed_config.has_value());
   EXPECT_DOUBLE_EQ(observed_config->xy_resolution_m, 0.2);
-  EXPECT_EQ(observed_config->yaw_bin_count, 32U);
+  EXPECT_EQ(observed_config->yaw_bin_count, 64U);
 }
 
 TEST_F(PlanMotionServerTest, ConfiguresFromAbsoluteCapabilityFiles) {
