@@ -5,6 +5,7 @@ find_package(ament_cmake REQUIRED)
 find_package(lunar_planner_core REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
+  src/conservative_aggregation.cpp
   src/roi_level.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 target_include_directories(${PROJECT_NAME}
@@ -19,6 +20,13 @@ if(BUILD_TESTING)
     test/roi_level_test.cpp)
   target_compile_features(luna_t3_map_adapter_roi_level_test PRIVATE cxx_std_20)
   target_link_libraries(luna_t3_map_adapter_roi_level_test ${PROJECT_NAME})
+
+  ament_add_gtest(luna_t3_map_adapter_conservative_aggregation_test
+    test/conservative_aggregation_test.cpp)
+  target_compile_features(
+    luna_t3_map_adapter_conservative_aggregation_test PRIVATE cxx_std_20)
+  target_link_libraries(
+    luna_t3_map_adapter_conservative_aggregation_test ${PROJECT_NAME})
 endif()
 
 install(
