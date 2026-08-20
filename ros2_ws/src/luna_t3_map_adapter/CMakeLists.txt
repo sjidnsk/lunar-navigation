@@ -38,6 +38,8 @@ if(BUILD_TESTING)
     test/test_global_map_cache.py)
   ament_add_pytest_test(luna_t3_map_adapter_global_grid_conversion_test
     test/test_global_grid_conversion.py)
+  ament_add_pytest_test(luna_t3_map_adapter_task_revision_state_test
+    test/test_task_revision_state.py)
 endif()
 
 install(
