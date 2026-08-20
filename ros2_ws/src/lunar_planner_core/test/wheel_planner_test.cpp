@@ -867,6 +867,44 @@ TEST(WheelPlanner, TimingUsesInitialVelocityTerrainAndDirectionStops) {
       }));
 }
 
+TEST(WheelPlanner, WheelV1TimingCapsTheTightestArcSpeed) {
+  auto capability =
+      std::get<WheeledCapability>(test::MakeValidWheelInput().capability);
+  capability.maximum_forward_speed_mps = 0.2;
+  capability.maximum_reverse_speed_mps = 0.2;
+  capability.maximum_spin_rate_radps = 0.389923188554511;
+  capability.maximum_acceleration_mps2 = 0.2;
+  capability.maximum_braking_deceleration_mps2 = 0.2;
+  capability.maximum_yaw_acceleration_radps2 = 0.389923188554511;
+  capability.maximum_lateral_acceleration_mps2 = 0.2;
+  capability.maximum_curvature_per_m = 5.0;
+  const wheel::WheelTransition tight_arc{
+      .source_pose = wheel::WheelPose{
+          .position_m = {0.0, 0.0, 0.0}, .yaw_rad = 0.0},
+      .target_pose = wheel::WheelPose{
+          .position_m = {0.039018064403226, 0.003842943919354, 0.0},
+          .yaw_rad = std::numbers::pi / 16.0},
+      .curvature_per_m = 5.0,
+      .primitive_kind = WheelPrimitiveKind::kForwardArc,
+      .source_mode = wheel::WheelMotionMode::kStart,
+      .target_mode = wheel::WheelMotionMode::kForward,
+      .path_length_m = std::numbers::pi / 80.0,
+  };
+
+  const auto result = wheel::ParameterizeWheelTiming(
+      {tight_arc}, capability, Twist3{}, 64U, {});
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  double observed_peak_speed = 0.0;
+  for (const auto& point : result.trajectory->points) {
+    const double transition_speed =
+        std::abs(point.velocity.angular_radps.z) / 5.0;
+    observed_peak_speed = std::max(observed_peak_speed, transition_speed);
+    EXPECT_LE(transition_speed, 0.077984637710902 + 1.0e-12);
+  }
+  EXPECT_NEAR(observed_peak_speed, 0.077984637710902, 1.0e-12);
+}
+
 TEST(WheelPlanner, SelectsReverseMotionForGoalBehind) {
   Planner planner;
   auto input = MakeWheelInputWithRequiredLocalCoverage();

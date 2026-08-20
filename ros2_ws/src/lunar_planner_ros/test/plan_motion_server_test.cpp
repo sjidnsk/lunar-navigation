@@ -582,6 +582,33 @@ TEST_F(PlanMotionServerTest, ConfiguresAndActivatesWithExplicitSnapshotPolicy) {
   node.reset();
 }
 
+TEST_F(
+    PlanMotionServerTest,
+    PassesApprovedWheelLatticeConfigurationToTheRuntimePlanner) {
+  std::mutex capture_mutex;
+  std::optional<lunar::planning::WheelPlannerConfig> observed_config;
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [&](const lunar::planning::PlannerInput& input) {
+        {
+          std::scoped_lock lock{capture_mutex};
+          observed_config = input.config.wheel;
+        }
+        return NoRouteOutput("WHEEL_CONFIG_OBSERVED");
+      },
+      .preloaded_capabilities = WheelCapabilities(),
+  }};
+  system.PublishInputs();
+
+  const auto goal = system.SendGoal(system.Goal("wheel-config"));
+  ASSERT_NE(goal, nullptr);
+  ASSERT_EQ(system.Result(goal).code, rclcpp_action::ResultCode::SUCCEEDED);
+
+  std::scoped_lock lock{capture_mutex};
+  ASSERT_TRUE(observed_config.has_value());
+  EXPECT_DOUBLE_EQ(observed_config->xy_resolution_m, 0.2);
+  EXPECT_EQ(observed_config->yaw_bin_count, 32U);
+}
+
 TEST_F(PlanMotionServerTest, ConfiguresFromAbsoluteCapabilityFiles) {
   const auto directory = WriteAbsoluteCapabilityFiles();
   auto options = ValidOptions();

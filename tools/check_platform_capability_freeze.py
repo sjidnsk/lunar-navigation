@@ -15,6 +15,16 @@ import yaml
 
 
 EXPECTED_PLATFORMS = ("LEGGED", "HOPPER", "WHEELED")
+EXPECTED_GEOMETRY_SOURCE_VARIANTS = {
+    "parametric_envelope": {
+        "required_fields": ["type"],
+        "forbidden_fields": ["urdf_file"],
+    },
+    "urdf_mesh": {
+        "required_fields": ["urdf_file"],
+        "forbidden_fields": ["type"],
+    },
+}
 EXPECTED_VALUES: dict[str, dict[str, Any]] = {
     "WHEELED": {
         "platform_id": "wheeled-lunar-explorer",
@@ -190,6 +200,10 @@ def validate(schema: Mapping[str, Any], freeze: Mapping[str, Any]) -> tuple[list
         errors.append("freeze schema_version must be lunar-platform-capability-freeze/v1")
     if freeze.get("capability_schema") != schema.get("schema_version"):
         errors.append("freeze capability_schema does not match schema_version")
+    if schema.get("geometry_source_variants") != EXPECTED_GEOMETRY_SOURCE_VARIANTS:
+        errors.append(
+            "geometry_source_variants must exactly match the approved contract"
+        )
 
     schema_platforms = schema.get("platforms")
     platforms = freeze.get("platforms")

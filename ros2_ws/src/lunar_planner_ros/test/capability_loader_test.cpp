@@ -1,11 +1,14 @@
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <numbers>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -83,6 +86,92 @@ std::string WithoutSource(std::string document, const std::string& field) {
   document.erase(begin, end - begin + 1U);
   return document;
 }
+
+std::string ReplaceOnce(
+    std::string document,
+    const std::string& existing,
+    const std::string& replacement) {
+  const auto position = document.find(existing);
+  EXPECT_NE(position, std::string::npos) << existing;
+  if (position != std::string::npos) {
+    document.replace(position, existing.size(), replacement);
+  }
+  return document;
+}
+
+void ExpectParametricFailure(
+    const std::string& document,
+    const std::string& reason_code,
+    const std::string& detail) {
+  const CapabilityLoadResult result = LoadParametricText(document);
+  ASSERT_TRUE(result.error.has_value());
+  EXPECT_EQ(result.error->reason_code, reason_code);
+  EXPECT_EQ(result.error->detail, detail);
+}
+
+std::map<std::string, std::string, std::less<>> ApprovedWheelSources() {
+  return {
+      {"allow_unsupported_gap", "user_confirmed_capability"},
+      {"body_extent_m", "user_provided_dimension"},
+      {"footprint_xy_m", "derived"},
+      {"maximum_acceleration_mps2", "user_confirmed_capability"},
+      {"maximum_braking_deceleration_mps2", "user_confirmed_capability"},
+      {"maximum_curvature_per_m", "user_confirmed_capability"},
+      {"maximum_forward_speed_mps", "user_confirmed_capability"},
+      {"maximum_lateral_acceleration_mps2",
+       "user_approved_planning_policy"},
+      {"maximum_local_obstacle_relief_m", "user_confirmed_capability"},
+      {"maximum_reverse_speed_mps", "user_confirmed_capability"},
+      {"maximum_spin_rate_radps", "derived"},
+      {"maximum_surface_slope_rad", "user_confirmed_capability"},
+      {"maximum_yaw_acceleration_radps2", "derived"},
+      {"minimum_clearance_m", "user_approved_planning_policy"},
+      {"minimum_underbody_clearance_m", "user_provided_dimension"},
+      {"motion_primitives", "user_approved_planning_policy"},
+      {"reference_point", "derived"},
+      {"roughness_handling", "user_approved_planning_policy"},
+      {"track_width_m", "user_provided_dimension"},
+      {"wheel_center_xy_m", "derived"},
+      {"wheel_count", "user_confirmed_capability"},
+      {"wheel_diameter_m", "user_provided_dimension"},
+      {"wheel_width_m", "user_provided_dimension"},
+      {"wheelbase_m", "user_provided_dimension"},
+  };
+}
+
+struct ExpectedWheelPrimitive final {
+  std::string primitive_id;
+  lunar::planning::WheelPrimitiveKind kind;
+  lunar::planning::Vec3 position_m;
+  lunar::planning::Quaternion orientation;
+};
+
+const std::array<ExpectedWheelPrimitive, 9U> kApprovedWheelPrimitives{{
+    {"forward", lunar::planning::WheelPrimitiveKind::kForward,
+     {0.2, 0.0, 0.0}, {1.0, 0.0, 0.0, 0.0}},
+    {"reverse", lunar::planning::WheelPrimitiveKind::kReverse,
+     {-0.2, 0.0, 0.0}, {1.0, 0.0, 0.0, 0.0}},
+    {"forward-arc-left", lunar::planning::WheelPrimitiveKind::kForwardArc,
+     {0.039018064403226, 0.003842943919354, 0.0},
+     {0.995184726672197, 0.0, 0.0, 0.098017140329561}},
+    {"forward-arc-right", lunar::planning::WheelPrimitiveKind::kForwardArc,
+     {0.039018064403226, -0.003842943919354, 0.0},
+     {0.995184726672197, 0.0, 0.0, -0.098017140329561}},
+    {"reverse-arc-left", lunar::planning::WheelPrimitiveKind::kReverseArc,
+     {-0.039018064403226, 0.003842943919354, 0.0},
+     {0.995184726672197, 0.0, 0.0, -0.098017140329561}},
+    {"reverse-arc-right", lunar::planning::WheelPrimitiveKind::kReverseArc,
+     {-0.039018064403226, -0.003842943919354, 0.0},
+     {0.995184726672197, 0.0, 0.0, 0.098017140329561}},
+    {"spin-left", lunar::planning::WheelPrimitiveKind::kSpinCounterclockwise,
+     {0.0, 0.0, 0.0},
+     {0.995184726672197, 0.0, 0.0, 0.098017140329561}},
+    {"spin-right", lunar::planning::WheelPrimitiveKind::kSpinClockwise,
+     {0.0, 0.0, 0.0},
+     {0.995184726672197, 0.0, 0.0, -0.098017140329561}},
+    {"stop-switch", lunar::planning::WheelPrimitiveKind::kStopAndSwitch,
+     {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0, 0.0}},
+}};
 
 std::string CommonHeader(const std::string& type) {
   const std::string base_frame = type == "WHEELED" ? "base_footprint" : "base_link";
@@ -220,18 +309,94 @@ TEST(CapabilityLoader, LoadsParametricWheelWithoutUrdfOrMesh) {
       share, "config/platform.yaml", "config/observation.json");
   ASSERT_TRUE(result.ok())
       << (result.error ? result.error->detail : std::string{});
+  ASSERT_TRUE(result.capabilities.has_value());
+  EXPECT_EQ(result.capabilities->platform_id, "wheel");
+  EXPECT_EQ(result.capabilities->capability_version, "wheel-v1");
+  EXPECT_EQ(result.capabilities->base_frame_id, "base_footprint");
+  EXPECT_EQ(result.capabilities->reference_point, "base_footprint");
   EXPECT_EQ(result.capabilities->geometry_source_kind,
             GeometrySourceKind::kParametricEnvelope);
   EXPECT_TRUE(result.capabilities->urdf_path.empty());
   EXPECT_TRUE(result.capabilities->mesh_paths.empty());
   ASSERT_TRUE(result.capabilities->parametric_wheeled_geometry.has_value());
-  EXPECT_EQ(result.capabilities->parametric_wheeled_geometry->wheel_count, 4U);
+  const auto& audit_geometry =
+      *result.capabilities->parametric_wheeled_geometry;
+  EXPECT_EQ(audit_geometry.wheel_count, 4U);
   EXPECT_EQ(
-      result.capabilities->parametric_wheeled_geometry->wheel_center_xy_m.size(),
-      4U);
+      audit_geometry.wheel_center_xy_m,
+      (std::vector<lunar::planning::Vec2>{
+          {0.4075, 0.3115},
+          {0.4075, -0.3115},
+          {-0.4075, -0.3115},
+          {-0.4075, 0.3115},
+      }));
+  EXPECT_EQ(result.capabilities->field_source_types, ApprovedWheelSources());
+  EXPECT_EQ(
+      result.capabilities->source_motion_primitive_ids,
+      (std::vector<std::string>{
+          "forward", "reverse", "forward-arc-left", "forward-arc-right",
+          "reverse-arc-left", "reverse-arc-right", "spin-left", "spin-right",
+          "stop-switch"}));
+  EXPECT_DOUBLE_EQ(result.capabilities->observation.sensor_range_m, 25.0);
+  EXPECT_NEAR(
+      result.capabilities->observation.sensor_fov_rad,
+      std::numbers::pi / 2.0,
+      1.0e-12);
+
   const auto& wheel = std::get<lunar::planning::WheeledCapability>(
       result.capabilities->platform);
+  EXPECT_EQ(
+      wheel.footprint_xy_m,
+      (std::vector<lunar::planning::Vec2>{
+          {0.6505, 0.404},
+          {0.6505, -0.404},
+          {-0.6505, -0.404},
+          {-0.6505, 0.404},
+      }));
+  EXPECT_EQ(wheel.body_extent_m, (lunar::planning::Vec3{1.301, 0.808, 1.363}));
+  EXPECT_DOUBLE_EQ(wheel.wheel_diameter_m, 0.304);
+  EXPECT_DOUBLE_EQ(wheel.wheel_width_m, 0.148);
+  EXPECT_DOUBLE_EQ(wheel.wheelbase_m, 0.815);
+  EXPECT_DOUBLE_EQ(wheel.track_width_m, 0.623);
+  EXPECT_DOUBLE_EQ(wheel.minimum_underbody_clearance_m, 0.214);
+  EXPECT_DOUBLE_EQ(wheel.maximum_local_obstacle_relief_m, 0.2);
+  EXPECT_FALSE(wheel.allow_unsupported_gap);
+  EXPECT_DOUBLE_EQ(wheel.minimum_body_z_m, 0.0);
+  EXPECT_DOUBLE_EQ(wheel.maximum_body_z_m, 1.363);
+  EXPECT_DOUBLE_EQ(wheel.maximum_forward_speed_mps, 0.2);
+  EXPECT_DOUBLE_EQ(wheel.maximum_reverse_speed_mps, 0.2);
+  EXPECT_NEAR(wheel.maximum_spin_rate_radps, 0.389923188554511, 1.0e-15);
+  EXPECT_DOUBLE_EQ(wheel.maximum_acceleration_mps2, 0.2);
+  EXPECT_DOUBLE_EQ(wheel.maximum_braking_deceleration_mps2, 0.2);
+  EXPECT_NEAR(
+      wheel.maximum_yaw_acceleration_radps2,
+      0.389923188554511,
+      1.0e-15);
+  EXPECT_DOUBLE_EQ(wheel.maximum_lateral_acceleration_mps2, 0.2);
   EXPECT_DOUBLE_EQ(wheel.maximum_curvature_per_m, 5.0);
+  EXPECT_NEAR(wheel.maximum_slope_rad, 0.174532925199433, 1.0e-15);
+  EXPECT_DOUBLE_EQ(wheel.minimum_clearance_m, 0.1);
+  ASSERT_EQ(wheel.motion_primitives.size(), kApprovedWheelPrimitives.size());
+  for (std::size_t index = 0U; index < kApprovedWheelPrimitives.size(); ++index) {
+    const auto& actual = wheel.motion_primitives[index];
+    const auto& expected = kApprovedWheelPrimitives[index];
+    EXPECT_EQ(actual.primitive_id, expected.primitive_id);
+    EXPECT_EQ(actual.kind, expected.kind);
+    EXPECT_NEAR(actual.relative_end_pose.position_m.x, expected.position_m.x,
+                1.0e-15);
+    EXPECT_NEAR(actual.relative_end_pose.position_m.y, expected.position_m.y,
+                1.0e-15);
+    EXPECT_NEAR(actual.relative_end_pose.position_m.z, expected.position_m.z,
+                1.0e-15);
+    EXPECT_NEAR(actual.relative_end_pose.orientation.w, expected.orientation.w,
+                1.0e-15);
+    EXPECT_NEAR(actual.relative_end_pose.orientation.x, expected.orientation.x,
+                1.0e-15);
+    EXPECT_NEAR(actual.relative_end_pose.orientation.y, expected.orientation.y,
+                1.0e-15);
+    EXPECT_NEAR(actual.relative_end_pose.orientation.z, expected.orientation.z,
+                1.0e-15);
+  }
 }
 
 TEST(CapabilityLoader, SelectsExactlyOneConfiguredPathMode) {
@@ -345,11 +510,115 @@ TEST(CapabilityLoader, RejectsMixedOrInvalidParametricGeometry) {
             "CAPABILITY_VALUE_INVALID");
 }
 
+TEST(CapabilityLoader, RejectsWheelV1GeometryThatDriftsFromItsDimensions) {
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedWheelYaml(),
+          "wheel_center_xy_m: [[0.4075, 0.3115]",
+          "wheel_center_xy_m: [[0.4, 0.3115]"),
+      "CAPABILITY_VALUE_INVALID",
+      "wheel_center_xy_m must match wheelbase_m and track_width_m");
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedWheelYaml(),
+          "minimum_underbody_clearance_m: 0.214",
+          "minimum_underbody_clearance_m: 1.363"),
+      "CAPABILITY_VALUE_INVALID",
+      "minimum_underbody_clearance_m must be less than body_extent_m.z");
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedWheelYaml(),
+          "footprint_xy_m: [[0.6505, 0.404], [0.6505, -0.404], "
+          "[-0.6505, -0.404], [-0.6505, 0.404]]",
+          "footprint_xy_m: [[0.6, 0.35], [0.6, -0.35], "
+          "[-0.6, -0.35], [-0.6, 0.35]]"),
+      "CAPABILITY_VALUE_INVALID",
+      "footprint_xy_m must match wheel-v1 full body envelope");
+}
+
+TEST(CapabilityLoader, RejectsUnapprovedWheelV1PrimitiveSemantics) {
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedWheelYaml(),
+          "position_m: [0.2, 0.0, 0.0]",
+          "position_m: [0.2, 0.01, 0.0]"),
+      "CAPABILITY_VALUE_INVALID",
+      "motion primitive forward does not match wheel-v1 definition");
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedWheelYaml(),
+          "- primitive_id: spin-left\n"
+          "      kind: SPIN_COUNTERCLOCKWISE\n"
+          "      relative_end_pose: {position_m: [0.0, 0.0, 0.0]",
+          "- primitive_id: spin-left\n"
+          "      kind: SPIN_COUNTERCLOCKWISE\n"
+          "      relative_end_pose: {position_m: [0.01, 0.0, 0.0]"),
+      "CAPABILITY_VALUE_INVALID",
+      "motion primitive spin-left does not match wheel-v1 definition");
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedWheelYaml(),
+          "orientation_wxyz: [1.0, 0.0, 0.0, 0.0]",
+          "orientation_wxyz: [1.0001, 0.0, 0.0, 0.0]"),
+      "CAPABILITY_VALUE_INVALID",
+      "quaternion is not unit length: "
+      "motion_primitives.relative_end_pose.orientation_wxyz");
+}
+
+TEST(CapabilityLoader, RejectsWheelV1IdentityAndAuditMetadataDrift) {
+  ExpectParametricFailure(
+      ReplaceOnce(TrackedWheelYaml(), "platform_id: wheel", "platform_id: rover"),
+      "CAPABILITY_VALUE_INVALID",
+      "platform.platform_id must be wheel");
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedWheelYaml(),
+          "platform_type: WHEELED",
+          "platform_type: LEGGED"),
+      "CAPABILITY_VALUE_INVALID",
+      "platform.platform_type must be WHEELED");
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedWheelYaml(),
+          "capability_version: wheel-v1",
+          "capability_version: wheel-v2"),
+      "CAPABILITY_VALUE_INVALID",
+      "platform.capability_version must be wheel-v1");
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedWheelYaml(),
+          "base_frame_id: base_footprint",
+          "base_frame_id: base_link"),
+      "CAPABILITY_VALUE_INVALID",
+      "platform.base_frame_id must be base_footprint");
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedWheelYaml(),
+          "level: approved_user_parameter_baseline",
+          "level: user_confirmed_capability"),
+      "CAPABILITY_VALUE_INVALID",
+      "platform.provenance.level must be approved_user_parameter_baseline");
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedWheelYaml(),
+          "2026-08-20-wheel-parametric-capability-design.md",
+          "2026-08-07-wheeled-platform-capability-design.md"),
+      "CAPABILITY_VALUE_INVALID",
+      "platform.provenance.design_document must name the wheel-v1 design");
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedWheelYaml(),
+          "unknown_fields: [bare_mass_kg, ",
+          "unknown_fields: ["),
+      "CAPABILITY_VALUE_INVALID",
+      "platform.unknown_fields must exactly match wheel-v1 unknown fields");
+}
+
 TEST(CapabilityLoader, RejectsMissingOrUnsupportedFieldSources) {
-  EXPECT_EQ(LoadParametricText(
-                WithoutSource(TrackedWheelYaml(), "maximum_curvature_per_m"))
-                .error->reason_code,
-            "CAPABILITY_SCHEMA_INVALID");
+  ExpectParametricFailure(
+      WithoutSource(TrackedWheelYaml(), "maximum_curvature_per_m"),
+      "CAPABILITY_SCHEMA_INVALID",
+      "sources missing fields: maximum_curvature_per_m");
   std::string unsupported = TrackedWheelYaml();
   const std::string approved =
       "maximum_curvature_per_m: user_confirmed_capability";
@@ -357,13 +626,25 @@ TEST(CapabilityLoader, RejectsMissingOrUnsupportedFieldSources) {
       approved,
       unsupported.find("sources:\n"));
   unsupported.replace(source, approved.size(), "maximum_curvature_per_m: guess");
-  EXPECT_EQ(LoadParametricText(unsupported).error->reason_code,
-            "CAPABILITY_VALUE_INVALID");
+  ExpectParametricFailure(
+      unsupported,
+      "CAPABILITY_VALUE_INVALID",
+      "unsupported field source type for maximum_curvature_per_m: guess");
+
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedWheelYaml(),
+          approved,
+          "maximum_curvature_per_m: derived"),
+      "CAPABILITY_VALUE_INVALID",
+      "sources invalid fields: maximum_curvature_per_m");
 
   std::string extra = TrackedWheelYaml();
   extra += "  baseline: derived\n";
-  EXPECT_EQ(LoadParametricText(extra).error->reason_code,
-            "CAPABILITY_SCHEMA_INVALID");
+  ExpectParametricFailure(
+      extra,
+      "CAPABILITY_SCHEMA_INVALID",
+      "sources extra fields: baseline");
 }
 
 TEST(CapabilityLoader, LoadsV2WheelGeometryAndSourcesWithoutProxyValues) {

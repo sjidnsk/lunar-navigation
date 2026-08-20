@@ -203,11 +203,16 @@ schema 中仍是绝对禁入层；在正式拆分“禁止着陆”和“禁止�
 
 `geometry_source` 只能选择一个变体。`{type: parametric_envelope}` 使用正式的数值化机身、足迹和轮式字段；它不提供组件级几何或可视化。`{urdf_file: ...}` 为 legacy `urdf_mesh` 模式，继续要求 URDF 引用的 mesh；URDF 及 mesh 路径必须保持 package-relative。只有参数模式允许外部绝对路径。
 
-本仓的 `platform_capability_schema_v2.yaml` 与 `three_platform_capability_freeze_v1.yaml` 是当前
-规划和正式训练的唯一能力权威，也是尚待外部 provider 对接的 provisional 消费合同。这里的
-`provisional` 只表示外部数据发布实现尚未交付，不降低这组已批准值在本项目中的正式身份。
-正式外部 provider 出现后必须先逐字段等价，再原子切换数据来源；不能在运行时静默改变能力值、
-版本或摘要。
+当前参数化分支只批准部署文件中的 `wheel/WHEELED/wheel-v1/base_footprint`：provenance、
+`unknown_fields`、逐字段 `sources`、完整外包络、由轴距/轨距推导的四个轮心和九个运动原语都必须
+与已审阅基线精确一致。任何新的参数化平台身份、来源映射或运动语义都必须使用新的已审阅能力版本；
+不得借当前版本启用横移或斜移。该约束不反向套用到 legacy `urdf_mesh` 文档。
+
+`three_platform_capability_freeze_v1.yaml` 仍是正式训练能力摘要；部署时使用的 `wheel-v1` 参数能力
+不会替换或改写该冻结 payload。`platform_capability_schema_v2.yaml`、三平台冻结和已审阅的部署能力
+共同构成尚待外部 provider 对接的 provisional 消费合同。这里的 `provisional` 只表示外部数据发布
+实现尚未交付，不降低已批准值在本项目中的正式身份。正式外部 provider 出现后必须先逐字段等价，
+再原子切换数据来源；不能在运行时静默改变能力值、版本或摘要。
 
 ## 消费边界
 

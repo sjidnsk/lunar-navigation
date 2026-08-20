@@ -1,6 +1,7 @@
 #include "lunar_planner_ros/capability_loader.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -27,6 +28,10 @@ namespace {
 constexpr std::string_view kPlatformSchema =
     "platform-control-capability-source/v2";
 constexpr double kProjectMaximumSlopeRad = std::numbers::pi / 6.0;
+constexpr double kWheelV1Tolerance = 1.0e-12;
+constexpr std::string_view kWheelV1DesignDocument =
+    "docs/superpowers/specs/"
+    "2026-08-20-wheel-parametric-capability-design.md";
 const std::set<std::string, std::less<>> kAllowedSourceTypes{
     "upstream_model",
     "upstream_config",
@@ -42,32 +47,86 @@ const std::set<std::string, std::less<>> kAllowedSourceTypes{
     "planning_safety_baseline",
     "unknown",
 };
-const std::set<std::string, std::less<>> kRequiredWheeledSources{
-    "allow_unsupported_gap",
-    "body_extent_m",
-    "footprint_xy_m",
-    "maximum_acceleration_mps2",
-    "maximum_braking_deceleration_mps2",
-    "maximum_curvature_per_m",
-    "maximum_forward_speed_mps",
-    "maximum_lateral_acceleration_mps2",
-    "maximum_local_obstacle_relief_m",
-    "maximum_reverse_speed_mps",
-    "maximum_spin_rate_radps",
-    "maximum_surface_slope_rad",
-    "maximum_yaw_acceleration_radps2",
-    "minimum_clearance_m",
-    "minimum_underbody_clearance_m",
-    "motion_primitives",
-    "reference_point",
-    "roughness_handling",
-    "track_width_m",
-    "wheel_center_xy_m",
-    "wheel_count",
-    "wheel_diameter_m",
-    "wheel_width_m",
-    "wheelbase_m",
+const std::map<std::string, std::string, std::less<>> kApprovedWheelV1Sources{
+    {"allow_unsupported_gap", "user_confirmed_capability"},
+    {"body_extent_m", "user_provided_dimension"},
+    {"footprint_xy_m", "derived"},
+    {"maximum_acceleration_mps2", "user_confirmed_capability"},
+    {"maximum_braking_deceleration_mps2", "user_confirmed_capability"},
+    {"maximum_curvature_per_m", "user_confirmed_capability"},
+    {"maximum_forward_speed_mps", "user_confirmed_capability"},
+    {"maximum_lateral_acceleration_mps2", "user_approved_planning_policy"},
+    {"maximum_local_obstacle_relief_m", "user_confirmed_capability"},
+    {"maximum_reverse_speed_mps", "user_confirmed_capability"},
+    {"maximum_spin_rate_radps", "derived"},
+    {"maximum_surface_slope_rad", "user_confirmed_capability"},
+    {"maximum_yaw_acceleration_radps2", "derived"},
+    {"minimum_clearance_m", "user_approved_planning_policy"},
+    {"minimum_underbody_clearance_m", "user_provided_dimension"},
+    {"motion_primitives", "user_approved_planning_policy"},
+    {"reference_point", "derived"},
+    {"roughness_handling", "user_approved_planning_policy"},
+    {"track_width_m", "user_provided_dimension"},
+    {"wheel_center_xy_m", "derived"},
+    {"wheel_count", "user_confirmed_capability"},
+    {"wheel_diameter_m", "user_provided_dimension"},
+    {"wheel_width_m", "user_provided_dimension"},
+    {"wheelbase_m", "user_provided_dimension"},
 };
+const std::vector<std::string> kApprovedWheelV1UnknownFields{
+    "bare_mass_kg",
+    "nominal_payload_kg",
+    "maximum_payload_kg",
+    "center_of_mass_height_m",
+    "suspension_type",
+    "maximum_drive_effort",
+    "manufacturer_rated_speed_mps",
+    "longitudinal_traction_coefficient",
+    "lateral_traction_coefficient",
+    "verified_cross_slope_limit_rad",
+};
+const std::array<lunar::planning::Vec2, 4U> kApprovedWheelV1Footprint{{
+    {0.6505, 0.404},
+    {0.6505, -0.404},
+    {-0.6505, -0.404},
+    {-0.6505, 0.404},
+}};
+
+struct ApprovedWheelPrimitive final {
+  std::string_view primitive_id;
+  lunar::planning::WheelPrimitiveKind kind;
+  lunar::planning::Pose3 relative_end_pose;
+};
+
+const std::array<ApprovedWheelPrimitive, 9U> kApprovedWheelV1Primitives{{
+    {"forward", lunar::planning::WheelPrimitiveKind::kForward,
+     {.position_m = {0.2, 0.0, 0.0},
+      .orientation = {1.0, 0.0, 0.0, 0.0}}},
+    {"reverse", lunar::planning::WheelPrimitiveKind::kReverse,
+     {.position_m = {-0.2, 0.0, 0.0},
+      .orientation = {1.0, 0.0, 0.0, 0.0}}},
+    {"forward-arc-left", lunar::planning::WheelPrimitiveKind::kForwardArc,
+     {.position_m = {0.039018064403226, 0.003842943919354, 0.0},
+      .orientation = {0.995184726672197, 0.0, 0.0, 0.098017140329561}}},
+    {"forward-arc-right", lunar::planning::WheelPrimitiveKind::kForwardArc,
+     {.position_m = {0.039018064403226, -0.003842943919354, 0.0},
+      .orientation = {0.995184726672197, 0.0, 0.0, -0.098017140329561}}},
+    {"reverse-arc-left", lunar::planning::WheelPrimitiveKind::kReverseArc,
+     {.position_m = {-0.039018064403226, 0.003842943919354, 0.0},
+      .orientation = {0.995184726672197, 0.0, 0.0, -0.098017140329561}}},
+    {"reverse-arc-right", lunar::planning::WheelPrimitiveKind::kReverseArc,
+     {.position_m = {-0.039018064403226, -0.003842943919354, 0.0},
+      .orientation = {0.995184726672197, 0.0, 0.0, 0.098017140329561}}},
+    {"spin-left", lunar::planning::WheelPrimitiveKind::kSpinCounterclockwise,
+     {.position_m = {0.0, 0.0, 0.0},
+      .orientation = {0.995184726672197, 0.0, 0.0, 0.098017140329561}}},
+    {"spin-right", lunar::planning::WheelPrimitiveKind::kSpinClockwise,
+     {.position_m = {0.0, 0.0, 0.0},
+      .orientation = {0.995184726672197, 0.0, 0.0, -0.098017140329561}}},
+    {"stop-switch", lunar::planning::WheelPrimitiveKind::kStopAndSwitch,
+     {.position_m = {0.0, 0.0, 0.0},
+      .orientation = {1.0, 0.0, 0.0, 0.0}}},
+}};
 
 class LoadFailure final : public std::runtime_error {
  public:
@@ -205,6 +264,75 @@ class LoadFailure final : public std::runtime_error {
   } catch (const YAML::Exception&) {
     SchemaFailure("invalid string: " + key);
   }
+}
+
+[[nodiscard]] std::vector<std::string> RequireStringSequence(
+    const YAML::Node& parent,
+    const std::string& key) {
+  const YAML::Node node = RequireSequence(parent, key);
+  std::vector<std::string> values;
+  values.reserve(node.size());
+  for (std::size_t index = 0U; index < node.size(); ++index) {
+    if (!node[index].IsScalar()) {
+      SchemaFailure("invalid string sequence: " + key);
+    }
+    try {
+      std::string value = node[index].as<std::string>();
+      if (value.empty()) {
+        SchemaFailure("invalid string sequence: " + key);
+      }
+      values.push_back(std::move(value));
+    } catch (const YAML::Exception&) {
+      SchemaFailure("invalid string sequence: " + key);
+    }
+  }
+  return values;
+}
+
+[[nodiscard]] std::string JoinFields(
+    const std::vector<std::string>& fields) {
+  std::string joined;
+  for (std::size_t index = 0U; index < fields.size(); ++index) {
+    if (index > 0U) {
+      joined.append(", ");
+    }
+    joined.append(fields[index]);
+  }
+  return joined;
+}
+
+[[nodiscard]] bool Near(
+    const double actual,
+    const double expected) noexcept {
+  return std::isfinite(actual) &&
+      std::abs(actual - expected) <= kWheelV1Tolerance;
+}
+
+[[nodiscard]] bool Near(
+    const lunar::planning::Vec2& actual,
+    const lunar::planning::Vec2& expected) noexcept {
+  return Near(actual.x, expected.x) && Near(actual.y, expected.y);
+}
+
+[[nodiscard]] bool Near(
+    const lunar::planning::Vec3& actual,
+    const lunar::planning::Vec3& expected) noexcept {
+  return Near(actual.x, expected.x) && Near(actual.y, expected.y) &&
+      Near(actual.z, expected.z);
+}
+
+[[nodiscard]] bool Near(
+    const lunar::planning::Quaternion& actual,
+    const lunar::planning::Quaternion& expected) noexcept {
+  return Near(actual.w, expected.w) && Near(actual.x, expected.x) &&
+      Near(actual.y, expected.y) && Near(actual.z, expected.z);
+}
+
+[[nodiscard]] bool Near(
+    const lunar::planning::Pose3& actual,
+    const lunar::planning::Pose3& expected) noexcept {
+  return Near(actual.position_m, expected.position_m) &&
+      Near(actual.orientation, expected.orientation);
 }
 
 [[nodiscard]] double RequireDouble(
@@ -425,7 +553,8 @@ void RejectUnexpectedKeys(
 
 [[nodiscard]] lunar::planning::Quaternion Quaternion(
     const YAML::Node& node,
-    const std::string& field) {
+    const std::string& field,
+    const bool require_tight_unit_norm) {
   if (!node.IsSequence() || node.size() != 4U) {
     SchemaFailure("expected quaternion wxyz: " + field);
   }
@@ -443,13 +572,17 @@ void RejectUnexpectedKeys(
   const double norm = std::sqrt(
       value.w * value.w + value.x * value.x +
       value.y * value.y + value.z * value.z);
-  if (!std::isfinite(norm) || std::abs(norm - 1.0) > 1.0e-3) {
+  const double norm_tolerance =
+      require_tight_unit_norm ? kWheelV1Tolerance : 1.0e-3;
+  if (!std::isfinite(norm) || std::abs(norm - 1.0) > norm_tolerance) {
     ValueFailure("quaternion is not unit length: " + field);
   }
-  value.w /= norm;
-  value.x /= norm;
-  value.y /= norm;
-  value.z /= norm;
+  if (!require_tight_unit_norm) {
+    value.w /= norm;
+    value.x /= norm;
+    value.y /= norm;
+    value.z /= norm;
+  }
   return value;
 }
 
@@ -498,7 +631,8 @@ void RejectUnexpectedKeys(
 
 [[nodiscard]] lunar::planning::Pose3 Pose(
     const YAML::Node& node,
-    const std::string& field) {
+    const std::string& field,
+    const bool require_tight_unit_quaternion) {
   if (!node || !node.IsMap()) {
     SchemaFailure("expected pose: " + field);
   }
@@ -507,7 +641,8 @@ void RejectUnexpectedKeys(
           RequireSequence(node, "position_m"), field + ".position_m"),
       .orientation = Quaternion(
           RequireSequence(node, "orientation_wxyz"),
-          field + ".orientation_wxyz"),
+          field + ".orientation_wxyz",
+          require_tight_unit_quaternion),
   };
 }
 
@@ -562,7 +697,10 @@ void RecordPrimitiveId(
     const YAML::Node& wheeled,
     const lunar::planning::Vec3& body_extent,
     const double wheel_diameter,
-    const double wheel_width) {
+    const double wheel_width,
+    const double wheelbase,
+    const double track_width,
+    const std::vector<lunar::planning::Vec2>& footprint) {
   const std::size_t wheel_count = RequirePositiveSize(wheeled, "wheel_count");
   if (wheel_count != 4U) {
     ValueFailure("parametric wheeled geometry requires four wheels");
@@ -575,6 +713,12 @@ void RecordPrimitiveId(
   }
   std::vector<lunar::planning::Vec2> centers;
   std::set<std::pair<double, double>> unique_centers;
+  std::vector<lunar::planning::Vec2> expected_centers{
+      {wheelbase / 2.0, track_width / 2.0},
+      {wheelbase / 2.0, -track_width / 2.0},
+      {-wheelbase / 2.0, -track_width / 2.0},
+      {-wheelbase / 2.0, track_width / 2.0},
+  };
   centers.reserve(wheel_count);
   for (std::size_t index = 0U; index < center_nodes.size(); ++index) {
     const auto center = Vec2(
@@ -589,25 +733,32 @@ void RecordPrimitiveId(
             body_extent.y / 2.0 + 1.0e-9) {
       ValueFailure("wheel center exceeds body envelope");
     }
+    const auto expected = std::ranges::find_if(
+        expected_centers,
+        [&](const lunar::planning::Vec2& candidate) {
+          return Near(center, candidate);
+        });
+    if (expected == expected_centers.end()) {
+      ValueFailure("wheel_center_xy_m must match wheelbase_m and track_width_m");
+    }
+    expected_centers.erase(expected);
     centers.push_back(center);
   }
 
-  const YAML::Node footprint_nodes = RequireSequence(
-      wheeled, "footprint_xy_m", 3U);
-  std::vector<lunar::planning::Vec2> footprint;
-  std::set<std::pair<double, double>> unique_vertices;
-  footprint.reserve(footprint_nodes.size());
-  for (std::size_t index = 0U; index < footprint_nodes.size(); ++index) {
-    const auto vertex = Vec2(
-        footprint_nodes[index],
-        "wheeled.footprint_xy_m[" + std::to_string(index) + "]");
-    if (!unique_vertices.emplace(vertex.x, vertex.y).second) {
-      ValueFailure("duplicate wheeled footprint vertex");
-    }
-    footprint.push_back(vertex);
-  }
   if (!IsStrictlyConvex(footprint)) {
     ValueFailure("parametric wheeled footprint must be strictly convex");
+  }
+  if (footprint.size() != kApprovedWheelV1Footprint.size() ||
+      !Near(body_extent.x, 2.0 * kApprovedWheelV1Footprint.front().x) ||
+      !Near(body_extent.y, 2.0 * kApprovedWheelV1Footprint.front().y) ||
+      !std::equal(
+          footprint.begin(), footprint.end(),
+          kApprovedWheelV1Footprint.begin(),
+          [](const lunar::planning::Vec2& actual,
+             const lunar::planning::Vec2& expected) {
+            return Near(actual, expected);
+          })) {
+    ValueFailure("footprint_xy_m must match wheel-v1 full body envelope");
   }
   return ParametricWheeledGeometry{
       .wheel_count = wheel_count,
@@ -615,15 +766,90 @@ void RecordPrimitiveId(
   };
 }
 
-void ValidateRequiredSources(
-    const LoadedCapabilities& loaded,
-    const std::set<std::string, std::less<>>& required) {
-  if (loaded.field_source_types.size() != required.size()) {
-    SchemaFailure("sources do not match required fields");
+void ValidateApprovedWheelV1Sources(const LoadedCapabilities& loaded) {
+  std::vector<std::string> missing;
+  std::vector<std::string> extra;
+  std::vector<std::string> invalid;
+  for (const auto& [field, expected_source] : kApprovedWheelV1Sources) {
+    const auto actual = loaded.field_source_types.find(field);
+    if (actual == loaded.field_source_types.end()) {
+      missing.push_back(field);
+    } else if (actual->second != expected_source) {
+      invalid.push_back(field);
+    }
   }
-  for (const auto& field : required) {
-    if (!loaded.field_source_types.contains(field)) {
-      SchemaFailure("missing required source: " + field);
+  for (const auto& [field, source] : loaded.field_source_types) {
+    static_cast<void>(source);
+    if (!kApprovedWheelV1Sources.contains(field)) {
+      extra.push_back(field);
+    }
+  }
+  if (!missing.empty()) {
+    SchemaFailure("sources missing fields: " + JoinFields(missing));
+  }
+  if (!extra.empty()) {
+    SchemaFailure("sources extra fields: " + JoinFields(extra));
+  }
+  if (!invalid.empty()) {
+    ValueFailure("sources invalid fields: " + JoinFields(invalid));
+  }
+}
+
+void ValidateApprovedWheelV1Platform(
+    const YAML::Node& platform,
+    const LoadedCapabilities& loaded,
+    const std::string& platform_type) {
+  RejectUnexpectedKeys(
+      platform,
+      {"platform_id", "platform_type", "capability_version", "base_frame_id",
+       "provenance", "unknown_fields"},
+      "platform");
+  if (loaded.platform_id != "wheel") {
+    ValueFailure("platform.platform_id must be wheel");
+  }
+  if (platform_type != "WHEELED") {
+    ValueFailure("platform.platform_type must be WHEELED");
+  }
+  if (loaded.capability_version != "wheel-v1") {
+    ValueFailure("platform.capability_version must be wheel-v1");
+  }
+  if (loaded.base_frame_id != "base_footprint") {
+    ValueFailure("platform.base_frame_id must be base_footprint");
+  }
+  const YAML::Node provenance = RequireMap(platform, "provenance");
+  RejectUnexpectedKeys(
+      provenance, {"level", "design_document"}, "platform.provenance");
+  if (RequireString(provenance, "level") !=
+      "approved_user_parameter_baseline") {
+    ValueFailure(
+        "platform.provenance.level must be approved_user_parameter_baseline");
+  }
+  if (RequireString(provenance, "design_document") != kWheelV1DesignDocument) {
+    ValueFailure(
+        "platform.provenance.design_document must name the wheel-v1 design");
+  }
+  if (RequireStringSequence(platform, "unknown_fields") !=
+      kApprovedWheelV1UnknownFields) {
+    ValueFailure(
+        "platform.unknown_fields must exactly match wheel-v1 unknown fields");
+  }
+}
+
+void ValidateApprovedWheelV1Primitives(
+    const std::vector<lunar::planning::WheelMotionPrimitive>& primitives) {
+  if (primitives.size() != kApprovedWheelV1Primitives.size()) {
+    ValueFailure("motion_primitives must exactly match wheel-v1 definitions");
+  }
+  for (std::size_t index = 0U;
+       index < kApprovedWheelV1Primitives.size(); ++index) {
+    const auto& actual = primitives[index];
+    const auto& expected = kApprovedWheelV1Primitives[index];
+    if (actual.primitive_id != expected.primitive_id ||
+        actual.kind != expected.kind ||
+        !Near(actual.relative_end_pose, expected.relative_end_pose)) {
+      ValueFailure(
+          "motion primitive " + std::string{expected.primitive_id} +
+          " does not match wheel-v1 definition");
     }
   }
 }
@@ -697,11 +923,17 @@ void ValidateRequiredSources(
   }
   if (loaded.geometry_source_kind == GeometrySourceKind::kParametricEnvelope) {
     loaded.parametric_wheeled_geometry = ParseParametricWheelGeometry(
-        node, body_extent, wheel_diameter, wheel_width);
+        node, body_extent, wheel_diameter, wheel_width, wheelbase, track_width,
+        footprint);
   }
   const double underbody_clearance = Positive(
       RequireDouble(node, "minimum_underbody_clearance_m"),
       "minimum_underbody_clearance_m");
+  if (loaded.geometry_source_kind == GeometrySourceKind::kParametricEnvelope &&
+      underbody_clearance >= body_extent.z) {
+    ValueFailure(
+        "minimum_underbody_clearance_m must be less than body_extent_m.z");
+  }
   const double local_relief = NonNegative(
       RequireDouble(node, "maximum_local_obstacle_relief_m"),
       "maximum_local_obstacle_relief_m");
@@ -732,8 +964,13 @@ void ValidateRequiredSources(
         .kind = WheelKind(RequireString(primitive, "kind")),
         .relative_end_pose =
             Pose(RequireMap(primitive, "relative_end_pose"),
-                 "motion_primitives.relative_end_pose"),
+                 "motion_primitives.relative_end_pose",
+                 loaded.geometry_source_kind ==
+                     GeometrySourceKind::kParametricEnvelope),
     });
+  }
+  if (loaded.geometry_source_kind == GeometrySourceKind::kParametricEnvelope) {
+    ValidateApprovedWheelV1Primitives(primitives);
   }
 
   return lunar::planning::WheeledCapability{
@@ -1097,12 +1334,6 @@ void AddMesh(
   const std::string platform_type = RequireString(platform, "platform_type");
   loaded.capability_version = RequireString(platform, "capability_version");
   loaded.base_frame_id = RequireString(platform, "base_frame_id");
-  const std::string expected_base_frame =
-      platform_type == "WHEELED" ? "base_footprint" : "base_link";
-  if (loaded.base_frame_id != expected_base_frame) {
-    ValueFailure(
-        "platform.base_frame_id must be " + expected_base_frame);
-  }
 
   const YAML::Node sources = RequireMap(platform_document, "sources");
   for (const auto& entry : sources) {
@@ -1123,9 +1354,9 @@ void AddMesh(
     SchemaFailure("sources must not be empty");
   }
   for (const auto& [field, source_type] : loaded.field_source_types) {
-    static_cast<void>(field);
     if (!kAllowedSourceTypes.contains(source_type)) {
-      ValueFailure("unsupported field source type: " + source_type);
+      ValueFailure(
+          "unsupported field source type for " + field + ": " + source_type);
     }
   }
 
@@ -1149,13 +1380,17 @@ void AddMesh(
       SchemaFailure("parametric geometry must not declare urdf_file");
     }
     RejectUnexpectedKeys(geometry, {"type"}, "geometry_source");
-    if (platform_type != "WHEELED") {
-      ValueFailure("parametric_envelope is only approved for WHEELED");
-    }
     loaded.geometry_source_kind = GeometrySourceKind::kParametricEnvelope;
+    ValidateApprovedWheelV1Platform(platform, loaded, platform_type);
   } else {
     RejectUnexpectedKeys(geometry, {"urdf_file"}, "geometry_source");
     loaded.geometry_source_kind = GeometrySourceKind::kUrdfMesh;
+    const std::string expected_base_frame =
+        platform_type == "WHEELED" ? "base_footprint" : "base_link";
+    if (loaded.base_frame_id != expected_base_frame) {
+      ValueFailure(
+          "platform.base_frame_id must be " + expected_base_frame);
+    }
     if (!package_share_directory) {
       throw LoadFailure{
           CapabilityLoadErrorCode::kPathModeInvalid,
@@ -1177,7 +1412,7 @@ void AddMesh(
   if (platform_type == "WHEELED") {
     loaded.platform = ParseWheeled(platform_document, loaded);
     if (loaded.geometry_source_kind == GeometrySourceKind::kParametricEnvelope) {
-      ValidateRequiredSources(loaded, kRequiredWheeledSources);
+      ValidateApprovedWheelV1Sources(loaded);
     }
   } else if (platform_type == "LEGGED") {
     loaded.platform = ParseLegged(platform_document, loaded);
