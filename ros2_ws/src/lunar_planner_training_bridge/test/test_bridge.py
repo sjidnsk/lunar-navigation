@@ -137,6 +137,10 @@ def _hopper_capability() -> bridge_api.HopperCapability:
     capability.specific_impulse_s = 301.0
     capability.reference_total_mass_kg = 20.0
     capability.reference_propellant_mass_kg = 0.2
+    capability.gravity_mps2 = _vec3(0.0, 0.0, -1.62)
+    capability.reference_horizontal_range_m = 100.0
+    capability.reference_elevation_delta_m = 0.0
+    capability.runtime_fallback_allowed = False
     capability.landing_support_radius_m = 0.45
     capability.flight_collision_radius_m = 0.55
     capability.maximum_landing_plane_residual_m = 0.05
@@ -159,6 +163,20 @@ def test_bridge_exposes_capability_v2_without_retired_limits_or_durations() -> N
     assert not hasattr(bridge_api, "SearchResourceLimits")
     assert not hasattr(bridge_api.WheelPlannerConfig(), "maximum_terminal_candidates")
     assert not hasattr(bridge_api.HopperPlannerConfig(), "maximum_graph_nodes")
+
+
+def test_bridge_exposes_complete_hopper_single_hop_projection() -> None:
+    """Would fail if formal Hopper fields were lost crossing the pybind boundary."""
+    hopper = _hopper_capability()
+
+    assert (hopper.gravity_mps2.x, hopper.gravity_mps2.y, hopper.gravity_mps2.z) == (
+        0.0,
+        0.0,
+        -1.62,
+    )
+    assert hopper.reference_horizontal_range_m == 100.0
+    assert hopper.reference_elevation_delta_m == 0.0
+    assert hopper.runtime_fallback_allowed is False
 
 
 def test_urdf_validation_uses_authoritative_model_parser() -> None:

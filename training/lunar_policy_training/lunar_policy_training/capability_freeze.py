@@ -130,7 +130,7 @@ _LEGGED_FIELDS = _LEGACY_LEGGED_FIELDS | _LEGGED_METADATA_FIELDS
 # without overstating payload capability; unknown terrain remains fail-closed.
 _LEGACY_NOMINAL_PAYLOAD_KG = 0.0
 _LEGACY_UNKNOWN_IS_TRAVERSABLE = False
-_HOPPER_FIELDS = frozenset(
+_LEGACY_HOPPER_FIELDS = frozenset(
     (
         "specific_impulse_s",
         "reference_total_mass_kg",
@@ -143,6 +143,14 @@ _HOPPER_FIELDS = frozenset(
         "reachability_delta_v_margin_ratio",
         "standard_gravity_mps2",
         "maximum_landing_slope_rad",
+    )
+)
+_HOPPER_FIELDS = _LEGACY_HOPPER_FIELDS | frozenset(
+    (
+        "gravity_mps2",
+        "reference_horizontal_range_m",
+        "reference_elevation_delta_m",
+        "runtime_fallback_allowed",
     )
 )
 _WHEEL_KINDS = frozenset(
@@ -282,6 +290,10 @@ class FrozenHopperCapability:
     reachability_delta_v_margin_ratio: float
     standard_gravity_mps2: float
     maximum_landing_slope_rad: float
+    gravity_mps2: FrozenVec3 = FrozenVec3(0.0, 0.0, -1.62)
+    reference_horizontal_range_m: float = 100.0
+    reference_elevation_delta_m: float = 0.0
+    runtime_fallback_allowed: bool = False
 
 
 FrozenTypedCapability: TypeAlias = (
@@ -413,6 +425,9 @@ class FrozenPlatformCapability:
             "specific_impulse_s",
             "reference_total_mass_kg",
             "reference_propellant_mass_kg",
+            "reference_horizontal_range_m",
+            "reference_elevation_delta_m",
+            "runtime_fallback_allowed",
             "landing_support_radius_m",
             "flight_collision_radius_m",
             "maximum_landing_plane_residual_m",
@@ -423,6 +438,7 @@ class FrozenPlatformCapability:
             "maximum_landing_slope_rad",
         ):
             setattr(value, field, getattr(typed, field))
+        value.gravity_mps2 = _bridge_vec3(typed.gravity_mps2, bridge_api)
         return value
 
 
@@ -1192,7 +1208,14 @@ def _parse_legged(value: object) -> FrozenLeggedCapability:
 
 
 def _parse_hopper(value: object) -> FrozenHopperCapability:
-    node = _require_exact_object(value, _HOPPER_FIELDS, "hopper capability")
+    if not isinstance(value, dict):
+        raise CapabilityFreezeError("hopper capability schema fields are invalid")
+    legacy = set(value) == _LEGACY_HOPPER_FIELDS
+    node = _require_exact_object(
+        value,
+        _LEGACY_HOPPER_FIELDS if legacy else _HOPPER_FIELDS,
+        "hopper capability",
+    )
     parsed = FrozenHopperCapability(
         specific_impulse_s=_positive(
             node["specific_impulse_s"], "specific_impulse_s"
@@ -1203,6 +1226,31 @@ def _parse_hopper(value: object) -> FrozenHopperCapability:
         reference_propellant_mass_kg=_positive(
             node["reference_propellant_mass_kg"],
             "reference_propellant_mass_kg",
+        ),
+        gravity_mps2=(
+            FrozenVec3(0.0, 0.0, -1.62)
+            if legacy
+            else _vec3(node["gravity_mps2"], "gravity_mps2")
+        ),
+        reference_horizontal_range_m=(
+            100.0
+            if legacy
+            else _positive(
+                node["reference_horizontal_range_m"], "reference_horizontal_range_m"
+            )
+        ),
+        reference_elevation_delta_m=(
+            0.0
+            if legacy
+            else _finite(
+                node["reference_elevation_delta_m"], "reference_elevation_delta_m"
+            )
+        ),
+        runtime_fallback_allowed=(
+            False
+            if legacy
+            else _boolean(
+                node["runtime_fallback_allowed"], "runtime_fallback_allowed")
         ),
         landing_support_radius_m=_positive(
             node["landing_support_radius_m"], "landing_support_radius_m"
@@ -1235,6 +1283,10 @@ def _parse_hopper(value: object) -> FrozenHopperCapability:
         raise CapabilityFreezeError(
             "reference_propellant_mass_kg must be less than reference_total_mass_kg"
         )
+    if parsed.gravity_mps2 != FrozenVec3(0.0, 0.0, -1.62):
+        raise CapabilityFreezeError("gravity_mps2 must be the approved lunar vector")
+    if parsed.runtime_fallback_allowed:
+        raise CapabilityFreezeError("runtime_fallback_allowed must be false")
     return parsed
 
 

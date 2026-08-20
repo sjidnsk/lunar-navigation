@@ -26,7 +26,6 @@ namespace lunar::planning::hopper {
 namespace {
 
 constexpr std::string_view kPlannerName = "cpp_v3_native_hopper";
-constexpr Vec3 kLunarGravityMps2{0.0, 0.0, -1.62};
 
 [[nodiscard]] bool Finite(const Vec3 value) noexcept {
   return std::isfinite(value.x) && std::isfinite(value.y) &&
@@ -60,6 +59,13 @@ constexpr Vec3 kLunarGravityMps2{0.0, 0.0, -1.62};
       capability.reference_propellant_mass_kg > 0.0 &&
       capability.reference_propellant_mass_kg <
           capability.reference_total_mass_kg &&
+      Finite(capability.gravity_mps2) &&
+      capability.gravity_mps2.x == 0.0 && capability.gravity_mps2.y == 0.0 &&
+      capability.gravity_mps2.z < 0.0 &&
+      std::isfinite(capability.reference_horizontal_range_m) &&
+      capability.reference_horizontal_range_m > 0.0 &&
+      std::isfinite(capability.reference_elevation_delta_m) &&
+      !capability.runtime_fallback_allowed &&
       std::isfinite(capability.landing_support_radius_m) &&
       capability.landing_support_radius_m > 0.0 &&
       std::isfinite(capability.flight_collision_radius_m) &&
@@ -285,7 +291,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
         SingleHopCertificationProblem{
             .launch_position_m = launch_pose_map->position_m,
             .landing_position_m = *landing_map,
-            .gravity_mps2 = kLunarGravityMps2,
+            .gravity_mps2 = capability->gravity_mps2,
             .flight_map = global_map.snapshot.get(),
             .capability = capability,
             .map_safety = &input.config.map_safety,
@@ -343,7 +349,7 @@ PlannerOutput HopperPlanner::Plan(const PlannerInput& input) const {
             std::hypot(vertex.x - landing_map->x,
                        vertex.y - landing_map->y));
         const BallisticSolveResult vertex_arc = SolveBallisticArc(
-            launch_pose_map->position_m, vertex, kLunarGravityMps2,
+            launch_pose_map->position_m, vertex, capability->gravity_mps2,
             certified.arc.flight_time_s);
         if (!vertex_arc.ok()) {
           return Failure(

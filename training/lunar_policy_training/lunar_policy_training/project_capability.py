@@ -301,6 +301,10 @@ def _hopper_payload(raw: Mapping[str, object]) -> dict[str, object]:
         "reference_propellant_mass_kg": reference[
             "reference_remaining_usable_fuel_mass_kg"
         ],
+        "gravity_mps2": environment["gravity_mps2"],
+        "reference_horizontal_range_m": reference["reference_horizontal_range_m"],
+        "reference_elevation_delta_m": reference["reference_elevation_delta_m"],
+        "runtime_fallback_allowed": reference["runtime_fallback_allowed"],
         "landing_support_radius_m": landing["landing_support_radius_m"],
         "flight_collision_radius_m": safety["flight_collision_radius_m"],
         "maximum_landing_slope_rad": landing["maximum_landing_slope_rad"],

@@ -78,6 +78,13 @@ std::string TrackedLeggedYaml() {
       std::istreambuf_iterator<char>{}};
 }
 
+std::string TrackedHopperYaml() {
+  std::ifstream stream{RepositoryRoot() / "deployment/config/hopper.yaml"};
+  return std::string{
+      std::istreambuf_iterator<char>{stream},
+      std::istreambuf_iterator<char>{}};
+}
+
 CapabilityLoadResult LoadParametricText(const std::string& document) {
   const auto share = UniqueShare("parametric-text");
   WriteObservation(share);
@@ -169,6 +176,26 @@ std::map<std::string, std::string, std::less<>> ApprovedLeggedSources() {
       {"roughness_handling", "planning_policy"},
       {"step_vertical_rate_mps", "planning_policy"},
       {"unknown_is_traversable", "planning_policy"},
+  };
+}
+
+std::map<std::string, std::string, std::less<>> ApprovedHopperSources() {
+  return {
+      {"specific_impulse_s", "project_engineering_baseline"},
+      {"landing_support_radius_m", "project_engineering_baseline"},
+      {"flight_collision_radius_m", "project_engineering_baseline"},
+      {"maximum_landing_slope_rad", "planning_safety_baseline"},
+      {"maximum_landing_plane_residual_m", "planning_safety_baseline"},
+      {"landing_lateral_margin_m", "planning_safety_baseline"},
+      {"flight_map_margin_m", "planning_safety_baseline"},
+      {"reachability_delta_v_margin_ratio", "planning_safety_baseline"},
+      {"gravity_mps2", "planning_safety_baseline"},
+      {"standard_gravity_mps2", "planning_safety_baseline"},
+      {"reference_total_mass_kg", "project_engineering_baseline"},
+      {"reference_remaining_usable_fuel_mass_kg",
+       "project_engineering_baseline"},
+      {"reference_horizontal_range_m", "project_engineering_baseline"},
+      {"reference_elevation_delta_m", "project_engineering_baseline"},
   };
 }
 
@@ -492,6 +519,95 @@ TEST(CapabilityLoader, LoadsApprovedParametricLeggedWithoutUrdfOrMesh) {
               std::numbers::pi / 32.0, 1.0e-15);
   EXPECT_NEAR(legged.motion_primitives[5].yaw_change_rad,
               -std::numbers::pi / 32.0, 1.0e-15);
+}
+
+TEST(CapabilityLoader, LoadsApprovedParametricHopperWithoutUrdfOrMesh) {
+  const auto share = UniqueShare("parametric-hopper");
+  WriteObservation(share);
+  Write(share / "config" / "platform.yaml", TrackedHopperYaml());
+  const auto result = CapabilityLoader{}.LoadFromShareDirectory(
+      share, "config/platform.yaml", "config/observation.json");
+
+  ASSERT_TRUE(result.ok())
+      << (result.error ? result.error->detail : std::string{});
+  ASSERT_TRUE(result.capabilities.has_value());
+  EXPECT_EQ(result.capabilities->platform_id, "hopper");
+  EXPECT_EQ(result.capabilities->capability_version, "hopper-v1");
+  EXPECT_EQ(result.capabilities->base_frame_id, "base_link");
+  EXPECT_EQ(result.capabilities->geometry_source_kind,
+            GeometrySourceKind::kParametricEnvelope);
+  EXPECT_TRUE(result.capabilities->urdf_path.empty());
+  EXPECT_TRUE(result.capabilities->mesh_paths.empty());
+  EXPECT_EQ(result.capabilities->field_source_types, ApprovedHopperSources());
+
+  const auto& hopper = std::get<lunar::planning::HopperCapability>(
+      result.capabilities->platform);
+  EXPECT_DOUBLE_EQ(hopper.specific_impulse_s, 301.0);
+  EXPECT_EQ(hopper.gravity_mps2, (lunar::planning::Vec3{0.0, 0.0, -1.62}));
+  EXPECT_DOUBLE_EQ(hopper.reference_total_mass_kg, 20.0);
+  EXPECT_DOUBLE_EQ(hopper.reference_propellant_mass_kg, 0.2);
+  EXPECT_DOUBLE_EQ(hopper.reference_horizontal_range_m, 100.0);
+  EXPECT_DOUBLE_EQ(hopper.reference_elevation_delta_m, 0.0);
+  EXPECT_FALSE(hopper.runtime_fallback_allowed);
+}
+
+TEST(CapabilityLoader, RejectsParametricHopperContractDrift) {
+  const std::string tracked = TrackedHopperYaml();
+  const auto expect_value_failure = [&](const std::string& document) {
+    const auto result = LoadParametricText(document);
+    ASSERT_TRUE(result.error.has_value());
+    EXPECT_EQ(result.error->reason_code, "CAPABILITY_VALUE_INVALID");
+  };
+  const auto expect_schema_failure = [&](const std::string& document) {
+    const auto result = LoadParametricText(document);
+    ASSERT_TRUE(result.error.has_value());
+    EXPECT_EQ(result.error->reason_code, "CAPABILITY_SCHEMA_INVALID");
+  };
+  const auto expect_compatibility_failure = [&](const std::string& document) {
+    const auto result = LoadParametricText(document);
+    ASSERT_TRUE(result.error.has_value());
+    EXPECT_EQ(result.error->reason_code,
+              "CAPABILITY_SCHEMA_VERSION_INCOMPATIBLE");
+  };
+
+  expect_value_failure(ReplaceOnce(
+      tracked, "platform_id: hopper", "platform_id: hopper-other"));
+  expect_value_failure(ReplaceOnce(
+      tracked, "platform_type: HOPPER", "platform_type: LEGGED"));
+  expect_value_failure(ReplaceOnce(
+      tracked, "capability_version: hopper-v1", "capability_version: hopper-v2"));
+  expect_value_failure(ReplaceOnce(
+      tracked, "base_frame_id: base_link", "base_frame_id: base_footprint"));
+  expect_compatibility_failure(tracked + "rogue_root: true\n");
+  expect_compatibility_failure(ReplaceOnce(
+      tracked, "runtime_fallback_allowed: false",
+      "runtime_fallback_allowed: false\n  rogue_hopper_field: 1"));
+  for (const auto& [field, source] : ApprovedHopperSources()) {
+    static_cast<void>(source);
+    expect_schema_failure(WithoutSource(tracked, field));
+  }
+  expect_value_failure(ReplaceOnce(
+      tracked, "reference_elevation_delta_m: project_engineering_baseline",
+      "reference_elevation_delta_m: derived"));
+  expect_schema_failure(ReplaceOnce(
+      tracked, "sources:\n", "sources:\n  rogue_source: derived\n"));
+  expect_compatibility_failure(ReplaceOnce(
+      tracked, "type: parametric_envelope", "type: unsupported_geometry"));
+  expect_schema_failure(ReplaceOnce(
+      tracked, "geometry_source: {type: parametric_envelope}",
+      "geometry_source: {type: parametric_envelope, urdf_file: urdf/rover.urdf}"));
+  expect_value_failure(ReplaceOnce(
+      tracked, "reference_remaining_usable_fuel_mass_kg: 0.2",
+      "reference_remaining_usable_fuel_mass_kg: 20.0"));
+  expect_value_failure(ReplaceOnce(
+      tracked, "gravity_mps2: [0.0, 0.0, -1.62]",
+      "gravity_mps2: [0.0, 0.0, -9.81]"));
+  expect_value_failure(ReplaceOnce(
+      tracked, "gravity_mps2: [0.0, 0.0, -1.62]",
+      "gravity_mps2: [0.0, 0.0, .nan]"));
+  expect_value_failure(ReplaceOnce(
+      tracked, "runtime_fallback_allowed: false",
+      "runtime_fallback_allowed: true"));
 }
 
 TEST(CapabilityLoader, RejectsParametricLeggedContractDrift) {

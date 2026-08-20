@@ -405,6 +405,30 @@ TEST(ReachabilityProjection, HopperRejectsInsufficientDeltaVWithoutAborting) {
   EXPECT_GT(reachability.projection->rejected_edges, 0U);
 }
 
+TEST(ReachabilityProjection, HopperProjectionUsesConfiguredGravity) {
+  PlannerInput lunar = test::MakeValidHopperInput();
+  lunar.world.global_map = test::MakeFlatMap("map", 80U, 16U, 0.5);
+  lunar.world.local_map = test::MakeFlatMap("odom", 80U, 16U, 0.5);
+  lunar.config.global_map.base_resolution_m = 0.5;
+  std::get<HopperState>(lunar.current_state).pose.position_m =
+      {3.25, 4.25, 0.0};
+  KeepOnlyLandingEvidencePatches(
+      lunar.world.local_map, {{8U, 6U}, {8U, 40U}});
+  PlannerInput altered = lunar;
+  std::get<HopperCapability>(altered.capability).gravity_mps2 = {
+      0.0, 0.0, -20.0};
+
+  const auto lunar_projection = ProjectReachability(lunar, 30.0);
+  const auto altered_projection = ProjectReachability(altered, 30.0);
+
+  ASSERT_TRUE(lunar_projection.ok()) << lunar_projection.reason_code;
+  ASSERT_TRUE(altered_projection.ok()) << altered_projection.reason_code;
+  const std::size_t target = Index(lunar.world.global_map, 8U, 40U);
+  EXPECT_NE(lunar_projection.projection->reachable[target], 0U);
+  EXPECT_EQ(altered_projection.projection->reachable[target], 0U);
+  EXPECT_GT(altered_projection.projection->rejected_edges, 0U);
+}
+
 TEST(ReachabilityProjection, HopperRejectsEveryBlockedFlightTube) {
   PlannerInput input = test::MakeValidHopperInput();
   input.world.global_map = test::MakeFlatMap("map", 80U, 16U, 0.5);

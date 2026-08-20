@@ -103,6 +103,23 @@ const std::map<std::string, std::string, std::less<>> kApprovedLeggedV1Sources{
     {"step_vertical_rate_mps", "planning_policy"},
     {"unknown_is_traversable", "planning_policy"},
 };
+const std::map<std::string, std::string, std::less<>> kApprovedHopperV1Sources{
+    {"specific_impulse_s", "project_engineering_baseline"},
+    {"landing_support_radius_m", "project_engineering_baseline"},
+    {"flight_collision_radius_m", "project_engineering_baseline"},
+    {"maximum_landing_slope_rad", "planning_safety_baseline"},
+    {"maximum_landing_plane_residual_m", "planning_safety_baseline"},
+    {"landing_lateral_margin_m", "planning_safety_baseline"},
+    {"flight_map_margin_m", "planning_safety_baseline"},
+    {"reachability_delta_v_margin_ratio", "planning_safety_baseline"},
+    {"gravity_mps2", "planning_safety_baseline"},
+    {"standard_gravity_mps2", "planning_safety_baseline"},
+    {"reference_total_mass_kg", "project_engineering_baseline"},
+    {"reference_remaining_usable_fuel_mass_kg",
+     "project_engineering_baseline"},
+    {"reference_horizontal_range_m", "project_engineering_baseline"},
+    {"reference_elevation_delta_m", "project_engineering_baseline"},
+};
 const std::vector<std::string> kApprovedWheelV1UnknownFields{
     "bare_mass_kg",
     "nominal_payload_kg",
@@ -957,6 +974,61 @@ void ValidateApprovedLeggedV1Platform(
   }
 }
 
+void ValidateApprovedHopperV1Sources(const LoadedCapabilities& loaded) {
+  std::vector<std::string> missing;
+  std::vector<std::string> extra;
+  std::vector<std::string> invalid;
+  for (const auto& [field, expected_source] : kApprovedHopperV1Sources) {
+    const auto actual = loaded.field_source_types.find(field);
+    if (actual == loaded.field_source_types.end()) {
+      missing.push_back(field);
+    } else if (actual->second != expected_source) {
+      invalid.push_back(field);
+    }
+  }
+  for (const auto& [field, source] : loaded.field_source_types) {
+    static_cast<void>(source);
+    if (!kApprovedHopperV1Sources.contains(field)) {
+      extra.push_back(field);
+    }
+  }
+  if (!missing.empty()) {
+    SchemaFailure("sources missing fields: " + JoinFields(missing));
+  }
+  if (!extra.empty()) {
+    SchemaFailure("sources extra fields: " + JoinFields(extra));
+  }
+  if (!invalid.empty()) {
+    ValueFailure("sources invalid fields: " + JoinFields(invalid));
+  }
+}
+
+void ValidateApprovedHopperV1Platform(
+    const YAML::Node& platform,
+    const LoadedCapabilities& loaded,
+    const std::string& platform_type) {
+  RejectUnexpectedKeys(
+      platform,
+      {"platform_id", "platform_type", "capability_version", "base_frame_id",
+       "unknown_fields"},
+      "platform");
+  if (loaded.platform_id != "hopper") {
+    ValueFailure("platform.platform_id must be hopper");
+  }
+  if (platform_type != "HOPPER") {
+    ValueFailure("platform.platform_type must be HOPPER");
+  }
+  if (loaded.capability_version != "hopper-v1") {
+    ValueFailure("platform.capability_version must be hopper-v1");
+  }
+  if (loaded.base_frame_id != "base_link") {
+    ValueFailure("platform.base_frame_id must be base_link");
+  }
+  if (!RequireStringSequence(platform, "unknown_fields").empty()) {
+    ValueFailure("platform.unknown_fields must be empty for hopper-v1");
+  }
+}
+
 void ValidateApprovedWheelV1Primitives(
     const std::vector<lunar::planning::WheelMotionPrimitive>& primitives) {
   if (primitives.size() != kApprovedWheelV1Primitives.size()) {
@@ -1349,30 +1421,55 @@ void ValidateApprovedLeggedV1Primitives(
 [[nodiscard]] lunar::planning::HopperCapability ParseHopper(
     const YAML::Node& root,
     LoadedCapabilities& loaded) {
-  static_cast<void>(loaded);
+  const bool parametric =
+      loaded.geometry_source_kind == GeometrySourceKind::kParametricEnvelope;
   const YAML::Node node = RequireMap(root, "hopper");
-  RejectUnexpectedKeys(
-      node,
-      {"specific_impulse_s",
-       "reference_total_mass_kg",
-       "reference_propellant_mass_kg",
-       "landing_support_radius_m",
-       "flight_collision_radius_m",
-       "maximum_landing_slope_rad",
-       "maximum_landing_plane_residual_m",
-       "landing_lateral_margin_m",
-       "flight_map_margin_m",
-       "reachability_delta_v_margin_ratio",
-       "standard_gravity_mps2"},
-      "hopper");
+  if (parametric) {
+    RejectUnexpectedKeys(
+        node,
+        {"specific_impulse_s",
+         "landing_support_radius_m",
+         "flight_collision_radius_m",
+         "maximum_landing_slope_rad",
+         "maximum_landing_plane_residual_m",
+         "landing_lateral_margin_m",
+         "flight_map_margin_m",
+         "reachability_delta_v_margin_ratio",
+         "gravity_mps2",
+         "standard_gravity_mps2",
+         "reference_total_mass_kg",
+         "reference_remaining_usable_fuel_mass_kg",
+         "reference_horizontal_range_m",
+         "reference_elevation_delta_m",
+         "runtime_fallback_allowed"},
+        "hopper");
+  } else {
+    RejectUnexpectedKeys(
+        node,
+        {"specific_impulse_s",
+         "reference_total_mass_kg",
+         "reference_propellant_mass_kg",
+         "landing_support_radius_m",
+         "flight_collision_radius_m",
+         "maximum_landing_slope_rad",
+         "maximum_landing_plane_residual_m",
+         "landing_lateral_margin_m",
+         "flight_map_margin_m",
+         "reachability_delta_v_margin_ratio",
+         "standard_gravity_mps2"},
+        "hopper");
+  }
   const double specific_impulse = Positive(
       RequireDouble(node, "specific_impulse_s"), "specific_impulse_s");
   const double reference_total_mass = Positive(
       RequireDouble(node, "reference_total_mass_kg"),
       "reference_total_mass_kg");
   const double reference_propellant_mass = Positive(
-      RequireDouble(node, "reference_propellant_mass_kg"),
-      "reference_propellant_mass_kg");
+      RequireDouble(
+          node, parametric ? "reference_remaining_usable_fuel_mass_kg"
+                           : "reference_propellant_mass_kg"),
+      parametric ? "reference_remaining_usable_fuel_mass_kg"
+                 : "reference_propellant_mass_kg");
   if (reference_propellant_mass >= reference_total_mass) {
     ValueFailure(
         "reference_propellant_mass_kg must be less than "
@@ -1399,10 +1496,45 @@ void ValidateApprovedLeggedV1Primitives(
       RequireDouble(node, "standard_gravity_mps2"),
       "standard_gravity_mps2");
 
+  const lunar::planning::Vec3 gravity = parametric
+      ? Vec3(RequireSequence(node, "gravity_mps2"), "gravity_mps2")
+      : lunar::planning::Vec3{0.0, 0.0, -1.62};
+  const double reference_horizontal_range = parametric
+      ? Positive(RequireDouble(node, "reference_horizontal_range_m"),
+                 "reference_horizontal_range_m")
+      : 100.0;
+  const double reference_elevation_delta = parametric
+      ? Finite(RequireDouble(node, "reference_elevation_delta_m"),
+               "reference_elevation_delta_m")
+      : 0.0;
+  const bool runtime_fallback_allowed = parametric
+      ? RequireBool(node, "runtime_fallback_allowed")
+      : false;
+
+  if (parametric &&
+      (!Near(specific_impulse, 301.0) || !Near(reference_total_mass, 20.0) ||
+       !Near(reference_propellant_mass, 0.2) ||
+       !Near(gravity, {0.0, 0.0, -1.62}) ||
+       !Near(reference_horizontal_range, 100.0) ||
+       !Near(reference_elevation_delta, 0.0) || runtime_fallback_allowed ||
+       !Near(landing_support_radius, 0.45) ||
+       !Near(flight_collision_radius, 0.55) ||
+       !Near(landing_plane_residual, 0.05) ||
+       !Near(landing_lateral_margin, 0.2) || !Near(flight_map_margin, 0.2) ||
+       !Near(delta_v_margin, 0.1) || !Near(standard_gravity, 9.80665) ||
+       !Near(RequireDouble(node, "maximum_landing_slope_rad"),
+             0.17453292519943295))) {
+    ValueFailure("hopper fields must match hopper-v1");
+  }
+
   return lunar::planning::HopperCapability{
       .specific_impulse_s = specific_impulse,
       .reference_total_mass_kg = reference_total_mass,
       .reference_propellant_mass_kg = reference_propellant_mass,
+      .gravity_mps2 = gravity,
+      .reference_horizontal_range_m = reference_horizontal_range,
+      .reference_elevation_delta_m = reference_elevation_delta,
+      .runtime_fallback_allowed = runtime_fallback_allowed,
       .landing_support_radius_m = landing_support_radius,
       .flight_collision_radius_m = flight_collision_radius,
       .maximum_landing_plane_residual_m = landing_plane_residual,
@@ -1613,9 +1745,17 @@ void AddMesh(
           {"schema_version", "platform", "geometry_source", "legged",
            "sources"},
           "platform document");
+    } else if (loaded.platform_id == "hopper" ||
+               loaded.capability_version == "hopper-v1") {
+      ValidateApprovedHopperV1Platform(platform, loaded, platform_type);
+      RejectUnexpectedKeys(
+          platform_document,
+          {"schema_version", "platform", "geometry_source", "hopper",
+           "sources"},
+          "platform document");
     } else {
       ValueFailure(
-          "parametric_envelope is only approved for WHEELED or LEGGED");
+          "parametric_envelope is only approved for WHEELED, LEGGED or HOPPER");
     }
   } else {
     RejectUnexpectedKeys(geometry, {"urdf_file"}, "geometry_source");
@@ -1656,6 +1796,9 @@ void AddMesh(
     }
   } else if (platform_type == "HOPPER") {
     loaded.platform = ParseHopper(platform_document, loaded);
+    if (loaded.geometry_source_kind == GeometrySourceKind::kParametricEnvelope) {
+      ValidateApprovedHopperV1Sources(loaded);
+    }
   } else {
     ValueFailure("unknown platform.platform_type: " + platform_type);
   }

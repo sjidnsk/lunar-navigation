@@ -92,6 +92,14 @@ def test_project_formal_capability_uses_approved_freeze() -> None:
     )
     assert hopper.reference_total_mass_kg == 20.0
     assert hopper.reference_propellant_mass_kg == 0.2
+    assert (hopper.gravity_mps2.x, hopper.gravity_mps2.y, hopper.gravity_mps2.z) == (
+        0.0,
+        0.0,
+        -1.62,
+    )
+    assert hopper.reference_horizontal_range_m == 100.0
+    assert hopper.reference_elevation_delta_m == 0.0
+    assert hopper.runtime_fallback_allowed is False
 
 
 def test_project_formal_capability_rejects_digest_drift(tmp_path: Path) -> None:

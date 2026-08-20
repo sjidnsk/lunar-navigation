@@ -60,9 +60,10 @@ The future extension points are named `map_pipeline` and `path_tracking`.
 They remain disabled unless their declared ROS package is installed; enabling
 one cannot create a missing map publisher or controller.
 
-The repository ships two reviewed numeric platform capability documents:
-`deployment/config/wheel.yaml` and `deployment/config/legged.yaml`. The latter
-is the Quad48 `legged/legged-v1` baseline and uses only a parametric body
-envelope; neither URDF nor mesh assets are required. Install exactly one as
-`/opt/luna/capabilities/platform.yaml` before launch. An observation capability
-is still independently required and is not fabricated by either document.
+The repository ships three reviewed numeric platform capability documents:
+`deployment/config/wheel.yaml`, `deployment/config/legged.yaml`, and
+`deployment/config/hopper.yaml`. The latter two are the Quad48
+`legged/legged-v1` and lunar `hopper/hopper-v1` parametric baselines; neither
+requires URDF or mesh assets. Install exactly one as
+`/opt/luna/capabilities/platform.yaml` before launch: only that selected file
+becomes active. An observation capability remains independently required.

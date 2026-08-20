@@ -50,7 +50,6 @@ struct GroundEndpointReachabilityContextStorage final {
 
 namespace {
 
-constexpr Vec3 kLunarGravityMps2{0.0, 0.0, -1.62};
 constexpr double kDistanceToleranceM = 1.0e-9;
 constexpr std::string_view kHopperLandingEvidenceAlgorithm =
     "cpp-hopper-detail-landing-regions/v1";
@@ -300,7 +299,7 @@ struct LandingRegionHopResult final {
       hopper::SingleHopCertificationProblem{
           .launch_position_m = source_position_m,
           .landing_position_m = target.aim_position_on_surface_m,
-          .gravity_mps2 = kLunarGravityMps2,
+          .gravity_mps2 = capability.gravity_mps2,
           .flight_map = &flight_map,
           .capability = &capability,
           .map_safety = &map_safety,
@@ -485,7 +484,7 @@ struct HopperEdgeDependencyResult final {
       hopper::SingleHopCertificationProblem{
           .launch_position_m = source.aim_position_on_surface_m,
           .landing_position_m = target.aim_position_on_surface_m,
-          .gravity_mps2 = kLunarGravityMps2,
+          .gravity_mps2 = capability.gravity_mps2,
           .flight_map = &flight_map,
           .capability = &capability,
           .map_safety = &map_safety,
@@ -1717,7 +1716,7 @@ HopperIncrementalEdgeProjectionResult ProjectHopperIncrementalEdges(
       };
       const auto envelope = hopper::EvaluateMinimumSingleHopEnvelope(
           pose_map->position_m, target.aim_position_on_surface_m,
-          kLunarGravityMps2, global.snapshot->resolution_m(), *capability);
+          capability->gravity_mps2, global.snapshot->resolution_m(), *capability);
       if (!envelope.ok()) {
         if (envelope.reason_code ==
             "HOPPER_SINGLE_HOP_ENVELOPE_EXCEEDED") {
@@ -1862,7 +1861,7 @@ HopperSingleHopEnvelopeProjectionResult ProjectHopperSingleHopEnvelope(
       }
       ++projection.candidates_evaluated;
       const auto envelope = hopper::EvaluateMinimumSingleHopEnvelope(
-          pose_map->position_m, target, kLunarGravityMps2,
+          pose_map->position_m, target, capability->gravity_mps2,
           global.snapshot->resolution_m(), *capability);
       if (!envelope.ok()) {
         if (envelope.reason_code ==

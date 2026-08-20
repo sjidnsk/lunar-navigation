@@ -540,6 +540,16 @@ void BindCapabilities(py::module_ &module) {
       .def_readwrite(
           "reference_propellant_mass_kg",
           &planning::HopperCapability::reference_propellant_mass_kg)
+      .def_readwrite("gravity_mps2", &planning::HopperCapability::gravity_mps2)
+      .def_readwrite(
+          "reference_horizontal_range_m",
+          &planning::HopperCapability::reference_horizontal_range_m)
+      .def_readwrite(
+          "reference_elevation_delta_m",
+          &planning::HopperCapability::reference_elevation_delta_m)
+      .def_readwrite(
+          "runtime_fallback_allowed",
+          &planning::HopperCapability::runtime_fallback_allowed)
       .def_readwrite("landing_support_radius_m",
                      &planning::HopperCapability::landing_support_radius_m)
       .def_readwrite("flight_collision_radius_m",

@@ -99,6 +99,10 @@ struct HopperCapability final {
   double specific_impulse_s{};
   double reference_total_mass_kg{};
   double reference_propellant_mass_kg{};
+  Vec3 gravity_mps2{0.0, 0.0, -1.62};
+  double reference_horizontal_range_m{100.0};
+  double reference_elevation_delta_m{};
+  bool runtime_fallback_allowed{};
   double landing_support_radius_m{};
   double flight_collision_radius_m{};
   double maximum_landing_plane_residual_m{};

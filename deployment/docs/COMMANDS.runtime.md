@@ -40,11 +40,14 @@ Select one reviewed platform baseline on the deployment host:
 ```bash
 sudo install -D -m 0644 deployment/config/wheel.yaml /opt/luna/capabilities/platform.yaml
 sudo install -D -m 0644 deployment/config/legged.yaml /opt/luna/capabilities/platform.yaml
+sudo install -D -m 0644 deployment/config/hopper.yaml /opt/luna/capabilities/platform.yaml
 ```
 
-Run only the command for the active platform. The second command selects the
-Quad48 `legged/legged-v1` parameter envelope and does not require URDF/mesh.
-It does not create the separately owned observation capability file.
+Run only one command for the active platform: each overwrites the active
+selection, so wheel, legged, and hopper cannot be active together. The second
+selects the Quad48 `legged/legged-v1` parameter envelope; the third selects the
+lunar `hopper/hopper-v1` single-hop envelope. Neither requires URDF/mesh, and
+neither creates the separately owned observation capability file.
 
 ## Lifecycle and logs
 

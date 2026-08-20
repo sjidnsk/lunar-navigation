@@ -133,6 +133,37 @@ TEST(HopperPlanner, RepeatsSingleHopPlanningWithoutDynamicFuelState) {
                    second_hop.available_delta_v_mps);
 }
 
+TEST(HopperPlanner, UsesConfiguredGravityForTheCertifiedBallisticArc) {
+  Planner planner;
+  PlannerInput lunar = test::MakeValidHopperInput();
+  PlannerInput altered = lunar;
+  std::get<HopperCapability>(altered.capability).gravity_mps2 = {
+      0.0, 0.0, -0.81};
+
+  const PlannerOutput lunar_output = planner.Plan(lunar);
+  const PlannerOutput altered_output = planner.Plan(altered);
+
+  ASSERT_EQ(lunar_output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << lunar_output.reason_code;
+  ASSERT_EQ(altered_output.outcome, PlanningOutcome::kNewReferenceAvailable)
+      << altered_output.reason_code;
+  const HopSegment& lunar_hop = HopperReferenceOf(lunar_output).segments.front();
+  const HopSegment& altered_hop = HopperReferenceOf(altered_output).segments.front();
+  EXPECT_NE(lunar_hop.launch_velocity_mps, altered_hop.launch_velocity_mps);
+  const double seconds = std::chrono::duration<double>(
+      altered_hop.flight_time).count();
+  const Vec3 landing{
+      altered_hop.launch_pose.position_m.x +
+          altered_hop.launch_velocity_mps.x * seconds,
+      altered_hop.launch_pose.position_m.y +
+          altered_hop.launch_velocity_mps.y * seconds,
+      altered_hop.launch_pose.position_m.z +
+          altered_hop.launch_velocity_mps.z * seconds -
+          0.5 * 0.81 * seconds * seconds,
+  };
+  EXPECT_NEAR(landing.z, altered_hop.nominal_landing_point_m.z, 1.0e-8);
+}
+
 TEST(HopperPlanner, HasNoHardCodedDistanceLimitAtHundredMeters) {
   Planner planner;
   const PlannerInput input = LongHopInput(100.0);
