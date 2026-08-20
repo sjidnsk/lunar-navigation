@@ -228,6 +228,36 @@ def _test_typed_content(platform: str) -> dict[str, object]:
     }
 
 
+def _pre_fix_legacy_legged_v2_content() -> dict[str, object]:
+    """Literal legacy v2 payload from before nominal metadata was exposed."""
+    return {
+        "reference_point": "base_link",
+        "body_extent_m": [0.68, 0.33, 0.35],
+        "platform_mass_kg": 15.89,
+        "maximum_payload_kg": 10.0,
+        "maximum_slope_rad": 0.5235987755982988,
+        "maximum_step_height_m": 0.5,
+        "maximum_gap_width_m": 0.3,
+        "minimum_body_clearance_m": 0.3,
+        "step_vertical_rate_mps": 0.1,
+        "body_height_m": [0.28, 0.38],
+        "forward_speed_mps": [-1.5, 1.5],
+        "lateral_speed_mps": [-0.8, 0.8],
+        "yaw_rate_radps": [-1.0, 1.0],
+        "maximum_linear_acceleration_mps2": 0.5,
+        "maximum_yaw_acceleration_radps2": 1.0,
+        "roughness_handling": "DIAGNOSTIC_ONLY",
+        "motion_primitives": [
+            {
+                "primitive_id": "test-forward",
+                "kind": "FORWARD",
+                "body_frame_displacement_m": [1.0, 0.0, 0.0],
+                "yaw_change_rad": 0.0,
+            }
+        ],
+    }
+
+
 def _rewrite_content(
     lock_path: Path,
     platform: str,
@@ -319,6 +349,13 @@ def _rewrite_typed_source_and_content(
         source_path,
         yaml.safe_dump(source, sort_keys=False).encode("utf-8"),
     )
+
+
+def _replace_mapping(
+    target: dict[str, object], replacement: dict[str, object]
+) -> None:
+    target.clear()
+    target.update(replacement)
 
 
 def test_formal_bundle_is_canonical_pickle_safe_and_relocation_independent(
@@ -744,6 +781,52 @@ def test_capability_v2_rejects_retired_platform_fields(
 
     with pytest.raises(CapabilityFreezeError, match="schema fields"):
         load_frozen_capability_bundle(lock_path, run_kind="formal")
+
+
+def test_legacy_legged_v2_exact_shape_keeps_conservative_metadata_defaults(
+    tmp_path: Path,
+) -> None:
+    """A pre-fix external bundle stays loadable without accepting extra keys."""
+    import lunar_planner_training_bridge as bridge_api
+
+    legacy = _pre_fix_legacy_legged_v2_content()
+    lock_path = _write_bundle(tmp_path / "legacy-legged-v2")
+    _rewrite_typed_source_and_content(
+        lock_path,
+        "LEGGED",
+        lambda capability: _replace_mapping(capability, legacy),
+    )
+
+    loaded = load_frozen_capability_bundle(lock_path, run_kind="formal")
+    typed = loaded.for_platform("LEGGED").typed_capability
+    bridge = loaded.for_platform("LEGGED").to_bridge_capability()
+    assert typed.nominal_body_height_m == pytest.approx(0.33)
+    assert typed.nominal_payload_kg == 0.0
+    assert typed.unknown_is_traversable is False
+    assert isinstance(bridge, bridge_api.LeggedCapability)
+    assert bridge.nominal_body_height_m == pytest.approx(0.33)
+    assert bridge.nominal_payload_kg == 0.0
+    assert bridge.unknown_is_traversable is False
+
+    invalid_path = _write_bundle(tmp_path / "legacy-legged-v2-extra")
+    invalid = {**legacy, "unreviewed_metadata": 1.0}
+    _rewrite_typed_source_and_content(
+        invalid_path,
+        "LEGGED",
+        lambda capability: _replace_mapping(capability, invalid),
+    )
+    with pytest.raises(CapabilityFreezeError, match="schema fields"):
+        load_frozen_capability_bundle(invalid_path, run_kind="formal")
+
+    partial_path = _write_bundle(tmp_path / "legacy-legged-v2-partial")
+    partial = {**legacy, "nominal_body_height_m": 0.33}
+    _rewrite_typed_source_and_content(
+        partial_path,
+        "LEGGED",
+        lambda capability: _replace_mapping(capability, partial),
+    )
+    with pytest.raises(CapabilityFreezeError, match="schema fields"):
+        load_frozen_capability_bundle(partial_path, run_kind="formal")
 
 
 def test_complete_typed_bundle_maps_all_platforms_to_v3_bridge(

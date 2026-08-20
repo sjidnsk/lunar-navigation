@@ -101,13 +101,11 @@ _WHEELED_FIELDS = frozenset(
         "motion_primitives",
     )
 )
-_LEGGED_FIELDS = frozenset(
+_LEGACY_LEGGED_FIELDS = frozenset(
     (
         "reference_point",
         "body_extent_m",
-        "nominal_body_height_m",
         "platform_mass_kg",
-        "nominal_payload_kg",
         "maximum_payload_kg",
         "maximum_slope_rad",
         "maximum_step_height_m",
@@ -121,10 +119,17 @@ _LEGGED_FIELDS = frozenset(
         "maximum_linear_acceleration_mps2",
         "maximum_yaw_acceleration_radps2",
         "roughness_handling",
-        "unknown_is_traversable",
         "motion_primitives",
     )
 )
+_LEGGED_METADATA_FIELDS = frozenset(
+    ("nominal_body_height_m", "nominal_payload_kg", "unknown_is_traversable")
+)
+_LEGGED_FIELDS = _LEGACY_LEGGED_FIELDS | _LEGGED_METADATA_FIELDS
+# A legacy bundle did not claim a nominal payload. Zero preserves that absence
+# without overstating payload capability; unknown terrain remains fail-closed.
+_LEGACY_NOMINAL_PAYLOAD_KG = 0.0
+_LEGACY_UNKNOWN_IS_TRAVERSABLE = False
 _HOPPER_FIELDS = frozenset(
     (
         "specific_impulse_s",
@@ -1081,7 +1086,16 @@ def _parse_wheeled(value: object) -> FrozenWheeledCapability:
 
 
 def _parse_legged(value: object) -> FrozenLeggedCapability:
-    node = _require_exact_object(value, _LEGGED_FIELDS, "legged capability")
+    if not isinstance(value, dict):
+        raise CapabilityFreezeError("legged capability schema fields are invalid")
+    fields = set(value)
+    if fields == _LEGGED_FIELDS:
+        has_nominal_metadata = True
+    elif fields == _LEGACY_LEGGED_FIELDS:
+        has_nominal_metadata = False
+    else:
+        raise CapabilityFreezeError("legged capability schema fields are invalid")
+    node = value
     reference_point = _nonempty_string(node["reference_point"], "reference_point")
     if reference_point != "base_link":
         raise CapabilityFreezeError("legged reference_point must be base_link")
@@ -1117,16 +1131,27 @@ def _parse_legged(value: object) -> FrozenLeggedCapability:
     body_height = _interval(node["body_height_m"], "body_height_m")
     if body_height.lower < 0.0:
         raise CapabilityFreezeError("body_height_m must be non-negative")
+    nominal_body_height = (
+        _positive(node["nominal_body_height_m"], "nominal_body_height_m")
+        if has_nominal_metadata
+        else 0.5 * (body_height.lower + body_height.upper)
+    )
+    nominal_payload = (
+        _positive(node["nominal_payload_kg"], "nominal_payload_kg")
+        if has_nominal_metadata
+        else _LEGACY_NOMINAL_PAYLOAD_KG
+    )
+    unknown_is_traversable = (
+        _boolean(node["unknown_is_traversable"], "unknown_is_traversable")
+        if has_nominal_metadata
+        else _LEGACY_UNKNOWN_IS_TRAVERSABLE
+    )
     return FrozenLeggedCapability(
         reference_point=reference_point,
         body_extent_m=extent,
-        nominal_body_height_m=_positive(
-            node["nominal_body_height_m"], "nominal_body_height_m"
-        ),
+        nominal_body_height_m=nominal_body_height,
         platform_mass_kg=_positive(node["platform_mass_kg"], "platform_mass_kg"),
-        nominal_payload_kg=_positive(
-            node["nominal_payload_kg"], "nominal_payload_kg"
-        ),
+        nominal_payload_kg=nominal_payload,
         maximum_payload_kg=_positive(
             node["maximum_payload_kg"], "maximum_payload_kg"
         ),
@@ -1161,9 +1186,7 @@ def _parse_legged(value: object) -> FrozenLeggedCapability:
             node["maximum_yaw_acceleration_radps2"],
             "maximum_yaw_acceleration_radps2",
         ),
-        unknown_is_traversable=_boolean(
-            node["unknown_is_traversable"], "unknown_is_traversable"
-        ),
+        unknown_is_traversable=unknown_is_traversable,
         motion_primitives=tuple(primitives),
     )
 
