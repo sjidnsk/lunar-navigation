@@ -34,6 +34,8 @@ if(BUILD_TESTING)
 
   ament_add_pytest_test(luna_t3_map_adapter_t3_sqlite_reader_test
     test/test_t3_sqlite_reader.py)
+  ament_add_pytest_test(luna_t3_map_adapter_global_map_cache_test
+    test/test_global_map_cache.py)
 endif()
 
 install(

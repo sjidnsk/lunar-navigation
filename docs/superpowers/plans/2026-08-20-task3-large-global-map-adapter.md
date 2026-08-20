@@ -4,7 +4,7 @@
 
 **Goal:** Add a revision-consistent Task3 map adapter that turns a large read-only SQLite map and explicit task ROI into the bounded conservative global `GridMap` required by the planner, while retaining an independent 60 m L0 local-map path.
 
-**Architecture:** Create one C++ ROS 2 package, `luna_t3_map_adapter`, with testable non-ROS components for ROI/level selection, conservative aggregation, tile reads, and revisioned caches. A thin ROS node consumes Task3 revision/task/local-map inputs, owns atomic map snapshots, and publishes canonical planner inputs. The planner core remains unchanged.
+**Architecture:** Create one ROS 2 package, `luna_t3_map_adapter`, with C++ reference components for ROI/level selection and conservative aggregation, plus a Python runtime adapter for the Task3 SQLite/NumPy boundary, revisioned cache, and canonical publication. A thin Python ROS node consumes Task3 revision/task/local-map inputs, owns atomic map snapshots, and publishes canonical planner inputs. The planner core remains unchanged.
 
 **Tech Stack:** C++20, Python 3.10, ROS 2 Humble, rclcpp, `grid_map_msgs`, `lunar_navigation_msgs`, SQLite3 read-only API, `numpy`, yaml-cpp, ament_cmake, GoogleTest, pytest.
 
@@ -35,10 +35,10 @@ Create package `ros2_ws/src/luna_t3_map_adapter/`:
 | `include/luna_t3_map_adapter/roi_level.hpp`, `src/roi_level.cpp` | ROI validation, tile intersection, exact selection of planner-compatible global level |
 | `include/luna_t3_map_adapter/conservative_aggregation.hpp`, `src/conservative_aggregation.cpp` | Pure 0.2 m to selected-level conservative aggregation |
 | `python/luna_t3_map_adapter/t3_sqlite_reader.py` | Read-only SQLite URI connection, zlib + NumPy payload decode, schema validation, revisioned ROI tile read transaction |
-| `include/luna_t3_map_adapter/global_map_cache.hpp`, `src/global_map_cache.cpp` | Bounded raw-tile LRU and immutable global snapshot cache, atomic replacement semantics |
-| `include/luna_t3_map_adapter/grid_map_conversion.hpp`, `src/grid_map_conversion.cpp` | `FineTile`/global snapshot to canonical `grid_map_msgs::msg::GridMap` conversion |
-| `include/luna_t3_map_adapter/local_map_adapter.hpp`, `src/local_map_adapter.cpp` | Task3 60 m map layer conversion into canonical 0.2 m local map |
-| `include/luna_t3_map_adapter/t3_map_adapter_node.hpp`, `src/t3_map_adapter_node.cpp`, `src/main.cpp` | Subscriptions, task/revision state machine, publication and diagnostics |
+| `python/luna_t3_map_adapter/global_map_cache.py` | Bounded raw-tile LRU and immutable global snapshot cache, atomic replacement semantics |
+| `python/luna_t3_map_adapter/grid_map_conversion.py` | Global snapshot to canonical `grid_map_msgs.msg.GridMap` conversion |
+| `python/luna_t3_map_adapter/local_map_adapter.py` | Task3 60 m map layer conversion into canonical 0.2 m local map |
+| `python/luna_t3_map_adapter/t3_map_adapter_node.py` | Subscriptions, task/revision state machine, publication and diagnostics |
 | `config/task3_map_adapter.yaml` | All source topic, SQLite path, semantic mapping, freshness, cache, and conservative-bound configuration |
 | `launch/task3_map_adapter.launch.py` | One-node launch entry point |
 | `test/*.cpp` | Isolated GTest coverage for every non-ROS component and node integration |
