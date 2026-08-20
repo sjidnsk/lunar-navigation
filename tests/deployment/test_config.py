@@ -105,3 +105,6 @@ def test_valid_fallback_config_renders_planner_ros_parameters(tmp_path: Path) ->
     assert "interfaces.map_global: /environment/map_global" in text
     assert "global_map_max_age: 1.0" in text
     assert "enable_nav2_adapter: false" in text
+    assert "platform_capability_file: /tmp/platform.yaml" in text
+    assert "observation_capability_file: /tmp/observation.yaml" in text
+    assert "capability_package" not in text

@@ -234,6 +234,61 @@ TEST(CapabilityLoader, LoadsParametricWheelWithoutUrdfOrMesh) {
   EXPECT_DOUBLE_EQ(wheel.maximum_curvature_per_m, 5.0);
 }
 
+TEST(CapabilityLoader, SelectsExactlyOneConfiguredPathMode) {
+  const auto absolute = UniqueShare("absolute-mode");
+  WriteObservation(absolute);
+  Write(absolute / "config" / "platform.yaml", TrackedWheelYaml());
+
+  EXPECT_TRUE(CapabilityLoader{}.LoadConfigured(
+      "", absolute / "config/platform.yaml",
+      absolute / "config/observation.json").ok());
+
+  const auto missing_package = CapabilityLoader{}.LoadConfigured(
+      "package_that_does_not_exist", "config/platform.yaml",
+      "config/observation.json");
+  ASSERT_TRUE(missing_package.error.has_value());
+  EXPECT_EQ(missing_package.error->reason_code, "CAPABILITY_PACKAGE_NOT_FOUND");
+
+  const auto relative_without_package = CapabilityLoader{}.LoadConfigured(
+      "", "config/platform.yaml", "config/observation.json");
+  ASSERT_TRUE(relative_without_package.error.has_value());
+  EXPECT_EQ(
+      relative_without_package.error->reason_code,
+      "CAPABILITY_PATH_MODE_INVALID");
+
+  const auto absolute_with_package = CapabilityLoader{}.LoadConfigured(
+      "robot_pkg", "/tmp/platform.yaml", "/tmp/observation.json");
+  ASSERT_TRUE(absolute_with_package.error.has_value());
+  EXPECT_EQ(
+      absolute_with_package.error->reason_code,
+      "CAPABILITY_PATH_MODE_INVALID");
+}
+
+TEST(CapabilityLoader, LoadsTrackedWheelV1FromAbsolutePath) {
+  const auto observation = UniqueShare("tracked-wheel") / "observation.yaml";
+  Write(observation, "sensor_range_m: 25.0\nsensor_fov_deg: 90.0\n");
+
+  const auto result = CapabilityLoader{}.LoadConfigured(
+      "", RepositoryRoot() / "deployment/config/wheel.yaml", observation);
+
+  ASSERT_TRUE(result.ok())
+      << (result.error ? result.error->detail : std::string{});
+  EXPECT_EQ(result.capabilities->capability_version, "wheel-v1");
+}
+
+TEST(CapabilityLoader, RejectsUrdfGeometryFromAbsoluteFiles) {
+  const auto share = UniqueShare("absolute-urdf");
+  WriteGeometry(share, true);
+  WriteObservation(share);
+  Write(share / "config" / "platform.yaml", WheeledYaml());
+
+  const auto result = CapabilityLoader{}.LoadFromFiles(
+      share / "config/platform.yaml", share / "config/observation.json");
+
+  ASSERT_TRUE(result.error.has_value());
+  EXPECT_EQ(result.error->reason_code, "CAPABILITY_PATH_MODE_INVALID");
+}
+
 TEST(CapabilityLoader, RejectsMixedOrInvalidParametricGeometry) {
   std::string mixed = TrackedWheelYaml();
   const std::string parametric_geometry =

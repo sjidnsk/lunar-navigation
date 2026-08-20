@@ -46,6 +46,7 @@ struct LoadedCapabilities final {
 
 enum class CapabilityLoadErrorCode : std::uint8_t {
   kPackageNotFound,
+  kPathModeInvalid,
   kUnsafePath,
   kFileMissing,
   kParseError,
@@ -72,6 +73,15 @@ struct CapabilityLoadResult final {
 
 class CapabilityLoader final {
  public:
+  [[nodiscard]] CapabilityLoadResult LoadConfigured(
+      const std::string& package_name,
+      const std::filesystem::path& platform_capability_file,
+      const std::filesystem::path& observation_capability_file) const;
+
+  [[nodiscard]] CapabilityLoadResult LoadFromFiles(
+      const std::filesystem::path& platform_capability_file,
+      const std::filesystem::path& observation_capability_file) const;
+
   [[nodiscard]] CapabilityLoadResult LoadFromPackageShare(
       const std::string& package_name,
       const std::filesystem::path& platform_capability_file,

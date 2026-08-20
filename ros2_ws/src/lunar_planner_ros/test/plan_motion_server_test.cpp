@@ -4,6 +4,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <memory>
@@ -187,6 +189,27 @@ rclcpp::NodeOptions ValidOptions() {
       rclcpp::Parameter{"target_global_axis_cells", 256},
   });
   return options;
+}
+
+std::filesystem::path RepositoryRoot() {
+  return std::filesystem::path{__FILE__}.parent_path()
+      .parent_path().parent_path().parent_path().parent_path();
+}
+
+std::filesystem::path WriteAbsoluteCapabilityFiles() {
+  const auto directory = std::filesystem::temp_directory_path() /
+      ("lunar-plan-motion-capability-" + std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::create_directories(directory);
+  std::filesystem::copy_file(
+      RepositoryRoot() / "deployment/config/wheel.yaml",
+      directory / "platform.yaml",
+      std::filesystem::copy_options::overwrite_existing);
+  std::ofstream observation{directory / "observation.yaml"};
+  EXPECT_TRUE(observation.good());
+  observation << "sensor_range_m: 25.0\nsensor_fov_deg: 90.0\n";
+  EXPECT_TRUE(observation.good());
+  return directory;
 }
 
 class RunningSystem final {
@@ -556,6 +579,28 @@ TEST_F(PlanMotionServerTest, ConfiguresAndActivatesWithExplicitSnapshotPolicy) {
   EXPECT_EQ(
       node->cleanup().id(),
       lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  node.reset();
+}
+
+TEST_F(PlanMotionServerTest, ConfiguresFromAbsoluteCapabilityFiles) {
+  const auto directory = WriteAbsoluteCapabilityFiles();
+  auto options = ValidOptions();
+  options.append_parameter_override(
+      "platform_capability_file", (directory / "platform.yaml").string());
+  options.append_parameter_override(
+      "observation_capability_file", (directory / "observation.yaml").string());
+  auto node = std::make_shared<PlanMotionServer>(
+      std::move(options), PlanMotionServerDependencies{
+                              .planner = [](const lunar::planning::PlannerInput&) {
+                                return NoRouteOutput();
+                              },
+                              .preloaded_capabilities = std::nullopt,
+                          });
+
+  EXPECT_EQ(
+      node->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+
+  node->cleanup();
   node.reset();
 }
 

@@ -8,6 +8,7 @@
 #include <limits>
 #include <map>
 #include <numbers>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -1068,7 +1069,7 @@ void AddMesh(
 }
 
 [[nodiscard]] LoadedCapabilities LoadDocuments(
-    const std::filesystem::path& share,
+    const std::optional<std::filesystem::path>& package_share_directory,
     const std::filesystem::path& platform_path,
     const std::filesystem::path& observation_path) {
   YAML::Node platform_document;
@@ -1155,14 +1156,22 @@ void AddMesh(
   } else {
     RejectUnexpectedKeys(geometry, {"urdf_file"}, "geometry_source");
     loaded.geometry_source_kind = GeometrySourceKind::kUrdfMesh;
+    if (!package_share_directory) {
+      throw LoadFailure{
+          CapabilityLoadErrorCode::kPathModeInvalid,
+          "CAPABILITY_PATH_MODE_INVALID",
+          "urdf geometry requires a package-relative capability file",
+      };
+    }
     const std::filesystem::path urdf_relative =
         RequireString(geometry, "urdf_file");
     loaded.urdf_path = ResolveFile(
-        share, urdf_relative,
+        *package_share_directory, urdf_relative,
         CapabilityLoadErrorCode::kFileMissing,
         "CAPABILITY_URDF_MISSING");
     loaded.mesh_paths =
-        ValidateGeometry(share, loaded.urdf_path, loaded.base_frame_id);
+        ValidateGeometry(
+            *package_share_directory, loaded.urdf_path, loaded.base_frame_id);
   }
 
   if (platform_type == "WHEELED") {
@@ -1181,6 +1190,74 @@ void AddMesh(
 }
 
 }  // namespace
+
+CapabilityLoadResult CapabilityLoader::LoadConfigured(
+    const std::string& package_name,
+    const std::filesystem::path& platform_capability_file,
+    const std::filesystem::path& observation_capability_file) const {
+  if (package_name.empty() && platform_capability_file.is_absolute() &&
+      observation_capability_file.is_absolute()) {
+    return LoadFromFiles(platform_capability_file, observation_capability_file);
+  }
+  if (!package_name.empty() && !platform_capability_file.is_absolute() &&
+      !observation_capability_file.is_absolute()) {
+    return LoadFromPackageShare(
+        package_name, platform_capability_file, observation_capability_file);
+  }
+  return Failure(LoadFailure{
+      CapabilityLoadErrorCode::kPathModeInvalid,
+      "CAPABILITY_PATH_MODE_INVALID",
+      "capability package and file path modes are inconsistent",
+  });
+}
+
+CapabilityLoadResult CapabilityLoader::LoadFromFiles(
+    const std::filesystem::path& platform_capability_file,
+    const std::filesystem::path& observation_capability_file) const {
+  try {
+    if (!platform_capability_file.is_absolute() ||
+        !observation_capability_file.is_absolute()) {
+      throw LoadFailure{
+          CapabilityLoadErrorCode::kPathModeInvalid,
+          "CAPABILITY_PATH_MODE_INVALID",
+          "absolute capability files are required outside a package share",
+      };
+    }
+    if (!std::filesystem::is_regular_file(platform_capability_file)) {
+      throw LoadFailure{
+          CapabilityLoadErrorCode::kFileMissing,
+          "PLATFORM_CAPABILITY_FILE_MISSING",
+          platform_capability_file.string(),
+      };
+    }
+    if (!std::filesystem::is_regular_file(observation_capability_file)) {
+      throw LoadFailure{
+          CapabilityLoadErrorCode::kFileMissing,
+          "OBSERVATION_CAPABILITY_FILE_MISSING",
+          observation_capability_file.string(),
+      };
+    }
+    return CapabilityLoadResult{
+        .capabilities = LoadDocuments(
+            std::nullopt, platform_capability_file, observation_capability_file),
+        .error = std::nullopt,
+    };
+  } catch (const LoadFailure& failure) {
+    return Failure(failure);
+  } catch (const YAML::Exception& error) {
+    return Failure(LoadFailure{
+        CapabilityLoadErrorCode::kParseError,
+        "CAPABILITY_DOCUMENT_PARSE_ERROR",
+        error.what(),
+    });
+  } catch (const std::exception& error) {
+    return Failure(LoadFailure{
+        CapabilityLoadErrorCode::kParseError,
+        "CAPABILITY_LOAD_ERROR",
+        error.what(),
+    });
+  }
+}
 
 CapabilityLoadResult CapabilityLoader::LoadFromPackageShare(
     const std::string& package_name,

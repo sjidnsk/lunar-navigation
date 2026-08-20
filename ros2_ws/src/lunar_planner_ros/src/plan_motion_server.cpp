@@ -515,8 +515,7 @@ struct PlanMotionServer::Impl final {
     node.declare_parameter<std::int64_t>("maximum_global_cells", 1'048'576);
     node.declare_parameter<std::int64_t>("maximum_global_axis_cells", 4'096);
     node.declare_parameter<std::int64_t>("target_global_axis_cells", 256);
-    node.declare_parameter(
-        "capability_package", rclcpp::ParameterType::PARAMETER_STRING);
+    node.declare_parameter<std::string>("capability_package", "");
     node.declare_parameter(
         "platform_capability_file", rclcpp::ParameterType::PARAMETER_STRING);
     node.declare_parameter(
@@ -673,7 +672,7 @@ struct PlanMotionServer::Impl final {
         node.get_parameter("platform_capability_file").as_string();
     const std::string observation_file =
         node.get_parameter("observation_capability_file").as_string();
-    const CapabilityLoadResult loaded = CapabilityLoader{}.LoadFromPackageShare(
+    const CapabilityLoadResult loaded = CapabilityLoader{}.LoadConfigured(
         package, platform_file, observation_file);
     if (!loaded.ok()) {
       throw std::runtime_error{
