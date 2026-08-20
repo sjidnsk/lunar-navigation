@@ -89,6 +89,18 @@ def test_task3_mode_launches_one_composed_integration_launch(tmp_path: Path) -> 
     assert any(item.startswith("task3_config_file:=") for item in runner.commands[0])
 
 
+def test_enabled_controller_is_explicitly_selected_in_unified_task3_launch(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    text = (root / "deployment/config/task3-adapted.runtime.yaml").read_text(encoding="utf-8")
+    config_path = tmp_path / "enabled.yaml"
+    config_path.write_text(text.replace("    enabled: false", "    enabled: true"), encoding="utf-8")
+    runner = FakeRunner(["unconfigured", "inactive", "active"])
+
+    start_runtime(load_runtime_config(config_path), resolve_runtime_paths("dev", home=tmp_path), runner)
+
+    assert "controller_enabled:=true" in runner.commands[0]
+
+
 def test_stop_is_idempotent_and_rejects_stale_pid(tmp_path: Path) -> None:
     paths = resolve_runtime_paths("dev", home=tmp_path)
     paths.data.mkdir(parents=True)

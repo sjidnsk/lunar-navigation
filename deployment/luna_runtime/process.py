@@ -46,16 +46,19 @@ def start_runtime(config: RuntimeConfig, paths: RuntimePaths, runner: ProcessRun
         raise RuntimeRefusal("POLICY_RUNTIME_UNBOUND")
     params = paths.data / "generated" / "planner-params.yaml"
     render_planner_params(config, params)
+    controller_enabled = str(bool(config.controller["wheeled"]["enabled"])).lower()
     if config.input_adapters["mode"] == "task3_adapted":
         command = (
             "ros2", "launch", "luna_t3_map_adapter", "task3_live_integration.launch.py",
             f"params_file:={params}",
             f"task3_config_file:={config.input_adapters['task3_config_file']}",
+            f"controller_enabled:={controller_enabled}",
         )
     else:
         command = (
             "ros2", "launch", "lunar_planner_ros", "lunar_planner.launch.py",
             f"params_file:={params}",
+            f"controller_enabled:={controller_enabled}",
         )
     child = runner.popen(command)
     try:
