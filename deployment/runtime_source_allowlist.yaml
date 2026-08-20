@@ -17,6 +17,7 @@ runtime_roots:
   - ros2_ws/src/lunar_planner_ros
   - ros2_ws/src/lunar_policy_runtime
   - ros2_ws/src/luna_t3_map_adapter
+  - ros2_ws/src/luna_wheeled_controller
 optional_roots:
   nav2_adapter: ros2_ws/src/lunar_nav2_adapter
 excluded_path_components:

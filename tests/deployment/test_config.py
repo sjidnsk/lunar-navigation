@@ -55,6 +55,23 @@ planner:
 policy: {{mode: fallback, model_id: null}}
 extensions: {{map_pipeline: false, path_tracking: false}}
 input_adapters: {{mode: external_canonical, task3_config_file: null}}
+controller:
+  wheeled:
+    enabled: false
+    command_topic: /Car/T5/Car_Cmd_Vel
+    odometry_topic: /Car/T3/semantic/current_pose
+    feedback_topic: /execution/motion_feedback
+    execution_goal_topic: /mission/execution_goal
+    reference_topic: /execution/wheeled_reference
+    control_rate_hz: 20.0
+    lookahead_m: 1.0
+    max_linear_mps: 0.2
+    max_angular_radps: 0.5
+    max_cross_track_error_m: 1.0
+    goal_position_tolerance_m: 0.25
+    goal_yaw_tolerance_rad: 0.35
+    reference_max_age_s: 1.0
+    odometry_max_age_s: 0.5
 runtime: {{log_level: INFO}}
 """
 
@@ -134,3 +151,12 @@ def test_task3_adapted_config_requires_absolute_adapter_config_path(tmp_path: Pa
 
     with pytest.raises(ConfigError, match="input_adapters.task3_config_file"):
         load_runtime_config(config)
+
+
+def test_explicit_disabled_wheeled_controller_is_retained_in_runtime_config(tmp_path: Path) -> None:
+    path = tmp_path / "runtime.yaml"
+    path.write_text(_runtime_config_text(), encoding="utf-8")
+
+    config = load_runtime_config(path)
+
+    assert config.controller["wheeled"]["enabled"] is False

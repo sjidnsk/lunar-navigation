@@ -27,3 +27,16 @@ def test_task3_adapted_build_includes_local_map_adapter(tmp_path: Path) -> None:
     plan = make_build_plan(config, resolve_runtime_paths("dev", home=tmp_path), root)
 
     assert "luna_t3_map_adapter" in plan.packages
+
+
+def test_enabled_wheeled_controller_is_selected_for_build(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    text = (root / "deployment/config/task3-adapted.runtime.yaml").read_text(encoding="utf-8")
+    config_path = tmp_path / "enabled.yaml"
+    config_path.write_text(text.replace("    enabled: false", "    enabled: true"), encoding="utf-8")
+
+    plan = make_build_plan(
+        load_runtime_config(config_path), resolve_runtime_paths("dev", home=tmp_path), root
+    )
+
+    assert "luna_wheeled_controller" in plan.packages

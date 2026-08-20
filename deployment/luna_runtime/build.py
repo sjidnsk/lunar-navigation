@@ -36,6 +36,8 @@ def make_build_plan(config: RuntimeConfig, paths: RuntimePaths, repo_root: Path)
     packages = REQUIRED_PACKAGES
     if config.input_adapters["mode"] == "task3_adapted":
         packages += ("luna_t3_map_adapter",)
+    if config.controller["wheeled"]["enabled"]:
+        packages += ("luna_wheeled_controller",)
     if config.planner["enable_nav2_adapter"]:
         packages += ("lunar_nav2_adapter",)
     return BuildPlan(

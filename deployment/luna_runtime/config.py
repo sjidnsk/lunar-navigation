@@ -30,6 +30,7 @@ _TOP_LEVEL_KEYS = (
     "policy",
     "extensions",
     "input_adapters",
+    "controller",
     "runtime",
 )
 _SNAPSHOT_KEYS = (
@@ -49,6 +50,23 @@ _FORBIDDEN_SAFETY_KEYS = {
     "disable_input_freshness_check",
     "disable_input_consistency_check",
 }
+_WHEELED_CONTROLLER_KEYS = (
+    "enabled",
+    "command_topic",
+    "odometry_topic",
+    "feedback_topic",
+    "execution_goal_topic",
+    "reference_topic",
+    "control_rate_hz",
+    "lookahead_m",
+    "max_linear_mps",
+    "max_angular_radps",
+    "max_cross_track_error_m",
+    "goal_position_tolerance_m",
+    "goal_yaw_tolerance_rad",
+    "reference_max_age_s",
+    "odometry_max_age_s",
+)
 
 
 class ConfigError(ValueError):
@@ -76,6 +94,7 @@ class RuntimeConfig:
     policy: Mapping[str, Any]
     extensions: Mapping[str, bool]
     input_adapters: Mapping[str, str | None]
+    controller: Mapping[str, Mapping[str, str | float | bool]]
     runtime: Mapping[str, Any]
 
     def planner_ros_parameters(self) -> dict[str, Any]:
@@ -86,6 +105,19 @@ class RuntimeConfig:
             "observation_capability_file": self.capabilities["observation_file"],
             "enable_nav2_adapter": self.planner["enable_nav2_adapter"],
             "log_level": self.runtime["log_level"],
+        }
+
+    def runtime_ros_parameters(self) -> dict[str, Any]:
+        controller = self.controller["wheeled"]
+        return {
+            "/lunar_planner": {"ros__parameters": self.planner_ros_parameters()},
+            "/luna_task_execution_coordinator": {"ros__parameters": {
+                "exploration_task_topic": self.interfaces["exploration_task"],
+                "execution_goal_topic": controller["execution_goal_topic"],
+                "plan_motion_action": self.interfaces["plan_motion"],
+                "reference_topic": controller["reference_topic"],
+            }},
+            "/luna_wheeled_controller": {"ros__parameters": dict(controller)},
         }
 
 
@@ -218,6 +250,21 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
         not isinstance(config_file, str) or not config_file.startswith("/")
     ):
         raise ConfigError("input_adapters.task3_config_file must be an absolute path for task3_adapted")
+    controller = _require_mapping(data["controller"], "controller")
+    if set(controller) != {"wheeled"}:
+        raise ConfigError("controller must contain wheeled")
+    wheeled = _require_mapping(controller["wheeled"], "controller.wheeled")
+    if set(wheeled) != set(_WHEELED_CONTROLLER_KEYS):
+        raise ConfigError("controller.wheeled keys mismatch")
+    if not isinstance(wheeled["enabled"], bool):
+        raise ConfigError("controller.wheeled.enabled must be boolean")
+    for key in ("command_topic", "odometry_topic", "feedback_topic", "execution_goal_topic", "reference_topic"):
+        if not isinstance(wheeled[key], str) or not wheeled[key].startswith("/"):
+            raise ConfigError(f"controller.wheeled.{key} must be an absolute ROS name")
+    for key in _WHEELED_CONTROLLER_KEYS[6:]:
+        value = wheeled[key]
+        if not isinstance(value, (float, int)) or isinstance(value, bool) or value <= 0:
+            raise ConfigError(f"controller.wheeled.{key} must be positive")
     runtime = _require_mapping(data["runtime"], "runtime")
     if set(runtime) != {"log_level"} or not isinstance(runtime["log_level"], str):
         raise ConfigError("runtime.log_level is required")
@@ -230,6 +277,7 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
         policy=dict(policy),
         extensions={key: bool(value) for key, value in extensions.items()},
         input_adapters={"mode": str(mode), "task3_config_file": config_file},
+        controller={"wheeled": dict(wheeled)},
         runtime=dict(runtime),
     )
 
@@ -242,7 +290,7 @@ def atomic_write_yaml(path: Path, value: Mapping[str, Any]) -> None:
 
 
 def render_planner_params(config: RuntimeConfig, output_path: Path) -> None:
-    atomic_write_yaml(output_path, {"/lunar_planner": {"ros__parameters": config.planner_ros_parameters()}})
+    atomic_write_yaml(output_path, config.runtime_ros_parameters())
 
 
 def load_allowlist(path: Path) -> Mapping[str, Any]:
