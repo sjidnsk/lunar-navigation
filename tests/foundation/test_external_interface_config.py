@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import subprocess
+import sys
 import xml.etree.ElementTree as element_tree
 from dataclasses import dataclass
 from pathlib import Path
@@ -151,6 +152,7 @@ EXPECTED_DOCUMENT = {
             "schema": "platform-control-capability-source/v2",
             "formats": ["yaml", "json", "urdf"],
             "required_fields": ["platform", "geometry_source", "sources"],
+            "geometry_sources": ["parametric_envelope", "urdf_mesh"],
         },
     },
 }
@@ -409,6 +411,30 @@ def test_check_interfaces_rejects_wrong_fixed_contract_values_without_ros(
 
     assert expected_error in errors
     assert calls == []
+
+
+def test_check_interfaces_cli_rejects_missing_platform_geometry_sources(tmp_path):
+    """The published geometry-source union is required before ROS discovery."""
+    document = complete_valid_config()
+    del document["static_inputs"]["platform_capability"]["geometry_sources"]
+    config = write_config(tmp_path / "interfaces.yaml", document)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPOSITORY_ROOT / "tools/check_external_interfaces.py"),
+            "--config",
+            str(config),
+            "--expected-lunar-navigation-prefix",
+            str(tmp_path / "expected"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "static_inputs" in result.stdout or "static_inputs" in result.stderr
 
 
 @pytest.mark.parametrize(

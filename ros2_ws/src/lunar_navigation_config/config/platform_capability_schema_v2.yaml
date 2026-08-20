@@ -2,6 +2,13 @@ schema_version: platform-control-capability-source/v2
 freeze_schema_version: lunar-platform-capability-freeze/v1
 ownership: external_platform_control
 repository_role: provisional_consumer_schema
+geometry_source_variants:
+  parametric_envelope:
+    required_fields: [type]
+    forbidden_fields: [urdf_file]
+  urdf_mesh:
+    required_fields: [urdf_file]
+    forbidden_fields: [type]
 allowed_source_types:
   - upstream_model
   - upstream_config

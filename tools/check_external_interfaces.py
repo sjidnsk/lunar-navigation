@@ -215,6 +215,7 @@ _STATIC_INPUTS = {
         "schema": "platform-control-capability-source/v2",
         "formats": ["yaml", "json", "urdf"],
         "required_fields": ["platform", "geometry_source", "sources"],
+        "geometry_sources": ["parametric_envelope", "urdf_mesh"],
     },
 }
 
