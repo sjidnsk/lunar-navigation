@@ -6,7 +6,7 @@
 
 ## 1. 决策与边界
 
-新增独立 ROS 2 Python 包 `luna_wheeled_controller`。它只消费规划器已经产出的 WHEELED 参考；不生成候选点、不重新规划、不发布 TF、不改写地图，也不处理 LEGGED 或 HOPPER。
+新增两个独立 ROS 2 Python 节点：`luna_task_execution_coordinator` 和 `luna_wheeled_controller`。协调器拥有 `PlanMotion` Action 客户端；控制器只消费协调器转交的、规划器已经产出的 WHEELED 参考。二者都不生成候选点、不重新规划、不发布 TF、不改写地图，也不处理 LEGGED 或 HOPPER。
 
 底盘命令唯一输出为：
 
@@ -19,8 +19,13 @@
 ## 2. 输入、输出与数据流
 
 ```text
-/plan_motion Action Result
+/mission/execution_goal : GoalRegion
+  → luna_task_execution_coordinator (PlanMotion Action client)
+/mission/exploration_task : ExplorationTask
+  → luna_task_execution_coordinator
+  → /plan_motion
   → MotionReference(WHEELED, plan_id, trajectory/path_preview)
+  → /execution/wheeled_reference
   → luna_wheeled_controller
   → /Car/T5/Car_Cmd_Vel : Twist
 
@@ -31,7 +36,9 @@ luna_wheeled_controller
   → /execution/motion_feedback : MotionExecutionFeedback
 ```
 
-控制器通过 `PlanMotion` Action 客户端顺序请求目标，而不是订阅、猜测或重建规划器内部状态。收到有参考的结果后，验证：
+`/mission/execution_goal` 是 `lunar_planning_msgs/msg/GoalRegion`：由任务/探索策略拥有，作为一次明确的下一目标。协调器同时订阅活跃的 `/mission/exploration_task`，从中读取 `mission_id` 与 `revision`；缺少活跃任务时拒绝目标而不发起规划。协调器为每个可接受目标生成唯一 `request_id`，以当前任务 `mission_id` 与 `revision` 发起 `/plan_motion`；它不会选择目标、修改目标或创建备用目标。规划结果只有在 `has_reference=true`、`execution_directive=ACTIVATE_NEW_REFERENCE` 且参考为 WHEELED 时，才以 transient-local QoS 发布到 `/execution/wheeled_reference`。无安全参考、保持指令、取消和 Action 错误均不发布旧参考，并向控制器发布取消。
+
+控制器收到有参考的结果后，验证：
 
 - `reference.platform_type == WHEELED`；
 - `plan_id` 非空；
@@ -39,7 +46,7 @@ luna_wheeled_controller
 - 参考、里程计和 TF 都在配置的最大新鲜度内；
 - 坐标为有限数，路径单调推进且终点有效。
 
-每条反馈都复制 `platform_type`、`plan_id` 和当前 `segment_id`，并为该控制器进程单调增加 `sequence`。执行控制器不伪造成功：只有位置和航向均进入终点容差时才发 `SEGMENT_COMPLETE`。
+对于地面 WHEELED 参考，规划器的反馈追踪器将 `segment_id` 定义为 `plan_id`；控制器必须原样使用 `segment_id = reference.plan_id`，并为该控制器进程单调增加 `sequence`。执行控制器不伪造成功：只有位置和航向均进入终点容差时才发 `SEGMENT_COMPLETE`。
 
 ## 3. 跟踪算法
 
@@ -92,9 +99,11 @@ controller:
 
 默认关闭保持既有部署行为。`luna start` 在启用时启动统一联调 launch，其中规划器、课题三适配器和控制器具有单一受管生命周期；配置检查拒绝非正频率、非正时效/容差、空 Topic 与速度上限缺失。`luna status` 应显示控制器 PID/状态与最近反馈原因。
 
+协调器始终启动但在没有 `/mission/execution_goal` 时静默等待；`controller.wheeled.enabled: false` 时它仍可获得规划结果，但不发布 `/execution/wheeled_reference`，且先发布取消以确保控制器保持零速度。这样部署者可单独验证任务到规划的链路，而不使底盘进入自动控制。
+
 ## 6. 测试与验收
 
-纯函数测试：前视点选择、直线/弯道控制、终点减速、速度/角速度限制和非有限输入拒绝。ROS 节点测试：有效参考的 `ACCEPTED → EXECUTING → SEGMENT_COMPLETE` 反馈；非 WHEELED、过期里程计、过期参考、路径偏离、替换/停止均先发零 `Twist` 后反馈。
+协调器测试：正确封装任务目标为一次 `PlanMotion` 请求；只转交 WHEELED 且 `ACTIVATE_NEW_REFERENCE` 的结果；无参考、保持、取消或 Action 错误均发布取消而不复用旧参考。纯函数测试：前视点选择、直线/弯道控制、终点减速、速度/角速度限制和非有限输入拒绝。ROS 节点测试：有效参考的 `ACCEPTED → EXECUTING → SEGMENT_COMPLETE` 反馈；非 WHEELED、过期里程计、过期参考、路径偏离、替换/停止均先发零 `Twist` 后反馈。
 
 集成测试只使用假的 `Twist` 订阅者和里程计发布者，绝不接触真实底盘。实机联调另行执行：验证底盘命令 Topic、线/角速度方向、控制超时行为和急停路径；在实机验证完成前，默认配置保持 `enabled: false`。
 
