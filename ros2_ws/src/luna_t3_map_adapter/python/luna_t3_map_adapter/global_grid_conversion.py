@@ -8,7 +8,7 @@ from typing import Mapping
 
 import numpy as np
 from grid_map_msgs.msg import GridMap
-from std_msgs.msg import Float32MultiArray, MultiArrayDimension
+from .grid_map_codec import encode_grid_map
 
 from .global_map_cache import GlobalMapSnapshot
 from .t3_sqlite_reader import Task3MapError
@@ -139,35 +139,14 @@ def to_canonical_global_grid(snapshot: GlobalMapSnapshot) -> CanonicalGlobalGrid
     )
 
 
-def _encode_layer(values: np.ndarray) -> Float32MultiArray:
-    height, width = values.shape
-    message = Float32MultiArray()
-    message.layout.dim = [
-        MultiArrayDimension(label="column_index", size=height, stride=width * height),
-        MultiArrayDimension(label="row_index", size=width, stride=width),
-    ]
-    # grid_map stores its default column-major ring buffer inverted relative to
-    # canonical [y, x] values.  This is the inverse of lunar_planner_ros::Unwrap.
-    encoded = np.empty((height, width), dtype=np.float32)
-    encoded[:, :] = values[::-1, ::-1]
-    message.data = encoded.reshape(-1).tolist()
-    return message
-
-
 def to_grid_map_message(grid: CanonicalGlobalGrid) -> GridMap:
     """Encode a canonical grid using the layout accepted by lunar_planner_ros."""
 
-    message = GridMap()
-    message.header.frame_id = grid.frame_id
-    message.info.resolution = grid.resolution_m
-    message.info.length_x = grid.width * grid.resolution_m
-    message.info.length_y = grid.height * grid.resolution_m
-    message.info.pose.position.x = grid.origin_x_m + message.info.length_x * 0.5
-    message.info.pose.position.y = grid.origin_y_m + message.info.length_y * 0.5
-    message.info.pose.orientation.w = 1.0
-    message.layers = list(_LAYER_NAMES)
-    message.basic_layers = ["elevation", "valid_mask"]
-    message.data = [_encode_layer(grid.layers[name]) for name in _LAYER_NAMES]
-    message.outer_start_index = 0
-    message.inner_start_index = 0
-    return message
+    return encode_grid_map(
+        frame_id=grid.frame_id,
+        resolution_m=grid.resolution_m,
+        origin_x_m=grid.origin_x_m,
+        origin_y_m=grid.origin_y_m,
+        layers=grid.layers,
+        basic_layers=("elevation", "valid_mask"),
+    )
