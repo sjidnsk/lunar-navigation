@@ -610,6 +610,37 @@ TEST(CapabilityLoader, RejectsParametricHopperContractDrift) {
       "runtime_fallback_allowed: true"));
 }
 
+TEST(CapabilityLoader, RejectsDuplicateKeysInParametricHopperDocuments) {
+  const std::string tracked = TrackedHopperYaml();
+  const auto expect_schema_failure = [&](const std::string& document) {
+    const auto result = LoadParametricText(document);
+    ASSERT_TRUE(result.error.has_value());
+    EXPECT_EQ(result.error->reason_code, "CAPABILITY_SCHEMA_INVALID");
+  };
+
+  expect_schema_failure(
+      tracked + "schema_version: platform-control-capability-source/v2\n");
+  expect_schema_failure(ReplaceOnce(
+      tracked, "  platform_id: hopper\n",
+      "  platform_id: hopper\n  platform_id: hopper\n"));
+  expect_schema_failure(ReplaceOnce(
+      tracked, "geometry_source: {type: parametric_envelope}",
+      "geometry_source: {type: parametric_envelope, type: parametric_envelope}"));
+  expect_schema_failure(ReplaceOnce(
+      tracked, "  specific_impulse_s: 301.0\n",
+      "  specific_impulse_s: 301.0\n  specific_impulse_s: 301.0\n"));
+}
+
+TEST(CapabilityLoader, RejectsSubToleranceParametricHopperFrozenValueDrift) {
+  const auto result = LoadParametricText(ReplaceOnce(
+      TrackedHopperYaml(), "specific_impulse_s: 301.0",
+      "specific_impulse_s: 301.0000000000005"));
+
+  ASSERT_TRUE(result.error.has_value());
+  EXPECT_EQ(result.error->reason_code, "CAPABILITY_VALUE_INVALID");
+  EXPECT_EQ(result.error->detail, "hopper fields must match hopper-v1");
+}
+
 TEST(CapabilityLoader, RejectsParametricLeggedContractDrift) {
   ExpectParametricFailure(
       TrackedLeggedYaml() + "rogue_root: true\n",

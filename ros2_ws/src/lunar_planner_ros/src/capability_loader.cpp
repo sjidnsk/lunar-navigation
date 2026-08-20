@@ -457,12 +457,16 @@ void RejectUnexpectedKeys(
   if (!node || !node.IsMap()) {
     SchemaFailure("expected map: " + section);
   }
+  std::set<std::string, std::less<>> seen;
   for (const auto& entry : node) {
     std::string key;
     try {
       key = entry.first.as<std::string>();
     } catch (const YAML::Exception&) {
       SchemaFailure("non-string key in: " + section);
+    }
+    if (!seen.insert(key).second) {
+      SchemaFailure("duplicate " + section + " field: " + key);
     }
     if (!allowed.contains(key)) {
       SchemaCompatibilityFailure(
@@ -1512,18 +1516,17 @@ void ValidateApprovedLeggedV1Primitives(
       : false;
 
   if (parametric &&
-      (!Near(specific_impulse, 301.0) || !Near(reference_total_mass, 20.0) ||
-       !Near(reference_propellant_mass, 0.2) ||
-       !Near(gravity, {0.0, 0.0, -1.62}) ||
-       !Near(reference_horizontal_range, 100.0) ||
-       !Near(reference_elevation_delta, 0.0) || runtime_fallback_allowed ||
-       !Near(landing_support_radius, 0.45) ||
-       !Near(flight_collision_radius, 0.55) ||
-       !Near(landing_plane_residual, 0.05) ||
-       !Near(landing_lateral_margin, 0.2) || !Near(flight_map_margin, 0.2) ||
-       !Near(delta_v_margin, 0.1) || !Near(standard_gravity, 9.80665) ||
-       !Near(RequireDouble(node, "maximum_landing_slope_rad"),
-             0.17453292519943295))) {
+      (!(specific_impulse == 301.0) || !(reference_total_mass == 20.0) ||
+       !(reference_propellant_mass == 0.2) || !(gravity.x == 0.0) ||
+       !(gravity.y == 0.0) || !(gravity.z == -1.62) ||
+       !(reference_horizontal_range == 100.0) ||
+       !(reference_elevation_delta == 0.0) || runtime_fallback_allowed ||
+       !(landing_support_radius == 0.45) || !(flight_collision_radius == 0.55) ||
+       !(landing_plane_residual == 0.05) || !(landing_lateral_margin == 0.2) ||
+       !(flight_map_margin == 0.2) || !(delta_v_margin == 0.1) ||
+       !(standard_gravity == 9.80665) ||
+       !(RequireDouble(node, "maximum_landing_slope_rad") ==
+         0.17453292519943295))) {
     ValueFailure("hopper fields must match hopper-v1");
   }
 

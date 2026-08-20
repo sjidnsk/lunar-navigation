@@ -47,3 +47,39 @@ capability freeze: OK sha256=60e258be85edd779d9acdc282bbde3d5cb914bce98c86c244a4
 - 旧 URDF HOPPER parser 使用旧 `reference_propellant_mass_kg` 路径，未被参数模式覆盖；wheel/legged 选择回归通过。
 - `gravity_mps2` 已进入 HopperPlanner、HopperReachabilityGraph、reachability projection、cache fingerprint、graph primitive bytes 和 pybind/formal projection；两个新行为测试可捕捉重力只存储而未消费的缺陷。
 - 未引入实时燃料状态、订阅、跨跳递减或 runtime fallback。
+
+## Fix round 1/5：YAML 重复键与亚容差冻结漂移
+
+### TDD RED
+
+在 `ros2-humble` clean-copy 中，仅补测试后运行：
+
+```bash
+.../lunar_planner_ros_capability_loader_test \
+  --gtest_filter='CapabilityLoader.RejectsDuplicateKeysInParametricHopperDocuments:CapabilityLoader.RejectsSubToleranceParametricHopperFrozenValueDrift'
+```
+
+结果 `2 FAILED TESTS`：重复 root/platform/geometry/hopper key 的四个 mutation 都被 loader 错误接受；`specific_impulse_s: 301.0000000000005` 也被错误接受。这直接复现 yaml-cpp 首值读取与 `Near(..., 1e-12)` 漂移漏洞，不是 fixture 或依赖失败。
+
+### 最小修复与 GREEN
+
+- `RejectUnexpectedKeys` 现在维护已见 key 集合，并对重复 key 返回 `CAPABILITY_SCHEMA_INVALID`；该路径统一保护所有已调用的 root、platform、geometry 和 typed section exact-key 验证。
+- parametric `hopper-v1` 的批准数值改为精确 IEEE double 比较；不再将非 canonical 的亚容差值写入 typed capability/hash。
+
+同一聚焦过滤器 GREEN：`2 tests, 0 failures`。
+
+回归命令与计数：
+
+```bash
+.../lunar_planner_ros_capability_loader_test                 # 22 passed
+.../lunar_planner_core_hopper_planner_test --gtest_filter='HopperPlanner.*' # 8 passed
+.../lunar_planner_ros_capability_loader_test \
+  --gtest_filter='CapabilityLoader.LoadsApprovedParametricHopperWithoutUrdfOrMesh:CapabilityLoader.AdaptsLeggedAndHopperSourcesToTypedCapabilities' # 2 passed
+```
+
+最后运行 freeze checker 仍为 `60e258be85edd779d9acdc282bbde3d5cb914bce98c86c244a46a772fda5ee95`。
+
+### 自审
+
+- 重复检测在 YAML map 迭代层执行，先于 `node[key]` 读取，故“批准首值 + 冲突后值”无法穿过任何已调用 exact-key gate。
+- HOPPER frozen value 采用精确比较；无 `Near` 旁路。legacy URDF HOPPER 不走该 parametric frozen gate，已由 legacy typed-adaptation 正例回归覆盖。
