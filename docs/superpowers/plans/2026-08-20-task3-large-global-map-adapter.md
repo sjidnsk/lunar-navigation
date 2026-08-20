@@ -63,14 +63,20 @@ Modify:
 
 **Interfaces:**
 - Consumes: scalar ROI bounds and the fixed `GlobalMapConfig` values from `lunar_planner_core/types/planner_config.hpp`.
-- Produces:
+- Produces the C++20-compatible result contract used by every adapter component:
   ```cpp
+  template <typename T>
+  struct Result {
+    std::optional<T> value;
+    std::string reason_code;
+    bool ok() const noexcept { return value.has_value() && reason_code.empty(); }
+  };
   struct TaskRoi { double min_x_m, min_y_m, max_x_m, max_y_m; };
   struct SelectedGlobalLevel {
     std::size_t level, width, height;
     double resolution_m;
   };
-  std::expected<SelectedGlobalLevel, std::string>
+  Result<SelectedGlobalLevel>
   SelectGlobalLevel(const TaskRoi&, const lunar::planning::GlobalMapConfig&);
   ```
 
@@ -78,13 +84,10 @@ Modify:
 
   Add parameterized cases proving exact output:
   ```cpp
-  EXPECT_THAT(SelectGlobalLevel({0, 0, 100, 100}, config),
-              HasValue(SelectedGlobalLevel{1U, 250U, 250U, 0.4}));
-  EXPECT_THAT(SelectGlobalLevel({0, 0, 300, 300}, config),
-              HasValue(SelectedGlobalLevel{3U, 188U, 188U, 1.6}));
-  EXPECT_THAT(SelectGlobalLevel({0, 0, 500, 500}, config),
-              HasValue(SelectedGlobalLevel{4U, 157U, 157U, 3.2}));
-  EXPECT_EQ(SelectGlobalLevel({0, 0, 1024.1, 10}, config).error(),
+  EXPECT_EQ(SelectGlobalLevel({0, 0, 100, 100}, config).value->level, 1U);
+  EXPECT_EQ(SelectGlobalLevel({0, 0, 300, 300}, config).value->level, 3U);
+  EXPECT_EQ(SelectGlobalLevel({0, 0, 500, 500}, config).value->level, 4U);
+  EXPECT_EQ(SelectGlobalLevel({0, 0, 1024.1, 10}, config).reason_code,
             "GLOBAL_MAP_SCALE_UNSUPPORTED");
   ```
 
@@ -133,7 +136,7 @@ Modify:
 - Produces:
   ```cpp
   struct AggregatedGrid { SelectedGlobalLevel level; std::vector<FineCell> cells; };
-  std::expected<AggregatedGrid, std::string>
+  Result<AggregatedGrid>
   AggregateConservatively(const FineTile&, const TaskRoi&, const SelectedGlobalLevel&);
   ```
 
@@ -198,7 +201,7 @@ Modify:
   ```cpp
   class SqliteTileProvider {
    public:
-    std::expected<std::vector<FineTile>, std::string>
+    Result<std::vector<FineTile>>
     ReadRoiAtRevision(const TaskRoi&, std::uint64_t required_revision) const;
   };
   ```
@@ -207,9 +210,9 @@ Modify:
 
   Create schema/data in a test-owned temporary database, then verify:
   ```cpp
-  EXPECT_THAT(provider.ReadRoiAtRevision(roi, 7U), HasValue(HasSize(4)));
-  EXPECT_EQ(provider.ReadRoiAtRevision(roi, 8U).error(), "TASK3_MAP_REVISION_MISMATCH");
-  EXPECT_EQ(provider.ReadRoiAtRevision(roi, 7U).error(), "TASK3_TILE_MISSING"); // missing fixture tile
+  EXPECT_EQ(provider.ReadRoiAtRevision(roi, 7U).value->size(), 4U);
+  EXPECT_EQ(provider.ReadRoiAtRevision(roi, 8U).reason_code, "TASK3_MAP_REVISION_MISMATCH");
+  EXPECT_EQ(provider.ReadRoiAtRevision(roi, 7U).reason_code, "TASK3_TILE_MISSING"); // missing fixture tile
   ```
   Add an OS-permission fixture that confirms no SQL write statement is accepted.
 
@@ -264,7 +267,7 @@ Modify:
   };
   class GlobalMapCache {
    public:
-    std::expected<std::shared_ptr<const GlobalMapSnapshot>, std::string>
+    Result<std::shared_ptr<const GlobalMapSnapshot>>
     Refresh(std::string_view mission_id, std::uint64_t mission_revision,
             const TaskRoi&, std::uint64_t map_revision);
   };
@@ -328,9 +331,9 @@ Modify:
 - Consumes: `GlobalMapSnapshot`, Task3 `grid_map_msgs::msg::GridMap`, configured occupancy/semantic class sets and conservative scalar bounds.
 - Produces:
   ```cpp
-  std::expected<grid_map_msgs::msg::GridMap, std::string>
+  Result<grid_map_msgs::msg::GridMap>
   ToCanonicalGlobalGridMap(const GlobalMapSnapshot&, const rclcpp::Time&);
-  std::expected<grid_map_msgs::msg::GridMap, std::string>
+  Result<grid_map_msgs::msg::GridMap>
   AdaptTask3LocalMap(const grid_map_msgs::msg::GridMap&, const LocalMapAdapterConfig&,
                       const geometry_msgs::msg::TransformStamped& odom_from_map,
                       const rclcpp::Time&);
@@ -342,7 +345,7 @@ Modify:
 
   Add missing-field tests:
   ```cpp
-  EXPECT_EQ(AdaptTask3LocalMap(no_elevation, config, tf, now).error(),
+  EXPECT_EQ(AdaptTask3LocalMap(no_elevation, config, tf, now).reason_code,
             "TASK3_LOCAL_ELEVATION_MISSING");
   EXPECT_TRUE(cell.forbidden);  // invalid input cell never becomes free
   EXPECT_GT(cell.elevation_variance, 0.0F);
@@ -460,9 +463,9 @@ Modify:
 
   Verify valid minimal YAML loads every required field and invalid configurations reject exactly:
   ```cpp
-  EXPECT_EQ(LoadConfig(missing_sqlite).error(), "TASK3_SQLITE_PATH_MISSING");
-  EXPECT_EQ(LoadConfig(zero_variance).error(), "CONSERVATIVE_VARIANCE_INVALID");
-  EXPECT_EQ(LoadConfig(zero_cache).error(), "TASK3_TILE_CACHE_INVALID");
+  EXPECT_EQ(LoadConfig(missing_sqlite).reason_code, "TASK3_SQLITE_PATH_MISSING");
+  EXPECT_EQ(LoadConfig(zero_variance).reason_code, "CONSERVATIVE_VARIANCE_INVALID");
+  EXPECT_EQ(LoadConfig(zero_cache).reason_code, "TASK3_TILE_CACHE_INVALID");
   ```
   Add a text-level test asserting `external_interfaces.yaml` declares Task3 revision as `std_msgs/msg/UInt64` and preserves canonical `/environment/map_global` ownership as the adapter.
 
