@@ -347,8 +347,8 @@ void AddLeggedMarkers(
 }
 
 [[nodiscard]] std::vector<lunar::planning::Vec3> BallisticArc(
-    const lunar::planning::CertifiedHopPreview& hop) {
-  constexpr lunar::planning::Vec3 kGravity{0.0, 0.0, -1.62};
+    const lunar::planning::CertifiedHopPreview& hop,
+    const lunar::planning::Vec3 gravity_mps2) {
   const double seconds = std::chrono::duration<double>(hop.flight_time).count();
   if (!std::isfinite(seconds) || seconds <= 0.0) {
     return {};
@@ -363,13 +363,13 @@ void AddLeggedMarkers(
     points.push_back({
         .x = hop.launch_pose_map.position_m.x +
             hop.launch_velocity_mps.x * time +
-            0.5 * kGravity.x * time * time,
+            0.5 * gravity_mps2.x * time * time,
         .y = hop.launch_pose_map.position_m.y +
             hop.launch_velocity_mps.y * time +
-            0.5 * kGravity.y * time * time,
+            0.5 * gravity_mps2.y * time * time,
         .z = hop.launch_pose_map.position_m.z +
             hop.launch_velocity_mps.z * time +
-            0.5 * kGravity.z * time * time,
+            0.5 * gravity_mps2.z * time * time,
     });
   }
   return points;
@@ -464,7 +464,7 @@ void AddHopperMarkers(
   nominal.scale.z = 0.16;
   markers.push_back(std::move(nominal));
 
-  const auto arc = BallisticArc(hop);
+  const auto arc = BallisticArc(hop, capability->gravity_mps2);
   if (!arc.empty()) {
     markers.push_back(LineMarker(
         "hopper_nominal_arc", 0, "map", context.stamp, 0.09,

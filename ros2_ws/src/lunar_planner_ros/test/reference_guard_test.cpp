@@ -74,25 +74,25 @@ TEST(ReferenceGuard, AllowsReplacementOnGroundAndRejectsInvalidCommit) {
 
   auto invalid = HopperReference();
   invalid.hops.clear();
-  EXPECT_FALSE(guard.Commit(invalid));
+  EXPECT_FALSE(guard.Commit(invalid, {0.0, 0.0, -1.62}));
   invalid = HopperReference();
   invalid.header.frame_id = "odom";
-  EXPECT_FALSE(guard.Commit(invalid));
+  EXPECT_FALSE(guard.Commit(invalid, {0.0, 0.0, -1.62}));
   invalid = HopperReference();
   invalid.hops.push_back(invalid.hops.front());
-  EXPECT_FALSE(guard.Commit(invalid));
+  EXPECT_FALSE(guard.Commit(invalid, {0.0, 0.0, -1.62}));
   invalid = HopperReference();
   invalid.hops.front().available_delta_v_mps = 6.9;
-  EXPECT_FALSE(guard.Commit(invalid));
+  EXPECT_FALSE(guard.Commit(invalid, {0.0, 0.0, -1.62}));
   invalid = HopperReference();
   invalid.hops.front().nominal_landing_point.x += 0.01;
-  EXPECT_FALSE(guard.Commit(invalid));
+  EXPECT_FALSE(guard.Commit(invalid, {0.0, 0.0, -1.62}));
   EXPECT_EQ(guard.state(), ReferenceGuardState::kGroundHold);
 }
 
 TEST(ReferenceGuard, LocksCommittedAndInFlightHopUntilStableLanding) {
   auto guard = MakeGuard();
-  ASSERT_TRUE(guard.Commit(HopperReference()));
+  ASSERT_TRUE(guard.Commit(HopperReference(), {0.0, 0.0, -1.62}));
 
   auto decision = guard.MayReplace(At(9'000'000'000LL), std::nullopt);
   EXPECT_FALSE(decision.may_replace);
@@ -113,9 +113,18 @@ TEST(ReferenceGuard, LocksCommittedAndInFlightHopUntilStableLanding) {
   EXPECT_EQ(decision.state, ReferenceGuardState::kGroundHold);
 }
 
+TEST(ReferenceGuard, CommitsHopperUsingConfiguredExecutionFrameGravity) {
+  auto reference = HopperReference();
+  reference.hops.front().nominal_landing_point.z = 2.38;
+  auto guard = MakeGuard();
+
+  EXPECT_TRUE(guard.Commit(reference, {0.0, 0.0, -0.81}));
+  EXPECT_EQ(guard.state(), ReferenceGuardState::kJumpCommitted);
+}
+
 TEST(ReferenceGuard, LatchesUnresolvedLandingUntilExplicitReset) {
   auto guard = MakeGuard();
-  ASSERT_TRUE(guard.Commit(HopperReference()));
+  ASSERT_TRUE(guard.Commit(HopperReference(), {0.0, 0.0, -1.62}));
 
   auto invalid = LandedOdometry(At(12'100'000'000LL));
   invalid.pose.pose.position.x = 10.0;
@@ -134,7 +143,7 @@ TEST(ReferenceGuard, LatchesUnresolvedLandingUntilExplicitReset) {
 
 TEST(ReferenceGuard, TreatsMissingPostFlightOdometryAsUnresolved) {
   auto guard = MakeGuard();
-  ASSERT_TRUE(guard.Commit(HopperReference()));
+  ASSERT_TRUE(guard.Commit(HopperReference(), {0.0, 0.0, -1.62}));
 
   const auto decision = guard.MayReplace(At(13'000'000'000LL), std::nullopt);
   EXPECT_FALSE(decision.may_replace);

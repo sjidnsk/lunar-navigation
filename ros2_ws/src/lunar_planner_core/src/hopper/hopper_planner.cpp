@@ -119,10 +119,8 @@ constexpr std::string_view kPlannerName = "cpp_v3_native_hopper";
 
 [[nodiscard]] std::optional<Vec3> RotateMapVectorToOdom(
     const Vec3 vector_map, const RigidTransform& map_from_odom) noexcept {
-  RigidTransform rotation = map_from_odom;
-  rotation.translation_m = {};
-  return hierarchical::TransformPoint(
-      vector_map, rotation,
+  return hierarchical::TransformVector(
+      vector_map, map_from_odom,
       hierarchical::TransformDirection::kParentToChild);
 }
 

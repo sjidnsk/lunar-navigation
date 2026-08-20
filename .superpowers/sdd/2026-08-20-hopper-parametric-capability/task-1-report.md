@@ -110,3 +110,100 @@ capability freeze: OK sha256=60e258be85edd779d9acdc282bbde3d5cb914bce98c86c244a4
 
 - 覆盖了批准为零的 HOPPER frozen scalar/vector components：gravity x/y 与 reference elevation delta；其余批准值均非零。
 - bitwise gate 只用于 strict parametric `hopper-v1`，不会重写或拒绝 legacy URDF/external-bundle HOPPER 的兼容路径。
+
+## Final fix wave：configured gravity 贯穿 ROS 输出与承诺保护链
+
+### 接管与 TDD 说明
+
+接管时上一实现代理的测试和生产 diff 已同时遗留在工作树中，因此本 wave 不把这些现成改动伪称为亲自完成的“测试先行”。先只读审计新增测试，随后在独立容器目录 `/tmp/hopper-finalfix-red/runtime` 中以 `29dccd7` archive 为基线，仅保留新增测试/API 声明，并恢复四个消费者的旧硬编码行为，执行 mutation/revert 式 RED。首次 RED build 因旧 `ReferenceGuard::Commit` 定义与新声明签名不一致而编译失败；这不是行为 RED，未计入验收。将 RED harness 调整为“新签名、旧 `-1.62` 行为”后，四个测试均可运行并因目标缺陷失败。
+
+### RED 证据
+
+RED build：
+
+```bash
+cd /tmp/hopper-finalfix-red/runtime/ros2_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-up-to lunar_planner_ros --cmake-args -DBUILD_TESTING=ON
+```
+
+在保留新测试但恢复旧硬编码消费者后运行：
+
+```bash
+build/lunar_planner_ros/lunar_planner_ros_message_conversion_test \
+  --gtest_filter=MessageConversion.AcceptsHopperBallisticsUsingConfiguredExecutionFrameGravity
+build/lunar_planner_ros/lunar_planner_ros_reference_guard_test \
+  --gtest_filter=ReferenceGuard.CommitsHopperUsingConfiguredExecutionFrameGravity
+build/lunar_planner_ros/lunar_planner_ros_route_marker_publisher_test \
+  --gtest_filter=RouteMarkerPublisher.DrawsHopperArcUsingConfiguredMapFrameGravity
+build/lunar_planner_ros/lunar_planner_ros_plan_motion_server_test \
+  --gtest_filter=PlanMotionServerTest.ReturnsAndCommitsHopperReferenceUsingConfiguredGravityAcrossLayers
+```
+
+结果为 `RED_EXIT_CODES=1,1,1,1`：
+
+- message conversion：`1 FAILED TEST`，reason 为 `REFERENCE_HOP_BALLISTIC_INCONSISTENT`；
+- ReferenceGuard：`1 FAILED TEST`，configured `-0.81` 下 `Commit` 错误返回 false；
+- route marker：`1 FAILED TEST`，弧线末点 `z=0.76`，期望 `z=2.38`，差 `1.62`；
+- PlanMotionServer：`1 FAILED TEST`，action 返回 ABORTED 而非 SUCCEEDED。
+
+跨层 fixture 初版的 landing polygon 未包含旋转后 nominal y，GREEN 时 guard 正确报 `HOP_REFERENCE_COMMIT_FAILED`。将 polygon 修正为覆盖 nominal 点后，重新验证同一测试：旧实现仍以 `REFERENCE_HOP_BALLISTIC_INCONSISTENT` RED（`RED_RC=1`），最终实现 GREEN（`GREEN_RC=0`）。因此最终跨层测试失败原因是旧 gravity threading，而不是无效 fixture。
+
+### 最小 API threading 与 frame 表达
+
+- 新增最小 public `lunar_planner_core/frame_transform.hpp`，只公开 `TransformDirection` 和 `TransformVector`；内部 point/pose/goal transforms 仍保持内部声明。`TransformVector` 正规化并旋转向量，明确不应用 `map_from_odom.translation_m`。
+- `HopperPlanner` 复用 `TransformVector` 将 map-frame launch velocity 表达到 odom，移除“清零平移后把向量当点”的本地适配。
+- `PlannerResultContext` 新增 `execution_gravity_mps2`；`ConvertPlannerOutput` 用该三轴执行帧向量重建 landing，并拒绝非有限 gravity。
+- `PlanMotionServer` 从同一个 typed `HopperCapability::gravity_mps2` 取 map-frame gravity，通过 `map_from_odom` 的 parent-to-child 纯旋转得到 odom-frame gravity，同时传给 converter 和 `ReferenceGuard::Commit`。非 HOPPER 结果使用零向量占位，不复制 lunar capability 常量。
+- `ReferenceGuard::Commit` 显式要求 execution-frame gravity，三轴重建 hop landing；生产 API 不保留 `-1.62` 默认值。
+- `RouteMarkerPublisher::BallisticArc` 直接使用 `input.capability.gravity_mps2`，因为 certified preview 与 marker 均在 map frame。
+- PlanMotionServer 行为测试使用 90° `map_from_odom` 旋转和 fixture 中既有非零平移：map gravity `{0,0,-0.81}` 必须成为 odom gravity `{0,-0.81,0}`，同时证明向量变换不会错误叠加平移。
+
+### GREEN 证据
+
+最终 clean-copy affected build：
+
+```bash
+cd /tmp/hopper-finalfix-green/runtime/ros2_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-up-to lunar_planner_ros lunar_planner_training_bridge \
+  --cmake-args -DBUILD_TESTING=ON
+```
+
+结果：`5 packages finished`，0 failed。
+
+最终 C++ 回归：
+
+```bash
+build/lunar_planner_ros/lunar_planner_ros_message_conversion_test
+build/lunar_planner_ros/lunar_planner_ros_reference_guard_test
+build/lunar_planner_ros/lunar_planner_ros_route_marker_publisher_test
+build/lunar_planner_ros/lunar_planner_ros_plan_motion_server_test
+build/lunar_planner_core/lunar_planner_core_hopper_planner_test
+build/lunar_planner_core/lunar_planner_core_reachability_projection_test \
+  --gtest_filter=ReachabilityProjection.HopperProjectionUsesConfiguredGravity
+build/lunar_planner_ros/lunar_planner_ros_capability_loader_test
+```
+
+结果依次为 `9 passed`、`5 passed`、`5 passed`、`27 passed`、`8 passed`、`1 passed`、`23 passed`，合计 `78 passed, 0 failed`。其中包含四个新增 altered-gravity 行为测试、现有 core HopperPlanner configured-gravity、ReachabilityProjection configured-gravity 和完整 loader 23。
+
+最终 freeze/deployment 回归：
+
+```bash
+python3 tools/check_platform_capability_freeze.py \
+  --schema ros2_ws/src/lunar_navigation_config/config/platform_capability_schema_v2.yaml \
+  --freeze ros2_ws/src/lunar_navigation_config/config/three_platform_capability_freeze_v1.yaml
+python3 -m pytest -q \
+  tests/foundation/test_platform_capability_freeze.py \
+  tests/deployment/test_hopper_capability.py
+git diff --check
+```
+
+结果：freeze checker 仍为 `capability freeze: OK sha256=60e258be85edd779d9acdc282bbde3d5cb914bce98c86c244a46a772fda5ee95`；Python `15 passed`；`git diff --check` 干净。
+
+### Final fix 自审与 concerns
+
+- mutation check：把 converter、guard 或 marker 任一处恢复为 `-1.62`，对应 altered-gravity 单测失败；PlanMotionServer 测试还会捕捉未传 gravity、错误旋转方向或向量错误叠加 TF 平移。
+- 三个原问题生产消费者不再包含 lunar gravity 常量；strict tracked `hopper-v1` loader 仍只接受批准的 `-1.62` raw bits，未放宽 loader，也未删除 typed configured-gravity 功能。
+- canonical freeze、`wheel.yaml`、`legged.yaml` 均未改；未安装 `/opt`、未推送、未合并，未新增 fuel state/fallback/primitive。
+- 无遗留 correctness concern。宿主与容器均无 `clang-format`，沿用 `git diff --check`、C++20 clean-copy 编译和行为测试作为格式/编译证据。

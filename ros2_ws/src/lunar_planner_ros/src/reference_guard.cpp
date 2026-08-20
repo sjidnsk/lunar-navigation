@@ -13,6 +13,10 @@ namespace {
   return std::isfinite(value);
 }
 
+[[nodiscard]] bool Finite(const lunar::planning::Vec3& value) noexcept {
+  return Finite(value.x) && Finite(value.y) && Finite(value.z);
+}
+
 [[nodiscard]] bool ValidPoint(const geometry_msgs::msg::Point32& point) noexcept {
   return Finite(point.x) && Finite(point.y) && Finite(point.z);
 }
@@ -103,7 +107,8 @@ namespace {
 
 [[nodiscard]] bool ValidHop(
     const lunar_planning_msgs::msg::MotionReference& reference,
-    const lunar_planning_msgs::msg::HopSegment& hop) noexcept {
+    const lunar_planning_msgs::msg::HopSegment& hop,
+    const lunar::planning::Vec3 execution_gravity_mps2) noexcept {
   if (reference.plan_id.empty() || reference.header.frame_id != "map" ||
       reference.hops.size() != 1U || hop.segment_id.empty() ||
       hop.header.frame_id != "odom" ||
@@ -134,14 +139,15 @@ namespace {
   } catch (const std::exception&) {
     return false;
   }
-  constexpr double kLunarGravityMps2 = -1.62;
   const double landing_x = hop.launch_pose.position.x +
-      hop.launch_velocity.x * flight_seconds;
+      hop.launch_velocity.x * flight_seconds +
+      0.5 * execution_gravity_mps2.x * flight_seconds * flight_seconds;
   const double landing_y = hop.launch_pose.position.y +
-      hop.launch_velocity.y * flight_seconds;
+      hop.launch_velocity.y * flight_seconds +
+      0.5 * execution_gravity_mps2.y * flight_seconds * flight_seconds;
   const double landing_z = hop.launch_pose.position.z +
       hop.launch_velocity.z * flight_seconds +
-      0.5 * kLunarGravityMps2 * flight_seconds * flight_seconds;
+      0.5 * execution_gravity_mps2.z * flight_seconds * flight_seconds;
   if (!NearlyEqual(landing_x, hop.nominal_landing_point.x) ||
       !NearlyEqual(landing_y, hop.nominal_landing_point.y) ||
       !NearlyEqual(landing_z, hop.nominal_landing_point.z)) {
@@ -199,10 +205,12 @@ ReferenceGuard::ReferenceGuard(ReferenceGuardLimits limits)
 }
 
 bool ReferenceGuard::Commit(
-    const lunar_planning_msgs::msg::MotionReference& reference) {
+    const lunar_planning_msgs::msg::MotionReference& reference,
+    const lunar::planning::Vec3 execution_gravity_mps2) {
   if (state_ != ReferenceGuardState::kGroundHold ||
       reference.platform_type != reference.HOPPER || reference.hops.empty() ||
-      !ValidHop(reference, reference.hops.front())) {
+      !Finite(execution_gravity_mps2) ||
+      !ValidHop(reference, reference.hops.front(), execution_gravity_mps2)) {
     return false;
   }
   committed_hop_ = reference.hops.front();

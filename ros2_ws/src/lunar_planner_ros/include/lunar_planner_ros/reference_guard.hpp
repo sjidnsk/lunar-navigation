@@ -9,6 +9,8 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/time.hpp>
 
+#include "lunar_planner_core/types/geometry.hpp"
+
 namespace lunar::planning::ros {
 
 enum class ReferenceGuardState : std::uint8_t {
@@ -36,7 +38,8 @@ class ReferenceGuard final {
   explicit ReferenceGuard(ReferenceGuardLimits limits);
 
   [[nodiscard]] bool Commit(
-      const lunar_planning_msgs::msg::MotionReference& reference);
+      const lunar_planning_msgs::msg::MotionReference& reference,
+      lunar::planning::Vec3 execution_gravity_mps2);
   [[nodiscard]] ReferenceGuardDecision MayReplace(
       rclcpp::Time now,
       const std::optional<nav_msgs::msg::Odometry>& odometry);

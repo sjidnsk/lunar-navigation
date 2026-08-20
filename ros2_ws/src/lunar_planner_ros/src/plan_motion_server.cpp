@@ -40,6 +40,7 @@
 #include <tf2_msgs/msg/tf_message.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
+#include "lunar_planner_core/frame_transform.hpp"
 #include "lunar_planner_core/planner.hpp"
 #include "lunar_planner_ros/execution_feedback_tracker.hpp"
 #include "lunar_planner_ros/message_conversion.hpp"
@@ -341,6 +342,18 @@ struct ExecutionDiagnosticInfo final {
   return ground != nullptr &&
       (ground->state == lunar::planning::GroundExecutionState::kExecuting ||
        ground->state == lunar::planning::GroundExecutionState::kHolding);
+}
+
+[[nodiscard]] std::optional<lunar::planning::Vec3>
+ExecutionGravityMps2(const lunar::planning::PlannerInput& input) noexcept {
+  const auto* capability =
+      std::get_if<lunar::planning::HopperCapability>(&input.capability);
+  if (capability == nullptr) {
+    return lunar::planning::Vec3{};
+  }
+  return lunar::planning::hierarchical::TransformVector(
+      capability->gravity_mps2, input.world.map_from_odom,
+      lunar::planning::hierarchical::TransformDirection::kParentToChild);
 }
 
 }  // namespace
@@ -1363,6 +1376,13 @@ struct PlanMotionServer::Impl final {
     }
 
     PublishFeedback(goal_handle, Action::Feedback::CERTIFYING, started);
+    const auto execution_gravity_mps2 = ExecutionGravityMps2(*snapshot.input);
+    if (!execution_gravity_mps2.has_value()) {
+      CompleteInvariantFailure(
+          goal_handle, request.mission_revision, generation,
+          "FRAME_TRANSFORM_INVALID");
+      return;
+    }
     const ActionResultConversion converted = ConvertPlannerOutput(
         output,
         PlannerResultContext{
@@ -1375,6 +1395,7 @@ struct PlanMotionServer::Impl final {
             .local_map_generation = snapshot.input->local_map_generation,
             .preview_frame = "map",
             .execution_frame = "odom",
+            .execution_gravity_mps2 = *execution_gravity_mps2,
         });
     if (!converted.ok()) {
       CompleteInvariantFailure(
@@ -1392,7 +1413,8 @@ struct PlanMotionServer::Impl final {
       {
         std::scoped_lock lock{state_mutex};
         committed = reference_guard &&
-            reference_guard->Commit(converted.result->reference);
+            reference_guard->Commit(
+                converted.result->reference, *execution_gravity_mps2);
       }
       if (!committed) {
         CompleteInvariantFailure(

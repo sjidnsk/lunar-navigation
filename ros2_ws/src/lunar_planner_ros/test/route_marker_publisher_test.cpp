@@ -281,6 +281,28 @@ TEST(RouteMarkerPublisher, RendersHopperTargetRegionTubeAndAuditText) {
   EXPECT_EQ(Find(markers, "certified_hop_promotion_region"), nullptr);
 }
 
+TEST(RouteMarkerPublisher, DrawsHopperArcUsingConfiguredMapFrameGravity) {
+  RouteMarkerPublisher publisher;
+  HopperCapability capability{
+      .specific_impulse_s = 301.0,
+      .landing_support_radius_m = 0.45,
+      .flight_collision_radius_m = 0.55,
+      .landing_lateral_margin_m = 0.20,
+  };
+  capability.gravity_mps2 = {0.0, 0.0, -0.81};
+  auto output = HopperOutput();
+  output.certified_hops.front().landing_pose_map.position_m.z = 2.38;
+  const PlannerInput input = BaseInput(
+      capability, HopperState{.pose = {}}, {4.0, 0.0, 2.38});
+
+  const auto markers = publisher.Replace(output, input, Context());
+
+  const Marker* arc = Find(markers, "hopper_nominal_arc");
+  ASSERT_NE(arc, nullptr);
+  ASSERT_FALSE(arc->points.empty());
+  EXPECT_NEAR(arc->points.back().z, 2.38, 1.0e-6);
+}
+
 TEST(RouteMarkerPublisher, ReplacesPlatformMarkersAndDeletesOwnedIds) {
   RouteMarkerPublisher publisher;
   const PlannerInput wheel_input = BaseInput(
