@@ -274,7 +274,9 @@ def test_formal_curriculum_identity_matches_injected_capability() -> None:
         typed_capability=FrozenLeggedCapability(
             reference_point="base_link",
             body_extent_m=FrozenVec3(0.68, 0.33, 0.35),
+            nominal_body_height_m=0.33,
             platform_mass_kg=15.89,
+            nominal_payload_kg=8.0,
             maximum_payload_kg=10.0,
             maximum_slope_rad=0.5235987755982988,
             maximum_step_height_m=0.5,
@@ -287,6 +289,7 @@ def test_formal_curriculum_identity_matches_injected_capability() -> None:
             yaw_rate_radps=FrozenInterval(-1.0, 1.0),
             maximum_linear_acceleration_mps2=1.0,
             maximum_yaw_acceleration_radps2=1.0,
+            unknown_is_traversable=False,
             motion_primitives=(
                 FrozenLeggedBodyPrimitive(
                     primitive_id="test-forward",

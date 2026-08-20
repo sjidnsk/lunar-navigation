@@ -187,7 +187,9 @@ def _test_typed_content(platform: str) -> dict[str, object]:
         return {
             "reference_point": "base_link",
             "body_extent_m": [0.68, 0.33, 0.35],
+            "nominal_body_height_m": 0.33,
             "platform_mass_kg": 15.89,
+            "nominal_payload_kg": 8.0,
             "maximum_payload_kg": 10.0,
             "maximum_slope_rad": 0.5235987755982988,
             "maximum_step_height_m": 0.5,
@@ -201,6 +203,7 @@ def _test_typed_content(platform: str) -> dict[str, object]:
             "maximum_linear_acceleration_mps2": 0.5,
             "maximum_yaw_acceleration_radps2": 1.0,
             "roughness_handling": "DIAGNOSTIC_ONLY",
+            "unknown_is_traversable": False,
             "motion_primitives": [
                 {
                     "primitive_id": "test-forward",
@@ -767,6 +770,9 @@ def test_complete_typed_bundle_maps_all_platforms_to_v3_bridge(
     assert isinstance(wheel_bridge, bridge_api.WheeledCapability)
     assert wheel_bridge.motion_primitives[0].primitive_id == "test-forward"
     assert isinstance(legged_bridge, bridge_api.LeggedCapability)
+    assert legged_bridge.nominal_body_height_m == pytest.approx(0.33)
+    assert legged_bridge.nominal_payload_kg == pytest.approx(8.0)
+    assert legged_bridge.unknown_is_traversable is False
     assert legged_bridge.motion_primitives[0].primitive_id == "test-forward"
     assert isinstance(hopper_bridge, bridge_api.HopperCapability)
     assert hopper.source_motion_primitive_ids == ()

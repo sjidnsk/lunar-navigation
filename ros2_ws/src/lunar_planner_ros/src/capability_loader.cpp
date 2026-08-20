@@ -1232,6 +1232,13 @@ void ValidateApprovedLeggedV1Primitives(
     if (!primitive.IsMap()) {
       SchemaFailure("legged motion primitive must be a map");
     }
+    if (parametric) {
+      RejectUnexpectedKeys(
+          primitive,
+          {"primitive_id", "kind", "body_frame_displacement_m",
+           "yaw_change_rad"},
+          "legged motion primitive");
+    }
     const std::string id = RequireString(primitive, "primitive_id");
     RecordPrimitiveId(id, primitive_ids, loaded.source_motion_primitive_ids);
     primitives.push_back(lunar::planning::LeggedBodyPrimitive{
@@ -1601,6 +1608,11 @@ void AddMesh(
     } else if (loaded.platform_id == "legged" ||
                loaded.capability_version == "legged-v1") {
       ValidateApprovedLeggedV1Platform(platform, loaded, platform_type);
+      RejectUnexpectedKeys(
+          platform_document,
+          {"schema_version", "platform", "geometry_source", "legged",
+           "sources"},
+          "platform document");
     } else {
       ValueFailure(
           "parametric_envelope is only approved for WHEELED or LEGGED");

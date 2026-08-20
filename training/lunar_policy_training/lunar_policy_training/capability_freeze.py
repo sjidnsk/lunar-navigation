@@ -105,7 +105,9 @@ _LEGGED_FIELDS = frozenset(
     (
         "reference_point",
         "body_extent_m",
+        "nominal_body_height_m",
         "platform_mass_kg",
+        "nominal_payload_kg",
         "maximum_payload_kg",
         "maximum_slope_rad",
         "maximum_step_height_m",
@@ -119,6 +121,7 @@ _LEGGED_FIELDS = frozenset(
         "maximum_linear_acceleration_mps2",
         "maximum_yaw_acceleration_radps2",
         "roughness_handling",
+        "unknown_is_traversable",
         "motion_primitives",
     )
 )
@@ -242,7 +245,9 @@ class FrozenLeggedBodyPrimitive:
 class FrozenLeggedCapability:
     reference_point: str
     body_extent_m: FrozenVec3
+    nominal_body_height_m: float
     platform_mass_kg: float
+    nominal_payload_kg: float
     maximum_payload_kg: float
     maximum_slope_rad: float
     maximum_step_height_m: float
@@ -255,6 +260,7 @@ class FrozenLeggedCapability:
     yaw_rate_radps: FrozenInterval
     maximum_linear_acceleration_mps2: float
     maximum_yaw_acceleration_radps2: float
+    unknown_is_traversable: bool
     motion_primitives: tuple[FrozenLeggedBodyPrimitive, ...]
 
 
@@ -361,7 +367,9 @@ class FrozenPlatformCapability:
             value = bridge_api.LeggedCapability()
             value.body_extent_m = _bridge_vec3(typed.body_extent_m, bridge_api)
             for field in (
+                "nominal_body_height_m",
                 "platform_mass_kg",
+                "nominal_payload_kg",
                 "maximum_payload_kg",
                 "maximum_slope_rad",
                 "maximum_step_height_m",
@@ -370,6 +378,7 @@ class FrozenPlatformCapability:
                 "step_vertical_rate_mps",
                 "maximum_linear_acceleration_mps2",
                 "maximum_yaw_acceleration_radps2",
+                "unknown_is_traversable",
             ):
                 setattr(value, field, getattr(typed, field))
             for field in (
@@ -1111,7 +1120,13 @@ def _parse_legged(value: object) -> FrozenLeggedCapability:
     return FrozenLeggedCapability(
         reference_point=reference_point,
         body_extent_m=extent,
+        nominal_body_height_m=_positive(
+            node["nominal_body_height_m"], "nominal_body_height_m"
+        ),
         platform_mass_kg=_positive(node["platform_mass_kg"], "platform_mass_kg"),
+        nominal_payload_kg=_positive(
+            node["nominal_payload_kg"], "nominal_payload_kg"
+        ),
         maximum_payload_kg=_positive(
             node["maximum_payload_kg"], "maximum_payload_kg"
         ),
@@ -1145,6 +1160,9 @@ def _parse_legged(value: object) -> FrozenLeggedCapability:
         maximum_yaw_acceleration_radps2=_positive(
             node["maximum_yaw_acceleration_radps2"],
             "maximum_yaw_acceleration_radps2",
+        ),
+        unknown_is_traversable=_boolean(
+            node["unknown_is_traversable"], "unknown_is_traversable"
         ),
         motion_primitives=tuple(primitives),
     )
@@ -1208,6 +1226,12 @@ def _require_exact_object(
 def _nonempty_string(value: object, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise CapabilityFreezeError(f"{field} must be a non-empty string")
+    return value
+
+
+def _boolean(value: object, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise CapabilityFreezeError(f"{field} must be a boolean")
     return value
 
 

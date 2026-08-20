@@ -496,6 +496,18 @@ TEST(CapabilityLoader, LoadsApprovedParametricLeggedWithoutUrdfOrMesh) {
 
 TEST(CapabilityLoader, RejectsParametricLeggedContractDrift) {
   ExpectParametricFailure(
+      TrackedLeggedYaml() + "rogue_root: true\n",
+      "CAPABILITY_SCHEMA_VERSION_INCOMPATIBLE",
+      "retired or unknown platform document field: rogue_root");
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedLeggedYaml(),
+          "body_frame_displacement_m: [0.2, 0.0, 0.0], yaw_change_rad: 0.0}",
+          "body_frame_displacement_m: [0.2, 0.0, 0.0], yaw_change_rad: 0.0, "
+          "foot_target_m: [0.2, 0.0, 0.0]}"),
+      "CAPABILITY_SCHEMA_VERSION_INCOMPATIBLE",
+      "retired or unknown legged motion primitive field: foot_target_m");
+  ExpectParametricFailure(
       ReplaceOnce(TrackedLeggedYaml(), "platform_id: legged",
                   "platform_id: quad48"),
       "CAPABILITY_VALUE_INVALID", "platform.platform_id must be legged");
