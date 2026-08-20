@@ -83,3 +83,30 @@ capability freeze: OK sha256=60e258be85edd779d9acdc282bbde3d5cb914bce98c86c244a4
 
 - 重复检测在 YAML map 迭代层执行，先于 `node[key]` 读取，故“批准首值 + 冲突后值”无法穿过任何已调用 exact-key gate。
 - HOPPER frozen value 采用精确比较；无 `Near` 旁路。legacy URDF HOPPER 不走该 parametric frozen gate，已由 legacy typed-adaptation 正例回归覆盖。
+
+## Fix round 2/5：signed-zero canonical gap
+
+### TDD RED
+
+新增 `CapabilityLoader.RejectsSignedZeroInParametricHopperFrozenFields` 后，在 `ros2-humble` clean-copy 运行：
+
+```bash
+.../lunar_planner_ros_capability_loader_test \
+  --gtest_filter='CapabilityLoader.RejectsSignedZeroInParametricHopperFrozenFields'
+```
+
+结果为 `1 FAILED TEST`，其中 `gravity_mps2: [-0.0, 0.0, -1.62]` 与 `reference_elevation_delta_m: -0.0` 都被错误接受。这证明普通 `==` 不能闭合 raw-byte fingerprint 上的 signed-zero 分歧。
+
+### 最小修复与 GREEN
+
+- 增加 `ExactFrozenDouble`，以 `std::bit_cast<uint64_t>` 比较 parametric `hopper-v1` 全部批准 double 值的 IEEE raw bytes。
+- 该 fail-closed 检查拒绝非 canonical `-0.0`，因此任何被接受的 frozen zero 在 typed capability 和 projection cache hash 中均为批准的 `+0.0` bytes。
+
+聚焦 GREEN：`1 test, 0 failures`。
+
+回归：完整 `lunar_planner_ros_capability_loader_test` 为 `23 passed`；tracked parametric HOPPER 与 legacy HOPPER typed-adaptation 过滤器为 `2 passed`；freeze checker 仍输出 `60e258be85edd779d9acdc282bbde3d5cb914bce98c86c244a46a772fda5ee95`。
+
+### 自审
+
+- 覆盖了批准为零的 HOPPER frozen scalar/vector components：gravity x/y 与 reference elevation delta；其余批准值均非零。
+- bitwise gate 只用于 strict parametric `hopper-v1`，不会重写或拒绝 legacy URDF/external-bundle HOPPER 的兼容路径。

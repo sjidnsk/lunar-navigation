@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -375,6 +376,13 @@ class LoadFailure final : public std::runtime_error {
     const double expected) noexcept {
   return std::isfinite(actual) &&
       std::abs(actual - expected) <= kWheelV1Tolerance;
+}
+
+[[nodiscard]] bool ExactFrozenDouble(
+    const double actual,
+    const double expected) noexcept {
+  return std::bit_cast<std::uint64_t>(actual) ==
+      std::bit_cast<std::uint64_t>(expected);
 }
 
 [[nodiscard]] bool Near(
@@ -1516,17 +1524,25 @@ void ValidateApprovedLeggedV1Primitives(
       : false;
 
   if (parametric &&
-      (!(specific_impulse == 301.0) || !(reference_total_mass == 20.0) ||
-       !(reference_propellant_mass == 0.2) || !(gravity.x == 0.0) ||
-       !(gravity.y == 0.0) || !(gravity.z == -1.62) ||
-       !(reference_horizontal_range == 100.0) ||
-       !(reference_elevation_delta == 0.0) || runtime_fallback_allowed ||
-       !(landing_support_radius == 0.45) || !(flight_collision_radius == 0.55) ||
-       !(landing_plane_residual == 0.05) || !(landing_lateral_margin == 0.2) ||
-       !(flight_map_margin == 0.2) || !(delta_v_margin == 0.1) ||
-       !(standard_gravity == 9.80665) ||
-       !(RequireDouble(node, "maximum_landing_slope_rad") ==
-         0.17453292519943295))) {
+      (!ExactFrozenDouble(specific_impulse, 301.0) ||
+       !ExactFrozenDouble(reference_total_mass, 20.0) ||
+       !ExactFrozenDouble(reference_propellant_mass, 0.2) ||
+       !ExactFrozenDouble(gravity.x, 0.0) ||
+       !ExactFrozenDouble(gravity.y, 0.0) ||
+       !ExactFrozenDouble(gravity.z, -1.62) ||
+       !ExactFrozenDouble(reference_horizontal_range, 100.0) ||
+       !ExactFrozenDouble(reference_elevation_delta, 0.0) ||
+       runtime_fallback_allowed ||
+       !ExactFrozenDouble(landing_support_radius, 0.45) ||
+       !ExactFrozenDouble(flight_collision_radius, 0.55) ||
+       !ExactFrozenDouble(landing_plane_residual, 0.05) ||
+       !ExactFrozenDouble(landing_lateral_margin, 0.2) ||
+       !ExactFrozenDouble(flight_map_margin, 0.2) ||
+       !ExactFrozenDouble(delta_v_margin, 0.1) ||
+       !ExactFrozenDouble(standard_gravity, 9.80665) ||
+       !ExactFrozenDouble(
+           RequireDouble(node, "maximum_landing_slope_rad"),
+           0.17453292519943295))) {
     ValueFailure("hopper fields must match hopper-v1");
   }
 

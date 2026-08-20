@@ -641,6 +641,22 @@ TEST(CapabilityLoader, RejectsSubToleranceParametricHopperFrozenValueDrift) {
   EXPECT_EQ(result.error->detail, "hopper fields must match hopper-v1");
 }
 
+TEST(CapabilityLoader, RejectsSignedZeroInParametricHopperFrozenFields) {
+  const auto expect_value_failure = [](const std::string& document) {
+    const auto result = LoadParametricText(document);
+    ASSERT_TRUE(result.error.has_value());
+    EXPECT_EQ(result.error->reason_code, "CAPABILITY_VALUE_INVALID");
+    EXPECT_EQ(result.error->detail, "hopper fields must match hopper-v1");
+  };
+
+  expect_value_failure(ReplaceOnce(
+      TrackedHopperYaml(), "gravity_mps2: [0.0, 0.0, -1.62]",
+      "gravity_mps2: [-0.0, 0.0, -1.62]"));
+  expect_value_failure(ReplaceOnce(
+      TrackedHopperYaml(), "reference_elevation_delta_m: 0.0",
+      "reference_elevation_delta_m: -0.0"));
+}
+
 TEST(CapabilityLoader, RejectsParametricLeggedContractDrift) {
   ExpectParametricFailure(
       TrackedLeggedYaml() + "rogue_root: true\n",
