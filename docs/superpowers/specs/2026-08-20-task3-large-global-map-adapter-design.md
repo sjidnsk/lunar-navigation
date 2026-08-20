@@ -46,7 +46,7 @@ Task3 SQLite global map + global_map_revision
  /environment/map_local (60 m x 60 m, 0.2 m GridMap)
 ```
 
-`luna_t3_global_map_adapter` has four responsibilities only:
+The Task3 SQLite payload is an outer zlib stream containing NumPy `.npz` arrays. Its decode boundary is therefore a small Python reader (`sqlite3`, `zlib`, `numpy`) that exactly follows the Task3 delivery format; the C++ adapter retains ROI/level selection, conservative aggregation, and planner-facing map handling. `luna_t3_global_map_adapter` has four responsibilities only:
 
 1. Freeze the active task ROI from an `ACTIVE` `ExplorationTask` revision.
 2. Read and cache only SQLite tiles overlapping that ROI.

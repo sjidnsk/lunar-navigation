@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.13)
 project(luna_t3_map_adapter LANGUAGES CXX)
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 find_package(lunar_planner_core REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
@@ -13,9 +14,12 @@ target_include_directories(${PROJECT_NAME}
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     "$<INSTALL_INTERFACE:include>")
 ament_target_dependencies(${PROJECT_NAME} lunar_planner_core)
+ament_python_install_package(${PROJECT_NAME}
+  PACKAGE_DIR python/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
   ament_add_gtest(luna_t3_map_adapter_roi_level_test
     test/roi_level_test.cpp)
   target_compile_features(luna_t3_map_adapter_roi_level_test PRIVATE cxx_std_20)
@@ -27,6 +31,9 @@ if(BUILD_TESTING)
     luna_t3_map_adapter_conservative_aggregation_test PRIVATE cxx_std_20)
   target_link_libraries(
     luna_t3_map_adapter_conservative_aggregation_test ${PROJECT_NAME})
+
+  ament_add_pytest_test(luna_t3_map_adapter_t3_sqlite_reader_test
+    test/test_t3_sqlite_reader.py)
 endif()
 
 install(

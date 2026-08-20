@@ -6,7 +6,7 @@
 
 **Architecture:** Create one C++ ROS 2 package, `luna_t3_map_adapter`, with testable non-ROS components for ROI/level selection, conservative aggregation, tile reads, and revisioned caches. A thin ROS node consumes Task3 revision/task/local-map inputs, owns atomic map snapshots, and publishes canonical planner inputs. The planner core remains unchanged.
 
-**Tech Stack:** C++20, ROS 2 Humble, rclcpp, `grid_map_msgs`, `lunar_navigation_msgs`, SQLite3 read-only API, yaml-cpp, ament_cmake, GoogleTest.
+**Tech Stack:** C++20, Python 3.10, ROS 2 Humble, rclcpp, `grid_map_msgs`, `lunar_navigation_msgs`, SQLite3 read-only API, `numpy`, yaml-cpp, ament_cmake, GoogleTest, pytest.
 
 **Spec:** `docs/superpowers/specs/2026-08-20-task3-large-global-map-adapter-design.md`
 
@@ -34,7 +34,7 @@ Create package `ros2_ws/src/luna_t3_map_adapter/`:
 | `include/luna_t3_map_adapter/types.hpp` | Value types: `TaskRoi`, `MapRevision`, `TileKey`, `FineCell`, `FineTile`, `GlobalMapSnapshot`, diagnostic counters |
 | `include/luna_t3_map_adapter/roi_level.hpp`, `src/roi_level.cpp` | ROI validation, tile intersection, exact selection of planner-compatible global level |
 | `include/luna_t3_map_adapter/conservative_aggregation.hpp`, `src/conservative_aggregation.cpp` | Pure 0.2 m to selected-level conservative aggregation |
-| `include/luna_t3_map_adapter/sqlite_tile_provider.hpp`, `src/sqlite_tile_provider.cpp` | Read-only SQLite URI connection, schema validation, revisioned ROI tile read transaction |
+| `python/luna_t3_map_adapter/t3_sqlite_reader.py` | Read-only SQLite URI connection, zlib + NumPy payload decode, schema validation, revisioned ROI tile read transaction |
 | `include/luna_t3_map_adapter/global_map_cache.hpp`, `src/global_map_cache.cpp` | Bounded raw-tile LRU and immutable global snapshot cache, atomic replacement semantics |
 | `include/luna_t3_map_adapter/grid_map_conversion.hpp`, `src/grid_map_conversion.cpp` | `FineTile`/global snapshot to canonical `grid_map_msgs::msg::GridMap` conversion |
 | `include/luna_t3_map_adapter/local_map_adapter.hpp`, `src/local_map_adapter.cpp` | Task3 60 m map layer conversion into canonical 0.2 m local map |
@@ -186,12 +186,11 @@ Modify:
   git commit -m "feat(task3-map): aggregate global tiles conservatively"
   ```
 
-## Task 3: Read-only Task3 SQLite tile provider
+## Task 3: Read-only Task3 SQLite tile reader
 
 **Files:**
-- Create: `ros2_ws/src/luna_t3_map_adapter/include/luna_t3_map_adapter/sqlite_tile_provider.hpp`
-- Create: `ros2_ws/src/luna_t3_map_adapter/src/sqlite_tile_provider.cpp`
-- Create: `ros2_ws/src/luna_t3_map_adapter/test/sqlite_tile_provider_test.cpp`
+- Create: `ros2_ws/src/luna_t3_map_adapter/python/luna_t3_map_adapter/t3_sqlite_reader.py`
+- Create: `ros2_ws/src/luna_t3_map_adapter/test/test_t3_sqlite_reader.py`
 - Modify: `ros2_ws/src/luna_t3_map_adapter/CMakeLists.txt`
 - Modify: `ros2_ws/src/luna_t3_map_adapter/package.xml`
 
@@ -199,11 +198,7 @@ Modify:
 - Consumes: absolute SQLite path, `std::uint64_t` published revision, `TaskRoi`.
 - Produces:
   ```cpp
-  class SqliteTileProvider {
-   public:
-    Result<std::vector<FineTile>>
-    ReadRoiAtRevision(const TaskRoi&, std::uint64_t required_revision) const;
-  };
+  read_roi_at_revision(database_path, roi, required_revision) -> Task3MapRead
   ```
 
 - [ ] **Step 1: Write failing provider tests against a temporary SQLite fixture**
@@ -221,13 +216,13 @@ Modify:
   Run:
   ```bash
   cd ros2_ws && colcon test --packages-select luna_t3_map_adapter \
-    --ctest-args -R sqlite_tile_provider
+    --ctest-args -R t3_sqlite_reader
   ```
   Expected: provider does not exist.
 
 - [ ] **Step 3: Implement transaction and schema checks**
 
-  Link SQLite3. Open the database with `sqlite3_open_v2(..., SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, ...)`, run `BEGIN` then validate the metadata revision equals `required_revision`, read only all tiles intersecting the ROI, validate L0 resolution and complete layer payloads, then `COMMIT`. Return exact reason codes `TASK3_SQLITE_OPEN_FAILED`, `TASK3_MAP_REVISION_MISMATCH`, `TASK3_TILE_MISSING`, `TASK3_TILE_SCHEMA_INVALID`, or `TASK3_TILE_DATA_INVALID`. Roll back and return an error for every incomplete transaction; never retry by reading a newer revision under the old request.
+  Open the database as `file:<path>?mode=ro`, execute `PRAGMA query_only=ON` and `BEGIN`, validate the metadata revision equals `required_revision`, read only all tiles intersecting the ROI, outer-decompress with `zlib`, and decode the documented NumPy `.npz` arrays with `numpy.load(..., allow_pickle=False)`. Return exact reason codes `TASK3_SQLITE_OPEN_FAILED`, `TASK3_MAP_REVISION_MISMATCH`, `TASK3_TILE_MISSING`, `TASK3_TILE_SCHEMA_INVALID`, or `TASK3_TILE_PAYLOAD_INVALID`. Roll back and return an error for every incomplete transaction; never retry by reading a newer revision under the old request.
 
 - [ ] **Step 4: Run focused tests**
 
@@ -235,7 +230,7 @@ Modify:
   ```bash
   cd ros2_ws
   colcon build --packages-select luna_t3_map_adapter
-  colcon test --packages-select luna_t3_map_adapter --ctest-args -R sqlite_tile_provider
+  colcon test --packages-select luna_t3_map_adapter --ctest-args -R t3_sqlite_reader
   colcon test-result --verbose
   ```
   Expected: temporary database tests pass and no fixture file is altered.
@@ -244,7 +239,7 @@ Modify:
 
   ```bash
   git add ros2_ws/src/luna_t3_map_adapter
-  git commit -m "feat(task3-map): add revisioned read-only tile provider"
+  git commit -m "feat(task3-map): add revisioned read-only tile reader"
   ```
 
 ## Task 4: Bounded revisioned cache and immutable global snapshot assembly
@@ -256,7 +251,7 @@ Modify:
 - Modify: `ros2_ws/src/luna_t3_map_adapter/CMakeLists.txt`
 
 **Interfaces:**
-- Consumes: `SqliteTileProvider`, `TaskRoi`, task identity, map revision, configured maximum cached tiles.
+- Consumes: Python Task3 SQLite reader, `TaskRoi`, task identity, map revision, configured maximum cached tiles.
 - Produces:
   ```cpp
   struct GlobalMapSnapshot {
