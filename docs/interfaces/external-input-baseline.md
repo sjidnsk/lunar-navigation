@@ -16,7 +16,8 @@
 
 | 输入 | 类型 | 外部所有权 | 接收字段/约束 |
 |---|---|---|---|
-| `/environment/map_global` | `grid_map_msgs/msg/GridMap` | 外部地图融合系统 | `header`、`info`、`layers`、`basic_layers`、`data`、`outer_start_index`、`inner_start_index`；`frame_id=map`；发布满足下述资源规则的最精细二倍层级 |
+| `/environment/map_global` | `grid_map_msgs/msg/GridMap` | `luna_t3_map_adapter` | 由课题三只读 SQLite 全局图和活跃任务 ROI 构造；`header`、`info`、`layers`、`basic_layers`、`data`、`outer_start_index`、`inner_start_index`；`frame_id=map`；发布满足下述资源规则的最精细二倍层级 |
+| `/Car/T3/mapping/global_map_revision` | `std_msgs/msg/UInt64` | 课题三地图系统 | 全局 SQLite 地图 revision；适配器只在严格更大的 revision 上重建当前活跃任务的有界快照 |
 | `/environment/map_local` | `grid_map_msgs/msg/GridMap` | 外部地图融合系统 | 同上；`frame_id=odom`；始终发布当前平台附近的 L0 窗口，不得复制整张全局图 |
 | `/localization/odometry` | `nav_msgs/msg/Odometry` | 外部定位系统 | `header`、`child_frame_id`、`pose`、`twist`；`odom -> base_link` |
 | `/localization/status` | `lunar_navigation_msgs/msg/LocalizationStatus` | 外部定位系统 | `header`、`status`；状态为 `UNKNOWN/VALID/DEGRADED/INVALID/RELOCALIZING` |

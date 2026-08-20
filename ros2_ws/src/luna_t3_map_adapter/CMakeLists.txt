@@ -40,6 +40,10 @@ if(BUILD_TESTING)
     test/test_global_grid_conversion.py)
   ament_add_pytest_test(luna_t3_map_adapter_task_revision_state_test
     test/test_task_revision_state.py)
+  ament_add_pytest_test(luna_t3_map_adapter_global_map_coordinator_test
+    test/test_global_map_coordinator.py)
+  ament_add_pytest_test(luna_t3_map_adapter_node_test
+    test/test_t3_map_adapter_node.py)
 endif()
 
 install(
@@ -50,6 +54,8 @@ install(
   RUNTIME DESTINATION bin
   INCLUDES DESTINATION include)
 install(DIRECTORY include/ DESTINATION include)
+install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
+install(PROGRAMS scripts/luna_t3_map_adapter_node.py DESTINATION lib/${PROJECT_NAME})
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(lunar_planner_core)
