@@ -258,6 +258,36 @@ TEST(CapabilityLoader, RejectsMixedOrInvalidParametricGeometry) {
       "[-0.4075, -0.3115], [-0.4075, 0.3115]]");
   EXPECT_EQ(LoadParametricText(outside).error->reason_code,
             "CAPABILITY_VALUE_INVALID");
+
+  std::string duplicate_center = TrackedWheelYaml();
+  const auto wheel_centers = duplicate_center.find("wheel_center_xy_m:");
+  duplicate_center.replace(
+      wheel_centers,
+      duplicate_center.find('\n', wheel_centers) - wheel_centers,
+      "wheel_center_xy_m: [[0.4075, 0.3115], [0.4075, 0.3115], "
+      "[-0.4075, -0.3115], [-0.4075, 0.3115]]");
+  EXPECT_EQ(LoadParametricText(duplicate_center).error->reason_code,
+            "CAPABILITY_VALUE_INVALID");
+
+  std::string concave = TrackedWheelYaml();
+  const auto concave_footprint = concave.find("footprint_xy_m:");
+  concave.replace(
+      concave_footprint,
+      concave.find('\n', concave_footprint) - concave_footprint,
+      "footprint_xy_m: [[0.6505, 0.404], [0.6505, -0.404], "
+      "[0.0, -0.1], [-0.6505, -0.404], [-0.6505, 0.404]]");
+  EXPECT_EQ(LoadParametricText(concave).error->reason_code,
+            "CAPABILITY_VALUE_INVALID");
+
+  std::string self_intersecting = TrackedWheelYaml();
+  const auto star_footprint = self_intersecting.find("footprint_xy_m:");
+  self_intersecting.replace(
+      star_footprint,
+      self_intersecting.find('\n', star_footprint) - star_footprint,
+      "footprint_xy_m: [[0.0, 0.4], [0.2351, -0.3236], "
+      "[-0.3804, 0.1236], [0.3804, 0.1236], [-0.2351, -0.3236]]");
+  EXPECT_EQ(LoadParametricText(self_intersecting).error->reason_code,
+            "CAPABILITY_VALUE_INVALID");
 }
 
 TEST(CapabilityLoader, RejectsMissingOrUnsupportedFieldSources) {
@@ -274,6 +304,11 @@ TEST(CapabilityLoader, RejectsMissingOrUnsupportedFieldSources) {
   unsupported.replace(source, approved.size(), "maximum_curvature_per_m: guess");
   EXPECT_EQ(LoadParametricText(unsupported).error->reason_code,
             "CAPABILITY_VALUE_INVALID");
+
+  std::string extra = TrackedWheelYaml();
+  extra += "  baseline: derived\n";
+  EXPECT_EQ(LoadParametricText(extra).error->reason_code,
+            "CAPABILITY_SCHEMA_INVALID");
 }
 
 TEST(CapabilityLoader, LoadsV2WheelGeometryAndSourcesWithoutProxyValues) {

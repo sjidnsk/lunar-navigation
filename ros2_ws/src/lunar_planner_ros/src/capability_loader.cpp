@@ -340,19 +340,65 @@ void RejectUnexpectedKeys(
   if (polygon.size() < 3U) {
     return false;
   }
+  const auto cross = [](const lunar::planning::Vec2& first,
+                        const lunar::planning::Vec2& second,
+                        const lunar::planning::Vec2& third) noexcept {
+    return (second.x - first.x) * (third.y - first.y) -
+        (second.y - first.y) * (third.x - first.x);
+  };
+  const auto sign = [](const double value) noexcept {
+    return value > 1.0e-12 ? 1 : (value < -1.0e-12 ? -1 : 0);
+  };
+  const auto on_segment = [](const lunar::planning::Vec2& first,
+                             const lunar::planning::Vec2& second,
+                             const lunar::planning::Vec2& point) noexcept {
+    return point.x >= std::min(first.x, second.x) - 1.0e-12 &&
+        point.x <= std::max(first.x, second.x) + 1.0e-12 &&
+        point.y >= std::min(first.y, second.y) - 1.0e-12 &&
+        point.y <= std::max(first.y, second.y) + 1.0e-12;
+  };
+  for (std::size_t first_index = 0U;
+       first_index < polygon.size(); ++first_index) {
+    const std::size_t first_next = (first_index + 1U) % polygon.size();
+    for (std::size_t second_index = first_index + 1U;
+         second_index < polygon.size(); ++second_index) {
+      const std::size_t second_next = (second_index + 1U) % polygon.size();
+      if (first_next == second_index || second_next == first_index) {
+        continue;
+      }
+      const int first_side = sign(cross(
+          polygon[first_index], polygon[first_next], polygon[second_index]));
+      const int second_side = sign(cross(
+          polygon[first_index], polygon[first_next], polygon[second_next]));
+      const int third_side = sign(cross(
+          polygon[second_index], polygon[second_next], polygon[first_index]));
+      const int fourth_side = sign(cross(
+          polygon[second_index], polygon[second_next], polygon[first_next]));
+      if ((first_side * second_side < 0 && third_side * fourth_side < 0) ||
+          (first_side == 0 && on_segment(
+              polygon[first_index], polygon[first_next], polygon[second_index])) ||
+          (second_side == 0 && on_segment(
+              polygon[first_index], polygon[first_next], polygon[second_next])) ||
+          (third_side == 0 && on_segment(
+              polygon[second_index], polygon[second_next], polygon[first_index])) ||
+          (fourth_side == 0 && on_segment(
+              polygon[second_index], polygon[second_next], polygon[first_next]))) {
+        return false;
+      }
+    }
+  }
   double orientation = 0.0;
   for (std::size_t index = 0U; index < polygon.size(); ++index) {
     const auto& first = polygon[index];
     const auto& second = polygon[(index + 1U) % polygon.size()];
     const auto& third = polygon[(index + 2U) % polygon.size()];
-    const double cross = (second.x - first.x) * (third.y - second.y) -
-        (second.y - first.y) * (third.x - second.x);
-    if (!std::isfinite(cross) || std::abs(cross) <= 1.0e-12) {
+    const double turn = cross(first, second, third);
+    if (!std::isfinite(turn) || std::abs(turn) <= 1.0e-12) {
       return false;
     }
     if (orientation == 0.0) {
-      orientation = cross;
-    } else if ((orientation > 0.0) != (cross > 0.0)) {
+      orientation = turn;
+    } else if ((orientation > 0.0) != (turn > 0.0)) {
       return false;
     }
   }
