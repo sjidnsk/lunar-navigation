@@ -1,0 +1,24 @@
+luna_t3_map_adapter:
+  ros__parameters:
+    sqlite_path: /home/yanfa/P3/map_retest_output/move_soft_raw_full_current_20260820/global_grid_map.sqlite3
+    max_cached_tiles: 128
+    exploration_task_topic: /mission/exploration_task
+    global_map_revision_topic: /Car/T3/mapping/global_map_revision
+    global_map_output_topic: /environment/map_global
+luna_t3_local_map_adapter:
+  ros__parameters:
+    sqlite_path: /home/yanfa/P3/map_retest_output/move_soft_raw_full_current_20260820/global_grid_map.sqlite3
+    source_topic: /Car/T3/mapping/grid_map
+    map_revision_topic: /Car/T3/mapping/global_map_revision
+    output_topic: /environment/map_local
+    occupancy_obstacle_threshold: 50
+    semantic_obstacle_ids: [3]
+    semantic_forbidden_ids: [4]
+    max_age_s: 30.0
+luna_t3_localization_status_adapter:
+  ros__parameters:
+    odometry_topic: /Car/T3/semantic/current_pose
+    status_topic: /localization/status
+    max_age_s: 1.0
+    valid_position_variance_max: 0.1
+    degraded_position_variance_max: 0.5

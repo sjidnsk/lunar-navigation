@@ -54,6 +54,7 @@ planner:
     max_pairwise_skew: 1.0
 policy: {{mode: fallback, model_id: null}}
 extensions: {{map_pipeline: false, path_tracking: false}}
+input_adapters: {{mode: external_canonical, task3_config_file: null}}
 runtime: {{log_level: INFO}}
 """
 
@@ -119,3 +120,17 @@ def test_valid_fallback_config_renders_planner_ros_parameters(tmp_path: Path) ->
     assert "platform_capability_file: /tmp/platform.yaml" in text
     assert "observation_capability_file: /tmp/observation.yaml" in text
     assert "capability_package" not in text
+
+
+def test_task3_adapted_config_requires_absolute_adapter_config_path(tmp_path: Path) -> None:
+    config = tmp_path / "runtime.yaml"
+    config.write_text(
+        _runtime_config_text().replace(
+            "input_adapters: {mode: external_canonical, task3_config_file: null}",
+            "input_adapters: {mode: task3_adapted, task3_config_file: relative.yaml}",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="input_adapters.task3_config_file"):
+        load_runtime_config(config)

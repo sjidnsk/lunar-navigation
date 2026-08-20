@@ -33,7 +33,11 @@ class BuildRunner(Protocol):
 
 
 def make_build_plan(config: RuntimeConfig, paths: RuntimePaths, repo_root: Path) -> BuildPlan:
-    packages = REQUIRED_PACKAGES + (("lunar_nav2_adapter",) if config.planner["enable_nav2_adapter"] else ())
+    packages = REQUIRED_PACKAGES
+    if config.input_adapters["mode"] == "task3_adapted":
+        packages += ("luna_t3_map_adapter",)
+    if config.planner["enable_nav2_adapter"]:
+        packages += ("lunar_nav2_adapter",)
     return BuildPlan(
         base_paths=(repo_root / "ros2_ws" / "src", repo_root / "model_contract"),
         packages=packages,

@@ -76,6 +76,19 @@ def test_nonfallback_policy_is_refused_before_launch(tmp_path: Path) -> None:
     assert runner.commands == []
 
 
+def test_task3_mode_launches_one_composed_integration_launch(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    config = load_runtime_config(root / "deployment/config/task3-adapted.runtime.yaml")
+    runner = FakeRunner(["unconfigured", "inactive", "active"])
+
+    start_runtime(config, resolve_runtime_paths("dev", home=tmp_path), runner)
+
+    assert runner.commands[0][:4] == (
+        "ros2", "launch", "luna_t3_map_adapter", "task3_live_integration.launch.py",
+    )
+    assert any(item.startswith("task3_config_file:=") for item in runner.commands[0])
+
+
 def test_stop_is_idempotent_and_rejects_stale_pid(tmp_path: Path) -> None:
     paths = resolve_runtime_paths("dev", home=tmp_path)
     paths.data.mkdir(parents=True)

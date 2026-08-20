@@ -19,3 +19,11 @@ def test_default_build_selects_current_runtime_packages_and_never_training_bridg
     assert plan.packages[-1] == "lunar_policy_runtime"
     assert plan.build_base == paths.data / "build"
     assert all(str(base).startswith(str(paths.data)) for base in (plan.build_base, plan.install_base, plan.log_base))
+
+
+def test_task3_adapted_build_includes_local_map_adapter(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    config = load_runtime_config(root / "deployment/config/task3-adapted.runtime.yaml")
+    plan = make_build_plan(config, resolve_runtime_paths("dev", home=tmp_path), root)
+
+    assert "luna_t3_map_adapter" in plan.packages

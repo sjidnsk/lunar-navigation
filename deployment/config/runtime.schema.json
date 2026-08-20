@@ -2,6 +2,6 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Luna runtime configuration",
   "type": "object",
-  "required": ["profile", "interfaces", "capabilities", "planner", "policy", "extensions", "runtime"],
+  "required": ["profile", "interfaces", "capabilities", "planner", "policy", "extensions", "input_adapters", "runtime"],
   "additionalProperties": false
 }

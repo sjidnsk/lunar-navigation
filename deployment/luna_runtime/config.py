@@ -22,7 +22,16 @@ _INTERFACE_KEYS = (
     "certified_route_markers",
     "provisional_route_markers",
 )
-_TOP_LEVEL_KEYS = ("profile", "interfaces", "capabilities", "planner", "policy", "extensions", "runtime")
+_TOP_LEVEL_KEYS = (
+    "profile",
+    "interfaces",
+    "capabilities",
+    "planner",
+    "policy",
+    "extensions",
+    "input_adapters",
+    "runtime",
+)
 _SNAPSHOT_KEYS = (
     "global_map_max_age",
     "local_map_max_age",
@@ -66,6 +75,7 @@ class RuntimeConfig:
     planner: Mapping[str, Any]
     policy: Mapping[str, Any]
     extensions: Mapping[str, bool]
+    input_adapters: Mapping[str, str | None]
     runtime: Mapping[str, Any]
 
     def planner_ros_parameters(self) -> dict[str, Any]:
@@ -195,6 +205,19 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
     extensions = _require_mapping(data["extensions"], "extensions")
     if set(extensions) != {"map_pipeline", "path_tracking"} or not all(isinstance(v, bool) for v in extensions.values()):
         raise ConfigError("extensions must contain boolean map_pipeline and path_tracking")
+    input_adapters = _require_mapping(data["input_adapters"], "input_adapters")
+    if set(input_adapters) != {"mode", "task3_config_file"}:
+        raise ConfigError("input_adapters must contain mode and task3_config_file")
+    mode = input_adapters["mode"]
+    config_file = input_adapters["task3_config_file"]
+    if mode not in {"external_canonical", "task3_adapted"}:
+        raise ConfigError("input_adapters.mode must be external_canonical or task3_adapted")
+    if mode == "external_canonical" and config_file is not None:
+        raise ConfigError("external_canonical input_adapters.task3_config_file must be null")
+    if mode == "task3_adapted" and (
+        not isinstance(config_file, str) or not config_file.startswith("/")
+    ):
+        raise ConfigError("input_adapters.task3_config_file must be an absolute path for task3_adapted")
     runtime = _require_mapping(data["runtime"], "runtime")
     if set(runtime) != {"log_level"} or not isinstance(runtime["log_level"], str):
         raise ConfigError("runtime.log_level is required")
@@ -206,6 +229,7 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
         planner={"enable_nav2_adapter": planner["enable_nav2_adapter"], "snapshot_policy": dict(snapshot_policy)},
         policy=dict(policy),
         extensions={key: bool(value) for key, value in extensions.items()},
+        input_adapters={"mode": str(mode), "task3_config_file": config_file},
         runtime=dict(runtime),
     )
 

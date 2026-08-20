@@ -2,7 +2,7 @@ profile: ubuntu22-humble-amd64
 interfaces:
   map_global: /environment/map_global
   map_local: /environment/map_local
-  odometry: /localization/odometry
+  odometry: /Car/T3/semantic/current_pose
   localization_status: /localization/status
   tf: /tf
   exploration_task: /mission/exploration_task
@@ -30,7 +30,7 @@ extensions:
   map_pipeline: false
   path_tracking: false
 input_adapters:
-  mode: external_canonical
-  task3_config_file: null
+  mode: task3_adapted
+  task3_config_file: /etc/luna/task3-adapters.yaml
 runtime:
   log_level: INFO

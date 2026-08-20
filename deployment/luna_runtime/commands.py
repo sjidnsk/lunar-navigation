@@ -185,6 +185,7 @@ def set_extension_enabled(config_path: Path, config: RuntimeConfig, runner: Comm
         planner=config.planner,
         policy=config.policy,
         extensions={**config.extensions, name: enabled},
+        input_adapters=config.input_adapters,
         runtime=config.runtime,
     )
     return extension_states(updated, runner)

@@ -10,6 +10,8 @@
   <buildtool_depend>ament_cmake_python</buildtool_depend>
   <depend>lunar_planner_core</depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
   <exec_depend>grid_map_msgs</exec_depend>
   <exec_depend>lunar_navigation_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
