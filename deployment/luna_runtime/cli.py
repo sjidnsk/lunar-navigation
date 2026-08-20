@@ -21,7 +21,7 @@ from .commands import (
     prepare_environment,
     set_extension_enabled,
 )
-from .config import ConfigError, load_runtime_config, load_profile
+from .config import ConfigError, load_runtime_config, load_profile, validate_host
 from .host import HostFacts
 from .process import read_runtime_status, start_runtime, stop_runtime, tail_log
 from .state import resolve_runtime_paths
@@ -134,7 +134,7 @@ def run_cli(
             if not args.profile:
                 return CliResult(2, {"reason": "PROFILE_REQUIRED"})
             profile = load_profile(args.profile, root)
-            reasons = list(__import__("deployment.luna_runtime.config", fromlist=["validate_host"]).validate_host(profile, host))
+            reasons = list(validate_host(profile, host))
             if reasons:
                 return CliResult(3, {"reasons": reasons})
             paths = resolve_runtime_paths("dev", home=home)

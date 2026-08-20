@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from deployment.luna_runtime.cli import run_cli
@@ -51,6 +54,28 @@ def test_init_writes_only_runtime_paths_and_never_overwrites(tmp_path: Path) -> 
     )
     assert repeated.exit_code == 2
     assert repeated.payload["reason"] == "CONFIG_EXISTS"
+
+
+def test_luna_script_initializes_from_outside_repository(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    home = tmp_path / "luna-home"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "luna"),
+            "init",
+            "--profile",
+            "ubuntu22-humble-amd64",
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "LUNA_HOME": str(home), "ROS_DISTRO": "humble"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert (home / "config" / "runtime.yaml").is_file()
 
 
 def test_doctor_reports_host_mismatch_without_running_build(tmp_path: Path) -> None:
