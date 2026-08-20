@@ -264,9 +264,11 @@ class RunningSystem final {
  public:
   explicit RunningSystem(
       PlanMotionServerDependencies dependencies = DefaultDependencies(),
-      const bool activate = true)
+      const bool activate = true,
+      rclcpp::NodeOptions options = ValidOptions(),
+      const std::string& odometry_topic = "/localization/odometry")
       : server(std::make_shared<PlanMotionServer>(
-            ValidOptions(), std::move(dependencies))),
+            std::move(options), std::move(dependencies))),
         client_node(std::make_shared<rclcpp::Node>(UniqueName())),
         executor(rclcpp::ExecutorOptions{}, 6U) {
     EXPECT_EQ(
@@ -287,7 +289,7 @@ class RunningSystem final {
             "/environment/map_local",
             rclcpp::QoS{1}.reliable().transient_local());
     odometry_publisher = client_node->create_publisher<nav_msgs::msg::Odometry>(
-        "/localization/odometry", rclcpp::SensorDataQoS{});
+        odometry_topic, rclcpp::SensorDataQoS{});
     localization_publisher = client_node->create_publisher<
         lunar_navigation_msgs::msg::LocalizationStatus>(
         "/localization/status", rclcpp::QoS{10}.reliable());
@@ -1223,6 +1225,41 @@ TEST_F(PlanMotionServerTest, HoldsSameGoalContinuationUntilFeedbackIsFresh) {
   const auto resumed = system.SendGoal(system.Goal("feedback-gate-resumed"));
   ASSERT_NE(resumed, nullptr);
   EXPECT_EQ(system.Result(resumed).result->reason_code, "FRESH_FEEDBACK_OBSERVED");
+  EXPECT_EQ(calls.load(), 2);
+}
+
+TEST_F(
+    PlanMotionServerTest,
+    ContinuesOnlyAfterTask3DirectOdometryFeedbackMatchesReference) {
+  auto options = ValidOptions();
+  options.append_parameter_override(
+      "interfaces.odometry", "/Car/T3/semantic/current_pose");
+  std::atomic<int> calls{0};
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [&](const lunar::planning::PlannerInput& input) {
+        if (calls.fetch_add(1) == 0) {
+          return WheelReferenceOutput(input, {});
+        }
+        return NoRouteOutput("TASK3_MATCHED_FEEDBACK_OBSERVED");
+      },
+      .preloaded_capabilities = WheelCapabilities(),
+  }, true, std::move(options), "/Car/T3/semantic/current_pose"};
+  system.PublishInputs();
+
+  const auto first = system.SendGoal(system.Goal("task3-direct-first"));
+  ASSERT_NE(first, nullptr);
+  ASSERT_EQ(system.Result(first).code, rclcpp_action::ResultCode::SUCCEEDED);
+  system.PublishExecutionFeedback(
+      "wheel/rolling-1", "wheel/rolling-1",
+      lunar_navigation_msgs::msg::MotionExecutionFeedback::WHEELED,
+      lunar_navigation_msgs::msg::MotionExecutionFeedback::SEGMENT_COMPLETE);
+  std::this_thread::sleep_for(30ms);
+
+  const auto second = system.SendGoal(system.Goal("task3-direct-next"));
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(
+      system.Result(second).result->reason_code,
+      "TASK3_MATCHED_FEEDBACK_OBSERVED");
   EXPECT_EQ(calls.load(), 2);
 }
 

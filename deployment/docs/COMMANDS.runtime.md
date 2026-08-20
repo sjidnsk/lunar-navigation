@@ -32,6 +32,7 @@ capabilities: {platform_file: /opt/luna/capabilities/platform.yaml, observation_
 planner: {enable_nav2_adapter: false, snapshot_policy: {global_map_max_age: 1.0, local_map_max_age: 1.0, odometry_max_age: 1.0, localization_status_max_age: 1.0, tf_max_age: 1.0, max_pairwise_skew: 1.0}}
 policy: {mode: fallback, model_id: null}
 extensions: {map_pipeline: false, path_tracking: false}
+input_adapters: {mode: external_canonical, task3_config_file: null}
 runtime: {log_level: INFO}
 ```
 
@@ -65,6 +66,41 @@ range and 90 degree field of view.
 backend. `policy.mode: onnx` or `tensorrt` is refused with
 `POLICY_RUNTIME_UNBOUND` until an approved ROS policy adapter exists; a staged
 model has `model_binding: staged_not_connected`.
+
+## Task3 adapted start and one safe request
+
+Keep the generic `runtime.yaml` in `external_canonical` mode unless the Task3
+publishers, TF chain, and read-only SQLite evidence are available. On the Task3
+host, copy the two templates, update only local paths/topics if needed, then
+use the Task3 runtime configuration:
+
+```bash
+sudo install -D -m 0644 deployment/config/task3-adapters.default.yaml /etc/luna/task3-adapters.yaml
+sudo install -D -m 0644 deployment/config/task3-adapted.runtime.yaml /etc/luna/task3-adapted.runtime.yaml
+./luna config check --config /etc/luna/task3-adapted.runtime.yaml
+./luna build --config /etc/luna/task3-adapted.runtime.yaml
+./luna start --config /etc/luna/task3-adapted.runtime.yaml
+```
+
+The Task3 configuration directly consumes `/Car/T3/mapping/grid_map`,
+`/Car/T3/semantic/current_pose`, and the `map -> odom -> base_link` TF chain.
+It remains fallback-only; a non-fallback model remains refused with
+`POLICY_RUNTIME_UNBOUND`.
+
+To make one non-executing point request, substitute an approved short safe
+point from the active Task3 mission:
+
+```bash
+ros2 run luna_t3_map_adapter luna_plan_smoke_client.py \
+  --mission-id "$MISSION_ID" --mission-revision "$MISSION_REVISION" \
+  --goal-id short-safe-point --x "$SAFE_X" --y "$SAFE_Y" --tolerance 0.2
+```
+
+The client only requests `/plan_motion` and prints its result. It never sends a
+controller command. If it returns a `MotionReference`, the external controller
+must use its `plan_id` and `segment_id` in matching `MotionExecutionFeedback`
+messages on `/execution/motion_feedback`; invalid identity or sequence is
+rejected by the planner.
 
 ## Model artifacts
 

@@ -23,3 +23,32 @@ def test_rendered_commands_document_every_public_subcommand_and_safe_policy_boun
     assert "ROSDEP_NOT_INITIALIZED" in commands
     assert "WAITING_FOR_EXTERNAL_INPUT" in commands
     assert "formal preflight" not in commands.lower()
+
+
+def test_task3_documentation_declares_direct_inputs_and_plan_feedback_contract() -> None:
+    root = Path(__file__).resolve().parents[2]
+    readme = (root / "deployment" / "docs" / "README.runtime.md").read_text(encoding="utf-8")
+    commands = (root / "deployment" / "docs" / "COMMANDS.runtime.md").read_text(encoding="utf-8")
+    smoke_client = root / "ros2_ws" / "src" / "luna_t3_map_adapter" / "scripts" / "luna_plan_smoke_client.py"
+
+    for token in (
+        "/Car/T3/mapping/grid_map",
+        "/Car/T3/semantic/current_pose",
+        "map -> odom -> base_link",
+        "MotionReference",
+        "MotionExecutionFeedback",
+        "no generic controller command topic",
+    ):
+        assert token in readme
+    for token in (
+        "task3-adapted.runtime.yaml",
+        "luna_plan_smoke_client.py",
+        "--mission-id",
+        "--mission-revision",
+        "--goal-id",
+        "--x",
+        "--y",
+        "--tolerance",
+    ):
+        assert token in commands
+    assert smoke_client.is_file()

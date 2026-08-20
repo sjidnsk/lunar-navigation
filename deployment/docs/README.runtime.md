@@ -60,6 +60,32 @@ The future extension points are named `map_pipeline` and `path_tracking`.
 They remain disabled unless their declared ROS package is installed; enabling
 one cannot create a missing map publisher or controller.
 
+## Task3 direct-input mode
+
+For Task3 integration, select `deployment/config/task3-adapted.runtime.yaml`.
+This mode starts three project-owned adapters plus the planner and consumes the
+following Task3-owned inputs without rewriting them:
+
+| Input | Use |
+|---|---|
+| `/Car/T3/mapping/grid_map` | 0.2 m `odom` local map, converted to the canonical ten planner layers without resampling |
+| `/Car/T3/semantic/current_pose` | direct `odom -> base_link` Odometry for the planner and localization-status check |
+| `/tf` | Task3-owned `map -> odom -> base_link` transform chain |
+| `/Car/T3/mapping/global_map_revision` | revision used for read-only global SQLite evidence lookup |
+
+The local adapter reads `map -> odom` only to locate matching global evidence.
+It never changes the local GridMap frame, orientation, resolution, dimensions,
+or timestamp. A malformed or incomplete input is withheld rather than made
+safe-looking.
+
+`/plan_motion` returns a `MotionReference` when a route is available. The
+external controller—not this runtime—executes it and publishes an identity
+matched `MotionExecutionFeedback` on `/execution/motion_feedback`. It must
+preserve the returned `plan_id`, `segment_id`, platform type, increasing
+sequence, and current state. Wrong, stale, duplicate, or mismatched feedback is
+rejected by the planner. There is no generic controller command topic in this
+repository.
+
 The repository ships three reviewed numeric platform capability documents:
 `deployment/config/wheel.yaml`, `deployment/config/legged.yaml`, and
 `deployment/config/hopper.yaml`. The latter two are the Quad48
