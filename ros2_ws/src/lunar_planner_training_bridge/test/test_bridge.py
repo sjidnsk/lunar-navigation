@@ -104,7 +104,9 @@ def _wheel_capability() -> bridge_api.WheeledCapability:
 def _legged_capability() -> bridge_api.LeggedCapability:
     capability = bridge_api.LeggedCapability()
     capability.body_extent_m = _vec3(0.68, 0.33, 0.35)
+    capability.nominal_body_height_m = 0.33
     capability.platform_mass_kg = 15.89
+    capability.nominal_payload_kg = 8.0
     capability.maximum_payload_kg = 10.0
     capability.maximum_slope_rad = 0.5235987755982988
     capability.maximum_step_height_m = 0.5
@@ -121,6 +123,7 @@ def _legged_capability() -> bridge_api.LeggedCapability:
     capability.yaw_rate_radps.upper = 1.0
     capability.maximum_linear_acceleration_mps2 = 0.5
     capability.maximum_yaw_acceleration_radps2 = 1.0
+    capability.unknown_is_traversable = False
     primitive = bridge_api.LeggedBodyPrimitive()
     primitive.primitive_id = "forward"
     primitive.kind = bridge_api.LeggedPrimitiveKind.FORWARD

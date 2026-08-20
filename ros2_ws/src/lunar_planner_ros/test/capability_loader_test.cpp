@@ -71,6 +71,13 @@ std::string TrackedWheelYaml() {
       std::istreambuf_iterator<char>{}};
 }
 
+std::string TrackedLeggedYaml() {
+  std::ifstream stream{RepositoryRoot() / "deployment/config/legged.yaml"};
+  return std::string{
+      std::istreambuf_iterator<char>{stream},
+      std::istreambuf_iterator<char>{}};
+}
+
 CapabilityLoadResult LoadParametricText(const std::string& document) {
   const auto share = UniqueShare("parametric-text");
   WriteObservation(share);
@@ -136,6 +143,32 @@ std::map<std::string, std::string, std::less<>> ApprovedWheelSources() {
       {"wheel_diameter_m", "user_provided_dimension"},
       {"wheel_width_m", "user_provided_dimension"},
       {"wheelbase_m", "user_provided_dimension"},
+  };
+}
+
+std::map<std::string, std::string, std::less<>> ApprovedLeggedSources() {
+  return {
+      {"body_extent_m", "user_spec_material"},
+      {"body_height_m", "planning_policy"},
+      {"maximum_forward_speed_mps", "planning_policy"},
+      {"maximum_gap_width_m", "user_spec_material"},
+      {"maximum_lateral_speed_mps", "upstream_config"},
+      {"maximum_payload_kg", "user_spec_material"},
+      {"maximum_reverse_speed_mps", "planning_policy"},
+      {"maximum_step_height_m", "user_confirmed_upgrade"},
+      {"maximum_surface_slope_rad", "user_spec_material"},
+      {"maximum_yaw_acceleration_radps2", "planning_policy"},
+      {"maximum_yaw_rate_radps", "upstream_config"},
+      {"maximum_linear_acceleration_mps2", "planning_policy"},
+      {"minimum_body_clearance_m", "planning_policy"},
+      {"motion_primitives", "user_approved_planning_policy"},
+      {"nominal_body_height_m", "derived"},
+      {"nominal_payload_kg", "user_spec_material"},
+      {"platform_mass_kg", "derived"},
+      {"reference_point", "upstream_model"},
+      {"roughness_handling", "planning_policy"},
+      {"step_vertical_rate_mps", "planning_policy"},
+      {"unknown_is_traversable", "planning_policy"},
   };
 }
 
@@ -399,6 +432,122 @@ TEST(CapabilityLoader, LoadsParametricWheelWithoutUrdfOrMesh) {
   }
 }
 
+TEST(CapabilityLoader, LoadsApprovedParametricLeggedWithoutUrdfOrMesh) {
+  const auto share = UniqueShare("parametric-legged");
+  WriteObservation(share);
+  Write(share / "config" / "platform.yaml", TrackedLeggedYaml());
+  const auto result = CapabilityLoader{}.LoadFromShareDirectory(
+      share, "config/platform.yaml", "config/observation.json");
+
+  ASSERT_TRUE(result.ok())
+      << (result.error ? result.error->detail : std::string{});
+  ASSERT_TRUE(result.capabilities.has_value());
+  EXPECT_EQ(result.capabilities->platform_id, "legged");
+  EXPECT_EQ(result.capabilities->capability_version, "legged-v1");
+  EXPECT_EQ(result.capabilities->base_frame_id, "base_link");
+  EXPECT_EQ(result.capabilities->reference_point, "base_link");
+  EXPECT_EQ(result.capabilities->geometry_source_kind,
+            GeometrySourceKind::kParametricEnvelope);
+  EXPECT_TRUE(result.capabilities->urdf_path.empty());
+  EXPECT_TRUE(result.capabilities->mesh_paths.empty());
+  EXPECT_EQ(result.capabilities->field_source_types, ApprovedLeggedSources());
+  EXPECT_EQ(result.capabilities->source_motion_primitive_ids,
+            (std::vector<std::string>{"forward", "backward", "lateral-left",
+                                      "lateral-right", "spin-left",
+                                      "spin-right"}));
+
+  const auto& legged = std::get<lunar::planning::LeggedCapability>(
+      result.capabilities->platform);
+  EXPECT_EQ(legged.body_extent_m, (lunar::planning::Vec3{0.68, 0.33, 0.35}));
+  EXPECT_DOUBLE_EQ(legged.nominal_body_height_m, 0.33);
+  EXPECT_DOUBLE_EQ(legged.body_height_m.lower, 0.28);
+  EXPECT_DOUBLE_EQ(legged.body_height_m.upper, 0.38);
+  EXPECT_DOUBLE_EQ(legged.platform_mass_kg, 15.89);
+  EXPECT_DOUBLE_EQ(legged.nominal_payload_kg, 8.0);
+  EXPECT_DOUBLE_EQ(legged.maximum_payload_kg, 10.0);
+  EXPECT_DOUBLE_EQ(legged.forward_speed_mps.lower, -1.5);
+  EXPECT_DOUBLE_EQ(legged.forward_speed_mps.upper, 1.5);
+  EXPECT_DOUBLE_EQ(legged.lateral_speed_mps.lower, -0.8);
+  EXPECT_DOUBLE_EQ(legged.lateral_speed_mps.upper, 0.8);
+  EXPECT_DOUBLE_EQ(legged.yaw_rate_radps.lower, -1.0);
+  EXPECT_DOUBLE_EQ(legged.yaw_rate_radps.upper, 1.0);
+  EXPECT_DOUBLE_EQ(legged.maximum_linear_acceleration_mps2, 1.0);
+  EXPECT_DOUBLE_EQ(legged.maximum_yaw_acceleration_radps2, 1.0);
+  EXPECT_NEAR(legged.maximum_slope_rad, 0.5235987755982988, 1.0e-15);
+  EXPECT_DOUBLE_EQ(legged.maximum_step_height_m, 0.5);
+  EXPECT_DOUBLE_EQ(legged.maximum_gap_width_m, 0.3);
+  EXPECT_DOUBLE_EQ(legged.minimum_body_clearance_m, 0.3);
+  EXPECT_DOUBLE_EQ(legged.step_vertical_rate_mps, 0.1);
+  EXPECT_FALSE(legged.unknown_is_traversable);
+  ASSERT_EQ(legged.motion_primitives.size(), 6U);
+  EXPECT_EQ(legged.motion_primitives[0].kind,
+            lunar::planning::LeggedPrimitiveKind::kForward);
+  EXPECT_EQ(legged.motion_primitives[0].body_frame_displacement_m,
+            (lunar::planning::Vec3{0.2, 0.0, 0.0}));
+  EXPECT_EQ(legged.motion_primitives[2].kind,
+            lunar::planning::LeggedPrimitiveKind::kLateralLeft);
+  EXPECT_EQ(legged.motion_primitives[2].body_frame_displacement_m,
+            (lunar::planning::Vec3{0.0, 0.2, 0.0}));
+  EXPECT_NEAR(legged.motion_primitives[4].yaw_change_rad,
+              std::numbers::pi / 32.0, 1.0e-15);
+  EXPECT_NEAR(legged.motion_primitives[5].yaw_change_rad,
+              -std::numbers::pi / 32.0, 1.0e-15);
+}
+
+TEST(CapabilityLoader, RejectsParametricLeggedContractDrift) {
+  ExpectParametricFailure(
+      ReplaceOnce(TrackedLeggedYaml(), "platform_id: legged",
+                  "platform_id: quad48"),
+      "CAPABILITY_VALUE_INVALID", "platform.platform_id must be legged");
+  ExpectParametricFailure(
+      ReplaceOnce(TrackedLeggedYaml(), "capability_version: legged-v1",
+                  "capability_version: legged-v2"),
+      "CAPABILITY_VALUE_INVALID",
+      "platform.capability_version must be legged-v1");
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedLeggedYaml(),
+          "upstream_commit: 4cc726374ee423c64c6682ef419e16ec2cb49a00",
+          "upstream_commit: 0000000000000000000000000000000000000000"),
+      "CAPABILITY_VALUE_INVALID",
+      "platform.provenance must exactly match legged-v1");
+  ExpectParametricFailure(
+      ReplaceOnce(
+          TrackedLeggedYaml(),
+          "geometry_source: {type: parametric_envelope}",
+          "geometry_source: {type: parametric_envelope, urdf_file: robot.urdf}"),
+      "CAPABILITY_SCHEMA_INVALID",
+      "parametric geometry must not declare urdf_file");
+  ExpectParametricFailure(
+      ReplaceOnce(TrackedLeggedYaml(), "maximum_step_height_m: 0.5",
+                  "maximum_step_height_m: 0.4"),
+      "CAPABILITY_VALUE_INVALID", "legged fields must match legged-v1");
+  ExpectParametricFailure(
+      ReplaceOnce(TrackedLeggedYaml(), "motion_primitives: user_approved_planning_policy",
+                  "motion_primitives: planning_policy"),
+      "CAPABILITY_VALUE_INVALID", "sources invalid fields: motion_primitives");
+  ExpectParametricFailure(
+      ReplaceOnce(TrackedLeggedYaml(), "kind: LATERAL_LEFT",
+                  "kind: COUPLED"),
+      "CAPABILITY_VALUE_INVALID",
+      "motion primitive lateral-left does not match legged-v1 definition");
+  ExpectParametricFailure(
+      ReplaceOnce(TrackedLeggedYaml(), "yaw_change_rad: 0.09817477042468103",
+                  "yaw_change_rad: 0.0"),
+      "CAPABILITY_VALUE_INVALID",
+      "motion primitive spin-left does not match legged-v1 definition");
+  ExpectParametricFailure(
+      ReplaceOnce(TrackedLeggedYaml(),
+                  "body_frame_displacement_m: [0.2, 0.0, 0.0]",
+                  "body_frame_displacement_m: [0.2, 0.0, 0.01]"),
+      "CAPABILITY_VALUE_INVALID",
+      "motion primitive forward does not match legged-v1 definition");
+  ExpectParametricFailure(
+      ReplaceOnce(TrackedLeggedYaml(), "unknown_is_traversable: false",
+                  "unknown_is_traversable: true"),
+      "CAPABILITY_VALUE_INVALID", "legged fields must match legged-v1");
+}
+
 TEST(CapabilityLoader, SelectsExactlyOneConfiguredPathMode) {
   const auto absolute = UniqueShare("absolute-mode");
   WriteObservation(absolute);
@@ -439,6 +588,18 @@ TEST(CapabilityLoader, LoadsTrackedWheelV1FromAbsolutePath) {
   ASSERT_TRUE(result.ok())
       << (result.error ? result.error->detail : std::string{});
   EXPECT_EQ(result.capabilities->capability_version, "wheel-v1");
+}
+
+TEST(CapabilityLoader, LoadsTrackedLeggedV1FromAbsolutePath) {
+  const auto observation = UniqueShare("tracked-legged") / "observation.yaml";
+  Write(observation, "sensor_range_m: 25.0\nsensor_fov_deg: 90.0\n");
+
+  const auto result = CapabilityLoader{}.LoadConfigured(
+      "", RepositoryRoot() / "deployment/config/legged.yaml", observation);
+
+  ASSERT_TRUE(result.ok())
+      << (result.error ? result.error->detail : std::string{});
+  EXPECT_EQ(result.capabilities->capability_version, "legged-v1");
 }
 
 TEST(CapabilityLoader, RejectsUrdfGeometryFromAbsoluteFiles) {

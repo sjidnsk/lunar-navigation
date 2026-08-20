@@ -95,6 +95,8 @@ void HashPose(std::uint64_t& hash, const Pose3& pose) noexcept {
         } else if constexpr (std::is_same_v<Capability, LeggedCapability>) {
           HashVec3(hash, typed.body_extent_m);
           HashPod(hash, typed.platform_mass_kg);
+          HashPod(hash, typed.nominal_body_height_m);
+          HashPod(hash, typed.nominal_payload_kg);
           HashPod(hash, typed.maximum_payload_kg);
           HashPod(hash, typed.maximum_slope_rad);
           HashPod(hash, typed.maximum_step_height_m);
@@ -111,6 +113,7 @@ void HashPose(std::uint64_t& hash, const Pose3& pose) noexcept {
           HashPod(hash, typed.yaw_rate_radps.upper);
           HashPod(hash, typed.maximum_linear_acceleration_mps2);
           HashPod(hash, typed.maximum_yaw_acceleration_radps2);
+          HashPod(hash, typed.unknown_is_traversable);
           HashPod(hash, typed.motion_primitives.size());
           for (const LeggedBodyPrimitive& primitive : typed.motion_primitives) {
             HashString(hash, primitive.primitive_id);

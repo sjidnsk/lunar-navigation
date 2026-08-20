@@ -86,6 +86,45 @@ LoadedCapabilities WheelCapabilities() {
   };
 }
 
+LoadedCapabilities LeggedCapabilities() {
+  return LoadedCapabilities{
+      .platform_id = "legged",
+      .capability_version = "legged-v1",
+      .base_frame_id = "base_link",
+      .reference_point = "base_link",
+      .actuator_profile_id = {},
+      .maximum_obstacle_height_m = std::nullopt,
+      .source_motion_primitive_ids = {},
+      .urdf_path = {},
+      .mesh_paths = {},
+      .observation = {},
+      .platform = lunar::planning::LeggedCapability{
+          .body_extent_m = {0.68, 0.33, 0.35},
+          .nominal_body_height_m = 0.33,
+          .platform_mass_kg = 15.89,
+          .nominal_payload_kg = 8.0,
+          .maximum_payload_kg = 10.0,
+          .maximum_slope_rad = 0.5235987755982988,
+          .maximum_step_height_m = 0.5,
+          .maximum_gap_width_m = 0.3,
+          .minimum_body_clearance_m = 0.3,
+          .step_vertical_rate_mps = 0.1,
+          .body_height_m = {0.28, 0.38},
+          .forward_speed_mps = {-1.5, 1.5},
+          .lateral_speed_mps = {-0.8, 0.8},
+          .yaw_rate_radps = {-1.0, 1.0},
+          .maximum_linear_acceleration_mps2 = 1.0,
+          .maximum_yaw_acceleration_radps2 = 1.0,
+          .unknown_is_traversable = false,
+          .motion_primitives = {{
+              .primitive_id = "forward",
+              .kind = lunar::planning::LeggedPrimitiveKind::kForward,
+              .body_frame_displacement_m = {0.2, 0.0, 0.0},
+          }},
+      },
+  };
+}
+
 lunar::planning::HopperCapability MakeHopperCapability();
 
 LoadedCapabilities HopperCapabilities() {
@@ -600,6 +639,33 @@ TEST_F(
   system.PublishInputs();
 
   const auto goal = system.SendGoal(system.Goal("wheel-config"));
+  ASSERT_NE(goal, nullptr);
+  ASSERT_EQ(system.Result(goal).code, rclcpp_action::ResultCode::SUCCEEDED);
+
+  std::scoped_lock lock{capture_mutex};
+  ASSERT_TRUE(observed_config.has_value());
+  EXPECT_DOUBLE_EQ(observed_config->xy_resolution_m, 0.2);
+  EXPECT_EQ(observed_config->yaw_bin_count, 64U);
+}
+
+TEST_F(
+    PlanMotionServerTest,
+    PassesApprovedLeggedLatticeConfigurationToTheRuntimePlanner) {
+  std::mutex capture_mutex;
+  std::optional<lunar::planning::LeggedPlannerConfig> observed_config;
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [&](const lunar::planning::PlannerInput& input) {
+        {
+          std::scoped_lock lock{capture_mutex};
+          observed_config = input.config.legged;
+        }
+        return NoRouteOutput("LEGGED_CONFIG_OBSERVED");
+      },
+      .preloaded_capabilities = LeggedCapabilities(),
+  }};
+  system.PublishInputs();
+
+  const auto goal = system.SendGoal(system.Goal("legged-config"));
   ASSERT_NE(goal, nullptr);
   ASSERT_EQ(system.Result(goal).code, rclcpp_action::ResultCode::SUCCEEDED);
 

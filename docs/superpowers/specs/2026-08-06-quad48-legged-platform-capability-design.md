@@ -319,6 +319,18 @@ RViz 必须：
    搜索未完成。
 8. 当前测试/代理能力资料不得原地改名为正式 Quad48 能力；正式资料必须带独立来源记录。
 
+### 13.1 参数化运行时部署身份
+
+正式运行文件 `deployment/config/legged.yaml` 使用简化部署身份
+`legged/LEGGED/legged-v1/base_link`，逐字段复用本文及三平台 freeze 中的 Quad48 冻结值与来源。
+此部署别名不改写 `three_platform_capability_freeze_v1.yaml` 的平台身份、payload 或 digest。
+
+运行时选择 `{type: parametric_envelope}`，仅声明 `0.68 × 0.33 × 0.35 m` 的机身外包络，
+不加载或生成 URDF/mesh。局部规划固定为 `0.2 m` XY 分辨率与 `64` 个航向方向。能力文件中的
+前进、后退、左右横移 `0.2 m` 和原地左右旋转 `pi/32` 六个机身参考原语属于
+`user_approved_planning_policy`；它们只描述规划格点连接，不是足端步态、关节命令或控制技能，
+也不引入垂向或 `COUPLED` 原语。
+
 ## 14. 训练门禁与非目标
 
 完成本文只代表足式平台正式能力设计冻结。正式 PPO 训练仍必须依次具备真实轮式、足式和

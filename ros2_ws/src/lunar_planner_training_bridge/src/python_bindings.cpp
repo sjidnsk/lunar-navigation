@@ -494,8 +494,12 @@ void BindCapabilities(py::module_ &module) {
       .def(py::init<>())
       .def_readwrite("body_extent_m",
                      &planning::LeggedCapability::body_extent_m)
+      .def_readwrite("nominal_body_height_m",
+                     &planning::LeggedCapability::nominal_body_height_m)
       .def_readwrite("platform_mass_kg",
                      &planning::LeggedCapability::platform_mass_kg)
+      .def_readwrite("nominal_payload_kg",
+                     &planning::LeggedCapability::nominal_payload_kg)
       .def_readwrite("maximum_payload_kg",
                      &planning::LeggedCapability::maximum_payload_kg)
       .def_readwrite("maximum_slope_rad",
@@ -522,6 +526,8 @@ void BindCapabilities(py::module_ &module) {
       .def_readwrite(
           "maximum_yaw_acceleration_radps2",
           &planning::LeggedCapability::maximum_yaw_acceleration_radps2)
+      .def_readwrite("unknown_is_traversable",
+                     &planning::LeggedCapability::unknown_is_traversable)
       .def_readwrite("motion_primitives",
                      &planning::LeggedCapability::motion_primitives);
 

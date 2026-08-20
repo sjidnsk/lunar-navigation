@@ -59,3 +59,10 @@ training preflight or closed-loop training evaluation.
 The future extension points are named `map_pipeline` and `path_tracking`.
 They remain disabled unless their declared ROS package is installed; enabling
 one cannot create a missing map publisher or controller.
+
+The repository ships two reviewed numeric platform capability documents:
+`deployment/config/wheel.yaml` and `deployment/config/legged.yaml`. The latter
+is the Quad48 `legged/legged-v1` baseline and uses only a parametric body
+envelope; neither URDF nor mesh assets are required. Install exactly one as
+`/opt/luna/capabilities/platform.yaml` before launch. An observation capability
+is still independently required and is not fabricated by either document.

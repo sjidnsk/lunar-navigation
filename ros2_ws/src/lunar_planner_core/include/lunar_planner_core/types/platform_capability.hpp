@@ -76,7 +76,9 @@ struct LeggedBodyPrimitive final {
 
 struct LeggedCapability final {
   Vec3 body_extent_m;
+  double nominal_body_height_m{};
   double platform_mass_kg{};
+  double nominal_payload_kg{};
   double maximum_payload_kg{};
   double maximum_slope_rad{};
   double maximum_step_height_m{};
@@ -89,6 +91,7 @@ struct LeggedCapability final {
   Interval yaw_rate_radps;
   double maximum_linear_acceleration_mps2{};
   double maximum_yaw_acceleration_radps2{};
+  bool unknown_is_traversable{};
   std::vector<LeggedBodyPrimitive> motion_primitives;
 };
 

@@ -32,6 +32,13 @@ constexpr double kWheelV1Tolerance = 1.0e-12;
 constexpr std::string_view kWheelV1DesignDocument =
     "docs/superpowers/specs/"
     "2026-08-20-wheel-parametric-capability-design.md";
+constexpr std::string_view kLeggedV1DesignDocument =
+    "docs/superpowers/specs/"
+    "2026-08-06-quad48-legged-platform-capability-design.md";
+constexpr std::string_view kLeggedV1UpstreamCommit =
+    "4cc726374ee423c64c6682ef419e16ec2cb49a00";
+constexpr std::string_view kLeggedV1UserSpecSha256 =
+    "1e3db711caf733c685eceef8893a189af4f34476573c38bd91298c06fd6107e5";
 const std::set<std::string, std::less<>> kAllowedSourceTypes{
     "upstream_model",
     "upstream_config",
@@ -72,6 +79,29 @@ const std::map<std::string, std::string, std::less<>> kApprovedWheelV1Sources{
     {"wheel_diameter_m", "user_provided_dimension"},
     {"wheel_width_m", "user_provided_dimension"},
     {"wheelbase_m", "user_provided_dimension"},
+};
+const std::map<std::string, std::string, std::less<>> kApprovedLeggedV1Sources{
+    {"body_extent_m", "user_spec_material"},
+    {"body_height_m", "planning_policy"},
+    {"maximum_forward_speed_mps", "planning_policy"},
+    {"maximum_gap_width_m", "user_spec_material"},
+    {"maximum_lateral_speed_mps", "upstream_config"},
+    {"maximum_linear_acceleration_mps2", "planning_policy"},
+    {"maximum_payload_kg", "user_spec_material"},
+    {"maximum_reverse_speed_mps", "planning_policy"},
+    {"maximum_step_height_m", "user_confirmed_upgrade"},
+    {"maximum_surface_slope_rad", "user_spec_material"},
+    {"maximum_yaw_acceleration_radps2", "planning_policy"},
+    {"maximum_yaw_rate_radps", "upstream_config"},
+    {"minimum_body_clearance_m", "planning_policy"},
+    {"motion_primitives", "user_approved_planning_policy"},
+    {"nominal_body_height_m", "derived"},
+    {"nominal_payload_kg", "user_spec_material"},
+    {"platform_mass_kg", "derived"},
+    {"reference_point", "upstream_model"},
+    {"roughness_handling", "planning_policy"},
+    {"step_vertical_rate_mps", "planning_policy"},
+    {"unknown_is_traversable", "planning_policy"},
 };
 const std::vector<std::string> kApprovedWheelV1UnknownFields{
     "bare_mass_kg",
@@ -126,6 +156,28 @@ const std::array<ApprovedWheelPrimitive, 9U> kApprovedWheelV1Primitives{{
     {"stop-switch", lunar::planning::WheelPrimitiveKind::kStopAndSwitch,
      {.position_m = {0.0, 0.0, 0.0},
       .orientation = {1.0, 0.0, 0.0, 0.0}}},
+}};
+
+struct ApprovedLeggedPrimitive final {
+  std::string_view primitive_id;
+  lunar::planning::LeggedPrimitiveKind kind;
+  lunar::planning::Vec3 displacement_m;
+  double yaw_change_rad;
+};
+
+const std::array<ApprovedLeggedPrimitive, 6U> kApprovedLeggedV1Primitives{{
+    {"forward", lunar::planning::LeggedPrimitiveKind::kForward,
+     {0.2, 0.0, 0.0}, 0.0},
+    {"backward", lunar::planning::LeggedPrimitiveKind::kBackward,
+     {-0.2, 0.0, 0.0}, 0.0},
+    {"lateral-left", lunar::planning::LeggedPrimitiveKind::kLateralLeft,
+     {0.0, 0.2, 0.0}, 0.0},
+    {"lateral-right", lunar::planning::LeggedPrimitiveKind::kLateralRight,
+     {0.0, -0.2, 0.0}, 0.0},
+    {"spin-left", lunar::planning::LeggedPrimitiveKind::kSpin,
+     {0.0, 0.0, 0.0}, std::numbers::pi / 32.0},
+    {"spin-right", lunar::planning::LeggedPrimitiveKind::kSpin,
+     {0.0, 0.0, 0.0}, -std::numbers::pi / 32.0},
 }};
 
 class LoadFailure final : public std::runtime_error {
@@ -835,6 +887,76 @@ void ValidateApprovedWheelV1Platform(
   }
 }
 
+void ValidateApprovedLeggedV1Sources(const LoadedCapabilities& loaded) {
+  std::vector<std::string> missing;
+  std::vector<std::string> extra;
+  std::vector<std::string> invalid;
+  for (const auto& [field, expected_source] : kApprovedLeggedV1Sources) {
+    const auto actual = loaded.field_source_types.find(field);
+    if (actual == loaded.field_source_types.end()) {
+      missing.push_back(field);
+    } else if (actual->second != expected_source) {
+      invalid.push_back(field);
+    }
+  }
+  for (const auto& [field, source] : loaded.field_source_types) {
+    static_cast<void>(source);
+    if (!kApprovedLeggedV1Sources.contains(field)) {
+      extra.push_back(field);
+    }
+  }
+  if (!missing.empty()) {
+    SchemaFailure("sources missing fields: " + JoinFields(missing));
+  }
+  if (!extra.empty()) {
+    SchemaFailure("sources extra fields: " + JoinFields(extra));
+  }
+  if (!invalid.empty()) {
+    ValueFailure("sources invalid fields: " + JoinFields(invalid));
+  }
+}
+
+void ValidateApprovedLeggedV1Platform(
+    const YAML::Node& platform,
+    const LoadedCapabilities& loaded,
+    const std::string& platform_type) {
+  RejectUnexpectedKeys(
+      platform,
+      {"platform_id", "platform_type", "capability_version", "base_frame_id",
+       "provenance", "unknown_fields"},
+      "platform");
+  if (loaded.platform_id != "legged") {
+    ValueFailure("platform.platform_id must be legged");
+  }
+  if (platform_type != "LEGGED") {
+    ValueFailure("platform.platform_type must be LEGGED");
+  }
+  if (loaded.capability_version != "legged-v1") {
+    ValueFailure("platform.capability_version must be legged-v1");
+  }
+  if (loaded.base_frame_id != "base_link") {
+    ValueFailure("platform.base_frame_id must be base_link");
+  }
+  const YAML::Node provenance = RequireMap(platform, "provenance");
+  RejectUnexpectedKeys(
+      provenance,
+      {"level", "design_document", "upstream_commit", "user_spec_sha256"},
+      "platform.provenance");
+  if (RequireString(provenance, "level") !=
+          "approved_mixed_evidence_baseline" ||
+      RequireString(provenance, "design_document") !=
+          kLeggedV1DesignDocument ||
+      RequireString(provenance, "upstream_commit") !=
+          kLeggedV1UpstreamCommit ||
+      RequireString(provenance, "user_spec_sha256") !=
+          kLeggedV1UserSpecSha256) {
+    ValueFailure("platform.provenance must exactly match legged-v1");
+  }
+  if (!RequireStringSequence(platform, "unknown_fields").empty()) {
+    ValueFailure("platform.unknown_fields must be empty for legged-v1");
+  }
+}
+
 void ValidateApprovedWheelV1Primitives(
     const std::vector<lunar::planning::WheelMotionPrimitive>& primitives) {
   if (primitives.size() != kApprovedWheelV1Primitives.size()) {
@@ -850,6 +972,26 @@ void ValidateApprovedWheelV1Primitives(
       ValueFailure(
           "motion primitive " + std::string{expected.primitive_id} +
           " does not match wheel-v1 definition");
+    }
+  }
+}
+
+void ValidateApprovedLeggedV1Primitives(
+    const std::vector<lunar::planning::LeggedBodyPrimitive>& primitives) {
+  if (primitives.size() != kApprovedLeggedV1Primitives.size()) {
+    ValueFailure("motion_primitives must exactly match legged-v1 definitions");
+  }
+  for (std::size_t index = 0U;
+       index < kApprovedLeggedV1Primitives.size(); ++index) {
+    const auto& actual = primitives[index];
+    const auto& expected = kApprovedLeggedV1Primitives[index];
+    if (actual.primitive_id != expected.primitive_id ||
+        actual.kind != expected.kind ||
+        !Near(actual.body_frame_displacement_m, expected.displacement_m) ||
+        !Near(actual.yaw_change_rad, expected.yaw_change_rad)) {
+      ValueFailure(
+          "motion primitive " + std::string{expected.primitive_id} +
+          " does not match legged-v1 definition");
     }
   }
 }
@@ -1021,26 +1163,35 @@ void ValidateApprovedWheelV1Primitives(
     const YAML::Node& root,
     LoadedCapabilities& loaded) {
   const YAML::Node node = RequireMap(root, "legged");
-  RejectUnexpectedKeys(
-      node,
-      {"reference_point",
-       "body_extent_m",
-       "platform_mass_kg",
-       "maximum_payload_kg",
-       "maximum_slope_rad",
-       "maximum_step_height_m",
-       "maximum_gap_width_m",
-       "minimum_body_clearance_m",
-       "step_vertical_rate_mps",
-       "body_height_m",
-       "forward_speed_mps",
-       "lateral_speed_mps",
-       "yaw_rate_radps",
-       "maximum_linear_acceleration_mps2",
-       "maximum_yaw_acceleration_radps2",
-       "roughness_handling",
-       "motion_primitives"},
-      "legged");
+  const bool parametric =
+      loaded.geometry_source_kind == GeometrySourceKind::kParametricEnvelope;
+  if (parametric) {
+    RejectUnexpectedKeys(
+        node,
+        {"reference_point", "body_extent_m", "nominal_body_height_m",
+         "body_height_m", "platform_mass_kg", "nominal_payload_kg",
+         "maximum_payload_kg", "maximum_forward_speed_mps",
+         "maximum_reverse_speed_mps", "maximum_lateral_speed_mps",
+         "maximum_yaw_rate_radps", "maximum_linear_acceleration_mps2",
+         "maximum_yaw_acceleration_radps2", "maximum_slope_rad",
+         "maximum_step_height_m", "maximum_gap_width_m",
+         "minimum_body_clearance_m", "step_vertical_rate_mps",
+         "roughness_handling", "unknown_is_traversable",
+         "motion_primitives"},
+        "legged");
+  } else {
+    RejectUnexpectedKeys(
+        node,
+        {"reference_point", "body_extent_m", "platform_mass_kg",
+         "maximum_payload_kg", "maximum_slope_rad",
+         "maximum_step_height_m", "maximum_gap_width_m",
+         "minimum_body_clearance_m", "step_vertical_rate_mps",
+         "body_height_m", "forward_speed_mps", "lateral_speed_mps",
+         "yaw_rate_radps", "maximum_linear_acceleration_mps2",
+         "maximum_yaw_acceleration_radps2", "roughness_handling",
+         "motion_primitives"},
+        "legged");
+  }
   loaded.reference_point = RequireString(node, "reference_point");
   if (loaded.reference_point != "base_link") {
     ValueFailure("legged.reference_point must be base_link");
@@ -1052,8 +1203,19 @@ void ValidateApprovedWheelV1Primitives(
   }
   const double platform_mass = Positive(
       RequireDouble(node, "platform_mass_kg"), "platform_mass_kg");
+  const double nominal_body_height = parametric
+      ? Positive(RequireDouble(node, "nominal_body_height_m"),
+                 "nominal_body_height_m")
+      : 0.0;
+  const double nominal_payload = parametric
+      ? Positive(RequireDouble(node, "nominal_payload_kg"),
+                 "nominal_payload_kg")
+      : 0.0;
   const double maximum_payload = Positive(
       RequireDouble(node, "maximum_payload_kg"), "maximum_payload_kg");
+  if (parametric && nominal_payload > maximum_payload) {
+    ValueFailure("nominal_payload_kg exceeds maximum_payload_kg");
+  }
   const double step_vertical_rate = Positive(
       RequireDouble(node, "step_vertical_rate_mps"),
       "step_vertical_rate_mps");
@@ -1083,15 +1245,46 @@ void ValidateApprovedWheelV1Primitives(
             "motion_primitives.yaw_change_rad"),
     });
   }
+  if (parametric) {
+    ValidateApprovedLeggedV1Primitives(primitives);
+  }
 
   const auto body_height = Interval(
       RequireSequence(node, "body_height_m"), "body_height_m");
   if (body_height.lower < 0.0) {
     ValueFailure("body_height_m must be non-negative");
   }
-  return lunar::planning::LeggedCapability{
+  const auto forward_speed = parametric
+      ? lunar::planning::Interval{
+            -NonNegative(RequireDouble(node, "maximum_reverse_speed_mps"),
+                         "maximum_reverse_speed_mps"),
+            Positive(RequireDouble(node, "maximum_forward_speed_mps"),
+                     "maximum_forward_speed_mps")}
+      : Interval(RequireSequence(node, "forward_speed_mps"),
+                 "forward_speed_mps", true);
+  const auto lateral_speed = parametric
+      ? [&]() {
+          const double maximum = Positive(
+              RequireDouble(node, "maximum_lateral_speed_mps"),
+              "maximum_lateral_speed_mps");
+          return lunar::planning::Interval{-maximum, maximum};
+        }()
+      : Interval(RequireSequence(node, "lateral_speed_mps"),
+                 "lateral_speed_mps", true);
+  const auto yaw_rate = parametric
+      ? [&]() {
+          const double maximum = Positive(
+              RequireDouble(node, "maximum_yaw_rate_radps"),
+              "maximum_yaw_rate_radps");
+          return lunar::planning::Interval{-maximum, maximum};
+        }()
+      : Interval(RequireSequence(node, "yaw_rate_radps"),
+                 "yaw_rate_radps", true);
+  lunar::planning::LeggedCapability capability{
       .body_extent_m = body_extent,
+      .nominal_body_height_m = nominal_body_height,
       .platform_mass_kg = platform_mass,
+      .nominal_payload_kg = nominal_payload,
       .maximum_payload_kg = maximum_payload,
       .maximum_slope_rad = Slope(
           RequireDouble(node, "maximum_slope_rad"), "maximum_slope_rad"),
@@ -1106,23 +1299,44 @@ void ValidateApprovedWheelV1Primitives(
           "minimum_body_clearance_m"),
       .step_vertical_rate_mps = step_vertical_rate,
       .body_height_m = body_height,
-      .forward_speed_mps = Interval(
-          RequireSequence(node, "forward_speed_mps"),
-          "forward_speed_mps", true),
-      .lateral_speed_mps = Interval(
-          RequireSequence(node, "lateral_speed_mps"),
-          "lateral_speed_mps", true),
-      .yaw_rate_radps = Interval(
-          RequireSequence(node, "yaw_rate_radps"),
-          "yaw_rate_radps", true),
+      .forward_speed_mps = forward_speed,
+      .lateral_speed_mps = lateral_speed,
+      .yaw_rate_radps = yaw_rate,
       .maximum_linear_acceleration_mps2 = Positive(
           RequireDouble(node, "maximum_linear_acceleration_mps2"),
           "maximum_linear_acceleration_mps2"),
       .maximum_yaw_acceleration_radps2 = Positive(
           RequireDouble(node, "maximum_yaw_acceleration_radps2"),
           "maximum_yaw_acceleration_radps2"),
+      .unknown_is_traversable =
+          parametric ? RequireBool(node, "unknown_is_traversable") : false,
       .motion_primitives = std::move(primitives),
   };
+  if (parametric &&
+      (!Near(capability.body_extent_m, {0.68, 0.33, 0.35}) ||
+       !Near(capability.nominal_body_height_m, 0.33) ||
+       !Near(capability.body_height_m.lower, 0.28) ||
+       !Near(capability.body_height_m.upper, 0.38) ||
+       !Near(capability.platform_mass_kg, 15.89) ||
+       !Near(capability.nominal_payload_kg, 8.0) ||
+       !Near(capability.maximum_payload_kg, 10.0) ||
+       !Near(capability.forward_speed_mps.lower, -1.5) ||
+       !Near(capability.forward_speed_mps.upper, 1.5) ||
+       !Near(capability.lateral_speed_mps.lower, -0.8) ||
+       !Near(capability.lateral_speed_mps.upper, 0.8) ||
+       !Near(capability.yaw_rate_radps.lower, -1.0) ||
+       !Near(capability.yaw_rate_radps.upper, 1.0) ||
+       !Near(capability.maximum_linear_acceleration_mps2, 1.0) ||
+       !Near(capability.maximum_yaw_acceleration_radps2, 1.0) ||
+       !Near(capability.maximum_slope_rad, std::numbers::pi / 6.0) ||
+       !Near(capability.maximum_step_height_m, 0.5) ||
+       !Near(capability.maximum_gap_width_m, 0.3) ||
+       !Near(capability.minimum_body_clearance_m, 0.3) ||
+       !Near(capability.step_vertical_rate_mps, 0.1) ||
+       capability.unknown_is_traversable)) {
+    ValueFailure("legged fields must match legged-v1");
+  }
+  return capability;
 }
 
 [[nodiscard]] lunar::planning::HopperCapability ParseHopper(
@@ -1381,7 +1595,16 @@ void AddMesh(
     }
     RejectUnexpectedKeys(geometry, {"type"}, "geometry_source");
     loaded.geometry_source_kind = GeometrySourceKind::kParametricEnvelope;
-    ValidateApprovedWheelV1Platform(platform, loaded, platform_type);
+    if (loaded.platform_id == "wheel" ||
+        loaded.capability_version == "wheel-v1") {
+      ValidateApprovedWheelV1Platform(platform, loaded, platform_type);
+    } else if (loaded.platform_id == "legged" ||
+               loaded.capability_version == "legged-v1") {
+      ValidateApprovedLeggedV1Platform(platform, loaded, platform_type);
+    } else {
+      ValueFailure(
+          "parametric_envelope is only approved for WHEELED or LEGGED");
+    }
   } else {
     RejectUnexpectedKeys(geometry, {"urdf_file"}, "geometry_source");
     loaded.geometry_source_kind = GeometrySourceKind::kUrdfMesh;
@@ -1416,6 +1639,9 @@ void AddMesh(
     }
   } else if (platform_type == "LEGGED") {
     loaded.platform = ParseLegged(platform_document, loaded);
+    if (loaded.geometry_source_kind == GeometrySourceKind::kParametricEnvelope) {
+      ValidateApprovedLeggedV1Sources(loaded);
+    }
   } else if (platform_type == "HOPPER") {
     loaded.platform = ParseHopper(platform_document, loaded);
   } else {
