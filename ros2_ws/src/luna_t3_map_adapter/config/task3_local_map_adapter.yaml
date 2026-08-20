@@ -1,0 +1,10 @@
+luna_t3_local_map_adapter:
+  ros__parameters:
+    sqlite_path: /home/yanfa/P3/map_retest_output/move_soft_raw_full_current_20260820/global_grid_map.sqlite3
+    source_topic: /Car/T3/mapping/grid_map
+    map_revision_topic: /Car/T3/mapping/global_map_revision
+    output_topic: /environment/map_local
+    occupancy_obstacle_threshold: 50
+    semantic_obstacle_ids: [3]
+    semantic_forbidden_ids: [4]
+    max_age_s: 30.0
