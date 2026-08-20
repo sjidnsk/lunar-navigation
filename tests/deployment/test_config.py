@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from deployment.luna_runtime.config import (
     ConfigError,
@@ -12,6 +13,16 @@ from deployment.luna_runtime.config import (
     validate_host,
 )
 from deployment.luna_runtime.host import HostFacts
+
+
+def test_deployment_observation_capability_is_ten_meter_ninety_degree_baseline() -> None:
+    root = Path(__file__).resolve().parents[2]
+    capability_path = root / "deployment" / "config" / "observation.yaml"
+
+    with capability_path.open(encoding="utf-8") as stream:
+        capability = yaml.safe_load(stream)
+
+    assert capability == {"sensor_range_m": 10.0, "sensor_fov_deg": 90.0}
 
 
 def _runtime_config_text(*, include_global_map: bool = True) -> str:
@@ -105,3 +116,6 @@ def test_valid_fallback_config_renders_planner_ros_parameters(tmp_path: Path) ->
     assert "interfaces.map_global: /environment/map_global" in text
     assert "global_map_max_age: 1.0" in text
     assert "enable_nav2_adapter: false" in text
+    assert "platform_capability_file: /tmp/platform.yaml" in text
+    assert "observation_capability_file: /tmp/observation.yaml" in text
+    assert "capability_package" not in text

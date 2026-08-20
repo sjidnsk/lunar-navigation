@@ -94,7 +94,7 @@ _TOPICS = {
     "map_global": {
         "name": "/environment/map_global",
         "type": "grid_map_msgs/msg/GridMap",
-        "owner": "external",
+        "owner": "luna_t3_map_adapter",
         "frame": "map",
         "level_semantics": "selected_configured_global",
         "required_fields": [
@@ -106,6 +106,13 @@ _TOPICS = {
             "outer_start_index",
             "inner_start_index",
         ],
+    },
+    "task3_global_map_revision": {
+        "name": "/Car/T3/mapping/global_map_revision",
+        "type": "std_msgs/msg/UInt64",
+        "owner": "external",
+        "frame": "map",
+        "required_fields": ["data"],
     },
     "map_local": {
         "name": "/environment/map_local",
@@ -215,6 +222,7 @@ _STATIC_INPUTS = {
         "schema": "platform-control-capability-source/v2",
         "formats": ["yaml", "json", "urdf"],
         "required_fields": ["platform", "geometry_source", "sources"],
+        "geometry_sources": ["parametric_envelope", "urdf_mesh"],
     },
 }
 

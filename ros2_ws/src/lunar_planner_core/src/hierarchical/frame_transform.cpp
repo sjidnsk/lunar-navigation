@@ -103,6 +103,21 @@ TransformYaw(const double yaw, const RigidTransform &transform,
 } // namespace
 
 std::optional<Vec3>
+TransformVector(const Vec3 vector, const RigidTransform& parent_from_child,
+                const TransformDirection direction) noexcept {
+  if (!Finite(vector)) {
+    return std::nullopt;
+  }
+  const auto rotation = DirectedRotation(parent_from_child, direction);
+  if (!rotation) {
+    return std::nullopt;
+  }
+  const Vec3 transformed = Rotate(*rotation, vector);
+  return Finite(transformed) ? std::optional<Vec3>{transformed}
+                             : std::nullopt;
+}
+
+std::optional<Vec3>
 TransformPoint(const Vec3 point, const RigidTransform &parent_from_child,
                const TransformDirection direction) noexcept {
   if (!Finite(point)) {

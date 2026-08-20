@@ -38,6 +38,7 @@ PlannerResultContext Context() {
       .local_map_generation = 37U,
       .preview_frame = "map",
       .execution_frame = "odom",
+      .execution_gravity_mps2 = {0.0, 0.0, -1.62},
   };
 }
 
@@ -267,6 +268,53 @@ TEST(MessageConversion, ConvertsHopperSegmentsWithExecutableTiming) {
   EXPECT_EQ(
       ConvertPlannerOutput(multiple_hops, Context()).reason_code,
       "REFERENCE_HOP_AUTHORIZATION_INVALID");
+}
+
+TEST(
+    MessageConversion,
+    AcceptsHopperBallisticsUsingConfiguredExecutionFrameGravity) {
+  lunar::planning::HopReference hops{
+      .segments = {
+          lunar::planning::HopSegment{
+              .segment_id = "hop-low-gravity",
+              .launch_pose = {},
+              .landing_region_boundary_m = {
+                  {1.0, -1.0, 0.0}, {3.0, -1.0, 0.0},
+                  {3.0, 1.0, 0.0}, {1.0, 1.0, 0.0}},
+              .flight_time = 2s,
+              .launch_velocity_mps = {1.0, 0.0, 2.0},
+              .flight_tube_radius_m = 0.2,
+              .nominal_landing_point_m = {2.0, 0.0, 2.38},
+              .required_delta_v_mps = 7.0,
+              .available_delta_v_mps = 8.0,
+              .capability_version = "hopper-capability-v1",
+              .global_map_generation = 31U,
+              .local_map_generation = 37U,
+          },
+      },
+  };
+  auto output = WheelOutput();
+  output.reference = lunar::planning::MotionReference{
+      .plan_id = "low-gravity-hop-plan",
+      .platform_type = lunar::planning::PlatformType::kHopper,
+      .input_time = {10'200'000'000LL},
+      .preview = lunar::planning::GlobalRoutePreview{
+          .poses_map = {
+              lunar::planning::Pose3{},
+              lunar::planning::Pose3{.position_m = {2.0, 0.0, 2.38}},
+          },
+      },
+      .data = std::move(hops),
+  };
+  auto context = Context();
+  context.execution_gravity_mps2 = {0.0, 0.0, -0.81};
+
+  const auto converted = ConvertPlannerOutput(output, context);
+
+  ASSERT_TRUE(converted.ok()) << converted.reason_code;
+  ASSERT_EQ(converted.result->reference.hops.size(), 1U);
+  EXPECT_DOUBLE_EQ(
+      converted.result->reference.hops.front().nominal_landing_point.z, 2.38);
 }
 
 TEST(MessageConversion, RejectsEmptySingleHopAuthorization) {

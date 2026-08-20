@@ -79,13 +79,27 @@ def test_project_formal_capability_uses_approved_freeze() -> None:
     assert tuple(item.primitive_id for item in legged.motion_primitives) == (
         "forward",
         "backward",
-        "left",
-        "right",
+        "lateral-left",
+        "lateral-right",
         "spin-left",
         "spin-right",
     )
+    assert legged.nominal_body_height_m == pytest.approx(0.33)
+    assert legged.nominal_payload_kg == pytest.approx(8.0)
+    assert legged.unknown_is_traversable is False
+    assert legged.motion_primitives[4].yaw_change_rad == pytest.approx(
+        3.141592653589793 / 32.0
+    )
     assert hopper.reference_total_mass_kg == 20.0
     assert hopper.reference_propellant_mass_kg == 0.2
+    assert (hopper.gravity_mps2.x, hopper.gravity_mps2.y, hopper.gravity_mps2.z) == (
+        0.0,
+        0.0,
+        -1.62,
+    )
+    assert hopper.reference_horizontal_range_m == 100.0
+    assert hopper.reference_elevation_delta_m == 0.0
+    assert hopper.runtime_fallback_allowed is False
 
 
 def test_project_formal_capability_rejects_digest_drift(tmp_path: Path) -> None:

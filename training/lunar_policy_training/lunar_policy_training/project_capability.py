@@ -232,19 +232,21 @@ def _legged_payload(raw: Mapping[str, object]) -> dict[str, object]:
     terrain = _required_mapping(raw, "terrain")
     motion = _required_mapping(raw, "motion")
     step = _positive_number(motion, "local_xy_resolution_m")
-    yaw = math.pi / 16.0
+    yaw = math.pi / 32.0
     primitives = (
         ("forward", "FORWARD", (step, 0.0, 0.0), 0.0),
         ("backward", "BACKWARD", (-step, 0.0, 0.0), 0.0),
-        ("left", "LATERAL_LEFT", (0.0, step, 0.0), 0.0),
-        ("right", "LATERAL_RIGHT", (0.0, -step, 0.0), 0.0),
+        ("lateral-left", "LATERAL_LEFT", (0.0, step, 0.0), 0.0),
+        ("lateral-right", "LATERAL_RIGHT", (0.0, -step, 0.0), 0.0),
         ("spin-left", "SPIN", (0.0, 0.0, 0.0), yaw),
         ("spin-right", "SPIN", (0.0, 0.0, 0.0), -yaw),
     )
     return {
         "reference_point": geometry["reference_point"],
         "body_extent_m": geometry["body_extent_m"],
+        "nominal_body_height_m": geometry["nominal_body_height_m"],
         "platform_mass_kg": physical["platform_mass_kg"],
+        "nominal_payload_kg": physical["nominal_payload_kg"],
         "maximum_payload_kg": physical["maximum_payload_kg"],
         "maximum_slope_rad": terrain["maximum_surface_slope_rad"],
         "maximum_step_height_m": terrain["maximum_step_height_m"],
@@ -271,6 +273,7 @@ def _legged_payload(raw: Mapping[str, object]) -> dict[str, object]:
             "maximum_yaw_acceleration_radps2"
         ],
         "roughness_handling": terrain["roughness_handling"],
+        "unknown_is_traversable": terrain["unknown_is_traversable"],
         "motion_primitives": [
             {
                 "primitive_id": identifier,
@@ -298,6 +301,10 @@ def _hopper_payload(raw: Mapping[str, object]) -> dict[str, object]:
         "reference_propellant_mass_kg": reference[
             "reference_remaining_usable_fuel_mass_kg"
         ],
+        "gravity_mps2": environment["gravity_mps2"],
+        "reference_horizontal_range_m": reference["reference_horizontal_range_m"],
+        "reference_elevation_delta_m": reference["reference_elevation_delta_m"],
+        "runtime_fallback_allowed": reference["runtime_fallback_allowed"],
         "landing_support_radius_m": landing["landing_support_radius_m"],
         "flight_collision_radius_m": safety["flight_collision_radius_m"],
         "maximum_landing_slope_rad": landing["maximum_landing_slope_rad"],

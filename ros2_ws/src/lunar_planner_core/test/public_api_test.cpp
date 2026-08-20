@@ -16,6 +16,8 @@ namespace {
 TEST(PlannerDefaults, GroundPlatformsUseSixtyFourYawBins) {
   EXPECT_EQ(WheelPlannerConfig{}.yaw_bin_count, 64U);
   EXPECT_EQ(LeggedPlannerConfig{}.yaw_bin_count, 64U);
+  EXPECT_DOUBLE_EQ(WheelPlannerConfig{}.xy_resolution_m, 0.2);
+  EXPECT_DOUBLE_EQ(LeggedPlannerConfig{}.xy_resolution_m, 0.2);
 }
 
 TEST(PublicApi, RejectsMissingRequiredMapLayersWithoutCallingBackend) {

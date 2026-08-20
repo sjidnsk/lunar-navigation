@@ -22,8 +22,6 @@ namespace lunar::planning::ros {
 namespace {
 
 constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
-constexpr double kLunarGravityMps2 = -1.62;
-
 [[nodiscard]] bool Finite(const double value) noexcept {
   return std::isfinite(value);
 }
@@ -369,12 +367,17 @@ constexpr double kLunarGravityMps2 = -1.62;
         std::chrono::duration<double>(segment.flight_time).count();
     const lunar::planning::Vec3 reconstructed_landing{
         .x = segment.launch_pose.position_m.x +
-            segment.launch_velocity_mps.x * flight_seconds,
+            segment.launch_velocity_mps.x * flight_seconds +
+            0.5 * context.execution_gravity_mps2.x * flight_seconds *
+                flight_seconds,
         .y = segment.launch_pose.position_m.y +
-            segment.launch_velocity_mps.y * flight_seconds,
+            segment.launch_velocity_mps.y * flight_seconds +
+            0.5 * context.execution_gravity_mps2.y * flight_seconds *
+                flight_seconds,
         .z = segment.launch_pose.position_m.z +
             segment.launch_velocity_mps.z * flight_seconds +
-            0.5 * kLunarGravityMps2 * flight_seconds * flight_seconds,
+            0.5 * context.execution_gravity_mps2.z * flight_seconds *
+                flight_seconds,
     };
     if (!NearlyEqual(
             reconstructed_landing.x, segment.nominal_landing_point_m.x,
@@ -492,7 +495,8 @@ ActionResultConversion ConvertPlannerOutput(
       context.local_map_stamp.nanoseconds_since_epoch <= 0 ||
       context.state_stamp.nanoseconds_since_epoch <= 0 ||
       context.preview_frame != "map" ||
-      context.execution_frame != "odom") {
+      context.execution_frame != "odom" ||
+      !Finite(context.execution_gravity_mps2)) {
     return ResultFailure("RESULT_CONTEXT_INVALID");
   }
   if (static_cast<std::uint8_t>(output.outcome) >

@@ -30,6 +30,7 @@ struct PlannerResultContext final {
   std::uint64_t local_map_generation{};
   std::string preview_frame{"map"};
   std::string execution_frame{"odom"};
+  lunar::planning::Vec3 execution_gravity_mps2{};
 };
 
 struct ActionResultConversion final {

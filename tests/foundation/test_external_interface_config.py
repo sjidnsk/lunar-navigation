@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import subprocess
+import sys
 import xml.etree.ElementTree as element_tree
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +31,7 @@ EXPECTED_DOCUMENT = {
         "map_global": {
             "name": "/environment/map_global",
             "type": "grid_map_msgs/msg/GridMap",
-            "owner": "external",
+            "owner": "luna_t3_map_adapter",
             "frame": "map",
             "level_semantics": "selected_configured_global",
             "required_fields": [
@@ -42,6 +43,13 @@ EXPECTED_DOCUMENT = {
                 "outer_start_index",
                 "inner_start_index",
             ],
+        },
+        "task3_global_map_revision": {
+            "name": "/Car/T3/mapping/global_map_revision",
+            "type": "std_msgs/msg/UInt64",
+            "owner": "external",
+            "frame": "map",
+            "required_fields": ["data"],
         },
         "map_local": {
             "name": "/environment/map_local",
@@ -151,6 +159,7 @@ EXPECTED_DOCUMENT = {
             "schema": "platform-control-capability-source/v2",
             "formats": ["yaml", "json", "urdf"],
             "required_fields": ["platform", "geometry_source", "sources"],
+            "geometry_sources": ["parametric_envelope", "urdf_mesh"],
         },
     },
 }
@@ -370,7 +379,7 @@ def test_check_interfaces_rejects_missing_required_contract_sections_without_ros
     ("path", "value", "expected_error"),
     [
         (("schema_version",), "wrong/v1", "config error: schema_version must be 'lunar-external-interfaces/v5'"),
-        (("topics", "map_global", "owner"), "internal", "config error: topics.map_global.owner must be 'external'"),
+        (("topics", "map_global", "owner"), "external", "config error: topics.map_global.owner must be 'luna_t3_map_adapter'"),
         (("topics", "map_global", "type"), "nav_msgs/msg/Path", "config error: topics.map_global.type must be 'grid_map_msgs/msg/GridMap'"),
         (("topics", "map_global", "frame"), "odom", "config error: topics.map_global.frame must be 'map'"),
         (("topics", "map_global", "level_semantics"), "l0_platform_window", "config error: topics.map_global.level_semantics must be 'selected_configured_global'"),
@@ -409,6 +418,30 @@ def test_check_interfaces_rejects_wrong_fixed_contract_values_without_ros(
 
     assert expected_error in errors
     assert calls == []
+
+
+def test_check_interfaces_cli_rejects_missing_platform_geometry_sources(tmp_path):
+    """The published geometry-source union is required before ROS discovery."""
+    document = complete_valid_config()
+    del document["static_inputs"]["platform_capability"]["geometry_sources"]
+    config = write_config(tmp_path / "interfaces.yaml", document)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPOSITORY_ROOT / "tools/check_external_interfaces.py"),
+            "--config",
+            str(config),
+            "--expected-lunar-navigation-prefix",
+            str(tmp_path / "expected"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "static_inputs" in result.stdout or "static_inputs" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -506,6 +539,7 @@ def test_check_interfaces_records_successful_package_prefix(tmp_path):
     assert package_locations == {
         "grid_map_msgs": "/opt/ros/humble",
         "nav_msgs": "/opt/ros/humble",
+        "std_msgs": "/opt/ros/humble",
         "tf2_msgs": "/opt/ros/humble",
         "lunar_navigation_msgs": str(expected),
     }

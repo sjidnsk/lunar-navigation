@@ -40,6 +40,7 @@
 #include <tf2_msgs/msg/tf_message.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
+#include "lunar_planner_core/frame_transform.hpp"
 #include "lunar_planner_core/planner.hpp"
 #include "lunar_planner_ros/execution_feedback_tracker.hpp"
 #include "lunar_planner_ros/message_conversion.hpp"
@@ -343,6 +344,18 @@ struct ExecutionDiagnosticInfo final {
        ground->state == lunar::planning::GroundExecutionState::kHolding);
 }
 
+[[nodiscard]] std::optional<lunar::planning::Vec3>
+ExecutionGravityMps2(const lunar::planning::PlannerInput& input) noexcept {
+  const auto* capability =
+      std::get_if<lunar::planning::HopperCapability>(&input.capability);
+  if (capability == nullptr) {
+    return lunar::planning::Vec3{};
+  }
+  return lunar::planning::hierarchical::TransformVector(
+      capability->gravity_mps2, input.world.map_from_odom,
+      lunar::planning::hierarchical::TransformDirection::kParentToChild);
+}
+
 }  // namespace
 
 struct PlanMotionServer::Impl final {
@@ -515,8 +528,7 @@ struct PlanMotionServer::Impl final {
     node.declare_parameter<std::int64_t>("maximum_global_cells", 1'048'576);
     node.declare_parameter<std::int64_t>("maximum_global_axis_cells", 4'096);
     node.declare_parameter<std::int64_t>("target_global_axis_cells", 256);
-    node.declare_parameter(
-        "capability_package", rclcpp::ParameterType::PARAMETER_STRING);
+    node.declare_parameter<std::string>("capability_package", "");
     node.declare_parameter(
         "platform_capability_file", rclcpp::ParameterType::PARAMETER_STRING);
     node.declare_parameter(
@@ -673,7 +685,7 @@ struct PlanMotionServer::Impl final {
         node.get_parameter("platform_capability_file").as_string();
     const std::string observation_file =
         node.get_parameter("observation_capability_file").as_string();
-    const CapabilityLoadResult loaded = CapabilityLoader{}.LoadFromPackageShare(
+    const CapabilityLoadResult loaded = CapabilityLoader{}.LoadConfigured(
         package, platform_file, observation_file);
     if (!loaded.ok()) {
       throw std::runtime_error{
@@ -1364,6 +1376,13 @@ struct PlanMotionServer::Impl final {
     }
 
     PublishFeedback(goal_handle, Action::Feedback::CERTIFYING, started);
+    const auto execution_gravity_mps2 = ExecutionGravityMps2(*snapshot.input);
+    if (!execution_gravity_mps2.has_value()) {
+      CompleteInvariantFailure(
+          goal_handle, request.mission_revision, generation,
+          "FRAME_TRANSFORM_INVALID");
+      return;
+    }
     const ActionResultConversion converted = ConvertPlannerOutput(
         output,
         PlannerResultContext{
@@ -1376,6 +1395,7 @@ struct PlanMotionServer::Impl final {
             .local_map_generation = snapshot.input->local_map_generation,
             .preview_frame = "map",
             .execution_frame = "odom",
+            .execution_gravity_mps2 = *execution_gravity_mps2,
         });
     if (!converted.ok()) {
       CompleteInvariantFailure(
@@ -1393,7 +1413,8 @@ struct PlanMotionServer::Impl final {
       {
         std::scoped_lock lock{state_mutex};
         committed = reference_guard &&
-            reference_guard->Commit(converted.result->reference);
+            reference_guard->Commit(
+                converted.result->reference, *execution_gravity_mps2);
       }
       if (!committed) {
         CompleteInvariantFailure(

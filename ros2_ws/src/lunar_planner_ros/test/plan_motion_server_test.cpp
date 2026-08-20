@@ -4,6 +4,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <memory>
@@ -17,6 +19,7 @@
 
 #include <action_msgs/msg/goal_status.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
+#include <geometry_msgs/msg/quaternion.hpp>
 #include <gtest/gtest.h>
 #include <lifecycle_msgs/msg/state.hpp>
 #include <lunar_navigation_msgs/msg/exploration_task.hpp>
@@ -84,6 +87,45 @@ LoadedCapabilities WheelCapabilities() {
   };
 }
 
+LoadedCapabilities LeggedCapabilities() {
+  return LoadedCapabilities{
+      .platform_id = "legged",
+      .capability_version = "legged-v1",
+      .base_frame_id = "base_link",
+      .reference_point = "base_link",
+      .actuator_profile_id = {},
+      .maximum_obstacle_height_m = std::nullopt,
+      .source_motion_primitive_ids = {},
+      .urdf_path = {},
+      .mesh_paths = {},
+      .observation = {},
+      .platform = lunar::planning::LeggedCapability{
+          .body_extent_m = {0.68, 0.33, 0.35},
+          .nominal_body_height_m = 0.33,
+          .platform_mass_kg = 15.89,
+          .nominal_payload_kg = 8.0,
+          .maximum_payload_kg = 10.0,
+          .maximum_slope_rad = 0.5235987755982988,
+          .maximum_step_height_m = 0.5,
+          .maximum_gap_width_m = 0.3,
+          .minimum_body_clearance_m = 0.3,
+          .step_vertical_rate_mps = 0.1,
+          .body_height_m = {0.28, 0.38},
+          .forward_speed_mps = {-1.5, 1.5},
+          .lateral_speed_mps = {-0.8, 0.8},
+          .yaw_rate_radps = {-1.0, 1.0},
+          .maximum_linear_acceleration_mps2 = 1.0,
+          .maximum_yaw_acceleration_radps2 = 1.0,
+          .unknown_is_traversable = false,
+          .motion_primitives = {{
+              .primitive_id = "forward",
+              .kind = lunar::planning::LeggedPrimitiveKind::kForward,
+              .body_frame_displacement_m = {0.2, 0.0, 0.0},
+          }},
+      },
+  };
+}
+
 lunar::planning::HopperCapability MakeHopperCapability();
 
 LoadedCapabilities HopperCapabilities() {
@@ -100,6 +142,14 @@ LoadedCapabilities HopperCapabilities() {
       .observation = {},
       .platform = MakeHopperCapability(),
   };
+}
+
+LoadedCapabilities HopperCapabilitiesWithGravity(
+    const lunar::planning::Vec3 gravity_mps2) {
+  auto loaded = HopperCapabilities();
+  std::get<lunar::planning::HopperCapability>(loaded.platform).gravity_mps2 =
+      gravity_mps2;
+  return loaded;
 }
 
 lunar::planning::PlannerOutput WheelReferenceOutput(
@@ -187,6 +237,27 @@ rclcpp::NodeOptions ValidOptions() {
       rclcpp::Parameter{"target_global_axis_cells", 256},
   });
   return options;
+}
+
+std::filesystem::path RepositoryRoot() {
+  return std::filesystem::path{__FILE__}.parent_path()
+      .parent_path().parent_path().parent_path().parent_path();
+}
+
+std::filesystem::path WriteAbsoluteCapabilityFiles() {
+  const auto directory = std::filesystem::temp_directory_path() /
+      ("lunar-plan-motion-capability-" + std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::create_directories(directory);
+  std::filesystem::copy_file(
+      RepositoryRoot() / "deployment/config/wheel.yaml",
+      directory / "platform.yaml",
+      std::filesystem::copy_options::overwrite_existing);
+  std::ofstream observation{directory / "observation.yaml"};
+  EXPECT_TRUE(observation.good());
+  observation << "sensor_range_m: 25.0\nsensor_fov_deg: 90.0\n";
+  EXPECT_TRUE(observation.good());
+  return directory;
 }
 
 class RunningSystem final {
@@ -288,7 +359,9 @@ class RunningSystem final {
   void PublishInputs(
       const std::uint64_t revision = 7U,
       const std::uint8_t desired_state =
-          lunar_navigation_msgs::msg::ExplorationTask::ACTIVE) {
+          lunar_navigation_msgs::msg::ExplorationTask::ACTIVE,
+      const std::optional<geometry_msgs::msg::Quaternion>
+          map_from_odom_rotation = std::nullopt) {
     const rclcpp::Time now = server->now();
     last_stamp = now;
     const std::int64_t nanoseconds = now.nanoseconds();
@@ -302,6 +375,10 @@ class RunningSystem final {
         lunar_navigation_msgs::msg::LocalizationStatus::VALID,
         nanoseconds);
     auto transforms = test::MakeTransforms(nanoseconds);
+    if (map_from_odom_rotation.has_value()) {
+      transforms.transforms.front().transform.rotation =
+          *map_from_odom_rotation;
+    }
     lunar_navigation_msgs::msg::ExplorationTask mission;
     mission.header.frame_id = "map";
     mission.header.stamp = last_stamp;
@@ -556,6 +633,82 @@ TEST_F(PlanMotionServerTest, ConfiguresAndActivatesWithExplicitSnapshotPolicy) {
   EXPECT_EQ(
       node->cleanup().id(),
       lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  node.reset();
+}
+
+TEST_F(
+    PlanMotionServerTest,
+    PassesApprovedWheelLatticeConfigurationToTheRuntimePlanner) {
+  std::mutex capture_mutex;
+  std::optional<lunar::planning::WheelPlannerConfig> observed_config;
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [&](const lunar::planning::PlannerInput& input) {
+        {
+          std::scoped_lock lock{capture_mutex};
+          observed_config = input.config.wheel;
+        }
+        return NoRouteOutput("WHEEL_CONFIG_OBSERVED");
+      },
+      .preloaded_capabilities = WheelCapabilities(),
+  }};
+  system.PublishInputs();
+
+  const auto goal = system.SendGoal(system.Goal("wheel-config"));
+  ASSERT_NE(goal, nullptr);
+  ASSERT_EQ(system.Result(goal).code, rclcpp_action::ResultCode::SUCCEEDED);
+
+  std::scoped_lock lock{capture_mutex};
+  ASSERT_TRUE(observed_config.has_value());
+  EXPECT_DOUBLE_EQ(observed_config->xy_resolution_m, 0.2);
+  EXPECT_EQ(observed_config->yaw_bin_count, 64U);
+}
+
+TEST_F(
+    PlanMotionServerTest,
+    PassesApprovedLeggedLatticeConfigurationToTheRuntimePlanner) {
+  std::mutex capture_mutex;
+  std::optional<lunar::planning::LeggedPlannerConfig> observed_config;
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [&](const lunar::planning::PlannerInput& input) {
+        {
+          std::scoped_lock lock{capture_mutex};
+          observed_config = input.config.legged;
+        }
+        return NoRouteOutput("LEGGED_CONFIG_OBSERVED");
+      },
+      .preloaded_capabilities = LeggedCapabilities(),
+  }};
+  system.PublishInputs();
+
+  const auto goal = system.SendGoal(system.Goal("legged-config"));
+  ASSERT_NE(goal, nullptr);
+  ASSERT_EQ(system.Result(goal).code, rclcpp_action::ResultCode::SUCCEEDED);
+
+  std::scoped_lock lock{capture_mutex};
+  ASSERT_TRUE(observed_config.has_value());
+  EXPECT_DOUBLE_EQ(observed_config->xy_resolution_m, 0.2);
+  EXPECT_EQ(observed_config->yaw_bin_count, 64U);
+}
+
+TEST_F(PlanMotionServerTest, ConfiguresFromAbsoluteCapabilityFiles) {
+  const auto directory = WriteAbsoluteCapabilityFiles();
+  auto options = ValidOptions();
+  options.append_parameter_override(
+      "platform_capability_file", (directory / "platform.yaml").string());
+  options.append_parameter_override(
+      "observation_capability_file", (directory / "observation.yaml").string());
+  auto node = std::make_shared<PlanMotionServer>(
+      std::move(options), PlanMotionServerDependencies{
+                              .planner = [](const lunar::planning::PlannerInput&) {
+                                return NoRouteOutput();
+                              },
+                              .preloaded_capabilities = std::nullopt,
+                          });
+
+  EXPECT_EQ(
+      node->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+
+  node->cleanup();
   node.reset();
 }
 
@@ -1456,6 +1609,75 @@ TEST_F(PlanMotionServerTest, LocksNewGoalsAfterActivatingHopperReference) {
   const std::string reason =
       system.server->last_diagnostic_reason_for_testing();
   EXPECT_TRUE(reason == "HOP_IN_FLIGHT" || reason == "HOP_JUMP_COMMITTED");
+}
+
+TEST_F(
+    PlanMotionServerTest,
+    ReturnsAndCommitsHopperReferenceUsingConfiguredGravityAcrossLayers) {
+  RunningSystem system{PlanMotionServerDependencies{
+      .planner = [](const lunar::planning::PlannerInput& input) {
+        lunar::planning::HopReference hops{
+            .segments = {lunar::planning::HopSegment{
+                .segment_id = "low-gravity-hop",
+                .launch_pose = {},
+                .landing_region_boundary_m = {
+                    {1.0, -2.62, 4.0}, {3.0, -2.62, 4.0},
+                    {3.0, -0.62, 4.0}, {1.0, -0.62, 4.0}},
+                .flight_time = 2s,
+                .launch_velocity_mps = {1.0, 0.0, 2.0},
+                .flight_tube_radius_m = 0.2,
+                .nominal_landing_point_m = {2.0, -1.62, 4.0},
+                .required_delta_v_mps = 7.0,
+                .available_delta_v_mps = 8.0,
+                .capability_version = input.capability_version,
+                .global_map_generation = input.global_map_generation,
+                .local_map_generation = input.local_map_generation,
+            }},
+        };
+        return lunar::planning::PlannerOutput{
+            .outcome = lunar::planning::PlanningOutcome::kNewReferenceAvailable,
+            .directive =
+                lunar::planning::ExecutionDirective::kActivateNewReference,
+            .reason_code = "LOW_GRAVITY_HOP_READY",
+            .reference = lunar::planning::MotionReference{
+                .plan_id = "low-gravity-hop-plan",
+                .platform_type = lunar::planning::PlatformType::kHopper,
+                .input_time = input.state_time,
+                .preview = lunar::planning::GlobalRoutePreview{
+                    .poses_map = {
+                        lunar::planning::Pose3{},
+                        lunar::planning::Pose3{
+                            .position_m = {2.0, -1.62, 4.0}},
+                    },
+                },
+                .data = std::move(hops),
+            },
+            .diagnostics = {},
+        };
+      },
+      .preloaded_capabilities =
+          HopperCapabilitiesWithGravity({0.0, 0.0, -0.81}),
+  }};
+  geometry_msgs::msg::Quaternion map_from_odom_rotation;
+  map_from_odom_rotation.w = 0.7071067811865476;
+  map_from_odom_rotation.x = 0.7071067811865476;
+  system.PublishInputs(
+      7U, lunar_navigation_msgs::msg::ExplorationTask::ACTIVE,
+      map_from_odom_rotation);
+
+  const auto goal = system.SendGoal(system.Goal("low-gravity-hop"));
+  ASSERT_NE(goal, nullptr);
+  const auto result = system.Result(goal);
+
+  ASSERT_NE(result.result, nullptr);
+  ASSERT_EQ(result.code, rclcpp_action::ResultCode::SUCCEEDED)
+      << result.result->reason_code;
+  ASSERT_TRUE(result.result->has_reference) << result.result->reason_code;
+  ASSERT_EQ(result.result->reference.hops.size(), 1U);
+  EXPECT_DOUBLE_EQ(result.result->reference.hops.front().nominal_landing_point.y,
+                   -1.62);
+  EXPECT_DOUBLE_EQ(result.result->reference.hops.front().nominal_landing_point.z,
+                   4.0);
 }
 
 TEST_F(PlanMotionServerTest, InternalResultInvariantUsesRecoverableErrorPath) {

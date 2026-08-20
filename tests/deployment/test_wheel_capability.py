@@ -1,0 +1,177 @@
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[2]
+CAPABILITY = ROOT / "deployment/config/wheel.yaml"
+
+
+def test_wheel_v1_is_complete_parametric_runtime_capability() -> None:
+    document = yaml.safe_load(CAPABILITY.read_text(encoding="utf-8"))
+
+    assert document == {
+        "schema_version": "platform-control-capability-source/v2",
+        "platform": {
+            "platform_id": "wheel",
+            "platform_type": "WHEELED",
+            "capability_version": "wheel-v1",
+            "base_frame_id": "base_footprint",
+            "provenance": {
+                "level": "approved_user_parameter_baseline",
+                "design_document": (
+                    "docs/superpowers/specs/"
+                    "2026-08-20-wheel-parametric-capability-design.md"
+                ),
+            },
+            "unknown_fields": [
+                "bare_mass_kg",
+                "nominal_payload_kg",
+                "maximum_payload_kg",
+                "center_of_mass_height_m",
+                "suspension_type",
+                "maximum_drive_effort",
+                "manufacturer_rated_speed_mps",
+                "longitudinal_traction_coefficient",
+                "lateral_traction_coefficient",
+                "verified_cross_slope_limit_rad",
+            ],
+        },
+        "geometry_source": {"type": "parametric_envelope"},
+        "wheeled": {
+            "reference_point": "base_footprint",
+            "body_extent_m": [1.301, 0.808, 1.363],
+            "footprint_xy_m": [
+                [0.6505, 0.404],
+                [0.6505, -0.404],
+                [-0.6505, -0.404],
+                [-0.6505, 0.404],
+            ],
+            "wheel_count": 4,
+            "wheel_diameter_m": 0.304,
+            "wheel_width_m": 0.148,
+            "wheelbase_m": 0.815,
+            "track_width_m": 0.623,
+            "wheel_center_xy_m": [
+                [0.4075, 0.3115],
+                [0.4075, -0.3115],
+                [-0.4075, -0.3115],
+                [-0.4075, 0.3115],
+            ],
+            "minimum_underbody_clearance_m": 0.214,
+            "maximum_local_obstacle_relief_m": 0.2,
+            "allow_unsupported_gap": False,
+            "maximum_forward_speed_mps": 0.2,
+            "maximum_reverse_speed_mps": 0.2,
+            "maximum_spin_rate_radps": 0.389923188554511,
+            "maximum_acceleration_mps2": 0.2,
+            "maximum_braking_deceleration_mps2": 0.2,
+            "maximum_yaw_acceleration_radps2": 0.389923188554511,
+            "maximum_lateral_acceleration_mps2": 0.2,
+            "maximum_curvature_per_m": 5.0,
+            "maximum_slope_rad": 0.174532925199433,
+            "minimum_clearance_m": 0.1,
+            "roughness_handling": "COST_SPEED_AND_LOCAL_RECHECK",
+            "motion_primitives": [
+                {
+                    "primitive_id": "forward",
+                    "kind": "FORWARD",
+                    "relative_end_pose": {
+                        "position_m": [0.2, 0.0, 0.0],
+                        "orientation_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                },
+                {
+                    "primitive_id": "reverse",
+                    "kind": "REVERSE",
+                    "relative_end_pose": {
+                        "position_m": [-0.2, 0.0, 0.0],
+                        "orientation_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                },
+                {
+                    "primitive_id": "forward-arc-left",
+                    "kind": "FORWARD_ARC",
+                    "relative_end_pose": {
+                        "position_m": [0.019603428065912, 0.000963054665561, 0.0],
+                        "orientation_wxyz": [0.998795456205172, 0.0, 0.0, 0.049067674327418],
+                    },
+                },
+                {
+                    "primitive_id": "forward-arc-right",
+                    "kind": "FORWARD_ARC",
+                    "relative_end_pose": {
+                        "position_m": [0.019603428065912, -0.000963054665561, 0.0],
+                        "orientation_wxyz": [0.998795456205172, 0.0, 0.0, -0.049067674327418],
+                    },
+                },
+                {
+                    "primitive_id": "reverse-arc-left",
+                    "kind": "REVERSE_ARC",
+                    "relative_end_pose": {
+                        "position_m": [-0.019603428065912, 0.000963054665561, 0.0],
+                        "orientation_wxyz": [0.998795456205172, 0.0, 0.0, -0.049067674327418],
+                    },
+                },
+                {
+                    "primitive_id": "reverse-arc-right",
+                    "kind": "REVERSE_ARC",
+                    "relative_end_pose": {
+                        "position_m": [-0.019603428065912, -0.000963054665561, 0.0],
+                        "orientation_wxyz": [0.998795456205172, 0.0, 0.0, 0.049067674327418],
+                    },
+                },
+                {
+                    "primitive_id": "spin-left",
+                    "kind": "SPIN_COUNTERCLOCKWISE",
+                    "relative_end_pose": {
+                        "position_m": [0.0, 0.0, 0.0],
+                        "orientation_wxyz": [0.998795456205172, 0.0, 0.0, 0.049067674327418],
+                    },
+                },
+                {
+                    "primitive_id": "spin-right",
+                    "kind": "SPIN_CLOCKWISE",
+                    "relative_end_pose": {
+                        "position_m": [0.0, 0.0, 0.0],
+                        "orientation_wxyz": [0.998795456205172, 0.0, 0.0, -0.049067674327418],
+                    },
+                },
+                {
+                    "primitive_id": "stop-switch",
+                    "kind": "STOP_AND_SWITCH",
+                    "relative_end_pose": {
+                        "position_m": [0.0, 0.0, 0.0],
+                        "orientation_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                },
+            ],
+        },
+        "sources": {
+            "reference_point": "derived",
+            "body_extent_m": "user_provided_dimension",
+            "footprint_xy_m": "derived",
+            "wheel_count": "user_confirmed_capability",
+            "wheel_diameter_m": "user_provided_dimension",
+            "wheel_width_m": "user_provided_dimension",
+            "wheelbase_m": "user_provided_dimension",
+            "track_width_m": "user_provided_dimension",
+            "wheel_center_xy_m": "derived",
+            "minimum_underbody_clearance_m": "user_provided_dimension",
+            "minimum_clearance_m": "user_approved_planning_policy",
+            "maximum_forward_speed_mps": "user_confirmed_capability",
+            "maximum_reverse_speed_mps": "user_confirmed_capability",
+            "maximum_spin_rate_radps": "derived",
+            "maximum_acceleration_mps2": "user_confirmed_capability",
+            "maximum_braking_deceleration_mps2": "user_confirmed_capability",
+            "maximum_yaw_acceleration_radps2": "derived",
+            "maximum_lateral_acceleration_mps2": "user_approved_planning_policy",
+            "maximum_curvature_per_m": "user_confirmed_capability",
+            "maximum_surface_slope_rad": "user_confirmed_capability",
+            "maximum_local_obstacle_relief_m": "user_confirmed_capability",
+            "allow_unsupported_gap": "user_confirmed_capability",
+            "roughness_handling": "user_approved_planning_policy",
+            "motion_primitives": "user_approved_planning_policy",
+        },
+    }
+    assert document["wheeled"]["allow_unsupported_gap"] is False

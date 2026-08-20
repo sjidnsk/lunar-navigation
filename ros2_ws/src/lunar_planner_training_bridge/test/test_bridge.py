@@ -104,7 +104,9 @@ def _wheel_capability() -> bridge_api.WheeledCapability:
 def _legged_capability() -> bridge_api.LeggedCapability:
     capability = bridge_api.LeggedCapability()
     capability.body_extent_m = _vec3(0.68, 0.33, 0.35)
+    capability.nominal_body_height_m = 0.33
     capability.platform_mass_kg = 15.89
+    capability.nominal_payload_kg = 8.0
     capability.maximum_payload_kg = 10.0
     capability.maximum_slope_rad = 0.5235987755982988
     capability.maximum_step_height_m = 0.5
@@ -121,6 +123,7 @@ def _legged_capability() -> bridge_api.LeggedCapability:
     capability.yaw_rate_radps.upper = 1.0
     capability.maximum_linear_acceleration_mps2 = 0.5
     capability.maximum_yaw_acceleration_radps2 = 1.0
+    capability.unknown_is_traversable = False
     primitive = bridge_api.LeggedBodyPrimitive()
     primitive.primitive_id = "forward"
     primitive.kind = bridge_api.LeggedPrimitiveKind.FORWARD
@@ -134,6 +137,10 @@ def _hopper_capability() -> bridge_api.HopperCapability:
     capability.specific_impulse_s = 301.0
     capability.reference_total_mass_kg = 20.0
     capability.reference_propellant_mass_kg = 0.2
+    capability.gravity_mps2 = _vec3(0.0, 0.0, -1.62)
+    capability.reference_horizontal_range_m = 100.0
+    capability.reference_elevation_delta_m = 0.0
+    capability.runtime_fallback_allowed = False
     capability.landing_support_radius_m = 0.45
     capability.flight_collision_radius_m = 0.55
     capability.maximum_landing_plane_residual_m = 0.05
@@ -156,6 +163,20 @@ def test_bridge_exposes_capability_v2_without_retired_limits_or_durations() -> N
     assert not hasattr(bridge_api, "SearchResourceLimits")
     assert not hasattr(bridge_api.WheelPlannerConfig(), "maximum_terminal_candidates")
     assert not hasattr(bridge_api.HopperPlannerConfig(), "maximum_graph_nodes")
+
+
+def test_bridge_exposes_complete_hopper_single_hop_projection() -> None:
+    """Would fail if formal Hopper fields were lost crossing the pybind boundary."""
+    hopper = _hopper_capability()
+
+    assert (hopper.gravity_mps2.x, hopper.gravity_mps2.y, hopper.gravity_mps2.z) == (
+        0.0,
+        0.0,
+        -1.62,
+    )
+    assert hopper.reference_horizontal_range_m == 100.0
+    assert hopper.reference_elevation_delta_m == 0.0
+    assert hopper.runtime_fallback_allowed is False
 
 
 def test_urdf_validation_uses_authoritative_model_parser() -> None:
@@ -561,7 +582,7 @@ def test_bridge_projects_start_bound_reachability_with_exact_array_contract(
         assert projection.algorithm_id == "cpp-hopper-certified-bidirectional-bfs/v3"
         assert projection.candidate_edges_evaluated > 0
     else:
-        assert projection.algorithm_id == "cpp-ground-start-connected-component/v1"
+        assert projection.algorithm_id == "cpp-ground-global-cost-tree/v1"
         assert projection.candidate_edges_evaluated == 0
 
 
@@ -651,7 +672,7 @@ def test_bridge_streams_hopper_landing_evidence_into_reachability(
     assert direct.reachable.shape == external.reachable.shape
     assert direct.reachable.dtype == np.uint8
     assert direct.reachable.flags.c_contiguous
-    assert opportunity.algorithm_id == "cpp-hopper-opportunity-distance/v1"
+    assert opportunity.algorithm_id == "cpp-hopper-opportunity-distance/v2"
     assert opportunity.direct_progress.shape == shape
     assert opportunity.direct_progress.dtype == np.bool_
     assert opportunity.direct_progress.flags.c_contiguous

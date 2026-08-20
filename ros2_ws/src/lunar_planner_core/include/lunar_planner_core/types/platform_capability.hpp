@@ -76,7 +76,9 @@ struct LeggedBodyPrimitive final {
 
 struct LeggedCapability final {
   Vec3 body_extent_m;
+  double nominal_body_height_m{};
   double platform_mass_kg{};
+  double nominal_payload_kg{};
   double maximum_payload_kg{};
   double maximum_slope_rad{};
   double maximum_step_height_m{};
@@ -89,6 +91,7 @@ struct LeggedCapability final {
   Interval yaw_rate_radps;
   double maximum_linear_acceleration_mps2{};
   double maximum_yaw_acceleration_radps2{};
+  bool unknown_is_traversable{};
   std::vector<LeggedBodyPrimitive> motion_primitives;
 };
 
@@ -96,6 +99,10 @@ struct HopperCapability final {
   double specific_impulse_s{};
   double reference_total_mass_kg{};
   double reference_propellant_mass_kg{};
+  Vec3 gravity_mps2{0.0, 0.0, -1.62};
+  double reference_horizontal_range_m{100.0};
+  double reference_elevation_delta_m{};
+  bool runtime_fallback_allowed{};
   double landing_support_radius_m{};
   double flight_collision_radius_m{};
   double maximum_landing_plane_residual_m{};

@@ -26,7 +26,6 @@
 namespace lunar::planning::hopper {
 namespace {
 
-constexpr Vec3 kLunarGravityMps2{0.0, 0.0, -1.62};
 constexpr double kDistanceToleranceM = 1.0e-9;
 constexpr double kDefaultPrimitiveDistanceM = 30.0;
 constexpr std::size_t kNoState = std::numeric_limits<std::size_t>::max();
@@ -219,7 +218,7 @@ CertifiedLandingAtPosition(
       SingleHopCertificationProblem{
           .launch_position_m = source.aim_position_on_surface_m,
           .landing_position_m = target.aim_position_on_surface_m,
-          .gravity_mps2 = kLunarGravityMps2,
+          .gravity_mps2 = capability.gravity_mps2,
           .flight_map = &flight_map,
           .capability = &capability,
           .map_safety = &map_safety,
@@ -285,6 +284,12 @@ void AppendString(
   AppendDouble(output, capability.specific_impulse_s);
   AppendDouble(output, capability.reference_total_mass_kg);
   AppendDouble(output, capability.reference_propellant_mass_kg);
+  AppendDouble(output, capability.gravity_mps2.x);
+  AppendDouble(output, capability.gravity_mps2.y);
+  AppendDouble(output, capability.gravity_mps2.z);
+  AppendDouble(output, capability.reference_horizontal_range_m);
+  AppendDouble(output, capability.reference_elevation_delta_m);
+  output.push_back(capability.runtime_fallback_allowed ? 1U : 0U);
   AppendDouble(output, capability.landing_support_radius_m);
   AppendDouble(output, capability.flight_collision_radius_m);
   AppendDouble(output, capability.maximum_landing_plane_residual_m);

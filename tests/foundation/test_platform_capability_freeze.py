@@ -46,6 +46,14 @@ def write_mutated_freeze(tmp_path: Path, mutate) -> Path:
     return output
 
 
+def write_mutated_schema(tmp_path: Path, mutate) -> Path:
+    document = yaml.safe_load(SCHEMA.read_text(encoding="utf-8"))
+    mutate(document)
+    output = tmp_path / "schema.yaml"
+    output.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return output
+
+
 def test_approved_freeze_is_complete_and_digest_verified():
     """Missing a platform, provenance, or matching digest must block the freeze."""
     result = run_checker(SCHEMA, FREEZE)
@@ -132,6 +140,35 @@ def test_checker_rejects_missing_field_provenance(tmp_path: Path):
 
     assert result.returncode == 1
     assert "WHEELED sources missing: wheel_diameter_m" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda document: document["geometry_source_variants"][
+            "parametric_envelope"
+        ]["required_fields"].remove("type"),
+        lambda document: document["geometry_source_variants"]["urdf_mesh"][
+            "required_fields"
+        ].remove("urdf_file"),
+        lambda document: document["geometry_source_variants"]
+        ["parametric_envelope"]["forbidden_fields"].remove("urdf_file"),
+        lambda document: document["geometry_source_variants"]["urdf_mesh"][
+            "forbidden_fields"
+        ].remove("type"),
+    ],
+)
+def test_checker_rejects_geometry_source_contract_mutations(tmp_path: Path, mutate):
+    """Required and forbidden geometry fields are part of the v2 schema contract."""
+    schema = write_mutated_schema(tmp_path, mutate)
+
+    result = run_checker(schema, FREEZE)
+
+    assert result.returncode == 1
+    assert (
+        "geometry_source_variants must exactly match the approved contract"
+        in result.stdout
+    )
 
 
 def test_schema_and_freeze_are_utf8_yaml_documents():
