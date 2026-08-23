@@ -34,6 +34,7 @@ set(LUNAR_ANYTIME_PRODUCTION_SOURCES
   src/hopper/ballistic_envelope.cpp
   src/hopper/ballistic_kinematics.cpp
   src/legged/anytime_legged_planner.cpp
+  src/shared/active_planner_cache.cpp
   src/shared/anytime_ara_star.cpp
   src/shared/cell_area_distance_transform.cpp
   src/shared/global_occupancy_projection.cpp
@@ -119,6 +120,8 @@ if(BUILD_TESTING)
     test/anytime_hopper_planner_test.cpp)
   lunar_add_core_gtest(lunar_pure_planner_core_ballistic_envelope_test
     test/ballistic_envelope_test.cpp)
+  lunar_add_core_gtest(lunar_pure_planner_core_active_planner_cache_test
+    test/active_planner_cache_test.cpp)
 
   add_test(
     NAME lunar_pure_planner_core_no_legacy_contract
