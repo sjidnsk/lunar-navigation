@@ -2,11 +2,13 @@ cmake_minimum_required(VERSION 3.22)
 project(lunar_pure_exploration_sim LANGUAGES CXX)
 
 find_package(ament_cmake REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(grid_map_msgs REQUIRED)
 find_package(lunar_planning_msgs REQUIRED)
 find_package(lunar_pure_exploration_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(nlohmann_json REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -18,6 +20,8 @@ add_library(${PROJECT_NAME} SHARED
   src/lunar_scene.cpp
   src/map_messages.cpp
   src/run_coordinator.cpp
+  src/run_recorder.cpp
+  src/run_recorder_node.cpp
   src/simulation_node.cpp
   src/visibility.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
@@ -26,6 +30,7 @@ target_include_directories(${PROJECT_NAME}
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     "$<INSTALL_INTERFACE:include>")
 ament_target_dependencies(${PROJECT_NAME}
+  diagnostic_msgs
   geometry_msgs
   grid_map_msgs
   lunar_planning_msgs
@@ -36,6 +41,7 @@ ament_target_dependencies(${PROJECT_NAME}
   std_msgs
   tf2_msgs
   visualization_msgs)
+target_link_libraries(${PROJECT_NAME} nlohmann_json::nlohmann_json)
 
 add_executable(simulation_node src/simulation_main.cpp)
 target_compile_features(simulation_node PRIVATE cxx_std_20)
@@ -45,6 +51,14 @@ add_executable(run_coordinator src/run_coordinator_main.cpp)
 target_compile_features(run_coordinator PRIVATE cxx_std_20)
 target_link_libraries(run_coordinator ${PROJECT_NAME})
 
+add_executable(run_recorder src/run_recorder_main.cpp)
+target_compile_features(run_recorder PRIVATE cxx_std_20)
+target_link_libraries(run_recorder ${PROJECT_NAME})
+
+add_executable(simulation_hud_node src/simulation_hud_node.cpp)
+target_compile_features(simulation_hud_node PRIVATE cxx_std_20)
+target_link_libraries(simulation_hud_node ${PROJECT_NAME})
+
 install(
   TARGETS ${PROJECT_NAME}
   EXPORT export_${PROJECT_NAME}
@@ -52,7 +66,8 @@ install(
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
   INCLUDES DESTINATION include)
-install(TARGETS simulation_node run_coordinator DESTINATION lib/${PROJECT_NAME})
+install(TARGETS simulation_node run_coordinator run_recorder simulation_hud_node
+  DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 
 if(BUILD_TESTING)
@@ -82,11 +97,16 @@ if(BUILD_TESTING)
   ament_add_gtest(run_coordinator_test test/run_coordinator_test.cpp)
   target_compile_features(run_coordinator_test PRIVATE cxx_std_20)
   target_link_libraries(run_coordinator_test ${PROJECT_NAME})
+
+  ament_add_gtest(run_recorder_test test/run_recorder_test.cpp)
+  target_compile_features(run_recorder_test PRIVATE cxx_std_20)
+  target_link_libraries(run_recorder_test ${PROJECT_NAME})
 endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(
   geometry_msgs
+  diagnostic_msgs
   grid_map_msgs
   lunar_planning_msgs
   lunar_pure_exploration_msgs
