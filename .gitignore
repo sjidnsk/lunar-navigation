@@ -1,0 +1,51 @@
+# ROS 2 / colcon generated output
+build/
+build-*/
+install/
+install-*/
+log/
+
+# Python caches and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE-generated databases; keep the small workspace configuration files
+.vscode/browse.vc.db*
+
+# Native compiler output
+compile_commands.json
+*.o
+*.a
+*.so
+
+# Runtime, device, dataset, and model artifacts
+artifacts/
+checkpoints/
+datasets/
+device-output/
+rosbags/
+training-output/
+*.bag
+*.db3
+*.mcap
+*.engine
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.npy
+*.npz
+*.parquet
+*.tif
+*.tiff
+*.dem
+*.dtm
+*.vrt
+
+# Editor and OS noise
+*~
+.DS_Store

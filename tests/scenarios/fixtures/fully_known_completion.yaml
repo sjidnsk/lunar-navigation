@@ -1,0 +1,50 @@
+schema_version: 1
+fixture_id: fully_known_completion
+authority: test-only/non-authoritative
+platform:
+  platform_type: wheel
+  geometry_reference: lunar_pure_navigation_config/platforms/wheel
+task:
+  task_id: task15-fully-known-completion
+  boundary_xy:
+    - [0.0, 0.0]
+    - [4.0, 0.0]
+    - [4.0, 4.0]
+    - [0.0, 4.0]
+initial_inputs:
+  occupancy_grid:
+    header: {frame_id: map, stamp_ns: 4000000000, map_version: 23}
+    geometry:
+      resolution_m: 1.0
+      width: 4
+      height: 4
+      origin: {x: 0.0, y: 0.0}
+    semantics: {unknown: -1, free: 0, occupied: 100}
+    data: [0, 0, 0, 0, 0, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    content_id: fully-known-content-v1
+  transforms:
+    map_to_odom: {translation_xy: [0.0, 0.0], yaw_rad: 0.0}
+  odometry:
+    frame_id: odom
+    child_frame_id: base_link
+    pose_xy_yaw: [0.5, 0.5, 0.0]
+    covariance: [0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04]
+events:
+  - {kind: publish_initial_inputs}
+candidate_goal_cell_response_table: {}
+expected:
+  ordered_candidate_keys: []
+  ordered_goal_cells: []
+  ordered_requests: []
+  status_sequence: [IDLE, WAITING_FOR_INPUT, SELECTING_FRONTIER, COMPLETED]
+  reference_plan_ids: []
+  cancellation_plan_ids: []
+  coverage_ratio: 1.0
+  completed: true
+  requires_exhaustive_planner_evidence: true
+  replan_count: 0
+  stuck_retries: 0
+  committed_goal_key: none
+  semantic_mutations: {timestamp_only: "fnv1a64:83215f7a97adb854", map_version_only: "fnv1a64:83215f7a97adb854", covariance_only: "fnv1a64:83215f7a97adb854"}
+  two_segment: {enabled: false, committed_candidate_key: null, request_ids: [], endpoint_cells: [], final_goal_cell: null}
+  ordered_trace_id: "fnv1a64:83215f7a97adb854"

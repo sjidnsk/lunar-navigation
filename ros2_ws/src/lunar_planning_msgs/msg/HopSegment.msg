@@ -1,0 +1,13 @@
+std_msgs/Header header
+string segment_id
+geometry_msgs/Pose launch_pose
+geometry_msgs/Polygon landing_region
+builtin_interfaces/Duration flight_time
+geometry_msgs/Vector3 launch_velocity
+float64 flight_tube_radius_m
+geometry_msgs/Point nominal_landing_point
+float64 required_delta_v_mps
+float64 available_delta_v_mps
+string capability_version
+uint64 global_map_generation
+uint64 local_map_generation

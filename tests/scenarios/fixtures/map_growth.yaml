@@ -1,0 +1,180 @@
+schema_version: 1
+fixture_id: map_growth
+authority: test-only/non-authoritative
+platform:
+  platform_type: wheel
+  geometry_reference: lunar_pure_navigation_config/platforms/wheel
+task:
+  task_id: task15-map-growth
+  boundary_xy:
+    - [0.0, 0.0]
+    - [10.0, 0.0]
+    - [10.0, 10.0]
+    - [0.0, 10.0]
+initial_inputs:
+  occupancy_grid:
+    header: {frame_id: map, stamp_ns: 3000000000, map_version: 17}
+    geometry:
+      resolution_m: 0.5
+      width: 20
+      height: 20
+      origin: {x: 0.0, y: 0.0}
+    semantics: {unknown: -1, free: 0, occupied: 100}
+    rows:
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+    content_id: growth-content-v1
+  transforms:
+    map_to_odom: {translation_xy: [0.0, 0.0], yaw_rad: 0.0}
+  odometry:
+    frame_id: odom
+    child_frame_id: base_link
+    pose_xy_yaw: [2.0, 2.0, 0.0]
+    covariance: [0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.03]
+events:
+  - {kind: publish_initial_inputs}
+  - kind: publish_map_growth
+    occupancy_grid:
+      header: {frame_id: map, stamp_ns: 3001000000, map_version: 18}
+      geometry:
+        resolution_m: 0.5
+        width: 20
+        height: 20
+        origin: {x: 0.0, y: 0.0}
+      semantics: {unknown: -1, free: 0, occupied: 100}
+      rows:
+        - ".........#??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+        - "..........??????????"
+      content_id: growth-content-v2
+  - {kind: publish_odometry, pose_xy_yaw: [3.5, 2.75, 0.0]}
+  - {kind: advance_steady_clock, seconds: 2.0}
+  - {kind: poll_execution}
+  - {kind: publish_odometry, pose_xy_yaw: [4.081, 2.75, 0.39269908169872414]}
+  - {kind: poll_execution}
+candidate_goal_cell_response_table:
+  "8,4":
+    responses:
+      - {kind: DELAYED, candidate_key: "4081,2250,450", request_id: task15-map-growth/candidate/0}
+      - {kind: NO_PATH, candidate_key: "4081,2250,225", request_id: task15-map-growth/candidate/1}
+      - {kind: NO_PATH, candidate_key: "4081,2250,0", request_id: task15-map-growth/candidate/2}
+      - {kind: NO_PATH, candidate_key: "4081,2250,-225", request_id: task15-map-growth/candidate/7}
+      - {kind: NO_PATH, candidate_key: "4081,2250,-450", request_id: task15-map-growth/candidate/12}
+  "8,9":
+    responses:
+      - {kind: NO_PATH, candidate_key: "4081,4750,0", request_id: task15-map-growth/candidate/3}
+      - {kind: NO_PATH, candidate_key: "4081,4750,225", request_id: task15-map-growth/candidate/4}
+      - {kind: NO_PATH, candidate_key: "4081,4750,-225", request_id: task15-map-growth/candidate/5}
+      - {kind: NO_PATH, candidate_key: "4081,4750,450", request_id: task15-map-growth/candidate/6}
+      - {kind: NO_PATH, candidate_key: "4081,4750,-450", request_id: task15-map-growth/candidate/10}
+  "8,14":
+    responses:
+      - {kind: NO_PATH, candidate_key: "4081,7250,-225", request_id: task15-map-growth/candidate/8}
+      - {kind: NO_PATH, candidate_key: "4081,7250,-450", request_id: task15-map-growth/candidate/9}
+      - {kind: NO_PATH, candidate_key: "4081,7250,0", request_id: task15-map-growth/candidate/11}
+      - {kind: NO_PATH, candidate_key: "4081,7250,225", request_id: task15-map-growth/candidate/13}
+      - {kind: NO_PATH, candidate_key: "4081,7250,450", request_id: task15-map-growth/candidate/14}
+  "8,5":
+    responses:
+      - {kind: SUCCESS, candidate_key: "4081,2750,225", request_id: task15-map-growth/candidate/15, executable_endpoint_xy: [3.5, 2.75]}
+      - {kind: NO_PATH, candidate_key: "4081,2750,450", request_id: task15-map-growth/candidate/16}
+      - {kind: NO_PATH, candidate_key: "4081,2750,0", request_id: task15-map-growth/candidate/17}
+      - {kind: NO_PATH, candidate_key: "4081,2750,-225", request_id: task15-map-growth/candidate/20}
+      - {kind: NO_PATH, candidate_key: "4081,2750,-450", request_id: task15-map-growth/candidate/26}
+      - {kind: SUCCESS, candidate_key: "4081,2750,225", request_id: task15-map-growth/candidate/30}
+  "8,10":
+    responses:
+      - {kind: NO_PATH, candidate_key: "4081,5250,0", request_id: task15-map-growth/candidate/18}
+      - {kind: NO_PATH, candidate_key: "4081,5250,-225", request_id: task15-map-growth/candidate/19}
+      - {kind: NO_PATH, candidate_key: "4081,5250,225", request_id: task15-map-growth/candidate/21}
+      - {kind: NO_PATH, candidate_key: "4081,5250,-450", request_id: task15-map-growth/candidate/23}
+      - {kind: NO_PATH, candidate_key: "4081,5250,450", request_id: task15-map-growth/candidate/25}
+  "8,15":
+    responses:
+      - {kind: NO_PATH, candidate_key: "4081,7750,-450", request_id: task15-map-growth/candidate/22}
+      - {kind: NO_PATH, candidate_key: "4081,7750,-225", request_id: task15-map-growth/candidate/24}
+      - {kind: NO_PATH, candidate_key: "4081,7750,0", request_id: task15-map-growth/candidate/27}
+      - {kind: NO_PATH, candidate_key: "4081,7750,225", request_id: task15-map-growth/candidate/28}
+      - {kind: NO_PATH, candidate_key: "4081,7750,450", request_id: task15-map-growth/candidate/29}
+expected:
+  ordered_candidate_keys: ["4081,2250,450", "4081,2250,225", "4081,2250,0", "4081,4750,0", "4081,4750,225", "4081,4750,-225", "4081,4750,450", "4081,2250,-225", "4081,7250,-225", "4081,7250,-450", "4081,4750,-450", "4081,7250,0", "4081,2250,-450", "4081,7250,225", "4081,7250,450", "4081,2750,225", "4081,2750,450", "4081,2750,0", "4081,5250,0", "4081,5250,-225", "4081,2750,-225", "4081,5250,225", "4081,7750,-450", "4081,5250,-450", "4081,7750,-225", "4081,5250,450", "4081,2750,-450", "4081,7750,0", "4081,7750,225", "4081,7750,450", "4081,2750,225"]
+  ordered_goal_cells: ["8,4", "8,4", "8,4", "8,9", "8,9", "8,9", "8,9", "8,4", "8,14", "8,14", "8,9", "8,14", "8,4", "8,14", "8,14", "8,5", "8,5", "8,5", "8,10", "8,10", "8,5", "8,10", "8,15", "8,10", "8,15", "8,10", "8,5", "8,15", "8,15", "8,15", "8,5"]
+  ordered_requests:
+    - {request_id: task15-map-growth/candidate/0, candidate_key: "4081,2250,450", goal_cell: "8,4", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/1, candidate_key: "4081,2250,225", goal_cell: "8,4", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/2, candidate_key: "4081,2250,0", goal_cell: "8,4", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/3, candidate_key: "4081,4750,0", goal_cell: "8,9", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/4, candidate_key: "4081,4750,225", goal_cell: "8,9", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/5, candidate_key: "4081,4750,-225", goal_cell: "8,9", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/6, candidate_key: "4081,4750,450", goal_cell: "8,9", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/7, candidate_key: "4081,2250,-225", goal_cell: "8,4", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/8, candidate_key: "4081,7250,-225", goal_cell: "8,14", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/9, candidate_key: "4081,7250,-450", goal_cell: "8,14", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/10, candidate_key: "4081,4750,-450", goal_cell: "8,9", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/11, candidate_key: "4081,7250,0", goal_cell: "8,14", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/12, candidate_key: "4081,2250,-450", goal_cell: "8,4", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/13, candidate_key: "4081,7250,225", goal_cell: "8,14", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/14, candidate_key: "4081,7250,450", goal_cell: "8,14", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/15, candidate_key: "4081,2750,225", goal_cell: "8,5", response_kind: SUCCESS, path_segments: [{segment_index: 0, reference_plan_id: "scenario-plan:task15-map-growth/candidate/15", endpoint_cell: "7,5", final_goal_cell: "8,5"}]}
+    - {request_id: task15-map-growth/candidate/16, candidate_key: "4081,2750,450", goal_cell: "8,5", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/17, candidate_key: "4081,2750,0", goal_cell: "8,5", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/18, candidate_key: "4081,5250,0", goal_cell: "8,10", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/19, candidate_key: "4081,5250,-225", goal_cell: "8,10", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/20, candidate_key: "4081,2750,-225", goal_cell: "8,5", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/21, candidate_key: "4081,5250,225", goal_cell: "8,10", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/22, candidate_key: "4081,7750,-450", goal_cell: "8,15", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/23, candidate_key: "4081,5250,-450", goal_cell: "8,10", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/24, candidate_key: "4081,7750,-225", goal_cell: "8,15", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/25, candidate_key: "4081,5250,450", goal_cell: "8,10", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/26, candidate_key: "4081,2750,-450", goal_cell: "8,5", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/27, candidate_key: "4081,7750,0", goal_cell: "8,15", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/28, candidate_key: "4081,7750,225", goal_cell: "8,15", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/29, candidate_key: "4081,7750,450", goal_cell: "8,15", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-map-growth/candidate/30, candidate_key: "4081,2750,225", goal_cell: "8,5", response_kind: SUCCESS, path_segments: [{segment_index: 1, reference_plan_id: "scenario-plan:task15-map-growth/candidate/30", endpoint_cell: "8,5", final_goal_cell: "8,5"}]}
+  status_sequence: [IDLE, WAITING_FOR_INPUT, SELECTING_FRONTIER, EXECUTING, REPLANNING, EXECUTING, SELECTING_FRONTIER]
+  reference_plan_ids: ["scenario-plan:task15-map-growth/candidate/15", "scenario-plan:task15-map-growth/candidate/30"]
+  cancellation_plan_ids: ["scenario-plan:task15-map-growth/candidate/15"]
+  coverage_ratio: 0.5
+  completed: false
+  requires_exhaustive_planner_evidence: false
+  replan_count: 0
+  stuck_retries: 0
+  committed_goal_key: "4081,2750,225"
+  semantic_mutations: {timestamp_only: "fnv1a64:e61ae2500e2953a2", map_version_only: "fnv1a64:e61ae2500e2953a2", covariance_only: "fnv1a64:e61ae2500e2953a2"}
+  two_segment: {enabled: true, committed_candidate_key: "4081,2750,225", request_ids: [task15-map-growth/candidate/15, task15-map-growth/candidate/30], endpoint_cells: ["7,5", "8,5"], final_goal_cell: "8,5", completed_goal_count: 1, active_goal_after_arrival: false, failed_candidate_growth: 0}
+  ordered_trace_id: "fnv1a64:e61ae2500e2953a2"

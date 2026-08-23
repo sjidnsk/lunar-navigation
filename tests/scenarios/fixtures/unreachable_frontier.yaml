@@ -1,0 +1,128 @@
+schema_version: 1
+fixture_id: unreachable_frontier
+authority: test-only/non-authoritative
+platform:
+  platform_type: wheel
+  geometry_reference: lunar_pure_navigation_config/platforms/wheel
+task:
+  task_id: task15-unreachable-frontier
+  boundary_xy:
+    - [0.0, 0.0]
+    - [10.0, 0.0]
+    - [10.0, 8.0]
+    - [0.0, 8.0]
+initial_inputs:
+  occupancy_grid:
+    header: {frame_id: map, stamp_ns: 2000000000, map_version: 11}
+    geometry:
+      resolution_m: 0.5
+      width: 20
+      height: 16
+      origin: {x: 0.0, y: 0.0}
+    semantics: {unknown: -1, free: 0, occupied: 100}
+    data: [
+      0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 100, 100, 100, 100, 100, 100, 100, 100, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1,
+      0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1]
+    content_id: narrow-passage-content-v1
+  transforms:
+    map_to_odom: {translation_xy: [0.0, 0.0], yaw_rad: 0.0}
+  odometry:
+    frame_id: odom
+    child_frame_id: base_link
+    pose_xy_yaw: [2.0, 2.0, 0.0]
+    covariance: [0.02, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02]
+events:
+  - {kind: publish_initial_inputs}
+candidate_goal_cell_response_table:
+  "11,3":
+    responses:
+      - {kind: NO_PATH, candidate_key: "5581,1750,225", request_id: task15-unreachable-frontier/candidate/0}
+      - {kind: NO_PATH, candidate_key: "5581,1750,0", request_id: task15-unreachable-frontier/candidate/1}
+      - {kind: NO_PATH, candidate_key: "5581,1750,450", request_id: task15-unreachable-frontier/candidate/2}
+      - {kind: NO_PATH, candidate_key: "5581,1750,-225", request_id: task15-unreachable-frontier/candidate/6}
+      - {kind: NO_PATH, candidate_key: "5581,1750,-450", request_id: task15-unreachable-frontier/candidate/15}
+  "13,5":
+    responses:
+      - {kind: NO_PATH, candidate_key: "6581,2750,0", request_id: task15-unreachable-frontier/candidate/3}
+      - {kind: NO_PATH, candidate_key: "6581,2750,225", request_id: task15-unreachable-frontier/candidate/5}
+      - {kind: NO_PATH, candidate_key: "6581,2750,-225", request_id: task15-unreachable-frontier/candidate/7}
+      - {kind: NO_PATH, candidate_key: "6581,2750,450", request_id: task15-unreachable-frontier/candidate/10}
+      - {kind: NO_PATH, candidate_key: "6581,2750,-450", request_id: task15-unreachable-frontier/candidate/11}
+  "11,12":
+    responses:
+      - {kind: NO_PATH, candidate_key: "5581,6250,0", request_id: task15-unreachable-frontier/candidate/4}
+      - {kind: NO_PATH, candidate_key: "5581,6250,-225", request_id: task15-unreachable-frontier/candidate/8}
+      - {kind: NO_PATH, candidate_key: "5581,6250,225", request_id: task15-unreachable-frontier/candidate/13}
+      - {kind: NO_PATH, candidate_key: "5581,6250,-450", request_id: task15-unreachable-frontier/candidate/14}
+      - {kind: NO_PATH, candidate_key: "5581,6250,450", request_id: task15-unreachable-frontier/candidate/17}
+  "13,10":
+    responses:
+      - {kind: NO_PATH, candidate_key: "6581,5250,0", request_id: task15-unreachable-frontier/candidate/9}
+  "13,1":
+    responses:
+      - {kind: NO_PATH, candidate_key: "6581,750,0", request_id: task15-unreachable-frontier/candidate/12}
+  "13,14":
+    responses:
+      - {kind: NO_PATH, candidate_key: "6581,7250,0", request_id: task15-unreachable-frontier/candidate/16}
+expected:
+  ordered_candidate_keys: ["5581,1750,225", "5581,1750,0", "5581,1750,450", "6581,2750,0", "5581,6250,0", "6581,2750,225", "5581,1750,-225", "6581,2750,-225", "5581,6250,-225", "6581,5250,0", "6581,2750,450", "6581,2750,-450", "6581,750,0", "5581,6250,225", "5581,6250,-450", "5581,1750,-450", "6581,7250,0", "5581,6250,450"]
+  ordered_goal_cells: ["11,3", "11,3", "11,3", "13,5", "11,12", "13,5", "11,3", "13,5", "11,12", "13,10", "13,5", "13,5", "13,1", "11,12", "11,12", "11,3", "13,14", "11,12"]
+  ordered_requests:
+    - {request_id: task15-unreachable-frontier/candidate/0, candidate_key: "5581,1750,225", goal_cell: "11,3", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/1, candidate_key: "5581,1750,0", goal_cell: "11,3", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/2, candidate_key: "5581,1750,450", goal_cell: "11,3", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/3, candidate_key: "6581,2750,0", goal_cell: "13,5", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/4, candidate_key: "5581,6250,0", goal_cell: "11,12", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/5, candidate_key: "6581,2750,225", goal_cell: "13,5", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/6, candidate_key: "5581,1750,-225", goal_cell: "11,3", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/7, candidate_key: "6581,2750,-225", goal_cell: "13,5", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/8, candidate_key: "5581,6250,-225", goal_cell: "11,12", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/9, candidate_key: "6581,5250,0", goal_cell: "13,10", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/10, candidate_key: "6581,2750,450", goal_cell: "13,5", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/11, candidate_key: "6581,2750,-450", goal_cell: "13,5", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/12, candidate_key: "6581,750,0", goal_cell: "13,1", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/13, candidate_key: "5581,6250,225", goal_cell: "11,12", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/14, candidate_key: "5581,6250,-450", goal_cell: "11,12", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/15, candidate_key: "5581,1750,-450", goal_cell: "11,3", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/16, candidate_key: "6581,7250,0", goal_cell: "13,14", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-unreachable-frontier/candidate/17, candidate_key: "5581,6250,450", goal_cell: "11,12", response_kind: NO_PATH, path_segments: []}
+  status_sequence: [IDLE, WAITING_FOR_INPUT, SELECTING_FRONTIER, COMPLETED]
+  reference_plan_ids: []
+  cancellation_plan_ids: []
+  coverage_ratio: 0.75
+  completed: true
+  requires_exhaustive_planner_evidence: true
+  replan_count: 0
+  stuck_retries: 0
+  committed_goal_key: none
+  semantic_mutations: {timestamp_only: "fnv1a64:1226f6241f12bae6", map_version_only: "fnv1a64:1226f6241f12bae6", covariance_only: "fnv1a64:1226f6241f12bae6"}
+  two_segment: {enabled: false, committed_candidate_key: null, request_ids: [], endpoint_cells: [], final_goal_cell: null}
+  ordered_trace_id: "fnv1a64:1226f6241f12bae6"
+variants:
+  narrow_passage_continue:
+    request_count: 16
+    success_request_index: 1
+    expected:
+      status_sequence: [IDLE, WAITING_FOR_INPUT, SELECTING_FRONTIER, EXECUTING]
+      reference_plan_ids: ["scenario-plan:task15-unreachable-frontier/candidate/1"]
+      cancellation_plan_ids: []
+      coverage_ratio: 0.75
+      completed: false
+      replan_count: 0
+      stuck_retries: 0
+      committed_goal_key: "5581,1750,0"
+      ordered_trace_id: "fnv1a64:6ce254d4875665a2"

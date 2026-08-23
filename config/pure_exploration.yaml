@@ -1,0 +1,26 @@
+pure_exploration:
+  ros__parameters:
+    global_occupied_threshold: 50
+    maximum_task_raster_cells: 1048576
+    sensor_range_m: 10.0
+    sensor_fov_deg: 90.0
+    yaw_offsets_deg: [-45.0, -22.5, 0.0, 22.5, 45.0]
+    candidates_per_planning_batch: 16
+    score_weights:
+      information_gain: 0.60
+      global_path_length: 0.30
+      heading_change: 0.05
+      revisit: 0.05
+    stuck_timeout_s: 30.0
+    minimum_progress_m: 0.2
+    maximum_replans_per_candidate: 2
+    goal_yaw_tolerance_deg: 11.25
+    planner_result_timeout_s: 2.0
+    global_map_topic: /Car/T3/mapping/global_overview
+    odometry_topic: /Car/T3/localization/odometry
+    tf_topic: /tf
+    task_topic: /Car/T4/exploration/task
+    planner_action: /Car/T4/plan_motion
+    planner_diagnostics_topic: /Car/T4/planning/diagnostics
+    motion_reference_topic: /Car/T4/execution/motion_reference
+    execution_cancel_topic: /Car/T4/execution/cancel

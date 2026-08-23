@@ -1,0 +1,74 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <span>
+#include <stop_token>
+#include <string>
+#include <vector>
+
+#include "lunar_pure_planner_core/types/planner_config.hpp"
+#include "shared/grid_search_projection.hpp"
+#include "shared/map_snapshot.hpp"
+
+namespace lunar::pure_planning::hierarchical {
+
+enum class GlobalSearchStatus : std::uint8_t {
+  kSolved,
+  kNoPath,
+  kCanceled,
+  kAllocationFailed,
+  kInvalidProblem,
+};
+
+struct GlobalGridSearchProblem final {
+  shared::GridSearchProjectionView projection;
+  shared::GridCell start;
+  std::span<const std::uint8_t> goal_mask;
+  std::span<const std::uint8_t> excluded_mask;
+  double maximum_speed_mps{1.0};
+  GlobalSearchConfig config;
+  std::stop_token stop_token;
+};
+
+struct GlobalGridSearchResult final {
+  GlobalSearchStatus status{GlobalSearchStatus::kInvalidProblem};
+  std::vector<shared::GridCell> path_cells;
+  double cost{};
+  std::uint64_t expanded_states{};
+  std::size_t open_peak{};
+  std::size_t estimated_work_memory_bytes{};
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept {
+    return status == GlobalSearchStatus::kSolved && reason_code.empty() &&
+           !path_cells.empty();
+  }
+};
+
+struct GlobalGridCostTree final {
+  std::vector<double> minimum_cost;
+  std::vector<std::size_t> parent_index;
+  std::size_t start_index{};
+  std::size_t expanded_states{};
+};
+
+struct GlobalGridCostTreeResult final {
+  GlobalSearchStatus status{GlobalSearchStatus::kInvalidProblem};
+  std::optional<GlobalGridCostTree> tree;
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept {
+    return status == GlobalSearchStatus::kSolved && tree.has_value() &&
+           reason_code.empty();
+  }
+};
+
+[[nodiscard]] GlobalGridSearchResult
+SearchGlobalGrid(const GlobalGridSearchProblem &problem);
+
+[[nodiscard]] GlobalGridCostTreeResult
+SearchGlobalGridCostTree(const GlobalGridSearchProblem &problem);
+
+} // namespace lunar::pure_planning::hierarchical

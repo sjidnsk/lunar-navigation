@@ -1,0 +1,54 @@
+{
+  "determinism_summary": {
+    "candidate_disposition": 0,
+    "execution_directive": 0,
+    "global_expanded_nodes": 0,
+    "local_expanded_nodes": 29,
+    "reference_kind": "certified_hops",
+    "reference_platform": 3,
+    "search_domain_sha256": "",
+    "stable_candidate_order": true,
+    "trajectory_mode": "CERTIFIED_HOP"
+  },
+  "expanded_nodes": 317,
+  "global_path_points": [
+    [
+      3.0,
+      3.0,
+      0.5
+    ],
+    [
+      4.0,
+      3.0,
+      0.0
+    ]
+  ],
+  "hop_segments": [
+    {
+      "available_delta_v_mps": 29.666597955419903,
+      "flight_time_ns": 1174856956,
+      "launch_position_m": [
+        3.0,
+        3.0,
+        0.5
+      ],
+      "launch_velocity_mps": [
+        0.8511674499627148,
+        0.0,
+        0.5260504100357675
+      ],
+      "nominal_landing_point_m": [
+        4.0,
+        3.0,
+        0.0
+      ],
+      "required_delta_v_mps": 2.8815864466462027
+    }
+  ],
+  "local_trajectory_points": [],
+  "outcome": 0,
+  "platform": "hopper",
+  "reason_code": "HOPPER_SINGLE_HOP_AVAILABLE",
+  "schema_version": "pure-planner-algorithm-probe/v1",
+  "total_cost": 2.8815864466462027
+}

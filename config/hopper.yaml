@@ -1,0 +1,24 @@
+# Source: ros2_ws/src/lunar_navigation_config/config/three_platform_capability_freeze_v1.yaml
+# Source Git SHA: c8cf14e167345150ba64dd141cfec5470e09ba41
+# Source content SHA-256: b80b57fbf904bebcffda57731a7ae3f86e45aabcaa7871e204551f04d55ef161
+platform: hopper
+platform_id: hopper-lunar-explorer
+platform_type: HOPPER
+capability_version: hopper-engineering-baseline-v1
+base_frame_id: base_link
+capability:
+  specific_impulse_s: 301.0
+  reference_total_mass_kg: 20.0
+  reference_propellant_mass_kg: 0.2
+  gravity_mps2: [0.0, 0.0, -1.62]
+  reference_horizontal_range_m: 100.0
+  reference_elevation_delta_m: 0.0
+  runtime_fallback_allowed: false
+  landing_support_radius_m: 0.45
+  flight_collision_radius_m: 0.55
+  maximum_landing_plane_residual_m: 0.05
+  landing_lateral_margin_m: 0.2
+  flight_map_margin_m: 0.2
+  reachability_delta_v_margin_ratio: 0.1
+  standard_gravity_mps2: 9.80665
+  maximum_landing_slope_rad: 0.17453292519943295

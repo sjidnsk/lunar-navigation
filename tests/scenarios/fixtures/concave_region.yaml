@@ -1,0 +1,110 @@
+schema_version: 1
+fixture_id: concave_region
+authority: test-only/non-authoritative
+platform:
+  platform_type: wheel
+  geometry_reference: lunar_pure_navigation_config/platforms/wheel
+task:
+  task_id: task15-concave-region
+  boundary_xy:
+    - [0.0, 0.0]
+    - [10.0, 0.0]
+    - [10.0, 10.0]
+    - [6.0, 10.0]
+    - [6.0, 5.0]
+    - [0.0, 5.0]
+initial_inputs:
+  occupancy_grid:
+    header: {frame_id: map, stamp_ns: 1000000000, map_version: 7}
+    geometry:
+      resolution_m: 0.5
+      width: 20
+      height: 20
+      origin: {x: 0.0, y: 0.0}
+    semantics: {unknown: -1, free: 0, occupied: 100}
+    rows:
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+      - "..........??????????"
+    content_id: concave-content-v1
+  transforms:
+    map_to_odom: {translation_xy: [0.0, 0.0], yaw_rad: 0.0}
+  odometry:
+    frame_id: odom
+    child_frame_id: base_link
+    pose_xy_yaw: [2.0, 2.0, 0.0]
+    covariance: [0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01]
+events:
+  - {kind: publish_initial_inputs}
+  - {kind: advance_steady_clock, seconds: 1.0}
+  - {kind: poll_execution}
+candidate_goal_cell_response_table:
+  "6,4":
+    responses:
+      - {kind: SUCCESS, candidate_key: "3081,2250,0", request_id: task15-concave-region/candidate/0, path_segment: {segment_index: 0, reference_plan_id: "scenario-plan:task15-concave-region/candidate/0", endpoint_cell: "6,4", final_goal_cell: "6,4"}}
+      - {kind: NO_PATH, candidate_key: "3081,2250,225", request_id: task15-concave-region/candidate/1}
+      - {kind: NO_PATH, candidate_key: "3081,2250,450", request_id: task15-concave-region/candidate/4}
+      - {kind: NO_PATH, candidate_key: "3081,2250,-225", request_id: task15-concave-region/candidate/5}
+      - {kind: NO_PATH, candidate_key: "3081,2250,-450", request_id: task15-concave-region/candidate/9}
+  "8,2":
+    responses:
+      - {kind: NO_PATH, candidate_key: "4081,1250,225", request_id: task15-concave-region/candidate/2}
+      - {kind: NO_PATH, candidate_key: "4081,1250,450", request_id: task15-concave-region/candidate/3}
+      - {kind: NO_PATH, candidate_key: "4081,1250,0", request_id: task15-concave-region/candidate/6}
+      - {kind: NO_PATH, candidate_key: "4081,1250,-225", request_id: task15-concave-region/candidate/12}
+      - {kind: NO_PATH, candidate_key: "4081,1250,-450", request_id: task15-concave-region/candidate/14}
+  "8,7":
+    responses:
+      - {kind: NO_PATH, candidate_key: "4081,3750,0", request_id: task15-concave-region/candidate/7}
+      - {kind: NO_PATH, candidate_key: "4081,3750,-225", request_id: task15-concave-region/candidate/8}
+      - {kind: NO_PATH, candidate_key: "4081,3750,-450", request_id: task15-concave-region/candidate/10}
+      - {kind: NO_PATH, candidate_key: "4081,3750,225", request_id: task15-concave-region/candidate/11}
+      - {kind: NO_PATH, candidate_key: "4081,3750,450", request_id: task15-concave-region/candidate/13}
+expected:
+  ordered_candidate_keys: ["3081,2250,0", "3081,2250,225", "4081,1250,225", "4081,1250,450", "3081,2250,450", "3081,2250,-225", "4081,1250,0", "4081,3750,0", "4081,3750,-225", "3081,2250,-450", "4081,3750,-450", "4081,3750,225", "4081,1250,-225", "4081,3750,450", "4081,1250,-450"]
+  ordered_goal_cells: ["6,4", "6,4", "8,2", "8,2", "6,4", "6,4", "8,2", "8,7", "8,7", "6,4", "8,7", "8,7", "8,2", "8,7", "8,2"]
+  ordered_requests:
+    - {request_id: task15-concave-region/candidate/0, candidate_key: "3081,2250,0", goal_cell: "6,4", response_kind: SUCCESS, path_segments: [{segment_index: 0, reference_plan_id: "scenario-plan:task15-concave-region/candidate/0", endpoint_cell: "6,4", final_goal_cell: "6,4"}]}
+    - {request_id: task15-concave-region/candidate/1, candidate_key: "3081,2250,225", goal_cell: "6,4", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-concave-region/candidate/2, candidate_key: "4081,1250,225", goal_cell: "8,2", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-concave-region/candidate/3, candidate_key: "4081,1250,450", goal_cell: "8,2", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-concave-region/candidate/4, candidate_key: "3081,2250,450", goal_cell: "6,4", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-concave-region/candidate/5, candidate_key: "3081,2250,-225", goal_cell: "6,4", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-concave-region/candidate/6, candidate_key: "4081,1250,0", goal_cell: "8,2", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-concave-region/candidate/7, candidate_key: "4081,3750,0", goal_cell: "8,7", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-concave-region/candidate/8, candidate_key: "4081,3750,-225", goal_cell: "8,7", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-concave-region/candidate/9, candidate_key: "3081,2250,-450", goal_cell: "6,4", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-concave-region/candidate/10, candidate_key: "4081,3750,-450", goal_cell: "8,7", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-concave-region/candidate/11, candidate_key: "4081,3750,225", goal_cell: "8,7", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-concave-region/candidate/12, candidate_key: "4081,1250,-225", goal_cell: "8,2", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-concave-region/candidate/13, candidate_key: "4081,3750,450", goal_cell: "8,7", response_kind: NO_PATH, path_segments: []}
+    - {request_id: task15-concave-region/candidate/14, candidate_key: "4081,1250,-450", goal_cell: "8,2", response_kind: NO_PATH, path_segments: []}
+  status_sequence: [IDLE, WAITING_FOR_INPUT, SELECTING_FRONTIER, EXECUTING]
+  reference_plan_ids: ["scenario-plan:task15-concave-region/candidate/0"]
+  cancellation_plan_ids: []
+  coverage_ratio: 0.35714285714285715
+  completed: false
+  requires_exhaustive_planner_evidence: false
+  replan_count: 0
+  stuck_retries: 0
+  committed_goal_key: "3081,2250,0"
+  semantic_mutations: {timestamp_only: "fnv1a64:85c1bd6f7a6da3e3", map_version_only: "fnv1a64:85c1bd6f7a6da3e3", covariance_only: "fnv1a64:85c1bd6f7a6da3e3"}
+  two_segment: {enabled: false, committed_candidate_key: null, request_ids: [], endpoint_cells: [], final_goal_cell: null}
+  ordered_trace_id: "fnv1a64:85c1bd6f7a6da3e3"

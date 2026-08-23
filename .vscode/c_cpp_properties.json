@@ -1,0 +1,22 @@
+{
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "${workspaceFolder}/.vscode/browse.vc.db",
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "includePath": [
+        "/opt/ros/jazzy/include/**",
+        "/home/kai/CodexDownloads/lunar_navigation/lunar_pure_planner_orin/ros2_ws/src/lunar_pure_planner_core/include/**",
+        "/home/kai/CodexDownloads/lunar_navigation/lunar_pure_planner_orin/ros2_ws/src/lunar_pure_planner_ros/include/**",
+        "/usr/include/**"
+      ],
+      "name": "ros2",
+      "intelliSenseMode": "gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "c++17"
+    }
+  ],
+  "version": 4
+}

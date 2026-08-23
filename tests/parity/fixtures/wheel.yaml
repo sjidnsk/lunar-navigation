@@ -1,0 +1,44 @@
+{
+  "schema_version": "pure-planner-canonical-fixture/v1",
+  "platform": "wheel",
+  "map": {
+    "global": {"width": 12, "height": 8, "resolution_m": 1.0, "origin_m": [0.0, 0.0, 0.0]},
+    "local": {"width": 24, "height": 16, "resolution_m": 1.0, "origin_m": [-4.0, 0.0, 0.0]},
+    "elevation_m": 0.0,
+    "forbidden_indices": []
+  },
+  "start": {"position_m": [2.5, 3.5, 0.0], "yaw_rad": 0.0},
+  "goal": {"position_m": [4.5, 3.5, 0.0], "tolerance_m": 0.2},
+  "planner_config": {"xy_resolution_m": 1.0, "global_base_resolution_m": 1.0, "stable_candidate_order": true},
+  "capability": {
+    "footprint_xy_m": [[-0.591, -0.409], [0.591, -0.409], [0.591, 0.409], [-0.591, 0.409]],
+    "body_extent_m": [1.182, 0.818, 1.29996],
+    "wheel_diameter_m": 0.319,
+    "wheel_width_m": 0.148,
+    "wheelbase_m": 0.8175,
+    "track_width_m": 0.67,
+    "minimum_underbody_clearance_m": 0.21,
+    "maximum_local_obstacle_relief_m": 0.2,
+    "minimum_body_z_m": -0.1,
+    "maximum_body_z_m": 0.5,
+    "maximum_forward_speed_mps": 1.0,
+    "maximum_reverse_speed_mps": 0.8,
+    "maximum_spin_rate_radps": 1.0,
+    "maximum_acceleration_mps2": 1.0,
+    "maximum_braking_deceleration_mps2": 1.0,
+    "maximum_yaw_acceleration_radps2": 1.0,
+    "maximum_lateral_acceleration_mps2": 1.0,
+    "maximum_curvature_per_m": 1.0,
+    "maximum_slope_rad": 0.5,
+    "minimum_clearance_m": 0.0,
+    "motion_primitives": [
+      {"id": "forward", "kind": "forward", "position_m": [1.0, 0.0, 0.0], "yaw_rad": 0.0},
+      {"id": "forward-arc", "kind": "forward_arc", "position_m": [1.0, 0.0, 0.0], "yaw_rad": 1.5707963267948966},
+      {"id": "reverse", "kind": "reverse", "position_m": [-1.0, 0.0, 0.0], "yaw_rad": 0.0},
+      {"id": "reverse-arc", "kind": "reverse_arc", "position_m": [-1.0, 0.0, 0.0], "yaw_rad": -1.5707963267948966},
+      {"id": "spin-left", "kind": "spin_counterclockwise", "position_m": [0.0, 0.0, 0.0], "yaw_rad": 1.5707963267948966},
+      {"id": "spin-right", "kind": "spin_clockwise", "position_m": [0.0, 0.0, 0.0], "yaw_rad": -1.5707963267948966},
+      {"id": "stop-switch", "kind": "stop_and_switch", "position_m": [0.0, 0.0, 0.0], "yaw_rad": 0.0}
+    ]
+  }
+}

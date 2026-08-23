@@ -1,0 +1,34 @@
+# Source: ros2_ws/src/lunar_navigation_config/config/three_platform_capability_freeze_v1.yaml
+# Source Git SHA: c8cf14e167345150ba64dd141cfec5470e09ba41
+# Source content SHA-256: b80b57fbf904bebcffda57731a7ae3f86e45aabcaa7871e204551f04d55ef161
+platform: legged
+platform_id: yobotics-quad48
+platform_type: LEGGED
+capability_version: quad48-approved-baseline-v1
+base_frame_id: base_link
+capability:
+  body_extent_m: [0.68, 0.33, 0.35]
+  nominal_body_height_m: 0.33
+  body_height_m: [0.28, 0.38]
+  platform_mass_kg: 15.89
+  nominal_payload_kg: 8.0
+  maximum_payload_kg: 10.0
+  maximum_forward_speed_mps: 1.5
+  maximum_reverse_speed_mps: 1.5
+  maximum_lateral_speed_mps: 0.8
+  maximum_yaw_rate_radps: 1.0
+  maximum_linear_acceleration_mps2: 1.0
+  maximum_yaw_acceleration_radps2: 1.0
+  maximum_slope_rad: 0.5235987755982988
+  maximum_step_height_m: 0.5
+  maximum_gap_width_m: 0.3
+  minimum_body_clearance_m: 0.3
+  step_vertical_rate_mps: 0.1
+  unknown_is_traversable: false
+  motion_primitives:
+    - {primitive_id: forward, kind: FORWARD, body_frame_displacement_m: [0.2, 0.0, 0.0], yaw_change_rad: 0.0}
+    - {primitive_id: backward, kind: BACKWARD, body_frame_displacement_m: [-0.2, 0.0, 0.0], yaw_change_rad: 0.0}
+    - {primitive_id: lateral-left, kind: LATERAL_LEFT, body_frame_displacement_m: [0.0, 0.2, 0.0], yaw_change_rad: 0.0}
+    - {primitive_id: lateral-right, kind: LATERAL_RIGHT, body_frame_displacement_m: [0.0, -0.2, 0.0], yaw_change_rad: 0.0}
+    - {primitive_id: spin-left, kind: SPIN, body_frame_displacement_m: [0.0, 0.0, 0.0], yaw_change_rad: 0.09817477042468103}
+    - {primitive_id: spin-right, kind: SPIN, body_frame_displacement_m: [0.0, 0.0, 0.0], yaw_change_rad: -0.09817477042468103}

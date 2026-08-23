@@ -1,0 +1,49 @@
+Panels:
+  - Class: rviz_common/Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Map
+      Enabled: true
+      Name: Lunar obstacles
+      Topic: /lunar_demo/global_overview
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Lunar elevation
+      Topic: /lunar_demo/terrain_markers
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Enabled: true
+      Name: Planned path
+      Topic: /lunar_demo/path
+      Value: true
+    - Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Name: Rover
+      Topic: /lunar_demo/odometry
+      Value: true
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: Default goal
+      Topic: /lunar_demo/default_goal
+      Value: true
+  Global Options:
+    Fixed Frame: map
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+    - Class: rviz_default_plugins/SetInitialPose
+      Topic: /initialpose
+    - Class: rviz_default_plugins/SetGoal
+      Topic: /lunar_demo/rviz_goal
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Scale: 130
+Window Geometry:
+  Height: 900
+  Width: 1200
