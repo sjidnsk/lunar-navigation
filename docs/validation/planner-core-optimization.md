@@ -140,3 +140,50 @@ Gate 2 validates the local-search components and their integration.  It does
 not yet claim end-to-end acceptance: the 750 m scenario remains excluded until
 Task 10 replaces independent portal attempts with one production multi-goal
 search and runs that scenario unchanged.
+
+## Final Jazzy integration and RViz runtime — 2026-08-24
+
+### Integrated build and tests
+
+- Source integration commit: `f8fe1d0` on branch `integration`.
+- Jazzy Release test-enabled build completed for `lunar_planning_msgs`,
+  `lunar_pure_planner_core` and `lunar_pure_planner_ros` in
+  `/tmp/lunar-planner-opt/final-integration`.
+- Core CTest excluding the long wheel executable passed `18/18`; the wheel
+  executable excluding only the 750 m runtime scenario passed `75/75`.
+- The merged ROS server passed `41/41`; request diagnostics, message conversion
+  and map adapters passed `3/3`, `9/9` and `7/7` respectively.
+- The repository-local deployment build then completed for all three packages
+  with `BUILD_TESTING=OFF`, matching the operator command that sources
+  `install/setup.bash`.
+- Frozen interface hashes remain unchanged:
+  - `PlanMotion.action`: `36e8077bb384deb15ee77a3c0768d1c1ccb3ac52a7db765db90a21e79ffdd55c`
+  - `PlannerDiagnostics.msg`: `379904270f20164112a60cfba95ceb719d115c0e6bf8a2386ad74171584ea900`
+
+### Runtime evidence
+
+- The isolated demo ran on ROS domain 72 with RViz omitted only for the
+  machine-readable probe.  A second goal produced
+  `planning_outcome=0`, `reason_code=PLAN_FOUND`,
+  `latency_class=TARGET_MET` and `total_elapsed_ms=114.497065`.
+- `/lunar_demo/path` was nonempty with `frame_id=map` and two poses.  Its first
+  pose `(-39.9,-39.9)` exactly matched the externally published odometry start;
+  its last pose `(-19.9,-39.9)` exactly matched the requested goal.
+- `/tf`, the global map and odometry each had one reliable publisher and one
+  compatible best-effort planner subscription.  The launch emitted neither
+  the former incompatible-QoS warnings nor an empty-frame path warning.  All
+  four non-GUI nodes exited cleanly on SIGINT.
+- A second launch with RViz enabled started RViz/OpenGL and again returned a
+  certified plan (`132.728 ms`).  This host emitted an RViz Map-display GLSL
+  sampler-link error; planner execution, diagnostics and path publication
+  remained valid, but the GUI map layer is therefore not claimed as visually
+  certified by this run.
+
+### Explicit remaining boundary
+
+At the user's direction, no further performance optimization or p95/750 m
+acceptance campaign was performed after the completed O(1) certificate-identity
+repair.  The `<1 s` target and 2 s SLA remain runtime classifications, while
+the implemented 3 s hard deadline and cancellation priority remain covered by
+tests.  Jetson Orin execution, controller tracking, DDS/rosbag endurance and
+field readiness are `NOT_RUN`; the host demo does not promote those states.
