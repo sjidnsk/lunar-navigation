@@ -34,6 +34,7 @@ set(LUNAR_ANYTIME_PRODUCTION_SOURCES
   src/hopper/ballistic_kinematics.cpp
   src/legged/anytime_legged_planner.cpp
   src/shared/anytime_ara_star.cpp
+  src/shared/cell_area_distance_transform.cpp
   src/shared/global_occupancy_projection.cpp
   src/shared/goal_distance_field.cpp
   src/shared/local_terrain_projection.cpp

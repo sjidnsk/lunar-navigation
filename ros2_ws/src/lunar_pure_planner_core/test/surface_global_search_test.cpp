@@ -197,14 +197,14 @@ TEST(SurfaceGlobalSearch, ReportsInfeasibleEndpointAsNoPath) {
   EXPECT_EQ(goal.reason_code, "GLOBAL_GOAL_INFEASIBLE");
 }
 
-TEST(SurfaceGlobalSearch, AvoidsAnInflatedWallCorner) {
+TEST(SurfaceGlobalSearch, RejectsACentreDistanceShortcutAroundInflatedWallCorner) {
   constexpr std::size_t kWidth = 12U;
   std::vector<std::int8_t> occupancy(kWidth * 7U, 0);
   for (std::size_t y = 2U; y <= 4U; ++y) {
     occupancy[y * kWidth + 5U] = 100;
   }
   auto projection = shared::BuildInflatedGlobalOccupancyProjection(
-      GlobalMap(std::move(occupancy), kWidth), 50, 1.1);
+      GlobalMap(std::move(occupancy), kWidth), 50, 0.9187);
   ASSERT_TRUE(projection.ok()) << projection.reason_code;
 
   SurfaceGlobalSearchProblem problem{
