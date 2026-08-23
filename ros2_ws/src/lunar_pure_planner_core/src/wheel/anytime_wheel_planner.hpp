@@ -26,7 +26,6 @@ struct WheelPlanRequest final {
   const WheeledCapability* capability{};
   SearchControl control;
   AnytimeSearchConfig search;
-  std::size_t maximum_search_states{131072U};
 };
 
 struct WheelPlanResult final {
@@ -39,11 +38,18 @@ struct WheelPlanResult final {
   std::size_t quantized_state_reuses{};
   std::size_t quantized_endpoint_aliases{};
   std::size_t quantized_state_count{};
+  std::size_t maximum_active_labels_per_key{};
   std::size_t sweep_cell_checks{};
   std::size_t mode_switch_edge_count{};
   std::size_t reverse_edge_count{};
   double finest_xy_key_resolution_m{};
   std::size_t maximum_yaw_bins{};
+  double start_heuristic_lower_bound{};
+  bool has_certified_preferred_candidate{};
+  std::size_t preferred_candidate_full_primitive_edge_count{};
+  std::size_t preferred_candidate_terminal_connector_edge_count{};
+  std::size_t preferred_candidate_certified_edge_count{};
+  double preferred_candidate_cost{};
   std::array<double, 5U> cost_components{};
   std::array<double, 5U> cost_scales{};
   double cost{};

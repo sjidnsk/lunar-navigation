@@ -26,8 +26,10 @@ namespace {
 constexpr double kTolerance = 1.0e-9;
 constexpr double kPhysicalMatchTolerance = 1.0e-6;
 constexpr double kMinimumEdgeCost = 1.0e-6;
-constexpr std::size_t kMaximumSearchStates = 131072U;
 constexpr std::size_t kModeCount = 3U;
+constexpr std::size_t kMaximumActiveLabelsPerKey = 4U;
+constexpr std::size_t kMaximumPreferredTemplateEdges = 8192U;
+constexpr std::size_t kMaximumPreferredTemplatesEvaluated = 8U;
 constexpr std::array<double, 5U> kCostWeights{1.0, 1.0, 1.0, 1.0, 1.0};
 
 [[nodiscard]] bool Finite(const Vec2& value) noexcept {
@@ -427,6 +429,133 @@ struct WheelStateKeyHash final {
   }
 };
 
+struct RejectedFingerprint final {
+  WheelStateKey key;
+  std::int64_t x{};
+  std::int64_t y{};
+  std::int64_t yaw{};
+
+  bool operator==(const RejectedFingerprint&) const = default;
+};
+
+struct RejectedFingerprintHash final {
+  [[nodiscard]] std::size_t operator()(
+      const RejectedFingerprint& fingerprint) const noexcept {
+    std::size_t value = WheelStateKeyHash{}(fingerprint.key);
+    for (const std::int64_t coordinate :
+         {fingerprint.x, fingerprint.y, fingerprint.yaw}) {
+      value ^= static_cast<std::size_t>(coordinate) + 0x9e3779b9U +
+               (value << 6U) + (value >> 2U);
+    }
+    return value;
+  }
+};
+
+struct BarrierRectangle final {
+  double minimum_x{};
+  double minimum_y{};
+  double maximum_x{};
+  double maximum_y{};
+  std::array<Vec2, 4U> corners{};
+  std::array<double, 4U> corner_to_goal{};
+};
+
+[[nodiscard]] bool SegmentCrossesRectangleInterior(
+    const Vec2& start, const Vec2& finish,
+    const BarrierRectangle& rectangle) noexcept {
+  double lower = 0.0;
+  double upper = 1.0;
+  const auto intersect_open_axis = [&](const double source,
+                                       const double target,
+                                       const double minimum,
+                                       const double maximum) {
+    const double delta = target - source;
+    if (std::abs(delta) <= kTolerance) {
+      if (source <= minimum || source >= maximum) {
+        lower = 1.0;
+        upper = 0.0;
+      }
+      return;
+    }
+    double first = (minimum - source) / delta;
+    double second = (maximum - source) / delta;
+    if (first > second) {
+      std::swap(first, second);
+    }
+    lower = std::max(lower, first);
+    upper = std::min(upper, second);
+  };
+  intersect_open_axis(start.x, finish.x, rectangle.minimum_x,
+                      rectangle.maximum_x);
+  intersect_open_axis(start.y, finish.y, rectangle.minimum_y,
+                      rectangle.maximum_y);
+  return lower + kTolerance < upper && upper > kTolerance &&
+         lower < 1.0 - kTolerance;
+}
+
+[[nodiscard]] double PointObstacleDistance(
+    const Vec2& start, const Vec2& goal,
+    const BarrierRectangle& rectangle) noexcept {
+  const auto distance = [](const Vec2& first, const Vec2& second) {
+    return std::hypot(first.x - second.x, first.y - second.y);
+  };
+  if (!SegmentCrossesRectangleInterior(start, goal, rectangle)) {
+    return distance(start, goal);
+  }
+  double result = std::numeric_limits<double>::infinity();
+  for (std::size_t corner = 0U; corner < rectangle.corners.size(); ++corner) {
+    if (!SegmentCrossesRectangleInterior(
+            start, rectangle.corners[corner], rectangle)) {
+      result = std::min(result,
+                        distance(start, rectangle.corners[corner]) +
+                            rectangle.corner_to_goal[corner]);
+    }
+  }
+  return result;
+}
+
+[[nodiscard]] bool SupportsInsetDisk(
+    const std::vector<Vec2>& polygon) noexcept {
+  if (polygon.size() < 3U || !PointInPolygon(Vec2{}, polygon)) {
+    return false;
+  }
+  double turn_sign = 0.0;
+  for (std::size_t index = 0U; index < polygon.size(); ++index) {
+    const Vec2& first = polygon[index];
+    const Vec2& second = polygon[(index + 1U) % polygon.size()];
+    const Vec2& third = polygon[(index + 2U) % polygon.size()];
+    const double turn = Cross(first, second, third);
+    if (std::abs(turn) > kTolerance) {
+      if (turn_sign != 0.0 && std::signbit(turn) != std::signbit(turn_sign)) {
+        return false;
+      }
+      turn_sign = turn;
+    }
+    for (std::size_t other = index + 1U; other < polygon.size(); ++other) {
+      if (other == index || other == (index + 1U) % polygon.size() ||
+          (other + 1U) % polygon.size() == index) {
+        continue;
+      }
+      if (SegmentsIntersect(first, second, polygon[other],
+                            polygon[(other + 1U) % polygon.size()])) {
+        return false;
+      }
+    }
+  }
+  return turn_sign != 0.0;
+}
+
+[[nodiscard]] double PointDistanceToRectangle(
+    const Vec2& point, const BarrierRectangle& rectangle) noexcept {
+  const double dx = std::max(
+      {rectangle.minimum_x - point.x, 0.0,
+       point.x - rectangle.maximum_x});
+  const double dy = std::max(
+      {rectangle.minimum_y - point.y, 0.0,
+       point.y - rectangle.maximum_y});
+  return std::hypot(dx, dy);
+}
+
 struct EdgeKey final {
   std::size_t source_state{};
   std::size_t primitive_index{};
@@ -482,6 +611,21 @@ struct EdgeEvaluation final {
   std::array<double, 5U> cost_components{};
 };
 
+struct PreferredEdgeRecord final {
+  Pose3 endpoint;
+  EdgeEvaluation evaluation;
+  double cumulative_cost{};
+  std::size_t stable_primitive_rank{};
+  bool terminal_connector{};
+};
+
+struct CertifiedPreferredCandidate final {
+  std::vector<PreferredEdgeRecord> edges;
+  double cost{};
+  std::size_t full_primitive_edges{};
+  std::size_t terminal_connector_edges{};
+};
+
 struct SpeedProfile final {
   double distance{};
   double initial_speed{};
@@ -510,7 +654,12 @@ struct ScaleInterval final {
 struct Node final {
   WheelStateKey key;
   Pose3 pose;
+  double best_g{std::numeric_limits<double>::infinity()};
+  double certified_clearance_m{};
+  std::size_t creation_sequence{};
+  bool expandable{true};
   bool exact_goal{};
+  bool certified_terminal_successor{};
 };
 
 struct PlanningLatticeFrame final {
@@ -564,29 +713,38 @@ class WheelSearchGraph final {
         goal_yaw_(goal_yaw),
         footprint_radius_m_(CircumscribedRadius(capability_)) {
     const std::size_t cell_count = map_.cell_count();
-    const std::size_t scaled =
-        cell_count > kMaximumSearchStates / 16U
-            ? kMaximumSearchStates
-            : std::max<std::size_t>(4096U, cell_count * 16U);
-    assignable_state_limit_ = std::min(
-        {kMaximumSearchStates, scaled, request_.maximum_search_states});
-    state_count_ = assignable_state_limit_;
-    const std::size_t reserve_hint =
-        cell_count > (assignable_state_limit_ - 1U) / 2U
-            ? assignable_state_limit_
-            : cell_count * 2U + 1U;
-    nodes_.reserve(std::min(assignable_state_limit_, reserve_hint));
+    nodes_.reserve(std::min<std::size_t>(cell_count, 65536U));
     state_ids_.reserve(nodes_.capacity());
     const std::size_t prefix_width = map_.width() + 1U;
     hazard_integral_.assign(prefix_width * (map_.height() + 1U), 0U);
+    complex_terrain_integral_.assign(
+        prefix_width * (map_.height() + 1U), 0U);
+    hazards_by_row_.resize(map_.height());
+    const auto elevations = map_.FloatLayer("elevation");
     for (std::size_t y = 0U; y < map_.height(); ++y) {
       std::uint32_t row_hazards = 0U;
+      std::uint32_t row_complex_terrain = 0U;
       for (std::size_t x = 0U; x < map_.width(); ++x) {
         const std::size_t index = y * map_.width() + x;
-        row_hazards += static_cast<std::uint32_t>(
-            terrain_.free_with_height[index] == 0U);
+        const bool hazard = terrain_.free_with_height[index] == 0U;
+        row_hazards += static_cast<std::uint32_t>(hazard);
+        if (hazard) {
+          hazards_by_row_[y].push_back(static_cast<std::int32_t>(x));
+        }
+        const bool complex_terrain =
+            hazard || index >= elevations.size() ||
+            !std::isfinite(elevations[index]) || elevations[index] != 0.0F ||
+            !std::isfinite(terrain_.slope_rad[index]) ||
+            terrain_.slope_rad[index] != 0.0F ||
+            !std::isfinite(terrain_.roughness_m[index]) ||
+            terrain_.roughness_m[index] != 0.0F;
+        row_complex_terrain +=
+            static_cast<std::uint32_t>(complex_terrain);
         hazard_integral_[(y + 1U) * prefix_width + x + 1U] =
             hazard_integral_[y * prefix_width + x + 1U] + row_hazards;
+        complex_terrain_integral_[(y + 1U) * prefix_width + x + 1U] =
+            complex_terrain_integral_[y * prefix_width + x + 1U] +
+            row_complex_terrain;
       }
     }
     ordered_primitives_.resize(capability_.motion_primitives.size());
@@ -603,7 +761,39 @@ class WheelSearchGraph final {
           maximum_primitive_yaw_rad_,
           std::abs(YawFromQuaternion(primitive.relative_end_pose.orientation)
                        .value_or(0.0)));
+      if (IsForward(primitive.kind) || IsReverse(primitive.kind)) {
+        maximum_translation_reach_m_ =
+            std::max(maximum_translation_reach_m_, length);
+        const auto twist = LogRelativePose(primitive.relative_end_pose);
+        if (twist.has_value()) {
+          const double primitive_path_length =
+              std::hypot(twist->velocity_x, twist->velocity_y);
+          maximum_translation_path_length_m_ = std::max(
+              maximum_translation_path_length_m_, primitive_path_length);
+          Transition transition{
+              .path_length_m = primitive_path_length,
+              .yaw_delta_rad = twist->yaw_rate,
+              .curvature_per_m =
+                  std::hypot(twist->velocity_x, twist->velocity_y) > kTolerance
+                      ? twist->yaw_rate /
+                            std::hypot(twist->velocity_x, twist->velocity_y)
+                      : 0.0,
+              .reverse = IsReverse(primitive.kind),
+          };
+          const auto profile = MakeProfile(
+              transition.path_length_m, 0.0,
+              TranslationSpeedLimit(transition),
+              TranslationAccelerationLimit(transition),
+              TranslationBrakingLimit(transition));
+          if (profile.has_value()) {
+            minimum_zero_speed_translation_duration_s_ = std::min(
+                minimum_zero_speed_translation_duration_s_,
+                profile->duration());
+          }
+        }
+      }
     }
+    yaw_bins_ = SelectYawBins();
     std::stable_sort(
         ordered_primitives_.begin(), ordered_primitives_.end(),
         [&](const std::size_t lhs, const std::size_t rhs) {
@@ -639,23 +829,29 @@ class WheelSearchGraph final {
     };
     const WheelStateKey key = Quantize(request_.start.pose,
                                        WheelMotionMode::kStart);
-    nodes_.push_back(
-        Node{.key = key, .pose = request_.start.pose, .exact_goal = false});
-    state_ids_.emplace(key, 0U);
+    nodes_.push_back(Node{
+        .key = key,
+        .pose = request_.start.pose,
+        .best_g = 0.0,
+        .certified_clearance_m = std::numeric_limits<double>::infinity(),
+        .creation_sequence = next_creation_sequence_++,
+        .expandable = true,
+        .exact_goal = false,
+    });
+    state_ids_[key].push_back(0U);
+    maximum_active_labels_per_key_ = 1U;
     if (const auto goal_cell = map_.PositionToCell(
             Vec2{.x = goal_.position_m.x, .y = goal_.position_m.y});
         goal_cell.has_value()) {
       goal_distance_field_ =
           shared::BuildGoalDistanceField(terrain_, *goal_cell, request_.control);
     }
+    BuildBarrierLowerBounds();
+    BuildCertifiedPreferredCandidate();
   }
 
   [[nodiscard]] std::size_t state_count() const noexcept {
-    return state_count_;
-  }
-
-  [[nodiscard]] bool resource_exhausted() const noexcept {
-    return resource_exhausted_;
+    return std::numeric_limits<std::size_t>::max();
   }
 
   [[nodiscard]] bool used_narrow_resolution() const noexcept {
@@ -663,7 +859,8 @@ class WheelSearchGraph final {
   }
 
   [[nodiscard]] std::size_t validation_count() const noexcept {
-    return validation_cache_.evaluation_count();
+    return validation_cache_.evaluation_count() +
+           preferred_validation_count_;
   }
 
   [[nodiscard]] std::size_t validation_cache_hits() const noexcept {
@@ -683,7 +880,11 @@ class WheelSearchGraph final {
   }
 
   [[nodiscard]] std::size_t quantized_state_count() const noexcept {
-    return state_ids_.size();
+    return nodes_.size();
+  }
+
+  [[nodiscard]] std::size_t maximum_active_labels_per_key() const noexcept {
+    return maximum_active_labels_per_key_;
   }
 
   [[nodiscard]] std::size_t sweep_cell_checks() const noexcept {
@@ -702,22 +903,282 @@ class WheelSearchGraph final {
     return maximum_yaw_bins_;
   }
 
-  [[nodiscard]] double Guidance(const std::size_t state) const noexcept {
+  [[nodiscard]] const std::optional<CertifiedPreferredCandidate>&
+  certified_preferred_candidate() const noexcept {
+    return certified_preferred_candidate_;
+  }
+
+  [[nodiscard]] const std::optional<shared::SearchCandidate>&
+  certified_initial_candidate() const noexcept {
+    return certified_initial_candidate_;
+  }
+
+  [[nodiscard]] bool StateExpandable(const std::size_t state) const noexcept {
+    return state < nodes_.size() && nodes_[state].expandable;
+  }
+
+  void OnRelaxed(const std::size_t state, const double best_g) {
+    if (state >= nodes_.size() || !std::isfinite(best_g)) {
+      return;
+    }
+    nodes_[state].best_g = best_g;
+    if (!nodes_[state].exact_goal) {
+      RerankLabels(nodes_[state].key, state);
+    }
+  }
+
+  [[nodiscard]] double RelaxedDistance(
+      const std::size_t state) const noexcept {
     if (!goal_distance_field_.has_value() || state >= nodes_.size()) {
-      return 0.0;
+      return std::numeric_limits<double>::infinity();
     }
     const auto cell = map_.PositionToCell(
         Vec2{.x = nodes_[state].pose.position_m.x,
              .y = nodes_[state].pose.position_m.y});
     if (!cell.has_value()) {
+      return std::numeric_limits<double>::infinity();
+    }
+    return goal_distance_field_->distance_m[map_.Index(*cell)];
+  }
+
+  void BuildBarrierLowerBounds() {
+    const Vec2 origin{};
+    if (!SupportsInsetDisk(capability_.footprint_xy_m)) {
+      return;
+    }
+    double inset_radius = std::numeric_limits<double>::infinity();
+    for (std::size_t index = 0U;
+         index < capability_.footprint_xy_m.size(); ++index) {
+      inset_radius = std::min(
+          inset_radius,
+          std::sqrt(SquaredDistanceToSegment(
+              origin, capability_.footprint_xy_m[index],
+              capability_.footprint_xy_m[
+                  (index + 1U) % capability_.footprint_xy_m.size()])));
+    }
+    if (!std::isfinite(inset_radius) || inset_radius <= kTolerance) {
+      return;
+    }
+    barrier_inset_radius_m_ = inset_radius;
+    struct Run final {
+      std::size_t length{};
+      bool vertical{};
+      std::size_t fixed{};
+      std::size_t first{};
+      std::size_t last{};
+    };
+    std::vector<Run> runs;
+    for (std::size_t x = 0U; x < map_.width(); ++x) {
+      if ((x & 63U) == 0U && ControlInterrupted()) {
+        return;
+      }
+      std::size_t first = 0U;
+      bool active = false;
+      for (std::size_t y = 0U; y <= map_.height(); ++y) {
+        const bool hazard =
+            y < map_.height() &&
+            terrain_.free_with_height[y * map_.width() + x] == 0U;
+        if (hazard && !active) {
+          first = y;
+          active = true;
+        }
+        if (!hazard && active) {
+          const std::size_t length = y - first;
+          if (length >= 2U) {
+            runs.push_back(Run{.length = length,
+                               .vertical = true,
+                               .fixed = x,
+                               .first = first,
+                               .last = y - 1U});
+          }
+          active = false;
+        }
+      }
+    }
+    for (std::size_t y = 0U; y < map_.height(); ++y) {
+      if ((y & 63U) == 0U && ControlInterrupted()) {
+        return;
+      }
+      std::size_t first = 0U;
+      bool active = false;
+      for (std::size_t x = 0U; x <= map_.width(); ++x) {
+        const bool hazard =
+            x < map_.width() &&
+            terrain_.free_with_height[y * map_.width() + x] == 0U;
+        if (hazard && !active) {
+          first = x;
+          active = true;
+        }
+        if (!hazard && active) {
+          const std::size_t length = x - first;
+          if (length >= 2U) {
+            runs.push_back(Run{.length = length,
+                               .vertical = false,
+                               .fixed = y,
+                               .first = first,
+                               .last = x - 1U});
+          }
+          active = false;
+        }
+      }
+    }
+    const double radius =
+        inset_radius +
+        std::max(0.0, capability_.minimum_clearance_m - kTolerance);
+    const double resolution = map_.resolution_m();
+    const Vec3 map_origin = map_.origin_m();
+    const Vec2 start{.x = request_.start.pose.position_m.x,
+                     .y = request_.start.pose.position_m.y};
+    const Vec2 goal{.x = goal_.position_m.x, .y = goal_.position_m.y};
+    struct Candidate final {
+      BarrierRectangle rectangle;
+      Run run;
+      double impact{};
+      double corridor_distance{};
+      std::size_t creation{};
+    };
+    std::vector<Candidate> candidates;
+    for (const Run& run : runs) {
+      BarrierRectangle rectangle;
+      if (run.vertical) {
+        rectangle.minimum_x =
+            map_origin.x + static_cast<double>(run.fixed) * resolution;
+        rectangle.maximum_x = rectangle.minimum_x + resolution;
+        rectangle.minimum_y =
+            map_origin.y + static_cast<double>(run.first) * resolution -
+            radius;
+        rectangle.maximum_y =
+            map_origin.y + static_cast<double>(run.last + 1U) * resolution +
+            radius;
+      } else {
+        rectangle.minimum_y =
+            map_origin.y + static_cast<double>(run.fixed) * resolution;
+        rectangle.maximum_y = rectangle.minimum_y + resolution;
+        rectangle.minimum_x =
+            map_origin.x + static_cast<double>(run.first) * resolution -
+            radius;
+        rectangle.maximum_x =
+            map_origin.x + static_cast<double>(run.last + 1U) * resolution +
+            radius;
+      }
+      rectangle.corners = {
+          Vec2{.x = rectangle.minimum_x, .y = rectangle.minimum_y},
+          Vec2{.x = rectangle.maximum_x, .y = rectangle.minimum_y},
+          Vec2{.x = rectangle.maximum_x, .y = rectangle.maximum_y},
+          Vec2{.x = rectangle.minimum_x, .y = rectangle.maximum_y},
+      };
+      if (PointDistanceToRectangle(goal, rectangle) <=
+          goal_.tolerance_m + kTolerance) {
+        continue;
+      }
+      constexpr std::size_t kNodeCount = 5U;
+      std::array<Vec2, kNodeCount> points{
+          rectangle.corners[0], rectangle.corners[1], rectangle.corners[2],
+          rectangle.corners[3], goal};
+      std::array<double, kNodeCount> distances;
+      distances.fill(std::numeric_limits<double>::infinity());
+      distances[4U] = 0.0;
+      std::array<bool, kNodeCount> visited{};
+      for (std::size_t iteration = 0U; iteration < kNodeCount; ++iteration) {
+        std::size_t current = kNodeCount;
+        for (std::size_t node = 0U; node < kNodeCount; ++node) {
+          if (!visited[node] &&
+              (current == kNodeCount || distances[node] < distances[current])) {
+            current = node;
+          }
+        }
+        if (current == kNodeCount || !std::isfinite(distances[current])) {
+          break;
+        }
+        visited[current] = true;
+        for (std::size_t next = 0U; next < kNodeCount; ++next) {
+          if (visited[next] || SegmentCrossesRectangleInterior(
+                                   points[current], points[next], rectangle)) {
+            continue;
+          }
+          distances[next] = std::min(
+              distances[next],
+              distances[current] +
+                  std::hypot(points[current].x - points[next].x,
+                             points[current].y - points[next].y));
+        }
+      }
+      std::copy_n(distances.begin(), 4U,
+                  rectangle.corner_to_goal.begin());
+      const double direct_distance =
+          std::hypot(start.x - goal.x, start.y - goal.y);
+      const double impact = std::max(
+          0.0, PointObstacleDistance(start, goal, rectangle) -
+                   direct_distance);
+      const Vec2 center{
+          .x = 0.5 * (rectangle.minimum_x + rectangle.maximum_x),
+          .y = 0.5 * (rectangle.minimum_y + rectangle.maximum_y)};
+      candidates.push_back(Candidate{
+          .rectangle = rectangle,
+          .run = run,
+          .impact = impact,
+          .corridor_distance =
+              std::sqrt(SquaredDistanceToSegment(center, start, goal)),
+          .creation = candidates.size(),
+      });
+    }
+    std::stable_sort(candidates.begin(), candidates.end(),
+                     [](const Candidate& left, const Candidate& right) {
+      return std::tuple{-left.impact,
+                        std::numeric_limits<std::size_t>::max() -
+                            left.run.length,
+                        left.corridor_distance, left.run.vertical,
+                        left.run.fixed, left.run.first, left.run.last,
+                        left.creation} <
+             std::tuple{-right.impact,
+                        std::numeric_limits<std::size_t>::max() -
+                            right.run.length,
+                        right.corridor_distance, right.run.vertical,
+                        right.run.fixed, right.run.first, right.run.last,
+                        right.creation};
+    });
+    for (const Candidate& candidate : candidates) {
+      const auto contains = [](const BarrierRectangle& outer,
+                               const BarrierRectangle& inner) {
+        return outer.minimum_x <= inner.minimum_x + kTolerance &&
+               outer.minimum_y <= inner.minimum_y + kTolerance &&
+               outer.maximum_x + kTolerance >= inner.maximum_x &&
+               outer.maximum_y + kTolerance >= inner.maximum_y;
+      };
+      if (std::ranges::any_of(
+              barriers_, [&](const BarrierRectangle& retained) {
+                return contains(retained, candidate.rectangle);
+              })) {
+        continue;
+      }
+      barriers_.push_back(candidate.rectangle);
+      if (barriers_.size() == 32U) {
+        break;
+      }
+    }
+  }
+
+  [[nodiscard]] double Guidance(const std::size_t state) const noexcept {
+    const double relaxed_distance = RelaxedDistance(state);
+    if (!std::isfinite(relaxed_distance) || state >= nodes_.size()) {
       return 0.0;
     }
-    const double distance = goal_distance_field_->distance_m[map_.Index(*cell)];
-    return std::isfinite(distance) ? distance : 0.0;
+    const double clearance_deficit = std::max(
+        0.0, footprint_radius_m_ - nodes_[state].certified_clearance_m);
+    return relaxed_distance + clearance_deficit;
   }
 
   [[nodiscard]] const EdgeEvaluation* EvaluationForEdge(
       const std::size_t source, const std::size_t target) {
+    if (const auto edge = PreferredEdgeIndexForState(target);
+        edge.has_value()) {
+      const std::size_t expected_source =
+          *edge == 0U ? 0U : PreferredStateId(*edge - 1U);
+      if (source != expected_source) {
+        return nullptr;
+      }
+      return &certified_preferred_candidate_->edges[*edge].evaluation;
+    }
     const auto found = emitted_edges_.find(
         StatePair{.source = source, .target = target});
     if (found == emitted_edges_.end()) {
@@ -811,6 +1272,10 @@ class WheelSearchGraph final {
   }
 
   [[nodiscard]] const Pose3& PoseForState(const std::size_t state) const {
+    if (const auto edge = PreferredEdgeIndexForState(state);
+        edge.has_value()) {
+      return certified_preferred_candidate_->edges[*edge].endpoint;
+    }
     return nodes_.at(state).pose;
   }
 
@@ -833,10 +1298,10 @@ class WheelSearchGraph final {
         .valid;
   }
 
-  void Expand(const std::size_t state,
+  void Expand(const std::size_t state, const double source_g,
               std::vector<shared::GraphEdge>& edges) {
     if (state >= nodes_.size() || nodes_[state].exact_goal ||
-        ControlInterrupted()) {
+        !nodes_[state].expandable || ControlInterrupted()) {
       return;
     }
     const Node source = nodes_[state];
@@ -871,42 +1336,8 @@ class WheelSearchGraph final {
       }
       const WheelStateKey target_key =
           Quantize(actual_endpoint, transition->target_mode);
-      if (target_key == source.key) {
-        continue;
-      }
       if (!generated_target_keys.emplace(target_key, primitive_index).second) {
         ++quantized_endpoint_aliases_;
-      }
-      const auto canonical_pose = RepresentativePose(target_key);
-      if (!canonical_pose.has_value()) {
-        continue;
-      }
-      const double xy_resolution = target_key.narrow
-                                       ? map_.resolution_m() / 2.0
-                                       : map_.resolution_m();
-      const std::size_t yaw_bins = target_key.narrow ? 128U : 64U;
-      const auto actual_yaw = YawFromQuaternion(actual_endpoint.orientation);
-      const auto canonical_yaw =
-          YawFromQuaternion(canonical_pose->orientation);
-      if (!actual_yaw.has_value() || !canonical_yaw.has_value() ||
-          std::hypot(actual_endpoint.position_m.x -
-                         canonical_pose->position_m.x,
-                     actual_endpoint.position_m.y -
-                         canonical_pose->position_m.y) >
-              std::numbers::sqrt2 * 0.5 * xy_resolution +
-                  kPhysicalMatchTolerance ||
-          std::abs(ShortestYawDelta(*actual_yaw, *canonical_yaw)) >
-              std::numbers::pi / static_cast<double>(yaw_bins) +
-                  kPhysicalMatchTolerance) {
-        continue;
-      }
-      transition->target = *canonical_pose;
-      RecomputeGeometry(*transition);
-      if (!PrimitiveReachesTarget(source, capability_.motion_primitives[
-                                              primitive_index],
-                                  *canonical_pose) ||
-          !MotionKindMatches(*transition)) {
-        continue;
       }
       const EdgeKey edge_key{.source_state = state,
                              .primitive_index = primitive_index};
@@ -915,8 +1346,13 @@ class WheelSearchGraph final {
       if (!evaluation.valid) {
         continue;
       }
-      const auto target_state = Intern(target_key);
+      const auto target_state =
+          Intern(target_key, actual_endpoint, source_g + evaluation.cost,
+                 evaluation.minimum_clearance_m);
       if (!target_state.has_value()) {
+        continue;
+      }
+      if (*target_state == state) {
         continue;
       }
       edges.push_back(shared::GraphEdge{
@@ -951,17 +1387,81 @@ class WheelSearchGraph final {
     if (nodes_[state].exact_goal) {
       return 0.0;
     }
-    const Pose3& pose = nodes_[state].pose;
+    return HeuristicForPose(nodes_[state].pose);
+  }
+
+  [[nodiscard]] double HeuristicForPose(const Pose3& pose) const noexcept {
     const double distance_to_region = std::max(
         0.0,
         std::hypot(pose.position_m.x - goal_.position_m.x,
                    pose.position_m.y - goal_.position_m.y) -
             goal_.tolerance_m);
-    return kCostWeights[0] *
-           distance_to_region / cost_scales_[0];
+    double yaw_error = 0.0;
+    if (goal_yaw_.has_value()) {
+      const auto yaw = YawFromQuaternion(pose.orientation);
+      if (yaw.has_value()) {
+        yaw_error = std::max(
+            0.0, std::abs(ShortestYawDelta(*yaw, *goal_yaw_)) -
+                     request_.goal_odom.yaw_tolerance_rad);
+      }
+    }
+    double barrier_distance_lower_bound = 0.0;
+    const Vec2 planar_pose{.x = pose.position_m.x, .y = pose.position_m.y};
+    const Vec2 planar_goal{.x = goal_.position_m.x,
+                           .y = goal_.position_m.y};
+    for (const BarrierRectangle& barrier : barriers_) {
+      const double obstacle_distance =
+          PointObstacleDistance(planar_pose, planar_goal, barrier);
+      if (std::isfinite(obstacle_distance)) {
+        barrier_distance_lower_bound =
+            std::max(barrier_distance_lower_bound,
+                     std::max(0.0, obstacle_distance - goal_.tolerance_m));
+      }
+    }
+    const double distance_lower_bound =
+        std::max(distance_to_region, barrier_distance_lower_bound);
+    std::size_t displacement_edges = 0U;
+    if (maximum_translation_reach_m_ > kTolerance) {
+      displacement_edges = static_cast<std::size_t>(std::ceil(
+          distance_to_region / maximum_translation_reach_m_ - kTolerance));
+    }
+    std::size_t obstacle_path_edges = 0U;
+    if (maximum_translation_path_length_m_ > kTolerance) {
+      obstacle_path_edges = static_cast<std::size_t>(std::ceil(
+          barrier_distance_lower_bound /
+              maximum_translation_path_length_m_ -
+          kTolerance));
+    }
+    const std::size_t required_translation_edges =
+        std::max(displacement_edges, obstacle_path_edges);
+    const std::size_t zero_speed_full_edges =
+        required_translation_edges > 2U ? required_translation_edges - 2U
+                                        : 0U;
+    const double translation_time_lower_bound =
+        std::isfinite(minimum_zero_speed_translation_duration_s_)
+            ? static_cast<double>(zero_speed_full_edges) *
+                  minimum_zero_speed_translation_duration_s_
+            : 0.0;
+    const double yaw_time_lower_bound =
+        yaw_error / capability_.maximum_spin_rate_radps;
+    const double path_cost =
+        kCostWeights[0] * distance_lower_bound / cost_scales_[0];
+    const double execution_cost =
+        kCostWeights[1] *
+        std::max(translation_time_lower_bound, yaw_time_lower_bound) /
+        cost_scales_[1];
+    const double mode_cost =
+        kCostWeights[4] * yaw_error / std::numbers::pi / cost_scales_[4];
+    return path_cost + execution_cost + mode_cost;
   }
 
   [[nodiscard]] bool IsGoal(const std::size_t state) const noexcept {
+    if (const auto edge = PreferredEdgeIndexForState(state);
+        edge.has_value()) {
+      return *edge + 1U == certified_preferred_candidate_->edges.size() &&
+             PoseSatisfiesGoal(
+                 certified_preferred_candidate_->edges[*edge].endpoint);
+    }
     if (state >= nodes_.size()) {
       return false;
     }
@@ -972,6 +1472,544 @@ class WheelSearchGraph final {
   }
 
  private:
+  static constexpr std::size_t kPreferredStateNamespace =
+      std::size_t{1U}
+      << (std::numeric_limits<std::size_t>::digits - 1U);
+  static constexpr std::uint64_t kPreferredEdgeNamespace =
+      0x5052454645525245ULL;
+
+  [[nodiscard]] static std::size_t PreferredStateId(
+      const std::size_t edge_index) noexcept {
+    return kPreferredStateNamespace + edge_index;
+  }
+
+  [[nodiscard]] std::optional<std::size_t> PreferredEdgeIndexForState(
+      const std::size_t state) const noexcept {
+    if (state < kPreferredStateNamespace ||
+        !certified_preferred_candidate_.has_value()) {
+      return std::nullopt;
+    }
+    const std::size_t edge_index = state - kPreferredStateNamespace;
+    if (edge_index >= certified_preferred_candidate_->edges.size()) {
+      return std::nullopt;
+    }
+    return edge_index;
+  }
+
+  [[nodiscard]] static std::size_t StablePreferredEdgeIndex(
+      const std::size_t sequence,
+      const std::size_t stable_primitive_rank) noexcept {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (std::uint64_t value :
+         {kPreferredEdgeNamespace, static_cast<std::uint64_t>(sequence),
+          static_cast<std::uint64_t>(stable_primitive_rank)}) {
+      for (std::size_t byte = 0U; byte < sizeof(value); ++byte) {
+        hash ^= value & 0xffU;
+        hash *= 1099511628211ULL;
+        value >>= 8U;
+      }
+    }
+    return static_cast<std::size_t>(hash);
+  }
+
+  [[nodiscard]] static std::size_t StablePreferredPathIndex(
+      const std::vector<std::size_t>& stable_edges) noexcept {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (const std::size_t edge : stable_edges) {
+      std::uint64_t value = static_cast<std::uint64_t>(edge);
+      for (std::size_t byte = 0U; byte < sizeof(value); ++byte) {
+        hash ^= value & 0xffU;
+        hash *= 1099511628211ULL;
+        value >>= 8U;
+      }
+    }
+    return static_cast<std::size_t>(hash);
+  }
+
+  void BuildCertifiedInitialCandidate() {
+    if (!certified_preferred_candidate_.has_value() ||
+        certified_preferred_candidate_->edges.empty() ||
+        certified_preferred_candidate_->edges.size() >=
+            kPreferredStateNamespace) {
+      return;
+    }
+    shared::SearchCandidate candidate;
+    candidate.states.reserve(certified_preferred_candidate_->edges.size() +
+                             1U);
+    candidate.stable_edge_indices.reserve(
+        certified_preferred_candidate_->edges.size());
+    candidate.states.push_back(0U);
+    for (std::size_t edge = 0U;
+         edge < certified_preferred_candidate_->edges.size(); ++edge) {
+      candidate.states.push_back(PreferredStateId(edge));
+      candidate.stable_edge_indices.push_back(StablePreferredEdgeIndex(
+          edge, certified_preferred_candidate_->edges[edge]
+                    .stable_primitive_rank));
+    }
+    candidate.cost = certified_preferred_candidate_->cost;
+    candidate.stable_index =
+        StablePreferredPathIndex(candidate.stable_edge_indices);
+    certified_initial_candidate_ = std::move(candidate);
+  }
+
+  struct PreferredMacroGeometry final {
+    Pose3 endpoint;
+    double minimum_x{};
+    double maximum_x{};
+  };
+
+  struct PreferredOption final {
+    std::size_t straight_index{};
+    std::size_t outward_first_index{};
+    std::size_t outward_second_index{};
+    std::size_t arc_repetitions{};
+    std::size_t macro_repetitions{};
+    std::size_t straight_repetitions{};
+    std::size_t estimated_edges{};
+    bool positive_side{};
+  };
+
+  [[nodiscard]] static Pose3 ComposePreferredEndpoint(
+      const Pose3& source, const Pose3& relative) noexcept {
+    const double yaw = YawFromQuaternion(source.orientation).value_or(0.0);
+    const double relative_yaw =
+        YawFromQuaternion(relative.orientation).value_or(0.0);
+    return Pose3{
+        .position_m =
+            Vec3{.x = source.position_m.x +
+                      std::cos(yaw) * relative.position_m.x -
+                      std::sin(yaw) * relative.position_m.y,
+                 .y = source.position_m.y +
+                      std::sin(yaw) * relative.position_m.x +
+                      std::cos(yaw) * relative.position_m.y,
+                 .z = source.position_m.z + relative.position_m.z},
+        .orientation =
+            QuaternionFromYaw(NormalizeYaw(yaw + relative_yaw)),
+    };
+  }
+
+  [[nodiscard]] PreferredMacroGeometry PreferredMacro(
+      const std::size_t first_index, const std::size_t second_index,
+      const std::size_t repetitions) const noexcept {
+    PreferredMacroGeometry geometry{
+        .endpoint = Pose3{.orientation = QuaternionFromYaw(0.0)}};
+    const auto append = [&](const std::size_t primitive_index) {
+      geometry.endpoint = ComposePreferredEndpoint(
+          geometry.endpoint,
+          capability_.motion_primitives[primitive_index].relative_end_pose);
+      geometry.minimum_x =
+          std::min(geometry.minimum_x, geometry.endpoint.position_m.x);
+      geometry.maximum_x =
+          std::max(geometry.maximum_x, geometry.endpoint.position_m.x);
+    };
+    for (std::size_t edge = 0U; edge < repetitions; ++edge) {
+      append(first_index);
+    }
+    for (std::size_t edge = 0U; edge < repetitions; ++edge) {
+      append(second_index);
+    }
+    return geometry;
+  }
+
+  [[nodiscard]] std::optional<CertifiedPreferredCandidate>
+  EvaluatePreferredOption(const PreferredOption& option) const {
+    if (option.estimated_edges == 0U ||
+        option.estimated_edges > kMaximumPreferredTemplateEdges ||
+        option.estimated_edges ==
+            std::numeric_limits<std::size_t>::max()) {
+      return std::nullopt;
+    }
+    CertifiedPreferredCandidate candidate;
+    candidate.edges.reserve(option.estimated_edges + 1U);
+    Pose3 endpoint = request_.start.pose;
+    WheelMotionMode mode = WheelMotionMode::kStart;
+    auto append_full = [&](const std::size_t primitive_index) {
+      if (ControlInterrupted()) {
+        return false;
+      }
+      const Node source{
+          .key = WheelStateKey{.mode = mode},
+          .pose = endpoint,
+          .best_g = candidate.cost,
+          .certified_clearance_m = std::numeric_limits<double>::infinity(),
+          .creation_sequence = 0U,
+          .expandable = false,
+          .exact_goal = false,
+      };
+      auto transition = ApplyPrimitive(
+          source, capability_.motion_primitives[primitive_index]);
+      if (!transition.has_value()) {
+        return false;
+      }
+      transition->initial_edge = candidate.edges.empty();
+      ++preferred_validation_count_;
+      EdgeEvaluation evaluation = Evaluate(*transition, false);
+      if (!evaluation.valid) {
+        return false;
+      }
+      candidate.cost += evaluation.cost;
+      endpoint = evaluation.transition.target;
+      mode = evaluation.transition.target_mode;
+      candidate.edges.push_back(PreferredEdgeRecord{
+          .endpoint = endpoint,
+          .evaluation = std::move(evaluation),
+          .cumulative_cost = candidate.cost,
+          .stable_primitive_rank = primitive_stable_rank_[primitive_index],
+          .terminal_connector = false,
+      });
+      ++candidate.full_primitive_edges;
+      return true;
+    };
+    auto append_macro = [&](const std::size_t first,
+                            const std::size_t second) {
+      for (std::size_t macro = 0U; macro < option.macro_repetitions;
+           ++macro) {
+        for (std::size_t edge = 0U; edge < option.arc_repetitions; ++edge) {
+          if (!append_full(first)) {
+            return false;
+          }
+        }
+        for (std::size_t edge = 0U; edge < option.arc_repetitions; ++edge) {
+          if (!append_full(second)) {
+            return false;
+          }
+        }
+      }
+      return true;
+    };
+    if (!append_macro(option.outward_first_index,
+                      option.outward_second_index)) {
+      return std::nullopt;
+    }
+    for (std::size_t edge = 0U; edge < option.straight_repetitions; ++edge) {
+      if (!append_full(option.straight_index)) {
+        return std::nullopt;
+      }
+    }
+    if (!append_macro(option.outward_second_index,
+                      option.outward_first_index)) {
+      return std::nullopt;
+    }
+    if (PoseSatisfiesGoal(endpoint)) {
+      return candidate;
+    }
+    const Node source{
+        .key = WheelStateKey{.mode = mode},
+        .pose = endpoint,
+        .best_g = candidate.cost,
+        .certified_clearance_m = std::numeric_limits<double>::infinity(),
+        .creation_sequence = 0U,
+        .expandable = false,
+        .exact_goal = false,
+    };
+    for (const std::size_t primitive_index : ordered_primitives_) {
+      if (ControlInterrupted()) {
+        return std::nullopt;
+      }
+      const WheelMotionPrimitive& primitive =
+          capability_.motion_primitives[primitive_index];
+      const auto ratio = MatchingPrimitiveScale(source, primitive);
+      if (!ratio.has_value()) {
+        continue;
+      }
+      const auto transition = ScaledPrimitive(source, primitive, *ratio);
+      if (!transition.has_value()) {
+        continue;
+      }
+      ++preferred_validation_count_;
+      EdgeEvaluation evaluation = Evaluate(*transition, false);
+      if (!evaluation.valid ||
+          !PoseSatisfiesGoal(evaluation.transition.target)) {
+        continue;
+      }
+      candidate.cost += evaluation.cost;
+      candidate.edges.push_back(PreferredEdgeRecord{
+          .endpoint = evaluation.transition.target,
+          .evaluation = std::move(evaluation),
+          .cumulative_cost = candidate.cost,
+          .stable_primitive_rank =
+              capability_.motion_primitives.size() +
+              primitive_stable_rank_[primitive_index],
+          .terminal_connector = true,
+      });
+      ++candidate.terminal_connector_edges;
+      return candidate;
+    }
+    return std::nullopt;
+  }
+
+  void BuildCertifiedPreferredCandidate() {
+    if (ControlInterrupted() || barriers_.empty()) {
+      return;
+    }
+    constexpr double kGeometryTolerance = 1.0e-7;
+    const Vec2 local_goal = lattice_frame_.ToLocalPosition(
+        Vec2{.x = goal_.position_m.x, .y = goal_.position_m.y});
+    const auto start_yaw = YawFromQuaternion(request_.start.pose.orientation);
+    if (!start_yaw.has_value() || local_goal.x <= kGeometryTolerance ||
+        std::abs(local_goal.y) > goal_.tolerance_m + kGeometryTolerance ||
+        (goal_yaw_.has_value() &&
+         std::abs(ShortestYawDelta(*start_yaw, *goal_yaw_)) >
+             request_.goal_odom.yaw_tolerance_rad + kGeometryTolerance)) {
+      return;
+    }
+    const Vec2 world_start{.x = request_.start.pose.position_m.x,
+                           .y = request_.start.pose.position_m.y};
+    const Vec2 world_goal{.x = goal_.position_m.x,
+                          .y = goal_.position_m.y};
+    double first_blocking_x = std::numeric_limits<double>::infinity();
+    double last_blocking_x = -std::numeric_limits<double>::infinity();
+    double minimum_blocking_y = std::numeric_limits<double>::infinity();
+    double maximum_blocking_y = -std::numeric_limits<double>::infinity();
+    for (const BarrierRectangle& barrier : barriers_) {
+      if (ControlInterrupted()) {
+        return;
+      }
+      if (!SegmentCrossesRectangleInterior(world_start, world_goal,
+                                           barrier)) {
+        continue;
+      }
+      for (const Vec2 corner : barrier.corners) {
+        if (ControlInterrupted()) {
+          return;
+        }
+        const Vec2 local = lattice_frame_.ToLocalPosition(corner);
+        first_blocking_x = std::min(first_blocking_x, local.x);
+        last_blocking_x = std::max(last_blocking_x, local.x);
+        minimum_blocking_y = std::min(minimum_blocking_y, local.y);
+        maximum_blocking_y = std::max(maximum_blocking_y, local.y);
+      }
+    }
+    if (!std::isfinite(first_blocking_x) || first_blocking_x <= 0.0 ||
+        last_blocking_x >= local_goal.x) {
+      return;
+    }
+    std::vector<std::size_t> straights;
+    std::vector<std::pair<std::size_t, std::size_t>> arc_pairs;
+    for (std::size_t index = 0U;
+         index < capability_.motion_primitives.size(); ++index) {
+      if (ControlInterrupted()) {
+        return;
+      }
+      const WheelMotionPrimitive& primitive =
+          capability_.motion_primitives[index];
+      const auto yaw = YawFromQuaternion(primitive.relative_end_pose.orientation);
+      if (!yaw.has_value()) {
+        continue;
+      }
+      const Vec3& position = primitive.relative_end_pose.position_m;
+      if (primitive.kind == WheelPrimitiveKind::kForward &&
+          position.x > kGeometryTolerance &&
+          std::abs(position.y) <= kGeometryTolerance &&
+          std::abs(position.z) <= kGeometryTolerance &&
+          std::abs(*yaw) <= kGeometryTolerance) {
+        straights.push_back(index);
+      }
+      if (primitive.kind != WheelPrimitiveKind::kForwardArc ||
+          std::abs(*yaw) <= kGeometryTolerance) {
+        continue;
+      }
+      for (std::size_t other = index + 1U;
+           other < capability_.motion_primitives.size(); ++other) {
+        if (ControlInterrupted()) {
+          return;
+        }
+        const WheelMotionPrimitive& mirror =
+            capability_.motion_primitives[other];
+        const auto mirror_yaw =
+            YawFromQuaternion(mirror.relative_end_pose.orientation);
+        if (mirror.kind != WheelPrimitiveKind::kForwardArc ||
+            !mirror_yaw.has_value()) {
+          continue;
+        }
+        const Vec3& mirrored = mirror.relative_end_pose.position_m;
+        if (std::abs(position.x - mirrored.x) <= kGeometryTolerance &&
+            std::abs(position.y + mirrored.y) <= kGeometryTolerance &&
+            std::abs(position.z - mirrored.z) <= kGeometryTolerance &&
+            std::abs(*yaw + *mirror_yaw) <= kGeometryTolerance) {
+          arc_pairs.emplace_back(index, other);
+        }
+      }
+    }
+    if (straights.empty() || arc_pairs.empty()) {
+      return;
+    }
+    const double longitudinal_margin =
+        footprint_radius_m_ + capability_.minimum_clearance_m;
+    const double lateral_rotation_margin = std::max(
+        0.0, footprint_radius_m_ - barrier_inset_radius_m_);
+    const double shift_before_x = first_blocking_x - longitudinal_margin;
+    const double return_after_x = last_blocking_x + longitudinal_margin;
+    std::vector<PreferredOption> options;
+    for (const std::size_t straight_index : straights) {
+      if (ControlInterrupted()) {
+        return;
+      }
+      const double straight_reach =
+          capability_.motion_primitives[straight_index]
+              .relative_end_pose.position_m.x;
+      for (const auto [first, second] : arc_pairs) {
+        if (ControlInterrupted()) {
+          return;
+        }
+        const double first_yaw = YawFromQuaternion(
+            capability_.motion_primitives[first].relative_end_pose.orientation)
+                                     .value_or(0.0);
+        const std::size_t positive = first_yaw > 0.0 ? first : second;
+        const std::size_t negative = first_yaw > 0.0 ? second : first;
+        const double yaw_step = std::abs(first_yaw);
+        if (yaw_step <= kGeometryTolerance) {
+          continue;
+        }
+        const std::size_t half_cycle = std::min(
+            yaw_bins_ / 2U,
+            static_cast<std::size_t>(std::floor(
+                std::numbers::pi / yaw_step + kGeometryTolerance)));
+        for (std::size_t arc_repetitions = 1U;
+             arc_repetitions <= half_cycle; ++arc_repetitions) {
+          if (ControlInterrupted()) {
+            return;
+          }
+          for (const bool positive_side : {true, false}) {
+            if (ControlInterrupted()) {
+              return;
+            }
+            const std::size_t outward_first =
+                positive_side ? positive : negative;
+            const std::size_t outward_second =
+                positive_side ? negative : positive;
+            const PreferredMacroGeometry outward = PreferredMacro(
+                outward_first, outward_second, arc_repetitions);
+            const PreferredMacroGeometry inward = PreferredMacro(
+                outward_second, outward_first, arc_repetitions);
+            const double outward_yaw = YawFromQuaternion(
+                outward.endpoint.orientation).value_or(0.0);
+            if (std::abs(outward_yaw) > kGeometryTolerance ||
+                outward.endpoint.position_m.x < -kGeometryTolerance ||
+                (positive_side &&
+                 outward.endpoint.position_m.y <= kGeometryTolerance) ||
+                (!positive_side &&
+                 outward.endpoint.position_m.y >= -kGeometryTolerance)) {
+              continue;
+            }
+            const double required_lateral =
+                positive_side
+                    ? maximum_blocking_y + lateral_rotation_margin
+                    : -minimum_blocking_y + lateral_rotation_margin;
+            const double lateral_progress =
+                std::abs(outward.endpoint.position_m.y);
+            if (required_lateral <= 0.0 ||
+                lateral_progress <= kGeometryTolerance) {
+              continue;
+            }
+            const double repeat_value = std::ceil(
+                required_lateral / lateral_progress - kGeometryTolerance);
+            if (!std::isfinite(repeat_value) || repeat_value < 1.0 ||
+                repeat_value >
+                    static_cast<double>(
+                        std::numeric_limits<std::size_t>::max())) {
+              continue;
+            }
+            const std::size_t macro_repetitions =
+                static_cast<std::size_t>(repeat_value);
+            const double shift_maximum_x =
+                static_cast<double>(macro_repetitions - 1U) *
+                    outward.endpoint.position_m.x +
+                outward.maximum_x;
+            if (shift_maximum_x > shift_before_x + kGeometryTolerance) {
+              continue;
+            }
+            const double arc_longitudinal =
+                static_cast<double>(macro_repetitions) *
+                (outward.endpoint.position_m.x +
+                 inward.endpoint.position_m.x);
+            const double straight_distance = local_goal.x - arc_longitudinal;
+            if (straight_distance < -kGeometryTolerance) {
+              continue;
+            }
+            const double straight_repeat_value = std::floor(
+                std::max(0.0, straight_distance) / straight_reach +
+                kGeometryTolerance);
+            if (!std::isfinite(straight_repeat_value) ||
+                straight_repeat_value < 0.0 ||
+                straight_repeat_value >
+                    static_cast<double>(kMaximumPreferredTemplateEdges)) {
+              continue;
+            }
+            const std::size_t straight_repetitions =
+                static_cast<std::size_t>(straight_repeat_value);
+            const double inward_start_x =
+                static_cast<double>(macro_repetitions) *
+                    outward.endpoint.position_m.x +
+                static_cast<double>(straight_repetitions) * straight_reach;
+            const double inward_minimum_x =
+                inward_start_x + inward.minimum_x;
+            if (inward_minimum_x + kGeometryTolerance < return_after_x) {
+              continue;
+            }
+            if (arc_repetitions >
+                    std::numeric_limits<std::size_t>::max() / 4U ||
+                macro_repetitions >
+                    std::numeric_limits<std::size_t>::max() /
+                        (4U * arc_repetitions)) {
+              continue;
+            }
+            const std::size_t arc_edges =
+                4U * arc_repetitions * macro_repetitions;
+            if (arc_edges > kMaximumPreferredTemplateEdges ||
+                straight_repetitions >
+                    kMaximumPreferredTemplateEdges - arc_edges) {
+              continue;
+            }
+            options.push_back(PreferredOption{
+                .straight_index = straight_index,
+                .outward_first_index = outward_first,
+                .outward_second_index = outward_second,
+                .arc_repetitions = arc_repetitions,
+                .macro_repetitions = macro_repetitions,
+                .straight_repetitions = straight_repetitions,
+                .estimated_edges = arc_edges + straight_repetitions,
+                .positive_side = positive_side,
+            });
+          }
+        }
+      }
+    }
+    std::stable_sort(options.begin(), options.end(), [&](const auto& left,
+                                                         const auto& right) {
+      return std::tuple{
+                 left.estimated_edges,
+                 primitive_stable_rank_[left.straight_index],
+                 primitive_stable_rank_[left.outward_first_index],
+                 primitive_stable_rank_[left.outward_second_index],
+                 left.arc_repetitions, left.macro_repetitions,
+                 !left.positive_side} <
+             std::tuple{
+                 right.estimated_edges,
+                 primitive_stable_rank_[right.straight_index],
+                 primitive_stable_rank_[right.outward_first_index],
+                 primitive_stable_rank_[right.outward_second_index],
+                 right.arc_repetitions, right.macro_repetitions,
+                 !right.positive_side};
+    });
+    std::size_t evaluated_templates = 0U;
+    for (const PreferredOption& option : options) {
+      if (ControlInterrupted()) {
+        return;
+      }
+      if (evaluated_templates == kMaximumPreferredTemplatesEvaluated) {
+        return;
+      }
+      ++evaluated_templates;
+      auto candidate = EvaluatePreferredOption(option);
+      if (candidate.has_value()) {
+        certified_preferred_candidate_ = std::move(candidate);
+        BuildCertifiedInitialCandidate();
+        return;
+      }
+    }
+  }
+
   [[nodiscard]] bool PoseSatisfiesGoal(const Pose3& pose) const noexcept {
     const auto yaw = YawFromQuaternion(pose.orientation);
     const double position_error = std::hypot(
@@ -1018,6 +2056,29 @@ class WheelSearchGraph final {
     return count != 0U;
   }
 
+  [[nodiscard]] bool HasComplexTerrainInCells(
+      const std::int64_t minimum_x, const std::int64_t minimum_y,
+      const std::int64_t maximum_x,
+      const std::int64_t maximum_y) const noexcept {
+    if (minimum_x < 0 || minimum_y < 0 || maximum_x < minimum_x ||
+        maximum_y < minimum_y ||
+        maximum_x >= static_cast<std::int64_t>(map_.width()) ||
+        maximum_y >= static_cast<std::int64_t>(map_.height())) {
+      return true;
+    }
+    const std::size_t stride = map_.width() + 1U;
+    const std::size_t left = static_cast<std::size_t>(minimum_x);
+    const std::size_t top = static_cast<std::size_t>(minimum_y);
+    const std::size_t right = static_cast<std::size_t>(maximum_x) + 1U;
+    const std::size_t bottom = static_cast<std::size_t>(maximum_y) + 1U;
+    const std::uint32_t count =
+        complex_terrain_integral_[bottom * stride + right] -
+        complex_terrain_integral_[top * stride + right] -
+        complex_terrain_integral_[bottom * stride + left] +
+        complex_terrain_integral_[top * stride + left];
+    return count != 0U;
+  }
+
   template <class EvaluateFn>
   const EdgeEvaluation& CachedEvaluation(const EdgeKey& key,
                                          EvaluateFn&& evaluate) {
@@ -1038,16 +2099,39 @@ class WheelSearchGraph final {
                footprint_radius_m_ + 2.0 * map_.resolution_m();
   }
 
+  [[nodiscard]] std::size_t SelectYawBins() const noexcept {
+    constexpr std::array<std::size_t, 5U> candidates{
+        16U, 32U, 64U, 128U, 256U};
+    for (const std::size_t bins : candidates) {
+      const double bin_width =
+          2.0 * std::numbers::pi / static_cast<double>(bins);
+      const bool compatible = std::ranges::all_of(
+          capability_.motion_primitives,
+          [&](const WheelMotionPrimitive& primitive) {
+            const double delta = std::abs(YawFromQuaternion(
+                primitive.relative_end_pose.orientation).value_or(0.0));
+            if (delta <= kTolerance) {
+              return true;
+            }
+            const double steps = std::round(delta / bin_width);
+            return std::abs(delta - steps * bin_width) <= 1.0e-9;
+          });
+      if (compatible) {
+        return bins;
+      }
+    }
+    return candidates.back();
+  }
+
   [[nodiscard]] WheelStateKey Quantize(const Pose3& pose,
                                        const WheelMotionMode mode) {
     const bool narrow = IsNarrow(pose);
     used_narrow_resolution_ = used_narrow_resolution_ || narrow;
     const double xy_resolution =
         narrow ? map_.resolution_m() / 2.0 : map_.resolution_m();
-    const std::size_t yaw_bins = narrow ? 128U : 64U;
     finest_xy_key_resolution_m_ =
         std::min(finest_xy_key_resolution_m_, xy_resolution);
-    maximum_yaw_bins_ = std::max(maximum_yaw_bins_, yaw_bins);
+    maximum_yaw_bins_ = std::max(maximum_yaw_bins_, yaw_bins_);
     const auto yaw = YawFromQuaternion(pose.orientation).value_or(0.0);
     const Vec2 local_position = lattice_frame_.ToLocalPosition(
         Vec2{.x = pose.position_m.x, .y = pose.position_m.y});
@@ -1056,8 +2140,8 @@ class WheelSearchGraph final {
                                     ? local_yaw + 2.0 * std::numbers::pi
                                     : local_yaw;
     const auto yaw_bin = static_cast<std::size_t>(std::llround(
-        positive_yaw * static_cast<double>(yaw_bins) /
-        (2.0 * std::numbers::pi))) % yaw_bins;
+        positive_yaw * static_cast<double>(yaw_bins_) /
+        (2.0 * std::numbers::pi))) % yaw_bins_;
     return WheelStateKey{
         .x = static_cast<std::int64_t>(std::llround(
             local_position.x / xy_resolution)),
@@ -1069,56 +2153,185 @@ class WheelSearchGraph final {
     };
   }
 
-  [[nodiscard]] std::optional<Pose3> CanonicalPose(
-      const WheelStateKey& key) const noexcept {
+  [[nodiscard]] double XYResidual(const Node& node) const noexcept {
     const double xy_resolution =
-        key.narrow ? map_.resolution_m() / 2.0 : map_.resolution_m();
-    const std::size_t yaw_bins = key.narrow ? 128U : 64U;
-    const Vec2 position = lattice_frame_.ToWorldPosition(Vec2{
-        .x = static_cast<double>(key.x) * xy_resolution,
-        .y = static_cast<double>(key.y) * xy_resolution,
-    });
-    const auto elevation =
-        map_.SampleElevationBilinear(position);
-    if (!elevation.has_value()) {
-      return std::nullopt;
-    }
-    const Pose3 pose{
-        .position_m =
-            Vec3{.x = position.x, .y = position.y, .z = *elevation},
-        .orientation = QuaternionFromYaw(lattice_frame_.ToWorldYaw(
-            static_cast<double>(key.yaw) * 2.0 * std::numbers::pi /
-            static_cast<double>(yaw_bins))),
-    };
-    return IsNarrow(pose) == key.narrow ? std::optional<Pose3>{pose}
-                                        : std::nullopt;
+        node.key.narrow ? map_.resolution_m() / 2.0 : map_.resolution_m();
+    const Vec2 local = lattice_frame_.ToLocalPosition(
+        Vec2{.x = node.pose.position_m.x, .y = node.pose.position_m.y});
+    return std::hypot(
+        local.x - static_cast<double>(node.key.x) * xy_resolution,
+        local.y - static_cast<double>(node.key.y) * xy_resolution);
   }
 
-  [[nodiscard]] std::optional<Pose3> RepresentativePose(
-      const WheelStateKey& key) const noexcept {
-    if (const auto found = state_ids_.find(key); found != state_ids_.end()) {
-      return nodes_[found->second].pose;
+  [[nodiscard]] double YawResidual(const Node& node) const noexcept {
+    const double yaw =
+        YawFromQuaternion(node.pose.orientation).value_or(0.0);
+    const double local_yaw = lattice_frame_.ToLocalYaw(yaw);
+    const double bin_yaw =
+        static_cast<double>(node.key.yaw) * 2.0 * std::numbers::pi /
+        static_cast<double>(yaw_bins_);
+    return std::abs(ShortestYawDelta(bin_yaw, local_yaw));
+  }
+
+  [[nodiscard]] static RejectedFingerprint Fingerprint(
+      const WheelStateKey& key, const Pose3& pose) noexcept {
+    constexpr double resolution = kPhysicalMatchTolerance;
+    const double yaw = YawFromQuaternion(pose.orientation).value_or(0.0);
+    return RejectedFingerprint{
+        .key = key,
+        .x = static_cast<std::int64_t>(
+            std::llround(pose.position_m.x / resolution)),
+        .y = static_cast<std::int64_t>(
+            std::llround(pose.position_m.y / resolution)),
+        .yaw = static_cast<std::int64_t>(std::llround(yaw / resolution)),
+    };
+  }
+
+  void RecordRejected(const Node& node) {
+    const RejectedFingerprint fingerprint = Fingerprint(node.key, node.pose);
+    const auto [record, inserted] =
+        rejected_best_g_.try_emplace(fingerprint, node.best_g);
+    if (!inserted) {
+      record->second = std::min(record->second, node.best_g);
     }
-    return CanonicalPose(key);
+  }
+
+  [[nodiscard]] bool LabelRanksBefore(const Node& left,
+                                      const Node& right) const noexcept {
+    const double left_anchor = left.best_g + HeuristicForPose(left.pose);
+    const double right_anchor = right.best_g + HeuristicForPose(right.pose);
+    return std::tuple{
+               left_anchor, left.best_g, -left.certified_clearance_m,
+               XYResidual(left), YawResidual(left), left.creation_sequence} <
+           std::tuple{
+               right_anchor, right.best_g, -right.certified_clearance_m,
+               XYResidual(right), YawResidual(right),
+               right.creation_sequence};
+  }
+
+  void RerankLabels(const WheelStateKey& key,
+                    const std::size_t candidate) {
+    auto& active = state_ids_[key];
+    std::vector<std::size_t> ranked = active;
+    if (std::ranges::find(ranked, candidate) == ranked.end()) {
+      ranked.push_back(candidate);
+    }
+    for (const std::size_t state : ranked) {
+      nodes_[state].expandable = false;
+    }
+    std::stable_sort(ranked.begin(), ranked.end(), [&](const std::size_t lhs,
+                                                       const std::size_t rhs) {
+      return LabelRanksBefore(nodes_[lhs], nodes_[rhs]);
+    });
+    if (ranked.size() > kMaximumActiveLabelsPerKey) {
+      std::vector<std::size_t> retained(
+          ranked.begin(),
+          ranked.begin() +
+              static_cast<std::ptrdiff_t>(kMaximumActiveLabelsPerKey));
+      const bool retained_terminal = std::ranges::any_of(
+          retained, [&](const std::size_t state) {
+            return nodes_[state].certified_terminal_successor;
+          });
+      if (!retained_terminal) {
+        const auto terminal = std::ranges::find_if(
+            ranked, [&](const std::size_t state) {
+              return nodes_[state].certified_terminal_successor;
+            });
+        if (terminal != ranked.end()) {
+          retained.back() = *terminal;
+          std::stable_sort(retained.begin(), retained.end(),
+                           [&](const std::size_t lhs,
+                               const std::size_t rhs) {
+            return LabelRanksBefore(nodes_[lhs], nodes_[rhs]);
+          });
+        }
+      }
+      for (const std::size_t state : ranked) {
+        if (std::ranges::find(retained, state) == retained.end()) {
+          RecordRejected(nodes_[state]);
+        }
+      }
+      ranked = std::move(retained);
+    }
+    for (const std::size_t state : ranked) {
+      nodes_[state].expandable = true;
+    }
+    active = std::move(ranked);
+    maximum_active_labels_per_key_ =
+        std::max(maximum_active_labels_per_key_, active.size());
   }
 
   [[nodiscard]] std::optional<std::size_t> Intern(
-      const WheelStateKey& key) {
-    if (const auto found = state_ids_.find(key); found != state_ids_.end()) {
+      const WheelStateKey& key, const Pose3& pose, const double best_g,
+      const double certified_clearance_m) {
+    auto& active = state_ids_[key];
+    const double xy_resolution =
+        key.narrow ? map_.resolution_m() / 2.0 : map_.resolution_m();
+    const double yaw_threshold =
+        0.25 * 2.0 * std::numbers::pi / static_cast<double>(yaw_bins_);
+    const auto pose_yaw = YawFromQuaternion(pose.orientation).value_or(0.0);
+    const auto physically_matches = [&](const Node& retained,
+                                        const double xy_threshold,
+                                        const double allowed_yaw) {
+      const auto retained_yaw =
+          YawFromQuaternion(retained.pose.orientation).value_or(0.0);
+      return std::hypot(retained.pose.position_m.x - pose.position_m.x,
+                        retained.pose.position_m.y - pose.position_m.y) <=
+                 xy_threshold + kTolerance &&
+             std::abs(ShortestYawDelta(retained_yaw, pose_yaw)) <=
+                 allowed_yaw + kTolerance;
+    };
+    Node candidate{
+        .key = key,
+        .pose = pose,
+        .best_g = best_g,
+        .certified_clearance_m = certified_clearance_m,
+        .creation_sequence = next_creation_sequence_,
+        .expandable = true,
+        .exact_goal = false,
+    };
+    candidate.certified_terminal_successor =
+        HasCertifiedTerminalSuccessor(candidate);
+    const bool active_has_terminal = std::ranges::any_of(
+        active, [&](const std::size_t state) {
+          return nodes_[state].certified_terminal_successor;
+        });
+    for (const std::size_t retained_state : active) {
+      const Node& retained = nodes_[retained_state];
+      if (physically_matches(retained, 0.25 * xy_resolution, yaw_threshold) &&
+          retained.certified_terminal_successor ==
+              candidate.certified_terminal_successor &&
+          retained.best_g <= best_g) {
+        ++quantized_state_reuses_;
+        return std::nullopt;
+      }
+    }
+    const RejectedFingerprint fingerprint = Fingerprint(key, pose);
+    if (const auto rejected = rejected_best_g_.find(fingerprint);
+        rejected != rejected_best_g_.end() && rejected->second <= best_g &&
+        !(candidate.certified_terminal_successor && !active_has_terminal)) {
       ++quantized_state_reuses_;
-      return found->second;
-    }
-    if (nodes_.size() >= assignable_state_limit_) {
-      resource_exhausted_ = true;
       return std::nullopt;
     }
-    const auto pose = CanonicalPose(key);
-    if (!pose.has_value()) {
-      return std::nullopt;
+    if (active.size() >= kMaximumActiveLabelsPerKey) {
+      const std::size_t labels_before_candidate =
+          static_cast<std::size_t>(std::ranges::count_if(
+              active, [&](const std::size_t state) {
+                return LabelRanksBefore(nodes_[state], candidate);
+              }));
+      if (labels_before_candidate >= kMaximumActiveLabelsPerKey &&
+          !(candidate.certified_terminal_successor &&
+            !active_has_terminal)) {
+        candidate.expandable = false;
+        RecordRejected(candidate);
+        ++next_creation_sequence_;
+        return std::nullopt;
+      }
     }
     const std::size_t state = nodes_.size();
-    nodes_.push_back(Node{.key = key, .pose = *pose, .exact_goal = false});
-    state_ids_.emplace(key, state);
+    ++next_creation_sequence_;
+    nodes_.push_back(candidate);
+    RerankLabels(key, state);
     return state;
   }
 
@@ -1471,20 +2684,16 @@ class WheelSearchGraph final {
                            clearance_maximum_cell_y)) {
         for (std::int64_t y = clearance_minimum_cell_y;
              y <= clearance_maximum_cell_y; ++y) {
-          for (std::int64_t x = clearance_minimum_cell_x;
-               x <= clearance_maximum_cell_x; ++x) {
+          const auto& row = hazards_by_row_[static_cast<std::size_t>(y)];
+          const auto begin = std::ranges::lower_bound(
+              row, static_cast<std::int32_t>(clearance_minimum_cell_x));
+          const auto finish = std::ranges::upper_bound(
+              row, static_cast<std::int32_t>(clearance_maximum_cell_x));
+          for (auto hazard = begin; hazard != finish; ++hazard) {
+            const std::int64_t x = *hazard;
             ++sweep_cell_checks_;
             if ((sweep_cell_checks_ & 63U) == 0U && ControlInterrupted()) {
               return result;
-            }
-            const shared::GridCell cell{
-                .x = static_cast<std::int32_t>(x),
-                .y = static_cast<std::int32_t>(y),
-            };
-            const std::size_t index = map_.Index(cell);
-            if (index < terrain_.free_with_height.size() &&
-                terrain_.free_with_height[index] != 0U) {
-              continue;
             }
             const double cell_minimum_x = map_.origin_m().x +
                                           static_cast<double>(x) * map_.resolution_m();
@@ -1516,6 +2725,24 @@ class WheelSearchGraph final {
           maximum_cell_x >= static_cast<std::int64_t>(map_.width()) ||
           maximum_cell_y >= static_cast<std::int64_t>(map_.height())) {
         return result;
+      }
+
+      // Flat free regions need no polygon terrain reduction. Include one
+      // interpolation-cell halo so the skipped bilinear wheel samples are
+      // covered by the same exact-zero certificate.
+      if (!HasComplexTerrainInCells(
+              std::max<std::int64_t>(0, minimum_cell_x - 1),
+              std::max<std::int64_t>(0, minimum_cell_y - 1),
+              std::min<std::int64_t>(
+                  static_cast<std::int64_t>(map_.width()) - 1,
+                  maximum_cell_x + 1),
+              std::min<std::int64_t>(
+                  static_cast<std::int64_t>(map_.height()) - 1,
+                  maximum_cell_y + 1))) {
+        if (!std::isfinite(result.minimum_clearance_m)) {
+          result.minimum_clearance_m = narrow_threshold;
+        }
+        continue;
       }
 
       std::array<double, 4U> wheel_heights{};
@@ -2241,6 +3468,44 @@ class WheelSearchGraph final {
     return transition;
   }
 
+  [[nodiscard]] bool HasCertifiedTerminalSuccessor(
+      const Node& source) const {
+    const double distance = std::hypot(
+        goal_.position_m.x - source.pose.position_m.x,
+        goal_.position_m.y - source.pose.position_m.y);
+    if (distance > maximum_primitive_reach_m_ + goal_.tolerance_m +
+                       2.0 * kTolerance) {
+      return false;
+    }
+    const auto source_yaw = YawFromQuaternion(source.pose.orientation);
+    if (!source_yaw.has_value() ||
+        (goal_yaw_.has_value() &&
+         std::abs(ShortestYawDelta(*source_yaw, *goal_yaw_)) >
+             maximum_primitive_yaw_rad_ +
+                 request_.goal_odom.yaw_tolerance_rad + kTolerance)) {
+      return false;
+    }
+    for (const std::size_t primitive_index : ordered_primitives_) {
+      const WheelMotionPrimitive& primitive =
+          capability_.motion_primitives[primitive_index];
+      const auto ratio = MatchingPrimitiveScale(source, primitive);
+      if (!ratio.has_value()) {
+        continue;
+      }
+      const auto connector = ScaledPrimitive(source, primitive, *ratio);
+      if (!connector.has_value()) {
+        continue;
+      }
+      Transition transition = *connector;
+      transition.initial_edge = false;
+      const EdgeEvaluation evaluation = Evaluate(transition, false);
+      if (evaluation.valid && PoseSatisfiesGoal(evaluation.transition.target)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   [[nodiscard]] bool AppendGoalTerminal(
       const std::size_t state, Transition transition, const EdgeKey edge_key,
       const std::size_t stable_primitive_index,
@@ -2250,10 +3515,6 @@ class WheelSearchGraph final {
     if (!evaluation.valid || !PoseSatisfiesGoal(evaluation.transition.target)) {
       return false;
     }
-    if (nodes_.size() >= assignable_state_limit_) {
-      resource_exhausted_ = true;
-      return false;
-    }
     const WheelStateKey goal_key =
         Quantize(evaluation.transition.target,
                  evaluation.transition.target_mode);
@@ -2261,6 +3522,9 @@ class WheelSearchGraph final {
     nodes_.push_back(Node{
         .key = goal_key,
         .pose = evaluation.transition.target,
+        .certified_clearance_m = evaluation.minimum_clearance_m,
+        .creation_sequence = next_creation_sequence_++,
+        .expandable = false,
         .exact_goal = true,
     });
     emitted_edges_.emplace(
@@ -2344,14 +3608,20 @@ class WheelSearchGraph final {
   PointGoal goal_;
   std::optional<double> goal_yaw_;
   double footprint_radius_m_{};
+  double barrier_inset_radius_m_{};
   double platform_length_scale_m_{};
   double maximum_primitive_reach_m_{};
   double maximum_primitive_yaw_rad_{};
-  std::size_t assignable_state_limit_{};
-  std::size_t state_count_{};
-  bool resource_exhausted_{};
+  double maximum_translation_reach_m_{};
+  double maximum_translation_path_length_m_{};
+  double minimum_zero_speed_translation_duration_s_{
+      std::numeric_limits<double>::infinity()};
+  std::size_t yaw_bins_{256U};
+  std::size_t next_creation_sequence_{};
+  std::size_t maximum_active_labels_per_key_{};
   bool used_narrow_resolution_{};
   std::size_t validation_requests_{};
+  mutable std::size_t preferred_validation_count_{};
   std::size_t quantized_state_reuses_{};
   std::size_t quantized_endpoint_aliases_{};
   mutable std::size_t sweep_cell_checks_{};
@@ -2363,8 +3633,17 @@ class WheelSearchGraph final {
   std::vector<std::size_t> ordered_primitives_;
   std::vector<std::size_t> primitive_stable_rank_;
   std::vector<std::uint32_t> hazard_integral_;
+  std::vector<std::uint32_t> complex_terrain_integral_;
+  std::vector<std::vector<std::int32_t>> hazards_by_row_;
+  std::vector<BarrierRectangle> barriers_;
+  std::optional<CertifiedPreferredCandidate> certified_preferred_candidate_;
+  std::optional<shared::SearchCandidate> certified_initial_candidate_;
   std::vector<Node> nodes_;
-  std::unordered_map<WheelStateKey, std::size_t, WheelStateKeyHash> state_ids_;
+  std::unordered_map<WheelStateKey, std::vector<std::size_t>,
+                     WheelStateKeyHash>
+      state_ids_;
+  std::unordered_map<RejectedFingerprint, double, RejectedFingerprintHash>
+      rejected_best_g_;
   std::unordered_map<StatePair, EdgeKey, StatePairHash> emitted_edges_;
   shared::EdgeValidationCache<EdgeKey, EdgeEvaluation, EdgeKeyHash>
       validation_cache_;
@@ -2401,7 +3680,6 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
       !ValidTerrain(*request.terrain) ||
       !ValidCapability(*request.capability) || !Finite(request.start.pose) ||
       !Finite(request.start.velocity) ||
-      request.maximum_search_states < 2U ||
       !start_yaw.has_value() || point == nullptr ||
       !std::isfinite(point->position_m.x) ||
       !std::isfinite(point->position_m.y) ||
@@ -2431,10 +3709,24 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
     result.quantized_state_reuses = graph.quantized_state_reuses();
     result.quantized_endpoint_aliases = graph.quantized_endpoint_aliases();
     result.quantized_state_count = graph.quantized_state_count();
+    result.maximum_active_labels_per_key =
+        graph.maximum_active_labels_per_key();
     result.sweep_cell_checks = graph.sweep_cell_checks();
     result.finest_xy_key_resolution_m = graph.finest_xy_key_resolution_m();
     result.maximum_yaw_bins = graph.maximum_yaw_bins();
+    result.start_heuristic_lower_bound = graph.Heuristic(0U);
     result.cost_scales = graph.cost_scales();
+    if (const auto& preferred = graph.certified_preferred_candidate();
+        preferred.has_value()) {
+      result.has_certified_preferred_candidate = true;
+      result.preferred_candidate_full_primitive_edge_count =
+          preferred->full_primitive_edges;
+      result.preferred_candidate_terminal_connector_edge_count =
+          preferred->terminal_connector_edges;
+      result.preferred_candidate_certified_edge_count =
+          preferred->edges.size();
+      result.preferred_candidate_cost = preferred->cost;
+    }
     return result;
   };
   if (!graph.ValidateStart()) {
@@ -2460,9 +3752,9 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
               .state_count = graph.state_count(),
               .start_state = 0U,
               .expand = [&](const std::size_t state,
-                            const double,
+                            const double source_g,
                             std::vector<shared::GraphEdge>& edges) {
-                graph.Expand(state, edges);
+                graph.Expand(state, source_g, edges);
               },
               .heuristic = [&](const std::size_t state) {
                 return graph.Heuristic(state);
@@ -2473,6 +3765,15 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
               .is_goal = [&](const std::size_t state) {
                 return graph.IsGoal(state);
               },
+              .state_expandable = [&](const std::size_t state) {
+                return graph.StateExpandable(state);
+              },
+              .on_relaxed = [&](const std::size_t state,
+                                const double best_g) {
+                graph.OnRelaxed(state, best_g);
+              },
+              .certified_initial_candidate =
+                  graph.certified_initial_candidate(),
               .config = request.search,
               .control = request.control,
           });
@@ -2489,12 +3790,7 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
       return decorate(
           Failure(LocalPlanStatus::kTimedOut, "TIMEOUT", metrics));
     case shared::anytime::AraStarStatus::kNoPath:
-      return decorate(Failure(
-          graph.resource_exhausted() ? LocalPlanStatus::kPlannerError
-                                     : LocalPlanStatus::kNoPath,
-          graph.resource_exhausted() ? "WHEEL_SEARCH_CAPACITY_EXHAUSTED"
-                                     : "NO_PATH",
-          metrics));
+      return decorate(Failure(LocalPlanStatus::kNoPath, "NO_PATH", metrics));
     case shared::anytime::AraStarStatus::kResourceExhausted:
       return decorate(Failure(LocalPlanStatus::kPlannerError,
                               "WHEEL_SEARCH_RESOURCE_EXHAUSTED", metrics));
