@@ -10,7 +10,10 @@ find_package(std_msgs REQUIRED)
 find_package(tf2_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
-add_library(${PROJECT_NAME} SHARED src/lunar_scene.cpp)
+add_library(${PROJECT_NAME} SHARED
+  src/lunar_scene.cpp
+  src/map_messages.cpp
+  src/visibility.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 target_include_directories(${PROJECT_NAME}
   PUBLIC
@@ -40,6 +43,14 @@ if(BUILD_TESTING)
   ament_add_gtest(lunar_scene_test test/lunar_scene_test.cpp)
   target_compile_features(lunar_scene_test PRIVATE cxx_std_20)
   target_link_libraries(lunar_scene_test ${PROJECT_NAME})
+
+  ament_add_gtest(visibility_test test/visibility_test.cpp)
+  target_compile_features(visibility_test PRIVATE cxx_std_20)
+  target_link_libraries(visibility_test ${PROJECT_NAME})
+
+  ament_add_gtest(map_messages_test test/map_messages_test.cpp)
+  target_compile_features(map_messages_test PRIVATE cxx_std_20)
+  target_link_libraries(map_messages_test ${PROJECT_NAME})
 endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
