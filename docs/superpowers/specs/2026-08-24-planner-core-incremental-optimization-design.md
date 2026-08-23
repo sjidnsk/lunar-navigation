@@ -3,9 +3,10 @@
 ## Status
 
 Approach A, incremental repair of the existing planner core, was approved in
-chat on 2026-08-24. This document records the architecture for user review
-before an implementation plan is written. It does not authorize source-code
-implementation by itself.
+chat on 2026-08-24. The parallel, worktree-isolated execution sequence is
+recorded in
+`docs/superpowers/plans/2026-08-24-planner-core-incremental-optimization.md`.
+Neither document changes production source by itself.
 
 ## Decision
 
