@@ -133,6 +133,11 @@ bool IsExplorationTimingKey(const std::string_view key) {
   return false;
 }
 
+bool IsTerminalStatus(const Status& status) {
+  return status.state == Status::COMPLETED || status.state == Status::ERROR ||
+         (status.state == Status::IDLE && status.reason_code == "CANCELED");
+}
+
 }  // namespace
 
 RunRecorder::RunRecorder(RunRecorderConfig config, SteadyNow steady_now)
@@ -142,6 +147,11 @@ RunRecorder::RunRecorder(RunRecorderConfig config, SteadyNow steady_now)
   }
   if (config_.repository_roots.empty()) {
     throw std::invalid_argument{"repository_roots must not be empty"};
+  }
+  if (config_.terminal_diagnostic_drain <=
+      std::chrono::steady_clock::duration::zero()) {
+    throw std::invalid_argument{
+        "terminal diagnostic drain must be positive"};
   }
   for (const auto& root : config_.repository_roots) {
     if (!root.is_absolute()) {
@@ -169,14 +179,14 @@ double RunRecorder::WallElapsed() const {
 }
 
 void RunRecorder::ObserveStatus(const Status& status) {
-  if (finalized_) {
+  if (finalized_ || pending_terminal_since_) {
     return;
   }
   snapshot_.status = status;
   snapshot_.wall_elapsed_s = WallElapsed();
   WriteCoverageRow(status);
-  if (status.state == Status::COMPLETED || status.state == Status::ERROR) {
-    Finalize(TerminalKind::kStatus, status.reason_code);
+  if (IsTerminalStatus(status)) {
+    pending_terminal_since_ = steady_now_();
   }
 }
 
@@ -265,27 +275,57 @@ void RunRecorder::ObserveExplorationDiagnostics(
   }
 }
 
-void RunRecorder::Finalize(const TerminalKind kind, std::string reason_code) {
-  if (finalized_) {
+void RunRecorder::PollTerminal() {
+  if (!pending_terminal_since_ || finalized_) {
+    return;
+  }
+  if (steady_now_() - *pending_terminal_since_ >=
+      config_.terminal_diagnostic_drain) {
+    FlushPendingTerminal();
+  }
+}
+
+void RunRecorder::FlushPendingTerminal() {
+  if (!pending_terminal_since_ || finalized_) {
     return;
   }
   snapshot_.wall_elapsed_s = WallElapsed();
-  WriteSummary(kind, reason_code);
+  WriteSummary(std::nullopt);
+  finalized_ = true;
+  pending_terminal_since_.reset();
+}
+
+void RunRecorder::Finalize(const TerminalKind kind) {
+  if (finalized_) {
+    return;
+  }
+  if (pending_terminal_since_) {
+    FlushPendingTerminal();
+    return;
+  }
+  snapshot_.wall_elapsed_s = WallElapsed();
+  WriteSummary(kind);
   finalized_ = true;
 }
 
-void RunRecorder::WriteSummary(const TerminalKind kind,
-                               const std::string& reason_code) {
+void RunRecorder::WriteSummary(
+    const std::optional<TerminalKind> external_kind) {
   const Status status = snapshot_.status.value_or(Status{});
-  const bool success =
-      kind == TerminalKind::kStatus && status.state == Status::COMPLETED &&
-      reason_code == "COMPLETED_NO_REACHABLE_FRONTIER";
+  const bool success = status.state == Status::COMPLETED &&
+                       status.reason_code ==
+                           "COMPLETED_NO_REACHABLE_FRONTIER";
   std::string terminal_state;
-  switch (kind) {
-    case TerminalKind::kStatus: terminal_state = StateName(status.state); break;
-    case TerminalKind::kTimeout: terminal_state = "TIMEOUT"; break;
-    case TerminalKind::kShutdown: terminal_state = "SHUTDOWN"; break;
-    case TerminalKind::kCanceled: terminal_state = "CANCELED"; break;
+  std::string reason_code;
+  if (IsTerminalStatus(status)) {
+    terminal_state = status.state == Status::IDLE ? "CANCELED"
+                                                   : StateName(status.state);
+    reason_code = status.reason_code;
+  } else if (external_kind == TerminalKind::kTimeout) {
+    terminal_state = "TIMEOUT";
+    reason_code = "WALL_TIMEOUT";
+  } else {
+    terminal_state = "SHUTDOWN";
+    reason_code = "SHUTDOWN";
   }
   nlohmann::json summary{
       {"seed", config_.seed},
@@ -295,6 +335,7 @@ void RunRecorder::WriteSummary(const TerminalKind kind,
       {"success", success},
       {"terminal_state", terminal_state},
       {"reason_code", reason_code},
+      {"task_id", status.task_id},
       {"coverage_ratio", status.coverage_ratio},
       {"status_coverage_ratio", status.coverage_ratio},
       {"polygon_area_m2", status.polygon_area_m2},
@@ -312,6 +353,7 @@ void RunRecorder::WriteSummary(const TerminalKind kind,
       {"current_plan_id", status.current_plan_id},
       {"current_goal", {{"x", status.current_goal.position.x},
                          {"y", status.current_goal.position.y}}},
+      {"active_elapsed_s", status.active_elapsed_s},
       {"distance_m", snapshot_.distance_m},
       {"wall_elapsed_s", snapshot_.wall_elapsed_s},
       {"sim_elapsed_s", snapshot_.sim_elapsed_s},

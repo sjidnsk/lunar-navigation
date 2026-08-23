@@ -75,21 +75,25 @@ RunRecorderNode::RunRecorderNode(const rclcpp::NodeOptions& options)
           [this](const diagnostic_msgs::msg::DiagnosticArray::ConstSharedPtr message) {
             recorder_->ObserveExplorationDiagnostics(*message);
           });
-  if (wall_timeout_s > 0.0) {
-    timeout_timer_ = create_wall_timer(std::chrono::milliseconds{100},
-      [this, wall_timeout_s] {
-        if (!recorder_->finalized() &&
+  timeout_timer_ = create_wall_timer(
+      std::chrono::milliseconds{50}, [this, wall_timeout_s] {
+        recorder_->PollTerminal();
+        if (!recorder_->finalized() && !recorder_->terminal_pending() &&
+            wall_timeout_s > 0.0 &&
             recorder_->snapshot().wall_elapsed_s >= wall_timeout_s) {
-          recorder_->Finalize(TerminalKind::kTimeout, "WALL_TIMEOUT");
+          recorder_->Finalize(TerminalKind::kTimeout);
         }
       });
-  }
 }
 
 void RunRecorderNode::FinalizeShutdown() noexcept {
   try {
     if (recorder_ && !recorder_->finalized()) {
-      recorder_->Finalize(TerminalKind::kShutdown, "SHUTDOWN");
+      if (recorder_->terminal_pending()) {
+        recorder_->FlushPendingTerminal();
+      } else {
+        recorder_->Finalize(TerminalKind::kShutdown);
+      }
     }
   } catch (const std::exception& error) {
     RCLCPP_ERROR(get_logger(), "failed to write shutdown summary: %s",

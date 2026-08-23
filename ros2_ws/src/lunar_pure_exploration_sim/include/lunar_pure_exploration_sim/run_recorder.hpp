@@ -24,16 +24,16 @@
 namespace lunar::pure_exploration_sim {
 
 enum class TerminalKind : std::uint8_t {
-  kStatus,
   kTimeout,
   kShutdown,
-  kCanceled,
 };
 
 struct RunRecorderConfig {
   std::filesystem::path output_dir;
   std::vector<std::filesystem::path> repository_roots;
   std::uint64_t seed{20260824U};
+  std::chrono::steady_clock::duration terminal_diagnostic_drain{
+      std::chrono::milliseconds{200}};
 };
 
 struct RunSnapshot {
@@ -71,16 +71,21 @@ class RunRecorder final {
       const diagnostic_msgs::msg::DiagnosticArray& diagnostics);
   void ObserveExplorationDiagnostics(
       const diagnostic_msgs::msg::DiagnosticArray& diagnostics);
-  void Finalize(TerminalKind kind, std::string reason_code);
+  void PollTerminal();
+  void FlushPendingTerminal();
+  void Finalize(TerminalKind kind);
 
   [[nodiscard]] RunSnapshot snapshot() const;
   [[nodiscard]] bool finalized() const noexcept { return finalized_; }
+  [[nodiscard]] bool terminal_pending() const noexcept {
+    return pending_terminal_since_.has_value();
+  }
 
  private:
   [[nodiscard]] double WallElapsed() const;
   void WriteCoverageRow(
       const lunar_pure_exploration_msgs::msg::PureExplorationStatus& status);
-  void WriteSummary(TerminalKind kind, const std::string& reason_code);
+  void WriteSummary(std::optional<TerminalKind> external_kind);
 
   RunRecorderConfig config_;
   SteadyNow steady_now_;
@@ -90,6 +95,7 @@ class RunRecorder final {
   RunSnapshot snapshot_;
   std::optional<std::pair<double, double>> previous_position_;
   std::set<std::string> planner_request_ids_;
+  std::optional<std::chrono::steady_clock::time_point> pending_terminal_since_;
   bool finalized_{false};
 };
 

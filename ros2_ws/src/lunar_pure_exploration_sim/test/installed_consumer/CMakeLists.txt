@@ -1,0 +1,9 @@
+cmake_minimum_required(VERSION 3.22)
+project(lunar_pure_exploration_sim_installed_consumer LANGUAGES CXX)
+
+find_package(lunar_pure_exploration_sim REQUIRED)
+
+add_executable(installed_consumer main.cpp)
+target_compile_features(installed_consumer PRIVATE cxx_std_20)
+target_link_libraries(installed_consumer PRIVATE
+  lunar_pure_exploration_sim::lunar_pure_exploration_sim)

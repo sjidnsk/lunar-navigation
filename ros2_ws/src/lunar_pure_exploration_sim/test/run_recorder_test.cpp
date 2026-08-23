@@ -19,16 +19,34 @@ namespace {
 using namespace std::chrono_literals;
 using Status = lunar_pure_exploration_msgs::msg::PureExplorationStatus;
 
-std::filesystem::path ExternalTestDirectory(const std::string& name) {
-  static std::uint64_t sequence = 0U;
-  const auto root = std::filesystem::path{
-      "/home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/test-output"};
-  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
-  const auto path = root /
-      (name + "-" + std::to_string(nonce) + "-" + std::to_string(sequence++));
-  std::filesystem::create_directories(path);
-  return path;
-}
+class ScopedTempDirectory final {
+ public:
+  explicit ScopedTempDirectory(const std::string& name) {
+    const auto root = std::filesystem::temp_directory_path();
+    const auto nonce =
+        std::chrono::steady_clock::now().time_since_epoch().count();
+    path_ = root / ("lunar-pure-exploration-" + name + "-" +
+                    std::to_string(nonce) + "-" +
+                    std::to_string(sequence_++));
+    std::filesystem::create_directories(path_);
+  }
+  ~ScopedTempDirectory() {
+    std::error_code ignored;
+    std::filesystem::remove_all(path_, ignored);
+  }
+  ScopedTempDirectory(const ScopedTempDirectory&) = delete;
+  ScopedTempDirectory& operator=(const ScopedTempDirectory&) = delete;
+
+  [[nodiscard]] const std::filesystem::path& path() const noexcept {
+    return path_;
+  }
+
+ private:
+  static std::uint64_t sequence_;
+  std::filesystem::path path_;
+};
+
+std::uint64_t ScopedTempDirectory::sequence_ = 0U;
 
 std::vector<std::string> Lines(const std::filesystem::path& path) {
   std::ifstream input{path};
@@ -85,23 +103,26 @@ diagnostic_msgs::msg::DiagnosticArray Diagnostics(
 
 RunRecorderConfig Config(const std::filesystem::path& output) {
   return {.output_dir = output,
-          .repository_roots = {
-              "/home/kai/CodexDownloads/lunar_navigation/lunar_pure_planner_orin",
-              "/home/kai/CodexDownloads/lunar_navigation/lunar_pure_planner_orin-worktrees/jazzy-300m-exploration"},
-          .seed = 20260824U};
+          .repository_roots = {output.parent_path() / "repository-root"},
+          .seed = 20260824U,
+          .terminal_diagnostic_drain = 200ms};
 }
 
 TEST(RunRecorderTest, RejectsRelativeAndRepositoryOutputDirectories) {
+  ScopedTempDirectory temporary{"path-validation"};
   auto relative = Config("relative-output");
   EXPECT_THROW((void)RunRecorder{relative}, std::invalid_argument);
 
-  auto inside = Config(
-      "/home/kai/CodexDownloads/lunar_navigation/lunar_pure_planner_orin-worktrees/jazzy-300m-exploration/runtime");
+  const auto repository = temporary.path() / "repository";
+  std::filesystem::create_directories(repository);
+  auto inside = Config(repository / "runtime");
+  inside.repository_roots = {repository};
   EXPECT_THROW((void)RunRecorder{inside}, std::invalid_argument);
 }
 
 TEST(RunRecorderTest, RejectsSymlinkThatResolvesInsideRepositoryRoot) {
-  const auto sandbox = ExternalTestDirectory("symlink-root");
+  ScopedTempDirectory temporary{"symlink-root"};
+  const auto sandbox = temporary.path();
   const auto repository = sandbox / "repository";
   const auto link = sandbox / "repository-link";
   std::filesystem::create_directories(repository);
@@ -112,7 +133,8 @@ TEST(RunRecorderTest, RejectsSymlinkThatResolvesInsideRepositoryRoot) {
 }
 
 TEST(RunRecorderTest, RecordsTwoMetresAndFlushesCsvRows) {
-  const auto output = ExternalTestDirectory("two-metres");
+  ScopedTempDirectory temporary{"two-metres"};
+  const auto output = temporary.path() / "results";
   auto now = std::chrono::steady_clock::time_point{};
   RunRecorder recorder(Config(output), [&now] { return now; });
 
@@ -138,7 +160,8 @@ TEST(RunRecorderTest, RecordsTwoMetresAndFlushesCsvRows) {
 }
 
 TEST(RunRecorderTest, AggregatesOnlyRealPlannerAndExplorationTimingKeys) {
-  const auto output = ExternalTestDirectory("timings");
+  ScopedTempDirectory temporary{"timings"};
+  const auto output = temporary.path() / "results";
   RunRecorder recorder(Config(output));
   recorder.ObservePlannerDiagnostics(Diagnostics({
       {"request_id", "req-1"}, {"platform_type", "WHEELED"},
@@ -146,6 +169,14 @@ TEST(RunRecorderTest, AggregatesOnlyRealPlannerAndExplorationTimingKeys) {
       {"reason_code", "PLAN_FOUND"}, {"global_elapsed_ms", "11.5"},
       {"global_call_count", "2"}, {"local_elapsed_ms", "7.25"},
       {"local_call_count", "3"}, {"total_elapsed_ms", "18.75"}}));
+  recorder.ObservePlannerDiagnostics(Diagnostics({
+      {"request_id", "req-1"}, {"global_elapsed_ms", "999"},
+      {"global_call_count", "999"}, {"local_elapsed_ms", "999"},
+      {"local_call_count", "999"}}));
+  recorder.ObservePlannerDiagnostics(Diagnostics({
+      {"request_id", "req-2"}, {"global_elapsed_ms", "4.5"},
+      {"global_call_count", "1"}, {"local_elapsed_ms", "2.75"},
+      {"local_call_count", "2"}}));
   recorder.ObserveExplorationDiagnostics(Diagnostics({
       {"frontier_detection_call_count", "4"},
       {"frontier_detection_last_elapsed_ms", "1.5"},
@@ -156,10 +187,12 @@ TEST(RunRecorderTest, AggregatesOnlyRealPlannerAndExplorationTimingKeys) {
       {"rolling_local_elapsed_ms", "unavailable"}}));
 
   const auto snapshot = recorder.snapshot();
-  EXPECT_EQ(snapshot.global_planner_call_count, 2U);
-  EXPECT_EQ(snapshot.local_planner_call_count, 3U);
-  EXPECT_DOUBLE_EQ(snapshot.global_planner_total_elapsed_ms, 11.5);
-  EXPECT_DOUBLE_EQ(snapshot.local_planner_total_elapsed_ms, 7.25);
+  EXPECT_EQ(snapshot.global_planner_call_count, 3U);
+  EXPECT_EQ(snapshot.local_planner_call_count, 5U);
+  EXPECT_DOUBLE_EQ(snapshot.global_planner_total_elapsed_ms, 16.0);
+  EXPECT_DOUBLE_EQ(snapshot.local_planner_total_elapsed_ms, 10.0);
+  EXPECT_DOUBLE_EQ(snapshot.global_planner_last_elapsed_ms, 4.5);
+  EXPECT_DOUBLE_EQ(snapshot.local_planner_last_elapsed_ms, 2.75);
   EXPECT_EQ(snapshot.exploration_timing.at("frontier_detection_call_count"), 4.0);
   EXPECT_EQ(snapshot.exploration_timing.at("candidate_global_call_count"), 2.0);
   EXPECT_FALSE(snapshot.exploration_timing.contains("invented_elapsed_ms"));
@@ -167,7 +200,8 @@ TEST(RunRecorderTest, AggregatesOnlyRealPlannerAndExplorationTimingKeys) {
 }
 
 TEST(RunRecorderTest, AtomicallyFinalizesOnlyExactSuccessfulCompletion) {
-  const auto output = ExternalTestDirectory("success");
+  ScopedTempDirectory temporary{"success"};
+  const auto output = temporary.path() / "results";
   auto now = std::chrono::steady_clock::time_point{};
   RunRecorder recorder(Config(output), [&now] { return now; });
   recorder.ObserveStatus(SampleStatus(Status::EXECUTING, 0.25));
@@ -176,6 +210,10 @@ TEST(RunRecorderTest, AtomicallyFinalizesOnlyExactSuccessfulCompletion) {
   recorder.ObserveStatus(SampleStatus(
       Status::COMPLETED, 0.625, "COMPLETED_NO_REACHABLE_FRONTIER"));
 
+  EXPECT_TRUE(recorder.terminal_pending());
+  EXPECT_FALSE(std::filesystem::exists(output / "summary.json"));
+  now += 200ms;
+  recorder.PollTerminal();
   EXPECT_FALSE(std::filesystem::exists(output / "summary.json.tmp"));
   ASSERT_TRUE(std::filesystem::exists(output / "summary.json"));
   const auto summary = nlohmann::json::parse(std::ifstream{output / "summary.json"});
@@ -184,35 +222,139 @@ TEST(RunRecorderTest, AtomicallyFinalizesOnlyExactSuccessfulCompletion) {
   EXPECT_EQ(summary.at("reason_code"), "COMPLETED_NO_REACHABLE_FRONTIER");
   EXPECT_DOUBLE_EQ(summary.at("coverage_ratio").get<double>(), 0.625);
   EXPECT_DOUBLE_EQ(summary.at("status_coverage_ratio").get<double>(), 0.625);
-  EXPECT_DOUBLE_EQ(summary.at("wall_elapsed_s").get<double>(), 3.0);
+  EXPECT_DOUBLE_EQ(summary.at("wall_elapsed_s").get<double>(), 3.2);
   EXPECT_DOUBLE_EQ(summary.at("sim_elapsed_s").get<double>(), 60.0);
   EXPECT_NE(Lines(output / "coverage.csv").back().find(",0.625,"),
             std::string::npos);
 }
 
-TEST(RunRecorderTest, ErrorTimeoutShutdownAndWrongCompletedReasonAreFailures) {
-  struct Case {
-    TerminalKind kind;
-    std::uint8_t state;
-    const char* reason;
-  };
-  const std::vector<Case> cases{
-      {TerminalKind::kStatus, Status::ERROR, "PLANNER_ERROR"},
-      {TerminalKind::kTimeout, Status::EXECUTING, "WALL_TIMEOUT"},
-      {TerminalKind::kShutdown, Status::EXECUTING, "SHUTDOWN"},
-      {TerminalKind::kCanceled, Status::PAUSED, "CANCELED"},
-      {TerminalKind::kStatus, Status::COMPLETED, "COVERAGE_REACHED"}};
-  for (std::size_t index = 0U; index < cases.size(); ++index) {
-    const auto output = ExternalTestDirectory("failure-" + std::to_string(index));
+TEST(RunRecorderTest, StatusBeforeDiagnosticsDrainsLastRealTimingValues) {
+  ScopedTempDirectory temporary{"status-before-diagnostics"};
+  const auto output = temporary.path() / "results";
+  auto now = std::chrono::steady_clock::time_point{};
+  RunRecorder recorder(Config(output), [&now] { return now; });
+  auto terminal = SampleStatus(
+      Status::COMPLETED, 0.7, "COMPLETED_NO_REACHABLE_FRONTIER");
+  terminal.header.stamp.sec = 42;
+  recorder.ObserveStatus(terminal);
+  recorder.ObservePlannerDiagnostics(Diagnostics({
+      {"request_id", "terminal-request"}, {"global_elapsed_ms", "8.5"},
+      {"global_call_count", "1"}, {"local_elapsed_ms", "4.25"},
+      {"local_call_count", "2"}}));
+  auto exploration = Diagnostics({
+      {"frontier_detection_call_count", "9"},
+      {"frontier_detection_accumulated_elapsed_ms", "12.5"}});
+  exploration.header.stamp = terminal.header.stamp;
+  recorder.ObserveExplorationDiagnostics(exploration);
+  EXPECT_FALSE(std::filesystem::exists(output / "summary.json"));
+  now += 200ms;
+  recorder.PollTerminal();
+
+  const auto summary =
+      nlohmann::json::parse(std::ifstream{output / "summary.json"});
+  EXPECT_EQ(summary["planner"]["global"]["call_count"], 1U);
+  EXPECT_DOUBLE_EQ(summary["planner"]["local"]["total_elapsed_ms"], 4.25);
+  EXPECT_DOUBLE_EQ(
+      summary["exploration_timing"]["frontier_detection_accumulated_elapsed_ms"],
+      12.5);
+}
+
+TEST(RunRecorderTest, DiagnosticsBeforeStatusRemainInTerminalSummary) {
+  ScopedTempDirectory temporary{"diagnostics-before-status"};
+  const auto output = temporary.path() / "results";
+  auto now = std::chrono::steady_clock::time_point{};
+  RunRecorder recorder(Config(output), [&now] { return now; });
+  recorder.ObservePlannerDiagnostics(Diagnostics({
+      {"request_id", "already-arrived"}, {"global_elapsed_ms", "3.0"},
+      {"global_call_count", "2"}, {"local_elapsed_ms", "6.0"},
+      {"local_call_count", "4"}}));
+  recorder.ObserveExplorationDiagnostics(Diagnostics({
+      {"snapshot_to_goal_call_count", "5"},
+      {"snapshot_to_goal_accumulated_elapsed_ms", "7.5"}}));
+  recorder.ObserveStatus(SampleStatus(Status::ERROR, 0.4, "PLANNER_ERROR"));
+  now += 200ms;
+  recorder.PollTerminal();
+
+  const auto summary =
+      nlohmann::json::parse(std::ifstream{output / "summary.json"});
+  EXPECT_FALSE(summary["success"].get<bool>());
+  EXPECT_EQ(summary["planner"]["local"]["call_count"], 4U);
+  EXPECT_DOUBLE_EQ(
+      summary["exploration_timing"]["snapshot_to_goal_accumulated_elapsed_ms"],
+      7.5);
+}
+
+TEST(RunRecorderTest, RecognizesIdleCanceledAsUnsuccessfulTerminalStatus) {
+  ScopedTempDirectory temporary{"actual-cancel"};
+  const auto output = temporary.path() / "results";
+  auto now = std::chrono::steady_clock::time_point{};
+  RunRecorder recorder(Config(output), [&now] { return now; });
+  recorder.ObserveStatus(SampleStatus(Status::IDLE, 0.4, "CANCELED"));
+  EXPECT_TRUE(recorder.terminal_pending());
+  now += 200ms;
+  recorder.PollTerminal();
+  const auto summary =
+      nlohmann::json::parse(std::ifstream{output / "summary.json"});
+  EXPECT_FALSE(summary["success"].get<bool>());
+  EXPECT_EQ(summary["terminal_state"], "CANCELED");
+  EXPECT_EQ(summary["reason_code"], "CANCELED");
+}
+
+TEST(RunRecorderTest, ShutdownFlushesPendingStatusWithoutReclassification) {
+  ScopedTempDirectory temporary{"shutdown-pending"};
+  const auto output = temporary.path() / "results";
+  RunRecorder recorder(Config(output));
+  recorder.ObserveStatus(SampleStatus(Status::ERROR, 0.4, "PLANNER_ERROR"));
+  recorder.FlushPendingTerminal();
+  const auto summary =
+      nlohmann::json::parse(std::ifstream{output / "summary.json"});
+  EXPECT_FALSE(summary["success"].get<bool>());
+  EXPECT_EQ(summary["terminal_state"], "ERROR");
+  EXPECT_EQ(summary["reason_code"], "PLANNER_ERROR");
+}
+
+TEST(RunRecorderTest, ExternalFinalizationCannotSpoofLatestStatusSuccess) {
+  for (const auto kind : {TerminalKind::kTimeout, TerminalKind::kShutdown}) {
+    ScopedTempDirectory temporary{"external-failure"};
+    const auto output = temporary.path() / "results";
     RunRecorder recorder(Config(output));
-    recorder.ObserveStatus(SampleStatus(cases[index].state, 0.4,
-                                        cases[index].reason));
-    if (cases[index].kind != TerminalKind::kStatus) {
-      recorder.Finalize(cases[index].kind, cases[index].reason);
-    }
-    const auto summary = nlohmann::json::parse(std::ifstream{output / "summary.json"});
-    EXPECT_FALSE(summary.at("success").get<bool>()) << index;
+    recorder.ObserveStatus(SampleStatus(
+        Status::EXECUTING, 0.4, "COMPLETED_NO_REACHABLE_FRONTIER"));
+    recorder.Finalize(kind);
+    const auto summary =
+        nlohmann::json::parse(std::ifstream{output / "summary.json"});
+    EXPECT_FALSE(summary["success"].get<bool>());
   }
+
+  ScopedTempDirectory temporary{"wrong-completed-reason"};
+  const auto output = temporary.path() / "results";
+  RunRecorder recorder(Config(output));
+  recorder.ObserveStatus(
+      SampleStatus(Status::COMPLETED, 0.4, "COVERAGE_REACHED"));
+  recorder.Finalize(TerminalKind::kTimeout);
+  const auto summary =
+      nlohmann::json::parse(std::ifstream{output / "summary.json"});
+  EXPECT_FALSE(summary["success"].get<bool>());
+  EXPECT_EQ(summary["terminal_state"], "COMPLETED");
+  EXPECT_EQ(summary["reason_code"], "COVERAGE_REACHED");
+}
+
+TEST(RunRecorderTest, SummaryJsonEscapesStatusStringsWithoutDataLoss) {
+  ScopedTempDirectory temporary{"json-escaping"};
+  const auto output = temporary.path() / "results";
+  auto now = std::chrono::steady_clock::time_point{};
+  RunRecorder recorder(Config(output), [&now] { return now; });
+  auto status = SampleStatus(Status::ERROR, 0.4, "bad \"quote\"\nslash\\end");
+  status.task_id = "task\n\"quoted\"";
+  status.current_plan_id = "plan\\path";
+  recorder.ObserveStatus(status);
+  now += 200ms;
+  recorder.PollTerminal();
+  const auto summary =
+      nlohmann::json::parse(std::ifstream{output / "summary.json"});
+  EXPECT_EQ(summary["reason_code"], status.reason_code);
+  EXPECT_EQ(summary["task_id"], status.task_id);
+  EXPECT_EQ(summary["current_plan_id"], status.current_plan_id);
 }
 
 TEST(RunRecorderTest, ConvertsMotionReferencePreviewWithoutUsingTrajectory) {

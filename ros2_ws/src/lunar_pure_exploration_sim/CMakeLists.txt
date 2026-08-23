@@ -9,6 +9,8 @@ find_package(lunar_planning_msgs REQUIRED)
 find_package(lunar_pure_exploration_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(nlohmann_json REQUIRED)
+get_target_property(NLOHMANN_JSON_INCLUDE_DIRS
+  nlohmann_json::nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -28,7 +30,9 @@ target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 target_include_directories(${PROJECT_NAME}
   PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
-    "$<INSTALL_INTERFACE:include>")
+    "$<INSTALL_INTERFACE:include>"
+  PRIVATE
+    ${NLOHMANN_JSON_INCLUDE_DIRS})
 ament_target_dependencies(${PROJECT_NAME}
   diagnostic_msgs
   geometry_msgs
@@ -41,7 +45,6 @@ ament_target_dependencies(${PROJECT_NAME}
   std_msgs
   tf2_msgs
   visualization_msgs)
-target_link_libraries(${PROJECT_NAME} nlohmann_json::nlohmann_json)
 
 add_executable(simulation_node src/simulation_main.cpp)
 target_compile_features(simulation_node PRIVATE cxx_std_20)
@@ -100,6 +103,8 @@ if(BUILD_TESTING)
 
   ament_add_gtest(run_recorder_test test/run_recorder_test.cpp)
   target_compile_features(run_recorder_test PRIVATE cxx_std_20)
+  target_include_directories(run_recorder_test PRIVATE
+    ${NLOHMANN_JSON_INCLUDE_DIRS})
   target_link_libraries(run_recorder_test ${PROJECT_NAME})
 endif()
 
