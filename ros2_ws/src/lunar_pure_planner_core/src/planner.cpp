@@ -271,6 +271,9 @@ using namespace std::chrono_literals;
         .snapshot_cache_hit = snapshot.cache_hit,
         .projection_cache_hit = projection.cache_hit,
         .goal_field_cache_hit = goal_field.cache_hit,
+        .expanded_states = result.metrics.expanded_states,
+        .best_cost = result.ok() ? std::optional<double>{result.cost}
+                                 : std::nullopt,
     };
   }
 
@@ -353,6 +356,9 @@ using namespace std::chrono_literals;
                                    : std::nullopt,
         .snapshot_cache_hit = snapshot.cache_hit,
         .projection_cache_hit = projection.cache_hit,
+        .expanded_states = result.metrics.expanded_states,
+        .best_cost = result.ok() ? std::optional<double>{result.cost}
+                                 : std::nullopt,
     };
   }
 
@@ -385,6 +391,9 @@ using namespace std::chrono_literals;
                                  : std::nullopt,
       .snapshot_cache_hit = snapshot.cache_hit,
       .projection_cache_hit = projection.cache_hit,
+      .expanded_states = result.metrics.expanded_states,
+      .best_cost = result.ok() ? std::optional<double>{result.cost}
+                               : std::nullopt,
   };
 }
 
@@ -401,6 +410,21 @@ Planner::Planner() : cache_(std::make_shared<shared::ActivePlannerCache>()) {
                        const LocalGoalSet& goals, SearchControl control) {
         return PlanLocalDefault(input, goals, std::move(control), *cache);
       };
+}
+
+LocalStageResult Planner::PlanLocal(const PlanningRequest& input,
+                                    const LocalGoalSet& goals_odom,
+                                    SearchControl control) noexcept {
+  try {
+    if (!backends_.local) {
+      return {.status = LocalPlanStatus::kPlannerError,
+              .reason_code = "PLANNER_ERROR"};
+    }
+    return backends_.local(input, goals_odom, std::move(control));
+  } catch (...) {
+    return {.status = LocalPlanStatus::kPlannerError,
+            .reason_code = "PLANNER_ERROR"};
+  }
 }
 
 Planner::Planner(PlannerBackends backends) : backends_(std::move(backends)) {}
@@ -624,10 +648,11 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
         .status = PlanningStatus::kSuccess,
         .reason_code = {},
         .reference = std::move(composed.reference),
-        .expanded_states = global_route.has_value()
-                               ? global_route->expanded_states
-                               : 0U,
+        .expanded_states =
+            (global_route.has_value() ? global_route->expanded_states : 0U) +
+            local.expanded_states,
         .selected_goal_index = local.selected_goal_index,
+        .best_cost = local.best_cost,
     };
     return finish(std::move(success));
   } catch (...) {

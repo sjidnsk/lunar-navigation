@@ -200,6 +200,44 @@ lunar::pure_planning::PlanningResult Success(
           .reference = std::move(reference)};
 }
 
+lunar::pure_planning::LocalStageResult LocalSuccess(
+    const lunar::pure_planning::PlanningRequest& request,
+    const lunar::pure_planning::LocalGoalSet& goals,
+    const std::size_t selected_goal_index = 0U) {
+  if (selected_goal_index >= goals.goals_odom.size()) {
+    return {.status = lunar::pure_planning::LocalPlanStatus::kInvalidInput,
+            .reason_code = "INVALID_INPUT"};
+  }
+  const auto* point = std::get_if<lunar::pure_planning::PointGoal>(
+      &goals.goals_odom[selected_goal_index].target);
+  const auto* state = std::get_if<lunar::pure_planning::WheeledState>(
+      &request.current_state);
+  if (point == nullptr || state == nullptr) {
+    return {.status = lunar::pure_planning::LocalPlanStatus::kInvalidInput,
+            .reason_code = "INVALID_INPUT"};
+  }
+  lunar::pure_planning::TrajectoryReference trajectory{
+      .semantics = lunar::pure_planning::TrajectorySemantics::kWheeledBase,
+      .points = {{.pose = state->pose},
+                 {.pose = {.position_m = point->position_m,
+                           .orientation = {.w = 1.0}}}},
+  };
+  return {
+      .status = lunar::pure_planning::LocalPlanStatus::kSolved,
+      .data = std::move(trajectory),
+      .reason_code = "WHEEL_PLAN_AVAILABLE",
+      .selected_goal_index = selected_goal_index,
+      .expanded_states = 7U,
+      .best_cost = 1.25,
+  };
+}
+
+bool MatchesPlanId(const lunar_planning_msgs::msg::MotionReference& reference,
+                   const std::string_view request_id) {
+  return reference.plan_id == request_id ||
+         reference.plan_id == "wheel/" + std::string{request_id};
+}
+
 class RunningSystem final {
  public:
   explicit RunningSystem(PlannerFn planner,
@@ -207,10 +245,11 @@ class RunningSystem final {
                          const std::string& platform_config =
                              ConfigPath("wheel.yaml").string(),
                          const std::vector<rclcpp::Parameter>&
-                             additional_parameters = {})
+                             additional_parameters = {},
+                         LocalPlannerFn local_planner = RealLocalPlannerFn())
       : server(std::make_shared<PurePlanMotionServer>(
             ServerOptions(platform, platform_config, additional_parameters),
-            std::move(planner))),
+            std::move(planner), std::move(local_planner))),
         client(std::make_shared<rclcpp::Node>(UniqueName())),
         executor(MakePurePlannerExecutor()) {
     global_publisher = client->create_publisher<nav_msgs::msg::OccupancyGrid>(
@@ -300,7 +339,17 @@ class RunningSystem final {
   }
 
   ClientGoalHandle::SharedPtr SendGoal(const Action::Goal& goal) {
-    auto future = action_client->async_send_goal(goal);
+    rclcpp_action::Client<Action>::SendGoalOptions options;
+    options.feedback_callback =
+        [this](ClientGoalHandle::SharedPtr,
+               std::shared_ptr<const Action::Feedback> feedback) {
+          if (!feedback) {
+            return;
+          }
+          std::scoped_lock lock{feedback_mutex};
+          feedback_samples.push_back(*feedback);
+        };
+    auto future = action_client->async_send_goal(goal, options);
     EXPECT_EQ(future.wait_for(3s), std::future_status::ready);
     return future.get();
   }
@@ -325,6 +374,17 @@ class RunningSystem final {
   std::vector<lunar_planning_msgs::msg::MotionReference> References() const {
     std::scoped_lock lock{references_mutex};
     return references;
+  }
+
+  std::vector<Action::Feedback> Feedback() const {
+    std::scoped_lock lock{feedback_mutex};
+    return feedback_samples;
+  }
+
+  void PublishLocalOnly() { local_publisher->publish(LocalMap()); }
+
+  void PublishOdometryOnly(const double position_x) {
+    odometry_publisher->publish(Odometry(position_x));
   }
 
   std::shared_ptr<PurePlanMotionServer> server;
@@ -352,6 +412,8 @@ class RunningSystem final {
   std::vector<diagnostic_msgs::msg::DiagnosticArray> diagnostics;
   mutable std::mutex references_mutex;
   std::vector<lunar_planning_msgs::msg::MotionReference> references;
+  mutable std::mutex feedback_mutex;
+  std::vector<Action::Feedback> feedback_samples;
 };
 
 class DelayedCancelActionSystem final {
@@ -480,7 +542,7 @@ std::set<std::string> SubscriptionTopics(
 void ExpectTenKeyDiagnostic(
     const diagnostic_msgs::msg::DiagnosticArray& diagnostics) {
   ASSERT_EQ(diagnostics.status.size(), 1U);
-  EXPECT_EQ(diagnostics.status.front().values.size(), 16U);
+  EXPECT_EQ(diagnostics.status.front().values.size(), 19U);
 }
 
 void ExpectBounded(const std::chrono::steady_clock::duration elapsed) {
@@ -620,6 +682,49 @@ TEST(PurePlanMotionServer, PublishesSuccessfulWheelReferenceAndClearsItOnFailure
   EXPECT_TRUE(cleared.plan_id.empty());
   EXPECT_TRUE(cleared.path_preview.poses.empty());
   EXPECT_TRUE(cleared.trajectory.points.empty());
+}
+
+TEST(PurePlanMotionServer,
+     PublishesImmediatePhaseChangesAndThrottlesRepeatedPhaseFeedback) {
+  RunningSystem system{[](const lunar::pure_planning::PlanningRequest& request) {
+    EXPECT_TRUE(static_cast<bool>(request.progress));
+    request.progress({.phase =
+                          lunar::pure_planning::PlannerPhase::kSnapshotProjection});
+    for (std::size_t repeat = 0U; repeat < 8U; ++repeat) {
+      request.progress({.phase =
+                            lunar::pure_planning::PlannerPhase::kSnapshotProjection});
+    }
+    request.progress(
+        {.phase = lunar::pure_planning::PlannerPhase::kGlobal});
+    auto result = Success(request);
+    result.expanded_states = 23U;
+    result.best_cost = 4.5;
+    return result;
+  }};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("feedback"));
+  ASSERT_NE(handle, nullptr);
+  EXPECT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_TRUE(WaitFor([&] { return system.Feedback().size() >= 4U; }));
+  const auto feedback = system.Feedback();
+  ASSERT_GE(feedback.size(), 4U);
+  EXPECT_EQ(feedback[0].phase, Action::Feedback::VALIDATING_INPUT);
+  EXPECT_EQ(feedback[1].phase, Action::Feedback::BUILDING_SNAPSHOT);
+  EXPECT_EQ(feedback[2].phase, Action::Feedback::SEARCHING);
+  EXPECT_EQ(feedback[3].phase, Action::Feedback::CERTIFYING);
+  EXPECT_EQ(std::ranges::count_if(feedback, [](const auto& sample) {
+              return sample.phase == Action::Feedback::BUILDING_SNAPSHOT;
+            }),
+            1);
+  for (std::size_t index = 1U; index < feedback.size(); ++index) {
+    EXPECT_GE(feedback[index].elapsed_s, feedback[index - 1U].elapsed_s);
+    EXPECT_GE(feedback[index].expanded_states,
+              feedback[index - 1U].expanded_states);
+  }
+  EXPECT_EQ(feedback[3].expanded_states, 23U);
+  EXPECT_TRUE(feedback[3].has_best_cost);
+  EXPECT_DOUBLE_EQ(feedback[3].best_cost, 4.5);
 }
 
 TEST(PurePlanMotionServer, ConsumesTrustedBridgeParameterAfterOneAcceptedGoal) {
@@ -1491,6 +1596,59 @@ TEST(PurePlanMotionServer,
 }
 
 TEST(PurePlanMotionServer,
+     RollingDiscardsLateLocalIdentityAndPublishesOnlyTheFreshCycle) {
+  std::atomic<std::uint64_t> calls{0U};
+  std::atomic<bool> first_entered{false};
+  std::atomic<bool> release_first{false};
+  RunningSystem system{
+      [](const lunar::pure_planning::PlanningRequest&) {
+        return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                       "PLANNER_ERROR");
+      },
+      "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"rolling_surface_enabled", true},
+       rclcpp::Parameter{"rolling_poll_period_ms", 10},
+       rclcpp::Parameter{"rolling_min_replan_interval_ms", 10}},
+      [&](const lunar::pure_planning::PlanningRequest& request,
+          const lunar::pure_planning::LocalGoalSet& goals,
+          lunar::pure_planning::SearchControl control) {
+        const std::uint64_t call = ++calls;
+        if (call == 1U) {
+          first_entered = true;
+          while (!release_first.load() && !control.canceled() &&
+                 !control.expired()) {
+            std::this_thread::sleep_for(1ms);
+          }
+        }
+        return LocalSuccess(request, goals);
+      }};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("rolling_identity"));
+  ASSERT_NE(handle, nullptr);
+  ASSERT_TRUE(WaitFor([&] { return first_entered.load(); }));
+  system.PublishLocalOnly();
+  std::this_thread::sleep_for(20ms);
+  release_first = true;
+  ASSERT_TRUE(WaitFor([&] { return calls.load() >= 2U; }));
+  ASSERT_TRUE(WaitFor([&] {
+    return std::ranges::count_if(system.References(), [](const auto& reference) {
+             return MatchesPlanId(reference, "rolling_identity");
+           }) == 1;
+  }));
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() >= 2U; }));
+  const auto diagnostics = system.Diagnostics();
+  ASSERT_GE(diagnostics.size(), 2U);
+  EXPECT_EQ(FindDiagnosticValue(diagnostics[0], "reason_code"), "STALE_INPUT");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics[1], "reason_code"), "PLAN_FOUND");
+
+  system.PublishOdometryOnly(0.2);
+  const auto result = system.Result(handle);
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::SUCCEEDED);
+  EXPECT_EQ(calls.load(), 2U);
+}
+
+TEST(PurePlanMotionServer,
      RollingFirstLocalRequestKeepsTheColdGlobalTimingWindow) {
   struct TimingObservation final {
     std::chrono::steady_clock::duration start_age;
@@ -1500,7 +1658,15 @@ TEST(PurePlanMotionServer,
   auto observed = observed_promise.get_future();
   std::atomic<bool> first{true};
   RunningSystem system{
-      [&](const lunar::pure_planning::PlanningRequest& request) {
+      [](const lunar::pure_planning::PlanningRequest&) {
+        return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                       "PLANNER_ERROR");
+      },
+      "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"rolling_surface_enabled", true}},
+      [&](const lunar::pure_planning::PlanningRequest& request,
+          const lunar::pure_planning::LocalGoalSet& goals,
+          lunar::pure_planning::SearchControl) {
         const auto invoked = std::chrono::steady_clock::now();
         if (first.exchange(false)) {
           EXPECT_TRUE(request.request_started_at.has_value());
@@ -1509,10 +1675,8 @@ TEST(PurePlanMotionServer,
               .window = request.control.deadline - *request.request_started_at,
           });
         }
-        return Success(request);
-      },
-      "wheel", ConfigPath("wheel.yaml").string(),
-      {rclcpp::Parameter{"rolling_surface_enabled", true}}};
+        return LocalSuccess(request, goals);
+      }};
   system.PublishInputs(true, 0.0, 2048U);
 
   const auto handle = system.SendGoal(system.Goal("rolling_cold_global"));
@@ -1532,15 +1696,21 @@ TEST(PurePlanMotionServer,
 TEST(PurePlanMotionServer,
      RollingFirstCycleFinalizedAtTwoPointFiveSecondsIsPlanFoundLate) {
   RunningSystem system{
-      [](const lunar::pure_planning::PlanningRequest& request) {
-        EXPECT_TRUE(request.request_started_at.has_value());
-        std::this_thread::sleep_until(*request.request_started_at + 2500ms);
-        return Success(request);
+      [](const lunar::pure_planning::PlanningRequest&) {
+        return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                       "PLANNER_ERROR");
       },
       "wheel", ConfigPath("wheel.yaml").string(),
       {rclcpp::Parameter{"rolling_surface_enabled", true},
        rclcpp::Parameter{"rolling_poll_period_ms", 10},
-       rclcpp::Parameter{"rolling_min_replan_interval_ms", 10}}};
+       rclcpp::Parameter{"rolling_min_replan_interval_ms", 10}},
+      [](const lunar::pure_planning::PlanningRequest& request,
+         const lunar::pure_planning::LocalGoalSet& goals,
+         lunar::pure_planning::SearchControl) {
+        EXPECT_TRUE(request.request_started_at.has_value());
+        std::this_thread::sleep_until(*request.request_started_at + 2500ms);
+        return LocalSuccess(request, goals);
+      }};
   system.PublishInputs();
 
   const auto handle = system.SendGoal(system.Goal("rolling_late"));
@@ -1549,7 +1719,7 @@ TEST(PurePlanMotionServer,
       [&] {
         const auto references = system.References();
         return std::ranges::any_of(references, [](const auto& reference) {
-          return reference.plan_id == "rolling_late";
+          return MatchesPlanId(reference, "rolling_late");
         });
       },
       4s));
@@ -1565,15 +1735,21 @@ TEST(PurePlanMotionServer,
 TEST(PurePlanMotionServer,
      RollingCycleFinalizedAtHardDeadlineDoesNotPublishAReference) {
   RunningSystem system{
-      [](const lunar::pure_planning::PlanningRequest& request) {
-        EXPECT_TRUE(request.request_started_at.has_value());
-        std::this_thread::sleep_until(*request.request_started_at + 3s);
-        return Success(request);
+      [](const lunar::pure_planning::PlanningRequest&) {
+        return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                       "PLANNER_ERROR");
       },
       "wheel", ConfigPath("wheel.yaml").string(),
       {rclcpp::Parameter{"rolling_surface_enabled", true},
        rclcpp::Parameter{"rolling_poll_period_ms", 10},
-       rclcpp::Parameter{"rolling_min_replan_interval_ms", 10}}};
+       rclcpp::Parameter{"rolling_min_replan_interval_ms", 10}},
+      [](const lunar::pure_planning::PlanningRequest& request,
+         const lunar::pure_planning::LocalGoalSet& goals,
+         lunar::pure_planning::SearchControl) {
+        EXPECT_TRUE(request.request_started_at.has_value());
+        std::this_thread::sleep_until(*request.request_started_at + 3s);
+        return LocalSuccess(request, goals);
+      }};
   system.PublishInputs();
 
   const auto handle = system.SendGoal(system.Goal("rolling_hard"));
@@ -1583,7 +1759,7 @@ TEST(PurePlanMotionServer,
   EXPECT_EQ(result_status, std::future_status::ready);
   const auto references = system.References();
   EXPECT_FALSE(std::ranges::any_of(references, [](const auto& reference) {
-    return reference.plan_id == "rolling_hard";
+    return MatchesPlanId(reference, "rolling_hard");
   }));
   if (result_status != std::future_status::ready) {
     auto cancel = system.action_client->async_cancel_goal(handle);

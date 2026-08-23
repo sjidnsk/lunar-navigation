@@ -319,6 +319,8 @@ Action::Result ConvertResult(const lunar::pure_planning::PlanningResult& source,
   result.diagnostics.elapsed_s =
       std::chrono::duration<double>(source.timing.total_elapsed).count();
   result.diagnostics.expanded_states = source.expanded_states;
+  result.diagnostics.has_best_cost = source.best_cost.has_value();
+  result.diagnostics.best_cost = source.best_cost.value_or(0.0);
   SetLatencyWarnings(
       lunar::pure_planning::ClassifyRequestLatency(
           source.timing.total_elapsed),

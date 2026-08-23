@@ -284,6 +284,23 @@ TEST(MessageConversion, AddsWarningsAtExactTargetAndSlaMilestones) {
   }
 }
 
+TEST(MessageConversion, MapsAvailableSearchMetricsWithoutInventingACost) {
+  auto with_cost = Result(PlanningStatus::kSuccess, WheelReference());
+  with_cost.expanded_states = 37U;
+  with_cost.best_cost = 12.5;
+  const auto converted_with_cost = ConvertResult(with_cost, 1U);
+  EXPECT_EQ(converted_with_cost.diagnostics.expanded_states, 37U);
+  EXPECT_TRUE(converted_with_cost.diagnostics.has_best_cost);
+  EXPECT_DOUBLE_EQ(converted_with_cost.diagnostics.best_cost, 12.5);
+
+  auto without_cost = Result(PlanningStatus::kNoPath, std::nullopt);
+  without_cost.expanded_states = 9U;
+  const auto converted_without_cost = ConvertResult(without_cost, 1U);
+  EXPECT_EQ(converted_without_cost.diagnostics.expanded_states, 9U);
+  EXPECT_FALSE(converted_without_cost.diagnostics.has_best_cost);
+  EXPECT_DOUBLE_EQ(converted_without_cost.diagnostics.best_cost, 0.0);
+}
+
 TEST(MessageConversion, ConvertsWheelAndLeggedReferencesLosslesslyInMapFrame) {
   for (const auto platform : {lunar::pure_planning::PlatformType::kWheeled,
                               lunar::pure_planning::PlatformType::kLegged}) {

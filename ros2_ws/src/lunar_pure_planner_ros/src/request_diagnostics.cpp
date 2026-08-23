@@ -87,6 +87,10 @@ diagnostic_msgs::msg::DiagnosticArray MakeRequestDiagnostics(
   add_value("planning_outcome", std::to_string(fields.outcome));
   add_value("reason_code",
             result.reason_code.empty() ? fields.reason : result.reason_code);
+  add_value("expanded_states", std::to_string(result.expanded_states));
+  add_value("has_best_cost", result.best_cost.has_value() ? "true" : "false");
+  add_value("best_cost",
+            result.best_cost.has_value() ? Decimal(*result.best_cost) : "0");
   add_value("latency_class", std::string{
       lunar::pure_planning::RequestLatencyClassName(
           lunar::pure_planning::ClassifyRequestLatency(

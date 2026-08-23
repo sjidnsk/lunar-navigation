@@ -109,6 +109,7 @@ struct PlanningResult final {
   bool local_snapshot_cache_hit{};
   bool local_projection_cache_hit{};
   bool goal_field_cache_hit{};
+  std::optional<double> best_cost;
 };
 
 }  // namespace lunar::pure_planning

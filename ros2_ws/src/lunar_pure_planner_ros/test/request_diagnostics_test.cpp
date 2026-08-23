@@ -26,7 +26,9 @@ TEST(RequestDiagnostics, EmitsStatusLatencyClassAndEveryPhaseTiming) {
       .certification_elapsed = 400us,
       .output_elapsed = 100us,
       .total_elapsed = 6ms,
-  }};
+  },
+      .expanded_states = 47U,
+      .best_cost = 12.25};
   const auto diagnostics = MakeRequestDiagnostics(
       "request-17", lunar::pure_planning::PlatformType::kLegged,
       lunar::pure_planning::EnvironmentMode::kLavaTube, result);
@@ -41,11 +43,15 @@ TEST(RequestDiagnostics, EmitsStatusLatencyClassAndEveryPhaseTiming) {
   }
   EXPECT_EQ(keys, (std::set<std::string>{
       "request_id", "platform_type", "environment_mode", "planning_outcome",
-      "reason_code", "latency_class", "snapshot_projection_elapsed_ms",
+      "reason_code", "expanded_states", "has_best_cost", "best_cost",
+      "latency_class", "snapshot_projection_elapsed_ms",
       "global_elapsed_ms", "global_call_count", "local_goal_elapsed_ms",
       "local_search_elapsed_ms", "local_elapsed_ms", "local_call_count",
       "certification_elapsed_ms", "output_elapsed_ms", "total_elapsed_ms"}));
-  EXPECT_EQ(status.values.size(), 16U);
+  EXPECT_EQ(status.values.size(), 19U);
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "expanded_states"), "47");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "has_best_cost"), "true");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "best_cost"), "12.25");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "latency_class"), "TARGET_MET");
   EXPECT_EQ(FindDiagnosticValue(diagnostics,
                                 "snapshot_projection_elapsed_ms"),
@@ -91,7 +97,7 @@ TEST(RequestDiagnostics, AssignsLevelForEveryTypedStatus) {
         lunar::pure_planning::EnvironmentMode::kLunarSurface, result);
     ASSERT_EQ(diagnostics.status.size(), 1U);
     EXPECT_EQ(diagnostics.status.front().level, expected.level);
-    EXPECT_EQ(diagnostics.status.front().values.size(), 16U);
+    EXPECT_EQ(diagnostics.status.front().values.size(), 19U);
   }
 }
 

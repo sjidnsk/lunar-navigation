@@ -230,6 +230,10 @@ AdapterResult<lunar::pure_planning::MinimalWorldSnapshot> AdaptSnapshot(
   lunar::pure_planning::MinimalWorldSnapshot result{
       .local_map = *local.value,
       .map_from_odom = *transform.value,
+      .global_map_sequence = input.global_sequence,
+      .local_map_sequence = input.local_sequence,
+      .odometry_sequence = input.odometry_sequence,
+      .tf_sequence = input.tf_sequence,
   };
   if (mode == lunar::pure_planning::EnvironmentMode::kLunarSurface) {
     if (!input.global_map) {

@@ -37,6 +37,8 @@ struct LocalStageResult final {
   bool snapshot_cache_hit{};
   bool projection_cache_hit{};
   bool goal_field_cache_hit{};
+  std::uint64_t expanded_states{};
+  std::optional<double> best_cost;
 };
 
 struct PlannerBackends final {
@@ -51,6 +53,9 @@ class Planner final {
   Planner();
   explicit Planner(PlannerBackends backends);
 
+  [[nodiscard]] LocalStageResult PlanLocal(
+      const PlanningRequest& input, const LocalGoalSet& goals_odom,
+      SearchControl control) noexcept;
   [[nodiscard]] PlanningResult Plan(const PlanningRequest& input) noexcept;
 
  private:
