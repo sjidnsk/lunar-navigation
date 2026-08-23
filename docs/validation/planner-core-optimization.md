@@ -90,3 +90,53 @@ count, final pose, and rolling segment count for later optimization gates.
 Gate 1 therefore validates the completed Wave 1 contracts while keeping the
 known wheel search-capability failures visible and blocking final acceptance
 until Gate 2/Task 10 makes them green.
+
+## Gate 2 — rolling portals, Hybrid labels and linear projection — 2026-08-24
+
+### Integrated build and compatibility evidence
+
+- Formal integration HEAD `a45de62b8e37dac47a7a3cdb784baf1451e5f3a3`
+  built `lunar_pure_planner_core` under ROS 2 Jazzy with
+  `BUILD_TESTING=ON` and `RelWithDebInfo` in the isolated
+  `/tmp/lunar-planner-opt/gate2-formal` tree.  The build completed in
+  `15.44 s`; peak build RSS was `512676 KiB`.
+- Non-wheel core CTest passed `17/17` in `6.25 s`.  The wheel binary excluding
+  only the frozen 750 m cross-module scenario passed `71/71` in `2.57 s` with
+  peak RSS `144772 KiB`.  Shared ARA* passed `25/25`.
+- Standalone no-legacy, action, external-interface and launch contracts passed
+  `48/48` in `0.26 s`.
+- `PlanMotion.action`, `GoalRegion.msg`, `MotionReference.msg` and
+  `PlannerDiagnostics.msg` are byte-identical to frozen baseline `45106ad`.
+  Their SHA-256 prefixes are respectively `36e8077b`, `2952e5ca`,
+  `b0472444` and `37990427`.
+- Both staged and formal worktrees passed `git diff --check`; the production
+  debug-marker scan was empty.  Formal verification made no source changes.
+
+### Wheel search behavior and measured scope
+
+- Wheel states now keep exact primitive endpoints behind request-scoped SE(2)
+  quantized keys, with at most four active continuous labels per key.  Interior
+  edges remain complete supplied capability primitives; only the existing
+  exact terminal connector may be scaled and every returned edge is evaluated
+  by the existing footprint, terrain, clearance and dynamics checks.
+- The occupied-wall and greater-than-300-m regressions are GREEN.  In the
+  latter, timing only the `PlanWheel()` call measured `393 ms`, leaving
+  `607 ms` against its explicit 1 s assertion.  The complete test including a
+  2500 x 1000 fixture takes about `1.25 s`.
+- That 300 m result exercises an optional certified preferred-candidate path:
+  a geometrically recognized straight/mirrored-arc S-shift is fully certified
+  first and supplied to ARA* as an incumbent.  With first-solution policy
+  enabled, ARA* therefore reports zero OPEN-state expansions.  This metric does
+  not mean zero planning work and is not a universal Hybrid A* latency bound.
+- The preferred builder is not tied to the fixture's coordinates or primitive
+  IDs, but its applicability is deliberately limited to compatible aligned
+  goals, obstacle geometry and primitive families.  Unsupported geometry,
+  overflow, control interruption or any failed edge certificate falls back to
+  the same continuous-label Hybrid A* search.  Separate regressions exercise
+  real state expansion, label retention, terminal-label completeness,
+  cancellation and the 3 s hard stop.
+
+Gate 2 validates the local-search components and their integration.  It does
+not yet claim end-to-end acceptance: the 750 m scenario remains excluded until
+Task 10 replaces independent portal attempts with one production multi-goal
+search and runs that scenario unchanged.
