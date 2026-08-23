@@ -651,6 +651,7 @@ TEST(AraStarAnytime, UsesCertifiedInitialCandidateAsAnImprovementBound) {
   problem.certified_initial_candidate =
       CertifiedCandidate({0U, std::numeric_limits<std::size_t>::max()},
                          {3U}, 5.0);
+  problem.config.stop_after_first_solution = false;
 
   const auto result = SearchAnytimeAraStar(problem);
 
@@ -680,6 +681,7 @@ TEST(AraStarAnytime, BreaksEqualCostIncumbentsByStablePathIndex) {
   };
   problem.certified_initial_candidate =
       CertifiedCandidate({0U, 99U}, {3U}, 5.0);
+  problem.config.stop_after_first_solution = false;
   ASSERT_LT(StablePathIndexForTest({10U}),
             problem.certified_initial_candidate->stable_index);
 
