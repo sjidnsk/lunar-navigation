@@ -1164,10 +1164,15 @@ TEST(WheelPlanner, RetainsContinuousStatesInsideOneQuantizedBucket) {
       Primitive("b-short", WheelPrimitiveKind::kForward, 0.21),
   };
 
-  const WheelPlanResult first = PlanWheel(RequestTo(
-      fixture, short_first, 1.38, 2.0, 0.0, Pose(1.0, 2.0)));
-  const WheelPlanResult second = PlanWheel(RequestTo(
-      fixture, long_first, 1.38, 2.0, 0.0, Pose(1.0, 2.0)));
+  WheelPlanRequest first_request = RequestTo(
+      fixture, short_first, 1.38, 2.0, 0.0, Pose(1.0, 2.0));
+  first_request.search.stop_after_first_solution = false;
+  WheelPlanRequest second_request = RequestTo(
+      fixture, long_first, 1.38, 2.0, 0.0, Pose(1.0, 2.0));
+  second_request.search.stop_after_first_solution = false;
+
+  const WheelPlanResult first = PlanWheel(first_request);
+  const WheelPlanResult second = PlanWheel(second_request);
 
   ASSERT_TRUE(first.ok()) << first.reason_code;
   ASSERT_TRUE(second.ok()) << second.reason_code;
