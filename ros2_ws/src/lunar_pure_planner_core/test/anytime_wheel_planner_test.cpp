@@ -265,6 +265,70 @@ TEST(WheelPlanner, PlansMultiplePrimitivesFromArbitraryTranslatedStart) {
   EXPECT_NEAR(result.trajectory.back().pose.position_m.y, 1.07, 1.0e-9);
 }
 
+TEST(WheelPlanner, PlansMultiplePrimitivesFromArbitrarySE2Start) {
+  const TerrainFixture fixture = FlatTerrain(80U, 80U);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+  constexpr double kStartYaw = 0.37;
+  const Pose3 start = Pose(2.13, 2.17, kStartYaw);
+  const double goal_x = 2.13 + std::cos(kStartYaw);
+  const double goal_y = 2.17 + std::sin(kStartYaw);
+
+  const WheelPlanResult result = PlanWheel(RequestTo(
+      fixture, capability, goal_x, goal_y, kStartYaw, start));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_GT(result.trajectory.size(), 2U);
+  EXPECT_NEAR(result.trajectory.front().pose.position_m.x, 2.13, 1.0e-12);
+  EXPECT_NEAR(result.trajectory.front().pose.position_m.y, 2.17, 1.0e-12);
+  EXPECT_NEAR(TrajectoryYaw(result.trajectory.front()), kStartYaw, 1.0e-12);
+  EXPECT_NEAR(result.trajectory.back().pose.position_m.x, goal_x, 1.0e-9);
+  EXPECT_NEAR(result.trajectory.back().pose.position_m.y, goal_y, 1.0e-9);
+  EXPECT_NEAR(TrajectoryYaw(result.trajectory.back()), kStartYaw, 1.0e-9);
+}
+
+TEST(WheelPlanner, RigidTransformPreservesRequestRelativeTrajectory) {
+  const TerrainFixture fixture = FlatTerrain(100U, 100U);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+  const WheelPlanResult baseline = PlanWheel(RequestTo(
+      fixture, capability, 3.0, 2.0, 0.0, Pose(2.0, 2.0)));
+  constexpr double kYaw = 0.63;
+  const double transformed_goal_x = 4.17 + std::cos(kYaw);
+  const double transformed_goal_y = 3.11 + std::sin(kYaw);
+  const WheelPlanResult transformed = PlanWheel(RequestTo(
+      fixture, capability, transformed_goal_x, transformed_goal_y, kYaw,
+      Pose(4.17, 3.11, kYaw)));
+
+  ASSERT_TRUE(baseline.ok()) << baseline.reason_code;
+  ASSERT_TRUE(transformed.ok()) << transformed.reason_code;
+  ASSERT_EQ(transformed.trajectory.size(), baseline.trajectory.size());
+  EXPECT_NEAR(transformed.cost, baseline.cost, 1.0e-9);
+  for (std::size_t index = 0U; index < baseline.trajectory.size(); ++index) {
+    const double world_dx =
+        transformed.trajectory[index].pose.position_m.x - 4.17;
+    const double world_dy =
+        transformed.trajectory[index].pose.position_m.y - 3.11;
+    const double local_x =
+        std::cos(kYaw) * world_dx + std::sin(kYaw) * world_dy;
+    const double local_y =
+        -std::sin(kYaw) * world_dx + std::cos(kYaw) * world_dy;
+    EXPECT_NEAR(local_x,
+                baseline.trajectory[index].pose.position_m.x - 2.0,
+                1.0e-8);
+    EXPECT_NEAR(local_y,
+                baseline.trajectory[index].pose.position_m.y - 2.0,
+                1.0e-8);
+    EXPECT_NEAR(ShortestYawDelta(
+                    kYaw, TrajectoryYaw(transformed.trajectory[index])),
+                TrajectoryYaw(baseline.trajectory[index]), 1.0e-8);
+  }
+}
+
 TEST(WheelPlanner, StopsWhenControlTriggersOnlyDuringTrajectoryReconstruction) {
   const TerrainFixture fixture = FlatTerrain();
   WheeledCapability capability = Capability(0.6, 0.4);

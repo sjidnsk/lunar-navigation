@@ -513,6 +513,44 @@ struct Node final {
   bool exact_goal{};
 };
 
+struct PlanningLatticeFrame final {
+  Vec2 origin_world_m;
+  double yaw_world_rad{};
+  double cosine{1.0};
+  double sine{};
+
+  explicit PlanningLatticeFrame(const Pose3& start)
+      : origin_world_m{.x = start.position_m.x, .y = start.position_m.y},
+        yaw_world_rad(
+            YawFromQuaternion(start.orientation).value_or(0.0)),
+        cosine(std::cos(yaw_world_rad)),
+        sine(std::sin(yaw_world_rad)) {}
+
+  [[nodiscard]] Vec2 ToLocalPosition(const Vec2 world) const noexcept {
+    const double dx = world.x - origin_world_m.x;
+    const double dy = world.y - origin_world_m.y;
+    return {
+        .x = cosine * dx + sine * dy,
+        .y = -sine * dx + cosine * dy,
+    };
+  }
+
+  [[nodiscard]] Vec2 ToWorldPosition(const Vec2 local) const noexcept {
+    return {
+        .x = origin_world_m.x + cosine * local.x - sine * local.y,
+        .y = origin_world_m.y + sine * local.x + cosine * local.y,
+    };
+  }
+
+  [[nodiscard]] double ToLocalYaw(const double world_yaw) const noexcept {
+    return NormalizeYaw(world_yaw - yaw_world_rad);
+  }
+
+  [[nodiscard]] double ToWorldYaw(const double local_yaw) const noexcept {
+    return NormalizeYaw(yaw_world_rad + local_yaw);
+  }
+};
+
 class WheelSearchGraph final {
  public:
   WheelSearchGraph(const WheelPlanRequest& request, const PointGoal& goal,
@@ -521,8 +559,7 @@ class WheelSearchGraph final {
         terrain_(*request.terrain),
         capability_(*request.capability),
         map_(*request.terrain->map),
-        lattice_origin_x_m_(request.start.pose.position_m.x),
-        lattice_origin_y_m_(request.start.pose.position_m.y),
+        lattice_frame_(request.start.pose),
         goal_(goal),
         goal_yaw_(goal_yaw),
         footprint_radius_m_(CircumscribedRadius(capability_)) {
@@ -1012,17 +1049,20 @@ class WheelSearchGraph final {
         std::min(finest_xy_key_resolution_m_, xy_resolution);
     maximum_yaw_bins_ = std::max(maximum_yaw_bins_, yaw_bins);
     const auto yaw = YawFromQuaternion(pose.orientation).value_or(0.0);
-    const double positive_yaw = NormalizeYaw(yaw) < 0.0
-                                    ? NormalizeYaw(yaw) + 2.0 * std::numbers::pi
-                                    : NormalizeYaw(yaw);
+    const Vec2 local_position = lattice_frame_.ToLocalPosition(
+        Vec2{.x = pose.position_m.x, .y = pose.position_m.y});
+    const double local_yaw = lattice_frame_.ToLocalYaw(yaw);
+    const double positive_yaw = local_yaw < 0.0
+                                    ? local_yaw + 2.0 * std::numbers::pi
+                                    : local_yaw;
     const auto yaw_bin = static_cast<std::size_t>(std::llround(
         positive_yaw * static_cast<double>(yaw_bins) /
         (2.0 * std::numbers::pi))) % yaw_bins;
     return WheelStateKey{
         .x = static_cast<std::int64_t>(std::llround(
-            (pose.position_m.x - lattice_origin_x_m_) / xy_resolution)),
+            local_position.x / xy_resolution)),
         .y = static_cast<std::int64_t>(std::llround(
-            (pose.position_m.y - lattice_origin_y_m_) / xy_resolution)),
+            local_position.y / xy_resolution)),
         .yaw = static_cast<std::uint16_t>(yaw_bin),
         .mode = mode,
         .narrow = narrow,
@@ -1034,18 +1074,19 @@ class WheelSearchGraph final {
     const double xy_resolution =
         key.narrow ? map_.resolution_m() / 2.0 : map_.resolution_m();
     const std::size_t yaw_bins = key.narrow ? 128U : 64U;
-    const double x = lattice_origin_x_m_ +
-                     static_cast<double>(key.x) * xy_resolution;
-    const double y = lattice_origin_y_m_ +
-                     static_cast<double>(key.y) * xy_resolution;
+    const Vec2 position = lattice_frame_.ToWorldPosition(Vec2{
+        .x = static_cast<double>(key.x) * xy_resolution,
+        .y = static_cast<double>(key.y) * xy_resolution,
+    });
     const auto elevation =
-        map_.SampleElevationBilinear(Vec2{.x = x, .y = y});
+        map_.SampleElevationBilinear(position);
     if (!elevation.has_value()) {
       return std::nullopt;
     }
     const Pose3 pose{
-        .position_m = Vec3{.x = x, .y = y, .z = *elevation},
-        .orientation = QuaternionFromYaw(NormalizeYaw(
+        .position_m =
+            Vec3{.x = position.x, .y = position.y, .z = *elevation},
+        .orientation = QuaternionFromYaw(lattice_frame_.ToWorldYaw(
             static_cast<double>(key.yaw) * 2.0 * std::numbers::pi /
             static_cast<double>(yaw_bins))),
     };
@@ -2299,8 +2340,7 @@ class WheelSearchGraph final {
   const shared::LocalTerrainProjection& terrain_;
   const WheeledCapability& capability_;
   const shared::MapSnapshot& map_;
-  const double lattice_origin_x_m_;
-  const double lattice_origin_y_m_;
+  const PlanningLatticeFrame lattice_frame_;
   PointGoal goal_;
   std::optional<double> goal_yaw_;
   double footprint_radius_m_{};
