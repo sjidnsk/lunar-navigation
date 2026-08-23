@@ -11,6 +11,7 @@ find_package(tf2_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
+  src/coordinated_steering_plant.cpp
   src/lunar_scene.cpp
   src/map_messages.cpp
   src/visibility.cpp)
@@ -51,6 +52,11 @@ if(BUILD_TESTING)
   ament_add_gtest(map_messages_test test/map_messages_test.cpp)
   target_compile_features(map_messages_test PRIVATE cxx_std_20)
   target_link_libraries(map_messages_test ${PROJECT_NAME})
+
+  ament_add_gtest(coordinated_steering_plant_test
+    test/coordinated_steering_plant_test.cpp)
+  target_compile_features(coordinated_steering_plant_test PRIVATE cxx_std_20)
+  target_link_libraries(coordinated_steering_plant_test ${PROJECT_NAME})
 endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
