@@ -7,9 +7,12 @@ import math
 
 import pytest
 import rclpy
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PoseStamped, Transform, Twist
+from lunar_planning_msgs.msg import MotionReference
 from nav_msgs.msg import Odometry, Path
 from rclpy.executors import SingleThreadedExecutor
+from std_msgs.msg import String
+from trajectory_msgs.msg import MultiDOFJointTrajectoryPoint
 
 from lunar_pure_wheeled_controller.node import PureWheeledControllerNode, _yaw
 
@@ -23,6 +26,26 @@ def make_path(*, goal_x: float = 2.0) -> Path:
         pose.pose.orientation.w = 1.0
         path.poses.append(pose)
     return path
+
+
+def make_trajectory_reference(
+    samples: list[tuple[float, float, float, float]],
+) -> MotionReference:
+    reference = make_reference()
+    for x, y, yaw, signed_speed in samples:
+        point = MultiDOFJointTrajectoryPoint()
+        transform = Transform()
+        transform.translation.x = x
+        transform.translation.y = y
+        transform.rotation.z = math.sin(yaw / 2.0)
+        transform.rotation.w = math.cos(yaw / 2.0)
+        velocity = Twist()
+        velocity.linear.x = signed_speed * math.cos(yaw)
+        velocity.linear.y = signed_speed * math.sin(yaw)
+        point.transforms.append(transform)
+        point.velocities.append(velocity)
+        reference.trajectory.points.append(point)
+    return reference
 
 
 def make_odometry(*, x: float, y: float = 0.0, yaw: float = 0.0) -> Odometry:
@@ -91,7 +114,114 @@ def test_path_and_odometry_publish_forward_twist(controller_with_observer) -> No
     assert received[-1].angular.z == 0.0
 
 
-def test_invalid_replacement_publishes_zero_and_clears_active_path(controller_with_observer) -> None:
+def test_reverse_trajectory_publishes_negative_linear_twist(controller_with_observer) -> None:
+    """A mode-selection mutation that falls back to path tracking must fail this test."""
+    controller, observer, received, _ = controller_with_observer
+    reference = make_trajectory_reference([
+        (0.0, 0.0, 0.0, -0.2),
+        (-1.0, 0.0, 0.0, -0.2),
+    ])
+
+    controller._on_reference(reference)
+    controller._on_odometry(make_odometry(x=0.0))
+    controller._tick()
+    wait_for_twists(controller, observer, received)
+
+    assert received[-1].linear.x < 0.0
+    assert received[-1].angular.z == 0.0
+
+
+@pytest.mark.parametrize(
+    "target_yaw, expected_sign",
+    [(math.pi / 2.0, 1.0), (-math.pi / 2.0, -1.0)],
+)
+def test_spin_trajectory_publishes_only_signed_angular_twist(
+    controller_with_observer,
+    target_yaw: float,
+    expected_sign: float,
+) -> None:
+    """A mode-selection or yaw-sign mutation must fail this test."""
+    controller, observer, received, _ = controller_with_observer
+    reference = make_trajectory_reference([
+        (0.0, 0.0, 0.0, 0.2),
+        (0.0, 0.0, target_yaw, 0.0),
+    ])
+
+    controller._on_reference(reference)
+    controller._on_odometry(make_odometry(x=0.0))
+    controller._tick()
+    wait_for_twists(controller, observer, received)
+
+    assert received[-1].linear.x == 0.0
+    assert math.copysign(1.0, received[-1].angular.z) == expected_sign
+
+
+def test_matching_cancel_immediately_stops_and_clears_active_trajectory(
+    controller_with_observer,
+) -> None:
+    """A cancellation mutation that leaves the matching plan active must fail this test."""
+    controller, observer, received, _ = controller_with_observer
+    controller._on_reference(make_trajectory_reference([
+        (0.0, 0.0, 0.0, -0.2),
+        (-1.0, 0.0, 0.0, -0.2),
+    ]))
+    controller._trajectory_cursor = 1
+
+    controller._on_cancel(String(data="wheel-plan"))
+    wait_for_twists(controller, observer, received)
+
+    assert controller._active is None
+    assert controller._trajectory_cursor == 0
+    assert received[-1].linear.x == 0.0
+    assert received[-1].angular.z == 0.0
+
+
+def test_mismatched_cancel_keeps_current_trajectory_active(
+    controller_with_observer,
+) -> None:
+    """A cancellation mutation that stops a different plan ID must fail this test."""
+    controller, observer, received, _ = controller_with_observer
+    controller._on_reference(make_trajectory_reference([
+        (0.0, 0.0, 0.0, -0.2),
+        (-1.0, 0.0, 0.0, -0.2),
+    ]))
+    active = controller._active
+    controller._trajectory_cursor = 0
+    controller._on_odometry(make_odometry(x=0.0))
+
+    controller._on_cancel(String(data="stale-plan"))
+    rclpy.spin_once(observer, timeout_sec=0.05)
+
+    assert received == []
+    assert controller._active is active
+    assert controller._trajectory_cursor == 0
+
+    controller._tick()
+    wait_for_twists(controller, observer, received)
+
+    assert received[-1].linear.x < 0.0
+
+
+def test_published_twists_keep_all_unsupported_components_zero(
+    controller_with_observer,
+) -> None:
+    """A publisher mutation that leaks unsupported velocity axes must fail this test."""
+    controller, observer, received, _ = controller_with_observer
+
+    controller._publish_twist(linear=-0.1, angular=0.2)
+    controller._publish_twist()
+    wait_for_twists(controller, observer, received, count=2)
+
+    assert all(
+        command.linear.y == 0.0
+        and command.linear.z == 0.0
+        and command.angular.x == 0.0
+        and command.angular.y == 0.0
+        for command in received
+    )
+
+
+def test_invalid_replacement_publishes_zero_and_clears_active_reference(controller_with_observer) -> None:
     """A mutation that retains a prior path after invalid input must fail this test."""
     controller, observer, received, _ = controller_with_observer
 

@@ -11,6 +11,8 @@
   <depend>rclpy</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>lunar_planning_msgs</depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <test_depend>ament_cmake_pytest</test_depend>
