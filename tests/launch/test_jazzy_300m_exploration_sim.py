@@ -10,10 +10,12 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -330,32 +332,201 @@ def _wait_for_empty_live_graph(env: dict[str, str], timeout: float = 20.0) -> No
     pytest.fail(f"isolated live-smoke graph did not drain:\n{last}")
 
 
-def _stop_exact_launch_group(
-    process: subprocess.Popen[bytes], env: dict[str, str]
-) -> None:
+@dataclass(frozen=True)
+class _ProcessIdentity:
+    pid: int
+    start_time_ticks: int
+    pgid: int
+    session_id: int
+
+
+@dataclass
+class _ExactProcessGroup:
+    pgid: int
+    session_id: int
+    leader: _ProcessIdentity
+    members: set[_ProcessIdentity] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class _GroupTeardownResult:
+    sigterm_sent: bool
+    recorded_members: tuple[_ProcessIdentity, ...]
+
+
+def _read_process_identity(pid: int) -> _ProcessIdentity | None:
     try:
-        os.killpg(process.pid, signal.SIGINT)
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        return None
+    command_end = stat.rfind(")")
+    if command_end < 0:
+        return None
+    fields = stat[command_end + 2 :].split()
+    if len(fields) < 20:
+        return None
+    try:
+        return _ProcessIdentity(
+            pid=pid,
+            start_time_ticks=int(fields[19]),
+            pgid=int(fields[2]),
+            session_id=int(fields[3]),
+        )
+    except ValueError:
+        return None
+
+
+def _capture_exact_process_group(process: subprocess.Popen[bytes]) -> _ExactProcessGroup:
+    leader = _read_process_identity(process.pid)
+    if leader is None:
+        raise RuntimeError("launch leader exited before process identity capture")
+    pgid = os.getpgid(process.pid)
+    if leader.pgid != pgid or leader.session_id != pgid:
+        raise RuntimeError("launch did not create the expected new session/process group")
+    group = _ExactProcessGroup(
+        pgid=pgid,
+        session_id=leader.session_id,
+        leader=leader,
+        members={leader},
+    )
+    _observe_exact_group_members(group)
+    return group
+
+
+def _observe_exact_group_members(group: _ExactProcessGroup) -> None:
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdecimal():
+            continue
+        identity = _read_process_identity(int(entry.name))
+        if (
+            identity is not None
+            and identity.pgid == group.pgid
+            and identity.session_id == group.session_id
+        ):
+            group.members.add(identity)
+
+
+def _identity_is_alive(identity: _ProcessIdentity) -> bool:
+    current = _read_process_identity(identity.pid)
+    return current is not None and current.start_time_ticks == identity.start_time_ticks
+
+
+def _remaining_exact_group_members(
+    group: _ExactProcessGroup,
+) -> set[_ProcessIdentity]:
+    _observe_exact_group_members(group)
+    return {identity for identity in group.members if _identity_is_alive(identity)}
+
+
+def _wait_for_exact_group_exit(
+    process: subprocess.Popen[bytes],
+    group: _ExactProcessGroup,
+    timeout: float,
+) -> set[_ProcessIdentity]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        process.poll()
+        remaining = _remaining_exact_group_members(group)
+        if not remaining:
+            return set()
+        time.sleep(0.02)
+    process.poll()
+    return _remaining_exact_group_members(group)
+
+
+def _terminate_exact_process_group(
+    process: subprocess.Popen[bytes],
+    group: _ExactProcessGroup,
+    *,
+    interrupt_timeout: float = 10.0,
+    terminate_timeout: float = 5.0,
+) -> _GroupTeardownResult:
+    _observe_exact_group_members(group)
+    try:
+        os.killpg(group.pgid, signal.SIGINT)
     except ProcessLookupError:
         pass
-    if process.poll() is None:
+    remaining = _wait_for_exact_group_exit(process, group, interrupt_timeout)
+    sigterm_sent = bool(remaining)
+    if remaining:
         try:
-            process.wait(timeout=10.0)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                pytest.fail("exact launch process group survived SIGINT and SIGTERM")
+            os.killpg(group.pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        remaining = _wait_for_exact_group_exit(process, group, terminate_timeout)
+    if remaining:
+        details = ", ".join(
+            f"pid={item.pid}/start={item.start_time_ticks}"
+            for item in sorted(remaining, key=lambda item: item.pid)
+        )
+        pytest.fail(f"exact launch process group survived SIGINT and SIGTERM: {details}")
+    if _identity_is_alive(group.leader):
+        pytest.fail("launch leader identity remained after process-group teardown")
+    return _GroupTeardownResult(
+        sigterm_sent=sigterm_sent,
+        recorded_members=tuple(sorted(group.members, key=lambda item: item.pid)),
+    )
+
+
+def _stop_exact_launch_group(
+    process: subprocess.Popen[bytes],
+    env: dict[str, str],
+    group: _ExactProcessGroup,
+) -> _GroupTeardownResult:
+    result = _terminate_exact_process_group(process, group)
     _wait_for_empty_live_graph(env)
+    return result
 
 
 def _diagnostic_fields(message) -> dict[str, str]:
     if len(message.status) != 1:
         return {}
     return {item.key: item.value for item in message.status[0].values}
+
+
+def test_exact_group_teardown_escalates_after_leader_exits() -> None:
+    """A launch child that ignores SIGINT must not outlive its leader."""
+    program = "\n".join(
+        [
+            "import os, signal, sys, time",
+            "child = os.fork()",
+            "if child == 0:",
+            "    signal.signal(signal.SIGINT, signal.SIG_IGN)",
+            "    while True: time.sleep(0.1)",
+            "print(child, flush=True)",
+            "signal.signal(signal.SIGINT, lambda *_: sys.exit(0))",
+            "while True: time.sleep(0.1)",
+        ]
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", program],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        text=True,
+    )
+    group = _capture_exact_process_group(process)
+    assert process.stdout is not None
+    child_pid = int(process.stdout.readline().strip())
+    try:
+        result = _terminate_exact_process_group(
+            process, group, interrupt_timeout=0.2, terminate_timeout=2.0
+        )
+        assert result.sigterm_sent
+        deadline = time.monotonic() + 2.0
+        while Path(f"/proc/{child_pid}").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not Path(f"/proc/{child_pid}").exists()
+    finally:
+        if Path(f"/proc/{child_pid}").exists():
+            os.kill(child_pid, signal.SIGTERM)
+            deadline = time.monotonic() + 2.0
+            while Path(f"/proc/{child_pid}").exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+        process.stdout.close()
+        assert process.stderr is not None
+        process.stderr.close()
 
 
 @pytest.mark.skipif(
@@ -556,6 +727,12 @@ def test_live_closed_loop_reaches_real_motion_and_planner_timing() -> None:
             start_new_session=True,
             env=env,
         )
+        launch_group = _capture_exact_process_group(process)
+        evidence["launch_pgid"] = launch_group.pgid
+        evidence["launch_leader"] = {
+            "pid": launch_group.leader.pid,
+            "start_time_ticks": launch_group.leader.start_time_ticks,
+        }
         failure: str | None = None
         try:
             deadline = time.monotonic() + 120.0
@@ -637,6 +814,22 @@ def test_live_closed_loop_reaches_real_motion_and_planner_timing() -> None:
                 rclpy.shutdown()
             finally:
                 try:
-                    _stop_exact_launch_group(process, env)
+                    teardown = _stop_exact_launch_group(process, env, launch_group)
+                    evidence["teardown"] = {
+                        "sigterm_sent": teardown.sigterm_sent,
+                        "recorded_members": [
+                            {
+                                "pid": member.pid,
+                                "start_time_ticks": member.start_time_ticks,
+                            }
+                            for member in teardown.recorded_members
+                        ],
+                        "exact_members_gone": True,
+                        "ros_graph_empty": True,
+                    }
+                    probe_path.write_text(
+                        json.dumps(evidence, indent=2, sort_keys=True),
+                        encoding="utf-8",
+                    )
                 finally:
                     launch_log.close()

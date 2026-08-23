@@ -142,3 +142,46 @@ under `/home/kai/CodexDownloads/lunar_navigation/`.
   is modified here.
 - This is local Ubuntu/Jazzy functional evidence only, not Humble or Jetson AGX
   Orin certification and not the long Task 5 terminal exploration run.
+
+## Independent-review teardown fix
+
+The independent review found that the original helper escalated to SIGTERM only
+while the launch leader itself was alive. A leader could therefore exit after
+SIGINT while a same-process-group non-ROS child survived, and an empty ROS graph
+would not detect that child.
+
+The fixed helper captures the exact launch identity as
+`(pid, /proc start_time, pgid, session_id)` immediately after
+`Popen(start_new_session=True)`. It continuously accumulates only identities in
+that exact session and process group. After SIGINT it waits for all recorded
+identities, not merely the leader; any residual member triggers SIGTERM to that
+same PGID. PID liveness also requires the captured `/proc` start time, preventing
+PID reuse from being mistaken for the original child. The bounded ROS graph
+check remains an independent final condition.
+
+A synthetic regression forks a leader and child in a new session. The leader
+exits on SIGINT while the child ignores SIGINT. The test proves that teardown
+detects the residual child, sends same-PGID SIGTERM, and leaves neither identity
+alive. Static plus synthetic launch tests pass `10/10`.
+
+A fresh external runtime overlay was rebuilt from the current worktree under
+`/home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/task4_teardown_fix_20260824`;
+all eight runtime-closure packages built successfully. The installed launch and
+source launch have identical SHA-256
+`6681f84273b195ea48a7dad1ee80672f1351e017a876df273718f0a662e00724`,
+and `ros2 pkg prefix lunar_pure_exploration_sim` resolves to that fixed overlay.
+
+Fresh fixed-overlay live run:
+`/home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_runs/live-smoke/run-ecb5597b562e48b3a3a16ec78f919d54`.
+
+- Pytest: `1 passed, 10 deselected in 3.69s`.
+- Domain 91; exact task published once; states `[0,1,2,3,4]`.
+- Reference 385 points; nonzero T5 observed; displacement `0.400019496 m`.
+- Coverage changed from `0.0` to `0.0004756242568370987`; this is initial-map
+  accounting evidence, not a claim that motion caused the increase.
+- First successful plan: global `69.85396 ms`, local `335.70915 ms`, total
+  `408.868357 ms`; odometry mean gap `0.050064979 s`.
+- Teardown recorded the leader plus all seven launch child identities. All eight
+  exact `(pid,start_time)` identities are absent, the process group drained on
+  SIGINT without requiring SIGTERM in this normal run, and the bounded domain-91
+  `ros2 node list --no-daemon` result is empty.

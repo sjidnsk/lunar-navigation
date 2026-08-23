@@ -35,6 +35,10 @@ Task 3 review at `2d0412e`: changes requested. Important: START can precede cont
 
 Task 3: complete (commits 7a83dab..685d484, independent re-review clean). Final evidence: 9/9 launch behavior tests, real controller-readiness node test, and exact composed parameter inspection.
 
+Task 4 review at `eed2743`: changes requested. Important teardown gap: if the launch leader exits after SIGINT while a same-PGID child remains, `process.poll()` skips SIGTERM and the final ROS graph check can miss a non-ROS child. Teardown must inspect the exact PGID/recorded child PIDs and prove all are absent.
+
+Task 4 teardown fix implemented in working tree: process identity is `(pid,start_time,pgid,session)`, all exact same-session/group members are accumulated from `/proc`, SIGTERM escalation depends on residual group members rather than leader state, and live evidence records every member. Synthetic leader-exits/child-survives regression and fresh live smoke pass; pending commit and independent re-review.
+
 Task 4: complete in working tree pending commit. The opt-in live smoke uses a
 locked candidate domain, localhost-only/no-daemon preflight, exact process-group
 cleanup, and external artifacts. Seven bounded RED/diagnostic iterations led to
