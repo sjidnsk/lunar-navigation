@@ -74,6 +74,11 @@ ros2 topic echo /Car/T4/exploration/status
 可达默认目标。所有接口位于 `/lunar_demo/*`，Action 为 `/lunar_demo/plan_motion`，不会连接
 生产 `/Car/T4/plan_motion`。
 
+外部里程计可提供地图范围内、有限且物理可行的任意 `x/y/yaw` 起点，不要求与地图原点、
+单元边界或单元中心对齐。每次局部规划以该真实起点建立一个在本次调用期间固定的内部
+SE(2) 搜索坐标系；地图原点仍只用于地形采样，不会被重写。输出轨迹的首点保持真实起点，
+不会插入吸附或几何直连段；末端仍只允许通过经过完整安全校验的缩放运动原语到达目标。
+
 ```bash
 cd /home/kai/CodexDownloads/lunar_navigation/lunar_pure_planner_orin
 source /opt/ros/jazzy/setup.bash
