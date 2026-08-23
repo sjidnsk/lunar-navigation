@@ -20,6 +20,9 @@ namespace lunar::pure_exploration_sim {
 namespace {
 
 constexpr double kMaximumWallStepS = 0.1;
+constexpr double kFrozenSensorRangeM = 10.0;
+constexpr double kFrozenSensorFovDeg = 90.0;
+constexpr double kContractTolerance = 1.0e-12;
 
 geometry_msgs::msg::Quaternion YawQuaternion(double yaw_rad) {
   geometry_msgs::msg::Quaternion quaternion;
@@ -61,13 +64,28 @@ SimulationNode::SimulationNode(const rclcpp::NodeOptions& options,
   plant_parameters_.speed_multiplier =
       declare_parameter<double>("speed_multiplier", 20.0);
   sensor_model_.range_m = declare_parameter<double>("sensor_range_m", 10.0);
-  sensor_model_.horizontal_fov_rad =
-      declare_parameter<double>("sensor_fov_deg", 90.0) *
-      std::numbers::pi / 180.0;
+  const double sensor_fov_deg =
+      declare_parameter<double>("sensor_fov_deg", 90.0);
   update_rate_hz_ = declare_parameter<double>("update_rate_hz", 20.0);
+  if (!std::isfinite(plant_parameters_.speed_multiplier) ||
+      plant_parameters_.speed_multiplier <= 0.0) {
+    throw std::invalid_argument(
+        "speed_multiplier must be finite and positive");
+  }
+  if (!std::isfinite(sensor_model_.range_m) ||
+      std::abs(sensor_model_.range_m - kFrozenSensorRangeM) >
+          kContractTolerance) {
+    throw std::invalid_argument("sensor_range_m must equal 10.0");
+  }
+  if (!std::isfinite(sensor_fov_deg) ||
+      std::abs(sensor_fov_deg - kFrozenSensorFovDeg) > kContractTolerance) {
+    throw std::invalid_argument("sensor_fov_deg must equal 90.0");
+  }
   if (!std::isfinite(update_rate_hz_) || update_rate_hz_ <= 0.0) {
     throw std::invalid_argument("update_rate_hz must be finite and positive");
   }
+  sensor_model_.horizontal_fov_rad =
+      sensor_fov_deg * std::numbers::pi / 180.0;
 
   const std::string command_topic = declare_parameter<std::string>(
       "command_topic", "/Car/T5/Car_Cmd_Vel");

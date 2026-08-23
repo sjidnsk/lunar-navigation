@@ -1,9 +1,13 @@
-#include <cmath>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
+#include <ranges>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 #include <rclcpp/rclcpp.hpp>
@@ -42,10 +46,56 @@ class RosContextTest : public ::testing::Test {
     });
     return std::make_shared<SimulationNode>(options, false);
   }
+
+  static rclcpp::NodeOptions OptionsWith(const rclcpp::Parameter& parameter) {
+    rclcpp::NodeOptions options;
+    options.parameter_overrides({parameter});
+    return options;
+  }
 };
 
+TEST_F(RosContextTest, RejectsInvalidSpeedMultiplierBeforeInitialPublish) {
+  const std::vector<double> invalid_values{
+      0.0, -1.0, std::numeric_limits<double>::infinity(),
+      std::numeric_limits<double>::quiet_NaN()};
+  for (const double value : invalid_values) {
+    SCOPED_TRACE(value);
+    EXPECT_THROW(
+        SimulationNode(OptionsWith(rclcpp::Parameter("speed_multiplier", value)),
+                       false),
+        std::invalid_argument);
+  }
+}
+
+TEST_F(RosContextTest, RejectsNonContractSensorRangeBeforeInitialPublish) {
+  const std::vector<double> invalid_values{
+      9.9, 10.1, std::numeric_limits<double>::infinity(),
+      std::numeric_limits<double>::quiet_NaN()};
+  for (const double value : invalid_values) {
+    SCOPED_TRACE(value);
+    EXPECT_THROW(
+        SimulationNode(OptionsWith(rclcpp::Parameter("sensor_range_m", value)),
+                       false),
+        std::invalid_argument);
+  }
+}
+
+TEST_F(RosContextTest, RejectsNonContractSensorFovBeforeInitialPublish) {
+  const std::vector<double> invalid_values{
+      89.0, 91.0, std::numeric_limits<double>::infinity(),
+      std::numeric_limits<double>::quiet_NaN()};
+  for (const double value : invalid_values) {
+    SCOPED_TRACE(value);
+    EXPECT_THROW(
+        SimulationNode(OptionsWith(rclcpp::Parameter("sensor_fov_deg", value)),
+                       false),
+        std::invalid_argument);
+  }
+}
+
 TEST_F(RosContextTest, InitialSnapshotContainsObservationAndFrozenInterfaces) {
-  const auto node = std::make_shared<SimulationNode>(rclcpp::NodeOptions{}, false);
+  const auto node =
+      std::make_shared<SimulationNode>(rclcpp::NodeOptions{}, false);
 
   EXPECT_EQ(node->get_parameter("seed").as_int(), 20260824);
   EXPECT_DOUBLE_EQ(node->get_parameter("speed_multiplier").as_double(), 20.0);
@@ -98,6 +148,7 @@ TEST_F(RosContextTest, InitialSnapshotContainsObservationAndFrozenInterfaces) {
 
 TEST_F(RosContextTest, ForwardCommandAdvancesCompleteSharedStateTick) {
   const auto node = MakeNode();
+  const std::size_t initial_known_count = node->known_global_count();
   geometry_msgs::msg::Twist command;
   command.linear.x = 0.5;
   node->SetCommand(command);
@@ -105,6 +156,16 @@ TEST_F(RosContextTest, ForwardCommandAdvancesCompleteSharedStateTick) {
   node->Tick(0.05);
 
   const auto& messages = node->latest_messages();
+  EXPECT_GE(node->known_global_count(), initial_known_count);
+  EXPECT_GT(node->known_global_count(), 0U);
+  EXPECT_EQ(messages.global_overview.data.size(), 300U * 300U);
+  EXPECT_NE(std::ranges::find_if(messages.global_overview.data,
+                                 [](std::int8_t value) { return value >= 0; }),
+            messages.global_overview.data.end());
+  ASSERT_EQ(messages.local_grid_map.data.size(), 4U);
+  for (const auto& layer : messages.local_grid_map.data) {
+    EXPECT_EQ(layer.data.size(), 320U * 320U);
+  }
   EXPECT_NEAR(messages.odometry.pose.pose.position.x, 0.5, 1.0e-12);
   EXPECT_NEAR(messages.odometry.pose.pose.position.y, 0.0, 1.0e-12);
   EXPECT_DOUBLE_EQ(messages.odometry.twist.twist.linear.x, 0.5);
@@ -114,6 +175,8 @@ TEST_F(RosContextTest, ForwardCommandAdvancesCompleteSharedStateTick) {
   EXPECT_NEAR(messages.transforms.transforms[1].transform.translation.x, 0.5,
               1.0e-12);
   EXPECT_EQ(messages.actual_path.poses.size(), 2U);
+  EXPECT_FALSE(messages.sensor_fov.points.empty());
+  EXPECT_GE(messages.vehicle_markers.markers.size(), 5U);
   EXPECT_GT(node->last_tick_duration_s(), 0.0);
 }
 
