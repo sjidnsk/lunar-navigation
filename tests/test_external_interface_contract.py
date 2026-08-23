@@ -10,8 +10,8 @@ import pytest
 import yaml
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-PURE_ROOT = REPOSITORY_ROOT / "pure_planner"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+PURE_ROOT = REPOSITORY_ROOT
 CONTRACT_PATH = PURE_ROOT / "config" / "external_interfaces.yaml"
 PARAMETERS_PATH = PURE_ROOT / "config" / "pure_planner.yaml"
 LAUNCH_PATH = PURE_ROOT / "launch" / "pure_planner.launch.py"
