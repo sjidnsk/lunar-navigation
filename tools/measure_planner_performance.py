@@ -22,6 +22,7 @@ REQUIRED_KEYS = {
     "sweep_cell_checks",
 }
 NUMERIC_KEYS = REQUIRED_KEYS - {"scenario", "success"}
+MAX_CYCLE_ELAPSED_KEY = "max_cycle_elapsed_ms"
 TARGET_LIMIT_MS = 1000.0
 SLA_FAILURE_MS = 2000.0
 HARD_LIMIT_MS = 3000.0
@@ -41,14 +42,8 @@ def parse_metrics_line(output: str) -> dict[str, Any]:
     if not isinstance(metrics, dict):
         raise ValueError("planner metrics JSON must be an object")
     missing = REQUIRED_KEYS - metrics.keys()
-    unexpected = metrics.keys() - REQUIRED_KEYS
-    if missing or unexpected:
-        details = []
-        if missing:
-            details.append("missing " + ", ".join(sorted(missing)))
-        if unexpected:
-            details.append("unexpected " + ", ".join(sorted(unexpected)))
-        raise ValueError("planner metrics keys: " + "; ".join(details))
+    if missing:
+        raise ValueError("planner metrics keys: missing " + ", ".join(sorted(missing)))
     if not isinstance(metrics["scenario"], str):
         raise ValueError("scenario must be a string")
     if not isinstance(metrics["success"], bool):
@@ -59,6 +54,12 @@ def parse_metrics_line(output: str) -> dict[str, Any]:
             raise ValueError(f"{key} must be numeric")
         if not math.isfinite(value):
             raise ValueError(f"{key} must be finite")
+    if MAX_CYCLE_ELAPSED_KEY in metrics:
+        value = metrics[MAX_CYCLE_ELAPSED_KEY]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{MAX_CYCLE_ELAPSED_KEY} must be numeric")
+        if not math.isfinite(value):
+            raise ValueError(f"{MAX_CYCLE_ELAPSED_KEY} must be finite")
     return metrics
 
 
@@ -141,7 +142,10 @@ def summarize(samples: list[dict[str, Any]]) -> dict[str, dict[str, float | int]
     if not samples:
         raise ValueError("cannot summarize zero samples")
     summary: dict[str, dict[str, float | int]] = {}
-    for key in sorted(NUMERIC_KEYS):
+    summarized_keys = set(NUMERIC_KEYS)
+    if all(MAX_CYCLE_ELAPSED_KEY in sample for sample in samples):
+        summarized_keys.add(MAX_CYCLE_ELAPSED_KEY)
+    for key in sorted(summarized_keys):
         values = [sample[key] for sample in samples]
         summary[key] = {
             "p50": _nearest_rank(values, 0.50),
@@ -161,6 +165,7 @@ def evaluate_acceptance(
     maximum_baseline_regression_fraction: float = (
         MAXIMUM_BASELINE_REGRESSION_FRACTION
     ),
+    latency_metric: str = "elapsed_ms",
 ) -> dict[str, Any]:
     """Evaluate functional success and the common planner timing boundaries."""
     if expected_samples is not None and expected_samples < 1:
@@ -185,17 +190,28 @@ def evaluate_acceptance(
     unsuccessful_sample_indices = [
         index for index, sample in enumerate(samples) if sample["success"] is not True
     ]
-    slow_sample_indices = [
+    missing_latency_sample_indices = [
         index for index, sample in enumerate(samples)
-        if sample["elapsed_ms"] >= SLA_FAILURE_MS
+        if latency_metric not in sample
+    ]
+    latency_samples = [
+        (index, sample[latency_metric])
+        for index, sample in enumerate(samples)
+        if latency_metric in sample
+    ]
+    slow_sample_indices = [
+        index for index, value in latency_samples if value >= SLA_FAILURE_MS
     ]
     hard_limit_sample_indices = [
-        index for index, sample in enumerate(samples)
-        if sample["elapsed_ms"] >= HARD_LIMIT_MS
+        index for index, value in latency_samples if value >= HARD_LIMIT_MS
     ]
     elapsed_ms_p95 = (
         _nearest_rank([sample["elapsed_ms"] for sample in samples], 0.95)
         if samples else None
+    )
+    latency_p95_ms = (
+        _nearest_rank([value for _, value in latency_samples], 0.95)
+        if latency_samples else None
     )
     baseline_limit_ms = (
         baseline_p95_ms * (1.0 + maximum_baseline_regression_fraction)
@@ -215,6 +231,11 @@ def evaluate_acceptance(
             "planner reported failure for samples " +
             ", ".join(str(index) for index in unsuccessful_sample_indices)
         )
+    if missing_latency_sample_indices:
+        errors.append(
+            f"samples missing {latency_metric}: " +
+            ", ".join(str(index) for index in missing_latency_sample_indices)
+        )
     if slow_sample_indices:
         errors.append(
             f"samples at or above {SLA_FAILURE_MS:g} ms: " +
@@ -225,16 +246,16 @@ def evaluate_acceptance(
             f"samples at or above hard {HARD_LIMIT_MS:g} ms limit: " +
             ", ".join(str(index) for index in hard_limit_sample_indices)
         )
-    if (p95_limit_ms is not None and elapsed_ms_p95 is not None and
-            elapsed_ms_p95 >= p95_limit_ms):
+    if (p95_limit_ms is not None and latency_p95_ms is not None and
+            latency_p95_ms >= p95_limit_ms):
         errors.append(
-            f"elapsed_ms p95 {elapsed_ms_p95:g} is not below "
+            f"{latency_metric} p95 {latency_p95_ms:g} is not below "
             f"{p95_limit_ms:g} ms"
         )
-    if (baseline_limit_ms is not None and elapsed_ms_p95 is not None and
-            elapsed_ms_p95 > baseline_limit_ms):
+    if (baseline_limit_ms is not None and latency_p95_ms is not None and
+            latency_p95_ms > baseline_limit_ms):
         errors.append(
-            f"elapsed_ms p95 {elapsed_ms_p95:g} exceeds baseline limit "
+            f"{latency_metric} p95 {latency_p95_ms:g} exceeds baseline limit "
             f"{baseline_limit_ms:g} ms"
         )
 
@@ -244,9 +265,12 @@ def evaluate_acceptance(
         "successful_samples": successful_samples,
         "expected_samples": expected_samples,
         "minimum_samples": minimum_samples,
+        "latency_metric": latency_metric,
+        "missing_latency_sample_indices": missing_latency_sample_indices,
         "slow_sample_indices": slow_sample_indices,
         "hard_limit_sample_indices": hard_limit_sample_indices,
         "elapsed_ms_p95": elapsed_ms_p95,
+        "latency_p95_ms": latency_p95_ms,
         "p95_limit_ms": p95_limit_ms,
         "baseline_p95_ms": baseline_p95_ms,
         "baseline_limit_ms": baseline_limit_ms,
@@ -259,7 +283,11 @@ def evaluate_acceptance(
 
 def evaluate_750m_acceptance(samples: list[dict[str, Any]]) -> dict[str, Any]:
     """Require the declared ten-out-of-ten 750 m acceptance run."""
-    return evaluate_acceptance(samples, expected_samples=10)
+    return evaluate_acceptance(
+        samples,
+        expected_samples=10,
+        latency_metric=MAX_CYCLE_ELAPSED_KEY,
+    )
 
 
 def evaluate_simple_acceptance(

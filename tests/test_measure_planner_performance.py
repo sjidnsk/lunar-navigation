@@ -98,17 +98,94 @@ def passing_sample(elapsed_ms: float = 100.0) -> dict[str, object]:
             "elapsed_ms": elapsed_ms}
 
 
+def passing_750m_sample(
+    elapsed_ms: float = 50000.0, max_cycle_elapsed_ms: float = 100.0
+) -> dict[str, object]:
+    return {
+        **passing_sample(elapsed_ms),
+        "max_cycle_elapsed_ms": max_cycle_elapsed_ms,
+    }
+
+
 def test_750m_acceptance_requires_exactly_ten_successful_samples() -> None:
     accepted = recorder.evaluate_750m_acceptance(
-        [passing_sample() for _ in range(10)]
+        [passing_750m_sample() for _ in range(10)]
     )
-    one_failed = [passing_sample() for _ in range(10)]
-    one_failed[6] = dict(METRICS)
+    one_failed = [passing_750m_sample() for _ in range(10)]
+    one_failed[6] = {**passing_750m_sample(), "success": False}
 
     assert accepted["passed"] is True
     assert accepted["successful_samples"] == 10
     assert recorder.evaluate_750m_acceptance(one_failed)["passed"] is False
     assert recorder.evaluate_750m_acceptance(one_failed[:9])["passed"] is False
+
+
+def test_750m_acceptance_does_not_treat_total_task_time_as_request_latency() -> None:
+    acceptance = recorder.evaluate_750m_acceptance(
+        [passing_750m_sample(elapsed_ms=60000.0) for _ in range(10)]
+    )
+
+    assert acceptance["passed"] is True
+    assert acceptance["latency_metric"] == "max_cycle_elapsed_ms"
+    assert acceptance["slow_sample_indices"] == []
+
+
+def test_750m_acceptance_fails_explicitly_when_cycle_latency_is_missing() -> None:
+    samples = [passing_750m_sample() for _ in range(10)]
+    del samples[4]["max_cycle_elapsed_ms"]
+
+    acceptance = recorder.evaluate_750m_acceptance(samples)
+
+    assert acceptance["passed"] is False
+    assert acceptance["missing_latency_sample_indices"] == [4]
+    assert any("max_cycle_elapsed_ms" in error for error in acceptance["errors"])
+
+
+@pytest.mark.parametrize("max_cycle_elapsed_ms", [2000.0, 2999.999, 3000.0])
+def test_750m_acceptance_uses_cycle_latency_for_two_and_three_second_gates(
+    max_cycle_elapsed_ms: float,
+) -> None:
+    samples = [passing_750m_sample() for _ in range(10)]
+    samples[7]["max_cycle_elapsed_ms"] = max_cycle_elapsed_ms
+
+    acceptance = recorder.evaluate_750m_acceptance(samples)
+
+    assert acceptance["passed"] is False
+    assert acceptance["slow_sample_indices"] == [7]
+    assert acceptance["hard_limit_sample_indices"] == (
+        [7] if max_cycle_elapsed_ms >= 3000.0 else []
+    )
+
+
+def test_parse_metrics_line_preserves_unbound_cycle_classification_fields() -> None:
+    extended = {
+        **passing_750m_sample(),
+        "cycle_target_met_count": 91,
+        "cycle_target_missed_count": 3,
+    }
+
+    assert recorder.parse_metrics_line(metrics_line(extended)) == extended
+
+
+def test_parse_metrics_line_rejects_non_numeric_max_cycle_elapsed() -> None:
+    invalid = {**passing_750m_sample(), "max_cycle_elapsed_ms": "fast"}
+
+    with pytest.raises(ValueError, match="max_cycle_elapsed_ms must be numeric"):
+        recorder.parse_metrics_line(metrics_line(invalid))
+
+
+def test_summarize_includes_max_cycle_elapsed_nearest_rank_statistics() -> None:
+    samples = [
+        passing_750m_sample(max_cycle_elapsed_ms=value)
+        for value in (10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0,
+                      100.0)
+    ]
+
+    assert recorder.summarize(samples)["max_cycle_elapsed_ms"] == {
+        "p50": 50.0,
+        "p95": 100.0,
+        "max": 100.0,
+    }
 
 
 @pytest.mark.parametrize("elapsed_ms", [2000.0, 2999.999, 3000.0])
