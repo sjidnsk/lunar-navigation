@@ -247,7 +247,7 @@ AraStarResult SearchAnytimeAraStar(const AraStarProblem& problem) try {
     });
     return std::nullopt;
   };
-  const auto prune_stale_open = [&]() -> std::optional<AraStarResult> {
+  const auto prune_invalid_open = [&]() -> std::optional<AraStarResult> {
     while (!open.empty()) {
       const OpenEntry& entry = open.top();
       const SearchNode& node = nodes[entry.state];
@@ -356,7 +356,7 @@ AraStarResult SearchAnytimeAraStar(const AraStarProblem& problem) try {
               stopped.has_value()) {
             return stopped;
           }
-          if (const auto failure = prune_stale_open(); failure.has_value()) {
+          if (const auto failure = prune_invalid_open(); failure.has_value()) {
             return failure;
           }
           if (open.empty()) {
@@ -514,7 +514,7 @@ AraStarResult SearchAnytimeAraStar(const AraStarProblem& problem) try {
         }
       }
 
-      if (const auto failure = prune_stale_open(); failure.has_value()) {
+      if (const auto failure = prune_invalid_open(); failure.has_value()) {
         return *failure;
       }
       if (open.empty() && incons_states.empty()) {
