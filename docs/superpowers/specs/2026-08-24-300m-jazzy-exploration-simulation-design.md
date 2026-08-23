@@ -139,6 +139,8 @@ plant 订阅 `/Car/T5/Car_Cmd_Vel`，只接受 `linear.x=v` 和 `angular.z=omega
 - 不实现横向平移、轮胎侧偏、悬架、驱动扭矩或地形动力学；
 - 发布 `/Car/T3/localization/odometry` (`odom -> base_link`) 和 `/tf` 中的恒等
   `map -> odom` 及动态 `odom -> base_link`。
+- 发布 `/Car/T4/simulation/sim_elapsed` (`std_msgs/msg/Float64`)，供测试记录器明确区分仿真时间与
+  本机 wall time；该 Topic 不进入探索或规划算法。
 
 20 倍加速由 plant 使用 `sim_dt = wall_dt * 20` 实现。控制器仍发布正常物理单位的速度，不把
 速度上限乘以 20；算法调用耗时继续用本机单调时钟统计。结果同时记录 wall elapsed 和 simulated
