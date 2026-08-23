@@ -52,8 +52,10 @@ AraStarProblem MakeImprovementProblem(std::vector<std::size_t>& expand_calls) {
 
 TEST(AraStarAnytime, ReusesOpenClosedAndInconsAcrossFixedSchedule) {
   std::vector<std::size_t> expand_calls(4U);
+  AraStarProblem problem = MakeImprovementProblem(expand_calls);
+  problem.config.stop_after_first_solution = false;
 
-  const auto result = SearchAnytimeAraStar(MakeImprovementProblem(expand_calls));
+  const auto result = SearchAnytimeAraStar(problem);
 
   ASSERT_EQ(result.status, AraStarStatus::kSolved) << result.reason_code;
   EXPECT_EQ(result.epsilon_history,
@@ -177,6 +179,7 @@ TEST(AraStarAnytime, CancelsWhileRekeyingLiveAndInconsistentStates) {
     return 0.0;
   };
   problem.control.stop_token = stop_source.get_token();
+  problem.config.stop_after_first_solution = false;
 
   const auto result = SearchAnytimeAraStar(problem);
 
@@ -210,6 +213,7 @@ TEST(AraStarAnytime, RejectsInvalidEdgesAndHeuristicsWhenUsed) {
   invalid_heuristic.heuristic = [](std::size_t state) {
     return state == 1U ? -1.0 : 0.0;
   };
+  invalid_heuristic.config.stop_after_first_solution = false;
 
   const auto heuristic_result = SearchAnytimeAraStar(invalid_heuristic);
   EXPECT_EQ(heuristic_result.status, AraStarStatus::kInvalidProblem);
@@ -303,6 +307,7 @@ TEST(AraStarAnytime, PreservesIncumbentAndMetricsWhenSearchAllocationsFail) {
       }
       throw std::length_error("simulated edge cache exhaustion");
     };
+    problem.config.stop_after_first_solution = false;
 
     const auto result = SearchAnytimeAraStar(problem);
 
@@ -500,6 +505,7 @@ TEST(AraStarAnytime, PassesSourceCostAndNotifiesEveryRelaxationInOrder) {
     events.push_back("relax" + std::to_string(state));
     relaxed_costs.emplace_back(state, new_g);
   };
+  problem.config.stop_after_first_solution = false;
 
   const auto result = SearchAnytimeAraStar(problem);
 
@@ -518,7 +524,7 @@ TEST(AraStarAnytime, PassesSourceCostAndNotifiesEveryRelaxationInOrder) {
   EXPECT_DOUBLE_EQ(result.candidates.back().cost, 3.0);
 }
 
-TEST(AraStarAnytime, ReturnsImmediatelyAfterTheFirstSolutionWhenRequested) {
+TEST(AraStarAnytime, ReturnsImmediatelyAfterTheFirstSolutionByDefault) {
   std::vector<std::size_t> expand_calls(4U);
   AraStarProblem problem;
   problem.state_count = 4U;
@@ -539,8 +545,6 @@ TEST(AraStarAnytime, ReturnsImmediatelyAfterTheFirstSolutionWhenRequested) {
       edges = {{.target_state = 3U, .cost = 1.0, .stable_index = 12U}};
     }
   };
-  problem.config.stop_after_first_solution = true;
-
   const auto result = SearchAnytimeAraStar(problem);
 
   ASSERT_EQ(result.status, AraStarStatus::kSolved) << result.reason_code;

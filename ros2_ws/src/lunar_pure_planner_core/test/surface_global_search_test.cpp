@@ -336,10 +336,16 @@ TEST(SurfaceGlobalSearch, TimesOutWhenDeadlineInterruptsMultiCellRawCertificatio
                          {.x = 0, .y = 0}, {.x = 3, .y = 0});
   problem.problem.start_pose_map.position_m = {.x = 0.1, .y = 0.1, .z = 0.0};
   problem.problem.goal_pose_map.position_m = {.x = 3.9, .y = 0.9, .z = 0.0};
+  // Calls 0..28 finish ARA*, raw-cell reconstruction, and exact-preview
+  // preparation.  Raw-route certification uses calls 29..31, so expiring on
+  // call 31 interrupts the last uncertified segment.
+  constexpr std::size_t kLastRawCertificationClockRead = 31U;
   std::size_t now_calls{};
   problem.problem.control.deadline = kDeadline;
   problem.problem.control.now = [&] {
-    return now_calls++ < 102U ? kDeadline - 1ns : kDeadline;
+    return now_calls++ < kLastRawCertificationClockRead
+               ? kDeadline - 1ns
+               : kDeadline;
   };
 
   const auto result = SearchSurfaceGlobal(problem.problem);
@@ -357,10 +363,16 @@ TEST(SurfaceGlobalSearch, ReturnsRawRouteWhenDeadlineFollowsMultiCellCertificati
                          {.x = 0, .y = 0}, {.x = 3, .y = 0});
   problem.problem.start_pose_map.position_m = {.x = 0.1, .y = 0.1, .z = 0.0};
   problem.problem.goal_pose_map.position_m = {.x = 3.9, .y = 0.9, .z = 0.0};
+  // Call 32 is the next control checkpoint after calls 29..31 have certified
+  // the complete raw route.  This is exactly one tick later than the timeout
+  // boundary above, so the certified raw route remains a valid fallback.
+  constexpr std::size_t kFirstSimplificationClockRead = 32U;
   std::size_t now_calls{};
   problem.problem.control.deadline = kDeadline;
   problem.problem.control.now = [&] {
-    return now_calls++ < 103U ? kDeadline - 1ns : kDeadline;
+    return now_calls++ < kFirstSimplificationClockRead
+               ? kDeadline - 1ns
+               : kDeadline;
   };
 
   const auto result = SearchSurfaceGlobal(problem.problem);

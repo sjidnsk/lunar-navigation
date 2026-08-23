@@ -171,9 +171,13 @@ TEST(AnytimeHopperPlanner, StopsWhenControlTriggersOnlyDuringHopReconstruction) 
   const TerrainFixture fixture = FlatTerrain();
   const HopperCapability capability = Capability();
   const Vec3 goal{.x = 6.25, .y = 4.4, .z = 0.0};
-  // All pre-reconstruction work consumes exactly this many deterministic
-  // clock reads; the next read is the first hop checkpoint.
-  constexpr std::size_t kFirstReconstructionClockRead = 129U;
+  // Sparse first-solution search reaches the hop loop at call 106;
+  // cancellation requested by that read is observed at the final checkpoint.
+  // Call 107 is the final deadline checkpoint that commits the reconstructed
+  // hop, while call 108 is after the complete planning pipeline.
+  constexpr std::size_t kFirstReconstructionClockRead = 106U;
+  constexpr std::size_t kFinalReconstructionClockRead = 107U;
+  constexpr std::size_t kAfterReconstructionClockRead = 108U;
 
   std::stop_source stop;
   std::size_t cancel_reads = 0U;
@@ -194,13 +198,26 @@ TEST(AnytimeHopperPlanner, StopsWhenControlTriggersOnlyDuringHopReconstruction) 
   HopperPlanRequest timed_out = RequestTo(fixture, capability, goal);
   timed_out.control.deadline = SteadyClock::time_point{1ms};
   timed_out.control.now = [&] {
-    return timeout_reads++ < kFirstReconstructionClockRead
+    return timeout_reads++ < kFinalReconstructionClockRead
                ? SteadyClock::time_point{}
                : SteadyClock::time_point{2ms};
   };
   const HopperPlanResult timeout_result = PlanHopper(timed_out);
   EXPECT_EQ(timeout_result.status, LocalPlanStatus::kTimedOut)
       << "clock_reads=" << timeout_reads;
+
+  std::size_t completed_reads = 0U;
+  HopperPlanRequest completed = RequestTo(fixture, capability, goal);
+  completed.control.deadline = SteadyClock::time_point{1ms};
+  completed.control.now = [&] {
+    return completed_reads++ < kAfterReconstructionClockRead
+               ? SteadyClock::time_point{}
+               : SteadyClock::time_point{2ms};
+  };
+  const HopperPlanResult completed_result = PlanHopper(completed);
+  ASSERT_TRUE(completed_result.ok())
+      << completed_result.reason_code << " clock_reads=" << completed_reads;
+  EXPECT_EQ(completed_result.hops.size(), 1U);
 }
 
 TEST(AnytimeHopperPlanner,

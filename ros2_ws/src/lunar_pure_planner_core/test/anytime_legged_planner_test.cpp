@@ -160,9 +160,13 @@ TEST(AnytimeLeggedPlanner, StopsWhenControlTriggersOnlyDuringReconstruction) {
       .body_frame_displacement_m = {0.27, -0.07, 0.0},
       .yaw_change_rad = 0.17,
   });
-  // All pre-reconstruction work consumes exactly this many deterministic
-  // clock reads; the next read is the first transition checkpoint.
-  constexpr std::size_t kFirstReconstructionClockRead = 151U;
+  // Sparse first-solution search reaches the transition loop at call 87;
+  // cancellation requested by that read is observed at the final checkpoint.
+  // Call 88 is the final deadline checkpoint that commits the reconstructed
+  // trajectory, while call 89 is after the complete planning pipeline.
+  constexpr std::size_t kFirstReconstructionClockRead = 87U;
+  constexpr std::size_t kFinalReconstructionClockRead = 88U;
+  constexpr std::size_t kAfterReconstructionClockRead = 89U;
 
   std::stop_source stop;
   std::size_t cancel_reads = 0U;
@@ -186,13 +190,28 @@ TEST(AnytimeLeggedPlanner, StopsWhenControlTriggersOnlyDuringReconstruction) {
   timed_out.control.deadline = SteadyClock::time_point{
       std::chrono::milliseconds{1}};
   timed_out.control.now = [&] {
-    return timeout_reads++ < kFirstReconstructionClockRead
+    return timeout_reads++ < kFinalReconstructionClockRead
                ? SteadyClock::time_point{}
                : SteadyClock::time_point{std::chrono::milliseconds{2}};
   };
   const LeggedPlanResult timeout_result = PlanLegged(timed_out);
   EXPECT_EQ(timeout_result.status, LocalPlanStatus::kTimedOut)
       << "clock_reads=" << timeout_reads;
+
+  std::size_t completed_reads = 0U;
+  LeggedPlanRequest completed = RequestTo(
+      fixture, capability, {1.1, 1.5, 0.5}, {1.37, 1.43, 0.0}, 0.17);
+  completed.control.deadline = SteadyClock::time_point{
+      std::chrono::milliseconds{1}};
+  completed.control.now = [&] {
+    return completed_reads++ < kAfterReconstructionClockRead
+               ? SteadyClock::time_point{}
+               : SteadyClock::time_point{std::chrono::milliseconds{2}};
+  };
+  const LeggedPlanResult completed_result = PlanLegged(completed);
+  ASSERT_TRUE(completed_result.ok())
+      << completed_result.reason_code << " clock_reads=" << completed_reads;
+  EXPECT_EQ(completed_result.trajectory.size(), 1U);
 }
 
 TEST(AnytimeLeggedPlanner, IgnoresGoalZAndDerivesTerminalZFromElevation) {
@@ -351,9 +370,13 @@ TEST(AnytimeLeggedPlanner,
   const LeggedCapability capability = Capability();
   LeggedPlanRequest request = RequestTo(
       fixture, capability, {10.1, 10.1, 0.5}, {10.35, 10.1, 0.0});
+  // Call 76 is the final reconstruction commit checkpoint.  A deadline of 77
+  // ns is the adjacent boundary and permits the exact same work to complete.
+  constexpr auto kFinalReconstructionClockRead =
+      std::chrono::nanoseconds{76};
   const auto clock_reads = std::make_shared<std::int64_t>(0);
-  request.control.deadline = SteadyClock::time_point{
-      std::chrono::nanoseconds{136}};
+  request.control.deadline =
+      SteadyClock::time_point{kFinalReconstructionClockRead};
   request.control.now = [clock_reads] {
     return SteadyClock::time_point{
         std::chrono::nanoseconds{(*clock_reads)++}};
@@ -367,6 +390,21 @@ TEST(AnytimeLeggedPlanner,
   EXPECT_TRUE(result.trajectory.empty());
   EXPECT_GT(result.metrics.expanded_states, 0U);
   EXPECT_LT(*clock_reads, 40000);
+
+  LeggedPlanRequest completed = RequestTo(
+      fixture, capability, {10.1, 10.1, 0.5}, {10.35, 10.1, 0.0});
+  const auto completed_reads = std::make_shared<std::int64_t>(0);
+  completed.control.deadline = SteadyClock::time_point{
+      kFinalReconstructionClockRead + std::chrono::nanoseconds{1}};
+  completed.control.now = [completed_reads] {
+    return SteadyClock::time_point{
+        std::chrono::nanoseconds{(*completed_reads)++}};
+  };
+  const LeggedPlanResult completed_result = PlanLegged(completed);
+  ASSERT_TRUE(completed_result.ok())
+      << completed_result.reason_code
+      << " clock_reads=" << *completed_reads;
+  EXPECT_FALSE(completed_result.trajectory.empty());
 }
 
 TEST(AnytimeLeggedPlanner, PlansFarAcrossLargeMapWithinOneSecond) {
