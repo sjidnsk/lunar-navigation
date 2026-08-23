@@ -139,6 +139,55 @@ def test_shell_entry_is_strict_and_sources_explicit_overridable_overlay() -> Non
     assert 'exec python3 "$SCRIPT_DIR/jazzy_300m_operator.py" "$@"' in source
 
 
+def test_shell_entry_removes_inherited_workspace_prefixes_before_sourcing(
+    tmp_path: Path,
+) -> None:
+    overlay_setup = tmp_path / "fresh-install/setup.bash"
+    overlay_setup.parent.mkdir()
+    overlay_setup.write_text(
+        'export AMENT_PREFIX_PATH="$FRESH_PREFIX:${AMENT_PREFIX_PATH:-}"\n',
+        encoding="utf-8",
+    )
+    capture = tmp_path / "captured-prefixes.txt"
+    fake_python = tmp_path / "bin/python3"
+    fake_python.parent.mkdir()
+    fake_python.write_text(
+        """#!/bin/sh
+printf '%s\n%s\n%s\n' "${AMENT_PREFIX_PATH:-}" "${CMAKE_PREFIX_PATH:-}" "${COLCON_PREFIX_PATH:-}" > "$CAPTURE_ENV"
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    stale = str(tmp_path / "stale-install")
+    fresh = str(overlay_setup.parent)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_python.parent}:{env['PATH']}",
+            "LUNAR_JAZZY_OVERLAY": str(overlay_setup),
+            "AMENT_PREFIX_PATH": stale,
+            "CMAKE_PREFIX_PATH": stale,
+            "COLCON_PREFIX_PATH": stale,
+            "FRESH_PREFIX": fresh,
+            "CAPTURE_ENV": str(capture),
+        }
+    )
+
+    completed = subprocess.run(
+        [str(SHELL_ENTRY), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10.0,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    captured = capture.read_text(encoding="utf-8").splitlines()
+    assert captured[0].split(":", maxsplit=1)[0] == fresh
+    assert all(stale not in value for value in captured)
+
+
 def test_verify_installation_records_overlay_build_git_and_hash_identity(
     tmp_path: Path,
 ) -> None:
@@ -230,6 +279,44 @@ def test_verify_installation_rejects_stale_installed_launch_hash(
 
     with pytest.raises(operator.AcceptanceError, match="launch.*hash"):
         operator.verify_installation(False, env=env, repository_root=ROOT)
+
+
+def test_verify_installation_rejects_installed_launch_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    operator = _module()
+    env, _install_root, _build_root, _prefixes, installed_launch = (
+        _make_installation_fixture(tmp_path, operator)
+    )
+    escaped_launch = tmp_path / "external-launch.py"
+    escaped_launch.write_bytes(installed_launch.read_bytes())
+    installed_launch.unlink()
+    installed_launch.symlink_to(escaped_launch)
+
+    with pytest.raises(operator.AcceptanceError, match="outside explicit overlay"):
+        operator.verify_installation(False, env=env, repository_root=ROOT)
+
+
+def test_verify_installation_rejects_source_launch_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    operator = _module()
+    env, _install_root, _build_root, _prefixes, _installed_launch = (
+        _make_installation_fixture(tmp_path, operator)
+    )
+    repository_root = tmp_path / "worktree"
+    source_launch = repository_root / operator.SIMULATION_LAUNCH_RELATIVE
+    source_launch.parent.mkdir(parents=True)
+    escaped_launch = tmp_path / "external-source-launch.py"
+    escaped_launch.write_bytes(
+        (ROOT / operator.SIMULATION_LAUNCH_RELATIVE).read_bytes()
+    )
+    source_launch.symlink_to(escaped_launch)
+
+    with pytest.raises(operator.AcceptanceError, match="outside repository root"):
+        operator.verify_installation(
+            False, env=env, repository_root=repository_root
+        )
 
 
 def test_operator_contract_uses_isolated_domain_external_runs_and_exact_group() -> None:

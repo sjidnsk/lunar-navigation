@@ -148,3 +148,21 @@ for every future run, so `operator_evidence.json` will contain the then-current 
 
 These fields are written at the top level of each run's `operator_evidence.json` together
 with the existing domain, process identity, outcome, wall guard, and teardown evidence.
+
+### Independent-review fix round 1 — launch path closure
+
+The first fix review identified that equal file content was insufficient when an installed
+launch path was a symlink to a file outside the explicit overlay. Both launch inputs now
+resolve strictly before hashing: the source launch must remain beneath the resolved current
+repository root, and the installed launch must remain beneath the resolved simulation
+package prefix in the explicit overlay. Either symlink escape fails before any ROS launch.
+
+- RED: 2 focused failures reproduced installed-launch and source-launch symlink escapes;
+  the installed escape was previously accepted and the source escape reached the later Git
+  check.
+- GREEN: focused operator suite `20 passed`.
+- Added a real shell-process regression that starts with stale `AMENT_PREFIX_PATH`,
+  `CMAKE_PREFIX_PATH`, and `COLCON_PREFIX_PATH`, sources Jazzy plus a temporary explicit
+  overlay, and proves no stale prefix reaches the operator process. This supplements the
+  static shell contract assertion.
+- No planner, explorer, simulation, or controller algorithm changed.

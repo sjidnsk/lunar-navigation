@@ -468,12 +468,29 @@ def verify_installation(
         executable_evidence[package] = package_executables
 
     assert simulation_prefix is not None
-    source_launch = (repository_root / SIMULATION_LAUNCH_RELATIVE).resolve()
-    installed_launch = (
-        simulation_prefix
-        / "share/lunar_pure_exploration_sim/launch"
-        / SIMULATION_LAUNCH_RELATIVE.name
-    ).resolve()
+    try:
+        resolved_repository_root = repository_root.resolve(strict=True)
+        source_launch = (
+            resolved_repository_root / SIMULATION_LAUNCH_RELATIVE
+        ).resolve(strict=True)
+    except OSError as error:
+        raise AcceptanceError("source launch file is unavailable") from error
+    if not _is_within(source_launch, resolved_repository_root):
+        raise AcceptanceError(
+            f"source launch resolved outside repository root: {source_launch}"
+        )
+    try:
+        installed_launch = (
+            simulation_prefix
+            / "share/lunar_pure_exploration_sim/launch"
+            / SIMULATION_LAUNCH_RELATIVE.name
+        ).resolve(strict=True)
+    except OSError as error:
+        raise AcceptanceError("installed launch file is unavailable") from error
+    if not _is_within(installed_launch, simulation_prefix):
+        raise AcceptanceError(
+            f"installed launch resolved outside explicit overlay: {installed_launch}"
+        )
     if not source_launch.is_file():
         raise AcceptanceError(f"source launch file is unavailable: {source_launch}")
     if not installed_launch.is_file():
@@ -487,7 +504,7 @@ def verify_installation(
         )
 
     git_result = _run_cli(
-        ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
+        ["git", "-C", str(resolved_repository_root), "rev-parse", "HEAD"],
         command_env,
         5.0,
     )
