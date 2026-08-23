@@ -185,3 +185,31 @@ Fresh fixed-overlay live run:
   exact `(pid,start_time)` identities are absent, the process group drained on
   SIGINT without requiring SIGTERM in this normal run, and the bounded domain-91
   `ros2 node list --no-daemon` result is empty.
+
+The teardown re-review then identified an exception window between successful
+`Popen` and entry into the cleanup `finally`. The live and synthetic paths now
+create an exact fallback group immediately from the invariant guaranteed by
+`start_new_session=True`: initial PID equals PGID and SID. Identity capture,
+synthetic child-PID parsing, and all subsequent work occur inside the outer
+`try/finally`. If the leader exits before `/proc` capture, teardown enumerates
+only members whose PGID and SID equal that original PID and applies the same
+bounded signal policy. Liveness now compares the complete captured identity,
+including start time, PGID, and SID.
+
+A second synthetic regression forces the leader to exit before identity
+capture while its child ignores SIGINT. The expected capture failure occurs,
+the fallback exact group finds the child, SIGTERM escalation removes it, and
+the final membership set is empty. Static plus both synthetic tests pass
+`11/11`.
+
+Final fresh live run after the exception-path fix:
+`/home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_runs/live-smoke/run-c18f053dde6d4752a9d12e5ff9a5de85`.
+
+- Pytest: `1 passed, 11 deselected in 4.09s`; domain 106.
+- States `[0,1,2,3,4]`, reference 385 points, nonzero T5, displacement
+  `0.400014484 m`, and coverage `0.0 -> 0.0004994054696789536`.
+- First plan global/local timing `71.885274/336.622921 ms`; odometry mean gap
+  `0.050018465 s`.
+- Teardown recorded the exact leader plus seven children; all eight complete
+  identities are absent, no SIGTERM was needed on the normal path, and the ROS
+  graph is empty.

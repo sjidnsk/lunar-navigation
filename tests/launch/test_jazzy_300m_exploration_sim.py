@@ -8,6 +8,7 @@ import importlib.util
 import json
 import math
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -344,7 +345,7 @@ class _ProcessIdentity:
 class _ExactProcessGroup:
     pgid: int
     session_id: int
-    leader: _ProcessIdentity
+    leader: _ProcessIdentity | None
     members: set[_ProcessIdentity] = field(default_factory=set)
 
 
@@ -393,6 +394,19 @@ def _capture_exact_process_group(process: subprocess.Popen[bytes]) -> _ExactProc
     return group
 
 
+def _fallback_new_session_group(
+    process: subprocess.Popen[bytes],
+) -> _ExactProcessGroup:
+    """Describe only the exact new session promised by start_new_session."""
+    group = _ExactProcessGroup(
+        pgid=process.pid,
+        session_id=process.pid,
+        leader=None,
+    )
+    _observe_exact_group_members(group)
+    return group
+
+
 def _observe_exact_group_members(group: _ExactProcessGroup) -> None:
     for entry in Path("/proc").iterdir():
         if not entry.name.isdecimal():
@@ -408,7 +422,7 @@ def _observe_exact_group_members(group: _ExactProcessGroup) -> None:
 
 def _identity_is_alive(identity: _ProcessIdentity) -> bool:
     current = _read_process_identity(identity.pid)
-    return current is not None and current.start_time_ticks == identity.start_time_ticks
+    return current == identity
 
 
 def _remaining_exact_group_members(
@@ -442,6 +456,13 @@ def _terminate_exact_process_group(
     terminate_timeout: float = 5.0,
 ) -> _GroupTeardownResult:
     _observe_exact_group_members(group)
+    initial_members = _remaining_exact_group_members(group)
+    if not initial_members:
+        process.poll()
+        return _GroupTeardownResult(
+            sigterm_sent=False,
+            recorded_members=tuple(sorted(group.members, key=lambda item: item.pid)),
+        )
     try:
         os.killpg(group.pgid, signal.SIGINT)
     except ProcessLookupError:
@@ -460,7 +481,7 @@ def _terminate_exact_process_group(
             for item in sorted(remaining, key=lambda item: item.pid)
         )
         pytest.fail(f"exact launch process group survived SIGINT and SIGTERM: {details}")
-    if _identity_is_alive(group.leader):
+    if group.leader is not None and _identity_is_alive(group.leader):
         pytest.fail("launch leader identity remained after process-group teardown")
     return _GroupTeardownResult(
         sigterm_sent=sigterm_sent,
@@ -506,10 +527,15 @@ def test_exact_group_teardown_escalates_after_leader_exits() -> None:
         start_new_session=True,
         text=True,
     )
-    group = _capture_exact_process_group(process)
-    assert process.stdout is not None
-    child_pid = int(process.stdout.readline().strip())
+    group = _fallback_new_session_group(process)
+    child_pid: int | None = None
     try:
+        group = _capture_exact_process_group(process)
+        assert process.stdout is not None
+        ready, _, _ = select.select([process.stdout], [], [], 2.0)
+        if not ready:
+            raise RuntimeError("synthetic child PID was not reported")
+        child_pid = int(process.stdout.readline().strip())
         result = _terminate_exact_process_group(
             process, group, interrupt_timeout=0.2, terminate_timeout=2.0
         )
@@ -519,14 +545,48 @@ def test_exact_group_teardown_escalates_after_leader_exits() -> None:
             time.sleep(0.01)
         assert not Path(f"/proc/{child_pid}").exists()
     finally:
-        if Path(f"/proc/{child_pid}").exists():
-            os.kill(child_pid, signal.SIGTERM)
-            deadline = time.monotonic() + 2.0
-            while Path(f"/proc/{child_pid}").exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-        process.stdout.close()
-        assert process.stderr is not None
-        process.stderr.close()
+        _terminate_exact_process_group(
+            process, group, interrupt_timeout=0.2, terminate_timeout=2.0
+        )
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+
+
+def test_fallback_group_cleans_child_when_leader_exits_before_capture() -> None:
+    """The Popen-to-identity-capture exception window remains bounded."""
+    program = "\n".join(
+        [
+            "import os, signal, sys, time",
+            "child = os.fork()",
+            "if child == 0:",
+            "    signal.signal(signal.SIGINT, signal.SIG_IGN)",
+            "    while True: time.sleep(0.1)",
+            "sys.exit(0)",
+        ]
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", program],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    group = _fallback_new_session_group(process)
+    try:
+        process.wait(timeout=2.0)
+        with pytest.raises(RuntimeError, match="identity capture"):
+            _capture_exact_process_group(process)
+        result = _terminate_exact_process_group(
+            process, group, interrupt_timeout=0.2, terminate_timeout=2.0
+        )
+        assert result.sigterm_sent
+        assert not _remaining_exact_group_members(group)
+    finally:
+        _terminate_exact_process_group(
+            process, group, interrupt_timeout=0.2, terminate_timeout=2.0
+        )
 
 
 @pytest.mark.skipif(
@@ -727,14 +787,16 @@ def test_live_closed_loop_reaches_real_motion_and_planner_timing() -> None:
             start_new_session=True,
             env=env,
         )
-        launch_group = _capture_exact_process_group(process)
-        evidence["launch_pgid"] = launch_group.pgid
-        evidence["launch_leader"] = {
-            "pid": launch_group.leader.pid,
-            "start_time_ticks": launch_group.leader.start_time_ticks,
-        }
+        launch_group = _fallback_new_session_group(process)
         failure: str | None = None
         try:
+            launch_group = _capture_exact_process_group(process)
+            assert launch_group.leader is not None
+            evidence["launch_pgid"] = launch_group.pgid
+            evidence["launch_leader"] = {
+                "pid": launch_group.leader.pid,
+                "start_time_ticks": launch_group.leader.start_time_ticks,
+            }
             deadline = time.monotonic() + 120.0
             while time.monotonic() < deadline:
                 rclpy.spin_once(node, timeout_sec=0.05)

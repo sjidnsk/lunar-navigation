@@ -39,6 +39,8 @@ Task 4 review at `eed2743`: changes requested. Important teardown gap: if the la
 
 Task 4 teardown fix implemented in working tree: process identity is `(pid,start_time,pgid,session)`, all exact same-session/group members are accumulated from `/proc`, SIGTERM escalation depends on residual group members rather than leader state, and live evidence records every member. Synthetic leader-exits/child-survives regression and fresh live smoke pass; pending commit and independent re-review.
 
+Task 4 re-review at `336d45b`: normal teardown addressed, but capture/readline exceptions occurred before cleanup `finally`. Follow-up wraps every post-Popen operation immediately, uses the exact `start_new_session` PID=PGID=SID fallback, compares full process identity, and adds a leader-exits-before-capture regression. Fresh static/synthetic and live evidence pass; pending final short review.
+
 Task 4: complete in working tree pending commit. The opt-in live smoke uses a
 locked candidate domain, localhost-only/no-daemon preflight, exact process-group
 cleanup, and external artifacts. Seven bounded RED/diagnostic iterations led to
