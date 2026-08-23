@@ -213,3 +213,10 @@ Final fresh live run after the exception-path fix:
 - Teardown recorded the exact leader plus seven children; all eight complete
   identities are absent, no SIGTERM was needed on the normal path, and the ROS
   graph is empty.
+
+The final line-level review noted that fallback construction itself still
+performed its first `/proc` scan before entry into `try`. It is now a pure,
+no-I/O construction of the guaranteed PID=PGID=SID descriptor. Every process
+observation, identity capture, child-output read, and signal action occurs
+inside the protected block. Static and synthetic tests remain `11/11`, and a
+fresh live smoke passes (`1 passed, 11 deselected in 3.67s`).

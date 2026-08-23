@@ -397,14 +397,12 @@ def _capture_exact_process_group(process: subprocess.Popen[bytes]) -> _ExactProc
 def _fallback_new_session_group(
     process: subprocess.Popen[bytes],
 ) -> _ExactProcessGroup:
-    """Describe only the exact new session promised by start_new_session."""
-    group = _ExactProcessGroup(
+    """Purely describe the exact new session promised by start_new_session."""
+    return _ExactProcessGroup(
         pgid=process.pid,
         session_id=process.pid,
         leader=None,
     )
-    _observe_exact_group_members(group)
-    return group
 
 
 def _observe_exact_group_members(group: _ExactProcessGroup) -> None:
