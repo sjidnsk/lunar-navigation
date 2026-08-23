@@ -1,0 +1,54 @@
+cmake_minimum_required(VERSION 3.22)
+project(lunar_pure_exploration_sim LANGUAGES CXX)
+
+find_package(ament_cmake REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(grid_map_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(tf2_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
+
+add_library(${PROJECT_NAME} SHARED src/lunar_scene.cpp)
+target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
+target_include_directories(${PROJECT_NAME}
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:include>")
+ament_target_dependencies(${PROJECT_NAME}
+  geometry_msgs
+  grid_map_msgs
+  nav_msgs
+  rclcpp
+  std_msgs
+  tf2_msgs
+  visualization_msgs)
+
+install(
+  TARGETS ${PROJECT_NAME}
+  EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+  INCLUDES DESTINATION include)
+install(DIRECTORY include/ DESTINATION include)
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(lunar_scene_test test/lunar_scene_test.cpp)
+  target_compile_features(lunar_scene_test PRIVATE cxx_std_20)
+  target_link_libraries(lunar_scene_test ${PROJECT_NAME})
+endif()
+
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+ament_export_dependencies(
+  geometry_msgs
+  grid_map_msgs
+  nav_msgs
+  rclcpp
+  std_msgs
+  tf2_msgs
+  visualization_msgs)
+ament_package()
