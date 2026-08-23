@@ -14,6 +14,7 @@ add_library(${PROJECT_NAME} SHARED
   src/coordinated_steering_plant.cpp
   src/lunar_scene.cpp
   src/map_messages.cpp
+  src/simulation_node.cpp
   src/visibility.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 target_include_directories(${PROJECT_NAME}
@@ -29,6 +30,10 @@ ament_target_dependencies(${PROJECT_NAME}
   tf2_msgs
   visualization_msgs)
 
+add_executable(simulation_node src/simulation_main.cpp)
+target_compile_features(simulation_node PRIVATE cxx_std_20)
+target_link_libraries(simulation_node ${PROJECT_NAME})
+
 install(
   TARGETS ${PROJECT_NAME}
   EXPORT export_${PROJECT_NAME}
@@ -36,6 +41,7 @@ install(
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
   INCLUDES DESTINATION include)
+install(TARGETS simulation_node DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 
 if(BUILD_TESTING)
@@ -57,6 +63,10 @@ if(BUILD_TESTING)
     test/coordinated_steering_plant_test.cpp)
   target_compile_features(coordinated_steering_plant_test PRIVATE cxx_std_20)
   target_link_libraries(coordinated_steering_plant_test ${PROJECT_NAME})
+
+  ament_add_gtest(simulation_node_test test/simulation_node_test.cpp)
+  target_compile_features(simulation_node_test PRIVATE cxx_std_20)
+  target_link_libraries(simulation_node_test ${PROJECT_NAME})
 endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
