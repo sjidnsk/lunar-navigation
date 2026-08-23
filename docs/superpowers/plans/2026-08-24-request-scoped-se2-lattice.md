@@ -99,6 +99,10 @@ const double y = lattice_origin_y_m_ +
 
 Keep map lookup, yaw quantization, safety evaluation and goal connection unchanged.
 
+Update the old `RegistersTheSpecialStartKeyWithoutCreatingASecondNode` regression to `KeepsRequestStartAsOnlyStateForSubResolutionReturn` and require `quantized_state_count == 1U`. The exact start is now canonical, so allocating a second fixed-map representative for the same bucket would violate the new design.
+
+In the 300 m detour test, retain the behavioral requirement that the path leaves the wall's direct `y=[70,130] m` band. Use a `>30.0 m` deviation from `y=100 m`; do not require the historical `>31.0 m` route shape because every accepted edge already undergoes the full oriented-footprint sweep validation.
+
 - [ ] **Step 4: Verify GREEN and run the stable wheel regression subset**
 
 Run the new test, then run all wheel tests except the known baseline timeout:

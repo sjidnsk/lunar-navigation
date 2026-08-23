@@ -246,6 +246,25 @@ TEST(WheelPlanner, ReachesOffGridPoseOnFlatFreeMap) {
   EXPECT_NEAR(TrajectoryYaw(result.trajectory.back()), kGoalYaw, 1.0e-6);
 }
 
+TEST(WheelPlanner, PlansMultiplePrimitivesFromArbitraryTranslatedStart) {
+  const TerrainFixture fixture = FlatTerrain(80U, 80U);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+  const Pose3 start = Pose(1.13, 1.07);
+
+  const WheelPlanResult result = PlanWheel(
+      RequestTo(fixture, capability, 2.13, 1.07, 0.0, start));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_GT(result.trajectory.size(), 2U);
+  EXPECT_NEAR(result.trajectory.front().pose.position_m.x, 1.13, 1.0e-12);
+  EXPECT_NEAR(result.trajectory.front().pose.position_m.y, 1.07, 1.0e-12);
+  EXPECT_NEAR(result.trajectory.back().pose.position_m.x, 2.13, 1.0e-9);
+  EXPECT_NEAR(result.trajectory.back().pose.position_m.y, 1.07, 1.0e-9);
+}
+
 TEST(WheelPlanner, StopsWhenControlTriggersOnlyDuringTrajectoryReconstruction) {
   const TerrainFixture fixture = FlatTerrain();
   WheeledCapability capability = Capability(0.6, 0.4);
@@ -697,7 +716,7 @@ TEST(WheelPlanner, RejectsCanonicalPoseWhoseRecomputedBandDiffersFromItsKey) {
   EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
 }
 
-TEST(WheelPlanner, RegistersTheSpecialStartKeyWithoutCreatingASecondNode) {
+TEST(WheelPlanner, KeepsRequestStartAsOnlyStateForSubResolutionReturn) {
   const TerrainFixture fixture = FlatTerrain(20U, 20U);
   WheeledCapability capability = Capability(0.2, 0.2);
   capability.motion_primitives = {
@@ -711,7 +730,7 @@ TEST(WheelPlanner, RegistersTheSpecialStartKeyWithoutCreatingASecondNode) {
   const WheelPlanResult result = PlanWheel(request);
 
   EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
-  EXPECT_EQ(result.quantized_state_count, 2U);
+  EXPECT_EQ(result.quantized_state_count, 1U);
 }
 
 TEST(WheelPlanner, QuantizedCanonicalStatesReachGoalUnderATightStateCap) {
@@ -1028,7 +1047,7 @@ TEST(WheelPlanner, ProjectWheelCapabilityDetoursForMoreThan300Meters) {
   for (const TrajectoryPoint& point : result.trajectory) {
     leaves_direct_corridor =
         leaves_direct_corridor || std::abs(point.pose.position_m.y - 100.0) >
-                                     31.0;
+                                     30.0;
   }
   EXPECT_TRUE(leaves_direct_corridor);
 }

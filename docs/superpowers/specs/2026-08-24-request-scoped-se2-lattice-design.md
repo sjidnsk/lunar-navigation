@@ -76,6 +76,8 @@ A rigid SE(2) transform preserves primitive length, yaw change, curvature and re
 
 The exact request start is the origin of the planning lattice. There is no physical start connector, no synthetic straight segment and no coordinate snap. `ValidateStart()` continues to reject starts that are outside the map, unsupported, in collision, non-finite, or incompatible with the platform state.
 
+Because the exact start is canonical in the request frame, a sub-resolution primitive whose endpoint quantizes back to the start key does not allocate a second representative state. This replaces the old fixed-map behavior in which an exact noncanonical start and a separate canonical pose could share the same quantized translation bucket.
+
 “Any start pose” means any continuous pose that is structurally valid and physically feasible. It does not mean that a pose inside an obstacle, outside the map, unsupported by terrain, or dynamically impossible must produce a path.
 
 ### Goal

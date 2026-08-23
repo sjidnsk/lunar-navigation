@@ -521,6 +521,8 @@ class WheelSearchGraph final {
         terrain_(*request.terrain),
         capability_(*request.capability),
         map_(*request.terrain->map),
+        lattice_origin_x_m_(request.start.pose.position_m.x),
+        lattice_origin_y_m_(request.start.pose.position_m.y),
         goal_(goal),
         goal_yaw_(goal_yaw),
         footprint_radius_m_(CircumscribedRadius(capability_)) {
@@ -1018,9 +1020,9 @@ class WheelSearchGraph final {
         (2.0 * std::numbers::pi))) % yaw_bins;
     return WheelStateKey{
         .x = static_cast<std::int64_t>(std::llround(
-            (pose.position_m.x - map_.origin_m().x) / xy_resolution)),
+            (pose.position_m.x - lattice_origin_x_m_) / xy_resolution)),
         .y = static_cast<std::int64_t>(std::llround(
-            (pose.position_m.y - map_.origin_m().y) / xy_resolution)),
+            (pose.position_m.y - lattice_origin_y_m_) / xy_resolution)),
         .yaw = static_cast<std::uint16_t>(yaw_bin),
         .mode = mode,
         .narrow = narrow,
@@ -1032,9 +1034,9 @@ class WheelSearchGraph final {
     const double xy_resolution =
         key.narrow ? map_.resolution_m() / 2.0 : map_.resolution_m();
     const std::size_t yaw_bins = key.narrow ? 128U : 64U;
-    const double x = map_.origin_m().x +
+    const double x = lattice_origin_x_m_ +
                      static_cast<double>(key.x) * xy_resolution;
-    const double y = map_.origin_m().y +
+    const double y = lattice_origin_y_m_ +
                      static_cast<double>(key.y) * xy_resolution;
     const auto elevation =
         map_.SampleElevationBilinear(Vec2{.x = x, .y = y});
@@ -2297,6 +2299,8 @@ class WheelSearchGraph final {
   const shared::LocalTerrainProjection& terrain_;
   const WheeledCapability& capability_;
   const shared::MapSnapshot& map_;
+  const double lattice_origin_x_m_;
+  const double lattice_origin_y_m_;
   PointGoal goal_;
   std::optional<double> goal_yaw_;
   double footprint_radius_m_{};
