@@ -53,6 +53,8 @@ def parse_reference(reference: MotionReference) -> ParsedReference:
         return _invalid_reference()
 
     if reference.trajectory.points:
+        if len(reference.trajectory.points) < 2:
+            return _invalid_reference()
         samples = []
         path = []
         for point in reference.trajectory.points:

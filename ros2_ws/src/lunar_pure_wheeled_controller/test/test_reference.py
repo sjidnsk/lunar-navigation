@@ -1,5 +1,6 @@
 import math
 
+import pytest
 from geometry_msgs.msg import PoseStamped, Transform, Twist
 from lunar_planning_msgs.msg import MotionReference
 from nav_msgs.msg import Path
@@ -50,6 +51,25 @@ def make_trajectory_reference(
     return reference
 
 
+def make_producer_spin_reference(direction: float) -> MotionReference:
+    """Mirror the wheel producer's initial point plus eight spin samples."""
+    return make_trajectory_reference([
+        (
+            (0.0, 0.0, direction * math.pi * index / 16.0),
+            (0.0, 0.0),
+            direction * 0.15 if 0 < index < 8 else 0.0,
+        )
+        for index in range(9)
+    ])
+
+
+def make_valid_two_point_trajectory_reference() -> MotionReference:
+    return make_trajectory_reference([
+        ((0.0, 0.0, 0.0), (0.2, 0.0), 0.0),
+        ((1.0, 0.0, 0.0), (0.0, 0.0), 0.0),
+    ])
+
+
 def test_wheeled_reference_yields_xy_yaw_path() -> None:
     parsed = parse_reference(make_reference(platform=MotionReference.WHEELED))
 
@@ -73,6 +93,7 @@ def test_trajectory_keeps_forward_and_reverse_signed_speed() -> None:
 def test_trajectory_projects_map_velocity_and_preserves_yaw_rate() -> None:
     parsed = parse_reference(make_trajectory_reference([
         ((1.0, 2.0, math.pi / 2.0), (0.0, 0.3), -0.4),
+        ((1.0, 3.0, math.pi / 2.0), (0.0, 0.0), 0.0),
     ]))
 
     assert parsed.reason is None
@@ -85,57 +106,88 @@ def test_trajectory_projects_map_velocity_and_preserves_yaw_rate() -> None:
     assert sample.yaw_rate_radps == -0.4
 
 
+@pytest.mark.parametrize("direction", [1.0, -1.0])
+def test_producer_shaped_zero_xy_spin_preserves_angular_authority(
+    direction: float,
+) -> None:
+    """Dropping zero-XY angular samples must break producer spin execution."""
+    parsed = parse_reference(make_producer_spin_reference(direction))
+
+    assert parsed.reason is None
+    assert len(parsed.trajectory_samples) == 9
+    assert all(
+        sample.x_m == 0.0
+        and sample.y_m == 0.0
+        and sample.signed_speed_mps == 0.0
+        for sample in parsed.trajectory_samples
+    )
+    assert all(
+        math.copysign(1.0, sample.yaw_rate_radps) == direction
+        for sample in parsed.trajectory_samples[1:-1]
+    )
+    assert parsed.trajectory_samples[-1].yaw_rate_radps == 0.0
+
+
+def test_single_point_trajectory_is_not_trackable() -> None:
+    """Reject trajectories the ordered tracker cannot execute."""
+    reference = make_trajectory_reference([
+        ((1.0, 2.0, 0.3), (0.2, 0.0), 0.0),
+    ])
+
+    assert parse_reference(reference).reason == "INVALID_REFERENCE"
+
+
 def test_non_finite_trajectory_transform_is_not_trackable() -> None:
-    reference = make_trajectory_reference([((0.0, 0.0, 0.0), (0.2, 0.0), 0.0)])
+    reference = make_valid_two_point_trajectory_reference()
     reference.trajectory.points[0].transforms[0].translation.x = math.nan
 
     assert parse_reference(reference).reason == "INVALID_REFERENCE"
 
 
 def test_non_finite_trajectory_velocity_is_not_trackable() -> None:
-    reference = make_trajectory_reference([((0.0, 0.0, 0.0), (0.2, 0.0), 0.0)])
+    reference = make_valid_two_point_trajectory_reference()
     reference.trajectory.points[0].velocities[0].angular.z = math.inf
 
     assert parse_reference(reference).reason == "INVALID_REFERENCE"
 
 
 def test_trajectory_point_without_exactly_one_transform_is_not_trackable() -> None:
-    reference = make_trajectory_reference([((0.0, 0.0, 0.0), (0.2, 0.0), 0.0)])
+    reference = make_valid_two_point_trajectory_reference()
     reference.trajectory.points[0].transforms.append(Transform())
 
     assert parse_reference(reference).reason == "INVALID_REFERENCE"
 
 
 def test_trajectory_point_without_a_transform_is_not_trackable() -> None:
-    reference = make_trajectory_reference([((0.0, 0.0, 0.0), (0.2, 0.0), 0.0)])
+    reference = make_valid_two_point_trajectory_reference()
     reference.trajectory.points[0].transforms.clear()
 
     assert parse_reference(reference).reason == "INVALID_REFERENCE"
 
 
 def test_trajectory_point_without_exactly_one_velocity_is_not_trackable() -> None:
-    reference = make_trajectory_reference([((0.0, 0.0, 0.0), (0.2, 0.0), 0.0)])
+    reference = make_valid_two_point_trajectory_reference()
     reference.trajectory.points[0].velocities.clear()
 
     assert parse_reference(reference).reason == "INVALID_REFERENCE"
 
 
 def test_trajectory_point_with_multiple_velocities_is_not_trackable() -> None:
-    reference = make_trajectory_reference([((0.0, 0.0, 0.0), (0.2, 0.0), 0.0)])
+    reference = make_valid_two_point_trajectory_reference()
     reference.trajectory.points[0].velocities.append(Twist())
 
     assert parse_reference(reference).reason == "INVALID_REFERENCE"
 
 
 def test_trajectory_is_authoritative_over_a_malformed_path_preview() -> None:
-    reference = make_trajectory_reference([((0.0, 0.0, 0.0), (0.2, 0.0), 0.0)])
+    reference = make_valid_two_point_trajectory_reference()
     reference.path_preview.poses[0].pose.position.x = math.nan
 
     assert parse_reference(reference).reason is None
 
 
 def test_malformed_trajectory_does_not_fall_back_to_path_preview() -> None:
-    reference = make_trajectory_reference([((0.0, 0.0, 0.0), (0.2, 0.0), 0.0)])
+    reference = make_valid_two_point_trajectory_reference()
     reference.trajectory.points[0].transforms.clear()
 
     assert parse_reference(reference).reason == "INVALID_REFERENCE"
