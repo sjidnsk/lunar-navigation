@@ -18,12 +18,10 @@ namespace lunar::pure_planning {
 
 struct AnytimeSearchConfig final {
   std::array<double, 4> epsilon_schedule{2.5, 2.0, 1.5, 1.0};
-  bool stop_after_first_solution{};
+  bool stop_after_first_solution{true};
 };
 
 struct AnytimePlannerConfig final {
-  std::chrono::milliseconds global_budget{150};
-  std::chrono::milliseconds output_reserve{50};
   std::int32_t global_occupancy_threshold{50};
   double local_occupancy_threshold{0.5};
   double platform_discretization_m{0.2};
@@ -73,6 +71,8 @@ struct PlanningRequest final {
   PlatformCapability capability;
   AnytimePlannerConfig config;
   SearchControl control;
+  std::optional<SteadyClock::time_point> request_started_at;
+  ProgressFn progress;
 };
 
 enum class PlanningStatus : std::uint8_t {

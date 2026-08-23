@@ -19,6 +19,53 @@ namespace {
 
 }  // namespace
 
+RequestTimingPolicy MakeRequestTimingPolicy(
+    const SteadyClock::time_point started_at) noexcept {
+  return {
+      .started_at = started_at,
+      .target_milestone = started_at + RequestTimingPolicy::kTarget,
+      .sla_milestone = started_at + RequestTimingPolicy::kSla,
+      .hard_deadline = started_at + RequestTimingPolicy::kHard,
+  };
+}
+
+RequestLatencyClass ClassifyRequestLatency(
+    const RequestTimingPolicy& policy,
+    const SteadyClock::time_point finalized_at) noexcept {
+  if (finalized_at >= policy.hard_deadline) {
+    return RequestLatencyClass::kHardTimeout;
+  }
+  if (finalized_at >= policy.sla_milestone) {
+    return RequestLatencyClass::kSlaMissed;
+  }
+  if (finalized_at >= policy.target_milestone) {
+    return RequestLatencyClass::kTargetMissed;
+  }
+  return RequestLatencyClass::kTargetMet;
+}
+
+RequestLatencyClass ClassifyRequestLatency(
+    const std::chrono::nanoseconds elapsed) noexcept {
+  return ClassifyRequestLatency(
+      MakeRequestTimingPolicy(SteadyClock::time_point{}),
+      SteadyClock::time_point{elapsed});
+}
+
+std::string_view RequestLatencyClassName(
+    const RequestLatencyClass latency_class) noexcept {
+  switch (latency_class) {
+    case RequestLatencyClass::kTargetMet:
+      return "TARGET_MET";
+    case RequestLatencyClass::kTargetMissed:
+      return "TARGET_MISSED";
+    case RequestLatencyClass::kSlaMissed:
+      return "SLA_MISSED";
+    case RequestLatencyClass::kHardTimeout:
+      return "HARD_TIMEOUT";
+  }
+  return "HARD_TIMEOUT";
+}
+
 ScopedPlannerCall::ScopedPlannerCall(
     const PlannerStage stage, PlannerCallTiming& timing, NowFn now)
     : stage_(stage),
@@ -49,6 +96,7 @@ bool ScopedPlannerCall::Finish(
   if (stage_ == PlannerStage::kGlobal) {
     timing_->global_elapsed += elapsed;
   } else {
+    timing_->local_search_elapsed += elapsed;
     timing_->local_elapsed += elapsed;
   }
   timing_->total_elapsed += elapsed;

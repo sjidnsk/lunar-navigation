@@ -152,8 +152,7 @@ class WheelLongRangeFixture final {
                   .local_map = make_local_map(current),
                   .map_from_odom = {.parent_frame = "map", .child_frame = "odom"}},
         .capability = capability,
-        .config = {.global_budget = std::chrono::seconds{20},
-                   .search = {.stop_after_first_solution = true}},
+        .config = {.search = {.stop_after_first_solution = true}},
         .control = {.deadline = SteadyClock::now() + std::chrono::seconds{20}},
     };
     const auto global_started = SteadyClock::now();

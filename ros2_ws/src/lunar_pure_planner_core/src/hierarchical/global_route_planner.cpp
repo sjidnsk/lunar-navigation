@@ -18,12 +18,6 @@
 namespace lunar::pure_planning::hierarchical {
 namespace {
 
-using namespace std::chrono_literals;
-
-// Leave the outer stage enough time to unwind, finish its real timing sample,
-// and map the controlled failure before the hard 150 ms stage boundary.
-constexpr auto kGlobalBackendReturnReserve = 10ms;
-
 [[nodiscard]] Quaternion QuaternionFromYaw(const double yaw) noexcept {
   return Quaternion{.w = std::cos(yaw / 2.0), .z = std::sin(yaw / 2.0)};
 }
@@ -132,9 +126,6 @@ GlobalStageResult PlanSurfaceGlobal(const PlanningRequest& input,
 GlobalStageResult PlanSurfaceGlobal(const PlanningRequest& input,
                                     SearchControl control,
                                     const double inflation_m) {
-  if (control.deadline != SteadyClock::time_point::max()) {
-    control.deadline -= kGlobalBackendReturnReserve;
-  }
   if (!input.world.global_map.has_value()) {
     return Failure("INVALID_INPUT");
   }

@@ -85,11 +85,25 @@ diagnostic_msgs::msg::DiagnosticArray MakeRequestDiagnostics(
   add_value("platform_type", PlatformType(platform_type));
   add_value("environment_mode", std::to_string(static_cast<std::uint8_t>(environment_mode)));
   add_value("planning_outcome", std::to_string(fields.outcome));
-  add_value("reason_code", fields.reason);
+  add_value("reason_code",
+            result.reason_code.empty() ? fields.reason : result.reason_code);
+  add_value("latency_class", std::string{
+      lunar::pure_planning::RequestLatencyClassName(
+          lunar::pure_planning::ClassifyRequestLatency(
+              result.timing.total_elapsed))});
+  add_value("snapshot_projection_elapsed_ms",
+            Milliseconds(result.timing.snapshot_projection_elapsed));
   add_value("global_elapsed_ms", Milliseconds(result.timing.global_elapsed));
   add_value("global_call_count", std::to_string(result.timing.global_call_count));
+  add_value("local_goal_elapsed_ms",
+            Milliseconds(result.timing.local_goal_elapsed));
+  add_value("local_search_elapsed_ms",
+            Milliseconds(result.timing.local_search_elapsed));
   add_value("local_elapsed_ms", Milliseconds(result.timing.local_elapsed));
   add_value("local_call_count", std::to_string(result.timing.local_call_count));
+  add_value("certification_elapsed_ms",
+            Milliseconds(result.timing.certification_elapsed));
+  add_value("output_elapsed_ms", Milliseconds(result.timing.output_elapsed));
   add_value("total_elapsed_ms", Milliseconds(result.timing.total_elapsed));
   diagnostic_msgs::msg::DiagnosticArray diagnostics;
   diagnostics.status.push_back(std::move(status));

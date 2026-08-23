@@ -261,6 +261,29 @@ TEST(MessageConversion, MapsTypedStatusExhaustivelyAndNeverPromotesFailureRefere
   }
 }
 
+TEST(MessageConversion, AddsWarningsAtExactTargetAndSlaMilestones) {
+  struct Case final {
+    std::chrono::milliseconds elapsed;
+    std::vector<std::string> warnings;
+  };
+  for (const Case& test_case : {
+           Case{999ms, {}},
+           Case{1000ms, {"TARGET_MISSED"}},
+           Case{1999ms, {"TARGET_MISSED"}},
+           Case{2000ms, {"TARGET_MISSED", "PLANNING_SLA_MISSED"}},
+           Case{2999ms, {"TARGET_MISSED", "PLANNING_SLA_MISSED"}},
+           Case{3000ms, {"TARGET_MISSED", "PLANNING_SLA_MISSED"}},
+         }) {
+    auto source = Result(PlanningStatus::kSuccess, WheelReference());
+    source.timing.total_elapsed = test_case.elapsed;
+
+    const auto converted = ConvertResult(source, 1U);
+
+    EXPECT_EQ(converted.diagnostics.warning_codes, test_case.warnings)
+        << test_case.elapsed.count();
+  }
+}
+
 TEST(MessageConversion, ConvertsWheelAndLeggedReferencesLosslesslyInMapFrame) {
   for (const auto platform : {lunar::pure_planning::PlatformType::kWheeled,
                               lunar::pure_planning::PlatformType::kLegged}) {

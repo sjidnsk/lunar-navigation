@@ -25,10 +25,6 @@ namespace {
 
 using namespace std::chrono_literals;
 
-constexpr auto kTotalBudget = 1s;
-constexpr auto kGlobalBudget = 150ms;
-constexpr auto kOutputReserve = 50ms;
-
 [[nodiscard]] SteadyClock::time_point ReadNow(const NowFn& now) {
   return now ? now() : SteadyClock::now();
 }
@@ -99,12 +95,15 @@ constexpr auto kOutputReserve = 50ms;
 
 [[nodiscard]] bool FinalizeTiming(
     PlanningResult& result, const SteadyClock::time_point started,
+    const SteadyClock::time_point output_started,
     const NowFn& now, const PlannerCallTiming& timing,
     SteadyClock::time_point* const finished_at) noexcept {
   result.timing = timing;
   try {
     const SteadyClock::time_point finish = ReadNow(now);
     result.timing.total_elapsed = NonNegativeElapsed(started, finish);
+    result.timing.output_elapsed +=
+        NonNegativeElapsed(output_started, finish);
     if (finished_at != nullptr) {
       *finished_at = finish;
     }
@@ -288,26 +287,51 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
   PlannerCallTiming timing;
   SteadyClock::time_point started{};
   try {
-    started = ReadNow(input.control.now);
+    if (input.request_started_at.has_value()) {
+      started = *input.request_started_at;
+    } else {
+      started = ReadNow(input.control.now);
+    }
   } catch (...) {
     return Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
   }
-  const SteadyClock::time_point total_deadline =
-      std::min(started + kTotalBudget, input.control.deadline);
-  const SteadyClock::time_point search_deadline =
-      total_deadline - kOutputReserve;
+  const RequestTimingPolicy policy = MakeRequestTimingPolicy(started);
+  SteadyClock::time_point phase_started = started;
+
+  const auto report_progress = [&](const PlannerPhase phase,
+                                   const std::chrono::nanoseconds elapsed) {
+    if (input.progress) {
+      input.progress(PlannerProgress{.phase = phase, .elapsed = elapsed});
+    }
+  };
+
+  const auto finish_phase = [&](std::chrono::nanoseconds& elapsed,
+                                const PlannerPhase phase) {
+    const auto phase_finished = ReadNow(input.control.now);
+    elapsed += NonNegativeElapsed(phase_started, phase_finished);
+    phase_started = phase_finished;
+    report_progress(phase, elapsed);
+  };
 
   const auto finish = [&](PlanningResult result) {
     SteadyClock::time_point finished_at{};
-    if (!FinalizeTiming(result, started, input.control.now, timing,
+    if (!FinalizeTiming(result, started, phase_started, input.control.now, timing,
                         &finished_at)) {
       PlanningResult error =
           Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
       error.timing = timing;
       return error;
     }
-    if (result.status == PlanningStatus::kSuccess &&
-        finished_at >= total_deadline) {
+    try {
+      report_progress(PlannerPhase::kOutput, result.timing.output_elapsed);
+    } catch (...) {
+      PlanningResult error =
+          Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
+      error.timing = result.timing;
+      return error;
+    }
+    if (result.status != PlanningStatus::kCanceled &&
+        finished_at >= policy.hard_deadline) {
       PlanningResult timeout = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
       timeout.timing = result.timing;
       return timeout;
@@ -326,6 +350,8 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
         !MatchingPlatform(input) || !MinimalLocalMapValid(input.world.local_map)) {
       return finish(Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT"));
     }
+    finish_phase(timing.snapshot_projection_elapsed,
+                 PlannerPhase::kSnapshotProjection);
 
     std::optional<GlobalRoute> global_route;
     GoalRegion local_goal;
@@ -334,7 +360,7 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
         return finish(Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT"));
       }
       SearchControl global_control{
-          .deadline = std::min(started + kGlobalBudget, search_deadline),
+          .deadline = policy.hard_deadline,
           .stop_token = input.control.stop_token,
           .now = input.control.now,
       };
@@ -349,13 +375,14 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
               Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR"));
         }
       }
+      report_progress(PlannerPhase::kGlobal, timing.global_elapsed);
+      phase_started = global_finished;
       if (global.reason_code == "REQUEST_CANCELED" ||
           input.control.stop_token.stop_requested()) {
         return finish(
             Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED"));
       }
-      if (global_finished >= std::min(started + kGlobalBudget,
-                                      search_deadline)) {
+      if (global_finished >= policy.hard_deadline) {
         return finish(Failure(PlanningStatus::kTimedOut, "TIMEOUT"));
       }
       if (!global.route.has_value()) {
@@ -365,7 +392,7 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
       const auto selected = hierarchical::SelectSurfaceLocalGoal(
           input, *global_route,
           SearchControl{
-              .deadline = search_deadline,
+              .deadline = policy.hard_deadline,
               .stop_token = input.control.stop_token,
               .now = input.control.now,
           });
@@ -386,11 +413,13 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
       local_goal = *transformed;
     }
 
+    finish_phase(timing.local_goal_elapsed, PlannerPhase::kLocalGoal);
+
     if (!backends_.local) {
       return finish(Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR"));
     }
     SearchControl local_control{
-        .deadline = search_deadline,
+        .deadline = policy.hard_deadline,
         .stop_token = input.control.stop_token,
         .now = input.control.now,
     };
@@ -404,13 +433,15 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
             Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR"));
       }
     }
+    report_progress(PlannerPhase::kLocalSearch, timing.local_search_elapsed);
+    phase_started = local_finished;
     if (local.status == LocalPlanStatus::kCanceled ||
         input.control.stop_token.stop_requested()) {
       return finish(
           Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED"));
     }
     if (local.status != LocalPlanStatus::kSolved &&
-        local_finished >= search_deadline) {
+        local_finished >= policy.hard_deadline) {
       return finish(Failure(PlanningStatus::kTimedOut, "TIMEOUT"));
     }
     if (local.status != LocalPlanStatus::kSolved) {
@@ -425,20 +456,21 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
             ? hierarchical::ComposeSurfaceReference(
                   input, *global_route, std::move(*local.data),
                   SearchControl{
-                      .deadline = total_deadline,
+                      .deadline = policy.hard_deadline,
                       .stop_token = input.control.stop_token,
                       .now = input.control.now,
                   })
             : hierarchical::ComposeCaveReference(input,
                                                   std::move(*local.data),
                                                   SearchControl{
-                                                      .deadline = total_deadline,
+                                                      .deadline = policy.hard_deadline,
                                                       .stop_token = input.control.stop_token,
                                                       .now = input.control.now,
                                                   });
     if (!composed.ok()) {
       return finish(GlobalFailure(composed.reason_code));
     }
+    finish_phase(timing.certification_elapsed, PlannerPhase::kCertification);
     PlanningResult success{
         .status = PlanningStatus::kSuccess,
         .reason_code = {},

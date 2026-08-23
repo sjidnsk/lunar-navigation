@@ -44,7 +44,7 @@ using ClientGoalHandle = rclcpp_action::ClientGoalHandle<Action>;
 using ServerGoalHandle = rclcpp_action::ServerGoalHandle<Action>;
 using namespace std::chrono_literals;
 
-constexpr auto kRequestBudget = 1s;
+constexpr auto kRequestBudget = 3s;
 constexpr auto kSchedulingTolerance = 150ms;
 
 class RosEnvironment final : public ::testing::Environment {
@@ -256,11 +256,13 @@ class RunningSystem final {
 
   void PublishInputs(const bool include_global = true,
                      const double odometry_x = 0.0) {
+    // Destroyed endpoints may briefly remain in the same-process DDS graph
+    // cache, so require a live subscriber without requiring an exact count.
     ASSERT_TRUE(WaitFor([this] {
-      return local_publisher->get_subscription_count() == 1U &&
-             odometry_publisher->get_subscription_count() == 1U &&
-             tf_publisher->get_subscription_count() == 1U &&
-             global_publisher->get_subscription_count() == 1U;
+      return local_publisher->get_subscription_count() >= 1U &&
+             odometry_publisher->get_subscription_count() >= 1U &&
+             tf_publisher->get_subscription_count() >= 1U &&
+             global_publisher->get_subscription_count() >= 1U;
     }));
     for (std::size_t attempt = 0U; attempt < 3U; ++attempt) {
       if (include_global) {
@@ -302,7 +304,7 @@ class RunningSystem final {
   ClientGoalHandle::WrappedResult Result(
       const ClientGoalHandle::SharedPtr& handle) {
     auto future = action_client->async_get_result(handle);
-    EXPECT_EQ(future.wait_for(3s), std::future_status::ready);
+    EXPECT_EQ(future.wait_for(5s), std::future_status::ready);
     return future.get();
   }
 
@@ -474,7 +476,7 @@ std::set<std::string> SubscriptionTopics(
 void ExpectTenKeyDiagnostic(
     const diagnostic_msgs::msg::DiagnosticArray& diagnostics) {
   ASSERT_EQ(diagnostics.status.size(), 1U);
-  EXPECT_EQ(diagnostics.status.front().values.size(), 10U);
+  EXPECT_EQ(diagnostics.status.front().values.size(), 16U);
 }
 
 void ExpectBounded(const std::chrono::steady_clock::duration elapsed) {
@@ -584,18 +586,21 @@ TEST(PurePlanMotionServer, SurfaceNeedsGlobalButLavaDoesNotTouchIt) {
 }
 
 TEST(PurePlanMotionServer, PublishesSuccessfulWheelReferenceAndClearsItOnFailure) {
-  RunningSystem successful{[](const auto& request) { return Success(request); }};
-  successful.PublishInputs(false);
-  const auto success_handle = successful.SendGoal(
-      successful.Goal("publish-wheel-reference", Action::Goal::LAVA_TUBE));
-  ASSERT_NE(success_handle, nullptr);
-  EXPECT_EQ(successful.Result(success_handle).code,
-            rclcpp_action::ResultCode::SUCCEEDED);
-  ASSERT_TRUE(WaitFor([&] { return successful.References().size() == 1U; }));
-  const auto published = successful.References().front();
-  EXPECT_EQ(published.plan_id, "publish-wheel-reference");
-  EXPECT_EQ(published.platform_type, published.WHEELED);
-  EXPECT_FALSE(published.trajectory.points.empty());
+  {
+    RunningSystem successful{
+        [](const auto& request) { return Success(request); }};
+    successful.PublishInputs(false);
+    const auto success_handle = successful.SendGoal(
+        successful.Goal("publish-wheel-reference", Action::Goal::LAVA_TUBE));
+    ASSERT_NE(success_handle, nullptr);
+    EXPECT_EQ(successful.Result(success_handle).code,
+              rclcpp_action::ResultCode::SUCCEEDED);
+    ASSERT_TRUE(WaitFor([&] { return successful.References().size() == 1U; }));
+    const auto published = successful.References().front();
+    EXPECT_EQ(published.plan_id, "publish-wheel-reference");
+    EXPECT_EQ(published.platform_type, published.WHEELED);
+    EXPECT_FALSE(published.trajectory.points.empty());
+  }
 
   RunningSystem failed{[](const auto&) {
     return Failure(lunar::pure_planning::PlanningStatus::kNoPath, "NO_PATH");
@@ -880,7 +885,7 @@ TEST(PurePlanMotionServer,
   const double maximum_total_ms = std::chrono::duration<double, std::milli>(
                                       kRequestBudget + kSchedulingTolerance)
                                       .count();
-  EXPECT_GE(total_ms, 950.0);
+  EXPECT_GE(total_ms, 3000.0);
   EXPECT_LT(total_ms, maximum_total_ms);
   EXPECT_NEAR(result.result->diagnostics.elapsed_s * 1000.0, total_ms, 1.0);
 }
@@ -1455,6 +1460,33 @@ TEST(PurePlanMotionServer, OuterWallTimeOverridesOnlyTotalTiming) {
 }
 
 TEST(PurePlanMotionServer,
+     CertifiedResultFinalizedAfterTwoPointFiveSecondsIsPlanFoundLate) {
+  RunningSystem system{[](const auto& request) {
+    std::this_thread::sleep_for(2500ms);
+    return Success(request);
+  }};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("late_success"));
+  ASSERT_NE(handle, nullptr);
+  const auto result = system.Result(handle);
+
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_NE(result.result, nullptr);
+  EXPECT_EQ(result.result->reason_code, "PLAN_FOUND_LATE");
+  EXPECT_TRUE(result.result->has_reference);
+  EXPECT_EQ(result.result->diagnostics.warning_codes,
+            (std::vector<std::string>{"TARGET_MISSED",
+                                      "PLANNING_SLA_MISSED"}));
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
+  const auto diagnostics = system.Diagnostics().front();
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "reason_code"),
+            "PLAN_FOUND_LATE");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "latency_class"),
+            "SLA_MISSED");
+}
+
+TEST(PurePlanMotionServer,
      FinalizationCrossingAbsoluteDeadlineCommitsTimeoutWithoutReference) {
   std::atomic<std::int64_t> core_remaining_ms{-1};
   RunningSystem system{
@@ -1491,7 +1523,7 @@ TEST(PurePlanMotionServer,
             Action::Result::RESOURCE_EXHAUSTED);
   EXPECT_EQ(result.result->reason_code, "TIMEOUT");
   EXPECT_FALSE(result.result->has_reference);
-  EXPECT_GT(result.result->diagnostics.elapsed_s, 1.0);
+  EXPECT_GE(result.result->diagnostics.elapsed_s, 3.0);
   EXPECT_GT(core_remaining_ms.load(), 0);
   EXPECT_LE(core_remaining_ms.load(), 8);
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
@@ -1506,7 +1538,7 @@ TEST(PurePlanMotionServer,
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "local_call_count"), "1");
   const double total_ms =
       std::stod(FindDiagnosticValue(diagnostics, "total_elapsed_ms"));
-  EXPECT_GT(total_ms, 1000.0);
+  EXPECT_GE(total_ms, 3000.0);
   EXPECT_NEAR(result.result->diagnostics.elapsed_s * 1000.0, total_ms,
               1.0e-9);
 }

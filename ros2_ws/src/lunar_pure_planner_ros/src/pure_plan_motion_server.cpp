@@ -60,16 +60,12 @@ using GoalHandle = rclcpp_action::ServerGoalHandle<Action>;
 using namespace std::chrono_literals;
 
 constexpr std::string_view kPackageName{"lunar_pure_planner_ros"};
-constexpr auto kRequestBudget = 1s;
 
 struct RollingSurfaceParameters final {
   bool enabled{};
   double horizon_m{8.0};
   std::int64_t poll_period_ms{100};
   std::int64_t min_replan_interval_ms{500};
-  std::int64_t global_budget_ms{1000};
-  std::int64_t local_budget_ms{1000};
-  std::int64_t action_timeout_s{300};
   double max_deviation_m{2.0};
 };
 
@@ -149,12 +145,6 @@ struct RuntimeParameters final {
           node.declare_parameter<std::int64_t>("rolling_poll_period_ms", 100),
       .min_replan_interval_ms = node.declare_parameter<std::int64_t>(
           "rolling_min_replan_interval_ms", 500),
-      .global_budget_ms = node.declare_parameter<std::int64_t>(
-          "rolling_global_budget_ms", 1000),
-      .local_budget_ms = node.declare_parameter<std::int64_t>(
-          "rolling_local_budget_ms", 1000),
-      .action_timeout_s = node.declare_parameter<std::int64_t>(
-          "rolling_action_timeout_s", 300),
       .max_deviation_m =
           node.declare_parameter<double>("rolling_max_deviation_m", 2.0),
   };
@@ -165,13 +155,7 @@ struct RuntimeParameters final {
       rolling_surface.poll_period_ms < 10 ||
       rolling_surface.poll_period_ms > 10000 ||
       rolling_surface.min_replan_interval_ms < 10 ||
-      rolling_surface.min_replan_interval_ms > 10000 ||
-      rolling_surface.global_budget_ms < 1 ||
-      rolling_surface.global_budget_ms > 10000 ||
-      rolling_surface.local_budget_ms < 1 ||
-      rolling_surface.local_budget_ms > 10000 ||
-      rolling_surface.action_timeout_s < 1 ||
-      rolling_surface.action_timeout_s > 3600) {
+      rolling_surface.min_replan_interval_ms > 10000) {
     throw std::runtime_error{"PLANNER_ERROR: rolling parameter invalid"};
   }
 
@@ -232,21 +216,47 @@ struct RuntimeParameters final {
   return left && right && left.get() == right.get();
 }
 
-void SetTotalElapsed(
-    diagnostic_msgs::msg::DiagnosticArray& diagnostics,
-    const std::chrono::nanoseconds elapsed) {
+void SetDiagnosticValue(diagnostic_msgs::msg::DiagnosticArray& diagnostics,
+                        const std::string_view key, std::string value) {
   if (diagnostics.status.size() != 1U) {
     return;
   }
-  std::ostringstream value;
-  value << std::setprecision(15)
-        << std::chrono::duration<double, std::milli>(elapsed).count();
   for (auto& field : diagnostics.status.front().values) {
-    if (field.key == "total_elapsed_ms") {
-      field.value = value.str();
+    if (field.key == key) {
+      field.value = std::move(value);
       return;
     }
   }
+}
+
+void SetFinalizedTiming(
+    const std::chrono::nanoseconds elapsed,
+    lunar::pure_planning::PlanningResult& result,
+    Action::Result& action_result,
+    diagnostic_msgs::msg::DiagnosticArray& diagnostics) {
+  result.timing.total_elapsed = elapsed;
+  action_result.diagnostics.elapsed_s =
+      std::chrono::duration<double>(elapsed).count();
+  const auto latency_class =
+      lunar::pure_planning::ClassifyRequestLatency(elapsed);
+  action_result.diagnostics.warning_codes.clear();
+  if (latency_class !=
+      lunar::pure_planning::RequestLatencyClass::kTargetMet) {
+    action_result.diagnostics.warning_codes.emplace_back("TARGET_MISSED");
+  }
+  if (latency_class == lunar::pure_planning::RequestLatencyClass::kSlaMissed ||
+      latency_class ==
+          lunar::pure_planning::RequestLatencyClass::kHardTimeout) {
+    action_result.diagnostics.warning_codes.emplace_back(
+        "PLANNING_SLA_MISSED");
+  }
+  std::ostringstream milliseconds;
+  milliseconds << std::setprecision(15)
+               << std::chrono::duration<double, std::milli>(elapsed).count();
+  SetDiagnosticValue(diagnostics, "total_elapsed_ms", milliseconds.str());
+  SetDiagnosticValue(
+      diagnostics, "latency_class",
+      std::string{lunar::pure_planning::RequestLatencyClassName(latency_class)});
 }
 
 struct AppliedTrustedBridge final {
@@ -499,7 +509,7 @@ struct PurePlanMotionServer::Impl final {
     if (UseRollingSurface(goal_handle->get_goal())) {
       InputSnapshot final_snapshot;
       auto result = ExecuteRollingSurfaceWheel(
-          goal_handle->get_goal(), stop_token, started, &final_snapshot);
+          goal_handle->get_goal(), stop_token, &final_snapshot);
       try {
         ExecuteKnownResult(goal_handle, generation, started, final_snapshot,
                            std::move(result));
@@ -508,7 +518,8 @@ struct PurePlanMotionServer::Impl final {
       }
       return;
     }
-    const auto absolute_deadline = started + kRequestBudget;
+    const auto timing_policy =
+        lunar::pure_planning::MakeRequestTimingPolicy(started);
     const InputSnapshot snapshot = input_store.Capture();
     const auto request_goal = goal_handle->get_goal();
     lunar::pure_planning::PlanningResult result;
@@ -545,10 +556,11 @@ struct PurePlanMotionServer::Impl final {
               .capability = parameters.capability,
               .config = parameters.planner_config,
               .control = {
-                  .deadline = absolute_deadline,
+                  .deadline = timing_policy.hard_deadline,
                   .stop_token = stop_token,
                   .now = [] { return std::chrono::steady_clock::now(); },
               },
+              .request_started_at = started,
           };
           const auto bridge = trusted_bridge_once
                                   ? ApplyTrustedBridge(request, snapshot)
@@ -579,12 +591,6 @@ struct PurePlanMotionServer::Impl final {
       result = Failure(lunar::pure_planning::PlanningStatus::kCanceled,
                        "REQUEST_CANCELED");
       result.timing = timing;
-    } else if (result.status == lunar::pure_planning::PlanningStatus::kSuccess &&
-               std::chrono::steady_clock::now() >= absolute_deadline) {
-      const auto timing = result.timing;
-      result = Failure(lunar::pure_planning::PlanningStatus::kTimedOut,
-                       "TIMEOUT");
-      result.timing = timing;
     }
 
     try {
@@ -614,7 +620,6 @@ struct PurePlanMotionServer::Impl final {
   [[nodiscard]] lunar::pure_planning::PlanningResult ExecuteRollingSurfaceWheel(
       const std::shared_ptr<const Action::Goal>& request_goal,
       const std::stop_token stop_token,
-      const std::chrono::steady_clock::time_point started,
       InputSnapshot* const final_snapshot) {
     using lunar::pure_planning::EnvironmentMode;
     using lunar::pure_planning::PlanningRequest;
@@ -623,8 +628,9 @@ struct PurePlanMotionServer::Impl final {
     using lunar::pure_planning::Pose3;
     using lunar::pure_planning::SearchControl;
     using lunar::pure_planning::WheeledState;
-    const auto total_deadline = started +
-        std::chrono::seconds{parameters.rolling_surface.action_timeout_s};
+    const auto global_started = std::chrono::steady_clock::now();
+    const auto global_timing =
+        lunar::pure_planning::MakeRequestTimingPolicy(global_started);
     InputSnapshot snapshot = input_store.Capture();
     if (final_snapshot != nullptr) {
       *final_snapshot = snapshot;
@@ -654,12 +660,10 @@ struct PurePlanMotionServer::Impl final {
         .world = *initial_world.value,
         .capability = parameters.capability,
         .config = parameters.planner_config,
-        .control = {.deadline = std::min(
-                         total_deadline,
-                         started + std::chrono::milliseconds{
-                                       parameters.rolling_surface.global_budget_ms}),
+        .control = {.deadline = global_timing.hard_deadline,
                     .stop_token = stop_token,
                     .now = [] { return std::chrono::steady_clock::now(); }},
+        .request_started_at = global_started,
     };
     global_request.config.search.stop_after_first_solution = true;
     const auto global = lunar::pure_planning::hierarchical::PlanSurfaceGlobal(
@@ -678,10 +682,10 @@ struct PurePlanMotionServer::Impl final {
     std::optional<lunar::pure_planning::GoalRegion> active_goal;
     std::optional<PlanningResult> last_segment;
     std::uint64_t seen_local_sequence{};
-    auto last_replan = started -
+    auto last_replan = global_started -
         std::chrono::milliseconds{parameters.rolling_surface.min_replan_interval_ms};
-    while (!stop_token.stop_requested() &&
-           std::chrono::steady_clock::now() < total_deadline) {
+    while (!stop_token.stop_requested()) {
+      const auto cycle_started = std::chrono::steady_clock::now();
       snapshot = input_store.Capture();
       if (final_snapshot != nullptr) {
         *final_snapshot = snapshot;
@@ -741,14 +745,14 @@ struct PurePlanMotionServer::Impl final {
         local_request.current_state = *state.value;
         local_request.goal_map = *decision.goal;
         local_request.world = *world.value;
+        const auto cycle_timing =
+            lunar::pure_planning::MakeRequestTimingPolicy(cycle_started);
         local_request.control = {
-            .deadline = std::min(total_deadline,
-                                 std::chrono::steady_clock::now() +
-                                     std::chrono::milliseconds{
-                                         parameters.rolling_surface.local_budget_ms}),
+            .deadline = cycle_timing.hard_deadline,
             .stop_token = stop_token,
             .now = [] { return std::chrono::steady_clock::now(); },
         };
+        local_request.request_started_at = cycle_started;
         PlanningResult segment = planner(local_request);
         if (segment.status != PlanningStatus::kSuccess ||
             !segment.reference.has_value()) {
@@ -766,9 +770,7 @@ struct PurePlanMotionServer::Impl final {
       std::this_thread::sleep_for(
           std::chrono::milliseconds{parameters.rolling_surface.poll_period_ms});
     }
-    return stop_token.stop_requested()
-        ? Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED")
-        : Failure(PlanningStatus::kTimedOut, "TIMEOUT");
+    return Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED");
   }
 
   struct OutputBundle final {
@@ -784,7 +786,6 @@ struct PurePlanMotionServer::Impl final {
     const std::string_view request_id =
         request_goal ? std::string_view{request_goal->request_id}
                      : std::string_view{};
-    result.timing.total_elapsed = 0ns;
     OutputBundle output{std::move(result), {},
                         diagnostic_msgs::msg::DiagnosticArray{}};
     output.action_result = std::make_shared<Action::Result>(ConvertResult(
@@ -913,10 +914,9 @@ struct PurePlanMotionServer::Impl final {
     timeout_result.timing = normal.result.timing;
     auto timeout = MakeOutputs(std::move(timeout_result), request_goal,
                                snapshot);
-    const auto request_deadline = started +
-        (UseRollingSurface(request_goal)
-             ? std::chrono::seconds{parameters.rolling_surface.action_timeout_s}
-             : kRequestBudget);
+    const bool rolling_surface = UseRollingSurface(request_goal);
+    const auto timing_policy =
+        lunar::pure_planning::MakeRequestTimingPolicy(started);
 
     if (ContextIsValid()) {
       try {
@@ -947,19 +947,27 @@ struct PurePlanMotionServer::Impl final {
         committed = &canceled;
       }
       const auto finalized = std::chrono::steady_clock::now();
-      if (committed == &normal &&
-          normal.result.status ==
-              lunar::pure_planning::PlanningStatus::kSuccess &&
-          finalized >= request_deadline) {
-        committed = &timeout;
+      if (committed == &normal && !rolling_surface) {
+        if (finalized >= timing_policy.hard_deadline) {
+          committed = &timeout;
+        } else if (
+            finalized >= timing_policy.sla_milestone &&
+            normal.result.status ==
+                lunar::pure_planning::PlanningStatus::kSuccess &&
+            normal.result.reference.has_value()) {
+          normal.result.reason_code = "PLAN_FOUND_LATE";
+          normal.action_result->reason_code = "PLAN_FOUND_LATE";
+          SetDiagnosticValue(normal.diagnostics, "reason_code",
+                             "PLAN_FOUND_LATE");
+        }
       }
-      const auto elapsed =
-          std::chrono::duration_cast<std::chrono::nanoseconds>(
-              finalized - started);
-      committed->result.timing.total_elapsed = elapsed;
-      committed->action_result->diagnostics.elapsed_s =
-          std::chrono::duration<double>(elapsed).count();
-      SetTotalElapsed(committed->diagnostics, elapsed);
+      const auto elapsed = rolling_surface
+                               ? committed->result.timing.total_elapsed
+                               : std::chrono::duration_cast<
+                                     std::chrono::nanoseconds>(finalized -
+                                                               started);
+      SetFinalizedTiming(elapsed, committed->result,
+                         *committed->action_result, committed->diagnostics);
     }
     if (ContextIsValid()) {
       try {
