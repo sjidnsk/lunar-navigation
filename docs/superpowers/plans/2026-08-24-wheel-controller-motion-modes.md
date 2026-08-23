@@ -62,10 +62,10 @@ Run:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-colcon build --base-paths ros2_ws/src \
+colcon --log-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/log \
+  build --base-paths ros2_ws/src \
   --build-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/build \
   --install-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/install \
-  --log-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/log \
   --packages-up-to lunar_planning_msgs
 source /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/install/setup.bash
 PYTHONPATH=ros2_ws/src/lunar_pure_wheeled_controller/python:$PYTHONPATH \
@@ -241,16 +241,16 @@ Run:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-colcon build --base-paths ros2_ws/src \
+colcon --log-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/log \
+  build --base-paths ros2_ws/src \
   --build-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/build \
   --install-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/install \
-  --log-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/log \
   --packages-up-to lunar_pure_wheeled_controller
 source /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/install/setup.bash
-colcon test --base-paths ros2_ws/src \
+colcon --log-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/log \
+  test --base-paths ros2_ws/src \
   --build-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/build \
   --install-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/install \
-  --log-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/log \
   --packages-select lunar_pure_wheeled_controller --event-handlers console_direct+
 colcon test-result \
   --test-result-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/controller/build \

@@ -54,16 +54,16 @@ Subscribe to five Topics, create a `PlanMotion` Action client, check `action_ser
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-colcon build --base-paths ros2_ws/src \
+colcon --log-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/log \
+  build --base-paths ros2_ws/src \
   --build-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/build \
   --install-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/install \
-  --log-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/log \
   --packages-up-to lunar_pure_exploration_sim
 source /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/install/setup.bash
-colcon test \
+colcon --log-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/log \
+  test \
   --build-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/build \
   --install-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/install \
-  --log-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/log \
   --packages-select lunar_pure_exploration_sim --ctest-args -R run_coordinator_test
 git add ros2_ws/src/lunar_pure_exploration_sim
 git commit -m "feat: start simulation exploration after readiness"
@@ -181,10 +181,10 @@ Use `Popen(start_new_session=True)`, log externally, and in `finally` send SIGIN
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-colcon build --base-paths ros2_ws/src \
+colcon --log-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/log \
+  build --base-paths ros2_ws/src \
   --build-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/build \
   --install-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/install \
-  --log-base /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/log \
   --packages-up-to lunar_pure_exploration_sim lunar_pure_exploration_ros \
     lunar_pure_planner_ros lunar_pure_wheeled_controller
 source /home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/install/setup.bash
