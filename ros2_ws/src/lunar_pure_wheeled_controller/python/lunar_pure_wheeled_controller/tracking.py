@@ -117,11 +117,15 @@ def _clip(value: float, limit: float) -> float:
 def _is_spin_target(
     samples: tuple[TrajectorySample, ...],
     target_index: int,
-    translation_epsilon_m: float,
+    policy: TrackingPolicy,
 ) -> bool:
     predecessor = samples[target_index - 1]
     target = samples[target_index]
-    return math.hypot(target.x_m - predecessor.x_m, target.y_m - predecessor.y_m) <= translation_epsilon_m
+    return (
+        math.hypot(target.x_m - predecessor.x_m, target.y_m - predecessor.y_m)
+        <= policy.translation_epsilon_m
+        and _angle_error(target.yaw_rad, predecessor.yaw_rad) > policy.goal_yaw_tolerance_rad
+    )
 
 
 def _sample_reached(
@@ -134,7 +138,7 @@ def _sample_reached(
     position_error = math.hypot(target.x_m - state.x_m, target.y_m - state.y_m)
     if position_error > policy.goal_position_tolerance_m:
         return False
-    if _is_spin_target(samples, sample_index, policy.translation_epsilon_m):
+    if _is_spin_target(samples, sample_index, policy):
         return _angle_error(target.yaw_rad, state.yaw_rad) <= policy.goal_yaw_tolerance_rad
     return True
 
@@ -142,21 +146,21 @@ def _sample_reached(
 def _translation_sign(
     samples: tuple[TrajectorySample, ...],
     target_index: int,
-    translation_epsilon_m: float,
+    policy: TrackingPolicy,
 ) -> float | None:
     speed = samples[target_index].signed_speed_mps
     if speed != 0.0:
         return math.copysign(1.0, speed)
 
     for index in range(target_index + 1, len(samples)):
-        if _is_spin_target(samples, index, translation_epsilon_m):
+        if _is_spin_target(samples, index, policy):
             break
         speed = samples[index].signed_speed_mps
         if speed != 0.0:
             return math.copysign(1.0, speed)
 
     for index in range(target_index - 1, -1, -1):
-        if index > 0 and _is_spin_target(samples, index, translation_epsilon_m):
+        if index > 0 and _is_spin_target(samples, index, policy):
             break
         speed = samples[index].signed_speed_mps
         if speed != 0.0:
@@ -221,14 +225,6 @@ def track_trajectory(
     x = float(state.x_m)
     y = float(state.y_m)
     yaw = float(state.yaw_rad)
-    final_sample = finite_samples[-1]
-    final_distance = math.hypot(final_sample.x_m - x, final_sample.y_m - y)
-    if (
-        final_distance <= policy.goal_position_tolerance_m
-        and _angle_error(final_sample.yaw_rad, yaw) <= policy.goal_yaw_tolerance_rad
-    ):
-        return TrajectoryTrackingResult(TrackingCommand(0.0, 0.0, True, None), cursor)
-
     if min(math.hypot(sample.x_m - x, sample.y_m - y) for sample in finite_samples) > policy.max_cross_track_error_m:
         return TrajectoryTrackingResult(_stopped("PATH_DEVIATION"), cursor)
 
@@ -242,18 +238,28 @@ def track_trajectory(
         next_cursor += 1
 
     if next_cursor + 1 >= len(finite_samples):
+        final_sample = finite_samples[-1]
+        final_distance = math.hypot(final_sample.x_m - x, final_sample.y_m - y)
+        if (
+            final_distance <= policy.goal_position_tolerance_m
+            and _angle_error(final_sample.yaw_rad, yaw) <= policy.goal_yaw_tolerance_rad
+        ):
+            return TrajectoryTrackingResult(TrackingCommand(0.0, 0.0, True, None), next_cursor)
         return TrajectoryTrackingResult(_stopped("INVALID_INPUT"), next_cursor)
 
     target_index = next_cursor + 1
     target = finite_samples[target_index]
-    if _is_spin_target(finite_samples, target_index, policy.translation_epsilon_m):
+    if (
+        _is_spin_target(finite_samples, target_index, policy)
+        and _angle_error(target.yaw_rad, yaw) > policy.goal_yaw_tolerance_rad
+    ):
         angular = _clip(
             policy.spin_kp * _normalized_yaw_error(target.yaw_rad, yaw),
             policy.max_angular_radps,
         )
         return TrajectoryTrackingResult(TrackingCommand(0.0, angular, False, None), next_cursor)
 
-    direction = _translation_sign(finite_samples, target_index, policy.translation_epsilon_m)
+    direction = _translation_sign(finite_samples, target_index, policy)
     if direction is None:
         return TrajectoryTrackingResult(_stopped("INVALID_INPUT"), next_cursor)
 
