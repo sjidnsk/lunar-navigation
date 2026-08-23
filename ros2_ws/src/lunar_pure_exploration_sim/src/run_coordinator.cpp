@@ -1,6 +1,7 @@
 #include "lunar_pure_exploration_sim/run_coordinator.hpp"
 
 #include <chrono>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -17,6 +18,7 @@ geometry_msgs::msg::Point32 BoundaryPoint(const float x, const float y) {
   geometry_msgs::msg::Point32 point;
   point.x = x;
   point.y = y;
+  point.z = 0.0F;
   return point;
 }
 
@@ -69,8 +71,11 @@ RunCoordinator::RunCoordinator() : RunCoordinator(rclcpp::NodeOptions{}) {}
 
 RunCoordinator::RunCoordinator(const rclcpp::NodeOptions& options)
     : rclcpp::Node("exploration_run_coordinator", options) {
-  seed_ = static_cast<std::uint64_t>(
-      declare_parameter<std::int64_t>("seed", 20260824));
+  const auto seed = declare_parameter<std::int64_t>("seed", 20260824);
+  if (seed < 0) {
+    throw std::invalid_argument{"seed must be nonnegative"};
+  }
+  seed_ = static_cast<std::uint64_t>(seed);
   const auto global_topic = declare_parameter<std::string>(
       "global_overview_topic", "/Car/T3/mapping/global_overview");
   const auto local_topic = declare_parameter<std::string>(
@@ -124,7 +129,7 @@ RunCoordinator::RunCoordinator(const rclcpp::NodeOptions& options)
 
 void RunCoordinator::PollReadiness() {
   readiness_.planner_action_ready = planner_client_->action_server_is_ready();
-  if (!readiness_.ShouldStart()) {
+  if (!readiness_.ShouldStart() || task_pub_->get_subscription_count() == 0U) {
     return;
   }
   readiness_.MarkStarted();

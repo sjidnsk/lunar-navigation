@@ -1,14 +1,54 @@
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <gtest/gtest.h>
 #include <rclcpp/time.hpp>
+#include <rclcpp_action/create_server.hpp>
 
 #include "lunar_pure_exploration_sim/run_coordinator.hpp"
 
 namespace lunar::pure_exploration_sim {
 namespace {
+
+using Action = lunar_planning_msgs::action::PlanMotion;
+using Task = lunar_pure_exploration_msgs::msg::PureExplorationTask;
+using namespace std::chrono_literals;
+
+class RosContextTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    if (!rclcpp::ok()) {
+      rclcpp::init(0, nullptr);
+    }
+  }
+
+  static void TearDownTestSuite() {
+    if (rclcpp::ok()) {
+      rclcpp::shutdown();
+    }
+  }
+};
+
+template <typename Predicate>
+bool SpinUntil(rclcpp::executors::SingleThreadedExecutor& executor,
+               Predicate&& predicate,
+               const std::chrono::milliseconds timeout = 3s) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    executor.spin_some();
+    if (predicate()) {
+      return true;
+    }
+    std::this_thread::sleep_for(2ms);
+  }
+  executor.spin_some();
+  return predicate();
+}
 
 CoordinatorReadiness FullyReady() {
   CoordinatorReadiness readiness;
@@ -68,6 +108,9 @@ TEST(CoordinatorReadinessTest, BuildsExactApprovedStartTask) {
   EXPECT_FLOAT_EQ(task.boundary.points[2].y, 145.0F);
   EXPECT_FLOAT_EQ(task.boundary.points[3].x, -145.0F);
   EXPECT_FLOAT_EQ(task.boundary.points[3].y, 145.0F);
+  for (const auto& point : task.boundary.points) {
+    EXPECT_FLOAT_EQ(point.z, 0.0F);
+  }
 }
 
 TEST(CoordinatorReadinessTest, AcceptsOnlyTheExplorersInitialIdleStatus) {
@@ -97,6 +140,156 @@ TEST(CoordinatorReadinessTest, TfChainCanArriveAcrossMultipleMessages) {
   second.transforms[0].child_frame_id = "base_link";
   chain.Observe(second);
   EXPECT_TRUE(chain.complete());
+}
+
+TEST(CoordinatorReadinessTest, ReverseTfEdgesDoNotSatisfyRequiredChain) {
+  RequiredTfChain chain;
+  tf2_msgs::msg::TFMessage reverse;
+  reverse.transforms.resize(2U);
+  reverse.transforms[0].header.frame_id = "odom";
+  reverse.transforms[0].child_frame_id = "map";
+  reverse.transforms[1].header.frame_id = "base_link";
+  reverse.transforms[1].child_frame_id = "odom";
+
+  chain.Observe(reverse);
+
+  EXPECT_FALSE(chain.complete());
+}
+
+TEST_F(RosContextTest, RejectsNegativeSeedBeforeCreatingInterfaces) {
+  rclcpp::NodeOptions options;
+  options.parameter_overrides(
+      {rclcpp::Parameter("seed", std::int64_t{-1})});
+  EXPECT_THROW(
+      { [[maybe_unused]] auto node =
+            std::make_shared<RunCoordinator>(options); },
+      std::invalid_argument);
+}
+
+TEST_F(RosContextTest, WaitsForVolatileTaskSubscriberThenPublishesOnce) {
+  const std::string prefix = "/coordinator_delivery_test";
+  rclcpp::NodeOptions coordinator_options;
+  coordinator_options.parameter_overrides({
+      rclcpp::Parameter("seed", 41),
+      rclcpp::Parameter("global_overview_topic", prefix + "/global"),
+      rclcpp::Parameter("local_grid_map_topic", prefix + "/local"),
+      rclcpp::Parameter("odometry_topic", prefix + "/odometry"),
+      rclcpp::Parameter("tf_topic", prefix + "/tf"),
+      rclcpp::Parameter("exploration_status_topic", prefix + "/status"),
+      rclcpp::Parameter("exploration_task_topic", prefix + "/task"),
+      rclcpp::Parameter("planner_action", prefix + "/plan_motion"),
+  });
+  auto coordinator = std::make_shared<RunCoordinator>(coordinator_options);
+  auto harness = std::make_shared<rclcpp::Node>("coordinator_delivery_harness");
+  const auto reliable = rclcpp::QoS{10}.reliable();
+  const auto global_pub = harness->create_publisher<nav_msgs::msg::OccupancyGrid>(
+      prefix + "/global", reliable);
+  const auto local_pub = harness->create_publisher<grid_map_msgs::msg::GridMap>(
+      prefix + "/local", reliable);
+  const auto odometry_pub = harness->create_publisher<nav_msgs::msg::Odometry>(
+      prefix + "/odometry", reliable);
+  const auto tf_pub = harness->create_publisher<tf2_msgs::msg::TFMessage>(
+      prefix + "/tf", reliable);
+  const auto status_pub = harness->create_publisher<
+      lunar_pure_exploration_msgs::msg::PureExplorationStatus>(
+      prefix + "/status", rclcpp::QoS{1}.reliable().transient_local());
+  const auto make_action_server = [&] {
+    return rclcpp_action::create_server<Action>(
+        harness, prefix + "/plan_motion",
+        [](const rclcpp_action::GoalUUID&,
+           std::shared_ptr<const Action::Goal>) {
+          return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+        },
+        [](std::shared_ptr<rclcpp_action::ServerGoalHandle<Action>>) {
+          return rclcpp_action::CancelResponse::ACCEPT;
+        },
+        [](std::shared_ptr<rclcpp_action::ServerGoalHandle<Action>>) {});
+  };
+  auto action_server = make_action_server();
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(coordinator);
+  executor.add_node(harness);
+  ASSERT_TRUE(SpinUntil(executor, [&] {
+    return global_pub->get_subscription_count() == 1U &&
+           local_pub->get_subscription_count() == 1U &&
+           odometry_pub->get_subscription_count() == 1U &&
+           tf_pub->get_subscription_count() == 1U &&
+           status_pub->get_subscription_count() == 1U;
+  }));
+
+  nav_msgs::msg::OccupancyGrid global;
+  grid_map_msgs::msg::GridMap local;
+  nav_msgs::msg::Odometry odometry;
+  tf2_msgs::msg::TFMessage transforms;
+  transforms.transforms.resize(2U);
+  transforms.transforms[0].header.frame_id = "map";
+  transforms.transforms[0].child_frame_id = "odom";
+  transforms.transforms[1].header.frame_id = "odom";
+  transforms.transforms[1].child_frame_id = "base_link";
+  lunar_pure_exploration_msgs::msg::PureExplorationStatus status;
+  status.state = decltype(status)::IDLE;
+  global_pub->publish(global);
+  local_pub->publish(local);
+  odometry_pub->publish(odometry);
+  tf_pub->publish(transforms);
+  status_pub->publish(status);
+
+  ASSERT_TRUE(SpinUntil(executor, [&] {
+    return harness->count_publishers(prefix + "/task") == 1U;
+  }));
+  std::this_thread::sleep_for(250ms);
+  executor.spin_some();
+
+  std::vector<Task> received_tasks;
+  const auto task_sub = harness->create_subscription<Task>(
+      prefix + "/task", rclcpp::QoS{1}.reliable(),
+      [&received_tasks](Task::ConstSharedPtr message) {
+        received_tasks.push_back(*message);
+      });
+  ASSERT_TRUE(SpinUntil(executor, [&] {
+    return task_sub->get_publisher_count() == 1U;
+  }));
+  ASSERT_TRUE(SpinUntil(executor, [&] { return received_tasks.size() == 1U; }));
+  ASSERT_EQ(received_tasks.size(), 1U);
+  const auto& received = received_tasks.front();
+  EXPECT_EQ(received.header.frame_id, "map");
+  EXPECT_EQ(received.task_id, "jazzy-300m-41");
+  EXPECT_EQ(received.command, Task::START);
+  ASSERT_EQ(received.boundary.points.size(), 4U);
+  EXPECT_EQ(received.boundary.points[0].x, -145.0F);
+  EXPECT_EQ(received.boundary.points[0].y, -145.0F);
+  EXPECT_EQ(received.boundary.points[1].x, 145.0F);
+  EXPECT_EQ(received.boundary.points[1].y, -145.0F);
+  EXPECT_EQ(received.boundary.points[2].x, 145.0F);
+  EXPECT_EQ(received.boundary.points[2].y, 145.0F);
+  EXPECT_EQ(received.boundary.points[3].x, -145.0F);
+  EXPECT_EQ(received.boundary.points[3].y, 145.0F);
+  for (const auto& point : received.boundary.points) {
+    EXPECT_EQ(point.z, 0.0F);
+  }
+
+  action_server.reset();
+  for (int iteration = 0; iteration < 3; ++iteration) {
+    executor.spin_some();
+    std::this_thread::sleep_for(110ms);
+  }
+  action_server = make_action_server();
+
+  for (int iteration = 0; iteration < 5; ++iteration) {
+    global_pub->publish(global);
+    local_pub->publish(local);
+    odometry_pub->publish(odometry);
+    tf_pub->publish(transforms);
+    status_pub->publish(status);
+    executor.spin_some();
+    std::this_thread::sleep_for(110ms);
+  }
+  executor.spin_some();
+  EXPECT_EQ(received_tasks.size(), 1U);
+
+  executor.remove_node(harness);
+  executor.remove_node(coordinator);
 }
 
 }  // namespace
