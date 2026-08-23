@@ -229,6 +229,55 @@ def test_trajectory_completes_only_at_final_pose_and_yaw() -> None:
     assert not not_aligned.command.complete
 
 
+def test_trajectory_does_not_complete_at_a_closed_loop_terminal_before_cursor_progress() -> None:
+    """A terminal-pose check before ordered cursor progress must fail this test."""
+    samples = (
+        sample(0.0, 0.0, 0.0, 0.2),
+        sample(1.0, 0.0, 0.0, 0.2),
+        sample(0.0, 0.0, 0.0, 0.0),
+    )
+
+    result = track_trajectory(samples, state(0.0, 0.0, 0.0), policy(), 0)
+
+    assert not result.command.complete
+    assert result.next_cursor == 0
+    assert result.command.linear_x_mps > 0.0
+
+
+def test_short_translation_within_epsilon_and_aligned_yaw_is_not_a_spin() -> None:
+    """An XY-only spin classification must fail this test."""
+    samples = (
+        sample(0.0, 0.0, 0.0, 0.2),
+        sample(0.0005, 0.0, 0.1, 0.2),
+        sample(1.0, 0.0, 0.1, 0.2),
+    )
+
+    result = track_trajectory(
+        samples,
+        state(0.0, 0.0, 0.0),
+        replace(policy(), goal_position_tolerance_m=1.0e-4),
+        0,
+    )
+
+    assert result.command.linear_x_mps > 0.0
+    assert result.command.angular_z_radps == 0.0
+
+
+def test_same_pose_same_yaw_stop_keeps_translation_continuity() -> None:
+    """A same-pose stop must not truncate the enclosing translation segment."""
+    samples = (
+        sample(0.0, 0.0, 0.0, 0.2),
+        sample(1.0, 0.0, 0.0, 0.2),
+        sample(1.0, 0.0, 0.0, 0.0),
+        sample(2.0, 0.0, 0.0, 0.2),
+    )
+
+    result = track_trajectory(samples, state(0.75, 0.0, 0.0), policy(), 1)
+
+    assert result.command.linear_x_mps > 0.0
+    assert result.command.angular_z_radps == 0.0
+
+
 @pytest.mark.parametrize("cursor", [-1, 2])
 def test_trajectory_rejects_cursor_outside_sample_bounds(cursor: int) -> None:
     """A cursor-bound mutation must fail this test."""
@@ -253,6 +302,58 @@ def test_trajectory_path_deviation_stops() -> None:
     result = track_trajectory(samples, state(0.0, 1.1, 0.0), policy(), 0)
 
     assert result.command == TrackingCommand(0.0, 0.0, False, "PATH_DEVIATION")
+
+
+def test_trajectory_positive_and_negative_linear_commands_are_bounded() -> None:
+    """A trajectory linear clamp mutation must fail this test."""
+    positive = track_trajectory(
+        (sample(0.0, 0.0, 0.0, 0.2), sample(10.0, 0.0, 0.0, 0.2)),
+        state(0.0, 0.0, 0.0),
+        replace(policy(), max_linear_mps=0.1),
+        0,
+    ).command
+    negative = track_trajectory(
+        (sample(0.0, 0.0, 0.0, -0.2), sample(-10.0, 0.0, 0.0, -0.2)),
+        state(0.0, 0.0, 0.0),
+        replace(policy(), max_linear_mps=0.1),
+        0,
+    ).command
+
+    assert 0.0 < positive.linear_x_mps <= 0.1
+    assert -0.1 <= negative.linear_x_mps < 0.0
+
+
+def test_trajectory_translation_angular_command_is_bounded() -> None:
+    """A trajectory curvature clamp mutation must fail this test."""
+    command = track_trajectory(
+        (sample(0.0, 0.0, 0.0, 0.2), sample(1.0, 1.0, 0.0, 0.2)),
+        state(0.0, 0.0, 0.0),
+        replace(policy(), max_angular_radps=0.1),
+        0,
+    ).command
+
+    assert 0.0 < command.angular_z_radps <= 0.1
+
+
+def test_trajectory_positive_and_negative_spin_commands_are_bounded() -> None:
+    """A trajectory spin clamp mutation must fail this test."""
+    positive = track_trajectory(
+        (sample(0.0, 0.0, 0.0, 0.2), sample(0.0, 0.0, math.pi / 2.0, 0.0)),
+        state(0.0, 0.0, 0.0),
+        replace(policy(), max_angular_radps=0.1),
+        0,
+    ).command
+    negative = track_trajectory(
+        (sample(0.0, 0.0, 0.0, 0.2), sample(0.0, 0.0, -math.pi / 2.0, 0.0)),
+        state(0.0, 0.0, 0.0),
+        replace(policy(), max_angular_radps=0.1),
+        0,
+    ).command
+
+    assert positive.linear_x_mps == 0.0
+    assert positive.angular_z_radps == 0.1
+    assert negative.linear_x_mps == 0.0
+    assert negative.angular_z_radps == -0.1
 
 
 def test_trajectory_command_has_no_lateral_velocity() -> None:
