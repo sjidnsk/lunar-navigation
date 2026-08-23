@@ -1,8 +1,10 @@
 #include "lunar_pure_exploration_sim/coordinated_steering_plant.hpp"
 
+#include <array>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 #include <gtest/gtest.h>
 
@@ -57,6 +59,24 @@ TEST(CoordinatedSteeringPlantTest, ReverseArcKeepsYawSignAndReversesTranslation)
   EXPECT_NEAR(reverse_left.x_m, -2.0 * std::sin(0.5), kTolerance);
   EXPECT_NEAR(reverse_left.y_m, -2.0 * (1.0 - std::cos(0.5)), kTolerance);
   EXPECT_NEAR(reverse_left.yaw_rad, 0.5, kTolerance);
+}
+
+TEST(CoordinatedSteeringPlantTest, ReverseRightArcMirrorsReverseLeftArc) {
+  const auto reverse_left = StepPlant(
+      PlantState{},
+      BodyCommand{.longitudinal_velocity_mps = -1.0, .yaw_rate_rps = 0.5},
+      0.05);
+  const auto reverse_right = StepPlant(
+      PlantState{},
+      BodyCommand{.longitudinal_velocity_mps = -1.0, .yaw_rate_rps = -0.5},
+      0.05);
+
+  EXPECT_NEAR(reverse_right.x_m, reverse_left.x_m, kTolerance);
+  EXPECT_NEAR(reverse_right.y_m, -reverse_left.y_m, kTolerance);
+  EXPECT_NEAR(reverse_right.yaw_rad, -reverse_left.yaw_rad, kTolerance);
+  EXPECT_LT(reverse_right.x_m, 0.0);
+  EXPECT_GT(reverse_right.y_m, 0.0);
+  EXPECT_LT(reverse_right.yaw_rad, 0.0);
 }
 
 TEST(CoordinatedSteeringPlantTest,
@@ -163,6 +183,55 @@ TEST(CoordinatedSteeringPlantTest, RejectsNegativeOrNonFiniteWallTime) {
                std::invalid_argument);
   EXPECT_THROW(step(std::numeric_limits<double>::infinity()),
                std::invalid_argument);
+}
+
+TEST(CoordinatedSteeringPlantTest, RejectsInvalidPlantParameters) {
+  const std::array invalid_values{
+      0.0,
+      -1.0,
+      std::numeric_limits<double>::quiet_NaN(),
+      std::numeric_limits<double>::infinity(),
+      -std::numeric_limits<double>::infinity(),
+  };
+  const auto expect_rejected = [](const PlantParameters& parameters) {
+    const auto step = [&parameters] {
+      const auto result =
+          StepPlant(PlantState{}, BodyCommand{}, 0.01, parameters);
+      static_cast<void>(result);
+    };
+    EXPECT_THROW(step(), std::invalid_argument);
+  };
+
+  for (const double value : invalid_values) {
+    SCOPED_TRACE("wheelbase_m=" + std::to_string(value));
+    auto parameters = PlantParameters{};
+    parameters.wheelbase_m = value;
+    expect_rejected(parameters);
+  }
+  for (const double value : invalid_values) {
+    SCOPED_TRACE("track_width_m=" + std::to_string(value));
+    auto parameters = PlantParameters{};
+    parameters.track_width_m = value;
+    expect_rejected(parameters);
+  }
+  for (const double value : invalid_values) {
+    SCOPED_TRACE("speed_multiplier=" + std::to_string(value));
+    auto parameters = PlantParameters{};
+    parameters.speed_multiplier = value;
+    expect_rejected(parameters);
+  }
+  for (const double value : invalid_values) {
+    SCOPED_TRACE("max_abs_velocity_mps=" + std::to_string(value));
+    auto parameters = PlantParameters{};
+    parameters.max_abs_velocity_mps = value;
+    expect_rejected(parameters);
+  }
+  for (const double value : invalid_values) {
+    SCOPED_TRACE("max_abs_yaw_rate_rps=" + std::to_string(value));
+    auto parameters = PlantParameters{};
+    parameters.max_abs_yaw_rate_rps = value;
+    expect_rejected(parameters);
+  }
 }
 
 TEST(CoordinatedSteeringPlantTest, NormalizesYawToClosedOpenPiInterval) {
