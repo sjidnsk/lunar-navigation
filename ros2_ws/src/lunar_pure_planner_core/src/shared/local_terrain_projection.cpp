@@ -4,18 +4,15 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
-#include <functional>
 #include <limits>
-#include <queue>
 #include <utility>
 #include <vector>
 
+#include "shared/cell_area_distance_transform.hpp"
 #include "shared/controlled_work.hpp"
 
 namespace lunar::pure_planning::shared {
 namespace {
-
-using QueueEntry = std::pair<double, std::size_t>;
 
 [[nodiscard]] bool IsFreeOccupancy(const float value,
                                    const float threshold) noexcept {
@@ -33,23 +30,24 @@ using QueueEntry = std::pair<double, std::size_t>;
                   .y = static_cast<std::int32_t>(index / map.width())};
 }
 
-[[nodiscard]] bool SolvePlane(const std::vector<std::array<double, 3>>& rows,
-                              const std::vector<double>& heights,
-                              std::array<double, 3>* coefficients) noexcept {
-  if (rows.size() != heights.size() || rows.size() < 3U ||
+[[nodiscard]] bool SolvePlane(
+    const std::array<std::array<double, 3>, 9>& rows,
+    const std::array<double, 9>& heights, const std::size_t sample_count,
+    std::array<double, 3>* coefficients) noexcept {
+  if (sample_count < 3U || sample_count > rows.size() ||
       coefficients == nullptr) {
     return false;
   }
   double mean_height = 0.0;
-  for (const double height : heights) {
-    mean_height += height;
+  for (std::size_t sample = 0U; sample < sample_count; ++sample) {
+    mean_height += heights[sample];
   }
-  mean_height /= static_cast<double>(heights.size());
+  mean_height /= static_cast<double>(sample_count);
   if (!std::isfinite(mean_height)) {
     return false;
   }
   std::array<std::array<double, 4>, 3> normal{};
-  for (std::size_t sample = 0U; sample < rows.size(); ++sample) {
+  for (std::size_t sample = 0U; sample < sample_count; ++sample) {
     for (std::size_t row = 0U; row < 3U; ++row) {
       normal[row][3] += rows[sample][row] *
                         (heights[sample] - mean_height);
@@ -148,10 +146,9 @@ using QueueEntry = std::pair<double, std::size_t>;
 [[nodiscard]] float EstimateRoughness(const MapSnapshot& map,
                                       const std::span<const float> elevation,
                                       const GridCell center) noexcept {
-  std::vector<std::array<double, 3>> rows;
-  std::vector<double> heights;
-  rows.reserve(9U);
-  heights.reserve(9U);
+  std::array<std::array<double, 3>, 9> rows{};
+  std::array<double, 9> heights{};
+  std::size_t sample_count = 0U;
   for (std::int32_t dy = -1; dy <= 1; ++dy) {
     for (std::int32_t dx = -1; dx <= 1; ++dx) {
       const GridCell cell{.x = center.x + dx, .y = center.y + dy};
@@ -162,24 +159,26 @@ using QueueEntry = std::pair<double, std::size_t>;
       if (!std::isfinite(height)) {
         continue;
       }
-      rows.push_back({static_cast<double>(dx) * map.resolution_m(),
-                      static_cast<double>(dy) * map.resolution_m(), 1.0});
-      heights.push_back(height);
+      rows[sample_count] = {static_cast<double>(dx) * map.resolution_m(),
+                            static_cast<double>(dy) * map.resolution_m(), 1.0};
+      heights[sample_count] = height;
+      ++sample_count;
     }
   }
   std::array<double, 3> coefficients{};
-  if (!SolvePlane(rows, heights, &coefficients)) {
+  if (!SolvePlane(rows, heights, sample_count, &coefficients)) {
     return std::numeric_limits<float>::infinity();
   }
   double squared_error = 0.0;
-  for (std::size_t sample = 0U; sample < rows.size(); ++sample) {
+  for (std::size_t sample = 0U; sample < sample_count; ++sample) {
     const double residual = heights[sample] -
                             (coefficients[0] * rows[sample][0] +
                              coefficients[1] * rows[sample][1] +
                              coefficients[2]);
     squared_error += residual * residual;
   }
-  const double roughness = std::sqrt(squared_error / rows.size());
+  const double roughness =
+      std::sqrt(squared_error / static_cast<double>(sample_count));
   return std::isfinite(roughness)
              ? static_cast<float>(roughness)
              : std::numeric_limits<float>::infinity();
@@ -224,13 +223,7 @@ LocalTerrainProjectionResult BuildLocalTerrainProjection(
     return {.reason_code = std::string{*stopped}};
   }
 
-  const double infinity = std::numeric_limits<double>::infinity();
-  std::vector<double> distance;
-  if (const auto stopped = ControlledFill(&distance, count, infinity, control);
-      stopped.has_value()) {
-    return {.reason_code = std::string{*stopped}};
-  }
-  std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<>> open;
+  std::vector<std::uint8_t> hazard_mask(count, 0U);
   for (std::size_t index = 0U; index < count; ++index) {
     if (ControlCheckDue(index)) {
       if (const auto stopped = StopReason(control); stopped.has_value()) {
@@ -240,49 +233,18 @@ LocalTerrainProjectionResult BuildLocalTerrainProjection(
     const bool free = IsFreeOccupancy(occupancy[index], occupancy_threshold);
     projection.free_with_height[index] = static_cast<std::uint8_t>(
         free && std::isfinite(elevation[index]));
-    if (IsHazard(occupancy[index], occupancy_threshold)) {
-      distance[index] = 0.0;
-      open.emplace(0.0, index);
-    }
+    hazard_mask[index] = static_cast<std::uint8_t>(
+        IsHazard(occupancy[index], occupancy_threshold));
   }
 
-  constexpr std::array<std::int32_t, 8> kDx{-1, 0, 1, -1, 1, -1, 0, 1};
-  constexpr std::array<std::int32_t, 8> kDy{-1, -1, -1, 0, 0, 1, 1, 1};
-  std::size_t expanded{};
-  while (!open.empty()) {
-    if (ControlCheckDue(expanded++)) {
-      if (const auto stopped = StopReason(control); stopped.has_value()) {
-        return {.reason_code = std::string{*stopped}};
-      }
-    }
-    const auto [current_distance, current_index] = open.top();
-    open.pop();
-    if (current_distance > distance[current_index]) {
-      continue;
-    }
-    const GridCell current = CellFromIndex(*projection.map, current_index);
-    for (std::size_t neighbor = 0U; neighbor < kDx.size(); ++neighbor) {
-      const GridCell next{.x = current.x + kDx[neighbor],
-                          .y = current.y + kDy[neighbor]};
-      if (!projection.map->InBounds(next)) {
-        continue;
-      }
-      const double step = projection.map->resolution_m() *
-                          (kDx[neighbor] != 0 && kDy[neighbor] != 0
-                               ? std::numbers::sqrt2
-                               : 1.0);
-      const std::size_t next_index = projection.map->Index(next);
-      if (current_distance + step < distance[next_index]) {
-        distance[next_index] = current_distance + step;
-        open.emplace(distance[next_index], next_index);
-      }
-    }
+  auto clearance = BuildCellAreaClearance(
+      projection.map->width(), projection.map->height(),
+      projection.map->resolution_m(), hazard_mask, control);
+  if (!clearance.ok()) {
+    return {.reason_code = std::move(clearance.reason_code)};
   }
+  projection.clearance_m = std::move(clearance.clearance_m);
 
-  if (const auto stopped = StopReason(control); stopped.has_value()) {
-    return {.reason_code = std::string{*stopped}};
-  }
-  projection.clearance_m.reserve(count);
   if (const auto stopped = StopReason(control); stopped.has_value()) {
     return {.reason_code = std::string{*stopped}};
   }
@@ -292,7 +254,6 @@ LocalTerrainProjectionResult BuildLocalTerrainProjection(
         return {.reason_code = std::string{*stopped}};
       }
     }
-    projection.clearance_m.push_back(static_cast<float>(distance[index]));
     const GridCell cell = CellFromIndex(*projection.map, index);
     projection.slope_rad[index] = EstimateSlope(*projection.map, elevation, cell);
     projection.roughness_m[index] =
