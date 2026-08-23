@@ -4,10 +4,13 @@ from dataclasses import replace
 import pytest
 
 from lunar_pure_wheeled_controller.tracking import (
+    TrackingCommand,
     TrackingPolicy,
     TrackingState,
     track_path,
+    track_trajectory,
 )
+from lunar_pure_wheeled_controller.reference import TrajectorySample
 
 
 def state(x: float, y: float, yaw: float) -> TrackingState:
@@ -22,6 +25,16 @@ def policy() -> TrackingPolicy:
         goal_position_tolerance_m=0.2,
         goal_yaw_tolerance_rad=0.2,
         max_cross_track_error_m=1.0,
+    )
+
+
+def sample(x: float, y: float, yaw: float, speed: float) -> TrajectorySample:
+    return TrajectorySample(
+        x_m=x,
+        y_m=y,
+        yaw_rad=yaw,
+        signed_speed_mps=speed,
+        yaw_rate_radps=0.0,
     )
 
 
@@ -133,3 +146,147 @@ def test_zero_tracking_policy_values_are_rejected(invalid_policy: TrackingPolicy
     command = track_path(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)), state(0.0, 0.0, 0.0), invalid_policy)
 
     assert command == type(command)(0.0, 0.0, False, "INVALID_INPUT")
+
+
+def test_reverse_trajectory_commands_negative_linear_velocity() -> None:
+    """A direction mutation that discards signed speed must fail this test."""
+    reverse_samples = (
+        sample(0.0, 0.0, 0.0, -0.2),
+        sample(-1.0, 0.0, 0.0, -0.2),
+    )
+
+    result = track_trajectory(reverse_samples, state(0.0, 0.0, 0.0), policy(), 0)
+
+    assert result.command.linear_x_mps < 0.0
+    assert result.command.angular_z_radps == 0.0
+
+
+def test_reverse_left_arc_commands_negative_angular_velocity() -> None:
+    """A curvature mutation that ignores reverse linear sign must fail this test."""
+    reverse_left_arc = (
+        sample(0.0, 0.0, 0.0, -0.2),
+        sample(-1.0, 1.0, 0.0, -0.2),
+    )
+
+    result = track_trajectory(reverse_left_arc, state(0.0, 0.0, 0.0), policy(), 0)
+
+    assert result.command.linear_x_mps < 0.0
+    assert result.command.angular_z_radps < 0.0
+
+
+def test_in_place_left_spin_has_zero_linear_and_positive_angular_velocity() -> None:
+    """A translation mutation for coincident yaw samples must fail this test."""
+    spin_left = (
+        sample(0.0, 0.0, 0.0, 0.2),
+        sample(0.0, 0.0, math.pi / 2.0, 0.0),
+    )
+
+    spin = track_trajectory(spin_left, state(0.0, 0.0, 0.0), policy(), 0).command
+
+    assert spin.linear_x_mps == 0.0
+    assert spin.angular_z_radps > 0.0
+
+
+def test_in_place_right_spin_has_zero_linear_and_negative_angular_velocity() -> None:
+    """A yaw-sign mutation must fail this test."""
+    spin_right = (
+        sample(0.0, 0.0, 0.0, 0.2),
+        sample(0.0, 0.0, -math.pi / 2.0, 0.0),
+    )
+
+    spin = track_trajectory(spin_right, state(0.0, 0.0, 0.0), policy(), 0).command
+
+    assert spin.linear_x_mps == 0.0
+    assert spin.angular_z_radps < 0.0
+
+
+def test_trajectory_cursor_advances_past_reached_intermediate_samples() -> None:
+    """A cursor mutation that retargets from the start must fail this test."""
+    samples = (
+        sample(0.0, 0.0, 0.0, 0.2),
+        sample(0.1, 0.0, 0.0, 0.2),
+        sample(0.2, 0.0, 0.0, 0.2),
+        sample(1.0, 0.0, 0.0, 0.2),
+    )
+
+    result = track_trajectory(samples, state(0.2, 0.0, 0.0), policy(), 0)
+
+    assert result.next_cursor == 2
+    assert result.command.linear_x_mps > 0.0
+
+
+def test_trajectory_completes_only_at_final_pose_and_yaw() -> None:
+    """A completion mutation that ignores final yaw must fail this test."""
+    samples = (
+        sample(0.0, 0.0, 0.0, 0.2),
+        sample(1.0, 0.0, math.pi / 2.0, 0.0),
+    )
+
+    result = track_trajectory(samples, state(1.0, 0.0, math.pi / 2.0), policy(), 0)
+    not_aligned = track_trajectory(samples, state(1.0, 0.0, 0.0), policy(), 0)
+
+    assert result.command == TrackingCommand(0.0, 0.0, True, None)
+    assert not not_aligned.command.complete
+
+
+@pytest.mark.parametrize("cursor", [-1, 2])
+def test_trajectory_rejects_cursor_outside_sample_bounds(cursor: int) -> None:
+    """A cursor-bound mutation must fail this test."""
+    samples = (
+        sample(0.0, 0.0, 0.0, 0.2),
+        sample(1.0, 0.0, 0.0, 0.2),
+    )
+
+    result = track_trajectory(samples, state(0.0, 0.0, 0.0), policy(), cursor)
+
+    assert result.command == TrackingCommand(0.0, 0.0, False, "INVALID_INPUT")
+    assert result.next_cursor == cursor
+
+
+def test_trajectory_path_deviation_stops() -> None:
+    """A path-deviation mutation must fail this test."""
+    samples = (
+        sample(0.0, 0.0, 0.0, 0.2),
+        sample(3.0, 0.0, 0.0, 0.2),
+    )
+
+    result = track_trajectory(samples, state(0.0, 1.1, 0.0), policy(), 0)
+
+    assert result.command == TrackingCommand(0.0, 0.0, False, "PATH_DEVIATION")
+
+
+def test_trajectory_command_has_no_lateral_velocity() -> None:
+    """Adding a lateral wheel command field must fail this safety-boundary test."""
+    command = track_trajectory(
+        (sample(0.0, 0.0, 0.0, 0.2), sample(1.0, 0.0, 0.0, 0.2)),
+        state(0.0, 0.0, 0.0),
+        policy(),
+        0,
+    ).command
+
+    assert not hasattr(command, "linear_y_mps")
+
+
+def test_zero_speed_terminal_translation_keeps_reverse_direction_after_spin() -> None:
+    """A zero-speed lookup crossing a spin into the forward segment must fail this test."""
+    samples = (
+        sample(0.0, 0.0, 0.0, 0.2),
+        sample(1.0, 0.0, 0.0, 0.2),
+        sample(1.0, 0.0, math.pi / 2.0, 0.0),
+        sample(1.0, -1.0, math.pi / 2.0, -0.2),
+        sample(1.0, -2.0, math.pi / 2.0, 0.0),
+    )
+
+    spin = track_trajectory(samples, state(1.0, 0.0, 0.0), policy(), 0)
+    reverse = track_trajectory(samples, state(1.0, 0.0, math.pi / 2.0), policy(), spin.next_cursor)
+    terminal_translation = track_trajectory(
+        samples,
+        state(1.0, -1.0, math.pi / 2.0),
+        policy(),
+        reverse.next_cursor,
+    )
+
+    assert spin.command.linear_x_mps == 0.0
+    assert spin.command.angular_z_radps > 0.0
+    assert reverse.command.linear_x_mps < 0.0
+    assert terminal_translation.command.linear_x_mps < 0.0
