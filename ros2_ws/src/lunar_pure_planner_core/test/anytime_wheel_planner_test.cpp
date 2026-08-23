@@ -1001,6 +1001,7 @@ TEST(WheelPlanner, DoesNotAllocateAStateForAnInvalidSweepEdge) {
   EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
   EXPECT_EQ(result.quantized_state_count, 1U);
   EXPECT_EQ(result.metrics.edge_validation_evaluations, 2U);
+  EXPECT_GE(result.broad_phase_rejects, 1U);
 }
 
 TEST(WheelPlanner, DoesNotInventTranslationForASpinOnlyCapability) {
@@ -1140,6 +1141,10 @@ TEST(WheelPlanner, UsesOrientedRectangleAndNarrowResolutionInTightCorridor) {
   EXPECT_NEAR(result.finest_xy_key_resolution_m, 0.1, 1.0e-12);
   EXPECT_EQ(result.maximum_yaw_bins, 16U);
   EXPECT_NEAR(result.trajectory.back().pose.position_m.x, 5.0, 1.0e-6);
+  EXPECT_GT(result.full_certifications, 0U);
+  ASSERT_EQ((result.trajectory.size() - 1U) % 8U, 0U);
+  EXPECT_EQ(result.returned_edge_certificate_confirmations,
+            (result.trajectory.size() - 1U) / 8U);
 }
 
 TEST(WheelPlanner, EnforcesMinimumOccupancyClearanceOutsideTheRealFootprint) {
@@ -1275,6 +1280,7 @@ TEST(WheelPlanner, EvaluatesEachExpandedStatePrimitiveOnlyOnceAcrossAraRounds) {
   EXPECT_EQ(result.metrics.edge_validation_evaluations, 3U);
   EXPECT_GE(result.edge_validation_cache_hits, 1U);
   EXPECT_GE(result.metrics.expanded_states, 2U);
+  EXPECT_EQ(result.returned_edge_certificate_confirmations, 2U);
 }
 
 TEST(WheelPlanner, RetainsContinuousStatesInsideOneQuantizedBucket) {
@@ -1924,6 +1930,57 @@ TEST(WheelPlanner, DoesNotInstantlyFlipAnOpposingInitialVelocity) {
   const WheelPlanResult result = PlanWheel(request);
 
   EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
+  EXPECT_GT(result.full_certifications, 0U);
+  EXPECT_GT(result.full_invalidations, 0U);
+}
+
+TEST(WheelPlanner, RejectsReturnedCertificateWhenRequestIdentityChanges) {
+  const TerrainFixture fixture = FlatTerrain();
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.4),
+  };
+
+  std::size_t baseline_reads = 0U;
+  WheelPlanRequest baseline = RequestTo(
+      fixture, capability, 1.4, 1.0, 0.0, Pose(1.0, 1.0));
+  baseline.local_source_sequence = 7U;
+  baseline.capability_fingerprint = 11U;
+  baseline.control.deadline = SteadyClock::time_point::max();
+  baseline.control.now = [&] {
+    ++baseline_reads;
+    return SteadyClock::time_point{};
+  };
+  const WheelPlanResult baseline_result = PlanWheel(baseline);
+  ASSERT_TRUE(baseline_result.ok()) << baseline_result.reason_code;
+  ASSERT_EQ(baseline_result.returned_edge_certificate_confirmations, 1U);
+  ASSERT_GT(baseline_result.trajectory.size(), 1U);
+  ASSERT_EQ((baseline_result.trajectory.size() - 1U) % 8U, 0U);
+  const std::size_t reconstructed_edges =
+      (baseline_result.trajectory.size() - 1U) / 8U;
+  const std::size_t reconstruction_reads = 3U + 9U * reconstructed_edges;
+  ASSERT_GT(baseline_reads, reconstruction_reads);
+  const std::size_t first_reconstruction_read =
+      baseline_reads - reconstruction_reads;
+
+  WheelPlanRequest changed = RequestTo(
+      fixture, capability, 1.4, 1.0, 0.0, Pose(1.0, 1.0));
+  changed.local_source_sequence = 7U;
+  changed.capability_fingerprint = 11U;
+  changed.control.deadline = SteadyClock::time_point::max();
+  std::size_t changed_reads = 0U;
+  changed.control.now = [&] {
+    if (changed_reads++ == first_reconstruction_read) {
+      changed.local_source_sequence = 8U;
+    }
+    return SteadyClock::time_point{};
+  };
+
+  const WheelPlanResult result = PlanWheel(changed);
+
+  EXPECT_EQ(result.status, LocalPlanStatus::kPlannerError);
+  EXPECT_EQ(result.reason_code, "WHEEL_CERTIFIED_EDGE_MISSING");
+  EXPECT_EQ(result.returned_edge_certificate_confirmations, 0U);
 }
 
 TEST(WheelPlanner, SpinProfileContinuesInitialYawVelocityWithinAcceleration) {

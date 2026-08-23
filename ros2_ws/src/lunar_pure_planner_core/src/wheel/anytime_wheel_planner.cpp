@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -50,6 +51,108 @@ constexpr std::array<double, 5U> kCostWeights{1.0, 1.0, 1.0, 1.0, 1.0};
 
 [[nodiscard]] bool Finite(const Twist3& twist) noexcept {
   return Finite(twist.linear_mps) && Finite(twist.angular_radps);
+}
+
+[[nodiscard]] std::array<std::uint64_t, 7U> PoseBits(
+    const Pose3& pose) noexcept {
+  return {
+      std::bit_cast<std::uint64_t>(pose.position_m.x),
+      std::bit_cast<std::uint64_t>(pose.position_m.y),
+      std::bit_cast<std::uint64_t>(pose.position_m.z),
+      std::bit_cast<std::uint64_t>(pose.orientation.w),
+      std::bit_cast<std::uint64_t>(pose.orientation.x),
+      std::bit_cast<std::uint64_t>(pose.orientation.y),
+      std::bit_cast<std::uint64_t>(pose.orientation.z),
+  };
+}
+
+[[nodiscard]] std::array<std::uint64_t, 6U> TwistBits(
+    const Twist3& twist) noexcept {
+  return {
+      std::bit_cast<std::uint64_t>(twist.linear_mps.x),
+      std::bit_cast<std::uint64_t>(twist.linear_mps.y),
+      std::bit_cast<std::uint64_t>(twist.linear_mps.z),
+      std::bit_cast<std::uint64_t>(twist.angular_radps.x),
+      std::bit_cast<std::uint64_t>(twist.angular_radps.y),
+      std::bit_cast<std::uint64_t>(twist.angular_radps.z),
+  };
+}
+
+void MixFingerprint(std::uint64_t* fingerprint,
+                    std::uint64_t value) noexcept {
+  if (fingerprint == nullptr) {
+    return;
+  }
+  for (std::size_t byte = 0U; byte < sizeof(value); ++byte) {
+    *fingerprint ^= value & 0xffU;
+    *fingerprint *= 1099511628211ULL;
+    value >>= 8U;
+  }
+}
+
+void MixString(std::uint64_t* fingerprint,
+               const std::string& value) noexcept {
+  MixFingerprint(fingerprint, value.size());
+  for (const unsigned char byte : value) {
+    if (fingerprint != nullptr) {
+      *fingerprint ^= byte;
+      *fingerprint *= 1099511628211ULL;
+    }
+  }
+}
+
+void MixPose(std::uint64_t* fingerprint, const Pose3& pose) noexcept {
+  for (const std::uint64_t value : PoseBits(pose)) {
+    MixFingerprint(fingerprint, value);
+  }
+}
+
+[[nodiscard]] std::uint64_t FallbackCapabilityFingerprint(
+    const WheeledCapability& capability) noexcept {
+  std::uint64_t fingerprint = 1469598103934665603ULL;
+  MixFingerprint(&fingerprint,
+                 static_cast<std::uint64_t>(PlatformType::kWheeled));
+  MixFingerprint(&fingerprint, capability.footprint_xy_m.size());
+  for (const Vec2 vertex : capability.footprint_xy_m) {
+    MixFingerprint(&fingerprint, std::bit_cast<std::uint64_t>(vertex.x));
+    MixFingerprint(&fingerprint, std::bit_cast<std::uint64_t>(vertex.y));
+  }
+  for (const double value : {
+           capability.body_extent_m.x,
+           capability.body_extent_m.y,
+           capability.body_extent_m.z,
+           capability.wheel_diameter_m,
+           capability.wheel_width_m,
+           capability.wheelbase_m,
+           capability.track_width_m,
+           capability.minimum_underbody_clearance_m,
+           capability.maximum_local_obstacle_relief_m,
+           capability.minimum_body_z_m,
+           capability.maximum_body_z_m,
+           capability.maximum_forward_speed_mps,
+           capability.maximum_reverse_speed_mps,
+           capability.maximum_spin_rate_radps,
+           capability.maximum_acceleration_mps2,
+           capability.maximum_braking_deceleration_mps2,
+           capability.maximum_yaw_acceleration_radps2,
+           capability.maximum_lateral_acceleration_mps2,
+           capability.maximum_curvature_per_m,
+           capability.maximum_slope_rad,
+           capability.minimum_clearance_m,
+       }) {
+    MixFingerprint(&fingerprint, std::bit_cast<std::uint64_t>(value));
+  }
+  MixFingerprint(&fingerprint,
+                 static_cast<std::uint64_t>(capability.allow_unsupported_gap));
+  MixFingerprint(&fingerprint, capability.motion_primitives.size());
+  for (const WheelMotionPrimitive& primitive :
+       capability.motion_primitives) {
+    MixString(&fingerprint, primitive.primitive_id);
+    MixFingerprint(&fingerprint,
+                   static_cast<std::uint64_t>(primitive.kind));
+    MixPose(&fingerprint, primitive.relative_end_pose);
+  }
+  return fingerprint == 0U ? 1U : fingerprint;
 }
 
 [[nodiscard]] bool IsForward(const WheelPrimitiveKind kind) noexcept {
@@ -602,6 +705,31 @@ struct Transition final {
   bool initial_edge{};
 };
 
+enum class EdgeCertificationKind : std::uint8_t {
+  kStartPose,
+  kFullPrimitive,
+  kScaledPrimitive,
+};
+
+struct EdgeCertificateIdentity final {
+  std::uint64_t local_source_sequence{};
+  std::uint64_t terrain_semantics_fingerprint{};
+  std::uint64_t capability_fingerprint{};
+  std::array<std::uint64_t, 7U> source_pose_bits{};
+  std::array<std::uint64_t, 7U> target_pose_bits{};
+  std::array<std::uint64_t, 6U> initial_velocity_bits{};
+  WheelMotionMode source_mode{WheelMotionMode::kStart};
+  WheelMotionMode target_mode{WheelMotionMode::kStart};
+  WheelPrimitiveKind primitive_kind{WheelPrimitiveKind::kForward};
+  EdgeCertificationKind certification_kind{
+      EdgeCertificationKind::kStartPose};
+  std::size_t primitive_stable_rank{};
+  bool initial_edge{};
+  bool pose_only{};
+
+  bool operator==(const EdgeCertificateIdentity&) const = default;
+};
+
 struct EdgeEvaluation final {
   bool valid{};
   Transition transition;
@@ -612,6 +740,13 @@ struct EdgeEvaluation final {
   double initial_speed{};
   double execution_time_s{};
   std::array<double, 5U> cost_components{};
+  EdgeCertificateIdentity certificate_identity;
+};
+
+struct BroadPhaseAssessment final {
+  bool rejected{};
+  bool interrupted{};
+  bool clearance_proven{};
 };
 
 struct PreferredEdgeRecord final {
@@ -724,8 +859,22 @@ class WheelSearchGraph final {
         goal_(goals_.front().point),
         goal_yaw_(goals_.front().yaw_rad),
         goal_yaw_tolerance_rad_(goals_.front().yaw_tolerance_rad),
-        footprint_radius_m_(CircumscribedRadius(capability_)) {
+        footprint_radius_m_(CircumscribedRadius(capability_)),
+        footprint_contains_origin_(
+            PointInPolygon(Vec2{}, capability_.footprint_xy_m)) {
     const std::size_t cell_count = map_.cell_count();
+    if (SupportsInsetDisk(capability_.footprint_xy_m)) {
+      broad_inset_radius_m_ = std::numeric_limits<double>::infinity();
+      for (std::size_t index = 0U;
+           index < capability_.footprint_xy_m.size(); ++index) {
+        broad_inset_radius_m_ = std::min(
+            broad_inset_radius_m_,
+            std::sqrt(SquaredDistanceToSegment(
+                Vec2{}, capability_.footprint_xy_m[index],
+                capability_.footprint_xy_m[
+                    (index + 1U) % capability_.footprint_xy_m.size()])));
+      }
+    }
     nodes_.reserve(std::min<std::size_t>(cell_count, 65536U));
     state_ids_.reserve(nodes_.capacity());
     const std::size_t prefix_width = map_.width() + 1U;
@@ -733,6 +882,15 @@ class WheelSearchGraph final {
     complex_terrain_integral_.assign(
         prefix_width * (map_.height() + 1U), 0U);
     hazards_by_row_.resize(map_.height());
+    terrain_semantics_fingerprint_ = 1469598103934665603ULL;
+    MixFingerprint(&terrain_semantics_fingerprint_, map_.width());
+    MixFingerprint(&terrain_semantics_fingerprint_, map_.height());
+    MixFingerprint(&terrain_semantics_fingerprint_,
+                   std::bit_cast<std::uint64_t>(map_.resolution_m()));
+    MixFingerprint(&terrain_semantics_fingerprint_,
+                   std::bit_cast<std::uint64_t>(map_.origin_m().x));
+    MixFingerprint(&terrain_semantics_fingerprint_,
+                   std::bit_cast<std::uint64_t>(map_.origin_m().y));
     const auto elevations = map_.FloatLayer("elevation");
     for (std::size_t y = 0U; y < map_.height(); ++y) {
       std::uint32_t row_hazards = 0U;
@@ -740,6 +898,8 @@ class WheelSearchGraph final {
       for (std::size_t x = 0U; x < map_.width(); ++x) {
         const std::size_t index = y * map_.width() + x;
         const bool hazard = terrain_.free_with_height[index] == 0U;
+        MixFingerprint(&terrain_semantics_fingerprint_,
+                       static_cast<std::uint64_t>(hazard));
         row_hazards += static_cast<std::uint32_t>(hazard);
         if (hazard) {
           hazards_by_row_[y].push_back(static_cast<std::int32_t>(x));
@@ -909,6 +1069,23 @@ class WheelSearchGraph final {
 
   [[nodiscard]] std::size_t validation_cache_hits() const noexcept {
     return validation_requests_ - validation_cache_.evaluation_count();
+  }
+
+  [[nodiscard]] std::size_t broad_phase_rejects() const noexcept {
+    return broad_phase_rejects_;
+  }
+
+  [[nodiscard]] std::size_t full_certifications() const noexcept {
+    return full_certifications_;
+  }
+
+  [[nodiscard]] std::size_t full_invalidations() const noexcept {
+    return full_invalidations_;
+  }
+
+  [[nodiscard]] std::size_t
+  returned_edge_certificate_confirmations() const noexcept {
+    return returned_edge_certificate_confirmations_;
   }
 
   [[nodiscard]] std::size_t quantization_alias_states() const noexcept {
@@ -1218,6 +1395,7 @@ class WheelSearchGraph final {
 
   [[nodiscard]] const EdgeEvaluation* EvaluationForEdge(
       const std::size_t source, const std::size_t target) {
+    const EdgeEvaluation* evaluation = nullptr;
     if (const auto edge = PreferredEdgeIndexForState(target);
         edge.has_value()) {
       const std::size_t expected_source =
@@ -1225,14 +1403,21 @@ class WheelSearchGraph final {
       if (source != expected_source) {
         return nullptr;
       }
-      return &certified_preferred_candidate_->edges[*edge].evaluation;
+      evaluation = &certified_preferred_candidate_->edges[*edge].evaluation;
+    } else {
+      const auto found = emitted_edges_.find(
+          StatePair{.source = source, .target = target});
+      if (found == emitted_edges_.end()) {
+        return nullptr;
+      }
+      evaluation =
+          &CachedEvaluation(found->second, [] { return EdgeEvaluation{}; });
     }
-    const auto found = emitted_edges_.find(
-        StatePair{.source = source, .target = target});
-    if (found == emitted_edges_.end()) {
+    if (!ConfirmReturnedCertificate(source, target, *evaluation)) {
       return nullptr;
     }
-    return &CachedEvaluation(found->second, [] { return EdgeEvaluation{}; });
+    ++returned_edge_certificate_confirmations_;
+    return evaluation;
   }
 
   [[nodiscard]] bool AppendTimedEdge(
@@ -1327,6 +1512,43 @@ class WheelSearchGraph final {
     return nodes_.at(state).pose;
   }
 
+  [[nodiscard]] std::optional<WheelMotionMode> ModeForAnyState(
+      const std::size_t state) const noexcept {
+    if (state < nodes_.size()) {
+      return nodes_[state].key.mode;
+    }
+    if (const auto edge = PreferredEdgeIndexForState(state);
+        edge.has_value()) {
+      return certified_preferred_candidate_->edges[*edge]
+          .evaluation.transition.target_mode;
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] bool ConfirmReturnedCertificate(
+      const std::size_t source, const std::size_t target,
+      const EdgeEvaluation& evaluation) const noexcept {
+    if (!evaluation.valid) {
+      return false;
+    }
+    const auto source_mode = ModeForAnyState(source);
+    const auto target_mode = ModeForAnyState(target);
+    if (!source_mode.has_value() || !target_mode.has_value() ||
+        *source_mode != evaluation.transition.source_mode ||
+        *target_mode != evaluation.transition.target_mode ||
+        PoseBits(PoseForState(source)) !=
+            evaluation.certificate_identity.source_pose_bits ||
+        PoseBits(PoseForState(target)) !=
+            evaluation.certificate_identity.target_pose_bits) {
+      return false;
+    }
+    return evaluation.certificate_identity == MakeCertificateIdentity(
+               evaluation.transition,
+               evaluation.certificate_identity.pose_only,
+               evaluation.certificate_identity.certification_kind,
+               evaluation.certificate_identity.primitive_stable_rank);
+  }
+
   [[nodiscard]] std::optional<std::size_t> GoalIndexForState(
       const std::size_t state) const noexcept {
     if (const auto edge = PreferredEdgeIndexForState(state);
@@ -1360,7 +1582,8 @@ class WheelSearchGraph final {
               .source = request_.start.pose,
               .target = request_.start.pose,
           };
-          return Evaluate(start, true);
+          return Evaluate(start, true, EdgeCertificationKind::kStartPose,
+                          std::numeric_limits<std::size_t>::max());
         })
         .valid;
   }
@@ -1417,7 +1640,11 @@ class WheelSearchGraph final {
       const EdgeKey edge_key{.source_state = state,
                              .primitive_index = primitive_index};
       const EdgeEvaluation& evaluation = CachedEvaluation(
-          edge_key, [&] { return Evaluate(*transition, false); });
+          edge_key, [&] {
+            return Evaluate(*transition, false,
+                            EdgeCertificationKind::kFullPrimitive,
+                            primitive_stable_rank_[primitive_index]);
+          });
       if (!evaluation.valid) {
         continue;
       }
@@ -1741,7 +1968,9 @@ class WheelSearchGraph final {
       }
       transition->initial_edge = candidate.edges.empty();
       ++preferred_validation_count_;
-      EdgeEvaluation evaluation = Evaluate(*transition, false);
+      EdgeEvaluation evaluation = Evaluate(
+          *transition, false, EdgeCertificationKind::kFullPrimitive,
+          primitive_stable_rank_[primitive_index]);
       if (!evaluation.valid) {
         return false;
       }
@@ -1815,7 +2044,9 @@ class WheelSearchGraph final {
         continue;
       }
       ++preferred_validation_count_;
-      EdgeEvaluation evaluation = Evaluate(*transition, false);
+      EdgeEvaluation evaluation = Evaluate(
+          *transition, false, EdgeCertificationKind::kScaledPrimitive,
+          primitive_stable_rank_[primitive_index]);
       if (!evaluation.valid ||
           !PoseSatisfiesGoal(evaluation.transition.target)) {
         continue;
@@ -2720,8 +2951,187 @@ class WheelSearchGraph final {
     };
   }
 
-  [[nodiscard]] EdgeEvaluation Evaluate(const Transition& transition,
-                                        const bool pose_only) const {
+  [[nodiscard]] EdgeCertificateIdentity MakeCertificateIdentity(
+      const Transition& transition, const bool pose_only,
+      const EdgeCertificationKind certification_kind,
+      const std::size_t primitive_stable_rank) const noexcept {
+    const std::uint64_t capability_fingerprint =
+        request_.capability_fingerprint != 0U
+            ? request_.capability_fingerprint
+            : FallbackCapabilityFingerprint(capability_);
+    return EdgeCertificateIdentity{
+        .local_source_sequence = request_.local_source_sequence,
+        .terrain_semantics_fingerprint = terrain_semantics_fingerprint_,
+        .capability_fingerprint = capability_fingerprint,
+        .source_pose_bits = PoseBits(transition.source),
+        .target_pose_bits = PoseBits(transition.target),
+        .initial_velocity_bits = TwistBits(request_.start.velocity),
+        .source_mode = transition.source_mode,
+        .target_mode = transition.target_mode,
+        .primitive_kind = transition.kind,
+        .certification_kind = certification_kind,
+        .primitive_stable_rank = primitive_stable_rank,
+        .initial_edge = transition.initial_edge,
+        .pose_only = pose_only,
+    };
+  }
+
+  [[nodiscard]] BroadPhaseAssessment AssessBroadPhase(
+      const Transition& transition, const bool pose_only) const {
+    BroadPhaseAssessment assessment{.clearance_proven = true};
+    if (!Finite(transition.source) || !Finite(transition.target) ||
+        !std::isfinite(transition.path_length_m) ||
+        transition.path_length_m < 0.0 ||
+        !std::isfinite(transition.yaw_delta_rad) ||
+        !std::isfinite(transition.curvature_per_m) ||
+        std::abs(transition.curvature_per_m) >
+            capability_.maximum_curvature_per_m + kTolerance ||
+        (!pose_only &&
+         (!ModeAllows(transition.source_mode, transition.kind) ||
+          transition.reverse != IsReverse(transition.kind)))) {
+      assessment.rejected = true;
+      return assessment;
+    }
+    const double swept_distance =
+        transition.path_length_m +
+        std::abs(transition.yaw_delta_rad) * footprint_radius_m_;
+    const double maximum_step = map_.resolution_m() / 4.0;
+    if (!std::isfinite(swept_distance) || swept_distance < 0.0 ||
+        !std::isfinite(maximum_step) || maximum_step <= 0.0) {
+      assessment.rejected = true;
+      return assessment;
+    }
+    const std::size_t subdivisions =
+        pose_only
+            ? 0U
+            : std::max<std::size_t>(
+                  1U, static_cast<std::size_t>(
+                          std::ceil(swept_distance / maximum_step)));
+    const double clearance_proof_threshold =
+        std::max(footprint_radius_m_ + 2.0 * map_.resolution_m(),
+                 footprint_radius_m_ + capability_.minimum_clearance_m) +
+        std::numbers::sqrt2 * 0.5 * map_.resolution_m();
+    for (std::size_t sample = 0U; sample <= subdivisions; ++sample) {
+      if (ControlInterrupted()) {
+        assessment.interrupted = true;
+        return assessment;
+      }
+      const double ratio =
+          subdivisions == 0U
+              ? 0.0
+              : static_cast<double>(sample) /
+                    static_cast<double>(subdivisions);
+      const auto pose = Interpolate(transition, ratio);
+      const auto yaw = pose.has_value()
+                           ? YawFromQuaternion(pose->orientation)
+                           : std::nullopt;
+      if (!pose.has_value() || !yaw.has_value()) {
+        assessment.rejected = true;
+        return assessment;
+      }
+      const double cosine = std::cos(*yaw);
+      const double sine = std::sin(*yaw);
+      double minimum_x = std::numeric_limits<double>::infinity();
+      double minimum_y = std::numeric_limits<double>::infinity();
+      double maximum_x = -std::numeric_limits<double>::infinity();
+      double maximum_y = -std::numeric_limits<double>::infinity();
+      for (const Vec2& vertex : capability_.footprint_xy_m) {
+        const double x = pose->position_m.x + cosine * vertex.x -
+                         sine * vertex.y;
+        const double y = pose->position_m.y + sine * vertex.x +
+                         cosine * vertex.y;
+        minimum_x = std::min(minimum_x, x);
+        minimum_y = std::min(minimum_y, y);
+        maximum_x = std::max(maximum_x, x);
+        maximum_y = std::max(maximum_y, y);
+      }
+      const double margin = capability_.minimum_clearance_m;
+      const std::int64_t minimum_cell_x = static_cast<std::int64_t>(
+          std::floor((minimum_x - margin - map_.origin_m().x) /
+                     map_.resolution_m()));
+      const std::int64_t minimum_cell_y = static_cast<std::int64_t>(
+          std::floor((minimum_y - margin - map_.origin_m().y) /
+                     map_.resolution_m()));
+      const std::int64_t maximum_cell_x = static_cast<std::int64_t>(
+          std::floor((maximum_x + margin - map_.origin_m().x) /
+                     map_.resolution_m()));
+      const std::int64_t maximum_cell_y = static_cast<std::int64_t>(
+          std::floor((maximum_y + margin - map_.origin_m().y) /
+                     map_.resolution_m()));
+      if (minimum_cell_x < 0 || minimum_cell_y < 0 ||
+          maximum_cell_x >= static_cast<std::int64_t>(map_.width()) ||
+          maximum_cell_y >= static_cast<std::int64_t>(map_.height())) {
+        assessment.rejected = true;
+        return assessment;
+      }
+      if (broad_inset_radius_m_ > kTolerance &&
+          HasHazardInCells(minimum_cell_x, minimum_cell_y, maximum_cell_x,
+                           maximum_cell_y)) {
+        const double rejection_radius =
+            broad_inset_radius_m_ + capability_.minimum_clearance_m;
+        for (std::int64_t y = minimum_cell_y; y <= maximum_cell_y; ++y) {
+          const auto& row = hazards_by_row_[static_cast<std::size_t>(y)];
+          const auto begin = std::ranges::lower_bound(
+              row, static_cast<std::int32_t>(minimum_cell_x));
+          const auto finish = std::ranges::upper_bound(
+              row, static_cast<std::int32_t>(maximum_cell_x));
+          for (auto hazard = begin; hazard != finish; ++hazard) {
+            const double cell_minimum_x =
+                map_.origin_m().x +
+                static_cast<double>(*hazard) * map_.resolution_m();
+            const double cell_minimum_y =
+                map_.origin_m().y +
+                static_cast<double>(y) * map_.resolution_m();
+            const double dx = std::max(
+                {cell_minimum_x - pose->position_m.x, 0.0,
+                 pose->position_m.x -
+                     (cell_minimum_x + map_.resolution_m())});
+            const double dy = std::max(
+                {cell_minimum_y - pose->position_m.y, 0.0,
+                 pose->position_m.y -
+                     (cell_minimum_y + map_.resolution_m())});
+            const double distance = std::hypot(dx, dy);
+            const bool intersects_inset =
+                distance <= broad_inset_radius_m_ + kTolerance;
+            const bool violates_clearance =
+                capability_.minimum_clearance_m > kTolerance &&
+                distance < rejection_radius - kTolerance;
+            if (intersects_inset || violates_clearance) {
+              assessment.rejected = true;
+              return assessment;
+            }
+          }
+        }
+      }
+      const auto center_cell = map_.PositionToCell(
+          Vec2{.x = pose->position_m.x, .y = pose->position_m.y});
+      if (!center_cell.has_value()) {
+        assessment.rejected = true;
+        return assessment;
+      }
+      const std::size_t center_index = map_.Index(*center_cell);
+      if (footprint_contains_origin_ &&
+          terrain_.free_with_height[center_index] == 0U) {
+        assessment.rejected = true;
+        return assessment;
+      }
+      const float clearance = terrain_.clearance_m[center_index];
+      assessment.clearance_proven =
+          assessment.clearance_proven &&
+          ((std::isinf(clearance) && clearance > 0.0F) ||
+           (std::isfinite(clearance) &&
+            static_cast<double>(clearance) >
+                clearance_proof_threshold + kTolerance));
+    }
+    return assessment;
+  }
+
+  [[nodiscard]] EdgeEvaluation EvaluateFullExact(
+      const Transition& transition, const bool pose_only,
+      const bool clearance_proven) const {
+    // The broad proof is useful for classifying cheap rejection, but exact
+    // clearance still supplies the certificate's cost and label ranking.
+    static_cast<void>(clearance_proven);
     EdgeEvaluation result{.transition = transition};
     if (std::abs(transition.curvature_per_m) >
         capability_.maximum_curvature_per_m + kTolerance) {
@@ -2816,7 +3226,12 @@ class WheelSearchGraph final {
           static_cast<std::int64_t>(
           std::floor((maximum_y + clearance_scan_margin - map_.origin_m().y) /
                      map_.resolution_m())));
-      if (HasHazardInCells(clearance_minimum_cell_x, clearance_minimum_cell_y,
+      // The broad clearance proof can rule out collision, but exact
+      // clearance remains part of label ranking and edge cost. Preserve that
+      // physical value while still running the terrain and dynamics stages;
+      // a broad result alone is never an emitted certificate.
+      if (HasHazardInCells(clearance_minimum_cell_x,
+                           clearance_minimum_cell_y,
                            clearance_maximum_cell_x,
                            clearance_maximum_cell_y)) {
         for (std::int64_t y = clearance_minimum_cell_y;
@@ -3028,6 +3443,29 @@ class WheelSearchGraph final {
     result.cost = pose_only ? 0.0 : EdgeCost(result);
     if (!std::isfinite(result.cost) || (!pose_only && result.cost <= 0.0)) {
       result.valid = false;
+    }
+    return result;
+  }
+
+  [[nodiscard]] EdgeEvaluation Evaluate(
+      const Transition& transition, const bool pose_only,
+      const EdgeCertificationKind certification_kind,
+      const std::size_t primitive_stable_rank) const {
+    const EdgeCertificateIdentity identity = MakeCertificateIdentity(
+        transition, pose_only, certification_kind, primitive_stable_rank);
+    const BroadPhaseAssessment broad =
+        AssessBroadPhase(transition, pose_only);
+    if (broad.rejected || broad.interrupted) {
+      broad_phase_rejects_ += static_cast<std::size_t>(broad.rejected);
+      return EdgeEvaluation{.transition = transition,
+                            .certificate_identity = identity};
+    }
+    ++full_certifications_;
+    EdgeEvaluation result =
+        EvaluateFullExact(transition, pose_only, broad.clearance_proven);
+    result.certificate_identity = identity;
+    if (!result.valid && !ControlInterrupted()) {
+      ++full_invalidations_;
     }
     return result;
   }
@@ -3635,7 +4073,9 @@ class WheelSearchGraph final {
       }
       Transition transition = *connector;
       transition.initial_edge = false;
-      const EdgeEvaluation evaluation = Evaluate(transition, false);
+      const EdgeEvaluation evaluation = Evaluate(
+          transition, false, EdgeCertificationKind::kScaledPrimitive,
+          primitive_stable_rank_[primitive_index]);
       if (evaluation.valid && PoseSatisfiesGoal(evaluation.transition.target)) {
         return true;
       }
@@ -3661,8 +4101,13 @@ class WheelSearchGraph final {
       const std::size_t goal_index, const std::size_t connector_kind,
       const std::size_t stable_primitive_index,
       std::vector<shared::GraphEdge>& edges) {
-    const EdgeEvaluation& evaluation = CachedEvaluation(
-        edge_key, [&] { return Evaluate(transition, false); });
+    const EdgeEvaluation& evaluation = CachedEvaluation(edge_key, [&] {
+      return Evaluate(
+          transition, false,
+          connector_kind == 0U ? EdgeCertificationKind::kFullPrimitive
+                               : EdgeCertificationKind::kScaledPrimitive,
+          stable_primitive_index);
+    });
     if (!evaluation.valid || !PoseSatisfiesGoal(evaluation.transition.target)) {
       return false;
     }
@@ -3786,6 +4231,9 @@ class WheelSearchGraph final {
   mutable std::optional<double> goal_yaw_;
   mutable double goal_yaw_tolerance_rad_{};
   double footprint_radius_m_{};
+  bool footprint_contains_origin_{};
+  double broad_inset_radius_m_{};
+  std::uint64_t terrain_semantics_fingerprint_{};
   double barrier_inset_radius_m_{};
   double platform_length_scale_m_{};
   double maximum_primitive_reach_m_{};
@@ -3800,6 +4248,10 @@ class WheelSearchGraph final {
   bool used_narrow_resolution_{};
   std::size_t validation_requests_{};
   mutable std::size_t preferred_validation_count_{};
+  mutable std::size_t broad_phase_rejects_{};
+  mutable std::size_t full_certifications_{};
+  mutable std::size_t full_invalidations_{};
+  mutable std::size_t returned_edge_certificate_confirmations_{};
   std::size_t preferred_builder_invocations_{};
   std::size_t quantized_state_reuses_{};
   std::size_t quantized_endpoint_aliases_{};
@@ -3910,6 +4362,11 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
         graph.maximum_active_labels_per_key();
     result.preferred_builder_invocations =
         graph.preferred_builder_invocations();
+    result.broad_phase_rejects = graph.broad_phase_rejects();
+    result.full_certifications = graph.full_certifications();
+    result.full_invalidations = graph.full_invalidations();
+    result.returned_edge_certificate_confirmations =
+        graph.returned_edge_certificate_confirmations();
     result.sweep_cell_checks = graph.sweep_cell_checks();
     result.finest_xy_key_resolution_m = graph.finest_xy_key_resolution_m();
     result.maximum_yaw_bins = graph.maximum_yaw_bins();

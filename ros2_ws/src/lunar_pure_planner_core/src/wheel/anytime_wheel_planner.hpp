@@ -55,6 +55,10 @@ struct WheelPlanResult final {
   double preferred_candidate_cost{};
   std::size_t preferred_builder_invocations{};
   std::size_t ara_search_invocations{};
+  std::size_t broad_phase_rejects{};
+  std::size_t full_certifications{};
+  std::size_t full_invalidations{};
+  std::size_t returned_edge_certificate_confirmations{};
   std::optional<std::size_t> selected_goal_index;
   std::array<double, 5U> cost_components{};
   std::array<double, 5U> cost_scales{};
