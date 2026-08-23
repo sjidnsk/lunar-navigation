@@ -93,8 +93,12 @@ colcon --log-base "$LUNAR_JAZZY_BUILD/log" build \
   --build-base "$LUNAR_JAZZY_BUILD/build" \
   --install-base "$LUNAR_JAZZY_BUILD/install" \
   --packages-up-to lunar_pure_exploration_sim lunar_pure_exploration_ros \
-    lunar_pure_planner_ros lunar_pure_wheeled_controller
+    lunar_pure_planner_ros lunar_pure_wheeled_controller \
+  --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
 ```
+
+完整场景必须使用上述优化构建；默认无优化构建可能让较难的局部搜索撞上规划器固定的 1 s 算法预算，
+形成重复的 `TIMEOUT`，不能作为完整探索验收。
 
 ### 完整运行与 RViz
 
