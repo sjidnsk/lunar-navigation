@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -36,6 +37,8 @@ REQUIRED_EXECUTABLES = {
         "lunar_pure_wheeled_controller_node.py"
     },
 }
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+SIMULATION_LAUNCH_RELATIVE = Path("launch/jazzy_300m_exploration_sim.launch.py")
 
 
 class AcceptanceError(RuntimeError):
@@ -317,15 +320,114 @@ def validate_results(output_dir: Path) -> dict[str, object]:
     return summary
 
 
-def verify_installation(start_rviz: bool) -> None:
-    if os.environ.get("ROS_DISTRO") != "jazzy":
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _cmake_cache_value(cache_path: Path, key: str) -> str:
+    try:
+        lines = cache_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise AcceptanceError(f"required CMakeCache is unavailable: {cache_path}") from error
+    matches: list[str] = []
+    for line in lines:
+        name_and_type, separator, value = line.partition("=")
+        if not separator:
+            continue
+        name, type_separator, _value_type = name_and_type.partition(":")
+        if type_separator and name == key:
+            matches.append(value)
+    if len(matches) != 1:
+        raise AcceptanceError(
+            f"CMakeCache must contain exactly one {key}: {cache_path}"
+        )
+    return matches[0]
+
+
+def verify_installation(
+    start_rviz: bool,
+    *,
+    env: dict[str, str] | None = None,
+    repository_root: Path = REPOSITORY_ROOT,
+) -> dict[str, object]:
+    command_env = os.environ.copy() if env is None else env.copy()
+    if command_env.get("ROS_DISTRO") != "jazzy":
         raise AcceptanceError("ROS_DISTRO must be jazzy after sourcing the overlay")
+    overlay_value = command_env.get("LUNAR_JAZZY_OVERLAY")
+    if not overlay_value:
+        raise AcceptanceError("LUNAR_JAZZY_OVERLAY must identify the explicit overlay setup")
+    try:
+        overlay_setup = Path(overlay_value).expanduser().resolve(strict=True)
+    except OSError as error:
+        raise AcceptanceError(
+            f"explicit overlay setup is unavailable: {overlay_value}"
+        ) from error
+    if not overlay_setup.is_file():
+        raise AcceptanceError(f"explicit overlay setup is not a file: {overlay_setup}")
+    overlay_install_root = overlay_setup.parent.resolve()
+    build_root = overlay_install_root.parent / "build"
+
+    resolved_prefixes: dict[str, str] = {}
+    package_build_types: dict[str, str] = {}
+    executable_evidence: dict[str, dict[str, dict[str, str]]] = {}
+    simulation_prefix: Path | None = None
     for package, expected in REQUIRED_EXECUTABLES.items():
-        prefix = _run_cli(["ros2", "pkg", "prefix", package], os.environ.copy(), 5.0)
+        prefix = _run_cli(["ros2", "pkg", "prefix", package], command_env, 5.0)
         if prefix.returncode != 0:
             raise AcceptanceError(f"required installed package is unavailable: {package}")
+        prefix_text = prefix.stdout.strip()
+        if not prefix_text or len(prefix_text.splitlines()) != 1:
+            raise AcceptanceError(f"required package prefix is invalid: {package}")
+        try:
+            resolved_prefix = Path(prefix_text).expanduser().resolve(strict=True)
+        except OSError as error:
+            raise AcceptanceError(
+                f"required package prefix is unavailable: {package}: {prefix_text}"
+            ) from error
+        if not resolved_prefix.is_dir() or not _is_within(
+            resolved_prefix, overlay_install_root
+        ):
+            raise AcceptanceError(
+                f"required package resolved outside explicit overlay: "
+                f"{package}: {resolved_prefix}"
+            )
+        resolved_prefixes[package] = str(resolved_prefix)
+        if package == "lunar_pure_exploration_sim":
+            simulation_prefix = resolved_prefix
+
+        cache_path = build_root / package / "CMakeCache.txt"
+        build_type = _cmake_cache_value(cache_path, "CMAKE_BUILD_TYPE")
+        cached_install_prefix = _cmake_cache_value(
+            cache_path, "CMAKE_INSTALL_PREFIX"
+        )
+        try:
+            cached_prefix = Path(cached_install_prefix).expanduser().resolve(strict=True)
+        except OSError as error:
+            raise AcceptanceError(
+                f"CMakeCache install prefix is unavailable for {package}: "
+                f"{cached_install_prefix}"
+            ) from error
+        if cached_prefix != resolved_prefix:
+            raise AcceptanceError(
+                f"CMakeCache install prefix mismatch for {package}: "
+                f"cache={cached_prefix}; resolved={resolved_prefix}"
+            )
+        package_build_types[package] = build_type
+
         listed = _run_cli(
-            ["ros2", "pkg", "executables", package], os.environ.copy(), 5.0
+            ["ros2", "pkg", "executables", package], command_env, 5.0
         )
         available = {
             line.split(maxsplit=1)[1]
@@ -337,19 +439,90 @@ def verify_installation(start_rviz: bool) -> None:
             raise AcceptanceError(
                 f"required executables are unavailable in {package}: {sorted(missing)}"
             )
-        if package == "lunar_pure_exploration_sim":
-            launch_file = (
-                Path(prefix.stdout.strip())
-                / "share/lunar_pure_exploration_sim/launch/jazzy_300m_exploration_sim.launch.py"
+        package_executables: dict[str, dict[str, str]] = {}
+        for executable in sorted(expected):
+            executable_path = (
+                resolved_prefix / "lib" / package / executable
             )
-            if not launch_file.is_file():
-                raise AcceptanceError(f"installed launch file is unavailable: {launch_file}")
+            try:
+                resolved_executable = executable_path.resolve(strict=True)
+            except OSError as error:
+                raise AcceptanceError(
+                    f"required executable path is unavailable: {executable_path}"
+                ) from error
+            if not resolved_executable.is_file() or not os.access(
+                resolved_executable, os.X_OK
+            ):
+                raise AcceptanceError(
+                    f"required executable is not executable: {resolved_executable}"
+                )
+            if not _is_within(resolved_executable, resolved_prefix):
+                raise AcceptanceError(
+                    f"required executable resolved outside package prefix: "
+                    f"{resolved_executable}"
+                )
+            package_executables[executable] = {
+                "path": str(resolved_executable),
+                "sha256": _sha256(resolved_executable),
+            }
+        executable_evidence[package] = package_executables
+
+    assert simulation_prefix is not None
+    source_launch = (repository_root / SIMULATION_LAUNCH_RELATIVE).resolve()
+    installed_launch = (
+        simulation_prefix
+        / "share/lunar_pure_exploration_sim/launch"
+        / SIMULATION_LAUNCH_RELATIVE.name
+    ).resolve()
+    if not source_launch.is_file():
+        raise AcceptanceError(f"source launch file is unavailable: {source_launch}")
+    if not installed_launch.is_file():
+        raise AcceptanceError(f"installed launch file is unavailable: {installed_launch}")
+    source_launch_hash = _sha256(source_launch)
+    installed_launch_hash = _sha256(installed_launch)
+    if source_launch_hash != installed_launch_hash:
+        raise AcceptanceError(
+            "source and installed launch file hash mismatch: "
+            f"source={source_launch_hash}; installed={installed_launch_hash}"
+        )
+
+    git_result = _run_cli(
+        ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
+        command_env,
+        5.0,
+    )
+    git_sha = git_result.stdout.strip()
+    if git_result.returncode != 0 or len(git_sha) != 40:
+        raise AcceptanceError("current worktree git SHA is unavailable")
+
+    unique_build_types = set(package_build_types.values())
+    if len(unique_build_types) != 1:
+        raise AcceptanceError(
+            f"required packages have inconsistent CMAKE_BUILD_TYPE values: "
+            f"{package_build_types}"
+        )
     if start_rviz:
         rviz = _run_cli(
-            ["ros2", "pkg", "executables", "rviz2"], os.environ.copy(), 5.0
+            ["ros2", "pkg", "executables", "rviz2"], command_env, 5.0
         )
         if rviz.returncode != 0 or "rviz2 rviz2" not in rviz.stdout:
             raise AcceptanceError("rviz2 executable is unavailable")
+    return {
+        "overlay_setup": str(overlay_setup),
+        "overlay_install_root": str(overlay_install_root),
+        "resolved_package_prefixes": resolved_prefixes,
+        "cmake_build_type": unique_build_types.pop(),
+        "package_build_types": package_build_types,
+        "worktree_git_sha": git_sha,
+        "launch_files": {
+            "source": {"path": str(source_launch), "sha256": source_launch_hash},
+            "installed": {
+                "path": str(installed_launch),
+                "sha256": installed_launch_hash,
+            },
+        },
+        "executables": executable_evidence,
+    }
 
 
 def make_run_directory(seed: int) -> tuple[Path, Path, Path]:
@@ -378,7 +551,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def run(argv: list[str]) -> int:
     args = parse_args(argv)
     start_rviz = not args.no_rviz
-    verify_installation(start_rviz)
+    installation_identity = verify_installation(start_rviz)
     run_dir, output_dir, ros_log_dir = make_run_directory(args.seed)
     reservation = reserve_empty_domain()
     env = reservation.environment.copy()
@@ -450,6 +623,7 @@ def run(argv: list[str]) -> int:
     finally:
         elapsed = time.monotonic() - started
         evidence = {
+            **installation_identity,
             "run_dir": str(run_dir),
             "domain_id": reservation.domain_id,
             "rviz_requested": start_rviz,

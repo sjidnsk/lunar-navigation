@@ -15,6 +15,11 @@ if [[ ! -r "$LUNAR_JAZZY_OVERLAY" ]]; then
   exit 2
 fi
 
+# Do not let a previously sourced ROS/workspace overlay select stale packages.
+unset AMENT_PREFIX_PATH CMAKE_PREFIX_PATH COLCON_PREFIX_PATH
+unset ROS_DISTRO ROS_VERSION ROS_PYTHON_VERSION
+unset PYTHONPATH LD_LIBRARY_PATH
+
 set +u
 source "$JAZZY_SETUP"
 source "$LUNAR_JAZZY_OVERLAY"

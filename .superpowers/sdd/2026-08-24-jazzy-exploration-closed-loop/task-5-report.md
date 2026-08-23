@@ -94,3 +94,57 @@ frontier,” so Task 5 does not weaken that rule or fabricate completion.
 Completion now depends on making the difficult local request produce a real result within
 the fixed algorithm budget (for example, after the separately scoped incremental planner
 optimization is integrated and reviewed), then rerunning this same strict operator entry.
+
+## Independent-review fix — bind runs to one overlay identity
+
+The Task 5 independent review found that executable names alone did not prove which
+workspace supplied the runtime. The operator now clears inherited ROS/workspace prefix
+variables before sourcing Jazzy and the explicit overlay. Before creating a ROS process it
+runs `ros2 pkg prefix` for every required package, resolves symlinks, and requires every
+prefix and executable to remain beneath the explicit overlay install closure. It also
+requires each corresponding package `CMakeCache.txt`, validates its
+`CMAKE_INSTALL_PREFIX`, requires a common `CMAKE_BUILD_TYPE`, checks source/installed
+launch equality, and hashes all launch and executable inputs. Missing, stale, escaped, or
+inconsistent evidence fails before launch.
+
+TDD evidence:
+
+- RED: 6 failures proved the absent inherited-overlay cleanup and provenance API.
+- GREEN: `17 passed` in the focused operator suite; combined operator checks are
+  `19 passed`.
+- Explicit negative coverage: wrong overlay, symlinked stale prefix, missing
+  `CMakeCache.txt`, and stale installed-launch hash.
+- Real fixed-overlay read-only probe passed; `git diff --check` and Python UTF-8 compile
+  passed. No planner, explorer, simulation, or controller algorithm changed.
+
+The real overlay probe recorded these values (the Git SHA is deliberately collected again
+for every future run, so `operator_evidence.json` will contain the then-current commit):
+
+- Overlay setup:
+  `/home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/install/setup.bash`
+- Overlay install root:
+  `/home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/install`
+- Resolved package prefixes:
+  - `lunar_pure_exploration_sim`: `.../install/lunar_pure_exploration_sim`
+  - `lunar_pure_planner_ros`: `.../install/lunar_pure_planner_ros`
+  - `lunar_pure_exploration_ros`: `.../install/lunar_pure_exploration_ros`
+  - `lunar_pure_wheeled_controller`: `.../install/lunar_pure_wheeled_controller`
+- Parsed `CMAKE_BUILD_TYPE`: empty string for all four packages (the current CMake
+  single-config default); the exact per-package values are retained in evidence.
+- Probe worktree Git SHA: `967f2e427c69d4a2baf7e3469303f49ff936a774`.
+- Source and installed launch SHA256:
+  `6681f84273b195ea48a7dad1ee80672f1351e017a876df273718f0a662e00724`.
+- Planner executable SHA256:
+  `4d030a8d594a2dea781083d9a88f444ddcc8f28637807a86137ddb3a91f69272`.
+- Explorer executable SHA256:
+  `58d944148f946412edb32d50686ccf85cb5e4dab8ba426910ccfcd9ca40e967b`.
+- Controller executable SHA256:
+  `ec3873303a615108287d3a86b049c9d2d1749bba905c296e24c4ab8073a5e7d5`.
+- Simulation executable SHA256 values:
+  - `simulation_node`: `f9743efca6f4df37b10211896dcb0ca8f2207998c6197a08c06b21e9a08b9f95`
+  - `run_coordinator`: `adadbc9a40d1caf6e620781f30fed90f8455736738f6a7e8bba36f56bf9f7cd0`
+  - `run_recorder`: `bc8223035fd53ab882492f57aab3cfd7f99cf5f4505f54d5bcc75c1bfbeb20bf`
+  - `simulation_hud_node`: `b0bbf86b5733a063657d6cb6c2830475a31399fa5a1d0085f2736c515aaa8ae1`
+
+These fields are written at the top level of each run's `operator_evidence.json` together
+with the existing domain, process identity, outcome, wall guard, and teardown evidence.
