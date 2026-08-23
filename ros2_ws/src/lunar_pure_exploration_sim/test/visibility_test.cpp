@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <optional>
 #include <utility>
 
@@ -109,6 +110,57 @@ TEST(VisibilityTest, PersistsGlobalKnowledgeAcrossObservations) {
             static_cast<std::size_t>(std::count(known_after_first.begin(),
                                                 known_after_first.end(), true)));
   EXPECT_FALSE(observations.IsCurrentlyVisible(scene, 5.5, 0.5));
+}
+
+TEST(VisibilityTest, RejectsAnyMaterialChangeToFrozenSensorContract) {
+  const auto scene = BuildLunarScene(20260824U);
+  const auto rejected = [&](SensorModel sensor) {
+    ObservationState observations;
+    observations.Observe(scene, Pose2{}, sensor);
+    EXPECT_FALSE(observations.IsCurrentlyVisible(scene, 1.0, 0.0));
+    EXPECT_EQ(observations.KnownGlobalCount(), 0U);
+  };
+
+  auto sensor = SensorModel{};
+  sensor.range_m = 9.9;
+  rejected(sensor);
+  sensor = SensorModel{};
+  sensor.range_m = 10.1;
+  rejected(sensor);
+  sensor = SensorModel{};
+  sensor.horizontal_fov_rad = kPi / 2.0 - 0.01;
+  rejected(sensor);
+  sensor = SensorModel{};
+  sensor.horizontal_fov_rad = kPi / 2.0 + 0.01;
+  rejected(sensor);
+  sensor = SensorModel{};
+  sensor.radial_step_m = 0.05;
+  rejected(sensor);
+  sensor = SensorModel{};
+  sensor.radial_step_m = 0.2;
+  rejected(sensor);
+  sensor = SensorModel{};
+  sensor.angular_step_rad = std::atan(0.1 / 10.0) + 0.001;
+  rejected(sensor);
+  sensor = SensorModel{};
+  sensor.range_m = std::numeric_limits<double>::quiet_NaN();
+  rejected(sensor);
+  sensor = SensorModel{};
+  sensor.horizontal_fov_rad = std::numeric_limits<double>::infinity();
+  rejected(sensor);
+  sensor = SensorModel{};
+  sensor.radial_step_m = std::numeric_limits<double>::quiet_NaN();
+  rejected(sensor);
+  sensor = SensorModel{};
+  sensor.angular_step_rad = std::numeric_limits<double>::quiet_NaN();
+  rejected(sensor);
+
+  ObservationState finer_angular_sampling;
+  sensor = SensorModel{};
+  sensor.angular_step_rad *= 0.5;
+  finer_angular_sampling.Observe(scene, Pose2{}, sensor);
+  EXPECT_TRUE(finer_angular_sampling.IsCurrentlyVisible(scene, 1.0, 0.0));
+  EXPECT_GT(finer_angular_sampling.KnownGlobalCount(), 0U);
 }
 
 }  // namespace

@@ -1,10 +1,13 @@
 #include "lunar_pure_exploration_sim/map_messages.hpp"
 
 #include <array>
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -213,6 +216,41 @@ TEST(MapMessagesTest, KeepsEveryLayerUnknownOutsideFiniteTruthDomain) {
   for (const auto& layer : message.data) {
     EXPECT_TRUE(std::isnan(layer.data[outside]));
   }
+}
+
+TEST(MapMessagesTest, CachedLocalMapConversionFitsTwentyHertzPeriod) {
+  const auto scene = BuildLunarScene(20260824U);
+  ObservationState observations;
+  observations.Observe(scene, Pose2{}, SensorModel{});
+  static_cast<void>(MakeLocalGridMap(
+      scene, observations, Pose2{}, rclcpp::Time{4, 0, RCL_ROS_TIME}));
+
+  std::vector<double> elapsed_ms;
+  elapsed_ms.reserve(7U);
+  std::size_t consumed_values = 0U;
+  for (int iteration = 0; iteration < 7; ++iteration) {
+    const auto begin = std::chrono::steady_clock::now();
+    const auto message = MakeLocalGridMap(
+        scene, observations, Pose2{},
+        rclcpp::Time{4, static_cast<std::uint32_t>(iteration), RCL_ROS_TIME});
+    const auto end = std::chrono::steady_clock::now();
+    elapsed_ms.push_back(
+        std::chrono::duration<double, std::milli>(end - begin).count());
+    consumed_values += message.data.front().data.size();
+  }
+  ASSERT_EQ(consumed_values, 7U * kLocalWidth * kLocalHeight);
+  for (std::size_t index = 0U; index < elapsed_ms.size(); ++index) {
+    std::cout << "local_map_conversion_ms[" << index
+              << "]=" << elapsed_ms[index] << '\n';
+  }
+  std::ranges::sort(elapsed_ms);
+  const double median_ms = elapsed_ms[elapsed_ms.size() / 2U];
+  const double maximum_ms = elapsed_ms.back();
+  RecordProperty("median_ms", median_ms);
+  RecordProperty("maximum_ms", maximum_ms);
+
+  EXPECT_LT(median_ms, 50.0);
+  EXPECT_LT(maximum_ms, 200.0);
 }
 
 }  // namespace

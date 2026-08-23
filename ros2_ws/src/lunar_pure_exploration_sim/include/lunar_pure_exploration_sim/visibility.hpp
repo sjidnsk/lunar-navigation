@@ -33,12 +33,23 @@ class ObservationState {
                                        std::size_t y) const noexcept;
   [[nodiscard]] std::size_t KnownGlobalCount() const noexcept;
   [[nodiscard]] const std::vector<bool>& KnownGlobalMask() const noexcept;
+  [[nodiscard]] const TruthSample* CurrentLocalSample(
+      Pose2 map_pose, std::size_t logical_x,
+      std::size_t logical_y) const noexcept;
 
  private:
+  struct CachedLocalCell {
+    bool visible{false};
+    TruthSample sample{};
+  };
+
   void MarkKnown(const LunarScene& scene, double world_x_m,
                  double world_y_m);
+  void CacheCurrentLocalCell(const LunarScene& scene, double world_x_m,
+                             double world_y_m);
 
   std::vector<bool> known_global_;
+  std::vector<CachedLocalCell> current_local_;
   Pose2 current_pose_{};
   SensorModel current_sensor_{};
   bool has_observation_{false};

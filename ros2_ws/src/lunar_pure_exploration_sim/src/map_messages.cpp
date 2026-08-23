@@ -69,6 +69,7 @@ nav_msgs::msg::OccupancyGrid MakeGlobalOverview(
 grid_map_msgs::msg::GridMap MakeLocalGridMap(
     const LunarScene& scene, const ObservationState& observations, Pose2 pose,
     const rclcpp::Time& stamp) {
+  static_cast<void>(scene);
   grid_map_msgs::msg::GridMap message;
   message.header.stamp = stamp;
   message.header.frame_id = "odom";
@@ -84,27 +85,20 @@ grid_map_msgs::msg::GridMap MakeLocalGridMap(
   message.outer_start_index = 0U;
   message.inner_start_index = 0U;
 
-  const double origin_x_m = pose.x_m - kLocalLengthM / 2.0;
-  const double origin_y_m = pose.y_m - kLocalLengthM / 2.0;
   for (std::size_t logical_y = 0U; logical_y < kLocalHeight; ++logical_y) {
-    const double world_y_m =
-        origin_y_m + (static_cast<double>(logical_y) + 0.5) *
-                         kLocalResolutionM;
     for (std::size_t logical_x = 0U; logical_x < kLocalWidth; ++logical_x) {
-      const double world_x_m =
-          origin_x_m + (static_cast<double>(logical_x) + 0.5) *
-                           kLocalResolutionM;
-      if (!observations.IsCurrentlyVisible(scene, world_x_m, world_y_m)) {
+      const TruthSample* sample =
+          observations.CurrentLocalSample(pose, logical_x, logical_y);
+      if (sample == nullptr) {
         continue;
       }
-      const TruthSample sample = scene.Sample(world_x_m, world_y_m);
       const std::size_t physical = PhysicalIndex(logical_x, logical_y);
-      message.data[0].data[physical] = sample.occupied ? 1.0F : 0.0F;
+      message.data[0].data[physical] = sample->occupied ? 1.0F : 0.0F;
       message.data[1].data[physical] =
-          static_cast<float>(sample.semantic_id);
+          static_cast<float>(sample->semantic_id);
       message.data[2].data[physical] =
-          static_cast<float>(sample.elevation_m);
-      message.data[3].data[physical] = static_cast<float>(sample.roughness);
+          static_cast<float>(sample->elevation_m);
+      message.data[3].data[physical] = static_cast<float>(sample->roughness);
     }
   }
   return message;
