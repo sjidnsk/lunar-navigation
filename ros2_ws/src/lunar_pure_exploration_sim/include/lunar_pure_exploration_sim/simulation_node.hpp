@@ -29,6 +29,7 @@ struct SimulationMessages {
   tf2_msgs::msg::TFMessage transforms;
   visualization_msgs::msg::Marker sensor_fov;
   visualization_msgs::msg::MarkerArray vehicle_markers;
+  visualization_msgs::msg::MarkerArray local_map_markers;
   nav_msgs::msg::Path actual_path;
   std_msgs::msg::Float64 sim_elapsed;
 };
@@ -80,6 +81,8 @@ class SimulationNode : public rclcpp::Node {
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr fov_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
       vehicle_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
+      local_markers_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr elapsed_pub_;
   rclcpp::TimerBase::SharedPtr timer_;

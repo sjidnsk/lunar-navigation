@@ -1,0 +1,73 @@
+Panels:
+  - Class: rviz_common/Displays
+  - Class: rviz_common/Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Enabled: true
+      Name: Ground grid
+      Plane Cell Count: 300
+      Cell Size: 1
+    - Class: rviz_default_plugins/Map
+      Enabled: true
+      Name: Persistent global overview
+      Topic: /Car/T3/mapping/global_overview
+    - Class: rviz_default_plugins/Path
+      Enabled: true
+      Name: Actual vehicle path
+      Topic: /Car/T4/simulation/actual_path
+      Line Style: Lines
+      Line Width: 0.15
+      Color: 25; 220; 80
+    - Class: rviz_default_plugins/Path
+      Enabled: true
+      Name: Active planned path
+      Topic: /Car/T4/simulation/planned_path
+      Line Style: Lines
+      Line Width: 0.20
+      Color: 255; 80; 40
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Frontiers candidates and selection
+      Topic: /Car/T4/exploration/frontiers
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: Current exploration goal
+      Topic: /Car/T4/exploration/current_goal
+      Shape: Arrow
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Coordinated steering vehicle
+      Topic: /Car/T4/simulation/vehicle_markers
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: 90 degree 10 metre FOV
+      Topic: /Car/T4/simulation/sensor_fov
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Local window and sampled elevation
+      Topic: /Car/T4/simulation/local_map_markers
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Exploration HUD attached to vehicle
+      Topic: /Car/T4/simulation/hud
+  Global Options:
+    Fixed Frame: map
+    Background Color: 18; 20; 24
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Follow exploration area
+      Scale: 35
+      Target Frame: base_link
+Window Geometry:
+  Height: 900
+  Width: 1400

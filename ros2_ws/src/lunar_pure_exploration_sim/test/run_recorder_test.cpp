@@ -437,7 +437,9 @@ TEST(RunRecorderTest, HudShowsStatusAreasPlannerTimingAndElapsedMetrics) {
   const auto markers = MakeHudMarkers(snapshot, rclcpp::Time{123, 0});
   ASSERT_EQ(markers.markers.size(), 1U);
   const auto& marker = markers.markers.front();
-  EXPECT_EQ(marker.header.frame_id, "map");
+  EXPECT_EQ(marker.header.frame_id, "base_link");
+  EXPECT_GT(marker.pose.position.z, 0.0);
+  EXPECT_GE(marker.scale.z, 0.5);
   EXPECT_EQ(marker.ns, "exploration_hud");
   EXPECT_EQ(marker.action, visualization_msgs::msg::Marker::ADD);
   EXPECT_EQ(marker.type, visualization_msgs::msg::Marker::TEXT_VIEW_FACING);

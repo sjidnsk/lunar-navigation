@@ -73,6 +73,21 @@ install(TARGETS simulation_node run_coordinator run_recorder simulation_hud_node
   DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 
+get_filename_component(
+  LUNAR_PURE_SIM_LAUNCH_SOURCE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../launch"
+  ABSOLUTE)
+get_filename_component(
+  LUNAR_PURE_SIM_RVIZ_SOURCE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../rviz"
+  ABSOLUTE)
+install(
+  FILES "${LUNAR_PURE_SIM_LAUNCH_SOURCE_DIR}/jazzy_300m_exploration_sim.launch.py"
+  DESTINATION share/${PROJECT_NAME}/launch)
+install(
+  FILES "${LUNAR_PURE_SIM_RVIZ_SOURCE_DIR}/jazzy_300m_exploration_sim.rviz"
+  DESTINATION share/${PROJECT_NAME}/rviz)
+
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 

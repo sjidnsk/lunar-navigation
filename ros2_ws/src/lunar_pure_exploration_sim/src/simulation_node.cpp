@@ -100,6 +100,8 @@ SimulationNode::SimulationNode(const rclcpp::NodeOptions& options,
       "sensor_fov_topic", "/Car/T4/simulation/sensor_fov");
   const std::string vehicle_topic = declare_parameter<std::string>(
       "vehicle_markers_topic", "/Car/T4/simulation/vehicle_markers");
+  const std::string local_markers_topic = declare_parameter<std::string>(
+      "local_map_markers_topic", "/Car/T4/simulation/local_map_markers");
   const std::string path_topic = declare_parameter<std::string>(
       "actual_path_topic", "/Car/T4/simulation/actual_path");
   const std::string elapsed_topic = declare_parameter<std::string>(
@@ -120,6 +122,8 @@ SimulationNode::SimulationNode(const rclcpp::NodeOptions& options,
       fov_topic, ReliableStateQos());
   vehicle_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
       vehicle_topic, ReliableStateQos());
+  local_markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+      local_markers_topic, ReliableStateQos());
   path_pub_ = create_publisher<nav_msgs::msg::Path>(
       path_topic, ReliableStateQos());
   elapsed_pub_ = create_publisher<std_msgs::msg::Float64>(
@@ -319,6 +323,68 @@ void SimulationNode::BuildMessages(const rclcpp::Time& stamp) {
     messages_.vehicle_markers.markers.push_back(wheel);
   }
 
+  messages_.local_map_markers.markers.clear();
+  visualization_msgs::msg::Marker window;
+  window.header.stamp = stamp;
+  window.header.frame_id = "odom";
+  window.ns = "local_map_window";
+  window.id = 0;
+  window.type = visualization_msgs::msg::Marker::LINE_STRIP;
+  window.action = visualization_msgs::msg::Marker::ADD;
+  window.pose.orientation.w = 1.0;
+  window.scale.x = 0.15;
+  window.color.r = 0.15F;
+  window.color.g = 0.90F;
+  window.color.b = 0.95F;
+  window.color.a = 1.0F;
+  constexpr double kLocalHalfLengthM = 32.0;
+  const double minimum_x = plant_state_.x_m - kLocalHalfLengthM;
+  const double maximum_x = plant_state_.x_m + kLocalHalfLengthM;
+  const double minimum_y = plant_state_.y_m - kLocalHalfLengthM;
+  const double maximum_y = plant_state_.y_m + kLocalHalfLengthM;
+  window.points = {Point(minimum_x, minimum_y, 0.05),
+                   Point(maximum_x, minimum_y, 0.05),
+                   Point(maximum_x, maximum_y, 0.05),
+                   Point(minimum_x, maximum_y, 0.05),
+                   Point(minimum_x, minimum_y, 0.05)};
+  messages_.local_map_markers.markers.push_back(std::move(window));
+
+  visualization_msgs::msg::Marker elevation;
+  elevation.header.stamp = stamp;
+  elevation.header.frame_id = "odom";
+  elevation.ns = "local_elevation";
+  elevation.id = 1;
+  elevation.type = visualization_msgs::msg::Marker::POINTS;
+  elevation.action = visualization_msgs::msg::Marker::ADD;
+  elevation.pose.orientation.w = 1.0;
+  elevation.scale.x = 0.35;
+  elevation.scale.y = 0.35;
+  elevation.color.r = 0.72F;
+  elevation.color.g = 0.70F;
+  elevation.color.b = 0.62F;
+  elevation.color.a = 0.90F;
+  constexpr std::size_t kLocalCells = 320U;
+  constexpr std::size_t kVisualizationStride = 2U;
+  constexpr double kLocalResolutionM = 0.2;
+  for (std::size_t logical_y = 0U; logical_y < kLocalCells;
+       logical_y += kVisualizationStride) {
+    for (std::size_t logical_x = 0U; logical_x < kLocalCells;
+         logical_x += kVisualizationStride) {
+      const TruthSample* sample =
+          observations_.CurrentLocalSample(pose, logical_x, logical_y);
+      if (sample == nullptr) {
+        continue;
+      }
+      elevation.points.push_back(Point(
+          minimum_x + (static_cast<double>(logical_x) + 0.5) *
+                          kLocalResolutionM,
+          minimum_y + (static_cast<double>(logical_y) + 0.5) *
+                          kLocalResolutionM,
+          sample->elevation_m + 0.08));
+    }
+  }
+  messages_.local_map_markers.markers.push_back(std::move(elevation));
+
   messages_.actual_path.header.stamp = stamp;
   messages_.actual_path.header.frame_id = "map";
   geometry_msgs::msg::PoseStamped path_pose;
@@ -336,6 +402,7 @@ void SimulationNode::PublishLatest() {
   tf_pub_->publish(messages_.transforms);
   fov_pub_->publish(messages_.sensor_fov);
   vehicle_pub_->publish(messages_.vehicle_markers);
+  local_markers_pub_->publish(messages_.local_map_markers);
   path_pub_->publish(messages_.actual_path);
   elapsed_pub_->publish(messages_.sim_elapsed);
 }

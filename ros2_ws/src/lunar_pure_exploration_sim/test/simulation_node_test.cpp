@@ -41,6 +41,7 @@ class RosContextTest : public ::testing::Test {
         rclcpp::Parameter("tf_topic", "test/tf"),
         rclcpp::Parameter("sensor_fov_topic", "test/fov"),
         rclcpp::Parameter("vehicle_markers_topic", "test/vehicle"),
+        rclcpp::Parameter("local_map_markers_topic", "test/local_markers"),
         rclcpp::Parameter("actual_path_topic", "test/path"),
         rclcpp::Parameter("sim_elapsed_topic", "test/elapsed"),
     });
@@ -115,6 +116,8 @@ TEST_F(RosContextTest, InitialSnapshotContainsObservationAndFrozenInterfaces) {
             "/Car/T4/simulation/sensor_fov");
   EXPECT_EQ(node->get_parameter("vehicle_markers_topic").as_string(),
             "/Car/T4/simulation/vehicle_markers");
+  EXPECT_EQ(node->get_parameter("local_map_markers_topic").as_string(),
+            "/Car/T4/simulation/local_map_markers");
   EXPECT_EQ(node->get_parameter("actual_path_topic").as_string(),
             "/Car/T4/simulation/actual_path");
   EXPECT_EQ(node->get_parameter("sim_elapsed_topic").as_string(),
@@ -142,6 +145,15 @@ TEST_F(RosContextTest, InitialSnapshotContainsObservationAndFrozenInterfaces) {
   EXPECT_EQ(messages.transforms.transforms[1].child_frame_id, "base_link");
   EXPECT_FALSE(messages.sensor_fov.points.empty());
   EXPECT_GE(messages.vehicle_markers.markers.size(), 5U);
+  ASSERT_EQ(messages.local_map_markers.markers.size(), 2U);
+  EXPECT_EQ(messages.local_map_markers.markers[0].ns, "local_map_window");
+  EXPECT_EQ(messages.local_map_markers.markers[0].type,
+            visualization_msgs::msg::Marker::LINE_STRIP);
+  EXPECT_EQ(messages.local_map_markers.markers[0].points.size(), 5U);
+  EXPECT_EQ(messages.local_map_markers.markers[1].ns, "local_elevation");
+  EXPECT_EQ(messages.local_map_markers.markers[1].type,
+            visualization_msgs::msg::Marker::POINTS);
+  EXPECT_FALSE(messages.local_map_markers.markers[1].points.empty());
   EXPECT_EQ(messages.actual_path.poses.size(), 1U);
   EXPECT_DOUBLE_EQ(messages.sim_elapsed.data, 0.0);
 }

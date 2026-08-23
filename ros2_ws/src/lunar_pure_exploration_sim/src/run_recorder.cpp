@@ -400,15 +400,16 @@ std::string ExplorationStateName(const std::uint8_t state) {
 visualization_msgs::msg::MarkerArray MakeHudMarkers(
     const RunSnapshot& snapshot, const rclcpp::Time& stamp) {
   visualization_msgs::msg::Marker marker;
-  marker.header.frame_id = "map";
+  marker.header.frame_id = "base_link";
   marker.header.stamp = stamp;
   marker.ns = "exploration_hud";
   marker.id = 0;
   marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
   marker.action = visualization_msgs::msg::Marker::ADD;
-  marker.pose.position.z = 4.0;
+  marker.pose.position.x = 2.0;
+  marker.pose.position.z = 2.5;
   marker.pose.orientation.w = 1.0;
-  marker.scale.z = 1.0;
+  marker.scale.z = 0.6;
   marker.color.r = 1.0F;
   marker.color.g = 1.0F;
   marker.color.b = 1.0F;

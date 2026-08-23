@@ -21,6 +21,14 @@
   <depend>tf2_msgs</depend>
   <depend>visualization_msgs</depend>
 
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>lunar_pure_exploration_ros</exec_depend>
+  <exec_depend>lunar_pure_planner_ros</exec_depend>
+  <exec_depend>lunar_pure_wheeled_controller</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+
   <test_depend>ament_cmake_gtest</test_depend>
 
   <export>
