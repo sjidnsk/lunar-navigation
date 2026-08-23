@@ -4,8 +4,11 @@ project(lunar_pure_exploration_sim LANGUAGES CXX)
 find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(grid_map_msgs REQUIRED)
+find_package(lunar_planning_msgs REQUIRED)
+find_package(lunar_pure_exploration_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
@@ -14,6 +17,7 @@ add_library(${PROJECT_NAME} SHARED
   src/coordinated_steering_plant.cpp
   src/lunar_scene.cpp
   src/map_messages.cpp
+  src/run_coordinator.cpp
   src/simulation_node.cpp
   src/visibility.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
@@ -24,8 +28,11 @@ target_include_directories(${PROJECT_NAME}
 ament_target_dependencies(${PROJECT_NAME}
   geometry_msgs
   grid_map_msgs
+  lunar_planning_msgs
+  lunar_pure_exploration_msgs
   nav_msgs
   rclcpp
+  rclcpp_action
   std_msgs
   tf2_msgs
   visualization_msgs)
@@ -34,6 +41,10 @@ add_executable(simulation_node src/simulation_main.cpp)
 target_compile_features(simulation_node PRIVATE cxx_std_20)
 target_link_libraries(simulation_node ${PROJECT_NAME})
 
+add_executable(run_coordinator src/run_coordinator_main.cpp)
+target_compile_features(run_coordinator PRIVATE cxx_std_20)
+target_link_libraries(run_coordinator ${PROJECT_NAME})
+
 install(
   TARGETS ${PROJECT_NAME}
   EXPORT export_${PROJECT_NAME}
@@ -41,7 +52,7 @@ install(
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
   INCLUDES DESTINATION include)
-install(TARGETS simulation_node DESTINATION lib/${PROJECT_NAME})
+install(TARGETS simulation_node run_coordinator DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 
 if(BUILD_TESTING)
@@ -67,14 +78,21 @@ if(BUILD_TESTING)
   ament_add_gtest(simulation_node_test test/simulation_node_test.cpp)
   target_compile_features(simulation_node_test PRIVATE cxx_std_20)
   target_link_libraries(simulation_node_test ${PROJECT_NAME})
+
+  ament_add_gtest(run_coordinator_test test/run_coordinator_test.cpp)
+  target_compile_features(run_coordinator_test PRIVATE cxx_std_20)
+  target_link_libraries(run_coordinator_test ${PROJECT_NAME})
 endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(
   geometry_msgs
   grid_map_msgs
+  lunar_planning_msgs
+  lunar_pure_exploration_msgs
   nav_msgs
   rclcpp
+  rclcpp_action
   std_msgs
   tf2_msgs
   visualization_msgs)
