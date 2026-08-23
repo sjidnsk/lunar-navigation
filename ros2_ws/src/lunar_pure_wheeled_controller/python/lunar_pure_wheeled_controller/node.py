@@ -8,9 +8,10 @@ from geometry_msgs.msg import Twist
 from lunar_planning_msgs.msg import MotionReference
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from std_msgs.msg import String
 
 from .reference import ParsedReference, parse_reference
-from .tracking import TrackingPolicy, TrackingState, track_path
+from .tracking import TrackingPolicy, TrackingState, track_path, track_trajectory
 
 
 def _yaw(odometry: Odometry) -> float | None:
@@ -51,6 +52,7 @@ class PureWheeledControllerNode(Node):
             "reference_topic": "/Car/T4/planning/wheeled_reference",
             "odometry_topic": "/Car/T3/localization/odometry",
             "command_topic": "/Car/T5/Car_Cmd_Vel",
+            "execution_cancel_topic": "/Car/T4/execution/cancel",
             "control_rate_hz": 20.0,
             "lookahead_m": 0.5,
             "max_linear_mps": 0.2,
@@ -58,12 +60,19 @@ class PureWheeledControllerNode(Node):
             "goal_position_tolerance_m": 0.2,
             "goal_yaw_tolerance_rad": 0.2,
             "max_cross_track_error_m": 1.0,
+            "spin_kp": 1.5,
+            "translation_epsilon_m": 1.0e-3,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         topics = {
             name: self._absolute_topic_name(name, self.get_parameter(name).value)
-            for name in ("reference_topic", "odometry_topic", "command_topic")
+            for name in (
+                "reference_topic",
+                "odometry_topic",
+                "command_topic",
+                "execution_cancel_topic",
+            )
         }
         self._policy = TrackingPolicy(**{
             name: float(self.get_parameter(name).value)
@@ -74,12 +83,15 @@ class PureWheeledControllerNode(Node):
                 "goal_position_tolerance_m",
                 "goal_yaw_tolerance_rad",
                 "max_cross_track_error_m",
+                "spin_kp",
+                "translation_epsilon_m",
             )
         })
         control_rate_hz = float(self.get_parameter("control_rate_hz").value)
         if not isfinite(control_rate_hz) or control_rate_hz <= 0.0:
             raise ValueError("control_rate_hz must be finite and greater than zero")
         self._active: ParsedReference | None = None
+        self._trajectory_cursor = 0
         self._odometry: Odometry | None = None
         self._commands = self.create_publisher(
             Twist, topics["command_topic"], 10
@@ -94,6 +106,12 @@ class PureWheeledControllerNode(Node):
             Odometry,
             topics["odometry_topic"],
             self._on_odometry,
+            10,
+        )
+        self.create_subscription(
+            String,
+            topics["execution_cancel_topic"],
+            self._on_cancel,
             10,
         )
         self.create_timer(1.0 / control_rate_hz, self._tick)
@@ -111,6 +129,13 @@ class PureWheeledControllerNode(Node):
             self._publish_twist()
             return
         self._active = parsed
+        self._trajectory_cursor = 0
+
+    def _on_cancel(self, message: String) -> None:
+        if self._active is not None and message.data == self._active.plan_id:
+            self._active = None
+            self._trajectory_cursor = 0
+            self._publish_twist()
 
     def _on_odometry(self, odometry: Odometry) -> None:
         if _yaw(odometry) is None:
@@ -129,11 +154,22 @@ class PureWheeledControllerNode(Node):
             self._publish_twist()
             return
         position = self._odometry.pose.pose.position
-        command = track_path(
-            self._active.path_xy_yaw,
-            TrackingState(position.x, position.y, yaw),
-            self._policy,
-        )
+        state = TrackingState(position.x, position.y, yaw)
+        if self._active.trajectory_samples:
+            result = track_trajectory(
+                self._active.trajectory_samples,
+                state,
+                self._policy,
+                self._trajectory_cursor,
+            )
+            self._trajectory_cursor = result.next_cursor
+            command = result.command
+        else:
+            command = track_path(
+                self._active.path_xy_yaw,
+                state,
+                self._policy,
+            )
         self._publish_twist(command.linear_x_mps, command.angular_z_radps)
         if command.complete or command.failure_reason is not None:
             self._active = None
