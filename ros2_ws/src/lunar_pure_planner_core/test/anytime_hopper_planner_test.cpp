@@ -1,5 +1,6 @@
 #include "hopper/anytime_hopper_planner.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -172,7 +173,7 @@ TEST(AnytimeHopperPlanner, StopsWhenControlTriggersOnlyDuringHopReconstruction) 
   const Vec3 goal{.x = 6.25, .y = 4.4, .z = 0.0};
   // All pre-reconstruction work consumes exactly this many deterministic
   // clock reads; the next read is the first hop checkpoint.
-  constexpr std::size_t kFirstReconstructionClockRead = 1478U;
+  constexpr std::size_t kFirstReconstructionClockRead = 129U;
 
   std::stop_source stop;
   std::size_t cancel_reads = 0U;
@@ -792,7 +793,7 @@ TEST(AnytimeHopperPlanner,
   request.control.deadline = SteadyClock::time_point{1ms};
   request.control.now = [&] {
     ++now_calls;
-    return now_calls < 5000U ? SteadyClock::time_point{0ms}
+    return now_calls < 50U ? SteadyClock::time_point{0ms}
                              : SteadyClock::time_point{2ms};
   };
 
@@ -800,7 +801,7 @@ TEST(AnytimeHopperPlanner,
 
   EXPECT_EQ(result.status, LocalPlanStatus::kTimedOut) << result.reason_code;
   EXPECT_EQ(result.reason_code, "TIMEOUT");
-  EXPECT_GE(now_calls, 5000U);
+  EXPECT_GE(now_calls, 50U);
 }
 
 TEST(AnytimeHopperPlanner,

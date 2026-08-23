@@ -375,6 +375,7 @@ SurfaceGlobalSearchResult SearchSurfaceGlobal(
           .start_state = index_of(problem.start),
           .expand = [view, &map, resolution_m, index_of](
                         const std::size_t id,
+                        const double,
                         std::vector<shared::GraphEdge>& edges) {
             const GridCell current = CellFromIndex(map, id);
             for (std::size_t offset = 0U; offset < kEightNeighbors.size(); ++offset) {

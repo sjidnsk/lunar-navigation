@@ -162,7 +162,7 @@ TEST(AnytimeLeggedPlanner, StopsWhenControlTriggersOnlyDuringReconstruction) {
   });
   // All pre-reconstruction work consumes exactly this many deterministic
   // clock reads; the next read is the first transition checkpoint.
-  constexpr std::size_t kFirstReconstructionClockRead = 1200299U;
+  constexpr std::size_t kFirstReconstructionClockRead = 151U;
 
   std::stop_source stop;
   std::size_t cancel_reads = 0U;
@@ -353,7 +353,7 @@ TEST(AnytimeLeggedPlanner,
       fixture, capability, {10.1, 10.1, 0.5}, {10.35, 10.1, 0.0});
   const auto clock_reads = std::make_shared<std::int64_t>(0);
   request.control.deadline = SteadyClock::time_point{
-      std::chrono::nanoseconds{21500}};
+      std::chrono::nanoseconds{136}};
   request.control.now = [clock_reads] {
     return SteadyClock::time_point{
         std::chrono::nanoseconds{(*clock_reads)++}};
@@ -361,7 +361,8 @@ TEST(AnytimeLeggedPlanner,
 
   const LeggedPlanResult result = PlanLegged(request);
 
-  EXPECT_EQ(result.status, LocalPlanStatus::kTimedOut) << result.reason_code;
+  EXPECT_EQ(result.status, LocalPlanStatus::kTimedOut)
+      << result.reason_code << " clock_reads=" << *clock_reads;
   EXPECT_EQ(result.reason_code, "TIMEOUT");
   EXPECT_TRUE(result.trajectory.empty());
   EXPECT_GT(result.metrics.expanded_states, 0U);

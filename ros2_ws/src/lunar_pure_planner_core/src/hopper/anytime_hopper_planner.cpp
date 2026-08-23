@@ -946,6 +946,7 @@ HopperPlanResult PlanHopper(const HopperPlanRequest& request) try {
               .state_count = graph.state_count(),
               .start_state = 0U,
               .expand = [&](const std::size_t state,
+                            const double,
                             std::vector<shared::GraphEdge>& edges) {
                 graph.Expand(state, edges);
               },
