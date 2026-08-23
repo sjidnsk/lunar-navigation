@@ -1945,6 +1945,7 @@ TEST(WheelPlanner, RejectsReturnedCertificateWhenRequestIdentityChanges) {
   WheelPlanRequest baseline = RequestTo(
       fixture, capability, 1.4, 1.0, 0.0, Pose(1.0, 1.0));
   baseline.local_source_sequence = 7U;
+  baseline.local_terrain_semantics_id = 13U;
   baseline.capability_fingerprint = 11U;
   baseline.control.deadline = SteadyClock::time_point::max();
   baseline.control.now = [&] {
@@ -1966,6 +1967,7 @@ TEST(WheelPlanner, RejectsReturnedCertificateWhenRequestIdentityChanges) {
   WheelPlanRequest changed = RequestTo(
       fixture, capability, 1.4, 1.0, 0.0, Pose(1.0, 1.0));
   changed.local_source_sequence = 7U;
+  changed.local_terrain_semantics_id = 13U;
   changed.capability_fingerprint = 11U;
   changed.control.deadline = SteadyClock::time_point::max();
   std::size_t changed_reads = 0U;
@@ -1981,6 +1983,26 @@ TEST(WheelPlanner, RejectsReturnedCertificateWhenRequestIdentityChanges) {
   EXPECT_EQ(result.status, LocalPlanStatus::kPlannerError);
   EXPECT_EQ(result.reason_code, "WHEEL_CERTIFIED_EDGE_MISSING");
   EXPECT_EQ(result.returned_edge_certificate_confirmations, 0U);
+
+  WheelPlanRequest changed_semantics = RequestTo(
+      fixture, capability, 1.4, 1.0, 0.0, Pose(1.0, 1.0));
+  changed_semantics.local_source_sequence = 7U;
+  changed_semantics.local_terrain_semantics_id = 13U;
+  changed_semantics.capability_fingerprint = 11U;
+  changed_semantics.control.deadline = SteadyClock::time_point::max();
+  std::size_t semantics_reads = 0U;
+  changed_semantics.control.now = [&] {
+    if (semantics_reads++ == first_reconstruction_read) {
+      changed_semantics.local_terrain_semantics_id = 14U;
+    }
+    return SteadyClock::time_point{};
+  };
+
+  const WheelPlanResult semantics_result = PlanWheel(changed_semantics);
+
+  EXPECT_EQ(semantics_result.status, LocalPlanStatus::kPlannerError);
+  EXPECT_EQ(semantics_result.reason_code, "WHEEL_CERTIFIED_EDGE_MISSING");
+  EXPECT_EQ(semantics_result.returned_edge_certificate_confirmations, 0U);
 }
 
 TEST(WheelPlanner, SpinProfileContinuesInitialYawVelocityWithinAcceleration) {

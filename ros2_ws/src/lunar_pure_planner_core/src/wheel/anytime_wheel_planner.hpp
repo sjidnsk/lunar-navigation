@@ -28,6 +28,7 @@ struct WheelPlanRequest final {
   const shared::LocalTerrainProjection* terrain{};
   const WheeledCapability* capability{};
   std::uint64_t local_source_sequence{};
+  std::uint64_t local_terrain_semantics_id{};
   std::uint64_t capability_fingerprint{};
   std::shared_ptr<const shared::GoalDistanceField> goal_distance_field;
   SearchControl control;

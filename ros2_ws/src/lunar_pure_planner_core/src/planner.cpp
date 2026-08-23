@@ -169,10 +169,11 @@ using namespace std::chrono_literals;
   if (!snapshot.ok()) {
     return LocalControlledFailure(snapshot.reason_code);
   }
+  const auto local_projection_key = shared::MakeLocalProjectionCacheKey(
+      input.world.local_map_sequence,
+      input.config.local_occupancy_threshold);
   const auto projection = cache.local_projection().GetOrBuild(
-      shared::MakeLocalProjectionCacheKey(
-          input.world.local_map_sequence,
-          input.config.local_occupancy_threshold),
+      local_projection_key,
       control, [&](const SearchControl& build_control) {
         auto built = shared::BuildLocalTerrainProjection(
             snapshot.value,
@@ -250,6 +251,8 @@ using namespace std::chrono_literals;
         .terrain = &terrain,
         .capability = capability,
         .local_source_sequence = input.world.local_map_sequence,
+        .local_terrain_semantics_id =
+            local_projection_key.semantic_identities.front(),
         .capability_fingerprint = capability_fingerprint,
         .goal_distance_field = goal_field.value,
         .control = control,

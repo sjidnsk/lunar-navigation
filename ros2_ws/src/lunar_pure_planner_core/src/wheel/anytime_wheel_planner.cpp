@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "shared/anytime_ara_star.hpp"
+#include "shared/active_planner_cache.hpp"
 #include "shared/controlled_work.hpp"
 #include "shared/edge_validation_cache.hpp"
 #include "shared/goal_distance_field.hpp"
@@ -76,83 +77,6 @@ constexpr std::array<double, 5U> kCostWeights{1.0, 1.0, 1.0, 1.0, 1.0};
       std::bit_cast<std::uint64_t>(twist.angular_radps.y),
       std::bit_cast<std::uint64_t>(twist.angular_radps.z),
   };
-}
-
-void MixFingerprint(std::uint64_t* fingerprint,
-                    std::uint64_t value) noexcept {
-  if (fingerprint == nullptr) {
-    return;
-  }
-  for (std::size_t byte = 0U; byte < sizeof(value); ++byte) {
-    *fingerprint ^= value & 0xffU;
-    *fingerprint *= 1099511628211ULL;
-    value >>= 8U;
-  }
-}
-
-void MixString(std::uint64_t* fingerprint,
-               const std::string& value) noexcept {
-  MixFingerprint(fingerprint, value.size());
-  for (const unsigned char byte : value) {
-    if (fingerprint != nullptr) {
-      *fingerprint ^= byte;
-      *fingerprint *= 1099511628211ULL;
-    }
-  }
-}
-
-void MixPose(std::uint64_t* fingerprint, const Pose3& pose) noexcept {
-  for (const std::uint64_t value : PoseBits(pose)) {
-    MixFingerprint(fingerprint, value);
-  }
-}
-
-[[nodiscard]] std::uint64_t FallbackCapabilityFingerprint(
-    const WheeledCapability& capability) noexcept {
-  std::uint64_t fingerprint = 1469598103934665603ULL;
-  MixFingerprint(&fingerprint,
-                 static_cast<std::uint64_t>(PlatformType::kWheeled));
-  MixFingerprint(&fingerprint, capability.footprint_xy_m.size());
-  for (const Vec2 vertex : capability.footprint_xy_m) {
-    MixFingerprint(&fingerprint, std::bit_cast<std::uint64_t>(vertex.x));
-    MixFingerprint(&fingerprint, std::bit_cast<std::uint64_t>(vertex.y));
-  }
-  for (const double value : {
-           capability.body_extent_m.x,
-           capability.body_extent_m.y,
-           capability.body_extent_m.z,
-           capability.wheel_diameter_m,
-           capability.wheel_width_m,
-           capability.wheelbase_m,
-           capability.track_width_m,
-           capability.minimum_underbody_clearance_m,
-           capability.maximum_local_obstacle_relief_m,
-           capability.minimum_body_z_m,
-           capability.maximum_body_z_m,
-           capability.maximum_forward_speed_mps,
-           capability.maximum_reverse_speed_mps,
-           capability.maximum_spin_rate_radps,
-           capability.maximum_acceleration_mps2,
-           capability.maximum_braking_deceleration_mps2,
-           capability.maximum_yaw_acceleration_radps2,
-           capability.maximum_lateral_acceleration_mps2,
-           capability.maximum_curvature_per_m,
-           capability.maximum_slope_rad,
-           capability.minimum_clearance_m,
-       }) {
-    MixFingerprint(&fingerprint, std::bit_cast<std::uint64_t>(value));
-  }
-  MixFingerprint(&fingerprint,
-                 static_cast<std::uint64_t>(capability.allow_unsupported_gap));
-  MixFingerprint(&fingerprint, capability.motion_primitives.size());
-  for (const WheelMotionPrimitive& primitive :
-       capability.motion_primitives) {
-    MixString(&fingerprint, primitive.primitive_id);
-    MixFingerprint(&fingerprint,
-                   static_cast<std::uint64_t>(primitive.kind));
-    MixPose(&fingerprint, primitive.relative_end_pose);
-  }
-  return fingerprint == 0U ? 1U : fingerprint;
 }
 
 [[nodiscard]] bool IsForward(const WheelPrimitiveKind kind) noexcept {
@@ -713,7 +637,9 @@ enum class EdgeCertificationKind : std::uint8_t {
 
 struct EdgeCertificateIdentity final {
   std::uint64_t local_source_sequence{};
-  std::uint64_t terrain_semantics_fingerprint{};
+  std::uint64_t local_terrain_semantics_id{};
+  std::uintptr_t zero_sequence_request_identity{};
+  std::array<std::uint64_t, 6U> map_metadata_bits{};
   std::uint64_t capability_fingerprint{};
   std::array<std::uint64_t, 7U> source_pose_bits{};
   std::array<std::uint64_t, 7U> target_pose_bits{};
@@ -861,7 +787,20 @@ class WheelSearchGraph final {
         goal_yaw_tolerance_rad_(goals_.front().yaw_tolerance_rad),
         footprint_radius_m_(CircumscribedRadius(capability_)),
         footprint_contains_origin_(
-            PointInPolygon(Vec2{}, capability_.footprint_xy_m)) {
+            PointInPolygon(Vec2{}, capability_.footprint_xy_m)),
+        capability_fingerprint_(
+            request.capability_fingerprint != 0U
+                ? request.capability_fingerprint
+                : shared::StableCapabilityFingerprint(
+                      PlatformCapability{capability_})),
+        map_metadata_bits_({
+            static_cast<std::uint64_t>(map_.width()),
+            static_cast<std::uint64_t>(map_.height()),
+            std::bit_cast<std::uint64_t>(map_.resolution_m()),
+            std::bit_cast<std::uint64_t>(map_.origin_m().x),
+            std::bit_cast<std::uint64_t>(map_.origin_m().y),
+            std::bit_cast<std::uint64_t>(map_.origin_m().z),
+        }) {
     const std::size_t cell_count = map_.cell_count();
     if (SupportsInsetDisk(capability_.footprint_xy_m)) {
       broad_inset_radius_m_ = std::numeric_limits<double>::infinity();
@@ -882,15 +821,6 @@ class WheelSearchGraph final {
     complex_terrain_integral_.assign(
         prefix_width * (map_.height() + 1U), 0U);
     hazards_by_row_.resize(map_.height());
-    terrain_semantics_fingerprint_ = 1469598103934665603ULL;
-    MixFingerprint(&terrain_semantics_fingerprint_, map_.width());
-    MixFingerprint(&terrain_semantics_fingerprint_, map_.height());
-    MixFingerprint(&terrain_semantics_fingerprint_,
-                   std::bit_cast<std::uint64_t>(map_.resolution_m()));
-    MixFingerprint(&terrain_semantics_fingerprint_,
-                   std::bit_cast<std::uint64_t>(map_.origin_m().x));
-    MixFingerprint(&terrain_semantics_fingerprint_,
-                   std::bit_cast<std::uint64_t>(map_.origin_m().y));
     const auto elevations = map_.FloatLayer("elevation");
     for (std::size_t y = 0U; y < map_.height(); ++y) {
       std::uint32_t row_hazards = 0U;
@@ -898,8 +828,6 @@ class WheelSearchGraph final {
       for (std::size_t x = 0U; x < map_.width(); ++x) {
         const std::size_t index = y * map_.width() + x;
         const bool hazard = terrain_.free_with_height[index] == 0U;
-        MixFingerprint(&terrain_semantics_fingerprint_,
-                       static_cast<std::uint64_t>(hazard));
         row_hazards += static_cast<std::uint32_t>(hazard);
         if (hazard) {
           hazards_by_row_[y].push_back(static_cast<std::int32_t>(x));
@@ -2963,10 +2891,16 @@ class WheelSearchGraph final {
     const std::uint64_t capability_fingerprint =
         request_.capability_fingerprint != 0U
             ? request_.capability_fingerprint
-            : FallbackCapabilityFingerprint(capability_);
+            : capability_fingerprint_;
     return EdgeCertificateIdentity{
         .local_source_sequence = request_.local_source_sequence,
-        .terrain_semantics_fingerprint = terrain_semantics_fingerprint_,
+        .local_terrain_semantics_id =
+            request_.local_terrain_semantics_id,
+        .zero_sequence_request_identity =
+            request_.local_source_sequence == 0U
+                ? reinterpret_cast<std::uintptr_t>(&request_)
+                : 0U,
+        .map_metadata_bits = map_metadata_bits_,
         .capability_fingerprint = capability_fingerprint,
         .source_pose_bits = PoseBits(transition.source),
         .target_pose_bits = PoseBits(transition.target),
@@ -4238,7 +4172,8 @@ class WheelSearchGraph final {
   double footprint_radius_m_{};
   bool footprint_contains_origin_{};
   double broad_inset_radius_m_{};
-  std::uint64_t terrain_semantics_fingerprint_{};
+  std::uint64_t capability_fingerprint_{};
+  std::array<std::uint64_t, 6U> map_metadata_bits_{};
   double barrier_inset_radius_m_{};
   double platform_length_scale_m_{};
   double maximum_primitive_reach_m_{};
