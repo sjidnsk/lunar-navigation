@@ -45,8 +45,8 @@ class ObservationState {
 
   void MarkKnown(const LunarScene& scene, double world_x_m,
                  double world_y_m);
-  void CacheCurrentLocalCell(const LunarScene& scene, double world_x_m,
-                             double world_y_m);
+  void CacheCurrentLocalCell(const LunarScene& scene, std::size_t logical_x,
+                             std::size_t logical_y);
 
   std::vector<bool> known_global_;
   std::vector<CachedLocalCell> current_local_;

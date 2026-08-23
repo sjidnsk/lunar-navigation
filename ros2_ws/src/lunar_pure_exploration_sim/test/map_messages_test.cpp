@@ -1,14 +1,18 @@
 #include "lunar_pure_exploration_sim/map_messages.hpp"
 
-#include <array>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <iostream>
+#include <limits>
+#include <numbers>
+#include <optional>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -82,6 +86,110 @@ VisibleObstacle FindVisibleObstacle(const LunarScene& scene) {
     }
   }
   return {};
+}
+
+struct ScoredPose {
+  Pose2 pose;
+  std::size_t occupied_centers;
+};
+
+std::vector<Pose2> ObstacleRichPoses(const LunarScene& scene) {
+  std::vector<ScoredPose> candidates;
+  for (std::size_t y = 10U; y + 10U < scene.global_height(); y += 5U) {
+    for (std::size_t x = 10U; x + 10U < scene.global_width(); x += 5U) {
+      if (scene.GlobalOccupancy()[y * scene.global_width() + x] != 0) {
+        continue;
+      }
+      const double pose_x_m = scene.min_x_m() + static_cast<double>(x) + 0.5;
+      const double pose_y_m = scene.min_x_m() + static_cast<double>(y) + 0.5;
+      for (const double yaw_rad : {0.0, std::numbers::pi / 2.0,
+                                   std::numbers::pi, -std::numbers::pi / 2.0}) {
+        std::size_t occupied_centers = 0U;
+        for (long offset_y = -10L; offset_y <= 10L; ++offset_y) {
+          for (long offset_x = -10L; offset_x <= 10L; ++offset_x) {
+            const double distance_m = std::hypot(
+                static_cast<double>(offset_x), static_cast<double>(offset_y));
+            if (distance_m > 10.0 || distance_m < 1.0e-9) {
+              continue;
+            }
+            const double angle = std::remainder(
+                std::atan2(static_cast<double>(offset_y),
+                           static_cast<double>(offset_x)) - yaw_rad,
+                2.0 * std::numbers::pi);
+            if (std::abs(angle) > std::numbers::pi / 4.0) {
+              continue;
+            }
+            const auto cell_x = static_cast<std::size_t>(
+                static_cast<long>(x) + offset_x);
+            const auto cell_y = static_cast<std::size_t>(
+                static_cast<long>(y) + offset_y);
+            if (scene.GlobalOccupancy()[cell_y * scene.global_width() +
+                                        cell_x] == 100) {
+              ++occupied_centers;
+            }
+          }
+        }
+        candidates.push_back({.pose = {.x_m = pose_x_m,
+                                       .y_m = pose_y_m,
+                                       .yaw_rad = yaw_rad},
+                              .occupied_centers = occupied_centers});
+      }
+    }
+  }
+  std::ranges::sort(candidates, [](const auto& left, const auto& right) {
+    return left.occupied_centers > right.occupied_centers;
+  });
+  std::vector<Pose2> selected;
+  for (const auto& candidate : candidates) {
+    if (candidate.occupied_centers == 0U) {
+      break;
+    }
+    const bool separated = std::ranges::all_of(selected, [&](const Pose2& pose) {
+      return std::hypot(candidate.pose.x_m - pose.x_m,
+                        candidate.pose.y_m - pose.y_m) > 20.0;
+    });
+    if (separated) {
+      selected.push_back(candidate.pose);
+      if (selected.size() == 3U) {
+        break;
+      }
+    }
+  }
+  return selected;
+}
+
+enum class ReferenceVisibility { kOutsideSector, kOccluded, kVisible };
+
+ReferenceVisibility ReferenceCellCenterVisibility(
+    const LunarScene& scene, const Pose2& pose, double world_x_m,
+    double world_y_m) {
+  if (world_x_m < scene.min_x_m() || world_x_m >= scene.max_x_m() ||
+      world_y_m < scene.min_x_m() || world_y_m >= scene.max_x_m()) {
+    return ReferenceVisibility::kOutsideSector;
+  }
+  const double delta_x_m = world_x_m - pose.x_m;
+  const double delta_y_m = world_y_m - pose.y_m;
+  const double distance_m = std::hypot(delta_x_m, delta_y_m);
+  if (distance_m > 10.0 + 1.0e-9) {
+    return ReferenceVisibility::kOutsideSector;
+  }
+  if (distance_m > 1.0e-9) {
+    const double yaw_offset = std::remainder(
+        std::atan2(delta_y_m, delta_x_m) - pose.yaw_rad,
+        2.0 * std::numbers::pi);
+    if (std::abs(yaw_offset) > std::numbers::pi / 4.0 + 1.0e-9) {
+      return ReferenceVisibility::kOutsideSector;
+    }
+    for (double distance = 0.1; distance < distance_m - 1.0e-9;
+         distance += 0.1) {
+      const double ratio = distance / distance_m;
+      if (scene.Sample(pose.x_m + ratio * delta_x_m,
+                       pose.y_m + ratio * delta_y_m).occupied) {
+        return ReferenceVisibility::kOccluded;
+      }
+    }
+  }
+  return ReferenceVisibility::kVisible;
 }
 
 TEST(MapMessagesTest, PublishesPersistentNativeGlobalOccupancy) {
@@ -251,6 +359,97 @@ TEST(MapMessagesTest, CachedLocalMapConversionFitsTwentyHertzPeriod) {
 
   EXPECT_LT(median_ms, 50.0);
   EXPECT_LT(maximum_ms, 200.0);
+}
+
+TEST(MapMessagesTest, CachedCellsMatchReferenceLosAcrossObstacleRichPoses) {
+  const auto scene = BuildLunarScene(20260824U);
+  const auto poses = ObstacleRichPoses(scene);
+  ASSERT_EQ(poses.size(), 3U);
+  std::size_t total_leaks = 0U;
+  std::size_t total_holes = 0U;
+  std::size_t total_occluded = 0U;
+
+  for (std::size_t pose_index = 0U; pose_index < poses.size(); ++pose_index) {
+    const Pose2 pose = poses[pose_index];
+    ObservationState observations;
+    observations.Observe(scene, pose, SensorModel{});
+    const auto map = MakeLocalGridMap(
+        scene, observations, pose,
+        rclcpp::Time{5, static_cast<std::uint32_t>(pose_index), RCL_ROS_TIME});
+    std::size_t pose_leaks = 0U;
+    std::size_t pose_holes = 0U;
+    std::optional<std::pair<std::size_t, std::size_t>> occluded_cell;
+    const double origin_x_m = pose.x_m - 32.0;
+    const double origin_y_m = pose.y_m - 32.0;
+    for (std::size_t logical_y = 0U; logical_y < kLocalHeight; ++logical_y) {
+      const double world_y_m =
+          origin_y_m + (static_cast<double>(logical_y) + 0.5) * 0.2;
+      for (std::size_t logical_x = 0U; logical_x < kLocalWidth; ++logical_x) {
+        const double world_x_m =
+            origin_x_m + (static_cast<double>(logical_x) + 0.5) * 0.2;
+        const auto reference = ReferenceCellCenterVisibility(
+            scene, pose, world_x_m, world_y_m);
+        const bool expected_visible = reference == ReferenceVisibility::kVisible;
+        const bool cached_visible =
+            observations.CurrentLocalSample(pose, logical_x, logical_y) != nullptr;
+        pose_leaks += cached_visible && !expected_visible ? 1U : 0U;
+        pose_holes += !cached_visible && expected_visible ? 1U : 0U;
+        if (reference == ReferenceVisibility::kOccluded &&
+            !occluded_cell.has_value()) {
+          occluded_cell = std::pair{logical_x, logical_y};
+        }
+      }
+    }
+    ASSERT_TRUE(occluded_cell.has_value());
+    const std::size_t occluded_physical =
+        PhysicalIndex(occluded_cell->first, occluded_cell->second);
+    for (const auto& layer : map.data) {
+      EXPECT_TRUE(std::isnan(layer.data[occluded_physical]));
+    }
+    std::cout << "los_compare_pose[" << pose_index << "]=" << pose.x_m << ','
+              << pose.y_m << ',' << pose.yaw_rad << " leaks=" << pose_leaks
+              << " holes=" << pose_holes << '\n';
+    total_leaks += pose_leaks;
+    total_holes += pose_holes;
+    ++total_occluded;
+  }
+  EXPECT_EQ(total_occluded, poses.size());
+  EXPECT_EQ(total_leaks, 0U);
+  EXPECT_EQ(total_holes, 0U);
+}
+
+TEST(MapMessagesTest, CombinedObservationAndConversionFitsTwentyHertzPeriod) {
+  const auto scene = BuildLunarScene(20260824U);
+  const auto poses = ObstacleRichPoses(scene);
+  ASSERT_EQ(poses.size(), 3U);
+  ObservationState observations;
+  std::vector<double> elapsed_ms;
+  elapsed_ms.reserve(7U);
+  std::size_t consumed_values = 0U;
+  for (std::size_t iteration = 0U; iteration < 7U; ++iteration) {
+    const Pose2 pose = poses[iteration % poses.size()];
+    const auto begin = std::chrono::steady_clock::now();
+    observations.Observe(scene, pose, SensorModel{});
+    const auto map = MakeLocalGridMap(
+        scene, observations, pose,
+        rclcpp::Time{6, static_cast<std::uint32_t>(iteration), RCL_ROS_TIME});
+    const auto end = std::chrono::steady_clock::now();
+    elapsed_ms.push_back(
+        std::chrono::duration<double, std::milli>(end - begin).count());
+    consumed_values += map.data.front().data.size();
+  }
+  ASSERT_EQ(consumed_values, 7U * kLocalWidth * kLocalHeight);
+  for (std::size_t index = 0U; index < elapsed_ms.size(); ++index) {
+    std::cout << "observe_plus_local_map_ms[" << index
+              << "]=" << elapsed_ms[index] << '\n';
+  }
+  std::ranges::sort(elapsed_ms);
+  const double median_ms = elapsed_ms[elapsed_ms.size() / 2U];
+  const double maximum_ms = elapsed_ms.back();
+  RecordProperty("combined_median_ms", median_ms);
+  RecordProperty("combined_maximum_ms", maximum_ms);
+  EXPECT_LT(median_ms, 35.0);
+  EXPECT_LT(maximum_ms, 100.0);
 }
 
 }  // namespace

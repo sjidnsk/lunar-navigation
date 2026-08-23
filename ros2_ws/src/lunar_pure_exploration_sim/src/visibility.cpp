@@ -87,8 +87,7 @@ void ObservationState::Observe(const LunarScene& scene, Pose2 pose,
         break;
       }
       MarkKnown(scene, world_x_m, world_y_m);
-      CacheCurrentLocalCell(scene, world_x_m, world_y_m);
-      if (scene.Sample(world_x_m, world_y_m).occupied) {
+      if (scene.IsOccupied(world_x_m, world_y_m)) {
         break;
       }
     }
@@ -124,6 +123,26 @@ void ObservationState::Observe(const LunarScene& scene, Pose2 pose,
       }
     }
   }
+
+  constexpr std::size_t kFirstCandidate = 109U;
+  constexpr std::size_t kLastCandidate = 210U;
+  const double local_origin_x_m = pose.x_m - kLocalHalfLengthM;
+  const double local_origin_y_m = pose.y_m - kLocalHalfLengthM;
+  for (std::size_t logical_y = kFirstCandidate;
+       logical_y <= kLastCandidate; ++logical_y) {
+    const double world_y_m =
+        local_origin_y_m + (static_cast<double>(logical_y) + 0.5) *
+                               kLocalResolutionM;
+    for (std::size_t logical_x = kFirstCandidate;
+         logical_x <= kLastCandidate; ++logical_x) {
+      const double world_x_m =
+          local_origin_x_m + (static_cast<double>(logical_x) + 0.5) *
+                                 kLocalResolutionM;
+      if (IsCurrentlyVisible(scene, world_x_m, world_y_m)) {
+        CacheCurrentLocalCell(scene, logical_x, logical_y);
+      }
+    }
+  }
 }
 
 bool ObservationState::IsCurrentlyVisible(const LunarScene& scene,
@@ -155,9 +174,8 @@ bool ObservationState::IsCurrentlyVisible(const LunarScene& scene,
        ray_distance_m < distance_m - kTolerance;
        ray_distance_m += current_sensor_.radial_step_m) {
     const double ratio = ray_distance_m / distance_m;
-    if (scene.Sample(current_pose_.x_m + ratio * delta_x_m,
-                     current_pose_.y_m + ratio * delta_y_m)
-            .occupied) {
+    if (scene.IsOccupied(current_pose_.x_m + ratio * delta_x_m,
+                         current_pose_.y_m + ratio * delta_y_m)) {
       return false;
     }
   }
@@ -202,22 +220,15 @@ void ObservationState::MarkKnown(const LunarScene& scene, double world_x_m,
 }
 
 void ObservationState::CacheCurrentLocalCell(const LunarScene& scene,
-                                             double world_x_m,
-                                             double world_y_m) {
+                                             std::size_t logical_x,
+                                             std::size_t logical_y) {
   const double origin_x_m = current_pose_.x_m - kLocalHalfLengthM;
   const double origin_y_m = current_pose_.y_m - kLocalHalfLengthM;
-  const auto logical_x = static_cast<long>(
-      std::floor((world_x_m - origin_x_m) / kLocalResolutionM));
-  const auto logical_y = static_cast<long>(
-      std::floor((world_y_m - origin_y_m) / kLocalResolutionM));
-  if (logical_x < 0L || logical_y < 0L ||
-      logical_x >= static_cast<long>(kLocalWidth) ||
-      logical_y >= static_cast<long>(kLocalHeight)) {
+  if (logical_x >= kLocalWidth || logical_y >= kLocalHeight) {
     return;
   }
   CachedLocalCell& cell =
-      current_local_[static_cast<std::size_t>(logical_y) * kLocalWidth +
-                     static_cast<std::size_t>(logical_x)];
+      current_local_[logical_y * kLocalWidth + logical_x];
   if (cell.visible) {
     return;
   }
@@ -227,16 +238,6 @@ void ObservationState::CacheCurrentLocalCell(const LunarScene& scene,
       origin_y_m + (static_cast<double>(logical_y) + 0.5) * kLocalResolutionM;
   if (center_x_m < scene.min_x_m() || center_x_m >= scene.max_x_m() ||
       center_y_m < scene.min_x_m() || center_y_m >= scene.max_x_m()) {
-    return;
-  }
-  const double delta_x_m = center_x_m - current_pose_.x_m;
-  const double delta_y_m = center_y_m - current_pose_.y_m;
-  const double distance_m = std::hypot(delta_x_m, delta_y_m);
-  const double yaw_offset = NormalizeAngle(
-      std::atan2(delta_y_m, delta_x_m) - current_pose_.yaw_rad);
-  if (distance_m > current_sensor_.range_m + kTolerance ||
-      std::abs(yaw_offset) > current_sensor_.horizontal_fov_rad / 2.0 +
-                                 kTolerance) {
     return;
   }
   cell.visible = true;

@@ -87,5 +87,22 @@ TEST(LunarSceneTest, ReportsMaximumNeighborElevationDifferenceAsRoughness) {
   EXPECT_DOUBLE_EQ(center.roughness, expected_roughness);
 }
 
+TEST(LunarSceneTest, SpatialOccupancyLookupMatchesContinuousLocalTruth) {
+  const auto scene = BuildLunarScene(20260824U);
+  constexpr double kLocalResolutionM = 0.2;
+  constexpr std::size_t kLocalCellsPerAxis = 1500U;
+  for (std::size_t y = 0U; y < kLocalCellsPerAxis; ++y) {
+    const double world_y_m =
+        scene.min_x_m() + (static_cast<double>(y) + 0.5) * kLocalResolutionM;
+    for (std::size_t x = 0U; x < kLocalCellsPerAxis; ++x) {
+      const double world_x_m =
+          scene.min_x_m() + (static_cast<double>(x) + 0.5) * kLocalResolutionM;
+      EXPECT_EQ(scene.IsOccupied(world_x_m, world_y_m),
+                scene.Sample(world_x_m, world_y_m).occupied)
+          << "cell=" << x << ',' << y;
+    }
+  }
+}
+
 }  // namespace
 }  // namespace lunar::pure_exploration_sim

@@ -19,6 +19,10 @@ constexpr double kStartClearRadiusM = 4.0;
 constexpr double kBackboneHalfWidthM = 2.0;
 constexpr double kLoopHalfExtentM = 80.0;
 constexpr double kRoughnessOffsetM = 0.2;
+constexpr double kSpatialBucketSizeM = 5.0;
+constexpr std::size_t kSpatialBucketWidth = 60U;
+constexpr std::size_t kSpatialBucketCount =
+    kSpatialBucketWidth * kSpatialBucketWidth;
 constexpr double kPi = 3.14159265358979323846;
 
 double UnitRandom(std::mt19937& generator) {
@@ -89,6 +93,8 @@ LunarScene::LunarScene(std::uint32_t seed) {
     });
   }
 
+  BuildSpatialIndex();
+
   global_occupancy_.reserve(kGlobalWidth * kGlobalHeight);
   for (std::size_t row = 0; row < kGlobalHeight; ++row) {
     const double world_y_m =
@@ -122,6 +128,34 @@ double LunarScene::global_resolution_m() const noexcept {
 
 const std::vector<std::int8_t>& LunarScene::GlobalOccupancy() const noexcept {
   return global_occupancy_;
+}
+
+bool LunarScene::IsOccupied(double world_x_m, double world_y_m) const {
+  if (IsReservedFree(world_x_m, world_y_m)) {
+    return false;
+  }
+  const auto bucket = SpatialBucketIndex(world_x_m, world_y_m);
+  if (!bucket.has_value()) {
+    return false;
+  }
+  for (const std::uint16_t index : crater_buckets_[*bucket]) {
+    const auto& crater = craters_[index];
+    const double distance_m =
+        Distance(world_x_m, world_y_m, crater.x_m, crater.y_m);
+    if (std::abs(distance_m - crater.radius_m) <= crater.rim_half_width_m) {
+      return true;
+    }
+  }
+  for (const std::uint16_t index : rock_buckets_[*bucket]) {
+    const auto& rock = rocks_[index];
+    const double delta_x_m = world_x_m - rock.x_m;
+    const double delta_y_m = world_y_m - rock.y_m;
+    if (delta_x_m * delta_x_m + delta_y_m * delta_y_m <
+        rock.radius_m * rock.radius_m) {
+      return true;
+    }
+  }
+  return false;
 }
 
 TruthSample LunarScene::Sample(double world_x_m, double world_y_m) const {
@@ -158,7 +192,16 @@ LunarScene::SurfaceSample LunarScene::EvaluateSurface(double world_x_m,
   }
 
   bool crater_rim_occupied = false;
-  for (const auto& crater : craters_) {
+  const auto bucket = SpatialBucketIndex(world_x_m, world_y_m);
+  if (!bucket.has_value()) {
+    return SurfaceSample{
+        .occupied = false,
+        .semantic_id = 0U,
+        .elevation_m = elevation_m,
+    };
+  }
+  for (const std::uint16_t index : crater_buckets_[*bucket]) {
+    const auto& crater = craters_[index];
     const double distance_m =
         Distance(world_x_m, world_y_m, crater.x_m, crater.y_m);
     const double rim_distance_m = std::abs(distance_m - crater.radius_m);
@@ -177,7 +220,8 @@ LunarScene::SurfaceSample LunarScene::EvaluateSurface(double world_x_m,
   }
 
   bool rock_occupied = false;
-  for (const auto& rock : rocks_) {
+  for (const std::uint16_t index : rock_buckets_[*bucket]) {
+    const auto& rock = rocks_[index];
     const double distance_m =
         Distance(world_x_m, world_y_m, rock.x_m, rock.y_m);
     if (distance_m < rock.radius_m) {
@@ -194,6 +238,57 @@ LunarScene::SurfaceSample LunarScene::EvaluateSurface(double world_x_m,
           crater_rim_occupied ? 2U : (rock_occupied ? 1U : 0U)),
       .elevation_m = elevation_m,
   };
+}
+
+void LunarScene::BuildSpatialIndex() {
+  rock_buckets_.assign(kSpatialBucketCount, {});
+  crater_buckets_.assign(kSpatialBucketCount, {});
+  const auto bucket_coordinate = [](double coordinate_m) {
+    return std::clamp(
+        static_cast<long>(std::floor(
+            (coordinate_m - kMinCoordinateM) / kSpatialBucketSizeM)),
+        0L, static_cast<long>(kSpatialBucketWidth) - 1L);
+  };
+  const auto add_bounds = [&](double center_x_m, double center_y_m,
+                              double radius_m, std::uint16_t primitive_index,
+                              auto& buckets) {
+    const long minimum_x = bucket_coordinate(center_x_m - radius_m);
+    const long maximum_x = bucket_coordinate(center_x_m + radius_m);
+    const long minimum_y = bucket_coordinate(center_y_m - radius_m);
+    const long maximum_y = bucket_coordinate(center_y_m + radius_m);
+    for (long y = minimum_y; y <= maximum_y; ++y) {
+      for (long x = minimum_x; x <= maximum_x; ++x) {
+        buckets[static_cast<std::size_t>(y) * kSpatialBucketWidth +
+                static_cast<std::size_t>(x)]
+            .push_back(primitive_index);
+      }
+    }
+  };
+  for (std::size_t index = 0U; index < rocks_.size(); ++index) {
+    const auto& rock = rocks_[index];
+    add_bounds(rock.x_m, rock.y_m, rock.radius_m,
+               static_cast<std::uint16_t>(index), rock_buckets_);
+  }
+  for (std::size_t index = 0U; index < craters_.size(); ++index) {
+    const auto& crater = craters_[index];
+    add_bounds(crater.x_m, crater.y_m,
+               crater.radius_m + crater.rim_half_width_m,
+               static_cast<std::uint16_t>(index), crater_buckets_);
+  }
+}
+
+std::optional<std::size_t> LunarScene::SpatialBucketIndex(
+    double world_x_m, double world_y_m) const noexcept {
+  if (!std::isfinite(world_x_m) || !std::isfinite(world_y_m) ||
+      world_x_m < kMinCoordinateM || world_x_m >= kMaxCoordinateM ||
+      world_y_m < kMinCoordinateM || world_y_m >= kMaxCoordinateM) {
+    return std::nullopt;
+  }
+  const auto x = static_cast<std::size_t>(
+      std::floor((world_x_m - kMinCoordinateM) / kSpatialBucketSizeM));
+  const auto y = static_cast<std::size_t>(
+      std::floor((world_y_m - kMinCoordinateM) / kSpatialBucketSizeM));
+  return y * kSpatialBucketWidth + x;
 }
 
 bool LunarScene::IsReservedFree(double world_x_m,
