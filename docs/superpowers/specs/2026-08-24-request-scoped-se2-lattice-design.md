@@ -4,6 +4,12 @@
 
 Approved in chat on 2026-08-24. This document records the design for review before implementation.
 
+The later approved
+`2026-08-24-planner-core-incremental-optimization-design.md` supersedes this
+document only where it requires canonical interior primitive endpoints and
+fixed 64/128 yaw-bin counts. The request-scoped exact-start SE(2) frame and the
+existing certified scaled-primitive terminal connector remain in force.
+
 ## Goal
 
 Allow the wheeled local planner to start from any finite, in-bounds, terrain-supported and collision-free continuous `(x, y, yaw)` pose without requiring that pose to align with the local map origin, map cell boundary, map cell centre, or a globally fixed yaw bin.
