@@ -14,6 +14,28 @@
 #include <utility>
 
 #include "lunar_pure_planner_core/search_control.hpp"
+#include "lunar_pure_planner_core/types/planning_request.hpp"
+
+namespace lunar::pure_planning {
+
+struct GlobalRoute;
+
+namespace shared {
+
+class GoalDistanceField;
+class GlobalOccupancyProjection;
+class LocalTerrainProjection;
+class MapSnapshot;
+
+struct GlobalSnapshotCacheDomain;
+struct GlobalProjectionCacheDomain;
+struct GlobalRouteCacheDomain;
+struct LocalSnapshotCacheDomain;
+struct LocalProjectionCacheDomain;
+struct GoalFieldCacheDomain;
+
+}  // namespace shared
+}  // namespace lunar::pure_planning
 
 namespace lunar::pure_planning::shared {
 
@@ -239,6 +261,80 @@ class ImmutableActiveCacheSlot final {
   std::shared_ptr<const Value> value_;
   std::shared_ptr<Flight> flight_;
   std::uint64_t epoch_{};
+};
+
+using GlobalSnapshotCacheKey =
+    RevisionCacheKey<GlobalSnapshotCacheDomain, 1U, 0U>;
+using GlobalProjectionCacheKey =
+    RevisionCacheKey<GlobalProjectionCacheDomain, 1U, 3U>;
+using GlobalRouteCacheKey =
+    RevisionCacheKey<GlobalRouteCacheDomain, 3U, 5U>;
+using LocalSnapshotCacheKey =
+    RevisionCacheKey<LocalSnapshotCacheDomain, 1U, 0U>;
+using LocalProjectionCacheKey =
+    RevisionCacheKey<LocalProjectionCacheDomain, 1U, 1U>;
+using GoalFieldCacheKey =
+    RevisionCacheKey<GoalFieldCacheDomain, 1U, 4U>;
+
+[[nodiscard]] std::uint64_t StableCapabilityFingerprint(
+    const PlatformCapability& capability) noexcept;
+
+[[nodiscard]] GlobalSnapshotCacheKey MakeGlobalSnapshotCacheKey(
+    std::uint64_t global_map_sequence) noexcept;
+[[nodiscard]] GlobalProjectionCacheKey MakeGlobalProjectionCacheKey(
+    std::uint64_t global_map_sequence, std::int32_t occupancy_threshold,
+    double inflation_m, std::uint64_t capability_fingerprint) noexcept;
+[[nodiscard]] GlobalRouteCacheKey MakeGlobalRouteCacheKey(
+    const PlanningRequest& input, double inflation_m,
+    std::uint64_t capability_fingerprint) noexcept;
+[[nodiscard]] LocalSnapshotCacheKey MakeLocalSnapshotCacheKey(
+    std::uint64_t local_map_sequence) noexcept;
+[[nodiscard]] LocalProjectionCacheKey MakeLocalProjectionCacheKey(
+    std::uint64_t local_map_sequence, double occupancy_threshold) noexcept;
+[[nodiscard]] GoalFieldCacheKey MakeGoalFieldCacheKey(
+    std::uint64_t local_map_sequence, double occupancy_threshold,
+    std::uint64_t capability_fingerprint, const LocalGoalSet& goals,
+    const AnytimeSearchConfig& search) noexcept;
+
+class ActivePlannerCache final {
+ public:
+  using GlobalSnapshotSlot =
+      ImmutableActiveCacheSlot<GlobalSnapshotCacheKey, MapSnapshot>;
+  using GlobalProjectionSlot = ImmutableActiveCacheSlot<
+      GlobalProjectionCacheKey, GlobalOccupancyProjection>;
+  using GlobalRouteSlot =
+      ImmutableActiveCacheSlot<GlobalRouteCacheKey, GlobalRoute>;
+  using LocalSnapshotSlot =
+      ImmutableActiveCacheSlot<LocalSnapshotCacheKey, MapSnapshot>;
+  using LocalProjectionSlot =
+      ImmutableActiveCacheSlot<LocalProjectionCacheKey, LocalTerrainProjection>;
+  using GoalFieldSlot =
+      ImmutableActiveCacheSlot<GoalFieldCacheKey, GoalDistanceField>;
+
+  [[nodiscard]] GlobalSnapshotSlot& global_snapshot() noexcept {
+    return global_snapshot_;
+  }
+  [[nodiscard]] GlobalProjectionSlot& global_projection() noexcept {
+    return global_projection_;
+  }
+  [[nodiscard]] GlobalRouteSlot& global_route() noexcept {
+    return global_route_;
+  }
+  [[nodiscard]] LocalSnapshotSlot& local_snapshot() noexcept {
+    return local_snapshot_;
+  }
+  [[nodiscard]] LocalProjectionSlot& local_projection() noexcept {
+    return local_projection_;
+  }
+  [[nodiscard]] GoalFieldSlot& goal_field() noexcept { return goal_field_; }
+
+ private:
+  GlobalSnapshotSlot global_snapshot_;
+  GlobalProjectionSlot global_projection_;
+  GlobalRouteSlot global_route_;
+  LocalSnapshotSlot local_snapshot_;
+  LocalProjectionSlot local_projection_;
+  GoalFieldSlot goal_field_;
 };
 
 }  // namespace lunar::pure_planning::shared

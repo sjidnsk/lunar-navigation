@@ -24,6 +24,14 @@ struct LocalGoalSetResult final {
     const PlanningRequest& input, SearchControl control);
 
 [[nodiscard]] GlobalStageResult PlanSurfaceGlobal(
+    const PlanningRequest& input, SearchControl control,
+    shared::ActivePlannerCache& cache);
+
+[[nodiscard]] GlobalStageResult PlanSurfaceGlobal(
+    const PlanningRequest& input, SearchControl control,
+    shared::ActivePlannerCache& cache, double inflation_m);
+
+[[nodiscard]] GlobalStageResult PlanSurfaceGlobal(
     const PlanningRequest& input, SearchControl control, double inflation_m);
 
 [[nodiscard]] LocalGoalSetResult SelectSurfaceLocalGoals(

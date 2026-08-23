@@ -103,6 +103,12 @@ struct PlanningResult final {
   PlannerCallTiming timing;
   std::uint64_t expanded_states{};
   std::optional<std::size_t> selected_goal_index;
+  bool global_snapshot_cache_hit{};
+  bool global_projection_cache_hit{};
+  bool global_route_cache_hit{};
+  bool local_snapshot_cache_hit{};
+  bool local_projection_cache_hit{};
+  bool goal_field_cache_hit{};
 };
 
 }  // namespace lunar::pure_planning

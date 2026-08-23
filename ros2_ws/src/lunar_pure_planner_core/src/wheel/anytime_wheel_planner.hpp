@@ -3,12 +3,14 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <optional>
 #include <vector>
 
 #include "lunar_pure_planner_core/types/planning_request.hpp"
 #include "shared/local_terrain_projection.hpp"
+#include "shared/goal_distance_field.hpp"
 
 namespace lunar::pure_planning {
 
@@ -27,6 +29,7 @@ struct WheelPlanRequest final {
   const WheeledCapability* capability{};
   std::uint64_t local_source_sequence{};
   std::uint64_t capability_fingerprint{};
+  std::shared_ptr<const shared::GoalDistanceField> goal_distance_field;
   SearchControl control;
   AnytimeSearchConfig search;
 };

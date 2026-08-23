@@ -935,6 +935,153 @@ TEST(DualModePlanner, DefaultBackendsSolveAllThreePlatformsInBothModes) {
   }
 }
 
+void SetCacheableSequences(PlanningRequest& input) {
+  input.world.global_map_sequence = 11U;
+  input.world.local_map_sequence = 12U;
+  input.world.odometry_sequence = 13U;
+  input.world.tf_sequence = 14U;
+}
+
+void ExpectEveryCacheMiss(const PlanningResult& result) {
+  EXPECT_FALSE(result.global_snapshot_cache_hit);
+  EXPECT_FALSE(result.global_projection_cache_hit);
+  EXPECT_FALSE(result.global_route_cache_hit);
+  EXPECT_FALSE(result.local_snapshot_cache_hit);
+  EXPECT_FALSE(result.local_projection_cache_hit);
+  EXPECT_FALSE(result.goal_field_cache_hit);
+}
+
+void ExpectEveryCacheHit(const PlanningResult& result) {
+  EXPECT_TRUE(result.global_snapshot_cache_hit);
+  EXPECT_TRUE(result.global_projection_cache_hit);
+  EXPECT_TRUE(result.global_route_cache_hit);
+  EXPECT_TRUE(result.local_snapshot_cache_hit);
+  EXPECT_TRUE(result.local_projection_cache_hit);
+  EXPECT_TRUE(result.goal_field_cache_hit);
+}
+
+TEST(DualModePlanner, DefaultPlannerReportsColdThenWarmArtifactHits) {
+  Planner planner;
+  PlanningRequest input =
+      RealRequest(PlatformType::kWheeled, EnvironmentMode::kLunarSurface);
+  SetCacheableSequences(input);
+
+  const PlanningResult cold = planner.Plan(input);
+  const PlanningResult warm = planner.Plan(input);
+
+  ASSERT_EQ(cold.status, PlanningStatus::kSuccess) << cold.reason_code;
+  ASSERT_EQ(warm.status, PlanningStatus::kSuccess) << warm.reason_code;
+  ExpectEveryCacheMiss(cold);
+  ExpectEveryCacheHit(warm);
+}
+
+TEST(DualModePlanner, ZeroSourceSequencesNeverReusePlannerArtifacts) {
+  Planner planner;
+  const PlanningRequest input =
+      RealRequest(PlatformType::kWheeled, EnvironmentMode::kLunarSurface);
+
+  const PlanningResult first = planner.Plan(input);
+  const PlanningResult second = planner.Plan(input);
+
+  ASSERT_EQ(first.status, PlanningStatus::kSuccess) << first.reason_code;
+  ASSERT_EQ(second.status, PlanningStatus::kSuccess) << second.reason_code;
+  ExpectEveryCacheMiss(first);
+  ExpectEveryCacheMiss(second);
+}
+
+TEST(DualModePlanner, SourceRevisionChangesInvalidateOnlyDependentArtifacts) {
+  struct Case final {
+    void (*mutate)(PlanningRequest&);
+    bool global_snapshot_hit;
+    bool global_projection_hit;
+    bool global_route_hit;
+    bool local_snapshot_hit;
+    bool local_projection_hit;
+    bool goal_field_hit;
+  };
+  const Case cases[]{
+      {[](PlanningRequest& request) { ++request.world.global_map_sequence; },
+       false, false, false, true, true, true},
+      {[](PlanningRequest& request) { ++request.world.local_map_sequence; },
+       true, true, true, false, false, false},
+      {[](PlanningRequest& request) { ++request.world.odometry_sequence; },
+       true, true, false, true, true, true},
+      {[](PlanningRequest& request) { ++request.world.tf_sequence; },
+       true, true, false, true, true, true},
+  };
+  for (const Case& test_case : cases) {
+    Planner planner;
+    PlanningRequest input =
+        RealRequest(PlatformType::kWheeled, EnvironmentMode::kLunarSurface);
+    SetCacheableSequences(input);
+    ASSERT_EQ(planner.Plan(input).status, PlanningStatus::kSuccess);
+    test_case.mutate(input);
+
+    const PlanningResult changed = planner.Plan(input);
+
+    ASSERT_EQ(changed.status, PlanningStatus::kSuccess) << changed.reason_code;
+    EXPECT_EQ(changed.global_snapshot_cache_hit,
+              test_case.global_snapshot_hit);
+    EXPECT_EQ(changed.global_projection_cache_hit,
+              test_case.global_projection_hit);
+    EXPECT_EQ(changed.global_route_cache_hit, test_case.global_route_hit);
+    EXPECT_EQ(changed.local_snapshot_cache_hit,
+              test_case.local_snapshot_hit);
+    EXPECT_EQ(changed.local_projection_cache_hit,
+              test_case.local_projection_hit);
+    EXPECT_EQ(changed.goal_field_cache_hit, test_case.goal_field_hit);
+  }
+}
+
+TEST(DualModePlanner, SemanticChangesInvalidateOnlyDependentArtifacts) {
+  struct Case final {
+    void (*mutate)(PlanningRequest&);
+    bool global_projection_hit;
+    bool global_route_hit;
+    bool local_projection_hit;
+    bool goal_field_hit;
+  };
+  const Case cases[]{
+      {[](PlanningRequest& request) {
+         ++request.config.global_occupancy_threshold;
+       }, false, false, true, true},
+      {[](PlanningRequest& request) {
+         request.config.local_occupancy_threshold = 0.6;
+       }, true, true, false, false},
+      {[](PlanningRequest& request) {
+         auto& capability = std::get<WheeledCapability>(request.capability);
+         capability.maximum_forward_speed_mps = 0.9;
+       }, false, false, true, false},
+      {[](PlanningRequest& request) {
+         request.goal_map.goal_id = "changed-goal";
+         std::get<PointGoal>(request.goal_map.target).position_m.x = 1.1;
+       }, true, false, true, false},
+      {[](PlanningRequest& request) {
+         request.config.search.stop_after_first_solution = false;
+       }, true, false, true, false},
+  };
+  for (const Case& test_case : cases) {
+    Planner planner;
+    PlanningRequest input =
+        RealRequest(PlatformType::kWheeled, EnvironmentMode::kLunarSurface);
+    SetCacheableSequences(input);
+    ASSERT_EQ(planner.Plan(input).status, PlanningStatus::kSuccess);
+    test_case.mutate(input);
+
+    const PlanningResult changed = planner.Plan(input);
+
+    ASSERT_EQ(changed.status, PlanningStatus::kSuccess) << changed.reason_code;
+    EXPECT_TRUE(changed.global_snapshot_cache_hit);
+    EXPECT_EQ(changed.global_projection_cache_hit,
+              test_case.global_projection_hit);
+    EXPECT_EQ(changed.global_route_cache_hit, test_case.global_route_hit);
+    EXPECT_TRUE(changed.local_snapshot_cache_hit);
+    EXPECT_EQ(changed.local_projection_cache_hit,
+              test_case.local_projection_hit);
+    EXPECT_EQ(changed.goal_field_cache_hit, test_case.goal_field_hit);
+  }
+}
+
 [[nodiscard]] RigidTransform NonUnitMapFromOdom() {
   constexpr double kHalfYaw = std::numbers::pi / 4.0;
   return RigidTransform{

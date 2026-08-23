@@ -14,6 +14,7 @@
 #include "hierarchical/surface_rolling_session.hpp"
 #include "hierarchical/surface_global_search.hpp"
 #include "shared/controlled_work.hpp"
+#include "shared/active_planner_cache.hpp"
 #include "shared/global_occupancy_projection.hpp"
 #include "shared/map_snapshot.hpp"
 
@@ -121,76 +122,141 @@ namespace {
 
 GlobalStageResult PlanSurfaceGlobal(const PlanningRequest& input,
                                     SearchControl control) {
-  return PlanSurfaceGlobal(input, std::move(control),
-                           WheelGlobalInflation(input));
+  shared::ActivePlannerCache cache;
+  return PlanSurfaceGlobal(input, std::move(control), cache);
 }
 
 GlobalStageResult PlanSurfaceGlobal(const PlanningRequest& input,
                                     SearchControl control,
                                     const double inflation_m) {
+  shared::ActivePlannerCache cache;
+  return PlanSurfaceGlobal(input, std::move(control), cache, inflation_m);
+}
+
+GlobalStageResult PlanSurfaceGlobal(const PlanningRequest& input,
+                                    SearchControl control,
+                                    shared::ActivePlannerCache& cache) {
+  return PlanSurfaceGlobal(input, std::move(control), cache,
+                           WheelGlobalInflation(input));
+}
+
+GlobalStageResult PlanSurfaceGlobal(const PlanningRequest& input,
+                                    SearchControl control,
+                                    shared::ActivePlannerCache& cache,
+                                    const double inflation_m) {
   if (!input.world.global_map.has_value()) {
     return Failure("INVALID_INPUT");
   }
-  auto map = shared::MapSnapshot::Create(
-      *input.world.global_map, shared::MapContract::kGlobalOccupancy, control);
+  const auto map = cache.global_snapshot().GetOrBuild(
+      shared::MakeGlobalSnapshotCacheKey(input.world.global_map_sequence),
+      control, [&](const SearchControl& build_control) {
+        auto built = shared::MapSnapshot::Create(
+            *input.world.global_map, shared::MapContract::kGlobalOccupancy,
+            build_control);
+        return shared::ImmutableCacheBuildResult<shared::MapSnapshot>{
+            .value = std::move(built.snapshot),
+            .reason_code = std::move(built.reason_code),
+        };
+      });
   if (!map.ok()) {
     return Failure(map.reason_code == "TIMEOUT" ||
                            map.reason_code == "REQUEST_CANCELED"
                        ? map.reason_code
                        : "INVALID_INPUT");
   }
-  auto projection = shared::BuildInflatedGlobalOccupancyProjection(
-      map.snapshot, input.config.global_occupancy_threshold, inflation_m,
-      control);
+  const std::uint64_t capability_fingerprint =
+      shared::StableCapabilityFingerprint(input.capability);
+  const auto projection = cache.global_projection().GetOrBuild(
+      shared::MakeGlobalProjectionCacheKey(
+          input.world.global_map_sequence,
+          input.config.global_occupancy_threshold, inflation_m,
+          capability_fingerprint),
+      control, [&](const SearchControl& build_control) {
+        auto built = shared::BuildInflatedGlobalOccupancyProjection(
+            map.value, input.config.global_occupancy_threshold, inflation_m,
+            build_control);
+        return shared::ImmutableCacheBuildResult<
+            shared::GlobalOccupancyProjection>{
+            .value = !built.projection.has_value()
+                         ? nullptr
+                         : std::make_shared<
+                               const shared::GlobalOccupancyProjection>(
+                               std::move(*built.projection)),
+            .reason_code = std::move(built.reason_code),
+        };
+      });
   if (!projection.ok()) {
-    return Failure(projection.reason_code == "TIMEOUT" ||
-                           projection.reason_code == "REQUEST_CANCELED"
-                       ? projection.reason_code
-                       : "INVALID_INPUT");
+    GlobalStageResult failure =
+        Failure(projection.reason_code == "TIMEOUT" ||
+                        projection.reason_code == "REQUEST_CANCELED"
+                    ? projection.reason_code
+                    : "INVALID_INPUT");
+    failure.snapshot_cache_hit = map.cache_hit;
+    return failure;
   }
+  const auto failure_after_projection = [&](std::string reason_code) {
+    GlobalStageResult failure = Failure(std::move(reason_code));
+    failure.snapshot_cache_hit = map.cache_hit;
+    failure.projection_cache_hit = projection.cache_hit;
+    return failure;
+  };
   const auto* point = std::get_if<PointGoal>(&input.goal_map.target);
   const Pose3* current = CurrentPose(input);
   if (point == nullptr || current == nullptr) {
-    return Failure("INVALID_INPUT");
+    return failure_after_projection("INVALID_INPUT");
   }
   const auto start_map = TransformPose(*current, input.world.map_from_odom,
                                        TransformDirection::kChildToParent);
   if (!start_map.has_value()) {
-    return Failure("INVALID_INPUT");
+    return failure_after_projection("INVALID_INPUT");
   }
   Pose3 goal_pose{
       .position_m = {.x = point->position_m.x,
                      .y = point->position_m.y,
-                     .z = map.snapshot->origin_m().z},
+                     .z = map.value->origin_m().z},
       .orientation = input.goal_map.yaw_rad.has_value()
                          ? QuaternionFromYaw(*input.goal_map.yaw_rad)
                          : start_map->orientation,
   };
-  const auto start_cell = map.snapshot->PositionToCell(
+  const auto start_cell = map.value->PositionToCell(
       {.x = start_map->position_m.x, .y = start_map->position_m.y});
-  const auto goal_cell = map.snapshot->PositionToCell(
+  const auto goal_cell = map.value->PositionToCell(
       {.x = goal_pose.position_m.x, .y = goal_pose.position_m.y});
   if (!start_cell.has_value() || !goal_cell.has_value()) {
-    return Failure("NO_PATH");
+    return failure_after_projection("NO_PATH");
   }
-  SurfaceGlobalSearchResult result = SearchSurfaceGlobal({
-      .projection = projection.projection->View(),
-      .start = *start_cell,
-      .goal = *goal_cell,
-      .start_pose_map = *start_map,
-      .goal_pose_map = goal_pose,
-      .control = std::move(control),
-      .search = input.config.search,
-  });
-  if (!result.ok()) {
-    return Failure(SurfaceFailureReason(result.status));
+  const auto route = cache.global_route().GetOrBuild(
+      shared::MakeGlobalRouteCacheKey(input, inflation_m,
+                                      capability_fingerprint),
+      control, [&](const SearchControl& build_control) {
+        SurfaceGlobalSearchResult result = SearchSurfaceGlobal({
+            .projection = projection.value->View(),
+            .start = *start_cell,
+            .goal = *goal_cell,
+            .start_pose_map = *start_map,
+            .goal_pose_map = goal_pose,
+            .control = build_control,
+            .search = input.config.search,
+        });
+        if (!result.ok()) {
+          return shared::ImmutableCacheBuildResult<GlobalRoute>{
+              .reason_code = SurfaceFailureReason(result.status)};
+        }
+        return shared::ImmutableCacheBuildResult<GlobalRoute>{
+            .value = std::make_shared<const GlobalRoute>(GlobalRoute{
+                .poses_map = std::move(result.preview.poses_map),
+                .expanded_states = result.expanded_states,
+            })};
+      });
+  if (!route.ok()) {
+    return failure_after_projection(route.reason_code);
   }
   return GlobalStageResult{
-      .route = GlobalRoute{
-          .poses_map = std::move(result.preview.poses_map),
-          .expanded_states = result.expanded_states,
-      },
+      .route = *route.value,
       .reason_code = {},
+      .snapshot_cache_hit = map.cache_hit,
+      .projection_cache_hit = projection.cache_hit,
+      .route_cache_hit = route.cache_hit,
   };
 }
 

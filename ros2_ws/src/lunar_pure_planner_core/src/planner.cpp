@@ -15,6 +15,8 @@
 #include "legged/anytime_legged_planner.hpp"
 #include "legged/legged_types.hpp"
 #include "shared/controlled_work.hpp"
+#include "shared/active_planner_cache.hpp"
+#include "shared/goal_distance_field.hpp"
 #include "shared/local_terrain_projection.hpp"
 #include "shared/map_snapshot.hpp"
 #include "shared/obstacle_height_estimator.hpp"
@@ -148,21 +150,47 @@ using namespace std::chrono_literals;
 
 [[nodiscard]] LocalStageResult PlanLocalDefault(
     const PlanningRequest& input, const LocalGoalSet& goals_odom,
-    SearchControl control) {
+    SearchControl control, shared::ActivePlannerCache& cache) {
   if (goals_odom.goals_odom.empty()) {
     return {.status = LocalPlanStatus::kInvalidInput,
             .reason_code = "INVALID_INPUT"};
   }
-  auto snapshot = shared::MapSnapshot::Create(
-      input.world.local_map, shared::MapContract::kLocalElevation, control);
+  const auto snapshot = cache.local_snapshot().GetOrBuild(
+      shared::MakeLocalSnapshotCacheKey(input.world.local_map_sequence),
+      control, [&](const SearchControl& build_control) {
+        auto built = shared::MapSnapshot::Create(
+            input.world.local_map, shared::MapContract::kLocalElevation,
+            build_control);
+        return shared::ImmutableCacheBuildResult<shared::MapSnapshot>{
+            .value = std::move(built.snapshot),
+            .reason_code = std::move(built.reason_code),
+        };
+      });
   if (!snapshot.ok()) {
     return LocalControlledFailure(snapshot.reason_code);
   }
-  auto projection = shared::BuildLocalTerrainProjection(
-      snapshot.snapshot,
-      static_cast<float>(input.config.local_occupancy_threshold), control);
+  const auto projection = cache.local_projection().GetOrBuild(
+      shared::MakeLocalProjectionCacheKey(
+          input.world.local_map_sequence,
+          input.config.local_occupancy_threshold),
+      control, [&](const SearchControl& build_control) {
+        auto built = shared::BuildLocalTerrainProjection(
+            snapshot.value,
+            static_cast<float>(input.config.local_occupancy_threshold),
+            build_control);
+        return shared::ImmutableCacheBuildResult<
+            shared::LocalTerrainProjection>{
+            .value = !built.value.has_value()
+                         ? nullptr
+                         : std::make_shared<const shared::LocalTerrainProjection>(
+                               std::move(*built.value)),
+            .reason_code = std::move(built.reason_code),
+        };
+      });
   if (!projection.ok()) {
-    return LocalControlledFailure(projection.reason_code);
+    LocalStageResult failure = LocalControlledFailure(projection.reason_code);
+    failure.snapshot_cache_hit = snapshot.cache_hit;
+    return failure;
   }
   const shared::LocalTerrainProjection& terrain = *projection.value;
 
@@ -171,7 +199,50 @@ using namespace std::chrono_literals;
     const auto* state = std::get_if<WheeledState>(&input.current_state);
     if (state == nullptr) {
       return {.status = LocalPlanStatus::kInvalidInput,
-              .reason_code = "INVALID_INPUT"};
+              .reason_code = "INVALID_INPUT",
+              .snapshot_cache_hit = snapshot.cache_hit,
+              .projection_cache_hit = projection.cache_hit};
+    }
+    std::vector<shared::GridCell> goal_cells;
+    goal_cells.reserve(goals_odom.goals_odom.size());
+    for (const GoalRegion& goal : goals_odom.goals_odom) {
+      const auto* point = std::get_if<PointGoal>(&goal.target);
+      if (point == nullptr) {
+        continue;
+      }
+      const auto cell = terrain.map->PositionToCell(
+          {.x = point->position_m.x, .y = point->position_m.y});
+      if (cell.has_value()) {
+        goal_cells.push_back(*cell);
+      }
+    }
+    const std::uint64_t capability_fingerprint =
+        shared::StableCapabilityFingerprint(input.capability);
+    const auto goal_field = cache.goal_field().GetOrBuild(
+        shared::MakeGoalFieldCacheKey(
+            input.world.local_map_sequence,
+            input.config.local_occupancy_threshold, capability_fingerprint,
+            goals_odom, input.config.search),
+        control, [&](const SearchControl& build_control) {
+          auto built = shared::BuildGoalDistanceField(
+              terrain, goal_cells, build_control);
+          return shared::ImmutableCacheBuildResult<shared::GoalDistanceField>{
+              .value = !built.has_value()
+                           ? nullptr
+                           : std::make_shared<const shared::GoalDistanceField>(
+                                 std::move(*built)),
+              .reason_code =
+                  !built.has_value()
+                      ? std::string{shared::StopReason(build_control)
+                                        .value_or("INVALID_INPUT")}
+                      : std::string{},
+          };
+        });
+    if (!goal_field.ok()) {
+      LocalStageResult failure = LocalControlledFailure(goal_field.reason_code);
+      failure.snapshot_cache_hit = snapshot.cache_hit;
+      failure.projection_cache_hit = projection.cache_hit;
+      return failure;
     }
     wheel::WheelPlanResult result = wheel::PlanWheel({
         .start = *state,
@@ -179,6 +250,8 @@ using namespace std::chrono_literals;
         .terrain = &terrain,
         .capability = capability,
         .local_source_sequence = input.world.local_map_sequence,
+        .capability_fingerprint = capability_fingerprint,
+        .goal_distance_field = goal_field.value,
         .control = control,
         .search = input.config.search,
     });
@@ -192,6 +265,9 @@ using namespace std::chrono_literals;
                     : std::nullopt,
         .reason_code = std::move(result.reason_code),
         .selected_goal_index = result.selected_goal_index,
+        .snapshot_cache_hit = snapshot.cache_hit,
+        .projection_cache_hit = projection.cache_hit,
+        .goal_field_cache_hit = goal_field.cache_hit,
     };
   }
 
@@ -202,7 +278,9 @@ using namespace std::chrono_literals;
     const auto* state = std::get_if<LeggedState>(&input.current_state);
     if (state == nullptr) {
       return {.status = LocalPlanStatus::kInvalidInput,
-              .reason_code = "INVALID_INPUT"};
+              .reason_code = "INVALID_INPUT",
+              .snapshot_cache_hit = snapshot.cache_hit,
+              .projection_cache_hit = projection.cache_hit};
     }
     legged::LeggedPlanResult result = legged::PlanLegged({
         .start = *state,
@@ -216,7 +294,11 @@ using namespace std::chrono_literals;
     if (result.ok()) {
       if (const auto stopped = shared::StopReason(control);
           stopped.has_value()) {
-        return LocalControlledFailure(std::string{*stopped});
+        LocalStageResult failure =
+            LocalControlledFailure(std::string{*stopped});
+        failure.snapshot_cache_hit = snapshot.cache_hit;
+        failure.projection_cache_hit = projection.cache_hit;
+        return failure;
       }
       TrajectoryReference trajectory{
           .semantics = TrajectorySemantics::kLeggedBodyReference,
@@ -224,14 +306,22 @@ using namespace std::chrono_literals;
       trajectory.points.reserve(result.trajectory.size() + 1U);
       if (const auto stopped = shared::StopReason(control);
           stopped.has_value()) {
-        return LocalControlledFailure(std::string{*stopped});
+        LocalStageResult failure =
+            LocalControlledFailure(std::string{*stopped});
+        failure.snapshot_cache_hit = snapshot.cache_hit;
+        failure.projection_cache_hit = projection.cache_hit;
+        return failure;
       }
       trajectory.points.push_back(
           {.pose = state->body_pose, .velocity = state->body_velocity});
       for (const legged::LeggedTransition& transition : result.trajectory) {
         if (const auto stopped = shared::StopReason(control);
             stopped.has_value()) {
-          return LocalControlledFailure(std::string{*stopped});
+          LocalStageResult failure =
+              LocalControlledFailure(std::string{*stopped});
+          failure.snapshot_cache_hit = snapshot.cache_hit;
+          failure.projection_cache_hit = projection.cache_hit;
+          return failure;
         }
         trajectory.points.push_back({
             .pose = Pose3{
@@ -243,7 +333,11 @@ using namespace std::chrono_literals;
       }
       if (const auto stopped = shared::StopReason(control);
           stopped.has_value()) {
-        return LocalControlledFailure(std::string{*stopped});
+        LocalStageResult failure =
+            LocalControlledFailure(std::string{*stopped});
+        failure.snapshot_cache_hit = snapshot.cache_hit;
+        failure.projection_cache_hit = projection.cache_hit;
+        return failure;
       }
       data = std::move(trajectory);
     }
@@ -254,6 +348,8 @@ using namespace std::chrono_literals;
         .selected_goal_index = result.ok()
                                    ? std::optional<std::size_t>{0U}
                                    : std::nullopt,
+        .snapshot_cache_hit = snapshot.cache_hit,
+        .projection_cache_hit = projection.cache_hit,
     };
   }
 
@@ -261,7 +357,9 @@ using namespace std::chrono_literals;
   const auto* state = std::get_if<HopperState>(&input.current_state);
   if (capability == nullptr || state == nullptr) {
     return {.status = LocalPlanStatus::kInvalidInput,
-            .reason_code = "INVALID_INPUT"};
+            .reason_code = "INVALID_INPUT",
+            .snapshot_cache_hit = snapshot.cache_hit,
+            .projection_cache_hit = projection.cache_hit};
   }
   hopper::HopperPlanResult result = hopper::PlanHopper({
       .start = *state,
@@ -282,18 +380,25 @@ using namespace std::chrono_literals;
       .selected_goal_index = result.ok()
                                  ? std::optional<std::size_t>{0U}
                                  : std::nullopt,
+      .snapshot_cache_hit = snapshot.cache_hit,
+      .projection_cache_hit = projection.cache_hit,
   };
 }
 
 }  // namespace
 
-Planner::Planner()
-    : Planner(PlannerBackends{
-          .global = [](const PlanningRequest& input, SearchControl control) {
-            return hierarchical::PlanSurfaceGlobal(input, std::move(control));
-          },
-          .local = PlanLocalDefault,
-      }) {}
+Planner::Planner() : cache_(std::make_shared<shared::ActivePlannerCache>()) {
+  backends_.global =
+      [cache = cache_](const PlanningRequest& input, SearchControl control) {
+        return hierarchical::PlanSurfaceGlobal(input, std::move(control),
+                                               *cache);
+      };
+  backends_.local =
+      [cache = cache_](const PlanningRequest& input,
+                       const LocalGoalSet& goals, SearchControl control) {
+        return PlanLocalDefault(input, goals, std::move(control), *cache);
+      };
+}
 
 Planner::Planner(PlannerBackends backends) : backends_(std::move(backends)) {}
 
@@ -311,6 +416,12 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
   }
   const RequestTimingPolicy policy = MakeRequestTimingPolicy(started);
   SteadyClock::time_point phase_started = started;
+  bool global_snapshot_cache_hit{};
+  bool global_projection_cache_hit{};
+  bool global_route_cache_hit{};
+  bool local_snapshot_cache_hit{};
+  bool local_projection_cache_hit{};
+  bool goal_field_cache_hit{};
 
   const auto report_progress = [&](const PlannerPhase phase,
                                    const std::chrono::nanoseconds elapsed) {
@@ -328,12 +439,22 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
   };
 
   const auto finish = [&](PlanningResult result) {
+    const auto apply_cache_hits = [&](PlanningResult& output) {
+      output.global_snapshot_cache_hit = global_snapshot_cache_hit;
+      output.global_projection_cache_hit = global_projection_cache_hit;
+      output.global_route_cache_hit = global_route_cache_hit;
+      output.local_snapshot_cache_hit = local_snapshot_cache_hit;
+      output.local_projection_cache_hit = local_projection_cache_hit;
+      output.goal_field_cache_hit = goal_field_cache_hit;
+    };
+    apply_cache_hits(result);
     SteadyClock::time_point finished_at{};
     if (!FinalizeTiming(result, started, phase_started, input.control.now, timing,
                         &finished_at)) {
       PlanningResult error =
           Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
       error.timing = timing;
+      apply_cache_hits(error);
       return error;
     }
     try {
@@ -342,12 +463,14 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
       PlanningResult error =
           Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
       error.timing = result.timing;
+      apply_cache_hits(error);
       return error;
     }
     if (result.status != PlanningStatus::kCanceled &&
         finished_at >= policy.hard_deadline) {
       PlanningResult timeout = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
       timeout.timing = result.timing;
+      apply_cache_hits(timeout);
       return timeout;
     }
     return result;
@@ -389,6 +512,9 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
               Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR"));
         }
       }
+      global_snapshot_cache_hit = global.snapshot_cache_hit;
+      global_projection_cache_hit = global.projection_cache_hit;
+      global_route_cache_hit = global.route_cache_hit;
       report_progress(PlannerPhase::kGlobal, timing.global_elapsed);
       phase_started = global_finished;
       if (global.reason_code == "REQUEST_CANCELED" ||
@@ -450,6 +576,9 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
             Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR"));
       }
     }
+    local_snapshot_cache_hit = local.snapshot_cache_hit;
+    local_projection_cache_hit = local.projection_cache_hit;
+    goal_field_cache_hit = local.goal_field_cache_hit;
     report_progress(PlannerPhase::kLocalSearch, timing.local_search_elapsed);
     phase_started = local_finished;
     if (local.status == LocalPlanStatus::kCanceled ||

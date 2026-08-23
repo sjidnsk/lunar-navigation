@@ -1023,10 +1023,15 @@ class WheelSearchGraph final {
         goal_cells.push_back(*goal_cell);
       }
     }
-    if (!goal_cells.empty()) {
-      goal_distance_field_ =
-          shared::BuildGoalDistanceField(terrain_, goal_cells,
-                                         request_.control);
+    goal_distance_field_ = request_.goal_distance_field;
+    if (goal_distance_field_ == nullptr && !goal_cells.empty()) {
+      auto built = shared::BuildGoalDistanceField(terrain_, goal_cells,
+                                                  request_.control);
+      if (built.has_value()) {
+        goal_distance_field_ =
+            std::make_shared<const shared::GoalDistanceField>(
+                std::move(*built));
+      }
     }
     barriers_by_goal_.resize(goals_.size());
     std::size_t preferred_goal_index = 0U;
@@ -1154,7 +1159,7 @@ class WheelSearchGraph final {
 
   [[nodiscard]] double RelaxedDistance(
       const std::size_t state) const noexcept {
-    if (!goal_distance_field_.has_value() || state >= nodes_.size()) {
+    if (goal_distance_field_ == nullptr || state >= nodes_.size()) {
       return std::numeric_limits<double>::infinity();
     }
     const auto cell = map_.PositionToCell(
@@ -4257,7 +4262,7 @@ class WheelSearchGraph final {
   std::size_t quantized_endpoint_aliases_{};
   mutable std::size_t sweep_cell_checks_{};
   std::array<double, 5U> cost_scales_{};
-  std::optional<shared::GoalDistanceField> goal_distance_field_;
+  std::shared_ptr<const shared::GoalDistanceField> goal_distance_field_;
   double finest_xy_key_resolution_m_{
       std::numeric_limits<double>::infinity()};
   std::size_t maximum_yaw_bins_{};

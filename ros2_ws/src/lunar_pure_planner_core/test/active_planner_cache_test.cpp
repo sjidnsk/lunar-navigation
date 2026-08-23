@@ -24,6 +24,16 @@ struct TestArtifact final {
   int value{};
 };
 
+[[nodiscard]] GoalRegion CacheGoal(const char* id, const double x) {
+  return GoalRegion{
+      .goal_id = id,
+      .target = PointGoal{
+          .position_m = {.x = x, .y = 1.0, .z = 0.0},
+          .tolerance_m = 0.1,
+      },
+  };
+}
+
 [[nodiscard]] TestKey Key(
     const std::uint64_t first_sequence = 1U,
     const std::uint64_t second_sequence = 2U,
@@ -108,6 +118,33 @@ TEST(ActivePlannerCache, EverySourceAndSemanticIdentityParticipatesInTheKey) {
     EXPECT_EQ(builds, 2U);
     EXPECT_NE(original.value, replacement.value);
   }
+}
+
+TEST(ActivePlannerCache, GlobalProjectionKeyIncludesInflationAndCapability) {
+  const auto original = MakeGlobalProjectionCacheKey(7U, 50, 0.4, 11U);
+  const auto inflation_changed =
+      MakeGlobalProjectionCacheKey(7U, 50, 0.5, 11U);
+  const auto capability_changed =
+      MakeGlobalProjectionCacheKey(7U, 50, 0.4, 12U);
+
+  EXPECT_NE(original, inflation_changed);
+  EXPECT_NE(original, capability_changed);
+}
+
+TEST(ActivePlannerCache, GoalFieldKeyPreservesOrderedGoalSemantics) {
+  const LocalGoalSet ordered{
+      .goals_odom = {CacheGoal("first", 1.0), CacheGoal("second", 2.0)},
+      .exact_final_goal = false,
+  };
+  const LocalGoalSet reversed{
+      .goals_odom = {CacheGoal("second", 2.0), CacheGoal("first", 1.0)},
+      .exact_final_goal = false,
+  };
+  const auto original = MakeGoalFieldCacheKey(9U, 0.5, 17U, ordered, {});
+  const auto order_changed =
+      MakeGoalFieldCacheKey(9U, 0.5, 17U, reversed, {});
+
+  EXPECT_NE(original, order_changed);
 }
 
 TEST(ActivePlannerCache, ConcurrentReadersCoalesceOneBuildAndShareOnePointer) {

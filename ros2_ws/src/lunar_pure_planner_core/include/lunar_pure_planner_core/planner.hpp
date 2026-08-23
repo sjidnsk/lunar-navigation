@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -10,6 +11,10 @@
 #include "lunar_pure_planner_core/types/planning_request.hpp"
 
 namespace lunar::pure_planning {
+
+namespace shared {
+class ActivePlannerCache;
+}
 
 struct GlobalRoute final {
   std::vector<Pose3> poses_map;
@@ -19,6 +24,9 @@ struct GlobalRoute final {
 struct GlobalStageResult final {
   std::optional<GlobalRoute> route;
   std::string reason_code;
+  bool snapshot_cache_hit{};
+  bool projection_cache_hit{};
+  bool route_cache_hit{};
 };
 
 struct LocalStageResult final {
@@ -26,6 +34,9 @@ struct LocalStageResult final {
   std::optional<MotionReferenceData> data;
   std::string reason_code;
   std::optional<std::size_t> selected_goal_index;
+  bool snapshot_cache_hit{};
+  bool projection_cache_hit{};
+  bool goal_field_cache_hit{};
 };
 
 struct PlannerBackends final {
@@ -43,6 +54,7 @@ class Planner final {
   [[nodiscard]] PlanningResult Plan(const PlanningRequest& input) noexcept;
 
  private:
+  std::shared_ptr<shared::ActivePlannerCache> cache_;
   PlannerBackends backends_;
 };
 
