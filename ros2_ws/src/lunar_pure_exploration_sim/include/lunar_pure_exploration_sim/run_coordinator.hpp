@@ -4,6 +4,7 @@
 #include <memory>
 
 #include <grid_map_msgs/msg/grid_map.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <lunar_planning_msgs/action/plan_motion.hpp>
 #include <lunar_pure_exploration_msgs/msg/pure_exploration_status.hpp>
 #include <lunar_pure_exploration_msgs/msg/pure_exploration_task.hpp>
@@ -22,6 +23,8 @@ struct CoordinatorReadiness {
   bool tf_chain_received{false};
   bool initial_status_received{false};
   bool planner_action_ready{false};
+  bool controller_publisher_unique{false};
+  bool controller_command_received{false};
 
   [[nodiscard]] bool ShouldStart() const noexcept;
   void MarkStarted() noexcept;
@@ -43,6 +46,9 @@ class RequiredTfChain {
 [[nodiscard]] bool IsInitialExplorationStatus(
     const lunar_pure_exploration_msgs::msg::PureExplorationStatus& status)
     noexcept;
+
+[[nodiscard]] bool IsFiniteControllerCommand(
+    const geometry_msgs::msg::Twist& command) noexcept;
 
 [[nodiscard]] lunar_pure_exploration_msgs::msg::PureExplorationTask
 MakeExplorationStartTask(std::uint64_t seed, const rclcpp::Time& stamp);
@@ -66,6 +72,8 @@ class RunCoordinator final : public rclcpp::Node {
   rclcpp::Subscription<
       lunar_pure_exploration_msgs::msg::PureExplorationStatus>::SharedPtr
       status_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr
+      controller_command_sub_;
   rclcpp_action::Client<lunar_planning_msgs::action::PlanMotion>::SharedPtr
       planner_client_;
   rclcpp::Publisher<

@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -76,6 +81,51 @@ def _keyword_strings(source: str, function_name: str, keyword: str) -> list[str]
     return values
 
 
+def _launch_module():
+    spec = importlib.util.spec_from_file_location("jazzy_300m_launch", LAUNCH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@contextmanager
+def _temporary_directory():
+    root = Path(tempfile.mkdtemp(prefix="lunar-launch-contract-"))
+    try:
+        yield root
+    finally:
+        git_marker = root / ".git"
+        if git_marker.is_file():
+            git_marker.unlink()
+        elif git_marker.is_dir():
+            git_marker.rmdir()
+        root.rmdir()
+
+
+def _context(output_dir: str):
+    from launch import LaunchContext
+
+    context = LaunchContext()
+    context.launch_configurations.update(
+        output_dir=output_dir,
+        seed="20260824",
+        speed_multiplier="20.0",
+        start_rviz="false",
+    )
+    return context
+
+
+def _action_parameters(action, context) -> dict[str, object]:
+    from launch_ros.utilities import evaluate_parameters
+
+    result: dict[str, object] = {}
+    for item in evaluate_parameters(context, action._Node__parameters):
+        if isinstance(item, dict):
+            result.update(item)
+    return result
+
+
 def test_static_launch_declares_required_arguments_and_absolute_output_guard() -> None:
     source = _source(LAUNCH)
     assert 'DeclareLaunchArgument("seed", default_value="20260824")' in source
@@ -98,12 +148,77 @@ def test_static_launch_freezes_interfaces_controller_override_and_capacities() -
     for topic in EXACT_TOPICS:
         assert topic in source
     assert '"reference_topic": "/Car/T4/execution/motion_reference"' in source
-    assert source.count('"command_topic": "/Car/T5/Car_Cmd_Vel"') == 2
+    assert '"controller_command_topic": "/Car/T5/Car_Cmd_Vel"' in source
     assert '"platform_type": "wheel"' in source
     assert '"speed_multiplier": ParameterValue(speed_multiplier, value_type=float)' in source
     for name, value in CAPACITIES.items():
         assert f'"{name}": {value}' in source
     assert "/lunar_demo/" not in source
+
+
+def test_launch_composition_exposes_exact_actions_and_runtime_parameters(monkeypatch) -> None:
+    module = _launch_module()
+    monkeypatch.setattr(
+        module,
+        "get_package_share_directory",
+        lambda package: f"/opt/ros/jazzy/share/{package}",
+    )
+    with _temporary_directory() as root:
+        context = _context(str(root / "run"))
+        actions = module._compose(context, rviz_config="/tmp/demo.rviz")
+
+    assert [action.node_executable for action in actions] == [
+        "simulation_node",
+        "lunar_pure_planner_node",
+        "pure_exploration_node",
+        "lunar_pure_wheeled_controller_node.py",
+        "run_coordinator",
+        "run_recorder",
+        "simulation_hud_node",
+        "rviz2",
+    ]
+    by_executable = {action.node_executable: action for action in actions}
+    simulation = _action_parameters(by_executable["simulation_node"], context)
+    controller = _action_parameters(
+        by_executable["lunar_pure_wheeled_controller_node.py"], context
+    )
+    coordinator = _action_parameters(by_executable["run_coordinator"], context)
+    explorer = _action_parameters(by_executable["pure_exploration_node"], context)
+    assert simulation["command_topic"] == "/Car/T5/Car_Cmd_Vel"
+    assert controller == {
+        "reference_topic": "/Car/T4/execution/motion_reference",
+        "odometry_topic": "/Car/T3/localization/odometry",
+        "command_topic": "/Car/T5/Car_Cmd_Vel",
+        "execution_cancel_topic": "/Car/T4/execution/cancel",
+    }
+    assert coordinator["controller_command_topic"] == "/Car/T5/Car_Cmd_Vel"
+    for name, value in CAPACITIES.items():
+        assert explorer[name] == value
+    assert actions[-1].condition is not None
+
+
+def test_output_validation_accepts_external_and_rejects_relative_and_repo() -> None:
+    module = _launch_module()
+    with _temporary_directory() as root:
+        accepted = module._validate_output_dir(str(root / "run"), [ROOT])
+        assert accepted == (root / "run").resolve(strict=False)
+    with pytest.raises(RuntimeError, match="absolute external path"):
+        module._validate_output_dir("relative", [ROOT])
+    with pytest.raises(RuntimeError, match="outside repositories"):
+        module._validate_output_dir(str(ROOT / "run-output"), [ROOT])
+
+
+@pytest.mark.parametrize("git_marker_kind", ["file", "directory"])
+def test_output_validation_rejects_any_git_ancestor(git_marker_kind: str) -> None:
+    module = _launch_module()
+    with _temporary_directory() as root:
+        marker = root / ".git"
+        if git_marker_kind == "file":
+            marker.write_text("gitdir: elsewhere\n", encoding="utf-8")
+        else:
+            marker.mkdir()
+        with pytest.raises(RuntimeError, match="Git repository or worktree"):
+            module._validate_output_dir(str(root / "nested" / "run"), [ROOT])
 
 
 def test_static_rviz_uses_only_standard_displays_for_approved_topics() -> None:

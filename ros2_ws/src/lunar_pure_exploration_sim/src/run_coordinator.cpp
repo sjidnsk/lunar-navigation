@@ -1,6 +1,7 @@
 #include "lunar_pure_exploration_sim/run_coordinator.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -27,7 +28,8 @@ geometry_msgs::msg::Point32 BoundaryPoint(const float x, const float y) {
 bool CoordinatorReadiness::ShouldStart() const noexcept {
   return !started_ && global_map_received && local_map_received &&
          odometry_received && tf_chain_received && initial_status_received &&
-         planner_action_ready;
+         planner_action_ready && controller_publisher_unique &&
+         controller_command_received;
 }
 
 void CoordinatorReadiness::MarkStarted() noexcept { started_ = true; }
@@ -52,6 +54,16 @@ bool RequiredTfChain::complete() const noexcept {
 
 bool IsInitialExplorationStatus(const Status& status) noexcept {
   return status.state == Status::IDLE && status.task_id.empty();
+}
+
+bool IsFiniteControllerCommand(
+    const geometry_msgs::msg::Twist& command) noexcept {
+  return std::isfinite(command.linear.x) &&
+         std::isfinite(command.linear.y) &&
+         std::isfinite(command.linear.z) &&
+         std::isfinite(command.angular.x) &&
+         std::isfinite(command.angular.y) &&
+         std::isfinite(command.angular.z);
 }
 
 Task MakeExplorationStartTask(const std::uint64_t seed,
@@ -89,6 +101,8 @@ RunCoordinator::RunCoordinator(const rclcpp::NodeOptions& options)
       "exploration_task_topic", "/Car/T4/exploration/task");
   const auto planner_action = declare_parameter<std::string>(
       "planner_action", "/Car/T4/plan_motion");
+  const auto controller_command_topic = declare_parameter<std::string>(
+      "controller_command_topic", "/Car/T5/Car_Cmd_Vel");
 
   const auto input_qos = rclcpp::QoS{rclcpp::KeepLast{10}}.reliable();
   global_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
@@ -119,6 +133,14 @@ RunCoordinator::RunCoordinator(const rclcpp::NodeOptions& options)
           readiness_.initial_status_received = true;
         }
       });
+  controller_command_sub_ = create_subscription<geometry_msgs::msg::Twist>(
+      controller_command_topic, input_qos,
+      [this](geometry_msgs::msg::Twist::ConstSharedPtr message) {
+        if (controller_command_sub_->get_publisher_count() == 1U &&
+            IsFiniteControllerCommand(*message)) {
+          readiness_.controller_command_received = true;
+        }
+      });
 
   task_pub_ = create_publisher<Task>(
       task_topic, rclcpp::QoS{1}.reliable().transient_local());
@@ -129,6 +151,11 @@ RunCoordinator::RunCoordinator(const rclcpp::NodeOptions& options)
 
 void RunCoordinator::PollReadiness() {
   readiness_.planner_action_ready = planner_client_->action_server_is_ready();
+  readiness_.controller_publisher_unique =
+      controller_command_sub_->get_publisher_count() == 1U;
+  if (!readiness_.controller_publisher_unique) {
+    readiness_.controller_command_received = false;
+  }
   if (!readiness_.ShouldStart() || task_pub_->get_subscription_count() == 0U) {
     return;
   }

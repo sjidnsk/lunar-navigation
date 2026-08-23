@@ -1,12 +1,14 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <geometry_msgs/msg/twist.hpp>
 #include <rclcpp/time.hpp>
 #include <rclcpp_action/create_server.hpp>
 
@@ -58,18 +60,22 @@ CoordinatorReadiness FullyReady() {
   readiness.tf_chain_received = true;
   readiness.initial_status_received = true;
   readiness.planner_action_ready = true;
+  readiness.controller_publisher_unique = true;
+  readiness.controller_command_received = true;
   return readiness;
 }
 
 TEST(CoordinatorReadinessTest, EveryRequiredInputIndependentlyBlocksStart) {
   using Member = bool CoordinatorReadiness::*;
-  constexpr std::array<Member, 6> required_inputs{
+  constexpr std::array<Member, 8> required_inputs{
       &CoordinatorReadiness::global_map_received,
       &CoordinatorReadiness::local_map_received,
       &CoordinatorReadiness::odometry_received,
       &CoordinatorReadiness::tf_chain_received,
       &CoordinatorReadiness::initial_status_received,
       &CoordinatorReadiness::planner_action_ready,
+      &CoordinatorReadiness::controller_publisher_unique,
+      &CoordinatorReadiness::controller_command_received,
   };
 
   for (const Member missing : required_inputs) {
@@ -77,6 +83,17 @@ TEST(CoordinatorReadinessTest, EveryRequiredInputIndependentlyBlocksStart) {
     readiness.*missing = false;
     EXPECT_FALSE(readiness.ShouldStart());
   }
+}
+
+TEST(CoordinatorReadinessTest, AcceptsOnlyFullyFiniteControllerCommands) {
+  geometry_msgs::msg::Twist command;
+  EXPECT_TRUE(IsFiniteControllerCommand(command));
+
+  command.linear.x = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(IsFiniteControllerCommand(command));
+  command.linear.x = 0.0;
+  command.angular.z = std::numeric_limits<double>::infinity();
+  EXPECT_FALSE(IsFiniteControllerCommand(command));
 }
 
 TEST(CoordinatorReadinessTest, StartDecisionIsOneShotAfterMarkStarted) {
@@ -166,6 +183,12 @@ TEST_F(RosContextTest, RejectsNegativeSeedBeforeCreatingInterfaces) {
       std::invalid_argument);
 }
 
+TEST_F(RosContextTest, DeclaresExactControllerCommandTopicDefault) {
+  const auto coordinator = std::make_shared<RunCoordinator>();
+  EXPECT_EQ(coordinator->get_parameter("controller_command_topic").as_string(),
+            "/Car/T5/Car_Cmd_Vel");
+}
+
 TEST_F(RosContextTest, WaitsForVolatileTaskSubscriberThenPublishesOnce) {
   const std::string prefix = "/coordinator_delivery_test";
   rclcpp::NodeOptions coordinator_options;
@@ -178,6 +201,7 @@ TEST_F(RosContextTest, WaitsForVolatileTaskSubscriberThenPublishesOnce) {
       rclcpp::Parameter("exploration_status_topic", prefix + "/status"),
       rclcpp::Parameter("exploration_task_topic", prefix + "/task"),
       rclcpp::Parameter("planner_action", prefix + "/plan_motion"),
+      rclcpp::Parameter("controller_command_topic", prefix + "/command"),
   });
   auto coordinator = std::make_shared<RunCoordinator>(coordinator_options);
   auto harness = std::make_shared<rclcpp::Node>("coordinator_delivery_harness");
@@ -193,6 +217,8 @@ TEST_F(RosContextTest, WaitsForVolatileTaskSubscriberThenPublishesOnce) {
   const auto status_pub = harness->create_publisher<
       lunar_pure_exploration_msgs::msg::PureExplorationStatus>(
       prefix + "/status", rclcpp::QoS{1}.reliable().transient_local());
+  const auto command_pub = harness->create_publisher<geometry_msgs::msg::Twist>(
+      prefix + "/command", reliable);
   const auto make_action_server = [&] {
     return rclcpp_action::create_server<Action>(
         harness, prefix + "/plan_motion",
@@ -215,7 +241,8 @@ TEST_F(RosContextTest, WaitsForVolatileTaskSubscriberThenPublishesOnce) {
            local_pub->get_subscription_count() == 1U &&
            odometry_pub->get_subscription_count() == 1U &&
            tf_pub->get_subscription_count() == 1U &&
-           status_pub->get_subscription_count() == 1U;
+           status_pub->get_subscription_count() == 1U &&
+           command_pub->get_subscription_count() == 1U;
   }));
 
   nav_msgs::msg::OccupancyGrid global;
@@ -235,12 +262,6 @@ TEST_F(RosContextTest, WaitsForVolatileTaskSubscriberThenPublishesOnce) {
   tf_pub->publish(transforms);
   status_pub->publish(status);
 
-  ASSERT_TRUE(SpinUntil(executor, [&] {
-    return harness->count_publishers(prefix + "/task") == 1U;
-  }));
-  std::this_thread::sleep_for(250ms);
-  executor.spin_some();
-
   std::vector<Task> received_tasks;
   const auto task_sub = harness->create_subscription<Task>(
       prefix + "/task", rclcpp::QoS{1}.reliable(),
@@ -250,6 +271,35 @@ TEST_F(RosContextTest, WaitsForVolatileTaskSubscriberThenPublishesOnce) {
   ASSERT_TRUE(SpinUntil(executor, [&] {
     return task_sub->get_publisher_count() == 1U;
   }));
+  EXPECT_FALSE(SpinUntil(executor, [&] { return !received_tasks.empty(); }, 250ms));
+
+  geometry_msgs::msg::Twist invalid_command;
+  invalid_command.linear.x = std::numeric_limits<double>::quiet_NaN();
+  command_pub->publish(invalid_command);
+  EXPECT_FALSE(SpinUntil(executor, [&] { return !received_tasks.empty(); }, 250ms));
+
+  auto duplicate_command_pub =
+      harness->create_publisher<geometry_msgs::msg::Twist>(prefix + "/command",
+                                                           reliable);
+  ASSERT_TRUE(SpinUntil(executor, [&] {
+    return harness->count_publishers(prefix + "/command") == 2U;
+  }));
+  geometry_msgs::msg::Twist finite_command;
+  command_pub->publish(finite_command);
+  EXPECT_FALSE(SpinUntil(executor, [&] { return !received_tasks.empty(); }, 250ms));
+  duplicate_command_pub.reset();
+  ASSERT_TRUE(SpinUntil(executor, [&] {
+    return harness->count_publishers(prefix + "/command") == 1U;
+  }));
+  EXPECT_FALSE(SpinUntil(executor, [&] { return !received_tasks.empty(); }, 250ms));
+  command_pub->publish(finite_command);
+
+  ASSERT_TRUE(SpinUntil(executor, [&] {
+    return harness->count_publishers(prefix + "/task") == 1U;
+  }));
+  std::this_thread::sleep_for(250ms);
+  executor.spin_some();
+
   ASSERT_TRUE(SpinUntil(executor, [&] { return received_tasks.size() == 1U; }));
   ASSERT_EQ(received_tasks.size(), 1U);
   const auto& received = received_tasks.front();

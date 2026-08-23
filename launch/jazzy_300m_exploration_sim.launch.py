@@ -75,14 +75,28 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
-def _compose(context, *, rviz_config: str):
-    output_dir = LaunchConfiguration("output_dir").perform(context).strip()
+def _validate_output_dir(output_dir: str, repository_roots: list[Path]) -> Path:
     if not output_dir or not Path(output_dir).is_absolute():
         raise RuntimeError("output_dir must be an absolute external path")
     normalized_output = Path(output_dir).resolve(strict=False)
+    if any(_is_within(normalized_output, root.resolve(strict=False))
+           for root in repository_roots):
+        raise RuntimeError(
+            "output_dir must be an absolute external path outside repositories"
+        )
+    for ancestor in (normalized_output, *normalized_output.parents):
+        git_marker = ancestor / ".git"
+        if git_marker.is_file() or git_marker.is_dir():
+            raise RuntimeError(
+                "output_dir must not be inside a Git repository or worktree"
+            )
+    return normalized_output
+
+
+def _compose(context, *, rviz_config: str):
+    output_dir = LaunchConfiguration("output_dir").perform(context).strip()
     repository_roots = _repository_roots()
-    if any(_is_within(normalized_output, root) for root in repository_roots):
-        raise RuntimeError("output_dir must be an absolute external path outside repositories")
+    normalized_output = _validate_output_dir(output_dir, repository_roots)
 
     seed = LaunchConfiguration("seed")
     speed_multiplier = LaunchConfiguration("speed_multiplier")
@@ -179,6 +193,7 @@ def _compose(context, *, rviz_config: str):
             "exploration_status_topic": INTERFACES["status"],
             "exploration_task_topic": INTERFACES["task"],
             "planner_action": INTERFACES["plan_motion"],
+            "controller_command_topic": "/Car/T5/Car_Cmd_Vel",
         }],
         output="screen",
     )
