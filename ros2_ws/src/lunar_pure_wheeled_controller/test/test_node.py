@@ -225,13 +225,19 @@ def test_invalid_replacement_publishes_zero_and_clears_active_reference(controll
     """A mutation that retains a prior path after invalid input must fail this test."""
     controller, observer, received, _ = controller_with_observer
 
-    controller._on_path(make_path())
+    controller._on_reference(make_trajectory_reference([
+        (0.0, 0.0, 0.0, 0.2),
+        (1.0, 0.0, 0.0, 0.2),
+    ]))
+    controller._trajectory_cursor = 1
     controller._on_odometry(make_odometry(x=0.0))
     controller._on_path(Path())
     wait_for_twists(controller, observer, received)
     controller._tick()
     wait_for_twists(controller, observer, received, count=2)
 
+    assert controller._active is None
+    assert controller._trajectory_cursor == 0
     assert received[-2].linear.x == 0.0
     assert received[-2].angular.z == 0.0
     assert received[-1].linear.x == 0.0
@@ -242,10 +248,17 @@ def test_goal_completion_publishes_zero_and_clears_active_reference(controller_w
     """A mutation that keeps commanding after a reached goal must fail this test."""
     controller, observer, received, _ = controller_with_observer
 
-    controller._on_path(make_path(goal_x=0.1))
+    controller._on_reference(make_trajectory_reference([
+        (0.0, 0.0, 0.0, 0.2),
+        (0.1, 0.0, 0.0, 0.0),
+    ]))
     controller._on_odometry(make_odometry(x=0.0))
     controller._tick()
     wait_for_twists(controller, observer, received)
+
+    assert controller._active is None
+    assert controller._trajectory_cursor == 0
+
     controller._tick()
     wait_for_twists(controller, observer, received, count=2)
 
@@ -259,10 +272,18 @@ def test_path_deviation_publishes_zero_and_clears_active_reference(controller_wi
     """A mutation that drives despite excessive cross-track error must fail this test."""
     controller, observer, received, _ = controller_with_observer
 
-    controller._on_path(make_path())
+    controller._on_reference(make_trajectory_reference([
+        (0.0, 0.0, 0.0, 0.2),
+        (2.0, 0.0, 0.0, 0.2),
+    ]))
+    controller._trajectory_cursor = 1
     controller._on_odometry(make_odometry(x=0.0, y=1.1))
     controller._tick()
     wait_for_twists(controller, observer, received)
+
+    assert controller._active is None
+    assert controller._trajectory_cursor == 0
+
     controller._tick()
     wait_for_twists(controller, observer, received, count=2)
 

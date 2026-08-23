@@ -125,6 +125,7 @@ class PureWheeledControllerNode(Node):
         parsed = parse_path(path)
         if parsed.reason is not None:
             self._active = None
+            self._trajectory_cursor = 0
             self._publish_twist()
             return
         self._active = parsed
@@ -172,6 +173,7 @@ class PureWheeledControllerNode(Node):
         self._publish_twist(command.linear_x_mps, command.angular_z_radps)
         if command.complete or command.failure_reason is not None:
             self._active = None
+            self._trajectory_cursor = 0
 
     def _publish_twist(self, linear: float = 0.0, angular: float = 0.0) -> None:
         message = Twist()
