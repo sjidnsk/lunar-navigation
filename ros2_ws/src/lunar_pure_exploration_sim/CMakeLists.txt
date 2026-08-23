@@ -106,6 +106,11 @@ if(BUILD_TESTING)
   target_include_directories(run_recorder_test PRIVATE
     ${NLOHMANN_JSON_INCLUDE_DIRS})
   target_link_libraries(run_recorder_test ${PROJECT_NAME})
+
+  add_test(NAME run_recorder_no_recursive_cleanup
+    COMMAND ${CMAKE_COMMAND}
+      -DRECORDER_TEST_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/test/run_recorder_test.cpp
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/test/no_recursive_cleanup.cmake)
 endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)

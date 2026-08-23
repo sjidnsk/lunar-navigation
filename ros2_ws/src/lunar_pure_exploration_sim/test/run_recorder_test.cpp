@@ -31,8 +31,9 @@ class ScopedTempDirectory final {
     std::filesystem::create_directories(path_);
   }
   ~ScopedTempDirectory() {
-    std::error_code ignored;
-    std::filesystem::remove_all(path_, ignored);
+    if (!Cleanup()) {
+      ADD_FAILURE() << cleanup_error_;
+    }
   }
   ScopedTempDirectory(const ScopedTempDirectory&) = delete;
   ScopedTempDirectory& operator=(const ScopedTempDirectory&) = delete;
@@ -41,9 +42,57 @@ class ScopedTempDirectory final {
     return path_;
   }
 
+  [[nodiscard]] bool Cleanup() noexcept {
+    if (cleaned_) {
+      return true;
+    }
+    const auto remove_known = [this](const std::filesystem::path& target) {
+      std::error_code status_error;
+      const auto status = std::filesystem::symlink_status(target, status_error);
+      if (status_error == std::errc::no_such_file_or_directory ||
+          status.type() == std::filesystem::file_type::not_found) {
+        return true;
+      }
+      if (status_error) {
+        cleanup_error_ = "cannot inspect " + target.string() + ": " +
+                         status_error.message();
+        return false;
+      }
+      std::error_code remove_error;
+      const bool removed = std::filesystem::remove(target, remove_error);
+      if (remove_error || !removed) {
+        cleanup_error_ = "cannot remove " + target.string() + ": " +
+                         (remove_error ? remove_error.message()
+                                       : std::string{"path not removed"});
+        return false;
+      }
+      return true;
+    };
+    const auto remove_result_files = [&remove_known](
+                                         const std::filesystem::path& dir) {
+      return remove_known(dir / "coverage.csv") &&
+             remove_known(dir / "trajectory.csv") &&
+             remove_known(dir / "summary.json") &&
+             remove_known(dir / "summary.json.tmp");
+    };
+    const auto results = path_ / "results";
+    const auto repository_runtime = path_ / "repository" / "runtime";
+    if (!remove_result_files(results) ||
+        !remove_result_files(repository_runtime) ||
+        !remove_known(path_ / "repository-link") ||
+        !remove_known(repository_runtime) || !remove_known(results) ||
+        !remove_known(path_ / "repository") || !remove_known(path_)) {
+      return false;
+    }
+    cleaned_ = true;
+    return true;
+  }
+
  private:
   static std::uint64_t sequence_;
   std::filesystem::path path_;
+  std::string cleanup_error_;
+  bool cleaned_{false};
 };
 
 std::uint64_t ScopedTempDirectory::sequence_ = 0U;

@@ -1,0 +1,10 @@
+if(NOT DEFINED RECORDER_TEST_SOURCE)
+  message(FATAL_ERROR "RECORDER_TEST_SOURCE is required")
+endif()
+
+file(READ "${RECORDER_TEST_SOURCE}" SOURCE_TEXT)
+string(CONCAT FORBIDDEN_CALL "remove" "_all")
+string(FIND "${SOURCE_TEXT}" "${FORBIDDEN_CALL}" MATCH_POSITION)
+if(NOT MATCH_POSITION EQUAL -1)
+  message(FATAL_ERROR "recorder tests contain forbidden recursive cleanup")
+endif()
