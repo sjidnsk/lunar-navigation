@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,7 @@ struct AraStarProblem final {
   GoalFn is_goal;
   StateExpandableFn state_expandable;
   RelaxedFn on_relaxed;
+  std::optional<SearchCandidate> certified_initial_candidate;
   bool edges_are_stably_sorted{};
   AnytimeSearchConfig config;
   SearchControl control;

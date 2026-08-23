@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <string>
 #include <stdexcept>
@@ -17,6 +18,31 @@ namespace lunar::pure_planning::shared::anytime {
 namespace {
 
 using namespace std::chrono_literals;
+
+std::size_t StablePathIndexForTest(
+    const std::vector<std::size_t>& stable_edges) {
+  std::uint64_t hash = 1469598103934665603ULL;
+  for (const std::size_t edge : stable_edges) {
+    std::uint64_t value = static_cast<std::uint64_t>(edge);
+    for (std::size_t byte = 0U; byte < sizeof(value); ++byte) {
+      hash ^= value & 0xffU;
+      hash *= 1099511628211ULL;
+      value >>= 8U;
+    }
+  }
+  return static_cast<std::size_t>(hash);
+}
+
+SearchCandidate CertifiedCandidate(std::vector<std::size_t> states,
+                                   std::vector<std::size_t> stable_edges,
+                                   const double cost) {
+  return SearchCandidate{
+      .states = std::move(states),
+      .stable_edge_indices = stable_edges,
+      .cost = cost,
+      .stable_index = StablePathIndexForTest(stable_edges),
+  };
+}
 
 AraStarProblem MakeImprovementProblem(std::vector<std::size_t>& expand_calls) {
   AraStarProblem problem;
@@ -575,6 +601,196 @@ TEST(AraStarAnytime, DoesNotAllocateTheNominalStateCount) {
   ASSERT_EQ(result.candidates.size(), 1U);
   EXPECT_EQ(result.candidates.front().states,
             (std::vector<std::size_t>{0U, 1U}));
+}
+
+TEST(AraStarAnytime, ReturnsCertifiedOpaqueInitialCandidateWithoutExpansion) {
+  std::size_t expand_calls = 0U;
+  AraStarProblem problem;
+  problem.state_count = 1U;
+  problem.start_state = 0U;
+  problem.heuristic = [](std::size_t) { return 0.0; };
+  problem.is_goal = [](const std::size_t state) {
+    return state == std::numeric_limits<std::size_t>::max();
+  };
+  problem.expand = [&expand_calls](std::size_t, double,
+                                   std::vector<GraphEdge>&) {
+    ++expand_calls;
+  };
+  problem.config.stop_after_first_solution = true;
+  problem.certified_initial_candidate = CertifiedCandidate(
+      {0U, std::numeric_limits<std::size_t>::max()}, {91U}, 7.0);
+
+  const auto result = SearchAnytimeAraStar(problem);
+
+  ASSERT_EQ(result.status, AraStarStatus::kSolved) << result.reason_code;
+  ASSERT_EQ(result.candidates.size(), 1U);
+  EXPECT_EQ(result.candidates.front(), *problem.certified_initial_candidate);
+  EXPECT_EQ(result.expanded_states, 0U);
+  EXPECT_EQ(result.generated_states, 0U);
+  EXPECT_EQ(expand_calls, 0U);
+  EXPECT_EQ(result.epsilon_history, (std::vector<double>{2.5}));
+}
+
+TEST(AraStarAnytime, UsesCertifiedInitialCandidateAsAnImprovementBound) {
+  std::size_t expand_calls = 0U;
+  AraStarProblem problem;
+  problem.state_count = 2U;
+  problem.start_state = 0U;
+  problem.heuristic = [](std::size_t) { return 0.0; };
+  problem.is_goal = [](const std::size_t state) {
+    return state == 1U ||
+           state == std::numeric_limits<std::size_t>::max();
+  };
+  problem.expand = [&expand_calls](const std::size_t state, const double,
+                                   std::vector<GraphEdge>& edges) {
+    ++expand_calls;
+    if (state == 0U) {
+      edges = {{.target_state = 1U, .cost = 3.0, .stable_index = 10U}};
+    }
+  };
+  problem.certified_initial_candidate =
+      CertifiedCandidate({0U, std::numeric_limits<std::size_t>::max()},
+                         {3U}, 5.0);
+
+  const auto result = SearchAnytimeAraStar(problem);
+
+  ASSERT_EQ(result.status, AraStarStatus::kSolved) << result.reason_code;
+  ASSERT_EQ(result.candidates.size(), 2U);
+  EXPECT_EQ(result.candidates.front(), *problem.certified_initial_candidate);
+  EXPECT_DOUBLE_EQ(result.candidates.back().cost, 3.0);
+  EXPECT_EQ(result.candidates.back().states,
+            (std::vector<std::size_t>{0U, 1U}));
+  EXPECT_EQ(result.expanded_states, 1U);
+  EXPECT_EQ(expand_calls, 1U);
+}
+
+TEST(AraStarAnytime, BreaksEqualCostIncumbentsByStablePathIndex) {
+  AraStarProblem problem;
+  problem.state_count = 2U;
+  problem.start_state = 0U;
+  problem.heuristic = [](std::size_t) { return 0.0; };
+  problem.is_goal = [](const std::size_t state) {
+    return state == 1U || state == 99U;
+  };
+  problem.expand = [](const std::size_t state, const double,
+                      std::vector<GraphEdge>& edges) {
+    if (state == 0U) {
+      edges = {{.target_state = 1U, .cost = 5.0, .stable_index = 10U}};
+    }
+  };
+  problem.certified_initial_candidate =
+      CertifiedCandidate({0U, 99U}, {3U}, 5.0);
+  ASSERT_LT(StablePathIndexForTest({10U}),
+            problem.certified_initial_candidate->stable_index);
+
+  const auto result = SearchAnytimeAraStar(problem);
+
+  ASSERT_EQ(result.status, AraStarStatus::kSolved) << result.reason_code;
+  ASSERT_EQ(result.candidates.size(), 2U);
+  EXPECT_EQ(result.candidates.back().stable_index,
+            StablePathIndexForTest({10U}));
+  EXPECT_EQ(result.candidates.back().states,
+            (std::vector<std::size_t>{0U, 1U}));
+}
+
+TEST(AraStarAnytime, KeepsLowerStableInitialCandidateAtEqualCost) {
+  AraStarProblem problem;
+  problem.state_count = 2U;
+  problem.start_state = 0U;
+  problem.heuristic = [](std::size_t) { return 0.0; };
+  problem.is_goal = [](const std::size_t state) {
+    return state == 1U || state == 99U;
+  };
+  problem.expand = [](const std::size_t state, const double,
+                      std::vector<GraphEdge>& edges) {
+    if (state == 0U) {
+      edges = {{.target_state = 1U, .cost = 5.0, .stable_index = 3U}};
+    }
+  };
+  problem.certified_initial_candidate =
+      CertifiedCandidate({0U, 99U}, {10U}, 5.0);
+  ASSERT_LT(problem.certified_initial_candidate->stable_index,
+            StablePathIndexForTest({3U}));
+
+  const auto result = SearchAnytimeAraStar(problem);
+
+  ASSERT_EQ(result.status, AraStarStatus::kSolved) << result.reason_code;
+  ASSERT_EQ(result.candidates.size(), 1U);
+  EXPECT_EQ(result.candidates.front(), *problem.certified_initial_candidate);
+}
+
+TEST(AraStarAnytime, RejectsMalformedCertifiedInitialCandidates) {
+  const auto make_problem = [] {
+    AraStarProblem problem;
+    problem.state_count = 2U;
+    problem.start_state = 0U;
+    problem.heuristic = [](std::size_t) { return 0.0; };
+    problem.is_goal = [](const std::size_t state) { return state == 1U; };
+    problem.expand = [](std::size_t, double, std::vector<GraphEdge>&) {};
+    return problem;
+  };
+  const auto expect_invalid = [&](SearchCandidate candidate) {
+    AraStarProblem problem = make_problem();
+    problem.certified_initial_candidate = std::move(candidate);
+    const auto result = SearchAnytimeAraStar(problem);
+    EXPECT_EQ(result.status, AraStarStatus::kInvalidProblem);
+    EXPECT_EQ(result.reason_code, "SEARCH_INITIAL_CANDIDATE_INVALID");
+    EXPECT_TRUE(result.candidates.empty());
+    EXPECT_EQ(result.expanded_states, 0U);
+  };
+
+  expect_invalid(CertifiedCandidate({}, {}, 0.0));
+  expect_invalid(CertifiedCandidate({1U}, {}, 0.0));
+  expect_invalid(CertifiedCandidate({0U, 1U}, {}, 1.0));
+  expect_invalid(CertifiedCandidate({0U, 1U}, {7U}, -1.0));
+  expect_invalid(CertifiedCandidate(
+      {0U, 1U}, {7U}, std::numeric_limits<double>::infinity()));
+  expect_invalid(CertifiedCandidate(
+      {0U, 1U}, {7U}, std::numeric_limits<double>::quiet_NaN()));
+  auto wrong_stable_index = CertifiedCandidate({0U, 1U}, {7U}, 1.0);
+  ++wrong_stable_index.stable_index;
+  expect_invalid(std::move(wrong_stable_index));
+  expect_invalid(CertifiedCandidate({0U, 2U}, {7U}, 1.0));
+}
+
+TEST(AraStarAnytime, GivesCancellationPriorityOverInitialCandidate) {
+  std::stop_source stop_source;
+  stop_source.request_stop();
+  AraStarProblem problem;
+  problem.state_count = 1U;
+  problem.start_state = 0U;
+  problem.heuristic = [](std::size_t) { return 0.0; };
+  problem.is_goal = [](std::size_t) { return true; };
+  problem.expand = [](std::size_t, double, std::vector<GraphEdge>&) {};
+  problem.control.stop_token = stop_source.get_token();
+  problem.config.stop_after_first_solution = true;
+  problem.certified_initial_candidate = CertifiedCandidate({}, {}, -1.0);
+
+  const auto result = SearchAnytimeAraStar(problem);
+
+  EXPECT_EQ(result.status, AraStarStatus::kCanceled);
+  EXPECT_EQ(result.reason_code, "REQUEST_CANCELED");
+}
+
+TEST(AraStarAnytime, GivesCancellationPriorityAfterInitialGoalValidation) {
+  std::stop_source stop_source;
+  AraStarProblem problem;
+  problem.state_count = 1U;
+  problem.start_state = 0U;
+  problem.heuristic = [](std::size_t) { return 0.0; };
+  problem.is_goal = [&stop_source](std::size_t) {
+    stop_source.request_stop();
+    return false;
+  };
+  problem.expand = [](std::size_t, double, std::vector<GraphEdge>&) {};
+  problem.control.stop_token = stop_source.get_token();
+  problem.certified_initial_candidate =
+      CertifiedCandidate({0U}, {}, 0.0);
+
+  const auto result = SearchAnytimeAraStar(problem);
+
+  EXPECT_EQ(result.status, AraStarStatus::kCanceled);
+  EXPECT_EQ(result.reason_code, "REQUEST_CANCELED");
 }
 
 }  // namespace

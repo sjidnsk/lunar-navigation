@@ -74,17 +74,6 @@ struct OpenEntryGreater final {
   };
 }
 
-[[nodiscard]] std::string ValidateStructure(const AraStarProblem& problem) {
-  if (problem.state_count == 0U || problem.start_state >= problem.state_count ||
-      !problem.expand || !problem.heuristic || !problem.is_goal) {
-    return "SEARCH_SHAPE_INVALID";
-  }
-  if (problem.config.epsilon_schedule != kEpsilonSchedule) {
-    return "SEARCH_EPSILON_SCHEDULE_INVALID";
-  }
-  return {};
-}
-
 [[nodiscard]] std::size_t StablePathIndex(
     const std::vector<std::size_t>& stable_edges) noexcept {
   std::uint64_t hash = 1469598103934665603ULL;
@@ -97,6 +86,35 @@ struct OpenEntryGreater final {
     }
   }
   return static_cast<std::size_t>(hash);
+}
+
+[[nodiscard]] std::string ValidateStructure(const AraStarProblem& problem) {
+  if (problem.state_count == 0U || problem.start_state >= problem.state_count ||
+      !problem.expand || !problem.heuristic || !problem.is_goal) {
+    return "SEARCH_SHAPE_INVALID";
+  }
+  if (problem.config.epsilon_schedule != kEpsilonSchedule) {
+    return "SEARCH_EPSILON_SCHEDULE_INVALID";
+  }
+  return {};
+}
+
+[[nodiscard]] std::string ValidateCertifiedInitialCandidate(
+    const AraStarProblem& problem) {
+  if (!problem.certified_initial_candidate.has_value()) {
+    return {};
+  }
+  const SearchCandidate& candidate = *problem.certified_initial_candidate;
+  if (candidate.states.empty() ||
+      candidate.states.front() != problem.start_state ||
+      candidate.stable_edge_indices.size() != candidate.states.size() - 1U ||
+      !std::isfinite(candidate.cost) || candidate.cost < 0.0 ||
+      candidate.stable_index !=
+          StablePathIndex(candidate.stable_edge_indices) ||
+      !problem.is_goal(candidate.states.back())) {
+    return "SEARCH_INITIAL_CANDIDATE_INVALID";
+  }
+  return {};
 }
 
 [[nodiscard]] std::optional<SearchCandidate> ReconstructCandidate(
@@ -141,12 +159,30 @@ AraStarResult SearchAnytimeAraStar(const AraStarProblem& problem) try {
   if (const std::string reason = ValidateStructure(problem); !reason.empty()) {
     return Failure(AraStarStatus::kInvalidProblem, reason);
   }
+  const std::string initial_candidate_reason =
+      ValidateCertifiedInitialCandidate(problem);
+  if (problem.control.canceled()) {
+    return Failure(AraStarStatus::kCanceled, "REQUEST_CANCELED");
+  }
+  if (!initial_candidate_reason.empty()) {
+    return Failure(AraStarStatus::kInvalidProblem, initial_candidate_reason);
+  }
+  if (problem.certified_initial_candidate.has_value() &&
+      problem.config.stop_after_first_solution) {
+    return Failure(AraStarStatus::kSolved, "SEARCH_SOLVED", 0U, 0U, 0U, 0U,
+                   {kEpsilonSchedule.front()}, false,
+                   {*problem.certified_initial_candidate});
+  }
   if (problem.control.expired()) {
     if (problem.control.canceled()) {
       return Failure(AraStarStatus::kCanceled, "REQUEST_CANCELED");
     }
-    return Failure(AraStarStatus::kTimedOut, "TIMEOUT", 0U, 0U, 0U, 0U,
-                   {}, true);
+    return problem.certified_initial_candidate.has_value()
+               ? Failure(AraStarStatus::kSolved, "SEARCH_SOLVED", 0U, 0U,
+                         0U, 0U, {}, true,
+                         {*problem.certified_initial_candidate})
+               : Failure(AraStarStatus::kTimedOut, "TIMEOUT", 0U, 0U, 0U,
+                         0U, {}, true);
   }
 
   std::vector<SearchNode> nodes(problem.start_state + 1U);
@@ -155,8 +191,11 @@ AraStarResult SearchAnytimeAraStar(const AraStarProblem& problem) try {
   std::vector<std::size_t> incons_states;
   std::vector<std::size_t> closed_states;
   std::vector<SearchCandidate> candidates;
-  std::optional<std::size_t> incumbent_goal;
-  std::optional<double> incumbent_cost;
+  std::optional<SearchCandidate> incumbent;
+  if (problem.certified_initial_candidate.has_value()) {
+    incumbent = *problem.certified_initial_candidate;
+    candidates.push_back(*incumbent);
+  }
   std::vector<double> epsilon_history;
   std::size_t expanded_states = 0U;
   std::size_t generated_states = 0U;
@@ -184,7 +223,7 @@ AraStarResult SearchAnytimeAraStar(const AraStarProblem& problem) try {
       if (problem.control.canceled()) {
         return finish(AraStarStatus::kCanceled, "REQUEST_CANCELED");
       }
-      return incumbent_goal.has_value()
+      return incumbent.has_value()
                  ? finish(AraStarStatus::kSolved, "SEARCH_SOLVED", true)
                  : finish(AraStarStatus::kTimedOut, "TIMEOUT", true);
     }
@@ -264,16 +303,25 @@ AraStarResult SearchAnytimeAraStar(const AraStarProblem& problem) try {
   };
   const auto update_incumbent = [&](const std::size_t goal)
       -> std::optional<AraStarResult> {
-    if (!incumbent_cost.has_value() ||
-        nodes[goal].path_cost + kCostTolerance < *incumbent_cost) {
-      const auto candidate =
-          ReconstructCandidate(problem.start_state, goal, nodes);
-      if (!candidate.has_value()) {
-        return finish(AraStarStatus::kInvalidProblem,
-                      "SEARCH_PARENT_CHAIN_INVALID");
-      }
-      incumbent_goal = goal;
-      incumbent_cost = nodes[goal].path_cost;
+    if (incumbent.has_value() &&
+        incumbent->cost + kCostTolerance < nodes[goal].path_cost) {
+      return std::nullopt;
+    }
+    const auto candidate =
+        ReconstructCandidate(problem.start_state, goal, nodes);
+    if (!candidate.has_value()) {
+      return finish(AraStarStatus::kInvalidProblem,
+                    "SEARCH_PARENT_CHAIN_INVALID");
+    }
+    const bool lower_cost =
+        !incumbent.has_value() ||
+        candidate->cost + kCostTolerance < incumbent->cost;
+    const bool equal_cost_lower_stable =
+        incumbent.has_value() &&
+        std::abs(candidate->cost - incumbent->cost) <= kCostTolerance &&
+        candidate->stable_index < incumbent->stable_index;
+    if (lower_cost || equal_cost_lower_stable) {
+      incumbent = *candidate;
       candidates.push_back(*candidate);
     }
     return std::nullopt;
@@ -362,8 +410,8 @@ AraStarResult SearchAnytimeAraStar(const AraStarProblem& problem) try {
           if (open.empty()) {
             break;
           }
-          if (incumbent_cost.has_value() &&
-              *incumbent_cost <= open.top().anchor_key + kCostTolerance) {
+          if (incumbent.has_value() &&
+              incumbent->cost <= open.top().anchor_key + kCostTolerance) {
             break;
           }
 
@@ -518,7 +566,7 @@ AraStarResult SearchAnytimeAraStar(const AraStarProblem& problem) try {
         return *failure;
       }
       if (open.empty() && incons_states.empty()) {
-        return incumbent_goal.has_value()
+        return incumbent.has_value()
                    ? finish(AraStarStatus::kSolved, "SEARCH_SOLVED")
                    : finish(AraStarStatus::kNoPath, "SEARCH_NO_PATH");
       }
@@ -530,7 +578,7 @@ AraStarResult SearchAnytimeAraStar(const AraStarProblem& problem) try {
       }
     }
 
-    return incumbent_goal.has_value()
+    return incumbent.has_value()
                ? finish(AraStarStatus::kSolved, "SEARCH_SOLVED")
                : finish(AraStarStatus::kNoPath, "SEARCH_NO_PATH");
   } catch (const std::bad_alloc&) {
