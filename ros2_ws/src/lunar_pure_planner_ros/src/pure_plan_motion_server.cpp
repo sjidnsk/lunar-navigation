@@ -232,8 +232,7 @@ void SetDiagnosticValue(diagnostic_msgs::msg::DiagnosticArray& diagnostics,
 void SetFinalizedTiming(
     const std::chrono::nanoseconds elapsed,
     lunar::pure_planning::PlanningResult& result,
-    Action::Result& action_result,
-    diagnostic_msgs::msg::DiagnosticArray& diagnostics) {
+    Action::Result& action_result) {
   result.timing.total_elapsed = elapsed;
   action_result.diagnostics.elapsed_s =
       std::chrono::duration<double>(elapsed).count();
@@ -250,6 +249,16 @@ void SetFinalizedTiming(
     action_result.diagnostics.warning_codes.emplace_back(
         "PLANNING_SLA_MISSED");
   }
+}
+
+void SetFinalizedTiming(
+    const std::chrono::nanoseconds elapsed,
+    lunar::pure_planning::PlanningResult& result,
+    Action::Result& action_result,
+    diagnostic_msgs::msg::DiagnosticArray& diagnostics) {
+  SetFinalizedTiming(elapsed, result, action_result);
+  const auto latency_class =
+      lunar::pure_planning::ClassifyRequestLatency(elapsed);
   std::ostringstream milliseconds;
   milliseconds << std::setprecision(15)
                << std::chrono::duration<double, std::milli>(elapsed).count();
@@ -668,6 +677,14 @@ struct PurePlanMotionServer::Impl final {
     global_request.config.search.stop_after_first_solution = true;
     const auto global = lunar::pure_planning::hierarchical::PlanSurfaceGlobal(
         global_request, global_request.control);
+    const auto global_finalized = std::chrono::steady_clock::now();
+    if (stop_token.stop_requested() ||
+        global.reason_code == "REQUEST_CANCELED") {
+      return Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED");
+    }
+    if (global_finalized >= global_timing.hard_deadline) {
+      return Failure(PlanningStatus::kTimedOut, "TIMEOUT");
+    }
     if (!global.route.has_value()) {
       return Failure(global.reason_code == "NO_PATH" ? PlanningStatus::kNoPath
                      : global.reason_code == "TIMEOUT" ? PlanningStatus::kTimedOut
@@ -745,20 +762,58 @@ struct PurePlanMotionServer::Impl final {
         local_request.current_state = *state.value;
         local_request.goal_map = *decision.goal;
         local_request.world = *world.value;
-        const auto cycle_timing =
-            lunar::pure_planning::MakeRequestTimingPolicy(cycle_started);
+        const auto cycle_timing = last_segment.has_value()
+            ? lunar::pure_planning::MakeRequestTimingPolicy(cycle_started)
+            : global_timing;
         local_request.control = {
             .deadline = cycle_timing.hard_deadline,
             .stop_token = stop_token,
             .now = [] { return std::chrono::steady_clock::now(); },
         };
-        local_request.request_started_at = cycle_started;
+        local_request.request_started_at = cycle_timing.started_at;
         PlanningResult segment = planner(local_request);
+        auto cycle_finalized = std::chrono::steady_clock::now();
+        const auto set_cycle_elapsed = [&](PlanningResult& result) {
+          result.timing.total_elapsed =
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  cycle_finalized - cycle_timing.started_at);
+        };
+        set_cycle_elapsed(segment);
+        if (stop_token.stop_requested() ||
+            segment.status == PlanningStatus::kCanceled) {
+          auto canceled =
+              Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED");
+          canceled.timing = segment.timing;
+          return canceled;
+        }
+        if (cycle_finalized >= cycle_timing.hard_deadline) {
+          auto timeout = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
+          timeout.timing = segment.timing;
+          return timeout;
+        }
         if (segment.status != PlanningStatus::kSuccess ||
             !segment.reference.has_value()) {
           return segment;
         }
-        const auto converted = ConvertResult(segment, request_goal->mission_revision);
+        auto converted = ConvertResult(segment, request_goal->mission_revision);
+        cycle_finalized = std::chrono::steady_clock::now();
+        set_cycle_elapsed(segment);
+        SetFinalizedTiming(segment.timing.total_elapsed, segment, converted);
+        if (stop_token.stop_requested()) {
+          auto canceled =
+              Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED");
+          canceled.timing = segment.timing;
+          return canceled;
+        }
+        if (cycle_finalized >= cycle_timing.hard_deadline) {
+          auto timeout = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
+          timeout.timing = segment.timing;
+          return timeout;
+        }
+        if (cycle_finalized >= cycle_timing.sla_milestone) {
+          segment.reason_code = "PLAN_FOUND_LATE";
+          converted.reason_code = "PLAN_FOUND_LATE";
+        }
         if (ContextIsValid()) {
           PublishWheeledReference(converted);
         }

@@ -133,14 +133,14 @@ grid_map_msgs::msg::GridMap LocalMap() {
   return map;
 }
 
-nav_msgs::msg::OccupancyGrid GlobalMap() {
+nav_msgs::msg::OccupancyGrid GlobalMap(const std::uint32_t width = 8U) {
   nav_msgs::msg::OccupancyGrid map;
   map.header.frame_id = "map";
-  map.info.width = 8U;
-  map.info.height = 8U;
+  map.info.width = width;
+  map.info.height = width;
   map.info.resolution = 1.0F;
-  map.info.origin.position.x = -4.0;
-  map.info.origin.position.y = -4.0;
+  map.info.origin.position.x = -static_cast<double>(width) / 2.0;
+  map.info.origin.position.y = -static_cast<double>(width) / 2.0;
   map.info.origin.orientation.w = 1.0;
   map.data.assign(map.info.width * map.info.height, 0);
   return map;
@@ -205,9 +205,12 @@ class RunningSystem final {
   explicit RunningSystem(PlannerFn planner,
                          const std::string& platform = "wheel",
                          const std::string& platform_config =
-                             ConfigPath("wheel.yaml").string())
+                             ConfigPath("wheel.yaml").string(),
+                         const std::vector<rclcpp::Parameter>&
+                             additional_parameters = {})
       : server(std::make_shared<PurePlanMotionServer>(
-            ServerOptions(platform, platform_config), std::move(planner))),
+            ServerOptions(platform, platform_config, additional_parameters),
+            std::move(planner))),
         client(std::make_shared<rclcpp::Node>(UniqueName())),
         executor(MakePurePlannerExecutor()) {
     global_publisher = client->create_publisher<nav_msgs::msg::OccupancyGrid>(
@@ -255,7 +258,8 @@ class RunningSystem final {
   }
 
   void PublishInputs(const bool include_global = true,
-                     const double odometry_x = 0.0) {
+                     const double odometry_x = 0.0,
+                     const std::uint32_t global_width = 8U) {
     // Destroyed endpoints may briefly remain in the same-process DDS graph
     // cache, so require a live subscriber without requiring an exact count.
     ASSERT_TRUE(WaitFor([this] {
@@ -266,7 +270,7 @@ class RunningSystem final {
     }));
     for (std::size_t attempt = 0U; attempt < 3U; ++attempt) {
       if (include_global) {
-        global_publisher->publish(GlobalMap());
+        global_publisher->publish(GlobalMap(global_width));
       }
       local_publisher->publish(LocalMap());
       odometry_publisher->publish(Odometry(odometry_x));
@@ -1484,6 +1488,117 @@ TEST(PurePlanMotionServer,
             "PLAN_FOUND_LATE");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "latency_class"),
             "SLA_MISSED");
+}
+
+TEST(PurePlanMotionServer,
+     RollingFirstLocalRequestKeepsTheColdGlobalTimingWindow) {
+  struct TimingObservation final {
+    std::chrono::steady_clock::duration start_age;
+    std::chrono::steady_clock::duration window;
+  };
+  std::promise<TimingObservation> observed_promise;
+  auto observed = observed_promise.get_future();
+  std::atomic<bool> first{true};
+  RunningSystem system{
+      [&](const lunar::pure_planning::PlanningRequest& request) {
+        const auto invoked = std::chrono::steady_clock::now();
+        if (first.exchange(false)) {
+          EXPECT_TRUE(request.request_started_at.has_value());
+          observed_promise.set_value({
+              .start_age = invoked - *request.request_started_at,
+              .window = request.control.deadline - *request.request_started_at,
+          });
+        }
+        return Success(request);
+      },
+      "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"rolling_surface_enabled", true}}};
+  system.PublishInputs(true, 0.0, 2048U);
+
+  const auto handle = system.SendGoal(system.Goal("rolling_cold_global"));
+  ASSERT_NE(handle, nullptr);
+  ASSERT_EQ(observed.wait_for(4s), std::future_status::ready);
+  const auto timing = observed.get();
+
+  EXPECT_EQ(timing.window, 3s);
+  EXPECT_GE(timing.start_age, 2ms);
+  auto cancel = system.action_client->async_cancel_goal(handle);
+  ASSERT_EQ(cancel.wait_for(3s), std::future_status::ready);
+  EXPECT_EQ(cancel.get()->return_code,
+            action_msgs::srv::CancelGoal::Response::ERROR_NONE);
+  EXPECT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::CANCELED);
+}
+
+TEST(PurePlanMotionServer,
+     RollingFirstCycleFinalizedAtTwoPointFiveSecondsIsPlanFoundLate) {
+  RunningSystem system{
+      [](const lunar::pure_planning::PlanningRequest& request) {
+        EXPECT_TRUE(request.request_started_at.has_value());
+        std::this_thread::sleep_until(*request.request_started_at + 2500ms);
+        return Success(request);
+      },
+      "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"rolling_surface_enabled", true},
+       rclcpp::Parameter{"rolling_poll_period_ms", 10},
+       rclcpp::Parameter{"rolling_min_replan_interval_ms", 10}}};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("rolling_late"));
+  ASSERT_NE(handle, nullptr);
+  ASSERT_TRUE(WaitFor(
+      [&] {
+        const auto references = system.References();
+        return std::ranges::any_of(references, [](const auto& reference) {
+          return reference.plan_id == "rolling_late";
+        });
+      },
+      4s));
+  system.PublishInputs(true, 0.2);
+  const auto result = system.Result(handle);
+
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_NE(result.result, nullptr);
+  EXPECT_EQ(result.result->reason_code, "PLAN_FOUND_LATE");
+  EXPECT_TRUE(result.result->has_reference);
+}
+
+TEST(PurePlanMotionServer,
+     RollingCycleFinalizedAtHardDeadlineDoesNotPublishAReference) {
+  RunningSystem system{
+      [](const lunar::pure_planning::PlanningRequest& request) {
+        EXPECT_TRUE(request.request_started_at.has_value());
+        std::this_thread::sleep_until(*request.request_started_at + 3s);
+        return Success(request);
+      },
+      "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"rolling_surface_enabled", true},
+       rclcpp::Parameter{"rolling_poll_period_ms", 10},
+       rclcpp::Parameter{"rolling_min_replan_interval_ms", 10}}};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("rolling_hard"));
+  ASSERT_NE(handle, nullptr);
+  auto result_future = system.action_client->async_get_result(handle);
+  const auto result_status = result_future.wait_for(4s);
+  EXPECT_EQ(result_status, std::future_status::ready);
+  const auto references = system.References();
+  EXPECT_FALSE(std::ranges::any_of(references, [](const auto& reference) {
+    return reference.plan_id == "rolling_hard";
+  }));
+  if (result_status != std::future_status::ready) {
+    auto cancel = system.action_client->async_cancel_goal(handle);
+    ASSERT_EQ(cancel.wait_for(3s), std::future_status::ready);
+    EXPECT_EQ(cancel.get()->return_code,
+              action_msgs::srv::CancelGoal::Response::ERROR_NONE);
+    ASSERT_EQ(result_future.wait_for(3s), std::future_status::ready);
+    (void)result_future.get();
+    return;
+  }
+  const auto result = result_future.get();
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::ABORTED);
+  ASSERT_NE(result.result, nullptr);
+  EXPECT_EQ(result.result->reason_code, "TIMEOUT");
+  EXPECT_FALSE(result.result->has_reference);
 }
 
 TEST(PurePlanMotionServer,
