@@ -62,6 +62,8 @@ At most three workers run concurrently because the coordinator occupies the four
 
 If a worker discovers that it must edit another worker's owned file, it stops and messages the coordinator. The coordinator either moves that edit to the integration gate or explicitly reassigns file ownership. It does not accept overlapping parallel edits.
 
+Because execution time is limited, coordinator review is intentionally narrow. For each worker commit, inspect only: file-ownership compliance, unchanged ROS message schemas, the timing/safety invariant affected by that lane, and the reported targeted RED/GREEN evidence. Do not perform unrelated style cleanup, speculative refactoring or a second broad manual review. Run each full automated suite only at its named integration gate and at final verification; targeted worker tests are sufficient between gates.
+
 ---
 
 ### Task 1: Freeze the Reproducible Baseline and Performance Recorder
@@ -439,9 +441,9 @@ git commit -m "fix: restore sparse anchor-ordered ARA star"
 - Modify only when resolving a reviewed semantic integration issue in files already owned by Tasks 2-4.
 - Append evidence: `docs/validation/planner-core-optimization.md`
 
-- [ ] **Step 1: Review each worker commit before cherry-picking**
+- [ ] **Step 1: Perform the necessary Wave 1 review and cherry-pick**
 
-Check scope, RED/GREEN evidence, exact boundary comparisons, OPEN comparator order, cancellation priority, cell-area equality semantics and absence of ROS message changes. Cherry-pick timing, global safety, then ARA*.
+Check file ownership and reported RED/GREEN evidence; inspect only exact boundary comparisons, OPEN comparator order, cancellation priority, cell-area equality semantics and absence of ROS message changes. Cherry-pick timing, global safety, then ARA*. Defer all other review to the automated gate.
 
 - [ ] **Step 2: Run the integrated suites**
 
@@ -680,9 +682,9 @@ git commit -m "perf: linearize local projection and goal fields"
 - Modify only reviewed integration conflicts.
 - Append evidence: `docs/validation/planner-core-optimization.md`
 
-- [ ] **Step 1: Review and cherry-pick portal, projection and Hybrid commits**
+- [ ] **Step 1: Perform the necessary Wave 2 review and cherry-pick**
 
-Verify the portal lane does not call 32 planners, the projection lane preserves corner blocking, and the Hybrid lane never overwrites a physical primitive endpoint with a quantized pose.
+Check file ownership and reported RED/GREEN evidence; verify only that the portal lane does not call 32 planners, the projection lane preserves corner blocking, and the Hybrid lane never overwrites a physical primitive endpoint with a quantized pose. Defer all other review to the automated gate.
 
 - [ ] **Step 2: Run the integrated core suite**
 
@@ -959,9 +961,9 @@ git commit -m "fix: stabilize rolling replans and planner feedback"
 - Modify: `tools/measure_planner_performance.py`
 - Modify: `docs/validation/planner-core-optimization.md`
 
-- [ ] **Step 1: Review and cherry-pick Wave 4 commits**
+- [ ] **Step 1: Perform the necessary Wave 4 review and cherry-pick**
 
-Cherry-pick certification, cache, then ROS. Resolve only the expected `Planner` metric wiring seam. Run the focused tests from all three lanes before integration changes.
+Check file ownership, ROS message-schema stability and each lane's reported targeted tests. Cherry-pick certification, cache, then ROS. Resolve only the expected `Planner` metric wiring seam; do not repeat worker test suites before the Gate 3 integrated run.
 
 - [ ] **Step 2: Cache multi-source fields and exact certificates by complete identity**
 
