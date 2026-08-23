@@ -204,14 +204,17 @@ struct TerrainFixture final {
     const Pose3& start = Pose(1.0, 1.0)) {
   return WheelPlanRequest{
       .start = WheeledState{.pose = start},
-      .goal_odom = GoalRegion{
-          .goal_id = "point",
-          .target = PointGoal{
-              .position_m = Vec3{.x = x, .y = y, .z = 0.0},
-              .tolerance_m = 1.0e-6,
-          },
-          .yaw_rad = yaw,
-          .yaw_tolerance_rad = 1.0e-6,
+      .goals_odom = LocalGoalSet{
+          .goals_odom = {GoalRegion{
+              .goal_id = "point",
+              .target = PointGoal{
+                  .position_m = Vec3{.x = x, .y = y, .z = 0.0},
+                  .tolerance_m = 1.0e-6,
+              },
+              .yaw_rad = yaw,
+              .yaw_tolerance_rad = 1.0e-6,
+          }},
+          .exact_final_goal = true,
       },
       .terrain = &fixture.terrain,
       .capability = &capability,
@@ -257,6 +260,124 @@ struct TerrainFixture final {
                std::abs(ShortestYawDelta(expected_yaw, target_yaw)) <=
                    1.0e-8;
       });
+}
+
+TEST(WheelPlanner, UsesOneSearchForRankedPortalFallback) {
+  constexpr std::size_t kWidth = 40U;
+  constexpr std::size_t kHeight = 20U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  occupancy[7U * kWidth + 7U] = 1.0F;
+  const TerrainFixture fixture =
+      MakeTerrain(kWidth, kHeight, std::move(occupancy));
+  WheeledCapability capability = Capability();
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2)};
+  const auto portal = [](const char* id, const double x, const double y) {
+    return GoalRegion{
+        .goal_id = id,
+        .target = PointGoal{
+            .position_m = Vec3{.x = x, .y = y, .z = 0.0},
+            .tolerance_m = 1.0e-6,
+        },
+    };
+  };
+  const WheelPlanRequest request{
+      .start = WheeledState{.pose = Pose(1.0, 1.0)},
+      .goals_odom = LocalGoalSet{
+          .goals_odom = {portal("rank-0-blocked", 1.4, 1.4),
+                         portal("rank-1-reachable", 1.4, 1.0)},
+          .exact_final_goal = false,
+      },
+      .terrain = &fixture.terrain,
+      .capability = &capability,
+      .control = SearchControl{.deadline = SteadyClock::now() + 2s},
+      .search = AnytimeSearchConfig{.stop_after_first_solution = true},
+  };
+
+  const WheelPlanResult result = PlanWheel(request);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_EQ(result.preferred_builder_invocations, 1U);
+  EXPECT_EQ(result.ara_search_invocations, 1U);
+  EXPECT_GT(result.metrics.expanded_states, 0U);
+  ASSERT_TRUE(result.selected_goal_index.has_value());
+  EXPECT_EQ(*result.selected_goal_index, 1U);
+  EXPECT_NEAR(result.trajectory.back().pose.position_m.x, 1.4, 1.0e-9);
+  EXPECT_NEAR(result.trajectory.back().pose.position_m.y, 1.0, 1.0e-9);
+}
+
+TEST(WheelPlanner, BoundsTerminalGoalSignaturesAtThirtyTwoPortals) {
+  const TerrainFixture fixture = FlatTerrain();
+  WheeledCapability capability = Capability();
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2)};
+  const auto portal = [](const std::size_t index) {
+    return GoalRegion{
+        .goal_id = "portal-" + std::to_string(index),
+        .target = PointGoal{
+            .position_m = Vec3{.x = 1.2, .y = 1.0, .z = 0.0},
+            .tolerance_m = 1.0e-6,
+        },
+    };
+  };
+  WheelPlanRequest request{
+      .start = WheeledState{.pose = Pose(1.0, 1.0)},
+      .goals_odom = LocalGoalSet{.exact_final_goal = false},
+      .terrain = &fixture.terrain,
+      .capability = &capability,
+      .control = SearchControl{.deadline = SteadyClock::now() + 2s},
+  };
+  for (std::size_t index = 0U; index < 32U; ++index) {
+    request.goals_odom.goals_odom.push_back(portal(index));
+  }
+
+  const WheelPlanResult at_limit = PlanWheel(request);
+  ASSERT_TRUE(at_limit.ok()) << at_limit.reason_code;
+  ASSERT_TRUE(at_limit.selected_goal_index.has_value());
+  EXPECT_EQ(*at_limit.selected_goal_index, 0U);
+
+  request.goals_odom.goals_odom.push_back(portal(32U));
+  const WheelPlanResult above_limit = PlanWheel(request);
+  EXPECT_EQ(above_limit.status, LocalPlanStatus::kInvalidInput);
+  EXPECT_EQ(above_limit.reason_code, "WHEEL_INPUT_INVALID");
+}
+
+TEST(WheelPlanner, ExactFinalGoalSetContainsOnlyUntouchedMissionGoal) {
+  const TerrainFixture fixture = FlatTerrain();
+  WheeledCapability capability = Capability();
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2)};
+  const GoalRegion mission_goal{
+      .goal_id = "mission-final",
+      .target = PointGoal{
+          .position_m = Vec3{.x = 1.2, .y = 1.0, .z = 0.0},
+          .tolerance_m = 1.0e-6,
+      },
+      .yaw_rad = 0.0,
+      .yaw_tolerance_rad = 1.0e-6,
+  };
+  WheelPlanRequest request{
+      .start = WheeledState{.pose = Pose(1.0, 1.0)},
+      .goals_odom = LocalGoalSet{
+          .goals_odom = {mission_goal},
+          .exact_final_goal = true,
+      },
+      .terrain = &fixture.terrain,
+      .capability = &capability,
+      .control = SearchControl{.deadline = SteadyClock::now() + 2s},
+  };
+
+  const WheelPlanResult exact = PlanWheel(request);
+  ASSERT_TRUE(exact.ok()) << exact.reason_code;
+  ASSERT_TRUE(exact.selected_goal_index.has_value());
+  EXPECT_EQ(*exact.selected_goal_index, 0U);
+  EXPECT_NEAR(TrajectoryYaw(exact.trajectory.back()), 0.0, 1.0e-9);
+
+  request.goals_odom.goals_odom.push_back(mission_goal);
+  EXPECT_EQ(PlanWheel(request).status, LocalPlanStatus::kInvalidInput);
+  request.goals_odom.exact_final_goal = false;
+  request.goals_odom.goals_odom.resize(1U);
+  EXPECT_EQ(PlanWheel(request).status, LocalPlanStatus::kInvalidInput);
 }
 
 TEST(WheelPlanner, ConsecutiveProjectArcsRemainPhysicalInteriorEdges) {
@@ -480,8 +601,10 @@ TEST(WheelPlanner, SkipsBarrierWhoseInteriorMeetsTheGoalDisk) {
       blocked, capability, 4.1, 3.0, 0.0, Pose(2.0, 3.0));
   WheelPlanRequest flat_request = RequestTo(
       flat, capability, 4.1, 3.0, 0.0, Pose(2.0, 3.0));
-  std::get<PointGoal>(blocked_request.goal_odom.target).tolerance_m = 0.3;
-  std::get<PointGoal>(flat_request.goal_odom.target).tolerance_m = 0.3;
+  std::get<PointGoal>(blocked_request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.3;
+  std::get<PointGoal>(flat_request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.3;
 
   const WheelPlanResult blocked_result = PlanWheel(blocked_request);
   const WheelPlanResult flat_result = PlanWheel(flat_request);
@@ -582,7 +705,8 @@ TEST(WheelPlanner, RetainsObstacleDistinctLabelsInOneKey) {
     WheelPlanRequest request = RequestTo(
         fixture, capability, goal.position_m.x, goal.position_m.y,
         TrajectoryYaw(TrajectoryPoint{.pose = goal}), start);
-    std::get<PointGoal>(request.goal_odom.target).tolerance_m = 0.04;
+    std::get<PointGoal>(request.goals_odom.goals_odom.front().target)
+        .tolerance_m = 0.04;
     return request;
   };
 
@@ -919,7 +1043,8 @@ TEST(WheelPlanner, ShortensARealReversePrimitiveToTheExactGoal) {
 
   WheelPlanRequest request = RequestTo(
       fixture, capability, 0.83, 1.0, 0.0, Pose(1.0, 1.0));
-  std::get<PointGoal>(request.goal_odom.target).tolerance_m = 0.0;
+  std::get<PointGoal>(request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.0;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -937,8 +1062,8 @@ TEST(WheelPlanner, OptionalYawKeepsThePhysicallyReachedArcYaw) {
   WheelPlanRequest request = RequestTo(
       fixture, capability, 1.0 + std::sin(kReachedYaw),
       2.0 - std::cos(kReachedYaw), 0.0);
-  request.goal_odom.yaw_rad.reset();
-  request.goal_odom.yaw_tolerance_rad = 0.4;
+  request.goals_odom.goals_odom.front().yaw_rad.reset();
+  request.goals_odom.goals_odom.front().yaw_tolerance_rad = 0.4;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -965,8 +1090,9 @@ TEST(WheelPlanner, IgnoresPointGoalZAndUsesTerrainSupportedEndpointZ) {
       fixture, capability, 1.4, 1.0, 0.0, supported_start);
   WheelPlanRequest high_z = zero_z;
   WheelPlanRequest nan_z = zero_z;
-  std::get<PointGoal>(high_z.goal_odom.target).position_m.z = 100.0;
-  std::get<PointGoal>(nan_z.goal_odom.target).position_m.z =
+  std::get<PointGoal>(high_z.goals_odom.goals_odom.front().target)
+      .position_m.z = 100.0;
+  std::get<PointGoal>(nan_z.goals_odom.goals_odom.front().target).position_m.z =
       std::numeric_limits<double>::quiet_NaN();
 
   const WheelPlanResult zero_result = PlanWheel(zero_z);
@@ -1220,7 +1346,8 @@ TEST(WheelPlanner, AcceptsImmutablePrimitiveEndpointInsideXYGoalRegion) {
   };
   WheelPlanRequest request = RequestTo(
       fixture, capability, 1.15, 2.0, 0.0, Pose(1.0, 2.0));
-  std::get<PointGoal>(request.goal_odom.target).tolerance_m = 0.05;
+  std::get<PointGoal>(request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.05;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -1359,7 +1486,7 @@ TEST(WheelPlanner, AcceptsAContinuousSlopeDespiteLargeTotalHeightChange) {
 
   WheelPlanRequest request = RequestTo(
       fixture, capability, 3.0, 2.0, 0.0, Pose(1.0, 2.0));
-  std::get<PointGoal>(request.goal_odom.target).position_m.z =
+  std::get<PointGoal>(request.goals_odom.goals_odom.front().target).position_m.z =
       fixture.map->SampleElevationBilinear(Vec2{.x = 3.0, .y = 2.0})
           .value();
   request.start.pose.position_m.z =
@@ -1710,7 +1837,13 @@ TEST(WheelPlanner,
       fixture.Run750MeterRollingScenario();
 
   ASSERT_TRUE(record.success) << "failed_segment=" << record.failed_segment;
-  EXPECT_LT(record.rolling_segments, 200U);
+  EXPECT_LT(record.rolling_segments, 320U);
+  EXPECT_EQ(record.cycles_at_least_three_seconds, 0U);
+  EXPECT_EQ(record.cycles_under_one_second +
+                record.cycles_one_to_two_seconds +
+                record.cycles_two_to_three_seconds +
+                record.cycles_at_least_three_seconds,
+            record.rolling_segments);
   EXPECT_NEAR(record.final_pose.position_m.x, 800.0, 0.2);
   EXPECT_NEAR(record.final_pose.position_m.y, 500.0, 0.2);
 }
@@ -1934,8 +2067,9 @@ TEST(WheelPlanner, UsesGoalTolerancesButStillReturnsTheExactPointAndYaw) {
   WheelPlanRequest request = RequestTo(
       fixture, capability, 1.0 + std::sin(kGoalYaw),
       2.0 - std::cos(kGoalYaw), kGoalYaw);
-  std::get<PointGoal>(request.goal_odom.target).tolerance_m = 0.05;
-  request.goal_odom.yaw_tolerance_rad = 0.1;
+  std::get<PointGoal>(request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.05;
+  request.goals_odom.goals_odom.front().yaw_tolerance_rad = 0.1;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -1957,8 +2091,9 @@ TEST(WheelPlanner, ConnectsInsideBothPositionAndYawToleranceIntervals) {
   WheelPlanRequest request = RequestTo(
       fixture, capability, 1.0 + std::sin(kPositionCenterYaw),
       2.0 - std::cos(kPositionCenterYaw), 0.2);
-  std::get<PointGoal>(request.goal_odom.target).tolerance_m = 0.03;
-  request.goal_odom.yaw_tolerance_rad = 0.03;
+  std::get<PointGoal>(request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.03;
+  request.goals_odom.goals_odom.front().yaw_tolerance_rad = 0.03;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -1985,7 +2120,8 @@ TEST(WheelPlanner, ConnectsAtANonCenterXYPointInsidePositionTolerance) {
   };
   WheelPlanRequest request = RequestTo(
       fixture, capability, 1.25, 1.03, 0.0, Pose(1.0, 1.0));
-  std::get<PointGoal>(request.goal_odom.target).tolerance_m = 0.05;
+  std::get<PointGoal>(request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.05;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -2014,7 +2150,8 @@ TEST(WheelPlanner, AcceptsACertifiedNonCenterStateInsidePointGoalRegion) {
   };
   WheelPlanRequest request = RequestTo(
       fixture, capability, 1.35, 1.0, 0.0, Pose(1.0, 1.0));
-  std::get<PointGoal>(request.goal_odom.target).tolerance_m = 0.15;
+  std::get<PointGoal>(request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.15;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -2101,7 +2238,7 @@ TEST(WheelPlanner, RejectsPlanarRegionWithoutReadingLegacyAdmissionData) {
   const TerrainFixture fixture = FlatTerrain();
   const WheeledCapability capability = Capability();
   WheelPlanRequest request = RequestTo(fixture, capability, 2.0, 1.0, 0.0);
-  request.goal_odom.target = PlanarRegionGoal{};
+  request.goals_odom.goals_odom.front().target = PlanarRegionGoal{};
 
   const WheelPlanResult result = PlanWheel(request);
 

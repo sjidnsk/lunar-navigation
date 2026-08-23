@@ -28,7 +28,9 @@ class SurfaceRollingSession final {
   SurfaceRollingSession(GlobalRoute route, GoalRegion final_goal,
                         SurfaceRollingConfig config);
 
-  [[nodiscard]] SurfaceRollingDecision Decide(const Pose3& pose_map) const;
+  [[nodiscard]] SurfaceRollingDecision Decide(
+      const Pose3& pose_map,
+      double minimum_route_progress_m = 0.0) const;
 
  private:
   GlobalRoute route_;

@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "hierarchical/global_route_planner.hpp"
+#include "hierarchical/surface_portal_set.hpp"
 #include "hierarchical/reference_composer.hpp"
 #include "legged/anytime_legged_planner.hpp"
 #include "lunar_pure_planner_core/planner.hpp"
@@ -158,11 +159,15 @@ class ManualClock final {
   };
 }
 
+[[nodiscard]] const GoalRegion& FirstGoal(const LocalGoalSet& goals) {
+  return goals.goals_odom.front();
+}
+
 struct CountingBackends final {
   ManualClock clock;
   std::size_t global_calls{};
   std::size_t local_calls{};
-  GoalRegion local_goal;
+  LocalGoalSet local_goals;
   SearchControl global_control;
   SearchControl local_control;
   Planner planner;
@@ -175,16 +180,108 @@ struct CountingBackends final {
               clock.Advance(20ms);
               return Route();
             },
-            .local = [this](const PlanningRequest&, const GoalRegion& goal,
+            .local = [this](const PlanningRequest&, const LocalGoalSet& goals,
                             SearchControl control) {
               ++local_calls;
-              local_goal = goal;
+              local_goals = goals;
               local_control = std::move(control);
               clock.Advance(30ms);
-              return TrajectoryTo(goal);
+              return TrajectoryTo(FirstGoal(goals));
             },
         }) {}
 };
+
+TEST(DualModePlanner, ConvertsPortalsToSafeStrictlyAdvancingGoalRegions) {
+  const GoalRegion advancing{
+      .goal_id = "advancing",
+      .target = PointGoal{
+          .position_m = {.x = 8.1, .y = 2.1, .z = 0.0},
+          .tolerance_m = 0.0,
+      },
+  };
+  const GoalRegion current_cell{
+      .goal_id = "current-cell",
+      .target = PointGoal{
+          .position_m = {.x = 1.1, .y = 2.1, .z = 0.0},
+          .tolerance_m = 0.0,
+      },
+  };
+  const hierarchical::SurfacePortalSetResult portals{
+      .candidates = {
+          hierarchical::SurfacePortalCandidate{
+              .goal_odom = advancing,
+              .route_progress_m = 18.0,
+              .local_cell = {.x = 40, .y = 10},
+          },
+          hierarchical::SurfacePortalCandidate{
+              .goal_odom = current_cell,
+              .route_progress_m = 10.0,
+              .local_cell = {.x = 5, .y = 10},
+          },
+      },
+  };
+  const hierarchical::SurfaceRollingDecision decision{
+      .kind = hierarchical::SurfaceRollingDecision::Kind::kNextPortalSet,
+      .projected_route_progress_m = 10.0,
+      .desired_horizon_progress_m = 18.0,
+      .targets_final_goal = false,
+  };
+
+  const hierarchical::LocalGoalSetResult converted =
+      hierarchical::ConvertSurfacePortalsToLocalGoals(
+          portals, decision,
+          Pose3{.position_m = {.x = 1.1, .y = 2.1, .z = 0.0}},
+          GridMap{.width = 100U, .height = 100U, .resolution_m = 1.0},
+          GridMap{.width = 100U, .height = 100U, .resolution_m = 0.2});
+
+  ASSERT_TRUE(converted.ok()) << converted.reason_code;
+  ASSERT_EQ(converted.goals->goals_odom.size(), 1U);
+  EXPECT_FALSE(converted.goals->exact_final_goal);
+  const GoalRegion& retained = converted.goals->goals_odom.front();
+  EXPECT_EQ(retained.goal_id, "advancing");
+  EXPECT_FALSE(retained.yaw_rad.has_value());
+  EXPECT_LT(std::get<PointGoal>(retained.target).tolerance_m, 0.1);
+  EXPECT_GT(std::get<PointGoal>(retained.target).tolerance_m, 0.099999);
+}
+
+TEST(DualModePlanner, LeavesExactFinalPortalUntouched) {
+  const GoalRegion mission_goal{
+      .goal_id = "mission-final",
+      .target = PointGoal{
+          .position_m = {.x = 8.0, .y = 2.0, .z = 0.0},
+          .tolerance_m = 0.23,
+      },
+      .yaw_rad = 0.4,
+      .yaw_tolerance_rad = 0.05,
+  };
+  const hierarchical::SurfacePortalSetResult portals{
+      .candidates = {hierarchical::SurfacePortalCandidate{
+          .goal_odom = mission_goal,
+          .route_progress_m = 18.0,
+      }},
+  };
+  const hierarchical::SurfaceRollingDecision decision{
+      .kind = hierarchical::SurfaceRollingDecision::Kind::kNextPortalSet,
+      .projected_route_progress_m = 10.0,
+      .desired_horizon_progress_m = 18.0,
+      .targets_final_goal = true,
+  };
+
+  const hierarchical::LocalGoalSetResult converted =
+      hierarchical::ConvertSurfacePortalsToLocalGoals(
+          portals, decision,
+          Pose3{.position_m = {.x = 1.0, .y = 2.0, .z = 0.0}},
+          GridMap{.width = 100U, .height = 100U, .resolution_m = 1.0},
+          GridMap{.width = 100U, .height = 100U, .resolution_m = 0.2});
+
+  ASSERT_TRUE(converted.ok()) << converted.reason_code;
+  ASSERT_TRUE(converted.goals->exact_final_goal);
+  ASSERT_EQ(converted.goals->goals_odom.size(), 1U);
+  const GoalRegion& retained = converted.goals->goals_odom.front();
+  EXPECT_EQ(retained.goal_id, mission_goal.goal_id);
+  EXPECT_EQ(retained.yaw_rad, mission_goal.yaw_rad);
+  EXPECT_DOUBLE_EQ(std::get<PointGoal>(retained.target).tolerance_m, 0.23);
+}
 
 TEST(DualModePlanner, LavaTubeNeverTouchesGlobalMap) {
   CountingBackends backends;
@@ -219,7 +316,9 @@ TEST(DualModePlanner, LunarSurfaceUsesOneGlobalAndOneLocalStage) {
             SteadyClock::time_point{3s});
   EXPECT_EQ(backends.local_control.deadline,
             SteadyClock::time_point{3s});
-  const auto* subgoal = std::get_if<PointGoal>(&backends.local_goal.target);
+  ASSERT_FALSE(backends.local_goals.goals_odom.empty());
+  const auto* subgoal = std::get_if<PointGoal>(
+      &backends.local_goals.goals_odom.front().target);
   ASSERT_NE(subgoal, nullptr);
   EXPECT_GT(subgoal->position_m.x, 4.0);
   EXPECT_LT(subgoal->position_m.x, 6.0);
@@ -266,11 +365,11 @@ TEST(DualModePlanner,
         return Route();
       },
       .local = [&clock, &local_control](const PlanningRequest&,
-                                        const GoalRegion& goal,
+                                        const LocalGoalSet& goals,
                                         SearchControl control) {
         local_control = std::move(control);
         clock.Advance(30ms);
-        return TrajectoryTo(goal);
+        return TrajectoryTo(FirstGoal(goals));
       },
   });
   PlanningRequest input = Request(EnvironmentMode::kLunarSurface, clock);
@@ -304,11 +403,11 @@ TEST(DualModePlanner, UsesExactThreeSecondHardBoundaryForEveryElapsedClass) {
     Planner planner(PlannerBackends{
         .global = {},
         .local = [&clock, test_case](const PlanningRequest&,
-                                     const GoalRegion& goal,
+                                     const LocalGoalSet& goals,
                                      SearchControl control) {
           EXPECT_EQ(control.deadline, SteadyClock::time_point{3s});
           clock.Advance(test_case.elapsed);
-          return TrajectoryTo(goal);
+          return TrajectoryTo(FirstGoal(goals));
         },
     });
 
@@ -338,10 +437,10 @@ TEST(DualModePlanner,
   };
   Planner planner(PlannerBackends{
       .global = {},
-      .local = [&clock_reads](const PlanningRequest&, const GoalRegion& goal,
+      .local = [&clock_reads](const PlanningRequest&, const LocalGoalSet& goals,
                               SearchControl) {
         EXPECT_EQ(clock_reads, 3U);
-        return TrajectoryTo(goal);
+        return TrajectoryTo(FirstGoal(goals));
       },
   });
 
@@ -380,10 +479,10 @@ TEST(DualModePlanner, RejectsGlobalIncumbentAfterTheStageDeadline) {
         clock.Advance(3000ms);
         return Route();
       },
-      .local = [&local_calls](const PlanningRequest&, const GoalRegion& goal,
+      .local = [&local_calls](const PlanningRequest&, const LocalGoalSet& goals,
                               SearchControl) {
         ++local_calls;
-        return TrajectoryTo(goal);
+        return TrajectoryTo(FirstGoal(goals));
       },
   });
 
@@ -403,7 +502,7 @@ TEST(DualModePlanner, CaveLocalStageMayUseTheFullHardWindow) {
   ManualClock clock;
   Planner planner(PlannerBackends{
       .global = {},
-      .local = [&clock](const PlanningRequest&, const GoalRegion&,
+      .local = [&clock](const PlanningRequest&, const LocalGoalSet&,
                         SearchControl control) {
         EXPECT_EQ(control.deadline, SteadyClock::time_point{3s});
         clock.Advance(3000ms);
@@ -426,10 +525,10 @@ TEST(DualModePlanner, ReturnsAValidIncumbentEvenWhenTheDeadlineIsReached) {
   ManualClock clock;
   Planner planner(PlannerBackends{
       .global = {},
-      .local = [&clock](const PlanningRequest&, const GoalRegion& goal,
+      .local = [&clock](const PlanningRequest&, const LocalGoalSet& goals,
                         SearchControl) {
         clock.Advance(950ms);
-        return TrajectoryTo(goal);
+        return TrajectoryTo(FirstGoal(goals));
       },
   });
 
@@ -463,7 +562,7 @@ TEST(DualModePlanner, RouteSamplingTimeoutIsNotReportedAsNoPath) {
   };
 
   const auto selected =
-      hierarchical::SelectSurfaceLocalGoal(input, route, control);
+      hierarchical::SelectSurfaceLocalGoals(input, route, control);
 
   EXPECT_FALSE(selected.ok());
   EXPECT_EQ(selected.reason_code, "TIMEOUT");
@@ -515,7 +614,7 @@ TEST(DualModePlanner, PreservesCanceledNoPathAndExceptionSemantics) {
     Planner planner(PlannerBackends{
         .global = {},
         .local = [test_case, &clock](const PlanningRequest&,
-                                     const GoalRegion&, SearchControl) {
+                                     const LocalGoalSet&, SearchControl) {
           clock.Advance(7ms);
           return LocalStageResult{.status = test_case.local_status,
                                   .reason_code = test_case.local_reason};
@@ -533,7 +632,7 @@ TEST(DualModePlanner, PreservesCanceledNoPathAndExceptionSemantics) {
   ManualClock clock;
   Planner throwing(PlannerBackends{
       .global = {},
-      .local = [&clock](const PlanningRequest&, const GoalRegion&,
+      .local = [&clock](const PlanningRequest&, const LocalGoalSet&,
                         SearchControl) -> LocalStageResult {
         clock.Advance(11ms);
         throw std::runtime_error("backend-specific exception");
@@ -572,7 +671,7 @@ TEST(DualModePlanner, PreservesGlobalFailureAndExceptionSemantics) {
           return GlobalStageResult{.route = std::nullopt,
                                    .reason_code = test_case.reason};
         },
-        .local = [&local_calls](const PlanningRequest&, const GoalRegion&,
+        .local = [&local_calls](const PlanningRequest&, const LocalGoalSet&,
                                 SearchControl) {
           ++local_calls;
           return LocalStageResult{};
@@ -639,8 +738,8 @@ TEST(DualModePlanner, InjectedClockExceptionsAlwaysReturnPlannerError) {
     };
     Planner planner(PlannerBackends{
         .global = {},
-        .local = [](const PlanningRequest&, const GoalRegion& goal,
-                    SearchControl) { return TrajectoryTo(goal); },
+        .local = [](const PlanningRequest&, const LocalGoalSet& goals,
+                    SearchControl) { return TrajectoryTo(FirstGoal(goals)); },
     });
     PlanningResult output = planner.Plan(input);
     if (observed_calls != nullptr) {
@@ -931,7 +1030,7 @@ TEST(DualModePlanner,
           .global = [route](const PlanningRequest&, SearchControl) {
             return GlobalStageResult{.route = route};
           },
-          .local = [platform](const PlanningRequest&, const GoalRegion&,
+          .local = [platform](const PlanningRequest&, const LocalGoalSet&,
                               SearchControl) {
             return LocalStageResult{
                 .status = LocalPlanStatus::kSolved,

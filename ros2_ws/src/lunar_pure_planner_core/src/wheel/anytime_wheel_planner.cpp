@@ -434,6 +434,7 @@ struct RejectedFingerprint final {
   std::int64_t x{};
   std::int64_t y{};
   std::int64_t yaw{};
+  std::uint32_t terminal_goal_mask{};
 
   bool operator==(const RejectedFingerprint&) const = default;
 };
@@ -447,6 +448,8 @@ struct RejectedFingerprintHash final {
       value ^= static_cast<std::size_t>(coordinate) + 0x9e3779b9U +
                (value << 6U) + (value >> 2U);
     }
+    value ^= static_cast<std::size_t>(fingerprint.terminal_goal_mask) +
+             0x9e3779b9U + (value << 6U) + (value >> 2U);
     return value;
   }
 };
@@ -624,6 +627,7 @@ struct CertifiedPreferredCandidate final {
   double cost{};
   std::size_t full_primitive_edges{};
   std::size_t terminal_connector_edges{};
+  std::size_t goal_index{};
 };
 
 struct SpeedProfile final {
@@ -659,7 +663,14 @@ struct Node final {
   std::size_t creation_sequence{};
   bool expandable{true};
   bool exact_goal{};
-  bool certified_terminal_successor{};
+  std::optional<std::size_t> goal_index;
+  std::uint32_t certified_terminal_goal_mask{};
+};
+
+struct WheelGoal final {
+  PointGoal point;
+  std::optional<double> yaw_rad;
+  double yaw_tolerance_rad{};
 };
 
 struct PlanningLatticeFrame final {
@@ -702,15 +713,17 @@ struct PlanningLatticeFrame final {
 
 class WheelSearchGraph final {
  public:
-  WheelSearchGraph(const WheelPlanRequest& request, const PointGoal& goal,
-                   const std::optional<double> goal_yaw)
+  WheelSearchGraph(const WheelPlanRequest& request,
+                   std::vector<WheelGoal> goals)
       : request_(request),
         terrain_(*request.terrain),
         capability_(*request.capability),
         map_(*request.terrain->map),
         lattice_frame_(request.start.pose),
-        goal_(goal),
-        goal_yaw_(goal_yaw),
+        goals_(std::move(goals)),
+        goal_(goals_.front().point),
+        goal_yaw_(goals_.front().yaw_rad),
+        goal_yaw_tolerance_rad_(goals_.front().yaw_tolerance_rad),
         footprint_radius_m_(CircumscribedRadius(capability_)) {
     const std::size_t cell_count = map_.cell_count();
     nodes_.reserve(std::min<std::size_t>(cell_count, 65536U));
@@ -840,14 +853,45 @@ class WheelSearchGraph final {
     });
     state_ids_[key].push_back(0U);
     maximum_active_labels_per_key_ = 1U;
-    if (const auto goal_cell = map_.PositionToCell(
-            Vec2{.x = goal_.position_m.x, .y = goal_.position_m.y});
-        goal_cell.has_value()) {
-      goal_distance_field_ =
-          shared::BuildGoalDistanceField(terrain_, *goal_cell, request_.control);
+    std::vector<shared::GridCell> goal_cells;
+    goal_cells.reserve(goals_.size());
+    for (const WheelGoal& goal : goals_) {
+      if (const auto goal_cell = map_.PositionToCell(
+              Vec2{.x = goal.point.position_m.x,
+                   .y = goal.point.position_m.y});
+          goal_cell.has_value()) {
+        goal_cells.push_back(*goal_cell);
+      }
     }
+    if (!goal_cells.empty()) {
+      goal_distance_field_ =
+          shared::BuildGoalDistanceField(terrain_, goal_cells,
+                                         request_.control);
+    }
+    barriers_by_goal_.resize(goals_.size());
+    std::size_t preferred_goal_index = 0U;
+    double preferred_goal_lower_bound =
+        std::numeric_limits<double>::infinity();
+    for (std::size_t goal_index = 0U; goal_index < goals_.size();
+         ++goal_index) {
+      ActivateGoal(goal_index);
+      const double lower_bound = HeuristicForActiveGoal(request_.start.pose);
+      if (std::tie(lower_bound, goal_index) <
+          std::tie(preferred_goal_lower_bound, preferred_goal_index)) {
+        preferred_goal_lower_bound = lower_bound;
+        preferred_goal_index = goal_index;
+      }
+    }
+    ActivateGoal(preferred_goal_index);
+    barriers_.clear();
     BuildBarrierLowerBounds();
+    barriers_by_goal_[preferred_goal_index] = barriers_;
+    ++preferred_builder_invocations_;
     BuildCertifiedPreferredCandidate();
+    if (certified_preferred_candidate_.has_value()) {
+      certified_preferred_candidate_->goal_index = preferred_goal_index;
+    }
+    BuildCertifiedInitialCandidate();
   }
 
   [[nodiscard]] std::size_t state_count() const noexcept {
@@ -885,6 +929,10 @@ class WheelSearchGraph final {
 
   [[nodiscard]] std::size_t maximum_active_labels_per_key() const noexcept {
     return maximum_active_labels_per_key_;
+  }
+
+  [[nodiscard]] std::size_t preferred_builder_invocations() const noexcept {
+    return preferred_builder_invocations_;
   }
 
   [[nodiscard]] std::size_t sweep_cell_checks() const noexcept {
@@ -1279,6 +1327,24 @@ class WheelSearchGraph final {
     return nodes_.at(state).pose;
   }
 
+  [[nodiscard]] std::optional<std::size_t> GoalIndexForState(
+      const std::size_t state) const noexcept {
+    if (const auto edge = PreferredEdgeIndexForState(state);
+        edge.has_value()) {
+      if (*edge + 1U == certified_preferred_candidate_->edges.size()) {
+        return certified_preferred_candidate_->goal_index;
+      }
+      return std::nullopt;
+    }
+    if (state >= nodes_.size()) {
+      return std::nullopt;
+    }
+    if (nodes_[state].goal_index.has_value()) {
+      return nodes_[state].goal_index;
+    }
+    return MatchingGoalIndex(nodes_[state].pose);
+  }
+
   [[nodiscard]] WheelMotionMode ModeForState(
       const std::size_t state) const noexcept {
     return nodes_[state].key.mode;
@@ -1287,7 +1353,8 @@ class WheelSearchGraph final {
   [[nodiscard]] bool ValidateStart() {
     const EdgeKey key{.source_state = 0U,
                       .primitive_index =
-                          3U * capability_.motion_primitives.size()};
+                          (2U + 2U * goals_.size()) *
+                          capability_.motion_primitives.size()};
     return CachedEvaluation(key, [&] {
           Transition start{
               .source = request_.start.pose,
@@ -1319,20 +1386,28 @@ class WheelSearchGraph final {
       }
       transition->initial_edge = state == 0U;
       const Pose3 actual_endpoint = transition->target;
-      if (PoseSatisfiesGoal(actual_endpoint)) {
+      bool full_edge_reaches_goal = false;
+      for (std::size_t goal_index = 0U; goal_index < goals_.size();
+           ++goal_index) {
+        ActivateGoal(goal_index);
+        if (!PoseSatisfiesGoal(actual_endpoint)) {
+          continue;
+        }
         const EdgeKey goal_edge_key{
             .source_state = state,
             .primitive_index =
-                2U * capability_.motion_primitives.size() + primitive_index,
+                (2U + goal_index) * capability_.motion_primitives.size() +
+                primitive_index,
         };
-        if (AppendGoalTerminal(
-                state, *transition, goal_edge_key,
-                2U * capability_.motion_primitives.size() +
-                    primitive_stable_rank_[primitive_index],
-                edges)) {
-          generated_goal_terminal = true;
-          continue;
-        }
+        full_edge_reaches_goal =
+            AppendGoalTerminal(state, *transition, goal_edge_key, goal_index,
+                               0U, primitive_stable_rank_[primitive_index],
+                               edges) ||
+            full_edge_reaches_goal;
+      }
+      if (full_edge_reaches_goal) {
+        generated_goal_terminal = true;
+        continue;
       }
       const WheelStateKey target_key =
           Quantize(actual_endpoint, transition->target_mode);
@@ -1391,6 +1466,17 @@ class WheelSearchGraph final {
   }
 
   [[nodiscard]] double HeuristicForPose(const Pose3& pose) const noexcept {
+    double minimum = std::numeric_limits<double>::infinity();
+    for (std::size_t goal_index = 0U; goal_index < goals_.size();
+         ++goal_index) {
+      ActivateGoal(goal_index);
+      minimum = std::min(minimum, HeuristicForActiveGoal(pose));
+    }
+    return std::isfinite(minimum) ? minimum : 0.0;
+  }
+
+  [[nodiscard]] double HeuristicForActiveGoal(
+      const Pose3& pose) const noexcept {
     const double distance_to_region = std::max(
         0.0,
         std::hypot(pose.position_m.x - goal_.position_m.x,
@@ -1402,14 +1488,18 @@ class WheelSearchGraph final {
       if (yaw.has_value()) {
         yaw_error = std::max(
             0.0, std::abs(ShortestYawDelta(*yaw, *goal_yaw_)) -
-                     request_.goal_odom.yaw_tolerance_rad);
+                     goal_yaw_tolerance_rad_);
       }
     }
     double barrier_distance_lower_bound = 0.0;
     const Vec2 planar_pose{.x = pose.position_m.x, .y = pose.position_m.y};
     const Vec2 planar_goal{.x = goal_.position_m.x,
                            .y = goal_.position_m.y};
-    for (const BarrierRectangle& barrier : barriers_) {
+    const auto& active_barriers =
+        active_goal_index_ < barriers_by_goal_.size()
+            ? barriers_by_goal_[active_goal_index_]
+            : barriers_;
+    for (const BarrierRectangle& barrier : active_barriers) {
       const double obstacle_distance =
           PointObstacleDistance(planar_pose, planar_goal, barrier);
       if (std::isfinite(obstacle_distance)) {
@@ -1458,9 +1548,7 @@ class WheelSearchGraph final {
   [[nodiscard]] bool IsGoal(const std::size_t state) const noexcept {
     if (const auto edge = PreferredEdgeIndexForState(state);
         edge.has_value()) {
-      return *edge + 1U == certified_preferred_candidate_->edges.size() &&
-             PoseSatisfiesGoal(
-                 certified_preferred_candidate_->edges[*edge].endpoint);
+      return *edge + 1U == certified_preferred_candidate_->edges.size();
     }
     if (state >= nodes_.size()) {
       return false;
@@ -1468,7 +1556,7 @@ class WheelSearchGraph final {
     if (nodes_[state].exact_goal) {
       return true;
     }
-    return PoseSatisfiesGoal(nodes_[state].pose);
+    return MatchingGoalIndex(nodes_[state].pose).has_value();
   }
 
  private:
@@ -1477,6 +1565,13 @@ class WheelSearchGraph final {
       << (std::numeric_limits<std::size_t>::digits - 1U);
   static constexpr std::uint64_t kPreferredEdgeNamespace =
       0x5052454645525245ULL;
+
+  void ActivateGoal(const std::size_t goal_index) const noexcept {
+    active_goal_index_ = goal_index;
+    goal_ = goals_[goal_index].point;
+    goal_yaw_ = goals_[goal_index].yaw_rad;
+    goal_yaw_tolerance_rad_ = goals_[goal_index].yaw_tolerance_rad;
+  }
 
   [[nodiscard]] static std::size_t PreferredStateId(
       const std::size_t edge_index) noexcept {
@@ -1496,13 +1591,17 @@ class WheelSearchGraph final {
     return edge_index;
   }
 
-  [[nodiscard]] static std::size_t StablePreferredEdgeIndex(
+  [[nodiscard]] std::size_t StablePreferredEdgeIndex(
       const std::size_t sequence,
-      const std::size_t stable_primitive_rank) noexcept {
+      const PreferredEdgeRecord& edge) const noexcept {
     std::uint64_t hash = 1469598103934665603ULL;
     for (std::uint64_t value :
-         {kPreferredEdgeNamespace, static_cast<std::uint64_t>(sequence),
-          static_cast<std::uint64_t>(stable_primitive_rank)}) {
+         {kPreferredEdgeNamespace,
+          static_cast<std::uint64_t>(
+              certified_preferred_candidate_->goal_index),
+          static_cast<std::uint64_t>(edge.terminal_connector),
+          static_cast<std::uint64_t>(edge.stable_primitive_rank),
+          static_cast<std::uint64_t>(sequence)}) {
       for (std::size_t byte = 0U; byte < sizeof(value); ++byte) {
         hash ^= value & 0xffU;
         hash *= 1099511628211ULL;
@@ -1543,8 +1642,7 @@ class WheelSearchGraph final {
          edge < certified_preferred_candidate_->edges.size(); ++edge) {
       candidate.states.push_back(PreferredStateId(edge));
       candidate.stable_edge_indices.push_back(StablePreferredEdgeIndex(
-          edge, certified_preferred_candidate_->edges[edge]
-                    .stable_primitive_rank));
+          edge, certified_preferred_candidate_->edges[edge]));
     }
     candidate.cost = certified_preferred_candidate_->cost;
     candidate.stable_index =
@@ -1750,7 +1848,7 @@ class WheelSearchGraph final {
         std::abs(local_goal.y) > goal_.tolerance_m + kGeometryTolerance ||
         (goal_yaw_.has_value() &&
          std::abs(ShortestYawDelta(*start_yaw, *goal_yaw_)) >
-             request_.goal_odom.yaw_tolerance_rad + kGeometryTolerance)) {
+             goal_yaw_tolerance_rad_ + kGeometryTolerance)) {
       return;
     }
     const Vec2 world_start{.x = request_.start.pose.position_m.x,
@@ -2004,7 +2102,6 @@ class WheelSearchGraph final {
       auto candidate = EvaluatePreferredOption(option);
       if (candidate.has_value()) {
         certified_preferred_candidate_ = std::move(candidate);
-        BuildCertifiedInitialCandidate();
         return;
       }
     }
@@ -2018,10 +2115,22 @@ class WheelSearchGraph final {
     if (!yaw.has_value() || position_error > goal_.tolerance_m + kTolerance ||
         (goal_yaw_.has_value() &&
          std::abs(ShortestYawDelta(*yaw, *goal_yaw_)) >
-             request_.goal_odom.yaw_tolerance_rad + kTolerance)) {
+             goal_yaw_tolerance_rad_ + kTolerance)) {
       return false;
     }
     return true;
+  }
+
+  [[nodiscard]] std::optional<std::size_t> MatchingGoalIndex(
+      const Pose3& pose) const noexcept {
+    for (std::size_t goal_index = 0U; goal_index < goals_.size();
+         ++goal_index) {
+      ActivateGoal(goal_index);
+      if (PoseSatisfiesGoal(pose)) {
+        return goal_index;
+      }
+    }
+    return std::nullopt;
   }
   [[nodiscard]] bool ControlInterrupted() const {
     if (request_.control.canceled()) {
@@ -2174,7 +2283,8 @@ class WheelSearchGraph final {
   }
 
   [[nodiscard]] static RejectedFingerprint Fingerprint(
-      const WheelStateKey& key, const Pose3& pose) noexcept {
+      const WheelStateKey& key, const Pose3& pose,
+      const std::uint32_t terminal_goal_mask) noexcept {
     constexpr double resolution = kPhysicalMatchTolerance;
     const double yaw = YawFromQuaternion(pose.orientation).value_or(0.0);
     return RejectedFingerprint{
@@ -2184,11 +2294,13 @@ class WheelSearchGraph final {
         .y = static_cast<std::int64_t>(
             std::llround(pose.position_m.y / resolution)),
         .yaw = static_cast<std::int64_t>(std::llround(yaw / resolution)),
+        .terminal_goal_mask = terminal_goal_mask,
     };
   }
 
   void RecordRejected(const Node& node) {
-    const RejectedFingerprint fingerprint = Fingerprint(node.key, node.pose);
+    const RejectedFingerprint fingerprint = Fingerprint(
+        node.key, node.pose, node.certified_terminal_goal_mask);
     const auto [record, inserted] =
         rejected_best_g_.try_emplace(fingerprint, node.best_g);
     if (!inserted) {
@@ -2228,24 +2340,46 @@ class WheelSearchGraph final {
           ranked.begin(),
           ranked.begin() +
               static_cast<std::ptrdiff_t>(kMaximumActiveLabelsPerKey));
-      const bool retained_terminal = std::ranges::any_of(
-          retained, [&](const std::size_t state) {
-            return nodes_[state].certified_terminal_successor;
-          });
-      if (!retained_terminal) {
-        const auto terminal = std::ranges::find_if(
-            ranked, [&](const std::size_t state) {
-              return nodes_[state].certified_terminal_successor;
-            });
-        if (terminal != ranked.end()) {
-          retained.back() = *terminal;
-          std::stable_sort(retained.begin(), retained.end(),
-                           [&](const std::size_t lhs,
-                               const std::size_t rhs) {
-            return LabelRanksBefore(nodes_[lhs], nodes_[rhs]);
-          });
+      std::vector<std::uint32_t> retained_terminal_signatures;
+      for (const std::size_t state : retained) {
+        const std::uint32_t signature =
+            nodes_[state].certified_terminal_goal_mask;
+        if (signature != 0U &&
+            std::ranges::find(retained_terminal_signatures, signature) ==
+                retained_terminal_signatures.end()) {
+          retained_terminal_signatures.push_back(signature);
         }
       }
+      for (const std::size_t state : ranked) {
+        const std::uint32_t signature =
+            nodes_[state].certified_terminal_goal_mask;
+        if (signature == 0U ||
+            std::ranges::find(retained_terminal_signatures, signature) !=
+                retained_terminal_signatures.end()) {
+          continue;
+        }
+        const auto replace = std::ranges::find_if(
+            retained.rbegin(), retained.rend(), [&](const std::size_t kept) {
+              const std::uint32_t kept_signature =
+                  nodes_[kept].certified_terminal_goal_mask;
+              return kept_signature == 0U ||
+                     std::ranges::count_if(
+                         retained, [&](const std::size_t other) {
+                           return nodes_[other]
+                                      .certified_terminal_goal_mask ==
+                                  kept_signature;
+                         }) > 1;
+            });
+        if (replace == retained.rend()) {
+          break;
+        }
+        *replace = state;
+        retained_terminal_signatures.push_back(signature);
+      }
+      std::stable_sort(retained.begin(), retained.end(),
+                       [&](const std::size_t lhs, const std::size_t rhs) {
+                         return LabelRanksBefore(nodes_[lhs], nodes_[rhs]);
+                       });
       for (const std::size_t state : ranked) {
         if (std::ranges::find(retained, state) == retained.end()) {
           RecordRejected(nodes_[state]);
@@ -2290,26 +2424,29 @@ class WheelSearchGraph final {
         .expandable = true,
         .exact_goal = false,
     };
-    candidate.certified_terminal_successor =
-        HasCertifiedTerminalSuccessor(candidate);
-    const bool active_has_terminal = std::ranges::any_of(
+    candidate.certified_terminal_goal_mask =
+        CertifiedTerminalGoalMask(candidate);
+    const bool active_has_signature = std::ranges::any_of(
         active, [&](const std::size_t state) {
-          return nodes_[state].certified_terminal_successor;
+          return nodes_[state].certified_terminal_goal_mask ==
+                 candidate.certified_terminal_goal_mask;
         });
     for (const std::size_t retained_state : active) {
       const Node& retained = nodes_[retained_state];
       if (physically_matches(retained, 0.25 * xy_resolution, yaw_threshold) &&
-          retained.certified_terminal_successor ==
-              candidate.certified_terminal_successor &&
+          retained.certified_terminal_goal_mask ==
+              candidate.certified_terminal_goal_mask &&
           retained.best_g <= best_g) {
         ++quantized_state_reuses_;
         return std::nullopt;
       }
     }
-    const RejectedFingerprint fingerprint = Fingerprint(key, pose);
+    const RejectedFingerprint fingerprint = Fingerprint(
+        key, pose, candidate.certified_terminal_goal_mask);
     if (const auto rejected = rejected_best_g_.find(fingerprint);
         rejected != rejected_best_g_.end() && rejected->second <= best_g &&
-        !(candidate.certified_terminal_successor && !active_has_terminal)) {
+        !(candidate.certified_terminal_goal_mask != 0U &&
+          !active_has_signature)) {
       ++quantized_state_reuses_;
       return std::nullopt;
     }
@@ -2320,8 +2457,8 @@ class WheelSearchGraph final {
                 return LabelRanksBefore(nodes_[state], candidate);
               }));
       if (labels_before_candidate >= kMaximumActiveLabelsPerKey &&
-          !(candidate.certified_terminal_successor &&
-            !active_has_terminal)) {
+          !(candidate.certified_terminal_goal_mask != 0U &&
+            !active_has_signature)) {
         candidate.expandable = false;
         RecordRejected(candidate);
         ++next_creation_sequence_;
@@ -3269,12 +3406,12 @@ class WheelSearchGraph final {
   [[nodiscard]] std::vector<ScaleInterval> YawScaleIntervals(
       const double source_yaw, const RelativeTwist& twist) const {
     if (!goal_yaw_.has_value() ||
-        request_.goal_odom.yaw_tolerance_rad + kTolerance >=
+        goal_yaw_tolerance_rad_ + kTolerance >=
             std::numbers::pi) {
       return {ScaleInterval{.lower = 0.0, .upper = 1.0}};
     }
     const double tolerance =
-        request_.goal_odom.yaw_tolerance_rad + kTolerance;
+        goal_yaw_tolerance_rad_ + kTolerance;
     if (std::abs(twist.yaw_rate) <= kTolerance) {
       return std::abs(ShortestYawDelta(source_yaw, *goal_yaw_)) <= tolerance
                  ? std::vector<ScaleInterval>{
@@ -3331,7 +3468,7 @@ class WheelSearchGraph final {
            std::abs(ShortestYawDelta(
                NormalizeYaw(source_yaw + ratio * twist.yaw_rate),
                *goal_yaw_)) <=
-               request_.goal_odom.yaw_tolerance_rad + kTolerance;
+               goal_yaw_tolerance_rad_ + kTolerance;
   }
 
   [[nodiscard]] std::optional<double> MatchingPrimitiveScale(
@@ -3468,7 +3605,7 @@ class WheelSearchGraph final {
     return transition;
   }
 
-  [[nodiscard]] bool HasCertifiedTerminalSuccessor(
+  [[nodiscard]] bool HasCertifiedTerminalSuccessorForActiveGoal(
       const Node& source) const {
     const double distance = std::hypot(
         goal_.position_m.x - source.pose.position_m.x,
@@ -3482,7 +3619,7 @@ class WheelSearchGraph final {
         (goal_yaw_.has_value() &&
          std::abs(ShortestYawDelta(*source_yaw, *goal_yaw_)) >
              maximum_primitive_yaw_rad_ +
-                 request_.goal_odom.yaw_tolerance_rad + kTolerance)) {
+                 goal_yaw_tolerance_rad_ + kTolerance)) {
       return false;
     }
     for (const std::size_t primitive_index : ordered_primitives_) {
@@ -3506,8 +3643,22 @@ class WheelSearchGraph final {
     return false;
   }
 
+  [[nodiscard]] std::uint32_t CertifiedTerminalGoalMask(
+      const Node& source) const {
+    std::uint32_t mask = 0U;
+    for (std::size_t goal_index = 0U; goal_index < goals_.size();
+         ++goal_index) {
+      ActivateGoal(goal_index);
+      if (HasCertifiedTerminalSuccessorForActiveGoal(source)) {
+        mask |= std::uint32_t{1U} << goal_index;
+      }
+    }
+    return mask;
+  }
+
   [[nodiscard]] bool AppendGoalTerminal(
       const std::size_t state, Transition transition, const EdgeKey edge_key,
+      const std::size_t goal_index, const std::size_t connector_kind,
       const std::size_t stable_primitive_index,
       std::vector<shared::GraphEdge>& edges) {
     const EdgeEvaluation& evaluation = CachedEvaluation(
@@ -3526,13 +3677,15 @@ class WheelSearchGraph final {
         .creation_sequence = next_creation_sequence_++,
         .expandable = false,
         .exact_goal = true,
+        .goal_index = goal_index,
     });
     emitted_edges_.emplace(
         StatePair{.source = state, .target = goal_state}, edge_key);
     edges.push_back(shared::GraphEdge{
         .target_state = goal_state,
         .cost = evaluation.cost,
-        .stable_index = StableEdgeIndex(state, stable_primitive_index),
+        .stable_index = StableGoalEdgeIndex(
+            state, goal_index, connector_kind, stable_primitive_index),
     });
     return true;
   }
@@ -3542,47 +3695,69 @@ class WheelSearchGraph final {
     if (IsGoal(state)) {
       return;
     }
-    const double distance = std::hypot(
-        goal_.position_m.x - source.pose.position_m.x,
-        goal_.position_m.y - source.pose.position_m.y);
-    const double connector_limit = maximum_primitive_reach_m_ +
-                                   goal_.tolerance_m + kTolerance;
-    if (distance > connector_limit + kTolerance) {
-      return;
-    }
     const auto source_yaw = YawFromQuaternion(source.pose.orientation);
     if (!source_yaw.has_value()) {
       return;
     }
-    if (goal_yaw_.has_value() &&
-        std::abs(ShortestYawDelta(*source_yaw, *goal_yaw_)) >
-            maximum_primitive_yaw_rad_ +
-                request_.goal_odom.yaw_tolerance_rad + kTolerance) {
-      return;
-    }
-    for (const std::size_t primitive_index : ordered_primitives_) {
-      const WheelMotionPrimitive& primitive =
-          capability_.motion_primitives[primitive_index];
-      const auto ratio = MatchingPrimitiveScale(source, primitive);
-      if (!ratio.has_value()) {
+    for (std::size_t goal_index = 0U; goal_index < goals_.size();
+         ++goal_index) {
+      ActivateGoal(goal_index);
+      const double distance = std::hypot(
+          goal_.position_m.x - source.pose.position_m.x,
+          goal_.position_m.y - source.pose.position_m.y);
+      const double connector_limit = maximum_primitive_reach_m_ +
+                                     goal_.tolerance_m + kTolerance;
+      if (distance > connector_limit + kTolerance ||
+          (goal_yaw_.has_value() &&
+           std::abs(ShortestYawDelta(*source_yaw, *goal_yaw_)) >
+               maximum_primitive_yaw_rad_ + goal_yaw_tolerance_rad_ +
+                   kTolerance)) {
         continue;
       }
-      const auto connector = ScaledPrimitive(source, primitive, *ratio);
-      if (!connector.has_value()) {
-        continue;
+      for (const std::size_t primitive_index : ordered_primitives_) {
+        const WheelMotionPrimitive& primitive =
+            capability_.motion_primitives[primitive_index];
+        const auto ratio = MatchingPrimitiveScale(source, primitive);
+        if (!ratio.has_value()) {
+          continue;
+        }
+        const auto connector = ScaledPrimitive(source, primitive, *ratio);
+        if (!connector.has_value()) {
+          continue;
+        }
+        Transition initial_connector = *connector;
+        initial_connector.initial_edge = state == 0U;
+        const std::size_t connector_index =
+            (2U + goals_.size() + goal_index) *
+                capability_.motion_primitives.size() +
+            primitive_index;
+        const EdgeKey key{.source_state = state,
+                          .primitive_index = connector_index};
+        static_cast<void>(AppendGoalTerminal(
+            state, initial_connector, key, goal_index, 1U,
+            primitive_stable_rank_[primitive_index], edges));
       }
-      Transition initial_connector = *connector;
-      initial_connector.initial_edge = state == 0U;
-      const std::size_t connector_index =
-          capability_.motion_primitives.size() + primitive_index;
-      const EdgeKey key{.source_state = state,
-                        .primitive_index = connector_index};
-      static_cast<void>(AppendGoalTerminal(
-          state, initial_connector, key,
-          capability_.motion_primitives.size() +
-              primitive_stable_rank_[primitive_index],
-          edges));
     }
+  }
+
+  [[nodiscard]] static std::size_t StableGoalEdgeIndex(
+      const std::size_t state, const std::size_t goal_index,
+      const std::size_t connector_kind,
+      const std::size_t primitive_rank) noexcept {
+    constexpr std::size_t kDigits =
+        std::numeric_limits<std::size_t>::digits;
+    constexpr std::size_t kGoalShift = kDigits - 5U;
+    constexpr std::size_t kConnectorShift = kGoalShift - 1U;
+    constexpr std::size_t kPrimitiveBits = 16U;
+    constexpr std::size_t kStateBits = kConnectorShift - kPrimitiveBits;
+    constexpr std::size_t kStateMask =
+        (std::size_t{1U} << kStateBits) - 1U;
+    constexpr std::size_t kPrimitiveMask =
+        (std::size_t{1U} << kPrimitiveBits) - 1U;
+    return (goal_index << kGoalShift) |
+           (connector_kind << kConnectorShift) |
+           ((primitive_rank & kPrimitiveMask) << kStateBits) |
+           (StableEdgeIndex(state, primitive_rank) & kStateMask);
   }
 
   [[nodiscard]] static std::size_t StableEdgeIndex(
@@ -3605,8 +3780,11 @@ class WheelSearchGraph final {
   const WheeledCapability& capability_;
   const shared::MapSnapshot& map_;
   const PlanningLatticeFrame lattice_frame_;
-  PointGoal goal_;
-  std::optional<double> goal_yaw_;
+  std::vector<WheelGoal> goals_;
+  mutable std::size_t active_goal_index_{};
+  mutable PointGoal goal_;
+  mutable std::optional<double> goal_yaw_;
+  mutable double goal_yaw_tolerance_rad_{};
   double footprint_radius_m_{};
   double barrier_inset_radius_m_{};
   double platform_length_scale_m_{};
@@ -3622,6 +3800,7 @@ class WheelSearchGraph final {
   bool used_narrow_resolution_{};
   std::size_t validation_requests_{};
   mutable std::size_t preferred_validation_count_{};
+  std::size_t preferred_builder_invocations_{};
   std::size_t quantized_state_reuses_{};
   std::size_t quantized_endpoint_aliases_{};
   mutable std::size_t sweep_cell_checks_{};
@@ -3636,6 +3815,7 @@ class WheelSearchGraph final {
   std::vector<std::uint32_t> complex_terrain_integral_;
   std::vector<std::vector<std::int32_t>> hazards_by_row_;
   std::vector<BarrierRectangle> barriers_;
+  std::vector<std::vector<BarrierRectangle>> barriers_by_goal_;
   std::optional<CertifiedPreferredCandidate> certified_preferred_candidate_;
   std::optional<shared::SearchCandidate> certified_initial_candidate_;
   std::vector<Node> nodes_;
@@ -3674,36 +3854,53 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
   if (request.control.canceled()) {
     return Failure(LocalPlanStatus::kCanceled, "REQUEST_CANCELED");
   }
-  const auto* point = std::get_if<PointGoal>(&request.goal_odom.target);
   const auto start_yaw = YawFromQuaternion(request.start.pose.orientation);
+  const std::vector<GoalRegion>& requested_goals =
+      request.goals_odom.goals_odom;
+  const bool exact_final_goal = request.goals_odom.exact_final_goal;
   if (request.terrain == nullptr || request.capability == nullptr ||
       !ValidTerrain(*request.terrain) ||
       !ValidCapability(*request.capability) || !Finite(request.start.pose) ||
       !Finite(request.start.velocity) ||
-      !start_yaw.has_value() || point == nullptr ||
-      !std::isfinite(point->position_m.x) ||
-      !std::isfinite(point->position_m.y) ||
-      !std::isfinite(point->tolerance_m) ||
-      point->tolerance_m < 0.0 ||
-      (request.goal_odom.yaw_rad.has_value() &&
-       !std::isfinite(*request.goal_odom.yaw_rad)) ||
-      !std::isfinite(request.goal_odom.yaw_tolerance_rad) ||
-      request.goal_odom.yaw_tolerance_rad < 0.0 ||
+      !start_yaw.has_value() || requested_goals.empty() ||
+      requested_goals.size() > 32U ||
+      (exact_final_goal && requested_goals.size() != 1U) ||
       request.search.epsilon_schedule !=
           std::array<double, 4>{2.5, 2.0, 1.5, 1.0}) {
     return Failure(LocalPlanStatus::kInvalidInput, "WHEEL_INPUT_INVALID");
   }
-  const auto goal_cell = request.terrain->map->PositionToCell(
-      Vec2{.x = point->position_m.x, .y = point->position_m.y});
+  std::vector<WheelGoal> goals;
+  goals.reserve(requested_goals.size());
+  for (const GoalRegion& goal : requested_goals) {
+    const auto* point = std::get_if<PointGoal>(&goal.target);
+    if (point == nullptr || !std::isfinite(point->position_m.x) ||
+        !std::isfinite(point->position_m.y) ||
+        !std::isfinite(point->tolerance_m) || point->tolerance_m < 0.0 ||
+        (goal.yaw_rad.has_value() && !std::isfinite(*goal.yaw_rad)) ||
+        !std::isfinite(goal.yaw_tolerance_rad) ||
+        goal.yaw_tolerance_rad < 0.0 ||
+        (!exact_final_goal && goal.yaw_rad.has_value()) ||
+        !request.terrain->map
+             ->PositionToCell(Vec2{.x = point->position_m.x,
+                                   .y = point->position_m.y})
+             .has_value()) {
+      return Failure(LocalPlanStatus::kInvalidInput, "WHEEL_INPUT_INVALID");
+    }
+    goals.push_back(WheelGoal{.point = *point,
+                              .yaw_rad = goal.yaw_rad,
+                              .yaw_tolerance_rad = goal.yaw_tolerance_rad});
+  }
   const auto start_cell = request.terrain->map->PositionToCell(
       Vec2{.x = request.start.pose.position_m.x,
            .y = request.start.pose.position_m.y});
-  if (!goal_cell.has_value() || !start_cell.has_value()) {
+  if (!start_cell.has_value()) {
     return Failure(LocalPlanStatus::kInvalidInput,
                    "WHEEL_POSE_OUTSIDE_LOCAL_MAP");
   }
-  WheelSearchGraph graph{request, *point, request.goal_odom.yaw_rad};
+  WheelSearchGraph graph{request, std::move(goals)};
+  std::size_t ara_search_invocations = 0U;
   const auto decorate = [&](WheelPlanResult result) {
+    result.ara_search_invocations = ara_search_invocations;
     result.edge_validation_cache_hits = graph.validation_cache_hits();
     result.quantization_alias_states = graph.quantization_alias_states();
     result.quantized_state_reuses = graph.quantized_state_reuses();
@@ -3711,6 +3908,8 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
     result.quantized_state_count = graph.quantized_state_count();
     result.maximum_active_labels_per_key =
         graph.maximum_active_labels_per_key();
+    result.preferred_builder_invocations =
+        graph.preferred_builder_invocations();
     result.sweep_cell_checks = graph.sweep_cell_checks();
     result.finest_xy_key_resolution_m = graph.finest_xy_key_resolution_m();
     result.maximum_yaw_bins = graph.maximum_yaw_bins();
@@ -3746,6 +3945,7 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
                             "WHEEL_START_INFEASIBLE", metrics));
   }
 
+  ++ara_search_invocations;
   const shared::anytime::AraStarResult search =
       shared::anytime::SearchAnytimeAraStar(
           shared::anytime::AraStarProblem{
@@ -3808,6 +4008,12 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
                             "WHEEL_INCUMBENT_MISSING", metrics));
   }
   const shared::SearchCandidate& candidate = search.candidates.back();
+  const std::optional<std::size_t> selected_goal_index =
+      graph.GoalIndexForState(candidate.states.back());
+  if (!selected_goal_index.has_value()) {
+    return decorate(Failure(LocalPlanStatus::kPlannerError,
+                            "WHEEL_TERMINAL_GOAL_INDEX_MISSING", metrics));
+  }
   const auto control_failure = [&]() -> std::optional<WheelPlanResult> {
     const auto stopped = shared::StopReason(request.control);
     if (!stopped.has_value()) {
@@ -3872,6 +4078,7 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
       .metrics = metrics,
       .mode_switch_edge_count = mode_switch_edge_count,
       .reverse_edge_count = reverse_edge_count,
+      .selected_goal_index = selected_goal_index,
       .cost_components = cost_components,
       .cost = candidate.cost,
   });

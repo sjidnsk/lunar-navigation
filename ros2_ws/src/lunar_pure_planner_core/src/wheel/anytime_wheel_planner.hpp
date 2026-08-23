@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <optional>
 #include <vector>
 
 #include "lunar_pure_planner_core/types/planning_request.hpp"
@@ -21,9 +22,11 @@ namespace wheel {
 
 struct WheelPlanRequest final {
   WheeledState start;
-  GoalRegion goal_odom;
+  LocalGoalSet goals_odom;
   const shared::LocalTerrainProjection* terrain{};
   const WheeledCapability* capability{};
+  std::uint64_t local_source_sequence{};
+  std::uint64_t capability_fingerprint{};
   SearchControl control;
   AnytimeSearchConfig search;
 };
@@ -50,6 +53,9 @@ struct WheelPlanResult final {
   std::size_t preferred_candidate_terminal_connector_edge_count{};
   std::size_t preferred_candidate_certified_edge_count{};
   double preferred_candidate_cost{};
+  std::size_t preferred_builder_invocations{};
+  std::size_t ara_search_invocations{};
+  std::optional<std::size_t> selected_goal_index;
   std::array<double, 5U> cost_components{};
   std::array<double, 5U> cost_scales{};
   double cost{};

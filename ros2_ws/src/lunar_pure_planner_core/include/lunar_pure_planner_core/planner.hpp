@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -24,11 +25,12 @@ struct LocalStageResult final {
   LocalPlanStatus status{LocalPlanStatus::kInvalidInput};
   std::optional<MotionReferenceData> data;
   std::string reason_code;
+  std::optional<std::size_t> selected_goal_index;
 };
 
 struct PlannerBackends final {
   std::function<GlobalStageResult(const PlanningRequest&, SearchControl)> global;
-  std::function<LocalStageResult(const PlanningRequest&, const GoalRegion&,
+  std::function<LocalStageResult(const PlanningRequest&, const LocalGoalSet&,
                                  SearchControl)>
       local;
 };

@@ -2,10 +2,12 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include "lunar_pure_planner_core/planning_timing.hpp"
 #include "lunar_pure_planner_core/search_control.hpp"
@@ -34,6 +36,15 @@ struct MinimalWorldSnapshot final {
   std::optional<GridMap> global_map;
   GridMap local_map;
   RigidTransform map_from_odom;
+  std::uint64_t global_map_sequence{};
+  std::uint64_t local_map_sequence{};
+  std::uint64_t odometry_sequence{};
+  std::uint64_t tf_sequence{};
+};
+
+struct LocalGoalSet final {
+  std::vector<GoalRegion> goals_odom;
+  bool exact_final_goal{};
 };
 
 struct WheeledState final {
@@ -91,6 +102,7 @@ struct PlanningResult final {
   std::optional<MotionReference> reference;
   PlannerCallTiming timing;
   std::uint64_t expanded_states{};
+  std::optional<std::size_t> selected_goal_index;
 };
 
 }  // namespace lunar::pure_planning

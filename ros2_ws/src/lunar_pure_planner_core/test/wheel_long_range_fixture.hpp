@@ -15,6 +15,8 @@
 #include <vector>
 
 #include "hierarchical/global_route_planner.hpp"
+#include "hierarchical/surface_portal_set.hpp"
+#include "hierarchical/surface_rolling_session.hpp"
 #include "lunar_pure_planner_core/planner.hpp"
 #include "shared/local_terrain_projection.hpp"
 #include "shared/map_snapshot.hpp"
@@ -30,6 +32,7 @@ class WheelLongRangeFixture final {
     std::int64_t failed_segment{-1};
     double global_elapsed_ms{};
     double local_elapsed_ms{};
+    double max_cycle_elapsed_ms{};
     double elapsed_ms{};
     std::uint64_t expanded_states{};
     std::size_t generated_states{};
@@ -37,6 +40,10 @@ class WheelLongRangeFixture final {
     std::size_t state_labels{};
     std::size_t sweep_cell_checks{};
     std::size_t rolling_segments{};
+    std::size_t cycles_under_one_second{};
+    std::size_t cycles_one_to_two_seconds{};
+    std::size_t cycles_two_to_three_seconds{};
+    std::size_t cycles_at_least_three_seconds{};
     Pose3 final_pose{};
   };
 
@@ -51,6 +58,16 @@ class WheelLongRangeFixture final {
                 << "\"success\":" << (completed.success ? "true" : "false") << ','
                 << "\"failed_segment\":" << completed.failed_segment << ','
                 << "\"elapsed_ms\":" << completed.elapsed_ms << ','
+                << "\"max_cycle_elapsed_ms\":"
+                << completed.max_cycle_elapsed_ms << ','
+                << "\"cycles_under_one_second\":"
+                << completed.cycles_under_one_second << ','
+                << "\"cycles_one_to_two_seconds\":"
+                << completed.cycles_one_to_two_seconds << ','
+                << "\"cycles_two_to_three_seconds\":"
+                << completed.cycles_two_to_three_seconds << ','
+                << "\"cycles_at_least_three_seconds\":"
+                << completed.cycles_at_least_three_seconds << ','
                 << "\"expanded_states\":" << completed.expanded_states << ','
                 << "\"edge_evaluations\":" << completed.edge_evaluations << ','
                 << "\"state_labels\":" << completed.state_labels << ','
@@ -108,13 +125,19 @@ class WheelLongRangeFixture final {
     };
 
     const auto make_local_map = [&](const Pose3& center) {
+      const double origin_x =
+          std::floor((center.position_m.x - 32.0) / kLocalResolutionM) *
+          kLocalResolutionM;
+      const double origin_y =
+          std::floor((center.position_m.y - 32.0) / kLocalResolutionM) *
+          kLocalResolutionM;
       std::vector<float> occupancy(kLocalWidth * kLocalHeight, 0.0F);
       for (std::size_t y = 0U; y < kLocalHeight; ++y) {
         for (std::size_t x = 0U; x < kLocalWidth; ++x) {
-          const double world_x = center.position_m.x - 32.0 +
+          const double world_x = origin_x +
                                  (static_cast<double>(x) + 0.5) *
                                      kLocalResolutionM;
-          const double world_y = center.position_m.y - 32.0 +
+          const double world_y = origin_y +
                                  (static_cast<double>(y) + 0.5) *
                                      kLocalResolutionM;
           const auto global_x = static_cast<std::int64_t>(std::floor(world_x));
@@ -133,8 +156,7 @@ class WheelLongRangeFixture final {
           .width = kLocalWidth,
           .height = kLocalHeight,
           .resolution_m = kLocalResolutionM,
-          .origin_m = {.x = center.position_m.x - 32.0,
-                       .y = center.position_m.y - 32.0},
+          .origin_m = {.x = origin_x, .y = origin_y},
           .layers = {
               {"occupancy", GridLayer{.values = std::move(occupancy)}},
               {"elevation", GridLayer{.values = std::vector<float>(
@@ -165,63 +187,15 @@ class WheelLongRangeFixture final {
       return finish(record);
     }
     record.expanded_states += global.route->expanded_states;
-
-    const auto route_point_at_horizon = [&](const Pose3& pose)
-        -> std::optional<Vec3> {
-      const auto& route = global.route->poses_map;
-      if (route.size() < 2U) {
-        return std::nullopt;
-      }
-      std::size_t nearest_segment{};
-      double nearest_ratio{};
-      double nearest_distance = std::numeric_limits<double>::infinity();
-      for (std::size_t index = 1U; index < route.size(); ++index) {
-        const Vec3 from = route[index - 1U].position_m;
-        const Vec3 to = route[index].position_m;
-        const double dx = to.x - from.x;
-        const double dy = to.y - from.y;
-        const double squared_length = dx * dx + dy * dy;
-        const double ratio = squared_length > 0.0
-                                 ? std::clamp(
-                                       ((pose.position_m.x - from.x) * dx +
-                                        (pose.position_m.y - from.y) * dy) /
-                                           squared_length,
-                                       0.0, 1.0)
-                                 : 0.0;
-        const double projected_x = from.x + ratio * dx;
-        const double projected_y = from.y + ratio * dy;
-        const double distance = std::hypot(pose.position_m.x - projected_x,
-                                           pose.position_m.y - projected_y);
-        if (distance < nearest_distance) {
-          nearest_distance = distance;
-          nearest_segment = index - 1U;
-          nearest_ratio = ratio;
-        }
-      }
-      constexpr double kRollingHorizonM = 8.0;
-      double remaining = kRollingHorizonM;
-      Vec3 from = route[nearest_segment].position_m;
-      Vec3 to = route[nearest_segment + 1U].position_m;
-      from.x += nearest_ratio * (to.x - from.x);
-      from.y += nearest_ratio * (to.y - from.y);
-      for (std::size_t index = nearest_segment + 1U;; ++index) {
-        const double distance = std::hypot(to.x - from.x, to.y - from.y);
-        if (distance >= remaining) {
-          return Vec3{.x = from.x + remaining * (to.x - from.x) / distance,
-                      .y = from.y + remaining * (to.y - from.y) / distance};
-        }
-        remaining -= distance;
-        if (index + 1U == route.size()) {
-          return to;
-        }
-        from = to;
-        to = route[index + 1U].position_m;
-      }
-    };
+    const hierarchical::SurfaceRollingSession rolling_session(
+        *global.route, final_goal,
+        hierarchical::SurfaceRollingConfig{.horizon_m = 8.0,
+                                            .max_deviation_m = 2.0});
+    double confirmed_route_progress_m{};
 
     while (std::hypot(current.position_m.x - 800.0,
                       current.position_m.y - 500.0) > 0.2) {
-      if (record.rolling_segments >= 200U) {
+      if (record.rolling_segments >= 320U) {
         record.failed_segment = static_cast<std::int64_t>(record.rolling_segments);
         record.final_pose = current;
         return finish(record);
@@ -232,18 +206,31 @@ class WheelLongRangeFixture final {
                                  std::to_string(record.rolling_segments);
       local_request.current_state = WheeledState{.pose = current};
       local_request.world.local_map = make_local_map(current);
-      const auto target = route_point_at_horizon(current);
-      if (!target.has_value()) {
+      const auto cycle_deadline = local_started + std::chrono::seconds{3};
+      const SearchControl cycle_control{.deadline = cycle_deadline};
+      hierarchical::SurfaceRollingDecision decision =
+          rolling_session.Decide(current, confirmed_route_progress_m);
+      const hierarchical::SurfacePortalSetResult portals =
+          hierarchical::BuildSurfacePortalSet(
+              local_request, *global.route, decision, 32U, cycle_control);
+      if (!portals.ok()) {
         record.failed_segment = static_cast<std::int64_t>(record.rolling_segments);
         record.final_pose = current;
         return finish(record);
       }
-      const GoalRegion bounded_local_goal{
-          .goal_id = "750m-local-goal",
-          .target = PointGoal{.position_m = *target, .tolerance_m = 0.2},
-      };
+      const hierarchical::LocalGoalSetResult converted =
+          hierarchical::ConvertSurfacePortalsToLocalGoals(
+              portals, decision, current, *local_request.world.global_map,
+              local_request.world.local_map);
+      if (!converted.ok()) {
+        record.failed_segment = static_cast<std::int64_t>(record.rolling_segments);
+        record.final_pose = current;
+        return finish(record);
+      }
+      LocalGoalSet local_goals = *converted.goals;
       const auto snapshot = shared::MapSnapshot::Create(
-          local_request.world.local_map, shared::MapContract::kLocalElevation);
+          local_request.world.local_map, shared::MapContract::kLocalElevation,
+          cycle_control);
       if (!snapshot.ok()) {
         record.failed_segment = static_cast<std::int64_t>(record.rolling_segments);
         record.final_pose = current;
@@ -251,7 +238,8 @@ class WheelLongRangeFixture final {
       }
       const auto terrain = shared::BuildLocalTerrainProjection(
           snapshot.snapshot,
-          static_cast<float>(local_request.config.local_occupancy_threshold));
+          static_cast<float>(local_request.config.local_occupancy_threshold),
+          cycle_control);
       if (!terrain.ok()) {
         record.failed_segment = static_cast<std::int64_t>(record.rolling_segments);
         record.final_pose = current;
@@ -259,10 +247,11 @@ class WheelLongRangeFixture final {
       }
       const WheelPlanResult local = PlanWheel({
           .start = WheeledState{.pose = current},
-          .goal_odom = bounded_local_goal,
+          .goals_odom = local_goals,
           .terrain = &*terrain.value,
           .capability = &capability,
-          .control = {.deadline = SteadyClock::now() + std::chrono::seconds{1}},
+          .control = cycle_control,
+          .search = {.stop_after_first_solution = true},
       });
       record.local_elapsed_ms +=
           std::chrono::duration<double, std::milli>(SteadyClock::now() - local_started)
@@ -276,6 +265,37 @@ class WheelLongRangeFixture final {
         record.failed_segment = static_cast<std::int64_t>(record.rolling_segments);
         record.final_pose = current;
         return finish(record);
+      }
+      const double cycle_elapsed_ms =
+          std::chrono::duration<double, std::milli>(SteadyClock::now() -
+                                                    local_started)
+              .count();
+      record.max_cycle_elapsed_ms =
+          std::max(record.max_cycle_elapsed_ms, cycle_elapsed_ms);
+      if (cycle_elapsed_ms < 1000.0) {
+        ++record.cycles_under_one_second;
+      } else if (cycle_elapsed_ms < 2000.0) {
+        ++record.cycles_one_to_two_seconds;
+      } else if (cycle_elapsed_ms < 3000.0) {
+        ++record.cycles_two_to_three_seconds;
+      } else {
+        ++record.cycles_at_least_three_seconds;
+      }
+      if (!decision.targets_final_goal &&
+          local.selected_goal_index.has_value() &&
+          *local.selected_goal_index < local_goals.goals_odom.size()) {
+        const auto& selected = std::get<PointGoal>(
+            local_goals.goals_odom[*local.selected_goal_index].target);
+        for (const hierarchical::SurfacePortalCandidate& portal :
+             portals.candidates) {
+          const auto& candidate = std::get<PointGoal>(portal.goal_odom.target);
+          if (candidate.position_m.x == selected.position_m.x &&
+              candidate.position_m.y == selected.position_m.y) {
+            confirmed_route_progress_m = std::max(
+                confirmed_route_progress_m, portal.route_progress_m);
+            break;
+          }
+        }
       }
       current = local.trajectory.back().pose;
       ++record.rolling_segments;

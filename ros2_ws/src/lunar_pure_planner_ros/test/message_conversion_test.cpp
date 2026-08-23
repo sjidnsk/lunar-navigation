@@ -168,7 +168,7 @@ PlanningResult PlanWheelReferenceWithNonUnitMapFromOdom() {
   lunar::pure_planning::Planner planner(lunar::pure_planning::PlannerBackends{
       .global = {},
       .local = [](const lunar::pure_planning::PlanningRequest&,
-                  const lunar::pure_planning::GoalRegion&,
+                  const lunar::pure_planning::LocalGoalSet&,
                   lunar::pure_planning::SearchControl) {
         return lunar::pure_planning::LocalStageResult{
             .status = lunar::pure_planning::LocalPlanStatus::kSolved,

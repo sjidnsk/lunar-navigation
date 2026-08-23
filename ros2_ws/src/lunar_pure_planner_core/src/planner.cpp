@@ -147,8 +147,12 @@ using namespace std::chrono_literals;
 }
 
 [[nodiscard]] LocalStageResult PlanLocalDefault(
-    const PlanningRequest& input, const GoalRegion& goal_odom,
+    const PlanningRequest& input, const LocalGoalSet& goals_odom,
     SearchControl control) {
+  if (goals_odom.goals_odom.empty()) {
+    return {.status = LocalPlanStatus::kInvalidInput,
+            .reason_code = "INVALID_INPUT"};
+  }
   auto snapshot = shared::MapSnapshot::Create(
       input.world.local_map, shared::MapContract::kLocalElevation, control);
   if (!snapshot.ok()) {
@@ -171,9 +175,10 @@ using namespace std::chrono_literals;
     }
     wheel::WheelPlanResult result = wheel::PlanWheel({
         .start = *state,
-        .goal_odom = goal_odom,
+        .goals_odom = goals_odom,
         .terrain = &terrain,
         .capability = capability,
+        .local_source_sequence = input.world.local_map_sequence,
         .control = control,
         .search = input.config.search,
     });
@@ -186,8 +191,11 @@ using namespace std::chrono_literals;
                       }}
                     : std::nullopt,
         .reason_code = std::move(result.reason_code),
+        .selected_goal_index = result.selected_goal_index,
     };
   }
+
+  const GoalRegion& goal_odom = goals_odom.goals_odom.front();
 
   if (const auto* capability =
           std::get_if<LeggedCapability>(&input.capability)) {
@@ -243,6 +251,9 @@ using namespace std::chrono_literals;
         .status = result.status,
         .data = std::move(data),
         .reason_code = std::move(result.reason_code),
+        .selected_goal_index = result.ok()
+                                   ? std::optional<std::size_t>{0U}
+                                   : std::nullopt,
     };
   }
 
@@ -268,6 +279,9 @@ using namespace std::chrono_literals;
                         HopReference{.segments = std::move(result.hops)}}
                   : std::nullopt,
       .reason_code = std::move(result.reason_code),
+      .selected_goal_index = result.ok()
+                                 ? std::optional<std::size_t>{0U}
+                                 : std::nullopt,
   };
 }
 
@@ -354,7 +368,7 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
                  PlannerPhase::kSnapshotProjection);
 
     std::optional<GlobalRoute> global_route;
-    GoalRegion local_goal;
+    LocalGoalSet local_goals;
     if (input.environment_mode == EnvironmentMode::kLunarSurface) {
       if (!input.world.global_map.has_value() || !backends_.global) {
         return finish(Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT"));
@@ -389,7 +403,7 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
         return finish(GlobalFailure(global.reason_code));
       }
       global_route = std::move(global.route);
-      const auto selected = hierarchical::SelectSurfaceLocalGoal(
+      const auto selected = hierarchical::SelectSurfaceLocalGoals(
           input, *global_route,
           SearchControl{
               .deadline = policy.hard_deadline,
@@ -399,7 +413,7 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
       if (!selected.ok()) {
         return finish(GlobalFailure(selected.reason_code));
       }
-      local_goal = *selected.goal;
+      local_goals = *selected.goals;
     } else {
       if (!hierarchical::GoalInsideLocalMap(input, input.goal_map)) {
         return finish(Failure(PlanningStatus::kGoalOutsideLocalMap,
@@ -410,7 +424,10 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
       if (!transformed.has_value()) {
         return finish(Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT"));
       }
-      local_goal = *transformed;
+      local_goals = LocalGoalSet{
+          .goals_odom = {*transformed},
+          .exact_final_goal = true,
+      };
     }
 
     finish_phase(timing.local_goal_elapsed, PlannerPhase::kLocalGoal);
@@ -427,7 +444,7 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
     SteadyClock::time_point local_finished{};
     {
       ScopedPlannerCall call(PlannerStage::kLocal, timing, input.control.now);
-      local = backends_.local(input, local_goal, std::move(local_control));
+      local = backends_.local(input, local_goals, std::move(local_control));
       if (!call.Finish(&local_finished)) {
         return finish(
             Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR"));
@@ -478,6 +495,7 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
         .expanded_states = global_route.has_value()
                                ? global_route->expanded_states
                                : 0U,
+        .selected_goal_index = local.selected_goal_index,
     };
     return finish(std::move(success));
   } catch (...) {
