@@ -28,13 +28,36 @@ def policy() -> TrackingPolicy:
     )
 
 
-def sample(x: float, y: float, yaw: float, speed: float) -> TrajectorySample:
+def sample(
+    x: float,
+    y: float,
+    yaw: float,
+    speed: float,
+    yaw_rate: float = 0.0,
+) -> TrajectorySample:
     return TrajectorySample(
         x_m=x,
         y_m=y,
         yaw_rad=yaw,
         signed_speed_mps=speed,
-        yaw_rate_radps=0.0,
+        yaw_rate_radps=yaw_rate,
+    )
+
+
+def producer_spin_samples(
+    direction: float,
+    yaw_rate: float = 0.15,
+) -> tuple[TrajectorySample, ...]:
+    """Mirror the wheel producer's initial point plus eight spin samples."""
+    return tuple(
+        sample(
+            0.0,
+            0.0,
+            direction * math.pi * index / 16.0,
+            0.0,
+            direction * yaw_rate if 0 < index < 8 else 0.0,
+        )
+        for index in range(9)
     )
 
 
@@ -200,6 +223,82 @@ def test_in_place_right_spin_has_zero_linear_and_negative_angular_velocity() -> 
     assert spin.angular_z_radps < 0.0
 
 
+@pytest.mark.parametrize("direction", [1.0, -1.0])
+def test_producer_shaped_dense_spin_is_not_skipped(direction: float) -> None:
+    """Do not classify producer spins by arrival tolerance."""
+    result = track_trajectory(
+        producer_spin_samples(direction),
+        state(0.0, 0.0, 0.0),
+        policy(),
+        0,
+    )
+
+    assert result.command.failure_reason is None
+    assert result.command.linear_x_mps == 0.0
+    assert math.isclose(
+        result.command.angular_z_radps,
+        direction * 0.15,
+        abs_tol=1.0e-12,
+    )
+
+
+@pytest.mark.parametrize(
+    "target_yaw, requested_yaw_rate",
+    [
+        (math.pi, 0.11),
+        (-math.pi, -0.12),
+    ],
+)
+def test_spin_yaw_rate_resolves_pi_direction_and_caps_command(
+    target_yaw: float,
+    requested_yaw_rate: float,
+) -> None:
+    """Ignoring trajectory yaw rate must fail direction or magnitude at pi."""
+    result = track_trajectory(
+        (
+            sample(0.0, 0.0, 0.0, 0.0),
+            sample(0.0, 0.0, target_yaw, 0.0, requested_yaw_rate),
+        ),
+        state(0.0, 0.0, 0.0),
+        policy(),
+        0,
+    )
+
+    assert result.command.linear_x_mps == 0.0
+    assert math.isclose(
+        result.command.angular_z_radps,
+        requested_yaw_rate,
+        abs_tol=1.0e-12,
+    )
+
+
+@pytest.mark.parametrize("direction", [1.0, -1.0])
+def test_terminal_zero_yaw_rate_inherits_contiguous_spin_authority(
+    direction: float,
+) -> None:
+    """Inherit the producer's spin limit at its zero-rate terminal."""
+    requested_yaw_rate = direction * 0.13
+    samples = (
+        sample(0.0, 0.0, 0.0, 0.0),
+        sample(0.0, 0.0, direction * math.pi / 4.0, 0.0, requested_yaw_rate),
+        sample(0.0, 0.0, direction * math.pi / 2.0, 0.0, 0.0),
+    )
+
+    result = track_trajectory(
+        samples,
+        state(0.0, 0.0, direction * math.pi / 4.0),
+        policy(),
+        1,
+    )
+
+    assert result.command.linear_x_mps == 0.0
+    assert math.isclose(
+        result.command.angular_z_radps,
+        requested_yaw_rate,
+        abs_tol=1.0e-12,
+    )
+
+
 def test_trajectory_cursor_advances_past_reached_intermediate_samples() -> None:
     """A cursor mutation that retargets from the start must fail this test."""
     samples = (
@@ -276,6 +375,54 @@ def test_same_pose_same_yaw_stop_keeps_translation_continuity() -> None:
 
     assert result.command.linear_x_mps > 0.0
     assert result.command.angular_z_radps == 0.0
+
+
+@pytest.mark.parametrize(
+    "samples, approach_state, approach_sign, departure_sign",
+    [
+        (
+            (
+                sample(0.0, 0.0, 0.0, 0.2),
+                sample(0.5, 0.0, 0.0, 0.2),
+                sample(1.0, 0.0, 0.0, 0.0),
+                sample(1.0, 0.0, 0.0, 0.0),
+                sample(0.5, 0.0, 0.0, -0.2),
+            ),
+            state(0.75, 0.0, 0.0),
+            1.0,
+            -1.0,
+        ),
+        (
+            (
+                sample(2.0, 0.0, 0.0, -0.2),
+                sample(1.5, 0.0, 0.0, -0.2),
+                sample(1.0, 0.0, 0.0, 0.0),
+                sample(1.0, 0.0, 0.0, 0.0),
+                sample(1.5, 0.0, 0.0, 0.2),
+            ),
+            state(1.25, 0.0, 0.0),
+            -1.0,
+            1.0,
+        ),
+    ],
+)
+def test_repeated_zero_stop_keeps_prior_direction_until_cursor_advances(
+    samples: tuple[TrajectorySample, ...],
+    approach_state: TrackingState,
+    approach_sign: float,
+    departure_sign: float,
+) -> None:
+    """Do not switch direction before reaching a repeated zero stop."""
+    approaching = track_trajectory(samples, approach_state, policy(), 1)
+    departing = track_trajectory(samples, state(1.0, 0.0, 0.0), policy(), 1)
+
+    assert (
+        math.copysign(1.0, approaching.command.linear_x_mps)
+        == approach_sign
+    )
+    assert approaching.next_cursor == 1
+    assert math.copysign(1.0, departing.command.linear_x_mps) == departure_sign
+    assert departing.next_cursor == 3
 
 
 @pytest.mark.parametrize("cursor", [-1, 2])

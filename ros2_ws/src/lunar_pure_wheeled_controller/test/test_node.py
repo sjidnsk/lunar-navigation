@@ -32,9 +32,18 @@ def make_reference(*, goal_x: float = 2.0) -> MotionReference:
 
 def make_trajectory_reference(
     samples: list[tuple[float, float, float, float]],
+    *,
+    yaw_rates: list[float] | None = None,
 ) -> MotionReference:
     reference = make_reference()
-    for x, y, yaw, signed_speed in samples:
+    if yaw_rates is None:
+        yaw_rates = [0.0] * len(samples)
+    assert len(yaw_rates) == len(samples)
+    for (x, y, yaw, signed_speed), yaw_rate in zip(
+        samples,
+        yaw_rates,
+        strict=True,
+    ):
         point = MultiDOFJointTrajectoryPoint()
         transform = Transform()
         transform.translation.x = x
@@ -44,10 +53,25 @@ def make_trajectory_reference(
         velocity = Twist()
         velocity.linear.x = signed_speed * math.cos(yaw)
         velocity.linear.y = signed_speed * math.sin(yaw)
+        velocity.angular.z = yaw_rate
         point.transforms.append(transform)
         point.velocities.append(velocity)
         reference.trajectory.points.append(point)
     return reference
+
+
+def make_producer_spin_reference(direction: float) -> MotionReference:
+    """Mirror the wheel producer's initial point plus eight spin samples."""
+    return make_trajectory_reference(
+        [
+            (0.0, 0.0, direction * math.pi * index / 16.0, 0.0)
+            for index in range(9)
+        ],
+        yaw_rates=[
+            direction * 0.15 if 0 < index < 8 else 0.0
+            for index in range(9)
+        ],
+    )
 
 
 def make_odometry(*, x: float, y: float = 0.0, yaw: float = 0.0) -> Odometry:
@@ -144,10 +168,8 @@ def test_spin_trajectory_publishes_only_signed_angular_twist(
 ) -> None:
     """A mode-selection or yaw-sign mutation must fail this test."""
     controller, observer, received, _ = controller_with_observer
-    reference = make_trajectory_reference([
-        (0.0, 0.0, 0.0, 0.2),
-        (0.0, 0.0, target_yaw, 0.0),
-    ])
+    direction = math.copysign(1.0, target_yaw)
+    reference = make_producer_spin_reference(direction)
 
     controller._on_reference(reference)
     controller._on_odometry(make_odometry(x=0.0))
@@ -156,6 +178,7 @@ def test_spin_trajectory_publishes_only_signed_angular_twist(
 
     assert received[-1].linear.x == 0.0
     assert math.copysign(1.0, received[-1].angular.z) == expected_sign
+    assert math.isclose(abs(received[-1].angular.z), 0.15, abs_tol=1.0e-12)
 
 
 def test_matching_cancel_immediately_stops_and_clears_active_trajectory(
@@ -202,6 +225,24 @@ def test_mismatched_cancel_keeps_current_trajectory_active(
     wait_for_twists(controller, observer, received)
 
     assert received[-1].linear.x < 0.0
+
+
+def test_empty_cancel_id_keeps_current_trajectory_active(
+    controller_with_observer,
+) -> None:
+    """Treating an empty cancel ID as a wildcard must fail this test."""
+    controller, observer, received, _ = controller_with_observer
+    controller._on_reference(make_trajectory_reference([
+        (0.0, 0.0, 0.0, -0.2),
+        (-1.0, 0.0, 0.0, -0.2),
+    ]))
+    active = controller._active
+
+    controller._on_cancel(String(data=""))
+    rclpy.spin_once(observer, timeout_sec=0.05)
+
+    assert received == []
+    assert controller._active is active
 
 
 def test_published_twists_keep_all_unsupported_components_zero(
@@ -404,6 +445,7 @@ def test_node_uses_spec_goal_tolerance_parameter_names() -> None:
         ("reference_topic:=relative_reference", "reference_topic"),
         ("odometry_topic:=relative_odometry", "odometry_topic"),
         ("command_topic:=relative_command", "command_topic"),
+        ("execution_cancel_topic:=relative_cancel", "execution_cancel_topic"),
     ],
 )
 def test_relative_topic_parameter_is_rejected(parameter_override: str, parameter_name: str) -> None:

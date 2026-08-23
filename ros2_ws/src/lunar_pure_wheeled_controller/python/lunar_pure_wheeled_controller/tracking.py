@@ -124,8 +124,49 @@ def _is_spin_target(
     return (
         math.hypot(target.x_m - predecessor.x_m, target.y_m - predecessor.y_m)
         <= policy.translation_epsilon_m
-        and _angle_error(target.yaw_rad, predecessor.yaw_rad) > policy.goal_yaw_tolerance_rad
+        and (
+            _angle_error(target.yaw_rad, predecessor.yaw_rad) > 0.0
+            or predecessor.yaw_rate_radps != 0.0
+            or target.yaw_rate_radps != 0.0
+        )
     )
+
+
+def _spin_segment_yaw_rate(
+    samples: tuple[TrajectorySample, ...],
+    target_index: int,
+    policy: TrackingPolicy,
+) -> float:
+    first_sample = target_index - 1
+    while first_sample > 0 and _is_spin_target(samples, first_sample, policy):
+        first_sample -= 1
+
+    last_sample = target_index
+    while last_sample + 1 < len(samples) and _is_spin_target(
+        samples,
+        last_sample + 1,
+        policy,
+    ):
+        last_sample += 1
+
+    if samples[target_index].yaw_rate_radps != 0.0:
+        return samples[target_index].yaw_rate_radps
+    for index in range(target_index - 1, first_sample - 1, -1):
+        if samples[index].yaw_rate_radps != 0.0:
+            return samples[index].yaw_rate_radps
+    for index in range(target_index + 1, last_sample + 1):
+        if samples[index].yaw_rate_radps != 0.0:
+            return samples[index].yaw_rate_radps
+    return 0.0
+
+
+def _spin_yaw_error(target: float, current: float, yaw_rate: float) -> float:
+    error = _normalized_yaw_error(target, current)
+    if yaw_rate > 0.0 and error < 0.0:
+        return error + 2.0 * math.pi
+    if yaw_rate < 0.0 and error > 0.0:
+        return error - 2.0 * math.pi
+    return error
 
 
 def _sample_reached(
@@ -152,15 +193,15 @@ def _translation_sign(
     if speed != 0.0:
         return math.copysign(1.0, speed)
 
-    for index in range(target_index + 1, len(samples)):
-        if _is_spin_target(samples, index, policy):
+    for index in range(target_index - 1, -1, -1):
+        if index > 0 and _is_spin_target(samples, index, policy):
             break
         speed = samples[index].signed_speed_mps
         if speed != 0.0:
             return math.copysign(1.0, speed)
 
-    for index in range(target_index - 1, -1, -1):
-        if index > 0 and _is_spin_target(samples, index, policy):
+    for index in range(target_index + 1, len(samples)):
+        if _is_spin_target(samples, index, policy):
             break
         speed = samples[index].signed_speed_mps
         if speed != 0.0:
@@ -253,9 +294,17 @@ def track_trajectory(
         _is_spin_target(finite_samples, target_index, policy)
         and _angle_error(target.yaw_rad, yaw) > policy.goal_yaw_tolerance_rad
     ):
+        yaw_rate = _spin_segment_yaw_rate(
+            finite_samples,
+            target_index,
+            policy,
+        )
+        angular_limit = policy.max_angular_radps
+        if yaw_rate != 0.0:
+            angular_limit = min(angular_limit, abs(yaw_rate))
         angular = _clip(
-            policy.spin_kp * _normalized_yaw_error(target.yaw_rad, yaw),
-            policy.max_angular_radps,
+            policy.spin_kp * _spin_yaw_error(target.yaw_rad, yaw, yaw_rate),
+            angular_limit,
         )
         return TrajectoryTrackingResult(TrackingCommand(0.0, angular, False, None), next_cursor)
 
