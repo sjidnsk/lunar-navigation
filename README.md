@@ -68,7 +68,97 @@ ros2 topic echo /Car/T4/exploration/status
 假 `PlanMotion` server 的 Goal、Result、MotionReference 握手通过。真实课题三在线输入、真实控制器、
 车辆执行和 Jetson AGX Orin 性能/稳定性尚未运行，不能由本机验证替代。
 
-## Jazzy 月表 RViz 演示（测试专用）
+## Jazzy 300 m 探索闭环（测试专用）
+
+这套入口在本机 ROS 2 Jazzy 中组合固定种子的 `300 m × 300 m` 月表、纯探索器、纯规划器、
+前后轮协调转向控制器、结果记录器和 RViz2。它使用 `/Car/T3/...` 输入、`/Car/T4/...` 探索与
+规划接口以及唯一的 `/Car/T5/Car_Cmd_Vel` 控制输出；不会接入实车。
+
+### 依赖与仓库外构建
+
+系统需安装 ROS 2 Jazzy desktop、`python3-colcon-common-extensions`、`python3-rosdep` 和
+`nlohmann-json3-dev`。`nlohmann_json` 也可以由已 source 的外部前缀提供。推荐先让 rosdep 核对
+工作区，再把 build/install/log 全部放到仓库外：
+
+```bash
+cd /home/kai/CodexDownloads/lunar_navigation/lunar_pure_planner_orin-worktrees/jazzy-300m-exploration
+source /opt/ros/jazzy/setup.bash
+sudo apt-get install nlohmann-json3-dev
+rosdep install --from-paths ros2_ws/src --ignore-src -r -y --rosdistro jazzy
+
+export LUNAR_JAZZY_BUILD=/home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop
+mkdir -p "$LUNAR_JAZZY_BUILD"
+colcon --log-base "$LUNAR_JAZZY_BUILD/log" build \
+  --base-paths ros2_ws/src \
+  --build-base "$LUNAR_JAZZY_BUILD/build" \
+  --install-base "$LUNAR_JAZZY_BUILD/install" \
+  --packages-up-to lunar_pure_exploration_sim lunar_pure_exploration_ros \
+    lunar_pure_planner_ros lunar_pure_wheeled_controller
+```
+
+### 完整运行与 RViz
+
+入口默认启动 RViz，并在启动前检查安装态包/可执行文件、选择并锁定一个候选
+`ROS_DOMAIN_ID`，以 `ROS_LOCALHOST_ONLY=1` 和 `ros2 node list --no-daemon` 拒绝非空图。该过程
+用于降低本机 DDS 冲突，不是对所有外部 DDS participant 的全局证明。
+
+```bash
+./scripts/run_jazzy_300m_exploration_sim.sh
+```
+
+无图形环境时显式关闭 RViz；不要把 headless 结果写成 RViz 人工验收证据：
+
+```bash
+./scripts/run_jazzy_300m_exploration_sim.sh --no-rviz
+```
+
+默认 overlay 是
+`/home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/install/setup.bash`。
+可显式覆盖，但必须指向当前工作树构建出的 Jazzy 安装态：
+
+```bash
+LUNAR_JAZZY_OVERLAY=/absolute/path/to/install/setup.bash \
+  ./scripts/run_jazzy_300m_exploration_sim.sh
+```
+
+RViz fixed frame 为 `map`。运行中应看到逐步显露的全局地图、10 m/90° FOV、当前局部窗口、
+前沿与候选、当前目标、规划路径、车辆实际轨迹、轮组姿态以及覆盖率/规划计时 HUD。终止后保留
+最后一帧。车辆原语只有前进/后退、前进/后退圆弧和原地旋转，不提供横向平移。
+
+仿真的 plant 使用 `sim_dt = wall_dt × 20`；控制器命令仍是正常物理单位，算法耗时仍由本机
+单调 wall clock 统计。该 launch 不发布 `/clock`，各算法也不启用 `use_sim_time`。20 倍表示车辆
+状态相对 wall time 加速推进，不表示规划算法变快 20 倍。
+
+### 完成条件与结果
+
+唯一成功条件是任务区内不存在可达前沿：终态必须为 `COMPLETED`，reason 必须为
+`COMPLETED_NO_REACHABLE_FRONTIER`。覆盖率只计算和记录，绝不作为停止阈值；人工中断、wall
+guard、ERROR 或 launch 提前退出均返回失败。完整运行的实测耗时应从本次结果读取；在形成完整
+终态实测前不承诺预计完成时间。
+
+每次运行创建独立目录：
+
+```text
+/home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_runs/run-<时间>-seed-<种子>-<随机后缀>/
+├── launch.log
+├── operator_evidence.json
+├── ros-logs/
+└── results/
+    ├── summary.json
+    ├── coverage.csv
+    └── trajectory.csv
+```
+
+`summary.json` 包含地图/传感器参数、终态与 reason、覆盖率和面积、完成目标数、重规划数、路程、
+wall/sim elapsed、全局/局部规划调用次数及最近/累计耗时。入口仅在三个文件非空、CSV 最后一条
+coverage 与 summary/status 完全一致、路程和完成目标数为正、全局/局部规划均至少调用一次时返回
+成功。`operator_evidence.json` 记录候选 domain、RViz 请求、wall guard、精确进程身份和清理后的
+空 ROS 图。
+
+这是 Ubuntu 本机 ROS 2 Jazzy 的功能仿真证据，不是 ROS 2 Humble、Jetson AGX Orin、实车控制、
+实时性、功耗或稳定性验收。部署前仍需在指定 Humble/Orin 环境重新构建并执行对应验收。
+
+## Jazzy 100 m 单次规划 RViz 演示（测试专用）
 
 该演示生成固定种子的 `100 m × 100 m` 月表：随机岩石/陨石坑障碍、模拟高程、轮式车位姿和
 可达默认目标。所有接口位于 `/lunar_demo/*`，Action 为 `/lunar_demo/plan_motion`，不会连接
