@@ -27,6 +27,7 @@ set(LUNAR_ANYTIME_PRODUCTION_SOURCES
   src/hierarchical/frame_transform.cpp
   src/hierarchical/global_route_planner.cpp
   src/hierarchical/reference_composer.cpp
+  src/hierarchical/surface_portal_set.cpp
   src/hierarchical/surface_rolling_session.cpp
   src/hierarchical/surface_global_search.cpp
   src/hopper/anytime_hopper_planner.cpp
@@ -104,6 +105,8 @@ if(BUILD_TESTING)
     test/surface_global_search_test.cpp)
   lunar_add_core_gtest(lunar_pure_planner_core_surface_rolling_session_test
     test/surface_rolling_session_test.cpp)
+  lunar_add_core_gtest(lunar_pure_planner_core_surface_portal_set_test
+    test/surface_portal_set_test.cpp)
   lunar_add_core_gtest(lunar_pure_planner_core_local_terrain_projection_test
     test/local_terrain_projection_test.cpp)
   lunar_add_core_gtest(lunar_pure_planner_core_obstacle_height_estimator_test

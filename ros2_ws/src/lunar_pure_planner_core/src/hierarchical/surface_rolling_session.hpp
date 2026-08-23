@@ -1,7 +1,5 @@
 #pragma once
 
-#include <optional>
-
 #include "lunar_pure_planner_core/planner.hpp"
 
 namespace lunar::pure_planning::hierarchical {
@@ -13,13 +11,15 @@ struct SurfaceRollingConfig final {
 
 struct SurfaceRollingDecision final {
   enum class Kind {
-    kNextGoal,
+    kNextPortalSet,
     kFinalGoalReached,
     kInvalidRoute,
   };
 
   Kind kind{Kind::kInvalidRoute};
-  std::optional<GoalRegion> goal;
+  double projected_route_progress_m{};
+  double desired_horizon_progress_m{};
+  bool targets_final_goal{};
   double lateral_deviation_m{};
 };
 
