@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <numbers>
 #include <optional>
 #include <utility>
 
@@ -15,6 +16,12 @@ namespace lunar::pure_exploration_sim {
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
+
+std::size_t LocalCell(const double world_coordinate_m,
+                      const double map_center_m) {
+  return static_cast<std::size_t>(
+      std::floor((world_coordinate_m - (map_center_m - 32.0)) / 0.2));
+}
 
 struct OcclusionFixture {
   Pose2 pose;
@@ -78,6 +85,71 @@ TEST(VisibilityTest, EnforcesNinetyDegreeFovAndTenMeterRange) {
       scene, outside_angle.first, outside_angle.second));
   EXPECT_FALSE(observations.IsCurrentlyVisible(
       scene, outside_range.first, outside_range.second));
+}
+
+TEST(VisibilityTest, UsesDerivedVehicleEnvelopeForPersistentFreeCells) {
+  const auto scene = BuildLunarScene(20260824U);
+  ObservationState observations;
+  observations.Observe(scene, Pose2{}, SensorModel{});
+
+  const double expected_margin =
+      std::hypot(0.8175 / 2.0, 0.67 / 2.0) + 0.2 +
+      std::numbers::sqrt2 / 2.0;
+  EXPECT_DOUBLE_EQ(GlobalKnownEnvelopeMarginM(), expected_margin);
+  EXPECT_TRUE(observations.IsKnownGlobalCell(155U, 150U));
+  EXPECT_FALSE(observations.IsKnownGlobalCell(159U, 150U));
+  EXPECT_FALSE(observations.IsKnownGlobalCell(156U, 156U));
+  EXPECT_TRUE(observations.IsCurrentlyVisible(scene, 9.5, 0.5));
+}
+
+TEST(VisibilityTest, CurrentContactEnvelopeCoversFootprintWithoutGlobalLeak) {
+  const auto scene = BuildLunarScene(20260824U);
+  const Pose2 pose{.x_m = 20.0, .y_m = 20.0, .yaw_rad = 0.0};
+  ObservationState observations;
+  observations.Observe(scene, pose, SensorModel{});
+
+  EXPECT_DOUBLE_EQ(LocalContactEnvelopeRadiusM(),
+                   std::hypot(0.591, 0.409) + 0.2 +
+                       0.2 * std::numbers::sqrt2 / 2.0);
+
+  for (const auto [offset_x_m, offset_y_m] :
+       {std::pair{-0.7, -0.5}, std::pair{-0.7, 0.5},
+        std::pair{0.7, -0.5}, std::pair{0.7, 0.5}}) {
+    EXPECT_NE(observations.CurrentLocalSample(
+                  pose, LocalCell(pose.x_m + offset_x_m, pose.x_m),
+                  LocalCell(pose.y_m + offset_y_m, pose.y_m)),
+              nullptr);
+  }
+  EXPECT_FALSE(observations.IsCurrentlyVisible(scene, 19.3, 20.5));
+  EXPECT_FALSE(observations.IsKnownGlobalCell(169U, 170U));
+}
+
+TEST(VisibilityTest, ContactEnvelopeIsCurrentOnlyAndLeavesFarRearUnknown) {
+  const auto scene = BuildLunarScene(20260824U);
+  ObservationState observations;
+  const Pose2 first{};
+  observations.Observe(scene, first, SensorModel{});
+  EXPECT_FALSE(observations.IsKnownGlobalCell(147U, 150U));
+  EXPECT_TRUE(observations.IsKnownGlobalCell(152U, 150U));
+  EXPECT_NE(observations.CurrentLocalSample(
+                first, LocalCell(2.5, first.x_m),
+                LocalCell(0.5, first.y_m)),
+            nullptr);
+  EXPECT_EQ(observations.CurrentLocalSample(
+                first, LocalCell(-5.0, first.x_m),
+                LocalCell(0.0, first.y_m)),
+            nullptr);
+
+  const Pose2 second{.x_m = 5.0, .y_m = 0.0, .yaw_rad = 0.0};
+  observations.Observe(scene, second, SensorModel{});
+  EXPECT_EQ(observations.CurrentLocalSample(
+                first, LocalCell(-0.7, first.x_m),
+                LocalCell(0.5, first.y_m)),
+            nullptr);
+  EXPECT_EQ(observations.CurrentLocalSample(
+                second, LocalCell(0.0, second.x_m),
+                LocalCell(0.0, second.y_m)),
+            nullptr);
 }
 
 TEST(VisibilityTest, KeepsFirstOccupiedSampleVisibleAndOccludesBehindIt) {

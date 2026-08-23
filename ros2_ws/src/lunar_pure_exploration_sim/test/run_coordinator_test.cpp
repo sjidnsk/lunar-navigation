@@ -62,7 +62,36 @@ CoordinatorReadiness FullyReady() {
   readiness.planner_action_ready = true;
   readiness.controller_publisher_unique = true;
   readiness.controller_command_received = true;
+  for (int poll = 0; poll < 5; ++poll) {
+    readiness.ObservePoll();
+  }
   return readiness;
+}
+
+TEST(CoordinatorReadinessTest, RequiresFiveConsecutiveStablePollsBeforeStart) {
+  CoordinatorReadiness readiness;
+  readiness.global_map_received = true;
+  readiness.local_map_received = true;
+  readiness.odometry_received = true;
+  readiness.tf_chain_received = true;
+  readiness.initial_status_received = true;
+  readiness.planner_action_ready = true;
+  readiness.controller_publisher_unique = true;
+  readiness.controller_command_received = true;
+
+  for (int poll = 0; poll < 4; ++poll) {
+    readiness.ObservePoll();
+    EXPECT_FALSE(readiness.ShouldStart());
+  }
+  readiness.planner_action_ready = false;
+  readiness.ObservePoll();
+  readiness.planner_action_ready = true;
+  for (int poll = 0; poll < 4; ++poll) {
+    readiness.ObservePoll();
+    EXPECT_FALSE(readiness.ShouldStart());
+  }
+  readiness.ObservePoll();
+  EXPECT_TRUE(readiness.ShouldStart());
 }
 
 TEST(CoordinatorReadinessTest, EveryRequiredInputIndependentlyBlocksStart) {

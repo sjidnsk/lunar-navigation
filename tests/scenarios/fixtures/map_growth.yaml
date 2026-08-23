@@ -166,7 +166,7 @@ expected:
     - {request_id: task15-map-growth/candidate/28, candidate_key: "4081,7750,225", goal_cell: "8,15", response_kind: NO_PATH, path_segments: []}
     - {request_id: task15-map-growth/candidate/29, candidate_key: "4081,7750,450", goal_cell: "8,15", response_kind: NO_PATH, path_segments: []}
     - {request_id: task15-map-growth/candidate/30, candidate_key: "4081,2750,225", goal_cell: "8,5", response_kind: SUCCESS, path_segments: [{segment_index: 1, reference_plan_id: "scenario-plan:task15-map-growth/candidate/30", endpoint_cell: "8,5", final_goal_cell: "8,5"}]}
-  status_sequence: [IDLE, WAITING_FOR_INPUT, SELECTING_FRONTIER, EXECUTING, REPLANNING, EXECUTING, SELECTING_FRONTIER]
+  status_sequence: [IDLE, WAITING_FOR_INPUT, SELECTING_FRONTIER, PLANNING, EXECUTING, REPLANNING, EXECUTING, SELECTING_FRONTIER]
   reference_plan_ids: ["scenario-plan:task15-map-growth/candidate/15", "scenario-plan:task15-map-growth/candidate/30"]
   cancellation_plan_ids: ["scenario-plan:task15-map-growth/candidate/15"]
   coverage_ratio: 0.5
@@ -175,6 +175,6 @@ expected:
   replan_count: 0
   stuck_retries: 0
   committed_goal_key: "4081,2750,225"
-  semantic_mutations: {timestamp_only: "fnv1a64:e61ae2500e2953a2", map_version_only: "fnv1a64:e61ae2500e2953a2", covariance_only: "fnv1a64:e61ae2500e2953a2"}
+  semantic_mutations: {timestamp_only: "fnv1a64:df87b8dd04a70e69", map_version_only: "fnv1a64:df87b8dd04a70e69", covariance_only: "fnv1a64:df87b8dd04a70e69"}
   two_segment: {enabled: true, committed_candidate_key: "4081,2750,225", request_ids: [task15-map-growth/candidate/15, task15-map-growth/candidate/30], endpoint_cells: ["7,5", "8,5"], final_goal_cell: "8,5", completed_goal_count: 1, active_goal_after_arrival: false, failed_candidate_growth: 0}
-  ordered_trace_id: "fnv1a64:e61ae2500e2953a2"
+  ordered_trace_id: "fnv1a64:df87b8dd04a70e69"

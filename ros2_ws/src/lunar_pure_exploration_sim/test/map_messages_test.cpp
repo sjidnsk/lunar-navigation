@@ -170,6 +170,9 @@ ReferenceVisibility ReferenceCellCenterVisibility(
   const double delta_x_m = world_x_m - pose.x_m;
   const double delta_y_m = world_y_m - pose.y_m;
   const double distance_m = std::hypot(delta_x_m, delta_y_m);
+  if (distance_m <= LocalContactEnvelopeRadiusM() + 1.0e-9) {
+    return ReferenceVisibility::kVisible;
+  }
   if (distance_m > 10.0 + 1.0e-9) {
     return ReferenceVisibility::kOutsideSector;
   }

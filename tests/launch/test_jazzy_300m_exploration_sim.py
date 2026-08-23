@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 import ast
+import fcntl
 import importlib.util
+import json
+import math
+import os
+import signal
+import subprocess
 import tempfile
+import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -15,6 +23,10 @@ ROOT = Path(__file__).resolve().parents[2]
 LAUNCH = ROOT / "launch" / "jazzy_300m_exploration_sim.launch.py"
 RVIZ = ROOT / "rviz" / "jazzy_300m_exploration_sim.rviz"
 CMAKE = ROOT / "ros2_ws" / "src" / "lunar_pure_exploration_sim" / "CMakeLists.txt"
+LIVE_OPT_IN = "LUNAR_RUN_LIVE_JAZZY_SMOKE"
+LIVE_ROOT = Path(
+    "/home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_runs/live-smoke"
+)
 
 EXPECTED_EXECUTABLES = {
     "simulation_node",
@@ -248,3 +260,383 @@ def test_static_sim_package_installs_launch_and_rviz_assets() -> None:
     assert 'DESTINATION share/${PROJECT_NAME}/launch' in source
     assert '"${LUNAR_PURE_SIM_RVIZ_SOURCE_DIR}/jazzy_300m_exploration_sim.rviz"' in source
     assert 'DESTINATION share/${PROJECT_NAME}/rviz' in source
+
+
+def _cli(command: list[str], env: dict[str, str], timeout: float = 5.0):
+    return subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
+
+
+@contextmanager
+def _empty_live_domain():
+    """Reserve a derived candidate and reject every nonempty ROS graph."""
+    first = 20 + ((os.getpid() * 37 + time.time_ns()) % 180)
+    for offset in range(180):
+        candidate = 20 + ((first - 20 + offset) % 180)
+        lock_path = Path(f"/tmp/lunar_jazzy_live_domain_{candidate}.lock")
+        lock = lock_path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            continue
+        env = os.environ.copy()
+        env.update(
+            {
+                "ROS_DOMAIN_ID": str(candidate),
+                "ROS_LOCALHOST_ONLY": "1",
+                "ROS2CLI_NO_DAEMON": "1",
+            }
+        )
+        try:
+            probe = _cli(
+                ["ros2", "node", "list", "--no-daemon"], env, timeout=3.0
+            )
+        except subprocess.TimeoutExpired:
+            lock.close()
+            continue
+        if probe.returncode != 0 or probe.stdout.strip():
+            lock.close()
+            continue
+        try:
+            yield env
+        finally:
+            lock.close()
+        return
+    pytest.fail("no empty isolated ROS_DOMAIN_ID candidate was available")
+
+
+def _wait_for_empty_live_graph(env: dict[str, str], timeout: float = 20.0) -> None:
+    deadline = time.monotonic() + timeout
+    last = ""
+    while time.monotonic() < deadline:
+        try:
+            probe = _cli(
+                ["ros2", "node", "list", "--no-daemon"], env, timeout=2.0
+            )
+        except subprocess.TimeoutExpired:
+            last = "node-list probe timed out"
+            continue
+        last = f"rc={probe.returncode}\n{probe.stdout}{probe.stderr}"
+        if probe.returncode == 0 and not probe.stdout.strip():
+            return
+        time.sleep(0.1)
+    pytest.fail(f"isolated live-smoke graph did not drain:\n{last}")
+
+
+def _stop_exact_launch_group(
+    process: subprocess.Popen[bytes], env: dict[str, str]
+) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGINT)
+    except ProcessLookupError:
+        pass
+    if process.poll() is None:
+        try:
+            process.wait(timeout=10.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                pytest.fail("exact launch process group survived SIGINT and SIGTERM")
+    _wait_for_empty_live_graph(env)
+
+
+def _diagnostic_fields(message) -> dict[str, str]:
+    if len(message.status) != 1:
+        return {}
+    return {item.key: item.value for item in message.status[0].values}
+
+
+@pytest.mark.skipif(
+    os.environ.get(LIVE_OPT_IN) != "1",
+    reason=f"set {LIVE_OPT_IN}=1 to run the isolated Jazzy live smoke",
+)
+def test_live_closed_loop_reaches_real_motion_and_planner_timing() -> None:
+    """Bounded proof of the real installed Jazzy closed loop, never completion."""
+    with _empty_live_domain() as env:
+        run_dir = LIVE_ROOT / f"run-{uuid.uuid4().hex}"
+        output_dir = run_dir / "results"
+        ros_log_dir = run_dir / "ros-logs"
+        run_dir.mkdir(parents=True)
+        output_dir.mkdir()
+        ros_log_dir.mkdir()
+        env = env.copy()
+        env["ROS_LOG_DIR"] = str(ros_log_dir)
+
+        # ROS_DOMAIN_ID must be frozen before importing/initializing rclpy.
+        os.environ.update(
+            {
+                "ROS_DOMAIN_ID": env["ROS_DOMAIN_ID"],
+                "ROS_LOCALHOST_ONLY": "1",
+                "ROS2CLI_NO_DAEMON": "1",
+            }
+        )
+        import rclpy
+        from diagnostic_msgs.msg import DiagnosticArray
+        from geometry_msgs.msg import PoseStamped, Twist
+        from grid_map_msgs.msg import GridMap
+        from lunar_planning_msgs.action import PlanMotion
+        from lunar_planning_msgs.msg import MotionReference
+        from lunar_pure_exploration_msgs.msg import (
+            PureExplorationStatus,
+            PureExplorationTask,
+        )
+        from nav_msgs.msg import OccupancyGrid, Odometry
+        from rclpy.action import ActionClient
+        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+        from tf2_msgs.msg import TFMessage
+        from visualization_msgs.msg import Marker, MarkerArray
+
+        evidence: dict[str, object] = {
+            "domain_id": env["ROS_DOMAIN_ID"],
+            "task_ids": [],
+            "task_message_count": 0,
+            "states": [],
+            "status_trace": [],
+            "streams": {"global": 0, "local": 0, "odometry": 0, "tf": 0},
+            "action_ready": False,
+            "reference_points": 0,
+            "nonzero_command": False,
+            "displacement_m": 0.0,
+            "coverage_baseline": None,
+            "coverage_maximum": None,
+            "planner_diagnostics": [],
+            "current_goals": [],
+            "candidate_markers": [],
+            "odom_arrival_monotonic_s": [],
+        }
+        reliable = QoSProfile(depth=20, reliability=ReliabilityPolicy.RELIABLE)
+        latched = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        rclpy.init(args=None)
+        node = rclpy.create_node(f"jazzy_live_probe_{uuid.uuid4().hex[:8]}")
+        action = ActionClient(node, PlanMotion, "/Car/T4/plan_motion")
+        first_xy: tuple[float, float] | None = None
+        tf_edges: set[tuple[str, str]] = set()
+
+        def on_global(_message: OccupancyGrid) -> None:
+            evidence["streams"]["global"] += 1
+
+        def on_local(_message: GridMap) -> None:
+            evidence["streams"]["local"] += 1
+
+        def on_odometry(message: Odometry) -> None:
+            nonlocal first_xy
+            evidence["streams"]["odometry"] += 1
+            evidence["odom_arrival_monotonic_s"].append(time.monotonic())
+            xy = (message.pose.pose.position.x, message.pose.pose.position.y)
+            if first_xy is None:
+                first_xy = xy
+            evidence["displacement_m"] = max(
+                float(evidence["displacement_m"]),
+                math.hypot(xy[0] - first_xy[0], xy[1] - first_xy[1]),
+            )
+
+        def on_tf(message: TFMessage) -> None:
+            evidence["streams"]["tf"] += 1
+            for transform in message.transforms:
+                tf_edges.add(
+                    (transform.header.frame_id, transform.child_frame_id)
+                )
+
+        def on_task(message: PureExplorationTask) -> None:
+            evidence["task_message_count"] += 1
+            if message.task_id not in evidence["task_ids"]:
+                evidence["task_ids"].append(message.task_id)
+
+        def on_status(message: PureExplorationStatus) -> None:
+            state = int(message.state)
+            if state not in evidence["states"]:
+                evidence["states"].append(state)
+            evidence["status_trace"].append(
+                {
+                    "state": state,
+                    "reason": message.reason_code,
+                    "coverage": message.coverage_ratio,
+                    "task_id": message.task_id,
+                }
+            )
+            if message.task_id == "jazzy-300m-20260824":
+                if evidence["coverage_baseline"] is None:
+                    evidence["coverage_baseline"] = message.coverage_ratio
+                current = evidence["coverage_maximum"]
+                evidence["coverage_maximum"] = (
+                    message.coverage_ratio
+                    if current is None
+                    else max(float(current), message.coverage_ratio)
+                )
+
+        def on_reference(message: MotionReference) -> None:
+            points = max(len(message.path_preview.poses), len(message.trajectory.points))
+            evidence["reference_points"] = max(
+                int(evidence["reference_points"]), points
+            )
+
+        def on_goal(message: PoseStamped) -> None:
+            orientation = message.pose.orientation
+            yaw = math.atan2(
+                2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
+                1.0 - 2.0 * (orientation.y**2 + orientation.z**2),
+            )
+            goal = [message.pose.position.x, message.pose.position.y, yaw]
+            if goal not in evidence["current_goals"]:
+                evidence["current_goals"].append(goal)
+
+        def on_frontiers(message: MarkerArray) -> None:
+            candidates = []
+            for marker in message.markers:
+                if marker.ns != "candidates" or marker.action != Marker.ADD:
+                    continue
+                orientation = marker.pose.orientation
+                yaw = math.atan2(
+                    2.0 * (orientation.w * orientation.z),
+                    1.0 - 2.0 * orientation.z**2,
+                )
+                candidates.append(
+                    [marker.pose.position.x, marker.pose.position.y, yaw]
+                )
+            if candidates:
+                evidence["candidate_markers"] = candidates
+
+        def on_command(message: Twist) -> None:
+            if abs(message.linear.x) > 1.0e-6 or abs(message.angular.z) > 1.0e-6:
+                evidence["nonzero_command"] = True
+
+        def on_diagnostics(message: DiagnosticArray) -> None:
+            fields = _diagnostic_fields(message)
+            if fields:
+                evidence["planner_diagnostics"].append(fields)
+
+        subscriptions = [
+            node.create_subscription(OccupancyGrid, "/Car/T3/mapping/global_overview", on_global, latched),
+            node.create_subscription(GridMap, "/Car/T3/mapping/grid_map", on_local, reliable),
+            node.create_subscription(Odometry, "/Car/T3/localization/odometry", on_odometry, reliable),
+            node.create_subscription(TFMessage, "/tf", on_tf, reliable),
+            node.create_subscription(PureExplorationTask, "/Car/T4/exploration/task", on_task, latched),
+            node.create_subscription(PureExplorationStatus, "/Car/T4/exploration/status", on_status, latched),
+            node.create_subscription(PoseStamped, "/Car/T4/exploration/current_goal", on_goal, latched),
+            node.create_subscription(MarkerArray, "/Car/T4/exploration/frontiers", on_frontiers, reliable),
+            node.create_subscription(MotionReference, "/Car/T4/execution/motion_reference", on_reference, reliable),
+            node.create_subscription(Twist, "/Car/T5/Car_Cmd_Vel", on_command, reliable),
+            node.create_subscription(DiagnosticArray, "/Car/T4/planning/diagnostics", on_diagnostics, reliable),
+        ]
+        assert subscriptions
+
+        launch_log_path = run_dir / "launch.log"
+        probe_path = run_dir / "probe.json"
+        launch_log = launch_log_path.open("wb")
+        process = subprocess.Popen(
+            [
+                "ros2",
+                "launch",
+                "lunar_pure_exploration_sim",
+                "jazzy_300m_exploration_sim.launch.py",
+                "start_rviz:=false",
+                "seed:=20260824",
+                "speed_multiplier:=20.0",
+                f"output_dir:={output_dir}",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=launch_log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=env,
+        )
+        failure: str | None = None
+        try:
+            deadline = time.monotonic() + 120.0
+            while time.monotonic() < deadline:
+                rclpy.spin_once(node, timeout_sec=0.05)
+                evidence["action_ready"] = action.server_is_ready()
+                diagnostics = evidence["planner_diagnostics"]
+                has_global_local_timing = any(
+                    int(item.get("global_call_count", "0")) > 0
+                    and int(item.get("local_call_count", "0")) > 0
+                    and float(item.get("global_elapsed_ms", "0")) > 0.0
+                    and float(item.get("local_elapsed_ms", "0")) > 0.0
+                    for item in diagnostics
+                )
+                observed_transitions = {
+                    (item["state"], item["reason"])
+                    for item in evidence["status_trace"]
+                }
+                coverage_increased = (
+                    evidence["coverage_baseline"] is not None
+                    and evidence["coverage_maximum"] is not None
+                    and float(evidence["coverage_maximum"])
+                    > float(evidence["coverage_baseline"])
+                )
+                if (
+                    all(int(value) > 0 for value in evidence["streams"].values())
+                    and {("map", "odom"), ("odom", "base_link")} <= tf_edges
+                    and evidence["action_ready"]
+                    and evidence["task_ids"] == ["jazzy-300m-20260824"]
+                    and evidence["task_message_count"] == 1
+                    and {
+                        (
+                            PureExplorationStatus.SELECTING_FRONTIER,
+                            "SELECTING_FRONTIER",
+                        ),
+                        (PureExplorationStatus.PLANNING, "PLANNING"),
+                        (PureExplorationStatus.EXECUTING, "EXECUTING"),
+                    }
+                    <= observed_transitions
+                    and int(evidence["reference_points"]) > 0
+                    and evidence["nonzero_command"]
+                    and float(evidence["displacement_m"]) >= 0.2
+                    and coverage_increased
+                    and has_global_local_timing
+                ):
+                    break
+                if process.poll() is not None:
+                    failure = f"launch exited early with rc={process.returncode}"
+                    break
+                terminal_states = {
+                    PureExplorationStatus.COMPLETED,
+                    PureExplorationStatus.ERROR,
+                }
+                if set(evidence["states"]) & terminal_states:
+                    failure = "exploration reached a terminal state before real motion"
+                    break
+            else:
+                failure = "120 second smoke deadline expired"
+
+            arrivals = evidence["odom_arrival_monotonic_s"]
+            gaps = [right - left for left, right in zip(arrivals, arrivals[1:])]
+            evidence["odom_sample_count"] = len(arrivals)
+            evidence["odom_mean_gap_s"] = (
+                sum(gaps) / len(gaps) if gaps else None
+            )
+            evidence["tf_edges"] = sorted([list(edge) for edge in tf_edges])
+            probe_path.write_text(
+                json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8"
+            )
+            if failure is not None:
+                pytest.fail(f"{failure}; evidence={probe_path}; log={launch_log_path}")
+            assert len(arrivals) >= 20, evidence
+            assert evidence["odom_mean_gap_s"] is not None
+            assert float(evidence["odom_mean_gap_s"]) <= 0.1, evidence
+        finally:
+            try:
+                action.destroy()
+                node.destroy_node()
+                rclpy.shutdown()
+            finally:
+                try:
+                    _stop_exact_launch_group(process, env)
+                finally:
+                    launch_log.close()

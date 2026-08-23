@@ -14,6 +14,7 @@ namespace {
 using Action = lunar_planning_msgs::action::PlanMotion;
 using Status = lunar_pure_exploration_msgs::msg::PureExplorationStatus;
 using Task = lunar_pure_exploration_msgs::msg::PureExplorationTask;
+constexpr std::uint8_t kRequiredStablePolls = 5U;
 
 geometry_msgs::msg::Point32 BoundaryPoint(const float x, const float y) {
   geometry_msgs::msg::Point32 point;
@@ -29,7 +30,20 @@ bool CoordinatorReadiness::ShouldStart() const noexcept {
   return !started_ && global_map_received && local_map_received &&
          odometry_received && tf_chain_received && initial_status_received &&
          planner_action_ready && controller_publisher_unique &&
-         controller_command_received;
+         controller_command_received &&
+         stable_poll_count_ >= kRequiredStablePolls;
+}
+
+void CoordinatorReadiness::ObservePoll() noexcept {
+  const bool ready = global_map_received && local_map_received &&
+                     odometry_received && tf_chain_received &&
+                     initial_status_received && planner_action_ready &&
+                     controller_publisher_unique && controller_command_received;
+  if (!ready) {
+    stable_poll_count_ = 0U;
+  } else if (stable_poll_count_ < kRequiredStablePolls) {
+    ++stable_poll_count_;
+  }
 }
 
 void CoordinatorReadiness::MarkStarted() noexcept { started_ = true; }
@@ -156,6 +170,7 @@ void RunCoordinator::PollReadiness() {
   if (!readiness_.controller_publisher_unique) {
     readiness_.controller_command_received = false;
   }
+  readiness_.ObservePoll();
   if (!readiness_.ShouldStart() || task_pub_->get_subscription_count() == 0U) {
     return;
   }

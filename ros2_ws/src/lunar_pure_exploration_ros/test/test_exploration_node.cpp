@@ -656,7 +656,7 @@ class ExplorationNodeTest : public ::testing::Test {
         });
     status_subscription_ = io_node_->create_subscription<Status>(
         parameters_.status_topic,
-        rclcpp::QoS{1}.reliable().transient_local(),
+        rclcpp::QoS{10}.reliable().transient_local(),
         [this](Status::SharedPtr value) {
           std::scoped_lock lock{messages_mutex_};
           statuses_.push_back(*value);
@@ -789,6 +789,11 @@ class ExplorationNodeTest : public ::testing::Test {
   std::size_t StatusCount() const {
     std::scoped_lock lock{messages_mutex_};
     return statuses_.size();
+  }
+
+  std::vector<Status> Statuses() const {
+    std::scoped_lock lock{messages_mutex_};
+    return statuses_;
   }
 
   std::size_t CurrentGoalCount() const {
@@ -968,6 +973,20 @@ TEST_F(ExplorationNodeTest,
   Start(FakePlannerServer::Mode::kReachable);
   PublishAllInputs();
   ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::EXECUTING;
+  }));
+
+  const auto statuses = Statuses();
+  const auto planning = std::ranges::find_if(
+      statuses, [](const Status& status) { return status.state == Status::PLANNING; });
+  const auto executing = std::ranges::find_if(
+      statuses, [](const Status& status) { return status.state == Status::EXECUTING; });
+  ASSERT_NE(planning, statuses.end());
+  ASSERT_NE(executing, statuses.end());
+  EXPECT_LT(std::distance(statuses.begin(), planning),
+            std::distance(statuses.begin(), executing));
 
   const auto cycle = ExplorationNodeTestPeer::ActiveCycle(*explorer_);
   ASSERT_NE(cycle, nullptr);

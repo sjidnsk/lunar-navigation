@@ -20,6 +20,9 @@ struct SensorModel {
   double angular_step_rad{0.009999666686665238};
 };
 
+[[nodiscard]] double GlobalKnownEnvelopeMarginM() noexcept;
+[[nodiscard]] double LocalContactEnvelopeRadiusM() noexcept;
+
 class ObservationState {
  public:
   ObservationState();
@@ -47,6 +50,10 @@ class ObservationState {
                  double world_y_m);
   void CacheCurrentLocalCell(const LunarScene& scene, std::size_t logical_x,
                              std::size_t logical_y);
+  [[nodiscard]] bool GlobalFreeCellEnvelopeVisible(
+      const LunarScene& scene, double world_x_m, double world_y_m) const;
+  void SeedInitialKnownStart(const LunarScene& scene, Pose2 pose);
+  void CacheCurrentContactEnvelope(const LunarScene& scene);
 
   std::vector<bool> known_global_;
   std::vector<CachedLocalCell> current_local_;

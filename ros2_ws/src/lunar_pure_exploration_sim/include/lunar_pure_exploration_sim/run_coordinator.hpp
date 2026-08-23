@@ -27,9 +27,11 @@ struct CoordinatorReadiness {
   bool controller_command_received{false};
 
   [[nodiscard]] bool ShouldStart() const noexcept;
+  void ObservePoll() noexcept;
   void MarkStarted() noexcept;
 
  private:
+  std::uint8_t stable_poll_count_{0U};
   bool started_{false};
 };
 

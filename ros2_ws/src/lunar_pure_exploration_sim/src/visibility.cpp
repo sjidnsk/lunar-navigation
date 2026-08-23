@@ -18,6 +18,21 @@ constexpr double kLocalHalfLengthM = 32.0;
 constexpr double kFrozenRangeM = 10.0;
 constexpr double kFrozenFovRad = std::numbers::pi / 2.0;
 constexpr double kFrozenRadialStepM = 0.1;
+constexpr double kWheelbaseM = 0.8175;
+constexpr double kTrackWidthM = 0.67;
+constexpr double kMinimumClearanceM = 0.2;
+constexpr double kGlobalCellHalfDiagonalM = std::numbers::sqrt2 / 2.0;
+constexpr double kGlobalKnownEnvelopeMarginM =
+    std::hypot(kWheelbaseM / 2.0, kTrackWidthM / 2.0) +
+    kMinimumClearanceM + kGlobalCellHalfDiagonalM;
+constexpr double kInitialKnownStartRadiusM = 4.0;
+constexpr double kFootprintHalfLengthM = 0.591;
+constexpr double kFootprintHalfWidthM = 0.409;
+constexpr double kLocalCellHalfDiagonalM =
+    kLocalResolutionM * std::numbers::sqrt2 / 2.0;
+constexpr double kLocalContactEnvelopeRadiusM =
+    std::hypot(kFootprintHalfLengthM, kFootprintHalfWidthM) +
+    kMinimumClearanceM + kLocalCellHalfDiagonalM;
 constexpr double kTolerance = 1.0e-9;
 constexpr double kContractTolerance = 1.0e-12;
 
@@ -54,6 +69,14 @@ bool SamePose(const Pose2& left, const Pose2& right) {
 
 }  // namespace
 
+double GlobalKnownEnvelopeMarginM() noexcept {
+  return kGlobalKnownEnvelopeMarginM;
+}
+
+double LocalContactEnvelopeRadiusM() noexcept {
+  return kLocalContactEnvelopeRadiusM;
+}
+
 ObservationState::ObservationState()
     : known_global_(kGlobalWidth * kGlobalHeight, false),
       current_local_(kLocalWidth * kLocalHeight) {}
@@ -69,6 +92,8 @@ void ObservationState::Observe(const LunarScene& scene, Pose2 pose,
   current_sensor_ = sensor;
   has_observation_ = true;
   std::fill(current_local_.begin(), current_local_.end(), CachedLocalCell{});
+  CacheCurrentContactEnvelope(scene);
+  SeedInitialKnownStart(scene, pose);
 
   const std::size_t ray_intervals = static_cast<std::size_t>(std::ceil(
       sensor.horizontal_fov_rad / sensor.angular_step_rad));
@@ -86,8 +111,8 @@ void ObservationState::Observe(const LunarScene& scene, Pose2 pose,
           world_y_m < scene.min_x_m() || world_y_m >= scene.max_x_m()) {
         break;
       }
-      MarkKnown(scene, world_x_m, world_y_m);
       if (scene.IsOccupied(world_x_m, world_y_m)) {
+        MarkKnown(scene, world_x_m, world_y_m);
         break;
       }
     }
@@ -117,9 +142,14 @@ void ObservationState::Observe(const LunarScene& scene, Pose2 pose,
       const double world_y_m =
           scene.min_x_m() + (static_cast<double>(y) + 0.5) *
                                 scene.global_resolution_m();
-      if (IsCurrentlyVisible(scene, world_x_m, world_y_m)) {
-        known_global_[static_cast<std::size_t>(y) * scene.global_width() +
-                      static_cast<std::size_t>(x)] = true;
+      const std::size_t index =
+          static_cast<std::size_t>(y) * scene.global_width() +
+          static_cast<std::size_t>(x);
+      const bool occupied = scene.GlobalOccupancy()[index] == 100;
+      if ((occupied && IsCurrentlyVisible(scene, world_x_m, world_y_m)) ||
+          (!occupied && GlobalFreeCellEnvelopeVisible(
+                            scene, world_x_m, world_y_m))) {
+        known_global_[index] = true;
       }
     }
   }
@@ -140,6 +170,87 @@ void ObservationState::Observe(const LunarScene& scene, Pose2 pose,
                                  kLocalResolutionM;
       if (IsCurrentlyVisible(scene, world_x_m, world_y_m)) {
         CacheCurrentLocalCell(scene, logical_x, logical_y);
+      }
+    }
+  }
+}
+
+bool ObservationState::GlobalFreeCellEnvelopeVisible(
+    const LunarScene& scene, const double world_x_m,
+    const double world_y_m) const {
+  if (!IsCurrentlyVisible(scene, world_x_m, world_y_m)) {
+    return false;
+  }
+  const double delta_x_m = world_x_m - current_pose_.x_m;
+  const double delta_y_m = world_y_m - current_pose_.y_m;
+  const double forward_m =
+      delta_x_m * std::cos(current_pose_.yaw_rad) +
+      delta_y_m * std::sin(current_pose_.yaw_rad);
+  const double lateral_m =
+      -delta_x_m * std::sin(current_pose_.yaw_rad) +
+      delta_y_m * std::cos(current_pose_.yaw_rad);
+  const double distance_m = std::hypot(delta_x_m, delta_y_m);
+  const double halfspace_margin_m =
+      kGlobalKnownEnvelopeMarginM * std::numbers::sqrt2;
+  if (distance_m + kGlobalKnownEnvelopeMarginM >
+          current_sensor_.range_m + kTolerance ||
+      forward_m - std::abs(lateral_m) + kTolerance < halfspace_margin_m) {
+    return false;
+  }
+
+  constexpr double kLosSampleStepM = kLocalResolutionM;
+  for (double offset_y_m = -kGlobalKnownEnvelopeMarginM;
+       offset_y_m <= kGlobalKnownEnvelopeMarginM + kTolerance;
+       offset_y_m += kLosSampleStepM) {
+    for (double offset_x_m = -kGlobalKnownEnvelopeMarginM;
+         offset_x_m <= kGlobalKnownEnvelopeMarginM + kTolerance;
+         offset_x_m += kLosSampleStepM) {
+      if (std::hypot(offset_x_m, offset_y_m) >
+          kGlobalKnownEnvelopeMarginM + kTolerance) {
+        continue;
+      }
+      if (!IsCurrentlyVisible(scene, world_x_m + offset_x_m,
+                              world_y_m + offset_y_m)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+void ObservationState::SeedInitialKnownStart(const LunarScene& scene,
+                                             const Pose2 pose) {
+  if (std::abs(pose.x_m) > kContractTolerance ||
+      std::abs(pose.y_m) > kContractTolerance ||
+      std::ranges::any_of(known_global_, [](const bool known) { return known; })) {
+    return;
+  }
+  for (std::size_t y = 0U; y < scene.global_height(); ++y) {
+    const double world_y_m =
+        scene.min_x_m() + (static_cast<double>(y) + 0.5) *
+                              scene.global_resolution_m();
+    for (std::size_t x = 0U; x < scene.global_width(); ++x) {
+      const double world_x_m =
+          scene.min_x_m() + (static_cast<double>(x) + 0.5) *
+                                scene.global_resolution_m();
+      const double delta_x_m = world_x_m - pose.x_m;
+      const double delta_y_m = world_y_m - pose.y_m;
+      const double distance_m = std::hypot(delta_x_m, delta_y_m);
+      const double forward_m =
+          delta_x_m * std::cos(pose.yaw_rad) +
+          delta_y_m * std::sin(pose.yaw_rad);
+      const double lateral_m =
+          -delta_x_m * std::sin(pose.yaw_rad) +
+          delta_y_m * std::cos(pose.yaw_rad);
+      const bool inside_contact_prior =
+          distance_m <= kLocalContactEnvelopeRadiusM + kTolerance;
+      const bool complete_cell_inside_start_fov =
+          distance_m + kGlobalCellHalfDiagonalM <=
+              kInitialKnownStartRadiusM + kTolerance &&
+          forward_m - std::abs(lateral_m) + kTolerance >=
+              kGlobalCellHalfDiagonalM * std::numbers::sqrt2;
+      if (inside_contact_prior || complete_cell_inside_start_fov) {
+        known_global_[y * scene.global_width() + x] = true;
       }
     }
   }
@@ -242,6 +353,41 @@ void ObservationState::CacheCurrentLocalCell(const LunarScene& scene,
   }
   cell.visible = true;
   cell.sample = scene.Sample(center_x_m, center_y_m);
+}
+
+void ObservationState::CacheCurrentContactEnvelope(const LunarScene& scene) {
+  const double local_origin_x_m = current_pose_.x_m - kLocalHalfLengthM;
+  const double local_origin_y_m = current_pose_.y_m - kLocalHalfLengthM;
+  const auto minimum_x = static_cast<long>(std::floor(
+      (current_pose_.x_m - kLocalContactEnvelopeRadiusM - local_origin_x_m) /
+      kLocalResolutionM));
+  const auto maximum_x = static_cast<long>(std::floor(
+      (current_pose_.x_m + kLocalContactEnvelopeRadiusM - local_origin_x_m) /
+      kLocalResolutionM));
+  const auto minimum_y = static_cast<long>(std::floor(
+      (current_pose_.y_m - kLocalContactEnvelopeRadiusM - local_origin_y_m) /
+      kLocalResolutionM));
+  const auto maximum_y = static_cast<long>(std::floor(
+      (current_pose_.y_m + kLocalContactEnvelopeRadiusM - local_origin_y_m) /
+      kLocalResolutionM));
+  for (long y = std::max(0L, minimum_y);
+       y <= std::min(static_cast<long>(kLocalHeight) - 1L, maximum_y); ++y) {
+    for (long x = std::max(0L, minimum_x);
+         x <= std::min(static_cast<long>(kLocalWidth) - 1L, maximum_x); ++x) {
+      const double center_x_m =
+          local_origin_x_m + (static_cast<double>(x) + 0.5) *
+                                 kLocalResolutionM;
+      const double center_y_m =
+          local_origin_y_m + (static_cast<double>(y) + 0.5) *
+                                 kLocalResolutionM;
+      if (std::hypot(center_x_m - current_pose_.x_m,
+                     center_y_m - current_pose_.y_m) <=
+          kLocalContactEnvelopeRadiusM + kTolerance) {
+        CacheCurrentLocalCell(scene, static_cast<std::size_t>(x),
+                              static_cast<std::size_t>(y));
+      }
+    }
+  }
 }
 
 }  // namespace lunar::pure_exploration_sim

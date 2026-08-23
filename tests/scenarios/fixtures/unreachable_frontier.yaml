@@ -117,7 +117,7 @@ variants:
     request_count: 16
     success_request_index: 1
     expected:
-      status_sequence: [IDLE, WAITING_FOR_INPUT, SELECTING_FRONTIER, EXECUTING]
+      status_sequence: [IDLE, WAITING_FOR_INPUT, SELECTING_FRONTIER, PLANNING, EXECUTING]
       reference_plan_ids: ["scenario-plan:task15-unreachable-frontier/candidate/1"]
       cancellation_plan_ids: []
       coverage_ratio: 0.75
@@ -125,4 +125,4 @@ variants:
       replan_count: 0
       stuck_retries: 0
       committed_goal_key: "5581,1750,0"
-      ordered_trace_id: "fnv1a64:6ce254d4875665a2"
+      ordered_trace_id: "fnv1a64:bb19062bfd92ce41"

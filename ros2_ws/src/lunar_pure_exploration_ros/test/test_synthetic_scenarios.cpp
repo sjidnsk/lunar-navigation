@@ -823,7 +823,7 @@ public:
           execution_cancels_.push_back(value->data);
         });
     status_subscription_ = io_node_->create_subscription<Status>(
-        parameters_.status_topic, rclcpp::QoS{1}.reliable().transient_local(),
+        parameters_.status_topic, rclcpp::QoS{10}.reliable().transient_local(),
         [this](Status::SharedPtr value) {
           std::scoped_lock lock{messages_mutex_};
           statuses_.push_back(*value);

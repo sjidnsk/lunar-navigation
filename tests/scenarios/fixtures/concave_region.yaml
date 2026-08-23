@@ -96,7 +96,7 @@ expected:
     - {request_id: task15-concave-region/candidate/12, candidate_key: "4081,1250,-225", goal_cell: "8,2", response_kind: NO_PATH, path_segments: []}
     - {request_id: task15-concave-region/candidate/13, candidate_key: "4081,3750,450", goal_cell: "8,7", response_kind: NO_PATH, path_segments: []}
     - {request_id: task15-concave-region/candidate/14, candidate_key: "4081,1250,-450", goal_cell: "8,2", response_kind: NO_PATH, path_segments: []}
-  status_sequence: [IDLE, WAITING_FOR_INPUT, SELECTING_FRONTIER, EXECUTING]
+  status_sequence: [IDLE, WAITING_FOR_INPUT, SELECTING_FRONTIER, PLANNING, EXECUTING]
   reference_plan_ids: ["scenario-plan:task15-concave-region/candidate/0"]
   cancellation_plan_ids: []
   coverage_ratio: 0.35714285714285715
@@ -105,6 +105,6 @@ expected:
   replan_count: 0
   stuck_retries: 0
   committed_goal_key: "3081,2250,0"
-  semantic_mutations: {timestamp_only: "fnv1a64:85c1bd6f7a6da3e3", map_version_only: "fnv1a64:85c1bd6f7a6da3e3", covariance_only: "fnv1a64:85c1bd6f7a6da3e3"}
+  semantic_mutations: {timestamp_only: "fnv1a64:cefd342ce9015b2e", map_version_only: "fnv1a64:cefd342ce9015b2e", covariance_only: "fnv1a64:cefd342ce9015b2e"}
   two_segment: {enabled: false, committed_candidate_key: null, request_ids: [], endpoint_cells: [], final_goal_cell: null}
-  ordered_trace_id: "fnv1a64:85c1bd6f7a6da3e3"
+  ordered_trace_id: "fnv1a64:cefd342ce9015b2e"

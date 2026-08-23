@@ -840,7 +840,7 @@ struct ExplorationNode::Runtime final {
             rclcpp::QoS{10}.reliable())),
         status_publisher(node.create_publisher<Status>(
             parameters.status_topic,
-            rclcpp::QoS{1}.reliable().transient_local())),
+            rclcpp::QoS{10}.reliable().transient_local())),
         current_goal_publisher(
             node.create_publisher<geometry_msgs::msg::PoseStamped>(
                 parameters.current_goal_topic,
@@ -2066,7 +2066,7 @@ void QueueFinalRank(const std::shared_ptr<RuntimeT>& runtime,
 
         bool rebuild = false;
         {
-          std::scoped_lock lock{locked->mutex};
+          std::unique_lock lock{locked->mutex};
           if (locked->teardown || locked->active_cycle != cycle ||
               locked->epoch != epoch || !locked->final_rank_in_flight ||
               locked->state_machine.state() !=
@@ -2121,6 +2121,22 @@ void QueueFinalRank(const std::shared_ptr<RuntimeT>& runtime,
                   now, locked->active_executable_polyline,
                   {initial_pose->x, initial_pose->y});
               locked->state_machine.BeginPlanning();
+              Status planning_status = MakeStatusLocked(*locked);
+              const auto planning_status_publisher = locked->status_publisher;
+              lock.unlock();
+              try {
+                planning_status_publisher->publish(std::move(planning_status));
+              } catch (...) {
+                lock.lock();
+                throw;
+              }
+              lock.lock();
+              if (locked->teardown || locked->active_cycle != cycle ||
+                  locked->epoch != epoch ||
+                  locked->state_machine.state() !=
+                      ExplorationState::kPlanning) {
+                return;
+              }
               locked->state_machine.CommitGoal(std::move(*selection.goal));
               if (locked->snapshot_to_goal_start &&
                   locked->snapshot_to_goal_start->cycle.lock() == cycle &&
