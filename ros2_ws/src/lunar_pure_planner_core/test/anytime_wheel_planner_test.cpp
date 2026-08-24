@@ -254,6 +254,125 @@ void ExpectSamePlanExceptZOffset(const WheelPlanResult& baseline,
   }
 }
 
+void ExpectStrictlyEquivalentPlan(const WheelPlanResult& baseline,
+                                  const WheelPlanResult& candidate) {
+  ASSERT_EQ(candidate.status, baseline.status);
+  ASSERT_EQ(candidate.reason_code, baseline.reason_code);
+  ASSERT_EQ(candidate.selected_goal_index, baseline.selected_goal_index);
+  ASSERT_EQ(candidate.trajectory.size(), baseline.trajectory.size());
+  EXPECT_DOUBLE_EQ(candidate.cost, baseline.cost);
+  EXPECT_EQ(candidate.cost_components, baseline.cost_components);
+  EXPECT_EQ(candidate.cost_scales, baseline.cost_scales);
+  EXPECT_EQ(candidate.quantized_state_count, baseline.quantized_state_count);
+  EXPECT_EQ(candidate.maximum_active_labels_per_key,
+            baseline.maximum_active_labels_per_key);
+  for (std::size_t index = 0U; index < baseline.trajectory.size(); ++index) {
+    SCOPED_TRACE(index);
+    EXPECT_EQ(candidate.trajectory[index].time_from_start,
+              baseline.trajectory[index].time_from_start);
+    EXPECT_EQ(candidate.trajectory[index].pose,
+              baseline.trajectory[index].pose);
+    EXPECT_EQ(candidate.trajectory[index].velocity,
+              baseline.trajectory[index].velocity);
+  }
+}
+
+struct TestCellWindow final {
+  std::int64_t minimum_x{};
+  std::int64_t minimum_y{};
+  std::int64_t maximum_x{};
+  std::int64_t maximum_y{};
+};
+
+[[nodiscard]] double FootprintRadius(
+    const WheeledCapability& capability) {
+  double radius = 0.0;
+  for (const Vec2& vertex : capability.footprint_xy_m) {
+    radius = std::max(radius, std::hypot(vertex.x, vertex.y));
+  }
+  return radius;
+}
+
+// This is the rejected radial candidate from commit 1032184, retained only to
+// characterize its strict boundary and construct a regression counterexample.
+// It is not sufficient to prove that the rotated AABB exact scan is empty.
+[[nodiscard]] bool RejectedRadialFarClearanceCandidate(
+    const double occupied_clearance_m, const double footprint_radius_m,
+    const double minimum_clearance_m,
+    const double map_resolution_m) noexcept {
+  if (!std::isfinite(footprint_radius_m) || footprint_radius_m < 0.0 ||
+      !std::isfinite(minimum_clearance_m) || minimum_clearance_m < 0.0 ||
+      !std::isfinite(map_resolution_m) || map_resolution_m <= 0.0) {
+    return false;
+  }
+  const double exact_scan_margin = std::max(
+      minimum_clearance_m, footprint_radius_m + 2.0 * map_resolution_m);
+  const double candidate_threshold =
+      footprint_radius_m + exact_scan_margin +
+      std::numbers::sqrt2 * 0.5 * map_resolution_m;
+  return (std::isinf(occupied_clearance_m) && occupied_clearance_m > 0.0) ||
+         (std::isfinite(occupied_clearance_m) &&
+          occupied_clearance_m > candidate_threshold);
+}
+
+[[nodiscard]] TestCellWindow ExactOccupiedScanWindow(
+    const TerrainFixture& fixture, const WheeledCapability& capability,
+    const Pose3& pose) {
+  const double yaw = YawFromQuaternion(pose.orientation).value();
+  const double cosine = std::cos(yaw);
+  const double sine = std::sin(yaw);
+  double minimum_x = std::numeric_limits<double>::infinity();
+  double minimum_y = std::numeric_limits<double>::infinity();
+  double maximum_x = -std::numeric_limits<double>::infinity();
+  double maximum_y = -std::numeric_limits<double>::infinity();
+  for (const Vec2& vertex : capability.footprint_xy_m) {
+    const double x = pose.position_m.x + cosine * vertex.x -
+                     sine * vertex.y;
+    const double y = pose.position_m.y + sine * vertex.x +
+                     cosine * vertex.y;
+    minimum_x = std::min(minimum_x, x);
+    minimum_y = std::min(minimum_y, y);
+    maximum_x = std::max(maximum_x, x);
+    maximum_y = std::max(maximum_y, y);
+  }
+  const double resolution_m = fixture.map->resolution_m();
+  const double exact_scan_margin = std::max(
+      capability.minimum_clearance_m,
+      FootprintRadius(capability) + 2.0 * resolution_m);
+  const auto cell = [&](const double coordinate, const double origin,
+                        const std::size_t extent) {
+    return static_cast<std::int64_t>(std::clamp(
+        std::floor((coordinate - origin) / resolution_m), 0.0,
+        static_cast<double>(extent - 1U)));
+  };
+  return TestCellWindow{
+      .minimum_x = cell(minimum_x - exact_scan_margin,
+                        fixture.map->origin_m().x, fixture.map->width()),
+      .minimum_y = cell(minimum_y - exact_scan_margin,
+                        fixture.map->origin_m().y, fixture.map->height()),
+      .maximum_x = cell(maximum_x + exact_scan_margin,
+                        fixture.map->origin_m().x, fixture.map->width()),
+      .maximum_y = cell(maximum_y + exact_scan_margin,
+                        fixture.map->origin_m().y, fixture.map->height()),
+  };
+}
+
+[[nodiscard]] std::size_t OccupiedCellsVisitedByExactScan(
+    const TerrainFixture& fixture, const WheeledCapability& capability,
+    const Pose3& pose) {
+  const TestCellWindow window =
+      ExactOccupiedScanWindow(fixture, capability, pose);
+  std::size_t visits = 0U;
+  for (std::int64_t y = window.minimum_y; y <= window.maximum_y; ++y) {
+    for (std::int64_t x = window.minimum_x; x <= window.maximum_x; ++x) {
+      visits += fixture.terrain.occupied[
+          static_cast<std::size_t>(y) * fixture.map->width() +
+          static_cast<std::size_t>(x)] != 0U;
+    }
+  }
+  return visits;
+}
+
 [[nodiscard]] Pose3 ComposePlanar(const Pose3& source,
                                   const Pose3& relative) {
   const double yaw = YawFromQuaternion(source.orientation).value();
@@ -1605,7 +1724,292 @@ TEST(WheelPlanner,
   ASSERT_TRUE(result.wheel_metrics.has_value());
   EXPECT_EQ(result.wheel_metrics->occupied_clearance_cell_checks, 0U);
   EXPECT_EQ(result.wheel_metrics->measured_obstacle_clearance_rejects, 0U);
-  EXPECT_GT(result.wheel_metrics->far_clearance_scan_skips, 0U);
+  EXPECT_EQ(result.wheel_metrics->far_clearance_scan_skips, 0U);
+}
+
+TEST(WheelPlanner, RotatedFractionalAabbCornersRetainExactOccupiedScan) {
+  constexpr std::size_t kWidth = 50U;
+  constexpr std::size_t kHeight = 50U;
+  constexpr double kResolutionM = 0.2;
+  constexpr double kYaw = std::numbers::pi / 4.0;
+  constexpr double kHalfLengthM = 0.5;
+  constexpr double kHalfWidthM = 0.3;
+  const Pose3 pose = Pose(4.19, 4.19, kYaw);
+  WheeledCapability capability = Capability(
+      2.0 * kHalfLengthM, 2.0 * kHalfWidthM);
+  const double footprint_radius_m = FootprintRadius(capability);
+  const double narrow_threshold =
+      footprint_radius_m + 2.0 * kResolutionM;
+  const TerrainFixture empty = FlatTerrain(kWidth, kHeight);
+  const TestCellWindow window =
+      ExactOccupiedScanWindow(empty, capability, pose);
+  ASSERT_EQ(window.minimum_x, 13);
+  ASSERT_EQ(window.minimum_y, 13);
+  ASSERT_EQ(window.maximum_x, 28);
+  ASSERT_EQ(window.maximum_y, 28);
+  const std::array<std::pair<std::int64_t, std::int64_t>, 4U> corners{
+      std::pair{window.minimum_x, window.minimum_y},
+      std::pair{window.minimum_x, window.maximum_y},
+      std::pair{window.maximum_x, window.minimum_y},
+      std::pair{window.maximum_x, window.maximum_y},
+  };
+
+  for (std::size_t corner = 0U; corner < corners.size(); ++corner) {
+    SCOPED_TRACE(corner);
+    const auto [occupied_x, occupied_y] = corners[corner];
+    std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+    occupancy[static_cast<std::size_t>(occupied_y) * kWidth +
+              static_cast<std::size_t>(occupied_x)] = 1.0F;
+    const TerrainFixture fixture = MakeTerrain(
+        kWidth, kHeight, std::move(occupancy), kResolutionM);
+    const auto center_cell = fixture.map->PositionToCell(
+        Vec2{.x = pose.position_m.x, .y = pose.position_m.y});
+    ASSERT_TRUE(center_cell.has_value());
+    const double occupied_clearance_m =
+        fixture.terrain.clearance_m[fixture.map->Index(*center_cell)];
+    ASSERT_TRUE(RejectedRadialFarClearanceCandidate(
+        occupied_clearance_m, footprint_radius_m,
+        capability.minimum_clearance_m, kResolutionM));
+    ASSERT_EQ(OccupiedCellsVisitedByExactScan(fixture, capability, pose),
+              1U);
+
+    const double cell_minimum_x =
+        static_cast<double>(occupied_x) * kResolutionM;
+    const double cell_minimum_y =
+        static_cast<double>(occupied_y) * kResolutionM;
+    const Vec2 nearest_cell_corner{
+        .x = occupied_x == window.maximum_x
+                 ? cell_minimum_x
+                 : cell_minimum_x + kResolutionM,
+        .y = occupied_y == window.maximum_y
+                 ? cell_minimum_y
+                 : cell_minimum_y + kResolutionM,
+    };
+    const double dx = nearest_cell_corner.x - pose.position_m.x;
+    const double dy = nearest_cell_corner.y - pose.position_m.y;
+    const double body_x = std::cos(kYaw) * dx + std::sin(kYaw) * dy;
+    const double body_y = -std::sin(kYaw) * dx + std::cos(kYaw) * dy;
+    const double exact_polygon_clearance_m = std::hypot(
+        std::max(std::abs(body_x) - kHalfLengthM, 0.0),
+        std::max(std::abs(body_y) - kHalfWidthM, 0.0));
+    EXPECT_GT(exact_polygon_clearance_m, narrow_threshold);
+    if (corner == 3U) {
+      EXPECT_NEAR(occupied_clearance_m, 2.1213203435596424, 2.0e-7);
+      EXPECT_NEAR(exact_polygon_clearance_m, 1.494041122946064, 1.0e-12);
+      EXPECT_NEAR(narrow_threshold, 0.9830951894845301, 1.0e-12);
+    }
+
+    const WheelPlanResult result = PlanWheel(RequestTo(
+        fixture, capability, pose.position_m.x, pose.position_m.y, kYaw,
+        pose));
+    ASSERT_TRUE(result.ok()) << result.reason_code;
+    ASSERT_TRUE(result.wheel_metrics.has_value());
+    EXPECT_EQ(result.wheel_metrics->far_clearance_scan_skips, 0U);
+    EXPECT_EQ(result.wheel_metrics->occupied_clearance_cell_checks, 1U);
+  }
+}
+
+TEST(WheelPlanner,
+     RejectedRadialFarClearanceCandidateThresholdIsStrict) {
+  constexpr double kResolutionM = 0.2;
+  constexpr double kFootprintRadiusM = 0.25;
+  constexpr double kMinimumClearanceM = 0.3;
+  const double exact_scan_margin = std::max(
+      kMinimumClearanceM,
+      kFootprintRadiusM + 2.0 * kResolutionM);
+  const double proof_threshold =
+      kFootprintRadiusM + exact_scan_margin +
+      std::numbers::sqrt2 * 0.5 * kResolutionM;
+
+  EXPECT_FALSE(RejectedRadialFarClearanceCandidate(
+      proof_threshold, kFootprintRadiusM, kMinimumClearanceM,
+      kResolutionM));
+  EXPECT_TRUE(RejectedRadialFarClearanceCandidate(
+      std::nextafter(proof_threshold,
+                     std::numeric_limits<double>::infinity()),
+      kFootprintRadiusM, kMinimumClearanceM, kResolutionM));
+  EXPECT_TRUE(RejectedRadialFarClearanceCandidate(
+      std::numeric_limits<double>::infinity(), kFootprintRadiusM,
+      kMinimumClearanceM, kResolutionM));
+  EXPECT_FALSE(RejectedRadialFarClearanceCandidate(
+      -std::numeric_limits<double>::infinity(), kFootprintRadiusM,
+      kMinimumClearanceM, kResolutionM));
+  EXPECT_FALSE(RejectedRadialFarClearanceCandidate(
+      std::numeric_limits<double>::quiet_NaN(), kFootprintRadiusM,
+      kMinimumClearanceM, kResolutionM));
+}
+
+TEST(WheelPlanner,
+     RejectedRadialCandidateDoesNotEnableProductionSkip) {
+  constexpr std::size_t kWidth = 60U;
+  constexpr std::size_t kHeight = 40U;
+  constexpr double kResolutionM = 0.2;
+  constexpr std::size_t kCenterX = 20U;
+  constexpr std::size_t kCenterY = 20U;
+  constexpr std::size_t kOccupiedX = 40U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  occupancy[kCenterY * kWidth + kOccupiedX] = 1.0F;
+  const TerrainFixture fixture = MakeTerrain(
+      kWidth, kHeight, std::move(occupancy), kResolutionM);
+  const Pose3 start = Pose(
+      (static_cast<double>(kCenterX) + 0.5) * kResolutionM,
+      (static_cast<double>(kCenterY) + 0.5) * kResolutionM);
+  const float occupied_clearance =
+      fixture.terrain.clearance_m[kCenterY * kWidth + kCenterX];
+  ASSERT_TRUE(std::isfinite(occupied_clearance));
+
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 0.1;
+  capability.track_width_m = 0.1;
+  const double footprint_radius_m = std::hypot(0.1, 0.1);
+  capability.minimum_clearance_m =
+      static_cast<double>(occupied_clearance) - footprint_radius_m -
+      std::numbers::sqrt2 * 0.5 * kResolutionM - 5.0e-10;
+  ASSERT_GT(capability.minimum_clearance_m,
+            footprint_radius_m + 2.0 * kResolutionM);
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+  ASSERT_TRUE(RejectedRadialFarClearanceCandidate(
+      static_cast<double>(occupied_clearance), footprint_radius_m,
+      capability.minimum_clearance_m, kResolutionM));
+
+  const WheelPlanResult result = PlanWheel(RequestTo(
+      fixture, capability, start.position_m.x, start.position_m.y, 0.0,
+      start));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_TRUE(result.wheel_metrics.has_value());
+  EXPECT_EQ(result.wheel_metrics->far_clearance_scan_skips, 0U);
+  EXPECT_EQ(result.wheel_metrics->occupied_clearance_cell_checks, 0U);
+}
+
+TEST(WheelPlanner, ExactScanRetainsFarOccupiedPlanEquivalence) {
+  constexpr std::size_t kWidth = 50U;
+  constexpr std::size_t kHeight = 30U;
+  std::vector<float> far_occupancy(kWidth * kHeight, 0.0F);
+  far_occupancy[2U * kWidth + 45U] = 1.0F;
+  const TerrainFixture baseline = FlatTerrain(kWidth, kHeight);
+  const TerrainFixture far = MakeTerrain(
+      kWidth, kHeight, std::move(far_occupancy));
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 0.1;
+  capability.track_width_m = 0.1;
+  capability.minimum_clearance_m = 0.2;
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.4),
+  };
+  const Pose3 start = Pose(2.0, 3.0);
+
+  const WheelPlanResult baseline_result = PlanWheel(RequestTo(
+      baseline, capability, 2.4, 3.0, 0.0, start));
+  const WheelPlanResult far_result = PlanWheel(RequestTo(
+      far, capability, 2.4, 3.0, 0.0, start));
+
+  ASSERT_TRUE(baseline_result.ok()) << baseline_result.reason_code;
+  ASSERT_TRUE(far_result.ok()) << far_result.reason_code;
+  ExpectStrictlyEquivalentPlan(baseline_result, far_result);
+  ASSERT_TRUE(baseline_result.wheel_metrics.has_value());
+  ASSERT_TRUE(far_result.wheel_metrics.has_value());
+  EXPECT_EQ(baseline_result.wheel_metrics->far_clearance_scan_skips, 0U);
+  EXPECT_EQ(far_result.wheel_metrics->far_clearance_scan_skips, 0U);
+  EXPECT_EQ(baseline_result.wheel_metrics->occupied_clearance_cell_checks,
+            0U);
+  EXPECT_EQ(far_result.wheel_metrics->occupied_clearance_cell_checks, 0U);
+}
+
+TEST(WheelPlanner, NearOccupiedEdgeRetainsExactClearanceChecks) {
+  constexpr std::size_t kWidth = 40U;
+  constexpr std::size_t kHeight = 30U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  occupancy[17U * kWidth + 15U] = 1.0F;
+  const TerrainFixture fixture = MakeTerrain(
+      kWidth, kHeight, std::move(occupancy));
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 0.1;
+  capability.track_width_m = 0.1;
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 2.0),
+  };
+  const Pose3 start = Pose(2.0, 3.0);
+
+  const WheelPlanResult start_only = PlanWheel(RequestTo(
+      fixture, capability, 2.0, 3.0, 0.0, start));
+  const WheelPlanResult result = PlanWheel(RequestTo(
+      fixture, capability, 4.0, 3.0, 0.0, start));
+
+  ASSERT_TRUE(start_only.ok()) << start_only.reason_code;
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_TRUE(start_only.wheel_metrics.has_value());
+  ASSERT_TRUE(result.wheel_metrics.has_value());
+  EXPECT_EQ(start_only.wheel_metrics->far_clearance_scan_skips, 0U);
+  EXPECT_EQ(result.wheel_metrics->far_clearance_scan_skips, 0U);
+  EXPECT_GT(result.wheel_metrics->occupied_clearance_cell_checks,
+            start_only.wheel_metrics->occupied_clearance_cell_checks);
+}
+
+TEST(WheelPlanner, ExactClearanceRetainsUnknownFootprintRejection) {
+  constexpr std::size_t kWidth = 20U;
+  constexpr std::size_t kHeight = 20U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  occupancy[9U * kWidth + 5U] = -1.0F;
+  const TerrainFixture fixture = MakeTerrain(
+      kWidth, kHeight, std::move(occupancy), 0.2);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 0.1;
+  capability.track_width_m = 0.1;
+  capability.minimum_clearance_m = 0.2;
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.4),
+  };
+
+  const WheelPlanResult result = PlanWheel(RequestTo(
+      fixture, capability, 1.4, 2.0, 0.0, Pose(1.0, 2.0)));
+
+  EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
+  ASSERT_TRUE(result.wheel_metrics.has_value());
+  EXPECT_EQ(result.wheel_metrics->far_clearance_scan_skips, 0U);
+  EXPECT_GT(result.wheel_metrics
+                ->direct_unknown_or_unsupported_footprint_rejects,
+            0U);
+  EXPECT_EQ(result.wheel_metrics->measured_obstacle_clearance_rejects, 0U);
+}
+
+TEST(WheelPlanner, ExactClearancePreservesTwentyRunDeterminism) {
+  constexpr std::size_t kWidth = 50U;
+  constexpr std::size_t kHeight = 30U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  occupancy[2U * kWidth + 45U] = 1.0F;
+  const TerrainFixture fixture = MakeTerrain(
+      kWidth, kHeight, std::move(occupancy));
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 0.1;
+  capability.track_width_m = 0.1;
+  capability.minimum_clearance_m = 0.2;
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.4),
+  };
+  const Pose3 start = Pose(2.0, 3.0);
+  std::optional<WheelPlanResult> first;
+
+  for (std::size_t run = 0U; run < 20U; ++run) {
+    SCOPED_TRACE(run);
+    const WheelPlanResult result = PlanWheel(RequestTo(
+        fixture, capability, 2.4, 3.0, 0.0, start));
+    ASSERT_TRUE(result.ok()) << result.reason_code;
+    ASSERT_TRUE(result.wheel_metrics.has_value());
+    EXPECT_EQ(result.wheel_metrics->far_clearance_scan_skips, 0U);
+    if (!first.has_value()) {
+      first = result;
+    } else {
+      ExpectStrictlyEquivalentPlan(*first, result);
+      ASSERT_TRUE(first->wheel_metrics.has_value());
+      EXPECT_EQ(result.wheel_metrics->far_clearance_scan_skips,
+                first->wheel_metrics->far_clearance_scan_skips);
+      EXPECT_EQ(result.wheel_metrics->occupied_clearance_cell_checks,
+                first->wheel_metrics->occupied_clearance_cell_checks);
+    }
+  }
 }
 
 TEST(WheelPlanner, RejectsExpandedTerrainProjectionWithMismatchedLayerSizes) {

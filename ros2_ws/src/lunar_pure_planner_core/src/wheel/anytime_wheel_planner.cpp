@@ -838,7 +838,6 @@ struct EdgeEvaluation final {
 struct BroadPhaseAssessment final {
   bool rejected{};
   bool interrupted{};
-  bool clearance_proven{};
   RejectionBucket rejection_bucket{RejectionBucket::kNone};
 };
 
@@ -1246,7 +1245,7 @@ class WheelSearchGraph final {
   }
 
   [[nodiscard]] std::size_t far_clearance_scan_skips() const noexcept {
-    return far_clearance_scan_skips_;
+    return 0U;
   }
 
   [[nodiscard]] std::size_t occupied_clearance_cell_checks() const noexcept {
@@ -3122,7 +3121,7 @@ class WheelSearchGraph final {
 
   [[nodiscard]] BroadPhaseAssessment AssessBroadPhase(
       const Transition& transition, const bool pose_only) const {
-    BroadPhaseAssessment assessment{.clearance_proven = true};
+    BroadPhaseAssessment assessment;
     if (!Finite(transition.source) || !Finite(transition.target) ||
         !std::isfinite(transition.path_length_m) ||
         transition.path_length_m < 0.0 ||
@@ -3155,10 +3154,6 @@ class WheelSearchGraph final {
             : std::max<std::size_t>(
                   1U, static_cast<std::size_t>(
                           std::ceil(swept_distance / maximum_step)));
-    const double clearance_proof_threshold =
-        std::max(footprint_radius_m_ + 2.0 * map_.resolution_m(),
-                 footprint_radius_m_ + capability_.minimum_clearance_m) +
-        std::numbers::sqrt2 * 0.5 * map_.resolution_m();
     for (std::size_t sample = 0U; sample <= subdivisions; ++sample) {
       if (ControlInterrupted()) {
         assessment.interrupted = true;
@@ -3267,22 +3262,12 @@ class WheelSearchGraph final {
             RejectionBucket::kDirectUnknownOrUnsupportedFootprint;
         return assessment;
       }
-      const float clearance = terrain_.clearance_m[center_index];
-      assessment.clearance_proven =
-          assessment.clearance_proven &&
-          ((std::isinf(clearance) && clearance > 0.0F) ||
-           (std::isfinite(clearance) &&
-            static_cast<double>(clearance) >
-                clearance_proof_threshold + kTolerance));
     }
     return assessment;
   }
 
   [[nodiscard]] EdgeEvaluation EvaluateFullExact(
-      const Transition& transition, const bool pose_only,
-      const bool clearance_proven) const {
-    // The broad proof is useful for classifying cheap rejection, but exact
-    // clearance still supplies the certificate's cost and label ranking.
+      const Transition& transition, const bool pose_only) const {
     EdgeEvaluation result{.transition = transition};
     if (std::abs(transition.curvature_per_m) >
         capability_.maximum_curvature_per_m + kTolerance) {
@@ -3359,14 +3344,9 @@ class WheelSearchGraph final {
           minimum_y - clearance_scan_margin,
           maximum_x + clearance_scan_margin,
           maximum_y + clearance_scan_margin);
-      // The broad clearance proof can rule out collision, but exact
-      // clearance remains part of label ranking and edge cost. Preserve that
-      // physical value while still running the terrain and dynamics stages;
-      // a broad result alone is never an emitted certificate.
-      const bool has_occupied_in_clearance_window = HasOccupiedInCells(
-          clearance_window.minimum_x, clearance_window.minimum_y,
-          clearance_window.maximum_x, clearance_window.maximum_y);
-      if (has_occupied_in_clearance_window) {
+      if (HasOccupiedInCells(
+              clearance_window.minimum_x, clearance_window.minimum_y,
+              clearance_window.maximum_x, clearance_window.maximum_y)) {
         for (std::int64_t y = clearance_window.minimum_y;
              y <= clearance_window.maximum_y; ++y) {
           const auto& row = occupied_by_row_[static_cast<std::size_t>(y)];
@@ -3403,8 +3383,6 @@ class WheelSearchGraph final {
             }
           }
         }
-      } else if (clearance_proven) {
-        ++far_clearance_scan_skips_;
       }
 
       const CellWindow footprint_window = ClosedFootprintContactWindow(
@@ -3657,8 +3635,7 @@ class WheelSearchGraph final {
                             .certificate_identity = identity};
     }
     ++full_certifications_;
-    EdgeEvaluation result =
-        EvaluateFullExact(transition, pose_only, broad.clearance_proven);
+    EdgeEvaluation result = EvaluateFullExact(transition, pose_only);
     result.certificate_identity = identity;
     if (!result.valid && !ControlInterrupted()) {
       ++full_invalidations_;
@@ -4487,7 +4464,6 @@ class WheelSearchGraph final {
   mutable std::size_t relief_or_underbody_rejects_{};
   mutable std::size_t dynamics_or_primitive_shape_rejects_{};
   mutable std::size_t deadline_or_cancellation_interruptions_{};
-  mutable std::size_t far_clearance_scan_skips_{};
   mutable std::size_t occupied_clearance_cell_checks_{};
   std::array<double, 5U> cost_scales_{};
   std::shared_ptr<const shared::GoalDistanceField> goal_distance_field_;
