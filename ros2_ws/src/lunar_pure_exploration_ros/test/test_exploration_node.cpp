@@ -1267,6 +1267,22 @@ TEST_F(ExplorationNodeTest,
 }
 
 TEST_F(ExplorationNodeTest,
+       RepeatedRetryableEvaluationAdvancesToTheNextCandidate) {
+  Start(FakePlannerServer::Mode::kRetryable);
+  PublishAllInputs();
+  ASSERT_TRUE(WaitFor([this] { return server_->Goals().size() >= 3U; }, 2s));
+
+  const auto goals = server_->Goals();
+  const auto first_candidate = ExplorationNodeTestPeer::CandidateIndexForRequest(
+      *explorer_, goals[0].request_id);
+  const auto third_candidate = ExplorationNodeTestPeer::CandidateIndexForRequest(
+      *explorer_, goals[2].request_id);
+  ASSERT_TRUE(first_candidate.has_value());
+  ASSERT_TRUE(third_candidate.has_value());
+  EXPECT_NE(*first_candidate, *third_candidate);
+}
+
+TEST_F(ExplorationNodeTest,
        RemoteMapChangeDoesNotCancelAStillValidCommittedGoal) {
   auto seams = std::make_shared<ExplorationPipelineSeams>();
   seams->generate_candidates =
