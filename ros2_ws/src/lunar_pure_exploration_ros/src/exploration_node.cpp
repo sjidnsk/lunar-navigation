@@ -1576,41 +1576,43 @@ void QueueBuild(const std::shared_ptr<RuntimeT>& runtime,
             ExplorationState::kSelectingFrontier) {
       return;
     }
-    if (!stationary_confirmed &&
-        runtime->parameters.stop_before_planning &&
-        PlanningIsAdmittedLocked(*runtime)) {
-      execution_cancel = RequestStationaryActionLocked(
-          *runtime, RuntimeT::PendingStationaryAction::kBuildFreshBatch);
-      publish_status = true;
-    }
-    if (!PlanningIsAdmittedLocked(*runtime)) {
-      publish_status = true;
-    } else if (WaitingForInputsLocked(*runtime)) {
+    if (WaitingForInputsLocked(*runtime)) {
       runtime->state_machine.WaitForInput();
       publish_status = true;
     } else if (!runtime->active_cycle && !runtime->build_in_flight) {
-      if (runtime->state_machine.state() ==
-          ExplorationState::kWaitingForInput) {
-        runtime->state_machine.BeginSelection();
+      if (!stationary_confirmed &&
+          runtime->parameters.stop_before_planning &&
+          PlanningIsAdmittedLocked(*runtime)) {
+        execution_cancel = RequestStationaryActionLocked(
+            *runtime, RuntimeT::PendingStationaryAction::kBuildFreshBatch);
+        publish_status = true;
       }
-      try {
-        snapshot.emplace(FrozenBuildSnapshot{
-            .task_id = runtime->state_machine.task_id(),
-            .epoch = runtime->epoch,
-            .generation = runtime->build_generation,
-            .map = *runtime->latest_map,
-            .boundary = *runtime->task_boundary,
-            .robot_pose = *runtime->pose_resolver.LatestPoseInMap(),
-            .failure_memory = runtime->failure_memory,
-            .snapshot_to_goal_start = SteadyNowLocked(*runtime)});
-        queue = runtime->work_queue;
-        runtime->build_in_flight = static_cast<bool>(queue);
-      } catch (const std::length_error& error) {
-        FailLocked(*runtime, ResourceReason(error));
-      } catch (const std::exception&) {
-        FailLocked(*runtime, "INVALID_EXPLORATION_INPUT");
+      if (!PlanningIsAdmittedLocked(*runtime)) {
+        publish_status = true;
+      } else {
+        if (runtime->state_machine.state() ==
+            ExplorationState::kWaitingForInput) {
+          runtime->state_machine.BeginSelection();
+        }
+        try {
+          snapshot.emplace(FrozenBuildSnapshot{
+              .task_id = runtime->state_machine.task_id(),
+              .epoch = runtime->epoch,
+              .generation = runtime->build_generation,
+              .map = *runtime->latest_map,
+              .boundary = *runtime->task_boundary,
+              .robot_pose = *runtime->pose_resolver.LatestPoseInMap(),
+              .failure_memory = runtime->failure_memory,
+              .snapshot_to_goal_start = SteadyNowLocked(*runtime)});
+          queue = runtime->work_queue;
+          runtime->build_in_flight = static_cast<bool>(queue);
+        } catch (const std::length_error& error) {
+          FailLocked(*runtime, ResourceReason(error));
+        } catch (const std::exception&) {
+          FailLocked(*runtime, "INVALID_EXPLORATION_INPUT");
+        }
+        publish_status = true;
       }
-      publish_status = true;
     }
   }
   if (execution_cancel) {

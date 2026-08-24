@@ -1011,46 +1011,56 @@ TEST_F(ExplorationNodeTest, MissingMapToOdomTransformWaitsIndefinitely) {
 
 TEST_F(ExplorationNodeTest,
        StopGateWaitsForThreeConsecutiveStationaryOdometrySamples) {
-  StartWithStopGateParameters(FakePlannerServer::Mode::kDelayed);
+  parameters_.stop_before_planning = true;
+  Start(FakePlannerServer::Mode::kDelayed);
   auto moving = Odometry();
   moving.twist.twist.linear.x = 0.2;
   PublishAllInputs(StartTask("stationary-three"), GlobalMap(), moving);
   ASSERT_TRUE(WaitFor([this] {
     const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
-    return pose && pose->x == 2.0;
+    const auto status = LatestStatus();
+    return pose && pose->x == 2.0 && status &&
+           status->reason_code == "WAITING_FOR_STOP";
   }));
-  std::this_thread::sleep_for(100ms);
-  EXPECT_TRUE(server_->Goals().empty());
+  EXPECT_EQ(server_->Goals().size(), 0U);
 
   odometry_publisher_->publish(Odometry(2.1, 2.0));
   ASSERT_TRUE(WaitFor([this] {
     const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
     return pose && pose->x == 2.1;
   }));
-  EXPECT_TRUE(server_->Goals().empty());
+  EXPECT_EQ(server_->Goals().size(), 0U);
   odometry_publisher_->publish(Odometry(2.2, 2.0));
   ASSERT_TRUE(WaitFor([this] {
     const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
     return pose && pose->x == 2.2;
   }));
-  EXPECT_TRUE(server_->Goals().empty());
+  EXPECT_EQ(server_->Goals().size(), 0U);
 
   odometry_publisher_->publish(Odometry(2.3, 2.0));
-  ASSERT_TRUE(WaitFor([this] { return !server_->Goals().empty(); }));
+  ASSERT_TRUE(WaitFor([this] { return server_->Goals().size() == 1U; }));
+  odometry_publisher_->publish(Odometry(2.4, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.4;
+  }));
+  EXPECT_EQ(server_->Goals().size(), 1U);
 }
 
 TEST_F(ExplorationNodeTest,
        MovingOdometryResetsConsecutiveStationaryAdmissionSamples) {
-  StartWithStopGateParameters(FakePlannerServer::Mode::kDelayed);
+  parameters_.stop_before_planning = true;
+  Start(FakePlannerServer::Mode::kDelayed);
   auto moving = Odometry();
   moving.twist.twist.linear.x = 0.2;
   PublishAllInputs(StartTask("stationary-reset"), GlobalMap(), moving);
   ASSERT_TRUE(WaitFor([this] {
     const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
-    return pose && pose->x == 2.0;
+    const auto status = LatestStatus();
+    return pose && pose->x == 2.0 && status &&
+           status->reason_code == "WAITING_FOR_STOP";
   }));
-  std::this_thread::sleep_for(100ms);
-  EXPECT_TRUE(server_->Goals().empty());
+  EXPECT_EQ(server_->Goals().size(), 0U);
 
   odometry_publisher_->publish(Odometry(2.1, 2.0));
   ASSERT_TRUE(WaitFor([this] {
@@ -1080,10 +1090,99 @@ TEST_F(ExplorationNodeTest,
     const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
     return pose && pose->x == 2.5;
   }));
-  EXPECT_TRUE(server_->Goals().empty());
+  EXPECT_EQ(server_->Goals().size(), 0U);
 
   odometry_publisher_->publish(Odometry(2.6, 2.0));
-  ASSERT_TRUE(WaitFor([this] { return !server_->Goals().empty(); }));
+  ASSERT_TRUE(WaitFor([this] { return server_->Goals().size() == 1U; }));
+  odometry_publisher_->publish(Odometry(2.7, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.7;
+  }));
+  EXPECT_EQ(server_->Goals().size(), 1U);
+}
+
+TEST_F(ExplorationNodeTest,
+       MapsDuringFreshBuildDoNotRearmConfirmedStationaryAdmission) {
+  parameters_.stop_before_planning = true;
+  auto build_entered = std::make_shared<std::promise<void>>();
+  auto build_entered_future = build_entered->get_future();
+  auto release_build = std::make_shared<std::promise<void>>();
+  const auto release_build_future = release_build->get_future().share();
+  auto build_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->generate_candidates =
+      [build_entered, release_build_future, build_calls](
+          const lunar::pure_exploration::TaskRaster&,
+          std::span<const lunar::pure_exploration::FrontierCluster> frontiers) {
+        if (build_calls->fetch_add(1U) == 0U) {
+          build_entered->set_value();
+          release_build_future.wait();
+        }
+        return ControlledCandidates(frontiers, 1U);
+      };
+  seams->evaluate_gain = [](const lunar::pure_exploration::TaskRaster&,
+                            const lunar::pure_exploration::CandidateView&) {
+    return 1.0;
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kDelayed);
+
+  auto moving = Odometry();
+  moving.twist.twist.linear.x = 0.2;
+  PublishAllInputs(StartTask("maps-during-fresh-build"), GlobalMap(), moving);
+  EXPECT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    const auto status = LatestStatus();
+    return pose && pose->x == 2.0 && status &&
+           status->reason_code == "WAITING_FOR_STOP";
+  }));
+  EXPECT_EQ(server_->Goals().size(), 0U);
+
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    EXPECT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  EXPECT_EQ(build_entered_future.wait_for(5s), std::future_status::ready);
+  EXPECT_EQ(server_->Goals().size(), 0U);
+
+  const auto publish_and_observe_map = [this](
+                                          const std::uint32_t width,
+                                          const double resolution) {
+    map_publisher_->publish(GlobalMap(width, width, resolution));
+    return WaitFor([this, resolution] {
+      const auto observed =
+          ExplorationNodeTestPeer::LatestMapResolution(*explorer_);
+      return observed && std::abs(*observed - resolution) < 1.0e-6;
+    });
+  };
+  EXPECT_TRUE(publish_and_observe_map(40U, 0.25));
+  EXPECT_TRUE(publish_and_observe_map(50U, 0.20));
+  EXPECT_TRUE(publish_and_observe_map(25U, 0.40));
+  EXPECT_TRUE(publish_and_observe_map(80U, 0.125));
+  EXPECT_EQ(server_->Goals().size(), 0U);
+  const auto status_during_build = LatestStatus();
+  EXPECT_TRUE(status_during_build.has_value());
+  if (status_during_build) {
+    EXPECT_NE(status_during_build->reason_code, "WAITING_FOR_STOP");
+  }
+
+  release_build->set_value();
+  ASSERT_TRUE(WaitFor([this] { return server_->Goals().size() == 1U; }));
+  EXPECT_EQ(build_calls->load(), 1U);
+
+  for (const double x : {2.4, 2.5, 2.6, 2.7}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+    EXPECT_EQ(server_->Goals().size(), 1U);
+  }
+  EXPECT_EQ(build_calls->load(), 1U);
 }
 
 TEST_F(ExplorationNodeTest, StopGateParameterLoadRejectsInvalidValues) {
