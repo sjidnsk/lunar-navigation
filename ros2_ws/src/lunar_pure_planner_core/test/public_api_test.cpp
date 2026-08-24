@@ -29,7 +29,7 @@ TEST(PublicApi, ExposesOnlyTheMinimalDualModePlannerEntrypoint) {
                                                SearchControl)>>);
 }
 
-TEST(PublicApi, GlobalGoalFeasibilityUsesInflatedCellAreaProjection) {
+TEST(PublicApi, GlobalGoalFeasibilityDoesNotInflateAnUnknownCell) {
   GlobalGoalFeasibilityRequest request;
   request.global_map.frame_id = "map";
   request.global_map.width = 5U;
@@ -42,8 +42,8 @@ TEST(PublicApi, GlobalGoalFeasibilityUsesInflatedCellAreaProjection) {
 
   const auto result = EvaluateGlobalGoalFeasibility(std::move(request));
 
-  EXPECT_FALSE(result.feasible);
-  EXPECT_EQ(result.reason_code, "GLOBAL_GOAL_INFEASIBLE");
+  EXPECT_TRUE(result.feasible);
+  EXPECT_TRUE(result.reason_code.empty());
 }
 
 TEST(PublicApi, RejectsPlanarRegionWithoutEnteringInjectedBackends) {

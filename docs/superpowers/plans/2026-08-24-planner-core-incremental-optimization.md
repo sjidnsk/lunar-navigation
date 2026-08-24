@@ -320,7 +320,7 @@ const double y = std::max(std::abs(dy) - 0.5, 0.0) * resolution_m;
 const double distance_m = std::hypot(x, y);
 ```
 
-The transform minimizes the corresponding separable squared function over all hazard sites in linear map time. The inflation stencil enumerates only offsets within `ceil(inflation/resolution + 0.5)`, sorts by `(dy,dx)`, and blocks when `distance_m < inflation_m`; equality remains feasible. Unknown, out-of-range and threshold-occupied values remain hazards. Check `SearchControl` during both transform passes and stencil application.
+The transform minimizes the corresponding separable squared function over valid occupied sites in linear map time. The inflation stencil enumerates only offsets within `ceil(inflation/resolution + 0.5)`, sorts by `(dy,dx)`, and blocks when `distance_m < inflation_m`; equality remains feasible. Unknown and out-of-range values remain individually infeasible, while only threshold-occupied values are clearance and inflation sources. Check `SearchControl` during both transform passes and stencil application.
 
 - [ ] **Step 3: Make hard feasibility and route cost use the same values**
 
@@ -1113,7 +1113,7 @@ git commit -m "docs: record optimized planner verification"
 
 - [ ] Exact 1 s/2 s/3 s fake-clock boundaries pass; 1 s and 2 s never reset or terminate search.
 - [ ] A `[2 s,3 s)` fully certified reference is `PLAN_FOUND_LATE`; `>=3 s` publishes no new reference.
-- [ ] Global and local clearances use occupied-cell-area geometry and unknown data remains hazardous.
+- [ ] Global and local clearances use occupied-cell-area geometry; unknown data remains individually hazardous but is not an inflation source.
 - [ ] Shared ARA* anchor ordering, sparse storage, cancellation and all-platform tests pass.
 - [ ] Continuous primitive endpoints, maximum-four active labels, derived yaw bins and exact terminal connector are covered.
 - [ ] The production 750 m fixture passes ten consecutive runs without target shift or fixed state-capacity exhaustion.

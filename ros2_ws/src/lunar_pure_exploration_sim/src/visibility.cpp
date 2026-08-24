@@ -23,9 +23,8 @@ constexpr double kTrackWidthM = 0.67;
 constexpr double kMinimumClearanceM = 0.2;
 constexpr double kGlobalCellHalfDiagonalM = std::numbers::sqrt2 / 2.0;
 // At the origin the continuous vehicle pose lies on a 1 m global-cell
-// corner.  Seed the complete 3x3 coarse-cell stencil so the global planner's
-// obstacle/unknown inflation can evaluate the known physical start state
-// without relaxing unknown-cell safety semantics.
+// corner. Seed the complete 3x3 coarse-cell stencil as the initial contact
+// prior so the coarse global map represents the known physical start state.
 constexpr double kInitialGlobalStartStencilRadiusM =
     3.0 * kGlobalCellHalfDiagonalM;
 constexpr double kGlobalKnownEnvelopeMarginM =

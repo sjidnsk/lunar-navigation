@@ -185,8 +185,9 @@ struct ExplorationNodeParameters {
   // one slow candidate cannot indefinitely block frontier selection.
   std::uint8_t maximum_candidate_retryable_retries{1U};
   double goal_yaw_tolerance_rad;
-  // Production filters goals that the global planner's circumscribed
-  // obstacle/unknown inflation would reject. Unit seams may disable it.
+  // Production filters goals that the global planner's circumscribed obstacle
+  // inflation would reject. Unknown cells remain individually infeasible.
+  // Unit seams may disable this production filter.
   bool filter_global_goal_cell{true};
   std::chrono::steady_clock::duration planner_goal_response_timeout{
       std::chrono::seconds{1}};

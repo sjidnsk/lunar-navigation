@@ -66,7 +66,8 @@ TEST(GlobalOccupancyProjection, HonorsAnExplicitIntegerThreshold) {
   EXPECT_EQ(view.hard_feasible[0], 1U);
 }
 
-TEST(GlobalOccupancyProjection, DerivesClearanceOnlyFromNativeHazards) {
+TEST(GlobalOccupancyProjection,
+     UnknownCellsRemainInfeasibleButDoNotReduceObstacleClearance) {
   const auto unknown_map = Snapshot({0, 0, -1, 0, 0}, 5U);
   const auto occupied_map = Snapshot({0, 0, 100, 0, 0}, 5U);
   const auto clear_map = Snapshot({0, 0, 0, 0, 0}, 5U);
@@ -78,20 +79,37 @@ TEST(GlobalOccupancyProjection, DerivesClearanceOnlyFromNativeHazards) {
   ASSERT_TRUE(unknown.ok()) << unknown.reason_code;
   ASSERT_TRUE(occupied.ok()) << occupied.reason_code;
   ASSERT_TRUE(clear.ok()) << clear.reason_code;
-  const auto unknown_clearance =
-      unknown.projection->View().clearance_m;
+  const auto unknown_view = unknown.projection->View();
+  const auto unknown_clearance = unknown_view.clearance_m;
   const auto occupied_clearance =
       occupied.projection->View().clearance_m;
   ASSERT_EQ(unknown_clearance.size(), 5U);
-  EXPECT_TRUE(std::ranges::equal(unknown_clearance, occupied_clearance));
-  EXPECT_FLOAT_EQ(unknown_clearance[0], 1.5F);
-  EXPECT_FLOAT_EQ(unknown_clearance[1], 0.5F);
-  EXPECT_FLOAT_EQ(unknown_clearance[2], 0.0F);
-  EXPECT_FLOAT_EQ(unknown_clearance[3], 0.5F);
-  EXPECT_FLOAT_EQ(unknown_clearance[4], 1.5F);
+  EXPECT_FALSE(unknown_view.HardFeasible({.x = 2, .y = 0}));
+  EXPECT_TRUE(std::ranges::all_of(
+      unknown_clearance,
+      [](const float value) { return std::isinf(value) && value > 0.0F; }));
+  EXPECT_FLOAT_EQ(occupied_clearance[0], 1.5F);
+  EXPECT_FLOAT_EQ(occupied_clearance[1], 0.5F);
+  EXPECT_FLOAT_EQ(occupied_clearance[2], 0.0F);
+  EXPECT_FLOAT_EQ(occupied_clearance[3], 0.5F);
+  EXPECT_FLOAT_EQ(occupied_clearance[4], 1.5F);
   EXPECT_TRUE(std::ranges::all_of(
       clear.projection->View().clearance_m,
       [](const float value) { return std::isinf(value) && value > 0.0F; }));
+}
+
+TEST(GlobalOccupancyProjection,
+     DoesNotInflateKnownFreeCellsAroundAnUnknownCell) {
+  const auto map = Snapshot({0, 0, -1, 0, 0}, 5U);
+
+  const auto inflated =
+      BuildInflatedGlobalOccupancyProjection(map, 50, 0.9187);
+
+  ASSERT_TRUE(inflated.ok()) << inflated.reason_code;
+  const auto view = inflated.projection->View();
+  EXPECT_TRUE(view.HardFeasible({.x = 1, .y = 0}));
+  EXPECT_FALSE(view.HardFeasible({.x = 2, .y = 0}));
+  EXPECT_TRUE(view.HardFeasible({.x = 3, .y = 0}));
 }
 
 TEST(GlobalOccupancyProjection, UsesOccupiedCellAreaForDiagonalClearance) {

@@ -928,11 +928,10 @@ TEST_F(ExplorationNodeTest, MissingMapToOdomTransformWaitsIndefinitely) {
 }
 
 TEST_F(ExplorationNodeTest,
-       GlobalGoalCellFilterSkipsCircumscribedInflationRejectedCandidate) {
+       GlobalGoalCellFilterKeepsKnownFreeCandidateAdjacentToUnknown) {
   // Match the deployed wheeled envelope: 0.7187 m circumscribed footprint
   // radius plus 0.2 m clearance.  The test map resolution is 0.5 m, so the
-  // candidate at x=4.5 lies inside the planner's inflated unknown mask while
-  // x=3.5 remains feasible.
+  // candidate at x=4.5 is known free and immediately adjacent to unknown.
   parameters_.platform.footprint_vertices = {{0.591, 0.409},
                                              {0.591, -0.409},
                                              {-0.591, -0.409},
@@ -944,10 +943,10 @@ TEST_F(ExplorationNodeTest,
       [](const lunar::pure_exploration::TaskRaster&,
          std::span<const lunar::pure_exploration::FrontierCluster> frontiers) {
         auto candidates = ControlledCandidates(frontiers, 2U);
-        // x=4.5 is exactly free in the 0.5 m map, but the adjacent unknown
-        // cell intersects the global circumscribed-footprint inflation.
-        candidates[0].pose = {4.5, 2.0, 0.0};
-        candidates[1].pose = {3.5, 2.0, 0.0};
+        // x=5.5 is unknown and must be rejected; x=4.5 is a known free cell
+        // adjacent to that unknown cell and must not be obstacle-inflated.
+        candidates[0].pose = {5.5, 2.0, 0.0};
+        candidates[1].pose = {4.5, 2.0, 0.0};
         return candidates;
       };
   seams->evaluate_gain = [](const lunar::pure_exploration::TaskRaster&,
@@ -964,10 +963,10 @@ TEST_F(ExplorationNodeTest,
   ASSERT_FALSE(goals.empty());
   // The fake server completes immediately, so the node may construct a
   // follow-up cycle before this assertion samples the request history.  Every
-  // dispatched goal must nevertheless be the globally feasible candidate;
-  // the x=4.5 candidate is rejected by the planner-core projection.
+  // dispatched goal must nevertheless be the globally feasible candidate:
+  // x=5.5 is unknown, whereas x=4.5 is free beside unknown.
   for (const auto& goal : goals) {
-    EXPECT_DOUBLE_EQ(goal.goal.point.x, 3.5);
+    EXPECT_DOUBLE_EQ(goal.goal.point.x, 4.5);
     EXPECT_DOUBLE_EQ(goal.goal.point.y, 2.0);
   }
 }

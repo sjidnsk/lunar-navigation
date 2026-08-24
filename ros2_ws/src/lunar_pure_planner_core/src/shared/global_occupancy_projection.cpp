@@ -12,10 +12,19 @@
 namespace lunar::pure_planning::shared {
 namespace {
 
-[[nodiscard]] bool IsHazard(const std::int8_t raw_value,
-                            const std::int32_t threshold) noexcept {
+[[nodiscard]] bool IsHardHazard(const std::int8_t raw_value,
+                                const std::int32_t threshold) noexcept {
   const auto value = static_cast<std::int32_t>(raw_value);
   return value < 0 || value > 100 || value >= threshold;
+}
+
+// Unknown and malformed cells are individually non-traversable, but neither
+// represents a measured obstacle.  Only valid occupied cells consume vehicle
+// clearance around their boundary.
+[[nodiscard]] bool IsOccupiedInflationSource(
+    const std::int8_t raw_value, const std::int32_t threshold) noexcept {
+  const auto value = static_cast<std::int32_t>(raw_value);
+  return value >= threshold && value <= 100;
 }
 
 }  // namespace
@@ -73,20 +82,23 @@ GlobalOccupancyProjectionBuildResult BuildGlobalOccupancyProjection(
     return {.reason_code = std::string{*stopped}};
   }
 
-  std::vector<std::uint8_t> hazard_mask(count, 0U);
+  std::vector<std::uint8_t> occupied_mask(count, 0U);
   for (std::size_t index = 0U; index < count; ++index) {
     if (ControlCheckDue(index)) {
       if (const auto stopped = StopReason(control); stopped.has_value()) {
         return {.reason_code = std::string{*stopped}};
       }
     }
-    const bool hazard = IsHazard(occupancy[index], obstacle_threshold_percent);
-    projection.hard_feasible_[index] = static_cast<std::uint8_t>(!hazard);
-    hazard_mask[index] = static_cast<std::uint8_t>(hazard);
+    const bool hard_hazard =
+        IsHardHazard(occupancy[index], obstacle_threshold_percent);
+    projection.hard_feasible_[index] = static_cast<std::uint8_t>(!hard_hazard);
+    occupied_mask[index] = static_cast<std::uint8_t>(
+        IsOccupiedInflationSource(occupancy[index],
+                                  obstacle_threshold_percent));
   }
   auto clearance = BuildCellAreaClearance(
       projection.source_map_->width(), projection.source_map_->height(),
-      projection.source_map_->resolution_m(), hazard_mask, control);
+      projection.source_map_->resolution_m(), occupied_mask, control);
   if (!clearance.ok()) {
     return {.reason_code = std::move(clearance.reason_code)};
   }
@@ -116,10 +128,12 @@ GlobalOccupancyProjectionBuildResult BuildInflatedGlobalOccupancyProjection(
   GlobalOccupancyProjection projection = std::move(*native.projection);
   const auto stencil = BuildCellAreaInflationStencil(
       projection.source_map_->resolution_m(), inflation_m);
+  const auto occupancy = projection.source_map_->Int8Layer("occupancy");
   std::size_t work{};
   for (std::size_t index = 0U; index < projection.hard_feasible_.size();
        ++index) {
-    if (projection.clearance_m_[index] != 0.0F) {
+    if (!IsOccupiedInflationSource(occupancy[index],
+                                   obstacle_threshold_percent)) {
       continue;
     }
     const std::int64_t hazard_x = static_cast<std::int64_t>(
