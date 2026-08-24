@@ -545,3 +545,82 @@ pass, but the full five-package regression is **FAIL / NOT GREEN** because the
 planner-core suite is nonzero and the two mandatory boundary gates are
 `NOT_RUN / MISSING`. This container evidence is not a native Jazzy 300 m/RViz
 run, Orin execution, DDS verification, or field-readiness acceptance.
+
+## Jazzy 300 m stop-gated acceptance — 2026-08-25
+
+This acceptance used source
+`b564eefc908bd4f22116fd0e3c70354d29917c8e`. A clean native Jazzy external
+`RelWithDebInfo` build completed 8/8 packages in `3 min 37 s`. Installation
+verification passed: all four operator-required runtime packages resolved from
+the new overlay, and the source and installed 300 m launch files had the same
+SHA-256, `d052cd64822646993f151a8d715f43b1b777a068bd3c807bcaf5134f0a6f1929`.
+
+The bounded moving-start Stage A smoke passed:
+
+| Check | Result |
+| --- | --- |
+| State sequence | `STARTED -> WAITING_FOR_STOP -> SELECTING_FRONTIER -> PLANNING -> EXECUTING` |
+| Candidate planning | 6/6 reachable, 0 failures, all `planning_outcome=0` |
+| Executable reference | 89 points; T5 produced a nonzero command |
+| Motion | `0.20011071571494968 m` |
+| Coverage | `0.0 -> 0.0005945303210463733` |
+| Global planner | 6 calls, `14.011608 ms` total |
+| Local planner | 6 calls, `5523.706476 ms` total |
+| Isolation and teardown | domain 57; exact process members gone; ROS graph empty; no SIGTERM |
+
+The smoke observed no terminal state or zero-goal false completion. Its
+post-acceptance `SHUTDOWN` summary was produced only by bounded SIGINT teardown
+and is not full-exploration completion evidence.
+
+Stage B started RViz and the full operator with a 21600 s wall guard, but
+failed after `13.958106673 s`; the guard did not expire. Its evidence is:
+
+```text
+/home/kai/CodexDownloads/lunar_navigation/jazzy_300m_exploration_runs/
+task7-stageA-b564eef-20260824T171622Z/full-runs/
+run-20260825-012343-seed-20260824-dd299394
+```
+
+| Result | Observed value |
+| --- | --- |
+| Terminal | `ERROR / PLANNER_CONTRACT_RESULT_CONTRACT_MISMATCH` |
+| Completed goals/local segments | 0 |
+| Distance | `0.7997593879210407 m` |
+| Coverage | `0.0007966706302021403` |
+| Global planner | 14 calls, `28.112865 ms` total |
+| Local planner | 14 calls, `9211.925479 ms` total |
+| Operator validation | `summary_validated=false`; evidence outcome remained `RUNNING` at validation exception |
+| Teardown | domain 33 graph empty; all nine exact members gone; no SIGTERM |
+
+Candidates 0 through 12 returned successful references. In particular,
+candidates 6 and 7 both returned `PLAN_FOUND`, so the historical moving-start
+candidate-6/7 `NO_PATH` and zero-goal false-completion behavior did not recur.
+Candidate 13 returned the internally coherent failure
+`INVALID_REQUEST / INVALID_INPUT`; the exploration client intentionally does
+not classify that outcome as an ordinary unreachable candidate and therefore
+failed closed with `RESULT_CONTRACT_MISMATCH`.
+
+The candidate-13 diagnostic has positive global and local call counts, local
+elapsed `15.982019 ms`, zero expanded states and no wheel metrics. This bounds
+the failure to the local wheel pre-search input path after Action transport,
+input adaptation and global planning. The planner collapses the more specific
+local reasons, including `WHEEL_INPUT_INVALID` and
+`WHEEL_POSE_OUTSIDE_LOCAL_MAP`, into `INVALID_INPUT`; this run did not retain
+the Action goal, local-map snapshot or uncollapsed reason needed to distinguish
+the exact sub-cause. No narrower cause is claimed.
+
+The recorder's failure summary, final status and final coverage CSV value
+agree. RViz started and reported OpenGL 4.6, but its OccupancyGrid display
+reported a GLSL sampler link error. The short failed run therefore provides no
+accepted continuous RViz visual evidence.
+
+Final verdict: **FAIL / INCOMPLETE**. The full 300 m exploration did not reach
+`COMPLETED_NO_REACHABLE_FRONTIER`, no local segment completed, and RViz visual
+acceptance did not pass. This local Jazzy evidence also does not establish
+Jetson AGX Orin execution, DDS integration, vehicle acceptance, or field
+readiness. External Stage A and Stage B reports are retained under:
+
+```text
+/home/kai/CodexDownloads/lunar_navigation/jazzy_300m_exploration_runs/
+task7-stageA-b564eef-20260824T171622Z/
+```
