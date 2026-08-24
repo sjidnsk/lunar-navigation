@@ -247,6 +247,16 @@ struct SearchResult final {
                     static_cast<double>(to.y - from.y));
 }
 
+[[nodiscard]] double RouteLengthMeters(const TraversabilitySnapshot& snapshot,
+                                       const std::vector<Cell>& path) {
+  long double total = 0.0L;
+  for (std::size_t i = 1U; i < path.size(); ++i) {
+    total += static_cast<long double>(Heuristic(path[i - 1U], path[i])) *
+             static_cast<long double>(snapshot.resolution_m());
+  }
+  return static_cast<double>(total);
+}
+
 struct OpenNode final {
   Cell cell;
   double f{};
@@ -600,6 +610,11 @@ PlanningResult Plan(const PlanningRequest& request) noexcept {
       return Failure(PlanningStatus::kNoPath, "GLOBAL_NO_PATH",
                      std::move(diagnostics), timing);
     }
+    const double global_route_cost_m = RouteLengthMeters(snapshot, global.path);
+    if (!Finite(global_route_cost_m) || global_route_cost_m < 0.0) {
+      return Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR",
+                     std::move(diagnostics), timing);
+    }
     GlobalRoutePreview global_route_preview;
     global_route_preview.poses_map.reserve(global.path.size());
     for (const Cell cell : global.path) {
@@ -860,6 +875,7 @@ PlanningResult Plan(const PlanningRequest& request) noexcept {
         .timing = timing,
         .expanded_states = diagnostics.local_expanded_states,
         .selected_goal_index = diagnostics.selected_candidate_index,
+        .best_cost = global_route_cost_m,
         .grid_v1 = std::move(diagnostics),
     };
   } catch (...) {

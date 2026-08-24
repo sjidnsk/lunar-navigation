@@ -287,11 +287,11 @@ TEST(MessageConversion, AddsWarningsAtExactTargetAndSlaMilestones) {
 TEST(MessageConversion, MapsAvailableSearchMetricsWithoutInventingACost) {
   auto with_cost = Result(PlanningStatus::kSuccess, WheelReference());
   with_cost.expanded_states = 37U;
-  with_cost.best_cost = 12.5;
+  with_cost.best_cost = 23.5;
   const auto converted_with_cost = ConvertResult(with_cost, 1U);
   EXPECT_EQ(converted_with_cost.diagnostics.expanded_states, 37U);
   EXPECT_TRUE(converted_with_cost.diagnostics.has_best_cost);
-  EXPECT_DOUBLE_EQ(converted_with_cost.diagnostics.best_cost, 12.5);
+  EXPECT_DOUBLE_EQ(converted_with_cost.diagnostics.best_cost, 23.5);
 
   auto without_cost = Result(PlanningStatus::kNoPath, std::nullopt);
   without_cost.expanded_states = 9U;

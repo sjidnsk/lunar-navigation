@@ -134,6 +134,26 @@ constexpr double kEpsilon = 1.0e-9;
   return poses;
 }
 
+[[nodiscard]] double LocalPreviewLength(const MotionReference& reference) {
+  double total{};
+  for (std::size_t index = 1U; index < reference.preview.poses_map.size(); ++index) {
+    const Vec3& previous = reference.preview.poses_map[index - 1U].position_m;
+    const Vec3& current = reference.preview.poses_map[index].position_m;
+    total += std::hypot(current.x - previous.x, current.y - previous.y);
+  }
+  return total;
+}
+
+[[nodiscard]] double GlobalPreviewLength(const GlobalRoutePreview& preview) {
+  double total{};
+  for (std::size_t index = 1U; index < preview.poses_map.size(); ++index) {
+    const Vec3& previous = preview.poses_map[index - 1U].position_m;
+    const Vec3& current = preview.poses_map[index].position_m;
+    total += std::hypot(current.x - previous.x, current.y - previous.y);
+  }
+  return total;
+}
+
 void ExpectTimedBoundedTrajectory(const TrajectoryReference& trajectory,
                                   const double maximum_speed_mps) {
   ASSERT_GE(trajectory.points.size(), 2U);
@@ -231,6 +251,21 @@ TEST(GridV1Planner, LimitsLocalCandidateToEightMeters) {
   const Vec3 end = trajectory.points.back().pose.position_m;
   EXPECT_LE(std::hypot(end.x - 0.5, end.y - 1.5), 8.0 + kEpsilon);
   EXPECT_NEAR(std::hypot(end.x - 0.5, end.y - 1.5), 8.0, kEpsilon);
+}
+
+TEST(GridV1Planner, ReportsCompleteGlobalRouteCostBeyondLocalHorizon) {
+  const auto snapshot = MakeSnapshot(28U, 3U, std::vector<float>(84U, 0.0F));
+  const PlanningResult result = Plan(MakeRequest(
+      snapshot, Vec3{.x = 0.5, .y = 1.5}, Vec3{.x = 24.5, .y = 1.5}));
+
+  ASSERT_EQ(result.status, PlanningStatus::kSuccess);
+  ASSERT_TRUE(result.best_cost.has_value());
+  EXPECT_GT(*result.best_cost, 20.0);
+  ASSERT_TRUE(result.reference.has_value());
+  EXPECT_LT(LocalPreviewLength(*result.reference), 9.0);
+  EXPECT_GT(GlobalPreviewLength(result.global_route_preview), 20.0);
+  EXPECT_NEAR(*result.best_cost,
+              GlobalPreviewLength(result.global_route_preview), 1.0e-9);
 }
 
 TEST(GridV1Planner, ObstacleDetourStaysFreeAfterPostprocessOrRawFallback) {
