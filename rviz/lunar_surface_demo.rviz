@@ -4,12 +4,12 @@ Visualization Manager:
   Class: ""
   Displays:
     - Class: rviz_default_plugins/Map
-      Alpha: 0.35
+      Alpha: 0.2
       Enabled: true
       Name: Lunar obstacles
       Topic: /lunar_demo/global_overview
       Value: true
-    - Alpha: 0.8
+    - Alpha: 0.72
       Autocompute Intensity Bounds: false
       Class: grid_map_rviz_plugin/GridMap
       Color Layer: traversability
@@ -18,9 +18,9 @@ Visualization Manager:
       Height Transformer: Flat
       History Length: 1
       Invert Rainbow: false
-      Max Color: 0; 255; 0
+      Max Color: 0; 158; 115
       Max Intensity: 1
-      Min Color: 255; 0; 0
+      Min Color: 213; 94; 0
       Min Intensity: 0
       Name: Wheel traversability
       Show Grid Lines: false
@@ -33,21 +33,42 @@ Visualization Manager:
       Topic: /lunar_demo/terrain_markers
       Value: true
     - Class: rviz_default_plugins/Path
+      Alpha: 1
+      Color: 0; 114; 178
       Enabled: true
+      Line Style: Lines
+      Line Width: 0.18
       Name: Planned path
+      Pose Style: None
       Topic: /lunar_demo/path
       Value: true
     - Class: rviz_default_plugins/Odometry
       Enabled: true
       Name: Rover
+      Shape:
+        Alpha: 1
+        Color: 204; 121; 167
+        Head Length: 0.5
+        Head Radius: 0.22
+        Shaft Length: 1
+        Shaft Radius: 0.12
+        Value: Arrow
       Topic: /lunar_demo/odometry
       Value: true
     - Class: rviz_default_plugins/Pose
+      Alpha: 1
+      Color: 230; 159; 0
       Enabled: true
+      Head Length: 0.5
+      Head Radius: 0.22
       Name: Default goal
+      Shape: Arrow
+      Shaft Length: 1
+      Shaft Radius: 0.12
       Topic: /lunar_demo/default_goal
       Value: true
   Global Options:
+    Background Color: 32; 34; 37
     Fixed Frame: map
   Tools:
     - Class: rviz_default_plugins/Interact

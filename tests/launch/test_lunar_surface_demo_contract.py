@@ -59,6 +59,29 @@ def test_demo_computes_and_displays_wheel_traversability() -> None:
     assert grid_map_dependency.attrib["condition"] == "$ROS_DISTRO == 'jazzy'"
 
 
+def test_rviz_uses_a_colorblind_safe_academic_palette() -> None:
+    rviz_config = yaml.safe_load(RVIZ.read_text(encoding="utf-8"))
+    manager = rviz_config["Visualization Manager"]
+    displays = manager["Displays"]
+
+    by_name = {display["Name"]: display for display in displays}
+    traversability = by_name["Wheel traversability"]
+    path = by_name["Planned path"]
+    rover = by_name["Rover"]
+    goal = by_name["Default goal"]
+
+    assert traversability["Max Color"] == "0; 158; 115"
+    assert traversability["Min Color"] == "213; 94; 0"
+    assert traversability["Alpha"] == 0.72
+    assert path["Color"] == "0; 114; 178"
+    assert path["Line Width"] == 0.18
+    assert path["Color"] != traversability["Max Color"]
+    assert rover["Shape"]["Color"] == "204; 121; 167"
+    assert goal["Color"] == "230; 159; 0"
+    assert by_name["Lunar obstacles"]["Alpha"] == 0.2
+    assert manager["Global Options"]["Background Color"] == "32; 34; 37"
+
+
 def test_rviz_inputs_are_compatible_and_empty_failed_paths_are_not_forwarded() -> None:
     demo_text = DEMO_NODE.read_text(encoding="utf-8")
     visualizer_text = VISUALIZER_NODE.read_text(encoding="utf-8")
