@@ -180,6 +180,10 @@ struct ExplorationNodeParameters {
   std::size_t maximum_path_preview_poses;
   std::size_t maximum_executable_path_points;
   std::uint8_t maximum_replans;
+  // A candidate planner evaluation may be retried once to tolerate a
+  // transient action timeout. Further retryable outcomes advance the batch so
+  // one slow candidate cannot indefinitely block frontier selection.
+  std::uint8_t maximum_candidate_retryable_retries{1U};
   double goal_yaw_tolerance_rad;
   // Production filters goals that the global planner's circumscribed
   // obstacle/unknown inflation would reject. Unit seams may disable it.

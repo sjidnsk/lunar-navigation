@@ -14,6 +14,7 @@ pure_exploration:
     stuck_timeout_s: 30.0
     minimum_progress_m: 0.2
     maximum_replans_per_candidate: 2
+    maximum_candidate_retryable_retries: 1
     goal_yaw_tolerance_deg: 11.25
     planner_goal_response_timeout_s: 1.0
     planner_result_timeout_s: 3.5

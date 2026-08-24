@@ -532,6 +532,9 @@ ExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
       node.declare_parameter<double>("score_weights.revisit", 0.05);
   const std::int64_t maximum_replans = node.declare_parameter<std::int64_t>(
       "maximum_replans_per_candidate", 2);
+  const std::int64_t maximum_candidate_retryable_retries =
+      node.declare_parameter<std::int64_t>(
+          "maximum_candidate_retryable_retries", 1);
   const double yaw_tolerance_deg =
       node.declare_parameter<double>("goal_yaw_tolerance_deg", 11.25);
   const double planner_goal_response_timeout_s =
@@ -542,6 +545,9 @@ ExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
   if (threshold < 0 || threshold > 100 || maximum_task_raster_cells <= 0 ||
       yaw_offsets_deg.size() != 5U || maximum_replans < 0 ||
       maximum_replans > std::numeric_limits<std::uint8_t>::max() ||
+      maximum_candidate_retryable_retries < 0 ||
+      maximum_candidate_retryable_retries >
+          std::numeric_limits<std::uint8_t>::max() ||
       !std::isfinite(sensor_range_m) || sensor_range_m <= 0.0 ||
       !std::isfinite(sensor_fov_deg) || sensor_fov_deg <= 0.0 ||
       !std::isfinite(yaw_tolerance_deg) || yaw_tolerance_deg <= 0.0 ||
@@ -586,6 +592,8 @@ ExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
       .maximum_executable_path_points =
           PositiveSizeParameter(node, "maximum_executable_path_points"),
       .maximum_replans = static_cast<std::uint8_t>(maximum_replans),
+      .maximum_candidate_retryable_retries =
+          static_cast<std::uint8_t>(maximum_candidate_retryable_retries),
       .goal_yaw_tolerance_rad =
           yaw_tolerance_deg * std::numbers::pi / 180.0,
       .planner_goal_response_timeout = std::chrono::duration_cast<
@@ -923,6 +931,7 @@ struct ExplorationNode::Runtime final {
   std::vector<std::size_t> current_batch;
   std::size_t current_batch_cursor{0U};
   std::optional<std::size_t> current_candidate;
+  std::uint8_t current_candidate_retryable_retries{0U};
   bool planner_in_flight{false};
   bool build_in_flight{false};
   bool final_rank_in_flight{false};
@@ -1906,6 +1915,7 @@ void HandleEvaluation(const std::weak_ptr<RuntimeT>& weak_runtime,
                   {.metrics = {*associated, *evaluation.path_length_m},
                    .reference = std::move(*evaluation.reference)});
               runtime->current_candidate.reset();
+              runtime->current_candidate_retryable_retries = 0U;
               ++runtime->current_batch_cursor;
               pump = true;
             } catch (const std::length_error&) {
@@ -1916,12 +1926,22 @@ void HandleEvaluation(const std::weak_ptr<RuntimeT>& weak_runtime,
             break;
           case PlannerEvaluationKind::kExhaustiveNoPath:
             runtime->current_candidate.reset();
+            runtime->current_candidate_retryable_retries = 0U;
             ++runtime->current_batch_cursor;
             pump = true;
             break;
           case PlannerEvaluationKind::kRetryable:
-            runtime->candidate_retry_deadline =
-                SteadyNowLocked(*runtime) + std::chrono::milliseconds{100};
+            if (runtime->current_candidate_retryable_retries <
+                runtime->parameters.maximum_candidate_retryable_retries) {
+              ++runtime->current_candidate_retryable_retries;
+              runtime->candidate_retry_deadline =
+                  SteadyNowLocked(*runtime) + std::chrono::milliseconds{100};
+            } else {
+              runtime->current_candidate.reset();
+              runtime->current_candidate_retryable_retries = 0U;
+              ++runtime->current_batch_cursor;
+              pump = true;
+            }
             break;
           case PlannerEvaluationKind::kCanceled:
             FailLocked(*runtime, "UNEXPECTED_PLANNER_CANCELED");
@@ -2314,6 +2334,7 @@ void Pump(const std::shared_ptr<RuntimeT>& runtime) {
           runtime->current_batch_cursor < runtime->current_batch.size()) {
         runtime->current_candidate =
             runtime->current_batch[runtime->current_batch_cursor];
+        runtime->current_candidate_retryable_retries = 0U;
       }
     }
 
