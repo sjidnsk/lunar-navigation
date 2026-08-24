@@ -85,6 +85,7 @@ struct RuntimeParameters final {
   std::string tf_topic;
   std::string action_name;
   std::string diagnostics_topic;
+  std::string wheeled_reference_topic;
   std::string wheeled_path_topic;
   std::string wheeled_timed_path_topic;
   RollingSurfaceParameters rolling_surface;
@@ -185,6 +186,8 @@ struct RuntimeParameters final {
           "action_name", "/Car/T4/plan_motion"),
       .diagnostics_topic = node.declare_parameter<std::string>(
           "diagnostics_topic", "/Car/T4/planning/diagnostics"),
+      .wheeled_reference_topic = node.declare_parameter<std::string>(
+          "wheeled_reference_topic", "/Car/T4/planning/wheeled_reference"),
       .wheeled_path_topic = node.declare_parameter<std::string>(
           "wheeled_path_topic", "/Car/T4/planning/wheeled_path"),
       .wheeled_timed_path_topic = node.declare_parameter<std::string>(
@@ -195,7 +198,8 @@ struct RuntimeParameters final {
            &parameters.global_map_topic, &parameters.local_map_topic,
            &parameters.odometry_topic, &parameters.tf_topic,
            &parameters.action_name, &parameters.diagnostics_topic,
-           &parameters.wheeled_path_topic, &parameters.wheeled_timed_path_topic}) {
+           &parameters.wheeled_reference_topic, &parameters.wheeled_path_topic,
+           &parameters.wheeled_timed_path_topic}) {
     if (!AbsoluteTopic(*interface_name)) {
       throw std::runtime_error{"PLANNER_ERROR: interface name must be absolute"};
     }
@@ -475,6 +479,9 @@ struct PurePlanMotionServer::Impl final {
     diagnostics_publisher =
         node.create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
             parameters.diagnostics_topic, rclcpp::QoS{10}.reliable());
+    wheeled_reference_publisher =
+        node.create_publisher<lunar_planning_msgs::msg::MotionReference>(
+            parameters.wheeled_reference_topic, rclcpp::QoS{1}.reliable());
     wheeled_path_publisher = node.create_publisher<nav_msgs::msg::Path>(
         parameters.wheeled_path_topic, rclcpp::QoS{1}.reliable());
     timed_path_publisher = node.create_publisher<lunar_planning_msgs::msg::TimedPath>(
@@ -1593,11 +1600,14 @@ struct PurePlanMotionServer::Impl final {
 
   void PublishWheeledPath(const Action::Result& result,
                           const std::chrono::nanoseconds planning_time) {
+    lunar_planning_msgs::msg::MotionReference reference;
     nav_msgs::msg::Path path;
     if (result.has_reference &&
         result.reference.platform_type == result.reference.WHEELED) {
-      path = result.reference.path_preview;
+      reference = result.reference;
+      path = reference.path_preview;
     }
+    wheeled_reference_publisher->publish(reference);
     wheeled_path_publisher->publish(path);
 
     lunar_planning_msgs::msg::TimedPath timed_path;
@@ -1722,6 +1732,8 @@ struct PurePlanMotionServer::Impl final {
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr tf_subscription;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
       diagnostics_publisher;
+  rclcpp::Publisher<lunar_planning_msgs::msg::MotionReference>::SharedPtr
+      wheeled_reference_publisher;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr wheeled_path_publisher;
   rclcpp::Publisher<lunar_planning_msgs::msg::TimedPath>::SharedPtr
       timed_path_publisher;

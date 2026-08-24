@@ -21,6 +21,7 @@ def generate_launch_description() -> LaunchDescription:
         "tf_topic": "/tf",
         "action_name": "/lunar_demo/plan_motion",
         "diagnostics_topic": "/lunar_demo/diagnostics",
+        "wheeled_reference_topic": "/lunar_demo/wheeled_reference",
         "wheeled_path_topic": "/lunar_demo/wheeled_path",
         "wheeled_timed_path_topic": "/lunar_demo/wheeled_path_timing",
     }

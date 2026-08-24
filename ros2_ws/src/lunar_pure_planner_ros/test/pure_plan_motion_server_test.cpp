@@ -263,6 +263,13 @@ class RunningSystem final {
               std::scoped_lock lock{diagnostics_mutex};
               diagnostics.push_back(*value);
             });
+    wheeled_reference_subscription = client->create_subscription<
+        lunar_planning_msgs::msg::MotionReference>(
+        "/Car/T4/planning/wheeled_reference", rclcpp::QoS{10}.reliable(),
+        [this](lunar_planning_msgs::msg::MotionReference::ConstSharedPtr value) {
+          std::scoped_lock lock{wheeled_references_mutex};
+          wheeled_references.push_back(*value);
+        });
     wheeled_path_subscription = client->create_subscription<nav_msgs::msg::Path>(
         "/Car/T4/planning/wheeled_path", rclcpp::QoS{10}.reliable(),
         [this](nav_msgs::msg::Path::ConstSharedPtr value) {
@@ -293,6 +300,7 @@ class RunningSystem final {
     executor->remove_node(server);
     action_client.reset();
     diagnostics_subscription.reset();
+    wheeled_reference_subscription.reset();
     wheeled_path_subscription.reset();
     timed_path_subscription.reset();
     client.reset();
@@ -374,6 +382,12 @@ class RunningSystem final {
     return diagnostics;
   }
 
+  std::vector<lunar_planning_msgs::msg::MotionReference>
+  WheeledReferences() const {
+    std::scoped_lock lock{wheeled_references_mutex};
+    return wheeled_references;
+  }
+
   std::vector<nav_msgs::msg::Path> WheeledPaths() const {
     std::scoped_lock lock{wheeled_paths_mutex};
     return wheeled_paths;
@@ -414,11 +428,15 @@ class RunningSystem final {
 
   rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
       diagnostics_subscription;
+  rclcpp::Subscription<lunar_planning_msgs::msg::MotionReference>::SharedPtr
+      wheeled_reference_subscription;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr wheeled_path_subscription;
   rclcpp::Subscription<lunar_planning_msgs::msg::TimedPath>::SharedPtr
       timed_path_subscription;
   mutable std::mutex diagnostics_mutex;
   std::vector<diagnostic_msgs::msg::DiagnosticArray> diagnostics;
+  mutable std::mutex wheeled_references_mutex;
+  std::vector<lunar_planning_msgs::msg::MotionReference> wheeled_references;
   mutable std::mutex wheeled_paths_mutex;
   std::vector<nav_msgs::msg::Path> wheeled_paths;
   mutable std::mutex timed_paths_mutex;
@@ -581,6 +599,9 @@ TEST(PurePlanMotionServer, ExposesExactlyTheFrozenOrdinaryNodeGraph) {
   EXPECT_EQ(system.server->count_publishers(
                 "/Car/T4/planning/diagnostics"),
             1U);
+  EXPECT_EQ(system.server->count_publishers(
+                "/Car/T4/planning/wheeled_reference"),
+            1U);
   EXPECT_TRUE(system.action_client->action_server_is_ready());
 }
 
@@ -662,7 +683,8 @@ TEST(PurePlanMotionServer, SurfaceNeedsGlobalButLavaDoesNotTouchIt) {
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 2U; }));
 }
 
-TEST(PurePlanMotionServer, PublishesSuccessfulWheeledPathAndClearsItOnFailure) {
+TEST(PurePlanMotionServer,
+     PublishesExecutableReferenceAndObservablePathsAndClearsAllOnFailure) {
   {
     RunningSystem successful{
         [](const auto& request) { return Success(request); }};
@@ -672,6 +694,12 @@ TEST(PurePlanMotionServer, PublishesSuccessfulWheeledPathAndClearsItOnFailure) {
     ASSERT_NE(success_handle, nullptr);
     EXPECT_EQ(successful.Result(success_handle).code,
               rclcpp_action::ResultCode::SUCCEEDED);
+    ASSERT_TRUE(
+        WaitFor([&] { return successful.WheeledReferences().size() == 1U; }));
+    const auto reference = successful.WheeledReferences().front();
+    EXPECT_EQ(reference.plan_id, "publish-wheel-reference");
+    EXPECT_EQ(reference.platform_type, reference.WHEELED);
+    EXPECT_FALSE(reference.trajectory.points.empty());
     ASSERT_TRUE(WaitFor([&] { return successful.WheeledPaths().size() == 1U; }));
     const auto published = successful.WheeledPaths().front();
     EXPECT_EQ(published.header.frame_id, "map");
@@ -691,6 +719,10 @@ TEST(PurePlanMotionServer, PublishesSuccessfulWheeledPathAndClearsItOnFailure) {
   ASSERT_NE(failed_handle, nullptr);
   EXPECT_EQ(failed.Result(failed_handle).code,
             rclcpp_action::ResultCode::ABORTED);
+  ASSERT_TRUE(WaitFor([&] { return failed.WheeledReferences().size() == 1U; }));
+  const auto cleared_reference = failed.WheeledReferences().front();
+  EXPECT_TRUE(cleared_reference.plan_id.empty());
+  EXPECT_TRUE(cleared_reference.trajectory.points.empty());
   ASSERT_TRUE(WaitFor([&] { return failed.WheeledPaths().size() == 1U; }));
   const auto cleared = failed.WheeledPaths().front();
   EXPECT_TRUE(cleared.header.frame_id.empty());

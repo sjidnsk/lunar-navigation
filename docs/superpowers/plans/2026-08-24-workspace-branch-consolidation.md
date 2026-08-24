@@ -161,17 +161,17 @@ python3 -m pytest -q -p no:cacheprovider \
   tests/test_car_orin_bundle.py
 bash -n scripts/start_all.sh scripts/send_goal.sh
 source /opt/ros/jazzy/setup.bash
-colcon build --base-paths ros2_ws/src \
+colcon --log-base /tmp/lunar-planner-consolidation-20260824/production/log build \
+  --base-paths ros2_ws/src \
   --build-base /tmp/lunar-planner-consolidation-20260824/production/build \
   --install-base /tmp/lunar-planner-consolidation-20260824/production/install \
-  --log-base /tmp/lunar-planner-consolidation-20260824/production/log \
   --packages-up-to lunar_pure_planner_ros lunar_pure_wheeled_controller \
   --event-handlers console_direct+
 source /tmp/lunar-planner-consolidation-20260824/production/install/setup.bash
-colcon test --base-paths ros2_ws/src \
+colcon --log-base /tmp/lunar-planner-consolidation-20260824/production/test-log test \
+  --base-paths ros2_ws/src \
   --build-base /tmp/lunar-planner-consolidation-20260824/production/build \
   --install-base /tmp/lunar-planner-consolidation-20260824/production/install \
-  --log-base /tmp/lunar-planner-consolidation-20260824/production/log \
   --packages-select lunar_pure_planner_core lunar_pure_planner_ros \
     lunar_pure_wheeled_controller --event-handlers console_direct+
 colcon test-result \
@@ -200,18 +200,18 @@ Run:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-colcon build --base-paths ros2_ws/src \
+colcon --log-base /tmp/lunar-planner-consolidation-20260824/exploration/log build \
+  --base-paths ros2_ws/src \
   --build-base /tmp/lunar-planner-consolidation-20260824/exploration/build \
   --install-base /tmp/lunar-planner-consolidation-20260824/exploration/install \
-  --log-base /tmp/lunar-planner-consolidation-20260824/exploration/log \
   --packages-up-to lunar_pure_exploration_sim lunar_pure_exploration_ros \
     lunar_pure_planner_ros lunar_pure_wheeled_controller \
   --event-handlers console_direct+
 source /tmp/lunar-planner-consolidation-20260824/exploration/install/setup.bash
-colcon test --base-paths ros2_ws/src \
+colcon --log-base /tmp/lunar-planner-consolidation-20260824/exploration/test-log test \
+  --base-paths ros2_ws/src \
   --build-base /tmp/lunar-planner-consolidation-20260824/exploration/build \
   --install-base /tmp/lunar-planner-consolidation-20260824/exploration/install \
-  --log-base /tmp/lunar-planner-consolidation-20260824/exploration/log \
   --packages-select lunar_pure_exploration_core lunar_pure_exploration_ros \
     lunar_pure_exploration_sim lunar_pure_wheeled_controller \
   --event-handlers console_direct+

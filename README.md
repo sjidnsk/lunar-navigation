@@ -98,6 +98,7 @@ RViz 固定坐标系为 `map`。使用 **2D Goal Pose** 在空白可达区域选
 | 订阅 | `/Car/T3/mapping/global_overview`、`/Car/T3/mapping/grid_map`、`/Car/T3/localization/odometry`、`/tf` |
 | Action server | `/Car/T4/plan_motion` |
 | 诊断发布 | `/Car/T4/planning/diagnostics` |
+| 可执行轮式参考发布 | `/Car/T4/planning/wheeled_reference`（`lunar_planning_msgs/msg/MotionReference`） |
 | 路径发布 | `/Car/T4/planning/wheeled_path`（`nav_msgs/msg/Path`） |
 | 带计时路径发布 | `/Car/T4/planning/wheeled_path_timing`（`lunar_planning_msgs/msg/TimedPath`） |
 
@@ -172,7 +173,7 @@ ros2 launch lunar_pure_planner_ros pure_planner.launch.py \
   platform_type:=wheel rolling_surface_enabled:=true
 ```
 
-启用后，一条月表 Action 先计算一次按轮式包络膨胀的全局路线；随后以 8 m 路线前瞻重复产生严格局部路径，直到 odometry 进入最终目标容差。每个真正触发的冷启动或滚动规划周期共用一个时钟：`<1 s` 达到目标，`[1 s,2 s)` 记录变慢，`[2 s,3 s)` 记录 SLA 失败但继续搜索，只有 `>=3 s` 才硬停止且不发布新路径；车辆行驶和轮询时间不计入规划周期，也没有 300 s Action 业务截止时间。取消或替换优先于迟到结果，失败会发布空 `Path` 和空 `TimedPath`。该模式不替代外部全局图生产者或独立轮式控制器。
+启用后，一条月表 Action 先计算一次按轮式包络膨胀的全局路线；随后以 8 m 路线前瞻重复产生严格局部路径，直到 odometry 进入最终目标容差。每个真正触发的冷启动或滚动规划周期共用一个时钟：`<1 s` 达到目标，`[1 s,2 s)` 记录变慢，`[2 s,3 s)` 记录 SLA 失败但继续搜索，只有 `>=3 s` 才硬停止且不发布新路径；车辆行驶和轮询时间不计入规划周期，也没有 300 s Action 业务截止时间。取消或替换优先于迟到结果，失败会同时发布空 `MotionReference`、空 `Path` 和空 `TimedPath`。控制器只订阅保留正反向速度及角速度的 `MotionReference`；两个 Path Topic 仅用于 RViz、rosbag 和外部观测。该模式不替代外部全局图生产者或独立轮式控制器。
 
 默认参数在 `config/pure_planner.yaml`；其中全局占据阈值为 `50` percent，局部占据阈值为 `0.5`。
 
