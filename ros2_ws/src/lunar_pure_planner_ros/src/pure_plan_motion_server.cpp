@@ -727,6 +727,7 @@ struct PurePlanMotionServer::Impl final {
     const InputSnapshot snapshot = input_store.Capture();
     const auto request_goal = goal_handle->get_goal();
     lunar::pure_planning::PlanningResult result;
+    bool planner_returned = false;
     try {
       if (stop_token.stop_requested()) {
         result = Failure(lunar::pure_planning::PlanningStatus::kCanceled,
@@ -776,6 +777,7 @@ struct PurePlanMotionServer::Impl final {
                                   ? ApplyTrustedBridge(request, snapshot)
                                   : std::optional<AppliedTrustedBridge>{};
           result = planner(request);
+          planner_returned = true;
           PublishFeedback(goal_handle, stop_token, feedback_state,
                           Action::Feedback::CERTIFYING,
                           result.expanded_states, result.best_cost);
@@ -789,8 +791,12 @@ struct PurePlanMotionServer::Impl final {
         }
       }
     } catch (...) {
-      result = Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
-                       "PLANNER_ERROR");
+      result = planner_returned
+          ? ReplaceWithFailure(result,
+                               lunar::pure_planning::PlanningStatus::kPlannerError,
+                               "PLANNER_ERROR")
+          : Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                    "PLANNER_ERROR");
     }
 
     if (result.status == lunar::pure_planning::PlanningStatus::kSuccess &&
@@ -805,6 +811,9 @@ struct PurePlanMotionServer::Impl final {
           "REQUEST_CANCELED");
     }
 
+    const auto finalization_fallback = ReplaceWithFailure(
+        result, lunar::pure_planning::PlanningStatus::kPlannerError,
+        "PLANNER_ERROR");
     try {
       ExecuteKnownResult(goal_handle, generation, started, snapshot,
                          std::move(result));
@@ -813,8 +822,7 @@ struct PurePlanMotionServer::Impl final {
       try {
         ExecuteKnownResult(
             goal_handle, generation, started, snapshot,
-            Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
-                    "PLANNER_ERROR"));
+            finalization_fallback);
       } catch (...) {
         SafeLogError("PLANNER_ERROR: fallback finalization failed");
       }

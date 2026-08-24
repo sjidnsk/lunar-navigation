@@ -14,6 +14,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -36,6 +37,37 @@
 #include <tf2_msgs/msg/tf_message.hpp>
 
 #include "lunar_pure_planner_ros/request_diagnostics.hpp"
+
+namespace allocation_probe {
+
+thread_local bool fail_next = false;
+
+}  // namespace allocation_probe
+
+void* operator new(const std::size_t size) {
+  if (allocation_probe::fail_next) {
+    allocation_probe::fail_next = false;
+    throw std::bad_alloc{};
+  }
+  if (void* const memory = std::malloc(size); memory != nullptr) {
+    return memory;
+  }
+  throw std::bad_alloc{};
+}
+
+void* operator new[](const std::size_t size) { return ::operator new(size); }
+
+void operator delete(void* const memory) noexcept { std::free(memory); }
+
+void operator delete[](void* const memory) noexcept { ::operator delete(memory); }
+
+void operator delete(void* const memory, const std::size_t) noexcept {
+  ::operator delete(memory);
+}
+
+void operator delete[](void* const memory, const std::size_t) noexcept {
+  ::operator delete[](memory);
+}
 
 namespace lunar::pure_planner_ros {
 namespace {
@@ -131,6 +163,20 @@ grid_map_msgs::msg::GridMap LocalMap() {
   map.layers = {"occupancy", "semantic_id", "elevation", "roughness"};
   map.data = {Layer(kWidth, kHeight, 0.0F), Layer(kWidth, kHeight, 17.0F),
               Layer(kWidth, kHeight, 0.0F), Layer(kWidth, kHeight, 99.0F)};
+  return map;
+}
+
+grid_map_msgs::msg::GridMap TrustedBridgeLocalMap() {
+  constexpr std::size_t kWidth = 20U;
+  constexpr std::size_t kHeight = 20U;
+  grid_map_msgs::msg::GridMap map;
+  map.header.frame_id = "odom";
+  map.info.resolution = 0.2;
+  map.info.length_x = kWidth * map.info.resolution;
+  map.info.length_y = kHeight * map.info.resolution;
+  map.info.pose.orientation.w = 1.0;
+  map.layers = {"occupancy", "elevation"};
+  map.data = {Layer(kWidth, kHeight, 0.0F), Layer(kWidth, kHeight, 0.0F)};
   return map;
 }
 
@@ -1603,10 +1649,118 @@ TEST(PurePlanMotionServer,
   EXPECT_EQ(result.result->reason_code, "PLANNER_ERROR");
   EXPECT_FALSE(result.result->has_reference);
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
+  ASSERT_EQ(system.DiagnosticCount(), 1U);
   const auto diagnostics = system.Diagnostics().front();
   ExpectCommonDiagnosticKeys(diagnostics);
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "reason_code"),
             "PLANNER_ERROR");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_metrics_available"),
+            "true");
+  EXPECT_EQ(FindDiagnosticValue(
+                diagnostics, "wheel_edge_validation_evaluations"),
+            "9");
+}
+
+TEST(PurePlanMotionServer,
+     PostPlanFeedbackAllocationFailurePreservesWheelMetrics) {
+  RunningSystem system{[](const lunar::pure_planning::PlanningRequest& request) {
+    auto result = Success(request);
+    result.timing.global_elapsed = 2ms;
+    result.timing.local_elapsed = 3ms;
+    result.wheel_metrics = lunar::pure_planning::WheelPlanningMetrics{
+        .edge_validation_evaluations = 9U,
+    };
+    allocation_probe::fail_next = true;
+    return result;
+  }};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("feedback_allocation"));
+  ASSERT_NE(handle, nullptr);
+  const auto result = system.Result(handle);
+
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::ABORTED);
+  ASSERT_NE(result.result, nullptr);
+  EXPECT_EQ(result.result->reason_code, "PLANNER_ERROR");
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
+  ASSERT_EQ(system.DiagnosticCount(), 1U);
+  const auto diagnostics = system.Diagnostics().front();
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "global_elapsed_ms"), "2");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "local_elapsed_ms"), "3");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_metrics_available"),
+            "true");
+  EXPECT_EQ(FindDiagnosticValue(
+                diagnostics, "wheel_edge_validation_evaluations"),
+            "9");
+}
+
+TEST(PurePlanMotionServer,
+     FinalizationFallbackPreservesMovedResultWheelMetrics) {
+  RunningSystem system{[](const lunar::pure_planning::PlanningRequest& request) {
+    request.progress({.phase = lunar::pure_planning::PlannerPhase::kOutput});
+    auto result = Success(request);
+    result.timing.global_elapsed = 2ms;
+    result.timing.local_elapsed = 3ms;
+    result.wheel_metrics = lunar::pure_planning::WheelPlanningMetrics{
+        .edge_validation_evaluations = 9U,
+    };
+    allocation_probe::fail_next = true;
+    return result;
+  }};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("finalization_fallback"));
+  ASSERT_NE(handle, nullptr);
+  const auto result = system.Result(handle);
+
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::ABORTED);
+  ASSERT_NE(result.result, nullptr);
+  EXPECT_EQ(result.result->reason_code, "PLANNER_ERROR");
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
+  ASSERT_EQ(system.DiagnosticCount(), 1U);
+  const auto diagnostics = system.Diagnostics().front();
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "global_elapsed_ms"), "2");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "local_elapsed_ms"), "3");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_metrics_available"),
+            "true");
+  EXPECT_EQ(FindDiagnosticValue(
+                diagnostics, "wheel_edge_validation_evaluations"),
+            "9");
+}
+
+TEST(PurePlanMotionServer,
+     TrustedBridgePrependFailurePreservesWheelMetricsAndTiming) {
+  RunningSystem system{[](const lunar::pure_planning::PlanningRequest& request) {
+    auto result = Success(request);
+    result.reference->data = lunar::pure_planning::HopReference{};
+    result.timing.global_elapsed = 2ms;
+    result.timing.local_elapsed = 3ms;
+    result.wheel_metrics = lunar::pure_planning::WheelPlanningMetrics{
+        .edge_validation_evaluations = 9U,
+    };
+    return result;
+  }};
+  system.PublishInputs(false);
+  for (std::size_t attempt = 0U; attempt < 3U; ++attempt) {
+    system.local_publisher->publish(TrustedBridgeLocalMap());
+    std::this_thread::sleep_for(20ms);
+  }
+  ASSERT_TRUE(system.server->set_parameter(
+      rclcpp::Parameter{"trusted_bridge_once", true}).successful);
+
+  const auto handle = system.SendGoal(
+      system.Goal("trusted_bridge_prepend_failure", Action::Goal::LAVA_TUBE));
+  ASSERT_NE(handle, nullptr);
+  const auto result = system.Result(handle);
+
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::ABORTED);
+  ASSERT_NE(result.result, nullptr);
+  EXPECT_EQ(result.result->reason_code, "PLANNER_ERROR");
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
+  ASSERT_EQ(system.DiagnosticCount(), 1U);
+  const auto diagnostics = system.Diagnostics().front();
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "global_elapsed_ms"), "2");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "local_elapsed_ms"), "3");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_metrics_available"),
             "true");
   EXPECT_EQ(FindDiagnosticValue(
@@ -1977,6 +2131,7 @@ TEST(PurePlanMotionServer,
   EXPECT_GT(core_remaining_ms.load(), 0);
   EXPECT_LE(core_remaining_ms.load(), 8);
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
+  ASSERT_EQ(system.DiagnosticCount(), 1U);
   const auto diagnostics = system.Diagnostics().front();
   ExpectCommonDiagnosticKeys(diagnostics);
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "planning_outcome"),
