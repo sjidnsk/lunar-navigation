@@ -1002,7 +1002,7 @@ class WheelSearchGraph final {
         const bool unsupported = terrain_.free_with_height[index] == 0U;
         const bool complex_terrain =
             unsupported || index >= elevations.size() ||
-            !std::isfinite(elevations[index]) || elevations[index] != 0.0F ||
+            !std::isfinite(elevations[index]) ||
             !std::isfinite(terrain_.slope_rad[index]) ||
             terrain_.slope_rad[index] != 0.0F ||
             !std::isfinite(terrain_.roughness_m[index]) ||

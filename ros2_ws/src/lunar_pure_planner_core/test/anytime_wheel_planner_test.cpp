@@ -230,6 +230,30 @@ struct TerrainFixture final {
   return yaw.value_or(std::numeric_limits<double>::quiet_NaN());
 }
 
+void ExpectSamePlanExceptZOffset(const WheelPlanResult& baseline,
+                                 const WheelPlanResult& shifted,
+                                 const double dz) {
+  ASSERT_EQ(baseline.status, shifted.status);
+  ASSERT_EQ(baseline.reason_code, shifted.reason_code);
+  ASSERT_EQ(baseline.selected_goal_index, shifted.selected_goal_index);
+  ASSERT_EQ(baseline.trajectory.size(), shifted.trajectory.size());
+  EXPECT_DOUBLE_EQ(baseline.cost, shifted.cost);
+  EXPECT_EQ(baseline.cost_components, shifted.cost_components);
+  EXPECT_EQ(baseline.cost_scales, shifted.cost_scales);
+  EXPECT_EQ(baseline.sweep_cell_checks, shifted.sweep_cell_checks);
+  for (std::size_t index = 0U; index < baseline.trajectory.size(); ++index) {
+    EXPECT_DOUBLE_EQ(baseline.trajectory[index].pose.position_m.x,
+                     shifted.trajectory[index].pose.position_m.x);
+    EXPECT_DOUBLE_EQ(baseline.trajectory[index].pose.position_m.y,
+                     shifted.trajectory[index].pose.position_m.y);
+    EXPECT_NEAR(shifted.trajectory[index].pose.position_m.z -
+                    baseline.trajectory[index].pose.position_m.z,
+                dz, 1.0e-9);
+    EXPECT_NEAR(TrajectoryYaw(baseline.trajectory[index]),
+                TrajectoryYaw(shifted.trajectory[index]), 1.0e-12);
+  }
+}
+
 [[nodiscard]] Pose3 ComposePlanar(const Pose3& source,
                                   const Pose3& relative) {
   const double yaw = YawFromQuaternion(source.orientation).value();
@@ -1119,6 +1143,62 @@ TEST(WheelPlanner, IgnoresPointGoalZAndUsesTerrainSupportedEndpointZ) {
     EXPECT_EQ(result->trajectory.back().time_from_start,
               zero_result.trajectory.back().time_from_start);
   }
+}
+
+TEST(WheelPlanner, ConstantElevationOffsetsPreserveCertifiedPlanAndCost) {
+  constexpr std::size_t kWidth = 40U;
+  constexpr std::size_t kHeight = 20U;
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+
+  const auto plan_at_elevation = [&](const double elevation) {
+    const TerrainFixture fixture = MakeTerrain(
+        kWidth, kHeight, std::vector<float>(kWidth * kHeight, 0.0F), 0.2,
+        std::vector<float>(kWidth * kHeight,
+                           static_cast<float>(elevation)));
+    Pose3 start = Pose(1.0, 1.0);
+    start.position_m.z = elevation;
+    return PlanWheel(RequestTo(fixture, capability, 1.8, 1.0, 0.0, start));
+  };
+
+  const WheelPlanResult baseline = plan_at_elevation(0.0);
+  ASSERT_TRUE(baseline.ok()) << baseline.reason_code;
+  for (const double elevation : {10.0, -3.0}) {
+    SCOPED_TRACE(elevation);
+    const WheelPlanResult shifted = plan_at_elevation(elevation);
+    ASSERT_TRUE(shifted.ok()) << shifted.reason_code;
+    ExpectSamePlanExceptZOffset(baseline, shifted, elevation);
+  }
+}
+
+TEST(WheelPlanner, FlatFastPathProofIncludesWheelBilinearSupportHalo) {
+  constexpr std::size_t kWidth = 20U;
+  constexpr std::size_t kHeight = 20U;
+  constexpr std::size_t kSupportHaloCell = 4U * kWidth + 7U;
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 0.9;
+  capability.track_width_m = 0.1;
+  capability.minimum_clearance_m = 0.0;
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+  std::vector<float> elevation(kWidth * kHeight, 0.0F);
+  elevation[kSupportHaloCell] = std::numeric_limits<float>::quiet_NaN();
+  const TerrainFixture fixture = MakeTerrain(
+      kWidth, kHeight, std::vector<float>(kWidth * kHeight, 0.0F), 0.2,
+      std::move(elevation));
+
+  const WheelPlanResult result = PlanWheel(RequestTo(
+      fixture, capability, 1.2, 1.0, 0.0, Pose(1.0, 1.0)));
+
+  EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
+  ASSERT_TRUE(result.wheel_metrics.has_value());
+  EXPECT_GT(result.wheel_metrics
+                ->direct_unknown_or_unsupported_footprint_rejects,
+            0U);
+  EXPECT_EQ(result.wheel_metrics->measured_obstacle_clearance_rejects, 0U);
 }
 
 TEST(WheelPlanner, UsesOrientedRectangleAndNarrowResolutionInTightCorridor) {
