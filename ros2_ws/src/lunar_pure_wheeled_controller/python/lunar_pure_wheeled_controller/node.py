@@ -5,7 +5,8 @@ from __future__ import annotations
 from math import atan2, isfinite, sqrt
 
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry, Path
+from lunar_planning_msgs.msg import MotionReference
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from std_msgs.msg import String
 
@@ -43,12 +44,12 @@ def _yaw(odometry: Odometry) -> float | None:
 
 
 class PureWheeledControllerNode(Node):
-    """Publishes bounded wheel commands for the latest valid path."""
+    """Publishes bounded wheel commands for the latest valid reference."""
 
     def __init__(self) -> None:
         super().__init__("lunar_pure_wheeled_controller")
         defaults = {
-            "path_topic": "/Car/T4/planning/wheeled_path",
+            "reference_topic": "/Car/T4/planning/wheeled_reference",
             "odometry_topic": "/Car/T3/localization/odometry",
             "command_topic": "/Car/T5/Car_Cmd_Vel",
             "execution_cancel_topic": "/Car/T4/execution/cancel",
@@ -96,9 +97,9 @@ class PureWheeledControllerNode(Node):
             Twist, topics["command_topic"], 10
         )
         self.create_subscription(
-            Path,
-            topics["path_topic"],
-            self._on_path,
+            MotionReference,
+            topics["reference_topic"],
+            self._on_reference,
             10,
         )
         self.create_subscription(
@@ -121,8 +122,8 @@ class PureWheeledControllerNode(Node):
             raise ValueError(f"{parameter_name} must be an absolute topic name")
         return value
 
-    def _on_path(self, path: Path) -> None:
-        parsed = parse_path(path)
+    def _on_reference(self, reference: MotionReference) -> None:
+        parsed = parse_reference(reference)
         if parsed.reason is not None:
             self._active = None
             self._trajectory_cursor = 0

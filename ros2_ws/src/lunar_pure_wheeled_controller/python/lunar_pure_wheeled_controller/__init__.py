@@ -1,5 +1,5 @@
 """Pure wheeled-controller reference parsing."""
 
-from .reference import ParsedReference, parse_path
+from .reference import ParsedReference, parse_reference
 
-__all__ = ["ParsedReference", "parse_path"]
+__all__ = ["ParsedReference", "parse_reference"]

@@ -1,9 +1,9 @@
-"""Validation and extraction of a wheeled path."""
+"""Validation and extraction of a wheeled motion reference."""
 
 from dataclasses import dataclass
 import math
 
-from nav_msgs.msg import Path
+from lunar_planning_msgs.msg import MotionReference
 
 
 @dataclass(frozen=True)
@@ -19,8 +19,9 @@ class TrajectorySample:
 
 @dataclass(frozen=True)
 class ParsedReference:
-    """Trackable data extracted from a valid path."""
+    """Trackable data extracted from a valid motion reference."""
 
+    plan_id: str
     path_xy_yaw: tuple[tuple[float, float, float], ...]
     trajectory_samples: tuple[TrajectorySample, ...]
     reason: str | None

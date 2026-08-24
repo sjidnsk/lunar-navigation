@@ -17,15 +17,17 @@ from trajectory_msgs.msg import MultiDOFJointTrajectoryPoint
 from lunar_pure_wheeled_controller.node import PureWheeledControllerNode, _yaw
 
 
-def make_path(*, goal_x: float = 2.0) -> Path:
-    path = Path()
-    path.header.frame_id = "map"
+def make_reference(*, goal_x: float = 2.0) -> MotionReference:
+    reference = MotionReference()
+    reference.plan_id = "wheel-plan"
+    reference.platform_type = MotionReference.WHEELED
+    reference.path_preview = Path()
     for x in (0.0, goal_x):
         pose = PoseStamped()
         pose.pose.position.x = x
         pose.pose.orientation.w = 1.0
-        path.poses.append(pose)
-    return path
+        reference.path_preview.poses.append(pose)
+    return reference
 
 
 def make_trajectory_reference(
@@ -125,11 +127,11 @@ def controller_with_observer():
         rclpy.shutdown()
 
 
-def test_path_and_odometry_publish_forward_twist(controller_with_observer) -> None:
+def test_reference_and_odometry_publish_forward_twist(controller_with_observer) -> None:
     """A tracker mutation that drops positive linear output must fail this test."""
     controller, observer, received, _ = controller_with_observer
 
-    controller._on_path(make_path())
+    controller._on_reference(make_reference())
     controller._on_odometry(make_odometry(x=0.0))
     controller._tick()
     wait_for_twists(controller, observer, received)
@@ -272,7 +274,7 @@ def test_invalid_replacement_publishes_zero_and_clears_active_reference(controll
     ]))
     controller._trajectory_cursor = 1
     controller._on_odometry(make_odometry(x=0.0))
-    controller._on_path(Path())
+    controller._on_reference(MotionReference())
     wait_for_twists(controller, observer, received)
     controller._tick()
     wait_for_twists(controller, observer, received, count=2)
@@ -355,7 +357,7 @@ def test_zero_quaternion_odometry_publishes_zero_and_clears_active_odometry(cont
     invalid_odometry.pose.pose.orientation.z = 0.0
     invalid_odometry.pose.pose.orientation.w = 0.0
 
-    controller._on_path(make_path())
+    controller._on_reference(make_reference())
     controller._on_odometry(invalid_odometry)
     wait_for_twists(controller, observer, received)
     controller._tick()
@@ -374,7 +376,9 @@ def test_default_topic_publishers_drive_bounded_twist() -> None:
     inputs = rclpy.create_node("pure_wheeled_controller_integration_inputs")
     observer = rclpy.create_node("pure_wheeled_controller_integration_observer")
     executor = SingleThreadedExecutor()
-    path_publisher = inputs.create_publisher(Path, "/Car/T4/planning/wheeled_path", 10)
+    reference_publisher = inputs.create_publisher(
+        MotionReference, "/Car/T4/planning/wheeled_reference", 10
+    )
     odometry_publisher = inputs.create_publisher(Odometry, "/Car/T3/localization/odometry", 10)
     received: list[Twist] = []
     observer.create_subscription(Twist, "/Car/T5/Car_Cmd_Vel", received.append, 10)
@@ -383,7 +387,7 @@ def test_default_topic_publishers_drive_bounded_twist() -> None:
     try:
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline and not any(command.linear.x > 0.0 for command in received):
-            path_publisher.publish(make_path())
+            reference_publisher.publish(make_reference())
             odometry_publisher.publish(make_odometry(x=0.0))
             executor.spin_once(timeout_sec=0.01)
 
@@ -438,7 +442,7 @@ def test_node_uses_spec_goal_tolerance_parameter_names() -> None:
 @pytest.mark.parametrize(
     "parameter_override, parameter_name",
     [
-        ("path_topic:=relative_path", "path_topic"),
+        ("reference_topic:=relative_reference", "reference_topic"),
         ("odometry_topic:=relative_odometry", "odometry_topic"),
         ("command_topic:=relative_command", "command_topic"),
         ("execution_cancel_topic:=relative_cancel", "execution_cancel_topic"),
