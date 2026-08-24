@@ -7,6 +7,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -221,31 +222,48 @@ void SetReference(const lunar::pure_planning::MotionReference& source,
 }
 
 void SetFailure(const lunar::pure_planning::PlanningStatus status,
+                const std::string_view source_reason,
                 Action::Result& result) {
   result.execution_directive = Action::Result::NO_SAFE_REFERENCE;
   result.has_reference = false;
+  const auto set_reason = [&result, source_reason](const std::string_view fallback) {
+    result.reason_code = source_reason.empty() ? fallback : source_reason;
+  };
   switch (status) {
     case lunar::pure_planning::PlanningStatus::kInvalidInput:
       result.planning_outcome = Action::Result::INVALID_REQUEST;
-      result.reason_code = "INVALID_INPUT";
+      set_reason("INVALID_INPUT");
       return;
     case lunar::pure_planning::PlanningStatus::kGoalOutsideLocalMap:
       result.planning_outcome = Action::Result::GOAL_INFEASIBLE;
-      result.reason_code = "GOAL_OUTSIDE_LOCAL_MAP";
+      set_reason("GOAL_OUTSIDE_LOCAL_MAP");
       return;
     case lunar::pure_planning::PlanningStatus::kNoPath:
+      if (source_reason == "STALE_PATH_INVALIDATED") {
+        result.planning_outcome = Action::Result::ACTIVE_REFERENCE_INVALIDATED;
+        set_reason("STALE_PATH_INVALIDATED");
+        return;
+      }
+      if (source_reason == "START_NOT_FREE") {
+        result.planning_outcome = Action::Result::INVALID_REQUEST;
+        set_reason("START_NOT_FREE");
+        return;
+      }
       result.planning_outcome = Action::Result::GOAL_INFEASIBLE;
-      result.reason_code = "NO_PATH";
+      set_reason("NO_PATH");
       return;
     case lunar::pure_planning::PlanningStatus::kTimedOut:
       result.planning_outcome = Action::Result::RESOURCE_EXHAUSTED;
-      result.reason_code = "TIMEOUT";
+      set_reason("TIMEOUT");
       return;
     case lunar::pure_planning::PlanningStatus::kCanceled:
       result.planning_outcome = Action::Result::CANCELED;
-      result.reason_code = "REQUEST_CANCELED";
+      set_reason("REQUEST_CANCELED");
       return;
     case lunar::pure_planning::PlanningStatus::kPlannerError:
+      result.planning_outcome = Action::Result::NUMERICAL_FAILURE;
+      set_reason("PLANNER_ERROR");
+      return;
     case lunar::pure_planning::PlanningStatus::kSuccess:
       result.planning_outcome = Action::Result::NUMERICAL_FAILURE;
       result.reason_code = "PLANNER_ERROR";
@@ -334,7 +352,7 @@ Action::Result ConvertResult(const lunar::pure_planning::PlanningResult& source,
     SetReference(*source.reference, result.reference);
     return result;
   }
-  SetFailure(source.status, result);
+  SetFailure(source.status, source.reason_code, result);
   result.reference = lunar_planning_msgs::msg::MotionReference{};
   return result;
 }

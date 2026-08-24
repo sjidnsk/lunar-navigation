@@ -813,13 +813,25 @@ TEST(PurePlanMotionServer,
   const auto wrapped = system.Result(handle);
   EXPECT_EQ(wrapped.code, rclcpp_action::ResultCode::ABORTED);
   EXPECT_FALSE(wrapped.result->has_reference);
+  EXPECT_EQ(wrapped.result->planning_outcome,
+            Action::Result::ACTIVE_REFERENCE_INVALIDATED);
+  EXPECT_EQ(wrapped.result->reason_code, "STALE_PATH_INVALIDATED");
+  EXPECT_EQ(wrapped.result->execution_directive,
+            Action::Result::NO_SAFE_REFERENCE);
+  EXPECT_TRUE(wrapped.result->reference.plan_id.empty());
+  EXPECT_TRUE(wrapped.result->reference.path_preview.poses.empty());
+  EXPECT_TRUE(wrapped.result->reference.trajectory.points.empty());
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
   EXPECT_EQ(FindDiagnosticValue(system.Diagnostics().front(), "reason_code"),
             "STALE_PATH_INVALIDATED");
   ASSERT_TRUE(WaitFor([&] {
-    return system.WheeledPaths().size() == 1U &&
+    return system.WheeledReferences().size() == 1U &&
+           system.WheeledPaths().size() == 1U &&
            system.TimedPaths().size() == 1U;
   }));
+  EXPECT_TRUE(system.WheeledReferences().front().plan_id.empty());
+  EXPECT_TRUE(system.WheeledReferences().front().path_preview.poses.empty());
+  EXPECT_TRUE(system.WheeledReferences().front().trajectory.points.empty());
   EXPECT_TRUE(system.WheeledPaths().front().poses.empty());
   EXPECT_TRUE(system.TimedPaths().front().path.poses.empty());
 }
