@@ -952,6 +952,8 @@ struct ExplorationNode::Runtime final {
   SpeedObservation latest_speed{};
   PendingStationaryAction pending_stationary_action{
       PendingStationaryAction::kNone};
+  std::optional<lunar::pure_exploration::GoalReleaseReason>
+      pending_fresh_batch_release_reason;
   CandidateGenerator candidate_generator;
   InformationGainEvaluator information_gain;
   CandidateRanker ranker;
@@ -1087,6 +1089,75 @@ void ClearExecutionPayloadsLocked(RuntimeT& runtime) {
   runtime.execution_monitor.reset();
 }
 
+enum class PlannerTerminalRebuild {
+  kNone,
+  kAwaitingStop,
+  kBuildNow,
+};
+
+template <typename RuntimeT>
+PlannerTerminalRebuild ResolvePendingRebuildAfterPlannerTerminalLocked(
+    RuntimeT& runtime) {
+  if (!runtime.pending_map_rebuild && !runtime.pending_stuck_rebuild) {
+    return PlannerTerminalRebuild::kNone;
+  }
+  runtime.pending_map_rebuild = false;
+  runtime.pending_stuck_rebuild = false;
+  if (runtime.pending_stationary_action !=
+      RuntimeT::PendingStationaryAction::kNone) {
+    return PlannerTerminalRebuild::kAwaitingStop;
+  }
+  ClearExecutionPayloadsLocked(runtime);
+  runtime.active_cycle.reset();
+  runtime.active_raster.reset();
+  ++runtime.epoch;
+  ++runtime.build_generation;
+  return PlannerTerminalRebuild::kBuildNow;
+}
+
+struct MapInvalidationDisposition final {
+  bool cancel_planner{false};
+  bool build_now{false};
+  std::optional<std::string> execution_cancel;
+};
+
+template <typename RuntimeT>
+MapInvalidationDisposition InvalidateActiveGoalForMapLocked(
+    RuntimeT& runtime) {
+  MapInvalidationDisposition result;
+  runtime.execution_replan_retry_pending = false;
+  if (runtime.parameters.stop_before_planning) {
+    if (runtime.state_machine.state() == ExplorationState::kExecuting) {
+      static_cast<void>(runtime.state_machine.BeginReplanning(
+          lunar::pure_exploration::ReplanCause::kRollingSegment));
+    }
+    runtime.pending_fresh_batch_release_reason =
+        lunar::pure_exploration::GoalReleaseReason::kCandidateInvalid;
+    result.execution_cancel = RequestStationaryActionLocked(
+        runtime, RuntimeT::PendingStationaryAction::kBuildFreshBatch);
+    if (runtime.planner_in_flight) {
+      runtime.pending_map_rebuild = true;
+      result.cancel_planner = true;
+    }
+    return result;
+  }
+
+  result.execution_cancel = ExecutionCancelLocked(runtime);
+  runtime.state_machine.ReleaseGoal(
+      lunar::pure_exploration::GoalReleaseReason::kCandidateInvalid);
+  ClearExecutionPayloadsLocked(runtime);
+  if (runtime.planner_in_flight) {
+    runtime.pending_map_rebuild = true;
+    result.cancel_planner = true;
+  } else {
+    runtime.active_cycle.reset();
+    runtime.active_raster.reset();
+    ++runtime.epoch;
+    result.build_now = true;
+  }
+  return result;
+}
+
 template <typename RuntimeT>
 void FailLocked(RuntimeT& runtime, std::string reason) {
   if (const auto execution_cancel = ExecutionCancelLocked(runtime)) {
@@ -1113,6 +1184,7 @@ void FailLocked(RuntimeT& runtime, std::string reason) {
   runtime.stationary_gate.Cancel();
   runtime.pending_stationary_action =
       RuntimeT::PendingStationaryAction::kNone;
+  runtime.pending_fresh_batch_release_reason.reset();
   ClearExecutionPayloadsLocked(runtime);
   runtime.build_in_flight = false;
   ++runtime.epoch;
@@ -1874,6 +1946,7 @@ void ApplyStartLocked(RuntimeT& runtime,
   runtime.stationary_gate.Cancel();
   runtime.pending_stationary_action =
       RuntimeT::PendingStationaryAction::kNone;
+  runtime.pending_fresh_batch_release_reason.reset();
   runtime.state_machine.Start(start.task_id);
   ++runtime.task_generation;
   ResetActiveElapsedLocked(runtime);
@@ -1928,6 +2001,7 @@ bool ApplyPendingControlLocked(RuntimeT& runtime) {
   runtime.stationary_gate.Cancel();
   runtime.pending_stationary_action =
       RuntimeT::PendingStationaryAction::kNone;
+  runtime.pending_fresh_batch_release_reason.reset();
   runtime.current_candidate.reset();
   runtime.current_batch.clear();
   runtime.current_batch_cursor = 0U;
@@ -2002,21 +2076,17 @@ void HandleEvaluation(const std::weak_ptr<RuntimeT>& weak_runtime,
           runtime->state_machine.active_goal().has_value();
     } else if (runtime->pending_control != RuntimeT::PendingControl::kNone) {
       build = ApplyPendingControlLocked(*runtime);
-    } else if (runtime->pending_map_rebuild ||
-               runtime->pending_stuck_rebuild) {
-      runtime->pending_map_rebuild = false;
-      runtime->pending_stuck_rebuild = false;
-      runtime->active_reference.reset();
-      runtime->active_executable_polyline.clear();
-      runtime->active_executable_endpoint.reset();
-      runtime->execution_monitor.reset();
-      runtime->active_cycle.reset();
-      runtime->active_raster.reset();
-      ++runtime->epoch;
-      ++runtime->build_generation;
-      build = true;
+    } else if (const auto pending_rebuild =
+                   ResolvePendingRebuildAfterPlannerTerminalLocked(*runtime);
+               pending_rebuild != PlannerTerminalRebuild::kNone) {
+      build = pending_rebuild == PlannerTerminalRebuild::kBuildNow;
     } else if (runtime->active_cycle != cycle || runtime->epoch != epoch) {
-      return;
+      if (runtime->state_machine.state() ==
+              ExplorationState::kSelectingFrontier &&
+          PlanningIsAdmittedLocked(*runtime)) {
+        pump = static_cast<bool>(runtime->active_cycle);
+        build = !runtime->active_cycle && !runtime->build_in_flight;
+      }
     } else {
       const auto associated =
           cycle->batch()->CandidateIndexForRequest(evaluation.request_id);
@@ -2099,7 +2169,7 @@ void HandleEvaluation(const std::weak_ptr<RuntimeT>& weak_runtime,
   if (build) {
     QueueBuild(runtime);
   } else if (start_execution_replan) {
-    StartExecutionReplan(runtime);
+    StartExecutionReplan(runtime, true);
   } else if (pump) {
     Pump(runtime);
   }
@@ -2644,6 +2714,7 @@ void StartExecutionReplan(const std::shared_ptr<RuntimeT>& runtime,
           std::optional<MotionReference> publish_reference;
           bool rebuild = false;
           bool build = false;
+          bool pump = false;
           {
             std::scoped_lock lock{locked->mutex};
             if (locked->teardown) {
@@ -2652,24 +2723,21 @@ void StartExecutionReplan(const std::shared_ptr<RuntimeT>& runtime,
             locked->planner_in_flight = false;
             if (locked->pending_control != RuntimeT::PendingControl::kNone) {
               build = ApplyPendingControlLocked(*locked);
-            } else if (locked->pending_map_rebuild ||
-                       locked->pending_stuck_rebuild) {
-              locked->pending_map_rebuild = false;
-              locked->pending_stuck_rebuild = false;
-              locked->active_reference.reset();
-              locked->active_executable_polyline.clear();
-              locked->active_executable_endpoint.reset();
-              locked->execution_monitor.reset();
-              locked->active_cycle.reset();
-              locked->active_raster.reset();
-              ++locked->epoch;
-              ++locked->build_generation;
-              rebuild = true;
+            } else if (const auto pending_rebuild =
+                           ResolvePendingRebuildAfterPlannerTerminalLocked(
+                               *locked);
+                       pending_rebuild != PlannerTerminalRebuild::kNone) {
+              rebuild = pending_rebuild == PlannerTerminalRebuild::kBuildNow;
             } else if (locked->active_cycle != cycle || locked->epoch != epoch ||
                        locked->state_machine.state() !=
                            ExplorationState::kReplanning ||
                        !locked->state_machine.active_goal()) {
-              return;
+              if (locked->state_machine.state() ==
+                      ExplorationState::kSelectingFrontier &&
+                  PlanningIsAdmittedLocked(*locked)) {
+                pump = static_cast<bool>(locked->active_cycle);
+                build = !locked->active_cycle && !locked->build_in_flight;
+              }
             } else if (evaluation.kind == PlannerEvaluationKind::kReachable) {
               if (!evaluation.path_length_m || !evaluation.reference) {
                 FailLocked(*locked, "PLANNER_REACHABLE_CONTRACT_ERROR");
@@ -2757,6 +2825,8 @@ void StartExecutionReplan(const std::shared_ptr<RuntimeT>& runtime,
             QueueBuild(locked);
           } else if (build) {
             QueueBuild(locked);
+          } else if (pump) {
+            Pump(locked);
           }
         });
   } catch (const std::exception&) {
@@ -2853,7 +2923,9 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
       runtime->latest_map = std::move(content);
       runtime->latest_map_message = message;
       ++runtime->map_generation;
-      if (runtime->state_machine.active_goal() && runtime->active_cycle &&
+      if (runtime->pending_stationary_action !=
+              RuntimeT::PendingStationaryAction::kBuildFreshBatch &&
+          runtime->state_machine.active_goal() && runtime->active_cycle &&
           !runtime->active_cycle->batch()->GlobalMapContentEquals(message)) {
         const auto selected = std::ranges::find_if(
             runtime->active_cycle->batch()->candidates(),
@@ -2921,23 +2993,11 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
                 cancel = locked->planner_in_flight;
                 FailLocked(*locked, std::move(error));
               } else if (invalid) {
-                execution_cancel = ExecutionCancelLocked(*locked);
-                locked->execution_replan_retry_pending = false;
-                locked->state_machine.ReleaseGoal(
-                    lunar::pure_exploration::GoalReleaseReason::kCandidateInvalid);
-                locked->active_reference.reset();
-                locked->active_executable_polyline.clear();
-                locked->active_executable_endpoint.reset();
-                locked->execution_monitor.reset();
-                if (locked->planner_in_flight) {
-                  locked->pending_map_rebuild = true;
-                  cancel = true;
-                } else {
-                  locked->active_cycle.reset();
-                  locked->active_raster.reset();
-                  ++locked->epoch;
-                  needs_build = true;
-                }
+                auto disposition =
+                    InvalidateActiveGoalForMapLocked(*locked);
+                cancel = disposition.cancel_planner;
+                needs_build = disposition.build_now;
+                execution_cancel = std::move(disposition.execution_cancel);
               }
             }
             if (execution_cancel) {
@@ -2971,23 +3031,10 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
         return;
       }
       if (invalidates_active_goal) {
-        execution_cancel = ExecutionCancelLocked(*runtime);
-        runtime->execution_replan_retry_pending = false;
-        runtime->state_machine.ReleaseGoal(
-            lunar::pure_exploration::GoalReleaseReason::kCandidateInvalid);
-        runtime->active_reference.reset();
-        runtime->active_executable_polyline.clear();
-        runtime->active_executable_endpoint.reset();
-        runtime->execution_monitor.reset();
-        if (runtime->planner_in_flight) {
-          runtime->pending_map_rebuild = true;
-          cancel = true;
-        } else {
-          runtime->active_cycle.reset();
-          runtime->active_raster.reset();
-          ++runtime->epoch;
-          needs_build = true;
-        }
+        auto disposition = InvalidateActiveGoalForMapLocked(*runtime);
+        cancel = disposition.cancel_planner;
+        needs_build = disposition.build_now;
+        execution_cancel = std::move(disposition.execution_cancel);
       } else {
         needs_build = runtime->state_machine.state() ==
               ExplorationState::kWaitingForInput ||
@@ -3101,10 +3148,20 @@ void HandleOdometry(const std::weak_ptr<RuntimeT>& weak_runtime,
         if (update.confirmed) {
           confirmed_action =
               ConsumeConfirmedStationaryActionLocked(*runtime);
+          if (confirmed_action ==
+                  RuntimeT::PendingStationaryAction::kBuildFreshBatch &&
+              runtime->pending_fresh_batch_release_reason &&
+              runtime->state_machine.active_goal()) {
+            runtime->state_machine.ReleaseGoal(
+                *runtime->pending_fresh_batch_release_reason);
+          }
+          runtime->pending_fresh_batch_release_reason.reset();
           ClearExecutionPayloadsLocked(*runtime);
           ++runtime->epoch;
           if (confirmed_action ==
               RuntimeT::PendingStationaryAction::kBuildFreshBatch) {
+            runtime->pending_map_rebuild = false;
+            runtime->pending_stuck_rebuild = false;
             runtime->active_cycle.reset();
             runtime->active_raster.reset();
             runtime->current_batch.clear();
@@ -3520,7 +3577,9 @@ void ExplorationNode::PollExecution() {
       bool stuck = !rolling && runtime->execution_monitor->UpdateProgress(
           now, position, false);
       if (rolling || stuck) {
-        execution_cancel = ExecutionCancelLocked(*runtime);
+        if (!rolling) {
+          execution_cancel = ExecutionCancelLocked(*runtime);
+        }
         std::optional<std::size_t> committed_candidate;
         if (!rolling && runtime->active_cycle) {
           const auto& candidates = runtime->active_cycle->batch()->candidates();
@@ -3537,7 +3596,28 @@ void ExplorationNode::PollExecution() {
         const auto result = runtime->state_machine.BeginReplanning(
             rolling ? lunar::pure_exploration::ReplanCause::kRollingSegment
                     : lunar::pure_exploration::ReplanCause::kStuckRecovery);
-        if (result == lunar::pure_exploration::ReplanResult::kExhausted) {
+        if (rolling) {
+          runtime->pending_fresh_batch_release_reason =
+              lunar::pure_exploration::GoalReleaseReason::
+                  kLocalSegmentCompleted;
+          if (runtime->parameters.stop_before_planning) {
+            execution_cancel = RequestStationaryActionLocked(
+                *runtime,
+                Runtime::PendingStationaryAction::kBuildFreshBatch);
+          } else {
+            execution_cancel = ExecutionCancelLocked(*runtime);
+            runtime->state_machine.ReleaseGoal(
+                *runtime->pending_fresh_batch_release_reason);
+            runtime->pending_fresh_batch_release_reason.reset();
+            ClearExecutionPayloadsLocked(*runtime);
+            runtime->active_cycle.reset();
+            runtime->active_raster.reset();
+            ++runtime->epoch;
+            ++runtime->build_generation;
+            rebuild = true;
+          }
+        } else if (result ==
+                   lunar::pure_exploration::ReplanResult::kExhausted) {
           bool failure_memory_failed = false;
           try {
             if (!runtime->active_cycle || !runtime->active_raster) {
@@ -3556,27 +3636,50 @@ void ExplorationNode::PollExecution() {
             failure_memory_failed = true;
           }
           if (!failure_memory_failed) {
-            runtime->active_reference.reset();
-            runtime->active_executable_polyline.clear();
-            runtime->active_executable_endpoint.reset();
-            runtime->execution_monitor.reset();
-            if (runtime->planner_in_flight) {
-              runtime->pending_stuck_rebuild = true;
-              cancel_planner = true;
+            if (runtime->parameters.stop_before_planning) {
+              const auto stop_cancel = RequestStationaryActionLocked(
+                  *runtime,
+                  Runtime::PendingStationaryAction::kBuildFreshBatch);
+              if (stop_cancel) {
+                execution_cancel = std::move(stop_cancel);
+              }
+              if (runtime->planner_in_flight) {
+                runtime->pending_stuck_rebuild = true;
+                cancel_planner = true;
+              }
             } else {
-              runtime->active_cycle.reset();
-              runtime->active_raster.reset();
-              ++runtime->epoch;
-              ++runtime->build_generation;
-              rebuild = true;
+              ClearExecutionPayloadsLocked(*runtime);
+              if (runtime->planner_in_flight) {
+                runtime->pending_stuck_rebuild = true;
+                cancel_planner = true;
+              } else {
+                runtime->active_cycle.reset();
+                runtime->active_raster.reset();
+                ++runtime->epoch;
+                ++runtime->build_generation;
+                rebuild = true;
+              }
             }
           }
         } else {
-          if (runtime->planner_in_flight) {
-            runtime->execution_replan_waiting_terminal = true;
-            cancel_planner = true;
+          if (runtime->parameters.stop_before_planning) {
+            const auto stop_cancel = RequestStationaryActionLocked(
+                *runtime,
+                Runtime::PendingStationaryAction::kReplanActiveGoal);
+            if (stop_cancel) {
+              execution_cancel = std::move(stop_cancel);
+            }
+            if (runtime->planner_in_flight) {
+              runtime->execution_replan_waiting_terminal = true;
+              cancel_planner = true;
+            }
           } else {
-            start_replan = true;
+            if (runtime->planner_in_flight) {
+              runtime->execution_replan_waiting_terminal = true;
+              cancel_planner = true;
+            } else {
+              start_replan = true;
+            }
           }
         }
       }
