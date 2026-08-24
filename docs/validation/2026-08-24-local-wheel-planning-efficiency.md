@@ -92,14 +92,50 @@ colcon test-result \
   --test-result-base "$LUNAR_WHEEL_FINAL_ROOT/test-build" --verbose
 ```
 
+Colcon delegated to these two CTest processes. The working directories and
+commands below are copied from the package `command.log` files:
+
+```bash
+(
+  cd /home/kai/CodexDownloads/lunar_navigation/\
+local-wheel-efficiency-evidence/final/test-build/lunar_pure_planner_core
+  /usr/bin/ctest -C RelWithDebInfo -D ExperimentalTest \
+    --no-compress-output -V --force-new-ctest-process
+)
+(
+  cd /home/kai/CodexDownloads/lunar_navigation/\
+local-wheel-efficiency-evidence/final/test-build/lunar_pure_planner_ros
+  /usr/bin/ctest -C RelWithDebInfo -D ExperimentalTest \
+    --no-compress-output -V --force-new-ctest-process
+)
+```
+
+The exact test working directory is `final/test-build`, not `final/build`.
+The latter is an external operator-preflight symlink to `prod-build` and is
+not test evidence. The core invocation returned 0 and the ROS invocation
+returned 8 for its one failing target. Their command and output evidence is:
+
+- `final/ctest-log/test_2026-08-24_17-01-15/lunar_pure_planner_core/command.log`;
+- `final/ctest-log/test_2026-08-24_17-01-15/lunar_pure_planner_core/stdout.log`;
+- `final/ctest-log/test_2026-08-24_17-01-15/lunar_pure_planner_ros/command.log`;
+- `final/ctest-log/test_2026-08-24_17-01-15/lunar_pure_planner_ros/stdout.log`.
+
 The `colcon test` evidence is retained at
 `final/ctest-log/test_2026-08-24_17-01-15/logger_all.log`, with package output
 under the sibling `lunar_pure_planner_core/stdout.log` and
-`lunar_pure_planner_ros/stdout.log`. The verbose result command reports 431
-tests and two failure records because the same one ROS failure is
-represented both by the 12-target CTest aggregate XML and by its GoogleTest
-XML; this is 19/19 core targets and 11/12 ROS targets, not two distinct test
-failures.
+`lunar_pure_planner_ros/stdout.log`. No standalone stdout capture was saved for
+`colcon test-result --verbose`; its 431-test, two-failure summary was rebuilt
+on demand from the existing XML, not read from a claimed log file. The XML
+evidence consists of the 16 core and 12 ROS files below the two package
+`test_results` directories plus these CTest aggregates:
+
+- `final/test-build/lunar_pure_planner_core/Testing/20260824-0901/Test.xml`;
+- `final/test-build/lunar_pure_planner_ros/Testing/20260824-0902/Test.xml`.
+
+The same ROS failure is represented both by the ROS aggregate above and by
+`final/test-build/lunar_pure_planner_ros/test_results/lunar_pure_planner_ros/pure_plan_motion_server_test.gtest.xml`.
+That duplicate representation explains the two failure records; the target
+classification remains 19/19 core and 11/12 ROS, not two distinct failures.
 
 The 97/97 wheel result was the complete wheel target executed by that core
 CTest run, not a second inferred standalone result. Its logged subprocess was:
@@ -170,8 +206,10 @@ colcon --log-base "$LUNAR_WHEEL_FINAL_ROOT/prod-log" build \
 
 It failed while configuring `lunar_pure_exploration_sim` because
 `nlohmann_jsonConfig.cmake` was unavailable. That failure is retained at
-`final/prod-log/build_2026-08-24_17-06-02/logger_all.log`; `prod-log` is not
-success evidence.
+`final/prod-log/build_2026-08-24_17-06-02/logger_all.log`. The package-level
+file that contains the quoted `CMake Error` and missing-config text is
+`final/prod-log/build_2026-08-24_17-06-02/lunar_pure_exploration_sim/stdout_stderr.log`;
+`prod-log` is not success evidence.
 
 The successful resume used an external deb-extracted prefix and the separate
 `prod-log-resume` log root, without adding a dependency or artifact to the
