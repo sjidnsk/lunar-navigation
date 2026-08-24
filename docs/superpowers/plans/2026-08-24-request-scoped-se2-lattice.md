@@ -103,7 +103,12 @@ Update the old `RegistersTheSpecialStartKeyWithoutCreatingASecondNode` regressio
 
 In the 300 m detour test, retain the behavioral requirement that the path leaves the wall's direct `y=[70,130] m` band. Use a `>30.0 m` deviation from `y=100 m`; do not require the historical `>31.0 m` route shape because every accepted edge already undergoes the full oriented-footprint sweep validation.
 
-- [ ] **Step 4: Verify GREEN and run the stable wheel regression subset**
+- [x] **Step 4: Verify GREEN and run the stable wheel regression subset**
+
+  Fresh Task 8 evidence at `e47c8f5`: the translated-start regression passed
+  in the focused 3/3 SE(2) run, and the complete wheel target passed 97/97.
+  See `docs/validation/2026-08-24-local-wheel-planning-efficiency.md` for the
+  separate closed-loop acceptance boundary.
 
 Run the new test, then run all wheel tests except the known baseline timeout:
 
@@ -261,13 +266,21 @@ Construct `lattice_frame_` from `request.start.pose`. In `Quantize()`, transform
 
 Do not change primitive application, `PrimitiveReachesTarget()`, edge evaluation or goal connectors.
 
-- [ ] **Step 4: Verify GREEN and run all stable wheel tests**
+- [x] **Step 4: Verify GREEN and run all stable wheel tests**
+
+  Fresh Task 8 evidence at `e47c8f5`: the arbitrary-SE(2), rigid-transform
+  and translated-start regressions passed 3/3; the complete wheel target
+  passed 97/97.
 
 Run both new tests, the translated-start test and then every wheel test except the known baseline timeout. After adding the three regressions this stable subset contains 54 tests.
 
 Expected: all selected tests pass with no warnings or errors.
 
-- [ ] **Step 5: Run the full wheel target and classify any difference from baseline**
+- [x] **Step 5: Run the full wheel target and classify any difference from baseline**
+
+  The fresh Jazzy full wheel target passed 97/97, including the current 750 m
+  regression. This unit result does not promote the failed same-seed smoke or
+  the unrun full RViz/300 m acceptance.
 
 Run the complete 55-test target. Expected baseline boundary: only the same 750m segment-21 timeout may remain. Any other failure blocks progress and must be investigated before continuing.
 
