@@ -4562,7 +4562,7 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
   }
   WheelSearchGraph graph{request, std::move(goals)};
   std::size_t ara_search_invocations = 0U;
-  const auto decorate = [&](WheelPlanResult result) {
+  const auto decorate = [&](WheelPlanResult result) noexcept {
     result.ara_search_invocations = ara_search_invocations;
     result.edge_validation_cache_hits = graph.validation_cache_hits();
     result.quantization_alias_states = graph.quantization_alias_states();
@@ -4647,6 +4647,7 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
     };
     return result;
   };
+  try {
   if (!graph.ValidateStart()) {
     const LocalPlanMetrics metrics{
         .edge_validation_evaluations = graph.validation_count(),
@@ -4801,6 +4802,14 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
       .cost_components = cost_components,
       .cost = candidate.cost,
   });
+  } catch (...) {
+    return decorate(Failure(
+        LocalPlanStatus::kPlannerError, "PLANNER_ERROR",
+        LocalPlanMetrics{
+            .edge_validation_evaluations = graph.validation_count(),
+            .used_narrow_resolution = graph.used_narrow_resolution(),
+        }));
+  }
 } catch (...) {
   return Failure(LocalPlanStatus::kPlannerError, "PLANNER_ERROR");
 }

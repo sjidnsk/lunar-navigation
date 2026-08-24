@@ -214,6 +214,16 @@ struct RuntimeParameters final {
   return {.status = status, .reason_code = std::move(reason_code)};
 }
 
+[[nodiscard]] lunar::pure_planning::PlanningResult ReplaceWithFailure(
+    const lunar::pure_planning::PlanningResult& prior,
+    const lunar::pure_planning::PlanningStatus status,
+    std::string reason_code) {
+  auto replacement = Failure(status, std::move(reason_code));
+  replacement.timing = prior.timing;
+  replacement.wheel_metrics = prior.wheel_metrics;
+  return replacement;
+}
+
 [[nodiscard]] lunar::pure_planning::PlanningResult LocalFailure(
     const lunar::pure_planning::LocalPlanStatus status,
     std::string reason_code) {
@@ -772,8 +782,9 @@ struct PurePlanMotionServer::Impl final {
           if (bridge.has_value() &&
               result.status == lunar::pure_planning::PlanningStatus::kSuccess &&
               !PrependTrustedBridge(result, *bridge)) {
-            result = Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
-                             "PLANNER_ERROR");
+            result = ReplaceWithFailure(
+                result, lunar::pure_planning::PlanningStatus::kPlannerError,
+                "PLANNER_ERROR");
           }
         }
       }
@@ -784,18 +795,14 @@ struct PurePlanMotionServer::Impl final {
 
     if (result.status == lunar::pure_planning::PlanningStatus::kSuccess &&
         !result.reference.has_value()) {
-      const auto timing = result.timing;
-      result = Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
-                       "PLANNER_ERROR");
-      result.timing = timing;
+      result = ReplaceWithFailure(
+          result, lunar::pure_planning::PlanningStatus::kPlannerError,
+          "PLANNER_ERROR");
     }
     if (stop_token.stop_requested()) {
-      const auto timing = result.timing;
-      const auto wheel_metrics = result.wheel_metrics;
-      result = Failure(lunar::pure_planning::PlanningStatus::kCanceled,
-                       "REQUEST_CANCELED");
-      result.timing = timing;
-      result.wheel_metrics = wheel_metrics;
+      result = ReplaceWithFailure(
+          result, lunar::pure_planning::PlanningStatus::kCanceled,
+          "REQUEST_CANCELED");
     }
 
     try {
@@ -1442,15 +1449,14 @@ struct PurePlanMotionServer::Impl final {
       const bool normal_output_already_published = false) {
     const auto request_goal = goal_handle->get_goal();
     auto normal = MakeOutputs(std::move(result), request_goal, snapshot);
-    auto canceled_result = Failure(
-        lunar::pure_planning::PlanningStatus::kCanceled, "REQUEST_CANCELED");
-    canceled_result.timing = normal.result.timing;
-    canceled_result.wheel_metrics = normal.result.wheel_metrics;
+    auto canceled_result = ReplaceWithFailure(
+        normal.result, lunar::pure_planning::PlanningStatus::kCanceled,
+        "REQUEST_CANCELED");
     auto canceled = MakeOutputs(std::move(canceled_result), request_goal,
                                 snapshot);
-    auto timeout_result = Failure(
-        lunar::pure_planning::PlanningStatus::kTimedOut, "TIMEOUT");
-    timeout_result.timing = normal.result.timing;
+    auto timeout_result = ReplaceWithFailure(
+        normal.result, lunar::pure_planning::PlanningStatus::kTimedOut,
+        "TIMEOUT");
     auto timeout = MakeOutputs(std::move(timeout_result), request_goal,
                                snapshot);
     const bool rolling_surface = UseRollingSurface(request_goal);

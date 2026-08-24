@@ -12,6 +12,7 @@
 #include <optional>
 #include <iostream>
 #include <random>
+#include <stdexcept>
 #include <stop_token>
 #include <vector>
 
@@ -3247,6 +3248,33 @@ TEST(WheelPlanner, GraphConstructedFailurePreservesCompletedMetrics) {
   EXPECT_GT(result.wheel_metrics->edge_validation_evaluations, 0U);
   EXPECT_EQ(result.wheel_metrics->expanded_states,
             result.metrics.expanded_states);
+}
+
+TEST(WheelPlanner, PostGraphExceptionPreservesCompletedMetrics) {
+  const TerrainFixture fixture = FlatTerrain(20U, 20U);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.4),
+  };
+  WheelPlanRequest request = RequestTo(
+      fixture, capability, 1.8, 2.0, 0.0, Pose(1.0, 2.0));
+  const auto deadline = SteadyClock::time_point{} + 1s;
+  std::size_t clock_calls = 0U;
+  request.control.deadline = deadline;
+  request.control.now = [&] {
+    ++clock_calls;
+    if (clock_calls < 100U) {
+      return deadline - 1ms;
+    }
+    throw std::runtime_error{"post-graph clock failure"};
+  };
+
+  const WheelPlanResult result = PlanWheel(request);
+
+  EXPECT_EQ(result.status, LocalPlanStatus::kPlannerError);
+  EXPECT_EQ(result.reason_code, "PLANNER_ERROR");
+  ASSERT_TRUE(result.wheel_metrics.has_value());
+  EXPECT_GT(result.wheel_metrics->edge_validation_evaluations, 0U);
 }
 
 TEST(WheelPlanner, PreGraphInputFailureHasNoWheelMetrics) {

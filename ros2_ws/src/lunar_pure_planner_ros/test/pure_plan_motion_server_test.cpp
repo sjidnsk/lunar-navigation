@@ -1586,7 +1586,10 @@ TEST(PurePlanMotionServer,
     return lunar::pure_planning::PlanningResult{
         .status = lunar::pure_planning::PlanningStatus::kSuccess,
         .reason_code = "PLAN_FOUND",
-        .reference = std::nullopt};
+        .reference = std::nullopt,
+        .wheel_metrics = lunar::pure_planning::WheelPlanningMetrics{
+            .edge_validation_evaluations = 9U,
+        }};
   }};
   system.PublishInputs();
 
@@ -1604,6 +1607,11 @@ TEST(PurePlanMotionServer,
   ExpectCommonDiagnosticKeys(diagnostics);
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "reason_code"),
             "PLANNER_ERROR");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_metrics_available"),
+            "true");
+  EXPECT_EQ(FindDiagnosticValue(
+                diagnostics, "wheel_edge_validation_evaluations"),
+            "9");
 }
 
 TEST(PurePlanMotionServer, OuterWallTimeOverridesOnlyTotalTiming) {
@@ -1931,6 +1939,9 @@ TEST(PurePlanMotionServer,
   RunningSystem system{
       [&](const lunar::pure_planning::PlanningRequest& request) {
         auto result = Success(request);
+        result.wheel_metrics = lunar::pure_planning::WheelPlanningMetrics{
+            .edge_validation_evaluations = 9U,
+        };
         result.timing.global_elapsed = 2ms;
         result.timing.global_call_count = 1U;
         result.timing.local_elapsed = 3ms;
@@ -1975,6 +1986,11 @@ TEST(PurePlanMotionServer,
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "global_call_count"), "1");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "local_elapsed_ms"), "3");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "local_call_count"), "1");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_metrics_available"),
+            "true");
+  EXPECT_EQ(FindDiagnosticValue(
+                diagnostics, "wheel_edge_validation_evaluations"),
+            "9");
   const double total_ms =
       std::stod(FindDiagnosticValue(diagnostics, "total_elapsed_ms"));
   EXPECT_GE(total_ms, 3000.0);
