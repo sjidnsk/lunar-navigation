@@ -696,7 +696,8 @@ std::size_t CandidateGenerator::maximum_search_step(double resolution_m) const {
 
 std::vector<CandidateView> CandidateGenerator::Generate(
     const TaskRaster& raster,
-    std::span<const FrontierCluster> frontiers) const {
+    std::span<const FrontierCluster> frontiers,
+    const bool require_global_goal_cell_feasible) const {
   const double resolution = raster.geometry().resolution;
   const double spacing = minimum_spacing_m(resolution);
   const double spacing_grid = spacing / resolution;
@@ -736,6 +737,7 @@ std::vector<CandidateView> CandidateGenerator::Generate(
   std::size_t position_probes = 0U;
   std::size_t candidate_views = 0U;
   std::size_t collision_work = 0U;
+  std::size_t global_goal_cell_work = 0U;
 
   for (const std::size_t original_index : order) {
     const FrontierCluster& frontier = frontiers[original_index];
@@ -801,6 +803,10 @@ std::vector<CandidateView> CandidateGenerator::Generate(
           if (!CollisionFree(raster, platform_, pose,
                              limits_.maximum_collision_work_units,
                              collision_work)) {
+            continue;
+          }
+          if (require_global_goal_cell_feasible &&
+              !GlobalGoalCellFeasible(raster, pose, global_goal_cell_work)) {
             continue;
           }
           if (candidate_views == limits_.maximum_candidate_views) {

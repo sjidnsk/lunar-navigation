@@ -384,6 +384,13 @@ TEST(CandidateGeneratorTest,
                        views.front().pose.yaw};
   EXPECT_TRUE(generator.GlobalGoalCellFeasible(raster, advanced,
                                                collision_work));
+
+  const auto filtered = generator.Generate(
+      raster, std::span<const FrontierCluster>(&frontier, 1U), true);
+  ASSERT_EQ(filtered.size(), 5U);
+  EXPECT_DOUBLE_EQ(filtered.front().pose.x, advanced.x);
+  EXPECT_TRUE(generator.GlobalGoalCellFeasible(raster, filtered.front().pose,
+                                               collision_work));
 }
 
 TEST(CandidateGeneratorTest, CanonicalOrderingPreservesOriginalFrontierIndex) {

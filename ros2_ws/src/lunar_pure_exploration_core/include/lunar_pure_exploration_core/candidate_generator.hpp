@@ -54,7 +54,8 @@ class CandidateGenerator {
                      CandidateParameters parameters, Limits limits);
   std::vector<CandidateView> Generate(
       const TaskRaster& raster,
-      std::span<const FrontierCluster> frontiers) const;
+      std::span<const FrontierCluster> frontiers,
+      bool require_global_goal_cell_feasible = false) const;
 
   double platform_length_m() const;
   double platform_width_m() const;

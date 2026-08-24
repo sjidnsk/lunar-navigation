@@ -1539,15 +1539,19 @@ void QueueBuild(const std::shared_ptr<RuntimeT>& runtime) {
               detection.has_reachable_free_start;
           if (product.has_reachable_free_start) {
             auto frontiers = std::move(detection.clusters);
-            auto candidates =
+            const bool controlled_candidates =
                 locked->parameters.pipeline_seams &&
-                        locked->parameters.pipeline_seams->generate_candidates
-                    ? locked->parameters.pipeline_seams->generate_candidates(
-                          *product.raster, frontiers)
-                    : locked->candidate_generator.Generate(*product.raster,
-                                                            frontiers);
+                locked->parameters.pipeline_seams->generate_candidates;
+            auto candidates = controlled_candidates
+                                  ? locked->parameters.pipeline_seams
+                                        ->generate_candidates(*product.raster,
+                                                              frontiers)
+                                  : locked->candidate_generator.Generate(
+                                        *product.raster, frontiers,
+                                        locked->parameters.filter_global_goal_cell);
 
-            if (locked->parameters.filter_global_goal_cell) {
+            if (locked->parameters.filter_global_goal_cell &&
+                controlled_candidates) {
               std::size_t global_goal_cell_work = 0U;
               std::erase_if(candidates, [&](const auto& candidate) {
                 return !locked->candidate_generator.GlobalGoalCellFeasible(
