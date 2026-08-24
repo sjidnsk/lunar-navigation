@@ -541,6 +541,17 @@ ExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
       node.declare_parameter<double>("planner_goal_response_timeout_s", 1.0);
   const double planner_timeout_s =
       node.declare_parameter<double>("planner_result_timeout_s", 3.5);
+  const bool stop_before_planning =
+      node.declare_parameter<bool>("stop_before_planning", true);
+  const double stationary_linear_speed_mps =
+      node.declare_parameter<double>("stationary_linear_speed_mps", 0.01);
+  const double stationary_angular_speed_radps =
+      node.declare_parameter<double>("stationary_angular_speed_radps", 0.02);
+  const std::int64_t stationary_confirmation_samples =
+      node.declare_parameter<std::int64_t>(
+          "stationary_confirmation_samples", 3);
+  const double stop_wait_diagnostic_s =
+      node.declare_parameter<double>("stop_wait_diagnostic_s", 5.0);
 
   if (threshold < 0 || threshold > 100 || maximum_task_raster_cells <= 0 ||
       yaw_offsets_deg.size() != 5U || maximum_replans < 0 ||
@@ -553,7 +564,16 @@ ExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
       !std::isfinite(yaw_tolerance_deg) || yaw_tolerance_deg <= 0.0 ||
       !std::isfinite(planner_goal_response_timeout_s) ||
       planner_goal_response_timeout_s <= 0.0 ||
-      !std::isfinite(planner_timeout_s) || planner_timeout_s <= 0.0) {
+      !std::isfinite(planner_timeout_s) || planner_timeout_s <= 0.0 ||
+      !std::isfinite(stationary_linear_speed_mps) ||
+      stationary_linear_speed_mps < 0.0 ||
+      !std::isfinite(stationary_angular_speed_radps) ||
+      stationary_angular_speed_radps < 0.0 ||
+      stationary_confirmation_samples <= 0 ||
+      static_cast<std::uint64_t>(stationary_confirmation_samples) >
+          std::numeric_limits<std::uint32_t>::max() ||
+      !std::isfinite(stop_wait_diagnostic_s) ||
+      stop_wait_diagnostic_s <= 0.0) {
     throw std::invalid_argument{"invalid exploration parameters"};
   }
   lunar::pure_exploration::CandidateParameters candidate_parameters;
@@ -596,6 +616,15 @@ ExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
           static_cast<std::uint8_t>(maximum_candidate_retryable_retries),
       .goal_yaw_tolerance_rad =
           yaw_tolerance_deg * std::numbers::pi / 180.0,
+      .stop_before_planning = stop_before_planning,
+      .stationary_gate =
+          {.maximum_linear_speed_mps = stationary_linear_speed_mps,
+           .maximum_angular_speed_radps = stationary_angular_speed_radps,
+           .confirmation_samples = static_cast<std::uint32_t>(
+               stationary_confirmation_samples),
+           .diagnostic_period = std::chrono::duration_cast<
+               std::chrono::steady_clock::duration>(
+               std::chrono::duration<double>{stop_wait_diagnostic_s})},
       .planner_goal_response_timeout = std::chrono::duration_cast<
           std::chrono::steady_clock::duration>(
           std::chrono::duration<double>{planner_goal_response_timeout_s}),
@@ -816,6 +845,11 @@ std::span<const FrozenReachableCandidate> FrozenPlanningCycle::reachable()
 
 struct ExplorationNode::Runtime final {
   enum class PendingControl { kNone, kPause, kCancel, kReplacementStart };
+  enum class PendingStationaryAction : std::uint8_t {
+    kNone,
+    kBuildFreshBatch,
+    kReplanActiveGoal,
+  };
 
   struct PendingStart {
     std::string task_id;
@@ -860,6 +894,7 @@ struct ExplorationNode::Runtime final {
 
   Runtime(rclcpp::Node& node, ExplorationNodeParameters input)
       : parameters(std::move(input)),
+        stationary_gate(parameters.stationary_gate),
         candidate_generator(parameters.platform,
                             parameters.candidate_parameters,
                             parameters.candidate_limits),
@@ -913,6 +948,10 @@ struct ExplorationNode::Runtime final {
   std::mutex mutex;
   bool teardown{false};
   ExplorationNodeParameters parameters;
+  StationaryPlanningGate stationary_gate;
+  SpeedObservation latest_speed{};
+  PendingStationaryAction pending_stationary_action{
+      PendingStationaryAction::kNone};
   CandidateGenerator candidate_generator;
   InformationGainEvaluator information_gain;
   CandidateRanker ranker;
@@ -996,6 +1035,59 @@ template <typename RuntimeT>
 std::optional<std::string> ExecutionCancelLocked(RuntimeT& runtime);
 
 template <typename RuntimeT>
+std::chrono::steady_clock::time_point SteadyNowLocked(RuntimeT& runtime);
+
+template <typename RuntimeT>
+bool PlanningIsAdmittedLocked(const RuntimeT& runtime) {
+  return runtime.pending_stationary_action ==
+         RuntimeT::PendingStationaryAction::kNone;
+}
+
+template <typename RuntimeT>
+std::string StatusReasonLocked(const RuntimeT& runtime) {
+  return runtime.pending_stationary_action !=
+                 RuntimeT::PendingStationaryAction::kNone
+             ? "WAITING_FOR_STOP"
+             : runtime.state_machine.reason_code();
+}
+
+template <typename RuntimeT>
+std::optional<std::string> RequestStationaryActionLocked(
+    RuntimeT& runtime,
+    const typename RuntimeT::PendingStationaryAction action) {
+  if (!runtime.parameters.stop_before_planning) {
+    runtime.stationary_gate.Cancel();
+    runtime.pending_stationary_action =
+        RuntimeT::PendingStationaryAction::kNone;
+    return std::nullopt;
+  }
+  if (runtime.pending_stationary_action == action) {
+    return std::nullopt;
+  }
+  runtime.pending_stationary_action = action;
+  runtime.stationary_gate.Begin(SteadyNowLocked(runtime),
+                                runtime.latest_speed);
+  return ExecutionCancelLocked(runtime);
+}
+
+template <typename RuntimeT>
+typename RuntimeT::PendingStationaryAction
+ConsumeConfirmedStationaryActionLocked(RuntimeT& runtime) {
+  const auto action = runtime.pending_stationary_action;
+  runtime.pending_stationary_action =
+      RuntimeT::PendingStationaryAction::kNone;
+  return action;
+}
+
+template <typename RuntimeT>
+void ClearExecutionPayloadsLocked(RuntimeT& runtime) {
+  runtime.active_reference.reset();
+  runtime.active_executable_polyline.clear();
+  runtime.active_executable_endpoint.reset();
+  runtime.execution_monitor.reset();
+}
+
+template <typename RuntimeT>
 void FailLocked(RuntimeT& runtime, std::string reason) {
   if (const auto execution_cancel = ExecutionCancelLocked(runtime)) {
     runtime.deferred_execution_cancel = *execution_cancel;
@@ -1018,10 +1110,10 @@ void FailLocked(RuntimeT& runtime, std::string reason) {
   runtime.execution_replan_retry_pending = false;
   runtime.pending_map_rebuild = false;
   runtime.pending_stuck_rebuild = false;
-  runtime.active_reference.reset();
-  runtime.active_executable_polyline.clear();
-  runtime.active_executable_endpoint.reset();
-  runtime.execution_monitor.reset();
+  runtime.stationary_gate.Cancel();
+  runtime.pending_stationary_action =
+      RuntimeT::PendingStationaryAction::kNone;
+  ClearExecutionPayloadsLocked(runtime);
   runtime.build_in_flight = false;
   ++runtime.epoch;
   ++runtime.build_generation;
@@ -1198,7 +1290,7 @@ Status MakeStatusLocked(RuntimeT& runtime) {
   status.header.frame_id = "map";
   status.task_id = runtime.state_machine.task_id();
   status.state = StatusState(runtime.state_machine.state());
-  status.reason_code = runtime.state_machine.reason_code();
+  status.reason_code = StatusReasonLocked(runtime);
   status.polygon_area_m2 = runtime.coverage.polygon_area_m2;
   status.task_raster_area_m2 = runtime.coverage.task_raster_area_m2;
   status.known_free_area_m2 = runtime.coverage.known_free_area_m2;
@@ -1424,7 +1516,8 @@ template <typename RuntimeT>
 void Pump(const std::shared_ptr<RuntimeT>& runtime);
 
 template <typename RuntimeT>
-void StartExecutionReplan(const std::shared_ptr<RuntimeT>& runtime);
+void StartExecutionReplan(const std::shared_ptr<RuntimeT>& runtime,
+                          bool stationary_confirmed = false);
 
 template <typename RuntimeT>
 std::optional<std::string> ExecutionCancelLocked(RuntimeT& runtime);
@@ -1466,8 +1559,10 @@ bool CandidateRemainsValidOnLatestMap(
     const lunar::pure_exploration::CandidateView& candidate);
 
 template <typename RuntimeT>
-void QueueBuild(const std::shared_ptr<RuntimeT>& runtime) {
+void QueueBuild(const std::shared_ptr<RuntimeT>& runtime,
+                const bool stationary_confirmed = false) {
   std::optional<FrozenBuildSnapshot> snapshot;
+  std::optional<std::string> execution_cancel;
   std::shared_ptr<SerializedWorkQueue> queue;
   bool publish_status = false;
   {
@@ -1481,7 +1576,16 @@ void QueueBuild(const std::shared_ptr<RuntimeT>& runtime) {
             ExplorationState::kSelectingFrontier) {
       return;
     }
-    if (WaitingForInputsLocked(*runtime)) {
+    if (!stationary_confirmed &&
+        runtime->parameters.stop_before_planning &&
+        PlanningIsAdmittedLocked(*runtime)) {
+      execution_cancel = RequestStationaryActionLocked(
+          *runtime, RuntimeT::PendingStationaryAction::kBuildFreshBatch);
+      publish_status = true;
+    }
+    if (!PlanningIsAdmittedLocked(*runtime)) {
+      publish_status = true;
+    } else if (WaitingForInputsLocked(*runtime)) {
       runtime->state_machine.WaitForInput();
       publish_status = true;
     } else if (!runtime->active_cycle && !runtime->build_in_flight) {
@@ -1508,6 +1612,11 @@ void QueueBuild(const std::shared_ptr<RuntimeT>& runtime) {
       }
       publish_status = true;
     }
+  }
+  if (execution_cancel) {
+    std_msgs::msg::String message;
+    message.data = *execution_cancel;
+    runtime->cancel_publisher->publish(std::move(message));
   }
   if (publish_status) {
     PublishStatus(runtime);
@@ -1757,6 +1866,12 @@ void QueueBuild(const std::shared_ptr<RuntimeT>& runtime) {
 template <typename RuntimeT>
 void ApplyStartLocked(RuntimeT& runtime,
                       typename RuntimeT::PendingStart start) {
+  const bool retain_execution_until_stationary =
+      runtime.parameters.stop_before_planning &&
+      runtime.active_reference.has_value();
+  runtime.stationary_gate.Cancel();
+  runtime.pending_stationary_action =
+      RuntimeT::PendingStationaryAction::kNone;
   runtime.state_machine.Start(start.task_id);
   ++runtime.task_generation;
   ResetActiveElapsedLocked(runtime);
@@ -1790,10 +1905,9 @@ void ApplyStartLocked(RuntimeT& runtime,
   runtime.candidate_count = 0U;
   runtime.coverage = {};
   runtime.completed_goal_positions.clear();
-  runtime.active_reference.reset();
-  runtime.active_executable_polyline.clear();
-  runtime.active_executable_endpoint.reset();
-  runtime.execution_monitor.reset();
+  if (!retain_execution_until_stationary) {
+    ClearExecutionPayloadsLocked(runtime);
+  }
   ++runtime.epoch;
   ++runtime.build_generation;
 }
@@ -1801,8 +1915,17 @@ void ApplyStartLocked(RuntimeT& runtime,
 template <typename RuntimeT>
 bool ApplyPendingControlLocked(RuntimeT& runtime) {
   const auto pending = runtime.pending_control;
+  const bool retain_execution_until_stationary =
+      pending == RuntimeT::PendingControl::kReplacementStart &&
+      runtime.parameters.stop_before_planning &&
+      runtime.active_reference.has_value();
   runtime.pending_control = RuntimeT::PendingControl::kNone;
-  runtime.pending_execution_cancel_sent = false;
+  if (!retain_execution_until_stationary) {
+    runtime.pending_execution_cancel_sent = false;
+  }
+  runtime.stationary_gate.Cancel();
+  runtime.pending_stationary_action =
+      RuntimeT::PendingStationaryAction::kNone;
   runtime.current_candidate.reset();
   runtime.current_batch.clear();
   runtime.current_batch_cursor = 0U;
@@ -1816,10 +1939,9 @@ bool ApplyPendingControlLocked(RuntimeT& runtime) {
   runtime.execution_replan_retry_pending = false;
   runtime.pending_map_rebuild = false;
   runtime.pending_stuck_rebuild = false;
-  runtime.active_reference.reset();
-  runtime.active_executable_polyline.clear();
-  runtime.active_executable_endpoint.reset();
-  runtime.execution_monitor.reset();
+  if (!retain_execution_until_stationary) {
+    ClearExecutionPayloadsLocked(runtime);
+  }
   ++runtime.epoch;
   ++runtime.build_generation;
   switch (pending) {
@@ -2291,6 +2413,7 @@ void Pump(const std::shared_ptr<RuntimeT>& runtime) {
     if (runtime->teardown || runtime->planner_in_flight ||
         runtime->final_rank_in_flight ||
         runtime->pending_control != RuntimeT::PendingControl::kNone ||
+        !PlanningIsAdmittedLocked(*runtime) ||
         !runtime->active_cycle ||
         runtime->state_machine.state() != ExplorationState::kSelectingFrontier) {
       return;
@@ -2424,7 +2547,8 @@ void Pump(const std::shared_ptr<RuntimeT>& runtime) {
 }
 
 template <typename RuntimeT>
-void StartExecutionReplan(const std::shared_ptr<RuntimeT>& runtime) {
+void StartExecutionReplan(const std::shared_ptr<RuntimeT>& runtime,
+                          const bool stationary_confirmed) {
   struct Call {
     std::string task_id;
     std::string request_id;
@@ -2435,6 +2559,7 @@ void StartExecutionReplan(const std::shared_ptr<RuntimeT>& runtime) {
     std::uint64_t epoch;
   };
   std::optional<Call> call;
+  std::optional<std::string> execution_cancel;
   {
     std::scoped_lock lock{runtime->mutex};
     if (runtime->teardown || runtime->planner_in_flight ||
@@ -2442,42 +2567,62 @@ void StartExecutionReplan(const std::shared_ptr<RuntimeT>& runtime) {
         !runtime->active_cycle || !runtime->state_machine.active_goal()) {
       return;
     }
-    const auto& candidates = runtime->active_cycle->batch()->candidates();
-    const auto selected = std::ranges::find_if(
-        candidates, [&](const auto& candidate) {
-          return candidate.key == runtime->state_machine.active_goal()->candidate_key();
-        });
-    if (selected == candidates.end() ||
-        runtime->request_sequence == std::numeric_limits<std::uint64_t>::max()) {
-      FailLocked(*runtime, "EXECUTION_REPLAN_REQUEST_ERROR");
-      return;
+    if (!stationary_confirmed &&
+        runtime->parameters.stop_before_planning &&
+        PlanningIsAdmittedLocked(*runtime)) {
+      execution_cancel = RequestStationaryActionLocked(
+          *runtime, RuntimeT::PendingStationaryAction::kReplanActiveGoal);
     }
-    const std::string request_id = PlannerClient::MakeRequestId(
-        runtime->state_machine.task_id(), runtime->request_sequence++);
-    const auto bucket = runtime->state_machine.reason_code() == "STUCK_RETRY"
-                            ? RuntimeT::PlannerTimingBucket::kStuck
-                            : RuntimeT::PlannerTimingBucket::kRolling;
-    try {
-      runtime->active_cycle->batch()->RegisterRequest(
-          request_id, static_cast<std::size_t>(selected - candidates.begin()));
-      RegisterPlannerTimingRequestLocked(*runtime, request_id, bucket);
-    } catch (const std::exception&) {
-      FailLocked(*runtime, "EXECUTION_REPLAN_REQUEST_ERROR");
-      return;
+    if (!PlanningIsAdmittedLocked(*runtime)) {
+      // The odometry handler dispatches the replan after confirmation.
+    } else {
+      const auto& candidates = runtime->active_cycle->batch()->candidates();
+      const auto selected = std::ranges::find_if(
+          candidates, [&](const auto& candidate) {
+            return candidate.key ==
+                   runtime->state_machine.active_goal()->candidate_key();
+          });
+      if (selected == candidates.end() ||
+          runtime->request_sequence ==
+              std::numeric_limits<std::uint64_t>::max()) {
+        FailLocked(*runtime, "EXECUTION_REPLAN_REQUEST_ERROR");
+        return;
+      }
+      const std::string request_id = PlannerClient::MakeRequestId(
+          runtime->state_machine.task_id(), runtime->request_sequence++);
+      const auto bucket = runtime->state_machine.reason_code() == "STUCK_RETRY"
+                              ? RuntimeT::PlannerTimingBucket::kStuck
+                              : RuntimeT::PlannerTimingBucket::kRolling;
+      try {
+        runtime->active_cycle->batch()->RegisterRequest(
+            request_id,
+            static_cast<std::size_t>(selected - candidates.begin()));
+        RegisterPlannerTimingRequestLocked(*runtime, request_id, bucket);
+      } catch (const std::exception&) {
+        FailLocked(*runtime, "EXECUTION_REPLAN_REQUEST_ERROR");
+        return;
+      }
+      runtime->planner_in_flight = true;
+      runtime->execution_replan_request_id = request_id;
+      runtime->execution_replan_bucket = bucket;
+      runtime->execution_replan_retry_pending = false;
+      call.emplace(
+          Call{.task_id = runtime->state_machine.task_id(),
+               .request_id = request_id,
+               .cycle = runtime->active_cycle,
+               .candidate = *selected,
+               .position_tolerance_m = std::max(
+                   0.5 * runtime->active_cycle->frozen_resolution_m(),
+                   0.25 * runtime->candidate_generator.platform_width_m()),
+               .yaw_tolerance_rad =
+                   runtime->parameters.goal_yaw_tolerance_rad,
+               .epoch = runtime->epoch});
     }
-    runtime->planner_in_flight = true;
-    runtime->execution_replan_request_id = request_id;
-    runtime->execution_replan_bucket = bucket;
-    runtime->execution_replan_retry_pending = false;
-    call.emplace(Call{.task_id = runtime->state_machine.task_id(),
-                      .request_id = request_id,
-                      .cycle = runtime->active_cycle,
-                      .candidate = *selected,
-                      .position_tolerance_m = std::max(
-                          0.5 * runtime->active_cycle->frozen_resolution_m(),
-                          0.25 * runtime->candidate_generator.platform_width_m()),
-                      .yaw_tolerance_rad = runtime->parameters.goal_yaw_tolerance_rad,
-                      .epoch = runtime->epoch});
+  }
+  if (execution_cancel) {
+    std_msgs::msg::String message;
+    message.data = *execution_cancel;
+    runtime->cancel_publisher->publish(std::move(message));
   }
   if (!call) {
     PublishStatus(runtime);
@@ -2923,6 +3068,85 @@ void HandlePoseInput(const std::weak_ptr<RuntimeT>& weak_runtime,
 }
 
 template <typename RuntimeT>
+void HandleOdometry(const std::weak_ptr<RuntimeT>& weak_runtime,
+                    const nav_msgs::msg::Odometry& message) {
+  const auto runtime = weak_runtime.lock();
+  if (!runtime) {
+    return;
+  }
+  const auto& linear = message.twist.twist.linear;
+  const auto& angular = message.twist.twist.angular;
+  const SpeedObservation speed{
+      .linear_speed_mps = std::hypot(linear.x, linear.y, linear.z),
+      .angular_speed_radps = std::hypot(angular.x, angular.y, angular.z),
+  };
+  auto confirmed_action = RuntimeT::PendingStationaryAction::kNone;
+  bool cancel_planner = false;
+  bool needs_build = false;
+  try {
+    {
+      std::scoped_lock lock{runtime->mutex};
+      if (runtime->teardown) {
+        return;
+      }
+      runtime->pose_resolver.UpdateOdometry(message);
+      runtime->latest_speed = speed;
+      ++runtime->pose_generation;
+      if (runtime->pending_stationary_action !=
+          RuntimeT::PendingStationaryAction::kNone) {
+        const auto update = runtime->stationary_gate.Observe(
+            SteadyNowLocked(*runtime), speed);
+        if (update.confirmed) {
+          confirmed_action =
+              ConsumeConfirmedStationaryActionLocked(*runtime);
+          ClearExecutionPayloadsLocked(*runtime);
+          ++runtime->epoch;
+          if (confirmed_action ==
+              RuntimeT::PendingStationaryAction::kBuildFreshBatch) {
+            runtime->active_cycle.reset();
+            runtime->active_raster.reset();
+            runtime->current_batch.clear();
+            runtime->current_batch_cursor = 0U;
+            runtime->current_candidate.reset();
+            runtime->final_rank_in_flight = false;
+            ++runtime->build_generation;
+          }
+        }
+      } else {
+        needs_build =
+            runtime->state_machine.state() ==
+                ExplorationState::kWaitingForInput ||
+            (runtime->state_machine.state() ==
+                 ExplorationState::kSelectingFrontier &&
+             !runtime->active_cycle);
+      }
+    }
+    if (confirmed_action ==
+        RuntimeT::PendingStationaryAction::kBuildFreshBatch) {
+      QueueBuild(runtime, true);
+    } else if (confirmed_action ==
+               RuntimeT::PendingStationaryAction::kReplanActiveGoal) {
+      StartExecutionReplan(runtime, true);
+    } else if (needs_build) {
+      QueueBuild(runtime);
+    } else {
+      Pump(runtime);
+      PublishStatus(runtime);
+    }
+  } catch (const std::exception&) {
+    {
+      std::scoped_lock lock{runtime->mutex};
+      cancel_planner = runtime->planner_in_flight;
+      FailLocked(*runtime, "INVALID_POSE_INPUT");
+    }
+    if (cancel_planner) {
+      runtime->planner_client->CancelActive();
+    }
+    PublishStatus(runtime);
+  }
+}
+
+template <typename RuntimeT>
 std::optional<std::string> ExecutionCancelLocked(RuntimeT& runtime) {
   if (runtime.pending_execution_cancel_sent || !runtime.active_reference ||
       runtime.active_reference->plan_id.empty()) {
@@ -2992,7 +3216,9 @@ void HandleTask(const std::weak_ptr<RuntimeT>& weak_runtime,
           } else {
             execution_cancel = ExecutionCancelLocked(*runtime);
             ApplyStartLocked(*runtime, std::move(*start));
-            runtime->pending_execution_cancel_sent = false;
+            if (!runtime->parameters.stop_before_planning) {
+              runtime->pending_execution_cancel_sent = false;
+            }
             build = true;
           }
           break;
@@ -3007,6 +3233,9 @@ void HandleTask(const std::weak_ptr<RuntimeT>& weak_runtime,
             }
           } else {
             execution_cancel = ExecutionCancelLocked(*runtime);
+            runtime->stationary_gate.Cancel();
+            runtime->pending_stationary_action =
+                RuntimeT::PendingStationaryAction::kNone;
             FreezeActiveElapsedLocked(*runtime);
             runtime->state_machine.Pause();
             runtime->active_cycle.reset();
@@ -3022,6 +3251,9 @@ void HandleTask(const std::weak_ptr<RuntimeT>& weak_runtime,
           }
           break;
         case Task::RESUME:
+          runtime->stationary_gate.Cancel();
+          runtime->pending_stationary_action =
+              RuntimeT::PendingStationaryAction::kNone;
           runtime->state_machine.Resume();
           runtime->active_elapsed_start = SteadyNowLocked(*runtime);
           runtime->active_cycle.reset();
@@ -3040,6 +3272,9 @@ void HandleTask(const std::weak_ptr<RuntimeT>& weak_runtime,
             execution_cancel = ExecutionCancelLocked(*runtime);
           } else {
             execution_cancel = ExecutionCancelLocked(*runtime);
+            runtime->stationary_gate.Cancel();
+            runtime->pending_stationary_action =
+                RuntimeT::PendingStationaryAction::kNone;
             FreezeActiveElapsedLocked(*runtime);
             runtime->state_machine.Cancel();
             runtime->active_elapsed_s = 0.0;
@@ -3113,10 +3348,7 @@ void ExplorationNode::Initialize(ExplorationNodeParameters parameters) {
   odometry_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
       runtime->parameters.odometry_topic, rclcpp::QoS{1}.reliable(),
       [weak_runtime](nav_msgs::msg::Odometry::SharedPtr message) {
-        HandlePoseInput(weak_runtime, [message = std::move(message)](
-                                          PoseResolver& resolver) {
-          resolver.UpdateOdometry(*message);
-        });
+        HandleOdometry(weak_runtime, *message);
       });
   tf_subscription_ = create_subscription<tf2_msgs::msg::TFMessage>(
       runtime->parameters.tf_topic, rclcpp::QoS{10}.reliable(),
@@ -3214,6 +3446,7 @@ void ExplorationNode::PollExecution() {
     retry_replan =
         runtime->execution_replan_retry_pending &&
         !runtime->planner_in_flight &&
+        PlanningIsAdmittedLocked(*runtime) &&
         runtime->pending_control == Runtime::PendingControl::kNone &&
         !runtime->execution_replan_waiting_terminal &&
         !runtime->pending_map_rebuild && !runtime->pending_stuck_rebuild &&
@@ -3223,6 +3456,7 @@ void ExplorationNode::PollExecution() {
         runtime->candidate_retry_deadline &&
         SteadyNowLocked(*runtime) >= *runtime->candidate_retry_deadline &&
         !runtime->planner_in_flight &&
+        PlanningIsAdmittedLocked(*runtime) &&
         runtime->pending_control == Runtime::PendingControl::kNone &&
         runtime->state_machine.state() == ExplorationState::kSelectingFrontier &&
         runtime->active_cycle && runtime->current_candidate;

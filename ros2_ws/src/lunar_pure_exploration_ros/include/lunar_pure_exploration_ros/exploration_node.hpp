@@ -32,6 +32,8 @@
 #include <tf2_msgs/msg/tf_message.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
+#include "lunar_pure_exploration_ros/stationary_planning_gate.hpp"
+
 namespace lunar::pure_exploration_ros {
 
 struct ExecutionMonitorParameters {
@@ -189,6 +191,10 @@ struct ExplorationNodeParameters {
   // inflation would reject. Unknown cells remain individually infeasible.
   // Unit seams may disable this production filter.
   bool filter_global_goal_cell{true};
+  // False is retained only as an isolated regression-diagnosis path. The
+  // production configuration enables stationary admission.
+  bool stop_before_planning{false};
+  StationaryGateParameters stationary_gate{};
   std::chrono::steady_clock::duration planner_goal_response_timeout{
       std::chrono::seconds{1}};
   std::chrono::steady_clock::duration planner_result_timeout;

@@ -155,6 +155,7 @@ def _compose(context, *, rviz_config: str):
                 "platform_selector": "wheel",
                 "platform_config": str(planner_share / "config" / "wheel.yaml"),
                 "use_sim_time": False,
+                "stop_before_planning": True,
                 "global_map_topic": INTERFACES["global_map"],
                 "odometry_topic": INTERFACES["odometry"],
                 "tf_topic": INTERFACES["tf"],

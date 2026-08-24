@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <future>
 #include <limits>
 #include <memory>
@@ -469,6 +470,11 @@ class FakePlannerServer final {
     mode_ = mode;
   }
 
+  void SetFixedPlanId(std::string plan_id) {
+    std::scoped_lock lock{mutex_};
+    fixed_plan_id_ = std::move(plan_id);
+  }
+
   bool HasHandle() const {
     std::scoped_lock lock{mutex_};
     return !handles_.empty();
@@ -506,7 +512,11 @@ class FakePlannerServer final {
       result->has_reference = true;
       result->reference.header.frame_id = "map";
       result->reference.header.stamp.sec = 31;
-      result->reference.plan_id = "plan:" + request_id;
+      {
+        std::scoped_lock lock{mutex_};
+        result->reference.plan_id = fixed_plan_id_.value_or(
+            "plan:" + request_id);
+      }
       result->reference.platform_type = result->reference.WHEELED;
       result->reference.input_time.sec = 29;
       result->reference.path_preview.header.frame_id = "map";
@@ -578,6 +588,7 @@ class FakePlannerServer final {
   std::vector<Action::Goal> goals_;
   std::unordered_map<std::string, std::shared_ptr<ServerGoalHandle>> handles_;
   std::set<std::string> canceled_request_ids_;
+  std::optional<std::string> fixed_plan_id_;
   std::size_t outstanding_{0U};
   std::size_t maximum_outstanding_{0U};
   std::size_t cancel_count_{0U};
@@ -607,6 +618,11 @@ ExplorationNodeParameters TestParameters(const std::string& prefix) {
       .maximum_replans = 2U,
       .goal_yaw_tolerance_rad = std::numbers::pi / 16.0,
       .filter_global_goal_cell = false,
+      .stationary_gate =
+          {.maximum_linear_speed_mps = 0.01,
+           .maximum_angular_speed_radps = 0.02,
+           .confirmation_samples = 3U,
+           .diagnostic_period = 5s},
       .planner_result_timeout = 2s,
       .global_map_topic = prefix + "/global_map",
       .odometry_topic = prefix + "/odometry",
@@ -695,6 +711,72 @@ class ExplorationNodeTest : public ::testing::Test {
         server_node_, parameters_.planner_action, mode, executable_points,
         preview_poses);
     explorer_ = std::make_shared<ExplorationNode>(parameters_);
+    executor_ = std::make_unique<rclcpp::executors::MultiThreadedExecutor>(
+        rclcpp::ExecutorOptions{}, 4U);
+    executor_->add_node(server_node_);
+    executor_->add_node(io_node_);
+    executor_->add_node(explorer_);
+    spin_thread_ = std::jthread([this] { executor_->spin(); });
+    auto probe = rclcpp_action::create_client<Action>(
+        io_node_, parameters_.planner_action);
+    ASSERT_TRUE(probe->wait_for_action_server(3s));
+    ASSERT_TRUE(WaitFor([this] {
+      return task_publisher_->get_subscription_count() == 1U &&
+             map_publisher_->get_subscription_count() == 1U &&
+             odometry_publisher_->get_subscription_count() == 1U &&
+             tf_publisher_->get_subscription_count() == 1U;
+    }));
+  }
+
+  rclcpp::NodeOptions StopGateParameterOptions(
+      const double linear_threshold = 0.01,
+      const double angular_threshold = 0.02,
+      const std::int64_t confirmation_samples = 3,
+      const double diagnostic_period_s = 5.0) const {
+    const auto platform_config =
+        (std::filesystem::path{__FILE__}.parent_path() /
+         "../../../../config/wheel.yaml")
+            .lexically_normal()
+            .string();
+    rclcpp::NodeOptions options;
+    options.parameter_overrides({
+        rclcpp::Parameter("platform_selector", "wheel"),
+        rclcpp::Parameter("platform_config", platform_config),
+        rclcpp::Parameter("maximum_position_probes", 4096),
+        rclcpp::Parameter("maximum_candidate_views", 64),
+        rclcpp::Parameter("maximum_collision_work_units", 100000),
+        rclcpp::Parameter("maximum_visibility_work_units", 100000),
+        rclcpp::Parameter("maximum_failure_entries", 8),
+        rclcpp::Parameter("maximum_failure_patch_cells_per_entry", 256),
+        rclcpp::Parameter("maximum_failure_total_patch_cells", 1024),
+        rclcpp::Parameter("maximum_path_preview_poses", 64),
+        rclcpp::Parameter("maximum_executable_path_points", 64),
+        rclcpp::Parameter("stop_before_planning", true),
+        rclcpp::Parameter("stationary_linear_speed_mps", linear_threshold),
+        rclcpp::Parameter("stationary_angular_speed_radps", angular_threshold),
+        rclcpp::Parameter("stationary_confirmation_samples",
+                          confirmation_samples),
+        rclcpp::Parameter("stop_wait_diagnostic_s", diagnostic_period_s),
+        rclcpp::Parameter("global_map_topic", parameters_.global_map_topic),
+        rclcpp::Parameter("odometry_topic", parameters_.odometry_topic),
+        rclcpp::Parameter("tf_topic", parameters_.tf_topic),
+        rclcpp::Parameter("task_topic", parameters_.task_topic),
+        rclcpp::Parameter("planner_action", parameters_.planner_action),
+        rclcpp::Parameter("planner_diagnostics_topic",
+                          parameters_.planner_diagnostics_topic),
+        rclcpp::Parameter("motion_reference_topic",
+                          parameters_.motion_reference_topic),
+        rclcpp::Parameter("execution_cancel_topic",
+                          parameters_.execution_cancel_topic),
+    });
+    return options;
+  }
+
+  void StartWithStopGateParameters(FakePlannerServer::Mode mode) {
+    server_ = std::make_unique<FakePlannerServer>(
+        server_node_, parameters_.planner_action, mode);
+    explorer_ =
+        std::make_shared<ExplorationNode>(StopGateParameterOptions());
     executor_ = std::make_unique<rclcpp::executors::MultiThreadedExecutor>(
         rclcpp::ExecutorOptions{}, 4U);
     executor_->add_node(server_node_);
@@ -925,6 +1007,169 @@ TEST_F(ExplorationNodeTest, MissingOdometryWaitsIndefinitely) {
 
 TEST_F(ExplorationNodeTest, MissingMapToOdomTransformWaitsIndefinitely) {
   ExpectWaitingWithMissingInput(2);
+}
+
+TEST_F(ExplorationNodeTest,
+       StopGateWaitsForThreeConsecutiveStationaryOdometrySamples) {
+  StartWithStopGateParameters(FakePlannerServer::Mode::kDelayed);
+  auto moving = Odometry();
+  moving.twist.twist.linear.x = 0.2;
+  PublishAllInputs(StartTask("stationary-three"), GlobalMap(), moving);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.0;
+  }));
+  std::this_thread::sleep_for(100ms);
+  EXPECT_TRUE(server_->Goals().empty());
+
+  odometry_publisher_->publish(Odometry(2.1, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.1;
+  }));
+  EXPECT_TRUE(server_->Goals().empty());
+  odometry_publisher_->publish(Odometry(2.2, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.2;
+  }));
+  EXPECT_TRUE(server_->Goals().empty());
+
+  odometry_publisher_->publish(Odometry(2.3, 2.0));
+  ASSERT_TRUE(WaitFor([this] { return !server_->Goals().empty(); }));
+}
+
+TEST_F(ExplorationNodeTest,
+       MovingOdometryResetsConsecutiveStationaryAdmissionSamples) {
+  StartWithStopGateParameters(FakePlannerServer::Mode::kDelayed);
+  auto moving = Odometry();
+  moving.twist.twist.linear.x = 0.2;
+  PublishAllInputs(StartTask("stationary-reset"), GlobalMap(), moving);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.0;
+  }));
+  std::this_thread::sleep_for(100ms);
+  EXPECT_TRUE(server_->Goals().empty());
+
+  odometry_publisher_->publish(Odometry(2.1, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.1;
+  }));
+  odometry_publisher_->publish(Odometry(2.2, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.2;
+  }));
+  auto reset = Odometry(2.3, 2.0);
+  reset.twist.twist.angular.z = 0.2;
+  odometry_publisher_->publish(reset);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.3;
+  }));
+
+  odometry_publisher_->publish(Odometry(2.4, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.4;
+  }));
+  odometry_publisher_->publish(Odometry(2.5, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.5;
+  }));
+  EXPECT_TRUE(server_->Goals().empty());
+
+  odometry_publisher_->publish(Odometry(2.6, 2.0));
+  ASSERT_TRUE(WaitFor([this] { return !server_->Goals().empty(); }));
+}
+
+TEST_F(ExplorationNodeTest, StopGateParameterLoadRejectsInvalidValues) {
+  EXPECT_THROW(ExplorationNode(StopGateParameterOptions(-0.01, 0.02, 3, 5.0)),
+               std::invalid_argument);
+  EXPECT_THROW(ExplorationNode(StopGateParameterOptions(0.01, -0.02, 3, 5.0)),
+               std::invalid_argument);
+  EXPECT_THROW(ExplorationNode(StopGateParameterOptions(0.01, 0.02, 0, 5.0)),
+               std::invalid_argument);
+  EXPECT_THROW(ExplorationNode(StopGateParameterOptions(0.01, 0.02, 3, 0.0)),
+               std::invalid_argument);
+}
+
+TEST_F(ExplorationNodeTest,
+       FreshPlanningRetainsCanceledPlanIdentityUntilStationaryConfirmation) {
+  parameters_.stop_before_planning = true;
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->generate_candidates =
+      [](const lunar::pure_exploration::TaskRaster&,
+         std::span<const lunar::pure_exploration::FrontierCluster> frontiers) {
+        return ControlledCandidates(frontiers, 1U);
+      };
+  seams->evaluate_gain = [](const lunar::pure_exploration::TaskRaster&,
+                            const lunar::pure_exploration::CandidateView&) {
+    return 1.0;
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  server_->SetFixedPlanId("wheel-active");
+  PublishAllInputs(StartTask("active-before-stop"));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return status && status->reason_code == "WAITING_FOR_STOP" && pose &&
+           pose->x == 2.0 && pose->y == 2.0;
+  }));
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return !server_->Goals().empty(); }));
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+  ASSERT_EQ(References().front().plan_id, "wheel-active");
+
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+  const auto goal_count_before_stop = server_->Goals().size();
+  auto moving = Odometry(2.4, 2.0);
+  moving.twist.twist.linear.x = 0.2;
+  odometry_publisher_->publish(moving);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.4;
+  }));
+  task_publisher_->publish(StartTask("fresh-after-stop"));
+
+  ASSERT_TRUE(WaitFor([this] {
+    return ExecutionCancels() == std::vector<std::string>{"wheel-active"};
+  }));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  auto retained = ExplorationNodeTestPeer::ActiveReference(*explorer_);
+  ASSERT_TRUE(retained.has_value());
+  EXPECT_EQ(retained->plan_id, "wheel-active");
+  EXPECT_EQ(server_->Goals().size(), goal_count_before_stop);
+
+  for (const double x : {2.5, 2.6}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+    EXPECT_TRUE(ExplorationNodeTestPeer::ActiveReference(*explorer_));
+    EXPECT_EQ(server_->Goals().size(), goal_count_before_stop);
+  }
+
+  odometry_publisher_->publish(Odometry(2.7, 2.0));
+  ASSERT_TRUE(WaitFor([this, goal_count_before_stop] {
+    return server_->Goals().size() > goal_count_before_stop;
+  }));
+  EXPECT_FALSE(ExplorationNodeTestPeer::ActiveReference(*explorer_));
+  EXPECT_EQ(ExecutionCancels(), std::vector<std::string>{"wheel-active"});
 }
 
 TEST_F(ExplorationNodeTest,
