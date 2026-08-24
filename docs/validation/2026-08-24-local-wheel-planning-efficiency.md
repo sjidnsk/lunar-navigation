@@ -77,6 +77,58 @@ Fresh results:
 | Core CTest | 19/19 targets passed |
 | Planner ROS CTest | 11/12 targets passed |
 
+The result table above comes from the following actually executed test and
+result commands:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+colcon --log-base "$LUNAR_WHEEL_FINAL_ROOT/ctest-log" test \
+  --build-base "$LUNAR_WHEEL_FINAL_ROOT/test-build" \
+  --install-base "$LUNAR_WHEEL_FINAL_ROOT/test-install" \
+  --packages-select lunar_pure_planner_core lunar_pure_planner_ros \
+  --return-code-on-test-failure \
+  --event-handlers console_direct+
+colcon test-result \
+  --test-result-base "$LUNAR_WHEEL_FINAL_ROOT/test-build" --verbose
+```
+
+The `colcon test` evidence is retained at
+`final/ctest-log/test_2026-08-24_17-01-15/logger_all.log`, with package output
+under the sibling `lunar_pure_planner_core/stdout.log` and
+`lunar_pure_planner_ros/stdout.log`. The verbose result command reports 431
+tests and two failure records because the same one ROS failure is
+represented both by the 12-target CTest aggregate XML and by its GoogleTest
+XML; this is 19/19 core targets and 11/12 ROS targets, not two distinct test
+failures.
+
+The 97/97 wheel result was the complete wheel target executed by that core
+CTest run, not a second inferred standalone result. Its logged subprocess was:
+
+```bash
+"$LUNAR_WHEEL_FINAL_ROOT/test-build/lunar_pure_planner_core/\
+lunar_pure_planner_core_anytime_wheel_planner_test" \
+  --gtest_output=xml:"$LUNAR_WHEEL_FINAL_ROOT/test-build/\
+lunar_pure_planner_core/test_results/lunar_pure_planner_core/\
+lunar_pure_planner_core_anytime_wheel_planner_test.gtest.xml"
+```
+
+The core stdout log records `Running 97 tests` and `97 tests` passed. The exact
+launch-only pytest subprocess executed by the ROS CTest target was:
+
+```bash
+/usr/bin/python3 -u -m pytest \
+  /home/kai/CodexDownloads/lunar_navigation/\
+lunar_pure_planner_orin-worktrees/jazzy-300m-exploration/\
+tests/launch/test_pure_plan_motion_server.py \
+  -o cache_dir="$LUNAR_WHEEL_FINAL_ROOT/test-build/lunar_pure_planner_ros/\
+ament_cmake_pytest/pure_plan_motion_server_launch_test/.cache" \
+  --junit-xml="$LUNAR_WHEEL_FINAL_ROOT/test-build/lunar_pure_planner_ros/\
+test_results/lunar_pure_planner_ros/pure_plan_motion_server_launch_test.xunit.xml" \
+  --junit-prefix=lunar_pure_planner_ros
+```
+
+Its ROS stdout log and xUnit XML both record 9/9 passed.
+
 The one ROS failure is
 `PurePlanMotionServer.RollingFirstLocalRequestKeepsTheColdGlobalTimingWindow`.
 Focused repeats were fail/pass/fail, consistent with a cancel/goal-completion
@@ -102,13 +154,9 @@ are marked in the SE(2) plan; ROS Action and RViz steps remain unchecked.
 
 ### Production closure
 
-The first production attempt found only the missing `nlohmann_json` system
-dependency. The successful rebuild used an external deb-extracted prefix,
-without adding a dependency or artifact to the repository:
+The first production attempt used the brief's original `prod-log` command:
 
 ```bash
-export CMAKE_PREFIX_PATH=/home/kai/CodexDownloads/lunar_navigation/\
-exploration_jazzy_build/deps/nlohmann-json3-dev/usr${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}
 source /opt/ros/jazzy/setup.bash
 colcon --log-base "$LUNAR_WHEEL_FINAL_ROOT/prod-log" build \
   --base-paths ros2_ws/src \
@@ -120,8 +168,33 @@ colcon --log-base "$LUNAR_WHEEL_FINAL_ROOT/prod-log" build \
   --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF
 ```
 
+It failed while configuring `lunar_pure_exploration_sim` because
+`nlohmann_jsonConfig.cmake` was unavailable. That failure is retained at
+`final/prod-log/build_2026-08-24_17-06-02/logger_all.log`; `prod-log` is not
+success evidence.
+
+The successful resume used an external deb-extracted prefix and the separate
+`prod-log-resume` log root, without adding a dependency or artifact to the
+repository:
+
+```bash
+export CMAKE_PREFIX_PATH=/home/kai/CodexDownloads/lunar_navigation/\
+exploration_jazzy_build/deps/nlohmann-json3-dev/usr${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}
+source /opt/ros/jazzy/setup.bash
+colcon --log-base "$LUNAR_WHEEL_FINAL_ROOT/prod-log-resume" build \
+  --base-paths ros2_ws/src \
+  --build-base "$LUNAR_WHEEL_FINAL_ROOT/prod-build" \
+  --install-base "$LUNAR_WHEEL_FINAL_ROOT/prod-install" \
+  --packages-up-to lunar_pure_planner_ros \
+    lunar_pure_wheeled_controller lunar_pure_exploration_sim \
+  --event-handlers console_direct+ \
+  --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF
+```
+
 Result: 8/8 packages built. Every operator-required executable resolves from
 the same `prod-install` overlay and every package reports `RelWithDebInfo`.
+The successful log is
+`final/prod-log-resume/build_2026-08-24_17-08-32/logger_all.log`.
 
 ## Repository and contract checks
 
@@ -160,25 +233,26 @@ run-20260824-171018-seed-20260824-c4a7fcc1
 run-20260824-171521-seed-20260824-53116e77
 ```
 
-Both current runs have the same first-eleven outcome distribution.
+Both current runs have the same first-eleven outcome distribution. The timing
+and counter tables below are specifically parsed from the stable rerun
+`run-20260824-171521-seed-20260824-53116e77`, not combined across both runs.
 
 | Evidence | TIMEOUT | PLAN_FOUND | PLAN_FOUND_LATE | NO_PATH | candidate 6 | candidate 7 |
 | --- | ---: | ---: | ---: | ---: | --- | --- |
 | baseline `348c5ca...` | 8 | 2 | 0 | 1 | PLAN_FOUND | PLAN_FOUND |
 | HEAD `e47c8f5` | 0 | 4 | 2 | 5 | NO_PATH | NO_PATH |
 
-HEAD first-eleven wall timings:
+First-eleven wall timings:
 
-| Stage | p50 ms | p95 ms |
-| --- | ---: | ---: |
-| global | 0.408986 | 3.378396 |
-| local | 17.009285 | 2263.837283 |
-| total | 19.567615 | 2265.312886 |
+| Evidence | global p50 ms | global p95 ms | local p50 ms | local p95 ms | total p50 ms | total p95 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline `348c5ca...` | 4.985851 | 6.8119645 | 2995.152062 | 3000.491233 | 3001.583536 | 3006.779240 |
+| HEAD rerun `...53116e77` | 0.408986 | 3.378396 | 17.009285 | 2263.837283 | 19.567615 | 2265.312886 |
 
-Baseline total p50/p95 was 3001.583536/3006.779240 ms. These are not direct
-same-input algorithm timings: the faster planner changes the closed-loop
-vehicle/simulation phase reached by later candidate IDs. They are retained as
-same-seed runtime evidence, not treated as an open-loop performance A/B.
+These are not direct same-input algorithm timings: the faster planner changes
+the closed-loop vehicle/simulation phase reached by later candidate IDs. They
+are retained as same-seed runtime evidence, not treated as an open-loop
+performance A/B.
 
 HEAD first-eleven wheel counters:
 
@@ -203,6 +277,13 @@ HEAD first-eleven wheel counters:
 Every graph-created diagnostic in the stable rerun reports real wheel metrics.
 Candidates 6 and 7 each have one expanded state, nine edge evaluations, eight
 full invalidations and eight dynamics/primitive-shape rejects.
+
+No dedicated baseline-versus-HEAD safety-oracle fixture acceptance-delta check
+was executed. The 97/97 current-suite result shows that all currently
+registered wheel safety cases pass, including the approved adjacent-unknown
+and exact-boundary cases, but a passing current suite alone does not prove that
+no previously rejected fixture became newly accepted. Consequently that smoke
+hard condition remains an explicit evidence gap rather than a claimed pass.
 
 ## Historical same-seed phase diagnosis
 
@@ -279,3 +360,9 @@ certification is retained and no skip was re-enabled.
 Because the smoke fails the required candidate 6/7 condition and completes no
 goal, the six-hour full 300 m RViz command was not run. No wall guard, launch
 exit, operator rejection or partial summary is recorded as completion.
+
+```text
+run directory: NONE
+terminal: NOT_RUN
+coverage: NOT_MEASURED
+```
