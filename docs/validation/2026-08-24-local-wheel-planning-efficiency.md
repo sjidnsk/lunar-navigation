@@ -128,19 +128,29 @@ returned 8 for its one failing target. Their command and output evidence is:
 The `colcon test` evidence is retained at
 `final/ctest-log/test_2026-08-24_17-01-15/logger_all.log`, with package output
 under the sibling `lunar_pure_planner_core/stdout.log` and
-`lunar_pure_planner_ros/stdout.log`. No standalone stdout capture was saved for
-`colcon test-result --verbose`; its 431-test, two-failure summary was rebuilt
-on demand from the existing XML, not read from a claimed log file. The XML
-evidence consists of the 16 core and 12 ROS files below the two package
-`test_results` directories plus these CTest aggregates:
+`lunar_pure_planner_ros/stdout.log`. At the original `e47c8f5`/`f60a964`
+stage, `colcon test-result --verbose` was observed as 431 tests and two failure
+records, but no standalone stdout capture of that summary was saved. It is a
+historical observation and cannot be reconstructed from today's shared XML.
 
-- `final/test-build/lunar_pure_planner_core/Testing/20260824-0901/Test.xml`;
-- `final/test-build/lunar_pure_planner_ros/Testing/20260824-0902/Test.xml`.
+The durable historical result anchors are the timestamped, unmodified package
+logs:
 
-The same ROS failure is represented both by the ROS aggregate above and by
-`final/test-build/lunar_pure_planner_ros/test_results/lunar_pure_planner_ros/pure_plan_motion_server_test.gtest.xml`.
-That duplicate representation explains the two failure records; the target
-classification remains 19/19 core and 11/12 ROS, not two distinct failures.
+- `final/ctest-log/test_2026-08-24_17-01-15/lunar_pure_planner_core/stdout.log`
+  records 97/97 wheel tests and 19/19 core CTest targets;
+- `final/ctest-log/test_2026-08-24_17-01-15/lunar_pure_planner_ros/stdout.log`
+  records the launch pytest 9/9 and ROS CTest 11/12, including the original
+  `RollingFirstLocalRequestKeepsTheColdGlobalTimingWindow` failure.
+
+The shared `final/test-build` result XML was overwritten by the later
+metrics-retention fix wave. At this documentation update, rebuilding a summary
+from that current XML yields 435 tests and four failure records: the current
+wheel XML is 98 tests/one failure, the current ROS server XML is 46 tests/one
+failure, and the core/ROS CTest aggregates each contain one failed target.
+Those XML files describe the fix-wave state audited in the addendum below;
+they are not evidence for the historical 431/two, 97/97 or 19/19 results. No
+duplicate-failure interpretation from the current XML is applied to the
+original stage.
 
 The 97/97 wheel result was the complete wheel target executed by that core
 CTest run, not a second inferred standalone result. Its logged subprocess was:
@@ -153,8 +163,11 @@ lunar_pure_planner_core/test_results/lunar_pure_planner_core/\
 lunar_pure_planner_core_anytime_wheel_planner_test.gtest.xml"
 ```
 
-The core stdout log records `Running 97 tests` and `97 tests` passed. The exact
-launch-only pytest subprocess executed by the ROS CTest target was:
+The historical core stdout log records `Running 97 tests` and `97 tests`
+passed. The `gtest_output` destination shown above is command provenance only;
+the XML now present at that shared path belongs to the later fix wave. The
+exact launch-only pytest subprocess executed by the original ROS CTest target
+was:
 
 ```bash
 /usr/bin/python3 -u -m pytest \
@@ -168,7 +181,8 @@ test_results/lunar_pure_planner_ros/pure_plan_motion_server_launch_test.xunit.xm
   --junit-prefix=lunar_pure_planner_ros
 ```
 
-Its ROS stdout log and xUnit XML both record 9/9 passed.
+The historical ROS stdout log records 9/9 passed. The xUnit destination is in
+the same shared `test-build` tree and is not used as the original-stage anchor.
 
 The one ROS failure is
 `PurePlanMotionServer.RollingFirstLocalRequestKeepsTheColdGlobalTimingWindow`.
