@@ -790,9 +790,11 @@ struct PurePlanMotionServer::Impl final {
     }
     if (stop_token.stop_requested()) {
       const auto timing = result.timing;
+      const auto wheel_metrics = result.wheel_metrics;
       result = Failure(lunar::pure_planning::PlanningStatus::kCanceled,
                        "REQUEST_CANCELED");
       result.timing = timing;
+      result.wheel_metrics = wheel_metrics;
     }
 
     try {
@@ -1304,7 +1306,11 @@ struct PurePlanMotionServer::Impl final {
       std::this_thread::sleep_for(std::chrono::milliseconds{
           parameters.rolling_surface.poll_period_ms});
     }
-    return Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED");
+    auto canceled = Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED");
+    if (last_segment.has_value()) {
+      canceled.wheel_metrics = last_segment->wheel_metrics;
+    }
+    return canceled;
   }
 
   struct OutputBundle final {
@@ -1442,6 +1448,7 @@ struct PurePlanMotionServer::Impl final {
     auto canceled_result = Failure(
         lunar::pure_planning::PlanningStatus::kCanceled, "REQUEST_CANCELED");
     canceled_result.timing = normal.result.timing;
+    canceled_result.wheel_metrics = normal.result.wheel_metrics;
     auto canceled = MakeOutputs(std::move(canceled_result), request_goal,
                                 snapshot);
     auto timeout_result = Failure(

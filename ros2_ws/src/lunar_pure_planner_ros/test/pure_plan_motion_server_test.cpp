@@ -1766,6 +1766,53 @@ TEST(PurePlanMotionServer,
   EXPECT_EQ(cancel.get()->return_code,
             action_msgs::srv::CancelGoal::Response::ERROR_NONE);
   EXPECT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::CANCELED);
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
+  const auto diagnostics = system.Diagnostics().front();
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_metrics_available"),
+            "true");
+  EXPECT_EQ(FindDiagnosticValue(
+                diagnostics, "wheel_edge_validation_evaluations"),
+            "9");
+}
+
+TEST(PurePlanMotionServer,
+     FinalCancellationPreservesWheelMetricsInPublishedDiagnostics) {
+  std::promise<void> planner_entered_promise;
+  auto planner_entered = planner_entered_promise.get_future();
+  std::promise<void> release_planner_promise;
+  const std::shared_future<void> release_planner =
+      release_planner_promise.get_future().share();
+  RunningSystem system{[&](const lunar::pure_planning::PlanningRequest& request) {
+    auto result = Success(request);
+    result.wheel_metrics = lunar::pure_planning::WheelPlanningMetrics{
+        .edge_validation_evaluations = 9U,
+    };
+    planner_entered_promise.set_value();
+    release_planner.wait();
+    return result;
+  }};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("final_cancel_metrics"));
+  ASSERT_NE(handle, nullptr);
+  ASSERT_EQ(planner_entered.wait_for(3s), std::future_status::ready);
+  auto cancel = system.action_client->async_cancel_goal(handle);
+  ASSERT_EQ(cancel.wait_for(3s), std::future_status::ready);
+  EXPECT_EQ(cancel.get()->return_code,
+            action_msgs::srv::CancelGoal::Response::ERROR_NONE);
+  release_planner_promise.set_value();
+
+  const auto result = system.Result(handle);
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::CANCELED);
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
+  const auto diagnostics = system.Diagnostics().front();
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "reason_code"),
+            "REQUEST_CANCELED");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_metrics_available"),
+            "true");
+  EXPECT_EQ(FindDiagnosticValue(
+                diagnostics, "wheel_edge_validation_evaluations"),
+            "9");
 }
 
 TEST(PurePlanMotionServer,
