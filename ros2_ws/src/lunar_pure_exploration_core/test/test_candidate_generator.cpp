@@ -440,6 +440,17 @@ TEST(CandidateGeneratorTest, RotatedMapAndLargeTranslationUseSharedRasterGeometr
   EXPECT_TRUE(std::any_of(views.begin(), views.end(), [](const CandidateView& view) {
     return std::abs(view.pose.yaw - kPi / 6.0) < 2.0e-6;
   }));
+  std::vector<CandidateKey> keys;
+  keys.reserve(views.size());
+  for (const CandidateView& view : views) {
+    keys.push_back(view.key);
+  }
+  EXPECT_EQ(keys, (std::vector<CandidateKey>{
+      CandidateKey{1000000001618, -999999996641, -150},
+      CandidateKey{1000000001618, -999999996641, 75},
+      CandidateKey{1000000001618, -999999996641, 300},
+      CandidateKey{1000000001618, -999999996641, 525},
+      CandidateKey{1000000001618, -999999996641, 750}}));
 }
 
 TEST(CandidateGeneratorTest, SymmetricUnknownRingAndBranchFallbackIsTranslationInvariant) {
@@ -976,6 +987,15 @@ TEST(CandidateGeneratorTest, QuantizesHalfBoundariesAndNormalizesPositivePi) {
           .Generate(raster,
                     std::span<const FrontierCluster>(&frontier, 1U));
   ASSERT_EQ(half_views.size(), 5U);
+  std::vector<CandidateKey> half_keys;
+  half_keys.reserve(half_views.size());
+  for (const CandidateView& view : half_views) {
+    half_keys.push_back(view.key);
+  }
+  EXPECT_EQ(half_keys, (std::vector<CandidateKey>{
+      CandidateKey{2, -2, -115}, CandidateKey{2, -2, -1},
+      CandidateKey{2, -2, 0}, CandidateKey{2, -2, 1},
+      CandidateKey{2, -2, 115}}));
   EXPECT_EQ(half_views.front().key.x_mm, 2);
   EXPECT_EQ(half_views.front().key.y_mm, -2);
   EXPECT_TRUE(std::any_of(half_views.begin(), half_views.end(),
@@ -1015,6 +1035,8 @@ TEST(CandidateGeneratorTest, QuantizesHalfBoundariesAndNormalizesPositivePi) {
   EXPECT_DOUBLE_EQ(minus->pose.yaw, -kPi);
   EXPECT_EQ(plus->key, minus->key);
   EXPECT_EQ(plus->id, minus->id);
+  EXPECT_EQ(MakeCandidateKey(Pose2{0.0015, -0.0015, kPi}),
+            CandidateKey({2, -2, -1800}));
 }
 
 TEST(CandidateGeneratorTest, AcceptsNegativeZeroOffsetAndEmitsCanonicalZeroYaw) {
