@@ -93,7 +93,7 @@ if(BUILD_TESTING)
      NOT _accepted_goal_finalizer_sha STREQUAL
       "bcd4dd1be9e56d6495b63171651b8449994d292d6451f3be960fd0fa72235d63" OR
      NOT _pure_plan_motion_server_sha STREQUAL
-      "e9c2e67e1522d9d509a7222240a253b23a01547df3583efe1347a311aeb4885e")
+      "672ff83d6f1d810d7d37ad39d4a7ffc3bf0265deec38cc286e7d6f5aa1c69b90")
     message(FATAL_ERROR
       "final planner source changed; re-review Task 10 compatibility")
   endif()
