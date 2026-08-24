@@ -4,10 +4,10 @@
 
 `FAIL / INCOMPLETE`. The latest stop-gated runtime acceptance used source
 `b564eefc908bd4f22116fd0e3c70354d29917c8e`. Its clean native Jazzy build and
-bounded moving-start Stage A smoke passed: candidates 6 and 7 no longer failed
-from a moving start, a non-empty executable reference moved the vehicle, and
-coverage increased. Stage B then started the full operator and RViz but stopped
-after `13.958106673 s` with
+bounded moving-start Stage A smoke passed: all six Stage A candidates returned
+references, a non-empty executable reference moved the vehicle, and coverage
+increased. Stage B then showed candidates 6 and 7 both returning `PLAN_FOUND`,
+started the full operator and RViz, and stopped after `13.958106673 s` with
 `ERROR / PLANNER_CONTRACT_RESULT_CONTRACT_MISMATCH`; no local segment
 completed and the task did not reach `COMPLETED_NO_REACHABLE_FRONTIER`.
 
