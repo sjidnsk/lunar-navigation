@@ -19,9 +19,15 @@ namespace {
   return std::isfinite(value) && value >= 0.0F && value < threshold;
 }
 
-[[nodiscard]] bool IsHazard(const float value, const float threshold) noexcept {
-  return !std::isfinite(value) || value < 0.0F || value > 1.0F ||
+[[nodiscard]] bool IsOccupiedInflationSource(
+    const float value, const float threshold) noexcept {
+  return std::isfinite(value) && value >= 0.0F && value <= 1.0F &&
          value >= threshold;
+}
+
+[[nodiscard]] bool IsNarrowBandSource(
+    const float value, const float threshold) noexcept {
+  return !IsFreeOccupancy(value, threshold);
 }
 
 [[nodiscard]] GridCell CellFromIndex(const MapSnapshot& map,
@@ -213,6 +219,11 @@ LocalTerrainProjectionResult BuildLocalTerrainProjection(
     return {.reason_code = std::string{*stopped}};
   }
   if (const auto stopped = ControlledFill(
+          &projection.occupied, count, std::uint8_t{0U}, control);
+      stopped.has_value()) {
+    return {.reason_code = std::string{*stopped}};
+  }
+  if (const auto stopped = ControlledFill(
           &projection.slope_rad, count, float_infinity, control);
       stopped.has_value()) {
     return {.reason_code = std::string{*stopped}};
@@ -223,7 +234,7 @@ LocalTerrainProjectionResult BuildLocalTerrainProjection(
     return {.reason_code = std::string{*stopped}};
   }
 
-  std::vector<std::uint8_t> hazard_mask(count, 0U);
+  std::vector<std::uint8_t> narrow_band_mask(count, 0U);
   for (std::size_t index = 0U; index < count; ++index) {
     if (ControlCheckDue(index)) {
       if (const auto stopped = StopReason(control); stopped.has_value()) {
@@ -233,17 +244,28 @@ LocalTerrainProjectionResult BuildLocalTerrainProjection(
     const bool free = IsFreeOccupancy(occupancy[index], occupancy_threshold);
     projection.free_with_height[index] = static_cast<std::uint8_t>(
         free && std::isfinite(elevation[index]));
-    hazard_mask[index] = static_cast<std::uint8_t>(
-        IsHazard(occupancy[index], occupancy_threshold));
+    projection.occupied[index] = static_cast<std::uint8_t>(
+        IsOccupiedInflationSource(occupancy[index], occupancy_threshold));
+    narrow_band_mask[index] = static_cast<std::uint8_t>(
+        IsNarrowBandSource(occupancy[index], occupancy_threshold));
   }
 
   auto clearance = BuildCellAreaClearance(
       projection.map->width(), projection.map->height(),
-      projection.map->resolution_m(), hazard_mask, control);
+      projection.map->resolution_m(), projection.occupied, control);
   if (!clearance.ok()) {
     return {.reason_code = std::move(clearance.reason_code)};
   }
   projection.clearance_m = std::move(clearance.clearance_m);
+
+  auto narrow_band_distance = BuildCellAreaClearance(
+      projection.map->width(), projection.map->height(),
+      projection.map->resolution_m(), narrow_band_mask, control);
+  if (!narrow_band_distance.ok()) {
+    return {.reason_code = std::move(narrow_band_distance.reason_code)};
+  }
+  projection.narrow_band_distance_m =
+      std::move(narrow_band_distance.clearance_m);
 
   if (const auto stopped = StopReason(control); stopped.has_value()) {
     return {.reason_code = std::string{*stopped}};
