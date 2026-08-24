@@ -15,7 +15,8 @@ pure_exploration:
     minimum_progress_m: 0.2
     maximum_replans_per_candidate: 2
     goal_yaw_tolerance_deg: 11.25
-    planner_result_timeout_s: 2.0
+    planner_goal_response_timeout_s: 1.0
+    planner_result_timeout_s: 3.5
     global_map_topic: /Car/T3/mapping/global_overview
     odometry_topic: /Car/T3/localization/odometry
     tf_topic: /tf

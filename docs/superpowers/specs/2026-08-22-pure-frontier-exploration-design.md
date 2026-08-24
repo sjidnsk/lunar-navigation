@@ -757,7 +757,8 @@ stuck_timeout_s: 30.0
 minimum_progress_m: 0.2
 maximum_replans_per_candidate: 2
 goal_yaw_tolerance_deg: 11.25
-planner_result_timeout_s: 2.0
+planner_goal_response_timeout_s: 1.0
+planner_result_timeout_s: 3.5
 ```
 
 `maximum_position_probes`、`maximum_candidate_views`、`maximum_collision_work_units`、
@@ -822,9 +823,13 @@ AABB limit、total fixture 触达累计 retained cells limit；各自把其他�
 包括 `PURE_EXPLORATION_MAXIMUM_PATH_PREVIEW_POSES` 和
 `PURE_EXPLORATION_MAXIMUM_EXECUTABLE_PATH_POINTS`。
 
-`planner_result_timeout_s` 是与上述九个无默认资源值不同的 transport 配置，仓库默认精确为有限正数
-`2.0`。它只转换为 `steady_clock::duration` 并驱动第 11.2 节客户端 result watchdog；不与 ROS time、
-header stamp、地图/状态年龄或 diagnostics stamp 比较，不能解释成 freshness。
+`planner_goal_response_timeout_s` 与 `planner_result_timeout_s` 是与上述九个无默认资源值不同的
+transport 配置，仓库默认精确为有限正数 `1.0` 与 `3.5`。前者从发送 Action Goal 起计时，后者只从
+收到 accepted GoalHandle 后起计时；二者都只转换为 `steady_clock::duration`。规划器的单次 3 s
+硬截止在 result watchdog 内，保留 0.5 s 终态传输余量，因此 2–3 s 的 `PLAN_FOUND_LATE` 不被
+客户端取消。Goal 未接受或 accepted 后始终无 Result 都保持 typed `kRetryable/CLIENT_RESULT_TIMEOUT`，
+不得作为无路径或完成证据。不与 ROS time、header stamp、地图/状态年龄或 diagnostics stamp 比较，
+不能解释成 freshness。
 
 车载实现使用 `std::chrono::steady_clock`：
 
@@ -1130,7 +1135,8 @@ stuck_timeout_s: 30.0
 minimum_progress_m: 0.2
 maximum_replans_per_candidate: 2
 goal_yaw_tolerance_deg: 11.25
-planner_result_timeout_s: 2.0
+planner_goal_response_timeout_s: 1.0
+planner_result_timeout_s: 3.5
 ```
 
 平台尺寸和净空不得在探索配置中重复填写，必须来自规划器拥有的同一份平台配置；规划及到达
@@ -1193,7 +1199,8 @@ planner_result_timeout_s: 2.0
 - 目标变障碍、前沿消失和增益归零时取消；
 - 每批 16 个 typed `kExhaustiveNoPath`（只允许 `NO_PATH` 或 `GOAL_OUTSIDE_LOCAL_MAP`）后继续下一批；
 - wrapper/payload 全矩阵逐 outcome/directive/reason/unknown/contradiction 验证；typed TIMEOUT、client
-  2 s deadline、取消和 Action/传输错误不计入完成证据，合同错误进入 ERROR；
+  1 s Goal 接受 deadline、accepted 后 3.5 s result deadline、取消和 Action/传输错误不计入完成证据，
+  合同错误进入 ERROR；
 - GoalRegion 精确 map/goal-id/POINT/XY/+0.0 z/yaw/tolerance，且所有 stamp 变体不改变分类；
 - empty/one-point/finite XY preview、long-double 累计、负零规范、preview/executable exact/over 资源边界；
 - cancel-before-goal-response、重复 cancel、reject/cancel 交错、cancel accepted/rejected、result-before-

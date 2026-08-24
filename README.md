@@ -97,8 +97,10 @@ colcon --log-base "$LUNAR_JAZZY_BUILD/log" build \
   --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
 ```
 
-完整场景必须使用上述优化构建；默认无优化构建可能让较难的局部搜索撞上规划器固定的 1 s 算法预算，
-形成重复的 `TIMEOUT`，不能作为完整探索验收。
+完整场景必须使用上述优化构建；规划器以 `<1 s` 为目标、`3 s` 为单次规划硬截止。探索器先用
+`1 s` 等待 Action Goal 接受，再从接受时刻起用 `3.5 s` 等待结果；因此 `2–3 s` 的
+`PLAN_FOUND_LATE` 仍是有效路径，不能被客户端过早取消。超过这两个 transport watchdog 的请求才
+按 `CLIENT_RESULT_TIMEOUT` 重试，不能作为“无可达前沿”证据。
 
 ### 完整运行与 RViz
 

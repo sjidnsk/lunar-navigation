@@ -228,10 +228,11 @@ def test_shipped_yaml_is_only_the_approved_non_resource_defaults() -> None:
     assert parameters["minimum_progress_m"] == 0.2
     assert parameters["maximum_replans_per_candidate"] == 2
     assert parameters["goal_yaw_tolerance_deg"] == 11.25
-    assert parameters["planner_result_timeout_s"] == 2.0
+    assert parameters["planner_goal_response_timeout_s"] == 1.0
+    assert parameters["planner_result_timeout_s"] == 3.5
     assert all(
         math.isfinite(parameters[name]) and parameters[name] > 0
-        for name in ("sensor_range_m", "sensor_fov_deg", "stuck_timeout_s", "minimum_progress_m", "goal_yaw_tolerance_deg", "planner_result_timeout_s")
+        for name in ("sensor_range_m", "sensor_fov_deg", "stuck_timeout_s", "minimum_progress_m", "goal_yaw_tolerance_deg", "planner_goal_response_timeout_s", "planner_result_timeout_s")
     )
     assert {name: parameters[name] for name in EXPECTED_TOPICS} == EXPECTED_TOPICS
     assert all(value.startswith("/") for value in EXPECTED_TOPICS.values())

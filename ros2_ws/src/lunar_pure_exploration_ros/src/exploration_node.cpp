@@ -508,8 +508,10 @@ ExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
       "maximum_replans_per_candidate", 2);
   const double yaw_tolerance_deg =
       node.declare_parameter<double>("goal_yaw_tolerance_deg", 11.25);
+  const double planner_goal_response_timeout_s =
+      node.declare_parameter<double>("planner_goal_response_timeout_s", 1.0);
   const double planner_timeout_s =
-      node.declare_parameter<double>("planner_result_timeout_s", 2.0);
+      node.declare_parameter<double>("planner_result_timeout_s", 3.5);
 
   if (threshold < 0 || threshold > 100 || maximum_task_raster_cells <= 0 ||
       yaw_offsets_deg.size() != 5U || maximum_replans < 0 ||
@@ -517,6 +519,8 @@ ExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
       !std::isfinite(sensor_range_m) || sensor_range_m <= 0.0 ||
       !std::isfinite(sensor_fov_deg) || sensor_fov_deg <= 0.0 ||
       !std::isfinite(yaw_tolerance_deg) || yaw_tolerance_deg <= 0.0 ||
+      !std::isfinite(planner_goal_response_timeout_s) ||
+      planner_goal_response_timeout_s <= 0.0 ||
       !std::isfinite(planner_timeout_s) || planner_timeout_s <= 0.0) {
     throw std::invalid_argument{"invalid exploration parameters"};
   }
@@ -558,6 +562,9 @@ ExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
       .maximum_replans = static_cast<std::uint8_t>(maximum_replans),
       .goal_yaw_tolerance_rad =
           yaw_tolerance_deg * std::numbers::pi / 180.0,
+      .planner_goal_response_timeout = std::chrono::duration_cast<
+          std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>{planner_goal_response_timeout_s}),
       .planner_result_timeout = std::chrono::duration_cast<
           std::chrono::steady_clock::duration>(
           std::chrono::duration<double>{planner_timeout_s}),
@@ -859,6 +866,8 @@ struct ExplorationNode::Runtime final {
                     parameters.maximum_path_preview_poses,
                 .maximum_executable_path_points =
                     parameters.maximum_executable_path_points,
+                .goal_response_timeout =
+                    parameters.planner_goal_response_timeout,
                 .result_timeout = parameters.planner_result_timeout},
             parameters.steady_now
                 ? parameters.steady_now

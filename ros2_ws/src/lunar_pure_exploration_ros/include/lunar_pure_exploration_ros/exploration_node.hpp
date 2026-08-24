@@ -181,6 +181,8 @@ struct ExplorationNodeParameters {
   std::size_t maximum_executable_path_points;
   std::uint8_t maximum_replans;
   double goal_yaw_tolerance_rad;
+  std::chrono::steady_clock::duration planner_goal_response_timeout{
+      std::chrono::seconds{1}};
   std::chrono::steady_clock::duration planner_result_timeout;
   std::string global_map_topic;
   std::string odometry_topic;

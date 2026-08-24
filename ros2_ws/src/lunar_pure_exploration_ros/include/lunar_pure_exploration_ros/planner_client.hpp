@@ -44,6 +44,7 @@ struct PlannerEvaluation {
 struct PlannerClientParameters {
   std::size_t maximum_path_preview_poses;
   std::size_t maximum_executable_path_points;
+  std::chrono::steady_clock::duration goal_response_timeout;
   std::chrono::steady_clock::duration result_timeout;
 };
 

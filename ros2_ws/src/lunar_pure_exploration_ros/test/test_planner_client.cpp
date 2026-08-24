@@ -334,7 +334,8 @@ class PlannerClientTest : public ::testing::Test {
         *client_node_, action_name_,
         PlannerClientParameters{.maximum_path_preview_poses = 4U,
                                 .maximum_executable_path_points = 3U,
-                                .result_timeout = 2s},
+                                .goal_response_timeout = 1s,
+                                .result_timeout = 3500ms},
         [this] {
           return std::chrono::steady_clock::time_point{
               std::chrono::nanoseconds{now_ns_.load()}};
@@ -770,11 +771,13 @@ TEST_F(PlannerClientTest,
   Evaluate("timeout-with-handle", Candidate());
   ASSERT_TRUE(
       WaitFor([&] { return server_->HasHandle("timeout-with-handle"); }));
-  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(2s).count() - 1;
+  now_ns_ =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(3499ms).count();
   client_->PollTimeout();
   EXPECT_EQ(CompletionCount(), 0U);
 
-  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(2s).count();
+  now_ns_ =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(3500ms).count();
   client_->PollTimeout();
   ASSERT_TRUE(WaitFor([&] { return CompletionCount() == 1U; }));
   ASSERT_TRUE(WaitFor(
@@ -790,12 +793,100 @@ TEST_F(PlannerClientTest,
   EXPECT_FALSE(completions_.front().reference.has_value());
 }
 
+TEST_F(PlannerClientTest, ResultDeadlineStartsWhenGoalIsAccepted) {
+  server_->DelayNextGoalResponse();
+  Evaluate("accepted-starts-result-deadline", Candidate());
+  ASSERT_TRUE(WaitFor([&] {
+    return server_->GoalCallbackEntered("accepted-starts-result-deadline");
+  }));
+
+  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(750ms).count();
+  server_->ReleaseGoalResponses();
+  ASSERT_TRUE(WaitFor(
+      [&] { return server_->HasHandle("accepted-starts-result-deadline"); }));
+  std::this_thread::sleep_for(20ms);
+
+  now_ns_ =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(3500ms).count();
+  client_->PollTimeout();
+  EXPECT_EQ(CompletionCount(), 0U);
+  EXPECT_EQ(server_->CancelCount("accepted-starts-result-deadline"), 0U);
+
+  now_ns_ =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(4250ms).count();
+  client_->PollTimeout();
+  ASSERT_TRUE(WaitFor([&] { return CompletionCount() == 1U; }));
+  ASSERT_TRUE(WaitFor([&] {
+    return server_->CancelCount("accepted-starts-result-deadline") == 1U;
+  }));
+  std::scoped_lock lock{completion_mutex_};
+  EXPECT_EQ(completions_.front().kind, PlannerEvaluationKind::kRetryable);
+  EXPECT_EQ(completions_.front().reason_code, "CLIENT_RESULT_TIMEOUT");
+}
+
+TEST_F(PlannerClientTest, LateCertifiedPathWinsBeforeResultWatchdog) {
+  Evaluate("plan-found-late", Candidate());
+  ASSERT_TRUE(WaitFor([&] { return server_->HasHandle("plan-found-late"); }));
+
+  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(2500ms).count();
+  client_->PollTimeout();
+  EXPECT_EQ(CompletionCount(), 0U);
+  EXPECT_EQ(server_->CancelCount("plan-found-late"), 0U);
+
+  auto result = SuccessResult({{0.0, 0.0}, {1.0, 0.0}});
+  result.reason_code = "PLAN_FOUND_LATE";
+  const auto evaluation = FinishAndWait(
+      "plan-found-late", rclcpp_action::ResultCode::SUCCEEDED, result);
+  EXPECT_EQ(evaluation.kind, PlannerEvaluationKind::kReachable);
+  EXPECT_EQ(evaluation.reason_code, "PLAN_FOUND_LATE");
+  EXPECT_EQ(server_->CancelCount("plan-found-late"), 0U);
+}
+
+TEST_F(PlannerClientTest, ServerTimeoutWinsBeforeResultWatchdog) {
+  Evaluate("server-timeout", Candidate());
+  ASSERT_TRUE(WaitFor([&] { return server_->HasHandle("server-timeout"); }));
+
+  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(3s).count();
+  client_->PollTimeout();
+  EXPECT_EQ(CompletionCount(), 0U);
+  EXPECT_EQ(server_->CancelCount("server-timeout"), 0U);
+
+  const auto evaluation = FinishAndWait(
+      "server-timeout", rclcpp_action::ResultCode::ABORTED,
+      FailureResult(Action::Result::RESOURCE_EXHAUSTED, "TIMEOUT"));
+  EXPECT_EQ(evaluation.kind, PlannerEvaluationKind::kRetryable);
+  EXPECT_EQ(evaluation.reason_code, "TIMEOUT");
+  EXPECT_EQ(server_->CancelCount("server-timeout"), 0U);
+}
+
+TEST_F(PlannerClientTest, MissingGoalResponseUsesGoalWatchdogWithoutCancel) {
+  server_->DelayNextGoalResponse();
+  Evaluate("missing-goal-response", Candidate());
+  ASSERT_TRUE(WaitFor([&] {
+    return server_->GoalCallbackEntered("missing-goal-response");
+  }));
+
+  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(999ms).count();
+  client_->PollTimeout();
+  EXPECT_EQ(CompletionCount(), 0U);
+
+  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(1s).count();
+  client_->PollTimeout();
+  ASSERT_TRUE(WaitFor([&] { return CompletionCount() == 1U; }));
+  EXPECT_EQ(server_->CancelCount("missing-goal-response"), 0U);
+  std::scoped_lock lock{completion_mutex_};
+  EXPECT_EQ(completions_.front().kind, PlannerEvaluationKind::kRetryable);
+  EXPECT_EQ(completions_.front().reason_code, "CLIENT_RESULT_TIMEOUT");
+  server_->ReleaseGoalResponses();
+}
+
 TEST_F(PlannerClientTest,
        ProductionTimerTimesOutOnceAndReentrantGenerationIgnoresOldCallbacks) {
   auto runtime_client = std::make_unique<PlannerClient>(
       *client_node_, action_name_,
       PlannerClientParameters{.maximum_path_preview_poses = 4U,
                               .maximum_executable_path_points = 3U,
+                              .goal_response_timeout = 100ms,
                               .result_timeout = 250ms});
   runtime_client->Evaluate(
       "task-alpha", "automatic-timeout", Candidate(), 0.25, 0.125,
@@ -854,7 +945,7 @@ TEST_F(PlannerClientTest,
   ASSERT_TRUE(WaitFor(
       [&] { return server_->GoalCallbackEntered("timeout-before-handle"); }));
   client_->CancelActive();
-  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(2s).count();
+  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(1s).count();
   client_->PollTimeout();
   ASSERT_TRUE(WaitFor([&] { return CompletionCount() == 1U; }));
   EXPECT_EQ(server_->CancelCount("timeout-before-handle"), 0U);
@@ -883,7 +974,8 @@ TEST_F(PlannerClientTest,
   client_->CancelActive();
   ASSERT_TRUE(WaitFor(
       [&] { return server_->CancelCount("old-generation") == 1U; }));
-  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(2s).count();
+  now_ns_ =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(3500ms).count();
   client_->PollTimeout();
   ASSERT_TRUE(WaitFor([&] { return CompletionCount() == 1U; }));
 
@@ -918,7 +1010,8 @@ TEST_F(PlannerClientTest,
   std::this_thread::sleep_for(20ms);
   EXPECT_EQ(CompletionCount(), 0U);
 
-  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(2s).count();
+  now_ns_ =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(3500ms).count();
   client_->PollTimeout();
   ASSERT_TRUE(WaitFor([&] { return CompletionCount() == 1U; }));
   std::scoped_lock lock{completion_mutex_};
@@ -941,7 +1034,8 @@ TEST_F(PlannerClientTest,
       FailureResult(Action::Result::GOAL_INFEASIBLE, "NO_PATH"));
   EXPECT_EQ(evaluation.kind, PlannerEvaluationKind::kExhaustiveNoPath);
   server_->ReleaseCancelResponses();
-  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(2s).count();
+  now_ns_ =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(3500ms).count();
   client_->PollTimeout();
   std::this_thread::sleep_for(20ms);
   EXPECT_EQ(CompletionCount(), 1U);
@@ -1015,7 +1109,8 @@ TEST_F(PlannerClientTest,
       *client_node_, action_name_ + "_missing",
       PlannerClientParameters{.maximum_path_preview_poses = 1U,
                               .maximum_executable_path_points = 1U,
-                              .result_timeout = 2s},
+                              .goal_response_timeout = 1s,
+                              .result_timeout = 3500ms},
       [] { return std::chrono::steady_clock::time_point{}; }};
   std::optional<PlannerEvaluation> completion;
   auto candidate = Candidate(55U);

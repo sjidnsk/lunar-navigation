@@ -217,7 +217,8 @@ struct PlannerClient::CallbackState final {
   PlannerClientParameters parameters;
   SteadyNow now;
   ActionClient::SharedPtr action_client;
-  rclcpp::TimerBase::SharedPtr timeout_timer;
+  rclcpp::TimerBase::SharedPtr goal_response_timer;
+  rclcpp::TimerBase::SharedPtr result_timer;
 };
 
 namespace {
@@ -230,8 +231,11 @@ struct CompletionDispatch final {
 template <typename State>
 void CancelTimerNoexcept(State& state) noexcept {
   try {
-    if (state.timeout_timer) {
-      state.timeout_timer->cancel();
+    if (state.goal_response_timer) {
+      state.goal_response_timer->cancel();
+    }
+    if (state.result_timer) {
+      state.result_timer->cancel();
     }
   } catch (...) {
   }
@@ -316,6 +320,8 @@ PlannerClient::PlannerClient(rclcpp::Node& node, std::string action_name,
                              PlannerClientParameters parameters, SteadyNow now) {
   if (action_name.empty() || parameters.maximum_path_preview_poses == 0U ||
       parameters.maximum_executable_path_points == 0U ||
+      parameters.goal_response_timeout <=
+          std::chrono::steady_clock::duration::zero() ||
       parameters.result_timeout <= std::chrono::steady_clock::duration::zero() ||
       !now) {
     throw std::invalid_argument{"invalid planner client parameters"};
@@ -326,7 +332,17 @@ PlannerClient::PlannerClient(rclcpp::Node& node, std::string action_name,
   state->action_client =
       rclcpp_action::create_client<Action>(&node, std::move(action_name));
   const std::weak_ptr<CallbackState> weak_state{state};
-  state->timeout_timer = node.create_wall_timer(
+  state->goal_response_timer = node.create_wall_timer(
+      parameters.goal_response_timeout, [weak_state] {
+        try {
+          const auto locked = weak_state.lock();
+          if (locked) {
+            PollTimeoutState(locked);
+          }
+        } catch (...) {
+        }
+      });
+  state->result_timer = node.create_wall_timer(
       parameters.result_timeout, [weak_state] {
         try {
           const auto locked = weak_state.lock();
@@ -336,7 +352,8 @@ PlannerClient::PlannerClient(rclcpp::Node& node, std::string action_name,
         } catch (...) {
         }
       });
-  state->timeout_timer->cancel();
+  state->goal_response_timer->cancel();
+  state->result_timer->cancel();
   state_ = std::move(state);
 }
 
@@ -391,7 +408,7 @@ void PlannerClient::Evaluate(
   goal.replace_active_request = false;
 
   const auto now = state_->now();
-  const auto deadline = now + state_->parameters.result_timeout;
+  const auto deadline = now + state_->parameters.goal_response_timeout;
   const std::weak_ptr<CallbackState> weak_state{state_};
   std::uint64_t generation{};
   std::optional<CompletionDispatch> immediate;
@@ -414,7 +431,7 @@ void PlannerClient::Evaluate(
         .cancel_requested = false,
         .cancel_sent = false});
     try {
-      state_->timeout_timer->reset();
+      state_->goal_response_timer->reset();
     } catch (...) {
       state_->active.reset();
       throw;
@@ -450,6 +467,10 @@ void PlannerClient::Evaluate(
                         state->active->candidate_id,
                         PlannerEvaluationKind::kRetryable, "GOAL_REJECTED"));
               } else {
+                state->active->deadline =
+                    state->now() + state->parameters.result_timeout;
+                state->goal_response_timer->cancel();
+                state->result_timer->reset();
                 state->active->goal_handle = goal_handle;
                 if (state->active->cancel_requested &&
                     !state->active->cancel_sent) {

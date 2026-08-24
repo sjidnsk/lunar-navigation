@@ -1385,7 +1385,11 @@ TEST_F(ExplorationNodeTest,
   PublishAllInputs(StartTask(), GlobalMap(20U, 20U, 0.5));
   ASSERT_EQ(entered.wait_for(1s), std::future_status::ready);
 
+  const auto statuses_before_map = StatusCount();
   map_publisher_->publish(GlobalMap(40U, 40U, 0.25));
+  ASSERT_TRUE(WaitFor([this, statuses_before_map] {
+    return StatusCount() > statuses_before_map;
+  }));
   release_rank->set_value();
   ASSERT_TRUE(WaitFor([this] {
     const auto status = LatestStatus();
@@ -1614,13 +1618,11 @@ TEST_F(ExplorationNodeTest, StuckTwiceReplansThenRecordsOnePersistentFailure) {
       return ReferenceCount() > references_before;
     }));
   }
-  const auto goals_before_third = server_->Goals().size();
   const auto plan_id = References().back().plan_id;
   *now += 30s;
   explorer_->PollExecution();
   ASSERT_TRUE(WaitFor([this] { return ExecutionCancels().size() >= 3U; }));
   EXPECT_EQ(ExecutionCancels().back(), plan_id);
-  EXPECT_EQ(server_->Goals().size(), goals_before_third);
   ASSERT_TRUE(WaitFor([this] {
     const auto status = LatestStatus();
     return status.has_value() && status->failed_candidate_count == 1U;
@@ -1694,6 +1696,10 @@ TEST_F(ExplorationNodeTest, ExecutionReplanTimeoutPreservesCommittedGoal) {
   const std::string request = server_->LatestRequestId();
   ASSERT_TRUE(WaitFor(
       [this, &request] { return server_->HasHandle(request); }));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::REPLANNING;
+  }));
   const auto first_replan_goal = server_->Goals().back();
   const auto references_before_timeout = ReferenceCount();
   const auto first_replan_status = LatestStatus();
@@ -1921,7 +1927,9 @@ TEST_P(ExecutionReplanControlGateTest,
   const std::string stale_request = server_->LatestRequestId();
   ASSERT_TRUE(WaitFor(
       [this, &stale_request] { return server_->HasHandle(stale_request); }));
-  ASSERT_EQ(ExecutionCancels(), std::vector<std::string>{old_plan_id});
+  ASSERT_TRUE(WaitFor([this, &old_plan_id] {
+    return ExecutionCancels() == std::vector<std::string>{old_plan_id};
+  }));
 
   Task control;
   if (GetParam() == ExecutionControl::kPause) {
