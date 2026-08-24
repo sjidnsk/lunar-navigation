@@ -1193,6 +1193,240 @@ TEST(WheelPlanner, AcceptsCorridorWhenMinimumOccupancyClearanceIsMet) {
   ASSERT_TRUE(result.ok()) << result.reason_code;
 }
 
+TEST(WheelPlanner,
+     AcceptsKnownFreeFootprintAdjacentToUnknownWithoutClearanceInflation) {
+  constexpr std::size_t kWidth = 20U;
+  constexpr std::size_t kHeight = 20U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  for (std::size_t x = 4U; x <= 7U; ++x) {
+    occupancy[8U * kWidth + x] = -1.0F;
+  }
+  const TerrainFixture fixture = MakeTerrain(
+      kWidth, kHeight, std::move(occupancy), 0.2);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 0.1;
+  capability.track_width_m = 0.1;
+  capability.minimum_clearance_m = 0.2;
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.4),
+  };
+
+  const WheelPlanResult result = PlanWheel(RequestTo(
+      fixture, capability, 1.4, 2.0, 0.0, Pose(1.0, 2.0)));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+}
+
+TEST(WheelPlanner,
+     RejectsUnknownOrNanElevationWhenFootprintOrWheelSupportTouches) {
+  constexpr std::size_t kWidth = 20U;
+  constexpr std::size_t kHeight = 20U;
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 0.1;
+  capability.track_width_m = 0.1;
+  capability.minimum_clearance_m = 0.2;
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.4),
+  };
+
+  std::vector<float> unknown_occupancy(kWidth * kHeight, 0.0F);
+  unknown_occupancy[9U * kWidth + 5U] = -1.0F;
+  const TerrainFixture unknown_fixture = MakeTerrain(
+      kWidth, kHeight, std::move(unknown_occupancy), 0.2);
+  const WheelPlanResult unknown_result = PlanWheel(RequestTo(
+      unknown_fixture, capability, 1.4, 2.0, 0.0, Pose(1.0, 2.0)));
+
+  EXPECT_EQ(unknown_result.status, LocalPlanStatus::kNoPath)
+      << unknown_result.reason_code;
+  ASSERT_TRUE(unknown_result.wheel_metrics.has_value());
+  EXPECT_GT(unknown_result.wheel_metrics
+                ->direct_unknown_or_unsupported_footprint_rejects,
+            0U);
+  EXPECT_EQ(unknown_result.wheel_metrics->measured_obstacle_clearance_rejects,
+            0U);
+
+  std::vector<float> nan_elevation(kWidth * kHeight, 0.0F);
+  nan_elevation[9U * kWidth + 5U] =
+      std::numeric_limits<float>::quiet_NaN();
+  const TerrainFixture nan_fixture = MakeTerrain(
+      kWidth, kHeight, std::vector<float>(kWidth * kHeight, 0.0F), 0.2,
+      std::move(nan_elevation));
+  const WheelPlanResult nan_result = PlanWheel(RequestTo(
+      nan_fixture, capability, 1.4, 2.0, 0.0, Pose(1.0, 2.0)));
+
+  EXPECT_EQ(nan_result.status, LocalPlanStatus::kNoPath)
+      << nan_result.reason_code;
+  ASSERT_TRUE(nan_result.wheel_metrics.has_value());
+  EXPECT_GT(nan_result.wheel_metrics
+                ->direct_unknown_or_unsupported_footprint_rejects,
+            0U);
+  EXPECT_EQ(nan_result.wheel_metrics->measured_obstacle_clearance_rejects,
+            0U);
+}
+
+TEST(WheelPlanner,
+     ClosedMapExtentAllowsExactTouchAndRejectsToleranceCrossingOnAllSides) {
+  constexpr double kExtentM = 2.0;
+  constexpr double kHalfFootprintM = 0.2;
+  constexpr double kCrossingM = 2.0e-9;
+  const TerrainFixture fixture = FlatTerrain(10U, 10U);
+  WheeledCapability capability = Capability(
+      2.0 * kHalfFootprintM, 2.0 * kHalfFootprintM);
+  capability.wheelbase_m = 0.2;
+  capability.track_width_m = 0.2;
+  capability.minimum_clearance_m = 0.2;
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+  const std::array<Pose3, 4U> exact_contacts{
+      Pose(kHalfFootprintM, 1.0),
+      Pose(kExtentM - kHalfFootprintM, 1.0),
+      Pose(1.0, kHalfFootprintM),
+      Pose(1.0, kExtentM - kHalfFootprintM),
+  };
+  const std::array<Pose3, 4U> crossings{
+      Pose(kHalfFootprintM - kCrossingM, 1.0),
+      Pose(kExtentM - kHalfFootprintM + kCrossingM, 1.0),
+      Pose(1.0, kHalfFootprintM - kCrossingM),
+      Pose(1.0, kExtentM - kHalfFootprintM + kCrossingM),
+  };
+
+  for (std::size_t side = 0U; side < exact_contacts.size(); ++side) {
+    SCOPED_TRACE(side);
+    const Pose3& contact = exact_contacts[side];
+    const WheelPlanResult contact_result = PlanWheel(RequestTo(
+        fixture, capability, contact.position_m.x, contact.position_m.y,
+        0.0, contact));
+    ASSERT_TRUE(contact_result.ok()) << contact_result.reason_code;
+
+    const Pose3& crossing = crossings[side];
+    const WheelPlanResult crossing_result = PlanWheel(RequestTo(
+        fixture, capability, crossing.position_m.x, crossing.position_m.y,
+        0.0, crossing));
+    EXPECT_EQ(crossing_result.status, LocalPlanStatus::kNoPath)
+        << crossing_result.reason_code;
+  }
+}
+
+TEST(WheelPlanner, PreservesOccupiedCollisionAndExactMinimumClearanceBoundary) {
+  constexpr std::size_t kWidth = 20U;
+  constexpr std::size_t kHeight = 20U;
+  const auto capability_with_clearance = [](const double clearance_m) {
+    WheeledCapability capability = Capability(0.4, 0.4);
+    capability.wheelbase_m = 0.2;
+    capability.track_width_m = 0.2;
+    capability.minimum_clearance_m = clearance_m;
+    capability.motion_primitives = {
+        Primitive("forward", WheelPrimitiveKind::kForward, 0.4),
+    };
+    return capability;
+  };
+
+  std::vector<float> boundary_occupancy(kWidth * kHeight, 0.0F);
+  for (std::size_t x = 4U; x <= 7U; ++x) {
+    boundary_occupancy[12U * kWidth + x] = 0.5F;
+  }
+  const TerrainFixture boundary_fixture = MakeTerrain(
+      kWidth, kHeight, std::move(boundary_occupancy), 0.2);
+  const WheeledCapability exact_capability = capability_with_clearance(0.2);
+  const WheelPlanResult exact_result = PlanWheel(RequestTo(
+      boundary_fixture, exact_capability, 1.4, 2.0, 0.0, Pose(1.0, 2.0)));
+
+  ASSERT_TRUE(exact_result.ok()) << exact_result.reason_code;
+  ASSERT_TRUE(exact_result.wheel_metrics.has_value());
+  EXPECT_GT(exact_result.wheel_metrics->occupied_clearance_cell_checks, 0U);
+  EXPECT_EQ(exact_result.wheel_metrics->measured_obstacle_clearance_rejects,
+            0U);
+
+  const WheeledCapability violating_capability =
+      capability_with_clearance(0.2 + 2.0e-9);
+  const WheelPlanResult violating_result = PlanWheel(RequestTo(
+      boundary_fixture, violating_capability, 1.4, 2.0, 0.0,
+      Pose(1.0, 2.0)));
+
+  EXPECT_EQ(violating_result.status, LocalPlanStatus::kNoPath)
+      << violating_result.reason_code;
+  ASSERT_TRUE(violating_result.wheel_metrics.has_value());
+  EXPECT_GT(violating_result.wheel_metrics
+                ->measured_obstacle_clearance_rejects,
+            0U);
+
+  std::vector<float> collision_occupancy(kWidth * kHeight, 0.0F);
+  collision_occupancy[10U * kWidth + 5U] = 0.5F;
+  const TerrainFixture collision_fixture = MakeTerrain(
+      kWidth, kHeight, std::move(collision_occupancy), 0.2);
+  const WheelPlanResult collision_result = PlanWheel(RequestTo(
+      collision_fixture, exact_capability, 1.4, 2.0, 0.0,
+      Pose(1.0, 2.0)));
+
+  EXPECT_EQ(collision_result.status, LocalPlanStatus::kNoPath)
+      << collision_result.reason_code;
+  ASSERT_TRUE(collision_result.wheel_metrics.has_value());
+  EXPECT_GT(collision_result.wheel_metrics
+                ->measured_obstacle_clearance_rejects,
+            0U);
+}
+
+TEST(WheelPlanner,
+     UnknownFrontierRetainsNarrowQuantizationWithoutObstacleClearance) {
+  constexpr std::size_t kWidth = 20U;
+  constexpr std::size_t kHeight = 20U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  for (std::size_t x = 0U; x < kWidth; ++x) {
+    occupancy[7U * kWidth + x] = -1.0F;
+    occupancy[12U * kWidth + x] = -1.0F;
+  }
+  const TerrainFixture fixture = MakeTerrain(
+      kWidth, kHeight, std::move(occupancy), 0.2);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 0.1;
+  capability.track_width_m = 0.1;
+  capability.minimum_clearance_m = 0.2;
+  capability.motion_primitives = {
+      Primitive("short", WheelPrimitiveKind::kForward, 0.21),
+      Primitive("long", WheelPrimitiveKind::kForward, 0.29),
+  };
+
+  const WheelPlanResult result = PlanWheel(RequestTo(
+      fixture, capability, 1.38, 2.0, 0.0, Pose(1.0, 2.0)));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_TRUE(result.metrics.used_narrow_resolution);
+  EXPECT_NEAR(result.finest_xy_key_resolution_m, 0.1, 1.0e-12);
+  ASSERT_TRUE(result.wheel_metrics.has_value());
+  EXPECT_EQ(result.wheel_metrics->occupied_clearance_cell_checks, 0U);
+  EXPECT_EQ(result.wheel_metrics->measured_obstacle_clearance_rejects, 0U);
+  EXPECT_GT(result.wheel_metrics->far_clearance_scan_skips, 0U);
+}
+
+TEST(WheelPlanner, RejectsExpandedTerrainProjectionWithMismatchedLayerSizes) {
+  const TerrainFixture fixture = FlatTerrain(20U, 20U);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+
+  shared::LocalTerrainProjection extra_occupied = fixture.terrain;
+  extra_occupied.occupied.push_back(0U);
+  WheelPlanRequest occupied_request = RequestTo(
+      fixture, capability, 1.2, 1.0, 0.0, Pose(1.0, 1.0));
+  occupied_request.terrain = &extra_occupied;
+  const WheelPlanResult occupied_result = PlanWheel(occupied_request);
+
+  EXPECT_EQ(occupied_result.status, LocalPlanStatus::kInvalidInput);
+  EXPECT_EQ(occupied_result.reason_code, "WHEEL_INPUT_INVALID");
+
+  shared::LocalTerrainProjection extra_narrow_band = fixture.terrain;
+  extra_narrow_band.narrow_band_distance_m.push_back(0.0F);
+  WheelPlanRequest narrow_band_request = RequestTo(
+      fixture, capability, 1.2, 1.0, 0.0, Pose(1.0, 1.0));
+  narrow_band_request.terrain = &extra_narrow_band;
+  const WheelPlanResult narrow_band_result = PlanWheel(narrow_band_request);
+
+  EXPECT_EQ(narrow_band_result.status, LocalPlanStatus::kInvalidInput);
+  EXPECT_EQ(narrow_band_result.reason_code, "WHEEL_INPUT_INVALID");
+}
+
 TEST(WheelPlanner, LowClearanceCostUsesDistanceFromTheRealPolygon) {
   constexpr std::size_t kWidth = 40U;
   constexpr std::size_t kHeight = 20U;
@@ -1468,6 +1702,8 @@ TEST(WheelPlanner, RejectsAHeightDiscontinuityAboveTheSlopeDerivedStepLimit) {
       fixture, capability, 3.0, 2.0, 0.0, Pose(1.0, 2.0)));
 
   EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
+  ASSERT_TRUE(result.wheel_metrics.has_value());
+  EXPECT_GT(result.wheel_metrics->relief_or_underbody_rejects, 0U);
 }
 
 TEST(WheelPlanner, AcceptsAContinuousSlopeDespiteLargeTotalHeightChange) {
@@ -1503,6 +1739,42 @@ TEST(WheelPlanner, AcceptsAContinuousSlopeDespiteLargeTotalHeightChange) {
   ASSERT_TRUE(result.ok()) << result.reason_code;
 }
 
+TEST(WheelPlanner, ReportsSlopeAsFirstEvaluatorRejectionStage) {
+  constexpr std::size_t kWidth = 30U;
+  constexpr std::size_t kHeight = 20U;
+  std::vector<float> elevation(kWidth * kHeight, 0.0F);
+  for (std::size_t y = 0U; y < kHeight; ++y) {
+    for (std::size_t x = 0U; x < kWidth; ++x) {
+      elevation[y * kWidth + x] = static_cast<float>(x) * 0.04F;
+    }
+  }
+  const TerrainFixture fixture = MakeTerrain(
+      kWidth, kHeight, std::vector<float>(kWidth * kHeight, 0.0F), 0.2,
+      std::move(elevation));
+  WheeledCapability capability = Capability(0.8, 0.4);
+  capability.maximum_slope_rad = 0.1;
+  capability.maximum_local_obstacle_relief_m = 1.0;
+  capability.minimum_underbody_clearance_m = 1.0;
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+  WheelPlanRequest request = RequestTo(
+      fixture, capability, 3.0, 2.0, 0.0, Pose(1.0, 2.0));
+  request.start.pose.position_m.z =
+      fixture.map->SampleElevationBilinear(Vec2{.x = 1.0, .y = 2.0})
+          .value();
+
+  const WheelPlanResult result = PlanWheel(request);
+
+  EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
+  ASSERT_TRUE(result.wheel_metrics.has_value());
+  EXPECT_GT(result.wheel_metrics->slope_or_roughness_rejects, 0U);
+  EXPECT_EQ(result.wheel_metrics
+                ->direct_unknown_or_unsupported_footprint_rejects,
+            0U);
+  EXPECT_EQ(result.wheel_metrics->relief_or_underbody_rejects, 0U);
+}
+
 TEST(WheelPlanner, RejectsALocalBumpAboveUnderbodyClearance) {
   constexpr std::size_t kWidth = 30U;
   constexpr std::size_t kHeight = 20U;
@@ -1523,6 +1795,8 @@ TEST(WheelPlanner, RejectsALocalBumpAboveUnderbodyClearance) {
       fixture, capability, 3.0, 2.1, 0.0, Pose(1.0, 2.1)));
 
   EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
+  ASSERT_TRUE(result.wheel_metrics.has_value());
+  EXPECT_GT(result.wheel_metrics->relief_or_underbody_rejects, 0U);
 }
 
 TEST(WheelPlanner, SpinSweepChecksIntermediateRectangleCorners) {
@@ -1614,6 +1888,9 @@ TEST(WheelPlanner, StopsLargeInnerSweepBatchWhenClockCrossesDeadline) {
   EXPECT_EQ(result.status, LocalPlanStatus::kTimedOut) << result.reason_code;
   EXPECT_LT(result.sweep_cell_checks, 1024U);
   EXPECT_GE(clock_calls, 5U);
+  ASSERT_TRUE(result.wheel_metrics.has_value());
+  EXPECT_GT(result.wheel_metrics->deadline_or_cancellation_interruptions,
+            0U);
 }
 
 TEST(WheelPlanner, ParameterizesExecutableVelocityAndAccelerationTiming) {
@@ -1932,6 +2209,8 @@ TEST(WheelPlanner, DoesNotInstantlyFlipAnOpposingInitialVelocity) {
   EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
   EXPECT_GT(result.full_certifications, 0U);
   EXPECT_GT(result.full_invalidations, 0U);
+  ASSERT_TRUE(result.wheel_metrics.has_value());
+  EXPECT_GT(result.wheel_metrics->dynamics_or_primitive_shape_rejects, 0U);
 }
 
 TEST(WheelPlanner, RejectsReturnedCertificateWhenRequestIdentityChanges) {

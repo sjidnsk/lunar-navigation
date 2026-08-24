@@ -34,6 +34,50 @@ constexpr std::size_t kMaximumPreferredTemplateEdges = 8192U;
 constexpr std::size_t kMaximumPreferredTemplatesEvaluated = 8U;
 constexpr std::array<double, 5U> kCostWeights{1.0, 1.0, 1.0, 1.0, 1.0};
 
+struct CellWindow final {
+  std::int64_t minimum_x{};
+  std::int64_t minimum_y{};
+  std::int64_t maximum_x{};
+  std::int64_t maximum_y{};
+};
+
+[[nodiscard]] bool FootprintWithinClosedMapExtent(
+    const shared::MapSnapshot& map, const double minimum_x,
+    const double minimum_y, const double maximum_x,
+    const double maximum_y) noexcept {
+  const double map_minimum_x = map.origin_m().x;
+  const double map_minimum_y = map.origin_m().y;
+  const double map_maximum_x =
+      map_minimum_x + static_cast<double>(map.width()) * map.resolution_m();
+  const double map_maximum_y =
+      map_minimum_y + static_cast<double>(map.height()) * map.resolution_m();
+  return std::isfinite(minimum_x) && std::isfinite(minimum_y) &&
+         std::isfinite(maximum_x) && std::isfinite(maximum_y) &&
+         minimum_x <= maximum_x && minimum_y <= maximum_y &&
+         minimum_x >= map_minimum_x - kTolerance &&
+         minimum_y >= map_minimum_y - kTolerance &&
+         maximum_x <= map_maximum_x + kTolerance &&
+         maximum_y <= map_maximum_y + kTolerance;
+}
+
+[[nodiscard]] CellWindow ClipOccupiedWindow(
+    const shared::MapSnapshot& map, const double minimum_x,
+    const double minimum_y, const double maximum_x,
+    const double maximum_y) noexcept {
+  const auto clip = [&](const double coordinate, const double origin,
+                        const std::size_t extent) {
+    const double cell = std::floor((coordinate - origin) / map.resolution_m());
+    return static_cast<std::int64_t>(std::clamp(
+        cell, 0.0, static_cast<double>(extent - 1U)));
+  };
+  return CellWindow{
+      .minimum_x = clip(minimum_x, map.origin_m().x, map.width()),
+      .minimum_y = clip(minimum_y, map.origin_m().y, map.height()),
+      .maximum_x = clip(maximum_x, map.origin_m().x, map.width()),
+      .maximum_y = clip(maximum_y, map.origin_m().y, map.height()),
+  };
+}
+
 [[nodiscard]] bool Finite(const Vec2& value) noexcept {
   return std::isfinite(value.x) && std::isfinite(value.y);
 }
@@ -635,6 +679,16 @@ enum class EdgeCertificationKind : std::uint8_t {
   kScaledPrimitive,
 };
 
+enum class RejectionBucket : std::uint8_t {
+  kNone,
+  kDirectUnknownOrUnsupportedFootprint,
+  kMeasuredObstacleClearance,
+  kSlopeOrRoughness,
+  kReliefOrUnderbody,
+  kDynamicsOrPrimitiveShape,
+  kDeadlineOrCancellation,
+};
+
 struct EdgeCertificateIdentity final {
   std::uint64_t local_source_sequence{};
   std::uint64_t local_terrain_semantics_id{};
@@ -667,12 +721,14 @@ struct EdgeEvaluation final {
   double execution_time_s{};
   std::array<double, 5U> cost_components{};
   EdgeCertificateIdentity certificate_identity;
+  RejectionBucket rejection_bucket{RejectionBucket::kNone};
 };
 
 struct BroadPhaseAssessment final {
   bool rejected{};
   bool interrupted{};
   bool clearance_proven{};
+  RejectionBucket rejection_bucket{RejectionBucket::kNone};
 };
 
 struct PreferredEdgeRecord final {
@@ -817,23 +873,24 @@ class WheelSearchGraph final {
     nodes_.reserve(std::min<std::size_t>(cell_count, 65536U));
     state_ids_.reserve(nodes_.capacity());
     const std::size_t prefix_width = map_.width() + 1U;
-    hazard_integral_.assign(prefix_width * (map_.height() + 1U), 0U);
+    occupied_integral_.assign(prefix_width * (map_.height() + 1U), 0U);
     complex_terrain_integral_.assign(
         prefix_width * (map_.height() + 1U), 0U);
-    hazards_by_row_.resize(map_.height());
+    occupied_by_row_.resize(map_.height());
     const auto elevations = map_.FloatLayer("elevation");
     for (std::size_t y = 0U; y < map_.height(); ++y) {
-      std::uint32_t row_hazards = 0U;
+      std::uint32_t row_occupied = 0U;
       std::uint32_t row_complex_terrain = 0U;
       for (std::size_t x = 0U; x < map_.width(); ++x) {
         const std::size_t index = y * map_.width() + x;
-        const bool hazard = terrain_.free_with_height[index] == 0U;
-        row_hazards += static_cast<std::uint32_t>(hazard);
-        if (hazard) {
-          hazards_by_row_[y].push_back(static_cast<std::int32_t>(x));
+        const bool occupied = terrain_.occupied[index] != 0U;
+        row_occupied += static_cast<std::uint32_t>(occupied);
+        if (occupied) {
+          occupied_by_row_[y].push_back(static_cast<std::int32_t>(x));
         }
+        const bool unsupported = terrain_.free_with_height[index] == 0U;
         const bool complex_terrain =
-            hazard || index >= elevations.size() ||
+            unsupported || index >= elevations.size() ||
             !std::isfinite(elevations[index]) || elevations[index] != 0.0F ||
             !std::isfinite(terrain_.slope_rad[index]) ||
             terrain_.slope_rad[index] != 0.0F ||
@@ -841,8 +898,8 @@ class WheelSearchGraph final {
             terrain_.roughness_m[index] != 0.0F;
         row_complex_terrain +=
             static_cast<std::uint32_t>(complex_terrain);
-        hazard_integral_[(y + 1U) * prefix_width + x + 1U] =
-            hazard_integral_[y * prefix_width + x + 1U] + row_hazards;
+        occupied_integral_[(y + 1U) * prefix_width + x + 1U] =
+            occupied_integral_[y * prefix_width + x + 1U] + row_occupied;
         complex_terrain_integral_[(y + 1U) * prefix_width + x + 1U] =
             complex_terrain_integral_[y * prefix_width + x + 1U] +
             row_complex_terrain;
@@ -1047,6 +1104,42 @@ class WheelSearchGraph final {
 
   [[nodiscard]] std::size_t sweep_cell_checks() const noexcept {
     return sweep_cell_checks_;
+  }
+
+  [[nodiscard]] std::size_t
+  direct_unknown_or_unsupported_footprint_rejects() const noexcept {
+    return direct_unknown_or_unsupported_footprint_rejects_;
+  }
+
+  [[nodiscard]] std::size_t
+  measured_obstacle_clearance_rejects() const noexcept {
+    return measured_obstacle_clearance_rejects_;
+  }
+
+  [[nodiscard]] std::size_t slope_or_roughness_rejects() const noexcept {
+    return slope_or_roughness_rejects_;
+  }
+
+  [[nodiscard]] std::size_t relief_or_underbody_rejects() const noexcept {
+    return relief_or_underbody_rejects_;
+  }
+
+  [[nodiscard]] std::size_t
+  dynamics_or_primitive_shape_rejects() const noexcept {
+    return dynamics_or_primitive_shape_rejects_;
+  }
+
+  [[nodiscard]] std::size_t
+  deadline_or_cancellation_interruptions() const noexcept {
+    return deadline_or_cancellation_interruptions_;
+  }
+
+  [[nodiscard]] std::size_t far_clearance_scan_skips() const noexcept {
+    return far_clearance_scan_skips_;
+  }
+
+  [[nodiscard]] std::size_t occupied_clearance_cell_checks() const noexcept {
+    return occupied_clearance_cell_checks_;
   }
 
   [[nodiscard]] const std::array<double, 5U>& cost_scales() const noexcept {
@@ -2306,10 +2399,10 @@ class WheelSearchGraph final {
     return request_.control.canceled();
   }
 
-  [[nodiscard]] bool HasHazardInCells(const std::int64_t minimum_x,
-                                      const std::int64_t minimum_y,
-                                      const std::int64_t maximum_x,
-                                      const std::int64_t maximum_y) const noexcept {
+  [[nodiscard]] bool HasOccupiedInCells(
+      const std::int64_t minimum_x, const std::int64_t minimum_y,
+      const std::int64_t maximum_x,
+      const std::int64_t maximum_y) const noexcept {
     if (minimum_x < 0 || minimum_y < 0 || maximum_x < minimum_x ||
         maximum_y < minimum_y ||
         maximum_x >= static_cast<std::int64_t>(map_.width()) ||
@@ -2322,10 +2415,10 @@ class WheelSearchGraph final {
     const std::size_t right = static_cast<std::size_t>(maximum_x) + 1U;
     const std::size_t bottom = static_cast<std::size_t>(maximum_y) + 1U;
     const std::uint32_t count =
-        hazard_integral_[bottom * stride + right] -
-        hazard_integral_[top * stride + right] -
-        hazard_integral_[bottom * stride + left] +
-        hazard_integral_[top * stride + left];
+        occupied_integral_[bottom * stride + right] -
+        occupied_integral_[top * stride + right] -
+        occupied_integral_[bottom * stride + left] +
+        occupied_integral_[top * stride + left];
     return count != 0U;
   }
 
@@ -2366,7 +2459,8 @@ class WheelSearchGraph final {
     if (!cell.has_value()) {
       return false;
     }
-    const float clearance = terrain_.clearance_m[map_.Index(*cell)];
+    const float clearance =
+        terrain_.narrow_band_distance_m[map_.Index(*cell)];
     return std::isfinite(clearance) &&
            static_cast<double>(clearance) <
                footprint_radius_m_ + 2.0 * map_.resolution_m();
@@ -2929,6 +3023,8 @@ class WheelSearchGraph final {
          (!ModeAllows(transition.source_mode, transition.kind) ||
           transition.reverse != IsReverse(transition.kind)))) {
       assessment.rejected = true;
+      assessment.rejection_bucket =
+          RejectionBucket::kDynamicsOrPrimitiveShape;
       return assessment;
     }
     const double swept_distance =
@@ -2938,6 +3034,8 @@ class WheelSearchGraph final {
     if (!std::isfinite(swept_distance) || swept_distance < 0.0 ||
         !std::isfinite(maximum_step) || maximum_step <= 0.0) {
       assessment.rejected = true;
+      assessment.rejection_bucket =
+          RejectionBucket::kDynamicsOrPrimitiveShape;
       return assessment;
     }
     const std::size_t subdivisions =
@@ -2953,6 +3051,8 @@ class WheelSearchGraph final {
     for (std::size_t sample = 0U; sample <= subdivisions; ++sample) {
       if (ControlInterrupted()) {
         assessment.interrupted = true;
+        assessment.rejection_bucket =
+            RejectionBucket::kDeadlineOrCancellation;
         return assessment;
       }
       const double ratio =
@@ -2966,6 +3066,8 @@ class WheelSearchGraph final {
                            : std::nullopt;
       if (!pose.has_value() || !yaw.has_value()) {
         assessment.rejected = true;
+        assessment.rejection_bucket =
+            RejectionBucket::kDynamicsOrPrimitiveShape;
         return assessment;
       }
       const double cosine = std::cos(*yaw);
@@ -2985,35 +3087,29 @@ class WheelSearchGraph final {
         maximum_y = std::max(maximum_y, y);
       }
       const double margin = capability_.minimum_clearance_m;
-      const std::int64_t minimum_cell_x = static_cast<std::int64_t>(
-          std::floor((minimum_x - margin - map_.origin_m().x) /
-                     map_.resolution_m()));
-      const std::int64_t minimum_cell_y = static_cast<std::int64_t>(
-          std::floor((minimum_y - margin - map_.origin_m().y) /
-                     map_.resolution_m()));
-      const std::int64_t maximum_cell_x = static_cast<std::int64_t>(
-          std::floor((maximum_x + margin - map_.origin_m().x) /
-                     map_.resolution_m()));
-      const std::int64_t maximum_cell_y = static_cast<std::int64_t>(
-          std::floor((maximum_y + margin - map_.origin_m().y) /
-                     map_.resolution_m()));
-      if (minimum_cell_x < 0 || minimum_cell_y < 0 ||
-          maximum_cell_x >= static_cast<std::int64_t>(map_.width()) ||
-          maximum_cell_y >= static_cast<std::int64_t>(map_.height())) {
+      if (!FootprintWithinClosedMapExtent(
+              map_, minimum_x, minimum_y, maximum_x, maximum_y)) {
         assessment.rejected = true;
+        assessment.rejection_bucket =
+            RejectionBucket::kDirectUnknownOrUnsupportedFootprint;
         return assessment;
       }
+      const CellWindow occupied_window = ClipOccupiedWindow(
+          map_, minimum_x - margin, minimum_y - margin,
+          maximum_x + margin, maximum_y + margin);
       if (broad_inset_radius_m_ > kTolerance &&
-          HasHazardInCells(minimum_cell_x, minimum_cell_y, maximum_cell_x,
-                           maximum_cell_y)) {
+          HasOccupiedInCells(
+              occupied_window.minimum_x, occupied_window.minimum_y,
+              occupied_window.maximum_x, occupied_window.maximum_y)) {
         const double rejection_radius =
             broad_inset_radius_m_ + capability_.minimum_clearance_m;
-        for (std::int64_t y = minimum_cell_y; y <= maximum_cell_y; ++y) {
-          const auto& row = hazards_by_row_[static_cast<std::size_t>(y)];
+        for (std::int64_t y = occupied_window.minimum_y;
+             y <= occupied_window.maximum_y; ++y) {
+          const auto& row = occupied_by_row_[static_cast<std::size_t>(y)];
           const auto begin = std::ranges::lower_bound(
-              row, static_cast<std::int32_t>(minimum_cell_x));
+              row, static_cast<std::int32_t>(occupied_window.minimum_x));
           const auto finish = std::ranges::upper_bound(
-              row, static_cast<std::int32_t>(maximum_cell_x));
+              row, static_cast<std::int32_t>(occupied_window.maximum_x));
           for (auto hazard = begin; hazard != finish; ++hazard) {
             const double cell_minimum_x =
                 map_.origin_m().x +
@@ -3037,6 +3133,8 @@ class WheelSearchGraph final {
                 distance < rejection_radius - kTolerance;
             if (intersects_inset || violates_clearance) {
               assessment.rejected = true;
+              assessment.rejection_bucket =
+                  RejectionBucket::kMeasuredObstacleClearance;
               return assessment;
             }
           }
@@ -3046,12 +3144,16 @@ class WheelSearchGraph final {
           Vec2{.x = pose->position_m.x, .y = pose->position_m.y});
       if (!center_cell.has_value()) {
         assessment.rejected = true;
+        assessment.rejection_bucket =
+            RejectionBucket::kDirectUnknownOrUnsupportedFootprint;
         return assessment;
       }
       const std::size_t center_index = map_.Index(*center_cell);
       if (footprint_contains_origin_ &&
           terrain_.free_with_height[center_index] == 0U) {
         assessment.rejected = true;
+        assessment.rejection_bucket =
+            RejectionBucket::kDirectUnknownOrUnsupportedFootprint;
         return assessment;
       }
       const float clearance = terrain_.clearance_m[center_index];
@@ -3070,10 +3172,11 @@ class WheelSearchGraph final {
       const bool clearance_proven) const {
     // The broad proof is useful for classifying cheap rejection, but exact
     // clearance still supplies the certificate's cost and label ranking.
-    static_cast<void>(clearance_proven);
     EdgeEvaluation result{.transition = transition};
     if (std::abs(transition.curvature_per_m) >
         capability_.maximum_curvature_per_m + kTolerance) {
+      result.rejection_bucket =
+          RejectionBucket::kDynamicsOrPrimitiveShape;
       return result;
     }
     const double swept_distance =
@@ -3094,6 +3197,8 @@ class WheelSearchGraph final {
     terrain_samples.reserve(capability_.footprint_xy_m.size() * 4U);
     for (std::size_t sample = 0U; sample < samples; ++sample) {
       if (ControlInterrupted()) {
+        result.rejection_bucket =
+            RejectionBucket::kDeadlineOrCancellation;
         return result;
       }
       const double ratio = subdivisions == 0U
@@ -3102,6 +3207,8 @@ class WheelSearchGraph final {
                                      static_cast<double>(subdivisions);
       const auto pose = Interpolate(transition, ratio);
       if (!pose.has_value()) {
+        result.rejection_bucket =
+            RejectionBucket::kDynamicsOrPrimitiveShape;
         return result;
       }
       const double center_x = pose->position_m.x;
@@ -3130,66 +3237,47 @@ class WheelSearchGraph final {
           footprint_radius_m_ + 2.0 * map_.resolution_m();
       const double clearance_scan_margin =
           std::max(clearance_margin, narrow_threshold);
-      const auto hard_minimum_cell_x = static_cast<std::int64_t>(
-          std::floor((minimum_x - clearance_margin - map_.origin_m().x) /
-                     map_.resolution_m()));
-      const auto hard_minimum_cell_y = static_cast<std::int64_t>(
-          std::floor((minimum_y - clearance_margin - map_.origin_m().y) /
-                     map_.resolution_m()));
-      const auto hard_maximum_cell_x = static_cast<std::int64_t>(
-          std::floor((maximum_x + clearance_margin - map_.origin_m().x) /
-                     map_.resolution_m()));
-      const auto hard_maximum_cell_y = static_cast<std::int64_t>(
-          std::floor((maximum_y + clearance_margin - map_.origin_m().y) /
-                     map_.resolution_m()));
-      if (hard_minimum_cell_x < 0 || hard_minimum_cell_y < 0 ||
-          hard_maximum_cell_x >= static_cast<std::int64_t>(map_.width()) ||
-          hard_maximum_cell_y >= static_cast<std::int64_t>(map_.height())) {
+      if (!FootprintWithinClosedMapExtent(
+              map_, minimum_x, minimum_y, maximum_x, maximum_y)) {
+        result.rejection_bucket =
+            RejectionBucket::kDirectUnknownOrUnsupportedFootprint;
         return result;
       }
-      const auto clearance_minimum_cell_x = std::max<std::int64_t>(
-          0, static_cast<std::int64_t>(
-          std::floor((minimum_x - clearance_scan_margin - map_.origin_m().x) /
-                     map_.resolution_m())));
-      const auto clearance_minimum_cell_y = std::max<std::int64_t>(
-          0, static_cast<std::int64_t>(
-          std::floor((minimum_y - clearance_scan_margin - map_.origin_m().y) /
-                     map_.resolution_m())));
-      const auto clearance_maximum_cell_x = std::min<std::int64_t>(
-          static_cast<std::int64_t>(map_.width()) - 1,
-          static_cast<std::int64_t>(
-          std::floor((maximum_x + clearance_scan_margin - map_.origin_m().x) /
-                     map_.resolution_m())));
-      const auto clearance_maximum_cell_y = std::min<std::int64_t>(
-          static_cast<std::int64_t>(map_.height()) - 1,
-          static_cast<std::int64_t>(
-          std::floor((maximum_y + clearance_scan_margin - map_.origin_m().y) /
-                     map_.resolution_m())));
+      const CellWindow clearance_window = ClipOccupiedWindow(
+          map_, minimum_x - clearance_scan_margin,
+          minimum_y - clearance_scan_margin,
+          maximum_x + clearance_scan_margin,
+          maximum_y + clearance_scan_margin);
       // The broad clearance proof can rule out collision, but exact
       // clearance remains part of label ranking and edge cost. Preserve that
       // physical value while still running the terrain and dynamics stages;
       // a broad result alone is never an emitted certificate.
-      if (HasHazardInCells(clearance_minimum_cell_x,
-                           clearance_minimum_cell_y,
-                           clearance_maximum_cell_x,
-                           clearance_maximum_cell_y)) {
-        for (std::int64_t y = clearance_minimum_cell_y;
-             y <= clearance_maximum_cell_y; ++y) {
-          const auto& row = hazards_by_row_[static_cast<std::size_t>(y)];
+      const bool has_occupied_in_clearance_window = HasOccupiedInCells(
+          clearance_window.minimum_x, clearance_window.minimum_y,
+          clearance_window.maximum_x, clearance_window.maximum_y);
+      if (has_occupied_in_clearance_window) {
+        for (std::int64_t y = clearance_window.minimum_y;
+             y <= clearance_window.maximum_y; ++y) {
+          const auto& row = occupied_by_row_[static_cast<std::size_t>(y)];
           const auto begin = std::ranges::lower_bound(
-              row, static_cast<std::int32_t>(clearance_minimum_cell_x));
+              row, static_cast<std::int32_t>(clearance_window.minimum_x));
           const auto finish = std::ranges::upper_bound(
-              row, static_cast<std::int32_t>(clearance_maximum_cell_x));
+              row, static_cast<std::int32_t>(clearance_window.maximum_x));
           for (auto hazard = begin; hazard != finish; ++hazard) {
             const std::int64_t x = *hazard;
             ++sweep_cell_checks_;
             if ((sweep_cell_checks_ & 63U) == 0U && ControlInterrupted()) {
+              result.rejection_bucket =
+                  RejectionBucket::kDeadlineOrCancellation;
               return result;
             }
-            const double cell_minimum_x = map_.origin_m().x +
-                                          static_cast<double>(x) * map_.resolution_m();
-            const double cell_minimum_y = map_.origin_m().y +
-                                          static_cast<double>(y) * map_.resolution_m();
+            const double cell_minimum_x =
+                map_.origin_m().x +
+                static_cast<double>(x) * map_.resolution_m();
+            const double cell_minimum_y =
+                map_.origin_m().y +
+                static_cast<double>(y) * map_.resolution_m();
+            ++occupied_clearance_cell_checks_;
             const double distance = PolygonDistanceToCell(
                 polygon, cell_minimum_x, cell_minimum_y,
                 cell_minimum_x + map_.resolution_m(),
@@ -3198,25 +3286,22 @@ class WheelSearchGraph final {
                 std::min(result.minimum_clearance_m, distance);
             if (distance + kTolerance < clearance_margin ||
                 distance <= kTolerance) {
+              result.rejection_bucket =
+                  RejectionBucket::kMeasuredObstacleClearance;
               return result;
             }
           }
         }
+      } else if (clearance_proven) {
+        ++far_clearance_scan_skips_;
       }
 
-      const auto minimum_cell_x = static_cast<std::int64_t>(std::floor(
-          (minimum_x - map_.origin_m().x) / map_.resolution_m()));
-      const auto minimum_cell_y = static_cast<std::int64_t>(std::floor(
-          (minimum_y - map_.origin_m().y) / map_.resolution_m()));
-      const auto maximum_cell_x = static_cast<std::int64_t>(std::floor(
-          (maximum_x - map_.origin_m().x) / map_.resolution_m()));
-      const auto maximum_cell_y = static_cast<std::int64_t>(std::floor(
-          (maximum_y - map_.origin_m().y) / map_.resolution_m()));
-      if (minimum_cell_x < 0 || minimum_cell_y < 0 ||
-          maximum_cell_x >= static_cast<std::int64_t>(map_.width()) ||
-          maximum_cell_y >= static_cast<std::int64_t>(map_.height())) {
-        return result;
-      }
+      const CellWindow footprint_window = ClipOccupiedWindow(
+          map_, minimum_x, minimum_y, maximum_x, maximum_y);
+      const std::int64_t minimum_cell_x = footprint_window.minimum_x;
+      const std::int64_t minimum_cell_y = footprint_window.minimum_y;
+      const std::int64_t maximum_cell_x = footprint_window.maximum_x;
+      const std::int64_t maximum_cell_y = footprint_window.maximum_y;
 
       // Flat free regions need no polygon terrain reduction. Include one
       // interpolation-cell halo so the skipped bilinear wheel samples are
@@ -3248,6 +3333,8 @@ class WheelSearchGraph final {
           };
           const auto elevation = map_.SampleElevationBilinear(wheel_position);
           if (!elevation.has_value()) {
+            result.rejection_bucket =
+                RejectionBucket::kDirectUnknownOrUnsupportedFootprint;
             return result;
           }
           wheel_heights[wheel_index++] = *elevation;
@@ -3272,6 +3359,7 @@ class WheelSearchGraph final {
       if (!std::isfinite(support_slope) ||
           support_slope > capability_.maximum_slope_rad +
                               kPhysicalMatchTolerance) {
+        result.rejection_bucket = RejectionBucket::kSlopeOrRoughness;
         return result;
       }
       result.maximum_slope_rad =
@@ -3284,6 +3372,8 @@ class WheelSearchGraph final {
         for (std::int64_t x = minimum_cell_x; x <= maximum_cell_x; ++x) {
           ++sweep_cell_checks_;
           if ((sweep_cell_checks_ & 63U) == 0U && ControlInterrupted()) {
+            result.rejection_bucket =
+                RejectionBucket::kDeadlineOrCancellation;
             return result;
           }
           const double cell_minimum_x =
@@ -3304,11 +3394,16 @@ class WheelSearchGraph final {
           const std::size_t index = map_.Index(cell);
           if (index >= terrain_.free_with_height.size() ||
               terrain_.free_with_height[index] == 0U ||
-              !std::isfinite(terrain_.slope_rad[index]) ||
+              index >= elevations.size() || !std::isfinite(elevations[index])) {
+            result.rejection_bucket =
+                RejectionBucket::kDirectUnknownOrUnsupportedFootprint;
+            return result;
+          }
+          if (!std::isfinite(terrain_.slope_rad[index]) ||
               terrain_.slope_rad[index] >
                   capability_.maximum_slope_rad + kTolerance ||
-              !std::isfinite(terrain_.roughness_m[index]) ||
-              index >= elevations.size() || !std::isfinite(elevations[index])) {
+              !std::isfinite(terrain_.roughness_m[index])) {
+            result.rejection_bucket = RejectionBucket::kSlopeOrRoughness;
             return result;
           }
           const double cell_center_x =
@@ -3334,13 +3429,18 @@ class WheelSearchGraph final {
               static_cast<double>(terrain_.roughness_m[index]));
         }
       }
-      if (!touched_cell ||
-          maximum_positive_relief >
+      if (!touched_cell) {
+        result.rejection_bucket =
+            RejectionBucket::kDirectUnknownOrUnsupportedFootprint;
+        return result;
+      }
+      if (maximum_positive_relief >
               capability_.maximum_local_obstacle_relief_m +
                   kPhysicalMatchTolerance ||
           maximum_positive_relief >
               capability_.minimum_underbody_clearance_m +
                   kPhysicalMatchTolerance) {
+        result.rejection_bucket = RejectionBucket::kReliefOrUnderbody;
         return result;
       }
       const double maximum_continuous_step =
@@ -3351,6 +3451,8 @@ class WheelSearchGraph final {
              second < terrain_samples.size(); ++second) {
           ++terrain_pair_checks;
           if ((terrain_pair_checks & 63U) == 0U && ControlInterrupted()) {
+            result.rejection_bucket =
+                RejectionBucket::kDeadlineOrCancellation;
             return result;
           }
           const auto& [first_cell, first_height] = terrain_samples[first];
@@ -3363,6 +3465,7 @@ class WheelSearchGraph final {
           if (separation == 1 &&
               std::abs(first_height - second_height) >
                   maximum_continuous_step + kTolerance) {
+            result.rejection_bucket = RejectionBucket::kReliefOrUnderbody;
             return result;
           }
         }
@@ -3377,11 +3480,15 @@ class WheelSearchGraph final {
     if (!std::isfinite(result.execution_time_s) ||
         result.execution_time_s < 0.0) {
       result.valid = false;
+      result.rejection_bucket =
+          RejectionBucket::kDynamicsOrPrimitiveShape;
       return result;
     }
     result.cost = pose_only ? 0.0 : EdgeCost(result);
     if (!std::isfinite(result.cost) || (!pose_only && result.cost <= 0.0)) {
       result.valid = false;
+      result.rejection_bucket =
+          RejectionBucket::kDynamicsOrPrimitiveShape;
     }
     return result;
   }
@@ -3396,6 +3503,7 @@ class WheelSearchGraph final {
         AssessBroadPhase(transition, pose_only);
     if (broad.rejected || broad.interrupted) {
       broad_phase_rejects_ += static_cast<std::size_t>(broad.rejected);
+      RecordRejection(broad.rejection_bucket);
       return EdgeEvaluation{.transition = transition,
                             .certificate_identity = identity};
     }
@@ -3406,7 +3514,35 @@ class WheelSearchGraph final {
     if (!result.valid && !ControlInterrupted()) {
       ++full_invalidations_;
     }
+    if (!result.valid) {
+      RecordRejection(result.rejection_bucket);
+    }
     return result;
+  }
+
+  void RecordRejection(const RejectionBucket bucket) const noexcept {
+    switch (bucket) {
+      case RejectionBucket::kDirectUnknownOrUnsupportedFootprint:
+        ++direct_unknown_or_unsupported_footprint_rejects_;
+        break;
+      case RejectionBucket::kMeasuredObstacleClearance:
+        ++measured_obstacle_clearance_rejects_;
+        break;
+      case RejectionBucket::kSlopeOrRoughness:
+        ++slope_or_roughness_rejects_;
+        break;
+      case RejectionBucket::kReliefOrUnderbody:
+        ++relief_or_underbody_rejects_;
+        break;
+      case RejectionBucket::kDynamicsOrPrimitiveShape:
+        ++dynamics_or_primitive_shape_rejects_;
+        break;
+      case RejectionBucket::kDeadlineOrCancellation:
+        ++deadline_or_cancellation_interruptions_;
+        break;
+      case RejectionBucket::kNone:
+        break;
+    }
   }
 
   [[nodiscard]] static std::optional<SpeedProfile> MakeProfile(
@@ -4196,6 +4332,14 @@ class WheelSearchGraph final {
   std::size_t quantized_state_reuses_{};
   std::size_t quantized_endpoint_aliases_{};
   mutable std::size_t sweep_cell_checks_{};
+  mutable std::size_t direct_unknown_or_unsupported_footprint_rejects_{};
+  mutable std::size_t measured_obstacle_clearance_rejects_{};
+  mutable std::size_t slope_or_roughness_rejects_{};
+  mutable std::size_t relief_or_underbody_rejects_{};
+  mutable std::size_t dynamics_or_primitive_shape_rejects_{};
+  mutable std::size_t deadline_or_cancellation_interruptions_{};
+  mutable std::size_t far_clearance_scan_skips_{};
+  mutable std::size_t occupied_clearance_cell_checks_{};
   std::array<double, 5U> cost_scales_{};
   std::shared_ptr<const shared::GoalDistanceField> goal_distance_field_;
   double finest_xy_key_resolution_m_{
@@ -4203,9 +4347,9 @@ class WheelSearchGraph final {
   std::size_t maximum_yaw_bins_{};
   std::vector<std::size_t> ordered_primitives_;
   std::vector<std::size_t> primitive_stable_rank_;
-  std::vector<std::uint32_t> hazard_integral_;
+  std::vector<std::uint32_t> occupied_integral_;
   std::vector<std::uint32_t> complex_terrain_integral_;
-  std::vector<std::vector<std::int32_t>> hazards_by_row_;
+  std::vector<std::vector<std::int32_t>> occupied_by_row_;
   std::vector<BarrierRectangle> barriers_;
   std::vector<std::vector<BarrierRectangle>> barriers_by_goal_;
   std::optional<CertifiedPreferredCandidate> certified_preferred_candidate_;
@@ -4235,7 +4379,9 @@ class WheelSearchGraph final {
     const shared::LocalTerrainProjection& terrain) noexcept {
   return terrain.map != nullptr && terrain.map->cell_count() != 0U &&
          terrain.free_with_height.size() == terrain.map->cell_count() &&
+         terrain.occupied.size() == terrain.map->cell_count() &&
          terrain.clearance_m.size() == terrain.map->cell_count() &&
+         terrain.narrow_band_distance_m.size() == terrain.map->cell_count() &&
          terrain.slope_rad.size() == terrain.map->cell_count() &&
          terrain.roughness_m.size() == terrain.map->cell_count();
 }
@@ -4359,6 +4505,20 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
         .preferred_builder_invocations = result.preferred_builder_invocations,
         .cost_components = result.cost_components,
         .cost_scales = result.cost_scales,
+        .direct_unknown_or_unsupported_footprint_rejects =
+            graph.direct_unknown_or_unsupported_footprint_rejects(),
+        .measured_obstacle_clearance_rejects =
+            graph.measured_obstacle_clearance_rejects(),
+        .slope_or_roughness_rejects = graph.slope_or_roughness_rejects(),
+        .relief_or_underbody_rejects =
+            graph.relief_or_underbody_rejects(),
+        .dynamics_or_primitive_shape_rejects =
+            graph.dynamics_or_primitive_shape_rejects(),
+        .deadline_or_cancellation_interruptions =
+            graph.deadline_or_cancellation_interruptions(),
+        .far_clearance_scan_skips = graph.far_clearance_scan_skips(),
+        .occupied_clearance_cell_checks =
+            graph.occupied_clearance_cell_checks(),
     };
     return result;
   };
