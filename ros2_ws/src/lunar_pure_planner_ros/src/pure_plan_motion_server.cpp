@@ -51,6 +51,7 @@
 #include "lunar_pure_planner_ros/message_conversion.hpp"
 #include "lunar_pure_planner_ros/platform_config.hpp"
 #include "lunar_pure_planner_ros/request_diagnostics.hpp"
+#include "rolling_result_retention.hpp"
 #include "lunar_pure_planner_ros/state_adapter.hpp"
 #include "lunar_pure_planner_ros/trusted_bridge.hpp"
 
@@ -1306,11 +1307,7 @@ struct PurePlanMotionServer::Impl final {
       std::this_thread::sleep_for(std::chrono::milliseconds{
           parameters.rolling_surface.poll_period_ms});
     }
-    auto canceled = Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED");
-    if (last_segment.has_value()) {
-      canceled.wheel_metrics = last_segment->wheel_metrics;
-    }
-    return canceled;
+    return detail::MakeRollingIdleCanceledResult(std::move(last_segment));
   }
 
   struct OutputBundle final {

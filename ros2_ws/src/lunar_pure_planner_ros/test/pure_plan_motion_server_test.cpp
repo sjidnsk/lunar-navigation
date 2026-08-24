@@ -1,6 +1,7 @@
 #include "lunar_pure_planner_ros/pure_plan_motion_server.hpp"
 #include "accepted_goal_finalizer.hpp"
 #include "action_execution_state.hpp"
+#include "rolling_result_retention.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -1813,6 +1814,24 @@ TEST(PurePlanMotionServer,
   EXPECT_EQ(FindDiagnosticValue(
                 diagnostics, "wheel_edge_validation_evaluations"),
             "9");
+}
+
+TEST(RollingResultRetention, IdleCancellationRetainsLastSegmentWheelMetrics) {
+  lunar::pure_planning::PlanningResult last_segment{
+      .status = lunar::pure_planning::PlanningStatus::kSuccess,
+      .reason_code = "PLAN_FOUND",
+      .wheel_metrics = lunar::pure_planning::WheelPlanningMetrics{
+          .edge_validation_evaluations = 9U,
+      },
+  };
+
+  const auto result =
+      detail::MakeRollingIdleCanceledResult(std::move(last_segment));
+
+  EXPECT_EQ(result.status, lunar::pure_planning::PlanningStatus::kCanceled);
+  EXPECT_EQ(result.reason_code, "REQUEST_CANCELED");
+  ASSERT_TRUE(result.wheel_metrics.has_value());
+  EXPECT_EQ(result.wheel_metrics->edge_validation_evaluations, 9U);
 }
 
 TEST(PurePlanMotionServer,
