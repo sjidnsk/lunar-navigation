@@ -606,6 +606,7 @@ ExplorationNodeParameters TestParameters(const std::string& prefix) {
       .maximum_executable_path_points = 64U,
       .maximum_replans = 2U,
       .goal_yaw_tolerance_rad = std::numbers::pi / 16.0,
+      .filter_global_goal_cell = false,
       .planner_result_timeout = 2s,
       .global_map_topic = prefix + "/global_map",
       .odometry_topic = prefix + "/odometry",
@@ -924,6 +925,36 @@ TEST_F(ExplorationNodeTest, MissingOdometryWaitsIndefinitely) {
 
 TEST_F(ExplorationNodeTest, MissingMapToOdomTransformWaitsIndefinitely) {
   ExpectWaitingWithMissingInput(2);
+}
+
+TEST_F(ExplorationNodeTest,
+       GlobalGoalCellFilterSkipsCircumscribedInflationRejectedCandidate) {
+  parameters_.filter_global_goal_cell = true;
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->generate_candidates =
+      [](const lunar::pure_exploration::TaskRaster&,
+         std::span<const lunar::pure_exploration::FrontierCluster> frontiers) {
+        auto candidates = ControlledCandidates(frontiers, 2U);
+        // x=4.5 is exactly free in the 0.5 m map, but the adjacent unknown
+        // cell intersects the global circumscribed-footprint inflation.
+        candidates[0].pose = {4.5, 2.0, 0.0};
+        candidates[1].pose = {3.5, 2.0, 0.0};
+        return candidates;
+      };
+  seams->evaluate_gain = [](const lunar::pure_exploration::TaskRaster&,
+                            const lunar::pure_exploration::CandidateView&) {
+    return 1.0;
+  };
+  parameters_.pipeline_seams = std::move(seams);
+
+  Start(FakePlannerServer::Mode::kReachable);
+  PublishAllInputs();
+
+  ASSERT_TRUE(WaitFor([this] { return !server_->Goals().empty(); }));
+  const auto goals = server_->Goals();
+  ASSERT_EQ(goals.size(), 1U);
+  EXPECT_DOUBLE_EQ(goals.front().goal.point.x, 3.5);
+  EXPECT_DOUBLE_EQ(goals.front().goal.point.y, 2.0);
 }
 
 TEST_F(ExplorationNodeTest,

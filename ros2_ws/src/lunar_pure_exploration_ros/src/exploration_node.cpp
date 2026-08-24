@@ -1547,6 +1547,14 @@ void QueueBuild(const std::shared_ptr<RuntimeT>& runtime) {
                     : locked->candidate_generator.Generate(*product.raster,
                                                             frontiers);
 
+            if (locked->parameters.filter_global_goal_cell) {
+              std::size_t global_goal_cell_work = 0U;
+              std::erase_if(candidates, [&](const auto& candidate) {
+                return !locked->candidate_generator.GlobalGoalCellFeasible(
+                    *product.raster, candidate.pose, global_goal_cell_work);
+              });
+            }
+
             std::vector<lunar::pure_exploration::CandidateView> unsuppressed;
             unsuppressed.reserve(candidates.size());
             for (auto& candidate : candidates) {
@@ -2565,6 +2573,12 @@ bool CandidateRemainsValidOnLatestMap(
           2.0 * map.geometry.resolution)});
   const auto detection = detector.Detect(raster, *robot_cell);
   if (!detection.has_reachable_free_start) {
+    return false;
+  }
+  std::size_t global_goal_cell_work = 0U;
+  if (runtime.parameters.filter_global_goal_cell &&
+      !runtime.candidate_generator.GlobalGoalCellFeasible(
+          raster, candidate.pose, global_goal_cell_work)) {
     return false;
   }
   const auto candidates =

@@ -361,6 +361,31 @@ TEST(CandidateGeneratorTest, KeepsEverySafeYawAtOnePositionAndUsesLocalUnknownNo
   }
 }
 
+TEST(CandidateGeneratorTest,
+     AdvancesPastGoalCellRejectedByGlobalCircumscribedInflation) {
+  std::vector<std::int8_t> data(30U * 20U, 0);
+  data[10U * 30U + 20U] = -1;
+  const TaskRaster raster = Raster(30U, 20U, data);
+  const FrontierCluster frontier =
+      OneEdgeCluster(raster, GridIndex{19, 10}, GridIndex{20, 10}, 0U);
+
+  const CandidateGenerator generator(WheelPlatform(), StandardYawOffsets(),
+                                     GenerousLimits());
+  const auto views = generator.Generate(
+      raster, std::span<const FrontierCluster>(&frontier, 1U));
+
+  ASSERT_EQ(views.size(), 5U);
+  std::size_t collision_work = 0U;
+  // The first continuous pose is body-safe, but its 0.2 m global goal cell
+  // still intersects the global planner's circumscribed inflated unknown mask.
+  EXPECT_FALSE(generator.GlobalGoalCellFeasible(
+      raster, views.front().pose, collision_work));
+  const Pose2 advanced{views.front().pose.x - 0.2, views.front().pose.y,
+                       views.front().pose.yaw};
+  EXPECT_TRUE(generator.GlobalGoalCellFeasible(raster, advanced,
+                                               collision_work));
+}
+
 TEST(CandidateGeneratorTest, CanonicalOrderingPreservesOriginalFrontierIndex) {
   std::vector<std::int8_t> data(50U * 20U, 0);
   data[10U * 50U + 35U] = -1;

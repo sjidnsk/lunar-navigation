@@ -766,6 +766,9 @@ ExplorationNodeParameters ScenarioParameters(
       .maximum_executable_path_points = 64U,
       .maximum_replans = 2U,
       .goal_yaw_tolerance_rad = std::numbers::pi / 16.0,
+      // Scripted candidates are the test input under evaluation.  The
+      // production prefilter has its own node-level regression coverage.
+      .filter_global_goal_cell = false,
       .planner_result_timeout = 2s,
       .global_map_topic = prefix + "/global_map",
       .odometry_topic = prefix + "/odometry",

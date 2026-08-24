@@ -392,6 +392,50 @@ bool CollisionFree(const TaskRaster& raster,
   return true;
 }
 
+bool GlobalInflatedGoalCellFeasible(const TaskRaster& raster,
+                                    const GridIndex center,
+                                    const double inflation_m,
+                                    std::size_t maximum_work,
+                                    std::size_t& consumed_work) {
+  const double resolution = raster.geometry().resolution;
+  const double inflation = inflation_m / resolution;
+  if (!std::isfinite(inflation) || inflation < 0.0) {
+    throw std::invalid_argument("candidate global inflation is invalid");
+  }
+  const auto radius = static_cast<std::int64_t>(std::ceil(inflation)) + 1;
+  const Wide inflation_squared = static_cast<Wide>(inflation) * inflation;
+  for (std::int64_t y = static_cast<std::int64_t>(center.y) - radius;
+       y <= static_cast<std::int64_t>(center.y) + radius; ++y) {
+    for (std::int64_t x = static_cast<std::int64_t>(center.x) - radius;
+         x <= static_cast<std::int64_t>(center.x) + radius; ++x) {
+      if (consumed_work == maximum_work) {
+        throw std::length_error("candidate collision work limit exceeded");
+      }
+      ++consumed_work;
+      if (x < 0 || y < 0 ||
+          x >= static_cast<std::int64_t>(raster.geometry().width) ||
+          y >= static_cast<std::int64_t>(raster.geometry().height)) {
+        continue;
+      }
+      const GridIndex cell{static_cast<std::int32_t>(x),
+                           static_cast<std::int32_t>(y)};
+      if (!raster.IsMapBacked(cell) ||
+          raster.Classify(cell) == CellState::kFree ||
+          raster.Classify(cell) == CellState::kOutsideTask) {
+        continue;
+      }
+      const double gap_x = std::max(0.0, std::abs(static_cast<double>(x - center.x)) - 1.0);
+      const double gap_y = std::max(0.0, std::abs(static_cast<double>(y - center.y)) - 1.0);
+      const Wide distance_squared =
+          static_cast<Wide>(gap_x) * gap_x + static_cast<Wide>(gap_y) * gap_y;
+      if (distance_squared <= inflation_squared) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 bool SameEdge(const FrontierCluster::InterfaceEdge& left,
               const FrontierCluster::InterfaceEdge& right) {
   return left.free_cell == right.free_cell &&
@@ -612,6 +656,17 @@ double CandidateGenerator::minimum_standoff_m() const {
   return footprint_circumscribed_radius_m_ + platform_.minimum_clearance_m;
 }
 
+bool CandidateGenerator::GlobalGoalCellFeasible(
+    const TaskRaster& raster, const Pose2 pose,
+    std::size_t& consumed_work) const {
+  const auto center = raster.WorldToCell(Vec2{pose.x, pose.y});
+  return center.has_value() && raster.IsMapBacked(*center) &&
+         raster.Classify(*center) == CellState::kFree &&
+         GlobalInflatedGoalCellFeasible(
+             raster, *center, minimum_standoff_m(),
+             limits_.maximum_collision_work_units, consumed_work);
+}
+
 double CandidateGenerator::maximum_extra_search_m() const {
   return 2.0 * platform_length_m_;
 }
@@ -729,7 +784,6 @@ std::vector<CandidateView> CandidateGenerator::Generate(
             HasClosePosition(position_buckets, center_grid, spacing_grid)) {
           continue;
         }
-
         Vec2 yaw_vector =
             Subtract(frame.unknown_centroid_grid, center_grid);
         if (Dot(yaw_vector, yaw_vector) == 0.0L) {

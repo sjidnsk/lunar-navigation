@@ -181,6 +181,9 @@ struct ExplorationNodeParameters {
   std::size_t maximum_executable_path_points;
   std::uint8_t maximum_replans;
   double goal_yaw_tolerance_rad;
+  // Production filters goals that the global planner's circumscribed
+  // obstacle/unknown inflation would reject. Unit seams may disable it.
+  bool filter_global_goal_cell{true};
   std::chrono::steady_clock::duration planner_goal_response_timeout{
       std::chrono::seconds{1}};
   std::chrono::steady_clock::duration planner_result_timeout;

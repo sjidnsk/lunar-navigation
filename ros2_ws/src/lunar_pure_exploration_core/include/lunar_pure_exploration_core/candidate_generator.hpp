@@ -61,6 +61,8 @@ class CandidateGenerator {
   double footprint_circumscribed_radius_m() const;
   double minimum_spacing_m(double resolution_m) const;
   double minimum_standoff_m() const;
+  bool GlobalGoalCellFeasible(const TaskRaster& raster, Pose2 pose,
+                              std::size_t& consumed_work) const;
   double maximum_extra_search_m() const;
   std::size_t maximum_search_step(double resolution_m) const;
 
