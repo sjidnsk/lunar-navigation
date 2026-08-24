@@ -686,6 +686,34 @@ TEST(DualModePlanner, PreservesWheelMetricsForSuccessAndNoPath) {
   }
 }
 
+TEST(DualModePlanner, PreservesWheelMetricsWhenPostLocalProgressThrows) {
+  ManualClock clock;
+  Planner planner(PlannerBackends{
+      .global = {},
+      .local = [](const PlanningRequest&, const LocalGoalSet& goals,
+                  SearchControl) {
+        LocalStageResult result = TrajectoryTo(FirstGoal(goals));
+        result.wheel_metrics = WheelPlanningMetrics{
+            .edge_validation_evaluations = 7U,
+        };
+        return result;
+      },
+  });
+  PlanningRequest input = Request(EnvironmentMode::kLavaTube, clock);
+  input.progress = [](const PlannerProgress& progress) {
+    if (progress.phase == PlannerPhase::kLocalSearch) {
+      throw std::runtime_error("post-local progress failure");
+    }
+  };
+
+  const PlanningResult output = planner.Plan(input);
+
+  EXPECT_EQ(output.status, PlanningStatus::kPlannerError);
+  EXPECT_EQ(output.reason_code, "PLANNER_ERROR");
+  ASSERT_TRUE(output.wheel_metrics.has_value());
+  EXPECT_EQ(output.wheel_metrics->edge_validation_evaluations, 7U);
+}
+
 TEST(DualModePlanner, PreservesGlobalFailureAndExceptionSemantics) {
   struct Case final {
     const char* reason;

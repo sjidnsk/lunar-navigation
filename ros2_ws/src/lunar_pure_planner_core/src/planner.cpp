@@ -450,6 +450,7 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
   bool local_snapshot_cache_hit{};
   bool local_projection_cache_hit{};
   bool goal_field_cache_hit{};
+  std::optional<WheelPlanningMetrics> wheel_metrics;
 
   const auto report_progress = [&](const PlannerPhase phase,
                                    const std::chrono::nanoseconds elapsed) {
@@ -598,7 +599,6 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
         .now = input.control.now,
     };
     LocalStageResult local;
-    std::optional<WheelPlanningMetrics> wheel_metrics;
     SteadyClock::time_point local_finished{};
     {
       ScopedPlannerCall call(PlannerStage::kLocal, timing, input.control.now);
@@ -671,7 +671,10 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
     };
     return finish(std::move(success));
   } catch (...) {
-    return finish(Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR"));
+    PlanningResult failure =
+        Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
+    failure.wheel_metrics = wheel_metrics;
+    return finish(std::move(failure));
   }
 }
 
