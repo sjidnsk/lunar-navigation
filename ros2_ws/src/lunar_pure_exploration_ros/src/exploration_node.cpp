@@ -856,6 +856,13 @@ struct ExplorationNode::Runtime final {
     Polygon2 boundary;
   };
 
+  struct StopWaitRecord final {
+    SpeedObservation entry_speed{};
+    std::optional<SpeedObservation> confirmed_speed;
+    std::uint32_t confirmation_samples{};
+    std::chrono::steady_clock::duration elapsed{};
+  };
+
   enum class PlannerTimingBucket : std::uint8_t {
     kCandidate,
     kRolling,
@@ -954,6 +961,9 @@ struct ExplorationNode::Runtime final {
       PendingStationaryAction::kNone};
   std::optional<lunar::pure_exploration::GoalReleaseReason>
       pending_fresh_batch_release_reason;
+  std::optional<StopWaitRecord> current_stop_wait;
+  std::optional<StopWaitRecord> last_stop_wait;
+  std::uint64_t planning_epoch{0U};
   CandidateGenerator candidate_generator;
   InformationGainEvaluator information_gain;
   CandidateRanker ranker;
@@ -1061,6 +1071,7 @@ std::optional<std::string> RequestStationaryActionLocked(
     runtime.stationary_gate.Cancel();
     runtime.pending_stationary_action =
         RuntimeT::PendingStationaryAction::kNone;
+    runtime.current_stop_wait.reset();
     return std::nullopt;
   }
   if (runtime.pending_stationary_action == action) {
@@ -1069,6 +1080,12 @@ std::optional<std::string> RequestStationaryActionLocked(
   runtime.pending_stationary_action = action;
   runtime.stationary_gate.Begin(SteadyNowLocked(runtime),
                                 runtime.latest_speed);
+  runtime.current_stop_wait.emplace(typename RuntimeT::StopWaitRecord{
+      .entry_speed = runtime.latest_speed,
+      .confirmed_speed = std::nullopt,
+      .confirmation_samples = 0U,
+      .elapsed = std::chrono::steady_clock::duration::zero(),
+  });
   return ExecutionCancelLocked(runtime);
 }
 
@@ -1087,6 +1104,14 @@ void CancelPendingStationaryActionLocked(RuntimeT& runtime) {
   runtime.pending_stationary_action =
       RuntimeT::PendingStationaryAction::kNone;
   runtime.pending_fresh_batch_release_reason.reset();
+  runtime.current_stop_wait.reset();
+}
+
+template <typename RuntimeT>
+void ResetStopWaitTaskLifetimeLocked(RuntimeT& runtime) {
+  runtime.current_stop_wait.reset();
+  runtime.last_stop_wait.reset();
+  runtime.planning_epoch = 0U;
 }
 
 template <typename RuntimeT>
@@ -1190,6 +1215,7 @@ void FailLocked(RuntimeT& runtime, std::string reason) {
   runtime.pending_map_rebuild = false;
   runtime.pending_stuck_rebuild = false;
   CancelPendingStationaryActionLocked(runtime);
+  ResetStopWaitTaskLifetimeLocked(runtime);
   ClearExecutionPayloadsLocked(runtime);
   runtime.build_in_flight = false;
   ++runtime.epoch;
@@ -1561,6 +1587,39 @@ void PublishStatus(const std::shared_ptr<RuntimeT>& runtime) {
     add("total_elapsed_ms", current_timing
                                 ? std::to_string(current_timing->total_elapsed_ms)
                                 : "unavailable");
+    const auto* stop_wait = runtime->current_stop_wait
+                                ? &*runtime->current_stop_wait
+                                : runtime->last_stop_wait
+                                      ? &*runtime->last_stop_wait
+                                      : nullptr;
+    const auto finite_value = [](const double value) {
+      return std::isfinite(value) ? std::to_string(value)
+                                  : std::string{"unavailable"};
+    };
+    add("stop_wait_elapsed_ms",
+        stop_wait
+            ? finite_value(std::chrono::duration<double, std::milli>(
+                               stop_wait->elapsed)
+                               .count())
+            : "unavailable");
+    add("stop_entry_linear_mps",
+        stop_wait ? finite_value(stop_wait->entry_speed.linear_speed_mps)
+                  : "unavailable");
+    add("stop_entry_angular_radps",
+        stop_wait ? finite_value(stop_wait->entry_speed.angular_speed_radps)
+                  : "unavailable");
+    add("stop_confirmed_linear_mps",
+        stop_wait && stop_wait->confirmed_speed
+            ? finite_value(stop_wait->confirmed_speed->linear_speed_mps)
+            : "unavailable");
+    add("stop_confirmed_angular_radps",
+        stop_wait && stop_wait->confirmed_speed
+            ? finite_value(stop_wait->confirmed_speed->angular_speed_radps)
+            : "unavailable");
+    add("stop_confirmation_samples",
+        stop_wait ? std::to_string(stop_wait->confirmation_samples)
+                  : "unavailable");
+    add("planning_epoch", std::to_string(runtime->planning_epoch));
     diagnostics.status.push_back(std::move(diagnostic));
     diagnostics.header = status.header;
     current_goal_publisher = runtime->current_goal_publisher;
@@ -1949,6 +2008,7 @@ void ApplyStartLocked(RuntimeT& runtime,
       runtime.parameters.stop_before_planning &&
       runtime.active_reference.has_value();
   CancelPendingStationaryActionLocked(runtime);
+  ResetStopWaitTaskLifetimeLocked(runtime);
   runtime.state_machine.Start(start.task_id);
   ++runtime.task_generation;
   ResetActiveElapsedLocked(runtime);
@@ -2031,6 +2091,7 @@ bool ApplyPendingControlLocked(RuntimeT& runtime) {
       runtime.pending_start.reset();
       FreezeActiveElapsedLocked(runtime);
       runtime.state_machine.Cancel();
+      ResetStopWaitTaskLifetimeLocked(runtime);
       runtime.active_elapsed_s = 0.0;
       runtime.task_boundary.reset();
       runtime.coverage = {};
@@ -3139,6 +3200,7 @@ void HandleOdometry(const std::weak_ptr<RuntimeT>& weak_runtime,
   auto confirmed_action = RuntimeT::PendingStationaryAction::kNone;
   bool cancel_planner = false;
   bool needs_build = false;
+  bool stop_wait_diagnostic_due = false;
   try {
     {
       std::scoped_lock lock{runtime->mutex};
@@ -3152,7 +3214,21 @@ void HandleOdometry(const std::weak_ptr<RuntimeT>& weak_runtime,
           RuntimeT::PendingStationaryAction::kNone) {
         const auto update = runtime->stationary_gate.Observe(
             SteadyNowLocked(*runtime), speed);
+        if (runtime->current_stop_wait) {
+          runtime->current_stop_wait->elapsed = update.elapsed;
+          runtime->current_stop_wait->confirmation_samples =
+              update.consecutive_samples;
+        }
+        stop_wait_diagnostic_due = update.diagnostic_due;
         if (update.confirmed) {
+          if (runtime->current_stop_wait) {
+            runtime->current_stop_wait->confirmed_speed = update.observation;
+            runtime->current_stop_wait->confirmation_samples =
+                update.consecutive_samples;
+          }
+          ++runtime->planning_epoch;
+          runtime->last_stop_wait = std::move(runtime->current_stop_wait);
+          runtime->current_stop_wait.reset();
           confirmed_action =
               ConsumeConfirmedStationaryActionLocked(*runtime);
           if (confirmed_action ==
@@ -3196,8 +3272,14 @@ void HandleOdometry(const std::weak_ptr<RuntimeT>& weak_runtime,
     } else if (needs_build) {
       QueueBuild(runtime);
     } else {
-      Pump(runtime);
-      PublishStatus(runtime);
+      if (stop_wait_diagnostic_due) {
+        // Observability only: publish the captured gate update without
+        // changing admission, failure memory, or task state.
+        PublishStatus(runtime);
+      } else {
+        Pump(runtime);
+        PublishStatus(runtime);
+      }
     }
   } catch (const std::exception&) {
     {
@@ -3337,6 +3419,7 @@ void HandleTask(const std::weak_ptr<RuntimeT>& weak_runtime,
             CancelPendingStationaryActionLocked(*runtime);
             FreezeActiveElapsedLocked(*runtime);
             runtime->state_machine.Cancel();
+            ResetStopWaitTaskLifetimeLocked(*runtime);
             runtime->active_elapsed_s = 0.0;
             runtime->task_boundary.reset();
             runtime->active_cycle.reset();

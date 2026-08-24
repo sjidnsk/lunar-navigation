@@ -172,6 +172,26 @@ TEST(PlannerTimingAccumulatorTest,
 }
 
 TEST(PlannerTimingAccumulatorTest,
+     ExactTenKeyPlannerRecordParsesButStopWaitOutputKeysRemainForeign) {
+  PlannerTimingAccumulator exact_accumulator{1U};
+  const auto exact = TimingMessage("request-exact", "WHEELED", "1", "0",
+                                   "PLAN_FOUND", "11.0", "2", "7.0",
+                                   "3", "18.0");
+  EXPECT_EQ(exact_accumulator.Ingest(exact), TimingIngestResult::kAccepted);
+  const auto parsed = exact_accumulator.Find("request-exact");
+  ASSERT_TRUE(parsed.has_value());
+  ExpectTiming(*parsed, "request-exact", 11.0, 2U, 7.0, 3U, 18.0);
+
+  auto exploration_output = exact;
+  exploration_output.status.front().values.push_back(
+      KeyValue{}.set__key("stop_wait_elapsed_ms").set__value("5000.000000"));
+  PlannerTimingAccumulator strict_accumulator{1U};
+  EXPECT_EQ(strict_accumulator.Ingest(exploration_output),
+            TimingIngestResult::kRejected);
+  EXPECT_FALSE(strict_accumulator.Find("request-exact").has_value());
+}
+
+TEST(PlannerTimingAccumulatorTest,
      RejectsInvalidEnumerationsIdentifiersCountsAndElapsedValues) {
   struct InvalidCase final {
     const char* label;

@@ -96,6 +96,45 @@ using Status = lunar_pure_exploration_msgs::msg::PureExplorationStatus;
 using ServerGoalHandle = rclcpp_action::ServerGoalHandle<Action>;
 using namespace std::chrono_literals;
 
+constexpr std::array<const char*, 7U> kStopWaitDiagnosticKeys{
+    "stop_wait_elapsed_ms",
+    "stop_entry_linear_mps",
+    "stop_entry_angular_radps",
+    "stop_confirmed_linear_mps",
+    "stop_confirmed_angular_radps",
+    "stop_confirmation_samples",
+    "planning_epoch",
+};
+
+constexpr std::array<const char*, 26U> kPlannerOutputTimingKeys{
+    "candidate_call_count",
+    "candidate_record_count",
+    "candidate_global_elapsed_ms",
+    "candidate_global_call_count",
+    "candidate_local_elapsed_ms",
+    "candidate_local_call_count",
+    "candidate_total_elapsed_ms",
+    "rolling_call_count",
+    "rolling_record_count",
+    "rolling_global_elapsed_ms",
+    "rolling_global_call_count",
+    "rolling_local_elapsed_ms",
+    "rolling_local_call_count",
+    "rolling_total_elapsed_ms",
+    "stuck_call_count",
+    "stuck_record_count",
+    "stuck_global_elapsed_ms",
+    "stuck_global_call_count",
+    "stuck_local_elapsed_ms",
+    "stuck_local_call_count",
+    "stuck_total_elapsed_ms",
+    "global_elapsed_ms",
+    "global_call_count",
+    "local_elapsed_ms",
+    "local_call_count",
+    "total_elapsed_ms",
+};
+
 class RosEnvironment final : public ::testing::Environment {
  public:
   void SetUp() override {
@@ -901,6 +940,11 @@ class ExplorationNodeTest : public ::testing::Test {
     return diagnostics_.empty() ? std::nullopt : std::optional{diagnostics_.back()};
   }
 
+  std::size_t DiagnosticsCount() const {
+    std::scoped_lock lock{messages_mutex_};
+    return diagnostics_.size();
+  }
+
   std::optional<std::string> DiagnosticValue(const std::string& key) const {
     const auto diagnostics = LatestDiagnostics();
     if (!diagnostics || diagnostics->status.size() != 1U) {
@@ -913,6 +957,28 @@ class ExplorationNodeTest : public ::testing::Test {
     return found == diagnostics->status.front().values.end()
                ? std::nullopt
                : std::optional<std::string>{found->value};
+  }
+
+  std::vector<std::string> PlannerTimingDiagnosticBytes() const {
+    const auto diagnostics = LatestDiagnostics();
+    if (!diagnostics || diagnostics->status.size() != 1U) {
+      return {};
+    }
+    std::vector<std::string> result;
+    result.reserve(kPlannerOutputTimingKeys.size());
+    for (const char* key : kPlannerOutputTimingKeys) {
+      const auto found = std::ranges::find_if(
+          diagnostics->status.front().values,
+          [key](const auto& value) { return value.key == key; });
+      if (found == diagnostics->status.front().values.end()) {
+        return {};
+      }
+      std::string bytes{found->key};
+      bytes.push_back('\0');
+      bytes += found->value;
+      result.push_back(std::move(bytes));
+    }
+    return result;
   }
 
   void ExpectWaitingWithMissingInput(const int missing) {
@@ -1100,6 +1166,290 @@ TEST_F(ExplorationNodeTest,
     return pose && pose->x == 2.7;
   }));
   EXPECT_EQ(server_->Goals().size(), 1U);
+}
+
+TEST_F(ExplorationNodeTest,
+       PublishesExactStopWaitDiagnosticsFromInjectedSteadyClock) {
+  auto now_ns = std::make_shared<std::atomic<std::int64_t>>(0);
+  parameters_.stop_before_planning = true;
+  parameters_.steady_now = [now_ns] {
+    return std::chrono::steady_clock::time_point{
+        std::chrono::nanoseconds{now_ns->load()}};
+  };
+  Start(FakePlannerServer::Mode::kDelayed);
+
+  auto moving = Odometry();
+  moving.twist.twist.linear.x = 0.2;
+  moving.twist.twist.angular.z = 0.1;
+  map_publisher_->publish(GlobalMap());
+  tf_publisher_->publish(MapFromOdom());
+  odometry_publisher_->publish(moving);
+  ASSERT_TRUE(WaitFor([this] {
+    return ExplorationNodeTestPeer::LatestPose(*explorer_).has_value();
+  }));
+  task_publisher_->publish(StartTask("stop-wait-diagnostics"));
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("reason_code") == "WAITING_FOR_STOP";
+  }));
+
+  auto diagnostics = LatestDiagnostics();
+  ASSERT_TRUE(diagnostics.has_value());
+  ASSERT_EQ(diagnostics->status.size(), 1U);
+  for (const char* key : kStopWaitDiagnosticKeys) {
+    EXPECT_EQ(std::ranges::count_if(
+                  diagnostics->status.front().values,
+                  [key](const auto& value) { return value.key == key; }),
+              1U)
+        << key;
+  }
+  EXPECT_EQ(DiagnosticValue("stop_wait_elapsed_ms"), "0.000000");
+  EXPECT_EQ(DiagnosticValue("stop_entry_linear_mps"), "0.200000");
+  EXPECT_EQ(DiagnosticValue("stop_entry_angular_radps"), "0.100000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_angular_radps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "0");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "0");
+
+  now_ns->store(std::chrono::duration_cast<std::chrono::nanoseconds>(5s)
+                    .count());
+  auto diagnostics_count = DiagnosticsCount();
+  odometry_publisher_->publish(Odometry(2.1, 2.0));
+  ASSERT_TRUE(WaitFor([this, diagnostics_count] {
+    return DiagnosticsCount() > diagnostics_count;
+  }));
+  EXPECT_EQ(DiagnosticValue("stop_wait_elapsed_ms"), "5000.000000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "1");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "0");
+  const auto waiting_status = LatestStatus();
+  ASSERT_TRUE(waiting_status.has_value());
+  EXPECT_EQ(waiting_status->reason_code, "WAITING_FOR_STOP");
+  EXPECT_EQ(waiting_status->failed_candidate_count, 0U);
+  EXPECT_TRUE(server_->Goals().empty());
+
+  now_ns->store(std::chrono::duration_cast<std::chrono::nanoseconds>(5100ms)
+                    .count());
+  auto reset = Odometry(2.2, 2.0);
+  reset.twist.twist.linear.x = 0.2;
+  diagnostics_count = DiagnosticsCount();
+  odometry_publisher_->publish(reset);
+  ASSERT_TRUE(WaitFor([this, diagnostics_count] {
+    return DiagnosticsCount() > diagnostics_count;
+  }));
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "0");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "0");
+
+  for (const auto [x, elapsed] :
+       {std::pair{2.3, 5200ms}, std::pair{2.4, 5300ms},
+        std::pair{2.5, 5400ms}}) {
+    now_ns->store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    diagnostics_count = DiagnosticsCount();
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, diagnostics_count] {
+      return DiagnosticsCount() > diagnostics_count;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return server_->Goals().size() == 1U; }));
+  EXPECT_EQ(DiagnosticValue("stop_wait_elapsed_ms"), "5400.000000");
+  EXPECT_EQ(DiagnosticValue("stop_entry_linear_mps"), "0.200000");
+  EXPECT_EQ(DiagnosticValue("stop_entry_angular_radps"), "0.100000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "0.000000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_angular_radps"), "0.000000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "3");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "1");
+}
+
+TEST_F(ExplorationNodeTest,
+       DiagnosticDuePublishesWithoutChangingPlannerTimingOrStopState) {
+  auto now_ns = std::make_shared<std::atomic<std::int64_t>>(0);
+  parameters_.stop_before_planning = true;
+  parameters_.steady_now = [now_ns] {
+    return std::chrono::steady_clock::time_point{
+        std::chrono::nanoseconds{now_ns->load()}};
+  };
+  Start(FakePlannerServer::Mode::kRollingReachable);
+  PublishAllInputs(StartTask("diagnostic-due-timing-isolation"));
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("reason_code") == "WAITING_FOR_STOP";
+  }));
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+  const auto request_id = ExplorationNodeTestPeer::ActiveRequestId(*explorer_);
+  ASSERT_TRUE(request_id.has_value());
+  PublishPlannerTiming(*request_id);
+  ASSERT_TRUE(WaitFor([this, &request_id] {
+    return DiagnosticValue("request_id") == request_id &&
+           DiagnosticValue("candidate_record_count") == "1";
+  }));
+  const auto timing_before_wait = PlannerTimingDiagnosticBytes();
+  ASSERT_EQ(timing_before_wait.size(), kPlannerOutputTimingKeys.size());
+
+  const auto reference = References().front();
+  const auto endpoint =
+      reference.trajectory.points.back().transforms.front().translation;
+  now_ns->store(std::chrono::duration_cast<std::chrono::nanoseconds>(1s)
+                    .count());
+  auto moving_at_endpoint = Odometry(endpoint.x, endpoint.y);
+  moving_at_endpoint.twist.twist.linear.x = 0.2;
+  odometry_publisher_->publish(moving_at_endpoint);
+  ASSERT_TRUE(WaitFor([this, &endpoint] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == endpoint.x && pose->y == endpoint.y;
+  }));
+  explorer_->PollExecution();
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("reason_code") == "WAITING_FOR_STOP";
+  }));
+  EXPECT_EQ(PlannerTimingDiagnosticBytes(), timing_before_wait);
+  const auto planner_goal_count = server_->Goals().size();
+
+  now_ns->store(std::chrono::duration_cast<std::chrono::nanoseconds>(6s)
+                    .count());
+  const auto diagnostics_count = DiagnosticsCount();
+  odometry_publisher_->publish(Odometry(endpoint.x, endpoint.y + 0.01));
+  ASSERT_TRUE(WaitFor([this, diagnostics_count] {
+    return DiagnosticsCount() > diagnostics_count;
+  }));
+  EXPECT_EQ(PlannerTimingDiagnosticBytes(), timing_before_wait);
+  EXPECT_EQ(DiagnosticValue("stop_wait_elapsed_ms"), "5000.000000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "1");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "1");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_angular_radps"), "unavailable");
+  EXPECT_EQ(server_->Goals().size(), planner_goal_count);
+  const auto status = LatestStatus();
+  ASSERT_TRUE(status.has_value());
+  EXPECT_EQ(status->state, Status::REPLANNING);
+  EXPECT_EQ(status->reason_code, "WAITING_FOR_STOP");
+  EXPECT_EQ(status->failed_candidate_count, 0U);
+}
+
+TEST_F(ExplorationNodeTest,
+       DisabledStopGateNeverCreatesAStopRecordOrPlanningEpoch) {
+  parameters_.stop_before_planning = false;
+  Start(FakePlannerServer::Mode::kDelayed);
+  auto moving = Odometry();
+  moving.twist.twist.linear.x = 0.2;
+  PublishAllInputs(StartTask("stop-gate-disabled"), GlobalMap(), moving);
+  ASSERT_TRUE(WaitFor([this] { return server_->Goals().size() == 1U; }));
+  for (const char* key : kStopWaitDiagnosticKeys) {
+    ASSERT_TRUE(DiagnosticValue(key).has_value()) << key;
+  }
+  EXPECT_EQ(DiagnosticValue("stop_wait_elapsed_ms"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_entry_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_entry_angular_radps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_angular_radps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "0");
+}
+
+TEST_F(ExplorationNodeTest, NonFiniteStopEntryIsPublishedAsUnavailable) {
+  parameters_.stop_before_planning = true;
+  Start(FakePlannerServer::Mode::kDelayed);
+  auto nonfinite = Odometry();
+  nonfinite.twist.twist.linear.x =
+      std::numeric_limits<double>::quiet_NaN();
+  map_publisher_->publish(GlobalMap());
+  tf_publisher_->publish(MapFromOdom());
+  odometry_publisher_->publish(nonfinite);
+  ASSERT_TRUE(WaitFor([this] {
+    return ExplorationNodeTestPeer::LatestPose(*explorer_).has_value();
+  }));
+  task_publisher_->publish(StartTask("nonfinite-stop-entry"));
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("reason_code") == "WAITING_FOR_STOP";
+  }));
+  EXPECT_EQ(DiagnosticValue("stop_entry_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "0");
+
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return server_->Goals().size() == 1U; }));
+  EXPECT_EQ(DiagnosticValue("stop_entry_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "0.000000");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "1");
+}
+
+TEST_F(ExplorationNodeTest,
+       GateCancelRetainsLastRecordButTaskCancelResetsStopLifetime) {
+  parameters_.stop_before_planning = true;
+  Start(FakePlannerServer::Mode::kRollingReachable);
+  auto moving = Odometry();
+  moving.twist.twist.linear.x = 0.2;
+  moving.twist.twist.angular.z = 0.1;
+  map_publisher_->publish(GlobalMap());
+  tf_publisher_->publish(MapFromOdom());
+  odometry_publisher_->publish(moving);
+  ASSERT_TRUE(WaitFor([this] {
+    return ExplorationNodeTestPeer::LatestPose(*explorer_).has_value();
+  }));
+  task_publisher_->publish(StartTask("stop-record-lifetime"));
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("reason_code") == "WAITING_FOR_STOP";
+  }));
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+
+  const auto endpoint = References()
+                            .front()
+                            .trajectory.points.back()
+                            .transforms.front()
+                            .translation;
+  auto moving_at_endpoint = Odometry(endpoint.x, endpoint.y);
+  moving_at_endpoint.twist.twist.linear.x = 0.4;
+  moving_at_endpoint.twist.twist.angular.z = 0.3;
+  odometry_publisher_->publish(moving_at_endpoint);
+  ASSERT_TRUE(WaitFor([this, &endpoint] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == endpoint.x && pose->y == endpoint.y;
+  }));
+  explorer_->PollExecution();
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("stop_entry_linear_mps") == "0.400000";
+  }));
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "1");
+
+  Task pause;
+  pause.command = Task::PAUSE;
+  task_publisher_->publish(pause);
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("reason_code") == "PAUSED";
+  }));
+  EXPECT_EQ(DiagnosticValue("stop_entry_linear_mps"), "0.200000");
+  EXPECT_EQ(DiagnosticValue("stop_entry_angular_radps"), "0.100000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "0.000000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "3");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "1");
+
+  Task cancel;
+  cancel.command = Task::CANCEL;
+  task_publisher_->publish(cancel);
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("planning_epoch") == "0";
+  }));
+  EXPECT_EQ(DiagnosticValue("stop_wait_elapsed_ms"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_entry_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "unavailable");
 }
 
 TEST_F(ExplorationNodeTest,
