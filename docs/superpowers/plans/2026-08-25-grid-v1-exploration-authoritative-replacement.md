@@ -117,10 +117,10 @@ Expected: every authority comparison is empty and every preserved path exists.
 Run:
 
 ```bash
-python3 -m pytest -q tests/test_car_orin_bundle.py tests/test_action_contract.py tests/test_external_interface_contract.py tests/test_launch_contract.py
+python3 -m pytest -q tests/test_car_orin_bundle.py tests/test_action_contract.py
 ```
 
-Expected: all selected pytest cases pass.
+Expected: all selected planner-owned pytest cases pass. Exploration interface and launch contracts run after the Task 5 overlay is complete.
 
 - [ ] **Step 5: Commit the mechanical import**
 
@@ -486,8 +486,7 @@ git commit -m "test: freeze grid v1 exploration contracts"
 - [ ] **Step 1: Run repository and Python contract suites**
 
 ```bash
-python3 tools/check_repository_boundaries.py .
-python3 -m pytest -q tests/foundation/test_repository_boundaries.py
+python3 tools/check_pure_planner_external_interfaces.py .
 python3 -m pytest -q tests/test_action_contract.py tests/test_external_interface_contract.py \
   tests/test_isolation_contract.py tests/test_launch_contract.py \
   tests/test_car_orin_bundle.py tests/launch/test_jazzy_300m_exploration_sim.py \
@@ -567,8 +566,7 @@ Create `docs/validation/2026-08-25-grid-v1-exploration-adaptation.md` with commi
 
 ```bash
 git diff --check
-python3 tools/check_repository_boundaries.py .
-python3 -m pytest -q tests/foundation/test_repository_boundaries.py
+python3 tools/check_pure_planner_external_interfaces.py .
 git status --short
 git add docs/validation/2026-08-25-grid-v1-exploration-adaptation.md
 git commit -m "docs: validate grid v1 exploration adaptation"
