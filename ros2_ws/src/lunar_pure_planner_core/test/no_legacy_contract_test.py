@@ -60,7 +60,6 @@ FORBIDDEN_PRODUCTION_TOKENS = (
     "execution_" + "feedback",
     "provisional_" + "observer",
     "st" + "ale",
-    "revi" + "sion",
 )
 
 

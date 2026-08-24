@@ -1,4 +1,4 @@
-"""Launch an isolated 100 m lunar-surface planning demo for RViz."""
+"""Launch the global-plus-local grid-traversability V1 RViz demo."""
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -9,12 +9,13 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description() -> LaunchDescription:
-    """Start test-only scenario, planner, RViz bridge, and visualization."""
+    """Start the synthetic map, V1 planner, manual goal bridge, and RViz."""
     share = get_package_share_directory("lunar_pure_planner_ros")
     seed = LaunchConfiguration("seed")
     start_rviz = LaunchConfiguration("start_rviz")
-    demo_parameters = {
+    planner_parameters = {
         "platform_type": "wheel",
+        "wheel_planner_mode": "grid_traversability_v1",
         "global_map_topic": "/lunar_demo/global_overview",
         "local_map_topic": "/lunar_demo/grid_map",
         "odometry_topic": "/lunar_demo/odometry",
@@ -33,21 +34,27 @@ def generate_launch_description() -> LaunchDescription:
             Node(
                 package="lunar_pure_planner_ros",
                 executable="lunar_surface_demo_node",
-                name="lunar_surface_demo",
+                name="lunar_surface_demo_v1",
                 parameters=[{"seed": seed}],
+                remappings=[
+                    (
+                        "/lunar_demo/rviz_goal",
+                        "/lunar_demo/ignored_auto_goal",
+                    )
+                ],
                 output="screen",
             ),
             Node(
                 package="lunar_pure_planner_ros",
                 executable="lunar_surface_visualizer_node",
-                name="lunar_surface_visualizer",
+                name="lunar_surface_visualizer_v1",
                 parameters=[{"seed": seed}],
                 output="screen",
             ),
             Node(
                 package="lunar_pure_planner_ros",
                 executable="lunar_local_traversability_node",
-                name="lunar_demo_traversability",
+                name="lunar_demo_traversability_v1",
                 parameters=[
                     {
                         "platform_type": "wheel",
@@ -62,18 +69,18 @@ def generate_launch_description() -> LaunchDescription:
             Node(
                 package="lunar_pure_planner_ros",
                 executable="lunar_pure_planner_node",
-                name="pure_planner",
-                parameters=[f"{share}/config/pure_planner.yaml", demo_parameters],
+                name="pure_planner_v1",
+                parameters=[f"{share}/config/pure_planner.yaml", planner_parameters],
                 output="screen",
             ),
             Node(
                 package="lunar_pure_planner_ros",
                 executable="lunar_rviz_goal_bridge",
-                name="rviz_goal_bridge",
+                name="rviz_goal_bridge_v1",
                 parameters=[
                     {
                         "environment_mode": 1,
-                        "mission_id": "lunar-demo",
+                        "mission_id": "lunar-demo-v1",
                         "mission_revision": 1,
                         "goal_topic": "/lunar_demo/rviz_goal",
                         "action_name": "/lunar_demo/plan_motion",
@@ -85,7 +92,7 @@ def generate_launch_description() -> LaunchDescription:
                 condition=IfCondition(start_rviz),
                 package="rviz2",
                 executable="rviz2",
-                name="lunar_surface_rviz",
+                name="lunar_surface_rviz_v1",
                 arguments=["-d", f"{share}/rviz/lunar_surface_demo.rviz"],
                 output="screen",
             ),

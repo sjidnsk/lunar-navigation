@@ -5,12 +5,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <memory>
 #include <string>
 #include <variant>
 #include <vector>
 
 #include "lunar_pure_planner_core/planning_timing.hpp"
 #include "lunar_pure_planner_core/search_control.hpp"
+#include "lunar_pure_planner_core/traversability_map.hpp"
 #include "lunar_pure_planner_core/types/goal.hpp"
 #include "lunar_pure_planner_core/types/motion_reference.hpp"
 #include "lunar_pure_planner_core/types/platform_capability.hpp"
@@ -29,6 +31,8 @@ struct AnytimePlannerConfig final {
   double platform_discretization_m{0.2};
   double capability_cost_scale{1.0};
   std::array<double, 5> cost_weights{1.0, 1.0, 1.0, 1.0, 1.0};
+  WheelPlannerMode wheel_planner_mode{WheelPlannerMode::kLegacyCertified};
+  double grid_v1_local_horizon_m{8.0};
   AnytimeSearchConfig search;
 };
 
@@ -40,6 +44,7 @@ struct MinimalWorldSnapshot final {
   std::uint64_t local_map_sequence{};
   std::uint64_t odometry_sequence{};
   std::uint64_t tf_sequence{};
+  std::shared_ptr<const TraversabilitySnapshot> traversability_snapshot;
 };
 
 struct LocalGoalSet final {
@@ -96,49 +101,52 @@ enum class PlanningStatus : std::uint8_t {
   kPlannerError,
 };
 
-struct WheelPlanningMetrics final {
-  std::uint64_t expanded_states{};
-  std::size_t edge_validation_evaluations{};
-  std::size_t edge_validation_cache_hits{};
-  std::size_t broad_phase_rejects{};
-  std::size_t full_certifications{};
-  std::size_t full_invalidations{};
-  std::size_t sweep_cell_checks{};
-  std::size_t quantization_alias_states{};
-  std::size_t quantized_state_reuses{};
-  std::size_t quantized_endpoint_aliases{};
-  std::size_t quantized_state_count{};
-  std::size_t maximum_active_labels_per_key{};
-  bool used_narrow_resolution{};
-  double finest_xy_key_resolution_m{};
-  std::size_t maximum_yaw_bins{};
-  std::size_t ara_search_invocations{};
-  std::size_t returned_edge_certificate_confirmations{};
-  std::size_t mode_switch_edge_count{};
-  std::size_t reverse_edge_count{};
-  double start_heuristic_lower_bound{};
-  bool has_certified_preferred_candidate{};
-  std::size_t preferred_candidate_full_primitive_edge_count{};
-  std::size_t preferred_candidate_terminal_connector_edge_count{};
-  std::size_t preferred_candidate_certified_edge_count{};
-  double preferred_candidate_cost{};
-  std::size_t preferred_builder_invocations{};
-  std::array<double, 5U> cost_components{};
-  std::array<double, 5U> cost_scales{};
-  std::size_t direct_unknown_or_unsupported_footprint_rejects{};
-  std::size_t measured_obstacle_clearance_rejects{};
-  std::size_t slope_or_roughness_rejects{};
-  std::size_t relief_or_underbody_rejects{};
-  std::size_t dynamics_or_primitive_shape_rejects{};
-  std::size_t deadline_or_cancellation_interruptions{};
-  std::size_t far_clearance_scan_skips{};
-  std::size_t occupied_clearance_cell_checks{};
+struct GridV1Diagnostics final {
+  bool active{};
+  std::uint64_t global_input_sequence{};
+  std::uint64_t local_input_sequence{};
+  std::uint64_t odometry_input_sequence{};
+  std::uint64_t traversability_revision{};
+  std::uint64_t publish_check_revision{};
+  std::uint64_t profile_hash{};
+  double canonical_resolution_m{};
+  Vec3 map_origin_m;
+  std::size_t allocated_tiles{};
+  std::size_t estimated_map_bytes{};
+  std::size_t updated_cells{};
+  std::size_t dirty_tiles{};
+  std::size_t halo_recomputed_cells{};
+  std::size_t free_cells{};
+  std::size_t blocked_cells{};
+  std::size_t unknown_cells{};
+  std::size_t prior_conflicts{};
+  bool global_route_reused{};
+  std::uint64_t global_expanded_states{};
+  std::size_t global_open_peak{};
+  std::uint64_t local_expanded_states{};
+  std::size_t local_open_peak{};
+  std::size_t local_candidate_count{};
+  std::size_t local_attempt_count{};
+  std::size_t selected_candidate_index{};
+  std::size_t raw_path_points{};
+  std::size_t shortcut_path_points{};
+  std::size_t resampled_path_points{};
+  std::size_t final_trajectory_points{};
+  std::string direction;
+  double forward_cost{};
+  double reverse_cost{};
+  std::size_t final_supercover_cells{};
+  std::string postprocess_mode;
+  std::chrono::nanoseconds map_fusion_elapsed{};
+  std::chrono::nanoseconds traversability_elapsed{};
+  std::chrono::nanoseconds postprocess_elapsed{};
 };
 
 struct PlanningResult final {
   PlanningStatus status{PlanningStatus::kInvalidInput};
   std::string reason_code;
   std::optional<MotionReference> reference;
+  GlobalRoutePreview global_route_preview;
   PlannerCallTiming timing;
   std::uint64_t expanded_states{};
   std::optional<std::size_t> selected_goal_index;
@@ -149,7 +157,7 @@ struct PlanningResult final {
   bool local_projection_cache_hit{};
   bool goal_field_cache_hit{};
   std::optional<double> best_cost;
-  std::optional<WheelPlanningMetrics> wheel_metrics;
+  GridV1Diagnostics grid_v1;
 };
 
 }  // namespace lunar::pure_planning

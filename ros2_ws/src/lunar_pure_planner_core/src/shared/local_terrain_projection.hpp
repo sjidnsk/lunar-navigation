@@ -14,9 +14,7 @@ namespace lunar::pure_planning::shared {
 struct LocalTerrainProjection final {
   std::shared_ptr<const MapSnapshot> map;
   std::vector<std::uint8_t> free_with_height;
-  std::vector<std::uint8_t> occupied;
   std::vector<float> clearance_m;
-  std::vector<float> narrow_band_distance_m;
   std::vector<float> slope_rad;
   std::vector<float> roughness_m;
 };

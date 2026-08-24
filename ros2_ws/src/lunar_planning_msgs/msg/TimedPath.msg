@@ -1,0 +1,2 @@
+nav_msgs/Path path
+builtin_interfaces/Duration planning_time

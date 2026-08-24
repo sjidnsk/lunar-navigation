@@ -270,11 +270,11 @@ using GlobalProjectionCacheKey =
 using GlobalRouteCacheKey =
     RevisionCacheKey<GlobalRouteCacheDomain, 3U, 5U>;
 using LocalSnapshotCacheKey =
-    RevisionCacheKey<LocalSnapshotCacheDomain, 1U, 0U>;
+    RevisionCacheKey<LocalSnapshotCacheDomain, 1U, 1U>;
 using LocalProjectionCacheKey =
-    RevisionCacheKey<LocalProjectionCacheDomain, 1U, 1U>;
+    RevisionCacheKey<LocalProjectionCacheDomain, 1U, 2U>;
 using GoalFieldCacheKey =
-    RevisionCacheKey<GoalFieldCacheDomain, 1U, 4U>;
+    RevisionCacheKey<GoalFieldCacheDomain, 1U, 5U>;
 
 [[nodiscard]] std::uint64_t StableCapabilityFingerprint(
     const PlatformCapability& capability) noexcept;
@@ -288,13 +288,16 @@ using GoalFieldCacheKey =
     const PlanningRequest& input, double inflation_m,
     std::uint64_t capability_fingerprint) noexcept;
 [[nodiscard]] LocalSnapshotCacheKey MakeLocalSnapshotCacheKey(
-    std::uint64_t local_map_sequence) noexcept;
+    std::uint64_t local_map_sequence,
+    std::uint64_t start_patch_identity = 0U) noexcept;
 [[nodiscard]] LocalProjectionCacheKey MakeLocalProjectionCacheKey(
-    std::uint64_t local_map_sequence, double occupancy_threshold) noexcept;
+    std::uint64_t local_map_sequence, double occupancy_threshold,
+    std::uint64_t start_patch_identity = 0U) noexcept;
 [[nodiscard]] GoalFieldCacheKey MakeGoalFieldCacheKey(
     std::uint64_t local_map_sequence, double occupancy_threshold,
     std::uint64_t capability_fingerprint, const LocalGoalSet& goals,
-    const AnytimeSearchConfig& search) noexcept;
+    const AnytimeSearchConfig& search,
+    std::uint64_t start_patch_identity = 0U) noexcept;
 
 class ActivePlannerCache final {
  public:

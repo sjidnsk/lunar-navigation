@@ -6,7 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "lunar_pure_planner_core/planner.hpp"
-#include "lunar_pure_planner_core/global_goal_feasibility.hpp"
+#include "lunar_pure_planner_core/traversability_map.hpp"
 
 namespace lunar::pure_planning {
 namespace {
@@ -29,21 +29,16 @@ TEST(PublicApi, ExposesOnlyTheMinimalDualModePlannerEntrypoint) {
                                                SearchControl)>>);
 }
 
-TEST(PublicApi, GlobalGoalFeasibilityDoesNotInflateAnUnknownCell) {
-  GlobalGoalFeasibilityRequest request;
-  request.global_map.frame_id = "map";
-  request.global_map.width = 5U;
-  request.global_map.height = 1U;
-  request.global_map.resolution_m = 1.0;
-  request.global_map.layers.emplace(
-      "occupancy", GridLayer{.values = std::vector<std::int8_t>{0, 0, -1, 0, 0}});
-  request.goal_position_m = {.x = 3.0, .y = 0.0};
-  request.inflation_m = 0.9187;
+TEST(PublicApi, DefaultsToLegacyAndCarriesNoTraversabilitySnapshot) {
+  static_assert(std::is_copy_constructible_v<TraversabilitySnapshot>);
+  EXPECT_EQ(WheelPlannerModeName(WheelPlannerMode::kGridTraversabilityV1),
+            "grid_traversability_v1");
 
-  const auto result = EvaluateGlobalGoalFeasibility(std::move(request));
+  PlanningRequest request;
 
-  EXPECT_TRUE(result.feasible);
-  EXPECT_TRUE(result.reason_code.empty());
+  EXPECT_EQ(request.config.wheel_planner_mode,
+            WheelPlannerMode::kLegacyCertified);
+  EXPECT_FALSE(request.world.traversability_snapshot);
 }
 
 TEST(PublicApi, RejectsPlanarRegionWithoutEnteringInjectedBackends) {

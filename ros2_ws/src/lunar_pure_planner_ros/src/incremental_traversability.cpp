@@ -12,6 +12,7 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 
 #include "lunar_pure_planner_core/types/world_snapshot.hpp"
+#include "lunar_pure_planner_ros/center_distance_transform.hpp"
 #include "lunar_pure_planner_ros/map_adapters.hpp"
 
 namespace lunar::pure_planner_ros {
@@ -164,37 +165,8 @@ std::optional<TraversabilityUpdate> IncrementalTraversability::Update(
 
   const std::size_t support_cells = static_cast<std::size_t>(std::ceil(
       profile_.support_radius_m / map.resolution_m));
-  const auto classify = [this, &map, support_cells](const std::size_t x,
-                                                     const std::size_t y) {
-    const std::size_t center = y * map.width + x;
-    if (!ValidValue(occupancy_[center]) || !ValidValue(elevation_[center]) ||
-        occupancy_[center] < 0.0F || occupancy_[center] > 1.0F) {
-      return std::numeric_limits<float>::quiet_NaN();
-    }
-    for (std::ptrdiff_t dy = -static_cast<std::ptrdiff_t>(support_cells);
-         dy <= static_cast<std::ptrdiff_t>(support_cells); ++dy) {
-      for (std::ptrdiff_t dx = -static_cast<std::ptrdiff_t>(support_cells);
-           dx <= static_cast<std::ptrdiff_t>(support_cells); ++dx) {
-        const double distance = std::hypot(static_cast<double>(dx),
-                                           static_cast<double>(dy)) * map.resolution_m;
-        if (distance > profile_.support_radius_m + 1.0e-9) continue;
-        const std::ptrdiff_t neighbour_x = static_cast<std::ptrdiff_t>(x) + dx;
-        const std::ptrdiff_t neighbour_y = static_cast<std::ptrdiff_t>(y) + dy;
-        if (neighbour_x < 0 || neighbour_y < 0 ||
-            neighbour_x >= static_cast<std::ptrdiff_t>(map.width) ||
-            neighbour_y >= static_cast<std::ptrdiff_t>(map.height)) {
-          return std::numeric_limits<float>::quiet_NaN();
-        }
-        const std::size_t neighbour =
-            static_cast<std::size_t>(neighbour_y) * map.width +
-            static_cast<std::size_t>(neighbour_x);
-        if (!ValidValue(occupancy_[neighbour]) || !ValidValue(elevation_[neighbour]) ||
-            occupancy_[neighbour] < 0.0F || occupancy_[neighbour] > 1.0F) {
-          return std::numeric_limits<float>::quiet_NaN();
-        }
-        if (occupancy_[neighbour] >= profile_.occupancy_threshold) return 0.0F;
-      }
-    }
+  const auto slope_classification = [this, &map](const std::size_t x,
+                                                  const std::size_t y) {
     const auto derivative = [this, &map, x, y](const bool x_axis)
         -> std::optional<double> {
       const std::ptrdiff_t coordinate = static_cast<std::ptrdiff_t>(x_axis ? x : y);
@@ -227,11 +199,75 @@ std::optional<TraversabilityUpdate> IncrementalTraversability::Update(
     const double slope = std::atan(std::hypot(*slope_x, *slope_y));
     return slope > profile_.maximum_slope_rad ? 0.0F : 1.0F;
   };
+  const auto classify = [this, &map, support_cells,
+                         &slope_classification](const std::size_t x,
+                                                const std::size_t y) {
+    const std::size_t center = y * map.width + x;
+    if (!ValidValue(occupancy_[center]) || !ValidValue(elevation_[center]) ||
+        occupancy_[center] < 0.0F || occupancy_[center] > 1.0F) {
+      return std::numeric_limits<float>::quiet_NaN();
+    }
+    for (std::ptrdiff_t dy = -static_cast<std::ptrdiff_t>(support_cells);
+         dy <= static_cast<std::ptrdiff_t>(support_cells); ++dy) {
+      for (std::ptrdiff_t dx = -static_cast<std::ptrdiff_t>(support_cells);
+           dx <= static_cast<std::ptrdiff_t>(support_cells); ++dx) {
+        const double distance = std::hypot(static_cast<double>(dx),
+                                           static_cast<double>(dy)) * map.resolution_m;
+        if (distance > profile_.support_radius_m + 1.0e-9) continue;
+        const std::ptrdiff_t neighbour_x = static_cast<std::ptrdiff_t>(x) + dx;
+        const std::ptrdiff_t neighbour_y = static_cast<std::ptrdiff_t>(y) + dy;
+        if (neighbour_x < 0 || neighbour_y < 0 ||
+            neighbour_x >= static_cast<std::ptrdiff_t>(map.width) ||
+            neighbour_y >= static_cast<std::ptrdiff_t>(map.height)) {
+          return std::numeric_limits<float>::quiet_NaN();
+        }
+        const std::size_t neighbour =
+            static_cast<std::size_t>(neighbour_y) * map.width +
+            static_cast<std::size_t>(neighbour_x);
+        if (!ValidValue(occupancy_[neighbour]) || !ValidValue(elevation_[neighbour]) ||
+            occupancy_[neighbour] < 0.0F || occupancy_[neighbour] > 1.0F) {
+          return std::numeric_limits<float>::quiet_NaN();
+        }
+        if (occupancy_[neighbour] >= profile_.occupancy_threshold) return 0.0F;
+      }
+    }
+    return slope_classification(x, y);
+  };
+
+  std::vector<bool> requires_neighbour_scan = dirty;
+  if (full_rebuild) {
+    std::vector<std::uint8_t> hazards(map.CellCount(), 0U);
+    for (std::size_t index = 0U; index < map.CellCount(); ++index) {
+      const float occupancy = occupancy_[index];
+      const float elevation = elevation_[index];
+      hazards[index] = static_cast<std::uint8_t>(
+          !ValidValue(occupancy) || !ValidValue(elevation) ||
+          occupancy < 0.0F || occupancy > 1.0F ||
+          occupancy >= profile_.occupancy_threshold);
+    }
+    const auto distance = BuildCenterSquaredDistance(map.width, map.height, hazards);
+    if (distance.ok()) {
+      const double radius_cells = profile_.support_radius_m / map.resolution_m;
+      const double radius_with_tolerance = radius_cells + 1.0e-9 / map.resolution_m;
+      const double squared_radius = radius_with_tolerance * radius_with_tolerance;
+      for (std::size_t y = support_cells; y + support_cells < map.height; ++y) {
+        for (std::size_t x = support_cells; x + support_cells < map.width; ++x) {
+          const std::size_t index = y * map.width + x;
+          requires_neighbour_scan[index] =
+              distance.squared_cells[index] <= squared_radius;
+        }
+      }
+    }
+  }
 
   std::size_t recomputed_cells{};
   for (std::size_t index = 0; index < map.CellCount(); ++index) {
     if (!dirty[index]) continue;
-    traversability_[index] = classify(index % map.width, index / map.width);
+    const std::size_t x = index % map.width;
+    const std::size_t y = index / map.width;
+    traversability_[index] = requires_neighbour_scan[index]
+        ? classify(x, y)
+        : slope_classification(x, y);
     ++recomputed_cells;
   }
   grid_map_msgs::msg::GridMap output;
@@ -240,6 +276,7 @@ std::optional<TraversabilityUpdate> IncrementalTraversability::Update(
   output.outer_start_index = local_map.outer_start_index;
   output.inner_start_index = local_map.inner_start_index;
   output.layers = {"traversability"};
+  output.basic_layers = {"traversability"};
   output.data = {WrapLayer(traversability_, map.width, map.height,
                            output.outer_start_index, output.inner_start_index)};
   return TraversabilityUpdate{.map = std::move(output),

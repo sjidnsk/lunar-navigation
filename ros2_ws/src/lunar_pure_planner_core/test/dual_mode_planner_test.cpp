@@ -127,6 +127,20 @@ class ManualClock final {
   };
 }
 
+[[nodiscard]] std::shared_ptr<const TraversabilitySnapshot> V1Snapshot(
+    const GridMap& global, const GridMap& local,
+    const RigidTransform& map_from_odom) {
+  PersistentTraversabilityMap map(TraversabilityProfile{
+      .global_occupancy_threshold = 50,
+      .local_occupancy_threshold = 0.5,
+      .maximum_slope_rad = 1.0,
+      .inflation_radius_m = 0.0,
+  });
+  EXPECT_TRUE(map.UpdateGlobal(global).accepted);
+  EXPECT_TRUE(map.UpdateLocal(local, map_from_odom, 1U).accepted);
+  return map.Capture();
+}
+
 [[nodiscard]] GlobalStageResult Route() {
   return GlobalStageResult{
       .route = GlobalRoute{
@@ -334,6 +348,54 @@ TEST(DualModePlanner, LunarSurfaceUsesOneGlobalAndOneLocalStage) {
   EXPECT_EQ(output.timing.global_elapsed, 20ms);
   EXPECT_EQ(output.timing.local_elapsed, 30ms);
   EXPECT_EQ(output.timing.total_elapsed, 50ms);
+}
+
+TEST(DualModePlanner,
+     GridTraversabilityV1MissingSnapshotFailsWithoutCallingLegacyBackends) {
+  CountingBackends backends;
+  PlanningRequest input =
+      Request(EnvironmentMode::kLunarSurface, backends.clock);
+  input.config.wheel_planner_mode = WheelPlannerMode::kGridTraversabilityV1;
+
+  const PlanningResult result = backends.planner.Plan(input);
+
+  EXPECT_EQ(result.status, PlanningStatus::kInvalidInput);
+  EXPECT_EQ(result.reason_code, "INVALID_INPUT");
+  EXPECT_EQ(backends.global_calls, 0U);
+  EXPECT_EQ(backends.local_calls, 0U);
+}
+
+TEST(DualModePlanner,
+     GridTraversabilityV1TransformsOdomStateAndNeverCallsLegacyBackends) {
+  CountingBackends backends;
+  PlanningRequest input =
+      Request(EnvironmentMode::kLunarSurface, backends.clock);
+  input.config.wheel_planner_mode = WheelPlannerMode::kGridTraversabilityV1;
+  input.config.grid_v1_local_horizon_m = 8.0;
+  input.world.map_from_odom.translation_m.x = 10.0;
+  input.world.local_map = WideLocalMap(8U);
+  input.world.traversability_snapshot = V1Snapshot(
+      *input.world.global_map, input.world.local_map,
+      input.world.map_from_odom);
+  input.goal_map = PointTarget(13.0, 1.0, 4.25);
+  auto& capability = std::get<WheeledCapability>(input.capability);
+  capability.maximum_forward_speed_mps = 1.0;
+  capability.maximum_reverse_speed_mps = 0.5;
+  capability.maximum_spin_rate_radps = 1.0;
+
+  const PlanningResult result = backends.planner.Plan(input);
+
+  ASSERT_EQ(result.status, PlanningStatus::kSuccess) << result.reason_code;
+  ASSERT_TRUE(result.reference.has_value());
+  const auto* trajectory =
+      std::get_if<TrajectoryReference>(&result.reference->data);
+  ASSERT_NE(trajectory, nullptr);
+  ASSERT_FALSE(trajectory->points.empty());
+  EXPECT_DOUBLE_EQ(trajectory->points.front().pose.position_m.x, 11.5);
+  EXPECT_EQ(result.timing.global_call_count, 1U);
+  EXPECT_EQ(result.timing.local_call_count, 1U);
+  EXPECT_EQ(backends.global_calls, 0U);
+  EXPECT_EQ(backends.local_calls, 0U);
 }
 
 TEST(DualModePlanner, GlobalBackendReceivesTheUnreducedHardDeadline) {
@@ -647,73 +709,6 @@ TEST(DualModePlanner, PreservesCanceledNoPathAndExceptionSemantics) {
   EXPECT_EQ(exception_output.timing.total_elapsed, 11ms);
 }
 
-TEST(DualModePlanner, PreservesWheelMetricsForSuccessAndNoPath) {
-  struct Case final {
-    LocalPlanStatus local_status;
-    PlanningStatus expected_status;
-  };
-  for (const Case& test_case : {
-           Case{LocalPlanStatus::kSolved, PlanningStatus::kSuccess},
-           Case{LocalPlanStatus::kNoPath, PlanningStatus::kNoPath},
-       }) {
-    ManualClock clock;
-    Planner planner(PlannerBackends{
-        .global = {},
-        .local = [test_case](const PlanningRequest&, const LocalGoalSet& goals,
-                             SearchControl) {
-          LocalStageResult result{
-              .status = test_case.local_status,
-              .wheel_metrics = WheelPlanningMetrics{
-                  .edge_validation_evaluations = 7U,
-              },
-          };
-          if (test_case.local_status == LocalPlanStatus::kSolved) {
-            result = TrajectoryTo(FirstGoal(goals));
-            result.wheel_metrics = WheelPlanningMetrics{
-                .edge_validation_evaluations = 7U,
-            };
-          }
-          return result;
-        },
-    });
-
-    const PlanningResult output =
-        planner.Plan(Request(EnvironmentMode::kLavaTube, clock));
-
-    EXPECT_EQ(output.status, test_case.expected_status);
-    ASSERT_TRUE(output.wheel_metrics.has_value());
-    EXPECT_EQ(output.wheel_metrics->edge_validation_evaluations, 7U);
-  }
-}
-
-TEST(DualModePlanner, PreservesWheelMetricsWhenPostLocalProgressThrows) {
-  ManualClock clock;
-  Planner planner(PlannerBackends{
-      .global = {},
-      .local = [](const PlanningRequest&, const LocalGoalSet& goals,
-                  SearchControl) {
-        LocalStageResult result = TrajectoryTo(FirstGoal(goals));
-        result.wheel_metrics = WheelPlanningMetrics{
-            .edge_validation_evaluations = 7U,
-        };
-        return result;
-      },
-  });
-  PlanningRequest input = Request(EnvironmentMode::kLavaTube, clock);
-  input.progress = [](const PlannerProgress& progress) {
-    if (progress.phase == PlannerPhase::kLocalSearch) {
-      throw std::runtime_error("post-local progress failure");
-    }
-  };
-
-  const PlanningResult output = planner.Plan(input);
-
-  EXPECT_EQ(output.status, PlanningStatus::kPlannerError);
-  EXPECT_EQ(output.reason_code, "PLANNER_ERROR");
-  ASSERT_TRUE(output.wheel_metrics.has_value());
-  EXPECT_EQ(output.wheel_metrics->edge_validation_evaluations, 7U);
-}
-
 TEST(DualModePlanner, PreservesGlobalFailureAndExceptionSemantics) {
   struct Case final {
     const char* reason;
@@ -1000,6 +995,167 @@ TEST(DualModePlanner, DefaultBackendsSolveAllThreePlatformsInBothModes) {
           output.reference->preview.poses_map.back().position_m.y, 1.0);
     }
   }
+}
+
+TEST(DualModePlanner,
+     WheelEscapesARequestLocalSelfOccludedStartIntoKnownForwardTerrain) {
+  PlanningRequest input =
+      RealRequest(PlatformType::kWheeled, EnvironmentMode::kLavaTube);
+  auto& state = std::get<WheeledState>(input.current_state);
+  state.pose.position_m = {.x = 1.5, .y = 1.5, .z = 0.0};
+  auto& capability = std::get<WheeledCapability>(input.capability);
+  capability.minimum_clearance_m = 0.1;
+  input.goal_map = PointTarget(2.1, 1.5);
+  input.goal_map.yaw_rad.reset();
+
+  constexpr std::size_t kStartCell = 1U * 6U + 1U;
+  auto& occupancy = std::get<std::vector<float>>(
+      input.world.local_map.layers.at("occupancy").values);
+  auto& elevation = std::get<std::vector<float>>(
+      input.world.local_map.layers.at("elevation").values);
+  occupancy[kStartCell] = std::numeric_limits<float>::quiet_NaN();
+  elevation[kStartCell] = std::numeric_limits<float>::quiet_NaN();
+
+  const PlanningResult output = Planner{}.Plan(input);
+
+  ASSERT_EQ(output.status, PlanningStatus::kSuccess) << output.reason_code;
+  ASSERT_TRUE(output.reference.has_value());
+  const auto* trajectory =
+      std::get_if<TrajectoryReference>(&output.reference->data);
+  ASSERT_NE(trajectory, nullptr);
+  ASSERT_FALSE(trajectory->points.empty());
+  EXPECT_NEAR(trajectory->points.back().pose.position_m.x, 2.1, 0.05);
+  EXPECT_NEAR(trajectory->points.back().pose.position_m.y, 1.5, 0.05);
+  EXPECT_TRUE(std::isnan(occupancy[kStartCell]));
+  EXPECT_TRUE(std::isnan(elevation[kStartCell]));
+}
+
+TEST(DualModePlanner, WheelStartPatchNeverOverwritesAFiniteObstacle) {
+  PlanningRequest input =
+      RealRequest(PlatformType::kWheeled, EnvironmentMode::kLavaTube);
+  auto& state = std::get<WheeledState>(input.current_state);
+  state.pose.position_m = {.x = 1.5, .y = 1.5, .z = 0.0};
+  auto& capability = std::get<WheeledCapability>(input.capability);
+  capability.minimum_clearance_m = 0.1;
+  input.goal_map = PointTarget(2.1, 1.5);
+  input.goal_map.yaw_rad.reset();
+
+  constexpr std::size_t kStartCell = 1U * 6U + 1U;
+  auto& occupancy = std::get<std::vector<float>>(
+      input.world.local_map.layers.at("occupancy").values);
+  auto& elevation = std::get<std::vector<float>>(
+      input.world.local_map.layers.at("elevation").values);
+  occupancy[kStartCell] = 1.0F;
+  elevation[kStartCell] = std::numeric_limits<float>::quiet_NaN();
+
+  const PlanningResult output = Planner{}.Plan(input);
+
+  EXPECT_EQ(output.status, PlanningStatus::kNoPath) << output.reason_code;
+  EXPECT_FLOAT_EQ(occupancy[kStartCell], 1.0F);
+  EXPECT_TRUE(std::isnan(elevation[kStartCell]));
+}
+
+TEST(DualModePlanner, WheelStartPatchTreatsInfinitiesAsInvalidNotUnknown) {
+  for (const bool invalid_occupancy : {true, false}) {
+    PlanningRequest input =
+        RealRequest(PlatformType::kWheeled, EnvironmentMode::kLavaTube);
+    auto& state = std::get<WheeledState>(input.current_state);
+    state.pose.position_m = {.x = 1.5, .y = 1.5, .z = 0.0};
+    auto& capability = std::get<WheeledCapability>(input.capability);
+    capability.minimum_clearance_m = 0.1;
+    input.goal_map = PointTarget(2.1, 1.5);
+    input.goal_map.yaw_rad.reset();
+
+    constexpr std::size_t kStartCell = 1U * 6U + 1U;
+    auto& occupancy = std::get<std::vector<float>>(
+        input.world.local_map.layers.at("occupancy").values);
+    auto& elevation = std::get<std::vector<float>>(
+        input.world.local_map.layers.at("elevation").values);
+    occupancy[kStartCell] =
+        invalid_occupancy
+            ? std::numeric_limits<float>::infinity()
+            : std::numeric_limits<float>::quiet_NaN();
+    elevation[kStartCell] =
+        invalid_occupancy
+            ? std::numeric_limits<float>::quiet_NaN()
+            : std::numeric_limits<float>::infinity();
+
+    const PlanningResult output = Planner{}.Plan(input);
+
+    EXPECT_EQ(output.status, PlanningStatus::kNoPath)
+        << invalid_occupancy << ":" << output.reason_code;
+    EXPECT_TRUE(std::isinf(invalid_occupancy ? occupancy[kStartCell]
+                                             : elevation[kStartCell]));
+  }
+}
+
+TEST(DualModePlanner, WheelStartPatchDoesNotExpandIntoUnknownAhead) {
+  PlanningRequest input =
+      RealRequest(PlatformType::kWheeled, EnvironmentMode::kLavaTube);
+  auto& state = std::get<WheeledState>(input.current_state);
+  state.pose.position_m = {.x = 1.5, .y = 1.5, .z = 0.0};
+  auto& capability = std::get<WheeledCapability>(input.capability);
+  capability.minimum_clearance_m = 0.1;
+  input.goal_map = PointTarget(3.1, 1.5);
+  input.goal_map.yaw_rad.reset();
+
+  constexpr std::size_t kStartCell = 1U * 6U + 1U;
+  constexpr std::size_t kUnknownAheadCell = 1U * 6U + 2U;
+  auto& occupancy = std::get<std::vector<float>>(
+      input.world.local_map.layers.at("occupancy").values);
+  auto& elevation = std::get<std::vector<float>>(
+      input.world.local_map.layers.at("elevation").values);
+  for (const std::size_t cell : {kStartCell, kUnknownAheadCell}) {
+    occupancy[cell] = std::numeric_limits<float>::quiet_NaN();
+    elevation[cell] = std::numeric_limits<float>::quiet_NaN();
+  }
+
+  const PlanningResult output = Planner{}.Plan(input);
+
+  EXPECT_EQ(output.status, PlanningStatus::kNoPath) << output.reason_code;
+  EXPECT_TRUE(std::isnan(occupancy[kUnknownAheadCell]));
+  EXPECT_TRUE(std::isnan(elevation[kUnknownAheadCell]));
+}
+
+TEST(DualModePlanner, WheelStartPatchIdentityIsolatesCachedLocalArtifacts) {
+  PlanningRequest first =
+      RealRequest(PlatformType::kWheeled, EnvironmentMode::kLavaTube);
+  auto& first_state = std::get<WheeledState>(first.current_state);
+  first_state.pose.position_m = {.x = 1.5, .y = 1.5, .z = 0.0};
+  auto& capability = std::get<WheeledCapability>(first.capability);
+  capability.minimum_clearance_m = 0.1;
+  first.goal_map = PointTarget(2.1, 1.5);
+  first.goal_map.yaw_rad.reset();
+  first.world.local_map_sequence = 42U;
+
+  constexpr std::size_t kFirstStartCell = 1U * 6U + 1U;
+  constexpr std::size_t kSecondStartCell = 1U * 6U + 3U;
+  auto& occupancy = std::get<std::vector<float>>(
+      first.world.local_map.layers.at("occupancy").values);
+  auto& elevation = std::get<std::vector<float>>(
+      first.world.local_map.layers.at("elevation").values);
+  for (const std::size_t cell : {kFirstStartCell, kSecondStartCell}) {
+    occupancy[cell] = std::numeric_limits<float>::quiet_NaN();
+    elevation[cell] = std::numeric_limits<float>::quiet_NaN();
+  }
+
+  PlanningRequest second = first;
+  auto& second_state = std::get<WheeledState>(second.current_state);
+  second_state.pose.position_m = {.x = 3.5, .y = 1.5, .z = 0.0};
+  second.goal_map = PointTarget(4.1, 1.5);
+  second.goal_map.yaw_rad.reset();
+
+  Planner planner;
+  const PlanningResult first_output = planner.Plan(first);
+  const PlanningResult second_output = planner.Plan(second);
+
+  ASSERT_EQ(first_output.status, PlanningStatus::kSuccess)
+      << first_output.reason_code;
+  ASSERT_EQ(second_output.status, PlanningStatus::kSuccess)
+      << second_output.reason_code;
+  EXPECT_FALSE(second_output.local_snapshot_cache_hit);
+  EXPECT_FALSE(second_output.local_projection_cache_hit);
+  EXPECT_FALSE(second_output.goal_field_cache_hit);
 }
 
 void SetCacheableSequences(PlanningRequest& input) {

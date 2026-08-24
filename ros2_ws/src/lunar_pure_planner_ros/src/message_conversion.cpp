@@ -339,4 +339,19 @@ Action::Result ConvertResult(const lunar::pure_planning::PlanningResult& source,
   return result;
 }
 
+nav_msgs::msg::Path ConvertGlobalPath(
+    const lunar::pure_planning::GlobalRoutePreview& preview,
+    const std_msgs::msg::Header& header) {
+  nav_msgs::msg::Path path;
+  path.header = header;
+  path.poses.reserve(preview.poses_map.size());
+  for (const auto& pose : preview.poses_map) {
+    geometry_msgs::msg::PoseStamped converted;
+    converted.header = header;
+    converted.pose = RosPose(pose);
+    path.poses.push_back(std::move(converted));
+  }
+  return path;
+}
+
 }  // namespace lunar::pure_planner_ros

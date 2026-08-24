@@ -39,7 +39,6 @@ struct LocalStageResult final {
   bool goal_field_cache_hit{};
   std::uint64_t expanded_states{};
   std::optional<double> best_cost;
-  std::optional<WheelPlanningMetrics> wheel_metrics;
 };
 
 struct PlannerBackends final {

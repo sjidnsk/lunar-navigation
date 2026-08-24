@@ -112,59 +112,6 @@ TEST(LocalTerrainProjection, TreatsCellFaultsAsUnknownWithoutRejectingMap) {
   EXPECT_EQ(projection.value->free_with_height[0], 1U);
 }
 
-TEST(LocalTerrainProjection,
-     UnknownOccupancyIsHardInfeasibleWithoutMeasuredClearanceInflation) {
-  const float nan = std::numeric_limits<float>::quiet_NaN();
-  const auto result = BuildLocalTerrainProjection(
-      Snapshot(3U, {0.0F, nan, 0.0F}, {0.0F, 0.0F, 0.0F}));
-
-  ASSERT_TRUE(result.ok()) << result.reason_code;
-  EXPECT_EQ(result.value->free_with_height,
-            (std::vector<std::uint8_t>{1U, 0U, 1U}));
-  EXPECT_EQ(result.value->occupied,
-            (std::vector<std::uint8_t>{0U, 0U, 0U}));
-  EXPECT_TRUE(std::ranges::all_of(
-      result.value->clearance_m,
-      [](const float value) { return std::isinf(value) && value > 0.0F; }));
-  EXPECT_FLOAT_EQ(result.value->narrow_band_distance_m[0U], 0.5F);
-  EXPECT_FLOAT_EQ(result.value->narrow_band_distance_m[1U], 0.0F);
-  EXPECT_FLOAT_EQ(result.value->narrow_band_distance_m[2U], 0.5F);
-}
-
-TEST(LocalTerrainProjection,
-     ThresholdOccupiedCellDrivesBothOccupiedClearanceAndNarrowBand) {
-  const auto result = BuildLocalTerrainProjection(
-      Snapshot(3U, {0.0F, 0.5F, 0.0F}, {0.0F, 0.0F, 0.0F}));
-
-  ASSERT_TRUE(result.ok()) << result.reason_code;
-  EXPECT_EQ(result.value->occupied,
-            (std::vector<std::uint8_t>{0U, 1U, 0U}));
-  EXPECT_EQ(result.value->clearance_m,
-            result.value->narrow_band_distance_m);
-  EXPECT_FLOAT_EQ(result.value->clearance_m[0U], 0.5F);
-  EXPECT_FLOAT_EQ(result.value->clearance_m[1U], 0.0F);
-  EXPECT_FLOAT_EQ(result.value->clearance_m[2U], 0.5F);
-}
-
-TEST(LocalTerrainProjection,
-     InvalidOccupancyAndMissingElevationAreNotOccupiedSources) {
-  const float nan = std::numeric_limits<float>::quiet_NaN();
-  const auto result = BuildLocalTerrainProjection(
-      Snapshot(4U, {0.0F, -0.1F, 1.1F, 0.0F},
-               {0.0F, 0.0F, 0.0F, nan}));
-
-  ASSERT_TRUE(result.ok()) << result.reason_code;
-  EXPECT_EQ(result.value->free_with_height,
-            (std::vector<std::uint8_t>{1U, 0U, 0U, 0U}));
-  EXPECT_EQ(result.value->occupied,
-            (std::vector<std::uint8_t>{0U, 0U, 0U, 0U}));
-  EXPECT_TRUE(std::ranges::all_of(
-      result.value->clearance_m,
-      [](const float value) { return std::isinf(value) && value > 0.0F; }));
-  EXPECT_FLOAT_EQ(result.value->narrow_band_distance_m[1U], 0.0F);
-  EXPECT_FLOAT_EQ(result.value->narrow_band_distance_m[2U], 0.0F);
-}
-
 TEST(LocalTerrainProjection, DerivesSlopeRoughnessAndClearanceFromTwoLayers) {
   constexpr std::size_t kWidth = 5U;
   std::vector<float> occupancy(kWidth * kWidth, 0.0F);
@@ -229,7 +176,7 @@ TEST(LocalTerrainProjection,
                                   [](const float value) {
                                     return value == 0.0F;
                                   }));
-  EXPECT_LT(allocation_count, kWidth * 32U);
+  EXPECT_LT(allocation_count, kWidth * 16U);
 }
 
 TEST(LocalTerrainProjection, KeepsSlopeAndRoughnessStableUnderLargeElevationOffset) {
@@ -259,11 +206,12 @@ TEST(LocalTerrainProjection, StopsDuringProjectionAtInjectedDeadline) {
   const auto map = Snapshot(
       kWidth, std::vector<float>(kWidth * kWidth, 0.0F),
       std::vector<float>(kWidth * kWidth, 0.0F));
-  std::size_t reads = 0U;
+  SteadyClock::time_point now{};
   SearchControl control{
-      .deadline = SteadyClock::time_point{2s},
-      .now = [&reads] {
-        return SteadyClock::time_point{std::chrono::milliseconds{reads++}};
+      .deadline = SteadyClock::time_point{5ms},
+      .now = [&now] {
+        now += 1ms;
+        return now;
       },
   };
 

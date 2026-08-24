@@ -24,7 +24,8 @@ endfunction()
 # linked into the pure planner.
 set(LUNAR_ANYTIME_PRODUCTION_SOURCES
   src/planner.cpp
-  src/global_goal_feasibility.cpp
+  src/grid_v1/grid_v1_planner.cpp
+  src/grid_v1/traversability_map.cpp
   src/hierarchical/frame_transform.cpp
   src/hierarchical/global_route_planner.cpp
   src/hierarchical/reference_composer.cpp
@@ -44,6 +45,7 @@ set(LUNAR_ANYTIME_PRODUCTION_SOURCES
   src/shared/map_snapshot.cpp
   src/shared/obstacle_height_estimator.cpp
   src/shared/planning_timing.cpp
+  src/shared/request_local_start_patch.cpp
   src/shared/search_control.cpp
   src/wheel/anytime_wheel_planner.cpp)
 
@@ -66,9 +68,9 @@ install(
   INCLUDES DESTINATION include)
 install(FILES
   include/lunar_pure_planner_core/planner.hpp
-  include/lunar_pure_planner_core/global_goal_feasibility.hpp
   include/lunar_pure_planner_core/planning_timing.hpp
   include/lunar_pure_planner_core/search_control.hpp
+  include/lunar_pure_planner_core/traversability_map.hpp
   DESTINATION include/lunar_pure_planner_core)
 install(FILES
   include/lunar_pure_planner_core/types/geometry.hpp
@@ -124,6 +126,10 @@ if(BUILD_TESTING)
     test/ballistic_envelope_test.cpp)
   lunar_add_core_gtest(lunar_pure_planner_core_active_planner_cache_test
     test/active_planner_cache_test.cpp)
+  lunar_add_core_gtest(lunar_pure_planner_core_traversability_map_v1_test
+    test/traversability_map_v1_test.cpp)
+  lunar_add_core_gtest(lunar_pure_planner_core_grid_v1_planner_test
+    test/grid_v1_planner_test.cpp)
 
   add_test(
     NAME lunar_pure_planner_core_no_legacy_contract

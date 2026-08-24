@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.13)
 project(lunar_pure_planner_ros LANGUAGES CXX)
 
+option(LUNAR_BUILD_DEMO "Build test-only lunar surface RViz demo" ON)
+
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
@@ -12,21 +14,30 @@ find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(tf2_msgs REQUIRED)
-find_package(visualization_msgs REQUIRED)
 find_package(yaml-cpp REQUIRED)
+if(LUNAR_BUILD_DEMO)
+  find_package(visualization_msgs REQUIRED)
+endif()
 
-add_library(${PROJECT_NAME} SHARED
+set(LUNAR_PURE_PLANNER_ROS_SOURCES
   src/platform_config.cpp
   src/input_store.cpp
+  src/traversability_input.cpp
   src/map_adapters.cpp
   src/incremental_traversability.cpp
+  src/center_distance_transform.cpp
+  src/traversability_qos.cpp
   src/trusted_bridge.cpp
   src/state_adapter.cpp
   src/message_conversion.cpp
   src/request_diagnostics.cpp
-  src/lunar_surface_scenario.cpp
   src/pure_plan_motion_server.cpp
   src/rviz_goal_bridge.cpp)
+if(LUNAR_BUILD_DEMO)
+  list(APPEND LUNAR_PURE_PLANNER_ROS_SOURCES
+    src/lunar_surface_scenario.cpp)
+endif()
+add_library(${PROJECT_NAME} SHARED ${LUNAR_PURE_PLANNER_ROS_SOURCES})
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 target_include_directories(${PROJECT_NAME}
   PUBLIC
@@ -66,17 +77,20 @@ target_link_libraries(lunar_local_traversability_node ${PROJECT_NAME})
 ament_target_dependencies(lunar_local_traversability_node
   ament_index_cpp grid_map_msgs rclcpp)
 
-add_executable(lunar_surface_demo_node src/lunar_surface_demo_node.cpp)
-target_compile_features(lunar_surface_demo_node PUBLIC cxx_std_20)
-target_link_libraries(lunar_surface_demo_node ${PROJECT_NAME})
-ament_target_dependencies(lunar_surface_demo_node
-  geometry_msgs grid_map_msgs nav_msgs rclcpp tf2_msgs)
+if(LUNAR_BUILD_DEMO)
+  add_executable(lunar_surface_demo_node src/lunar_surface_demo_node.cpp)
+  target_compile_features(lunar_surface_demo_node PUBLIC cxx_std_20)
+  target_link_libraries(lunar_surface_demo_node ${PROJECT_NAME})
+  ament_target_dependencies(lunar_surface_demo_node
+    geometry_msgs grid_map_msgs nav_msgs rclcpp tf2_msgs)
 
-add_executable(lunar_surface_visualizer_node src/lunar_surface_visualizer_node.cpp)
-target_compile_features(lunar_surface_visualizer_node PUBLIC cxx_std_20)
-target_link_libraries(lunar_surface_visualizer_node ${PROJECT_NAME})
-ament_target_dependencies(lunar_surface_visualizer_node
-  lunar_planning_msgs nav_msgs rclcpp visualization_msgs)
+  add_executable(lunar_surface_visualizer_node
+    src/lunar_surface_visualizer_node.cpp)
+  target_compile_features(lunar_surface_visualizer_node PUBLIC cxx_std_20)
+  target_link_libraries(lunar_surface_visualizer_node ${PROJECT_NAME})
+  ament_target_dependencies(lunar_surface_visualizer_node
+    lunar_planning_msgs nav_msgs rclcpp visualization_msgs)
+endif()
 
 install(
   TARGETS ${PROJECT_NAME}
@@ -87,9 +101,13 @@ install(
   INCLUDES DESTINATION include)
 install(
   TARGETS lunar_pure_planner_node lunar_rviz_goal_bridge
-    lunar_local_traversability_node lunar_surface_demo_node
-    lunar_surface_visualizer_node
+    lunar_local_traversability_node
   RUNTIME DESTINATION lib/${PROJECT_NAME})
+if(LUNAR_BUILD_DEMO)
+  install(
+    TARGETS lunar_surface_demo_node lunar_surface_visualizer_node
+    RUNTIME DESTINATION lib/${PROJECT_NAME})
+endif()
 install(DIRECTORY include/ DESTINATION include)
 
 get_filename_component(
@@ -99,10 +117,6 @@ get_filename_component(
 get_filename_component(
   LUNAR_PURE_PLANNER_LAUNCH_SOURCE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../../launch"
-  ABSOLUTE)
-get_filename_component(
-  LUNAR_PURE_PLANNER_RVIZ_SOURCE_DIR
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../../rviz"
   ABSOLUTE)
 install(
   DIRECTORY "${LUNAR_PURE_PLANNER_CONFIG_SOURCE_DIR}/"
@@ -116,10 +130,16 @@ install(
   FILES_MATCHING
     PATTERN "*.launch.py"
     PATTERN "pure_exploration.launch.py" EXCLUDE)
-install(
-  DIRECTORY "${LUNAR_PURE_PLANNER_RVIZ_SOURCE_DIR}/"
-  DESTINATION share/${PROJECT_NAME}/rviz
-  FILES_MATCHING PATTERN "*.rviz")
+if(LUNAR_BUILD_DEMO)
+  get_filename_component(
+    LUNAR_PURE_PLANNER_RVIZ_SOURCE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../rviz"
+    ABSOLUTE)
+  install(
+    DIRECTORY "${LUNAR_PURE_PLANNER_RVIZ_SOURCE_DIR}/"
+    DESTINATION share/${PROJECT_NAME}/rviz
+    FILES_MATCHING PATTERN "*.rviz")
+endif()
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -151,6 +171,9 @@ if(BUILD_TESTING)
   ament_add_gtest(request_diagnostics_test test/request_diagnostics_test.cpp)
   target_link_libraries(request_diagnostics_test ${PROJECT_NAME})
 
+  ament_add_gtest(traversability_input_test test/traversability_input_test.cpp)
+  target_link_libraries(traversability_input_test ${PROJECT_NAME})
+
   ament_add_gtest(pure_plan_motion_server_test
     test/pure_plan_motion_server_test.cpp)
   target_compile_definitions(pure_plan_motion_server_test PRIVATE
@@ -170,12 +193,22 @@ if(BUILD_TESTING)
     test/incremental_traversability_test.cpp)
   target_link_libraries(incremental_traversability_test ${PROJECT_NAME})
 
+  ament_add_gtest(traversability_qos_test test/traversability_qos_test.cpp)
+  target_link_libraries(traversability_qos_test ${PROJECT_NAME})
+  ament_target_dependencies(traversability_qos_test rclcpp)
+
+  ament_add_gtest(center_distance_transform_test
+    test/center_distance_transform_test.cpp)
+  target_link_libraries(center_distance_transform_test ${PROJECT_NAME})
+
   ament_add_gtest(trusted_bridge_test test/trusted_bridge_test.cpp)
   target_link_libraries(trusted_bridge_test ${PROJECT_NAME})
 
-  ament_add_gtest(lunar_surface_scenario_test
-    test/lunar_surface_scenario_test.cpp)
-  target_link_libraries(lunar_surface_scenario_test ${PROJECT_NAME})
+  if(LUNAR_BUILD_DEMO)
+    ament_add_gtest(lunar_surface_scenario_test
+      test/lunar_surface_scenario_test.cpp)
+    target_link_libraries(lunar_surface_scenario_test ${PROJECT_NAME})
+  endif()
 
   get_filename_component(
     LUNAR_PURE_PLANNER_LAUNCH_TEST
@@ -198,6 +231,8 @@ ament_export_dependencies(
   rclcpp
   rclcpp_action
   tf2_msgs
-  visualization_msgs
   yaml-cpp)
+if(LUNAR_BUILD_DEMO)
+  ament_export_dependencies(visualization_msgs)
+endif()
 ament_package()
