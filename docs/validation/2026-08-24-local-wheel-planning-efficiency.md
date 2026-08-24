@@ -2,25 +2,31 @@
 
 ## Verdict
 
-`INCOMPLETE` from the runtime acceptance captured at source
-`e47c8f54e3addc939297e57ff539f9edb55d4b5c`. The later metrics-retention
-fix-wave source is `639ce5134e1eda140a15d8df87ea922f198f18cc`, but no smoke or
-field acceptance was rerun from that source.
+`FAIL / INCOMPLETE`. The latest stop-gated runtime acceptance used source
+`b564eefc908bd4f22116fd0e3c70354d29917c8e`. Its clean native Jazzy build and
+bounded moving-start Stage A smoke passed: candidates 6 and 7 no longer failed
+from a moving start, a non-empty executable reference moved the vehicle, and
+coverage increased. Stage B then started the full operator and RViz but stopped
+after `13.958106673 s` with
+`ERROR / PLANNER_CONTRACT_RESULT_CONTRACT_MISMATCH`; no local segment
+completed and the task did not reach `COMPLETED_NO_REACHABLE_FRONTIER`.
 
-At the original Task 8 `e47c8f5`/documentation-commit `f60a964` stage, the
-planner-core performance change had fresh Jazzy unit evidence and the
-production eight-package overlay built successfully. The fixed-seed
-closed-loop smoke is not accepted: candidates 6 and 7 are `NO_PATH` from a
-moving start, no goal completes, and the operator rejects the result. The full
-300 m RViz run was therefore not started.
+The later Humble regression built successfully and both exploration packages
+passed, but the selected five-package suite was not green because planner core
+finished 18/19. The historical Task 8 and metrics-retention evidence is retained
+below with its original source attribution; it is not the current readiness
+verdict.
 
 Readiness boundaries:
 
-- full 300 m + RViz: `NOT_RUN / INCOMPLETE`;
-- Jetson AGX Orin / ROS 2 Humble: `NOT_RUN`;
+- full 300 m exploration: `FAILED / INCOMPLETE`;
+- RViz: started, but continuous visual acceptance `FAILED / INCOMPLETE`;
+- ROS 2 Humble: build passed, selected five-package regression `FAIL / NOT GREEN`;
+- Jetson AGX Orin and Task 3 DDS integration: `NOT_RUN`;
 - Task 7 far-clearance result: `FAR_CLEARANCE_SKIP_NOT_ENABLED`;
-- exploration candidate/yaw/order/retry/call-count behavior: unchanged;
-- controller, Action/messages and admission contracts: unchanged.
+- planner algorithms, controller and Action/messages: unchanged from the
+  stop-gated implementation baseline;
+- repository-boundary entrypoints: `NOT_RUN / MISSING`.
 
 ## Source and scope
 
