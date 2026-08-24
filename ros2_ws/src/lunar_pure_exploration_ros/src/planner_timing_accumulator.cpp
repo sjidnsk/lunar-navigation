@@ -62,16 +62,14 @@ bool ParseElapsed(const std::string_view text, double& output) {
 
 std::optional<PlannerTiming> ParseTiming(
     const diagnostic_msgs::msg::DiagnosticArray& message) {
-  if (message.status.size() != 1U ||
-      message.status.front().values.size() != kTimingKeys.size()) {
+  if (message.status.size() != 1U) {
     return std::nullopt;
   }
 
   FieldMap fields;
-  fields.reserve(kTimingKeys.size());
+  fields.reserve(message.status.front().values.size());
   for (const auto& entry : message.status.front().values) {
-    if (!IsKnownKey(entry.key) ||
-        !fields.emplace(entry.key, entry.value).second) {
+    if (IsKnownKey(entry.key) && !fields.emplace(entry.key, entry.value).second) {
       return std::nullopt;
     }
   }

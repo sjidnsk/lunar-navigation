@@ -90,11 +90,11 @@ if(BUILD_TESTING)
   file(SHA256 "${_planner_ros_source_dir}/pure_plan_motion_server.cpp"
     _pure_plan_motion_server_sha)
   if(NOT _message_conversion_sha STREQUAL
-      "52633bc5352cd303cc27da65db33aebbc9ad58d56537cfd1e149523a8797e3db" OR
+      "397be394bcf8c460dc2654bc2ef45c7181914461007367e338da2395f862a160" OR
      NOT _accepted_goal_finalizer_sha STREQUAL
       "bcd4dd1be9e56d6495b63171651b8449994d292d6451f3be960fd0fa72235d63" OR
      NOT _pure_plan_motion_server_sha STREQUAL
-      "672ff83d6f1d810d7d37ad39d4a7ffc3bf0265deec38cc286e7d6f5aa1c69b90")
+      "ddad903a6838a61e3018ce8a5e98173276de6971baf9a87702fe94970f44dd0a")
     message(FATAL_ERROR
       "final planner source changed; re-review Task 10 compatibility")
   endif()

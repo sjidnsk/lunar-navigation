@@ -5,6 +5,7 @@
 #include <mutex>
 #include <new>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 #include <lunar_planning_msgs/action/plan_motion.hpp>
@@ -141,8 +142,16 @@ PlannerEvaluation Classify(
           PlannerResourceKind::kExecutablePathPoints,
           "RESOURCE_EXECUTABLE_PATH_LIMIT");
     }
-    const auto path_length =
-        PathLength(result.reference, maximum_path_preview_poses);
+    std::optional<double> path_length;
+    if (result.diagnostics.has_best_cost) {
+      const double best_cost = result.diagnostics.best_cost;
+      if (!std::isfinite(best_cost) || best_cost < 0.0) {
+        return ContractError(request_id, candidate_id, "BEST_COST_INVALID");
+      }
+      path_length = best_cost;
+    } else {
+      path_length = PathLength(result.reference, maximum_path_preview_poses);
+    }
     if (!path_length.has_value()) {
       return ContractError(request_id, candidate_id,
                            "PATH_PREVIEW_INVALID");
@@ -159,11 +168,13 @@ PlannerEvaluation Classify(
       !result.has_reference && IsEmptyReference(result.reference);
   const bool ordinary_failure_wrapper =
       wrapped.code == rclcpp_action::ResultCode::ABORTED;
+  const std::string_view reason_code{result.reason_code};
   if (result.planning_outcome == Action::Result::GOAL_INFEASIBLE &&
       result.execution_directive == Action::Result::NO_SAFE_REFERENCE &&
       empty_failure_reference && ordinary_failure_wrapper &&
-      (result.reason_code == "NO_PATH" ||
-       result.reason_code == "GOAL_OUTSIDE_LOCAL_MAP")) {
+      (reason_code == "NO_PATH" || reason_code == "GOAL_OUTSIDE_LOCAL_MAP" ||
+       reason_code == "GOAL_NOT_FREE" || reason_code == "GLOBAL_NO_PATH" ||
+       reason_code == "LOCAL_NO_CANDIDATE" || reason_code == "LOCAL_NO_PATH")) {
     return FailureEvaluation(request_id, candidate_id,
                              PlannerEvaluationKind::kExhaustiveNoPath,
                              result.reason_code);
@@ -176,6 +187,14 @@ PlannerEvaluation Classify(
                              PlannerEvaluationKind::kRetryable,
                              result.reason_code);
   }
+  if (result.planning_outcome == Action::Result::ACTIVE_REFERENCE_INVALIDATED &&
+      result.execution_directive == Action::Result::NO_SAFE_REFERENCE &&
+      empty_failure_reference && ordinary_failure_wrapper &&
+      reason_code == "STALE_PATH_INVALIDATED") {
+    return FailureEvaluation(request_id, candidate_id,
+                             PlannerEvaluationKind::kRetryable,
+                             result.reason_code);
+  }
   if (result.planning_outcome == Action::Result::CANCELED &&
       result.execution_directive == Action::Result::NO_SAFE_REFERENCE &&
       empty_failure_reference && locally_requested_cancel &&
@@ -184,6 +203,15 @@ PlannerEvaluation Classify(
     return FailureEvaluation(request_id, candidate_id,
                              PlannerEvaluationKind::kCanceled,
                              result.reason_code);
+  }
+  if (((result.planning_outcome == Action::Result::INVALID_REQUEST &&
+        (reason_code == "START_NOT_FREE" || reason_code == "INVALID_INPUT" ||
+         reason_code == "MAP_RESOLUTION_MISMATCH")) ||
+       (result.planning_outcome == Action::Result::NUMERICAL_FAILURE &&
+        (reason_code == "POSTCHECK_FAILED" || reason_code == "PLANNER_ERROR"))) &&
+      result.execution_directive == Action::Result::NO_SAFE_REFERENCE &&
+      empty_failure_reference && ordinary_failure_wrapper) {
+    return ContractError(request_id, candidate_id, result.reason_code);
   }
   return ContractError(request_id, candidate_id, "RESULT_CONTRACT_MISMATCH");
 }

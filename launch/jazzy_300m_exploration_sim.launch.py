@@ -133,6 +133,7 @@ def _compose(context, *, rviz_config: str):
             {
                 "platform_type": "wheel",
                 "platform_config": str(planner_share / "config" / "wheel.yaml"),
+                "wheel_planner_mode": "grid_traversability_v1",
                 "rolling_surface_enabled": False,
                 "global_map_topic": INTERFACES["global_map"],
                 "local_map_topic": INTERFACES["local_map"],

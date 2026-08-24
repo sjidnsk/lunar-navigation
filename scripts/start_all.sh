@@ -29,7 +29,8 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 ros2 launch lunar_pure_planner_ros pure_planner.launch.py \
-  platform_type:="${platform}" &
+  platform_type:="${platform}" \
+  wheel_planner_mode:="grid_traversability_v1" &
 pids+=("$!")
 
 ros2 launch lunar_pure_planner_ros local_traversability.launch.py \

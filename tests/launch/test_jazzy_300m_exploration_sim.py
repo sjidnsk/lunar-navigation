@@ -199,6 +199,7 @@ def test_launch_composition_exposes_exact_actions_and_runtime_parameters(monkeyp
     )
     coordinator = _action_parameters(by_executable["run_coordinator"], context)
     explorer = _action_parameters(by_executable["pure_exploration_node"], context)
+    planner = _action_parameters(by_executable["lunar_pure_planner_node"], context)
     assert simulation["command_topic"] == "/Car/T5/Car_Cmd_Vel"
     assert controller == {
         "reference_topic": "/Car/T4/execution/motion_reference",
@@ -207,6 +208,8 @@ def test_launch_composition_exposes_exact_actions_and_runtime_parameters(monkeyp
         "execution_cancel_topic": "/Car/T4/execution/cancel",
     }
     assert coordinator["controller_command_topic"] == "/Car/T5/Car_Cmd_Vel"
+    assert planner["wheel_planner_mode"] == "grid_traversability_v1"
+    assert planner["rolling_surface_enabled"] is False
     for name, value in CAPACITIES.items():
         assert explorer[name] == value
     assert actions[-1].condition is not None
@@ -807,6 +810,9 @@ def test_live_closed_loop_reaches_real_motion_and_planner_timing() -> None:
                     and float(item.get("local_elapsed_ms", "0")) > 0.0
                     for item in diagnostics
                 )
+                grid_v1_active = any(
+                    item.get("grid_v1_active") == "true" for item in diagnostics
+                )
                 observed_transitions = {
                     (item["state"], item["reason"])
                     for item in evidence["status_trace"]
@@ -837,6 +843,7 @@ def test_live_closed_loop_reaches_real_motion_and_planner_timing() -> None:
                     and float(evidence["displacement_m"]) >= 0.2
                     and coverage_increased
                     and has_global_local_timing
+                    and grid_v1_active
                 ):
                     break
                 if process.poll() is not None:

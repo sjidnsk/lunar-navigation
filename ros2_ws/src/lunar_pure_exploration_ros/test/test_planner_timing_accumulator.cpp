@@ -172,7 +172,7 @@ TEST(PlannerTimingAccumulatorTest,
 }
 
 TEST(PlannerTimingAccumulatorTest,
-     ExactTenKeyPlannerRecordParsesButStopWaitOutputKeysRemainForeign) {
+     ExactTenKeyPlannerRecordParsesAndIgnoresUniqueExtensionKeys) {
   PlannerTimingAccumulator exact_accumulator{1U};
   const auto exact = TimingMessage("request-exact", "WHEELED", "1", "0",
                                    "PLAN_FOUND", "11.0", "2", "7.0",
@@ -185,10 +185,42 @@ TEST(PlannerTimingAccumulatorTest,
   auto exploration_output = exact;
   exploration_output.status.front().values.push_back(
       KeyValue{}.set__key("stop_wait_elapsed_ms").set__value("5000.000000"));
-  PlannerTimingAccumulator strict_accumulator{1U};
-  EXPECT_EQ(strict_accumulator.Ingest(exploration_output),
-            TimingIngestResult::kRejected);
-  EXPECT_FALSE(strict_accumulator.Find("request-exact").has_value());
+  PlannerTimingAccumulator extension_accumulator{1U};
+  EXPECT_EQ(extension_accumulator.Ingest(exploration_output),
+            TimingIngestResult::kAccepted);
+  EXPECT_TRUE(extension_accumulator.Find("request-exact").has_value());
+}
+
+TEST(PlannerTimingAccumulatorTest,
+     AcceptsUniqueGridV1DiagnosticExtensionsButRejectsBrokenRequiredFields) {
+  auto grid_v1 = TimingMessage("grid-v1", "WHEELED", "1", "0",
+                               "PLAN_FOUND", "11.0", "2", "7.0", "3",
+                               "18.0");
+  grid_v1.status.front().values.insert(
+      grid_v1.status.front().values.end(),
+      {KeyValue{}.set__key("grid_v1_active").set__value("true"),
+       KeyValue{}.set__key("global_input_sequence").set__value("9"),
+       KeyValue{}.set__key("fused_tile_count").set__value("4")});
+  PlannerTimingAccumulator accepted{1U};
+  EXPECT_EQ(accepted.Ingest(grid_v1), TimingIngestResult::kAccepted);
+  EXPECT_TRUE(accepted.Find("grid-v1").has_value());
+
+  auto duplicate_required = grid_v1;
+  duplicate_required.status.front().values.push_back(
+      KeyValue{}.set__key("request_id").set__value("other"));
+  PlannerTimingAccumulator duplicate{1U};
+  EXPECT_EQ(duplicate.Ingest(duplicate_required), TimingIngestResult::kRejected);
+
+  auto missing_required = grid_v1;
+  missing_required.status.front().values.erase(
+      missing_required.status.front().values.begin() + 4);
+  PlannerTimingAccumulator missing{1U};
+  EXPECT_EQ(missing.Ingest(missing_required), TimingIngestResult::kRejected);
+
+  auto malformed_required = grid_v1;
+  malformed_required.status.front().values[5].value = "-1";
+  PlannerTimingAccumulator malformed{1U};
+  EXPECT_EQ(malformed.Ingest(malformed_required), TimingIngestResult::kRejected);
 }
 
 TEST(PlannerTimingAccumulatorTest,

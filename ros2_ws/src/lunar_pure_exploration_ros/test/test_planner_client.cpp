@@ -1,5 +1,6 @@
 #include "lunar_pure_exploration_ros/planner_client.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -501,6 +502,101 @@ TEST_F(PlannerClientTest, ClassifiesTheOnlyFourAcceptedTypedCombinations) {
   EXPECT_EQ(canceled.reason_code, "REQUEST_CANCELED");
   EXPECT_FALSE(canceled.path_length_m.has_value());
   EXPECT_FALSE(canceled.reference.has_value());
+}
+
+TEST_F(PlannerClientTest,
+       UsesGridV1BestCostForReachableRoutesAndRejectsInvalidCosts) {
+  auto grid_v1_result = SuccessResult({{0.0, 0.0}, {8.0, 0.0}});
+  grid_v1_result.diagnostics.has_best_cost = true;
+  grid_v1_result.diagnostics.best_cost = 31.25;
+  Evaluate("grid-v1-best-cost", Candidate());
+  const auto grid_v1_evaluation = FinishAndWait(
+      "grid-v1-best-cost", rclcpp_action::ResultCode::SUCCEEDED,
+      grid_v1_result);
+  EXPECT_EQ(grid_v1_evaluation.kind, PlannerEvaluationKind::kReachable);
+  ASSERT_TRUE(grid_v1_evaluation.path_length_m.has_value());
+  EXPECT_DOUBLE_EQ(*grid_v1_evaluation.path_length_m, 31.25);
+
+  for (const auto [id, value] :
+       {std::pair{"nan", std::numeric_limits<double>::quiet_NaN()},
+        std::pair{"infinity", std::numeric_limits<double>::infinity()},
+        std::pair{"negative", -0.25}}) {
+    auto invalid = grid_v1_result;
+    invalid.diagnostics.best_cost = value;
+    Evaluate("grid-v1-best-cost-" + std::string{id}, Candidate());
+    const auto evaluation = FinishAndWait(
+        "grid-v1-best-cost-" + std::string{id},
+        rclcpp_action::ResultCode::SUCCEEDED, invalid);
+    EXPECT_EQ(evaluation.kind, PlannerEvaluationKind::kContractError);
+    EXPECT_EQ(evaluation.reason_code, "BEST_COST_INVALID");
+  }
+
+  auto compatible = SuccessResult({{0.0, 0.0}, {8.0, 0.0}});
+  compatible.diagnostics.has_best_cost = false;
+  compatible.diagnostics.best_cost = std::numeric_limits<double>::quiet_NaN();
+  Evaluate("grid-v1-best-cost-compatibility", Candidate());
+  const auto fallback = FinishAndWait(
+      "grid-v1-best-cost-compatibility", rclcpp_action::ResultCode::SUCCEEDED,
+      compatible);
+  EXPECT_EQ(fallback.kind, PlannerEvaluationKind::kReachable);
+  ASSERT_TRUE(fallback.path_length_m.has_value());
+  EXPECT_DOUBLE_EQ(*fallback.path_length_m, 8.0);
+}
+
+TEST_F(PlannerClientTest, ClassifiesFrozenGridV1FailureReasons) {
+  struct Case final {
+    const char* id;
+    std::uint8_t outcome;
+    rclcpp_action::ResultCode wrapper;
+    const char* reason;
+    PlannerEvaluationKind kind;
+    bool locally_requested_cancel;
+  };
+  const std::array cases{
+      Case{"goal-not-free", Action::Result::GOAL_INFEASIBLE,
+           rclcpp_action::ResultCode::ABORTED, "GOAL_NOT_FREE",
+           PlannerEvaluationKind::kExhaustiveNoPath, false},
+      Case{"global-no-path", Action::Result::GOAL_INFEASIBLE,
+           rclcpp_action::ResultCode::ABORTED, "GLOBAL_NO_PATH",
+           PlannerEvaluationKind::kExhaustiveNoPath, false},
+      Case{"local-no-candidate", Action::Result::GOAL_INFEASIBLE,
+           rclcpp_action::ResultCode::ABORTED, "LOCAL_NO_CANDIDATE",
+           PlannerEvaluationKind::kExhaustiveNoPath, false},
+      Case{"local-no-path", Action::Result::GOAL_INFEASIBLE,
+           rclcpp_action::ResultCode::ABORTED, "LOCAL_NO_PATH",
+           PlannerEvaluationKind::kExhaustiveNoPath, false},
+      Case{"stale-path", Action::Result::ACTIVE_REFERENCE_INVALIDATED,
+           rclcpp_action::ResultCode::ABORTED, "STALE_PATH_INVALIDATED",
+           PlannerEvaluationKind::kRetryable, false},
+      Case{"timeout", Action::Result::RESOURCE_EXHAUSTED,
+           rclcpp_action::ResultCode::ABORTED, "TIMEOUT",
+           PlannerEvaluationKind::kRetryable, false},
+      Case{"canceled", Action::Result::CANCELED,
+           rclcpp_action::ResultCode::CANCELED, "REQUEST_CANCELED",
+           PlannerEvaluationKind::kCanceled, true},
+      Case{"start-not-free", Action::Result::INVALID_REQUEST,
+           rclcpp_action::ResultCode::ABORTED, "START_NOT_FREE",
+           PlannerEvaluationKind::kContractError, false},
+      Case{"resolution", Action::Result::INVALID_REQUEST,
+           rclcpp_action::ResultCode::ABORTED, "MAP_RESOLUTION_MISMATCH",
+           PlannerEvaluationKind::kContractError, false},
+      Case{"postcheck", Action::Result::NUMERICAL_FAILURE,
+           rclcpp_action::ResultCode::ABORTED, "POSTCHECK_FAILED",
+           PlannerEvaluationKind::kContractError, false},
+      Case{"planner-error", Action::Result::NUMERICAL_FAILURE,
+           rclcpp_action::ResultCode::ABORTED, "PLANNER_ERROR",
+           PlannerEvaluationKind::kContractError, false},
+  };
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.id);
+    Evaluate(test_case.id, Candidate());
+    const auto evaluation = FinishAndWait(
+        test_case.id, test_case.wrapper,
+        FailureResult(test_case.outcome, test_case.reason),
+        test_case.locally_requested_cancel);
+    EXPECT_EQ(evaluation.kind, test_case.kind);
+    EXPECT_EQ(evaluation.reason_code, test_case.reason);
+  }
 }
 
 TEST_F(PlannerClientTest,
