@@ -72,9 +72,10 @@ def test_rviz_uses_a_colorblind_safe_academic_palette() -> None:
 
     assert traversability["Max Color"] == "0; 158; 115"
     assert traversability["Min Color"] == "213; 94; 0"
-    assert traversability["Alpha"] == 0.72
-    assert path["Color"] == "0; 114; 178"
-    assert path["Line Width"] == 0.18
+    assert traversability["Alpha"] == 0.58
+    assert path["Color"] == "255; 255; 255"
+    assert path["Line Style"] == "Billboards"
+    assert path["Line Width"] == 0.3
     assert path["Color"] != traversability["Max Color"]
     assert rover["Shape"]["Color"] == "204; 121; 167"
     assert goal["Color"] == "230; 159; 0"

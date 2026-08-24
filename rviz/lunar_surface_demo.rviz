@@ -9,7 +9,7 @@ Visualization Manager:
       Name: Lunar obstacles
       Topic: /lunar_demo/global_overview
       Value: true
-    - Alpha: 0.72
+    - Alpha: 0.58
       Autocompute Intensity Bounds: false
       Class: grid_map_rviz_plugin/GridMap
       Color Layer: traversability
@@ -34,10 +34,10 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/Path
       Alpha: 1
-      Color: 0; 114; 178
+      Color: 255; 255; 255
       Enabled: true
-      Line Style: Lines
-      Line Width: 0.18
+      Line Style: Billboards
+      Line Width: 0.3
       Name: Planned path
       Pose Style: None
       Topic: /lunar_demo/path
