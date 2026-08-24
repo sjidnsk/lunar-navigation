@@ -22,6 +22,12 @@ constexpr double kWheelbaseM = 0.8175;
 constexpr double kTrackWidthM = 0.67;
 constexpr double kMinimumClearanceM = 0.2;
 constexpr double kGlobalCellHalfDiagonalM = std::numbers::sqrt2 / 2.0;
+// At the origin the continuous vehicle pose lies on a 1 m global-cell
+// corner.  Seed the complete 3x3 coarse-cell stencil so the global planner's
+// obstacle/unknown inflation can evaluate the known physical start state
+// without relaxing unknown-cell safety semantics.
+constexpr double kInitialGlobalStartStencilRadiusM =
+    3.0 * kGlobalCellHalfDiagonalM;
 constexpr double kGlobalKnownEnvelopeMarginM =
     std::hypot(kWheelbaseM / 2.0, kTrackWidthM / 2.0) +
     kMinimumClearanceM + kGlobalCellHalfDiagonalM;
@@ -243,7 +249,7 @@ void ObservationState::SeedInitialKnownStart(const LunarScene& scene,
           -delta_x_m * std::sin(pose.yaw_rad) +
           delta_y_m * std::cos(pose.yaw_rad);
       const bool inside_contact_prior =
-          distance_m <= kLocalContactEnvelopeRadiusM + kTolerance;
+          distance_m <= kInitialGlobalStartStencilRadiusM + kTolerance;
       const bool complete_cell_inside_start_fov =
           distance_m + kGlobalCellHalfDiagonalM <=
               kInitialKnownStartRadiusM + kTolerance &&

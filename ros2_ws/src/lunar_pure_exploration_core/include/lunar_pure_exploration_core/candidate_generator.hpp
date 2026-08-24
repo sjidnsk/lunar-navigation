@@ -4,6 +4,7 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -42,6 +43,8 @@ struct CandidateView {
   std::shared_ptr<const std::vector<std::int64_t>> frontier_canonical_key{};
 };
 
+using CandidatePositionAcceptance = std::function<bool(Pose2)>;
+
 class CandidateGenerator {
  public:
   struct Limits {
@@ -55,15 +58,13 @@ class CandidateGenerator {
   std::vector<CandidateView> Generate(
       const TaskRaster& raster,
       std::span<const FrontierCluster> frontiers,
-      bool require_global_goal_cell_feasible = false) const;
+      const CandidatePositionAcceptance& accept_position = {}) const;
 
   double platform_length_m() const;
   double platform_width_m() const;
   double footprint_circumscribed_radius_m() const;
   double minimum_spacing_m(double resolution_m) const;
   double minimum_standoff_m() const;
-  bool GlobalGoalCellFeasible(const TaskRaster& raster, Pose2 pose,
-                              std::size_t& consumed_work) const;
   double maximum_extra_search_m() const;
   std::size_t maximum_search_step(double resolution_m) const;
 

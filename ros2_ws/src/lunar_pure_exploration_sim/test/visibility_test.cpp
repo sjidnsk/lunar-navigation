@@ -102,6 +102,19 @@ TEST(VisibilityTest, UsesDerivedVehicleEnvelopeForPersistentFreeCells) {
   EXPECT_TRUE(observations.IsCurrentlyVisible(scene, 9.5, 0.5));
 }
 
+TEST(VisibilityTest, InitialContactPriorCoversGlobalPlannerStartStencil) {
+  const auto scene = BuildLunarScene(20260824U);
+  ObservationState observations;
+  observations.Observe(scene, Pose2{}, SensorModel{});
+
+  // The robot starts on the corner shared by four 1 m global cells.  Its
+  // coarse global projection therefore needs the complete 3x3 start stencil
+  // known before unknown cells can remain hard obstacles for the planner.
+  EXPECT_TRUE(observations.IsKnownGlobalCell(149U, 149U));
+  EXPECT_TRUE(observations.IsKnownGlobalCell(151U, 151U));
+  EXPECT_FALSE(observations.IsKnownGlobalCell(152U, 152U));
+}
+
 TEST(VisibilityTest, CurrentContactEnvelopeCoversFootprintWithoutGlobalLeak) {
   const auto scene = BuildLunarScene(20260824U);
   const Pose2 pose{.x_m = 20.0, .y_m = 20.0, .yaw_rad = 0.0};

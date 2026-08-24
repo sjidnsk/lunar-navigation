@@ -392,50 +392,6 @@ bool CollisionFree(const TaskRaster& raster,
   return true;
 }
 
-bool GlobalInflatedGoalCellFeasible(const TaskRaster& raster,
-                                    const GridIndex center,
-                                    const double inflation_m,
-                                    std::size_t maximum_work,
-                                    std::size_t& consumed_work) {
-  const double resolution = raster.geometry().resolution;
-  const double inflation = inflation_m / resolution;
-  if (!std::isfinite(inflation) || inflation < 0.0) {
-    throw std::invalid_argument("candidate global inflation is invalid");
-  }
-  const auto radius = static_cast<std::int64_t>(std::ceil(inflation)) + 1;
-  const Wide inflation_squared = static_cast<Wide>(inflation) * inflation;
-  for (std::int64_t y = static_cast<std::int64_t>(center.y) - radius;
-       y <= static_cast<std::int64_t>(center.y) + radius; ++y) {
-    for (std::int64_t x = static_cast<std::int64_t>(center.x) - radius;
-         x <= static_cast<std::int64_t>(center.x) + radius; ++x) {
-      if (consumed_work == maximum_work) {
-        throw std::length_error("candidate collision work limit exceeded");
-      }
-      ++consumed_work;
-      if (x < 0 || y < 0 ||
-          x >= static_cast<std::int64_t>(raster.geometry().width) ||
-          y >= static_cast<std::int64_t>(raster.geometry().height)) {
-        continue;
-      }
-      const GridIndex cell{static_cast<std::int32_t>(x),
-                           static_cast<std::int32_t>(y)};
-      if (!raster.IsMapBacked(cell) ||
-          raster.Classify(cell) == CellState::kFree ||
-          raster.Classify(cell) == CellState::kOutsideTask) {
-        continue;
-      }
-      const double gap_x = std::max(0.0, std::abs(static_cast<double>(x - center.x)) - 1.0);
-      const double gap_y = std::max(0.0, std::abs(static_cast<double>(y - center.y)) - 1.0);
-      const Wide distance_squared =
-          static_cast<Wide>(gap_x) * gap_x + static_cast<Wide>(gap_y) * gap_y;
-      if (distance_squared <= inflation_squared) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 bool SameEdge(const FrontierCluster::InterfaceEdge& left,
               const FrontierCluster::InterfaceEdge& right) {
   return left.free_cell == right.free_cell &&
@@ -656,17 +612,6 @@ double CandidateGenerator::minimum_standoff_m() const {
   return footprint_circumscribed_radius_m_ + platform_.minimum_clearance_m;
 }
 
-bool CandidateGenerator::GlobalGoalCellFeasible(
-    const TaskRaster& raster, const Pose2 pose,
-    std::size_t& consumed_work) const {
-  const auto center = raster.WorldToCell(Vec2{pose.x, pose.y});
-  return center.has_value() && raster.IsMapBacked(*center) &&
-         raster.Classify(*center) == CellState::kFree &&
-         GlobalInflatedGoalCellFeasible(
-             raster, *center, minimum_standoff_m(),
-             limits_.maximum_collision_work_units, consumed_work);
-}
-
 double CandidateGenerator::maximum_extra_search_m() const {
   return 2.0 * platform_length_m_;
 }
@@ -697,7 +642,7 @@ std::size_t CandidateGenerator::maximum_search_step(double resolution_m) const {
 std::vector<CandidateView> CandidateGenerator::Generate(
     const TaskRaster& raster,
     std::span<const FrontierCluster> frontiers,
-    const bool require_global_goal_cell_feasible) const {
+    const CandidatePositionAcceptance& accept_position) const {
   const double resolution = raster.geometry().resolution;
   const double spacing = minimum_spacing_m(resolution);
   const double spacing_grid = spacing / resolution;
@@ -737,7 +682,6 @@ std::vector<CandidateView> CandidateGenerator::Generate(
   std::size_t position_probes = 0U;
   std::size_t candidate_views = 0U;
   std::size_t collision_work = 0U;
-  std::size_t global_goal_cell_work = 0U;
 
   for (const std::size_t original_index : order) {
     const FrontierCluster& frontier = frontiers[original_index];
@@ -805,10 +749,6 @@ std::vector<CandidateView> CandidateGenerator::Generate(
                              collision_work)) {
             continue;
           }
-          if (require_global_goal_cell_feasible &&
-              !GlobalGoalCellFeasible(raster, pose, global_goal_cell_work)) {
-            continue;
-          }
           if (candidate_views == limits_.maximum_candidate_views) {
             throw std::length_error("candidate view limit exceeded");
           }
@@ -836,11 +776,20 @@ std::vector<CandidateView> CandidateGenerator::Generate(
           });
         }
         if (!group.empty()) {
+          // The caller can supply an exact downstream feasibility predicate
+          // (for example the planner's inflated global projection).  A
+          // rejection means this free, body-safe position is not actionable,
+          // so continue searching farther into known space.  Without a
+          // predicate, retain the original one-position-per-edge budget.
+          if (accept_position && !accept_position(group.front().pose)) {
+            continue;
+          }
           if (output.size() > output.max_size() - group.size()) {
             throw std::length_error("candidate output exceeds storage capacity");
           }
           AddPosition(position_buckets, center_grid, spacing_grid);
           output.insert(output.end(), group.begin(), group.end());
+          break;
         }
       }
     }

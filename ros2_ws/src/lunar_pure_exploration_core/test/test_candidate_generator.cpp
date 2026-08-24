@@ -361,8 +361,7 @@ TEST(CandidateGeneratorTest, KeepsEverySafeYawAtOnePositionAndUsesLocalUnknownNo
   }
 }
 
-TEST(CandidateGeneratorTest,
-     AdvancesPastGoalCellRejectedByGlobalCircumscribedInflation) {
+TEST(CandidateGeneratorTest, SearchesPastPositionRejectedByCaller) {
   std::vector<std::int8_t> data(30U * 20U, 0);
   data[10U * 30U + 20U] = -1;
   const TaskRaster raster = Raster(30U, 20U, data);
@@ -371,26 +370,16 @@ TEST(CandidateGeneratorTest,
 
   const CandidateGenerator generator(WheelPlatform(), StandardYawOffsets(),
                                      GenerousLimits());
+  std::size_t acceptance_calls = 0U;
   const auto views = generator.Generate(
-      raster, std::span<const FrontierCluster>(&frontier, 1U));
+      raster, std::span<const FrontierCluster>(&frontier, 1U),
+      [&acceptance_calls](const Pose2) { return ++acceptance_calls == 2U; });
 
   ASSERT_EQ(views.size(), 5U);
-  std::size_t collision_work = 0U;
-  // The first continuous pose is body-safe, but its 0.2 m global goal cell
-  // still intersects the global planner's circumscribed inflated unknown mask.
-  EXPECT_FALSE(generator.GlobalGoalCellFeasible(
-      raster, views.front().pose, collision_work));
-  const Pose2 advanced{views.front().pose.x - 0.2, views.front().pose.y,
-                       views.front().pose.yaw};
-  EXPECT_TRUE(generator.GlobalGoalCellFeasible(raster, advanced,
-                                               collision_work));
-
-  const auto filtered = generator.Generate(
-      raster, std::span<const FrontierCluster>(&frontier, 1U), true);
-  ASSERT_EQ(filtered.size(), 5U);
-  EXPECT_DOUBLE_EQ(filtered.front().pose.x, advanced.x);
-  EXPECT_TRUE(generator.GlobalGoalCellFeasible(raster, filtered.front().pose,
-                                               collision_work));
+  // Global goal feasibility is deliberately decided by the caller (the ROS
+  // node supplies lunar_pure_planner_core), so this pure candidate generator
+  // advances from a rejected body-safe position to the next one.
+  EXPECT_EQ(acceptance_calls, 2U);
 }
 
 TEST(CandidateGeneratorTest, CanonicalOrderingPreservesOriginalFrontierIndex) {

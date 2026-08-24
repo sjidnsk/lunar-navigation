@@ -929,6 +929,15 @@ TEST_F(ExplorationNodeTest, MissingMapToOdomTransformWaitsIndefinitely) {
 
 TEST_F(ExplorationNodeTest,
        GlobalGoalCellFilterSkipsCircumscribedInflationRejectedCandidate) {
+  // Match the deployed wheeled envelope: 0.7187 m circumscribed footprint
+  // radius plus 0.2 m clearance.  The test map resolution is 0.5 m, so the
+  // candidate at x=4.5 lies inside the planner's inflated unknown mask while
+  // x=3.5 remains feasible.
+  parameters_.platform.footprint_vertices = {{0.591, 0.409},
+                                             {0.591, -0.409},
+                                             {-0.591, -0.409},
+                                             {-0.591, 0.409}};
+  parameters_.platform.minimum_clearance_m = 0.2;
   parameters_.filter_global_goal_cell = true;
   auto seams = std::make_shared<ExplorationPipelineSeams>();
   seams->generate_candidates =

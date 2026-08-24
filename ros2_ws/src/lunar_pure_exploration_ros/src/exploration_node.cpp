@@ -1568,14 +1568,29 @@ void QueueBuild(const std::shared_ptr<RuntimeT>& runtime) {
             const bool controlled_candidates =
                 locked->parameters.pipeline_seams &&
                 locked->parameters.pipeline_seams->generate_candidates;
-            auto candidates = controlled_candidates
-                                  ? locked->parameters.pipeline_seams
-                                        ->generate_candidates(*product.raster,
-                                                              frontiers)
-                                  : locked->candidate_generator.Generate(
-                                        *product.raster, frontiers);
+            std::vector<lunar::pure_exploration::CandidateView> candidates;
+            if (controlled_candidates) {
+              candidates = locked->parameters.pipeline_seams
+                               ->generate_candidates(*product.raster,
+                                                     frontiers);
+            } else if (locked->parameters.filter_global_goal_cell) {
+              candidates = locked->candidate_generator.Generate(
+                  *product.raster, frontiers,
+                  [&](const Pose2 pose) {
+                    return GlobalGoalCellFeasible(
+                        snapshot.map, pose,
+                        locked->candidate_generator.minimum_standoff_m(),
+                        locked->parameters.global_occupied_threshold);
+                  });
+            } else {
+              candidates = locked->candidate_generator.Generate(
+                  *product.raster, frontiers);
+            }
 
-            if (locked->parameters.filter_global_goal_cell) {
+            // Test seams inject completed candidate lists and therefore
+            // cannot participate in the generator's retry predicate.
+            if (locked->parameters.filter_global_goal_cell &&
+                controlled_candidates) {
               std::erase_if(candidates, [&](const auto& candidate) {
                 return !GlobalGoalCellFeasible(
                     snapshot.map, candidate.pose,
