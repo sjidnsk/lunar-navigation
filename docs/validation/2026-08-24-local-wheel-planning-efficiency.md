@@ -2,10 +2,14 @@
 
 ## Verdict
 
-`INCOMPLETE` at source `e47c8f54e3addc939297e57ff539f9edb55d4b5c`.
+`INCOMPLETE` from the runtime acceptance captured at source
+`e47c8f54e3addc939297e57ff539f9edb55d4b5c`. The later metrics-retention
+fix-wave source is `639ce5134e1eda140a15d8df87ea922f198f18cc`, but no smoke or
+field acceptance was rerun from that source.
 
-The planner-core performance change is supported by fresh Jazzy unit evidence,
-and the production eight-package overlay builds successfully. The fixed-seed
+At the original Task 8 `e47c8f5`/documentation-commit `f60a964` stage, the
+planner-core performance change had fresh Jazzy unit evidence and the
+production eight-package overlay built successfully. The fixed-seed
 closed-loop smoke is not accepted: candidates 6 and 7 are `NO_PATH` from a
 moving start, no goal completes, and the operator rejects the result. The full
 300 m RViz run was therefore not started.
@@ -29,8 +33,8 @@ git diff 68b24c7..HEAD -- \
   ros2_ws/src/lunar_pure_exploration_ros
 ```
 
-The integration worktree was clean at `e47c8f5`. There is no diff in either
-exploration package over the inspected range.
+The original Task 8 integration worktree was clean at `e47c8f5`. There is no
+diff in either exploration package over the inspected range.
 
 All generated build, log and run data is outside the repository. The principal
 evidence root is:
@@ -67,7 +71,8 @@ while the integrated source digest is
 The other two gated files still match. Updating this digest requires an
 explicit Task 10 compatibility re-review; it was not changed here.
 
-Fresh results:
+Original Task 8 fresh results at planner/runtime source `e47c8f5`, first
+recorded by documentation commit `f60a964`:
 
 | Verification | Result |
 | --- | --- |
@@ -234,6 +239,65 @@ the same `prod-install` overlay and every package reports `RelWithDebInfo`.
 The successful log is
 `final/prod-log-resume/build_2026-08-24_17-08-32/logger_all.log`.
 
+## Post-review metrics-retention fix wave
+
+This is a source-and-test audit after the original Task 8 runtime capture; it
+does not replace the `e47c8f5` test table above or promote runtime acceptance.
+The scoped code review approved both fix-wave commits:
+
+- `326bc3c` adds core post-graph exception metric retention and the ROS
+  `ReplaceWithFailure()` result-replacement helper;
+- `639ce51` has no planner-core diff and extends the ROS post-plan catch,
+  finalization fallback and trusted-bridge failure coverage while preserving
+  result timing and optional wheel metrics.
+
+Focused verification at the fix-wave source:
+
+| Check | Result | External evidence |
+| --- | --- | --- |
+| Core post-graph metric regression | 1/1 passed | `final/final-fix-round1-core-metrics-green.log` |
+| Three new ROS replacement regressions | 3/3 passed | `final/final-fix-round1-focused-ros-green.log` |
+| Request diagnostics GoogleTest | 5/5 passed | `final/final-fix-round1-request-diagnostics-gtest.log` |
+| Focused request-diagnostics contract pytest | 1/1 selected test passed; 5 deselected | `final/final-fix-round1-request-diagnostics-pytest.log` |
+
+The intentional core regression increases the complete wheel target from the
+original Task 8 count of 97 to 98 tests. Two distinct full-result groups must
+remain visible:
+
+| Evidence run | Full wheel target | Core CTest | External evidence |
+| --- | --- | --- | --- |
+| Earlier fix-wave run of the `326bc3c` core implementation, unchanged at `639ce51` | 98/98 passed | 19/19 passed | `final/final-fix-full-wheel-verified.log`; `final/final-fix-core-ctest.log` |
+| Current-source rerun at `639ce51` | 96/98 passed | 18/19 passed | `final/final-fix-round1-current-source-full-wheel.log`; `final/final-fix-round1-current-source-core-ctest.log` |
+
+The current-source standalone wheel rerun observed
+`ProjectWheelCapabilityDetoursForMoreThan300Meters` at 1067 ms against the
+unchanged 1 s assertion and the 750 m regression failing at segment 107. The
+current-source core CTest observed the 750 m segment-107 failure, yielding
+18/19 targets. Although `639ce51` has no planner-core diff and the earlier run
+used the same core implementation, the reason for the differing outcomes is
+undetermined. This document does not attribute them to environment, algorithm,
+randomness or pre-existing behavior.
+
+The current-source ROS CTest remains 11/12. Its one failure is the timing
+fixture
+`PurePlanMotionServer.RollingFirstCycleFinalizedAtTwoPointFiveSecondsIsPlanFoundLate`;
+evidence is `final/final-fix-round1-ros-ctest.log`. This is distinct from the
+one ROS target failure recorded in the original `e47c8f5` table.
+
+No fixed-seed smoke was rerun after `326bc3c`/`639ce51`. The only smoke rows
+below remain the `e47c8f5` runtime evidence at capture, and their `HEAD` labels
+refer to that captured runtime source rather than the repository's later
+documentation HEAD. The existing smoke therefore remains `INCOMPLETE`.
+Full 300 m/RViz and Jetson AGX Orin/ROS 2 Humble remain:
+
+```text
+run directory: NONE
+terminal: NOT_RUN
+coverage: NOT_MEASURED
+```
+
+The approved metric-retention code scope does not establish field readiness.
+
 ## Repository and contract checks
 
 ```bash
@@ -317,11 +381,12 @@ Candidates 6 and 7 each have one expanded state, nine edge evaluations, eight
 full invalidations and eight dynamics/primitive-shape rejects.
 
 No dedicated baseline-versus-HEAD safety-oracle fixture acceptance-delta check
-was executed. The 97/97 current-suite result shows that all currently
-registered wheel safety cases pass, including the approved adjacent-unknown
-and exact-boundary cases, but a passing current suite alone does not prove that
-no previously rejected fixture became newly accepted. Consequently that smoke
-hard condition remains an explicit evidence gap rather than a claimed pass.
+was executed. The original `e47c8f5`-stage 97/97 suite result shows that all
+wheel safety cases registered at that stage passed, including the approved
+adjacent-unknown and exact-boundary cases, but that historical passing suite
+alone does not prove that no previously rejected fixture became newly
+accepted. Consequently that smoke hard condition remains an explicit evidence
+gap rather than a claimed pass.
 
 ## Historical same-seed phase diagnosis
 
