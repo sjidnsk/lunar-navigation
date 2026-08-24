@@ -78,6 +78,109 @@ struct CellWindow final {
   };
 }
 
+[[nodiscard]] CellWindow ClosedFootprintContactWindow(
+    const shared::MapSnapshot& map, const double minimum_x,
+    const double minimum_y, const double maximum_x,
+    const double maximum_y) noexcept {
+  const auto clip = [](const double cell, const std::size_t extent) {
+    return static_cast<std::int64_t>(std::clamp(
+        cell, 0.0, static_cast<double>(extent - 1U)));
+  };
+  const auto minimum_cell = [&](const double coordinate,
+                                const double origin,
+                                const std::size_t extent) {
+    const double relative = (coordinate - origin) / map.resolution_m();
+    return clip(std::ceil(relative) - 1.0, extent);
+  };
+  const auto maximum_cell = [&](const double coordinate,
+                                const double origin,
+                                const std::size_t extent) {
+    const double relative = (coordinate - origin) / map.resolution_m();
+    return clip(std::floor(relative), extent);
+  };
+  return CellWindow{
+      .minimum_x = minimum_cell(minimum_x, map.origin_m().x, map.width()),
+      .minimum_y = minimum_cell(minimum_y, map.origin_m().y, map.height()),
+      .maximum_x = maximum_cell(maximum_x, map.origin_m().x, map.width()),
+      .maximum_y = maximum_cell(maximum_y, map.origin_m().y, map.height()),
+  };
+}
+
+[[nodiscard]] std::optional<double> SampleKnownFreeElevationBilinear(
+    const shared::MapSnapshot& map,
+    const shared::LocalTerrainProjection& terrain,
+    const Vec2 position_m) noexcept {
+  if (!std::isfinite(position_m.x) || !std::isfinite(position_m.y)) {
+    return std::nullopt;
+  }
+  const double sample_x =
+      (position_m.x - map.origin_m().x) / map.resolution_m() - 0.5;
+  const double sample_y =
+      (position_m.y - map.origin_m().y) / map.resolution_m() - 0.5;
+  if (!std::isfinite(sample_x) || !std::isfinite(sample_y) ||
+      sample_x < static_cast<double>(
+                     std::numeric_limits<std::int32_t>::min()) ||
+      sample_x > static_cast<double>(
+                     std::numeric_limits<std::int32_t>::max()) ||
+      sample_y < static_cast<double>(
+                     std::numeric_limits<std::int32_t>::min()) ||
+      sample_y > static_cast<double>(
+                     std::numeric_limits<std::int32_t>::max())) {
+    return std::nullopt;
+  }
+  const auto x0 = static_cast<std::int64_t>(std::floor(sample_x));
+  const auto y0 = static_cast<std::int64_t>(std::floor(sample_y));
+  const double fraction_x = sample_x - static_cast<double>(x0);
+  const double fraction_y = sample_y - static_cast<double>(y0);
+  const auto elevations = map.FloatLayer("elevation");
+  if (elevations.size() != map.cell_count()) {
+    return std::nullopt;
+  }
+  double result = 0.0;
+  double total_weight = 0.0;
+  for (std::int64_t dy = 0; dy <= 1; ++dy) {
+    const double weight_y = dy == 0 ? 1.0 - fraction_y : fraction_y;
+    for (std::int64_t dx = 0; dx <= 1; ++dx) {
+      const double weight_x = dx == 0 ? 1.0 - fraction_x : fraction_x;
+      if (weight_x * weight_y <= 1.0e-15) {
+        continue;
+      }
+      const std::int64_t x = x0 + dx;
+      const std::int64_t y = y0 + dy;
+      if (x < 0 || y < 0 ||
+          x > static_cast<std::int64_t>(
+                  std::numeric_limits<std::int32_t>::max()) ||
+          y > static_cast<std::int64_t>(
+                  std::numeric_limits<std::int32_t>::max())) {
+        return std::nullopt;
+      }
+      const shared::GridCell cell{
+          .x = static_cast<std::int32_t>(x),
+          .y = static_cast<std::int32_t>(y),
+      };
+      if (!map.InBounds(cell)) {
+        return std::nullopt;
+      }
+      const std::size_t index = map.Index(cell);
+      if (index >= terrain.free_with_height.size() ||
+          terrain.free_with_height[index] != 1U ||
+          !std::isfinite(elevations[index])) {
+        return std::nullopt;
+      }
+      const double weight = weight_x * weight_y;
+      result += weight * static_cast<double>(elevations[index]);
+      total_weight += weight;
+    }
+  }
+  if (total_weight <= 0.0 || !std::isfinite(result)) {
+    return std::nullopt;
+  }
+  const double interpolated = result / total_weight;
+  return std::isfinite(interpolated)
+             ? std::optional<double>{interpolated}
+             : std::nullopt;
+}
+
 [[nodiscard]] bool Finite(const Vec2& value) noexcept {
   return std::isfinite(value.x) && std::isfinite(value.y);
 }
@@ -3296,7 +3399,7 @@ class WheelSearchGraph final {
         ++far_clearance_scan_skips_;
       }
 
-      const CellWindow footprint_window = ClipOccupiedWindow(
+      const CellWindow footprint_window = ClosedFootprintContactWindow(
           map_, minimum_x, minimum_y, maximum_x, maximum_y);
       const std::int64_t minimum_cell_x = footprint_window.minimum_x;
       const std::int64_t minimum_cell_y = footprint_window.minimum_y;
@@ -3331,7 +3434,8 @@ class WheelSearchGraph final {
               .x = center_x + cosine * body_x - sine * body_y,
               .y = center_y + sine * body_x + cosine * body_y,
           };
-          const auto elevation = map_.SampleElevationBilinear(wheel_position);
+          const auto elevation = SampleKnownFreeElevationBilinear(
+              map_, terrain_, wheel_position);
           if (!elevation.has_value()) {
             result.rejection_bucket =
                 RejectionBucket::kDirectUnknownOrUnsupportedFootprint;

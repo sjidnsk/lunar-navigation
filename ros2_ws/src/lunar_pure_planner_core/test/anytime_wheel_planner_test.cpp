@@ -683,6 +683,8 @@ TEST(WheelPlanner, RetainsObstacleDistinctLabelsInOneKey) {
       kWidth, kHeight, std::vector<float>(kWidth * kHeight, 0.0F),
       kResolution);
   WheeledCapability capability = Capability(0.02, 0.02);
+  capability.wheelbase_m = 0.01;
+  capability.track_width_m = 1.0;
   const WheelMotionPrimitive short_arc =
       ArcPrimitive("a-short", WheelPrimitiveKind::kForwardArc, 1.0,
                    std::numbers::pi / 16.0);
@@ -991,6 +993,8 @@ TEST(WheelPlanner, DoesNotAllocateAStateForAnInvalidSweepEdge) {
   const TerrainFixture fixture =
       MakeTerrain(kWidth, kHeight, std::move(occupancy));
   WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 0.1;
+  capability.track_width_m = 0.1;
   capability.motion_primitives = {
       Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
   };
@@ -1265,6 +1269,41 @@ TEST(WheelPlanner,
 }
 
 TEST(WheelPlanner,
+     RejectsUnsupportedCellsUsedOnlyByWheelBilinearSupport) {
+  constexpr std::size_t kWidth = 20U;
+  constexpr std::size_t kHeight = 20U;
+  constexpr std::size_t kSupportCell = 4U * kWidth + 6U;
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 0.3;
+  capability.track_width_m = 0.1;
+  capability.minimum_clearance_m = 0.0;
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+
+  for (const float unsupported_occupancy : {-1.0F, 1.1F}) {
+    SCOPED_TRACE(unsupported_occupancy);
+    std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+    occupancy[kSupportCell] = unsupported_occupancy;
+    const TerrainFixture fixture = MakeTerrain(
+        kWidth, kHeight, std::move(occupancy), 0.2,
+        std::vector<float>(kWidth * kHeight, 0.0F));
+
+    const WheelPlanResult result = PlanWheel(RequestTo(
+        fixture, capability, 1.0, 1.0, 0.0, Pose(1.0, 1.0)));
+
+    EXPECT_EQ(result.status, LocalPlanStatus::kNoPath)
+        << result.reason_code;
+    ASSERT_TRUE(result.wheel_metrics.has_value());
+    EXPECT_GT(result.wheel_metrics
+                  ->direct_unknown_or_unsupported_footprint_rejects,
+              0U);
+    EXPECT_EQ(result.wheel_metrics->measured_obstacle_clearance_rejects,
+              0U);
+  }
+}
+
+TEST(WheelPlanner,
      ClosedMapExtentAllowsExactTouchAndRejectsToleranceCrossingOnAllSides) {
   constexpr double kExtentM = 2.0;
   constexpr double kHalfFootprintM = 0.2;
@@ -1305,6 +1344,65 @@ TEST(WheelPlanner,
         0.0, crossing));
     EXPECT_EQ(crossing_result.status, LocalPlanStatus::kNoPath)
         << crossing_result.reason_code;
+  }
+}
+
+TEST(WheelPlanner,
+     TreatsInternalUnknownCellContactAsClosedOnAllFootprintSides) {
+  constexpr std::size_t kWidth = 12U;
+  constexpr std::size_t kHeight = 12U;
+  constexpr double kResolutionM = 0.25;
+  constexpr double kGapM = 1.0e-6;
+  struct SideCase final {
+    std::size_t unknown_x;
+    std::size_t unknown_y;
+    Pose3 gap_pose;
+  };
+  const std::array<SideCase, 4U> sides{
+      SideCase{.unknown_x = 2U, .unknown_y = 4U,
+               .gap_pose = Pose(1.0 + kGapM, 1.0)},
+      SideCase{.unknown_x = 5U, .unknown_y = 4U,
+               .gap_pose = Pose(1.0 - kGapM, 1.0)},
+      SideCase{.unknown_x = 4U, .unknown_y = 2U,
+               .gap_pose = Pose(1.0, 1.0 + kGapM)},
+      SideCase{.unknown_x = 4U, .unknown_y = 5U,
+               .gap_pose = Pose(1.0, 1.0 - kGapM)},
+  };
+  WheeledCapability capability = Capability(0.5, 0.5);
+  capability.wheelbase_m = 0.25;
+  capability.track_width_m = 0.25;
+  capability.minimum_clearance_m = 0.0;
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.25),
+  };
+
+  for (std::size_t side = 0U; side < sides.size(); ++side) {
+    SCOPED_TRACE(side);
+    std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+    occupancy[sides[side].unknown_y * kWidth + sides[side].unknown_x] =
+        -1.0F;
+    const TerrainFixture fixture = MakeTerrain(
+        kWidth, kHeight, std::move(occupancy), kResolutionM);
+    const Pose3 exact_contact = Pose(1.0, 1.0);
+
+    const WheelPlanResult contact_result = PlanWheel(RequestTo(
+        fixture, capability, exact_contact.position_m.x,
+        exact_contact.position_m.y, 0.0, exact_contact));
+
+    EXPECT_EQ(contact_result.status, LocalPlanStatus::kNoPath)
+        << contact_result.reason_code;
+    ASSERT_TRUE(contact_result.wheel_metrics.has_value());
+    EXPECT_GT(contact_result.wheel_metrics
+                  ->direct_unknown_or_unsupported_footprint_rejects,
+              0U);
+    EXPECT_EQ(
+        contact_result.wheel_metrics->measured_obstacle_clearance_rejects,
+        0U);
+
+    const Pose3& gap = sides[side].gap_pose;
+    const WheelPlanResult gap_result = PlanWheel(RequestTo(
+        fixture, capability, gap.position_m.x, gap.position_m.y, 0.0, gap));
+    ASSERT_TRUE(gap_result.ok()) << gap_result.reason_code;
   }
 }
 
@@ -1439,6 +1537,8 @@ TEST(WheelPlanner, LowClearanceCostUsesDistanceFromTheRealPolygon) {
   const TerrainFixture far_fixture =
       MakeTerrain(kWidth, kHeight, std::move(far_occupancy));
   WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 0.1;
+  capability.track_width_m = 0.1;
   capability.motion_primitives = {
       Primitive("forward", WheelPrimitiveKind::kForward, 0.4),
   };
@@ -1607,6 +1707,8 @@ TEST(WheelPlanner, RetainsPhysicalPoseWhenItsQuantizedBandDiffers) {
   const TerrainFixture fixture =
       MakeTerrain(kWidth, kHeight, std::move(occupancy));
   WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 0.1;
+  capability.track_width_m = 0.1;
   capability.motion_primitives = {
       Primitive("forward", WheelPrimitiveKind::kForward, 0.19),
   };
@@ -2503,6 +2605,8 @@ TEST(WheelPlanner, AcceptsACertifiedNonCenterStateInsidePointGoalRegion) {
   const TerrainFixture fixture =
       MakeTerrain(kWidth, kHeight, std::move(occupancy));
   WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 0.1;
+  capability.track_width_m = 0.1;
   capability.motion_primitives = {
       Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
   };
