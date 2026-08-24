@@ -88,6 +88,7 @@ def test_generator_creates_minimal_humble_production_bundle(tmp_path: Path) -> N
         "src/shared/map_snapshot.cpp",
         "src/shared/obstacle_height_estimator.cpp",
         "src/shared/planning_timing.cpp",
+        "src/shared/request_local_start_patch.cpp",
         "src/shared/search_control.cpp",
         "src/wheel/anytime_wheel_planner.cpp",
     }
@@ -98,6 +99,11 @@ def test_generator_creates_minimal_humble_production_bundle(tmp_path: Path) -> N
     assert actual_core_sources == expected_core_sources
 
     ros_package = output / "ros2_ws" / "src" / "lunar_pure_planner_ros"
+    for required_source in (
+        "src/center_distance_transform.cpp",
+        "src/traversability_qos.cpp",
+    ):
+        assert (ros_package / required_source).is_file()
     assert not (ros_package / "src" / "lunar_surface_scenario.cpp").exists()
     assert "LUNAR_BUILD_DEMO" in (ros_package / "CMakeLists.txt").read_text()
 
