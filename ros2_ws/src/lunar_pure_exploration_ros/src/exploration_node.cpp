@@ -1082,6 +1082,14 @@ ConsumeConfirmedStationaryActionLocked(RuntimeT& runtime) {
 }
 
 template <typename RuntimeT>
+void CancelPendingStationaryActionLocked(RuntimeT& runtime) {
+  runtime.stationary_gate.Cancel();
+  runtime.pending_stationary_action =
+      RuntimeT::PendingStationaryAction::kNone;
+  runtime.pending_fresh_batch_release_reason.reset();
+}
+
+template <typename RuntimeT>
 void ClearExecutionPayloadsLocked(RuntimeT& runtime) {
   runtime.active_reference.reset();
   runtime.active_executable_polyline.clear();
@@ -1181,10 +1189,7 @@ void FailLocked(RuntimeT& runtime, std::string reason) {
   runtime.execution_replan_retry_pending = false;
   runtime.pending_map_rebuild = false;
   runtime.pending_stuck_rebuild = false;
-  runtime.stationary_gate.Cancel();
-  runtime.pending_stationary_action =
-      RuntimeT::PendingStationaryAction::kNone;
-  runtime.pending_fresh_batch_release_reason.reset();
+  CancelPendingStationaryActionLocked(runtime);
   ClearExecutionPayloadsLocked(runtime);
   runtime.build_in_flight = false;
   ++runtime.epoch;
@@ -1943,10 +1948,7 @@ void ApplyStartLocked(RuntimeT& runtime,
   const bool retain_execution_until_stationary =
       runtime.parameters.stop_before_planning &&
       runtime.active_reference.has_value();
-  runtime.stationary_gate.Cancel();
-  runtime.pending_stationary_action =
-      RuntimeT::PendingStationaryAction::kNone;
-  runtime.pending_fresh_batch_release_reason.reset();
+  CancelPendingStationaryActionLocked(runtime);
   runtime.state_machine.Start(start.task_id);
   ++runtime.task_generation;
   ResetActiveElapsedLocked(runtime);
@@ -1998,10 +2000,7 @@ bool ApplyPendingControlLocked(RuntimeT& runtime) {
   if (!retain_execution_until_stationary) {
     runtime.pending_execution_cancel_sent = false;
   }
-  runtime.stationary_gate.Cancel();
-  runtime.pending_stationary_action =
-      RuntimeT::PendingStationaryAction::kNone;
-  runtime.pending_fresh_batch_release_reason.reset();
+  CancelPendingStationaryActionLocked(runtime);
   runtime.current_candidate.reset();
   runtime.current_batch.clear();
   runtime.current_batch_cursor = 0U;
@@ -2989,15 +2988,23 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
                       validation.candidate.key) {
                 return;
               }
-              if (!error.empty()) {
-                cancel = locked->planner_in_flight;
-                FailLocked(*locked, std::move(error));
-              } else if (invalid) {
-                auto disposition =
-                    InvalidateActiveGoalForMapLocked(*locked);
-                cancel = disposition.cancel_planner;
-                needs_build = disposition.build_now;
-                execution_cancel = std::move(disposition.execution_cancel);
+              const bool local_endpoint_refresh_owns_release =
+                  locked->pending_stationary_action ==
+                      RuntimeT::PendingStationaryAction::kBuildFreshBatch &&
+                  locked->pending_fresh_batch_release_reason ==
+                      lunar::pure_exploration::GoalReleaseReason::
+                          kLocalSegmentCompleted;
+              if (!local_endpoint_refresh_owns_release) {
+                if (!error.empty()) {
+                  cancel = locked->planner_in_flight;
+                  FailLocked(*locked, std::move(error));
+                } else if (invalid) {
+                  auto disposition =
+                      InvalidateActiveGoalForMapLocked(*locked);
+                  cancel = disposition.cancel_planner;
+                  needs_build = disposition.build_now;
+                  execution_cancel = std::move(disposition.execution_cancel);
+                }
               }
             }
             if (execution_cancel) {
@@ -3292,9 +3299,7 @@ void HandleTask(const std::weak_ptr<RuntimeT>& weak_runtime,
             }
           } else {
             execution_cancel = ExecutionCancelLocked(*runtime);
-            runtime->stationary_gate.Cancel();
-            runtime->pending_stationary_action =
-                RuntimeT::PendingStationaryAction::kNone;
+            CancelPendingStationaryActionLocked(*runtime);
             FreezeActiveElapsedLocked(*runtime);
             runtime->state_machine.Pause();
             runtime->active_cycle.reset();
@@ -3310,9 +3315,7 @@ void HandleTask(const std::weak_ptr<RuntimeT>& weak_runtime,
           }
           break;
         case Task::RESUME:
-          runtime->stationary_gate.Cancel();
-          runtime->pending_stationary_action =
-              RuntimeT::PendingStationaryAction::kNone;
+          CancelPendingStationaryActionLocked(*runtime);
           runtime->state_machine.Resume();
           runtime->active_elapsed_start = SteadyNowLocked(*runtime);
           runtime->active_cycle.reset();
@@ -3331,9 +3334,7 @@ void HandleTask(const std::weak_ptr<RuntimeT>& weak_runtime,
             execution_cancel = ExecutionCancelLocked(*runtime);
           } else {
             execution_cancel = ExecutionCancelLocked(*runtime);
-            runtime->stationary_gate.Cancel();
-            runtime->pending_stationary_action =
-                RuntimeT::PendingStationaryAction::kNone;
+            CancelPendingStationaryActionLocked(*runtime);
             FreezeActiveElapsedLocked(*runtime);
             runtime->state_machine.Cancel();
             runtime->active_elapsed_s = 0.0;

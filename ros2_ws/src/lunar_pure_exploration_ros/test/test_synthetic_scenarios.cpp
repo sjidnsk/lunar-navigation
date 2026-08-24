@@ -1426,6 +1426,16 @@ TEST(SyntheticScenarioRunnerTest,
       << scenario.Trace();
   EXPECT_EQ(arrived_status->replan_count, 0U) << scenario.Trace();
   EXPECT_EQ(scenario.StuckRetryCount(), 0U) << scenario.Trace();
+  EXPECT_DOUBLE_EQ(arrived_status->coverage_ratio,
+                   fixture.expected["coverage_ratio"].as<double>())
+      << scenario.Trace();
+  EXPECT_EQ(
+      scenario.StatusTransitions(),
+      (std::vector<std::uint8_t>{Status::IDLE, Status::WAITING_FOR_INPUT,
+                                 Status::SELECTING_FRONTIER, Status::PLANNING,
+                                 Status::EXECUTING,
+                                 Status::SELECTING_FRONTIER}))
+      << scenario.Trace();
   EXPECT_EQ(scenario.References().size(), 1U) << scenario.Trace();
   EXPECT_TRUE(scenario.ExecutionCancels().empty()) << scenario.Trace();
   const auto records = scripts->Records();
@@ -1438,9 +1448,18 @@ TEST(SyntheticScenarioRunnerTest,
     EXPECT_EQ(records[index].candidate_key,
               expected_requests[index]["candidate_key"].as<std::string>())
         << scenario.Trace();
+    EXPECT_EQ(CellString(records[index].goal_cell),
+              expected_requests[index]["goal_cell"].as<std::string>())
+        << scenario.Trace();
+    EXPECT_EQ(records[index].response,
+              expected_requests[index]["response_kind"].as<std::string>())
+        << scenario.Trace();
   }
   EXPECT_EQ(scripts->Remaining(), 0U) << scenario.Trace();
   EXPECT_TRUE(scripts->Error().empty()) << scenario.Trace();
+  EXPECT_EQ(StableHash(NormalizedTrace(scenario)),
+            "fnv1a64:a8f59de91b0ef6b9")
+      << scenario.Trace();
   scenario.ExpectWithinDeadline();
 }
 
