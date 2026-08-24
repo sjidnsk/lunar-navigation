@@ -4323,6 +4323,43 @@ WheelPlanResult PlanWheel(const WheelPlanRequest& request) try {
           preferred->edges.size();
       result.preferred_candidate_cost = preferred->cost;
     }
+    result.wheel_metrics = WheelPlanningMetrics{
+        .expanded_states = result.metrics.expanded_states,
+        .edge_validation_evaluations =
+            result.metrics.edge_validation_evaluations,
+        .edge_validation_cache_hits = result.edge_validation_cache_hits,
+        .broad_phase_rejects = result.broad_phase_rejects,
+        .full_certifications = result.full_certifications,
+        .full_invalidations = result.full_invalidations,
+        .sweep_cell_checks = result.sweep_cell_checks,
+        .quantization_alias_states = result.quantization_alias_states,
+        .quantized_state_reuses = result.quantized_state_reuses,
+        .quantized_endpoint_aliases = result.quantized_endpoint_aliases,
+        .quantized_state_count = result.quantized_state_count,
+        .maximum_active_labels_per_key =
+            result.maximum_active_labels_per_key,
+        .used_narrow_resolution = result.metrics.used_narrow_resolution,
+        .finest_xy_key_resolution_m = result.finest_xy_key_resolution_m,
+        .maximum_yaw_bins = result.maximum_yaw_bins,
+        .ara_search_invocations = result.ara_search_invocations,
+        .returned_edge_certificate_confirmations =
+            result.returned_edge_certificate_confirmations,
+        .mode_switch_edge_count = result.mode_switch_edge_count,
+        .reverse_edge_count = result.reverse_edge_count,
+        .start_heuristic_lower_bound = result.start_heuristic_lower_bound,
+        .has_certified_preferred_candidate =
+            result.has_certified_preferred_candidate,
+        .preferred_candidate_full_primitive_edge_count =
+            result.preferred_candidate_full_primitive_edge_count,
+        .preferred_candidate_terminal_connector_edge_count =
+            result.preferred_candidate_terminal_connector_edge_count,
+        .preferred_candidate_certified_edge_count =
+            result.preferred_candidate_certified_edge_count,
+        .preferred_candidate_cost = result.preferred_candidate_cost,
+        .preferred_builder_invocations = result.preferred_builder_invocations,
+        .cost_components = result.cost_components,
+        .cost_scales = result.cost_scales,
+    };
     return result;
   };
   if (!graph.ValidateStart()) {

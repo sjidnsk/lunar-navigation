@@ -2324,5 +2324,36 @@ TEST(WheelPlanner, RejectsPlanarRegionWithoutReadingLegacyAdmissionData) {
   EXPECT_EQ(result.status, LocalPlanStatus::kInvalidInput);
 }
 
+TEST(WheelPlanner, GraphConstructedFailurePreservesCompletedMetrics) {
+  constexpr std::size_t kWidth = 120U;
+  constexpr std::size_t kHeight = 120U;
+  const TerrainFixture fixture = MakeTerrain(
+      kWidth, kHeight, std::vector<float>(kWidth * kHeight, 0.0F), 0.05);
+  WheeledCapability capability = Capability(3.0, 3.0);
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+  WheelPlanRequest request = RequestTo(
+      fixture, capability, 4.0, 3.0, 0.0, Pose(3.0, 3.0));
+  const auto deadline = SteadyClock::time_point{} + 1s;
+  std::size_t clock_calls = 0U;
+  request.control.deadline = deadline;
+  request.control.now = [&] {
+    ++clock_calls;
+    return clock_calls < 5U ? deadline - 1ms : deadline + 1ms;
+  };
+
+  const WheelPlanResult result = PlanWheel(request);
+  EXPECT_EQ(result.status, LocalPlanStatus::kTimedOut);
+  ASSERT_TRUE(result.wheel_metrics.has_value());
+  EXPECT_GT(result.wheel_metrics->edge_validation_evaluations, 0U);
+  EXPECT_EQ(result.wheel_metrics->expanded_states,
+            result.metrics.expanded_states);
+}
+
+TEST(WheelPlanner, PreGraphInputFailureHasNoWheelMetrics) {
+  EXPECT_FALSE(PlanWheel(WheelPlanRequest{}).wheel_metrics.has_value());
+}
+
 }  // namespace
 }  // namespace lunar::pure_planning::wheel

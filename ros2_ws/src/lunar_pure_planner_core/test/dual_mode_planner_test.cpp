@@ -647,6 +647,45 @@ TEST(DualModePlanner, PreservesCanceledNoPathAndExceptionSemantics) {
   EXPECT_EQ(exception_output.timing.total_elapsed, 11ms);
 }
 
+TEST(DualModePlanner, PreservesWheelMetricsForSuccessAndNoPath) {
+  struct Case final {
+    LocalPlanStatus local_status;
+    PlanningStatus expected_status;
+  };
+  for (const Case& test_case : {
+           Case{LocalPlanStatus::kSolved, PlanningStatus::kSuccess},
+           Case{LocalPlanStatus::kNoPath, PlanningStatus::kNoPath},
+       }) {
+    ManualClock clock;
+    Planner planner(PlannerBackends{
+        .global = {},
+        .local = [test_case](const PlanningRequest&, const LocalGoalSet& goals,
+                             SearchControl) {
+          LocalStageResult result{
+              .status = test_case.local_status,
+              .wheel_metrics = WheelPlanningMetrics{
+                  .edge_validation_evaluations = 7U,
+              },
+          };
+          if (test_case.local_status == LocalPlanStatus::kSolved) {
+            result = TrajectoryTo(FirstGoal(goals));
+            result.wheel_metrics = WheelPlanningMetrics{
+                .edge_validation_evaluations = 7U,
+            };
+          }
+          return result;
+        },
+    });
+
+    const PlanningResult output =
+        planner.Plan(Request(EnvironmentMode::kLavaTube, clock));
+
+    EXPECT_EQ(output.status, test_case.expected_status);
+    ASSERT_TRUE(output.wheel_metrics.has_value());
+    EXPECT_EQ(output.wheel_metrics->edge_validation_evaluations, 7U);
+  }
+}
+
 TEST(DualModePlanner, PreservesGlobalFailureAndExceptionSemantics) {
   struct Case final {
     const char* reason;

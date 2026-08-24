@@ -67,6 +67,7 @@ struct WheelPlanResult final {
   std::array<double, 5U> cost_components{};
   std::array<double, 5U> cost_scales{};
   double cost{};
+  std::optional<WheelPlanningMetrics> wheel_metrics;
 
   [[nodiscard]] bool ok() const noexcept {
     return status == LocalPlanStatus::kSolved && !trajectory.empty();

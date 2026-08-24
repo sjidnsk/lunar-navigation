@@ -274,6 +274,7 @@ using namespace std::chrono_literals;
         .expanded_states = result.metrics.expanded_states,
         .best_cost = result.ok() ? std::optional<double>{result.cost}
                                  : std::nullopt,
+        .wheel_metrics = result.wheel_metrics,
     };
   }
 
@@ -481,6 +482,7 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
       PlanningResult error =
           Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
       error.timing = timing;
+      error.wheel_metrics = result.wheel_metrics;
       apply_cache_hits(error);
       return error;
     }
@@ -490,6 +492,7 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
       PlanningResult error =
           Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
       error.timing = result.timing;
+      error.wheel_metrics = result.wheel_metrics;
       apply_cache_hits(error);
       return error;
     }
@@ -497,6 +500,7 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
         finished_at >= policy.hard_deadline) {
       PlanningResult timeout = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
       timeout.timing = result.timing;
+      timeout.wheel_metrics = result.wheel_metrics;
       apply_cache_hits(timeout);
       return timeout;
     }
@@ -594,34 +598,44 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
         .now = input.control.now,
     };
     LocalStageResult local;
+    std::optional<WheelPlanningMetrics> wheel_metrics;
     SteadyClock::time_point local_finished{};
     {
       ScopedPlannerCall call(PlannerStage::kLocal, timing, input.control.now);
       local = backends_.local(input, local_goals, std::move(local_control));
+      wheel_metrics = local.wheel_metrics;
       if (!call.Finish(&local_finished)) {
-        return finish(
-            Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR"));
+        PlanningResult failure =
+            Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
+        failure.wheel_metrics = wheel_metrics;
+        return finish(std::move(failure));
       }
     }
     local_snapshot_cache_hit = local.snapshot_cache_hit;
     local_projection_cache_hit = local.projection_cache_hit;
     goal_field_cache_hit = local.goal_field_cache_hit;
+    const auto preserve_wheel_metrics = [&](PlanningResult result) {
+      result.wheel_metrics = wheel_metrics;
+      return result;
+    };
     report_progress(PlannerPhase::kLocalSearch, timing.local_search_elapsed);
     phase_started = local_finished;
     if (local.status == LocalPlanStatus::kCanceled ||
         input.control.stop_token.stop_requested()) {
-      return finish(
-          Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED"));
+      return finish(preserve_wheel_metrics(
+          Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED")));
     }
     if (local.status != LocalPlanStatus::kSolved &&
         local_finished >= policy.hard_deadline) {
-      return finish(Failure(PlanningStatus::kTimedOut, "TIMEOUT"));
+      return finish(preserve_wheel_metrics(
+          Failure(PlanningStatus::kTimedOut, "TIMEOUT")));
     }
     if (local.status != LocalPlanStatus::kSolved) {
-      return finish(LocalFailure(local.status));
+      return finish(preserve_wheel_metrics(LocalFailure(local.status)));
     }
     if (!local.data.has_value()) {
-      return finish(Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR"));
+      return finish(preserve_wheel_metrics(
+          Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR")));
     }
 
     hierarchical::ReferenceComposeResult composed =
@@ -641,7 +655,7 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
                                                       .now = input.control.now,
                                                   });
     if (!composed.ok()) {
-      return finish(GlobalFailure(composed.reason_code));
+      return finish(preserve_wheel_metrics(GlobalFailure(composed.reason_code)));
     }
     finish_phase(timing.certification_elapsed, PlannerPhase::kCertification);
     PlanningResult success{
@@ -653,6 +667,7 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
             local.expanded_states,
         .selected_goal_index = local.selected_goal_index,
         .best_cost = local.best_cost,
+        .wheel_metrics = wheel_metrics,
     };
     return finish(std::move(success));
   } catch (...) {
