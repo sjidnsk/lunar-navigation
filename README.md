@@ -91,6 +91,11 @@ ros2 launch lunar_pure_planner_ros lunar_surface_rviz_demo.launch.py
 RViz 固定坐标系为 `map`。使用 **2D Goal Pose** 在空白可达区域选择目标，成功信号是
 `/lunar_demo/path` 更新；障碍物或不可达位置没有有效路径是预期的安全行为。此演示不提供
 控制器，绝不可用于驱动车辆。
+
+RViz 默认启用 **Wheel traversability** 图层。该图层由
+`lunar_local_traversability_node` 根据 `/lunar_demo/grid_map` 的障碍和高程实时计算，并发布到
+`/lunar_demo/traversability`：绿色表示轮式车包络可通行，红色表示障碍、坡度或净空不满足，
+无色区域表示未知。它与全局障碍、高程、车辆和规划路径同时显示。
 它只使用下列固定 ROS 接口：
 
 | 方向 | 接口 |

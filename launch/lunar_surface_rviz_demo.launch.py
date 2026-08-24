@@ -45,6 +45,21 @@ def generate_launch_description() -> LaunchDescription:
             ),
             Node(
                 package="lunar_pure_planner_ros",
+                executable="lunar_local_traversability_node",
+                name="lunar_demo_traversability",
+                parameters=[
+                    {
+                        "platform_type": "wheel",
+                        "local_map_topic": "/lunar_demo/grid_map",
+                        "traversability_topic": "/lunar_demo/traversability",
+                        "input_qos_reliability": "reliable",
+                        "input_qos_durability": "volatile",
+                    }
+                ],
+                output="screen",
+            ),
+            Node(
+                package="lunar_pure_planner_ros",
                 executable="lunar_pure_planner_node",
                 name="pure_planner",
                 parameters=[f"{share}/config/pure_planner.yaml", demo_parameters],

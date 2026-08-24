@@ -1,6 +1,9 @@
 """Source contract checks for the isolated lunar-surface RViz demo."""
 
 from pathlib import Path
+import xml.etree.ElementTree as ET
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -8,6 +11,7 @@ LAUNCH = ROOT / "launch" / "lunar_surface_rviz_demo.launch.py"
 RVIZ = ROOT / "rviz" / "lunar_surface_demo.rviz"
 DEMO_NODE = ROOT / "ros2_ws/src/lunar_pure_planner_ros/src/lunar_surface_demo_node.cpp"
 VISUALIZER_NODE = ROOT / "ros2_ws/src/lunar_pure_planner_ros/src/lunar_surface_visualizer_node.cpp"
+PACKAGE_XML = ROOT / "ros2_ws/src/lunar_pure_planner_ros/package.xml"
 
 
 def test_demo_launch_isolated_from_production_action() -> None:
@@ -27,6 +31,32 @@ def test_rviz_config_exposes_goal_path_and_lunar_layers() -> None:
         "/lunar_demo/terrain_markers",
     ):
         assert topic in text
+
+
+def test_demo_computes_and_displays_wheel_traversability() -> None:
+    launch_text = LAUNCH.read_text(encoding="utf-8")
+    assert 'executable="lunar_local_traversability_node"' in launch_text
+    assert '"local_map_topic": "/lunar_demo/grid_map"' in launch_text
+    assert '"traversability_topic": "/lunar_demo/traversability"' in launch_text
+    assert '"input_qos_reliability": "reliable"' in launch_text
+    assert '"input_qos_durability": "volatile"' in launch_text
+
+    rviz_config = yaml.safe_load(RVIZ.read_text(encoding="utf-8"))
+    displays = rviz_config["Visualization Manager"]["Displays"]
+    traversability = next(
+        display for display in displays if display.get("Name") == "Wheel traversability"
+    )
+    assert traversability["Class"] == "grid_map_rviz_plugin/GridMap"
+    assert traversability["Topic"] == "/lunar_demo/traversability"
+    assert traversability["Height Transformer"] == "Flat"
+    assert traversability["Color Transformer"] == "IntensityLayer"
+    assert traversability["Color Layer"] == "traversability"
+
+    dependencies = ET.parse(PACKAGE_XML).getroot().findall("exec_depend")
+    grid_map_dependency = next(
+        element for element in dependencies if element.text == "grid_map_rviz_plugin"
+    )
+    assert grid_map_dependency.attrib["condition"] == "$ROS_DISTRO == 'jazzy'"
 
 
 def test_rviz_inputs_are_compatible_and_empty_failed_paths_are_not_forwarded() -> None:
