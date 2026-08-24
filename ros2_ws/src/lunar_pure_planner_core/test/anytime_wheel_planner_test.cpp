@@ -1272,9 +1272,9 @@ TEST(WheelPlanner,
      RejectsUnsupportedCellsUsedOnlyByWheelBilinearSupport) {
   constexpr std::size_t kWidth = 20U;
   constexpr std::size_t kHeight = 20U;
-  constexpr std::size_t kSupportCell = 4U * kWidth + 6U;
+  constexpr std::size_t kSupportCell = 4U * kWidth + 7U;
   WheeledCapability capability = Capability(0.2, 0.2);
-  capability.wheelbase_m = 0.3;
+  capability.wheelbase_m = 0.9;
   capability.track_width_m = 0.1;
   capability.minimum_clearance_m = 0.0;
   capability.motion_primitives = {

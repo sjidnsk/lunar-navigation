@@ -10,6 +10,7 @@
 #include <numbers>
 #include <optional>
 #include <ranges>
+#include <span>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -106,9 +107,18 @@ struct CellWindow final {
   };
 }
 
-[[nodiscard]] std::optional<double> SampleKnownFreeElevationBilinear(
+struct BilinearSupportNeighborhood final {
+  std::array<std::size_t, 4U> indices{};
+  std::array<double, 4U> weights{};
+  std::size_t count{};
+  double total_weight{};
+};
+
+[[nodiscard]] std::optional<BilinearSupportNeighborhood>
+KnownFreeBilinearSupportNeighborhood(
     const shared::MapSnapshot& map,
     const shared::LocalTerrainProjection& terrain,
+    const std::span<const float> elevations,
     const Vec2 position_m) noexcept {
   if (!std::isfinite(position_m.x) || !std::isfinite(position_m.y)) {
     return std::nullopt;
@@ -132,12 +142,10 @@ struct CellWindow final {
   const auto y0 = static_cast<std::int64_t>(std::floor(sample_y));
   const double fraction_x = sample_x - static_cast<double>(x0);
   const double fraction_y = sample_y - static_cast<double>(y0);
-  const auto elevations = map.FloatLayer("elevation");
   if (elevations.size() != map.cell_count()) {
     return std::nullopt;
   }
-  double result = 0.0;
-  double total_weight = 0.0;
+  BilinearSupportNeighborhood neighborhood;
   for (std::int64_t dy = 0; dy <= 1; ++dy) {
     const double weight_y = dy == 0 ? 1.0 - fraction_y : fraction_y;
     for (std::int64_t dx = 0; dx <= 1; ++dx) {
@@ -168,17 +176,17 @@ struct CellWindow final {
         return std::nullopt;
       }
       const double weight = weight_x * weight_y;
-      result += weight * static_cast<double>(elevations[index]);
-      total_weight += weight;
+      neighborhood.indices[neighborhood.count] = index;
+      neighborhood.weights[neighborhood.count] = weight;
+      ++neighborhood.count;
+      neighborhood.total_weight += weight;
     }
   }
-  if (total_weight <= 0.0 || !std::isfinite(result)) {
+  if (neighborhood.count == 0U || neighborhood.total_weight <= 0.0 ||
+      !std::isfinite(neighborhood.total_weight)) {
     return std::nullopt;
   }
-  const double interpolated = result / total_weight;
-  return std::isfinite(interpolated)
-             ? std::optional<double>{interpolated}
-             : std::nullopt;
+  return neighborhood;
 }
 
 [[nodiscard]] bool Finite(const Vec2& value) noexcept {
@@ -3406,9 +3414,30 @@ class WheelSearchGraph final {
       const std::int64_t maximum_cell_x = footprint_window.maximum_x;
       const std::int64_t maximum_cell_y = footprint_window.maximum_y;
 
-      // Flat free regions need no polygon terrain reduction. Include one
-      // interpolation-cell halo so the skipped bilinear wheel samples are
-      // covered by the same exact-zero certificate.
+      std::array<BilinearSupportNeighborhood, 4U> wheel_supports{};
+      std::size_t wheel_index = 0U;
+      for (const double body_x : {-0.5 * capability_.wheelbase_m,
+                                  0.5 * capability_.wheelbase_m}) {
+        for (const double body_y : {-0.5 * capability_.track_width_m,
+                                    0.5 * capability_.track_width_m}) {
+          const Vec2 wheel_position{
+              .x = center_x + cosine * body_x - sine * body_y,
+              .y = center_y + sine * body_x + cosine * body_y,
+          };
+          const auto support = KnownFreeBilinearSupportNeighborhood(
+              map_, terrain_, elevations, wheel_position);
+          if (!support.has_value()) {
+            result.rejection_bucket =
+                RejectionBucket::kDirectUnknownOrUnsupportedFootprint;
+            return result;
+          }
+          wheel_supports[wheel_index++] = *support;
+        }
+      }
+
+      // Wheel support neighborhoods are validated above even when they lie
+      // beyond the footprint. Flat footprint-adjacent terrain needs no
+      // polygon reduction.
       if (!HasComplexTerrainInCells(
               std::max<std::int64_t>(0, minimum_cell_x - 1),
               std::max<std::int64_t>(0, minimum_cell_y - 1),
@@ -3425,23 +3454,17 @@ class WheelSearchGraph final {
       }
 
       std::array<double, 4U> wheel_heights{};
-      std::size_t wheel_index = 0U;
-      for (const double body_x : {-0.5 * capability_.wheelbase_m,
-                                  0.5 * capability_.wheelbase_m}) {
-        for (const double body_y : {-0.5 * capability_.track_width_m,
-                                    0.5 * capability_.track_width_m}) {
-          const Vec2 wheel_position{
-              .x = center_x + cosine * body_x - sine * body_y,
-              .y = center_y + sine * body_x + cosine * body_y,
-          };
-          const auto elevation = SampleKnownFreeElevationBilinear(
-              map_, terrain_, wheel_position);
-          if (!elevation.has_value()) {
-            result.rejection_bucket =
-                RejectionBucket::kDirectUnknownOrUnsupportedFootprint;
-            return result;
-          }
-          wheel_heights[wheel_index++] = *elevation;
+      for (std::size_t wheel = 0U; wheel < wheel_supports.size(); ++wheel) {
+        const BilinearSupportNeighborhood& support = wheel_supports[wheel];
+        double height = 0.0;
+        for (std::size_t index = 0U; index < support.count; ++index) {
+          height += support.weights[index] * elevations[support.indices[index]];
+        }
+        wheel_heights[wheel] = height / support.total_weight;
+        if (!std::isfinite(wheel_heights[wheel])) {
+          result.rejection_bucket =
+              RejectionBucket::kDirectUnknownOrUnsupportedFootprint;
+          return result;
         }
       }
       const double rear_height = 0.5 * (wheel_heights[0] + wheel_heights[1]);
