@@ -1150,6 +1150,7 @@ struct PurePlanMotionServer::Impl final {
           };
         }
       }
+      segment.wheel_metrics = local.wheel_metrics;
       auto cycle_finalized = std::chrono::steady_clock::now();
       segment.timing = cycle_call_timing;
       segment.timing.total_elapsed =
@@ -1160,6 +1161,7 @@ struct PurePlanMotionServer::Impl final {
         auto canceled = Failure(PlanningStatus::kCanceled,
                                 "REQUEST_CANCELED");
         canceled.timing = segment.timing;
+        canceled.wheel_metrics = local.wheel_metrics;
         PublishCycleDiagnostics(request_goal, canceled);
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
@@ -1169,6 +1171,7 @@ struct PurePlanMotionServer::Impl final {
       if (cycle_finalized >= cycle_timing->hard_deadline) {
         auto timeout = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
         timeout.timing = segment.timing;
+        timeout.wheel_metrics = local.wheel_metrics;
         PublishCycleDiagnostics(request_goal, timeout);
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
@@ -1192,6 +1195,7 @@ struct PurePlanMotionServer::Impl final {
         auto canceled = Failure(PlanningStatus::kCanceled,
                                 "REQUEST_CANCELED");
         canceled.timing = segment.timing;
+        canceled.wheel_metrics = local.wheel_metrics;
         PublishCycleDiagnostics(request_goal, canceled);
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
@@ -1205,6 +1209,7 @@ struct PurePlanMotionServer::Impl final {
         timeout.timing.total_elapsed =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 cycle_finalized - cycle_timing->started_at);
+        timeout.wheel_metrics = local.wheel_metrics;
         PublishCycleDiagnostics(request_goal, timeout);
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
@@ -1229,6 +1234,7 @@ struct PurePlanMotionServer::Impl final {
         auto canceled = Failure(PlanningStatus::kCanceled,
                                 "REQUEST_CANCELED");
         canceled.timing = segment.timing;
+        canceled.wheel_metrics = local.wheel_metrics;
         PublishCycleDiagnostics(request_goal, canceled);
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
@@ -1238,6 +1244,7 @@ struct PurePlanMotionServer::Impl final {
       if (cycle_finalized >= cycle_timing->hard_deadline) {
         auto timeout = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
         timeout.timing = segment.timing;
+        timeout.wheel_metrics = local.wheel_metrics;
         PublishCycleDiagnostics(request_goal, timeout);
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;

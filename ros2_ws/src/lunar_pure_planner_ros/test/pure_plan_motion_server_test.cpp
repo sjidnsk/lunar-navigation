@@ -229,6 +229,9 @@ lunar::pure_planning::LocalStageResult LocalSuccess(
       .selected_goal_index = selected_goal_index,
       .expanded_states = 7U,
       .best_cost = 1.25,
+      .wheel_metrics = lunar::pure_planning::WheelPlanningMetrics{
+          .edge_validation_evaluations = 9U,
+      },
   };
 }
 
@@ -539,10 +542,72 @@ std::set<std::string> SubscriptionTopics(
   return topics;
 }
 
-void ExpectTenKeyDiagnostic(
+void ExpectConditionalWheelMetricKeys(
     const diagnostic_msgs::msg::DiagnosticArray& diagnostics) {
   ASSERT_EQ(diagnostics.status.size(), 1U);
-  EXPECT_EQ(diagnostics.status.front().values.size(), 19U);
+  std::set<std::string> keys;
+  for (const auto& value : diagnostics.status.front().values) {
+    keys.insert(value.key);
+  }
+  const std::set<std::string> expected{
+      "wheel_expanded_states", "wheel_edge_validation_evaluations",
+      "wheel_edge_validation_cache_hits", "wheel_broad_phase_rejects",
+      "wheel_full_certifications", "wheel_full_invalidations",
+      "wheel_sweep_cell_checks", "wheel_quantization_alias_states",
+      "wheel_quantized_state_reuses", "wheel_quantized_endpoint_aliases",
+      "wheel_quantized_state_count", "wheel_maximum_active_labels_per_key",
+      "wheel_used_narrow_resolution", "wheel_finest_xy_key_resolution_m",
+      "wheel_maximum_yaw_bins", "wheel_ara_search_invocations",
+      "wheel_returned_edge_certificate_confirmations",
+      "wheel_mode_switch_edge_count", "wheel_reverse_edge_count",
+      "wheel_start_heuristic_lower_bound",
+      "wheel_has_certified_preferred_candidate",
+      "wheel_preferred_candidate_full_primitive_edge_count",
+      "wheel_preferred_candidate_terminal_connector_edge_count",
+      "wheel_preferred_candidate_certified_edge_count",
+      "wheel_preferred_candidate_cost", "wheel_preferred_builder_invocations",
+      "wheel_cost_component_0", "wheel_cost_component_1",
+      "wheel_cost_component_2", "wheel_cost_component_3",
+      "wheel_cost_component_4", "wheel_cost_scale_0", "wheel_cost_scale_1",
+      "wheel_cost_scale_2", "wheel_cost_scale_3", "wheel_cost_scale_4",
+      "wheel_direct_unknown_or_unsupported_footprint_rejects",
+      "wheel_measured_obstacle_clearance_rejects",
+      "wheel_slope_or_roughness_rejects",
+      "wheel_relief_or_underbody_rejects",
+      "wheel_dynamics_or_primitive_shape_rejects",
+      "wheel_deadline_or_cancellation_interruptions",
+      "wheel_far_clearance_scan_skips", "wheel_occupied_clearance_cell_checks"};
+  const bool available =
+      FindDiagnosticValue(diagnostics, "wheel_metrics_available") == "true";
+  for (const std::string& key : expected) {
+    EXPECT_EQ(keys.contains(key), available) << key;
+  }
+  for (const std::string& key : keys) {
+    if (key.starts_with("wheel_") && key != "wheel_metrics_available") {
+      EXPECT_TRUE(expected.contains(key)) << key;
+    }
+  }
+}
+
+void ExpectCommonDiagnosticKeys(
+    const diagnostic_msgs::msg::DiagnosticArray& diagnostics) {
+  ASSERT_EQ(diagnostics.status.size(), 1U);
+  std::set<std::string> keys;
+  for (const auto& value : diagnostics.status.front().values) {
+    keys.insert(value.key);
+  }
+  for (const std::string_view key : {
+           "request_id", "platform_type", "environment_mode",
+           "planning_outcome", "reason_code", "expanded_states",
+           "has_best_cost", "best_cost", "latency_class",
+           "snapshot_projection_elapsed_ms", "global_elapsed_ms",
+           "global_call_count", "local_goal_elapsed_ms",
+           "local_search_elapsed_ms", "local_elapsed_ms", "local_call_count",
+           "certification_elapsed_ms", "output_elapsed_ms", "total_elapsed_ms",
+           "wheel_metrics_available"}) {
+    EXPECT_TRUE(keys.contains(std::string{key})) << key;
+  }
+  ExpectConditionalWheelMetricKeys(diagnostics);
 }
 
 void ExpectBounded(const std::chrono::steady_clock::duration elapsed) {
@@ -792,7 +857,7 @@ TEST_P(SuccessfulRequestLifecycleTest,
   // with the result future complete, this is a closed publication boundary.
   ASSERT_EQ(system.DiagnosticCount(), 1U);
   const auto diagnostics = system.Diagnostics().front();
-  ExpectTenKeyDiagnostic(diagnostics);
+  ExpectCommonDiagnosticKeys(diagnostics);
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "reason_code"), "PLAN_FOUND");
 }
 
@@ -919,7 +984,7 @@ TEST(PurePlanMotionServer, RejectsConflictAndSerializesReplacement) {
   std::set<std::string> diagnostic_request_ids;
   std::set<std::string> diagnostic_reasons;
   for (const auto& diagnostics : system.Diagnostics()) {
-    ExpectTenKeyDiagnostic(diagnostics);
+    ExpectCommonDiagnosticKeys(diagnostics);
     diagnostic_request_ids.insert(
         FindDiagnosticValue(diagnostics, "request_id"));
     diagnostic_reasons.insert(FindDiagnosticValue(diagnostics, "reason_code"));
@@ -985,7 +1050,7 @@ TEST(PurePlanMotionServer,
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
   ASSERT_EQ(system.DiagnosticCount(), 1U);
   const auto diagnostics = system.Diagnostics().front();
-  ExpectTenKeyDiagnostic(diagnostics);
+  ExpectCommonDiagnosticKeys(diagnostics);
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "reason_code"), "TIMEOUT");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "planning_outcome"),
             std::to_string(Action::Result::RESOURCE_EXHAUSTED));
@@ -1022,7 +1087,7 @@ TEST(PurePlanMotionServer, ClientCancelTerminatesOnceAndPublishesOneDiagnostic) 
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
   ASSERT_EQ(system.DiagnosticCount(), 1U);
   const auto diagnostics = system.Diagnostics().front();
-  ExpectTenKeyDiagnostic(diagnostics);
+  ExpectCommonDiagnosticKeys(diagnostics);
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "request_id"), "cancel");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "reason_code"),
             "REQUEST_CANCELED");
@@ -1535,7 +1600,7 @@ TEST(PurePlanMotionServer,
   EXPECT_FALSE(result.result->has_reference);
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
   const auto diagnostics = system.Diagnostics().front();
-  ExpectTenKeyDiagnostic(diagnostics);
+  ExpectCommonDiagnosticKeys(diagnostics);
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "reason_code"),
             "PLANNER_ERROR");
 }
@@ -1641,6 +1706,16 @@ TEST(PurePlanMotionServer,
   ASSERT_GE(diagnostics.size(), 2U);
   EXPECT_EQ(FindDiagnosticValue(diagnostics[0], "reason_code"), "STALE_INPUT");
   EXPECT_EQ(FindDiagnosticValue(diagnostics[1], "reason_code"), "PLAN_FOUND");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics[0], "wheel_metrics_available"),
+            "true");
+  EXPECT_EQ(FindDiagnosticValue(
+                diagnostics[0], "wheel_edge_validation_evaluations"),
+            "9");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics[1], "wheel_metrics_available"),
+            "true");
+  EXPECT_EQ(FindDiagnosticValue(
+                diagnostics[1], "wheel_edge_validation_evaluations"),
+            "9");
 
   system.PublishOdometryOnly(0.2);
   const auto result = system.Result(handle);
@@ -1775,6 +1850,13 @@ TEST(PurePlanMotionServer,
   ASSERT_NE(result.result, nullptr);
   EXPECT_EQ(result.result->reason_code, "TIMEOUT");
   EXPECT_FALSE(result.result->has_reference);
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
+  const auto diagnostics = system.Diagnostics().front();
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_metrics_available"),
+            "true");
+  EXPECT_EQ(FindDiagnosticValue(
+                diagnostics, "wheel_edge_validation_evaluations"),
+            "9");
 }
 
 TEST(PurePlanMotionServer,
@@ -1819,7 +1901,7 @@ TEST(PurePlanMotionServer,
   EXPECT_LE(core_remaining_ms.load(), 8);
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
   const auto diagnostics = system.Diagnostics().front();
-  ExpectTenKeyDiagnostic(diagnostics);
+  ExpectCommonDiagnosticKeys(diagnostics);
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "planning_outcome"),
             std::to_string(Action::Result::RESOURCE_EXHAUSTED));
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "reason_code"), "TIMEOUT");

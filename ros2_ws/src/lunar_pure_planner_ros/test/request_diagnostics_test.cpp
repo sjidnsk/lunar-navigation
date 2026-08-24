@@ -47,8 +47,9 @@ TEST(RequestDiagnostics, EmitsStatusLatencyClassAndEveryPhaseTiming) {
       "latency_class", "snapshot_projection_elapsed_ms",
       "global_elapsed_ms", "global_call_count", "local_goal_elapsed_ms",
       "local_search_elapsed_ms", "local_elapsed_ms", "local_call_count",
-      "certification_elapsed_ms", "output_elapsed_ms", "total_elapsed_ms"}));
-  EXPECT_EQ(status.values.size(), 19U);
+      "certification_elapsed_ms", "output_elapsed_ms", "total_elapsed_ms",
+      "wheel_metrics_available"}));
+  EXPECT_EQ(status.values.size(), 20U);
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "expanded_states"), "47");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "has_best_cost"), "true");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "best_cost"), "12.25");
@@ -68,6 +69,47 @@ TEST(RequestDiagnostics, EmitsStatusLatencyClassAndEveryPhaseTiming) {
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "total_elapsed_ms"), "6");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "global_call_count"), "2");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "local_call_count"), "3");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_metrics_available"), "false");
+}
+
+TEST(RequestDiagnostics, EmitsConditionalWheelMetricsWhenAvailable) {
+  const lunar::pure_planning::PlanningResult result{
+      .status = lunar::pure_planning::PlanningStatus::kTimedOut,
+      .wheel_metrics = lunar::pure_planning::WheelPlanningMetrics{
+          .expanded_states = 4U,
+          .edge_validation_evaluations = 11U,
+          .sweep_cell_checks = 29U,
+          .used_narrow_resolution = true,
+          .finest_xy_key_resolution_m = 0.125,
+          .cost_components = {1.0, 2.0, 3.0, 4.0, 5.0},
+      },
+  };
+  const auto diagnostics = MakeRequestDiagnostics(
+      "wheel", lunar::pure_planning::PlatformType::kWheeled,
+      lunar::pure_planning::EnvironmentMode::kLunarSurface, result);
+
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_metrics_available"), "true");
+  EXPECT_EQ(FindDiagnosticValue(
+                diagnostics, "wheel_edge_validation_evaluations"), "11");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_sweep_cell_checks"), "29");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_used_narrow_resolution"),
+            "true");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics,
+                                "wheel_finest_xy_key_resolution_m"),
+            "0.125");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_cost_component_4"), "5");
+}
+
+TEST(RequestDiagnostics, OmitsConditionalWheelMetricsBeforeGraphCreation) {
+  const auto diagnostics = MakeRequestDiagnostics(
+      "invalid", lunar::pure_planning::PlatformType::kWheeled,
+      lunar::pure_planning::EnvironmentMode::kLunarSurface,
+      lunar::pure_planning::PlanningResult{
+          .status = lunar::pure_planning::PlanningStatus::kInvalidInput});
+
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "wheel_metrics_available"), "false");
+  EXPECT_TRUE(FindDiagnosticValue(
+      diagnostics, "wheel_edge_validation_evaluations").empty());
 }
 
 TEST(RequestDiagnostics, AssignsLevelForEveryTypedStatus) {
@@ -97,7 +139,7 @@ TEST(RequestDiagnostics, AssignsLevelForEveryTypedStatus) {
         lunar::pure_planning::EnvironmentMode::kLunarSurface, result);
     ASSERT_EQ(diagnostics.status.size(), 1U);
     EXPECT_EQ(diagnostics.status.front().level, expected.level);
-    EXPECT_EQ(diagnostics.status.front().values.size(), 19U);
+    EXPECT_EQ(diagnostics.status.front().values.size(), 20U);
   }
 }
 
