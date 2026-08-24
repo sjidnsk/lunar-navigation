@@ -13,6 +13,7 @@
   <depend>lunar_planning_msgs</depend>
   <depend>lunar_pure_exploration_core</depend>
   <depend>lunar_pure_exploration_msgs</depend>
+  <depend>lunar_pure_planner_core</depend>
   <depend>nav_msgs</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>

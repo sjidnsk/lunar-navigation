@@ -841,7 +841,6 @@ std::vector<CandidateView> CandidateGenerator::Generate(
           }
           AddPosition(position_buckets, center_grid, spacing_grid);
           output.insert(output.end(), group.begin(), group.end());
-          break;
         }
       }
     }

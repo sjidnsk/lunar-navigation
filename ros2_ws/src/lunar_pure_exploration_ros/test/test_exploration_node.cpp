@@ -952,9 +952,15 @@ TEST_F(ExplorationNodeTest,
 
   ASSERT_TRUE(WaitFor([this] { return !server_->Goals().empty(); }));
   const auto goals = server_->Goals();
-  ASSERT_EQ(goals.size(), 1U);
-  EXPECT_DOUBLE_EQ(goals.front().goal.point.x, 3.5);
-  EXPECT_DOUBLE_EQ(goals.front().goal.point.y, 2.0);
+  ASSERT_FALSE(goals.empty());
+  // The fake server completes immediately, so the node may construct a
+  // follow-up cycle before this assertion samples the request history.  Every
+  // dispatched goal must nevertheless be the globally feasible candidate;
+  // the x=4.5 candidate is rejected by the planner-core projection.
+  for (const auto& goal : goals) {
+    EXPECT_DOUBLE_EQ(goal.goal.point.x, 3.5);
+    EXPECT_DOUBLE_EQ(goal.goal.point.y, 2.0);
+  }
 }
 
 TEST_F(ExplorationNodeTest,

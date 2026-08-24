@@ -43,6 +43,8 @@ Task 4 re-review at `336d45b`: normal teardown addressed, but capture/readline e
 
 Task 4 final line-level review at `3cdee13`: fallback construction still performed `/proc` I/O before entering `try`. The fallback is now a pure no-I/O PID=PGID=SID descriptor; all observation/capture work occurs inside cleanup protection. Static/synthetic `11/11` and fresh live pass; pending final review.
 
+Task 4: complete (commits 685d484..6a18b75, final independent re-review clean). Final evidence includes fresh fixed-overlay live motion/planning and exact exception-safe process-group teardown with no residual identities or ROS nodes.
+
 Task 4: complete in working tree pending commit. The opt-in live smoke uses a
 locked candidate domain, localhost-only/no-daemon preflight, exact process-group
 cleanup, and external artifacts. Seven bounded RED/diagnostic iterations led to

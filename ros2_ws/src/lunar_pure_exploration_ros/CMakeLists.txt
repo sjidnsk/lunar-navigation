@@ -7,6 +7,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(lunar_planning_msgs REQUIRED)
 find_package(lunar_pure_exploration_core REQUIRED)
 find_package(lunar_pure_exploration_msgs REQUIRED)
+find_package(lunar_pure_planner_core REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
@@ -33,6 +34,7 @@ ament_target_dependencies(${PROJECT_NAME}
   lunar_planning_msgs
   lunar_pure_exploration_core
   lunar_pure_exploration_msgs
+  lunar_pure_planner_core
   nav_msgs
   rclcpp
   rclcpp_action
@@ -150,6 +152,7 @@ ament_export_dependencies(
   lunar_planning_msgs
   lunar_pure_exploration_core
   lunar_pure_exploration_msgs
+  lunar_pure_planner_core
   nav_msgs
   rclcpp
   rclcpp_action

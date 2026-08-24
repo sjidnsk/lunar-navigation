@@ -1,4 +1,5 @@
 #include "lunar_pure_exploration_ros/exploration_node.hpp"
+#include "lunar_pure_planner_core/global_goal_feasibility.hpp"
 
 #include <algorithm>
 #include <array>
@@ -104,6 +105,8 @@ using lunar::pure_exploration::Pose2;
 using lunar::pure_exploration::TaskRaster;
 using lunar::pure_exploration::Vec2;
 using lunar::pure_exploration::ActiveGoal;
+using lunar::pure_planning::EvaluateGlobalGoalFeasibility;
+using lunar::pure_planning::GlobalGoalFeasibilityRequest;
 using Task = lunar_pure_exploration_msgs::msg::PureExplorationTask;
 using Status = lunar_pure_exploration_msgs::msg::PureExplorationStatus;
 using MotionReference = lunar_planning_msgs::msg::MotionReference;
@@ -250,6 +253,29 @@ FrozenGlobalMapContent FreezeGlobalMap(
   static_cast<void>(OccupancyGridView(result.geometry, result.data,
                                       occupied_threshold));
   return result;
+}
+
+bool GlobalGoalCellFeasible(const FrozenGlobalMapContent& map,
+                            const Pose2 pose,
+                            const double inflation_m,
+                            const std::int8_t occupied_threshold) {
+  if (map.geometry.origin_yaw != 0.0) {
+    return false;
+  }
+  GlobalGoalFeasibilityRequest request;
+  request.global_map.frame_id = "map";
+  request.global_map.width = map.geometry.width;
+  request.global_map.height = map.geometry.height;
+  request.global_map.resolution_m = map.geometry.resolution;
+  request.global_map.origin_m = {.x = map.geometry.origin_x,
+                                 .y = map.geometry.origin_y,
+                                 .z = 0.0};
+  request.global_map.layers.emplace(
+      "occupancy", lunar::pure_planning::GridLayer{.values = map.data});
+  request.goal_position_m = {.x = pose.x, .y = pose.y};
+  request.obstacle_threshold_percent = occupied_threshold;
+  request.inflation_m = inflation_m;
+  return EvaluateGlobalGoalFeasibility(std::move(request)).feasible;
 }
 
 bool SameGeometry(const GridGeometry& left, const GridGeometry& right) {
@@ -1547,15 +1573,14 @@ void QueueBuild(const std::shared_ptr<RuntimeT>& runtime) {
                                         ->generate_candidates(*product.raster,
                                                               frontiers)
                                   : locked->candidate_generator.Generate(
-                                        *product.raster, frontiers,
-                                        locked->parameters.filter_global_goal_cell);
+                                        *product.raster, frontiers);
 
-            if (locked->parameters.filter_global_goal_cell &&
-                controlled_candidates) {
-              std::size_t global_goal_cell_work = 0U;
+            if (locked->parameters.filter_global_goal_cell) {
               std::erase_if(candidates, [&](const auto& candidate) {
-                return !locked->candidate_generator.GlobalGoalCellFeasible(
-                    *product.raster, candidate.pose, global_goal_cell_work);
+                return !GlobalGoalCellFeasible(
+                    snapshot.map, candidate.pose,
+                    locked->candidate_generator.minimum_standoff_m(),
+                    locked->parameters.global_occupied_threshold);
               });
             }
 
@@ -2579,10 +2604,10 @@ bool CandidateRemainsValidOnLatestMap(
   if (!detection.has_reachable_free_start) {
     return false;
   }
-  std::size_t global_goal_cell_work = 0U;
   if (runtime.parameters.filter_global_goal_cell &&
-      !runtime.candidate_generator.GlobalGoalCellFeasible(
-          raster, candidate.pose, global_goal_cell_work)) {
+      !GlobalGoalCellFeasible(
+          map, candidate.pose, runtime.candidate_generator.minimum_standoff_m(),
+          runtime.parameters.global_occupied_threshold)) {
     return false;
   }
   const auto candidates =

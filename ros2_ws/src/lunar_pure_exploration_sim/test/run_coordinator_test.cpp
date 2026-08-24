@@ -68,7 +68,7 @@ CoordinatorReadiness FullyReady() {
   return readiness;
 }
 
-TEST(CoordinatorReadinessTest, RequiresFiveConsecutiveStablePollsBeforeStart) {
+TEST(CoordinatorReadinessTest, RequiresTwentyConsecutiveStablePollsBeforeStart) {
   CoordinatorReadiness readiness;
   readiness.global_map_received = true;
   readiness.local_map_received = true;
@@ -79,14 +79,14 @@ TEST(CoordinatorReadinessTest, RequiresFiveConsecutiveStablePollsBeforeStart) {
   readiness.controller_publisher_unique = true;
   readiness.controller_command_received = true;
 
-  for (int poll = 0; poll < 4; ++poll) {
+  for (int poll = 0; poll < 19; ++poll) {
     readiness.ObservePoll();
     EXPECT_FALSE(readiness.ShouldStart());
   }
   readiness.planner_action_ready = false;
   readiness.ObservePoll();
   readiness.planner_action_ready = true;
-  for (int poll = 0; poll < 4; ++poll) {
+  for (int poll = 0; poll < 19; ++poll) {
     readiness.ObservePoll();
     EXPECT_FALSE(readiness.ShouldStart());
   }

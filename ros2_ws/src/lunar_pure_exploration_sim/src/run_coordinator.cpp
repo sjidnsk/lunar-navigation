@@ -14,7 +14,9 @@ namespace {
 using Action = lunar_planning_msgs::action::PlanMotion;
 using Status = lunar_pure_exploration_msgs::msg::PureExplorationStatus;
 using Task = lunar_pure_exploration_msgs::msg::PureExplorationTask;
-constexpr std::uint8_t kRequiredStablePolls = 5U;
+// Let late-joining best-effort planner subscriptions receive recurring inputs
+// before the task can trigger its first rolling planning request.
+constexpr std::uint8_t kRequiredStablePolls = 20U;
 
 geometry_msgs::msg::Point32 BoundaryPoint(const float x, const float y) {
   geometry_msgs::msg::Point32 point;

@@ -24,6 +24,7 @@ endfunction()
 # linked into the pure planner.
 set(LUNAR_ANYTIME_PRODUCTION_SOURCES
   src/planner.cpp
+  src/global_goal_feasibility.cpp
   src/hierarchical/frame_transform.cpp
   src/hierarchical/global_route_planner.cpp
   src/hierarchical/reference_composer.cpp
@@ -65,6 +66,7 @@ install(
   INCLUDES DESTINATION include)
 install(FILES
   include/lunar_pure_planner_core/planner.hpp
+  include/lunar_pure_planner_core/global_goal_feasibility.hpp
   include/lunar_pure_planner_core/planning_timing.hpp
   include/lunar_pure_planner_core/search_control.hpp
   DESTINATION include/lunar_pure_planner_core)

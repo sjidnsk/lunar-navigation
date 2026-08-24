@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "lunar_pure_planner_core/planner.hpp"
+#include "lunar_pure_planner_core/global_goal_feasibility.hpp"
 
 namespace lunar::pure_planning {
 namespace {
@@ -26,6 +27,23 @@ TEST(PublicApi, ExposesOnlyTheMinimalDualModePlannerEntrypoint) {
                 std::function<LocalStageResult(const PlanningRequest&,
                                                const LocalGoalSet&,
                                                SearchControl)>>);
+}
+
+TEST(PublicApi, GlobalGoalFeasibilityUsesInflatedCellAreaProjection) {
+  GlobalGoalFeasibilityRequest request;
+  request.global_map.frame_id = "map";
+  request.global_map.width = 5U;
+  request.global_map.height = 1U;
+  request.global_map.resolution_m = 1.0;
+  request.global_map.layers.emplace(
+      "occupancy", GridLayer{.values = std::vector<std::int8_t>{0, 0, -1, 0, 0}});
+  request.goal_position_m = {.x = 3.0, .y = 0.0};
+  request.inflation_m = 0.9187;
+
+  const auto result = EvaluateGlobalGoalFeasibility(std::move(request));
+
+  EXPECT_FALSE(result.feasible);
+  EXPECT_EQ(result.reason_code, "GLOBAL_GOAL_INFEASIBLE");
 }
 
 TEST(PublicApi, RejectsPlanarRegionWithoutEnteringInjectedBackends) {
