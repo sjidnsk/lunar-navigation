@@ -3435,10 +3435,8 @@ class WheelSearchGraph final {
         }
       }
 
-      // Wheel support neighborhoods are validated above even when they lie
-      // beyond the footprint. Flat footprint-adjacent terrain needs no
-      // polygon reduction.
-      if (!HasComplexTerrainInCells(
+      const bool footprint_proof_has_complex_terrain =
+          HasComplexTerrainInCells(
               std::max<std::int64_t>(0, minimum_cell_x - 1),
               std::max<std::int64_t>(0, minimum_cell_y - 1),
               std::min<std::int64_t>(
@@ -3446,7 +3444,31 @@ class WheelSearchGraph final {
                   maximum_cell_x + 1),
               std::min<std::int64_t>(
                   static_cast<std::int64_t>(map_.height()) - 1,
-                  maximum_cell_y + 1))) {
+                  maximum_cell_y + 1));
+      bool wheel_support_proof_has_complex_terrain = false;
+      for (const BilinearSupportNeighborhood& support : wheel_supports) {
+        for (std::size_t index = 0U; index < support.count; ++index) {
+          const std::size_t support_index = support.indices[index];
+          const std::int64_t support_x = static_cast<std::int64_t>(
+              support_index % map_.width());
+          const std::int64_t support_y = static_cast<std::int64_t>(
+              support_index / map_.width());
+          if (HasComplexTerrainInCells(support_x, support_y, support_x,
+                                       support_y)) {
+            wheel_support_proof_has_complex_terrain = true;
+            break;
+          }
+        }
+        if (wheel_support_proof_has_complex_terrain) {
+          break;
+        }
+      }
+
+      // The exact bilinear support cells, including cells outside the
+      // footprint, must be flat before taking the fast path. Their support
+      // neighborhoods were already sampled and validated above.
+      if (!footprint_proof_has_complex_terrain &&
+          !wheel_support_proof_has_complex_terrain) {
         if (!std::isfinite(result.minimum_clearance_m)) {
           result.minimum_clearance_m = narrow_threshold;
         }

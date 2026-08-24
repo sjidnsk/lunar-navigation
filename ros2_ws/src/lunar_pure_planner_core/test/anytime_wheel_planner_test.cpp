@@ -1165,10 +1165,12 @@ TEST(WheelPlanner, ConstantElevationOffsetsPreserveCertifiedPlanAndCost) {
 
   const WheelPlanResult baseline = plan_at_elevation(0.0);
   ASSERT_TRUE(baseline.ok()) << baseline.reason_code;
+  EXPECT_EQ(baseline.sweep_cell_checks, 0U);
   for (const double elevation : {10.0, -3.0}) {
     SCOPED_TRACE(elevation);
     const WheelPlanResult shifted = plan_at_elevation(elevation);
     ASSERT_TRUE(shifted.ok()) << shifted.reason_code;
+    EXPECT_EQ(shifted.sweep_cell_checks, 0U);
     ExpectSamePlanExceptZOffset(baseline, shifted, elevation);
   }
 }
@@ -1199,6 +1201,35 @@ TEST(WheelPlanner, FlatFastPathProofIncludesWheelBilinearSupportHalo) {
                 ->direct_unknown_or_unsupported_footprint_rejects,
             0U);
   EXPECT_EQ(result.wheel_metrics->measured_obstacle_clearance_rejects, 0U);
+}
+
+TEST(WheelPlanner,
+     FlatFastPathProofIncludesWheelSupportTerrainComplexityOutsideFootprint) {
+  constexpr std::size_t kWidth = 20U;
+  constexpr std::size_t kHeight = 20U;
+  constexpr std::size_t kSupportCell = 4U * kWidth + 8U;
+  constexpr std::size_t kSlopeSourceCell = 4U * kWidth + 9U;
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.wheelbase_m = 1.3;
+  capability.track_width_m = 0.1;
+  capability.minimum_clearance_m = 0.0;
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+  std::vector<float> elevation(kWidth * kHeight, 0.0F);
+  elevation[kSlopeSourceCell] = 0.02F;
+  TerrainFixture fixture = MakeTerrain(
+      kWidth, kHeight, std::vector<float>(kWidth * kHeight, 0.0F), 0.2,
+      std::move(elevation));
+  ASSERT_GT(fixture.terrain.slope_rad[kSupportCell], 0.0F);
+  ASSERT_GT(fixture.terrain.roughness_m[kSupportCell], 0.0F);
+
+  const WheelPlanResult result = PlanWheel(RequestTo(
+      fixture, capability, 1.2, 1.0, 0.0, Pose(1.0, 1.0)));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_TRUE(result.wheel_metrics.has_value());
+  EXPECT_GT(result.sweep_cell_checks, 0U);
 }
 
 TEST(WheelPlanner, UsesOrientedRectangleAndNarrowResolutionInTightCorridor) {
