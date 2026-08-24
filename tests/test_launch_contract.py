@@ -8,8 +8,7 @@ import pytest
 import yaml
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-PURE_PLANNER_ROOT = REPOSITORY_ROOT / "pure_planner"
+PURE_PLANNER_ROOT = Path(__file__).resolve().parents[1]
 PARAMETERS_PATH = PURE_PLANNER_ROOT / "config" / "pure_planner.yaml"
 LAUNCH_PATH = PURE_PLANNER_ROOT / "launch" / "pure_planner.launch.py"
 README_PATH = PURE_PLANNER_ROOT / "README.md"
@@ -59,9 +58,6 @@ EXPECTED_PARAMETERS = {
     "rolling_horizon_m",
     "rolling_poll_period_ms",
     "rolling_min_replan_interval_ms",
-    "rolling_global_budget_ms",
-    "rolling_local_budget_ms",
-    "rolling_action_timeout_s",
     "rolling_max_deviation_m",
     *EXPECTED_TOPICS,
 }

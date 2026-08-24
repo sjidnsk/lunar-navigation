@@ -2,10 +2,12 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include "lunar_pure_planner_core/planning_timing.hpp"
 #include "lunar_pure_planner_core/search_control.hpp"
@@ -18,12 +20,10 @@ namespace lunar::pure_planning {
 
 struct AnytimeSearchConfig final {
   std::array<double, 4> epsilon_schedule{2.5, 2.0, 1.5, 1.0};
-  bool stop_after_first_solution{};
+  bool stop_after_first_solution{true};
 };
 
 struct AnytimePlannerConfig final {
-  std::chrono::milliseconds global_budget{150};
-  std::chrono::milliseconds output_reserve{50};
   std::int32_t global_occupancy_threshold{50};
   double local_occupancy_threshold{0.5};
   double platform_discretization_m{0.2};
@@ -36,6 +36,15 @@ struct MinimalWorldSnapshot final {
   std::optional<GridMap> global_map;
   GridMap local_map;
   RigidTransform map_from_odom;
+  std::uint64_t global_map_sequence{};
+  std::uint64_t local_map_sequence{};
+  std::uint64_t odometry_sequence{};
+  std::uint64_t tf_sequence{};
+};
+
+struct LocalGoalSet final {
+  std::vector<GoalRegion> goals_odom;
+  bool exact_final_goal{};
 };
 
 struct WheeledState final {
@@ -73,6 +82,8 @@ struct PlanningRequest final {
   PlatformCapability capability;
   AnytimePlannerConfig config;
   SearchControl control;
+  std::optional<SteadyClock::time_point> request_started_at;
+  ProgressFn progress;
 };
 
 enum class PlanningStatus : std::uint8_t {
@@ -91,6 +102,14 @@ struct PlanningResult final {
   std::optional<MotionReference> reference;
   PlannerCallTiming timing;
   std::uint64_t expanded_states{};
+  std::optional<std::size_t> selected_goal_index;
+  bool global_snapshot_cache_hit{};
+  bool global_projection_cache_hit{};
+  bool global_route_cache_hit{};
+  bool local_snapshot_cache_hit{};
+  bool local_projection_cache_hit{};
+  bool goal_field_cache_hit{};
+  std::optional<double> best_cost;
 };
 
 }  // namespace lunar::pure_planning

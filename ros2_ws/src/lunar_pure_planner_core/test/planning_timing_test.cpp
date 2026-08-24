@@ -59,8 +59,35 @@ TEST(PlanningTiming, CountsCallWhenExceptionUnwinds) {
   }
 
   EXPECT_EQ(timing.local_call_count, 1U);
+  EXPECT_EQ(timing.local_search_elapsed, 11ms);
   EXPECT_EQ(timing.local_elapsed, 11ms);
   EXPECT_EQ(timing.total_elapsed, 11ms);
+}
+
+TEST(PlanningTiming, ExactMilestonesBelongToTheLaterLatencyClass) {
+  const auto policy =
+      MakeRequestTimingPolicy(SteadyClock::time_point{100ms});
+  struct Case final {
+    std::chrono::milliseconds finalized;
+    RequestLatencyClass latency_class;
+    const char* name;
+  };
+  for (const Case& test_case : {
+           Case{1099ms, RequestLatencyClass::kTargetMet, "TARGET_MET"},
+           Case{1100ms, RequestLatencyClass::kTargetMissed, "TARGET_MISSED"},
+           Case{2099ms, RequestLatencyClass::kTargetMissed, "TARGET_MISSED"},
+           Case{2100ms, RequestLatencyClass::kSlaMissed, "SLA_MISSED"},
+           Case{3099ms, RequestLatencyClass::kSlaMissed, "SLA_MISSED"},
+           Case{3100ms, RequestLatencyClass::kHardTimeout, "HARD_TIMEOUT"},
+       }) {
+    const auto actual = ClassifyRequestLatency(
+        policy, SteadyClock::time_point{test_case.finalized});
+    EXPECT_EQ(actual, test_case.latency_class) << test_case.finalized.count();
+    EXPECT_EQ(RequestLatencyClassName(actual), test_case.name);
+  }
+  EXPECT_EQ(policy.target_milestone, SteadyClock::time_point{1100ms});
+  EXPECT_EQ(policy.sla_milestone, SteadyClock::time_point{2100ms});
+  EXPECT_EQ(policy.hard_deadline, SteadyClock::time_point{3100ms});
 }
 
 TEST(PlanningTiming, ClampsClockRegressionToNonNegativeDuration) {
@@ -92,8 +119,7 @@ TEST(PlanningTypes, PreserveExactEnvironmentModeValuesAndMinimalRequest) {
   EXPECT_EQ(static_cast<std::uint8_t>(EnvironmentMode::kLavaTube), 2U);
 
   const AnytimePlannerConfig config;
-  EXPECT_EQ(config.global_budget, 150ms);
-  EXPECT_EQ(config.output_reserve, 50ms);
+  EXPECT_TRUE(config.search.stop_after_first_solution);
   EXPECT_DOUBLE_EQ(config.global_occupancy_threshold, 50.0);
   EXPECT_DOUBLE_EQ(config.local_occupancy_threshold, 0.5);
   EXPECT_EQ(config.search.epsilon_schedule,

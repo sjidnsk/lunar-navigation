@@ -42,6 +42,8 @@
 #include "lunar_pure_planner_core/planner.hpp"
 #include "hierarchical/frame_transform.hpp"
 #include "hierarchical/global_route_planner.hpp"
+#include "hierarchical/reference_composer.hpp"
+#include "hierarchical/surface_portal_set.hpp"
 #include "hierarchical/surface_rolling_session.hpp"
 #include "lunar_pure_planner_ros/input_store.hpp"
 #include "lunar_pure_planner_ros/incremental_traversability.hpp"
@@ -60,16 +62,12 @@ using GoalHandle = rclcpp_action::ServerGoalHandle<Action>;
 using namespace std::chrono_literals;
 
 constexpr std::string_view kPackageName{"lunar_pure_planner_ros"};
-constexpr auto kRequestBudget = 1s;
 
 struct RollingSurfaceParameters final {
   bool enabled{};
   double horizon_m{8.0};
   std::int64_t poll_period_ms{100};
   std::int64_t min_replan_interval_ms{500};
-  std::int64_t global_budget_ms{1000};
-  std::int64_t local_budget_ms{1000};
-  std::int64_t action_timeout_s{300};
   double max_deviation_m{2.0};
 };
 
@@ -149,12 +147,6 @@ struct RuntimeParameters final {
           node.declare_parameter<std::int64_t>("rolling_poll_period_ms", 100),
       .min_replan_interval_ms = node.declare_parameter<std::int64_t>(
           "rolling_min_replan_interval_ms", 500),
-      .global_budget_ms = node.declare_parameter<std::int64_t>(
-          "rolling_global_budget_ms", 1000),
-      .local_budget_ms = node.declare_parameter<std::int64_t>(
-          "rolling_local_budget_ms", 1000),
-      .action_timeout_s = node.declare_parameter<std::int64_t>(
-          "rolling_action_timeout_s", 300),
       .max_deviation_m =
           node.declare_parameter<double>("rolling_max_deviation_m", 2.0),
   };
@@ -165,13 +157,7 @@ struct RuntimeParameters final {
       rolling_surface.poll_period_ms < 10 ||
       rolling_surface.poll_period_ms > 10000 ||
       rolling_surface.min_replan_interval_ms < 10 ||
-      rolling_surface.min_replan_interval_ms > 10000 ||
-      rolling_surface.global_budget_ms < 1 ||
-      rolling_surface.global_budget_ms > 10000 ||
-      rolling_surface.local_budget_ms < 1 ||
-      rolling_surface.local_budget_ms > 10000 ||
-      rolling_surface.action_timeout_s < 1 ||
-      rolling_surface.action_timeout_s > 3600) {
+      rolling_surface.min_replan_interval_ms > 10000) {
     throw std::runtime_error{"PLANNER_ERROR: rolling parameter invalid"};
   }
 
@@ -227,26 +213,120 @@ struct RuntimeParameters final {
   return {.status = status, .reason_code = std::move(reason_code)};
 }
 
+[[nodiscard]] lunar::pure_planning::PlanningResult LocalFailure(
+    const lunar::pure_planning::LocalPlanStatus status,
+    std::string reason_code) {
+  using lunar::pure_planning::LocalPlanStatus;
+  using lunar::pure_planning::PlanningStatus;
+  switch (status) {
+    case LocalPlanStatus::kNoPath:
+      return Failure(PlanningStatus::kNoPath, "NO_PATH");
+    case LocalPlanStatus::kTimedOut:
+      return Failure(PlanningStatus::kTimedOut, "TIMEOUT");
+    case LocalPlanStatus::kCanceled:
+      return Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED");
+    case LocalPlanStatus::kInvalidInput:
+      return Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT");
+    case LocalPlanStatus::kPlannerError:
+      return Failure(PlanningStatus::kPlannerError,
+                     reason_code.empty() ? "PLANNER_ERROR"
+                                         : std::move(reason_code));
+    case LocalPlanStatus::kSolved:
+      break;
+  }
+  return Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
+}
+
+[[nodiscard]] lunar::pure_planning::PlanningResult FailureForReason(
+    const std::string_view reason_code) {
+  using lunar::pure_planning::PlanningStatus;
+  if (reason_code == "REQUEST_CANCELED") {
+    return Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED");
+  }
+  if (reason_code == "TIMEOUT") {
+    return Failure(PlanningStatus::kTimedOut, "TIMEOUT");
+  }
+  if (reason_code == "NO_PATH") {
+    return Failure(PlanningStatus::kNoPath, "NO_PATH");
+  }
+  if (reason_code == "PLANNER_ERROR") {
+    return Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
+  }
+  return Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT");
+}
+
+[[nodiscard]] std::uint8_t FeedbackPhase(
+    const lunar::pure_planning::PlannerPhase phase) noexcept {
+  using lunar::pure_planning::PlannerPhase;
+  switch (phase) {
+    case PlannerPhase::kSnapshotProjection:
+      return Action::Feedback::BUILDING_SNAPSHOT;
+    case PlannerPhase::kGlobal:
+    case PlannerPhase::kLocalGoal:
+    case PlannerPhase::kLocalSearch:
+      return Action::Feedback::SEARCHING;
+    case PlannerPhase::kCertification:
+    case PlannerPhase::kOutput:
+      return Action::Feedback::CERTIFYING;
+  }
+  return Action::Feedback::VALIDATING_INPUT;
+}
+
 [[nodiscard]] bool SameGoal(const std::shared_ptr<GoalHandle>& left,
                             const std::shared_ptr<GoalHandle>& right) noexcept {
   return left && right && left.get() == right.get();
 }
 
-void SetTotalElapsed(
-    diagnostic_msgs::msg::DiagnosticArray& diagnostics,
-    const std::chrono::nanoseconds elapsed) {
+void SetDiagnosticValue(diagnostic_msgs::msg::DiagnosticArray& diagnostics,
+                        const std::string_view key, std::string value) {
   if (diagnostics.status.size() != 1U) {
     return;
   }
-  std::ostringstream value;
-  value << std::setprecision(15)
-        << std::chrono::duration<double, std::milli>(elapsed).count();
   for (auto& field : diagnostics.status.front().values) {
-    if (field.key == "total_elapsed_ms") {
-      field.value = value.str();
+    if (field.key == key) {
+      field.value = std::move(value);
       return;
     }
   }
+}
+
+void SetFinalizedTiming(
+    const std::chrono::nanoseconds elapsed,
+    lunar::pure_planning::PlanningResult& result,
+    Action::Result& action_result) {
+  result.timing.total_elapsed = elapsed;
+  action_result.diagnostics.elapsed_s =
+      std::chrono::duration<double>(elapsed).count();
+  const auto latency_class =
+      lunar::pure_planning::ClassifyRequestLatency(elapsed);
+  action_result.diagnostics.warning_codes.clear();
+  if (latency_class !=
+      lunar::pure_planning::RequestLatencyClass::kTargetMet) {
+    action_result.diagnostics.warning_codes.emplace_back("TARGET_MISSED");
+  }
+  if (latency_class == lunar::pure_planning::RequestLatencyClass::kSlaMissed ||
+      latency_class ==
+          lunar::pure_planning::RequestLatencyClass::kHardTimeout) {
+    action_result.diagnostics.warning_codes.emplace_back(
+        "PLANNING_SLA_MISSED");
+  }
+}
+
+void SetFinalizedTiming(
+    const std::chrono::nanoseconds elapsed,
+    lunar::pure_planning::PlanningResult& result,
+    Action::Result& action_result,
+    diagnostic_msgs::msg::DiagnosticArray& diagnostics) {
+  SetFinalizedTiming(elapsed, result, action_result);
+  const auto latency_class =
+      lunar::pure_planning::ClassifyRequestLatency(elapsed);
+  std::ostringstream milliseconds;
+  milliseconds << std::setprecision(15)
+               << std::chrono::duration<double, std::milli>(elapsed).count();
+  SetDiagnosticValue(diagnostics, "total_elapsed_ms", milliseconds.str());
+  SetDiagnosticValue(
+      diagnostics, "latency_class",
+      std::string{lunar::pure_planning::RequestLatencyClassName(latency_class)});
 }
 
 struct AppliedTrustedBridge final {
@@ -320,17 +400,31 @@ PlannerFn RealPlannerFn() {
   };
 }
 
+LocalPlannerFn RealLocalPlannerFn() {
+  auto planner = std::make_shared<lunar::pure_planning::Planner>();
+  return [planner = std::move(planner)](
+             const lunar::pure_planning::PlanningRequest& request,
+             const lunar::pure_planning::LocalGoalSet& goals,
+             lunar::pure_planning::SearchControl control) {
+    return planner->PlanLocal(request, goals, std::move(control));
+  };
+}
+
 std::unique_ptr<rclcpp::Executor> MakePurePlannerExecutor() {
   return std::make_unique<rclcpp::executors::MultiThreadedExecutor>(
       rclcpp::ExecutorOptions{}, 2U);
 }
 
 struct PurePlanMotionServer::Impl final {
-  Impl(PurePlanMotionServer& owner, PlannerFn planner)
+  Impl(PurePlanMotionServer& owner, PlannerFn planner,
+       LocalPlannerFn local_planner)
       : node(owner), parameters(ReadRuntimeParameters(owner)),
-        planner(std::move(planner)) {
+        planner(std::move(planner)), local_planner(std::move(local_planner)) {
     if (!this->planner) {
       this->planner = RealPlannerFn();
+    }
+    if (!this->local_planner) {
+      this->local_planner = RealLocalPlannerFn();
     }
     node.declare_parameter<bool>("trusted_bridge_once", false);
     action_group =
@@ -385,6 +479,111 @@ struct PurePlanMotionServer::Impl final {
     teardown_requested.store(true, std::memory_order_release);
     cancel_transition_waiter.Notify();
     StopAndJoinWorker();
+  }
+
+  struct FeedbackState final {
+    std::optional<std::uint8_t> phase;
+    std::chrono::steady_clock::time_point last_publish{};
+    std::chrono::steady_clock::time_point cycle_started{};
+    std::uint64_t expanded_states{};
+    std::optional<double> best_cost;
+  };
+
+  void BeginFeedbackCycle(const std::shared_ptr<GoalHandle>& goal_handle,
+                          const std::stop_token stop_token,
+                          FeedbackState& state,
+                          const std::chrono::steady_clock::time_point started) {
+    state = FeedbackState{.cycle_started = started};
+    PublishFeedback(goal_handle, stop_token, state,
+                    Action::Feedback::VALIDATING_INPUT);
+  }
+
+  void PublishFeedback(
+      const std::shared_ptr<GoalHandle>& goal_handle,
+      const std::stop_token stop_token, FeedbackState& state,
+      const std::uint8_t phase, const std::uint64_t expanded_states = 0U,
+      const std::optional<double> best_cost = std::nullopt) {
+    if (!goal_handle || stop_token.stop_requested()) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const bool phase_changed = !state.phase.has_value() || *state.phase != phase;
+    if (!phase_changed && state.last_publish != std::chrono::steady_clock::time_point{} &&
+        now - state.last_publish < 100ms) {
+      return;
+    }
+    {
+      std::scoped_lock lock{state_mutex};
+      if (!SameGoal(active_goal, goal_handle)) {
+        return;
+      }
+    }
+    state.phase = phase;
+    state.last_publish = now;
+    state.expanded_states = std::max(state.expanded_states, expanded_states);
+    if (best_cost.has_value() && std::isfinite(*best_cost)) {
+      state.best_cost = best_cost;
+    }
+    auto feedback = std::make_shared<Action::Feedback>();
+    feedback->phase = phase;
+    feedback->elapsed_s = std::chrono::duration<double>(
+                              now - state.cycle_started)
+                              .count();
+    feedback->expanded_states = state.expanded_states;
+    feedback->has_best_cost = state.best_cost.has_value();
+    feedback->best_cost = state.best_cost.value_or(0.0);
+    try {
+      goal_handle->publish_feedback(feedback);
+    } catch (...) {
+      SafeLogError("PLANNER_ERROR: failed to publish planner feedback");
+    }
+  }
+
+  void PublishCoreProgress(
+      const std::shared_ptr<GoalHandle>& goal_handle,
+      const std::stop_token stop_token, FeedbackState& state,
+      const lunar::pure_planning::PlannerProgress& progress) {
+    PublishFeedback(goal_handle, stop_token, state,
+                    FeedbackPhase(progress.phase));
+  }
+
+  [[nodiscard]] static bool SamePlanningIdentity(
+      const InputSnapshot& planned, const InputSnapshot& latest) noexcept {
+    return planned.global_sequence == latest.global_sequence &&
+           planned.local_sequence == latest.local_sequence &&
+           planned.tf_sequence == latest.tf_sequence;
+  }
+
+  void PublishCycleDiagnostics(
+      const std::shared_ptr<const Action::Goal>& request_goal,
+      const lunar::pure_planning::PlanningResult& result,
+      const bool stale_input = false) {
+    auto diagnostics = MakeRequestDiagnostics(
+        request_goal ? std::string_view{request_goal->request_id}
+                     : std::string_view{},
+        parameters.platform_type,
+        request_goal ? EnvironmentMode(request_goal->environment_mode)
+                     : lunar::pure_planning::EnvironmentMode::kLunarSurface,
+        result);
+    if (stale_input) {
+      if (diagnostics.status.size() == 1U) {
+        diagnostics.status.front().level =
+            diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      }
+      SetDiagnosticValue(diagnostics, "planning_outcome",
+                         std::to_string(Action::Result::STALE_INPUT));
+      SetDiagnosticValue(diagnostics, "reason_code", "STALE_INPUT");
+    }
+    if (!ContextIsValid()) {
+      return;
+    }
+    try {
+      diagnostics.header.stamp = node.now();
+      diagnostics_publisher->publish(diagnostics);
+      LogDiagnostics(diagnostics);
+    } catch (...) {
+      SafeLogError("PLANNER_ERROR: failed to publish rolling diagnostics");
+    }
   }
 
   [[nodiscard]] rclcpp_action::GoalResponse HandleGoal(
@@ -496,19 +695,24 @@ struct PurePlanMotionServer::Impl final {
       const bool trusted_bridge_once,
       const std::stop_token stop_token,
       const std::chrono::steady_clock::time_point started) {
+    FeedbackState feedback_state;
     if (UseRollingSurface(goal_handle->get_goal())) {
       InputSnapshot final_snapshot;
+      bool result_diagnostic_published = false;
       auto result = ExecuteRollingSurfaceWheel(
-          goal_handle->get_goal(), stop_token, started, &final_snapshot);
+          goal_handle, goal_handle->get_goal(), stop_token, &feedback_state,
+          &final_snapshot, &result_diagnostic_published);
       try {
         ExecuteKnownResult(goal_handle, generation, started, final_snapshot,
-                           std::move(result));
+                           std::move(result), result_diagnostic_published);
       } catch (...) {
         SafeLogError("PLANNER_ERROR: rolling finalization failed");
       }
       return;
     }
-    const auto absolute_deadline = started + kRequestBudget;
+    BeginFeedbackCycle(goal_handle, stop_token, feedback_state, started);
+    const auto timing_policy =
+        lunar::pure_planning::MakeRequestTimingPolicy(started);
     const InputSnapshot snapshot = input_store.Capture();
     const auto request_goal = goal_handle->get_goal();
     lunar::pure_planning::PlanningResult result;
@@ -545,15 +749,25 @@ struct PurePlanMotionServer::Impl final {
               .capability = parameters.capability,
               .config = parameters.planner_config,
               .control = {
-                  .deadline = absolute_deadline,
+                  .deadline = timing_policy.hard_deadline,
                   .stop_token = stop_token,
                   .now = [] { return std::chrono::steady_clock::now(); },
+              },
+              .request_started_at = started,
+              .progress = [this, goal_handle, stop_token, &feedback_state](
+                              const lunar::pure_planning::PlannerProgress&
+                                  progress) {
+                PublishCoreProgress(goal_handle, stop_token, feedback_state,
+                                    progress);
               },
           };
           const auto bridge = trusted_bridge_once
                                   ? ApplyTrustedBridge(request, snapshot)
                                   : std::optional<AppliedTrustedBridge>{};
           result = planner(request);
+          PublishFeedback(goal_handle, stop_token, feedback_state,
+                          Action::Feedback::CERTIFYING,
+                          result.expanded_states, result.best_cost);
           if (bridge.has_value() &&
               result.status == lunar::pure_planning::PlanningStatus::kSuccess &&
               !PrependTrustedBridge(result, *bridge)) {
@@ -578,12 +792,6 @@ struct PurePlanMotionServer::Impl final {
       const auto timing = result.timing;
       result = Failure(lunar::pure_planning::PlanningStatus::kCanceled,
                        "REQUEST_CANCELED");
-      result.timing = timing;
-    } else if (result.status == lunar::pure_planning::PlanningStatus::kSuccess &&
-               std::chrono::steady_clock::now() >= absolute_deadline) {
-      const auto timing = result.timing;
-      result = Failure(lunar::pure_planning::PlanningStatus::kTimedOut,
-                       "TIMEOUT");
       result.timing = timing;
     }
 
@@ -612,90 +820,62 @@ struct PurePlanMotionServer::Impl final {
   }
 
   [[nodiscard]] lunar::pure_planning::PlanningResult ExecuteRollingSurfaceWheel(
+      const std::shared_ptr<GoalHandle>& goal_handle,
       const std::shared_ptr<const Action::Goal>& request_goal,
-      const std::stop_token stop_token,
-      const std::chrono::steady_clock::time_point started,
-      InputSnapshot* const final_snapshot) {
+      const std::stop_token stop_token, FeedbackState* const feedback_state,
+      InputSnapshot* const final_snapshot,
+      bool* const result_diagnostic_published) {
     using lunar::pure_planning::EnvironmentMode;
+    using lunar::pure_planning::LocalPlanStatus;
     using lunar::pure_planning::PlanningRequest;
     using lunar::pure_planning::PlanningResult;
     using lunar::pure_planning::PlanningStatus;
     using lunar::pure_planning::Pose3;
     using lunar::pure_planning::SearchControl;
     using lunar::pure_planning::WheeledState;
-    const auto total_deadline = started +
-        std::chrono::seconds{parameters.rolling_surface.action_timeout_s};
-    InputSnapshot snapshot = input_store.Capture();
-    if (final_snapshot != nullptr) {
-      *final_snapshot = snapshot;
+    using RollingDecision =
+        lunar::pure_planning::hierarchical::SurfaceRollingDecision;
+
+    if (result_diagnostic_published != nullptr) {
+      *result_diagnostic_published = false;
     }
-    if (!request_goal || !snapshot.map_from_odom.has_value() ||
-        !snapshot.odometry || !snapshot.local_map || !snapshot.global_map) {
-      return Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT");
-    }
-    const auto initial_transform =
-        AdaptDirectMapFromOdom(*snapshot.map_from_odom);
-    const auto initial_goal = initial_transform.value.has_value()
-        ? ConvertGoal(*request_goal, *initial_transform.value)
-        : GoalConversionResult{};
-    const auto initial_world = AdaptSnapshot(EnvironmentMode::kLunarSurface,
-                                             snapshot);
-    const auto initial_state = AdaptOdometry(
-        *snapshot.odometry, lunar::pure_planning::PlatformType::kWheeled);
-    if (!initial_transform.value.has_value() || !initial_goal.ok() ||
-        !initial_world.value.has_value() || !initial_state.value.has_value()) {
-      return Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT");
-    }
-    PlanningRequest global_request{
-        .request_id = request_goal->request_id,
-        .environment_mode = EnvironmentMode::kLunarSurface,
-        .current_state = *initial_state.value,
-        .goal_map = *initial_goal.goal,
-        .world = *initial_world.value,
-        .capability = parameters.capability,
-        .config = parameters.planner_config,
-        .control = {.deadline = std::min(
-                         total_deadline,
-                         started + std::chrono::milliseconds{
-                                       parameters.rolling_surface.global_budget_ms}),
-                    .stop_token = stop_token,
-                    .now = [] { return std::chrono::steady_clock::now(); }},
-    };
-    global_request.config.search.stop_after_first_solution = true;
-    const auto global = lunar::pure_planning::hierarchical::PlanSurfaceGlobal(
-        global_request, global_request.control);
-    if (!global.route.has_value()) {
-      return Failure(global.reason_code == "NO_PATH" ? PlanningStatus::kNoPath
-                     : global.reason_code == "TIMEOUT" ? PlanningStatus::kTimedOut
-                     : global.reason_code == "REQUEST_CANCELED" ? PlanningStatus::kCanceled
-                     : PlanningStatus::kInvalidInput,
-                     global.reason_code.empty() ? "PLANNER_ERROR" : global.reason_code);
-    }
-    lunar::pure_planning::hierarchical::SurfaceRollingSession session{
-        *global.route, global_request.goal_map,
-        {.horizon_m = parameters.rolling_surface.horizon_m,
-         .max_deviation_m = parameters.rolling_surface.max_deviation_m}};
+    std::optional<lunar::pure_planning::GlobalRoute> route;
+    std::optional<lunar::pure_planning::hierarchical::SurfaceRollingSession>
+        session;
     std::optional<lunar::pure_planning::GoalRegion> active_goal;
     std::optional<PlanningResult> last_segment;
+    std::uint64_t route_global_sequence{};
+    std::uint64_t route_tf_sequence{};
     std::uint64_t seen_local_sequence{};
-    auto last_replan = started -
-        std::chrono::milliseconds{parameters.rolling_surface.min_replan_interval_ms};
-    while (!stop_token.stop_requested() &&
-           std::chrono::steady_clock::now() < total_deadline) {
-      snapshot = input_store.Capture();
+    double minimum_route_progress_m{};
+    bool force_replan = true;
+    auto last_replan = std::chrono::steady_clock::now() -
+        std::chrono::milliseconds{
+            parameters.rolling_surface.min_replan_interval_ms};
+
+    while (!stop_token.stop_requested()) {
+      InputSnapshot snapshot = input_store.Capture();
       if (final_snapshot != nullptr) {
         *final_snapshot = snapshot;
       }
-      if (!snapshot.map_from_odom.has_value() || !snapshot.odometry ||
-          !snapshot.local_map) {
+      if (!request_goal || !snapshot.map_from_odom.has_value() ||
+          !snapshot.odometry || !snapshot.local_map || !snapshot.global_map) {
         return Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT");
       }
+      const bool route_identity_changed =
+          !route.has_value() ||
+          route_global_sequence != snapshot.global_sequence ||
+          route_tf_sequence != snapshot.tf_sequence;
+
       const auto transform = AdaptDirectMapFromOdom(*snapshot.map_from_odom);
-      const auto world = AdaptSnapshot(EnvironmentMode::kLavaTube, snapshot);
+      const auto converted_goal = transform.value.has_value()
+          ? ConvertGoal(*request_goal, *transform.value)
+          : GoalConversionResult{};
+      const auto world = AdaptSnapshot(EnvironmentMode::kLunarSurface, snapshot);
       const auto state = AdaptOdometry(
           *snapshot.odometry, lunar::pure_planning::PlatformType::kWheeled);
-      if (!transform.value.has_value() || !world.value.has_value() ||
-          !state.value.has_value()) {
+      if (!transform.value.has_value() || !converted_goal.ok() ||
+          !world.value.has_value() || !state.value.has_value()) {
         return Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT");
       }
       const auto* wheel_state = std::get_if<WheeledState>(&*state.value);
@@ -703,72 +883,421 @@ struct PurePlanMotionServer::Impl final {
           ? std::optional<Pose3>{}
           : lunar::pure_planning::hierarchical::TransformPose(
                 wheel_state->pose, *transform.value,
-                lunar::pure_planning::hierarchical::TransformDirection::kChildToParent);
-      if (!pose_map.has_value()) {
+                lunar::pure_planning::hierarchical::TransformDirection::
+                    kChildToParent);
+      if (wheel_state == nullptr || !pose_map.has_value()) {
         return Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT");
       }
-      const auto decision = session.Decide(*pose_map);
-      if (decision.kind == lunar::pure_planning::hierarchical::SurfaceRollingDecision::Kind::kInvalidRoute) {
+      const auto* final_point =
+          std::get_if<lunar::pure_planning::PointGoal>(
+              &converted_goal.goal->target);
+      if (last_segment.has_value() && final_point != nullptr &&
+          std::hypot(pose_map->position_m.x - final_point->position_m.x,
+                     pose_map->position_m.y - final_point->position_m.y) <=
+              final_point->tolerance_m) {
+        if (result_diagnostic_published != nullptr) {
+          *result_diagnostic_published = true;
+        }
+        return std::move(*last_segment);
+      }
+
+      std::optional<lunar::pure_planning::RequestTimingPolicy> cycle_timing;
+      lunar::pure_planning::PlannerCallTiming cycle_call_timing;
+      if (route_identity_changed) {
+        const auto cycle_started = std::chrono::steady_clock::now();
+        cycle_timing =
+            lunar::pure_planning::MakeRequestTimingPolicy(cycle_started);
+        if (feedback_state != nullptr) {
+          BeginFeedbackCycle(goal_handle, stop_token, *feedback_state,
+                             cycle_started);
+          PublishFeedback(goal_handle, stop_token, *feedback_state,
+                          Action::Feedback::BUILDING_SNAPSHOT);
+          PublishFeedback(goal_handle, stop_token, *feedback_state,
+                          Action::Feedback::SEARCHING);
+        }
+        PlanningRequest global_request{
+            .request_id = request_goal->request_id,
+            .environment_mode = EnvironmentMode::kLunarSurface,
+            .current_state = *state.value,
+            .goal_map = *converted_goal.goal,
+            .world = *world.value,
+            .capability = parameters.capability,
+            .config = parameters.planner_config,
+            .control = {.deadline = cycle_timing->hard_deadline,
+                        .stop_token = stop_token,
+                        .now = [] { return std::chrono::steady_clock::now(); }},
+            .request_started_at = cycle_started,
+        };
+        global_request.config.search.stop_after_first_solution = true;
+        const auto global_started = std::chrono::steady_clock::now();
+        auto global = lunar::pure_planning::hierarchical::PlanSurfaceGlobal(
+            global_request, global_request.control);
+        const auto global_finished = std::chrono::steady_clock::now();
+        cycle_call_timing.global_elapsed =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                global_finished - global_started);
+        cycle_call_timing.global_call_count = 1U;
+        if (stop_token.stop_requested() ||
+            global.reason_code == "REQUEST_CANCELED") {
+          auto canceled =
+              Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED");
+          canceled.timing = cycle_call_timing;
+          canceled.timing.total_elapsed =
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  global_finished - cycle_timing->started_at);
+          PublishCycleDiagnostics(request_goal, canceled);
+          if (result_diagnostic_published != nullptr) {
+            *result_diagnostic_published = true;
+          }
+          return canceled;
+        }
+        if (global_finished >= cycle_timing->hard_deadline) {
+          auto timeout = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
+          timeout.timing = cycle_call_timing;
+          timeout.timing.total_elapsed =
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  global_finished - cycle_timing->started_at);
+          PublishCycleDiagnostics(request_goal, timeout);
+          if (result_diagnostic_published != nullptr) {
+            *result_diagnostic_published = true;
+          }
+          return timeout;
+        }
+        if (!global.route.has_value()) {
+          PlanningResult failed = FailureForReason(
+              global.reason_code.empty() ? "PLANNER_ERROR"
+                                         : global.reason_code);
+          failed.timing = cycle_call_timing;
+          failed.timing.total_elapsed =
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  global_finished - cycle_timing->started_at);
+          PublishCycleDiagnostics(request_goal, failed);
+          if (result_diagnostic_published != nullptr) {
+            *result_diagnostic_published = true;
+          }
+          return failed;
+        }
+        route = std::move(global.route);
+        route_global_sequence = snapshot.global_sequence;
+        route_tf_sequence = snapshot.tf_sequence;
+        minimum_route_progress_m = 0.0;
+        active_goal.reset();
+        session.emplace(
+            *route, *converted_goal.goal,
+            lunar::pure_planning::hierarchical::SurfaceRollingConfig{
+                .horizon_m = parameters.rolling_surface.horizon_m,
+                .max_deviation_m =
+                    parameters.rolling_surface.max_deviation_m});
+        force_replan = true;
+      }
+
+      if (!session.has_value() || !route.has_value()) {
         return Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
       }
-      if (decision.kind == lunar::pure_planning::hierarchical::SurfaceRollingDecision::Kind::kFinalGoalReached) {
-        return last_segment.has_value()
-            ? std::move(*last_segment)
-            : Failure(PlanningStatus::kNoPath, "NO_PATH");
+      const RollingDecision decision =
+          session->Decide(*pose_map, minimum_route_progress_m);
+      if (decision.kind == RollingDecision::Kind::kInvalidRoute) {
+        return Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
       }
-      const auto* candidate = decision.goal.has_value()
-          ? std::get_if<lunar::pure_planning::PointGoal>(&decision.goal->target)
-          : nullptr;
+      if (decision.kind == RollingDecision::Kind::kFinalGoalReached) {
+        if (last_segment.has_value()) {
+          if (result_diagnostic_published != nullptr) {
+            *result_diagnostic_published = true;
+          }
+          return std::move(*last_segment);
+        }
+        return Failure(PlanningStatus::kNoPath, "NO_PATH");
+      }
+
       const auto* active = active_goal.has_value()
           ? std::get_if<lunar::pure_planning::PointGoal>(&active_goal->target)
           : nullptr;
-      const bool target_reached = active != nullptr && pose_map.has_value() &&
+      const bool target_reached =
+          active != nullptr &&
           std::hypot(pose_map->position_m.x - active->position_m.x,
                      pose_map->position_m.y - active->position_m.y) <=
               active->tolerance_m;
-      const bool local_changed = snapshot.local_sequence != seen_local_sequence &&
+      const bool local_changed =
+          snapshot.local_sequence != seen_local_sequence &&
           std::chrono::steady_clock::now() - last_replan >=
-              std::chrono::milliseconds{parameters.rolling_surface.min_replan_interval_ms};
+              std::chrono::milliseconds{
+                  parameters.rolling_surface.min_replan_interval_ms};
       const bool deviated = decision.lateral_deviation_m >
-          parameters.rolling_surface.max_deviation_m;
-      const bool target_changed = candidate != nullptr && active != nullptr &&
-          std::hypot(candidate->position_m.x - active->position_m.x,
-                     candidate->position_m.y - active->position_m.y) > 1.0e-6;
-      if (!last_segment.has_value() || target_reached || local_changed || deviated ||
-          target_changed) {
-        PlanningRequest local_request = global_request;
-        local_request.environment_mode = EnvironmentMode::kLavaTube;
-        local_request.current_state = *state.value;
-        local_request.goal_map = *decision.goal;
-        local_request.world = *world.value;
-        local_request.control = {
-            .deadline = std::min(total_deadline,
-                                 std::chrono::steady_clock::now() +
-                                     std::chrono::milliseconds{
-                                         parameters.rolling_surface.local_budget_ms}),
-            .stop_token = stop_token,
-            .now = [] { return std::chrono::steady_clock::now(); },
-        };
-        PlanningResult segment = planner(local_request);
-        if (segment.status != PlanningStatus::kSuccess ||
-            !segment.reference.has_value()) {
-          return segment;
-        }
-        const auto converted = ConvertResult(segment, request_goal->mission_revision);
-        if (ContextIsValid()) {
-          PublishWheeledReference(converted);
-        }
-        active_goal = *decision.goal;
-        last_segment = std::move(segment);
-        seen_local_sequence = snapshot.local_sequence;
-        last_replan = std::chrono::steady_clock::now();
+                            parameters.rolling_surface.max_deviation_m;
+      if (!force_replan && last_segment.has_value() && !target_reached &&
+          !local_changed && !deviated) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{
+            parameters.rolling_surface.poll_period_ms});
+        continue;
       }
-      std::this_thread::sleep_for(
-          std::chrono::milliseconds{parameters.rolling_surface.poll_period_ms});
+
+      if (!cycle_timing.has_value()) {
+        const auto cycle_started = std::chrono::steady_clock::now();
+        cycle_timing =
+            lunar::pure_planning::MakeRequestTimingPolicy(cycle_started);
+        if (feedback_state != nullptr) {
+          BeginFeedbackCycle(goal_handle, stop_token, *feedback_state,
+                             cycle_started);
+          PublishFeedback(goal_handle, stop_token, *feedback_state,
+                          Action::Feedback::BUILDING_SNAPSHOT);
+        }
+      }
+      PlanningRequest local_request{
+          .request_id = request_goal->request_id,
+          .environment_mode = EnvironmentMode::kLunarSurface,
+          .current_state = *state.value,
+          .goal_map = *converted_goal.goal,
+          .world = *world.value,
+          .capability = parameters.capability,
+          .config = parameters.planner_config,
+          .control = {.deadline = cycle_timing->hard_deadline,
+                      .stop_token = stop_token,
+                      .now = [] { return std::chrono::steady_clock::now(); }},
+          .request_started_at = cycle_timing->started_at,
+      };
+      local_request.config.search.stop_after_first_solution = true;
+
+      const auto local_goal_started = std::chrono::steady_clock::now();
+      const auto portals =
+          lunar::pure_planning::hierarchical::BuildSurfacePortalSet(
+              local_request, *route, decision, 32U, local_request.control);
+      lunar::pure_planning::hierarchical::LocalGoalSetResult local_goals;
+      if (portals.ok()) {
+        local_goals = lunar::pure_planning::hierarchical::
+            ConvertSurfacePortalsToLocalGoals(
+                portals, decision, wheel_state->pose, *world.value->global_map,
+                world.value->local_map);
+      } else {
+        local_goals.reason_code = portals.reason_code;
+      }
+      const auto local_goal_finished = std::chrono::steady_clock::now();
+      cycle_call_timing.local_goal_elapsed =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              local_goal_finished - local_goal_started);
+      if (!local_goals.ok()) {
+        PlanningResult failed = FailureForReason(local_goals.reason_code);
+        failed.timing = cycle_call_timing;
+        failed.timing.total_elapsed =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                local_goal_finished - cycle_timing->started_at);
+        if (stop_token.stop_requested()) {
+          failed = Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED");
+          failed.timing = cycle_call_timing;
+          failed.timing.total_elapsed =
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  local_goal_finished - cycle_timing->started_at);
+        } else if (local_goal_finished >= cycle_timing->hard_deadline) {
+          failed = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
+          failed.timing = cycle_call_timing;
+          failed.timing.total_elapsed =
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  local_goal_finished - cycle_timing->started_at);
+        }
+        PublishCycleDiagnostics(request_goal, failed);
+        if (result_diagnostic_published != nullptr) {
+          *result_diagnostic_published = true;
+        }
+        return failed;
+      }
+
+      if (feedback_state != nullptr) {
+        PublishFeedback(goal_handle, stop_token, *feedback_state,
+                        Action::Feedback::SEARCHING);
+      }
+      const auto local_started = std::chrono::steady_clock::now();
+      lunar::pure_planning::LocalStageResult local = local_planner(
+          local_request, *local_goals.goals, local_request.control);
+      const auto local_finished = std::chrono::steady_clock::now();
+      cycle_call_timing.local_search_elapsed =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(local_finished -
+                                                               local_started);
+      cycle_call_timing.local_elapsed = cycle_call_timing.local_search_elapsed;
+      cycle_call_timing.local_call_count = 1U;
+      if (feedback_state != nullptr) {
+        PublishFeedback(goal_handle, stop_token, *feedback_state,
+                        Action::Feedback::CERTIFYING,
+                        local.expanded_states, local.best_cost);
+      }
+
+      PlanningResult segment;
+      if (local.status != LocalPlanStatus::kSolved) {
+        segment = LocalFailure(local.status, std::move(local.reason_code));
+      } else if (!local.data.has_value() ||
+                 !local.selected_goal_index.has_value() ||
+                 *local.selected_goal_index >=
+                     local_goals.goals->goals_odom.size()) {
+        segment = Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
+      } else {
+        const auto certification_started = std::chrono::steady_clock::now();
+        auto composed =
+            lunar::pure_planning::hierarchical::ComposeSurfaceReference(
+                local_request, *route, std::move(*local.data),
+                local_request.control);
+        const auto certification_finished = std::chrono::steady_clock::now();
+        cycle_call_timing.certification_elapsed =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                certification_finished - certification_started);
+        if (!composed.ok()) {
+          segment = FailureForReason(composed.reason_code);
+        } else {
+          segment = PlanningResult{
+              .status = PlanningStatus::kSuccess,
+              .reason_code = "PLAN_FOUND",
+              .reference = std::move(composed.reference),
+              .expanded_states = local.expanded_states,
+              .selected_goal_index = local.selected_goal_index,
+              .best_cost = local.best_cost,
+          };
+        }
+      }
+      auto cycle_finalized = std::chrono::steady_clock::now();
+      segment.timing = cycle_call_timing;
+      segment.timing.total_elapsed =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              cycle_finalized - cycle_timing->started_at);
+      if (stop_token.stop_requested() ||
+          segment.status == PlanningStatus::kCanceled) {
+        auto canceled = Failure(PlanningStatus::kCanceled,
+                                "REQUEST_CANCELED");
+        canceled.timing = segment.timing;
+        PublishCycleDiagnostics(request_goal, canceled);
+        if (result_diagnostic_published != nullptr) {
+          *result_diagnostic_published = true;
+        }
+        return canceled;
+      }
+      if (cycle_finalized >= cycle_timing->hard_deadline) {
+        auto timeout = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
+        timeout.timing = segment.timing;
+        PublishCycleDiagnostics(request_goal, timeout);
+        if (result_diagnostic_published != nullptr) {
+          *result_diagnostic_published = true;
+        }
+        return timeout;
+      }
+      if (segment.status != PlanningStatus::kSuccess ||
+          !segment.reference.has_value()) {
+        PublishCycleDiagnostics(request_goal, segment);
+        if (result_diagnostic_published != nullptr) {
+          *result_diagnostic_published = true;
+        }
+        return segment;
+      }
+
+      const InputSnapshot latest = input_store.Capture();
+      if (final_snapshot != nullptr) {
+        *final_snapshot = latest;
+      }
+      if (stop_token.stop_requested()) {
+        auto canceled = Failure(PlanningStatus::kCanceled,
+                                "REQUEST_CANCELED");
+        canceled.timing = segment.timing;
+        PublishCycleDiagnostics(request_goal, canceled);
+        if (result_diagnostic_published != nullptr) {
+          *result_diagnostic_published = true;
+        }
+        return canceled;
+      }
+      cycle_finalized = std::chrono::steady_clock::now();
+      if (cycle_finalized >= cycle_timing->hard_deadline) {
+        auto timeout = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
+        timeout.timing = segment.timing;
+        timeout.timing.total_elapsed =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                cycle_finalized - cycle_timing->started_at);
+        PublishCycleDiagnostics(request_goal, timeout);
+        if (result_diagnostic_published != nullptr) {
+          *result_diagnostic_published = true;
+        }
+        return timeout;
+      }
+      if (!SamePlanningIdentity(snapshot, latest)) {
+        PublishCycleDiagnostics(request_goal, segment, true);
+        if (result_diagnostic_published != nullptr) {
+          *result_diagnostic_published = true;
+        }
+        force_replan = true;
+        continue;
+      }
+
+      auto converted = ConvertResult(segment, request_goal->mission_revision);
+      cycle_finalized = std::chrono::steady_clock::now();
+      segment.timing.total_elapsed =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              cycle_finalized - cycle_timing->started_at);
+      if (stop_token.stop_requested()) {
+        auto canceled = Failure(PlanningStatus::kCanceled,
+                                "REQUEST_CANCELED");
+        canceled.timing = segment.timing;
+        PublishCycleDiagnostics(request_goal, canceled);
+        if (result_diagnostic_published != nullptr) {
+          *result_diagnostic_published = true;
+        }
+        return canceled;
+      }
+      if (cycle_finalized >= cycle_timing->hard_deadline) {
+        auto timeout = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
+        timeout.timing = segment.timing;
+        PublishCycleDiagnostics(request_goal, timeout);
+        if (result_diagnostic_published != nullptr) {
+          *result_diagnostic_published = true;
+        }
+        return timeout;
+      }
+      const InputSnapshot publish_snapshot = input_store.Capture();
+      if (final_snapshot != nullptr) {
+        *final_snapshot = publish_snapshot;
+      }
+      if (!SamePlanningIdentity(snapshot, publish_snapshot)) {
+        PublishCycleDiagnostics(request_goal, segment, true);
+        if (result_diagnostic_published != nullptr) {
+          *result_diagnostic_published = true;
+        }
+        force_replan = true;
+        continue;
+      }
+      if (cycle_finalized >= cycle_timing->sla_milestone) {
+        segment.reason_code = "PLAN_FOUND_LATE";
+        converted.reason_code = "PLAN_FOUND_LATE";
+      }
+      SetFinalizedTiming(segment.timing.total_elapsed, segment, converted);
+      if (ContextIsValid()) {
+        PublishWheeledReference(converted);
+      }
+      PublishCycleDiagnostics(request_goal, segment);
+      if (result_diagnostic_published != nullptr) {
+        *result_diagnostic_published = true;
+      }
+
+      const std::size_t selected_index = *local.selected_goal_index;
+      active_goal = local_goals.goals->goals_odom[selected_index];
+      if (!decision.targets_final_goal) {
+        const auto* selected = std::get_if<lunar::pure_planning::PointGoal>(
+            &active_goal->target);
+        if (selected != nullptr) {
+          for (const auto& portal : portals.candidates) {
+            const auto* candidate =
+                std::get_if<lunar::pure_planning::PointGoal>(
+                    &portal.goal_odom.target);
+            if (candidate != nullptr &&
+                candidate->position_m.x == selected->position_m.x &&
+                candidate->position_m.y == selected->position_m.y) {
+              minimum_route_progress_m =
+                  std::max(minimum_route_progress_m,
+                           portal.route_progress_m);
+              break;
+            }
+          }
+        }
+      }
+      last_segment = std::move(segment);
+      seen_local_sequence = snapshot.local_sequence;
+      last_replan = std::chrono::steady_clock::now();
+      force_replan = false;
+      std::this_thread::sleep_for(std::chrono::milliseconds{
+          parameters.rolling_surface.poll_period_ms});
     }
-    return stop_token.stop_requested()
-        ? Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED")
-        : Failure(PlanningStatus::kTimedOut, "TIMEOUT");
+    return Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED");
   }
 
   struct OutputBundle final {
@@ -784,7 +1313,6 @@ struct PurePlanMotionServer::Impl final {
     const std::string_view request_id =
         request_goal ? std::string_view{request_goal->request_id}
                      : std::string_view{};
-    result.timing.total_elapsed = 0ns;
     OutputBundle output{std::move(result), {},
                         diagnostic_msgs::msg::DiagnosticArray{}};
     output.action_result = std::make_shared<Action::Result>(ConvertResult(
@@ -900,7 +1428,8 @@ struct PurePlanMotionServer::Impl final {
       const std::uint64_t generation,
       const std::chrono::steady_clock::time_point started,
       const InputSnapshot& snapshot,
-      lunar::pure_planning::PlanningResult result) {
+      lunar::pure_planning::PlanningResult result,
+      const bool normal_output_already_published = false) {
     const auto request_goal = goal_handle->get_goal();
     auto normal = MakeOutputs(std::move(result), request_goal, snapshot);
     auto canceled_result = Failure(
@@ -913,10 +1442,9 @@ struct PurePlanMotionServer::Impl final {
     timeout_result.timing = normal.result.timing;
     auto timeout = MakeOutputs(std::move(timeout_result), request_goal,
                                snapshot);
-    const auto request_deadline = started +
-        (UseRollingSurface(request_goal)
-             ? std::chrono::seconds{parameters.rolling_surface.action_timeout_s}
-             : kRequestBudget);
+    const bool rolling_surface = UseRollingSurface(request_goal);
+    const auto timing_policy =
+        lunar::pure_planning::MakeRequestTimingPolicy(started);
 
     if (ContextIsValid()) {
       try {
@@ -947,37 +1475,53 @@ struct PurePlanMotionServer::Impl final {
         committed = &canceled;
       }
       const auto finalized = std::chrono::steady_clock::now();
-      if (committed == &normal &&
-          normal.result.status ==
-              lunar::pure_planning::PlanningStatus::kSuccess &&
-          finalized >= request_deadline) {
-        committed = &timeout;
+      if (committed == &normal && !rolling_surface) {
+        if (finalized >= timing_policy.hard_deadline) {
+          committed = &timeout;
+        } else if (
+            finalized >= timing_policy.sla_milestone &&
+            normal.result.status ==
+                lunar::pure_planning::PlanningStatus::kSuccess &&
+            normal.result.reference.has_value()) {
+          normal.result.reason_code = "PLAN_FOUND_LATE";
+          normal.action_result->reason_code = "PLAN_FOUND_LATE";
+          SetDiagnosticValue(normal.diagnostics, "reason_code",
+                             "PLAN_FOUND_LATE");
+        }
       }
-      const auto elapsed =
-          std::chrono::duration_cast<std::chrono::nanoseconds>(
-              finalized - started);
-      committed->result.timing.total_elapsed = elapsed;
-      committed->action_result->diagnostics.elapsed_s =
-          std::chrono::duration<double>(elapsed).count();
-      SetTotalElapsed(committed->diagnostics, elapsed);
+      const auto elapsed = rolling_surface
+                               ? committed->result.timing.total_elapsed
+                               : std::chrono::duration_cast<
+                                     std::chrono::nanoseconds>(finalized -
+                                                               started);
+      SetFinalizedTiming(elapsed, committed->result,
+                         *committed->action_result, committed->diagnostics);
     }
+    const bool suppress_duplicate_reference =
+        normal_output_already_published && committed == &normal &&
+        committed->result.status ==
+            lunar::pure_planning::PlanningStatus::kSuccess;
     if (ContextIsValid()) {
-      try {
-        PublishWheeledReference(*committed->action_result);
-      } catch (...) {
-        SafeLogError("PLANNER_ERROR: failed to publish wheeled reference");
+      if (!suppress_duplicate_reference) {
+        try {
+          PublishWheeledReference(*committed->action_result);
+        } catch (...) {
+          SafeLogError("PLANNER_ERROR: failed to publish wheeled reference");
+        }
       }
-      try {
-        diagnostics_publisher->publish(committed->diagnostics);
-      } catch (...) {
-        SafeLogError("PLANNER_ERROR: failed to publish request diagnostics");
+      if (!normal_output_already_published) {
+        try {
+          diagnostics_publisher->publish(committed->diagnostics);
+        } catch (...) {
+          SafeLogError("PLANNER_ERROR: failed to publish request diagnostics");
+        }
+        try {
+          LogDiagnostics(committed->diagnostics);
+        } catch (...) {
+          SafeLogError("PLANNER_ERROR: failed to log request diagnostics");
+        }
       }
-      try {
-        LogDiagnostics(committed->diagnostics);
-      } catch (...) {
-        SafeLogError("PLANNER_ERROR: failed to log request diagnostics");
-      }
-    } else {
+    } else if (!ContextIsValid()) {
       SafeLogError(
           "PLANNER_ERROR: ROS context invalid; diagnostics not published");
     }
@@ -1139,6 +1683,7 @@ struct PurePlanMotionServer::Impl final {
   PurePlanMotionServer& node;
   RuntimeParameters parameters;
   PlannerFn planner;
+  LocalPlannerFn local_planner;
   InputStore input_store;
   rclcpp::CallbackGroup::SharedPtr action_group;
   rclcpp::CallbackGroup::SharedPtr input_group;
@@ -1163,9 +1708,11 @@ struct PurePlanMotionServer::Impl final {
 };
 
 PurePlanMotionServer::PurePlanMotionServer(const rclcpp::NodeOptions& options,
-                                           PlannerFn planner)
+                                           PlannerFn planner,
+                                           LocalPlannerFn local_planner)
     : rclcpp::Node("pure_planner", options),
-      impl_(std::make_unique<Impl>(*this, std::move(planner))) {}
+      impl_(std::make_unique<Impl>(*this, std::move(planner),
+                                   std::move(local_planner))) {}
 
 PurePlanMotionServer::~PurePlanMotionServer() = default;
 

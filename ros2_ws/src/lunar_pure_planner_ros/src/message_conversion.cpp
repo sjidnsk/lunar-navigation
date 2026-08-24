@@ -253,6 +253,20 @@ void SetFailure(const lunar::pure_planning::PlanningStatus status,
   }
 }
 
+void SetLatencyWarnings(
+    const lunar::pure_planning::RequestLatencyClass latency_class,
+    lunar_planning_msgs::msg::PlannerDiagnostics& diagnostics) {
+  if (latency_class !=
+      lunar::pure_planning::RequestLatencyClass::kTargetMet) {
+    diagnostics.warning_codes.emplace_back("TARGET_MISSED");
+  }
+  if (latency_class == lunar::pure_planning::RequestLatencyClass::kSlaMissed ||
+      latency_class ==
+          lunar::pure_planning::RequestLatencyClass::kHardTimeout) {
+    diagnostics.warning_codes.emplace_back("PLANNING_SLA_MISSED");
+  }
+}
+
 }  // namespace
 
 GoalConversionResult ConvertGoal(const Action::Goal& request,
@@ -305,6 +319,12 @@ Action::Result ConvertResult(const lunar::pure_planning::PlanningResult& source,
   result.diagnostics.elapsed_s =
       std::chrono::duration<double>(source.timing.total_elapsed).count();
   result.diagnostics.expanded_states = source.expanded_states;
+  result.diagnostics.has_best_cost = source.best_cost.has_value();
+  result.diagnostics.best_cost = source.best_cost.value_or(0.0);
+  SetLatencyWarnings(
+      lunar::pure_planning::ClassifyRequestLatency(
+          source.timing.total_elapsed),
+      result.diagnostics);
   if (source.status == lunar::pure_planning::PlanningStatus::kSuccess &&
       source.reference.has_value()) {
     result.planning_outcome = Action::Result::NEW_REFERENCE_AVAILABLE;

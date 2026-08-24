@@ -206,6 +206,10 @@ TEST(MapAdapters, RejectsWrongMapFramesAndNonAxisAlignedMapOrientation) {
 
 TEST(MapAdapters, SurfaceRequiresGlobalButLavaTubeDoesNotReadIt) {
   InputSnapshot snapshot;
+  snapshot.global_sequence = 11U;
+  snapshot.local_sequence = 12U;
+  snapshot.odometry_sequence = 13U;
+  snapshot.tf_sequence = 14U;
   snapshot.local_map = std::make_shared<grid_map_msgs::msg::GridMap>(FourLayerMap());
   auto odometry = std::make_shared<nav_msgs::msg::Odometry>();
   odometry->header.frame_id = "odom";
@@ -220,9 +224,13 @@ TEST(MapAdapters, SurfaceRequiresGlobalButLavaTubeDoesNotReadIt) {
   EXPECT_FALSE(AdaptSnapshot(lunar::pure_planning::EnvironmentMode::kLunarSurface,
                              snapshot)
                    .value.has_value());
-  EXPECT_TRUE(AdaptSnapshot(lunar::pure_planning::EnvironmentMode::kLavaTube,
-                            snapshot)
-                  .value.has_value());
+  const auto lava = AdaptSnapshot(
+      lunar::pure_planning::EnvironmentMode::kLavaTube, snapshot);
+  ASSERT_TRUE(lava.value.has_value());
+  EXPECT_EQ(lava.value->global_map_sequence, 11U);
+  EXPECT_EQ(lava.value->local_map_sequence, 12U);
+  EXPECT_EQ(lava.value->odometry_sequence, 13U);
+  EXPECT_EQ(lava.value->tf_sequence, 14U);
 
   odometry->pose.pose.orientation.w = 0.0;
   EXPECT_FALSE(AdaptSnapshot(lunar::pure_planning::EnvironmentMode::kLavaTube,

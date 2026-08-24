@@ -168,7 +168,7 @@ PlanningResult PlanWheelReferenceWithNonUnitMapFromOdom() {
   lunar::pure_planning::Planner planner(lunar::pure_planning::PlannerBackends{
       .global = {},
       .local = [](const lunar::pure_planning::PlanningRequest&,
-                  const lunar::pure_planning::GoalRegion&,
+                  const lunar::pure_planning::LocalGoalSet&,
                   lunar::pure_planning::SearchControl) {
         return lunar::pure_planning::LocalStageResult{
             .status = lunar::pure_planning::LocalPlanStatus::kSolved,
@@ -259,6 +259,46 @@ TEST(MessageConversion, MapsTypedStatusExhaustivelyAndNeverPromotesFailureRefere
     EXPECT_NE(result.planning_outcome, Action::Result::STALE_INPUT);
     EXPECT_DOUBLE_EQ(result.diagnostics.elapsed_s, 2.75);
   }
+}
+
+TEST(MessageConversion, AddsWarningsAtExactTargetAndSlaMilestones) {
+  struct Case final {
+    std::chrono::milliseconds elapsed;
+    std::vector<std::string> warnings;
+  };
+  for (const Case& test_case : {
+           Case{999ms, {}},
+           Case{1000ms, {"TARGET_MISSED"}},
+           Case{1999ms, {"TARGET_MISSED"}},
+           Case{2000ms, {"TARGET_MISSED", "PLANNING_SLA_MISSED"}},
+           Case{2999ms, {"TARGET_MISSED", "PLANNING_SLA_MISSED"}},
+           Case{3000ms, {"TARGET_MISSED", "PLANNING_SLA_MISSED"}},
+         }) {
+    auto source = Result(PlanningStatus::kSuccess, WheelReference());
+    source.timing.total_elapsed = test_case.elapsed;
+
+    const auto converted = ConvertResult(source, 1U);
+
+    EXPECT_EQ(converted.diagnostics.warning_codes, test_case.warnings)
+        << test_case.elapsed.count();
+  }
+}
+
+TEST(MessageConversion, MapsAvailableSearchMetricsWithoutInventingACost) {
+  auto with_cost = Result(PlanningStatus::kSuccess, WheelReference());
+  with_cost.expanded_states = 37U;
+  with_cost.best_cost = 12.5;
+  const auto converted_with_cost = ConvertResult(with_cost, 1U);
+  EXPECT_EQ(converted_with_cost.diagnostics.expanded_states, 37U);
+  EXPECT_TRUE(converted_with_cost.diagnostics.has_best_cost);
+  EXPECT_DOUBLE_EQ(converted_with_cost.diagnostics.best_cost, 12.5);
+
+  auto without_cost = Result(PlanningStatus::kNoPath, std::nullopt);
+  without_cost.expanded_states = 9U;
+  const auto converted_without_cost = ConvertResult(without_cost, 1U);
+  EXPECT_EQ(converted_without_cost.diagnostics.expanded_states, 9U);
+  EXPECT_FALSE(converted_without_cost.diagnostics.has_best_cost);
+  EXPECT_DOUBLE_EQ(converted_without_cost.diagnostics.best_cost, 0.0);
 }
 
 TEST(MessageConversion, ConvertsWheelAndLeggedReferencesLosslesslyInMapFrame) {

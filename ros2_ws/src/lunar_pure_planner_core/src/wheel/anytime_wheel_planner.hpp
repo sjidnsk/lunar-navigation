@@ -3,11 +3,14 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <optional>
 #include <vector>
 
 #include "lunar_pure_planner_core/types/planning_request.hpp"
 #include "shared/local_terrain_projection.hpp"
+#include "shared/goal_distance_field.hpp"
 
 namespace lunar::pure_planning {
 
@@ -21,12 +24,15 @@ namespace wheel {
 
 struct WheelPlanRequest final {
   WheeledState start;
-  GoalRegion goal_odom;
+  LocalGoalSet goals_odom;
   const shared::LocalTerrainProjection* terrain{};
   const WheeledCapability* capability{};
+  std::uint64_t local_source_sequence{};
+  std::uint64_t local_terrain_semantics_id{};
+  std::uint64_t capability_fingerprint{};
+  std::shared_ptr<const shared::GoalDistanceField> goal_distance_field;
   SearchControl control;
   AnytimeSearchConfig search;
-  std::size_t maximum_search_states{131072U};
 };
 
 struct WheelPlanResult final {
@@ -39,11 +45,25 @@ struct WheelPlanResult final {
   std::size_t quantized_state_reuses{};
   std::size_t quantized_endpoint_aliases{};
   std::size_t quantized_state_count{};
+  std::size_t maximum_active_labels_per_key{};
   std::size_t sweep_cell_checks{};
   std::size_t mode_switch_edge_count{};
   std::size_t reverse_edge_count{};
   double finest_xy_key_resolution_m{};
   std::size_t maximum_yaw_bins{};
+  double start_heuristic_lower_bound{};
+  bool has_certified_preferred_candidate{};
+  std::size_t preferred_candidate_full_primitive_edge_count{};
+  std::size_t preferred_candidate_terminal_connector_edge_count{};
+  std::size_t preferred_candidate_certified_edge_count{};
+  double preferred_candidate_cost{};
+  std::size_t preferred_builder_invocations{};
+  std::size_t ara_search_invocations{};
+  std::size_t broad_phase_rejects{};
+  std::size_t full_certifications{};
+  std::size_t full_invalidations{};
+  std::size_t returned_edge_certificate_confirmations{};
+  std::optional<std::size_t> selected_goal_index;
   std::array<double, 5U> cost_components{};
   std::array<double, 5U> cost_scales{};
   double cost{};

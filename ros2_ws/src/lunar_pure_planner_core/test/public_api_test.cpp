@@ -24,7 +24,7 @@ TEST(PublicApi, ExposesOnlyTheMinimalDualModePlannerEntrypoint) {
   static_assert(std::is_same_v<
                 decltype(std::declval<PlannerBackends&>().local),
                 std::function<LocalStageResult(const PlanningRequest&,
-                                               const GoalRegion&,
+                                               const LocalGoalSet&,
                                                SearchControl)>>);
 }
 
@@ -35,7 +35,7 @@ TEST(PublicApi, RejectsPlanarRegionWithoutEnteringInjectedBackends) {
         ++calls;
         return GlobalStageResult{};
       },
-      .local = [&calls](const PlanningRequest&, const GoalRegion&,
+      .local = [&calls](const PlanningRequest&, const LocalGoalSet&,
                         SearchControl) {
         ++calls;
         return LocalStageResult{};

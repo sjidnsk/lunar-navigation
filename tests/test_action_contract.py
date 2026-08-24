@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 ACTION_PATH = REPOSITORY_ROOT / "ros2_ws/src/lunar_planning_msgs/action/PlanMotion.action"
 BASELINE_ACTION_SHA256 = (
     "5bbc8bfe85d422a798ff17e44b605b0da043795a4eecaf8a6db8c22853641f2e"

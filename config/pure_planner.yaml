@@ -15,7 +15,4 @@
     rolling_horizon_m: 8.0
     rolling_poll_period_ms: 100
     rolling_min_replan_interval_ms: 500
-    rolling_global_budget_ms: 1000
-    rolling_local_budget_ms: 1000
-    rolling_action_timeout_s: 300
     rolling_max_deviation_m: 2.0

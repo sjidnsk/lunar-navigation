@@ -40,18 +40,16 @@ namespace {
                .orientation = {}};
 }
 
-TEST(SurfaceRollingSession, SelectsHorizonAlongTheCurrentSegment) {
+TEST(SurfaceRollingSession, ReportsProjectedAndDesiredProgressOnCurrentSegment) {
   const SurfaceRollingSession session(
       Route(), FinalGoal(), {.horizon_m = 8.0, .max_deviation_m = 2.0});
 
   const auto decision = session.Decide(Pose(3.0, 0.0));
 
-  ASSERT_EQ(decision.kind, SurfaceRollingDecision::Kind::kNextGoal);
-  ASSERT_TRUE(decision.goal.has_value());
-  const auto* goal = std::get_if<PointGoal>(&decision.goal->target);
-  ASSERT_NE(goal, nullptr);
-  EXPECT_DOUBLE_EQ(goal->position_m.x, 11.0);
-  EXPECT_DOUBLE_EQ(goal->position_m.y, 0.0);
+  ASSERT_EQ(decision.kind, SurfaceRollingDecision::Kind::kNextPortalSet);
+  EXPECT_DOUBLE_EQ(decision.projected_route_progress_m, 3.0);
+  EXPECT_DOUBLE_EQ(decision.desired_horizon_progress_m, 11.0);
+  EXPECT_FALSE(decision.targets_final_goal);
   EXPECT_DOUBLE_EQ(decision.lateral_deviation_m, 0.0);
 }
 
@@ -61,12 +59,10 @@ TEST(SurfaceRollingSession, CarriesHorizonAcrossPolylineCorner) {
 
   const auto decision = session.Decide(Pose(19.0, 1.0));
 
-  ASSERT_EQ(decision.kind, SurfaceRollingDecision::Kind::kNextGoal);
-  ASSERT_TRUE(decision.goal.has_value());
-  const auto* goal = std::get_if<PointGoal>(&decision.goal->target);
-  ASSERT_NE(goal, nullptr);
-  EXPECT_DOUBLE_EQ(goal->position_m.x, 20.0);
-  EXPECT_DOUBLE_EQ(goal->position_m.y, 9.0);
+  ASSERT_EQ(decision.kind, SurfaceRollingDecision::Kind::kNextPortalSet);
+  EXPECT_DOUBLE_EQ(decision.projected_route_progress_m, 21.0);
+  EXPECT_DOUBLE_EQ(decision.desired_horizon_progress_m, 29.0);
+  EXPECT_FALSE(decision.targets_final_goal);
 }
 
 TEST(SurfaceRollingSession, RecognizesTheFinalGoal) {
@@ -76,7 +72,7 @@ TEST(SurfaceRollingSession, RecognizesTheFinalGoal) {
   const auto decision = session.Decide(Pose(20.0, 20.0));
 
   EXPECT_EQ(decision.kind, SurfaceRollingDecision::Kind::kFinalGoalReached);
-  EXPECT_FALSE(decision.goal.has_value());
+  EXPECT_FALSE(decision.targets_final_goal);
 }
 
 TEST(SurfaceRollingSession, ReportsLateralDeviationFromThePolyline) {
@@ -85,7 +81,7 @@ TEST(SurfaceRollingSession, ReportsLateralDeviationFromThePolyline) {
 
   const auto decision = session.Decide(Pose(3.0, 3.0));
 
-  EXPECT_EQ(decision.kind, SurfaceRollingDecision::Kind::kNextGoal);
+  EXPECT_EQ(decision.kind, SurfaceRollingDecision::Kind::kNextPortalSet);
   EXPECT_DOUBLE_EQ(decision.lateral_deviation_m, 3.0);
 }
 
@@ -95,12 +91,33 @@ TEST(SurfaceRollingSession, UsesTheFinalGoalWhenTheRouteIsShorterThanHorizon) {
 
   const auto decision = session.Decide(Pose(3.0, 0.0));
 
-  ASSERT_EQ(decision.kind, SurfaceRollingDecision::Kind::kNextGoal);
-  ASSERT_TRUE(decision.goal.has_value());
-  const auto* goal = std::get_if<PointGoal>(&decision.goal->target);
-  ASSERT_NE(goal, nullptr);
-  EXPECT_DOUBLE_EQ(goal->position_m.x, 20.0);
-  EXPECT_DOUBLE_EQ(goal->position_m.y, 20.0);
+  ASSERT_EQ(decision.kind, SurfaceRollingDecision::Kind::kNextPortalSet);
+  EXPECT_DOUBLE_EQ(decision.projected_route_progress_m, 3.0);
+  EXPECT_DOUBLE_EQ(decision.desired_horizon_progress_m, 40.0);
+  EXPECT_TRUE(decision.targets_final_goal);
+}
+
+TEST(SurfaceRollingSession, DoesNotRegressAcrossAdjacentFoldedRouteLegs) {
+  GlobalRoute folded_route{
+      .poses_map = {
+          Pose(0.0, 0.0), Pose(10.0, 0.0), Pose(10.0, 1.0),
+          Pose(0.0, 1.0), Pose(0.0, 2.0), Pose(10.0, 2.0),
+      },
+  };
+  GoalRegion folded_final = FinalGoal();
+  std::get<PointGoal>(folded_final.target).position_m =
+      folded_route.poses_map.back().position_m;
+  const SurfaceRollingSession session(
+      std::move(folded_route), std::move(folded_final),
+      {.horizon_m = 8.0, .max_deviation_m = 2.0});
+
+  // This pose is closest to the first leg (raw progress 5 m), but the caller
+  // has already certified progress beyond the adjacent return leg.
+  const auto decision = session.Decide(Pose(5.0, 0.1), 22.0);
+
+  ASSERT_EQ(decision.kind, SurfaceRollingDecision::Kind::kNextPortalSet);
+  EXPECT_DOUBLE_EQ(decision.projected_route_progress_m, 22.0);
+  EXPECT_DOUBLE_EQ(decision.desired_horizon_progress_m, 30.0);
 }
 
 TEST(SurfaceRollingSession, RejectsInvalidRouteConfigurationAndInputs) {
@@ -128,6 +145,13 @@ TEST(SurfaceRollingSession, RejectsInvalidRouteConfigurationAndInputs) {
                                    .Decide(Pose(std::numeric_limits<double>::quiet_NaN(),
                                                  0.0));
   EXPECT_EQ(non_finite_pose.kind,
+            SurfaceRollingDecision::Kind::kInvalidRoute);
+
+  const SurfaceRollingSession valid_session(
+      Route(), FinalGoal(), {.horizon_m = 8.0, .max_deviation_m = 2.0});
+  EXPECT_EQ(valid_session.Decide(Pose(0.0, 0.0), -1.0).kind,
+            SurfaceRollingDecision::Kind::kInvalidRoute);
+  EXPECT_EQ(valid_session.Decide(Pose(0.0, 0.0), 41.0).kind,
             SurfaceRollingDecision::Kind::kInvalidRoute);
 }
 

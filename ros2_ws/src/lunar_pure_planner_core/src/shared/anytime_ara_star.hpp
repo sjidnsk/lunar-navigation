@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -11,10 +12,13 @@
 
 namespace lunar::pure_planning::shared::anytime {
 
-using ExpandFn = std::function<void(std::size_t, std::vector<GraphEdge>&)>;
+using ExpandFn =
+    std::function<void(std::size_t, double, std::vector<GraphEdge>&)>;
 using HeuristicFn = std::function<double(std::size_t)>;
 using GuidanceFn = std::function<double(std::size_t)>;
 using GoalFn = std::function<bool(std::size_t)>;
+using StateExpandableFn = std::function<bool(std::size_t)>;
+using RelaxedFn = std::function<void(std::size_t, double)>;
 
 struct AraStarProblem final {
   std::size_t state_count{};
@@ -23,6 +27,9 @@ struct AraStarProblem final {
   HeuristicFn heuristic;
   GuidanceFn guidance;
   GoalFn is_goal;
+  StateExpandableFn state_expandable;
+  RelaxedFn on_relaxed;
+  std::optional<SearchCandidate> certified_initial_candidate;
   bool edges_are_stably_sorted{};
   AnytimeSearchConfig config;
   SearchControl control;
@@ -42,6 +49,9 @@ struct AraStarResult final {
   std::vector<SearchCandidate> candidates;
   std::vector<double> epsilon_history;
   std::size_t expanded_states{};
+  std::size_t generated_states{};
+  std::size_t reopened_states{};
+  std::size_t open_peak{};
   bool deadline_reached{};
   std::string reason_code;
 };

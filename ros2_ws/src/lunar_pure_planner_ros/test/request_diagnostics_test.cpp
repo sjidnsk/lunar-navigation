@@ -11,17 +11,24 @@ namespace {
 
 using namespace std::chrono_literals;
 
-TEST(RequestDiagnostics, EmitsOneExactTenKeyStatusAndTiming) {
+TEST(RequestDiagnostics, EmitsStatusLatencyClassAndEveryPhaseTiming) {
   const lunar::pure_planning::PlanningResult result{
       .status = lunar::pure_planning::PlanningStatus::kNoPath,
       .reason_code = "ignored",
       .timing = {
+      .snapshot_projection_elapsed = 250us,
       .global_elapsed = 1250us,
       .global_call_count = 2U,
+      .local_goal_elapsed = 750us,
+      .local_search_elapsed = 3500us,
       .local_elapsed = 3500us,
       .local_call_count = 3U,
+      .certification_elapsed = 400us,
+      .output_elapsed = 100us,
       .total_elapsed = 6ms,
-  }};
+  },
+      .expanded_states = 47U,
+      .best_cost = 12.25};
   const auto diagnostics = MakeRequestDiagnostics(
       "request-17", lunar::pure_planning::PlatformType::kLegged,
       lunar::pure_planning::EnvironmentMode::kLavaTube, result);
@@ -36,11 +43,28 @@ TEST(RequestDiagnostics, EmitsOneExactTenKeyStatusAndTiming) {
   }
   EXPECT_EQ(keys, (std::set<std::string>{
       "request_id", "platform_type", "environment_mode", "planning_outcome",
-      "reason_code", "global_elapsed_ms", "global_call_count", "local_elapsed_ms",
-      "local_call_count", "total_elapsed_ms"}));
-  EXPECT_EQ(status.values.size(), 10U);
+      "reason_code", "expanded_states", "has_best_cost", "best_cost",
+      "latency_class", "snapshot_projection_elapsed_ms",
+      "global_elapsed_ms", "global_call_count", "local_goal_elapsed_ms",
+      "local_search_elapsed_ms", "local_elapsed_ms", "local_call_count",
+      "certification_elapsed_ms", "output_elapsed_ms", "total_elapsed_ms"}));
+  EXPECT_EQ(status.values.size(), 19U);
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "expanded_states"), "47");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "has_best_cost"), "true");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "best_cost"), "12.25");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "latency_class"), "TARGET_MET");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics,
+                                "snapshot_projection_elapsed_ms"),
+            "0.25");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "global_elapsed_ms"), "1.25");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "local_goal_elapsed_ms"),
+            "0.75");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "local_search_elapsed_ms"),
+            "3.5");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "local_elapsed_ms"), "3.5");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "certification_elapsed_ms"),
+            "0.4");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "output_elapsed_ms"), "0.1");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "total_elapsed_ms"), "6");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "global_call_count"), "2");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "local_call_count"), "3");
@@ -73,7 +97,30 @@ TEST(RequestDiagnostics, AssignsLevelForEveryTypedStatus) {
         lunar::pure_planning::EnvironmentMode::kLunarSurface, result);
     ASSERT_EQ(diagnostics.status.size(), 1U);
     EXPECT_EQ(diagnostics.status.front().level, expected.level);
-    EXPECT_EQ(diagnostics.status.front().values.size(), 10U);
+    EXPECT_EQ(diagnostics.status.front().values.size(), 19U);
+  }
+}
+
+TEST(RequestDiagnostics, UsesLaterLatencyClassAtEveryExactMilestone) {
+  struct Case final {
+    std::chrono::milliseconds elapsed;
+    const char* latency_class;
+  };
+  for (const Case& test_case : {
+           Case{999ms, "TARGET_MET"}, Case{1000ms, "TARGET_MISSED"},
+           Case{1999ms, "TARGET_MISSED"}, Case{2000ms, "SLA_MISSED"},
+           Case{2999ms, "SLA_MISSED"}, Case{3000ms, "HARD_TIMEOUT"},
+       }) {
+    const lunar::pure_planning::PlanningResult result{
+        .status = lunar::pure_planning::PlanningStatus::kSuccess,
+        .timing = {.total_elapsed = test_case.elapsed},
+    };
+    const auto diagnostics = MakeRequestDiagnostics(
+        "request", lunar::pure_planning::PlatformType::kWheeled,
+        lunar::pure_planning::EnvironmentMode::kLunarSurface, result);
+    EXPECT_EQ(FindDiagnosticValue(diagnostics, "latency_class"),
+              test_case.latency_class)
+        << test_case.elapsed.count();
   }
 }
 

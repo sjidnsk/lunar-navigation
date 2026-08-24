@@ -22,6 +22,7 @@
 #include "shared/local_terrain_projection.hpp"
 #include "shared/map_snapshot.hpp"
 #include "wheel/wheel_types.hpp"
+#include "wheel_long_range_fixture.hpp"
 
 namespace lunar::pure_planning::wheel {
 namespace {
@@ -203,14 +204,17 @@ struct TerrainFixture final {
     const Pose3& start = Pose(1.0, 1.0)) {
   return WheelPlanRequest{
       .start = WheeledState{.pose = start},
-      .goal_odom = GoalRegion{
-          .goal_id = "point",
-          .target = PointGoal{
-              .position_m = Vec3{.x = x, .y = y, .z = 0.0},
-              .tolerance_m = 1.0e-6,
-          },
-          .yaw_rad = yaw,
-          .yaw_tolerance_rad = 1.0e-6,
+      .goals_odom = LocalGoalSet{
+          .goals_odom = {GoalRegion{
+              .goal_id = "point",
+              .target = PointGoal{
+                  .position_m = Vec3{.x = x, .y = y, .z = 0.0},
+                  .tolerance_m = 1.0e-6,
+              },
+              .yaw_rad = yaw,
+              .yaw_tolerance_rad = 1.0e-6,
+          }},
+          .exact_final_goal = true,
       },
       .terrain = &fixture.terrain,
       .capability = &capability,
@@ -224,6 +228,568 @@ struct TerrainFixture final {
   const auto yaw = YawFromQuaternion(point.pose.orientation);
   EXPECT_TRUE(yaw.has_value());
   return yaw.value_or(std::numeric_limits<double>::quiet_NaN());
+}
+
+[[nodiscard]] Pose3 ComposePlanar(const Pose3& source,
+                                  const Pose3& relative) {
+  const double yaw = YawFromQuaternion(source.orientation).value();
+  const double relative_yaw =
+      YawFromQuaternion(relative.orientation).value();
+  return Pose(
+      source.position_m.x + std::cos(yaw) * relative.position_m.x -
+          std::sin(yaw) * relative.position_m.y,
+      source.position_m.y + std::sin(yaw) * relative.position_m.x +
+          std::cos(yaw) * relative.position_m.y,
+      NormalizeYaw(yaw + relative_yaw));
+}
+
+[[nodiscard]] bool MatchesAnyFullPrimitive(
+    const Pose3& source, const Pose3& target,
+    const WheeledCapability& capability) {
+  const double target_yaw = YawFromQuaternion(target.orientation).value();
+  return std::ranges::any_of(
+      capability.motion_primitives,
+      [&](const WheelMotionPrimitive& primitive) {
+        const Pose3 expected =
+            ComposePlanar(source, primitive.relative_end_pose);
+        const double expected_yaw =
+            YawFromQuaternion(expected.orientation).value();
+        return std::hypot(expected.position_m.x - target.position_m.x,
+                          expected.position_m.y - target.position_m.y) <=
+                   1.0e-8 &&
+               std::abs(ShortestYawDelta(expected_yaw, target_yaw)) <=
+                   1.0e-8;
+      });
+}
+
+TEST(WheelPlanner, UsesOneSearchForRankedPortalFallback) {
+  constexpr std::size_t kWidth = 40U;
+  constexpr std::size_t kHeight = 20U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  occupancy[7U * kWidth + 7U] = 1.0F;
+  const TerrainFixture fixture =
+      MakeTerrain(kWidth, kHeight, std::move(occupancy));
+  WheeledCapability capability = Capability();
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2)};
+  const auto portal = [](const char* id, const double x, const double y) {
+    return GoalRegion{
+        .goal_id = id,
+        .target = PointGoal{
+            .position_m = Vec3{.x = x, .y = y, .z = 0.0},
+            .tolerance_m = 1.0e-6,
+        },
+    };
+  };
+  const WheelPlanRequest request{
+      .start = WheeledState{.pose = Pose(1.0, 1.0)},
+      .goals_odom = LocalGoalSet{
+          .goals_odom = {portal("rank-0-blocked", 1.4, 1.4),
+                         portal("rank-1-reachable", 1.4, 1.0)},
+          .exact_final_goal = false,
+      },
+      .terrain = &fixture.terrain,
+      .capability = &capability,
+      .control = SearchControl{.deadline = SteadyClock::now() + 2s},
+      .search = AnytimeSearchConfig{.stop_after_first_solution = true},
+  };
+
+  const WheelPlanResult result = PlanWheel(request);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_EQ(result.preferred_builder_invocations, 1U);
+  EXPECT_EQ(result.ara_search_invocations, 1U);
+  EXPECT_GT(result.metrics.expanded_states, 0U);
+  ASSERT_TRUE(result.selected_goal_index.has_value());
+  EXPECT_EQ(*result.selected_goal_index, 1U);
+  EXPECT_NEAR(result.trajectory.back().pose.position_m.x, 1.4, 1.0e-9);
+  EXPECT_NEAR(result.trajectory.back().pose.position_m.y, 1.0, 1.0e-9);
+}
+
+TEST(WheelPlanner, BoundsTerminalGoalSignaturesAtThirtyTwoPortals) {
+  const TerrainFixture fixture = FlatTerrain();
+  WheeledCapability capability = Capability();
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2)};
+  const auto portal = [](const std::size_t index) {
+    return GoalRegion{
+        .goal_id = "portal-" + std::to_string(index),
+        .target = PointGoal{
+            .position_m = Vec3{.x = 1.2, .y = 1.0, .z = 0.0},
+            .tolerance_m = 1.0e-6,
+        },
+    };
+  };
+  WheelPlanRequest request{
+      .start = WheeledState{.pose = Pose(1.0, 1.0)},
+      .goals_odom = LocalGoalSet{.exact_final_goal = false},
+      .terrain = &fixture.terrain,
+      .capability = &capability,
+      .control = SearchControl{.deadline = SteadyClock::now() + 2s},
+  };
+  for (std::size_t index = 0U; index < 32U; ++index) {
+    request.goals_odom.goals_odom.push_back(portal(index));
+  }
+
+  const WheelPlanResult at_limit = PlanWheel(request);
+  ASSERT_TRUE(at_limit.ok()) << at_limit.reason_code;
+  ASSERT_TRUE(at_limit.selected_goal_index.has_value());
+  EXPECT_EQ(*at_limit.selected_goal_index, 0U);
+
+  request.goals_odom.goals_odom.push_back(portal(32U));
+  const WheelPlanResult above_limit = PlanWheel(request);
+  EXPECT_EQ(above_limit.status, LocalPlanStatus::kInvalidInput);
+  EXPECT_EQ(above_limit.reason_code, "WHEEL_INPUT_INVALID");
+}
+
+TEST(WheelPlanner, ExactFinalGoalSetContainsOnlyUntouchedMissionGoal) {
+  const TerrainFixture fixture = FlatTerrain();
+  WheeledCapability capability = Capability();
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2)};
+  const GoalRegion mission_goal{
+      .goal_id = "mission-final",
+      .target = PointGoal{
+          .position_m = Vec3{.x = 1.2, .y = 1.0, .z = 0.0},
+          .tolerance_m = 1.0e-6,
+      },
+      .yaw_rad = 0.0,
+      .yaw_tolerance_rad = 1.0e-6,
+  };
+  WheelPlanRequest request{
+      .start = WheeledState{.pose = Pose(1.0, 1.0)},
+      .goals_odom = LocalGoalSet{
+          .goals_odom = {mission_goal},
+          .exact_final_goal = true,
+      },
+      .terrain = &fixture.terrain,
+      .capability = &capability,
+      .control = SearchControl{.deadline = SteadyClock::now() + 2s},
+  };
+
+  const WheelPlanResult exact = PlanWheel(request);
+  ASSERT_TRUE(exact.ok()) << exact.reason_code;
+  ASSERT_TRUE(exact.selected_goal_index.has_value());
+  EXPECT_EQ(*exact.selected_goal_index, 0U);
+  EXPECT_NEAR(TrajectoryYaw(exact.trajectory.back()), 0.0, 1.0e-9);
+
+  request.goals_odom.goals_odom.push_back(mission_goal);
+  EXPECT_EQ(PlanWheel(request).status, LocalPlanStatus::kInvalidInput);
+  request.goals_odom.exact_final_goal = false;
+  request.goals_odom.goals_odom.resize(1U);
+  EXPECT_EQ(PlanWheel(request).status, LocalPlanStatus::kInvalidInput);
+}
+
+TEST(WheelPlanner, ConsecutiveProjectArcsRemainPhysicalInteriorEdges) {
+  const TerrainFixture fixture = FlatTerrain(80U, 80U);
+  WheeledCapability capability = ProjectWheelCapability();
+  const WheelMotionPrimitive arc = capability.motion_primitives[1U];
+  capability.motion_primitives = {arc};
+  const Pose3 start = Pose(3.0, 3.0, 0.31);
+  const Pose3 first = ComposePlanar(start, arc.relative_end_pose);
+  const Pose3 second = ComposePlanar(first, arc.relative_end_pose);
+  const Pose3 half_arc = Pose(
+      std::sin(std::numbers::pi / 32.0),
+      1.0 - std::cos(std::numbers::pi / 32.0),
+      std::numbers::pi / 32.0);
+  const Pose3 goal = ComposePlanar(second, half_arc);
+
+  const WheelPlanResult result = PlanWheel(RequestTo(
+      fixture, capability, goal.position_m.x, goal.position_m.y,
+      TrajectoryYaw(TrajectoryPoint{.pose = goal}), start));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_GE(result.trajectory.size(), 25U);
+  EXPECT_NEAR(result.trajectory[8U].pose.position_m.x, first.position_m.x,
+              1.0e-9);
+  EXPECT_NEAR(result.trajectory[8U].pose.position_m.y, first.position_m.y,
+              1.0e-9);
+  EXPECT_NEAR(TrajectoryYaw(result.trajectory[8U]),
+              TrajectoryYaw(TrajectoryPoint{.pose = first}), 1.0e-9);
+  EXPECT_NEAR(result.trajectory[16U].pose.position_m.x, second.position_m.x,
+              1.0e-9);
+  EXPECT_NEAR(result.trajectory[16U].pose.position_m.y, second.position_m.y,
+              1.0e-9);
+  EXPECT_NEAR(TrajectoryYaw(result.trajectory[16U]),
+              TrajectoryYaw(TrajectoryPoint{.pose = second}), 1.0e-9);
+  EXPECT_NEAR(result.trajectory.back().pose.position_m.x, goal.position_m.x,
+              1.0e-9);
+  EXPECT_NEAR(result.trajectory.back().pose.position_m.y, goal.position_m.y,
+              1.0e-9);
+}
+
+TEST(WheelPlanner, PlansCertifiedSTurnWithContinuousPrimitiveEndpoints) {
+  const TerrainFixture fixture = FlatTerrain(80U, 80U);
+  WheeledCapability capability = ProjectWheelCapability();
+  const WheelMotionPrimitive left = capability.motion_primitives[1U];
+  const WheelMotionPrimitive right = capability.motion_primitives[2U];
+  capability.motion_primitives = {left, right};
+  const Pose3 start = Pose(3.0, 3.0, -0.27);
+  const Pose3 first = ComposePlanar(start, left.relative_end_pose);
+  const Pose3 goal = ComposePlanar(first, right.relative_end_pose);
+
+  const WheelPlanResult result = PlanWheel(RequestTo(
+      fixture, capability, goal.position_m.x, goal.position_m.y,
+      TrajectoryYaw(TrajectoryPoint{.pose = goal}), start));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_GE(result.trajectory.size(), 17U);
+  EXPECT_NEAR(result.trajectory[8U].pose.position_m.x, first.position_m.x,
+              1.0e-9);
+  EXPECT_NEAR(result.trajectory[8U].pose.position_m.y, first.position_m.y,
+              1.0e-9);
+  EXPECT_NEAR(result.trajectory.back().pose.position_m.x, goal.position_m.x,
+              1.0e-9);
+  EXPECT_NEAR(result.trajectory.back().pose.position_m.y, goal.position_m.y,
+              1.0e-9);
+  EXPECT_NEAR(TrajectoryYaw(result.trajectory.back()),
+              TrajectoryYaw(TrajectoryPoint{.pose = goal}), 1.0e-9);
+}
+
+TEST(WheelPlanner, PlansConsecutiveReverseArcsAtPhysicalEndpoints) {
+  const TerrainFixture fixture = FlatTerrain(80U, 80U);
+  WheeledCapability capability = ProjectWheelCapability();
+  const WheelMotionPrimitive reverse_arc = capability.motion_primitives[4U];
+  capability.motion_primitives = {reverse_arc};
+  const Pose3 start = Pose(5.0, 5.0, 0.23);
+  const Pose3 first = ComposePlanar(start, reverse_arc.relative_end_pose);
+  const Pose3 goal = ComposePlanar(first, reverse_arc.relative_end_pose);
+
+  const WheelPlanResult result = PlanWheel(RequestTo(
+      fixture, capability, goal.position_m.x, goal.position_m.y,
+      TrajectoryYaw(TrajectoryPoint{.pose = goal}), start));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_GE(result.trajectory.size(), 17U);
+  EXPECT_NEAR(result.trajectory[8U].pose.position_m.x, first.position_m.x,
+              1.0e-9);
+  EXPECT_NEAR(result.trajectory[8U].pose.position_m.y, first.position_m.y,
+              1.0e-9);
+  EXPECT_EQ(result.reverse_edge_count, 2U);
+}
+
+TEST(WheelPlanner, SelectsYawBinsFromPrimitiveIncrements) {
+  const TerrainFixture fixture = FlatTerrain();
+  const std::array<std::pair<double, std::size_t>, 6U> cases{{
+      {std::numbers::pi / 8.0, 16U},
+      {std::numbers::pi / 16.0, 32U},
+      {std::numbers::pi / 32.0, 64U},
+      {std::numbers::pi / 64.0, 128U},
+      {std::numbers::pi / 128.0, 256U},
+      {0.1, 256U},
+  }};
+  for (const auto& [yaw_delta, expected_bins] : cases) {
+    WheeledCapability capability = Capability(0.2, 0.2);
+    capability.motion_primitives = {
+        ArcPrimitive("arc", WheelPrimitiveKind::kForwardArc, 1.0,
+                     yaw_delta),
+    };
+    const WheelPlanResult result = PlanWheel(RequestTo(
+        fixture, capability, 1.0, 1.0, 0.0, Pose(1.0, 1.0)));
+    ASSERT_TRUE(result.ok()) << result.reason_code;
+    EXPECT_EQ(result.maximum_yaw_bins, expected_bins)
+        << "yaw_delta=" << yaw_delta;
+  }
+}
+
+TEST(WheelPlanner, LongRangeHeuristicIsStrongAndBelowCertifiedCost) {
+  const TerrainFixture fixture = FlatTerrain(1800U, 30U);
+  WheeledCapability capability = ProjectWheelCapability();
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+  WheelPlanRequest stopped = RequestTo(
+      fixture, capability, 341.0, 2.0, 0.0, Pose(1.0, 2.0));
+  stopped.control.deadline = SteadyClock::now() + 5s;
+  WheelPlanRequest moving = stopped;
+  moving.start.velocity.linear_mps.x = 0.2;
+
+  const WheelPlanResult stopped_result = PlanWheel(stopped);
+  const WheelPlanResult moving_result = PlanWheel(moving);
+
+  ASSERT_TRUE(stopped_result.ok()) << stopped_result.reason_code;
+  ASSERT_TRUE(moving_result.ok()) << moving_result.reason_code;
+  const double distance_only = 340.0 / stopped_result.cost_scales[0U];
+  EXPECT_GT(stopped_result.start_heuristic_lower_bound,
+            5.0 * distance_only);
+  EXPECT_LE(stopped_result.start_heuristic_lower_bound,
+            stopped_result.cost + 1.0e-9);
+  EXPECT_LE(moving_result.start_heuristic_lower_bound,
+            moving_result.cost + 1.0e-9);
+}
+
+TEST(WheelPlanner, HeuristicDiscountsInitialAndScaledTerminalEdges) {
+  const TerrainFixture fixture = FlatTerrain(30U, 20U);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+  for (const double distance : {0.1, 0.3999999, 0.4, 0.4000001}) {
+    const WheelPlanResult result = PlanWheel(RequestTo(
+        fixture, capability, 1.0 + distance, 2.0, 0.0, Pose(1.0, 2.0)));
+    ASSERT_TRUE(result.ok()) << "distance=" << distance << ' '
+                             << result.reason_code;
+    EXPECT_LE(result.start_heuristic_lower_bound, result.cost + 1.0e-9)
+        << "distance=" << distance;
+  }
+}
+
+TEST(WheelPlanner, HeuristicDoesNotOverestimateLongObliquePrimitiveChain) {
+  const TerrainFixture fixture = FlatTerrain(600U, 350U);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+  const double yaw = std::atan(0.5);
+  const Pose3 start = Pose(5.0, 5.0, yaw);
+  constexpr std::size_t kEdges = 500U;
+  const double travel = 0.2 * static_cast<double>(kEdges);
+  const Pose3 goal = Pose(5.0 + travel * std::cos(yaw),
+                          5.0 + travel * std::sin(yaw), yaw);
+
+  const WheelPlanResult result = PlanWheel(RequestTo(
+      fixture, capability, goal.position_m.x, goal.position_m.y, yaw, start));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_LE(result.start_heuristic_lower_bound, result.cost + 1.0e-9);
+}
+
+TEST(WheelPlanner, DisablesBarrierLowerBoundForConcaveFootprint) {
+  constexpr std::size_t kWidth = 60U;
+  constexpr std::size_t kHeight = 30U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  for (std::size_t y = 0U; y < kHeight; ++y) {
+    occupancy[y * kWidth + 25U] = 1.0F;
+  }
+  const TerrainFixture blocked =
+      MakeTerrain(kWidth, kHeight, std::move(occupancy));
+  const TerrainFixture flat = FlatTerrain(kWidth, kHeight);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.footprint_xy_m = {
+      Vec2{.x = -0.1, .y = -0.1}, Vec2{.x = 0.1, .y = -0.1},
+      Vec2{.x = 0.04, .y = 0.0}, Vec2{.x = 0.1, .y = 0.1},
+      Vec2{.x = -0.1, .y = 0.1},
+  };
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+
+  const WheelPlanResult blocked_result = PlanWheel(RequestTo(
+      blocked, capability, 8.0, 3.0, 0.0, Pose(2.0, 3.0)));
+  const WheelPlanResult flat_result = PlanWheel(RequestTo(
+      flat, capability, 8.0, 3.0, 0.0, Pose(2.0, 3.0)));
+
+  EXPECT_NEAR(blocked_result.start_heuristic_lower_bound,
+              flat_result.start_heuristic_lower_bound, 1.0e-9);
+}
+
+TEST(WheelPlanner, SkipsBarrierWhoseInteriorMeetsTheGoalDisk) {
+  constexpr std::size_t kWidth = 40U;
+  constexpr std::size_t kHeight = 30U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  for (std::size_t y = 0U; y < kHeight; ++y) {
+    occupancy[y * kWidth + 20U] = 1.0F;
+  }
+  const TerrainFixture blocked =
+      MakeTerrain(kWidth, kHeight, std::move(occupancy));
+  const TerrainFixture flat = FlatTerrain(kWidth, kHeight);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+  WheelPlanRequest blocked_request = RequestTo(
+      blocked, capability, 4.1, 3.0, 0.0, Pose(2.0, 3.0));
+  WheelPlanRequest flat_request = RequestTo(
+      flat, capability, 4.1, 3.0, 0.0, Pose(2.0, 3.0));
+  std::get<PointGoal>(blocked_request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.3;
+  std::get<PointGoal>(flat_request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.3;
+
+  const WheelPlanResult blocked_result = PlanWheel(blocked_request);
+  const WheelPlanResult flat_result = PlanWheel(flat_request);
+
+  EXPECT_NEAR(blocked_result.start_heuristic_lower_bound,
+              flat_result.start_heuristic_lower_bound, 1.0e-9);
+}
+
+TEST(WheelPlanner, KeepsBlockingBarrierAheadOfThirtyTwoLongIrrelevantRuns) {
+  constexpr std::size_t kWidth = 150U;
+  constexpr std::size_t kHeight = 150U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  for (std::size_t run = 0U; run < 32U; ++run) {
+    const std::size_t y = 2U * run;
+    for (std::size_t x = 0U; x < 50U; ++x) {
+      occupancy[y * kWidth + x] = 1.0F;
+    }
+  }
+  for (std::size_t y = 95U; y <= 105U; ++y) {
+    occupancy[y * kWidth + 75U] = 1.0F;
+  }
+  const TerrainFixture blocked =
+      MakeTerrain(kWidth, kHeight, std::move(occupancy));
+  const TerrainFixture flat = FlatTerrain(kWidth, kHeight);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.2),
+  };
+
+  const WheelPlanResult blocked_result = PlanWheel(RequestTo(
+      blocked, capability, 25.0, 20.0, 0.0, Pose(5.0, 20.0)));
+  const WheelPlanResult flat_result = PlanWheel(RequestTo(
+      flat, capability, 25.0, 20.0, 0.0, Pose(5.0, 20.0)));
+
+  EXPECT_GT(blocked_result.start_heuristic_lower_bound,
+            flat_result.start_heuristic_lower_bound);
+}
+
+TEST(WheelPlanner, HeuristicUsesArcChordAndPureYawLowerBounds) {
+  const TerrainFixture fixture = FlatTerrain(50U, 50U);
+  WheeledCapability arc_capability = Capability(0.2, 0.2);
+  arc_capability.motion_primitives = {
+      ArcPrimitive("arc", WheelPrimitiveKind::kForwardArc, 1.0,
+                   std::numbers::pi / 2.0),
+  };
+  const WheelPlanResult arc_result = PlanWheel(RequestTo(
+      fixture, arc_capability, 3.0, 3.0, std::numbers::pi / 2.0,
+      Pose(2.0, 2.0)));
+  ASSERT_TRUE(arc_result.ok()) << arc_result.reason_code;
+  EXPECT_LE(arc_result.start_heuristic_lower_bound,
+            arc_result.cost + 1.0e-9);
+
+  WheeledCapability spin_capability = Capability(0.2, 0.2);
+  spin_capability.motion_primitives = {
+      Primitive("spin", WheelPrimitiveKind::kSpinCounterclockwise, 0.0, 0.0,
+                std::numbers::pi / 2.0),
+  };
+  const WheelPlanResult spin_result = PlanWheel(RequestTo(
+      fixture, spin_capability, 2.0, 2.0, std::numbers::pi / 2.0,
+      Pose(2.0, 2.0)));
+  ASSERT_TRUE(spin_result.ok()) << spin_result.reason_code;
+  EXPECT_GT(spin_result.start_heuristic_lower_bound, 0.0);
+  EXPECT_LE(spin_result.start_heuristic_lower_bound,
+            spin_result.cost + 1.0e-9);
+}
+
+TEST(WheelPlanner, RetainsObstacleDistinctLabelsInOneKey) {
+  constexpr std::size_t kWidth = 80U;
+  constexpr std::size_t kHeight = 60U;
+  constexpr double kResolution = 0.2;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  occupancy[11U * kWidth + 10U] = 1.0F;
+  const TerrainFixture blocked = MakeTerrain(
+      kWidth, kHeight, std::move(occupancy), kResolution);
+  const TerrainFixture clear = MakeTerrain(
+      kWidth, kHeight, std::vector<float>(kWidth * kHeight, 0.0F),
+      kResolution);
+  WheeledCapability capability = Capability(0.02, 0.02);
+  const WheelMotionPrimitive short_arc =
+      ArcPrimitive("a-short", WheelPrimitiveKind::kForwardArc, 1.0,
+                   std::numbers::pi / 16.0);
+  const WheelMotionPrimitive long_arc =
+      ArcPrimitive("b-long", WheelPrimitiveKind::kForwardArc, 1.2,
+                   std::numbers::pi / 16.0);
+  capability.motion_primitives = {short_arc, long_arc};
+  const Pose3 start = Pose(2.0, 2.16);
+  const Pose3 short_first =
+      ComposePlanar(start, short_arc.relative_end_pose);
+  const Pose3 short_goal =
+      ComposePlanar(short_first, short_arc.relative_end_pose);
+  const Pose3 long_first = ComposePlanar(start, long_arc.relative_end_pose);
+  const Pose3 long_goal = ComposePlanar(long_first, long_arc.relative_end_pose);
+  const Pose3 goal = Pose(
+      0.5 * (short_goal.position_m.x + long_goal.position_m.x),
+      0.5 * (short_goal.position_m.y + long_goal.position_m.y),
+      TrajectoryYaw(TrajectoryPoint{.pose = long_goal}));
+  const auto make_request = [&](const TerrainFixture& fixture) {
+    WheelPlanRequest request = RequestTo(
+        fixture, capability, goal.position_m.x, goal.position_m.y,
+        TrajectoryYaw(TrajectoryPoint{.pose = goal}), start);
+    std::get<PointGoal>(request.goals_odom.goals_odom.front().target)
+        .tolerance_m = 0.04;
+    return request;
+  };
+
+  const WheelPlanResult clear_result = PlanWheel(make_request(clear));
+  const WheelPlanResult blocked_result = PlanWheel(make_request(blocked));
+  const WheelPlanResult short_edge_result = PlanWheel(RequestTo(
+      blocked, capability, short_first.position_m.x, short_first.position_m.y,
+      TrajectoryYaw(TrajectoryPoint{.pose = short_first}), start));
+
+  ASSERT_TRUE(clear_result.ok()) << clear_result.reason_code;
+  ASSERT_TRUE(blocked_result.ok()) << blocked_result.reason_code;
+  ASSERT_TRUE(short_edge_result.ok()) << short_edge_result.reason_code;
+  ASSERT_GE(clear_result.trajectory.size(), 17U);
+  ASSERT_GE(blocked_result.trajectory.size(), 17U);
+  EXPECT_NEAR(clear_result.trajectory[8U].pose.position_m.x,
+              short_first.position_m.x, 1.0e-9);
+  EXPECT_NEAR(blocked_result.trajectory[8U].pose.position_m.x,
+              long_first.position_m.x, 1.0e-9);
+  EXPECT_GT(blocked_result.quantized_endpoint_aliases, 0U);
+}
+
+TEST(WheelPlanner, RetainsHigherCostNearLabelWithCertifiedGoalConnector) {
+  const TerrainFixture fixture = FlatTerrain(60U, 40U);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  const WheelMotionPrimitive short_arc = ArcPrimitive(
+      "a-short", WheelPrimitiveKind::kForwardArc, 1.0,
+      std::numbers::pi / 16.0);
+  const WheelMotionPrimitive terminal_arc = ArcPrimitive(
+      "b-terminal", WheelPrimitiveKind::kForwardArc, 1.2,
+      std::numbers::pi / 16.0);
+  const WheelMotionPrimitive connector =
+      Primitive("c-connector", WheelPrimitiveKind::kForward, 0.2);
+  capability.motion_primitives = {short_arc, terminal_arc, connector};
+  const Pose3 start = Pose(3.0, 3.0);
+  const Pose3 terminal_source =
+      ComposePlanar(start, terminal_arc.relative_end_pose);
+  const Pose3 goal =
+      ComposePlanar(terminal_source, Pose(0.1, 0.0, 0.0));
+
+  const WheelPlanResult result = PlanWheel(RequestTo(
+      fixture, capability, goal.position_m.x, goal.position_m.y,
+      TrajectoryYaw(TrajectoryPoint{.pose = goal}), start));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_GE(result.trajectory.size(), 17U);
+  EXPECT_NEAR(result.trajectory[8U].pose.position_m.x,
+              terminal_source.position_m.x, 1.0e-9);
+  EXPECT_NEAR(result.trajectory[8U].pose.position_m.y,
+              terminal_source.position_m.y, 1.0e-9);
+}
+
+TEST(WheelPlanner, CertifiedGoalLabelReplacesOneOfFourNonterminalLabels) {
+  const TerrainFixture fixture = FlatTerrain(60U, 40U);
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.motion_primitives = {
+      ArcPrimitive("a", WheelPrimitiveKind::kForwardArc, 0.8,
+                   std::numbers::pi / 16.0),
+      ArcPrimitive("b", WheelPrimitiveKind::kForwardArc, 0.9,
+                   std::numbers::pi / 16.0),
+      ArcPrimitive("c", WheelPrimitiveKind::kForwardArc, 1.0,
+                   std::numbers::pi / 16.0),
+      ArcPrimitive("d", WheelPrimitiveKind::kForwardArc, 1.1,
+                   std::numbers::pi / 16.0),
+      ArcPrimitive("e-terminal", WheelPrimitiveKind::kForwardArc, 1.2,
+                   std::numbers::pi / 16.0),
+      Primitive("f-connector", WheelPrimitiveKind::kForward, 0.2),
+  };
+  const Pose3 start = Pose(3.0, 3.0);
+  const Pose3 terminal_source =
+      ComposePlanar(start, capability.motion_primitives[4U].relative_end_pose);
+  const Pose3 goal =
+      ComposePlanar(terminal_source, Pose(0.1, 0.0, 0.0));
+
+  const WheelPlanResult result = PlanWheel(RequestTo(
+      fixture, capability, goal.position_m.x, goal.position_m.y,
+      TrajectoryYaw(TrajectoryPoint{.pose = goal}), start));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_LE(result.maximum_active_labels_per_key, 4U);
+  EXPECT_NEAR(result.trajectory[8U].pose.position_m.x,
+              terminal_source.position_m.x, 1.0e-9);
+  EXPECT_NEAR(result.trajectory[8U].pose.position_m.y,
+              terminal_source.position_m.y, 1.0e-9);
 }
 
 TEST(WheelPlanner, ReachesOffGridPoseOnFlatFreeMap) {
@@ -336,11 +902,30 @@ TEST(WheelPlanner, StopsWhenControlTriggersOnlyDuringTrajectoryReconstruction) {
       ArcPrimitive("left", WheelPrimitiveKind::kForwardArc, 1.0, 0.6),
   };
   constexpr double kGoalYaw = 0.3;
-  // All pre-reconstruction work consumes exactly this many deterministic
-  // clock reads; the next read is the first trajectory checkpoint.
-  constexpr std::size_t kFirstReconstructionClockRead = 117287U;
   const double goal_x = 1.0 + std::sin(kGoalYaw);
   const double goal_y = 2.0 - std::cos(kGoalYaw);
+
+  std::size_t baseline_reads = 0U;
+  WheelPlanRequest baseline =
+      RequestTo(fixture, capability, goal_x, goal_y, kGoalYaw);
+  baseline.control.deadline = SteadyClock::time_point::max();
+  baseline.control.now = [&] {
+    ++baseline_reads;
+    return SteadyClock::time_point{};
+  };
+  const WheelPlanResult baseline_result = PlanWheel(baseline);
+  ASSERT_TRUE(baseline_result.ok()) << baseline_result.reason_code;
+  ASSERT_GT(baseline_result.trajectory.size(), 1U);
+  ASSERT_EQ((baseline_result.trajectory.size() - 1U) % 8U, 0U);
+  const std::size_t reconstructed_edges =
+      (baseline_result.trajectory.size() - 1U) / 8U;
+  // Reconstruction performs two entry checkpoints, one checkpoint plus
+  // eight timed samples per edge, and one final checkpoint. Derive the phase
+  // boundary from observable output instead of dense-search initialization.
+  const std::size_t reconstruction_reads = 3U + 9U * reconstructed_edges;
+  ASSERT_GT(baseline_reads, reconstruction_reads);
+  const std::size_t first_reconstruction_read =
+      baseline_reads - reconstruction_reads;
 
   std::stop_source stop;
   std::size_t cancel_reads = 0U;
@@ -349,7 +934,7 @@ TEST(WheelPlanner, StopsWhenControlTriggersOnlyDuringTrajectoryReconstruction) {
   canceled.control.stop_token = stop.get_token();
   canceled.control.deadline = SteadyClock::time_point::max();
   canceled.control.now = [&] {
-    if (cancel_reads++ == kFirstReconstructionClockRead) {
+    if (cancel_reads++ == first_reconstruction_read) {
       stop.request_stop();
     }
     return SteadyClock::time_point{};
@@ -363,7 +948,7 @@ TEST(WheelPlanner, StopsWhenControlTriggersOnlyDuringTrajectoryReconstruction) {
       RequestTo(fixture, capability, goal_x, goal_y, kGoalYaw);
   timed_out.control.deadline = SteadyClock::time_point{1ms};
   timed_out.control.now = [&] {
-    return timeout_reads++ < kFirstReconstructionClockRead
+    return timeout_reads++ < first_reconstruction_read
                ? SteadyClock::time_point{}
                : SteadyClock::time_point{2ms};
   };
@@ -416,6 +1001,7 @@ TEST(WheelPlanner, DoesNotAllocateAStateForAnInvalidSweepEdge) {
   EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
   EXPECT_EQ(result.quantized_state_count, 1U);
   EXPECT_EQ(result.metrics.edge_validation_evaluations, 2U);
+  EXPECT_GE(result.broad_phase_rejects, 1U);
 }
 
 TEST(WheelPlanner, DoesNotInventTranslationForASpinOnlyCapability) {
@@ -458,7 +1044,8 @@ TEST(WheelPlanner, ShortensARealReversePrimitiveToTheExactGoal) {
 
   WheelPlanRequest request = RequestTo(
       fixture, capability, 0.83, 1.0, 0.0, Pose(1.0, 1.0));
-  std::get<PointGoal>(request.goal_odom.target).tolerance_m = 0.0;
+  std::get<PointGoal>(request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.0;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -476,8 +1063,8 @@ TEST(WheelPlanner, OptionalYawKeepsThePhysicallyReachedArcYaw) {
   WheelPlanRequest request = RequestTo(
       fixture, capability, 1.0 + std::sin(kReachedYaw),
       2.0 - std::cos(kReachedYaw), 0.0);
-  request.goal_odom.yaw_rad.reset();
-  request.goal_odom.yaw_tolerance_rad = 0.4;
+  request.goals_odom.goals_odom.front().yaw_rad.reset();
+  request.goals_odom.goals_odom.front().yaw_tolerance_rad = 0.4;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -504,8 +1091,9 @@ TEST(WheelPlanner, IgnoresPointGoalZAndUsesTerrainSupportedEndpointZ) {
       fixture, capability, 1.4, 1.0, 0.0, supported_start);
   WheelPlanRequest high_z = zero_z;
   WheelPlanRequest nan_z = zero_z;
-  std::get<PointGoal>(high_z.goal_odom.target).position_m.z = 100.0;
-  std::get<PointGoal>(nan_z.goal_odom.target).position_m.z =
+  std::get<PointGoal>(high_z.goals_odom.goals_odom.front().target)
+      .position_m.z = 100.0;
+  std::get<PointGoal>(nan_z.goals_odom.goals_odom.front().target).position_m.z =
       std::numeric_limits<double>::quiet_NaN();
 
   const WheelPlanResult zero_result = PlanWheel(zero_z);
@@ -551,8 +1139,12 @@ TEST(WheelPlanner, UsesOrientedRectangleAndNarrowResolutionInTightCorridor) {
   ASSERT_TRUE(result.ok()) << result.reason_code;
   EXPECT_TRUE(result.metrics.used_narrow_resolution);
   EXPECT_NEAR(result.finest_xy_key_resolution_m, 0.1, 1.0e-12);
-  EXPECT_EQ(result.maximum_yaw_bins, 128U);
+  EXPECT_EQ(result.maximum_yaw_bins, 16U);
   EXPECT_NEAR(result.trajectory.back().pose.position_m.x, 5.0, 1.0e-6);
+  EXPECT_GT(result.full_certifications, 0U);
+  ASSERT_EQ((result.trajectory.size() - 1U) % 8U, 0U);
+  EXPECT_EQ(result.returned_edge_certificate_confirmations,
+            (result.trajectory.size() - 1U) / 8U);
 }
 
 TEST(WheelPlanner, EnforcesMinimumOccupancyClearanceOutsideTheRealFootprint) {
@@ -688,9 +1280,10 @@ TEST(WheelPlanner, EvaluatesEachExpandedStatePrimitiveOnlyOnceAcrossAraRounds) {
   EXPECT_EQ(result.metrics.edge_validation_evaluations, 3U);
   EXPECT_GE(result.edge_validation_cache_hits, 1U);
   EXPECT_GE(result.metrics.expanded_states, 2U);
+  EXPECT_EQ(result.returned_edge_certificate_confirmations, 2U);
 }
 
-TEST(WheelPlanner, ReusesCanonicalStateForEndpointsInsideOneQuantizedBucket) {
+TEST(WheelPlanner, RetainsContinuousStatesInsideOneQuantizedBucket) {
   const TerrainFixture fixture = FlatTerrain(20U, 20U);
   WheeledCapability short_first = Capability(0.2, 0.2);
   short_first.motion_primitives = {
@@ -703,17 +1296,22 @@ TEST(WheelPlanner, ReusesCanonicalStateForEndpointsInsideOneQuantizedBucket) {
       Primitive("b-short", WheelPrimitiveKind::kForward, 0.21),
   };
 
-  const WheelPlanResult first = PlanWheel(RequestTo(
-      fixture, short_first, 1.38, 2.0, 0.0, Pose(1.0, 2.0)));
-  const WheelPlanResult second = PlanWheel(RequestTo(
-      fixture, long_first, 1.38, 2.0, 0.0, Pose(1.0, 2.0)));
+  WheelPlanRequest first_request = RequestTo(
+      fixture, short_first, 1.38, 2.0, 0.0, Pose(1.0, 2.0));
+  first_request.search.stop_after_first_solution = false;
+  WheelPlanRequest second_request = RequestTo(
+      fixture, long_first, 1.38, 2.0, 0.0, Pose(1.0, 2.0));
+  second_request.search.stop_after_first_solution = false;
+
+  const WheelPlanResult first = PlanWheel(first_request);
+  const WheelPlanResult second = PlanWheel(second_request);
 
   ASSERT_TRUE(first.ok()) << first.reason_code;
   ASSERT_TRUE(second.ok()) << second.reason_code;
   EXPECT_GT(first.quantized_state_reuses, 0U);
   EXPECT_GT(second.quantized_state_reuses, 0U);
-  EXPECT_LT(first.quantized_state_count, 8U);
-  EXPECT_LT(second.quantized_state_count, 8U);
+  EXPECT_GE(first.quantized_state_count, 8U);
+  EXPECT_GE(second.quantized_state_count, 8U);
   EXPECT_NEAR(first.trajectory.back().pose.position_m.x, 1.38, 1.0e-9);
   EXPECT_NEAR(second.trajectory.back().pose.position_m.x, 1.38, 1.0e-9);
   for (const WheelPlanResult* result : {&first, &second}) {
@@ -739,7 +1337,11 @@ TEST(WheelPlanner, DoesNotStretchAShortPrimitiveToACanonicalBucketCenter) {
   const WheelPlanResult result = PlanWheel(RequestTo(
       fixture, capability, 1.2, 2.0, 0.0, Pose(1.0, 2.0)));
 
-  EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_GE(result.trajectory.size(), 17U);
+  EXPECT_NEAR(result.trajectory[8U].pose.position_m.x, 1.11, 1.0e-9);
+  EXPECT_NEAR(result.trajectory[8U].pose.position_m.y, 2.0, 1.0e-9);
+  EXPECT_NEAR(result.trajectory.back().pose.position_m.x, 1.2, 1.0e-9);
 }
 
 TEST(WheelPlanner, AcceptsImmutablePrimitiveEndpointInsideXYGoalRegion) {
@@ -750,7 +1352,8 @@ TEST(WheelPlanner, AcceptsImmutablePrimitiveEndpointInsideXYGoalRegion) {
   };
   WheelPlanRequest request = RequestTo(
       fixture, capability, 1.15, 2.0, 0.0, Pose(1.0, 2.0));
-  std::get<PointGoal>(request.goal_odom.target).tolerance_m = 0.05;
+  std::get<PointGoal>(request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.05;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -762,7 +1365,7 @@ TEST(WheelPlanner, AcceptsImmutablePrimitiveEndpointInsideXYGoalRegion) {
             0.05 + 1.0e-12);
 }
 
-TEST(WheelPlanner, RejectsCanonicalPoseWhoseRecomputedBandDiffersFromItsKey) {
+TEST(WheelPlanner, RetainsPhysicalPoseWhenItsQuantizedBandDiffers) {
   constexpr std::size_t kWidth = 20U;
   constexpr std::size_t kHeight = 20U;
   std::vector<float> occupancy(kWidth * kHeight, 0.0F);
@@ -777,7 +1380,8 @@ TEST(WheelPlanner, RejectsCanonicalPoseWhoseRecomputedBandDiffersFromItsKey) {
   const WheelPlanResult result = PlanWheel(RequestTo(
       fixture, capability, 1.2, 1.0, 0.0, Pose(1.0, 1.0)));
 
-  EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_NEAR(result.trajectory[8U].pose.position_m.x, 1.19, 1.0e-9);
 }
 
 TEST(WheelPlanner, KeepsRequestStartAsOnlyStateForSubResolutionReturn) {
@@ -789,15 +1393,13 @@ TEST(WheelPlanner, KeepsRequestStartAsOnlyStateForSubResolutionReturn) {
   };
   WheelPlanRequest request = RequestTo(
       fixture, capability, 2.0, 2.0, 0.0, Pose(1.04, 2.0));
-  request.maximum_search_states = 2U;
-
   const WheelPlanResult result = PlanWheel(request);
 
   EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
-  EXPECT_EQ(result.quantized_state_count, 1U);
+  EXPECT_LE(result.quantized_state_count, 2U);
 }
 
-TEST(WheelPlanner, QuantizedCanonicalStatesReachGoalUnderATightStateCap) {
+TEST(WheelPlanner, ContinuousLabelsReachGoalWithoutEndpointReplacement) {
   const TerrainFixture fixture = FlatTerrain(30U, 20U);
   WheeledCapability capability = Capability(0.2, 0.2);
   capability.motion_primitives = {
@@ -806,12 +1408,9 @@ TEST(WheelPlanner, QuantizedCanonicalStatesReachGoalUnderATightStateCap) {
   };
   WheelPlanRequest request = RequestTo(
       fixture, capability, 2.0, 2.0, 0.0, Pose(1.0, 2.0));
-  request.maximum_search_states = 8U;
-
   const WheelPlanResult result = PlanWheel(request);
 
   ASSERT_TRUE(result.ok()) << result.reason_code;
-  EXPECT_LE(result.quantized_state_count, 8U);
   EXPECT_NEAR(result.trajectory.back().pose.position_m.x, 2.0, 1.0e-9);
 }
 
@@ -842,7 +1441,7 @@ TEST(WheelPlanner, NarrowKeysReduceCoarseEndpointReuse) {
   ASSERT_TRUE(narrow_result.ok()) << narrow_result.reason_code;
   EXPECT_GT(coarse_result.quantized_endpoint_aliases,
             narrow_result.quantized_endpoint_aliases);
-  EXPECT_EQ(narrow_result.maximum_yaw_bins, 128U);
+  EXPECT_EQ(narrow_result.maximum_yaw_bins, 16U);
 }
 
 TEST(WheelPlanner, RejectsAHeightDiscontinuityAboveTheSlopeDerivedStepLimit) {
@@ -893,7 +1492,7 @@ TEST(WheelPlanner, AcceptsAContinuousSlopeDespiteLargeTotalHeightChange) {
 
   WheelPlanRequest request = RequestTo(
       fixture, capability, 3.0, 2.0, 0.0, Pose(1.0, 2.0));
-  std::get<PointGoal>(request.goal_odom.target).position_m.z =
+  std::get<PointGoal>(request.goals_odom.goals_odom.front().target).position_m.z =
       fixture.map->SampleElevationBilinear(Vec2{.x = 3.0, .y = 2.0})
           .value();
   request.start.pose.position_m.z =
@@ -1049,6 +1648,113 @@ TEST(WheelPlanner, ParameterizesExecutableVelocityAndAccelerationTiming) {
   EXPECT_GT(result.trajectory.back().time_from_start, 1s);
 }
 
+TEST(WheelPlanner, CertifiesPreferredWallChainInOnePlanningRequest) {
+  constexpr std::size_t kWidth = 70U;
+  constexpr std::size_t kHeight = 50U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  for (std::size_t y = 14U; y <= 25U; ++y) {
+    occupancy[y * kWidth + 30U] = 1.0F;
+  }
+  const TerrainFixture fixture =
+      MakeTerrain(kWidth, kHeight, std::move(occupancy));
+  const WheeledCapability capability = ProjectWheelCapability();
+  WheelPlanRequest request = RequestTo(
+      fixture, capability, 10.0, 4.0, 0.0, Pose(2.0, 4.0));
+  request.control.deadline = SteadyClock::now() + 1s;
+  request.search.stop_after_first_solution = true;
+
+  const WheelPlanResult result = PlanWheel(request);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_TRUE(result.has_certified_preferred_candidate);
+  EXPECT_EQ(result.metrics.expanded_states, 0U);
+  EXPECT_EQ(result.quantized_state_count, 1U);
+  ASSERT_EQ(result.trajectory.size(),
+            8U * result.preferred_candidate_certified_edge_count + 1U);
+  for (std::size_t edge = 0U;
+       edge < result.preferred_candidate_full_primitive_edge_count; ++edge) {
+    EXPECT_TRUE(MatchesAnyFullPrimitive(result.trajectory[8U * edge].pose,
+                                        result.trajectory[8U * (edge + 1U)].pose,
+                                        capability));
+  }
+}
+
+TEST(WheelPlanner, BuildsCertifiedPreferredCandidateAroundOccupiedWall) {
+  constexpr std::size_t kWidth = 70U;
+  constexpr std::size_t kHeight = 50U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  for (std::size_t y = 14U; y <= 25U; ++y) {
+    occupancy[y * kWidth + 30U] = 1.0F;
+  }
+  const TerrainFixture fixture =
+      MakeTerrain(kWidth, kHeight, std::move(occupancy));
+  const WheeledCapability capability = ProjectWheelCapability();
+  WheelPlanRequest request = RequestTo(
+      fixture, capability, 10.0, 4.0, 0.0, Pose(2.0, 4.0));
+  request.control.deadline = SteadyClock::now() + 100ms;
+  request.search.stop_after_first_solution = true;
+
+  const WheelPlanResult result = PlanWheel(request);
+
+  EXPECT_TRUE(result.has_certified_preferred_candidate);
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_EQ(result.metrics.expanded_states, 0U);
+  EXPECT_EQ(result.quantized_state_count, 1U);
+  EXPECT_GT(result.preferred_candidate_full_primitive_edge_count, 0U);
+  EXPECT_LE(result.preferred_candidate_terminal_connector_edge_count, 1U);
+  EXPECT_EQ(result.preferred_candidate_certified_edge_count,
+            result.preferred_candidate_full_primitive_edge_count +
+                result.preferred_candidate_terminal_connector_edge_count);
+  EXPECT_TRUE(std::isfinite(result.preferred_candidate_cost));
+  EXPECT_GT(result.preferred_candidate_cost, 0.0);
+  ASSERT_EQ(result.trajectory.size(),
+            8U * result.preferred_candidate_certified_edge_count + 1U);
+  for (std::size_t edge = 0U;
+       edge < result.preferred_candidate_full_primitive_edge_count; ++edge) {
+    EXPECT_TRUE(MatchesAnyFullPrimitive(result.trajectory[8U * edge].pose,
+                                        result.trajectory[8U * (edge + 1U)].pose,
+                                        capability));
+  }
+}
+
+TEST(WheelPlanner, BuildsCertifiedPreferredCandidateForMoreThan300Meters) {
+  constexpr std::size_t kWidth = 2500U;
+  constexpr std::size_t kHeight = 1000U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  for (std::size_t y = 350U; y <= 650U; ++y) {
+    occupancy[y * kWidth + 950U] = 1.0F;
+  }
+  const TerrainFixture fixture =
+      MakeTerrain(kWidth, kHeight, std::move(occupancy));
+  const WheeledCapability capability = ProjectWheelCapability();
+  WheelPlanRequest request = RequestTo(
+      fixture, capability, 360.0, 100.0, 0.0, Pose(20.0, 100.0));
+  request.control.deadline = SteadyClock::now() + 5s;
+  request.search.stop_after_first_solution = true;
+
+  const WheelPlanResult result = PlanWheel(request);
+
+  EXPECT_TRUE(result.has_certified_preferred_candidate);
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  EXPECT_EQ(result.metrics.expanded_states, 0U);
+  EXPECT_EQ(result.quantized_state_count, 1U);
+  EXPECT_GT(result.preferred_candidate_full_primitive_edge_count, 1500U);
+  EXPECT_LE(result.preferred_candidate_terminal_connector_edge_count, 1U);
+  EXPECT_EQ(result.preferred_candidate_certified_edge_count,
+            result.preferred_candidate_full_primitive_edge_count +
+                result.preferred_candidate_terminal_connector_edge_count);
+  EXPECT_TRUE(std::isfinite(result.preferred_candidate_cost));
+  EXPECT_GT(result.preferred_candidate_cost, 0.0);
+  ASSERT_EQ(result.trajectory.size(),
+            8U * result.preferred_candidate_certified_edge_count + 1U);
+  for (std::size_t edge = 0U;
+       edge < result.preferred_candidate_full_primitive_edge_count; ++edge) {
+    EXPECT_TRUE(MatchesAnyFullPrimitive(result.trajectory[8U * edge].pose,
+                                        result.trajectory[8U * (edge + 1U)].pose,
+                                        capability));
+  }
+}
+
 TEST(WheelPlanner, ProjectWheelCapabilityDetoursAroundAnOccupiedWall) {
   constexpr std::size_t kWidth = 70U;
   constexpr std::size_t kHeight = 50U;
@@ -1062,6 +1768,7 @@ TEST(WheelPlanner, ProjectWheelCapabilityDetoursAroundAnOccupiedWall) {
   WheelPlanRequest request = RequestTo(
       fixture, capability, 10.0, 4.0, 0.0, Pose(2.0, 4.0));
   request.control.deadline = SteadyClock::now() + 1s;
+  request.search.stop_after_first_solution = true;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -1071,6 +1778,10 @@ TEST(WheelPlanner, ProjectWheelCapabilityDetoursAroundAnOccupiedWall) {
                            << result.metrics.edge_validation_evaluations
                            << " states=" << result.quantized_state_count
                            << " sweep_cells=" << result.sweep_cell_checks;
+  EXPECT_TRUE(result.has_certified_preferred_candidate);
+  EXPECT_EQ(result.metrics.expanded_states, 0U);
+  EXPECT_EQ(result.quantized_state_count, 1U);
+  EXPECT_LE(result.start_heuristic_lower_bound, result.cost + 1.0e-9);
   ASSERT_FALSE(result.trajectory.empty());
   bool leaves_direct_corridor = false;
   for (const TrajectoryPoint& point : result.trajectory) {
@@ -1092,10 +1803,15 @@ TEST(WheelPlanner, ProjectWheelCapabilityDetoursForMoreThan300Meters) {
   const WheeledCapability capability = ProjectWheelCapability();
   WheelPlanRequest request = RequestTo(
       fixture, capability, 360.0, 100.0, 0.0, Pose(20.0, 100.0));
-  request.maximum_search_states = 500000U;
   request.control.deadline = SteadyClock::now() + 30s;
+  request.search.stop_after_first_solution = true;
 
+  const SteadyClock::time_point planning_started = SteadyClock::now();
   const WheelPlanResult result = PlanWheel(request);
+  const auto planning_elapsed =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          SteadyClock::now() - planning_started);
+  RecordProperty("plan_wheel_elapsed_ms", planning_elapsed.count());
 
   ASSERT_TRUE(result.ok()) << result.reason_code
                            << " expanded=" << result.metrics.expanded_states
@@ -1103,6 +1819,10 @@ TEST(WheelPlanner, ProjectWheelCapabilityDetoursForMoreThan300Meters) {
                            << result.metrics.edge_validation_evaluations
                            << " states=" << result.quantized_state_count
                            << " sweep_cells=" << result.sweep_cell_checks;
+  EXPECT_TRUE(result.has_certified_preferred_candidate);
+  EXPECT_EQ(result.metrics.expanded_states, 0U);
+  EXPECT_EQ(result.quantized_state_count, 1U);
+  EXPECT_LT(planning_elapsed, 1s);
   ASSERT_FALSE(result.trajectory.empty());
   EXPECT_GT(result.trajectory.back().pose.position_m.x -
                 result.trajectory.front().pose.position_m.x,
@@ -1118,212 +1838,20 @@ TEST(WheelPlanner, ProjectWheelCapabilityDetoursForMoreThan300Meters) {
 
 TEST(WheelPlanner,
      GlobalRouteWithEightMeterRollingHorizonReaches750MeterGoalThroughRandomObstacles) {
-  const auto end_to_end_started = SteadyClock::now();
-  constexpr std::size_t kGlobalWidth = 1000U;
-  constexpr std::size_t kGlobalHeight = 1000U;
-  constexpr double kGlobalResolutionM = 1.0;
-  constexpr std::size_t kLocalWidth = 320U;
-  constexpr std::size_t kLocalHeight = 320U;
-  constexpr double kLocalResolutionM = 0.2;
-  std::vector<std::int8_t> obstacle_world(kGlobalWidth * kGlobalHeight, 0);
-  std::minstd_rand generator{0x5EED1234U};
-  std::uniform_int_distribution<std::size_t> x_distribution{80U, 770U};
-  std::uniform_int_distribution<std::size_t> y_distribution{40U, 960U};
-  for (std::size_t index = 0U; index < 1800U; ++index) {
-    const std::size_t x = x_distribution(generator);
-    const std::size_t y = y_distribution(generator);
-    if (std::hypot(static_cast<double>(x) - 50.0,
-                   static_cast<double>(y) - 500.0) > 8.0 &&
-        std::hypot(static_cast<double>(x) - 800.0,
-                   static_cast<double>(y) - 500.0) > 8.0) {
-      obstacle_world[y * kGlobalWidth + x] = 100;
-    }
-  }
-  for (const auto [x, gap_y] : {std::pair{180U, 350U}, std::pair{360U, 650U},
-                                std::pair{540U, 350U}, std::pair{700U, 650U}}) {
-    for (std::size_t y = 80U; y < 920U; ++y) {
-      if (y < gap_y || y > gap_y + 80U) {
-        obstacle_world[y * kGlobalWidth + x] = 100;
-      }
-    }
-  }
-  const GridMap global_map{
-      .frame_id = "map",
-      .width = kGlobalWidth,
-      .height = kGlobalHeight,
-      .resolution_m = kGlobalResolutionM,
-      .layers = {
-          {"occupancy", GridLayer{.values = obstacle_world}},
-      },
-  };
-  const WheeledCapability capability = ProjectWheelCapability();
-  Pose3 current = Pose(50.0, 500.0);
-  const GoalRegion final_goal{
-      .goal_id = "750m-goal",
-      .target = PointGoal{.position_m = {.x = 800.0, .y = 500.0, .z = 0.0},
-                          .tolerance_m = 0.2},
-      .yaw_rad = 0.0,
-      .yaw_tolerance_rad = 0.1,
-  };
+  const WheelLongRangeFixture fixture;
+  const WheelLongRangeFixture::RunRecord record =
+      fixture.Run750MeterRollingScenario();
 
-  auto make_local_map = [&](const Pose3& center) {
-    std::vector<float> occupancy(kLocalWidth * kLocalHeight, 0.0F);
-    for (std::size_t y = 0U; y < kLocalHeight; ++y) {
-      for (std::size_t x = 0U; x < kLocalWidth; ++x) {
-        const double world_x = center.position_m.x - 32.0 +
-                               (static_cast<double>(x) + 0.5) *
-                                   kLocalResolutionM;
-        const double world_y = center.position_m.y - 32.0 +
-                               (static_cast<double>(y) + 0.5) *
-                                   kLocalResolutionM;
-        const auto global_x = static_cast<std::int64_t>(std::floor(world_x));
-        const auto global_y = static_cast<std::int64_t>(std::floor(world_y));
-        if (global_x >= 0 && global_y >= 0 &&
-            global_x < static_cast<std::int64_t>(kGlobalWidth) &&
-            global_y < static_cast<std::int64_t>(kGlobalHeight) &&
-            obstacle_world[static_cast<std::size_t>(global_y) * kGlobalWidth +
-                           static_cast<std::size_t>(global_x)] >= 50) {
-          occupancy[y * kLocalWidth + x] = 1.0F;
-        }
-      }
-    }
-    return GridMap{
-        .frame_id = "odom",
-        .width = kLocalWidth,
-        .height = kLocalHeight,
-        .resolution_m = kLocalResolutionM,
-        .origin_m = {.x = center.position_m.x - 32.0,
-                     .y = center.position_m.y - 32.0},
-        .layers = {
-            {"occupancy", GridLayer{.values = std::move(occupancy)}},
-            {"elevation", GridLayer{.values = std::vector<float>(
-                              kLocalWidth * kLocalHeight, 0.0F)}},
-        },
-    };
-  };
-
-  PlanningRequest global_request{
-      .request_id = "750m-global",
-      .environment_mode = EnvironmentMode::kLunarSurface,
-      .current_state = WheeledState{.pose = current},
-      .goal_map = final_goal,
-      .world = {.global_map = global_map,
-                .local_map = make_local_map(current),
-                .map_from_odom = {.parent_frame = "map", .child_frame = "odom"}},
-      .capability = capability,
-      .config = {.global_budget = 20s,
-                 .search = {.stop_after_first_solution = true}},
-      .control = {.deadline = SteadyClock::now() + 20s},
-  };
-  const auto global_started = SteadyClock::now();
-  const GlobalStageResult global = hierarchical::PlanSurfaceGlobal(
-      global_request, {.deadline = SteadyClock::now() + 20s});
-  const auto global_elapsed = SteadyClock::now() - global_started;
-  std::cerr << "[rolling-1000m-random-profile] global_ms="
-            << std::chrono::duration<double, std::milli>(global_elapsed).count()
-            << " global_reason=" << global.reason_code << '\n';
-  ASSERT_TRUE(global.route.has_value()) << global.reason_code;
-
-  auto route_point_at_horizon = [&](const Pose3& pose) -> std::optional<Vec3> {
-    const auto& route = global.route->poses_map;
-    if (route.size() < 2U) {
-      return std::nullopt;
-    }
-    std::size_t nearest_segment{};
-    double nearest_ratio{};
-    double nearest_distance = std::numeric_limits<double>::infinity();
-    for (std::size_t index = 1U; index < route.size(); ++index) {
-      const Vec3 from = route[index - 1U].position_m;
-      const Vec3 to = route[index].position_m;
-      const double dx = to.x - from.x;
-      const double dy = to.y - from.y;
-      const double squared_length = dx * dx + dy * dy;
-      const double ratio = squared_length > 0.0
-                               ? std::clamp(((pose.position_m.x - from.x) * dx +
-                                             (pose.position_m.y - from.y) * dy) /
-                                                squared_length,
-                                            0.0, 1.0)
-                               : 0.0;
-      const double projected_x = from.x + ratio * dx;
-      const double projected_y = from.y + ratio * dy;
-      const double distance = std::hypot(pose.position_m.x - projected_x,
-                                         pose.position_m.y - projected_y);
-      if (distance < nearest_distance) {
-        nearest_distance = distance;
-        nearest_segment = index - 1U;
-        nearest_ratio = ratio;
-      }
-    }
-    constexpr double kRollingHorizonM = 8.0;
-    double remaining = kRollingHorizonM;
-    Vec3 from = route[nearest_segment].position_m;
-    Vec3 to = route[nearest_segment + 1U].position_m;
-    from.x += nearest_ratio * (to.x - from.x);
-    from.y += nearest_ratio * (to.y - from.y);
-    for (std::size_t index = nearest_segment + 1U;; ++index) {
-      const double distance = std::hypot(to.x - from.x, to.y - from.y);
-      if (distance >= remaining) {
-        return Vec3{.x = from.x + remaining * (to.x - from.x) / distance,
-                    .y = from.y + remaining * (to.y - from.y) / distance};
-      }
-      remaining -= distance;
-      if (index + 1U == route.size()) {
-        return to;
-      }
-      from = to;
-      to = route[index + 1U].position_m;
-    }
-  };
-
-  std::size_t rolling_segments = 0U;
-  std::chrono::steady_clock::duration local_elapsed{};
-  while (std::hypot(current.position_m.x - 800.0,
-                    current.position_m.y - 500.0) > 0.2) {
-    ASSERT_LT(rolling_segments, 200U);
-    const auto local_started = SteadyClock::now();
-    PlanningRequest local_request = global_request;
-    local_request.request_id = "750m-local-" + std::to_string(rolling_segments);
-    local_request.current_state = WheeledState{.pose = current};
-    local_request.world.local_map = make_local_map(current);
-    const auto target = route_point_at_horizon(current);
-    ASSERT_TRUE(target.has_value());
-    const GoalRegion bounded_local_goal{
-        .goal_id = "750m-local-goal",
-        .target = PointGoal{.position_m = *target, .tolerance_m = 0.2},
-    };
-    const auto snapshot = shared::MapSnapshot::Create(
-        local_request.world.local_map, shared::MapContract::kLocalElevation);
-    ASSERT_TRUE(snapshot.ok()) << snapshot.reason_code;
-    const auto terrain = shared::BuildLocalTerrainProjection(
-        snapshot.snapshot, static_cast<float>(local_request.config.local_occupancy_threshold));
-    ASSERT_TRUE(terrain.ok()) << terrain.reason_code;
-    const WheelPlanResult local = PlanWheel({
-        .start = WheeledState{.pose = current},
-        .goal_odom = bounded_local_goal,
-        .terrain = &*terrain.value,
-        .capability = &capability,
-        .control = {.deadline = SteadyClock::now() + 1s},
-    });
-    local_elapsed += SteadyClock::now() - local_started;
-    ASSERT_TRUE(local.ok()) << local.reason_code
-                            << " segment=" << rolling_segments
-                            << " current=(" << current.position_m.x << ","
-                            << current.position_m.y << ") goal=("
-                            << target->x << "," << target->y << ")";
-    current = local.trajectory.back().pose;
-    ++rolling_segments;
-  }
-  EXPECT_GT(rolling_segments, 1U);
-  EXPECT_NEAR(current.position_m.x, 800.0, 0.2);
-  EXPECT_NEAR(current.position_m.y, 500.0, 0.2);
-  const auto total_elapsed = SteadyClock::now() - end_to_end_started;
-  std::cout << "[rolling-1000m-random-profile] global_ms="
-            << std::chrono::duration<double, std::milli>(global_elapsed).count()
-            << " local_total_ms="
-            << std::chrono::duration<double, std::milli>(local_elapsed).count()
-            << " end_to_end_ms="
-            << std::chrono::duration<double, std::milli>(total_elapsed).count()
-            << " local_segments=" << rolling_segments << '\n';
+  ASSERT_TRUE(record.success) << "failed_segment=" << record.failed_segment;
+  EXPECT_LT(record.rolling_segments, 320U);
+  EXPECT_EQ(record.cycles_at_least_three_seconds, 0U);
+  EXPECT_EQ(record.cycles_under_one_second +
+                record.cycles_one_to_two_seconds +
+                record.cycles_two_to_three_seconds +
+                record.cycles_at_least_three_seconds,
+            record.rolling_segments);
+  EXPECT_NEAR(record.final_pose.position_m.x, 800.0, 0.2);
+  EXPECT_NEAR(record.final_pose.position_m.y, 500.0, 0.2);
 }
 
 TEST(WheelPlanner, InitialVelocityShortensTheFirstExecutableProfileAndCost) {
@@ -1402,6 +1930,79 @@ TEST(WheelPlanner, DoesNotInstantlyFlipAnOpposingInitialVelocity) {
   const WheelPlanResult result = PlanWheel(request);
 
   EXPECT_EQ(result.status, LocalPlanStatus::kNoPath) << result.reason_code;
+  EXPECT_GT(result.full_certifications, 0U);
+  EXPECT_GT(result.full_invalidations, 0U);
+}
+
+TEST(WheelPlanner, RejectsReturnedCertificateWhenRequestIdentityChanges) {
+  const TerrainFixture fixture = FlatTerrain();
+  WheeledCapability capability = Capability(0.2, 0.2);
+  capability.motion_primitives = {
+      Primitive("forward", WheelPrimitiveKind::kForward, 0.4),
+  };
+
+  std::size_t baseline_reads = 0U;
+  WheelPlanRequest baseline = RequestTo(
+      fixture, capability, 1.4, 1.0, 0.0, Pose(1.0, 1.0));
+  baseline.local_source_sequence = 7U;
+  baseline.local_terrain_semantics_id = 13U;
+  baseline.capability_fingerprint = 11U;
+  baseline.control.deadline = SteadyClock::time_point::max();
+  baseline.control.now = [&] {
+    ++baseline_reads;
+    return SteadyClock::time_point{};
+  };
+  const WheelPlanResult baseline_result = PlanWheel(baseline);
+  ASSERT_TRUE(baseline_result.ok()) << baseline_result.reason_code;
+  ASSERT_EQ(baseline_result.returned_edge_certificate_confirmations, 1U);
+  ASSERT_GT(baseline_result.trajectory.size(), 1U);
+  ASSERT_EQ((baseline_result.trajectory.size() - 1U) % 8U, 0U);
+  const std::size_t reconstructed_edges =
+      (baseline_result.trajectory.size() - 1U) / 8U;
+  const std::size_t reconstruction_reads = 3U + 9U * reconstructed_edges;
+  ASSERT_GT(baseline_reads, reconstruction_reads);
+  const std::size_t first_reconstruction_read =
+      baseline_reads - reconstruction_reads;
+
+  WheelPlanRequest changed = RequestTo(
+      fixture, capability, 1.4, 1.0, 0.0, Pose(1.0, 1.0));
+  changed.local_source_sequence = 7U;
+  changed.local_terrain_semantics_id = 13U;
+  changed.capability_fingerprint = 11U;
+  changed.control.deadline = SteadyClock::time_point::max();
+  std::size_t changed_reads = 0U;
+  changed.control.now = [&] {
+    if (changed_reads++ == first_reconstruction_read) {
+      changed.local_source_sequence = 8U;
+    }
+    return SteadyClock::time_point{};
+  };
+
+  const WheelPlanResult result = PlanWheel(changed);
+
+  EXPECT_EQ(result.status, LocalPlanStatus::kPlannerError);
+  EXPECT_EQ(result.reason_code, "WHEEL_CERTIFIED_EDGE_MISSING");
+  EXPECT_EQ(result.returned_edge_certificate_confirmations, 0U);
+
+  WheelPlanRequest changed_semantics = RequestTo(
+      fixture, capability, 1.4, 1.0, 0.0, Pose(1.0, 1.0));
+  changed_semantics.local_source_sequence = 7U;
+  changed_semantics.local_terrain_semantics_id = 13U;
+  changed_semantics.capability_fingerprint = 11U;
+  changed_semantics.control.deadline = SteadyClock::time_point::max();
+  std::size_t semantics_reads = 0U;
+  changed_semantics.control.now = [&] {
+    if (semantics_reads++ == first_reconstruction_read) {
+      changed_semantics.local_terrain_semantics_id = 14U;
+    }
+    return SteadyClock::time_point{};
+  };
+
+  const WheelPlanResult semantics_result = PlanWheel(changed_semantics);
+
+  EXPECT_EQ(semantics_result.status, LocalPlanStatus::kPlannerError);
+  EXPECT_EQ(semantics_result.reason_code, "WHEEL_CERTIFIED_EDGE_MISSING");
+  EXPECT_EQ(semantics_result.returned_edge_certificate_confirmations, 0U);
 }
 
 TEST(WheelPlanner, SpinProfileContinuesInitialYawVelocityWithinAcceleration) {
@@ -1545,8 +2146,9 @@ TEST(WheelPlanner, UsesGoalTolerancesButStillReturnsTheExactPointAndYaw) {
   WheelPlanRequest request = RequestTo(
       fixture, capability, 1.0 + std::sin(kGoalYaw),
       2.0 - std::cos(kGoalYaw), kGoalYaw);
-  std::get<PointGoal>(request.goal_odom.target).tolerance_m = 0.05;
-  request.goal_odom.yaw_tolerance_rad = 0.1;
+  std::get<PointGoal>(request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.05;
+  request.goals_odom.goals_odom.front().yaw_tolerance_rad = 0.1;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -1568,8 +2170,9 @@ TEST(WheelPlanner, ConnectsInsideBothPositionAndYawToleranceIntervals) {
   WheelPlanRequest request = RequestTo(
       fixture, capability, 1.0 + std::sin(kPositionCenterYaw),
       2.0 - std::cos(kPositionCenterYaw), 0.2);
-  std::get<PointGoal>(request.goal_odom.target).tolerance_m = 0.03;
-  request.goal_odom.yaw_tolerance_rad = 0.03;
+  std::get<PointGoal>(request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.03;
+  request.goals_odom.goals_odom.front().yaw_tolerance_rad = 0.03;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -1596,7 +2199,8 @@ TEST(WheelPlanner, ConnectsAtANonCenterXYPointInsidePositionTolerance) {
   };
   WheelPlanRequest request = RequestTo(
       fixture, capability, 1.25, 1.03, 0.0, Pose(1.0, 1.0));
-  std::get<PointGoal>(request.goal_odom.target).tolerance_m = 0.05;
+  std::get<PointGoal>(request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.05;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -1625,7 +2229,8 @@ TEST(WheelPlanner, AcceptsACertifiedNonCenterStateInsidePointGoalRegion) {
   };
   WheelPlanRequest request = RequestTo(
       fixture, capability, 1.35, 1.0, 0.0, Pose(1.0, 1.0));
-  std::get<PointGoal>(request.goal_odom.target).tolerance_m = 0.15;
+  std::get<PointGoal>(request.goals_odom.goals_odom.front().target)
+      .tolerance_m = 0.15;
 
   const WheelPlanResult result = PlanWheel(request);
 
@@ -1657,7 +2262,7 @@ TEST(WheelPlanner, MapsImmediateCancellationAndExpiredDeadline) {
   EXPECT_EQ(expired_result.reason_code, "TIMEOUT");
 }
 
-TEST(WheelPlanner, BoundsAFullSizeHighBranchingSearchUnderOneSecond) {
+TEST(WheelPlanner, SolvesAFullSizeHighBranchingSearchWithoutAFixedStateCap) {
   constexpr std::size_t kSide = 320U;
   const TerrainFixture fixture = MakeTerrain(
       kSide, kSide, std::vector<float>(kSide * kSide, 0.0F));
@@ -1670,17 +2275,15 @@ TEST(WheelPlanner, BoundsAFullSizeHighBranchingSearchUnderOneSecond) {
   };
   WheelPlanRequest request = RequestTo(
       fixture, capability, 62.0, 32.0, 0.0, Pose(2.0, 32.0));
-  request.maximum_search_states = 192U;
   request.control.deadline = SteadyClock::now() + 950ms;
 
   const auto begin = SteadyClock::now();
   const WheelPlanResult result = PlanWheel(request);
   const auto elapsed = SteadyClock::now() - begin;
 
-  EXPECT_EQ(result.status, LocalPlanStatus::kPlannerError);
-  EXPECT_EQ(result.reason_code, "WHEEL_SEARCH_CAPACITY_EXHAUSTED");
+  ASSERT_TRUE(result.ok()) << result.reason_code;
   EXPECT_LT(elapsed, 1s);
-  EXPECT_LE(result.quantized_state_count, request.maximum_search_states);
+  EXPECT_GT(result.quantized_state_count, 192U);
 }
 
 TEST(WheelPlanner, SolvesAFullSizeNarrowCorridorUnderOneSecond) {
@@ -1714,7 +2317,7 @@ TEST(WheelPlanner, RejectsPlanarRegionWithoutReadingLegacyAdmissionData) {
   const TerrainFixture fixture = FlatTerrain();
   const WheeledCapability capability = Capability();
   WheelPlanRequest request = RequestTo(fixture, capability, 2.0, 1.0, 0.0);
-  request.goal_odom.target = PlanarRegionGoal{};
+  request.goals_odom.goals_odom.front().target = PlanarRegionGoal{};
 
   const WheelPlanResult result = PlanWheel(request);
 

@@ -95,11 +95,24 @@ SurfaceRollingSession::SurfaceRollingSession(GlobalRoute route,
       final_goal_(std::move(final_goal)),
       config_(config) {}
 
-SurfaceRollingDecision SurfaceRollingSession::Decide(const Pose3& pose_map) const {
+SurfaceRollingDecision SurfaceRollingSession::Decide(
+    const Pose3& pose_map, const double minimum_route_progress_m) const {
   if (!IsValidRoute(route_) || !IsValidFinalGoal(final_goal_) ||
       !IsFinite(pose_map) || !std::isfinite(config_.horizon_m) ||
       config_.horizon_m <= 0.0 || !std::isfinite(config_.max_deviation_m) ||
-      config_.max_deviation_m < 0.0) {
+      config_.max_deviation_m < 0.0 ||
+      !std::isfinite(minimum_route_progress_m) ||
+      minimum_route_progress_m < 0.0) {
+    return {};
+  }
+
+  double route_length_m{};
+  for (std::size_t index = 0U; index + 1U < route_.poses_map.size();
+       ++index) {
+    route_length_m += DistanceXY(route_.poses_map[index].position_m,
+                                 route_.poses_map[index + 1U].position_m);
+  }
+  if (minimum_route_progress_m > route_length_m) {
     return {};
   }
 
@@ -108,7 +121,6 @@ SurfaceRollingDecision SurfaceRollingSession::Decide(const Pose3& pose_map) cons
       final_point->tolerance_m) {
     return {
         .kind = SurfaceRollingDecision::Kind::kFinalGoalReached,
-        .goal = std::nullopt,
         .lateral_deviation_m = 0.0,
     };
   }
@@ -118,39 +130,28 @@ SurfaceRollingDecision SurfaceRollingSession::Decide(const Pose3& pose_map) cons
     return {};
   }
 
-  double remaining_horizon_m = config_.horizon_m;
-  for (std::size_t index = closest->segment_index;
-       index + 1U < route_.poses_map.size(); ++index) {
-    const Vec3& start = route_.poses_map[index].position_m;
-    const Vec3& end = route_.poses_map[index + 1U].position_m;
-    const double segment_length_m = DistanceXY(start, end);
-    if (segment_length_m <= std::numeric_limits<double>::epsilon()) {
-      continue;
+  double projected_route_progress_m{};
+  for (std::size_t index = 0U; index + 1U < route_.poses_map.size(); ++index) {
+    const double segment_length_m =
+        DistanceXY(route_.poses_map[index].position_m,
+                   route_.poses_map[index + 1U].position_m);
+    if (index < closest->segment_index) {
+      projected_route_progress_m += segment_length_m;
+    } else if (index == closest->segment_index) {
+      projected_route_progress_m += closest->fraction * segment_length_m;
     }
-    const double start_fraction = index == closest->segment_index
-                                      ? closest->fraction
-                                      : 0.0;
-    const double available_m = (1.0 - start_fraction) * segment_length_m;
-    if (remaining_horizon_m <= available_m) {
-      const double target_fraction =
-          start_fraction + remaining_horizon_m / segment_length_m;
-      GoalRegion goal = final_goal_;
-      goal.target = PointGoal{
-          .position_m = Interpolate(start, end, target_fraction),
-          .tolerance_m = final_point->tolerance_m,
-      };
-      return {
-          .kind = SurfaceRollingDecision::Kind::kNextGoal,
-          .goal = std::move(goal),
-          .lateral_deviation_m = closest->lateral_deviation_m,
-      };
-    }
-    remaining_horizon_m -= available_m;
   }
+  projected_route_progress_m =
+      std::max(projected_route_progress_m, minimum_route_progress_m);
 
+  const double desired_horizon_progress_m =
+      std::min(route_length_m,
+               projected_route_progress_m + config_.horizon_m);
   return {
-      .kind = SurfaceRollingDecision::Kind::kNextGoal,
-      .goal = final_goal_,
+      .kind = SurfaceRollingDecision::Kind::kNextPortalSet,
+      .projected_route_progress_m = projected_route_progress_m,
+      .desired_horizon_progress_m = desired_horizon_progress_m,
+      .targets_final_goal = desired_horizon_progress_m >= route_length_m,
       .lateral_deviation_m = closest->lateral_deviation_m,
   };
 }

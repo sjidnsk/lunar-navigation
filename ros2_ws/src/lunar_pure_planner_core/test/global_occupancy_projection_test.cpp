@@ -84,31 +84,52 @@ TEST(GlobalOccupancyProjection, DerivesClearanceOnlyFromNativeHazards) {
       occupied.projection->View().clearance_m;
   ASSERT_EQ(unknown_clearance.size(), 5U);
   EXPECT_TRUE(std::ranges::equal(unknown_clearance, occupied_clearance));
-  EXPECT_FLOAT_EQ(unknown_clearance[0], 2.0F);
-  EXPECT_FLOAT_EQ(unknown_clearance[1], 1.0F);
+  EXPECT_FLOAT_EQ(unknown_clearance[0], 1.5F);
+  EXPECT_FLOAT_EQ(unknown_clearance[1], 0.5F);
   EXPECT_FLOAT_EQ(unknown_clearance[2], 0.0F);
-  EXPECT_FLOAT_EQ(unknown_clearance[3], 1.0F);
-  EXPECT_FLOAT_EQ(unknown_clearance[4], 2.0F);
+  EXPECT_FLOAT_EQ(unknown_clearance[3], 0.5F);
+  EXPECT_FLOAT_EQ(unknown_clearance[4], 1.5F);
   EXPECT_TRUE(std::ranges::all_of(
       clear.projection->View().clearance_m,
       [](const float value) { return std::isinf(value) && value > 0.0F; }));
 }
 
-TEST(GlobalOccupancyProjection, InflatesNativeClearanceIntoHardInfeasibility) {
-  std::vector<std::int8_t> occupancy(9U * 5U, 0);
-  occupancy[2U * 9U + 4U] = 100;
-  const auto map = Snapshot(std::move(occupancy), 9U);
+TEST(GlobalOccupancyProjection, UsesOccupiedCellAreaForDiagonalClearance) {
+  std::vector<std::int8_t> occupancy(5U * 5U, 0);
+  occupancy[2U * 5U + 2U] = 100;
+  const auto map = Snapshot(std::move(occupancy), 5U);
+
+  const auto result = BuildGlobalOccupancyProjection(map, 50);
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  const auto view = result.projection->View();
+  EXPECT_FLOAT_EQ(view.ClearanceMeters({.x = 2, .y = 2}), 0.0F);
+  EXPECT_FLOAT_EQ(view.ClearanceMeters({.x = 3, .y = 2}), 0.5F);
+  EXPECT_FLOAT_EQ(view.ClearanceMeters({.x = 4, .y = 2}), 1.5F);
+  EXPECT_FLOAT_EQ(view.ClearanceMeters({.x = 3, .y = 3}),
+                  static_cast<float>(std::sqrt(0.5)));
+}
+
+TEST(GlobalOccupancyProjection, InflatesByStrictOccupiedCellAreaDistance) {
+  std::vector<std::int8_t> occupancy(5U * 5U, 0);
+  occupancy[2U * 5U + 2U] = 100;
+  const auto map = Snapshot(std::move(occupancy), 5U);
 
   const auto native = BuildGlobalOccupancyProjection(map, 50);
-  const auto inflated = BuildInflatedGlobalOccupancyProjection(map, 50, 1.1);
+  const auto inflated =
+      BuildInflatedGlobalOccupancyProjection(map, 50, 0.9187);
+  const auto equality = BuildInflatedGlobalOccupancyProjection(map, 50, 0.5);
 
   ASSERT_TRUE(native.ok()) << native.reason_code;
   ASSERT_TRUE(inflated.ok()) << inflated.reason_code;
+  ASSERT_TRUE(equality.ok()) << equality.reason_code;
   EXPECT_TRUE(native.projection->View().HardFeasible({.x = 3, .y = 2}));
   EXPECT_FALSE(inflated.projection->View().HardFeasible({.x = 3, .y = 2}));
-  EXPECT_TRUE(inflated.projection->View().HardFeasible({.x = 0, .y = 0}));
+  EXPECT_FALSE(inflated.projection->View().HardFeasible({.x = 3, .y = 3}));
+  EXPECT_TRUE(inflated.projection->View().HardFeasible({.x = 4, .y = 2}));
+  EXPECT_TRUE(equality.projection->View().HardFeasible({.x = 3, .y = 2}));
   EXPECT_FLOAT_EQ(inflated.projection->View().ClearanceMeters({.x = 3, .y = 2}),
-                  1.0F);
+                  0.5F);
 }
 
 TEST(GlobalOccupancyProjection, RejectsInvalidInflationDistance) {

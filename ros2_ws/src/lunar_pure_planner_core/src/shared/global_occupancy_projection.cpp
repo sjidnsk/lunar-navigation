@@ -1,11 +1,12 @@
 #include "shared/global_occupancy_projection.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <limits>
+#include <cstdint>
+#include <utility>
 #include <vector>
 
+#include "shared/cell_area_distance_transform.hpp"
 #include "shared/controlled_work.hpp"
 
 namespace lunar::pure_planning::shared {
@@ -15,49 +16,6 @@ namespace {
                             const std::int32_t threshold) noexcept {
   const auto value = static_cast<std::int32_t>(raw_value);
   return value < 0 || value > 100 || value >= threshold;
-}
-
-// Felzenszwalb-Huttenlocher lower-envelope transform.  Input and output are
-// squared distances in cell units; infinite inputs are non-obstacle cells.
-void TransformLine(const std::vector<double>& input, std::vector<double>* output) {
-  const std::size_t size = input.size();
-  output->assign(size, std::numeric_limits<double>::infinity());
-  std::vector<std::size_t> sites;
-  sites.reserve(size);
-  for (std::size_t index = 0U; index < size; ++index) {
-    if (std::isfinite(input[index])) sites.push_back(index);
-  }
-  if (sites.empty()) return;
-  std::vector<std::size_t> envelope(sites.size());
-  std::vector<double> boundary(sites.size() + 1U);
-  std::size_t count = 0U;
-  envelope[0] = sites[0];
-  boundary[0] = -std::numeric_limits<double>::infinity();
-  boundary[1] = std::numeric_limits<double>::infinity();
-  for (std::size_t source_index = 1U; source_index < sites.size(); ++source_index) {
-    const std::size_t q = sites[source_index];
-    double intersection{};
-    do {
-      const std::size_t v = envelope[count];
-      intersection = ((input[q] + static_cast<double>(q) * q) -
-                      (input[v] + static_cast<double>(v) * v)) /
-                     (2.0 * static_cast<double>(q - v));
-      if (intersection <= boundary[count] && count > 0U) --count;
-      else break;
-    } while (true);
-    ++count;
-    envelope[count] = q;
-    boundary[count] = intersection;
-    boundary[count + 1U] = std::numeric_limits<double>::infinity();
-  }
-  std::size_t segment{};
-  for (std::size_t x = 0U; x < size; ++x) {
-    while (segment + 1U <= count && boundary[segment + 1U] < static_cast<double>(x)) {
-      ++segment;
-    }
-    const double delta = static_cast<double>(x) - envelope[segment];
-    (*output)[x] = delta * delta + input[envelope[segment]];
-  }
 }
 
 }  // namespace
@@ -115,8 +73,7 @@ GlobalOccupancyProjectionBuildResult BuildGlobalOccupancyProjection(
     return {.reason_code = std::string{*stopped}};
   }
 
-  const double infinity = std::numeric_limits<double>::infinity();
-  std::vector<double> squared_distance(count, infinity);
+  std::vector<std::uint8_t> hazard_mask(count, 0U);
   for (std::size_t index = 0U; index < count; ++index) {
     if (ControlCheckDue(index)) {
       if (const auto stopped = StopReason(control); stopped.has_value()) {
@@ -125,41 +82,15 @@ GlobalOccupancyProjectionBuildResult BuildGlobalOccupancyProjection(
     }
     const bool hazard = IsHazard(occupancy[index], obstacle_threshold_percent);
     projection.hard_feasible_[index] = static_cast<std::uint8_t>(!hazard);
-    if (hazard) squared_distance[index] = 0.0;
+    hazard_mask[index] = static_cast<std::uint8_t>(hazard);
   }
-  std::vector<double> temporary(count, infinity);
-  std::vector<double> line;
-  std::vector<double> transformed;
-  line.resize(projection.source_map_->width());
-  for (std::size_t y = 0U; y < projection.source_map_->height(); ++y) {
-    if (ControlCheckDue(y)) {
-      if (const auto stopped = StopReason(control); stopped.has_value()) {
-        return {.reason_code = std::string{*stopped}};
-      }
-    }
-    const std::size_t begin = y * projection.source_map_->width();
-    std::copy_n(squared_distance.begin() + begin, line.size(), line.begin());
-    TransformLine(line, &transformed);
-    std::copy(transformed.begin(), transformed.end(), temporary.begin() + begin);
+  auto clearance = BuildCellAreaClearance(
+      projection.source_map_->width(), projection.source_map_->height(),
+      projection.source_map_->resolution_m(), hazard_mask, control);
+  if (!clearance.ok()) {
+    return {.reason_code = std::move(clearance.reason_code)};
   }
-  line.resize(projection.source_map_->height());
-  projection.clearance_m_.resize(count);
-  for (std::size_t x = 0U; x < projection.source_map_->width(); ++x) {
-    if (ControlCheckDue(x)) {
-      if (const auto stopped = StopReason(control); stopped.has_value()) {
-        return {.reason_code = std::string{*stopped}};
-      }
-    }
-    for (std::size_t y = 0U; y < projection.source_map_->height(); ++y) {
-      line[y] = temporary[y * projection.source_map_->width() + x];
-    }
-    TransformLine(line, &transformed);
-    for (std::size_t y = 0U; y < projection.source_map_->height(); ++y) {
-      projection.clearance_m_[y * projection.source_map_->width() + x] =
-          static_cast<float>(std::sqrt(transformed[y]) *
-                             projection.source_map_->resolution_m());
-    }
-  }
+  projection.clearance_m_ = std::move(clearance.clearance_m);
   if (const auto stopped = StopReason(control); stopped.has_value()) {
     return {.reason_code = std::string{*stopped}};
   }
@@ -183,15 +114,39 @@ GlobalOccupancyProjectionBuildResult BuildInflatedGlobalOccupancyProjection(
   }
 
   GlobalOccupancyProjection projection = std::move(*native.projection);
+  const auto stencil = BuildCellAreaInflationStencil(
+      projection.source_map_->resolution_m(), inflation_m);
+  std::size_t work{};
   for (std::size_t index = 0U; index < projection.hard_feasible_.size();
        ++index) {
-    if (ControlCheckDue(index)) {
+    if (projection.clearance_m_[index] != 0.0F) {
+      continue;
+    }
+    const std::int64_t hazard_x = static_cast<std::int64_t>(
+        index % projection.source_map_->width());
+    const std::int64_t hazard_y = static_cast<std::int64_t>(
+        index / projection.source_map_->width());
+    for (const CellAreaOffset offset : stencil) {
+      if (ControlCheckDue(work++)) {
+        if (const auto stopped = StopReason(control); stopped.has_value()) {
+          return {.reason_code = std::string{*stopped}};
+        }
+      }
+      const std::int64_t x = hazard_x + offset.dx;
+      const std::int64_t y = hazard_y + offset.dy;
+      if (x < 0 || y < 0 ||
+          x >= static_cast<std::int64_t>(projection.source_map_->width()) ||
+          y >= static_cast<std::int64_t>(projection.source_map_->height())) {
+        continue;
+      }
+      projection.hard_feasible_[static_cast<std::size_t>(y) *
+                                    projection.source_map_->width() +
+                                static_cast<std::size_t>(x)] = 0U;
+    }
+    if (ControlCheckDue(work++)) {
       if (const auto stopped = StopReason(control); stopped.has_value()) {
         return {.reason_code = std::string{*stopped}};
       }
-    }
-    if (projection.clearance_m_[index] < inflation_m) {
-      projection.hard_feasible_[index] = 0U;
     }
   }
   if (const auto stopped = StopReason(control); stopped.has_value()) {

@@ -27,13 +27,16 @@ set(LUNAR_ANYTIME_PRODUCTION_SOURCES
   src/hierarchical/frame_transform.cpp
   src/hierarchical/global_route_planner.cpp
   src/hierarchical/reference_composer.cpp
+  src/hierarchical/surface_portal_set.cpp
   src/hierarchical/surface_rolling_session.cpp
   src/hierarchical/surface_global_search.cpp
   src/hopper/anytime_hopper_planner.cpp
   src/hopper/ballistic_envelope.cpp
   src/hopper/ballistic_kinematics.cpp
   src/legged/anytime_legged_planner.cpp
+  src/shared/active_planner_cache.cpp
   src/shared/anytime_ara_star.cpp
+  src/shared/cell_area_distance_transform.cpp
   src/shared/global_occupancy_projection.cpp
   src/shared/goal_distance_field.cpp
   src/shared/local_terrain_projection.cpp
@@ -103,6 +106,8 @@ if(BUILD_TESTING)
     test/surface_global_search_test.cpp)
   lunar_add_core_gtest(lunar_pure_planner_core_surface_rolling_session_test
     test/surface_rolling_session_test.cpp)
+  lunar_add_core_gtest(lunar_pure_planner_core_surface_portal_set_test
+    test/surface_portal_set_test.cpp)
   lunar_add_core_gtest(lunar_pure_planner_core_local_terrain_projection_test
     test/local_terrain_projection_test.cpp)
   lunar_add_core_gtest(lunar_pure_planner_core_obstacle_height_estimator_test
@@ -115,6 +120,8 @@ if(BUILD_TESTING)
     test/anytime_hopper_planner_test.cpp)
   lunar_add_core_gtest(lunar_pure_planner_core_ballistic_envelope_test
     test/ballistic_envelope_test.cpp)
+  lunar_add_core_gtest(lunar_pure_planner_core_active_planner_cache_test
+    test/active_planner_cache_test.cpp)
 
   add_test(
     NAME lunar_pure_planner_core_no_legacy_contract

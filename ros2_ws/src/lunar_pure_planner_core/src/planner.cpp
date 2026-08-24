@@ -15,6 +15,8 @@
 #include "legged/anytime_legged_planner.hpp"
 #include "legged/legged_types.hpp"
 #include "shared/controlled_work.hpp"
+#include "shared/active_planner_cache.hpp"
+#include "shared/goal_distance_field.hpp"
 #include "shared/local_terrain_projection.hpp"
 #include "shared/map_snapshot.hpp"
 #include "shared/obstacle_height_estimator.hpp"
@@ -24,10 +26,6 @@ namespace lunar::pure_planning {
 namespace {
 
 using namespace std::chrono_literals;
-
-constexpr auto kTotalBudget = 1s;
-constexpr auto kGlobalBudget = 150ms;
-constexpr auto kOutputReserve = 50ms;
 
 [[nodiscard]] SteadyClock::time_point ReadNow(const NowFn& now) {
   return now ? now() : SteadyClock::now();
@@ -99,12 +97,15 @@ constexpr auto kOutputReserve = 50ms;
 
 [[nodiscard]] bool FinalizeTiming(
     PlanningResult& result, const SteadyClock::time_point started,
+    const SteadyClock::time_point output_started,
     const NowFn& now, const PlannerCallTiming& timing,
     SteadyClock::time_point* const finished_at) noexcept {
   result.timing = timing;
   try {
     const SteadyClock::time_point finish = ReadNow(now);
     result.timing.total_elapsed = NonNegativeElapsed(started, finish);
+    result.timing.output_elapsed +=
+        NonNegativeElapsed(output_started, finish);
     if (finished_at != nullptr) {
       *finished_at = finish;
     }
@@ -148,18 +149,49 @@ constexpr auto kOutputReserve = 50ms;
 }
 
 [[nodiscard]] LocalStageResult PlanLocalDefault(
-    const PlanningRequest& input, const GoalRegion& goal_odom,
-    SearchControl control) {
-  auto snapshot = shared::MapSnapshot::Create(
-      input.world.local_map, shared::MapContract::kLocalElevation, control);
+    const PlanningRequest& input, const LocalGoalSet& goals_odom,
+    SearchControl control, shared::ActivePlannerCache& cache) {
+  if (goals_odom.goals_odom.empty()) {
+    return {.status = LocalPlanStatus::kInvalidInput,
+            .reason_code = "INVALID_INPUT"};
+  }
+  const auto snapshot = cache.local_snapshot().GetOrBuild(
+      shared::MakeLocalSnapshotCacheKey(input.world.local_map_sequence),
+      control, [&](const SearchControl& build_control) {
+        auto built = shared::MapSnapshot::Create(
+            input.world.local_map, shared::MapContract::kLocalElevation,
+            build_control);
+        return shared::ImmutableCacheBuildResult<shared::MapSnapshot>{
+            .value = std::move(built.snapshot),
+            .reason_code = std::move(built.reason_code),
+        };
+      });
   if (!snapshot.ok()) {
     return LocalControlledFailure(snapshot.reason_code);
   }
-  auto projection = shared::BuildLocalTerrainProjection(
-      snapshot.snapshot,
-      static_cast<float>(input.config.local_occupancy_threshold), control);
+  const auto local_projection_key = shared::MakeLocalProjectionCacheKey(
+      input.world.local_map_sequence,
+      input.config.local_occupancy_threshold);
+  const auto projection = cache.local_projection().GetOrBuild(
+      local_projection_key,
+      control, [&](const SearchControl& build_control) {
+        auto built = shared::BuildLocalTerrainProjection(
+            snapshot.value,
+            static_cast<float>(input.config.local_occupancy_threshold),
+            build_control);
+        return shared::ImmutableCacheBuildResult<
+            shared::LocalTerrainProjection>{
+            .value = !built.value.has_value()
+                         ? nullptr
+                         : std::make_shared<const shared::LocalTerrainProjection>(
+                               std::move(*built.value)),
+            .reason_code = std::move(built.reason_code),
+        };
+      });
   if (!projection.ok()) {
-    return LocalControlledFailure(projection.reason_code);
+    LocalStageResult failure = LocalControlledFailure(projection.reason_code);
+    failure.snapshot_cache_hit = snapshot.cache_hit;
+    return failure;
   }
   const shared::LocalTerrainProjection& terrain = *projection.value;
 
@@ -168,13 +200,61 @@ constexpr auto kOutputReserve = 50ms;
     const auto* state = std::get_if<WheeledState>(&input.current_state);
     if (state == nullptr) {
       return {.status = LocalPlanStatus::kInvalidInput,
-              .reason_code = "INVALID_INPUT"};
+              .reason_code = "INVALID_INPUT",
+              .snapshot_cache_hit = snapshot.cache_hit,
+              .projection_cache_hit = projection.cache_hit};
+    }
+    std::vector<shared::GridCell> goal_cells;
+    goal_cells.reserve(goals_odom.goals_odom.size());
+    for (const GoalRegion& goal : goals_odom.goals_odom) {
+      const auto* point = std::get_if<PointGoal>(&goal.target);
+      if (point == nullptr) {
+        continue;
+      }
+      const auto cell = terrain.map->PositionToCell(
+          {.x = point->position_m.x, .y = point->position_m.y});
+      if (cell.has_value()) {
+        goal_cells.push_back(*cell);
+      }
+    }
+    const std::uint64_t capability_fingerprint =
+        shared::StableCapabilityFingerprint(input.capability);
+    const auto goal_field = cache.goal_field().GetOrBuild(
+        shared::MakeGoalFieldCacheKey(
+            input.world.local_map_sequence,
+            input.config.local_occupancy_threshold, capability_fingerprint,
+            goals_odom, input.config.search),
+        control, [&](const SearchControl& build_control) {
+          auto built = shared::BuildGoalDistanceField(
+              terrain, goal_cells, build_control);
+          return shared::ImmutableCacheBuildResult<shared::GoalDistanceField>{
+              .value = !built.has_value()
+                           ? nullptr
+                           : std::make_shared<const shared::GoalDistanceField>(
+                                 std::move(*built)),
+              .reason_code =
+                  !built.has_value()
+                      ? std::string{shared::StopReason(build_control)
+                                        .value_or("INVALID_INPUT")}
+                      : std::string{},
+          };
+        });
+    if (!goal_field.ok()) {
+      LocalStageResult failure = LocalControlledFailure(goal_field.reason_code);
+      failure.snapshot_cache_hit = snapshot.cache_hit;
+      failure.projection_cache_hit = projection.cache_hit;
+      return failure;
     }
     wheel::WheelPlanResult result = wheel::PlanWheel({
         .start = *state,
-        .goal_odom = goal_odom,
+        .goals_odom = goals_odom,
         .terrain = &terrain,
         .capability = capability,
+        .local_source_sequence = input.world.local_map_sequence,
+        .local_terrain_semantics_id =
+            local_projection_key.semantic_identities.front(),
+        .capability_fingerprint = capability_fingerprint,
+        .goal_distance_field = goal_field.value,
         .control = control,
         .search = input.config.search,
     });
@@ -187,15 +267,26 @@ constexpr auto kOutputReserve = 50ms;
                       }}
                     : std::nullopt,
         .reason_code = std::move(result.reason_code),
+        .selected_goal_index = result.selected_goal_index,
+        .snapshot_cache_hit = snapshot.cache_hit,
+        .projection_cache_hit = projection.cache_hit,
+        .goal_field_cache_hit = goal_field.cache_hit,
+        .expanded_states = result.metrics.expanded_states,
+        .best_cost = result.ok() ? std::optional<double>{result.cost}
+                                 : std::nullopt,
     };
   }
+
+  const GoalRegion& goal_odom = goals_odom.goals_odom.front();
 
   if (const auto* capability =
           std::get_if<LeggedCapability>(&input.capability)) {
     const auto* state = std::get_if<LeggedState>(&input.current_state);
     if (state == nullptr) {
       return {.status = LocalPlanStatus::kInvalidInput,
-              .reason_code = "INVALID_INPUT"};
+              .reason_code = "INVALID_INPUT",
+              .snapshot_cache_hit = snapshot.cache_hit,
+              .projection_cache_hit = projection.cache_hit};
     }
     legged::LeggedPlanResult result = legged::PlanLegged({
         .start = *state,
@@ -209,7 +300,11 @@ constexpr auto kOutputReserve = 50ms;
     if (result.ok()) {
       if (const auto stopped = shared::StopReason(control);
           stopped.has_value()) {
-        return LocalControlledFailure(std::string{*stopped});
+        LocalStageResult failure =
+            LocalControlledFailure(std::string{*stopped});
+        failure.snapshot_cache_hit = snapshot.cache_hit;
+        failure.projection_cache_hit = projection.cache_hit;
+        return failure;
       }
       TrajectoryReference trajectory{
           .semantics = TrajectorySemantics::kLeggedBodyReference,
@@ -217,14 +312,22 @@ constexpr auto kOutputReserve = 50ms;
       trajectory.points.reserve(result.trajectory.size() + 1U);
       if (const auto stopped = shared::StopReason(control);
           stopped.has_value()) {
-        return LocalControlledFailure(std::string{*stopped});
+        LocalStageResult failure =
+            LocalControlledFailure(std::string{*stopped});
+        failure.snapshot_cache_hit = snapshot.cache_hit;
+        failure.projection_cache_hit = projection.cache_hit;
+        return failure;
       }
       trajectory.points.push_back(
           {.pose = state->body_pose, .velocity = state->body_velocity});
       for (const legged::LeggedTransition& transition : result.trajectory) {
         if (const auto stopped = shared::StopReason(control);
             stopped.has_value()) {
-          return LocalControlledFailure(std::string{*stopped});
+          LocalStageResult failure =
+              LocalControlledFailure(std::string{*stopped});
+          failure.snapshot_cache_hit = snapshot.cache_hit;
+          failure.projection_cache_hit = projection.cache_hit;
+          return failure;
         }
         trajectory.points.push_back({
             .pose = Pose3{
@@ -236,7 +339,11 @@ constexpr auto kOutputReserve = 50ms;
       }
       if (const auto stopped = shared::StopReason(control);
           stopped.has_value()) {
-        return LocalControlledFailure(std::string{*stopped});
+        LocalStageResult failure =
+            LocalControlledFailure(std::string{*stopped});
+        failure.snapshot_cache_hit = snapshot.cache_hit;
+        failure.projection_cache_hit = projection.cache_hit;
+        return failure;
       }
       data = std::move(trajectory);
     }
@@ -244,6 +351,14 @@ constexpr auto kOutputReserve = 50ms;
         .status = result.status,
         .data = std::move(data),
         .reason_code = std::move(result.reason_code),
+        .selected_goal_index = result.ok()
+                                   ? std::optional<std::size_t>{0U}
+                                   : std::nullopt,
+        .snapshot_cache_hit = snapshot.cache_hit,
+        .projection_cache_hit = projection.cache_hit,
+        .expanded_states = result.metrics.expanded_states,
+        .best_cost = result.ok() ? std::optional<double>{result.cost}
+                                 : std::nullopt,
     };
   }
 
@@ -251,7 +366,9 @@ constexpr auto kOutputReserve = 50ms;
   const auto* state = std::get_if<HopperState>(&input.current_state);
   if (capability == nullptr || state == nullptr) {
     return {.status = LocalPlanStatus::kInvalidInput,
-            .reason_code = "INVALID_INPUT"};
+            .reason_code = "INVALID_INPUT",
+            .snapshot_cache_hit = snapshot.cache_hit,
+            .projection_cache_hit = projection.cache_hit};
   }
   hopper::HopperPlanResult result = hopper::PlanHopper({
       .start = *state,
@@ -269,18 +386,46 @@ constexpr auto kOutputReserve = 50ms;
                         HopReference{.segments = std::move(result.hops)}}
                   : std::nullopt,
       .reason_code = std::move(result.reason_code),
+      .selected_goal_index = result.ok()
+                                 ? std::optional<std::size_t>{0U}
+                                 : std::nullopt,
+      .snapshot_cache_hit = snapshot.cache_hit,
+      .projection_cache_hit = projection.cache_hit,
+      .expanded_states = result.metrics.expanded_states,
+      .best_cost = result.ok() ? std::optional<double>{result.cost}
+                               : std::nullopt,
   };
 }
 
 }  // namespace
 
-Planner::Planner()
-    : Planner(PlannerBackends{
-          .global = [](const PlanningRequest& input, SearchControl control) {
-            return hierarchical::PlanSurfaceGlobal(input, std::move(control));
-          },
-          .local = PlanLocalDefault,
-      }) {}
+Planner::Planner() : cache_(std::make_shared<shared::ActivePlannerCache>()) {
+  backends_.global =
+      [cache = cache_](const PlanningRequest& input, SearchControl control) {
+        return hierarchical::PlanSurfaceGlobal(input, std::move(control),
+                                               *cache);
+      };
+  backends_.local =
+      [cache = cache_](const PlanningRequest& input,
+                       const LocalGoalSet& goals, SearchControl control) {
+        return PlanLocalDefault(input, goals, std::move(control), *cache);
+      };
+}
+
+LocalStageResult Planner::PlanLocal(const PlanningRequest& input,
+                                    const LocalGoalSet& goals_odom,
+                                    SearchControl control) noexcept {
+  try {
+    if (!backends_.local) {
+      return {.status = LocalPlanStatus::kPlannerError,
+              .reason_code = "PLANNER_ERROR"};
+    }
+    return backends_.local(input, goals_odom, std::move(control));
+  } catch (...) {
+    return {.status = LocalPlanStatus::kPlannerError,
+            .reason_code = "PLANNER_ERROR"};
+  }
+}
 
 Planner::Planner(PlannerBackends backends) : backends_(std::move(backends)) {}
 
@@ -288,28 +433,71 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
   PlannerCallTiming timing;
   SteadyClock::time_point started{};
   try {
-    started = ReadNow(input.control.now);
+    if (input.request_started_at.has_value()) {
+      started = *input.request_started_at;
+    } else {
+      started = ReadNow(input.control.now);
+    }
   } catch (...) {
     return Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
   }
-  const SteadyClock::time_point total_deadline =
-      std::min(started + kTotalBudget, input.control.deadline);
-  const SteadyClock::time_point search_deadline =
-      total_deadline - kOutputReserve;
+  const RequestTimingPolicy policy = MakeRequestTimingPolicy(started);
+  SteadyClock::time_point phase_started = started;
+  bool global_snapshot_cache_hit{};
+  bool global_projection_cache_hit{};
+  bool global_route_cache_hit{};
+  bool local_snapshot_cache_hit{};
+  bool local_projection_cache_hit{};
+  bool goal_field_cache_hit{};
+
+  const auto report_progress = [&](const PlannerPhase phase,
+                                   const std::chrono::nanoseconds elapsed) {
+    if (input.progress) {
+      input.progress(PlannerProgress{.phase = phase, .elapsed = elapsed});
+    }
+  };
+
+  const auto finish_phase = [&](std::chrono::nanoseconds& elapsed,
+                                const PlannerPhase phase) {
+    const auto phase_finished = ReadNow(input.control.now);
+    elapsed += NonNegativeElapsed(phase_started, phase_finished);
+    phase_started = phase_finished;
+    report_progress(phase, elapsed);
+  };
 
   const auto finish = [&](PlanningResult result) {
+    const auto apply_cache_hits = [&](PlanningResult& output) {
+      output.global_snapshot_cache_hit = global_snapshot_cache_hit;
+      output.global_projection_cache_hit = global_projection_cache_hit;
+      output.global_route_cache_hit = global_route_cache_hit;
+      output.local_snapshot_cache_hit = local_snapshot_cache_hit;
+      output.local_projection_cache_hit = local_projection_cache_hit;
+      output.goal_field_cache_hit = goal_field_cache_hit;
+    };
+    apply_cache_hits(result);
     SteadyClock::time_point finished_at{};
-    if (!FinalizeTiming(result, started, input.control.now, timing,
+    if (!FinalizeTiming(result, started, phase_started, input.control.now, timing,
                         &finished_at)) {
       PlanningResult error =
           Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
       error.timing = timing;
+      apply_cache_hits(error);
       return error;
     }
-    if (result.status == PlanningStatus::kSuccess &&
-        finished_at >= total_deadline) {
+    try {
+      report_progress(PlannerPhase::kOutput, result.timing.output_elapsed);
+    } catch (...) {
+      PlanningResult error =
+          Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR");
+      error.timing = result.timing;
+      apply_cache_hits(error);
+      return error;
+    }
+    if (result.status != PlanningStatus::kCanceled &&
+        finished_at >= policy.hard_deadline) {
       PlanningResult timeout = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
       timeout.timing = result.timing;
+      apply_cache_hits(timeout);
       return timeout;
     }
     return result;
@@ -326,15 +514,17 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
         !MatchingPlatform(input) || !MinimalLocalMapValid(input.world.local_map)) {
       return finish(Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT"));
     }
+    finish_phase(timing.snapshot_projection_elapsed,
+                 PlannerPhase::kSnapshotProjection);
 
     std::optional<GlobalRoute> global_route;
-    GoalRegion local_goal;
+    LocalGoalSet local_goals;
     if (input.environment_mode == EnvironmentMode::kLunarSurface) {
       if (!input.world.global_map.has_value() || !backends_.global) {
         return finish(Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT"));
       }
       SearchControl global_control{
-          .deadline = std::min(started + kGlobalBudget, search_deadline),
+          .deadline = policy.hard_deadline,
           .stop_token = input.control.stop_token,
           .now = input.control.now,
       };
@@ -349,30 +539,34 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
               Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR"));
         }
       }
+      global_snapshot_cache_hit = global.snapshot_cache_hit;
+      global_projection_cache_hit = global.projection_cache_hit;
+      global_route_cache_hit = global.route_cache_hit;
+      report_progress(PlannerPhase::kGlobal, timing.global_elapsed);
+      phase_started = global_finished;
       if (global.reason_code == "REQUEST_CANCELED" ||
           input.control.stop_token.stop_requested()) {
         return finish(
             Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED"));
       }
-      if (global_finished >= std::min(started + kGlobalBudget,
-                                      search_deadline)) {
+      if (global_finished >= policy.hard_deadline) {
         return finish(Failure(PlanningStatus::kTimedOut, "TIMEOUT"));
       }
       if (!global.route.has_value()) {
         return finish(GlobalFailure(global.reason_code));
       }
       global_route = std::move(global.route);
-      const auto selected = hierarchical::SelectSurfaceLocalGoal(
+      const auto selected = hierarchical::SelectSurfaceLocalGoals(
           input, *global_route,
           SearchControl{
-              .deadline = search_deadline,
+              .deadline = policy.hard_deadline,
               .stop_token = input.control.stop_token,
               .now = input.control.now,
           });
       if (!selected.ok()) {
         return finish(GlobalFailure(selected.reason_code));
       }
-      local_goal = *selected.goal;
+      local_goals = *selected.goals;
     } else {
       if (!hierarchical::GoalInsideLocalMap(input, input.goal_map)) {
         return finish(Failure(PlanningStatus::kGoalOutsideLocalMap,
@@ -383,14 +577,19 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
       if (!transformed.has_value()) {
         return finish(Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT"));
       }
-      local_goal = *transformed;
+      local_goals = LocalGoalSet{
+          .goals_odom = {*transformed},
+          .exact_final_goal = true,
+      };
     }
+
+    finish_phase(timing.local_goal_elapsed, PlannerPhase::kLocalGoal);
 
     if (!backends_.local) {
       return finish(Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR"));
     }
     SearchControl local_control{
-        .deadline = search_deadline,
+        .deadline = policy.hard_deadline,
         .stop_token = input.control.stop_token,
         .now = input.control.now,
     };
@@ -398,19 +597,24 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
     SteadyClock::time_point local_finished{};
     {
       ScopedPlannerCall call(PlannerStage::kLocal, timing, input.control.now);
-      local = backends_.local(input, local_goal, std::move(local_control));
+      local = backends_.local(input, local_goals, std::move(local_control));
       if (!call.Finish(&local_finished)) {
         return finish(
             Failure(PlanningStatus::kPlannerError, "PLANNER_ERROR"));
       }
     }
+    local_snapshot_cache_hit = local.snapshot_cache_hit;
+    local_projection_cache_hit = local.projection_cache_hit;
+    goal_field_cache_hit = local.goal_field_cache_hit;
+    report_progress(PlannerPhase::kLocalSearch, timing.local_search_elapsed);
+    phase_started = local_finished;
     if (local.status == LocalPlanStatus::kCanceled ||
         input.control.stop_token.stop_requested()) {
       return finish(
           Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED"));
     }
     if (local.status != LocalPlanStatus::kSolved &&
-        local_finished >= search_deadline) {
+        local_finished >= policy.hard_deadline) {
       return finish(Failure(PlanningStatus::kTimedOut, "TIMEOUT"));
     }
     if (local.status != LocalPlanStatus::kSolved) {
@@ -425,27 +629,30 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
             ? hierarchical::ComposeSurfaceReference(
                   input, *global_route, std::move(*local.data),
                   SearchControl{
-                      .deadline = total_deadline,
+                      .deadline = policy.hard_deadline,
                       .stop_token = input.control.stop_token,
                       .now = input.control.now,
                   })
             : hierarchical::ComposeCaveReference(input,
                                                   std::move(*local.data),
                                                   SearchControl{
-                                                      .deadline = total_deadline,
+                                                      .deadline = policy.hard_deadline,
                                                       .stop_token = input.control.stop_token,
                                                       .now = input.control.now,
                                                   });
     if (!composed.ok()) {
       return finish(GlobalFailure(composed.reason_code));
     }
+    finish_phase(timing.certification_elapsed, PlannerPhase::kCertification);
     PlanningResult success{
         .status = PlanningStatus::kSuccess,
         .reason_code = {},
         .reference = std::move(composed.reference),
-        .expanded_states = global_route.has_value()
-                               ? global_route->expanded_states
-                               : 0U,
+        .expanded_states =
+            (global_route.has_value() ? global_route->expanded_states : 0U) +
+            local.expanded_states,
+        .selected_goal_index = local.selected_goal_index,
+        .best_cost = local.best_cost,
     };
     return finish(std::move(success));
   } catch (...) {

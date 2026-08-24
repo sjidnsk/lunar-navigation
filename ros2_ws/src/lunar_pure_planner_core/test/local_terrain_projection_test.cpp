@@ -1,8 +1,11 @@
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <new>
 #include <ranges>
 #include <vector>
 
@@ -14,10 +17,65 @@
 #include "shared/local_terrain_projection.hpp"
 #include "shared/map_snapshot.hpp"
 
+namespace allocation_probe {
+
+thread_local bool enabled = false;
+thread_local std::size_t count = 0U;
+
+}  // namespace allocation_probe
+
+void* operator new(const std::size_t size) {
+  if (allocation_probe::enabled) {
+    ++allocation_probe::count;
+  }
+  if (void* const memory = std::malloc(size); memory != nullptr) {
+    return memory;
+  }
+  throw std::bad_alloc{};
+}
+
+void* operator new[](const std::size_t size) {
+  return ::operator new(size);
+}
+
+void operator delete(void* const memory) noexcept {
+  std::free(memory);
+}
+
+void operator delete[](void* const memory) noexcept {
+  ::operator delete(memory);
+}
+
+void operator delete(void* const memory, const std::size_t) noexcept {
+  ::operator delete(memory);
+}
+
+void operator delete[](void* const memory, const std::size_t) noexcept {
+  ::operator delete[](memory);
+}
+
 namespace lunar::pure_planning::shared {
 namespace {
 
 using namespace std::chrono_literals;
+
+class AllocationScope final {
+ public:
+  AllocationScope() {
+    allocation_probe::count = 0U;
+    allocation_probe::enabled = true;
+  }
+
+  AllocationScope(const AllocationScope&) = delete;
+  AllocationScope& operator=(const AllocationScope&) = delete;
+
+  ~AllocationScope() { allocation_probe::enabled = false; }
+
+  [[nodiscard]] std::size_t Stop() noexcept {
+    allocation_probe::enabled = false;
+    return allocation_probe::count;
+  }
+};
 
 [[nodiscard]] std::shared_ptr<const MapSnapshot> Snapshot(
     const std::size_t width, std::vector<float> occupancy,
@@ -78,7 +136,47 @@ TEST(LocalTerrainProjection, DerivesSlopeRoughnessAndClearanceFromTwoLayers) {
               1.0e-6);
   EXPECT_NEAR(projection.value->roughness_m[corner], 0.0F, 1.0e-6F);
   EXPECT_FLOAT_EQ(projection.value->clearance_m[obstacle], 0.0F);
-  EXPECT_FLOAT_EQ(projection.value->clearance_m[side], 1.0F);
+  EXPECT_FLOAT_EQ(projection.value->clearance_m[side], 0.5F);
+}
+
+TEST(LocalTerrainProjection, UsesOccupiedCellAreaForAxisAndDiagonalClearance) {
+  constexpr std::size_t kWidth = 5U;
+  std::vector<float> occupancy(kWidth * kWidth, 0.0F);
+  occupancy[2U * kWidth + 2U] = 0.5F;
+  const auto map = Snapshot(
+      kWidth, std::move(occupancy),
+      std::vector<float>(kWidth * kWidth, 0.0F));
+
+  const auto projection = BuildLocalTerrainProjection(map, 0.5F);
+
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  EXPECT_FLOAT_EQ(projection.value->clearance_m[2U * kWidth + 2U], 0.0F);
+  EXPECT_FLOAT_EQ(projection.value->clearance_m[2U * kWidth + 3U], 0.5F);
+  EXPECT_FLOAT_EQ(projection.value->clearance_m[2U * kWidth + 4U], 1.5F);
+  EXPECT_FLOAT_EQ(projection.value->clearance_m[3U * kWidth + 3U],
+                  static_cast<float>(std::sqrt(0.5)));
+}
+
+TEST(LocalTerrainProjection,
+     KeepsLargeFlatMapExactWithoutPerCellHeapAllocation) {
+  constexpr std::size_t kWidth = 128U;
+  constexpr std::size_t kCount = kWidth * kWidth;
+  const auto map = Snapshot(kWidth, std::vector<float>(kCount, 0.0F),
+                            std::vector<float>(kCount, 0.0F));
+
+  AllocationScope allocations;
+  const auto projection = BuildLocalTerrainProjection(map, 0.5F);
+  const std::size_t allocation_count = allocations.Stop();
+
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  EXPECT_TRUE(std::ranges::all_of(
+      projection.value->clearance_m,
+      [](const float value) { return std::isinf(value) && value > 0.0F; }));
+  EXPECT_TRUE(std::ranges::all_of(projection.value->roughness_m,
+                                  [](const float value) {
+                                    return value == 0.0F;
+                                  }));
+  EXPECT_LT(allocation_count, kWidth * 16U);
 }
 
 TEST(LocalTerrainProjection, KeepsSlopeAndRoughnessStableUnderLargeElevationOffset) {
@@ -157,6 +255,60 @@ TEST(GoalDistanceField, RoutesThroughAnOpeningAndMarksSealedCellsUnreachable) {
   ASSERT_TRUE(sealed_field.has_value());
   EXPECT_FALSE(std::isfinite(
       sealed_field->distance_m[sealed_map->Index(GridCell{.x = 0, .y = 2})]));
+}
+
+TEST(GoalDistanceField, SelectsNearestSourceAndStableLowerInputIndex) {
+  constexpr std::size_t kWidth = 5U;
+  const auto map = Snapshot(kWidth, std::vector<float>(kWidth, 0.0F),
+                            std::vector<float>(kWidth, 0.0F));
+  const auto projection = BuildLocalTerrainProjection(map);
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  const std::vector<GridCell> goals{
+      GridCell{.x = 4, .y = 0},
+      GridCell{.x = 4, .y = 0},
+      GridCell{.x = 0, .y = 0},
+  };
+
+  const auto field = BuildGoalDistanceField(
+      *projection.value, std::span<const GridCell>{goals});
+
+  ASSERT_TRUE(field.has_value());
+  EXPECT_DOUBLE_EQ(field->distance_m[0U], 0.0);
+  EXPECT_EQ(field->nearest_goal_index[0U], 2U);
+  EXPECT_DOUBLE_EQ(field->distance_m[2U], 2.0);
+  EXPECT_EQ(field->nearest_goal_index[2U], 0U);
+  EXPECT_DOUBLE_EQ(field->distance_m[4U], 0.0);
+  EXPECT_EQ(field->nearest_goal_index[4U], 0U);
+}
+
+TEST(GoalDistanceField, BlocksDiagonalCornersAndKeepsSealedCellsUnassigned) {
+  constexpr std::size_t kWidth = 3U;
+  std::vector<float> occupancy(kWidth * kWidth, 0.0F);
+  occupancy[0U * kWidth + 1U] = 1.0F;
+  occupancy[1U * kWidth + 0U] = 1.0F;
+  const auto map = Snapshot(
+      kWidth, std::move(occupancy),
+      std::vector<float>(kWidth * kWidth, 0.0F));
+  const auto projection = BuildLocalTerrainProjection(map);
+  ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  const std::vector<GridCell> goals{
+      GridCell{.x = -1, .y = 0},
+      GridCell{.x = 2, .y = 2},
+      GridCell{.x = 2, .y = 2},
+  };
+
+  const auto field = BuildGoalDistanceField(
+      *projection.value, std::span<const GridCell>{goals});
+
+  ASSERT_TRUE(field.has_value());
+  const std::size_t sealed = map->Index(GridCell{.x = 0, .y = 0});
+  EXPECT_TRUE(std::isinf(field->distance_m[sealed]));
+  EXPECT_GT(field->distance_m[sealed], 0.0);
+  EXPECT_EQ(field->nearest_goal_index[sealed],
+            std::numeric_limits<std::size_t>::max());
+  const std::size_t goal = map->Index(GridCell{.x = 2, .y = 2});
+  EXPECT_DOUBLE_EQ(field->distance_m[goal], 0.0);
+  EXPECT_EQ(field->nearest_goal_index[goal], 1U);
 }
 
 TEST(GoalDistanceField, StopsWhenControlIsCanceled) {
