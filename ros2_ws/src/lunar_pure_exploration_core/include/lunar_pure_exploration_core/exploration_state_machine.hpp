@@ -28,6 +28,7 @@ enum class GoalReleaseReason : std::uint8_t {
   kCandidateInvalid,
   kFrontierDisappeared,
   kInformationGainZero,
+  kLocalSegmentCompleted,
 };
 
 enum class ReplanCause : std::uint8_t {

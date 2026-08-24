@@ -31,6 +31,8 @@ const char* ReleaseCode(GoalReleaseReason reason) {
       return "FRONTIER_DISAPPEARED";
     case GoalReleaseReason::kInformationGainZero:
       return "INFORMATION_GAIN_ZERO";
+    case GoalReleaseReason::kLocalSegmentCompleted:
+      return "LOCAL_SEGMENT_COMPLETED";
   }
   throw std::invalid_argument("unknown goal release reason");
 }

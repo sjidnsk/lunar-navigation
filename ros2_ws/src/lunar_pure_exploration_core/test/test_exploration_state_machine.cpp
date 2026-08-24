@@ -453,6 +453,15 @@ TEST(ExplorationStateMachineTest, ReleaseGoalMatrixAcceptsExecutingAndReplanning
   }
 }
 
+TEST(ExplorationStateMachineTest,
+     LocalSegmentCompletionReleasesGoalWithoutFailureSideEffect) {
+  auto machine = MachineIn(ExplorationState::kExecuting);
+  machine->ReleaseGoal(GoalReleaseReason::kLocalSegmentCompleted);
+  EXPECT_EQ(machine->state(), ExplorationState::kSelectingFrontier);
+  EXPECT_EQ(machine->reason_code(), "LOCAL_SEGMENT_COMPLETED");
+  EXPECT_FALSE(machine->active_goal().has_value());
+}
+
 TEST(ExplorationStateMachineTest, CompletionMatrixOnlyAcceptsSelectingWithoutGoal) {
   for (const ExplorationState source : kAllStates) {
     auto machine = MachineIn(source);
@@ -599,12 +608,13 @@ TEST(ExplorationStateMachineTest, ReleaseReasonsAreTypedAndMappedLiterally) {
     GoalReleaseReason reason;
     const char* code;
   };
-  constexpr std::array<Case, 5> cases{{
+  constexpr std::array<Case, 6> cases{{
       {GoalReleaseReason::kArrived, "ARRIVED"},
       {GoalReleaseReason::kNoPath, "NO_PATH"},
       {GoalReleaseReason::kCandidateInvalid, "CANDIDATE_INVALID"},
       {GoalReleaseReason::kFrontierDisappeared, "FRONTIER_DISAPPEARED"},
       {GoalReleaseReason::kInformationGainZero, "INFORMATION_GAIN_ZERO"},
+      {GoalReleaseReason::kLocalSegmentCompleted, "LOCAL_SEGMENT_COMPLETED"},
   }};
   for (const auto& test_case : cases) {
     auto machine = MachineIn(ExplorationState::kExecuting);
