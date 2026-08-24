@@ -22,7 +22,8 @@ add_library(${PROJECT_NAME} SHARED
   src/planner_client.cpp
   src/planner_timing_accumulator.cpp
   src/platform_config_loader.cpp
-  src/pose_resolver.cpp)
+  src/pose_resolver.cpp
+  src/stationary_planning_gate.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 target_include_directories(${PROJECT_NAME}
   PUBLIC
@@ -107,6 +108,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_pose_resolver test/test_pose_resolver.cpp)
   target_compile_features(test_pose_resolver PRIVATE cxx_std_20)
   target_link_libraries(test_pose_resolver ${PROJECT_NAME})
+
+  ament_add_gtest(test_stationary_planning_gate
+    test/test_stationary_planning_gate.cpp)
+  target_compile_features(test_stationary_planning_gate PRIVATE cxx_std_20)
+  target_link_libraries(test_stationary_planning_gate ${PROJECT_NAME})
 
   ament_add_gtest(test_planner_timing_accumulator
     test/test_planner_timing_accumulator.cpp)
