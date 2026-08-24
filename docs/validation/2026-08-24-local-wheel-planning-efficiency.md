@@ -483,3 +483,65 @@ run directory: NONE
 terminal: NOT_RUN
 coverage: NOT_MEASURED
 ```
+
+## Stop-gated exploration Humble regression — 2026-08-25
+
+This regression used exact source SHA
+`ac6c16a57037c33e4c25a06885afaa1c6b289c76` in one disposable amd64
+`osrf/ros:humble-desktop-full-jammy` container. The seven-package
+`BUILD_TESTING=ON` build passed in `71.097 s`.
+
+The five selected package suites did **not** finish green:
+
+| Package | CTest result | Leaf result |
+| --- | ---: | ---: |
+| `lunar_pure_exploration_core` | 11/11 passed | 192 tests, 0 errors/failures |
+| `lunar_pure_exploration_ros` | 9/9 passed | 157 tests, 0 errors/failures |
+| `lunar_pure_wheeled_controller` | 3/3 passed | 83 tests, 0 errors/failures |
+| `lunar_pure_planner_core` | 18/19 passed | 205 records, 1 missing-result error |
+| `lunar_pure_planner_ros` | 12/12 passed | 102 tests, 0 errors/failures |
+
+The full retained XML summary is `793 tests, 1 error, 1 failure, 0 skipped`.
+The error and failure are the leaf missing-result and outer CTest records for
+the same planner-core wheel target terminated by its 60 s CTest timeout; they
+are not two independent product failures. The complete planner-server target
+passed 46/46 in this Humble run, including the four timing/concurrency cases
+that had failed in the separate native-Jazzy baseline. The planner ROS launch
+pytest also passed 9/9.
+
+One explicitly bounded direct-binary recheck reused the same Humble build and
+did not rerun the package suites. It completed with 0/2 passed rather than
+timing out:
+
+- `ProjectWheelCapabilityDetoursForMoreThan300Meters` failed the unchanged
+  `<1 s` assertion after `12.023 s`;
+- `GlobalRouteWithEightMeterRollingHorizonReaches750MeterGoalThroughRandomObstacles`
+  failed after `126.032 s` with `success=false` and `failed_segment=107`.
+
+The production diff from `a6c63c609589468fddef056f90b3ff913701b6e3` is
+empty for `lunar_pure_planner_core`, `lunar_pure_planner_ros` and
+`lunar_planning_msgs`. Static checks retain
+`rolling_surface_enabled: false` in the default planner YAML and `False` in
+the 300 m launch, preserve the approved `/Car/T3/`, `/Car/T4/` and `/Car/T5/`
+topic namespaces, and show no planning-message diff.
+
+The two mandated repository-boundary entrypoints remain absent:
+
+```text
+tools/check_repository_boundaries.py: NOT_RUN / MISSING
+tests/foundation/test_repository_boundaries.py: NOT_RUN / MISSING
+```
+
+No substitute was presented as either required gate. Full stdout, XML,
+timings, commands and the focused recheck are retained under:
+
+```text
+/home/kai/CodexDownloads/lunar_navigation/sdd_builds/stop_gated_task6_humble/
+ac6c16a57037-20260824T170006Z
+```
+
+Verdict for this evidence set: the Humble build and both exploration suites
+pass, but the full five-package regression is **FAIL / NOT GREEN** because the
+planner-core suite is nonzero and the two mandatory boundary gates are
+`NOT_RUN / MISSING`. This container evidence is not a native Jazzy 300 m/RViz
+run, Orin execution, DDS verification, or field-readiness acceptance.
