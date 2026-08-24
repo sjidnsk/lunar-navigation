@@ -60,7 +60,7 @@ bool SegmentsIntersect(Vec2 a, Vec2 b, Vec2 c, Vec2 d) {
   return (abc == 0 && OnSegment(c, a, b)) ||
          (abd == 0 && OnSegment(d, a, b)) ||
          (cda == 0 && OnSegment(a, c, d)) ||
-         (cdb == 0 && OnSegment(a, c, d));
+         (cdb == 0 && OnSegment(b, c, d));
 }
 
 std::size_t ValidateAndNormalizeFootprint(PlatformGeometry& platform,

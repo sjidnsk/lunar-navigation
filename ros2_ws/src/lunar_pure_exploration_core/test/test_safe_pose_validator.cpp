@@ -155,5 +155,18 @@ TEST(SafePoseValidatorTest, ChargesCumulativeWorkExactlyAtLimit) {
   EXPECT_THROW(one_less.IsMapFree(map, pose, one_less_work), std::length_error);
 }
 
+TEST(SafePoseValidatorTest, RejectsNonAdjacentEndpointContactAsSelfIntersection) {
+  PlatformGeometry footprint = SquarePlatform();
+  footprint.footprint_vertices = {
+      {0.0, 0.0}, {2.0, 1.0}, {1.0, 1.0}, {3.0, 1.0}, {0.0, 3.0}};
+
+  try {
+    (void)SafePoseValidator(std::move(footprint), 20U);
+    FAIL() << "non-adjacent edge endpoint contact must be rejected";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_STREQ(error.what(), "candidate footprint self-intersects");
+  }
+}
+
 }  // namespace
 }  // namespace lunar::pure_exploration

@@ -841,6 +841,61 @@ TEST(CandidateGeneratorTest, ClosedTangencyMatrixRejectsEveryNonfreeState) {
   }
 }
 
+TEST(CandidateGeneratorTest, FreeRoundedTangencyKeepsFrozenCandidateKeyVector) {
+  TangencyFixture fixture = MakeTangencyFixture(
+      kPi / 6.0, 0.0, TangencyContact::kRoundedClearance, TangencyState::kFree);
+  const FrontierCluster frontier = OneEdgeCluster(
+      fixture.raster, GridIndex{7, 5}, GridIndex{8, 5}, 0U);
+  const auto views = CandidateGenerator(
+      std::move(fixture.platform), SymmetricYawOffsets(0.0),
+      CandidateGenerator::Limits{1U, 5U, 100000U})
+      .Generate(fixture.raster,
+                std::span<const FrontierCluster>(&frontier, 1U));
+  ASSERT_EQ(views.size(), 5U);
+  std::vector<CandidateKey> keys;
+  keys.reserve(views.size());
+  for (const CandidateView& view : views) {
+    keys.push_back(view.key);
+  }
+  EXPECT_EQ(keys, (std::vector<CandidateKey>{
+      CandidateKey{102833, -42014, 300},
+      CandidateKey{102833, -42014, 1200},
+      CandidateKey{102833, -42014, -1500},
+      CandidateKey{102833, -42014, -600},
+      CandidateKey{102833, -42014, 300}}));
+}
+
+TEST(CandidateGeneratorTest, ConcaveTaskKeepsFrozenCandidateKeyVector) {
+  const GridGeometry geometry{40U, 40U, 0.2, 0.0, 0.0, 0.0};
+  std::vector<std::int8_t> data(40U * 40U, 0);
+  data[20U * 40U + 31U] = -1;
+  const OccupancyGridView map(geometry, data, 50);
+  const auto world = [&geometry](double x, double y) {
+    return *OccupancyGridView::GridToWorld(geometry, Vec2{x, y});
+  };
+  const TaskRaster raster = TaskRaster::Build(
+      map, Polygon2{{world(0.0, 0.0), world(40.0, 0.0),
+                     world(40.0, 40.0), world(0.0, 40.0),
+                     world(0.0, 30.0), world(20.0, 30.0),
+                     world(20.0, 10.0), world(0.0, 10.0)}});
+  const FrontierCluster frontier =
+      OneEdgeCluster(raster, GridIndex{30, 20}, GridIndex{31, 20}, 0U);
+  const auto views = CandidateGenerator(WheelPlatform(), StandardYawOffsets(),
+                                        GenerousLimits())
+                         .Generate(raster,
+                                   std::span<const FrontierCluster>(&frontier, 1U));
+  ASSERT_EQ(views.size(), 5U);
+  std::vector<CandidateKey> keys;
+  keys.reserve(views.size());
+  for (const CandidateView& view : views) {
+    keys.push_back(view.key);
+  }
+  EXPECT_EQ(keys, (std::vector<CandidateKey>{
+      CandidateKey{5281, 4100, -450}, CandidateKey{5281, 4100, -225},
+      CandidateKey{5281, 4100, 0}, CandidateKey{5281, 4100, 225},
+      CandidateKey{5281, 4100, 450}}));
+}
+
 TEST(CandidateGeneratorTest, ResourceBudgetsThrowInsteadOfReturningEmptyEvidence) {
   std::vector<std::int8_t> data(30U * 20U, 0);
   data[10U * 30U + 20U] = -1;
