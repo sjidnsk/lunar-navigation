@@ -4,6 +4,7 @@ build-*/
 install/
 install-*/
 log/
+.worktrees/
 
 # Python caches and test output
 __pycache__/
