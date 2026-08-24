@@ -7,7 +7,7 @@ from launch_ros.actions import Node
 
 
 _PARAMETERS = {
-    "reference_topic": "/Car/T4/planning/wheeled_reference",
+    "path_topic": "/Car/T4/planning/wheeled_path",
     "odometry_topic": "/Car/T3/localization/odometry",
     "command_topic": "/Car/T5/Car_Cmd_Vel",
     "control_rate_hz": "20.0",

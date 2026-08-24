@@ -1,7 +1,6 @@
 #include <cstdint>
 #include <memory>
 
-#include <lunar_planning_msgs/msg/motion_reference.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -20,14 +19,13 @@ class LunarSurfaceVisualizerNode final : public rclcpp::Node {
     path_pub_ = create_publisher<nav_msgs::msg::Path>("/lunar_demo/path", rclcpp::QoS{10}.reliable());
     marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
         "/lunar_demo/terrain_markers", rclcpp::QoS{1}.transient_local());
-    reference_sub_ = create_subscription<lunar_planning_msgs::msg::MotionReference>(
-        "/lunar_demo/wheeled_reference", rclcpp::QoS{10}.reliable(),
-        [this](lunar_planning_msgs::msg::MotionReference::ConstSharedPtr message) {
-          // A rejected request contains an empty preview. Publishing it makes
+    path_sub_ = create_subscription<nav_msgs::msg::Path>(
+        "/lunar_demo/wheeled_path", rclcpp::QoS{10}.reliable(),
+        [this](nav_msgs::msg::Path::ConstSharedPtr message) {
+          // A rejected request contains an empty path. Publishing it makes
           // RViz emit a frame-id warning and does not represent a valid route.
-          if (!message->path_preview.header.frame_id.empty() &&
-              !message->path_preview.poses.empty()) {
-            path_pub_->publish(message->path_preview);
+          if (!message->header.frame_id.empty() && !message->poses.empty()) {
+            path_pub_->publish(*message);
           }
         });
     PublishMarkers();
@@ -70,7 +68,7 @@ class LunarSurfaceVisualizerNode final : public rclcpp::Node {
   LunarSurfaceScenario scenario_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
-  rclcpp::Subscription<lunar_planning_msgs::msg::MotionReference>::SharedPtr reference_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
 };
 
 }  // namespace

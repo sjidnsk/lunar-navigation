@@ -24,12 +24,15 @@
 #include <variant>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <builtin_interfaces/msg/duration.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <grid_map_msgs/msg/grid_map.hpp>
 #include <lunar_planning_msgs/action/plan_motion.hpp>
 #include <lunar_planning_msgs/msg/motion_reference.hpp>
+#include <lunar_planning_msgs/msg/timed_path.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/callback_group.hpp>
 #include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <rclcpp/qos.hpp>
@@ -82,7 +85,8 @@ struct RuntimeParameters final {
   std::string tf_topic;
   std::string action_name;
   std::string diagnostics_topic;
-  std::string wheeled_reference_topic;
+  std::string wheeled_path_topic;
+  std::string wheeled_timed_path_topic;
   RollingSurfaceParameters rolling_surface;
 };
 
@@ -181,15 +185,17 @@ struct RuntimeParameters final {
           "action_name", "/Car/T4/plan_motion"),
       .diagnostics_topic = node.declare_parameter<std::string>(
           "diagnostics_topic", "/Car/T4/planning/diagnostics"),
-      .wheeled_reference_topic = node.declare_parameter<std::string>(
-          "wheeled_reference_topic", "/Car/T4/planning/wheeled_reference"),
+      .wheeled_path_topic = node.declare_parameter<std::string>(
+          "wheeled_path_topic", "/Car/T4/planning/wheeled_path"),
+      .wheeled_timed_path_topic = node.declare_parameter<std::string>(
+          "wheeled_timed_path_topic", "/Car/T4/planning/wheeled_path_timing"),
       .rolling_surface = rolling_surface,
   };
   for (const std::string* interface_name : {
            &parameters.global_map_topic, &parameters.local_map_topic,
            &parameters.odometry_topic, &parameters.tf_topic,
            &parameters.action_name, &parameters.diagnostics_topic,
-           &parameters.wheeled_reference_topic}) {
+           &parameters.wheeled_path_topic, &parameters.wheeled_timed_path_topic}) {
     if (!AbsoluteTopic(*interface_name)) {
       throw std::runtime_error{"PLANNER_ERROR: interface name must be absolute"};
     }
@@ -288,6 +294,18 @@ void SetDiagnosticValue(diagnostic_msgs::msg::DiagnosticArray& diagnostics,
       return;
     }
   }
+}
+
+[[nodiscard]] builtin_interfaces::msg::Duration RosDuration(
+    const std::chrono::nanoseconds duration) noexcept {
+  constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
+  constexpr std::int64_t kMaxSeconds = std::numeric_limits<std::int32_t>::max();
+  const std::int64_t nanoseconds = std::max<std::int64_t>(duration.count(), 0LL);
+  builtin_interfaces::msg::Duration converted;
+  converted.sec = static_cast<std::int32_t>(
+      std::min(nanoseconds / kNanosecondsPerSecond, kMaxSeconds));
+  converted.nanosec = static_cast<std::uint32_t>(nanoseconds % kNanosecondsPerSecond);
+  return converted;
 }
 
 void SetFinalizedTiming(
@@ -457,9 +475,10 @@ struct PurePlanMotionServer::Impl final {
     diagnostics_publisher =
         node.create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
             parameters.diagnostics_topic, rclcpp::QoS{10}.reliable());
-    wheeled_reference_publisher = node.create_publisher<
-        lunar_planning_msgs::msg::MotionReference>(
-        parameters.wheeled_reference_topic, rclcpp::QoS{1}.reliable());
+    wheeled_path_publisher = node.create_publisher<nav_msgs::msg::Path>(
+        parameters.wheeled_path_topic, rclcpp::QoS{1}.reliable());
+    timed_path_publisher = node.create_publisher<lunar_planning_msgs::msg::TimedPath>(
+        parameters.wheeled_timed_path_topic, rclcpp::QoS{1}.reliable());
     action_server = rclcpp_action::create_server<Action>(
         node.get_node_base_interface(), node.get_node_clock_interface(),
         node.get_node_logging_interface(), node.get_node_waitables_interface(),
@@ -1262,7 +1281,7 @@ struct PurePlanMotionServer::Impl final {
       }
       SetFinalizedTiming(segment.timing.total_elapsed, segment, converted);
       if (ContextIsValid()) {
-        PublishWheeledReference(converted);
+        PublishWheeledPath(converted, segment.timing.total_elapsed);
       }
       PublishCycleDiagnostics(request_goal, segment);
       if (result_diagnostic_published != nullptr) {
@@ -1504,9 +1523,10 @@ struct PurePlanMotionServer::Impl final {
     if (ContextIsValid()) {
       if (!suppress_duplicate_reference) {
         try {
-          PublishWheeledReference(*committed->action_result);
+          PublishWheeledPath(*committed->action_result,
+                             committed->result.timing.total_elapsed);
         } catch (...) {
-          SafeLogError("PLANNER_ERROR: failed to publish wheeled reference");
+          SafeLogError("PLANNER_ERROR: failed to publish wheeled path");
         }
       }
       if (!normal_output_already_published) {
@@ -1571,13 +1591,19 @@ struct PurePlanMotionServer::Impl final {
     }
   }
 
-  void PublishWheeledReference(const Action::Result& result) {
-    lunar_planning_msgs::msg::MotionReference reference;
+  void PublishWheeledPath(const Action::Result& result,
+                          const std::chrono::nanoseconds planning_time) {
+    nav_msgs::msg::Path path;
     if (result.has_reference &&
         result.reference.platform_type == result.reference.WHEELED) {
-      reference = result.reference;
+      path = result.reference.path_preview;
     }
-    wheeled_reference_publisher->publish(reference);
+    wheeled_path_publisher->publish(path);
+
+    lunar_planning_msgs::msg::TimedPath timed_path;
+    timed_path.path = std::move(path);
+    timed_path.planning_time = RosDuration(planning_time);
+    timed_path_publisher->publish(timed_path);
   }
 
   [[nodiscard]] bool ContextIsValid() const noexcept {
@@ -1696,8 +1722,9 @@ struct PurePlanMotionServer::Impl final {
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr tf_subscription;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
       diagnostics_publisher;
-  rclcpp::Publisher<lunar_planning_msgs::msg::MotionReference>::SharedPtr
-      wheeled_reference_publisher;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr wheeled_path_publisher;
+  rclcpp::Publisher<lunar_planning_msgs::msg::TimedPath>::SharedPtr
+      timed_path_publisher;
   rclcpp_action::Server<Action>::SharedPtr action_server;
   std::mutex state_mutex;
   std::unique_ptr<std::jthread> worker;

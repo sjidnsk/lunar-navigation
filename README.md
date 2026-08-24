@@ -91,13 +91,34 @@ ros2 launch lunar_pure_planner_ros lunar_surface_rviz_demo.launch.py
 RViz 固定坐标系为 `map`。使用 **2D Goal Pose** 在空白可达区域选择目标，成功信号是
 `/lunar_demo/path` 更新；障碍物或不可达位置没有有效路径是预期的安全行为。此演示不提供
 控制器，绝不可用于驱动车辆。
-它只使用下列六个固定 ROS 接口：
+它只使用下列固定 ROS 接口：
 
 | 方向 | 接口 |
 | --- | --- |
 | 订阅 | `/Car/T3/mapping/global_overview`、`/Car/T3/mapping/grid_map`、`/Car/T3/localization/odometry`、`/tf` |
 | Action server | `/Car/T4/plan_motion` |
 | 诊断发布 | `/Car/T4/planning/diagnostics` |
+| 路径发布 | `/Car/T4/planning/wheeled_path`（`nav_msgs/msg/Path`） |
+| 带计时路径发布 | `/Car/T4/planning/wheeled_path_timing`（`lunar_planning_msgs/msg/TimedPath`） |
+
+## 局部可通行性地图
+
+`local_traversability.launch.py` 将 `/Car/T3/mapping/grid_map` 的 `occupancy` 与
+`elevation` 转为 `/Car/T4/planning/local_traversability`。输出使用 `odom` 坐标系，
+`traversability` 同时是唯一的 basic layer：`1.0` 为可通行、`0.0` 为不可通行、`NaN`
+为未知。轮式车对障碍做圆形膨胀，半径为车体角点外接半径加 `minimum_clearance_m`，当前
+`wheel.yaml` 配置约为 `0.919 m`；这张图不替代规划器的姿态、支撑平面和底盘净空校验。
+
+输入 QoS 默认是 `reliable + transient_local`，以支持节点晚于缓存型地图发布者启动。若
+T3 发布者实际提供 `best_effort + volatile`，启动时显式覆盖为：
+
+```bash
+ros2 launch lunar_pure_planner_ros local_traversability.launch.py \
+  input_qos_reliability:=best_effort input_qos_durability:=volatile
+```
+
+`scripts/start_all.sh` 会先等待 `/local_traversability` 创建，再继续启动其余本包节点；外部
+地图发布者或 rosbag 仍应在该节点就绪后再启动或从头回放。
 
 ## 构建
 
@@ -151,7 +172,7 @@ ros2 launch lunar_pure_planner_ros pure_planner.launch.py \
   platform_type:=wheel rolling_surface_enabled:=true
 ```
 
-启用后，一条月表 Action 先计算一次按轮式包络膨胀的全局路线；随后以 8 m 路线前瞻重复产生严格局部参考，直到 odometry 进入最终目标容差。每个真正触发的冷启动或滚动规划周期共用一个时钟：`<1 s` 达到目标，`[1 s,2 s)` 记录变慢，`[2 s,3 s)` 记录 SLA 失败但继续搜索，只有 `>=3 s` 才硬停止且不发布新参考；车辆行驶和轮询时间不计入规划周期，也没有 300 s Action 业务截止时间。取消或替换优先于迟到结果，失败会发布空轮式参考。该模式不替代外部全局图生产者或独立轮式控制器。
+启用后，一条月表 Action 先计算一次按轮式包络膨胀的全局路线；随后以 8 m 路线前瞻重复产生严格局部路径，直到 odometry 进入最终目标容差。每个真正触发的冷启动或滚动规划周期共用一个时钟：`<1 s` 达到目标，`[1 s,2 s)` 记录变慢，`[2 s,3 s)` 记录 SLA 失败但继续搜索，只有 `>=3 s` 才硬停止且不发布新路径；车辆行驶和轮询时间不计入规划周期，也没有 300 s Action 业务截止时间。取消或替换优先于迟到结果，失败会发布空 `Path` 和空 `TimedPath`。该模式不替代外部全局图生产者或独立轮式控制器。
 
 默认参数在 `config/pure_planner.yaml`；其中全局占据阈值为 `50` percent，局部占据阈值为 `0.5`。
 
@@ -244,6 +265,7 @@ Action Result 和 diagnostics Topic 的生产成功原因码为 `PLAN_FOUND`。�
 | Action Result | `diagnostics.elapsed_s` | seconds；从 worker 读取请求快照到终态输出收尾的总耗时 |
 | diagnostics Topic | `global_elapsed_ms`、`local_elapsed_ms`、`total_elapsed_ms` | milliseconds；分别为全局、局部和请求总耗时 |
 | diagnostics Topic | `global_call_count`、`local_call_count` | 次数；进入对应搜索函数的实际调用数 |
+| TimedPath Topic | `planning_time` | seconds；`builtin_interfaces/Duration` 以 sec + nanosec 编码，表示同消息 `path` 的本次请求总规划耗时 |
 
 diagnostics Topic 使用 `DiagnosticStatus.values`，所以上述毫秒值和计数在线上表现为字符串。
 Action Result 不提供分阶段耗时或调用次数；不能把其中的 `elapsed_s` 当成毫秒，也不能从它推导

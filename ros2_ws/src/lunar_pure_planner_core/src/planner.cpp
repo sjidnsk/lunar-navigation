@@ -20,6 +20,7 @@
 #include "shared/local_terrain_projection.hpp"
 #include "shared/map_snapshot.hpp"
 #include "shared/obstacle_height_estimator.hpp"
+#include "shared/request_local_start_patch.hpp"
 #include "wheel/anytime_wheel_planner.hpp"
 
 namespace lunar::pure_planning {
@@ -144,6 +145,16 @@ using namespace std::chrono_literals;
           .reason_code = "INVALID_INPUT"};
 }
 
+[[nodiscard]] LocalStageResult LocalStartPatchFailure(
+    const std::string& reason_code) {
+  if (reason_code == "WHEEL_START_SUPPORT_PLANE_UNAVAILABLE" ||
+      reason_code == "WHEEL_START_SUPPORT_PLANE_INFEASIBLE") {
+    return {.status = LocalPlanStatus::kNoPath,
+            .reason_code = reason_code};
+  }
+  return LocalControlledFailure(reason_code);
+}
+
 [[nodiscard]] Quaternion QuaternionFromYaw(const double yaw) noexcept {
   return Quaternion{.w = std::cos(yaw / 2.0), .z = std::sin(yaw / 2.0)};
 }
@@ -155,12 +166,44 @@ using namespace std::chrono_literals;
     return {.status = LocalPlanStatus::kInvalidInput,
             .reason_code = "INVALID_INPUT"};
   }
+
+  shared::RequestLocalStartPatch start_patch;
+  if (const auto* capability =
+          std::get_if<WheeledCapability>(&input.capability)) {
+    const auto* state = std::get_if<WheeledState>(&input.current_state);
+    if (state == nullptr) {
+      return {.status = LocalPlanStatus::kInvalidInput,
+              .reason_code = "INVALID_INPUT"};
+    }
+    auto analyzed = shared::AnalyzeWheelStartPatch(
+        input.world.local_map, *state, *capability,
+        input.config.local_occupancy_threshold, control);
+    if (!analyzed.ok()) {
+      return LocalStartPatchFailure(analyzed.reason_code);
+    }
+    start_patch = std::move(*analyzed.patch);
+  }
+
   const auto snapshot = cache.local_snapshot().GetOrBuild(
-      shared::MakeLocalSnapshotCacheKey(input.world.local_map_sequence),
+      shared::MakeLocalSnapshotCacheKey(input.world.local_map_sequence,
+                                        start_patch.identity),
       control, [&](const SearchControl& build_control) {
-        auto built = shared::MapSnapshot::Create(
-            input.world.local_map, shared::MapContract::kLocalElevation,
-            build_control);
+        shared::MapSnapshotBuildResult built;
+        if (start_patch.required()) {
+          auto patched = shared::BuildWheelStartPatchedMap(
+              input.world.local_map, start_patch, build_control);
+          if (!patched.ok()) {
+            return shared::ImmutableCacheBuildResult<shared::MapSnapshot>{
+                .reason_code = std::move(patched.reason_code),
+            };
+          }
+          built = shared::MapSnapshot::Create(
+              std::move(*patched.map), shared::MapContract::kLocalElevation);
+        } else {
+          built = shared::MapSnapshot::Create(
+              input.world.local_map, shared::MapContract::kLocalElevation,
+              build_control);
+        }
         return shared::ImmutableCacheBuildResult<shared::MapSnapshot>{
             .value = std::move(built.snapshot),
             .reason_code = std::move(built.reason_code),
@@ -171,7 +214,7 @@ using namespace std::chrono_literals;
   }
   const auto local_projection_key = shared::MakeLocalProjectionCacheKey(
       input.world.local_map_sequence,
-      input.config.local_occupancy_threshold);
+      input.config.local_occupancy_threshold, start_patch.identity);
   const auto projection = cache.local_projection().GetOrBuild(
       local_projection_key,
       control, [&](const SearchControl& build_control) {
@@ -223,7 +266,7 @@ using namespace std::chrono_literals;
         shared::MakeGoalFieldCacheKey(
             input.world.local_map_sequence,
             input.config.local_occupancy_threshold, capability_fingerprint,
-            goals_odom, input.config.search),
+            goals_odom, input.config.search, start_patch.identity),
         control, [&](const SearchControl& build_control) {
           auto built = shared::BuildGoalDistanceField(
               terrain, goal_cells, build_control);

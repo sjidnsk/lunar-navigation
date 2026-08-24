@@ -28,8 +28,10 @@
 #include <gtest/gtest.h>
 #include <lunar_planning_msgs/action/plan_motion.hpp>
 #include <lunar_planning_msgs/msg/motion_reference.hpp>
+#include <lunar_planning_msgs/msg/timed_path.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
@@ -232,12 +234,6 @@ lunar::pure_planning::LocalStageResult LocalSuccess(
   };
 }
 
-bool MatchesPlanId(const lunar_planning_msgs::msg::MotionReference& reference,
-                   const std::string_view request_id) {
-  return reference.plan_id == request_id ||
-         reference.plan_id == "wheel/" + std::string{request_id};
-}
-
 class RunningSystem final {
  public:
   explicit RunningSystem(PlannerFn planner,
@@ -267,12 +263,18 @@ class RunningSystem final {
               std::scoped_lock lock{diagnostics_mutex};
               diagnostics.push_back(*value);
             });
-    reference_subscription = client->create_subscription<
-        lunar_planning_msgs::msg::MotionReference>(
-        "/Car/T4/planning/wheeled_reference", rclcpp::QoS{10}.reliable(),
-        [this](lunar_planning_msgs::msg::MotionReference::ConstSharedPtr value) {
-          std::scoped_lock lock{references_mutex};
-          references.push_back(*value);
+    wheeled_path_subscription = client->create_subscription<nav_msgs::msg::Path>(
+        "/Car/T4/planning/wheeled_path", rclcpp::QoS{10}.reliable(),
+        [this](nav_msgs::msg::Path::ConstSharedPtr value) {
+          std::scoped_lock lock{wheeled_paths_mutex};
+          wheeled_paths.push_back(*value);
+        });
+    timed_path_subscription = client->create_subscription<
+        lunar_planning_msgs::msg::TimedPath>(
+        "/Car/T4/planning/wheeled_path_timing", rclcpp::QoS{10}.reliable(),
+        [this](lunar_planning_msgs::msg::TimedPath::ConstSharedPtr value) {
+          std::scoped_lock lock{timed_paths_mutex};
+          timed_paths.push_back(*value);
         });
     action_client = rclcpp_action::create_client<Action>(
         client, "/Car/T4/plan_motion");
@@ -291,7 +293,8 @@ class RunningSystem final {
     executor->remove_node(server);
     action_client.reset();
     diagnostics_subscription.reset();
-    reference_subscription.reset();
+    wheeled_path_subscription.reset();
+    timed_path_subscription.reset();
     client.reset();
     server.reset();
   }
@@ -371,9 +374,14 @@ class RunningSystem final {
     return diagnostics;
   }
 
-  std::vector<lunar_planning_msgs::msg::MotionReference> References() const {
-    std::scoped_lock lock{references_mutex};
-    return references;
+  std::vector<nav_msgs::msg::Path> WheeledPaths() const {
+    std::scoped_lock lock{wheeled_paths_mutex};
+    return wheeled_paths;
+  }
+
+  std::vector<lunar_planning_msgs::msg::TimedPath> TimedPaths() const {
+    std::scoped_lock lock{timed_paths_mutex};
+    return timed_paths;
   }
 
   std::vector<Action::Feedback> Feedback() const {
@@ -406,12 +414,15 @@ class RunningSystem final {
 
   rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
       diagnostics_subscription;
-  rclcpp::Subscription<lunar_planning_msgs::msg::MotionReference>::SharedPtr
-      reference_subscription;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr wheeled_path_subscription;
+  rclcpp::Subscription<lunar_planning_msgs::msg::TimedPath>::SharedPtr
+      timed_path_subscription;
   mutable std::mutex diagnostics_mutex;
   std::vector<diagnostic_msgs::msg::DiagnosticArray> diagnostics;
-  mutable std::mutex references_mutex;
-  std::vector<lunar_planning_msgs::msg::MotionReference> references;
+  mutable std::mutex wheeled_paths_mutex;
+  std::vector<nav_msgs::msg::Path> wheeled_paths;
+  mutable std::mutex timed_paths_mutex;
+  std::vector<lunar_planning_msgs::msg::TimedPath> timed_paths;
   mutable std::mutex feedback_mutex;
   std::vector<Action::Feedback> feedback_samples;
 };
@@ -651,7 +662,7 @@ TEST(PurePlanMotionServer, SurfaceNeedsGlobalButLavaDoesNotTouchIt) {
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 2U; }));
 }
 
-TEST(PurePlanMotionServer, PublishesSuccessfulWheelReferenceAndClearsItOnFailure) {
+TEST(PurePlanMotionServer, PublishesSuccessfulWheeledPathAndClearsItOnFailure) {
   {
     RunningSystem successful{
         [](const auto& request) { return Success(request); }};
@@ -661,11 +672,14 @@ TEST(PurePlanMotionServer, PublishesSuccessfulWheelReferenceAndClearsItOnFailure
     ASSERT_NE(success_handle, nullptr);
     EXPECT_EQ(successful.Result(success_handle).code,
               rclcpp_action::ResultCode::SUCCEEDED);
-    ASSERT_TRUE(WaitFor([&] { return successful.References().size() == 1U; }));
-    const auto published = successful.References().front();
-    EXPECT_EQ(published.plan_id, "publish-wheel-reference");
-    EXPECT_EQ(published.platform_type, published.WHEELED);
-    EXPECT_FALSE(published.trajectory.points.empty());
+    ASSERT_TRUE(WaitFor([&] { return successful.WheeledPaths().size() == 1U; }));
+    const auto published = successful.WheeledPaths().front();
+    EXPECT_EQ(published.header.frame_id, "map");
+    EXPECT_FALSE(published.poses.empty());
+    ASSERT_TRUE(WaitFor([&] { return successful.TimedPaths().size() == 1U; }));
+    const auto timed = successful.TimedPaths().front();
+    EXPECT_EQ(timed.path.poses.size(), published.poses.size());
+    EXPECT_TRUE(timed.planning_time.sec > 0 || timed.planning_time.nanosec > 0U);
   }
 
   RunningSystem failed{[](const auto&) {
@@ -677,11 +691,12 @@ TEST(PurePlanMotionServer, PublishesSuccessfulWheelReferenceAndClearsItOnFailure
   ASSERT_NE(failed_handle, nullptr);
   EXPECT_EQ(failed.Result(failed_handle).code,
             rclcpp_action::ResultCode::ABORTED);
-  ASSERT_TRUE(WaitFor([&] { return failed.References().size() == 1U; }));
-  const auto cleared = failed.References().front();
-  EXPECT_TRUE(cleared.plan_id.empty());
-  EXPECT_TRUE(cleared.path_preview.poses.empty());
-  EXPECT_TRUE(cleared.trajectory.points.empty());
+  ASSERT_TRUE(WaitFor([&] { return failed.WheeledPaths().size() == 1U; }));
+  const auto cleared = failed.WheeledPaths().front();
+  EXPECT_TRUE(cleared.header.frame_id.empty());
+  EXPECT_TRUE(cleared.poses.empty());
+  ASSERT_TRUE(WaitFor([&] { return failed.TimedPaths().size() == 1U; }));
+  EXPECT_TRUE(failed.TimedPaths().front().path.poses.empty());
 }
 
 TEST(PurePlanMotionServer,
@@ -1632,8 +1647,8 @@ TEST(PurePlanMotionServer,
   release_first = true;
   ASSERT_TRUE(WaitFor([&] { return calls.load() >= 2U; }));
   ASSERT_TRUE(WaitFor([&] {
-    return std::ranges::count_if(system.References(), [](const auto& reference) {
-             return MatchesPlanId(reference, "rolling_identity");
+    return std::ranges::count_if(system.WheeledPaths(), [](const auto& path) {
+             return !path.poses.empty();
            }) == 1;
   }));
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() >= 2U; }));
@@ -1717,9 +1732,9 @@ TEST(PurePlanMotionServer,
   ASSERT_NE(handle, nullptr);
   ASSERT_TRUE(WaitFor(
       [&] {
-        const auto references = system.References();
-        return std::ranges::any_of(references, [](const auto& reference) {
-          return MatchesPlanId(reference, "rolling_late");
+        const auto paths = system.WheeledPaths();
+        return std::ranges::any_of(paths, [](const auto& path) {
+          return !path.poses.empty();
         });
       },
       4s));
@@ -1733,7 +1748,7 @@ TEST(PurePlanMotionServer,
 }
 
 TEST(PurePlanMotionServer,
-     RollingCycleFinalizedAtHardDeadlineDoesNotPublishAReference) {
+     RollingCycleFinalizedAtHardDeadlinePublishesAnEmptyPath) {
   RunningSystem system{
       [](const lunar::pure_planning::PlanningRequest&) {
         return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
@@ -1757,10 +1772,8 @@ TEST(PurePlanMotionServer,
   auto result_future = system.action_client->async_get_result(handle);
   const auto result_status = result_future.wait_for(4s);
   EXPECT_EQ(result_status, std::future_status::ready);
-  const auto references = system.References();
-  EXPECT_FALSE(std::ranges::any_of(references, [](const auto& reference) {
-    return MatchesPlanId(reference, "rolling_hard");
-  }));
+  ASSERT_TRUE(WaitFor([&] { return system.WheeledPaths().size() == 1U; }));
+  EXPECT_TRUE(system.WheeledPaths().front().poses.empty());
   if (result_status != std::future_status::ready) {
     auto cancel = system.action_client->async_cancel_goal(handle);
     ASSERT_EQ(cancel.wait_for(3s), std::future_status::ready);

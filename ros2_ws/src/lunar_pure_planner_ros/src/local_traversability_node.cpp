@@ -16,6 +16,7 @@
 #include "lunar_pure_planner_core/types/platform_capability.hpp"
 #include "lunar_pure_planner_ros/incremental_traversability.hpp"
 #include "lunar_pure_planner_ros/platform_config.hpp"
+#include "lunar_pure_planner_ros/traversability_qos.hpp"
 
 namespace lunar::pure_planner_ros {
 namespace {
@@ -47,10 +48,19 @@ class LocalTraversabilityNode final : public rclcpp::Node {
         declare_parameter<std::string>("local_map_topic", "/Car/T3/mapping/grid_map");
     const std::string output_topic = declare_parameter<std::string>(
         "traversability_topic", "/Car/T4/planning/local_traversability");
+    const std::string input_reliability = declare_parameter<std::string>(
+        "input_qos_reliability", "reliable");
+    const std::string input_durability = declare_parameter<std::string>(
+        "input_qos_durability", "transient_local");
     if (!AbsoluteTopic(local_topic) || !AbsoluteTopic(output_topic) ||
         !std::isfinite(occupancy_threshold) || occupancy_threshold < 0.0 ||
         occupancy_threshold > 1.0) {
       throw std::runtime_error{"invalid traversability node parameters"};
+    }
+    const auto input_qos = MakeTraversabilityInputQos(
+        input_reliability, input_durability);
+    if (!input_qos.has_value()) {
+      throw std::runtime_error{"invalid traversability input QoS parameters"};
     }
     const auto config_path = ResolvePlatformConfig(platform, configured_path);
     auto loaded = LoadPlatformConfig(config_path, platform);
@@ -62,7 +72,7 @@ class LocalTraversabilityNode final : public rclcpp::Node {
     publisher_ = create_publisher<grid_map_msgs::msg::GridMap>(
         output_topic, rclcpp::QoS{1}.reliable().transient_local());
     subscription_ = create_subscription<grid_map_msgs::msg::GridMap>(
-        local_topic, rclcpp::QoS{rclcpp::KeepLast{10}}.best_effort(),
+        local_topic, *input_qos,
         [this](grid_map_msgs::msg::GridMap::ConstSharedPtr message) {
           const auto update = builder_->Update(*message);
           if (update.has_value()) publisher_->publish(update->map);

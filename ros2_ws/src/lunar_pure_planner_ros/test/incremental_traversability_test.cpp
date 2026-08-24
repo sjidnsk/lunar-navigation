@@ -74,6 +74,8 @@ TEST(IncrementalTraversabilityTest,
   ASSERT_TRUE(initial.has_value());
   EXPECT_TRUE(initial->full_rebuild);
   EXPECT_EQ(initial->recomputed_cells, kWidth * kHeight);
+  EXPECT_EQ(initial->map.basic_layers,
+            (std::vector<std::string>{"traversability"}));
   EXPECT_FLOAT_EQ(LayerValue(initial->map.data.front(), kWidth, kHeight, 3, 3), 1.0F);
 
   const auto unchanged = builder.Update(MakeMap(kWidth, kHeight, occupancy, elevation));
@@ -100,6 +102,31 @@ TEST(IncrementalTraversabilityTest,
   ASSERT_TRUE(resized.has_value());
   EXPECT_TRUE(resized->full_rebuild);
   EXPECT_EQ(resized->recomputed_cells, 8U * kHeight);
+}
+
+TEST(IncrementalTraversabilityTest,
+     FullRebuildInflatesObstaclesByTheConfiguredSupportRadius) {
+  constexpr std::size_t kWidth = 9U;
+  constexpr std::size_t kHeight = 9U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  const std::vector<float> elevation(kWidth * kHeight, 0.0F);
+  occupancy[4U * kWidth + 4U] = 1.0F;
+  IncrementalTraversability builder(
+      TraversabilityProfile{.support_radius_m = 2.0,
+                            .maximum_slope_rad = 0.5});
+
+  const auto update = builder.Update(MakeMap(kWidth, kHeight, occupancy, elevation));
+
+  ASSERT_TRUE(update.has_value());
+  EXPECT_TRUE(update->full_rebuild);
+  EXPECT_FLOAT_EQ(LayerValue(update->map.data.front(), kWidth, kHeight, 4U, 4U),
+                  0.0F);
+  EXPECT_FLOAT_EQ(LayerValue(update->map.data.front(), kWidth, kHeight, 6U, 4U),
+                  0.0F);
+  EXPECT_FLOAT_EQ(LayerValue(update->map.data.front(), kWidth, kHeight, 6U, 6U),
+                  1.0F);
+  EXPECT_TRUE(
+      std::isnan(LayerValue(update->map.data.front(), kWidth, kHeight, 0U, 0U)));
 }
 
 

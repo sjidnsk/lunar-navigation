@@ -34,5 +34,5 @@ def test_rviz_inputs_are_compatible_and_empty_failed_paths_are_not_forwarded() -
     visualizer_text = VISUALIZER_NODE.read_text(encoding="utf-8")
 
     assert "rclcpp::QoS{10}.reliable()" in demo_text
-    assert "!message->path_preview.header.frame_id.empty()" in visualizer_text
-    assert "!message->path_preview.poses.empty()" in visualizer_text
+    assert "!message->header.frame_id.empty()" in visualizer_text
+    assert "!message->poses.empty()" in visualizer_text

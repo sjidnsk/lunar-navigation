@@ -47,7 +47,8 @@ EXPECTED_TOPICS = {
     "tf_topic": "/tf",
     "action_name": "/Car/T4/plan_motion",
     "diagnostics_topic": "/Car/T4/planning/diagnostics",
-    "wheeled_reference_topic": "/Car/T4/planning/wheeled_reference",
+    "wheeled_path_topic": "/Car/T4/planning/wheeled_path",
+    "wheeled_timed_path_topic": "/Car/T4/planning/wheeled_path_timing",
 }
 EXPECTED_PARAMETERS = {
     "platform_type",
@@ -430,6 +431,7 @@ def test_readme_timing_table_maps_each_output_field_to_its_exact_unit() -> None:
         ("diagnostics Topic", "total_elapsed_ms"),
         ("diagnostics Topic", "global_call_count"),
         ("diagnostics Topic", "local_call_count"),
+        ("TimedPath Topic", "planning_time"),
     }
     action_unit, action_meaning = timing_contract[
         ("Action Result", "diagnostics.elapsed_s")
@@ -440,6 +442,9 @@ def test_readme_timing_table_maps_each_output_field_to_its_exact_unit() -> None:
         assert timing_contract[("diagnostics Topic", field)][0] == "milliseconds"
     for field in ("global_call_count", "local_call_count"):
         assert timing_contract[("diagnostics Topic", field)][0] == "count"
+    timed_path_unit, timed_path_meaning = timing_contract[("TimedPath Topic", "planning_time")]
+    assert timed_path_unit == "seconds"
+    assert "sec + nanosec" in timed_path_meaning
 
 
 def test_readme_failure_list_is_exact_and_keeps_success_separate() -> None:

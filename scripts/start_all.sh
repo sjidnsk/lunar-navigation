@@ -28,11 +28,24 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-ros2 launch lunar_pure_planner_ros pure_planner.launch.py \
+ros2 launch lunar_pure_planner_ros local_traversability.launch.py \
   platform_type:="${platform}" &
 pids+=("$!")
 
-ros2 launch lunar_pure_planner_ros local_traversability.launch.py \
+local_node_ready=false
+for _ in {1..20}; do
+  if ros2 node list 2>/dev/null | grep -Fxq /local_traversability; then
+    local_node_ready=true
+    break
+  fi
+  sleep 0.25
+done
+if [[ "${local_node_ready}" != true ]]; then
+  echo "local_traversability 未在 5 秒内创建订阅节点" >&2
+  exit 1
+fi
+
+ros2 launch lunar_pure_planner_ros pure_planner.launch.py \
   platform_type:="${platform}" &
 pids+=("$!")
 
