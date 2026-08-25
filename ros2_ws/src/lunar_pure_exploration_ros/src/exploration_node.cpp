@@ -511,8 +511,14 @@ ExecutableReference ValidateExecutableReference(
 }
 
 std::size_t PositiveSizeParameter(rclcpp::Node& node,
-                                  const std::string& name) {
-  const std::int64_t value = node.declare_parameter<std::int64_t>(name, 0);
+                                  const std::string& name,
+                                  const std::size_t default_value = 0U) {
+  if (default_value >
+      static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) {
+    throw std::overflow_error{name + " default exceeds ROS integer range"};
+  }
+  const std::int64_t value = node.declare_parameter<std::int64_t>(
+      name, static_cast<std::int64_t>(default_value));
   if (value <= 0 ||
       static_cast<std::uint64_t>(value) >
           static_cast<std::uint64_t>(
@@ -520,6 +526,26 @@ std::size_t PositiveSizeParameter(rclcpp::Node& node,
     throw std::invalid_argument{name + " must be a required positive integer"};
   }
   return static_cast<std::size_t>(value);
+}
+
+bool HasParameterOverride(rclcpp::Node& node, const std::string& name) {
+  return node.get_node_parameters_interface()
+      ->get_parameter_overrides()
+      .contains(name);
+}
+
+std::size_t DefaultGuidanceWorkUnits(const std::size_t grid_cells) {
+  constexpr std::size_t kNeighborsPerCell = 8U;
+  constexpr std::size_t kMaximumSize =
+      std::numeric_limits<std::size_t>::max();
+  const std::size_t maximum_ros_integer = static_cast<std::size_t>(
+      std::numeric_limits<std::int64_t>::max());
+  if (grid_cells > kMaximumSize / kNeighborsPerCell ||
+      grid_cells > maximum_ros_integer / kNeighborsPerCell) {
+    throw std::overflow_error{
+        "maximum_guidance_work_units default overflow"};
+  }
+  return kNeighborsPerCell * grid_cells;
 }
 
 std::string AbsoluteTopicParameter(rclcpp::Node& node,
@@ -620,15 +646,34 @@ ExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
         yaw_offsets_deg[index] * std::numbers::pi / 180.0;
   }
 
+  const std::size_t maximum_position_probes =
+      PositiveSizeParameter(node, "maximum_position_probes");
+  const std::size_t maximum_candidate_views =
+      PositiveSizeParameter(node, "maximum_candidate_views");
+  const std::size_t maximum_collision_work_units =
+      PositiveSizeParameter(node, "maximum_collision_work_units");
+  const std::size_t resolved_task_raster_cells =
+      static_cast<std::size_t>(maximum_task_raster_cells);
+  const std::size_t maximum_guidance_grid_cells = PositiveSizeParameter(
+      node, "maximum_guidance_grid_cells", resolved_task_raster_cells);
+  const std::size_t default_guidance_work_units =
+      HasParameterOverride(node, "maximum_guidance_work_units")
+          ? 1U
+          : DefaultGuidanceWorkUnits(maximum_guidance_grid_cells);
+  const std::size_t maximum_guidance_work_units = PositiveSizeParameter(
+      node, "maximum_guidance_work_units", default_guidance_work_units);
+  const std::size_t maximum_approach_candidates = PositiveSizeParameter(
+      node, "maximum_approach_candidates", maximum_candidate_views);
+
   return ExplorationNodeParameters{
       .platform = std::move(platform),
       .candidate_parameters = candidate_parameters,
-      .candidate_limits =
-          {PositiveSizeParameter(node, "maximum_position_probes"),
-           PositiveSizeParameter(node, "maximum_candidate_views"),
-           PositiveSizeParameter(node, "maximum_collision_work_units")},
-      .task_raster_limits =
-          {static_cast<std::size_t>(maximum_task_raster_cells)},
+      .candidate_limits = {maximum_position_probes, maximum_candidate_views,
+                           maximum_collision_work_units},
+      .task_raster_limits = {resolved_task_raster_cells},
+      .boundary_guidance_limits = {maximum_guidance_grid_cells,
+                                   maximum_guidance_work_units,
+                                   maximum_approach_candidates},
       .sensor_model =
           {sensor_range_m, sensor_fov_deg * std::numbers::pi / 180.0},
       .information_gain_limits =

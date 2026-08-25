@@ -1,0 +1,566 @@
+schema_version: 1
+fixture_id: outside_to_inside
+authority: test-only/non-authoritative
+platform:
+  platform_type: wheel
+  geometry_reference: lunar_pure_navigation_config/platforms/wheel
+task:
+  task_id: task7-outside-to-inside
+  boundary_xy:
+    - [0.0, 0.0]
+    - [20.0, 0.0]
+    - [20.0, 20.0]
+    - [0.0, 20.0]
+initial_inputs:
+  occupancy_grid:
+    header: {frame_id: map, stamp_ns: 7000000000, map_version: 70}
+    geometry:
+      resolution_m: 0.5
+      width: 48
+      height: 40
+      origin: {x: -4.0, y: 0.0}
+    semantics: {unknown: -1, free: 0, occupied: 100}
+    rows:
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........#???????????????????????????????????????"
+        - "........#???????????????????????????????????????"
+        - "........#???????????????????????????????????????"
+        - "........#???????????????????????????????????????"
+        - "........#???????????????????????????????????????"
+        - "........#???????????????????????????????????????"
+        - "........#???????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+    content_id: outside-to-inside-v1
+  transforms:
+    map_to_odom: {translation_xy: [0.0, 0.0], yaw_rad: 0.0}
+  odometry:
+    frame_id: odom
+    child_frame_id: base_link
+    pose_xy_yaw: [-2.0, 10.0, 0.0]
+    covariance: [0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04]
+events:
+  - {kind: publish_initial_inputs}
+  - {kind: publish_odometry, pose_xy_yaw: [-1.25, 6.25, 0.0]}
+  - kind: publish_map_growth
+    occupancy_grid:
+      header: {frame_id: map, stamp_ns: 7100000000, map_version: 71}
+      geometry:
+        resolution_m: 0.5
+        width: 48
+        height: 40
+        origin: {x: -4.0, y: 0.0}
+      semantics: {unknown: -1, free: 0, occupied: 100}
+      rows:
+        - "..............??????????????????????????????????"
+        - "..............??????????????????????????????????"
+        - "..............??????????????????????????????????"
+        - "..............??????????????????????????????????"
+        - "..............??????????????????????????????????"
+        - "..............??????????????????????????????????"
+        - "..............??????????????????????????????????"
+        - "..............??????????????????????????????????"
+        - "..............??????????????????????????????????"
+        - "..............??????????????????????????????????"
+        - "..............??????????????????????????????????"
+        - "..............??????????????????????????????????"
+        - "..............??????????????????????????????????"
+        - "..............??????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........#???????????????????????????????????????"
+        - "........#???????????????????????????????????????"
+        - "........#???????????????????????????????????????"
+        - "........#???????????????????????????????????????"
+        - "........#???????????????????????????????????????"
+        - "........#???????????????????????????????????????"
+        - "........#???????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+        - "........????????????????????????????????????????"
+      content_id: outside-to-inside-v2
+  - {kind: publish_odometry, pose_xy_yaw: [1.75, 6.25, 0.0]}
+  - kind: publish_map_growth
+    occupancy_grid:
+      header: {frame_id: map, stamp_ns: 7200000000, map_version: 72}
+      geometry:
+        resolution_m: 0.5
+        width: 48
+        height: 40
+        origin: {x: -4.0, y: 0.0}
+      semantics: {unknown: -1, free: 0, occupied: 100}
+      rows:
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "........#...................????????????????????"
+        - "........#...................????????????????????"
+        - "........#...................????????????????????"
+        - "........#...................????????????????????"
+        - "........#...................????????????????????"
+        - "........#...................????????????????????"
+        - "........#...................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+        - "............................????????????????????"
+      content_id: outside-to-inside-v3
+  - {kind: publish_odometry, pose_xy_yaw: [9.081, 9.75, 0.0]}
+  - kind: publish_map_growth
+    occupancy_grid:
+      header: {frame_id: map, stamp_ns: 7300000000, map_version: 73}
+      geometry:
+        resolution_m: 0.5
+        width: 48
+        height: 40
+        origin: {x: -4.0, y: 0.0}
+      semantics: {unknown: -1, free: 0, occupied: 100}
+      rows:
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "........#..................................?????"
+        - "........#..................................?????"
+        - "........#..................................?????"
+        - "........#..................................?????"
+        - "........#..................................?????"
+        - "........#..................................?????"
+        - "........#..................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+        - "...........................................?????"
+      content_id: outside-to-inside-v4
+  - {kind: publish_odometry, pose_xy_yaw: [16.581, 4.75, 0.7853981633974483]}
+candidate_goal_cell_response_table:
+  "5,12":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,6250,0", request_id: task7-outside-to-inside/candidate/0, best_cost: 3.25}
+  "5,11":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,5750,0", request_id: task7-outside-to-inside/candidate/1, best_cost: 3.25}
+  "5,28":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,14250,0", request_id: task7-outside-to-inside/candidate/2, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,14250,0", request_id: task7-outside-to-inside/candidate/43, best_cost: 3.25}
+  "5,13":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,6750,0", request_id: task7-outside-to-inside/candidate/3, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,6750,0", request_id: task7-outside-to-inside/candidate/61, best_cost: 3.25}
+  "5,27":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,13750,0", request_id: task7-outside-to-inside/candidate/4, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,13750,0", request_id: task7-outside-to-inside/candidate/44, best_cost: 3.25}
+  "5,10":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,5250,0", request_id: task7-outside-to-inside/candidate/5, best_cost: 3.25}
+  "5,29":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,14750,0", request_id: task7-outside-to-inside/candidate/6, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,14750,0", request_id: task7-outside-to-inside/candidate/45, best_cost: 3.25}
+  "5,9":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,4750,0", request_id: task7-outside-to-inside/candidate/7, best_cost: 3.25}
+  "5,30":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,15250,0", request_id: task7-outside-to-inside/candidate/8, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,15250,0", request_id: task7-outside-to-inside/candidate/46, best_cost: 3.25}
+  "5,8":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,4250,0", request_id: task7-outside-to-inside/candidate/9, best_cost: 3.25}
+  "5,31":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,15750,0", request_id: task7-outside-to-inside/candidate/10, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,15750,0", request_id: task7-outside-to-inside/candidate/47, best_cost: 3.25}
+  "5,14":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,7250,0", request_id: task7-outside-to-inside/candidate/11, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,7250,0", request_id: task7-outside-to-inside/candidate/52, best_cost: 3.25}
+  "5,26":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,13250,0", request_id: task7-outside-to-inside/candidate/12, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,13250,0", request_id: task7-outside-to-inside/candidate/48, best_cost: 3.25}
+  "5,7":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,3750,0", request_id: task7-outside-to-inside/candidate/13, best_cost: 3.25}
+  "5,32":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,16250,0", request_id: task7-outside-to-inside/candidate/14, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,16250,0", request_id: task7-outside-to-inside/candidate/49, best_cost: 3.25}
+  "5,6":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,3250,0", request_id: task7-outside-to-inside/candidate/15, best_cost: 3.25}
+  "5,33":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,16750,0", request_id: task7-outside-to-inside/candidate/16, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,16750,0", request_id: task7-outside-to-inside/candidate/50, best_cost: 3.25}
+  "5,5":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,2750,0", request_id: task7-outside-to-inside/candidate/17, best_cost: 3.25}
+  "5,34":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,17250,0", request_id: task7-outside-to-inside/candidate/18, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,17250,0", request_id: task7-outside-to-inside/candidate/51, best_cost: 3.25}
+  "5,15":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,7750,0", request_id: task7-outside-to-inside/candidate/19, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,7750,0", request_id: task7-outside-to-inside/candidate/56, best_cost: 3.25}
+  "5,25":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,12750,0", request_id: task7-outside-to-inside/candidate/20, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,12750,0", request_id: task7-outside-to-inside/candidate/53, best_cost: 3.25}
+  "5,4":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,2250,0", request_id: task7-outside-to-inside/candidate/21, best_cost: 3.25}
+  "5,35":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,17750,0", request_id: task7-outside-to-inside/candidate/22, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,17750,0", request_id: task7-outside-to-inside/candidate/54, best_cost: 3.25}
+  "5,3":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,1750,0", request_id: task7-outside-to-inside/candidate/23, best_cost: 3.25}
+  "5,36":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,18250,0", request_id: task7-outside-to-inside/candidate/24, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,18250,0", request_id: task7-outside-to-inside/candidate/55, best_cost: 3.25}
+  "5,2":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,1250,0", request_id: task7-outside-to-inside/candidate/25, best_cost: 3.25}
+  "5,37":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,18750,0", request_id: task7-outside-to-inside/candidate/26, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,18750,0", request_id: task7-outside-to-inside/candidate/57, best_cost: 3.25}
+  "5,16":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,8250,0", request_id: task7-outside-to-inside/candidate/27, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,8250,0", request_id: task7-outside-to-inside/candidate/60, best_cost: 3.25}
+  "5,24":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,12250,0", request_id: task7-outside-to-inside/candidate/28, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,12250,0", request_id: task7-outside-to-inside/candidate/58, best_cost: 3.25}
+  "5,1":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,750,0", request_id: task7-outside-to-inside/candidate/29, best_cost: 3.25}
+  "5,38":
+    responses:
+      - {kind: SUCCESS, candidate_key: "-1250,19250,0", request_id: task7-outside-to-inside/candidate/30, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "-1250,19250,0", request_id: task7-outside-to-inside/candidate/59, best_cost: 3.25}
+  "11,12":
+    responses:
+      - {kind: SUCCESS, candidate_key: "1750,6250,0", request_id: task7-outside-to-inside/candidate/31, best_cost: 3.25}
+  "11,11":
+    responses:
+      - {kind: SUCCESS, candidate_key: "1750,5750,0", request_id: task7-outside-to-inside/candidate/32, best_cost: 3.25}
+  "11,10":
+    responses:
+      - {kind: SUCCESS, candidate_key: "1750,5250,0", request_id: task7-outside-to-inside/candidate/33, best_cost: 3.25}
+  "11,9":
+    responses:
+      - {kind: SUCCESS, candidate_key: "1750,4750,0", request_id: task7-outside-to-inside/candidate/34, best_cost: 3.25}
+  "11,8":
+    responses:
+      - {kind: SUCCESS, candidate_key: "1750,4250,0", request_id: task7-outside-to-inside/candidate/35, best_cost: 3.25}
+  "11,7":
+    responses:
+      - {kind: SUCCESS, candidate_key: "1750,3750,0", request_id: task7-outside-to-inside/candidate/36, best_cost: 3.25}
+  "11,6":
+    responses:
+      - {kind: SUCCESS, candidate_key: "1750,3250,0", request_id: task7-outside-to-inside/candidate/37, best_cost: 3.25}
+  "11,5":
+    responses:
+      - {kind: SUCCESS, candidate_key: "1750,2750,0", request_id: task7-outside-to-inside/candidate/38, best_cost: 3.25}
+  "11,4":
+    responses:
+      - {kind: SUCCESS, candidate_key: "1750,2250,0", request_id: task7-outside-to-inside/candidate/39, best_cost: 3.25}
+  "11,3":
+    responses:
+      - {kind: SUCCESS, candidate_key: "1750,1750,0", request_id: task7-outside-to-inside/candidate/40, best_cost: 3.25}
+  "11,2":
+    responses:
+      - {kind: SUCCESS, candidate_key: "1750,1250,0", request_id: task7-outside-to-inside/candidate/41, best_cost: 3.25}
+  "11,1":
+    responses:
+      - {kind: SUCCESS, candidate_key: "1750,750,0", request_id: task7-outside-to-inside/candidate/42, best_cost: 3.25}
+  "26,9":
+    responses:
+      - {kind: SUCCESS, candidate_key: "9081,4750,225", request_id: task7-outside-to-inside/candidate/62, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "9081,4750,0", request_id: task7-outside-to-inside/candidate/63, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "9081,4750,450", request_id: task7-outside-to-inside/candidate/67, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "9081,4750,-225", request_id: task7-outside-to-inside/candidate/70, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "9081,4750,-450", request_id: task7-outside-to-inside/candidate/75, best_cost: 3.25}
+  "26,19":
+    responses:
+      - {kind: SUCCESS, candidate_key: "9081,9750,0", request_id: task7-outside-to-inside/candidate/64, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "9081,9750,-225", request_id: task7-outside-to-inside/candidate/65, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "9081,9750,225", request_id: task7-outside-to-inside/candidate/66, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "9081,9750,-450", request_id: task7-outside-to-inside/candidate/68, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "9081,9750,450", request_id: task7-outside-to-inside/candidate/69, best_cost: 3.25}
+  "26,29":
+    responses:
+      - {kind: SUCCESS, candidate_key: "9081,14750,-225", request_id: task7-outside-to-inside/candidate/71, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "9081,14750,0", request_id: task7-outside-to-inside/candidate/72, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "9081,14750,-450", request_id: task7-outside-to-inside/candidate/73, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "9081,14750,225", request_id: task7-outside-to-inside/candidate/74, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "9081,14750,450", request_id: task7-outside-to-inside/candidate/76, best_cost: 3.25}
+  "41,19":
+    responses:
+      - {kind: SUCCESS, candidate_key: "16581,9750,-450", request_id: task7-outside-to-inside/candidate/77, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "16581,9750,450", request_id: task7-outside-to-inside/candidate/78, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "16581,9750,-225", request_id: task7-outside-to-inside/candidate/81, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "16581,9750,225", request_id: task7-outside-to-inside/candidate/82, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "16581,9750,0", request_id: task7-outside-to-inside/candidate/87, best_cost: 3.25}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,9750,450", request_id: task7-outside-to-inside/candidate/97}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,9750,-450", request_id: task7-outside-to-inside/candidate/98}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,9750,225", request_id: task7-outside-to-inside/candidate/99}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,9750,-225", request_id: task7-outside-to-inside/candidate/100}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,9750,0", request_id: task7-outside-to-inside/candidate/102}
+  "41,9":
+    responses:
+      - {kind: SUCCESS, candidate_key: "16581,4750,450", request_id: task7-outside-to-inside/candidate/79, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "16581,4750,225", request_id: task7-outside-to-inside/candidate/83, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "16581,4750,-225", request_id: task7-outside-to-inside/candidate/88, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "16581,4750,-450", request_id: task7-outside-to-inside/candidate/89, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "16581,4750,0", request_id: task7-outside-to-inside/candidate/90, best_cost: 3.25}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,4750,450", request_id: task7-outside-to-inside/candidate/92}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,4750,225", request_id: task7-outside-to-inside/candidate/93}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,4750,-225", request_id: task7-outside-to-inside/candidate/94}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,4750,-450", request_id: task7-outside-to-inside/candidate/95}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,4750,0", request_id: task7-outside-to-inside/candidate/96}
+  "41,29":
+    responses:
+      - {kind: SUCCESS, candidate_key: "16581,14750,-450", request_id: task7-outside-to-inside/candidate/80, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "16581,14750,-225", request_id: task7-outside-to-inside/candidate/84, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "16581,14750,450", request_id: task7-outside-to-inside/candidate/85, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "16581,14750,225", request_id: task7-outside-to-inside/candidate/86, best_cost: 3.25}
+      - {kind: SUCCESS, candidate_key: "16581,14750,0", request_id: task7-outside-to-inside/candidate/91, best_cost: 3.25}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,14750,-450", request_id: task7-outside-to-inside/candidate/101}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,14750,-225", request_id: task7-outside-to-inside/candidate/103}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,14750,450", request_id: task7-outside-to-inside/candidate/104}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,14750,225", request_id: task7-outside-to-inside/candidate/105}
+      - {kind: GLOBAL_NO_PATH, candidate_key: "16581,14750,0", request_id: task7-outside-to-inside/candidate/106}
+expected:
+  ordered_candidate_keys: ["-1250,6250,0", "-1250,5750,0", "-1250,14250,0", "-1250,6750,0", "-1250,13750,0", "-1250,5250,0", "-1250,14750,0", "-1250,4750,0", "-1250,15250,0", "-1250,4250,0", "-1250,15750,0", "-1250,7250,0", "-1250,13250,0", "-1250,3750,0", "-1250,16250,0", "-1250,3250,0", "-1250,16750,0", "-1250,2750,0", "-1250,17250,0", "-1250,7750,0", "-1250,12750,0", "-1250,2250,0", "-1250,17750,0", "-1250,1750,0", "-1250,18250,0", "-1250,1250,0", "-1250,18750,0", "-1250,8250,0", "-1250,12250,0", "-1250,750,0", "-1250,19250,0", "1750,6250,0", "1750,5750,0", "1750,5250,0", "1750,4750,0", "1750,4250,0", "1750,3750,0", "1750,3250,0", "1750,2750,0", "1750,2250,0", "1750,1750,0", "1750,1250,0", "1750,750,0", "-1250,14250,0", "-1250,13750,0", "-1250,14750,0", "-1250,15250,0", "-1250,15750,0", "-1250,13250,0", "-1250,16250,0", "-1250,16750,0", "-1250,17250,0", "-1250,7250,0", "-1250,12750,0", "-1250,17750,0", "-1250,18250,0", "-1250,7750,0", "-1250,18750,0", "-1250,12250,0", "-1250,19250,0", "-1250,8250,0", "-1250,6750,0", "9081,4750,225", "9081,4750,0", "9081,9750,0", "9081,9750,-225", "9081,9750,225", "9081,4750,450", "9081,9750,-450", "9081,9750,450", "9081,4750,-225", "9081,14750,-225", "9081,14750,0", "9081,14750,-450", "9081,14750,225", "9081,4750,-450", "9081,14750,450", "16581,9750,-450", "16581,9750,450", "16581,4750,450", "16581,14750,-450", "16581,9750,-225", "16581,9750,225", "16581,4750,225", "16581,14750,-225", "16581,14750,450", "16581,14750,225", "16581,9750,0", "16581,4750,-225", "16581,4750,-450", "16581,4750,0", "16581,14750,0", "16581,4750,450", "16581,4750,225", "16581,4750,-225", "16581,4750,-450", "16581,4750,0", "16581,9750,450", "16581,9750,-450", "16581,9750,225", "16581,9750,-225", "16581,14750,-450", "16581,9750,0", "16581,14750,-225", "16581,14750,450", "16581,14750,225", "16581,14750,0"]
+  ordered_goal_cells: ["5,12", "5,11", "5,28", "5,13", "5,27", "5,10", "5,29", "5,9", "5,30", "5,8", "5,31", "5,14", "5,26", "5,7", "5,32", "5,6", "5,33", "5,5", "5,34", "5,15", "5,25", "5,4", "5,35", "5,3", "5,36", "5,2", "5,37", "5,16", "5,24", "5,1", "5,38", "11,12", "11,11", "11,10", "11,9", "11,8", "11,7", "11,6", "11,5", "11,4", "11,3", "11,2", "11,1", "5,28", "5,27", "5,29", "5,30", "5,31", "5,26", "5,32", "5,33", "5,34", "5,14", "5,25", "5,35", "5,36", "5,15", "5,37", "5,24", "5,38", "5,16", "5,13", "26,9", "26,9", "26,19", "26,19", "26,19", "26,9", "26,19", "26,19", "26,9", "26,29", "26,29", "26,29", "26,29", "26,9", "26,29", "41,19", "41,19", "41,9", "41,29", "41,19", "41,19", "41,9", "41,29", "41,29", "41,29", "41,19", "41,9", "41,9", "41,9", "41,29", "41,9", "41,9", "41,9", "41,9", "41,9", "41,19", "41,19", "41,19", "41,19", "41,29", "41,19", "41,29", "41,29", "41,29", "41,29"]
+  ordered_requests:
+    - {request_id: task7-outside-to-inside/candidate/0, candidate_key: "-1250,6250,0", goal_cell: "5,12", response_kind: SUCCESS, path_segments: [{segment_index: 0, reference_plan_id: "scenario-plan:task7-outside-to-inside/candidate/0", endpoint_cell: "5,12", final_goal_cell: "5,12"}]}
+    - {request_id: task7-outside-to-inside/candidate/1, candidate_key: "-1250,5750,0", goal_cell: "5,11", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/2, candidate_key: "-1250,14250,0", goal_cell: "5,28", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/3, candidate_key: "-1250,6750,0", goal_cell: "5,13", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/4, candidate_key: "-1250,13750,0", goal_cell: "5,27", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/5, candidate_key: "-1250,5250,0", goal_cell: "5,10", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/6, candidate_key: "-1250,14750,0", goal_cell: "5,29", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/7, candidate_key: "-1250,4750,0", goal_cell: "5,9", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/8, candidate_key: "-1250,15250,0", goal_cell: "5,30", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/9, candidate_key: "-1250,4250,0", goal_cell: "5,8", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/10, candidate_key: "-1250,15750,0", goal_cell: "5,31", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/11, candidate_key: "-1250,7250,0", goal_cell: "5,14", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/12, candidate_key: "-1250,13250,0", goal_cell: "5,26", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/13, candidate_key: "-1250,3750,0", goal_cell: "5,7", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/14, candidate_key: "-1250,16250,0", goal_cell: "5,32", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/15, candidate_key: "-1250,3250,0", goal_cell: "5,6", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/16, candidate_key: "-1250,16750,0", goal_cell: "5,33", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/17, candidate_key: "-1250,2750,0", goal_cell: "5,5", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/18, candidate_key: "-1250,17250,0", goal_cell: "5,34", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/19, candidate_key: "-1250,7750,0", goal_cell: "5,15", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/20, candidate_key: "-1250,12750,0", goal_cell: "5,25", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/21, candidate_key: "-1250,2250,0", goal_cell: "5,4", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/22, candidate_key: "-1250,17750,0", goal_cell: "5,35", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/23, candidate_key: "-1250,1750,0", goal_cell: "5,3", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/24, candidate_key: "-1250,18250,0", goal_cell: "5,36", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/25, candidate_key: "-1250,1250,0", goal_cell: "5,2", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/26, candidate_key: "-1250,18750,0", goal_cell: "5,37", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/27, candidate_key: "-1250,8250,0", goal_cell: "5,16", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/28, candidate_key: "-1250,12250,0", goal_cell: "5,24", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/29, candidate_key: "-1250,750,0", goal_cell: "5,1", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/30, candidate_key: "-1250,19250,0", goal_cell: "5,38", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/31, candidate_key: "1750,6250,0", goal_cell: "11,12", response_kind: SUCCESS, path_segments: [{segment_index: 0, reference_plan_id: "scenario-plan:task7-outside-to-inside/candidate/31", endpoint_cell: "11,12", final_goal_cell: "11,12"}]}
+    - {request_id: task7-outside-to-inside/candidate/32, candidate_key: "1750,5750,0", goal_cell: "11,11", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/33, candidate_key: "1750,5250,0", goal_cell: "11,10", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/34, candidate_key: "1750,4750,0", goal_cell: "11,9", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/35, candidate_key: "1750,4250,0", goal_cell: "11,8", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/36, candidate_key: "1750,3750,0", goal_cell: "11,7", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/37, candidate_key: "1750,3250,0", goal_cell: "11,6", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/38, candidate_key: "1750,2750,0", goal_cell: "11,5", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/39, candidate_key: "1750,2250,0", goal_cell: "11,4", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/40, candidate_key: "1750,1750,0", goal_cell: "11,3", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/41, candidate_key: "1750,1250,0", goal_cell: "11,2", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/42, candidate_key: "1750,750,0", goal_cell: "11,1", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/43, candidate_key: "-1250,14250,0", goal_cell: "5,28", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/44, candidate_key: "-1250,13750,0", goal_cell: "5,27", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/45, candidate_key: "-1250,14750,0", goal_cell: "5,29", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/46, candidate_key: "-1250,15250,0", goal_cell: "5,30", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/47, candidate_key: "-1250,15750,0", goal_cell: "5,31", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/48, candidate_key: "-1250,13250,0", goal_cell: "5,26", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/49, candidate_key: "-1250,16250,0", goal_cell: "5,32", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/50, candidate_key: "-1250,16750,0", goal_cell: "5,33", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/51, candidate_key: "-1250,17250,0", goal_cell: "5,34", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/52, candidate_key: "-1250,7250,0", goal_cell: "5,14", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/53, candidate_key: "-1250,12750,0", goal_cell: "5,25", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/54, candidate_key: "-1250,17750,0", goal_cell: "5,35", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/55, candidate_key: "-1250,18250,0", goal_cell: "5,36", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/56, candidate_key: "-1250,7750,0", goal_cell: "5,15", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/57, candidate_key: "-1250,18750,0", goal_cell: "5,37", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/58, candidate_key: "-1250,12250,0", goal_cell: "5,24", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/59, candidate_key: "-1250,19250,0", goal_cell: "5,38", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/60, candidate_key: "-1250,8250,0", goal_cell: "5,16", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/61, candidate_key: "-1250,6750,0", goal_cell: "5,13", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/62, candidate_key: "9081,4750,225", goal_cell: "26,9", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/63, candidate_key: "9081,4750,0", goal_cell: "26,9", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/64, candidate_key: "9081,9750,0", goal_cell: "26,19", response_kind: SUCCESS, path_segments: [{segment_index: 0, reference_plan_id: "scenario-plan:task7-outside-to-inside/candidate/64", endpoint_cell: "26,19", final_goal_cell: "26,19"}]}
+    - {request_id: task7-outside-to-inside/candidate/65, candidate_key: "9081,9750,-225", goal_cell: "26,19", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/66, candidate_key: "9081,9750,225", goal_cell: "26,19", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/67, candidate_key: "9081,4750,450", goal_cell: "26,9", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/68, candidate_key: "9081,9750,-450", goal_cell: "26,19", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/69, candidate_key: "9081,9750,450", goal_cell: "26,19", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/70, candidate_key: "9081,4750,-225", goal_cell: "26,9", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/71, candidate_key: "9081,14750,-225", goal_cell: "26,29", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/72, candidate_key: "9081,14750,0", goal_cell: "26,29", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/73, candidate_key: "9081,14750,-450", goal_cell: "26,29", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/74, candidate_key: "9081,14750,225", goal_cell: "26,29", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/75, candidate_key: "9081,4750,-450", goal_cell: "26,9", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/76, candidate_key: "9081,14750,450", goal_cell: "26,29", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/77, candidate_key: "16581,9750,-450", goal_cell: "41,19", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/78, candidate_key: "16581,9750,450", goal_cell: "41,19", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/79, candidate_key: "16581,4750,450", goal_cell: "41,9", response_kind: SUCCESS, path_segments: [{segment_index: 0, reference_plan_id: "scenario-plan:task7-outside-to-inside/candidate/79", endpoint_cell: "41,9", final_goal_cell: "41,9"}]}
+    - {request_id: task7-outside-to-inside/candidate/80, candidate_key: "16581,14750,-450", goal_cell: "41,29", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/81, candidate_key: "16581,9750,-225", goal_cell: "41,19", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/82, candidate_key: "16581,9750,225", goal_cell: "41,19", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/83, candidate_key: "16581,4750,225", goal_cell: "41,9", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/84, candidate_key: "16581,14750,-225", goal_cell: "41,29", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/85, candidate_key: "16581,14750,450", goal_cell: "41,29", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/86, candidate_key: "16581,14750,225", goal_cell: "41,29", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/87, candidate_key: "16581,9750,0", goal_cell: "41,19", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/88, candidate_key: "16581,4750,-225", goal_cell: "41,9", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/89, candidate_key: "16581,4750,-450", goal_cell: "41,9", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/90, candidate_key: "16581,4750,0", goal_cell: "41,9", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/91, candidate_key: "16581,14750,0", goal_cell: "41,29", response_kind: SUCCESS, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/92, candidate_key: "16581,4750,450", goal_cell: "41,9", response_kind: GLOBAL_NO_PATH, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/93, candidate_key: "16581,4750,225", goal_cell: "41,9", response_kind: GLOBAL_NO_PATH, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/94, candidate_key: "16581,4750,-225", goal_cell: "41,9", response_kind: GLOBAL_NO_PATH, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/95, candidate_key: "16581,4750,-450", goal_cell: "41,9", response_kind: GLOBAL_NO_PATH, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/96, candidate_key: "16581,4750,0", goal_cell: "41,9", response_kind: GLOBAL_NO_PATH, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/97, candidate_key: "16581,9750,450", goal_cell: "41,19", response_kind: GLOBAL_NO_PATH, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/98, candidate_key: "16581,9750,-450", goal_cell: "41,19", response_kind: GLOBAL_NO_PATH, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/99, candidate_key: "16581,9750,225", goal_cell: "41,19", response_kind: GLOBAL_NO_PATH, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/100, candidate_key: "16581,9750,-225", goal_cell: "41,19", response_kind: GLOBAL_NO_PATH, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/101, candidate_key: "16581,14750,-450", goal_cell: "41,29", response_kind: GLOBAL_NO_PATH, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/102, candidate_key: "16581,9750,0", goal_cell: "41,19", response_kind: GLOBAL_NO_PATH, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/103, candidate_key: "16581,14750,-225", goal_cell: "41,29", response_kind: GLOBAL_NO_PATH, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/104, candidate_key: "16581,14750,450", goal_cell: "41,29", response_kind: GLOBAL_NO_PATH, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/105, candidate_key: "16581,14750,225", goal_cell: "41,29", response_kind: GLOBAL_NO_PATH, path_segments: []}
+    - {request_id: task7-outside-to-inside/candidate/106, candidate_key: "16581,14750,0", goal_cell: "41,29", response_kind: GLOBAL_NO_PATH, path_segments: []}
+  status_sequence: [IDLE, WAITING_FOR_INPUT, SELECTING_FRONTIER, PLANNING, EXECUTING, SELECTING_FRONTIER, PLANNING, EXECUTING, SELECTING_FRONTIER, PLANNING, EXECUTING, SELECTING_FRONTIER, PLANNING, EXECUTING, SELECTING_FRONTIER, COMPLETED]
+  reference_plan_ids: ["scenario-plan:task7-outside-to-inside/candidate/0", "scenario-plan:task7-outside-to-inside/candidate/31", "scenario-plan:task7-outside-to-inside/candidate/64", "scenario-plan:task7-outside-to-inside/candidate/79"]
+  cancellation_plan_ids: ["scenario-plan:task7-outside-to-inside/candidate/0", "scenario-plan:task7-outside-to-inside/candidate/64"]
+  coverage_ratio: 0.875
+  completed: true
+  requires_exhaustive_planner_evidence: true
+  replan_count: 0
+  stuck_retries: 0
+  committed_goal_key: "16581,4750,450"
+  semantic_mutations: {timestamp_only: "fnv1a64:544956a6bc383599", map_version_only: "fnv1a64:544956a6bc383599", covariance_only: "fnv1a64:544956a6bc383599"}
+  two_segment: {enabled: false, committed_candidate_key: null, request_ids: [], endpoint_cells: [], final_goal_cell: null}
+  ordered_trace_id: "fnv1a64:544956a6bc383599"
+  navigation_phases: [APPROACH_TASK, EXPLORE_TASK]
+  terminal_reason: COMPLETED_NO_REACHABLE_FRONTIER
+  minimum_coverage_ratio: 0.80
+  approach_goal_count_minimum: 2
+  wfd_goal_count_minimum: 1
+  all_action_targets_known_free: true
+  nearest_blocked_entry_selected: false
