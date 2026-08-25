@@ -24,6 +24,7 @@ set(LUNAR_PURE_PLANNER_ROS_SOURCES
   src/input_store.cpp
   src/map_adapters.cpp
   src/incremental_traversability.cpp
+  src/elevation_occupancy.cpp
   src/center_distance_transform.cpp
   src/traversability_qos.cpp
   src/trusted_bridge.cpp
@@ -76,6 +77,13 @@ target_link_libraries(lunar_local_traversability_node ${PROJECT_NAME})
 ament_target_dependencies(lunar_local_traversability_node
   ament_index_cpp grid_map_msgs rclcpp)
 
+add_executable(lunar_elevation_occupancy_node
+  src/elevation_occupancy_main.cpp
+  src/elevation_occupancy_node.cpp)
+target_compile_features(lunar_elevation_occupancy_node PUBLIC cxx_std_20)
+target_link_libraries(lunar_elevation_occupancy_node ${PROJECT_NAME})
+ament_target_dependencies(lunar_elevation_occupancy_node grid_map_msgs rclcpp)
+
 if(LUNAR_BUILD_DEMO)
   add_executable(lunar_surface_demo_node src/lunar_surface_demo_node.cpp)
   target_compile_features(lunar_surface_demo_node PUBLIC cxx_std_20)
@@ -100,7 +108,7 @@ install(
   INCLUDES DESTINATION include)
 install(
   TARGETS lunar_pure_planner_node lunar_rviz_goal_bridge
-    lunar_local_traversability_node
+    lunar_local_traversability_node lunar_elevation_occupancy_node
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 if(LUNAR_BUILD_DEMO)
   install(
@@ -188,6 +196,9 @@ if(BUILD_TESTING)
   ament_add_gtest(incremental_traversability_test
     test/incremental_traversability_test.cpp)
   target_link_libraries(incremental_traversability_test ${PROJECT_NAME})
+
+  ament_add_gtest(elevation_occupancy_test test/elevation_occupancy_test.cpp)
+  target_link_libraries(elevation_occupancy_test ${PROJECT_NAME})
 
   ament_add_gtest(traversability_qos_test test/traversability_qos_test.cpp)
   target_link_libraries(traversability_qos_test ${PROJECT_NAME})
