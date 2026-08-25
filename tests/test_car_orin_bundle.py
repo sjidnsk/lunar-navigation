@@ -69,6 +69,9 @@ def test_generator_creates_minimal_humble_production_bundle(tmp_path: Path) -> N
 
     expected_core_sources = {
         "src/planner.cpp",
+        "src/global_goal_feasibility.cpp",
+        "src/grid_v1/grid_v1_planner.cpp",
+        "src/grid_v1/traversability_map.cpp",
         "src/hierarchical/frame_transform.cpp",
         "src/hierarchical/global_route_planner.cpp",
         "src/hierarchical/reference_composer.cpp",
@@ -101,6 +104,10 @@ def test_generator_creates_minimal_humble_production_bundle(tmp_path: Path) -> N
     ros_package = output / "ros2_ws" / "src" / "lunar_pure_planner_ros"
     for required_source in (
         "src/center_distance_transform.cpp",
+        "src/elevation_occupancy.cpp",
+        "src/elevation_occupancy_main.cpp",
+        "src/elevation_occupancy_node.cpp",
+        "src/traversability_input.cpp",
         "src/traversability_qos.cpp",
     ):
         assert (ros_package / required_source).is_file()

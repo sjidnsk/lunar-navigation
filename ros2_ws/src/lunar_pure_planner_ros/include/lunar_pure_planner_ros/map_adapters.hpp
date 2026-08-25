@@ -16,6 +16,7 @@ namespace lunar::pure_planner_ros {
 
 [[nodiscard]] AdapterResult<lunar::pure_planning::MinimalWorldSnapshot>
 AdaptSnapshot(lunar::pure_planning::EnvironmentMode mode,
-              const InputSnapshot& input);
+              const InputSnapshot& input,
+              bool require_surface_global_map = true);
 
 }  // namespace lunar::pure_planner_ros

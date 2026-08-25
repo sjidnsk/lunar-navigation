@@ -4,9 +4,10 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <variant>
 #include <vector>
 
-#include "lunar_pure_exploration_core/candidate_generator.hpp"
+#include "lunar_pure_exploration_core/goal_identity.hpp"
 
 namespace lunar::pure_exploration {
 
@@ -28,6 +29,7 @@ enum class GoalReleaseReason : std::uint8_t {
   kCandidateInvalid,
   kFrontierDisappeared,
   kInformationGainZero,
+  kLocalSegmentCompleted,
 };
 
 enum class ReplanCause : std::uint8_t {
@@ -49,10 +51,12 @@ class ActiveGoal {
 
   std::uint64_t candidate_id() const;
   std::uint64_t frontier_id() const;
+  GoalKind kind() const;
   std::span<const std::int64_t> frontier_canonical_key() const;
   const CandidateKey& candidate_key() const;
   const Pose2& target() const;
   const std::string& request_id() const;
+  const BoundaryApproachGoalIdentity* boundary_approach_identity() const;
   std::uint8_t replan_count() const;
   bool MatchesAnyFrontier(
       std::span<const FrontierCluster> current_frontiers) const;
@@ -61,17 +65,21 @@ class ActiveGoal {
   friend ActiveGoal MakeActiveGoal(const CandidateView& candidate,
                                    std::span<const FrontierCluster> frozen_frontiers,
                                    std::string request_id);
+  friend ActiveGoal MakeBoundaryApproachActiveGoal(
+      std::uint64_t display_id, BoundaryApproachGoalIdentity identity,
+      Pose2 target, std::string request_id);
   friend class ExplorationStateMachine;
 
   ActiveGoal(std::uint64_t candidate_id, std::uint64_t frontier_id,
-             std::vector<std::int64_t> frontier_canonical_key,
-             CandidateKey candidate_key, Pose2 target,
+             std::variant<TaskFrontierGoalIdentity,
+                          BoundaryApproachGoalIdentity> identity,
+             Pose2 target,
              std::string request_id);
 
   std::uint64_t candidate_id_;
   std::uint64_t frontier_id_;
-  std::vector<std::int64_t> frontier_canonical_key_;
-  CandidateKey candidate_key_;
+  std::variant<TaskFrontierGoalIdentity, BoundaryApproachGoalIdentity>
+      identity_;
   Pose2 target_;
   std::string request_id_;
   std::uint8_t replan_count_{0U};
@@ -81,6 +89,10 @@ class ActiveGoal {
 ActiveGoal MakeActiveGoal(const CandidateView& candidate,
                           std::span<const FrontierCluster> frozen_frontiers,
                           std::string request_id);
+
+ActiveGoal MakeBoundaryApproachActiveGoal(
+    std::uint64_t display_id, BoundaryApproachGoalIdentity identity,
+    Pose2 target, std::string request_id);
 
 class ExplorationStateMachine {
  public:

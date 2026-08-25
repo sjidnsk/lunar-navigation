@@ -13,6 +13,9 @@ from pathlib import Path
 
 CORE_PRODUCTION_SOURCES = (
     "src/planner.cpp",
+    "src/global_goal_feasibility.cpp",
+    "src/grid_v1/grid_v1_planner.cpp",
+    "src/grid_v1/traversability_map.cpp",
     "src/hierarchical/frame_transform.cpp",
     "src/hierarchical/global_route_planner.cpp",
     "src/hierarchical/reference_composer.cpp",
@@ -40,9 +43,11 @@ CORE_PRODUCTION_SOURCES = (
 ROS_PRODUCTION_SOURCES = (
     "src/platform_config.cpp",
     "src/input_store.cpp",
+    "src/traversability_input.cpp",
     "src/map_adapters.cpp",
     "src/center_distance_transform.cpp",
     "src/incremental_traversability.cpp",
+    "src/elevation_occupancy.cpp",
     "src/traversability_qos.cpp",
     "src/trusted_bridge.cpp",
     "src/state_adapter.cpp",
@@ -54,6 +59,8 @@ ROS_PRODUCTION_SOURCES = (
     "src/rviz_goal_bridge_main.cpp",
     "src/local_traversability_main.cpp",
     "src/local_traversability_node.cpp",
+    "src/elevation_occupancy_main.cpp",
+    "src/elevation_occupancy_node.cpp",
 )
 
 BUILD_SCRIPT = """#!/usr/bin/env bash

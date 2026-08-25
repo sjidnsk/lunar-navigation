@@ -10,10 +10,12 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <future>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <numbers>
 #include <optional>
 #include <set>
@@ -39,6 +41,12 @@ namespace lunar::pure_exploration_ros {
 
 class ExplorationNodeTestPeer final {
  public:
+  enum class MapValidationAuthority {
+    kTaskBoundary,
+    kActiveReference,
+    kPose,
+  };
+
   static FrozenPlanningCyclePtr ActiveCycle(const ExplorationNode& node) {
     return node.SnapshotActiveCycleForTest();
   }
@@ -52,6 +60,15 @@ class ExplorationNodeTestPeer final {
   }
   static std::optional<lunar::pure_exploration::Pose2> ActiveTarget(
       const ExplorationNode& node) { return node.SnapshotActiveTargetForTest(); }
+  static std::optional<lunar::pure_exploration::GoalKind> ActiveGoalKind(
+      const ExplorationNode& node) {
+    return node.SnapshotActiveGoalKindForTest();
+  }
+  static std::optional<
+      lunar::pure_exploration::BoundaryApproachGoalIdentity>
+  BoundaryApproachIdentity(const ExplorationNode& node) {
+    return node.SnapshotBoundaryApproachIdentityForTest();
+  }
   static std::vector<lunar::pure_exploration::Vec2> ExecutablePolyline(
       const ExplorationNode& node) {
     return node.SnapshotExecutablePolylineForTest();
@@ -85,6 +102,24 @@ class ExplorationNodeTestPeer final {
   static void ResetActiveCycle(ExplorationNode& node) {
     node.ResetActiveCycleForTest();
   }
+  static void ResetMapValidationAuthority(
+      ExplorationNode& node, const MapValidationAuthority authority) {
+    switch (authority) {
+      case MapValidationAuthority::kTaskBoundary:
+        node.ResetMapValidationAuthorityForTest(
+            ExplorationNode::MapValidationAuthorityForTest::kTaskBoundary);
+        return;
+      case MapValidationAuthority::kActiveReference:
+        node.ResetMapValidationAuthorityForTest(
+            ExplorationNode::MapValidationAuthorityForTest::kActiveReference);
+        return;
+      case MapValidationAuthority::kPose:
+        node.ResetMapValidationAuthorityForTest(
+            ExplorationNode::MapValidationAuthorityForTest::kPose);
+        return;
+    }
+    throw std::invalid_argument{"unknown map-validation authority"};
+  }
 };
 
 namespace {
@@ -94,6 +129,55 @@ using Task = lunar_pure_exploration_msgs::msg::PureExplorationTask;
 using Status = lunar_pure_exploration_msgs::msg::PureExplorationStatus;
 using ServerGoalHandle = rclcpp_action::ServerGoalHandle<Action>;
 using namespace std::chrono_literals;
+
+constexpr std::array<const char*, 7U> kStopWaitDiagnosticKeys{
+    "stop_wait_elapsed_ms",
+    "stop_entry_linear_mps",
+    "stop_entry_angular_radps",
+    "stop_confirmed_linear_mps",
+    "stop_confirmed_angular_radps",
+    "stop_confirmation_samples",
+    "planning_epoch",
+};
+
+constexpr std::array<const char*, 7U> kApproachDiagnosticKeys{
+    "navigation_phase",
+    "fully_inside_task",
+    "approach_intent_count",
+    "approach_candidate_count",
+    "remaining_guidance_m",
+    "guidance_unknown_cell_count",
+    "approach_wait_reason",
+};
+
+constexpr std::array<const char*, 26U> kPlannerOutputTimingKeys{
+    "candidate_call_count",
+    "candidate_record_count",
+    "candidate_global_elapsed_ms",
+    "candidate_global_call_count",
+    "candidate_local_elapsed_ms",
+    "candidate_local_call_count",
+    "candidate_total_elapsed_ms",
+    "rolling_call_count",
+    "rolling_record_count",
+    "rolling_global_elapsed_ms",
+    "rolling_global_call_count",
+    "rolling_local_elapsed_ms",
+    "rolling_local_call_count",
+    "rolling_total_elapsed_ms",
+    "stuck_call_count",
+    "stuck_record_count",
+    "stuck_global_elapsed_ms",
+    "stuck_global_call_count",
+    "stuck_local_elapsed_ms",
+    "stuck_local_call_count",
+    "stuck_total_elapsed_ms",
+    "global_elapsed_ms",
+    "global_call_count",
+    "local_elapsed_ms",
+    "local_call_count",
+    "total_elapsed_ms",
+};
 
 class RosEnvironment final : public ::testing::Environment {
  public:
@@ -154,6 +238,61 @@ nav_msgs::msg::OccupancyGrid GlobalMap(
     }
   }
   return map;
+}
+
+nav_msgs::msg::OccupancyGrid OutsideApproachMap(
+    const bool reveal_left_entry = false) {
+  constexpr std::uint32_t width = 32U;
+  constexpr std::uint32_t height = 24U;
+  constexpr double resolution = 0.5;
+  auto map = GlobalMap(width, height, resolution, -4.0, 0.0);
+  map.data.assign(static_cast<std::size_t>(width) * height, 0);
+  const auto set = [&map](const std::uint32_t x, const std::uint32_t y,
+                          const std::int8_t value) {
+    map.data[static_cast<std::size_t>(y) * map.info.width + x] = value;
+  };
+
+  // The task is [0, 10] x [0, 10]. Keep every boundary intent UNKNOWN so the
+  // first executable goal must stop at the known-FREE prefix outside x=0.
+  const std::uint32_t left = 8U;
+  const std::uint32_t right = 27U;
+  const std::uint32_t bottom = 0U;
+  const std::uint32_t top = 19U;
+  for (std::uint32_t y = bottom; y <= top; ++y) {
+    set(left, y, -1);
+    set(right, y, -1);
+  }
+  for (std::uint32_t x = left; x <= right; ++x) {
+    set(x, bottom, -1);
+    set(x, top, -1);
+  }
+  // Preserve an ordinary in-task WFD frontier after entry.
+  for (std::uint32_t y = 1U; y < top; ++y) {
+    for (std::uint32_t x = 16U; x < right; ++x) {
+      set(x, y, -1);
+    }
+  }
+  if (reveal_left_entry) {
+    for (std::uint32_t y = 0U; y <= top; ++y) {
+      set(left, y, 0);
+    }
+  }
+  return map;
+}
+
+std::optional<std::size_t> MapOffset(
+    const nav_msgs::msg::OccupancyGrid& map, const double world_x,
+    const double world_y) {
+  const auto x = static_cast<std::int64_t>(std::floor(
+      (world_x - map.info.origin.position.x) / map.info.resolution));
+  const auto y = static_cast<std::int64_t>(std::floor(
+      (world_y - map.info.origin.position.y) / map.info.resolution));
+  if (x < 0 || y < 0 || x >= static_cast<std::int64_t>(map.info.width) ||
+      y >= static_cast<std::int64_t>(map.info.height)) {
+    return std::nullopt;
+  }
+  return static_cast<std::size_t>(y) * map.info.width +
+         static_cast<std::size_t>(x);
 }
 
 nav_msgs::msg::Odometry Odometry(const double x = 2.0,
@@ -293,6 +432,38 @@ std::vector<lunar::pure_exploration::RankedCandidate> Order(
   return order;
 }
 
+lunar::pure_exploration::BoundaryGuidanceResult ApproachResult(
+    const std::size_t count) {
+  lunar::pure_exploration::BoundaryGuidanceResult result{
+      .phase = lunar::pure_exploration::NavigationPhase::kApproachTask,
+      .wait_reason = lunar::pure_exploration::ApproachWaitReason::kNone,
+      .fully_inside_task = false,
+  };
+  result.candidates.reserve(count);
+  for (std::size_t index = 0U; index < count; ++index) {
+    const auto x_mm = static_cast<std::int64_t>(index + 1U) * 1000;
+    const lunar::pure_exploration::CandidateKey key{
+        .x_mm = x_mm, .y_mm = 0, .yaw_tenth_deg = 0};
+    result.candidates.push_back(
+        {.id = static_cast<std::uint64_t>(100U + index),
+         .identity =
+             {.intent_cell = {static_cast<std::int32_t>(index), 0},
+              .candidate_key = key,
+              .candidate_kind = lunar::pure_exploration::
+                  ApproachCandidateKind::kTranslation},
+         .pose = {.x = static_cast<double>(index + 1U),
+                  .y = 0.0,
+                  .yaw = 0.0},
+         .remaining_cost = {.unknown_cell_count = 1U,
+                            .path_length_m = static_cast<double>(count - index)},
+         .task_unknown_area_m2 = 1.0,
+         .guidance_unknown_cell_count = 1U,
+         .fully_inside_task = false,
+         .guidance_route = {{static_cast<double>(index + 1U), 0.0}}});
+  }
+  return result;
+}
+
 TEST(FrozenCandidateBatchTest, OwnsIdentityAndAssociatesOnlyByRequestId) {
   auto source_map = GlobalMap(2U, 2U, 0.5, 1.0, 2.0);
   source_map.header.stamp.sec = 100;
@@ -408,6 +579,36 @@ TEST(FrozenPlanningCycleTest, OwnsUniqueReachableRowsAndReferences) {
                std::invalid_argument);
 }
 
+TEST(FrozenApproachCycleTest,
+     OwnsGuidanceAssociatesRequestsAndChunksThirtyThreeSequentially) {
+  auto source = ApproachResult(33U);
+  std::vector<std::size_t> order(33U);
+  std::iota(order.begin(), order.end(), 0U);
+  FrozenApproachCycle cycle(FrozenMap(GlobalMap(40U, 2U)), source,
+                            {0.0, 0.0, 0.0}, 0.5, order);
+
+  source.candidates.front().pose.x = 999.0;
+  EXPECT_DOUBLE_EQ(cycle.guidance().candidates.front().pose.x, 1.0);
+  EXPECT_EQ(cycle.TakeNextCandidateIndices().size(), 16U);
+  EXPECT_EQ(cycle.TakeNextCandidateIndices().size(), 16U);
+  const auto tail = cycle.TakeNextCandidateIndices();
+  ASSERT_EQ(tail.size(), 1U);
+  EXPECT_EQ(tail.front(), 32U);
+  EXPECT_TRUE(cycle.TakeNextCandidateIndices().empty());
+
+  cycle.RegisterRequest("approach-request-17", 17U);
+  EXPECT_EQ(cycle.CandidateIndexForRequest("approach-request-17"), 17U);
+  EXPECT_EQ(cycle.LatestRequestIdForCandidate(17U), "approach-request-17");
+  lunar_planning_msgs::msg::MotionReference reference;
+  reference.plan_id = "owned-approach-plan";
+  cycle.AddReachable(
+      {.metrics = {.candidate_index = 17U, .path_length_m = 4.5},
+       .reference = reference});
+  ASSERT_EQ(cycle.reachable().size(), 1U);
+  EXPECT_EQ(cycle.reachable().front().reference.plan_id,
+            "owned-approach-plan");
+}
+
 class FakePlannerServer final {
  public:
   enum class Mode { kDelayed, kReachable, kExhaustive, kRetryable,
@@ -464,9 +665,20 @@ class FakePlannerServer final {
     std::scoped_lock lock{mutex_};
     return cancel_count_;
   }
+
+  std::set<std::string> CanceledRequestIds() const {
+    std::scoped_lock lock{mutex_};
+    return canceled_request_ids_;
+  }
+
   void SetMode(const Mode mode) {
     std::scoped_lock lock{mutex_};
     mode_ = mode;
+  }
+
+  void SetFixedPlanId(std::string plan_id) {
+    std::scoped_lock lock{mutex_};
+    fixed_plan_id_ = std::move(plan_id);
   }
 
   bool HasHandle() const {
@@ -506,7 +718,11 @@ class FakePlannerServer final {
       result->has_reference = true;
       result->reference.header.frame_id = "map";
       result->reference.header.stamp.sec = 31;
-      result->reference.plan_id = "plan:" + request_id;
+      {
+        std::scoped_lock lock{mutex_};
+        result->reference.plan_id = fixed_plan_id_.value_or(
+            "plan:" + request_id);
+      }
       result->reference.platform_type = result->reference.WHEELED;
       result->reference.input_time.sec = 29;
       result->reference.path_preview.header.frame_id = "map";
@@ -578,6 +794,7 @@ class FakePlannerServer final {
   std::vector<Action::Goal> goals_;
   std::unordered_map<std::string, std::shared_ptr<ServerGoalHandle>> handles_;
   std::set<std::string> canceled_request_ids_;
+  std::optional<std::string> fixed_plan_id_;
   std::size_t outstanding_{0U};
   std::size_t maximum_outstanding_{0U};
   std::size_t cancel_count_{0U};
@@ -597,6 +814,7 @@ ExplorationNodeParameters TestParameters(const std::string& prefix) {
                                 std::numbers::pi / 4.0}},
       .candidate_limits = {4096U, 64U, 100000U},
       .task_raster_limits = {1048576U},
+      .boundary_guidance_limits = {1048576U, 1000000U, 64U},
       .sensor_model = {10.0, std::numbers::pi / 2.0},
       .information_gain_limits = {100000U},
       .score_weights = {},
@@ -606,6 +824,12 @@ ExplorationNodeParameters TestParameters(const std::string& prefix) {
       .maximum_executable_path_points = 64U,
       .maximum_replans = 2U,
       .goal_yaw_tolerance_rad = std::numbers::pi / 16.0,
+      .filter_global_goal_cell = false,
+      .stationary_gate =
+          {.maximum_linear_speed_mps = 0.01,
+           .maximum_angular_speed_radps = 0.02,
+           .confirmation_samples = 3U,
+           .diagnostic_period = 5s},
       .planner_result_timeout = 2s,
       .global_map_topic = prefix + "/global_map",
       .odometry_topic = prefix + "/odometry",
@@ -656,7 +880,7 @@ class ExplorationNodeTest : public ::testing::Test {
         });
     status_subscription_ = io_node_->create_subscription<Status>(
         parameters_.status_topic,
-        rclcpp::QoS{1}.reliable().transient_local(),
+        rclcpp::QoS{10}.reliable().transient_local(),
         [this](Status::SharedPtr value) {
           std::scoped_lock lock{messages_mutex_};
           statuses_.push_back(*value);
@@ -694,6 +918,72 @@ class ExplorationNodeTest : public ::testing::Test {
         server_node_, parameters_.planner_action, mode, executable_points,
         preview_poses);
     explorer_ = std::make_shared<ExplorationNode>(parameters_);
+    executor_ = std::make_unique<rclcpp::executors::MultiThreadedExecutor>(
+        rclcpp::ExecutorOptions{}, 4U);
+    executor_->add_node(server_node_);
+    executor_->add_node(io_node_);
+    executor_->add_node(explorer_);
+    spin_thread_ = std::jthread([this] { executor_->spin(); });
+    auto probe = rclcpp_action::create_client<Action>(
+        io_node_, parameters_.planner_action);
+    ASSERT_TRUE(probe->wait_for_action_server(3s));
+    ASSERT_TRUE(WaitFor([this] {
+      return task_publisher_->get_subscription_count() == 1U &&
+             map_publisher_->get_subscription_count() == 1U &&
+             odometry_publisher_->get_subscription_count() == 1U &&
+             tf_publisher_->get_subscription_count() == 1U;
+    }));
+  }
+
+  rclcpp::NodeOptions StopGateParameterOptions(
+      const double linear_threshold = 0.01,
+      const double angular_threshold = 0.02,
+      const std::int64_t confirmation_samples = 3,
+      const double diagnostic_period_s = 5.0) const {
+    const auto platform_config =
+        (std::filesystem::path{__FILE__}.parent_path() /
+         "../../../../config/wheel.yaml")
+            .lexically_normal()
+            .string();
+    rclcpp::NodeOptions options;
+    options.parameter_overrides({
+        rclcpp::Parameter("platform_selector", "wheel"),
+        rclcpp::Parameter("platform_config", platform_config),
+        rclcpp::Parameter("maximum_position_probes", 4096),
+        rclcpp::Parameter("maximum_candidate_views", 64),
+        rclcpp::Parameter("maximum_collision_work_units", 100000),
+        rclcpp::Parameter("maximum_visibility_work_units", 100000),
+        rclcpp::Parameter("maximum_failure_entries", 8),
+        rclcpp::Parameter("maximum_failure_patch_cells_per_entry", 256),
+        rclcpp::Parameter("maximum_failure_total_patch_cells", 1024),
+        rclcpp::Parameter("maximum_path_preview_poses", 64),
+        rclcpp::Parameter("maximum_executable_path_points", 64),
+        rclcpp::Parameter("stop_before_planning", true),
+        rclcpp::Parameter("stationary_linear_speed_mps", linear_threshold),
+        rclcpp::Parameter("stationary_angular_speed_radps", angular_threshold),
+        rclcpp::Parameter("stationary_confirmation_samples",
+                          confirmation_samples),
+        rclcpp::Parameter("stop_wait_diagnostic_s", diagnostic_period_s),
+        rclcpp::Parameter("global_map_topic", parameters_.global_map_topic),
+        rclcpp::Parameter("odometry_topic", parameters_.odometry_topic),
+        rclcpp::Parameter("tf_topic", parameters_.tf_topic),
+        rclcpp::Parameter("task_topic", parameters_.task_topic),
+        rclcpp::Parameter("planner_action", parameters_.planner_action),
+        rclcpp::Parameter("planner_diagnostics_topic",
+                          parameters_.planner_diagnostics_topic),
+        rclcpp::Parameter("motion_reference_topic",
+                          parameters_.motion_reference_topic),
+        rclcpp::Parameter("execution_cancel_topic",
+                          parameters_.execution_cancel_topic),
+    });
+    return options;
+  }
+
+  void StartWithStopGateParameters(FakePlannerServer::Mode mode) {
+    server_ = std::make_unique<FakePlannerServer>(
+        server_node_, parameters_.planner_action, mode);
+    explorer_ =
+        std::make_shared<ExplorationNode>(StopGateParameterOptions());
     executor_ = std::make_unique<rclcpp::executors::MultiThreadedExecutor>(
         rclcpp::ExecutorOptions{}, 4U);
     executor_->add_node(server_node_);
@@ -791,6 +1081,11 @@ class ExplorationNodeTest : public ::testing::Test {
     return statuses_.size();
   }
 
+  std::vector<Status> Statuses() const {
+    std::scoped_lock lock{messages_mutex_};
+    return statuses_;
+  }
+
   std::size_t CurrentGoalCount() const {
     std::scoped_lock lock{messages_mutex_};
     return current_goals_.size();
@@ -813,6 +1108,11 @@ class ExplorationNodeTest : public ::testing::Test {
     return diagnostics_.empty() ? std::nullopt : std::optional{diagnostics_.back()};
   }
 
+  std::size_t DiagnosticsCount() const {
+    std::scoped_lock lock{messages_mutex_};
+    return diagnostics_.size();
+  }
+
   std::optional<std::string> DiagnosticValue(const std::string& key) const {
     const auto diagnostics = LatestDiagnostics();
     if (!diagnostics || diagnostics->status.size() != 1U) {
@@ -825,6 +1125,38 @@ class ExplorationNodeTest : public ::testing::Test {
     return found == diagnostics->status.front().values.end()
                ? std::nullopt
                : std::optional<std::string>{found->value};
+  }
+
+  std::size_t DiagnosticKeyCount(const std::string& key) const {
+    const auto diagnostics = LatestDiagnostics();
+    if (!diagnostics || diagnostics->status.size() != 1U) {
+      return 0U;
+    }
+    return static_cast<std::size_t>(std::ranges::count_if(
+        diagnostics->status.front().values,
+        [&key](const auto& value) { return value.key == key; }));
+  }
+
+  std::vector<std::string> PlannerTimingDiagnosticBytes() const {
+    const auto diagnostics = LatestDiagnostics();
+    if (!diagnostics || diagnostics->status.size() != 1U) {
+      return {};
+    }
+    std::vector<std::string> result;
+    result.reserve(kPlannerOutputTimingKeys.size());
+    for (const char* key : kPlannerOutputTimingKeys) {
+      const auto found = std::ranges::find_if(
+          diagnostics->status.front().values,
+          [key](const auto& value) { return value.key == key; });
+      if (found == diagnostics->status.front().values.end()) {
+        return {};
+      }
+      std::string bytes{found->key};
+      bytes.push_back('\0');
+      bytes += found->value;
+      result.push_back(std::move(bytes));
+    }
+    return result;
   }
 
   void ExpectWaitingWithMissingInput(const int missing) {
@@ -850,6 +1182,50 @@ class ExplorationNodeTest : public ::testing::Test {
     EXPECT_EQ(status->reason_code, "WAITING_FOR_INPUT");
     EXPECT_TRUE(server_->Goals().empty());
     EXPECT_EQ(ReferenceCount(), 0U);
+  }
+
+  void ExpectSameContentMissingMapValidationAuthorityFails(
+      const ExplorationNodeTestPeer::MapValidationAuthority authority,
+      const bool exact_cancel_available) {
+    auto guidance_build_calls =
+        std::make_shared<std::atomic<std::size_t>>(0U);
+    auto seams = std::make_shared<ExplorationPipelineSeams>();
+    seams->after_boundary_guidance_build = [guidance_build_calls] {
+      guidance_build_calls->fetch_add(1U);
+    };
+    parameters_.pipeline_seams = std::move(seams);
+    Start(FakePlannerServer::Mode::kReachable);
+    const auto map = OutsideApproachMap(false);
+    PublishAllInputs(StartTask("same-map-missing-authority"), map,
+                     Odometry(-2.0, 5.0));
+    ASSERT_TRUE(WaitFor([this] {
+      return ReferenceCount() == 1U &&
+             ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+                 lunar::pure_exploration::GoalKind::kBoundaryApproach;
+    }));
+    const std::string plan_id = References().front().plan_id;
+    const std::size_t goals_before = server_->Goals().size();
+    ExplorationNodeTestPeer::ResetMapValidationAuthority(
+        *explorer_, authority);
+    map_publisher_->publish(map);
+
+    ASSERT_TRUE(WaitFor([this] {
+      const auto status = LatestStatus();
+      return status && status->state == Status::ERROR &&
+             status->reason_code == "FINAL_MAP_VALIDATION_ERROR";
+    }));
+    if (exact_cancel_available) {
+      ASSERT_TRUE(WaitFor([this, &plan_id] {
+        return ExecutionCancels() == std::vector<std::string>{plan_id};
+      }));
+    } else {
+      EXPECT_TRUE(ExecutionCancels().empty());
+    }
+    EXPECT_EQ(server_->Goals().size(), goals_before);
+    EXPECT_EQ(guidance_build_calls->load(), 1U);
+    ASSERT_TRUE(LatestStatus());
+    EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+    EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
   }
 
   static std::atomic<std::uint64_t> sequence_;
@@ -909,6 +1285,16 @@ class ExecutionReplanControlGateTest
     : public ExplorationNodeTest,
       public ::testing::WithParamInterface<ExecutionControl> {};
 
+enum class ApproachControl {
+  kPauseResume,
+  kCancel,
+  kReplacementStart,
+};
+
+class ApproachControlTest
+    : public ExplorationNodeTest,
+      public ::testing::WithParamInterface<ApproachControl> {};
+
 TEST_F(ExplorationNodeTest, MissingGlobalMapWaitsIndefinitely) {
   ExpectWaitingWithMissingInput(0);
 }
@@ -919,6 +1305,596 @@ TEST_F(ExplorationNodeTest, MissingOdometryWaitsIndefinitely) {
 
 TEST_F(ExplorationNodeTest, MissingMapToOdomTransformWaitsIndefinitely) {
   ExpectWaitingWithMissingInput(2);
+}
+
+TEST_F(ExplorationNodeTest,
+       StopGateWaitsForThreeConsecutiveStationaryOdometrySamples) {
+  parameters_.stop_before_planning = true;
+  Start(FakePlannerServer::Mode::kDelayed);
+  auto moving = Odometry();
+  moving.twist.twist.linear.x = 0.2;
+  PublishAllInputs(StartTask("stationary-three"), GlobalMap(), moving);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    const auto status = LatestStatus();
+    return pose && pose->x == 2.0 && status &&
+           status->reason_code == "WAITING_FOR_STOP";
+  }));
+  EXPECT_EQ(server_->Goals().size(), 0U);
+
+  odometry_publisher_->publish(Odometry(2.1, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.1;
+  }));
+  EXPECT_EQ(server_->Goals().size(), 0U);
+  odometry_publisher_->publish(Odometry(2.2, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.2;
+  }));
+  EXPECT_EQ(server_->Goals().size(), 0U);
+
+  odometry_publisher_->publish(Odometry(2.3, 2.0));
+  ASSERT_TRUE(WaitFor([this] { return server_->Goals().size() == 1U; }));
+  odometry_publisher_->publish(Odometry(2.4, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.4;
+  }));
+  EXPECT_EQ(server_->Goals().size(), 1U);
+}
+
+TEST_F(ExplorationNodeTest,
+       MovingOdometryResetsConsecutiveStationaryAdmissionSamples) {
+  parameters_.stop_before_planning = true;
+  Start(FakePlannerServer::Mode::kDelayed);
+  auto moving = Odometry();
+  moving.twist.twist.linear.x = 0.2;
+  PublishAllInputs(StartTask("stationary-reset"), GlobalMap(), moving);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    const auto status = LatestStatus();
+    return pose && pose->x == 2.0 && status &&
+           status->reason_code == "WAITING_FOR_STOP";
+  }));
+  EXPECT_EQ(server_->Goals().size(), 0U);
+
+  odometry_publisher_->publish(Odometry(2.1, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.1;
+  }));
+  odometry_publisher_->publish(Odometry(2.2, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.2;
+  }));
+  auto reset = Odometry(2.3, 2.0);
+  reset.twist.twist.angular.z = 0.2;
+  odometry_publisher_->publish(reset);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.3;
+  }));
+
+  odometry_publisher_->publish(Odometry(2.4, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.4;
+  }));
+  odometry_publisher_->publish(Odometry(2.5, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.5;
+  }));
+  EXPECT_EQ(server_->Goals().size(), 0U);
+
+  odometry_publisher_->publish(Odometry(2.6, 2.0));
+  ASSERT_TRUE(WaitFor([this] { return server_->Goals().size() == 1U; }));
+  odometry_publisher_->publish(Odometry(2.7, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.7;
+  }));
+  EXPECT_EQ(server_->Goals().size(), 1U);
+}
+
+TEST_F(ExplorationNodeTest,
+       PublishesExactStopWaitDiagnosticsFromInjectedSteadyClock) {
+  auto now_ns = std::make_shared<std::atomic<std::int64_t>>(0);
+  parameters_.stop_before_planning = true;
+  parameters_.steady_now = [now_ns] {
+    return std::chrono::steady_clock::time_point{
+        std::chrono::nanoseconds{now_ns->load()}};
+  };
+  Start(FakePlannerServer::Mode::kDelayed);
+
+  auto moving = Odometry();
+  moving.twist.twist.linear.x = 0.2;
+  moving.twist.twist.angular.z = 0.1;
+  map_publisher_->publish(GlobalMap());
+  tf_publisher_->publish(MapFromOdom());
+  odometry_publisher_->publish(moving);
+  ASSERT_TRUE(WaitFor([this] {
+    return ExplorationNodeTestPeer::LatestPose(*explorer_).has_value();
+  }));
+  task_publisher_->publish(StartTask("stop-wait-diagnostics"));
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("reason_code") == "WAITING_FOR_STOP";
+  }));
+
+  auto diagnostics = LatestDiagnostics();
+  ASSERT_TRUE(diagnostics.has_value());
+  ASSERT_EQ(diagnostics->status.size(), 1U);
+  for (const char* key : kStopWaitDiagnosticKeys) {
+    EXPECT_EQ(std::ranges::count_if(
+                  diagnostics->status.front().values,
+                  [key](const auto& value) { return value.key == key; }),
+              1U)
+        << key;
+  }
+  EXPECT_EQ(DiagnosticValue("stop_wait_elapsed_ms"), "0.000000");
+  EXPECT_EQ(DiagnosticValue("stop_entry_linear_mps"), "0.200000");
+  EXPECT_EQ(DiagnosticValue("stop_entry_angular_radps"), "0.100000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_angular_radps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "0");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "0");
+
+  now_ns->store(std::chrono::duration_cast<std::chrono::nanoseconds>(5s)
+                    .count());
+  auto diagnostics_count = DiagnosticsCount();
+  odometry_publisher_->publish(Odometry(2.1, 2.0));
+  ASSERT_TRUE(WaitFor([this, diagnostics_count] {
+    return DiagnosticsCount() > diagnostics_count;
+  }));
+  EXPECT_EQ(DiagnosticValue("stop_wait_elapsed_ms"), "5000.000000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "1");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "0");
+  const auto waiting_status = LatestStatus();
+  ASSERT_TRUE(waiting_status.has_value());
+  EXPECT_EQ(waiting_status->reason_code, "WAITING_FOR_STOP");
+  EXPECT_EQ(waiting_status->failed_candidate_count, 0U);
+  EXPECT_TRUE(server_->Goals().empty());
+
+  now_ns->store(std::chrono::duration_cast<std::chrono::nanoseconds>(5100ms)
+                    .count());
+  auto reset = Odometry(2.2, 2.0);
+  reset.twist.twist.linear.x = 0.2;
+  diagnostics_count = DiagnosticsCount();
+  odometry_publisher_->publish(reset);
+  ASSERT_TRUE(WaitFor([this, diagnostics_count] {
+    return DiagnosticsCount() > diagnostics_count;
+  }));
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "0");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "0");
+
+  for (const auto [x, elapsed] :
+       {std::pair{2.3, 5200ms}, std::pair{2.4, 5300ms},
+        std::pair{2.5, 5400ms}}) {
+    now_ns->store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    diagnostics_count = DiagnosticsCount();
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, diagnostics_count] {
+      return DiagnosticsCount() > diagnostics_count;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return server_->Goals().size() == 1U; }));
+  EXPECT_EQ(DiagnosticValue("stop_wait_elapsed_ms"), "5400.000000");
+  EXPECT_EQ(DiagnosticValue("stop_entry_linear_mps"), "0.200000");
+  EXPECT_EQ(DiagnosticValue("stop_entry_angular_radps"), "0.100000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "0.000000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_angular_radps"), "0.000000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "3");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "1");
+}
+
+TEST_F(ExplorationNodeTest,
+       DiagnosticDuePublishesWithoutChangingPlannerTimingOrStopState) {
+  auto now_ns = std::make_shared<std::atomic<std::int64_t>>(0);
+  parameters_.stop_before_planning = true;
+  parameters_.steady_now = [now_ns] {
+    return std::chrono::steady_clock::time_point{
+        std::chrono::nanoseconds{now_ns->load()}};
+  };
+  Start(FakePlannerServer::Mode::kRollingReachable);
+  PublishAllInputs(StartTask("diagnostic-due-timing-isolation"));
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("reason_code") == "WAITING_FOR_STOP";
+  }));
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+  const auto request_id = ExplorationNodeTestPeer::ActiveRequestId(*explorer_);
+  ASSERT_TRUE(request_id.has_value());
+  PublishPlannerTiming(*request_id);
+  ASSERT_TRUE(WaitFor([this, &request_id] {
+    return DiagnosticValue("request_id") == request_id &&
+           DiagnosticValue("candidate_record_count") == "1";
+  }));
+  const auto timing_before_wait = PlannerTimingDiagnosticBytes();
+  ASSERT_EQ(timing_before_wait.size(), kPlannerOutputTimingKeys.size());
+
+  const auto reference = References().front();
+  const auto endpoint =
+      reference.trajectory.points.back().transforms.front().translation;
+  now_ns->store(std::chrono::duration_cast<std::chrono::nanoseconds>(1s)
+                    .count());
+  auto moving_at_endpoint = Odometry(endpoint.x, endpoint.y);
+  moving_at_endpoint.twist.twist.linear.x = 0.2;
+  odometry_publisher_->publish(moving_at_endpoint);
+  ASSERT_TRUE(WaitFor([this, &endpoint] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == endpoint.x && pose->y == endpoint.y;
+  }));
+  explorer_->PollExecution();
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("reason_code") == "WAITING_FOR_STOP";
+  }));
+  EXPECT_EQ(PlannerTimingDiagnosticBytes(), timing_before_wait);
+  const auto planner_goal_count = server_->Goals().size();
+
+  now_ns->store(std::chrono::duration_cast<std::chrono::nanoseconds>(6s)
+                    .count());
+  const auto diagnostics_count = DiagnosticsCount();
+  odometry_publisher_->publish(Odometry(endpoint.x, endpoint.y + 0.01));
+  ASSERT_TRUE(WaitFor([this, diagnostics_count] {
+    return DiagnosticsCount() > diagnostics_count;
+  }));
+  EXPECT_EQ(PlannerTimingDiagnosticBytes(), timing_before_wait);
+  EXPECT_EQ(DiagnosticValue("stop_wait_elapsed_ms"), "5000.000000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "1");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "1");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_angular_radps"), "unavailable");
+  EXPECT_EQ(server_->Goals().size(), planner_goal_count);
+  const auto status = LatestStatus();
+  ASSERT_TRUE(status.has_value());
+  EXPECT_EQ(status->state, Status::REPLANNING);
+  EXPECT_EQ(status->reason_code, "WAITING_FOR_STOP");
+  EXPECT_EQ(status->failed_candidate_count, 0U);
+}
+
+TEST_F(ExplorationNodeTest,
+       DisabledStopGateNeverCreatesAStopRecordOrPlanningEpoch) {
+  parameters_.stop_before_planning = false;
+  Start(FakePlannerServer::Mode::kDelayed);
+  auto moving = Odometry();
+  moving.twist.twist.linear.x = 0.2;
+  PublishAllInputs(StartTask("stop-gate-disabled"), GlobalMap(), moving);
+  ASSERT_TRUE(WaitFor([this] { return server_->Goals().size() == 1U; }));
+  for (const char* key : kStopWaitDiagnosticKeys) {
+    ASSERT_TRUE(DiagnosticValue(key).has_value()) << key;
+  }
+  EXPECT_EQ(DiagnosticValue("stop_wait_elapsed_ms"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_entry_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_entry_angular_radps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_angular_radps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "0");
+}
+
+TEST_F(ExplorationNodeTest, NonFiniteStopEntryIsPublishedAsUnavailable) {
+  parameters_.stop_before_planning = true;
+  Start(FakePlannerServer::Mode::kDelayed);
+  auto nonfinite = Odometry();
+  nonfinite.twist.twist.linear.x =
+      std::numeric_limits<double>::quiet_NaN();
+  map_publisher_->publish(GlobalMap());
+  tf_publisher_->publish(MapFromOdom());
+  odometry_publisher_->publish(nonfinite);
+  ASSERT_TRUE(WaitFor([this] {
+    return ExplorationNodeTestPeer::LatestPose(*explorer_).has_value();
+  }));
+  task_publisher_->publish(StartTask("nonfinite-stop-entry"));
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("reason_code") == "WAITING_FOR_STOP";
+  }));
+  EXPECT_EQ(DiagnosticValue("stop_entry_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "0");
+
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return server_->Goals().size() == 1U; }));
+  EXPECT_EQ(DiagnosticValue("stop_entry_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "0.000000");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "1");
+}
+
+TEST_F(ExplorationNodeTest,
+       GateCancelRetainsLastRecordButTaskCancelResetsStopLifetime) {
+  parameters_.stop_before_planning = true;
+  Start(FakePlannerServer::Mode::kRollingReachable);
+  auto moving = Odometry();
+  moving.twist.twist.linear.x = 0.2;
+  moving.twist.twist.angular.z = 0.1;
+  map_publisher_->publish(GlobalMap());
+  tf_publisher_->publish(MapFromOdom());
+  odometry_publisher_->publish(moving);
+  ASSERT_TRUE(WaitFor([this] {
+    return ExplorationNodeTestPeer::LatestPose(*explorer_).has_value();
+  }));
+  task_publisher_->publish(StartTask("stop-record-lifetime"));
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("reason_code") == "WAITING_FOR_STOP";
+  }));
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+
+  const auto endpoint = References()
+                            .front()
+                            .trajectory.points.back()
+                            .transforms.front()
+                            .translation;
+  auto moving_at_endpoint = Odometry(endpoint.x, endpoint.y);
+  moving_at_endpoint.twist.twist.linear.x = 0.4;
+  moving_at_endpoint.twist.twist.angular.z = 0.3;
+  odometry_publisher_->publish(moving_at_endpoint);
+  ASSERT_TRUE(WaitFor([this, &endpoint] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == endpoint.x && pose->y == endpoint.y;
+  }));
+  explorer_->PollExecution();
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("stop_entry_linear_mps") == "0.400000";
+  }));
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "1");
+
+  Task pause;
+  pause.command = Task::PAUSE;
+  task_publisher_->publish(pause);
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("reason_code") == "PAUSED";
+  }));
+  EXPECT_EQ(DiagnosticValue("stop_entry_linear_mps"), "0.200000");
+  EXPECT_EQ(DiagnosticValue("stop_entry_angular_radps"), "0.100000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "0.000000");
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "3");
+  EXPECT_EQ(DiagnosticValue("planning_epoch"), "1");
+
+  Task cancel;
+  cancel.command = Task::CANCEL;
+  task_publisher_->publish(cancel);
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("planning_epoch") == "0";
+  }));
+  EXPECT_EQ(DiagnosticValue("stop_wait_elapsed_ms"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_entry_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmed_linear_mps"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("stop_confirmation_samples"), "unavailable");
+}
+
+TEST_F(ExplorationNodeTest,
+       MapsDuringFreshBuildDoNotRearmConfirmedStationaryAdmission) {
+  parameters_.stop_before_planning = true;
+  auto build_entered = std::make_shared<std::promise<void>>();
+  auto build_entered_future = build_entered->get_future();
+  auto release_build = std::make_shared<std::promise<void>>();
+  const auto release_build_future = release_build->get_future().share();
+  auto build_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->generate_candidates =
+      [build_entered, release_build_future, build_calls](
+          const lunar::pure_exploration::TaskRaster&,
+          std::span<const lunar::pure_exploration::FrontierCluster> frontiers) {
+        if (build_calls->fetch_add(1U) == 0U) {
+          build_entered->set_value();
+          release_build_future.wait();
+        }
+        return ControlledCandidates(frontiers, 1U);
+      };
+  seams->evaluate_gain = [](const lunar::pure_exploration::TaskRaster&,
+                            const lunar::pure_exploration::CandidateView&) {
+    return 1.0;
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kDelayed);
+
+  auto moving = Odometry();
+  moving.twist.twist.linear.x = 0.2;
+  PublishAllInputs(StartTask("maps-during-fresh-build"), GlobalMap(), moving);
+  EXPECT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    const auto status = LatestStatus();
+    return pose && pose->x == 2.0 && status &&
+           status->reason_code == "WAITING_FOR_STOP";
+  }));
+  EXPECT_EQ(server_->Goals().size(), 0U);
+
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    EXPECT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  EXPECT_EQ(build_entered_future.wait_for(5s), std::future_status::ready);
+  EXPECT_EQ(server_->Goals().size(), 0U);
+
+  const auto publish_and_observe_map = [this](
+                                          const std::uint32_t width,
+                                          const double resolution) {
+    map_publisher_->publish(GlobalMap(width, width, resolution));
+    return WaitFor([this, resolution] {
+      const auto observed =
+          ExplorationNodeTestPeer::LatestMapResolution(*explorer_);
+      return observed && std::abs(*observed - resolution) < 1.0e-6;
+    });
+  };
+  EXPECT_TRUE(publish_and_observe_map(40U, 0.25));
+  EXPECT_TRUE(publish_and_observe_map(50U, 0.20));
+  EXPECT_TRUE(publish_and_observe_map(25U, 0.40));
+  EXPECT_TRUE(publish_and_observe_map(80U, 0.125));
+  EXPECT_EQ(server_->Goals().size(), 0U);
+  const auto status_during_build = LatestStatus();
+  EXPECT_TRUE(status_during_build.has_value());
+  if (status_during_build) {
+    EXPECT_NE(status_during_build->reason_code, "WAITING_FOR_STOP");
+  }
+
+  release_build->set_value();
+  ASSERT_TRUE(WaitFor([this] { return server_->Goals().size() == 1U; }));
+  EXPECT_EQ(build_calls->load(), 1U);
+
+  for (const double x : {2.4, 2.5, 2.6, 2.7}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+    EXPECT_EQ(server_->Goals().size(), 1U);
+  }
+  EXPECT_EQ(build_calls->load(), 1U);
+}
+
+TEST_F(ExplorationNodeTest, StopGateParameterLoadRejectsInvalidValues) {
+  EXPECT_THROW(ExplorationNode(StopGateParameterOptions(-0.01, 0.02, 3, 5.0)),
+               std::invalid_argument);
+  EXPECT_THROW(ExplorationNode(StopGateParameterOptions(0.01, -0.02, 3, 5.0)),
+               std::invalid_argument);
+  EXPECT_THROW(ExplorationNode(StopGateParameterOptions(0.01, 0.02, 0, 5.0)),
+               std::invalid_argument);
+  EXPECT_THROW(ExplorationNode(StopGateParameterOptions(0.01, 0.02, 3, 0.0)),
+               std::invalid_argument);
+}
+
+TEST_F(ExplorationNodeTest,
+       FreshPlanningRetainsCanceledPlanIdentityUntilStationaryConfirmation) {
+  parameters_.stop_before_planning = true;
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->generate_candidates =
+      [](const lunar::pure_exploration::TaskRaster&,
+         std::span<const lunar::pure_exploration::FrontierCluster> frontiers) {
+        return ControlledCandidates(frontiers, 1U);
+      };
+  seams->evaluate_gain = [](const lunar::pure_exploration::TaskRaster&,
+                            const lunar::pure_exploration::CandidateView&) {
+    return 1.0;
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  server_->SetFixedPlanId("wheel-active");
+  PublishAllInputs(StartTask("active-before-stop"));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return status && status->reason_code == "WAITING_FOR_STOP" && pose &&
+           pose->x == 2.0 && pose->y == 2.0;
+  }));
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return !server_->Goals().empty(); }));
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+  ASSERT_EQ(References().front().plan_id, "wheel-active");
+
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+  const auto goal_count_before_stop = server_->Goals().size();
+  auto moving = Odometry(2.4, 2.0);
+  moving.twist.twist.linear.x = 0.2;
+  odometry_publisher_->publish(moving);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.4;
+  }));
+  task_publisher_->publish(StartTask("fresh-after-stop"));
+
+  ASSERT_TRUE(WaitFor([this] {
+    return ExecutionCancels() == std::vector<std::string>{"wheel-active"};
+  }));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  auto retained = ExplorationNodeTestPeer::ActiveReference(*explorer_);
+  ASSERT_TRUE(retained.has_value());
+  EXPECT_EQ(retained->plan_id, "wheel-active");
+  EXPECT_EQ(server_->Goals().size(), goal_count_before_stop);
+
+  for (const double x : {2.5, 2.6}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+    EXPECT_TRUE(ExplorationNodeTestPeer::ActiveReference(*explorer_));
+    EXPECT_EQ(server_->Goals().size(), goal_count_before_stop);
+  }
+
+  odometry_publisher_->publish(Odometry(2.7, 2.0));
+  ASSERT_TRUE(WaitFor([this, goal_count_before_stop] {
+    return server_->Goals().size() > goal_count_before_stop;
+  }));
+  EXPECT_FALSE(ExplorationNodeTestPeer::ActiveReference(*explorer_));
+  EXPECT_EQ(ExecutionCancels(), std::vector<std::string>{"wheel-active"});
+}
+
+TEST_F(ExplorationNodeTest,
+       GlobalGoalCellFilterKeepsKnownFreeCandidateAdjacentToUnknown) {
+  // Match the deployed wheeled envelope: 0.7187 m circumscribed footprint
+  // radius plus 0.2 m clearance.  The test map resolution is 0.5 m, so the
+  // candidate at x=4.5 is known free and immediately adjacent to unknown.
+  parameters_.platform.footprint_vertices = {{0.591, 0.409},
+                                             {0.591, -0.409},
+                                             {-0.591, -0.409},
+                                             {-0.591, 0.409}};
+  parameters_.platform.minimum_clearance_m = 0.2;
+  parameters_.filter_global_goal_cell = true;
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->generate_candidates =
+      [](const lunar::pure_exploration::TaskRaster&,
+         std::span<const lunar::pure_exploration::FrontierCluster> frontiers) {
+        auto candidates = ControlledCandidates(frontiers, 2U);
+        // x=5.5 is unknown and must be rejected; x=4.5 is a known free cell
+        // adjacent to that unknown cell and must not be obstacle-inflated.
+        candidates[0].pose = {5.5, 2.0, 0.0};
+        candidates[1].pose = {4.5, 2.0, 0.0};
+        return candidates;
+      };
+  seams->evaluate_gain = [](const lunar::pure_exploration::TaskRaster&,
+                            const lunar::pure_exploration::CandidateView&) {
+    return 1.0;
+  };
+  parameters_.pipeline_seams = std::move(seams);
+
+  Start(FakePlannerServer::Mode::kReachable);
+  PublishAllInputs();
+
+  ASSERT_TRUE(WaitFor([this] { return !server_->Goals().empty(); }));
+  const auto goals = server_->Goals();
+  ASSERT_FALSE(goals.empty());
+  // The fake server completes immediately, so the node may construct a
+  // follow-up cycle before this assertion samples the request history.  Every
+  // dispatched goal must nevertheless be the globally feasible candidate:
+  // x=5.5 is unknown, whereas x=4.5 is free beside unknown.
+  for (const auto& goal : goals) {
+    EXPECT_DOUBLE_EQ(goal.goal.point.x, 4.5);
+    EXPECT_DOUBLE_EQ(goal.goal.point.y, 2.0);
+  }
 }
 
 TEST_F(ExplorationNodeTest,
@@ -968,6 +1944,20 @@ TEST_F(ExplorationNodeTest,
   Start(FakePlannerServer::Mode::kReachable);
   PublishAllInputs();
   ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::EXECUTING;
+  }));
+
+  const auto statuses = Statuses();
+  const auto planning = std::ranges::find_if(
+      statuses, [](const Status& status) { return status.state == Status::PLANNING; });
+  const auto executing = std::ranges::find_if(
+      statuses, [](const Status& status) { return status.state == Status::EXECUTING; });
+  ASSERT_NE(planning, statuses.end());
+  ASSERT_NE(executing, statuses.end());
+  EXPECT_LT(std::distance(statuses.begin(), planning),
+            std::distance(statuses.begin(), executing));
 
   const auto cycle = ExplorationNodeTestPeer::ActiveCycle(*explorer_);
   ASSERT_NE(cycle, nullptr);
@@ -1202,6 +2192,22 @@ TEST_F(ExplorationNodeTest,
 }
 
 TEST_F(ExplorationNodeTest,
+       RepeatedRetryableEvaluationAdvancesToTheNextCandidate) {
+  Start(FakePlannerServer::Mode::kRetryable);
+  PublishAllInputs();
+  ASSERT_TRUE(WaitFor([this] { return server_->Goals().size() >= 3U; }, 2s));
+
+  const auto goals = server_->Goals();
+  const auto first_candidate = ExplorationNodeTestPeer::CandidateIndexForRequest(
+      *explorer_, goals[0].request_id);
+  const auto third_candidate = ExplorationNodeTestPeer::CandidateIndexForRequest(
+      *explorer_, goals[2].request_id);
+  ASSERT_TRUE(first_candidate.has_value());
+  ASSERT_TRUE(third_candidate.has_value());
+  EXPECT_NE(*first_candidate, *third_candidate);
+}
+
+TEST_F(ExplorationNodeTest,
        RemoteMapChangeDoesNotCancelAStillValidCommittedGoal) {
   auto seams = std::make_shared<ExplorationPipelineSeams>();
   seams->generate_candidates =
@@ -1229,6 +2235,223 @@ TEST_F(ExplorationNodeTest,
   EXPECT_EQ(server_->Goals().size(), original_goal_count);
   EXPECT_EQ(ReferenceCount(), 1U);
   EXPECT_TRUE(ExplorationNodeTestPeer::ActiveReference(*explorer_));
+}
+
+TEST_F(ExplorationNodeTest,
+       MapInvalidationRetainsCanceledReferenceUntilStopThenBuildsFresh) {
+  parameters_.stop_before_planning = true;
+  auto build_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->generate_candidates =
+      [build_calls](const lunar::pure_exploration::TaskRaster& raster,
+                    std::span<const lunar::pure_exploration::FrontierCluster>
+                        frontiers) {
+        ++*build_calls;
+        auto candidates = ControlledCandidates(frontiers, 1U);
+        const auto old_target = raster.WorldToCell({4.5, 2.0});
+        const bool old_target_free =
+            old_target && raster.Classify(*old_target) ==
+                              lunar::pure_exploration::CellState::kFree;
+        candidates.front().pose =
+            old_target_free ? lunar::pure_exploration::Pose2{4.5, 2.0, 0.0}
+                            : lunar::pure_exploration::Pose2{3.5, 2.0, 0.0};
+        candidates.front().key.x_mm = old_target_free ? 4500 : 3500;
+        return candidates;
+      };
+  seams->evaluate_gain = [](const lunar::pure_exploration::TaskRaster&,
+                            const lunar::pure_exploration::CandidateView&) {
+    return 1.0;
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  auto map = GlobalMap();
+  PublishAllInputs(StartTask("map-stop-refresh"), map);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+  const auto first = References().front();
+  const auto initial_goals = server_->Goals().size();
+  const auto initial_build_calls = build_calls->load();
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+
+  auto moving = Odometry(2.4, 2.0);
+  moving.twist.twist.linear.x = 0.2;
+  odometry_publisher_->publish(moving);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == 2.4;
+  }));
+  map.data[4U * map.info.width + 9U] = 100;
+  map_publisher_->publish(map);
+
+  ASSERT_TRUE(WaitFor([this, &first] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP" &&
+           ExecutionCancels() == std::vector<std::string>{first.plan_id};
+  }));
+  const auto retained = ExplorationNodeTestPeer::ActiveReference(*explorer_);
+  ASSERT_TRUE(retained.has_value());
+  EXPECT_EQ(retained->plan_id, first.plan_id);
+  EXPECT_EQ(server_->Goals().size(), initial_goals);
+  // The map callback performs one foreground validity check through the same
+  // candidate seam, but must not start a new planner batch before stop.
+  EXPECT_EQ(build_calls->load(), initial_build_calls + 1U);
+
+  for (const double x : {2.41, 2.42}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+    EXPECT_TRUE(ExplorationNodeTestPeer::ActiveReference(*explorer_));
+    EXPECT_EQ(server_->Goals().size(), initial_goals);
+  }
+  odometry_publisher_->publish(Odometry(2.43, 2.0));
+  ASSERT_TRUE(WaitFor([this, build_calls, initial_build_calls] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "CANDIDATE_INVALID" &&
+           !ExplorationNodeTestPeer::ActiveReference(*explorer_) &&
+           build_calls->load() > initial_build_calls + 1U;
+  }));
+  ASSERT_TRUE(WaitFor([this, initial_goals] {
+    return server_->Goals().size() > initial_goals;
+  }));
+  const auto latest_goal = server_->Goals().back();
+  EXPECT_DOUBLE_EQ(latest_goal.goal.point.x, 3.5);
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+  EXPECT_EQ(ExecutionCancels(), std::vector<std::string>{first.plan_id});
+}
+
+TEST_F(ExplorationNodeTest,
+       LocalEndpointFreshAuthorityOutranksOlderBlockedMapValidation) {
+  parameters_.stop_before_planning = true;
+  auto block_next_validation = std::make_shared<std::atomic<bool>>(false);
+  auto validation_entered = std::make_shared<std::promise<void>>();
+  auto release_validation = std::make_shared<std::promise<void>>();
+  const auto entered = validation_entered->get_future().share();
+  const auto release = release_validation->get_future().share();
+  auto build_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->generate_candidates =
+      [block_next_validation, validation_entered, release, build_calls](
+          const lunar::pure_exploration::TaskRaster& raster,
+          std::span<const lunar::pure_exploration::FrontierCluster> frontiers) {
+        ++*build_calls;
+        if (block_next_validation->exchange(false)) {
+          validation_entered->set_value();
+          release.wait();
+        }
+        auto candidates = ControlledCandidates(frontiers, 1U);
+        const auto old_target = raster.WorldToCell({4.5, 2.0});
+        const bool old_target_free =
+            old_target && raster.Classify(*old_target) ==
+                              lunar::pure_exploration::CellState::kFree;
+        candidates.front().pose =
+            old_target_free ? lunar::pure_exploration::Pose2{4.5, 2.0, 0.0}
+                            : lunar::pure_exploration::Pose2{3.5, 2.0, 0.0};
+        candidates.front().key.x_mm = old_target_free ? 4500 : 3500;
+        return candidates;
+      };
+  seams->evaluate_gain = [](const lunar::pure_exploration::TaskRaster&,
+                            const lunar::pure_exploration::CandidateView&) {
+    return 1.0;
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kRollingReachable);
+  auto map = GlobalMap();
+  PublishAllInputs(StartTask("endpoint-outranks-map-validation"), map);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+  const auto first = References().front();
+  ASSERT_FALSE(first.trajectory.points.empty());
+  const auto endpoint =
+      first.trajectory.points.back().transforms.front().translation;
+  const auto initial_cycle = ExplorationNodeTestPeer::ActiveCycle(*explorer_);
+  ASSERT_NE(initial_cycle, nullptr);
+  const auto initial_goals = server_->Goals().size();
+  const auto initial_build_calls = build_calls->load();
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+
+  block_next_validation->store(true);
+  map.data[4U * map.info.width + 9U] = 100;
+  map_publisher_->publish(map);
+  const bool validation_is_blocked =
+      entered.wait_for(1s) == std::future_status::ready;
+  if (!validation_is_blocked) {
+    release_validation->set_value();
+  }
+  ASSERT_TRUE(validation_is_blocked);
+
+  auto moving_at_endpoint = Odometry(endpoint.x, endpoint.y, 0.0);
+  moving_at_endpoint.twist.twist.linear.x = 0.2;
+  odometry_publisher_->publish(moving_at_endpoint);
+  EXPECT_TRUE(WaitFor([this, &endpoint] {
+    const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+    return pose && pose->x == endpoint.x && pose->y == endpoint.y;
+  }));
+  explorer_->PollExecution();
+  EXPECT_TRUE(WaitFor([this, &first] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP" &&
+           ExecutionCancels() == std::vector<std::string>{first.plan_id};
+  }));
+  for (const double y : {2.01, 2.02}) {
+    odometry_publisher_->publish(Odometry(endpoint.x, y, 0.0));
+    EXPECT_TRUE(WaitFor([this, &endpoint, y] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == endpoint.x && pose->y == y;
+    }));
+  }
+
+  const auto statuses_before_release = StatusCount();
+  release_validation->set_value();
+  ASSERT_TRUE(WaitFor([this, statuses_before_release] {
+    return StatusCount() > statuses_before_release;
+  }));
+  EXPECT_EQ(ExecutionCancels(), std::vector<std::string>{first.plan_id});
+  const auto retained = ExplorationNodeTestPeer::ActiveReference(*explorer_);
+  ASSERT_TRUE(retained.has_value());
+  EXPECT_EQ(retained->plan_id, first.plan_id);
+  EXPECT_EQ(server_->Goals().size(), initial_goals);
+
+  odometry_publisher_->publish(Odometry(endpoint.x, 2.03, 0.0));
+  ASSERT_TRUE(WaitFor([this, build_calls, initial_build_calls] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "LOCAL_SEGMENT_COMPLETED" &&
+           build_calls->load() > initial_build_calls + 1U;
+  }));
+  ASSERT_TRUE(WaitFor([this, initial_goals] {
+    return server_->Goals().size() > initial_goals;
+  }));
+  const auto refreshed_cycle = ExplorationNodeTestPeer::ActiveCycle(*explorer_);
+  ASSERT_NE(refreshed_cycle, nullptr);
+  ASSERT_NE(refreshed_cycle, initial_cycle);
+  ASSERT_EQ(refreshed_cycle->batch()->candidates().size(), 1U);
+  EXPECT_DOUBLE_EQ(refreshed_cycle->batch()->candidates().front().pose.x, 3.5);
+  const auto status = LatestStatus();
+  ASSERT_TRUE(status.has_value());
+  EXPECT_EQ(status->completed_goal_count, 0U);
+  EXPECT_EQ(status->failed_candidate_count, 0U);
+  EXPECT_EQ(ExecutionCancels(), std::vector<std::string>{first.plan_id});
 }
 
 TEST_F(ExplorationNodeTest,
@@ -1366,7 +2589,11 @@ TEST_F(ExplorationNodeTest,
   PublishAllInputs(StartTask(), GlobalMap(20U, 20U, 0.5));
   ASSERT_EQ(entered.wait_for(1s), std::future_status::ready);
 
+  const auto statuses_before_map = StatusCount();
   map_publisher_->publish(GlobalMap(40U, 40U, 0.25));
+  ASSERT_TRUE(WaitFor([this, statuses_before_map] {
+    return StatusCount() > statuses_before_map;
+  }));
   release_rank->set_value();
   ASSERT_TRUE(WaitFor([this] {
     const auto status = LatestStatus();
@@ -1527,27 +2754,176 @@ TEST_F(ExplorationNodeTest,
   }));
 }
 
-TEST_F(ExplorationNodeTest, RollingEndpointCancelsAndReplansSameGoal) {
+TEST_F(ExplorationNodeTest,
+       LocalEndpointStopsThenBuildsAFreshFrontierBatch) {
+  parameters_.stop_before_planning = true;
+  auto build_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->generate_candidates =
+      [build_calls](const lunar::pure_exploration::TaskRaster&,
+                    std::span<const lunar::pure_exploration::FrontierCluster>
+                        frontiers) {
+        ++*build_calls;
+        return ControlledCandidates(frontiers, 1U);
+      };
+  seams->evaluate_gain = [](const lunar::pure_exploration::TaskRaster&,
+                            const lunar::pure_exploration::CandidateView&) {
+    return 1.0;
+  };
+  parameters_.pipeline_seams = std::move(seams);
   Start(FakePlannerServer::Mode::kRollingReachable);
   PublishAllInputs();
+
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
   ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
   const auto first = References().front();
   ASSERT_FALSE(first.trajectory.points.empty());
-  const auto& endpoint = first.trajectory.points.back().transforms.front().translation;
+  const auto& endpoint =
+      first.trajectory.points.back().transforms.front().translation;
   const auto initial_goals = server_->Goals().size();
-  odometry_publisher_->publish(Odometry(endpoint.x, endpoint.y, 0.0));
-  ASSERT_TRUE(WaitFor([this] { return ExecutionCancels().size() == 1U; }));
-  ASSERT_TRUE(WaitFor([this, initial_goals] {
-    return server_->Goals().size() > initial_goals && ReferenceCount() >= 2U;
+  const auto initial_build_calls = build_calls->load();
+  const auto initial_cycle = ExplorationNodeTestPeer::ActiveCycle(*explorer_);
+  ASSERT_NE(initial_cycle, nullptr);
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+
+  auto moving_at_endpoint = Odometry(endpoint.x, endpoint.y, 0.0);
+  moving_at_endpoint.twist.twist.linear.x = 0.2;
+  odometry_publisher_->publish(moving_at_endpoint);
+  ASSERT_TRUE(WaitFor([this, &first] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::REPLANNING &&
+           status->reason_code == "WAITING_FOR_STOP" &&
+           ExecutionCancels() == std::vector<std::string>{first.plan_id};
   }));
-  EXPECT_EQ(ExecutionCancels().front(), first.plan_id);
+  EXPECT_EQ(server_->Goals().size(), initial_goals);
+  EXPECT_EQ(build_calls->load(), initial_build_calls);
+  const auto retained = ExplorationNodeTestPeer::ActiveReference(*explorer_);
+  ASSERT_TRUE(retained.has_value());
+  EXPECT_EQ(retained->plan_id, first.plan_id);
+
+  for (const double y : {2.01, 2.02}) {
+    odometry_publisher_->publish(Odometry(endpoint.x, y, 0.0));
+    ASSERT_TRUE(WaitFor([this, &endpoint, y] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == endpoint.x && pose->y == y;
+    }));
+    EXPECT_EQ(server_->Goals().size(), initial_goals);
+    EXPECT_TRUE(ExplorationNodeTestPeer::ActiveReference(*explorer_));
+  }
+  odometry_publisher_->publish(Odometry(endpoint.x, 2.03, 0.0));
+  ASSERT_TRUE(WaitFor([this, build_calls, initial_build_calls] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "LOCAL_SEGMENT_COMPLETED" &&
+           !ExplorationNodeTestPeer::ActiveReference(*explorer_) &&
+           build_calls->load() > initial_build_calls;
+  }));
+  ASSERT_TRUE(WaitFor([this, initial_goals] {
+    return server_->Goals().size() > initial_goals;
+  }));
+  const auto refreshed_cycle =
+      ExplorationNodeTestPeer::ActiveCycle(*explorer_);
+  ASSERT_NE(refreshed_cycle, nullptr);
+  EXPECT_NE(refreshed_cycle, initial_cycle);
   const auto status = LatestStatus();
   ASSERT_TRUE(status.has_value());
+  EXPECT_EQ(status->completed_goal_count, 0U);
+  EXPECT_EQ(status->failed_candidate_count, 0U);
   EXPECT_EQ(status->replan_count, 0U);
+  EXPECT_EQ(ExecutionCancels(), std::vector<std::string>{first.plan_id});
 }
 
 TEST_F(ExplorationNodeTest,
-       RollingDiagnosticsExposeOnlyTheCurrentReplanRequestRecord) {
+       PauseAndResumeInterruptLocalEndpointReleaseAuthority) {
+  parameters_.stop_before_planning = true;
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->generate_candidates =
+      [](const lunar::pure_exploration::TaskRaster&,
+         std::span<const lunar::pure_exploration::FrontierCluster> frontiers) {
+        return ControlledCandidates(frontiers, 1U);
+      };
+  seams->evaluate_gain = [](const lunar::pure_exploration::TaskRaster&,
+                            const lunar::pure_exploration::CandidateView&) {
+    return 1.0;
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kRollingReachable);
+  PublishAllInputs(StartTask("endpoint-control-interrupt"));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+  const auto first = References().front();
+  const auto endpoint =
+      first.trajectory.points.back().transforms.front().translation;
+  auto moving_at_endpoint = Odometry(endpoint.x, endpoint.y, 0.0);
+  moving_at_endpoint.twist.twist.linear.x = 0.2;
+  odometry_publisher_->publish(moving_at_endpoint);
+  ASSERT_TRUE(WaitFor([this, &first] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP" &&
+           ExecutionCancels() == std::vector<std::string>{first.plan_id};
+  }));
+
+  Task pause;
+  pause.command = Task::PAUSE;
+  task_publisher_->publish(pause);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::PAUSED &&
+           status->reason_code == "PAUSED";
+  }));
+  Task resume;
+  resume.command = Task::RESUME;
+  task_publisher_->publish(resume);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+  const auto goals_before_resume = server_->Goals().size();
+  const auto statuses_before_resume = StatusCount();
+  for (const double y : {2.01, 2.02, 2.03}) {
+    odometry_publisher_->publish(Odometry(endpoint.x, y, 0.0));
+    ASSERT_TRUE(WaitFor([this, &endpoint, y] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == endpoint.x && pose->y == y;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this, goals_before_resume] {
+    return server_->Goals().size() > goals_before_resume;
+  }));
+  const auto statuses = Statuses();
+  ASSERT_LE(statuses_before_resume, statuses.size());
+  EXPECT_TRUE(std::ranges::none_of(
+      statuses.begin() + static_cast<std::ptrdiff_t>(statuses_before_resume),
+      statuses.end(), [](const Status& status) {
+        return status.reason_code == "LOCAL_SEGMENT_COMPLETED";
+      }));
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+  EXPECT_EQ(ExecutionCancels(), std::vector<std::string>{first.plan_id});
+}
+
+TEST_F(ExplorationNodeTest,
+       LocalEndpointFreshBatchDoesNotCreateRollingPlannerTiming) {
   Start(FakePlannerServer::Mode::kRollingReachable);
   PublishAllInputs();
   ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
@@ -1561,14 +2937,15 @@ TEST_F(ExplorationNodeTest,
   ASSERT_TRUE(WaitFor([this, initial_goals] {
     return server_->Goals().size() > initial_goals;
   }));
-  const auto replan_request = server_->LatestRequestId();
-  ASSERT_FALSE(replan_request.empty());
-  PublishPlannerTiming(replan_request);
-  ASSERT_TRUE(WaitFor([this, &replan_request] {
-    return DiagnosticValue("request_id") == replan_request &&
-           DiagnosticValue("rolling_record_count") == "1";
+  const auto fresh_candidate_request = server_->LatestRequestId();
+  ASSERT_FALSE(fresh_candidate_request.empty());
+  PublishPlannerTiming(fresh_candidate_request);
+  ASSERT_TRUE(WaitFor([this, &fresh_candidate_request] {
+    return DiagnosticValue("request_id") == fresh_candidate_request &&
+           DiagnosticValue("candidate_record_count") == "1";
   }));
-  EXPECT_EQ(DiagnosticValue("rolling_record_count"), "1");
+  EXPECT_EQ(DiagnosticValue("candidate_record_count"), "1");
+  EXPECT_EQ(DiagnosticValue("rolling_record_count"), "0");
   EXPECT_EQ(DiagnosticValue("global_elapsed_ms"), "11.000000");
   EXPECT_EQ(DiagnosticValue("local_elapsed_ms"), "7.000000");
   EXPECT_EQ(DiagnosticValue("total_elapsed_ms"), "18.000000");
@@ -1595,17 +2972,116 @@ TEST_F(ExplorationNodeTest, StuckTwiceReplansThenRecordsOnePersistentFailure) {
       return ReferenceCount() > references_before;
     }));
   }
-  const auto goals_before_third = server_->Goals().size();
   const auto plan_id = References().back().plan_id;
   *now += 30s;
   explorer_->PollExecution();
   ASSERT_TRUE(WaitFor([this] { return ExecutionCancels().size() >= 3U; }));
   EXPECT_EQ(ExecutionCancels().back(), plan_id);
-  EXPECT_EQ(server_->Goals().size(), goals_before_third);
   ASSERT_TRUE(WaitFor([this] {
     const auto status = LatestStatus();
     return status.has_value() && status->failed_candidate_count == 1U;
   }));
+}
+
+TEST_F(ExplorationNodeTest,
+       ExhaustedStuckRetriesRetainReferenceUntilFreshBuildStopConfirmation) {
+  auto now = std::make_shared<std::chrono::steady_clock::time_point>();
+  parameters_.steady_now = [now] { return *now; };
+  parameters_.stop_before_planning = true;
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->generate_candidates =
+      [](const lunar::pure_exploration::TaskRaster&,
+         std::span<const lunar::pure_exploration::FrontierCluster> frontiers) {
+        return ControlledCandidates(frontiers, 1U);
+      };
+  seams->evaluate_gain = [](const lunar::pure_exploration::TaskRaster&,
+                            const lunar::pure_exploration::CandidateView&) {
+    return 1.0;
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  PublishAllInputs(StartTask("stuck-stop-gated"));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+
+  for (const std::uint8_t retry : {1U, 2U}) {
+    server_->SetMode(FakePlannerServer::Mode::kDelayed);
+    const auto goals_before = server_->Goals().size();
+    const auto references_before = ReferenceCount();
+    *now += 30s;
+    explorer_->PollExecution();
+    ASSERT_TRUE(WaitFor([this, retry] {
+      const auto status = LatestStatus();
+      return status && status->state == Status::REPLANNING &&
+             status->reason_code == "WAITING_FOR_STOP" &&
+             status->replan_count == retry;
+    }));
+    EXPECT_EQ(server_->Goals().size(), goals_before);
+    for (std::size_t sample = 1U; sample <= 3U; ++sample) {
+      const double x =
+          2.3 + 0.1 * static_cast<double>(retry) +
+          0.01 * static_cast<double>(sample);
+      odometry_publisher_->publish(Odometry(x, 2.0));
+      ASSERT_TRUE(WaitFor([this, x] {
+        const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+        return pose && pose->x == x;
+      }));
+    }
+    ASSERT_TRUE(WaitFor([this, goals_before] {
+      return server_->Goals().size() > goals_before;
+    }));
+    const auto request = server_->LatestRequestId();
+    ASSERT_TRUE(WaitFor(
+        [this, &request] { return server_->HasHandle(request); }));
+    server_->Finish(request, FakePlannerServer::Mode::kReachable);
+    ASSERT_TRUE(WaitFor([this, references_before] {
+      return ReferenceCount() > references_before;
+    }));
+  }
+
+  const auto exhausted_plan = References().back().plan_id;
+  const auto goals_before_exhaustion = server_->Goals().size();
+  *now += 30s;
+  explorer_->PollExecution();
+  ASSERT_TRUE(WaitFor([this, &exhausted_plan] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP" &&
+           status->failed_candidate_count == 1U &&
+           !ExecutionCancels().empty() &&
+           ExecutionCancels().back() == exhausted_plan;
+  }));
+  const auto retained = ExplorationNodeTestPeer::ActiveReference(*explorer_);
+  ASSERT_TRUE(retained.has_value());
+  EXPECT_EQ(retained->plan_id, exhausted_plan);
+  EXPECT_EQ(server_->Goals().size(), goals_before_exhaustion);
+
+  for (const double x : {2.61, 2.62}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+    EXPECT_TRUE(ExplorationNodeTestPeer::ActiveReference(*explorer_));
+  }
+  odometry_publisher_->publish(Odometry(2.63, 2.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::COMPLETED &&
+           status->reason_code == "COMPLETED_NO_REACHABLE_FRONTIER" &&
+           !ExplorationNodeTestPeer::ActiveReference(*explorer_);
+  }));
+  EXPECT_EQ(server_->Goals().size(), goals_before_exhaustion);
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 1U);
 }
 
 TEST_F(ExplorationNodeTest,
@@ -1675,6 +3151,10 @@ TEST_F(ExplorationNodeTest, ExecutionReplanTimeoutPreservesCommittedGoal) {
   const std::string request = server_->LatestRequestId();
   ASSERT_TRUE(WaitFor(
       [this, &request] { return server_->HasHandle(request); }));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::REPLANNING;
+  }));
   const auto first_replan_goal = server_->Goals().back();
   const auto references_before_timeout = ReferenceCount();
   const auto first_replan_status = LatestStatus();
@@ -1722,6 +3202,200 @@ TEST_F(ExplorationNodeTest, ExecutionReplanNoPathReleasesGoal) {
   ASSERT_TRUE(WaitFor([this, &request] { return server_->HasHandle(request); }));
   server_->Finish(request, FakePlannerServer::Mode::kExhaustive);
   ASSERT_TRUE(WaitFor([this] { return !ExplorationNodeTestPeer::ActiveTarget(*explorer_); }));
+}
+
+TEST_F(ExplorationNodeTest,
+       OldEpochNoPathCannotFailOrCompleteTheFreshStationaryBatch) {
+  auto now = std::make_shared<std::chrono::steady_clock::time_point>();
+  parameters_.steady_now = [now] { return *now; };
+  parameters_.stop_before_planning = true;
+  auto build_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->generate_candidates =
+      [build_calls](const lunar::pure_exploration::TaskRaster&,
+                    std::span<const lunar::pure_exploration::FrontierCluster>
+                        frontiers) {
+        ++*build_calls;
+        return ControlledCandidates(frontiers, 1U);
+      };
+  seams->evaluate_gain = [](const lunar::pure_exploration::TaskRaster&,
+                            const lunar::pure_exploration::CandidateView&) {
+    return 1.0;
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  auto map = GlobalMap();
+  PublishAllInputs(StartTask("stale-no-path"), map);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+  const auto goals_before_replan = server_->Goals().size();
+  *now += 30s;
+  explorer_->PollExecution();
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  for (const double x : {2.4, 2.5, 2.6}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this, goals_before_replan] {
+    return server_->Goals().size() > goals_before_replan;
+  }));
+  const std::string stale_request = server_->LatestRequestId();
+  ASSERT_TRUE(WaitFor(
+      [this, &stale_request] { return server_->HasHandle(stale_request); }));
+
+  map.data[0] = 100;
+  map_publisher_->publish(map);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP" &&
+           server_->CancelCount() == 1U;
+  }));
+  const auto old_build_calls = build_calls->load();
+  for (const double x : {2.7, 2.8, 2.9}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([build_calls, old_build_calls] {
+    return build_calls->load() > old_build_calls;
+  }));
+  const auto goals_before_stale_terminal = server_->Goals().size();
+  EXPECT_EQ(goals_before_stale_terminal, goals_before_replan + 1U);
+
+  server_->Finish(stale_request, FakePlannerServer::Mode::kExhaustive);
+  ASSERT_TRUE(WaitFor([this, goals_before_stale_terminal] {
+    return server_->Goals().size() > goals_before_stale_terminal;
+  }));
+  const auto after_stale = LatestStatus();
+  ASSERT_TRUE(after_stale.has_value());
+  EXPECT_NE(after_stale->state, Status::COMPLETED);
+  EXPECT_EQ(after_stale->failed_candidate_count, 0U);
+  EXPECT_FALSE(ExplorationNodeTestPeer::ActiveTarget(*explorer_));
+
+  const std::string current_request = server_->LatestRequestId();
+  ASSERT_NE(current_request, stale_request);
+  ASSERT_TRUE(WaitFor(
+      [this, &current_request] { return server_->HasHandle(current_request); }));
+  server_->Finish(current_request, FakePlannerServer::Mode::kExhaustive);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::COMPLETED &&
+           status->reason_code == "COMPLETED_NO_REACHABLE_FRONTIER";
+  }));
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+}
+
+TEST_F(ExplorationNodeTest,
+       OldPlannerTerminalBeforeMapStopCannotDiscardTheActiveCycle) {
+  auto now = std::make_shared<std::chrono::steady_clock::time_point>();
+  parameters_.steady_now = [now] { return *now; };
+  parameters_.stop_before_planning = true;
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->generate_candidates =
+      [](const lunar::pure_exploration::TaskRaster&,
+         std::span<const lunar::pure_exploration::FrontierCluster> frontiers) {
+        return ControlledCandidates(frontiers, 1U);
+      };
+  seams->evaluate_gain = [](const lunar::pure_exploration::TaskRaster&,
+                            const lunar::pure_exploration::CandidateView&) {
+    return 1.0;
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  auto map = GlobalMap();
+  PublishAllInputs(StartTask("terminal-before-stop"), map);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  for (const double x : {2.1, 2.2, 2.3}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+  const auto goals_before_replan = server_->Goals().size();
+  *now += 30s;
+  explorer_->PollExecution();
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  for (const double x : {2.4, 2.5, 2.6}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this, goals_before_replan] {
+    return server_->Goals().size() > goals_before_replan;
+  }));
+  const std::string old_request = server_->LatestRequestId();
+  ASSERT_TRUE(WaitFor(
+      [this, &old_request] { return server_->HasHandle(old_request); }));
+  const auto active_cycle = ExplorationNodeTestPeer::ActiveCycle(*explorer_);
+  ASSERT_NE(active_cycle, nullptr);
+
+  map.data[0] = 100;
+  map_publisher_->publish(map);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP" &&
+           server_->CancelCount() == 1U;
+  }));
+  const auto goals_before_old_terminal = server_->Goals().size();
+  const auto statuses_before_old_terminal = StatusCount();
+  server_->Finish(old_request, FakePlannerServer::Mode::kExhaustive);
+  ASSERT_TRUE(WaitFor([this, statuses_before_old_terminal] {
+    return StatusCount() > statuses_before_old_terminal;
+  }));
+  const auto waiting_after_terminal = LatestStatus();
+  ASSERT_TRUE(waiting_after_terminal.has_value());
+  EXPECT_EQ(waiting_after_terminal->reason_code, "WAITING_FOR_STOP");
+  EXPECT_EQ(ExplorationNodeTestPeer::ActiveCycle(*explorer_), active_cycle);
+  EXPECT_TRUE(ExplorationNodeTestPeer::ActiveTarget(*explorer_));
+  EXPECT_FALSE(ExplorationNodeTestPeer::ActiveReference(*explorer_));
+  EXPECT_EQ(server_->Goals().size(), goals_before_old_terminal);
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+
+  for (const double x : {2.7, 2.8, 2.9}) {
+    odometry_publisher_->publish(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this, goals_before_old_terminal] {
+    return server_->Goals().size() > goals_before_old_terminal;
+  }));
+  EXPECT_FALSE(ExplorationNodeTestPeer::ActiveReference(*explorer_));
+  EXPECT_NE(server_->LatestRequestId(), old_request);
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
 }
 
 TEST_F(ExplorationNodeTest, ExecutionReplanContractErrorFailsClosed) {
@@ -1902,7 +3576,9 @@ TEST_P(ExecutionReplanControlGateTest,
   const std::string stale_request = server_->LatestRequestId();
   ASSERT_TRUE(WaitFor(
       [this, &stale_request] { return server_->HasHandle(stale_request); }));
-  ASSERT_EQ(ExecutionCancels(), std::vector<std::string>{old_plan_id});
+  ASSERT_TRUE(WaitFor([this, &old_plan_id] {
+    return ExecutionCancels() == std::vector<std::string>{old_plan_id};
+  }));
 
   Task control;
   if (GetParam() == ExecutionControl::kPause) {
@@ -2358,6 +4034,1510 @@ TEST_F(ExplorationNodeTest, UnknownRequestIdFailsClosed) {
   }));
   EXPECT_EQ(LatestStatus()->reason_code, "UNKNOWN_PLANNER_REQUEST_ID");
   EXPECT_EQ(ReferenceCount(), 0U);
+}
+
+TEST_F(ExplorationNodeTest,
+       BoundaryGuidanceSafePoseWorkExhaustionUsesGuidanceReason) {
+  // Four footprint vertices consume exactly twelve validation work units in
+  // the constructor.  The first Build then exhausts the shared validator's
+  // collision work while checking the outside start pose.
+  parameters_.boundary_guidance_limits.maximum_guidance_work_units = 12U;
+  Start(FakePlannerServer::Mode::kDelayed);
+  PublishAllInputs(StartTask("guidance-resource"), OutsideApproachMap(false),
+                   Odometry(-2.0, 5.0));
+
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::ERROR;
+  }));
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->reason_code, "RESOURCE_GUIDANCE_WORK_LIMIT");
+  EXPECT_TRUE(server_->Goals().empty());
+}
+
+TEST_F(ExplorationNodeTest,
+       SameContentMapRepublishDuringApproachFinalRankCommitsFrozenReference) {
+  auto observed = std::make_shared<std::promise<void>>();
+  auto release = std::make_shared<std::promise<void>>();
+  const auto observed_future = observed->get_future().share();
+  const auto release_future = release->get_future().share();
+  auto seam_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_final_rank_map_observed =
+      [observed, release_future, seam_calls] {
+        if (seam_calls->fetch_add(1U) == 0U) {
+          observed->set_value();
+          release_future.wait();
+        }
+      };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  const auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-same-map-final-rank"), map,
+                   Odometry(-2.0, 5.0));
+
+  const bool validation_observed =
+      observed_future.wait_for(1s) == std::future_status::ready;
+  if (!validation_observed) {
+    release->set_value();
+  }
+  ASSERT_TRUE(validation_observed);
+  const auto original_goals = server_->Goals();
+  std::set<std::string> original_plan_ids;
+  for (const auto& goal : original_goals) {
+    original_plan_ids.insert("plan:" + goal.request_id);
+  }
+
+  const auto statuses_before_map = StatusCount();
+  map_publisher_->publish(map);
+  const bool same_map_observed = WaitFor([this, statuses_before_map] {
+    return StatusCount() > statuses_before_map;
+  });
+  release->set_value();
+  ASSERT_TRUE(same_map_observed);
+  ASSERT_FALSE(original_goals.empty());
+  EXPECT_EQ(server_->Goals().size(), original_goals.size());
+
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+  EXPECT_EQ(ExplorationNodeTestPeer::ActiveGoalKind(*explorer_),
+            lunar::pure_exploration::GoalKind::kBoundaryApproach);
+  EXPECT_EQ(server_->Goals().size(), original_goals.size());
+  EXPECT_TRUE(original_plan_ids.contains(References().front().plan_id));
+}
+
+TEST_F(ExplorationNodeTest,
+       ChangedMapCallbackCannotOvertakeApproachGoalCommitLinearization) {
+  auto map = std::make_shared<nav_msgs::msg::OccupancyGrid>(
+      OutsideApproachMap(false));
+  auto commit_seam_done = std::make_shared<std::promise<void>>();
+  const auto commit_seam_future = commit_seam_done->get_future().share();
+  auto map_callback_done = std::make_shared<std::promise<void>>();
+  const auto map_callback_future = map_callback_done->get_future().share();
+  auto commit_seam_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto map_callback_signaled = std::make_shared<std::atomic<bool>>(false);
+  auto watch_map_callback = std::make_shared<std::atomic<bool>>(false);
+  auto planning_status_observed = std::make_shared<std::atomic<bool>>(false);
+  auto original_goals_present = std::make_shared<std::atomic<bool>>(false);
+  auto status_count_before_map =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto map_callback_completed_before_commit =
+      std::make_shared<std::atomic<bool>>(false);
+  auto map_status_observed = std::make_shared<std::atomic<bool>>(false);
+  auto commit_and_reference_linearized =
+      std::make_shared<std::atomic<bool>>(false);
+  auto map_callback_saw_linearized_commit =
+      std::make_shared<std::atomic<bool>>(false);
+  auto original_plan_ids = std::make_shared<std::set<std::string>>();
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->before_reference_publish = [commit_and_reference_linearized] {
+    commit_and_reference_linearized->store(true,
+                                           std::memory_order_release);
+  };
+  seams->after_global_map_callback =
+      [this, watch_map_callback, map_callback_signaled,
+       status_count_before_map, map_status_observed,
+       commit_and_reference_linearized, map_callback_saw_linearized_commit,
+       map_callback_done] {
+        if (!watch_map_callback->load(std::memory_order_acquire) ||
+            map_callback_signaled->exchange(true)) {
+          return;
+        }
+        map_status_observed->store(
+            WaitFor(
+                [this, status_count_before_map] {
+                  return StatusCount() > status_count_before_map->load();
+                },
+                250ms));
+        map_callback_saw_linearized_commit->store(
+            commit_and_reference_linearized->load(
+                std::memory_order_acquire));
+        map_callback_done->set_value();
+      };
+  seams->before_approach_goal_commit =
+      [this, map, commit_seam_done, map_callback_future, commit_seam_calls,
+       watch_map_callback, planning_status_observed, original_goals_present,
+       status_count_before_map, map_callback_completed_before_commit,
+       original_plan_ids] {
+        if (commit_seam_calls->fetch_add(1U) != 0U) {
+          return;
+        }
+        const bool planning_observed = WaitFor([this] {
+          const auto status = LatestStatus();
+          return status && status->state == Status::PLANNING &&
+                 status->reason_code == "PLANNING_APPROACH";
+        }, 1s);
+        planning_status_observed->store(planning_observed);
+        if (planning_observed) {
+          const auto goals = server_->Goals();
+          original_goals_present->store(!goals.empty());
+          for (const auto& goal : goals) {
+            original_plan_ids->insert("plan:" + goal.request_id);
+            const auto x = static_cast<std::int64_t>(std::floor(
+                (goal.goal.point.x - map->info.origin.position.x) /
+                map->info.resolution));
+            const auto y = static_cast<std::int64_t>(std::floor(
+                (goal.goal.point.y - map->info.origin.position.y) /
+                map->info.resolution));
+            if (x >= 0 && y >= 0 &&
+                x < static_cast<std::int64_t>(map->info.width) &&
+                y < static_cast<std::int64_t>(map->info.height)) {
+              map->data[static_cast<std::size_t>(y) * map->info.width +
+                        static_cast<std::size_t>(x)] = -1;
+            }
+          }
+          status_count_before_map->store(StatusCount());
+          watch_map_callback->store(true, std::memory_order_release);
+          map_publisher_->publish(*map);
+          map_callback_completed_before_commit->store(
+              map_callback_future.wait_for(750ms) ==
+              std::future_status::ready);
+        }
+        commit_seam_done->set_value();
+      };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  PublishAllInputs(StartTask("approach-goal-commit-linearization"), *map,
+                   Odometry(-2.0, 5.0));
+
+  ASSERT_EQ(commit_seam_future.wait_for(2s), std::future_status::ready);
+  ASSERT_TRUE(planning_status_observed->load());
+  ASSERT_TRUE(original_goals_present->load());
+  EXPECT_FALSE(map_callback_completed_before_commit->load());
+
+  ASSERT_EQ(map_callback_future.wait_for(2s), std::future_status::ready);
+  EXPECT_TRUE(map_status_observed->load());
+  EXPECT_TRUE(map_callback_saw_linearized_commit->load());
+  ASSERT_TRUE(WaitFor([this, original_plan_ids] {
+    return std::ranges::any_of(
+        References(), [original_plan_ids](const auto& reference) {
+          return original_plan_ids->contains(reference.plan_id);
+        });
+  }));
+}
+
+TEST_F(ExplorationNodeTest,
+       IdenticalStationaryOdometryDoesNotStarveApproachBuildCommit) {
+  parameters_.stop_before_planning = true;
+  auto guidance_build_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_boundary_guidance_build = [guidance_build_calls] {
+    guidance_build_calls->fetch_add(1U);
+    std::this_thread::sleep_for(20ms);
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  PublishAllInputs(StartTask("approach-stationary-odom"),
+                   OutsideApproachMap(false), Odometry(-2.0, 5.0));
+
+  std::jthread odometry_stream([this](const std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      odometry_publisher_->publish(Odometry(-2.0, 5.0));
+      std::this_thread::sleep_for(1ms);
+    }
+  });
+  const bool committed = WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }, 3s);
+  odometry_stream.request_stop();
+  odometry_stream.join();
+
+  EXPECT_TRUE(committed);
+  EXPECT_EQ(guidance_build_calls->load(), 1U);
+  std::size_t wait_entries = 0U;
+  bool waiting = false;
+  for (const auto& status : Statuses()) {
+    const bool now_waiting = status.reason_code == "WAITING_FOR_STOP";
+    if (now_waiting && !waiting) {
+      ++wait_entries;
+    }
+    waiting = now_waiting;
+  }
+  EXPECT_EQ(wait_entries, 1U);
+}
+
+TEST_F(ExplorationNodeTest,
+       OccupiedActiveApproachTargetCancelsExactPlanOnceAndRebuilds) {
+  auto guidance_build_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_boundary_guidance_build = [guidance_build_calls] {
+    guidance_build_calls->fetch_add(1U);
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-map-invalid"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto target = ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  ASSERT_TRUE(target);
+  const auto target_offset = MapOffset(map, target->x, target->y);
+  ASSERT_TRUE(target_offset);
+  ASSERT_EQ(map.data[*target_offset], 0);
+  const std::string plan_id = References().front().plan_id;
+  const std::size_t goals_before = server_->Goals().size();
+  map.data[*target_offset] = 100;
+
+  map_publisher_->publish(map);
+  map_publisher_->publish(map);
+  map_publisher_->publish(map);
+
+  ASSERT_TRUE(WaitFor([this, &plan_id] {
+    return ExecutionCancels() == std::vector<std::string>{plan_id};
+  }));
+  ASSERT_TRUE(WaitFor([this, goals_before] {
+    return server_->Goals().size() > goals_before;
+  }));
+  ASSERT_TRUE(WaitFor([guidance_build_calls] {
+    return guidance_build_calls->load() == 2U;
+  }));
+  std::this_thread::sleep_for(100ms);
+  EXPECT_EQ(ExecutionCancels(), std::vector<std::string>{plan_id});
+  EXPECT_EQ(guidance_build_calls->load(), 2U);
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+}
+
+TEST_F(ExplorationNodeTest,
+       OccupiedApproachIntentCancelsWhileActualTargetRemainsFree) {
+  auto guidance_build_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_boundary_guidance_build = [guidance_build_calls] {
+    guidance_build_calls->fetch_add(1U);
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-intent-invalid"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto markers = LatestMarkers();
+    return ReferenceCount() == 1U && markers &&
+           std::ranges::any_of(markers->markers, [](const auto& marker) {
+             return marker.ns == "approach_guidance" &&
+                    marker.action == visualization_msgs::msg::Marker::ADD &&
+                    !marker.points.empty();
+           });
+  }));
+  const auto target = ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  ASSERT_TRUE(target);
+  const auto target_offset = MapOffset(map, target->x, target->y);
+  ASSERT_TRUE(target_offset);
+  ASSERT_EQ(map.data[*target_offset], 0);
+  const std::string plan_id = References().front().plan_id;
+  const auto markers = LatestMarkers();
+  ASSERT_TRUE(markers);
+  const auto guidance = std::ranges::find_if(
+      markers->markers, [](const auto& marker) {
+        return marker.ns == "approach_guidance" &&
+               marker.action == visualization_msgs::msg::Marker::ADD;
+      });
+  ASSERT_NE(guidance, markers->markers.end());
+  ASSERT_FALSE(guidance->points.empty());
+  const auto intent_offset = MapOffset(
+      map, guidance->points.back().x, guidance->points.back().y);
+  ASSERT_TRUE(intent_offset);
+  ASSERT_EQ(map.data[*intent_offset], -1);
+  ASSERT_NE(*intent_offset, *target_offset);
+  for (const double dx : {-0.1, 0.1}) {
+    for (const double dy : {-0.1, 0.1}) {
+      const auto footprint_offset =
+          MapOffset(map, target->x + dx, target->y + dy);
+      ASSERT_TRUE(footprint_offset);
+      ASSERT_NE(*footprint_offset, *intent_offset);
+      ASSERT_EQ(map.data[*footprint_offset], 0);
+    }
+  }
+  map.data[*intent_offset] = 100;
+  map_publisher_->publish(map);
+
+  ASSERT_TRUE(WaitFor([this, &plan_id] {
+    return ExecutionCancels() == std::vector<std::string>{plan_id};
+  }));
+  ASSERT_TRUE(WaitFor([guidance_build_calls] {
+    return guidance_build_calls->load() == 2U;
+  }));
+  EXPECT_EQ(map.data[*target_offset], 0);
+  EXPECT_EQ(map.data[*intent_offset], 100);
+  EXPECT_EQ(guidance_build_calls->load(), 2U);
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+}
+
+TEST_F(ExplorationNodeTest,
+       InvisibleFrozenGuidanceRouteCancelsWithLegalIntentAndFreeTarget) {
+  auto guidance_build_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_boundary_guidance_build = [guidance_build_calls] {
+    guidance_build_calls->fetch_add(1U);
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  const auto original_map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-route-invalid"), original_map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto markers = LatestMarkers();
+    return ReferenceCount() == 1U && markers &&
+           std::ranges::any_of(markers->markers, [](const auto& marker) {
+             return marker.ns == "approach_guidance" &&
+                    marker.action == visualization_msgs::msg::Marker::ADD &&
+                    !marker.points.empty();
+           });
+  }));
+  const auto target = ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  ASSERT_TRUE(target);
+  const auto markers = LatestMarkers();
+  ASSERT_TRUE(markers);
+  const auto guidance = std::ranges::find_if(
+      markers->markers, [](const auto& marker) {
+        return marker.ns == "approach_guidance" &&
+               marker.action == visualization_msgs::msg::Marker::ADD;
+      });
+  ASSERT_NE(guidance, markers->markers.end());
+  ASSERT_FALSE(guidance->points.empty());
+  const auto selected_intent = guidance->points.back();
+  const auto frozen_intent_offset =
+      MapOffset(original_map, selected_intent.x, selected_intent.y);
+  ASSERT_TRUE(frozen_intent_offset);
+  const std::uint32_t intent_x = static_cast<std::uint32_t>(
+      *frozen_intent_offset % original_map.info.width);
+  const std::uint32_t intent_y = static_cast<std::uint32_t>(
+      *frozen_intent_offset / original_map.info.width);
+  ASSERT_EQ(intent_x, 8U);
+
+  auto changed = GlobalMap(64U, 48U, 0.25, -2.0, 0.0);
+  changed.data.assign(static_cast<std::size_t>(changed.info.width) *
+                          changed.info.height,
+                      0);
+  ASSERT_LT(intent_x, changed.info.width);
+  ASSERT_LT(intent_y, changed.info.height);
+  changed.data[static_cast<std::size_t>(intent_y) * changed.info.width +
+               intent_x] = -1;
+  const auto changed_target_offset =
+      MapOffset(changed, target->x, target->y);
+  ASSERT_TRUE(changed_target_offset);
+  ASSERT_EQ(changed.data[*changed_target_offset], 0);
+  const auto old_route_endpoint_offset =
+      MapOffset(changed, selected_intent.x, selected_intent.y);
+  ASSERT_TRUE(old_route_endpoint_offset);
+  ASSERT_NE(*old_route_endpoint_offset,
+            static_cast<std::size_t>(intent_y) * changed.info.width +
+                intent_x);
+  ASSERT_EQ(changed.data[*old_route_endpoint_offset], 0);
+  const std::string plan_id = References().front().plan_id;
+  map_publisher_->publish(changed);
+
+  ASSERT_TRUE(WaitFor([this, &plan_id] {
+    return ExecutionCancels() == std::vector<std::string>{plan_id};
+  }));
+  ASSERT_TRUE(WaitFor([guidance_build_calls] {
+    return guidance_build_calls->load() == 2U;
+  }));
+  EXPECT_EQ(changed.data[*changed_target_offset], 0);
+  EXPECT_EQ(changed.data[static_cast<std::size_t>(intent_y) *
+                             changed.info.width +
+                         intent_x],
+            -1);
+  EXPECT_EQ(guidance_build_calls->load(), 2U);
+}
+
+TEST_F(ExplorationNodeTest,
+       SameMapAndPotentiallyBetterPoseDoNotPreemptActiveApproach) {
+  auto guidance_build_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_boundary_guidance_build = [guidance_build_calls] {
+    guidance_build_calls->fetch_add(1U);
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-no-preempt"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto active_request =
+      ExplorationNodeTestPeer::ActiveRequestId(*explorer_);
+  const auto active_target = ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  ASSERT_TRUE(active_request);
+  ASSERT_TRUE(active_target);
+  const auto goal_count = server_->Goals().size();
+  const auto status_count = StatusCount();
+
+  map_publisher_->publish(map);
+  odometry_publisher_->publish(Odometry(-2.0, 9.0));
+  ASSERT_TRUE(WaitFor([this, status_count] {
+    return StatusCount() > status_count;
+  }));
+  auto remotely_changed = map;
+  remotely_changed.data.back() = 100;
+  const auto statuses_before_changed_map = StatusCount();
+  map_publisher_->publish(remotely_changed);
+  ASSERT_TRUE(WaitFor([this, statuses_before_changed_map] {
+    return StatusCount() > statuses_before_changed_map;
+  }));
+  std::this_thread::sleep_for(100ms);
+
+  EXPECT_TRUE(ExecutionCancels().empty());
+  EXPECT_EQ(ReferenceCount(), 1U);
+  EXPECT_EQ(server_->Goals().size(), goal_count);
+  EXPECT_EQ(guidance_build_calls->load(), 1U);
+  EXPECT_EQ(ExplorationNodeTestPeer::ActiveRequestId(*explorer_),
+            active_request);
+  const auto retained = ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  ASSERT_TRUE(retained);
+  EXPECT_DOUBLE_EQ(retained->x, active_target->x);
+  EXPECT_DOUBLE_EQ(retained->y, active_target->y);
+  EXPECT_DOUBLE_EQ(retained->yaw, active_target->yaw);
+}
+
+TEST_F(ExplorationNodeTest,
+       MissingFrozenApproachAuthorityInvalidatesActivePlanFailClosed) {
+  auto guidance_build_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_boundary_guidance_build = [guidance_build_calls] {
+    guidance_build_calls->fetch_add(1U);
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  const auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-missing-authority"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const std::string plan_id = References().front().plan_id;
+  ExplorationNodeTestPeer::ResetActiveCycle(*explorer_);
+  map_publisher_->publish(map);
+
+  ASSERT_TRUE(WaitFor([this, &plan_id] {
+    return ExecutionCancels() == std::vector<std::string>{plan_id};
+  }));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::ERROR &&
+           status->reason_code == "FINAL_MAP_VALIDATION_ERROR";
+  }));
+  EXPECT_EQ(guidance_build_calls->load(), 1U);
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+}
+
+TEST_F(ExplorationNodeTest,
+       MissingFrozenWfdAuthorityFailsCurrentPlanWithValidationError) {
+  Start(FakePlannerServer::Mode::kReachable);
+  const auto map = GlobalMap();
+  PublishAllInputs(StartTask("wfd-missing-authority"), map, Odometry());
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kTaskFrontier;
+  }));
+  const std::string plan_id = References().front().plan_id;
+  const auto goals_before = server_->Goals().size();
+  ExplorationNodeTestPeer::ResetActiveCycle(*explorer_);
+  map_publisher_->publish(map);
+
+  ASSERT_TRUE(WaitFor([this, &plan_id] {
+    return ExecutionCancels() == std::vector<std::string>{plan_id};
+  }));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::ERROR &&
+           status->reason_code == "FINAL_MAP_VALIDATION_ERROR";
+  }));
+  EXPECT_EQ(server_->Goals().size(), goals_before);
+}
+
+TEST_F(ExplorationNodeTest,
+       SameContentMapMissingTaskBoundaryFailsClosedWithoutRebuild) {
+  ExpectSameContentMissingMapValidationAuthorityFails(
+      ExplorationNodeTestPeer::MapValidationAuthority::kTaskBoundary, true);
+}
+
+TEST_F(ExplorationNodeTest,
+       SameContentMapMissingActiveReferenceFailsClosedWithoutRebuild) {
+  ExpectSameContentMissingMapValidationAuthorityFails(
+      ExplorationNodeTestPeer::MapValidationAuthority::kActiveReference,
+      false);
+}
+
+TEST_F(ExplorationNodeTest,
+       SameContentMapMissingLatestPoseFailsClosedWithoutRebuild) {
+  ExpectSameContentMissingMapValidationAuthorityFails(
+      ExplorationNodeTestPeer::MapValidationAuthority::kPose, true);
+}
+
+TEST_F(ExplorationNodeTest,
+       InFlightValidationAuthorityLossFailsCurrentPlanClosed) {
+  auto commit_entered = std::make_shared<std::promise<void>>();
+  auto release_commit = std::make_shared<std::promise<void>>();
+  auto commit_completed = std::make_shared<std::promise<void>>();
+  const auto commit_entered_future = commit_entered->get_future().share();
+  const auto release_commit_future = release_commit->get_future().share();
+  const auto commit_completed_future = commit_completed->get_future().share();
+  auto before_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto after_signaled = std::make_shared<std::atomic<bool>>(false);
+  auto guidance_build_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_boundary_guidance_build = [guidance_build_calls] {
+    guidance_build_calls->fetch_add(1U);
+  };
+  seams->before_active_map_validation_commit =
+      [commit_entered, release_commit_future, before_calls] {
+        if (before_calls->fetch_add(1U) == 0U) {
+          commit_entered->set_value();
+          static_cast<void>(release_commit_future.wait_for(5s));
+        }
+      };
+  seams->after_active_map_validation_commit =
+      [commit_completed, after_signaled] {
+        if (!after_signaled->exchange(true)) {
+          commit_completed->set_value();
+        }
+      };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("in-flight-authority-loss"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+  const std::string plan_id = References().front().plan_id;
+  map.data.back() = 100;
+  map_publisher_->publish(map);
+  ASSERT_EQ(commit_entered_future.wait_for(3s), std::future_status::ready);
+
+  ExplorationNodeTestPeer::ResetMapValidationAuthority(
+      *explorer_,
+      ExplorationNodeTestPeer::MapValidationAuthority::kTaskBoundary);
+  release_commit->set_value();
+  ASSERT_EQ(commit_completed_future.wait_for(3s), std::future_status::ready);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::ERROR &&
+           status->reason_code == "FINAL_MAP_VALIDATION_ERROR";
+  }));
+  EXPECT_EQ(ExecutionCancels(), std::vector<std::string>{plan_id});
+  EXPECT_EQ(guidance_build_calls->load(), 1U);
+}
+
+TEST_F(ExplorationNodeTest,
+       StaleSerializedApproachValidationCannotCancelReplacementGoal) {
+  auto commit_entered = std::make_shared<std::promise<void>>();
+  auto release_commit = std::make_shared<std::promise<void>>();
+  auto commit_completed = std::make_shared<std::promise<void>>();
+  const auto commit_entered_future = commit_entered->get_future().share();
+  const auto release_commit_future = release_commit->get_future().share();
+  const auto commit_completed_future = commit_completed->get_future().share();
+  auto before_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto after_signaled = std::make_shared<std::atomic<bool>>(false);
+  auto release_timed_out = std::make_shared<std::atomic<bool>>(false);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->before_active_map_validation_commit =
+      [commit_entered, release_commit_future, before_calls,
+       release_timed_out] {
+        if (before_calls->fetch_add(1U) != 0U) {
+          return;
+        }
+        commit_entered->set_value();
+        release_timed_out->store(
+            release_commit_future.wait_for(5s) != std::future_status::ready,
+            std::memory_order_release);
+      };
+  seams->after_active_map_validation_commit =
+      [commit_completed, after_signaled] {
+        if (!after_signaled->exchange(true)) {
+          commit_completed->set_value();
+        }
+      };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-validation-old"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const std::string old_plan_id = References().front().plan_id;
+  const auto old_target = ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  const auto old_identity =
+      ExplorationNodeTestPeer::BoundaryApproachIdentity(*explorer_);
+  ASSERT_TRUE(old_target);
+  ASSERT_TRUE(old_identity);
+  const auto old_target_offset = MapOffset(map, old_target->x, old_target->y);
+  ASSERT_TRUE(old_target_offset);
+  map.data[*old_target_offset] = 100;
+  map_publisher_->publish(map);
+  ASSERT_EQ(commit_entered_future.wait_for(3s), std::future_status::ready);
+  ASSERT_TRUE(ExecutionCancels().empty());
+
+  task_publisher_->publish(StartTask("approach-validation-replacement"));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return ReferenceCount() >= 2U && status &&
+           status->task_id == "approach-validation-replacement" &&
+           status->state == Status::EXECUTING &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }, 3s));
+  const std::string replacement_plan_id = References().back().plan_id;
+  const auto replacement_identity =
+      ExplorationNodeTestPeer::BoundaryApproachIdentity(*explorer_);
+  ASSERT_TRUE(replacement_identity);
+  ASSERT_NE(replacement_plan_id, old_plan_id);
+  EXPECT_NE(*replacement_identity, *old_identity);
+  ASSERT_TRUE(WaitFor([this, &old_plan_id] {
+    return ExecutionCancels() == std::vector<std::string>{old_plan_id};
+  }));
+  release_commit->set_value();
+  ASSERT_EQ(commit_completed_future.wait_for(3s), std::future_status::ready);
+
+  EXPECT_FALSE(release_timed_out->load(std::memory_order_acquire));
+  EXPECT_EQ(ExecutionCancels(), std::vector<std::string>{old_plan_id});
+  EXPECT_EQ(References().back().plan_id, replacement_plan_id);
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->task_id, "approach-validation-replacement");
+  EXPECT_NE(LatestStatus()->state, Status::ERROR);
+}
+
+TEST_F(ExplorationNodeTest,
+       LatestMapInvalidationFollowsSameGoalRollingPlanSuccessor) {
+  auto commit_entered = std::make_shared<std::promise<void>>();
+  auto release_commit = std::make_shared<std::promise<void>>();
+  auto commit_completed = std::make_shared<std::promise<void>>();
+  const auto commit_entered_future = commit_entered->get_future().share();
+  const auto release_commit_future = release_commit->get_future().share();
+  const auto commit_completed_future = commit_completed->get_future().share();
+  auto before_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto after_signaled = std::make_shared<std::atomic<bool>>(false);
+  auto guidance_build_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_boundary_guidance_build = [guidance_build_calls] {
+    guidance_build_calls->fetch_add(1U);
+  };
+  seams->before_active_map_validation_commit =
+      [commit_entered, release_commit_future, before_calls] {
+        if (before_calls->fetch_add(1U) == 0U) {
+          commit_entered->set_value();
+          static_cast<void>(release_commit_future.wait_for(5s));
+        }
+      };
+  seams->after_active_map_validation_commit =
+      [commit_completed, after_signaled] {
+        if (!after_signaled->exchange(true)) {
+          commit_completed->set_value();
+        }
+      };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kRollingReachable);
+  auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("rolling-map-validation"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto old_identity =
+      ExplorationNodeTestPeer::BoundaryApproachIdentity(*explorer_);
+  const auto old_target = ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  ASSERT_TRUE(old_identity);
+  ASSERT_TRUE(old_target);
+  const auto first_reference = References().front();
+  ASSERT_FALSE(first_reference.trajectory.points.empty());
+  const auto endpoint = first_reference.trajectory.points.back()
+                            .transforms.front().translation;
+  const std::size_t goals_before = server_->Goals().size();
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+  odometry_publisher_->publish(Odometry(endpoint.x, endpoint.y));
+  ASSERT_TRUE(WaitFor([this, goals_before] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::REPLANNING &&
+           server_->Goals().size() > goals_before;
+  }));
+  const std::string replan_request = server_->LatestRequestId();
+  ASSERT_TRUE(WaitFor([this, &replan_request] {
+    return server_->HasHandle(replan_request);
+  }));
+  ASSERT_TRUE(WaitFor([this, &first_reference] {
+    return ExecutionCancels() ==
+           std::vector<std::string>{first_reference.plan_id};
+  }));
+
+  const auto target_offset = MapOffset(map, old_target->x, old_target->y);
+  ASSERT_TRUE(target_offset);
+  map.data[*target_offset] = 100;
+  map_publisher_->publish(map);
+  ASSERT_EQ(commit_entered_future.wait_for(3s), std::future_status::ready);
+
+  server_->Finish(replan_request, FakePlannerServer::Mode::kReachable);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return ReferenceCount() == 2U && status &&
+           status->state == Status::EXECUTING;
+  }));
+  const std::string successor_plan_id = References().back().plan_id;
+  ASSERT_NE(successor_plan_id, first_reference.plan_id);
+  EXPECT_EQ(ExplorationNodeTestPeer::BoundaryApproachIdentity(*explorer_),
+            old_identity);
+
+  release_commit->set_value();
+  ASSERT_EQ(commit_completed_future.wait_for(3s), std::future_status::ready);
+  ASSERT_TRUE(WaitFor([this, &first_reference, &successor_plan_id] {
+    return ExecutionCancels() ==
+           std::vector<std::string>{first_reference.plan_id,
+                                    successor_plan_id};
+  }));
+  ASSERT_TRUE(WaitFor([guidance_build_calls] {
+    return guidance_build_calls->load() == 2U;
+  }));
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_NE(LatestStatus()->state, Status::ERROR);
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+}
+
+TEST_F(ExplorationNodeTest,
+       StationaryReplanEpochCannotDiscardPendingMapInvalidation) {
+  parameters_.stop_before_planning = true;
+  auto commit_entered = std::make_shared<std::promise<void>>();
+  auto release_commit = std::make_shared<std::promise<void>>();
+  auto commit_completed = std::make_shared<std::promise<void>>();
+  const auto commit_entered_future = commit_entered->get_future().share();
+  const auto release_commit_future = release_commit->get_future().share();
+  const auto commit_completed_future = commit_completed->get_future().share();
+  auto before_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto after_signaled = std::make_shared<std::atomic<bool>>(false);
+  auto guidance_build_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_boundary_guidance_build = [guidance_build_calls] {
+    guidance_build_calls->fetch_add(1U);
+  };
+  seams->before_active_map_validation_commit =
+      [commit_entered, release_commit_future, before_calls] {
+        if (before_calls->fetch_add(1U) == 0U) {
+          commit_entered->set_value();
+          static_cast<void>(release_commit_future.wait_for(5s));
+        }
+      };
+  seams->after_active_map_validation_commit =
+      [commit_completed, after_signaled] {
+        if (!after_signaled->exchange(true)) {
+          commit_completed->set_value();
+        }
+      };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kRollingReachable);
+  auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("stationary-replan-map-validation"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  for (std::size_t sample = 0U; sample < 3U; ++sample) {
+    const double x = -2.0 + 0.01 * static_cast<double>(sample + 1U);
+    odometry_publisher_->publish(Odometry(x, 5.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto target = ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  const auto identity =
+      ExplorationNodeTestPeer::BoundaryApproachIdentity(*explorer_);
+  ASSERT_TRUE(target);
+  ASSERT_TRUE(identity);
+  const auto first_reference = References().front();
+  ASSERT_FALSE(first_reference.trajectory.points.empty());
+  const auto endpoint = first_reference.trajectory.points.back()
+                            .transforms.front().translation;
+
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+  const std::size_t goals_before_replan = server_->Goals().size();
+  odometry_publisher_->publish(Odometry(endpoint.x, endpoint.y));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::REPLANNING &&
+           status->reason_code == "WAITING_FOR_STOP";
+  }));
+  ASSERT_TRUE(WaitFor([this, &first_reference] {
+    return ExecutionCancels() ==
+           std::vector<std::string>{first_reference.plan_id};
+  }));
+
+  const auto target_offset = MapOffset(map, target->x, target->y);
+  ASSERT_TRUE(target_offset);
+  map.data[*target_offset] = 100;
+  map_publisher_->publish(map);
+  ASSERT_EQ(commit_entered_future.wait_for(3s), std::future_status::ready);
+
+  for (std::size_t sample = 0U; sample < 3U; ++sample) {
+    const double x = endpoint.x +
+                     0.01 * static_cast<double>(sample + 1U);
+    odometry_publisher_->publish(Odometry(x, endpoint.y));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this, goals_before_replan] {
+    return server_->Goals().size() > goals_before_replan;
+  }));
+  const std::string replan_request = server_->LatestRequestId();
+  ASSERT_TRUE(WaitFor([this, &replan_request] {
+    return server_->HasHandle(replan_request);
+  }));
+  server_->Finish(replan_request, FakePlannerServer::Mode::kReachable);
+  const bool successor_committed = WaitFor([this] {
+    const auto status = LatestStatus();
+    return ReferenceCount() == 2U && status &&
+           status->state == Status::EXECUTING;
+  }, 3s);
+  const auto after_replan = LatestStatus();
+  ASSERT_TRUE(successor_committed)
+      << "references=" << ReferenceCount()
+      << " goals=" << server_->Goals().size()
+      << " cancels=" << ExecutionCancels().size()
+      << " state=" << (after_replan ? std::to_string(after_replan->state)
+                                     : "none")
+      << " reason=" << (after_replan ? after_replan->reason_code : "none");
+  const std::string successor_plan_id = References().back().plan_id;
+  ASSERT_NE(successor_plan_id, first_reference.plan_id);
+  EXPECT_EQ(ExplorationNodeTestPeer::BoundaryApproachIdentity(*explorer_),
+            identity);
+
+  release_commit->set_value();
+  ASSERT_EQ(commit_completed_future.wait_for(3s), std::future_status::ready);
+  ASSERT_TRUE(WaitFor([this, &first_reference, &successor_plan_id] {
+    return ExecutionCancels() ==
+           std::vector<std::string>{first_reference.plan_id,
+                                    successor_plan_id};
+  }));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+
+  for (std::size_t sample = 0U; sample < 3U; ++sample) {
+    const double x = endpoint.x +
+                     0.04 + 0.01 * static_cast<double>(sample);
+    odometry_publisher_->publish(Odometry(x, endpoint.y));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([guidance_build_calls] {
+    return guidance_build_calls->load() == 2U;
+  }));
+  EXPECT_EQ(ReferenceCount(), 2U);
+  EXPECT_FALSE(ExplorationNodeTestPeer::ActiveTarget(*explorer_));
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_NE(LatestStatus()->state, Status::EXECUTING);
+  EXPECT_NE(LatestStatus()->state, Status::COMPLETED);
+  EXPECT_NE(LatestStatus()->state, Status::ERROR);
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+}
+
+TEST_F(ExplorationNodeTest,
+       InFlightStationaryReplanConsumesPendingMapInvalidation) {
+  parameters_.stop_before_planning = true;
+  auto commit_entered = std::make_shared<std::promise<void>>();
+  auto release_commit = std::make_shared<std::promise<void>>();
+  auto commit_completed = std::make_shared<std::promise<void>>();
+  const auto commit_entered_future = commit_entered->get_future().share();
+  const auto release_commit_future = release_commit->get_future().share();
+  const auto commit_completed_future = commit_completed->get_future().share();
+  auto before_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto after_signaled = std::make_shared<std::atomic<bool>>(false);
+  auto guidance_build_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_boundary_guidance_build = [guidance_build_calls] {
+    guidance_build_calls->fetch_add(1U);
+  };
+  seams->before_active_map_validation_commit =
+      [commit_entered, release_commit_future, before_calls] {
+        if (before_calls->fetch_add(1U) == 0U) {
+          commit_entered->set_value();
+          static_cast<void>(release_commit_future.wait_for(5s));
+        }
+      };
+  seams->after_active_map_validation_commit =
+      [commit_completed, after_signaled] {
+        if (!after_signaled->exchange(true)) {
+          commit_completed->set_value();
+        }
+      };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kRollingReachable);
+  auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("in-flight-stationary-map-validation"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  for (std::size_t sample = 0U; sample < 3U; ++sample) {
+    const double x = -2.0 + 0.01 * static_cast<double>(sample + 1U);
+    odometry_publisher_->publish(Odometry(x, 5.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto target = ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  ASSERT_TRUE(target);
+  const auto first_reference = References().front();
+  ASSERT_FALSE(first_reference.trajectory.points.empty());
+  const auto endpoint = first_reference.trajectory.points.back()
+                            .transforms.front().translation;
+
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+  const std::size_t goals_before_replan = server_->Goals().size();
+  odometry_publisher_->publish(Odometry(endpoint.x, endpoint.y));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::REPLANNING &&
+           status->reason_code == "WAITING_FOR_STOP";
+  }));
+  ASSERT_TRUE(WaitFor([this, &first_reference] {
+    return ExecutionCancels() ==
+           std::vector<std::string>{first_reference.plan_id};
+  }));
+
+  const auto target_offset = MapOffset(map, target->x, target->y);
+  ASSERT_TRUE(target_offset);
+  map.data[*target_offset] = 100;
+  map_publisher_->publish(map);
+  ASSERT_EQ(commit_entered_future.wait_for(3s), std::future_status::ready);
+
+  for (std::size_t sample = 0U; sample < 3U; ++sample) {
+    const double x = endpoint.x +
+                     0.01 * static_cast<double>(sample + 1U);
+    odometry_publisher_->publish(Odometry(x, endpoint.y));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this, goals_before_replan] {
+    return server_->Goals().size() > goals_before_replan;
+  }));
+  const std::string replan_request = server_->LatestRequestId();
+  ASSERT_TRUE(WaitFor([this, &replan_request] {
+    return server_->HasHandle(replan_request);
+  }));
+
+  release_commit->set_value();
+  ASSERT_EQ(commit_completed_future.wait_for(3s), std::future_status::ready);
+  ASSERT_TRUE(WaitFor([this, &replan_request] {
+    return server_->CancelCount() == 1U &&
+           server_->CanceledRequestIds() ==
+               std::set<std::string>{replan_request};
+  }));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_NE(LatestStatus()->state, Status::ERROR);
+  EXPECT_EQ(ReferenceCount(), 1U);
+
+  const auto statuses_before_terminal = StatusCount();
+  server_->FinishCanceled(replan_request);
+  ASSERT_TRUE(WaitFor([this, statuses_before_terminal] {
+    return StatusCount() > statuses_before_terminal;
+  }));
+  EXPECT_EQ(ReferenceCount(), 1U);
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->reason_code, "WAITING_FOR_STOP");
+  EXPECT_NE(LatestStatus()->state, Status::ERROR);
+
+  for (std::size_t sample = 0U; sample < 3U; ++sample) {
+    const double x = endpoint.x +
+                     0.04 + 0.01 * static_cast<double>(sample);
+    odometry_publisher_->publish(Odometry(x, endpoint.y));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([guidance_build_calls] {
+    return guidance_build_calls->load() == 2U;
+  }));
+  EXPECT_EQ(ReferenceCount(), 1U);
+  EXPECT_FALSE(ExplorationNodeTestPeer::ActiveTarget(*explorer_));
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_NE(LatestStatus()->state, Status::EXECUTING);
+  EXPECT_NE(LatestStatus()->state, Status::COMPLETED);
+  EXPECT_NE(LatestStatus()->state, Status::ERROR);
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+}
+
+TEST_F(ExplorationNodeTest,
+       ApproachExecutionPublishesTruthfulGoalMarkersAndSevenDiagnostics) {
+  Start(FakePlannerServer::Mode::kReachable);
+  const auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-observability"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto markers = LatestMarkers();
+    const auto remaining = DiagnosticValue("remaining_guidance_m");
+    return ReferenceCount() == 1U && CurrentGoalCount() > 0U && markers &&
+           std::ranges::any_of(markers->markers, [](const auto& marker) {
+             return marker.ns == "approach_candidates" &&
+                    marker.action == visualization_msgs::msg::Marker::ADD &&
+                    marker.color.r == 1.0F;
+           }) &&
+           std::ranges::any_of(markers->markers, [](const auto& marker) {
+             return marker.ns == "approach_guidance" &&
+                    marker.action == visualization_msgs::msg::Marker::ADD;
+           }) &&
+           DiagnosticValue("navigation_phase") == "APPROACH_TASK" &&
+           remaining && *remaining != "unavailable";
+  }));
+
+  const auto current_goal = LatestCurrentGoal();
+  ASSERT_TRUE(current_goal);
+  const auto goal_offset = MapOffset(
+      map, current_goal->pose.position.x, current_goal->pose.position.y);
+  ASSERT_TRUE(goal_offset);
+  EXPECT_EQ(map.data[*goal_offset], 0);
+
+  const auto markers = LatestMarkers();
+  ASSERT_TRUE(markers);
+  std::size_t guidance_adds = 0U;
+  bool selected_candidate = false;
+  std::size_t intent_adds = 0U;
+  for (const auto& marker : markers->markers) {
+    if (marker.action != visualization_msgs::msg::Marker::ADD) {
+      continue;
+    }
+    if (marker.ns == "approach_intents") {
+      ++intent_adds;
+      const auto intent_offset =
+          MapOffset(map, marker.pose.position.x, marker.pose.position.y);
+      ASSERT_TRUE(intent_offset);
+      EXPECT_EQ(map.data[*intent_offset], -1);
+      EXPECT_TRUE(marker.pose.position.x != current_goal->pose.position.x ||
+                  marker.pose.position.y != current_goal->pose.position.y);
+    } else if (marker.ns == "approach_guidance") {
+      ++guidance_adds;
+      EXPECT_EQ(marker.id, 0);
+      EXPECT_EQ(marker.type, visualization_msgs::msg::Marker::LINE_STRIP);
+    } else if (marker.ns == "approach_candidates" &&
+               marker.color.r == 1.0F) {
+      selected_candidate = true;
+      EXPECT_DOUBLE_EQ(marker.pose.position.x,
+                       current_goal->pose.position.x);
+      EXPECT_DOUBLE_EQ(marker.pose.position.y,
+                       current_goal->pose.position.y);
+    }
+  }
+  EXPECT_GT(intent_adds, 0U);
+  EXPECT_EQ(guidance_adds, 1U);
+  EXPECT_TRUE(selected_candidate);
+
+  for (const char* key : kApproachDiagnosticKeys) {
+    EXPECT_EQ(DiagnosticKeyCount(key), 1U) << key;
+  }
+  EXPECT_EQ(DiagnosticValue("fully_inside_task"), "false");
+  ASSERT_TRUE(DiagnosticValue("approach_intent_count"));
+  EXPECT_GT(std::stoull(*DiagnosticValue("approach_intent_count")), 0U);
+  ASSERT_TRUE(DiagnosticValue("approach_candidate_count"));
+  EXPECT_GT(std::stoull(*DiagnosticValue("approach_candidate_count")), 0U);
+  const auto remaining_guidance = DiagnosticValue("remaining_guidance_m");
+  ASSERT_TRUE(remaining_guidance);
+  ASSERT_NE(*remaining_guidance, "unavailable");
+  const double remaining_guidance_value = std::stod(*remaining_guidance);
+  EXPECT_TRUE(std::isfinite(remaining_guidance_value));
+  EXPECT_GE(remaining_guidance_value, 0.0);
+  const auto unknown_count =
+      DiagnosticValue("guidance_unknown_cell_count");
+  ASSERT_TRUE(unknown_count);
+  ASSERT_NE(*unknown_count, "unavailable");
+  EXPECT_LE(std::stoull(*unknown_count),
+            std::numeric_limits<std::uint32_t>::max());
+  EXPECT_EQ(DiagnosticValue("approach_wait_reason"), "unavailable");
+  const auto statuses = Statuses();
+  for (const char* reason : {"SELECTING_APPROACH_TARGET",
+                             "PLANNING_APPROACH",
+                             "EXECUTING_APPROACH"}) {
+    EXPECT_TRUE(std::ranges::any_of(statuses, [reason](const auto& status) {
+      return status.reason_code == reason;
+    })) << reason;
+  }
+}
+
+TEST_F(ExplorationNodeTest,
+       ApproachWaitRetainsCountsAndExplorePublishesUnavailableSelection) {
+  Start(FakePlannerServer::Mode::kExhaustive);
+  PublishAllInputs(StartTask("approach-wait-observability"),
+                   OutsideApproachMap(false), Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("approach_wait_reason") ==
+           "APPROACH_NO_REACHABLE_TARGET";
+  }));
+  EXPECT_EQ(DiagnosticValue("navigation_phase"), "APPROACH_TASK");
+  EXPECT_EQ(DiagnosticValue("fully_inside_task"), "false");
+  ASSERT_TRUE(DiagnosticValue("approach_intent_count"));
+  EXPECT_GT(std::stoull(*DiagnosticValue("approach_intent_count")), 0U);
+  ASSERT_TRUE(DiagnosticValue("approach_candidate_count"));
+  EXPECT_GT(std::stoull(*DiagnosticValue("approach_candidate_count")), 0U);
+  EXPECT_EQ(DiagnosticValue("remaining_guidance_m"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("guidance_unknown_cell_count"), "unavailable");
+  for (const char* key : kApproachDiagnosticKeys) {
+    EXPECT_EQ(DiagnosticKeyCount(key), 1U) << key;
+  }
+
+  task_publisher_->publish(StartTask("explore-observability"));
+  map_publisher_->publish(GlobalMap());
+  odometry_publisher_->publish(Odometry());
+  ASSERT_TRUE(WaitFor([this] {
+    return DiagnosticValue("navigation_phase") == "EXPLORE_TASK" &&
+           DiagnosticValue("fully_inside_task") == "true";
+  }));
+  EXPECT_EQ(DiagnosticValue("fully_inside_task"), "true");
+  EXPECT_EQ(DiagnosticValue("approach_intent_count"), "0");
+  EXPECT_EQ(DiagnosticValue("approach_candidate_count"), "0");
+  EXPECT_EQ(DiagnosticValue("remaining_guidance_m"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("guidance_unknown_cell_count"), "unavailable");
+  EXPECT_EQ(DiagnosticValue("approach_wait_reason"), "unavailable");
+  for (const char* key : kApproachDiagnosticKeys) {
+    EXPECT_EQ(DiagnosticKeyCount(key), 1U) << key;
+  }
+}
+
+TEST_F(ExplorationNodeTest,
+       OutsideStartPublishesOnlyFreeApproachGoalsThenSwitchesToWfd) {
+  Start(FakePlannerServer::Mode::kReachable);
+  const auto initial_map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("outside-progress"), initial_map,
+                   Odometry(-2.0, 5.0));
+
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto first_goals = server_->Goals();
+  const auto first_request =
+      ExplorationNodeTestPeer::ActiveRequestId(*explorer_);
+  ASSERT_TRUE(first_request);
+  const auto first_row = std::ranges::find_if(
+      first_goals, [&](const auto& goal) {
+        return goal.request_id == *first_request;
+      });
+  ASSERT_NE(first_row, first_goals.end());
+  const auto first = first_row->goal;
+  const auto first_x = static_cast<std::int64_t>(
+      std::floor((first.point.x - initial_map.info.origin.position.x) /
+                 initial_map.info.resolution));
+  const auto first_y = static_cast<std::int64_t>(
+      std::floor((first.point.y - initial_map.info.origin.position.y) /
+                 initial_map.info.resolution));
+  ASSERT_GE(first_x, 0);
+  ASSERT_GE(first_y, 0);
+  ASSERT_LT(first_x, static_cast<std::int64_t>(initial_map.info.width));
+  ASSERT_LT(first_y, static_cast<std::int64_t>(initial_map.info.height));
+  EXPECT_EQ(initial_map.data[static_cast<std::size_t>(first_y) *
+                                 initial_map.info.width +
+                             static_cast<std::size_t>(first_x)],
+            0);
+  EXPECT_LT(first.point.x, 0.0);
+
+  map_publisher_->publish(OutsideApproachMap(true));
+  odometry_publisher_->publish(
+      Odometry(first.point.x, first.point.y, first.yaw_rad));
+  ASSERT_TRUE(WaitFor([this, &first_request] {
+    return ReferenceCount() >= 2U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach &&
+           ExplorationNodeTestPeer::ActiveRequestId(*explorer_) !=
+               first_request;
+  }));
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+  const auto second_goals = server_->Goals();
+  const auto second_request =
+      ExplorationNodeTestPeer::ActiveRequestId(*explorer_);
+  ASSERT_TRUE(second_request);
+  const auto second_row = std::ranges::find_if(
+      second_goals, [&](const auto& goal) {
+        return goal.request_id == *second_request;
+      });
+  ASSERT_NE(second_row, second_goals.end());
+  const auto second = second_row->goal;
+  EXPECT_GT(second.point.x, first.point.x);
+  const auto revealed_map = OutsideApproachMap(true);
+  const auto second_x = static_cast<std::int64_t>(
+      std::floor((second.point.x - revealed_map.info.origin.position.x) /
+                 revealed_map.info.resolution));
+  const auto second_y = static_cast<std::int64_t>(
+      std::floor((second.point.y - revealed_map.info.origin.position.y) /
+                 revealed_map.info.resolution));
+  ASSERT_GE(second_x, 0);
+  ASSERT_GE(second_y, 0);
+  ASSERT_LT(second_x, static_cast<std::int64_t>(revealed_map.info.width));
+  ASSERT_LT(second_y, static_cast<std::int64_t>(revealed_map.info.height));
+  EXPECT_EQ(revealed_map.data[static_cast<std::size_t>(second_y) *
+                                  revealed_map.info.width +
+                              static_cast<std::size_t>(second_x)],
+            0);
+
+  odometry_publisher_->publish(
+      Odometry(second.point.x, second.point.y, second.yaw_rad));
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() >= 3U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kTaskFrontier;
+  }));
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+}
+
+TEST_F(ExplorationNodeTest,
+       ApproachRollingReplanRetainsTypedGoalAndExactCancelAuthority) {
+  Start(FakePlannerServer::Mode::kRollingReachable);
+  PublishAllInputs(StartTask("approach-rolling"), OutsideApproachMap(false),
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto original_target =
+      ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  const auto original_request =
+      ExplorationNodeTestPeer::ActiveRequestId(*explorer_);
+  ASSERT_TRUE(original_target);
+  ASSERT_TRUE(original_request);
+  const auto original_reference = References().front();
+  ASSERT_FALSE(original_reference.trajectory.points.empty());
+  const auto endpoint = original_reference.trajectory.points.back()
+                            .transforms.front().translation;
+  const auto goals_before = server_->Goals().size();
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+
+  odometry_publisher_->publish(Odometry(endpoint.x, endpoint.y));
+  ASSERT_TRUE(WaitFor([this, goals_before] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::REPLANNING &&
+           server_->Goals().size() > goals_before;
+  }));
+  EXPECT_EQ(ExplorationNodeTestPeer::ActiveGoalKind(*explorer_),
+            lunar::pure_exploration::GoalKind::kBoundaryApproach);
+  EXPECT_EQ(ExplorationNodeTestPeer::ActiveRequestId(*explorer_),
+            original_request);
+  const auto retained_target =
+      ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  ASSERT_TRUE(retained_target);
+  EXPECT_DOUBLE_EQ(retained_target->x, original_target->x);
+  EXPECT_DOUBLE_EQ(retained_target->y, original_target->y);
+  EXPECT_DOUBLE_EQ(retained_target->yaw, original_target->yaw);
+  ASSERT_TRUE(WaitFor([this, &original_reference] {
+    return ExecutionCancels() ==
+           std::vector<std::string>{original_reference.plan_id};
+  }));
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+
+  const auto replan_request = server_->LatestRequestId();
+  ASSERT_TRUE(WaitFor([this, &replan_request] {
+    return server_->HasHandle(replan_request);
+  }));
+  server_->Finish(replan_request, FakePlannerServer::Mode::kReachable);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return ReferenceCount() == 2U && status &&
+           status->state == Status::EXECUTING;
+  }));
+  EXPECT_EQ(ExplorationNodeTestPeer::ActiveGoalKind(*explorer_),
+            lunar::pure_exploration::GoalKind::kBoundaryApproach);
+  EXPECT_EQ(ExplorationNodeTestPeer::ActiveRequestId(*explorer_),
+            original_request);
+}
+
+TEST_F(ExplorationNodeTest,
+       ExhaustedApproachStuckRetriesFreezeWithoutFailureMemoryOrBusyLoop) {
+  auto now = std::make_shared<std::chrono::steady_clock::time_point>();
+  parameters_.steady_now = [now] { return *now; };
+  parameters_.maximum_replans = 0U;
+  Start(FakePlannerServer::Mode::kReachable);
+  const auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-stalled"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto plan_id = References().front().plan_id;
+  const auto goals_before = server_->Goals().size();
+
+  *now += 31s;
+  explorer_->PollExecution();
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "APPROACH_STALLED";
+  }));
+  const auto status = LatestStatus();
+  ASSERT_TRUE(status);
+  EXPECT_NE(status->state, Status::COMPLETED);
+  EXPECT_NE(status->state, Status::ERROR);
+  EXPECT_EQ(status->completed_goal_count, 0U);
+  EXPECT_EQ(status->failed_candidate_count, 0U);
+  EXPECT_FALSE(ExplorationNodeTestPeer::ActiveTarget(*explorer_));
+  ASSERT_TRUE(WaitFor([this, &plan_id] {
+    return ExecutionCancels() == std::vector<std::string>{plan_id};
+  }));
+
+  map_publisher_->publish(map);
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(server_->Goals().size(), goals_before);
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->reason_code, "APPROACH_STALLED");
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+}
+
+TEST_P(ApproachControlTest,
+       PauseResumeCancelAndReplacementStartPreserveEpochAndCancelRules) {
+  Start(FakePlannerServer::Mode::kReachable);
+  const auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-control"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto plan_id = References().front().plan_id;
+  const auto goals_before = server_->Goals().size();
+  const auto last_request_before = server_->LatestRequestId();
+
+  if (GetParam() == ApproachControl::kPauseResume) {
+    Task pause;
+    pause.command = Task::PAUSE;
+    task_publisher_->publish(pause);
+    ASSERT_TRUE(WaitFor([this] {
+      const auto status = LatestStatus();
+      return status && status->state == Status::PAUSED;
+    }));
+    EXPECT_FALSE(ExplorationNodeTestPeer::ActiveTarget(*explorer_));
+    Task resume;
+    resume.command = Task::RESUME;
+    task_publisher_->publish(resume);
+    ASSERT_TRUE(WaitFor([this] {
+      return ReferenceCount() > 1U &&
+             ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+                 lunar::pure_exploration::GoalKind::kBoundaryApproach;
+    }));
+    EXPECT_EQ(LatestStatus()->task_id, "approach-control");
+  } else if (GetParam() == ApproachControl::kCancel) {
+    Task cancel;
+    cancel.command = Task::CANCEL;
+    task_publisher_->publish(cancel);
+    ASSERT_TRUE(WaitFor([this] {
+      const auto status = LatestStatus();
+      return status && status->state == Status::IDLE;
+    }));
+    EXPECT_FALSE(ExplorationNodeTestPeer::ActiveTarget(*explorer_));
+    map_publisher_->publish(map);
+    std::this_thread::sleep_for(100ms);
+    EXPECT_EQ(server_->Goals().size(), goals_before);
+  } else {
+    task_publisher_->publish(StartTask("approach-control-new"));
+    ASSERT_TRUE(WaitFor([this] {
+      const auto status = LatestStatus();
+      return ReferenceCount() > 1U && status &&
+             status->task_id == "approach-control-new" &&
+             ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+                 lunar::pure_exploration::GoalKind::kBoundaryApproach;
+    }));
+  }
+
+  ASSERT_TRUE(WaitFor([this, &plan_id] {
+    return ExecutionCancels() == std::vector<std::string>{plan_id};
+  }));
+  if (GetParam() != ApproachControl::kCancel) {
+    EXPECT_GT(server_->Goals().size(), goals_before);
+    EXPECT_NE(server_->LatestRequestId(), last_request_before);
+  }
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    BoundaryApproachControls, ApproachControlTest,
+    ::testing::Values(ApproachControl::kPauseResume,
+                      ApproachControl::kCancel,
+                      ApproachControl::kReplacementStart));
+
+TEST_F(ExplorationNodeTest,
+       ExhaustedApproachCandidatesWaitWithoutCompletionOrBusyResubmit) {
+  Start(FakePlannerServer::Mode::kExhaustive);
+  const auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("outside-no-path"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status &&
+           status->reason_code == "APPROACH_NO_REACHABLE_TARGET";
+  }));
+  const auto before = server_->Goals().size();
+  ASSERT_GT(before, 0U);
+  const auto status = LatestStatus();
+  ASSERT_TRUE(status);
+  EXPECT_NE(status->state, Status::COMPLETED);
+
+  map_publisher_->publish(map);
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(server_->Goals().size(), before);
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_NE(LatestStatus()->state, Status::COMPLETED);
+  EXPECT_EQ(LatestStatus()->reason_code,
+            "APPROACH_NO_REACHABLE_TARGET");
 }
 
 TEST_F(ExplorationNodeTest,

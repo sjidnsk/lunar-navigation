@@ -250,7 +250,9 @@ TEST(MessageConversion, MapsTypedStatusExhaustivelyAndNeverPromotesFailureRefere
       {PlanningStatus::kPlannerError, Action::Result::NUMERICAL_FAILURE, "PLANNER_ERROR"},
   };
   for (const auto& expected : cases) {
-    const auto result = ConvertResult(Result(expected.status, WheelReference()), 42U);
+    auto source = Result(expected.status, WheelReference());
+    source.reason_code.clear();
+    const auto result = ConvertResult(source, 42U);
     EXPECT_EQ(result.planning_outcome, expected.outcome);
     EXPECT_EQ(result.execution_directive, Action::Result::NO_SAFE_REFERENCE);
     EXPECT_FALSE(result.has_reference);
@@ -258,6 +260,50 @@ TEST(MessageConversion, MapsTypedStatusExhaustivelyAndNeverPromotesFailureRefere
     EXPECT_EQ(result.mission_revision, 42U);
     EXPECT_NE(result.planning_outcome, Action::Result::STALE_INPUT);
     EXPECT_DOUBLE_EQ(result.diagnostics.elapsed_s, 2.75);
+  }
+}
+
+TEST(MessageConversion, PreservesDetailedGridV1FailureReasons) {
+  struct Case final {
+    PlanningStatus status;
+    const char* source_reason;
+    std::uint8_t outcome;
+  };
+  const Case cases[] = {
+      {PlanningStatus::kNoPath, "GOAL_NOT_FREE",
+       Action::Result::GOAL_INFEASIBLE},
+      {PlanningStatus::kNoPath, "GLOBAL_NO_PATH",
+       Action::Result::GOAL_INFEASIBLE},
+      {PlanningStatus::kNoPath, "LOCAL_NO_CANDIDATE",
+       Action::Result::GOAL_INFEASIBLE},
+      {PlanningStatus::kNoPath, "LOCAL_NO_PATH",
+       Action::Result::GOAL_INFEASIBLE},
+      {PlanningStatus::kNoPath, "STALE_PATH_INVALIDATED",
+       Action::Result::ACTIVE_REFERENCE_INVALIDATED},
+      {PlanningStatus::kNoPath, "START_NOT_FREE",
+       Action::Result::INVALID_REQUEST},
+      {PlanningStatus::kInvalidInput, "MAP_RESOLUTION_MISMATCH",
+       Action::Result::INVALID_REQUEST},
+      {PlanningStatus::kPlannerError, "POSTCHECK_FAILED",
+       Action::Result::NUMERICAL_FAILURE},
+      {PlanningStatus::kPlannerError, "PLANNER_ERROR",
+       Action::Result::NUMERICAL_FAILURE},
+  };
+  for (const auto& expected : cases) {
+    auto source = Result(expected.status, WheelReference());
+    source.reason_code = expected.source_reason;
+
+    const auto result = ConvertResult(source, 42U);
+
+    EXPECT_EQ(result.planning_outcome, expected.outcome)
+        << expected.source_reason;
+    EXPECT_EQ(result.reason_code, expected.source_reason);
+    EXPECT_EQ(result.execution_directive, Action::Result::NO_SAFE_REFERENCE);
+    EXPECT_FALSE(result.has_reference);
+    EXPECT_TRUE(result.reference.plan_id.empty());
+    EXPECT_TRUE(result.reference.path_preview.poses.empty());
+    EXPECT_TRUE(result.reference.trajectory.points.empty());
+    EXPECT_TRUE(result.reference.hops.empty());
   }
 }
 
@@ -287,11 +333,11 @@ TEST(MessageConversion, AddsWarningsAtExactTargetAndSlaMilestones) {
 TEST(MessageConversion, MapsAvailableSearchMetricsWithoutInventingACost) {
   auto with_cost = Result(PlanningStatus::kSuccess, WheelReference());
   with_cost.expanded_states = 37U;
-  with_cost.best_cost = 12.5;
+  with_cost.best_cost = 23.5;
   const auto converted_with_cost = ConvertResult(with_cost, 1U);
   EXPECT_EQ(converted_with_cost.diagnostics.expanded_states, 37U);
   EXPECT_TRUE(converted_with_cost.diagnostics.has_best_cost);
-  EXPECT_DOUBLE_EQ(converted_with_cost.diagnostics.best_cost, 12.5);
+  EXPECT_DOUBLE_EQ(converted_with_cost.diagnostics.best_cost, 23.5);
 
   auto without_cost = Result(PlanningStatus::kNoPath, std::nullopt);
   without_cost.expanded_states = 9U;

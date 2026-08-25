@@ -215,7 +215,8 @@ AdapterResult<lunar::pure_planning::GridMap> AdaptLocal(
 }
 
 AdapterResult<lunar::pure_planning::MinimalWorldSnapshot> AdaptSnapshot(
-    const lunar::pure_planning::EnvironmentMode mode, const InputSnapshot& input) {
+    const lunar::pure_planning::EnvironmentMode mode, const InputSnapshot& input,
+    const bool require_surface_global_map) {
   if (!input.local_map || !input.odometry || !input.map_from_odom.has_value()) {
     return Invalid<lunar::pure_planning::MinimalWorldSnapshot>();
   }
@@ -236,14 +237,16 @@ AdapterResult<lunar::pure_planning::MinimalWorldSnapshot> AdaptSnapshot(
       .tf_sequence = input.tf_sequence,
   };
   if (mode == lunar::pure_planning::EnvironmentMode::kLunarSurface) {
-    if (!input.global_map) {
+    if (!input.global_map && require_surface_global_map) {
       return Invalid<lunar::pure_planning::MinimalWorldSnapshot>();
     }
-    const auto global = AdaptGlobal(*input.global_map);
-    if (!global.value.has_value()) {
-      return Invalid<lunar::pure_planning::MinimalWorldSnapshot>();
+    if (input.global_map) {
+      const auto global = AdaptGlobal(*input.global_map);
+      if (!global.value.has_value()) {
+        return Invalid<lunar::pure_planning::MinimalWorldSnapshot>();
+      }
+      result.global_map = std::move(*global.value);
     }
-    result.global_map = std::move(*global.value);
   } else if (mode != lunar::pure_planning::EnvironmentMode::kLavaTube) {
     return Invalid<lunar::pure_planning::MinimalWorldSnapshot>();
   }

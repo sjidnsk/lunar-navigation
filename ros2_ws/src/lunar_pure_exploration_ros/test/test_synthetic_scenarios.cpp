@@ -164,6 +164,7 @@ struct ResponseSpec final {
   std::optional<std::pair<double, double>> executable_endpoint{};
   std::optional<std::string> expected_candidate_key{};
   std::optional<std::string> expected_request_id{};
+  std::vector<std::pair<double, double>> executable_trajectory{};
 };
 
 struct ScriptedCell final {
@@ -364,15 +365,26 @@ public:
       preview.pose.orientation =
           YawQuaternion(handle->get_goal()->goal.yaw_rad);
       result->reference.path_preview.poses.push_back(std::move(preview));
-      auto &point = result->reference.trajectory.points.emplace_back();
-      auto &transform = point.transforms.emplace_back();
-      transform.translation.x = response.executable_endpoint
-                                    ? response.executable_endpoint->first
-                                    : handle->get_goal()->goal.point.x;
-      transform.translation.y = response.executable_endpoint
-                                    ? response.executable_endpoint->second
-                                    : handle->get_goal()->goal.point.y;
-      transform.rotation.w = 1.0;
+      const auto add_trajectory_point = [&result](const double x,
+                                                  const double y) {
+        auto &point = result->reference.trajectory.points.emplace_back();
+        auto &transform = point.transforms.emplace_back();
+        transform.translation.x = x;
+        transform.translation.y = y;
+        transform.rotation.w = 1.0;
+      };
+      if (response.executable_trajectory.empty()) {
+        add_trajectory_point(response.executable_endpoint
+                                 ? response.executable_endpoint->first
+                                 : handle->get_goal()->goal.point.x,
+                             response.executable_endpoint
+                                 ? response.executable_endpoint->second
+                                 : handle->get_goal()->goal.point.y);
+      } else {
+        for (const auto &[x, y] : response.executable_trajectory) {
+          add_trajectory_point(x, y);
+        }
+      }
       scripts_->UpdateRecord(record_index, "SUCCESS");
       handle->succeed(result);
       return;
@@ -452,6 +464,24 @@ nav_msgs::msg::OccupancyGrid ExplorationMap() {
   map.data.assign(400U, 0);
   for (std::uint32_t y = 0U; y < map.info.height; ++y) {
     for (std::uint32_t x = 10U; x < map.info.width; ++x) {
+      map.data[static_cast<std::size_t>(y) * map.info.width + x] = -1;
+    }
+  }
+  return map;
+}
+
+nav_msgs::msg::OccupancyGrid LongRangeExplorationMap() {
+  nav_msgs::msg::OccupancyGrid map;
+  map.header.frame_id = "map";
+  map.header.stamp.sec = 1;
+  map.info.width = 60U;
+  map.info.height = 20U;
+  map.info.resolution = 0.5F;
+  map.info.origin.orientation.w = 1.0;
+  map.data.assign(static_cast<std::size_t>(map.info.width) * map.info.height,
+                  0);
+  for (std::uint32_t y = 0U; y < map.info.height; ++y) {
+    for (std::uint32_t x = 40U; x < map.info.width; ++x) {
       map.data[static_cast<std::size_t>(y) * map.info.width + x] = -1;
     }
   }
@@ -552,9 +582,12 @@ CellKey ParseCell(const std::string &value) {
 }
 
 std::shared_ptr<GoalCellScripts>
-LoadCanonicalScripts(const CanonicalFixture &fixture) {
+LoadCanonicalScripts(
+    const CanonicalFixture &fixture,
+    const std::vector<std::pair<double, double>> &full_trajectory = {}) {
   auto scripts = std::make_shared<GoalCellScripts>();
   scripts->EnableStrict();
+  bool full_trajectory_applied = false;
   for (const auto row : fixture.response_table) {
     const CellKey cell = ParseCell(row.first.as<std::string>());
     std::vector<ResponseSpec> responses;
@@ -570,18 +603,30 @@ LoadCanonicalScripts(const CanonicalFixture &fixture) {
                                .expected_request_id = request_id});
         }
       } else {
+        const auto response_kind = ParseResponseKind(kind);
+        if (!full_trajectory.empty() &&
+            response_kind == ResponseKind::kSuccess &&
+            full_trajectory_applied) {
+          continue;
+        }
         std::optional<std::pair<double, double>> endpoint;
         if (response["executable_endpoint_xy"]) {
           endpoint =
               std::pair{response["executable_endpoint_xy"][0].as<double>(),
                         response["executable_endpoint_xy"][1].as<double>()};
         }
-        responses.push_back(
-            {.kind = ParseResponseKind(kind),
-             .executable_endpoint = endpoint,
-             .expected_candidate_key =
-                 response["candidate_key"].as<std::string>(),
-             .expected_request_id = response["request_id"].as<std::string>()});
+        ResponseSpec spec{
+            .kind = response_kind,
+            .executable_endpoint = endpoint,
+            .expected_candidate_key =
+                response["candidate_key"].as<std::string>(),
+            .expected_request_id = response["request_id"].as<std::string>()};
+        if (!full_trajectory.empty() &&
+            response_kind == ResponseKind::kSuccess) {
+          spec.executable_trajectory = full_trajectory;
+          full_trajectory_applied = true;
+        }
+        responses.push_back(std::move(spec));
       }
     }
     scripts->SetCanonical(cell, std::move(responses));
@@ -743,7 +788,8 @@ std::vector<lunar::pure_exploration::CandidateView> ControlledCandidates(
 ExplorationNodeParameters ScenarioParameters(
     const std::string &prefix,
     const std::shared_ptr<std::chrono::steady_clock::time_point> &now,
-    std::shared_ptr<ExplorationPipelineSeams> seams = {}) {
+    std::shared_ptr<ExplorationPipelineSeams> seams = {},
+    const bool stop_before_planning = false) {
   const auto wheel = LoadPlatformConfig(
       std::filesystem::path{ament_index_cpp::get_package_share_directory(
           "lunar_pure_planner_ros")} /
@@ -766,6 +812,10 @@ ExplorationNodeParameters ScenarioParameters(
       .maximum_executable_path_points = 64U,
       .maximum_replans = 2U,
       .goal_yaw_tolerance_rad = std::numbers::pi / 16.0,
+      // Scripted candidates are the test input under evaluation.  The
+      // production prefilter has its own node-level regression coverage.
+      .filter_global_goal_cell = false,
+      .stop_before_planning = stop_before_planning,
       .planner_result_timeout = 2s,
       .global_map_topic = prefix + "/global_map",
       .odometry_topic = prefix + "/odometry",
@@ -787,13 +837,15 @@ class ScenarioHarness final {
 public:
   explicit ScenarioHarness(std::shared_ptr<GoalCellScripts> scripts,
                            std::shared_ptr<ExplorationPipelineSeams> seams = {},
-                           const double resolution = 0.5)
+                           const double resolution = 0.5,
+                           const bool stop_before_planning = false)
       : started_(std::chrono::steady_clock::now()),
         scripts_(std::move(scripts)),
         now_(std::make_shared<std::chrono::steady_clock::time_point>()) {
     const auto suffix = sequence_.fetch_add(1U);
     prefix_ = "/task15_scenario_" + std::to_string(suffix);
-    parameters_ = ScenarioParameters(prefix_, now_, std::move(seams));
+    parameters_ = ScenarioParameters(prefix_, now_, std::move(seams),
+                                     stop_before_planning);
     server_node_ = std::make_shared<rclcpp::Node>("task15_scenario_server_" +
                                                   std::to_string(suffix));
     io_node_ = std::make_shared<rclcpp::Node>("task15_scenario_io_" +
@@ -823,7 +875,7 @@ public:
           execution_cancels_.push_back(value->data);
         });
     status_subscription_ = io_node_->create_subscription<Status>(
-        parameters_.status_topic, rclcpp::QoS{1}.reliable().transient_local(),
+        parameters_.status_topic, rclcpp::QoS{10}.reliable().transient_local(),
         [this](Status::SharedPtr value) {
           std::scoped_lock lock{messages_mutex_};
           statuses_.push_back(*value);
@@ -853,7 +905,8 @@ public:
                  map_publisher_->get_subscription_count() == 1U &&
                  odometry_publisher_->get_subscription_count() == 1U &&
                  tf_publisher_->get_subscription_count() == 1U;
-        })) {
+        }) ||
+        !WaitFor([this] { return LatestStatus().has_value(); })) {
       throw std::runtime_error{"scenario ROS graph did not become ready"};
     }
   }
@@ -882,6 +935,9 @@ public:
     odometry_publisher_->publish(std::move(odometry));
   }
   void PublishTask(Task task) { task_publisher_->publish(std::move(task)); }
+  void AdvanceSteadyClock(const std::chrono::steady_clock::duration duration) {
+    *now_ += duration;
+  }
   void PollExecution() { explorer_->PollExecution(); }
   bool HasActiveGoal() const {
     return ExplorationNodeTestPeer::ActiveTarget(*explorer_).has_value();
@@ -1279,9 +1335,15 @@ TEST(SyntheticScenarioRunnerTest,
 }
 
 TEST(SyntheticScenarioRunnerTest,
-     MapContentGrowthReevaluatesFailedCellAndTwoSegmentsKeepOneCommit) {
+     MapContentGrowthReevaluatesFailedCellAndExecutesOneCompleteTrajectory) {
   const auto fixture = LoadFixture("map_growth");
-  const auto scripts = LoadCanonicalScripts(fixture);
+  ASSERT_EQ(fixture.execution_odometries.size(), 2U);
+  std::vector<std::pair<double, double>> full_trajectory;
+  for (const auto &odometry : fixture.execution_odometries) {
+    full_trajectory.emplace_back(odometry.pose.pose.position.x,
+                                 odometry.pose.pose.position.y);
+  }
+  const auto scripts = LoadCanonicalScripts(fixture, full_trajectory);
   ScenarioHarness scenario(scripts, {}, fixture.initial_map.info.resolution);
   scenario.PublishInputs(fixture.task, fixture.initial_map, fixture.odometry);
 
@@ -1301,45 +1363,39 @@ TEST(SyntheticScenarioRunnerTest,
   })) << scenario.Trace();
   const auto committed = scenario.LatestCurrentGoal();
   ASSERT_TRUE(committed.has_value()) << scenario.Trace();
-  const auto first_reference = scenario.References().front();
-  ASSERT_EQ(fixture.execution_odometries.size(), 2U) << scenario.Trace();
   scenario.PublishOdometry(fixture.execution_odometries.front());
   ASSERT_TRUE(WaitFor([&scenario] {
     scenario.PollExecution();
     const auto status = scenario.LatestStatus();
-    return scenario.References().size() == 2U && status &&
+    return scenario.References().size() == 1U && status &&
            status->state == Status::EXECUTING;
   })) << scenario.Trace();
   const auto retained = scenario.LatestCurrentGoal();
   ASSERT_TRUE(retained.has_value()) << scenario.Trace();
   EXPECT_EQ(PoseKeyString(retained->pose), PoseKeyString(committed->pose))
       << scenario.Trace();
-  ASSERT_EQ(scenario.ExecutionCancels().size(), 1U) << scenario.Trace();
-  EXPECT_EQ(scenario.ExecutionCancels().front(), first_reference.plan_id)
-      << scenario.Trace();
+  EXPECT_TRUE(scenario.ExecutionCancels().empty()) << scenario.Trace();
   const auto before_arrival = scenario.LatestStatus();
   ASSERT_TRUE(before_arrival.has_value()) << scenario.Trace();
   EXPECT_TRUE(scenario.HasActiveGoal()) << scenario.Trace();
   EXPECT_EQ(before_arrival->completed_goal_count, 0U) << scenario.Trace();
 
-  const auto two_segment = fixture.expected["two_segment"];
-  const auto endpoint_cells =
-      two_segment["endpoint_cells"].as<std::vector<std::string>>();
   const auto references = scenario.References();
-  ASSERT_EQ(references.size(), endpoint_cells.size()) << scenario.Trace();
-  for (std::size_t index = 0U; index < references.size(); ++index) {
-    ASSERT_FALSE(references[index].trajectory.points.empty())
-        << scenario.Trace();
+  ASSERT_EQ(references.size(), 1U) << scenario.Trace();
+  ASSERT_EQ(references.front().trajectory.points.size(), full_trajectory.size())
+      << scenario.Trace();
+  for (std::size_t index = 0U; index < full_trajectory.size(); ++index) {
     const auto &transforms =
-        references[index].trajectory.points.back().transforms;
+        references.front().trajectory.points[index].transforms;
     ASSERT_FALSE(transforms.empty()) << scenario.Trace();
     const auto &translation = transforms.back().translation;
-    EXPECT_EQ(CellString(WorldCell(translation.x, translation.y,
-                                   fixture.initial_map.info.resolution)),
-              endpoint_cells[index])
+    EXPECT_DOUBLE_EQ(translation.x, full_trajectory[index].first)
+        << scenario.Trace();
+    EXPECT_DOUBLE_EQ(translation.y, full_trajectory[index].second)
         << scenario.Trace();
   }
   const auto &final_odometry = fixture.execution_odometries.back();
+  const auto two_segment = fixture.expected["two_segment"];
   EXPECT_EQ(PoseKeyString(final_odometry.pose.pose),
             two_segment["committed_candidate_key"].as<std::string>())
       << scenario.Trace();
@@ -1370,7 +1426,153 @@ TEST(SyntheticScenarioRunnerTest,
       << scenario.Trace();
   EXPECT_EQ(arrived_status->replan_count, 0U) << scenario.Trace();
   EXPECT_EQ(scenario.StuckRetryCount(), 0U) << scenario.Trace();
-  ExpectCanonicalTrace(scenario, fixture);
+  EXPECT_DOUBLE_EQ(arrived_status->coverage_ratio,
+                   fixture.expected["coverage_ratio"].as<double>())
+      << scenario.Trace();
+  EXPECT_EQ(
+      scenario.StatusTransitions(),
+      (std::vector<std::uint8_t>{Status::IDLE, Status::WAITING_FOR_INPUT,
+                                 Status::SELECTING_FRONTIER, Status::PLANNING,
+                                 Status::EXECUTING,
+                                 Status::SELECTING_FRONTIER}))
+      << scenario.Trace();
+  EXPECT_EQ(scenario.References().size(), 1U) << scenario.Trace();
+  EXPECT_TRUE(scenario.ExecutionCancels().empty()) << scenario.Trace();
+  const auto records = scripts->Records();
+  const auto expected_requests = fixture.expected["ordered_requests"];
+  ASSERT_EQ(records.size(), expected_requests.size() - 1U) << scenario.Trace();
+  for (std::size_t index = 0U; index < records.size(); ++index) {
+    EXPECT_EQ(records[index].request_id,
+              expected_requests[index]["request_id"].as<std::string>())
+        << scenario.Trace();
+    EXPECT_EQ(records[index].candidate_key,
+              expected_requests[index]["candidate_key"].as<std::string>())
+        << scenario.Trace();
+    EXPECT_EQ(CellString(records[index].goal_cell),
+              expected_requests[index]["goal_cell"].as<std::string>())
+        << scenario.Trace();
+    EXPECT_EQ(records[index].response,
+              expected_requests[index]["response_kind"].as<std::string>())
+        << scenario.Trace();
+  }
+  EXPECT_EQ(scripts->Remaining(), 0U) << scenario.Trace();
+  EXPECT_TRUE(scripts->Error().empty()) << scenario.Trace();
+  EXPECT_EQ(StableHash(NormalizedTrace(scenario)),
+            "fnv1a64:a8f59de91b0ef6b9")
+      << scenario.Trace();
+  scenario.ExpectWithinDeadline();
+}
+
+TEST(SyntheticScenarioRunnerTest,
+     FrontierGuidesOneCompleteLocalTrajectoryThenRefreshesFromLatestMap) {
+  const auto scripts = std::make_shared<GoalCellScripts>();
+  ResponseSpec first_segment{.kind = ResponseKind::kSuccess};
+  first_segment.executable_trajectory = {
+      {4.0, 2.0}, {7.0, 2.0}, {10.0, 2.0}};
+  scripts->Set({39, 4}, "far-frontier", {first_segment});
+  auto pipeline = std::make_shared<ExplorationPipelineSeams>();
+  pipeline->generate_candidates =
+      [](const lunar::pure_exploration::TaskRaster &,
+         std::span<const lunar::pure_exploration::FrontierCluster> frontiers) {
+        return frontiers.empty()
+                   ? std::vector<lunar::pure_exploration::CandidateView>{}
+                   : ControlledCandidates(frontiers,
+                                          {{19.5, 2.0, 0.0}});
+      };
+  pipeline->evaluate_gain =
+      [](const lunar::pure_exploration::TaskRaster &,
+         const lunar::pure_exploration::CandidateView &) { return 1.0; };
+  ScenarioHarness scenario(scripts, std::move(pipeline), 0.5, true);
+  auto map = LongRangeExplorationMap();
+  scenario.PublishInputs(
+      StartTask("frontier-guidance",
+                {{0.0F, 0.0F}, {30.0F, 0.0F},
+                 {30.0F, 10.0F}, {0.0F, 10.0F}}),
+      map, Odometry());
+
+  ASSERT_TRUE(WaitFor([&scenario] {
+    const auto status = scenario.LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  })) << scenario.Trace();
+  for (const double x : {2.01, 2.02, 2.03}) {
+    const auto status_count = scenario.StatusCount();
+    scenario.PublishOdometry(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([&scenario, status_count] {
+      return scenario.StatusCount() > status_count;
+    })) << scenario.Trace();
+  }
+  ASSERT_TRUE(WaitFor([&scenario] {
+    const auto status = scenario.LatestStatus();
+    return scenario.References().size() == 1U && status &&
+           status->state == Status::EXECUTING;
+  })) << scenario.Trace();
+
+  const auto reference = scenario.References().front();
+  ASSERT_EQ(reference.path_preview.poses.size(), 1U) << scenario.Trace();
+  EXPECT_DOUBLE_EQ(reference.path_preview.poses.front().pose.position.x, 19.5)
+      << scenario.Trace();
+  ASSERT_EQ(reference.trajectory.points.size(), 3U) << scenario.Trace();
+  for (const double x : {4.0, 7.0}) {
+    const auto status_count = scenario.StatusCount();
+    scenario.PublishOdometry(Odometry(x, 2.0));
+    ASSERT_TRUE(WaitFor([&scenario, status_count] {
+      return scenario.StatusCount() > status_count;
+    })) << scenario.Trace();
+    scenario.PollExecution();
+    EXPECT_TRUE(scenario.ExecutionCancels().empty()) << scenario.Trace();
+    EXPECT_EQ(scenario.References().size(), 1U) << scenario.Trace();
+  }
+
+  auto moving_at_endpoint = Odometry(10.0, 2.0);
+  moving_at_endpoint.twist.twist.linear.x = 0.2;
+  scenario.PublishOdometry(moving_at_endpoint);
+  ASSERT_TRUE(WaitFor([&scenario] {
+    scenario.PollExecution();
+    const auto status = scenario.LatestStatus();
+    return status && status->state == Status::REPLANNING &&
+           status->reason_code == "WAITING_FOR_STOP" &&
+           scenario.ExecutionCancels().size() == 1U;
+  })) << scenario.Trace();
+  const auto waiting = scenario.LatestStatus();
+  ASSERT_TRUE(waiting.has_value()) << scenario.Trace();
+  EXPECT_EQ(waiting->completed_goal_count, 0U) << scenario.Trace();
+  EXPECT_EQ(scenario.ExecutionCancels().front(), reference.plan_id)
+      << scenario.Trace();
+
+  std::fill(map.data.begin(), map.data.end(), 0);
+  ++map.header.stamp.sec;
+  const auto status_before_refresh = scenario.StatusCount();
+  scenario.PublishMap(map);
+  ASSERT_TRUE(WaitFor([&scenario, status_before_refresh] {
+    return scenario.StatusCount() > status_before_refresh;
+  })) << scenario.Trace();
+  for (const double y : {2.01, 2.02, 2.03}) {
+    const auto status_count = scenario.StatusCount();
+    scenario.PublishOdometry(Odometry(10.0, y));
+    ASSERT_TRUE(WaitFor([&scenario, status_count] {
+      return scenario.StatusCount() > status_count;
+    })) << scenario.Trace();
+  }
+
+  ASSERT_TRUE(WaitFor([&scenario] {
+    const auto status = scenario.LatestStatus();
+    return status && status->state == Status::COMPLETED &&
+           status->reason_code == "COMPLETED_NO_REACHABLE_FRONTIER";
+  })) << scenario.Trace();
+  const auto completed = scenario.LatestStatus();
+  ASSERT_TRUE(completed.has_value()) << scenario.Trace();
+  EXPECT_DOUBLE_EQ(completed->coverage_ratio, 1.0) << scenario.Trace();
+  EXPECT_EQ(completed->completed_goal_count, 0U) << scenario.Trace();
+  EXPECT_EQ(completed->failed_candidate_count, 0U) << scenario.Trace();
+  EXPECT_FALSE(scenario.HasActiveGoal()) << scenario.Trace();
+  EXPECT_EQ(scenario.References().size(), 1U) << scenario.Trace();
+  EXPECT_EQ(scenario.ExecutionCancels(),
+            std::vector<std::string>{reference.plan_id})
+      << scenario.Trace();
+  EXPECT_EQ(scripts->Records().size(), 1U) << scenario.Trace();
+  EXPECT_EQ(scripts->Remaining(), 0U) << scenario.Trace();
+  EXPECT_TRUE(scripts->Error().empty()) << scenario.Trace();
+  scenario.ExpectWithinDeadline();
 }
 
 TEST(SyntheticScenarioRunnerTest,
@@ -1484,7 +1686,7 @@ INSTANTIATE_TEST_SUITE_P(StampVersionCovariance, MetadataInvariantScenarioTest,
                                            MetadataMutation::kCovariance));
 
 TEST(SyntheticScenarioRunnerTest,
-     ExecutionTimeoutCannotCompleteAndRetriesTheSameCommittedGoal) {
+     FreshBatchTimeoutCannotCompleteAndRetriesTheCandidate) {
   const auto scripts = std::make_shared<GoalCellScripts>();
   scripts->Set({9, 4}, "timeout-retry",
                {{ResponseKind::kSuccess, std::pair{3.5, 2.0}},
@@ -1502,6 +1704,17 @@ TEST(SyntheticScenarioRunnerTest,
   scenario.PublishOdometry(Odometry(3.5, 2.0, 0.0));
   ASSERT_TRUE(WaitFor([&scenario, scripts] {
     scenario.PollExecution();
+    return scripts->Records().size() >= 2U;
+  })) << scenario.Trace();
+  const auto after_timeout = scenario.LatestStatus();
+  ASSERT_TRUE(after_timeout.has_value()) << scenario.Trace();
+  EXPECT_EQ(after_timeout->state, Status::SELECTING_FRONTIER)
+      << scenario.Trace();
+  EXPECT_EQ(after_timeout->completed_goal_count, 0U) << scenario.Trace();
+  EXPECT_FALSE(scenario.HasActiveGoal()) << scenario.Trace();
+  scenario.AdvanceSteadyClock(100ms);
+  ASSERT_TRUE(WaitFor([&scenario, scripts] {
+    scenario.PollExecution();
     return scripts->Records().size() >= 3U;
   })) << scenario.Trace();
   const auto records = scripts->Records();
@@ -1514,7 +1727,8 @@ TEST(SyntheticScenarioRunnerTest,
   EXPECT_NE(records[1].request_id, records[2].request_id) << scenario.Trace();
   const auto before_success = scenario.LatestStatus();
   ASSERT_TRUE(before_success.has_value()) << scenario.Trace();
-  EXPECT_EQ(before_success->state, Status::REPLANNING) << scenario.Trace();
+  EXPECT_EQ(before_success->state, Status::SELECTING_FRONTIER)
+      << scenario.Trace();
   EXPECT_EQ(before_success->completed_goal_count, 0U) << scenario.Trace();
   EXPECT_EQ(scenario.References().size(), 1U) << scenario.Trace();
   ASSERT_TRUE(WaitFor([&scenario, &records] {

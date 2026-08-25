@@ -12,6 +12,7 @@ def generate_launch_description() -> LaunchDescription:
     package_share = get_package_share_directory("lunar_pure_planner_ros")
     params_file = LaunchConfiguration("params_file")
     platform_type = LaunchConfiguration("platform_type")
+    wheel_planner_mode = LaunchConfiguration("wheel_planner_mode")
     rolling_surface_enabled = LaunchConfiguration("rolling_surface_enabled")
 
     return LaunchDescription(
@@ -21,6 +22,9 @@ def generate_launch_description() -> LaunchDescription:
                 default_value=f"{package_share}/config/pure_planner.yaml",
             ),
             DeclareLaunchArgument("platform_type", default_value="wheel"),
+            DeclareLaunchArgument(
+                "wheel_planner_mode", default_value="legacy_certified"
+            ),
             DeclareLaunchArgument("rolling_surface_enabled", default_value="false"),
             Node(
                 package="lunar_pure_planner_ros",
@@ -31,6 +35,7 @@ def generate_launch_description() -> LaunchDescription:
                     params_file,
                     {
                         "platform_type": platform_type,
+                        "wheel_planner_mode": wheel_planner_mode,
                         "rolling_surface_enabled": rolling_surface_enabled,
                     },
                 ],

@@ -5,12 +5,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <memory>
 #include <string>
 #include <variant>
 #include <vector>
 
 #include "lunar_pure_planner_core/planning_timing.hpp"
 #include "lunar_pure_planner_core/search_control.hpp"
+#include "lunar_pure_planner_core/traversability_map.hpp"
 #include "lunar_pure_planner_core/types/goal.hpp"
 #include "lunar_pure_planner_core/types/motion_reference.hpp"
 #include "lunar_pure_planner_core/types/platform_capability.hpp"
@@ -29,6 +31,8 @@ struct AnytimePlannerConfig final {
   double platform_discretization_m{0.2};
   double capability_cost_scale{1.0};
   std::array<double, 5> cost_weights{1.0, 1.0, 1.0, 1.0, 1.0};
+  WheelPlannerMode wheel_planner_mode{WheelPlannerMode::kLegacyCertified};
+  double grid_v1_local_horizon_m{8.0};
   AnytimeSearchConfig search;
 };
 
@@ -40,6 +44,7 @@ struct MinimalWorldSnapshot final {
   std::uint64_t local_map_sequence{};
   std::uint64_t odometry_sequence{};
   std::uint64_t tf_sequence{};
+  std::shared_ptr<const TraversabilitySnapshot> traversability_snapshot;
 };
 
 struct LocalGoalSet final {
@@ -96,10 +101,52 @@ enum class PlanningStatus : std::uint8_t {
   kPlannerError,
 };
 
+struct GridV1Diagnostics final {
+  bool active{};
+  std::uint64_t global_input_sequence{};
+  std::uint64_t local_input_sequence{};
+  std::uint64_t odometry_input_sequence{};
+  std::uint64_t traversability_revision{};
+  std::uint64_t publish_check_revision{};
+  std::uint64_t profile_hash{};
+  double canonical_resolution_m{};
+  Vec3 map_origin_m;
+  std::size_t allocated_tiles{};
+  std::size_t estimated_map_bytes{};
+  std::size_t updated_cells{};
+  std::size_t dirty_tiles{};
+  std::size_t halo_recomputed_cells{};
+  std::size_t free_cells{};
+  std::size_t blocked_cells{};
+  std::size_t unknown_cells{};
+  std::size_t prior_conflicts{};
+  bool global_route_reused{};
+  std::uint64_t global_expanded_states{};
+  std::size_t global_open_peak{};
+  std::uint64_t local_expanded_states{};
+  std::size_t local_open_peak{};
+  std::size_t local_candidate_count{};
+  std::size_t local_attempt_count{};
+  std::size_t selected_candidate_index{};
+  std::size_t raw_path_points{};
+  std::size_t shortcut_path_points{};
+  std::size_t resampled_path_points{};
+  std::size_t final_trajectory_points{};
+  std::string direction;
+  double forward_cost{};
+  double reverse_cost{};
+  std::size_t final_supercover_cells{};
+  std::string postprocess_mode;
+  std::chrono::nanoseconds map_fusion_elapsed{};
+  std::chrono::nanoseconds traversability_elapsed{};
+  std::chrono::nanoseconds postprocess_elapsed{};
+};
+
 struct PlanningResult final {
   PlanningStatus status{PlanningStatus::kInvalidInput};
   std::string reason_code;
   std::optional<MotionReference> reference;
+  GlobalRoutePreview global_route_preview;
   PlannerCallTiming timing;
   std::uint64_t expanded_states{};
   std::optional<std::size_t> selected_goal_index;
@@ -110,6 +157,7 @@ struct PlanningResult final {
   bool local_projection_cache_hit{};
   bool goal_field_cache_hit{};
   std::optional<double> best_cost;
+  GridV1Diagnostics grid_v1;
 };
 
 }  // namespace lunar::pure_planning

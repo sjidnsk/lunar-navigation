@@ -127,6 +127,20 @@ class ManualClock final {
   };
 }
 
+[[nodiscard]] std::shared_ptr<const TraversabilitySnapshot> V1Snapshot(
+    const GridMap& global, const GridMap& local,
+    const RigidTransform& map_from_odom) {
+  PersistentTraversabilityMap map(TraversabilityProfile{
+      .global_occupancy_threshold = 50,
+      .local_occupancy_threshold = 0.5,
+      .maximum_slope_rad = 1.0,
+      .inflation_radius_m = 0.0,
+  });
+  EXPECT_TRUE(map.UpdateGlobal(global).accepted);
+  EXPECT_TRUE(map.UpdateLocal(local, map_from_odom, 1U).accepted);
+  return map.Capture();
+}
+
 [[nodiscard]] GlobalStageResult Route() {
   return GlobalStageResult{
       .route = GlobalRoute{
@@ -334,6 +348,54 @@ TEST(DualModePlanner, LunarSurfaceUsesOneGlobalAndOneLocalStage) {
   EXPECT_EQ(output.timing.global_elapsed, 20ms);
   EXPECT_EQ(output.timing.local_elapsed, 30ms);
   EXPECT_EQ(output.timing.total_elapsed, 50ms);
+}
+
+TEST(DualModePlanner,
+     GridTraversabilityV1MissingSnapshotFailsWithoutCallingLegacyBackends) {
+  CountingBackends backends;
+  PlanningRequest input =
+      Request(EnvironmentMode::kLunarSurface, backends.clock);
+  input.config.wheel_planner_mode = WheelPlannerMode::kGridTraversabilityV1;
+
+  const PlanningResult result = backends.planner.Plan(input);
+
+  EXPECT_EQ(result.status, PlanningStatus::kInvalidInput);
+  EXPECT_EQ(result.reason_code, "INVALID_INPUT");
+  EXPECT_EQ(backends.global_calls, 0U);
+  EXPECT_EQ(backends.local_calls, 0U);
+}
+
+TEST(DualModePlanner,
+     GridTraversabilityV1TransformsOdomStateAndNeverCallsLegacyBackends) {
+  CountingBackends backends;
+  PlanningRequest input =
+      Request(EnvironmentMode::kLunarSurface, backends.clock);
+  input.config.wheel_planner_mode = WheelPlannerMode::kGridTraversabilityV1;
+  input.config.grid_v1_local_horizon_m = 8.0;
+  input.world.map_from_odom.translation_m.x = 10.0;
+  input.world.local_map = WideLocalMap(8U);
+  input.world.traversability_snapshot = V1Snapshot(
+      *input.world.global_map, input.world.local_map,
+      input.world.map_from_odom);
+  input.goal_map = PointTarget(13.0, 1.0, 4.25);
+  auto& capability = std::get<WheeledCapability>(input.capability);
+  capability.maximum_forward_speed_mps = 1.0;
+  capability.maximum_reverse_speed_mps = 0.5;
+  capability.maximum_spin_rate_radps = 1.0;
+
+  const PlanningResult result = backends.planner.Plan(input);
+
+  ASSERT_EQ(result.status, PlanningStatus::kSuccess) << result.reason_code;
+  ASSERT_TRUE(result.reference.has_value());
+  const auto* trajectory =
+      std::get_if<TrajectoryReference>(&result.reference->data);
+  ASSERT_NE(trajectory, nullptr);
+  ASSERT_FALSE(trajectory->points.empty());
+  EXPECT_DOUBLE_EQ(trajectory->points.front().pose.position_m.x, 11.5);
+  EXPECT_EQ(result.timing.global_call_count, 1U);
+  EXPECT_EQ(result.timing.local_call_count, 1U);
+  EXPECT_EQ(backends.global_calls, 0U);
+  EXPECT_EQ(backends.local_calls, 0U);
 }
 
 TEST(DualModePlanner, GlobalBackendReceivesTheUnreducedHardDeadline) {

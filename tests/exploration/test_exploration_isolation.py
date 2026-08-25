@@ -230,7 +230,9 @@ def test_plan_motion_freezes_environment_and_single_worker_request_contract(
     assert goal_lines.count("bool replace_active_request") == 1
 
 
-def test_planner_diagnostics_are_the_exact_exploration_surface(repo_root: Path) -> None:
+def test_planner_diagnostics_preserve_the_exploration_timing_subset(
+    repo_root: Path,
+) -> None:
     contract_path = repo_root / "config/external_interfaces.yaml"
     contract = yaml.safe_load(contract_path.read_text(encoding="utf-8"))
     assert contract["action"] == {
@@ -239,13 +241,16 @@ def test_planner_diagnostics_are_the_exact_exploration_surface(repo_root: Path) 
         "owner": "lunar_pure_planner_ros",
         "required_goal_fields": ["environment_mode"],
     }
-    assert contract["diagnostics"] == {
+    diagnostics = contract["diagnostics"]
+    expected_diagnostics = {
         "name": "/Car/T4/planning/diagnostics",
         "type": "diagnostic_msgs/msg/DiagnosticArray",
         "owner": "lunar_pure_planner_ros",
         "required_fields": ["header", "status"],
-        "required_keys": PLANNER_DIAGNOSTIC_KEYS,
     }
+    for key, value in expected_diagnostics.items():
+        assert diagnostics[key] == value
+    assert set(PLANNER_DIAGNOSTIC_KEYS) <= set(diagnostics["required_keys"])
 
 
 def test_exploration_packages_cannot_copy_platform_config_or_link_algorithms(

@@ -185,12 +185,13 @@ inflation = circumscribed_footprint_radius + minimum_clearance
 For every relative raster offset, the stencil uses the exact minimum Euclidean
 distance between the candidate cell centre and the occupied cell's closed
 axis-aligned square. An offset is blocked when that distance is smaller than
-the required inflation. Unknown and malformed occupancy remain hazards.
+the required inflation. Unknown and malformed occupancy remain individually
+infeasible, but only valid occupied cells are inflation and clearance sources.
 
-The global clearance value exposed to route costs must use the same cell-area
-distance convention. Route preview and simplification continue to be checked
-against the same inflated hard-feasibility mask, so simplification cannot
-reintroduce a globally unsafe segment.
+The global clearance value exposed to route costs must use the same
+occupied-cell-area distance convention. Route preview and simplification
+continue to be checked against the same inflated hard-feasibility mask, so
+simplification cannot reintroduce a globally unsafe segment.
 
 ### Local Goal Portals
 

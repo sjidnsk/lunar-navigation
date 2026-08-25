@@ -36,7 +36,8 @@ TEST(OccupancyGridViewTest, ClassifiesEverySignedInt8UsingNativeSemantics) {
   const OccupancyGridView map(UnitGeometry(256U, 1U), data, 50);
 
   for (int value = -128; value <= 127; ++value) {
-    const auto actual = map.Classify(GridIndex{value + 128, 0});
+    const GridIndex cell{value + 128, 0};
+    const auto actual = map.Classify(cell);
     const auto expected = value >= 0 && value <= 49
                               ? CellState::kFree
                               : value >= 50 && value <= 100
@@ -44,6 +45,9 @@ TEST(OccupancyGridViewTest, ClassifiesEverySignedInt8UsingNativeSemantics) {
                                     : CellState::kUnknown;
     SCOPED_TRACE(value);
     EXPECT_EQ(actual, expected);
+    EXPECT_EQ(map.RawValue(cell),
+              std::optional<std::int8_t>(
+                  static_cast<std::int8_t>(value)));
   }
 
   EXPECT_EQ(map.Classify(GridIndex{127, 0}), CellState::kUnknown);  // -1
@@ -52,6 +56,10 @@ TEST(OccupancyGridViewTest, ClassifiesEverySignedInt8UsingNativeSemantics) {
   EXPECT_EQ(map.Classify(GridIndex{178, 0}), CellState::kOccupied); // 50
   EXPECT_EQ(map.Classify(GridIndex{228, 0}), CellState::kOccupied); // 100
   EXPECT_EQ(map.Classify(GridIndex{229, 0}), CellState::kUnknown);  // 101
+  EXPECT_EQ(map.RawValue(GridIndex{127, 0}),
+            std::optional<std::int8_t>{-1});
+  EXPECT_EQ(map.RawValue(GridIndex{229, 0}),
+            std::optional<std::int8_t>{101});
 }
 
 TEST(OccupancyGridViewTest, ReportsIndicesOutsideTheMapWithoutArrayAccess) {
@@ -64,6 +72,8 @@ TEST(OccupancyGridViewTest, ReportsIndicesOutsideTheMapWithoutArrayAccess) {
   EXPECT_FALSE(map.Contains(GridIndex{1, 0}));
   EXPECT_EQ(map.Classify(GridIndex{-1, 0}), CellState::kOutsideMap);
   EXPECT_EQ(map.Classify(GridIndex{1, 0}), CellState::kOutsideMap);
+  EXPECT_FALSE(map.RawValue(GridIndex{-1, 0}).has_value());
+  EXPECT_FALSE(map.RawValue(GridIndex{1, 0}).has_value());
 }
 
 TEST(OccupancyGridViewTest, OwnsACopyOfNativeOccupancyData) {

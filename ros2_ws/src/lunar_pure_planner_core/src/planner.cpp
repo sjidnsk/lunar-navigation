@@ -11,6 +11,7 @@
 
 #include "hierarchical/global_route_planner.hpp"
 #include "hierarchical/reference_composer.hpp"
+#include "grid_v1/grid_v1_planner.hpp"
 #include "hopper/anytime_hopper_planner.hpp"
 #include "legged/anytime_legged_planner.hpp"
 #include "legged/legged_types.hpp"
@@ -550,15 +551,46 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
     if (input.control.stop_token.stop_requested()) {
       return finish(Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED"));
     }
+    const bool use_grid_v1 = input.config.wheel_planner_mode ==
+                             WheelPlannerMode::kGridTraversabilityV1;
     const bool known_mode =
         input.environment_mode == EnvironmentMode::kLunarSurface ||
         input.environment_mode == EnvironmentMode::kLavaTube;
     if (!known_mode || input.request_id.empty() || !FinitePointGoal(input.goal_map) ||
-        !MatchingPlatform(input) || !MinimalLocalMapValid(input.world.local_map)) {
+        !MatchingPlatform(input) || !MinimalLocalMapValid(input.world.local_map) ||
+        (use_grid_v1 &&
+         (input.environment_mode != EnvironmentMode::kLunarSurface ||
+          !std::holds_alternative<WheeledState>(input.current_state) ||
+          !std::holds_alternative<WheeledCapability>(input.capability) ||
+          !input.world.traversability_snapshot ||
+          !input.world.traversability_snapshot->valid()))) {
       return finish(Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT"));
     }
     finish_phase(timing.snapshot_projection_elapsed,
                  PlannerPhase::kSnapshotProjection);
+
+    if (use_grid_v1) {
+      PlanningRequest grid_request = input;
+      grid_request.control.deadline = policy.hard_deadline;
+      PlanningResult result = grid_v1::Plan(grid_request);
+      timing.global_elapsed += result.timing.global_elapsed;
+      timing.global_call_count += result.timing.global_call_count;
+      timing.local_search_elapsed += result.timing.local_search_elapsed;
+      timing.local_elapsed += result.timing.local_elapsed;
+      timing.local_call_count += result.timing.local_call_count;
+      phase_started = ReadNow(input.control.now);
+      report_progress(PlannerPhase::kGlobal, timing.global_elapsed);
+      report_progress(PlannerPhase::kLocalSearch,
+                      timing.local_search_elapsed);
+      result.grid_v1.global_input_sequence =
+          input.world.global_map_sequence;
+      result.grid_v1.local_input_sequence = input.world.local_map_sequence;
+      result.grid_v1.odometry_input_sequence =
+          input.world.odometry_sequence;
+      finish_phase(timing.certification_elapsed,
+                   PlannerPhase::kCertification);
+      return finish(std::move(result));
+    }
 
     std::optional<GlobalRoute> global_route;
     LocalGoalSet local_goals;

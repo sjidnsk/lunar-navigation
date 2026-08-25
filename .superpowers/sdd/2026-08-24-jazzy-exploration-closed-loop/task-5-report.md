@@ -1,0 +1,168 @@
+# Closed-loop Task 5 implementation report — operator workflow and full-run acceptance
+
+## Scope and commit
+
+- Start HEAD: `6a18b75`.
+- Operator workflow commit: `ffd60e9` (`docs: add 300m Jazzy exploration workflow`).
+- Added strict shell entry `scripts/run_jazzy_300m_exploration_sim.sh`, reusable Python
+  operator `scripts/jazzy_300m_operator.py`, 12 operator contract/behavior tests, and a
+  Chinese UTF-8 README section.
+- The operator sources Jazzy plus an explicit overridable external overlay, validates
+  installed packages/executables/launch assets, reserves a candidate empty ROS domain,
+  creates a unique external run directory, launches RViz by default, and accepts only
+  an exact successful terminal summary with three consistent nonempty artifacts.
+- Teardown reuses the independently reviewed Task 4 identity model: complete
+  `(pid,start_time,pgid,sid)` identities, bounded same-group SIGINT, then same-group
+  SIGTERM only for residual identities. It contains no recursive deletion, broad process
+  match, broad kill, or unbounded wait.
+
+## TDD and verification evidence
+
+- RED: all 12 new operator tests failed because both entry files were absent.
+- GREEN: `12 passed in 0.29s`, including strict summary/CSV acceptance and a synthetic
+  leader-exits/child-ignores-SIGINT teardown case.
+- A real `--help` invocation then exposed Jazzy setup reading an unset internal variable
+  under `set -u`. A regression was added first; setup sourcing now temporarily disables
+  nounset and immediately restores it. The shell remains `set -euo pipefail` for all
+  operator work.
+- Fresh runtime closure build with `BUILD_TESTING=OFF`: 8 packages built.
+- Fresh focused simulation test build: 8/8 CTest wrappers, 73 tests, 0 failures.
+- Launch plus operator tests: 23 passed, 1 opt-in live test skipped.
+- Fresh opt-in live smoke: 1 passed, 11 deselected in 3.80 s.
+- UTF-8 reads for README and both scripts passed; `git diff --check` passed.
+- A whole-workspace `BUILD_TESTING=ON` build remains blocked before this task by unchanged
+  `anytime_hopper_planner_test.cpp` using `std::ranges::any_of` without the required
+  standard header. Task 5 did not modify planner, incremental optimization, or SE(2)
+  files.
+
+## Full-run attempt 1 — default unoptimized build
+
+Run directory:
+
+`/home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_runs/run-20260824-062821-seed-20260824-c390f2e2`
+
+- RViz requested and started; OpenGL 4.6 initialized and RViz attempted a 300 by 300 Map.
+  Mesa then reported a GLSL sampler link error, so startup is proven but correct rendering
+  of every display is not claimed.
+- The vehicle moved 4.199363644 m and coverage reached
+  `0.0010582639714625446`.
+- 286 global and 286 local planner calls were recorded. After the first movement, the
+  current candidate repeatedly consumed the local fixed deadline at about 0.883 s and
+  returned `TIMEOUT`; pose and coverage stopped changing.
+- The run was operator-interrupted after 231.30 wall s rather than left in a deterministic
+  retry loop. Recorder summary correctly says `success=false`, `SHUTDOWN`, and zero
+  completed goals. All nine exact process identities disappeared on SIGINT, no SIGTERM
+  was needed, and domain 44 was empty.
+
+## Full-run attempt 2 — RelWithDebInfo build
+
+Run directory:
+
+`/home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_runs/run-20260824-063501-seed-20260824-66ff4b6e`
+
+- Rebuilt the same runtime closure with `-DCMAKE_BUILD_TYPE=RelWithDebInfo`; no exploration
+  or planning algorithm was changed.
+- RViz again initialized OpenGL 4.6 and attempted the 300 by 300 Map; the same GLSL sampler
+  error remained.
+- The vehicle moved 3.199708548 m and coverage reached
+  `0.00085612366230677765`.
+- 106 global and 106 local calls were recorded: 60 `PLAN_FOUND`, then 46 consecutive
+  `TIMEOUT` responses for the same current candidate. Optimization reduced global calls
+  from about 68 ms to about 18–19 ms, but the difficult local search still consumed about
+  932–935 ms and hit the fixed request budget.
+- The run was interrupted after 53.71 operator wall s once the invariant retry was proven.
+  Recorder summary correctly says `success=false`, `SHUTDOWN`, zero completed goals,
+  wall elapsed 52.4468 s and simulated elapsed 1048.2362 s. All nine exact identities
+  disappeared on SIGINT, no SIGTERM was needed, and domain 34 was empty.
+- Focused simulation timing evidence remains `complete_tick_average_ms=16.2297`,
+  `complete_tick_max_ms=16.7649`, `deadline_misses=0`. Runtime plant deadline-miss count is
+  not exported in the full-run result schema, so no unsupported full-run count is claimed.
+
+## Acceptance result and blocker
+
+Task 5 full acceptance is **not complete**. Neither attempt reached `COMPLETED` with
+`COMPLETED_NO_REACHABLE_FRONTIER`; neither had a completed goal, and both summaries
+correctly remained unsuccessful.
+
+The reproducible blocker is an existing semantic interaction: planner `TIMEOUT` is
+classified as retryable during candidate validation, so the explorer intentionally keeps
+the same candidate and does not advance or mark it unreachable. With a stationary vehicle,
+the map does not change and retrying produces the same timeout indefinitely. Treating
+timeout as no path would violate the frozen rule that timeout cannot establish “no reachable
+frontier,” so Task 5 does not weaken that rule or fabricate completion.
+
+Completion now depends on making the difficult local request produce a real result within
+the fixed algorithm budget (for example, after the separately scoped incremental planner
+optimization is integrated and reviewed), then rerunning this same strict operator entry.
+
+## Independent-review fix — bind runs to one overlay identity
+
+The Task 5 independent review found that executable names alone did not prove which
+workspace supplied the runtime. The operator now clears inherited ROS/workspace prefix
+variables before sourcing Jazzy and the explicit overlay. Before creating a ROS process it
+runs `ros2 pkg prefix` for every required package, resolves symlinks, and requires every
+prefix and executable to remain beneath the explicit overlay install closure. It also
+requires each corresponding package `CMakeCache.txt`, validates its
+`CMAKE_INSTALL_PREFIX`, requires a common `CMAKE_BUILD_TYPE`, checks source/installed
+launch equality, and hashes all launch and executable inputs. Missing, stale, escaped, or
+inconsistent evidence fails before launch.
+
+TDD evidence:
+
+- RED: 6 failures proved the absent inherited-overlay cleanup and provenance API.
+- GREEN: `17 passed` in the focused operator suite; combined operator checks are
+  `19 passed`.
+- Explicit negative coverage: wrong overlay, symlinked stale prefix, missing
+  `CMakeCache.txt`, and stale installed-launch hash.
+- Real fixed-overlay read-only probe passed; `git diff --check` and Python UTF-8 compile
+  passed. No planner, explorer, simulation, or controller algorithm changed.
+
+The real overlay probe recorded these values (the Git SHA is deliberately collected again
+for every future run, so `operator_evidence.json` will contain the then-current commit):
+
+- Overlay setup:
+  `/home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/install/setup.bash`
+- Overlay install root:
+  `/home/kai/CodexDownloads/lunar_navigation/exploration_jazzy_build/closed_loop/install`
+- Resolved package prefixes:
+  - `lunar_pure_exploration_sim`: `.../install/lunar_pure_exploration_sim`
+  - `lunar_pure_planner_ros`: `.../install/lunar_pure_planner_ros`
+  - `lunar_pure_exploration_ros`: `.../install/lunar_pure_exploration_ros`
+  - `lunar_pure_wheeled_controller`: `.../install/lunar_pure_wheeled_controller`
+- Parsed `CMAKE_BUILD_TYPE`: empty string for all four packages (the current CMake
+  single-config default); the exact per-package values are retained in evidence.
+- Probe worktree Git SHA: `967f2e427c69d4a2baf7e3469303f49ff936a774`.
+- Source and installed launch SHA256:
+  `6681f84273b195ea48a7dad1ee80672f1351e017a876df273718f0a662e00724`.
+- Planner executable SHA256:
+  `4d030a8d594a2dea781083d9a88f444ddcc8f28637807a86137ddb3a91f69272`.
+- Explorer executable SHA256:
+  `58d944148f946412edb32d50686ccf85cb5e4dab8ba426910ccfcd9ca40e967b`.
+- Controller executable SHA256:
+  `ec3873303a615108287d3a86b049c9d2d1749bba905c296e24c4ab8073a5e7d5`.
+- Simulation executable SHA256 values:
+  - `simulation_node`: `f9743efca6f4df37b10211896dcb0ca8f2207998c6197a08c06b21e9a08b9f95`
+  - `run_coordinator`: `adadbc9a40d1caf6e620781f30fed90f8455736738f6a7e8bba36f56bf9f7cd0`
+  - `run_recorder`: `bc8223035fd53ab882492f57aab3cfd7f99cf5f4505f54d5bcc75c1bfbeb20bf`
+  - `simulation_hud_node`: `b0bbf86b5733a063657d6cb6c2830475a31399fa5a1d0085f2736c515aaa8ae1`
+
+These fields are written at the top level of each run's `operator_evidence.json` together
+with the existing domain, process identity, outcome, wall guard, and teardown evidence.
+
+### Independent-review fix round 1 — launch path closure
+
+The first fix review identified that equal file content was insufficient when an installed
+launch path was a symlink to a file outside the explicit overlay. Both launch inputs now
+resolve strictly before hashing: the source launch must remain beneath the resolved current
+repository root, and the installed launch must remain beneath the resolved simulation
+package prefix in the explicit overlay. Either symlink escape fails before any ROS launch.
+
+- RED: 2 focused failures reproduced installed-launch and source-launch symlink escapes;
+  the installed escape was previously accepted and the source escape reached the later Git
+  check.
+- GREEN: focused operator suite `20 passed`.
+- Added a real shell-process regression that starts with stale `AMENT_PREFIX_PATH`,
+  `CMAKE_PREFIX_PATH`, and `COLCON_PREFIX_PATH`, sources Jazzy plus a temporary explicit
+  overlay, and proves no stale prefix reaches the operator process. This supplements the
+  static shell contract assertion.
+- No planner, explorer, simulation, or controller algorithm changed.

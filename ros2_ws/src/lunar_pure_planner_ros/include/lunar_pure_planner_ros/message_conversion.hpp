@@ -5,6 +5,8 @@
 #include <string>
 
 #include <lunar_planning_msgs/action/plan_motion.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <std_msgs/msg/header.hpp>
 
 #include "lunar_pure_planner_core/types/planning_request.hpp"
 #include "lunar_pure_planner_core/types/world_snapshot.hpp"
@@ -27,5 +29,9 @@ struct GoalConversionResult final {
 [[nodiscard]] lunar_planning_msgs::action::PlanMotion::Result ConvertResult(
     const lunar::pure_planning::PlanningResult& result,
     std::uint64_t mission_revision);
+
+[[nodiscard]] nav_msgs::msg::Path ConvertGlobalPath(
+    const lunar::pure_planning::GlobalRoutePreview& preview,
+    const std_msgs::msg::Header& header);
 
 }  // namespace lunar::pure_planner_ros

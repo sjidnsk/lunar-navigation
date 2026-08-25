@@ -75,6 +75,16 @@ CellState OccupancyGridView::Classify(GridIndex index) const {
                                       : CellState::kFree;
 }
 
+std::optional<std::int8_t> OccupancyGridView::RawValue(
+    GridIndex index) const {
+  if (!Contains(index)) {
+    return std::nullopt;
+  }
+  const auto offset = static_cast<std::size_t>(index.y) * geometry_.width +
+                      static_cast<std::size_t>(index.x);
+  return data_[offset];
+}
+
 bool OccupancyGridView::Contains(GridIndex index) const {
   return index.x >= 0 && index.y >= 0 &&
          static_cast<std::uint32_t>(index.x) < geometry_.width &&

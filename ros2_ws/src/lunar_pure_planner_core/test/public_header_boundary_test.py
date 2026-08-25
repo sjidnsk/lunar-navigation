@@ -14,6 +14,7 @@ EXPECTED_HEADERS = {
     "lunar_pure_planner_core/planner.hpp",
     "lunar_pure_planner_core/planning_timing.hpp",
     "lunar_pure_planner_core/search_control.hpp",
+    "lunar_pure_planner_core/traversability_map.hpp",
     "lunar_pure_planner_core/types/geometry.hpp",
     "lunar_pure_planner_core/types/goal.hpp",
     "lunar_pure_planner_core/types/motion_reference.hpp",

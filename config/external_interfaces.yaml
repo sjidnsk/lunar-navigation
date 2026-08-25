@@ -1,4 +1,4 @@
-schema_version: lunar-pure-planner-task3-inputs/v1
+schema_version: lunar-pure-planner-task3-io/v1
 topics:
   global_overview:
     name: /Car/T3/mapping/global_overview
@@ -32,9 +32,94 @@ action:
   type: lunar_planning_msgs/action/PlanMotion
   owner: lunar_pure_planner_ros
   required_goal_fields: [environment_mode]
+outputs:
+  wheeled_reference:
+    name: /Car/T4/planning/wheeled_reference
+    type: lunar_planning_msgs/msg/MotionReference
+    owner: lunar_pure_planner_ros
+    frame: map
+    required_fields: [header, plan_id, input_time, platform_type, path_preview, trajectory]
+  wheeled_path:
+    name: /Car/T4/planning/wheeled_path
+    type: nav_msgs/msg/Path
+    owner: lunar_pure_planner_ros
+    frame: map
+    required_fields: [header, poses]
+  wheeled_global_path:
+    name: /Car/T4/planning/wheeled_global_path
+    type: nav_msgs/msg/Path
+    owner: lunar_pure_planner_ros
+    frame: map
+    required_fields: [header, poses]
+  wheeled_path_timing:
+    name: /Car/T4/planning/wheeled_path_timing
+    type: lunar_planning_msgs/msg/TimedPath
+    owner: lunar_pure_planner_ros
+    frame: map
+    required_fields: [path, planning_time]
 diagnostics:
   name: /Car/T4/planning/diagnostics
   type: diagnostic_msgs/msg/DiagnosticArray
   owner: lunar_pure_planner_ros
   required_fields: [header, status]
-  required_keys: [request_id, platform_type, environment_mode, planning_outcome, reason_code, global_elapsed_ms, global_call_count, local_elapsed_ms, local_call_count, total_elapsed_ms]
+  required_keys:
+    - request_id
+    - platform_type
+    - environment_mode
+    - planning_outcome
+    - reason_code
+    - expanded_states
+    - has_best_cost
+    - best_cost
+    - has_reference
+    - latency_class
+    - snapshot_projection_elapsed_ms
+    - global_elapsed_ms
+    - global_call_count
+    - local_goal_elapsed_ms
+    - local_search_elapsed_ms
+    - local_elapsed_ms
+    - local_call_count
+    - certification_elapsed_ms
+    - output_elapsed_ms
+    - total_elapsed_ms
+    - grid_v1_active
+    - global_input_sequence
+    - local_input_sequence
+    - odometry_input_sequence
+    - traversability_revision
+    - publish_check_revision
+    - profile_hash
+    - canonical_resolution_m
+    - map_origin_x_m
+    - map_origin_y_m
+    - map_origin_z_m
+    - allocated_tiles
+    - estimated_map_bytes
+    - updated_cells
+    - dirty_tiles
+    - halo_recomputed_cells
+    - free_cells
+    - blocked_cells
+    - unknown_cells
+    - prior_conflicts
+    - global_route_reused
+    - global_expanded_states
+    - global_open_peak
+    - local_expanded_states
+    - local_open_peak
+    - local_candidate_count
+    - local_attempt_count
+    - selected_candidate_index
+    - raw_path_points
+    - shortcut_path_points
+    - resampled_path_points
+    - final_trajectory_points
+    - direction
+    - forward_cost
+    - reverse_cost
+    - final_supercover_cells
+    - postprocess_mode
+    - map_fusion_elapsed_ms
+    - traversability_elapsed_ms
+    - postprocess_elapsed_ms

@@ -31,6 +31,8 @@ const char* ReleaseCode(GoalReleaseReason reason) {
       return "FRONTIER_DISAPPEARED";
     case GoalReleaseReason::kInformationGainZero:
       return "INFORMATION_GAIN_ZERO";
+    case GoalReleaseReason::kLocalSegmentCompleted:
+      return "LOCAL_SEGMENT_COMPLETED";
   }
   throw std::invalid_argument("unknown goal release reason");
 }
@@ -38,21 +40,20 @@ const char* ReleaseCode(GoalReleaseReason reason) {
 }  // namespace
 
 ActiveGoal::ActiveGoal(std::uint64_t candidate_id, std::uint64_t frontier_id,
-                       std::vector<std::int64_t> frontier_canonical_key,
-                       CandidateKey candidate_key, Pose2 target,
+                       std::variant<TaskFrontierGoalIdentity,
+                                    BoundaryApproachGoalIdentity> identity,
+                       Pose2 target,
                        std::string request_id)
     : candidate_id_(candidate_id),
       frontier_id_(frontier_id),
-      frontier_canonical_key_(std::move(frontier_canonical_key)),
-      candidate_key_(candidate_key),
+      identity_(std::move(identity)),
       target_(target),
       request_id_(std::move(request_id)) {}
 
 ActiveGoal::ActiveGoal(ActiveGoal&& other) noexcept
     : candidate_id_(other.candidate_id_),
       frontier_id_(other.frontier_id_),
-      frontier_canonical_key_(std::move(other.frontier_canonical_key_)),
-      candidate_key_(other.candidate_key_),
+      identity_(std::move(other.identity_)),
       target_(other.target_),
       request_id_(std::move(other.request_id_)),
       replan_count_(other.replan_count_),
@@ -64,24 +65,49 @@ std::uint64_t ActiveGoal::candidate_id() const { return candidate_id_; }
 
 std::uint64_t ActiveGoal::frontier_id() const { return frontier_id_; }
 
-std::span<const std::int64_t> ActiveGoal::frontier_canonical_key() const {
-  return frontier_canonical_key_;
+GoalKind ActiveGoal::kind() const {
+  return std::holds_alternative<BoundaryApproachGoalIdentity>(identity_)
+             ? GoalKind::kBoundaryApproach
+             : GoalKind::kTaskFrontier;
 }
 
-const CandidateKey& ActiveGoal::candidate_key() const { return candidate_key_; }
+std::span<const std::int64_t> ActiveGoal::frontier_canonical_key() const {
+  if (const auto* identity =
+          std::get_if<TaskFrontierGoalIdentity>(&identity_)) {
+    return identity->frontier_canonical_key;
+  }
+  return {};
+}
+
+const CandidateKey& ActiveGoal::candidate_key() const {
+  return std::visit(
+      [](const auto& identity) -> const CandidateKey& {
+        return identity.candidate_key;
+      },
+      identity_);
+}
 
 const Pose2& ActiveGoal::target() const { return target_; }
 
 const std::string& ActiveGoal::request_id() const { return request_id_; }
 
+const BoundaryApproachGoalIdentity* ActiveGoal::boundary_approach_identity()
+    const {
+  return std::get_if<BoundaryApproachGoalIdentity>(&identity_);
+}
+
 std::uint8_t ActiveGoal::replan_count() const { return replan_count_; }
 
 bool ActiveGoal::MatchesAnyFrontier(
     std::span<const FrontierCluster> current_frontiers) const {
+  if (kind() != GoalKind::kTaskFrontier) {
+    return false;
+  }
+  const auto& goal_identity = std::get<TaskFrontierGoalIdentity>(identity_);
   return std::any_of(
       current_frontiers.begin(), current_frontiers.end(),
-      [this](const FrontierCluster& frontier) {
-        return frontier.canonical_key == frontier_canonical_key_;
+      [&goal_identity](const FrontierCluster& frontier) {
+        return frontier.canonical_key == goal_identity.frontier_canonical_key;
       });
 }
 
@@ -115,8 +141,22 @@ ActiveGoal MakeActiveGoal(
     throw std::invalid_argument("active goal full frontier key mismatch");
   }
   return ActiveGoal(candidate.id, candidate.frontier_id,
-                    *candidate.frontier_canonical_key, candidate.key,
+                    TaskFrontierGoalIdentity{
+                        *candidate.frontier_canonical_key, candidate.key},
                     candidate.pose, std::move(request_id));
+}
+
+ActiveGoal MakeBoundaryApproachActiveGoal(
+    std::uint64_t display_id, BoundaryApproachGoalIdentity identity,
+    Pose2 target, std::string request_id) {
+  if (request_id.empty()) {
+    throw std::invalid_argument("active goal request id must be nonempty");
+  }
+  if (!Finite(target)) {
+    throw std::invalid_argument("active goal pose must be finite");
+  }
+  return ActiveGoal(display_id, 0U, std::move(identity), target,
+                    std::move(request_id));
 }
 
 ExplorationStateMachine::ExplorationStateMachine(

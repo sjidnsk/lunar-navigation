@@ -8,10 +8,10 @@
 
 ## 决策
 
-项目边界接收课题三提供的原始全局地图、随车滚动局部地图、里程计和坐标变换。规划算法不直接分别解释这些原始地图，而是统一读取由地图维护器生成的不可变高分辨率可通行地图快照。
+项目边界以课题三提供的随车滚动局部地图、里程计和坐标变换建立高分辨率可通行地图；原始全局地图是扩大已知区域的可选粗先验。规划算法不直接分别解释这些原始地图，而是统一读取由地图维护器生成的不可变高分辨率可通行地图快照。
 
 ```text
-/Car/T3/mapping/global_overview ──────┐
+/Car/T3/mapping/global_overview [可选] ┐
 /Car/T3/mapping/grid_map ─────────────┼─> 高分辨率可通行地图维护器
 /Car/T3/localization/odometry + /tf ──┘              │
                                                      ▼
@@ -42,13 +42,13 @@
 
 | 输入 | ROS 类型 | 坐标系 | V1 用途 |
 | --- | --- | --- | --- |
-| `/Car/T3/mapping/global_overview` | `nav_msgs/msg/OccupancyGrid` | `map` | 全局边界和未近距离观测区域的粗分辨率可通行先验 |
+| `/Car/T3/mapping/global_overview` | `nav_msgs/msg/OccupancyGrid` | `map` | 可选；提供全局边界和未近距离观测区域的粗分辨率可通行先验 |
 | `/Car/T3/mapping/grid_map` | `grid_map_msgs/msg/GridMap` | `odom` | 随车更新的高分辨率 `occupancy`、`elevation` 观测 |
 | `/Car/T3/localization/odometry` | `nav_msgs/msg/Odometry` | `odom -> base_link` | 当前车辆位姿、速度、局部窗口起点和执行进度 |
 | `/tf` | `tf2_msgs/msg/TFMessage` | `map -> odom` | 将局部地图和车辆状态转换到统一 `map` 坐标系 |
 | `/Car/T4/plan_motion` | `lunar_planning_msgs/action/PlanMotion` | 由环境模式和 Goal header 决定 | 目标点/区域、位置容差和可选目标航向 |
 
-V1 不新增要求课题三发布“已经生成好的可通行地图”的外部接口。可通行地图是项目内部派生状态。`/Car/T4/planning/local_traversability` 可继续用于 RViz 和诊断，但不是规划算法的权威订阅输入。
+V1 不新增要求课题三发布“已经生成好的可通行地图”的外部接口。可通行地图是项目内部派生状态。有效 local GridMap 和 `map <- odom` 到达后即可生成首个快照；global overview 晚到时按世界坐标重锚并扩大已知先验，缺失时局部覆盖之外保持 `UNKNOWN`。`/Car/T4/planning/local_traversability` 可继续用于 RViz 和诊断，但不是规划算法的权威订阅输入。
 
 ## 高分辨率地图分辨率契约
 
@@ -56,7 +56,7 @@ V1 不新增要求课题三发布“已经生成好的可通行地图”的外�
 2. 该分辨率必须有限且大于零；全局搜索、局部搜索、路径简化复检和诊断统计均使用原始分辨率，不降采样。
 3. 后续局部地图分辨率必须在 `max(1e-9 m, canonical_resolution_m * 1e-6)` 容差内相同。
 4. 超出容差的变化返回 `MAP_RESOLUTION_MISMATCH`，不修改已有地图，也不发布新轨迹。V1 不在运行中隐式重采样或清空地图。
-5. 高分辨率栅格轴与 `map` 坐标轴对齐，原点锚定到全局 `OccupancyGrid.info.origin`。全局图无效或带非零平面旋转时返回 `GLOBAL_MAP_GEOMETRY_INVALID`。
+5. 高分辨率栅格轴与 `map` 坐标轴对齐；global 缺失时原点取首个有效局部覆盖的 `map` 坐标原点，global 晚到后重锚到 `OccupancyGrid.info.origin` 且保留局部世界语义。ROS 消息适配阶段发现全局图结构、frame 或姿态无效时返回 `INVALID_INPUT`；核心地图维护器拒绝内部全局图几何时使用 `GLOBAL_MAP_GEOMETRY_INVALID`。
 6. 全局图的分辨率可以不同于局部图。映射按世界坐标几何关系完成，不要求两者分辨率为整数倍。
 
 ## 地图存储架构
@@ -207,7 +207,7 @@ V1 原因码至少区分：
 
 - `PLAN_FOUND`；
 - `INVALID_INPUT`；
-- `GLOBAL_MAP_GEOMETRY_INVALID`；
+- `GLOBAL_MAP_GEOMETRY_INVALID`（核心地图维护器；ROS 原始消息可能先在适配边界返回 `INVALID_INPUT`）；
 - `MAP_RESOLUTION_MISMATCH`；
 - `START_NOT_FREE`；
 - `GOAL_NOT_FREE`；

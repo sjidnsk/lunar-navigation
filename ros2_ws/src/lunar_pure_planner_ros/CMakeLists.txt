@@ -22,6 +22,7 @@ endif()
 set(LUNAR_PURE_PLANNER_ROS_SOURCES
   src/platform_config.cpp
   src/input_store.cpp
+  src/traversability_input.cpp
   src/map_adapters.cpp
   src/incremental_traversability.cpp
   src/elevation_occupancy.cpp
@@ -177,6 +178,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(request_diagnostics_test test/request_diagnostics_test.cpp)
   target_link_libraries(request_diagnostics_test ${PROJECT_NAME})
+
+  ament_add_gtest(traversability_input_test test/traversability_input_test.cpp)
+  target_link_libraries(traversability_input_test ${PROJECT_NAME})
 
   ament_add_gtest(pure_plan_motion_server_test
     test/pure_plan_motion_server_test.cpp)

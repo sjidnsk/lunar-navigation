@@ -453,6 +453,15 @@ TEST(ExplorationStateMachineTest, ReleaseGoalMatrixAcceptsExecutingAndReplanning
   }
 }
 
+TEST(ExplorationStateMachineTest,
+     LocalSegmentCompletionReleasesGoalWithoutFailureSideEffect) {
+  auto machine = MachineIn(ExplorationState::kExecuting);
+  machine->ReleaseGoal(GoalReleaseReason::kLocalSegmentCompleted);
+  EXPECT_EQ(machine->state(), ExplorationState::kSelectingFrontier);
+  EXPECT_EQ(machine->reason_code(), "LOCAL_SEGMENT_COMPLETED");
+  EXPECT_FALSE(machine->active_goal().has_value());
+}
+
 TEST(ExplorationStateMachineTest, CompletionMatrixOnlyAcceptsSelectingWithoutGoal) {
   for (const ExplorationState source : kAllStates) {
     auto machine = MachineIn(source);
@@ -536,6 +545,8 @@ TEST(ExplorationStateMachineTest, GoalFactoryDeepCopiesAllPayloadAndMatchesOnlyF
 
   EXPECT_EQ(goal.candidate_id(), 42U);
   EXPECT_EQ(goal.frontier_id(), 77U);
+  EXPECT_EQ(goal.kind(), GoalKind::kTaskFrontier);
+  EXPECT_EQ(goal.boundary_approach_identity(), nullptr);
   EXPECT_EQ(std::vector<std::int64_t>(goal.frontier_canonical_key().begin(),
                                       goal.frontier_canonical_key().end()),
             (std::vector<std::int64_t>{4, 5, 6}));
@@ -565,6 +576,33 @@ TEST(ExplorationStateMachineTest, GoalFactoryDeepCopiesAllPayloadAndMatchesOnlyF
   EXPECT_FALSE(goal_a.MatchesAnyFrontier(key_b));
   EXPECT_FALSE(goal_b.MatchesAnyFrontier(key_a));
   EXPECT_TRUE(goal_b.MatchesAnyFrontier(key_b));
+}
+
+TEST(ExplorationStateMachineTest,
+     BoundaryApproachGoalOwnsTypedIdentityWithoutFrontierMembership) {
+  ActiveGoal goal = [] {
+    auto identity = BoundaryApproachGoalIdentity{
+        .intent_cell = {17, -9},
+        .candidate_key = {250, -500, 90},
+        .candidate_kind = ApproachCandidateKind::kRotation,
+    };
+    return MakeBoundaryApproachActiveGoal(314U, std::move(identity),
+                                          {2.5, -5.0, 1.57}, "approach-1");
+  }();
+
+  EXPECT_EQ(goal.kind(), GoalKind::kBoundaryApproach);
+  EXPECT_TRUE(goal.frontier_canonical_key().empty());
+  const auto* identity = goal.boundary_approach_identity();
+  ASSERT_NE(identity, nullptr);
+  EXPECT_EQ(identity->intent_cell, (GridIndex{17, -9}));
+  EXPECT_EQ(identity->candidate_key, (CandidateKey{250, -500, 90}));
+  EXPECT_EQ(identity->candidate_kind, ApproachCandidateKind::kRotation);
+  EXPECT_EQ(goal.candidate_key(), identity->candidate_key);
+  ExpectPose(goal.target(), Pose2{2.5, -5.0, 1.57});
+  EXPECT_EQ(goal.request_id(), "approach-1");
+
+  const std::array<FrontierCluster, 1> frontiers{Frontier(314U, {17, -9})};
+  EXPECT_FALSE(goal.MatchesAnyFrontier(frontiers));
 }
 
 TEST(ExplorationStateMachineTest, ActiveGoalIsOneShotAndCommitRejectsConsumedSource) {
@@ -599,12 +637,13 @@ TEST(ExplorationStateMachineTest, ReleaseReasonsAreTypedAndMappedLiterally) {
     GoalReleaseReason reason;
     const char* code;
   };
-  constexpr std::array<Case, 5> cases{{
+  constexpr std::array<Case, 6> cases{{
       {GoalReleaseReason::kArrived, "ARRIVED"},
       {GoalReleaseReason::kNoPath, "NO_PATH"},
       {GoalReleaseReason::kCandidateInvalid, "CANDIDATE_INVALID"},
       {GoalReleaseReason::kFrontierDisappeared, "FRONTIER_DISAPPEARED"},
       {GoalReleaseReason::kInformationGainZero, "INFORMATION_GAIN_ZERO"},
+      {GoalReleaseReason::kLocalSegmentCompleted, "LOCAL_SEGMENT_COMPLETED"},
   }};
   for (const auto& test_case : cases) {
     auto machine = MachineIn(ExplorationState::kExecuting);

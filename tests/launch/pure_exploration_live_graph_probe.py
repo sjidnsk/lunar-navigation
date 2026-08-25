@@ -52,8 +52,12 @@ class FakePlanMotionServer(Node):
         self.goal_received = threading.Event()
         self.result_sent = threading.Event()
         self.reference_received = threading.Event()
+        self.waiting_for_stop = threading.Event()
+        self._allow_result = threading.Event()
         self._goals: list[PlanMotion.Goal] = []
         self._goals_lock = threading.Lock()
+        self._status_condition = threading.Condition()
+        self._waiting_status_count = 0
         self._server = ActionServer(
             self,
             PlanMotion,
@@ -78,7 +82,10 @@ class FakePlanMotionServer(Node):
             10,
         )
         self._status_subscription = self.create_subscription(
-            PureExplorationStatus, "/Car/T4/exploration/status", lambda _: None, 10
+            PureExplorationStatus,
+            "/Car/T4/exploration/status",
+            self._observe_status,
+            10,
         )
 
     def inputs_connected(self) -> bool:
@@ -92,7 +99,7 @@ class FakePlanMotionServer(Node):
             )
         )
 
-    def publish_inputs(self) -> None:
+    def publish_start_inputs(self) -> None:
         global_map = OccupancyGrid()
         global_map.header.frame_id = "map"
         global_map.info.width = 20
@@ -110,6 +117,7 @@ class FakePlanMotionServer(Node):
         odometry.pose.pose.position.x = 2.0
         odometry.pose.pose.position.y = 2.0
         odometry.pose.pose.orientation.w = 1.0
+        odometry.twist.twist.linear.x = 0.2
         map_from_odom = TransformStamped()
         map_from_odom.header.frame_id = "map"
         map_from_odom.child_frame_id = "odom"
@@ -130,6 +138,40 @@ class FakePlanMotionServer(Node):
         self._tf_publisher.publish(transforms)
         self._task_publisher.publish(task)
 
+    def publish_stationary_odometry(self) -> None:
+        odometry = Odometry()
+        odometry.header.frame_id = "odom"
+        odometry.child_frame_id = "base_link"
+        odometry.pose.pose.position.x = 2.0
+        odometry.pose.pose.position.y = 2.0
+        odometry.pose.pose.orientation.w = 1.0
+        self._odometry_publisher.publish(odometry)
+
+    def goal_count(self) -> int:
+        with self._goals_lock:
+            return len(self._goals)
+
+    def waiting_status_count(self) -> int:
+        with self._status_condition:
+            return self._waiting_status_count
+
+    def wait_for_next_waiting_status(self, previous: int, timeout: float) -> bool:
+        with self._status_condition:
+            return self._status_condition.wait_for(
+                lambda: self._waiting_status_count > previous, timeout=timeout
+            )
+
+    def release_result(self) -> None:
+        self._allow_result.set()
+
+    def _observe_status(self, status: PureExplorationStatus) -> None:
+        if status.reason_code != "WAITING_FOR_STOP":
+            return
+        with self._status_condition:
+            self._waiting_status_count += 1
+            self.waiting_for_stop.set()
+            self._status_condition.notify_all()
+
     def first_goal(self) -> PlanMotion.Goal:
         with self._goals_lock:
             assert self._goals
@@ -142,6 +184,8 @@ class FakePlanMotionServer(Node):
         return GoalResponse.ACCEPT
 
     def _execute(self, goal_handle):
+        if not self._allow_result.wait(timeout=20.0):
+            raise RuntimeError("test did not release the first PlanMotion result")
         result = PlanMotion.Result()
         goal = goal_handle.request
         result.planning_outcome = PlanMotion.Result.NEW_REFERENCE_AVAILABLE
@@ -295,15 +339,33 @@ def main() -> None:
             )
         assert _wait_until(server.inputs_connected, deadline), "explorer did not subscribe to all inputs"
         _assert_no_legacy_workload(launch)
-        server.publish_inputs()
+        server.publish_start_inputs()
+        assert server.waiting_for_stop.wait(
+            timeout=20.0
+        ), "explorer did not establish WAITING_FOR_STOP"
+        assert server.goal_count() == 0, "Goal arrived before stationary confirmation"
+        for sample in range(2):
+            previous = server.waiting_status_count()
+            server.publish_stationary_odometry()
+            assert server.wait_for_next_waiting_status(
+                previous, timeout=5.0
+            ), f"stationary odometry sample {sample + 1} was not consumed"
+            assert server.goal_count() == 0, (
+                "Goal arrived before the third stationary odometry sample"
+            )
+        assert server.goal_count() == 0, "Goal arrived before the third sample"
+        server.publish_stationary_odometry()
         assert server.goal_received.wait(timeout=20.0), "fake PlanMotion server received no Goal"
+        assert server.goal_count() == 1, "stationary confirmation did not admit exactly the first Goal"
         goal = server.first_goal()
         assert goal.environment_mode == PlanMotion.Goal.LUNAR_SURFACE
         assert goal.replace_active_request is False
         assert goal.request_id
+        server.release_result()
         assert server.result_sent.wait(timeout=5.0), "fake PlanMotion server sent no typed Result"
         assert server.reference_received.wait(timeout=20.0), "explorer did not publish the accepted reference"
     finally:
+        server.release_result()
         if launch.poll() is None:
             launch.send_signal(signal.SIGTERM)
             try:

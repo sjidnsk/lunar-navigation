@@ -7,6 +7,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(lunar_planning_msgs REQUIRED)
 find_package(lunar_pure_exploration_core REQUIRED)
 find_package(lunar_pure_exploration_msgs REQUIRED)
+find_package(lunar_pure_planner_core REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
@@ -21,7 +22,8 @@ add_library(${PROJECT_NAME} SHARED
   src/planner_client.cpp
   src/planner_timing_accumulator.cpp
   src/platform_config_loader.cpp
-  src/pose_resolver.cpp)
+  src/pose_resolver.cpp
+  src/stationary_planning_gate.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 target_include_directories(${PROJECT_NAME}
   PUBLIC
@@ -33,6 +35,7 @@ ament_target_dependencies(${PROJECT_NAME}
   lunar_planning_msgs
   lunar_pure_exploration_core
   lunar_pure_exploration_msgs
+  lunar_pure_planner_core
   nav_msgs
   rclcpp
   rclcpp_action
@@ -87,11 +90,11 @@ if(BUILD_TESTING)
   file(SHA256 "${_planner_ros_source_dir}/pure_plan_motion_server.cpp"
     _pure_plan_motion_server_sha)
   if(NOT _message_conversion_sha STREQUAL
-      "972d41be8bb8eb2da854422e5aa69a52da2cacd89392700caa37ec422401b9d8" OR
+      "397be394bcf8c460dc2654bc2ef45c7181914461007367e338da2395f862a160" OR
      NOT _accepted_goal_finalizer_sha STREQUAL
       "bcd4dd1be9e56d6495b63171651b8449994d292d6451f3be960fd0fa72235d63" OR
      NOT _pure_plan_motion_server_sha STREQUAL
-      "fe8e8265a84943c2d721c6e6fbcfb152861b4818aa2fad8f3c9bb67a8065d4db")
+      "ddad903a6838a61e3018ce8a5e98173276de6971baf9a87702fe94970f44dd0a")
     message(FATAL_ERROR
       "final planner source changed; re-review Task 10 compatibility")
   endif()
@@ -105,6 +108,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_pose_resolver test/test_pose_resolver.cpp)
   target_compile_features(test_pose_resolver PRIVATE cxx_std_20)
   target_link_libraries(test_pose_resolver ${PROJECT_NAME})
+
+  ament_add_gtest(test_stationary_planning_gate
+    test/test_stationary_planning_gate.cpp)
+  target_compile_features(test_stationary_planning_gate PRIVATE cxx_std_20)
+  target_link_libraries(test_stationary_planning_gate ${PROJECT_NAME})
 
   ament_add_gtest(test_planner_timing_accumulator
     test/test_planner_timing_accumulator.cpp)
@@ -150,6 +158,7 @@ ament_export_dependencies(
   lunar_planning_msgs
   lunar_pure_exploration_core
   lunar_pure_exploration_msgs
+  lunar_pure_planner_core
   nav_msgs
   rclcpp
   rclcpp_action

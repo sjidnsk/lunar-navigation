@@ -14,8 +14,15 @@ pure_exploration:
     stuck_timeout_s: 30.0
     minimum_progress_m: 0.2
     maximum_replans_per_candidate: 2
+    maximum_candidate_retryable_retries: 1
     goal_yaw_tolerance_deg: 11.25
-    planner_result_timeout_s: 2.0
+    planner_goal_response_timeout_s: 1.0
+    planner_result_timeout_s: 3.5
+    stop_before_planning: true
+    stationary_linear_speed_mps: 0.01
+    stationary_angular_speed_radps: 0.02
+    stationary_confirmation_samples: 3
+    stop_wait_diagnostic_s: 5.0
     global_map_topic: /Car/T3/mapping/global_overview
     odometry_topic: /Car/T3/localization/odometry
     tf_topic: /tf

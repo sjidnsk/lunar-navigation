@@ -204,7 +204,7 @@ TEST(MapAdapters, RejectsWrongMapFramesAndNonAxisAlignedMapOrientation) {
   EXPECT_FALSE(AdaptLocal(local).value.has_value());
 }
 
-TEST(MapAdapters, SurfaceRequiresGlobalButLavaTubeDoesNotReadIt) {
+TEST(MapAdapters, SurfaceGlobalCanBeOptionalButPresentGlobalIsValidated) {
   InputSnapshot snapshot;
   snapshot.global_sequence = 11U;
   snapshot.local_sequence = 12U;
@@ -224,6 +224,12 @@ TEST(MapAdapters, SurfaceRequiresGlobalButLavaTubeDoesNotReadIt) {
   EXPECT_FALSE(AdaptSnapshot(lunar::pure_planning::EnvironmentMode::kLunarSurface,
                              snapshot)
                    .value.has_value());
+  const auto local_only_surface = AdaptSnapshot(
+      lunar::pure_planning::EnvironmentMode::kLunarSurface, snapshot, false);
+  ASSERT_TRUE(local_only_surface.value.has_value())
+      << local_only_surface.reason_code;
+  EXPECT_FALSE(local_only_surface.value->global_map.has_value());
+
   const auto lava = AdaptSnapshot(
       lunar::pure_planning::EnvironmentMode::kLavaTube, snapshot);
   ASSERT_TRUE(lava.value.has_value());
@@ -231,6 +237,19 @@ TEST(MapAdapters, SurfaceRequiresGlobalButLavaTubeDoesNotReadIt) {
   EXPECT_EQ(lava.value->local_map_sequence, 12U);
   EXPECT_EQ(lava.value->odometry_sequence, 13U);
   EXPECT_EQ(lava.value->tf_sequence, 14U);
+
+  auto malformed_global = std::make_shared<nav_msgs::msg::OccupancyGrid>();
+  malformed_global->header.frame_id = "odom";
+  malformed_global->info.width = 1U;
+  malformed_global->info.height = 1U;
+  malformed_global->info.resolution = 1.0F;
+  malformed_global->info.origin.orientation.w = 1.0;
+  malformed_global->data = {0};
+  snapshot.global_map = malformed_global;
+  EXPECT_FALSE(AdaptSnapshot(
+                   lunar::pure_planning::EnvironmentMode::kLunarSurface,
+                   snapshot, false)
+                   .value.has_value());
 
   odometry->pose.pose.orientation.w = 0.0;
   EXPECT_FALSE(AdaptSnapshot(lunar::pure_planning::EnvironmentMode::kLavaTube,

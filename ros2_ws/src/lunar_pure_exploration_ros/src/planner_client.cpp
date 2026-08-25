@@ -5,6 +5,7 @@
 #include <mutex>
 #include <new>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 #include <lunar_planning_msgs/action/plan_motion.hpp>
@@ -141,8 +142,16 @@ PlannerEvaluation Classify(
           PlannerResourceKind::kExecutablePathPoints,
           "RESOURCE_EXECUTABLE_PATH_LIMIT");
     }
-    const auto path_length =
-        PathLength(result.reference, maximum_path_preview_poses);
+    std::optional<double> path_length;
+    if (result.diagnostics.has_best_cost) {
+      const double best_cost = result.diagnostics.best_cost;
+      if (!std::isfinite(best_cost) || best_cost < 0.0) {
+        return ContractError(request_id, candidate_id, "BEST_COST_INVALID");
+      }
+      path_length = best_cost;
+    } else {
+      path_length = PathLength(result.reference, maximum_path_preview_poses);
+    }
     if (!path_length.has_value()) {
       return ContractError(request_id, candidate_id,
                            "PATH_PREVIEW_INVALID");
@@ -159,11 +168,13 @@ PlannerEvaluation Classify(
       !result.has_reference && IsEmptyReference(result.reference);
   const bool ordinary_failure_wrapper =
       wrapped.code == rclcpp_action::ResultCode::ABORTED;
+  const std::string_view reason_code{result.reason_code};
   if (result.planning_outcome == Action::Result::GOAL_INFEASIBLE &&
       result.execution_directive == Action::Result::NO_SAFE_REFERENCE &&
       empty_failure_reference && ordinary_failure_wrapper &&
-      (result.reason_code == "NO_PATH" ||
-       result.reason_code == "GOAL_OUTSIDE_LOCAL_MAP")) {
+      (reason_code == "NO_PATH" || reason_code == "GOAL_OUTSIDE_LOCAL_MAP" ||
+       reason_code == "GOAL_NOT_FREE" || reason_code == "GLOBAL_NO_PATH" ||
+       reason_code == "LOCAL_NO_CANDIDATE" || reason_code == "LOCAL_NO_PATH")) {
     return FailureEvaluation(request_id, candidate_id,
                              PlannerEvaluationKind::kExhaustiveNoPath,
                              result.reason_code);
@@ -176,6 +187,14 @@ PlannerEvaluation Classify(
                              PlannerEvaluationKind::kRetryable,
                              result.reason_code);
   }
+  if (result.planning_outcome == Action::Result::ACTIVE_REFERENCE_INVALIDATED &&
+      result.execution_directive == Action::Result::NO_SAFE_REFERENCE &&
+      empty_failure_reference && ordinary_failure_wrapper &&
+      reason_code == "STALE_PATH_INVALIDATED") {
+    return FailureEvaluation(request_id, candidate_id,
+                             PlannerEvaluationKind::kRetryable,
+                             result.reason_code);
+  }
   if (result.planning_outcome == Action::Result::CANCELED &&
       result.execution_directive == Action::Result::NO_SAFE_REFERENCE &&
       empty_failure_reference && locally_requested_cancel &&
@@ -184,6 +203,15 @@ PlannerEvaluation Classify(
     return FailureEvaluation(request_id, candidate_id,
                              PlannerEvaluationKind::kCanceled,
                              result.reason_code);
+  }
+  if (((result.planning_outcome == Action::Result::INVALID_REQUEST &&
+        (reason_code == "START_NOT_FREE" || reason_code == "INVALID_INPUT" ||
+         reason_code == "MAP_RESOLUTION_MISMATCH")) ||
+       (result.planning_outcome == Action::Result::NUMERICAL_FAILURE &&
+        (reason_code == "POSTCHECK_FAILED" || reason_code == "PLANNER_ERROR"))) &&
+      result.execution_directive == Action::Result::NO_SAFE_REFERENCE &&
+      empty_failure_reference && ordinary_failure_wrapper) {
+    return ContractError(request_id, candidate_id, result.reason_code);
   }
   return ContractError(request_id, candidate_id, "RESULT_CONTRACT_MISMATCH");
 }
@@ -217,7 +245,8 @@ struct PlannerClient::CallbackState final {
   PlannerClientParameters parameters;
   SteadyNow now;
   ActionClient::SharedPtr action_client;
-  rclcpp::TimerBase::SharedPtr timeout_timer;
+  rclcpp::TimerBase::SharedPtr goal_response_timer;
+  rclcpp::TimerBase::SharedPtr result_timer;
 };
 
 namespace {
@@ -230,8 +259,11 @@ struct CompletionDispatch final {
 template <typename State>
 void CancelTimerNoexcept(State& state) noexcept {
   try {
-    if (state.timeout_timer) {
-      state.timeout_timer->cancel();
+    if (state.goal_response_timer) {
+      state.goal_response_timer->cancel();
+    }
+    if (state.result_timer) {
+      state.result_timer->cancel();
     }
   } catch (...) {
   }
@@ -316,6 +348,8 @@ PlannerClient::PlannerClient(rclcpp::Node& node, std::string action_name,
                              PlannerClientParameters parameters, SteadyNow now) {
   if (action_name.empty() || parameters.maximum_path_preview_poses == 0U ||
       parameters.maximum_executable_path_points == 0U ||
+      parameters.goal_response_timeout <=
+          std::chrono::steady_clock::duration::zero() ||
       parameters.result_timeout <= std::chrono::steady_clock::duration::zero() ||
       !now) {
     throw std::invalid_argument{"invalid planner client parameters"};
@@ -326,7 +360,17 @@ PlannerClient::PlannerClient(rclcpp::Node& node, std::string action_name,
   state->action_client =
       rclcpp_action::create_client<Action>(&node, std::move(action_name));
   const std::weak_ptr<CallbackState> weak_state{state};
-  state->timeout_timer = node.create_wall_timer(
+  state->goal_response_timer = node.create_wall_timer(
+      parameters.goal_response_timeout, [weak_state] {
+        try {
+          const auto locked = weak_state.lock();
+          if (locked) {
+            PollTimeoutState(locked);
+          }
+        } catch (...) {
+        }
+      });
+  state->result_timer = node.create_wall_timer(
       parameters.result_timeout, [weak_state] {
         try {
           const auto locked = weak_state.lock();
@@ -336,7 +380,8 @@ PlannerClient::PlannerClient(rclcpp::Node& node, std::string action_name,
         } catch (...) {
         }
       });
-  state->timeout_timer->cancel();
+  state->goal_response_timer->cancel();
+  state->result_timer->cancel();
   state_ = std::move(state);
 }
 
@@ -360,13 +405,13 @@ std::string PlannerClient::MakeRequestId(const std::string_view task_id,
 
 void PlannerClient::Evaluate(
     std::string task_id, std::string request_id,
-    const lunar::pure_exploration::CandidateView& candidate,
+    const PlannerTarget target,
     const double position_tolerance_m, const double yaw_tolerance_rad,
     Completion completion) {
   if (task_id.empty() || request_id.empty() || !completion ||
-      !std::isfinite(candidate.pose.x) ||
-      !std::isfinite(candidate.pose.y) ||
-      !std::isfinite(candidate.pose.yaw) ||
+      !std::isfinite(target.pose.x) ||
+      !std::isfinite(target.pose.y) ||
+      !std::isfinite(target.pose.yaw) ||
       !std::isfinite(position_tolerance_m) || position_tolerance_m < 0.0 ||
       !std::isfinite(yaw_tolerance_rad) || yaw_tolerance_rad < 0.0) {
     throw std::invalid_argument{"invalid planner evaluation"};
@@ -380,18 +425,18 @@ void PlannerClient::Evaluate(
   goal.goal.header.frame_id = "map";
   goal.goal.goal_id = request_id + "/goal";
   goal.goal.goal_type = goal.goal.POINT;
-  goal.goal.point.x = candidate.pose.x;
-  goal.goal.point.y = candidate.pose.y;
+  goal.goal.point.x = target.pose.x;
+  goal.goal.point.y = target.pose.y;
   goal.goal.point.z = 0.0;
   goal.goal.planar_region.points.clear();
   goal.goal.position_tolerance_m = position_tolerance_m;
   goal.goal.has_yaw_constraint = true;
-  goal.goal.yaw_rad = candidate.pose.yaw;
+  goal.goal.yaw_rad = target.pose.yaw;
   goal.goal.yaw_tolerance_rad = yaw_tolerance_rad;
   goal.replace_active_request = false;
 
   const auto now = state_->now();
-  const auto deadline = now + state_->parameters.result_timeout;
+  const auto deadline = now + state_->parameters.goal_response_timeout;
   const std::weak_ptr<CallbackState> weak_state{state_};
   std::uint64_t generation{};
   std::optional<CompletionDispatch> immediate;
@@ -407,14 +452,14 @@ void PlannerClient::Evaluate(
     state_->active.emplace(CallbackState::ActiveRequest{
         .generation = generation,
         .request_id = request_id,
-        .candidate_id = candidate.id,
+        .candidate_id = target.display_id,
         .completion = std::move(completion),
         .deadline = deadline,
         .goal_handle = GoalHandle::SharedPtr{},
         .cancel_requested = false,
         .cancel_sent = false});
     try {
-      state_->timeout_timer->reset();
+      state_->goal_response_timer->reset();
     } catch (...) {
       state_->active.reset();
       throw;
@@ -423,7 +468,7 @@ void PlannerClient::Evaluate(
     if (!state_->action_client->action_server_is_ready()) {
       immediate = ClaimLocked(
           *state_, generation,
-          FailureEvaluation(request_id, candidate.id,
+          FailureEvaluation(request_id, target.display_id,
                             PlannerEvaluationKind::kRetryable,
                             "ACTION_SERVER_UNAVAILABLE"));
     } else {
@@ -450,6 +495,10 @@ void PlannerClient::Evaluate(
                         state->active->candidate_id,
                         PlannerEvaluationKind::kRetryable, "GOAL_REJECTED"));
               } else {
+                state->active->deadline =
+                    state->now() + state->parameters.result_timeout;
+                state->goal_response_timer->cancel();
+                state->result_timer->reset();
                 state->active->goal_handle = goal_handle;
                 if (state->active->cancel_requested &&
                     !state->active->cancel_sent) {
@@ -516,7 +565,7 @@ void PlannerClient::Evaluate(
       } catch (...) {
         immediate = ClaimLocked(
             *state_, generation,
-            FailureEvaluation(request_id, candidate.id,
+            FailureEvaluation(request_id, target.display_id,
                               PlannerEvaluationKind::kRetryable,
                               "GOAL_SEND_FAILED"));
       }

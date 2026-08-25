@@ -135,6 +135,12 @@ grid_map_msgs::msg::GridMap LocalMap() {
   return map;
 }
 
+grid_map_msgs::msg::GridMap BlockedLocalMap() {
+  auto map = LocalMap();
+  map.data[0] = Layer(8U, 8U, 1.0F);
+  return map;
+}
+
 nav_msgs::msg::OccupancyGrid GlobalMap(const std::uint32_t width = 8U) {
   nav_msgs::msg::OccupancyGrid map;
   map.header.frame_id = "map";
@@ -276,6 +282,13 @@ class RunningSystem final {
           std::scoped_lock lock{wheeled_paths_mutex};
           wheeled_paths.push_back(*value);
         });
+    wheeled_global_path_subscription =
+        client->create_subscription<nav_msgs::msg::Path>(
+            "/Car/T4/planning/wheeled_global_path", rclcpp::QoS{10}.reliable(),
+            [this](nav_msgs::msg::Path::ConstSharedPtr value) {
+              std::scoped_lock lock{wheeled_global_paths_mutex};
+              wheeled_global_paths.push_back(*value);
+            });
     timed_path_subscription = client->create_subscription<
         lunar_planning_msgs::msg::TimedPath>(
         "/Car/T4/planning/wheeled_path_timing", rclcpp::QoS{10}.reliable(),
@@ -302,6 +315,7 @@ class RunningSystem final {
     diagnostics_subscription.reset();
     wheeled_reference_subscription.reset();
     wheeled_path_subscription.reset();
+    wheeled_global_path_subscription.reset();
     timed_path_subscription.reset();
     client.reset();
     server.reset();
@@ -393,6 +407,11 @@ class RunningSystem final {
     return wheeled_paths;
   }
 
+  std::vector<nav_msgs::msg::Path> WheeledGlobalPaths() const {
+    std::scoped_lock lock{wheeled_global_paths_mutex};
+    return wheeled_global_paths;
+  }
+
   std::vector<lunar_planning_msgs::msg::TimedPath> TimedPaths() const {
     std::scoped_lock lock{timed_paths_mutex};
     return timed_paths;
@@ -404,6 +423,10 @@ class RunningSystem final {
   }
 
   void PublishLocalOnly() { local_publisher->publish(LocalMap()); }
+
+  void PublishLocal(grid_map_msgs::msg::GridMap map) {
+    local_publisher->publish(std::move(map));
+  }
 
   void PublishOdometryOnly(const double position_x) {
     odometry_publisher->publish(Odometry(position_x));
@@ -431,6 +454,8 @@ class RunningSystem final {
   rclcpp::Subscription<lunar_planning_msgs::msg::MotionReference>::SharedPtr
       wheeled_reference_subscription;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr wheeled_path_subscription;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr
+      wheeled_global_path_subscription;
   rclcpp::Subscription<lunar_planning_msgs::msg::TimedPath>::SharedPtr
       timed_path_subscription;
   mutable std::mutex diagnostics_mutex;
@@ -439,6 +464,8 @@ class RunningSystem final {
   std::vector<lunar_planning_msgs::msg::MotionReference> wheeled_references;
   mutable std::mutex wheeled_paths_mutex;
   std::vector<nav_msgs::msg::Path> wheeled_paths;
+  mutable std::mutex wheeled_global_paths_mutex;
+  std::vector<nav_msgs::msg::Path> wheeled_global_paths;
   mutable std::mutex timed_paths_mutex;
   std::vector<lunar_planning_msgs::msg::TimedPath> timed_paths;
   mutable std::mutex feedback_mutex;
@@ -568,10 +595,10 @@ std::set<std::string> SubscriptionTopics(
   return topics;
 }
 
-void ExpectTenKeyDiagnostic(
+void ExpectBaseDiagnostic(
     const diagnostic_msgs::msg::DiagnosticArray& diagnostics) {
   ASSERT_EQ(diagnostics.status.size(), 1U);
-  EXPECT_EQ(diagnostics.status.front().values.size(), 19U);
+  EXPECT_EQ(diagnostics.status.front().values.size(), 20U);
 }
 
 void ExpectBounded(const std::chrono::steady_clock::duration elapsed) {
@@ -659,6 +686,156 @@ TEST(PurePlanMotionServer, RejectsInvalidRollingParameter) {
   }
 }
 
+TEST(PurePlanMotionServer, RejectsUnknownWheelPlannerMode) {
+  EXPECT_THROW(
+      PurePlanMotionServer(
+          ServerOptions(
+              "wheel", ConfigPath("wheel.yaml").string(),
+              {rclcpp::Parameter{"wheel_planner_mode", "unknown_mode"}}),
+          [](const auto&) {
+            return Failure(lunar::pure_planning::PlanningStatus::kNoPath,
+                           "NO_PATH");
+          }),
+      std::runtime_error);
+}
+
+TEST(PurePlanMotionServer,
+     ExplicitGridTraversabilityV1AttachesOriginalResolutionSnapshot) {
+  std::atomic<bool> saw_v1_snapshot{false};
+  RunningSystem system{
+      [&](const lunar::pure_planning::PlanningRequest& request) {
+        saw_v1_snapshot =
+            request.config.wheel_planner_mode ==
+                lunar::pure_planning::WheelPlannerMode::kGridTraversabilityV1 &&
+            request.world.traversability_snapshot &&
+            request.world.traversability_snapshot->valid() &&
+            request.world.traversability_snapshot->resolution_m() == 0.2 &&
+            request.world.traversability_snapshot->revision() > 0U;
+        return Failure(lunar::pure_planning::PlanningStatus::kNoPath,
+                       "NO_PATH");
+      },
+      "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"wheel_planner_mode", "grid_traversability_v1"}}};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("grid-v1-snapshot"));
+  ASSERT_NE(handle, nullptr);
+  EXPECT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::ABORTED);
+  EXPECT_TRUE(saw_v1_snapshot.load());
+}
+
+TEST(PurePlanMotionServer,
+     GridTraversabilityV1PlansAndPublishesWithoutGlobalInput) {
+  RunningSystem system{
+      RealPlannerFn(), "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"wheel_planner_mode", "grid_traversability_v1"}}};
+  system.PublishInputs(false);
+
+  const auto handle = system.SendGoal(system.Goal("grid-v1-real"));
+  ASSERT_NE(handle, nullptr);
+  const auto wrapped = system.Result(handle);
+  ASSERT_EQ(wrapped.code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_TRUE(wrapped.result->has_reference);
+  EXPECT_EQ(wrapped.result->planning_outcome,
+            Action::Result::NEW_REFERENCE_AVAILABLE);
+  EXPECT_FALSE(wrapped.result->reference.trajectory.points.empty());
+  EXPECT_FALSE(wrapped.result->reference.path_preview.poses.empty());
+  ASSERT_TRUE(WaitFor([&] {
+    return system.WheeledReferences().size() == 1U &&
+           system.WheeledPaths().size() == 1U &&
+           system.WheeledGlobalPaths().size() == 1U &&
+           system.TimedPaths().size() == 1U &&
+           system.DiagnosticCount() == 1U;
+  }));
+  const auto reference = system.WheeledReferences().front();
+  const auto path = system.WheeledPaths().front();
+  const auto global_path = system.WheeledGlobalPaths().front();
+  const auto timed = system.TimedPaths().front();
+  ASSERT_FALSE(path.poses.empty());
+  ASSERT_FALSE(global_path.poses.empty());
+  EXPECT_EQ(global_path.header.frame_id, "map");
+  EXPECT_EQ(global_path.header.stamp, path.header.stamp);
+  EXPECT_NEAR(global_path.poses.back().pose.position.x, 0.2, 0.3);
+  EXPECT_NEAR(global_path.poses.back().pose.position.y, 0.0, 0.3);
+  ASSERT_EQ(reference.path_preview.poses.size(), path.poses.size());
+  ASSERT_EQ(timed.path.poses.size(), path.poses.size());
+  EXPECT_EQ(reference.path_preview.header.frame_id, path.header.frame_id);
+  EXPECT_EQ(timed.path.header.frame_id, path.header.frame_id);
+  EXPECT_EQ(reference.path_preview.header.stamp, path.header.stamp);
+  EXPECT_EQ(timed.path.header.stamp, path.header.stamp);
+  for (std::size_t index = 0U; index < path.poses.size(); ++index) {
+    EXPECT_EQ(reference.path_preview.poses[index].pose, path.poses[index].pose);
+    EXPECT_EQ(timed.path.poses[index].pose, path.poses[index].pose);
+  }
+  const auto diagnostics = system.Diagnostics().front();
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "planning_outcome"), "0");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "has_reference"), "true");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "grid_v1_active"), "true");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "global_input_sequence"), "0");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "global_call_count"), "1");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "local_call_count"), "1");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "canonical_resolution_m"),
+            "0.2");
+  EXPECT_TRUE(timed.planning_time.sec > 0 ||
+              timed.planning_time.nanosec > 0U);
+  const double timed_path_ms =
+      static_cast<double>(timed.planning_time.sec) * 1000.0 +
+      static_cast<double>(timed.planning_time.nanosec) / 1.0e6;
+  EXPECT_NEAR(timed_path_ms,
+              std::stod(FindDiagnosticValue(diagnostics,
+                                            "total_elapsed_ms")),
+              1.0e-6);
+}
+
+TEST(PurePlanMotionServer,
+     GridTraversabilityV1RejectsPathBlockedAfterPlanningSnapshot) {
+  std::promise<void> planner_entered_promise;
+  auto planner_entered = planner_entered_promise.get_future();
+  std::promise<void> release_planner_promise;
+  auto release_planner = release_planner_promise.get_future().share();
+  RunningSystem system{
+      [&](const lunar::pure_planning::PlanningRequest& request) {
+        planner_entered_promise.set_value();
+        release_planner.wait();
+        return Success(request);
+      },
+      "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"wheel_planner_mode", "grid_traversability_v1"}}};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("grid-v1-stale"));
+  ASSERT_NE(handle, nullptr);
+  ASSERT_EQ(planner_entered.wait_for(2s), std::future_status::ready);
+  system.PublishLocal(BlockedLocalMap());
+  std::this_thread::sleep_for(100ms);
+  release_planner_promise.set_value();
+
+  const auto wrapped = system.Result(handle);
+  EXPECT_EQ(wrapped.code, rclcpp_action::ResultCode::ABORTED);
+  EXPECT_FALSE(wrapped.result->has_reference);
+  EXPECT_EQ(wrapped.result->planning_outcome,
+            Action::Result::ACTIVE_REFERENCE_INVALIDATED);
+  EXPECT_EQ(wrapped.result->reason_code, "STALE_PATH_INVALIDATED");
+  EXPECT_EQ(wrapped.result->execution_directive,
+            Action::Result::NO_SAFE_REFERENCE);
+  EXPECT_TRUE(wrapped.result->reference.plan_id.empty());
+  EXPECT_TRUE(wrapped.result->reference.path_preview.poses.empty());
+  EXPECT_TRUE(wrapped.result->reference.trajectory.points.empty());
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
+  EXPECT_EQ(FindDiagnosticValue(system.Diagnostics().front(), "reason_code"),
+            "STALE_PATH_INVALIDATED");
+  ASSERT_TRUE(WaitFor([&] {
+    return system.WheeledReferences().size() == 1U &&
+           system.WheeledPaths().size() == 1U &&
+           system.TimedPaths().size() == 1U;
+  }));
+  EXPECT_TRUE(system.WheeledReferences().front().plan_id.empty());
+  EXPECT_TRUE(system.WheeledReferences().front().path_preview.poses.empty());
+  EXPECT_TRUE(system.WheeledReferences().front().trajectory.points.empty());
+  EXPECT_TRUE(system.WheeledPaths().front().poses.empty());
+  EXPECT_TRUE(system.TimedPaths().front().path.poses.empty());
+}
+
 TEST(PurePlanMotionServer, SurfaceNeedsGlobalButLavaDoesNotTouchIt) {
   std::atomic<std::uint64_t> calls{0U};
   RunningSystem system{[&](const auto& request) {
@@ -708,6 +885,8 @@ TEST(PurePlanMotionServer,
     const auto timed = successful.TimedPaths().front();
     EXPECT_EQ(timed.path.poses.size(), published.poses.size());
     EXPECT_TRUE(timed.planning_time.sec > 0 || timed.planning_time.nanosec > 0U);
+    ASSERT_TRUE(WaitFor(
+        [&] { return successful.WheeledGlobalPaths().size() == 1U; }));
   }
 
   RunningSystem failed{[](const auto&) {
@@ -727,6 +906,9 @@ TEST(PurePlanMotionServer,
   const auto cleared = failed.WheeledPaths().front();
   EXPECT_TRUE(cleared.header.frame_id.empty());
   EXPECT_TRUE(cleared.poses.empty());
+  ASSERT_TRUE(
+      WaitFor([&] { return failed.WheeledGlobalPaths().size() == 1U; }));
+  EXPECT_TRUE(failed.WheeledGlobalPaths().front().poses.empty());
   ASSERT_TRUE(WaitFor([&] { return failed.TimedPaths().size() == 1U; }));
   EXPECT_TRUE(failed.TimedPaths().front().path.poses.empty());
 }
@@ -839,7 +1021,7 @@ TEST_P(SuccessfulRequestLifecycleTest,
   // with the result future complete, this is a closed publication boundary.
   ASSERT_EQ(system.DiagnosticCount(), 1U);
   const auto diagnostics = system.Diagnostics().front();
-  ExpectTenKeyDiagnostic(diagnostics);
+  ExpectBaseDiagnostic(diagnostics);
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "reason_code"), "PLAN_FOUND");
 }
 
@@ -966,7 +1148,7 @@ TEST(PurePlanMotionServer, RejectsConflictAndSerializesReplacement) {
   std::set<std::string> diagnostic_request_ids;
   std::set<std::string> diagnostic_reasons;
   for (const auto& diagnostics : system.Diagnostics()) {
-    ExpectTenKeyDiagnostic(diagnostics);
+    ExpectBaseDiagnostic(diagnostics);
     diagnostic_request_ids.insert(
         FindDiagnosticValue(diagnostics, "request_id"));
     diagnostic_reasons.insert(FindDiagnosticValue(diagnostics, "reason_code"));
@@ -1032,7 +1214,7 @@ TEST(PurePlanMotionServer,
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
   ASSERT_EQ(system.DiagnosticCount(), 1U);
   const auto diagnostics = system.Diagnostics().front();
-  ExpectTenKeyDiagnostic(diagnostics);
+  ExpectBaseDiagnostic(diagnostics);
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "reason_code"), "TIMEOUT");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "planning_outcome"),
             std::to_string(Action::Result::RESOURCE_EXHAUSTED));
@@ -1069,7 +1251,7 @@ TEST(PurePlanMotionServer, ClientCancelTerminatesOnceAndPublishesOneDiagnostic) 
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
   ASSERT_EQ(system.DiagnosticCount(), 1U);
   const auto diagnostics = system.Diagnostics().front();
-  ExpectTenKeyDiagnostic(diagnostics);
+  ExpectBaseDiagnostic(diagnostics);
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "request_id"), "cancel");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "reason_code"),
             "REQUEST_CANCELED");
@@ -1582,7 +1764,7 @@ TEST(PurePlanMotionServer,
   EXPECT_FALSE(result.result->has_reference);
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
   const auto diagnostics = system.Diagnostics().front();
-  ExpectTenKeyDiagnostic(diagnostics);
+  ExpectBaseDiagnostic(diagnostics);
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "reason_code"),
             "PLANNER_ERROR");
 }
@@ -1864,7 +2046,7 @@ TEST(PurePlanMotionServer,
   EXPECT_LE(core_remaining_ms.load(), 8);
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
   const auto diagnostics = system.Diagnostics().front();
-  ExpectTenKeyDiagnostic(diagnostics);
+  ExpectBaseDiagnostic(diagnostics);
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "planning_outcome"),
             std::to_string(Action::Result::RESOURCE_EXHAUSTED));
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "reason_code"), "TIMEOUT");

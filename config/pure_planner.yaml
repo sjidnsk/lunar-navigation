@@ -4,6 +4,7 @@
     platform_config: ""
     global_occupancy_threshold_percent: 50
     local_occupancy_threshold: 0.5
+    wheel_planner_mode: legacy_certified
     global_map_topic: /Car/T3/mapping/global_overview
     local_map_topic: /Car/T3/mapping/grid_map
     odometry_topic: /Car/T3/localization/odometry
@@ -12,6 +13,7 @@
     diagnostics_topic: /Car/T4/planning/diagnostics
     wheeled_reference_topic: /Car/T4/planning/wheeled_reference
     wheeled_path_topic: /Car/T4/planning/wheeled_path
+    wheeled_global_path_topic: /Car/T4/planning/wheeled_global_path
     wheeled_timed_path_topic: /Car/T4/planning/wheeled_path_timing
     rolling_surface_enabled: false
     rolling_horizon_m: 8.0

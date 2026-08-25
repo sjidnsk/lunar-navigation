@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "lunar_pure_planner_core/planner.hpp"
+#include "lunar_pure_planner_core/traversability_map.hpp"
 
 namespace lunar::pure_planning {
 namespace {
@@ -26,6 +27,18 @@ TEST(PublicApi, ExposesOnlyTheMinimalDualModePlannerEntrypoint) {
                 std::function<LocalStageResult(const PlanningRequest&,
                                                const LocalGoalSet&,
                                                SearchControl)>>);
+}
+
+TEST(PublicApi, DefaultsToLegacyAndCarriesNoTraversabilitySnapshot) {
+  static_assert(std::is_copy_constructible_v<TraversabilitySnapshot>);
+  EXPECT_EQ(WheelPlannerModeName(WheelPlannerMode::kGridTraversabilityV1),
+            "grid_traversability_v1");
+
+  PlanningRequest request;
+
+  EXPECT_EQ(request.config.wheel_planner_mode,
+            WheelPlannerMode::kLegacyCertified);
+  EXPECT_FALSE(request.world.traversability_snapshot);
 }
 
 TEST(PublicApi, RejectsPlanarRegionWithoutEnteringInjectedBackends) {

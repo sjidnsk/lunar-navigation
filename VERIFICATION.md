@@ -180,7 +180,7 @@ python3 -m pytest -q -p no:cacheprovider \
 - 恰好 4 个业务订阅：global overview、local grid map、Odometry、`/tf`；
 - `/Car/T4/plan_motion` Action 的 5 个内部 service 存在；
 - `/Car/T4/planning/diagnostics` 恰有 1 个 publisher；
-- 每个 accepted request 恰有一条、恰含 10 个键的 diagnostics；
+- 每个 accepted request 恰有一条 diagnostics，包含公共键集及条件发布的 wheel metrics；
 - Surface/Lava 成功、`TIMEOUT`、client cancel、replace 和异常恢复均有界结束；
 - wheel、legged、hopper 安装配置选择正确，错配返回 `PLANNER_ERROR`。
 

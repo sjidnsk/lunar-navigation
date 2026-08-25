@@ -1,5 +1,6 @@
 #include "lunar_pure_exploration_ros/planner_client.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -31,6 +32,7 @@
 #include <variant>
 
 #include "accepted_goal_finalizer.hpp"
+#include "lunar_pure_exploration_core/candidate_generator.hpp"
 #include "lunar_pure_planner_ros/message_conversion.hpp"
 
 namespace lunar::pure_exploration_ros {
@@ -240,6 +242,10 @@ lunar::pure_exploration::CandidateView Candidate(
           .frontier_distance_m = 2.0};
 }
 
+PlannerTarget Target(lunar::pure_exploration::CandidateView candidate) {
+  return {.display_id = candidate.id, .pose = candidate.pose};
+}
+
 Action::Result FailureResult(const std::uint8_t outcome,
                              std::string reason_code) {
   Action::Result result;
@@ -334,7 +340,8 @@ class PlannerClientTest : public ::testing::Test {
         *client_node_, action_name_,
         PlannerClientParameters{.maximum_path_preview_poses = 4U,
                                 .maximum_executable_path_points = 3U,
-                                .result_timeout = 2s},
+                                .goal_response_timeout = 1s,
+                                .result_timeout = 3500ms},
         [this] {
           return std::chrono::steady_clock::time_point{
               std::chrono::nanoseconds{now_ns_.load()}};
@@ -358,7 +365,9 @@ class PlannerClientTest : public ::testing::Test {
   void Evaluate(const std::string& request_id,
                 const lunar::pure_exploration::CandidateView& candidate) {
     client_->Evaluate(
-        "task-alpha", request_id, candidate, 0.25, 0.125,
+        "task-alpha", request_id,
+        PlannerTarget{.display_id = candidate.id, .pose = candidate.pose},
+        0.25, 0.125,
         [this](PlannerEvaluation evaluation) {
           std::scoped_lock lock{completion_mutex_};
           completions_.push_back(std::move(evaluation));
@@ -455,6 +464,39 @@ TEST_F(PlannerClientTest, BuildsExactCanonicalGoalAndCorrelatesOnlyByRequestId) 
   EXPECT_NE(first.request_id, second.request_id);
 }
 
+TEST_F(PlannerClientTest,
+       NeutralApproachTargetBuildsTheExactPointAndYawGoal) {
+  const PlannerTarget approach_target{
+      .display_id = 314U,
+      .pose = {.x = -0.25, .y = 5.25, .yaw = -0.375},
+  };
+  client_->Evaluate(
+      "task-alpha", "task-alpha/candidate/approach", approach_target,
+      0.2, 0.1,
+      [this](PlannerEvaluation evaluation) {
+        std::scoped_lock lock{completion_mutex_};
+        completions_.push_back(std::move(evaluation));
+      });
+
+  ASSERT_TRUE(WaitFor([&] {
+    return server_->HasGoal("task-alpha/candidate/approach");
+  }));
+  const auto goal = server_->Goal("task-alpha/candidate/approach");
+  EXPECT_EQ(goal.goal.goal_type, goal.goal.POINT);
+  EXPECT_DOUBLE_EQ(goal.goal.point.x, -0.25);
+  EXPECT_DOUBLE_EQ(goal.goal.point.y, 5.25);
+  EXPECT_DOUBLE_EQ(goal.goal.yaw_rad, -0.375);
+  EXPECT_DOUBLE_EQ(goal.goal.position_tolerance_m, 0.2);
+  EXPECT_DOUBLE_EQ(goal.goal.yaw_tolerance_rad, 0.1);
+
+  const auto evaluation = FinishAndWait(
+      "task-alpha/candidate/approach",
+      rclcpp_action::ResultCode::ABORTED,
+      FailureResult(Action::Result::GOAL_INFEASIBLE, "GLOBAL_NO_PATH"));
+  EXPECT_EQ(evaluation.candidate_id, 314U);
+  EXPECT_EQ(evaluation.kind, PlannerEvaluationKind::kExhaustiveNoPath);
+}
+
 TEST_F(PlannerClientTest, ClassifiesTheOnlyFourAcceptedTypedCombinations) {
   Evaluate("reachable", Candidate());
   const auto reference = ReferenceWithPath({{0.0, 0.0}, {3.0, 4.0}, {6.0, 8.0}});
@@ -500,6 +542,104 @@ TEST_F(PlannerClientTest, ClassifiesTheOnlyFourAcceptedTypedCombinations) {
   EXPECT_EQ(canceled.reason_code, "REQUEST_CANCELED");
   EXPECT_FALSE(canceled.path_length_m.has_value());
   EXPECT_FALSE(canceled.reference.has_value());
+}
+
+TEST_F(PlannerClientTest,
+       UsesGridV1BestCostForReachableRoutesAndRejectsInvalidCosts) {
+  auto grid_v1_result = SuccessResult({{0.0, 0.0}, {8.0, 0.0}});
+  grid_v1_result.diagnostics.has_best_cost = true;
+  grid_v1_result.diagnostics.best_cost = 31.25;
+  Evaluate("grid-v1-best-cost", Candidate());
+  const auto grid_v1_evaluation = FinishAndWait(
+      "grid-v1-best-cost", rclcpp_action::ResultCode::SUCCEEDED,
+      grid_v1_result);
+  EXPECT_EQ(grid_v1_evaluation.kind, PlannerEvaluationKind::kReachable);
+  ASSERT_TRUE(grid_v1_evaluation.path_length_m.has_value());
+  EXPECT_DOUBLE_EQ(*grid_v1_evaluation.path_length_m, 31.25);
+
+  for (const auto [id, value] :
+       {std::pair{"nan", std::numeric_limits<double>::quiet_NaN()},
+        std::pair{"infinity", std::numeric_limits<double>::infinity()},
+        std::pair{"negative", -0.25}}) {
+    auto invalid = grid_v1_result;
+    invalid.diagnostics.best_cost = value;
+    Evaluate("grid-v1-best-cost-" + std::string{id}, Candidate());
+    const auto evaluation = FinishAndWait(
+        "grid-v1-best-cost-" + std::string{id},
+        rclcpp_action::ResultCode::SUCCEEDED, invalid);
+    EXPECT_EQ(evaluation.kind, PlannerEvaluationKind::kContractError);
+    EXPECT_EQ(evaluation.reason_code, "BEST_COST_INVALID");
+  }
+
+  auto compatible = SuccessResult({{0.0, 0.0}, {8.0, 0.0}});
+  compatible.diagnostics.has_best_cost = false;
+  compatible.diagnostics.best_cost = std::numeric_limits<double>::quiet_NaN();
+  Evaluate("grid-v1-best-cost-compatibility", Candidate());
+  const auto fallback = FinishAndWait(
+      "grid-v1-best-cost-compatibility", rclcpp_action::ResultCode::SUCCEEDED,
+      compatible);
+  EXPECT_EQ(fallback.kind, PlannerEvaluationKind::kReachable);
+  ASSERT_TRUE(fallback.path_length_m.has_value());
+  EXPECT_DOUBLE_EQ(*fallback.path_length_m, 8.0);
+}
+
+TEST_F(PlannerClientTest, ClassifiesFrozenGridV1FailureReasons) {
+  struct Case final {
+    const char* id;
+    std::uint8_t outcome;
+    rclcpp_action::ResultCode wrapper;
+    const char* reason;
+    PlannerEvaluationKind kind;
+    bool locally_requested_cancel;
+  };
+  const std::array cases{
+      Case{"goal-not-free", Action::Result::GOAL_INFEASIBLE,
+           rclcpp_action::ResultCode::ABORTED, "GOAL_NOT_FREE",
+           PlannerEvaluationKind::kExhaustiveNoPath, false},
+      Case{"global-no-path", Action::Result::GOAL_INFEASIBLE,
+           rclcpp_action::ResultCode::ABORTED, "GLOBAL_NO_PATH",
+           PlannerEvaluationKind::kExhaustiveNoPath, false},
+      Case{"local-no-candidate", Action::Result::GOAL_INFEASIBLE,
+           rclcpp_action::ResultCode::ABORTED, "LOCAL_NO_CANDIDATE",
+           PlannerEvaluationKind::kExhaustiveNoPath, false},
+      Case{"local-no-path", Action::Result::GOAL_INFEASIBLE,
+           rclcpp_action::ResultCode::ABORTED, "LOCAL_NO_PATH",
+           PlannerEvaluationKind::kExhaustiveNoPath, false},
+      Case{"stale-path", Action::Result::ACTIVE_REFERENCE_INVALIDATED,
+           rclcpp_action::ResultCode::ABORTED, "STALE_PATH_INVALIDATED",
+           PlannerEvaluationKind::kRetryable, false},
+      Case{"timeout", Action::Result::RESOURCE_EXHAUSTED,
+           rclcpp_action::ResultCode::ABORTED, "TIMEOUT",
+           PlannerEvaluationKind::kRetryable, false},
+      Case{"canceled", Action::Result::CANCELED,
+           rclcpp_action::ResultCode::CANCELED, "REQUEST_CANCELED",
+           PlannerEvaluationKind::kCanceled, true},
+      Case{"start-not-free", Action::Result::INVALID_REQUEST,
+           rclcpp_action::ResultCode::ABORTED, "START_NOT_FREE",
+           PlannerEvaluationKind::kContractError, false},
+      Case{"invalid-input", Action::Result::INVALID_REQUEST,
+           rclcpp_action::ResultCode::ABORTED, "INVALID_INPUT",
+           PlannerEvaluationKind::kContractError, false},
+      Case{"resolution", Action::Result::INVALID_REQUEST,
+           rclcpp_action::ResultCode::ABORTED, "MAP_RESOLUTION_MISMATCH",
+           PlannerEvaluationKind::kContractError, false},
+      Case{"postcheck", Action::Result::NUMERICAL_FAILURE,
+           rclcpp_action::ResultCode::ABORTED, "POSTCHECK_FAILED",
+           PlannerEvaluationKind::kContractError, false},
+      Case{"planner-error", Action::Result::NUMERICAL_FAILURE,
+           rclcpp_action::ResultCode::ABORTED, "PLANNER_ERROR",
+           PlannerEvaluationKind::kContractError, false},
+  };
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.id);
+    Evaluate(test_case.id, Candidate());
+    const auto evaluation = FinishAndWait(
+        test_case.id, test_case.wrapper,
+        FailureResult(test_case.outcome, test_case.reason),
+        test_case.locally_requested_cancel);
+    EXPECT_EQ(evaluation.kind, test_case.kind);
+    EXPECT_EQ(evaluation.reason_code, test_case.reason);
+  }
 }
 
 TEST_F(PlannerClientTest,
@@ -770,11 +910,13 @@ TEST_F(PlannerClientTest,
   Evaluate("timeout-with-handle", Candidate());
   ASSERT_TRUE(
       WaitFor([&] { return server_->HasHandle("timeout-with-handle"); }));
-  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(2s).count() - 1;
+  now_ns_ =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(3499ms).count();
   client_->PollTimeout();
   EXPECT_EQ(CompletionCount(), 0U);
 
-  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(2s).count();
+  now_ns_ =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(3500ms).count();
   client_->PollTimeout();
   ASSERT_TRUE(WaitFor([&] { return CompletionCount() == 1U; }));
   ASSERT_TRUE(WaitFor(
@@ -790,22 +932,110 @@ TEST_F(PlannerClientTest,
   EXPECT_FALSE(completions_.front().reference.has_value());
 }
 
+TEST_F(PlannerClientTest, ResultDeadlineStartsWhenGoalIsAccepted) {
+  server_->DelayNextGoalResponse();
+  Evaluate("accepted-starts-result-deadline", Candidate());
+  ASSERT_TRUE(WaitFor([&] {
+    return server_->GoalCallbackEntered("accepted-starts-result-deadline");
+  }));
+
+  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(750ms).count();
+  server_->ReleaseGoalResponses();
+  ASSERT_TRUE(WaitFor(
+      [&] { return server_->HasHandle("accepted-starts-result-deadline"); }));
+  std::this_thread::sleep_for(20ms);
+
+  now_ns_ =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(3500ms).count();
+  client_->PollTimeout();
+  EXPECT_EQ(CompletionCount(), 0U);
+  EXPECT_EQ(server_->CancelCount("accepted-starts-result-deadline"), 0U);
+
+  now_ns_ =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(4250ms).count();
+  client_->PollTimeout();
+  ASSERT_TRUE(WaitFor([&] { return CompletionCount() == 1U; }));
+  ASSERT_TRUE(WaitFor([&] {
+    return server_->CancelCount("accepted-starts-result-deadline") == 1U;
+  }));
+  std::scoped_lock lock{completion_mutex_};
+  EXPECT_EQ(completions_.front().kind, PlannerEvaluationKind::kRetryable);
+  EXPECT_EQ(completions_.front().reason_code, "CLIENT_RESULT_TIMEOUT");
+}
+
+TEST_F(PlannerClientTest, LateCertifiedPathWinsBeforeResultWatchdog) {
+  Evaluate("plan-found-late", Candidate());
+  ASSERT_TRUE(WaitFor([&] { return server_->HasHandle("plan-found-late"); }));
+
+  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(2500ms).count();
+  client_->PollTimeout();
+  EXPECT_EQ(CompletionCount(), 0U);
+  EXPECT_EQ(server_->CancelCount("plan-found-late"), 0U);
+
+  auto result = SuccessResult({{0.0, 0.0}, {1.0, 0.0}});
+  result.reason_code = "PLAN_FOUND_LATE";
+  const auto evaluation = FinishAndWait(
+      "plan-found-late", rclcpp_action::ResultCode::SUCCEEDED, result);
+  EXPECT_EQ(evaluation.kind, PlannerEvaluationKind::kReachable);
+  EXPECT_EQ(evaluation.reason_code, "PLAN_FOUND_LATE");
+  EXPECT_EQ(server_->CancelCount("plan-found-late"), 0U);
+}
+
+TEST_F(PlannerClientTest, ServerTimeoutWinsBeforeResultWatchdog) {
+  Evaluate("server-timeout", Candidate());
+  ASSERT_TRUE(WaitFor([&] { return server_->HasHandle("server-timeout"); }));
+
+  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(3s).count();
+  client_->PollTimeout();
+  EXPECT_EQ(CompletionCount(), 0U);
+  EXPECT_EQ(server_->CancelCount("server-timeout"), 0U);
+
+  const auto evaluation = FinishAndWait(
+      "server-timeout", rclcpp_action::ResultCode::ABORTED,
+      FailureResult(Action::Result::RESOURCE_EXHAUSTED, "TIMEOUT"));
+  EXPECT_EQ(evaluation.kind, PlannerEvaluationKind::kRetryable);
+  EXPECT_EQ(evaluation.reason_code, "TIMEOUT");
+  EXPECT_EQ(server_->CancelCount("server-timeout"), 0U);
+}
+
+TEST_F(PlannerClientTest, MissingGoalResponseUsesGoalWatchdogWithoutCancel) {
+  server_->DelayNextGoalResponse();
+  Evaluate("missing-goal-response", Candidate());
+  ASSERT_TRUE(WaitFor([&] {
+    return server_->GoalCallbackEntered("missing-goal-response");
+  }));
+
+  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(999ms).count();
+  client_->PollTimeout();
+  EXPECT_EQ(CompletionCount(), 0U);
+
+  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(1s).count();
+  client_->PollTimeout();
+  ASSERT_TRUE(WaitFor([&] { return CompletionCount() == 1U; }));
+  EXPECT_EQ(server_->CancelCount("missing-goal-response"), 0U);
+  std::scoped_lock lock{completion_mutex_};
+  EXPECT_EQ(completions_.front().kind, PlannerEvaluationKind::kRetryable);
+  EXPECT_EQ(completions_.front().reason_code, "CLIENT_RESULT_TIMEOUT");
+  server_->ReleaseGoalResponses();
+}
+
 TEST_F(PlannerClientTest,
        ProductionTimerTimesOutOnceAndReentrantGenerationIgnoresOldCallbacks) {
   auto runtime_client = std::make_unique<PlannerClient>(
       *client_node_, action_name_,
       PlannerClientParameters{.maximum_path_preview_poses = 4U,
                               .maximum_executable_path_points = 3U,
+                              .goal_response_timeout = 100ms,
                               .result_timeout = 250ms});
   runtime_client->Evaluate(
-      "task-alpha", "automatic-timeout", Candidate(), 0.25, 0.125,
+      "task-alpha", "automatic-timeout", Target(Candidate()), 0.25, 0.125,
       [&, this](PlannerEvaluation evaluation) {
         {
           std::scoped_lock lock{completion_mutex_};
           completions_.push_back(std::move(evaluation));
         }
         runtime_client->Evaluate(
-            "task-alpha", "automatic-reentrant", Candidate(42U), 0.25,
+            "task-alpha", "automatic-reentrant", Target(Candidate(42U)), 0.25,
             0.125, [this](PlannerEvaluation next) {
               std::scoped_lock lock{completion_mutex_};
               completions_.push_back(std::move(next));
@@ -854,7 +1084,7 @@ TEST_F(PlannerClientTest,
   ASSERT_TRUE(WaitFor(
       [&] { return server_->GoalCallbackEntered("timeout-before-handle"); }));
   client_->CancelActive();
-  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(2s).count();
+  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(1s).count();
   client_->PollTimeout();
   ASSERT_TRUE(WaitFor([&] { return CompletionCount() == 1U; }));
   EXPECT_EQ(server_->CancelCount("timeout-before-handle"), 0U);
@@ -883,7 +1113,8 @@ TEST_F(PlannerClientTest,
   client_->CancelActive();
   ASSERT_TRUE(WaitFor(
       [&] { return server_->CancelCount("old-generation") == 1U; }));
-  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(2s).count();
+  now_ns_ =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(3500ms).count();
   client_->PollTimeout();
   ASSERT_TRUE(WaitFor([&] { return CompletionCount() == 1U; }));
 
@@ -918,7 +1149,8 @@ TEST_F(PlannerClientTest,
   std::this_thread::sleep_for(20ms);
   EXPECT_EQ(CompletionCount(), 0U);
 
-  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(2s).count();
+  now_ns_ =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(3500ms).count();
   client_->PollTimeout();
   ASSERT_TRUE(WaitFor([&] { return CompletionCount() == 1U; }));
   std::scoped_lock lock{completion_mutex_};
@@ -941,7 +1173,8 @@ TEST_F(PlannerClientTest,
       FailureResult(Action::Result::GOAL_INFEASIBLE, "NO_PATH"));
   EXPECT_EQ(evaluation.kind, PlannerEvaluationKind::kExhaustiveNoPath);
   server_->ReleaseCancelResponses();
-  now_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(2s).count();
+  now_ns_ =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(3500ms).count();
   client_->PollTimeout();
   std::this_thread::sleep_for(20ms);
   EXPECT_EQ(CompletionCount(), 1U);
@@ -967,14 +1200,14 @@ TEST_F(PlannerClientTest,
 TEST_F(PlannerClientTest,
        CompletionMayReenterEvaluateAndThrowWithoutUndoingEitherGeneration) {
   client_->Evaluate(
-      "task-alpha", "reentrant-first", Candidate(), 0.25, 0.125,
+      "task-alpha", "reentrant-first", Target(Candidate()), 0.25, 0.125,
       [this](PlannerEvaluation evaluation) {
         {
           std::scoped_lock lock{completion_mutex_};
           completions_.push_back(std::move(evaluation));
         }
         client_->Evaluate(
-            "task-alpha", "reentrant-second", Candidate(43U), 0.25, 0.125,
+            "task-alpha", "reentrant-second", Target(Candidate(43U)), 0.25, 0.125,
             [this](PlannerEvaluation second) {
               std::scoped_lock lock{completion_mutex_};
               completions_.push_back(std::move(second));
@@ -1015,12 +1248,13 @@ TEST_F(PlannerClientTest,
       *client_node_, action_name_ + "_missing",
       PlannerClientParameters{.maximum_path_preview_poses = 1U,
                               .maximum_executable_path_points = 1U,
-                              .result_timeout = 2s},
+                              .goal_response_timeout = 1s,
+                              .result_timeout = 3500ms},
       [] { return std::chrono::steady_clock::time_point{}; }};
   std::optional<PlannerEvaluation> completion;
   auto candidate = Candidate(55U);
   unavailable.Evaluate(
-      "task-alpha", "unavailable", candidate, 0.0, 0.0,
+      "task-alpha", "unavailable", Target(candidate), 0.0, 0.0,
       [&](PlannerEvaluation evaluation) { completion = std::move(evaluation); });
   candidate.id = 99U;
   ASSERT_TRUE(completion.has_value());

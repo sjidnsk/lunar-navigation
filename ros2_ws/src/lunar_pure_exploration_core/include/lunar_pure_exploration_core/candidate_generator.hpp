@@ -4,22 +4,17 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
 #include <vector>
 
 #include "lunar_pure_exploration_core/frontier_detector.hpp"
+#include "lunar_pure_exploration_core/platform_geometry.hpp"
+#include "lunar_pure_exploration_core/safe_pose_validator.hpp"
 
 namespace lunar::pure_exploration {
-
-struct PlatformGeometry {
-  std::string platform_id;
-  std::string platform_type;
-  std::string base_frame_id;
-  std::vector<Vec2> footprint_vertices;
-  double minimum_clearance_m;
-};
 
 struct CandidateParameters {
   std::array<double, 5> yaw_offsets_rad;
@@ -32,6 +27,8 @@ struct CandidateKey {
   auto operator<=>(const CandidateKey&) const = default;
 };
 
+CandidateKey MakeCandidateKey(Pose2 pose);
+
 struct CandidateView {
   std::uint64_t id;
   std::uint64_t frontier_id;
@@ -41,6 +38,8 @@ struct CandidateView {
   double frontier_distance_m;
   std::shared_ptr<const std::vector<std::int64_t>> frontier_canonical_key{};
 };
+
+using CandidatePositionAcceptance = std::function<bool(Pose2)>;
 
 class CandidateGenerator {
  public:
@@ -54,7 +53,8 @@ class CandidateGenerator {
                      CandidateParameters parameters, Limits limits);
   std::vector<CandidateView> Generate(
       const TaskRaster& raster,
-      std::span<const FrontierCluster> frontiers) const;
+      std::span<const FrontierCluster> frontiers,
+      const CandidatePositionAcceptance& accept_position = {}) const;
 
   double platform_length_m() const;
   double platform_width_m() const;
@@ -65,12 +65,9 @@ class CandidateGenerator {
   std::size_t maximum_search_step(double resolution_m) const;
 
  private:
-  PlatformGeometry platform_;
+  SafePoseValidator validator_;
   CandidateParameters parameters_;
   Limits limits_;
-  double platform_length_m_;
-  double platform_width_m_;
-  double footprint_circumscribed_radius_m_;
 };
 
 }  // namespace lunar::pure_exploration

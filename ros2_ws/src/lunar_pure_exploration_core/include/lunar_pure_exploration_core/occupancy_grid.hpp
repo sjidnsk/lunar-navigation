@@ -16,6 +16,7 @@ class OccupancyGridView {
                     std::int8_t occupied_threshold);
 
   CellState Classify(GridIndex index) const;
+  std::optional<std::int8_t> RawValue(GridIndex index) const;
   bool Contains(GridIndex index) const;
   static std::optional<Vec2> WorldToGrid(const GridGeometry& geometry,
                                          Vec2 world_point);
