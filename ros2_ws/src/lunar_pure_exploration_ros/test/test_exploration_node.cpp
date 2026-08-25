@@ -4710,7 +4710,9 @@ TEST_F(ExplorationNodeTest,
     return status && status->state == Status::ERROR &&
            status->reason_code == "FINAL_MAP_VALIDATION_ERROR";
   }));
-  EXPECT_EQ(ExecutionCancels(), std::vector<std::string>{plan_id});
+  ASSERT_TRUE(WaitFor([this, &plan_id] {
+    return ExecutionCancels() == std::vector<std::string>{plan_id};
+  }));
   EXPECT_EQ(guidance_build_calls->load(), 1U);
 }
 

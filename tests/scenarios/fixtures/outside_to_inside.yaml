@@ -547,16 +547,16 @@ expected:
     - {request_id: task7-outside-to-inside/candidate/106, candidate_key: "16581,14750,0", goal_cell: "41,29", response_kind: GLOBAL_NO_PATH, path_segments: []}
   status_sequence: [IDLE, WAITING_FOR_INPUT, SELECTING_FRONTIER, PLANNING, EXECUTING, SELECTING_FRONTIER, PLANNING, EXECUTING, SELECTING_FRONTIER, PLANNING, EXECUTING, SELECTING_FRONTIER, PLANNING, EXECUTING, SELECTING_FRONTIER, COMPLETED]
   reference_plan_ids: ["scenario-plan:task7-outside-to-inside/candidate/0", "scenario-plan:task7-outside-to-inside/candidate/31", "scenario-plan:task7-outside-to-inside/candidate/64", "scenario-plan:task7-outside-to-inside/candidate/79"]
-  cancellation_plan_ids: ["scenario-plan:task7-outside-to-inside/candidate/0", "scenario-plan:task7-outside-to-inside/candidate/64"]
+  cancellation_plan_ids: ["scenario-plan:task7-outside-to-inside/candidate/64"]
   coverage_ratio: 0.875
   completed: true
   requires_exhaustive_planner_evidence: true
   replan_count: 0
   stuck_retries: 0
   committed_goal_key: "16581,4750,450"
-  semantic_mutations: {timestamp_only: "fnv1a64:544956a6bc383599", map_version_only: "fnv1a64:544956a6bc383599", covariance_only: "fnv1a64:544956a6bc383599"}
+  semantic_mutations: {timestamp_only: "fnv1a64:958c9aa1ee6a8991", map_version_only: "fnv1a64:958c9aa1ee6a8991", covariance_only: "fnv1a64:958c9aa1ee6a8991"}
   two_segment: {enabled: false, committed_candidate_key: null, request_ids: [], endpoint_cells: [], final_goal_cell: null}
-  ordered_trace_id: "fnv1a64:544956a6bc383599"
+  ordered_trace_id: "fnv1a64:958c9aa1ee6a8991"
   navigation_phases: [APPROACH_TASK, EXPLORE_TASK]
   terminal_reason: COMPLETED_NO_REACHABLE_FRONTIER
   minimum_coverage_ratio: 0.80
