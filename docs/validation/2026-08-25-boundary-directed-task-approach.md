@@ -2,10 +2,11 @@
 
 ## 结论与范围
 
-2026-08-25 在隔离特性分支完成“任务区外启动，先安全进入任务区，再自主探索”。实现只扩展纯探索
-core/ROS 协调器、300 m 资源参数和测试；规划器生产实现仍为已批准基线
-`3f5b0f746a15d48edced0c045387154eb808e59c` 的
-`grid_traversability_v1`，未增加 legacy fallback、控制器行为或外部接口。
+2026-08-25 在隔离特性分支完成“任务区外启动，先安全进入任务区，再自主探索”，并以
+`adee712` 合入 `main`。实现只扩展纯探索 core/ROS 协调器、300 m 资源参数和测试；
+merge 相对 `main` 第一父提交没有修改规划器生产目录，保留当前 `main` 已正式集成的最新
+`grid_traversability_v1` 与 `global_goal_feasibility`，未增加 legacy fallback、控制器行为
+或外部接口。
 
 ## 已实现合同
 
@@ -38,15 +39,21 @@ core/ROS 协调器、300 m 资源参数和测试；规划器生产实现仍为�
 - 三个负例在重复 poll 后保持原 reason、请求数和状态发布数不变，且零
   `COMPLETED`。
 
-冻结基线缺少
-`lunar_pure_planner_core/global_goal_feasibility.hpp`，因此受影响 C++ translation units
-使用过仅位于 `/tmp` 的 test-only 兼容头重建；该头保留目标 known-free 与 occupied inflation
-语义，测试后已删除，不能视为生产 global-feasibility 构建证明。无垫片的完整原生 package build
-仍为 **BLOCKED_BY_BASELINE**。
+隔离特性分支最初因其冻结基线缺少
+`lunar_pure_planner_core/global_goal_feasibility.hpp` 使用过 test-only 兼容头；该头已删除。
+`main` 在本次 merge 前已经正式提供该头及实现。合并后从 `main@adee712` 使用仓库外
+`/tmp/lunar-main-merge-ZLku0Q` 构建目录、无任何垫片完成
+`lunar_planning_msgs`、planner core/ROS、exploration core/msg/ROS 共 6 包构建；随后
+`test_exploration_node` 与 `test_synthetic_scenarios` 2/2 targets 通过，Python 再次为
+37 passed、1 skipped。因此原 **BLOCKED_BY_BASELINE** 只属于历史特性分支证据，不再适用于
+当前 `main`。
 
 ## 权威与接口审计
 
-规划器生产目录相对上述基线零 diff，三个哨兵 SHA256 未变：
+本次 merge 相对第一父提交未引入规划器生产文件改动；隔离特性分支相对其批准基线
+`3f5b0f746a15d48edced0c045387154eb808e59c` 的规划器生产目录也为零 diff。当前
+`main` 另行保留已集成的正式 global-goal-feasibility/elevation 更新，以下三个入口哨兵
+SHA256 未变：
 
 - `message_conversion.cpp`:
   `397be394bcf8c460dc2654bc2ef45c7181914461007367e338da2395f862a160`
