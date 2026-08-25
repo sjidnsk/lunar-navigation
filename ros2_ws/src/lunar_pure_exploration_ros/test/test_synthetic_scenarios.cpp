@@ -26,6 +26,7 @@
 #include <vector>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <lunar_planning_msgs/action/plan_motion.hpp>
 #include <lunar_pure_exploration_msgs/msg/pure_exploration_status.hpp>
@@ -44,6 +45,10 @@ public:
   static std::optional<lunar::pure_exploration::Pose2>
   ActiveTarget(const ExplorationNode &node) {
     return node.SnapshotActiveTargetForTest();
+  }
+  static std::optional<lunar::pure_exploration::GoalKind>
+  ActiveGoalKind(const ExplorationNode &node) {
+    return node.SnapshotActiveGoalKindForTest();
   }
 };
 
@@ -138,6 +143,7 @@ CellKey WorldCell(const double x, const double y, const double resolution,
 enum class ResponseKind {
   kSuccess,
   kNoPath,
+  kGlobalNoPath,
   kTimeout,
   kDelayed,
   kInvalidSuccess
@@ -149,6 +155,8 @@ const char *ResponseName(const ResponseKind kind) {
     return "SUCCESS";
   case ResponseKind::kNoPath:
     return "NO_PATH";
+  case ResponseKind::kGlobalNoPath:
+    return "GLOBAL_NO_PATH";
   case ResponseKind::kTimeout:
     return "TIMEOUT";
   case ResponseKind::kDelayed:
@@ -165,6 +173,7 @@ struct ResponseSpec final {
   std::optional<std::string> expected_candidate_key{};
   std::optional<std::string> expected_request_id{};
   std::vector<std::pair<double, double>> executable_trajectory{};
+  double best_cost{1.0};
 };
 
 struct ScriptedCell final {
@@ -199,6 +208,14 @@ public:
     scripts_.insert_or_assign(
         cell, ScriptedCell{"", {responses.begin(), responses.end()}});
   }
+  void SetFallback(ResponseSpec response) {
+    std::scoped_lock lock{mutex_};
+    fallback_ = std::move(response);
+  }
+  void RecordError(std::string error) {
+    std::scoped_lock lock{mutex_};
+    error_ = std::move(error);
+  }
 
   struct Assigned final {
     ResponseSpec response;
@@ -216,7 +233,8 @@ public:
                  " key=" + candidate_key + " for request " + request_id;
         return std::nullopt;
       }
-      const ResponseSpec response{ResponseKind::kNoPath, std::nullopt};
+      const ResponseSpec response =
+          fallback_.value_or(ResponseSpec{ResponseKind::kNoPath, std::nullopt});
       records_.push_back(
           {request_id, candidate_key, cell, ResponseName(response.kind)});
       return Assigned{response, records_.size() - 1U};
@@ -282,6 +300,40 @@ private:
   std::vector<RequestRecord> records_;
   std::string error_;
   bool strict_{false};
+  std::optional<ResponseSpec> fallback_{};
+};
+
+class ContemporaneousMap final {
+public:
+  void Update(nav_msgs::msg::OccupancyGrid map) {
+    std::scoped_lock lock{mutex_};
+    map_ = std::move(map);
+  }
+
+  std::optional<std::pair<CellKey, std::int8_t>> Classify(
+      const double world_x, const double world_y) const {
+    std::scoped_lock lock{mutex_};
+    if (!map_ || !std::isfinite(world_x) || !std::isfinite(world_y) ||
+        !std::isfinite(map_->info.resolution) || map_->info.resolution <= 0.0) {
+      return std::nullopt;
+    }
+    const CellKey cell =
+        WorldCell(world_x, world_y, map_->info.resolution,
+                  map_->info.origin.position.x, map_->info.origin.position.y);
+    if (cell.x < 0 || cell.y < 0 ||
+        cell.x >= static_cast<std::int32_t>(map_->info.width) ||
+        cell.y >= static_cast<std::int32_t>(map_->info.height)) {
+      return std::nullopt;
+    }
+    const std::size_t offset = static_cast<std::size_t>(cell.y) *
+                                   map_->info.width +
+                               static_cast<std::size_t>(cell.x);
+    return std::pair{cell, map_->data.at(offset)};
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::optional<nav_msgs::msg::OccupancyGrid> map_{};
 };
 
 class GoalCellPlannerServer final {
@@ -289,16 +341,27 @@ public:
   GoalCellPlannerServer(std::shared_ptr<rclcpp::Node> node,
                         const std::string &action_name,
                         std::shared_ptr<GoalCellScripts> scripts,
-                        const double resolution, const double origin_x = 0.0,
-                        const double origin_y = 0.0)
+                        std::shared_ptr<ContemporaneousMap> current_map)
       : node_(std::move(node)), scripts_(std::move(scripts)),
-        resolution_(resolution), origin_x_(origin_x), origin_y_(origin_y) {
+        current_map_(std::move(current_map)) {
     server_ = rclcpp_action::create_server<Action>(
         node_, action_name,
         [this](const rclcpp_action::GoalUUID &,
                const std::shared_ptr<const Action::Goal> goal) {
-          const CellKey cell = WorldCell(goal->goal.point.x, goal->goal.point.y,
-                                         resolution_, origin_x_, origin_y_);
+          if (goal->environment_mode != Action::Goal::LUNAR_SURFACE ||
+              goal->goal.header.frame_id != "map" ||
+              goal->goal.goal_type != goal->goal.POINT) {
+            scripts_->RecordError("PlanMotion request contract mismatch");
+            return rclcpp_action::GoalResponse::REJECT;
+          }
+          const auto classified = current_map_->Classify(
+              goal->goal.point.x, goal->goal.point.y);
+          if (!classified || classified->second != 0) {
+            scripts_->RecordError(
+                "PlanMotion target is not FREE in contemporaneous map");
+            return rclcpp_action::GoalResponse::REJECT;
+          }
+          const CellKey cell = classified->first;
           auto assigned = scripts_->Assign(cell, CandidateKeyString(*goal),
                                            goal->request_id);
           if (!assigned) {
@@ -346,6 +409,7 @@ public:
       record_index = assignments_.at(request_id).record_index;
     }
     auto result = std::make_shared<Action::Result>();
+    result->diagnostics.planner_name = "grid_traversability_v1";
     if (response.kind == ResponseKind::kSuccess) {
       result->planning_outcome = Action::Result::NEW_REFERENCE_AVAILABLE;
       result->execution_directive = Action::Result::ACTIVATE_NEW_REFERENCE;
@@ -356,6 +420,8 @@ public:
       result->reference.input_time.sec = 29;
       result->reference.plan_id = "scenario-plan:" + request_id;
       result->reference.platform_type = result->reference.WHEELED;
+      result->diagnostics.has_best_cost = true;
+      result->diagnostics.best_cost = response.best_cost;
       result->reference.path_preview.header.frame_id = "map";
       geometry_msgs::msg::PoseStamped preview;
       preview.header.frame_id = "map";
@@ -389,12 +455,15 @@ public:
       handle->succeed(result);
       return;
     }
-    if (response.kind == ResponseKind::kNoPath) {
+    if (response.kind == ResponseKind::kNoPath ||
+        response.kind == ResponseKind::kGlobalNoPath) {
       result->planning_outcome = Action::Result::GOAL_INFEASIBLE;
       result->execution_directive = Action::Result::NO_SAFE_REFERENCE;
-      result->reason_code = "NO_PATH";
+      result->reason_code = response.kind == ResponseKind::kGlobalNoPath
+                                ? "GLOBAL_NO_PATH"
+                                : "NO_PATH";
       result->has_reference = false;
-      scripts_->UpdateRecord(record_index, "NO_PATH");
+      scripts_->UpdateRecord(record_index, ResponseName(response.kind));
       handle->abort(result);
       return;
     }
@@ -442,9 +511,7 @@ public:
 private:
   std::shared_ptr<rclcpp::Node> node_;
   std::shared_ptr<GoalCellScripts> scripts_;
-  double resolution_;
-  double origin_x_;
-  double origin_y_;
+  std::shared_ptr<ContemporaneousMap> current_map_;
   rclcpp_action::Server<Action>::SharedPtr server_;
   mutable std::mutex mutex_;
   std::map<std::string, GoalCellScripts::Assigned> assignments_;
@@ -541,6 +608,13 @@ tf2_msgs::msg::TFMessage MapFromOdom() {
 }
 
 struct CanonicalFixture final {
+  struct Event final {
+    enum class Kind { kInitialInputs, kMapGrowth, kOdometry };
+    Kind kind{Kind::kInitialInputs};
+    std::optional<nav_msgs::msg::OccupancyGrid> map{};
+    std::optional<nav_msgs::msg::Odometry> odometry{};
+  };
+
   std::string fixture_id;
   Task task;
   nav_msgs::msg::OccupancyGrid initial_map;
@@ -548,6 +622,7 @@ struct CanonicalFixture final {
   tf2_msgs::msg::TFMessage transforms;
   std::optional<nav_msgs::msg::OccupancyGrid> growth_map;
   std::vector<nav_msgs::msg::Odometry> execution_odometries;
+  std::vector<Event> events;
   YAML::Node response_table;
   YAML::Node expected;
   YAML::Node variants;
@@ -559,6 +634,9 @@ ResponseKind ParseResponseKind(const std::string &kind) {
   }
   if (kind == "NO_PATH") {
     return ResponseKind::kNoPath;
+  }
+  if (kind == "GLOBAL_NO_PATH") {
+    return ResponseKind::kGlobalNoPath;
   }
   if (kind == "TIMEOUT") {
     return ResponseKind::kTimeout;
@@ -620,7 +698,10 @@ LoadCanonicalScripts(
             .executable_endpoint = endpoint,
             .expected_candidate_key =
                 response["candidate_key"].as<std::string>(),
-            .expected_request_id = response["request_id"].as<std::string>()};
+            .expected_request_id = response["request_id"].as<std::string>(),
+            .best_cost = response["best_cost"]
+                             ? response["best_cost"].as<double>()
+                             : 1.0};
         if (!full_trajectory.empty() &&
             response_kind == ResponseKind::kSuccess) {
           spec.executable_trajectory = full_trajectory;
@@ -720,8 +801,14 @@ CanonicalFixture LoadFixture(const std::string &name) {
   fixture.transforms.transforms.push_back(std::move(transform));
   for (const auto event : root["events"]) {
     const auto kind = event["kind"].as<std::string>();
-    if (kind == "publish_map_growth") {
-      fixture.growth_map = LoadGrid(event["occupancy_grid"]);
+    if (kind == "publish_initial_inputs") {
+      fixture.events.push_back(
+          {.kind = CanonicalFixture::Event::Kind::kInitialInputs});
+    } else if (kind == "publish_map_growth") {
+      auto map = LoadGrid(event["occupancy_grid"]);
+      fixture.growth_map = map;
+      fixture.events.push_back(
+          {.kind = CanonicalFixture::Event::Kind::kMapGrowth, .map = map});
     } else if (kind == "publish_odometry") {
       auto execution_odometry = fixture.odometry;
       const auto event_pose = event["pose_xy_yaw"];
@@ -729,7 +816,10 @@ CanonicalFixture LoadFixture(const std::string &name) {
       execution_odometry.pose.pose.position.y = event_pose[1].as<double>();
       execution_odometry.pose.pose.orientation =
           YawQuaternion(event_pose[2].as<double>());
-      fixture.execution_odometries.push_back(std::move(execution_odometry));
+      fixture.execution_odometries.push_back(execution_odometry);
+      fixture.events.push_back(
+          {.kind = CanonicalFixture::Event::Kind::kOdometry,
+           .odometry = std::move(execution_odometry)});
     }
   }
   fixture.response_table = root["candidate_goal_cell_response_table"];
@@ -789,7 +879,9 @@ ExplorationNodeParameters ScenarioParameters(
     const std::string &prefix,
     const std::shared_ptr<std::chrono::steady_clock::time_point> &now,
     std::shared_ptr<ExplorationPipelineSeams> seams = {},
-    const bool stop_before_planning = false) {
+    const bool stop_before_planning = false,
+    const bool filter_global_goal_cell = false,
+    const std::uint8_t maximum_replans = 2U) {
   const auto wheel = LoadPlatformConfig(
       std::filesystem::path{ament_index_cpp::get_package_share_directory(
           "lunar_pure_planner_ros")} /
@@ -801,7 +893,7 @@ ExplorationNodeParameters ScenarioParameters(
                                 -std::numbers::pi / 8.0, 0.0,
                                 std::numbers::pi / 8.0,
                                 std::numbers::pi / 4.0}},
-      .candidate_limits = {4096U, 64U, 100000U},
+      .candidate_limits = {4096U, 4096U, 100000U},
       .task_raster_limits = {1048576U},
       .sensor_model = {10.0, std::numbers::pi / 2.0},
       .information_gain_limits = {100000U},
@@ -810,11 +902,11 @@ ExplorationNodeParameters ScenarioParameters(
       .global_occupied_threshold = 50,
       .maximum_path_preview_poses = 64U,
       .maximum_executable_path_points = 64U,
-      .maximum_replans = 2U,
+      .maximum_replans = maximum_replans,
       .goal_yaw_tolerance_rad = std::numbers::pi / 16.0,
-      // Scripted candidates are the test input under evaluation.  The
-      // production prefilter has its own node-level regression coverage.
-      .filter_global_goal_cell = false,
+      // Legacy canonical fixtures script candidate poses.  The Task 7
+      // outside-to-inside fixture opts into the production prefilter.
+      .filter_global_goal_cell = filter_global_goal_cell,
       .stop_before_planning = stop_before_planning,
       .planner_result_timeout = 2s,
       .global_map_topic = prefix + "/global_map",
@@ -837,21 +929,26 @@ class ScenarioHarness final {
 public:
   explicit ScenarioHarness(std::shared_ptr<GoalCellScripts> scripts,
                            std::shared_ptr<ExplorationPipelineSeams> seams = {},
-                           const double resolution = 0.5,
-                           const bool stop_before_planning = false)
+                           const double /* resolution */ = 0.5,
+                           const bool stop_before_planning = false,
+                           const bool filter_global_goal_cell = false,
+                           const std::uint8_t maximum_replans = 2U)
       : started_(std::chrono::steady_clock::now()),
         scripts_(std::move(scripts)),
+        current_map_(std::make_shared<ContemporaneousMap>()),
         now_(std::make_shared<std::chrono::steady_clock::time_point>()) {
     const auto suffix = sequence_.fetch_add(1U);
     prefix_ = "/task15_scenario_" + std::to_string(suffix);
     parameters_ = ScenarioParameters(prefix_, now_, std::move(seams),
-                                     stop_before_planning);
+                                     stop_before_planning,
+                                     filter_global_goal_cell,
+                                     maximum_replans);
     server_node_ = std::make_shared<rclcpp::Node>("task15_scenario_server_" +
                                                   std::to_string(suffix));
     io_node_ = std::make_shared<rclcpp::Node>("task15_scenario_io_" +
                                               std::to_string(suffix));
     server_ = std::make_unique<GoalCellPlannerServer>(
-        server_node_, parameters_.planner_action, scripts_, resolution);
+        server_node_, parameters_.planner_action, scripts_, current_map_);
     explorer_ = std::make_shared<ExplorationNode>(parameters_);
     task_publisher_ =
         io_node_->create_publisher<Task>(parameters_.task_topic, 10);
@@ -884,6 +981,27 @@ public:
             status_transitions_.push_back(value->state);
           }
         });
+    diagnostics_subscription_ =
+        io_node_->create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
+            parameters_.diagnostics_topic,
+            rclcpp::QoS{1}.reliable().transient_local(),
+            [this](diagnostic_msgs::msg::DiagnosticArray::SharedPtr value) {
+              std::scoped_lock lock{messages_mutex_};
+              for (const auto &status : value->status) {
+                std::optional<std::string> phase;
+                std::optional<bool> fully_inside;
+                for (const auto &item : status.values) {
+                  if (item.key == "navigation_phase") {
+                    phase = item.value;
+                  } else if (item.key == "fully_inside_task") {
+                    fully_inside = item.value == "true";
+                  }
+                }
+                if (phase && fully_inside) {
+                  phase_diagnostics_.emplace_back(*phase, *fully_inside);
+                }
+              }
+            });
     current_goal_subscription_ =
         io_node_->create_subscription<geometry_msgs::msg::PoseStamped>(
             parameters_.current_goal_topic,
@@ -923,12 +1041,14 @@ public:
 
   void PublishInputs(Task task, nav_msgs::msg::OccupancyGrid map,
                      nav_msgs::msg::Odometry odometry = Odometry()) {
+    current_map_->Update(map);
     map_publisher_->publish(std::move(map));
     odometry_publisher_->publish(std::move(odometry));
     tf_publisher_->publish(MapFromOdom());
     task_publisher_->publish(std::move(task));
   }
   void PublishMap(nav_msgs::msg::OccupancyGrid map) {
+    current_map_->Update(map);
     map_publisher_->publish(std::move(map));
   }
   void PublishOdometry(nav_msgs::msg::Odometry odometry) {
@@ -941,6 +1061,9 @@ public:
   void PollExecution() { explorer_->PollExecution(); }
   bool HasActiveGoal() const {
     return ExplorationNodeTestPeer::ActiveTarget(*explorer_).has_value();
+  }
+  std::optional<lunar::pure_exploration::GoalKind> ActiveGoalKind() const {
+    return ExplorationNodeTestPeer::ActiveGoalKind(*explorer_);
   }
 
   std::optional<Status> LatestStatus() const {
@@ -971,6 +1094,10 @@ public:
     std::scoped_lock lock{messages_mutex_};
     return execution_cancels_;
   }
+  std::vector<std::pair<std::string, bool>> PhaseDiagnostics() const {
+    std::scoped_lock lock{messages_mutex_};
+    return phase_diagnostics_;
+  }
   std::optional<geometry_msgs::msg::PoseStamped> LatestCurrentGoal() const {
     std::scoped_lock lock{messages_mutex_};
     return current_goals_.empty()
@@ -995,6 +1122,13 @@ public:
     for (const auto &plan_id : ExecutionCancels()) {
       stream << ' ' << plan_id;
     }
+    if (const auto status = LatestStatus()) {
+      stream << "\nlatest status=" << static_cast<int>(status->state)
+             << " reason=" << status->reason_code
+             << " coverage=" << status->coverage_ratio
+             << " frontiers=" << status->frontier_cluster_count
+             << " candidates=" << status->candidate_count;
+    }
     stream << "\nwall elapsed ms="
            << std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - started_)
@@ -1010,6 +1144,7 @@ private:
   static std::atomic<std::uint64_t> sequence_;
   std::chrono::steady_clock::time_point started_;
   std::shared_ptr<GoalCellScripts> scripts_;
+  std::shared_ptr<ContemporaneousMap> current_map_;
   std::shared_ptr<std::chrono::steady_clock::time_point> now_;
   std::string prefix_;
   ExplorationNodeParameters parameters_;
@@ -1027,6 +1162,8 @@ private:
       reference_subscription_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr cancel_subscription_;
   rclcpp::Subscription<Status>::SharedPtr status_subscription_;
+  rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
+      diagnostics_subscription_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr
       current_goal_subscription_;
   mutable std::mutex messages_mutex_;
@@ -1035,6 +1172,7 @@ private:
   std::vector<lunar_planning_msgs::msg::MotionReference> references_;
   std::vector<std::string> execution_cancels_;
   std::vector<geometry_msgs::msg::PoseStamped> current_goals_;
+  std::vector<std::pair<std::string, bool>> phase_diagnostics_;
 };
 
 std::atomic<std::uint64_t> ScenarioHarness::sequence_{0U};
@@ -1075,7 +1213,9 @@ std::string StableHash(const std::string &value) {
   return output.str();
 }
 
-std::string NormalizedTrace(const ScenarioHarness &scenario) {
+std::string NormalizedTrace(
+    const ScenarioHarness &scenario,
+    const std::optional<std::string> &ignored_cancel_plan_id = std::nullopt) {
   std::ostringstream trace;
   for (const auto &record : scenario.Scripts()->Records()) {
     trace << "request=" << record.request_id << "|key=" << record.candidate_key
@@ -1092,6 +1232,9 @@ std::string NormalizedTrace(const ScenarioHarness &scenario) {
   }
   trace << "\ncancels=";
   for (const auto &plan_id : scenario.ExecutionCancels()) {
+    if (ignored_cancel_plan_id && plan_id == *ignored_cancel_plan_id) {
+      continue;
+    }
     trace << plan_id << ',';
   }
   const auto status = scenario.LatestStatus();
@@ -1115,9 +1258,16 @@ std::string NormalizedTrace(const ScenarioHarness &scenario) {
 
 void ExpectCanonicalTrace(const ScenarioHarness &scenario,
                           const CanonicalFixture &fixture) {
+  const std::optional<std::string> ignored_cancel_plan_id =
+      fixture.fixture_id == "outside_to_inside"
+          ? std::optional<std::string>{
+                "scenario-plan:task7-outside-to-inside/candidate/0"}
+          : std::nullopt;
+  const std::string normalized =
+      NormalizedTrace(scenario, ignored_cancel_plan_id);
   const std::string diagnostic =
-      scenario.Trace() + "\nnormalized trace:\n" + NormalizedTrace(scenario) +
-      "\nhash=" + StableHash(NormalizedTrace(scenario));
+      scenario.Trace() + "\nnormalized trace:\n" + normalized +
+      "\nhash=" + StableHash(normalized);
   const auto records = scenario.Scripts()->Records();
   const auto requests = fixture.expected["ordered_requests"];
   ASSERT_EQ(records.size(), requests.size()) << diagnostic;
@@ -1150,8 +1300,12 @@ void ExpectCanonicalTrace(const ScenarioHarness &scenario,
       reference_ids,
       fixture.expected["reference_plan_ids"].as<std::vector<std::string>>())
       << diagnostic;
+  auto observed_cancels = scenario.ExecutionCancels();
+  if (ignored_cancel_plan_id) {
+    std::erase(observed_cancels, *ignored_cancel_plan_id);
+  }
   EXPECT_EQ(
-      scenario.ExecutionCancels(),
+      observed_cancels,
       fixture.expected["cancellation_plan_ids"].as<std::vector<std::string>>())
       << diagnostic;
   const auto status = scenario.LatestStatus();
@@ -1176,7 +1330,7 @@ void ExpectCanonicalTrace(const ScenarioHarness &scenario,
       << diagnostic;
   EXPECT_EQ(scenario.Scripts()->Remaining(), 0U) << diagnostic;
   EXPECT_TRUE(scenario.Scripts()->Error().empty()) << diagnostic;
-  EXPECT_EQ(StableHash(NormalizedTrace(scenario)),
+  EXPECT_EQ(StableHash(normalized),
             fixture.expected["ordered_trace_id"].as<std::string>())
       << diagnostic;
   scenario.ExpectWithinDeadline();
@@ -1580,7 +1734,10 @@ TEST(SyntheticScenarioRunnerTest,
   const auto fixture = LoadFixture("fully_known_completion");
   const auto scripts = LoadCanonicalScripts(fixture);
   ScenarioHarness scenario(scripts, {}, fixture.initial_map.info.resolution);
-  scenario.PublishInputs(fixture.task, fixture.initial_map, fixture.odometry);
+  // The post-Task-5 coordinator requires the complete wheel footprint inside
+  // the task before it may enter WFD completion.
+  scenario.PublishInputs(fixture.task, fixture.initial_map,
+                         Odometry(3.0, 3.0));
 
   ASSERT_TRUE(WaitFor([&scenario] {
     const auto status = scenario.LatestStatus();
@@ -1754,6 +1911,262 @@ TEST(SyntheticScenarioRunnerTest,
   EXPECT_EQ(scenario.ExecutionCancels().size(), 1U) << scenario.Trace();
   EXPECT_TRUE(scripts->Error().empty()) << scenario.Trace();
   scenario.ExpectWithinDeadline();
+}
+
+TEST(SyntheticScenarioRunnerTest,
+     OutsideToInsideUsesProductionApproachThenWfdBeforeExhaustiveCompletion) {
+  const auto fixture = LoadFixture("outside_to_inside");
+  std::vector<nav_msgs::msg::OccupancyGrid> growth_maps;
+  for (const auto &event : fixture.events) {
+    if (event.kind == CanonicalFixture::Event::Kind::kMapGrowth) {
+      ASSERT_TRUE(event.map.has_value());
+      growth_maps.push_back(*event.map);
+    }
+  }
+  ASSERT_EQ(growth_maps.size(), 3U);
+
+  auto scripts = std::make_shared<GoalCellScripts>();
+  scripts->SetFallback({.kind = ResponseKind::kSuccess,
+                        .best_cost = 3.25});
+  ScenarioHarness scenario(scripts, {}, fixture.initial_map.info.resolution,
+                           false, true);
+  scenario.PublishInputs(fixture.task, fixture.initial_map, fixture.odometry);
+
+  ASSERT_TRUE(WaitFor([&scenario] {
+    return scenario.References().size() >= 1U &&
+           scenario.ActiveGoalKind() ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach &&
+           scenario.LatestCurrentGoal().has_value();
+  })) << scenario.Trace();
+  const auto first_goal = *scenario.LatestCurrentGoal();
+  EXPECT_LT(first_goal.pose.position.x, 0.0) << scenario.Trace();
+  EXPECT_GT(std::abs(first_goal.pose.position.y - 10.0), 1.0)
+      << scenario.Trace();
+  scenario.PublishOdometry(
+      Odometry(first_goal.pose.position.x, first_goal.pose.position.y,
+               2.0 * std::atan2(first_goal.pose.orientation.z,
+                                first_goal.pose.orientation.w)));
+  scenario.PublishMap(growth_maps[0]);
+
+  ASSERT_TRUE(WaitFor([&scenario, &first_goal] {
+    const auto goal = scenario.LatestCurrentGoal();
+    return scenario.References().size() >= 2U && goal &&
+           PoseKeyString(goal->pose) != PoseKeyString(first_goal.pose) &&
+           scenario.ActiveGoalKind() ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  })) << scenario.Trace();
+  const auto second_goal = *scenario.LatestCurrentGoal();
+  scenario.PublishOdometry(
+      Odometry(second_goal.pose.position.x, second_goal.pose.position.y,
+               2.0 * std::atan2(second_goal.pose.orientation.z,
+                                second_goal.pose.orientation.w)));
+  scenario.PublishMap(growth_maps[1]);
+
+  std::size_t approach_goal_count = 2U;
+  for (std::size_t approach_step = 0U; approach_step < 4U;
+       ++approach_step) {
+    ASSERT_TRUE(WaitFor([&scenario] {
+      return scenario.ActiveGoalKind().has_value() &&
+             scenario.LatestCurrentGoal().has_value();
+    })) << scenario.Trace();
+    if (scenario.ActiveGoalKind() ==
+        lunar::pure_exploration::GoalKind::kTaskFrontier) {
+      break;
+    }
+    ASSERT_EQ(scenario.ActiveGoalKind(),
+              lunar::pure_exploration::GoalKind::kBoundaryApproach)
+        << scenario.Trace();
+    ++approach_goal_count;
+    const auto approach_goal = *scenario.LatestCurrentGoal();
+    const auto references_before_arrival = scenario.References().size();
+    scenario.PublishOdometry(
+        Odometry(approach_goal.pose.position.x,
+                 approach_goal.pose.position.y,
+                 2.0 * std::atan2(approach_goal.pose.orientation.z,
+                                  approach_goal.pose.orientation.w)));
+    ASSERT_TRUE(WaitFor([&scenario, references_before_arrival] {
+      return scenario.References().size() > references_before_arrival ||
+             scenario.ActiveGoalKind() ==
+                 lunar::pure_exploration::GoalKind::kTaskFrontier;
+    })) << scenario.Trace();
+  }
+  ASSERT_TRUE(WaitFor([&scenario] {
+    return scenario.References().size() >= 3U &&
+           scenario.ActiveGoalKind() ==
+               lunar::pure_exploration::GoalKind::kTaskFrontier &&
+           scenario.LatestCurrentGoal().has_value();
+  })) << scenario.Trace();
+  EXPECT_GE(approach_goal_count,
+            fixture.expected["approach_goal_count_minimum"].as<std::size_t>())
+      << scenario.Trace();
+  std::size_t wfd_goal_count = 1U;
+  const auto first_wfd_goal = *scenario.LatestCurrentGoal();
+  const auto references_before_final_map = scenario.References().size();
+  scenario.PublishOdometry(
+      Odometry(first_wfd_goal.pose.position.x,
+               first_wfd_goal.pose.position.y,
+               2.0 * std::atan2(first_wfd_goal.pose.orientation.z,
+                                first_wfd_goal.pose.orientation.w)));
+  scenario.PublishMap(growth_maps[2]);
+  ASSERT_TRUE(WaitFor([&scenario, references_before_final_map] {
+    const auto status = scenario.LatestStatus();
+    return status && status->coverage_ratio > 0.80 &&
+           scenario.References().size() > references_before_final_map &&
+           scenario.ActiveGoalKind() ==
+               lunar::pure_exploration::GoalKind::kTaskFrontier &&
+           scenario.LatestCurrentGoal().has_value();
+  })) << scenario.Trace();
+  ++wfd_goal_count;
+  EXPECT_GE(wfd_goal_count,
+            fixture.expected["wfd_goal_count_minimum"].as<std::size_t>())
+      << scenario.Trace();
+  const auto final_wfd_goal = *scenario.LatestCurrentGoal();
+  scripts->SetFallback({.kind = ResponseKind::kGlobalNoPath});
+  scenario.PublishOdometry(
+      Odometry(final_wfd_goal.pose.position.x,
+               final_wfd_goal.pose.position.y,
+               2.0 * std::atan2(final_wfd_goal.pose.orientation.z,
+                                final_wfd_goal.pose.orientation.w)));
+
+  ASSERT_TRUE(WaitFor([&scenario] {
+    const auto status = scenario.LatestStatus();
+    return status && status->state == Status::COMPLETED &&
+           status->reason_code == "COMPLETED_NO_REACHABLE_FRONTIER";
+  })) << scenario.Trace() << "\nnormalized trace:\n"
+      << NormalizedTrace(scenario) << "\nhash="
+      << StableHash(NormalizedTrace(scenario));
+  const auto completed = scenario.LatestStatus();
+  ASSERT_TRUE(completed.has_value()) << scenario.Trace();
+  EXPECT_GT(completed->coverage_ratio, 0.80) << scenario.Trace();
+  EXPECT_TRUE(scripts->Error().empty()) << scenario.Trace();
+  const auto phases = scenario.PhaseDiagnostics();
+  const auto first_inside = std::ranges::find_if(
+      phases, [](const auto &row) {
+        return row.first == "EXPLORE_TASK" && row.second;
+      });
+  ASSERT_NE(first_inside, phases.end()) << scenario.Trace();
+  ASSERT_TRUE(WaitFor([&scenario, &fixture] {
+    const auto observed = scenario.ExecutionCancels();
+    const auto expected =
+        fixture.expected["cancellation_plan_ids"]
+            .as<std::vector<std::string>>();
+    return std::ranges::all_of(expected, [&observed](const auto &plan_id) {
+      return std::ranges::find(observed, plan_id) != observed.end();
+    });
+  })) << scenario.Trace();
+  ExpectCanonicalTrace(scenario, fixture);
+}
+
+TEST(SyntheticScenarioRunnerTest,
+     ExhaustedApproachGridV1ActionsWaitWithoutCompletionOrBusyLoop) {
+  const auto fixture = LoadFixture("outside_to_inside");
+  auto scripts = std::make_shared<GoalCellScripts>();
+  scripts->SetFallback({.kind = ResponseKind::kGlobalNoPath});
+  ScenarioHarness scenario(scripts, {}, fixture.initial_map.info.resolution,
+                           false, true);
+  scenario.PublishInputs(fixture.task, fixture.initial_map, fixture.odometry);
+
+  ASSERT_TRUE(WaitFor([&scenario] {
+    const auto status = scenario.LatestStatus();
+    return status &&
+           status->reason_code == "APPROACH_NO_REACHABLE_TARGET";
+  })) << scenario.Trace();
+  const auto request_count = scripts->Records().size();
+  ASSERT_GT(request_count, 0U) << scenario.Trace();
+  std::this_thread::sleep_for(100ms);
+  const auto status_count = scenario.StatusCount();
+  for (std::size_t poll = 0U; poll < 8U; ++poll) {
+    scenario.PollExecution();
+  }
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(scripts->Records().size(), request_count) << scenario.Trace();
+  EXPECT_EQ(scenario.StatusCount(), status_count) << scenario.Trace();
+  ASSERT_TRUE(scenario.LatestStatus().has_value()) << scenario.Trace();
+  EXPECT_EQ(scenario.LatestStatus()->reason_code,
+            "APPROACH_NO_REACHABLE_TARGET")
+      << scenario.Trace();
+  EXPECT_EQ(std::ranges::count(scenario.StatusTransitions(),
+                               Status::COMPLETED),
+            0) << scenario.Trace();
+  EXPECT_FALSE(scenario.HasActiveGoal()) << scenario.Trace();
+  EXPECT_TRUE(scripts->Error().empty()) << scenario.Trace();
+}
+
+TEST(SyntheticScenarioRunnerTest,
+     BoundaryOutsideMapCoverageWaitsWithoutActionOrCompletion) {
+  const auto fixture = LoadFixture("outside_to_inside");
+  auto scripts = std::make_shared<GoalCellScripts>();
+  scripts->SetFallback({.kind = ResponseKind::kSuccess,
+                        .best_cost = 3.25});
+  ScenarioHarness scenario(scripts, {}, fixture.initial_map.info.resolution,
+                           false, true);
+  const auto outside_task = StartTask(
+      "task7-boundary-outside-map",
+      {{30.0F, 0.0F}, {50.0F, 0.0F},
+       {50.0F, 20.0F}, {30.0F, 20.0F}});
+  scenario.PublishInputs(outside_task, fixture.initial_map,
+                         fixture.odometry);
+
+  ASSERT_TRUE(WaitFor([&scenario] {
+    const auto status = scenario.LatestStatus();
+    return status && status->reason_code ==
+                         "WAITING_FOR_TASK_MAP_COVERAGE";
+  })) << scenario.Trace();
+  std::this_thread::sleep_for(100ms);
+  const auto status_count = scenario.StatusCount();
+  for (std::size_t poll = 0U; poll < 8U; ++poll) {
+    scenario.PollExecution();
+  }
+  std::this_thread::sleep_for(200ms);
+  EXPECT_TRUE(scripts->Records().empty()) << scenario.Trace();
+  EXPECT_EQ(scenario.StatusCount(), status_count) << scenario.Trace();
+  ASSERT_TRUE(scenario.LatestStatus().has_value()) << scenario.Trace();
+  EXPECT_EQ(scenario.LatestStatus()->reason_code,
+            "WAITING_FOR_TASK_MAP_COVERAGE")
+      << scenario.Trace();
+  EXPECT_EQ(std::ranges::count(scenario.StatusTransitions(),
+                               Status::COMPLETED),
+            0) << scenario.Trace();
+  EXPECT_FALSE(scenario.HasActiveGoal()) << scenario.Trace();
+}
+
+TEST(SyntheticScenarioRunnerTest,
+     UnchangedApproachStallDoesNotResubmitOrComplete) {
+  const auto fixture = LoadFixture("outside_to_inside");
+  auto scripts = std::make_shared<GoalCellScripts>();
+  scripts->SetFallback({.kind = ResponseKind::kSuccess,
+                        .best_cost = 3.25});
+  ScenarioHarness scenario(scripts, {}, fixture.initial_map.info.resolution,
+                           false, true, 0U);
+  scenario.PublishInputs(fixture.task, fixture.initial_map, fixture.odometry);
+
+  ASSERT_TRUE(WaitFor([&scenario] {
+    return scenario.References().size() == 1U &&
+           scenario.ActiveGoalKind() ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  })) << scenario.Trace();
+  const auto request_count = scripts->Records().size();
+  scenario.AdvanceSteadyClock(31s);
+  scenario.PollExecution();
+  ASSERT_TRUE(WaitFor([&scenario] {
+    const auto status = scenario.LatestStatus();
+    return status && status->reason_code == "APPROACH_STALLED";
+  })) << scenario.Trace();
+  std::this_thread::sleep_for(100ms);
+  const auto status_count = scenario.StatusCount();
+  for (std::size_t poll = 0U; poll < 8U; ++poll) {
+    scenario.PollExecution();
+  }
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(scripts->Records().size(), request_count) << scenario.Trace();
+  EXPECT_EQ(scenario.StatusCount(), status_count) << scenario.Trace();
+  ASSERT_TRUE(scenario.LatestStatus().has_value()) << scenario.Trace();
+  EXPECT_EQ(scenario.LatestStatus()->reason_code, "APPROACH_STALLED")
+      << scenario.Trace();
+  EXPECT_EQ(std::ranges::count(scenario.StatusTransitions(),
+                               Status::COMPLETED),
+            0) << scenario.Trace();
+  EXPECT_FALSE(scenario.HasActiveGoal()) << scenario.Trace();
 }
 
 TEST(SyntheticScenarioRunnerTest, InvalidSuccessPayloadFailsClosed) {

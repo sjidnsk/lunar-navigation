@@ -20,6 +20,20 @@ stamp、地图版本、协方差、地图新鲜度和观测时间不参与探索
 `/Car/T3/mapping/global_overview` 的原生 `nav_msgs/msg/OccupancyGrid` 语义，局部高度与可通行性仍由
 规划器处理。传感器模型为 10 m、90°，所有项目 Topic 均位于 `/Car/T4/...`。
 
+START 时若完整车体尚未进入任务多边形，协调器先进入 `APPROACH_TASK`：`boundary` 上的
+UNKNOWN 只生成探索意图，实际下发给规划器的目标始终是当前地图中经完整车体包络和间距校验的
+FREE 位姿；完整车体进入后切换为 `EXPLORE_TASK` 并继续原有 WFD。规划 Action 显式绑定冻结的
+`grid_traversability_v1`，不复制规划算法、不回退 legacy。入口不可达、地图尚未覆盖任务边界或
+入口停滞分别稳定报告 `APPROACH_NO_REACHABLE_TARGET`、
+`WAITING_FOR_TASK_MAP_COVERAGE`、`APPROACH_STALLED`，都不能证明探索完成。诊断同时发布
+`navigation_phase`、`fully_inside_task`、入口意图/候选数量、剩余引导距离、引导 UNKNOWN
+数量和等待原因；`current_goal` 仍只表示实际安全执行目标。
+
+入口资源默认继承任务栅格与候选上限，搜索工作量为经溢出检查的
+`8 × maximum_guidance_grid_cells`；300 m 测试 launch 显式使用
+`1048576 / 1048576 / 8388608 / 4096`。覆盖率仍只用于观测和验收断言，唯一完成条件仍是进入
+`EXPLORE_TASK` 后 Grid V1 对当前 WFD 候选给出穷尽不可达证据。
+
 本机 Humble 验证 overlay 位于 `install-humble-exploration-66d8636`，与原有 `install` 分开。在
 Ubuntu 22.04 + ROS 2 Humble 中启动前执行：
 

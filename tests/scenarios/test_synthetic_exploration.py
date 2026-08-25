@@ -7,6 +7,7 @@ and completion behavior remain production C++ responsibilities.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any, Mapping, Protocol, get_type_hints
 
@@ -17,10 +18,10 @@ import yaml
 FIXTURE_DIRECTORY = Path(__file__).with_name("fixtures")
 FIXTURE_NAMES = (
     "concave_region", "unreachable_frontier", "map_growth",
-    "fully_known_completion",
+    "fully_known_completion", "outside_to_inside",
 )
 AUTHORITY = "test-only/non-authoritative"
-RESPONSE_KINDS = frozenset({"SUCCESS", "NO_PATH", "DELAYED"})
+RESPONSE_KINDS = frozenset({"SUCCESS", "NO_PATH", "GLOBAL_NO_PATH", "DELAYED"})
 STATE_NAMES = frozenset({
     "IDLE", "WAITING_FOR_INPUT", "SELECTING_FRONTIER", "PLANNING",
     "EXECUTING", "REPLANNING", "PAUSED", "COMPLETED", "ERROR",
@@ -208,7 +209,9 @@ def _validate_events(value: object) -> list[Mapping[str, Any]]:
     return growth
 
 
-def _validate_table(value: object) -> dict[str, tuple[str, str]]:
+def _validate_table(
+    value: object, *, require_grid_v1_cost: bool = False
+) -> dict[str, tuple[str, str]]:
     table = _mapping(value, "candidate_goal_cell_response_table")
     by_request: dict[str, tuple[str, str]] = {}
     for goal_cell, raw_row in table.items():
@@ -220,7 +223,7 @@ def _validate_table(value: object) -> dict[str, tuple[str, str]]:
         for raw_response in responses:
             response = _mapping(raw_response, f"response[{goal_cell}]")
             required = {"kind", "candidate_key", "request_id"}
-            optional = {"executable_endpoint_xy", "path_segment"}
+            optional = {"executable_endpoint_xy", "path_segment", "best_cost"}
             if not required <= set(response) or set(response) - required - optional:
                 raise FixtureSchemaError("PlanMotion response shape is invalid")
             kind = _nonempty(response["kind"], "response.kind")
@@ -238,18 +241,46 @@ def _validate_table(value: object) -> dict[str, tuple[str, str]]:
                 raise FixtureSchemaError("endpoint is only valid for SUCCESS")
             if "path_segment" in response and kind != "SUCCESS":
                 raise FixtureSchemaError("path_segment is only valid for SUCCESS")
+            best_cost = response.get("best_cost")
+            if kind == "SUCCESS" and require_grid_v1_cost and (
+                not isinstance(best_cost, (int, float))
+                or not math.isfinite(best_cost)
+                or best_cost < 0
+            ):
+                raise FixtureSchemaError("Grid V1 SUCCESS requires finite best_cost")
+            if kind == "SUCCESS" and best_cost is not None and (
+                not isinstance(best_cost, (int, float))
+                or not math.isfinite(best_cost)
+                or best_cost < 0
+            ):
+                raise FixtureSchemaError("best_cost must be finite and non-negative")
+            if kind != "SUCCESS" and best_cost is not None:
+                raise FixtureSchemaError("best_cost is only valid for SUCCESS")
             by_request[request_id] = (goal_cell, key)
     return by_request
 
 
-def _validate_expected(value: object, table: dict[str, tuple[str, str]]) -> None:
-    expected = _exact(value, {
+def _validate_expected(
+    value: object, table: dict[str, tuple[str, str]], fixture_name: str
+) -> None:
+    base_fields = {
         "ordered_candidate_keys", "ordered_goal_cells", "ordered_requests",
         "status_sequence", "reference_plan_ids", "cancellation_plan_ids",
         "coverage_ratio", "completed", "requires_exhaustive_planner_evidence",
         "replan_count", "stuck_retries", "committed_goal_key",
         "semantic_mutations", "two_segment", "ordered_trace_id",
-    }, "expected")
+    }
+    approach_fields = {
+        "navigation_phases", "terminal_reason", "minimum_coverage_ratio",
+        "approach_goal_count_minimum", "wfd_goal_count_minimum",
+        "all_action_targets_known_free", "nearest_blocked_entry_selected",
+    }
+    expected = _exact(
+        value,
+        base_fields | approach_fields if fixture_name == "outside_to_inside"
+        else base_fields,
+        "expected",
+    )
     requests = expected["ordered_requests"]
     if not isinstance(requests, list) or len(requests) != len(table):
         raise FixtureSchemaError("ordered requests must exactly cover response table")
@@ -267,7 +298,9 @@ def _validate_expected(value: object, table: dict[str, tuple[str, str]]) -> None
         cell = _cell(request["goal_cell"], "expected.goal_cell")
         if table.get(request_id) != (cell, key):
             raise FixtureSchemaError("ordered request must match response lookup")
-        if request["response_kind"] not in {"SUCCESS", "NO_PATH"}:
+        if request["response_kind"] not in {
+            "SUCCESS", "NO_PATH", "GLOBAL_NO_PATH"
+        }:
             raise FixtureSchemaError("observed response kind must be terminal")
         if not isinstance(request["path_segments"], list):
             raise FixtureSchemaError("path_segments must be a list")
@@ -314,6 +347,29 @@ def _validate_expected(value: object, table: dict[str, tuple[str, str]]) -> None
         for field in ("replan_count", "stuck_retries")
     ):
         raise FixtureSchemaError("retry counters must be integers")
+    if fixture_name == "outside_to_inside":
+        if expected["navigation_phases"] != ["APPROACH_TASK", "EXPLORE_TASK"]:
+            raise FixtureSchemaError("outside scenario must freeze both phases")
+        if expected["terminal_reason"] != "COMPLETED_NO_REACHABLE_FRONTIER":
+            raise FixtureSchemaError("outside scenario terminal reason is invalid")
+        minimum = expected["minimum_coverage_ratio"]
+        if (
+            not isinstance(minimum, (int, float))
+            or minimum != 0.80
+            or coverage <= minimum
+        ):
+            raise FixtureSchemaError("outside scenario coverage must be above 0.80")
+        if (
+            not isinstance(expected["approach_goal_count_minimum"], int)
+            or expected["approach_goal_count_minimum"] < 2
+            or not isinstance(expected["wfd_goal_count_minimum"], int)
+            or expected["wfd_goal_count_minimum"] < 1
+            or expected["all_action_targets_known_free"] is not True
+            or expected["nearest_blocked_entry_selected"] is not False
+            or expected["requires_exhaustive_planner_evidence"] is not True
+            or expected["completed"] is not True
+        ):
+            raise FixtureSchemaError("outside scenario acceptance fields are invalid")
     mutations = _exact(
         expected["semantic_mutations"],
         {"timestamp_only", "map_version_only", "covariance_only"},
@@ -416,8 +472,11 @@ def load_fixture(name: str) -> Mapping[str, Any]:
             or _grid_data(grid) == initial_data
         ):
             raise FixtureSchemaError("map growth must change geometry/data content")
-    table = _validate_table(fixture["candidate_goal_cell_response_table"])
-    _validate_expected(fixture["expected"], table)
+    table = _validate_table(
+        fixture["candidate_goal_cell_response_table"],
+        require_grid_v1_cost=name == "outside_to_inside",
+    )
+    _validate_expected(fixture["expected"], table, name)
     if "variants" in fixture:
         _validate_variants(fixture["variants"], fixture["expected"])
     return fixture
@@ -507,6 +566,38 @@ def test_fully_known_completion_freezes_coverage_one_after_normal_exhaustion() -
     assert -1 not in _grid_data(fixture["initial_inputs"]["occupancy_grid"])
     assert fixture["expected"]["coverage_ratio"] == 1.0
     assert fixture["expected"]["completed"] is True
+
+
+def test_outside_to_inside_freezes_geometry_reveal_order_and_acceptance() -> None:
+    fixture = load_fixture("outside_to_inside")
+    grid = fixture["initial_inputs"]["occupancy_grid"]
+    assert grid["geometry"] == {
+        "resolution_m": 0.5,
+        "width": 48,
+        "height": 40,
+        "origin": {"x": -4.0, "y": 0.0},
+    }
+    assert fixture["task"]["boundary_xy"] == [
+        [0.0, 0.0], [20.0, 0.0], [20.0, 20.0], [0.0, 20.0]
+    ]
+    assert fixture["initial_inputs"]["odometry"]["pose_xy_yaw"] == [-2.0, 10.0, 0.0]
+    events = fixture["events"]
+    growth_indices = [
+        index for index, event in enumerate(events)
+        if event["kind"] == "publish_map_growth"
+    ]
+    assert len(growth_indices) >= 2
+    assert all(
+        any(
+            event["kind"] == "publish_odometry"
+            for event in events[(growth_indices[index - 1] + 1 if index else 1):growth]
+        )
+        for index, growth in enumerate(growth_indices)
+    )
+    expected = fixture["expected"]
+    assert expected["coverage_ratio"] > expected["minimum_coverage_ratio"] == 0.80
+    assert expected["completed"] is True
+    assert expected["terminal_reason"] == "COMPLETED_NO_REACHABLE_FRONTIER"
 
 
 def test_ros_runner_contract_has_a_fixed_steady_deadline() -> None:

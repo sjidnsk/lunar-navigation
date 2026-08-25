@@ -979,6 +979,15 @@ class ExplorationNodeTest : public ::testing::Test {
     return options;
   }
 
+  rclcpp::NodeOptions ResourceParameterOptions(
+      std::vector<rclcpp::Parameter> overrides = {}) const {
+    auto options = StopGateParameterOptions();
+    auto parameters = options.parameter_overrides();
+    parameters.insert(parameters.end(), overrides.begin(), overrides.end());
+    options.parameter_overrides(parameters);
+    return options;
+  }
+
   void StartWithStopGateParameters(FakePlannerServer::Mode mode) {
     server_ = std::make_unique<FakePlannerServer>(
         server_node_, parameters_.planner_action, mode);
@@ -1776,6 +1785,69 @@ TEST_F(ExplorationNodeTest, StopGateParameterLoadRejectsInvalidValues) {
                std::invalid_argument);
   EXPECT_THROW(ExplorationNode(StopGateParameterOptions(0.01, 0.02, 3, 0.0)),
                std::invalid_argument);
+}
+
+TEST_F(ExplorationNodeTest, ResourceParameterDefaultsDeriveFromParentLimits) {
+  auto explorer = ExplorationNode(ResourceParameterOptions({
+      rclcpp::Parameter("maximum_task_raster_cells", 17),
+      rclcpp::Parameter("maximum_candidate_views", 13),
+  }));
+
+  EXPECT_EQ(explorer.get_parameter("maximum_guidance_grid_cells").as_int(),
+            17);
+  EXPECT_EQ(explorer.get_parameter("maximum_guidance_work_units").as_int(),
+            136);
+  EXPECT_EQ(explorer.get_parameter("maximum_approach_candidates").as_int(),
+            13);
+}
+
+TEST_F(ExplorationNodeTest, ResourceParameterWorkDefaultFollowsGridOverride) {
+  auto explorer = ExplorationNode(ResourceParameterOptions({
+      rclcpp::Parameter("maximum_guidance_grid_cells", 7),
+  }));
+
+  EXPECT_EQ(explorer.get_parameter("maximum_guidance_grid_cells").as_int(),
+            7);
+  EXPECT_EQ(explorer.get_parameter("maximum_guidance_work_units").as_int(),
+            56);
+}
+
+TEST_F(ExplorationNodeTest, ResourceParametersAcceptPositiveExplicitOverrides) {
+  auto explorer = ExplorationNode(ResourceParameterOptions({
+      rclcpp::Parameter("maximum_guidance_grid_cells", 19),
+      rclcpp::Parameter("maximum_guidance_work_units", 23),
+      rclcpp::Parameter("maximum_approach_candidates", 29),
+  }));
+
+  EXPECT_EQ(explorer.get_parameter("maximum_guidance_grid_cells").as_int(),
+            19);
+  EXPECT_EQ(explorer.get_parameter("maximum_guidance_work_units").as_int(),
+            23);
+  EXPECT_EQ(explorer.get_parameter("maximum_approach_candidates").as_int(),
+            29);
+}
+
+TEST_F(ExplorationNodeTest, ResourceParametersRejectNonPositiveValues) {
+  for (const std::string& name : {"maximum_guidance_grid_cells",
+                                  "maximum_guidance_work_units",
+                                  "maximum_approach_candidates"}) {
+    EXPECT_THROW(
+        ExplorationNode(ResourceParameterOptions({rclcpp::Parameter(name, 0)})),
+        std::invalid_argument)
+        << name;
+    EXPECT_THROW(ExplorationNode(ResourceParameterOptions(
+                     {rclcpp::Parameter(name, -1)})),
+                 std::invalid_argument)
+        << name;
+  }
+}
+
+TEST_F(ExplorationNodeTest, ResourceParameterDefaultWorkRejectsOverflow) {
+  EXPECT_THROW(
+      ExplorationNode(ResourceParameterOptions({rclcpp::Parameter(
+          "maximum_guidance_grid_cells",
+          std::numeric_limits<std::int64_t>::max())})),
+      std::overflow_error);
 }
 
 TEST_F(ExplorationNodeTest,
@@ -4638,7 +4710,9 @@ TEST_F(ExplorationNodeTest,
     return status && status->state == Status::ERROR &&
            status->reason_code == "FINAL_MAP_VALIDATION_ERROR";
   }));
-  EXPECT_EQ(ExecutionCancels(), std::vector<std::string>{plan_id});
+  ASSERT_TRUE(WaitFor([this, &plan_id] {
+    return ExecutionCancels() == std::vector<std::string>{plan_id};
+  }));
   EXPECT_EQ(guidance_build_calls->load(), 1U);
 }
 
