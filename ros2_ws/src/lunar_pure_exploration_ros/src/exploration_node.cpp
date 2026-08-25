@@ -2145,6 +2145,13 @@ void QueueBuild(const std::shared_ptr<RuntimeT>& runtime,
           try {
             guidance.emplace(locked->boundary_guidance.Build(
                 map, *product.raster, snapshot.robot_pose));
+            if (guidance->phase == NavigationPhase::kApproachTask &&
+                locked->parameters.pipeline_seams &&
+                locked->parameters.pipeline_seams
+                    ->after_boundary_guidance_build) {
+              locked->parameters.pipeline_seams
+                  ->after_boundary_guidance_build();
+            }
           } catch (const std::length_error& error) {
             product.error = GuidanceResourceReason(error);
           }
@@ -2280,8 +2287,7 @@ void QueueBuild(const std::shared_ptr<RuntimeT>& runtime,
             retry_after_stale = !locked->teardown;
           } else if (product.error.empty() &&
                      product.navigation_phase == NavigationPhase::kApproachTask &&
-                     (snapshot.pose_generation != locked->pose_generation ||
-                      snapshot.task_generation != locked->task_generation ||
+                     (snapshot.task_generation != locked->task_generation ||
                       !locked->latest_map_message ||
                       !product.approach_cycle ||
                       !product.approach_cycle->GlobalMapContentEquals(
@@ -3067,7 +3073,6 @@ void QueueApproachFinalRank(const std::shared_ptr<RuntimeT>& runtime,
           std::string error;
         };
         struct LatestValidation final {
-          std::uint64_t map_generation;
           FrozenGlobalMapContent map;
           Polygon2 boundary;
         };
@@ -3142,10 +3147,13 @@ void QueueApproachFinalRank(const std::shared_ptr<RuntimeT>& runtime,
             selection.error = "FINAL_MAP_VALIDATION_ERROR";
           } else {
             validation.emplace(LatestValidation{
-                .map_generation = locked->map_generation,
                 .map = *locked->latest_map,
                 .boundary = *locked->task_boundary});
           }
+        }
+        if (locked->parameters.pipeline_seams &&
+            locked->parameters.pipeline_seams->after_final_rank_map_observed) {
+          locked->parameters.pipeline_seams->after_final_rank_map_observed();
         }
 
         bool candidate_valid = false;
@@ -3174,6 +3182,17 @@ void QueueApproachFinalRank(const std::shared_ptr<RuntimeT>& runtime,
           }
         }
 
+        if (validation && selection.error.empty() &&
+            validation_error.empty() && candidate_valid &&
+            locked->parameters.pipeline_seams &&
+            locked->parameters.pipeline_seams->before_approach_goal_commit) {
+          try {
+            locked->parameters.pipeline_seams->before_approach_goal_commit();
+          } catch (const std::exception&) {
+            validation_error = "FINAL_MAP_VALIDATION_ERROR";
+          }
+        }
+
         bool rebuild = false;
         {
           std::unique_lock lock{locked->mutex};
@@ -3188,8 +3207,10 @@ void QueueApproachFinalRank(const std::shared_ptr<RuntimeT>& runtime,
             FailLocked(*locked, std::move(selection.error));
           } else if (!validation_error.empty()) {
             FailLocked(*locked, std::move(validation_error));
-          } else if (!validation ||
-                     locked->map_generation != validation->map_generation ||
+          } else if (!validation || !locked->latest_map ||
+                     !SameGeometry(validation->map.geometry,
+                                   locked->latest_map->geometry) ||
+                     validation->map.data != locked->latest_map->data ||
                      !candidate_valid) {
             ClearSelectionCycleLocked(*locked);
             ++locked->epoch;
@@ -3228,14 +3249,7 @@ void QueueApproachFinalRank(const std::shared_ptr<RuntimeT>& runtime,
               locked->status_reason_override = "PLANNING_APPROACH";
               Status planning_status = MakeStatusLocked(*locked);
               const auto status_publisher = locked->status_publisher;
-              lock.unlock();
-              try {
-                status_publisher->publish(std::move(planning_status));
-              } catch (...) {
-                lock.lock();
-                throw;
-              }
-              lock.lock();
+              status_publisher->publish(std::move(planning_status));
               if (locked->teardown ||
                   locked->active_approach_cycle != cycle ||
                   locked->epoch != epoch ||

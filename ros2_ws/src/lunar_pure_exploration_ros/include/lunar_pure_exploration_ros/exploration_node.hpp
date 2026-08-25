@@ -207,6 +207,8 @@ struct ExplorationPipelineSeams {
   std::function<lunar_planning_msgs::msg::MotionReference(
       const lunar_planning_msgs::msg::MotionReference&)>
       copy_reference;
+  std::function<void()> after_boundary_guidance_build;
+  std::function<void()> before_approach_goal_commit;
   std::function<void()> before_reference_publish;
   std::function<void()> after_final_rank_map_observed;
 };

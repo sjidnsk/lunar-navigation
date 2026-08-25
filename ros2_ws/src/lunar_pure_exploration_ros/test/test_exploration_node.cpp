@@ -3942,6 +3942,163 @@ TEST_F(ExplorationNodeTest,
 }
 
 TEST_F(ExplorationNodeTest,
+       SameContentMapRepublishDuringApproachFinalRankCommitsFrozenReference) {
+  auto observed = std::make_shared<std::promise<void>>();
+  auto release = std::make_shared<std::promise<void>>();
+  const auto observed_future = observed->get_future().share();
+  const auto release_future = release->get_future().share();
+  auto seam_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_final_rank_map_observed =
+      [observed, release_future, seam_calls] {
+        if (seam_calls->fetch_add(1U) == 0U) {
+          observed->set_value();
+          release_future.wait();
+        }
+      };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  const auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-same-map-final-rank"), map,
+                   Odometry(-2.0, 5.0));
+
+  const bool validation_observed =
+      observed_future.wait_for(1s) == std::future_status::ready;
+  if (!validation_observed) {
+    release->set_value();
+  }
+  ASSERT_TRUE(validation_observed);
+  const auto original_goals = server_->Goals();
+  std::set<std::string> original_plan_ids;
+  for (const auto& goal : original_goals) {
+    original_plan_ids.insert("plan:" + goal.request_id);
+  }
+
+  const auto statuses_before_map = StatusCount();
+  map_publisher_->publish(map);
+  const bool same_map_observed = WaitFor([this, statuses_before_map] {
+    return StatusCount() > statuses_before_map;
+  });
+  release->set_value();
+  ASSERT_TRUE(same_map_observed);
+  ASSERT_FALSE(original_goals.empty());
+  EXPECT_EQ(server_->Goals().size(), original_goals.size());
+
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+  EXPECT_EQ(ExplorationNodeTestPeer::ActiveGoalKind(*explorer_),
+            lunar::pure_exploration::GoalKind::kBoundaryApproach);
+  EXPECT_EQ(server_->Goals().size(), original_goals.size());
+  EXPECT_TRUE(original_plan_ids.contains(References().front().plan_id));
+}
+
+TEST_F(ExplorationNodeTest,
+       ChangedMapAfterApproachValidationCannotCommitFrozenReference) {
+  auto entered = std::make_shared<std::promise<void>>();
+  auto release = std::make_shared<std::promise<void>>();
+  const auto entered_future = entered->get_future().share();
+  const auto release_future = release->get_future().share();
+  auto seam_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->before_approach_goal_commit =
+      [entered, release_future, seam_calls] {
+        if (seam_calls->fetch_add(1U) == 0U) {
+          entered->set_value();
+          release_future.wait();
+        }
+      };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-final-validation-toctou"), map,
+                   Odometry(-2.0, 5.0));
+
+  const bool commit_window_entered =
+      entered_future.wait_for(1s) == std::future_status::ready;
+  if (!commit_window_entered) {
+    release->set_value();
+  }
+  ASSERT_TRUE(commit_window_entered);
+  const auto original_goals = server_->Goals();
+  std::set<std::string> original_plan_ids;
+  for (const auto& goal : original_goals) {
+    original_plan_ids.insert("plan:" + goal.request_id);
+    const auto x = static_cast<std::int64_t>(std::floor(
+        (goal.goal.point.x - map.info.origin.position.x) /
+        map.info.resolution));
+    const auto y = static_cast<std::int64_t>(std::floor(
+        (goal.goal.point.y - map.info.origin.position.y) /
+        map.info.resolution));
+    if (x >= 0 && y >= 0 &&
+        x < static_cast<std::int64_t>(map.info.width) &&
+        y < static_cast<std::int64_t>(map.info.height)) {
+      map.data[static_cast<std::size_t>(y) * map.info.width +
+               static_cast<std::size_t>(x)] = -1;
+    }
+  }
+
+  const auto statuses_before_map = StatusCount();
+  map_publisher_->publish(map);
+  const bool changed_map_observed = WaitFor([this, statuses_before_map] {
+    return StatusCount() > statuses_before_map;
+  });
+  release->set_value();
+  ASSERT_TRUE(changed_map_observed);
+  ASSERT_FALSE(original_goals.empty());
+  ASSERT_TRUE(WaitFor([this, &original_plan_ids] {
+    const auto active = ExplorationNodeTestPeer::ActiveReference(*explorer_);
+    return !active || !original_plan_ids.contains(active->plan_id);
+  }));
+  std::this_thread::sleep_for(100ms);
+  EXPECT_TRUE(std::ranges::none_of(
+      References(), [&original_plan_ids](const auto& reference) {
+        return original_plan_ids.contains(reference.plan_id);
+      }));
+}
+
+TEST_F(ExplorationNodeTest,
+       IdenticalStationaryOdometryDoesNotStarveApproachBuildCommit) {
+  parameters_.stop_before_planning = true;
+  auto guidance_build_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_boundary_guidance_build = [guidance_build_calls] {
+    guidance_build_calls->fetch_add(1U);
+    std::this_thread::sleep_for(20ms);
+  };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  PublishAllInputs(StartTask("approach-stationary-odom"),
+                   OutsideApproachMap(false), Odometry(-2.0, 5.0));
+
+  std::jthread odometry_stream([this](const std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      odometry_publisher_->publish(Odometry(-2.0, 5.0));
+      std::this_thread::sleep_for(1ms);
+    }
+  });
+  const bool committed = WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }, 3s);
+  odometry_stream.request_stop();
+  odometry_stream.join();
+
+  EXPECT_TRUE(committed);
+  EXPECT_EQ(guidance_build_calls->load(), 1U);
+  std::size_t wait_entries = 0U;
+  bool waiting = false;
+  for (const auto& status : Statuses()) {
+    const bool now_waiting = status.reason_code == "WAITING_FOR_STOP";
+    if (now_waiting && !waiting) {
+      ++wait_entries;
+    }
+    waiting = now_waiting;
+  }
+  EXPECT_EQ(wait_entries, 1U);
+}
+
+TEST_F(ExplorationNodeTest,
        OutsideStartPublishesOnlyFreeApproachGoalsThenSwitchesToWfd) {
   Start(FakePlannerServer::Mode::kReachable);
   const auto initial_map = OutsideApproachMap(false);
