@@ -4375,13 +4375,32 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
                                validation.approach_candidate->identity;
                       });
                 }
+                const bool execution_replan_without_reference =
+                    locked->state_machine.state() ==
+                        ExplorationState::kReplanning &&
+                    locked->planner_in_flight &&
+                    locked->execution_replan_request_id &&
+                    !locked->active_reference;
                 const bool current_authority_missing =
                     !locked->task_boundary || !current_pose ||
-                    !locked->active_reference ||
-                    !current_frozen_authority;
+                    !current_frozen_authority ||
+                    (!locked->active_reference &&
+                     !execution_replan_without_reference);
                 if (current_authority_missing) {
                   cancel = locked->planner_in_flight;
                   FailLocked(*locked, "FINAL_MAP_VALIDATION_ERROR");
+                } else if (execution_replan_without_reference) {
+                  if (!error.empty()) {
+                    cancel = locked->planner_in_flight;
+                    FailLocked(*locked, std::move(error));
+                  } else if (invalid) {
+                    auto disposition =
+                        InvalidateActiveGoalForMapLocked(*locked);
+                    cancel = disposition.cancel_planner;
+                    needs_build = disposition.build_now;
+                    execution_cancel =
+                        std::move(disposition.execution_cancel);
+                  }
                 } else {
                   // Candidate safety is a property of this exact frozen goal
                   // and map snapshot, not of a particular rolling-reference
