@@ -41,6 +41,12 @@ namespace lunar::pure_exploration_ros {
 
 class ExplorationNodeTestPeer final {
  public:
+  enum class MapValidationAuthority {
+    kTaskBoundary,
+    kActiveReference,
+    kPose,
+  };
+
   static FrozenPlanningCyclePtr ActiveCycle(const ExplorationNode& node) {
     return node.SnapshotActiveCycleForTest();
   }
@@ -57,6 +63,11 @@ class ExplorationNodeTestPeer final {
   static std::optional<lunar::pure_exploration::GoalKind> ActiveGoalKind(
       const ExplorationNode& node) {
     return node.SnapshotActiveGoalKindForTest();
+  }
+  static std::optional<
+      lunar::pure_exploration::BoundaryApproachGoalIdentity>
+  BoundaryApproachIdentity(const ExplorationNode& node) {
+    return node.SnapshotBoundaryApproachIdentityForTest();
   }
   static std::vector<lunar::pure_exploration::Vec2> ExecutablePolyline(
       const ExplorationNode& node) {
@@ -90,6 +101,24 @@ class ExplorationNodeTestPeer final {
   }
   static void ResetActiveCycle(ExplorationNode& node) {
     node.ResetActiveCycleForTest();
+  }
+  static void ResetMapValidationAuthority(
+      ExplorationNode& node, const MapValidationAuthority authority) {
+    switch (authority) {
+      case MapValidationAuthority::kTaskBoundary:
+        node.ResetMapValidationAuthorityForTest(
+            ExplorationNode::MapValidationAuthorityForTest::kTaskBoundary);
+        return;
+      case MapValidationAuthority::kActiveReference:
+        node.ResetMapValidationAuthorityForTest(
+            ExplorationNode::MapValidationAuthorityForTest::kActiveReference);
+        return;
+      case MapValidationAuthority::kPose:
+        node.ResetMapValidationAuthorityForTest(
+            ExplorationNode::MapValidationAuthorityForTest::kPose);
+        return;
+    }
+    throw std::invalid_argument{"unknown map-validation authority"};
   }
 };
 
@@ -1147,6 +1176,50 @@ class ExplorationNodeTest : public ::testing::Test {
     EXPECT_EQ(status->reason_code, "WAITING_FOR_INPUT");
     EXPECT_TRUE(server_->Goals().empty());
     EXPECT_EQ(ReferenceCount(), 0U);
+  }
+
+  void ExpectSameContentMissingMapValidationAuthorityFails(
+      const ExplorationNodeTestPeer::MapValidationAuthority authority,
+      const bool exact_cancel_available) {
+    auto guidance_build_calls =
+        std::make_shared<std::atomic<std::size_t>>(0U);
+    auto seams = std::make_shared<ExplorationPipelineSeams>();
+    seams->after_boundary_guidance_build = [guidance_build_calls] {
+      guidance_build_calls->fetch_add(1U);
+    };
+    parameters_.pipeline_seams = std::move(seams);
+    Start(FakePlannerServer::Mode::kReachable);
+    const auto map = OutsideApproachMap(false);
+    PublishAllInputs(StartTask("same-map-missing-authority"), map,
+                     Odometry(-2.0, 5.0));
+    ASSERT_TRUE(WaitFor([this] {
+      return ReferenceCount() == 1U &&
+             ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+                 lunar::pure_exploration::GoalKind::kBoundaryApproach;
+    }));
+    const std::string plan_id = References().front().plan_id;
+    const std::size_t goals_before = server_->Goals().size();
+    ExplorationNodeTestPeer::ResetMapValidationAuthority(
+        *explorer_, authority);
+    map_publisher_->publish(map);
+
+    ASSERT_TRUE(WaitFor([this] {
+      const auto status = LatestStatus();
+      return status && status->state == Status::ERROR &&
+             status->reason_code == "FINAL_MAP_VALIDATION_ERROR";
+    }));
+    if (exact_cancel_available) {
+      ASSERT_TRUE(WaitFor([this, &plan_id] {
+        return ExecutionCancels() == std::vector<std::string>{plan_id};
+      }));
+    } else {
+      EXPECT_TRUE(ExecutionCancels().empty());
+    }
+    EXPECT_EQ(server_->Goals().size(), goals_before);
+    EXPECT_EQ(guidance_build_calls->load(), 1U);
+    ASSERT_TRUE(LatestStatus());
+    EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+    EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
   }
 
   static std::atomic<std::uint64_t> sequence_;
@@ -4491,37 +4564,111 @@ TEST_F(ExplorationNodeTest,
 }
 
 TEST_F(ExplorationNodeTest,
-       StaleSerializedApproachValidationCannotCancelReplacementGoal) {
-  parameters_.task_raster_limits.maximum_raster_cell_count = 5000000U;
-  parameters_.boundary_guidance_limits.maximum_guidance_grid_cells =
-      10000000U;
-  parameters_.boundary_guidance_limits.maximum_guidance_work_units =
-      50000000U;
-  auto validation_submission_count =
+       SameContentMapMissingTaskBoundaryFailsClosedWithoutRebuild) {
+  ExpectSameContentMissingMapValidationAuthorityFails(
+      ExplorationNodeTestPeer::MapValidationAuthority::kTaskBoundary, true);
+}
+
+TEST_F(ExplorationNodeTest,
+       SameContentMapMissingActiveReferenceFailsClosedWithoutRebuild) {
+  ExpectSameContentMissingMapValidationAuthorityFails(
+      ExplorationNodeTestPeer::MapValidationAuthority::kActiveReference,
+      false);
+}
+
+TEST_F(ExplorationNodeTest,
+       SameContentMapMissingLatestPoseFailsClosedWithoutRebuild) {
+  ExpectSameContentMissingMapValidationAuthorityFails(
+      ExplorationNodeTestPeer::MapValidationAuthority::kPose, true);
+}
+
+TEST_F(ExplorationNodeTest,
+       InFlightValidationAuthorityLossFailsCurrentPlanClosed) {
+  auto commit_entered = std::make_shared<std::promise<void>>();
+  auto release_commit = std::make_shared<std::promise<void>>();
+  auto commit_completed = std::make_shared<std::promise<void>>();
+  const auto commit_entered_future = commit_entered->get_future().share();
+  const auto release_commit_future = release_commit->get_future().share();
+  const auto commit_completed_future = commit_completed->get_future().share();
+  auto before_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto after_signaled = std::make_shared<std::atomic<bool>>(false);
+  auto guidance_build_calls =
       std::make_shared<std::atomic<std::size_t>>(0U);
-  auto watch_validation = std::make_shared<std::atomic<bool>>(false);
-  auto first_submitted = std::make_shared<std::promise<void>>();
-  auto second_submitted = std::make_shared<std::promise<void>>();
-  const auto first_submitted_future = first_submitted->get_future().share();
-  const auto second_submitted_future = second_submitted->get_future().share();
   auto seams = std::make_shared<ExplorationPipelineSeams>();
-  seams->after_global_map_callback =
-      [watch_validation, validation_submission_count, first_submitted,
-       second_submitted] {
-        if (!watch_validation->load(std::memory_order_acquire)) {
-          return;
+  seams->after_boundary_guidance_build = [guidance_build_calls] {
+    guidance_build_calls->fetch_add(1U);
+  };
+  seams->before_active_map_validation_commit =
+      [commit_entered, release_commit_future, before_calls] {
+        if (before_calls->fetch_add(1U) == 0U) {
+          commit_entered->set_value();
+          static_cast<void>(release_commit_future.wait_for(5s));
         }
-        const auto index = validation_submission_count->fetch_add(1U);
-        if (index == 0U) {
-          first_submitted->set_value();
-        } else if (index == 1U) {
-          second_submitted->set_value();
+      };
+  seams->after_active_map_validation_commit =
+      [commit_completed, after_signaled] {
+        if (!after_signaled->exchange(true)) {
+          commit_completed->set_value();
         }
       };
   parameters_.pipeline_seams = std::move(seams);
   Start(FakePlannerServer::Mode::kReachable);
-  const auto original_map = OutsideApproachMap(false);
-  PublishAllInputs(StartTask("approach-validation-old"), original_map,
+  auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("in-flight-authority-loss"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] { return ReferenceCount() == 1U; }));
+  const std::string plan_id = References().front().plan_id;
+  map.data.back() = 100;
+  map_publisher_->publish(map);
+  ASSERT_EQ(commit_entered_future.wait_for(3s), std::future_status::ready);
+
+  ExplorationNodeTestPeer::ResetMapValidationAuthority(
+      *explorer_,
+      ExplorationNodeTestPeer::MapValidationAuthority::kTaskBoundary);
+  release_commit->set_value();
+  ASSERT_EQ(commit_completed_future.wait_for(3s), std::future_status::ready);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::ERROR &&
+           status->reason_code == "FINAL_MAP_VALIDATION_ERROR";
+  }));
+  EXPECT_EQ(ExecutionCancels(), std::vector<std::string>{plan_id});
+  EXPECT_EQ(guidance_build_calls->load(), 1U);
+}
+
+TEST_F(ExplorationNodeTest,
+       StaleSerializedApproachValidationCannotCancelReplacementGoal) {
+  auto commit_entered = std::make_shared<std::promise<void>>();
+  auto release_commit = std::make_shared<std::promise<void>>();
+  auto commit_completed = std::make_shared<std::promise<void>>();
+  const auto commit_entered_future = commit_entered->get_future().share();
+  const auto release_commit_future = release_commit->get_future().share();
+  const auto commit_completed_future = commit_completed->get_future().share();
+  auto before_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto after_signaled = std::make_shared<std::atomic<bool>>(false);
+  auto release_timed_out = std::make_shared<std::atomic<bool>>(false);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->before_active_map_validation_commit =
+      [commit_entered, release_commit_future, before_calls,
+       release_timed_out] {
+        if (before_calls->fetch_add(1U) != 0U) {
+          return;
+        }
+        commit_entered->set_value();
+        release_timed_out->store(
+            release_commit_future.wait_for(5s) != std::future_status::ready,
+            std::memory_order_release);
+      };
+  seams->after_active_map_validation_commit =
+      [commit_completed, after_signaled] {
+        if (!after_signaled->exchange(true)) {
+          commit_completed->set_value();
+        }
+      };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kReachable);
+  auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-validation-old"), map,
                    Odometry(-2.0, 5.0));
   ASSERT_TRUE(WaitFor([this] {
     return ReferenceCount() == 1U &&
@@ -4530,34 +4677,18 @@ TEST_F(ExplorationNodeTest,
   }));
   const std::string old_plan_id = References().front().plan_id;
   const auto old_target = ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  const auto old_identity =
+      ExplorationNodeTestPeer::BoundaryApproachIdentity(*explorer_);
   ASSERT_TRUE(old_target);
-
-  auto slow_changed = GlobalMap(3000U, 3000U, 0.005, -4.0, 0.0);
-  slow_changed.data.assign(
-      static_cast<std::size_t>(slow_changed.info.width) *
-          slow_changed.info.height,
-      0);
-  watch_validation->store(true, std::memory_order_release);
-  map_publisher_->publish(slow_changed);
-  ASSERT_EQ(first_submitted_future.wait_for(3s), std::future_status::ready);
-
-  auto invalid = original_map;
-  const auto old_target_offset =
-      MapOffset(invalid, old_target->x, old_target->y);
+  ASSERT_TRUE(old_identity);
+  const auto old_target_offset = MapOffset(map, old_target->x, old_target->y);
   ASSERT_TRUE(old_target_offset);
-  invalid.data[*old_target_offset] = 100;
-  map_publisher_->publish(invalid);
-  ASSERT_EQ(second_submitted_future.wait_for(3s), std::future_status::ready);
+  map.data[*old_target_offset] = 100;
+  map_publisher_->publish(map);
+  ASSERT_EQ(commit_entered_future.wait_for(3s), std::future_status::ready);
   ASSERT_TRUE(ExecutionCancels().empty());
 
   task_publisher_->publish(StartTask("approach-validation-replacement"));
-  ASSERT_TRUE(WaitFor([this] {
-    const auto status = LatestStatus();
-    return status && status->task_id ==
-                         "approach-validation-replacement";
-  }));
-  map_publisher_->publish(original_map);
-  odometry_publisher_->publish(Odometry(-2.0, 5.0));
   ASSERT_TRUE(WaitFor([this] {
     const auto status = LatestStatus();
     return ReferenceCount() >= 2U && status &&
@@ -4565,20 +4696,123 @@ TEST_F(ExplorationNodeTest,
            status->state == Status::EXECUTING &&
            ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
                lunar::pure_exploration::GoalKind::kBoundaryApproach;
-  }, 10s));
+  }, 3s));
   const std::string replacement_plan_id = References().back().plan_id;
+  const auto replacement_identity =
+      ExplorationNodeTestPeer::BoundaryApproachIdentity(*explorer_);
+  ASSERT_TRUE(replacement_identity);
   ASSERT_NE(replacement_plan_id, old_plan_id);
+  EXPECT_NE(*replacement_identity, *old_identity);
   ASSERT_TRUE(WaitFor([this, &old_plan_id] {
     return ExecutionCancels() == std::vector<std::string>{old_plan_id};
   }));
-  std::this_thread::sleep_for(1s);
+  release_commit->set_value();
+  ASSERT_EQ(commit_completed_future.wait_for(3s), std::future_status::ready);
 
+  EXPECT_FALSE(release_timed_out->load(std::memory_order_acquire));
   EXPECT_EQ(ExecutionCancels(), std::vector<std::string>{old_plan_id});
-  EXPECT_NE(replacement_plan_id, old_plan_id);
+  EXPECT_EQ(References().back().plan_id, replacement_plan_id);
   ASSERT_TRUE(LatestStatus());
-  EXPECT_EQ(LatestStatus()->task_id,
-            "approach-validation-replacement");
+  EXPECT_EQ(LatestStatus()->task_id, "approach-validation-replacement");
   EXPECT_NE(LatestStatus()->state, Status::ERROR);
+}
+
+TEST_F(ExplorationNodeTest,
+       LatestMapInvalidationFollowsSameGoalRollingPlanSuccessor) {
+  auto commit_entered = std::make_shared<std::promise<void>>();
+  auto release_commit = std::make_shared<std::promise<void>>();
+  auto commit_completed = std::make_shared<std::promise<void>>();
+  const auto commit_entered_future = commit_entered->get_future().share();
+  const auto release_commit_future = release_commit->get_future().share();
+  const auto commit_completed_future = commit_completed->get_future().share();
+  auto before_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto after_signaled = std::make_shared<std::atomic<bool>>(false);
+  auto guidance_build_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_boundary_guidance_build = [guidance_build_calls] {
+    guidance_build_calls->fetch_add(1U);
+  };
+  seams->before_active_map_validation_commit =
+      [commit_entered, release_commit_future, before_calls] {
+        if (before_calls->fetch_add(1U) == 0U) {
+          commit_entered->set_value();
+          static_cast<void>(release_commit_future.wait_for(5s));
+        }
+      };
+  seams->after_active_map_validation_commit =
+      [commit_completed, after_signaled] {
+        if (!after_signaled->exchange(true)) {
+          commit_completed->set_value();
+        }
+      };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kRollingReachable);
+  auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("rolling-map-validation"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto old_identity =
+      ExplorationNodeTestPeer::BoundaryApproachIdentity(*explorer_);
+  const auto old_target = ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  ASSERT_TRUE(old_identity);
+  ASSERT_TRUE(old_target);
+  const auto first_reference = References().front();
+  ASSERT_FALSE(first_reference.trajectory.points.empty());
+  const auto endpoint = first_reference.trajectory.points.back()
+                            .transforms.front().translation;
+  const std::size_t goals_before = server_->Goals().size();
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+  odometry_publisher_->publish(Odometry(endpoint.x, endpoint.y));
+  ASSERT_TRUE(WaitFor([this, goals_before] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::REPLANNING &&
+           server_->Goals().size() > goals_before;
+  }));
+  const std::string replan_request = server_->LatestRequestId();
+  ASSERT_TRUE(WaitFor([this, &replan_request] {
+    return server_->HasHandle(replan_request);
+  }));
+  ASSERT_TRUE(WaitFor([this, &first_reference] {
+    return ExecutionCancels() ==
+           std::vector<std::string>{first_reference.plan_id};
+  }));
+
+  const auto target_offset = MapOffset(map, old_target->x, old_target->y);
+  ASSERT_TRUE(target_offset);
+  map.data[*target_offset] = 100;
+  map_publisher_->publish(map);
+  ASSERT_EQ(commit_entered_future.wait_for(3s), std::future_status::ready);
+
+  server_->Finish(replan_request, FakePlannerServer::Mode::kReachable);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return ReferenceCount() == 2U && status &&
+           status->state == Status::EXECUTING;
+  }));
+  const std::string successor_plan_id = References().back().plan_id;
+  ASSERT_NE(successor_plan_id, first_reference.plan_id);
+  EXPECT_EQ(ExplorationNodeTestPeer::BoundaryApproachIdentity(*explorer_),
+            old_identity);
+
+  release_commit->set_value();
+  ASSERT_EQ(commit_completed_future.wait_for(3s), std::future_status::ready);
+  ASSERT_TRUE(WaitFor([this, &first_reference, &successor_plan_id] {
+    return ExecutionCancels() ==
+           std::vector<std::string>{first_reference.plan_id,
+                                    successor_plan_id};
+  }));
+  ASSERT_TRUE(WaitFor([guidance_build_calls] {
+    return guidance_build_calls->load() == 2U;
+  }));
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_NE(LatestStatus()->state, Status::ERROR);
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
 }
 
 TEST_F(ExplorationNodeTest,

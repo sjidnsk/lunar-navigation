@@ -4091,6 +4091,7 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
     std::uint64_t epoch{0U};
     std::string task_id;
     std::string plan_id;
+    std::string goal_request_id;
     lunar::pure_exploration::GoalKind kind;
     FrozenGlobalMapContent map;
     Polygon2 boundary;
@@ -4131,8 +4132,26 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
               RuntimeT::PendingStationaryAction::kBuildFreshBatch &&
           runtime->state_machine.active_goal()) {
         const auto& active_goal = *runtime->state_machine.active_goal();
-        if (active_goal.kind() ==
-            lunar::pure_exploration::GoalKind::kTaskFrontier) {
+        const auto pose = runtime->pose_resolver.LatestPoseInMap();
+        // Stationary-confirmed execution replanning intentionally clears the
+        // old reference before dispatching its replacement.  The frozen goal
+        // and cycle remain authoritative during that bounded transition.  A
+        // changed map must cancel the in-flight replan and enter the fresh-map
+        // stop/rebuild gate; same-content input needs no reference validation
+        // because no reference is executing yet.
+        const bool execution_replan_without_reference =
+            runtime->state_machine.state() ==
+                ExplorationState::kReplanning &&
+            runtime->planner_in_flight &&
+            runtime->execution_replan_request_id &&
+            !runtime->active_reference;
+        validation_authority_error =
+            !runtime->task_boundary || !pose ||
+            (!runtime->active_reference &&
+             !execution_replan_without_reference);
+        if (!validation_authority_error &&
+            active_goal.kind() ==
+                lunar::pure_exploration::GoalKind::kTaskFrontier) {
           if (!runtime->active_cycle) {
             validation_authority_error = true;
           } else {
@@ -4148,28 +4167,35 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
             validation_authority_error =
                 selected ==
                 runtime->active_cycle->batch()->candidates().end();
-            if (!validation_authority_error &&
+            const bool map_changed =
                 !runtime->active_cycle->batch()->GlobalMapContentEquals(
-                    message)) {
-              const auto pose = runtime->pose_resolver.LatestPoseInMap();
-              validation_authority_error =
-                  !runtime->task_boundary || !pose || !runtime->active_reference;
-              if (!validation_authority_error) {
-                validation.emplace(ActiveGoalValidation{
-                    .generation = runtime->map_generation,
-                    .epoch = runtime->epoch,
-                    .task_id = runtime->state_machine.task_id(),
-                    .plan_id = runtime->active_reference->plan_id,
-                    .kind = active_goal.kind(),
-                    .map = *runtime->latest_map,
-                    .boundary = *runtime->task_boundary,
-                    .pose = *pose,
-                    .wfd_candidate = *selected,
-                    .approach_candidate = std::nullopt});
+                    message);
+            if (!validation_authority_error &&
+                execution_replan_without_reference && map_changed) {
+              auto disposition =
+                  InvalidateActiveGoalForMapLocked(*runtime);
+              cancel = cancel || disposition.cancel_planner;
+              needs_build = needs_build || disposition.build_now;
+              if (disposition.execution_cancel) {
+                execution_cancel =
+                    std::move(disposition.execution_cancel);
               }
+            } else if (!validation_authority_error && map_changed) {
+              validation.emplace(ActiveGoalValidation{
+                  .generation = runtime->map_generation,
+                  .epoch = runtime->epoch,
+                  .task_id = runtime->state_machine.task_id(),
+                  .plan_id = runtime->active_reference->plan_id,
+                  .goal_request_id = active_goal.request_id(),
+                  .kind = active_goal.kind(),
+                  .map = *runtime->latest_map,
+                  .boundary = *runtime->task_boundary,
+                  .pose = *pose,
+                  .wfd_candidate = *selected,
+                  .approach_candidate = std::nullopt});
             }
           }
-        } else {
+        } else if (!validation_authority_error) {
           const auto* identity = active_goal.boundary_approach_identity();
           if (!runtime->active_approach_cycle || !identity) {
             validation_authority_error = true;
@@ -4182,24 +4208,32 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
                 });
             validation_authority_error =
                 selected == approach_candidates.end();
-            if (!validation_authority_error &&
+            const bool map_changed =
                 !runtime->active_approach_cycle->GlobalMapContentEquals(
-                    message)) {
-              validation_authority_error =
-                  !runtime->task_boundary || !runtime->active_reference;
-              if (!validation_authority_error) {
-                validation.emplace(ActiveGoalValidation{
-                    .generation = runtime->map_generation,
-                    .epoch = runtime->epoch,
-                    .task_id = runtime->state_machine.task_id(),
-                    .plan_id = runtime->active_reference->plan_id,
-                    .kind = active_goal.kind(),
-                    .map = *runtime->latest_map,
-                    .boundary = *runtime->task_boundary,
-                    .pose = std::nullopt,
-                    .wfd_candidate = std::nullopt,
-                    .approach_candidate = *selected});
+                    message);
+            if (!validation_authority_error &&
+                execution_replan_without_reference && map_changed) {
+              auto disposition =
+                  InvalidateActiveGoalForMapLocked(*runtime);
+              cancel = cancel || disposition.cancel_planner;
+              needs_build = needs_build || disposition.build_now;
+              if (disposition.execution_cancel) {
+                execution_cancel =
+                    std::move(disposition.execution_cancel);
               }
+            } else if (!validation_authority_error && map_changed) {
+              validation.emplace(ActiveGoalValidation{
+                  .generation = runtime->map_generation,
+                  .epoch = runtime->epoch,
+                  .task_id = runtime->state_machine.task_id(),
+                  .plan_id = runtime->active_reference->plan_id,
+                  .goal_request_id = active_goal.request_id(),
+                  .kind = active_goal.kind(),
+                  .map = *runtime->latest_map,
+                  .boundary = *runtime->task_boundary,
+                  .pose = *pose,
+                  .wfd_candidate = std::nullopt,
+                  .approach_candidate = *selected});
             }
           }
         }
@@ -4258,8 +4292,15 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
               error = "FINAL_MAP_VALIDATION_ERROR";
             }
 
+            if (locked->parameters.pipeline_seams &&
+                locked->parameters.pipeline_seams
+                    ->before_active_map_validation_commit) {
+              locked->parameters.pipeline_seams
+                  ->before_active_map_validation_commit();
+            }
             bool cancel = false;
             bool needs_build = false;
+            bool stale = false;
             std::optional<std::string> execution_cancel;
             {
               std::scoped_lock lock{locked->mutex};
@@ -4267,65 +4308,130 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
                   locked->map_generation != validation.generation ||
                   locked->epoch != validation.epoch ||
                   locked->state_machine.task_id() != validation.task_id ||
-                  !locked->active_reference ||
-                  locked->active_reference->plan_id != validation.plan_id ||
                   !locked->state_machine.active_goal() ||
                   locked->state_machine.active_goal()->kind() !=
-                      validation.kind) {
-                return;
+                      validation.kind ||
+                  locked->state_machine.active_goal()->request_id() !=
+                      validation.goal_request_id) {
+                stale = true;
               }
-              if (validation.kind ==
-                  lunar::pure_exploration::GoalKind::kTaskFrontier) {
-                if (!validation.wfd_candidate ||
-                    locked->state_machine.active_goal()->candidate_key() !=
-                        validation.wfd_candidate->key ||
-                    !validation.wfd_candidate->frontier_canonical_key ||
-                    !std::ranges::equal(
+              bool goal_identity_matches = false;
+              if (!stale && validation.kind ==
+                                lunar::pure_exploration::GoalKind::
+                                    kTaskFrontier) {
+                goal_identity_matches =
+                    validation.wfd_candidate &&
+                    locked->state_machine.active_goal()->candidate_key() ==
+                        validation.wfd_candidate->key &&
+                    validation.wfd_candidate->frontier_canonical_key &&
+                    std::ranges::equal(
                         *validation.wfd_candidate->frontier_canonical_key,
                         locked->state_machine.active_goal()
-                            ->frontier_canonical_key())) {
-                  return;
-                }
-              } else {
+                            ->frontier_canonical_key());
+              } else if (!stale) {
                 const auto* identity = locked->state_machine.active_goal()
                                            ->boundary_approach_identity();
-                if (!identity || !validation.approach_candidate ||
-                    *identity != validation.approach_candidate->identity) {
-                  return;
-                }
+                goal_identity_matches =
+                    identity && validation.approach_candidate &&
+                    *identity == validation.approach_candidate->identity;
+              }
+              if (!stale && !goal_identity_matches) {
+                stale = true;
               }
               const bool local_endpoint_refresh_owns_release =
+                  !stale &&
                   locked->pending_stationary_action ==
                       RuntimeT::PendingStationaryAction::kBuildFreshBatch &&
                   locked->pending_fresh_batch_release_reason ==
                       lunar::pure_exploration::GoalReleaseReason::
                           kLocalSegmentCompleted;
-              if (!local_endpoint_refresh_owns_release) {
-                if (!error.empty()) {
+              if (!stale && !local_endpoint_refresh_owns_release) {
+                const auto current_pose =
+                    locked->pose_resolver.LatestPoseInMap();
+                bool current_frozen_authority = false;
+                if (validation.kind ==
+                    lunar::pure_exploration::GoalKind::kTaskFrontier) {
+                  if (locked->active_cycle && validation.wfd_candidate) {
+                    const auto& candidates =
+                        locked->active_cycle->batch()->candidates();
+                    current_frozen_authority = std::ranges::any_of(
+                        candidates, [&](const auto& candidate) {
+                          return candidate.key ==
+                                     validation.wfd_candidate->key &&
+                                 candidate.frontier_canonical_key &&
+                                 validation.wfd_candidate
+                                     ->frontier_canonical_key &&
+                                 std::ranges::equal(
+                                     *candidate.frontier_canonical_key,
+                                     *validation.wfd_candidate
+                                          ->frontier_canonical_key);
+                        });
+                  }
+                } else if (locked->active_approach_cycle &&
+                           validation.approach_candidate) {
+                  current_frozen_authority = std::ranges::any_of(
+                      locked->active_approach_cycle->guidance().candidates,
+                      [&](const auto& candidate) {
+                        return candidate.identity ==
+                               validation.approach_candidate->identity;
+                      });
+                }
+                const bool current_authority_missing =
+                    !locked->task_boundary || !current_pose ||
+                    !locked->active_reference ||
+                    !current_frozen_authority;
+                if (current_authority_missing) {
                   cancel = locked->planner_in_flight;
-                  FailLocked(*locked, std::move(error));
-                } else if (invalid) {
-                  auto disposition =
-                      InvalidateActiveGoalForMapLocked(*locked);
-                  cancel = disposition.cancel_planner;
-                  needs_build = disposition.build_now;
-                  execution_cancel = std::move(disposition.execution_cancel);
+                  FailLocked(*locked, "FINAL_MAP_VALIDATION_ERROR");
+                } else {
+                  // Candidate safety is a property of this exact frozen goal
+                  // and map snapshot, not of a particular rolling-reference
+                  // plan ID.  A newer reference may therefore consume the
+                  // completed result only while epoch, task, goal request,
+                  // kind, and full typed identity all remain unchanged.
+                  const bool exact_plan =
+                      locked->active_reference->plan_id == validation.plan_id;
+                  const bool same_goal_successor =
+                      !exact_plan &&
+                      locked->state_machine.state() ==
+                          ExplorationState::kExecuting;
+                  if (!exact_plan && !same_goal_successor) {
+                    stale = true;
+                  } else if (!error.empty()) {
+                    cancel = locked->planner_in_flight;
+                    FailLocked(*locked, std::move(error));
+                  } else if (invalid) {
+                    auto disposition =
+                        InvalidateActiveGoalForMapLocked(*locked);
+                    cancel = disposition.cancel_planner;
+                    needs_build = disposition.build_now;
+                    execution_cancel =
+                        std::move(disposition.execution_cancel);
+                  }
                 }
               }
             }
-            if (execution_cancel) {
-              std_msgs::msg::String message;
-              message.data = std::move(*execution_cancel);
-              locked->cancel_publisher->publish(std::move(message));
+            if (!stale) {
+              if (execution_cancel) {
+                std_msgs::msg::String message;
+                message.data = std::move(*execution_cancel);
+                locked->cancel_publisher->publish(std::move(message));
+              }
+              if (cancel) {
+                locked->planner_client->CancelActive();
+              }
+              if (needs_build) {
+                QueueBuild(locked);
+              } else {
+                PumpCurrentCycle(locked);
+                PublishStatus(locked);
+              }
             }
-            if (cancel) {
-              locked->planner_client->CancelActive();
-            }
-            if (needs_build) {
-              QueueBuild(locked);
-            } else {
-              PumpCurrentCycle(locked);
-              PublishStatus(locked);
+            if (locked->parameters.pipeline_seams &&
+                locked->parameters.pipeline_seams
+                    ->after_active_map_validation_commit) {
+              locked->parameters.pipeline_seams
+                  ->after_active_map_validation_commit();
             }
           });
       if (!submitted) {
@@ -5128,6 +5234,21 @@ ExplorationNode::SnapshotActiveGoalKindForTest() const {
              : std::nullopt;
 }
 
+std::optional<lunar::pure_exploration::BoundaryApproachGoalIdentity>
+ExplorationNode::SnapshotBoundaryApproachIdentityForTest() const {
+  const auto runtime = runtime_;
+  if (!runtime) {
+    return std::nullopt;
+  }
+  std::scoped_lock lock{runtime->mutex};
+  if (!runtime->state_machine.active_goal()) {
+    return std::nullopt;
+  }
+  const auto* identity = runtime->state_machine.active_goal()
+                             ->boundary_approach_identity();
+  return identity ? std::optional{*identity} : std::nullopt;
+}
+
 std::optional<Pose2> ExplorationNode::SnapshotActiveTargetForTest() const {
   const auto runtime = runtime_;
   if (!runtime) return std::nullopt;
@@ -5164,6 +5285,27 @@ void ExplorationNode::ResetActiveCycleForTest() {
   std::scoped_lock lock{runtime->mutex};
   runtime->active_cycle.reset();
   runtime->active_approach_cycle.reset();
+}
+
+void ExplorationNode::ResetMapValidationAuthorityForTest(
+    const MapValidationAuthorityForTest authority) {
+  const auto runtime = runtime_;
+  if (!runtime) {
+    return;
+  }
+  std::scoped_lock lock{runtime->mutex};
+  switch (authority) {
+    case MapValidationAuthorityForTest::kTaskBoundary:
+      runtime->task_boundary.reset();
+      return;
+    case MapValidationAuthorityForTest::kActiveReference:
+      runtime->active_reference.reset();
+      return;
+    case MapValidationAuthorityForTest::kPose:
+      runtime->pose_resolver = PoseResolver{};
+      return;
+  }
+  throw std::invalid_argument{"unknown map-validation authority"};
 }
 
 double ExplorationNode::PlatformWidthForTest() const {

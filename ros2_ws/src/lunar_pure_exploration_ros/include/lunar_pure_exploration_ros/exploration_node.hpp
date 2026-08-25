@@ -212,6 +212,8 @@ struct ExplorationPipelineSeams {
   std::function<void()> before_reference_publish;
   std::function<void()> after_final_rank_map_observed;
   std::function<void()> after_global_map_callback;
+  std::function<void()> before_active_map_validation_commit;
+  std::function<void()> after_active_map_validation_commit;
 };
 
 struct ExplorationNodeParameters {
@@ -282,6 +284,11 @@ class ExplorationNode final : public rclcpp::Node {
 
  private:
   struct Runtime;
+  enum class MapValidationAuthorityForTest {
+    kTaskBoundary,
+    kActiveReference,
+    kPose,
+  };
 
   void Initialize(ExplorationNodeParameters parameters);
   [[nodiscard]] FrozenPlanningCyclePtr SnapshotActiveCycleForTest() const;
@@ -293,6 +300,9 @@ class ExplorationNode final : public rclcpp::Node {
   SnapshotActiveTargetForTest() const;
   [[nodiscard]] std::optional<lunar::pure_exploration::GoalKind>
   SnapshotActiveGoalKindForTest() const;
+  [[nodiscard]] std::optional<
+      lunar::pure_exploration::BoundaryApproachGoalIdentity>
+  SnapshotBoundaryApproachIdentityForTest() const;
   [[nodiscard]] std::vector<lunar::pure_exploration::Vec2>
   SnapshotExecutablePolylineForTest() const;
   [[nodiscard]] std::optional<lunar::pure_exploration::Vec2>
@@ -306,6 +316,8 @@ class ExplorationNode final : public rclcpp::Node {
   [[nodiscard]] std::optional<double> LatestMapResolutionForTest() const;
   void InjectEvaluationForTest(PlannerEvaluation evaluation);
   void ResetActiveCycleForTest();
+  void ResetMapValidationAuthorityForTest(
+      MapValidationAuthorityForTest authority);
 
   std::shared_ptr<Runtime> runtime_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr
