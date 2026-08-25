@@ -3992,67 +3992,114 @@ TEST_F(ExplorationNodeTest,
 }
 
 TEST_F(ExplorationNodeTest,
-       ChangedMapAfterApproachValidationCannotCommitFrozenReference) {
-  auto entered = std::make_shared<std::promise<void>>();
-  auto release = std::make_shared<std::promise<void>>();
-  const auto entered_future = entered->get_future().share();
-  const auto release_future = release->get_future().share();
-  auto seam_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+       ChangedMapCallbackCannotOvertakeApproachGoalCommitLinearization) {
+  auto map = std::make_shared<nav_msgs::msg::OccupancyGrid>(
+      OutsideApproachMap(false));
+  auto commit_seam_done = std::make_shared<std::promise<void>>();
+  const auto commit_seam_future = commit_seam_done->get_future().share();
+  auto map_callback_done = std::make_shared<std::promise<void>>();
+  const auto map_callback_future = map_callback_done->get_future().share();
+  auto commit_seam_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto map_callback_signaled = std::make_shared<std::atomic<bool>>(false);
+  auto watch_map_callback = std::make_shared<std::atomic<bool>>(false);
+  auto planning_status_observed = std::make_shared<std::atomic<bool>>(false);
+  auto original_goals_present = std::make_shared<std::atomic<bool>>(false);
+  auto status_count_before_map =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto map_callback_completed_before_commit =
+      std::make_shared<std::atomic<bool>>(false);
+  auto map_status_observed = std::make_shared<std::atomic<bool>>(false);
+  auto commit_and_reference_linearized =
+      std::make_shared<std::atomic<bool>>(false);
+  auto map_callback_saw_linearized_commit =
+      std::make_shared<std::atomic<bool>>(false);
+  auto original_plan_ids = std::make_shared<std::set<std::string>>();
   auto seams = std::make_shared<ExplorationPipelineSeams>();
-  seams->before_approach_goal_commit =
-      [entered, release_future, seam_calls] {
-        if (seam_calls->fetch_add(1U) == 0U) {
-          entered->set_value();
-          release_future.wait();
+  seams->before_reference_publish = [commit_and_reference_linearized] {
+    commit_and_reference_linearized->store(true,
+                                           std::memory_order_release);
+  };
+  seams->after_global_map_callback =
+      [this, watch_map_callback, map_callback_signaled,
+       status_count_before_map, map_status_observed,
+       commit_and_reference_linearized, map_callback_saw_linearized_commit,
+       map_callback_done] {
+        if (!watch_map_callback->load(std::memory_order_acquire) ||
+            map_callback_signaled->exchange(true)) {
+          return;
         }
+        map_status_observed->store(
+            WaitFor(
+                [this, status_count_before_map] {
+                  return StatusCount() > status_count_before_map->load();
+                },
+                250ms));
+        map_callback_saw_linearized_commit->store(
+            commit_and_reference_linearized->load(
+                std::memory_order_acquire));
+        map_callback_done->set_value();
+      };
+  seams->before_approach_goal_commit =
+      [this, map, commit_seam_done, map_callback_future, commit_seam_calls,
+       watch_map_callback, planning_status_observed, original_goals_present,
+       status_count_before_map, map_callback_completed_before_commit,
+       original_plan_ids] {
+        if (commit_seam_calls->fetch_add(1U) != 0U) {
+          return;
+        }
+        const bool planning_observed = WaitFor([this] {
+          const auto status = LatestStatus();
+          return status && status->state == Status::PLANNING &&
+                 status->reason_code == "PLANNING_APPROACH";
+        }, 1s);
+        planning_status_observed->store(planning_observed);
+        if (planning_observed) {
+          const auto goals = server_->Goals();
+          original_goals_present->store(!goals.empty());
+          for (const auto& goal : goals) {
+            original_plan_ids->insert("plan:" + goal.request_id);
+            const auto x = static_cast<std::int64_t>(std::floor(
+                (goal.goal.point.x - map->info.origin.position.x) /
+                map->info.resolution));
+            const auto y = static_cast<std::int64_t>(std::floor(
+                (goal.goal.point.y - map->info.origin.position.y) /
+                map->info.resolution));
+            if (x >= 0 && y >= 0 &&
+                x < static_cast<std::int64_t>(map->info.width) &&
+                y < static_cast<std::int64_t>(map->info.height)) {
+              map->data[static_cast<std::size_t>(y) * map->info.width +
+                        static_cast<std::size_t>(x)] = -1;
+            }
+          }
+          status_count_before_map->store(StatusCount());
+          watch_map_callback->store(true, std::memory_order_release);
+          map_publisher_->publish(*map);
+          map_callback_completed_before_commit->store(
+              map_callback_future.wait_for(750ms) ==
+              std::future_status::ready);
+        }
+        commit_seam_done->set_value();
       };
   parameters_.pipeline_seams = std::move(seams);
   Start(FakePlannerServer::Mode::kReachable);
-  auto map = OutsideApproachMap(false);
-  PublishAllInputs(StartTask("approach-final-validation-toctou"), map,
+  PublishAllInputs(StartTask("approach-goal-commit-linearization"), *map,
                    Odometry(-2.0, 5.0));
 
-  const bool commit_window_entered =
-      entered_future.wait_for(1s) == std::future_status::ready;
-  if (!commit_window_entered) {
-    release->set_value();
-  }
-  ASSERT_TRUE(commit_window_entered);
-  const auto original_goals = server_->Goals();
-  std::set<std::string> original_plan_ids;
-  for (const auto& goal : original_goals) {
-    original_plan_ids.insert("plan:" + goal.request_id);
-    const auto x = static_cast<std::int64_t>(std::floor(
-        (goal.goal.point.x - map.info.origin.position.x) /
-        map.info.resolution));
-    const auto y = static_cast<std::int64_t>(std::floor(
-        (goal.goal.point.y - map.info.origin.position.y) /
-        map.info.resolution));
-    if (x >= 0 && y >= 0 &&
-        x < static_cast<std::int64_t>(map.info.width) &&
-        y < static_cast<std::int64_t>(map.info.height)) {
-      map.data[static_cast<std::size_t>(y) * map.info.width +
-               static_cast<std::size_t>(x)] = -1;
-    }
-  }
+  ASSERT_EQ(commit_seam_future.wait_for(2s), std::future_status::ready);
+  ASSERT_TRUE(planning_status_observed->load());
+  ASSERT_TRUE(original_goals_present->load());
+  EXPECT_FALSE(map_callback_completed_before_commit->load());
 
-  const auto statuses_before_map = StatusCount();
-  map_publisher_->publish(map);
-  const bool changed_map_observed = WaitFor([this, statuses_before_map] {
-    return StatusCount() > statuses_before_map;
-  });
-  release->set_value();
-  ASSERT_TRUE(changed_map_observed);
-  ASSERT_FALSE(original_goals.empty());
-  ASSERT_TRUE(WaitFor([this, &original_plan_ids] {
-    const auto active = ExplorationNodeTestPeer::ActiveReference(*explorer_);
-    return !active || !original_plan_ids.contains(active->plan_id);
+  ASSERT_EQ(map_callback_future.wait_for(2s), std::future_status::ready);
+  EXPECT_TRUE(map_status_observed->load());
+  EXPECT_TRUE(map_callback_saw_linearized_commit->load());
+  ASSERT_TRUE(WaitFor([this, original_plan_ids] {
+    return std::ranges::any_of(
+        References(), [original_plan_ids](const auto& reference) {
+          return original_plan_ids->contains(reference.plan_id);
+        });
   }));
-  std::this_thread::sleep_for(100ms);
-  EXPECT_TRUE(std::ranges::none_of(
-      References(), [&original_plan_ids](const auto& reference) {
-        return original_plan_ids.contains(reference.plan_id);
-      }));
 }
 
 TEST_F(ExplorationNodeTest,

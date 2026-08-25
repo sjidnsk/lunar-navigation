@@ -211,6 +211,7 @@ struct ExplorationPipelineSeams {
   std::function<void()> before_approach_goal_commit;
   std::function<void()> before_reference_publish;
   std::function<void()> after_final_rank_map_observed;
+  std::function<void()> after_global_map_callback;
 };
 
 struct ExplorationNodeParameters {

@@ -3182,17 +3182,6 @@ void QueueApproachFinalRank(const std::shared_ptr<RuntimeT>& runtime,
           }
         }
 
-        if (validation && selection.error.empty() &&
-            validation_error.empty() && candidate_valid &&
-            locked->parameters.pipeline_seams &&
-            locked->parameters.pipeline_seams->before_approach_goal_commit) {
-          try {
-            locked->parameters.pipeline_seams->before_approach_goal_commit();
-          } catch (const std::exception&) {
-            validation_error = "FINAL_MAP_VALIDATION_ERROR";
-          }
-        }
-
         bool rebuild = false;
         {
           std::unique_lock lock{locked->mutex};
@@ -3250,6 +3239,12 @@ void QueueApproachFinalRank(const std::shared_ptr<RuntimeT>& runtime,
               Status planning_status = MakeStatusLocked(*locked);
               const auto status_publisher = locked->status_publisher;
               status_publisher->publish(std::move(planning_status));
+              if (locked->parameters.pipeline_seams &&
+                  locked->parameters.pipeline_seams
+                      ->before_approach_goal_commit) {
+                locked->parameters.pipeline_seams
+                    ->before_approach_goal_commit();
+              }
               if (locked->teardown ||
                   locked->active_approach_cycle != cycle ||
                   locked->epoch != epoch ||
@@ -4169,6 +4164,10 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
   }
   if (failed) {
     PublishStatus(runtime);
+  }
+  if (runtime->parameters.pipeline_seams &&
+      runtime->parameters.pipeline_seams->after_global_map_callback) {
+    runtime->parameters.pipeline_seams->after_global_map_callback();
   }
 }
 
