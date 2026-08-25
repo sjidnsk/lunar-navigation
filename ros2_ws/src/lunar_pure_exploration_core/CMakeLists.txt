@@ -4,6 +4,7 @@ project(lunar_pure_exploration_core LANGUAGES CXX)
 find_package(ament_cmake REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
+  src/boundary_guidance.cpp
   src/candidate_generator.cpp
   src/candidate_ranker.cpp
   src/coverage.cpp
@@ -56,6 +57,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_safe_pose_validator test/test_safe_pose_validator.cpp)
   target_compile_features(test_safe_pose_validator PRIVATE cxx_std_20)
   target_link_libraries(test_safe_pose_validator ${PROJECT_NAME})
+
+  ament_add_gtest(test_boundary_guidance test/test_boundary_guidance.cpp)
+  target_compile_features(test_boundary_guidance PRIVATE cxx_std_20)
+  target_link_libraries(test_boundary_guidance ${PROJECT_NAME})
 
   ament_add_gtest(test_exploration_state_machine test/test_exploration_state_machine.cpp)
   target_compile_features(test_exploration_state_machine PRIVATE cxx_std_20)
