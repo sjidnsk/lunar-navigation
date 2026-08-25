@@ -63,6 +63,32 @@ ROS_PRODUCTION_SOURCES = (
     "src/elevation_occupancy_node.cpp",
 )
 
+EXPLORATION_CORE_PRODUCTION_SOURCES = (
+    "src/boundary_guidance.cpp",
+    "src/candidate_generator.cpp",
+    "src/candidate_ranker.cpp",
+    "src/coverage.cpp",
+    "src/exploration_state_machine.cpp",
+    "src/failure_memory.cpp",
+    "src/frontier_detector.cpp",
+    "src/information_gain.cpp",
+    "src/occupancy_grid.cpp",
+    "src/progress_monitor.cpp",
+    "src/safe_pose_validator.cpp",
+    "src/task_raster.cpp",
+)
+
+EXPLORATION_ROS_PRODUCTION_SOURCES = (
+    "src/exploration_node.cpp",
+    "src/marker_builder.cpp",
+    "src/planner_client.cpp",
+    "src/planner_timing_accumulator.cpp",
+    "src/platform_config_loader.cpp",
+    "src/pose_resolver.cpp",
+    "src/stationary_planning_gate.cpp",
+    "src/main.cpp",
+)
+
 BUILD_SCRIPT = """#!/usr/bin/env bash
 # Build only the ROS 2 Humble production packages on Jetson Orin.
 set -eo pipefail
@@ -78,7 +104,7 @@ fi
 source /opt/ros/humble/setup.bash
 cd "${workspace}"
 colcon build \\
-  --packages-up-to lunar_pure_planner_ros lunar_pure_wheeled_controller \\
+  --packages-up-to lunar_pure_exploration_ros lunar_pure_wheeled_controller \\
   --cmake-args \\
     -DBUILD_TESTING=OFF \\
     -DLUNAR_BUILD_DEMO=OFF \\
@@ -88,8 +114,8 @@ colcon build \\
 
 README = """# car_orin
 
-Jetson Orin 的 ROS 2 Humble 轮式生产部署源码包。目录不包含测试、探索、
-Demo、RViz、Git 历史或任何 x86 构建产物。
+Jetson Orin 的 ROS 2 Humble 轮式规划、控制与纯前沿探索部署源码包。目录不包含
+测试、Jazzy 仿真/Demo、RViz、Git 历史或任何 x86 构建产物。
 
 ## Orin 依赖
 
@@ -132,6 +158,34 @@ scripts/send_goal.sh
 ```
 
 `environment_mode=2` 使用 `odom` 目标；月表模式使用 `1` 和 `map` 目标。
+
+## 纯前沿探索
+
+本包包含 `lunar_pure_exploration_msgs`、`lunar_pure_exploration_core` 和
+`lunar_pure_exploration_ros`，但 `start_all.sh` 不会自动启动探索节点。探索必须在
+规划器已运行、外部地图/里程计/TF 已就绪，且已提供经过 Orin 验收的资源限制 profile 后，
+单独启动：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /path/to/car_orin/ros2_ws/install/setup.bash
+set -a
+source /path/to/approved-pure-exploration-profile.env
+set +a
+ros2 launch lunar_pure_exploration_ros pure_exploration.launch.py \\
+  platform_selector:=wheel \\
+  maximum_position_probes:="$PURE_EXPLORATION_MAXIMUM_POSITION_PROBES" \\
+  maximum_candidate_views:="$PURE_EXPLORATION_MAXIMUM_CANDIDATE_VIEWS" \\
+  maximum_collision_work_units:="$PURE_EXPLORATION_MAXIMUM_COLLISION_WORK_UNITS" \\
+  maximum_visibility_work_units:="$PURE_EXPLORATION_MAXIMUM_VISIBILITY_WORK_UNITS" \\
+  maximum_path_preview_poses:="$PURE_EXPLORATION_MAXIMUM_PATH_PREVIEW_POSES" \\
+  maximum_executable_path_points:="$PURE_EXPLORATION_MAXIMUM_EXECUTABLE_PATH_POINTS" \\
+  maximum_failure_entries:="$PURE_EXPLORATION_MAXIMUM_FAILURE_ENTRIES" \\
+  maximum_failure_patch_cells_per_entry:="$PURE_EXPLORATION_MAXIMUM_FAILURE_PATCH_CELLS_PER_ENTRY" \\
+  maximum_failure_total_patch_cells:="$PURE_EXPLORATION_MAXIMUM_FAILURE_TOTAL_PATCH_CELLS"
+```
+
+profile 缺失或任一资源上限缺失时，不应启动探索。它不是控制器启动授权。
 
 ## 外部输入边界
 
@@ -243,17 +297,30 @@ def create_bundle(source_root: Path, output: Path) -> None:
         raise FileNotFoundError(f"不是有效源码根目录：{source_root}")
     output.mkdir(parents=True)
 
-    for name in ("external_interfaces.yaml", "pure_planner.yaml", "wheel.yaml"):
+    for name in (
+        "external_interfaces.yaml",
+        "pure_exploration.yaml",
+        "pure_planner.yaml",
+        "wheel.yaml",
+    ):
         copy_file(source_root / "config" / name, output / "config" / name)
     for name in (
         "local_traversability.launch.py",
         "pure_planner.launch.py",
+        "pure_exploration.launch.py",
         "rviz_goal_bridge.launch.py",
     ):
         copy_file(source_root / "launch" / name, output / "launch" / name)
 
     messages = source_root / "ros2_ws" / "src" / "lunar_planning_msgs"
     copy_tree(messages, output / "ros2_ws" / "src" / messages.name)
+    exploration_messages = (
+        source_root / "ros2_ws" / "src" / "lunar_pure_exploration_msgs"
+    )
+    copy_tree(
+        exploration_messages,
+        output / "ros2_ws" / "src" / exploration_messages.name,
+    )
     copy_source_package(
         source_root,
         output,
@@ -265,6 +332,18 @@ def create_bundle(source_root: Path, output: Path) -> None:
         output,
         "lunar_pure_planner_ros",
         ROS_PRODUCTION_SOURCES,
+    )
+    copy_source_package(
+        source_root,
+        output,
+        "lunar_pure_exploration_core",
+        EXPLORATION_CORE_PRODUCTION_SOURCES,
+    )
+    copy_source_package(
+        source_root,
+        output,
+        "lunar_pure_exploration_ros",
+        EXPLORATION_ROS_PRODUCTION_SOURCES,
     )
 
     controller = source_root / "ros2_ws" / "src" / "lunar_pure_wheeled_controller"

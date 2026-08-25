@@ -34,16 +34,21 @@ def test_generator_creates_minimal_humble_production_bundle(tmp_path: Path) -> N
     }
     assert {path.name for path in (output / "config").iterdir()} == {
         "external_interfaces.yaml",
+        "pure_exploration.yaml",
         "pure_planner.yaml",
         "wheel.yaml",
     }
     assert {path.name for path in (output / "launch").iterdir()} == {
         "local_traversability.launch.py",
+        "pure_exploration.launch.py",
         "pure_planner.launch.py",
         "rviz_goal_bridge.launch.py",
     }
     assert {path.name for path in (output / "ros2_ws" / "src").iterdir()} == {
         "lunar_planning_msgs",
+        "lunar_pure_exploration_core",
+        "lunar_pure_exploration_msgs",
+        "lunar_pure_exploration_ros",
         "lunar_pure_planner_core",
         "lunar_pure_planner_ros",
         "lunar_pure_wheeled_controller",
@@ -62,7 +67,7 @@ def test_generator_creates_minimal_humble_production_bundle(tmp_path: Path) -> N
     }
     for path in output.rglob("*"):
         assert forbidden_components.isdisjoint(path.relative_to(output).parts)
-        assert "exploration" not in path.name
+        assert "lunar_pure_exploration_sim" not in path.name
         assert "lunar_surface_demo" not in path.name
         assert "lunar_surface_visualizer" not in path.name
         assert path.suffix not in {".pyc", ".rviz"}
@@ -114,6 +119,17 @@ def test_generator_creates_minimal_humble_production_bundle(tmp_path: Path) -> N
     assert not (ros_package / "src" / "lunar_surface_scenario.cpp").exists()
     assert "LUNAR_BUILD_DEMO" in (ros_package / "CMakeLists.txt").read_text()
 
+    exploration_ros = output / "ros2_ws" / "src" / "lunar_pure_exploration_ros"
+    for required_source in (
+        "src/exploration_node.cpp",
+        "src/marker_builder.cpp",
+        "src/planner_client.cpp",
+        "src/stationary_planning_gate.cpp",
+    ):
+        assert (exploration_ros / required_source).is_file()
+    assert (output / "launch" / "pure_exploration.launch.py").is_file()
+    assert (output / "config" / "pure_exploration.yaml").is_file()
+
     for script_name in ("build.sh", "start_all.sh", "send_goal.sh"):
         script = output / "scripts" / script_name
         assert os.access(script, os.X_OK)
@@ -123,6 +139,7 @@ def test_generator_creates_minimal_humble_production_bundle(tmp_path: Path) -> N
     assert "/opt/ros/humble/setup.bash" in build_script
     assert "-DBUILD_TESTING=OFF" in build_script
     assert "-DLUNAR_BUILD_DEMO=OFF" in build_script
+    assert "lunar_pure_exploration_ros" in build_script
 
     subprocess.run(
         ["sha256sum", "--check", "MANIFEST.sha256"],
