@@ -2,9 +2,13 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <ranges>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace lunar::pure_exploration_ros {
@@ -12,8 +16,11 @@ namespace {
 
 using lunar::pure_exploration::CandidateKey;
 using lunar::pure_exploration::CandidateView;
+using lunar::pure_exploration::ApproachCandidateKind;
+using lunar::pure_exploration::BoundaryApproachGoalIdentity;
 using lunar::pure_exploration::FrontierCluster;
 using lunar::pure_exploration::Pose2;
+using lunar::pure_exploration::Vec2;
 
 FrontierCluster Frontier(std::uint64_t display_id,
                          std::vector<std::int64_t> canonical_key,
@@ -39,6 +46,23 @@ CandidateView Candidate(std::uint64_t display_id, std::size_t frontier_index,
           .pose = {.x = x, .y = 0.0, .yaw = 0.0},
           .frontier_distance_m = 1.0,
           .frontier_canonical_key = std::move(key)};
+}
+
+BoundaryApproachGoalIdentity ApproachIdentity(
+    const std::int32_t intent_x, const std::int64_t candidate_x,
+    const ApproachCandidateKind kind = ApproachCandidateKind::kTranslation) {
+  return {.intent_cell = {.x = intent_x, .y = 4},
+          .candidate_key = {.x_mm = candidate_x,
+                            .y_mm = 2500,
+                            .yaw_tenth_deg = 0},
+          .candidate_kind = kind};
+}
+
+ApproachMarkerCandidate ApproachCandidateMarker(
+    BoundaryApproachGoalIdentity identity, const double x,
+    const double yaw = 0.0) {
+  return {.identity = std::move(identity),
+          .pose = {.x = x, .y = 2.5, .yaw = yaw}};
 }
 
 TEST(ExplorationMarkerBuilderTest,
@@ -90,6 +114,96 @@ TEST(ExplorationMarkerBuilderTest, DeletesMarkersAbsentFromReplacementBatch) {
   EXPECT_EQ(markers.markers[3].id, 1);
   EXPECT_EQ(markers.markers[3].action,
             visualization_msgs::msg::Marker::DELETE);
+}
+
+TEST(ExplorationMarkerBuilderTest,
+     BuildsDistinctApproachNamespacesAndSelectsByFullIdentity) {
+  const auto first_identity = ApproachIdentity(8, 2500);
+  const auto selected_identity = ApproachIdentity(9, 2500);
+  const ApproachMarkers approach{
+      .intent_points = {Vec2{4.25, 2.25}, Vec2{4.75, 2.25}},
+      .selected_guidance = {Vec2{2.5, 2.5}, Vec2{4.75, 2.25}},
+      .candidates = {ApproachCandidateMarker(first_identity, 2.5),
+                     ApproachCandidateMarker(selected_identity, 2.5)},
+      .selected_identity = selected_identity};
+
+  MarkerBuilder builder;
+  const auto markers = builder.Build({}, {}, std::nullopt, &approach);
+
+  ASSERT_EQ(markers.markers.size(), 5U);
+  EXPECT_EQ(markers.markers[0].ns, "approach_intents");
+  EXPECT_EQ(markers.markers[0].id, 0);
+  EXPECT_EQ(markers.markers[1].ns, "approach_intents");
+  EXPECT_EQ(markers.markers[1].id, 1);
+  EXPECT_EQ(markers.markers[2].ns, "approach_guidance");
+  EXPECT_EQ(markers.markers[2].id, 0);
+  EXPECT_EQ(markers.markers[2].type,
+            visualization_msgs::msg::Marker::LINE_STRIP);
+  EXPECT_EQ(markers.markers[3].ns, "approach_candidates");
+  EXPECT_EQ(markers.markers[3].color.g, 1.0F);
+  EXPECT_EQ(markers.markers[4].ns, "approach_candidates");
+  EXPECT_EQ(markers.markers[4].color.r, 1.0F);
+}
+
+TEST(ExplorationMarkerBuilderTest,
+     DeletesShortenedApproachDataAndClearsBothPhaseDirections) {
+  MarkerBuilder builder;
+  const ApproachMarkers initial{
+      .intent_points = {Vec2{4.25, 2.25}, Vec2{4.75, 2.25},
+                        Vec2{5.25, 2.25}},
+      .selected_guidance = {Vec2{2.5, 2.5}, Vec2{4.75, 2.25}},
+      .candidates = {
+          ApproachCandidateMarker(ApproachIdentity(8, 2500), 2.5),
+          ApproachCandidateMarker(ApproachIdentity(9, 3000), 3.0)},
+      .selected_identity = ApproachIdentity(9, 3000)};
+  static_cast<void>(builder.Build({}, {}, std::nullopt, &initial));
+
+  const ApproachMarkers shortened{
+      .intent_points = {Vec2{4.25, 2.25}},
+      .selected_guidance = {},
+      .candidates = {
+          ApproachCandidateMarker(ApproachIdentity(8, 2500), 2.5)},
+      .selected_identity = std::nullopt};
+  const auto shortened_markers =
+      builder.Build({}, {}, std::nullopt, &shortened);
+
+  const auto has_delete = [](const auto& markers, const std::string& ns,
+                             const int id) {
+    return std::ranges::any_of(markers.markers, [&](const auto& marker) {
+      return marker.ns == ns && marker.id == id &&
+             marker.action == visualization_msgs::msg::Marker::DELETE;
+    });
+  };
+  EXPECT_TRUE(has_delete(shortened_markers, "approach_intents", 1));
+  EXPECT_TRUE(has_delete(shortened_markers, "approach_intents", 2));
+  EXPECT_TRUE(has_delete(shortened_markers, "approach_guidance", 0));
+  EXPECT_TRUE(has_delete(shortened_markers, "approach_candidates", 1));
+
+  const std::vector<FrontierCluster> frontiers{
+      Frontier(7U, {1, 2, 3}, 1.0)};
+  const std::vector<CandidateView> candidates{
+      Candidate(9U, 0U, {1, 2, 3}, 4.0)};
+  const auto explore_markers =
+      builder.Build(frontiers, candidates, std::nullopt, nullptr);
+  EXPECT_TRUE(has_delete(explore_markers, "approach_intents", 0));
+  EXPECT_TRUE(has_delete(explore_markers, "approach_candidates", 0));
+  EXPECT_TRUE(std::ranges::any_of(explore_markers.markers,
+                                 [](const auto& marker) {
+                                   return marker.ns == "frontiers" &&
+                                          marker.action ==
+                                              visualization_msgs::msg::Marker::ADD;
+                                 }));
+
+  const auto approach_markers =
+      builder.Build({}, {}, std::nullopt, &shortened);
+  EXPECT_TRUE(has_delete(approach_markers, "frontiers", 0));
+  EXPECT_TRUE(has_delete(approach_markers, "candidates", 0));
+  EXPECT_TRUE(std::ranges::any_of(approach_markers.markers,
+                                 [](const auto& marker) {
+                                   return marker.ns == "approach_candidates" &&
+                                          marker.action ==
+                                              visualization_msgs::msg::Marker::ADD;
+                                 }));
 }
 
 }  // namespace

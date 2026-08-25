@@ -1092,6 +1092,12 @@ struct ExplorationNode::Runtime final {
     std::uint64_t pose_generation;
     std::uint64_t task_generation;
   };
+  struct ApproachObservabilitySnapshot final {
+    ApproachMarkers markers;
+    std::optional<double> remaining_guidance_m;
+    std::optional<std::uint32_t> guidance_unknown_cell_count;
+    std::optional<std::string> wait_reason;
+  };
 
   Runtime(rclcpp::Node& node, ExplorationNodeParameters input)
       : parameters(NormalizeApproachLimits(std::move(input))),
@@ -1180,6 +1186,7 @@ struct ExplorationNode::Runtime final {
   bool fully_inside_task{false};
   std::optional<std::string> status_reason_override;
   std::optional<BlockedApproachSnapshot> blocked_approach_snapshot;
+  std::optional<ApproachObservabilitySnapshot> approach_observability;
   FrozenPlanningCyclePtr active_cycle;
   FrozenApproachCyclePtr active_approach_cycle;
   std::vector<std::size_t> current_batch;
@@ -1329,7 +1336,19 @@ void ClearExecutionPayloadsLocked(RuntimeT& runtime) {
 }
 
 template <typename RuntimeT>
+void ClearApproachSelectionLocked(RuntimeT& runtime) {
+  if (!runtime.approach_observability) {
+    return;
+  }
+  runtime.approach_observability->markers.selected_identity.reset();
+  runtime.approach_observability->markers.selected_guidance.clear();
+  runtime.approach_observability->remaining_guidance_m.reset();
+  runtime.approach_observability->guidance_unknown_cell_count.reset();
+}
+
+template <typename RuntimeT>
 void ClearSelectionCycleLocked(RuntimeT& runtime) {
+  ClearApproachSelectionLocked(runtime);
   runtime.active_cycle.reset();
   runtime.active_approach_cycle.reset();
   runtime.active_raster.reset();
@@ -1421,6 +1440,7 @@ void FailLocked(RuntimeT& runtime, std::string reason) {
   FreezeActiveElapsedLocked(runtime);
   runtime.state_machine.Fail(std::move(reason));
   ClearSelectionCycleLocked(runtime);
+  runtime.approach_observability.reset();
   runtime.execution_replan_request_id.reset();
   runtime.execution_replan_bucket.reset();
   runtime.pending_control = RuntimeT::PendingControl::kNone;
@@ -1717,6 +1737,9 @@ void PublishStatus(const std::shared_ptr<RuntimeT>& runtime) {
     std::span<const lunar::pure_exploration::FrontierCluster> frontiers;
     std::span<const lunar::pure_exploration::CandidateView> candidates;
     std::optional<MarkerSelection> selected;
+    const ApproachMarkers* approach = nullptr;
+    std::optional<double> remaining_guidance_m;
+    std::optional<std::uint32_t> guidance_unknown_cell_count;
     if (runtime->active_cycle) {
       frontiers = runtime->active_cycle->batch()->frontiers();
       candidates = runtime->active_cycle->batch()->candidates();
@@ -1732,7 +1755,19 @@ void PublishStatus(const std::shared_ptr<RuntimeT>& runtime) {
                                          .target = goal.target()});
       }
     }
-    markers = runtime->marker_builder.Build(frontiers, candidates, selected);
+    if (runtime->navigation_phase == NavigationPhase::kApproachTask &&
+        runtime->approach_observability) {
+      approach = &runtime->approach_observability->markers;
+      const auto remaining =
+          runtime->approach_observability->remaining_guidance_m;
+      if (remaining && std::isfinite(*remaining) && *remaining >= 0.0) {
+        remaining_guidance_m = remaining;
+      }
+      guidance_unknown_cell_count =
+          runtime->approach_observability->guidance_unknown_cell_count;
+    }
+    markers =
+        runtime->marker_builder.Build(frontiers, candidates, selected, approach);
     for (auto& marker : markers.markers) {
       marker.header = status.header;
     }
@@ -1768,6 +1803,28 @@ void PublishStatus(const std::shared_ptr<RuntimeT>& runtime) {
     add("coverage_ratio", std::to_string(status.coverage_ratio));
     add("frontier_cluster_count", std::to_string(status.frontier_cluster_count));
     add("candidate_count", std::to_string(status.candidate_count));
+    add("navigation_phase",
+        runtime->navigation_phase == NavigationPhase::kApproachTask
+            ? "APPROACH_TASK"
+            : "EXPLORE_TASK");
+    add("fully_inside_task", runtime->fully_inside_task ? "true" : "false");
+    add("approach_intent_count",
+        std::to_string(approach ? approach->intent_points.size() : 0U));
+    add("approach_candidate_count",
+        std::to_string(approach ? approach->candidates.size() : 0U));
+    add("remaining_guidance_m",
+        remaining_guidance_m ? std::to_string(*remaining_guidance_m)
+                             : "unavailable");
+    add("guidance_unknown_cell_count",
+        guidance_unknown_cell_count
+            ? std::to_string(*guidance_unknown_cell_count)
+            : "unavailable");
+    add("approach_wait_reason",
+        runtime->navigation_phase == NavigationPhase::kApproachTask &&
+                runtime->approach_observability &&
+                runtime->approach_observability->wait_reason
+            ? *runtime->approach_observability->wait_reason
+            : "unavailable");
     const auto add_local = [&add](const char* name, const auto& timing) {
       const std::string base{name};
       add(base + "_call_count", std::to_string(timing.call_count));
@@ -1932,6 +1989,7 @@ struct FrozenBuildProduct final {
   lunar::pure_exploration::FailureMemory failure_memory;
   FrozenPlanningCyclePtr cycle;
   FrozenApproachCyclePtr approach_cycle;
+  std::optional<ApproachMarkers> approach_markers;
   std::size_t frontier_count{0U};
   std::size_t candidate_count{0U};
   LocalTiming frontier_detection_timing;
@@ -1944,6 +2002,22 @@ struct FrozenBuildProduct final {
       lunar::pure_exploration::ApproachWaitReason::kNone};
   std::string error;
 };
+
+ApproachMarkers FreezeApproachMarkers(
+    const lunar::pure_exploration::BoundaryGuidanceResult& guidance,
+    const TaskRaster& raster) {
+  ApproachMarkers result;
+  result.intent_points.reserve(guidance.intents.size());
+  for (const auto& intent : guidance.intents) {
+    result.intent_points.push_back(raster.CellCenter(intent.cell));
+  }
+  result.candidates.reserve(guidance.candidates.size());
+  for (const auto& candidate : guidance.candidates) {
+    result.candidates.push_back(ApproachMarkerCandidate{
+        .identity = candidate.identity, .pose = candidate.pose});
+  }
+  return result;
+}
 
 template <typename RuntimeT>
 bool CandidateRemainsValidOnLatestMap(
@@ -1990,6 +2064,10 @@ void BlockApproachSnapshotLocked(RuntimeT& runtime,
   runtime.snapshot_to_goal_start.reset();
   runtime.navigation_phase = NavigationPhase::kApproachTask;
   runtime.fully_inside_task = false;
+  if (runtime.approach_observability) {
+    ClearApproachSelectionLocked(runtime);
+    runtime.approach_observability->wait_reason = reason_code;
+  }
   runtime.status_reason_override = std::move(reason_code);
 }
 
@@ -2160,12 +2238,22 @@ void QueueBuild(const std::shared_ptr<RuntimeT>& runtime,
           product.fully_inside_task = guidance->fully_inside_task;
           product.approach_wait_reason = guidance->wait_reason;
           if (guidance->phase == NavigationPhase::kApproachTask) {
+            try {
+              product.approach_markers =
+                  FreezeApproachMarkers(*guidance, *product.raster);
+            } catch (const std::length_error&) {
+              product.error = "RESOURCE_RESULT_COPY";
+            } catch (const std::bad_alloc&) {
+              product.error = "RESOURCE_RESULT_COPY";
+            }
             auto order = locked->boundary_guidance.CoarseOrder(
                 *guidance, snapshot.robot_pose);
             product.candidate_count = guidance->candidates.size();
-            product.approach_cycle = std::make_shared<FrozenApproachCycle>(
-                snapshot.map, std::move(*guidance), snapshot.robot_pose,
-                snapshot.map.geometry.resolution, std::move(order));
+            if (product.error.empty()) {
+              product.approach_cycle = std::make_shared<FrozenApproachCycle>(
+                  snapshot.map, std::move(*guidance), snapshot.robot_pose,
+                  snapshot.map.geometry.resolution, std::move(order));
+            }
           } else {
             const auto robot_cell = product.raster->WorldToCell(
                 {snapshot.robot_pose.x, snapshot.robot_pose.y});
@@ -2321,28 +2409,39 @@ void QueueBuild(const std::shared_ptr<RuntimeT>& runtime,
               locked->blocked_approach_snapshot.reset();
               if (product.navigation_phase == NavigationPhase::kApproachTask) {
                 locked->active_cycle.reset();
-                locked->active_approach_cycle =
-                    std::move(product.approach_cycle);
-                if (!locked->active_approach_cycle) {
-                  FailLocked(*locked, "INVALID_EXPLORATION_INPUT");
-                } else if (locked->active_approach_cycle->coarse_order().empty()) {
-                  const auto wait_reason =
-                      locked->active_approach_cycle->guidance().wait_reason;
-                  locked->active_approach_cycle.reset();
-                  BlockApproachSnapshotLocked(
-                      *locked, ApproachWaitCode(wait_reason));
+                if (!product.approach_markers) {
+                  FailLocked(*locked, "RESOURCE_RESULT_COPY");
                 } else {
-                  locked->status_reason_override =
-                      "SELECTING_APPROACH_TARGET";
-                  locked->snapshot_to_goal_start.emplace(
-                      typename RuntimeT::SnapshotToGoalStart{
-                          .approach_cycle = locked->active_approach_cycle,
-                          .epoch = snapshot.epoch,
-                          .build_generation = snapshot.generation,
-                          .start = snapshot.snapshot_to_goal_start});
-                  pump = true;
+                  locked->approach_observability.emplace(
+                      typename RuntimeT::ApproachObservabilitySnapshot{
+                          .markers = std::move(*product.approach_markers),
+                          .remaining_guidance_m = std::nullopt,
+                          .guidance_unknown_cell_count = std::nullopt,
+                          .wait_reason = std::nullopt});
+                  locked->active_approach_cycle =
+                      std::move(product.approach_cycle);
+                  if (!locked->active_approach_cycle) {
+                    FailLocked(*locked, "INVALID_EXPLORATION_INPUT");
+                  } else if (locked->active_approach_cycle->coarse_order().empty()) {
+                    const auto wait_reason =
+                        locked->active_approach_cycle->guidance().wait_reason;
+                    locked->active_approach_cycle.reset();
+                    BlockApproachSnapshotLocked(
+                        *locked, ApproachWaitCode(wait_reason));
+                  } else {
+                    locked->status_reason_override =
+                        "SELECTING_APPROACH_TARGET";
+                    locked->snapshot_to_goal_start.emplace(
+                        typename RuntimeT::SnapshotToGoalStart{
+                            .approach_cycle = locked->active_approach_cycle,
+                            .epoch = snapshot.epoch,
+                            .build_generation = snapshot.generation,
+                            .start = snapshot.snapshot_to_goal_start});
+                    pump = true;
+                  }
                 }
               } else {
+                locked->approach_observability.reset();
                 locked->active_approach_cycle.reset();
                 locked->status_reason_override.reset();
                 if (!product.has_reachable_free_start) {
@@ -2439,6 +2538,7 @@ void ApplyStartLocked(RuntimeT& runtime,
   runtime.failure_memory.BeginTask(start.task_id);
   runtime.task_boundary = std::move(start.boundary);
   ClearSelectionCycleLocked(runtime);
+  runtime.approach_observability.reset();
   runtime.execution_replan_waiting_terminal = false;
   runtime.execution_replan_retry_pending = false;
   runtime.pending_map_rebuild = false;
@@ -2490,6 +2590,7 @@ bool ApplyPendingControlLocked(RuntimeT& runtime) {
       runtime.pending_start.reset();
       FreezeActiveElapsedLocked(runtime);
       runtime.state_machine.Cancel();
+      runtime.approach_observability.reset();
       ResetStopWaitTaskLifetimeLocked(runtime);
       runtime.active_elapsed_s = 0.0;
       runtime.task_boundary.reset();
@@ -3234,6 +3335,20 @@ void QueueApproachFinalRank(const std::shared_ptr<RuntimeT>& runtime,
               locked->execution_monitor->ResetProgress(
                   now, locked->active_executable_polyline,
                   {pose->x, pose->y});
+              if (!locked->approach_observability) {
+                throw std::logic_error{
+                    "missing approach observability authority"};
+              }
+              locked->approach_observability->markers.selected_identity =
+                  selection.candidate->identity;
+              locked->approach_observability->markers.selected_guidance =
+                  selection.candidate->guidance_route;
+              locked->approach_observability->remaining_guidance_m =
+                  selection.candidate->remaining_cost.path_length_m;
+              locked->approach_observability
+                  ->guidance_unknown_cell_count =
+                  selection.candidate->guidance_unknown_cell_count;
+              locked->approach_observability->wait_reason.reset();
               locked->state_machine.BeginPlanning();
               locked->status_reason_override = "PLANNING_APPROACH";
               Status planning_status = MakeStatusLocked(*locked);
@@ -3976,13 +4091,16 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
     std::uint64_t epoch{0U};
     std::string task_id;
     std::string plan_id;
+    lunar::pure_exploration::GoalKind kind;
     FrozenGlobalMapContent map;
     Polygon2 boundary;
-    Pose2 pose;
-    lunar::pure_exploration::CandidateView candidate;
+    std::optional<Pose2> pose;
+    std::optional<lunar::pure_exploration::CandidateView> wfd_candidate;
+    std::optional<lunar::pure_exploration::ApproachCandidate>
+        approach_candidate;
   };
   std::optional<ActiveGoalValidation> validation;
-  bool invalidates_active_goal = false;
+  bool validation_authority_error = false;
   try {
     auto content = FreezeGlobalMap(
         message, runtime->parameters.global_occupied_threshold);
@@ -4011,28 +4129,84 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
       }
       if (runtime->pending_stationary_action !=
               RuntimeT::PendingStationaryAction::kBuildFreshBatch &&
-          runtime->state_machine.active_goal() && runtime->active_cycle &&
-          !runtime->active_cycle->batch()->GlobalMapContentEquals(message)) {
-        const auto selected = std::ranges::find_if(
-            runtime->active_cycle->batch()->candidates(),
-            [&](const auto& candidate) {
-              return candidate.key ==
-                  runtime->state_machine.active_goal()->candidate_key();
-            });
-        const auto pose = runtime->pose_resolver.LatestPoseInMap();
-        invalidates_active_goal =
-            selected == runtime->active_cycle->batch()->candidates().end() ||
-            !runtime->task_boundary || !pose || !runtime->active_reference;
-        if (!invalidates_active_goal) {
-          validation.emplace(ActiveGoalValidation{
-              .generation = runtime->map_generation,
-              .epoch = runtime->epoch,
-              .task_id = runtime->state_machine.task_id(),
-              .plan_id = runtime->active_reference->plan_id,
-              .map = *runtime->latest_map,
-              .boundary = *runtime->task_boundary,
-              .pose = *pose,
-              .candidate = *selected});
+          runtime->state_machine.active_goal()) {
+        const auto& active_goal = *runtime->state_machine.active_goal();
+        if (active_goal.kind() ==
+            lunar::pure_exploration::GoalKind::kTaskFrontier) {
+          if (!runtime->active_cycle) {
+            validation_authority_error = true;
+          } else {
+            const auto selected = std::ranges::find_if(
+                runtime->active_cycle->batch()->candidates(),
+                [&](const auto& candidate) {
+                  return candidate.key == active_goal.candidate_key() &&
+                         candidate.frontier_canonical_key &&
+                         std::ranges::equal(
+                             *candidate.frontier_canonical_key,
+                             active_goal.frontier_canonical_key());
+                });
+            validation_authority_error =
+                selected ==
+                runtime->active_cycle->batch()->candidates().end();
+            if (!validation_authority_error &&
+                !runtime->active_cycle->batch()->GlobalMapContentEquals(
+                    message)) {
+              const auto pose = runtime->pose_resolver.LatestPoseInMap();
+              validation_authority_error =
+                  !runtime->task_boundary || !pose || !runtime->active_reference;
+              if (!validation_authority_error) {
+                validation.emplace(ActiveGoalValidation{
+                    .generation = runtime->map_generation,
+                    .epoch = runtime->epoch,
+                    .task_id = runtime->state_machine.task_id(),
+                    .plan_id = runtime->active_reference->plan_id,
+                    .kind = active_goal.kind(),
+                    .map = *runtime->latest_map,
+                    .boundary = *runtime->task_boundary,
+                    .pose = *pose,
+                    .wfd_candidate = *selected,
+                    .approach_candidate = std::nullopt});
+              }
+            }
+          }
+        } else {
+          const auto* identity = active_goal.boundary_approach_identity();
+          if (!runtime->active_approach_cycle || !identity) {
+            validation_authority_error = true;
+          } else {
+            const auto& approach_candidates =
+                runtime->active_approach_cycle->guidance().candidates;
+            const auto selected = std::ranges::find_if(
+                approach_candidates, [&](const auto& candidate) {
+                  return candidate.identity == *identity;
+                });
+            validation_authority_error =
+                selected == approach_candidates.end();
+            if (!validation_authority_error &&
+                !runtime->active_approach_cycle->GlobalMapContentEquals(
+                    message)) {
+              validation_authority_error =
+                  !runtime->task_boundary || !runtime->active_reference;
+              if (!validation_authority_error) {
+                validation.emplace(ActiveGoalValidation{
+                    .generation = runtime->map_generation,
+                    .epoch = runtime->epoch,
+                    .task_id = runtime->state_machine.task_id(),
+                    .plan_id = runtime->active_reference->plan_id,
+                    .kind = active_goal.kind(),
+                    .map = *runtime->latest_map,
+                    .boundary = *runtime->task_boundary,
+                    .pose = std::nullopt,
+                    .wfd_candidate = std::nullopt,
+                    .approach_candidate = *selected});
+              }
+            }
+          }
+        }
+        if (validation_authority_error) {
+          cancel = runtime->planner_in_flight;
+          FailLocked(*runtime, "FINAL_MAP_VALIDATION_ERROR");
+          failed = true;
         }
       }
     }
@@ -4048,9 +4222,34 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
             bool invalid = false;
             std::string error;
             try {
-              invalid = !CandidateRemainsValidOnLatestMap(
-                  *locked, validation.map, validation.boundary,
-                  validation.pose, validation.candidate);
+              if (validation.kind ==
+                  lunar::pure_exploration::GoalKind::kTaskFrontier) {
+                if (!validation.pose || !validation.wfd_candidate) {
+                  throw std::logic_error{
+                      "missing WFD map-validation authority"};
+                }
+                invalid = !CandidateRemainsValidOnLatestMap(
+                    *locked, validation.map, validation.boundary,
+                    *validation.pose, *validation.wfd_candidate);
+              } else {
+                if (!validation.approach_candidate) {
+                  throw std::logic_error{
+                      "missing approach map-validation authority"};
+                }
+                OccupancyGridView latest_view(
+                    validation.map.geometry, validation.map.data,
+                    locked->parameters.global_occupied_threshold);
+                const TaskRaster latest_raster = TaskRaster::Build(
+                    latest_view, validation.boundary,
+                    locked->parameters.task_raster_limits);
+                try {
+                  invalid = !locked->boundary_guidance.IsCandidateStillValid(
+                      latest_view, latest_raster,
+                      *validation.approach_candidate);
+                } catch (const std::length_error& exception) {
+                  error = GuidanceResourceReason(exception);
+                }
+              }
             } catch (const std::length_error& exception) {
               error = ResourceReason(exception);
             } catch (const std::bad_alloc&) {
@@ -4071,9 +4270,29 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
                   !locked->active_reference ||
                   locked->active_reference->plan_id != validation.plan_id ||
                   !locked->state_machine.active_goal() ||
-                  locked->state_machine.active_goal()->candidate_key() !=
-                      validation.candidate.key) {
+                  locked->state_machine.active_goal()->kind() !=
+                      validation.kind) {
                 return;
+              }
+              if (validation.kind ==
+                  lunar::pure_exploration::GoalKind::kTaskFrontier) {
+                if (!validation.wfd_candidate ||
+                    locked->state_machine.active_goal()->candidate_key() !=
+                        validation.wfd_candidate->key ||
+                    !validation.wfd_candidate->frontier_canonical_key ||
+                    !std::ranges::equal(
+                        *validation.wfd_candidate->frontier_canonical_key,
+                        locked->state_machine.active_goal()
+                            ->frontier_canonical_key())) {
+                  return;
+                }
+              } else {
+                const auto* identity = locked->state_machine.active_goal()
+                                           ->boundary_approach_identity();
+                if (!identity || !validation.approach_candidate ||
+                    *identity != validation.approach_candidate->identity) {
+                  return;
+                }
               }
               const bool local_endpoint_refresh_owns_release =
                   locked->pending_stationary_action ==
@@ -4105,7 +4324,7 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
             if (needs_build) {
               QueueBuild(locked);
             } else {
-              Pump(locked);
+              PumpCurrentCycle(locked);
               PublishStatus(locked);
             }
           });
@@ -4115,6 +4334,10 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
         FailLocked(*runtime, "SERIAL_WORK_QUEUE_STOPPED");
         failed = true;
       } else {
+        if (runtime->parameters.pipeline_seams &&
+            runtime->parameters.pipeline_seams->after_global_map_callback) {
+          runtime->parameters.pipeline_seams->after_global_map_callback();
+        }
         return;
       }
     }
@@ -4124,18 +4347,14 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
           (validation && runtime->map_generation != validation->generation)) {
         return;
       }
-      if (invalidates_active_goal) {
-        auto disposition = InvalidateActiveGoalForMapLocked(*runtime);
-        cancel = disposition.cancel_planner;
-        needs_build = disposition.build_now;
-        execution_cancel = std::move(disposition.execution_cancel);
-      } else {
-        needs_build = needs_build || runtime->state_machine.state() ==
-              ExplorationState::kWaitingForInput ||
-          (runtime->state_machine.state() ==
-               ExplorationState::kSelectingFrontier &&
-           !HasFrozenCycleLocked(*runtime));
-      }
+      const bool waiting_for_input =
+          runtime->state_machine.state() == ExplorationState::kWaitingForInput;
+      const bool selecting_without_frozen_cycle =
+          runtime->state_machine.state() ==
+              ExplorationState::kSelectingFrontier &&
+          !HasFrozenCycleLocked(*runtime);
+      needs_build =
+          needs_build || waiting_for_input || selecting_without_frozen_cycle;
     }
   } catch (const std::length_error& error) {
     std::scoped_lock lock{runtime->mutex};
@@ -4449,6 +4668,7 @@ void HandleTask(const std::weak_ptr<RuntimeT>& weak_runtime,
             CancelPendingStationaryActionLocked(*runtime);
             FreezeActiveElapsedLocked(*runtime);
             runtime->state_machine.Cancel();
+            runtime->approach_observability.reset();
             ResetStopWaitTaskLifetimeLocked(*runtime);
             runtime->active_elapsed_s = 0.0;
             runtime->task_boundary.reset();
@@ -4586,6 +4806,7 @@ ExplorationNode::~ExplorationNode() noexcept {
     std::scoped_lock lock{runtime->mutex};
     runtime->teardown = true;
     ClearSelectionCycleLocked(*runtime);
+    runtime->approach_observability.reset();
     runtime->execution_replan_request_id.reset();
     runtime->execution_replan_bucket.reset();
     runtime->execution_replan_waiting_terminal = false;
@@ -4942,6 +5163,7 @@ void ExplorationNode::ResetActiveCycleForTest() {
   }
   std::scoped_lock lock{runtime->mutex};
   runtime->active_cycle.reset();
+  runtime->active_approach_cycle.reset();
 }
 
 double ExplorationNode::PlatformWidthForTest() const {

@@ -8,6 +8,7 @@
 
 #include <lunar_pure_exploration_core/candidate_generator.hpp>
 #include <lunar_pure_exploration_core/frontier_detector.hpp>
+#include <lunar_pure_exploration_core/goal_identity.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
 namespace lunar::pure_exploration_ros {
@@ -18,6 +19,19 @@ struct MarkerSelection final {
   lunar::pure_exploration::Pose2 target;
 };
 
+struct ApproachMarkerCandidate final {
+  lunar::pure_exploration::BoundaryApproachGoalIdentity identity;
+  lunar::pure_exploration::Pose2 pose;
+};
+
+struct ApproachMarkers final {
+  std::vector<lunar::pure_exploration::Vec2> intent_points;
+  std::vector<lunar::pure_exploration::Vec2> selected_guidance;
+  std::vector<ApproachMarkerCandidate> candidates;
+  std::optional<lunar::pure_exploration::BoundaryApproachGoalIdentity>
+      selected_identity;
+};
+
 // Marker IDs intentionally use the frozen vector index, not display hashes.
 // The builder retains only the prior namespace sizes so a replacement batch
 // explicitly deletes stale entries while all semantic identity stays frozen.
@@ -26,11 +40,15 @@ class MarkerBuilder final {
   visualization_msgs::msg::MarkerArray Build(
       std::span<const lunar::pure_exploration::FrontierCluster> frontiers,
       std::span<const lunar::pure_exploration::CandidateView> candidates,
-      const std::optional<MarkerSelection>& selected);
+      const std::optional<MarkerSelection>& selected,
+      const ApproachMarkers* approach = nullptr);
 
  private:
   std::size_t previous_frontier_count_{0U};
   std::size_t previous_candidate_count_{0U};
+  std::size_t previous_approach_intent_count_{0U};
+  std::size_t previous_approach_guidance_count_{0U};
+  std::size_t previous_approach_candidate_count_{0U};
 };
 
 }  // namespace lunar::pure_exploration_ros
