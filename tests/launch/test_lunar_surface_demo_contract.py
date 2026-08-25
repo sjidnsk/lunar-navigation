@@ -90,3 +90,11 @@ def test_rviz_inputs_are_compatible_and_empty_failed_paths_are_not_forwarded() -
     assert "rclcpp::QoS{10}.reliable()" in demo_text
     assert "!message->header.frame_id.empty()" in visualizer_text
     assert "!message->poses.empty()" in visualizer_text
+
+
+def test_visualizer_labels_the_rover_at_kilometre_map_scale() -> None:
+    text = VISUALIZER_NODE.read_text(encoding="utf-8")
+    assert 'rover.ns = "lunar_surface_rover"' in text
+    assert "visualization_msgs::msg::Marker::CYLINDER" in text
+    assert "visualization_msgs::msg::Marker::TEXT_VIEW_FACING" in text
+    assert 'rover_label.text = "Current rover position"' in text

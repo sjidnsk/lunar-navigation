@@ -14,9 +14,12 @@
 namespace lunar::pure_planner_ros {
 namespace {
 
-constexpr std::size_t kWidth = 500U;
-constexpr std::size_t kHeight = 500U;
-constexpr double kCellSizeM = 0.2;
+// A kilometre-scale scene at one metre per cell contains one million cells.
+// Keeping the demo at this resolution avoids publishing the 25 million cells
+// required for a 0.2 m map every half second.
+constexpr std::size_t kWidth = 1000U;
+constexpr std::size_t kHeight = 1000U;
+constexpr double kCellSizeM = 1.0;
 
 [[nodiscard]] double SquaredDistance(const LunarSurfaceCell lhs,
                                      const LunarSurfaceCell rhs) noexcept {
@@ -26,8 +29,8 @@ constexpr double kCellSizeM = 0.2;
 }
 
 void MarkObstacleDisk(LunarSurfaceScenario& scenario, const LunarSurfaceCell center,
-                      const double radius_m) {
-  const double radius_squared = radius_m * radius_m;
+                      const double radius_cells) {
+  const double radius_squared = radius_cells * radius_cells;
   for (std::size_t y = 0U; y < scenario.height; ++y) {
     for (std::size_t x = 0U; x < scenario.width; ++x) {
       const LunarSurfaceCell cell{x, y};
@@ -92,21 +95,22 @@ LunarSurfaceScenario BuildLunarSurfaceScenario(const std::uint32_t seed) {
   scenario.width = kWidth;
   scenario.height = kHeight;
   scenario.resolution_m = kCellSizeM;
-  scenario.origin_x_m = -50.0;
-  scenario.origin_y_m = -50.0;
+  scenario.origin_x_m = -500.0;
+  scenario.origin_y_m = -500.0;
+  scenario.start_cell = LunarSurfaceCell{150U, 500U};
   scenario.occupancy.assign(kWidth * kHeight, 0);
   scenario.elevation_m.resize(kWidth * kHeight);
 
   std::mt19937 generator(seed);
-  std::uniform_int_distribution<std::size_t> x_distribution(10U, kWidth - 11U);
-  std::uniform_int_distribution<std::size_t> y_distribution(10U, kHeight - 11U);
-  std::uniform_real_distribution<double> radius_distribution(1.0, 2.0);
+  std::uniform_int_distribution<std::size_t> x_distribution(80U, kWidth - 81U);
+  std::uniform_int_distribution<std::size_t> y_distribution(80U, kHeight - 81U);
+  std::uniform_real_distribution<double> radius_distribution(20.0, 45.0);
   std::vector<std::pair<LunarSurfaceCell, double>> craters;
-  craters.reserve(14U);
-  for (std::size_t crater = 0U; crater < 14U; ++crater) {
+  craters.reserve(12U);
+  for (std::size_t crater = 0U; crater < 12U; ++crater) {
     craters.emplace_back(LunarSurfaceCell{x_distribution(generator),
                                           y_distribution(generator)},
-                         radius_distribution(generator) * 15.0);
+                         radius_distribution(generator));
   }
 
   for (std::size_t y = 0U; y < kHeight; ++y) {
@@ -131,7 +135,7 @@ LunarSurfaceScenario BuildLunarSurfaceScenario(const std::uint32_t seed) {
     }
   }
 
-  std::bernoulli_distribution rock_distribution(0.001);
+  std::bernoulli_distribution rock_distribution(0.00015);
   for (std::size_t y = 1U; y + 1U < kHeight; ++y) {
     for (std::size_t x = 1U; x + 1U < kWidth; ++x) {
       if (rock_distribution(generator)) {
@@ -143,25 +147,16 @@ LunarSurfaceScenario BuildLunarSurfaceScenario(const std::uint32_t seed) {
   for (std::size_t y = 0U; y < kHeight; ++y) {
     for (std::size_t x = 0U; x < kWidth; ++x) {
       const LunarSurfaceCell cell{x, y};
-      if (SquaredDistance(cell, scenario.start_cell) <= 225.0) {
+      if (SquaredDistance(cell, scenario.start_cell) <= 625.0) {
         scenario.occupancy[scenario.Index(cell)] = 0;
       }
-      if (SquaredDistance(cell, scenario.start_cell) <= 900.0) {
+      if (SquaredDistance(cell, scenario.start_cell) <= 2500.0) {
         scenario.elevation_m[scenario.Index(cell)] = 0.0F;
       }
     }
   }
 
-  // A deterministic, visibly traversable lane makes the initial RViz request
-  // repeatable while the rest of the 100 m scene remains randomly obstructed.
-  for (std::size_t y = 25U; y <= 75U; ++y) {
-    for (std::size_t x = 25U; x <= 175U; ++x) {
-      const LunarSurfaceCell cell{x, y};
-      scenario.occupancy[scenario.Index(cell)] = 0;
-      scenario.elevation_m[scenario.Index(cell)] = 0.0F;
-    }
-  }
-  scenario.default_goal_cell = LunarSurfaceCell{150U, 50U};
+  scenario.default_goal_cell = LunarSurfaceCell{850U, 500U};
 
   const std::vector<std::int32_t> distance = FloodFill(scenario, scenario.start_cell);
   if (distance[scenario.Index(scenario.default_goal_cell)] < 0) {

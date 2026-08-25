@@ -5,7 +5,7 @@ Visualization Manager:
   Displays:
     - Class: rviz_default_plugins/Map
       Alpha: 0.2
-      Enabled: true
+      Enabled: false
       Name: Lunar obstacles
       Topic: /lunar_demo/global_overview
       Value: true
@@ -83,7 +83,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/TopDownOrtho
-      Scale: 130
+      Scale: 1200
 Window Geometry:
   Height: 900
   Width: 1200

@@ -1,4 +1,4 @@
-"""Launch an isolated 100 m lunar-surface planning demo for RViz."""
+"""Launch an isolated 1 km by 1 km lunar-surface planning demo for RViz."""
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -24,6 +24,8 @@ def generate_launch_description() -> LaunchDescription:
         "wheeled_reference_topic": "/lunar_demo/wheeled_reference",
         "wheeled_path_topic": "/lunar_demo/wheeled_path",
         "wheeled_timed_path_topic": "/lunar_demo/wheeled_path_timing",
+        "rolling_surface_enabled": True,
+        "rolling_horizon_m": 12.0,
     }
     return LaunchDescription(
         [

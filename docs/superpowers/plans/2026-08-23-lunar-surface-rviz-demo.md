@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a deterministic, isolated ROS 2 Jazzy RViz demonstration that plans a wheel route across a synthetic 100 m by 100 m lunar surface.
+**Goal:** Add a deterministic, isolated ROS 2 Jazzy RViz demonstration that plans a wheel route across a synthetic 1 km by 1 km lunar surface.
 
 **Architecture:** A test-only C++ scenario publisher emits the existing planner's global map, local GridMap, odometry, and identity TF under `/lunar_demo`. A second test-only C++ visualizer turns the planner's existing `MotionReference.path_preview` into standard RViz `Path` and height-coloured markers. A launch file composes both with the planner and existing RViz goal bridge, while an RViz config exposes `/lunar_demo/rviz_goal` as `2D Goal Pose`.
 
@@ -14,7 +14,7 @@
 
 - Keep all demo endpoints under `/lunar_demo/*`; never publish or subscribe to `/Car/T4/plan_motion`.
 - Use `wheel` and the existing planner/action implementation without modifying planning algorithms, feasibility checks, or production interfaces.
-- Generate a deterministic physical 100 m by 100 m scene with 500 by 500 cells at 0.2 m resolution, origin `(-50, -50)`, finite elevation, nonzero obstacle density, safe start, and a reachable default goal.
+- Generate a deterministic physical 1 km by 1 km scene with 1000 by 1000 cells at 1 m resolution, origin `(-500, -500)`, finite elevation, nonzero obstacle density, safe start, and a reachable default goal.
 - Build the ROS executable without test targets on Jazzy using `-DBUILD_TESTING=OFF`; run new focused tests in a separate test-enabled build once the pre-existing Hopper include failure is repaired.
 - This is an RViz/ROS input-and-path demonstration, not a dynamics, controller, Orin, or production-readiness certification.
 - The workspace has no Git root; record verification output in the final handoff instead of making commits.

@@ -70,8 +70,7 @@ ros2 topic echo /Car/T4/exploration/status
 
 ## Jazzy 月表 RViz 演示（测试专用）
 
-该演示生成固定种子的 `100 m × 100 m` 月表：随机岩石/陨石坑障碍、模拟高程、轮式车位姿和
-可达默认目标。所有接口位于 `/lunar_demo/*`，Action 为 `/lunar_demo/plan_motion`，不会连接
+该演示生成固定种子的 `1 km × 1 km` 全局月表，分辨率为 `1 m/cell`（`1000 × 1000` 栅格）；规划器同时接收以车辆为中心的 `100 m × 100 m` 局部 GridMap，分辨率为 `0.2 m/cell`（`500 × 500` 栅格）。这保留全图路线语境，同时以适合轮式安全检查的局部精度规划默认目标。所有接口位于 `/lunar_demo/*`，Action 为 `/lunar_demo/plan_motion`，不会连接
 生产 `/Car/T4/plan_motion`。
 
 外部里程计可提供地图范围内、有限且物理可行的任意 `x/y/yaw` 起点，不要求与地图原点、
@@ -88,7 +87,9 @@ source install/setup.bash
 ros2 launch lunar_pure_planner_ros lunar_surface_rviz_demo.launch.py
 ```
 
-RViz 固定坐标系为 `map`。使用 **2D Goal Pose** 在空白可达区域选择目标，成功信号是
+RViz 固定坐标系为 `map`，初始顶视范围约为整张 1 km 地图。为规避部分 Mesa/RViz 组合中
+`Map` 与 GridMap 插件同时启用的 GLSL sampler 冲突，默认关闭原始占据图；**Wheel traversability**
+仍以同一张地图的障碍与安全判定显示可规划区域。等待启动后约 6 秒，再使用 **2D Goal Pose** 在空白可达区域选择目标，成功信号是
 `/lunar_demo/path` 更新；障碍物或不可达位置没有有效路径是预期的安全行为。此演示不提供
 控制器，绝不可用于驱动车辆。
 

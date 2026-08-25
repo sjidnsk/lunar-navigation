@@ -3,7 +3,7 @@
 ## Purpose
 
 Provide a repeatable, test-only ROS 2 Jazzy demonstration of the isolated
-wheel planner.  RViz users can inspect a synthetic 100 m by 100 m lunar
+wheel planner. RViz users can inspect a synthetic 1 km by 1 km lunar
 surface and place a `2D Goal Pose` to request a route.
 
 ## Safety and scope boundary
@@ -16,9 +16,8 @@ obstacle, slope, and reachability checks remain unchanged.
 ## Components and data flow
 
 1. A `lunar_surface_demo` publisher generates a deterministic scene using a
-   configurable seed (default fixed).  Its 500 by 500 cells are 0.2 m square
-   (a physical 100 m by 100 m area),
-   with map origin `(-50, -50)`.  It publishes:
+   configurable seed (default fixed). Its 1000 by 1000 cells are 1 m square
+   (a physical 1 km by 1 km area), with map origin `(-500, -500)`. It publishes:
    - `/lunar_demo/global_overview` (`nav_msgs/OccupancyGrid`),
    - `/lunar_demo/grid_map` (`grid_map_msgs/GridMap`) with `occupancy` and
      `elevation` layers,
@@ -27,12 +26,12 @@ obstacle, slope, and reachability checks remain unchanged.
    to those demo inputs and `/lunar_demo/plan_motion`.
 3. The existing RViz goal bridge receives `/lunar_demo/rviz_goal` and sends
    the demo Action request.
-4. A test-only visualizer converts successful `MotionReference` messages to
-   `/lunar_demo/path` (`nav_msgs/Path`) and publishes a height-coloured
-   terrain `MarkerArray`.  This avoids requiring a nonstandard GridMap RViz
-   plugin.
-5. An RViz configuration shows the occupancy map, terrain markers, robot,
-   start/goal, and planned path.  Fixed frame is `map`.
+4. A test-only visualizer converts successful planner paths to
+   `/lunar_demo/path` (`nav_msgs/Path`) and publishes a sampled,
+   height-coloured terrain `MarkerArray`.
+5. An RViz configuration shows the full occupancy map, wheel-traversability
+   layer, terrain markers, robot, start/goal, and planned path. Fixed frame is
+   `map`; the initial top-down view spans the complete kilometre-scale map.
 
 ## Scene generation
 
@@ -54,7 +53,7 @@ without manual interaction.
 
 ## Acceptance criteria
 
-1. Generator tests verify exactly 100 m by 100 m geometry, finite elevation,
+1. Generator tests verify exactly 1 km by 1 km geometry, finite elevation,
    nonzero bounded obstacle density, safe start, and a connected default goal.
 2. A ROS launch test observes all demo inputs and `/lunar_demo/plan_motion`,
    sends the default goal, and requires a successful result with a nonempty
