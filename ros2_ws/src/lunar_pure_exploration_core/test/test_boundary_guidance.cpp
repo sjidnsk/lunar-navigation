@@ -1,6 +1,7 @@
 #include "lunar_pure_exploration_core/boundary_guidance.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -435,6 +436,91 @@ TEST(BoundaryGuidance,
   const TaskRaster blocked_raster = TaskRaster::Build(blocked_map, task);
   EXPECT_FALSE(guidance.IsCandidateStillValid(blocked_map, blocked_raster,
                                               frozen));
+}
+
+TEST(BoundaryGuidance,
+     InvalidRawOccupancyNeverActsAsIntentSearchCellTargetOrTransparentBlocker) {
+  const GridGeometry geometry = Geometry(7U, 3U);
+  const Polygon2 task = GridPolygon(
+      geometry, {{5.0, 1.0}, {6.0, 1.0}, {6.0, 2.0}, {5.0, 2.0}});
+  BoundaryGuidance guidance = Guidance();
+  const std::array<std::int8_t, 4> invalid_values{
+      std::numeric_limits<std::int8_t>::min(), -2, 101,
+      std::numeric_limits<std::int8_t>::max()};
+
+  for (const std::int8_t invalid_value : invalid_values) {
+    SCOPED_TRACE(static_cast<int>(invalid_value));
+
+    std::vector<std::int8_t> intent_data = Filled(geometry, kOccupied);
+    for (std::int32_t x = 0; x <= 4; ++x) {
+      Set(intent_data, geometry, x, 1, kFree);
+    }
+    Set(intent_data, geometry, 5, 1, invalid_value);
+    const OccupancyGridView intent_map = Map(geometry, intent_data);
+    const TaskRaster intent_raster = TaskRaster::Build(intent_map, task);
+    const BoundaryGuidanceResult intent_result = guidance.Build(
+        intent_map, intent_raster, PoseAt(intent_map, {0, 1}));
+    EXPECT_TRUE(intent_result.intents.empty());
+    EXPECT_EQ(intent_result.wait_reason,
+              ApproachWaitReason::kNoGuidanceRoute);
+
+    std::vector<std::int8_t> search_data = Filled(geometry, kOccupied);
+    Set(search_data, geometry, 0, 1, kFree);
+    Set(search_data, geometry, 1, 1, invalid_value);
+    for (std::int32_t x = 2; x <= 4; ++x) {
+      Set(search_data, geometry, x, 1, kFree);
+    }
+    Set(search_data, geometry, 5, 1, kUnknown);
+    const OccupancyGridView search_map = Map(geometry, search_data);
+    const TaskRaster search_raster = TaskRaster::Build(search_map, task);
+    const BoundaryGuidanceResult search_result = guidance.Build(
+        search_map, search_raster, PoseAt(search_map, {0, 1}));
+    EXPECT_TRUE(search_result.intents.empty());
+    EXPECT_EQ(search_result.wait_reason,
+              ApproachWaitReason::kNoGuidanceRoute);
+
+    std::vector<std::int8_t> target_data = Filled(geometry, kOccupied);
+    for (std::int32_t x = 0; x <= 5; ++x) {
+      Set(target_data, geometry, x, 1, kFree);
+    }
+    Set(target_data, geometry, 1, 1, invalid_value);
+    const OccupancyGridView target_map = Map(geometry, target_data);
+    const TaskRaster target_raster = TaskRaster::Build(target_map, task);
+    const Pose2 frozen_pose = PoseAt(target_map, {0, 1});
+    const CandidateKey frozen_key = MakeCandidateKey(frozen_pose);
+    const ApproachCandidate invalid_target{
+        .id = 201U,
+        .identity = BoundaryApproachGoalIdentity{
+            .intent_cell = {5, 1},
+            .candidate_key = frozen_key,
+            .candidate_kind = ApproachCandidateKind::kTranslation,
+        },
+        .pose = frozen_pose,
+        .remaining_cost = GuidanceCost{1U, 5.0},
+        .task_unknown_area_m2 = 0.0,
+        .guidance_unknown_cell_count = 1U,
+        .fully_inside_task = false,
+        .guidance_route = {Vec2{frozen_pose.x, frozen_pose.y},
+                           target_map.CellCenter({1, 1})},
+    };
+    EXPECT_FALSE(guidance.IsCandidateStillValid(
+        target_map, target_raster, invalid_target));
+
+    std::vector<std::int8_t> blocker_data = Filled(geometry, kOccupied);
+    for (std::int32_t x = 0; x <= 5; ++x) {
+      Set(blocker_data, geometry, x, 1, kFree);
+    }
+    Set(blocker_data, geometry, 1, 1, invalid_value);
+    Set(blocker_data, geometry, 2, 1, kUnknown);
+    const OccupancyGridView blocker_map = Map(geometry, blocker_data);
+    const TaskRaster blocker_raster = TaskRaster::Build(blocker_map, task);
+    ApproachCandidate invalid_blocker = invalid_target;
+    invalid_blocker.guidance_route = {
+        Vec2{frozen_pose.x, frozen_pose.y},
+        blocker_map.CellCenter({2, 1})};
+    EXPECT_FALSE(guidance.IsCandidateStillValid(
+        blocker_map, blocker_raster, invalid_blocker));
+  }
 }
 
 TEST(BoundaryGuidance,

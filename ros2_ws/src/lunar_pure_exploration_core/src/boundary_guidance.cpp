@@ -72,6 +72,21 @@ bool SameGeometry(const GridGeometry& left, const GridGeometry& right) {
          left.origin_yaw == right.origin_yaw;
 }
 
+CellState ClassifyGuidanceCell(const OccupancyGridView& map,
+                               GridIndex cell) {
+  const std::optional<std::int8_t> raw = map.RawValue(cell);
+  if (!raw.has_value()) {
+    return CellState::kOutsideMap;
+  }
+  if (*raw == -1) {
+    return CellState::kUnknown;
+  }
+  if (*raw < 0 || *raw > 100) {
+    return CellState::kOccupied;
+  }
+  return map.Classify(cell);
+}
+
 void ValidateSharedGeometry(const OccupancyGridView& map,
                             const TaskRaster& raster) {
   if (!SameGeometry(map.geometry(), raster.geometry())) {
@@ -296,7 +311,7 @@ bool IsLegalIntent(const OccupancyGridView& map, const TaskRaster& raster,
       !IsBoundaryCell(raster, intent)) {
     return false;
   }
-  const CellState state = map.Classify(intent);
+  const CellState state = ClassifyGuidanceCell(map, intent);
   return state == CellState::kFree || state == CellState::kUnknown;
 }
 
@@ -329,7 +344,7 @@ std::vector<SearchLabel> SearchGlobalMap(
       if (!neighbor.has_value() || !map.Contains(*neighbor)) {
         continue;
       }
-      const CellState state = map.Classify(*neighbor);
+      const CellState state = ClassifyGuidanceCell(map, *neighbor);
       if (state != CellState::kFree && state != CellState::kUnknown) {
         continue;
       }
@@ -459,7 +474,7 @@ std::uint32_t RemainingUnknownCount(
   for (std::size_t index = candidate_index + 1U; index < route.size();
        ++index) {
     ConsumeWork(work_limit, consumed_work);
-    if (map.Classify(route[index]) != CellState::kUnknown) {
+    if (ClassifyGuidanceCell(map, route[index]) != CellState::kUnknown) {
       continue;
     }
     if (count == std::numeric_limits<std::uint32_t>::max()) {
@@ -593,7 +608,7 @@ VisibilityCounts EvaluateVisibility(
           continue;
         }
       }
-      if (map.Classify(target) != CellState::kUnknown) {
+      if (ClassifyGuidanceCell(map, target) != CellState::kUnknown) {
         continue;
       }
 
@@ -618,7 +633,7 @@ VisibilityCounts EvaluateVisibility(
                 blocked = true;
                 break;
               }
-              const CellState state = map.Classify(visited);
+              const CellState state = ClassifyGuidanceCell(map, visited);
               if (state == CellState::kOccupied ||
                   state == CellState::kOutsideMap) {
                 blocked = true;
@@ -883,7 +898,7 @@ BoundaryGuidanceResult BoundaryGuidance::Build(
       uncovered_boundary = true;
       continue;
     }
-    const CellState state = map.Classify(cell);
+    const CellState state = ClassifyGuidanceCell(map, cell);
     if (state == CellState::kFree || state == CellState::kUnknown) {
       legal_boundary_cells.push_back(cell);
     }
