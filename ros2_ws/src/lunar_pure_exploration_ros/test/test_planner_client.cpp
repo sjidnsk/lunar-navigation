@@ -32,6 +32,7 @@
 #include <variant>
 
 #include "accepted_goal_finalizer.hpp"
+#include "lunar_pure_exploration_core/candidate_generator.hpp"
 #include "lunar_pure_planner_ros/message_conversion.hpp"
 
 namespace lunar::pure_exploration_ros {
@@ -241,6 +242,10 @@ lunar::pure_exploration::CandidateView Candidate(
           .frontier_distance_m = 2.0};
 }
 
+PlannerTarget Target(lunar::pure_exploration::CandidateView candidate) {
+  return {.display_id = candidate.id, .pose = candidate.pose};
+}
+
 Action::Result FailureResult(const std::uint8_t outcome,
                              std::string reason_code) {
   Action::Result result;
@@ -360,7 +365,9 @@ class PlannerClientTest : public ::testing::Test {
   void Evaluate(const std::string& request_id,
                 const lunar::pure_exploration::CandidateView& candidate) {
     client_->Evaluate(
-        "task-alpha", request_id, candidate, 0.25, 0.125,
+        "task-alpha", request_id,
+        PlannerTarget{.display_id = candidate.id, .pose = candidate.pose},
+        0.25, 0.125,
         [this](PlannerEvaluation evaluation) {
           std::scoped_lock lock{completion_mutex_};
           completions_.push_back(std::move(evaluation));
@@ -455,6 +462,39 @@ TEST_F(PlannerClientTest, BuildsExactCanonicalGoalAndCorrelatesOnlyByRequestId) 
   EXPECT_EQ(second.request_id, "task-alpha/candidate/1");
   EXPECT_EQ(second.candidate_id, 77U);
   EXPECT_NE(first.request_id, second.request_id);
+}
+
+TEST_F(PlannerClientTest,
+       NeutralApproachTargetBuildsTheExactPointAndYawGoal) {
+  const PlannerTarget approach_target{
+      .display_id = 314U,
+      .pose = {.x = -0.25, .y = 5.25, .yaw = -0.375},
+  };
+  client_->Evaluate(
+      "task-alpha", "task-alpha/candidate/approach", approach_target,
+      0.2, 0.1,
+      [this](PlannerEvaluation evaluation) {
+        std::scoped_lock lock{completion_mutex_};
+        completions_.push_back(std::move(evaluation));
+      });
+
+  ASSERT_TRUE(WaitFor([&] {
+    return server_->HasGoal("task-alpha/candidate/approach");
+  }));
+  const auto goal = server_->Goal("task-alpha/candidate/approach");
+  EXPECT_EQ(goal.goal.goal_type, goal.goal.POINT);
+  EXPECT_DOUBLE_EQ(goal.goal.point.x, -0.25);
+  EXPECT_DOUBLE_EQ(goal.goal.point.y, 5.25);
+  EXPECT_DOUBLE_EQ(goal.goal.yaw_rad, -0.375);
+  EXPECT_DOUBLE_EQ(goal.goal.position_tolerance_m, 0.2);
+  EXPECT_DOUBLE_EQ(goal.goal.yaw_tolerance_rad, 0.1);
+
+  const auto evaluation = FinishAndWait(
+      "task-alpha/candidate/approach",
+      rclcpp_action::ResultCode::ABORTED,
+      FailureResult(Action::Result::GOAL_INFEASIBLE, "GLOBAL_NO_PATH"));
+  EXPECT_EQ(evaluation.candidate_id, 314U);
+  EXPECT_EQ(evaluation.kind, PlannerEvaluationKind::kExhaustiveNoPath);
 }
 
 TEST_F(PlannerClientTest, ClassifiesTheOnlyFourAcceptedTypedCombinations) {
@@ -988,14 +1028,14 @@ TEST_F(PlannerClientTest,
                               .goal_response_timeout = 100ms,
                               .result_timeout = 250ms});
   runtime_client->Evaluate(
-      "task-alpha", "automatic-timeout", Candidate(), 0.25, 0.125,
+      "task-alpha", "automatic-timeout", Target(Candidate()), 0.25, 0.125,
       [&, this](PlannerEvaluation evaluation) {
         {
           std::scoped_lock lock{completion_mutex_};
           completions_.push_back(std::move(evaluation));
         }
         runtime_client->Evaluate(
-            "task-alpha", "automatic-reentrant", Candidate(42U), 0.25,
+            "task-alpha", "automatic-reentrant", Target(Candidate(42U)), 0.25,
             0.125, [this](PlannerEvaluation next) {
               std::scoped_lock lock{completion_mutex_};
               completions_.push_back(std::move(next));
@@ -1160,14 +1200,14 @@ TEST_F(PlannerClientTest,
 TEST_F(PlannerClientTest,
        CompletionMayReenterEvaluateAndThrowWithoutUndoingEitherGeneration) {
   client_->Evaluate(
-      "task-alpha", "reentrant-first", Candidate(), 0.25, 0.125,
+      "task-alpha", "reentrant-first", Target(Candidate()), 0.25, 0.125,
       [this](PlannerEvaluation evaluation) {
         {
           std::scoped_lock lock{completion_mutex_};
           completions_.push_back(std::move(evaluation));
         }
         client_->Evaluate(
-            "task-alpha", "reentrant-second", Candidate(43U), 0.25, 0.125,
+            "task-alpha", "reentrant-second", Target(Candidate(43U)), 0.25, 0.125,
             [this](PlannerEvaluation second) {
               std::scoped_lock lock{completion_mutex_};
               completions_.push_back(std::move(second));
@@ -1214,7 +1254,7 @@ TEST_F(PlannerClientTest,
   std::optional<PlannerEvaluation> completion;
   auto candidate = Candidate(55U);
   unavailable.Evaluate(
-      "task-alpha", "unavailable", candidate, 0.0, 0.0,
+      "task-alpha", "unavailable", Target(candidate), 0.0, 0.0,
       [&](PlannerEvaluation evaluation) { completion = std::move(evaluation); });
   candidate.id = 99U;
   ASSERT_TRUE(completion.has_value());

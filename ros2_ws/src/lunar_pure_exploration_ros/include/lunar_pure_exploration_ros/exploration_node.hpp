@@ -15,8 +15,10 @@
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <lunar_planning_msgs/msg/motion_reference.hpp>
+#include <lunar_pure_exploration_core/boundary_guidance.hpp>
 #include <lunar_pure_exploration_core/candidate_ranker.hpp>
 #include <lunar_pure_exploration_core/coverage.hpp>
+#include <lunar_pure_exploration_core/exploration_state_machine.hpp>
 #include <lunar_pure_exploration_core/failure_memory.hpp>
 #include <lunar_pure_exploration_core/frontier_detector.hpp>
 #include <lunar_pure_exploration_core/information_gain.hpp>
@@ -144,6 +146,47 @@ class FrozenPlanningCycle {
 
 using FrozenPlanningCyclePtr = std::shared_ptr<FrozenPlanningCycle>;
 
+class FrozenApproachCycle {
+ public:
+  FrozenApproachCycle(
+      FrozenGlobalMapContent global_map_content,
+      lunar::pure_exploration::BoundaryGuidanceResult guidance,
+      lunar::pure_exploration::Pose2 frozen_robot_pose,
+      double frozen_resolution_m,
+      std::vector<std::size_t> coarse_order);
+
+  [[nodiscard]] const lunar::pure_exploration::BoundaryGuidanceResult&
+  guidance() const;
+  [[nodiscard]] lunar::pure_exploration::Pose2 frozen_robot_pose() const;
+  [[nodiscard]] double frozen_resolution_m() const;
+  [[nodiscard]] std::span<const std::size_t> coarse_order() const;
+  [[nodiscard]] std::size_t coarse_cursor() const;
+  std::vector<std::size_t> TakeNextCandidateIndices();
+  void RegisterRequest(std::string request_id, std::size_t candidate_index);
+  [[nodiscard]] std::optional<std::size_t> CandidateIndexForRequest(
+      std::string_view request_id) const;
+  [[nodiscard]] std::optional<std::string> LatestRequestIdForCandidate(
+      std::size_t candidate_index) const;
+  void AddReachable(FrozenReachableCandidate result);
+  [[nodiscard]] std::span<const FrozenReachableCandidate> reachable() const;
+  [[nodiscard]] bool GlobalMapContentEquals(
+      const nav_msgs::msg::OccupancyGrid& latest) const;
+
+ private:
+  const FrozenGlobalMapContent global_map_content_;
+  const lunar::pure_exploration::BoundaryGuidanceResult guidance_;
+  const lunar::pure_exploration::Pose2 frozen_robot_pose_;
+  const double frozen_resolution_m_;
+  const std::vector<std::size_t> coarse_order_;
+  std::size_t coarse_cursor_{0U};
+  std::unordered_map<std::string, std::size_t>
+      request_to_candidate_index_;
+  std::vector<std::optional<std::string>> latest_request_by_candidate_;
+  std::vector<FrozenReachableCandidate> reachable_;
+};
+
+using FrozenApproachCyclePtr = std::shared_ptr<FrozenApproachCycle>;
+
 struct ExplorationPipelineSeams {
   std::function<std::vector<lunar::pure_exploration::CandidateView>(
       const lunar::pure_exploration::TaskRaster&,
@@ -173,6 +216,7 @@ struct ExplorationNodeParameters {
   lunar::pure_exploration::CandidateParameters candidate_parameters;
   lunar::pure_exploration::CandidateGenerator::Limits candidate_limits;
   lunar::pure_exploration::TaskRaster::Limits task_raster_limits;
+  lunar::pure_exploration::BoundaryGuidance::Limits boundary_guidance_limits{};
   lunar::pure_exploration::SensorModel sensor_model;
   lunar::pure_exploration::InformationGainEvaluator::Limits
       information_gain_limits;
@@ -244,6 +288,8 @@ class ExplorationNode final : public rclcpp::Node {
   SnapshotActiveRequestIdForTest() const;
   [[nodiscard]] std::optional<lunar::pure_exploration::Pose2>
   SnapshotActiveTargetForTest() const;
+  [[nodiscard]] std::optional<lunar::pure_exploration::GoalKind>
+  SnapshotActiveGoalKindForTest() const;
   [[nodiscard]] std::vector<lunar::pure_exploration::Vec2>
   SnapshotExecutablePolylineForTest() const;
   [[nodiscard]] std::optional<lunar::pure_exploration::Vec2>

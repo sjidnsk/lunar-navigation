@@ -405,13 +405,13 @@ std::string PlannerClient::MakeRequestId(const std::string_view task_id,
 
 void PlannerClient::Evaluate(
     std::string task_id, std::string request_id,
-    const lunar::pure_exploration::CandidateView& candidate,
+    const PlannerTarget target,
     const double position_tolerance_m, const double yaw_tolerance_rad,
     Completion completion) {
   if (task_id.empty() || request_id.empty() || !completion ||
-      !std::isfinite(candidate.pose.x) ||
-      !std::isfinite(candidate.pose.y) ||
-      !std::isfinite(candidate.pose.yaw) ||
+      !std::isfinite(target.pose.x) ||
+      !std::isfinite(target.pose.y) ||
+      !std::isfinite(target.pose.yaw) ||
       !std::isfinite(position_tolerance_m) || position_tolerance_m < 0.0 ||
       !std::isfinite(yaw_tolerance_rad) || yaw_tolerance_rad < 0.0) {
     throw std::invalid_argument{"invalid planner evaluation"};
@@ -425,13 +425,13 @@ void PlannerClient::Evaluate(
   goal.goal.header.frame_id = "map";
   goal.goal.goal_id = request_id + "/goal";
   goal.goal.goal_type = goal.goal.POINT;
-  goal.goal.point.x = candidate.pose.x;
-  goal.goal.point.y = candidate.pose.y;
+  goal.goal.point.x = target.pose.x;
+  goal.goal.point.y = target.pose.y;
   goal.goal.point.z = 0.0;
   goal.goal.planar_region.points.clear();
   goal.goal.position_tolerance_m = position_tolerance_m;
   goal.goal.has_yaw_constraint = true;
-  goal.goal.yaw_rad = candidate.pose.yaw;
+  goal.goal.yaw_rad = target.pose.yaw;
   goal.goal.yaw_tolerance_rad = yaw_tolerance_rad;
   goal.replace_active_request = false;
 
@@ -452,7 +452,7 @@ void PlannerClient::Evaluate(
     state_->active.emplace(CallbackState::ActiveRequest{
         .generation = generation,
         .request_id = request_id,
-        .candidate_id = candidate.id,
+        .candidate_id = target.display_id,
         .completion = std::move(completion),
         .deadline = deadline,
         .goal_handle = GoalHandle::SharedPtr{},
@@ -468,7 +468,7 @@ void PlannerClient::Evaluate(
     if (!state_->action_client->action_server_is_ready()) {
       immediate = ClaimLocked(
           *state_, generation,
-          FailureEvaluation(request_id, candidate.id,
+          FailureEvaluation(request_id, target.display_id,
                             PlannerEvaluationKind::kRetryable,
                             "ACTION_SERVER_UNAVAILABLE"));
     } else {
@@ -565,7 +565,7 @@ void PlannerClient::Evaluate(
       } catch (...) {
         immediate = ClaimLocked(
             *state_, generation,
-            FailureEvaluation(request_id, candidate.id,
+            FailureEvaluation(request_id, target.display_id,
                               PlannerEvaluationKind::kRetryable,
                               "GOAL_SEND_FAILED"));
       }

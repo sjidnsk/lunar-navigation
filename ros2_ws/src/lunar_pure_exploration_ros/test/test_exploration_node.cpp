@@ -15,6 +15,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <numbers>
 #include <optional>
 #include <set>
@@ -53,6 +54,10 @@ class ExplorationNodeTestPeer final {
   }
   static std::optional<lunar::pure_exploration::Pose2> ActiveTarget(
       const ExplorationNode& node) { return node.SnapshotActiveTargetForTest(); }
+  static std::optional<lunar::pure_exploration::GoalKind> ActiveGoalKind(
+      const ExplorationNode& node) {
+    return node.SnapshotActiveGoalKindForTest();
+  }
   static std::vector<lunar::pure_exploration::Vec2> ExecutablePolyline(
       const ExplorationNode& node) {
     return node.SnapshotExecutablePolylineForTest();
@@ -196,6 +201,46 @@ nav_msgs::msg::OccupancyGrid GlobalMap(
   return map;
 }
 
+nav_msgs::msg::OccupancyGrid OutsideApproachMap(
+    const bool reveal_left_entry = false) {
+  constexpr std::uint32_t width = 32U;
+  constexpr std::uint32_t height = 24U;
+  constexpr double resolution = 0.5;
+  auto map = GlobalMap(width, height, resolution, -4.0, 0.0);
+  map.data.assign(static_cast<std::size_t>(width) * height, 0);
+  const auto set = [&map](const std::uint32_t x, const std::uint32_t y,
+                          const std::int8_t value) {
+    map.data[static_cast<std::size_t>(y) * map.info.width + x] = value;
+  };
+
+  // The task is [0, 10] x [0, 10]. Keep every boundary intent UNKNOWN so the
+  // first executable goal must stop at the known-FREE prefix outside x=0.
+  const std::uint32_t left = 8U;
+  const std::uint32_t right = 27U;
+  const std::uint32_t bottom = 0U;
+  const std::uint32_t top = 19U;
+  for (std::uint32_t y = bottom; y <= top; ++y) {
+    set(left, y, -1);
+    set(right, y, -1);
+  }
+  for (std::uint32_t x = left; x <= right; ++x) {
+    set(x, bottom, -1);
+    set(x, top, -1);
+  }
+  // Preserve an ordinary in-task WFD frontier after entry.
+  for (std::uint32_t y = 1U; y < top; ++y) {
+    for (std::uint32_t x = 16U; x < right; ++x) {
+      set(x, y, -1);
+    }
+  }
+  if (reveal_left_entry) {
+    for (std::uint32_t y = 0U; y <= top; ++y) {
+      set(left, y, 0);
+    }
+  }
+  return map;
+}
+
 nav_msgs::msg::Odometry Odometry(const double x = 2.0,
                                  const double y = 2.0,
                                  const double yaw = 0.0) {
@@ -333,6 +378,38 @@ std::vector<lunar::pure_exploration::RankedCandidate> Order(
   return order;
 }
 
+lunar::pure_exploration::BoundaryGuidanceResult ApproachResult(
+    const std::size_t count) {
+  lunar::pure_exploration::BoundaryGuidanceResult result{
+      .phase = lunar::pure_exploration::NavigationPhase::kApproachTask,
+      .wait_reason = lunar::pure_exploration::ApproachWaitReason::kNone,
+      .fully_inside_task = false,
+  };
+  result.candidates.reserve(count);
+  for (std::size_t index = 0U; index < count; ++index) {
+    const auto x_mm = static_cast<std::int64_t>(index + 1U) * 1000;
+    const lunar::pure_exploration::CandidateKey key{
+        .x_mm = x_mm, .y_mm = 0, .yaw_tenth_deg = 0};
+    result.candidates.push_back(
+        {.id = static_cast<std::uint64_t>(100U + index),
+         .identity =
+             {.intent_cell = {static_cast<std::int32_t>(index), 0},
+              .candidate_key = key,
+              .candidate_kind = lunar::pure_exploration::
+                  ApproachCandidateKind::kTranslation},
+         .pose = {.x = static_cast<double>(index + 1U),
+                  .y = 0.0,
+                  .yaw = 0.0},
+         .remaining_cost = {.unknown_cell_count = 1U,
+                            .path_length_m = static_cast<double>(count - index)},
+         .task_unknown_area_m2 = 1.0,
+         .guidance_unknown_cell_count = 1U,
+         .fully_inside_task = false,
+         .guidance_route = {{static_cast<double>(index + 1U), 0.0}}});
+  }
+  return result;
+}
+
 TEST(FrozenCandidateBatchTest, OwnsIdentityAndAssociatesOnlyByRequestId) {
   auto source_map = GlobalMap(2U, 2U, 0.5, 1.0, 2.0);
   source_map.header.stamp.sec = 100;
@@ -446,6 +523,36 @@ TEST(FrozenPlanningCycleTest, OwnsUniqueReachableRowsAndReferences) {
                    {.metrics = {0U, std::numeric_limits<double>::infinity()},
                     .reference = reference}),
                std::invalid_argument);
+}
+
+TEST(FrozenApproachCycleTest,
+     OwnsGuidanceAssociatesRequestsAndChunksThirtyThreeSequentially) {
+  auto source = ApproachResult(33U);
+  std::vector<std::size_t> order(33U);
+  std::iota(order.begin(), order.end(), 0U);
+  FrozenApproachCycle cycle(FrozenMap(GlobalMap(40U, 2U)), source,
+                            {0.0, 0.0, 0.0}, 0.5, order);
+
+  source.candidates.front().pose.x = 999.0;
+  EXPECT_DOUBLE_EQ(cycle.guidance().candidates.front().pose.x, 1.0);
+  EXPECT_EQ(cycle.TakeNextCandidateIndices().size(), 16U);
+  EXPECT_EQ(cycle.TakeNextCandidateIndices().size(), 16U);
+  const auto tail = cycle.TakeNextCandidateIndices();
+  ASSERT_EQ(tail.size(), 1U);
+  EXPECT_EQ(tail.front(), 32U);
+  EXPECT_TRUE(cycle.TakeNextCandidateIndices().empty());
+
+  cycle.RegisterRequest("approach-request-17", 17U);
+  EXPECT_EQ(cycle.CandidateIndexForRequest("approach-request-17"), 17U);
+  EXPECT_EQ(cycle.LatestRequestIdForCandidate(17U), "approach-request-17");
+  lunar_planning_msgs::msg::MotionReference reference;
+  reference.plan_id = "owned-approach-plan";
+  cycle.AddReachable(
+      {.metrics = {.candidate_index = 17U, .path_length_m = 4.5},
+       .reference = reference});
+  ASSERT_EQ(cycle.reachable().size(), 1U);
+  EXPECT_EQ(cycle.reachable().front().reference.plan_id,
+            "owned-approach-plan");
 }
 
 class FakePlannerServer final {
@@ -647,6 +754,7 @@ ExplorationNodeParameters TestParameters(const std::string& prefix) {
                                 std::numbers::pi / 4.0}},
       .candidate_limits = {4096U, 64U, 100000U},
       .task_raster_limits = {1048576U},
+      .boundary_guidance_limits = {1048576U, 1000000U, 64U},
       .sensor_model = {10.0, std::numbers::pi / 2.0},
       .information_gain_limits = {100000U},
       .score_weights = {},
@@ -1062,6 +1170,16 @@ enum class ExecutionControl {
 class ExecutionReplanControlGateTest
     : public ExplorationNodeTest,
       public ::testing::WithParamInterface<ExecutionControl> {};
+
+enum class ApproachControl {
+  kPauseResume,
+  kCancel,
+  kReplacementStart,
+};
+
+class ApproachControlTest
+    : public ExplorationNodeTest,
+      public ::testing::WithParamInterface<ApproachControl> {};
 
 TEST_F(ExplorationNodeTest, MissingGlobalMapWaitsIndefinitely) {
   ExpectWaitingWithMissingInput(0);
@@ -3802,6 +3920,318 @@ TEST_F(ExplorationNodeTest, UnknownRequestIdFailsClosed) {
   }));
   EXPECT_EQ(LatestStatus()->reason_code, "UNKNOWN_PLANNER_REQUEST_ID");
   EXPECT_EQ(ReferenceCount(), 0U);
+}
+
+TEST_F(ExplorationNodeTest,
+       BoundaryGuidanceSafePoseWorkExhaustionUsesGuidanceReason) {
+  // Four footprint vertices consume exactly twelve validation work units in
+  // the constructor.  The first Build then exhausts the shared validator's
+  // collision work while checking the outside start pose.
+  parameters_.boundary_guidance_limits.maximum_guidance_work_units = 12U;
+  Start(FakePlannerServer::Mode::kDelayed);
+  PublishAllInputs(StartTask("guidance-resource"), OutsideApproachMap(false),
+                   Odometry(-2.0, 5.0));
+
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::ERROR;
+  }));
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->reason_code, "RESOURCE_GUIDANCE_WORK_LIMIT");
+  EXPECT_TRUE(server_->Goals().empty());
+}
+
+TEST_F(ExplorationNodeTest,
+       OutsideStartPublishesOnlyFreeApproachGoalsThenSwitchesToWfd) {
+  Start(FakePlannerServer::Mode::kReachable);
+  const auto initial_map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("outside-progress"), initial_map,
+                   Odometry(-2.0, 5.0));
+
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto first_goals = server_->Goals();
+  const auto first_request =
+      ExplorationNodeTestPeer::ActiveRequestId(*explorer_);
+  ASSERT_TRUE(first_request);
+  const auto first_row = std::ranges::find_if(
+      first_goals, [&](const auto& goal) {
+        return goal.request_id == *first_request;
+      });
+  ASSERT_NE(first_row, first_goals.end());
+  const auto first = first_row->goal;
+  const auto first_x = static_cast<std::int64_t>(
+      std::floor((first.point.x - initial_map.info.origin.position.x) /
+                 initial_map.info.resolution));
+  const auto first_y = static_cast<std::int64_t>(
+      std::floor((first.point.y - initial_map.info.origin.position.y) /
+                 initial_map.info.resolution));
+  ASSERT_GE(first_x, 0);
+  ASSERT_GE(first_y, 0);
+  ASSERT_LT(first_x, static_cast<std::int64_t>(initial_map.info.width));
+  ASSERT_LT(first_y, static_cast<std::int64_t>(initial_map.info.height));
+  EXPECT_EQ(initial_map.data[static_cast<std::size_t>(first_y) *
+                                 initial_map.info.width +
+                             static_cast<std::size_t>(first_x)],
+            0);
+  EXPECT_LT(first.point.x, 0.0);
+
+  map_publisher_->publish(OutsideApproachMap(true));
+  odometry_publisher_->publish(
+      Odometry(first.point.x, first.point.y, first.yaw_rad));
+  ASSERT_TRUE(WaitFor([this, &first_request] {
+    return ReferenceCount() >= 2U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach &&
+           ExplorationNodeTestPeer::ActiveRequestId(*explorer_) !=
+               first_request;
+  }));
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+  const auto second_goals = server_->Goals();
+  const auto second_request =
+      ExplorationNodeTestPeer::ActiveRequestId(*explorer_);
+  ASSERT_TRUE(second_request);
+  const auto second_row = std::ranges::find_if(
+      second_goals, [&](const auto& goal) {
+        return goal.request_id == *second_request;
+      });
+  ASSERT_NE(second_row, second_goals.end());
+  const auto second = second_row->goal;
+  EXPECT_GT(second.point.x, first.point.x);
+  const auto revealed_map = OutsideApproachMap(true);
+  const auto second_x = static_cast<std::int64_t>(
+      std::floor((second.point.x - revealed_map.info.origin.position.x) /
+                 revealed_map.info.resolution));
+  const auto second_y = static_cast<std::int64_t>(
+      std::floor((second.point.y - revealed_map.info.origin.position.y) /
+                 revealed_map.info.resolution));
+  ASSERT_GE(second_x, 0);
+  ASSERT_GE(second_y, 0);
+  ASSERT_LT(second_x, static_cast<std::int64_t>(revealed_map.info.width));
+  ASSERT_LT(second_y, static_cast<std::int64_t>(revealed_map.info.height));
+  EXPECT_EQ(revealed_map.data[static_cast<std::size_t>(second_y) *
+                                  revealed_map.info.width +
+                              static_cast<std::size_t>(second_x)],
+            0);
+
+  odometry_publisher_->publish(
+      Odometry(second.point.x, second.point.y, second.yaw_rad));
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() >= 3U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kTaskFrontier;
+  }));
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+}
+
+TEST_F(ExplorationNodeTest,
+       ApproachRollingReplanRetainsTypedGoalAndExactCancelAuthority) {
+  Start(FakePlannerServer::Mode::kRollingReachable);
+  PublishAllInputs(StartTask("approach-rolling"), OutsideApproachMap(false),
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto original_target =
+      ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  const auto original_request =
+      ExplorationNodeTestPeer::ActiveRequestId(*explorer_);
+  ASSERT_TRUE(original_target);
+  ASSERT_TRUE(original_request);
+  const auto original_reference = References().front();
+  ASSERT_FALSE(original_reference.trajectory.points.empty());
+  const auto endpoint = original_reference.trajectory.points.back()
+                            .transforms.front().translation;
+  const auto goals_before = server_->Goals().size();
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+
+  odometry_publisher_->publish(Odometry(endpoint.x, endpoint.y));
+  ASSERT_TRUE(WaitFor([this, goals_before] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::REPLANNING &&
+           server_->Goals().size() > goals_before;
+  }));
+  EXPECT_EQ(ExplorationNodeTestPeer::ActiveGoalKind(*explorer_),
+            lunar::pure_exploration::GoalKind::kBoundaryApproach);
+  EXPECT_EQ(ExplorationNodeTestPeer::ActiveRequestId(*explorer_),
+            original_request);
+  const auto retained_target =
+      ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  ASSERT_TRUE(retained_target);
+  EXPECT_DOUBLE_EQ(retained_target->x, original_target->x);
+  EXPECT_DOUBLE_EQ(retained_target->y, original_target->y);
+  EXPECT_DOUBLE_EQ(retained_target->yaw, original_target->yaw);
+  ASSERT_TRUE(WaitFor([this, &original_reference] {
+    return ExecutionCancels() ==
+           std::vector<std::string>{original_reference.plan_id};
+  }));
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+
+  const auto replan_request = server_->LatestRequestId();
+  ASSERT_TRUE(WaitFor([this, &replan_request] {
+    return server_->HasHandle(replan_request);
+  }));
+  server_->Finish(replan_request, FakePlannerServer::Mode::kReachable);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return ReferenceCount() == 2U && status &&
+           status->state == Status::EXECUTING;
+  }));
+  EXPECT_EQ(ExplorationNodeTestPeer::ActiveGoalKind(*explorer_),
+            lunar::pure_exploration::GoalKind::kBoundaryApproach);
+  EXPECT_EQ(ExplorationNodeTestPeer::ActiveRequestId(*explorer_),
+            original_request);
+}
+
+TEST_F(ExplorationNodeTest,
+       ExhaustedApproachStuckRetriesFreezeWithoutFailureMemoryOrBusyLoop) {
+  auto now = std::make_shared<std::chrono::steady_clock::time_point>();
+  parameters_.steady_now = [now] { return *now; };
+  parameters_.maximum_replans = 0U;
+  Start(FakePlannerServer::Mode::kReachable);
+  const auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-stalled"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto plan_id = References().front().plan_id;
+  const auto goals_before = server_->Goals().size();
+
+  *now += 31s;
+  explorer_->PollExecution();
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "APPROACH_STALLED";
+  }));
+  const auto status = LatestStatus();
+  ASSERT_TRUE(status);
+  EXPECT_NE(status->state, Status::COMPLETED);
+  EXPECT_NE(status->state, Status::ERROR);
+  EXPECT_EQ(status->completed_goal_count, 0U);
+  EXPECT_EQ(status->failed_candidate_count, 0U);
+  EXPECT_FALSE(ExplorationNodeTestPeer::ActiveTarget(*explorer_));
+  ASSERT_TRUE(WaitFor([this, &plan_id] {
+    return ExecutionCancels() == std::vector<std::string>{plan_id};
+  }));
+
+  map_publisher_->publish(map);
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(server_->Goals().size(), goals_before);
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->reason_code, "APPROACH_STALLED");
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+}
+
+TEST_P(ApproachControlTest,
+       PauseResumeCancelAndReplacementStartPreserveEpochAndCancelRules) {
+  Start(FakePlannerServer::Mode::kReachable);
+  const auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("approach-control"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto plan_id = References().front().plan_id;
+  const auto goals_before = server_->Goals().size();
+  const auto last_request_before = server_->LatestRequestId();
+
+  if (GetParam() == ApproachControl::kPauseResume) {
+    Task pause;
+    pause.command = Task::PAUSE;
+    task_publisher_->publish(pause);
+    ASSERT_TRUE(WaitFor([this] {
+      const auto status = LatestStatus();
+      return status && status->state == Status::PAUSED;
+    }));
+    EXPECT_FALSE(ExplorationNodeTestPeer::ActiveTarget(*explorer_));
+    Task resume;
+    resume.command = Task::RESUME;
+    task_publisher_->publish(resume);
+    ASSERT_TRUE(WaitFor([this] {
+      return ReferenceCount() > 1U &&
+             ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+                 lunar::pure_exploration::GoalKind::kBoundaryApproach;
+    }));
+    EXPECT_EQ(LatestStatus()->task_id, "approach-control");
+  } else if (GetParam() == ApproachControl::kCancel) {
+    Task cancel;
+    cancel.command = Task::CANCEL;
+    task_publisher_->publish(cancel);
+    ASSERT_TRUE(WaitFor([this] {
+      const auto status = LatestStatus();
+      return status && status->state == Status::IDLE;
+    }));
+    EXPECT_FALSE(ExplorationNodeTestPeer::ActiveTarget(*explorer_));
+    map_publisher_->publish(map);
+    std::this_thread::sleep_for(100ms);
+    EXPECT_EQ(server_->Goals().size(), goals_before);
+  } else {
+    task_publisher_->publish(StartTask("approach-control-new"));
+    ASSERT_TRUE(WaitFor([this] {
+      const auto status = LatestStatus();
+      return ReferenceCount() > 1U && status &&
+             status->task_id == "approach-control-new" &&
+             ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+                 lunar::pure_exploration::GoalKind::kBoundaryApproach;
+    }));
+  }
+
+  ASSERT_TRUE(WaitFor([this, &plan_id] {
+    return ExecutionCancels() == std::vector<std::string>{plan_id};
+  }));
+  if (GetParam() != ApproachControl::kCancel) {
+    EXPECT_GT(server_->Goals().size(), goals_before);
+    EXPECT_NE(server_->LatestRequestId(), last_request_before);
+  }
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    BoundaryApproachControls, ApproachControlTest,
+    ::testing::Values(ApproachControl::kPauseResume,
+                      ApproachControl::kCancel,
+                      ApproachControl::kReplacementStart));
+
+TEST_F(ExplorationNodeTest,
+       ExhaustedApproachCandidatesWaitWithoutCompletionOrBusyResubmit) {
+  Start(FakePlannerServer::Mode::kExhaustive);
+  const auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("outside-no-path"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status &&
+           status->reason_code == "APPROACH_NO_REACHABLE_TARGET";
+  }));
+  const auto before = server_->Goals().size();
+  ASSERT_GT(before, 0U);
+  const auto status = LatestStatus();
+  ASSERT_TRUE(status);
+  EXPECT_NE(status->state, Status::COMPLETED);
+
+  map_publisher_->publish(map);
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(server_->Goals().size(), before);
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_NE(LatestStatus()->state, Status::COMPLETED);
+  EXPECT_EQ(LatestStatus()->reason_code,
+            "APPROACH_NO_REACHABLE_TARGET");
 }
 
 TEST_F(ExplorationNodeTest,

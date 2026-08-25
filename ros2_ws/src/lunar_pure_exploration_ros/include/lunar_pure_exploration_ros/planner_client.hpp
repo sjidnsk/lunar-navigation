@@ -10,7 +10,7 @@
 #include <string_view>
 
 #include <lunar_planning_msgs/msg/motion_reference.hpp>
-#include <lunar_pure_exploration_core/candidate_generator.hpp>
+#include <lunar_pure_exploration_core/types.hpp>
 #include <rclcpp/node.hpp>
 
 namespace lunar::pure_exploration_ros {
@@ -48,6 +48,11 @@ struct PlannerClientParameters {
   std::chrono::steady_clock::duration result_timeout;
 };
 
+struct PlannerTarget final {
+  std::uint64_t display_id;
+  lunar::pure_exploration::Pose2 pose;
+};
+
 class PlannerClient {
  public:
   using Completion = std::function<void(PlannerEvaluation)>;
@@ -67,7 +72,7 @@ class PlannerClient {
   static std::string MakeRequestId(std::string_view task_id,
                                    std::uint64_t sequence);
   void Evaluate(std::string task_id, std::string request_id,
-                const lunar::pure_exploration::CandidateView& candidate,
+                PlannerTarget target,
                 double position_tolerance_m, double yaw_tolerance_rad,
                 Completion completion);
   void CancelActive();
