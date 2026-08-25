@@ -4816,6 +4816,156 @@ TEST_F(ExplorationNodeTest,
 }
 
 TEST_F(ExplorationNodeTest,
+       StationaryReplanEpochCannotDiscardPendingMapInvalidation) {
+  parameters_.stop_before_planning = true;
+  auto commit_entered = std::make_shared<std::promise<void>>();
+  auto release_commit = std::make_shared<std::promise<void>>();
+  auto commit_completed = std::make_shared<std::promise<void>>();
+  const auto commit_entered_future = commit_entered->get_future().share();
+  const auto release_commit_future = release_commit->get_future().share();
+  const auto commit_completed_future = commit_completed->get_future().share();
+  auto before_calls = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto after_signaled = std::make_shared<std::atomic<bool>>(false);
+  auto guidance_build_calls =
+      std::make_shared<std::atomic<std::size_t>>(0U);
+  auto seams = std::make_shared<ExplorationPipelineSeams>();
+  seams->after_boundary_guidance_build = [guidance_build_calls] {
+    guidance_build_calls->fetch_add(1U);
+  };
+  seams->before_active_map_validation_commit =
+      [commit_entered, release_commit_future, before_calls] {
+        if (before_calls->fetch_add(1U) == 0U) {
+          commit_entered->set_value();
+          static_cast<void>(release_commit_future.wait_for(5s));
+        }
+      };
+  seams->after_active_map_validation_commit =
+      [commit_completed, after_signaled] {
+        if (!after_signaled->exchange(true)) {
+          commit_completed->set_value();
+        }
+      };
+  parameters_.pipeline_seams = std::move(seams);
+  Start(FakePlannerServer::Mode::kRollingReachable);
+  auto map = OutsideApproachMap(false);
+  PublishAllInputs(StartTask("stationary-replan-map-validation"), map,
+                   Odometry(-2.0, 5.0));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+  for (std::size_t sample = 0U; sample < 3U; ++sample) {
+    const double x = -2.0 + 0.01 * static_cast<double>(sample + 1U);
+    odometry_publisher_->publish(Odometry(x, 5.0));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] {
+    return ReferenceCount() == 1U &&
+           ExplorationNodeTestPeer::ActiveGoalKind(*explorer_) ==
+               lunar::pure_exploration::GoalKind::kBoundaryApproach;
+  }));
+  const auto target = ExplorationNodeTestPeer::ActiveTarget(*explorer_);
+  const auto identity =
+      ExplorationNodeTestPeer::BoundaryApproachIdentity(*explorer_);
+  ASSERT_TRUE(target);
+  ASSERT_TRUE(identity);
+  const auto first_reference = References().front();
+  ASSERT_FALSE(first_reference.trajectory.points.empty());
+  const auto endpoint = first_reference.trajectory.points.back()
+                            .transforms.front().translation;
+
+  server_->SetMode(FakePlannerServer::Mode::kDelayed);
+  const std::size_t goals_before_replan = server_->Goals().size();
+  odometry_publisher_->publish(Odometry(endpoint.x, endpoint.y));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->state == Status::REPLANNING &&
+           status->reason_code == "WAITING_FOR_STOP";
+  }));
+  ASSERT_TRUE(WaitFor([this, &first_reference] {
+    return ExecutionCancels() ==
+           std::vector<std::string>{first_reference.plan_id};
+  }));
+
+  const auto target_offset = MapOffset(map, target->x, target->y);
+  ASSERT_TRUE(target_offset);
+  map.data[*target_offset] = 100;
+  map_publisher_->publish(map);
+  ASSERT_EQ(commit_entered_future.wait_for(3s), std::future_status::ready);
+
+  for (std::size_t sample = 0U; sample < 3U; ++sample) {
+    const double x = endpoint.x +
+                     0.01 * static_cast<double>(sample + 1U);
+    odometry_publisher_->publish(Odometry(x, endpoint.y));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this, goals_before_replan] {
+    return server_->Goals().size() > goals_before_replan;
+  }));
+  const std::string replan_request = server_->LatestRequestId();
+  ASSERT_TRUE(WaitFor([this, &replan_request] {
+    return server_->HasHandle(replan_request);
+  }));
+  server_->Finish(replan_request, FakePlannerServer::Mode::kReachable);
+  const bool successor_committed = WaitFor([this] {
+    const auto status = LatestStatus();
+    return ReferenceCount() == 2U && status &&
+           status->state == Status::EXECUTING;
+  }, 3s);
+  const auto after_replan = LatestStatus();
+  ASSERT_TRUE(successor_committed)
+      << "references=" << ReferenceCount()
+      << " goals=" << server_->Goals().size()
+      << " cancels=" << ExecutionCancels().size()
+      << " state=" << (after_replan ? std::to_string(after_replan->state)
+                                     : "none")
+      << " reason=" << (after_replan ? after_replan->reason_code : "none");
+  const std::string successor_plan_id = References().back().plan_id;
+  ASSERT_NE(successor_plan_id, first_reference.plan_id);
+  EXPECT_EQ(ExplorationNodeTestPeer::BoundaryApproachIdentity(*explorer_),
+            identity);
+
+  release_commit->set_value();
+  ASSERT_EQ(commit_completed_future.wait_for(3s), std::future_status::ready);
+  ASSERT_TRUE(WaitFor([this, &first_reference, &successor_plan_id] {
+    return ExecutionCancels() ==
+           std::vector<std::string>{first_reference.plan_id,
+                                    successor_plan_id};
+  }));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LatestStatus();
+    return status && status->reason_code == "WAITING_FOR_STOP";
+  }));
+
+  for (std::size_t sample = 0U; sample < 3U; ++sample) {
+    const double x = endpoint.x +
+                     0.04 + 0.01 * static_cast<double>(sample);
+    odometry_publisher_->publish(Odometry(x, endpoint.y));
+    ASSERT_TRUE(WaitFor([this, x] {
+      const auto pose = ExplorationNodeTestPeer::LatestPose(*explorer_);
+      return pose && pose->x == x;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([guidance_build_calls] {
+    return guidance_build_calls->load() == 2U;
+  }));
+  EXPECT_EQ(ReferenceCount(), 2U);
+  EXPECT_FALSE(ExplorationNodeTestPeer::ActiveTarget(*explorer_));
+  ASSERT_TRUE(LatestStatus());
+  EXPECT_NE(LatestStatus()->state, Status::EXECUTING);
+  EXPECT_NE(LatestStatus()->state, Status::COMPLETED);
+  EXPECT_NE(LatestStatus()->state, Status::ERROR);
+  EXPECT_EQ(LatestStatus()->failed_candidate_count, 0U);
+  EXPECT_EQ(LatestStatus()->completed_goal_count, 0U);
+}
+
+TEST_F(ExplorationNodeTest,
        ApproachExecutionPublishesTruthfulGoalMarkersAndSevenDiagnostics) {
   Start(FakePlannerServer::Mode::kReachable);
   const auto map = OutsideApproachMap(false);

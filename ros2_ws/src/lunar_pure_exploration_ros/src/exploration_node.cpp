@@ -4306,7 +4306,6 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
               std::scoped_lock lock{locked->mutex};
               if (locked->teardown ||
                   locked->map_generation != validation.generation ||
-                  locked->epoch != validation.epoch ||
                   locked->state_machine.task_id() != validation.task_id ||
                   !locked->state_machine.active_goal() ||
                   locked->state_machine.active_goal()->kind() !=
@@ -4387,15 +4386,19 @@ void HandleGlobalMap(const std::weak_ptr<RuntimeT>& weak_runtime,
                   // Candidate safety is a property of this exact frozen goal
                   // and map snapshot, not of a particular rolling-reference
                   // plan ID.  A newer reference may therefore consume the
-                  // completed result only while epoch, task, goal request,
-                  // kind, and full typed identity all remain unchanged.
+                  // completed result across a stationary-confirmed replan
+                  // epoch only while task, goal request, kind, and full typed
+                  // identity all remain unchanged.  The captured plan itself
+                  // remains valid only in its original epoch.
                   const bool exact_plan =
                       locked->active_reference->plan_id == validation.plan_id;
+                  const bool exact_plan_and_epoch =
+                      exact_plan && locked->epoch == validation.epoch;
                   const bool same_goal_successor =
                       !exact_plan &&
                       locked->state_machine.state() ==
                           ExplorationState::kExecuting;
-                  if (!exact_plan && !same_goal_successor) {
+                  if (!exact_plan_and_epoch && !same_goal_successor) {
                     stale = true;
                   } else if (!error.empty()) {
                     cancel = locked->planner_in_flight;
