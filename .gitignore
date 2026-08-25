@@ -24,6 +24,8 @@ compile_commands.json
 
 # Runtime, device, dataset, and model artifacts
 artifacts/
+/bags/
+/t3_*/
 checkpoints/
 datasets/
 device-output/
