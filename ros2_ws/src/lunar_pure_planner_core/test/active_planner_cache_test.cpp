@@ -131,6 +131,31 @@ TEST(ActivePlannerCache, GlobalProjectionKeyIncludesInflationAndCapability) {
   EXPECT_NE(original, capability_changed);
 }
 
+TEST(ActivePlannerCache,
+     LeggedTraversabilityKeysIncludeRevisionProfileAndCapability) {
+  PlanningRequest request;
+  request.world.odometry_sequence = 3U;
+  request.world.tf_sequence = 5U;
+  request.goal_map = CacheGoal("legged-grid", 7.0);
+  const auto projection =
+      MakeLeggedTraversabilityProjectionCacheKey(11U, 13U, 17U);
+  const auto revision_changed =
+      MakeLeggedTraversabilityProjectionCacheKey(12U, 13U, 17U);
+  const auto profile_changed =
+      MakeLeggedTraversabilityProjectionCacheKey(11U, 14U, 17U);
+  const auto capability_changed =
+      MakeLeggedTraversabilityProjectionCacheKey(11U, 13U, 18U);
+  const auto route = MakeLeggedTraversabilityRouteCacheKey(
+      request, 11U, 13U, 17U);
+  const auto route_revision_changed = MakeLeggedTraversabilityRouteCacheKey(
+      request, 12U, 13U, 17U);
+
+  EXPECT_NE(projection, revision_changed);
+  EXPECT_NE(projection, profile_changed);
+  EXPECT_NE(projection, capability_changed);
+  EXPECT_NE(route, route_revision_changed);
+}
+
 TEST(ActivePlannerCache, GoalFieldKeyPreservesOrderedGoalSemantics) {
   const LocalGoalSet ordered{
       .goals_odom = {CacheGoal("first", 1.0), CacheGoal("second", 2.0)},

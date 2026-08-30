@@ -3,9 +3,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
+#include "lunar_pure_planner_core/search_control.hpp"
 #include "lunar_pure_planner_core/types/geometry.hpp"
 #include "lunar_pure_planner_core/types/world_snapshot.hpp"
 
@@ -22,6 +24,11 @@ enum class WheelPlannerMode : std::uint8_t {
   kGridTraversabilityV1,
 };
 
+enum class LeggedGlobalMode : std::uint8_t {
+  kLegacyOccupancy,
+  kGridTraversabilityV1,
+};
+
 [[nodiscard]] constexpr std::string_view WheelPlannerModeName(
     const WheelPlannerMode mode) noexcept {
   switch (mode) {
@@ -31,6 +38,17 @@ enum class WheelPlannerMode : std::uint8_t {
       return "grid_traversability_v1";
   }
   return "legacy_certified";
+}
+
+[[nodiscard]] constexpr std::string_view LeggedGlobalModeName(
+    const LeggedGlobalMode mode) noexcept {
+  switch (mode) {
+    case LeggedGlobalMode::kLegacyOccupancy:
+      return "legacy_occupancy";
+    case LeggedGlobalMode::kGridTraversabilityV1:
+      return "grid_traversability_v1";
+  }
+  return "grid_traversability_v1";
 }
 
 struct TraversabilityProfile final {
@@ -54,6 +72,20 @@ struct TraversabilityMetrics final {
   std::size_t prior_conflicts{};
 };
 
+struct TraversabilityProjectionGrid final {
+  GridMap map;
+  double inflation_radius_m{};
+};
+
+struct TraversabilityProjectionGridBuildResult final {
+  std::optional<TraversabilityProjectionGrid> value;
+  std::string reason_code;
+
+  [[nodiscard]] bool ok() const noexcept {
+    return value.has_value() && reason_code.empty();
+  }
+};
+
 class TraversabilitySnapshot final {
  public:
   TraversabilitySnapshot() noexcept = default;
@@ -65,6 +97,8 @@ class TraversabilitySnapshot final {
   [[nodiscard]] std::uint64_t profile_hash() const noexcept;
   [[nodiscard]] TraversabilityState StateAtWorld(double x_m,
                                                  double y_m) const;
+  [[nodiscard]] TraversabilityProjectionGridBuildResult BuildProjectionGrid(
+      SearchControl control = {}) const;
   [[nodiscard]] TraversabilityMetrics metrics() const noexcept;
 
  private:

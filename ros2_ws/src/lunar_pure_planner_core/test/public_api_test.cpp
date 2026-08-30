@@ -38,6 +38,10 @@ TEST(PublicApi, DefaultsToLegacyAndCarriesNoTraversabilitySnapshot) {
 
   EXPECT_EQ(request.config.wheel_planner_mode,
             WheelPlannerMode::kLegacyCertified);
+  EXPECT_EQ(request.config.legged_global_mode,
+            LeggedGlobalMode::kGridTraversabilityV1);
+  EXPECT_EQ(LeggedGlobalModeName(LeggedGlobalMode::kLegacyOccupancy),
+            "legacy_occupancy");
   EXPECT_FALSE(request.world.traversability_snapshot);
 }
 

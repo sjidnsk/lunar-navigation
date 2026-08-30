@@ -284,8 +284,16 @@ using GoalFieldCacheKey =
 [[nodiscard]] GlobalProjectionCacheKey MakeGlobalProjectionCacheKey(
     std::uint64_t global_map_sequence, std::int32_t occupancy_threshold,
     double inflation_m, std::uint64_t capability_fingerprint) noexcept;
+[[nodiscard]] GlobalProjectionCacheKey
+MakeLeggedTraversabilityProjectionCacheKey(
+    std::uint64_t traversability_revision, std::uint64_t profile_hash,
+    std::uint64_t capability_fingerprint) noexcept;
 [[nodiscard]] GlobalRouteCacheKey MakeGlobalRouteCacheKey(
     const PlanningRequest& input, double inflation_m,
+    std::uint64_t capability_fingerprint) noexcept;
+[[nodiscard]] GlobalRouteCacheKey MakeLeggedTraversabilityRouteCacheKey(
+    const PlanningRequest& input, std::uint64_t traversability_revision,
+    std::uint64_t profile_hash,
     std::uint64_t capability_fingerprint) noexcept;
 [[nodiscard]] LocalSnapshotCacheKey MakeLocalSnapshotCacheKey(
     std::uint64_t local_map_sequence,

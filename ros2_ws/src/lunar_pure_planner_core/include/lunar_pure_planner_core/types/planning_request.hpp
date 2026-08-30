@@ -32,6 +32,8 @@ struct AnytimePlannerConfig final {
   double capability_cost_scale{1.0};
   std::array<double, 5> cost_weights{1.0, 1.0, 1.0, 1.0, 1.0};
   WheelPlannerMode wheel_planner_mode{WheelPlannerMode::kLegacyCertified};
+  LeggedGlobalMode legged_global_mode{
+      LeggedGlobalMode::kGridTraversabilityV1};
   double grid_v1_local_horizon_m{8.0};
   AnytimeSearchConfig search;
 };

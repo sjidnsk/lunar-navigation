@@ -13,6 +13,8 @@
 #include <variant>
 #include <vector>
 
+#include "shared/controlled_work.hpp"
+
 namespace lunar::pure_planning {
 namespace {
 
@@ -705,6 +707,164 @@ TraversabilityState TraversabilitySnapshot::StateAtWorld(const double x_m,
   return impl_ ? StateAt(impl_->state, x_m, y_m) : TraversabilityState::kUnknown;
 }
 
+TraversabilityProjectionGridBuildResult
+TraversabilitySnapshot::BuildProjectionGrid(SearchControl control) const {
+  if (!impl_ || !impl_->state.global_map || !valid()) {
+    return {.reason_code = "INVALID_INPUT"};
+  }
+  if (const auto stopped = shared::StopReason(control); stopped.has_value()) {
+    return {.reason_code = std::string{*stopped}};
+  }
+  const SnapshotState& state = impl_->state;
+  const GridMap& global = *state.global_map;
+  if (!GlobalMapValid(global)) {
+    return {.reason_code = "INVALID_INPUT"};
+  }
+  const auto& prior = std::get<std::vector<std::int8_t>>(
+      global.layers.at("occupancy").values);
+  std::vector<std::int8_t> occupancy(prior.size(), -1);
+  std::vector<std::uint8_t> locally_blocked(prior.size(), 0U);
+  std::vector<std::uint8_t> locally_free_candidate(prior.size(), 0U);
+  std::size_t work{};
+  for (std::size_t index = 0U; index < prior.size(); ++index) {
+    if (shared::ControlCheckDue(work++)) {
+      if (const auto stopped = shared::StopReason(control);
+          stopped.has_value()) {
+        return {.reason_code = std::string{*stopped}};
+      }
+    }
+    const std::int32_t value = static_cast<std::int32_t>(prior[index]);
+    occupancy[index] = value < 0 ? std::int8_t{-1}
+                                 : value >= state.profile.global_occupancy_threshold ||
+                                           value > 100
+                                       ? std::int8_t{100}
+                                       : std::int8_t{0};
+  }
+
+  const auto global_index_range = [&](const Rectangle& source)
+      -> std::optional<std::array<std::int64_t, 4U>> {
+    const auto first_x = WorldCellIndex(source.min_x, global.origin_m.x,
+                                        global.resolution_m);
+    const auto last_x = WorldCellIndex(
+        std::nextafter(source.max_x,
+                       -std::numeric_limits<double>::infinity()),
+        global.origin_m.x, global.resolution_m);
+    const auto first_y = WorldCellIndex(source.min_y, global.origin_m.y,
+                                        global.resolution_m);
+    const auto last_y = WorldCellIndex(
+        std::nextafter(source.max_y,
+                       -std::numeric_limits<double>::infinity()),
+        global.origin_m.y, global.resolution_m);
+    if (!first_x || !last_x || !first_y || !last_y) {
+      return std::nullopt;
+    }
+    return std::array<std::int64_t, 4U>{
+        std::max<std::int64_t>(0, *first_x),
+        std::min<std::int64_t>(static_cast<std::int64_t>(global.width) - 1,
+                               *last_x),
+        std::max<std::int64_t>(0, *first_y),
+        std::min<std::int64_t>(static_cast<std::int64_t>(global.height) - 1,
+                               *last_y)};
+  };
+
+  for (const auto& [tile_coordinate, tile] : state.tiles) {
+    for (std::size_t offset = 0U; offset < tile->states.size(); ++offset) {
+      if (shared::ControlCheckDue(work++)) {
+        if (const auto stopped = shared::StopReason(control);
+            stopped.has_value()) {
+          return {.reason_code = std::string{*stopped}};
+        }
+      }
+      const TraversabilityState local = tile->states[offset];
+      if (local == TraversabilityState::kUnknown) {
+        continue;
+      }
+      const std::int64_t source_x =
+          tile_coordinate.x * kTileWidth +
+          static_cast<std::int64_t>(offset % kTileWidth);
+      const std::int64_t source_y =
+          tile_coordinate.y * kTileWidth +
+          static_cast<std::int64_t>(offset / kTileWidth);
+      const auto range = global_index_range(
+          CellRectangle(state, source_x, source_y));
+      if (!range || (*range)[0] > (*range)[1] || (*range)[2] > (*range)[3]) {
+        continue;
+      }
+      for (std::int64_t y = (*range)[2]; y <= (*range)[3]; ++y) {
+        for (std::int64_t x = (*range)[0]; x <= (*range)[1]; ++x) {
+          const std::size_t index = static_cast<std::size_t>(y) * global.width +
+                                    static_cast<std::size_t>(x);
+          if (local == TraversabilityState::kBlocked) {
+            locally_blocked[index] = 1U;
+            occupancy[index] = 100;
+          } else {
+            locally_free_candidate[index] = 1U;
+          }
+        }
+      }
+    }
+  }
+
+  const auto first_center_index = [&](const double minimum,
+                                      const double origin) {
+    return static_cast<std::int64_t>(
+        std::ceil((minimum - origin) / state.resolution_m - 0.5 -
+                  kGeometryEpsilon));
+  };
+  const auto end_center_index = [&](const double maximum,
+                                    const double origin) {
+    return static_cast<std::int64_t>(
+        std::ceil((maximum - origin) / state.resolution_m - 0.5 -
+                  kGeometryEpsilon));
+  };
+  for (std::size_t index = 0U; index < occupancy.size(); ++index) {
+    if (occupancy[index] == 0 || locally_blocked[index] != 0U ||
+        locally_free_candidate[index] == 0U) {
+      continue;
+    }
+    const std::size_t global_x = index % global.width;
+    const std::size_t global_y = index / global.width;
+    const double min_x = global.origin_m.x +
+                         static_cast<double>(global_x) * global.resolution_m;
+    const double min_y = global.origin_m.y +
+                         static_cast<double>(global_y) * global.resolution_m;
+    const std::int64_t first_x = first_center_index(min_x, state.origin_m.x);
+    const std::int64_t end_x = end_center_index(
+        min_x + global.resolution_m, state.origin_m.x);
+    const std::int64_t first_y = first_center_index(min_y, state.origin_m.y);
+    const std::int64_t end_y = end_center_index(
+        min_y + global.resolution_m, state.origin_m.y);
+    bool all_free = first_x < end_x && first_y < end_y;
+    for (std::int64_t y = first_y; all_free && y < end_y; ++y) {
+      for (std::int64_t x = first_x; x < end_x; ++x) {
+        if (shared::ControlCheckDue(work++)) {
+          if (const auto stopped = shared::StopReason(control);
+              stopped.has_value()) {
+            return {.reason_code = std::string{*stopped}};
+          }
+        }
+        if (RawStateAt(state, x, y) != TraversabilityState::kFree) {
+          all_free = false;
+          break;
+        }
+      }
+    }
+    if (all_free) {
+      occupancy[index] = 0;
+    }
+  }
+  if (const auto stopped = shared::StopReason(control); stopped.has_value()) {
+    return {.reason_code = std::string{*stopped}};
+  }
+  GridMap projection = global;
+  projection.layers = {
+      {"occupancy", GridLayer{.values = std::move(occupancy)}}};
+  return {.value = TraversabilityProjectionGrid{
+              .map = std::move(projection),
+              .inflation_radius_m = state.profile.inflation_radius_m,
+          }};
+}
+
 TraversabilityMetrics TraversabilitySnapshot::metrics() const noexcept {
   return impl_ ? Metrics(impl_->state) : TraversabilityMetrics{};
 }
@@ -836,13 +996,6 @@ TraversabilityUpdateResult PersistentTraversabilityMap::UpdateLocal(
             const bool wrote = WriteRawCell(next->state, target_x, target_y,
                                              source, writable_tiles, updated_cells);
             changed = wrote || changed;
-          } else if (covered && source == TraversabilityState::kFree &&
-                     RawStateAt(next->state, target_x, target_y) !=
-                         TraversabilityState::kUnknown) {
-            const bool cleared = WriteRawCell(
-                next->state, target_x, target_y, TraversabilityState::kUnknown,
-                writable_tiles, updated_cells);
-            changed = cleared || changed;
           }
         }
       }

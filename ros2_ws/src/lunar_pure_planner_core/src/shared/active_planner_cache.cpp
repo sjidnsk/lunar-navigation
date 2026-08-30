@@ -11,6 +11,8 @@ namespace {
 
 constexpr std::uint64_t kFnvOffset = 14'695'981'039'346'656'037ULL;
 constexpr std::uint64_t kFnvPrime = 1'099'511'628'211ULL;
+constexpr std::uint64_t kLeggedTraversabilityModeIdentity =
+    0x4c45474745445631ULL;
 
 void HashByte(std::uint64_t& hash, const std::uint8_t value) noexcept {
   hash ^= value;
@@ -216,6 +218,17 @@ GlobalProjectionCacheKey MakeGlobalProjectionCacheKey(
   };
 }
 
+GlobalProjectionCacheKey MakeLeggedTraversabilityProjectionCacheKey(
+    const std::uint64_t traversability_revision,
+    const std::uint64_t profile_hash,
+    const std::uint64_t capability_fingerprint) noexcept {
+  return {
+      .source_sequences = {traversability_revision},
+      .semantic_identities = {profile_hash, capability_fingerprint,
+                              kLeggedTraversabilityModeIdentity},
+  };
+}
+
 GlobalRouteCacheKey MakeGlobalRouteCacheKey(
     const PlanningRequest& input, const double inflation_m,
     const std::uint64_t capability_fingerprint) noexcept {
@@ -228,6 +241,22 @@ GlobalRouteCacheKey MakeGlobalRouteCacheKey(
               input.config.global_occupancy_threshold)),
           DoubleIdentity(inflation_m), capability_fingerprint,
           GoalFingerprint(input.goal_map), SearchFingerprint(input.config.search)},
+  };
+}
+
+GlobalRouteCacheKey MakeLeggedTraversabilityRouteCacheKey(
+    const PlanningRequest& input,
+    const std::uint64_t traversability_revision,
+    const std::uint64_t profile_hash,
+    const std::uint64_t capability_fingerprint) noexcept {
+  return {
+      .source_sequences = {traversability_revision,
+                           input.world.odometry_sequence,
+                           input.world.tf_sequence},
+      .semantic_identities = {profile_hash, capability_fingerprint,
+                              GoalFingerprint(input.goal_map),
+                              SearchFingerprint(input.config.search),
+                              kLeggedTraversabilityModeIdentity},
   };
 }
 

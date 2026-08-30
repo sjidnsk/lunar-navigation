@@ -256,6 +256,43 @@ TEST(TraversabilityMapV1, GlobalBlockedInflatesBySourceRectangleOnce) {
   EXPECT_EQ(snapshot->StateAtWorld(1.30, 0.125), TraversabilityState::kFree);
 }
 
+TEST(TraversabilityMapV1,
+     BuildsUninflatedGlobalProjectionFromKnownLocalAndLazyPrior) {
+  PersistentTraversabilityMap map(Profile(0.4));
+  ASSERT_TRUE(map.UpdateGlobal(GlobalMap(3U, 1U, 1.0, {100, 0, 0})).accepted);
+  const float unknown = std::numeric_limits<float>::quiet_NaN();
+  std::vector<float> occupancy(48U, 0.0F);
+  std::vector<float> elevation(48U, 0.0F);
+  occupancy[12U + 5U] = 0.9F;
+  for (std::size_t y = 0U; y < 4U; ++y) {
+    for (std::size_t x = 8U; x < 12U; ++x) {
+      occupancy[y * 12U + x] = unknown;
+      elevation[y * 12U + x] = unknown;
+    }
+  }
+  const auto snapshot = UpdateKnownLocal(
+      map, LocalMap(12U, 4U, 0.25, std::move(occupancy),
+                    std::move(elevation)),
+      MapFromOdom(), 1U);
+
+  ASSERT_TRUE(snapshot);
+  EXPECT_EQ(snapshot->metrics().free_cells, 31U);
+  EXPECT_EQ(snapshot->metrics().blocked_cells, 1U);
+  const auto built = snapshot->BuildProjectionGrid();
+
+  ASSERT_TRUE(built.ok()) << built.reason_code;
+  ASSERT_TRUE(built.value.has_value());
+  EXPECT_DOUBLE_EQ(built.value->inflation_radius_m, 0.4);
+  EXPECT_EQ(built.value->map.frame_id, "map");
+  EXPECT_EQ(built.value->map.width, 3U);
+  EXPECT_EQ(built.value->map.height, 1U);
+  EXPECT_DOUBLE_EQ(built.value->map.resolution_m, 1.0);
+  const auto& projected_occupancy = std::get<std::vector<std::int8_t>>(
+      built.value->map.layers.at("occupancy").values);
+  EXPECT_EQ(projected_occupancy,
+            (std::vector<std::int8_t>{0, 100, 0}));
+}
+
 TEST(TraversabilityMapV1, RasterizesRotatedLocalFreeAtCentersOnly) {
   PersistentTraversabilityMap map(Profile());
   const auto snapshot = UpdateKnownLocal(
