@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 EXPECTED_HEADERS = {
+    "lunar_pure_planner_core/global_goal_feasibility.hpp",
     "lunar_pure_planner_core/planner.hpp",
     "lunar_pure_planner_core/planning_timing.hpp",
     "lunar_pure_planner_core/search_control.hpp",

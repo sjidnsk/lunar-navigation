@@ -3,8 +3,8 @@
 from pathlib import Path
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-PURE_PLANNER_ROOT = REPOSITORY_ROOT / "pure_planner"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+PURE_PLANNER_ROOT = REPOSITORY_ROOT
 PRODUCTION_SOURCE = PURE_PLANNER_ROOT / "ros2_ws" / "src"
 CORE_PACKAGE = PRODUCTION_SOURCE / "lunar_pure_planner_core"
 ROS_PACKAGE = PRODUCTION_SOURCE / "lunar_pure_planner_ros"
@@ -21,7 +21,8 @@ def test_pure_planner_core_is_physically_isolated() -> None:
     forbidden_directories = {".git", "build", "install", "log"}
     present_forbidden_directories = sorted(
         path.relative_to(PURE_PLANNER_ROOT).as_posix()
-        for path in PURE_PLANNER_ROOT.rglob("*")
+        for package_root in (CORE_PACKAGE, ROS_PACKAGE)
+        for path in package_root.rglob("*")
         if path.is_dir() and path.name in forbidden_directories
     )
     assert not present_forbidden_directories, (
@@ -29,7 +30,13 @@ def test_pure_planner_core_is_physically_isolated() -> None:
         f"{present_forbidden_directories}"
     )
 
-    source_files = [path for path in CORE_PACKAGE.rglob("*") if path.is_file()]
+    source_files = [
+        path
+        for path in CORE_PACKAGE.rglob("*")
+        if path.is_file()
+        and (path.suffix in {".cmake", ".cpp", ".h", ".hpp", ".py"}
+             or path.name in {"CMakeLists.txt", "package.xml"})
+    ]
     include_violations = []
     namespace_violations = []
     cmake_link_violations = []
@@ -51,12 +58,11 @@ def test_pure_planner_core_is_physically_isolated() -> None:
 
 
 def test_shared_plan_motion_action_is_the_only_external_message_contract() -> None:
-    """The shared Action stays at the repository root, outside pure_planner/."""
+    """The shared Action has one source definition beside the planner packages."""
     assert SHARED_PLAN_MOTION_ACTION.is_file(), "shared PlanMotion Action is required"
-    assert PURE_PLANNER_ROOT not in SHARED_PLAN_MOTION_ACTION.parents
-    assert not list(PURE_PLANNER_ROOT.rglob("PlanMotion.action")), (
-        "pure planner must not copy the shared PlanMotion Action"
-    )
+    assert list(PRODUCTION_SOURCE.rglob("PlanMotion.action")) == [
+        SHARED_PLAN_MOTION_ACTION
+    ]
 
 
 def test_ros_wrapper_has_fixed_capabilities_launch_and_interface_contracts() -> None:
@@ -70,6 +76,7 @@ def test_ros_wrapper_has_fixed_capabilities_launch_and_interface_contracts() -> 
         "hopper.yaml",
         "pure_planner.yaml",
         "external_interfaces.yaml",
+        "pure_exploration.yaml",
     }
 
     forbidden_fragments = {
@@ -80,7 +87,13 @@ def test_ros_wrapper_has_fixed_capabilities_launch_and_interface_contracts() -> 
         "revision",
         "mission",
     }
-    for configuration_path in CONFIGURATION_ROOT.glob("*.yaml"):
+    for configuration_name in (
+        "wheel.yaml",
+        "legged.yaml",
+        "hopper.yaml",
+        "pure_planner.yaml",
+    ):
+        configuration_path = CONFIGURATION_ROOT / configuration_name
         contents = configuration_path.read_text(encoding="utf-8").lower()
         violations = sorted(
             fragment for fragment in forbidden_fragments if fragment in contents

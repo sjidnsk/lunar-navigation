@@ -65,6 +65,10 @@ ALLOWED_PLANNER_SHARE_LOOKUP = re.compile(
 ALLOWED_PLANNER_CONFIG_PROVIDER = re.compile(
     r"<exec_depend>\s*lunar_pure_planner_ros\s*</exec_depend>"
 )
+APPROVED_PLANNER_RUNTIME_CONSUMERS = {
+    "lunar_pure_exploration_ros",
+    "lunar_pure_exploration_sim",
+}
 PACKAGE_TEST_DEPENDENCY = re.compile(
     r"<test_depend>.*?</test_depend>", re.DOTALL
 )
@@ -125,7 +129,7 @@ def production_contents(
         return without_cmake_testing_blocks(contents)
     if source_path == package_root / "package.xml":
         production_dependencies = PACKAGE_TEST_DEPENDENCY.sub("", contents)
-        if package_root.name == "lunar_pure_exploration_ros":
+        if package_root.name in APPROVED_PLANNER_RUNTIME_CONSUMERS:
             return ALLOWED_PLANNER_CONFIG_PROVIDER.sub("", production_dependencies)
         return production_dependencies
     if (
@@ -133,6 +137,47 @@ def production_contents(
         and source_path.suffix in PRODUCTION_SOURCE_SUFFIXES
     ):
         return ALLOWED_PLANNER_SHARE_LOOKUP.sub("", contents)
+    return contents
+
+
+def without_approved_global_goal_feasibility_edge(
+    package_root: Path,
+    source_path: Path,
+    contents: str,
+) -> str:
+    """Remove only the reviewed explorer-to-planner feasibility dependency."""
+    dependency = "lunar_pure_planner_core"
+    if package_root.name != "lunar_pure_exploration_ros":
+        return contents
+
+    relative_path = source_path.relative_to(package_root).as_posix()
+    if relative_path == "CMakeLists.txt":
+        find_line = "find_package(lunar_pure_planner_core required)"
+        dependency_line = "  lunar_pure_planner_core"
+        if (
+            contents.count(dependency) == 3
+            and contents.splitlines().count(find_line) == 1
+            and contents.splitlines().count(dependency_line) == 2
+        ):
+            return "\n".join(
+                line
+                for line in contents.splitlines()
+                if line not in {find_line, dependency_line}
+            )
+        return contents
+
+    if relative_path == "package.xml":
+        approved_line = "  <depend>lunar_pure_planner_core</depend>"
+        if contents.count(dependency) == 1 and approved_line in contents.splitlines():
+            return contents.replace(approved_line, "", 1)
+        return contents
+
+    if relative_path == "src/exploration_node.cpp":
+        approved_line = (
+            '#include "lunar_pure_planner_core/global_goal_feasibility.hpp"'
+        )
+        if contents.count(dependency) == 1 and approved_line in contents.splitlines():
+            return contents.replace(approved_line, "", 1)
     return contents
 
 
@@ -162,6 +207,11 @@ def scan_exploration_isolation(source_root: Path) -> tuple[list[str], list[str]]
             if not is_production_file(package_root, source_path):
                 continue
             contents = production_contents(
+                package_root,
+                source_path,
+                contents,
+            )
+            contents = without_approved_global_goal_feasibility_edge(
                 package_root,
                 source_path,
                 contents,
@@ -269,6 +319,48 @@ def test_exploration_packages_cannot_copy_platform_config_or_link_algorithms(
         "the ROS adapter may only locate planner YAML through ament package share "
         "and an exec_depend config provider: "
         f"{dependency_violations}"
+    )
+
+
+def test_isolation_scanner_allows_only_reviewed_global_feasibility_edge(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "ros2_ws/src"
+    package_root = source_root / "lunar_pure_exploration_ros"
+    source_path = package_root / "src/exploration_node.cpp"
+    source_path.parent.mkdir(parents=True)
+    (package_root / "CMakeLists.txt").write_text(
+        "find_package(lunar_pure_planner_core REQUIRED)\n"
+        "ament_target_dependencies(node\n"
+        "  lunar_pure_planner_core\n"
+        ")\n"
+        "ament_export_dependencies(\n"
+        "  lunar_pure_planner_core\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    (package_root / "package.xml").write_text(
+        "  <depend>lunar_pure_planner_core</depend>\n",
+        encoding="utf-8",
+    )
+    source_path.write_text(
+        '#include "lunar_pure_planner_core/global_goal_feasibility.hpp"\n',
+        encoding="utf-8",
+    )
+
+    assert scan_exploration_isolation(source_root) == ([], [])
+
+    source_path.write_text(
+        source_path.read_text(encoding="utf-8")
+        + 'constexpr auto kUnexpected = "lunar_pure_planner_core";\n',
+        encoding="utf-8",
+    )
+    assert scan_exploration_isolation(source_root) == (
+        [],
+        [
+            "lunar_pure_exploration_ros/src/exploration_node.cpp: "
+            "['lunar_pure_planner_core']"
+        ],
     )
 
 

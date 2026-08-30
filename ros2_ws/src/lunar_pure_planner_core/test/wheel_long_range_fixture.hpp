@@ -30,6 +30,8 @@ class WheelLongRangeFixture final {
   struct RunRecord final {
     bool success{};
     std::int64_t failed_segment{-1};
+    std::string failure_stage;
+    std::string failure_reason_code;
     double global_elapsed_ms{};
     double local_elapsed_ms{};
     double max_cycle_elapsed_ms{};
@@ -57,6 +59,9 @@ class WheelLongRangeFixture final {
       std::cout << "[planner-metrics] {\"scenario\":\"750m\","
                 << "\"success\":" << (completed.success ? "true" : "false") << ','
                 << "\"failed_segment\":" << completed.failed_segment << ','
+                << "\"failure_stage\":\"" << completed.failure_stage << "\","
+                << "\"failure_reason_code\":\""
+                << completed.failure_reason_code << "\","
                 << "\"elapsed_ms\":" << completed.elapsed_ms << ','
                 << "\"max_cycle_elapsed_ms\":"
                 << completed.max_cycle_elapsed_ms << ','
@@ -184,6 +189,8 @@ class WheelLongRangeFixture final {
         std::chrono::duration<double, std::milli>(SteadyClock::now() - global_started)
             .count();
     if (!global.route.has_value()) {
+      record.failure_stage = "global_route";
+      record.failure_reason_code = global.reason_code;
       return finish(record);
     }
     record.expanded_states += global.route->expanded_states;
@@ -197,6 +204,8 @@ class WheelLongRangeFixture final {
                       current.position_m.y - 500.0) > 0.2) {
       if (record.rolling_segments >= 320U) {
         record.failed_segment = static_cast<std::int64_t>(record.rolling_segments);
+        record.failure_stage = "segment_limit";
+        record.failure_reason_code = "ROLLING_SEGMENT_LIMIT";
         record.final_pose = current;
         return finish(record);
       }
@@ -215,6 +224,8 @@ class WheelLongRangeFixture final {
               local_request, *global.route, decision, 32U, cycle_control);
       if (!portals.ok()) {
         record.failed_segment = static_cast<std::int64_t>(record.rolling_segments);
+        record.failure_stage = "surface_portals";
+        record.failure_reason_code = portals.reason_code;
         record.final_pose = current;
         return finish(record);
       }
@@ -224,6 +235,8 @@ class WheelLongRangeFixture final {
               local_request.world.local_map);
       if (!converted.ok()) {
         record.failed_segment = static_cast<std::int64_t>(record.rolling_segments);
+        record.failure_stage = "local_goal_conversion";
+        record.failure_reason_code = converted.reason_code;
         record.final_pose = current;
         return finish(record);
       }
@@ -233,6 +246,8 @@ class WheelLongRangeFixture final {
           cycle_control);
       if (!snapshot.ok()) {
         record.failed_segment = static_cast<std::int64_t>(record.rolling_segments);
+        record.failure_stage = "map_snapshot";
+        record.failure_reason_code = snapshot.reason_code;
         record.final_pose = current;
         return finish(record);
       }
@@ -242,6 +257,8 @@ class WheelLongRangeFixture final {
           cycle_control);
       if (!terrain.ok()) {
         record.failed_segment = static_cast<std::int64_t>(record.rolling_segments);
+        record.failure_stage = "terrain_projection";
+        record.failure_reason_code = terrain.reason_code;
         record.final_pose = current;
         return finish(record);
       }
@@ -261,17 +278,19 @@ class WheelLongRangeFixture final {
       record.edge_evaluations += local.metrics.edge_validation_evaluations;
       record.state_labels += local.quantized_state_count;
       record.sweep_cell_checks += local.sweep_cell_checks;
-      if (!local.ok()) {
-        record.failed_segment = static_cast<std::int64_t>(record.rolling_segments);
-        record.final_pose = current;
-        return finish(record);
-      }
       const double cycle_elapsed_ms =
           std::chrono::duration<double, std::milli>(SteadyClock::now() -
                                                     local_started)
               .count();
       record.max_cycle_elapsed_ms =
           std::max(record.max_cycle_elapsed_ms, cycle_elapsed_ms);
+      if (!local.ok()) {
+        record.failed_segment = static_cast<std::int64_t>(record.rolling_segments);
+        record.failure_stage = "wheel_plan";
+        record.failure_reason_code = local.reason_code;
+        record.final_pose = current;
+        return finish(record);
+      }
       if (cycle_elapsed_ms < 1000.0) {
         ++record.cycles_under_one_second;
       } else if (cycle_elapsed_ms < 2000.0) {

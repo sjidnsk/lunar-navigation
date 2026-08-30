@@ -12,7 +12,7 @@ import yaml
 
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
-SCHEMA_VERSION = "lunar-pure-planner-task3-inputs/v1"
+SCHEMA_VERSION = "lunar-pure-planner-task3-io/v1"
 CONFIG_RELATIVE_PATH = Path("config/external_interfaces.yaml")
 CONTRACT = {
     "schema_version": SCHEMA_VERSION,
@@ -63,6 +63,43 @@ CONTRACT = {
         "owner": "lunar_pure_planner_ros",
         "required_goal_fields": ["environment_mode"],
     },
+    "outputs": {
+        "wheeled_reference": {
+            "name": "/Car/T4/planning/wheeled_reference",
+            "type": "lunar_planning_msgs/msg/MotionReference",
+            "owner": "lunar_pure_planner_ros",
+            "frame": "map",
+            "required_fields": [
+                "header",
+                "plan_id",
+                "input_time",
+                "platform_type",
+                "path_preview",
+                "trajectory",
+            ],
+        },
+        "wheeled_path": {
+            "name": "/Car/T4/planning/wheeled_path",
+            "type": "nav_msgs/msg/Path",
+            "owner": "lunar_pure_planner_ros",
+            "frame": "map",
+            "required_fields": ["header", "poses"],
+        },
+        "wheeled_global_path": {
+            "name": "/Car/T4/planning/wheeled_global_path",
+            "type": "nav_msgs/msg/Path",
+            "owner": "lunar_pure_planner_ros",
+            "frame": "map",
+            "required_fields": ["header", "poses"],
+        },
+        "wheeled_path_timing": {
+            "name": "/Car/T4/planning/wheeled_path_timing",
+            "type": "lunar_planning_msgs/msg/TimedPath",
+            "owner": "lunar_pure_planner_ros",
+            "frame": "map",
+            "required_fields": ["path", "planning_time"],
+        },
+    },
     "diagnostics": {
         "name": "/Car/T4/planning/diagnostics",
         "type": "diagnostic_msgs/msg/DiagnosticArray",
@@ -74,11 +111,61 @@ CONTRACT = {
             "environment_mode",
             "planning_outcome",
             "reason_code",
+            "expanded_states",
+            "has_best_cost",
+            "best_cost",
+            "has_reference",
+            "latency_class",
+            "snapshot_projection_elapsed_ms",
             "global_elapsed_ms",
             "global_call_count",
+            "local_goal_elapsed_ms",
+            "local_search_elapsed_ms",
             "local_elapsed_ms",
             "local_call_count",
+            "certification_elapsed_ms",
+            "output_elapsed_ms",
             "total_elapsed_ms",
+            "grid_v1_active",
+            "global_input_sequence",
+            "local_input_sequence",
+            "odometry_input_sequence",
+            "traversability_revision",
+            "publish_check_revision",
+            "profile_hash",
+            "canonical_resolution_m",
+            "map_origin_x_m",
+            "map_origin_y_m",
+            "map_origin_z_m",
+            "allocated_tiles",
+            "estimated_map_bytes",
+            "updated_cells",
+            "dirty_tiles",
+            "halo_recomputed_cells",
+            "free_cells",
+            "blocked_cells",
+            "unknown_cells",
+            "prior_conflicts",
+            "global_route_reused",
+            "global_expanded_states",
+            "global_open_peak",
+            "local_expanded_states",
+            "local_open_peak",
+            "local_candidate_count",
+            "local_attempt_count",
+            "selected_candidate_index",
+            "raw_path_points",
+            "shortcut_path_points",
+            "resampled_path_points",
+            "final_trajectory_points",
+            "direction",
+            "forward_cost",
+            "reverse_cost",
+            "final_supercover_cells",
+            "postprocess_mode",
+            "map_fusion_elapsed_ms",
+            "traversability_elapsed_ms",
+            "postprocess_elapsed_ms",
         ],
     },
 }
@@ -203,7 +290,7 @@ def _validate_action_definition(
 
 
 def validate_external_config(document: object) -> list[str]:
-    """Return deterministic errors for any drift from the six-interface pure contract."""
+    """Return deterministic errors for drift from the reviewed Task 3 IO contract."""
     if not isinstance(document, Mapping):
         return ["config error: document must be a mapping"]
     if document == CONTRACT:
@@ -232,6 +319,10 @@ def _interface_specs() -> list[tuple[str, list[str]]]:
     ] + [
         (CONTRACT["tf"]["type"], CONTRACT["tf"]["required_fields"]),
         (CONTRACT["action"]["type"], CONTRACT["action"]["required_goal_fields"]),
+    ] + [
+        (value["type"], value["required_fields"])
+        for value in CONTRACT["outputs"].values()
+    ] + [
         (CONTRACT["diagnostics"]["type"], CONTRACT["diagnostics"]["required_fields"]),
     ]
 
@@ -346,4 +437,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

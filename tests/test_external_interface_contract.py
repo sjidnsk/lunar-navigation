@@ -22,6 +22,10 @@ EXPECTED_INTERFACE_NAMES = {
     "odometry": "/Car/T3/localization/odometry",
     "tf": "/tf",
     "plan_motion": "/Car/T4/plan_motion",
+    "wheeled_reference": "/Car/T4/planning/wheeled_reference",
+    "wheeled_path": "/Car/T4/planning/wheeled_path",
+    "wheeled_global_path": "/Car/T4/planning/wheeled_global_path",
+    "wheeled_path_timing": "/Car/T4/planning/wheeled_path_timing",
     "diagnostics": "/Car/T4/planning/diagnostics",
 }
 FORBIDDEN_LEGACY_TOPICS = {
@@ -73,10 +77,13 @@ def load_contract() -> dict[str, object]:
     return yaml.safe_load(CONTRACT_PATH.read_text(encoding="utf-8"))
 
 
-def test_pure_contract_is_the_exact_six_interface_v1_surface() -> None:
-    """A legacy input or seventh interface would expand the pure node boundary."""
+def test_pure_contract_is_the_exact_task3_io_v1_surface() -> None:
+    """The checked contract must match the reviewed Grid V1 ROS IO surface."""
+    from tools.check_pure_planner_external_interfaces import CONTRACT
+
     contract = load_contract()
-    assert contract["schema_version"] == "lunar-pure-planner-task3-inputs/v1"
+    assert contract["schema_version"] == "lunar-pure-planner-task3-io/v1"
+    assert contract == CONTRACT
     assert contract["topics"] == {
         "global_overview": {
             "name": EXPECTED_INTERFACE_NAMES["global_overview"],
@@ -124,24 +131,44 @@ def test_pure_contract_is_the_exact_six_interface_v1_surface() -> None:
         "owner": "lunar_pure_planner_ros",
         "required_goal_fields": ["environment_mode"],
     }
-    assert contract["diagnostics"] == {
-        "name": EXPECTED_INTERFACE_NAMES["diagnostics"],
-        "type": "diagnostic_msgs/msg/DiagnosticArray",
-        "owner": "lunar_pure_planner_ros",
-        "required_fields": ["header", "status"],
-        "required_keys": [
-            "request_id",
-            "platform_type",
-            "environment_mode",
-            "planning_outcome",
-            "reason_code",
-            "global_elapsed_ms",
-            "global_call_count",
-            "local_elapsed_ms",
-            "local_call_count",
-            "total_elapsed_ms",
-        ],
+    assert contract["outputs"] == {
+        "wheeled_reference": {
+            "name": EXPECTED_INTERFACE_NAMES["wheeled_reference"],
+            "type": "lunar_planning_msgs/msg/MotionReference",
+            "owner": "lunar_pure_planner_ros",
+            "frame": "map",
+            "required_fields": [
+                "header",
+                "plan_id",
+                "input_time",
+                "platform_type",
+                "path_preview",
+                "trajectory",
+            ],
+        },
+        "wheeled_path": {
+            "name": EXPECTED_INTERFACE_NAMES["wheeled_path"],
+            "type": "nav_msgs/msg/Path",
+            "owner": "lunar_pure_planner_ros",
+            "frame": "map",
+            "required_fields": ["header", "poses"],
+        },
+        "wheeled_global_path": {
+            "name": EXPECTED_INTERFACE_NAMES["wheeled_global_path"],
+            "type": "nav_msgs/msg/Path",
+            "owner": "lunar_pure_planner_ros",
+            "frame": "map",
+            "required_fields": ["header", "poses"],
+        },
+        "wheeled_path_timing": {
+            "name": EXPECTED_INTERFACE_NAMES["wheeled_path_timing"],
+            "type": "lunar_planning_msgs/msg/TimedPath",
+            "owner": "lunar_pure_planner_ros",
+            "frame": "map",
+            "required_fields": ["path", "planning_time"],
+        },
     }
+    assert contract["diagnostics"] == CONTRACT["diagnostics"]
 
 
 def test_checker_rejects_platform_capability_frame_as_odometry_child() -> None:
@@ -161,7 +188,7 @@ def test_checker_rejects_platform_capability_frame_as_odometry_child() -> None:
     ]
 
 
-def test_node_parameters_and_launch_use_the_same_six_interface_names() -> None:
+def test_node_parameters_and_launch_use_the_same_interface_names() -> None:
     """A contract-only topic rename must not leave the actual launch surface behind."""
     contract = load_contract()
     params = yaml.safe_load(PARAMETERS_PATH.read_text(encoding="utf-8"))["/**"][
@@ -173,6 +200,10 @@ def test_node_parameters_and_launch_use_the_same_six_interface_names() -> None:
         "odometry": params["odometry_topic"],
         "tf": params["tf_topic"],
         "plan_motion": params["action_name"],
+        "wheeled_reference": params["wheeled_reference_topic"],
+        "wheeled_path": params["wheeled_path_topic"],
+        "wheeled_global_path": params["wheeled_global_path_topic"],
+        "wheeled_path_timing": params["wheeled_timed_path_topic"],
         "diagnostics": params["diagnostics_topic"],
     } == EXPECTED_INTERFACE_NAMES
     assert "pure_planner.yaml" in LAUNCH_PATH.read_text(encoding="utf-8")
@@ -246,6 +277,15 @@ def fake_ros_environment(tmp_path: Path) -> tuple[FakeRosRunner, Path, str]:
         "nav_msgs/msg/Odometry": "std_msgs/Header header\nstring child_frame_id\ngeometry_msgs/PoseWithCovariance pose\ngeometry_msgs/TwistWithCovariance twist\n",
         "tf2_msgs/msg/TFMessage": "geometry_msgs/TransformStamped[] transforms\n",
         "lunar_planning_msgs/action/PlanMotion": PLAN_MOTION_DEFINITION,
+        "lunar_planning_msgs/msg/MotionReference": (
+            "std_msgs/Header header\nstring plan_id\nbuiltin_interfaces/Time input_time\n"
+            "string platform_type\nnav_msgs/Path path_preview\n"
+            "lunar_planning_msgs/TrajectoryPoint[] trajectory\n"
+        ),
+        "nav_msgs/msg/Path": "std_msgs/Header header\ngeometry_msgs/PoseStamped[] poses\n",
+        "lunar_planning_msgs/msg/TimedPath": (
+            "nav_msgs/Path path\nbuiltin_interfaces/Duration planning_time\n"
+        ),
         "diagnostic_msgs/msg/DiagnosticArray": "std_msgs/Header header\ndiagnostic_msgs/DiagnosticStatus[] status\n",
     }
     return (

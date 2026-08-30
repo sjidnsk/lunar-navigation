@@ -35,7 +35,8 @@ def test_start_all_passes_grid_v1_mode_to_the_real_planner_invocation(
     bash_env = tmp_path / "bash-env"
     bash_env.write_text(
         "source() {\n"
-        "  if [ \"$1\" = /opt/ros/humble/setup.bash ]; then return 0; fi\n"
+        "  if [ \"$1\" = /opt/ros/humble/setup.bash ] || "
+        "[[ \"$1\" = */ros2_ws/install/setup.bash ]]; then return 0; fi\n"
         "  builtin source \"$@\"\n"
         "}\n",
         encoding="utf-8",

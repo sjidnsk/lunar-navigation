@@ -62,7 +62,7 @@ CoordinatorReadiness FullyReady() {
   readiness.planner_action_ready = true;
   readiness.controller_publisher_unique = true;
   readiness.controller_command_received = true;
-  for (int poll = 0; poll < 5; ++poll) {
+  for (int poll = 0; poll < 20; ++poll) {
     readiness.ObservePoll();
   }
   return readiness;

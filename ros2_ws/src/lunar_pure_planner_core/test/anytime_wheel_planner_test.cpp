@@ -1842,7 +1842,11 @@ TEST(WheelPlanner,
   const WheelLongRangeFixture::RunRecord record =
       fixture.Run750MeterRollingScenario();
 
-  ASSERT_TRUE(record.success) << "failed_segment=" << record.failed_segment;
+  ASSERT_TRUE(record.success)
+      << "failed_segment=" << record.failed_segment
+      << " failure_stage=" << record.failure_stage
+      << " reason_code=" << record.failure_reason_code
+      << " max_cycle_elapsed_ms=" << record.max_cycle_elapsed_ms;
   EXPECT_LT(record.rolling_segments, 320U);
   EXPECT_EQ(record.cycles_at_least_three_seconds, 0U);
   EXPECT_EQ(record.cycles_under_one_second +

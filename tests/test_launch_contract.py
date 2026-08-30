@@ -49,6 +49,7 @@ EXPECTED_TOPICS = {
     "diagnostics_topic": "/Car/T4/planning/diagnostics",
     "wheeled_reference_topic": "/Car/T4/planning/wheeled_reference",
     "wheeled_path_topic": "/Car/T4/planning/wheeled_path",
+    "wheeled_global_path_topic": "/Car/T4/planning/wheeled_global_path",
     "wheeled_timed_path_topic": "/Car/T4/planning/wheeled_path_timing",
 }
 EXPECTED_PARAMETERS = {
@@ -56,6 +57,7 @@ EXPECTED_PARAMETERS = {
     "platform_config",
     "global_occupancy_threshold_percent",
     "local_occupancy_threshold",
+    "wheel_planner_mode",
     "rolling_surface_enabled",
     "rolling_horizon_m",
     "rolling_poll_period_ms",
@@ -330,10 +332,10 @@ def test_launch_passes_the_shared_parameter_file_and_explicit_overrides() -> Non
     assert parameters.elts[0].id == "params_file"
     assert isinstance(parameters.elts[1], ast.Dict)
     assert [ast.literal_eval(key) for key in parameters.elts[1].keys] == [
-        "platform_type", "rolling_surface_enabled"
+        "platform_type", "wheel_planner_mode", "rolling_surface_enabled"
     ]
     assert [value.id for value in parameters.elts[1].values if isinstance(value, ast.Name)] == [
-        "platform_type", "rolling_surface_enabled"
+        "platform_type", "wheel_planner_mode", "rolling_surface_enabled"
     ]
 
 

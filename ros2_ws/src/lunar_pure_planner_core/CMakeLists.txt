@@ -120,6 +120,13 @@ if(BUILD_TESTING)
     test/obstacle_height_estimator_test.cpp)
   lunar_add_core_gtest(lunar_pure_planner_core_anytime_wheel_planner_test
     test/anytime_wheel_planner_test.cpp)
+  # This target contains the deterministic 750 m rolling-planner benchmark.
+  # It takes longer than a unit-test binary on development hosts and must not
+  # compete with other planner-core tests for CPU time.
+  set_tests_properties(
+    lunar_pure_planner_core_anytime_wheel_planner_test PROPERTIES
+    RUN_SERIAL TRUE
+    TIMEOUT 180)
   lunar_add_core_gtest(lunar_pure_planner_core_anytime_legged_planner_test
     test/anytime_legged_planner_test.cpp)
   lunar_add_core_gtest(lunar_pure_planner_core_anytime_hopper_planner_test
