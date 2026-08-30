@@ -13,6 +13,7 @@ def generate_launch_description() -> LaunchDescription:
     params_file = LaunchConfiguration("params_file")
     platform_type = LaunchConfiguration("platform_type")
     wheel_planner_mode = LaunchConfiguration("wheel_planner_mode")
+    legged_global_mode = LaunchConfiguration("legged_global_mode")
     rolling_surface_enabled = LaunchConfiguration("rolling_surface_enabled")
 
     return LaunchDescription(
@@ -25,6 +26,9 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "wheel_planner_mode", default_value="legacy_certified"
             ),
+            DeclareLaunchArgument(
+                "legged_global_mode", default_value="grid_traversability_v1"
+            ),
             DeclareLaunchArgument("rolling_surface_enabled", default_value="false"),
             Node(
                 package="lunar_pure_planner_ros",
@@ -36,6 +40,7 @@ def generate_launch_description() -> LaunchDescription:
                     {
                         "platform_type": platform_type,
                         "wheel_planner_mode": wheel_planner_mode,
+                        "legged_global_mode": legged_global_mode,
                         "rolling_surface_enabled": rolling_surface_enabled,
                     },
                 ],

@@ -5,6 +5,7 @@
     global_occupancy_threshold_percent: 50
     local_occupancy_threshold: 0.5
     wheel_planner_mode: legacy_certified
+    legged_global_mode: grid_traversability_v1
     global_map_topic: /Car/T3/mapping/global_overview
     local_map_topic: /Car/T3/mapping/grid_map
     odometry_topic: /Car/T3/localization/odometry

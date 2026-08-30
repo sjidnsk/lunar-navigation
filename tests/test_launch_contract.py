@@ -58,6 +58,7 @@ EXPECTED_PARAMETERS = {
     "global_occupancy_threshold_percent",
     "local_occupancy_threshold",
     "wheel_planner_mode",
+    "legged_global_mode",
     "rolling_surface_enabled",
     "rolling_horizon_m",
     "rolling_poll_period_ms",
@@ -283,6 +284,7 @@ def test_parameters_are_limited_to_the_pure_planner_contract() -> None:
     assert params["global_occupancy_threshold_percent"] == 50
     assert params["local_occupancy_threshold"] == 0.5
     assert params["platform_config"] == ""
+    assert params["legged_global_mode"] == "grid_traversability_v1"
     forbidden = {
         key
         for key in params
@@ -332,11 +334,31 @@ def test_launch_passes_the_shared_parameter_file_and_explicit_overrides() -> Non
     assert parameters.elts[0].id == "params_file"
     assert isinstance(parameters.elts[1], ast.Dict)
     assert [ast.literal_eval(key) for key in parameters.elts[1].keys] == [
-        "platform_type", "wheel_planner_mode", "rolling_surface_enabled"
+        "platform_type", "wheel_planner_mode", "legged_global_mode",
+        "rolling_surface_enabled"
     ]
     assert [value.id for value in parameters.elts[1].values if isinstance(value, ast.Name)] == [
-        "platform_type", "wheel_planner_mode", "rolling_surface_enabled"
+        "platform_type", "wheel_planner_mode", "legged_global_mode",
+        "rolling_surface_enabled"
     ]
+
+
+def test_launch_defaults_legged_global_mode_to_grid_v1() -> None:
+    """The launch override must expose the same default as the YAML contract."""
+    tree = ast.parse(LAUNCH_PATH.read_text(encoding="utf-8"))
+    declarations = [
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "DeclareLaunchArgument"
+        and call.args
+        and ast.literal_eval(call.args[0]) == "legged_global_mode"
+    ]
+    assert len(declarations) == 1
+    assert ast.literal_eval(
+        _keyword_value(declarations[0], "default_value")
+    ) == "grid_traversability_v1"
 
 
 def test_cmake_installs_the_single_top_level_config_and_launch_sources() -> None:

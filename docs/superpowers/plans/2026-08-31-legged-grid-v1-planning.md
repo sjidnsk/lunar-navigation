@@ -42,7 +42,7 @@
 - Produces: `TraversabilitySnapshot::BuildProjectionGrid(SearchControl)` returning an uninflated `GridMap` plus `inflation_radius_m`.
 - Produces: `MakeLeggedTraversabilityProjectionCacheKey()` and `MakeLeggedTraversabilityRouteCacheKey()`.
 
-- [ ] **Step 1: Write failing public-mode and projection-grid tests**
+- [x] **Step 1: Write failing public-mode and projection-grid tests**
 
 Add a default-mode assertion:
 
@@ -56,7 +56,7 @@ EXPECT_EQ(LeggedGlobalModeName(LeggedGlobalMode::kLegacyOccupancy),
 
 Add a projection fixture whose global prior is free, whose local elevation creates one blocked slope cell, and whose local NaN cell leaves the prior unchanged. Assert that `BuildProjectionGrid({})` returns global-grid geometry, marks the slope-intersecting global cell occupied, leaves the NaN/prior-free cell free, and reports the profile inflation radius without applying it to neighboring cells.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run:
 
@@ -73,7 +73,7 @@ cmake --build /home/kai/CodexDownloads/lunar_navigation/legged_grid_v1_20260831/
 
 Expected: compilation fails because `LeggedGlobalMode` and `BuildProjectionGrid` do not exist.
 
-- [ ] **Step 3: Implement the minimal mode and batch projection API**
+- [x] **Step 3: Implement the minimal mode and batch projection API**
 
 Add to the core request configuration:
 
@@ -116,7 +116,7 @@ Implementation rules:
 5. Return the profile's inflation radius separately; do not inflate in this method.
 6. Check cancellation/deadline during linear scans and return the existing reason string.
 
-- [ ] **Step 4: Add revision/profile-aware cache-key helpers**
+- [x] **Step 4: Add revision/profile-aware cache-key helpers**
 
 Implement:
 
@@ -135,7 +135,7 @@ GlobalRouteCacheKey MakeLeggedTraversabilityRouteCacheKey(
 
 Use the traversability revision as the first source sequence and include a fixed mode discriminator in semantic identities so legacy and legged Grid V1 artifacts cannot alias.
 
-- [ ] **Step 5: Run focused tests and commit**
+- [x] **Step 5: Run focused tests and commit**
 
 Run the three focused test binaries and `git diff --check`. Expected: all pass.
 
@@ -169,7 +169,7 @@ git commit -m "feat: add legged traversability projection contract"
 - Produces: `BuildLeggedTraversabilityProjection()` returning the existing `GlobalOccupancyProjection` type.
 - Produces: core routing that uses Grid V1 only for legged lunar-surface global planning while preserving `PlanLocalDefault()`.
 
-- [ ] **Step 1: Write failing projection and end-to-end core tests**
+- [x] **Step 1: Write failing projection and end-to-end core tests**
 
 Add a projection test that builds a small uninflated grid with one hazard and inflation `0.678 m`, then asserts:
 
@@ -188,11 +188,11 @@ Add core tests covering these observable behaviors:
 - two identical requests make the second request report both global projection and route cache hits;
 - a Grid V1 global failure returns the Grid V1 failure and never invokes a legacy fallback backend.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Expected: tests fail because the core currently treats Grid V1 as wheel-only and `PlanSurfaceGlobal()` only builds from global occupancy.
 
-- [ ] **Step 3: Implement one-time projection build**
+- [x] **Step 3: Implement one-time projection build**
 
 Implement:
 
@@ -204,7 +204,7 @@ GlobalOccupancyProjectionBuildResult BuildLeggedTraversabilityProjection(
 
 The function calls `BuildProjectionGrid()`, creates the existing immutable `MapSnapshot`, then calls `BuildInflatedGlobalOccupancyProjection()` exactly once with the returned radius. It must not call `StateAtWorld()` during ARA* expansion.
 
-- [ ] **Step 4: Select the projection and cache keys in `PlanSurfaceGlobal`**
+- [x] **Step 4: Select the projection and cache keys in `PlanSurfaceGlobal`**
 
 For `LeggedCapability + kGridTraversabilityV1`:
 
@@ -217,7 +217,7 @@ For `LeggedCapability + kGridTraversabilityV1`:
 
 All other requests continue through the existing occupancy projection code.
 
-- [ ] **Step 5: Route legged Grid V1 through the existing hierarchical pipeline and select a 3 m local target**
+- [x] **Step 5: Route legged Grid V1 through the existing hierarchical pipeline and select a 3 m local target**
 
 In `Planner::Plan()` distinguish:
 
@@ -233,7 +233,7 @@ In `SelectSurfaceLocalGoals()`, construct `SurfaceRollingSession` with horizon
 paths. Add a test whose route extends beyond both distances and assert that the
 selected legged candidate does not exceed the 3 m route horizon.
 
-- [ ] **Step 6: Run focused and core regression tests, then commit**
+- [x] **Step 6: Run focused and core regression tests, then commit**
 
 Run projection, dual-mode, surface-global, legged-local, Grid V1 wheel and Hopper tests. Expected: all pass and wheel/Hopper behavior remains unchanged.
 
@@ -260,7 +260,7 @@ git commit -m "feat: route legged planning through Grid V1"
 - Consumes: `LeggedGlobalMode` and existing `TraversabilityInput`.
 - Produces: ROS parameter `legged_global_mode` and a foot-specific `TraversabilityProfile`.
 
-- [ ] **Step 1: Write failing server tests**
+- [x] **Step 1: Write failing server tests**
 
 Add tests proving:
 
@@ -269,11 +269,11 @@ Add tests proving:
 - an unknown legged mode rejects server construction;
 - a legged Grid V1 success is finalized without a latest-map recapture or `STALE_PATH_INVALIDATED` result, while the existing wheel stale-path test remains unchanged.
 
-- [ ] **Step 2: Run the server test and verify RED**
+- [x] **Step 2: Run the server test and verify RED**
 
 Expected: new tests fail because the parameter and legged traversability input do not exist.
 
-- [ ] **Step 3: Parse the legged mode and construct the correct profile**
+- [x] **Step 3: Parse the legged mode and construct the correct profile**
 
 Add:
 
@@ -292,11 +292,11 @@ maximum_slope_rad = capability.maximum_slope_rad;
 
 Create `TraversabilityInput` when either wheel Grid V1 or legged Grid V1 is active. Keep the current rejection of `wheel_planner_mode=grid_traversability_v1` on non-wheel platforms.
 
-- [ ] **Step 4: Capture and attach the legged snapshot without adding publish checks**
+- [x] **Step 4: Capture and attach the legged snapshot without adding publish checks**
 
 Use a common `uses_traversability_snapshot` boolean for request capture and diagnostics. Keep the existing latest-map `PathIsFree()` block gated only by `use_wheel_grid_v1`; legged requests must skip it. Require the global occupancy input for legged surface planning.
 
-- [ ] **Step 5: Build and run the server test, then commit**
+- [x] **Step 5: Build and run the server test, then commit**
 
 Run the complete `pure_plan_motion_server_test` under the external Jazzy build. Expected: new legged tests and existing wheel stale-path test all pass.
 
@@ -321,7 +321,7 @@ git commit -m "feat: configure legged Grid V1 requests"
 - Consumes: ROS parameter `legged_global_mode` from Task 3.
 - Produces: YAML/launch default `grid_traversability_v1` and explicit rollback value `legacy_occupancy`.
 
-- [ ] **Step 1: Write failing launch/config behavior tests**
+- [x] **Step 1: Write failing launch/config behavior tests**
 
 Extend the launch contract to load the YAML and launch description, asserting:
 
@@ -332,11 +332,11 @@ assert launch_arguments["legged_global_mode"] == "grid_traversability_v1"
 
 Also assert the node parameter mapping forwards the launch configuration; do not add source-text assertions for removed safety checks.
 
-- [ ] **Step 2: Run pytest and verify RED**
+- [x] **Step 2: Run pytest and verify RED**
 
 Expected: failure because the parameter is absent.
 
-- [ ] **Step 3: Add the default parameter**
+- [x] **Step 3: Add the default parameter**
 
 Add to YAML:
 
@@ -346,7 +346,7 @@ legged_global_mode: grid_traversability_v1
 
 Declare and forward the same launch argument. Do not rename `wheel_planner_mode`.
 
-- [ ] **Step 4: Run scoped full verification**
+- [x] **Step 4: Run scoped full verification**
 
 Run:
 
@@ -363,7 +363,7 @@ git diff --check
 
 Also run the complete ROS planner package build/test in external `build/install/log` directories. If Humble or Orin is unavailable, record that boundary instead of claiming deployment proof.
 
-- [ ] **Step 5: Mark this plan complete and commit the final scoped files**
+- [x] **Step 5: Mark this plan complete and commit the final scoped files**
 
 Change completed checkboxes in this document to `[x]`, stage only this task's files, inspect `git diff --cached`, then commit:
 
