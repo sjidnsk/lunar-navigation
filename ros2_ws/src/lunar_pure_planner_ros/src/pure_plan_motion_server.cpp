@@ -120,6 +120,17 @@ struct RuntimeParameters final {
   throw std::runtime_error{"PLANNER_ERROR: unknown wheel_planner_mode"};
 }
 
+[[nodiscard]] lunar::pure_planning::LeggedGlobalMode ParseLeggedGlobalMode(
+    const std::string_view mode) {
+  if (mode == "legacy_occupancy") {
+    return lunar::pure_planning::LeggedGlobalMode::kLegacyOccupancy;
+  }
+  if (mode == "grid_traversability_v1") {
+    return lunar::pure_planning::LeggedGlobalMode::kGridTraversabilityV1;
+  }
+  throw std::runtime_error{"PLANNER_ERROR: unknown legged_global_mode"};
+}
+
 [[nodiscard]] std::filesystem::path ResolvePlatformConfig(
     const std::string_view platform, const std::string_view configured_path) {
   const std::filesystem::path share =
@@ -157,6 +168,9 @@ struct RuntimeParameters final {
   const auto wheel_planner_mode = ParseWheelPlannerMode(
       node.declare_parameter<std::string>("wheel_planner_mode",
                                           "legacy_certified"));
+  const auto legged_global_mode = ParseLeggedGlobalMode(
+      node.declare_parameter<std::string>("legged_global_mode",
+                                          "grid_traversability_v1"));
   if (global_threshold < 0 || global_threshold > 100 ||
       !std::isfinite(local_threshold) || local_threshold < 0.0 ||
       local_threshold > 1.0) {
@@ -193,6 +207,7 @@ struct RuntimeParameters final {
               static_cast<std::int32_t>(global_threshold),
           .local_occupancy_threshold = local_threshold,
           .wheel_planner_mode = wheel_planner_mode,
+          .legged_global_mode = legged_global_mode,
       },
       .global_map_topic = node.declare_parameter<std::string>(
           "global_map_topic", "/Car/T3/mapping/global_overview"),
@@ -500,8 +515,17 @@ struct PurePlanMotionServer::Impl final {
     if (!this->local_planner) {
       this->local_planner = RealLocalPlannerFn();
     }
-    if (parameters.planner_config.wheel_planner_mode ==
-        lunar::pure_planning::WheelPlannerMode::kGridTraversabilityV1) {
+    const bool use_wheel_grid_v1 =
+        parameters.platform_type ==
+            lunar::pure_planning::PlatformType::kWheeled &&
+        parameters.planner_config.wheel_planner_mode ==
+            lunar::pure_planning::WheelPlannerMode::kGridTraversabilityV1;
+    const bool use_legged_grid_v1 =
+        parameters.platform_type ==
+            lunar::pure_planning::PlatformType::kLegged &&
+        parameters.planner_config.legged_global_mode ==
+            lunar::pure_planning::LeggedGlobalMode::kGridTraversabilityV1;
+    if (use_wheel_grid_v1) {
       const auto* capability =
           std::get_if<lunar::pure_planning::WheeledCapability>(
               &parameters.capability);
@@ -523,6 +547,27 @@ struct PurePlanMotionServer::Impl final {
               .maximum_slope_rad = capability->maximum_slope_rad,
               .inflation_radius_m =
                   footprint_radius_m + capability->minimum_clearance_m,
+          });
+    } else if (use_legged_grid_v1) {
+      const auto* capability =
+          std::get_if<lunar::pure_planning::LeggedCapability>(
+              &parameters.capability);
+      if (capability == nullptr) {
+        throw std::runtime_error{
+            "PLANNER_ERROR: legged traversability profile invalid"};
+      }
+      traversability_input = std::make_unique<TraversabilityInput>(
+          lunar::pure_planning::TraversabilityProfile{
+              .global_occupancy_threshold =
+                  parameters.planner_config.global_occupancy_threshold,
+              .local_occupancy_threshold =
+                  parameters.planner_config.local_occupancy_threshold,
+              .maximum_slope_rad = capability->maximum_slope_rad,
+              .inflation_radius_m =
+                  std::hypot(capability->body_extent_m.x,
+                             capability->body_extent_m.y) /
+                      2.0 +
+                  capability->minimum_body_clearance_m,
           });
     }
     node.declare_parameter<bool>("trusted_bridge_once", false);
@@ -829,13 +874,25 @@ struct PurePlanMotionServer::Impl final {
         lunar::pure_planning::MakeRequestTimingPolicy(started);
     const InputSnapshot snapshot = input_store.Capture();
     const auto request_goal = goal_handle->get_goal();
-    const bool use_grid_v1 =
+    const bool use_wheel_grid_v1 =
+        parameters.platform_type ==
+            lunar::pure_planning::PlatformType::kWheeled &&
         parameters.planner_config.wheel_planner_mode ==
-        lunar::pure_planning::WheelPlannerMode::kGridTraversabilityV1;
+            lunar::pure_planning::WheelPlannerMode::kGridTraversabilityV1;
+    const bool use_legged_grid_v1 =
+        request_goal &&
+        EnvironmentMode(request_goal->environment_mode) ==
+            lunar::pure_planning::EnvironmentMode::kLunarSurface &&
+        parameters.platform_type ==
+            lunar::pure_planning::PlatformType::kLegged &&
+        parameters.planner_config.legged_global_mode ==
+            lunar::pure_planning::LeggedGlobalMode::kGridTraversabilityV1;
+    const bool uses_traversability_snapshot =
+        use_wheel_grid_v1 || use_legged_grid_v1;
     std::optional<TraversabilityInputSnapshot> traversability;
     lunar::pure_planning::PlanningResult result;
     try {
-      if (use_grid_v1 && traversability_input) {
+      if (uses_traversability_snapshot && traversability_input) {
         traversability = traversability_input->Capture();
       }
       if (stop_token.stop_requested()) {
@@ -851,7 +908,7 @@ struct PurePlanMotionServer::Impl final {
         const auto converted_goal = map_from_odom.value.has_value()
             ? ConvertGoal(*request_goal, *map_from_odom.value)
             : GoalConversionResult{};
-        const bool require_surface_global_map = !use_grid_v1;
+        const bool require_surface_global_map = !use_wheel_grid_v1;
         auto world = AdaptSnapshot(EnvironmentMode(request_goal->environment_mode),
                                    snapshot, require_surface_global_map);
         const auto state = AdaptOdometry(*snapshot.odometry,
@@ -860,7 +917,7 @@ struct PurePlanMotionServer::Impl final {
             !world.value.has_value() || !state.value.has_value()) {
           result = Failure(lunar::pure_planning::PlanningStatus::kInvalidInput,
                            "INVALID_INPUT");
-        } else if (use_grid_v1 &&
+        } else if (uses_traversability_snapshot &&
                    (!traversability.has_value() ||
                     !traversability->snapshot ||
                     !traversability->snapshot->valid() ||
@@ -872,7 +929,7 @@ struct PurePlanMotionServer::Impl final {
                   ? traversability->reason_code
                   : "INVALID_INPUT");
         } else {
-          if (use_grid_v1) {
+          if (uses_traversability_snapshot) {
             world.value->traversability_snapshot = traversability->snapshot;
           }
           lunar::pure_planning::PlanningRequest request{
@@ -897,9 +954,10 @@ struct PurePlanMotionServer::Impl final {
                                     progress);
               },
           };
-          const auto bridge = trusted_bridge_once && !use_grid_v1
-                                  ? ApplyTrustedBridge(request, snapshot)
-                                  : std::optional<AppliedTrustedBridge>{};
+          const auto bridge =
+              trusted_bridge_once && !uses_traversability_snapshot
+                  ? ApplyTrustedBridge(request, snapshot)
+                  : std::optional<AppliedTrustedBridge>{};
           result = planner(request);
           PublishFeedback(goal_handle, stop_token, feedback_state,
                           Action::Feedback::CERTIFYING,
@@ -918,7 +976,7 @@ struct PurePlanMotionServer::Impl final {
     }
 
     std::optional<std::uint64_t> publish_check_revision;
-    if (use_grid_v1 &&
+    if (use_wheel_grid_v1 &&
         result.status == lunar::pure_planning::PlanningStatus::kSuccess &&
         result.reference.has_value()) {
       const auto latest = traversability_input
@@ -948,7 +1006,7 @@ struct PurePlanMotionServer::Impl final {
       }
     }
 
-    if (use_grid_v1) {
+    if (uses_traversability_snapshot) {
       auto& diagnostics = result.grid_v1;
       diagnostics.active = true;
       diagnostics.global_input_sequence = snapshot.global_sequence;
@@ -960,7 +1018,9 @@ struct PurePlanMotionServer::Impl final {
         const auto metrics = map.metrics();
         diagnostics.traversability_revision = map.revision();
         diagnostics.publish_check_revision =
-            publish_check_revision.value_or(map.revision());
+            use_wheel_grid_v1
+                ? publish_check_revision.value_or(map.revision())
+                : 0U;
         diagnostics.profile_hash = map.profile_hash();
         diagnostics.canonical_resolution_m = map.resolution_m();
         diagnostics.map_origin_m = map.origin_m();

@@ -188,16 +188,24 @@ lunar::pure_planning::PlanningResult Failure(
 
 lunar::pure_planning::PlanningResult Success(
     const lunar::pure_planning::PlanningRequest& request) {
+  const bool legged =
+      std::holds_alternative<lunar::pure_planning::LeggedState>(
+          request.current_state);
   const auto& point = std::get<lunar::pure_planning::PointGoal>(
       request.goal_map.target);
   lunar::pure_planning::TrajectoryReference trajectory{
-      .semantics = lunar::pure_planning::TrajectorySemantics::kWheeledBase,
+      .semantics = legged
+                       ? lunar::pure_planning::TrajectorySemantics::
+                             kLeggedBodyReference
+                       : lunar::pure_planning::TrajectorySemantics::kWheeledBase,
       .points = {{.pose = {.position_m = point.position_m,
                             .orientation = {.w = 1.0}}}},
   };
   lunar::pure_planning::MotionReference reference{
       .plan_id = request.request_id,
-      .platform_type = lunar::pure_planning::PlatformType::kWheeled,
+      .platform_type = legged
+                           ? lunar::pure_planning::PlatformType::kLegged
+                           : lunar::pure_planning::PlatformType::kWheeled,
       .input_time = request.world.local_map.stamp,
       .preview = {.poses_map = {{.position_m = point.position_m,
                                  .orientation = {.w = 1.0}}}},
@@ -697,6 +705,119 @@ TEST(PurePlanMotionServer, RejectsUnknownWheelPlannerMode) {
                            "NO_PATH");
           }),
       std::runtime_error);
+}
+
+TEST(PurePlanMotionServer, RejectsUnknownLeggedGlobalMode) {
+  EXPECT_THROW(
+      PurePlanMotionServer(
+          ServerOptions(
+              "legged", ConfigPath("legged.yaml").string(),
+              {rclcpp::Parameter{"legged_global_mode", "unknown_mode"}}),
+          [](const auto&) {
+            return Failure(lunar::pure_planning::PlanningStatus::kNoPath,
+                           "NO_PATH");
+          }),
+      std::runtime_error);
+}
+
+TEST(PurePlanMotionServer,
+     DefaultLeggedGridV1AttachesOriginalResolutionSnapshot) {
+  std::atomic<bool> saw_v1_snapshot{false};
+  RunningSystem system{
+      [&](const lunar::pure_planning::PlanningRequest& request) {
+        const auto& capability =
+            std::get<lunar::pure_planning::LeggedCapability>(
+                request.capability);
+        lunar::pure_planning::PersistentTraversabilityMap expected_profile{
+            lunar::pure_planning::TraversabilityProfile{
+                .global_occupancy_threshold =
+                    request.config.global_occupancy_threshold,
+                .local_occupancy_threshold =
+                    request.config.local_occupancy_threshold,
+                .maximum_slope_rad = capability.maximum_slope_rad,
+                .inflation_radius_m =
+                    std::hypot(capability.body_extent_m.x,
+                               capability.body_extent_m.y) /
+                        2.0 +
+                    capability.minimum_body_clearance_m,
+            }};
+        saw_v1_snapshot =
+            request.config.legged_global_mode ==
+                lunar::pure_planning::LeggedGlobalMode::
+                    kGridTraversabilityV1 &&
+            request.world.traversability_snapshot &&
+            request.world.traversability_snapshot->valid() &&
+            request.world.traversability_snapshot->resolution_m() == 0.2 &&
+            request.world.traversability_snapshot->revision() > 0U &&
+            request.world.traversability_snapshot->profile_hash() ==
+                expected_profile.Capture()->profile_hash();
+        return Failure(lunar::pure_planning::PlanningStatus::kNoPath,
+                       "NO_PATH");
+      },
+      "legged", ConfigPath("legged.yaml").string()};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("legged-grid-v1-snapshot"));
+  ASSERT_NE(handle, nullptr);
+  EXPECT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::ABORTED);
+  EXPECT_TRUE(saw_v1_snapshot.load());
+}
+
+TEST(PurePlanMotionServer, ExplicitLeggedLegacyOccupancySkipsGridSnapshot) {
+  std::atomic<bool> saw_legacy_request{false};
+  RunningSystem system{
+      [&](const lunar::pure_planning::PlanningRequest& request) {
+        saw_legacy_request =
+            request.config.legged_global_mode ==
+                lunar::pure_planning::LeggedGlobalMode::kLegacyOccupancy &&
+            !request.world.traversability_snapshot;
+        return Failure(lunar::pure_planning::PlanningStatus::kNoPath,
+                       "NO_PATH");
+      },
+      "legged", ConfigPath("legged.yaml").string(),
+      {rclcpp::Parameter{"legged_global_mode", "legacy_occupancy"}}};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("legged-legacy"));
+  ASSERT_NE(handle, nullptr);
+  EXPECT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::ABORTED);
+  EXPECT_TRUE(saw_legacy_request.load());
+}
+
+TEST(PurePlanMotionServer,
+     LeggedGridV1DoesNotRecaptureOrInvalidateAfterPlanning) {
+  std::atomic<bool> saw_v1_snapshot{false};
+  std::promise<void> planner_entered_promise;
+  auto planner_entered = planner_entered_promise.get_future();
+  std::promise<void> release_planner_promise;
+  auto release_planner = release_planner_promise.get_future().share();
+  RunningSystem system{
+      [&](const lunar::pure_planning::PlanningRequest& request) {
+        saw_v1_snapshot = request.world.traversability_snapshot &&
+                          request.world.traversability_snapshot->valid();
+        planner_entered_promise.set_value();
+        release_planner.wait();
+        return Success(request);
+      },
+      "legged", ConfigPath("legged.yaml").string()};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("legged-grid-v1-no-recheck"));
+  ASSERT_NE(handle, nullptr);
+  ASSERT_EQ(planner_entered.wait_for(2s), std::future_status::ready);
+  system.PublishLocal(BlockedLocalMap());
+  std::this_thread::sleep_for(100ms);
+  release_planner_promise.set_value();
+
+  const auto wrapped = system.Result(handle);
+  ASSERT_EQ(wrapped.code, rclcpp_action::ResultCode::SUCCEEDED);
+  EXPECT_TRUE(wrapped.result->has_reference);
+  EXPECT_EQ(wrapped.result->reason_code, "PLAN_FOUND");
+  EXPECT_TRUE(saw_v1_snapshot.load());
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
+  EXPECT_EQ(FindDiagnosticValue(system.Diagnostics().front(),
+                                "publish_check_revision"),
+            "0");
 }
 
 TEST(PurePlanMotionServer,
