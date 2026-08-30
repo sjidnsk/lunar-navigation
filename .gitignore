@@ -52,3 +52,8 @@ training-output/
 # Editor and OS noise
 *~
 .DS_Store
+
+# Local Codex analysis and document-rendering intermediates
+.codex_tmp/
+.codex_artifacts/
+.understand-anything/
