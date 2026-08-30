@@ -8,6 +8,7 @@
 #include <thread>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <gtest/gtest.h>
 #include <lunar_planning_msgs/action/plan_motion.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -55,15 +56,17 @@ bool WaitFor(Predicate&& predicate, const std::chrono::milliseconds timeout = 3s
 
 class CapturingActionServer final {
  public:
-  CapturingActionServer()
-      : node_(std::make_shared<rclcpp::Node>("rviz_goal_bridge_action_test")) {
+  explicit CapturingActionServer(const bool hold_goal = false)
+      : node_(std::make_shared<rclcpp::Node>("rviz_goal_bridge_action_test")),
+        hold_goal_(hold_goal) {
     server_ = rclcpp_action::create_server<Action>(
         node_, "/test/plan_motion",
         [](const rclcpp_action::GoalUUID&,
            std::shared_ptr<const Action::Goal>) {
           return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
         },
-        [](const std::shared_ptr<GoalHandle>) {
+        [this](const std::shared_ptr<GoalHandle>) {
+          cancel_requests_.fetch_add(1U);
           return rclcpp_action::CancelResponse::ACCEPT;
         },
         [this](const std::shared_ptr<GoalHandle> handle) {
@@ -71,7 +74,11 @@ class CapturingActionServer final {
             std::scoped_lock lock(mutex_);
             received_goal_ = *handle->get_goal();
           }
-          handle->succeed(std::make_shared<Action::Result>());
+          if (hold_goal_) {
+            held_goal_ = handle;
+          } else {
+            handle->succeed(std::make_shared<Action::Result>());
+          }
         });
   }
 
@@ -82,11 +89,18 @@ class CapturingActionServer final {
     return received_goal_;
   }
 
+  [[nodiscard]] std::uint64_t cancel_requests() const noexcept {
+    return cancel_requests_.load();
+  }
+
  private:
   rclcpp::Node::SharedPtr node_;
   rclcpp_action::Server<Action>::SharedPtr server_;
   mutable std::mutex mutex_;
   std::optional<Action::Goal> received_goal_;
+  bool hold_goal_{};
+  std::atomic<std::uint64_t> cancel_requests_{};
+  std::shared_ptr<GoalHandle> held_goal_;
 };
 
 rclcpp::NodeOptions BridgeOptions() {
@@ -99,6 +113,7 @@ rclcpp::NodeOptions BridgeOptions() {
       rclcpp::Parameter{"mission_revision", 7},
       rclcpp::Parameter{"position_tolerance_m", 0.25},
       rclcpp::Parameter{"yaw_tolerance_rad", 0.15},
+      rclcpp::Parameter{"start_topic", "/test/start_pose"},
   });
   return options;
 }
@@ -152,6 +167,57 @@ TEST(RvizGoalBridge, ConvertsRvizPoseIntoPlanMotionGoal) {
   EXPECT_NEAR(goal.goal.yaw_rad, 0.8, 1e-12);
   EXPECT_DOUBLE_EQ(goal.goal.yaw_tolerance_rad, 0.15);
 
+  executor.cancel();
+  spinner.join();
+}
+
+TEST(RvizGoalBridge, CancelsTheActiveRequestWhenRvizStartChanges) {
+  CapturingActionServer action_server{true};
+  auto bridge = std::make_shared<RvizGoalBridge>(BridgeOptions());
+  auto publisher_node = std::make_shared<rclcpp::Node>("rviz_start_publisher_test");
+  auto goal_publisher =
+      publisher_node->create_publisher<geometry_msgs::msg::PoseStamped>(
+          "/Car/T4/rviz_goal", rclcpp::QoS{10}.reliable());
+  auto start_publisher =
+      publisher_node->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
+          "/test/start_pose", rclcpp::QoS{10}.reliable());
+
+  rclcpp::executors::MultiThreadedExecutor executor;
+  executor.add_node(action_server.node());
+  executor.add_node(bridge);
+  executor.add_node(publisher_node);
+  std::jthread spinner([&executor] { executor.spin(); });
+
+  const bool subscriptions_ready = WaitFor([&] {
+    return goal_publisher->get_subscription_count() == 1U &&
+           start_publisher->get_subscription_count() == 1U;
+  });
+  if (!subscriptions_ready) {
+    executor.cancel();
+    spinner.join();
+  }
+  ASSERT_TRUE(subscriptions_ready);
+  geometry_msgs::msg::PoseStamped goal;
+  goal.header.frame_id = "map";
+  goal.pose.orientation.w = 1.0;
+  goal_publisher->publish(goal);
+  const bool goal_received = WaitFor([&action_server] {
+    return action_server.received_goal().has_value();
+  });
+  if (!goal_received) {
+    executor.cancel();
+    spinner.join();
+  }
+  ASSERT_TRUE(goal_received);
+
+  geometry_msgs::msg::PoseWithCovarianceStamped start;
+  start.header.frame_id = "map";
+  start.pose.pose.orientation.w = 1.0;
+  start_publisher->publish(start);
+
+  EXPECT_TRUE(WaitFor([&action_server] {
+    return action_server.cancel_requests() == 1U;
+  }));
   executor.cancel();
   spinner.join();
 }

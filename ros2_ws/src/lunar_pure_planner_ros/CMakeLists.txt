@@ -36,7 +36,10 @@ set(LUNAR_PURE_PLANNER_ROS_SOURCES
   src/rviz_goal_bridge.cpp)
 if(LUNAR_BUILD_DEMO)
   list(APPEND LUNAR_PURE_PLANNER_ROS_SOURCES
-    src/lunar_surface_scenario.cpp)
+    src/lunar_surface_scenario.cpp
+    src/lunar_surface_local_map.cpp
+    src/lunar_surface_reporter.cpp
+    src/lunar_surface_traversability_viz.cpp)
 endif()
 add_library(${PROJECT_NAME} SHARED ${LUNAR_PURE_PLANNER_ROS_SOURCES})
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
@@ -58,6 +61,9 @@ ament_target_dependencies(${PROJECT_NAME}
   rclcpp
   rclcpp_action
   tf2_msgs)
+if(LUNAR_BUILD_DEMO)
+  ament_target_dependencies(${PROJECT_NAME} visualization_msgs)
+endif()
 target_link_libraries(${PROJECT_NAME} yaml-cpp)
 
 add_executable(lunar_pure_planner_node src/main.cpp)
@@ -97,7 +103,13 @@ if(LUNAR_BUILD_DEMO)
   target_compile_features(lunar_surface_visualizer_node PUBLIC cxx_std_20)
   target_link_libraries(lunar_surface_visualizer_node ${PROJECT_NAME})
   ament_target_dependencies(lunar_surface_visualizer_node
-    lunar_planning_msgs nav_msgs rclcpp visualization_msgs)
+    grid_map_msgs lunar_planning_msgs nav_msgs rclcpp visualization_msgs)
+
+  add_executable(lunar_surface_reporter_node
+    src/lunar_surface_reporter_main.cpp)
+  target_compile_features(lunar_surface_reporter_node PUBLIC cxx_std_20)
+  target_link_libraries(lunar_surface_reporter_node ${PROJECT_NAME})
+  ament_target_dependencies(lunar_surface_reporter_node rclcpp)
 endif()
 
 install(
@@ -114,6 +126,7 @@ install(
 if(LUNAR_BUILD_DEMO)
   install(
     TARGETS lunar_surface_demo_node lunar_surface_visualizer_node
+      lunar_surface_reporter_node
     RUNTIME DESTINATION lib/${PROJECT_NAME})
 endif()
 install(DIRECTORY include/ DESTINATION include)
@@ -219,6 +232,14 @@ if(BUILD_TESTING)
     ament_add_gtest(lunar_surface_scenario_test
       test/lunar_surface_scenario_test.cpp)
     target_link_libraries(lunar_surface_scenario_test ${PROJECT_NAME})
+
+    ament_add_gtest(lunar_surface_reporter_test
+      test/lunar_surface_reporter_test.cpp)
+    target_link_libraries(lunar_surface_reporter_test ${PROJECT_NAME})
+
+    ament_add_gtest(lunar_surface_traversability_viz_test
+      test/lunar_surface_traversability_viz_test.cpp)
+    target_link_libraries(lunar_surface_traversability_viz_test ${PROJECT_NAME})
   endif()
 
   get_filename_component(

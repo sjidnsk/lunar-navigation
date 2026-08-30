@@ -1341,6 +1341,7 @@ struct PurePlanMotionServer::Impl final {
               .status = PlanningStatus::kSuccess,
               .reason_code = "PLAN_FOUND",
               .reference = std::move(composed.reference),
+              .global_route_preview = {.poses_map = route->poses_map},
               .expanded_states = local.expanded_states,
               .selected_goal_index = local.selected_goal_index,
               .best_cost = local.best_cost,

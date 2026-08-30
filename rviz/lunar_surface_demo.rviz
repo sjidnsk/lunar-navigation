@@ -1,71 +1,67 @@
 Panels:
   - Class: rviz_common/Displays
+    Help Height: 0
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Global traversability and obstacles1
+        - /Local obstacles and traversability1
+      Splitter Ratio: 0.5
+    Tree Height: 500
+  - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
+      - /Saved Views1
+    Name: Views
+    Splitter Ratio: 0.5
 Visualization Manager:
   Class: ""
   Displays:
-    - Class: rviz_default_plugins/Map
-      Alpha: 0.2
-      Enabled: false
-      Name: Lunar obstacles
-      Topic: /lunar_demo/global_overview
-      Value: true
-    - Alpha: 0.58
-      Autocompute Intensity Bounds: false
-      Class: grid_map_rviz_plugin/GridMap
-      Color Layer: traversability
-      Color Transformer: IntensityLayer
+    - Class: rviz_default_plugins/MarkerArray
       Enabled: true
-      Height Transformer: Flat
-      History Length: 1
-      Invert Rainbow: false
-      Max Color: 0; 158; 115
-      Max Intensity: 1
-      Min Color: 213; 94; 0
-      Min Intensity: 0
-      Name: Wheel traversability
-      Show Grid Lines: false
-      Topic: /lunar_demo/traversability
-      Use Rainbow: false
+      Name: Global traversability and obstacles
+      Topic: /lunar_demo/classic_global_map
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
-      Name: Lunar elevation
-      Topic: /lunar_demo/terrain_markers
+      Name: Local obstacles and traversability
+      Topic: /lunar_demo/classic_local_map
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Rover marker
+      Topic: /lunar_demo/rover_markers
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Start and goal
+      Topic: /lunar_demo/pose_markers
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: 64 m local window
+      Topic: /lunar_demo/local_window
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Alpha: 0.85
+      Color: 230; 159; 0
+      Enabled: true
+      Line Style: Billboards
+      Line Width: 1.2
+      Name: Global path
+      Pose Style: None
+      Topic: /lunar_demo/global_path
       Value: true
     - Class: rviz_default_plugins/Path
       Alpha: 1
-      Color: 255; 255; 255
+      Color: 86; 180; 233
       Enabled: true
       Line Style: Billboards
-      Line Width: 0.3
-      Name: Planned path
+      Line Width: 0.7
+      Name: Local path segment
       Pose Style: None
-      Topic: /lunar_demo/path
-      Value: true
-    - Class: rviz_default_plugins/Odometry
-      Enabled: true
-      Name: Rover
-      Shape:
-        Alpha: 1
-        Color: 204; 121; 167
-        Head Length: 0.5
-        Head Radius: 0.22
-        Shaft Length: 1
-        Shaft Radius: 0.12
-        Value: Arrow
-      Topic: /lunar_demo/odometry
-      Value: true
-    - Class: rviz_default_plugins/Pose
-      Alpha: 1
-      Color: 230; 159; 0
-      Enabled: true
-      Head Length: 0.5
-      Head Radius: 0.22
-      Name: Default goal
-      Shape: Arrow
-      Shaft Length: 1
-      Shaft Radius: 0.12
-      Topic: /lunar_demo/default_goal
+      Topic: /lunar_demo/wheeled_path
       Value: true
   Global Options:
     Background Color: 32; 34; 37
@@ -77,13 +73,36 @@ Visualization Manager:
     - Class: rviz_default_plugins/FocusCamera
     - Class: rviz_default_plugins/Measure
     - Class: rviz_default_plugins/SetInitialPose
-      Topic: /initialpose
+      Topic: /lunar_demo/start_pose
     - Class: rviz_default_plugins/SetGoal
       Topic: /lunar_demo/rviz_goal
   Views:
     Current:
       Class: rviz_default_plugins/TopDownOrtho
-      Scale: 1200
+      Name: Local 64 m detail
+      Scale: 8
+      Target Frame: <Fixed Frame>
+      X: -349.5
+      Y: 0.5
+    Saved:
+      - Class: rviz_default_plugins/TopDownOrtho
+        Name: Global 1 km overview
+        Scale: 0.6
+        Target Frame: <Fixed Frame>
+        X: 0
+        Y: 0
+      - Class: rviz_default_plugins/TopDownOrtho
+        Name: Local 64 m detail
+        Scale: 8
+        Target Frame: <Fixed Frame>
+        X: -349.5
+        Y: 0.5
 Window Geometry:
+  Displays:
+    collapsed: false
   Height: 900
+  Hide Left Dock: false
+  Hide Right Dock: false
+  Views:
+    collapsed: false
   Width: 1200

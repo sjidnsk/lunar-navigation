@@ -1,7 +1,6 @@
 """Source contract checks for the isolated lunar-surface RViz demo."""
 
 from pathlib import Path
-import xml.etree.ElementTree as ET
 
 import yaml
 
@@ -11,7 +10,6 @@ LAUNCH = ROOT / "launch" / "lunar_surface_rviz_demo.launch.py"
 RVIZ = ROOT / "rviz" / "lunar_surface_demo.rviz"
 DEMO_NODE = ROOT / "ros2_ws/src/lunar_pure_planner_ros/src/lunar_surface_demo_node.cpp"
 VISUALIZER_NODE = ROOT / "ros2_ws/src/lunar_pure_planner_ros/src/lunar_surface_visualizer_node.cpp"
-PACKAGE_XML = ROOT / "ros2_ws/src/lunar_pure_planner_ros/package.xml"
 
 
 def test_demo_launch_isolated_from_production_action() -> None:
@@ -25,38 +23,105 @@ def test_demo_launch_isolated_from_production_action() -> None:
 def test_rviz_config_exposes_goal_path_and_lunar_layers() -> None:
     text = RVIZ.read_text(encoding="utf-8")
     for topic in (
+        "/lunar_demo/start_pose",
         "/lunar_demo/rviz_goal",
-        "/lunar_demo/path",
-        "/lunar_demo/global_overview",
-        "/lunar_demo/terrain_markers",
+        "/lunar_demo/global_path",
+        "/lunar_demo/wheeled_path",
+        "/lunar_demo/classic_global_map",
+        "/lunar_demo/classic_local_map",
+        "/lunar_demo/pose_markers",
+        "/lunar_demo/local_window",
+        "/lunar_demo/rover_markers",
     ):
         assert topic in text
 
 
 def test_demo_computes_and_displays_wheel_traversability() -> None:
     launch_text = LAUNCH.read_text(encoding="utf-8")
+    demo_text = DEMO_NODE.read_text(encoding="utf-8")
     assert 'executable="lunar_local_traversability_node"' in launch_text
+    assert launch_text.count('executable="lunar_local_traversability_node"') == 2
     assert '"local_map_topic": "/lunar_demo/grid_map"' in launch_text
     assert '"traversability_topic": "/lunar_demo/traversability"' in launch_text
+    assert '"local_map_topic": "/lunar_demo/global_grid_map"' in launch_text
+    assert '"traversability_topic": "/lunar_demo/global_traversability"' in launch_text
+    assert '"/lunar_demo/global_grid_map"' in demo_text
     assert '"input_qos_reliability": "reliable"' in launch_text
     assert '"input_qos_durability": "volatile"' in launch_text
 
     rviz_config = yaml.safe_load(RVIZ.read_text(encoding="utf-8"))
     displays = rviz_config["Visualization Manager"]["Displays"]
     traversability = next(
-        display for display in displays if display.get("Name") == "Wheel traversability"
+        display for display in displays
+        if display.get("Name") == "Local obstacles and traversability"
     )
-    assert traversability["Class"] == "grid_map_rviz_plugin/GridMap"
-    assert traversability["Topic"] == "/lunar_demo/traversability"
-    assert traversability["Height Transformer"] == "Flat"
-    assert traversability["Color Transformer"] == "IntensityLayer"
-    assert traversability["Color Layer"] == "traversability"
+    assert traversability["Class"] == "rviz_default_plugins/MarkerArray"
+    assert traversability["Topic"] == "/lunar_demo/classic_local_map"
 
-    dependencies = ET.parse(PACKAGE_XML).getroot().findall("exec_depend")
-    grid_map_dependency = next(
-        element for element in dependencies if element.text == "grid_map_rviz_plugin"
-    )
-    assert grid_map_dependency.attrib["condition"] == "$ROS_DISTRO == 'jazzy'"
+
+def test_demo_uses_a_sixty_four_metre_local_map_and_manual_goal_by_default() -> None:
+    launch_text = LAUNCH.read_text(encoding="utf-8")
+    demo_text = DEMO_NODE.read_text(encoding="utf-8")
+
+    assert 'DeclareLaunchArgument("auto_goal", default_value="false")' in launch_text
+    assert '"auto_goal": ParameterValue(auto_goal, value_type=bool)' in launch_text
+    assert "constexpr std::size_t kLocalWidth = 320U" in demo_text
+    assert "constexpr std::size_t kLocalHeight = 320U" in demo_text
+    assert "constexpr double kLocalResolutionM = 0.2" in demo_text
+
+
+def test_rviz_distinguishes_global_and_local_paths() -> None:
+    rviz_config = yaml.safe_load(RVIZ.read_text(encoding="utf-8"))
+    displays = rviz_config["Visualization Manager"]["Displays"]
+    by_name = {display["Name"]: display for display in displays}
+
+    assert by_name["Global path"]["Topic"] == "/lunar_demo/global_path"
+    assert by_name["Local path segment"]["Topic"] == "/lunar_demo/wheeled_path"
+    assert by_name["Global path"]["Color"] != by_name["Local path segment"]["Color"]
+    assert by_name["Global traversability and obstacles"]["Topic"] == "/lunar_demo/classic_global_map"
+    assert by_name["Local obstacles and traversability"]["Topic"] == "/lunar_demo/classic_local_map"
+
+
+def test_rviz_uses_shader_safe_classic_obstacle_and_traversability_markers() -> None:
+    rviz_config = yaml.safe_load(RVIZ.read_text(encoding="utf-8"))
+    displays = rviz_config["Visualization Manager"]["Displays"]
+    by_name = {display["Name"]: display for display in displays}
+
+    global_obstacles = by_name["Global traversability and obstacles"]
+    local_overlay = by_name["Local obstacles and traversability"]
+
+    assert global_obstacles["Class"] == "rviz_default_plugins/MarkerArray"
+    assert global_obstacles["Topic"] == "/lunar_demo/classic_global_map"
+    assert local_overlay["Class"] == "rviz_default_plugins/MarkerArray"
+    assert local_overlay["Topic"] == "/lunar_demo/classic_local_map"
+    assert all(display["Class"] != "rviz_default_plugins/Map" for display in displays)
+    assert all(display["Class"] != "grid_map_rviz_plugin/GridMap" for display in displays)
+    assert all(display["Class"] != "rviz_default_plugins/Odometry" for display in displays)
+    assert "Lunar elevation" not in by_name
+
+
+def test_rviz_opens_on_local_detail_and_keeps_a_one_kilometre_saved_view() -> None:
+    rviz_config = yaml.safe_load(RVIZ.read_text(encoding="utf-8"))
+    panels = {panel["Name"]: panel for panel in rviz_config["Panels"]}
+    views = rviz_config["Visualization Manager"]["Views"]
+    current = views["Current"]
+    saved = {view["Name"]: view for view in views["Saved"]}
+
+    assert panels["Displays"]["Class"] == "rviz_common/Displays"
+    assert panels["Views"]["Class"] == "rviz_common/Views"
+    assert current["Scale"] == 8
+    assert current["X"] == -349.5
+    assert current["Y"] == 0.5
+    assert saved["Global 1 km overview"]["Scale"] == 0.6
+    assert saved["Global 1 km overview"]["X"] == 0
+    assert saved["Global 1 km overview"]["Y"] == 0
+    assert saved["Local 64 m detail"]["Scale"] == 8
+
+
+def test_launch_starts_concise_reporter() -> None:
+    text = LAUNCH.read_text(encoding="utf-8")
+    assert 'executable="lunar_surface_reporter_node"' in text
+    assert 'name="lunar_surface_reporter"' in text
 
 
 def test_rviz_uses_a_colorblind_safe_academic_palette() -> None:
@@ -65,21 +130,19 @@ def test_rviz_uses_a_colorblind_safe_academic_palette() -> None:
     displays = manager["Displays"]
 
     by_name = {display["Name"]: display for display in displays}
-    traversability = by_name["Wheel traversability"]
-    path = by_name["Planned path"]
-    rover = by_name["Rover"]
-    goal = by_name["Default goal"]
+    traversability = by_name["Local obstacles and traversability"]
+    global_path = by_name["Global path"]
+    local_path = by_name["Local path segment"]
+    rover = by_name["Rover marker"]
 
-    assert traversability["Max Color"] == "0; 158; 115"
-    assert traversability["Min Color"] == "213; 94; 0"
-    assert traversability["Alpha"] == 0.58
-    assert path["Color"] == "255; 255; 255"
-    assert path["Line Style"] == "Billboards"
-    assert path["Line Width"] == 0.3
-    assert path["Color"] != traversability["Max Color"]
-    assert rover["Shape"]["Color"] == "204; 121; 167"
-    assert goal["Color"] == "230; 159; 0"
-    assert by_name["Lunar obstacles"]["Alpha"] == 0.2
+    assert traversability["Class"] == "rviz_default_plugins/MarkerArray"
+    assert global_path["Color"] == "230; 159; 0"
+    assert local_path["Color"] == "86; 180; 233"
+    assert global_path["Line Style"] == "Billboards"
+    assert local_path["Line Style"] == "Billboards"
+    assert global_path["Color"] != local_path["Color"]
+    assert rover["Class"] == "rviz_default_plugins/MarkerArray"
+    assert by_name["Global traversability and obstacles"]["Enabled"] is True
     assert manager["Global Options"]["Background Color"] == "32; 34; 37"
 
 
@@ -98,3 +161,8 @@ def test_visualizer_labels_the_rover_at_kilometre_map_scale() -> None:
     assert "visualization_msgs::msg::Marker::CYLINDER" in text
     assert "visualization_msgs::msg::Marker::TEXT_VIEW_FACING" in text
     assert 'rover_label.text = "Current rover position"' in text
+    assert text.count("rover.scale.x = 5.0") == 2
+    assert "label.scale.z = 2.0" in text
+    assert "rover_label.scale.z = 2.0" in text
+    assert "marker.scale.x = 6.0" in text
+    assert "marker.scale.z = 3.0" in text

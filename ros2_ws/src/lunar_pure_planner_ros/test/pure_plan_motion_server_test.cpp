@@ -1865,6 +1865,12 @@ TEST(PurePlanMotionServer,
              return !path.poses.empty();
            }) == 1;
   }));
+  ASSERT_TRUE(WaitFor([&] {
+    return std::ranges::any_of(system.WheeledGlobalPaths(),
+                               [](const auto& path) {
+                                 return !path.poses.empty();
+                               });
+  }));
   ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() >= 2U; }));
   const auto diagnostics = system.Diagnostics();
   ASSERT_GE(diagnostics.size(), 2U);

@@ -28,19 +28,6 @@ constexpr double kCellSizeM = 1.0;
   return dx * dx + dy * dy;
 }
 
-void MarkObstacleDisk(LunarSurfaceScenario& scenario, const LunarSurfaceCell center,
-                      const double radius_cells) {
-  const double radius_squared = radius_cells * radius_cells;
-  for (std::size_t y = 0U; y < scenario.height; ++y) {
-    for (std::size_t x = 0U; x < scenario.width; ++x) {
-      const LunarSurfaceCell cell{x, y};
-      if (SquaredDistance(cell, center) <= radius_squared) {
-        scenario.occupancy[scenario.Index(cell)] = 100;
-      }
-    }
-  }
-}
-
 [[nodiscard]] std::vector<std::int32_t> FloodFill(
     const LunarSurfaceScenario& scenario, const LunarSurfaceCell start) {
   const std::size_t count = scenario.width * scenario.height;
@@ -90,6 +77,48 @@ bool LunarSurfaceScenario::Occupied(const LunarSurfaceCell cell) const noexcept 
   return !InBounds(cell) || occupancy[Index(cell)] >= 50;
 }
 
+std::optional<LunarSurfaceSample> LunarSurfaceScenario::Sample(
+    const double x_m, const double y_m) const noexcept {
+  if (!std::isfinite(x_m) || !std::isfinite(y_m) || x_m < origin_x_m ||
+      y_m < origin_y_m ||
+      x_m >= origin_x_m + static_cast<double>(width) * resolution_m ||
+      y_m >= origin_y_m + static_cast<double>(height) * resolution_m) {
+    return std::nullopt;
+  }
+
+  double elevation = 0.012 * x_m +
+                     0.38 * std::sin(x_m * 0.11) * std::cos(y_m * 0.09);
+  bool occupied = false;
+  for (const auto& crater : craters) {
+    const double distance =
+        std::hypot(x_m - crater.center_x_m, y_m - crater.center_y_m);
+    const double normalized = distance / crater.radius_m;
+    if (normalized < 1.0) {
+      elevation -= 0.45 * (1.0 - normalized * normalized);
+    }
+    occupied = occupied || (normalized >= 0.90 && normalized <= 1.15);
+  }
+  for (const auto& rock : rocks) {
+    occupied = occupied ||
+               std::hypot(x_m - rock.center_x_m, y_m - rock.center_y_m) <=
+                   rock.radius_m;
+  }
+
+  const double start_x_m = origin_x_m +
+      (static_cast<double>(start_cell.x) + 0.5) * resolution_m;
+  const double start_y_m = origin_y_m +
+      (static_cast<double>(start_cell.y) + 0.5) * resolution_m;
+  const double start_distance = std::hypot(x_m - start_x_m, y_m - start_y_m);
+  if (start_distance <= 25.0) {
+    occupied = false;
+  }
+  if (start_distance <= 50.0) {
+    elevation = 0.0;
+  }
+  return LunarSurfaceSample{.occupied = occupied,
+                            .elevation_m = static_cast<float>(elevation)};
+}
+
 LunarSurfaceScenario BuildLunarSurfaceScenario(const std::uint32_t seed) {
   LunarSurfaceScenario scenario;
   scenario.width = kWidth;
@@ -105,12 +134,35 @@ LunarSurfaceScenario BuildLunarSurfaceScenario(const std::uint32_t seed) {
   std::uniform_int_distribution<std::size_t> x_distribution(80U, kWidth - 81U);
   std::uniform_int_distribution<std::size_t> y_distribution(80U, kHeight - 81U);
   std::uniform_real_distribution<double> radius_distribution(20.0, 45.0);
-  std::vector<std::pair<LunarSurfaceCell, double>> craters;
-  craters.reserve(12U);
+  scenario.craters.reserve(12U);
   for (std::size_t crater = 0U; crater < 12U; ++crater) {
-    craters.emplace_back(LunarSurfaceCell{x_distribution(generator),
-                                          y_distribution(generator)},
-                         radius_distribution(generator));
+    // Preserve the fixed-seed layout produced by the former emplace_back
+    // expression on the supported GCC toolchain, which evaluated the radius
+    // argument before the braced centre argument.
+    const double radius_m =
+        radius_distribution(generator) * scenario.resolution_m;
+    const LunarSurfaceCell center{x_distribution(generator),
+                                  y_distribution(generator)};
+    scenario.craters.push_back(LunarSurfaceCrater{
+        .center_x_m = scenario.origin_x_m +
+            (static_cast<double>(center.x) + 0.5) * scenario.resolution_m,
+        .center_y_m = scenario.origin_y_m +
+            (static_cast<double>(center.y) + 0.5) * scenario.resolution_m,
+        .radius_m = radius_m});
+  }
+
+  std::bernoulli_distribution rock_distribution(0.00015);
+  for (std::size_t y = 1U; y + 1U < kHeight; ++y) {
+    for (std::size_t x = 1U; x + 1U < kWidth; ++x) {
+      if (rock_distribution(generator)) {
+        scenario.rocks.push_back(LunarSurfaceRock{
+            .center_x_m = scenario.origin_x_m +
+                (static_cast<double>(x) + 0.5) * scenario.resolution_m,
+            .center_y_m = scenario.origin_y_m +
+                (static_cast<double>(y) + 0.5) * scenario.resolution_m,
+            .radius_m = scenario.resolution_m});
+      }
+    }
   }
 
   for (std::size_t y = 0U; y < kHeight; ++y) {
@@ -120,39 +172,11 @@ LunarSurfaceScenario BuildLunarSurfaceScenario(const std::uint32_t seed) {
                              (static_cast<double>(x) + 0.5) * kCellSizeM;
       const double world_y = scenario.origin_y_m +
                              (static_cast<double>(y) + 0.5) * kCellSizeM;
-      double elevation = 0.012 * world_x +
-                         0.38 * std::sin(world_x * 0.11) * std::cos(world_y * 0.09);
-      for (const auto& [center, radius] : craters) {
-        const double normalized = std::sqrt(SquaredDistance(cell, center)) / radius;
-        if (normalized < 1.0) {
-          elevation -= 0.45 * (1.0 - normalized * normalized);
-        }
-        if (normalized >= 0.90 && normalized <= 1.15) {
-          scenario.occupancy[scenario.Index(cell)] = 100;
-        }
-      }
-      scenario.elevation_m[scenario.Index(cell)] = static_cast<float>(elevation);
-    }
-  }
-
-  std::bernoulli_distribution rock_distribution(0.00015);
-  for (std::size_t y = 1U; y + 1U < kHeight; ++y) {
-    for (std::size_t x = 1U; x + 1U < kWidth; ++x) {
-      if (rock_distribution(generator)) {
-        MarkObstacleDisk(scenario, LunarSurfaceCell{x, y}, 1.0);
-      }
-    }
-  }
-
-  for (std::size_t y = 0U; y < kHeight; ++y) {
-    for (std::size_t x = 0U; x < kWidth; ++x) {
-      const LunarSurfaceCell cell{x, y};
-      if (SquaredDistance(cell, scenario.start_cell) <= 625.0) {
-        scenario.occupancy[scenario.Index(cell)] = 0;
-      }
-      if (SquaredDistance(cell, scenario.start_cell) <= 2500.0) {
-        scenario.elevation_m[scenario.Index(cell)] = 0.0F;
-      }
+      const auto sample = scenario.Sample(world_x, world_y);
+      scenario.occupancy[scenario.Index(cell)] =
+          sample.has_value() && sample->occupied ? 100 : 0;
+      scenario.elevation_m[scenario.Index(cell)] =
+          sample.has_value() ? sample->elevation_m : 0.0F;
     }
   }
 

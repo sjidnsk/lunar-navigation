@@ -6,6 +6,7 @@
 #include <string>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <lunar_planning_msgs/action/plan_motion.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -31,6 +32,8 @@ class RvizGoalBridge final : public rclcpp::Node {
   std::atomic<std::uint64_t> request_sequence_{1U};
   rclcpp_action::Client<Action>::SharedPtr action_client_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr subscription_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
+      start_subscription_;
 };
 
 }  // namespace lunar::pure_planner_ros

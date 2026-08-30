@@ -33,12 +33,20 @@ RvizGoalBridge::RvizGoalBridge(const rclcpp::NodeOptions& options)
       declare_parameter<std::string>("action_name", "/Car/T4/plan_motion");
   const std::string goal_topic =
       declare_parameter<std::string>("goal_topic", "/Car/T4/rviz_goal");
+  const std::string start_topic =
+      declare_parameter<std::string>("start_topic", "/Car/T4/rviz_start");
   action_client_ = rclcpp_action::create_client<Action>(this, action_name);
   subscription_ = create_subscription<geometry_msgs::msg::PoseStamped>(
       goal_topic, rclcpp::QoS{10}.reliable(),
       [this](geometry_msgs::msg::PoseStamped::ConstSharedPtr goal_pose) {
         ForwardGoal(std::move(goal_pose));
       });
+  start_subscription_ =
+      create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+          start_topic, rclcpp::QoS{10}.reliable(),
+          [this](geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr) {
+            action_client_->async_cancel_all_goals();
+          });
 }
 
 void RvizGoalBridge::ForwardGoal(

@@ -26,7 +26,6 @@
   <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>action_msgs</test_depend>
   <exec_depend>ament_index_python</exec_depend>
-  <exec_depend condition="$ROS_DISTRO == 'jazzy'">grid_map_rviz_plugin</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 

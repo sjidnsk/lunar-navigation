@@ -6,6 +6,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -13,6 +14,7 @@ def generate_launch_description() -> LaunchDescription:
     share = get_package_share_directory("lunar_pure_planner_ros")
     seed = LaunchConfiguration("seed")
     start_rviz = LaunchConfiguration("start_rviz")
+    auto_goal = LaunchConfiguration("auto_goal")
     demo_parameters = {
         "platform_type": "wheel",
         "global_map_topic": "/lunar_demo/global_overview",
@@ -32,11 +34,15 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument("seed", default_value="20260823"),
             DeclareLaunchArgument("start_rviz", default_value="true"),
+            DeclareLaunchArgument("auto_goal", default_value="false"),
             Node(
                 package="lunar_pure_planner_ros",
                 executable="lunar_surface_demo_node",
                 name="lunar_surface_demo",
-                parameters=[{"seed": seed}],
+                parameters=[{
+                    "seed": seed,
+                    "auto_goal": ParameterValue(auto_goal, value_type=bool),
+                }],
                 output="screen",
             ),
             Node(
@@ -63,6 +69,21 @@ def generate_launch_description() -> LaunchDescription:
             ),
             Node(
                 package="lunar_pure_planner_ros",
+                executable="lunar_local_traversability_node",
+                name="lunar_demo_global_traversability",
+                parameters=[
+                    {
+                        "platform_type": "wheel",
+                        "local_map_topic": "/lunar_demo/global_grid_map",
+                        "traversability_topic": "/lunar_demo/global_traversability",
+                        "input_qos_reliability": "reliable",
+                        "input_qos_durability": "transient_local",
+                    }
+                ],
+                output="screen",
+            ),
+            Node(
+                package="lunar_pure_planner_ros",
                 executable="lunar_pure_planner_node",
                 name="pure_planner",
                 parameters=[f"{share}/config/pure_planner.yaml", demo_parameters],
@@ -78,9 +99,16 @@ def generate_launch_description() -> LaunchDescription:
                         "mission_id": "lunar-demo",
                         "mission_revision": 1,
                         "goal_topic": "/lunar_demo/rviz_goal",
+                        "start_topic": "/lunar_demo/accepted_start",
                         "action_name": "/lunar_demo/plan_motion",
                     }
                 ],
+                output="screen",
+            ),
+            Node(
+                package="lunar_pure_planner_ros",
+                executable="lunar_surface_reporter_node",
+                name="lunar_surface_reporter",
                 output="screen",
             ),
             Node(
